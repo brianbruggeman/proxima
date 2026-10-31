@@ -14,7 +14,7 @@ include = ["src/**", "build.rs", "Cargo.toml", "README.md", "LICENSE*"]
 default = ["std"]
 # proxima-primitives::pipe alloc tier drags in proxima-primitives::transport
 # -> parking_lot (no no_std path)
-std = ["alloc", "futures/executor", "dep:proxima-primitives", "proxima-primitives/std", "dep:proxima-process"]
+std = ["alloc", "futures/executor", "dep:proxima-primitives", "proxima-primitives/std", "dep:proxima-process", "dep:cpio", "thiserror/std", "dep:kvm-ioctls", "dep:kvm-bindings", "dep:libc", "dep:proxima-listen", "dep:proxima-runtime", "dep:proxima-telemetry"]
 # `dtb::builder` needs `Vec<u8>` (vm-fdt's writer); the parser half
 # (`fdt` crate) is genuinely tier-3 and would build without this, but the
 # module is one file so it shares the alloc gate.
@@ -38,17 +38,23 @@ kernel-boot = ["std"]
 [dependencies]
 arrayvec.workspace = true
 bytes.workspace = true
+cpio = { version = "0.4.1", optional = true }
+crossbeam-queue.workspace = true
 fdt = "0.1.5"
 futures.workspace = true
 postcard = { workspace = true, features = ["alloc"] }
 proxima-core = { workspace = true, features = ["alloc"] }
+proxima-listen = { workspace = true, optional = true }
 proxima-net = { version = "0.1.0", path = "../../proxima-net", default-features = false, features = ["alloc"] }
 proxima-onnx = { version = "0.1.0", path = "../../proxima-onnx", default-features = false, features = ["std"], optional = true }
 proxima-primitives = { workspace = true, features = ["alloc"], optional = true }
 proxima-process = { workspace = true, features = ["alloc"], optional = true }
 proxima-protocols = { workspace = true, features = ["process", "nvme", "virtio"] }
+proxima-runtime = { workspace = true, optional = true }
+proxima-telemetry = { workspace = true, features = ["emit"], optional = true }
 proxima-tensor = { version = "0.1.0", path = "../../proxima-tensor", default-features = false, features = ["std"], optional = true }
 serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
 vm-fdt = { version = "0.3.0", default-features = false, features = ["alloc"], optional = true }
 
 [[bin]]
@@ -130,3 +136,8 @@ object = "0.40.0"
 proptest.workspace = true
 proxima = { package = "proxima-lib", path = "../..", features = ["test-support"] }
 tempfile.workspace = true
+
+[target.'cfg(all(target_os = "linux", target_arch = "x86_64"))'.dependencies]
+kvm-bindings = { version = "0.14.2", optional = true }
+kvm-ioctls = { version = "0.25.1", optional = true }
+libc = { workspace = true, optional = true }

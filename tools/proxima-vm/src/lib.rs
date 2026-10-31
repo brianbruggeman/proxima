@@ -21,12 +21,17 @@ extern crate alloc;
 pub mod abi;
 #[cfg(feature = "std")]
 pub mod boot;
+pub mod cmos_rtc;
 pub mod dispatch;
 #[cfg(feature = "alloc")]
 pub mod dtb;
 pub mod elf;
 pub mod gic;
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+pub mod kvm;
 pub mod loader;
+#[cfg(feature = "std")]
+pub mod linux;
 #[cfg(feature = "std")]
 pub mod mmio_trampoline;
 #[cfg(feature = "std")]
@@ -36,12 +41,14 @@ pub mod pl011;
 pub mod psci;
 #[cfg(feature = "std")]
 pub mod snapshot;
+pub mod uart16550;
 #[cfg(feature = "std")]
 pub mod virtio_blk;
 #[cfg(feature = "std")]
 pub mod virtio_console;
 #[cfg(feature = "std")]
 pub mod virtio_net;
+pub mod x86_boot;
 
 #[cfg(feature = "std")]
 use core::future::Future;
@@ -83,6 +90,17 @@ impl ScratchVm {
 }
 
 #[cfg(feature = "std")]
+impl ScratchVm {
+    /// This guest as a pipe whose every call runs on the runtime's background
+    /// pool, the same [`proxima_listen::Offload`] a `vm` upstream is served
+    /// through: [`ScratchVm::run`] blocks the calling thread in `KVM_RUN`.
+    #[must_use]
+    pub fn offloaded(self, runtime: std::sync::Arc<dyn proxima_runtime::Runtime>) -> proxima_listen::Offload {
+        proxima_listen::Offload::new(proxima_primitives::pipe::handler::into_handle(self), runtime)
+    }
+}
+
+#[cfg(feature = "std")]
 impl SendPipe for ScratchVm {
     type In = Request<Bytes>;
     type Out = Response<Bytes>;
@@ -97,10 +115,19 @@ impl SendPipe for ScratchVm {
     }
 }
 
-#[cfg(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
-))]
+#[cfg(all(feature = "std", target_os = "linux", target_arch = "x86_64"))]
+mod platform {
+    use bytes::Bytes;
+    use proxima_core::ProximaError;
+
+    pub fn run(message: &[u8]) -> Result<Bytes, ProximaError> {
+        crate::kvm::scratch::run_scratch(message)
+            .map(Bytes::from)
+            .map_err(|error| ProximaError::Upstream(error.to_string()))
+    }
+}
+
+#[cfg(all(feature = "std", target_os = "macos", target_arch = "aarch64"))]
 mod platform {
     use alloc::vec;
     use core::ffi::{CStr, c_char};
@@ -144,9 +171,12 @@ mod platform {
     }
 }
 
-#[cfg(not(any(
-    all(target_os = "linux", target_arch = "x86_64"),
-    all(target_os = "macos", target_arch = "aarch64")
+#[cfg(not(all(
+    feature = "std",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    )
 )))]
 mod platform {
     use bytes::Bytes;
@@ -154,7 +184,7 @@ mod platform {
 
     pub fn run(_message: &[u8]) -> Result<Bytes, ProximaError> {
         Err(ProximaError::Config(
-            "scratch-vm supports linux/x86_64 KVM and macos/aarch64 Hypervisor.framework only"
+            "scratch-vm needs the std feature on linux/x86_64 KVM or macos/aarch64 Hypervisor.framework"
                 .into(),
         ))
     }

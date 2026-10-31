@@ -6,8 +6,9 @@
 //! backing object each platform substitutes instead — `memfd_create` +
 //! `MAP_SHARED`/`MAP_PRIVATE` on the KVM lane, `vm_allocate` +
 //! `mach_make_memory_entry_64` on the HVF lane
-//! (`backend_linux.c`/`backend_macos.c`'s `proxima_vm_create_named_region`
-//! / `proxima_vm_map_named_region` / `proxima_vm_destroy_named_region`).
+//! (`crate::kvm::memory::NamedRegion` / `backend_macos.c`'s
+//! `proxima_vm_create_named_region`, `proxima_vm_map_named_region`,
+//! `proxima_vm_destroy_named_region`).
 //!
 //! [`GuestMemoryRegion`] owns the backing object and its first
 //! ([`GuestMemoryRegion::primary_slice`]) view; [`RegionView`] is a second,
@@ -163,6 +164,53 @@ unsafe impl Sync for GuestMemoryRegion {}
 unsafe impl Send for RegionView {}
 unsafe impl Sync for RegionView {}
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+mod platform {
+    use proxima_core::ProximaError;
+
+    use super::RawNamedRegion;
+    use crate::kvm::memory::{HostMapping, NamedRegion};
+    use crate::kvm::session::record_failure;
+
+    fn upstream(error: crate::kvm::KvmError) -> ProximaError {
+        ProximaError::Upstream(error.to_string())
+    }
+
+    pub(super) fn create(size: usize) -> Result<RawNamedRegion, ProximaError> {
+        let (handle, primary_address, mapped_size) = NamedRegion::create(size).map_err(upstream)?.into_raw_parts();
+        Ok(RawNamedRegion { handle, primary_address: primary_address.cast(), mapped_size })
+    }
+
+    pub(super) fn map_view(
+        region: &RawNamedRegion,
+        want_private_view: bool,
+    ) -> Result<super::RegionView, ProximaError> {
+        let mapping = HostMapping::of_fd(region.handle, region.mapped_size, !want_private_view).map_err(upstream)?;
+        let (address, mapped_size) = mapping.into_raw_parts();
+        Ok(super::RegionView { address: address.cast(), mapped_size })
+    }
+
+    pub(super) fn unmap_view(address: *mut core::ffi::c_void, mapped_size: usize) {
+        // SAFETY: a view's parts are exactly what `map_view` surrendered, released once.
+        if let Err(error) = unsafe { HostMapping::release_raw(address.cast(), mapped_size) } {
+            record_failure("munmap named region view", &error);
+        }
+    }
+
+    pub(super) fn destroy(region: &mut RawNamedRegion) {
+        if region.handle >= 0 {
+            // SAFETY: the record holds exactly the parts `create` surrendered, reclaimed once.
+            let owned = unsafe { NamedRegion::from_raw_parts(region.handle, region.primary_address.cast(), region.mapped_size) };
+            for error in owned.release() {
+                record_failure("release named region", &error);
+            }
+        }
+        region.handle = -1;
+        region.primary_address = core::ptr::null_mut();
+        region.mapped_size = 0;
+    }
+}
+
 #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
 mod platform {
     use std::ffi::CStr;
@@ -258,7 +306,10 @@ mod platform {
     }
 }
 
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+#[cfg(not(any(
+    all(target_os = "linux", target_arch = "x86_64"),
+    all(target_os = "macos", target_arch = "aarch64")
+)))]
 mod platform {
     use proxima_core::ProximaError;
 
@@ -266,7 +317,7 @@ mod platform {
 
     pub(super) fn create(_size: usize) -> Result<RawNamedRegion, ProximaError> {
         Err(ProximaError::Upstream(
-            "named guest memory regions are only implemented for the HVF lane (backend_linux.c has no named-region leaf)".into(),
+            "named guest memory regions are only implemented for the KVM and HVF lanes".into(),
         ))
     }
 
@@ -275,7 +326,7 @@ mod platform {
         _want_private_view: bool,
     ) -> Result<super::RegionView, ProximaError> {
         Err(ProximaError::Upstream(
-            "named guest memory regions are only implemented for the HVF lane (backend_linux.c has no named-region leaf)".into(),
+            "named guest memory regions are only implemented for the KVM and HVF lanes".into(),
         ))
     }
 
@@ -290,7 +341,10 @@ mod tests {
 
     use super::GuestMemoryRegion;
 
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
     #[proxima::test]
     async fn a_second_shared_view_observes_writes_made_through_the_primary_view() {
         let mut region =
@@ -306,7 +360,10 @@ mod tests {
         );
     }
 
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
     #[proxima::test]
     async fn a_write_through_a_second_shared_view_is_visible_through_the_primary_view() {
         let region = GuestMemoryRegion::create(4096).expect("create a named guest memory region");
@@ -322,7 +379,10 @@ mod tests {
         );
     }
 
-    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    ))]
     #[proxima::test]
     async fn a_freshly_created_region_is_zero_filled() {
         let region = GuestMemoryRegion::create(4096).expect("create a named guest memory region");
@@ -333,18 +393,59 @@ mod tests {
         );
     }
 
-    /// `backend_linux.c` defines no named-region leaf, so the KVM lane
-    /// reports the gap by name instead of failing at link time.
-    #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+    /// KVM lane only (`ROADMAP.md`'s M4 exit criterion verbatim: "a
+    /// `MAP_PRIVATE` child on the KVM lane observes copy-on-write"); the
+    /// `memfd_create` backing is `crate::kvm::memory::NamedRegion`.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     #[proxima::test]
-    async fn a_named_region_request_off_the_hvf_lane_is_a_named_unsupported_error() {
-        let error = GuestMemoryRegion::create(4096)
-            .expect_err("only the HVF lane implements named guest memory regions");
+    async fn a_private_child_view_on_the_kvm_lane_does_not_see_its_own_writes_reflected_back() {
+        let mut region =
+            GuestMemoryRegion::create(4096).expect("create a named guest memory region");
+        region.primary_slice_mut()[..4].copy_from_slice(&[1, 2, 3, 4]);
 
-        let message = error.to_string();
-        assert!(
-            message.contains("only implemented for the HVF lane"),
-            "the unsupported-lane rejection must name the gap, not fail silently: {message}"
+        let mut child = region
+            .map_private_view()
+            .expect("map a private copy-on-write view");
+        assert_eq!(
+            &child.as_slice()[..4],
+            &[1, 2, 3, 4],
+            "a private view must read the parent's contents before its own first write"
+        );
+
+        child.as_slice_mut()[..4].copy_from_slice(&[9, 8, 7, 6]);
+
+        assert_eq!(
+            &region.primary_slice()[..4],
+            &[1, 2, 3, 4],
+            "a write through a MAP_PRIVATE child view must never become visible through the \
+             parent's primary view -- proven by reading the parent's bytes back, not by inference"
+        );
+    }
+
+    /// The other half of the split: after the child's first write to a page,
+    /// the parent's later write to that page must not reach the child.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+    #[proxima::test]
+    async fn a_parent_write_after_the_copy_on_write_split_is_invisible_to_the_child() {
+        let mut region =
+            GuestMemoryRegion::create(4096).expect("create a named guest memory region");
+        region.primary_slice_mut()[..4].copy_from_slice(&[1, 2, 3, 4]);
+        let mut child = region
+            .map_private_view()
+            .expect("map a private copy-on-write view");
+        child.as_slice_mut()[..4].copy_from_slice(&[9, 8, 7, 6]);
+
+        region.primary_slice_mut()[..4].copy_from_slice(&[5, 5, 5, 5]);
+
+        assert_eq!(
+            &child.as_slice()[..4],
+            &[9, 8, 7, 6],
+            "after the split the child owns its own copy of the page; a parent write must not reach it"
+        );
+        assert_eq!(
+            &region.primary_slice()[..4],
+            &[5, 5, 5, 5],
+            "the parent still sees its own write"
         );
     }
 

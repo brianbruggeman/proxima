@@ -117,6 +117,7 @@ fn main() -> Result<(), Box<dyn Error>> {
             "iteration_touch_all_pages_nanos:{index}:{}",
             report.touch_all_pages_nanos
         );
+        println!("iteration_bytes_copied:{index}:{}", report.bytes_copied);
         println!(
             "iteration_register_restore_nanos:{index}:{}",
             report.phases.register_restore_nanos

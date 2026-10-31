@@ -12,8 +12,6 @@
 //! (`tests/boot.rs` and `tests/dispatch_hypercall.rs` each already carry
 //! their own copy of this exact shape).
 
-// the m3 instrument and its aarch64 degenerate guest exist only on the hvf lane
-#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::path::{Path, PathBuf};
@@ -27,6 +25,11 @@ const GUEST_MANIFEST_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/guests/la
 
 const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 const KVM_LANE: bool = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+const GUEST_TARGET: &str = if KVM_LANE {
+    "x86_64-unknown-none"
+} else {
+    "aarch64-unknown-none"
+};
 
 fn build_guest_elf(target_dir: &Path) -> PathBuf {
     let status = Command::new("cargo")
@@ -35,7 +38,7 @@ fn build_guest_elf(target_dir: &Path) -> PathBuf {
             "--manifest-path",
             &format!("{GUEST_MANIFEST_DIR}/Cargo.toml"),
             "--target",
-            "aarch64-unknown-none",
+            GUEST_TARGET,
             "--release",
         ])
         .env("CARGO_TARGET_DIR", target_dir)
@@ -43,7 +46,7 @@ fn build_guest_elf(target_dir: &Path) -> PathBuf {
         .expect("run cargo build for the guest ELF");
     assert!(status.success(), "guest ELF build failed");
     target_dir
-        .join("aarch64-unknown-none")
+        .join(GUEST_TARGET)
         .join("release")
         .join("proxima-vm-guest-lambda")
 }
@@ -177,7 +180,13 @@ fn build_minimal_elf(content: &[u8]) -> Vec<u8> {
 /// its own `PROXIMA_VM_HALT_VERB` branch, before any mmio window or
 /// dispatcher call is ever reached. This is the M3 degenerate control's "a
 /// run that touches zero pages" guest.
+#[cfg(target_arch = "aarch64")]
 const HALT_ONLY_GUEST_CODE: [u8; 8] = [0xe0, 0xff, 0x9f, 0xd2, 0x02, 0x00, 0x00, 0xd4];
+
+/// The x86_64 spelling of the same guest: `mov dx, 0xffff; out dx, al`
+/// (`PROXIMA_VM_HALT_VERB` rides in `dx`, the port register, on this lane).
+#[cfg(not(target_arch = "aarch64"))]
+const HALT_ONLY_GUEST_CODE: [u8; 5] = [0x66, 0xba, 0xff, 0xff, 0xee];
 
 /// Parses `dispatch_probe`'s
 /// `m3 create_to_first_exit_nanos=<n> touch_all_pages_nanos=<n> mmio_trap_count=<n>`

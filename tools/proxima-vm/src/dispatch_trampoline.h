@@ -203,8 +203,8 @@ int32_t proxima_vm_mmio_drain_tx(
  * (`src/mmio_trampoline.rs`) for the same `extern "C"`-cannot-be-generic
  * reason the console pair is monomorphized to `ConsoleTransport`. Drained
  * bytes are the concatenated Ethernet frame bytes with each chain's
- * `virtio_net_hdr` already stripped (`NetTransport::drain_tx`'s own
- * `FrameSink` contract). */
+ * `virtio_net_hdr` already stripped (`NetTransport::drain_tx`'s return
+ * value). A receiveq1 kick fills posted receive buffers instead. */
 int32_t proxima_vm_dispatch_mmio_net(
     void *net_transport,
     uint64_t offset,
@@ -646,6 +646,7 @@ int proxima_vm_scratch_warm_restore(
     size_t page_size,
     uint64_t *restore_wall_nanos_out,
     uint64_t *touch_all_pages_nanos_out,
+    uint64_t *bytes_copied_out,
     uint64_t *fault_count_out,
     uint64_t *resumed_x0_out,
     int *resumed_ok_out,

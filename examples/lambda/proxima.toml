@@ -1,0 +1,22 @@
+[[pipe]]
+name = "elf"
+type = "vm"
+guest_image_path = "uppercase"
+
+[[pipe]]
+name = "linux"
+type = "vm"
+kernel_path = "/boot/vmlinuz-linux"
+init_path = "uppercase-init"
+
+[[listen]]
+type = "http"
+bind = "127.0.0.1:8088"
+
+[[listen.mount]]
+path = "/elf"
+pipe = "elf"
+
+[[listen.mount]]
+path = "/linux"
+pipe = "linux"

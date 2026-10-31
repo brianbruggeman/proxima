@@ -16,8 +16,6 @@
 //! bytes actually moved), kept separate from the mmio/net/hypercall channels
 //! so this test's assertion can never be satisfied by the wrong channel.
 
-// the leaves these tests drive exist only in backend_macos.c
-#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #![allow(clippy::expect_used, clippy::unwrap_used, clippy::indexing_slicing)]
 
 use std::path::{Path, PathBuf};
@@ -28,6 +26,12 @@ const ENTITLEMENTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/entitlements.pl
 const GUEST_MANIFEST_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/guests/lambda");
 
 const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+const KVM_LANE: bool = cfg!(all(target_os = "linux", target_arch = "x86_64"));
+const GUEST_TARGET: &str = if KVM_LANE {
+    "x86_64-unknown-none"
+} else {
+    "aarch64-unknown-none"
+};
 
 const SECTOR_LEN: usize = 512;
 
@@ -45,7 +49,7 @@ fn build_guest_elf(target_dir: &Path) -> PathBuf {
             "--manifest-path",
             &format!("{GUEST_MANIFEST_DIR}/Cargo.toml"),
             "--target",
-            "aarch64-unknown-none",
+            GUEST_TARGET,
             "--release",
         ])
         .env("CARGO_TARGET_DIR", target_dir)
@@ -53,7 +57,7 @@ fn build_guest_elf(target_dir: &Path) -> PathBuf {
         .expect("run cargo build for the guest ELF");
     assert!(status.success(), "guest ELF build failed");
     target_dir
-        .join("aarch64-unknown-none")
+        .join(GUEST_TARGET)
         .join("release")
         .join("proxima-vm-guest-lambda")
 }
@@ -74,13 +78,13 @@ fn parse_blk_emitted(stderr: &str) -> Vec<u8> {
         .collect()
 }
 
-/// This proof runs only on the hypervisor lane: `handle_mmio_data_abort`
-/// (`src/backend_macos.c`) is aarch64/HVF-only per this slice's scope —
-/// `backend_linux.c`'s mirror compiles but does not yet decode
-/// `KVM_EXIT_MMIO`.
+/// Runs on both hypervisor lanes: a data-abort exit on HVF
+/// (`src/backend_macos.c`'s `handle_mmio_data_abort`), `KVM_EXIT_MMIO` on KVM
+/// (`src/kvm/devices.rs`'s `VirtioWindow`), both landing in the same Rust
+/// trampolines.
 #[proxima::test]
 async fn guest_virtio_blk_requests_round_trip_through_a_real_vm_exit() {
-    if !HYPERVISOR_LANE {
+    if !(HYPERVISOR_LANE || KVM_LANE) {
         return;
     }
 
@@ -89,20 +93,22 @@ async fn guest_virtio_blk_requests_round_trip_through_a_real_vm_exit() {
     std::fs::copy(Path::new(PROBE_BINARY), &probe_path).expect("copy the built probe binary");
     let guest_elf = build_guest_elf(&directory.path().join("guest-target"));
 
-    let status = Command::new("codesign")
-        .arg("--force")
-        .arg("--sign")
-        .arg("-")
-        .arg("--entitlements")
-        .arg(ENTITLEMENTS)
-        .arg(&probe_path)
-        .status()
-        .expect("run codesign");
-    assert!(
-        status.success(),
-        "codesign failed for {}",
-        probe_path.display()
-    );
+    if HYPERVISOR_LANE {
+        let status = Command::new("codesign")
+            .arg("--force")
+            .arg("--sign")
+            .arg("-")
+            .arg("--entitlements")
+            .arg(ENTITLEMENTS)
+            .arg(&probe_path)
+            .status()
+            .expect("run codesign");
+        assert!(
+            status.success(),
+            "codesign failed for {}",
+            probe_path.display()
+        );
+    }
 
     let output = Command::new(&probe_path)
         .arg(&guest_elf)

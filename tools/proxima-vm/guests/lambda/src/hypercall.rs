@@ -3,7 +3,7 @@
 //! x86_64. Both instructions cause a synchronous exit into the host, which
 //! reads the full guest register file to recover the call — the same shape
 //! `src/backend_macos.c` already uses (`hv_vcpu_get_reg(vcpu, HV_REG_X0,
-//! ..)` after an `HVC` exception) and `src/backend_linux.c` already uses
+//! ..)` after an `HVC` exception) and `src/kvm` already uses
 //! (`run->io.data_offset` after a `KVM_EXIT_IO`). `dx` carries the verb
 //! itself rather than a fixed immediate port, because the immediate `out
 //! imm8, al` form the scratch guest uses today caps the call space at 256;
@@ -47,7 +47,7 @@ pub unsafe fn hypercall(verb: u16, buffer: &mut [u8]) -> u64 {
 }
 
 /// Issues `out dx, al`, placing `verb` in `dx`, the buffer's address in
-/// `rdi`, and its length in `rsi` — the port write `src/backend_linux.c`'s
+/// `rdi`, and its length in `rsi` — the port write `src/kvm`'s
 /// exit handler reads via `KVM_EXIT_IO` today, widened from a fixed
 /// immediate port to a caller-supplied one. `al` carries no payload; the
 /// trap itself, not its operand, is what the host observes.

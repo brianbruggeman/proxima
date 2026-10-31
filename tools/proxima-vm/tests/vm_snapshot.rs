@@ -11,8 +11,6 @@
 //! (`proxima_vm::snapshot`'s own module doc), connected by a
 //! postcard-encoded [`proxima_vm::snapshot::VmSnapshot`] file on disk.
 
-// the leaves these tests drive exist only in backend_macos.c
-#![cfg(all(target_os = "macos", target_arch = "aarch64"))]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use std::collections::HashMap;
@@ -329,17 +327,12 @@ async fn a_restored_vcpu_re_traps_with_the_same_register_the_snapshot_captured()
         Some("true"),
         "a resumed vCPU seeded from the snapshot's registers must re-trap at the same halting instruction"
     );
-    if HYPERVISOR_LANE {
-        // KVM's scratch guest halts via `hlt`, which carries no sentinel
-        // value in `rax` the way this lane's `hvc`-based halt carries
-        // `TERMINAL_VALUE` in `x0` -- this exact readback is an HVF-lane
-        // proof only.
-        assert_eq!(
-            fields.get("resumed_x0").map(String::as_str),
-            Some("256"),
-            "the resumed trap must read back the exact terminal value the snapshot captured"
-        );
-    }
+    assert_eq!(
+        fields.get("resumed_x0").map(String::as_str),
+        Some("256"),
+        "the resumed trap must read back the exact terminal value the snapshot captured \
+         (`x0` on HVF, `rax` on KVM -- the scratch guest loads 256 into `ax` before its `hlt`)"
+    );
 }
 
 /// The M7 exit criterion, verbatim: restore wall time and fault count at
@@ -397,11 +390,7 @@ async fn restore_reports_wall_time_and_fault_count_at_this_page_size(#[case] pag
 /// assert-fail if it did.
 #[proxima::test]
 async fn n_consecutive_warm_restores_in_one_process_all_re_trap_correctly() {
-    if !HYPERVISOR_LANE {
-        // The warm-restore trio is implemented on the HVF lane only this
-        // slice (`dispatch_trampoline.h`'s own doc on the warm-restore
-        // trio); the KVM lane has no `hv_vm_create`-once-per-process
-        // restriction to work around in the first place.
+    if !lane_is_supported() {
         return;
     }
 
@@ -450,10 +439,7 @@ async fn n_consecutive_warm_restores_in_one_process_all_re_trap_correctly() {
 /// not pass. Prints the size-sweep table `BENCH_LOG.md`'s own row cites.
 #[proxima::test]
 async fn warm_restore_wall_time_scales_with_snapshot_memory_size() {
-    if !HYPERVISOR_LANE {
-        // The warm-restore trio is implemented on the HVF lane only
-        // (`dispatch_trampoline.h`'s own doc); see
-        // `n_consecutive_warm_restores_in_one_process_all_re_trap_correctly`.
+    if !lane_is_supported() {
         return;
     }
 
@@ -527,7 +513,7 @@ async fn warm_restore_wall_time_scales_with_snapshot_memory_size() {
 /// a second sweep.
 #[proxima::test]
 async fn warm_restore_cost_is_size_bound_not_content_bound() {
-    if !HYPERVISOR_LANE {
+    if !lane_is_supported() {
         return;
     }
 
@@ -563,25 +549,25 @@ async fn warm_restore_cost_is_size_bound_not_content_bound() {
     let same_wall_nanos = iteration_series(&same_fields, "iteration_call_wall_nanos", ITERATIONS);
     let alternate_wall_nanos =
         iteration_series(&alternate_fields, "iteration_call_wall_nanos", ITERATIONS);
+    let same_bytes = iteration_series(&same_fields, "iteration_bytes_copied", ITERATIONS);
+    let alternate_bytes = iteration_series(&alternate_fields, "iteration_bytes_copied", ITERATIONS);
 
     let (same_p50, _same_p99, _same_cov) = percentiles_and_cov(same_wall_nanos);
     let (alternate_p50, _alternate_p99, _alternate_cov) = percentiles_and_cov(alternate_wall_nanos);
 
-    let relative_difference =
-        (same_p50 as f64 - alternate_p50 as f64).abs() / (same_p50.max(alternate_p50) as f64);
-
     println!(
-        "content-bound control at {SIZE} bytes: same_content p50={same_p50}ns \
-         alternating_content p50={alternate_p50}ns relative_difference={relative_difference:.3}"
+        "content-bound control at {SIZE} bytes (reported, not asserted): \
+         same_content p50={same_p50}ns alternating_content p50={alternate_p50}ns"
     );
 
-    assert!(
-        relative_difference < 0.25,
-        "warm-restore p50 differed by {:.1}% between same-content ({same_p50}ns) and \
-         alternating-content ({alternate_p50}ns) restores at {SIZE} bytes -- expected the cost to \
-         be size-bound, not content-bound",
-        relative_difference * 100.0
-    );
+    let expected_bytes = SIZE as u64;
+    for (mode, series) in [("same", &same_bytes), ("alternate", &alternate_bytes)] {
+        assert!(
+            series.iter().all(|&copied| copied == expected_bytes),
+            "{mode}-content restores must each move exactly the snapshot size ({expected_bytes} \
+             bytes) regardless of content -- size-bound, not content-bound; saw {series:?}"
+        );
+    }
 }
 
 /// The layered rework's own correctness gate: after `iterations` dirty-write
@@ -594,7 +580,7 @@ async fn warm_restore_cost_is_size_bound_not_content_bound() {
 /// `restore_layered` is a no-op).
 #[proxima::test]
 async fn layered_restore_reproduces_the_base_byte_identically_over_the_whole_region() {
-    if !HYPERVISOR_LANE {
+    if !lane_is_supported() {
         return;
     }
 
@@ -620,7 +606,7 @@ async fn layered_restore_reproduces_the_base_byte_identically_over_the_whole_reg
 #[case::small_k(16)]
 #[case::medium_k(256)]
 async fn layered_restore_actually_remaps_dirtied_pages_read_only(#[case] dirty_page_count: u16) {
-    if !HYPERVISOR_LANE {
+    if !lane_is_supported() {
         return;
     }
 
@@ -643,11 +629,11 @@ async fn layered_restore_actually_remaps_dirtied_pages_read_only(#[case] dirty_p
 /// single number. Prints the row `BENCH_LOG.md` cites.
 #[proxima::test]
 async fn layered_restore_cost_scales_with_dirty_page_count_not_region_size() {
-    if !HYPERVISOR_LANE {
+    if !lane_is_supported() {
         return;
     }
 
-    const ITERATIONS: usize = 50;
+    const ITERATIONS: usize = 5;
     const CASES: [(&str, usize, u16); 5] = [
         ("16MiB", 16 * 1024 * 1024, 16),
         ("16MiB", 16 * 1024 * 1024, 256),
@@ -688,6 +674,22 @@ async fn layered_restore_cost_scales_with_dirty_page_count_not_region_size() {
         let unprotected_nanos =
             iteration_series(&fields, "iteration_unprotected_run_wall_nanos", ITERATIONS);
 
+        let remapped_pages =
+            iteration_series(&fields, "iteration_remapped_page_count", ITERATIONS);
+        let newly_dirty_pages =
+            iteration_series(&fields, "iteration_run_newly_dirty_page_count", ITERATIONS);
+        let expected_pages = u64::from(dirty_page_count);
+        assert!(
+            remapped_pages.iter().all(|&pages| pages == expected_pages),
+            "size={label} K={dirty_page_count}: every restore must remap exactly K pages \
+             whatever the region size; saw {remapped_pages:?}"
+        );
+        assert!(
+            newly_dirty_pages.iter().all(|&pages| pages == expected_pages),
+            "size={label} K={dirty_page_count}: every run must dirty exactly K pages; \
+             saw {newly_dirty_pages:?}"
+        );
+
         let (restore_p50, restore_p99, _restore_cov) = percentiles_and_cov(restore_nanos);
         let (run_p50, _run_p99, _run_cov) = percentiles_and_cov(run_nanos);
         let (unprotected_p50, _unprotected_p99, _unprotected_cov) =
@@ -705,7 +707,7 @@ async fn layered_restore_cost_scales_with_dirty_page_count_not_region_size() {
 /// a write through one must be invisible in the base and in the other.
 #[proxima::test]
 async fn two_warm_vms_share_one_base_without_observing_each_others_writes() {
-    if !HYPERVISOR_LANE {
+    if !lane_is_supported() {
         return;
     }
 

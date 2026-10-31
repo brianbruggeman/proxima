@@ -1293,6 +1293,7 @@ int proxima_vm_scratch_warm_restore(
     size_t page_size,
     uint64_t *restore_wall_nanos_out,
     uint64_t *touch_all_pages_nanos_out,
+    uint64_t *bytes_copied_out,
     uint64_t *fault_count_out,
     uint64_t *resumed_x0_out,
     int *resumed_ok_out,
@@ -1308,6 +1309,7 @@ int proxima_vm_scratch_warm_restore(
 
     *resumed_ok_out = 0;
     *fault_count_out = 0;
+    *bytes_copied_out = 0;
 
     if (guest_memory_length > context->guest_memory_capacity) {
         return set_error(error_buffer, error_capacity, "warm restore guest memory exceeds context capacity");
@@ -1324,6 +1326,7 @@ int proxima_vm_scratch_warm_restore(
         for (size_t offset = 0; offset < guest_memory_length; offset += stride) {
             const size_t chunk = (guest_memory_length - offset) < stride ? (guest_memory_length - offset) : stride;
             memcpy(destination + offset, guest_memory_in + offset, chunk);
+            *bytes_copied_out += (uint64_t)chunk;
         }
         *touch_all_pages_nanos_out = now_nanos() - touch_start_nanos;
     }

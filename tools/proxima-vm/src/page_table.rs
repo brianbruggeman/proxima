@@ -344,6 +344,113 @@ fn walk_x86_64(
     unreachable!("the final level (shift == 12) always terminates")
 }
 
+pub const X86_TABLE_PAGE_SIZE: u64 = 4096;
+pub const X86_HUGE_PAGE_SIZE: u64 = 2 * 1024 * 1024;
+const X86_ENTRIES_PER_TABLE: usize = 512;
+const X86_TABLE_ENTRY_FLAGS: u64 = 0x3;
+const X86_FIRST_DIRECTORY_PAGE: usize = 2;
+const GIGABYTE_SHIFT: u32 = 30;
+const HUGE_PAGE_SHIFT: u32 = 21;
+const INDEX_MASK: u64 = 0x1ff;
+
+/// A span `[start, end)` of guest-physical addresses mapped onto itself in
+/// 2 MiB pages, every entry carrying `flags` (present, writable, PS, and
+/// whatever caching or accessed/dirty bits the caller wants) alongside the
+/// address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentitySpan {
+    pub start: u64,
+    pub end: u64,
+    pub flags: u64,
+}
+
+/// Why [`write_x86_64_identity_2m`] could not lay the tables out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutError {
+    /// The output buffer is not a whole number of 4 KiB pages, or holds fewer
+    /// than the two a PML4 and PDPT need.
+    BufferShape { length: usize },
+    /// A span reaches past the 512 GiB one PML4 entry covers.
+    BeyondFirstPml4Entry { end: u64 },
+    /// The spans touch more gigabytes than the buffer has directory pages for.
+    OutOfPages { capacity_pages: usize },
+}
+
+impl core::fmt::Display for LayoutError {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::BufferShape { length } => {
+                write!(formatter, "page table buffer of {length} bytes is not at least two whole pages")
+            }
+            Self::BeyondFirstPml4Entry { end } => {
+                write!(formatter, "identity span ends at {end:#x}, past the first 512 GiB")
+            }
+            Self::OutOfPages { capacity_pages } => {
+                write!(formatter, "guest page tables exceed their reserved {capacity_pages} pages")
+            }
+        }
+    }
+}
+
+impl core::error::Error for LayoutError {}
+
+fn store_entry(out: &mut [u8], page: usize, index: usize, entry: u64) {
+    let offset = page * X86_TABLE_PAGE_SIZE as usize + index * 8;
+    out[offset..offset + 8].copy_from_slice(&entry.to_le_bytes());
+}
+
+fn load_entry(out: &[u8], page: usize, index: usize) -> u64 {
+    let offset = page * X86_TABLE_PAGE_SIZE as usize + index * 8;
+    read_u64(out, offset)
+}
+
+/// Lays an x86-64 identity map over `spans` into `out`, which the caller
+/// places at guest-physical `table_address`: page 0 is the PML4, page 1 the
+/// PDPT, and one page-directory page follows per gigabyte first touched, in
+/// the order the spans first reach it. Every entry is written for the
+/// walker's own [`Format::X86_64FourLevel`] to read back; the output is the
+/// number of 4 KiB pages used.
+///
+/// # Errors
+///
+/// [`LayoutError`] when `out` cannot hold the directories the spans need.
+pub fn write_x86_64_identity_2m(
+    out: &mut [u8],
+    table_address: u64,
+    spans: &[IdentitySpan],
+) -> Result<usize, LayoutError> {
+    let capacity_pages = out.len() / X86_TABLE_PAGE_SIZE as usize;
+    if !out.len().is_multiple_of(X86_TABLE_PAGE_SIZE as usize) || capacity_pages < X86_FIRST_DIRECTORY_PAGE {
+        return Err(LayoutError::BufferShape { length: out.len() });
+    }
+    out.fill(0);
+    store_entry(out, 0, 0, (table_address + X86_TABLE_PAGE_SIZE) | X86_TABLE_ENTRY_FLAGS);
+    let mut used_pages = X86_FIRST_DIRECTORY_PAGE;
+    for span in spans {
+        if span.end > 1 << 39 {
+            return Err(LayoutError::BeyondFirstPml4Entry { end: span.end });
+        }
+        let mut address = span.start;
+        while address < span.end {
+            let pdpt_index = ((address >> GIGABYTE_SHIFT) & INDEX_MASK) as usize;
+            if load_entry(out, 1, pdpt_index) == 0 {
+                if used_pages >= capacity_pages {
+                    return Err(LayoutError::OutOfPages { capacity_pages });
+                }
+                let directory_address = table_address + used_pages as u64 * X86_TABLE_PAGE_SIZE;
+                store_entry(out, 1, pdpt_index, directory_address | X86_TABLE_ENTRY_FLAGS);
+                used_pages += 1;
+            }
+            let directory_entry = load_entry(out, 1, pdpt_index) & OUTPUT_ADDRESS_MASK;
+            let directory = ((directory_entry - table_address) / X86_TABLE_PAGE_SIZE) as usize;
+            let slot = ((address >> HUGE_PAGE_SHIFT) & INDEX_MASK) as usize;
+            store_entry(out, directory, slot % X86_ENTRIES_PER_TABLE, address | span.flags);
+            address += X86_HUGE_PAGE_SIZE;
+        }
+    }
+    Ok(used_pages)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -775,5 +882,107 @@ mod tests {
             };
             let _ = walk(&bytes, 0, vaddr, Access { write: true, execute: true }, format);
         }
+    }
+}
+
+#[cfg(test)]
+mod identity_map_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    const TABLE_ADDRESS: u64 = 0x9000;
+    const LINUX_FLAGS: u64 = 0x83;
+    const ELF_FLAGS: u64 = 0xe3;
+    const ELF_UNCACHED_FLAGS: u64 = 0xfb;
+    const MIB: u64 = 1024 * 1024;
+
+    fn guest_memory_holding(tables: &[u8], total: usize) -> alloc::vec::Vec<u8> {
+        let mut memory = alloc::vec![0_u8; total];
+        memory[TABLE_ADDRESS as usize..TABLE_ADDRESS as usize + tables.len()].copy_from_slice(tables);
+        memory
+    }
+
+    #[test]
+    fn a_128_mib_linux_map_is_the_pml4_pdpt_and_one_directory_with_83_entries() {
+        let mut tables = [0_u8; 3 * 4096];
+
+        let used = write_x86_64_identity_2m(
+            &mut tables,
+            TABLE_ADDRESS,
+            &[IdentitySpan { start: 0, end: 128 * MIB, flags: LINUX_FLAGS }],
+        )
+        .expect("one gigabyte of directory fits three pages");
+
+        assert_eq!(used, 3);
+        assert_eq!(read_u64(&tables, 0), 0xa003, "pml4[0] -> pdpt at 0xa000");
+        assert_eq!(read_u64(&tables, 4096), 0xb003, "pdpt[0] -> directory at 0xb000");
+        assert_eq!(read_u64(&tables, 2 * 4096), 0x83, "pd[0] maps 0");
+        assert_eq!(read_u64(&tables, 2 * 4096 + 8), 0x20_0083, "pd[1] maps 2 MiB");
+        assert_eq!(read_u64(&tables, 2 * 4096 + 63 * 8), (126 * MIB) | 0x83);
+        assert_eq!(read_u64(&tables, 2 * 4096 + 64 * 8), 0, "nothing past 128 MiB");
+    }
+
+    #[test]
+    fn the_walker_resolves_every_mapped_address_to_itself() {
+        let mut tables = [0_u8; 3 * 4096];
+        write_x86_64_identity_2m(
+            &mut tables,
+            TABLE_ADDRESS,
+            &[IdentitySpan { start: 0, end: 8 * MIB, flags: LINUX_FLAGS }],
+        )
+        .expect("fits");
+        let memory = guest_memory_holding(&tables, 16 * MIB as usize);
+
+        for vaddr in [0, 0x1234, 2 * MIB, 2 * MIB + 5, 7 * MIB + 0xfff] {
+            let resolved = walk(&memory, TABLE_ADDRESS, vaddr, Access { write: true, execute: true }, Format::X86_64FourLevel);
+            assert_eq!(resolved, Ok(vaddr), "identity at {vaddr:#x}");
+        }
+        let past_the_span = walk(&memory, TABLE_ADDRESS, 8 * MIB, Access::default(), Format::X86_64FourLevel);
+        assert!(matches!(past_the_span, Err(Fault::InvalidDescriptor { level: 2, .. })));
+    }
+
+    #[test]
+    fn a_second_span_carries_its_own_flags_into_a_second_gigabyte_directory() {
+        let mut tables = [0_u8; 4 * 4096];
+        let mmio = 0x10_0000_0000_u64;
+
+        let used = write_x86_64_identity_2m(
+            &mut tables,
+            TABLE_ADDRESS,
+            &[
+                IdentitySpan { start: 0, end: 4 * MIB, flags: ELF_FLAGS },
+                IdentitySpan { start: mmio, end: mmio + 2 * MIB, flags: ELF_UNCACHED_FLAGS },
+            ],
+        )
+        .expect("two directories fit four pages");
+
+        assert_eq!(used, 4);
+        assert_eq!(read_u64(&tables, 2 * 4096), 0xe3);
+        assert_eq!(read_u64(&tables, 3 * 4096), mmio | 0xfb, "the mmio page is uncached");
+        assert_eq!(read_u64(&tables, 4096 + 64 * 8), 0xc003, "pdpt[64] -> second directory");
+    }
+
+    #[test]
+    fn running_out_of_directory_pages_is_named_not_truncated() {
+        let mut tables = [0_u8; 2 * 4096];
+
+        let error = write_x86_64_identity_2m(
+            &mut tables,
+            TABLE_ADDRESS,
+            &[IdentitySpan { start: 0, end: 2 * MIB, flags: LINUX_FLAGS }],
+        )
+        .expect_err("no page left for a directory");
+
+        assert_eq!(error, LayoutError::OutOfPages { capacity_pages: 2 });
+    }
+
+    #[test]
+    fn a_buffer_that_is_not_whole_pages_is_rejected() {
+        let mut tables = [0_u8; 5000];
+
+        let error = write_x86_64_identity_2m(&mut tables, TABLE_ADDRESS, &[]).expect_err("ragged buffer");
+
+        assert_eq!(error, LayoutError::BufferShape { length: 5000 });
     }
 }

@@ -47,6 +47,12 @@ path = "src/bin/gic_probe.rs"
 name = "proxima-vm-guest-lambda-pl011"
 path = "src/bin/pl011_probe.rs"
 
+# the elf guest: its own 2 MiB `link-elf.ld`, its stack a real ELF segment,
+# so it runs in any guest_memory_size covering its segments (`build.rs`).
+[[bin]]
+name = "uppercase"
+path = "src/bin/uppercase.rs"
+
 # mirrors the host workspace's [workspace.lints] (see root Cargo.toml);
 # `workspace = true` is unavailable since this crate is its own workspace root
 [lints.rust]

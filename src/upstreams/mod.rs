@@ -162,6 +162,6 @@ pub use tokio_stream::TokioTcpUpstream;
 #[cfg(all(feature = "unix", unix, feature = "tokio"))]
 pub use tokio_stream::TokioUnixUpstream;
 #[cfg(feature = "vm")]
-pub use vm::{VmConfig, VmPipeFactory, VmSpec, VmUpstream};
+pub use vm::{GuestSpec, VmConfig, VmPipeFactory, VmSpec, VmUpstream};
 #[cfg(feature = "websocket-upstream")]
 pub use websocket::WebSocketUpstream;
