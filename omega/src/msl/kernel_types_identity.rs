@@ -1541,6 +1541,7 @@ pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Op
         | Codec::Q1_0
         | Codec::Q2_0
         | Codec::Pq2_0
+        | Codec::Ptq1_0
         | Codec::Float16
         | Codec::BFloat16
         | Codec::BFloat8
@@ -1593,6 +1594,7 @@ pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
         Codec::Q1_0 => "q1_0",
         Codec::Q2_0 => "q2_0",
         Codec::Pq2_0 => "pq2_0",
+        Codec::Ptq1_0 => "ptq1_0",
     }
 }
 
@@ -1639,6 +1641,7 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
         Codec::Q1_0 => GgmlType::Q1_0.block_layout().block_bytes as usize,
         Codec::Q2_0 => GgmlType::Q2_0.block_layout().block_bytes as usize,
         Codec::Pq2_0 => GgmlType::Pq2_0.block_layout().block_bytes as usize,
+        Codec::Ptq1_0 => GgmlType::Ptq1_0.block_layout().block_bytes as usize,
     }
 }
 
@@ -1706,6 +1709,7 @@ pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
         Codec::Q1_0 => GgmlType::Q1_0.block_layout().block_elements as usize,
         Codec::Q2_0 => GgmlType::Q2_0.block_layout().block_elements as usize,
         Codec::Pq2_0 => GgmlType::Pq2_0.block_layout().block_elements as usize,
+        Codec::Ptq1_0 => GgmlType::Ptq1_0.block_layout().block_elements as usize,
     }
 }
 
@@ -2057,6 +2061,7 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
         | Codec::Q1_0
         | Codec::Q2_0
         | Codec::Pq2_0
+        | Codec::Ptq1_0
         | Codec::BFloat8 => None,
         Codec::Fp6E3M2 => Some(TiledDecode::new(
             FP6_E3M2_ELEMENTS,

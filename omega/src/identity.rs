@@ -581,6 +581,7 @@ mod gated {
             Some(Codec::Q1_0) => 'u',
             Some(Codec::Q2_0) => 'v',
             Some(Codec::Pq2_0) => 'W',
+            Some(Codec::Ptq1_0) => 'X',
             None => 'f',
         }
     }

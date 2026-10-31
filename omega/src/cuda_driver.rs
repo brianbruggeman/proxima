@@ -2428,6 +2428,7 @@ fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
         | Codec::Q1_0
         | Codec::Q2_0
         | Codec::Pq2_0
+        | Codec::Ptq1_0
         | Codec::Float16
         | Codec::BFloat16 => Some(*codec),
         Codec::Q5_1
@@ -2593,7 +2594,7 @@ mod tests {
         Codec::Nvfp4,
     ];
 
-    const CODECS_WITH_CUDA_KERNEL: [Codec; 13] = [
+    const CODECS_WITH_CUDA_KERNEL: [Codec; 14] = [
         Codec::Q2K,
         Codec::Q3K,
         Codec::Q4K,
@@ -2605,6 +2606,7 @@ mod tests {
         Codec::Q1_0,
         Codec::Q2_0,
         Codec::Pq2_0,
+        Codec::Ptq1_0,
         Codec::Float16,
         Codec::BFloat16,
     ];

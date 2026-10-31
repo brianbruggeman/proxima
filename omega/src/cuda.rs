@@ -1584,6 +1584,8 @@ pub(crate) fn preamble(source: &mut String, element_type: &str) {
     source.push('\n');
     source.push_str(Q2_0_UNPACK_CUDA);
     source.push('\n');
+    source.push_str(PTQ1_0_UNPACK_CUDA);
+    source.push('\n');
     source.push_str(BF16_UNPACK_CUDA);
     source.push('\n');
 }
@@ -1844,6 +1846,9 @@ fn operand_read(
         )),
         Some(Codec::Pq2_0) => Ok(format!(
             "q2_0_element(in{index} + ({offset} / {PQ2_0_BLOCK_ELEMENTS}) * {PQ2_0_BLOCK_BYTES}, (unsigned int)({offset} % {PQ2_0_BLOCK_ELEMENTS}))"
+        )),
+        Some(Codec::Ptq1_0) => Ok(format!(
+            "ptq1_0_element(in{index} + ({offset} / {PTQ1_0_BLOCK_ELEMENTS}) * {PTQ1_0_BLOCK_BYTES}, (unsigned int)({offset} % {PTQ1_0_BLOCK_ELEMENTS}))"
         )),
         // `__half` converts implicitly to `float` in CUDA C++, the same
         // "already a valid narrow-float buffer" shape MSL's `half` takes.
@@ -3505,6 +3510,36 @@ pub const Q2_0_BLOCK_BYTES: usize = proxima_gguf::quant::q2_0::BLOCK_BYTES;
 pub const Q2_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q2_0::QK_Q2_0;
 pub const PQ2_0_BLOCK_BYTES: usize = proxima_gguf::quant::pq2_0::BLOCK_BYTES;
 pub const PQ2_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::pq2_0::QK_PQ2_0;
+
+/// CUDA C source for unpacking one element of a `PTQ1_0` block (PrismML
+/// `dequantize_row_ptq1_0`): 28-byte block, `qs[24]` then `qh[2]` then `d` f16 at 26. Elements
+/// 0..80 are the five trits of `qs[0..16]` (element `n * 16 + m` is trit `n` of byte `m`),
+/// 80..120 the five trits of `qs[16..24]` (`n * 8 + m`), 120..128 the four trits of `qh`
+/// (`n * 2 + m`). Trit `n` of byte `b` is `((b * 3^n mod 256) * 3 >> 8) - 1`, times `d`.
+pub const PTQ1_0_UNPACK_CUDA: &str = "\
+__device__ __forceinline__ float ptq1_0_element(const unsigned char *block, unsigned int index) {
+    unsigned short d_bits = (unsigned short)((unsigned int)block[26] | ((unsigned int)block[27] << 8));
+    float d = __half2float(__ushort_as_half(d_bits));
+    unsigned int byte_index;
+    unsigned int position;
+    if (index < 80u) {
+        byte_index = index & 15u;
+        position = index >> 4u;
+    } else if (index < 120u) {
+        byte_index = 16u + ((index - 80u) & 7u);
+        position = (index - 80u) >> 3u;
+    } else {
+        byte_index = 24u + ((index - 120u) & 1u);
+        position = (index - 120u) >> 1u;
+    }
+    unsigned int power = position == 0u ? 1u : position == 1u ? 3u : position == 2u ? 9u : position == 3u ? 27u : 81u;
+    unsigned int scaled = ((unsigned int)block[byte_index] * power) & 255u;
+    return (float)((int)((scaled * 3u) >> 8u) - 1) * d;
+}
+";
+
+pub const PTQ1_0_BLOCK_BYTES: usize = proxima_gguf::quant::ptq1_0::BLOCK_BYTES;
+pub const PTQ1_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::ptq1_0::QK_PTQ1_0;
 
 pub const FLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::f16::BLOCK_BYTES;
 pub const FLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::f16::QK_F16;
