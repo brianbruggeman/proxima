@@ -3578,12 +3578,16 @@ pub(crate) fn cuda_cached_attention_class(kind: &BoundOpKind) -> Option<CudaAtte
     else {
         return None;
     };
-    if rotary_dim < head_dim {
-        return None;
-    }
+    let (static_operands, bound_operands) = if rotary_dim < head_dim {
+        (11, 12)
+    } else {
+        (8, 9)
+    };
     match operands.len() {
-        8 => Some(CudaAttentionClass::Static),
-        9 if *cached_key_rows > 0 => Some(CudaAttentionClass::CachedBound),
+        count if count == static_operands => Some(CudaAttentionClass::Static),
+        count if count == bound_operands && *cached_key_rows > 0 => {
+            Some(CudaAttentionClass::CachedBound)
+        }
         _ => None,
     }
 }
@@ -3661,16 +3665,54 @@ mod tests {
     }
 
     #[test]
-    fn classifier_declines_single_range_and_partial_rotary_and_non_attention() {
+    fn classifier_declines_single_range_and_mismatched_pass_planes_and_non_attention() {
         let single_range = attention_kind(9, 0, 256, 256);
-        let partial_rotary = attention_kind(11, 5, 256, 128);
+        let partial_rotary_without_pass_planes = attention_kind(8, 5, 256, 64);
         let unexpected_count = attention_kind(11, 5, 256, 256);
         let elementwise = elementwise_tanh_op(4).kind;
 
         assert_eq!(cuda_cached_attention_class(&single_range), None);
-        assert_eq!(cuda_cached_attention_class(&partial_rotary), None);
+        assert_eq!(
+            cuda_cached_attention_class(&partial_rotary_without_pass_planes),
+            None
+        );
         assert_eq!(cuda_cached_attention_class(&unexpected_count), None);
         assert_eq!(cuda_cached_attention_class(&elementwise), None);
+    }
+
+    #[test]
+    fn classifier_accepts_partial_rotary_with_pass_planes() {
+        assert_eq!(
+            cuda_cached_attention_class(&attention_kind(11, 5, 256, 64)),
+            Some(CudaAttentionClass::Static)
+        );
+        assert_eq!(
+            cuda_cached_attention_class(&attention_kind(12, 5, 256, 64)),
+            Some(CudaAttentionClass::CachedBound)
+        );
+    }
+
+    #[test]
+    fn partial_rotary_kernel_reads_the_pass_planes_after_the_cached_len_slot() {
+        let op = attention_op_with(attention_kind(12, 5, 256, 64));
+
+        let kernel = emit_cuda(&op, &no_packed()).expect("partial rotary two-range form emits");
+
+        assert!(kernel.source.contains("pass_query = in9"));
+        assert!(kernel.source.contains("pass_cached_key = in10"));
+        assert!(kernel.source.contains("pass_new_key = in11"));
+        assert!(kernel.source.contains("constexpr long pass_dim = head_dim - rotary_dim"));
+    }
+
+    #[test]
+    fn entry_name_differs_when_rotary_dim_differs() {
+        let full = attention_op_with(attention_kind(9, 32, 256, 256));
+        let partial = attention_op_with(attention_kind(12, 32, 256, 64));
+
+        let full_kernel = emit_cuda(&full, &no_packed()).expect("full rotary emits");
+        let partial_kernel = emit_cuda(&partial, &no_packed()).expect("partial rotary emits");
+
+        assert_ne!(full_kernel.entry, partial_kernel.entry);
     }
 
     fn attention_op_with(kind: BoundOpKind) -> BoundOp {

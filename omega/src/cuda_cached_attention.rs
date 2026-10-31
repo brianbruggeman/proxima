@@ -17,6 +17,7 @@ pub(crate) fn cached_attention_entry_name(
         kv_heads,
         query_groups,
         head_dim,
+        rotary_dim,
         new_key_rows,
         scale,
         cached_lower_inclusive,
@@ -26,8 +27,13 @@ pub(crate) fn cached_attention_entry_name(
     else {
         return Err(kind_mismatch(resolved));
     };
+    let rotary_token = if rotary_dim < head_dim {
+        format!("_r{rotary_dim}")
+    } else {
+        String::new()
+    };
     Ok(format!(
-        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}_n{new_key_rows}_s{:08x}_l{}_u{}",
+        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_n{new_key_rows}_s{:08x}_l{}_u{}",
         class_tag(class),
         scale.to_bits(),
         signed_name_part(*cached_lower_inclusive),
@@ -52,6 +58,7 @@ pub(crate) fn render_cached_attention_cuda(
         kv_heads,
         query_groups,
         head_dim,
+        rotary_dim,
         scale,
         cached_lower_inclusive,
         new_upper_inclusive,
@@ -78,6 +85,25 @@ pub(crate) fn render_cached_attention_cuda(
         i64::MIN => String::from("-9223372036854775807L"),
         bound => format!("{bound}L"),
     };
+    let pass_planes = if rotary_dim < head_dim {
+        let first = match class {
+            CudaAttentionClass::CachedBound => 9,
+            CudaAttentionClass::Static => 8,
+        };
+        format!(
+            "const float* __restrict__ pass_query = in{first};\n\
+             \x20   const float* __restrict__ pass_cached_key = in{};\n\
+             \x20   const float* __restrict__ pass_new_key = in{};\n",
+            first + 1,
+            first + 2
+        )
+    } else {
+        String::from(
+            "const float* __restrict__ pass_query = in0;\n\
+             \x20   const float* __restrict__ pass_cached_key = in0;\n\
+             \x20   const float* __restrict__ pass_new_key = in0;\n",
+        )
+    };
     let mut source = String::new();
     preamble(&mut source, "float");
     source.push_str("struct Uniforms { long total_elements; };\n\n");
@@ -88,12 +114,15 @@ pub(crate) fn render_cached_attention_cuda(
         "    constexpr long kv_heads = {kv_heads};\n\
          \x20   constexpr long query_groups = {query_groups};\n\
          \x20   constexpr long head_dim = {head_dim};\n\
-         \x20   constexpr long pair_dim = head_dim / 2;\n\
+         \x20   constexpr long rotary_dim = {rotary_dim};\n\
+         \x20   constexpr long pair_dim = rotary_dim / 2;\n\
+         \x20   constexpr long pass_dim = head_dim - rotary_dim;\n\
          \x20   constexpr long new_key_rows = {new_key_rows}L;\n\
          \x20   constexpr long new_upper = {new_upper_inclusive}L;\n\
          \x20   constexpr long cached_lower = {cached_lower};\n\
          \x20   constexpr float scale = {scale};\n\
-         \x20   {cached_rows_decl}\n",
+         \x20   {cached_rows_decl}\n\
+         \x20   {pass_planes}",
         scale = cuda_float_literal(*scale),
     ));
     source.push_str(CACHED_ATTENTION_BODY);
@@ -111,6 +140,7 @@ const CACHED_ATTENTION_BODY: &str = "\
     const long query_head = vector_index % (kv_heads * query_groups);
     const long kv_head = query_head / query_groups;
     const long qbase = query_row * (kv_heads * query_groups * pair_dim) + query_head * pair_dim;
+    const long qpass = query_row * (kv_heads * query_groups * pass_dim) + query_head * pass_dim;
     const long last_key = cached_key_rows + new_key_rows - 1L;
     float maximum = negative_infinity;
     float sum = 0.0f;
@@ -122,11 +152,17 @@ const CACHED_ATTENTION_BODY: &str = "\
         const long relative = (cached ? key - cached_key_rows : new_index) - query_row;
         if (cached && relative < cached_lower) { continue; }
         if (!cached && relative > new_upper) { continue; }
-        const long kbase = (cached ? key : new_index) * (kv_heads * pair_dim) + kv_head * pair_dim;
+        const long key_row = cached ? key : new_index;
+        const long kbase = key_row * (kv_heads * pair_dim) + kv_head * pair_dim;
+        const long kpass = key_row * (kv_heads * pass_dim) + kv_head * pass_dim;
+        const long vbase = key_row * (kv_heads * head_dim) + kv_head * head_dim;
         float partial = 0.0f;
         for (long pair = (long)lane; pair < pair_dim; pair += 32L) {
             partial += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);
             partial += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);
+        }
+        for (long column = (long)lane; column < pass_dim; column += 32L) {
+            partial += pass_query[qpass + column] * (cached ? pass_cached_key[kpass + column] : pass_new_key[kpass + column]);
         }
         for (int offset = 16; offset > 0; offset >>= 1) { partial += __shfl_xor_sync(0xffffffffu, partial, offset); }
         const float score = partial * scale;
@@ -137,7 +173,7 @@ const CACHED_ATTENTION_BODY: &str = "\
         for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
             const long local_dimension = dimension / 32L;
             weighted[local_dimension] = weighted[local_dimension] * rescale
-                + weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);
+                + weight * (cached ? in6[vbase + dimension] : in7[vbase + dimension]);
         }
         maximum = next_max;
     }
