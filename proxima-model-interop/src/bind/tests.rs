@@ -1573,6 +1573,7 @@ fn weight_precision_config_and_builder_surfaces_agree() {
 /// mmap's own bytes) rather than widening to an owned f32 table: the f32
 /// copy was 2x the file bytes and was the only binding the embedding gather
 /// read from, so the packed block is the whole point of this arm.
+#[cfg(feature = "std")]
 #[test]
 fn f16_token_embedding_binds_packed_not_widened_to_f32() {
     let rows = 4usize;
@@ -1629,6 +1630,7 @@ fn f16_token_embedding_binds_packed_not_widened_to_f32() {
 /// lm_head (`bind_matmul_weight_as`). Both must stay packed F16 over the same
 /// mmap bytes so the CUDA resident cache, keyed by (address, length), can
 /// serve both from one device upload.
+#[cfg(feature = "std")]
 #[test]
 fn tied_f16_embedding_and_lm_head_bind_packed_over_the_same_bytes() {
     let rows = 4usize;
@@ -1671,6 +1673,7 @@ fn tied_f16_embedding_and_lm_head_bind_packed_over_the_same_bytes() {
 /// A dense `F16` leaf the program reads whole (a norm-shaped tensor, not a
 /// gather) must keep widening to the owned f32 slot: packing it would change
 /// the binding every non-embedding fixture pins.
+#[cfg(feature = "std")]
 #[test]
 fn f16_dense_leaf_outside_the_gather_still_widens_to_owned_f32() {
     let rows = 4usize;
