@@ -668,6 +668,56 @@ is the compatibility path that lets every k3s workload run unchanged.
   responses byte-equal to the k3s-hosted whoami for the same request; control: a
   tampered layer digest is rejected before boot.
 
+D3 as built (2026-10-31), the linux flavor's image input and nothing vm-wide:
+
+- `src/oci/`: `registry.rs` pulls index, manifest, config and layers through one
+  transport function (`Request -> Response`, any host; `transport.rs` is proxima's
+  own prime HTTP/1 client with TLS, anonymous bearer from `auth.docker.io`,
+  redirects to the CDN without the registry token); every blob is checked against
+  its sha256 before it is cached or unpacked (`digest.rs`, `cache.rs`);
+  `rootfs.rs` applies layers in order with `.wh.` and `.wh..wh..opq` honoured;
+  `initramfs.rs` archives the tree as newc cpio beside `/init`, `/dev/console`,
+  `/dev/ttyS1` and `/.proxima/run.json`.
+- Boot semantics: `guests/linux-init` gains `oci-init` (static musl). It mounts
+  devtmpfs, proc and sysfs, reads `/.proxima/run.json` (image Entrypoint+Cmd, Env,
+  WorkingDir), execs the entrypoint with that env and cwd, and reports its fate
+  over COM2. Chosen over `rdinit=` because the kernel hands an `rdinit=` program
+  neither the image Env nor its cwd, no pseudo-filesystems, and the linux lane
+  needs a process to frame the result back. Marker 3 on port 0xe9 stamps the
+  moment before the spawn (`LinuxGuestTimings::entrypoint`).
+- Config: `VmConfig.image`, `oci_init_path`, `image_cache_dir` (`GuestSpec::Linux
+  { root: LinuxRoot::Init | LinuxRoot::Image }`); `image` and `init_path` are
+  mutually exclusive. A call's body is the milliseconds the entrypoint is left
+  running; the reply is `running`, `exited:<code>` or `signal:<n>`.
+- The CMOS RTC held binary registers; x86 Linux decodes every RTC as BCD, so the
+  guest clock read 2020-10-25 when the host read 2026-10-31. `cmos_rtc.rs` is BCD
+  now and whoami logs `2026/10/31`.
+- Not covered: the image `User` field (the entrypoint runs as root), volumes,
+  layers with zstd media types (refused by name).
+
+Kernel networking evidence (`/boot/vmlinuz-linux` = 7.2.11-arch1-1, config from
+`/usr/lib/modules/7.2.11-arch1-1/build/.config`): `CONFIG_NET=y INET=y PACKET=y
+UNIX=y VIRTIO=y VIRTIO_PCI=y VIRTIO_BLK=y VIRTIO_CONSOLE=y`, but
+`CONFIG_VIRTIO_NET=m VIRTIO_MMIO=m NET_FAILOVER=m FAILOVER=m E1000=m`;
+`modules.builtin` lists virtio, virtio_ring, virtio_pci, virtio_blk,
+virtio_console and not virtio_net or virtio_mmio; `modules.dep` has
+`virtio_net.ko.zst` depending on `net_failover.ko.zst` and `failover.ko.zst`.
+`CONFIG_MODULES=y MODULE_COMPRESS_ZSTD=y MODULE_DECOMPRESS=y`, `MODULE_SIG=y`
+without `MODULE_SIG_FORCE`. The guest console shows `Unknown kernel command line
+parameters "nomodules", will be passed to user space`: `nomodules` is not a kernel
+parameter, so it does not stop module loading. The same console shows `PCI: Fatal:
+No config space access function found`: the lane has no PCI bus, so the built-in
+virtio_pci can never find a device.
+
+D2 therefore needs: (1) a virtio-mmio net device on the lane's bus (the existing
+`virtio_net.rs` is the device model) declared to the guest with
+`virtio_mmio.device=<size>@<base>:<irq>` on the cmdline
+(`VIRTIO_MMIO_CMDLINE_DEVICES=y`), plus an irq line for it; (2) the guest driver:
+either load `failover`, `net_failover`, `virtio_mmio`, `virtio_net` (all `.ko.zst`,
+about 92 KB together) from the initramfs with `finit_module` in `oci-init` before
+the entrypoint, or boot a kernel with `VIRTIO_MMIO` and `VIRTIO_NET` built in;
+(3) `oci-init` bringing up the interface (address, route, `lo`) before the spawn.
+
 ### D4 — replicas, restart and the reconcile transform
 
 Desired count per workload from config; the reconcile transform emits start/stop
