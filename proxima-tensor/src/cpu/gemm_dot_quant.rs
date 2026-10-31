@@ -1844,6 +1844,128 @@ pub fn matmul_q5_0_f32(
     )
 }
 
+/// Widest block among the linear scalar codecs routed through
+/// [`dot_linear_layout_f32`] (`Q1_0`/`PQ2_0` at 128 elements).
+const LINEAR_LAYOUT_MAX_ELEMENTS: usize = 128;
+
+/// [`dot_q5_0_f32`]'s mechanism for the 1- and 2-bit scalar codecs: each
+/// block is decoded by [`proxima_gguf::quant::block_layout::dequantize_block`]
+/// from the codec's own [`proxima_primitives::block_layout::BlockLayout`], then folded against the matching
+/// activation slice.
+fn dot_linear_layout_f32(
+    layout: &proxima_primitives::block_layout::BlockLayout,
+    weight_row: &[u8],
+    activation: &[f32],
+) -> Result<f32, TensorError> {
+    let block_bytes = usize::from(layout.block_bytes);
+    let block_elements = usize::from(layout.elements);
+    if !weight_row.len().is_multiple_of(block_bytes) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the codec block size",
+        });
+    }
+    if activation.len() != weight_row.len() / block_bytes * block_elements {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+    let mut scratch = [0.0f32; LINEAR_LAYOUT_MAX_ELEMENTS];
+    let decoded = &mut scratch[..block_elements];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .chunks_exact(block_bytes)
+        .zip(activation.chunks_exact(block_elements))
+    {
+        proxima_gguf::quant::block_layout::dequantize_block(layout, block, decoded);
+        acc = dot_fold_fused_multiply_add(
+            decoded,
+            activation_chunk,
+            DotFold {
+                len: block_elements,
+                init: acc,
+                seeded: true,
+            },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `Q1_0` weight matrix (`rows` x `k`) times one `f32` activation vector.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] on a row length that is not a whole
+/// number of blocks, an activation of the wrong length, or zero rows.
+pub fn matmul_q1_0_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_q1_0_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        |row, activation_row| {
+            dot_linear_layout_f32(
+                &proxima_primitives::block_layout::BlockLayout::Q1_0,
+                row,
+                activation_row,
+            )
+        },
+    )
+}
+
+/// A full `Q2_0` (group 64) weight matrix times one `f32` activation vector.
+///
+/// # Errors
+/// As [`matmul_q1_0_f32`].
+pub fn matmul_q2_0_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_q2_0_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        |row, activation_row| {
+            dot_linear_layout_f32(
+                &proxima_primitives::block_layout::BlockLayout::Q2_0,
+                row,
+                activation_row,
+            )
+        },
+    )
+}
+
+/// A full `PQ2_0` (group 128) weight matrix times one `f32` activation vector.
+///
+/// # Errors
+/// As [`matmul_q1_0_f32`].
+pub fn matmul_pq2_0_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_pq2_0_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        |row, activation_row| {
+            dot_linear_layout_f32(
+                &proxima_primitives::block_layout::BlockLayout::PQ2_0,
+                row,
+                activation_row,
+            )
+        },
+    )
+}
+
 /// Packed bytes per `IQ4_NL` block -- byte-identical to
 /// [`Q4_0_BLOCK_BYTES`], kept as its own named constant rather than reused
 /// since the two codecs decode differently (fixed recenter vs codebook

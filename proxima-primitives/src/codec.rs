@@ -45,6 +45,7 @@ pub enum Codec {
     Nvfp4,
     Q1_0,
     Q2_0,
+    Pq2_0,
     BFloat8,
     Bf8E5M2,
     Bf4E2M1,
@@ -90,6 +91,7 @@ impl Codec {
             Codec::Bf8E5M2 => 30,
             Codec::Bf4E2M1 => 31,
             Codec::Fp6E3M2 => 32,
+            Codec::Pq2_0 => 33,
         }
     }
 
@@ -130,6 +132,7 @@ impl Codec {
             30 => Some(Codec::Bf8E5M2),
             31 => Some(Codec::Bf4E2M1),
             32 => Some(Codec::Fp6E3M2),
+            33 => Some(Codec::Pq2_0),
             _ => None,
         }
     }
@@ -154,6 +157,7 @@ impl Codec {
             Codec::Q8_1 => Some(BlockLayout::Q8_1),
             Codec::Q1_0 => Some(BlockLayout::Q1_0),
             Codec::Q2_0 => Some(BlockLayout::Q2_0),
+            Codec::Pq2_0 => Some(BlockLayout::PQ2_0),
             Codec::Q2K => Some(BlockLayout::Q2_K),
             Codec::Q3K => Some(BlockLayout::Q3_K),
             Codec::Q4K => Some(BlockLayout::Q4_K),
@@ -202,7 +206,8 @@ impl Codec {
             | Codec::Mxfp4
             | Codec::Nvfp4
             | Codec::Q1_0
-            | Codec::Q2_0 => None,
+            | Codec::Q2_0
+            | Codec::Pq2_0 => None,
         }
     }
 }
@@ -247,8 +252,9 @@ mod tests {
             (Codec::Bf8E5M2, 30),
             (Codec::Bf4E2M1, 31),
             (Codec::Fp6E3M2, 32),
+            (Codec::Pq2_0, 33),
         ];
-        assert_eq!(variants.len(), 33);
+        assert_eq!(variants.len(), 34);
         for (codec, stable_tag) in variants {
             assert_eq!(codec.tag(), stable_tag);
             assert_eq!(Codec::from_tag(stable_tag), Some(codec));
@@ -262,8 +268,8 @@ mod tests {
     }
 
     #[test]
-    fn fp6_e3m2_codec_tag_33_rejected() {
-        assert_eq!(Codec::from_tag(33), None);
+    fn fp6_e3m2_codec_tag_34_rejected() {
+        assert_eq!(Codec::from_tag(34), None);
     }
 
     #[test]
@@ -274,7 +280,7 @@ mod tests {
 
     #[test]
     fn card_02_bf8_codec_rejects_unassigned_tag() {
-        assert_eq!(Codec::from_tag(33), None);
+        assert_eq!(Codec::from_tag(34), None);
         assert_eq!(Codec::from_tag(255), None);
     }
 }

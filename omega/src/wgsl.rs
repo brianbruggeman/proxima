@@ -1171,6 +1171,7 @@ fn codec_function_name(node: NodeId, codec: Codec) -> Result<&'static str, EmitE
         | Codec::Nvfp4
         | Codec::Q1_0
         | Codec::Q2_0
+        | Codec::Pq2_0
         | Codec::BFloat8
         | Codec::Bf8E5M2
         | Codec::Bf4E2M1

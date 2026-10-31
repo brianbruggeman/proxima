@@ -1139,6 +1139,7 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
             | Codec::Nvfp4
             | Codec::Q1_0
             | Codec::Q2_0
+            | Codec::Pq2_0
             | Codec::BFloat8,
         ) => format!("in{index}[{offset}]"),
     }
@@ -1215,6 +1216,7 @@ fn codec_element_fn_name(codec: Codec) -> &'static str {
         | Codec::Nvfp4
         | Codec::Q1_0
         | Codec::Q2_0
+        | Codec::Pq2_0
         | Codec::BFloat8 => "unreachable_element_fn",
     }
 }

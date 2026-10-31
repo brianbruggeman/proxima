@@ -580,6 +580,7 @@ mod gated {
             Some(Codec::Nvfp4) => 't',
             Some(Codec::Q1_0) => 'u',
             Some(Codec::Q2_0) => 'v',
+            Some(Codec::Pq2_0) => 'W',
             None => 'f',
         }
     }

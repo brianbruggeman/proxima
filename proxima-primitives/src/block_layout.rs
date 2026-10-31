@@ -325,6 +325,13 @@ impl BlockLayout {
         1,
         None,
     );
+    pub const PQ2_0: Self = linear(
+        128,
+        34,
+        coded(FloatLayout::UINT2, run(2, 16, 128), None, 1),
+        1,
+        None,
+    );
     pub const TQ2_0: Self = Self {
         elements: 256,
         block_bytes: 66,

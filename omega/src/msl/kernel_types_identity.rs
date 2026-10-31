@@ -1589,6 +1589,7 @@ pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
         Codec::Nvfp4 => "nvfp4",
         Codec::Q1_0 => "q1_0",
         Codec::Q2_0 => "q2_0",
+        Codec::Pq2_0 => "pq2_0",
     }
 }
 
@@ -1634,6 +1635,7 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
         Codec::Nvfp4 => GgmlType::Nvfp4.block_layout().block_bytes as usize,
         Codec::Q1_0 => GgmlType::Q1_0.block_layout().block_bytes as usize,
         Codec::Q2_0 => GgmlType::Q2_0.block_layout().block_bytes as usize,
+        Codec::Pq2_0 => GgmlType::Pq2_0.block_layout().block_bytes as usize,
     }
 }
 
@@ -1700,6 +1702,7 @@ pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
         Codec::Nvfp4 => GgmlType::Nvfp4.block_layout().block_elements as usize,
         Codec::Q1_0 => GgmlType::Q1_0.block_layout().block_elements as usize,
         Codec::Q2_0 => GgmlType::Q2_0.block_layout().block_elements as usize,
+        Codec::Pq2_0 => GgmlType::Pq2_0.block_layout().block_elements as usize,
     }
 }
 
@@ -2050,6 +2053,7 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
         | Codec::Nvfp4
         | Codec::Q1_0
         | Codec::Q2_0
+        | Codec::Pq2_0
         | Codec::BFloat8 => None,
         Codec::Fp6E3M2 => Some(TiledDecode::new(
             FP6_E3M2_ELEMENTS,

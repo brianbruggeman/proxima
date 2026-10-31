@@ -222,6 +222,7 @@ fn source_codec_name(codec: Codec) -> &'static str {
         Codec::Nvfp4 => "nvfp4",
         Codec::Q1_0 => "q1_0",
         Codec::Q2_0 => "q2_0",
+        Codec::Pq2_0 => "pq2_0",
     }
 }
 
@@ -274,6 +275,9 @@ fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<
         Codec::Nvfp4 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "nvfp4" }),
         Codec::Q1_0 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q1_0" }),
         Codec::Q2_0 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q2_0" }),
+        Codec::Pq2_0 => {
+            Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "pq2_0" })
+        }
     }
     .map_err(InteropError::from)
 }

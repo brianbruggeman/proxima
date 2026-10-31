@@ -270,11 +270,11 @@ pub fn supported_dense_cpu_codecs() -> Vec<GgmlType> {
 /// gaining a 30th codec fails this crate's own build before it can silently
 /// fail to appear here.
 ///
-/// `Codec` carries 32 variants; 17 have a CPU decode/matmul path: the 14 that
+/// `Codec` carries 34 variants; 20 have a CPU decode/matmul path: the 17 that
 /// `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type` maps to
 /// `Some`, plus `Bf8E5M2`, `Bf4E2M1` and `Fp6E3M2`, which
 /// `QuantizedBlock::block_layout`, `codec_matmul_f32_kernel` and
-/// `codec_dequantize_fn` handle directly. The other 15 are recognized (this
+/// `codec_dequantize_fn` handle directly. The other 14 are recognized (this
 /// table names every one) but no construction site in this crate or
 /// `proxima_tensor` ever builds a
 /// [`proxima_tensor::cpu::QuantizedBlock::Packed`] carrying one. This mirrors the CPU
@@ -329,14 +329,15 @@ pub mod quant_format {
             Codec::Nvfp4 => "NVFP4",
             Codec::Q1_0 => "Q1_0",
             Codec::Q2_0 => "Q2_0",
+            Codec::Pq2_0 => "PQ2_0",
         }
     }
 
-    /// `true` for exactly the 17 [`Codec`] variants with a CPU decode path:
-    /// the 14 `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type`
+    /// `true` for exactly the 20 [`Codec`] variants with a CPU decode path:
+    /// the 17 `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type`
     /// maps to `Some`, plus `Bf8E5M2`, `Bf4E2M1` and `Fp6E3M2`, which
     /// `codec_matmul_f32_kernel` dispatches to dedicated kernels. `false` for
-    /// the other 15 -- no construction site in this crate or `proxima_tensor`
+    /// the other 14 -- no construction site in this crate or `proxima_tensor`
     /// ever builds a `QuantizedBlock::Packed` carrying one of them.
     const fn cpu_kernel_supported(codec: Codec) -> bool {
         matches!(
@@ -353,6 +354,9 @@ pub mod quant_format {
                 | Codec::Iq4Nl
                 | Codec::Iq2Xs
                 | Codec::Iq3Xxs
+                | Codec::Q1_0
+                | Codec::Q2_0
+                | Codec::Pq2_0
                 | Codec::Float16
                 | Codec::BFloat16
                 | Codec::Bf8E5M2
@@ -397,6 +401,7 @@ pub mod quant_format {
         Codec::Nvfp4,
         Codec::Q1_0,
         Codec::Q2_0,
+        Codec::Pq2_0,
         Codec::BFloat8,
         Codec::Bf8E5M2,
         Codec::Bf4E2M1,
