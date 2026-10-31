@@ -2162,7 +2162,11 @@ impl CudaPlan {
                 timing_rows.len(),
                 timing_rows.iter().map(|row| row.1).sum::<u128>() as f64 / 1000.0
             );
-            for (rank, (node, micros, output_len)) in timing_rows.iter().take(12).enumerate() {
+            let top_rows = std::env::var("PROXIMA_CUDA_TIMING_ROWS")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(12);
+            for (rank, (node, micros, output_len)) in timing_rows.iter().take(top_rows).enumerate() {
                 eprintln!(
                     "cuda_timing_top rank={} node={:?} elapsed_ms={:.3} output_len={}",
                     rank + 1,

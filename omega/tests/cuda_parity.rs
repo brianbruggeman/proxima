@@ -1251,7 +1251,7 @@ fn run_batched_program(
     (output, identities)
 }
 
-const BATCHED_TOKEN_COUNTS: [u32; 5] = [1, 2, 7, 8, 66];
+const BATCHED_TOKEN_COUNTS: [u32; 6] = [1, 2, 7, 8, 66, 130];
 
 /// A prefill of `tokens` rows must equal, row for row, the single-row matvec
 /// kernel (bit for bit: the tiled body keeps each row's accumulation order),

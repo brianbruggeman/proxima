@@ -28,7 +28,11 @@ use super::{
 };
 
 pub(super) const FEATURE_TILE: usize = 64;
-pub(super) const TOKEN_TILE: usize = 64;
+pub(super) const TOKEN_TILE: usize = 128;
+const ACT_REPS: usize = TOKEN_TILE / FEATURE_TILE;
+const WARP_TOKENS: usize = TOKEN_TILE / 2;
+const WARP_TILES: usize = WARP_TOKENS / 8;
+const _: () = assert!(WARP_TILES == 8 && WARP_TOKENS == 64 && ACT_REPS == 2);
 pub(super) const GEMM_THREADS: u64 = 256;
 const STAGE_K: usize = 32;
 const STAGE_PAD: usize = 40;
@@ -366,23 +370,34 @@ pub(super) fn push_mma_gemm_body(
     source.push_str(&format!(
         "    const long token_first = ((long)blockIdx.x / feature_tiles) * {TOKEN_TILE};\n"
     ));
-    source.push_str("    const int load_row = tid >> 2;\n");
-    source.push_str("    const int load_segment = (tid & 3) * 8;\n");
-    source.push_str("    const long load_feature = feature_first + load_row;\n");
-    source.push_str("    const long load_token = token_first + load_row;\n");
-    source.push_str("    const bool feature_ok = load_feature < feature_total;\n");
-    source.push_str("    const bool token_ok = load_token < token_total;\n");
-    source.push_str(&format!(
-        "    long token_offset = u.operand_base[{activation}];\n"
-    ));
-    source.push_str("    if (token_ok) {\n        long token_rest = load_token;\n");
-    for &position in plan.token_positions.iter().rev() {
-        let axis = output_axes[position];
+    source.push_str("    const int load_row = tid >> 2;
+");
+    source.push_str("    const int load_segment = (tid & 3) * 8;
+");
+    source.push_str("    const long load_feature = feature_first + load_row;
+");
+    source.push_str("    const bool feature_ok = load_feature < feature_total;
+");
+    for rep in 0..ACT_REPS {
         source.push_str(&format!(
-            "        token_offset += (token_rest % u.output_extents[{position}]) * u.operand_strides[{activation}][{axis}]; token_rest /= u.output_extents[{position}];\n"
+            "    const long load_token{rep} = token_first + load_row + {};
+    const bool token_ok{rep} = load_token{rep} < token_total;
+    long token_offset{rep} = u.operand_base[{activation}];
+    if (token_ok{rep}) {{
+        long token_rest = load_token{rep};
+",
+            rep * FEATURE_TILE
         ));
+        for &position in plan.token_positions.iter().rev() {
+            let axis = output_axes[position];
+            source.push_str(&format!(
+                "        token_offset{rep} += (token_rest % u.output_extents[{position}]) * u.operand_strides[{activation}][{axis}]; token_rest /= u.output_extents[{position}];
+"
+            ));
+        }
+        source.push_str("    }
+");
     }
-    source.push_str("    }\n");
     source.push_str(&format!(
         "    const long weight_row = u.operand_base[{weight}] + load_feature * u.reduction_total;\n"
     ));
@@ -407,8 +422,8 @@ pub(super) fn push_mma_gemm_body(
             "    __shared__ float act_sum[{TOKEN_TILE}][2];\n"
         ));
     }
-    source.push_str("    float acc[4][4];\n");
-    source.push_str("    #pragma unroll\n    for (int tile = 0; tile < 4; tile++) {\n");
+    source.push_str("    float acc[8][4];\n");
+    source.push_str("    #pragma unroll\n    for (int tile = 0; tile < 8; tile++) {\n");
     source.push_str("        #pragma unroll\n        for (int slot = 0; slot < 4; slot++) { acc[tile][slot] = 0.0f; }\n    }\n");
 
     source.push_str(&format!(
@@ -434,66 +449,111 @@ pub(super) fn push_mma_gemm_body(
     }
     source.push_str("        }\n");
 
-    source.push_str("        float act_values[8];\n");
-    source.push_str("        #pragma unroll\n        for (int slot = 0; slot < 8; slot++) { act_values[slot] = 0.0f; }\n");
-    source.push_str("        if (token_ok) {\n");
-    source.push_str("            unsigned int reduce_rest = (unsigned int)(stage_first + load_segment);\n");
-    source.push_str(&format!("            long reduce_coord[{reduce_rank}];\n"));
-    source.push_str("            long reduce_offset = 0;\n");
-    for (index, dim) in reduce_dims.iter().enumerate().rev() {
+    for rep in 0..ACT_REPS {
+        let row = format!("load_row + {}", rep * FEATURE_TILE);
+        source.push_str("        {
+");
+        source.push_str("        float act_values[8];
+");
+        source.push_str("        #pragma unroll
+        for (int slot = 0; slot < 8; slot++) { act_values[slot] = 0.0f; }
+");
+        source.push_str(&format!("        if (token_ok{rep}) {{
+"));
+        source.push_str("            unsigned int reduce_rest = (unsigned int)(stage_first + load_segment);
+");
+        source.push_str(&format!("            long reduce_coord[{reduce_rank}];
+"));
+        source.push_str("            long reduce_offset = 0;
+");
+        for (index, dim) in reduce_dims.iter().enumerate().rev() {
+            source.push_str(&format!(
+                "            reduce_coord[{index}] = (long)(reduce_rest % (unsigned int)u.reduction_extents[{index}]); reduce_rest /= (unsigned int)u.reduction_extents[{index}];
+            reduce_offset += reduce_coord[{index}] * u.operand_strides[{activation}][{dim}];
+"
+            ));
+        }
+        source.push_str("            #pragma unroll
+            for (int slot = 0; slot < 8; slot++) {
+");
         source.push_str(&format!(
-            "            reduce_coord[{index}] = (long)(reduce_rest % (unsigned int)u.reduction_extents[{index}]); reduce_rest /= (unsigned int)u.reduction_extents[{index}];\n            reduce_offset += reduce_coord[{index}] * u.operand_strides[{activation}][{dim}];\n"
+            "                act_values[slot] = in{activation}[token_offset{rep} + reduce_offset];
+"
         ));
-    }
-    source.push_str("            #pragma unroll\n            for (int slot = 0; slot < 8; slot++) {\n");
-    source.push_str(&format!(
-        "                act_values[slot] = in{activation}[token_offset + reduce_offset];\n"
-    ));
-    let last = reduce_rank - 1;
-    source.push_str(&format!(
-        "                reduce_coord[{last}]++; reduce_offset += u.operand_strides[{activation}][{}];\n",
-        reduce_dims[last]
-    ));
-    for index in (1..reduce_rank).rev() {
+        let last = reduce_rank - 1;
         source.push_str(&format!(
-            "                if (reduce_coord[{index}] == u.reduction_extents[{index}]) {{ reduce_offset -= reduce_coord[{index}] * u.operand_strides[{activation}][{}]; reduce_coord[{index}] = 0; reduce_coord[{prev}]++; reduce_offset += u.operand_strides[{activation}][{}]; }}\n",
-            reduce_dims[index],
-            reduce_dims[index - 1],
-            prev = index - 1
+            "                reduce_coord[{last}]++; reduce_offset += u.operand_strides[{activation}][{}];
+",
+            reduce_dims[last]
         ));
-    }
-    source.push_str("            }\n        }\n");
-    source.push_str("        __align__(16) __half2 high_pairs[4];\n        __align__(16) __half2 low_pairs[4];\n");
-    if has_minimum {
-        source.push_str("        float half_sum = 0.0f;\n");
-    }
-    source.push_str("        #pragma unroll\n        for (int pair = 0; pair < 4; pair++) {\n");
-    source.push_str("            __half high_a = __float2half_rn(act_values[2 * pair]);\n");
-    source.push_str("            __half high_b = __float2half_rn(act_values[2 * pair + 1]);\n");
-    source.push_str("            high_pairs[pair] = __halves2half2(high_a, high_b);\n");
-    source.push_str("            low_pairs[pair] = __halves2half2(__float2half_rn(act_values[2 * pair] - __half2float(high_a)), __float2half_rn(act_values[2 * pair + 1] - __half2float(high_b)));\n");
-    if has_minimum {
-        source.push_str("            half_sum += act_values[2 * pair] + act_values[2 * pair + 1];\n");
-    }
-    source.push_str("        }\n");
-    source.push_str("        *(uint4 *)&act_high[load_row][load_segment] = *(const uint4 *)high_pairs;\n");
-    source.push_str("        *(uint4 *)&act_low[load_row][load_segment] = *(const uint4 *)low_pairs;\n");
-    if has_minimum {
-        source.push_str("        half_sum += __shfl_xor_sync(0xffffffffu, half_sum, 1);\n");
-        source.push_str("        if ((load_segment & 15) == 0) { act_sum[load_row][load_segment >> 4] = half_sum; }\n");
+        for index in (1..reduce_rank).rev() {
+            source.push_str(&format!(
+                "                if (reduce_coord[{index}] == u.reduction_extents[{index}]) {{ reduce_offset -= reduce_coord[{index}] * u.operand_strides[{activation}][{}]; reduce_coord[{index}] = 0; reduce_coord[{prev}]++; reduce_offset += u.operand_strides[{activation}][{}]; }}
+",
+                reduce_dims[index],
+                reduce_dims[index - 1],
+                prev = index - 1
+            ));
+        }
+        source.push_str("            }
+        }
+");
+        source.push_str("        __align__(16) __half2 high_pairs[4];
+        __align__(16) __half2 low_pairs[4];
+");
+        if has_minimum {
+            source.push_str("        float half_sum = 0.0f;
+");
+        }
+        source.push_str("        #pragma unroll
+        for (int pair = 0; pair < 4; pair++) {
+");
+        source.push_str("            __half high_a = __float2half_rn(act_values[2 * pair]);
+");
+        source.push_str("            __half high_b = __float2half_rn(act_values[2 * pair + 1]);
+");
+        source.push_str("            high_pairs[pair] = __halves2half2(high_a, high_b);
+");
+        source.push_str("            low_pairs[pair] = __halves2half2(__float2half_rn(act_values[2 * pair] - __half2float(high_a)), __float2half_rn(act_values[2 * pair + 1] - __half2float(high_b)));
+");
+        if has_minimum {
+            source.push_str("            half_sum += act_values[2 * pair] + act_values[2 * pair + 1];
+");
+        }
+        source.push_str("        }
+");
+        source.push_str(&format!(
+            "        *(uint4 *)&act_high[{row}][load_segment] = *(const uint4 *)high_pairs;
+"
+        ));
+        source.push_str(&format!(
+            "        *(uint4 *)&act_low[{row}][load_segment] = *(const uint4 *)low_pairs;
+"
+        ));
+        if has_minimum {
+            source.push_str("        half_sum += __shfl_xor_sync(0xffffffffu, half_sum, 1);
+");
+            source.push_str(&format!(
+                "        if ((load_segment & 15) == 0) {{ act_sum[{row}][load_segment >> 4] = half_sum; }}
+"
+            ));
+        }
+        source.push_str("        }
+");
     }
     source.push_str("        __syncthreads();\n");
 
     source.push_str("        #pragma unroll\n        for (int half_index = 0; half_index < 2; half_index++) {\n");
-    source.push_str("            float scratch[4][4];\n");
-    source.push_str("            #pragma unroll\n            for (int tile = 0; tile < 4; tile++) {\n");
+    source.push_str("            float scratch[8][4];\n");
+    source.push_str("            #pragma unroll\n            for (int tile = 0; tile < 8; tile++) {\n");
     source.push_str("                #pragma unroll\n                for (int slot = 0; slot < 4; slot++) { scratch[tile][slot] = 0.0f; }\n            }\n");
     source.push_str("            #pragma unroll\n            for (int step = 0; step < 2; step++) {\n");
     source.push_str("                const int k_base = half_index * 16 + step * 8 + quad * 2;\n");
     source.push_str("                const unsigned int a_low = *(const unsigned int *)&weight_q[warp_feature * 16 + group][k_base];\n");
     source.push_str("                const unsigned int a_high = *(const unsigned int *)&weight_q[warp_feature * 16 + group + 8][k_base];\n");
-    source.push_str("                #pragma unroll\n                for (int tile = 0; tile < 4; tile++) {\n");
-    source.push_str("                    const int token_row = warp_token * 32 + tile * 8 + group;\n");
+    source.push_str("                #pragma unroll\n                for (int tile = 0; tile < 8; tile++) {\n");
+    source.push_str("                    if (token_first + warp_token * 64 + tile * 8 >= token_total) { continue; }\n");
+    source.push_str("                    const int token_row = warp_token * 64 + tile * 8 + group;\n");
     source.push_str("                    mma_m16n8k8(scratch[tile], a_low, a_high, *(const unsigned int *)&act_high[token_row][k_base]);\n");
     source.push_str("                    mma_m16n8k8(scratch[tile], a_low, a_high, *(const unsigned int *)&act_low[token_row][k_base]);\n");
     source.push_str("                }\n            }\n");
@@ -503,9 +563,10 @@ pub(super) fn push_mma_gemm_body(
         source.push_str("            const float minimum_low = weight_minimum[warp_feature * 16 + group][half_index];\n");
         source.push_str("            const float minimum_high = weight_minimum[warp_feature * 16 + group + 8][half_index];\n");
     }
-    source.push_str("            #pragma unroll\n            for (int tile = 0; tile < 4; tile++) {\n");
+    source.push_str("            #pragma unroll\n            for (int tile = 0; tile < 8; tile++) {\n");
+    source.push_str("                if (token_first + warp_token * 64 + tile * 8 >= token_total) { continue; }\n");
     if has_minimum {
-        source.push_str("                const int token_column = warp_token * 32 + tile * 8 + quad * 2;\n");
+        source.push_str("                const int token_column = warp_token * 64 + tile * 8 + quad * 2;\n");
         source.push_str("                const float sum_a = act_sum[token_column][half_index];\n");
         source.push_str("                const float sum_b = act_sum[token_column + 1][half_index];\n");
         source.push_str("                acc[tile][0] += scale_low * scratch[tile][0] - minimum_low * sum_a;\n");
@@ -521,10 +582,10 @@ pub(super) fn push_mma_gemm_body(
     source.push_str("            }\n        }\n");
     source.push_str("        __syncthreads();\n    }\n");
 
-    source.push_str("    #pragma unroll\n    for (int tile = 0; tile < 4; tile++) {\n");
+    source.push_str("    #pragma unroll\n    for (int tile = 0; tile < 8; tile++) {\n");
     source.push_str("        #pragma unroll\n        for (int slot = 0; slot < 4; slot++) {\n");
     source.push_str("            const long feature = feature_first + warp_feature * 16 + group + (slot >> 1) * 8;\n");
-    source.push_str("            const long token = token_first + warp_token * 32 + tile * 8 + quad * 2 + (slot & 1);\n");
+    source.push_str("            const long token = token_first + warp_token * 64 + tile * 8 + quad * 2 + (slot & 1);\n");
     source.push_str("            if (feature >= feature_total || token >= token_total) { continue; }\n");
     source.push_str(&format!("            long output_coord[{output_rank}];\n"));
     source.push_str("            long feature_rest = feature;\n            long token_rest = token;\n");
