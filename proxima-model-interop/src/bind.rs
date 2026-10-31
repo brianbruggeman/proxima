@@ -1144,6 +1144,9 @@ pub(crate) fn as_block(
         | Codec::Iq4Nl
         | Codec::Iq2Xs
         | Codec::Iq3Xxs
+        | Codec::Q1_0
+        | Codec::Q2_0
+        | Codec::Pq2_0
         | Codec::Fp6E3M2 => Some(proxima_tensor::cpu::QuantizedBlock::Packed { codec, bytes }),
         Codec::Q4_1
         | Codec::Q8_1
@@ -1158,8 +1161,6 @@ pub(crate) fn as_block(
         | Codec::Tq20
         | Codec::Mxfp4
         | Codec::Nvfp4
-        | Codec::Q1_0
-        | Codec::Q2_0
         | Codec::BFloat8
         | Codec::Bf8E5M2
         | Codec::Bf4E2M1 => None,
@@ -1216,6 +1217,7 @@ pub(crate) fn codec_from_ggml_type(ggml_type: GgmlType) -> Option<Codec> {
         GgmlType::Nvfp4 => Some(Codec::Nvfp4),
         GgmlType::Q1_0 => Some(Codec::Q1_0),
         GgmlType::Q2_0 => Some(Codec::Q2_0),
+        GgmlType::Pq2_0 => Some(Codec::Pq2_0),
         GgmlType::Fp6E3M2 => Some(Codec::Fp6E3M2),
         // `F32`/the integer types/`F64` have no `Codec` counterpart.
         // `GgmlType` is `#[non_exhaustive]` (a foreign, still-growing wire
@@ -1269,6 +1271,7 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
         Codec::Nvfp4 => "nvfp4",
         Codec::Q1_0 => "q1_0",
         Codec::Q2_0 => "q2_0",
+        Codec::Pq2_0 => "pq2_0",
     }
 }
 
@@ -1310,6 +1313,7 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError>
         Codec::Nvfp4 => GgmlType::Nvfp4,
         Codec::Q1_0 => GgmlType::Q1_0,
         Codec::Q2_0 => GgmlType::Q2_0,
+        Codec::Pq2_0 => GgmlType::Pq2_0,
         Codec::Fp6E3M2 => GgmlType::Fp6E3M2,
         Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 => {
             return Err(InteropError::UnsupportedCodec { codec });
@@ -1846,6 +1850,7 @@ pub(crate) fn quantize_to_kind(
         Codec::Nvfp4 => Err(QuantError::UnsupportedCodec { codec: "nvfp4" }),
         Codec::Q1_0 => Err(QuantError::UnsupportedCodec { codec: "q1_0" }),
         Codec::Q2_0 => Err(QuantError::UnsupportedCodec { codec: "q2_0" }),
+        Codec::Pq2_0 => Err(QuantError::UnsupportedCodec { codec: "pq2_0" }),
         Codec::BFloat8 => Err(QuantError::UnsupportedCodec { codec: "bf8" }),
         Codec::Bf8E5M2 => Err(QuantError::UnsupportedCodec { codec: "bf8_e5m2" }),
         Codec::Bf4E2M1 => Err(QuantError::UnsupportedCodec { codec: "bf4_e2m1" }),

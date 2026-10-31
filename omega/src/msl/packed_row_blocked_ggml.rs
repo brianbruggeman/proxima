@@ -763,7 +763,8 @@ pub(super) fn push_packed_row_blocked_body(
                 | Codec::Mxfp4
                 | Codec::Nvfp4
                 | Codec::Q1_0
-                | Codec::Q2_0 => {
+                | Codec::Q2_0
+                | Codec::Pq2_0 => {
                     return Err(EmitError::NonKQuantCodec {
                         node: resolved.node,
                         codec: "unsupported",

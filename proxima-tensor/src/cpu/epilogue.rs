@@ -1458,6 +1458,9 @@ pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima
         Codec::Q4_0 => Some(proxima_gguf::GgmlType::Q4_0),
         Codec::Q5_1 => Some(proxima_gguf::GgmlType::Q5_1),
         Codec::Q5_0 => Some(proxima_gguf::GgmlType::Q5_0),
+        Codec::Q1_0 => Some(proxima_gguf::GgmlType::Q1_0),
+        Codec::Q2_0 => Some(proxima_gguf::GgmlType::Q2_0),
+        Codec::Pq2_0 => Some(proxima_gguf::GgmlType::Pq2_0),
         Codec::Iq4Nl => Some(proxima_gguf::GgmlType::Iq4Nl),
         Codec::Iq2Xs => Some(proxima_gguf::GgmlType::Iq2Xs),
         Codec::Iq3Xxs => Some(proxima_gguf::GgmlType::Iq3Xxs),
@@ -1477,9 +1480,7 @@ pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima
         | Codec::Tq10
         | Codec::Tq20
         | Codec::Mxfp4
-        | Codec::Nvfp4
-        | Codec::Q1_0
-        | Codec::Q2_0 => None,
+        | Codec::Nvfp4 => None,
     }
 }
 
@@ -1507,6 +1508,9 @@ pub(super) const fn codec_matmul_f32_kernel(
         Codec::Q4_0 => Some(matmul_q4_0_f32),
         Codec::Q5_1 => Some(matmul_q5_1_f32),
         Codec::Q5_0 => Some(matmul_q5_0_f32),
+        Codec::Q1_0 => Some(matmul_q1_0_f32),
+        Codec::Q2_0 => Some(matmul_q2_0_f32),
+        Codec::Pq2_0 => Some(matmul_pq2_0_f32),
         Codec::Iq4Nl => Some(matmul_iq4_nl_f32),
         Codec::Iq2Xs => Some(matmul_iq2_xs_f32),
         Codec::Iq3Xxs => Some(matmul_iq3_xxs_f32),
@@ -1531,9 +1535,7 @@ pub(super) const fn codec_matmul_f32_kernel(
         | Codec::Tq10
         | Codec::Tq20
         | Codec::Mxfp4
-        | Codec::Nvfp4
-        | Codec::Q1_0
-        | Codec::Q2_0 => None,
+        | Codec::Nvfp4 => None,
     }
 }
 
@@ -1561,6 +1563,9 @@ pub(super) const fn codec_dequantize_fn(
         Codec::Q8_0 => Some(q8_0::dequantize),
         Codec::Iq4Nl => Some(iq4_nl::dequantize),
         Codec::Q5_1 => Some(q5_1::dequantize),
+        Codec::Q1_0 => Some(q1_0::dequantize),
+        Codec::Q2_0 => Some(q2_0::dequantize),
+        Codec::Pq2_0 => Some(pq2_0::dequantize),
         Codec::Iq2Xs => Some(iq2_xs::dequantize),
         Codec::Iq3Xxs => Some(iq3_xxs::dequantize),
         Codec::Float16 => Some(gguf_f16::dequantize),
@@ -1583,9 +1588,7 @@ pub(super) const fn codec_dequantize_fn(
         | Codec::Tq10
         | Codec::Tq20
         | Codec::Mxfp4
-        | Codec::Nvfp4
-        | Codec::Q1_0
-        | Codec::Q2_0 => None,
+        | Codec::Nvfp4 => None,
     }
 }
 
@@ -2125,6 +2128,24 @@ impl<'a> QuantizedBlock<'a> {
                             bytes.len() / scaled_float::BLOCK_BYTES * scaled_float::BLOCK_ELEMENTS
                         }),
                 ),
+                Codec::Q1_0 => (
+                    "q1_0",
+                    bytes.len(),
+                    q1_0::BLOCK_BYTES,
+                    whole_blocks(bytes.len(), q1_0::BLOCK_BYTES, q1_0::QK_Q1_0),
+                ),
+                Codec::Q2_0 => (
+                    "q2_0",
+                    bytes.len(),
+                    q2_0::BLOCK_BYTES,
+                    whole_blocks(bytes.len(), q2_0::BLOCK_BYTES, q2_0::QK_Q2_0),
+                ),
+                Codec::Pq2_0 => (
+                    "pq2_0",
+                    bytes.len(),
+                    pq2_0::BLOCK_BYTES,
+                    whole_blocks(bytes.len(), pq2_0::BLOCK_BYTES, pq2_0::QK_PQ2_0),
+                ),
                 Codec::BFloat8 => ("bfloat8", bytes.len(), 1, Some(bytes.len())),
                 Codec::Bf8E5M2 => ("bf8_e5m2", bytes.len(), 1, Some(bytes.len())),
                 Codec::Bf4E2M1 => ("bf4_e2m1", bytes.len(), 1, Some(bytes.len() * 2)),
@@ -2147,6 +2168,12 @@ impl<'a> QuantizedBlock<'a> {
             block_bytes,
         })
     }
+}
+
+fn whole_blocks(byte_len: usize, block_bytes: usize, block_elements: usize) -> Option<usize> {
+    byte_len
+        .is_multiple_of(block_bytes)
+        .then(|| byte_len / block_bytes * block_elements)
 }
 
 /// A stable diagnostic name for a [`Codec`] this crate never packs into a
@@ -2188,5 +2215,6 @@ const fn codec_name_for_error(codec: Codec) -> &'static str {
         Codec::Nvfp4 => "nvfp4",
         Codec::Q1_0 => "q1_0",
         Codec::Q2_0 => "q2_0",
+        Codec::Pq2_0 => "pq2_0",
     }
 }

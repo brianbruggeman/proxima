@@ -2246,6 +2246,7 @@ fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
         | Codec::Nvfp4
         | Codec::Q1_0
         | Codec::Q2_0
+        | Codec::Pq2_0
         | Codec::BFloat8
         | Codec::Bf8E5M2
         | Codec::Bf4E2M1
