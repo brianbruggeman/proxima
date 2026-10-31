@@ -292,16 +292,17 @@ fn extent_fields(
     let cooperative = reduce_is_cooperative(resolved, quantized, numeric_policy);
     let row_tile = row_tile_axis(resolved, quantized, numeric_policy);
     let gemm = mma_gemm_plan(resolved, quantized, numeric_policy);
+    let reduce_width = cooperative_width(resolved, quantized);
     let grid = match gemm {
         Some(plan) => CudaGridSpec {
             threads: mma_gemm_threads(resolved, &plan),
             block_width: Some(GEMM_THREADS),
         },
         None => CudaGridSpec {
-            threads: grid_threads(resolved, cooperative, row_tile)?,
+            threads: grid_threads(resolved, cooperative, row_tile, reduce_width)?,
             block_width: match &resolved.kind {
                 BoundOpKind::MoeTopK { expert_count, .. } => Some(moe_block_width(*expert_count)),
-                _ => cooperative.then_some(WARP_SIZE),
+                _ => cooperative.then_some(reduce_width),
             },
         },
     };
@@ -1040,10 +1041,38 @@ fn bindings(resolved: &BoundOp) -> Vec<Binding> {
     bindings
 }
 
+/// Threads that cooperate on one output row of a cooperative reduce. A
+/// broadcast-epilogue reduce over a single row (the decode-shaped norm) has one
+/// warp's worth of latency to hide, so it takes a whole block; every other
+/// cooperative reduce keeps one warp per output.
+const BLOCK_REDUCE_WIDTH: u64 = 256;
+
+fn cooperative_width(resolved: &BoundOp, quantized: &[Option<Codec>]) -> u64 {
+    let BoundOpKind::Reduce {
+        output_axes,
+        epilogue_broadcast_axes,
+        keep: Keep::Reduce,
+        ..
+    } = &resolved.kind
+    else {
+        return WARP_SIZE;
+    };
+    let rows: u64 = output_axes
+        .iter()
+        .map(|dim| resolved.extents[*dim as usize])
+        .product();
+    if !epilogue_broadcast_axes.is_empty() && quantized.iter().all(Option::is_none) && rows == 1 {
+        BLOCK_REDUCE_WIDTH
+    } else {
+        WARP_SIZE
+    }
+}
+
 fn grid_threads(
     resolved: &BoundOp,
     cooperative: bool,
     row_tile: Option<usize>,
+    reduce_width: u64,
 ) -> Result<u64, EmitError> {
     let extents_product = || checked_product(resolved.node, resolved.extents.iter().copied());
     match &resolved.kind {
@@ -1075,7 +1104,12 @@ fn grid_threads(
                 extents_product()?
             };
             if cooperative {
-                checked_product(resolved.node, [output_total, WARP_SIZE])
+                let warps = if epilogue_broadcast_axes.is_empty() || row_per_warp {
+                    output_total
+                } else {
+                    kept_rows
+                };
+                checked_product(resolved.node, [warps, reduce_width])
             } else {
                 Ok(output_total)
             }
@@ -2255,6 +2289,229 @@ fn push_plain_row_base(source: &mut String, index: usize, rank: usize, reduce_di
     ));
 }
 
+const LEAN_UNROLL: usize = 4;
+
+/// Whether the flat reduction index walks every plain operand with one stride:
+/// outer reduction strides must equal the inner stride times the inner extent.
+fn contiguity_guard(quantized: &[Option<Codec>], reduce_dims: &[u16]) -> String {
+    let mut conditions: Vec<String> = Vec::new();
+    for (index, codec) in quantized.iter().enumerate() {
+        if codec.is_some() {
+            continue;
+        }
+        for (slot, pair) in reduce_dims.windows(2).enumerate() {
+            conditions.push(format!(
+                "u.operand_strides[{index}][{}] == u.operand_strides[{index}][{}] * u.reduction_extents[{}]",
+                pair[0],
+                pair[1],
+                slot + 1
+            ));
+        }
+    }
+    if conditions.is_empty() {
+        conditions.push("true".to_string());
+    }
+    format!(
+        "    const bool contiguous = {};\n    if (contiguous) {{\n",
+        conditions.join(" && ")
+    )
+}
+
+/// One lane's share of a rank-1 packed reduction. Every lane walks eight-element
+/// chunks `WARP_SIZE * 8` apart, in the same order as the generic loop, so the
+/// accumulation order (and therefore every bit of the sum) matches it; the
+/// differences are that per-row address terms are hoisted out of the loop and
+/// that `LEAN_UNROLL` chunks are loaded before any is folded, so the loads of
+/// consecutive chunks overlap instead of each waiting on the previous fold.
+#[allow(clippy::too_many_arguments)]
+fn push_lean_chunk_loops(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    output_axes: &[u16],
+    rank: usize,
+    reduce_dim: u16,
+    quantized: &[Option<Codec>],
+    chunk_slots: &[(usize, ChunkCodec)],
+    element_type: &str,
+) -> Result<(), EmitError> {
+    let span = WARP_SIZE as usize * 8;
+    for (index, &codec) in quantized.iter().enumerate() {
+        if codec.is_some() {
+            let (_, layout, _) = &resolved.operands()[index];
+            push_packed_row_base(source, index, layout, output_axes, resolved);
+        } else {
+            push_plain_row_base(source, index, rank, reduce_dim);
+        }
+    }
+    source.push_str("    long start = 0;\n");
+    let plain_vectors: Vec<usize> = if element_type == "float" {
+        quantized
+            .iter()
+            .enumerate()
+            .filter(|(_, codec)| codec.is_none())
+            .map(|(index, _)| index)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    if !chunk_slots.is_empty() {
+        let aligned = chunk_slots
+            .iter()
+            .map(|(index, _)| format!("((row{index} & 7) == 0)"))
+            .chain(
+                plain_vectors
+                    .iter()
+                    .map(|index| format!("((lane_base{index} & 3) == 0 && lane_step{index} == 1)")),
+            )
+            .collect::<Vec<_>>()
+            .join(" && ");
+        source.push_str(&format!("    if ({aligned}) {{\n"));
+        source.push_str(&format!(
+            "        for (; start + {} <= u.reduction_total; start += {}) {{\n",
+            LEAN_UNROLL * span,
+            LEAN_UNROLL * span
+        ));
+        for step in 0..LEAN_UNROLL {
+            source.push_str(&format!(
+                "            const long chunk{step} = start + {} + (long)lane * 8;\n",
+                step * span
+            ));
+            for &(index, spec) in chunk_slots {
+                let ChunkCodec {
+                    name,
+                    block_elements,
+                    block_bytes,
+                } = spec;
+                source.push_str(&format!(
+                    "            const long off{index}_{step} = row{index} + chunk{step};\n\
+                     \x20           float {name}_chunk{index}_{step}[8];\n\
+                     \x20           {name}_chunk8(in{index} + (off{index}_{step} / {block_elements}) * {block_bytes}, \
+                     (unsigned int)(off{index}_{step} % {block_elements}), {name}_chunk{index}_{step});\n"
+                ));
+            }
+            for index in &plain_vectors {
+                source.push_str(&format!(
+                    "            float plain_chunk{index}_{step}[8];\n\
+                     \x20           {{\n\
+                     \x20               const float4 low = __ldg((const float4 *)(in{index} + lane_base{index} + chunk{step}));\n\
+                     \x20               const float4 high = __ldg((const float4 *)(in{index} + lane_base{index} + chunk{step} + 4));\n\
+                     \x20               plain_chunk{index}_{step}[0] = low.x; plain_chunk{index}_{step}[1] = low.y;\n\
+                     \x20               plain_chunk{index}_{step}[2] = low.z; plain_chunk{index}_{step}[3] = low.w;\n\
+                     \x20               plain_chunk{index}_{step}[4] = high.x; plain_chunk{index}_{step}[5] = high.y;\n\
+                     \x20               plain_chunk{index}_{step}[6] = high.z; plain_chunk{index}_{step}[7] = high.w;\n\
+                     \x20           }}\n"
+                ));
+            }
+        }
+        for step in 0..LEAN_UNROLL {
+            source.push_str("            {\n");
+            source.push_str("                #pragma unroll\n");
+            source.push_str("                for (int inner = 0; inner < 8; inner++) {\n");
+            push_lean_fold(
+                source,
+                resolved,
+                reduce_op,
+                quantized,
+                chunk_slots,
+                element_type,
+                &format!("chunk{step}"),
+                &format!("_{step}"),
+                &plain_vectors,
+            )?;
+            source.push_str("                }\n            }\n");
+        }
+        source.push_str("        }\n    }\n");
+    }
+    source.push_str(&format!(
+        "    for (long chunk = start + (long)lane * 8; chunk < u.reduction_total; chunk += {span}) {{\n"
+    ));
+    if !chunk_slots.is_empty() {
+        source.push_str("        long r = chunk;\n");
+    }
+    for &(index, spec) in chunk_slots {
+        source.push_str(&format!("        long off{index} = row{index} + r;\n"));
+        push_chunk_decode(source, index, spec);
+    }
+    source.push_str("        for (long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
+    push_lean_fold(
+        source,
+        resolved,
+        reduce_op,
+        quantized,
+        chunk_slots,
+        element_type,
+        "chunk",
+        "",
+        &[],
+    )?;
+    source.push_str("        }\n    }\n");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn push_lean_fold(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    quantized: &[Option<Codec>],
+    chunk_slots: &[(usize, ChunkCodec)],
+    element_type: &str,
+    chunk_var: &str,
+    suffix: &str,
+    plain_vectors: &[usize],
+) -> Result<(), EmitError> {
+    source.push_str(&format!("            long r = {chunk_var} + inner;\n"));
+    let chunk_spec = |index: usize| {
+        chunk_slots
+            .iter()
+            .find(|(slot, _)| *slot == index)
+            .map(|(_, spec)| *spec)
+    };
+    for (index, &codec) in quantized.iter().enumerate() {
+        if chunk_spec(index).is_some() || plain_vectors.contains(&index) {
+            continue;
+        }
+        if codec.is_some() {
+            source.push_str(&format!("            long off{index} = row{index} + r;\n"));
+        } else {
+            source.push_str(&format!(
+                "            long off{index} = lane_base{index} + r * lane_step{index};\n"
+            ));
+        }
+    }
+    source.push_str(&format!(
+        "            {element_type} scratch[{}];\n",
+        resolved.operands().len().max(1)
+    ));
+    for (index, &codec) in quantized.iter().enumerate() {
+        if let Some(spec) = chunk_spec(index) {
+            source.push_str(&format!(
+                "            scratch[{index}] = {}_chunk{index}{suffix}[inner];\n",
+                spec.name
+            ));
+            continue;
+        }
+        if plain_vectors.contains(&index) {
+            source.push_str(&format!(
+                "            scratch[{index}] = plain_chunk{index}{suffix}[inner];\n"
+            ));
+            continue;
+        }
+        source.push_str(&format!(
+            "            scratch[{index}] = {};\n",
+            operand_read(resolved.node, index, &format!("off{index}"), codec)?
+        ));
+    }
+    let value_expr = push_body_steps(source, resolved.element_body(), "            ", element_type);
+    source.push_str(&format!("            {element_type} value = {value_expr};\n"));
+    let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
+    source.push_str(&format!(
+        "            accumulator = seeded ? {combine_expr} : value;\n"
+    ));
+    source.push_str("            seeded = true;\n");
+    Ok(())
+}
 
 /// The warp-shuffle cooperative fold — the CUDA counterpart of
 /// `crate::msl::push_cooperative_reduce_body`'s non-tiled, non-row-blocked
@@ -2292,11 +2549,24 @@ fn push_cooperative_reduce_body(
     // returning to the same quantization block.
     let packed_chunked = quantized.iter().any(Option::is_some);
 
-    source.push_str(&format!("    long output_index = gid / {WARP_SIZE};\n"));
-    source.push_str("    if (output_index >= u.output_total) { return; }\n");
-    source.push_str(&format!(
-        "    unsigned int lane = (unsigned int)(gid % {WARP_SIZE});\n"
-    ));
+    let block_reduce = is_broadcast_epilogue && !packed_chunked;
+    let (leader, lane_start, lane_stride) = if block_reduce {
+        ("tid == 0u", "(long)tid", "(long)blockDim.x".to_string())
+    } else {
+        ("lane == 0u", "(long)lane", WARP_SIZE.to_string())
+    };
+    if block_reduce {
+        source.push_str("    long output_index = (long)blockIdx.x;\n");
+        source.push_str("    if (output_index >= u.output_total) { return; }\n");
+        source.push_str("    unsigned int tid = threadIdx.x;\n");
+        source.push_str("    unsigned int lane = tid & 31u;\n");
+    } else {
+        source.push_str(&format!("    long output_index = gid / {WARP_SIZE};\n"));
+        source.push_str("    if (output_index >= u.output_total) { return; }\n");
+        source.push_str(&format!(
+            "    unsigned int lane = (unsigned int)(gid % {WARP_SIZE});\n"
+        ));
+    }
 
     source.push_str(&format!("    long full_coord[{rank_len}];\n"));
     for dim in 0..rank {
@@ -2332,7 +2602,7 @@ fn push_cooperative_reduce_body(
     let identity = cooperative_identity_token(resolved.node, reduce_op)?;
     source.push_str(&format!("    {element_type} accumulator;\n"));
     source.push_str("    bool seeded;\n");
-    source.push_str("    if (lane == 0u) {\n");
+    source.push_str(&format!("    if ({leader}) {{\n"));
     source.push_str(&format!("        accumulator = {init_expr};\n"));
     source.push_str(&format!("        seeded = {seeded_init};\n"));
     source.push_str("    } else {\n");
@@ -2352,117 +2622,125 @@ fn push_cooperative_reduce_body(
             .map(|(_, spec)| *spec)
     };
     let lean = packed_chunked
-        && reduce_rank == 1
+        && reduce_rank >= 1
         && !logical_packed_address()
         && gather_count(resolved) == 0;
+    let guarded = lean && reduce_rank > 1;
 
     if lean {
-        for (index, &codec) in quantized.iter().enumerate() {
-            if codec.is_some() {
-                let (_, layout, _) = &resolved.operands()[index];
-                push_packed_row_base(source, index, layout, output_axes, resolved);
-            } else {
-                push_plain_row_base(source, index, rank, reduce_dims[0]);
-            }
+        if guarded {
+            source.push_str(&contiguity_guard(quantized, reduce_dims));
+        }
+        push_lean_chunk_loops(
+            source,
+            resolved,
+            reduce_op,
+            output_axes,
+            rank,
+            reduce_dims[reduce_rank - 1],
+            quantized,
+            &chunk_slots,
+            element_type,
+        )?;
+        if guarded {
+            source.push_str("    }\n    if (!contiguous) {\n");
         }
     }
-
-    if packed_chunked {
-        source.push_str(&format!(
-            "    for (long chunk = (long)lane * 8; chunk < u.reduction_total; chunk += {} * 8) {{\n",
-            WARP_SIZE
-        ));
-        if reduce_rank > 0 && !lean {
-            push_reduction_coord_decompose(source, "chunk", reduce_rank, reduce_rank_len, "        ");
-        }
-        if !chunk_slots.is_empty() {
-            source.push_str("        long r = chunk;\n");
-        }
-        for &(index, spec) in &chunk_slots {
-            if lean {
-                source.push_str(&format!("        long off{index} = row{index} + r;\n"));
-            } else {
+    if !lean || guarded {
+        if packed_chunked {
+            source.push_str(&format!(
+                "    for (long chunk = (long)lane * 8; chunk < u.reduction_total; chunk += {} * 8) {{\n",
+                WARP_SIZE
+            ));
+            if reduce_rank > 0 {
+                push_reduction_coord_decompose(
+                    source,
+                    "chunk",
+                    reduce_rank,
+                    reduce_rank_len,
+                    "        ",
+                );
+            }
+            if !chunk_slots.is_empty() {
+                source.push_str("        long r = chunk;\n");
+            }
+            for &(index, spec) in &chunk_slots {
                 let (_, layout, _) = &resolved.operands()[index];
                 push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
                 push_gather_base_add(source, resolved, index, "        ");
+                push_chunk_decode(source, index, spec);
             }
-            push_chunk_decode(source, index, spec);
-        }
-        source.push_str("        for (long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
-        source.push_str("            long r = chunk + inner;\n");
-    } else {
-        source.push_str(&format!(
-            "    #pragma unroll 8\n    for (long r = (long)lane; r < u.reduction_total; r += {WARP_SIZE}) {{\n"
-        ));
-    }
-    if reduce_rank > 0 && !packed_chunked {
-        push_reduction_coord_decompose(source, "r", reduce_rank, reduce_rank_len, "        ");
-    }
-    if reduce_rank > 0 && !lean {
-        for (index, dim) in reduce_dims.iter().enumerate() {
-            source.push_str(&format!(
-                "        full_coord[{dim}] = reduction_coord[{index}];\n"
-            ));
-        }
-    }
-
-    for (index, &codec) in quantized.iter().enumerate() {
-        if chunk_spec(index).is_some() {
-            continue;
-        }
-        if lean && codec.is_some() {
-            source.push_str(&format!("        long off{index} = row{index} + r;\n"));
-        } else if lean {
-            source.push_str(&format!(
-                "        long off{index} = lane_base{index} + r * lane_step{index};\n"
-            ));
-        } else if codec.is_some() {
-            let (_, layout, _) = &resolved.operands()[index];
-            push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
+            source.push_str("        for (long inner = 0; inner < 8 && chunk + inner < u.reduction_total; inner++) {\n");
+            source.push_str("            long r = chunk + inner;\n");
         } else {
             source.push_str(&format!(
-                "        long off{index} = u.operand_base[{index}];\n"
+                "    #pragma unroll 8\n    for (long r = {lane_start}; r < u.reduction_total; r += {lane_stride}) {{\n"
             ));
-            for dim in 0..rank {
+        }
+        if reduce_rank > 0 && !packed_chunked {
+            push_reduction_coord_decompose(source, "r", reduce_rank, reduce_rank_len, "        ");
+        }
+        if reduce_rank > 0 {
+            for (index, dim) in reduce_dims.iter().enumerate() {
                 source.push_str(&format!(
-                    "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                    "        full_coord[{dim}] = reduction_coord[{index}];\n"
                 ));
             }
         }
-        if !lean {
+
+        for (index, &codec) in quantized.iter().enumerate() {
+            if chunk_spec(index).is_some() {
+                continue;
+            }
+            if codec.is_some() {
+                let (_, layout, _) = &resolved.operands()[index];
+                push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
+            } else {
+                source.push_str(&format!(
+                    "        long off{index} = u.operand_base[{index}];\n"
+                ));
+                for dim in 0..rank {
+                    source.push_str(&format!(
+                        "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                    ));
+                }
+            }
             push_gather_base_add(source, resolved, index, "        ");
         }
-    }
-    source.push_str(&format!(
-        "        {element_type} scratch[{}];\n",
-        operand_count.max(1)
-    ));
-    for (index, &codec) in quantized.iter().enumerate() {
-        if let Some(spec) = chunk_spec(index) {
-            source.push_str(&format!(
-                "        scratch[{index}] = {}_chunk{index}[inner];\n",
-                spec.name
-            ));
-            continue;
-        }
         source.push_str(&format!(
-            "        scratch[{index}] = {};\n",
-            operand_read(resolved.node, index, &format!("off{index}"), codec)?
+            "        {element_type} scratch[{}];\n",
+            operand_count.max(1)
         ));
-    }
-    let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
-    source.push_str(&format!("        {element_type} value = {value_expr};\n"));
-    let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
-    source.push_str(&format!(
-        "        accumulator = seeded ? {combine_expr} : value;\n"
-    ));
-    source.push_str("        seeded = true;\n");
-    if packed_chunked && reduce_rank > 0 && !lean {
-        push_reduction_coord_carry(source, reduce_rank);
-    }
-    source.push_str("    }\n");
-    if packed_chunked {
+        for (index, &codec) in quantized.iter().enumerate() {
+            if let Some(spec) = chunk_spec(index) {
+                source.push_str(&format!(
+                    "        scratch[{index}] = {}_chunk{index}[inner];\n",
+                    spec.name
+                ));
+                continue;
+            }
+            source.push_str(&format!(
+                "        scratch[{index}] = {};\n",
+                operand_read(resolved.node, index, &format!("off{index}"), codec)?
+            ));
+        }
+        let value_expr = push_body_steps(source, resolved.element_body(), "        ", element_type);
+        source.push_str(&format!("        {element_type} value = {value_expr};\n"));
+        let combine_expr = scalar_op_expr(reduce_op, &["accumulator", "value"]);
+        source.push_str(&format!(
+            "        accumulator = seeded ? {combine_expr} : value;\n"
+        ));
+        source.push_str("        seeded = true;\n");
+        if packed_chunked && reduce_rank > 0 {
+            push_reduction_coord_carry(source, reduce_rank);
+        }
         source.push_str("    }\n");
+        if packed_chunked {
+            source.push_str("    }\n");
+        }
+        if guarded {
+            source.push_str("    }\n");
+        }
     }
 
     source.push_str("    #pragma unroll\n");
@@ -2476,6 +2754,30 @@ fn push_cooperative_reduce_body(
     let shuffle_expr = shuffle_combine_expr(resolved.node, reduce_op, "accumulator", "shuffled")?;
     source.push_str(&format!("        accumulator = {shuffle_expr};\n"));
     source.push_str("    }\n");
+
+    if block_reduce {
+        source.push_str("    if (blockDim.x > 32u) {\n");
+        source.push_str(&format!(
+            "        __shared__ {element_type} warp_partials[32];\n"
+        ));
+        source.push_str("        if (lane == 0u) { warp_partials[tid >> 5u] = accumulator; }\n");
+        source.push_str("        __syncthreads();\n");
+        source.push_str(&format!(
+            "        accumulator = lane < (blockDim.x >> 5u) ? warp_partials[lane] : {identity};\n"
+        ));
+        source.push_str("        #pragma unroll\n");
+        source.push_str(&format!(
+            "        for (int shift = {}; shift > 0; shift >>= 1) {{\n",
+            WARP_SIZE / 2
+        ));
+        source.push_str(&format!(
+            "            {element_type} shuffled = __shfl_down_sync(0xffffffffu, accumulator, shift);\n"
+        ));
+        let second_expr =
+            shuffle_combine_expr(resolved.node, reduce_op, "accumulator", "shuffled")?;
+        source.push_str(&format!("            accumulator = {second_expr};\n"));
+        source.push_str("        }\n    }\n");
+    }
 
     if is_broadcast_epilogue {
         // Every lane participates in the broadcast write below. The
@@ -2493,7 +2795,7 @@ fn push_cooperative_reduce_body(
             source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
         }
         source.push_str(&format!(
-            "    #pragma unroll 8\n    for (long r = (long)lane; r < u.reduction_total; r += {WARP_SIZE}) {{\n"
+            "    #pragma unroll 8\n    for (long r = {lane_start}; r < u.reduction_total; r += {lane_stride}) {{\n"
         ));
         if reduce_rank > 0 {
             source.push_str(&format!(
