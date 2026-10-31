@@ -59,6 +59,7 @@ pub struct LinuxReport {
     pub setup_nanos: u64,
     pub first_exit_nanos: u64,
     pub init_marker_nanos: u64,
+    pub entrypoint_marker_nanos: u64,
     pub total_nanos: u64,
     pub exit_count: u64,
     pub mmio_exit_count: u64,
@@ -139,12 +140,13 @@ pub fn run_linux(run: &LinuxRun<'_>) -> LinuxOutcome {
     let output = RefCell::new(Transmit::with_capacity(run.output_capacity));
     let tally = RefCell::new(PortTally::default());
     let marker_stamp = Cell::new(None);
+    let entrypoint_stamp = Cell::new(None);
     let mut setup_nanos = 0;
     let mut total_nanos = 0;
     let (failure, end) = match prepare(run) {
         Ok(prepared) => {
             setup_nanos = ledger.elapsed_nanos();
-            let outcome = drive_prepared(&prepared, run, &ledger, [&console, &output], &tally, &marker_stamp);
+            let outcome = drive_prepared(&prepared, run, &ledger, [&console, &output], &tally, [&marker_stamp, &entrypoint_stamp]);
             total_nanos = ledger.elapsed_nanos();
             release_off_the_return_path(prepared.session);
             outcome
@@ -164,6 +166,7 @@ pub fn run_linux(run: &LinuxRun<'_>) -> LinuxOutcome {
             setup_nanos,
             first_exit_nanos: ledger.first_exit_nanos(),
             init_marker_nanos: marker_stamp.get().unwrap_or(0),
+            entrypoint_marker_nanos: entrypoint_stamp.get().unwrap_or(0),
             total_nanos,
             exit_count: ledger.exits(),
             mmio_exit_count: ledger.mmio_exits(),
@@ -181,7 +184,7 @@ fn drive_prepared(
     ledger: &ExitLedger,
     [console, output]: [&RefCell<Transmit>; 2],
     tally: &RefCell<PortTally>,
-    marker_stamp: &Cell<Option<u64>>,
+    [marker_stamp, entrypoint_stamp]: [&Cell<Option<u64>>; 2],
 ) -> (Option<String>, Option<End>) {
     let Ok(vcpu) = prepared.session.vcpu() else {
         return (Some("the vcpu is created before the run starts".to_owned()), None);
@@ -202,7 +205,7 @@ fn drive_prepared(
                     RtcPorts::at(run.wall_clock_seconds),
                     FirstClaim::new(
                         ResetPort,
-                        FirstClaim::new(InitMarker::new(&com2, ledger, marker_stamp), Unhandled::new(tally)),
+                        FirstClaim::new(InitMarker::new(&com2, ledger, marker_stamp, entrypoint_stamp), Unhandled::new(tally)),
                     ),
                 ),
             ),

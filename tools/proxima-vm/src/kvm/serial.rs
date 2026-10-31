@@ -18,6 +18,7 @@ pub const RESET_PORT: u16 = 0x64;
 pub const RESET_VALUE: u8 = 0xfe;
 pub const MARKER_PORT: u16 = 0xe9;
 pub const MARKER_INVOCATION_READY: u8 = 2;
+pub const MARKER_ENTRYPOINT: u8 = 3;
 pub const MAX_UNHANDLED_PORTS: usize = 32;
 
 #[derive(Debug)]
@@ -206,12 +207,18 @@ pub struct InitMarker<'run> {
     invocation: &'run SerialPort<'run>,
     ledger: &'run ExitLedger,
     stamp: &'run Cell<Option<u64>>,
+    entrypoint_stamp: &'run Cell<Option<u64>>,
 }
 
 impl<'run> InitMarker<'run> {
     #[must_use]
-    pub fn new(invocation: &'run SerialPort<'run>, ledger: &'run ExitLedger, stamp: &'run Cell<Option<u64>>) -> Self {
-        Self { invocation, ledger, stamp }
+    pub fn new(
+        invocation: &'run SerialPort<'run>,
+        ledger: &'run ExitLedger,
+        stamp: &'run Cell<Option<u64>>,
+        entrypoint_stamp: &'run Cell<Option<u64>>,
+    ) -> Self {
+        Self { invocation, ledger, stamp, entrypoint_stamp }
     }
 }
 
@@ -225,6 +232,9 @@ impl Pipe for InitMarker<'_> {
             Trap::Exit(VcpuExit::PortOut { port: MARKER_PORT, data, .. }) => {
                 if self.stamp.get().is_none() {
                     self.stamp.set(Some(self.ledger.elapsed_nanos()));
+                }
+                if data[0] == MARKER_ENTRYPOINT && self.entrypoint_stamp.get().is_none() {
+                    self.entrypoint_stamp.set(Some(self.ledger.elapsed_nanos()));
                 }
                 let irq = (data[0] == MARKER_INVOCATION_READY).then(|| self.invocation.enable_receive()).flatten();
                 answered(Reply::Io { value: None, irq })
