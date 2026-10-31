@@ -1,4 +1,5 @@
 #![cfg(unix)]
+#![allow(clippy::expect_used)]
 
 use std::future::poll_fn;
 #[cfg(target_os = "macos")]
