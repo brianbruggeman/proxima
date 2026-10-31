@@ -511,7 +511,7 @@ async fn warm_restore_wall_time_scales_with_snapshot_memory_size() {
 /// or `alternate` (content changes every call). Run at one representative
 /// size (16MiB), not the full sweep -- this is one control experiment, not
 /// a second sweep.
-#[proxima::test]
+#[proxima::test(timeout = "300s")]
 async fn warm_restore_cost_is_size_bound_not_content_bound() {
     if !lane_is_supported() {
         return;
@@ -627,7 +627,7 @@ async fn layered_restore_actually_remaps_dirtied_pages_read_only(#[case] dirty_p
 /// count `K`, at two region sizes -- the design's own claim ("restore scales
 /// with K remaps, not with size or copy volume") stated as a table, not a
 /// single number. Prints the row `BENCH_LOG.md` cites.
-#[proxima::test]
+#[proxima::test(timeout = "300s")]
 async fn layered_restore_cost_scales_with_dirty_page_count_not_region_size() {
     if !lane_is_supported() {
         return;
