@@ -606,6 +606,100 @@ loopback listener to the frame pipes so the real `curl` binary talks to it.
 
 ---
 
+# Track D — beat k3s in form, function and performance
+
+The owner's goal, 2026-10-31: replace k3s, not wrap it. The incumbent is measured
+on this box in `K3S_BASELINE.md`, and every exit below is stated against a row of
+that file, re-run with the same harness and with `/proc/loadavg` reported.
+
+Form: k3s is a control plane, a runtime, and a set of object kinds. proxima is
+none of those. The four pipe forms are the whole vocabulary:
+
+| k3s piece | the pipe it is |
+| --- | --- |
+| desired state (manifests, API server) | a source pipe of specs (`In = ()`): the TOML store (`proxima-config/src/store/mod.rs:52`), a file watch, or an HTTP `apply` are three sources of the same item |
+| controller / reconcile | a transform `(desired, observed) -> actions`, sans-IO, no IO in it at all |
+| kubelet / runtime | a sink pipe of actions (`Out = ()`) that starts and stops instances through the `vm` upstream or the `process` upstream |
+| liveness / readiness | a source pipe of probe results feeding `observed` |
+| Service + kube-proxy | the existing balancer (`proxima-patterns/src/balancer/selection.rs:230`) over instance endpoints; endpoints arrive from `observed`, not from static config |
+| Ingress | the listener and router proxima already is |
+| multi-node | a remote node is one more upstream: `proximad` on another host behind a proxy hop (proxima can proxy everything) |
+
+A workload names a flavor, never a kernel: `elf` (bare proxima guest), `linux`
+(one flavor, for compatibility and OCI images), `proxima-os` (Track C's end
+state). Nothing in Track D may assume linux is the runtime. Two lifetimes are
+both first class: per-request (the lambda: boot, serve, drop; already measured at
+p50 3.0 ms for elf) and resident (the pod: boot once, serve many, restart on
+failure). k3s has only the second.
+
+Rule for every slice: before adding any type, write the pipe. A kubernetes-shaped
+noun (`Pod`, `ReplicaSet`, `Deployment`, `Service`) is a finding that the
+pipe was not written yet, not a type to add.
+
+### D1 — the ingress hop beats traefik on the same backend
+
+Baseline (`K3S_BASELINE.md` K4/P4): at c=64 traefik served 17,014 to 22,945 rps
+to the whoami NodePort-equivalent path; proxima served 7,207 to 10,124 rps, with
+max latency 5.2 to 14.8 s while p50 stayed under 0.3 ms. That is the number that
+hurts first and the first thing fixed, by instrumenting the multi-second tail and
+the throughput gap before changing anything.
+
+- exit: proxima reverse proxy to the same whoami backend, c=64 for 15 s, three
+  runs: rps above traefik's best run measured in the same session, p99 below
+  traefik's, max under 100 ms; c=1 p50 at or under the 0.123 ms already measured.
+
+### D2 — a resident instance reachable over the network
+
+A guest that boots once and serves many connections: its virtio-net frames
+(OS-1's source and sink pipes) bridged to host TCP, so the http upstream dials it
+like any backend. Flavor-agnostic: the elf netstack guest first, linux second.
+
+- exit: 10,000 sequential GETs to one resident guest with body digests equal;
+  instance start (exec to first 200) reported against k3s K3 pod create to
+  Running, p50 860 ms.
+
+### D3 — OCI images run under the linux flavor
+
+Pull a manifest and its layers from a registry, flatten them to a root
+filesystem, boot it with the image's entrypoint as the process init execs. This
+is the compatibility path that lets every k3s workload run unchanged.
+
+- exit: `traefik/whoami:v1.10.2` pulled by digest, booted, and served through D2,
+  responses byte-equal to the k3s-hosted whoami for the same request; control: a
+  tampered layer digest is rejected before boot.
+
+### D4 — replicas, restart and the reconcile transform
+
+Desired count per workload from config; the reconcile transform emits start/stop
+actions; endpoints flow into the balancer; a dead instance is restarted.
+
+- exit: scale 0 to 10 and 0 to 50, all ready, timed against K3 (2,048 ms and
+  6,798 ms p50); kill one instance under load and report failed requests and time
+  to replacement; per-instance resident memory against K5 (7,812 to 20,857 kB per
+  pod).
+
+### D5 — probes and rolling update
+
+Periodic liveness and readiness as probe source pipes; a rolling replace that
+never drops below the desired ready count.
+
+- exit: a rolling update of 10 instances under c=64 load with zero non-2xx
+  responses; a failing liveness probe restarts the instance within two probe
+  periods.
+
+### D6 — the remaining k3s surface
+
+Host-header routing, a metrics exporter, secrets as sensitive config delivered
+to the workload, volumes over virtio-blk (M6 exists), and multi-node as a proxy
+hop to a remote `proximad`. Each gets its own exit against a k3s measurement
+taken with the same harness before it lands.
+
+Footprint, to hold through all of D: k3s idle 561,684 kB RSS, 3.6% of a core,
+72 MB binary (K2); proxima today 144,712 kB, 0.63%, 16 MB (P2). A slice that
+moves proxima's idle figures toward k3s's records it.
+
+---
+
 ## P0 — fix before M6 grows the contract
 
 `proxima-protocols/src/process/protocol.rs:113`: `ChildRequest` has 5 variants,
