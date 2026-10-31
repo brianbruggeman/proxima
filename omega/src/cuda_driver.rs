@@ -1849,6 +1849,12 @@ impl CudaPlan {
     ) -> Result<Evaluated, CudaDriverError> {
         let host_timing = std::env::var_os("PROXIMA_CUDA_HOST_TIMING").is_some();
         let upload_started = host_timing.then(std::time::Instant::now);
+        let phase_started = Instant::now();
+        let upload_bytes_before = self.driver.packed_upload_bytes();
+        let compilations_before = self.driver.kernel_compilations();
+        let nvrtc_before = self.driver.nvrtc_micros();
+        let load_before = self.driver.load_micros();
+        let mut upload_call_us = 0u64;
         let mut resident_hits = 0usize;
         let mut resident_misses = 0usize;
         let blocks = resolve_named_blocks(&self.program, named).map_err(|_| {
@@ -1898,6 +1904,7 @@ impl CudaPlan {
             if resident {
                 resident_misses += 1;
             }
+            let upload_call_started = Instant::now();
             match block {
                 QuantizedBlock::Float32(values) => {
                     self.driver
@@ -1925,6 +1932,7 @@ impl CudaPlan {
                         .upload_bytes(&mut self.arena, node, packed_bytes(other))?;
                 }
             }
+            upload_call_us += elapsed_micros(upload_call_started);
             if resident {
                 self.arena.resident_sources.insert(node, source);
                 if let Some(buffer) = self.arena.buffers.get(&node).cloned() {
@@ -1945,6 +1953,8 @@ impl CudaPlan {
                 resident_misses
             );
         }
+        let upload_phase_us = elapsed_micros(phase_started);
+        let submit_started = Instant::now();
         let trace = std::env::var_os("PROXIMA_CUDA_TRACE").is_some();
         let timing = std::env::var_os("PROXIMA_CUDA_TIMING").is_some();
         let mut timing_rows: Vec<(NodeId, u128, usize)> = Vec::new();
@@ -2120,8 +2130,11 @@ impl CudaPlan {
                 self.resolved.len()
             );
         }
+        let submit_us = elapsed_micros(submit_started);
+        let sync_phase_started = Instant::now();
         let sync_started = host_timing.then(std::time::Instant::now);
         self.driver.stream.synchronize()?;
+        let sync_us = elapsed_micros(sync_phase_started);
         if let Some(array) = &fault_array {
             let faults = self.driver.stream.clone_dtoh(array)?;
             for (node, offset, slots) in &fault_windows {
@@ -2159,6 +2172,7 @@ impl CudaPlan {
                 );
             }
         }
+        let readback_phase_started = Instant::now();
         let host_readback_started = host_timing.then(std::time::Instant::now);
         let mut results = Vec::with_capacity(self.outputs.len());
         let readback_started = timing.then(std::time::Instant::now);
@@ -2183,6 +2197,21 @@ impl CudaPlan {
                 self.outputs.len()
             );
         }
+        proxima_telemetry::debug!(
+            upload_phase_us = upload_phase_us,
+            upload_call_us = upload_call_us,
+            upload_bytes = self.driver.packed_upload_bytes() - upload_bytes_before,
+            resident_hits = resident_hits as u64,
+            resident_misses = resident_misses as u64,
+            submit_us = submit_us,
+            sync_us = sync_us,
+            readback_us = elapsed_micros(readback_phase_started),
+            compilations = self.driver.kernel_compilations() - compilations_before,
+            nvrtc_us = self.driver.nvrtc_micros() - nvrtc_before,
+            load_us = self.driver.load_micros() - load_before,
+            node_count = self.resolved.len() as u64,
+            "cuda execute phases"
+        );
         if let Some(started) = readback_started {
             eprintln!(
                 "cuda_timing_readback: outputs={} elapsed_ms={:.3}",
