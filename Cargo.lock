@@ -5314,8 +5314,10 @@ dependencies = [
  "proxima-telemetry",
  "proxima-tensor",
  "serde",
+ "smoltcp",
  "tempfile",
  "thiserror 2.0.19",
+ "tokio",
  "vm-fdt",
 ]
 

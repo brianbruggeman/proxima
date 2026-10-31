@@ -14,7 +14,7 @@ use super::trap::{End, Reply, RunError, Trap, VcpuExit, Writeback};
 use crate::dispatch::dispatch_captured;
 use crate::virtio_blk::BlkTransport;
 use crate::virtio_console::ConsoleTransport;
-use crate::virtio_net::NetTransport;
+use crate::virtio_net::{HostNetTransport, RX_QUEUE};
 
 pub const EMIT_VERB: u16 = 0xfffe;
 pub const HALT_VERB: u16 = 0xffff;
@@ -32,6 +32,13 @@ impl Channel {
     #[must_use]
     pub fn with_capacity(capacity: usize) -> Self {
         Self { bytes: Vec::new(), capacity }
+    }
+
+    /// A zero-capacity channel declares the caller wants no byte stream: whatever
+    /// the device drained already went out its own pipe.
+    #[must_use]
+    pub fn is_disabled(&self) -> bool {
+        self.capacity == 0
     }
 
     #[must_use]
@@ -190,7 +197,7 @@ where
 #[derive(Debug)]
 pub enum Transport {
     Console(ConsoleTransport),
-    Net(NetTransport),
+    Net(HostNetTransport),
     Blk(BlkTransport),
 }
 
@@ -212,11 +219,13 @@ impl Transport {
     fn drain(&mut self, queue: u16, ram: &mut [u8]) -> Option<Vec<u8>> {
         match self {
             Self::Console(transport) => transport.drain_tx(queue, ram).ok(),
+            Self::Net(transport) if queue == RX_QUEUE => {
+                transport.fill_rx(ram).ok()?;
+                Some(Vec::new())
+            }
             Self::Net(transport) => {
-                let mut frames = Vec::new();
-                let mut collect = |drained: crate::virtio_net::DrainedFrame| frames.extend_from_slice(&drained.frame);
-                transport.drain_tx(queue, ram, &mut collect).ok()?;
-                Some(frames)
+                let drained = transport.drain_tx(queue, ram).ok()?;
+                Some(drained.into_iter().flat_map(|frame| frame.frame).collect())
             }
             Self::Blk(transport) => {
                 let serviced = transport.service_queue(queue, ram).ok()?;
@@ -241,7 +250,7 @@ pub struct VirtioWindow<'run> {
     name: &'static str,
     base: u64,
     size: u64,
-    transport: RefCell<Option<Transport>>,
+    transport: &'run RefCell<Option<Transport>>,
     emitted: &'run RefCell<Channel>,
     ram: GuestRam,
     ledger: &'run ExitLedger,
@@ -253,12 +262,12 @@ impl<'run> VirtioWindow<'run> {
         name: &'static str,
         base: u64,
         size: u64,
-        transport: Option<Transport>,
+        transport: &'run RefCell<Option<Transport>>,
         emitted: &'run RefCell<Channel>,
         ram: GuestRam,
         ledger: &'run ExitLedger,
     ) -> Self {
-        Self { name, base, size, transport: RefCell::new(transport), emitted, ram, ledger }
+        Self { name, base, size, transport, emitted, ram, ledger }
     }
 
     fn owns(&self, address: u64) -> bool {
@@ -311,7 +320,10 @@ impl<'run> VirtioWindow<'run> {
 
     fn drain(&self, transport: &mut Transport, queue: u16) -> Result<(), RunError> {
         let drained = self.ram.with_mut(|ram| transport.drain(queue, ram));
-        let stored = drained.is_some_and(|bytes| self.emitted.borrow_mut().push(&bytes));
+        let stored = drained.is_some_and(|bytes| {
+            let mut channel = self.emitted.borrow_mut();
+            channel.is_disabled() || channel.push(&bytes)
+        });
         match stored {
             true => Ok(()),
             false => Err(KvmError::guest("mmio queue drain failed").into()),

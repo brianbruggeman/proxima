@@ -31,9 +31,19 @@ pub mod gic;
 pub mod kvm;
 pub mod loader;
 #[cfg(feature = "std")]
+pub mod frame_pipe;
+#[cfg(feature = "std")]
 pub mod linux;
 #[cfg(feature = "std")]
 pub mod mmio_trampoline;
+#[cfg(all(
+    feature = "std",
+    any(
+        all(target_os = "linux", target_arch = "x86_64"),
+        all(target_os = "macos", target_arch = "aarch64")
+    )
+))]
+pub mod net_run;
 #[cfg(feature = "std")]
 pub mod named_memory;
 pub mod page_table;

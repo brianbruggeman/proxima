@@ -18,8 +18,7 @@
 //! target_os = "linux")]`-gated (`proxima-storage/src/dax/mod.rs:26-29`) and
 //! this host is macOS, so it cannot even compile here. Per this slice's own
 //! instructions, the floor is a plain in-memory block store local to the
-//! transport — the same locality `virtio_net::NetTransport`'s own module
-//! doc names for `FrameSink` (one host loop plus tests, never an open set).
+//! transport — one host loop plus tests, never an open set.
 //!
 //! Per VIRTIO 1.2 spec §5.2.2, this device exposes exactly one queue,
 //! `requestq` (index 0) — no multiqueue, matching M6's exit criterion of

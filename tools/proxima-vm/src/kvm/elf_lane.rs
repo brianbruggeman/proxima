@@ -42,6 +42,7 @@ pub struct GuestSegment<'a> {
     pub writable: bool,
 }
 
+#[derive(Debug, Default)]
 pub struct Transports {
     pub console: Option<Transport>,
     pub net: Option<Transport>,
@@ -86,6 +87,9 @@ pub struct ElfReport {
 pub struct ElfOutcome {
     pub report: ElfReport,
     pub failure: Option<String>,
+    /// The device models as the run left them, so a caller can read their
+    /// counters or keep their pipes after the guest has ended.
+    pub transports: Transports,
 }
 
 struct Prepared {
@@ -210,17 +214,30 @@ where
     ];
     let sentinel = Cell::new(0_i64);
     let prepared = prepare(&spec);
+    let Transports { console, net, blk } = spec.transports;
+    let cells = [RefCell::new(console), RefCell::new(net), RefCell::new(blk)];
     let (failure, touch_all_pages_nanos) = match prepared {
         Ok(prepared) => {
             let touch = prepared.touch_all_pages_nanos;
-            let failure = drive_prepared(&prepared, spec, observer, &ledger, &channels, &sentinel);
+            let run = RunContext {
+                dispatcher: spec.dispatcher,
+                max_hypercalls: spec.max_hypercalls,
+                watchdog_millis: spec.watchdog_millis,
+                ledger: &ledger,
+                channels: &channels,
+                transports: &cells,
+                sentinel: &sentinel,
+            };
+            let failure = drive_prepared(&prepared, &run, observer);
             release_off_the_return_path(prepared.session);
             (failure, touch)
         }
         Err(error) => (Some(error.to_string()), 0),
     };
     let [emitted, console, net, blk] = channels.map(|channel| channel.into_inner().into_bytes());
+    let [console_transport, net_transport, blk_transport] = cells.map(RefCell::into_inner);
     ElfOutcome {
+        transports: Transports { console: console_transport, net: net_transport, blk: blk_transport },
         report: ElfReport {
             emitted,
             console,
@@ -237,36 +254,53 @@ where
     }
 }
 
+/// What one drive borrows from the run that owns it: the dispatcher, the
+/// budgets, the counters and the byte channels, and the device models.
+struct RunContext<'run, Dispatcher> {
+    dispatcher: &'run Dispatcher,
+    max_hypercalls: usize,
+    watchdog_millis: u64,
+    ledger: &'run ExitLedger,
+    channels: &'run [RefCell<Channel>; 4],
+    transports: &'run [RefCell<Option<Transport>>; 3],
+    sentinel: &'run Cell<i64>,
+}
+
 fn drive_prepared<Dispatcher, Observer>(
     prepared: &Prepared,
-    spec: ElfRun<'_, Dispatcher>,
+    run: &RunContext<'_, Dispatcher>,
     observer: Observer,
-    ledger: &ExitLedger,
-    channels: &[RefCell<Channel>; 4],
-    sentinel: &Cell<i64>,
 ) -> Option<String>
 where
     Dispatcher: Pipe<In = ChildRequest, Out = ChildResponse, Err = ProximaError>,
     Observer: Pipe<In = Trap, Out = Trap, Err = RunError>,
 {
     let (machine, vcpu) = (prepared.session.machine(), prepared.session.vcpu().ok()?);
-    let watchdog = match Watchdog::arm(vcpu.immediate_exit_flag(), spec.watchdog_millis) {
+    let watchdog = match Watchdog::arm(vcpu.immediate_exit_flag(), run.watchdog_millis) {
         Ok(armed) => armed,
         Err(error) => return Some(error.to_string()),
     };
     let ram = prepared.ram;
-    let Transports { console, net, blk } = spec.transports;
-    let window = |name, base, transport, index: usize| {
-        VirtioWindow::new(name, base, WINDOW_SIZE, transport, &channels[index], ram, ledger)
+    let ledger = run.ledger;
+    let window = |name, base, transport: usize, channel: usize| {
+        VirtioWindow::new(
+            name,
+            base,
+            WINDOW_SIZE,
+            &run.transports[transport],
+            &run.channels[channel],
+            ram,
+            ledger,
+        )
     };
-    let hypercall = Hypercall::new(spec.dispatcher, &channels[0], sentinel, spec.max_hypercalls);
+    let hypercall = Hypercall::new(run.dispatcher, &run.channels[0], run.sentinel, run.max_hypercalls);
     let bus = FirstClaim::new(
         Lifecycle::new(false),
         FirstClaim::new(
-            window("console", CONSOLE_WINDOW_BASE, console, 1),
+            window("console", CONSOLE_WINDOW_BASE, 0, 1),
             FirstClaim::new(
-                window("net", NET_WINDOW_BASE, net, 2),
-                FirstClaim::new(window("blk", BLK_WINDOW_BASE, blk, 3), FirstClaim::new(hypercall, RejectUnmapped)),
+                window("net", NET_WINDOW_BASE, 1, 2),
+                FirstClaim::new(window("blk", BLK_WINDOW_BASE, 2, 3), FirstClaim::new(hypercall, RejectUnmapped)),
             ),
         ),
     );

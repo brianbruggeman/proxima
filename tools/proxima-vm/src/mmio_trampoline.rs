@@ -16,7 +16,7 @@ use crate::gic::{
 use crate::pl011::{Pl011Access, Pl011Uart};
 use crate::virtio_blk::BlkTransport;
 use crate::virtio_console::ConsoleTransport;
-use crate::virtio_net::{DrainedFrame, NetTransport};
+use crate::virtio_net::{HostNetTransport as NetTransport, RX_QUEUE};
 use proxima_protocols::virtio::MmioAccess;
 
 /// Sentinel `notified_queue_out` value meaning "no queue was notified by
@@ -191,10 +191,26 @@ pub unsafe extern "C" fn proxima_vm_mmio_drain_tx_net(
     let guest_memory =
         unsafe { core::slice::from_raw_parts_mut(guest_memory, guest_memory_length) };
 
-    let mut frames = std::vec::Vec::new();
-    let mut sink = |drained: DrainedFrame| frames.extend_from_slice(&drained.frame);
-    if transport.drain_tx(queue, guest_memory, &mut sink).is_err() {
+    if queue == RX_QUEUE {
+        // a receiveq1 kick is the guest asking for host-to-guest frames
+        // now; nothing is emitted on the byte channel for it.
+        if transport.fill_rx(guest_memory).is_err() {
+            return -1;
+        }
+        // SAFETY: forwarded verbatim from this function's own safety contract.
+        unsafe { *emitted_length_out = 0 };
+        return 0;
+    }
+    let Ok(drained) = transport.drain_tx(queue, guest_memory) else {
         return -1;
+    };
+    let frames: std::vec::Vec<u8> = drained.into_iter().flat_map(|frame| frame.frame).collect();
+    if emitted_capacity == 0 {
+        // the caller declared no byte channel; frames already went out the
+        // transport's egress pipe.
+        // SAFETY: forwarded verbatim from this function's own safety contract.
+        unsafe { *emitted_length_out = 0 };
+        return 0;
     }
     if frames.len() > emitted_capacity {
         return -2;
