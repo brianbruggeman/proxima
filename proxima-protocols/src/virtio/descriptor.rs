@@ -5,9 +5,12 @@ use super::raw::{read_u16, read_u32, read_u64};
 /// §2.7.5): le64 addr, le32 len, le16 flags, le16 next.
 pub const DESC_LEN: usize = 16;
 
-const FLAG_NEXT: u16 = 1;
-const FLAG_WRITE: u16 = 2;
-const FLAG_INDIRECT: u16 = 4;
+/// `VIRTQ_DESC_F_NEXT` (spec §2.7.5): the chain continues at `next`.
+pub const DESC_F_NEXT: u16 = 1;
+/// `VIRTQ_DESC_F_WRITE` (spec §2.7.5): the device writes this buffer.
+pub const DESC_F_WRITE: u16 = 2;
+/// `VIRTQ_DESC_F_INDIRECT` (spec §2.7.5): the buffer holds a descriptor table.
+pub const DESC_F_INDIRECT: u16 = 4;
 
 /// Decoded descriptor flags (spec §2.7.5, `VIRTQ_DESC_F_*`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,14 +20,14 @@ impl DescriptorFlags {
     /// This descriptor continues into `next` — the chain does not end here.
     #[must_use]
     pub fn has_next(self) -> bool {
-        self.0 & FLAG_NEXT != 0
+        self.0 & DESC_F_NEXT != 0
     }
 
     /// Buffer is device-writable (the device writes into it); otherwise it is
     /// device-readable (the driver wrote it before publishing the chain).
     #[must_use]
     pub fn device_writable(self) -> bool {
-        self.0 & FLAG_WRITE != 0
+        self.0 & DESC_F_WRITE != 0
     }
 
     /// `addr`/`len` point at a table of further descriptors rather than a
@@ -33,7 +36,7 @@ impl DescriptorFlags {
     /// surfaces but does not follow.
     #[must_use]
     pub fn is_indirect(self) -> bool {
-        self.0 & FLAG_INDIRECT != 0
+        self.0 & DESC_F_INDIRECT != 0
     }
 
     #[must_use]
@@ -239,7 +242,7 @@ mod tests {
     #[test]
     fn indirect_flag_is_surfaced_not_followed() {
         let mut table = [0u8; DESC_LEN];
-        table[12] = FLAG_INDIRECT as u8;
+        table[12] = DESC_F_INDIRECT as u8;
         let mut chain = DescriptorChain::new(&table, 1, 0);
         let descriptor = chain.next().expect("one link").expect("well-formed");
         assert!(descriptor.flags().is_indirect());
@@ -263,9 +266,9 @@ mod tests {
     fn cyclic_next_is_bounded_by_queue_size_not_looped_forever() {
         // depth 2: descriptor 0 -> 1 -> 0 -> 1 ... an adversarial cycle.
         let mut table = [0u8; 2 * DESC_LEN];
-        table[12] = FLAG_NEXT as u8; // desc 0: NEXT
+        table[12] = DESC_F_NEXT as u8; // desc 0: NEXT
         table[14] = 1; // desc 0 next = 1 (LE16 low byte)
-        table[12 + DESC_LEN] = FLAG_NEXT as u8; // desc 1: NEXT
+        table[12 + DESC_LEN] = DESC_F_NEXT as u8; // desc 1: NEXT
         table[14 + DESC_LEN] = 0; // desc 1 next = 0 (LE16 low byte)
 
         let mut chain = DescriptorChain::new(&table, 2, 0);

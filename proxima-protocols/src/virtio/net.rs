@@ -35,6 +35,14 @@ pub const DEVICE_ID_NET: u32 = 1;
 /// address the driver reads from config space rather than generating one.
 pub const FEATURE_NET_MAC: u64 = 1 << 5;
 
+/// receiveq1 and transmitq1 queue indices (spec §5.1.2).
+pub const RECEIVEQ1: u16 = 0;
+pub const TRANSMITQ1: u16 = 1;
+
+/// `VIRTIO_NET_F_STATUS` (spec §5.1.3, bit 16): the config-space `status`
+/// field is valid, so the device can report link-down to the driver.
+pub const FEATURE_NET_STATUS: u64 = 1 << 16;
+
 const HDR_FLAG_NEEDS_CSUM: u8 = 1;
 const HDR_FLAG_DATA_VALID: u8 = 2;
 const HDR_FLAG_RSC_INFO: u8 = 4;
@@ -185,8 +193,8 @@ const REG_CONFIG_MAC_HIGH_STATUS: u64 = CONFIG_SPACE_BASE + 0x004;
 const REG_CONFIG_MAX_VQ_PAIRS: u64 = CONFIG_SPACE_BASE + 0x008;
 
 /// `status` config-space field value (spec §5.1.4, `VIRTIO_NET_S_LINK_UP`):
-/// this device models a link that is always up, since M6's transport has
-/// no notion of link-down.
+/// reported while [`NetConfigSpace::link_up`] holds, cleared when the host
+/// takes the link down.
 pub const NET_STATUS_LINK_UP: u16 = 1;
 
 /// A virtio-net device: `super::mmio::MmioDevice`'s core register block
@@ -199,22 +207,33 @@ pub const NET_STATUS_LINK_UP: u16 = 1;
 pub struct NetConfigSpace {
     transport: MmioDevice<2>,
     mac: [u8; 6],
+    link_up: bool,
 }
 
 impl NetConfigSpace {
-    /// A freshly reset virtio-net device advertising `mac`, offering
-    /// `VIRTIO_F_VERSION_1 | FEATURE_NET_MAC` only — see the module doc for
-    /// why nothing else is offered.
+    /// A freshly reset virtio-net device advertising `mac` with its link up,
+    /// offering `VIRTIO_F_VERSION_1 | FEATURE_NET_MAC | FEATURE_NET_STATUS`
+    /// only — see the module doc for why nothing else is offered.
     #[must_use]
     pub fn new(mac: [u8; 6], queue_num_max: u16) -> Self {
         Self {
             transport: MmioDevice::new(
                 DEVICE_ID_NET,
                 queue_num_max,
-                super::status::FEATURE_VERSION_1 | FEATURE_NET_MAC,
+                super::status::FEATURE_VERSION_1 | FEATURE_NET_MAC | FEATURE_NET_STATUS,
             ),
             mac,
+            link_up: true,
         }
+    }
+
+    pub fn set_link_up(&mut self, link_up: bool) {
+        self.link_up = link_up;
+    }
+
+    #[must_use]
+    pub fn link_up(&self) -> bool {
+        self.link_up
     }
 
     #[must_use]
@@ -247,7 +266,8 @@ impl NetConfigSpace {
             REG_CONFIG_MAC_HIGH_STATUS if !access.is_write => {
                 let mut word = [0u8; 4];
                 word[0..2].copy_from_slice(&self.mac[4..6]);
-                word[2..4].copy_from_slice(&NET_STATUS_LINK_UP.to_le_bytes());
+                let status = if self.link_up { NET_STATUS_LINK_UP } else { 0 };
+                word[2..4].copy_from_slice(&status.to_le_bytes());
                 Ok(MmioEffect::ReadValue(u32::from_le_bytes(word)))
             }
             REG_CONFIG_MAC_HIGH_STATUS => Err(MmioError::ReadOnlyRegister {
@@ -455,6 +475,24 @@ mod tests {
             MmioEffect::ReadValue(1)
         );
         assert_eq!(device.mac(), mac);
+    }
+
+    #[test]
+    fn link_down_clears_the_status_bit_the_driver_reads() {
+        let mut device = NetConfigSpace::new([0x02, 0xde, 0xad, 0xbe, 0xef, 0x01], 4);
+        let read = MmioAccess {
+            offset: REG_CONFIG_MAC_HIGH_STATUS,
+            is_write: false,
+            value: 0,
+        };
+
+        device.set_link_up(false);
+
+        assert_eq!(
+            device.apply(read).unwrap(),
+            MmioEffect::ReadValue(u32::from_le_bytes([0xef, 0x01, 0x00, 0x00]))
+        );
+        assert!(!device.link_up());
     }
 
     /// Config-space registers are read-only from the driver's side —
