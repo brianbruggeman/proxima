@@ -1,8 +1,8 @@
 //! Greedy-decode comparison of the CPU oracle against the CUDA backend.
 //!
 //! Usage: `decode_compare <model.gguf> [prompt] [tokens] [backends]` (default prompt
-//! `The capital of France is`, default 16 tokens, `backends` is `both` or `cuda`,
-//! default `both`; `cuda` skips the CPU oracle and prints `matched=n/a`).
+//! `The capital of France is`, default 16 tokens, `backends` is `both`, `cuda` or `cpu`,
+//! default `both`; `cuda` skips the CPU oracle and `cpu` skips CUDA, both print `matched=n/a`).
 //!
 //! Loads the checkpoint once, runs `LoadedModel::generate_with_serving_config`
 //! with `gpu_layers: 0` and with `GPU_LAYERS_ALL`, prints one line per position,
@@ -45,7 +45,7 @@ const DEFAULT_TOKENS: usize = 16;
 
 #[derive(Debug, thiserror::Error)]
 enum ExampleError {
-    #[error("usage: decode_compare <model.gguf> [prompt] [tokens] [both|cuda]")]
+    #[error("usage: decode_compare <model.gguf> [prompt] [tokens] [both|cuda|cpu]")]
     Usage,
     #[error("{path}: {source}")]
     Io {
@@ -58,7 +58,7 @@ enum ExampleError {
     Interop(#[from] InteropError),
     #[error("tokenizer: {0}")]
     Tokenizer(#[from] TokenizerError),
-    #[error("backends {0:?} is not one of both, cuda")]
+    #[error("backends {0:?} is not one of both, cuda, cpu")]
     BadBackends(String),
     #[error("telemetry: {0}")]
     Telemetry(String),
@@ -75,6 +75,7 @@ enum ExampleError {
 enum Backends {
     Both,
     Cuda,
+    Cpu,
 }
 
 struct Top2 {
@@ -240,9 +241,20 @@ fn run(path: &str, prompt: &str, tokens: usize, backends: Backends) -> Result<()
     let model = LoadedModel::load(&parsed, &mapping)?;
     println!("prompt_ids {:?}", prompt_ids(&vocab, prompt)?);
     let cpu = match backends {
-        Backends::Both => Some(decode(&model, prompt, tokens, 0)?),
+        Backends::Both | Backends::Cpu => Some(decode(&model, prompt, tokens, 0)?),
         Backends::Cuda => None,
     };
+    if matches!(backends, Backends::Cpu) {
+        let (cpu_ids, cpu_text, cpu_timing) = cpu.ok_or(ExampleError::Usage)?;
+        cpu_timing.report("cpu");
+        println!("decode_text backend=cpu ids={cpu_ids:?} text={cpu_text:?}");
+        println!(
+            "decode_compare model={} tokens={} matched=n/a first_divergence=n/a",
+            model_label(&model, path),
+            cpu_ids.len()
+        );
+        return Ok(());
+    }
     let (cuda, cuda_text, cuda_timing) = decode(&model, prompt, tokens, GPU_LAYERS_ALL)?;
     if let Some((_, _, cpu_timing)) = &cpu {
         cpu_timing.report("cpu");
@@ -333,6 +345,7 @@ fn main() -> ExitCode {
             .map_or(Ok(Backends::Both), |text| match text.as_str() {
                 "both" => Ok(Backends::Both),
                 "cuda" => Ok(Backends::Cuda),
+                "cpu" => Ok(Backends::Cpu),
                 _ => Err(ExampleError::BadBackends(text)),
             })?;
         let recorder = install_telemetry()?;
