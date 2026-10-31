@@ -20,6 +20,9 @@
 //! sampled from the prefill pass), so it includes tokenization and runtime
 //! construction, which the streaming API does not expose separately. Decode steps
 //! start at the second token event; step `i` is the gap since the previous event.
+//!
+//! `DECODE_COMPARE_TELEMETRY=<path>` writes debug events to a file; `DECODE_COMPARE_FILTER`
+//! replaces its default `proxima_model_interop=debug,omega=debug` filter.
 
 use std::env;
 use std::fs::File;
@@ -339,7 +342,9 @@ fn install_telemetry() -> Result<Option<Arc<Recorder>>, ExampleError> {
     let Ok(log_path) = env::var("DECODE_COMPARE_TELEMETRY") else {
         return Ok(None);
     };
-    global::install(EnvFilter::parse("proxima_model_interop=debug,omega=debug"));
+    let filter = env::var("DECODE_COMPARE_FILTER")
+        .unwrap_or_else(|_| "proxima_model_interop=debug,omega=debug".to_owned());
+    global::install(EnvFilter::parse(&filter));
     let recorder = Recorder::builder()
         .export(Exporter::file(&log_path).format(Formatter::Text))
         .map_err(|error| ExampleError::Telemetry(error.to_string()))?
