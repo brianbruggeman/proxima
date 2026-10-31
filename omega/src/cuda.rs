@@ -1054,7 +1054,12 @@ fn grid_threads(
             keep: Keep::Reduce,
             ..
         } => {
-            let output_total: u64 = if epilogue_broadcast_axes.is_empty() {
+            let kept_rows: u64 = output_axes
+                .iter()
+                .map(|dim| resolved.extents[*dim as usize])
+                .product();
+            let row_per_warp = cooperative && kept_rows > 1;
+            let output_total: u64 = if epilogue_broadcast_axes.is_empty() || row_per_warp {
                 checked_product(
                     resolved.node,
                     output_axes.iter().enumerate().map(|(position, dim)| {
