@@ -98,6 +98,25 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: bash scripts/thumbv7m-cliff-gate.sh
 
+  # no-alloc-link — links every proxima-vm guest for both bare targets with no
+  # global allocator and fails if any allocator symbol is present. The cells
+  # above prove crates COMPILE without alloc; only a link proves the alloc
+  # crate is not pulled in by a dependency.
+  no-alloc-link:
+    name: no-alloc-link (proxima-vm guests)
+    needs: changes
+    if: needs.changes.outputs.nostd == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-none,aarch64-unknown-none
+      - uses: Swatinem/rust-cache@v2
+      - name: install nextest
+        uses: taiki-e/install-action@nextest
+      - run: cargo nextest run -p proxima-vm --test no_alloc_link
+
   # quic-h3-gate.sh — sans-IO proto crates must build at tier-1 (no_std +
   # alloc) AND tier-3 (no_std + no_alloc) AND on the thumbv7m-none-eabi
   # cliff. Per `proxima/docs/proxima-quic/discipline.md` A0 row.
