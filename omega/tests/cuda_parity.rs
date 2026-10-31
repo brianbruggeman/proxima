@@ -3220,3 +3220,25 @@ fn cuda_partial_rotary_cached_attention_matches_cpu_with_padded_rows() {
         );
     }
 }
+
+#[test]
+fn packed_q1_0_matmul_matches_at_the_27b_contraction_widths_on_cuda() {
+    use proxima_gguf::quant::q1_0::{BLOCK_BYTES, QK_Q1_0, dequantize, quantize};
+    for blocks_per_row in [40_usize, 48, 136] {
+        assert_packed_codec_parity(
+            "q1_0",
+            BLOCK_BYTES,
+            QK_Q1_0,
+            quantize,
+            dequantize,
+            |bytes| QuantizedBlock::Packed {
+                codec: Codec::Q1_0,
+                bytes,
+            },
+            96,
+            blocks_per_row,
+            NumericPolicy::default(),
+            1e-4,
+        );
+    }
+}
