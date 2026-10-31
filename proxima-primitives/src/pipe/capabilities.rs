@@ -4,6 +4,7 @@ use core::time::Duration;
 #[cfg(feature = "alloc")]
 use alloc::borrow::Cow;
 
+#[cfg(feature = "alloc")]
 use bytes::Bytes;
 use proxima_core::ProximaError;
 
@@ -81,6 +82,7 @@ pub trait ApplyOps<Op>: Sized {
 /// Implement this on any payload to make `Mutation` / `MutateOp` work over it.
 /// HTTP impls it on `Request` and `Response` (their `body`); a non-HTTP payload
 /// implements it over its own bytes.
+#[cfg(feature = "alloc")]
 pub trait BytePayload: Sized {
     /// Replace the payload's bytes with `bytes`.
     fn set_bytes(&mut self, bytes: Bytes);

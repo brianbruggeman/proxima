@@ -53,14 +53,17 @@ webpki-roots = { workspace = true, optional = true }
 # backward-compat shape. Opt into the no-alloc tier explicitly via
 # `--no-default-features --features dns-codec-trait`.
 default = ["alloc"]
-std = []
+std = ["link-alloc"]
+# links the alloc crate without selecting the `alloc` tier below, which dns's
+# no-alloc rung needs to stay reachable while other codecs use Vec/String.
+link-alloc = []
 # Selects the alloc-tier `proxima_alloc` cfg (see build.rs) — the DNS-TCP
 # `OwnFrame` no-alloc rung (C3) reads it to choose between an unbounded
 # `alloc::string::String` and a `heapless::String` inline buffer for
 # `DnsTcpQuery::name`. Mirrors `proxima-primitives`' own `alloc` axis.
-alloc = []
+alloc = ["link-alloc"]
 
-dns = []
+dns = ["link-alloc"]
 # DnsDatagramCodec impls `proxima_codec::Datagram` for DNS-over-UDP — one
 # packet is one message, matching the trait's atomic-datagram contract.
 # Also carries `frame_codec::DnsTcpCodec`, the TCP-direction `FrameCodec`
@@ -78,7 +81,7 @@ dns-codec-trait = ["dns", "dep:proxima-codec", "codec-pipe", "dep:heapless"]
 # from proxima-tcp. Tier-3: no_std + no-alloc, zero deps.
 tcp = []
 
-mqtt = ["dep:thiserror"]
+mqtt = ["link-alloc","dep:thiserror"]
 
 amqp = ["dep:thiserror"]
 
@@ -87,9 +90,9 @@ kafka = ["dep:thiserror"]
 # request/response framing — the plug-and-play-floor sweep's codec
 # encoder pass (sweep/codec-encoders). see
 # `docs/pipe-to-metal/discipline.md`.
-kafka-codec-trait = ["kafka", "dep:proxima-codec"]
+kafka-codec-trait = ["kafka", "link-alloc","dep:proxima-codec"]
 
-memcached = ["dep:thiserror"]
+memcached = ["link-alloc","dep:thiserror"]
 # MemcachedDatagramCodec impls `proxima_codec::Datagram` for memcached's
 # UDP mode (8-byte request-id/sequence/total header + the text protocol).
 # Also carries `frame_codec::MemcachedCodec`, the TCP-direction
@@ -128,9 +131,9 @@ pgwire_codec = ["dep:memchr"]
 # proxima-vm — extracted from proxima-process-protocol. Tier-1:
 # no_std + alloc. The effect markers are named re-exports of
 # proxima-core's, so consumers reach them without a second dependency.
-process = ["dep:serde", "dep:proxima-core"]
+process = ["link-alloc","dep:serde", "dep:proxima-core"]
 
-grpc_framing = ["dep:thiserror"]
+grpc_framing = ["link-alloc","dep:thiserror"]
 # C9 of the codec-trait initiative: GrpcFrameCodec impls `FrameCodec`
 # for the gRPC 5-byte length-prefix framing. default-off until C11
 # e2e bench. see `docs/codec-trait/discipline.md`.
@@ -139,16 +142,16 @@ grpc_framing-codec-trait = ["grpc_framing", "dep:proxima-codec"]
 # part of the plug-and-play-floor sweep (validate/pipe-transform-sweep).
 grpc_framing-frame-pipe = ["grpc_framing-codec-trait", "codec-pipe", "dep:bytes"]
 
-protobuf_wire = ["dep:thiserror"]
+protobuf_wire = ["link-alloc","dep:thiserror"]
 # C8 of the codec-trait initiative: ProtobufWireCodec impls `WireCodec`
 # for the protobuf wire format. default-off until C11 e2e bench. see
 # `docs/codec-trait/discipline.md`.
 protobuf_wire-codec-trait = ["protobuf_wire", "dep:proxima-codec"]
 
 # The pure envelope types compile under no_std + alloc.
-jsonrpc = ["dep:serde", "dep:serde_json"]
+jsonrpc = ["link-alloc","dep:serde", "dep:serde_json"]
 
-websocket_frame = ["dep:proxima-macros"]
+websocket_frame = ["link-alloc","dep:proxima-macros"]
 # C10 of the codec-trait initiative: WebSocketFrameCodec impls
 # `FrameCodec` for RFC 6455 WebSocket frames. default-off until C11
 # e2e bench. see `docs/codec-trait/discipline.md`.
@@ -166,11 +169,11 @@ websocket_frame-frame-pipe = ["websocket_frame-codec-trait", "codec-pipe", "dep:
 # concrete CSPRNG dependency — the caller supplies the entropy.
 websocket_frame-session = ["websocket_frame", "dep:rand_core"]
 
-websocket_handshake = ["dep:sha1", "dep:base64"]
+websocket_handshake = ["link-alloc","dep:sha1", "dep:base64"]
 
 # The sans-IO `parse` / `encode` / `ProxyHeader` / `WireVersion` /
 # `ParseError` core is no_std + alloc clean.
-proxy_protocol = ["dep:proxima-core"]
+proxy_protocol = ["link-alloc","dep:proxima-core"]
 # `proxy_protocol-std` gates the IO adapters (read_header, Prepended)
 # since they consume `futures::io::AsyncRead` which requires
 # futures/std.
@@ -186,7 +189,7 @@ proxy_protocol-codec-trait = ["proxy_protocol", "dep:proxima-codec"]
 # from proxima-redis (codec half only; the client stays in the
 # proxima-redis facade crate, mirroring the pgwire/pgwire_codec split).
 # Tier-1: no_std + alloc.
-redis = ["dep:memchr"]
+redis = ["link-alloc","dep:memchr"]
 # RedisFrameCodec impls `FrameCodec` for RESP2/RESP3 — the plug-and-play-
 # floor sweep's spot-check that "could cleanly impl FrameCodec" is the
 # right call for this codec (validate/pipe-transform-sweep).
@@ -200,7 +203,7 @@ redis-codec-trait = ["redis", "dep:proxima-codec"]
 # module on `not(feature = ...)` let any one consumer in the graph delete
 # that module's API out from under every other consumer (measured: it
 # made `--all-features --all-targets` fail to compile at all).
-hpack = ["dep:bytes", "dep:thiserror"]
+hpack = ["link-alloc","dep:bytes", "dep:thiserror"]
 # alias: `hpack-no-alloc` used to SUBTRACT the alloc modules; the floor
 # is now just the absence of `hpack-alloc`. Kept for existing consumers
 # that request it explicitly, mirroring `quic-no-alloc`.
@@ -220,7 +223,7 @@ hpack-codec-trait = ["hpack-alloc", "dep:proxima-codec", "dep:proxima-core"]
 # feature is the tier-3 floor (bare no_std + no alloc, streaming
 # request-head parser subset); `http1_codec-alloc` widens it. See the
 # `hpack` block above for why the polarity is this way round.
-http1_codec = ["dep:bumpalo", "dep:httparse", "dep:bytes", "dep:smallvec"]
+http1_codec = ["link-alloc","dep:bumpalo", "dep:httparse", "dep:bytes", "dep:smallvec"]
 # alias: the floor is now just the absence of `http1_codec-alloc`. Kept
 # for existing consumers that request it explicitly.
 http1_codec-no-alloc = ["http1_codec"]
@@ -246,13 +249,13 @@ http1_codec-frame-pipe = [
 # rewrite (guiding-principle 1). Enabled transitively by each codec's own
 # `-frame-pipe` feature (`http1_codec-frame-pipe`, `grpc_framing-frame-pipe`,
 # `websocket_frame-frame-pipe`, ...).
-codec-pipe = ["dep:proxima-primitives", "proxima-primitives/alloc", "dep:proxima-codec", "dep:bytes"]
+codec-pipe = ["link-alloc", "dep:proxima-primitives", "proxima-primitives/alloc", "dep:proxima-codec", "dep:bytes"]
 
 # Sans-IO HTTP/2 codec — extracted from proxima-h2-codec. The BASE
 # feature is the tier-3 floor (bare no_std + no alloc, the per-stream
 # RFC 7540 §5 state machine); `http2_codec-alloc` widens it. See the
 # `hpack` block above for why the polarity is this way round.
-http2_codec = ["hpack", "dep:smallvec", "dep:thiserror", "dep:bytes", "dep:tracing"]
+http2_codec = ["link-alloc","hpack", "dep:smallvec", "dep:thiserror", "dep:bytes", "dep:tracing"]
 # alias: the floor is now just the absence of `http2_codec-alloc`. Kept
 # for existing consumers that request it explicitly.
 http2_codec-no-alloc = ["http2_codec"]
@@ -266,7 +269,7 @@ http2_codec-codec-trait = ["http2_codec-alloc", "dep:proxima-codec"]
 # proxima-h3-proto. Depends on this crate's own `quic` module (folded
 # from proxima-quic-proto) rather than an external crate, so what was
 # once a dependency edge is now intra-crate.
-http3_codec = ["hpack-alloc", "quic-alloc", "dep:arrayvec", "dep:heapless"]
+http3_codec = ["link-alloc","hpack-alloc", "quic-alloc", "dep:arrayvec", "dep:heapless"]
 # tier-1: alloc-tier state machines (server/client connections, QPACK
 # dynamic table). `http3_codec` already requires `quic-alloc`; this
 # alias is kept for existing consumers that request it explicitly.
@@ -286,7 +289,7 @@ http3_codec-part-source = ["http3_codec", "dep:proxima-primitives", "proxima-pri
 # Sans-IO length-prefixed JSON framing codec (4-byte BE length + JSON
 # payload) — extracted from proxima-framing-json. Tier-1: no_std +
 # alloc.
-json_framing = []
+json_framing = ["link-alloc"]
 # JsonFrameCodec impls `FrameCodec` for the length-prefixed JSON framing —
 # the plug-and-play-floor sweep's spot-check that "could cleanly impl
 # FrameCodec" is the right call for this codec (validate/pipe-transform-sweep).
@@ -334,7 +337,7 @@ quic = [
 ]
 # tier-1: alloc-tier state machines (connection FSM, stream flow
 # control table, endpoint DCID demux table, RFC 9221 datagram queues).
-quic-alloc = ["quic", "dep:proxima-core", "proxima-core/alloc", "dep:hashbrown"]
+quic-alloc = ["quic", "link-alloc","dep:proxima-core", "proxima-core/alloc", "dep:hashbrown"]
 # alias: quic-proto's own `std` feature was purely additive over
 # `alloc` (no separate std-only code path); kept for existing
 # consumers that request it explicitly.

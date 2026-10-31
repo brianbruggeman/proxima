@@ -98,6 +98,12 @@ declare -a FLOOR_CRATE_CELLS=(
     # of it had ever been compiled for an embedded target. Measured 2026-08-04:
     # it builds clean, so this cell locks in a claim that was true but unproven.
     "proxima-protocols-codec-seams|proxima-protocols|dns-codec-trait,memcached-codec-trait,kafka-codec-trait,redis-codec-trait,json_framing-codec-trait,grpc_framing-codec-trait,grpc_framing-frame-pipe,protobuf_wire-codec-trait,websocket_frame-codec-trait,websocket_frame-frame-pipe,websocket_frame-session,http1_codec-alloc,http1_codec-codec-trait,http1_codec-frame-pipe,http2_codec-alloc,http2_codec-codec-trait,http3_codec-codec-trait,http3_codec-part-source,hpack-alloc,hpack-codec-trait,proxy_protocol-codec-trait,quic-codec-trait,quic-mock-tls"
+    # the protocols that claim tier-3 (no_std + NO alloc): with `alloc` off
+    # and no feature that links the alloc crate, `extern crate alloc` is
+    # absent, so this cell is what keeps the claim true at crate level. The
+    # binary-level proof (no allocator symbol in a linked guest) is
+    # tools/proxima-vm/tests/no_alloc_link.rs, run by the no-alloc-link job.
+    "proxima-protocols-tier3|proxima-protocols|tcp,inet,nvme,virtio,pgwire_codec,amqp,kafka"
     # proxima-codec's own Cargo.toml calls `alloc` its tier-1 floor and four
     # crates consume it there (proxima-kafka, proxima-protocols' -codec-trait
     # features, proxima-listen's framed-any, and the root crate's bench
