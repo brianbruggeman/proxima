@@ -71,6 +71,9 @@ use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use crate::msl::{Binding, Codec, PackedOperands};
 
+mod row_tile;
+use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
+
 /// Appended to a Q4_0 matvec's CUDA entry name only when
 /// `NumericPolicy::activation_quantization` is granted and the dp4a
 /// recogniser matches -- the int8-activation body is a different kernel from
@@ -285,8 +288,9 @@ fn extent_fields(
     numeric_policy: NumericPolicy,
 ) -> Result<(CudaGridSpec, Vec<(NodeId, usize)>), EmitError> {
     let cooperative = reduce_is_cooperative(resolved, quantized, numeric_policy);
+    let row_tile = row_tile_axis(resolved, quantized, numeric_policy);
     let grid = CudaGridSpec {
-        threads: grid_threads(resolved, cooperative)?,
+        threads: grid_threads(resolved, cooperative, row_tile)?,
         block_width: match &resolved.kind {
             BoundOpKind::MoeTopK { expert_count, .. } => Some(moe_block_width(*expert_count)),
             _ => cooperative.then_some(WARP_SIZE),
@@ -1027,7 +1031,11 @@ fn bindings(resolved: &BoundOp) -> Vec<Binding> {
     bindings
 }
 
-fn grid_threads(resolved: &BoundOp, cooperative: bool) -> Result<u64, EmitError> {
+fn grid_threads(
+    resolved: &BoundOp,
+    cooperative: bool,
+    row_tile: Option<usize>,
+) -> Result<u64, EmitError> {
     let extents_product = || checked_product(resolved.node, resolved.extents.iter().copied());
     match &resolved.kind {
         BoundOpKind::Elementwise { .. } => extents_product(),
@@ -1040,9 +1048,14 @@ fn grid_threads(resolved: &BoundOp, cooperative: bool) -> Result<u64, EmitError>
             let output_total: u64 = if epilogue_broadcast_axes.is_empty() {
                 checked_product(
                     resolved.node,
-                    output_axes
-                        .iter()
-                        .map(|dim| resolved.extents[*dim as usize]),
+                    output_axes.iter().enumerate().map(|(position, dim)| {
+                        let extent = resolved.extents[*dim as usize];
+                        if row_tile == Some(position) {
+                            extent.div_ceil(ROW_TILE as u64)
+                        } else {
+                            extent
+                        }
+                    }),
                 )?
             } else {
                 extents_product()?
@@ -1223,7 +1236,12 @@ fn entry_name(
     } else {
         ""
     };
-    format!("{identity}{activation_token}_gid64c8")
+    let row_tile_token = if row_tile_axis(resolved, quantized, numeric_policy).is_some() {
+        format!("_rt{ROW_TILE}")
+    } else {
+        String::new()
+    };
+    format!("{identity}{activation_token}{row_tile_token}_gid64c9")
 }
 
 /// The `(weight, activation)` operand slots of a Q4_0-weight matvec that the
@@ -2567,7 +2585,9 @@ fn render_reduce(
         element_type,
     );
 
-    if reduce_is_cooperative(resolved, quantized, numeric_policy) {
+    if let Some(tile_index) = row_tile_axis(resolved, quantized, numeric_policy) {
+        push_row_tiled_cooperative_body(&mut source, resolved, quantized, element_type, tile_index)?;
+    } else if reduce_is_cooperative(resolved, quantized, numeric_policy) {
         push_cooperative_reduce_body(
             &mut source,
             resolved,

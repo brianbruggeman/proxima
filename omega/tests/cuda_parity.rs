@@ -1152,6 +1152,367 @@ fn packed_pq2_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
     );
 }
 
+fn packed_batched_program(
+    rows: u32,
+    k: u32,
+    tokens: Option<u32>,
+    weight_dtype: DType,
+) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: weight_dtype,
+            shape: vec![Extent::Static(rows), Extent::Static(k)],
+            name: Some("weight".into()),
+        },
+    );
+    let activation_shape = match tokens {
+        Some(tokens) => vec![Extent::Static(k), Extent::Static(tokens)],
+        None => vec![Extent::Static(k)],
+    };
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: activation_shape,
+            name: Some("activation".into()),
+        },
+    );
+    let rank = if tokens.is_some() { 3 } else { 2 };
+    let (activation_dims, output_dims): (&[u16], &[u16]) = match tokens {
+        Some(_) => (&[2, 1], &[0, 1]),
+        None => (&[1], &[0]),
+    };
+    let weight_dims: &[u16] = if tokens.is_some() { &[0, 2] } else { &[0, 1] };
+    let all_dims: &[u16] = if tokens.is_some() { &[0, 1, 2] } else { &[0, 1] };
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, IndexMap::Affine(projection(rank, weight_dims))),
+                (
+                    activation,
+                    IndexMap::Affine(projection(rank, activation_dims)),
+                ),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(projection(rank, all_dims)),
+            out_map: IndexMap::Affine(projection(rank, output_dims)),
+            keep: Keep::Reduce,
+            name: Some("packed_batched_matmul".into()),
+        }),
+    );
+    (program, sum)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_batched_program(
+    engine: Engine,
+    driver: Option<GpuDriver>,
+    weight: QuantizedBlock<'_>,
+    weight_dtype: DType,
+    activation: &[f32],
+    rows: u32,
+    k: u32,
+    tokens: Option<u32>,
+) -> (Vec<f32>, Option<Vec<String>>) {
+    let (program, root) = packed_batched_program(rows, k, tokens, weight_dtype);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("weight", weight),
+        ("activation", QuantizedBlock::Float32(activation)),
+    ];
+    let mut plan = plan_named(
+        engine,
+        driver,
+        &program,
+        &[],
+        &named,
+        &[root],
+        NumericPolicy::bit_exact().with_reassociation(true),
+    )
+    .expect("omega::backend plans the batched packed matmul");
+    let identities = cuda_kernel_identities(&plan);
+    let output = execute_plan_named(&mut plan, &named)
+        .expect("omega::backend runs the batched packed matmul")
+        .root()
+        .to_vec();
+    (output, identities)
+}
+
+const BATCHED_TOKEN_COUNTS: [u32; 5] = [1, 2, 7, 8, 66];
+
+/// A prefill of `tokens` rows must equal, row for row, the single-row matvec
+/// kernel (bit for bit: the tiled body keeps each row's accumulation order),
+/// and the dequantized f32 CPU path within `tolerance`.
+#[allow(clippy::too_many_arguments)]
+fn assert_batched_prefill_parity(
+    codec_name: &str,
+    block_bytes: usize,
+    block_elements: usize,
+    quantize: fn(&[f32], &mut [u8]) -> Result<(), proxima_gguf::quant::QuantError>,
+    dequantize: fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>,
+    to_block: fn(&[u8]) -> QuantizedBlock<'_>,
+    rows: u32,
+    blocks_per_row: usize,
+) {
+    let k = (block_elements * blocks_per_row) as u32;
+    let weight_f32: Vec<f32> = random_vec(37, rows as usize * k as usize)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let mut weight_blocks = vec![0u8; rows as usize * blocks_per_row * block_bytes];
+    let mut dequantized: Vec<f32> = vec![0.0; rows as usize * k as usize];
+    for ((row_f32, row_blocks), row_dequantized) in weight_f32
+        .chunks_exact(k as usize)
+        .zip(weight_blocks.chunks_exact_mut(blocks_per_row * block_bytes))
+        .zip(dequantized.chunks_exact_mut(k as usize))
+    {
+        quantize(row_f32, row_blocks).expect("row length is a whole number of blocks");
+        dequantize(row_blocks, row_dequantized).expect("a whole number of packed blocks");
+    }
+
+    for tokens in BATCHED_TOKEN_COUNTS {
+        let activation: Vec<f32> = random_vec(41 + u64::from(tokens), (k * tokens) as usize)
+            .into_iter()
+            .map(|value| value * 4.0 - 2.0)
+            .collect();
+        let (tiled, identities) = run_batched_program(
+            Engine::Gpu,
+            Some(GpuDriver::Cuda),
+            to_block(&weight_blocks),
+            DType::UINT8,
+            &activation,
+            rows,
+            k,
+            Some(tokens),
+        );
+        let identities = identities.expect("cuda plan exposes its kernels");
+        assert!(
+            identities.iter().any(|identity| identity.contains("_rt8")),
+            "degenerate gate: {codec_name} prefill at {tokens} tokens did not take the row-tiled kernel: {identities:?}"
+        );
+        let (reference, _) = run_batched_program(
+            Engine::Cpu,
+            None,
+            QuantizedBlock::Float32(&dequantized),
+            DType::FLOAT32,
+            &activation,
+            rows,
+            k,
+            Some(tokens),
+        );
+        assert_eq!(tiled.len(), rows as usize * tokens as usize);
+        let max_magnitude = reference.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+        let max_diff = tiled
+            .iter()
+            .zip(&reference)
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            tiled.iter().all(|value| value.is_finite())
+                && max_diff / max_magnitude.max(f32::MIN_POSITIVE) < 1e-5,
+            "cuda {codec_name} prefill at {tokens} tokens disagrees with the f32 oracle: max_diff={max_diff}"
+        );
+
+        let probe_columns: Vec<u32> = [0, 1, tokens / 2, tokens.saturating_sub(1)]
+            .into_iter()
+            .filter(|column| *column < tokens)
+            .collect();
+        for column in probe_columns {
+            let column_activation: Vec<f32> = (0..k as usize)
+                .map(|kk| activation[kk * tokens as usize + column as usize])
+                .collect();
+            let (matvec, matvec_identities) = run_batched_program(
+                Engine::Gpu,
+                Some(GpuDriver::Cuda),
+                to_block(&weight_blocks),
+                DType::UINT8,
+                &column_activation,
+                rows,
+                k,
+                None,
+            );
+            let matvec_identities = matvec_identities.expect("cuda plan exposes its kernels");
+            assert!(
+                matvec_identities
+                    .iter()
+                    .all(|identity| !identity.contains("_rt8")),
+                "degenerate control: the matvec took the row-tiled kernel: {matvec_identities:?}"
+            );
+            for row in 0..rows as usize {
+                let tiled_bits = tiled[row * tokens as usize + column as usize].to_bits();
+                assert_eq!(
+                    tiled_bits,
+                    matvec[row].to_bits(),
+                    "{codec_name}: row {row} token {column} of {tokens} differs from the single-row kernel"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn batched_q4k_prefill_matches_the_matvec_and_the_f32_oracle_on_cuda() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_batched_prefill_parity(
+        "q4_k",
+        BLOCK_BYTES,
+        QK_K,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q4K, bytes },
+        5,
+        2,
+    );
+}
+
+#[test]
+fn batched_q5k_prefill_matches_the_matvec_and_the_f32_oracle_on_cuda() {
+    use proxima_gguf::quant::q5_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_batched_prefill_parity(
+        "q5_k",
+        BLOCK_BYTES,
+        QK_K,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q5K, bytes },
+        5,
+        2,
+    );
+}
+
+#[test]
+fn batched_q6k_prefill_matches_the_matvec_and_the_f32_oracle_on_cuda() {
+    use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_batched_prefill_parity(
+        "q6_k",
+        BLOCK_BYTES,
+        QK_K,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q6K, bytes },
+        5,
+        2,
+    );
+}
+
+#[test]
+fn batched_q8_0_prefill_matches_the_matvec_and_the_f32_oracle_on_cuda() {
+    use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
+    assert_batched_prefill_parity(
+        "q8_0",
+        BLOCK_BYTES,
+        QK8_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q8_0, bytes },
+        5,
+        9,
+    );
+}
+
+#[test]
+fn batched_q4_0_prefill_matches_the_matvec_and_the_f32_oracle_on_cuda() {
+    use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, dequantize, quantize};
+    assert_batched_prefill_parity(
+        "q4_0",
+        BLOCK_BYTES,
+        QK4_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q4_0, bytes },
+        5,
+        9,
+    );
+}
+
+#[test]
+fn batched_q5_0_prefill_matches_the_matvec_and_the_f32_oracle_on_cuda() {
+    use proxima_gguf::quant::q5_0::{BLOCK_BYTES, QK5_0, dequantize, quantize};
+    assert_batched_prefill_parity(
+        "q5_0",
+        BLOCK_BYTES,
+        QK5_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q5_0, bytes },
+        5,
+        9,
+    );
+}
+
+#[test]
+fn batched_q1_0_prefill_matches_the_matvec_and_the_f32_oracle_on_cuda() {
+    use proxima_gguf::quant::q1_0::{BLOCK_BYTES, QK_Q1_0, dequantize, quantize};
+    assert_batched_prefill_parity(
+        "q1_0",
+        BLOCK_BYTES,
+        QK_Q1_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q1_0, bytes },
+        5,
+        5,
+    );
+}
+
+#[test]
+fn batched_q2_0_prefill_matches_the_matvec_and_the_f32_oracle_on_cuda() {
+    use proxima_gguf::quant::q2_0::{BLOCK_BYTES, QK_Q2_0, dequantize, quantize};
+    assert_batched_prefill_parity(
+        "q2_0",
+        BLOCK_BYTES,
+        QK_Q2_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed { codec: Codec::Q2_0, bytes },
+        5,
+        5,
+    );
+}
+
+#[test]
+fn batched_pq2_0_prefill_matches_the_matvec_and_the_f32_oracle_on_cuda() {
+    use proxima_gguf::quant::pq2_0::{BLOCK_BYTES, QK_PQ2_0, dequantize, quantize};
+    assert_batched_prefill_parity(
+        "pq2_0",
+        BLOCK_BYTES,
+        QK_PQ2_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed { codec: Codec::Pq2_0, bytes },
+        5,
+        5,
+    );
+}
+
+#[test]
+fn batched_f16_prefill_matches_the_matvec_and_the_f32_oracle_on_cuda() {
+    use proxima_gguf::quant::f16::{BLOCK_BYTES, QK_F16, dequantize, quantize};
+    assert_batched_prefill_parity(
+        "f16",
+        BLOCK_BYTES,
+        QK_F16,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed { codec: Codec::Float16, bytes },
+        5,
+        200,
+    );
+}
+
 /// `cuda.rs`'s `kernel_signature` declares the OUTPUT pointer itself as
 /// `__half*` for a `DType::FLOAT16` op (unlike `crate::wgsl`, which always
 /// casts an f16 compute result back to an `array<f32>` storage write) -- see
