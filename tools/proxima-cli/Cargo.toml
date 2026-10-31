@@ -21,6 +21,9 @@ path = "src/main.rs"
 name = "proximad"
 path = "src/daemon.rs"
 
+[features]
+vm = ["proxima/vm"]
+
 [dependencies]
 proxima = { workspace = true, features = ["runtime-tokio", "tokio", "http1-native", "http1"] }
 clap = { workspace = true, features = ["derive", "env"] }
