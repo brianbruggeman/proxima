@@ -6,6 +6,7 @@
 #![cfg(feature = "cuda")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use omega::msl::Codec;
 use omega::{CudaKernel, PackedOperands, emit_cuda_reusing, emit_cuda_with_policy};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
@@ -158,15 +159,43 @@ fn reused_cuda_source_equals_a_fresh_emit_for_every_op_across_kv_lengths() {
         reused_kernels, fresh,
         "reused source differs from a fresh emit"
     );
-    assert!(
-        reused_count > 0,
-        "no op was skipped across kv lengths 6 -> 7"
-    );
-    assert!(
-        reused_count < after.len(),
-        "every op was skipped although kv-sized ops changed extents"
+    assert_eq!(
+        reused_count,
+        after.len(),
+        "with no packed operand an extent-only change reuses every op's source"
     );
     println!("ops={} reused={reused_count}", after.len());
+}
+
+#[test]
+fn ops_reading_packed_operands_re_emit_when_their_extents_change() {
+    let (program, logits) = decode_program();
+    let before = bound_at(&program, logits, 6);
+    let after = bound_at(&program, logits, 7);
+    let packed: PackedOperands = before
+        .iter()
+        .zip(&after)
+        .filter(|(old, new)| old.extents != new.extents)
+        .flat_map(|(_, new)| new.all_read_sources().map(|(node, _, _)| *node))
+        .map(|node| (node, Codec::Q4_0))
+        .collect();
+    assert!(!packed.is_empty(), "kv growth changed some op's extents");
+    let previous_kernels = fresh_kernels(&before, &packed);
+
+    let (reused_kernels, reused_count) = emit_cuda_reusing(
+        &before,
+        previous_kernels,
+        &after,
+        &packed,
+        NumericPolicy::default(),
+    )
+    .expect("the reuse path emits the decode program");
+
+    assert_eq!(reused_kernels, fresh_kernels(&after, &packed));
+    assert!(
+        reused_count < after.len(),
+        "ops reading a packed operand at changed extents must be re-emitted"
+    );
 }
 
 #[test]
