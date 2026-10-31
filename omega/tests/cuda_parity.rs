@@ -1072,6 +1072,26 @@ fn packed_q4_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
     );
 }
 
+#[test]
+fn packed_q5_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
+    use proxima_gguf::quant::q5_0::{BLOCK_BYTES, QK5_0, dequantize, quantize};
+    assert_packed_codec_parity(
+        "q5_0",
+        BLOCK_BYTES,
+        QK5_0,
+        quantize,
+        dequantize,
+        |bytes| QuantizedBlock::Packed {
+            codec: Codec::Q5_0,
+            bytes,
+        },
+        3,
+        2,
+        NumericPolicy::default(),
+        1e-5,
+    );
+}
+
 /// `cuda.rs`'s `kernel_signature` declares the OUTPUT pointer itself as
 /// `__half*` for a `DType::FLOAT16` op (unlike `crate::wgsl`, which always
 /// casts an f16 compute result back to an `array<f32>` storage write) -- see

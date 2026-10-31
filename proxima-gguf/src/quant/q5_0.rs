@@ -84,10 +84,82 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
     Ok(())
 }
 
+fn quantize_block(input: &[f32], output: &mut [u8]) {
+    let mut amax = 0.0f32;
+    let mut max = 0.0f32;
+    for &value in input {
+        if amax < value.abs() {
+            amax = value.abs();
+            max = value;
+        }
+    }
+    let scale = max / -16.0;
+    let inverse = if scale == 0.0 { 0.0 } else { 1.0 / scale };
+    output[D_OFFSET..D_OFFSET + 2].copy_from_slice(&half::f16::from_f32(scale).to_le_bytes());
+
+    let mut high_bits = 0u32;
+    for index in 0..HALF_BLOCK {
+        let low = 31i8.min((input[index] * inverse + 16.5) as i8) as u8;
+        let high = 31i8.min((input[HALF_BLOCK + index] * inverse + 16.5) as i8) as u8;
+        output[QS_OFFSET + index] = (low & 0x0f) | ((high & 0x0f) << 4);
+        high_bits |= u32::from((low & 0x10) >> 4) << index;
+        high_bits |= u32::from((high & 0x10) >> 4) << (index + HALF_BLOCK);
+    }
+    output[QH_OFFSET..QH_OFFSET + 4].copy_from_slice(&high_bits.to_le_bytes());
+}
+
+/// Quantizes whole 32-element runs of `f32` into `Q5_0` blocks, following
+/// llama.cpp's `quantize_row_q5_0_ref`.
+pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
+    if !input.len().is_multiple_of(QK5_0) {
+        return Err(QuantError::InputNotElementMultiple {
+            codec: "q5_0",
+            unit: "block",
+            found: input.len(),
+            block_elements: QK5_0,
+        });
+    }
+    let expected = input.len() / QK5_0 * BLOCK_BYTES;
+    if output.len() != expected {
+        return Err(QuantError::OutputSizeMismatch {
+            found: output.len(),
+            expected,
+        });
+    }
+    for (chunk, block) in input
+        .as_chunks::<QK5_0>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<BLOCK_BYTES>().0)
+    {
+        quantize_block(chunk, block);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn quantize_then_dequantize_stays_within_one_step_of_the_input() {
+        let input: Vec<f32> = (0..64).map(|index| (index as f32 - 31.5) * 0.37).collect();
+        let mut packed = vec![0u8; 2 * BLOCK_BYTES];
+        quantize(&input, &mut packed).expect("two whole blocks");
+        let mut decoded = vec![0.0f32; 64];
+        dequantize(&packed, &mut decoded).expect("two complete blocks");
+        let step = 31.5 * 0.37 / 16.0;
+        for (original, round_trip) in input.iter().zip(&decoded) {
+            assert!((original - round_trip).abs() <= step, "{original} vs {round_trip}");
+        }
+    }
+
+    #[test]
+    fn quantize_rejects_partial_block() {
+        let error = quantize(&[0.0; QK5_0 - 1], &mut []).expect_err("partial block");
+        assert!(matches!(error, QuantError::InputNotElementMultiple { .. }));
+    }
 
     #[test]
     fn decodes_low_and_high_five_bit_values() {

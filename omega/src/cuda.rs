@@ -39,7 +39,7 @@
 //!   `crate::msl`'s own gather-fetch renderer's `atomic_fetch_max` does, so
 //!   `omega::execute`'s driver can turn a nonzero slot into the same
 //!   `TensorError::GatherIndexOutOfRange` the CPU oracle reports.
-//! - **Packed operands**: `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q4_0` plus
+//! - **Packed operands**: `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q4_0`/`Q5_0` plus
 //!   `Float16`/`BFloat16`, ported from [`crate::msl`]'s own unpack constants
 //!   — see [`Q4K_UNPACK_CUDA`] and its siblings.
 //! - **`f32`/`f16`** (`type_token`) — `f16` needs `<cuda_fp16.h>`'s
@@ -1469,6 +1469,8 @@ pub(crate) fn preamble(source: &mut String, element_type: &str) {
     source.push('\n');
     source.push_str(Q4_0_UNPACK_CUDA);
     source.push('\n');
+    source.push_str(Q5_0_UNPACK_CUDA);
+    source.push('\n');
     source.push_str(BF16_UNPACK_CUDA);
     source.push('\n');
 }
@@ -1718,6 +1720,9 @@ fn operand_read(
         Some(Codec::Q4_0) => Ok(format!(
             "q4_0_element(in{index} + ({offset} / {Q4_0_BLOCK_ELEMENTS}) * {Q4_0_BLOCK_BYTES}, (unsigned int)({offset} % {Q4_0_BLOCK_ELEMENTS}))"
         )),
+        Some(Codec::Q5_0) => Ok(format!(
+            "q5_0_element(in{index} + ({offset} / {Q5_0_BLOCK_ELEMENTS}) * {Q5_0_BLOCK_BYTES}, (unsigned int)({offset} % {Q5_0_BLOCK_ELEMENTS}))"
+        )),
         // `__half` converts implicitly to `float` in CUDA C++, the same
         // "already a valid narrow-float buffer" shape MSL's `half` takes.
         Some(Codec::Float16) => Ok(format!("in{index}[{offset}]")),
@@ -1727,7 +1732,6 @@ fn operand_read(
         // a future codec must choose here; no silent raw read of packed bytes
         Some(
             Codec::Q5_1
-            | Codec::Q5_0
             | Codec::Q4_1
             | Codec::Q8_1
             | Codec::Q8K
@@ -2942,6 +2946,30 @@ __device__ __forceinline__ void q4_0_chunk8(const unsigned char *block, unsigned
 
 pub const Q4_0_BLOCK_BYTES: usize = proxima_gguf::quant::q4_0::BLOCK_BYTES;
 pub const Q4_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_0::QK4_0;
+
+/// CUDA C source for unpacking one element of a `Q5_0` block — ports
+/// `crate::msl::Q5_0_UNPACK_MSL`'s `q5_0_element` exactly: 22-byte block,
+/// `d` f16 at 0, `qh` at 2, `qs` nibbles at 6, `value = (level - 16) * d`.
+pub const Q5_0_UNPACK_CUDA: &str = "\
+__device__ __forceinline__ float q5_0_element(const unsigned char *block, unsigned int index) {
+    unsigned short d_bits = (unsigned short)((unsigned int)block[0] | ((unsigned int)block[1] << 8));
+    float d = __half2float(__ushort_as_half(d_bits));
+    unsigned int qh = (unsigned int)block[2] | ((unsigned int)block[3] << 8) | ((unsigned int)block[4] << 16) | ((unsigned int)block[5] << 24);
+    bool high_half = index >= 16u;
+    unsigned int local = high_half ? (index - 16u) : index;
+    unsigned int byte = (unsigned int)block[6u + local];
+    unsigned int level;
+    if (high_half) {
+        level = (byte >> 4u) | ((qh >> (local + 12u)) & 0x10u);
+    } else {
+        level = (byte & 0x0Fu) | (((qh >> local) << 4u) & 0x10u);
+    }
+    return ((float)level - 16.0f) * d;
+}
+";
+
+pub const Q5_0_BLOCK_BYTES: usize = proxima_gguf::quant::q5_0::BLOCK_BYTES;
+pub const Q5_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_0::QK5_0;
 
 pub const FLOAT16_BLOCK_BYTES: usize = proxima_gguf::quant::f16::BLOCK_BYTES;
 pub const FLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::f16::QK_F16;
