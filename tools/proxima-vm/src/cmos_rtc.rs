@@ -3,7 +3,7 @@
 //!
 //! Without it every read returns 0xff, so the Linux kernel sees
 //! "update in progress" forever and spins on `mc146818_avoid_UIP` for over a
-//! second. Binary, 24-hour mode; the update-in-progress bit never sets.
+//! second. BCD, 24-hour mode (x86 Linux decodes every RTC as BCD whatever the data-mode bit says, so binary registers read as the wrong date); the update-in-progress bit never sets.
 //! Register layout per the Motorola MC146818A datasheet, "Time, Calendar and
 //! Alarm Locations": 0x00 seconds, 0x02 minutes, 0x04 hours, 0x06 day of week
 //! (1-7), 0x07 day of month, 0x08 month, 0x09 year (00-99); 0x0a/0x0b/0x0d are
@@ -15,7 +15,7 @@ pub const DATA_PORT: u16 = 0x71;
 const REGISTER_COUNT: usize = 128;
 const INDEX_MASK: u8 = 0x7f;
 const STATUS_A_STABLE: u8 = 0x26;
-const STATUS_B_24H_BINARY: u8 = 0x06;
+const STATUS_B_24H_BCD: u8 = 0x02;
 const STATUS_D_VALID: u8 = 0x80;
 const SECONDS_PER_DAY: i64 = 86_400;
 
@@ -23,6 +23,10 @@ const SECONDS_PER_DAY: i64 = 86_400;
 pub struct CmosRtc {
     index: u8,
     registers: [u8; REGISTER_COUNT],
+}
+
+fn bcd(value: u8) -> u8 {
+    (value / 10) << 4 | (value % 10)
 }
 
 struct CivilTime {
@@ -63,17 +67,17 @@ impl CmosRtc {
     pub fn at(seconds_since_epoch: i64) -> Self {
         let time = civil_from_epoch(seconds_since_epoch);
         let mut registers = [0_u8; REGISTER_COUNT];
-        registers[0x00] = time.second;
-        registers[0x02] = time.minute;
-        registers[0x04] = time.hour;
+        registers[0x00] = bcd(time.second);
+        registers[0x02] = bcd(time.minute);
+        registers[0x04] = bcd(time.hour);
         registers[0x06] = time.weekday_from_sunday + 1;
-        registers[0x07] = time.day;
-        registers[0x08] = time.month;
-        registers[0x09] = time.year.rem_euclid(100) as u8;
+        registers[0x07] = bcd(time.day);
+        registers[0x08] = bcd(time.month);
+        registers[0x09] = bcd(time.year.rem_euclid(100) as u8);
         registers[0x0a] = STATUS_A_STABLE;
-        registers[0x0b] = STATUS_B_24H_BINARY;
+        registers[0x0b] = STATUS_B_24H_BCD;
         registers[0x0d] = STATUS_D_VALID;
-        registers[0x32] = time.year.div_euclid(100) as u8;
+        registers[0x32] = bcd(time.year.div_euclid(100) as u8);
         Self { index: 0, registers }
     }
 
@@ -108,24 +112,24 @@ mod tests {
     }
 
     #[test]
-    fn the_unix_epoch_is_thursday_1_january_1970() {
+    fn the_unix_epoch_is_thursday_1_january_1970_in_bcd() {
         let mut rtc = CmosRtc::at(0);
 
-        assert_eq!(time_registers(&mut rtc), [0, 0, 0, 5, 1, 1, 70, 19]);
+        assert_eq!(time_registers(&mut rtc), [0x00, 0x00, 0x00, 5, 0x01, 0x01, 0x70, 0x19]);
     }
 
     #[test]
     fn a_2023_instant_decodes_to_its_utc_calendar_fields() {
         let mut rtc = CmosRtc::at(1_700_000_000);
 
-        assert_eq!(time_registers(&mut rtc), [20, 13, 22, 3, 14, 11, 23, 20]);
+        assert_eq!(time_registers(&mut rtc), [0x20, 0x13, 0x22, 3, 0x14, 0x11, 0x23, 0x20]);
     }
 
     #[test]
     fn a_leap_day_in_a_century_year_divisible_by_400_is_february_29() {
         let mut rtc = CmosRtc::at(951_782_400);
 
-        assert_eq!(time_registers(&mut rtc), [0, 0, 0, 3, 29, 2, 0, 20]);
+        assert_eq!(time_registers(&mut rtc), [0x00, 0x00, 0x00, 3, 0x29, 0x02, 0x00, 0x20]);
     }
 
     #[test]
@@ -133,7 +137,7 @@ mod tests {
         let mut rtc = CmosRtc::at(1_700_000_000);
 
         assert_eq!(read_register(&mut rtc, 0x0a) & 0x80, 0);
-        assert_eq!(read_register(&mut rtc, 0x0b), 0x06);
+        assert_eq!(read_register(&mut rtc, 0x0b), 0x02);
         assert_eq!(read_register(&mut rtc, 0x0d), 0x80);
     }
 
@@ -161,6 +165,6 @@ mod tests {
     fn an_instant_before_the_epoch_still_decodes() {
         let mut rtc = CmosRtc::at(-1);
 
-        assert_eq!(time_registers(&mut rtc), [59, 59, 23, 4, 31, 12, 69, 19]);
+        assert_eq!(time_registers(&mut rtc), [0x59, 0x59, 0x23, 4, 0x31, 0x12, 0x69, 0x19]);
     }
 }
