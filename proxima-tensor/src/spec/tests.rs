@@ -10684,6 +10684,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
             output_gate,
             v_head_reordered,
             false,
+            None,
             match sequence_extent {
                 Extent::Static(width) => Some(width),
                 Extent::Symbolic(_) => None,
@@ -11665,6 +11666,7 @@ fn evaluate_dense_attention_test_program(
             k_second_cache,
             k_pass_cache,
             v_cache,
+            None,
         )
         .expect("dense attention layer lowers");
 
@@ -11924,6 +11926,7 @@ fn dense_attention_only_and_with_taps_produce_the_same_program() {
         k_second_cache,
         k_pass_cache,
         v_cache,
+        None,
     )
     .expect("plain dense attention program lowers");
 
@@ -11979,6 +11982,7 @@ fn dense_attention_only_and_with_taps_produce_the_same_program() {
         k_second_cache,
         k_pass_cache,
         v_cache,
+        None,
     )
     .expect("taps dense attention program lowers");
 
@@ -16447,6 +16451,9 @@ mod gemma4_synthetic_parity {
             ssm_epsilon: 0.0,
             v_head_reordered: false,
             ssm_out_head_major: false,
+            hadamard_block: 0,
+            hadamard_gdn_v_grouped: false,
+            hadamard_latent_embedding: false,
             expert_shared_feed_forward: 0,
             prefill_width: None,
             gated_attention: false,
@@ -19170,6 +19177,9 @@ mod head_repeats {
             ssm_epsilon: 0.0,
             v_head_reordered: false,
             ssm_out_head_major: false,
+            hadamard_block: 0,
+            hadamard_gdn_v_grouped: false,
+            hadamard_latent_embedding: false,
             expert_shared_feed_forward: 0,
             prefill_width: None,
             gated_attention: false,
@@ -19708,6 +19718,10 @@ mod descriptor_config {
             .ssm_inner_size(source.ssm_inner_size)
             .ssm_epsilon(source.ssm_epsilon)
             .v_head_reordered(source.v_head_reordered)
+            .ssm_out_head_major(source.ssm_out_head_major)
+            .hadamard_block(source.hadamard_block)
+            .hadamard_gdn_v_grouped(source.hadamard_gdn_v_grouped)
+            .hadamard_latent_embedding(source.hadamard_latent_embedding)
             .expert_shared_feed_forward(source.expert_shared_feed_forward)
             .maybe_prefill_width(source.prefill_width)
             .gated_attention(source.gated_attention)
@@ -20579,6 +20593,9 @@ mod hybrid_dense_descriptor {
             ssm_epsilon: 1e-5,
             v_head_reordered: false,
             ssm_out_head_major: false,
+            hadamard_block: 0,
+            hadamard_gdn_v_grouped: false,
+            hadamard_latent_embedding: false,
             expert_shared_feed_forward: 0,
             prefill_width: None,
             gated_attention: true,
@@ -20873,6 +20890,9 @@ mod hybrid_routed_descriptor {
             ssm_epsilon: 1e-6,
             v_head_reordered: false,
             ssm_out_head_major: false,
+            hadamard_block: 0,
+            hadamard_gdn_v_grouped: false,
+            hadamard_latent_embedding: false,
             expert_shared_feed_forward: 4,
             prefill_width: None,
             gated_attention: true,

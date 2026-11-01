@@ -1095,6 +1095,7 @@ fn qwen35_partial_rotary_attention_fixture() -> (
         k_second_cache,
         k_pass_cache,
         v_cache,
+        None,
     )
     .expect("qwen35 partial-rotary dense attention fixture lowers");
 
@@ -5959,6 +5960,7 @@ mod gated_delta_net_tests {
             false,
             false,
             None,
+            None,
         )
         .expect("real-shape qwen35moe ssm mixer lowers");
 
@@ -6290,6 +6292,7 @@ mod gated_delta_net_tests {
             GdnOutputGate::Silu,
             false,
             false,
+            None,
             None,
         )
         .expect("real-shape qwen35moe ssm mixer lowers");

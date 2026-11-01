@@ -115,6 +115,7 @@ fn fixture(positions: u32) -> Fixture {
         GdnOutputGate::Silu,
         false,
         false,
+        None,
         prefill_width,
     )
     .expect("the qwen35 gdn mixer lowers");

@@ -264,6 +264,19 @@ pub struct ModelDescriptor {
     /// checkpoints that reorder the V heads without the key nest `ssm_out` differently.
     #[serde(default)]
     pub ssm_out_head_major: bool,
+    /// The block width of a Hadamard-folded checkpoint (`prism.hadamard.block_size`); `0` for an
+    /// unfolded one. Every projection except the recurrence's `ssm_alpha`/`ssm_beta` then reads
+    /// `H * (D * x)`, see [`HadamardFold`].
+    #[serde(default)]
+    pub hadamard_block: u32,
+    /// Whether a folded `ssm_out` was folded over value heads in grouped order
+    /// (`prism.hadamard.gdn_v_grouped`).
+    #[serde(default)]
+    pub hadamard_gdn_v_grouped: bool,
+    /// Whether the token-embedding table stores latent rows to rotate back after the lookup
+    /// (`prism.hadamard.inverse_weight_names` names `token_embd.weight`).
+    #[serde(default)]
+    pub hadamard_latent_embedding: bool,
     /// Width of the shared expert a [`FfnCombination::RoutedWithSharedExpert`]
     /// layer runs next to its routed experts
     /// (`<family>.expert_shared_feed_forward_length`); `0` when no layer has one.
@@ -711,6 +724,9 @@ pub fn gqa_descriptor_from_shape(
         ssm_epsilon: 0.0,
         v_head_reordered: false,
         ssm_out_head_major: false,
+        hadamard_block: 0,
+        hadamard_gdn_v_grouped: false,
+        hadamard_latent_embedding: false,
         expert_shared_feed_forward: 0,
         prefill_width: None,
         gated_attention: false,
