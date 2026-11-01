@@ -14,7 +14,7 @@ include = ["src/**", "build.rs", "Cargo.toml", "README.md", "LICENSE*"]
 default = ["std"]
 # proxima-primitives::pipe alloc tier drags in proxima-primitives::transport
 # -> parking_lot (no no_std path)
-std = ["alloc", "futures/executor", "dep:proxima-primitives", "proxima-primitives/std", "dep:proxima-process", "dep:cpio", "thiserror/std", "dep:kvm-ioctls", "dep:kvm-bindings", "dep:libc", "dep:proxima-listen", "dep:proxima-runtime", "dep:proxima-telemetry", "dep:tar", "dep:flate2", "dep:sha2", "dep:http", "dep:prime", "dep:proxima-http", "dep:serde_json"]
+std = ["alloc", "futures/executor", "dep:proxima-primitives", "proxima-primitives/std", "dep:proxima-process", "dep:cpio", "thiserror/std", "dep:kvm-ioctls", "dep:kvm-bindings", "dep:libc", "dep:proxima-listen", "dep:proxima-runtime", "dep:proxima-telemetry", "dep:tar", "dep:flate2", "dep:sha2", "dep:http", "dep:prime", "dep:proxima-http", "dep:serde_json", "proxima-net/frame-stack", "proxima-protocols/http1_codec"]
 # `dtb::builder` needs `Vec<u8>` (vm-fdt's writer); the parser half
 # (`fdt` crate) is genuinely tier-3 and would build without this, but the
 # module is one file so it shares the alloc gate.

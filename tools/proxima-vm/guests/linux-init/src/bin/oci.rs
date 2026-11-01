@@ -8,6 +8,8 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 
 const RUN_SPEC: &str = "/.proxima/run.json";
+const CMDLINE: &str = "/proc/cmdline";
+const RESIDENT_FLAG: &str = "proxima.resident";
 const POLL_INTERVAL: Duration = Duration::from_millis(2);
 const PSEUDO_FILESYSTEMS: [(&str, &str); 3] = [("devtmpfs", "/dev"), ("proc", "/proc"), ("sysfs", "/sys")];
 
@@ -80,23 +82,53 @@ fn step<Value>(what: &str, outcome: io::Result<Value>) -> io::Result<Value> {
     outcome.map_err(|error| io::Error::new(error.kind(), format!("{what}: {error}")))
 }
 
-fn serve() -> io::Result<()> {
-    mount_pseudo_filesystems();
+fn is_resident() -> bool {
+    fs::read_to_string(CMDLINE).is_ok_and(|cmdline| cmdline.split_whitespace().any(|token| token == RESIDENT_FLAG))
+}
+
+fn load_spec() -> io::Result<RunSpec> {
     let spec_bytes = step("read /.proxima/run.json", fs::read(RUN_SPEC))?;
-    let spec: RunSpec = serde_json::from_slice(&spec_bytes).map_err(io::Error::other)?;
-    let mut tty = step("open the invocation tty", linux_guest::open_invocation())?;
-    let linger = linger_from(&step("read the linger frame", linux_guest::read_frame(&mut tty))?)?;
+    serde_json::from_slice(&spec_bytes).map_err(io::Error::other)
+}
+
+fn start(spec: &RunSpec) -> io::Result<Child> {
     linux_guest::mark_entrypoint();
     step(&format!("chdir {}", spec.cwd), std::env::set_current_dir(&spec.cwd))?;
-    let mut child = step(&format!("spawn {:?}", spec.argv), spawn(&spec))?;
+    step(&format!("spawn {:?}", spec.argv), spawn(spec))
+}
+
+fn serve_invocation(spec: &RunSpec) -> io::Result<()> {
+    let mut tty = step("open the invocation tty", linux_guest::open_invocation())?;
+    let linger = linger_from(&step("read the linger frame", linux_guest::read_frame(&mut tty))?)?;
+    let mut child = start(spec)?;
     let report = supervise(&mut child, linger)?;
     linux_guest::write_frame(&mut tty, report.as_bytes())
 }
 
+fn serve_resident(spec: &RunSpec) -> io::Result<()> {
+    step("bring up the network", linux_guest::network::bring_up("oci-init"))?;
+    let mut child = start(spec)?;
+    let status = step("wait for the entrypoint", child.wait())?;
+    println!("oci-init: entrypoint ended {}", describe(status));
+    Ok(())
+}
+
+fn serve() -> io::Result<()> {
+    mount_pseudo_filesystems();
+    let spec = load_spec()?;
+    if is_resident() { serve_resident(&spec) } else { serve_invocation(&spec) }
+}
+
 fn main() {
     linux_guest::mark_init_started();
-    if let Err(error) = serve() {
+    let outcome = serve();
+    if let Err(error) = &outcome {
         eprintln!("oci-init: {error}");
+    }
+    if is_resident() {
+        loop {
+            unsafe { libc::pause() };
+        }
     }
     linux_guest::power_off()
 }

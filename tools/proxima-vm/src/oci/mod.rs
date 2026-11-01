@@ -22,6 +22,8 @@ use std::path::Path;
 use prime::os::core_shard::run_on_this_thread;
 use proxima_runtime::CoreId;
 
+use crate::kernel_modules::KernelModule;
+
 pub use error::OciError;
 pub use reference::ImageRef;
 pub use registry::PulledImage;
@@ -42,6 +44,14 @@ pub fn pull_blocking(cache_root: &Path, image: &ImageRef) -> Result<PulledImage,
         .join()
         .map_err(|_| OciError::Runtime("the pull worker thread panicked".into()))?
         .map_err(|error| OciError::Runtime(error.to_string()))?
+}
+
+/// [`initramfs_for`] plus `modules` packed for the guest to load before it runs the entrypoint.
+pub fn initramfs_with_modules(pulled: &PulledImage, init: &[u8], modules: &[KernelModule]) -> Result<Vec<u8>, proxima_core::ProximaError> {
+    let mut tree = rootfs::flatten(&pulled.layers)?;
+    initramfs::add_guest_files(&mut tree, init, &runspec::RunSpec::from_config(&pulled.run)?)?;
+    initramfs::add_modules(&mut tree, modules);
+    initramfs::to_initramfs(&tree)
 }
 
 /// The newc initramfs for a pulled image, with `init` as `/init`.

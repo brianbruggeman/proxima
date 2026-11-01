@@ -33,6 +33,8 @@ pub mod loader;
 #[cfg(feature = "std")]
 pub mod frame_pipe;
 #[cfg(feature = "std")]
+pub mod kernel_modules;
+#[cfg(feature = "std")]
 pub mod linux;
 #[cfg(feature = "std")]
 pub mod oci;
