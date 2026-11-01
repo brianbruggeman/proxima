@@ -2,6 +2,8 @@ use std::io::Write;
 
 use proxima_core::ProximaError;
 
+use crate::kernel_modules::KernelModule;
+use crate::linux::MODULES_DIR;
 use crate::oci::error::OciError;
 use crate::oci::rootfs::{Entry, Node, Rootfs};
 use crate::oci::runspec::{RUN_SPEC_PATH, RunSpec};
@@ -19,6 +21,7 @@ const CONSOLE_MINOR: u32 = 1;
 const DEVICE_MODE: u32 = 0o600;
 const INIT_MODE: u32 = 0o755;
 const RUN_SPEC_MODE: u32 = 0o444;
+const MODULE_MODE: u32 = 0o444;
 
 fn put(rootfs: &mut Rootfs, path: &str, mode: u32, node: Node) {
     rootfs.insert(path.to_string(), Entry { mode, uid: 0, gid: 0, node });
@@ -33,6 +36,16 @@ pub fn add_guest_files(rootfs: &mut Rootfs, init: &[u8], run: &RunSpec) -> Resul
     put(rootfs, ".proxima", 0o755, Node::Directory);
     put(rootfs, RUN_SPEC_PATH, RUN_SPEC_MODE, Node::File(run.to_json()?));
     Ok(())
+}
+
+/// Adds `modules` under `.proxima/modules`, each prefixed with its load position so the guest loads them in order.
+pub fn add_modules(rootfs: &mut Rootfs, modules: &[KernelModule]) {
+    put(rootfs, ".proxima", 0o755, Node::Directory);
+    put(rootfs, MODULES_DIR, 0o755, Node::Directory);
+    for (index, module) in modules.iter().enumerate() {
+        let path = format!("{MODULES_DIR}/{index:02}-{}", module.file_name);
+        put(rootfs, &path, MODULE_MODE, Node::File(module.bytes.clone()));
+    }
 }
 
 pub fn to_initramfs(rootfs: &Rootfs) -> Result<Vec<u8>, ProximaError> {

@@ -10,7 +10,6 @@ mod common;
 use std::cell::Cell;
 use std::io::Cursor;
 use std::io::Write;
-use std::path::PathBuf;
 
 use bytes::Bytes;
 use flate2::Compression;
@@ -25,34 +24,9 @@ use proxima_vm::oci::rootfs::{self, Entry, Node};
 use proxima_vm::oci::{cache, initramfs_for};
 use tar::{Builder, EntryType, Header};
 
-const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/oci/whoami-v1.10.2");
-const INDEX_DIGEST: &str = "sha256:1474027c316661cdec87df2623e13a41e7e1ce0ba99c24917631de8f300b5420";
-const MANIFEST_DIGEST: &str = "sha256:7000846753fcc36eb2a1a3a21fe897da09c71e1d3b5381f912ea6e6e1c8871b6";
-const CONFIG_DIGEST: &str = "sha256:ab0ca2603e47e42f7d45e094b6f4cecc5d5b7b0ef6ca89170ce1a771ed1a0066";
-const ZONEINFO_LAYER: &str = "sha256:1b5c60a1be3bf9cb17566bdad4cb1f36387367e56798bc307d394169f1e5d72d";
-const CERTS_LAYER: &str = "sha256:1d12c9005bc5cd6824edcfe37f412c35922508f76cb4b854beb52f85c12a929b";
+use common::{CERTS_LAYER, CONFIG_DIGEST, INDEX_DIGEST, MANIFEST_DIGEST, WHOAMI_BLOBS, ZONEINFO_LAYER, vendored};
+
 const DOCKER_LAYER: &str = "application/vnd.docker.image.rootfs.diff.tar.gzip";
-
-fn vendored(digest: &str) -> Vec<u8> {
-    let name = digest.strip_prefix("sha256:").expect("sha256 digest");
-    let raw: PathBuf = [FIXTURE, "blobs", "sha256", name].iter().collect();
-    match std::fs::read(&raw) {
-        Ok(bytes) => bytes,
-        Err(_) => {
-            let hex_path = raw.with_extension("hex");
-            let text = std::fs::read_to_string(&hex_path).unwrap_or_else(|error| panic!("vendored blob {} must exist raw or as .hex: {error}", raw.display()));
-            decode_hex(&text)
-        }
-    }
-}
-
-fn decode_hex(text: &str) -> Vec<u8> {
-    text.trim()
-        .as_bytes()
-        .chunks(2)
-        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).expect("ascii hex"), 16).expect("hex digit pair"))
-        .collect()
-}
 
 fn vendored_layer(digest: &str) -> Layer {
     Layer { digest: Digest::parse(digest).expect("digest"), media_type: DOCKER_LAYER.into(), bytes: vendored(digest) }
@@ -67,7 +41,7 @@ fn file_data(tree: &rootfs::Rootfs, path: &str) -> Vec<u8> {
 
 #[test]
 fn every_vendored_blob_verifies_against_the_digest_it_is_named_by() {
-    for digest in [INDEX_DIGEST, MANIFEST_DIGEST, CONFIG_DIGEST, ZONEINFO_LAYER, CERTS_LAYER] {
+    for digest in WHOAMI_BLOBS {
         Digest::parse(digest).expect("digest").verify("vendored blob", &vendored(digest)).expect("fixture bytes match their name");
     }
 }
@@ -183,7 +157,7 @@ fn an_entrypoint_that_is_not_in_the_rootfs_is_reported_by_init_on_the_console() 
 fn a_tampered_cached_layer_is_rejected_before_any_boot() {
     let cache_root = tempfile::tempdir().expect("tempdir");
     let hex = |digest: &str| digest.strip_prefix("sha256:").expect("sha256").to_string();
-    for digest in [INDEX_DIGEST, MANIFEST_DIGEST, CONFIG_DIGEST, ZONEINFO_LAYER, CERTS_LAYER] {
+    for digest in WHOAMI_BLOBS {
         cache::write(cache_root.path(), &Digest::parse(digest).expect("digest"), &vendored(digest)).expect("seed cache");
     }
     let tampered = cache_root.path().join("blobs").join("sha256").join(hex(ZONEINFO_LAYER));

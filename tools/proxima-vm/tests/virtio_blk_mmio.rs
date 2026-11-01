@@ -125,7 +125,7 @@ async fn guest_virtio_blk_requests_round_trip_through_a_real_vm_exit() {
         "console window must stay green: {stderr}"
     );
     assert!(
-        stderr.contains("guest drained 42 net byte(s):"),
+        stderr.contains(&format!("guest drained {} net byte(s):", 42 + usize::from(KVM_LANE) * 4)),
         "net window must stay green: {stderr}"
     );
 

@@ -18,6 +18,7 @@ use proxima_core::ProximaError;
 use crate::kvm::linux_lane::{LinuxOutcome, LinuxReport, LinuxRun, Load, NetWiring, run_linux};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use crate::kvm::trap::End;
+use crate::kernel_modules::KernelModule;
 use crate::x86_boot::{BOOT_PARAMS_SIZE, BootPlan, GDT_ADDRESS, PAGE_TABLES_ADDRESS, SetupHeader, fill_boot_params};
 
 const FRAME_PREFIX: usize = 8;
@@ -25,6 +26,8 @@ const CONSOLE_TAIL: usize = 1024;
 const DEVICE_MODE: u32 = 0o020_600;
 const INIT_MODE: u32 = 0o100_755;
 const DIRECTORY_MODE: u32 = 0o040_755;
+const FILE_MODE: u32 = 0o100_644;
+pub const MODULES_DIR: &str = ".proxima/modules";
 const TTY_MAJOR: u32 = 4;
 const COM2_MINOR: u32 = 65;
 const CONSOLE_MAJOR: u32 = 5;
@@ -119,6 +122,13 @@ fn write_entry(
 /// `/dev/console` (the kernel opens it for init's stdio) and `/dev/ttyS1`
 /// (COM2, the invocation channel).
 pub fn initramfs_from_init(init: &[u8]) -> Result<Vec<u8>, ProximaError> {
+    initramfs_with_modules(init, &[])
+}
+
+/// [`initramfs_from_init`] plus `modules` under [`MODULES_DIR`], each file
+/// prefixed with its load position (`00-failover.ko.zst`) so the guest loads
+/// them in the order given.
+pub fn initramfs_with_modules(init: &[u8], modules: &[KernelModule]) -> Result<Vec<u8>, ProximaError> {
     let mut archive = Vec::with_capacity(init.len() + 2048);
     archive = write_entry(archive, cpio::newc::Builder::new("dev").ino(1).mode(DIRECTORY_MODE).nlink(2), &[])?;
     archive = write_entry(
@@ -132,7 +142,23 @@ pub fn initramfs_from_init(init: &[u8]) -> Result<Vec<u8>, ProximaError> {
         &[],
     )?;
     archive = write_entry(archive, cpio::newc::Builder::new("init").ino(4).mode(INIT_MODE), init)?;
+    archive = write_modules(archive, modules)?;
     Ok(cpio::newc::trailer(archive)?)
+}
+
+fn write_modules(mut archive: Vec<u8>, modules: &[KernelModule]) -> Result<Vec<u8>, ProximaError> {
+    if modules.is_empty() {
+        return Ok(archive);
+    }
+    for (inode, directory) in (5_u32..).zip([".proxima", MODULES_DIR]) {
+        archive = write_entry(archive, cpio::newc::Builder::new(directory).ino(inode).mode(DIRECTORY_MODE).nlink(2), &[])?;
+    }
+    for (index, module) in modules.iter().enumerate() {
+        let path = format!("{MODULES_DIR}/{index:02}-{}", module.file_name);
+        let inode = u32::try_from(index + 7).map_err(|_| ProximaError::Config("too many kernel modules".into()))?;
+        archive = write_entry(archive, cpio::newc::Builder::new(&path).ino(inode).mode(FILE_MODE), &module.bytes)?;
+    }
+    Ok(archive)
 }
 
 /// The invocation frame the guest reads from COM2: `u64` LE length, then bytes.

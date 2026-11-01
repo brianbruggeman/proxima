@@ -53,6 +53,18 @@ const EXPECTED_ARP_FRAME: [u8; 42] = [
     10, 0, 0, 2, // tpa = TARGET_IP
 ];
 
+/// The KVM lane's emitted channel carries each frame behind a little-endian
+/// u32 length (`src/kvm/devices.rs`'s `length_prefixed`); the hypervisor lane
+/// emits the bare frame bytes.
+fn expected_net_stream() -> Vec<u8> {
+    let mut stream = Vec::new();
+    if KVM_LANE {
+        stream.extend_from_slice(&(EXPECTED_ARP_FRAME.len() as u32).to_le_bytes());
+    }
+    stream.extend_from_slice(&EXPECTED_ARP_FRAME);
+    stream
+}
+
 fn build_guest_elf(target_dir: &Path) -> PathBuf {
     let status = Command::new("cargo")
         .args([
@@ -119,10 +131,11 @@ async fn guest_virtio_net_frame_arrives_through_a_real_vm_exit() {
     // net window — the net_hdr is stripped by the transport before
     // delivery, so the drained bytes are exactly the 42-byte Ethernet
     // frame, byte-exact.
+    let expected_stream = expected_net_stream();
     let expected_line = format!(
         "guest drained {} net byte(s): {:?}",
-        EXPECTED_ARP_FRAME.len(),
-        EXPECTED_ARP_FRAME
+        expected_stream.len(),
+        expected_stream
     );
     assert!(
         stderr.contains(&expected_line),

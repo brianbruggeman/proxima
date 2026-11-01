@@ -60,6 +60,16 @@ impl Channel {
     }
 }
 
+/// Each frame behind its own little-endian u32 length, so a notify that drains
+/// several chains keeps their boundaries in the byte stream.
+fn length_prefixed<'frame>(frames: impl Iterator<Item = &'frame [u8]>) -> Vec<u8> {
+    frames.fold(Vec::new(), |mut stream, frame| {
+        stream.extend_from_slice(&(frame.len() as u32).to_le_bytes());
+        stream.extend_from_slice(frame);
+        stream
+    })
+}
+
 pub type Verdict = core::future::Ready<Result<Reply, RunError>>;
 
 pub fn answered(reply: Reply) -> Verdict {
@@ -202,14 +212,13 @@ pub enum Transport {
 }
 
 impl Transport {
-    fn apply(&mut self, access: MmioAccess) -> Option<(u32, u16)> {
+    fn apply(&mut self, access: MmioAccess) -> Result<(u32, u16), MmioError> {
         let effect = match self {
             Self::Console(transport) => transport.apply(access),
             Self::Net(transport) => transport.apply(access),
             Self::Blk(transport) => transport.apply(access),
-        }
-        .ok()?;
-        Some(match effect {
+        }?;
+        Ok(match effect {
             MmioEffect::ReadValue(word) => (word, NO_QUEUE_NOTIFIED),
             MmioEffect::QueueNotify { queue } => (0, queue),
             _ => (0, NO_QUEUE_NOTIFIED),
@@ -230,26 +239,29 @@ impl Transport {
         }
     }
 
-    fn drain(&mut self, queue: u16, ram: &mut [u8]) -> Option<Vec<u8>> {
+    fn drain(&mut self, queue: u16, ram: &mut [u8]) -> Result<Vec<u8>, String> {
         match self {
-            Self::Console(transport) => transport.drain_tx(queue, ram).ok(),
+            Self::Console(transport) => transport.drain_tx(queue, ram).map_err(|error| error.to_string()),
             Self::Net(transport) if queue == RX_QUEUE => {
-                transport.fill_rx(ram).ok()?;
-                Some(Vec::new())
+                let delivered = transport.fill_rx(ram).map_err(|error| error.to_string())?;
+                proxima_telemetry::debug!(queue, delivered, "net rx queue filled");
+                Ok(Vec::new())
             }
             Self::Net(transport) => {
-                let drained = transport.drain_tx(queue, ram).ok()?;
-                Some(drained.into_iter().flat_map(|frame| frame.frame).collect())
+                let drained = transport.drain_tx(queue, ram).map_err(|error| error.to_string())?;
+                let lengths: Vec<usize> = drained.iter().map(|frame| frame.frame.len()).collect();
+                proxima_telemetry::debug!(queue, chains = drained.len(), lengths = ?lengths, "net tx queue drained");
+                Ok(length_prefixed(drained.iter().map(|frame| frame.frame.as_slice())))
             }
             Self::Blk(transport) => {
-                let serviced = transport.service_queue(queue, ram).ok()?;
+                let serviced = transport.service_queue(queue, ram).map_err(|error| error.to_string())?;
                 let mut encoded = Vec::new();
                 for request in serviced {
                     encoded.extend_from_slice(&request.sector.to_le_bytes());
                     encoded.push(request.status);
                     encoded.extend_from_slice(&request.data);
                 }
-                Some(encoded)
+                Ok(encoded)
             }
         }
     }
@@ -311,7 +323,9 @@ impl<'run> VirtioWindow<'run> {
             return Err(KvmError::guest("rx service against a window with no transport").into());
         };
         self.drain(transport, RX_QUEUE)?;
-        Ok(self.edge(transport))
+        let irq = self.edge(transport);
+        proxima_telemetry::debug!(window = self.name, pending = transport.interrupt_pending(), edge = ?irq, "rx serviced on doorbell");
+        Ok(irq)
     }
 
     fn registers(
@@ -337,14 +351,15 @@ impl<'run> VirtioWindow<'run> {
                 is_write,
                 value: (write_value >> (lane * 32)) as u32,
             };
-            let Some((lane_value, lane_queue)) = transport.apply(access) else {
-                return Err(KvmError::guest(format!(
-                    "mmio register access rejected: window={} offset=0x{offset:x} is_write={}",
+            let (lane_value, lane_queue) = transport.apply(access).map_err(|error| {
+                KvmError::guest(format!(
+                    "mmio register access rejected: window={} offset=0x{:x} is_write={} value=0x{:x} {error:?}",
                     self.name,
-                    u8::from(is_write)
+                    access.offset,
+                    u8::from(is_write),
+                    access.value
                 ))
-                .into());
-            };
+            })?;
             read_value |= u64::from(lane_value) << (lane * 32);
             if lane_queue != NO_QUEUE_NOTIFIED {
                 notified = lane_queue;
@@ -369,21 +384,32 @@ impl<'run> VirtioWindow<'run> {
         let offset = address - self.base;
         let (read_value, notified) = self.registers(transport, offset, is_write, write_value, length)?;
         if notified != NO_QUEUE_NOTIFIED {
+            proxima_telemetry::debug!(window = self.name, queue = notified, "queue notify");
             self.drain(transport, notified)?;
         }
         let value = (!is_write).then(|| Bytes::copy_from_slice(&read_value.to_le_bytes()[..length]));
-        Ok(Reply::Io { value, irq: self.edge(transport) })
+        let irq = self.edge(transport);
+        if matches!(offset, 0x50 | 0x60 | 0x64) || irq.is_some() {
+            proxima_telemetry::debug!(window = self.name, offset, is_write, write_value, read_value, pending = transport.interrupt_pending(), edge = ?irq, "mmio interrupt-path access");
+        }
+        Ok(Reply::Io { value, irq })
     }
 
     fn drain(&self, transport: &mut Transport, queue: u16) -> Result<(), RunError> {
-        let drained = self.ram.with_mut(|ram| transport.drain(queue, ram));
-        let stored = drained.is_some_and(|bytes| {
-            let mut channel = self.emitted.borrow_mut();
-            channel.is_disabled() || channel.push(&bytes)
-        });
-        match stored {
+        let bytes = self
+            .ram
+            .with_mut(|ram| transport.drain(queue, ram))
+            .map_err(|error| KvmError::guest(format!("mmio queue drain failed: window={} queue={queue} {error}", self.name)))?;
+        let mut channel = self.emitted.borrow_mut();
+        match channel.is_disabled() || channel.push(&bytes) {
             true => Ok(()),
-            false => Err(KvmError::guest("mmio queue drain failed").into()),
+            false => Err(KvmError::guest(format!(
+                "mmio emitted channel full: window={} queue={queue} bytes={} remaining={}",
+                self.name,
+                bytes.len(),
+                channel.remaining()
+            ))
+            .into()),
         }
     }
 }

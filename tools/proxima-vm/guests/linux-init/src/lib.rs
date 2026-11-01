@@ -1,3 +1,5 @@
+pub mod network;
+
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::fd::AsRawFd;

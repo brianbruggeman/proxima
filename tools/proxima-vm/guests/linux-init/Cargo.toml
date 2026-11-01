@@ -30,6 +30,11 @@ path = "src/bin/uppercase.rs"
 name = "idle-init"
 path = "src/bin/idle.rs"
 
+# loads virtio_mmio and virtio_net from /.proxima/modules, brings eth0 up at 10.0.2.15/24 and sends one UDP datagram
+[[bin]]
+name = "net-init"
+path = "src/bin/net.rs"
+
 # declares more output bytes than it sends: the frame-truncation fixture
 [[bin]]
 name = "truncated-init"

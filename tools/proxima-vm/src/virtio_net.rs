@@ -35,8 +35,10 @@ use crate::frame_pipe::{FrameError, FrameSink, FrameSource, frame_channel};
 pub const RX_QUEUE: u16 = RECEIVEQ1;
 /// transmitq1 — guest-to-host delivery.
 pub const TX_QUEUE: u16 = TRANSMITQ1;
-/// `QueueNumMax` this device advertises for both queues.
-pub const QUEUE_NUM_MAX: u16 = 16;
+/// `QueueNumMax` this device advertises for both queues. The Linux driver stops a
+/// transmit queue when fewer than 2 + MAX_SKB_FRAGS (19) descriptors are free, so a
+/// ring smaller than that never wakes again after its first frame.
+pub const QUEUE_NUM_MAX: u16 = 256;
 
 /// Why a queue walk could not complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

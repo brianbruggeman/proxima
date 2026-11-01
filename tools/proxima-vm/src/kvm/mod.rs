@@ -22,6 +22,7 @@ pub mod drive;
 pub mod elf_lane;
 pub mod error;
 pub mod exit_source;
+pub mod host_wire;
 pub mod layered;
 pub mod linux_lane;
 pub mod memory;
