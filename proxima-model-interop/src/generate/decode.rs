@@ -4488,6 +4488,7 @@ only the single-row decode kernel reads the half-width device cache",
                     }
                     let carry_kv_this_step = kv_carry_eligible
                         && runtime.carries_state_on_device()
+                        && runtime.pads_cached_kv(new_count)
                         && new_count == 1
                         && !speculative_step
                         && self.ffn_routing != FfnRouting::Routed;
