@@ -13,7 +13,7 @@ use proxima_gguf::value::{MetadataArray, MetadataValue};
 use crate::error::InteropError;
 
 const PREFIX: &str = "prism.hadamard";
-const ROTATION_LEAF: &str = "prism.hadamard.rotation";
+const ROTATION_LEAF_PREFIX: &str = "prism.hadamard.rotation.";
 const SIGNS_LEAF_PREFIX: &str = "prism.hadamard.signs.";
 const LATENT_EMBEDDING: &str = "token_embd.weight";
 
@@ -117,8 +117,8 @@ impl PrismHadamard {
 
     /// The data of a `prism.hadamard.*` program leaf, `None` for any other leaf name.
     pub(crate) fn leaf(&self, name: &str) -> Option<Vec<f32>> {
-        if name == ROTATION_LEAF {
-            return Some(self.rotation());
+        if let Some(size) = name.strip_prefix(ROTATION_LEAF_PREFIX) {
+            return size.parse().ok().map(sylvester);
         }
         let width: usize = name.strip_prefix(SIGNS_LEAF_PREFIX)?.parse().ok()?;
         self.signs
@@ -127,20 +127,22 @@ impl PrismHadamard {
             .map(|(_, signs)| signs.clone())
     }
 
-    fn rotation(&self) -> Vec<f32> {
-        let scale = 1.0 / (self.block as f32).sqrt();
-        (0..self.block)
-            .flat_map(|row| {
-                (0..self.block).map(move |column| {
-                    if (row & column).count_ones().is_multiple_of(2) {
-                        scale
-                    } else {
-                        -scale
-                    }
-                })
+}
+
+/// The normalized Sylvester-Walsh matrix of `size`: entry `(-1)^popcount(row & column) / sqrt(size)`.
+fn sylvester(size: usize) -> Vec<f32> {
+    let scale = 1.0 / (size as f32).sqrt();
+    (0..size)
+        .flat_map(|row| {
+            (0..size).map(move |column| {
+                if (row & column).count_ones().is_multiple_of(2) {
+                    scale
+                } else {
+                    -scale
+                }
             })
-            .collect()
-    }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -163,8 +165,8 @@ mod tests {
 
     #[test]
     fn rotation_is_a_symmetric_orthonormal_sylvester_matrix() {
-        let hadamard = fixture(8);
-        let rotation = hadamard.rotation();
+
+        let rotation = sylvester(8);
 
         for row in 0..8 {
             for column in 0..8 {
@@ -183,7 +185,7 @@ mod tests {
         let hadamard = fixture(8);
 
         assert_eq!(
-            hadamard.leaf(ROTATION_LEAF).map(|data| data.len()),
+            hadamard.leaf("prism.hadamard.rotation.8").map(|data| data.len()),
             Some(64)
         );
         assert_eq!(
