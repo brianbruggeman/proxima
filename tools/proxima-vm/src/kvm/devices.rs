@@ -5,12 +5,12 @@ use bytes::Bytes;
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::Pipe;
 use proxima_protocols::process::{ChildRequest, ChildResponse};
-use proxima_protocols::virtio::{MmioAccess, MmioEffect};
+use proxima_protocols::virtio::{CONFIG_SPACE_BASE, MmioAccess, MmioEffect, MmioError};
 
 use super::error::KvmError;
 use super::memory::GuestRam;
 use super::pipes::ExitLedger;
-use super::trap::{End, Reply, RunError, Trap, VcpuExit, Writeback};
+use super::trap::{End, IrqEdge, Reply, RunError, Trap, VcpuExit, Writeback};
 use crate::dispatch::dispatch_captured;
 use crate::virtio_blk::BlkTransport;
 use crate::virtio_console::ConsoleTransport;
@@ -216,6 +216,20 @@ impl Transport {
         })
     }
 
+    fn interrupt_pending(&self) -> bool {
+        match self {
+            Self::Net(transport) => transport.interrupt_pending(),
+            Self::Console(_) | Self::Blk(_) => false,
+        }
+    }
+
+    fn config_read(&self, offset: u64, length: usize) -> Option<Result<u64, MmioError>> {
+        match self {
+            Self::Net(transport) => Some(transport.config_read(offset, length)),
+            Self::Console(_) | Self::Blk(_) => None,
+        }
+    }
+
     fn drain(&mut self, queue: u16, ram: &mut [u8]) -> Option<Vec<u8>> {
         match self {
             Self::Console(transport) => transport.drain_tx(queue, ram).ok(),
@@ -254,6 +268,8 @@ pub struct VirtioWindow<'run> {
     emitted: &'run RefCell<Channel>,
     ram: GuestRam,
     ledger: &'run ExitLedger,
+    irq: Option<u32>,
+    line: Cell<bool>,
 }
 
 impl<'run> VirtioWindow<'run> {
@@ -267,27 +283,52 @@ impl<'run> VirtioWindow<'run> {
         ram: GuestRam,
         ledger: &'run ExitLedger,
     ) -> Self {
-        Self { name, base, size, transport, emitted, ram, ledger }
+        Self { name, base, size, transport, emitted, ram, ledger, irq: None, line: Cell::new(false) }
+    }
+
+    /// The same window raising `line` while its device has an interrupt
+    /// pending: every reply that changes the pending state carries the level change.
+    #[must_use]
+    pub fn with_irq(self, line: u32) -> Self {
+        Self { irq: Some(line), ..self }
     }
 
     fn owns(&self, address: u64) -> bool {
         address >= self.base && address - self.base < self.size
     }
 
-    fn access(&self, address: u64, is_write: bool, written: &[u8], read_length: usize) -> Result<Reply, RunError> {
+    fn edge(&self, transport: &Transport) -> Option<IrqEdge> {
+        let line = self.irq?;
+        let level = transport.interrupt_pending();
+        (level != self.line.replace(level)).then_some(IrqEdge { line, level })
+    }
+
+    /// Delivers whatever the host has queued for the guest into the receive
+    /// ring, returning the interrupt-line change that results.
+    pub fn service_rx(&self) -> Result<Option<IrqEdge>, RunError> {
         let mut guard = self.transport.borrow_mut();
         let Some(transport) = guard.as_mut() else {
-            return Err(KvmError::guest("mmio exit against a window with no transport").into());
+            return Err(KvmError::guest("rx service against a window with no transport").into());
         };
-        let length = if is_write { written.len() } else { read_length };
-        if length > 8 {
-            return Err(KvmError::guest("mmio access wider than 8 bytes").into());
+        self.drain(transport, RX_QUEUE)?;
+        Ok(self.edge(transport))
+    }
+
+    fn registers(
+        &self,
+        transport: &mut Transport,
+        offset: u64,
+        is_write: bool,
+        write_value: u64,
+        length: usize,
+    ) -> Result<(u64, u16), RunError> {
+        let narrow_config = !is_write && length < 4 && offset >= CONFIG_SPACE_BASE;
+        if let Some(config) = narrow_config.then(|| transport.config_read(offset, length)).flatten() {
+            let value = config.map_err(|error| {
+                KvmError::guest(format!("mmio config read rejected: window={} offset=0x{offset:x} {error}", self.name))
+            })?;
+            return Ok((value, NO_QUEUE_NOTIFIED));
         }
-        self.ledger.count_virtio_exit();
-        let mut write_value = [0_u8; 8];
-        write_value[..written.len().min(8)].copy_from_slice(&written[..written.len().min(8)]);
-        let write_value = u64::from_le_bytes(write_value);
-        let offset = address - self.base;
         let lanes = if length == 8 { 2 } else { 1 };
         let (mut read_value, mut notified) = (0_u64, NO_QUEUE_NOTIFIED);
         for lane in 0..lanes {
@@ -309,13 +350,29 @@ impl<'run> VirtioWindow<'run> {
                 notified = lane_queue;
             }
         }
+        Ok((read_value, notified))
+    }
+
+    fn access(&self, address: u64, is_write: bool, written: &[u8], read_length: usize) -> Result<Reply, RunError> {
+        let mut guard = self.transport.borrow_mut();
+        let Some(transport) = guard.as_mut() else {
+            return Err(KvmError::guest("mmio exit against a window with no transport").into());
+        };
+        let length = if is_write { written.len() } else { read_length };
+        if length > 8 {
+            return Err(KvmError::guest("mmio access wider than 8 bytes").into());
+        }
+        self.ledger.count_virtio_exit();
+        let mut write_value = [0_u8; 8];
+        write_value[..written.len().min(8)].copy_from_slice(&written[..written.len().min(8)]);
+        let write_value = u64::from_le_bytes(write_value);
+        let offset = address - self.base;
+        let (read_value, notified) = self.registers(transport, offset, is_write, write_value, length)?;
         if notified != NO_QUEUE_NOTIFIED {
             self.drain(transport, notified)?;
         }
-        Ok(match is_write {
-            true => Reply::ACK,
-            false => Reply::value(Bytes::copy_from_slice(&read_value.to_le_bytes()[..length])),
-        })
+        let value = (!is_write).then(|| Bytes::copy_from_slice(&read_value.to_le_bytes()[..length]));
+        Ok(Reply::Io { value, irq: self.edge(transport) })
     }
 
     fn drain(&self, transport: &mut Transport, queue: u16) -> Result<(), RunError> {
@@ -350,6 +407,16 @@ impl Pipe for VirtioWindow<'_> {
     }
 }
 
+impl Pipe for &VirtioWindow<'_> {
+    type In = Trap;
+    type Out = Reply;
+    type Err = RunError;
+
+    fn call(&self, trap: Trap) -> impl Future<Output = Result<Reply, RunError>> {
+        VirtioWindow::call(self, trap)
+    }
+}
+
 /// Tail of the elf lane's bus: an MMIO exit no window owns is the guest's bug.
 pub struct RejectUnmapped;
 
@@ -365,5 +432,165 @@ impl Pipe for RejectUnmapped {
             }
             other => declined(other),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use futures::FutureExt;
+    use proxima_protocols::virtio::mmio::{
+        REG_DRIVER_FEATURES, REG_DRIVER_FEATURES_SEL, REG_INTERRUPT_ACK, REG_INTERRUPT_STATUS, REG_QUEUE_DESC_HIGH,
+        REG_QUEUE_DESC_LOW, REG_QUEUE_DEVICE_HIGH, REG_QUEUE_DEVICE_LOW, REG_QUEUE_DRIVER_HIGH, REG_QUEUE_DRIVER_LOW,
+        REG_QUEUE_NUM, REG_QUEUE_READY, REG_QUEUE_SEL, REG_STATUS,
+    };
+    use proxima_protocols::virtio::status::{STATUS_ACKNOWLEDGE, STATUS_DRIVER, STATUS_DRIVER_OK, STATUS_FEATURES_OK};
+    use proxima_protocols::virtio::DriverQueue;
+
+    use super::*;
+    use crate::frame_pipe::{FrameSink, frame_channel};
+    use crate::kvm::memory::HostMapping;
+    use crate::virtio_net::NetTransport;
+
+    const BASE: u64 = 0xd000_0000;
+    const LINE: u32 = 5;
+    const MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
+    const RX_TABLE: usize = 0x4000;
+    const RX_AVAIL: usize = 0x5000;
+    const RX_USED: u64 = 0x6000;
+    const BUFFER: u64 = 0x9000;
+    const MEMORY: usize = 0x10000;
+
+    struct Rig {
+        mapping: HostMapping,
+        transport: RefCell<Option<Transport>>,
+        emitted: RefCell<Channel>,
+        ledger: ExitLedger,
+        to_guest: FrameSink,
+    }
+
+    fn rig() -> Rig {
+        let (to_guest, ingress) = frame_channel(8);
+        let (egress, _from_guest) = frame_channel(8);
+        let transport = Transport::Net(NetTransport::with_pipes(MAC, ingress, egress));
+        Rig {
+            mapping: HostMapping::anonymous(MEMORY, false).expect("anonymous guest memory maps"),
+            transport: RefCell::new(Some(transport)),
+            emitted: RefCell::new(Channel::with_capacity(0)),
+            ledger: ExitLedger::begin(),
+            to_guest,
+        }
+    }
+
+    fn window(rig: &Rig) -> VirtioWindow<'_> {
+        VirtioWindow::new("net", BASE, 0x1000, &rig.transport, &rig.emitted, GuestRam::of(&rig.mapping), &rig.ledger)
+    }
+
+    fn write(window: &VirtioWindow<'_>, offset: u64, value: u32) -> Reply {
+        let trap = Trap::Exit(VcpuExit::MmioWrite { address: BASE + offset, data: Bytes::copy_from_slice(&value.to_le_bytes()) });
+        window.call(trap).now_or_never().expect("ready").expect("window answers")
+    }
+
+    fn read(window: &VirtioWindow<'_>, offset: u64, length: u8) -> Reply {
+        let trap = Trap::Exit(VcpuExit::MmioRead { address: BASE + offset, length });
+        window.call(trap).now_or_never().expect("ready").expect("window answers")
+    }
+
+    fn bring_up_rx(window: &VirtioWindow<'_>, rig: &Rig) {
+        write(window, REG_STATUS, u32::from(STATUS_ACKNOWLEDGE));
+        write(window, REG_STATUS, u32::from(STATUS_ACKNOWLEDGE | STATUS_DRIVER));
+        for (select, word) in [(0, 0), (1, 1)] {
+            write(window, REG_DRIVER_FEATURES_SEL, select);
+            write(window, REG_DRIVER_FEATURES, word);
+        }
+        write(window, REG_STATUS, u32::from(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK));
+        for (offset, value) in [
+            (REG_QUEUE_SEL, 0),
+            (REG_QUEUE_NUM, 4),
+            (REG_QUEUE_DESC_LOW, RX_TABLE as u32),
+            (REG_QUEUE_DESC_HIGH, 0),
+            (REG_QUEUE_DRIVER_LOW, RX_AVAIL as u32),
+            (REG_QUEUE_DRIVER_HIGH, 0),
+            (REG_QUEUE_DEVICE_LOW, RX_USED as u32),
+            (REG_QUEUE_DEVICE_HIGH, 0),
+            (REG_QUEUE_READY, 1),
+        ] {
+            write(window, offset, value);
+        }
+        let all = STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK | STATUS_DRIVER_OK;
+        write(window, REG_STATUS, u32::from(all));
+        GuestRam::of(&rig.mapping).with_mut(|memory| {
+            let mut queue = DriverQueue::<4>::new(&mut memory[RX_TABLE..]).expect("queue lays out");
+            let (before, after) = memory.split_at_mut(RX_AVAIL);
+            queue.post(&mut before[RX_TABLE..], after, &[], &[(BUFFER, 2048)]).expect("buffer posts");
+        });
+    }
+
+    #[test]
+    fn mac_read_bytewise_through_a_one_byte_mmio_read_returns_each_mac_byte() {
+        let rig = rig();
+        let window = window(&rig);
+
+        let bytes: Vec<u8> = (0..6)
+            .map(|index| match read(&window, 0x100 + index, 1) {
+                Reply::Io { value: Some(value), .. } => value[0],
+                other => panic!("expected a value reply, got {other:?}"),
+            })
+            .collect();
+
+        assert_eq!(bytes, MAC);
+    }
+
+    #[test]
+    fn status_reads_as_sixteen_bits_at_offset_0x106() {
+        let rig = rig();
+        let window = window(&rig);
+
+        let reply = read(&window, 0x106, 2);
+
+        assert_eq!(reply, Reply::value(Bytes::from_static(&[1, 0])));
+    }
+
+    #[test]
+    fn a_rejected_narrow_config_read_is_the_runs_error() {
+        let rig = rig();
+        let window = window(&rig);
+        let trap = Trap::Exit(VcpuExit::MmioRead { address: BASE + 0x10b, length: 2 });
+
+        let outcome = window.call(trap).now_or_never().expect("ready");
+
+        assert!(matches!(outcome, Err(RunError::Failed(_))));
+    }
+
+    #[test]
+    fn irq_edge_rides_the_rx_delivery_then_the_ack_lowers_it_and_nothing_repeats() {
+        let rig = rig();
+        let window = window(&rig).with_irq(LINE);
+        bring_up_rx(&window, &rig);
+        rig.to_guest.call(vec![0xab; 60]).now_or_never().expect("ready").expect("frame queues");
+
+        let raised = window.service_rx().expect("rx services");
+        let repeated = window.service_rx().expect("rx services again");
+        let status = read(&window, REG_INTERRUPT_STATUS, 4);
+        let acked = write(&window, REG_INTERRUPT_ACK, 1);
+        let after = read(&window, REG_INTERRUPT_STATUS, 4);
+
+        assert_eq!(raised, Some(IrqEdge { line: LINE, level: true }));
+        assert_eq!(repeated, None, "the level has not changed");
+        assert_eq!(status, Reply::Io { value: Some(Bytes::from_static(&[1, 0, 0, 0])), irq: None });
+        assert_eq!(acked, Reply::Io { value: None, irq: Some(IrqEdge { line: LINE, level: false }) });
+        assert_eq!(after, Reply::Io { value: Some(Bytes::from_static(&[0, 0, 0, 0])), irq: None });
+    }
+
+    #[test]
+    fn a_window_without_an_irq_line_never_reports_an_edge() {
+        let rig = rig();
+        let window = window(&rig);
+        bring_up_rx(&window, &rig);
+        rig.to_guest.call(vec![0xab; 60]).now_or_never().expect("ready").expect("frame queues");
+
+        let edge = window.service_rx().expect("rx services");
+
+        assert_eq!(edge, None);
     }
 }

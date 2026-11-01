@@ -11,10 +11,11 @@
 use std::io::Write;
 use std::time::Duration;
 
+use bytes::Bytes;
 use proxima_core::ProximaError;
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-use crate::kvm::linux_lane::{LinuxReport, LinuxRun, Load, run_linux};
+use crate::kvm::linux_lane::{LinuxOutcome, LinuxReport, LinuxRun, Load, NetWiring, run_linux};
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use crate::kvm::trap::End;
 use crate::x86_boot::{BOOT_PARAMS_SIZE, BootPlan, GDT_ADDRESS, PAGE_TABLES_ADDRESS, SetupHeader, fill_boot_params};
@@ -48,6 +49,16 @@ impl Default for LinuxGuestLimits {
             watchdog_millis: 10_000,
         }
     }
+}
+
+/// Everything a resident boot needs, owned because it crosses to the vCPU
+/// thread. `limits.watchdog_millis` is ignored: a resident run has no deadline.
+#[derive(Clone, Debug)]
+pub struct LinuxBootInputs {
+    pub kernel: Bytes,
+    pub initramfs: Bytes,
+    pub cmdline: String,
+    pub limits: LinuxGuestLimits,
 }
 
 /// How the guest stopped: it wrote the i8042 reset byte (`reboot=k`), or KVM
@@ -204,7 +215,7 @@ fn prepare<'bytes>(
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-fn execute(prepared: &Prepared<'_>, limits: &LinuxGuestLimits) -> Result<LinuxGuestRun, ProximaError> {
+fn launch(prepared: &Prepared<'_>, limits: &LinuxGuestLimits, net: Option<NetWiring<'_>>) -> LinuxOutcome {
     let plan = &prepared.plan;
     let loads = [
         Load { guest_address: plan.kernel_address, data: &prepared.kernel[plan.kernel_offset..] },
@@ -215,7 +226,7 @@ fn execute(prepared: &Prepared<'_>, limits: &LinuxGuestLimits) -> Result<LinuxGu
     let wall_clock_seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(0));
-    let outcome = run_linux(&LinuxRun {
+    run_linux(&LinuxRun {
         ram_bytes: plan.ram_bytes,
         entry: plan.entry,
         boot_params_address: plan.boot_params_address,
@@ -227,7 +238,13 @@ fn execute(prepared: &Prepared<'_>, limits: &LinuxGuestLimits) -> Result<LinuxGu
         output_capacity: limits.output_capacity,
         watchdog_millis: limits.watchdog_millis,
         wall_clock_seconds,
-    });
+        net,
+    })
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn execute(prepared: &Prepared<'_>, limits: &LinuxGuestLimits) -> Result<LinuxGuestRun, ProximaError> {
+    let outcome = launch(prepared, limits, None);
     let report = outcome.report;
     if let Some(message) = outcome.failure {
         return Err(ProximaError::Upstream(format!(
@@ -236,6 +253,16 @@ fn execute(prepared: &Prepared<'_>, limits: &LinuxGuestLimits) -> Result<LinuxGu
         )));
     }
     collect(report, limits)
+}
+
+/// Boots the guest described by `inputs` with the net device wired in and runs it
+/// until `net.stop` ends it or the guest ends itself.
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+pub(crate) fn boot_resident(inputs: &LinuxBootInputs, net: NetWiring<'_>) -> LinuxOutcome {
+    match prepare(&inputs.kernel, &inputs.initramfs, &inputs.cmdline, &[], &inputs.limits) {
+        Ok(prepared) => launch(&prepared, &inputs.limits, Some(net)),
+        Err(error) => LinuxOutcome::failed(error.to_string()),
+    }
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -254,7 +281,7 @@ fn collect(
                 console_tail(&console)
             )));
         }
-        Some(End::Halted) | None => {
+        Some(End::Halted | End::Stopped) | None => {
             return Err(ProximaError::Upstream("linux vm reported unknown end reason".into()));
         }
     };

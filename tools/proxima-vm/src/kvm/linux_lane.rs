@@ -3,16 +3,21 @@
 //! and marker ports, each a device on one bus.
 
 use core::cell::{Cell, RefCell};
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::mpsc::SyncSender;
 
-use proxima_primitives::pipe::AndThen;
+use proxima_primitives::pipe::{AndThen, Pipe};
 use proxima_primitives::pipe::fan_in::{FanIn, Select};
 
 use super::describe::describe_failure;
-use super::devices::Lifecycle;
+use super::devices::{Channel, Lifecycle, Transport, VirtioWindow};
+use super::doorbell::Doorbell;
 use super::drive::drive;
 use super::error::{KvmError, KvmResult};
 use super::exit_source::TrapSource;
 use super::memory::{GuestRam, HostMapping};
+use super::resident::{NET_IRQ, NET_WINDOW_BASE, NET_WINDOW_SIZE, Wake};
 use super::pipes::{ExitLedger, FirstClaim, MAX_TOTAL_EXITS, Meter, Resume};
 use super::serial::{
     COM1_BASE, COM1_IRQ, COM2_BASE, COM2_IRQ, InitMarker, PortTally, ResetPort, RtcPorts, SerialPort, Transmit,
@@ -20,7 +25,8 @@ use super::serial::{
 };
 use super::session::{Session, release_off_the_return_path};
 use super::slots::{SlotOp, SlotRegion};
-use super::trap::End;
+use super::trap::{End, Reply, RunError, Trap};
+use super::vcpu::Vcpu;
 use super::watchdog::Watchdog;
 use crate::page_table::{IdentitySpan, X86_TABLE_PAGE_SIZE, write_x86_64_identity_2m};
 use crate::x86_boot::{GDT_SIZE, write_boot_gdt};
@@ -37,6 +43,15 @@ pub struct Load<'a> {
     pub data: &'a [u8],
 }
 
+/// The resident run's view of its host side: the net device the guest sees at
+/// [`NET_WINDOW_BASE`], the flag that ends the run, and where the run publishes
+/// the doorbell that wakes its vCPU thread.
+pub struct NetWiring<'a> {
+    pub transport: &'a RefCell<Option<Transport>>,
+    pub stop: &'a AtomicBool,
+    pub doorbell_out: &'a SyncSender<Arc<Doorbell>>,
+}
+
 pub struct LinuxRun<'a> {
     pub ram_bytes: u64,
     pub entry: u64,
@@ -49,6 +64,7 @@ pub struct LinuxRun<'a> {
     pub output_capacity: usize,
     pub watchdog_millis: u64,
     pub wall_clock_seconds: i64,
+    pub net: Option<NetWiring<'a>>,
 }
 
 #[derive(Debug)]
@@ -72,6 +88,30 @@ pub struct LinuxReport {
 pub struct LinuxOutcome {
     pub report: LinuxReport,
     pub failure: Option<String>,
+}
+
+impl LinuxOutcome {
+    #[must_use]
+    pub fn failed(message: String) -> Self {
+        Self {
+            report: LinuxReport {
+                console: Vec::new(),
+                console_dropped: 0,
+                output: Vec::new(),
+                setup_nanos: 0,
+                first_exit_nanos: 0,
+                init_marker_nanos: 0,
+                entrypoint_marker_nanos: 0,
+                total_nanos: 0,
+                exit_count: 0,
+                mmio_exit_count: 0,
+                end: None,
+                unhandled: Vec::new(),
+                unhandled_overflow: 0,
+            },
+            failure: Some(message),
+        }
+    }
 }
 
 struct Prepared {
@@ -195,33 +235,82 @@ fn drive_prepared(
     };
     let com1 = SerialPort::new(COM1_BASE, COM1_IRQ, &[], console, false);
     let com2 = SerialPort::new(COM2_BASE, COM2_IRQ, run.input, output, true);
-    let bus = FirstClaim::new(
-        Lifecycle::new(true),
+    let legacy = FirstClaim::new(
+        com1,
         FirstClaim::new(
-            com1,
+            &com2,
             FirstClaim::new(
-                &com2,
+                RtcPorts::at(run.wall_clock_seconds),
                 FirstClaim::new(
-                    RtcPorts::at(run.wall_clock_seconds),
-                    FirstClaim::new(
-                        ResetPort,
-                        FirstClaim::new(InitMarker::new(&com2, ledger, marker_stamp, entrypoint_stamp), Unhandled::new(tally)),
-                    ),
+                    ResetPort,
+                    FirstClaim::new(InitMarker::new(&com2, ledger, marker_stamp, entrypoint_stamp), Unhandled::new(tally)),
                 ),
             ),
         ),
     );
-    let merge = FanIn::new(
-        [TrapSource::Watchdog(watchdog.as_ref()), TrapSource::Exit { vcpu, hypercall_memory: None }],
-        Select::Fifo,
-    );
-    let meter = Meter::new(ledger, MAX_TOTAL_EXITS, "exceeded total exit budget without the guest ending");
-    let step = AndThen::new(
-        AndThen::new(AndThen::new(merge, meter), bus),
-        Resume::new(prepared.session.machine(), vcpu, prepared.ram),
-    );
-    match drive(&step) {
-        Ok(end) => (None, Some(end)),
-        Err(error) => (Some(describe_failure(&error, Some(vcpu))), None),
+    let stepping = Stepping { prepared, vcpu, watchdog: watchdog.as_ref(), ledger };
+    match &run.net {
+        None => stepping.run(MAX_TOTAL_EXITS, FirstClaim::new(Lifecycle::new(true), legacy)),
+        Some(net) => stepping.run_resident(net, legacy),
+    }
+}
+
+struct Stepping<'run> {
+    prepared: &'run Prepared,
+    vcpu: &'run Vcpu,
+    watchdog: Option<&'run Watchdog>,
+    ledger: &'run ExitLedger,
+}
+
+impl Stepping<'_> {
+    fn run<Bus>(&self, exit_budget: u64, bus: Bus) -> (Option<String>, Option<End>)
+    where
+        Bus: Pipe<In = Trap, Out = Reply, Err = RunError>,
+    {
+        let merge = FanIn::new(
+            [TrapSource::Watchdog(self.watchdog), TrapSource::Exit { vcpu: self.vcpu, hypercall_memory: None }],
+            Select::Fifo,
+        );
+        let meter = Meter::new(self.ledger, exit_budget, "exceeded total exit budget without the guest ending");
+        let step = AndThen::new(
+            AndThen::new(AndThen::new(merge, meter), bus),
+            Resume::new(self.prepared.session.machine(), self.vcpu, self.prepared.ram),
+        );
+        match drive(&step) {
+            Ok(end) => (None, Some(end)),
+            Err(error) => (Some(describe_failure(&error, Some(self.vcpu))), None),
+        }
+    }
+
+    fn run_resident<Rest>(&self, net: &NetWiring<'_>, rest: Rest) -> (Option<String>, Option<End>)
+    where
+        Rest: Pipe<In = Trap, Out = Reply, Err = RunError>,
+    {
+        let doorbell = match Doorbell::for_current_thread(self.vcpu.immediate_exit_flag()) {
+            Ok(bound) => Arc::new(bound),
+            Err(error) => return (Some(error.to_string()), None),
+        };
+        if net.doorbell_out.send(Arc::clone(&doorbell)).is_err() {
+            doorbell.retire();
+            return (Some("the resident run's doorbell receiver is gone".to_owned()), None);
+        }
+        let emitted = RefCell::new(Channel::with_capacity(0));
+        let window = VirtioWindow::new(
+            "net",
+            NET_WINDOW_BASE,
+            NET_WINDOW_SIZE,
+            net.transport,
+            &emitted,
+            self.prepared.ram,
+            self.ledger,
+        )
+        .with_irq(NET_IRQ);
+        let bus = FirstClaim::new(
+            Wake::new(&window, &doorbell, net.stop),
+            FirstClaim::new(Lifecycle::new(true), FirstClaim::new(&window, rest)),
+        );
+        let outcome = self.run(u64::MAX, bus);
+        doorbell.retire();
+        outcome
     }
 }
