@@ -72,7 +72,8 @@ struct Conn {
     // sent outside the window we told it, a protocol violation on ITS
     // side). See `recv_window_drops` for the pressure observable.
     recv: VecDeque<u8>,
-    pending: BTreeMap<u32, u8>,
+    held: Vec<(u32, Vec<u8>)>,
+    trimmed: u32,
     deliver_seq: u32,
     peer_finished: bool,
     we_finished: bool,
@@ -323,14 +324,12 @@ impl TcpStack {
         let Some(Entry::Open(conn)) = self.conns.get_mut(&id) else {
             return 0;
         };
-        let mut count = 0;
-        while count < buf.len() {
-            let Some(byte) = conn.recv.pop_front() else {
-                break;
-            };
-            buf[count] = byte;
-            count += 1;
-        }
+        let count = buf.len().min(conn.recv.len());
+        let (front, back) = conn.recv.as_slices();
+        let from_front = count.min(front.len());
+        buf[..from_front].copy_from_slice(&front[..from_front]);
+        buf[from_front..count].copy_from_slice(&back[..count - from_front]);
+        conn.recv.drain(..count);
         count
     }
 
@@ -511,7 +510,8 @@ impl Conn {
             sent: 0,
             send_buf: Vec::new(),
             recv: VecDeque::new(),
-            pending: BTreeMap::new(),
+            held: Vec::new(),
+            trimmed: 0,
             deliver_seq: irs.wrapping_add(1),
             peer_finished: false,
             we_finished: false,
@@ -540,10 +540,7 @@ impl Conn {
     fn on_segment(&mut self, inbound: &Inbound, now: Instant) -> Vec<OutSegment> {
         let control = to_control(inbound.flags);
         let payload_len = u32::try_from(inbound.payload.len()).unwrap_or(u32::MAX);
-        for (index, byte) in inbound.payload.iter().enumerate() {
-            let seq = inbound.seq.wrapping_add(u32::try_from(index).unwrap_or(0));
-            self.pending.insert(seq, *byte);
-        }
+        self.hold_ahead(inbound);
         let output = self.path.on_segment(
             control,
             SeqNum(inbound.seq),
@@ -556,20 +553,7 @@ impl Conn {
             self.reset = true;
             return Vec::new();
         }
-        for _ in 0..output.delivered {
-            if let Some(byte) = self.pending.remove(&self.deliver_seq) {
-                if self.recv.len() < usize::from(OUR_WINDOW) {
-                    self.recv.push_back(byte);
-                } else {
-                    // RFC 793 §3.3: a peer sending beyond the window WE
-                    // advertised (in every segment we emit) is the
-                    // violation, not us — drop-and-count rather than grow
-                    // `recv` unbounded.
-                    self.recv_window_drops += 1;
-                }
-            }
-            self.deliver_seq = self.deliver_seq.wrapping_add(1);
-        }
+        self.deliver(inbound, output.delivered);
 
         // set peer_finished before draining so every ack we emit here covers the
         // FIN's sequence number.
@@ -588,12 +572,93 @@ impl Conn {
         segments
     }
 
+    // store an out-of-order payload whole, only while it sits ahead of
+    // deliver_seq and inside the window we advertised; same-seq retransmit replaces.
+    fn hold_ahead(&mut self, inbound: &Inbound) {
+        let offset = inbound.seq.wrapping_sub(self.deliver_seq);
+        let length = u32::try_from(inbound.payload.len()).unwrap_or(u32::MAX);
+        let outside_window = offset.saturating_add(length) > u32::from(OUR_WINDOW);
+        if length == 0 || offset == 0 || offset >= SEQ_HALF || outside_window {
+            return;
+        }
+        match self.held.iter_mut().find(|(seq, _)| *seq == inbound.seq) {
+            Some((_, bytes)) => {
+                bytes.clear();
+                bytes.extend_from_slice(inbound.payload);
+            }
+            None => self.held.push((inbound.seq, inbound.payload.to_vec())),
+        }
+    }
+
+    // move `delivered` in-order bytes into recv: the inbound slice past any
+    // prefix behind deliver_seq first, then held segments that now connect.
+    fn deliver(&mut self, inbound: &Inbound, delivered: u32) {
+        let mut remaining = usize::try_from(delivered).unwrap_or(usize::MAX);
+        let behind = usize::try_from(self.deliver_seq.wrapping_sub(inbound.seq)).unwrap_or(usize::MAX);
+        let fresh = inbound.payload.get(behind..).unwrap_or(&[]);
+        let take = fresh.len().min(remaining);
+        Self::push_capped(&mut self.recv, &mut self.recv_window_drops, &fresh[..take]);
+        self.advance_deliver(take);
+        remaining -= take;
+        while remaining > 0 {
+            remaining -= self.pull_held(remaining);
+        }
+        let deliver_seq = self.deliver_seq;
+        self.held.retain(|(start, bytes)| {
+            let length = u32::try_from(bytes.len()).unwrap_or(u32::MAX);
+            let end_offset = start.wrapping_add(length).wrapping_sub(deliver_seq);
+            end_offset != 0 && end_offset < SEQ_HALF
+        });
+    }
+
+    // consume up to `limit` bytes from the held segment covering deliver_seq;
+    // a byte no held segment covers was never stored (outside our window) and is
+    // skipped one at a time, as the sequence space still advanced.
+    fn pull_held(&mut self, limit: usize) -> usize {
+        let deliver_seq = self.deliver_seq;
+        let covering = self
+            .held
+            .iter()
+            .enumerate()
+            .find_map(|(index, (start, bytes))| {
+                skip_into(*start, deliver_seq)
+                    .filter(|skip| *skip < bytes.len())
+                    .map(|skip| (index, skip))
+            });
+        let Some((index, skip)) = covering else {
+            self.advance_deliver(1);
+            return 1;
+        };
+        let bytes = &self.held[index].1;
+        let end = bytes.len().min(skip.saturating_add(limit));
+        Self::push_capped(&mut self.recv, &mut self.recv_window_drops, &bytes[skip..end]);
+        self.advance_deliver(end - skip);
+        end - skip
+    }
+
+    fn advance_deliver(&mut self, count: usize) {
+        let count = u32::try_from(count).unwrap_or(u32::MAX);
+        self.deliver_seq = self.deliver_seq.wrapping_add(count);
+    }
+
+    // RFC 793 §3.3: a peer sending beyond the window WE advertised (in every
+    // segment we emit) is the violation, not us; drop-and-count rather than
+    // grow `recv` unbounded.
+    fn push_capped(recv: &mut VecDeque<u8>, drops: &mut u32, bytes: &[u8]) {
+        let room = usize::from(OUR_WINDOW).saturating_sub(recv.len());
+        let take = room.min(bytes.len());
+        recv.extend(&bytes[..take]);
+        let dropped = u32::try_from(bytes.len() - take).unwrap_or(u32::MAX);
+        *drops = drops.saturating_add(dropped);
+    }
+
     // pull queued app bytes through DataPath into data segments.
     fn drain_send(&mut self, now: Instant) -> Vec<OutSegment> {
         let mut segments = Vec::new();
-        // sent bytes sit at the front of send_buf (never trimmed), so the next
-        // unsent byte is at offset `sent`.
-        let mut cursor = usize::try_from(self.sent).unwrap_or(usize::MAX);
+        self.release_acked();
+        // sent-but-unacked bytes sit at the front of send_buf, so the next
+        // unsent byte is at offset `sent - trimmed`.
+        let mut cursor = usize::try_from(self.sent.wrapping_sub(self.trimmed)).unwrap_or(usize::MAX);
         while cursor < self.send_buf.len() {
             let remaining = u32::try_from(self.send_buf.len() - cursor).unwrap_or(u32::MAX);
             let offset = u32::try_from(cursor).unwrap_or(u32::MAX);
@@ -617,6 +682,21 @@ impl Conn {
             cursor += len;
         }
         segments
+    }
+
+    // drop the acknowledged prefix of send_buf; an ack covering our FIN runs
+    // one past the data, so the release is clamped to the bytes actually sent.
+    fn release_acked(&mut self) {
+        let acked = self.path.snd_una().0.wrapping_sub(self.iss_plus_one);
+        let releasable = acked.wrapping_sub(self.trimmed);
+        let in_buffer_sent = self.sent.wrapping_sub(self.trimmed);
+        if releasable >= SEQ_HALF {
+            return;
+        }
+        let release = releasable.min(in_buffer_sent);
+        let count = usize::try_from(release).unwrap_or(0).min(self.send_buf.len());
+        self.send_buf.drain(..count);
+        self.trimmed = self.trimmed.wrapping_add(release);
     }
 
     fn fin(&self) -> OutSegment {
@@ -647,9 +727,21 @@ impl Conn {
     }
 }
 
+const SEQ_HALF: u32 = 0x8000_0000;
+
 // wrapping sequence comparison: is `a` at or beyond `b` within the 2^31 window.
 fn seq_geq(a: u32, b: u32) -> bool {
-    a.wrapping_sub(b) < 0x8000_0000
+    a.wrapping_sub(b) < SEQ_HALF
+}
+
+// how far `deliver_seq` sits past `start`, or None when `start` is ahead of it.
+fn skip_into(start: u32, deliver_seq: u32) -> Option<usize> {
+    let skip = deliver_seq.wrapping_sub(start);
+    if skip < SEQ_HALF {
+        usize::try_from(skip).ok()
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -703,14 +795,175 @@ mod tests {
     }
 
     fn established() -> TcpStack {
-        let mut stack = TcpStack::new(OUR_IP, OUR_PORT, OUR_ISN);
-        let out = stack.on_inbound(&seg(syn(), CLIENT_ISN, 0, &[]), Instant::ZERO);
+        established_with(CLIENT_ISN, OUR_ISN)
+    }
+
+    fn established_with(client_isn: u32, our_isn: u32) -> TcpStack {
+        let mut stack = TcpStack::new(OUR_IP, OUR_PORT, our_isn);
+        let out = stack.on_inbound(&seg(syn(), client_isn, 0, &[]), Instant::ZERO);
         assert!(out[0].1.flags.syn && out[0].1.flags.ack);
-        assert_eq!(out[0].1.seq, OUR_ISN);
+        assert_eq!(out[0].1.seq, our_isn);
         // before the final ACK there is nothing to accept.
         assert!(stack.poll_accept().is_none());
-        stack.on_inbound(&seg(ack(), CLIENT_ISN + 1, OUR_ISN + 1, &[]), Instant::ZERO);
+        stack.on_inbound(
+            &seg(
+                ack(),
+                client_isn.wrapping_add(1),
+                our_isn.wrapping_add(1),
+                &[],
+            ),
+            Instant::ZERO,
+        );
         stack
+    }
+
+    fn stream(length: usize) -> Vec<u8> {
+        (0..length).map(|index| (index % 251) as u8).collect()
+    }
+
+    fn read_all(stack: &mut TcpStack) -> Vec<u8> {
+        let mut collected = Vec::new();
+        let mut buf = [0u8; 4096];
+        loop {
+            let count = stack.read(ID, &mut buf);
+            if count == 0 {
+                return collected;
+            }
+            collected.extend_from_slice(&buf[..count]);
+        }
+    }
+
+    fn send_data(stack: &mut TcpStack, client_isn: u32, our_isn: u32, offset: usize, bytes: &[u8], tick: u64) {
+        let seq = client_isn.wrapping_add(1).wrapping_add(offset as u32);
+        stack.on_inbound(
+            &seg(ack(), seq, our_isn.wrapping_add(1), bytes),
+            Instant::from_micros(tick),
+        );
+    }
+
+    fn open_conn(stack: &TcpStack) -> &Conn {
+        let Some(Entry::Open(conn)) = stack.conns.get(&ID) else {
+            panic!("established connection must be Entry::Open");
+        };
+        conn
+    }
+
+    #[test]
+    fn later_segments_first_then_the_gap_fill_read_back_in_order() {
+        let mut stack = established();
+        let _ = stack.poll_accept();
+        let bytes = stream(54 + 402 + 1460);
+
+        send_data(&mut stack, CLIENT_ISN, OUR_ISN, 54 + 402, &bytes[456..], 1);
+        send_data(&mut stack, CLIENT_ISN, OUR_ISN, 54, &bytes[54..456], 2);
+        send_data(&mut stack, CLIENT_ISN, OUR_ISN, 54, &bytes[54..456], 3);
+        assert!(read_all(&mut stack).is_empty(), "nothing readable across the gap");
+        send_data(&mut stack, CLIENT_ISN, OUR_ISN, 0, &bytes[..54], 4);
+
+        assert_eq!(read_all(&mut stack), bytes);
+        assert!(open_conn(&stack).held.is_empty(), "delivered segments are released");
+    }
+
+    #[test]
+    fn duplicate_and_front_overlapping_segments_deliver_each_byte_once() {
+        let mut stack = established();
+        let _ = stack.poll_accept();
+        let bytes = stream(54 + 402 + 1460);
+
+        send_data(&mut stack, CLIENT_ISN, OUR_ISN, 0, &bytes[..54], 1);
+        send_data(&mut stack, CLIENT_ISN, OUR_ISN, 0, &bytes[..54], 2);
+        send_data(&mut stack, CLIENT_ISN, OUR_ISN, 30, &bytes[30..432], 3);
+        send_data(&mut stack, CLIENT_ISN, OUR_ISN, 400, &bytes[400..1860], 4);
+        send_data(&mut stack, CLIENT_ISN, OUR_ISN, 432, &bytes[432..], 5);
+
+        assert_eq!(read_all(&mut stack), bytes);
+        assert_eq!(stack.recv_window_drops(ID), Some(0));
+    }
+
+    #[test]
+    fn held_segment_overlapped_by_the_gap_fill_is_consumed_without_duplication() {
+        let mut stack = established();
+        let _ = stack.poll_accept();
+        let bytes = stream(1460 + 402);
+
+        send_data(&mut stack, CLIENT_ISN, OUR_ISN, 1000, &bytes[1000..], 1);
+        send_data(&mut stack, CLIENT_ISN, OUR_ISN, 0, &bytes[..1460], 2);
+
+        assert_eq!(read_all(&mut stack), bytes);
+        assert!(open_conn(&stack).held.is_empty());
+    }
+
+    #[test]
+    fn send_buffer_stays_bounded_by_the_unacked_amount_across_many_acked_writes() {
+        let mut stack = established();
+        let _ = stack.poll_accept();
+        let chunk = stream(1460);
+        let writes = 200;
+        let mut wire = Vec::new();
+
+        for round in 0..writes {
+            let out = stack.write(ID, &chunk, Instant::from_micros(round + 1));
+            wire.extend(out.iter().flat_map(|(_, segment)| segment.payload.clone()));
+            let acked = OUR_ISN + 1 + 1460 * (round as u32 + 1);
+            stack.on_inbound(
+                &seg(ack(), CLIENT_ISN + 1, acked, &[]),
+                Instant::from_micros(round + 1),
+            );
+            assert!(
+                open_conn(&stack).send_buf.len() <= 1460,
+                "round {round}: send_buf holds more than the unacked amount"
+            );
+        }
+
+        assert!(wire.len() > 4 * usize::from(OUR_WINDOW), "wrote far past the window");
+        assert_eq!(wire, chunk.repeat(writes as usize), "acked bytes were transmitted intact");
+        assert!(open_conn(&stack).send_buf.is_empty(), "everything acked, nothing retained");
+    }
+
+    #[test]
+    fn inbound_stream_crossing_the_sequence_wrap_reads_back_in_order() {
+        let client_isn = u32::MAX - 100;
+        let mut stack = established_with(client_isn, OUR_ISN);
+        let _ = stack.poll_accept();
+        let bytes = stream(54 + 402 + 1460);
+
+        send_data(&mut stack, client_isn, OUR_ISN, 54, &bytes[54..456], 1);
+        send_data(&mut stack, client_isn, OUR_ISN, 456, &bytes[456..], 2);
+        send_data(&mut stack, client_isn, OUR_ISN, 0, &bytes[..54], 3);
+
+        assert_eq!(read_all(&mut stack), bytes);
+        assert!(open_conn(&stack).held.is_empty());
+    }
+
+    #[test]
+    fn outbound_stream_crossing_the_sequence_wrap_is_acked_and_released() {
+        let our_isn = u32::MAX - 1000;
+        let mut stack = established_with(CLIENT_ISN, our_isn);
+        let _ = stack.poll_accept();
+        let chunk = stream(1460);
+        let mut sent_total = 0u32;
+        let mut wire = Vec::new();
+
+        for round in 0..4u64 {
+            let out = stack.write(ID, &chunk, Instant::from_micros(round + 1));
+            for (_, segment) in &out {
+                assert_eq!(
+                    segment.seq,
+                    our_isn.wrapping_add(1).wrapping_add(sent_total),
+                    "segment seq follows the wrapping send sequence"
+                );
+                sent_total = sent_total.wrapping_add(segment.payload.len() as u32);
+                wire.extend_from_slice(&segment.payload);
+            }
+            let acked = our_isn.wrapping_add(1).wrapping_add(sent_total);
+            stack.on_inbound(
+                &seg(ack(), CLIENT_ISN + 1, acked, &[]),
+                Instant::from_micros(round + 1),
+            );
+        }
+
+        assert_eq!(wire, chunk.repeat(4));
+        assert!(open_conn(&stack).send_buf.is_empty(), "acks across the wrap released the buffer");
     }
 
     #[test]
