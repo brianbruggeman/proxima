@@ -27,8 +27,13 @@ use proxima_protocols::tcp::congestion::Reno;
 use proxima_protocols::tcp::seq::SeqNum;
 use proxima_protocols::tcp::time::Instant;
 
-/// The peer key a connection is addressed by: `(peer_ip, peer_port)`.
-pub type ConnId = ([u8; 4], u16);
+/// The 4-tuple key a connection is addressed by: `(local_port, peer_ip, peer_port)`;
+/// our ip is the stack's single address so it is not part of the key.
+pub type ConnId = (u16, [u8; 4], u16);
+
+const EPHEMERAL_FIRST: u16 = 49152;
+const EPHEMERAL_COUNT: usize = 16384;
+const EPHEMERAL_WORDS: usize = EPHEMERAL_COUNT / 64;
 
 /// A segment to transmit, paired with the peer to send it to.
 pub type Outbound = (Endpoint, OutSegment);
@@ -54,7 +59,7 @@ enum Lifecycle {
 
 struct Conn {
     peer: Endpoint,
-    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
+    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp")))]
     active_open: bool,
     path: Path,
     iss_plus_one: u32,
@@ -95,6 +100,9 @@ pub struct TcpStack {
     our_port: u16,
     next_isn: u32,
     conns: BTreeMap<ConnId, Entry>,
+    ephemeral_next: u32,
+    ephemeral_free: VecDeque<u16>,
+    ephemeral_used: [u64; EPHEMERAL_WORDS],
     // Bounded (OverflowPolicy::Drop — see `lifecycle_event_cap`'s doc): a
     // synchronous sans-IO state machine has no async surface to block on,
     // so the RFC 793 accept-backlog-overflow precedent applies (a listen
@@ -128,6 +136,9 @@ impl TcpStack {
             our_port,
             next_isn: our_isn,
             conns: BTreeMap::new(),
+            ephemeral_next: u32::from(EPHEMERAL_FIRST),
+            ephemeral_free: VecDeque::new(),
+            ephemeral_used: [0; EPHEMERAL_WORDS],
             accepted: VecDeque::new(),
             connected: VecDeque::new(),
             lifecycle_event_cap,
@@ -137,10 +148,13 @@ impl TcpStack {
     }
 
     /// Actively open a connection to `peer`: registers a half-open entry and
-    /// returns the SYN to transmit. The connection becomes usable once
-    /// [`poll_connected`](Self::poll_connected) yields its id.
-    pub fn connect(&mut self, peer: Endpoint) -> (ConnId, Vec<Outbound>) {
-        let id: ConnId = (peer.ip, peer.port);
+    /// returns the SYN to transmit from a freshly allocated ephemeral local
+    /// port (the first element of the id). The connection becomes usable once
+    /// [`poll_connected`](Self::poll_connected) yields its id. `None` when all
+    /// ephemeral ports are held by live connections.
+    pub fn connect(&mut self, peer: Endpoint) -> Option<(ConnId, Vec<Outbound>)> {
+        let local_port = self.allocate_port()?;
+        let id: ConnId = (local_port, peer.ip, peer.port);
         let isn = self.next_isn;
         self.next_isn = self.next_isn.wrapping_add(ISN_STRIDE);
         self.conns.insert(id, Entry::SynSent { peer, isn });
@@ -154,7 +168,48 @@ impl TcpStack {
             window: OUR_WINDOW,
             payload: Vec::new(),
         };
-        (id, vec![(peer, syn)])
+        Some((id, vec![(peer, syn)]))
+    }
+
+    fn allocate_port(&mut self) -> Option<u16> {
+        loop {
+            let port = match u16::try_from(self.ephemeral_next) {
+                Ok(fresh) => {
+                    self.ephemeral_next += 1;
+                    fresh
+                }
+                Err(_) => self.ephemeral_free.pop_front()?,
+            };
+            if port != self.our_port {
+                self.ephemeral_used[ephemeral_word(port)] |= ephemeral_bit(port);
+                return Some(port);
+            }
+        }
+    }
+
+    fn release_port(&mut self, port: u16) {
+        if port < EPHEMERAL_FIRST {
+            return;
+        }
+        let word = &mut self.ephemeral_used[ephemeral_word(port)];
+        if *word & ephemeral_bit(port) != 0 {
+            *word &= !ephemeral_bit(port);
+            self.ephemeral_free.push_back(port);
+        }
+    }
+
+    fn remove_conn(&mut self, id: ConnId) {
+        if self.conns.remove(&id).is_some() {
+            self.release_port(id.0);
+        }
+    }
+
+    /// True for the listener port and every ephemeral port a live active open holds.
+    #[must_use]
+    pub fn owns_port(&self, port: u16) -> bool {
+        port == self.our_port
+            || (port >= EPHEMERAL_FIRST
+                && self.ephemeral_used[ephemeral_word(port)] & ephemeral_bit(port) != 0)
     }
 
     /// Pop the next actively-opened connection whose handshake completed.
@@ -162,7 +217,7 @@ impl TcpStack {
         self.connected.pop_front()
     }
 
-    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
+    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp")))]
     pub(crate) fn active_connect_sequence(&self, id: ConnId) -> Option<u32> {
         match self.conns.get(&id) {
             Some(Entry::SynSent { isn, .. }) => Some(*isn),
@@ -170,7 +225,7 @@ impl TcpStack {
         }
     }
 
-    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
+    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp")))]
     pub(crate) fn active_connection_sequence(&self, id: ConnId) -> Option<u32> {
         match self.conns.get(&id) {
             Some(Entry::Open(connection)) if connection.active_open => {
@@ -180,7 +235,7 @@ impl TcpStack {
         }
     }
 
-    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
+    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp")))]
     pub(crate) fn cancel_connect(&mut self, id: ConnId, sequence: u32) {
         let owned = match self.conns.get(&id) {
             Some(Entry::SynSent { isn, .. }) => *isn == sequence,
@@ -191,7 +246,7 @@ impl TcpStack {
             None => true,
         };
         if owned {
-            self.conns.remove(&id);
+            self.remove_conn(id);
             self.connected.retain(|connected| *connected != id);
         }
     }
@@ -307,7 +362,18 @@ impl TcpStack {
     /// Process one inbound segment. Returns the segments to transmit; readable
     /// bytes and accept events are observed via `read` / `poll_accept`.
     pub fn on_inbound(&mut self, inbound: &Inbound, now: Instant) -> Vec<Outbound> {
-        let id: ConnId = (inbound.source_ip, inbound.source_port);
+        self.on_inbound_to(self.our_port, inbound, now)
+    }
+
+    /// [`on_inbound`](Self::on_inbound) for a segment addressed to `local_port`:
+    /// the listener port, or the ephemeral port of an active open.
+    pub fn on_inbound_to(
+        &mut self,
+        local_port: u16,
+        inbound: &Inbound,
+        now: Instant,
+    ) -> Vec<Outbound> {
+        let id: ConnId = (local_port, inbound.source_ip, inbound.source_port);
         let peer = Endpoint {
             mac: inbound.source_mac,
             ip: inbound.source_ip,
@@ -315,7 +381,7 @@ impl TcpStack {
         };
 
         if inbound.flags.rst {
-            self.conns.remove(&id);
+            self.remove_conn(id);
             return Vec::new();
         }
 
@@ -336,9 +402,7 @@ impl TcpStack {
                         self.dropped_connected += 1;
                     }
                 }
-                Lifecycle::Drop => {
-                    self.conns.remove(&id);
-                }
+                Lifecycle::Drop => self.remove_conn(id),
                 Lifecycle::None => {}
             }
             return segments
@@ -347,7 +411,7 @@ impl TcpStack {
                 .collect();
         }
 
-        if is_initial_syn(inbound.flags) {
+        if local_port == self.our_port && is_initial_syn(inbound.flags) {
             let isn = self.next_isn;
             self.next_isn = self.next_isn.wrapping_add(ISN_STRIDE);
             self.conns.insert(
@@ -362,6 +426,14 @@ impl TcpStack {
         }
         Vec::new()
     }
+}
+
+fn ephemeral_word(port: u16) -> usize {
+    usize::from(port - EPHEMERAL_FIRST) / 64
+}
+
+fn ephemeral_bit(port: u16) -> u64 {
+    1 << (usize::from(port - EPHEMERAL_FIRST) % 64)
 }
 
 fn advance(entry: &mut Entry, inbound: &Inbound, now: Instant) -> (Vec<OutSegment>, Lifecycle) {
@@ -387,7 +459,7 @@ fn advance(entry: &mut Entry, inbound: &Inbound, now: Instant) -> (Vec<OutSegmen
                 return (Vec::new(), Lifecycle::None);
             }
             let conn = Conn {
-                #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
+                #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp")))]
                 active_open: true,
                 ..Conn::new(*peer, *isn, inbound.seq, inbound.window)
             };
@@ -427,7 +499,7 @@ impl Conn {
         );
         Self {
             peer,
-            #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
+            #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp")))]
             active_open: false,
             path,
             iss_plus_one,
@@ -591,7 +663,7 @@ mod tests {
     const PEER_IP: [u8; 4] = [10, 0, 0, 1];
     const PEER_PORT: u16 = 50000;
     const CLIENT_ISN: u32 = 0x5000;
-    const ID: ConnId = (PEER_IP, PEER_PORT);
+    const ID: ConnId = (OUR_PORT, PEER_IP, PEER_PORT);
 
     fn seg(flags: TcpFlags, seq: u32, ack: u32, payload: &[u8]) -> Inbound<'_> {
         Inbound {
@@ -768,7 +840,8 @@ mod tests {
             ip: PEER_IP,
             port: PEER_PORT,
         };
-        let (id, out) = stack.connect(peer);
+        let (id, out) = stack.connect(peer).expect("ephemeral port available");
+        assert!(id.0 >= 49152 && id.0 != OUR_PORT, "active open uses an ephemeral local port");
         // we emit a bare SYN with our ISN.
         assert!(out[0].1.flags.syn && !out[0].1.flags.ack);
         assert_eq!(out[0].1.seq, OUR_ISN);
@@ -783,7 +856,7 @@ mod tests {
             ack: true,
             ..TcpFlags::default()
         };
-        let reply = stack.on_inbound(&seg(synack, CLIENT_ISN, OUR_ISN + 1, &[]), Instant::ZERO);
+        let reply = stack.on_inbound_to(id.0, &seg(synack, CLIENT_ISN, OUR_ISN + 1, &[]), Instant::ZERO);
         assert!(
             reply[0].1.flags.ack && !reply[0].1.flags.syn,
             "we ACK the SYN-ACK"
@@ -799,7 +872,8 @@ mod tests {
                 .map(|(_, s)| s.payload.clone()),
             Some(b"ping".to_vec())
         );
-        stack.on_inbound(
+        stack.on_inbound_to(
+            id.0,
             &seg(ack(), CLIENT_ISN + 1, OUR_ISN + 1 + 4, b"pong"),
             Instant::from_micros(2),
         );

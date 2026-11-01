@@ -15,6 +15,7 @@ proxima-build.workspace = true
 
 [dependencies]
 bytes = { workspace = true, optional = true }
+crossbeam-queue = { workspace = true, optional = true }
 futures = { workspace = true, optional = true }
 libc = { workspace = true, optional = true }
 prime = { workspace = true, optional = true }
@@ -109,6 +110,7 @@ wasm = ["std"]
 # device-independent TCP stack driver over three frame pipes (rx/tx/mint).
 frame-stack = [
     "std",
+    "dep:crossbeam-queue",
     "dep:thiserror",
     "dep:futures",
     "dep:proxima-primitives",
@@ -135,6 +137,7 @@ dpdk = [
 # ring/uapi/sized sans-IO half builds on any host once this feature is on.
 xdp = [
     "std",
+    "dep:crossbeam-queue",
     "dep:libc",
     "dep:prime",
     "prime/runtime-prime-executor",

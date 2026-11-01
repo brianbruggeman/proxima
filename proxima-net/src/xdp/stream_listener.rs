@@ -205,11 +205,13 @@ impl State {
                     if let Some((ip, mac)) = stack::parse_arp_reply(frame) {
                         self.arp.insert(ip, mac);
                         self.socket.umem_mut().free_frame(desc.addr);
-                    } else if let Some(inbound) = classify_tcp(frame, self.our_ip, self.our_port) {
+                    } else if let Some(inbound) = classify_tcp(frame, self.our_ip).filter(|inbound| self.stack.owns_port(inbound.destination_port)) {
                         self.socket.umem_mut().free_frame(desc.addr);
-                        let outbound = self.stack.on_inbound(&inbound.borrow(), now);
+                        let outbound = self
+                            .stack
+                            .on_inbound_to(inbound.destination_port, &inbound.borrow(), now);
                         for (peer, segment) in outbound {
-                            self.tx_segment(peer, &segment);
+                            self.tx_segment(peer, &segment, inbound.destination_port);
                         }
                     } else {
                         self.socket.umem_mut().free_frame(desc.addr);
@@ -290,7 +292,7 @@ impl State {
         let _ = self.socket.kick_tx();
     }
 
-    fn tx_segment(&mut self, peer: Endpoint, segment: &OutSegment) {
+    fn tx_segment(&mut self, peer: Endpoint, segment: &OutSegment, source_port: u16) {
         let payload_len = u16::try_from(segment.payload.len()).unwrap_or(0);
         let total = ETH + IP + TCP + segment.payload.len();
         if total > sized::UMEM_FRAME_SIZE as usize {
@@ -320,7 +322,7 @@ impl State {
             &mut buf[ETH + IP..],
             self.our_ip,
             peer.ip,
-            self.our_port,
+            source_port,
             peer.port,
             segment.seq,
             segment.ack,
@@ -346,6 +348,7 @@ struct OwnedInbound {
     mac: [u8; 6],
     ip: [u8; 4],
     port: u16,
+    destination_port: u16,
     flags: tcp::TcpFlags,
     seq: u32,
     ack: u32,
@@ -368,7 +371,7 @@ impl OwnedInbound {
     }
 }
 
-fn classify_tcp(frame: &[u8], our_ip: [u8; 4], our_port: u16) -> Option<OwnedInbound> {
+fn classify_tcp(frame: &[u8], our_ip: [u8; 4]) -> Option<OwnedInbound> {
     let eth = EthernetFrame::parse(frame).ok()?;
     if eth.ether_type() != EtherType::Ipv4 {
         return None;
@@ -378,13 +381,11 @@ fn classify_tcp(frame: &[u8], our_ip: [u8; 4], our_port: u16) -> Option<OwnedInb
         return None;
     }
     let segment = TcpHeader::parse(ip.payload()).ok()?;
-    if segment.destination_port() != our_port {
-        return None;
-    }
     Some(OwnedInbound {
         mac: eth.source(),
         ip: ip.source(),
         port: segment.source_port(),
+        destination_port: segment.destination_port(),
         flags: segment.flags(),
         seq: segment.sequence(),
         ack: segment.acknowledgement(),
@@ -510,7 +511,7 @@ impl AsyncWrite for XdpStreamConnection {
             None => state.stack.write(this.id, buf, now),
         };
         for (peer, segment) in outbound {
-            state.tx_segment(peer, &segment);
+            state.tx_segment(peer, &segment, this.id.0);
         }
         Poll::Ready(Ok(buf.len()))
     }
@@ -533,7 +534,7 @@ impl AsyncWrite for XdpStreamConnection {
             None => state.stack.close(this.id),
         };
         for (peer, segment) in outbound {
-            state.tx_segment(peer, &segment);
+            state.tx_segment(peer, &segment, this.id.0);
         }
         let _ = state.socket.kick_tx();
         Poll::Ready(Ok(()))
@@ -581,7 +582,7 @@ impl XdpStreamUpstream {
         Ok(Self {
             shared: Arc::new(Shared {
                 inner: Mutex::new(state),
-                dial: Some(Arc::new(DialLease::new((peer.ip().octets(), peer.port())))),
+                dial: Some(Arc::new(DialLease::new())),
             }),
             peer_ip: peer.ip().octets(),
             peer_port: peer.port(),
@@ -611,7 +612,7 @@ impl XdpStreamUpstream {
             return Poll::Ready(Err(io::Error::other("missing upstream tuple lease")));
         };
         if operation.is_none() {
-            *operation = Some(lease.claim(&mut state.stack)?);
+            *operation = Some(lease.claim());
         }
         let Some(dial) = operation.as_mut() else {
             return Poll::Ready(Err(io::Error::other("missing dial ownership")));
@@ -622,8 +623,8 @@ impl XdpStreamUpstream {
                 if !dial.owns(&state.stack) {
                     return Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionReset)));
                 }
-                while let Some(connected) = state.stack.poll_connected() {
-                    if connected == id && dial.connected(&state.stack) {
+                if dial.connected(&state.stack) {
+                    while state.stack.poll_connected().is_some() {}
                         let Some(dial) = operation.take() else {
                             return Poll::Ready(Err(io::Error::other("missing dial ownership")));
                         };
@@ -637,7 +638,6 @@ impl XdpStreamUpstream {
                                 self.peer_port,
                             )),
                         }));
-                    }
                 }
             } else if let Some(&mac) = state.arp.get(&self.peer_ip) {
                 let peer = Endpoint {
@@ -646,8 +646,9 @@ impl XdpStreamUpstream {
                     port: self.peer_port,
                 };
                 let outbound = dial.start(&mut state.stack, peer)?;
+                let source_port = dial.connection().map_or(state.our_port, |(port, _, _)| port);
                 for (target, segment) in outbound {
-                    state.tx_segment(target, &segment);
+                    state.tx_segment(target, &segment, source_port);
                 }
             } else {
                 state.send_arp_request(self.peer_ip);

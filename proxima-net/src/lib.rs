@@ -29,7 +29,7 @@ pub mod packet;
 pub mod stack;
 #[cfg(feature = "frame-stack")]
 pub mod frame_stack;
-#[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
+#[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp")))]
 mod tcp_dial;
 #[cfg(feature = "alloc")]
 pub mod tcp_listener;
