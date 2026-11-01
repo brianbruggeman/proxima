@@ -550,17 +550,17 @@ impl SignedSelf {
             command.current_dir(directory);
         }
         let mut child = command.spawn().expect("spawn the signed self-copy");
-        child
-            .stdin
-            .take()
-            .expect("child stdin is piped")
-            .write_all(stdin_body)
-            .expect("write the request body to the child");
+        // a child that exits before reading its input breaks the pipe; its stderr says why
+        let written = child.stdin.take().expect("child stdin is piped").write_all(stdin_body);
         let output = child.wait_with_output().expect("wait for the child");
-        if output.status.success() {
-            Ok(output.stdout)
-        } else {
-            Err(String::from_utf8_lossy(&output.stderr).into_owned())
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        match (written, output.status.success()) {
+            (Ok(()), true) => Ok(output.stdout),
+            (Ok(()), false) => Err(stderr),
+            (Err(error), _) => Err(format!(
+                "write the request body to the child failed ({error}); child exited {}; stderr: {stderr}",
+                output.status
+            )),
         }
     }
 
