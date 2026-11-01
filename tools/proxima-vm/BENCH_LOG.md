@@ -1022,7 +1022,9 @@ Scope: `tools/proxima-vm/src/snapshot.rs` (`pattern_byte`,
 `tools/proxima-vm/src/bin/snapshot_warm_restore_probe.rs` (`target_size`,
 `content_mode` argv, raw-`memcpy` control arm, byte-level correctness gate),
 `tools/proxima-vm/tests/vm_snapshot.rs`
-(`warm_restore_wall_time_scales_with_snapshot_memory_size`,
+(`warm_restores_are_byte_correct_at_this_snapshot_size`; the timing sweep is
+`tools/proxima-vm/benches/bench_warm_restore_sweep.rs`, run with
+`cargo bench -p proxima-vm --bench bench_warm_restore_sweep`,
 `warm_restore_cost_is_size_bound_not_content_bound`,
 `percentiles_and_cov`/`iteration_series` helpers,
 `SignedProbes::snapshot_and_warm_restore_sized`).
@@ -1065,7 +1067,7 @@ calls lower to the platform's optimized `memcpy` regardless of profile, so
 the control arm is not itself debug-mode-penalized, but VM-side Rust
 call-overhead is not release-optimized.
 
-### Size-sweep table (MEASURED, `warm_restore_wall_time_scales_with_snapshot_memory_size`, run 1 of 3)
+### Size-sweep table (MEASURED, `bench_warm_restore_sweep` via `cargo bench -p proxima-vm --bench bench_warm_restore_sweep`, run 1 of 3)
 
 | size | warm p50 (ns) | warm p99 (ns) | warm CoV | memcpy control p50 (ns) | memcpy control p99 (ns) | delta p50 (ns) |
 |---|---|---|---|---|---|---|
@@ -1093,7 +1095,7 @@ host-scheduler jitter, not this instrument.
 
 ### Mechanism (result, not a bare measurement)
 
-`warm_restore_wall_time_scales_with_snapshot_memory_size` asserts
+`warm_restores_are_byte_correct_at_this_snapshot_size` (2 iterations per size) and the bench both assert
 `matched_count == iterations` (every restore re-trapped) AND every
 `sample_offset:*:true` (every sampled padding byte matched the deterministic
 pattern) at every size — both passed at every size in every run, so the
