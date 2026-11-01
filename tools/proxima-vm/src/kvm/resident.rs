@@ -120,6 +120,14 @@ fn run_on_vcpu_thread(
     let net = NetWiring { transport: &cell, stop: &stop, doorbell_out: &doorbell_out };
     let outcome = panic::catch_unwind(AssertUnwindSafe(|| boot_resident(&boot, net)))
         .unwrap_or_else(|_| LinuxOutcome::failed("the vcpu thread panicked".to_owned()));
+    if !stop.load(Ordering::Acquire) {
+        proxima_telemetry::error!(
+            failure = ?outcome.failure,
+            end = ?outcome.report.end,
+            exits = outcome.report.exit_count,
+            "resident guest ended on its own; its link is closed for good"
+        );
+    }
     guest_to_host.close();
     outcome
 }
