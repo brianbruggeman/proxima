@@ -1928,6 +1928,33 @@ pub fn carry_cuda_state(plan: &mut Plan, pairs: &[(NodeId, NodeId)]) -> bool {
     }
 }
 
+/// Keeps each `(cache input, new-rows output)` pair's cache on the device of a [`Plan::Cuda`],
+/// appending every call's output rows to it there; `cached_rows` is the valid row count of the
+/// host block at the first upload. Returns whether the plan carries them; every other backend
+/// returns `false`.
+#[cfg(feature = "cuda-driver")]
+pub fn carry_cuda_rows(plan: &mut Plan, pairs: &[(NodeId, NodeId)], cached_rows: u64) -> bool {
+    match plan {
+        Plan::Cuda(cuda_plan) => cuda_plan.carry_rows(pairs, cached_rows),
+        #[allow(unreachable_patterns)]
+        _ => false,
+    }
+}
+
+/// Reads the valid rows of every device-resident appended cache of a [`Plan::Cuda`] back to
+/// the host, keyed by the cache INPUT node.
+///
+/// # Errors
+/// A device read failure.
+#[cfg(feature = "cuda-driver")]
+pub fn drain_cuda_appended_rows(plan: &mut Plan) -> Result<Vec<(NodeId, Vec<f32>)>, BackendError> {
+    match plan {
+        Plan::Cuda(cuda_plan) => Ok(cuda_plan.drain_appended_rows()?),
+        #[allow(unreachable_patterns)]
+        _ => Ok(Vec::new()),
+    }
+}
+
 /// Hands a [`Plan::Cuda`]'s device-carried state to the driver before the plan
 /// is evicted, so the plan that replaces it adopts the state on the device.
 #[cfg(feature = "cuda-driver")]
