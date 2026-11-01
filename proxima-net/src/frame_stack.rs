@@ -13,7 +13,7 @@
 //! call: the sink and mint must settle at once ([`DriverError::Stalled`]); the source parks the task on its waker.
 
 use crate::stack::{self, Action};
-use crate::tcp_dial::{DialError, DialGuard, DialLease, SynStep, wake_after};
+use crate::tcp_dial::{DialError, DialGuard, DialLease, SynStep, backoff_interval, resend_due, wake_after};
 use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
 use crate::tcp_stack::{ConnId, Outbound, TcpStack};
 use core::fmt::Debug;
@@ -187,7 +187,7 @@ pub struct Driver<Rx, Tx, Mint> {
     our_ip: [u8; 4],
     our_port: u16,
     arp: HashMap<[u8; 4], [u8; 6]>,
-    arp_sent: HashMap<[u8; 4], ClockInstant>,
+    arp_sent: HashMap<[u8; 4], (ClockInstant, u32)>,
     retransmit: Duration,
     connection_waiters: HashMap<ConnId, Waker>,
     accept_waiters: Vec<Waker>,
@@ -222,7 +222,8 @@ impl<Rx, Tx, Mint> Driver<Rx, Tx, Mint> {
         }
     }
 
-    /// Interval before an unanswered ARP request is sent again.
+    /// Initial interval before an unanswered ARP request or SYN is sent again;
+    /// each further resend waits twice as long, up to the RFC 6298 maximum.
     #[must_use]
     pub fn with_retransmit(mut self, interval: Duration) -> Self {
         self.retransmit = interval;
@@ -294,13 +295,20 @@ where
     }
 
     fn retransmit_arp(&mut self, target: [u8; 4], cx: &mut Context<'_>) -> Result<(), DriverFailure<Rx, Tx, Mint>> {
-        let due = self.arp_sent.get(&target).is_none_or(|sent| time::now().saturating_duration_since(*sent) >= self.retransmit);
+        let previous = self.arp_sent.get(&target).copied();
+        let due = previous.is_none_or(|(sent, resends)| {
+            resend_due(self.retransmit, resends, time::now().saturating_duration_since(sent))
+        });
         if due {
             self.send_arp_request(target)?;
-            self.arp_sent.insert(target, time::now());
+            let resends = previous.map_or(0, |(_, resends)| resends.saturating_add(1));
+            self.arp_sent.insert(target, (time::now(), resends));
         }
-        let waited = self.arp_sent.get(&target).map_or(Duration::ZERO, |sent| time::now().saturating_duration_since(*sent));
-        wake_after(self.retransmit.saturating_sub(waited), cx);
+        let (waited, resends) = self
+            .arp_sent
+            .get(&target)
+            .map_or((Duration::ZERO, 0), |(sent, resends)| (time::now().saturating_duration_since(*sent), *resends));
+        wake_after(backoff_interval(self.retransmit, resends).saturating_sub(waited), cx);
         Ok(())
     }
 
@@ -309,7 +317,7 @@ where
         let remaining = match dial.next_syn(self.retransmit) {
             SynStep::Send(segments) => {
                 self.send_segments(segments, source_port).map_err(into_io)?;
-                self.retransmit
+                dial.syn_interval(self.retransmit)
             }
             SynStep::Wait(remaining) => remaining,
             SynStep::Exhausted => {
@@ -1077,6 +1085,51 @@ mod tests {
 
         assert_eq!(dial.to_server.frames.len(), 3, "each poll past the deadline sends one arp request");
         assert!(dial.wakes.0.load(Ordering::SeqCst) > 0, "a passed deadline wakes the task");
+    }
+
+    const SILENT_TARGET: [u8; 4] = [10, 0, 2, 15];
+    const OTHER_TARGET: [u8; 4] = [10, 0, 2, 16];
+
+    fn arp_driver(retransmit: Duration) -> (Wire, Driver<WireRx, WireTx, WireMint>) {
+        let to_server = WireQueue::new(64);
+        let pipes = (WireRx(WireQueue::new(64)), WireTx(to_server.clone()), WireMint);
+        (to_server, Driver::new(pipes, CLIENT_MAC, CLIENT, 0x2000).with_retransmit(retransmit))
+    }
+
+    fn request_arp(driver: &mut Driver<WireRx, WireTx, WireMint>, target: [u8; 4]) {
+        driver.retransmit_arp(target, &mut Context::from_waker(Waker::noop())).expect("arp tx has room");
+    }
+
+    #[test]
+    fn the_first_arp_request_goes_out_at_once_and_a_second_waits_out_the_interval() {
+        let (to_server, mut driver) = arp_driver(Duration::from_secs(3600));
+
+        request_arp(&mut driver, SILENT_TARGET);
+        request_arp(&mut driver, SILENT_TARGET);
+
+        assert_eq!(to_server.frames.len(), 1, "the second poll falls inside the interval");
+        assert_eq!(driver.arp_sent[&SILENT_TARGET].1, 0, "the first request is not a resend");
+    }
+
+    #[test]
+    fn each_arp_resend_is_counted_so_the_next_wait_doubles() {
+        let (to_server, mut driver) = arp_driver(Duration::ZERO);
+
+        (0..4).for_each(|_| request_arp(&mut driver, SILENT_TARGET));
+
+        assert_eq!(to_server.frames.len(), 4, "a zero interval is always due");
+        assert_eq!(driver.arp_sent[&SILENT_TARGET].1, 3, "one request then three resends");
+    }
+
+    #[test]
+    fn arp_resend_counts_are_kept_per_target() {
+        let (_to_server, mut driver) = arp_driver(Duration::ZERO);
+
+        (0..3).for_each(|_| request_arp(&mut driver, SILENT_TARGET));
+        request_arp(&mut driver, OTHER_TARGET);
+
+        assert_eq!(driver.arp_sent[&SILENT_TARGET].1, 2);
+        assert_eq!(driver.arp_sent[&OTHER_TARGET].1, 0, "a fresh target starts its own backoff");
     }
 
     #[test]

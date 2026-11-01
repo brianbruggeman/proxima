@@ -27,7 +27,7 @@ use super::sys;
 use super::uapi::{self, xdp_desc};
 use super::xsk::{RingSizes, UmemConfig, XskSocket};
 use crate::stack::{self, Action};
-use crate::tcp_dial::{DEFAULT_RETRANSMIT, DialError, DialGuard, DialLease, SynStep, wake_after};
+use crate::tcp_dial::{DEFAULT_RETRANSMIT, DialError, DialGuard, DialLease, SynStep, backoff_interval, resend_due, wake_after};
 use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
 use crate::tcp_stack::{ConnId, TcpStack};
 use futures::io::{AsyncRead, AsyncWrite};
@@ -66,7 +66,7 @@ struct State {
     our_ip: [u8; 4],
     our_port: u16,
     arp: HashMap<[u8; 4], [u8; 6]>,
-    arp_sent: HashMap<[u8; 4], ClockInstant>,
+    arp_sent: HashMap<[u8; 4], (ClockInstant, u32)>,
 }
 
 struct Shared {
@@ -274,19 +274,20 @@ impl State {
     }
 
     fn retransmit_arp(&mut self, target: [u8; 4], cx: &mut Context<'_>) {
-        let due = self
-            .arp_sent
-            .get(&target)
-            .is_none_or(|sent| time::now().saturating_duration_since(*sent) >= DEFAULT_RETRANSMIT);
+        let previous = self.arp_sent.get(&target).copied();
+        let due = previous.is_none_or(|(sent, resends)| {
+            resend_due(DEFAULT_RETRANSMIT, resends, time::now().saturating_duration_since(sent))
+        });
         if due {
             self.send_arp_request(target);
-            self.arp_sent.insert(target, time::now());
+            let resends = previous.map_or(0, |(_, resends)| resends.saturating_add(1));
+            self.arp_sent.insert(target, (time::now(), resends));
         }
-        let waited = self
+        let (waited, resends) = self
             .arp_sent
             .get(&target)
-            .map_or(Duration::ZERO, |sent| time::now().saturating_duration_since(*sent));
-        wake_after(DEFAULT_RETRANSMIT.saturating_sub(waited), cx);
+            .map_or((Duration::ZERO, 0), |(sent, resends)| (time::now().saturating_duration_since(*sent), *resends));
+        wake_after(backoff_interval(DEFAULT_RETRANSMIT, resends).saturating_sub(waited), cx);
     }
 
     fn retransmit_syn(&mut self, dial: &mut DialGuard, cx: &mut Context<'_>) -> io::Result<()> {
@@ -296,7 +297,7 @@ impl State {
                 for (target, segment) in segments {
                     self.tx_segment(*target, segment, source_port);
                 }
-                DEFAULT_RETRANSMIT
+                dial.syn_interval(DEFAULT_RETRANSMIT)
             }
             SynStep::Wait(remaining) => remaining,
             SynStep::Exhausted => {
