@@ -3500,7 +3500,7 @@ const NORM_EPSILON: f32 = 1e-5;
 const NORM_RUNS: usize = 3;
 const NORM_CHAIN: usize = 24;
 const BUSY_EXTENT: u32 = 1 << 26;
-const BUSY_DEPTH: usize = 8;
+const BUSY_DEPTH: usize = 40;
 
 /// Eight tanh passes over a large buffer keep the stream backlogged while the host
 /// enqueues the norm chain, so event deltas between the norms are device time and
