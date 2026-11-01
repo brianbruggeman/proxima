@@ -23,9 +23,10 @@ const F32_EXACT_INTEGER_BOUND: u64 = 1 << 24;
 ///   consistent key/value rows, a non-empty cached range for the two-range
 ///   form, the f32-exact row bound) and whose query rows and output extents
 ///   did not move;
-/// - anything else touched, any condition failing, or a partial-rotary op
-///   (whose pass-plane operands this function does not re-check), returns
-///   `None` and the caller binds from scratch.
+/// - a partial-rotary op additionally needs its pass-plane operands (query,
+///   cached key, new key) to agree with the same query, cached and new row
+///   counts, and a non-empty cached range;
+/// - anything else touched, or any condition failing, returns `None` and the caller binds from scratch.
 ///
 /// Applying the returned patches to `resolved` yields exactly the ops a
 /// fresh bind at `next` returns, which `refit_matches_a_fresh_bind_*` in this
@@ -156,7 +157,8 @@ fn refit_one(bound: &BoundOp, next: &Shapes) -> Option<BoundOp> {
     else {
         return None;
     };
-    if rotary_dim != head_dim {
+    let has_pass_plane = rotary_dim != head_dim;
+    if has_pass_plane && *cached_key_rows == 0 {
         return None;
     }
     let rows = |index: usize| next.of(operands.get(index)?.0).first().copied();
@@ -172,6 +174,9 @@ fn refit_one(bound: &BoundOp, next: &Shapes) -> Option<BoundOp> {
         let in_range = new.checked_sub(1)?.checked_add(cached)? < F32_EXACT_INTEGER_BOUND;
         (consistent && cached > 0 && in_range).then_some((cached, new))?
     };
+    if has_pass_plane && !pass_planes_agree(operands, *query_rows, refit_cached, refit_new, next) {
+        return None;
+    }
     let mut patched = bound.clone();
     if let BoundOpKind::CachedAttention {
         cached_key_rows,
@@ -183,4 +188,23 @@ fn refit_one(bound: &BoundOp, next: &Shapes) -> Option<BoundOp> {
         *new_key_rows = refit_new;
     }
     Some(patched)
+}
+
+/// The partial-rotary pass triple is always the last three operands
+/// (`cached_attention_candidates` re-appends it after the optional
+/// `cached_len`): query pass, cached key pass, new key pass.
+fn pass_planes_agree(
+    operands: &BoundOperands,
+    query_rows: u64,
+    cached_rows: u64,
+    new_rows: u64,
+    next: &Shapes,
+) -> bool {
+    let Some(start) = operands.len().checked_sub(3) else {
+        return false;
+    };
+    let rows = |index: usize| next.of(operands[index].0).first().copied();
+    rows(start) == Some(query_rows)
+        && rows(start + 1) == Some(cached_rows)
+        && rows(start + 2) == Some(new_rows)
 }
