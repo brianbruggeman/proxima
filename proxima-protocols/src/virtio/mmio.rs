@@ -53,6 +53,12 @@ pub const REG_QUEUE_DEVICE_LOW: u64 = 0x0a0;
 pub const REG_QUEUE_DEVICE_HIGH: u64 = 0x0a4;
 pub const REG_CONFIG_GENERATION: u64 = 0x0fc;
 
+/// `InterruptStatus` bit 0 (spec §4.2.2): a virtqueue has used buffers.
+pub const INTERRUPT_USED_BUFFER: u32 = 1;
+
+/// `InterruptStatus` bit 1 (spec §4.2.2): the device config space changed.
+pub const INTERRUPT_CONFIG_CHANGE: u32 = 2;
+
 /// One raw register access, as the transport layer (`backend_macos.c`'s
 /// data-abort decode, §4.2.2) recovers it from a trapped guest load/store:
 /// the byte offset from the device's MMIO window base, whether it was a
@@ -101,6 +107,9 @@ pub enum MmioError {
     WriteOnlyRegister { offset: u64 },
     /// `QueueSel` named a queue index this device was not configured with.
     QueueSelectOutOfRange { queue: u16, queue_count: u16 },
+    /// A narrow config-space read named a width other than 1, 2, 4 or 8, or
+    /// ran past the end of the config image.
+    ConfigAccess { offset: u64, length: usize },
     /// The `Status` register write was rejected by the device-status FSM.
     Negotiation(NegotiationError),
 }
@@ -120,6 +129,10 @@ impl core::fmt::Display for MmioError {
             Self::QueueSelectOutOfRange { queue, queue_count } => write!(
                 formatter,
                 "queue index {queue} is out of range for a device with {queue_count} queues"
+            ),
+            Self::ConfigAccess { offset, length } => write!(
+                formatter,
+                "config read of {length} bytes at offset {offset:#x} is not a valid width inside the config space"
             ),
             Self::Negotiation(inner) => write!(formatter, "{inner}"),
         }
@@ -158,6 +171,7 @@ pub struct MmioDevice<const MAX_QUEUES: usize> {
     queue_sel: u16,
     queue_num_max: u16,
     queues: [QueueConfig; MAX_QUEUES],
+    interrupt_status: u32,
 }
 
 impl<const MAX_QUEUES: usize> MmioDevice<MAX_QUEUES> {
@@ -179,12 +193,22 @@ impl<const MAX_QUEUES: usize> MmioDevice<MAX_QUEUES> {
             queue_sel: 0,
             queue_num_max,
             queues: [QueueConfig::default(); MAX_QUEUES],
+            interrupt_status: 0,
         }
     }
 
     #[must_use]
     pub fn status(&self) -> DeviceStatus {
         self.negotiation.status()
+    }
+
+    pub fn raise_interrupt(&mut self, bits: u32) {
+        self.interrupt_status |= bits;
+    }
+
+    #[must_use]
+    pub fn interrupt_pending(&self) -> bool {
+        self.interrupt_status != 0
     }
 
     /// The fully assembled guest-physical descriptor-table address for
@@ -342,21 +366,29 @@ impl<const MAX_QUEUES: usize> MmioDevice<MAX_QUEUES> {
                 offset: access.offset,
             }),
 
-            (REG_INTERRUPT_STATUS, false) => Ok(MmioEffect::ReadValue(0)),
+            (REG_INTERRUPT_STATUS, false) => Ok(MmioEffect::ReadValue(self.interrupt_status)),
             (REG_INTERRUPT_STATUS, true) => Err(MmioError::ReadOnlyRegister {
                 offset: access.offset,
             }),
 
-            (REG_INTERRUPT_ACK, true) => Ok(MmioEffect::Applied),
+            (REG_INTERRUPT_ACK, true) => {
+                self.interrupt_status &= !access.value;
+                Ok(MmioEffect::Applied)
+            }
             (REG_INTERRUPT_ACK, false) => Err(MmioError::WriteOnlyRegister {
                 offset: access.offset,
             }),
 
-            (REG_STATUS, true) => self
-                .negotiation
-                .write_status(access.value as u8)
-                .map(MmioEffect::StatusTransition)
-                .map_err(MmioError::Negotiation),
+            (REG_STATUS, true) => {
+                let transition = self
+                    .negotiation
+                    .write_status(access.value as u8)
+                    .map_err(MmioError::Negotiation)?;
+                if transition == DeviceStatus::Reset {
+                    self.interrupt_status = 0;
+                }
+                Ok(MmioEffect::StatusTransition(transition))
+            }
             (REG_STATUS, false) => Ok(MmioEffect::ReadValue(u32::from(
                 self.negotiation.status().as_byte(),
             ))),
@@ -676,5 +708,60 @@ mod tests {
             error,
             MmioError::Negotiation(NegotiationError::OutOfOrder { .. })
         ));
+    }
+
+    #[test]
+    fn raised_interrupt_bits_read_back_and_partial_ack_clears_only_acked_bits() {
+        let mut device = MmioDevice::<1>::new(DEVICE_ID_CONSOLE, 4, FEATURE_VERSION_1);
+        assert!(!device.interrupt_pending());
+        assert_eq!(
+            device.apply(read(REG_INTERRUPT_STATUS)).unwrap(),
+            MmioEffect::ReadValue(0)
+        );
+
+        device.raise_interrupt(INTERRUPT_USED_BUFFER);
+        device.raise_interrupt(INTERRUPT_CONFIG_CHANGE);
+        assert!(device.interrupt_pending());
+        assert_eq!(
+            device.apply(read(REG_INTERRUPT_STATUS)).unwrap(),
+            MmioEffect::ReadValue(3)
+        );
+
+        device
+            .apply(write(REG_INTERRUPT_ACK, INTERRUPT_USED_BUFFER))
+            .unwrap();
+        assert_eq!(
+            device.apply(read(REG_INTERRUPT_STATUS)).unwrap(),
+            MmioEffect::ReadValue(INTERRUPT_CONFIG_CHANGE)
+        );
+        assert!(device.interrupt_pending());
+
+        device
+            .apply(write(REG_INTERRUPT_ACK, INTERRUPT_CONFIG_CHANGE))
+            .unwrap();
+        assert!(!device.interrupt_pending());
+    }
+
+    #[test]
+    fn ack_of_unraised_bits_leaves_pending_bits_intact() {
+        let mut device = MmioDevice::<1>::new(DEVICE_ID_CONSOLE, 4, FEATURE_VERSION_1);
+        device.raise_interrupt(INTERRUPT_USED_BUFFER);
+        device
+            .apply(write(REG_INTERRUPT_ACK, INTERRUPT_CONFIG_CHANGE))
+            .unwrap();
+        assert!(device.interrupt_pending());
+    }
+
+    #[test]
+    fn device_reset_clears_pending_interrupts() {
+        let mut device = MmioDevice::<1>::new(DEVICE_ID_CONSOLE, 4, FEATURE_VERSION_1);
+        device
+            .apply(write(REG_STATUS, u32::from(STATUS_ACKNOWLEDGE)))
+            .unwrap();
+        device.raise_interrupt(INTERRUPT_USED_BUFFER);
+
+        device.apply(write(REG_STATUS, 0)).unwrap();
+
+        assert!(!device.interrupt_pending());
     }
 }

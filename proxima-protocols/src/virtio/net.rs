@@ -15,17 +15,18 @@
 //! defect, not a latent one; the fix is to never offer what is not built.
 //!
 //! Device config space (spec §5.1.4: MAC, status, max_virtqueue_pairs) is
-//! exposed as fixed 32-bit-word registers starting at offset `0x100`,
-//! matching the width discipline `super::mmio`'s core register block
-//! already uses for every other register in this codec — a deliberate
-//! simplification against the spec's "driver uses the natural per-field
-//! width" rule (§4.2.2.2), scoped to this M6 slice: no guest driver in
-//! this worktree issues a narrower-than-32-bit config-space access yet.
-//! [`NetConfigSpace::apply`] composes `MmioDevice::apply` for the core
-//! register block rather than reimplementing it (reuse-first, principle 1).
+//! served from a byte image starting at offset `0x100`. A driver reads each
+//! field at its natural width (spec §4.2.2.2: the MAC bytewise, `status` and
+//! `max_virtqueue_pairs` as 16 bits), so [`NetConfigSpace::read_config`]
+//! accepts 1, 2, 4 and 8 byte reads anywhere inside the image, and
+//! [`NetConfigSpace::apply`] serves aligned 32-bit words through that same
+//! path. `apply` composes `MmioDevice::apply` for the core register block
+//! rather than reimplementing it (reuse-first, principle 1).
 
 use super::error::DecodeError;
-use super::mmio::{MmioAccess, MmioDevice, MmioEffect, MmioError};
+use super::mmio::{
+    INTERRUPT_CONFIG_CHANGE, INTERRUPT_USED_BUFFER, MmioAccess, MmioDevice, MmioEffect, MmioError,
+};
 use super::raw::read_u16;
 
 /// `DeviceID` value for the network device type (spec §5, Table 5.1).
@@ -192,6 +193,10 @@ const REG_CONFIG_MAC_LOW: u64 = CONFIG_SPACE_BASE;
 const REG_CONFIG_MAC_HIGH_STATUS: u64 = CONFIG_SPACE_BASE + 0x004;
 const REG_CONFIG_MAX_VQ_PAIRS: u64 = CONFIG_SPACE_BASE + 0x008;
 
+const CONFIG_STATUS_OFFSET: usize = 6;
+const CONFIG_MAX_VQ_PAIRS_OFFSET: usize = 8;
+const CONFIG_IMAGE_LEN: usize = 12;
+
 /// `status` config-space field value (spec §5.1.4, `VIRTIO_NET_S_LINK_UP`):
 /// reported while [`NetConfigSpace::link_up`] holds, cleared when the host
 /// takes the link down.
@@ -228,7 +233,47 @@ impl NetConfigSpace {
     }
 
     pub fn set_link_up(&mut self, link_up: bool) {
+        if self.link_up != link_up {
+            self.transport.raise_interrupt(INTERRUPT_CONFIG_CHANGE);
+        }
         self.link_up = link_up;
+    }
+
+    pub fn raise_used_buffer(&mut self) {
+        self.transport.raise_interrupt(INTERRUPT_USED_BUFFER);
+    }
+
+    #[must_use]
+    pub fn interrupt_pending(&self) -> bool {
+        self.transport.interrupt_pending()
+    }
+
+    fn config_image(&self) -> [u8; CONFIG_IMAGE_LEN] {
+        let mut image = [0u8; CONFIG_IMAGE_LEN];
+        let status = if self.link_up { NET_STATUS_LINK_UP } else { 0 };
+        image[..6].copy_from_slice(&self.mac);
+        image[CONFIG_STATUS_OFFSET..CONFIG_STATUS_OFFSET + 2].copy_from_slice(&status.to_le_bytes());
+        image[CONFIG_MAX_VQ_PAIRS_OFFSET..CONFIG_MAX_VQ_PAIRS_OFFSET + 2]
+            .copy_from_slice(&1u16.to_le_bytes());
+        image
+    }
+
+    /// Read `length` (1, 2, 4 or 8) config-space bytes at absolute `offset`
+    /// as a little-endian integer.
+    pub fn read_config(&self, offset: u64, length: usize) -> Result<u64, MmioError> {
+        let invalid = MmioError::ConfigAccess { offset, length };
+        if !matches!(length, 1 | 2 | 4 | 8) {
+            return Err(invalid);
+        }
+        let start = offset
+            .checked_sub(CONFIG_SPACE_BASE)
+            .and_then(|relative| usize::try_from(relative).ok())
+            .ok_or(invalid)?;
+        let image = self.config_image();
+        let bytes = image.get(start..start + length).ok_or(invalid)?;
+        let mut word = [0u8; 8];
+        word[..length].copy_from_slice(bytes);
+        Ok(u64::from_le_bytes(word))
     }
 
     #[must_use]
@@ -251,34 +296,16 @@ impl NetConfigSpace {
     /// it are this device's own config-space block.
     pub fn apply(&mut self, access: MmioAccess) -> Result<MmioEffect, MmioError> {
         match access.offset {
-            REG_CONFIG_MAC_LOW if !access.is_write => {
-                Ok(MmioEffect::ReadValue(u32::from_le_bytes([
-                    self.mac[0],
-                    self.mac[1],
-                    self.mac[2],
-                    self.mac[3],
-                ])))
+            REG_CONFIG_MAC_LOW | REG_CONFIG_MAC_HIGH_STATUS | REG_CONFIG_MAX_VQ_PAIRS
+                if access.is_write =>
+            {
+                Err(MmioError::ReadOnlyRegister {
+                    offset: access.offset,
+                })
             }
-            REG_CONFIG_MAC_LOW => Err(MmioError::ReadOnlyRegister {
-                offset: access.offset,
-            }),
-
-            REG_CONFIG_MAC_HIGH_STATUS if !access.is_write => {
-                let mut word = [0u8; 4];
-                word[0..2].copy_from_slice(&self.mac[4..6]);
-                let status = if self.link_up { NET_STATUS_LINK_UP } else { 0 };
-                word[2..4].copy_from_slice(&status.to_le_bytes());
-                Ok(MmioEffect::ReadValue(u32::from_le_bytes(word)))
-            }
-            REG_CONFIG_MAC_HIGH_STATUS => Err(MmioError::ReadOnlyRegister {
-                offset: access.offset,
-            }),
-
-            REG_CONFIG_MAX_VQ_PAIRS if !access.is_write => Ok(MmioEffect::ReadValue(1)),
-            REG_CONFIG_MAX_VQ_PAIRS => Err(MmioError::ReadOnlyRegister {
-                offset: access.offset,
-            }),
-
+            REG_CONFIG_MAC_LOW | REG_CONFIG_MAC_HIGH_STATUS | REG_CONFIG_MAX_VQ_PAIRS => self
+                .read_config(access.offset, 4)
+                .map(|word| MmioEffect::ReadValue(word as u32)),
             _ => self.transport.apply(access),
         }
     }
@@ -552,6 +579,95 @@ mod tests {
             MmioEffect::StatusTransition(super::super::status::DeviceStatus::Acknowledged)
         );
         let _ = STATUS_DRIVER_OK; // referenced only to keep the import used across cfg permutations
+    }
+
+    #[test]
+    fn bytewise_mac_read_equals_the_six_mac_bytes() {
+        let mac = [0x02, 0xde, 0xad, 0xbe, 0xef, 0x01];
+        let device = NetConfigSpace::new(mac, 4);
+
+        let bytes: Vec<u8> = (0..6)
+            .map(|index| device.read_config(CONFIG_SPACE_BASE + index, 1).unwrap() as u8)
+            .collect();
+
+        assert_eq!(bytes, mac);
+    }
+
+    #[test]
+    fn status_and_max_pairs_read_as_sixteen_bits() {
+        let mut device = NetConfigSpace::new([0; 6], 4);
+        assert_eq!(
+            device.read_config(CONFIG_SPACE_BASE + 6, 2).unwrap(),
+            u64::from(NET_STATUS_LINK_UP)
+        );
+        assert_eq!(device.read_config(CONFIG_SPACE_BASE + 8, 2).unwrap(), 1);
+
+        device.set_link_up(false);
+
+        assert_eq!(device.read_config(CONFIG_SPACE_BASE + 6, 2).unwrap(), 0);
+    }
+
+    #[test]
+    fn eight_byte_read_spans_mac_and_status() {
+        let device = NetConfigSpace::new([1, 2, 3, 4, 5, 6], 4);
+        assert_eq!(
+            device.read_config(CONFIG_SPACE_BASE, 8).unwrap(),
+            u64::from_le_bytes([1, 2, 3, 4, 5, 6, 1, 0])
+        );
+    }
+
+    #[test]
+    fn config_read_rejects_bad_widths_and_out_of_image_offsets() {
+        let device = NetConfigSpace::new([0; 6], 4);
+        for (offset, length) in [
+            (CONFIG_SPACE_BASE, 3),
+            (CONFIG_SPACE_BASE, 0),
+            (CONFIG_SPACE_BASE + 9, 4),
+            (CONFIG_SPACE_BASE + 12, 1),
+            (CONFIG_SPACE_BASE - 4, 4),
+        ] {
+            assert_eq!(
+                device.read_config(offset, length).unwrap_err(),
+                MmioError::ConfigAccess { offset, length }
+            );
+        }
+    }
+
+    #[test]
+    fn link_change_raises_config_change_but_no_change_does_not() {
+        let mut device = NetConfigSpace::new([0; 6], 4);
+        device.set_link_up(true);
+        assert!(!device.interrupt_pending());
+
+        device.set_link_up(false);
+
+        assert!(device.interrupt_pending());
+        let status = MmioAccess {
+            offset: super::super::mmio::REG_INTERRUPT_STATUS,
+            is_write: false,
+            value: 0,
+        };
+        assert_eq!(
+            device.apply(status).unwrap(),
+            MmioEffect::ReadValue(INTERRUPT_CONFIG_CHANGE)
+        );
+    }
+
+    #[test]
+    fn used_buffer_interrupt_is_raised_then_acked_through_the_register() {
+        let mut device = NetConfigSpace::new([0; 6], 4);
+        device.raise_used_buffer();
+        assert!(device.interrupt_pending());
+
+        device
+            .apply(MmioAccess {
+                offset: super::super::mmio::REG_INTERRUPT_ACK,
+                is_write: true,
+                value: INTERRUPT_USED_BUFFER,
+            })
+            .unwrap();
+
+        assert!(!device.interrupt_pending());
     }
 
     #[test]
