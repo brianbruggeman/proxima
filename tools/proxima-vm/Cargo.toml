@@ -161,3 +161,13 @@ tokio = { workspace = true, features = ["rt-multi-thread"] }
 kvm-bindings = { version = "0.14.2", optional = true }
 kvm-ioctls = { version = "0.25.1", optional = true }
 libc = { workspace = true, optional = true }
+
+[[bench]]
+name = "bench_frame_pipe"
+harness = false
+required-features = ["std"]
+
+[[bench]]
+name = "bench_virtio_net_queue"
+harness = false
+required-features = ["std"]
