@@ -2237,6 +2237,19 @@ impl Plan {
         self.numeric_policy
     }
 
+    /// Whether every reader of the K/V inputs `is_kv_input` accepts is a fused
+    /// `CachedAttention`, so the cached range may be bound padded to its bucket. The same
+    /// graph predicate the CUDA plan asks.
+    #[must_use]
+    pub fn pads_kv_safely(&self, is_kv_input: impl Fn(&str) -> bool) -> bool {
+        proxima_tensor::bind::kv_read_only_by_fused_attention(
+            &self.program,
+            &self.prepared.resolved,
+            &self.prepared.effective_outputs,
+            is_kv_input,
+        )
+    }
+
     /// `Ok(())` when `desired` matches the policy this plan was bound
     /// under, `Err` otherwise. See [`Self::numeric_policy`]'s own doc for
     /// why there is no in-place rebind.

@@ -222,13 +222,12 @@ impl GpuDriver {
         }
     }
 
-    /// Whether this driver always renders the fused `BoundOpKind::CachedAttention`, whose
-    /// bound excludes the pad rows of a bucketed KV range. Wgpu runs the unfused chain and
-    /// sees every pad row, so its KV range is bound exact. CUDA renders the fused op only
-    /// where the matcher accepts the attention form, so it is decided per plan by
-    /// [`cuda_plan_pads_kv`], not here.
+    /// Capability only: whether this driver renders every `BoundOpKind::CachedAttention`
+    /// it is handed, usable before a plan exists. The padding decision itself is the graph
+    /// property [`plan_pads_kv`]; wgpu runs the unfused chain and CUDA renders the fused
+    /// op only where its matcher accepts the form, so neither claims it up front.
     #[must_use]
-    pub const fn fuses_cached_attention(self) -> bool {
+    pub const fn renders_fused_cached_attention(self) -> bool {
         matches!(self, GpuDriver::Metal)
     }
 }
@@ -1455,17 +1454,23 @@ pub fn cuda_kernel_identities(plan: &Plan) -> Option<Vec<String>> {
     }
 }
 
-/// Whether a [`Plan::Cuda`] may bind its cached K/V range padded to a bucket: true only
-/// when every reader of an input `is_kv_input` accepts is a fused `CachedAttention`, whose
-/// runtime bound excludes the pad rows. A plan with any other reader of those inputs (an
-/// unfused attention chain would score zero pad rows into its softmax) is `false`, as is
-/// every other plan arm. See [`cuda_driver::CudaPlan::pads_kv_safely`].
-#[cfg(feature = "cuda-driver")]
+/// Whether a plan may bind its cached K/V range padded to a bucket: true only when every
+/// reader of an input `is_kv_input` accepts is a fused `CachedAttention`, whose runtime
+/// bound excludes the pad rows. A plan with any other reader of those inputs (an unfused
+/// attention chain would score zero pad rows into its softmax) is `false`, as is every arm
+/// that never renders the fused op. CUDA and Metal both answer with
+/// [`proxima_tensor::bind::kv_read_only_by_fused_attention`].
 #[must_use]
-pub fn cuda_plan_pads_kv(plan: &Plan, is_kv_input: impl Fn(&str) -> bool) -> bool {
+pub fn plan_pads_kv(plan: &Plan, is_kv_input: impl Fn(&str) -> bool) -> bool {
     match plan {
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Plan::Metal(metal_plan) => metal_plan.pads_kv_safely(is_kv_input),
+        #[cfg(feature = "cuda-driver")]
         Plan::Cuda(cuda_plan) => cuda_plan.pads_kv_safely(is_kv_input),
-        _ => false,
+        _ => {
+            let _ = is_kv_input;
+            false
+        }
     }
 }
 
@@ -2017,12 +2022,12 @@ mod tests {
 
     #[test]
     fn only_the_metal_driver_always_renders_the_fused_cached_attention_bound() {
-        assert!(GpuDriver::Metal.fuses_cached_attention());
-        assert!(!GpuDriver::Wgpu.fuses_cached_attention());
+        assert!(GpuDriver::Metal.renders_fused_cached_attention());
+        assert!(!GpuDriver::Wgpu.renders_fused_cached_attention());
         #[cfg(feature = "cuda-driver")]
         assert!(
-            !GpuDriver::Cuda.fuses_cached_attention(),
-            "cuda fuses per plan, decided by cuda_plan_pads_kv"
+            !GpuDriver::Cuda.renders_fused_cached_attention(),
+            "cuda fuses per plan, decided by plan_pads_kv"
         );
     }
 

@@ -31,8 +31,8 @@ use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
 use crate::msl::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{
-    RefreshRefusal, changed_nodes, refit_cached_attention_at, refresh_bound_ops, touched_positions,
-    touches_changed,
+    RefreshRefusal, changed_nodes, kv_read_only_by_fused_attention, refit_cached_attention_at,
+    refresh_bound_ops, touched_positions, touches_changed,
 };
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, NodeId, NumericPolicy, Op, QuantizedBlock,
@@ -1474,33 +1474,6 @@ fn refresh_bound_resolved(
     )?;
     correct_packed_matmul_layouts(&mut refreshed, &packed_operands.keys().copied().collect());
     Ok((refreshed, touched))
-}
-
-fn kv_read_only_by_fused_attention(
-    program: &[Op],
-    resolved: &[BoundOp],
-    outputs: &[NodeId],
-    is_kv_input: impl Fn(&str) -> bool,
-) -> bool {
-    let kv_nodes: BTreeSet<NodeId> = program
-        .iter()
-        .enumerate()
-        .filter_map(|(index, op)| match op {
-            Op::Input {
-                name: Some(name), ..
-            } if is_kv_input(name) => Some(NodeId(index as u32)),
-            _ => None,
-        })
-        .collect();
-    let is_fused = |bound: &&BoundOp| matches!(bound.kind, BoundOpKind::CachedAttention { .. });
-    let fused_readers = resolved.iter().filter(is_fused).count();
-    let other_reader = resolved
-        .iter()
-        .filter(|bound| !is_fused(bound))
-        .flat_map(BoundOp::all_read_sources)
-        .any(|(node, _, _)| kv_nodes.contains(node));
-    let kv_is_output = outputs.iter().any(|node| kv_nodes.contains(node));
-    !kv_nodes.is_empty() && fused_readers > 0 && !other_reader && !kv_is_output
 }
 
 fn cuda_supports_kind(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
@@ -2987,7 +2960,7 @@ mod tests {
     use crate::msl::Codec;
     use cudarc::nvrtc::{CompileOptions, Ptx};
     use proxima_tensor::{
-        BoundOp, BoundOpKind, ComposedBody, DType, Layout, Lookup, NodeId, Op, QuantizedBlock,
+        BoundOp, BoundOpKind, DType, NodeId, QuantizedBlock,
     };
 
     const KERNEL_CACHE_DIR_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
@@ -3385,118 +3358,5 @@ mod tests {
                 assert!(message.contains("/nonexistent/cuda/include"), "{message}");
             },
         );
-    }
-
-    fn kv_program() -> Vec<Op> {
-        ["kv_cache.0.k_even", "kv_cache.0.v", "token_embedding"]
-            .map(|name| Op::Input {
-                dtype: DType::FLOAT32,
-                shape: Vec::new(),
-                name: Some(name.to_string()),
-            })
-            .to_vec()
-    }
-
-    fn reader(kind: BoundOpKind, node: u32) -> BoundOp {
-        BoundOp {
-            node: NodeId(node),
-            dtype: DType::FLOAT32,
-            extents: vec![1],
-            kind,
-        }
-    }
-
-    fn operands_over(nodes: &[u32]) -> Vec<(NodeId, Layout, Option<Lookup>)> {
-        nodes
-            .iter()
-            .map(|index| {
-                let layout = Layout {
-                    base: 0,
-                    strides: vec![1_i64].into(),
-                };
-                (NodeId(*index), layout, None)
-            })
-            .collect()
-    }
-
-    fn fused_attention(node: u32, nodes: &[u32]) -> BoundOp {
-        reader(
-            BoundOpKind::CachedAttention {
-                operands: operands_over(nodes),
-                query_rows: 1,
-                cached_key_rows: 32,
-                new_key_rows: 1,
-                kv_heads: 1,
-                query_groups: 8,
-                head_dim: 256,
-                rotary_dim: 256,
-                scale: 1.0,
-                cached_lower_inclusive: i64::MIN,
-                new_upper_inclusive: 0,
-            },
-            node,
-        )
-    }
-
-    fn unfused_reader(node: u32, nodes: &[u32]) -> BoundOp {
-        reader(
-            BoundOpKind::Elementwise {
-                body: ComposedBody { steps: Vec::new() },
-                operands: operands_over(nodes),
-            },
-            node,
-        )
-    }
-
-    fn is_kv(name: &str) -> bool {
-        name.starts_with("kv_cache.")
-    }
-
-    #[test]
-    fn padding_is_granted_when_only_fused_attention_reads_the_kv_inputs() {
-        let resolved = vec![fused_attention(3, &[0, 1, 2]), unfused_reader(4, &[2, 3])];
-
-        assert!(super::kv_read_only_by_fused_attention(
-            &kv_program(),
-            &resolved,
-            &[NodeId(4)],
-            is_kv
-        ));
-    }
-
-    #[test]
-    fn padding_is_refused_when_an_unfused_op_reads_a_kv_input() {
-        let resolved = vec![fused_attention(3, &[0, 1, 2]), unfused_reader(4, &[1, 3])];
-
-        assert!(!super::kv_read_only_by_fused_attention(
-            &kv_program(),
-            &resolved,
-            &[NodeId(4)],
-            is_kv
-        ));
-    }
-
-    #[test]
-    fn padding_is_refused_when_no_fused_attention_reads_the_kv_inputs() {
-        let resolved = vec![unfused_reader(4, &[2])];
-
-        assert!(!super::kv_read_only_by_fused_attention(
-            &kv_program(),
-            &resolved,
-            &[NodeId(4)],
-            is_kv
-        ));
-    }
-
-    #[test]
-    fn padding_is_refused_when_a_kv_input_is_a_plan_output() {
-        let resolved = vec![fused_attention(3, &[0, 1, 2])];
-
-        assert!(!super::kv_read_only_by_fused_attention(
-            &kv_program(),
-            &resolved,
-            &[NodeId(0)],
-            is_kv
-        ));
     }
 }
