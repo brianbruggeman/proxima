@@ -16,13 +16,11 @@ use crate::stack::{self, Action};
 use crate::tcp_dial::{DialError, DialGuard, DialLease, SynStep, wake_after};
 use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
 use crate::tcp_stack::{ConnId, Outbound, TcpStack};
-use crossbeam_queue::SegQueue;
 use core::fmt::Debug;
 use core::future::Future;
 use core::pin::pin;
 use futures::FutureExt;
 use futures::io::{AsyncRead, AsyncWrite};
-use futures::task::{ArcWake, waker};
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::stream::{
     BindAddr, ConnectFuture, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
@@ -40,7 +38,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
-use std::time::Instant as StdInstant;
+use proxima_core::time::{self, Instant as ClockInstant};
 use thiserror::Error;
 
 const BURST: usize = 32;
@@ -167,36 +165,33 @@ fn classify_tcp(frame: &[u8], our_ip: [u8; 4]) -> Option<OwnedInbound> {
     })
 }
 
-/// Tasks parked on the rx source. The source holds one waker slot, so the
-/// driver registers this fan-out waker there and every parked task here.
-struct Waiters {
-    parked: SegQueue<Waker>,
-}
-
-impl ArcWake for Waiters {
-    fn wake_by_ref(arc_self: &Arc<Self>) {
-        while let Some(task) = arc_self.parked.pop() {
-            task.wake();
-        }
+fn park(waiters: &mut Vec<Waker>, waker: &Waker) {
+    if !waiters.iter().any(|parked| parked.will_wake(waker)) {
+        waiters.push(waker.clone());
     }
 }
 
 /// One TCP endpoint on one frame device: the sans-IO stack plus the ARP table
-/// and the three frame pipes it reads, writes and mints through.
+/// and the sink and mint pipes it writes and mints through. The rx source is
+/// consumed by exactly one future, [`FrameListener::pump`] or
+/// [`FrameUpstream::pump`]; the driver only keeps the handle to hand it over.
+/// Each inbound frame wakes the tasks it can affect: the connection it
+/// addresses, the accept waiters, or the dials waiting on an ARP reply.
 pub struct Driver<Rx, Tx, Mint> {
-    rx: Rx,
+    rx: Arc<AsyncMutex<Rx>>,
     tx: Tx,
     mint: Mint,
     stack: TcpStack,
-    start: StdInstant,
+    start: ClockInstant,
     our_mac: [u8; 6],
     our_ip: [u8; 4],
     our_port: u16,
     arp: HashMap<[u8; 4], [u8; 6]>,
-    arp_sent: HashMap<[u8; 4], StdInstant>,
+    arp_sent: HashMap<[u8; 4], ClockInstant>,
     retransmit: Duration,
-    waiters: Arc<Waiters>,
-    fan_out: Waker,
+    connection_waiters: HashMap<ConnId, Waker>,
+    accept_waiters: Vec<Waker>,
+    arp_waiters: HashMap<[u8; 4], Vec<Waker>>,
 }
 
 impl<Rx, Tx, Mint> Driver<Rx, Tx, Mint> {
@@ -209,17 +204,17 @@ impl<Rx, Tx, Mint> Driver<Rx, Tx, Mint> {
     ) -> Self {
         let our_ip = local.ip().octets();
         let our_port = local.port();
-        let waiters = Arc::new(Waiters { parked: SegQueue::new() });
         Self {
-            fan_out: waker(Arc::clone(&waiters)),
-            waiters,
+            connection_waiters: HashMap::new(),
+            accept_waiters: Vec::new(),
+            arp_waiters: HashMap::new(),
             arp_sent: HashMap::new(),
             retransmit: DEFAULT_RETRANSMIT,
-            rx,
+            rx: Arc::new(AsyncMutex::new(rx)),
             tx,
             mint,
             stack: TcpStack::new(our_ip, our_port, initial_sequence),
-            start: StdInstant::now(),
+            start: time::now(),
             our_mac,
             our_ip,
             our_port,
@@ -235,7 +230,7 @@ impl<Rx, Tx, Mint> Driver<Rx, Tx, Mint> {
     }
 
     fn now(&self) -> TcpInstant {
-        TcpInstant::from_micros(u64::try_from(self.start.elapsed().as_micros()).unwrap_or(u64::MAX))
+        TcpInstant::from_micros(u64::try_from(time::now().saturating_duration_since(self.start).as_micros()).unwrap_or(u64::MAX))
     }
 }
 
@@ -267,46 +262,44 @@ where
         Ok(frame)
     }
 
-    fn poll_rx(&self) -> Poll<Result<Mint::Out, Rx::Err>> {
-        let mut fan_out = Context::from_waker(&self.fan_out);
-        pin!(self.rx.call(())).poll(&mut fan_out)
+    fn deliver(&mut self, mut frame: Mint::Out) -> Result<(), DriverFailure<Rx, Tx, Mint>> {
+        let now = self.now();
+        match stack::handle_frame(frame.as_mut(), self.our_mac, self.our_ip) {
+            Action::Transmit => self.transmit(frame),
+            Action::Drop => self.ingest(frame, now),
+        }
     }
 
-    /// One rx burst: answer arp/icmp, route TCP through the stack, transmit
-    /// replies. When the source has nothing the calling task is parked and
-    /// woken by the next frame; a burst that moved frames wakes every parked
-    /// task, since the frames may belong to another connection.
-    ///
-    /// # Errors
-    /// The first pipe or encode failure; frames already handled stay handled.
-    pub fn pump(&mut self, cx: &Context<'_>) -> Result<(), DriverFailure<Rx, Tx, Mint>> {
-        self.waiters.parked.push(cx.waker().clone());
-        let now = self.now();
-        let mut moved = false;
-        for _ in 0..BURST {
-            let Poll::Ready(received) = self.poll_rx() else {
-                break;
-            };
-            let mut frame = received.map_err(DriverError::Rx)?;
-            moved = true;
-            match stack::handle_frame(frame.as_mut(), self.our_mac, self.our_ip) {
-                Action::Transmit => self.transmit(frame)?,
-                Action::Drop => self.ingest(frame, now)?,
-            }
+    fn park_connection(&mut self, id: ConnId, waker: &Waker) {
+        self.connection_waiters
+            .entry(id)
+            .and_modify(|parked| parked.clone_from(waker))
+            .or_insert_with(|| waker.clone());
+    }
+
+    fn wake_connection(&mut self, id: ConnId) {
+        if let Some(parked) = self.connection_waiters.remove(&id) {
+            parked.wake();
         }
-        if moved {
-            ArcWake::wake_by_ref(&self.waiters);
+    }
+
+    fn wake_accepts(&mut self) {
+        self.accept_waiters.drain(..).for_each(Waker::wake);
+    }
+
+    fn wake_arp(&mut self, ip: [u8; 4]) {
+        if let Some(parked) = self.arp_waiters.remove(&ip) {
+            parked.into_iter().for_each(Waker::wake);
         }
-        Ok(())
     }
 
     fn retransmit_arp(&mut self, target: [u8; 4], cx: &mut Context<'_>) -> Result<(), DriverFailure<Rx, Tx, Mint>> {
-        let due = self.arp_sent.get(&target).is_none_or(|sent| sent.elapsed() >= self.retransmit);
+        let due = self.arp_sent.get(&target).is_none_or(|sent| time::now().saturating_duration_since(*sent) >= self.retransmit);
         if due {
             self.send_arp_request(target)?;
-            self.arp_sent.insert(target, StdInstant::now());
+            self.arp_sent.insert(target, time::now());
         }
-        let waited = self.arp_sent.get(&target).map_or(Duration::ZERO, StdInstant::elapsed);
+        let waited = self.arp_sent.get(&target).map_or(Duration::ZERO, |sent| time::now().saturating_duration_since(*sent));
         wake_after(self.retransmit.saturating_sub(waited), cx);
         Ok(())
     }
@@ -331,6 +324,7 @@ where
     fn ingest(&mut self, frame: Mint::Out, now: TcpInstant) -> Result<(), DriverFailure<Rx, Tx, Mint>> {
         if let Some((ip, mac)) = stack::parse_arp_reply(frame.as_ref()) {
             self.arp.insert(ip, mac);
+            self.wake_arp(ip);
             return Ok(());
         }
         let Some(inbound) = classify_tcp(frame.as_ref(), self.our_ip) else {
@@ -341,6 +335,10 @@ where
             let outbound = self
                 .stack
                 .on_inbound_to(inbound.destination_port, &inbound.borrow(), now);
+            self.wake_connection((inbound.destination_port, inbound.ip, inbound.port));
+            if self.stack.has_pending_accept() {
+                self.wake_accepts();
+            }
             return self.send_segments(&outbound, inbound.destination_port);
         }
         let refusals: Vec<Outbound> = inbound.refusal().into_iter().collect();
@@ -410,11 +408,29 @@ where
 }
 
 struct Shared<Rx, Tx, Mint> {
+    rx: Arc<AsyncMutex<Rx>>,
     inner: AsyncMutex<Driver<Rx, Tx, Mint>>,
     dial: Option<Arc<DialLease>>,
 }
 
+async fn yield_once() {
+    let mut yielded = false;
+    core::future::poll_fn(|cx| {
+        if yielded {
+            return Poll::Ready(());
+        }
+        yielded = true;
+        cx.waker().wake_by_ref();
+        Poll::Pending
+    })
+    .await;
+}
+
 impl<Rx, Tx, Mint> Shared<Rx, Tx, Mint> {
+    fn new(driver: Driver<Rx, Tx, Mint>, dial: Option<Arc<DialLease>>) -> Arc<Self> {
+        Arc::new(Self { rx: Arc::clone(&driver.rx), inner: AsyncMutex::new(driver), dial })
+    }
+
     // manually polls the async gate's `lock()`: no thread parks, and on the
     // contended path the caller's waker is queued and re-woken on release.
     fn poll_lock(&self, cx: &mut Context<'_>) -> Poll<AsyncMutexGuard<'_, Driver<Rx, Tx, Mint>>> {
@@ -427,6 +443,35 @@ impl<Rx, Tx, Mint> Shared<Rx, Tx, Mint> {
                 Poll::Ready(driver)
             }
             Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
+impl<Rx, Tx, Mint> Shared<Rx, Tx, Mint>
+where
+    Mint: Pipe<In = u16>,
+    Mint::Out: AsRef<[u8]> + AsMut<[u8]>,
+    Rx: Pipe<In = (), Out = Mint::Out>,
+    Tx: Pipe<In = Mint::Out, Out = ()>,
+{
+    async fn pump(&self) -> DriverFailure<Rx, Tx, Mint> {
+        let source = self.rx.lock().await;
+        let mut burst = 0;
+        loop {
+            let frame = match source.call(()).await {
+                Ok(frame) => frame,
+                Err(source) => return DriverError::Rx(source),
+            };
+            let mut driver = core::future::poll_fn(|cx| self.poll_lock(cx)).await;
+            if let Err(error) = driver.deliver(frame) {
+                return error;
+            }
+            drop(driver);
+            burst += 1;
+            if burst == BURST {
+                burst = 0;
+                yield_once().await;
+            }
         }
     }
 }
@@ -450,9 +495,25 @@ impl<Rx, Tx, Mint> FrameListener<Rx, Tx, Mint> {
     #[must_use]
     pub fn new(driver: Driver<Rx, Tx, Mint>, bind: SocketAddrV4) -> Self {
         Self {
-            shared: Arc::new(Shared { inner: AsyncMutex::new(driver), dial: None }),
+            shared: Shared::new(driver, None),
             local_addr: SocketAddr::V4(bind),
         }
+    }
+}
+
+impl<Rx, Tx, Mint> FrameListener<Rx, Tx, Mint>
+where
+    Mint: Pipe<In = u16>,
+    Mint::Out: AsRef<[u8]> + AsMut<[u8]>,
+    Rx: Pipe<In = (), Out = Mint::Out>,
+    Tx: Pipe<In = Mint::Out, Out = ()>,
+{
+    /// The single consumer of the rx source: routes every inbound frame to the
+    /// connection, accept waiter or dial it addresses. Drive it for as long as
+    /// the listener and its connections are in use; it ends only with the rx
+    /// source's own error or a failed transmit, which it returns.
+    pub async fn pump(&self) -> DriverFailure<Rx, Tx, Mint> {
+        self.shared.pump().await
     }
 }
 
@@ -467,9 +528,6 @@ where
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
         let mut driver = locked!(self.shared, cx);
-        if let Err(error) = driver.pump(cx) {
-            return Poll::Ready(Err(into_io(error)));
-        }
         if let Some(id) = driver.stack.poll_accept() {
             let peer = driver.stack.peer(id).map_or(self.local_addr, |endpoint| {
                 SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(endpoint.ip), endpoint.port))
@@ -481,6 +539,7 @@ where
                 dial: None,
             }));
         }
+        park(&mut driver.accept_waiters, cx.waker());
         Poll::Pending
     }
 
@@ -523,9 +582,6 @@ where
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         let mut driver = locked!(this.shared, cx);
-        if let Err(error) = driver.pump(cx) {
-            return Poll::Ready(Err(into_io(error)));
-        }
         let read = match &this.dial {
             Some(dial) => dial.read(&mut driver.stack, buf)?,
             None => driver.stack.read(this.id, buf),
@@ -534,9 +590,10 @@ where
             return Poll::Ready(Ok(read));
         }
         if driver.stack.read_closed(this.id) {
+            driver.connection_waiters.remove(&this.id);
             return Poll::Ready(Ok(0));
         }
-        drop(driver);
+        driver.park_connection(this.id, cx.waker());
         Poll::Pending
     }
 }
@@ -596,12 +653,33 @@ impl<Rx, Tx, Mint> FrameUpstream<Rx, Tx, Mint> {
     #[must_use]
     pub fn new(driver: Driver<Rx, Tx, Mint>, peer: SocketAddrV4) -> Self {
         Self {
-            shared: Arc::new(Shared {
-                inner: AsyncMutex::new(driver),
-                dial: Some(Arc::new(DialLease::new())),
-            }),
+            shared: Shared::new(driver, Some(Arc::new(DialLease::new()))),
             peer,
         }
+    }
+}
+
+/// A clone is another handle on the same driver, so one task can drive
+/// [`FrameUpstream::pump`] while others dial through it.
+impl<Rx, Tx, Mint> Clone for FrameUpstream<Rx, Tx, Mint> {
+    fn clone(&self) -> Self {
+        Self { shared: Arc::clone(&self.shared), peer: self.peer }
+    }
+}
+
+impl<Rx, Tx, Mint> FrameUpstream<Rx, Tx, Mint>
+where
+    Mint: Pipe<In = u16>,
+    Mint::Out: AsRef<[u8]> + AsMut<[u8]>,
+    Rx: Pipe<In = (), Out = Mint::Out>,
+    Tx: Pipe<In = Mint::Out, Out = ()>,
+{
+    /// The single consumer of the rx source: routes every inbound frame to the
+    /// connection or dial it addresses. Drive it for as long as dials and their
+    /// connections are in use; it ends only with the rx source's own error or a
+    /// failed transmit, which it returns.
+    pub async fn pump(&self) -> DriverFailure<Rx, Tx, Mint> {
+        self.shared.pump().await
     }
 }
 
@@ -645,9 +723,6 @@ where
         let Some(dial) = operation.as_mut() else {
             return Poll::Ready(Err(io::Error::other("missing dial ownership")));
         };
-        if let Err(error) = driver.pump(cx) {
-            return Poll::Ready(Err(into_io(error)));
-        }
         let peer_ip = self.peer.ip().octets();
         if let Some(id) = dial.connection() {
             if !dial.owns(&driver.stack) {
@@ -676,8 +751,16 @@ where
             if let Err(error) = driver.send_segments(&outbound, source_port) {
                 return Poll::Ready(Err(into_io(error)));
             }
-        } else if let Err(error) = driver.retransmit_arp(peer_ip, cx) {
-            return Poll::Ready(Err(into_io(error)));
+            wake_after(driver.retransmit, cx);
+        } else {
+            if let Err(error) = driver.retransmit_arp(peer_ip, cx) {
+                return Poll::Ready(Err(into_io(error)));
+            }
+            park(driver.arp_waiters.entry(peer_ip).or_default(), cx.waker());
+            return Poll::Pending;
+        }
+        if let Some(id) = dial.connection() {
+            driver.park_connection(id, cx.waker());
         }
         Poll::Pending
     }
@@ -688,9 +771,9 @@ mod tests {
     use super::*;
     use core::convert::Infallible;
     use crossbeam_queue::ArrayQueue;
-    use futures::task::AtomicWaker;
+    use futures::task::{ArcWake, AtomicWaker, waker};
     use futures::executor::block_on;
-    use futures::future::{join, join_all};
+    use futures::future::{Either, join, join_all, select};
     use futures::io::{AsyncReadExt, AsyncWriteExt};
     use proxima_primitives::stream::{StreamListenerExt, StreamUpstreamExt};
     use proxima_protocols::http1_codec::h1::HttpVersion;
@@ -765,6 +848,25 @@ mod tests {
     }
 
     type WirePipes = (WireRx, WireTx, WireMint);
+    type WireListener = FrameListener<WireRx, WireTx, WireMint>;
+    type WireConnection = FrameConnection<WireRx, WireTx, WireMint>;
+
+    fn drive<Output, UpstreamTx>(
+        work: impl Future<Output = Output>,
+        listener: &WireListener,
+        upstream: &FrameUpstream<WireRx, UpstreamTx, WireMint>,
+    ) -> Output
+    where
+        UpstreamTx: Pipe<In = Vec<u8>, Out = ()>,
+    {
+        let pumps = join(listener.pump(), upstream.pump());
+        block_on(async {
+            match select(pin!(work), pin!(pumps)).await {
+                Either::Left((output, _)) => output,
+                Either::Right(_) => panic!("a pump ended before the work finished"),
+            }
+        })
+    }
 
     const SERVER_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x01];
     const CLIENT_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x02];
@@ -837,7 +939,7 @@ mod tests {
         let (request, response) = (request_bytes(), response_bytes());
 
         let (request_seen, response_seen) =
-            block_on(join(serve(&listener, &response), call(&upstream, &request)));
+            drive(join(serve(&listener, &response), call(&upstream, &request)), &listener, &upstream);
 
         assert_eq!(request_seen, request);
         assert_eq!(response_seen, response);
@@ -878,10 +980,14 @@ mod tests {
         let listener = FrameListener::new(Driver::new(server_pipes, SERVER_MAC, SERVER, 0x1000), SERVER);
         let upstream = FrameUpstream::new(Driver::new(client_pipes, CLIENT_MAC, CLIENT, 0x2000), SERVER);
 
-        let (served, echoed) = block_on(join(
-            echo_accepted(&listener, DIALS),
-            join_all((0..DIALS).map(|index| dial_and_echo(&upstream, index))),
-        ));
+        let (served, echoed) = drive(
+            join(
+                echo_accepted(&listener, DIALS),
+                join_all((0..DIALS).map(|index| dial_and_echo(&upstream, index))),
+            ),
+            &listener,
+            &upstream,
+        );
 
         let expected: Vec<Vec<u8>> = (0..DIALS).map(payload_for).collect();
         assert_eq!(echoed, expected, "each connection receives its own payload back");
@@ -896,10 +1002,14 @@ mod tests {
         let closed_port = SocketAddrV4::new(*SERVER.ip(), 9999);
         let (listener, upstream) = endpoints(closed_port);
         let mut context = Context::from_waker(Waker::noop());
+        let mut listener_pump = pin!(listener.pump());
+        let mut upstream_pump = pin!(upstream.pump());
         let mut accept = pin!(listener.accept());
         let mut connect = pin!(upstream.connect());
 
         let outcome = (0..POLL_BUDGET).find_map(|_| {
+            assert!(listener_pump.as_mut().poll(&mut context).is_pending(), "the listener pump never ends");
+            assert!(upstream_pump.as_mut().poll(&mut context).is_pending(), "the upstream pump never ends");
             assert!(accept.as_mut().poll(&mut context).is_pending(), "nothing listens on the dialed port");
             match connect.as_mut().poll(&mut context) {
                 Poll::Ready(result) => Some(result),
@@ -970,14 +1080,38 @@ mod tests {
     }
 
     #[test]
-    fn a_frame_arriving_wakes_the_parked_dial_exactly_once() {
+    fn an_arp_reply_wakes_the_dial_waiting_on_it_exactly_once() {
         let dial = silent_dial(Duration::from_secs(3600));
         polls_pending(&dial, 1);
         assert_eq!(dial.wakes.0.load(Ordering::SeqCst), 0, "parked, not spinning");
+        let pump_wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let pump_waker = waker(Arc::clone(&pump_wakes));
+        let mut pump_context = Context::from_waker(&pump_waker);
+        let mut pump = pin!(dial.upstream.pump());
+        assert!(pump.as_mut().poll(&mut pump_context).is_pending(), "no frame yet: the pump parks on the source");
+        let mut reply = dial.to_server.frames.pop().expect("the dial sent an arp request");
+        assert_eq!(stack::handle_frame(&mut reply, SERVER_MAC, SERVER.ip().octets()), Action::Transmit);
+
+        dial.to_client.deliver(reply).expect("rx wire has room");
+
+        assert_eq!(pump_wakes.0.load(Ordering::SeqCst), 1, "the source woke the pump, not the dial");
+        assert_eq!(dial.wakes.0.load(Ordering::SeqCst), 0, "the dial waits for the pump to route the reply");
+        assert!(pump.as_mut().poll(&mut pump_context).is_pending(), "the pump keeps consuming");
+        assert_eq!(dial.wakes.0.load(Ordering::SeqCst), 1, "the reply woke the dial waiting on that address once");
+    }
+
+    #[test]
+    fn a_frame_addressed_to_nobody_wakes_no_dial() {
+        let dial = silent_dial(Duration::from_secs(3600));
+        polls_pending(&dial, 1);
+        let mut pump = pin!(dial.upstream.pump());
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(pump.as_mut().poll(&mut context).is_pending());
 
         dial.to_client.deliver(vec![0; 60]).expect("rx wire has room");
+        assert!(pump.as_mut().poll(&mut context).is_pending());
 
-        assert_eq!(dial.wakes.0.load(Ordering::SeqCst), 1, "the push woke the parked task");
+        assert_eq!(dial.wakes.0.load(Ordering::SeqCst), 0, "a frame that parses as nothing wakes nobody");
     }
 
     #[test]
@@ -992,6 +1126,64 @@ mod tests {
 
         assert!(matches!(overflow, Err(DriverError::Tx(WireFull::AtCapacity))), "second frame meets a full sink");
     }
+
+    async fn accept_all(listener: &WireListener, count: usize) -> Vec<WireConnection> {
+        let mut accepted = Vec::with_capacity(count);
+        for _ in 0..count {
+            accepted.push(listener.accept().await.expect("server accepts every dialed connection"));
+        }
+        accepted
+    }
+
+    async fn connect_all(upstream: &FrameUpstream<WireRx, WireTx, WireMint>, count: usize) -> Vec<WireConnection> {
+        join_all((0..count).map(|_| upstream.connect()))
+            .await
+            .into_iter()
+            .map(|dialed| dialed.expect("every dial completes its handshake"))
+            .collect()
+    }
+
+    #[test]
+    fn a_frame_for_one_connection_wakes_no_other_idle_connection() {
+        const IDLE: usize = 8;
+        const TARGET: usize = 3;
+        let (server_pipes, client_pipes) = wired(4096);
+        let listener = FrameListener::new(Driver::new(server_pipes, SERVER_MAC, SERVER, 0x1000), SERVER);
+        let upstream = FrameUpstream::new(Driver::new(client_pipes, CLIENT_MAC, CLIENT, 0x2000), SERVER);
+        let (mut servers, mut clients) = drive(
+            join(accept_all(&listener, IDLE), connect_all(&upstream, IDLE)),
+            &listener,
+            &upstream,
+        );
+        let wakes: Vec<Arc<WakeCount>> = (0..IDLE).map(|_| Arc::new(WakeCount(AtomicUsize::new(0)))).collect();
+        let mut buffer = [0u8; 16];
+        for (connection, count) in clients.iter_mut().zip(&wakes) {
+            let task_waker = waker(Arc::clone(count));
+            let polled = Pin::new(connection).poll_read(&mut Context::from_waker(&task_waker), &mut buffer);
+            assert!(polled.is_pending(), "no data yet: every idle connection parks");
+        }
+        let before: Vec<usize> = wakes.iter().map(|count| count.0.load(Ordering::SeqCst)).collect();
+        let target_peer = SocketAddr::V4(SocketAddrV4::new(*CLIENT.ip(), clients[TARGET].id.0));
+        let server = servers.iter_mut().find(|server| server.peer == target_peer).expect("server side of the target");
+        let mut noop = Context::from_waker(Waker::noop());
+        assert!(matches!(Pin::new(server).poll_write(&mut noop, b"ping"), Poll::Ready(Ok(4))));
+
+        let mut pump = pin!(upstream.pump());
+        assert!(pump.as_mut().poll(&mut noop).is_pending(), "the pump drains the wire and parks");
+        let target_waker = waker(Arc::clone(&wakes[TARGET]));
+        let read = Pin::new(&mut clients[TARGET]).poll_read(&mut Context::from_waker(&target_waker), &mut buffer);
+
+        assert!(matches!(read, Poll::Ready(Ok(4))), "the addressed connection reads its frame");
+        let woken: Vec<usize> = wakes
+            .iter()
+            .zip(&before)
+            .map(|(count, base)| count.0.load(Ordering::SeqCst) - base)
+            .collect();
+        let bystanders_woken: usize = woken.iter().enumerate().filter(|(index, _)| *index != TARGET).map(|(_, delta)| delta).sum();
+        assert_eq!(bystanders_woken, 0, "wakes per connection after one frame for connection {TARGET}: {woken:?}");
+        assert_eq!(woken[TARGET], 1, "the addressed connection is woken once: {woken:?}");
+    }
+
     struct SynCounts {
         seen: AtomicUsize,
         dropped: AtomicUsize,
@@ -1046,7 +1238,11 @@ mod tests {
     fn a_dial_whose_first_syn_is_lost_completes_on_the_retransmitted_syn() {
         let dial = lossy_dial(1, Duration::ZERO);
 
-        let (accepted, connected) = block_on(join(dial.listener.accept(), dial.upstream.connect()));
+        let (accepted, connected) = drive(
+            join(dial.listener.accept(), dial.upstream.connect()),
+            &dial.listener,
+            &dial.upstream,
+        );
 
         accepted.expect("server accepts the retransmitted handshake");
         connected.expect("dial completes after the retransmit");
@@ -1058,10 +1254,14 @@ mod tests {
     fn a_lost_syn_is_not_resent_before_the_retransmit_deadline() {
         let dial = lossy_dial(1, Duration::from_secs(3600));
         let mut context = Context::from_waker(Waker::noop());
+        let mut listener_pump = pin!(dial.listener.pump());
+        let mut upstream_pump = pin!(dial.upstream.pump());
         let mut accept = pin!(dial.listener.accept());
         let mut connect = pin!(dial.upstream.connect());
 
         (0..16).for_each(|_| {
+            assert!(listener_pump.as_mut().poll(&mut context).is_pending());
+            assert!(upstream_pump.as_mut().poll(&mut context).is_pending());
             assert!(accept.as_mut().poll(&mut context).is_pending());
             assert!(connect.as_mut().poll(&mut context).is_pending(), "the lost syn stalls the dial");
         });
@@ -1073,10 +1273,14 @@ mod tests {
     fn a_dial_whose_syn_is_never_answered_fails_with_a_named_error_after_the_retry_bound() {
         let dial = lossy_dial(usize::MAX, Duration::ZERO);
         let mut context = Context::from_waker(Waker::noop());
+        let mut listener_pump = pin!(dial.listener.pump());
+        let mut upstream_pump = pin!(dial.upstream.pump());
         let mut accept = pin!(dial.listener.accept());
         let mut connect = pin!(dial.upstream.connect());
 
         let outcome = (0..256).find_map(|_| {
+            assert!(listener_pump.as_mut().poll(&mut context).is_pending());
+            assert!(upstream_pump.as_mut().poll(&mut context).is_pending());
             assert!(accept.as_mut().poll(&mut context).is_pending());
             match connect.as_mut().poll(&mut context) {
                 Poll::Ready(result) => Some(result),

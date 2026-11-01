@@ -9,7 +9,8 @@ use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Context;
-use std::time::{Duration, Instant as StdInstant};
+use proxima_core::time::{self, Instant as ClockInstant};
+use std::time::Duration;
 use thiserror::Error;
 
 /// Interval before an unanswered ARP request or SYN is sent again, and between
@@ -69,7 +70,7 @@ pub(crate) struct DialGuard {
     lease: Arc<DialLease>,
     started: Option<(ConnId, u32)>,
     syn: Vec<Outbound>,
-    syn_sent: Option<StdInstant>,
+    syn_sent: Option<ClockInstant>,
     syn_resends: u8,
 }
 
@@ -91,12 +92,12 @@ impl DialGuard {
         })?;
         self.started = Some((id, outbound[0].1.seq));
         self.syn.clone_from(&outbound);
-        self.syn_sent = Some(StdInstant::now());
+        self.syn_sent = Some(time::now());
         Ok(outbound)
     }
 
     pub(crate) fn next_syn(&mut self, interval: Duration) -> SynStep<'_> {
-        let waited = self.syn_sent.map_or(Duration::ZERO, |sent| sent.elapsed());
+        let waited = self.syn_sent.map_or(Duration::ZERO, |sent| time::now().saturating_duration_since(sent));
         if waited < interval {
             return SynStep::Wait(interval - waited);
         }
@@ -104,7 +105,7 @@ impl DialGuard {
             return SynStep::Exhausted;
         }
         self.syn_resends += 1;
-        self.syn_sent = Some(StdInstant::now());
+        self.syn_sent = Some(time::now());
         SynStep::Send(&self.syn)
     }
 

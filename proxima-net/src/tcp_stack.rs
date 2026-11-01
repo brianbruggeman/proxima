@@ -261,6 +261,11 @@ impl TcpStack {
         self.our_port
     }
 
+    #[cfg(feature = "frame-stack")]
+    pub(crate) fn has_pending_accept(&self) -> bool {
+        !self.accepted.is_empty()
+    }
+
     /// Pop the next connection that finished its handshake, if any.
     pub fn poll_accept(&mut self) -> Option<ConnId> {
         self.accepted.pop_front()
