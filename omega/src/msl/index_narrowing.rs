@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) const INDEX32_REACH_LIMIT: u64 = 1 << 30;
+use crate::epilogue::index32_reach_fits;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IndexFamily {
@@ -125,10 +125,11 @@ pub(super) fn body_reach_fits(resolved: &BoundOp) -> bool {
             }),
         );
     }
-    (1..=INDEX32_REACH_LIMIT).contains(&iteration_space)
+    iteration_space > 0
+        && index32_reach_fits(iteration_space)
         && reaches
             .iter()
-            .all(|reach| reach.is_some_and(|value| value <= INDEX32_REACH_LIMIT))
+            .all(|reach| reach.is_some_and(index32_reach_fits))
 }
 
 pub(super) fn output_total_fits_u32(resolved: &BoundOp) -> bool {

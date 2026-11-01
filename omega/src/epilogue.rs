@@ -19,7 +19,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{ComposedBody, ScalarOp, StepArg};
+use proxima_tensor::{ComposedBody, Layout, Lookup, NodeId, ScalarOp, StepArg};
+#[cfg(any(feature = "cuda", feature = "metal-wide-cooperative-reduce"))]
+use proxima_tensor::{BoundOp, BoundOpKind};
+
+#[cfg(any(feature = "cuda", feature = "metal-wide-cooperative-reduce"))]
+use crate::msl::Codec;
 
 /// Declares one step per [`ComposedBody`] entry, in order, returning the
 /// declared name of the body's own result (its last step). `operand_prefix`
@@ -106,4 +111,126 @@ pub(crate) fn declare_steps_partitioned(
         }
     }
     format!("{step_prefix}{}", body.steps.len().saturating_sub(1))
+}
+
+/// Largest element count a 32-bit index may address. The cooperative loops stride by the
+/// block width, so an extent at the full u32 range would wrap `r += blockDim.x`; 2^30 leaves
+/// room for any block width a backend takes.
+pub(crate) const INDEX32_REACH_LIMIT: u64 = 1 << 30;
+
+pub(crate) fn index32_reach_fits(reach: u64) -> bool {
+    reach <= INDEX32_REACH_LIMIT
+}
+
+/// Lanes a cooperating block gives one reduction: a power of two sized so each lane folds
+/// about `elements_per_lane` elements serially, held between the backend's `simd_width` and
+/// its `cap`.
+#[cfg(any(feature = "cuda", feature = "metal-wide-cooperative-reduce"))]
+pub(crate) fn reduce_block_width(
+    total: u64,
+    elements_per_lane: u64,
+    simd_width: u64,
+    cap: u64,
+) -> u64 {
+    (total / elements_per_lane)
+        .next_power_of_two()
+        .clamp(simd_width, cap)
+}
+
+/// Whether a reduce with a broadcast epilogue (the decode-shaped norm) takes a whole block
+/// for its single row instead of one simd group: a single output row, no packed operands.
+#[cfg(any(feature = "cuda", feature = "metal-wide-cooperative-reduce"))]
+pub(crate) fn broadcast_reduce_takes_block(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+) -> bool {
+    let BoundOpKind::Reduce {
+        output_axes,
+        epilogue_broadcast_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return false;
+    };
+    let rows: u64 = output_axes
+        .iter()
+        .map(|dim| resolved.extents[usize::from(*dim)])
+        .product();
+    !epilogue_broadcast_axes.is_empty() && quantized.iter().all(Option::is_none) && rows == 1
+}
+
+/// True when the epilogue operand's layout never varies along any of `reduce_dims` and it is
+/// not gathered, so its value is the same on every pass of the per-lane write loop and can be
+/// loaded once before it. A gathered operand's address depends on an index buffer this does
+/// not follow.
+pub(crate) fn epilogue_operand_is_loop_invariant(
+    operand: &(NodeId, Layout, Option<Lookup>),
+    reduce_dims: &[u16],
+) -> bool {
+    let (_, layout, lookup) = operand;
+    lookup.is_none() && reduce_dims.iter().all(|&dim| layout.stride(dim) == 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use super::*;
+
+    fn operand(strides: &[i64], lookup: Option<Lookup>) -> (NodeId, Layout, Option<Lookup>) {
+        let layout = Layout {
+            base: 0,
+            strides: strides.to_vec().into(),
+        };
+        (NodeId(0), layout, lookup)
+    }
+
+    #[test]
+    fn a_hidden_width_row_takes_the_next_power_of_two_of_a_quarter() {
+        assert_eq!(reduce_block_width(1536, 4, 32, 1024), 512);
+        assert_eq!(reduce_block_width(4096, 4, 32, 1024), 1024);
+    }
+
+    #[test]
+    fn a_short_row_is_held_to_one_simd_group() {
+        assert_eq!(reduce_block_width(7, 4, 32, 1024), 32);
+        assert_eq!(reduce_block_width(0, 4, 32, 1024), 32);
+    }
+
+    #[test]
+    fn a_long_row_is_held_to_the_cap() {
+        assert_eq!(reduce_block_width(1 << 20, 4, 32, 256), 256);
+    }
+
+    #[test]
+    fn a_stride_zero_operand_is_loop_invariant() {
+        assert!(epilogue_operand_is_loop_invariant(&operand(&[0, 0], None), &[1]));
+    }
+
+    #[test]
+    fn an_operand_striding_along_the_reduce_axis_is_not_invariant() {
+        assert!(!epilogue_operand_is_loop_invariant(&operand(&[0, 1], None), &[1]));
+    }
+
+    #[test]
+    fn a_stride_zero_operand_that_is_gathered_is_not_invariant() {
+        let layout = Layout {
+            base: 0,
+            strides: vec![0_i64, 0].into(),
+        };
+        let lookup = Lookup {
+            indices: NodeId(1),
+            index_layout: layout,
+            element_stride: 1,
+            extent: 4,
+        };
+        assert!(!epilogue_operand_is_loop_invariant(&operand(&[0, 0], Some(lookup)), &[1]));
+    }
+
+    #[test]
+    fn index_reach_stops_short_of_the_stride_wrap() {
+        assert!(index32_reach_fits(INDEX32_REACH_LIMIT));
+        assert!(!index32_reach_fits(INDEX32_REACH_LIMIT + 1));
+        assert!(!index32_reach_fits(u64::from(u32::MAX)));
+    }
 }
