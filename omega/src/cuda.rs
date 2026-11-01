@@ -297,10 +297,10 @@ fn extent_fields(
     let row_tile = row_tile_axis(resolved, quantized, numeric_policy);
     let gemm = mma_gemm_plan(resolved, quantized, numeric_policy);
     let reduce_width = cooperative_width(resolved, quantized);
-    let staged = staged_matvec_plan(resolved, quantized, numeric_policy).is_some();
+    let staged = staged_matvec_plan(resolved, quantized, numeric_policy);
     let grid = match gemm {
-        _ if staged => CudaGridSpec {
-            threads: staged_matvec_threads(resolved),
+        _ if staged.is_some() => CudaGridSpec {
+            threads: staged.as_ref().map_or(0, |plan| staged_matvec_threads(resolved, plan)),
             block_width: Some(STAGED_THREADS),
         },
         Some(plan) => CudaGridSpec {
@@ -1334,8 +1334,8 @@ fn entry_name(
     } else {
         ""
     };
-    let revision = if staged_matvec_plan(resolved, quantized, numeric_policy).is_some() {
-        format!("_smv{}x{}_gid64c9", staged_matvec::STAGED_WARPS, staged_matvec::STAGED_ROWS_PER_WARP)
+    let revision = if let Some(plan) = staged_matvec_plan(resolved, quantized, numeric_policy) {
+        format!("_smv{}x{}_gid64c9", staged_matvec::STAGED_WARPS, plan.dot.rows_per_warp)
     } else if mma_gemm_plan(resolved, quantized, numeric_policy).is_some() {
         String::from("_mma16x8x8_gid64c9")
     } else if row_tile_axis(resolved, quantized, numeric_policy).is_some() {

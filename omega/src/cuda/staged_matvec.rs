@@ -10,8 +10,6 @@ use super::{Codec, EmitError, flat_packed_rows, gather_count, push_reduce_epilog
 /// Warps in one block of a staged matvec.
 pub(super) const STAGED_WARPS: usize = 8;
 
-/// Output rows one warp folds, each against the same staged operand.
-pub(super) const STAGED_ROWS_PER_WARP: usize = 4;
 
 /// Threads in one block of a staged matvec.
 pub(super) const STAGED_THREADS: u64 = (STAGED_WARPS * 32) as u64;
@@ -22,7 +20,7 @@ const MAX_STAGED_REDUCTION: u64 = 32_768;
 
 /// `sum(packed * shared)` lowered as: the operand every output row reads at the
 /// same coordinates is staged once per block in shared memory, rounded to int8
-/// groups of 32, and each warp folds `STAGED_ROWS_PER_WARP` rows against it with
+/// groups of 32, and each warp folds `BlockDot::rows_per_warp` rows against it with
 /// `dp4a`. The packed operand's half comes from its [`BlockDot`], which is
 /// derived from the codec's block layout, so the rule names no format.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,8 +113,8 @@ pub(super) fn staged_matvec_plan(
     })
 }
 
-/// Threads to launch: one block per `STAGED_WARPS * STAGED_ROWS_PER_WARP` output rows.
-pub(super) fn staged_matvec_threads(resolved: &BoundOp) -> u64 {
+/// Threads to launch: one block per `STAGED_WARPS * rows_per_warp` output rows.
+pub(super) fn staged_matvec_threads(resolved: &BoundOp, plan: &StagedMatvec) -> u64 {
     let output_total: u64 = match &resolved.kind {
         BoundOpKind::Reduce { output_axes, .. } => output_axes
             .iter()
@@ -124,7 +122,7 @@ pub(super) fn staged_matvec_threads(resolved: &BoundOp) -> u64 {
             .product(),
         _ => 0,
     };
-    let rows_per_block = (STAGED_WARPS * STAGED_ROWS_PER_WARP) as u64;
+    let rows_per_block = (STAGED_WARPS * plan.dot.rows_per_warp) as u64;
     output_total.div_ceil(rows_per_block) * STAGED_THREADS
 }
 
@@ -146,7 +144,7 @@ pub(super) fn push_staged_matvec_body(
     push_row_setup(source, resolved, plan, output_axes);
     push_stage(source, plan);
     push_direct_fold(source, plan);
-    push_write(source, resolved, output_axes.len());
+    push_write(source, resolved, output_axes.len(), plan.dot.rows_per_warp);
     Ok(())
 }
 
@@ -247,18 +245,19 @@ fn push_stage(source: &mut String, plan: &StagedMatvec) {
 }
 
 fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, output_axes: &[u16]) {
+    let rows = plan.dot.rows_per_warp;
     let weight_slot = plan.weight_slot;
     let (_, weight_layout, _) = &resolved.operands()[weight_slot];
     for index in 0..output_axes.len() {
-        source.push_str(&format!("    long coord{index}_rows[{STAGED_ROWS_PER_WARP}];\n"));
+        source.push_str(&format!("    long coord{index}_rows[{rows}];\n"));
     }
-    source.push_str(&format!("    __shared__ long block_row_byte[{}];\n", STAGED_WARPS * STAGED_ROWS_PER_WARP));
+    source.push_str(&format!("    __shared__ long block_row_byte[{}];\n", STAGED_WARPS * rows));
     source.push_str(&format!(
-        "    const long first_row = ((long)blockIdx.x * {STAGED_WARPS} + (long)warp) * {STAGED_ROWS_PER_WARP};\n\
-         \x20   long row_block[{STAGED_ROWS_PER_WARP}];\n\
-         \x20   long out_offset[{STAGED_ROWS_PER_WARP}];\n\
+        "    const long first_row = ((long)blockIdx.x * {STAGED_WARPS} + (long)warp) * {rows};\n\
+         \x20   long row_block[{rows}];\n\
+         \x20   long out_offset[{rows}];\n\
          \x20   #pragma unroll\n\
-         \x20   for (int row = 0; row < {STAGED_ROWS_PER_WARP}; row++) {{\n\
+         \x20   for (int row = 0; row < {rows}; row++) {{\n\
          \x20       unsigned int remaining = (unsigned int)(first_row + row);\n\
          \x20       long packed_row = 0;\n\
          \x20       out_offset[row] = u.out_base;\n"
@@ -285,7 +284,7 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
         "        const long row_element = u.operand_base[{weight_slot}] + packed_row * {};\n\
          \x20       if (row_element % {elements} != 0) {{ __trap(); }}\n\
          \x20       row_block[row] = row_element / {elements};\n\
-         \x20       if (lane == 0u) {{ block_row_byte[warp * {STAGED_ROWS_PER_WARP} + row] = first_row + row < u.output_total ? row_block[row] * {block_bytes} : -1; }}\n\
+         \x20       if (lane == 0u) {{ block_row_byte[warp * {rows} + row] = first_row + row < u.output_total ? row_block[row] * {block_bytes} : -1; }}\n\
          \x20   }}\n",
         plan.reduction
     ));
@@ -303,14 +302,15 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
         block_bytes,
         ..
     } = &plan.dot;
+    let rows = plan.dot.rows_per_warp;
     let chunks_per_block = elements / DOT_ELEMENTS;
     let total_chunks = plan.reduction / DOT_ELEMENTS as u64;
     source.push_str(&format!(
-        "    const unsigned char *row_start[{STAGED_ROWS_PER_WARP}];\n\
-         \x20   float accumulator[{STAGED_ROWS_PER_WARP}];\n\
+        "    const unsigned char *row_start[{rows}];\n\
+         \x20   float accumulator[{rows}];\n\
          \x20   #pragma unroll\n\
-         \x20   for (int row = 0; row < {STAGED_ROWS_PER_WARP}; row++) {{\n\
-         \x20       const long base = block_row_byte[warp * {STAGED_ROWS_PER_WARP} + row];\n\
+         \x20   for (int row = 0; row < {rows}; row++) {{\n\
+         \x20       const long base = block_row_byte[warp * {rows} + row];\n\
          \x20       row_start[row] = base < 0 ? (const unsigned char *)0 : in{weight_slot} + base;\n\
          \x20       accumulator[row] = 0.0f;\n\
          \x20   }}\n\
@@ -322,7 +322,7 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
          \x20       const float activation_scale = staged_d[chunk];\n\
          \x20       const unsigned int block_offset = (chunk / {chunks_per_block}u) * {block_bytes}u;\n\
          \x20       #pragma unroll\n\
-         \x20       for (int row = 0; row < {STAGED_ROWS_PER_WARP}; row++) {{\n\
+         \x20       for (int row = 0; row < {rows}; row++) {{\n\
          \x20           if (row_start[row] == 0) {{ continue; }}\n\
          \x20           const unsigned char *block = row_start[row] + block_offset;\n\
          \x20           int words[8];\n\
@@ -336,10 +336,10 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
     ));
 }
 
-fn push_write(source: &mut String, resolved: &BoundOp, output_rank: usize) {
+fn push_write(source: &mut String, resolved: &BoundOp, output_rank: usize, rows: usize) {
     source.push_str(&format!(
         "    #pragma unroll\n\
-         \x20   for (int row = 0; row < {STAGED_ROWS_PER_WARP}; row++) {{\n\
+         \x20   for (int row = 0; row < {rows}; row++) {{\n\
          \x20       float total = accumulator[row];\n\
          \x20       #pragma unroll\n\
          \x20       for (int shift = 16; shift > 0; shift >>= 1) {{ total += __shfl_down_sync(0xffffffffu, total, shift); }}\n\

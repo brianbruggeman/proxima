@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use proxima_primitives::block_layout::{BlockLayout, Coded};
 
-use super::block_dot::{BlockDot, DOT_ELEMENTS, affine, layout_name, scale_helpers};
+use super::block_dot::{BlockDot, DOT_ELEMENTS, affine, layout_name, rows_per_warp, scale_helpers};
 
 /// Codes one int8x4 word covers.
 const WORD_ELEMENTS: usize = 4;
@@ -42,6 +42,7 @@ pub(super) fn radix_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
         helpers,
         elements,
         block_bytes: usize::from(layout.block_bytes),
+        rows_per_warp: rows_per_warp(true),
     })
 }
 
