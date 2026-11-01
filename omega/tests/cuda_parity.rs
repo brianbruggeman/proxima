@@ -3618,3 +3618,88 @@ async fn rmsnorm_broadcast_epilogue_reduce_matches_the_f64_oracle_on_cuda(
         .fold(0.0f64, f64::max);
     assert!(worst < 1e-5, "cuda rmsnorm disagrees with the f64 oracle: worst relative={worst}");
 }
+
+const MATVEC_CHAIN: usize = 24;
+
+fn matvec_chain_program(rows: u32, k: u32) -> (Vec<Op>, Vec<NodeId>, Vec<String>) {
+    let mut program = Vec::new();
+    let busy = append_busy_chain(&mut program);
+    let weight = input_leaf(&mut program, DType::UINT8, vec![Extent::Static(rows), Extent::Static(k)], "weight");
+    let names: Vec<String> = (0..MATVEC_CHAIN).map(|index| format!("activation{index}")).collect();
+    let mut roots = Vec::new();
+    for name in &names {
+        let activation = input_leaf(&mut program, DType::FLOAT32, vec![Extent::Static(k), Extent::Static(1)], name);
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight, IndexMap::Affine(projection(3, &[0, 2]))),
+                    (activation, IndexMap::Affine(projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        roots.push(append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("matvec".into()),
+            }),
+        ));
+    }
+    roots.push(busy);
+    (program, roots, names)
+}
+
+#[proxima::test]
+#[case::pq2_0_qkv_4096_by_4096(Codec::Pq2_0, 4096, 4096)]
+#[case::pq2_0_gate_up_12288_by_4096(Codec::Pq2_0, 12288, 4096)]
+#[case::pq2_0_down_4096_by_12288(Codec::Pq2_0, 4096, 12288)]
+#[case::ptq1_0_5120_by_17408(Codec::Ptq1_0, 5120, 17408)]
+async fn staged_matvec_chain_matches_the_f64_oracle_and_reports_event_time_on_cuda(
+    #[case] codec: Codec,
+    #[case] rows: usize,
+    #[case] k: usize,
+) {
+    let layout = codec.block_layout().expect("a block codec");
+    let weight = arbitrary_blocks(&layout, rows * k / usize::from(layout.elements), 41);
+    let activations: Vec<Vec<f32>> = (0..MATVEC_CHAIN)
+        .map(|index| on_the_int8_grid(&random_vec(43 + index as u64, k).iter().map(|value| value * 4.0 - 2.0).collect::<Vec<_>>()))
+        .collect();
+    let busy = random_vec(17, BUSY_EXTENT as usize);
+    let (program, roots, names) = matvec_chain_program(rows as u32, k as u32);
+    let mut named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("busy", QuantizedBlock::Float32(&busy)),
+        ("weight", QuantizedBlock::Packed { codec, bytes: &weight }),
+    ];
+    named.extend(names.iter().zip(&activations).map(|(name, values)| (name.as_str(), QuantizedBlock::Float32(values))));
+    let policy = NumericPolicy::default().with_activation_quantization(true);
+    let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &roots, policy)
+        .expect("the matvec chain plans on cuda");
+    let actual = (0..NORM_RUNS)
+        .map(|_| {
+            let evaluated = execute_plan_named(&mut plan, &named).expect("the matvec chain runs on cuda");
+            evaluated.get(roots[0]).expect("the first matvec is a requested output").0.to_vec()
+        })
+        .last()
+        .expect("at least one run");
+
+    let mut decoded = vec![0.0f32; rows * k];
+    block_layout::dequantize(&layout, &weight, &mut decoded).expect("whole blocks");
+    let expected: Vec<f64> = decoded
+        .chunks_exact(k)
+        .map(|row| row.iter().zip(&activations[0]).map(|(code, value)| f64::from(*code) * f64::from(*value)).sum())
+        .collect();
+    let magnitude = expected.iter().fold(0.0f64, |largest, value| largest.max(value.abs()));
+    let worst = actual.iter().zip(&expected).map(|(got, want)| (f64::from(*got) - want).abs()).fold(0.0f64, f64::max);
+    assert_eq!(actual.len(), rows, "every row is compared");
+    assert!(worst / magnitude < 1e-5, "{codec:?} {rows}x{k} disagrees with the walker: worst={worst} magnitude={magnitude}");
+}
