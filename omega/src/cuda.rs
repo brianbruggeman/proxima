@@ -1079,7 +1079,11 @@ fn bindings(resolved: &BoundOp) -> Vec<Binding> {
 /// broadcast-epilogue reduce over a single row (the decode-shaped norm) has one
 /// warp's worth of latency to hide, so it takes a whole block; every other
 /// cooperative reduce keeps one warp per output.
-const BLOCK_REDUCE_WIDTH: u64 = 256;
+const MAX_BLOCK_REDUCE_WIDTH: u64 = 1024;
+
+/// Elements each thread folds serially before the block merge; the per-element fold is
+/// latency-bound, so the block widens until each thread owns this few.
+const BLOCK_REDUCE_ELEMENTS_PER_THREAD: u64 = 4;
 
 /// Warps that share one attention vector (one query row of one head): each walks a
 /// strided subset of the keys and the block merges their softmax states.
@@ -1102,7 +1106,13 @@ fn cooperative_width(resolved: &BoundOp, quantized: &[Option<Codec>]) -> u64 {
         .map(|dim| resolved.extents[*dim as usize])
         .product();
     if !epilogue_broadcast_axes.is_empty() && quantized.iter().all(Option::is_none) && rows == 1 {
-        BLOCK_REDUCE_WIDTH
+        let reduction_total: u64 = reduction_dims(resolved, output_axes)
+            .iter()
+            .map(|dim| resolved.extents[*dim as usize])
+            .product();
+        (reduction_total / BLOCK_REDUCE_ELEMENTS_PER_THREAD)
+            .next_power_of_two()
+            .clamp(WARP_SIZE, MAX_BLOCK_REDUCE_WIDTH)
     } else {
         WARP_SIZE
     }
