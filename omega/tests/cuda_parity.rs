@@ -21,6 +21,8 @@ use support::{
 };
 
 use omega::Codec;
+use proxima_gguf::quant::block_layout;
+use proxima_primitives::block_layout::BlockLayout;
 use omega::backend::{
     BackendError, Engine, GpuDriver, cuda_kernel_identities, execute_plan_named, plan_named,
 };
@@ -1541,6 +1543,81 @@ fn packed_ptq1_0_matmul_matches_the_dequantized_f32_cpu_path_on_cuda() {
         NumericPolicy::default(),
         1e-5,
     );
+}
+
+/// Snaps each group of 32 onto the levels `amax / 127 * level` that an int8 activation round
+/// trip reproduces exactly, so the f32 oracle can hold the quantized kernel to a tight bound.
+fn on_the_int8_grid(values: &[f32]) -> Vec<f32> {
+    values
+        .chunks(32)
+        .flat_map(|group| {
+            let scale = group.iter().fold(0.0f32, |amax, value| amax.max(value.abs())) / 127.0;
+            group.iter().map(move |value| (value / scale).round() * scale)
+        })
+        .collect()
+}
+
+/// Random bytes in every code position, so every digit pattern a stored byte can hold is read,
+/// and a finite power-of-two f16 in the scale field so no NaN hides a wrong code.
+fn arbitrary_blocks(layout: &BlockLayout, blocks: usize, seed: u64) -> Vec<u8> {
+    let mut lcg = Lcg(seed);
+    let block_bytes = usize::from(layout.block_bytes);
+    let scale_at = usize::from(layout.scale.byte_offset);
+    let mut bytes: Vec<u8> = (0..blocks * block_bytes).map(|_| (lcg.next_unit() * 256.0) as u8).collect();
+    for block in bytes.chunks_exact_mut(block_bytes) {
+        let exponent = 9 + (lcg.next_unit() * 4.0) as u16;
+        block[scale_at..scale_at + 2].copy_from_slice(&(exponent << 10).to_le_bytes());
+    }
+    bytes
+}
+
+/// The contract of the int8 lowering: for a layout it accepts, the dp4a matvec over any block
+/// bytes equals the CPU block-layout walker's decode dotted with the same int8-grid activation.
+#[proxima::test]
+#[case::ptq1_0_radix_digits_in_three_regions(Codec::Ptq1_0)]
+#[case::pq2_0_two_bit_runs(Codec::Pq2_0)]
+#[case::q2_0_two_bit_runs(Codec::Q2_0)]
+#[case::q1_0_one_bit_runs(Codec::Q1_0)]
+#[case::q8_0_signed_bytes(Codec::Q8_0)]
+async fn staged_int8_matvec_over_arbitrary_block_bytes_equals_the_block_layout_walker_on_cuda(#[case] codec: Codec) {
+    let layout = codec.block_layout().expect("a block codec");
+    assert_eq!(layout.scale.layout.width(), 16, "arbitrary_blocks writes an f16 scale");
+    let (rows, blocks_per_row) = (40usize, 10usize);
+    let k = usize::from(layout.elements) * blocks_per_row;
+    let weight = arbitrary_blocks(&layout, rows * blocks_per_row, 41);
+    let activation = on_the_int8_grid(&random_vec(43, k).into_iter().map(|value| value * 4.0 - 2.0).collect::<Vec<_>>());
+    let mut decoded = vec![0.0f32; rows * k];
+    block_layout::dequantize(&layout, &weight, &mut decoded).expect("whole blocks");
+    let expected: Vec<f64> = decoded
+        .chunks_exact(k)
+        .map(|row| row.iter().zip(&activation).map(|(code, value)| f64::from(*code) * f64::from(*value)).sum())
+        .collect();
+
+    let (program, sum) = packed_matmul_program(rows as u32, k as u32, DType::UINT8);
+    let named = vec![
+        ("weight", QuantizedBlock::Packed { codec, bytes: &weight }),
+        ("activation", QuantizedBlock::Float32(&activation)),
+    ];
+    let policy = NumericPolicy::default().with_activation_quantization(true);
+    let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[sum], policy)
+        .expect("the packed matvec plans on cuda");
+    let identities = cuda_kernel_identities(&plan).expect("a cuda plan");
+    assert!(
+        identities.iter().any(|identity| identity.contains("_smv")),
+        "{codec:?} must lower to the staged dp4a matvec, got {:?}",
+        identities.iter().map(|identity| identity.lines().next()).collect::<Vec<_>>()
+    );
+    let actual = execute_plan_named(&mut plan, &named).expect("the matvec runs on cuda");
+
+    let magnitude = expected.iter().fold(0.0f64, |largest, value| largest.max(value.abs()));
+    let worst = actual
+        .root()
+        .iter()
+        .zip(&expected)
+        .map(|(got, want)| (f64::from(*got) - want).abs())
+        .fold(0.0f64, f64::max);
+    assert_eq!(actual.root().len(), rows, "every row is compared");
+    assert!(worst / magnitude < 1e-5, "{codec:?} staged dp4a disagrees with the walker: worst={worst} magnitude={magnitude}");
 }
 
 /// `cuda.rs`'s `kernel_signature` declares the OUTPUT pointer itself as
