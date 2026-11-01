@@ -6,9 +6,10 @@
 //! `sum(q * activation)` into a scratch fragment that is folded into the f32
 //! accumulator as `scale * scratch - minimum * activation_sum`. The activation
 //! is split into an fp16 high and low part so the product keeps f32 accuracy.
-//! Block shape and the integer-times-scale split follow llama.cpp's MMQ design
-//! (ggml-cuda/mmq.cuh, MIT, ggml authors); this body is an independent
-//! rendering for omega's `BoundOp` descriptor.
+//! The integer-times-scale split is the idea behind llama.cpp's MMQ kernels
+//! (ggml-cuda/mmq.cuh); this body was written from the codec layouts in
+//! `crate::cuda` and the token/feature axis ownership split of
+//! `crate::msl::split_token_feature_axes`, not ported from that source.
 
 use alloc::format;
 use alloc::string::String;
