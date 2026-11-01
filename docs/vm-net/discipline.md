@@ -140,6 +140,36 @@ counts from the journal after a cursor taken post-startup,
 vCPU core), the exits are the candidate for the third of the core not spent in
 the guest; attribution of those 34% to these specific exits is unmeasured.
 
+**Four resident guests behind round robin** (`$M/resident-x4.toml`), c=64 15 s
+×3 alternating with traefik: proxima 23,635 / 23,970 / 24,092 rps, p50
+0.64-0.98 ms, p99 15.2-16.9 ms, max 20.8-177.8 ms; traefik 26,870 / 27,300 /
+26,960 rps, p50 1.38-1.40 ms, p99 12.0-12.3 ms, max 32.9-34.6 ms; loadavg 1.4
+to 12. Four vCPU threads at 1,465-1,471 ticks each over 15 s; CPU/request 207
+us. rps by guest count: 1 → 6.5k, 2 → 12.7k, 4 → 23.9k. VmRSS 756 MB (about
+155 MB per guest); first 200 after 6.9 s (2.1-2.7 s with one guest; the boots
+look serialized, unmeasured).
+
+### C3 candidate — honor `VRING_AVAIL_F_NO_INTERRUPT` (rolled back)
+
+Exits per request at c=1 (journal, 1,000 requests): InterruptStatus read 2.29,
+InterruptACK write 2.29, QueueNotify 1.06 — 4.58 of 5.64 exits are interrupt
+handling. The device raised the used-buffer interrupt after every completion
+(`tools/proxima-vm/src/virtio_net.rs:207-208`, `:237-238`) and never read the
+avail ring flags (`pending_head`, `:277-289`).
+
+| Date | Change | Δ | runs | Host loadout |
+|---|---|---|---|---|
+| 2026-11-01 | raise only when the queue's avail flags lack NO_INTERRUPT (perf/virtio-no-interrupt 44cac59b + d0b814fb) | c=64 rps A 6,421 / 6,600 / 6,644 vs B 6,693 / 6,549 / 6,699 (mean +1.4%, inside the 3% same-binary spread); CPU/request 191.3 vs 188.7 us; interrupt reads per rx fill under c=64 A 1.05 / 0.98 vs B 0.89 / 0.89 | 3 alternating A/B rows; 2 alternating exit-count rows | loadavg 1.2-4.7 |
+
+**ROLLBACK:** no throughput signal, so the simpler form stays. The flag does
+engage under load (about 13% fewer interrupt reads per rx fill), but rps does
+not follow. Only the docs commit (feature-set comments) landed.
+**Instrumentation gap found:** the c=64 exit counts came from a debug journal
+that journald rate-limited (37,426-37,444 lines for every 20,000-request run,
+0.33 rx fills per request against 2.06 at c=1), so their absolute values are
+not data; only within-run ratios were used. Exit counts at load need counters,
+not log lines.
+
 **Implication:** two levers. (1) Let a workload use more cores: replicas or
 guest vCPUs. Today, N resident upstreams in one composed pipe with
 round-robin is expressible in config. (2) Fewer exits per request: virtio
