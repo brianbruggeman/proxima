@@ -381,7 +381,7 @@ async fn run_supervisor(state: Arc<ProcessState>, mut shutdown_rx: mpsc::Receive
             let _ = task.await;
         }
         if state.shutting_down.load(Ordering::SeqCst) {
-            let _ = state.exit_tx.send(last_exit);
+            state.exit_tx.send_replace(last_exit);
             return;
         }
         let should_restart = match (state.spec.restart, &exit) {
@@ -392,7 +392,7 @@ async fn run_supervisor(state: Arc<ProcessState>, mut shutdown_rx: mpsc::Receive
         };
         if !should_restart {
             debug!(label = %state.label, "process exited; restart policy declines");
-            let _ = state.exit_tx.send(last_exit);
+            state.exit_tx.send_replace(last_exit);
             return;
         }
         let attempts = state.restart_attempts.fetch_add(1, Ordering::SeqCst) + 1;
@@ -402,7 +402,7 @@ async fn run_supervisor(state: Arc<ProcessState>, mut shutdown_rx: mpsc::Receive
                 attempts,
                 "process exceeded max_restart_attempts; supervisor stopping"
             );
-            let _ = state.exit_tx.send(last_exit);
+            state.exit_tx.send_replace(last_exit);
             return;
         }
         if state.spec.restart_delay_ms > 0 {
@@ -419,7 +419,7 @@ async fn run_supervisor(state: Arc<ProcessState>, mut shutdown_rx: mpsc::Receive
             }
             Err(error) => {
                 error!(label = %state.label, ?error, "supervisor relaunch failed");
-                let _ = state.exit_tx.send(last_exit);
+                state.exit_tx.send_replace(last_exit);
                 return;
             }
         }
@@ -702,6 +702,8 @@ impl PipeFactory for ProcessPipeFactory {
 mod tests {
     use super::*;
     use serde_json::json;
+    use tokio::task::yield_now;
+    use tokio::time::timeout;
 
     fn shell() -> &'static str {
         if cfg!(windows) { "cmd" } else { "sh" }
@@ -881,6 +883,40 @@ mod tests {
             )
             .await;
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
+    }
+
+    fn exiting_spec(script: &str) -> ProcessSpec {
+        ProcessSpec {
+            command: shell().into(),
+            args: vec![shell_arg().into(), script.into()],
+            working_dir: None,
+            env: BTreeMap::new(),
+            restart: RestartPolicy::Never,
+            restart_delay_ms: 0,
+            max_restart_attempts: 0,
+            ready_probe: ReadyProbe::None,
+            shutdown_signal: ShutdownSignal::Term,
+            shutdown_timeout_ms: 5_000,
+        }
+    }
+
+    // the supervisor holds the only other Arc<ProcessState>, so a strong count
+    // of one means it has already fired (or dropped) the exit before any
+    // subscriber existed.
+    #[proxima::test]
+    async fn wait_for_exit_returns_status_when_child_exited_before_first_subscribe() {
+        let upstream = ProcessUpstream::spawn("early_exit", exiting_spec("exit 7"))
+            .await
+            .expect("spawn");
+        while Arc::strong_count(&upstream.state) > 1 {
+            yield_now().await;
+        }
+
+        let status = timeout(Duration::from_secs(5), upstream.wait_for_exit())
+            .await
+            .expect("wait_for_exit must observe an exit fired before the first subscribe");
+
+        assert_eq!(status.and_then(|status| status.code()), Some(7));
     }
 
     #[proxima::test]
