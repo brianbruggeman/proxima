@@ -3620,6 +3620,7 @@ async fn rmsnorm_broadcast_epilogue_reduce_matches_the_f64_oracle_on_cuda(
 }
 
 const MATVEC_CHAIN: usize = 24;
+const MATVEC_RUNS: usize = 8;
 
 fn matvec_chain_program(rows: u32, k: u32) -> (Vec<Op>, Vec<NodeId>, Vec<String>) {
     let mut program = Vec::new();
@@ -3684,7 +3685,7 @@ async fn staged_matvec_chain_matches_the_f64_oracle_and_reports_event_time_on_cu
     let policy = NumericPolicy::default().with_activation_quantization(true);
     let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &roots, policy)
         .expect("the matvec chain plans on cuda");
-    let actual = (0..NORM_RUNS)
+    let actual = (0..MATVEC_RUNS)
         .map(|_| {
             let evaluated = execute_plan_named(&mut plan, &named).expect("the matvec chain runs on cuda");
             evaluated.get(roots[0]).expect("the first matvec is a requested output").0.to_vec()
