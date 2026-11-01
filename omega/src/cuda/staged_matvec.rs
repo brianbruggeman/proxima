@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use proxima_tensor::{BoundOp, BoundOpKind, DType, Keep, NumericPolicy, ReduceInit, ScalarOp, StepArg};
 
 use super::block_dot::{BlockDot, DOT_ELEMENTS, block_dot_i8};
-use super::{Codec, EmitError, gather_count, push_reduce_epilogue_write, reduction_dims};
+use super::{Codec, EmitError, flat_packed_rows, gather_count, push_reduce_epilogue_write, reduction_dims};
 
 /// Warps in one block of a staged matvec.
 pub(super) const STAGED_WARPS: usize = 8;
@@ -84,7 +84,8 @@ pub(super) fn staged_matvec_plan(
         && stageable
         && shared_by_every_row
         && epilogue_broadcast_axes.is_empty()
-        && gather_count(resolved) == 0)
+        && gather_count(resolved) == 0
+        && flat_packed_rows(resolved, quantized))
     .then_some(StagedMatvec {
         weight_slot,
         activation_slot,

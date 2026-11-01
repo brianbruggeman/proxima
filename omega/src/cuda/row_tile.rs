@@ -5,7 +5,7 @@ use proxima_tensor::{BoundOp, BoundOpKind, Keep, NumericPolicy};
 
 use super::{
     Codec, EmitError, WARP_SIZE, chunk_codec, cooperative_identity_token, fold_init_tokens, gather_count,
-    logical_packed_address, operand_read, push_body_steps,
+    flat_packed_rows, operand_read, push_body_steps,
     push_chunk_decode, push_packed_matmul_offset, push_reduce_epilogue_write, push_reduction_coord_carry,
     push_reduction_coord_decompose, reduce_is_cooperative, reduction_dims, scalar_op_expr,
     shuffle_combine_expr,
@@ -38,7 +38,7 @@ pub(super) fn row_tile_axis(
         && gather_count(resolved) == 0
         && quantized.iter().any(Option::is_some)
         && !reduction_dims(resolved, output_axes).is_empty()
-        && !logical_packed_address()
+        && flat_packed_rows(resolved, quantized)
         && reduce_is_cooperative(resolved, quantized, numeric_policy);
     if !eligible {
         return None;
