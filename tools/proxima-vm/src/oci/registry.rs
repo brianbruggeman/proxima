@@ -72,12 +72,27 @@ where
     match &image.pin {
         Pin::Digest(digest) => Ok((digest.clone(), content(fetch, cache_root, image, "manifests", digest, token).await?)),
         Pin::Tag(tag) => {
+            if let Some(recorded) = recorded_root(cache_root, image, tag)? {
+                return Ok(recorded);
+            }
             let url = endpoint(image, "manifests", tag);
             let body = get(fetch, image, &url, Some(manifest::ACCEPT), token).await?;
             let digest = Digest::of(&body);
             cache::write(cache_root, &digest, &body)?;
+            cache::write_tag(cache_root, image, tag, &digest)?;
             Ok((digest, body.to_vec()))
         }
+    }
+}
+
+fn recorded_root(cache_root: &Path, image: &ImageRef, tag: &str) -> Result<Option<(Digest, Vec<u8>)>, OciError> {
+    let Some(digest) = cache::read_tag(cache_root, image, tag)? else {
+        return Ok(None);
+    };
+    match cache::read(cache_root, &digest) {
+        Ok(found) => Ok(found.map(|bytes| (digest, bytes))),
+        Err(OciError::DigestMismatch { .. }) => Ok(None),
+        Err(error) => Err(error),
     }
 }
 
@@ -193,11 +208,14 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use std::cell::RefCell;
     use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::PathBuf;
 
     use super::*;
 
     const LAYER: &[u8] = b"layer-bytes-standing-in-for-a-gzip-tar";
-    const CONFIG: &str = r#"{"config":{"Entrypoint":["/whoami"],"Env":["PATH=/usr/bin"]}}"#;
+    const REQUESTS_PER_RESOLUTION: usize = 2;
+    const CONFIG: &str =r#"{"config":{"Entrypoint":["/whoami"],"Env":["PATH=/usr/bin"]}}"#;
 
     struct Registry {
         blobs: BTreeMap<String, Vec<u8>>,
@@ -285,6 +303,85 @@ mod tests {
         assert!(first_run_requests > 0);
         assert_eq!(registry.requests.borrow().len(), first_run_requests, "a cache hit must not touch the network");
         assert_eq!(pulled.layers[0].bytes, LAYER);
+    }
+
+    async fn forbidden_transport(request: Request<Bytes>) -> Result<Response<Bytes>, OciError> {
+        panic!("a cached tag must not touch the network, but {} was requested", request.uri());
+    }
+
+    fn request_log(registry: &Registry) -> String {
+        registry.requests.borrow().join("\n")
+    }
+
+    fn tag_requests(registry: &Registry) -> usize {
+        registry.requests.borrow().iter().filter(|url| url.ends_with("/manifests/v1")).count()
+    }
+
+    fn only_file_in(directory: &Path) -> PathBuf {
+        let mut entries = fs::read_dir(directory).expect("read dir").map(|entry| entry.expect("entry").path());
+        let first = entries.next().expect("one file");
+        assert!(entries.next().is_none(), "exactly one file in {}", directory.display());
+        first
+    }
+
+    #[proxima::test]
+    async fn the_second_pull_of_a_tag_makes_zero_requests_once_the_resolution_is_recorded() {
+        let registry = registry();
+        let cache_root = tempfile::tempdir().expect("tempdir");
+        let by_tag = image("registry.test/team/app:v1");
+        pull(&async |request| registry.serve(request).await, cache_root.path(), &by_tag, "linux", "amd64").await.expect("first pull");
+
+        let pulled = pull(&forbidden_transport, cache_root.path(), &by_tag, "linux", "amd64").await.expect("cached tag pull");
+
+        assert_eq!(tag_requests(&registry), REQUESTS_PER_RESOLUTION, "{}: {}", "the tag is resolved once", request_log(&registry));
+        assert_eq!(pulled.root, registry.index);
+        assert_eq!(pulled.manifest, registry.manifest);
+        assert_eq!(pulled.layers[0].bytes, LAYER);
+    }
+
+    #[proxima::test]
+    async fn a_tag_record_naming_a_missing_blob_resolves_the_tag_again() {
+        let registry = registry();
+        let cache_root = tempfile::tempdir().expect("tempdir");
+        let by_tag = image("registry.test/team/app:v1");
+        pull(&async |request| registry.serve(request).await, cache_root.path(), &by_tag, "linux", "amd64").await.expect("first pull");
+        fs::remove_file(cache_root.path().join("blobs").join("sha256").join(registry.index.hex())).expect("drop the index blob");
+
+        let pulled = pull(&async |request| registry.serve(request).await, cache_root.path(), &by_tag, "linux", "amd64").await.expect("fallback pull");
+
+        assert_eq!(tag_requests(&registry), 2 * REQUESTS_PER_RESOLUTION, "{}: {}", "a missing blob sends the pull back to the registry", request_log(&registry));
+        assert_eq!(pulled.root, registry.index);
+    }
+
+    #[proxima::test]
+    async fn a_tag_record_naming_a_tampered_blob_resolves_the_tag_again() {
+        let registry = registry();
+        let cache_root = tempfile::tempdir().expect("tempdir");
+        let by_tag = image("registry.test/team/app:v1");
+        pull(&async |request| registry.serve(request).await, cache_root.path(), &by_tag, "linux", "amd64").await.expect("first pull");
+        fs::write(cache_root.path().join("blobs").join("sha256").join(registry.index.hex()), b"tampered index").expect("tamper");
+
+        let pulled = pull(&async |request| registry.serve(request).await, cache_root.path(), &by_tag, "linux", "amd64").await.expect("fallback pull");
+
+        assert_eq!(tag_requests(&registry), 2 * REQUESTS_PER_RESOLUTION, "{}: {}", "a failed verification sends the pull back to the registry", request_log(&registry));
+        assert_eq!(pulled.root, registry.index);
+    }
+
+    #[proxima::test]
+    async fn a_corrupted_tag_record_resolves_the_tag_again_and_is_rewritten() {
+        let registry = registry();
+        let cache_root = tempfile::tempdir().expect("tempdir");
+        let by_tag = image("registry.test/team/app:v1");
+        pull(&async |request| registry.serve(request).await, cache_root.path(), &by_tag, "linux", "amd64").await.expect("first pull");
+        let record = only_file_in(&cache_root.path().join("tags"));
+        fs::write(&record, b"sha256:not-a-digest").expect("corrupt the record");
+
+        let pulled = pull(&async |request| registry.serve(request).await, cache_root.path(), &by_tag, "linux", "amd64").await.expect("fallback pull");
+
+        assert_eq!(tag_requests(&registry), 2 * REQUESTS_PER_RESOLUTION, "{}: {}", "an unparsable record is ignored", request_log(&registry));
+        assert_eq!(pulled.root, registry.index);
+        assert_eq!(fs::read_to_string(&record).expect("rewritten record"), registry.index.as_str());
+        pull(&forbidden_transport, cache_root.path(), &by_tag, "linux", "amd64").await.expect("the rewritten record serves the next pull");
     }
 
     #[proxima::test]
