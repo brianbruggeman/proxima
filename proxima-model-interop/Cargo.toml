@@ -179,7 +179,17 @@ vulkan = ["gpu", "omega/wgpu-backend"]
 gpu = ["dep:omega", "dep:libc", "std", "dep:proxima-telemetry", "proxima-telemetry/std", "proxima-telemetry/emit"]
 # CUDA serving uses the same backend-agnostic model path as Vulkan, but
 # selects omega's cudarc/NVRTC driver when no wgpu driver is requested.
-cuda = ["gpu", "omega/cuda-driver"]
+# kv-capacity-bucket, cached-attention-streaming and reduce-epilogue-fusion join
+# the cuda lane on the 2026-11-01 bake-off (16 tokens, ids identical): 8B PQ2_0
+# 19.2 -> 11.9 ms/token, Bonsai-27B Q1_0 115.5 -> 55.6, Bonsai-2-27B PTQ1_0
+# 174.4 -> 106.9, with one refit per run instead of one per token.
+cuda = [
+    "gpu",
+    "omega/cuda-driver",
+    "kv-capacity-bucket",
+    "cached-attention-streaming",
+    "reduce-epilogue-fusion",
+]
 # cached-attention physical step for the real serving/decode harness; folded
 # into `metal`'s default shape per ROW 282 but kept individually selectable
 # so a caller can build without `metal` and still exercise the fused path on
