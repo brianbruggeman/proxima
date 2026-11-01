@@ -71,12 +71,12 @@ impl Default for RingCapacities {
 }
 
 impl RingSet {
-    pub fn new(caps: &RingCapacities) -> Result<Self, crate::error::Error> {
+    pub fn new(caps: &RingCapacities) -> Self {
         // each stream is a bounded queue with drop-newest overflow; the recorder
         // routes Block vs Drop per-emit on top via `try_enqueue`, and counts a
         // Drop through the queue's own counter (`note_drop`), so `dropped()` sums
         // the per-stream totals rather than a separate per-core atomic.
-        Ok(Self {
+        Self {
             spans: HeapBoundedQueue::new(caps.spans, FailMode::DropNewest),
             events: HeapBoundedQueue::new(caps.events, FailMode::DropNewest),
             logs: HeapBoundedQueue::new(caps.logs, FailMode::DropNewest),
@@ -86,7 +86,7 @@ impl RingSet {
             #[cfg(feature = "deferred-metric-fold")]
             span_obs: HeapBoundedQueue::new(caps.span_obs, FailMode::DropNewest),
             assisted: AtomicU64::new(0),
-        })
+        }
     }
 
     /// Records dropped on this core (a full ring at emit under `Drop`), summed

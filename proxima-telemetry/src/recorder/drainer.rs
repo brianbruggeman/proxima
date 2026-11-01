@@ -63,7 +63,7 @@ impl Drainer {
 /// overflow_attr, then instruments. Called by [`Drainer`] and by
 /// `EmitShared::drop` (final flush).
 pub(crate) fn drain_pass(shared: &EmitShared) -> usize {
-    let mut total = drain_cores(shared, 0, shared.cores().count());
+    let mut total = drain_cores(shared, 0, shared.core_count());
     let pipe_handle: TelemetryPipeHandle = shared.pipe().read(TelemetryPipeHandle::clone);
     let ts_ns = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -83,8 +83,10 @@ pub(crate) fn drain_cores(shared: &EmitShared, start: usize, end: usize) -> usiz
     let batch = shared.drain_batch();
 
     let mut total = 0usize;
-    for core_index in start..end.min(shared.cores().count()) {
-        let ring_set = shared.cores().slot(core_index);
+    for core_index in start..end.min(shared.core_count()) {
+        let Some(ring_set) = shared.initialised_ring_set(core_index) else {
+            continue;
+        };
         total += drain_one(
             shared,
             pipe,
@@ -183,8 +185,10 @@ pub(crate) async fn drain_cores_async(shared: &EmitShared, start: usize, end: us
     let batch = shared.drain_batch();
 
     let mut total = 0usize;
-    for core_index in start..end.min(shared.cores().count()) {
-        let ring_set = shared.cores().slot(core_index);
+    for core_index in start..end.min(shared.core_count()) {
+        let Some(ring_set) = shared.initialised_ring_set(core_index) else {
+            continue;
+        };
         total += drain_one_async(
             shared,
             pipe,
@@ -545,9 +549,6 @@ mod tests {
         METHOD_SPAN_BATCH, METHOD_SPAN_BATCH_ARC, TelemetryRequest, into_telemetry_handle,
     };
     use crate::recorder::EmitShared;
-    use crate::recorder::PerCore;
-    use crate::recorder::registry::InstrumentRegistry;
-    use crate::recorder::ring_set::RingSet;
 
     use super::Drainer;
 
@@ -573,10 +574,9 @@ mod tests {
             #[cfg(feature = "deferred-metric-fold")]
             span_obs: 256,
         };
-        let cores = PerCore::new_with(1, |_| RingSet::new(&caps).expect("ring set init in test"));
         let shared = Arc::new(EmitShared::new(
-            cores,
-            InstrumentRegistry::new(),
+            1,
+            caps,
             into_telemetry_handle(pipe),
             sharing,
             256,
@@ -658,7 +658,7 @@ mod tests {
         };
         let (drainer, cores) = make_drainer_with(pipe, RecordSharing::Inline);
 
-        let ring_set = cores.cores().slot(0);
+        let ring_set = cores.ring_set(0);
         for _ in 0..5 {
             let _ = ring_set.spans.enqueue(crate::trace::SpanRecord {
                 trace_id: crate::id::TraceId::INVALID,
@@ -735,7 +735,7 @@ mod tests {
         };
         let (drainer, cores) = make_drainer_with(pipe, RecordSharing::Arc);
 
-        let ring_set = cores.cores().slot(0);
+        let ring_set = cores.ring_set(0);
         for _ in 0..10 {
             let _ = ring_set.spans.enqueue(crate::trace::SpanRecord {
                 trace_id: crate::id::TraceId::INVALID,
