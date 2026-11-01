@@ -457,6 +457,7 @@ pub fn append_gated_attention_only(
     k_second_cache: NodeId,
     k_pass_cache: NodeId,
     v_cache: NodeId,
+    fold: Option<&HadamardFold>,
 ) -> Result<(NodeId, DenseAttentionRoots), TensorError> {
     let (residual1, taps) = append_gated_attention_only_with_taps(
         program,
@@ -485,6 +486,7 @@ pub fn append_gated_attention_only(
         k_second_cache,
         k_pass_cache,
         v_cache,
+        fold,
     )?;
     Ok((
         residual1,
@@ -607,6 +609,7 @@ pub fn append_gated_attention_only_with_taps(
     k_second_cache: NodeId,
     k_pass_cache: NodeId,
     v_cache: NodeId,
+    fold: Option<&HadamardFold>,
 ) -> Result<(NodeId, DenseAttentionTaps), TensorError> {
     let pass_dim = attn_head_dim - rotary_dim;
 
@@ -627,21 +630,32 @@ pub fn append_gated_attention_only_with_taps(
     // matmul, then narrows q/gate per head with the same
     // [`per_head_channel_range`] technique `q_pass`/`k_pass` already use on
     // dense float32 activations just below.
-    let qg_product = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(normed, "si->shci"), (wq_gate, "ihc->shci")],
-    )?;
-    let qg_raw = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        qg_product,
-        "shci->shci",
-        "shc->shci",
-    )?;
+    let rotated_input = match fold {
+        Some(fold) => Some(fold.rotate_flat(program, normed, fold.embedding(), "s")?),
+        None => None,
+    };
+    let qg_raw = match (fold, rotated_input) {
+        (Some(fold), Some(rotated)) => {
+            fold.project_folded(program, rotated, wq_gate, "s", "hc")?
+        }
+        _ => {
+            let qg_product = elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[(normed, "si->shci"), (wq_gate, "ihc->shci")],
+            )?;
+            reduce(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                qg_product,
+                "shci->shci",
+                "shc->shci",
+            )?
+        }
+    };
     let q_raw = per_head_channel_range(program, qg_raw, "h", attn_head_dim * 2, 0, attn_head_dim)?;
     let gate_raw = per_head_channel_range(
         program,
@@ -652,37 +666,47 @@ pub fn append_gated_attention_only_with_taps(
         attn_head_dim,
     )?;
 
-    let k_product = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(normed, "si->sudi"), (wk, "iud->sudi")],
-    )?;
-    let k_raw = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        k_product,
-        "sudi->sudi",
-        "sud->sudi",
-    )?;
+    let k_raw = match (fold, rotated_input) {
+        (Some(fold), Some(rotated)) => fold.project_folded(program, rotated, wk, "s", "ud")?,
+        _ => {
+            let k_product = elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[(normed, "si->sudi"), (wk, "iud->sudi")],
+            )?;
+            reduce(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                k_product,
+                "sudi->sudi",
+                "sud->sudi",
+            )?
+        }
+    };
 
-    let v_product = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(normed, "si->sudi"), (wv, "iud->sudi")],
-    )?;
-    let v_new = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        v_product,
-        "sudi->sudi",
-        "sud->sudi",
-    )?;
+    let v_new = match (fold, rotated_input) {
+        (Some(fold), Some(rotated)) => fold.project_folded(program, rotated, wv, "s", "ud")?,
+        _ => {
+            let v_product = elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[(normed, "si->sudi"), (wv, "iud->sudi")],
+            )?;
+            reduce(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                v_product,
+                "sudi->sudi",
+                "sud->sudi",
+            )?
+        }
+    };
 
     // `q_norm`/`k_norm` run on the FULL `attn_head_dim` width, before RoPE
     // ever splits it (`modeling_qwen3_next.py:300-301`,
@@ -1115,21 +1139,31 @@ pub fn append_gated_attention_only_with_taps(
         &[(attended, "sugd->sugd"), (sigmoid_attn_gate, "sugd->sugd")],
     )?;
 
-    let wo_product = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(gated_attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
-    )?;
-    let attn_out = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        wo_product,
-        "sugdo->sugdo",
-        "so->sugdo",
-    )?;
+    let attn_out = match fold {
+        Some(fold) => {
+            let kv_heads = fold.kv_heads();
+            let heads = merge_head_axes(program, gated_attended, "sugd", "s", kv_heads, group, true)?;
+            let rotated = fold.rotate_heads(program, heads, kv_heads * group, attn_head_dim, "s")?;
+            fold.project_folded(program, rotated, wo, "s", "o")?
+        }
+        None => {
+            let wo_product = elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[(gated_attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
+            )?;
+            reduce(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                wo_product,
+                "sugdo->sugdo",
+                "so->sugdo",
+            )?
+        }
+    };
 
     let residual1 = elementwise(
         program,
@@ -1200,6 +1234,7 @@ pub fn append_gated_attention_layer(
     k_second_cache: NodeId,
     k_pass_cache: NodeId,
     v_cache: NodeId,
+    fold: Option<&HadamardFold>,
 ) -> Result<(NodeId, DenseAttentionRoots), TensorError> {
     let (residual1, roots) = append_gated_attention_only(
         program,
@@ -1228,40 +1263,53 @@ pub fn append_gated_attention_layer(
         k_second_cache,
         k_pass_cache,
         v_cache,
+        fold,
     )?;
 
     let normed2 = rmsnorm(program, residual1, ffn_norm_weight, inv_dim, eps)?;
 
-    let gate_product2 = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
-    )?;
-    let ffn_gate = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        gate_product2,
-        "sdg->sdg",
-        "sg->sdg",
-    )?;
-    let up_product = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
-    )?;
-    let up = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        up_product,
-        "sdg->sdg",
-        "sg->sdg",
-    )?;
+    let (ffn_gate, up) = match fold {
+        Some(fold) => {
+            let rotated = fold.rotate_flat(program, normed2, fold.embedding(), "s")?;
+            (
+                fold.project_folded(program, rotated, w_gate, "s", "g")?,
+                fold.project_folded(program, rotated, w_up, "s", "g")?,
+            )
+        }
+        None => {
+            let gate_product2 = elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
+            )?;
+            let ffn_gate = reduce(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                gate_product2,
+                "sdg->sdg",
+                "sg->sdg",
+            )?;
+            let up_product = elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
+            )?;
+            let up = reduce(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                up_product,
+                "sdg->sdg",
+                "sg->sdg",
+            )?;
+            (ffn_gate, up)
+        }
+    };
 
     let neg_ffn_gate = elementwise(
         program,
@@ -1300,21 +1348,29 @@ pub fn append_gated_attention_layer(
         &[(silu_gate, "sg->sg"), (up, "sg->sg")],
     )?;
 
-    let down_product = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
-    )?;
-    let ffn_out = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        down_product,
-        "sgd->sgd",
-        "sd->sgd",
-    )?;
+    let ffn_out = match fold {
+        Some(fold) => {
+            let rotated = fold.rotate_flat(program, ffn_hidden, fold.feed_forward(), "s")?;
+            fold.project_folded(program, rotated, w_down, "s", "d")?
+        }
+        None => {
+            let down_product = elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
+            )?;
+            reduce(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                down_product,
+                "sgd->sgd",
+                "sd->sgd",
+            )?
+        }
+    };
 
     let x_next = elementwise(
         program,

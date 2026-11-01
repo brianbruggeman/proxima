@@ -68,6 +68,7 @@ mod gqa_layer_routed;
 mod gqa_forward_cached;
 #[macro_use]
 mod gated_attention;
+mod hadamard;
 #[macro_use]
 mod single_range_moe_cached;
 #[macro_use]
@@ -95,6 +96,7 @@ pub use crate::op::{SLIDING_CACHED_LEN_INPUT, SLIDING_KV_SYMBOL};
 pub use attention_forward::*;
 pub use descriptor::*;
 pub use gated_attention::*;
+pub use hadamard::*;
 pub use gguf_descriptor::*;
 pub use gqa_forward_cached::*;
 pub use gqa_layer_routed::*;

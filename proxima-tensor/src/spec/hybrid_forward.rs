@@ -143,6 +143,17 @@ pub(super) fn hybrid_dense_forward(
     };
 
     let mut program = Vec::new();
+    let fold = (descriptor.hadamard_block > 0).then(|| {
+        HadamardFold::declare(
+            &mut program,
+            descriptor.hadamard_block,
+            embedding,
+            feed_forward,
+            kv_heads,
+            descriptor.hadamard_gdn_v_grouped,
+            &[ssm_d_inner, query_heads * attn_head_dim],
+        )
+    });
 
     let ids = input_leaf(&mut program, DType::INT32, alloc::vec![x_extent], "ids");
     let table = input_leaf(
@@ -152,6 +163,9 @@ pub(super) fn hybrid_dense_forward(
         "token_embd.weight",
     );
     let mut x = embedding_lookup(&mut program, table, ids);
+    if let (Some(fold), true) = (fold.as_ref(), descriptor.hadamard_latent_embedding) {
+        x = fold.restore_flat(&mut program, x, embedding)?;
+    }
 
     let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
     let eps = input_leaf(&mut program, DType::FLOAT32, alloc::vec![x_extent], "eps");
@@ -473,7 +487,7 @@ pub(super) fn hybrid_dense_forward(
                 wq_gate,
                 wk,
                 wv,
-                wo,
+                if fold.is_some() { wo_flat } else { wo },
                 w_gate,
                 w_up,
                 w_down,
@@ -481,6 +495,7 @@ pub(super) fn hybrid_dense_forward(
                 k_second_cache,
                 k_pass_cache,
                 v_cache,
+                fold.as_ref(),
             )?;
             (
                 x_next,
@@ -589,6 +604,7 @@ pub(super) fn hybrid_dense_forward(
                 GdnOutputGate::Silu,
                 descriptor.v_head_reordered,
                 descriptor.ssm_out_head_major,
+                fold.as_ref(),
                 descriptor.prefill_width,
             )?;
 
@@ -618,36 +634,49 @@ pub(super) fn hybrid_dense_forward(
                 alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
                 &alloc::format!("blk.{layer}.ffn_down.weight"),
             );
-            let gate_product = elementwise(
-                &mut program,
-                DType::FLOAT32,
-                ScalarOp::Multiply,
-                &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
-            )?;
-            let gate = reduce(
-                &mut program,
-                DType::FLOAT32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                gate_product,
-                "sdg->sdg",
-                "sg->sdg",
-            )?;
-            let up_product = elementwise(
-                &mut program,
-                DType::FLOAT32,
-                ScalarOp::Multiply,
-                &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
-            )?;
-            let up = reduce(
-                &mut program,
-                DType::FLOAT32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                up_product,
-                "sdg->sdg",
-                "sg->sdg",
-            )?;
+            let (gate, up) = match fold.as_ref() {
+                Some(fold) => {
+                    let rotated =
+                        fold.rotate_flat(&mut program, normed2, fold.embedding(), "s")?;
+                    (
+                        fold.project_folded(&mut program, rotated, w_gate, "s", "g")?,
+                        fold.project_folded(&mut program, rotated, w_up, "s", "g")?,
+                    )
+                }
+                None => {
+                    let gate_product = elementwise(
+                        &mut program,
+                        DType::FLOAT32,
+                        ScalarOp::Multiply,
+                        &[(normed2, "sd->sdg"), (w_gate, "dg->sdg")],
+                    )?;
+                    let gate = reduce(
+                        &mut program,
+                        DType::FLOAT32,
+                        ScalarOp::Add,
+                        ReduceInit::Zero,
+                        gate_product,
+                        "sdg->sdg",
+                        "sg->sdg",
+                    )?;
+                    let up_product = elementwise(
+                        &mut program,
+                        DType::FLOAT32,
+                        ScalarOp::Multiply,
+                        &[(normed2, "sd->sdg"), (w_up, "dg->sdg")],
+                    )?;
+                    let up = reduce(
+                        &mut program,
+                        DType::FLOAT32,
+                        ScalarOp::Add,
+                        ReduceInit::Zero,
+                        up_product,
+                        "sdg->sdg",
+                        "sg->sdg",
+                    )?;
+                    (gate, up)
+                }
+            };
             let silu_gate = silu(&mut program, gate, one, "sg->sg")?;
             let ffn_hidden = elementwise(
                 &mut program,
@@ -655,21 +684,34 @@ pub(super) fn hybrid_dense_forward(
                 ScalarOp::Multiply,
                 &[(silu_gate, "sg->sg"), (up, "sg->sg")],
             )?;
-            let down_product = elementwise(
-                &mut program,
-                DType::FLOAT32,
-                ScalarOp::Multiply,
-                &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
-            )?;
-            let ffn_out = reduce(
-                &mut program,
-                DType::FLOAT32,
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                down_product,
-                "sgd->sgd",
-                "sd->sgd",
-            )?;
+            let ffn_out = match fold.as_ref() {
+                Some(fold) => {
+                    let rotated = fold.rotate_flat(
+                        &mut program,
+                        ffn_hidden,
+                        fold.feed_forward(),
+                        "s",
+                    )?;
+                    fold.project_folded(&mut program, rotated, w_down, "s", "d")?
+                }
+                None => {
+                    let down_product = elementwise(
+                        &mut program,
+                        DType::FLOAT32,
+                        ScalarOp::Multiply,
+                        &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
+                    )?;
+                    reduce(
+                        &mut program,
+                        DType::FLOAT32,
+                        ScalarOp::Add,
+                        ReduceInit::Zero,
+                        down_product,
+                        "sgd->sgd",
+                        "sd->sgd",
+                    )?
+                }
+            };
             let x_after_ffn = elementwise(
                 &mut program,
                 DType::FLOAT32,
@@ -706,21 +748,30 @@ pub(super) fn hybrid_dense_forward(
         alloc::vec![Extent::Static(embedding), Extent::Static(vocab)],
         "output.weight",
     );
-    let logits_product = elementwise(
-        &mut program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
-    )?;
-    let logits = reduce(
-        &mut program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        logits_product,
-        "sdv->sdv",
-        "sv->sdv",
-    )?;
+    let logits = match fold.as_ref() {
+        Some(fold) => {
+            let rotated =
+                fold.rotate_flat(&mut program, normed_last, fold.embedding(), "s")?;
+            fold.project_folded(&mut program, rotated, lm_head, "s", "v")?
+        }
+        None => {
+            let logits_product = elementwise(
+                &mut program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[(normed_last, "sd->sdv"), (lm_head, "dv->sdv")],
+            )?;
+            reduce(
+                &mut program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                logits_product,
+                "sdv->sdv",
+                "sv->sdv",
+            )?
+        }
+    };
 
     Ok(ForwardProgram {
         program,
@@ -1384,6 +1435,7 @@ pub(super) fn hybrid_routed_forward(
                     k_second_cache,
                     k_pass_cache,
                     v_cache,
+                    None,
                 )?;
                 layer_roots.push(LayerCacheRoots::DenseAttention((
                     dense_taps.rotated_k_new_first,
@@ -1526,6 +1578,7 @@ pub(super) fn hybrid_routed_forward(
                     GdnOutputGate::Silu,
                     descriptor.v_head_reordered,
                     descriptor.ssm_out_head_major,
+                    None,
                     descriptor.prefill_width,
                 )?;
                 layer_roots.push(LayerCacheRoots::Ssm {

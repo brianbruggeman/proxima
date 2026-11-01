@@ -1712,6 +1712,17 @@ pub fn append_delta_net_sequence_tail_with_taps(
     program: &mut Vec<Op>,
     tail: GdnSequenceTail,
 ) -> Result<GdnSequenceTailTaps, TensorError> {
+    append_delta_net_sequence_tail_projected(program, tail, false, None)
+}
+
+/// [`append_delta_net_sequence_tail_with_taps`] with the `ssm_out` projection read in llama.cpp's
+/// head-major order, or through a Hadamard fold.
+pub fn append_delta_net_sequence_tail_projected(
+    program: &mut Vec<Op>,
+    tail: GdnSequenceTail,
+    ssm_out_head_major: bool,
+    fold: Option<&HadamardFold>,
+) -> Result<GdnSequenceTailTaps, TensorError> {
     let squared = elementwise(
         program,
         DType::FLOAT32,
@@ -1772,47 +1783,79 @@ pub fn append_delta_net_sequence_tail_with_taps(
         ScalarOp::Multiply,
         &[(normed_gamma, "sjug->sguj"), (tail.z, "sugj->sguj")],
     )?;
-    let out_weight_map = alloc::format!(
-        "{}*j+{}*u+g,d->ugjd",
-        tail.kv_heads * tail.group,
-        tail.group
-    );
-    let value_head_ones = op::append(
-        program,
-        Op::Constant {
-            dtype: DType::FLOAT32,
-            shape: alloc::vec![
-                Extent::Static(tail.kv_heads),
-                Extent::Static(tail.group),
-                Extent::Static(tail.head_v_dim),
-            ],
-            value: 1.0,
-        },
-    );
-    let out_weight_split = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[
-            (tail.out_weight, out_weight_map.as_str()),
-            (value_head_ones, "ugj->ugjd"),
-        ],
-    )?;
-    let product = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(gated, "sguj->sgujd"), (out_weight_split, "ugjd->sgujd")],
-    )?;
-    let projected = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        product,
-        "sgujd->sgujd",
-        "sd->sgujd",
-    )?;
+    let projected = match fold {
+        Some(fold) => {
+            let heads =
+                merge_head_axes(
+                program,
+                gated,
+                "sgud",
+                "s",
+                tail.kv_heads,
+                tail.group,
+                fold.gdn_v_grouped(),
+            )?;
+            let rotated = fold.rotate_heads(
+                program,
+                heads,
+                tail.kv_heads * tail.group,
+                tail.head_v_dim,
+                "s",
+            )?;
+            fold.project_folded(program, rotated, tail.out_weight, "s", "d")?
+        }
+        None => {
+            let out_weight_map = if ssm_out_head_major {
+                alloc::format!(
+                    "{}*g+{}*u+j,d->ugjd",
+                    tail.kv_heads * tail.head_v_dim,
+                    tail.head_v_dim
+                )
+            } else {
+                alloc::format!(
+                    "{}*j+{}*u+g,d->ugjd",
+                    tail.kv_heads * tail.group,
+                    tail.group
+                )
+            };
+            let value_head_ones = op::append(
+                program,
+                Op::Constant {
+                    dtype: DType::FLOAT32,
+                    shape: alloc::vec![
+                        Extent::Static(tail.kv_heads),
+                        Extent::Static(tail.group),
+                        Extent::Static(tail.head_v_dim),
+                    ],
+                    value: 1.0,
+                },
+            );
+            let out_weight_split = elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[
+                    (tail.out_weight, out_weight_map.as_str()),
+                    (value_head_ones, "ugj->ugjd"),
+                ],
+            )?;
+            let product = elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[(gated, "sguj->sgujd"), (out_weight_split, "ugjd->sgujd")],
+            )?;
+            reduce(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                product,
+                "sgujd->sgujd",
+                "sd->sgujd",
+            )?
+        }
+    };
     let output = elementwise(
         program,
         DType::FLOAT32,
@@ -1960,6 +2003,7 @@ pub fn append_delta_net_mixer_with_taps(
         output_gate,
         false,
         false,
+        None,
         prefill_width,
     )
 }
@@ -2133,6 +2177,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
     output_gate: GdnOutputGate,
     v_head_reordered: bool,
     ssm_out_head_major: bool,
+    fold: Option<&HadamardFold>,
     prefill_width: Option<u32>,
 ) -> Result<(NodeId, SsmMixerTaps), TensorError> {
     // `prefill_width` is the caller's own already-known leading (`s`) extent
@@ -2169,37 +2214,49 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         None => x,
     };
 
-    let qkv_product = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(normed, "si->siq"), (wqkv, "iq->siq")],
-    )?;
-    let qkv_mixed = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        qkv_product,
-        "siq->siq",
-        "sq->siq",
-    )?;
-
-    let z_product = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(normed, "si->siz"), (wqkv_gate, "iz->siz")],
-    )?;
-    let z = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        z_product,
-        "siz->siz",
-        "sz->siz",
-    )?;
+    let rotated_input = match fold {
+        Some(fold) => Some(fold.rotate_flat(program, normed, fold.embedding(), "s")?),
+        None => None,
+    };
+    let (qkv_mixed, z) = match (fold, rotated_input) {
+        (Some(fold), Some(rotated)) => (
+            fold.project_folded(program, rotated, wqkv, "s", "q")?,
+            fold.project_folded(program, rotated, wqkv_gate, "s", "z")?,
+        ),
+        _ => {
+            let qkv_product = elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[(normed, "si->siq"), (wqkv, "iq->siq")],
+            )?;
+            let qkv_mixed = reduce(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                qkv_product,
+                "siq->siq",
+                "sq->siq",
+            )?;
+            let z_product = elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Multiply,
+                &[(normed, "si->siz"), (wqkv_gate, "iz->siz")],
+            )?;
+            let z = reduce(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                z_product,
+                "siz->siz",
+                "sz->siz",
+            )?;
+            (qkv_mixed, z)
+        }
+    };
     let z_gated = match output_gate {
         GdnOutputGate::Silu => silu(program, z, one, "sz->sz")?,
         GdnOutputGate::Sigmoid => sigmoid(program, z, one, "sz->sz")?,
@@ -2557,7 +2614,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         // sans-IO executor supplies its caller-owned `[s,j,u,g]` scan
         // output as `delta_out`") -- this recurrence is exactly that
         // caller.
-        let tail = append_delta_net_sequence_tail_with_taps(
+        let tail = append_delta_net_sequence_tail_projected(
             program,
             GdnSequenceTail {
                 x,
@@ -2571,6 +2628,8 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
                 kv_heads,
                 group,
             },
+            ssm_out_head_major,
+            fold,
         )?;
 
         let taps = SsmMixerTaps {
@@ -2767,38 +2826,57 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         // `g * kv_heads + u` -- the order a checkpoint converted with its V heads
         // reordered carries, proven on Bonsai-27B by the " Paris" completion of
         // "The capital of France is".
-        let out_weight_split_map = if ssm_out_head_major {
-            alloc::format!("{}*g+{head_v_dim}*u+j,d->ugjd", kv_heads * head_v_dim)
-        } else {
-            alloc::format!("{}*j+{group}*u+g,d->ugjd", kv_heads * group)
+        let cur = match fold {
+            Some(fold) => {
+                let gated_axes = if v_head_reordered { "gud" } else { "dug" };
+                let heads = merge_head_axes(
+                    program,
+                    gated_out,
+                    gated_axes,
+                    "",
+                    kv_heads,
+                    group,
+                    fold.gdn_v_grouped(),
+                )?;
+                let rotated =
+                    fold.rotate_heads(program, heads, kv_heads * group, head_v_dim, "")?;
+                fold.project_folded(program, rotated, ssm_out, "", "d")?
+            }
+            None => {
+                let out_weight_split_map = if ssm_out_head_major {
+                    alloc::format!("{}*g+{head_v_dim}*u+j,d->ugjd", kv_heads * head_v_dim)
+                } else {
+                    alloc::format!("{}*j+{group}*u+g,d->ugjd", kv_heads * group)
+                };
+                let ssm_out_split = elementwise(
+                    program,
+                    DType::FLOAT32,
+                    ScalarOp::Multiply,
+                    &[
+                        (ssm_out, out_weight_split_map.as_str()),
+                        (value_head_ones, "ugj->ugjd"),
+                    ],
+                )?;
+                let cur_product = elementwise(
+                    program,
+                    DType::FLOAT32,
+                    ScalarOp::Multiply,
+                    &[
+                        (gated_out, gated_product_map),
+                        (ssm_out_split, "ugjd->gujd"),
+                    ],
+                )?;
+                reduce(
+                    program,
+                    DType::FLOAT32,
+                    ScalarOp::Add,
+                    ReduceInit::Zero,
+                    cur_product,
+                    "gujd->gujd",
+                    "d->gujd",
+                )?
+            }
         };
-        let ssm_out_split = elementwise(
-            program,
-            DType::FLOAT32,
-            ScalarOp::Multiply,
-            &[
-                (ssm_out, out_weight_split_map.as_str()),
-                (value_head_ones, "ugj->ugjd"),
-            ],
-        )?;
-        let cur_product = elementwise(
-            program,
-            DType::FLOAT32,
-            ScalarOp::Multiply,
-            &[
-                (gated_out, gated_product_map),
-                (ssm_out_split, "ugjd->gujd"),
-            ],
-        )?;
-        let cur = reduce(
-            program,
-            DType::FLOAT32,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            cur_product,
-            "gujd->gujd",
-            "d->gujd",
-        )?;
 
         let mixer_out = elementwise(
             program,

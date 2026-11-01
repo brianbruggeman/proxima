@@ -481,6 +481,7 @@ pub fn qwen35_partial_rotary_forward_fixture(
         k_second_cache,
         k_pass_cache,
         v_cache,
+        None,
     )
     .expect("qwen35 partial-rotary dense attention fixture lowers");
 
