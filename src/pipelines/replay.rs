@@ -329,9 +329,6 @@ async fn run_stage_live(
     )
     .await?;
     let exit_code = handle.wait_for_exit().await;
-    for _ in 0..32 {
-        proxima_primitives::sync::task::yield_now().await;
-    }
     drop(upstream);
     Ok(StageOutcome::Completed { exit_code })
 }

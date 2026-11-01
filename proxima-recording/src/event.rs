@@ -207,6 +207,11 @@ pub enum ProcessEvent {
     Exited {
         exit_code: Option<i32>,
     },
+    /// Count of stdout lines the child wrote that never reached the
+    /// recording because the live-tail queue was full, e.g. `744`.
+    StdoutLost(u64),
+    /// Count of stderr lines lost the same way as `StdoutLost`.
+    StderrLost(u64),
 }
 
 #[derive(Debug, Clone, PartialEq)]

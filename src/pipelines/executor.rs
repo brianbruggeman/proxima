@@ -321,12 +321,6 @@ async fn run_stage(
     )
     .await?;
     let exit_code = bridge_handle.wait_for_exit().await;
-    // hold the upstream alive a few ticks so drain tasks can flush any
-    // remaining lines emitted just before exit (the bridge tests do the
-    // same dance).
-    for _ in 0..32 {
-        proxima_primitives::sync::task::yield_now().await;
-    }
     drop(upstream);
     Ok(StageOutcome::Completed { exit_code })
 }

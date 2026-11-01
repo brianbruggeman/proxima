@@ -75,6 +75,12 @@ pub(super) enum WireProcessEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
     },
+    StdoutLost {
+        lines: u64,
+    },
+    StderrLost {
+        lines: u64,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -213,6 +219,8 @@ fn process_to_wire(event: ProcessEvent) -> WireProcessEvent {
             b64: BASE64.encode(&data),
         },
         ProcessEvent::Exited { exit_code } => WireProcessEvent::Exited { exit_code },
+        ProcessEvent::StdoutLost(lines) => WireProcessEvent::StdoutLost { lines },
+        ProcessEvent::StderrLost(lines) => WireProcessEvent::StderrLost { lines },
     }
 }
 
@@ -234,6 +242,8 @@ fn wire_to_process(event: WireProcessEvent) -> Result<ProcessEvent, ProximaError
         WireProcessEvent::Stdout { b64 } => ProcessEvent::Stdout(decode_base64(&b64)?),
         WireProcessEvent::Stderr { b64 } => ProcessEvent::Stderr(decode_base64(&b64)?),
         WireProcessEvent::Exited { exit_code } => ProcessEvent::Exited { exit_code },
+        WireProcessEvent::StdoutLost { lines } => ProcessEvent::StdoutLost(lines),
+        WireProcessEvent::StderrLost { lines } => ProcessEvent::StderrLost(lines),
     })
 }
 
@@ -465,6 +475,18 @@ mod tests {
         InteractionId::from_bytes([9; 16]),
         12,
         ProtocolEvent::Process(ProcessEvent::Stderr(Bytes::from_static(b"warning"))),
+    ))]
+    #[case::process_stdout_lost(child(
+        InteractionId::from_bytes([5; 16]),
+        InteractionId::from_bytes([9; 16]),
+        99,
+        ProtocolEvent::Process(ProcessEvent::StdoutLost(3)),
+    ))]
+    #[case::process_stderr_lost(child(
+        InteractionId::from_bytes([5; 16]),
+        InteractionId::from_bytes([9; 16]),
+        99,
+        ProtocolEvent::Process(ProcessEvent::StderrLost(u64::MAX)),
     ))]
     #[case::process_exited_zero(child(
         InteractionId::from_bytes([5; 16]),
