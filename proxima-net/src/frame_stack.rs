@@ -260,9 +260,11 @@ where
             return Ok(());
         };
         drop(frame);
-        if inbound.destination_port == self.our_port {
-            let outbound = self.stack.on_inbound(&inbound.borrow(), now);
-            return self.send_segments(&outbound, self.our_port);
+        if self.stack.owns_port(inbound.destination_port) {
+            let outbound = self
+                .stack
+                .on_inbound_to(inbound.destination_port, &inbound.borrow(), now);
+            return self.send_segments(&outbound, inbound.destination_port);
         }
         let refusals: Vec<Outbound> = inbound.refusal().into_iter().collect();
         self.send_segments(&refusals, inbound.destination_port)
@@ -483,7 +485,7 @@ where
             Some(dial) => dial.write(&mut driver.stack, buf, now)?,
             None => driver.stack.write(this.id, buf, now),
         };
-        let sent = driver.send_segments(&outbound, driver.our_port);
+        let sent = driver.send_segments(&outbound, this.id.0);
         Poll::Ready(sent.map(|()| buf.len()).map_err(into_io))
     }
 
@@ -503,7 +505,7 @@ where
             Some(dial) => dial.close(&mut driver.stack)?,
             None => driver.stack.close(this.id),
         };
-        let sent = driver.send_segments(&outbound, driver.our_port);
+        let sent = driver.send_segments(&outbound, this.id.0);
         Poll::Ready(sent.map_err(into_io))
     }
 }
@@ -518,11 +520,10 @@ pub struct FrameUpstream<Rx, Tx, Mint> {
 impl<Rx, Tx, Mint> FrameUpstream<Rx, Tx, Mint> {
     #[must_use]
     pub fn new(driver: Driver<Rx, Tx, Mint>, peer: SocketAddrV4) -> Self {
-        let tuple = (peer.ip().octets(), peer.port());
         Self {
             shared: Arc::new(Shared {
                 inner: AsyncMutex::new(driver),
-                dial: Some(Arc::new(DialLease::new(tuple))),
+                dial: Some(Arc::new(DialLease::new())),
             }),
             peer,
         }
@@ -564,7 +565,7 @@ where
             return Poll::Ready(Err(io::Error::other("missing upstream tuple lease")));
         };
         if operation.is_none() {
-            *operation = Some(lease.claim(&mut driver.stack)?);
+            *operation = Some(lease.claim());
         }
         let Some(dial) = operation.as_mut() else {
             return Poll::Ready(Err(io::Error::other("missing dial ownership")));
@@ -577,24 +578,24 @@ where
             if !dial.owns(&driver.stack) {
                 return Poll::Ready(Err(io::Error::from(io::ErrorKind::ConnectionRefused)));
             }
-            while let Some(connected) = driver.stack.poll_connected() {
-                if connected == id && dial.connected(&driver.stack) {
-                    let Some(dial) = operation.take() else {
-                        return Poll::Ready(Err(io::Error::other("missing dial ownership")));
-                    };
-                    let dial = dial.complete(&driver.stack)?;
-                    return Poll::Ready(Ok(FrameConnection {
-                        shared: Arc::clone(&self.shared),
-                        dial: Some(dial),
-                        id,
-                        peer: SocketAddr::V4(self.peer),
-                    }));
-                }
+            if dial.connected(&driver.stack) {
+                while driver.stack.poll_connected().is_some() {}
+                let Some(dial) = operation.take() else {
+                    return Poll::Ready(Err(io::Error::other("missing dial ownership")));
+                };
+                let dial = dial.complete(&driver.stack)?;
+                return Poll::Ready(Ok(FrameConnection {
+                    shared: Arc::clone(&self.shared),
+                    dial: Some(dial),
+                    id,
+                    peer: SocketAddr::V4(self.peer),
+                }));
             }
         } else if let Some(&mac) = driver.arp.get(&peer_ip) {
             let endpoint = Endpoint { mac, ip: peer_ip, port: self.peer.port() };
             let outbound = dial.start(&mut driver.stack, endpoint)?;
-            if let Err(error) = driver.send_segments(&outbound, driver.our_port) {
+            let source_port = dial.connection().map_or(driver.our_port, |(port, _, _)| port);
+            if let Err(error) = driver.send_segments(&outbound, source_port) {
                 return Poll::Ready(Err(into_io(error)));
             }
         } else if let Err(error) = driver.send_arp_request(peer_ip) {
@@ -611,7 +612,7 @@ mod tests {
     use core::convert::Infallible;
     use crossbeam_queue::ArrayQueue;
     use futures::executor::block_on;
-    use futures::future::join;
+    use futures::future::{join, join_all};
     use futures::io::{AsyncReadExt, AsyncWriteExt};
     use proxima_primitives::stream::{StreamListenerExt, StreamUpstreamExt};
     use proxima_protocols::http1_codec::h1::HttpVersion;
@@ -738,6 +739,53 @@ mod tests {
 
         assert_eq!(request_seen, request);
         assert_eq!(response_seen, response);
+    }
+
+    fn payload_for(index: usize) -> Vec<u8> {
+        format!("connection-{index:04}-payload").into_bytes()
+    }
+
+    async fn echo_accepted(listener: &FrameListener<WireRx, WireTx, WireMint>, count: usize) -> Vec<Vec<u8>> {
+        let mut accepted = Vec::with_capacity(count);
+        for _ in 0..count {
+            accepted.push(listener.accept().await.expect("server accepts every dialed connection"));
+        }
+        join_all(accepted.into_iter().map(|mut connection| async move {
+            let mut received = vec![0u8; payload_for(0).len()];
+            connection.read_exact(&mut received).await.expect("server reads the payload");
+            connection.write_all(&received).await.expect("server echoes the payload");
+            connection.close().await.expect("server closes");
+            received
+        }))
+        .await
+    }
+
+    async fn dial_and_echo(upstream: &FrameUpstream<WireRx, WireTx, WireMint>, index: usize) -> Vec<u8> {
+        let mut connection = upstream.connect().await.expect("every concurrent dial completes its handshake");
+        connection.write_all(&payload_for(index)).await.expect("client writes its payload");
+        let mut echoed = Vec::new();
+        connection.read_to_end(&mut echoed).await.expect("client reads the echo to the server's FIN");
+        connection.close().await.expect("client closes");
+        echoed
+    }
+
+    #[test]
+    fn sixty_four_concurrent_dials_to_one_peer_endpoint_are_independent_byte_streams() {
+        const DIALS: usize = 64;
+        let (server_pipes, client_pipes) = wired(4096);
+        let listener = FrameListener::new(Driver::new(server_pipes, SERVER_MAC, SERVER, 0x1000), SERVER);
+        let upstream = FrameUpstream::new(Driver::new(client_pipes, CLIENT_MAC, CLIENT, 0x2000), SERVER);
+
+        let (served, echoed) = block_on(join(
+            echo_accepted(&listener, DIALS),
+            join_all((0..DIALS).map(|index| dial_and_echo(&upstream, index))),
+        ));
+
+        let expected: Vec<Vec<u8>> = (0..DIALS).map(payload_for).collect();
+        assert_eq!(echoed, expected, "each connection receives its own payload back");
+        let mut served_sorted = served;
+        served_sorted.sort();
+        assert_eq!(served_sorted, expected, "the listener saw each payload exactly once");
     }
 
     #[test]

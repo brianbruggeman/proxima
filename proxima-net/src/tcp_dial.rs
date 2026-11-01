@@ -1,65 +1,45 @@
 use crate::tcp_listener::Endpoint;
 use crate::tcp_stack::{ConnId, Outbound, TcpStack};
+use crossbeam_queue::SegQueue;
 use proxima_protocols::tcp::time::Instant;
 use std::io;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 
-const FREE: u8 = 0;
-const PENDING: u8 = 1;
-const CANCELLED: u8 = 2;
-
-// a fixed local/remote tuple has one owner; Drop cannot wait for a driver lock.
+// Drop cannot wait for a driver lock, so a dropped dial parks its (id, isn)
+// here and the next lock holder cancels it against the stack.
 pub(crate) struct DialLease {
-    peer: ConnId,
-    state: AtomicU8,
-    cancelled_sequence: AtomicU32,
+    cancelled: SegQueue<(ConnId, u32)>,
 }
 
 impl DialLease {
-    pub(crate) fn new(peer: ConnId) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            peer,
-            state: AtomicU8::new(FREE),
-            cancelled_sequence: AtomicU32::new(0),
+            cancelled: SegQueue::new(),
         }
     }
 
     pub(crate) fn reclaim(&self, stack: &mut TcpStack) {
-        if self.state.load(Ordering::Acquire) == CANCELLED {
-            stack.cancel_connect(self.peer, self.cancelled_sequence.load(Ordering::Relaxed));
-            self.state.store(FREE, Ordering::Release);
+        while let Some((id, sequence)) = self.cancelled.pop() {
+            stack.cancel_connect(id, sequence);
         }
     }
 
-    pub(crate) fn claim(self: &Arc<Self>, stack: &mut TcpStack) -> io::Result<DialGuard> {
-        self.reclaim(stack);
-        if stack.peer(self.peer).is_some()
-            || self
-                .state
-                .compare_exchange(FREE, PENDING, Ordering::AcqRel, Ordering::Acquire)
-                .is_err()
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                "TCP tuple already occupied",
-            ));
-        }
-        Ok(DialGuard {
+    pub(crate) fn claim(self: &Arc<Self>) -> DialGuard {
+        DialGuard {
             lease: Arc::clone(self),
-            sequence: None,
-        })
+            started: None,
+        }
     }
 }
 
 pub(crate) struct DialGuard {
     lease: Arc<DialLease>,
-    sequence: Option<u32>,
+    started: Option<(ConnId, u32)>,
 }
 
 impl DialGuard {
     pub(crate) fn connection(&self) -> Option<ConnId> {
-        self.sequence.map(|_| self.lease.peer)
+        self.started.map(|(id, _)| id)
     }
 
     pub(crate) fn start(
@@ -67,26 +47,25 @@ impl DialGuard {
         stack: &mut TcpStack,
         peer: Endpoint,
     ) -> io::Result<Vec<Outbound>> {
-        if stack.peer(self.lease.peer).is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                "TCP tuple already occupied",
-            ));
-        }
-        let (_, outbound) = stack.connect(peer);
-        self.sequence = Some(outbound[0].1.seq);
+        let (id, outbound) = stack.connect(peer).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "all ephemeral TCP ports are in use",
+            )
+        })?;
+        self.started = Some((id, outbound[0].1.seq));
         Ok(outbound)
     }
 
     pub(crate) fn owns(&self, stack: &TcpStack) -> bool {
-        self.sequence.is_some_and(|sequence| {
-            stack.active_connect_sequence(self.lease.peer) == Some(sequence)
+        self.started.is_some_and(|(id, sequence)| {
+            stack.active_connect_sequence(id) == Some(sequence)
         })
     }
 
     pub(crate) fn connected(&self, stack: &TcpStack) -> bool {
-        self.sequence.is_some_and(|sequence| {
-            stack.active_connection_sequence(self.lease.peer) == Some(sequence)
+        self.started.is_some_and(|(id, sequence)| {
+            stack.active_connection_sequence(id) == Some(sequence)
         })
     }
 
@@ -96,8 +75,8 @@ impl DialGuard {
     }
 
     pub(crate) fn read(&self, stack: &mut TcpStack, buffer: &mut [u8]) -> io::Result<usize> {
-        self.flush(stack)?;
-        Ok(stack.read(self.lease.peer, buffer))
+        let id = self.live_id(stack)?;
+        Ok(stack.read(id, buffer))
     }
 
     pub(crate) fn write(
@@ -106,33 +85,31 @@ impl DialGuard {
         buffer: &[u8],
         now: Instant,
     ) -> io::Result<Vec<Outbound>> {
-        self.flush(stack)?;
-        Ok(stack.write(self.lease.peer, buffer, now))
+        let id = self.live_id(stack)?;
+        Ok(stack.write(id, buffer, now))
     }
 
     pub(crate) fn close(&self, stack: &mut TcpStack) -> io::Result<Vec<Outbound>> {
-        self.flush(stack)?;
-        Ok(stack.close(self.lease.peer))
+        let id = self.live_id(stack)?;
+        Ok(stack.close(id))
     }
 
     pub(crate) fn flush(&self, stack: &TcpStack) -> io::Result<()> {
-        if self.connected(stack) {
-            Ok(())
-        } else {
-            Err(io::Error::from(io::ErrorKind::ConnectionReset))
+        self.live_id(stack).map(|_| ())
+    }
+
+    fn live_id(&self, stack: &TcpStack) -> io::Result<ConnId> {
+        match self.started {
+            Some((id, _)) if self.connected(stack) => Ok(id),
+            _ => Err(io::Error::from(io::ErrorKind::ConnectionReset)),
         }
     }
 }
 
 impl Drop for DialGuard {
     fn drop(&mut self) {
-        if let Some(sequence) = self.sequence {
-            self.lease
-                .cancelled_sequence
-                .store(sequence, Ordering::Relaxed);
-            self.lease.state.store(CANCELLED, Ordering::Release);
-        } else {
-            self.lease.state.store(FREE, Ordering::Release);
+        if let Some(started) = self.started {
+            self.lease.cancelled.push(started);
         }
     }
 }
@@ -142,19 +119,24 @@ mod tests {
     use super::*;
     use crate::tcp_listener::Inbound;
     use proxima_protocols::inet::tcp::TcpFlags;
-    use proxima_protocols::tcp::time::Instant;
 
-    fn inbound(
-        peer: Endpoint,
+    const OUR_IP: [u8; 4] = [127, 0, 0, 1];
+    const PEER: Endpoint = Endpoint {
+        mac: [2, 0, 0, 0, 0, 2],
+        ip: [127, 0, 0, 2],
+        port: 4321,
+    };
+
+    fn from_peer(
         sequence: u32,
         acknowledgement: u32,
         flags: TcpFlags,
         payload: &[u8],
     ) -> Inbound<'_> {
         Inbound {
-            source_mac: peer.mac,
-            source_ip: peer.ip,
-            source_port: peer.port,
+            source_mac: PEER.mac,
+            source_ip: PEER.ip,
+            source_port: PEER.port,
             flags,
             seq: sequence,
             ack: acknowledgement,
@@ -163,323 +145,126 @@ mod tests {
         }
     }
 
-    fn establish(stack: &mut TcpStack, peer: Endpoint, sequence: u32) {
-        let response = stack.on_inbound(
-            &inbound(
-                peer,
-                900,
-                sequence.wrapping_add(1),
-                TcpFlags {
-                    syn: true,
-                    ack: true,
-                    ..TcpFlags::default()
-                },
-                &[],
-            ),
+    fn syn_ack() -> TcpFlags {
+        TcpFlags {
+            syn: true,
+            ack: true,
+            ..TcpFlags::default()
+        }
+    }
+
+    fn ack() -> TcpFlags {
+        TcpFlags {
+            ack: true,
+            ..TcpFlags::default()
+        }
+    }
+
+    fn rst() -> TcpFlags {
+        TcpFlags {
+            rst: true,
+            ..TcpFlags::default()
+        }
+    }
+
+    fn establish(stack: &mut TcpStack, guard: &DialGuard, sequence: u32) {
+        let (local_port, _, _) = guard.connection().expect("dial started");
+        let reply = stack.on_inbound_to(
+            local_port,
+            &from_peer(900, sequence.wrapping_add(1), syn_ack(), &[]),
             Instant::ZERO,
         );
-        assert_eq!(response.len(), 1);
-        assert_eq!(response[0].1.ack, 901);
+        assert_eq!(reply.len(), 1);
+        assert_eq!(reply[0].1.ack, 901);
     }
 
     #[test]
-    fn fixed_tuple_preserves_payload_and_cancels_only_owned_generation() {
-        let peer = Endpoint {
-            mac: [2, 0, 0, 0, 0, 2],
-            ip: [127, 0, 0, 2],
-            port: 4321,
-        };
-        let identity = (peer.ip, peer.port);
-        let mut stack = TcpStack::new([127, 0, 0, 1], 1234, 100);
-        let lease = Arc::new(DialLease::new(identity));
-        let mut first = lease.claim(&mut stack).expect("claim fixed tuple");
-        let outbound = first.start(&mut stack, peer).expect("start owned dial");
-        assert_eq!(outbound.len(), 1);
-        assert_eq!(outbound[0].1.seq, 100);
-        assert_eq!(first.connection(), Some(identity));
-        assert!(first.owns(&stack));
-        assert!(!first.connected(&stack));
-        let rejected = lease
-            .claim(&mut stack)
-            .err()
-            .expect("second call must reject occupied tuple");
-        assert_eq!(rejected.kind(), io::ErrorKind::AddrInUse);
-        assert_eq!(stack.peer(identity), Some(peer));
-        establish(&mut stack, peer, 100);
-        assert_eq!(stack.poll_connected(), Some(identity));
-        stack.on_inbound(
-            &inbound(
-                peer,
-                901,
-                101,
-                TcpFlags {
-                    ack: true,
-                    ..TcpFlags::default()
-                },
-                b"original",
-            ),
-            Instant::ZERO,
-        );
-        let mut payload = [0; 8];
-        assert_eq!(
-            first
-                .read(&mut stack, &mut payload)
-                .expect("read owned connection"),
-            8
-        );
-        assert_eq!(&payload, b"original");
-        let written = first
-            .write(&mut stack, b"owned", Instant::ZERO)
-            .expect("write owned connection");
-        assert!(
-            written
-                .iter()
-                .any(|(_, segment)| segment.payload == b"owned")
-        );
-        first.flush(&stack).expect("flush owned connection");
-        assert!(
-            first
-                .close(&mut stack)
-                .expect("close owned connection")
-                .iter()
-                .any(|(_, segment)| segment.flags.fin)
-        );
-        let first = first
-            .complete(&stack)
-            .expect("transfer dial ownership into stream");
-        lease.reclaim(&mut stack);
-        assert_eq!(
-            stack.peer(identity),
-            Some(peer),
-            "delivered connection retains tuple ownership"
-        );
-        assert_eq!(
-            lease
-                .claim(&mut stack)
-                .err()
-                .expect("live tuple remains occupied")
-                .kind(),
-            io::ErrorKind::AddrInUse
-        );
-        drop(first);
-        lease.reclaim(&mut stack);
-        assert_eq!(
-            stack.peer(identity),
-            None,
-            "delivered stream Drop reclaims active state"
+    fn concurrent_dials_to_one_peer_get_distinct_local_ports_and_independent_data() {
+        let mut stack = TcpStack::new(OUR_IP, 1234, 100);
+        let lease = Arc::new(DialLease::new());
+        let mut first = lease.claim();
+        let mut second = lease.claim();
+
+        let first_syn = first.start(&mut stack, PEER).expect("first dial");
+        let second_syn = second.start(&mut stack, PEER).expect("second dial");
+        let (first_id, second_id) = (
+            first.connection().expect("first id"),
+            second.connection().expect("second id"),
         );
 
-        for completed_handshake in [false, true] {
-            let mut cancelled = lease.claim(&mut stack).expect("claim reclaimed tuple");
-            let outbound = cancelled
-                .start(&mut stack, peer)
-                .expect("start cancelled dial");
-            if completed_handshake {
-                establish(&mut stack, peer, outbound[0].1.seq);
-            }
-            drop(cancelled);
-            lease.reclaim(&mut stack);
-            assert_eq!(stack.peer(identity), None);
-            assert_eq!(
-                stack.poll_connected(),
-                None,
-                "cancelled completion cannot reach another call"
+        assert_ne!(first_id.0, second_id.0, "each dial owns its local port");
+        assert_eq!((first_id.1, first_id.2), (second_id.1, second_id.2));
+        establish(&mut stack, &first, first_syn[0].1.seq);
+        establish(&mut stack, &second, second_syn[0].1.seq);
+        for (guard, local_port, body) in [
+            (&first, first_id.0, b"first!!!"),
+            (&second, second_id.0, b"second!!"),
+        ] {
+            let sequence = guard.started.expect("started").1;
+            stack.on_inbound_to(
+                local_port,
+                &from_peer(901, sequence.wrapping_add(1), ack(), body),
+                Instant::ZERO,
             );
         }
+        let mut buffer = [0; 8];
+        assert_eq!(first.read(&mut stack, &mut buffer).expect("first read"), 8);
+        assert_eq!(&buffer, b"first!!!");
+        assert_eq!(second.read(&mut stack, &mut buffer).expect("second read"), 8);
+        assert_eq!(&buffer, b"second!!");
+    }
 
-        let unstarted = lease
-            .claim(&mut stack)
-            .expect("claim before ARP resolution");
-        drop(unstarted);
-        let mut stale = lease
-            .claim(&mut stack)
-            .expect("unstarted Drop releases tuple");
-        let old = stale
-            .start(&mut stack, peer)
-            .expect("start stale generation");
-        stack.on_inbound(
-            &inbound(
-                peer,
-                900,
-                0,
-                TcpFlags {
-                    rst: true,
-                    ..TcpFlags::default()
-                },
-                &[],
-            ),
-            Instant::ZERO,
-        );
-        let (_, replacement) = stack.connect(peer);
-        assert_ne!(old[0].1.seq, replacement[0].1.seq);
+    #[test]
+    fn dropped_dial_is_reclaimed_and_its_port_returns_to_the_pool() {
+        let mut stack = TcpStack::new(OUR_IP, 1234, 100);
+        let lease = Arc::new(DialLease::new());
+        let mut cancelled = lease.claim();
+        cancelled.start(&mut stack, PEER).expect("start dial");
+        let (port, _, _) = cancelled.connection().expect("dial id");
+        assert!(stack.owns_port(port));
+
+        drop(cancelled);
+        lease.reclaim(&mut stack);
+
+        assert!(!stack.owns_port(port), "reclaim frees the ephemeral port");
+        assert_eq!(stack.peer((port, PEER.ip, PEER.port)), None);
+    }
+
+    #[test]
+    fn stale_cancellation_leaves_a_replacement_on_the_same_id_untouched() {
+        let mut stack = TcpStack::new(OUR_IP, 1234, 100);
+        let lease = Arc::new(DialLease::new());
+        let mut stale = lease.claim();
+        let old = stale.start(&mut stack, PEER).expect("start stale dial");
+        let (port, _, _) = stale.connection().expect("stale id");
+        stack.on_inbound_to(port, &from_peer(900, 0, rst(), &[]), Instant::ZERO);
+        assert!(!stack.owns_port(port), "reset releases the port");
+
+        let mut replacement = lease.claim();
+        let current = replacement.start(&mut stack, PEER).expect("start replacement");
+        assert_ne!(old[0].1.seq, current[0].1.seq);
         drop(stale);
         lease.reclaim(&mut stack);
-        assert_eq!(
-            stack.peer(identity),
-            Some(peer),
-            "stale cancellation preserves replacement"
-        );
-        establish(&mut stack, peer, replacement[0].1.seq);
-        assert_eq!(stack.poll_connected(), Some(identity));
-        stack.on_inbound(
-            &inbound(
-                peer,
-                901,
-                replacement[0].1.seq.wrapping_add(1),
-                TcpFlags {
-                    ack: true,
-                    ..TcpFlags::default()
-                },
-                b"replaced",
-            ),
-            Instant::ZERO,
-        );
-        assert_eq!(stack.read(identity, &mut payload), 8);
-        assert_eq!(&payload, b"replaced");
 
-        stack = TcpStack::new([127, 0, 0, 1], 1234, 500);
-        let mut stale = lease
-            .claim(&mut stack)
-            .expect("claim active sequence control");
-        let original = stale
-            .start(&mut stack, peer)
-            .expect("start active sequence control");
-        establish(&mut stack, peer, original[0].1.seq);
-        assert_eq!(stack.poll_connected(), Some(identity));
-        let stale = stale.complete(&stack).expect("retain delivered old handle");
-        stack.on_inbound(
-            &inbound(
-                peer,
-                900,
-                0,
-                TcpFlags {
-                    rst: true,
-                    ..TcpFlags::default()
-                },
-                &[],
-            ),
-            Instant::ZERO,
-        );
-        assert_eq!(
-            lease
-                .claim(&mut stack)
-                .err()
-                .expect("old handle still owns reset tuple")
-                .kind(),
-            io::ErrorKind::AddrInUse
-        );
-        // reconstruct the sequence-wrap state directly instead of opening thousands of peers.
-        stack = TcpStack::new([127, 0, 0, 1], 1234, original[0].1.seq);
-        let passive = stack.on_inbound(
-            &inbound(
-                peer,
-                900,
-                0,
-                TcpFlags {
-                    syn: true,
-                    ..TcpFlags::default()
-                },
-                &[],
-            ),
-            Instant::ZERO,
-        );
-        assert_eq!(passive[0].1.seq, original[0].1.seq);
-        stack.on_inbound(
-            &inbound(
-                peer,
-                901,
-                passive[0].1.seq.wrapping_add(1),
-                TcpFlags {
-                    ack: true,
-                    ..TcpFlags::default()
-                },
-                b"passive!",
-            ),
-            Instant::ZERO,
-        );
+        assert!(replacement.owns(&stack), "stale drop must not cancel the replacement");
+    }
+
+    #[test]
+    fn a_reset_connection_cannot_be_read_through_a_stale_handle() {
+        let mut stack = TcpStack::new(OUR_IP, 1234, 100);
+        let lease = Arc::new(DialLease::new());
+        let mut guard = lease.claim();
+        let syn = guard.start(&mut stack, PEER).expect("start dial");
+        establish(&mut stack, &guard, syn[0].1.seq);
+        let (port, _, _) = guard.connection().expect("dial id");
+        stack.on_inbound_to(port, &from_peer(901, 0, rst(), &[]), Instant::ZERO);
+
         let mut untouched = [0x7f; 8];
-        assert_eq!(
-            stale
-                .read(&mut stack, &mut untouched)
-                .expect_err("old handle cannot read passive replacement")
-                .kind(),
-            io::ErrorKind::ConnectionReset
-        );
-        assert_eq!(untouched, [0x7f; 8]);
-        assert_eq!(
-            stale
-                .write(&mut stack, b"corrupt!", Instant::ZERO)
-                .expect_err("old handle cannot write replacement")
-                .kind(),
-            io::ErrorKind::ConnectionReset
-        );
-        assert_eq!(
-            stale
-                .close(&mut stack)
-                .expect_err("old handle cannot close replacement")
-                .kind(),
-            io::ErrorKind::ConnectionReset
-        );
-        assert_eq!(
-            stale
-                .flush(&stack)
-                .expect_err("old handle cannot flush replacement")
-                .kind(),
-            io::ErrorKind::ConnectionReset
-        );
-        drop(stale);
-        lease.reclaim(&mut stack);
-        assert_eq!(stack.poll_accept(), Some(identity));
-        assert_eq!(
-            stack.peer(identity),
-            Some(peer),
-            "passive same-sequence replacement survives active cancellation"
-        );
-        assert_eq!(stack.read(identity, &mut payload), 8);
-        assert_eq!(&payload, b"passive!");
+        let error = guard
+            .read(&mut stack, &mut untouched)
+            .expect_err("reset handle cannot read");
 
-        stack = TcpStack::new([127, 0, 0, 1], 1234, 1000);
-        let (_, previous) = stack.connect(peer);
-        establish(&mut stack, peer, previous[0].1.seq);
-        stack.on_inbound(
-            &inbound(
-                peer,
-                900,
-                0,
-                TcpFlags {
-                    rst: true,
-                    ..TcpFlags::default()
-                },
-                &[],
-            ),
-            Instant::ZERO,
-        );
-        let mut pending = lease.claim(&mut stack).expect("claim after previous reset");
-        let current = pending.start(&mut stack, peer).expect("start current dial");
-        assert_eq!(
-            stack.poll_connected(),
-            Some(identity),
-            "observe stale queued notification"
-        );
-        assert!(pending.owns(&stack));
-        assert!(
-            !pending.connected(&stack),
-            "old notification cannot complete current SYN"
-        );
-        assert_eq!(
-            pending
-                .flush(&stack)
-                .expect_err("pending is not a stream")
-                .kind(),
-            io::ErrorKind::ConnectionReset
-        );
-        establish(&mut stack, peer, current[0].1.seq);
-        assert_eq!(stack.poll_connected(), Some(identity));
-        let delivered = pending
-            .complete(&stack)
-            .expect("complete only current handshake");
-        drop(delivered);
-        lease.reclaim(&mut stack);
-        assert_eq!(stack.peer(identity), None);
+        assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
+        assert_eq!(untouched, [0x7f; 8]);
     }
 }
