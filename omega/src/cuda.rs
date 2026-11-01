@@ -2011,23 +2011,47 @@ fn packed_reduction_term(
     output_axes: &[u16],
     resolved: &BoundOp,
 ) -> String {
-    let reduction_axes: Vec<usize> = (0..resolved.extents.len())
-        .filter(|axis| !output_axes.contains(&(*axis as u16)) && layout.stride(*axis as u16) != 0)
-        .collect();
-    let mut expected = 1i64;
-    let iteration_order = reduction_axes.iter().rev().all(|axis| {
-        let matches = layout.stride(*axis as u16) == expected;
-        expected *= resolved.extents[*axis] as i64;
-        matches
-    });
-    if iteration_order {
+    if packed_reduction_in_order(layout, output_axes, resolved) {
         return String::from("r");
     }
-    reduction_axes
+    packed_reduction_axes(layout, output_axes, resolved)
         .iter()
         .map(|axis| format!("full_coord[{axis}] * u.operand_strides[{index}][{axis}]"))
         .collect::<Vec<String>>()
         .join(" + ")
+}
+
+fn packed_reduction_axes(layout: &Layout, output_axes: &[u16], resolved: &BoundOp) -> Vec<usize> {
+    (0..resolved.extents.len())
+        .filter(|axis| !output_axes.contains(&(*axis as u16)) && layout.stride(*axis as u16) != 0)
+        .collect()
+}
+
+fn packed_reduction_in_order(layout: &Layout, output_axes: &[u16], resolved: &BoundOp) -> bool {
+    let mut expected = 1i64;
+    packed_reduction_axes(layout, output_axes, resolved)
+        .iter()
+        .rev()
+        .all(|axis| {
+            let matches = layout.stride(*axis as u16) == expected;
+            expected *= resolved.extents[*axis] as i64;
+            matches
+        })
+}
+
+/// Whether every packed operand's row holds the reduction in flat iteration order, the
+/// contract every body that addresses a packed weight as `row + r` (chunked decode,
+/// row tiles, staged int8 dots, tensor-core tiles) relies on.
+fn flat_packed_rows(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
+    let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
+        return false;
+    };
+    !logical_packed_address()
+        && quantized
+            .iter()
+            .zip(resolved.operands())
+            .filter(|(codec, _)| codec.is_some())
+            .all(|(_, (_, layout, _))| packed_reduction_in_order(layout, output_axes, resolved))
 }
 
 // mirrors `crate::msl::elementwise_reduce_core::push_serial_reduce_body`'s
@@ -2686,7 +2710,8 @@ fn push_cooperative_reduce_body(
     source.push_str("        seeded = true;\n");
     source.push_str("    }\n");
 
-    let chunk_slots = if packed_chunked && !logical_packed_address() {
+    let flat_rows = flat_packed_rows(resolved, quantized);
+    let chunk_slots = if packed_chunked && flat_rows {
         chunk_slots(quantized)
     } else {
         Vec::new()
@@ -2699,7 +2724,7 @@ fn push_cooperative_reduce_body(
     };
     let lean = packed_chunked
         && reduce_rank >= 1
-        && !logical_packed_address()
+        && flat_rows
         && gather_count(resolved) == 0;
     let guarded = lean && reduce_rank > 1;
 

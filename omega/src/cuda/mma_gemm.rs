@@ -24,7 +24,7 @@ use super::{
     Q1_0_BLOCK_ELEMENTS, Q2_0_BLOCK_BYTES, Q2_0_BLOCK_ELEMENTS, Q4_0_BLOCK_BYTES,
     Q4_0_BLOCK_ELEMENTS, Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, Q5_0_BLOCK_BYTES,
     Q5_0_BLOCK_ELEMENTS, Q5K_BLOCK_BYTES, Q6K_BLOCK_BYTES, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS,
-    gather_count, logical_packed_address, push_reduce_epilogue_write, reduce_is_cooperative,
+    flat_packed_rows, gather_count, push_reduce_epilogue_write, reduce_is_cooperative,
     reduction_dims,
 };
 
@@ -124,7 +124,7 @@ pub(super) fn mma_gemm_plan(
         && epilogue_broadcast_axes.is_empty()
         && gather_count(resolved) == 0
         && is_plain_product(resolved)
-        && !logical_packed_address()
+        && flat_packed_rows(resolved, quantized)
         && reduce_is_cooperative(resolved, quantized, numeric_policy)
         && !reduction_dims(resolved, output_axes).is_empty()
         && reduce_extent.is_multiple_of(STAGE_K as u64)
