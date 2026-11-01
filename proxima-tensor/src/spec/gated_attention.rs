@@ -636,7 +636,8 @@ pub fn append_gated_attention_only_with_taps(
     };
     let qg_raw = match (fold, rotated_input) {
         (Some(fold), Some(rotated)) => {
-            fold.project_folded(program, rotated, wq_gate, "s", "hc")?
+            let flat = fold.project_folded(program, rotated, wq_gate, "s", "o")?;
+            split_projection(program, flat, "s", fold.kv_heads() * group, attn_head_dim * 2)?
         }
         _ => {
             let qg_product = elementwise(
@@ -667,7 +668,10 @@ pub fn append_gated_attention_only_with_taps(
     )?;
 
     let k_raw = match (fold, rotated_input) {
-        (Some(fold), Some(rotated)) => fold.project_folded(program, rotated, wk, "s", "ud")?,
+        (Some(fold), Some(rotated)) => {
+            let flat = fold.project_folded(program, rotated, wk, "s", "o")?;
+            split_projection(program, flat, "s", fold.kv_heads(), attn_head_dim)?
+        }
         _ => {
             let k_product = elementwise(
                 program,
@@ -688,7 +692,10 @@ pub fn append_gated_attention_only_with_taps(
     };
 
     let v_new = match (fold, rotated_input) {
-        (Some(fold), Some(rotated)) => fold.project_folded(program, rotated, wv, "s", "ud")?,
+        (Some(fold), Some(rotated)) => {
+            let flat = fold.project_folded(program, rotated, wv, "s", "o")?;
+            split_projection(program, flat, "s", fold.kv_heads(), attn_head_dim)?
+        }
         _ => {
             let v_product = elementwise(
                 program,

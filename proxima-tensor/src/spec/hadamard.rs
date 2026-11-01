@@ -4,15 +4,22 @@
 //! elements. `W_f` is the quantized tensor; this module builds the `H * (D * x)` that feeds it.
 //!
 //! Teaching pointer: everything here is [`elementwise`] and [`reduce`] over the same read-side
-//! index decompositions `gated_attention.rs` uses to split a flat axis into heads. The block
-//! transform is a contraction against one `[block, block]` leaf, so the result is rank three
-//! `[s, blocks, block]` in flat order; a consumer contracts both trailing axes against the
-//! weight's flat input axis read as `block * b + e`. `lead` is `"s"` for a sequence axis and
-//! `""` for the squeezed single-position programs.
+//! index decompositions `gated_attention.rs` uses to split a flat axis into heads. The Sylvester
+//! matrix factors by bits, `H_block = H_n1 (x) H_n2` with `block = n1 * n2`, so one block rotates
+//! as two small contractions instead of one `block x block` one: `n1 + n2` multiplies per element
+//! instead of `block`, and no `[.., block, block]` product to hold. The result is rank four
+//! `[lead, blocks, n1, n2]` in flat order; a consumer contracts the three trailing axes against
+//! the weight's flat input axis read as `block * b + n2 * e + f`. `lead` is `"s"` for a sequence
+//! axis and `""` for the squeezed single-position programs.
 
 use super::*;
 
-pub const HADAMARD_ROTATION_LEAF: &str = "prism.hadamard.rotation";
+pub const HADAMARD_ROTATION_LEAF_PREFIX: &str = "prism.hadamard.rotation.";
+
+#[must_use]
+pub fn hadamard_rotation_leaf(size: u32) -> String {
+    alloc::format!("{HADAMARD_ROTATION_LEAF_PREFIX}{size}")
+}
 
 #[must_use]
 pub fn hadamard_signs_leaf(width: u32) -> String {
@@ -26,12 +33,15 @@ pub struct HadamardFold {
     feed_forward: u32,
     kv_heads: u32,
     block: u32,
-    rotation: NodeId,
+    outer: u32,
+    inner: u32,
+    outer_rotation: NodeId,
+    inner_rotation: NodeId,
     signs: Vec<(u32, NodeId)>,
 }
 
 impl HadamardFold {
-    /// Declares the rotation leaf and one sign leaf per distinct projection input width: the
+    /// Declares the rotation leaves and one sign leaf per distinct projection input width: the
     /// embedding width, the feed-forward width, and the `extra_widths` of the recurrence and
     /// attention outputs.
     pub fn declare(
@@ -43,13 +53,22 @@ impl HadamardFold {
         gdn_v_grouped: bool,
         extra_widths: &[u32],
     ) -> Self {
+        let outer = 1u32 << (block.trailing_zeros() / 2);
+        let inner = block / outer;
         let widths = [&[embedding, feed_forward][..], extra_widths].concat();
-        let rotation = input_leaf(
-            program,
-            DType::FLOAT32,
-            alloc::vec![Extent::Static(block), Extent::Static(block)],
-            HADAMARD_ROTATION_LEAF,
-        );
+        let rotation_leaf = |program: &mut Vec<Op>, size: u32| {
+            input_leaf(
+                program,
+                DType::FLOAT32,
+                alloc::vec![Extent::Static(size), Extent::Static(size)],
+                &hadamard_rotation_leaf(size),
+            )
+        };
+        let outer_rotation = rotation_leaf(program, outer);
+        let inner_rotation = match inner == outer {
+            true => outer_rotation,
+            false => rotation_leaf(program, inner),
+        };
         let mut signs: Vec<(u32, NodeId)> = Vec::new();
         for &width in &widths {
             if signs.iter().all(|(existing, _)| *existing != width) {
@@ -68,7 +87,10 @@ impl HadamardFold {
             feed_forward,
             kv_heads,
             block,
-            rotation,
+            outer,
+            inner,
+            outer_rotation,
+            inner_rotation,
             signs,
         }
     }
@@ -109,7 +131,7 @@ impl HadamardFold {
             })
     }
 
-    /// `H * (D * x)` for a flat `[lead, width]` activation, as `[lead, width / block, block]`.
+    /// `H * (D * x)` for a flat `[lead, width]` activation, as `[lead, width / block, n1, n2]`.
     pub fn rotate_flat(
         &self,
         program: &mut Vec<Op>,
@@ -117,19 +139,23 @@ impl HadamardFold {
         width: u32,
         lead: &str,
     ) -> Result<NodeId, TensorError> {
-        let blocks = width / self.block;
         let signs = self.signs_for(width)?;
-        let block_ones = ones(program, &[blocks, self.block]);
-        let blocked = elementwise(
+        let donor = ones(program, &[width / self.block, self.outer, self.inner]);
+        let split = elementwise(
             program,
             DType::FLOAT32,
             ScalarOp::Multiply,
             &[
                 (
                     x,
-                    leading(lead, &alloc::format!("{}*b+d", self.block), "bd").as_str(),
+                    leading(
+                        lead,
+                        &alloc::format!("{}*b+{}*a+c", self.block, self.inner),
+                        "bac",
+                    )
+                    .as_str(),
                 ),
-                (block_ones, alloc::format!("bd->{lead}bd").as_str()),
+                (donor, alloc::format!("bac->{lead}bac").as_str()),
             ],
         )?;
         let signed = elementwise(
@@ -137,15 +163,37 @@ impl HadamardFold {
             DType::FLOAT32,
             ScalarOp::Multiply,
             &[
-                (blocked, alloc::format!("{lead}bd->{lead}bd").as_str()),
-                (signs, alloc::format!("bd->{lead}bd").as_str()),
+                (split, alloc::format!("{lead}bac->{lead}bac").as_str()),
+                (
+                    signs,
+                    alloc::format!("b,{}*a+c->{lead}bac", self.inner).as_str(),
+                ),
             ],
         )?;
-        self.contract_blocks(program, signed, lead)
+        let first = elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            &[
+                (signed, alloc::format!("{lead}bac->{lead}beac").as_str()),
+                (self.outer_rotation, alloc::format!("ae->{lead}beac").as_str()),
+            ],
+        )?;
+        let first = reduce(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            first,
+            alloc::format!("{lead}beac->{lead}beac").as_str(),
+            alloc::format!("{lead}bec->{lead}beac").as_str(),
+        )?;
+        self.contract_inner(program, first, lead)
     }
 
     /// `H * (D * x)` for an activation already split into `[lead, heads, head_dim]` heads whose
-    /// flat order is `head * head_dim + dim`; a block spans `block / head_dim` consecutive heads.
+    /// flat order is `head * head_dim + dim`; a block spans `block / head_dim` consecutive heads
+    /// and `head_dim` must be a multiple of the inner factor.
     pub fn rotate_heads(
         &self,
         program: &mut Vec<Op>,
@@ -154,19 +202,34 @@ impl HadamardFold {
         head_dim: u32,
         lead: &str,
     ) -> Result<NodeId, TensorError> {
+        if head_dim % self.inner != 0 || self.block % head_dim != 0 {
+            return Err(TensorError::NotLowerable {
+                node: NodeId(0),
+                reason: "a hadamard block must hold whole heads, each a multiple of the inner factor",
+            });
+        }
         let heads_per_block = self.block / head_dim;
+        let rows_per_head = head_dim / self.inner;
         let signs = self.signs_for(heads * head_dim)?;
-        let head_blocks = ones(program, &[heads / heads_per_block, heads_per_block]);
-        let blocked = elementwise(
+        let donor = ones(
+            program,
+            &[heads / heads_per_block, heads_per_block, rows_per_head, self.inner],
+        );
+        let split = elementwise(
             program,
             DType::FLOAT32,
             ScalarOp::Multiply,
             &[
                 (
                     x,
-                    leading(lead, &alloc::format!("{heads_per_block}*b+q,d"), "bqd").as_str(),
+                    leading(
+                        lead,
+                        &alloc::format!("{heads_per_block}*b+q,{}*r+c", self.inner),
+                        "bqrc",
+                    )
+                    .as_str(),
                 ),
-                (head_blocks, alloc::format!("bq->{lead}bqd").as_str()),
+                (donor, alloc::format!("bqrc->{lead}bqrc").as_str()),
             ],
         )?;
         let signed = elementwise(
@@ -174,23 +237,52 @@ impl HadamardFold {
             DType::FLOAT32,
             ScalarOp::Multiply,
             &[
-                (blocked, alloc::format!("{lead}bqd->{lead}bqd").as_str()),
+                (split, alloc::format!("{lead}bqrc->{lead}bqrc").as_str()),
                 (
                     signs,
-                    alloc::format!("b,{head_dim}*q+d->{lead}bqd").as_str(),
+                    alloc::format!("b,{head_dim}*q+{}*r+c->{lead}bqrc", self.inner).as_str(),
                 ),
             ],
         )?;
-        let product = elementwise(
+        let first = elementwise(
             program,
             DType::FLOAT32,
             ScalarOp::Multiply,
             &[
-                (signed, alloc::format!("{lead}bqd->{lead}beqd").as_str()),
+                (signed, alloc::format!("{lead}bqrc->{lead}beqrc").as_str()),
                 (
-                    self.rotation,
-                    alloc::format!("{head_dim}*q+d,e->{lead}beqd").as_str(),
+                    self.outer_rotation,
+                    alloc::format!("{rows_per_head}*q+r,e->{lead}beqrc").as_str(),
                 ),
+            ],
+        )?;
+        let first = reduce(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            first,
+            alloc::format!("{lead}beqrc->{lead}beqrc").as_str(),
+            alloc::format!("{lead}bec->{lead}beqrc").as_str(),
+        )?;
+        self.contract_inner(program, first, lead)
+    }
+
+    /// The second Kronecker factor: contracts the trailing `c` axis of `[lead, b, e, c]` with
+    /// the inner rotation into `[lead, b, e, f]`.
+    fn contract_inner(
+        &self,
+        program: &mut Vec<Op>,
+        first: NodeId,
+        lead: &str,
+    ) -> Result<NodeId, TensorError> {
+        let second = elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            &[
+                (first, alloc::format!("{lead}bec->{lead}befc").as_str()),
+                (self.inner_rotation, alloc::format!("cf->{lead}befc").as_str()),
             ],
         )?;
         reduce(
@@ -198,16 +290,16 @@ impl HadamardFold {
             DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
-            product,
-            alloc::format!("{lead}beqd->{lead}beqd").as_str(),
-            alloc::format!("{lead}be->{lead}beqd").as_str(),
+            second,
+            alloc::format!("{lead}befc->{lead}befc").as_str(),
+            alloc::format!("{lead}bef->{lead}befc").as_str(),
         )
     }
 
     /// A latent embedding row `z` of `[s, width]` back in the primal basis, `D * (H * z)`: the
     /// rotation comes first and the signs after, the reverse of a folded weight's input.
-    /// A flat result needs the `[blocks, block]` axes merged again, which has no affine read
-    /// map, so a one-hot of the flat index (`Equal` over `Iota`s) merges them.
+    /// A flat result needs the rotated axes merged again, which has no affine read map, so a
+    /// one-hot of the flat index (`Equal` over `Iota`s) merges them.
     pub fn restore_flat(
         &self,
         program: &mut Vec<Op>,
@@ -216,22 +308,43 @@ impl HadamardFold {
     ) -> Result<NodeId, TensorError> {
         let blocks = width / self.block;
         let signs = self.signs_for(width)?;
-        let block_ones = ones(program, &[blocks, self.block]);
-        let blocked = elementwise(
+        let donor = ones(program, &[blocks, self.outer, self.inner]);
+        let split = elementwise(
             program,
             DType::FLOAT32,
             ScalarOp::Multiply,
             &[
-                (z, alloc::format!("s,{}*b+d->sbd", self.block).as_str()),
-                (block_ones, "bd->sbd"),
+                (
+                    z,
+                    alloc::format!("s,{}*b+{}*a+c->sbac", self.block, self.inner).as_str(),
+                ),
+                (donor, "bac->sbac"),
             ],
         )?;
-        let rotated = self.contract_blocks(program, blocked, "s")?;
+        let first = elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            &[(split, "sbac->sbeac"), (self.outer_rotation, "ae->sbeac")],
+        )?;
+        let first = reduce(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            first,
+            "sbeac->sbeac",
+            "sbec->sbeac",
+        )?;
+        let rotated = self.contract_inner(program, first, "s")?;
         let signed = elementwise(
             program,
             DType::FLOAT32,
             ScalarOp::Multiply,
-            &[(rotated, "sbe->sbe"), (signs, "be->sbe")],
+            &[
+                (rotated, "sbef->sbef"),
+                (signs, alloc::format!("b,{}*e+f->sbef", self.inner).as_str()),
+            ],
         )?;
         let iota = |program: &mut Vec<Op>, extent: u32| {
             op::append(
@@ -244,31 +357,45 @@ impl HadamardFold {
         };
         let flat_index = iota(program, width);
         let block_index = iota(program, blocks);
-        let lane_index = iota(program, self.block);
+        let outer_index = iota(program, self.outer);
+        let inner_index = iota(program, self.inner);
         let block_stride = scalar_constant(program, self.block as f32);
+        let inner_stride = scalar_constant(program, self.inner as f32);
         let block_start = elementwise(
             program,
             DType::FLOAT32,
             ScalarOp::Multiply,
             &[(block_index, "b->b"), (block_stride, "->b")],
         )?;
+        let outer_start = elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            &[(outer_index, "e->e"), (inner_stride, "->e")],
+        )?;
+        let in_block = elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            &[(outer_start, "e->ef"), (inner_index, "f->ef")],
+        )?;
         let position = elementwise(
             program,
             DType::FLOAT32,
             ScalarOp::Add,
-            &[(block_start, "b->be"), (lane_index, "e->be")],
+            &[(block_start, "b->bef"), (in_block, "ef->bef")],
         )?;
         let selector = elementwise(
             program,
             DType::FLOAT32,
             ScalarOp::Equal,
-            &[(flat_index, "k->kbe"), (position, "be->kbe")],
+            &[(flat_index, "k->kbef"), (position, "bef->kbef")],
         )?;
         let product = elementwise(
             program,
             DType::FLOAT32,
             ScalarOp::Multiply,
-            &[(signed, "sbe->skbe"), (selector, "kbe->skbe")],
+            &[(signed, "sbef->skbef"), (selector, "kbef->skbef")],
         )?;
         reduce(
             program,
@@ -276,38 +403,12 @@ impl HadamardFold {
             ScalarOp::Add,
             ReduceInit::Zero,
             product,
-            "skbe->skbe",
-            "sk->skbe",
+            "skbef->skbef",
+            "sk->skbef",
         )
     }
 
-    fn contract_blocks(
-        &self,
-        program: &mut Vec<Op>,
-        signed: NodeId,
-        lead: &str,
-    ) -> Result<NodeId, TensorError> {
-        let product = elementwise(
-            program,
-            DType::FLOAT32,
-            ScalarOp::Multiply,
-            &[
-                (signed, alloc::format!("{lead}bd->{lead}bed").as_str()),
-                (self.rotation, alloc::format!("de->{lead}bed").as_str()),
-            ],
-        )?;
-        reduce(
-            program,
-            DType::FLOAT32,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            product,
-            alloc::format!("{lead}bed->{lead}bed").as_str(),
-            alloc::format!("{lead}be->{lead}bed").as_str(),
-        )
-    }
-
-    /// Contracts a rotated activation `[lead, blocks, block]` against a weight whose flat input
+    /// Contracts a rotated activation `[lead, blocks, n1, n2]` against a weight whose flat input
     /// axis is first and whose remaining axes are `free` letters (`"hc"` for `[in, h, c]`).
     pub fn project_folded(
         &self,
@@ -327,10 +428,11 @@ impl HadamardFold {
             DType::FLOAT32,
             ScalarOp::Multiply,
             &[
-                (rotated, alloc::format!("{lead}be->{lead}{free}be").as_str()),
+                (rotated, alloc::format!("{lead}bef->{lead}{free}bef").as_str()),
                 (
                     weight,
-                    alloc::format!("{}*b+e,{free_axes}->{lead}{free}be", self.block).as_str(),
+                    alloc::format!("{}*b+{}*e+f,{free_axes}->{lead}{free}bef", self.block, self.inner)
+                        .as_str(),
                 ),
             ],
         )?;
@@ -340,8 +442,8 @@ impl HadamardFold {
             ScalarOp::Add,
             ReduceInit::Zero,
             product,
-            alloc::format!("{lead}{free}be->{lead}{free}be").as_str(),
-            alloc::format!("{lead}{free}->{lead}{free}be").as_str(),
+            alloc::format!("{lead}{free}bef->{lead}{free}bef").as_str(),
+            alloc::format!("{lead}{free}->{lead}{free}bef").as_str(),
         )
     }
 }
@@ -437,6 +539,30 @@ pub fn merge_head_axes(
     )
 }
 
+/// A flat `[lead, outer * inner]` projection output read as `[lead, outer, inner]`: the
+/// read-side split every head layout uses, with a ones donor to bind the two extents.
+pub fn split_projection(
+    program: &mut Vec<Op>,
+    flat: NodeId,
+    lead: &str,
+    outer: u32,
+    inner: u32,
+) -> Result<NodeId, TensorError> {
+    let donor = ones(program, &[outer, inner]);
+    elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Multiply,
+        &[
+            (
+                flat,
+                leading(lead, &alloc::format!("{inner}*h+c"), "hc").as_str(),
+            ),
+            (donor, alloc::format!("hc->{lead}hc").as_str()),
+        ],
+    )
+}
+
 fn ones(program: &mut Vec<Op>, shape: &[u32]) -> NodeId {
     op::append(
         program,
@@ -454,17 +580,22 @@ mod tests {
     use super::*;
 
     const BLOCK: u32 = 8;
+    const OUTER: usize = 2;
+    const INNER: usize = 4;
     const SEQUENCE: u32 = 2;
 
-    fn sylvester(row: usize, column: usize) -> f64 {
-        let parity = (row & column).count_ones() % 2;
-        let sign = if parity == 0 { 1.0 } else { -1.0 };
-        sign / f64::from(BLOCK).sqrt()
+    fn sylvester(size: usize, row: usize, column: usize) -> f64 {
+        let sign = if (row & column).count_ones() % 2 == 0 {
+            1.0
+        } else {
+            -1.0
+        };
+        sign / (size as f64).sqrt()
     }
 
-    fn rotation_data() -> Vec<f32> {
-        (0..BLOCK as usize)
-            .flat_map(|row| (0..BLOCK as usize).map(move |column| sylvester(row, column) as f32))
+    fn rotation_data(size: usize) -> Vec<f32> {
+        (0..size)
+            .flat_map(|row| (0..size).map(move |column| sylvester(size, row, column) as f32))
             .collect()
     }
 
@@ -483,12 +614,15 @@ mod tests {
     fn reference(x: &[f32], signs: &[f32], width: usize) -> Vec<f64> {
         let mut out = Vec::new();
         for row in x.chunks_exact(width) {
-            for block in row.chunks_exact(BLOCK as usize).zip(signs.chunks_exact(BLOCK as usize)) {
+            for block in row
+                .chunks_exact(BLOCK as usize)
+                .zip(signs.chunks_exact(BLOCK as usize))
+            {
                 for column in 0..BLOCK as usize {
                     out.push(
                         (0..BLOCK as usize)
                             .map(|index| {
-                                sylvester(index, column)
+                                sylvester(BLOCK as usize, index, column)
                                     * f64::from(block.0[index])
                                     * f64::from(block.1[index])
                             })
@@ -510,6 +644,29 @@ mod tests {
         }
     }
 
+    fn evaluate(program: &[Op], leading: &[&[f32]], width: usize, root: NodeId) -> Vec<f32> {
+        let outer = rotation_data(OUTER);
+        let inner = rotation_data(INNER);
+        let signs = signs_data(width);
+        let mut blocks: Vec<&[f32]> = leading.to_vec();
+        blocks.extend([outer.as_slice(), inner.as_slice(), signs.as_slice()]);
+        crate::cpu::evaluate(program, &[], &blocks, &[root])
+            .expect("evaluates")
+            .root()
+            .to_vec()
+    }
+
+    #[test]
+    fn the_block_factors_into_outer_and_inner_kronecker_sizes() {
+        let mut program = Vec::new();
+
+        let fold = HadamardFold::declare(&mut program, 1024, 2048, 2048, 1, true, &[]);
+
+        assert_eq!((fold.outer, fold.inner), (32, 32));
+        let odd = HadamardFold::declare(&mut program, BLOCK, 16, 16, 1, true, &[]);
+        assert_eq!((odd.outer as usize, odd.inner as usize), (OUTER, INNER));
+    }
+
     #[test]
     fn flat_rotation_matches_the_block_sylvester_reference() {
         let width = 24u32;
@@ -523,15 +680,12 @@ mod tests {
         let fold = HadamardFold::declare(&mut program, BLOCK, width, width, 1, true, &[]);
         let root = fold.rotate_flat(&mut program, x, width, "s").expect("lowers");
         let x_data = activation((SEQUENCE * width) as usize);
-        let signs = signs_data(width as usize);
-        let rotation = rotation_data();
 
-        let blocks: [&[f32]; 3] = [&x_data, &rotation, &signs];
-        let evaluated = crate::cpu::evaluate(&program, &[], &blocks, &[root]).expect("evaluates");
+        let rotated = evaluate(&program, &[&x_data], width as usize, root);
 
         assert_close(
-            evaluated.root(),
-            &reference(&x_data, &signs, width as usize),
+            &rotated,
+            &reference(&x_data, &signs_data(width as usize), width as usize),
         );
     }
 
@@ -555,15 +709,12 @@ mod tests {
             .rotate_heads(&mut program, x, heads, head_dim, "s")
             .expect("lowers");
         let x_data = activation((SEQUENCE * width) as usize);
-        let signs = signs_data(width as usize);
-        let rotation = rotation_data();
 
-        let blocks: [&[f32]; 3] = [&x_data, &rotation, &signs];
-        let evaluated = crate::cpu::evaluate(&program, &[], &blocks, &[root]).expect("evaluates");
+        let rotated = evaluate(&program, &[&x_data], width as usize, root);
 
         assert_close(
-            evaluated.root(),
-            &reference(&x_data, &signs, width as usize),
+            &rotated,
+            &reference(&x_data, &signs_data(width as usize), width as usize),
         );
     }
 
@@ -581,7 +732,6 @@ mod tests {
         let restored = fold.restore_flat(&mut program, z, width).expect("lowers");
         let z_data = activation((SEQUENCE * width) as usize);
         let signs = signs_data(width as usize);
-        let rotation = rotation_data();
         let ones_signs = vec![1.0f32; width as usize];
         let expected: Vec<f64> = reference(&z_data, &ones_signs, width as usize)
             .iter()
@@ -589,8 +739,57 @@ mod tests {
             .map(|(index, value)| value * f64::from(signs[index % width as usize]))
             .collect();
 
-        let blocks: [&[f32]; 3] = [&z_data, &rotation, &signs];
-        let evaluated = crate::cpu::evaluate(&program, &[], &blocks, &[restored]).expect("evaluates");
+        let restored = evaluate(&program, &[&z_data], width as usize, restored);
+
+        assert_close(&restored, &expected);
+    }
+
+    #[test]
+    fn project_folded_contracts_the_rotated_blocks_against_the_flat_weight_axis() {
+        let (width, outputs) = (24u32, 3u32);
+        let mut program = Vec::new();
+        let x = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            alloc::vec![Extent::Static(SEQUENCE), Extent::Static(width)],
+            "x",
+        );
+        let weight = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            alloc::vec![Extent::Static(width), Extent::Static(outputs)],
+            "weight",
+        );
+        let fold = HadamardFold::declare(&mut program, BLOCK, width, width, 1, true, &[]);
+        let rotated = fold.rotate_flat(&mut program, x, width, "s").expect("lowers");
+        let root = fold
+            .project_folded(&mut program, rotated, weight, "s", "o")
+            .expect("lowers");
+        let x_data = activation((SEQUENCE * width) as usize);
+        let weight_data: Vec<f32> = (0..(width * outputs) as usize)
+            .map(|index| ((index * 3 + 1) % 7) as f32 * 0.5 - 1.5)
+            .collect();
+        let expected: Vec<f64> = reference(&x_data, &signs_data(width as usize), width as usize)
+            .chunks_exact(width as usize)
+            .flat_map(|row| {
+                (0..outputs as usize)
+                    .map(|output| {
+                        row.iter()
+                            .enumerate()
+                            .map(|(index, value)| {
+                                value * f64::from(weight_data[index * outputs as usize + output])
+                            })
+                            .sum::<f64>()
+                    })
+                    .collect::<Vec<f64>>()
+            })
+            .collect();
+
+        let outer = rotation_data(OUTER);
+        let inner = rotation_data(INNER);
+        let signs = signs_data(width as usize);
+        let blocks: [&[f32]; 5] = [&x_data, &weight_data, &outer, &inner, &signs];
+        let evaluated = crate::cpu::evaluate(&program, &[], &blocks, &[root]).expect("evaluates");
 
         assert_close(evaluated.root(), &expected);
     }
@@ -610,13 +809,45 @@ mod tests {
             ],
             "x",
         );
-        let merged = merge_head_axes(&mut program, x, "sugd", "s", kv_heads, group, true).expect("lowers");
+        let merged =
+            merge_head_axes(&mut program, x, "sugd", "s", kv_heads, group, true).expect("lowers");
         let x_data = activation((SEQUENCE * kv_heads * group * dim) as usize);
 
         let blocks: [&[f32]; 1] = [&x_data];
         let evaluated = crate::cpu::evaluate(&program, &[], &blocks, &[merged]).expect("evaluates");
 
         assert_eq!(evaluated.root(), x_data.as_slice());
+    }
+
+    #[test]
+    fn merge_head_axes_tiled_order_puts_the_group_index_outermost() {
+        let (kv_heads, group, dim) = (3u32, 2u32, 4u32);
+        let mut program = Vec::new();
+        let x = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            alloc::vec![
+                Extent::Static(kv_heads),
+                Extent::Static(group),
+                Extent::Static(dim)
+            ],
+            "x",
+        );
+        let merged =
+            merge_head_axes(&mut program, x, "ugd", "", kv_heads, group, false).expect("lowers");
+        let x_data = activation((kv_heads * group * dim) as usize);
+        let expected: Vec<f32> = (0..group as usize)
+            .flat_map(|inner| (0..kv_heads as usize).map(move |kv| (kv, inner)))
+            .flat_map(|(kv, inner)| {
+                let start = (kv * group as usize + inner) * dim as usize;
+                x_data[start..start + dim as usize].to_vec()
+            })
+            .collect();
+
+        let blocks: [&[f32]; 1] = [&x_data];
+        let evaluated = crate::cpu::evaluate(&program, &[], &blocks, &[merged]).expect("evaluates");
+
+        assert_eq!(evaluated.root(), expected.as_slice());
     }
 
     #[test]
@@ -633,7 +864,8 @@ mod tests {
             ],
             "x",
         );
-        let merged = merge_head_axes(&mut program, x, "gud", "", kv_heads, group, true).expect("lowers");
+        let merged =
+            merge_head_axes(&mut program, x, "gud", "", kv_heads, group, true).expect("lowers");
         let x_data = activation((group * kv_heads * dim) as usize);
         let expected: Vec<f32> = (0..kv_heads as usize)
             .flat_map(|kv| (0..group as usize).map(move |inner| (kv, inner)))
