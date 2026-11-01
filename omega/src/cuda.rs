@@ -1520,6 +1520,26 @@ fn push_unit_stride_broadcast_loop(
     ));
 }
 
+fn push_unit_stride_fold_header(
+    source: &mut String,
+    resolved: &BoundOp,
+    output_axes: &[u16],
+) {
+    for index in 0..resolved.operands().len() {
+        source.push_str(&format!(
+            "    long off_base{index} = u.operand_base[{index}];\n"
+        ));
+        for dim in output_axes {
+            source.push_str(&format!(
+                "    off_base{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+            ));
+        }
+    }
+    source.push_str(
+        "    #pragma unroll 8\n    for (unsigned int r = tid; r < (unsigned int)u.reduction_total; r += blockDim.x) {\n",
+    );
+}
+
 struct HoistedEpilogue {
     before_loop: String,
     in_loop: String,
@@ -2861,8 +2881,14 @@ fn push_cooperative_reduce_body(
             source.push_str("    }\n    if (!contiguous) {\n");
         }
     }
+    let unit_fold = block_reduce
+        && reduce_rank == 1
+        && gather_count(resolved) == 0
+        && resolved.extents[reduce_dims[0] as usize] <= u64::from(u32::MAX);
     if !lean || guarded {
-        if packed_chunked {
+        if unit_fold {
+            push_unit_stride_fold_header(source, resolved, output_axes);
+        } else if packed_chunked {
             source.push_str(&format!(
                 "    for (long chunk = (long)lane * 8; chunk < u.reduction_total; chunk += {} * 8) {{\n",
                 WARP_SIZE
@@ -2892,10 +2918,10 @@ fn push_cooperative_reduce_body(
                 "    #pragma unroll 8\n    for (long r = {lane_start}; r < u.reduction_total; r += {lane_stride}) {{\n"
             ));
         }
-        if reduce_rank > 0 && !packed_chunked {
+        if reduce_rank > 0 && !packed_chunked && !unit_fold {
             push_reduction_coord_decompose(source, "r", reduce_rank, reduce_rank_len, "        ");
         }
-        if reduce_rank > 0 {
+        if reduce_rank > 0 && !unit_fold {
             for (index, dim) in reduce_dims.iter().enumerate() {
                 source.push_str(&format!(
                     "        full_coord[{dim}] = reduction_coord[{index}];\n"
@@ -2910,6 +2936,11 @@ fn push_cooperative_reduce_body(
             if codec.is_some() {
                 let (_, layout, _) = &resolved.operands()[index];
                 push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
+            } else if unit_fold {
+                let stride = resolved.operands()[index].1.stride(reduce_dims[0]);
+                source.push_str(&format!(
+                    "        long off{index} = off_base{index} + (long)r * {stride}L;\n"
+                ));
             } else {
                 source.push_str(&format!(
                     "        long off{index} = u.operand_base[{index}];\n"
