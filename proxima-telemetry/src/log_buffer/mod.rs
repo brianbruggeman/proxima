@@ -31,14 +31,18 @@ pub mod sized {
 pub const DEFAULT_LOG_BUFFER_CAPACITY: usize = sized::LOG_BUFFER_CAPACITY_DEFAULT;
 
 /// Per-subscriber lock-free FIFO for the live-tail fanout. The buffer
-/// pushes to every subscriber's queue via `try_push`; full queues drop
-/// the new line (slow-subscriber backpressure). Receivers poll with
-/// `try_recv` or block on a [`proxima_primitives::sync::Notify`] surfaced via the
+/// pushes to every subscriber's queue via `try_push`; a full queue drops
+/// the new line and increments that subscriber's `dropped` counter
+/// (slow-subscriber backpressure), which the receiver reads back with
+/// `LiveTailReceiver::take_dropped`. Receivers poll with `try_recv` or
+/// block on a [`proxima_primitives::sync::Notify`] surfaced via the
 /// `LiveTailReceiver` wrapper.
+#[derive(Clone)]
 struct Subscriber {
     id: u64,
     queue: Arc<ArrayQueue<String>>,
     notify: Arc<Notify>,
+    dropped: Arc<AtomicU64>,
 }
 
 /// Receiver handle for a live-tail subscription. `recv().await` parks
@@ -47,6 +51,7 @@ pub struct LiveTailReceiver {
     id: u64,
     queue: Arc<ArrayQueue<String>>,
     notify: Arc<Notify>,
+    dropped: Arc<AtomicU64>,
     parent: Arc<ArcSwap<Vec<Subscriber>>>,
 }
 
@@ -55,6 +60,12 @@ impl LiveTailReceiver {
     /// currently empty. Does not block.
     pub fn try_recv(&self) -> Option<String> {
         self.queue.pop()
+    }
+
+    /// Lines the buffer could not queue for this subscriber because the
+    /// queue was full, since the last call. Resets the count.
+    pub fn take_dropped(&self) -> u64 {
+        self.dropped.swap(0, Ordering::AcqRel)
     }
 
     /// Block until a line arrives, then return it. If the parent
@@ -71,18 +82,13 @@ impl LiveTailReceiver {
 
 impl Drop for LiveTailReceiver {
     fn drop(&mut self) {
-        // unregister from the parent subscriber list
-        let current = self.parent.load_full();
-        let next: Vec<Subscriber> = current
-            .iter()
-            .filter(|entry| entry.id != self.id)
-            .map(|entry| Subscriber {
-                id: entry.id,
-                queue: entry.queue.clone(),
-                notify: entry.notify.clone(),
-            })
-            .collect();
-        self.parent.store(Arc::new(next));
+        self.parent.rcu(|current| {
+            current
+                .iter()
+                .filter(|entry| entry.id != self.id)
+                .cloned()
+                .collect::<Vec<Subscriber>>()
+        });
     }
 }
 
@@ -94,10 +100,12 @@ impl Drop for LiveTailReceiver {
 /// no_std + alloc cliff this was carved for). Subscribers ride
 /// `ArcSwap<Vec<Subscriber>>` with per-subscriber `ArrayQueue<String>` +
 /// `Notify`. Read fanout is lock-free; subscription churn (register /
-/// drop) is copy-on-write, fine because subscribe is rare relative to
-/// push. Slow subscribers drop messages silently — log fanout is
-/// best-effort (the retained ring buffer is the system of record for
-/// late readers).
+/// drop) is copy-on-write retried with `ArcSwap::rcu`, so concurrent
+/// churn never loses an update; fine because subscribe is rare relative
+/// to push. Slow subscribers lose lines, but never silently: each loss is
+/// counted per subscriber and surfaced by `LiveTailReceiver::take_dropped`.
+/// Fanout stays best-effort — the retained ring buffer is the system of
+/// record for late readers.
 pub struct LogBuffer {
     ring: LogRing,
     subscribers: Arc<ArcSwap<Vec<Subscriber>>>,
@@ -138,7 +146,9 @@ impl LogBuffer {
         // authoritative).
         let snapshot = self.subscribers.load();
         for entry in snapshot.iter() {
-            let _ = entry.queue.push(fanout_line.clone());
+            if entry.queue.push(fanout_line.clone()).is_err() {
+                entry.dropped.fetch_add(1, Ordering::AcqRel);
+            }
             entry.notify.notify_one();
         }
     }
@@ -158,26 +168,23 @@ impl LogBuffer {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let queue = Arc::new(ArrayQueue::new(self.live_tail_channel_capacity));
         let notify = Arc::new(Notify::new());
-        // copy-on-write append
-        let current = self.subscribers.load_full();
-        let mut next: Vec<Subscriber> = current
-            .iter()
-            .map(|entry| Subscriber {
-                id: entry.id,
-                queue: entry.queue.clone(),
-                notify: entry.notify.clone(),
-            })
-            .collect();
-        next.push(Subscriber {
+        let dropped = Arc::new(AtomicU64::new(0));
+        let subscriber = Subscriber {
             id,
             queue: queue.clone(),
             notify: notify.clone(),
+            dropped: dropped.clone(),
+        };
+        self.subscribers.rcu(|current| {
+            let mut next: Vec<Subscriber> = current.iter().cloned().collect();
+            next.push(subscriber.clone());
+            next
         });
-        self.subscribers.store(Arc::new(next));
         LiveTailReceiver {
             id,
             queue,
             notify,
+            dropped,
             parent: self.subscribers.clone(),
         }
     }
@@ -293,6 +300,45 @@ mod tests {
         drop(r1);
         tokio::task::yield_now().await;
         assert_eq!(buffer.subscribers.load().len(), 0);
+    }
+
+    #[test]
+    fn concurrent_subscribe_and_drop_never_lose_an_update() {
+        const THREADS: usize = 16;
+        const ROUNDS: usize = 200;
+        for _ in 0..ROUNDS {
+            let buffer = LogBuffer::new(4);
+            let subscribed = std::sync::Barrier::new(THREADS);
+            let counted = std::sync::Barrier::new(THREADS);
+            let dropping = std::sync::Barrier::new(THREADS);
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = (0..THREADS)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            subscribed.wait();
+                            let receiver = buffer.subscribe();
+                            counted.wait();
+                            let seen = buffer.subscribers.load().len();
+                            dropping.wait();
+                            drop(receiver);
+                            seen
+                        })
+                    })
+                    .collect();
+                for handle in handles {
+                    assert_eq!(
+                        handle.join().expect("subscriber thread"),
+                        THREADS,
+                        "every concurrent subscribe must be visible"
+                    );
+                }
+            });
+            assert_eq!(
+                buffer.subscribers.load().len(),
+                0,
+                "every concurrent drop must unregister"
+            );
+        }
     }
 
     #[test]
