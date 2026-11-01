@@ -136,12 +136,11 @@ pub(super) fn native_packed_layout(
     // `ssm_out`'s head axes do), the LAST one contiguous. An axis the operand never varies
     // along (a sequence batch, or the selected-expert axis of a gathered fold, whose expert
     // comes from the route) holds no bytes of the weight, so it widens no row.
-    let mut accumulator = 1i64;
+    let mut in_dim = 1i64;
     for axis in reduction_axes.iter().rev() {
-        strides[*axis as usize] = accumulator;
-        accumulator *= extents[*axis as usize] as i64;
+        strides[*axis as usize] = in_dim;
+        in_dim *= extents[*axis as usize] as i64;
     }
-    let in_dim = accumulator;
 
     // the output axes: outermost group, scaled by the whole reduction group's flat width
     // since it sits inside them.

@@ -1983,7 +1983,10 @@ fn dot_ptq1_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorEr
     }
     let mut decoded = [0.0f32; ptq1_0::QK_PTQ1_0];
     let mut acc = 0.0f32;
-    for (block, activation_chunk) in blocks.iter().zip(activation.chunks_exact(ptq1_0::QK_PTQ1_0)) {
+    for (block, activation_chunk) in blocks
+        .iter()
+        .zip(activation.as_chunks::<{ ptq1_0::QK_PTQ1_0 }>().0.iter())
+    {
         ptq1_0::dequantize_block(block, &mut decoded);
         acc = dot_fold_fused_multiply_add(
             &decoded,
@@ -2013,7 +2016,7 @@ pub fn matmul_ptq1_0_f32(
         activation,
         "matmul_ptq1_0_f32 called with zero rows",
         "weight byte length is not a whole multiple of the row count",
-        |row, activation_row| dot_ptq1_0_f32(row, activation_row),
+        dot_ptq1_0_f32,
     )
 }
 

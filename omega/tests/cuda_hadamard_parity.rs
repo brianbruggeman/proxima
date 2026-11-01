@@ -719,21 +719,6 @@ mod packed_folded_attention {
         )
         .expect("the folded packed attention lowers");
         let symbols = vec![1u64, 8];
-        if std::env::var_os("HADAMARD_DEBUG_BIND").is_some() {
-            let shapes_debug = infer(&program, &symbols).expect("infers");
-            let mut resolved = proxima_tensor::bind_with_fusion(&program, &shapes_debug, &[taps.v_new], true, NumericPolicy::bit_exact().with_reassociation(true)).expect("binds");
-            let packed_set: std::collections::BTreeSet<NodeId> = [wv_flat].into_iter().collect();
-            proxima_tensor::correct_packed_matmul_layouts(&mut resolved, &packed_set);
-            let mut lines = Vec::new();
-            for bound in &resolved {
-                for (node, layout, _) in bound.operands() {
-                    if *node == wv_flat {
-                        lines.push(format!("op {:?} kind={} extents={:?} strides={:?}", bound.node, bound.kind.name(), bound.extents, layout.strides));
-                    }
-                }
-            }
-            panic!("{}", lines.join("\n"));
-        }
         let shapes = infer(&program, &symbols).expect("infers");
         let packed: Vec<(&str, Packed)> = WEIGHTS
             .iter()
