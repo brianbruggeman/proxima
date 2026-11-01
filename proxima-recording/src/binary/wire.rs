@@ -85,6 +85,12 @@ pub(super) enum BinProcessEvent {
     Exited {
         exit_code: Option<i32>,
     },
+    StdoutLost {
+        lines: u64,
+    },
+    StderrLost {
+        lines: u64,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -296,6 +302,8 @@ fn process_to_bin(event: ProcessEvent) -> BinProcessEvent {
             data: data.to_vec(),
         },
         ProcessEvent::Exited { exit_code } => BinProcessEvent::Exited { exit_code },
+        ProcessEvent::StdoutLost(lines) => BinProcessEvent::StdoutLost { lines },
+        ProcessEvent::StderrLost(lines) => BinProcessEvent::StderrLost { lines },
     }
 }
 
@@ -324,6 +332,8 @@ fn bin_to_process(event: BinProcessEvent) -> Result<ProcessEvent, ProximaError> 
         BinProcessEvent::Stdout { data } => ProcessEvent::Stdout(Bytes::from(data)),
         BinProcessEvent::Stderr { data } => ProcessEvent::Stderr(Bytes::from(data)),
         BinProcessEvent::Exited { exit_code } => ProcessEvent::Exited { exit_code },
+        BinProcessEvent::StdoutLost { lines } => ProcessEvent::StdoutLost(lines),
+        BinProcessEvent::StderrLost { lines } => ProcessEvent::StderrLost(lines),
     })
 }
 
@@ -568,6 +578,18 @@ mod tests {
         InteractionId::from_bytes([13; 16]),
         51,
         ProtocolEvent::Process(ProcessEvent::Stdout(Bytes::from_static(b"line of output"))),
+    ))]
+    #[case::process_stdout_lost(child(
+        InteractionId::from_bytes([2; 16]),
+        InteractionId::from_bytes([13; 16]),
+        99,
+        ProtocolEvent::Process(ProcessEvent::StdoutLost(3)),
+    ))]
+    #[case::process_stderr_lost(child(
+        InteractionId::from_bytes([2; 16]),
+        InteractionId::from_bytes([13; 16]),
+        99,
+        ProtocolEvent::Process(ProcessEvent::StderrLost(u64::MAX)),
     ))]
     #[case::process_exited_signaled(child(
         InteractionId::from_bytes([2; 16]),

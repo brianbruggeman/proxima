@@ -1,7 +1,10 @@
+use std::pin::pin;
+use std::process::ExitStatus;
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
+use futures::future::{Either, join, select};
 use proxima_primitives::sync::task::JoinSet;
 use proxima_telemetry::error;
 use time::OffsetDateTime;
@@ -19,6 +22,17 @@ use crate::upstreams::ProcessUpstream;
 /// event with `stage_id` and a `parent` of the owning pipeline (or
 /// other coordinator), so downstream tools can walk the parent edge to
 /// reconstruct the DAG.
+///
+/// **Ordering**: each stream's forwarder keeps recording lines until the
+/// process exits, then drains whatever its receiver still holds. The
+/// terminal `Exited` event is appended only after both forwarders have
+/// finished, so no `Stdout`/`Stderr` event follows `Exited`.
+///
+/// **Loss**: a subscriber queue that was full drops the newest line and
+/// counts it. After the drain each forwarder reads that count
+/// (`LiveTailReceiver::take_dropped`) and, when nonzero, records
+/// `ProcessEvent::StdoutLost(n)` / `StderrLost(n)` before `Exited`, so a
+/// recording states how many lines it is missing instead of hiding it.
 ///
 /// **Subscription race**: `LogBuffer::subscribe` only delivers lines
 /// pushed AFTER subscription, and the child can write the moment it is
@@ -101,64 +115,78 @@ impl ProcessEventBridge {
         })
         .await?;
 
-        let mut tasks = JoinSet::new();
-        {
-            let sink = sink.clone();
-            tasks.spawn(async move {
-                while let Some(line) = stdout_rx.recv().await {
-                    let event = RecordingEvent {
-                        id: stage_id,
-                        ts_ms: elapsed_ms(started),
-                        parent,
-                        event: ProtocolEvent::Process(ProcessEvent::Stdout(Bytes::from(line))),
-                    };
-                    if let Err(error) = sink.append(event).await {
-                        error!(?error, "process bridge: stdout sink append failed");
-                    }
-                }
-            });
-        }
-        {
-            let sink = sink.clone();
-            tasks.spawn(async move {
-                while let Some(line) = stderr_rx.recv().await {
-                    let event = RecordingEvent {
-                        id: stage_id,
-                        ts_ms: elapsed_ms(started),
-                        parent,
-                        event: ProtocolEvent::Process(ProcessEvent::Stderr(Bytes::from(line))),
-                    };
-                    if let Err(error) = sink.append(event).await {
-                        error!(?error, "process bridge: stderr sink append failed");
-                    }
-                }
-            });
-        }
+        let stamp = move |event: ProcessEvent| RecordingEvent {
+            id: stage_id,
+            ts_ms: elapsed_ms(started),
+            parent,
+            event: ProtocolEvent::Process(event),
+        };
         let (exit_tx, exit_rx) = oneshot::channel();
-        {
-            let sink = sink.clone();
-            let upstream = upstream.clone();
-            tasks.spawn(async move {
-                let exit_status = upstream.wait_for_exit().await;
-                let exit_code = exit_status.and_then(|status| status.code());
-                let event = RecordingEvent {
-                    id: stage_id,
-                    ts_ms: elapsed_ms(started),
-                    parent,
-                    event: ProtocolEvent::Process(ProcessEvent::Exited { exit_code }),
-                };
-                if let Err(error) = sink.append(event).await {
-                    error!(?error, "process bridge: exited sink append failed");
-                }
-                let _ = exit_tx.send(exit_code);
-            });
-        }
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async move {
+            let (exit_status, _) = join(
+                forward_until_exit(
+                    stdout_rx,
+                    &upstream,
+                    &sink,
+                    &stamp,
+                    ProcessEvent::Stdout,
+                    ProcessEvent::StdoutLost,
+                ),
+                forward_until_exit(
+                    stderr_rx,
+                    &upstream,
+                    &sink,
+                    &stamp,
+                    ProcessEvent::Stderr,
+                    ProcessEvent::StderrLost,
+                ),
+            )
+            .await;
+            let exit_code = exit_status.and_then(|status| status.code());
+            record(&sink, stamp(ProcessEvent::Exited { exit_code })).await;
+            let _ = exit_tx.send(exit_code);
+        });
 
         Ok(BridgeHandle {
             exit_rx,
             _tasks: tasks,
         })
     }
+}
+
+async fn record(sink: &DynRecordingSink, envelope: RecordingEvent) {
+    if let Err(error) = sink.append(envelope).await {
+        error!(?error, "process bridge: sink append failed");
+    }
+}
+
+async fn forward_until_exit(
+    receiver: LiveTailReceiver,
+    upstream: &ProcessUpstream,
+    sink: &DynRecordingSink,
+    stamp: &impl Fn(ProcessEvent) -> RecordingEvent,
+    line_event: fn(Bytes) -> ProcessEvent,
+    lost_event: fn(u64) -> ProcessEvent,
+) -> Option<ExitStatus> {
+    let mut exit = pin!(upstream.wait_for_exit());
+    let status = loop {
+        match select(pin!(receiver.recv()), exit.as_mut()).await {
+            Either::Left((Some(line), _)) => {
+                record(sink, stamp(line_event(Bytes::from(line)))).await;
+            }
+            Either::Left((None, _)) => break exit.await,
+            Either::Right((status, _)) => break status,
+        }
+    };
+    while let Some(line) = receiver.try_recv() {
+        record(sink, stamp(line_event(Bytes::from(line)))).await;
+    }
+    match receiver.take_dropped() {
+        0 => {}
+        lost => record(sink, stamp(lost_event(lost))).await,
+    }
+    status
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -178,19 +206,16 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
-    use tokio::sync::Notify;
 
     #[derive(Default)]
     struct MemorySink {
         events: StdMutex<Vec<RecordingEvent>>,
-        appended: Notify,
     }
 
     impl RecordingSink for MemorySink {
         fn append<'lifetime>(&'lifetime self, event: RecordingEvent) -> AppendFuture<'lifetime> {
             Box::pin(async move {
                 self.events.lock().expect("memory sink lock").push(event);
-                self.appended.notify_one();
                 Ok(())
             })
         }
@@ -261,26 +286,7 @@ mod tests {
         .await
         .expect("attach");
         let exit_code = handle.wait_for_exit().await;
-        // the supervisor joins both drains before firing exit, so the buffers
-        // hold every line the child wrote; started + exited + one event per
-        // line is the exact count the forwarding tasks still owe the sink.
-        let expected_events = 2 + stdout_buf.len() + stderr_buf.len();
-        let delivered = tokio::time::timeout(Duration::from_secs(5), async {
-            while sink.events.lock().expect("lock").len() < expected_events {
-                sink.appended.notified().await;
-            }
-        })
-        .await;
         let events = sink.events.lock().expect("lock").clone();
-        assert!(
-            delivered.is_ok(),
-            "forwarding tasks must deliver every buffered line before drop: recorded {} of {} events; \
-             stdout missing {:?}; stderr missing {:?}",
-            events.len(),
-            expected_events,
-            missing_lines(&stdout_buf.snapshot(None), &stream_lines(&events, Stream::Stdout)),
-            missing_lines(&stderr_buf.snapshot(None), &stream_lines(&events, Stream::Stderr)),
-        );
         drop(upstream);
         (events, exit_code)
     }
@@ -301,14 +307,6 @@ mod tests {
                 }
                 _ => None,
             })
-            .collect()
-    }
-
-    fn missing_lines(buffered: &[String], recorded: &[String]) -> Vec<String> {
-        buffered
-            .iter()
-            .filter(|line| !recorded.contains(line))
-            .cloned()
             .collect()
     }
 
@@ -404,6 +402,39 @@ mod tests {
             }
         }
         assert_eq!(parents.len(), 1, "every event must share one parent id");
+    }
+
+    #[proxima::test]
+    async fn exited_is_the_last_event_and_follows_every_line_across_fifty_runs() {
+        for run in 0..50 {
+            let (events, _exit_code) = run_stage("echo a; echo b; echo c 1>&2; echo d").await;
+            let last = events.last().expect("events");
+            assert!(
+                matches!(last.event, ProtocolEvent::Process(ProcessEvent::Exited { .. })),
+                "run {run}: last event must be Exited, got {:?}; stdout {:?} stderr {:?}",
+                last.event,
+                stream_lines(&events, Stream::Stdout),
+                stream_lines(&events, Stream::Stderr),
+            );
+            assert_eq!(stream_lines(&events, Stream::Stdout), vec!["a", "b", "d"], "run {run}");
+            assert_eq!(stream_lines(&events, Stream::Stderr), vec!["c"], "run {run}");
+        }
+    }
+
+    #[proxima::test]
+    async fn thousand_line_burst_is_recorded_completely_or_with_explicit_loss() {
+        let (events, _exit_code) = run_stage_attaching("seq 1 1000", true).await;
+        let recorded = stream_lines(&events, Stream::Stdout);
+        let lost: u64 = events
+            .iter()
+            .filter_map(|event| match event.event {
+                ProtocolEvent::Process(ProcessEvent::StdoutLost(count)) => Some(count),
+                _ => None,
+            })
+            .sum();
+        assert_eq!(recorded.len() as u64 + lost, 1000, "recorded {} lost {lost}", recorded.len());
+        let numbers: Vec<u32> = recorded.iter().map(|line| line.parse().expect("seq line")).collect();
+        assert!(numbers.windows(2).all(|pair| pair[0] < pair[1]), "recorded lines out of order or duplicated");
     }
 
     // intentionally tight: validates the bridge does not hang on a
