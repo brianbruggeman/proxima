@@ -1,5 +1,6 @@
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 use proxima_tensor::{BoundOp, BoundOpKind, DType, Keep, NumericPolicy, ReduceInit, ScalarOp, StepArg};
 
@@ -28,7 +29,7 @@ const MAX_STAGED_REDUCTION: u64 = 32_768;
 pub(super) struct StagedMatvec {
     pub weight_slot: usize,
     pub activation_slot: usize,
-    pub reduce_dim: u16,
+    pub reduce_dims: Vec<u16>,
     pub reduction: u64,
     pub dot: BlockDot,
 }
@@ -65,10 +66,13 @@ pub(super) fn staged_matvec_plan(
     };
     let dot = block_dot_i8(&codec.block_layout()?)?;
     let reduce_dims = reduction_dims(resolved, output_axes);
-    let [reduce_dim] = reduce_dims.as_slice() else {
+    if reduce_dims.is_empty() {
         return None;
-    };
-    let reduction = *resolved.extents.get(usize::from(*reduce_dim))?;
+    }
+    let reduction: u64 = reduce_dims
+        .iter()
+        .map(|dim| resolved.extents.get(usize::from(*dim)).copied())
+        .product::<Option<u64>>()?;
     let (_, activation_layout, _) = operands.get(activation_slot)?;
     let shared_by_every_row = output_axes
         .iter()
@@ -84,7 +88,7 @@ pub(super) fn staged_matvec_plan(
     .then_some(StagedMatvec {
         weight_slot,
         activation_slot,
-        reduce_dim: *reduce_dim,
+        reduce_dims,
         reduction,
         dot,
     })
@@ -116,35 +120,66 @@ pub(super) fn push_staged_matvec_body(
             found: resolved.kind.name(),
         });
     };
-    push_stage(source, plan);
+    source.push_str("    const unsigned int lane = threadIdx.x & 31u;\n");
+    source.push_str("    const unsigned int warp = threadIdx.x >> 5u;\n");
     push_row_setup(source, resolved, plan, output_axes);
+    push_fold_prologue(source, plan);
+    push_stage(source, plan);
     push_fold(source, plan);
     push_write(source, resolved, output_axes.len());
     Ok(())
 }
 
+/// Groups of 32 one warp loads before it reduces any, so their loads overlap.
+const STAGE_BATCH: usize = 8;
+
+/// `long act_offset = ...` for flat reduction index `flat`, walking every reduced axis.
+fn activation_offset(plan: &StagedMatvec, flat: &str) -> String {
+    let activation_slot = plan.activation_slot;
+    let mut text = format!(
+        "            long act_offset = u.operand_base[{activation_slot}];\n            long act_rest = {flat};\n"
+    );
+    for (index, dim) in plan.reduce_dims.iter().enumerate().rev() {
+        text.push_str(&format!(
+            "            act_offset += (act_rest % u.reduction_extents[{index}]) * u.operand_strides[{activation_slot}][{dim}];\n\
+             \x20           act_rest /= u.reduction_extents[{index}];\n"
+        ));
+    }
+    text
+}
+
 fn push_stage(source: &mut String, plan: &StagedMatvec) {
     let activation_slot = plan.activation_slot;
-    let reduce_dim = plan.reduce_dim;
     let groups = plan.reduction / DOT_ELEMENTS as u64;
+    let stride = STAGED_WARPS * STAGE_BATCH;
+    let offset = activation_offset(plan, "(long)group * 32 + lane");
     source.push_str(&format!(
         "    __shared__ __align__(16) int staged_q[{}];\n    __shared__ float staged_d[{groups}];\n",
         plan.reduction / 4
     ));
-    source.push_str("    const unsigned int lane = threadIdx.x & 31u;\n");
-    source.push_str("    const unsigned int warp = threadIdx.x >> 5u;\n");
     source.push_str(&format!(
-        "    const long act_base = u.operand_base[{activation_slot}];\n\
-         \x20   const long act_step = u.operand_strides[{activation_slot}][{reduce_dim}];\n\
-         \x20   for (unsigned int group = warp; group < {groups}u; group += {STAGED_WARPS}u) {{\n\
-         \x20       float value = in{activation_slot}[act_base + (long)(group * 32u + lane) * act_step];\n\
-         \x20       float amax = fabsf(value);\n\
+        "    for (unsigned int first = warp; first < {groups}u; first += {stride}u) {{\n\
+         \x20       float values[{STAGE_BATCH}];\n\
          \x20       #pragma unroll\n\
-         \x20       for (int shift = 16; shift > 0; shift >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, shift)); }}\n\
-         \x20       float scale = amax / 127.0f;\n\
-         \x20       int level = amax == 0.0f ? 0 : __float2int_rn(value / scale);\n\
-         \x20       ((signed char *)staged_q)[group * 32u + lane] = (signed char)level;\n\
-         \x20       if (lane == 0u) {{ staged_d[group] = scale; }}\n\
+         \x20       for (int batch = 0; batch < {STAGE_BATCH}; batch++) {{\n\
+         \x20           const unsigned int group = first + batch * {STAGED_WARPS}u;\n\
+         \x20           values[batch] = 0.0f;\n\
+         \x20           if (group >= {groups}u) {{ continue; }}\n\
+         {offset}\
+         \x20           values[batch] = in{activation_slot}[act_offset];\n\
+         \x20       }}\n\
+         \x20       #pragma unroll\n\
+         \x20       for (int batch = 0; batch < {STAGE_BATCH}; batch++) {{\n\
+         \x20           const unsigned int group = first + batch * {STAGED_WARPS}u;\n\
+         \x20           if (group >= {groups}u) {{ continue; }}\n\
+         \x20           float amax = fabsf(values[batch]);\n\
+         \x20           #pragma unroll\n\
+         \x20           for (int shift = 16; shift > 0; shift >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, shift)); }}\n\
+         \x20           float scale = amax / 127.0f;\n\
+         \x20           int level = amax == 0.0f ? 0 : __float2int_rn(values[batch] / scale);\n\
+         \x20           ((signed char *)staged_q)[group * 32u + lane] = (signed char)level;\n\
+         \x20           if (lane == 0u) {{ staged_d[group] = scale; }}\n\
+         \x20       }}\n\
          \x20   }}\n\
          \x20   __syncthreads();\n"
     ));
@@ -260,6 +295,22 @@ fn push_tile_load(source: &mut String, plan: &StagedMatvec, tiles: &TilePlan, ti
     ));
 }
 
+/// Declares the tile buffers and issues tile 0's loads, so they are in flight
+/// while the shared operand is staged.
+fn push_fold_prologue(source: &mut String, plan: &StagedMatvec) {
+    let tiles = tile_plan(plan);
+    let rows = STAGED_WARPS * STAGED_ROWS_PER_WARP;
+    source.push_str(&format!(
+        "    __shared__ uint4 weight_tile[{}];\n\
+         \x20   uint4 prefetch[{}];\n\
+         \x20   {{\n",
+        rows * tiles.segments,
+        tiles.loads_per_thread
+    ));
+    push_tile_load(source, plan, &tiles, "0");
+    source.push_str("    }\n");
+}
+
 fn push_fold(source: &mut String, plan: &StagedMatvec) {
     let BlockDot {
         name,
@@ -279,17 +330,9 @@ fn push_fold(source: &mut String, plan: &StagedMatvec) {
     let rows = STAGED_WARPS * STAGED_ROWS_PER_WARP;
     let tile_bytes = blocks * block_bytes;
     source.push_str(&format!(
-        "    __shared__ uint4 weight_tile[{}];\n\
-         \x20   float accumulator[{STAGED_ROWS_PER_WARP}];\n\
+        "    float accumulator[{STAGED_ROWS_PER_WARP}];\n\
          \x20   #pragma unroll\n\
          \x20   for (int row = 0; row < {STAGED_ROWS_PER_WARP}; row++) {{ accumulator[row] = 0.0f; }}\n\
-         \x20   uint4 prefetch[{loads_per_thread}];\n\
-         \x20   {{\n",
-        rows * segments
-    ));
-    push_tile_load(source, plan, &tiles, "0");
-    source.push_str(&format!(
-        "    }}\n\
          \x20   for (int tile = 0; tile < {tile_count}; tile++) {{\n\
          \x20       #pragma unroll\n\
          \x20       for (int load = 0; load < {loads_per_thread}; load++) {{\n\
