@@ -20366,7 +20366,7 @@ mod recurrence_fields {
     use super::head_repeats;
     use super::*;
 
-    const RECURRENCE_KEYS: [&str; 9] = [
+    const RECURRENCE_KEYS: [&str; 13] = [
         "ssm_conv_kernel",
         "ssm_state_size",
         "ssm_group_count",
@@ -20374,6 +20374,10 @@ mod recurrence_fields {
         "ssm_inner_size",
         "ssm_epsilon",
         "v_head_reordered",
+        "ssm_out_head_major",
+        "hadamard_block",
+        "hadamard_gdn_v_grouped",
+        "hadamard_latent_embedding",
         "expert_shared_feed_forward",
         "gated_attention",
     ];
