@@ -210,6 +210,63 @@ pub struct CudaF32Arena {
     uniform_host: BTreeMap<NodeId, Vec<u8>>,
     resident_sources: BTreeMap<NodeId, (usize, usize)>,
     allocations: u64,
+    launch_profile: LaunchProfile,
+}
+
+#[derive(Debug, Default)]
+struct LaunchProfile {
+    enabled: bool,
+    phase_nanos: [u64; LAUNCH_PHASES],
+    output_allocs: u64,
+    extra_allocs: u64,
+    uniform_uploads: u64,
+    function_lookups: u64,
+}
+
+const LAUNCH_PHASES: usize = 6;
+const LAUNCH_PHASE_NAMES: [&str; LAUNCH_PHASES] = [
+    "upload_uniform",
+    "extra_outputs",
+    "output_buffer",
+    "fault_buffer",
+    "launch_builder_args",
+    "launch_call",
+];
+
+fn report_launch_profile(profile: &LaunchProfile, kind_rows: &BTreeMap<&str, (u64, u64)>) {
+    let mut kinds: Vec<_> = kind_rows.iter().collect();
+    kinds.sort_by_key(|(_, (_, nanos))| std::cmp::Reverse(*nanos));
+    for (kind, (count, nanos)) in kinds.into_iter().take(8) {
+        eprintln!(
+            "cuda_host_timing: submit_kind={kind} launches={count} total_us={} per_launch_us={:.2}",
+            nanos / 1_000,
+            *nanos as f64 / 1_000.0 / *count as f64
+        );
+    }
+    for (name, nanos) in LAUNCH_PHASE_NAMES.iter().zip(profile.phase_nanos) {
+        eprintln!(
+            "cuda_host_timing: launch_phase={name} total_us={}",
+            nanos / 1_000
+        );
+    }
+    eprintln!(
+        "cuda_host_timing: launch_counts output_allocs={} extra_allocs={} uniform_uploads={} function_lookups={}",
+        profile.output_allocs,
+        profile.extra_allocs,
+        profile.uniform_uploads,
+        profile.function_lookups
+    );
+}
+
+impl LaunchProfile {
+    fn mark(&mut self, phase: usize, since: &mut Option<Instant>) {
+        if let Some(start) = since {
+            let now = Instant::now();
+            let nanos = now.duration_since(*start).as_nanos();
+            self.phase_nanos[phase] += u64::try_from(nanos).unwrap_or(u64::MAX);
+            *start = now;
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -765,6 +822,7 @@ impl CudaDriver {
             }
             self.stream.memcpy_htod(values, buffer)?;
             self.graph_uploads.fetch_add(1, Ordering::Relaxed);
+            arena.launch_profile.uniform_uploads += 1;
             arena.uniform_host.insert(node, values.to_vec());
             return Ok(());
         }
@@ -1052,15 +1110,18 @@ impl CudaDriver {
         if fault_count > 1 {
             return Err(CudaDriverError::BindingContract);
         }
+        let mut lap = arena.launch_profile.enabled.then(Instant::now);
         let looked_up;
         let function = match function {
             Some(function) => function,
             None => {
+                arena.launch_profile.function_lookups += 1;
                 looked_up = self.function_for(kernel)?;
                 &looked_up
             }
         };
         self.upload_uniform(arena, output_node, uniforms)?;
+        arena.launch_profile.mark(0, &mut lap);
         let mut extra_buffers = Vec::with_capacity(kernel.extra_outputs.len());
         for (node, length) in &kernel.extra_outputs {
             match self.take_extra_output(arena, *node, *length) {
@@ -1071,6 +1132,7 @@ impl CudaDriver {
                 }
             }
         }
+        arena.launch_profile.mark(1, &mut lap);
         let device_uniforms = arena
             .uniforms
             .get(&output_node)
@@ -1080,6 +1142,7 @@ impl CudaDriver {
             Some(CudaGraphBuffer::Bytes(_)) => return Err(CudaDriverError::BindingContract),
             None => {
                 arena.allocations += 1;
+                arena.launch_profile.output_allocs += 1;
                 self.stream.alloc_zeros::<f32>(output_len)?
             }
         };
@@ -1095,7 +1158,9 @@ impl CudaDriver {
             };
             device_output = replacement;
             arena.allocations += 1;
+            arena.launch_profile.output_allocs += 1;
         }
+        arena.launch_profile.mark(2, &mut lap);
         if input_nodes().any(|node| !arena.buffers.contains_key(&node)) {
             arena
                 .buffers
@@ -1117,6 +1182,7 @@ impl CudaDriver {
             .transpose()?;
         let fault_window =
             deferred_fault.map(|(array, offset, slots)| array.slice(offset..offset + slots));
+        arena.launch_profile.mark(3, &mut lap);
         let mut args = self.stream.launch_builder(function);
         for binding in &kernel.bindings[..output_index] {
             match binding {
@@ -1148,7 +1214,9 @@ impl CudaDriver {
         for (_, buffer) in &mut extra_buffers {
             args.arg(buffer);
         }
+        arena.launch_profile.mark(4, &mut lap);
         let launch_result = unsafe { args.launch(config) };
+        arena.launch_profile.mark(5, &mut lap);
         Self::restore_extra_outputs(arena, extra_buffers);
         if let Err(error) = launch_result {
             arena
@@ -1196,6 +1264,7 @@ impl CudaDriver {
             Some(CudaGraphBuffer::Bytes(_)) => Err(CudaDriverError::BindingContract),
             Some(CudaGraphBuffer::F32(_)) | None => {
                 arena.allocations += 1;
+                arena.launch_profile.extra_allocs += 1;
                 Ok(self.stream.alloc_zeros::<f32>(length)?)
             }
         }
@@ -2474,6 +2543,11 @@ impl CudaPlan {
         let event_origin = event_timing
             .then(|| self.driver.record_event(&self.driver.stream))
             .transpose()?;
+        self.arena.launch_profile = LaunchProfile {
+            enabled: host_timing,
+            ..LaunchProfile::default()
+        };
+        let mut kind_rows: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
         let dispatch_started = host_timing.then(std::time::Instant::now);
         for (position, (bound, (kernel, uniforms))) in self
             .resolved
@@ -2560,6 +2634,7 @@ impl CudaPlan {
                 if self.functions[position].is_none() && !timing {
                     self.functions[position] = Some(self.driver.function_for(kernel)?);
                 }
+                let launch_started = host_timing.then(Instant::now);
                 let launch = if timing {
                     self.driver.launch_f32_persistent_sized(
                         &mut self.arena,
@@ -2577,6 +2652,11 @@ impl CudaPlan {
                         self.functions[position].as_ref(),
                     )
                 };
+                if let Some(started) = launch_started {
+                    let row = kind_rows.entry(bound.kind.name()).or_default();
+                    row.0 += 1;
+                    row.1 += u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                }
                 launch.map_err(|error| match error {
                     typed @ CudaDriverError::GatherIndexOutOfRange { .. } => typed,
                     other => CudaDriverError::Execute {
@@ -2619,6 +2699,7 @@ impl CudaPlan {
                 started.elapsed().as_secs_f64() * 1_000.0,
                 self.resolved.len()
             );
+            report_launch_profile(&self.arena.launch_profile, &kind_rows);
         }
         self.append_new_rows()?;
         let submit_us = elapsed_micros(submit_started);
