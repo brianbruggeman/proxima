@@ -4149,6 +4149,15 @@ only the single-row decode kernel reads the half-width device cache",
         let mut step = 0usize;
         let mut carried_layers: Vec<(usize, NodeId)> = Vec::new();
         let mut carried_program = 0usize;
+        let kv_carry_eligible = serving_config.kv_cache_key_quant == GgmlType::F32
+            && layer_caches.iter().all(|state| match state {
+                LayerCacheState::Attention(cache) => cache.ring.is_none(),
+                _ => true,
+            });
+        let mut kv_carried: Vec<KvCarryLeaf> = Vec::new();
+        let mut kv_carried_layers: Vec<bool> = vec![false; layer_caches.len()];
+        let mut kv_carry_program = 0usize;
+        let mut kv_live = false;
         'decode: while step < max_tokens {
             settled_tokens.clear();
             'evaluate: {
@@ -4477,6 +4486,34 @@ only the single-row decode kernel reads the half-width device cache",
                         carried_layers = layers.iter().map(|(layer, _, output)| (*layer, *output)).collect();
                         carried_program = active_program.as_ptr() as usize;
                     }
+                    let carry_kv_this_step = kv_carry_eligible
+                        && runtime.carries_state_on_device()
+                        && new_count == 1
+                        && !speculative_step
+                        && self.ffn_routing != FfnRouting::Routed;
+                    if !kv_carried.is_empty()
+                        && (!carry_kv_this_step
+                            || kv_carry_program != active_program.as_ptr() as usize)
+                    {
+                        flush_carried_kv(runtime, &mut layer_caches, &kv_carried)?;
+                        kv_carried.clear();
+                        kv_carried_layers.fill(false);
+                        kv_carry_program = 0;
+                        kv_live = false;
+                    }
+                    if carry_kv_this_step && kv_carried.is_empty() {
+                        kv_carried = kv_carry_leaves(active_program, &cache_names, active_layer_roots);
+                        for leaf in &kv_carried {
+                            kv_carried_layers[leaf.layer] = true;
+                        }
+                        runtime.set_kv_carry(
+                            kv_carried.iter().map(|leaf| (leaf.input, leaf.output)).collect(),
+                            cached_len as u64,
+                        );
+                        kv_carry_program = active_program.as_ptr() as usize;
+                    } else if carry_kv_this_step {
+                        runtime.set_kv_cached_rows(cached_len as u64);
+                    }
                     let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
                         self.weights.owned.len()
                             + self.weights.packed.len()
@@ -4685,7 +4722,8 @@ did not hold every cached position)",
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     let device_resident_view: &[bool] = &device_resident_flags;
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
-                    let device_resident_view: &[bool] = &[];
+                    let device_resident_view: &[bool] =
+                        if kv_live { &kv_carried_layers } else { &[] };
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     let device_cache_codec = device_kv.as_ref().and_then(DeviceKv::cache_codec);
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
@@ -6292,13 +6330,26 @@ did not hold every cached position)",
                         .get(3)
                         .filter(|_| cache_checksum_diag)
                         .map_or((0, 0.0), layer_cache_checksum);
+                    let kv_on_device = carry_kv_this_step && runtime.kv_carry_accepted();
+                    if kv_live && !kv_on_device {
+                        return Err(InteropError::UnsupportedServingConfig(String::from(
+                            "device-carried attention kv: a step the host cache missed was not carried",
+                        )));
+                    }
+                    kv_live = kv_on_device;
+                    let kv_appended_view: &[bool] =
+                        if kv_on_device { &kv_carried_layers } else { &[] };
                     for (layer, roots_for_layer) in active_layer_roots.iter().enumerate() {
+                        let appended_on_device =
+                            kv_appended_view.get(layer).copied().unwrap_or(false);
                         match (roots_for_layer, &mut layer_caches[layer]) {
                             (
                                 LayerCacheRoots::Attention((even, odd, value)),
                                 LayerCacheState::Attention(cache),
                             ) => {
-                                if device_resident_view.get(layer).copied().unwrap_or(false) {
+                                if appended_on_device
+                                    || device_resident_view.get(layer).copied().unwrap_or(false)
+                                {
                                     continue;
                                 }
                                 let (even_data, _) = evaluated
@@ -6333,7 +6384,7 @@ did not hold every cached position)",
                                     target_os = "macos"
                                 )))]
                                 let dense_attention_is_placed = false;
-                                if dense_attention_is_placed {
+                                if dense_attention_is_placed || appended_on_device {
                                     continue;
                                 }
                                 let (first_data, _) = evaluated
@@ -7232,6 +7283,18 @@ did not hold every cached position)",
         };
         // a stop inside an accepted span leaves forwarded rows the caller never received
         flush_carried_state(runtime, &mut layer_caches, &carried_layers)?;
+        if !kv_carried.is_empty() {
+            let drained = flush_carried_kv(runtime, &mut layer_caches, &kv_carried)?;
+            if drained {
+                seal_attention_layers(
+                    &mut layer_caches,
+                    &layer_row_widths,
+                    block_tokens,
+                    seal_horizon_rows,
+                    summarizer,
+                );
+            }
+        }
         #[cfg(feature = "cuda")]
         debug!(
             carried_host_bytes = runtime.state_carry_host_bytes(),
@@ -8419,12 +8482,15 @@ pub(super) fn map_expert_sources_to_segment<'source>(
     Ok(mapped)
 }
 
-fn ssm_carry_layers(
-    program: &[Op],
-    cache_names: &[LayerCacheNames],
-    layer_roots: &[LayerCacheRoots],
-) -> Vec<(usize, NodeId, NodeId)> {
-    let inputs: BTreeMap<&str, NodeId> = program
+struct KvCarryLeaf {
+    input: NodeId,
+    output: NodeId,
+    layer: usize,
+    field: usize,
+}
+
+fn program_input_nodes(program: &[Op]) -> BTreeMap<&str, NodeId> {
+    program
         .iter()
         .enumerate()
         .filter_map(|(index, operation)| match operation {
@@ -8433,7 +8499,15 @@ fn ssm_carry_layers(
             } => Some((name.as_str(), NodeId(index as u32))),
             _ => None,
         })
-        .collect();
+        .collect()
+}
+
+fn ssm_carry_layers(
+    program: &[Op],
+    cache_names: &[LayerCacheNames],
+    layer_roots: &[LayerCacheRoots],
+) -> Vec<(usize, NodeId, NodeId)> {
+    let inputs = program_input_nodes(program);
     layer_roots
         .iter()
         .zip(cache_names)
@@ -8445,6 +8519,95 @@ fn ssm_carry_layers(
             _ => None,
         })
         .collect()
+}
+
+fn kv_leaves<'names>(
+    names: &'names LayerCacheNames,
+    roots: &LayerCacheRoots,
+) -> Vec<(&'names str, NodeId)> {
+    match (names, roots) {
+        (
+            LayerCacheNames::Attention { k_even, k_odd, v },
+            LayerCacheRoots::Attention((even, odd, value)),
+        ) => vec![
+            (k_even.as_str(), *even),
+            (k_odd.as_str(), *odd),
+            (v.as_str(), *value),
+        ],
+        (
+            LayerCacheNames::DenseAttention {
+                k_first,
+                k_second,
+                k_pass,
+                v,
+            },
+            LayerCacheRoots::DenseAttention((first, second, pass, value)),
+        ) => vec![
+            (k_first.as_str(), *first),
+            (k_second.as_str(), *second),
+            (k_pass.as_str(), *pass),
+            (v.as_str(), *value),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+fn kv_carry_leaves(
+    program: &[Op],
+    cache_names: &[LayerCacheNames],
+    layer_roots: &[LayerCacheRoots],
+) -> Vec<KvCarryLeaf> {
+    let inputs = program_input_nodes(program);
+    layer_roots
+        .iter()
+        .zip(cache_names)
+        .enumerate()
+        .flat_map(|(layer, (roots, names))| {
+            kv_leaves(names, roots)
+                .into_iter()
+                .enumerate()
+                .filter_map(|(field, (name, output))| {
+                    inputs.get(name).map(|input| KvCarryLeaf {
+                        input: *input,
+                        output,
+                        layer,
+                        field,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn write_kv_field(state: &mut LayerCacheState, field: usize, values: Vec<f32>) {
+    match (state, field) {
+        (LayerCacheState::Attention(cache), 0) => cache.k_even = values,
+        (LayerCacheState::Attention(cache), 1) => cache.k_odd = values,
+        (LayerCacheState::Attention(cache), 2) => cache.v = values,
+        (LayerCacheState::DenseAttention(cache), 0) => cache.k_first = values,
+        (LayerCacheState::DenseAttention(cache), 1) => cache.k_second = values,
+        (LayerCacheState::DenseAttention(cache), 2) => cache.k_pass = values,
+        (LayerCacheState::DenseAttention(cache), 3) => cache.v = values,
+        _ => {}
+    }
+}
+
+fn flush_carried_kv(
+    runtime: &mut BackendRuntime,
+    layer_caches: &mut [LayerCacheState],
+    carried: &[KvCarryLeaf],
+) -> Result<bool, InteropError> {
+    let drained = runtime.drain_kv_carry()?;
+    let any_drained = !drained.is_empty();
+    for (input, values) in drained {
+        let leaf = carried
+            .iter()
+            .find(|leaf| leaf.input == input)
+            .ok_or(InteropError::MissingEvaluatedNode { node: input })?;
+        write_kv_field(&mut layer_caches[leaf.layer], leaf.field, values);
+    }
+    runtime.set_kv_carry(Vec::new(), 0);
+    Ok(any_drained)
 }
 
 fn flush_carried_state(
