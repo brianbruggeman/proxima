@@ -3080,7 +3080,7 @@ fn time_packed_prefill(rows: u32, k: u32, tokens: u32, iterations: u32) -> f64 {
     let mut weight_blocks: Vec<u8> = (0..rows as usize * blocks_per_row * BLOCK_BYTES)
         .map(|_| (lcg.next_unit() * 255.0) as u8)
         .collect();
-    for block in weight_blocks.chunks_exact_mut(BLOCK_BYTES) {
+    for block in weight_blocks.as_chunks_mut::<BLOCK_BYTES>().0 {
         block[0] = 0x00;
         block[1] = 0x3C;
     }
@@ -3117,11 +3117,17 @@ fn time_packed_prefill(rows: u32, k: u32, tokens: u32, iterations: u32) -> f64 {
 
 #[test]
 fn prefill_matmul_timing_at_8b_gate_shape_reports_ms_per_call() {
-    let mut report = String::new();
-    for tokens in [5u32, 22, 66] {
-        let millis = time_packed_prefill(12288, 4096, tokens, 20);
-        assert!(millis > 0.0);
-        report.push_str(&format!("tokens={tokens} ms_per_call={millis:.3}; "));
-    }
-    panic!("TIMING {report}");
+    let per_call: Vec<f64> = [5u32, 22, 66]
+        .iter()
+        .map(|tokens| time_packed_prefill(12288, 4096, *tokens, 20))
+        .collect();
+    eprintln!("prefill_matmul_timing ms_per_call at 5, 22, 66 tokens: {per_call:?}");
+    assert!(
+        per_call.iter().all(|millis| *millis > 0.0),
+        "timed executes must take measurable time: {per_call:?}"
+    );
+    assert!(
+        per_call[2] < per_call[0] * 66.0,
+        "66 tokens must cost less than 66 single-row executes: {per_call:?}"
+    );
 }
