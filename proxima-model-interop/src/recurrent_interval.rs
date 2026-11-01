@@ -161,7 +161,7 @@ pub fn recurrent_interval_architecture_from_metadata(
 
     let v_head_reordered = match parsed.metadata_value(&format!("{architecture}.ssm.v_head_reordered")) {
         Some(MetadataValue::Bool(value)) => *value,
-        _ => architecture == "qwen35",
+        _ => family_profile(architecture)?.ssm_v_head_reordered,
     };
 
     let hadamard = prism_hadamard_from_metadata(parsed)?;

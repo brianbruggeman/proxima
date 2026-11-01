@@ -3,6 +3,7 @@ value_norm = false
 rope_layout = "split_half"
 schedule_source = "recurrent_interval"
 kv_cache_shape = "custom"
+ssm_v_head_reordered = true
 
 [ffn]
 post_attention_norm = false

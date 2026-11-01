@@ -480,6 +480,11 @@ pub struct FamilyProfile {
     /// gain from chunked submission; an explicit caller value always wins.
     #[serde(default = "default_command_buffer_chunks")]
     pub command_buffer_chunks: u32,
+    /// The V-head order a recurrent checkpoint uses when its header omits
+    /// `{family}.ssm.v_head_reordered`: `true` for a family whose converter tiles
+    /// V heads the way llama.cpp's does. An explicit header value always wins.
+    #[serde(default)]
+    pub ssm_v_head_reordered: bool,
 }
 
 const fn default_command_buffer_chunks() -> u32 {
