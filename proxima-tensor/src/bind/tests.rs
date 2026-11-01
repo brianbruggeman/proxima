@@ -934,7 +934,7 @@ const QWEN35_PARTIAL_ROTARY_CACHED_EXTENT: usize = 40;
 /// `Select` masks with `-inf` (`spec.rs:4979-4997`).
 #[cfg(feature = "cached-attention-streaming")]
 #[allow(clippy::too_many_lines, clippy::type_complexity)]
-fn qwen35_partial_rotary_attention_fixture() -> (
+pub(super) fn qwen35_partial_rotary_attention_fixture() -> (
     Vec<Op>,
     NodeId,
     crate::spec::DenseAttentionTaps,

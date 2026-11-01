@@ -159,33 +159,73 @@ fn refit_declines_when_an_unfused_op_reads_the_moving_symbol() {
     );
 }
 
-#[test]
-fn refit_declines_a_partial_rotary_attention_op() {
-    let fixture = single_range_fixture(2);
-    let (low_shapes, mut low_bound) = bound_at(&fixture, &[1, 33], true);
-    let (high_shapes, _) = bound_at(&fixture, &[1, 65], true);
-    let attention_positions: Vec<usize> = low_bound
-        .iter()
-        .enumerate()
-        .filter(|(_, bound)| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
-        .map(|(position, _)| position)
-        .collect();
-    assert_eq!(
-        attention_positions.len(),
-        fixture.layers,
-        "one fused attention op per layer"
+fn partial_rotary_bound_at(cached_rows: u64) -> (Shapes, Vec<BoundOp>, Vec<Op>, Vec<NodeId>) {
+    let (program, residual1, taps, _, _) = super::tests::qwen35_partial_rotary_attention_fixture();
+    let outputs = alloc::vec![
+        residual1,
+        taps.attended,
+        taps.rotated_k_new_first,
+        taps.rotated_k_new_second,
+        taps.k_pass,
+        taps.v_new,
+    ];
+    let shapes = crate::shape::infer(&program, &[1, cached_rows]).expect("fixture infers");
+    let bound = bind_with_fusion(
+        &program,
+        &shapes,
+        &outputs,
+        true,
+        NumericPolicy::llama_relaxed(),
+    )
+    .expect("fixture binds");
+    (shapes, prune_dead(bound, &outputs), program, outputs)
+}
+
+#[proxima::test]
+#[case::grow_by_one(40, 41)]
+#[case::cross_bucket(40, 64)]
+#[case::shrink(64, 9)]
+#[case::from_one_row(1, 40)]
+async fn refit_matches_a_fresh_bind_for_a_partial_rotary_attention_op(
+    #[case] low: u64,
+    #[case] high: u64,
+) {
+    let (low_shapes, low_bound, program, _) = partial_rotary_bound_at(low);
+    let (high_shapes, high_bound, _, _) = partial_rotary_bound_at(high);
+    assert!(
+        low_bound.iter().any(|bound| matches!(
+            &bound.kind,
+            BoundOpKind::CachedAttention { rotary_dim, head_dim, .. } if rotary_dim != head_dim
+        )),
+        "the fixture must fuse a partial-rotary cached-attention op"
     );
-    for position in attention_positions {
-        if let BoundOpKind::CachedAttention { rotary_dim, .. } = &mut low_bound[position].kind {
-            *rotary_dim /= 2;
+
+    let patches = refit_cached_attention_rows(&low_bound, &program, &low_shapes, &high_shapes)
+        .expect("a pass-plane row move is local to the fused attention op");
+
+    let mut refit = low_bound.clone();
+    for (position, patched) in patches {
+        refit[position] = patched;
+    }
+    assert_eq!(refit, high_bound, "refit ops differ from a fresh bind");
+}
+
+#[proxima::test]
+async fn refit_declines_a_partial_rotary_op_whose_pass_plane_rows_disagree() {
+    let (low_shapes, low_bound, program, _) = partial_rotary_bound_at(40);
+    let (high_shapes, _, _, _) = partial_rotary_bound_at(64);
+    let mut broken = low_bound.clone();
+    for bound in &mut broken {
+        if let BoundOpKind::CachedAttention { operands, .. } = &mut bound.kind {
+            let last = operands.len() - 1;
+            operands[last].0 = operands[last - 1].0;
         }
     }
 
-    let patches =
-        refit_cached_attention_rows(&low_bound, &fixture.program, &low_shapes, &high_shapes);
+    let patches = refit_cached_attention_rows(&broken, &program, &low_shapes, &high_shapes);
 
     assert_eq!(
         patches, None,
-        "a pass plane carries operands the refit does not re-check"
+        "a new-key pass plane that reads the cached rows cannot be refit"
     );
 }
