@@ -74,10 +74,21 @@ on the same box (4,755-5,220 rps, K4 row a). Not traced.
 **O(1):** target — per-frame work independent of open-connection count; the
 counting test asserts it.
 
+**Wake-count proof (counting test + control):**
+`frame_stack::tests::a_frame_for_one_connection_wakes_no_other_idle_connection`
+(8 established connections, each parked in `poll_read` with its own counting
+waker; one `ping` written to connection 3; the pump polled once).
+- control on the incumbent (c43fca60, same test against the old API): wakes per
+  connection `[1, 1, 1, 2, 1, 1, 1, 1]`, assertion `left: 7 right: 0` fails —
+  every bystander woken by one frame.
+- after (feat/frame-pump): bystander wakes 0, connection 3 woken exactly once.
+Status of the mechanism: **measured** (the count follows the toggle).
+
 ### Changelog
 | Date | Change | Δ vs prior | CoV / runs | Host loadout |
 |---|---|---|---|---|
 | 2026-11-01 | baseline: incumbent wake-all pump through `proxima serve`, c=1/8/64 | baseline | 1 run per arm (CoV not yet computed) | loadavg 4-5; my own builds idle at the time |
+| 2026-11-01 | single pump future + per-ConnId wakers (feat/frame-pump 472b3d01..94a0afe9) | bystander wakes per frame 7 → 0 at K=8; e2e CPU/request pending | counting test, deterministic | n/a |
 
 ## Per-piece decomposition (criterion, one bench file per piece)
 
@@ -92,6 +103,39 @@ ACK, `[402]` response, plus 1514 B full frame).
 | C3 frame channel | `tools/proxima-vm/benches/bench_frame_pipe.rs` | one frame send + recv across threads (plain and waking) | `crossbeam_queue::ArrayQueue` + `AtomicWaker`; `std::sync::mpsc::sync_channel` | pending |
 | C4 virtio-net queue | `tools/proxima-vm/benches/bench_virtio_net_queue.rs` | guest TX chain drain → frame; frame → guest RX chain fill | no comparable micro surface (the incumbent is the host kernel's virtio backend); floor arm: `memcpy` of the same bytes | pending |
 | C1 frame-stack pump | `proxima-net/benches/bench_frame_stack_pump.rs` | one frame to one of K open connections, K = 1 / 8 / 64 | incumbent wake-all at 54588cc0 (`--save-baseline wake-all`) | slice 1 in flight |
+
+## C2 — TcpStack byte path
+
+| Build | Tests | Clippy | Micro-bench | Compare-bench | E2E | Opt | SIMD/SM/no-Box | O(1) | Cfg/API | Home-turf | Δ | Notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| pending | pending | pending | `bench_tcp_stack.rs` (8f6df058) | baseline only | pending | pending | pending | **fails: per-byte BTreeMap** | n/a | kernel loopback arm present | — | principles 1, 11, hot-path zero-alloc |
+
+**Incumbent design point:** host-kernel TCP (loopback, `TCP_NODELAY`, one
+keep-alive request/response per iteration across two threads) — built for
+bulk byte streams; its cost is per-call (syscalls, wakeups), nearly flat in
+payload size.
+
+**Baseline (first run, loadavg 15.31, no same-code control yet):**
+
+| arm | 54 B | 402 B | 1514 B | design-favors |
+|---|---|---|---|---|
+| `on_inbound_to` + `read` | 1.468 us | 19.63 us | 89.77 us | neutral |
+| `write` + inbound response + `read` | 1.551 us | 20.06 us | 90.69 us | neutral |
+| kernel loopback round trip (two threads, 2 syscalls each way) | 13.01 us | 13.07 us | 14.55 us | incumbent |
+
+proxima's cost grows ~49 ns per payload byte (54 → 402 B adds 18.2 us for 348
+bytes); the kernel's grows ~1.1 ns per byte (54 → 1514 B).
+
+**Mechanism (read from code, status plausible until the fixed bench lands):**
+`proxima-net/src/tcp_stack.rs:538-541` inserts every payload byte into
+`pending: BTreeMap<u32, u8>`; `:554-567` removes each byte and `push_back`s it
+into `recv: VecDeque<u8>`; `read` (`:322-328`) pops one byte per iteration.
+Send side: `send_buf` is never trimmed (`:589-590` comment, `:599`
+`to_vec` per segment), so a keep-alive connection retains every byte it ever
+sent, and `sent: u32` indexes it.
+
+**Baseline saved:** criterion `--save-baseline per-byte`, 3 runs, worktree
+`proxima-tcp-stack` (branch `perf/tcp-stack-bytes` from 5fcf47e2).
 
 ## Related defects found while measuring (not C1)
 
