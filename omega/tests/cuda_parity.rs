@@ -24,7 +24,7 @@ use omega::Codec;
 use proxima_gguf::quant::block_layout;
 use proxima_primitives::block_layout::BlockLayout;
 use omega::backend::{
-    BackendError, Engine, GpuDriver, cuda_kernel_identities, execute_plan_named, plan_named,
+    BackendError, Engine, GpuDriver, Plan, cuda_kernel_identities, execute_plan_named, plan_named,
 };
 use proxima_tensor::NumericPolicy;
 use proxima_tensor::infer;
@@ -3318,4 +3318,178 @@ fn packed_q1_0_matmul_matches_at_the_27b_contraction_widths_on_cuda() {
             1e-4,
         );
     }
+}
+
+const APPEND_WIDTH: usize = 1024;
+const APPEND_CACHE: NodeId = NodeId(0);
+const APPENDED_ROWS: NodeId = NodeId(2);
+const APPEND_COLUMN_SUM: NodeId = NodeId(3);
+
+fn appended_rows_program() -> Vec<Op> {
+    let mut program = Vec::new();
+    let cache = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: vec![Extent::Symbolic(0), Extent::Static(APPEND_WIDTH as u32)],
+            name: Some("cache".into()),
+        },
+    );
+    let row = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: vec![Extent::Static(1), Extent::Static(APPEND_WIDTH as u32)],
+            name: Some("row".into()),
+        },
+    );
+    let both = IndexMap::Affine(map::projection(2, &[0, 1]));
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            operands: vec![(row, both.clone()), (row, both.clone())],
+            name: Some("appended".into()),
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: cache,
+            in_map: both,
+            out_map: IndexMap::Affine(map::projection(2, &[1])),
+            keep: Keep::Reduce,
+            name: Some("column_sum".into()),
+        }),
+    );
+    program
+}
+
+fn appended_row_values(step: usize) -> Vec<f32> {
+    (0..APPEND_WIDTH)
+        .map(|column| ((step * APPEND_WIDTH + column + 13) % 97) as f32 * 0.25)
+        .collect()
+}
+
+fn padded_cache(valid: &[f32], extent: usize) -> Vec<f32> {
+    let mut padded = valid.to_vec();
+    padded.resize(extent * APPEND_WIDTH, 0.0);
+    padded
+}
+
+fn appended_rows_plan(
+    program: &[Op],
+    extent: usize,
+    cache: &[f32],
+    row: &[f32],
+) -> Plan {
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("cache", QuantizedBlock::Float32(cache)),
+        ("row", QuantizedBlock::Float32(row)),
+    ];
+    plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        program,
+        &[extent as u64],
+        &named,
+        &[APPENDED_ROWS, APPEND_COLUMN_SUM],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the appended-rows program on cuda")
+}
+
+#[proxima::test]
+#[case::within_the_planned_extent(16, 2, 5)]
+#[case::crossing_an_extent_growth(4, 2, 7)]
+#[case::from_an_empty_cache(4, 0, 6)]
+async fn appended_rows_stay_on_device_and_drain_equal_to_the_host_append(
+    #[case] initial_extent: usize,
+    #[case] initial_rows: usize,
+    #[case] steps: usize,
+) {
+    let program = appended_rows_program();
+    let seed: Vec<f32> = (0..initial_rows * APPEND_WIDTH)
+        .map(|index| (index % 97) as f32 * 0.25)
+        .collect();
+    let first_row = appended_row_values(0);
+    let policy = NumericPolicy::default();
+
+    let mut host_plan = appended_rows_plan(&program, initial_extent, &padded_cache(&seed, initial_extent), &first_row);
+    let mut carry_plan = appended_rows_plan(&program, initial_extent, &padded_cache(&seed, initial_extent), &first_row);
+    assert!(
+        omega::backend::carry_cuda_rows(&mut carry_plan, &[(APPEND_CACHE, APPENDED_ROWS)], initial_rows as u64),
+        "the cache and row outputs share a row width"
+    );
+
+    let mut host_cache = seed.clone();
+    let mut extent = initial_extent;
+    let first_upload = (initial_extent * APPEND_WIDTH * std::mem::size_of::<f32>()) as u64;
+    for step in 0..steps {
+        let row = appended_row_values(step);
+        if host_cache.len() / APPEND_WIDTH + 1 > extent {
+            extent *= 2;
+            for plan in [&mut host_plan, &mut carry_plan] {
+                let refitted = omega::backend::refit_cuda_symbols(plan, &[extent as u64], policy)
+                    .expect("refit to the grown cache extent succeeds");
+                assert!(refitted, "step {step}: the plan refits in place");
+            }
+        }
+        let host_cache_block = padded_cache(&host_cache, extent);
+        let host_named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+            ("cache", QuantizedBlock::Float32(&host_cache_block)),
+            ("row", QuantizedBlock::Float32(&row)),
+        ];
+        let host_step = execute_plan_named(&mut host_plan, &host_named)
+            .expect("host round trip step executes");
+        let stale: &[f32] = &[];
+        let carry_named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+            ("cache", QuantizedBlock::Float32(if step == 0 { &host_cache_block } else { stale })),
+            ("row", QuantizedBlock::Float32(&row)),
+        ];
+        let carry_step = execute_plan_named(&mut carry_plan, &carry_named)
+            .expect("carried step executes");
+
+        assert_eq!(
+            carry_step.get(APPEND_COLUMN_SUM).expect("carried step returns the column sum").0,
+            host_step.get(APPEND_COLUMN_SUM).expect("host step returns the column sum").0,
+            "step {step}: the reader sees the same cache rows on both paths"
+        );
+        assert!(carry_step.get(APPENDED_ROWS).is_none(), "step {step}: appended rows are not read back");
+        host_cache.extend_from_slice(host_step.get(APPENDED_ROWS).expect("host step returns the new row").0);
+        assert_eq!(
+            omega::backend::cuda_carried_host_bytes(&carry_plan),
+            Some(first_upload),
+            "step {step}: nothing but the first upload crosses the host"
+        );
+    }
+
+    let drained = omega::backend::drain_cuda_appended_rows(&mut carry_plan)
+        .expect("drain reads the valid rows from the device");
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].0, APPEND_CACHE, "drained rows are keyed by the cache input");
+    assert_eq!(drained[0].1, host_cache, "drained cache equals the host append");
+    let drained_bytes = (host_cache.len() * std::mem::size_of::<f32>()) as u64;
+    assert_eq!(
+        omega::backend::cuda_carried_host_bytes(&carry_plan),
+        Some(first_upload + drained_bytes),
+        "carried bytes are the first upload plus one drain"
+    );
+}
+
+#[test]
+fn carry_rows_rejects_a_pair_whose_row_widths_differ() {
+    let program = appended_rows_program();
+    let cache = padded_cache(&[], 4);
+    let row = appended_row_values(0);
+    let mut plan = appended_rows_plan(&program, 4, &cache, &row);
+
+    let carried = omega::backend::carry_cuda_rows(&mut plan, &[(APPEND_CACHE, APPEND_COLUMN_SUM)], 0);
+
+    assert!(!carried, "the column sum has row width 1, the cache row width {APPEND_WIDTH}");
+    assert_eq!(omega::backend::cuda_carried_host_bytes(&plan), Some(0));
 }
