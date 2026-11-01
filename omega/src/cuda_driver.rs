@@ -169,6 +169,8 @@ pub struct CudaDriver {
     packed_upload_bytes: Arc<AtomicU64>,
     graph_uploads: Arc<AtomicU64>,
     graph_launches: Arc<AtomicU64>,
+    // carried recurrent state whose plan was evicted: keyed by state input node, valued by its output node and device buffer, so the replacement plan adopts it without a host round trip.
+    parked_state: Arc<Mutex<BTreeMap<NodeId, (NodeId, CudaGraphBuffer)>>>,
 }
 
 /// Device identity and successful graph upload/launch submissions from one CUDA driver.
@@ -236,6 +238,17 @@ pub struct CudaPlan {
     emit_calls: u64,
     emit_reused: u64,
     pack_calls: u64,
+    carry: Box<StateCarry>,
+}
+
+/// Recurrent state that stays on the device between calls: `pairs` maps a state input node to the
+/// output node that produces its next value, `live` holds the inputs whose arena buffer is already
+/// current, and `host_bytes` counts every carried state byte that crossed PCIe in either direction.
+#[derive(Debug, Default)]
+struct StateCarry {
+    pairs: BTreeMap<NodeId, NodeId>,
+    live: BTreeSet<NodeId>,
+    host_bytes: u64,
 }
 
 /// Numeric and activation policy for one plan, plus the runtime config when the
@@ -292,6 +305,7 @@ impl CudaDriver {
             packed_upload_bytes: Arc::new(AtomicU64::new(0)),
             graph_uploads: Arc::new(AtomicU64::new(0)),
             graph_launches: Arc::new(AtomicU64::new(0)),
+            parked_state: Arc::default(),
         })
     }
 
@@ -657,6 +671,7 @@ impl CudaDriver {
             emit_calls: 0,
             emit_reused: 0,
             pack_calls: 0,
+            carry: Box::default(),
         };
         if config.is_some() {
             plan.validate_resources(&blocks, None)?;
@@ -1984,6 +1999,97 @@ impl CudaPlan {
         self.resident_nodes = marked.into_boxed_slice();
     }
 
+    /// Keeps each `(input, output)` pair's state on the device: after a call the output buffer
+    /// becomes the next call's input buffer and is neither read back nor re-uploaded. Returns
+    /// `false` (carrying nothing) when a resource-constrained plan or a pair whose input and
+    /// output differ in element count cannot swap buffers. Pairs equal to the current set keep
+    /// their live device state; a different set requires [`Self::drain_carried`] first.
+    pub fn carry_state(&mut self, pairs: &[(NodeId, NodeId)]) -> bool {
+        let wanted: BTreeMap<NodeId, NodeId> = pairs.iter().copied().collect();
+        if wanted == self.carry.pairs {
+            return true;
+        }
+        let swappable = self.constraints.is_none()
+            && pairs.iter().all(|(input, output)| {
+                self.outputs.contains(output)
+                    && self.shapes.of(*input).iter().product::<u64>()
+                        == self.shapes.of(*output).iter().product::<u64>()
+            });
+        if !swappable || !self.carry.live.is_empty() {
+            return false;
+        }
+        self.carry.pairs = wanted;
+        self.adopt_parked();
+        true
+    }
+
+    fn adopt_parked(&mut self) {
+        let mut parked = self.driver.parked_state.lock();
+        for input in self.carry.pairs.keys() {
+            if let Some((_, buffer)) = parked.remove(input) {
+                self.arena.buffers.insert(*input, buffer);
+                self.arena.resident_sources.remove(input);
+                self.carry.live.insert(*input);
+            }
+        }
+    }
+
+    /// Hands live carried state to the driver so the plan that replaces this one adopts it on
+    /// the device instead of re-uploading a stale host copy.
+    pub fn park_carried(&mut self) {
+        let live = std::mem::take(&mut self.carry.live);
+        let mut parked = self.driver.parked_state.lock();
+        for input in live {
+            let (Some(output), Some(buffer)) =
+                (self.carry.pairs.get(&input).copied(), self.arena.buffers.remove(&input))
+            else {
+                continue;
+            };
+            parked.insert(input, (output, buffer));
+        }
+    }
+
+    /// Reads every live carried state back to the host, keyed by the output node that produces
+    /// it, and marks the device copies stale so the next call uploads its host inputs again.
+    pub fn drain_carried(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, CudaDriverError> {
+        self.park_carried();
+        let parked = std::mem::take(&mut *self.driver.parked_state.lock());
+        let mut drained = Vec::with_capacity(parked.len());
+        for (_, (output, buffer)) in parked {
+            let CudaGraphBuffer::F32(slice) = buffer else {
+                return Err(CudaDriverError::BindingContract);
+            };
+            let values = self.driver.stream.clone_dtoh(&slice)?;
+            self.carry.host_bytes += (values.len() * std::mem::size_of::<f32>()) as u64;
+            drained.push((output, values));
+        }
+        Ok(drained)
+    }
+
+    /// Bytes of carried recurrent state that crossed PCIe in either direction so far.
+    #[must_use]
+    pub fn carried_host_bytes(&self) -> u64 {
+        self.carry.host_bytes
+    }
+
+    fn swap_carried_buffers(&mut self) {
+        for (input, output) in &self.carry.pairs {
+            if !(self.arena.buffers.contains_key(output) && self.arena.buffers.contains_key(input)) {
+                continue;
+            }
+            let (Some(next), Some(previous)) = (
+                self.arena.buffers.remove(output),
+                self.arena.buffers.remove(input),
+            ) else {
+                continue;
+            };
+            self.arena.buffers.insert(*input, next);
+            self.arena.buffers.insert(*output, previous);
+            self.arena.resident_sources.remove(input);
+            self.carry.live.insert(*input);
+        }
+    }
+
     /// Executes the planned graph with name-resolved inputs and returns the
     /// requested outputs. Packed bytes stay on device in the persistent arena.
     pub fn execute_named(
@@ -2024,6 +2130,9 @@ impl CudaPlan {
             let source = (block_address(block), block_length(block));
             let resident = self.resident_nodes.binary_search(&node).is_ok()
                 || resident_names.is_some_and(|names| names.contains(name));
+            if self.carry.live.contains(&node) {
+                continue;
+            }
             if resident && self.arena.resident_sources.get(&node) == Some(&source) {
                 resident_hits += 1;
                 continue;
@@ -2077,6 +2186,9 @@ impl CudaPlan {
                 }
             }
             upload_call_us += elapsed_micros(upload_call_started);
+            if self.carry.pairs.contains_key(&node) {
+                self.carry.host_bytes += block_length(block) as u64;
+            }
             if resident {
                 self.arena.resident_sources.insert(node, source);
                 if let Some(buffer) = self.arena.buffers.get(&node).cloned() {
@@ -2343,11 +2455,15 @@ impl CudaPlan {
                 );
             }
         }
+        self.swap_carried_buffers();
         let readback_phase_started = Instant::now();
         let host_readback_started = host_timing.then(std::time::Instant::now);
         let mut results = Vec::with_capacity(self.outputs.len());
         let readback_started = timing.then(std::time::Instant::now);
         for node in &self.outputs {
+            if self.carry.pairs.iter().any(|(input, output)| output == node && self.carry.live.contains(input)) {
+                continue;
+            }
             if trace_outputs {
                 let length = self.arena.buffers.get(node).map(|buffer| match buffer {
                     CudaGraphBuffer::F32(values) => values.len(),
