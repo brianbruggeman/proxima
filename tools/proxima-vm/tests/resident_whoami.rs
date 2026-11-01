@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use futures::executor::block_on;
+use futures::future::{Either, select};
 use futures::io::{AsyncReadExt, AsyncWriteExt};
 use http::{Request, Response};
 use proxima_net::frame_stack::{Driver, FrameUpstream};
@@ -182,6 +183,13 @@ async fn fetch(upstream: &Upstream, request: &[u8], answer: &mut Answer) -> io::
     connection.close().await
 }
 
+async fn fetch_pumped(upstream: &Upstream, request: &[u8], answer: &mut Answer) -> io::Result<()> {
+    match select(pin!(fetch(upstream, request, answer)), pin!(upstream.pump())).await {
+        Either::Left((outcome, _)) => outcome,
+        Either::Right((failure, _)) => Err(io::Error::other(format!("the frame pump ended before the fetch finished: {failure:?}"))),
+    }
+}
+
 #[test]
 fn a_resident_whoami_guest_answers_an_http_get_from_the_host() {
     global::install(EnvFilter::parse("info"));
@@ -199,7 +207,7 @@ fn a_resident_whoami_guest_answers_an_http_get_from_the_host() {
     let upstream = dial_tapped(host, seen);
 
     let mut answer = Answer { bytes: Vec::new(), first_200: None };
-    let fetched = drive(fetch(&upstream, &request_bytes(), &mut answer), started + DEADLINE);
+    let fetched = drive(fetch_pumped(&upstream, &request_bytes(), &mut answer), started + DEADLINE);
     let rss_after = resident_set_kib();
     let load = fs::read_to_string("/proc/loadavg").expect("loadavg is readable");
     let was_running = resident.is_running();

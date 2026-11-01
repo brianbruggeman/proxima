@@ -5,6 +5,7 @@
 //! [`H1ClientUpstream`], so connection reuse is the client's lock-free idle
 //! queue and nothing here frames a byte.
 
+use core::pin::pin;
 use std::io;
 use std::net::SocketAddrV4;
 use std::path::Path;
@@ -12,6 +13,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use bytes::Bytes;
+use futures::channel::oneshot;
+use futures::future::{Either, select};
 use futures::io::AsyncWriteExt;
 use proxima_http::http1::H1ClientUpstream;
 use proxima_net::frame_stack::FrameUpstream;
@@ -28,6 +31,7 @@ use super::vm::{GuestSpec, LinuxRoot, VmSpec, read_guest_file};
 use crate::error::ProximaError;
 use crate::pipe::{PipeHandle, into_handle};
 use crate::request::{Request, Response};
+use crate::runtime::{CoreId, installed_runtime};
 
 const GUEST_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 2, 15);
 const GUEST_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
@@ -45,14 +49,16 @@ pub fn guests_booted() -> u64 {
     GUESTS_BOOTED.load(Ordering::Relaxed)
 }
 
-type GuestDial =FrameUpstream<FrameSource, RingingTx, ZeroMint>;
+type GuestDial = FrameUpstream<FrameSource, RingingTx, ZeroMint>;
 
-/// A guest kept up for the life of the upstream, and the HTTP client that
-/// talks to it. The guest is stopped by `ResidentLinux`'s own drop, so it
-/// outlives no request and no handle: `client` is declared first and drops
-/// first, releasing its end of the link before the vCPU thread is joined.
+/// A guest kept up for the life of the upstream, the HTTP client that talks
+/// to it, and the stop half of the task pumping the guest's frames. The guest
+/// is stopped by `ResidentLinux`'s own drop, so it outlives no request and no
+/// handle: `client` drops first, then `pump_stop` ends the pump task, and the
+/// vCPU thread is joined last.
 pub struct ResidentVmUpstream {
     client: H1ClientUpstream<GuestDial>,
+    _pump_stop: oneshot::Sender<()>,
     guest: ResidentLinux,
 }
 
@@ -144,6 +150,34 @@ async fn connect_when_listening(dial: &GuestDial) -> io::Result<()> {
     dial_guest_when_listening(dial).await?.close().await
 }
 
+async fn pump_until_stopped(label: String, dial: GuestDial, mut stop: oneshot::Receiver<()>) {
+    let failure = {
+        let pump = pin!(dial.pump());
+        match select(pump, &mut stop).await {
+            Either::Left((failure, _)) => failure,
+            Either::Right(_) => return,
+        }
+    };
+    if matches!(stop.try_recv(), Ok(None)) {
+        proxima_telemetry::error!(
+            label = %label,
+            failure = ?failure,
+            "resident guest frame pump ended while the upstream was live; its connections are dead"
+        );
+    }
+}
+
+fn spawn_pump(label: &str, dial: GuestDial) -> Result<oneshot::Sender<()>, ProximaError> {
+    let runtime = installed_runtime()
+        .ok_or_else(|| ProximaError::Config(format!("vm `{label}`: a resident guest needs an installed runtime to pump its frames")))?
+        .runtime;
+    let (stop_sender, stop_receiver) = oneshot::channel();
+    runtime
+        .spawn_on_core(CoreId(0), Box::pin(pump_until_stopped(label.to_owned(), dial, stop_receiver)))
+        .map_err(|error| upstream_error(label, "spawn the frame pump", format_args!("{error:?}")))?;
+    Ok(stop_sender)
+}
+
 async fn await_listening(label: &str, dial: &GuestDial, limit: Duration) -> Result<(), ProximaError> {
     match proxima_core::time::timeout(limit, connect_when_listening(dial)).await {
         Ok(Ok(())) => Ok(()),
@@ -162,7 +196,8 @@ pub(super) async fn build_resident(label: &str, spec: &VmSpec) -> Result<PipeHan
         ResidentLinux::start(inputs, link).map_err(|error| upstream_error(label, "start the resident guest", error))?;
     GUESTS_BOOTED.fetch_add(1, Ordering::Relaxed);
     let dial = dial_guest(host, SocketAddrV4::new(GUEST_IP, spec.guest_port));
+    let pump_stop = spawn_pump(label, dial.clone())?;
     await_listening(label, &dial, Duration::from_millis(spec.connect_timeout_millis)).await?;
     let client = H1ClientUpstream::new(dial, GUEST_IP.to_string(), label);
-    Ok(into_handle(ResidentVmUpstream { client, guest }))
+    Ok(into_handle(ResidentVmUpstream { client, _pump_stop: pump_stop, guest }))
 }

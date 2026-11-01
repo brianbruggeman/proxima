@@ -101,7 +101,7 @@ mod tests {
     use std::thread;
 
     use futures::executor::block_on;
-    use futures::future::join;
+    use futures::future::{Either, join, select};
     use futures::io::{AsyncReadExt, AsyncWriteExt};
     use proxima_net::frame_stack::FrameListener;
     use proxima_primitives::stream::{StreamListenerExt, StreamUpstreamExt};
@@ -174,6 +174,13 @@ mod tests {
         response
     }
 
+    fn drive<Work: Future, Pumps: Future>(work: Work, pumps: Pumps) -> Work::Output {
+        match block_on(select(pin!(work), pin!(pumps))) {
+            Either::Left((output, _)) => output,
+            Either::Right(_) => panic!("a pump ended before the work finished"),
+        }
+    }
+
     #[test]
     fn host_http1_request_reaches_the_guest_listener_and_the_response_returns_byte_equal() {
         let mut flag = 0_u8;
@@ -183,8 +190,8 @@ mod tests {
         let upstream = dial_guest(link, GUEST_HTTP);
         let (request, response) = (request_bytes(), response_bytes());
 
-        let (request_seen, response_seen) =
-            block_on(join(serve(&listener, &response), call(&upstream, &request)));
+        let work = join(serve(&listener, &response), call(&upstream, &request));
+        let (request_seen, response_seen) = drive(work, join(listener.pump(), upstream.pump()));
         doorbell.retire();
 
         assert_eq!(request_seen, request);
@@ -200,10 +207,14 @@ mod tests {
         let listener = guest_listener(guest_pipes);
         let upstream = dial_guest(link, SocketAddrV4::new(GUEST_IP, 9999));
         let mut context = Context::from_waker(Waker::noop());
+        let mut listener_pump = pin!(listener.pump());
+        let mut upstream_pump = pin!(upstream.pump());
         let mut accept = pin!(listener.accept());
         let mut connect = pin!(upstream.connect());
 
         let outcome = (0..POLL_BUDGET).find_map(|_| {
+            assert!(listener_pump.as_mut().poll(&mut context).is_pending(), "the listener pump never ends");
+            assert!(upstream_pump.as_mut().poll(&mut context).is_pending(), "the upstream pump never ends");
             assert!(accept.as_mut().poll(&mut context).is_pending(), "nothing listens on the dialed port");
             match connect.as_mut().poll(&mut context) {
                 Poll::Ready(result) => Some(result),
@@ -248,10 +259,14 @@ mod tests {
         let listener = FrameListener::new(Driver::new((counted, guest_egress, mint), GUEST_MAC, GUEST_HTTP, 0x9000), GUEST_HTTP);
         let upstream = dial_guest(link, SocketAddrV4::new(GUEST_IP, 9999));
         let mut context = Context::from_waker(Waker::noop());
+        let mut listener_pump = pin!(listener.pump());
+        let mut upstream_pump = pin!(upstream.pump());
         let mut accept = pin!(listener.accept());
         let mut dial = pin!(dial_guest_when_listening(&upstream));
 
         (0..POLLS).for_each(|_| {
+            assert!(listener_pump.as_mut().poll(&mut context).is_pending());
+            assert!(upstream_pump.as_mut().poll(&mut context).is_pending());
             assert!(accept.as_mut().poll(&mut context).is_pending());
             assert!(dial.as_mut().poll(&mut context).is_pending(), "a refusal is retried, never surfaced");
         });

@@ -46,7 +46,7 @@ use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
-use std::time::Instant as StdInstant;
+use proxima_core::time::{self, Instant as ClockInstant};
 
 const ETH: usize = 14;
 const IP: usize = 20;
@@ -61,12 +61,12 @@ struct State {
     // + connect). One fd registration, many waiters — see the module docs.
     read_wakers: Vec<Waker>,
     stack: TcpStack,
-    start: StdInstant,
+    start: ClockInstant,
     our_mac: [u8; 6],
     our_ip: [u8; 4],
     our_port: u16,
     arp: HashMap<[u8; 4], [u8; 6]>,
-    arp_sent: HashMap<[u8; 4], StdInstant>,
+    arp_sent: HashMap<[u8; 4], ClockInstant>,
 }
 
 struct Shared {
@@ -153,7 +153,7 @@ impl XdpStreamListener {
             readiness,
             read_wakers: Vec::new(),
             stack,
-            start: StdInstant::now(),
+            start: time::now(),
             our_mac,
             our_ip,
             our_port,
@@ -172,7 +172,7 @@ impl XdpStreamListener {
 
 impl State {
     fn now(&self) -> TcpInstant {
-        TcpInstant::from_micros(u64::try_from(self.start.elapsed().as_micros()).unwrap_or(u64::MAX))
+        TcpInstant::from_micros(u64::try_from(time::now().saturating_duration_since(self.start).as_micros()).unwrap_or(u64::MAX))
     }
 
     // fully drain the rx ring (EPOLLET requires it): answer arp/icmp, learn peer
@@ -277,15 +277,15 @@ impl State {
         let due = self
             .arp_sent
             .get(&target)
-            .is_none_or(|sent| sent.elapsed() >= DEFAULT_RETRANSMIT);
+            .is_none_or(|sent| time::now().saturating_duration_since(*sent) >= DEFAULT_RETRANSMIT);
         if due {
             self.send_arp_request(target);
-            self.arp_sent.insert(target, StdInstant::now());
+            self.arp_sent.insert(target, time::now());
         }
         let waited = self
             .arp_sent
             .get(&target)
-            .map_or(Duration::ZERO, StdInstant::elapsed);
+            .map_or(Duration::ZERO, |sent| time::now().saturating_duration_since(*sent));
         wake_after(DEFAULT_RETRANSMIT.saturating_sub(waited), cx);
     }
 
@@ -618,7 +618,7 @@ impl XdpStreamUpstream {
             readiness,
             read_wakers: Vec::new(),
             stack,
-            start: StdInstant::now(),
+            start: time::now(),
             our_mac,
             our_ip,
             our_port,
