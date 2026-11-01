@@ -1495,6 +1495,31 @@ fn push_epilogue_body_steps(
     )
 }
 
+fn push_unit_stride_broadcast_loop(
+    source: &mut String,
+    hoisted: &HoistedEpilogue,
+    output_axes: &[u16],
+    reduce_dim: u16,
+) {
+    source.push_str("    long out_row_base = u.out_base;\n");
+    for dim in output_axes {
+        source.push_str(&format!(
+            "    out_row_base += full_coord[{dim}] * u.broadcast_out_strides[{dim}];\n"
+        ));
+    }
+    source.push_str(&format!(
+        "    long out_reduce_stride = u.broadcast_out_strides[{reduce_dim}];\n"
+    ));
+    source.push_str(
+        "    #pragma unroll 8\n    for (unsigned int r = tid; r < (unsigned int)u.reduction_total; r += blockDim.x) {\n",
+    );
+    source.push_str(&hoisted.in_loop);
+    source.push_str(&format!(
+        "        out[out_row_base + (long)r * out_reduce_stride] = {};\n    }}\n",
+        hoisted.value
+    ));
+}
+
 struct HoistedEpilogue {
     before_loop: String,
     in_loop: String,
@@ -1526,6 +1551,7 @@ fn hoisted_broadcast_epilogue(
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     reduce_dims: &[u16],
+    unit_reduce: bool,
     rank: usize,
     element_type: &str,
     indent: &str,
@@ -1542,6 +1568,13 @@ fn hoisted_broadcast_epilogue(
     for (index, &invariant) in invariant_operand.iter().enumerate() {
         if invariant {
             push_epilogue_operand_load(&mut before_loop, index, rank, "    ", &outer_coord);
+        } else if unit_reduce {
+            let stride = epilogue_operands[index].1.stride(reduce_dims[0]);
+            push_epilogue_operand_load(&mut before_loop, index, rank, "    ", &outer_coord);
+            before_loop.push_str(&format!("    long epi_base{index} = epi_off{index};\n"));
+            in_loop.push_str(&format!(
+                "{indent}epi_scratch[{index}] = epi{index}[epi_base{index} + (long)r * {stride}L];\n"
+            ));
         } else {
             push_epilogue_operand_load(&mut in_loop, index, rank, indent, &inner_coord);
         }
@@ -2976,6 +3009,11 @@ fn push_cooperative_reduce_body(
         for (index, dim) in output_axes.iter().enumerate() {
             source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
         }
+        let unit_epilogue = block_reduce
+            && reduce_rank == 1
+            && gather_count(resolved) == 0
+            && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
+            && resolved.extents[reduce_dims[0] as usize] <= u64::from(u32::MAX);
         let hoisted = (reduce_rank > 0
             && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands))
         .then(|| {
@@ -2983,6 +3021,7 @@ fn push_cooperative_reduce_body(
                 epilogue_body,
                 epilogue_operands,
                 reduce_dims,
+                unit_epilogue,
                 rank,
                 element_type,
                 "        ",
@@ -2990,6 +3029,10 @@ fn push_cooperative_reduce_body(
         });
         if let Some(hoisted) = &hoisted {
             source.push_str(&hoisted.before_loop);
+        }
+        if let (true, Some(hoisted)) = (unit_epilogue, &hoisted) {
+            push_unit_stride_broadcast_loop(source, hoisted, output_axes, reduce_dims[0]);
+            return Ok(());
         }
         source.push_str(&format!(
             "    #pragma unroll 8\n    for (long r = {lane_start}; r < u.reduction_total; r += {lane_stride}) {{\n"
