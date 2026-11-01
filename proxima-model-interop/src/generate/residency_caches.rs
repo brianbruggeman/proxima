@@ -17,7 +17,7 @@ use proxima_core::ServingState;
 #[cfg(all(feature = "instrument", feature = "gpu"))]
 use proxima_telemetry::metric::Counter;
 
-#[cfg(feature = "cuda")]
+#[cfg(feature = "gpu")]
 const KV_CACHE_INPUT_PREFIX: &str = "kv_cache.";
 
 /// One CUDA graph to evaluate: the program, its shape symbols, its named
@@ -165,7 +165,7 @@ mod configured_runtime_tests {
     #[test]
     fn a_cuda_plan_whose_kv_has_a_non_fused_reader_keeps_the_exact_range() {
         let mut runtime = gpu_runtime();
-        runtime.cuda_kv_pad.insert(1, false);
+        runtime.kv_pad.insert(1, false);
 
         assert!(!runtime.pads_cached_kv(1));
         assert_eq!(
@@ -178,7 +178,7 @@ mod configured_runtime_tests {
     #[test]
     fn a_cuda_plan_whose_kv_is_read_only_by_fused_attention_binds_the_bucket() {
         let mut runtime = gpu_runtime();
-        runtime.cuda_kv_pad.insert(1, true);
+        runtime.kv_pad.insert(1, true);
 
         assert!(runtime.pads_cached_kv(1));
         assert!(
@@ -2789,8 +2789,8 @@ pub struct BackendRuntime {
     /// Per `new_count`, whether the first CUDA plan built for that width reads its
     /// `kv_cache.*` inputs only through fused `CachedAttention` ops, so the range may be
     /// bound padded to its bucket. Decided once per width, at that plan's first build.
-    #[cfg(feature = "cuda")]
-    cuda_kv_pad: alloc::collections::BTreeMap<usize, bool>,
+    #[cfg(feature = "gpu")]
+    kv_pad: alloc::collections::BTreeMap<usize, bool>,
     /// Misses served by refitting the previous plan in place
     /// ([`Self::take_near_plan`]) instead of building one -- a subset of
     /// `plan_misses`, so `plan_misses - plan_refits` is the number of plans
@@ -2916,8 +2916,8 @@ impl BackendRuntime {
             kv_carry_pairs: Vec::new(),
             kv_carry_cached_rows: 0,
             kv_carry_accepted: false,
-            #[cfg(feature = "cuda")]
-            cuda_kv_pad: alloc::collections::BTreeMap::new(),
+            #[cfg(feature = "gpu")]
+            kv_pad: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             plan_refits: 0,
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -2988,28 +2988,23 @@ impl BackendRuntime {
         matches!(self.engine, Engine::Gpu)
     }
 
-    /// Whether the cached K/V range is bound padded to its bucket. Metal always renders
-    /// the fused `CachedAttention` bound that excludes the pad rows. CUDA pads a
-    /// `new_count`-row plan only after a plan of that width was built and
-    /// `omega::backend::cuda_plan_pads_kv` found every reader of the `kv_cache.*` inputs to
-    /// be a fused `CachedAttention`; until then, and for any plan with another reader (an
-    /// unfused chain would score the zero pad rows), the range is bound exact.
+    /// Whether the cached K/V range is bound padded to its bucket. Once a plan of this
+    /// `new_count` width was built, `omega::backend::plan_pads_kv` decides from its graph
+    /// (every reader of the `kv_cache.*` inputs a fused `CachedAttention`); before that, a
+    /// driver that renders the fused op for every plan (Metal) pads, any other binds exact.
     #[cfg(feature = "gpu")]
     pub(super) fn pads_cached_kv(&self, new_count: usize) -> bool {
-        let driver_fuses = self.uses_gpu()
+        self.kv_pad
+            .get(&new_count)
+            .copied()
+            .unwrap_or_else(|| self.driver_renders_fused_cached_attention())
+    }
+
+    #[cfg(feature = "gpu")]
+    fn driver_renders_fused_cached_attention(&self) -> bool {
+        self.uses_gpu()
             && omega::backend::GpuDriver::for_target()
-                .is_some_and(omega::backend::GpuDriver::fuses_cached_attention);
-        driver_fuses || self.cuda_plan_pads_kv_decided(new_count)
-    }
-
-    #[cfg(feature = "cuda")]
-    fn cuda_plan_pads_kv_decided(&self, new_count: usize) -> bool {
-        self.cuda_kv_pad.get(&new_count).copied().unwrap_or(false)
-    }
-
-    #[cfg(all(feature = "gpu", not(feature = "cuda")))]
-    fn cuda_plan_pads_kv_decided(&self, _new_count: usize) -> bool {
-        false
+                .is_some_and(omega::backend::GpuDriver::renders_fused_cached_attention)
     }
 
     /// Whether recurrent state can stay on a CUDA device between evaluations.
@@ -3224,9 +3219,9 @@ impl BackendRuntime {
         {
             Self::emit_plan_footprint_diff(&previous_footprint, &previous_kernel_keys, metal_plan);
         }
-        #[cfg(feature = "cuda")]
-        self.cuda_kv_pad.entry(symbols[0] as usize).or_insert_with(|| {
-            omega::backend::cuda_plan_pads_kv(plan, |name| name.starts_with(KV_CACHE_INPUT_PREFIX))
+        #[cfg(feature = "gpu")]
+        self.kv_pad.entry(symbols[0] as usize).or_insert_with(|| {
+            omega::backend::plan_pads_kv(plan, |name| name.starts_with(KV_CACHE_INPUT_PREFIX))
         });
         #[cfg(feature = "cuda")]
         let plan_hit = self.plan_misses == misses_before;
