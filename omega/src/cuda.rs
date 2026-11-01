@@ -71,10 +71,13 @@ use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use crate::msl::{Binding, Codec, PackedOperands};
 
+mod block_dot;
 mod mma_gemm;
 mod row_tile;
+mod staged_matvec;
 use mma_gemm::{GEMM_THREADS, MMA_GEMM_HELPERS, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body};
 use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
+use staged_matvec::{STAGED_THREADS, push_staged_matvec_body, staged_matvec_plan, staged_matvec_threads};
 
 /// Appended to a Q4_0 matvec's CUDA entry name only when
 /// `NumericPolicy::activation_quantization` is granted and the dp4a
@@ -293,7 +296,12 @@ fn extent_fields(
     let row_tile = row_tile_axis(resolved, quantized, numeric_policy);
     let gemm = mma_gemm_plan(resolved, quantized, numeric_policy);
     let reduce_width = cooperative_width(resolved, quantized);
+    let staged = staged_matvec_plan(resolved, quantized, numeric_policy).is_some();
     let grid = match gemm {
+        _ if staged => CudaGridSpec {
+            threads: staged_matvec_threads(resolved),
+            block_width: Some(STAGED_THREADS),
+        },
         Some(plan) => CudaGridSpec {
             threads: mma_gemm_threads(resolved, &plan),
             block_width: Some(GEMM_THREADS),
@@ -1315,7 +1323,9 @@ fn entry_name(
     } else {
         ""
     };
-    let revision = if mma_gemm_plan(resolved, quantized, numeric_policy).is_some() {
+    let revision = if staged_matvec_plan(resolved, quantized, numeric_policy).is_some() {
+        format!("_smv{}x{}_gid64c9", staged_matvec::STAGED_WARPS, staged_matvec::STAGED_ROWS_PER_WARP)
+    } else if mma_gemm_plan(resolved, quantized, numeric_policy).is_some() {
         String::from("_mma16x8x8_gid64c9")
     } else if row_tile_axis(resolved, quantized, numeric_policy).is_some() {
         format!("_rt{ROW_TILE}_gid64c9")
@@ -2942,10 +2952,14 @@ fn render_reduce(
     let epilogue_operand_count = epilogue_operands.len();
 
     let gemm = mma_gemm_plan(resolved, quantized, numeric_policy);
+    let staged = staged_matvec_plan(resolved, quantized, numeric_policy);
     let mut source = String::new();
     preamble(&mut source, element_type);
     if gemm.is_some() {
         source.push_str(MMA_GEMM_HELPERS);
+    }
+    if let Some(plan) = &staged {
+        source.push_str(&plan.dot.helpers);
     }
 
     source.push_str("struct Uniforms {\n");
@@ -2982,7 +2996,14 @@ fn render_reduce(
         element_type,
     );
 
-    if let Some(plan) = gemm {
+    if let Some(plan) = &staged {
+        source = source.replacen(
+            "__global__ void ",
+            &format!("__global__ void __launch_bounds__({STAGED_THREADS}) "),
+            1,
+        );
+        push_staged_matvec_body(&mut source, resolved, plan)?;
+    } else if let Some(plan) = gemm {
         source = source.replacen(
             "__global__ void ",
             &format!("__global__ void __launch_bounds__({GEMM_THREADS}, 2) "),
