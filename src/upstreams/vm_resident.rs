@@ -10,10 +10,12 @@ use std::io;
 use std::net::SocketAddrV4;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 use std::time::Duration;
 
 use bytes::Bytes;
 use futures::channel::oneshot;
+use futures::executor::block_on;
 use futures::future::{Either, select};
 use futures::io::AsyncWriteExt;
 use proxima_http::http1::H1ClientUpstream;
@@ -31,7 +33,6 @@ use super::vm::{GuestSpec, LinuxRoot, VmSpec, read_guest_file};
 use crate::error::ProximaError;
 use crate::pipe::{PipeHandle, into_handle};
 use crate::request::{Request, Response};
-use crate::runtime::{CoreId, installed_runtime};
 
 const GUEST_IP: std::net::Ipv4Addr = std::net::Ipv4Addr::new(10, 0, 2, 15);
 const GUEST_MAC: [u8; 6] = [0x02, 0x00, 0x00, 0x00, 0x00, 0x01];
@@ -39,6 +40,7 @@ const FRAME_CAPACITY: usize = 256;
 const NET_MODULES: [&str; 2] = ["virtio_mmio", "virtio_net"];
 const RESIDENT_FLAG: &str = "proxima.resident";
 const MODULES_DISABLED: &str = "nomodules";
+const PUMP_THREAD: &str = "proxima-vm-resident-pump";
 
 static GUESTS_BOOTED: AtomicU64 = AtomicU64::new(0);
 
@@ -54,7 +56,7 @@ type GuestDial = FrameUpstream<FrameSource, RingingTx, ZeroMint>;
 /// A guest kept up for the life of the upstream, the HTTP client that talks
 /// to it, and the stop half of the task pumping the guest's frames. The guest
 /// is stopped by `ResidentLinux`'s own drop, so it outlives no request and no
-/// handle: `client` drops first, then `pump_stop` ends the pump task, and the
+/// handle: `client` drops first, then `pump_stop` ends the pump thread, and the
 /// vCPU thread is joined last.
 pub struct ResidentVmUpstream {
     client: H1ClientUpstream<GuestDial>,
@@ -168,13 +170,12 @@ async fn pump_until_stopped(label: String, dial: GuestDial, mut stop: oneshot::R
 }
 
 fn spawn_pump(label: &str, dial: GuestDial) -> Result<oneshot::Sender<()>, ProximaError> {
-    let runtime = installed_runtime()
-        .ok_or_else(|| ProximaError::Config(format!("vm `{label}`: a resident guest needs an installed runtime to pump its frames")))?
-        .runtime;
     let (stop_sender, stop_receiver) = oneshot::channel();
-    runtime
-        .spawn_on_core(CoreId(0), Box::pin(pump_until_stopped(label.to_owned(), dial, stop_receiver)))
-        .map_err(|error| upstream_error(label, "spawn the frame pump", format_args!("{error:?}")))?;
+    let pump_label = label.to_owned();
+    thread::Builder::new()
+        .name(PUMP_THREAD.to_owned())
+        .spawn(move || block_on(pump_until_stopped(pump_label, dial, stop_receiver)))
+        .map_err(|error| upstream_error(label, "spawn the frame pump", error))?;
     Ok(stop_sender)
 }
 
