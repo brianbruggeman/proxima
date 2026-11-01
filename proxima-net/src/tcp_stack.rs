@@ -54,7 +54,7 @@ enum Lifecycle {
 
 struct Conn {
     peer: Endpoint,
-    #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
     active_open: bool,
     path: Path,
     iss_plus_one: u32,
@@ -162,7 +162,7 @@ impl TcpStack {
         self.connected.pop_front()
     }
 
-    #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
     pub(crate) fn active_connect_sequence(&self, id: ConnId) -> Option<u32> {
         match self.conns.get(&id) {
             Some(Entry::SynSent { isn, .. }) => Some(*isn),
@@ -170,7 +170,7 @@ impl TcpStack {
         }
     }
 
-    #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
     pub(crate) fn active_connection_sequence(&self, id: ConnId) -> Option<u32> {
         match self.conns.get(&id) {
             Some(Entry::Open(connection)) if connection.active_open => {
@@ -180,7 +180,7 @@ impl TcpStack {
         }
     }
 
-    #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+    #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
     pub(crate) fn cancel_connect(&mut self, id: ConnId, sequence: u32) {
         let owned = match self.conns.get(&id) {
             Some(Entry::SynSent { isn, .. }) => *isn == sequence,
@@ -387,7 +387,7 @@ fn advance(entry: &mut Entry, inbound: &Inbound, now: Instant) -> (Vec<OutSegmen
                 return (Vec::new(), Lifecycle::None);
             }
             let conn = Conn {
-                #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+                #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
                 active_open: true,
                 ..Conn::new(*peer, *isn, inbound.seq, inbound.window)
             };
@@ -427,7 +427,7 @@ impl Conn {
         );
         Self {
             peer,
-            #[cfg(all(feature = "std", any(feature = "dpdk", feature = "xdp", test)))]
+            #[cfg(all(feature = "std", any(feature = "frame-stack", feature = "dpdk", feature = "xdp", test)))]
             active_open: false,
             path,
             iss_plus_one,

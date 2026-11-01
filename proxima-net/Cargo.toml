@@ -28,6 +28,7 @@ tokio-util = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true, features = ["cargo_bench_support"] }
+crossbeam-queue.workspace = true
 # test-support-tokio (not test-support): the tokio-backed unit tests in
 # tokio_acceptor/tokio_datagram/tokio_packet/tokio_stream_listener/
 # tokio_stream_upstream bind real tokio sockets, so they pin
@@ -104,10 +105,21 @@ tokio = [
 # internal cfg gate).
 wasm = ["std"]
 
+# device-independent TCP stack driver over three frame pipes (rx/tx/mint).
+frame-stack = [
+    "std",
+    "dep:thiserror",
+    "dep:futures",
+    "dep:proxima-primitives",
+    "proxima-primitives/std",
+    "proxima-primitives/async-mutex",
+]
+
 # ==== dpdk backend (folded former proxima-net-dpdk crate) ====
 # DPDK EAL + poll-mode-driver shell. Default-off; links `librte_*` and
 # needs a dpdk host toolchain (see build.rs).
 dpdk = [
+    "frame-stack",
     "std",
     "dep:thiserror",
     "dep:futures",
