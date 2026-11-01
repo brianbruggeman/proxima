@@ -176,13 +176,26 @@ async fn dense_cpu_q6_k_forward_produces_a_deterministic_token_sequence(#[case] 
     );
 }
 
+#[proxima::test]
+#[case::prefill_only(1)]
+#[case::prefill_then_decode(2)]
+async fn dense_cpu_tq1_0_forward_produces_a_deterministic_token_sequence(#[case] max_tokens: usize) {
+    let (ids, text, stopped_by_eos) = run_cpu(GgmlType::Tq10, max_tokens)
+        .await
+        .expect("tq1_0 decodes through its block layout and runs on cpu");
+    assert_respects_budget_and_range(&ids, &text, stopped_by_eos, max_tokens);
+    let expected: &[u32] = if max_tokens == 1 { &[0] } else { &[0, 0] };
+    assert_eq!(
+        ids, expected,
+        "greedy decode must reproduce the fixture's own deterministic output"
+    );
+}
+
 // --- the codecs this crate's bind path cannot run at all ---
 
-/// [`GgmlType::Mxfp4`]/[`GgmlType::Tq10`]/[`GgmlType::Iq1S`] have no decoder
-/// anywhere in `proxima_gguf::quant::dispatch::dequantize` (grepped: its
-/// `match` names `f16`/`bf16`/`q1_0`/`q2_0`/`q2_k`/`q3_k`/`q4_0`/`q4_1`/`q4_k`/
-/// `q5_0`/`q5_1`/`q5_k`/`q6_k`/`q8_0`/`q8_1`/`q8_k`/`iq2_xs`/`iq3_xxs`/`iq4_nl`;
-/// `mxfp4`/`tq1_0`/`iq1_s` fall through its `other` arm to
+/// [`GgmlType::Mxfp4`]/[`GgmlType::Iq1S`] have no decoder anywhere in
+/// `proxima_gguf::quant::dispatch::dequantize` (`tq1_0` left this list when it
+/// became a `BlockLayout`; they fall through its `other` arm to
 /// `QuantError::UnsupportedCodec`) -- `bind::gguf_tensor_as_f32`'s own `match`
 /// names every one of them as `InteropError::UnrepresentableGgmlType` rather
 /// than misreading a codec it has no decoder for. `bind::bind_dense`/
@@ -192,7 +205,6 @@ async fn dense_cpu_q6_k_forward_produces_a_deterministic_token_sequence(#[case] 
 /// rather than aborting the process on untrusted input.
 #[proxima::test]
 #[case::mxfp4(GgmlType::Mxfp4)]
-#[case::tq1_0(GgmlType::Tq10)]
 #[case::iq1_s(GgmlType::Iq1S)]
 async fn dense_cpu_unrepresentable_codec_load_returns_a_typed_error(#[case] codec: GgmlType) {
     let file_bytes = support::checkpoint_bytes(codec);
