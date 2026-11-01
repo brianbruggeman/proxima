@@ -118,8 +118,8 @@ use std::time::Instant;
 use bon::Builder;
 use bytes::Bytes;
 use conflaguration::{Settings, Validate, ValidationMessage};
+use crossbeam_queue::ArrayQueue;
 use futures::io::{AsyncReadExt, AsyncWriteExt};
-use proxima_primitives::sync::Mutex;
 use proxima_telemetry::{debug, warn};
 use serde::{Deserialize, Serialize};
 
@@ -156,10 +156,16 @@ const REQUEST_HEAD_CAPACITY_HINT: usize = 64;
 
 // ── connection state ──────────────────────────────────────────────────────────
 
+/// Upper bound on idle keep-alive connections parked per client; a connection
+/// returned while the queue is full is closed. Concurrency itself is not
+/// capped here — a burst dials as many connections as it has calls in flight.
+const IDLE_CONNECTIONS_MAX: usize = 128;
+
 /// Reusable I/O buffers held per connection — cleared between requests so
 /// allocations are paid once per connection, not once per request. The read
 /// buffer absorbs the head + body; the write buffer holds the encoded request.
-/// Both live behind the same `Mutex` as the connection itself.
+/// Both travel with the connection: a call owns the whole `ConnState` for its
+/// exchange and parks it in the client's idle queue afterwards.
 struct ConnState<C: StreamConnection> {
     conn: Option<C>,
     read_buf: Vec<u8>,
@@ -194,7 +200,8 @@ impl<C: StreamConnection> ConnState<C> {
 /// the impl is [`SendPipe`].
 ///
 /// One client owns one upstream binding (host:port, optionally TLS-wrapped)
-/// and one cached connection reused across calls.
+/// and a pool of idle keep-alive connections. Each call checks a connection
+/// out for its exchange, so concurrent calls run on concurrent connections.
 ///
 /// `U` is the transport: any [`StreamUpstream`]. The client never names a
 /// socket type, which is why the same client works over
@@ -210,14 +217,11 @@ impl<C: StreamConnection> ConnState<C> {
 ///   that lets an operator move the host without a recompile.
 pub struct H1ClientUpstream<U: StreamUpstream> {
     upstream: Arc<U>,
-    // Same rationale as LengthPrefixedJsonClient::conn — interior
-    // mutability for the `&self` Pipe API, holding the keep-alive
-    // connection (pool of one) between calls. Single in-flight request
-    // per client: the lock spans the head exchange, then the connection
-    // moves into the streamed body and is returned here on clean EOF.
-    // `Arc` so the streamed body (a `'static` stream) can hand the
-    // connection back for keep-alive once it drains.
-    state: Arc<Mutex<ConnState<U::Conn>>>,
+    // lock-free idle queue: a call pops a state (or builds an empty one and
+    // dials), owns it for the whole exchange, and pushes it back on a clean
+    // body end. `Arc` so the streamed body (a `'static` stream) can hand the
+    // connection back once it drains.
+    idle: Arc<ArrayQueue<ConnState<U::Conn>>>,
     base_host: String,
     label: String,
     config: HttpUpstreamConfig,
@@ -231,7 +235,7 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
     pub fn new(upstream: U, host: impl Into<String>, label: impl Into<String>) -> Self {
         Self {
             upstream: Arc::new(upstream),
-            state: Arc::new(Mutex::new(ConnState::empty())),
+            idle: Arc::new(ArrayQueue::new(IDLE_CONNECTIONS_MAX)),
             base_host: host.into(),
             label: label.into(),
             config: HttpUpstreamConfig::default(),
@@ -402,7 +406,7 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
     pub fn from_config(upstream: U, config: &H1ClientConfig) -> Self {
         Self {
             upstream: Arc::new(upstream),
-            state: Arc::new(Mutex::new(ConnState::empty())),
+            idle: Arc::new(ArrayQueue::new(IDLE_CONNECTIONS_MAX)),
             base_host: config.host.clone(),
             label: config.label.clone(),
             config: HttpUpstreamConfig::default(),
@@ -723,7 +727,8 @@ struct BodyPump<C: StreamConnection> {
     conn: Option<C>,
     decoder: BodyDecoder,
     seed: Option<Vec<u8>>,
-    pool: Arc<Mutex<ConnState<C>>>,
+    parked: Option<ConnState<C>>,
+    pool: Arc<ArrayQueue<ConnState<C>>>,
     finished: bool,
 }
 
@@ -738,12 +743,14 @@ fn body_stream<C: StreamConnection>(
     conn: C,
     framing: proxima_protocols::http1_codec::h1_body::BodyFraming,
     seed: Vec<u8>,
-    pool: Arc<Mutex<ConnState<C>>>,
+    parked: ConnState<C>,
+    pool: Arc<ArrayQueue<ConnState<C>>>,
 ) -> impl futures::stream::Stream<Item = Result<Bytes, ProximaError>> + Send + 'static {
     let pump = BodyPump {
         conn: Some(conn),
         decoder: BodyDecoder::new(framing),
         seed: Some(seed),
+        parked: Some(parked),
         pool,
         finished: false,
     };
@@ -761,7 +768,7 @@ fn body_stream<C: StreamConnection>(
                     .feed(&seed, |chunk| out.extend_from_slice(chunk))
                 {
                     Ok((_consumed, BodyStatus::End)) => {
-                        return finish(pump, out).await;
+                        return finish(pump, out);
                     }
                     Ok((_consumed, BodyStatus::NeedMore)) => {}
                     Err(err) => return fail(pump, format!("decode body: {err}")),
@@ -784,7 +791,7 @@ fn body_stream<C: StreamConnection>(
                 .decoder
                 .feed(&scratch[..read], |chunk| out.extend_from_slice(chunk))
             {
-                Ok((_consumed, BodyStatus::End)) => return finish(pump, out).await,
+                Ok((_consumed, BodyStatus::End)) => return finish(pump, out),
                 Ok((_consumed, BodyStatus::NeedMore)) => {
                     if !out.is_empty() {
                         return Some((Ok(Bytes::from(out)), pump));
@@ -836,13 +843,13 @@ async fn drain_body<C: StreamConnection>(
 
 /// Terminal step: hand the connection back to the pool for keep-alive,
 /// then yield any final bytes (or end the stream when there are none).
-async fn finish<C: StreamConnection>(
+fn finish<C: StreamConnection>(
     mut pump: BodyPump<C>,
     out: Vec<u8>,
 ) -> Option<(Result<Bytes, ProximaError>, BodyPump<C>)> {
-    if let Some(conn) = pump.conn.take() {
-        let mut guard = pump.pool.lock().await;
-        guard.conn = Some(conn);
+    if let (Some(conn), Some(mut parked)) = (pump.conn.take(), pump.parked.take()) {
+        parked.conn = Some(conn);
+        park(&pump.pool, parked);
     }
     pump.finished = true;
     if out.is_empty() {
@@ -859,8 +866,15 @@ fn fail<C: StreamConnection>(
     message: String,
 ) -> Option<(Result<Bytes, ProximaError>, BodyPump<C>)> {
     pump.conn = None;
+    pump.parked = None;
     pump.finished = true;
     Some((Err(ProximaError::Upstream(message)), pump))
+}
+
+/// Return a connection at a clean message boundary to the idle queue; a full
+/// queue drops it, which closes the socket.
+fn park<C: StreamConnection>(pool: &ArrayQueue<ConnState<C>>, state: ConnState<C>) {
+    let _ = pool.push(state);
 }
 
 // ── config application ────────────────────────────────────────────────────────
@@ -984,16 +998,16 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
         let telemetry = request.context.telemetry.clone();
         let started = Instant::now();
 
-        let mut guard = self.state.lock().await;
-        let reused = guard.conn.is_some();
-        if guard.conn.is_none() {
+        let mut state = self.idle.pop().unwrap_or_else(ConnState::empty);
+        let reused = state.conn.is_some();
+        if state.conn.is_none() {
             let conn = self
                 .upstream
                 .connect()
                 .await
                 .map_err(|err| ProximaError::Upstream(format!("connect: {err}")))?;
             debug!(label = %self.label, "h1 client connected");
-            guard.conn = Some(conn);
+            state.conn = Some(conn);
         }
 
         // encode into the reusable write buffer, then write + read head. A
@@ -1003,32 +1017,32 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
         // header_pairs Vec, the content-length format, the head serialization).
         let cacheable = request.query.is_empty() && request.metadata.is_empty();
         let cache_hit = cacheable
-            && guard
+            && state
                 .encoded
                 .as_ref()
                 .is_some_and(|(method, path, encoded_body)| {
                     *method == request.method && *path == request.path && *encoded_body == body
                 });
         if !cache_hit {
-            encode_request(&request, &self.base_host, &body, &mut guard.write_buf);
-            guard.encoded =
+            encode_request(&request, &self.base_host, &body, &mut state.write_buf);
+            state.encoded =
                 cacheable.then(|| (request.method.clone(), request.path.clone(), body.clone()));
         }
 
         let response_mode = self.response;
-        let first = Self::write_and_read_head(&mut guard, response_mode.headers).await;
+        let first = Self::write_and_read_head(&mut state, response_mode.headers).await;
         let outcome = match first {
             Ok(value) => Ok(value),
             Err(error) if reused => {
                 warn!(label = %self.label, error = %error, "reused h1 connection failed; reconnecting and retrying once");
-                guard.conn = None;
+                state.conn = None;
                 let conn = self
                     .upstream
                     .connect()
                     .await
                     .map_err(|err| ProximaError::Upstream(format!("reconnect: {err}")))?;
-                guard.conn = Some(conn);
-                Self::write_and_read_head(&mut guard, response_mode.headers).await
+                state.conn = Some(conn);
+                Self::write_and_read_head(&mut state, response_mode.headers).await
             }
             Err(error) => Err(error),
         };
@@ -1054,9 +1068,9 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
                         // consume the body inline to the keep-alive boundary — no
                         // streaming machinery, no per-chunk alloc, and the head
                         // leftover is fed as a BORROW of read_buf (no copy). on clean
-                        // end the connection stays in the pool slot; an error drops it.
+                        // end the connection parks in the idle queue; an error drops it.
                         let result = {
-                            let ConnState { conn, read_buf, .. } = &mut *guard;
+                            let ConnState { conn, read_buf, .. } = &mut state;
                             match conn.as_mut() {
                                 Some(conn) => {
                                     drain_body(conn, framing, &read_buf[body_offset..]).await
@@ -1068,26 +1082,22 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
                         };
                         match result {
                             Ok(()) => {
-                                drop(guard);
+                                park(&self.idle, state);
                                 Ok(response)
                             }
-                            Err(err) => {
-                                guard.conn = None;
-                                drop(guard);
-                                Err(err)
-                            }
+                            Err(err) => Err(err),
                         }
                     }
                     ResponseBodyMode::Collect => {
                         // collect's lazy stream is `'static` (the connection moves
                         // into it), so it needs an owned seed — the one to_vec the
                         // Drain fast path avoids.
-                        let seed = guard.read_buf[body_offset..].to_vec();
-                        let conn = guard.conn.take().ok_or_else(|| {
+                        let seed = state.read_buf[body_offset..].to_vec();
+                        let conn = state.conn.take().ok_or_else(|| {
                             ProximaError::Upstream("connection slot empty after head".into())
                         })?;
-                        drop(guard);
-                        let stream = body_stream(conn, framing, seed, Arc::clone(&self.state));
+                        let stream =
+                            body_stream(conn, framing, seed, state, Arc::clone(&self.idle));
                         Ok(response.with_stream(ResponseStream::new(stream)))
                     }
                 }
@@ -1100,7 +1110,6 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
                     ]);
                     telemetry.counter_inc("proxima.upstream.errors_total", &labels, 1);
                 }
-                guard.conn = None;
                 warn!(label = %self.label, error = %error, "h1 client head exchange failed, dropping connection");
                 Err(error)
             }
@@ -1154,33 +1163,33 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
     /// Reuses the pooled connection and reconnects once on a stale keep-alive,
     /// exactly like `exchange`.
     pub async fn send_raw(&self, request_bytes: &[u8]) -> Result<u16, ProximaError> {
-        let mut guard = self.state.lock().await;
-        let reused = guard.conn.is_some();
-        if guard.conn.is_none() {
+        let mut state = self.idle.pop().unwrap_or_else(ConnState::empty);
+        let reused = state.conn.is_some();
+        if state.conn.is_none() {
             let conn = self
                 .upstream
                 .connect()
                 .await
                 .map_err(|err| ProximaError::Upstream(format!("connect: {err}")))?;
-            guard.conn = Some(conn);
+            state.conn = Some(conn);
         }
-        let first = Self::write_raw_read_status(&mut guard, request_bytes).await;
+        let first = Self::write_raw_read_status(&mut state, request_bytes).await;
         let (status, framing, body_offset) = match first {
             Ok(value) => value,
             Err(_) if reused => {
-                guard.conn = None;
+                state.conn = None;
                 let conn = self
                     .upstream
                     .connect()
                     .await
                     .map_err(|err| ProximaError::Upstream(format!("reconnect: {err}")))?;
-                guard.conn = Some(conn);
-                Self::write_raw_read_status(&mut guard, request_bytes).await?
+                state.conn = Some(conn);
+                Self::write_raw_read_status(&mut state, request_bytes).await?
             }
             Err(error) => return Err(error),
         };
         let result = {
-            let ConnState { conn, read_buf, .. } = &mut *guard;
+            let ConnState { conn, read_buf, .. } = &mut state;
             match conn.as_mut() {
                 Some(conn) => drain_body(conn, framing, &read_buf[body_offset..]).await,
                 None => Err(ProximaError::Upstream(
@@ -1188,13 +1197,10 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
                 )),
             }
         };
-        match result {
-            Ok(()) => Ok(status),
-            Err(err) => {
-                guard.conn = None;
-                Err(err)
-            }
-        }
+        result.map(|()| {
+            park(&self.idle, state);
+            status
+        })
     }
 
     /// Write pre-encoded request bytes and read just the status + framing +
@@ -1232,9 +1238,14 @@ mod tests {
     use futures::StreamExt as _;
     use proxima_net::tokio::tokio_stream_upstream::TokioTcpUpstream;
     use std::net::{Ipv4Addr, SocketAddr};
+    use std::mem;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::TcpListener;
+    use tokio::sync::Barrier;
+    use tokio::time::timeout;
 
     async fn read_request_head(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
         let mut buffer = Vec::new();
@@ -1637,6 +1648,76 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Concurrent calls on one client must run on concurrent upstream
+    /// connections. The server answers a connection's first request only once
+    /// `CONCURRENCY` connections are each holding one, so a client that
+    /// serializes calls onto a single connection never gets answered (the
+    /// watchdog turns that hang into a failure). Afterwards, sequential calls
+    /// must reuse the idle connections instead of dialing again.
+    #[proxima::test(runtime = "tokio")]
+    async fn concurrent_calls_use_concurrent_connections_then_reuse_idle() {
+        const CONCURRENCY: usize = 4;
+        let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+            .await
+            .expect("bind");
+        let local = listener.local_addr().expect("local_addr");
+        let rendezvous = Arc::new(Barrier::new(CONCURRENCY));
+        let accepted = Arc::new(AtomicUsize::new(0));
+
+        let accepted_by_server = Arc::clone(&accepted);
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                accepted_by_server.fetch_add(1, Ordering::SeqCst);
+                let rendezvous = Arc::clone(&rendezvous);
+                tokio::spawn(async move {
+                    let mut first_request = true;
+                    loop {
+                        read_request_head(&mut socket).await;
+                        if mem::take(&mut first_request) {
+                            rendezvous.wait().await;
+                        }
+                        socket
+                            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                            .await
+                            .expect("write resp");
+                    }
+                });
+            }
+        });
+
+        let client = H1ClientUpstream::new(TokioTcpUpstream::new(local), "example.com", "test");
+        let call_once = || async {
+            let request = Request::builder()
+                .method("GET")
+                .path("/")
+                .build()
+                .expect("request");
+            let response = SendPipe::call(&client, request).await.expect("call");
+            assert_eq!(response.status, 200);
+            response.collect_body().await.expect("collect body");
+        };
+
+        let burst = futures::future::join_all((0..CONCURRENCY).map(|_| call_once()));
+        timeout(Duration::from_secs(10), burst)
+            .await
+            .expect("concurrent calls were serialized onto one connection");
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            CONCURRENCY,
+            "each concurrent call should hold its own upstream connection"
+        );
+
+        for _ in 0..CONCURRENCY {
+            call_once().await;
+        }
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            CONCURRENCY,
+            "sequential calls after the burst should reuse idle connections"
+        );
     }
 
     /// The bytes-in/status-out fast path reuses the keep-alive connection
