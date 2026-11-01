@@ -30,6 +30,14 @@ const HOST_PORT: u16 = 49152;
 const HOST_INITIAL_SEQUENCE: u32 = 0x4000;
 // the only loss on this link is a guest that has not finished booting, so the first resend comes quickly and backoff bounds the cost
 const LINK_RETRANSMIT: Duration = Duration::from_millis(10);
+const LINK_RETRANSMIT_CEILING: Duration = Duration::from_millis(20);
+// the resident upstream's connect timeout bounds the wait, so the link must outlast any sane value of it
+const LINK_ABANDON_AFTER: Duration = Duration::from_secs(3600);
+
+fn link_max_resends() -> u32 {
+    let resends = LINK_ABANDON_AFTER.as_millis() / LINK_RETRANSMIT_CEILING.as_millis();
+    u32::try_from(resends).unwrap_or(u32::MAX)
+}
 
 /// `Vec<u8> -> ()`: the host-to-guest frame sink that rings the vCPU's
 /// doorbell after each accepted frame.
@@ -76,7 +84,10 @@ pub fn dial_guest(link: HostLink, guest: SocketAddrV4) -> FrameUpstream<FrameSou
         ZeroMint,
     );
     let local = SocketAddrV4::new(HOST_IP, HOST_PORT);
-    let driver = Driver::new(pipes, HOST_MAC, local, HOST_INITIAL_SEQUENCE).with_retransmit(LINK_RETRANSMIT);
+    let driver = Driver::new(pipes, HOST_MAC, local, HOST_INITIAL_SEQUENCE)
+        .with_retransmit(LINK_RETRANSMIT)
+        .with_retransmit_ceiling(LINK_RETRANSMIT_CEILING)
+        .with_max_resends(link_max_resends());
     FrameUpstream::new(driver, guest)
 }
 
