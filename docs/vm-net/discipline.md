@@ -170,6 +170,26 @@ that journald rate-limited (37,426-37,444 lines for every 20,000-request run,
 not data; only within-run ratios were used. Exit counts at load need counters,
 not log lines.
 
+### Start to first 200 through `proxima serve`
+
+Start timeline (info events per phase, `src/upstreams/vm_resident.rs`), three
+starts on 305c467d: image pulled/verified 547-985 ms, first dial → listening
+1,000-1,001 ms with dial_attempts=1 (the fixed 1 s ARP/SYN retransmit while
+the guest boots), process start to first phase 116-386 ms; first 200 at
+1,839-2,545 ms.
+
+| Date | Change | Δ | runs | loadavg |
+|---|---|---|---|---|
+| 2026-11-01 | ARP/SYN retransmit backs off per RFC 6298 §5.5; the vm link starts at 10 ms (d482bcf3) | dial → listening 1,000 → 630 ms every start (= 10+20+40+80+160+320 ms) | 3 starts | 2.4-2.7 |
+| 2026-11-01 | counterfactual: image by digest instead of tag (config only) | image phase 663-712 → 135-166 ms; first 200 1.62-1.86 → 1.10-1.17 s | 2+2 alternating | 0.9 |
+| 2026-11-01 | reuse a cached tag → digest record (b02d746a, k3s IfNotPresent semantics) | ten starts by tag, release d0c14646: 966, 989, 1047, 1071, 1079, 1153, 1156, 1160, 1167, 2150 ms; p50 1,116 ms; start 1 resolved the tag (image phase 838 ms) and wrote the record, starts 2-10 image phase 20-177 ms | 10 starts | 2.6-3.2 |
+
+Against k3s pod create → first 200 (busybox-free whoami pod, image cached,
+n=10): p50 ≈1,010 ms, min 977, max 1,610. proxima p50 1,116 ms, min 966.
+The remaining fixed cost is the dial: 630-666 ms on every start, the backoff
+schedule overshooting the moment the guest becomes reachable by up to one
+320 ms doubling gap.
+
 **Implication:** two levers. (1) Let a workload use more cores: replicas or
 guest vCPUs. Today, N resident upstreams in one composed pipe with
 round-robin is expressible in config. (2) Fewer exits per request: virtio
