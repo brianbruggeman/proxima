@@ -20,6 +20,7 @@ pub(super) struct BlockDot {
     pub helpers: String,
     pub elements: usize,
     pub block_bytes: usize,
+    pub rows_per_warp: usize,
 }
 
 /// `None` when the layout is neither a radix-packed code nor a single-plane linear code whose
@@ -50,7 +51,18 @@ pub(super) fn block_dot_i8(layout: &BlockLayout) -> Option<BlockDot> {
         helpers,
         elements,
         block_bytes: usize::from(layout.block_bytes),
+        rows_per_warp: rows_per_warp(false),
     })
+}
+
+/// A radix decode spends enough ALU per weight that a warp holding fewer rows lets more blocks
+/// overlap; a bit-run decode is cheap enough that more rows amortize the staging.
+const RADIX_ROWS_PER_WARP: usize = 2;
+const LINEAR_ROWS_PER_WARP: usize = 4;
+
+/// Output rows one warp folds against the staged operand.
+pub(super) fn rows_per_warp(radix: bool) -> usize {
+    if radix { RADIX_ROWS_PER_WARP } else { LINEAR_ROWS_PER_WARP }
 }
 
 /// `<name>_scale(block)`: the block scale, read through the scale field's layout.
@@ -203,5 +215,13 @@ mod tests {
         assert_ne!(two_bit_64.name, two_bit_128.name);
         assert_eq!(two_bit_128.elements, 128);
         assert_eq!(two_bit_128.block_bytes, 34);
+    }
+
+    #[test]
+    fn radix_and_linear_decodes_fold_different_row_counts() {
+        let radix = block_dot_i8(&BlockLayout::PTQ1_0).expect("ptq1_0 lowers");
+        let linear = block_dot_i8(&BlockLayout::PQ2_0).expect("pq2_0 lowers");
+        assert_eq!(radix.rows_per_warp, 2);
+        assert_eq!(linear.rows_per_warp, 4);
     }
 }
