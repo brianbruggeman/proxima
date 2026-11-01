@@ -454,6 +454,14 @@ impl CudaDriver {
             None => build_module()?,
         };
         let function = module.load_function(entry)?;
+        proxima_telemetry::debug!(
+            entry = %entry,
+            registers = function.num_regs().unwrap_or(-1),
+            shared_bytes = function.shared_size_bytes().unwrap_or(-1),
+            local_bytes = function.local_size_bytes().unwrap_or(-1),
+            max_threads = function.max_threads_per_block().unwrap_or(-1),
+            "kernel function loaded; occupancy follows from these resource counts"
+        );
         self.store_function(cache_key, source, entry, module, function.clone());
         Ok(function)
     }
@@ -2093,7 +2101,7 @@ impl CudaPlan {
         let submit_started = Instant::now();
         let trace = std::env::var_os("PROXIMA_CUDA_TRACE").is_some();
         let timing = std::env::var_os("PROXIMA_CUDA_TIMING").is_some();
-        let mut timing_rows: Vec<(NodeId, u128, usize)> = Vec::new();
+        let mut timing_rows: Vec<(NodeId, u128, usize, String)> = Vec::new();
         let trace_outputs = std::env::var_os("PROXIMA_CUDA_TRACE_OUTPUTS").is_some();
         let trace_values: Vec<NodeId> = std::env::var("PROXIMA_CUDA_TRACE_VALUES")
             .ok()
@@ -2250,7 +2258,12 @@ impl CudaPlan {
                     },
                 })?;
                 if let Some(started) = node_started {
-                    timing_rows.push((bound.node, started.elapsed().as_micros(), output_len));
+                    timing_rows.push((
+                        bound.node,
+                        started.elapsed().as_micros(),
+                        output_len,
+                        kernel.entry.clone(),
+                    ));
                 }
                 if event_timing {
                     let event = self.driver.record_event(&self.driver.stream)?;
@@ -2319,13 +2332,14 @@ impl CudaPlan {
                 .ok()
                 .and_then(|value| value.parse::<usize>().ok())
                 .unwrap_or(12);
-            for (rank, (node, micros, output_len)) in timing_rows.iter().take(top_rows).enumerate() {
+            for (rank, (node, micros, output_len, entry)) in timing_rows.iter().take(top_rows).enumerate() {
                 eprintln!(
-                    "cuda_timing_top rank={} node={:?} elapsed_ms={:.3} output_len={}",
+                    "cuda_timing_top rank={} node={:?} elapsed_ms={:.3} output_len={} entry={}",
                     rank + 1,
                     node,
                     *micros as f64 / 1000.0,
-                    output_len
+                    output_len,
+                    entry
                 );
             }
         }
