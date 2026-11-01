@@ -307,6 +307,8 @@ async fn run_stage_live(
     };
     let stdout_buf = Arc::new(LogBuffer::new(DEFAULT_LOG_BUFFER_CAPACITY));
     let stderr_buf = Arc::new(LogBuffer::new(DEFAULT_LOG_BUFFER_CAPACITY));
+    let stdout_rx = stdout_buf.subscribe();
+    let stderr_rx = stderr_buf.subscribe();
     let upstream = Arc::new(
         ProcessUpstream::spawn_with_buffers(
             format!("__replay_{new_pipeline_id}_stage_{new_stage_id}"),
@@ -317,9 +319,15 @@ async fn run_stage_live(
         )
         .await?,
     );
-    let handle =
-        ProcessEventBridge::attach(upstream.clone(), new_stage_id, Some(new_pipeline_id), sink)
-            .await?;
+    let handle = ProcessEventBridge::attach(
+        upstream.clone(),
+        stdout_rx,
+        stderr_rx,
+        new_stage_id,
+        Some(new_pipeline_id),
+        sink,
+    )
+    .await?;
     let exit_code = handle.wait_for_exit().await;
     for _ in 0..32 {
         proxima_primitives::sync::task::yield_now().await;

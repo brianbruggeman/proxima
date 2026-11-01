@@ -299,6 +299,8 @@ async fn run_stage(
     };
     let stdout_buf = Arc::new(LogBuffer::new(DEFAULT_LOG_BUFFER_CAPACITY));
     let stderr_buf = Arc::new(LogBuffer::new(DEFAULT_LOG_BUFFER_CAPACITY));
+    let stdout_rx = stdout_buf.subscribe();
+    let stderr_rx = stderr_buf.subscribe();
     let upstream = Arc::new(
         ProcessUpstream::spawn_with_buffers(
             format!("__pipeline_{pipeline_id}_stage_{stage_id}"),
@@ -309,8 +311,15 @@ async fn run_stage(
         )
         .await?,
     );
-    let bridge_handle =
-        ProcessEventBridge::attach(upstream.clone(), stage_id, Some(pipeline_id), sink).await?;
+    let bridge_handle = ProcessEventBridge::attach(
+        upstream.clone(),
+        stdout_rx,
+        stderr_rx,
+        stage_id,
+        Some(pipeline_id),
+        sink,
+    )
+    .await?;
     let exit_code = bridge_handle.wait_for_exit().await;
     // hold the upstream alive a few ticks so drain tasks can flush any
     // remaining lines emitted just before exit (the bridge tests do the
