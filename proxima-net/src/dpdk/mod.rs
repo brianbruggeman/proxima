@@ -16,6 +16,7 @@ mod ffi;
 
 pub mod eal;
 pub mod error;
+pub mod frame_pipes;
 pub mod packet_listener;
 pub mod port;
 pub mod stream_listener;
