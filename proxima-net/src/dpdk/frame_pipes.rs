@@ -5,6 +5,7 @@
 
 use super::port::{self, Port};
 use super::{DpdkError, Eal, Mempool, RawMbuf};
+use core::cell::Cell;
 use core::mem::ManuallyDrop;
 use proxima_primitives::pipe::Pipe;
 use std::sync::Arc;
@@ -48,7 +49,7 @@ impl Hardware {
     }
 
     pub(crate) fn pipes(hardware: Arc<Self>) -> (DpdkRx, DpdkTx, DpdkMint) {
-        (DpdkRx(hardware.clone()), DpdkTx(hardware.clone()), DpdkMint(hardware))
+        (DpdkRx::new(hardware.clone()), DpdkTx(hardware.clone()), DpdkMint(hardware))
     }
 }
 
@@ -81,9 +82,66 @@ impl Drop for DpdkFrame {
     }
 }
 
-pub struct DpdkRx(Arc<Hardware>);
+const BURST: usize = 32;
+
+/// Pulls up to `BURST` mbufs per `rx_burst` and hands them out one frame per call.
+pub struct DpdkRx {
+    hardware: Arc<Hardware>,
+    batch: [Cell<RawMbuf>; BURST],
+    next: Cell<usize>,
+    filled: Cell<usize>,
+}
+
 pub struct DpdkTx(Arc<Hardware>);
 pub struct DpdkMint(Arc<Hardware>);
+
+impl DpdkRx {
+    fn new(hardware: Arc<Hardware>) -> Self {
+        Self {
+            hardware,
+            batch: core::array::from_fn(|_| Cell::new(core::ptr::null_mut())),
+            next: Cell::new(0),
+            filled: Cell::new(0),
+        }
+    }
+
+    fn refill(&self) {
+        let mut burst: [RawMbuf; BURST] = [core::ptr::null_mut(); BURST];
+        let received = usize::from(self.hardware.port.rx_burst(&mut burst));
+        self.batch.iter().zip(burst).for_each(|(slot, mbuf)| slot.set(mbuf));
+        self.next.set(0);
+        self.filled.set(received);
+    }
+
+    fn take(&self) -> Option<DpdkFrame> {
+        if self.next.get() == self.filled.get() {
+            self.refill();
+        }
+        let index = self.next.get();
+        (index < self.filled.get()).then(|| {
+            self.next.set(index + 1);
+            DpdkFrame { raw: self.batch[index].get() }
+        })
+    }
+}
+
+impl Drop for DpdkRx {
+    fn drop(&mut self) {
+        for slot in &self.batch[self.next.get()..self.filled.get()] {
+            // SAFETY: slots in next..filled hold mbufs rx_burst handed to this
+            // pipe that no DpdkFrame owns yet, so each is live and freed once.
+            unsafe { port::free(slot.get()) };
+        }
+    }
+}
+
+// SAFETY: the batch cells are touched only from the single prime core that owns
+// the rx queue, under the driver's async lock, so no two threads race on them.
+unsafe impl Sync for DpdkRx {}
+
+// SAFETY: the batched mbufs are owned by this pipe alone, so moving the pipe to
+// another thread moves that ownership with it, exactly as `Hardware` does.
+unsafe impl Send for DpdkRx {}
 
 impl Pipe for DpdkRx {
     type In = ();
@@ -91,11 +149,7 @@ impl Pipe for DpdkRx {
     type Err = DpdkFrameError;
 
     fn call(&self, _input: ()) -> impl Future<Output = Result<Option<DpdkFrame>, DpdkFrameError>> {
-        async move {
-            let mut one: [RawMbuf; 1] = [core::ptr::null_mut()];
-            let received = self.0.port.rx_burst(&mut one);
-            Ok((received > 0).then(|| DpdkFrame { raw: one[0] }))
-        }
+        async move { Ok(self.take()) }
     }
 }
 
