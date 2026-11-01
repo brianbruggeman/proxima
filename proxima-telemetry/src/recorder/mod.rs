@@ -19,6 +19,7 @@ use core::time::Duration;
 use core::sync::atomic::AtomicU64;
 #[cfg(any(feature = "lossless-backpressure", feature = "instrument-metrics"))]
 use core::sync::atomic::{AtomicBool, Ordering};
+use std::sync::OnceLock;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "lossless-backpressure")]
@@ -86,7 +87,8 @@ const DEFAULT_FLUSH_INTERVAL: Duration = Duration::from_micros(crate::sized::FLU
 /// Wraps [`crate::ring::Ring`] and the telemetry pipe primitives; see those for
 /// the underlying lock-free MPMC protocol.
 pub struct EmitShared {
-    cores: PerCore<RingSet>,
+    cores: PerCore<OnceLock<RingSet>>,
+    ring_caps: RingCapacities,
     registry: InstrumentRegistry,
     pipe: Live<TelemetryPipeHandle>,
     pipe_control: LiveControl<TelemetryPipeHandle>,
@@ -265,8 +267,8 @@ impl SlotGate {
 
 impl EmitShared {
     fn new(
-        cores: PerCore<RingSet>,
-        registry: InstrumentRegistry,
+        core_count: usize,
+        ring_caps: RingCapacities,
         pipe: TelemetryPipeHandle,
         sharing: RecordSharing,
         drain_batch: usize,
@@ -275,8 +277,9 @@ impl EmitShared {
     ) -> Self {
         let (pipe, pipe_control) = live(pipe);
         Self {
-            cores,
-            registry,
+            cores: PerCore::new_with(core_count, |_| OnceLock::new()),
+            ring_caps,
+            registry: InstrumentRegistry::new(),
             pipe,
             pipe_control,
             sharing,
@@ -388,8 +391,31 @@ impl EmitShared {
         self.gate.slot_park.parked()
     }
 
-    pub(crate) fn cores(&self) -> &PerCore<RingSet> {
-        &self.cores
+    pub(crate) fn core_count(&self) -> usize {
+        self.cores.count()
+    }
+
+    // oncelock: first record on a core pays the allocation, every later one is a
+    // single acquire load, so the emit path stays lock-free and alloc-free.
+    pub(crate) fn local_ring_set(&self) -> &RingSet {
+        self.cores
+            .local()
+            .get_or_init(|| RingSet::new(&self.ring_caps))
+    }
+
+    #[cfg(all(test, not(feature = "loom")))]
+    pub(crate) fn ring_set(&self, index: usize) -> &RingSet {
+        self.cores
+            .slot(index)
+            .get_or_init(|| RingSet::new(&self.ring_caps))
+    }
+
+    pub(crate) fn initialised_ring_set(&self, index: usize) -> Option<&RingSet> {
+        self.cores.slot(index).get()
+    }
+
+    pub(crate) fn initialised_ring_sets(&self) -> impl Iterator<Item = &RingSet> {
+        (0..self.cores.count()).filter_map(|index| self.initialised_ring_set(index))
     }
 
     pub(crate) fn registry(&self) -> &InstrumentRegistry {
@@ -442,7 +468,7 @@ impl EmitShared {
             // parks for the pump or producer-assist-folds a batch inline — never
             // drops — so the producer pays fold cost only when the drain falls
             // behind (graceful degradation toward the inline-fold cost, no cliff).
-            let ring_set = self.cores().local();
+            let ring_set = self.local_ring_set();
             deliver(
                 self,
                 &ring_set.span_obs,
@@ -630,7 +656,7 @@ impl SpanSink for RingSink {
         if metrics_live {
             shared.record_exemplar(record.name, record.duration_ns, record.trace_id);
         }
-        let ring_set = shared.cores().local();
+        let ring_set = shared.local_ring_set();
         deliver(shared, &ring_set.spans, record, self.overflow, || {
             let pipe = shared.pipe().read(TelemetryPipeHandle::clone);
             {
@@ -1021,7 +1047,7 @@ impl<Clk: Clock> LogBuilderWired<Clk> {
         let shared = self.shared;
         let overflow = self.overflow;
         let sink: RingLogSink = alloc::boxed::Box::new(move |record: LogRecord| {
-            let ring_set = shared.cores().local();
+            let ring_set = shared.local_ring_set();
             deliver(&shared, &ring_set.logs, record, overflow, || {
                 let pipe = shared.pipe().read(TelemetryPipeHandle::clone);
                 {
@@ -1227,7 +1253,7 @@ impl<Clk: Clock> Recorder<Clk> {
 
     /// Number of per-core ring sets active in this recorder.
     pub fn core_count(&self) -> usize {
-        self.shared.cores().count()
+        self.shared.core_count()
     }
 
     /// The ring overflow policy in force (lossless `Block` or lossy `Drop`).
@@ -1426,7 +1452,7 @@ impl<Clk: Clock> Recorder<Clk> {
             start_ts_ns: 0,
         });
         let shared = &self.shared;
-        let ring_set = shared.cores().local();
+        let ring_set = shared.local_ring_set();
         deliver(shared, &ring_set.metrics, sample, self.overflow, || {
             let pipe = shared.pipe().read(TelemetryPipeHandle::clone);
             {
@@ -1460,7 +1486,7 @@ impl<Clk: Clock> Recorder<Clk> {
             start_ts_ns: 0,
         });
         let shared = &self.shared;
-        let ring_set = shared.cores().local();
+        let ring_set = shared.local_ring_set();
         deliver(shared, &ring_set.metrics, sample, self.overflow, || {
             let pipe = shared.pipe().read(TelemetryPipeHandle::clone);
             let freed = drainer::drain_export_metrics(
@@ -1490,7 +1516,7 @@ impl<Clk: Clock> Recorder<Clk> {
             start_ts_ns: 0,
         });
         let shared = &self.shared;
-        let ring_set = shared.cores().local();
+        let ring_set = shared.local_ring_set();
         deliver(shared, &ring_set.metrics, sample, self.overflow, || {
             let pipe = shared.pipe().read(TelemetryPipeHandle::clone);
             let freed = drainer::drain_export_metrics(
@@ -1531,7 +1557,7 @@ impl<Clk: Clock> Recorder<Clk> {
             start_ts_ns: 0,
         });
         let shared = &self.shared;
-        let ring_set = shared.cores().local();
+        let ring_set = shared.local_ring_set();
         deliver(shared, &ring_set.metrics, sample, self.overflow, || {
             let pipe = shared.pipe().read(TelemetryPipeHandle::clone);
             {
@@ -1611,7 +1637,7 @@ impl<Clk: Clock> Recorder<Clk> {
     /// used because start time was captured earlier at `on_new_span`).
     pub fn emit_span_record(&self, record: SpanRecord) {
         let shared = &self.shared;
-        let ring_set = shared.cores().local();
+        let ring_set = shared.local_ring_set();
         deliver(shared, &ring_set.spans, record, self.overflow, || {
             let pipe = shared.pipe().read(TelemetryPipeHandle::clone);
             {
@@ -1642,9 +1668,9 @@ impl<Clk: Clock> Recorder<Clk> {
     /// drops are silent) so callers can alert when emit outruns drain.
     #[must_use]
     pub fn dropped(&self) -> u64 {
-        let cores = self.shared.cores();
-        (0..cores.count())
-            .map(|index| cores.slot(index).dropped())
+        self.shared
+            .initialised_ring_sets()
+            .map(RingSet::dropped)
             .sum()
     }
 
@@ -1657,9 +1683,9 @@ impl<Clk: Clock> Recorder<Clk> {
     /// drain is comfortably ahead of emit.
     #[must_use]
     pub fn assisted(&self) -> u64 {
-        let cores = self.shared.cores();
-        (0..cores.count())
-            .map(|index| cores.slot(index).assisted())
+        self.shared
+            .initialised_ring_sets()
+            .map(RingSet::assisted)
             .sum()
     }
 
@@ -1728,9 +1754,7 @@ impl<Clk: Clock> Recorder<Clk> {
     pub(crate) fn fold_deferred(&self) {
         #[cfg(feature = "deferred-metric-fold")]
         {
-            let cores = self.shared.cores();
-            for index in 0..cores.count() {
-                let ring_set = cores.slot(index);
+            for ring_set in self.shared.initialised_ring_sets() {
                 while let Some(observation) = ring_set.span_obs.dequeue() {
                     self.shared.fold_span_obs(observation);
                 }
@@ -1762,7 +1786,7 @@ impl<Clk: Clock> Recorder<Clk> {
     /// deadlock). Registry instruments are global; drain those via
     /// [`drain`](Self::drain) on a sync pump (this skips them).
     pub async fn drain_async(&self) -> usize {
-        drainer::drain_cores_async(&self.shared, 0, self.shared.cores().count()).await
+        drainer::drain_cores_async(&self.shared, 0, self.shared.core_count()).await
     }
 
     /// Async drain of the instrument registry (counters/histograms): `.await`s
@@ -2081,20 +2105,11 @@ impl<Clk: Clock + Default> RecorderBuilder<HasPipe, Clk> {
     }
 
     pub fn start(self) -> Result<Recorder<Clk>, crate::error::Error> {
-        let caps = &self.ring_caps;
-        let count = self.core_count;
-
-        let mut ring_sets: alloc::vec::Vec<RingSet> = alloc::vec::Vec::with_capacity(count);
-        for _ in 0..count {
-            ring_sets.push(RingSet::new(caps)?);
-        }
-        let cores = PerCore::from_vec(ring_sets);
-
         let pipe = self.pipe.ok_or(crate::error::Error::InvalidInput)?;
 
         let shared = Arc::new(EmitShared::new(
-            cores,
-            InstrumentRegistry::new(),
+            self.core_count,
+            self.ring_caps.clone(),
             pipe,
             self.record_sharing,
             self.drain_batch,
@@ -2265,6 +2280,30 @@ mod tests {
             (emit - capacity) as u64,
             "ring holds `capacity`, the rest drop"
         );
+    }
+
+    #[test]
+    fn start_allocates_no_ring_set_until_a_core_records() {
+        let recorder = make_recorder_null(8);
+
+        assert_eq!(recorder.core_count(), 8);
+        assert_eq!(recorder.shared.initialised_ring_sets().count(), 0);
+        assert_eq!(recorder.drain(), 0, "draining untouched cores exports nothing");
+        assert_eq!(recorder.dropped(), 0);
+        assert_eq!(recorder.assisted(), 0);
+        assert_eq!(recorder.shared.initialised_ring_sets().count(), 0);
+    }
+
+    #[test]
+    fn recording_on_one_core_allocates_only_that_cores_ring_set() {
+        let recorder = make_recorder_null(8);
+
+        drop(recorder.span("checkout").start());
+        let drained = recorder.drain();
+
+        assert_eq!(recorder.shared.initialised_ring_sets().count(), 1);
+        assert!(drained > 0, "the span recorded on the live core drains");
+        assert_eq!(recorder.dropped(), 0);
     }
 
     #[test]
