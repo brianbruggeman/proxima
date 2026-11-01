@@ -85,7 +85,7 @@ fn ternary(value: f32, inverse: f32) -> u32 {
 }
 
 fn pack_byte(trits: u32) -> u8 {
-    ((trits * 256 + 242) / 243) as u8
+    (trits * 256).div_ceil(243) as u8
 }
 
 fn quantize_block(input: &[f32; QK_PTQ1_0], block: &mut [u8; BLOCK_BYTES]) {

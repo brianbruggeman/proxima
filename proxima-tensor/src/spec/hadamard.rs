@@ -202,7 +202,7 @@ impl HadamardFold {
         head_dim: u32,
         lead: &str,
     ) -> Result<NodeId, TensorError> {
-        if head_dim % self.inner != 0 || self.block % head_dim != 0 {
+        if !head_dim.is_multiple_of(self.inner) || !self.block.is_multiple_of(head_dim) {
             return Err(TensorError::NotLowerable {
                 node: NodeId(0),
                 reason: "a hadamard block must hold whole heads, each a multiple of the inner factor",
@@ -585,7 +585,7 @@ mod tests {
     const SEQUENCE: u32 = 2;
 
     fn sylvester(size: usize, row: usize, column: usize) -> f64 {
-        let sign = if (row & column).count_ones() % 2 == 0 {
+        let sign = if (row & column).count_ones().is_multiple_of(2) {
             1.0
         } else {
             -1.0
@@ -615,8 +615,10 @@ mod tests {
         let mut out = Vec::new();
         for row in x.chunks_exact(width) {
             for block in row
-                .chunks_exact(BLOCK as usize)
-                .zip(signs.chunks_exact(BLOCK as usize))
+                .as_chunks::<{ BLOCK as usize }>()
+                .0
+                .iter()
+                .zip(signs.as_chunks::<{ BLOCK as usize }>().0.iter())
             {
                 for column in 0..BLOCK as usize {
                     out.push(

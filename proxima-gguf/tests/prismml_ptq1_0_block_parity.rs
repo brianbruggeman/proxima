@@ -31,24 +31,24 @@ fn spec_dequantize_row_ptq1_0(block: &[u8; 28]) -> Vec<f32> {
     const POW3: [u8; 6] = [1, 3, 9, 27, 81, 243];
     let scale = half::f16::from_le_bytes([block[26], block[27]]).to_f32();
     let mut output = Vec::new();
-    let mut j = 0;
-    for c in STAGES {
-        while j + c <= 24 {
-            for n in 0..5 {
-                for m in 0..c {
-                    let q = block[j + m].wrapping_mul(POW3[n]);
-                    let xi = (u16::from(q) * 3) >> 8;
-                    output.push((xi as i16 - 1) as f32 * scale);
+    let mut consumed = 0;
+    for stage in STAGES {
+        while consumed + stage <= 24 {
+            for power in &POW3[..5] {
+                for lane in 0..stage {
+                    let scaled = block[consumed + lane].wrapping_mul(*power);
+                    let trit = (u16::from(scaled) * 3) >> 8;
+                    output.push((trit as i16 - 1) as f32 * scale);
                 }
             }
-            j += c;
+            consumed += stage;
         }
     }
-    for n in 0..4 {
-        for h in 0..2 {
-            let q = block[24 + h].wrapping_mul(POW3[n]);
-            let xi = (u16::from(q) * 3) >> 8;
-            output.push((xi as i16 - 1) as f32 * scale);
+    for power in &POW3[..4] {
+        for lane in 0..2 {
+            let scaled = block[24 + lane].wrapping_mul(*power);
+            let trit = (u16::from(scaled) * 3) >> 8;
+            output.push((trit as i16 - 1) as f32 * scale);
         }
     }
     output
