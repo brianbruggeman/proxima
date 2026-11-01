@@ -614,6 +614,10 @@ mod tests {
     use futures::future::join;
     use futures::io::{AsyncReadExt, AsyncWriteExt};
     use proxima_primitives::stream::{StreamListenerExt, StreamUpstreamExt};
+    use proxima_protocols::http1_codec::h1::HttpVersion;
+    use proxima_protocols::http1_codec::h1_body::BodyFraming;
+    use proxima_protocols::http1_codec::h1_client::encode_request_head;
+    use proxima_protocols::http1_codec::h1_response::write_response_head;
     use std::task::Waker;
 
     type Wire = Arc<ArrayQueue<Vec<u8>>>;
@@ -663,8 +667,26 @@ mod tests {
     const CLIENT_MAC: [u8; 6] = [0x02, 0, 0, 0, 0, 0x02];
     const SERVER: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 1), 8080);
     const CLIENT: SocketAddrV4 = SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 2), 40000);
-    const REQUEST: &[u8] = b"GET /healthz HTTP/1.1\r\nHost: guest.local\r\nUser-Agent: proxima\r\nAccept: */*\r\n\r\n";
-    const RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n";
+    const BODY: &[u8] = b"ok\n";
+
+    fn request_bytes() -> Vec<u8> {
+        let mut request = Vec::new();
+        let headers = [("Host", "guest.local"), ("User-Agent", "proxima"), ("Accept", "*/*")];
+        encode_request_head("GET", "/healthz", &headers, &mut request);
+        request
+    }
+
+    fn response_bytes() -> Vec<u8> {
+        let mut response = Vec::new();
+        let headers = [
+            ("Content-Type".to_owned(), "text/plain".to_owned()),
+            ("Connection".to_owned(), "close".to_owned()),
+        ];
+        let framing = BodyFraming::ContentLength(BODY.len() as u64);
+        write_response_head(&mut response, HttpVersion::Http11, 200, "OK", &headers, framing);
+        response.extend_from_slice(BODY);
+        response
+    }
 
     fn wired(capacity: usize) -> (WirePipes, WirePipes) {
         let to_server: Wire = Arc::new(ArrayQueue::new(capacity));
@@ -682,7 +704,7 @@ mod tests {
         (listener, upstream)
     }
 
-    async fn serve(listener: &FrameListener<WireRx, WireTx, WireMint>) -> Vec<u8> {
+    async fn serve(listener: &FrameListener<WireRx, WireTx, WireMint>, response: &[u8]) -> Vec<u8> {
         let mut connection = listener.accept().await.expect("server accepts the dialed connection");
         let mut request = Vec::new();
         let mut chunk = [0u8; 256];
@@ -691,14 +713,14 @@ mod tests {
             assert!(read > 0, "client closed before finishing the request head");
             request.extend_from_slice(&chunk[..read]);
         }
-        connection.write_all(RESPONSE).await.expect("server writes the response");
+        connection.write_all(response).await.expect("server writes the response");
         connection.close().await.expect("server closes");
         request
     }
 
-    async fn call(upstream: &FrameUpstream<WireRx, WireTx, WireMint>) -> Vec<u8> {
+    async fn call(upstream: &FrameUpstream<WireRx, WireTx, WireMint>, request: &[u8]) -> Vec<u8> {
         let mut connection = upstream.connect().await.expect("client completes the handshake");
-        connection.write_all(REQUEST).await.expect("client writes the request");
+        connection.write_all(request).await.expect("client writes the request");
         let mut response = Vec::new();
         connection.read_to_end(&mut response).await.expect("client reads to the server's FIN");
         connection.close().await.expect("client closes");
@@ -709,10 +731,13 @@ mod tests {
     fn http1_request_and_response_cross_two_drivers_and_both_sides_close() {
         let (listener, upstream) = endpoints(SERVER);
 
-        let (request_seen, response_seen) = block_on(join(serve(&listener), call(&upstream)));
+        let (request, response) = (request_bytes(), response_bytes());
 
-        assert_eq!(request_seen, REQUEST);
-        assert_eq!(response_seen, RESPONSE);
+        let (request_seen, response_seen) =
+            block_on(join(serve(&listener, &response), call(&upstream, &request)));
+
+        assert_eq!(request_seen, request);
+        assert_eq!(response_seen, response);
     }
 
     #[test]

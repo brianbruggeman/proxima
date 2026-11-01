@@ -42,6 +42,7 @@ crossbeam-queue.workspace = true
 # see its doc there. This is a dev-only addition; it does not touch
 # proxima-net's own feature graph or production dependency closure.
 proxima = { package = "proxima-lib", path = "..", features = ["test-support-tokio"] }
+proxima-protocols = { workspace = true, features = ["http1_codec"] }
 proxima-runtime = { workspace = true }
 socket2 = { workspace = true }
 tempfile = { workspace = true }
