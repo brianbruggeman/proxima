@@ -1526,6 +1526,8 @@ fn push_unit_stride_fold_header(
     source: &mut String,
     resolved: &BoundOp,
     output_axes: &[u16],
+    lane_start: &str,
+    lane_step: &str,
 ) {
     for index in 0..resolved.operands().len() {
         source.push_str(&format!(
@@ -1537,9 +1539,9 @@ fn push_unit_stride_fold_header(
             ));
         }
     }
-    source.push_str(
-        "    #pragma unroll 8\n    for (unsigned int r = tid; r < (unsigned int)u.reduction_total; r += blockDim.x) {\n",
-    );
+    source.push_str(&format!(
+        "    #pragma unroll 8\n    for (unsigned int r = {lane_start}; r < (unsigned int)u.reduction_total; r += {lane_step}) {{\n"
+    ));
 }
 
 struct HoistedEpilogue {
@@ -2883,13 +2885,18 @@ fn push_cooperative_reduce_body(
             source.push_str("    }\n    if (!contiguous) {\n");
         }
     }
-    let unit_fold = block_reduce
+    let unit_fold = (block_reduce || !packed_chunked)
         && reduce_rank == 1
         && gather_count(resolved) == 0
         && index32_reach_fits(resolved.extents[reduce_dims[0] as usize]);
     if !lean || guarded {
         if unit_fold {
-            push_unit_stride_fold_header(source, resolved, output_axes);
+            let (fold_start, fold_step) = if block_reduce {
+                ("tid", "blockDim.x")
+            } else {
+                ("lane", "32u")
+            };
+            push_unit_stride_fold_header(source, resolved, output_axes, fold_start, fold_step);
         } else if packed_chunked {
             source.push_str(&format!(
                 "    for (long chunk = (long)lane * 8; chunk < u.reduction_total; chunk += {} * 8) {{\n",
