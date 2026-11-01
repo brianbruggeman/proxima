@@ -96,6 +96,32 @@ P4 config (local, not in the repo): `$B/ingress.toml` = `name = "ingress"`, `[[u
 
 P4 c=64 distribution is bimodal. A fourth run (loadavg 14.92) gave 7286 rps, p50 0.272 ms, p90 1.98 ms, p99 38.3 ms, p99.9 894 ms, p99.99 3.9 s, histogram buckets reaching 6.0 s with 109,254 of 109,408 requests under 0.6 s. The cause of the multi-second tail is unexplained (not traced: no per-connection data was collected).
 
+### D1: the P4 tail and throughput gap, traced, and the same hop after the fix
+
+Date 2026-10-31, worktree `fix/ingress-hop`, fresh k3s data dir, whoami x2 behind a ClusterIP service, a NodePort (31471) and a traefik Ingress. Loadavg during these runs was 26 to 41 (other agents on the box), against 7 to 28 for the rows above, so absolute numbers are not comparable across the two tables; the rows inside this table are interleaved or run back to back.
+
+Mechanism for the P4 rows (measured on the pre-fix binary, `H1ClientUpstream` in `proxima-http/src/http1/client.rs`, state `Arc<Mutex<ConnState>>` held across connect + write + head + drain):
+
+- Not accept-queue overflow and not SYN retransmit: `nstat` deltas over 15 s c=64 runs with max 3.7 s and 15.0 s were `TcpExtListenOverflows 0`, `TcpExtListenDrops 0`, `TcpExtTCPSynRetrans 0`.
+- Not a new upstream connection per request: `TcpActiveOpens` delta 143 and 129 over 128,026 and 151,010 requests (64 of those are oha's own dials).
+- One upstream connection at a time: distinct local ports of established sockets to the backend, sampled six times across a run, were 1 each time on the pre-fix binary and 64 each time after the fix.
+- Throughput ceiling is one in-flight upstream exchange: pre-fix `proxima-core-0` was the only busy thread (438 to 460 ticks over the window) and the rate (8.5k to 10.1k rps) matches the c=1 rate of the direct backend path (10.8k rps, 0.082 ms in the table above).
+- The multi-second tail is lock starvation on that slot: a temporary `warn!` on lock wait over 50 ms logged 162 waits in one 15 s run, the longest 9,161,921 us against oha's slowest response 9.163 s, and 55 waits of 14.99 s (requests still queued when the run ended). `futures::lock::Mutex` wakes one waiter and lets newly arriving callers barge in, so a few client connections won every release and the rest starved.
+
+Fix: `H1ClientUpstream` keeps a lock-free `crossbeam_queue::ArrayQueue` of idle connection states. A call pops one (or dials), owns it for the whole exchange with no lock held across IO, and pushes it back at a clean body end. Control: `concurrent_calls_use_concurrent_connections_then_reuse_idle` fails on the pre-fix client (`concurrent calls were serialized onto one connection: Elapsed`) and passes after.
+
+Same session, proxima release binary, both backends reached through the pod endpoints 10.42.0.8:80 and 10.42.0.10:80 (traefik routes to the same two pod endpoints; proxima config: two `[[upstreams]]` with `[select] algorithm = "round_robin"`), oha c=64 15 s, traefik and proxima alternated:
+
+| Target | rps, 3 runs | p50 (ms) | p99 (ms) | p99.9 (ms) | max (ms) | loadavg 1m |
+|---|---|---|---|---|---|---|
+| traefik ingress `192.168.1.76:80` | 11821, 20499, 19653 | 4.105, 1.979, 2.043 | 21.44, 14.82, 15.72 | 49.2, 22.7, 24.2 | 88.1, 41.5, 41.1 | 41.16, 39.71, 41.46 |
+| proxima after fix | 20093, 24301, 31044 | 1.781, 1.546, 1.481 | 18.64, 14.50, 9.51 | 34.7, 24.2, 16.9 | 92.0, 62.7, 60.4 | 39.34, 40.40, 41.19 |
+| proxima before fix (separate back-to-back runs) | 8296, 9167, 9535 | 0.491, 0.415, 0.383 | 167.5, 182.1, 156.6 | 871.9, 711.6, 742.5 | 1443, 1222, 1541 | 33.48, 35.15, 36.97 |
+
+All responses 200; the 51 to 64 errors per run are oha's in-flight count at the deadline. Pre-fix on the NodePort hop in this session: 8722 rps, max 15,036 ms, p99.99 13,140 ms, 1 upstream local port.
+
+c=1, n=2000, p50 in ms: proxima after fix 0.141, 0.136, 0.142 (loadavg 34 to 32), traefik 0.206, 0.206, 0.205; direct pod endpoint 0.105 to 0.125 at loadavg 25 to 32. Pre-fix and post-fix binaries alternated on one config: 0.141, 0.139, 0.140, 0.146, 0.145, 0.147 (before) against 0.148, 0.140, 0.144, 0.143, 0.131, 0.130 (after). The 0.123 ms c=1 figure from the P4 row is not met in this session. Per request on the post-fix binary at c=1 (10,000 requests): `proxima-core-0` on-CPU 36.5 us and runnable-but-waiting 51.4 us (schedstat), 1.75 voluntary context switches, 3.76 `read` calls of which 1.33 returned EAGAIN, 2.0 `sendto`, 1.35 `epoll_wait` (strace -c, 2000 requests); a perf profile of that thread was flat (largest symbol 2.8%).
+
 ### K5: per-pod memory (50 idle `busybox sleep 3600` pods vs 0, 30 s settled)
 
 | Run | 0 pods, total kB | 50 pods, total kB | delta kB | per pod kB | of which k3s-server+containerd+shims (cgroup) | of which container processes | host `free` used MB (0 to 50) |
