@@ -80,6 +80,7 @@ const LINUX_PIPE: &str = "shout-linux";
 const IMAGE_PIPE: &str = "probe-image";
 const DEFAULT_KERNEL: &str = "/boot/vmlinuz-linux";
 const RESIDENT_FLAG: &str = "--vm-registry-resident-child";
+const RESIDENT_BARE_FLAG: &str = "--vm-registry-resident-bare-child";
 const RESIDENT_PIPE: &str = "resident-whoami";
 const WHOAMI_FIXTURE: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -110,7 +111,8 @@ fn main() {
     let outcome = match arguments.first().map(String::as_str) {
         Some(PROBE_FLAG) => Some(run_probe_child(&arguments[1], &arguments[2])),
         Some(SERVE_FLAG) => Some(run_serve_child(&arguments[1], &arguments[2])),
-        Some(RESIDENT_FLAG) => Some(run_resident_child(&arguments[1], &arguments[2])),
+        Some(RESIDENT_FLAG) => Some(run_resident_child(&arguments[1], &arguments[2], true)),
+        Some(RESIDENT_BARE_FLAG) => Some(run_resident_child(&arguments[1], &arguments[2], false)),
         Some(BENCH_FLAG) => Some(run_bench_child(&arguments[1..])),
         Some(INSTRUMENT_FLAG) => Some(run_instrument_child(&arguments[1..])),
         _ => None,
@@ -146,6 +148,10 @@ fn main() {
             trial(
                 "a_resident_vm_upstream_boots_one_guest_and_serves_sequential_gets",
                 a_resident_vm_upstream_boots_one_guest_and_serves_sequential_gets,
+            ),
+            trial(
+                "a_resident_vm_upstream_serves_without_an_installed_runtime",
+                a_resident_vm_upstream_serves_without_an_installed_runtime,
             ),
             trial(
                 "a_resident_elf_guest_is_rejected_when_the_config_is_applied",
@@ -331,8 +337,12 @@ fn get_request() -> Result<proxima::Request<Bytes>, Box<dyn Error>> {
 /// `RESIDENT_REQUESTS` sequential GETs through its `PipeHandle`, and prints one
 /// `status=<code>` line per response, the first response's body, and
 /// `boots=<n>`: the count of guests this process started.
-fn run_resident_child(config_path: &str, pipe_name: &str) -> Result<(), Box<dyn Error>> {
-    let runtime = child_runtime(true)?;
+fn run_resident_child(
+    config_path: &str,
+    pipe_name: &str,
+    install_runtime: bool,
+) -> Result<(), Box<dyn Error>> {
+    let runtime = child_runtime(install_runtime)?;
     runtime.block_on(async move {
         let handle = build_pipe(config_path, pipe_name).await?;
         let mut report = String::new();
@@ -1210,6 +1220,16 @@ fn write_resident_config(directory: &Path, kernel: &str, extra: &str) -> PathBuf
 /// through `H1ClientUpstream` over `dial_guest`, all three answer 200, and the
 /// process started exactly one guest.
 fn a_resident_vm_upstream_boots_one_guest_and_serves_sequential_gets() {
+    assert_resident_serves(RESIDENT_FLAG);
+}
+
+/// The `proxima serve` shape: no runtime is installed in the process, yet the
+/// resident upstream still boots one guest and answers every GET with 200.
+fn a_resident_vm_upstream_serves_without_an_installed_runtime() {
+    assert_resident_serves(RESIDENT_BARE_FLAG);
+}
+
+fn assert_resident_serves(child_flag: &str) {
     let directory = tempfile::tempdir().expect("create tempdir for the guest build");
     let oci_init = build_linux_bin(&directory.path().join("linux-target"), "oci-init");
     let cache_dir = directory.path().join("oci-cache");
@@ -1223,7 +1243,7 @@ fn a_resident_vm_upstream_boots_one_guest_and_serves_sequential_gets() {
     let signed_self = SignedSelf::prepare();
 
     let output = signed_self
-        .run(&[RESIDENT_FLAG, &config.to_string_lossy(), RESIDENT_PIPE], b"")
+        .run(&[child_flag, &config.to_string_lossy(), RESIDENT_PIPE], b"")
         .expect("config-registered resident upstream serves sequential GETs");
 
     let report = String::from_utf8(output).expect("child prints text");
