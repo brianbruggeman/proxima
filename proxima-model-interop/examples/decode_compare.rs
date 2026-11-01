@@ -110,9 +110,14 @@ impl Top2 {
 }
 
 fn config(gpu_layers: i32) -> ServingConfig<'static> {
+    let defaults = ServingConfig::default();
+    let activation_quantization = env::var_os("DECODE_COMPARE_ACTIVATION_QUANTIZATION").is_some();
     ServingConfig {
         gpu_layers,
-        ..ServingConfig::default()
+        numeric_policy: defaults
+            .numeric_policy
+            .with_activation_quantization(activation_quantization),
+        ..defaults
     }
 }
 

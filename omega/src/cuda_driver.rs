@@ -150,6 +150,13 @@ impl CompileCounters {
     }
 }
 
+/// How a launch completes: waited on here, or left on the stream with an optional window of a
+/// fault array the caller reads after its own synchronization.
+enum Completion<'fault> {
+    Synchronize,
+    Defer(Option<(&'fault CudaSlice<u32>, usize, usize)>),
+}
+
 /// One CUDA context and stream owned by a caller's inference runtime.
 #[derive(Debug, Clone)]
 pub struct CudaDriver {
@@ -912,7 +919,7 @@ impl CudaDriver {
         output_len: usize,
     ) -> Result<(), CudaDriverError> {
         self.launch_f32_persistent_sized_with_sync(
-            arena, kernel, uniforms, output_len, true, None, None,
+            arena, kernel, uniforms, output_len, Completion::Synchronize, None,
         )
     }
 
@@ -946,8 +953,7 @@ impl CudaDriver {
             kernel,
             uniforms,
             output_len,
-            false,
-            deferred_fault,
+            Completion::Defer(deferred_fault),
             function,
         )
     }
@@ -958,10 +964,13 @@ impl CudaDriver {
         kernel: &CudaKernel,
         uniforms: &[u8],
         output_len: usize,
-        synchronize: bool,
-        deferred_fault: Option<(&CudaSlice<u32>, usize, usize)>,
+        completion: Completion<'_>,
         function: Option<&CudaFunction>,
     ) -> Result<(), CudaDriverError> {
+        let (synchronize, deferred_fault) = match completion {
+            Completion::Synchronize => (true, None),
+            Completion::Defer(deferred_fault) => (false, deferred_fault),
+        };
         let Some((output_index, Binding::Output(output_node))) = kernel
             .bindings
             .iter()
