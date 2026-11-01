@@ -33,6 +33,7 @@ use crate::bind::{
 use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
 use crate::lowering::StepState;
+use crate::prism_hadamard::{PrismHadamard, prism_hadamard_from_metadata};
 use crate::profiles::{binding_profile, family_profile};
 
 /// One layer's real tensor shape, derived from
@@ -102,6 +103,12 @@ pub struct RecurrentIntervalHparams {
     /// when the file states it, otherwise true for the dense `qwen35` family, whose converter
     /// reorders the heads without writing the key.
     pub v_head_reordered: bool,
+    /// `prism.hadamard.block_size` of a Hadamard-folded checkpoint, `0` otherwise.
+    pub hadamard_block: u32,
+    /// `prism.hadamard.gdn_v_grouped`.
+    pub hadamard_gdn_v_grouped: bool,
+    /// Whether `token_embd.weight` holds latent rows rotated back after the lookup.
+    pub hadamard_latent_embedding: bool,
     pub layer_kinds: Vec<IntervalLayerKind>,
 }
 
@@ -157,6 +164,7 @@ pub fn recurrent_interval_architecture_from_metadata(
         _ => architecture == "qwen35",
     };
 
+    let hadamard = prism_hadamard_from_metadata(parsed)?;
     let layer_kinds = (0..block_count)
         .map(|layer| IntervalLayerKind::from_interval(layer, full_attention_interval))
         .collect();
@@ -180,6 +188,11 @@ pub fn recurrent_interval_architecture_from_metadata(
         ssm_time_step_rank,
         ssm_inner_size,
         v_head_reordered,
+        hadamard_block: hadamard.as_ref().map_or(0, |prism| prism.block() as u32),
+        hadamard_gdn_v_grouped: hadamard.as_ref().is_some_and(PrismHadamard::gdn_v_grouped),
+        hadamard_latent_embedding: hadamard
+            .as_ref()
+            .is_some_and(PrismHadamard::latent_embedding),
         layer_kinds,
     })
 }
@@ -423,6 +436,9 @@ pub fn descriptor_from_architecture(
         ssm_epsilon: architecture.rms_epsilon,
         v_head_reordered: architecture.v_head_reordered,
         ssm_out_head_major: architecture.v_head_reordered,
+        hadamard_block: architecture.hadamard_block,
+        hadamard_gdn_v_grouped: architecture.hadamard_gdn_v_grouped,
+        hadamard_latent_embedding: architecture.hadamard_latent_embedding,
         expert_shared_feed_forward: 0,
         prefill_width: None,
         gated_attention: true,

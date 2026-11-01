@@ -35,6 +35,7 @@ use alloc::vec::Vec;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
+
 use proxima_tensor::IndexPattern;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{Extent, Op, Reduce, ScalarOp};
@@ -45,7 +46,9 @@ use crate::bind::{
     bind_moe_expert_weights, bind_moe_stacked_experts, bind_native_f32, codec_from_ggml_type,
     reinterpret_f32,
 };
+
 use crate::error::InteropError;
+use crate::prism_hadamard::prism_hadamard_from_metadata;
 use crate::profiles::{BindingProfile, TensorAlias};
 use crate::serving::WeightPrecisionRule;
 
@@ -121,6 +124,7 @@ pub(crate) fn bind_missing_leaves<'file>(
         .map(|tensor| (tensor.name.as_str(), tensor))
         .collect();
     let consumers = consumers_of(program);
+    let prism = prism_hadamard_from_metadata(parsed)?;
     let mut bound: BTreeSet<String> = state
         .owned()
         .iter()
@@ -145,6 +149,11 @@ pub(crate) fn bind_missing_leaves<'file>(
             continue;
         };
         if !bound.insert(leaf.clone()) {
+            continue;
+        }
+        if let Some(data) = prism.as_ref().and_then(|prism| prism.leaf(leaf)) {
+            state.resident_bytes += data.len() * core::mem::size_of::<f32>();
+            state.owned.push((leaf.clone(), data));
             continue;
         }
         let leaf = Leaf {

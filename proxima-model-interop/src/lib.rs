@@ -93,6 +93,8 @@ mod recurrent_config;
 #[cfg(feature = "std")]
 mod recurrent_interval;
 #[cfg(feature = "std")]
+mod prism_hadamard;
+#[cfg(feature = "std")]
 mod recurrent_settings;
 pub mod rope_scaling;
 mod serving;
