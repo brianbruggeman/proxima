@@ -224,6 +224,8 @@ pub struct CudaPlan {
     // cumulative per-plan totals; read by the decode path's per-step telemetry, never printed per dispatch.
     refit_calls: u64,
     patch_memo: Option<(Vec<NodeId>, Vec<usize>)>,
+    // one resolved device function per kernel, so a launch skips the module-cache text comparison
+    functions: Vec<Option<CudaFunction>>,
     emit_calls: u64,
     emit_reused: u64,
     pack_calls: u64,
@@ -625,6 +627,7 @@ impl CudaDriver {
             program: program.to_vec(),
             shapes,
             resolved,
+            functions: vec![None; kernels.len()],
             kernels,
             uniforms,
             block_nodes,
@@ -908,7 +911,9 @@ impl CudaDriver {
         uniforms: &[u8],
         output_len: usize,
     ) -> Result<(), CudaDriverError> {
-        self.launch_f32_persistent_sized_with_sync(arena, kernel, uniforms, output_len, true, None)
+        self.launch_f32_persistent_sized_with_sync(
+            arena, kernel, uniforms, output_len, true, None, None,
+        )
     }
 
     /// Enqueues a kernel on the driver's stream without synchronizing.
@@ -927,6 +932,7 @@ impl CudaDriver {
         uniforms: &[u8],
         output_len: usize,
         deferred_fault: Option<(&CudaSlice<u32>, usize, usize)>,
+        function: Option<&CudaFunction>,
     ) -> Result<(), CudaDriverError> {
         let faults = kernel
             .bindings
@@ -942,6 +948,7 @@ impl CudaDriver {
             output_len,
             false,
             deferred_fault,
+            function,
         )
     }
 
@@ -953,6 +960,7 @@ impl CudaDriver {
         output_len: usize,
         synchronize: bool,
         deferred_fault: Option<(&CudaSlice<u32>, usize, usize)>,
+        function: Option<&CudaFunction>,
     ) -> Result<(), CudaDriverError> {
         let Some((output_index, Binding::Output(output_node))) = kernel
             .bindings
@@ -973,21 +981,19 @@ impl CudaDriver {
         if uniform_index <= output_index {
             return Err(CudaDriverError::BindingContract);
         }
-        let input_nodes: Vec<NodeId> = kernel
-            .bindings
-            .iter()
-            .filter_map(|binding| match binding {
+        let input_nodes = || {
+            kernel.bindings.iter().filter_map(|binding| match binding {
                 Binding::Input(node) | Binding::Indices(node) => Some(*node),
-                Binding::Output(_) | Binding::Uniforms | Binding::Fault => None,
-                Binding::ExpertPayloads(_) | Binding::ExpertDescriptors(_) | Binding::Scratch => {
-                    None
-                }
+                Binding::Output(_)
+                | Binding::Uniforms
+                | Binding::Fault
+                | Binding::ExpertPayloads(_)
+                | Binding::ExpertDescriptors(_)
+                | Binding::Scratch => None,
             })
-            .collect();
-        for node in &input_nodes {
-            if !arena.buffers.contains_key(node) {
-                return Err(CudaDriverError::MissingBuffer(*node));
-            }
+        };
+        if let Some(node) = input_nodes().find(|node| !arena.buffers.contains_key(node)) {
+            return Err(CudaDriverError::MissingBuffer(node));
         }
         let fault_count = kernel
             .bindings
@@ -997,7 +1003,14 @@ impl CudaDriver {
         if fault_count > 1 {
             return Err(CudaDriverError::BindingContract);
         }
-        let function = self.function_for(kernel)?;
+        let looked_up;
+        let function = match function {
+            Some(function) => function,
+            None => {
+                looked_up = self.function_for(kernel)?;
+                &looked_up
+            }
+        };
         self.upload_uniform(arena, output_node, uniforms)?;
         let mut extra_buffers = Vec::with_capacity(kernel.extra_outputs.len());
         for (node, length) in &kernel.extra_outputs {
@@ -1034,10 +1047,7 @@ impl CudaDriver {
             device_output = replacement;
             arena.allocations += 1;
         }
-        if input_nodes
-            .iter()
-            .any(|node| !arena.buffers.contains_key(node))
-        {
+        if input_nodes().any(|node| !arena.buffers.contains_key(&node)) {
             arena
                 .buffers
                 .insert(output_node, CudaGraphBuffer::F32(device_output));
@@ -1058,7 +1068,7 @@ impl CudaDriver {
             .transpose()?;
         let fault_window =
             deferred_fault.map(|(array, offset, slots)| array.slice(offset..offset + slots));
-        let mut args = self.stream.launch_builder(&function);
+        let mut args = self.stream.launch_builder(function);
         for binding in &kernel.bindings[..output_index] {
             match binding {
                 Binding::Input(node) | Binding::Indices(node) => match arena.buffers.get(node) {
@@ -1638,6 +1648,7 @@ impl CudaPlan {
         self.numeric_policy = numeric_policy;
         self.shapes = shapes;
         self.resolved = resolved;
+        self.functions = vec![None; kernels.len()];
         self.kernels = kernels;
         self.uniforms = uniforms;
         proxima_telemetry::debug!(
@@ -1681,7 +1692,7 @@ impl CudaPlan {
         let touched = patches.len();
         for (position, bound) in patches {
             let previous = std::mem::replace(&mut self.resolved[position], bound);
-            crate::cuda::refit_kernel(
+            let text_kept = crate::cuda::refit_kernel(
                 &previous,
                 &self.resolved[position],
                 &mut self.kernels[position],
@@ -1692,6 +1703,9 @@ impl CudaPlan {
                 node: previous.node,
                 error: error.to_string(),
             })?;
+            if !text_kept {
+                self.functions[position] = None;
+            }
             self.uniforms[position] = crate::cuda::pack_cuda_uniforms(&self.resolved[position])
                 .map_err(|error| CudaDriverError::Emit {
                     node: previous.node,
@@ -2117,10 +2131,11 @@ impl CudaPlan {
             .then(|| self.driver.record_event(&self.driver.stream))
             .transpose()?;
         let dispatch_started = host_timing.then(std::time::Instant::now);
-        for (bound, (kernel, uniforms)) in self
+        for (position, (bound, (kernel, uniforms))) in self
             .resolved
             .iter()
             .zip(self.kernels.iter().zip(self.uniforms.iter()))
+            .enumerate()
         {
             let node_started = timing.then(std::time::Instant::now);
             if trace_node == Some(bound.node) {
@@ -2198,6 +2213,9 @@ impl CudaPlan {
                         .find(|(node, _, _)| *node == bound.node)
                         .map(|(_, offset, slots)| (array, *offset, *slots))
                 });
+                if self.functions[position].is_none() && !timing {
+                    self.functions[position] = Some(self.driver.function_for(kernel)?);
+                }
                 let launch = if timing {
                     self.driver.launch_f32_persistent_sized(
                         &mut self.arena,
@@ -2212,6 +2230,7 @@ impl CudaPlan {
                         uniforms,
                         output_len,
                         deferred_fault,
+                        self.functions[position].as_ref(),
                     )
                 };
                 launch.map_err(|error| match error {
