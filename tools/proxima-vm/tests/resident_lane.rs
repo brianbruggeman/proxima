@@ -17,7 +17,7 @@ use proxima_vm::linux::{LinuxBootInputs, LinuxGuestLimits, initramfs_from_init};
 const RINGS: usize = 64;
 
 fn boot_inputs() -> LinuxBootInputs {
-    let initramfs = initramfs_from_init(&common::guest("spin-init")).expect("initramfs builds");
+    let initramfs = initramfs_from_init(&common::guest("idle-init")).expect("initramfs builds");
     LinuxBootInputs {
         kernel: Bytes::from_static(common::kernel()),
         initramfs: Bytes::from(initramfs),

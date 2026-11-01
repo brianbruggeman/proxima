@@ -157,7 +157,7 @@ fn the_image_config_reaches_the_process_as_argv_env_and_cwd() {
 #[test]
 fn a_long_lived_entrypoint_is_reported_running_when_the_linger_ends() {
     let mut image = probe_image();
-    image.layers = vec![probe_layer(&common::guest("spin-init"))];
+    image.layers = vec![probe_layer(&common::guest("idle-init"))];
     image.run.entrypoint = Some(vec!["/bin/entry-probe".into()]);
     image.run.cmd = None;
     let initramfs = initramfs_for(&image, &common::guest("oci-init")).expect("initramfs");

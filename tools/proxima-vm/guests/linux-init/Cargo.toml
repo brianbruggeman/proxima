@@ -25,10 +25,10 @@ path = "src/lib.rs"
 name = "uppercase-init"
 path = "src/bin/uppercase.rs"
 
-# never powers off: the watchdog's fixture
+# blocks in pause(2) and never powers off: the watchdog and resident-lane fixture
 [[bin]]
-name = "spin-init"
-path = "src/bin/spin.rs"
+name = "idle-init"
+path = "src/bin/idle.rs"
 
 # declares more output bytes than it sends: the frame-truncation fixture
 [[bin]]

@@ -154,7 +154,7 @@ fn a_console_smaller_than_the_boot_log_reports_the_dropped_bytes() {
 fn watchdog_fires_on_an_init_that_never_powers_off() {
     let limits = LinuxGuestLimits { watchdog_millis: 1500, ..LinuxGuestLimits::default() };
 
-    let error = run_linux_guest(kernel(), &guest("spin-init"), CMDLINE, b"x", &limits).expect_err("spin never ends");
+    let error = run_linux_guest(kernel(), &guest("idle-init"), CMDLINE, b"x", &limits).expect_err("idle never ends");
 
     let message = error.to_string();
     assert!(message.contains("watchdog forced exit: guest never trapped within the watchdog window"), "{message}");
