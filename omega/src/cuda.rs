@@ -4990,8 +4990,8 @@ mod tests {
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("broadcast kernel emits");
 
-        assert_eq!(kernel.grid.block_width, Some(BLOCK_REDUCE_WIDTH));
-        assert_eq!(kernel.grid.threads, BLOCK_REDUCE_WIDTH);
+        assert_eq!(kernel.grid.block_width, Some(1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD));
+        assert_eq!(kernel.grid.threads, 1024 / BLOCK_REDUCE_ELEMENTS_PER_THREAD);
         assert!(kernel.source.contains("__shared__ float warp_partials[32];"));
         assert!(kernel.source.contains("long output_index = (long)blockIdx.x;"));
     }
