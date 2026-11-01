@@ -481,6 +481,34 @@ mod tests {
         }
     }
 
+    /// Linux's virtio core resets the device (status 0) before every probe,
+    /// then negotiates. The reset must not forget what the device offers, or
+    /// `FEATURES_OK` is refused as acking unoffered bits.
+    #[test]
+    fn features_ok_is_accepted_after_the_reset_linux_writes_first() {
+        let mut device = MmioDevice::<2>::new(DEVICE_ID_CONSOLE, 4, FEATURE_VERSION_1);
+        let handshake = [STATUS_ACKNOWLEDGE, STATUS_ACKNOWLEDGE | STATUS_DRIVER];
+
+        device.apply(write(REG_STATUS, 0)).expect("reset is always legal");
+        for status in handshake {
+            device.apply(write(REG_STATUS, u32::from(status))).expect("handshake step is in order");
+        }
+        device.apply(write(REG_DRIVER_FEATURES_SEL, 1)).expect("select the high feature word");
+        device.apply(write(REG_DRIVER_FEATURES, 1)).expect("ack VIRTIO_F_VERSION_1");
+        let outcome = device.apply(write(
+            REG_STATUS,
+            u32::from(STATUS_ACKNOWLEDGE | STATUS_DRIVER | STATUS_FEATURES_OK),
+        ));
+
+        assert_eq!(
+            outcome,
+            Ok(MmioEffect::StatusTransition(DeviceStatus::FeaturesOk {
+                offered: FEATURE_VERSION_1,
+                acked: FEATURE_VERSION_1,
+            }))
+        );
+    }
+
     /// Worked example (principle 9 / /algorithm-development): the exact
     /// register sequence a minimal conformant driver performs to bring up
     /// virtio-console over the mmio transport, hand-derived from VIRTIO 1.2

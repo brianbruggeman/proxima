@@ -179,8 +179,9 @@ impl Negotiation {
     /// is how the driver responds to `DEVICE_NEEDS_RESET`).
     pub fn write_status(&mut self, byte: u8) -> Result<DeviceStatus, NegotiationError> {
         if byte == 0 {
+            // the offer is the device's, fixed at construction; a driver reset
+            // forgets only what the driver acked, or every first negotiation fails.
             self.state = DeviceStatus::Reset;
-            self.offered = 0;
             self.acked = 0;
             return Ok(self.state);
         }
