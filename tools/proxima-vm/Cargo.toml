@@ -136,6 +136,11 @@ name = "bench_elf"
 harness = false
 required-features = ["elf-bench"]
 
+[[bench]]
+name = "bench_warm_restore_sweep"
+harness = false
+required-features = ["std"]
+
 [lints]
 workspace = true
 
