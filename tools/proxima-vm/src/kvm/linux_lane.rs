@@ -38,9 +38,9 @@ const TSS_ADDRESS: usize = 0xfffb_d000;
 const HUGE_ENTRY_FLAGS: u64 = 0x83;
 
 #[derive(Clone, Copy, Debug)]
-pub struct Load<'a> {
+pub struct Load<Data> {
     pub guest_address: u64,
-    pub data: &'a [u8],
+    pub data: Data,
 }
 
 /// The resident run's view of its host side: the net device the guest sees at
@@ -58,7 +58,6 @@ pub struct LinuxRun<'a> {
     pub boot_params_address: u64,
     pub gdt_address: u64,
     pub page_tables_address: u64,
-    pub loads: &'a [Load<'a>],
     pub input: &'a [u8],
     pub console_capacity: usize,
     pub output_capacity: usize,
@@ -123,14 +122,18 @@ fn fits(ram_bytes: u64, address: u64, length: u64) -> bool {
     address <= ram_bytes && length <= ram_bytes - address
 }
 
-fn lay_out_boot_memory(run: &LinuxRun<'_>, ram: &mut HostMapping) -> KvmResult<()> {
-    for load in run.loads {
-        let length = load.data.len() as u64;
-        if !fits(run.ram_bytes, load.guest_address, length) {
+fn lay_out_boot_memory<Data: AsRef<[u8]>>(
+    run: &LinuxRun<'_>,
+    loads: impl IntoIterator<Item = Load<Data>>,
+    ram: &mut HostMapping,
+) -> KvmResult<()> {
+    for load in loads {
+        let data = load.data.as_ref();
+        if !fits(run.ram_bytes, load.guest_address, data.len() as u64) {
             return Err(KvmError::guest("linux load exceeds guest ram"));
         }
         let start = load.guest_address as usize;
-        ram.bytes_mut()[start..start + load.data.len()].copy_from_slice(load.data);
+        ram.bytes_mut()[start..start + data.len()].copy_from_slice(data);
     }
     let directories = run.ram_bytes.div_ceil(GIGABYTE);
     let table_bytes = (2 + directories) * X86_TABLE_PAGE_SIZE;
@@ -148,7 +151,7 @@ fn lay_out_boot_memory(run: &LinuxRun<'_>, ram: &mut HostMapping) -> KvmResult<(
     write_boot_gdt(&mut ram.bytes_mut()[gdt..gdt + GDT_SIZE]).map_err(|error| KvmError::guest(error.to_string()))
 }
 
-fn prepare(run: &LinuxRun<'_>) -> KvmResult<Prepared> {
+fn prepare<Data: AsRef<[u8]>>(run: &LinuxRun<'_>, loads: impl IntoIterator<Item = Load<Data>>) -> KvmResult<Prepared> {
     if run.ram_bytes == 0 || run.ram_bytes > MAX_RAM || !run.ram_bytes.is_multiple_of(X86_TABLE_PAGE_SIZE) {
         return Err(KvmError::guest("linux ram must be a nonzero page multiple of at most 3 GiB"));
     }
@@ -164,7 +167,7 @@ fn prepare(run: &LinuxRun<'_>) -> KvmResult<Prepared> {
     });
     session.machine().apply(&[slot], "KVM_SET_USER_MEMORY_REGION linux ram")?;
     session.create_vcpu()?;
-    lay_out_boot_memory(run, &mut ram)?;
+    lay_out_boot_memory(run, loads, &mut ram)?;
     let guest_ram = GuestRam::of(&ram);
     session.attach_mapping(ram);
     session.vcpu()?.start_linux_boot(run.entry, run.boot_params_address, run.gdt_address, run.page_tables_address)?;
@@ -173,8 +176,9 @@ fn prepare(run: &LinuxRun<'_>) -> KvmResult<Prepared> {
 
 /// Boots the guest and runs it until it resets, shuts down, overflows its
 /// output budget, or is stopped. The report carries what the guest produced
-/// either way.
-pub fn run_linux(run: &LinuxRun<'_>) -> LinuxOutcome {
+/// either way. `loads` is consumed by the copy into guest ram, so an owning
+/// `Data` is released before the first `KVM_RUN`.
+pub fn run_linux<Data: AsRef<[u8]>>(run: &LinuxRun<'_>, loads: impl IntoIterator<Item = Load<Data>>) -> LinuxOutcome {
     let ledger = ExitLedger::begin();
     let console = RefCell::new(Transmit::with_capacity(run.console_capacity));
     let output = RefCell::new(Transmit::with_capacity(run.output_capacity));
@@ -183,7 +187,7 @@ pub fn run_linux(run: &LinuxRun<'_>) -> LinuxOutcome {
     let entrypoint_stamp = Cell::new(None);
     let mut setup_nanos = 0;
     let mut total_nanos = 0;
-    let (failure, end) = match prepare(run) {
+    let (failure, end) = match prepare(run, loads) {
         Ok(prepared) => {
             setup_nanos = ledger.elapsed_nanos();
             let outcome = drive_prepared(&prepared, run, &ledger, [&console, &output], &tally, [&marker_stamp, &entrypoint_stamp]);

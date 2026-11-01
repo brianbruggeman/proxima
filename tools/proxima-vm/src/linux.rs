@@ -246,26 +246,37 @@ fn launch(prepared: &Prepared<'_>, limits: &LinuxGuestLimits, net: Option<NetWir
     let loads = [
         Load { guest_address: plan.kernel_address, data: &prepared.kernel[plan.kernel_offset..] },
         Load { guest_address: plan.initrd_address, data: prepared.initramfs },
-        Load { guest_address: plan.boot_params_address, data: &prepared.boot_params },
-        Load { guest_address: plan.cmdline_address, data: &prepared.cmdline },
+        Load { guest_address: plan.boot_params_address, data: &prepared.boot_params[..] },
+        Load { guest_address: plan.cmdline_address, data: &prepared.cmdline[..] },
     ];
+    run_loaded(plan, &prepared.framed_input, limits, net, loads)
+}
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+fn run_loaded<Data: AsRef<[u8]>>(
+    plan: &BootPlan,
+    framed_input: &[u8],
+    limits: &LinuxGuestLimits,
+    net: Option<NetWiring<'_>>,
+    loads: [Load<Data>; 4],
+) -> LinuxOutcome {
     let wall_clock_seconds = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(0));
-    run_linux(&LinuxRun {
+    let run = LinuxRun {
         ram_bytes: plan.ram_bytes,
         entry: plan.entry,
         boot_params_address: plan.boot_params_address,
         gdt_address: GDT_ADDRESS,
         page_tables_address: PAGE_TABLES_ADDRESS,
-        loads: &loads,
-        input: &prepared.framed_input,
+        input: framed_input,
         console_capacity: limits.console_capacity,
         output_capacity: limits.output_capacity,
         watchdog_millis: limits.watchdog_millis,
         wall_clock_seconds,
         net,
-    })
+    };
+    run_linux(&run, loads)
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
@@ -284,14 +295,25 @@ fn execute(prepared: &Prepared<'_>, limits: &LinuxGuestLimits) -> Result<LinuxGu
 /// Boots the guest described by `inputs` with the net device wired in and runs it
 /// until `net.stop` ends it or the guest ends itself. The wall-clock watchdog in
 /// `inputs.limits` is not armed: it bounds one request's guest, and a resident
-/// guest's lifetime is its owner's.
+/// guest's lifetime is its owner's. `inputs` is consumed: the kernel and
+/// initramfs live only until they are copied into guest ram.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
-pub(crate) fn boot_resident(inputs: &LinuxBootInputs, net: NetWiring<'_>) -> LinuxOutcome {
-    let limits = LinuxGuestLimits { watchdog_millis: 0, ..inputs.limits };
-    match prepare(&inputs.kernel, &inputs.initramfs, &inputs.cmdline, &[], &limits) {
-        Ok(prepared) => launch(&prepared, &limits, Some(net)),
-        Err(error) => LinuxOutcome::failed(error.to_string()),
-    }
+pub(crate) fn boot_resident(inputs: LinuxBootInputs, net: NetWiring<'_>) -> LinuxOutcome {
+    let LinuxBootInputs { kernel, initramfs, cmdline, limits } = inputs;
+    let limits = LinuxGuestLimits { watchdog_millis: 0, ..limits };
+    let prepared = match prepare(&kernel, &initramfs, &cmdline, &[], &limits) {
+        Ok(prepared) => prepared,
+        Err(error) => return LinuxOutcome::failed(error.to_string()),
+    };
+    let Prepared { plan, boot_params, cmdline, framed_input, .. } = prepared;
+    let loads = [
+        Load { guest_address: plan.kernel_address, data: kernel.slice(plan.kernel_offset..) },
+        Load { guest_address: plan.initrd_address, data: initramfs },
+        Load { guest_address: plan.boot_params_address, data: Bytes::copy_from_slice(&boot_params) },
+        Load { guest_address: plan.cmdline_address, data: Bytes::from(cmdline) },
+    ];
+    drop(kernel);
+    run_loaded(&plan, &framed_input, &limits, Some(net), loads)
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
