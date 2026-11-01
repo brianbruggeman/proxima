@@ -177,7 +177,7 @@ async fn read_response(connection: &mut (impl AsyncReadExt + Unpin), answer: &mu
 }
 
 async fn fetch(upstream: &Upstream, request: &[u8], answer: &mut Answer) -> io::Result<()> {
-    let mut connection = dial_guest_when_listening(upstream).await?;
+    let (mut connection, _dial_attempts) = dial_guest_when_listening(upstream).await?;
     connection.write_all(request).await?;
     read_response(&mut connection, answer).await?;
     connection.close().await
