@@ -90,6 +90,15 @@ pub enum CudaDriverError {
     Emit { node: NodeId, error: String },
     #[error("CUDA graph node {node:?} failed during execution: {error}")]
     Execute { node: NodeId, error: String },
+    #[error(
+        "CUDA appended rows overflow cache node {node:?}: {valid_elements} valid + {new_elements} new elements exceed {capacity_elements} of capacity"
+    )]
+    AppendOverflow {
+        node: NodeId,
+        valid_elements: usize,
+        new_elements: usize,
+        capacity_elements: usize,
+    },
 }
 
 impl From<DriverError> for CudaDriverError {
@@ -171,6 +180,8 @@ pub struct CudaDriver {
     graph_launches: Arc<AtomicU64>,
     // carried recurrent state whose plan was evicted: keyed by state input node, valued by its output node and device buffer, so the replacement plan adopts it without a host round trip.
     parked_state: Arc<Mutex<BTreeMap<NodeId, (NodeId, CudaGraphBuffer)>>>,
+    // appended-row caches whose plan was evicted: keyed by cache input node, valued by its valid row count and device buffer.
+    parked_appends: Arc<Mutex<BTreeMap<NodeId, (u64, CudaGraphBuffer)>>>,
 }
 
 /// Device identity and successful graph upload/launch submissions from one CUDA driver.
@@ -244,11 +255,16 @@ pub struct CudaPlan {
 /// Recurrent state that stays on the device between calls: `pairs` maps a state input node to the
 /// output node that produces its next value, `live` holds the inputs whose arena buffer is already
 /// current, and `host_bytes` counts every carried state byte that crossed PCIe in either direction.
+/// `appends` maps a cache input node to the output node whose rows are appended to it on the
+/// device, `append_rows` holds the valid row count of each live cache input.
 #[derive(Debug, Default)]
 struct StateCarry {
     pairs: BTreeMap<NodeId, NodeId>,
     live: BTreeSet<NodeId>,
     host_bytes: u64,
+    appends: BTreeMap<NodeId, NodeId>,
+    append_rows: BTreeMap<NodeId, u64>,
+    append_cached_rows: u64,
 }
 
 /// Numeric and activation policy for one plan, plus the runtime config when the
@@ -306,6 +322,7 @@ impl CudaDriver {
             graph_uploads: Arc::new(AtomicU64::new(0)),
             graph_launches: Arc::new(AtomicU64::new(0)),
             parked_state: Arc::default(),
+            parked_appends: Arc::default(),
         })
     }
 
@@ -2073,6 +2090,7 @@ impl CudaPlan {
     /// Hands live carried state to the driver so the plan that replaces this one adopts it on
     /// the device instead of re-uploading a stale host copy.
     pub fn park_carried(&mut self) {
+        self.park_appended();
         let live = std::mem::take(&mut self.carry.live);
         let mut parked = self.driver.parked_state.lock();
         for input in live {
@@ -2100,6 +2118,160 @@ impl CudaPlan {
             drained.push((output, values));
         }
         Ok(drained)
+    }
+
+    /// Keeps each `(cache input, new-rows output)` pair's cache on the device: the input leaf has
+    /// shape `[extent_rows, ..row]`, the output `[new_rows, ..row]`. The first call uploads the host
+    /// block (holding `cached_rows` valid rows); afterwards the input is never uploaded and each
+    /// call's output rows are copied device-to-device onto the end of the valid rows, and the output
+    /// is not read back. Returns `false` (carrying nothing) for a resource-constrained plan, an
+    /// output that is not a plan output, or differing row widths. The same set keeps live state; a
+    /// different set requires [`Self::drain_appended_rows`] first.
+    pub fn carry_rows(&mut self, pairs: &[(NodeId, NodeId)], cached_rows: u64) -> bool {
+        let wanted: BTreeMap<NodeId, NodeId> = pairs.iter().copied().collect();
+        if wanted == self.carry.appends {
+            return true;
+        }
+        let appendable = self.constraints.is_none()
+            && pairs
+                .iter()
+                .all(|(input, output)| self.appendable(*input, *output));
+        if !appendable || !self.carry.append_rows.is_empty() {
+            return false;
+        }
+        self.carry.appends = wanted;
+        self.carry.append_cached_rows = cached_rows;
+        self.adopt_parked_appends();
+        true
+    }
+
+    fn appendable(&self, input: NodeId, output: NodeId) -> bool {
+        !self.shapes.of(input).is_empty()
+            && !self.shapes.of(output).is_empty()
+            && self.outputs.contains(&output)
+            && !self.carry.pairs.contains_key(&input)
+            && self.row_width(input) == self.row_width(output)
+    }
+
+    fn row_width(&self, node: NodeId) -> u64 {
+        self.shapes.of(node).iter().skip(1).product()
+    }
+
+    fn adopt_parked_appends(&mut self) {
+        let mut parked = self.driver.parked_appends.lock();
+        for input in self.carry.appends.keys() {
+            if let Some((rows, buffer)) = parked.remove(input) {
+                self.arena.buffers.insert(*input, buffer);
+                self.arena.resident_sources.remove(input);
+                self.carry.append_rows.insert(*input, rows);
+            }
+        }
+    }
+
+    fn park_appended(&mut self) {
+        let live = std::mem::take(&mut self.carry.append_rows);
+        let mut parked = self.driver.parked_appends.lock();
+        for (input, rows) in live {
+            if let Some(buffer) = self.arena.buffers.remove(&input) {
+                parked.insert(input, (rows, buffer));
+            }
+        }
+    }
+
+    /// Reads the valid rows of every live appended cache back to the host, keyed by the cache
+    /// INPUT node, and marks the device copies stale so the next call uploads its host block again.
+    pub fn drain_appended_rows(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, CudaDriverError> {
+        self.park_appended();
+        let parked = std::mem::take(&mut *self.driver.parked_appends.lock());
+        let mut drained = Vec::with_capacity(parked.len());
+        for (input, (rows, buffer)) in parked {
+            let CudaGraphBuffer::F32(slice) = buffer else {
+                return Err(CudaDriverError::BindingContract);
+            };
+            let valid = (rows * self.row_width(input)) as usize;
+            let values = self.driver.stream.clone_dtoh(&slice.slice(0..valid))?;
+            self.carry.host_bytes += (values.len() * std::mem::size_of::<f32>()) as u64;
+            drained.push((input, values));
+        }
+        Ok(drained)
+    }
+
+    fn grow_appended_inputs(&mut self) -> Result<(), CudaDriverError> {
+        let live: Vec<(NodeId, u64)> = self.carry.append_rows.iter().map(|(node, rows)| (*node, *rows)).collect();
+        for (input, rows) in live {
+            let needed = self.shapes.of(input).iter().product::<u64>() as usize;
+            let valid = (rows * self.row_width(input)) as usize;
+            let Some(CudaGraphBuffer::F32(current)) = self.arena.buffers.get(&input) else {
+                return Err(CudaDriverError::MissingBuffer(input));
+            };
+            if current.len() >= needed {
+                continue;
+            }
+            if valid > current.len() {
+                return Err(CudaDriverError::AppendOverflow {
+                    node: input,
+                    valid_elements: valid,
+                    new_elements: 0,
+                    capacity_elements: current.len(),
+                });
+            }
+            let mut grown = self.driver.stream.alloc_zeros::<f32>(needed)?;
+            if valid > 0 {
+                self.driver
+                    .stream
+                    .memcpy_dtod(&current.slice(0..valid), &mut grown.slice_mut(0..valid))?;
+            }
+            self.arena.allocations += 1;
+            self.arena.buffers.insert(input, CudaGraphBuffer::F32(grown));
+        }
+        Ok(())
+    }
+
+    fn append_new_rows(&mut self) -> Result<(), CudaDriverError> {
+        let pairs: Vec<(NodeId, NodeId)> = self.carry.appends.iter().map(|(input, output)| (*input, *output)).collect();
+        for (input, output) in pairs {
+            let Some(rows) = self.carry.append_rows.get(&input).copied() else {
+                continue;
+            };
+            let new_rows = self.shapes.of(output).first().copied().unwrap_or(0);
+            let width = self.row_width(input);
+            self.append_output(input, output, (rows * width) as usize, (new_rows * width) as usize)?;
+            self.carry.append_rows.insert(input, rows + new_rows);
+        }
+        Ok(())
+    }
+
+    fn append_output(
+        &mut self,
+        input: NodeId,
+        output: NodeId,
+        offset: usize,
+        count: usize,
+    ) -> Result<(), CudaDriverError> {
+        let Some(CudaGraphBuffer::F32(mut cache)) = self.arena.buffers.remove(&input) else {
+            return Err(CudaDriverError::MissingBuffer(input));
+        };
+        let copied = match self.arena.buffers.get(&output) {
+            _ if offset + count > cache.len() => Err(CudaDriverError::AppendOverflow {
+                node: input,
+                valid_elements: offset,
+                new_elements: count,
+                capacity_elements: cache.len(),
+            }),
+            Some(CudaGraphBuffer::F32(source)) if source.len() >= count => {
+                if count == 0 {
+                    Ok(())
+                } else {
+                    self.driver
+                        .stream
+                        .memcpy_dtod(&source.slice(0..count), &mut cache.slice_mut(offset..offset + count))
+                        .map_err(CudaDriverError::from)
+                }
+            }
+            _ => Err(CudaDriverError::MissingBuffer(output)),
+        };
+        self.arena.buffers.insert(input, CudaGraphBuffer::F32(cache));
+        copied
     }
 
     /// Bytes of carried recurrent state that crossed PCIe in either direction so far.
@@ -2166,7 +2338,7 @@ impl CudaPlan {
             let source = (block_address(block), block_length(block));
             let resident = self.resident_nodes.binary_search(&node).is_ok()
                 || resident_names.is_some_and(|names| names.contains(name));
-            if self.carry.live.contains(&node) {
+            if self.carry.live.contains(&node) || self.carry.append_rows.contains_key(&node) {
                 continue;
             }
             if resident && self.arena.resident_sources.get(&node) == Some(&source) {
@@ -2225,6 +2397,12 @@ impl CudaPlan {
             if self.carry.pairs.contains_key(&node) {
                 self.carry.host_bytes += block_length(block) as u64;
             }
+            if self.carry.appends.contains_key(&node) {
+                self.carry.host_bytes += block_length(block) as u64;
+                self.carry.append_rows.insert(node, self.carry.append_cached_rows);
+                self.arena.resident_sources.remove(&node);
+                continue;
+            }
             if resident {
                 self.arena.resident_sources.insert(node, source);
                 if let Some(buffer) = self.arena.buffers.get(&node).cloned() {
@@ -2245,6 +2423,7 @@ impl CudaPlan {
                 resident_misses
             );
         }
+        self.grow_appended_inputs()?;
         let upload_phase_us = elapsed_micros(phase_started);
         let submit_started = Instant::now();
         let trace = std::env::var_os("PROXIMA_CUDA_TRACE").is_some();
@@ -2441,6 +2620,7 @@ impl CudaPlan {
                 self.resolved.len()
             );
         }
+        self.append_new_rows()?;
         let submit_us = elapsed_micros(submit_started);
         let sync_phase_started = Instant::now();
         let sync_started = host_timing.then(std::time::Instant::now);
@@ -2498,6 +2678,9 @@ impl CudaPlan {
         let readback_started = timing.then(std::time::Instant::now);
         for node in &self.outputs {
             if self.carry.pairs.iter().any(|(input, output)| output == node && self.carry.live.contains(input)) {
+                continue;
+            }
+            if self.carry.appends.iter().any(|(input, output)| output == node && self.carry.append_rows.contains_key(input)) {
                 continue;
             }
             if trace_outputs {
