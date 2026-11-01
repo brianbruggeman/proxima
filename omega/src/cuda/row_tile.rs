@@ -4,10 +4,9 @@ use alloc::string::String;
 use proxima_tensor::{BoundOp, BoundOpKind, Keep, NumericPolicy};
 
 use super::{
-    Codec, EmitError, WARP_SIZE, cooperative_identity_token, fold_init_tokens, gather_count,
+    Codec, EmitError, WARP_SIZE, chunk_codec, cooperative_identity_token, fold_init_tokens, gather_count,
     logical_packed_address, operand_read, push_body_steps,
-    push_packed_matmul_offset, push_q4_0_chunk_decode, push_q6k_chunk_decode,
-    push_q8_0_chunk_decode, push_reduce_epilogue_write, push_reduction_coord_carry,
+    push_chunk_decode, push_packed_matmul_offset, push_reduce_epilogue_write, push_reduction_coord_carry,
     push_reduction_coord_decompose, reduce_is_cooperative, reduction_dims, scalar_op_expr,
     shuffle_combine_expr,
 };
@@ -307,9 +306,10 @@ fn push_weight_chunk(
     codec: Codec,
 ) -> Result<(), EmitError> {
     match codec {
-        Codec::Q4_0 => push_q4_0_chunk_decode(source, index),
-        Codec::Q8_0 => push_q8_0_chunk_decode(source, index),
-        Codec::Q6K => push_q6k_chunk_decode(source, index),
+        Codec::Q4_0 | Codec::Q8_0 | Codec::Q6K => match chunk_codec(codec) {
+            Some(spec) => push_chunk_decode(source, index, spec),
+            None => return Err(EmitError::CudaUnsupportedCodec { node: resolved.node }),
+        },
         _ => {
             let read = operand_read(resolved.node, index, &format!("(off{index} + slot)"), Some(codec))?;
             source.push_str(&format!("        float weight_chunk{index}[8];\n"));
