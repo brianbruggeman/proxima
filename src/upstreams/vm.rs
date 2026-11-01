@@ -60,6 +60,16 @@ use crate::pipe_factory::PipeFactory;
 use crate::request::{Request, Response};
 use crate::runtime::Runtime;
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use super::vm_resident::build_resident;
+
+#[cfg(not(all(target_os = "linux", target_arch = "x86_64")))]
+async fn build_resident(label: &str, _spec: &VmSpec) -> Result<PipeHandle, ProximaError> {
+    Err(ProximaError::Config(format!(
+        "vm `{label}`: a resident guest needs linux on x86_64"
+    )))
+}
+
 /// PT_LOAD segment cap `elf::parse_elf`'s const generic is instantiated
 /// with. The elf guest links four (`.text`, `.rodata`, `.data`, and the
 /// bss+stack segment `link-elf.ld` declares); headroom for a guest that
@@ -110,6 +120,18 @@ fn default_image_cache_dir() -> PathBuf {
     std::env::temp_dir().join("proxima-oci-cache")
 }
 
+fn default_guest_port() -> u16 {
+    80
+}
+
+fn default_connect_timeout_millis() -> u64 {
+    60_000
+}
+
+fn default_modules_root() -> String {
+    "/usr/lib/modules".to_string()
+}
+
 fn default_ram_mib() -> u32 {
     LinuxGuestLimits::default().ram_mib
 }
@@ -156,6 +178,10 @@ pub struct VmSpec {
     pub max_hypercalls: usize,
     pub output_capacity: usize,
     pub guest_memory_size: u64,
+    pub resident: bool,
+    pub guest_port: u16,
+    pub connect_timeout_millis: u64,
+    pub modules_root: PathBuf,
 }
 
 /// Typed config surface for the `vm` upstream -- either an ELF guest
@@ -255,6 +281,34 @@ pub struct VmConfig {
     #[serde(default = "default_guest_memory_size")]
     #[builder(default = default_guest_memory_size())]
     pub guest_memory_size: u64,
+
+    /// Boot the Linux guest once when the upstream is built and proxy every request
+    /// into the HTTP server inside it, instead of booting a fresh guest per call.
+    /// Only a Linux guest (`kernel_path`) can be resident.
+    #[setting(default = false)]
+    #[serde(default)]
+    #[builder(default = false)]
+    pub resident: bool,
+
+    /// TCP port the resident guest's HTTP server listens on, e.g. `80` for whoami.
+    #[setting(default = 80)]
+    #[serde(default = "default_guest_port")]
+    #[builder(default = default_guest_port())]
+    pub guest_port: u16,
+
+    /// Milliseconds the build waits for a resident guest to accept its first
+    /// connection before failing.
+    #[setting(default = 60000)]
+    #[serde(default = "default_connect_timeout_millis")]
+    #[builder(default = default_connect_timeout_millis())]
+    pub connect_timeout_millis: u64,
+
+    /// Directory holding one `<kernel release>` subdirectory of kernel modules,
+    /// e.g. `/usr/lib/modules`; a resident guest loads its virtio net modules from there.
+    #[setting(default = "/usr/lib/modules")]
+    #[serde(default = "default_modules_root")]
+    #[builder(default = default_modules_root())]
+    pub modules_root: String,
 }
 
 impl Validate for VmConfig {
@@ -305,6 +359,7 @@ impl Validate for VmConfig {
             _ => {}
         }
         self.validate_image(&mut errors);
+        self.validate_resident(&mut errors);
         if self.ram_mib == 0 {
             errors.push(ValidationMessage::new("ram_mib", "must be greater than zero"));
         }
@@ -369,6 +424,27 @@ impl VmConfig {
         }
     }
 
+    fn validate_resident(&self, errors: &mut Vec<ValidationMessage>) {
+        if self.resident && self.kernel_path.is_none() {
+            errors.push(ValidationMessage::new(
+                "resident",
+                "only a Linux guest (kernel_path) can run resident",
+            ));
+        }
+        if self.guest_port == 0 {
+            errors.push(ValidationMessage::new("guest_port", "must be greater than zero"));
+        }
+        if self.connect_timeout_millis == 0 {
+            errors.push(ValidationMessage::new(
+                "connect_timeout_millis",
+                "must be greater than zero",
+            ));
+        }
+        if self.modules_root.is_empty() {
+            errors.push(ValidationMessage::new("modules_root", "must not be empty"));
+        }
+    }
+
     /// Lower the wire config to the runtime [`VmSpec`].
     pub fn into_spec(self) -> Result<VmSpec, ProximaError> {
         self.validate()
@@ -420,6 +496,10 @@ impl VmConfig {
             max_hypercalls: self.max_hypercalls,
             output_capacity: self.output_capacity,
             guest_memory_size: self.guest_memory_size,
+            resident: self.resident,
+            guest_port: self.guest_port,
+            connect_timeout_millis: self.connect_timeout_millis,
+            modules_root: PathBuf::from(self.modules_root),
         })
     }
 }
@@ -443,7 +523,7 @@ enum LoadedGuest {
     Linux { kernel: Bytes, initramfs: Bytes },
 }
 
-fn read_guest_file(label: &str, what: &str, path: &Path) -> Result<Vec<u8>, ProximaError> {
+pub(super) fn read_guest_file(label: &str, what: &str, path: &Path) -> Result<Vec<u8>, ProximaError> {
     std::fs::read(path).map_err(|error| {
         ProximaError::Upstream(format!(
             "vm `{label}`: read {what} `{}`: {error}",
@@ -641,6 +721,7 @@ impl PipeFactory for VmPipeFactory {
             "init_path",
             "oci_init_path",
             "image_cache_dir",
+            "modules_root",
         ]
     }
 
@@ -655,6 +736,9 @@ impl PipeFactory for VmPipeFactory {
                 .map_err(|err| ProximaError::Config(format!("vm config: {err}")))?;
             let label = config.name.clone();
             let parsed = config.into_spec()?;
+            if parsed.resident {
+                return build_resident(&label, &parsed).await;
+            }
             let upstream = into_handle(VmUpstream::new(label, parsed)?);
             let runtime = crate::runtime::installed_runtime().map(|selection| selection.runtime);
             Ok(offloaded(upstream, runtime))
@@ -923,6 +1007,84 @@ mod tests {
         assert_eq!(from_value.cmdline, DEFAULT_LINUX_CMDLINE);
         assert_eq!(from_env, from_builder);
         assert_eq!(from_value, from_builder);
+    }
+
+    #[test]
+    fn resident_env_loader_value_and_builder_yield_identical_state() {
+        let from_env: VmConfig = temp_env::with_vars(
+            [
+                ("PROXIMA_VM_KERNEL_PATH", Some("/boot/vmlinuz-linux")),
+                ("PROXIMA_VM_IMAGE", Some(WHOAMI_IMAGE)),
+                ("PROXIMA_VM_OCI_INIT_PATH", Some("/opt/oci-init")),
+                ("PROXIMA_VM_RESIDENT", Some("true")),
+                ("PROXIMA_VM_GUEST_PORT", Some("8080")),
+                ("PROXIMA_VM_CONNECT_TIMEOUT_MILLIS", Some("5000")),
+                ("PROXIMA_VM_MODULES_ROOT", Some("/opt/modules")),
+            ],
+            || VmConfig::from_env().expect("VmConfig::from_env"),
+        );
+        let from_value: VmConfig = serde_json::from_value(json!({
+            "kernel_path": "/boot/vmlinuz-linux",
+            "image": WHOAMI_IMAGE,
+            "oci_init_path": "/opt/oci-init",
+            "resident": true,
+            "guest_port": 8080,
+            "connect_timeout_millis": 5000,
+            "modules_root": "/opt/modules",
+        }))
+        .expect("from_value");
+        let from_builder = VmConfig::builder()
+            .kernel_path("/boot/vmlinuz-linux")
+            .image(WHOAMI_IMAGE)
+            .oci_init_path("/opt/oci-init")
+            .resident(true)
+            .guest_port(8080)
+            .connect_timeout_millis(5000)
+            .modules_root("/opt/modules")
+            .build();
+
+        assert_eq!(from_env, from_value, "env loader and value diverged");
+        assert_eq!(from_value, from_builder, "value and builder diverged");
+        let spec = from_builder.into_spec().expect("resident spec");
+        assert!(spec.resident);
+        assert_eq!(spec.guest_port, 8080);
+        assert_eq!(spec.connect_timeout_millis, 5000);
+        assert_eq!(spec.modules_root, PathBuf::from("/opt/modules"));
+    }
+
+    #[test]
+    fn resident_defaults_are_per_call_whoami_friendly() {
+        let config = VmConfig::builder().kernel_path("/k").init_path("/i").build();
+
+        assert!(!config.resident);
+        assert_eq!(config.guest_port, 80);
+        assert_eq!(config.connect_timeout_millis, 60_000);
+        assert_eq!(config.modules_root, "/usr/lib/modules");
+    }
+
+    #[proxima::test]
+    #[case::resident_elf(
+        VmConfig::builder().guest_image_path("/g.elf").resident(true).build(),
+        "resident: only a Linux guest (kernel_path) can run resident"
+    )]
+    #[case::zero_guest_port(
+        VmConfig::builder().kernel_path("/k").init_path("/i").resident(true).guest_port(0).build(),
+        "guest_port: must be greater than zero"
+    )]
+    #[case::zero_connect_timeout(
+        VmConfig::builder().kernel_path("/k").init_path("/i").resident(true).connect_timeout_millis(0).build(),
+        "connect_timeout_millis: must be greater than zero"
+    )]
+    async fn invalid_resident_configs_are_rejected_with_the_field_named(
+        #[case] config: VmConfig,
+        #[case] expected: &str,
+    ) {
+        let outcome = config.into_spec();
+
+        assert!(
+            matches!(&outcome, Err(ProximaError::Config(message)) if message.contains(expected)),
+            "expected a config error containing {expected:?}, got {outcome:?}"
+        );
     }
 
     #[test]
@@ -1260,6 +1422,10 @@ mod tests {
                 max_hypercalls: 16,
                 output_capacity: 64,
                 guest_memory_size: 2 * 1024 * 1024,
+                resident: false,
+                guest_port: 80,
+                connect_timeout_millis: 60_000,
+                modules_root: PathBuf::from("/usr/lib/modules"),
             },
         );
 
