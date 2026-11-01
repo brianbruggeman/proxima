@@ -26,6 +26,7 @@ struct Fixture {
     leaves: Vec<(String, NodeId)>,
     mixer_out: NodeId,
     taps: SsmMixerTaps,
+    symbols: [u64; 1],
 }
 
 fn leaf(program: &mut Vec<proxima_tensor::Op>, name: &str, shape: Vec<Extent>) -> NodeId {
@@ -144,14 +145,14 @@ fn fixture(positions: u32) -> Fixture {
         leaves,
         mixer_out,
         taps,
+        symbols: [u64::from(positions)],
     }
 }
 
-fn leaf_data(
-    program: &[proxima_tensor::Op],
-    leaves: &[(String, NodeId)],
-) -> Vec<(String, Vec<f32>)> {
-    let shapes = infer(program, &[1]).expect("the mixer program infers at one position");
+fn leaf_data(fixture: &Fixture) -> Vec<(String, Vec<f32>)> {
+    let shapes = infer(&fixture.program, &fixture.symbols)
+        .expect("the mixer program infers at the width it was built for");
+    let leaves = &fixture.leaves;
     let mut lcg = Lcg(11);
     leaves
         .iter()
@@ -201,7 +202,7 @@ fn evaluate(
     roots: &[NodeId],
     policy: NumericPolicy,
 ) -> proxima_tensor::cpu::Evaluated {
-    let mut plan = plan_named(engine, driver, &fixture.program, &[1], named, roots, policy)
+    let mut plan = plan_named(engine, driver, &fixture.program, &fixture.symbols, named, roots, policy)
         .expect("the mixer plans");
     execute_plan_named(&mut plan, named).expect("the mixer executes")
 }
@@ -218,7 +219,7 @@ fn relative_error(expected: &[f32], actual: &[f32]) -> f32 {
 
 fn assert_taps_match_cpu(positions: u32) {
     let fixture = fixture(positions);
-    let owned = leaf_data(&fixture.program, &fixture.leaves);
+    let owned = leaf_data(&fixture);
     let named: Vec<(&str, QuantizedBlock<'_>)> = owned
         .iter()
         .map(|(name, data)| (name.as_str(), QuantizedBlock::Float32(data)))
@@ -251,7 +252,7 @@ fn assert_taps_match_cpu(positions: u32) {
 
 fn assert_fused_roots_match_cpu(positions: u32) {
     let fixture = fixture(positions);
-    let owned = leaf_data(&fixture.program, &fixture.leaves);
+    let owned = leaf_data(&fixture);
     let named: Vec<(&str, QuantizedBlock<'_>)> = owned
         .iter()
         .map(|(name, data)| (name.as_str(), QuantizedBlock::Float32(data)))
@@ -354,7 +355,7 @@ fn mixer_out_with_ssm_out(
 #[test]
 fn packed_q1_0_ssm_out_matches_its_float32_decode_on_cpu_and_cuda() {
     let fixture = fixture(1);
-    let owned = leaf_data(&fixture.program, &fixture.leaves);
+    let owned = leaf_data(&fixture);
     let value_dim = (KV_HEADS * GROUP * HEAD_DIM) as usize;
     let projection = packed_out_projection(value_dim, MODEL_DIM as usize);
 
