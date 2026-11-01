@@ -135,7 +135,7 @@ impl HadamardFold {
     pub fn rotate_flat(
         &self,
         program: &mut Vec<Op>,
-        x: NodeId,
+        activation: NodeId,
         width: u32,
         lead: &str,
     ) -> Result<NodeId, TensorError> {
@@ -147,7 +147,7 @@ impl HadamardFold {
             ScalarOp::Multiply,
             &[
                 (
-                    x,
+                    activation,
                     leading(
                         lead,
                         &alloc::format!("{}*b+{}*a+c", self.block, self.inner),
@@ -197,7 +197,7 @@ impl HadamardFold {
     pub fn rotate_heads(
         &self,
         program: &mut Vec<Op>,
-        x: NodeId,
+        activation: NodeId,
         heads: u32,
         head_dim: u32,
         lead: &str,
@@ -221,7 +221,7 @@ impl HadamardFold {
             ScalarOp::Multiply,
             &[
                 (
-                    x,
+                    activation,
                     leading(
                         lead,
                         &alloc::format!("{heads_per_block}*b+q,{}*r+c", self.inner),
@@ -303,7 +303,7 @@ impl HadamardFold {
     pub fn restore_flat(
         &self,
         program: &mut Vec<Op>,
-        z: NodeId,
+        latent: NodeId,
         width: u32,
     ) -> Result<NodeId, TensorError> {
         let blocks = width / self.block;
@@ -315,7 +315,7 @@ impl HadamardFold {
             ScalarOp::Multiply,
             &[
                 (
-                    z,
+                    latent,
                     alloc::format!("s,{}*b+{}*a+c->sbac", self.block, self.inner).as_str(),
                 ),
                 (donor, "bac->sbac"),
@@ -462,7 +462,7 @@ fn leading(lead: &str, read: &str, iteration: &str) -> String {
 /// from `Iota`s does it.
 pub fn merge_head_axes(
     program: &mut Vec<Op>,
-    x: NodeId,
+    activation: NodeId,
     x_axes: &str,
     lead: &str,
     kv_heads: u32,
@@ -524,7 +524,7 @@ pub fn merge_head_axes(
         DType::FLOAT32,
         ScalarOp::Multiply,
         &[
-            (x, alloc::format!("{x_axes}->{lead}hugd").as_str()),
+            (activation, alloc::format!("{x_axes}->{lead}hugd").as_str()),
             (selector, alloc::format!("hug->{lead}hugd").as_str()),
         ],
     )?;
