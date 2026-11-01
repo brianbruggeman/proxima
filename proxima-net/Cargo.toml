@@ -213,3 +213,8 @@ required-features = ["xdp"]
 name = "xdp_zerocopy_probe"
 path = "examples/xdp_zerocopy_probe.rs"
 required-features = ["xdp"]
+
+[[bench]]
+name = "bench_tcp_stack"
+harness = false
+required-features = ["alloc"]
