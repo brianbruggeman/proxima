@@ -111,7 +111,7 @@ pub(super) fn mma_gemm_plan(
         (None, Some(codec)) => (1, *codec),
         _ => return None,
     };
-    let shape = codec_shape(codec)?;
+    codec_shape(codec)?;
     let activation = 1 - weight;
     let operands = resolved.operands();
     let reduce_extent: u64 = reduction_dims(resolved, output_axes)
@@ -126,9 +126,8 @@ pub(super) fn mma_gemm_plan(
         && !logical_packed_address()
         && reduce_is_cooperative(resolved, quantized, numeric_policy)
         && !reduction_dims(resolved, output_axes).is_empty()
-        && reduce_extent % STAGE_K as u64 == 0
-        && reduce_extent % shape.block_elements.min(STAGE_K) as u64 == 0
-        && weight_layout.base % 256 == 0;
+        && reduce_extent.is_multiple_of(STAGE_K as u64)
+        && weight_layout.base.rem_euclid(256) == 0;
     if !eligible {
         return None;
     }
@@ -422,9 +421,11 @@ pub(super) fn push_mma_gemm_body(
             "    __shared__ float act_sum[{TOKEN_TILE}][2];\n"
         ));
     }
-    source.push_str("    float acc[8][4];\n");
-    source.push_str("    #pragma unroll\n    for (int tile = 0; tile < 8; tile++) {\n");
-    source.push_str("        #pragma unroll\n        for (int slot = 0; slot < 4; slot++) { acc[tile][slot] = 0.0f; }\n    }\n");
+    for tile in 0..WARP_TILES {
+        source.push_str(&format!(
+            "    float acc{tile}[4] = {{0.0f, 0.0f, 0.0f, 0.0f}};\n"
+        ));
+    }
 
     source.push_str(&format!(
         "    for (long stage_first = 0; stage_first < u.reduction_total; stage_first += {STAGE_K}) {{\n"
@@ -543,66 +544,133 @@ pub(super) fn push_mma_gemm_body(
     }
     source.push_str("        __syncthreads();\n");
 
-    source.push_str("        #pragma unroll\n        for (int half_index = 0; half_index < 2; half_index++) {\n");
-    source.push_str("            float scratch[8][4];\n");
-    source.push_str("            #pragma unroll\n            for (int tile = 0; tile < 8; tile++) {\n");
-    source.push_str("                #pragma unroll\n                for (int slot = 0; slot < 4; slot++) { scratch[tile][slot] = 0.0f; }\n            }\n");
-    source.push_str("            #pragma unroll\n            for (int step = 0; step < 2; step++) {\n");
-    source.push_str("                const int k_base = half_index * 16 + step * 8 + quad * 2;\n");
-    source.push_str("                const unsigned int a_low = *(const unsigned int *)&weight_q[warp_feature * 16 + group][k_base];\n");
-    source.push_str("                const unsigned int a_high = *(const unsigned int *)&weight_q[warp_feature * 16 + group + 8][k_base];\n");
-    source.push_str("                #pragma unroll\n                for (int tile = 0; tile < 8; tile++) {\n");
-    source.push_str("                    if (token_first + warp_token * 64 + tile * 8 >= token_total) { continue; }\n");
-    source.push_str("                    const int token_row = warp_token * 64 + tile * 8 + group;\n");
-    source.push_str("                    mma_m16n8k8(scratch[tile], a_low, a_high, *(const unsigned int *)&act_high[token_row][k_base]);\n");
-    source.push_str("                    mma_m16n8k8(scratch[tile], a_low, a_high, *(const unsigned int *)&act_low[token_row][k_base]);\n");
-    source.push_str("                }\n            }\n");
-    source.push_str("            const float scale_low = weight_scale[warp_feature * 16 + group][half_index];\n");
-    source.push_str("            const float scale_high = weight_scale[warp_feature * 16 + group + 8][half_index];\n");
-    if has_minimum {
-        source.push_str("            const float minimum_low = weight_minimum[warp_feature * 16 + group][half_index];\n");
-        source.push_str("            const float minimum_high = weight_minimum[warp_feature * 16 + group + 8][half_index];\n");
+    for half_index in 0..2usize {
+        source.push_str("        {
+");
+        for tile in 0..WARP_TILES {
+            source.push_str(&format!(
+                "            float scratch{tile}[4] = {{0.0f, 0.0f, 0.0f, 0.0f}};
+"
+            ));
+        }
+        for step in 0..2usize {
+            let k_base = format!("{} + quad * 2", half_index * 16 + step * 8);
+            source.push_str(&format!(
+                "            {{
+                const unsigned int a_low = *(const unsigned int *)&weight_q[warp_feature * 16 + group][{k_base}];
+                const unsigned int a_high = *(const unsigned int *)&weight_q[warp_feature * 16 + group + 8][{k_base}];
+"
+            ));
+            for tile in 0..WARP_TILES {
+                source.push_str(&format!(
+                    "                if (token_first + warp_token * {WARP_TOKENS} + {} < token_total) {{
+                    const int token_row = warp_token * {WARP_TOKENS} + {} + group;
+                    mma_m16n8k8(scratch{tile}, a_low, a_high, *(const unsigned int *)&act_high[token_row][{k_base}]);
+                    mma_m16n8k8(scratch{tile}, a_low, a_high, *(const unsigned int *)&act_low[token_row][{k_base}]);
+                }}
+",
+                    tile * 8,
+                    tile * 8
+                ));
+            }
+            source.push_str("            }
+");
+        }
+        source.push_str(&format!(
+            "            const float scale_low = weight_scale[warp_feature * 16 + group][{half_index}];
+            const float scale_high = weight_scale[warp_feature * 16 + group + 8][{half_index}];
+"
+        ));
+        if has_minimum {
+            source.push_str(&format!(
+                "            const float minimum_low = weight_minimum[warp_feature * 16 + group][{half_index}];
+            const float minimum_high = weight_minimum[warp_feature * 16 + group + 8][{half_index}];
+"
+            ));
+        }
+        for tile in 0..WARP_TILES {
+            source.push_str(&format!(
+                "            if (token_first + warp_token * {WARP_TOKENS} + {} < token_total) {{
+",
+                tile * 8
+            ));
+            if has_minimum {
+                source.push_str(&format!(
+                    "                const int token_column = warp_token * {WARP_TOKENS} + {} + quad * 2;
+                const float sum_a = act_sum[token_column][{half_index}];
+                const float sum_b = act_sum[token_column + 1][{half_index}];
+                acc{tile}[0] += scale_low * scratch{tile}[0] - minimum_low * sum_a;
+                acc{tile}[1] += scale_low * scratch{tile}[1] - minimum_low * sum_b;
+                acc{tile}[2] += scale_high * scratch{tile}[2] - minimum_high * sum_a;
+                acc{tile}[3] += scale_high * scratch{tile}[3] - minimum_high * sum_b;
+",
+                    tile * 8
+                ));
+            } else {
+                source.push_str(&format!(
+                    "                acc{tile}[0] += scale_low * scratch{tile}[0];
+                acc{tile}[1] += scale_low * scratch{tile}[1];
+                acc{tile}[2] += scale_high * scratch{tile}[2];
+                acc{tile}[3] += scale_high * scratch{tile}[3];
+"
+                ));
+            }
+            source.push_str("            }
+");
+        }
+        source.push_str("        }
+");
     }
-    source.push_str("            #pragma unroll\n            for (int tile = 0; tile < 8; tile++) {\n");
-    source.push_str("                if (token_first + warp_token * 64 + tile * 8 >= token_total) { continue; }\n");
-    if has_minimum {
-        source.push_str("                const int token_column = warp_token * 64 + tile * 8 + quad * 2;\n");
-        source.push_str("                const float sum_a = act_sum[token_column][half_index];\n");
-        source.push_str("                const float sum_b = act_sum[token_column + 1][half_index];\n");
-        source.push_str("                acc[tile][0] += scale_low * scratch[tile][0] - minimum_low * sum_a;\n");
-        source.push_str("                acc[tile][1] += scale_low * scratch[tile][1] - minimum_low * sum_b;\n");
-        source.push_str("                acc[tile][2] += scale_high * scratch[tile][2] - minimum_high * sum_a;\n");
-        source.push_str("                acc[tile][3] += scale_high * scratch[tile][3] - minimum_high * sum_b;\n");
-    } else {
-        source.push_str("                acc[tile][0] += scale_low * scratch[tile][0];\n");
-        source.push_str("                acc[tile][1] += scale_low * scratch[tile][1];\n");
-        source.push_str("                acc[tile][2] += scale_high * scratch[tile][2];\n");
-        source.push_str("                acc[tile][3] += scale_high * scratch[tile][3];\n");
+    source.push_str("        __syncthreads();
     }
-    source.push_str("            }\n        }\n");
-    source.push_str("        __syncthreads();\n    }\n");
+");
 
-    source.push_str("    #pragma unroll\n    for (int tile = 0; tile < 8; tile++) {\n");
-    source.push_str("        #pragma unroll\n        for (int slot = 0; slot < 4; slot++) {\n");
-    source.push_str("            const long feature = feature_first + warp_feature * 16 + group + (slot >> 1) * 8;\n");
-    source.push_str("            const long token = token_first + warp_token * 64 + tile * 8 + quad * 2 + (slot & 1);\n");
-    source.push_str("            if (feature >= feature_total || token >= token_total) { continue; }\n");
-    source.push_str(&format!("            long output_coord[{output_rank}];\n"));
-    source.push_str("            long feature_rest = feature;\n            long token_rest = token;\n");
+    source.push_str("    float flat[32];
+");
+    for tile in 0..WARP_TILES {
+        for slot in 0..4usize {
+            source.push_str(&format!(
+                "    flat[{}] = acc{tile}[{slot}];
+",
+                tile * 4 + slot
+            ));
+        }
+    }
+    source.push_str("    #pragma unroll 1
+    for (int index = 0; index < 32; index++) {
+");
+    source.push_str("        const int tile = index >> 2;
+        const int slot = index & 3;
+");
+    source.push_str("        const long feature = feature_first + warp_feature * 16 + group + (slot >> 1) * 8;
+");
+    source.push_str("        const long token = token_first + warp_token * 64 + tile * 8 + quad * 2 + (slot & 1);
+");
+    source.push_str("        if (feature >= feature_total || token >= token_total) { continue; }
+");
+    source.push_str(&format!("        long output_coord[{output_rank}];
+"));
+    source.push_str("        long feature_rest = feature;
+        long token_rest = token;
+");
     for &position in plan.feature_positions.iter().rev() {
         source.push_str(&format!(
-            "            output_coord[{position}] = feature_rest % u.output_extents[{position}]; feature_rest /= u.output_extents[{position}];\n"
+            "        output_coord[{position}] = feature_rest % u.output_extents[{position}]; feature_rest /= u.output_extents[{position}];
+"
         ));
     }
     for &position in plan.token_positions.iter().rev() {
         source.push_str(&format!(
-            "            output_coord[{position}] = token_rest % u.output_extents[{position}]; token_rest /= u.output_extents[{position}];\n"
+            "        output_coord[{position}] = token_rest % u.output_extents[{position}]; token_rest /= u.output_extents[{position}];
+"
         ));
     }
-    source.push_str("            long out_offset = u.out_base;\n");
+    source.push_str("        long out_offset = u.out_base;
+");
     for (position, axis) in output_axes.iter().enumerate() {
         source.push_str(&format!(
-            "            out_offset += output_coord[{position}] * u.out_strides[{axis}];\n"
+            "        out_offset += output_coord[{position}] * u.out_strides[{axis}];
+"
         ));
     }
     push_reduce_epilogue_write(
@@ -611,11 +679,12 @@ pub(super) fn push_mma_gemm_body(
         epilogue_operands,
         output_rank,
         element_type,
-        "            ",
+        "        ",
         |dim| format!("output_coord[{dim}]"),
-        "acc[tile][slot]",
+        "flat[index]",
         "out_offset",
     );
-    source.push_str("        }\n    }\n");
+    source.push_str("    }
+");
     Ok(())
 }
