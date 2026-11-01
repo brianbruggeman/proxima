@@ -282,11 +282,14 @@ fn execute(prepared: &Prepared<'_>, limits: &LinuxGuestLimits) -> Result<LinuxGu
 }
 
 /// Boots the guest described by `inputs` with the net device wired in and runs it
-/// until `net.stop` ends it or the guest ends itself.
+/// until `net.stop` ends it or the guest ends itself. The wall-clock watchdog in
+/// `inputs.limits` is not armed: it bounds one request's guest, and a resident
+/// guest's lifetime is its owner's.
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) fn boot_resident(inputs: &LinuxBootInputs, net: NetWiring<'_>) -> LinuxOutcome {
-    match prepare(&inputs.kernel, &inputs.initramfs, &inputs.cmdline, &[], &inputs.limits) {
-        Ok(prepared) => launch(&prepared, &inputs.limits, Some(net)),
+    let limits = LinuxGuestLimits { watchdog_millis: 0, ..inputs.limits };
+    match prepare(&inputs.kernel, &inputs.initramfs, &inputs.cmdline, &[], &limits) {
+        Ok(prepared) => launch(&prepared, &limits, Some(net)),
         Err(error) => LinuxOutcome::failed(error.to_string()),
     }
 }
