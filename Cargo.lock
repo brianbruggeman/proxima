@@ -4239,6 +4239,7 @@ dependencies = [
  "bytes",
  "conflaguration",
  "criterion",
+ "crossbeam-queue",
  "futures",
  "futures-rustls",
  "h3",

@@ -62,6 +62,7 @@ bon = { workspace = true }
 conflaguration = { workspace = true, features = ["derive", "toml"] }
 xxhash-rust = { workspace = true, optional = true, features = ["xxh3"] }
 thiserror = { workspace = true, optional = true }
+crossbeam-queue.workspace = true
 
 [dev-dependencies]
 proxima = { package = "proxima-lib", path = "..", features = ["test-support-tokio"] }
