@@ -4,8 +4,7 @@ use alloc::string::String;
 use proxima_tensor::{BoundOp, BoundOpKind, DType, Keep, NumericPolicy, ReduceInit, ScalarOp, StepArg};
 
 use super::block_dot::{BlockDot, DOT_ELEMENTS, block_dot_i8};
-use super::{Codec, EmitError, gather_count, reduction_dims};
-use crate::identity::reduce_epilogue_is_identity;
+use super::{Codec, EmitError, gather_count, push_reduce_epilogue_write, reduction_dims};
 
 /// Warps in one block of a staged matvec.
 pub(super) const STAGED_WARPS: usize = 8;
@@ -47,8 +46,6 @@ pub(super) fn staged_matvec_plan(
         init: ReduceInit::Zero,
         keep: Keep::Reduce,
         output_axes,
-        epilogue_body,
-        epilogue_operands,
         epilogue_broadcast_axes,
         operands,
         ..
@@ -75,7 +72,7 @@ pub(super) fn staged_matvec_plan(
     let (_, activation_layout, _) = operands.get(activation_slot)?;
     let shared_by_every_row = output_axes
         .iter()
-        .all(|axis| activation_layout.stride(*axis) == 0);
+        .all(|axis| activation_layout.stride(*axis) == 0 || resolved.extents[usize::from(*axis)] == 1);
     let stageable = reduction > 0
         && reduction <= MAX_STAGED_REDUCTION
         && reduction.is_multiple_of(dot.elements as u64);
@@ -83,8 +80,7 @@ pub(super) fn staged_matvec_plan(
         && stageable
         && shared_by_every_row
         && epilogue_broadcast_axes.is_empty()
-        && gather_count(resolved) == 0
-        && reduce_epilogue_is_identity(epilogue_body, epilogue_operands))
+        && gather_count(resolved) == 0)
     .then_some(StagedMatvec {
         weight_slot,
         activation_slot,
@@ -123,7 +119,7 @@ pub(super) fn push_staged_matvec_body(
     push_stage(source, plan);
     push_row_setup(source, resolved, plan, output_axes);
     push_fold(source, plan);
-    push_write(source);
+    push_write(source, resolved, output_axes.len());
     Ok(())
 }
 
@@ -157,6 +153,9 @@ fn push_stage(source: &mut String, plan: &StagedMatvec) {
 fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, output_axes: &[u16]) {
     let weight_slot = plan.weight_slot;
     let (_, weight_layout, _) = &resolved.operands()[weight_slot];
+    for index in 0..output_axes.len() {
+        source.push_str(&format!("    long coord{index}_rows[{STAGED_ROWS_PER_WARP}];\n"));
+    }
     source.push_str(&format!(
         "    const long first_row = ((long)blockIdx.x * {STAGED_WARPS} + (long)warp) * {STAGED_ROWS_PER_WARP};\n\
          \x20   long row_block[{STAGED_ROWS_PER_WARP}];\n\
@@ -170,7 +169,8 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
     for (index, axis) in output_axes.iter().enumerate().rev() {
         source.push_str(&format!(
             "        long coord{index} = remaining % u.output_extents[{index}]; remaining /= u.output_extents[{index}];\n\
-             \x20       out_offset[row] += coord{index} * u.out_strides[{axis}];\n"
+             \x20       out_offset[row] += coord{index} * u.out_strides[{axis}];\n\
+             \x20       coord{index}_rows[row] = coord{index};\n"
         ));
     }
     for (index, axis) in output_axes.iter().enumerate() {
@@ -225,14 +225,32 @@ fn push_fold(source: &mut String, plan: &StagedMatvec) {
     ));
 }
 
-fn push_write(source: &mut String) {
+fn push_write(source: &mut String, resolved: &BoundOp, output_rank: usize) {
     source.push_str(&format!(
         "    #pragma unroll\n\
          \x20   for (int row = 0; row < {STAGED_ROWS_PER_WARP}; row++) {{\n\
          \x20       float total = accumulator[row];\n\
          \x20       #pragma unroll\n\
          \x20       for (int shift = 16; shift > 0; shift >>= 1) {{ total += __shfl_down_sync(0xffffffffu, total, shift); }}\n\
-         \x20       if (lane == 0u && first_row + row < u.output_total) {{ out[out_offset[row]] = total; }}\n\
-         \x20   }}\n"
+         \x20       if (lane == 0u && first_row + row < u.output_total) {{\n"
     ));
+    if let BoundOpKind::Reduce {
+        epilogue_body,
+        epilogue_operands,
+        ..
+    } = &resolved.kind
+    {
+        push_reduce_epilogue_write(
+            source,
+            epilogue_body,
+            epilogue_operands,
+            output_rank,
+            "float",
+            "            ",
+            |dim| format!("coord{dim}_rows[row]"),
+            "total",
+            "out_offset[row]",
+        );
+    }
+    source.push_str("        }\n    }\n");
 }
