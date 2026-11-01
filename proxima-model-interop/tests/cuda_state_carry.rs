@@ -1,4 +1,5 @@
 #![cfg(feature = "cuda")]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::string::String;
 

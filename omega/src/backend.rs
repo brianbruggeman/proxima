@@ -1916,6 +1916,52 @@ pub fn execute_plan_named_metal_op_timed_with_expert_sources(
     }
 }
 
+/// Keeps the listed `(state input, state output)` pairs on the device across
+/// [`execute_plan_named_with_resident_names`] calls of a [`Plan::Cuda`]. Returns
+/// whether the plan carries them; every other backend returns `false`.
+#[cfg(feature = "cuda-driver")]
+pub fn carry_cuda_state(plan: &mut Plan, pairs: &[(NodeId, NodeId)]) -> bool {
+    match plan {
+        Plan::Cuda(cuda_plan) => cuda_plan.carry_state(pairs),
+        #[allow(unreachable_patterns)]
+        _ => false,
+    }
+}
+
+/// Hands a [`Plan::Cuda`]'s device-carried state to the driver before the plan
+/// is evicted, so the plan that replaces it adopts the state on the device.
+#[cfg(feature = "cuda-driver")]
+pub fn park_cuda_carried(plan: &mut Plan) {
+    if let Plan::Cuda(cuda_plan) = plan {
+        cuda_plan.park_carried();
+    }
+}
+
+/// Reads the device-carried state of a [`Plan::Cuda`] back to the host, keyed
+/// by the output node that produced each value.
+///
+/// # Errors
+/// A device read failure.
+#[cfg(feature = "cuda-driver")]
+pub fn drain_cuda_carried(plan: &mut Plan) -> Result<Vec<(NodeId, Vec<f32>)>, BackendError> {
+    match plan {
+        Plan::Cuda(cuda_plan) => Ok(cuda_plan.drain_carried()?),
+        #[allow(unreachable_patterns)]
+        _ => Ok(Vec::new()),
+    }
+}
+
+/// Carried state bytes that crossed PCIe in either direction; `None` off CUDA.
+#[cfg(feature = "cuda-driver")]
+#[must_use]
+pub fn cuda_carried_host_bytes(plan: &Plan) -> Option<u64> {
+    match plan {
+        Plan::Cuda(cuda_plan) => Some(cuda_plan.carried_host_bytes()),
+        #[allow(unreachable_patterns)]
+        _ => None,
+    }
+}
+
 #[cfg(all(test, feature = "cpu"))]
 // hand-built fixtures: an expect failure IS the test failing, same as `mod tests` below.
 #[allow(clippy::expect_used)]
@@ -2169,51 +2215,5 @@ mod tests {
             "gpu with no driver compiled must never silently run on cpu",
         );
         assert!(matches!(error, BackendError::NoGpuDriver));
-    }
-}
-
-/// Keeps the listed `(state input, state output)` pairs on the device across
-/// [`execute_plan_named_with_resident_names`] calls of a [`Plan::Cuda`]. Returns
-/// whether the plan carries them; every other backend returns `false`.
-#[cfg(feature = "cuda-driver")]
-pub fn carry_cuda_state(plan: &mut Plan, pairs: &[(NodeId, NodeId)]) -> bool {
-    match plan {
-        Plan::Cuda(cuda_plan) => cuda_plan.carry_state(pairs),
-        #[allow(unreachable_patterns)]
-        _ => false,
-    }
-}
-
-/// Hands a [`Plan::Cuda`]'s device-carried state to the driver before the plan
-/// is evicted, so the plan that replaces it adopts the state on the device.
-#[cfg(feature = "cuda-driver")]
-pub fn park_cuda_carried(plan: &mut Plan) {
-    if let Plan::Cuda(cuda_plan) = plan {
-        cuda_plan.park_carried();
-    }
-}
-
-/// Reads the device-carried state of a [`Plan::Cuda`] back to the host, keyed
-/// by the output node that produced each value.
-///
-/// # Errors
-/// A device read failure.
-#[cfg(feature = "cuda-driver")]
-pub fn drain_cuda_carried(plan: &mut Plan) -> Result<Vec<(NodeId, Vec<f32>)>, BackendError> {
-    match plan {
-        Plan::Cuda(cuda_plan) => Ok(cuda_plan.drain_carried()?),
-        #[allow(unreachable_patterns)]
-        _ => Ok(Vec::new()),
-    }
-}
-
-/// Carried state bytes that crossed PCIe in either direction; `None` off CUDA.
-#[cfg(feature = "cuda-driver")]
-#[must_use]
-pub fn cuda_carried_host_bytes(plan: &Plan) -> Option<u64> {
-    match plan {
-        Plan::Cuda(cuda_plan) => Some(cuda_plan.carried_host_bytes()),
-        #[allow(unreachable_patterns)]
-        _ => None,
     }
 }
