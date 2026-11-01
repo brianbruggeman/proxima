@@ -118,7 +118,7 @@ fn run_on_vcpu_thread(
 ) -> LinuxOutcome {
     let cell = RefCell::new(Some(transport));
     let net = NetWiring { transport: &cell, stop: &stop, doorbell_out: &doorbell_out };
-    let outcome = panic::catch_unwind(AssertUnwindSafe(|| boot_resident(&boot, net)))
+    let outcome = panic::catch_unwind(AssertUnwindSafe(|| boot_resident(boot, net)))
         .unwrap_or_else(|_| LinuxOutcome::failed("the vcpu thread panicked".to_owned()));
     if !stop.load(Ordering::Acquire) {
         proxima_telemetry::error!(

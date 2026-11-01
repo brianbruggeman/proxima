@@ -6,6 +6,8 @@
 
 mod common;
 
+use std::sync::Arc;
+
 use bytes::Bytes;
 use futures::FutureExt;
 use proxima_primitives::pipe::Pipe;
@@ -64,6 +66,39 @@ fn dropping_the_resident_guest_stops_it_and_closes_the_pipe() {
     drop(resident);
 
     assert_eq!(host.from_guest.call(()).now_or_never().expect("ready"), Err(FrameError::Closed));
+}
+
+struct Tracked {
+    backing: Bytes,
+    _owners: Arc<()>,
+}
+
+impl AsRef<[u8]> for Tracked {
+    fn as_ref(&self) -> &[u8] {
+        &self.backing
+    }
+}
+
+fn tracked(backing: Bytes) -> (Bytes, Arc<()>) {
+    let owners = Arc::new(());
+    (Bytes::from_owner(Tracked { backing, _owners: Arc::clone(&owners) }), owners)
+}
+
+#[test]
+fn a_serving_resident_guest_holds_no_host_copy_of_the_kernel_or_initramfs() {
+    let mut inputs = boot_inputs();
+    let (kernel, kernel_owners) = tracked(inputs.kernel.clone());
+    let (initramfs, initramfs_owners) = tracked(inputs.initramfs.clone());
+    inputs.kernel = kernel;
+    inputs.initramfs = initramfs;
+    assert_eq!(Arc::strong_count(&kernel_owners), 2, "the inputs own the kernel before start");
+
+    let (resident, _host) = ResidentLinux::start(inputs, link()).expect("the resident guest starts");
+
+    assert!(resident.is_running(), "the guest is serving when the count is read");
+    assert_eq!(Arc::strong_count(&kernel_owners), 1, "the kernel is released once it is in guest ram");
+    assert_eq!(Arc::strong_count(&initramfs_owners), 1, "the initramfs is released once it is in guest ram");
+    drop(resident);
 }
 
 #[test]
