@@ -40,7 +40,7 @@ pub fn describe_failure(error: &RunError, vcpu: Option<&Vcpu>) -> String {
     let rip = || vcpu.map_or(0, Vcpu::instruction_pointer);
     match error {
         RunError::Watchdog => format!(
-            "watchdog forced exit: guest never trapped within the watchdog window, still executing at rip=0x{:x}",
+            "watchdog forced exit: the guest was still running when its wall-clock limit expired, at rip=0x{:x}",
             rip()
         ),
         RunError::Declined(Trap::Exit(exit)) => unexpected_exit(exit, rip()),

@@ -157,7 +157,7 @@ fn watchdog_fires_on_an_init_that_never_powers_off() {
     let error = run_linux_guest(kernel(), &guest("idle-init"), CMDLINE, b"x", &limits).expect_err("idle never ends");
 
     let message = error.to_string();
-    assert!(message.contains("watchdog forced exit: guest never trapped within the watchdog window"), "{message}");
+    assert!(message.contains("watchdog forced exit: the guest was still running when its wall-clock limit expired"), "{message}");
     assert!(message.contains("console tail:"), "{message}");
 }
 
