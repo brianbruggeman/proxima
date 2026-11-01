@@ -257,6 +257,11 @@ where
     pub fn rcv_nxt(&self) -> SeqNum {
         self.window.rcv_nxt()
     }
+
+    #[must_use]
+    pub fn snd_una(&self) -> SeqNum {
+        self.window.snd_una()
+    }
 }
 
 #[cfg(test)]
