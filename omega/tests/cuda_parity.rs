@@ -28,7 +28,9 @@ use omega::backend::{
 };
 use proxima_tensor::NumericPolicy;
 use proxima_tensor::infer;
-use proxima_tensor::spec::qk_norm_cached_forward_program;
+use proxima_tensor::spec::{
+    input_leaf, qk_norm_cached_forward_program, rmsnorm, rmsnorm_per_head, scalar_constant,
+};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{
     DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
@@ -3492,4 +3494,127 @@ fn carry_rows_rejects_a_pair_whose_row_widths_differ() {
 
     assert!(!carried, "the column sum has row width 1, the cache row width {APPEND_WIDTH}");
     assert_eq!(omega::backend::cuda_carried_host_bytes(&plan), Some(0));
+}
+
+const NORM_EPSILON: f32 = 1e-5;
+const NORM_RUNS: usize = 3;
+const NORM_CHAIN: usize = 24;
+const BUSY_EXTENT: u32 = 1 << 26;
+const BUSY_DEPTH: usize = 8;
+
+/// Eight tanh passes over a large buffer keep the stream backlogged while the host
+/// enqueues the norm chain, so event deltas between the norms are device time and
+/// not host launch latency.
+fn append_busy_chain(program: &mut Vec<Op>) -> NodeId {
+    let mut node = input_leaf(
+        program,
+        DType::FLOAT32,
+        vec![Extent::Static(BUSY_EXTENT)],
+        "busy",
+    );
+    for _ in 0..BUSY_DEPTH {
+        node = append(
+            program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Tanh,
+                operands: vec![(node, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+    }
+    node
+}
+
+fn norm_program(rows: u32, width: u32) -> (Vec<Op>, Vec<NodeId>) {
+    let mut program = Vec::new();
+    let busy = append_busy_chain(&mut program);
+    let eps_scalar = scalar_constant(&mut program, NORM_EPSILON);
+    let inv_width = scalar_constant(&mut program, 1.0 / width as f32);
+    let gamma = input_leaf(&mut program, DType::FLOAT32, vec![Extent::Static(width)], "gamma");
+    let eps_row = input_leaf(&mut program, DType::FLOAT32, vec![Extent::Static(1)], "eps");
+    let shape = if rows == 1 {
+        vec![Extent::Static(1), Extent::Static(width)]
+    } else {
+        vec![Extent::Static(1), Extent::Static(rows), Extent::Static(width)]
+    };
+    let mut node = input_leaf(&mut program, DType::FLOAT32, shape, "x");
+    for _ in 0..NORM_CHAIN {
+        node = if rows == 1 {
+            rmsnorm(&mut program, node, gamma, inv_width, eps_scalar).expect("rmsnorm lowers")
+        } else {
+            rmsnorm_per_head(&mut program, node, gamma, inv_width, eps_row, "h")
+                .expect("per-head rmsnorm lowers")
+        };
+    }
+    (program, vec![node, busy])
+}
+
+fn norm_oracle(x: &[f32], gamma: &[f32], width: usize) -> Vec<f64> {
+    let mut current: Vec<f64> = x.iter().map(|value| f64::from(*value)).collect();
+    for _ in 0..NORM_CHAIN {
+        current = current
+            .chunks_exact(width)
+            .flat_map(|row| {
+                let mean_square = row.iter().map(|value| value * value).sum::<f64>() / width as f64;
+                let scale = 1.0 / (mean_square + f64::from(NORM_EPSILON)).sqrt();
+                row.iter().zip(gamma).map(move |(value, weight)| value * scale * f64::from(*weight))
+            })
+            .collect();
+    }
+    current
+}
+
+#[proxima::test]
+#[case::decode_hidden_norm_one_row_of_4096(1, 4096)]
+#[case::per_head_q_norm_32_rows_of_128(32, 128)]
+#[case::per_head_k_norm_8_rows_of_128(8, 128)]
+async fn rmsnorm_broadcast_epilogue_reduce_matches_the_f64_oracle_on_cuda(
+    #[case] rows: u32,
+    #[case] width: u32,
+) {
+    let (program, roots) = norm_program(rows, width);
+    let x = random_vec(11, (rows * width) as usize);
+    let gamma: Vec<f32> = random_vec(13, width as usize).iter().map(|value| 1.0 + value * 0.5).collect();
+    let eps = [NORM_EPSILON];
+    let busy = random_vec(17, BUSY_EXTENT as usize);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("busy", QuantizedBlock::Float32(&busy)),
+        ("x", QuantizedBlock::Float32(&x)),
+        ("gamma", QuantizedBlock::Float32(&gamma)),
+        ("eps", QuantizedBlock::Float32(&eps)),
+    ];
+    let mut plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &roots,
+        NumericPolicy::bit_exact().with_reassociation(true),
+    )
+    .expect("the rmsnorm chain plans on cuda");
+    let identities = cuda_kernel_identities(&plan).expect("a cuda plan");
+    assert!(
+        identities.iter().any(|identity| {
+            identity.contains("_reduce_r") && identity.contains("_epi") && identity.contains("square_root")
+        }),
+        "the norm must lower to the broadcast-epilogue reduce, got {:?}",
+        identities.iter().map(|identity| identity.lines().next()).collect::<Vec<_>>()
+    );
+    let mut actual = Vec::new();
+    for _ in 0..NORM_RUNS {
+        actual = execute_plan_named(&mut plan, &named)
+            .expect("the rmsnorm chain runs on cuda")
+            .root()
+            .to_vec();
+    }
+    let expected = norm_oracle(&x, &gamma, width as usize);
+    assert_eq!(actual.len(), expected.len());
+    let worst = actual
+        .iter()
+        .zip(&expected)
+        .map(|(got, want)| (f64::from(*got) - want).abs() / want.abs().max(1e-3))
+        .fold(0.0f64, f64::max);
+    assert!(worst < 1e-5, "cuda rmsnorm disagrees with the f64 oracle: worst relative={worst}");
 }
