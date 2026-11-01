@@ -24,6 +24,7 @@ use std::process::Command;
 const PROBE_BINARY: &str = env!("CARGO_BIN_EXE_dispatch_probe");
 const ENTITLEMENTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/entitlements.plist");
 const GUEST_MANIFEST_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/guests/lambda");
+const GUEST_TARGET_DIR: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/lambda-guest");
 
 const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 
@@ -61,7 +62,7 @@ async fn guest_pl011_uartdr_bytes_arrive_through_a_real_vm_exit() {
     let directory = tempfile::tempdir().expect("create tempdir for the signed probe");
     let probe_path = directory.path().join("pl011-dispatch-probe");
     std::fs::copy(Path::new(PROBE_BINARY), &probe_path).expect("copy the built probe binary");
-    let guest_elf = build_pl011_guest_elf(&directory.path().join("guest-target"));
+    let guest_elf = build_pl011_guest_elf(Path::new(GUEST_TARGET_DIR));
 
     let status = Command::new("codesign")
         .arg("--force")
@@ -107,7 +108,7 @@ async fn guest_halt_after_pl011_writes_cleanly_ends_the_run() {
     let directory = tempfile::tempdir().expect("create tempdir for the signed probe");
     let probe_path = directory.path().join("pl011-dispatch-probe");
     std::fs::copy(Path::new(PROBE_BINARY), &probe_path).expect("copy the built probe binary");
-    let guest_elf = build_pl011_guest_elf(&directory.path().join("guest-target"));
+    let guest_elf = build_pl011_guest_elf(Path::new(GUEST_TARGET_DIR));
 
     let status = Command::new("codesign")
         .arg("--force")

@@ -30,6 +30,7 @@ use tempfile::TempDir;
 const PROBE_BINARY: &str = env!("CARGO_BIN_EXE_dispatch_probe");
 const ENTITLEMENTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/entitlements.plist");
 const GUEST_MANIFEST_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/guests/lambda");
+const GUEST_TARGET_DIR: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/lambda-guest");
 
 const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 const KVM_LANE: bool = cfg!(all(target_os = "linux", target_arch = "x86_64"));
@@ -46,9 +47,9 @@ const SIXTY_FOUR_MIB: u64 = 64 * 1024 * 1024;
 
 /// Builds every bin of the lambda guest crate for this lane's bare-metal
 /// target (`aarch64-unknown-none` on HVF, `x86_64-unknown-none` on KVM) into
-/// a per-case tempdir's own `CARGO_TARGET_DIR`, so parallel nextest cases
-/// never race on a shared build output -- same discipline as
-/// `tests/boot.rs`'s per-case signing tempdir.
+/// a `CARGO_TARGET_DIR` shared by every case: cargo serializes concurrent
+/// builds on that directory's lock and later cases find it fresh, where a
+/// per-case dir recompiled the whole dependency tree once per case.
 fn build_guest_elfs(target_dir: &Path) {
     let status = Command::new("cargo")
         .args([
@@ -76,7 +77,7 @@ impl SignedProbe {
         let directory = tempfile::tempdir().expect("create tempdir for the signed probe");
         let path = directory.path().join("dispatch-probe");
         std::fs::copy(Path::new(PROBE_BINARY), &path).expect("copy the built probe binary");
-        let guest_target_dir = directory.path().join("guest-target");
+        let guest_target_dir = PathBuf::from(GUEST_TARGET_DIR);
         build_guest_elfs(&guest_target_dir);
 
         if HYPERVISOR_LANE {
