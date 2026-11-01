@@ -8,6 +8,7 @@ use time::OffsetDateTime;
 use tokio::sync::oneshot;
 
 use crate::error::ProximaError;
+use crate::log_buffer::LiveTailReceiver;
 use crate::recording::event::{InteractionId, ProcessEvent, ProtocolEvent, RecordingEvent};
 use crate::recording::sink::DynRecordingSink;
 use crate::upstreams::ProcessUpstream;
@@ -20,23 +21,39 @@ use crate::upstreams::ProcessUpstream;
 /// reconstruct the DAG.
 ///
 /// **Subscription race**: `LogBuffer::subscribe` only delivers lines
-/// pushed AFTER subscription. To get zero-loss observation, pass the
-/// bridge's buffers into `ProcessUpstream::spawn_with_buffers` so the
-/// upstream's drain tasks push into the same buffers the bridge
-/// subscribed to before any child I/O begins. The standard usage
-/// pattern below shows this.
+/// pushed AFTER subscription, and the child can write the moment it is
+/// spawned. `attach` therefore takes receivers the caller subscribed
+/// BEFORE `ProcessUpstream::spawn_with_buffers`, so no line can be pushed
+/// before a subscriber exists. The standard usage pattern below shows
+/// the order.
 ///
 /// Standard usage:
-/// ```ignore
+/// ```no_run
+/// # use std::sync::Arc;
+/// # use proxima::error::ProximaError;
+/// # use proxima::recording::{DynRecordingSink, InteractionId, ProcessEventBridge};
+/// # use proxima::upstreams::{ProcessSpec, ProcessUpstream};
+/// # use proxima::{DEFAULT_LOG_BUFFER_CAPACITY, LogBuffer};
+/// # async fn run_stage(
+/// #     spec: ProcessSpec,
+/// #     stage_id: InteractionId,
+/// #     parent: Option<InteractionId>,
+/// #     sink: DynRecordingSink,
+/// # ) -> Result<Option<i32>, ProximaError> {
 /// let stdout_buf = Arc::new(LogBuffer::new(DEFAULT_LOG_BUFFER_CAPACITY));
 /// let stderr_buf = Arc::new(LogBuffer::new(DEFAULT_LOG_BUFFER_CAPACITY));
+/// let stdout_rx = stdout_buf.subscribe();
+/// let stderr_rx = stderr_buf.subscribe();
 /// let upstream = Arc::new(
 ///     ProcessUpstream::spawn_with_buffers(
-///         "stage-1", spec, Some(stdout_buf.clone()), Some(stderr_buf.clone()), None,
+///         "stage-1", spec, Some(stdout_buf), Some(stderr_buf), None,
 ///     ).await?,
 /// );
-/// let handle = ProcessEventBridge::attach(upstream.clone(), stage_id, parent, sink).await?;
-/// let exit_code = handle.wait_for_exit().await;
+/// let handle = ProcessEventBridge::attach(
+///     upstream.clone(), stdout_rx, stderr_rx, stage_id, parent, sink,
+/// ).await?;
+/// Ok(handle.wait_for_exit().await)
+/// # }
 /// ```
 pub struct ProcessEventBridge;
 
@@ -60,18 +77,12 @@ impl BridgeHandle {
 impl ProcessEventBridge {
     pub async fn attach(
         upstream: Arc<ProcessUpstream>,
+        stdout_rx: LiveTailReceiver,
+        stderr_rx: LiveTailReceiver,
         stage_id: InteractionId,
         parent: Option<InteractionId>,
         sink: DynRecordingSink,
     ) -> Result<BridgeHandle, ProximaError> {
-        let stdout_buf = upstream.log_buffer();
-        let stderr_buf = upstream.stderr_buffer();
-        // subscribe before emitting Started — guarantees the subscriber
-        // queues are registered before any lines flow. callers should
-        // pass these same buffers into spawn_with_buffers so this race
-        // is closed end-to-end.
-        let stdout_rx = stdout_buf.subscribe();
-        let stderr_rx = stderr_buf.subscribe();
         let started = Instant::now();
         let started_ts = OffsetDateTime::now_utc();
 
@@ -167,16 +178,19 @@ mod tests {
     use std::collections::BTreeMap;
     use std::sync::Mutex as StdMutex;
     use std::time::Duration;
+    use tokio::sync::Notify;
 
     #[derive(Default)]
     struct MemorySink {
         events: StdMutex<Vec<RecordingEvent>>,
+        appended: Notify,
     }
 
     impl RecordingSink for MemorySink {
         fn append<'lifetime>(&'lifetime self, event: RecordingEvent) -> AppendFuture<'lifetime> {
             Box::pin(async move {
                 self.events.lock().expect("memory sink lock").push(event);
+                self.appended.notify_one();
                 Ok(())
             })
         }
@@ -207,10 +221,19 @@ mod tests {
     }
 
     async fn run_stage(script: &str) -> (Vec<RecordingEvent>, Option<i32>) {
+        run_stage_attaching(script, false).await
+    }
+
+    async fn run_stage_attaching(
+        script: &str,
+        attach_after_exit: bool,
+    ) -> (Vec<RecordingEvent>, Option<i32>) {
         let sink: Arc<MemorySink> = Arc::new(MemorySink::default());
         let dyn_sink: DynRecordingSink = sink.clone();
         let stdout_buf = Arc::new(LogBuffer::new(DEFAULT_LOG_BUFFER_CAPACITY));
         let stderr_buf = Arc::new(LogBuffer::new(DEFAULT_LOG_BUFFER_CAPACITY));
+        let stdout_rx = stdout_buf.subscribe();
+        let stderr_rx = stderr_buf.subscribe();
         let upstream = Arc::new(
             ProcessUpstream::spawn_with_buffers(
                 "stage",
@@ -222,41 +245,83 @@ mod tests {
             .await
             .expect("spawn"),
         );
+        if attach_after_exit {
+            upstream.wait_for_exit().await;
+        }
         let stage_id = InteractionId::new();
         let pipeline_id = InteractionId::new();
-        let handle =
-            ProcessEventBridge::attach(upstream.clone(), stage_id, Some(pipeline_id), dyn_sink)
-                .await
-                .expect("attach");
+        let handle = ProcessEventBridge::attach(
+            upstream.clone(),
+            stdout_rx,
+            stderr_rx,
+            stage_id,
+            Some(pipeline_id),
+            dyn_sink,
+        )
+        .await
+        .expect("attach");
         let exit_code = handle.wait_for_exit().await;
-        // the bridge's stdout/stderr forwarding tasks keep running in the
-        // background past the exit event (see `BridgeHandle` doc comment),
-        // so trailing lines can still be in flight here. poll on a real
-        // timer (not just `yield_now`) until the sink's event count stops
-        // growing: catching the pipe's readable notification is the
-        // reactor's job, and cooperative yields alone don't force the
-        // reactor to tick, so a pure yield-loop can call it "stable"
-        // before the wakeup has even been delivered. the outer timeout
-        // turns a genuine stall into a clear test failure, not a hang.
-        tokio::time::timeout(Duration::from_secs(5), async {
-            let mut previous_len = sink.events.lock().expect("lock").len();
-            let mut stable_rounds = 0;
-            while stable_rounds < 16 {
-                tokio::time::sleep(Duration::from_millis(1)).await;
-                let current_len = sink.events.lock().expect("lock").len();
-                if current_len == previous_len {
-                    stable_rounds += 1;
-                } else {
-                    stable_rounds = 0;
-                    previous_len = current_len;
-                }
+        // the supervisor joins both drains before firing exit, so the buffers
+        // hold every line the child wrote; started + exited + one event per
+        // line is the exact count the forwarding tasks still owe the sink.
+        let expected_events = 2 + stdout_buf.len() + stderr_buf.len();
+        let delivered = tokio::time::timeout(Duration::from_secs(5), async {
+            while sink.events.lock().expect("lock").len() < expected_events {
+                sink.appended.notified().await;
             }
         })
-        .await
-        .expect("sink events must quiesce before drop");
-        drop(upstream);
+        .await;
         let events = sink.events.lock().expect("lock").clone();
+        assert!(
+            delivered.is_ok(),
+            "forwarding tasks must deliver every buffered line before drop: recorded {} of {} events; \
+             stdout missing {:?}; stderr missing {:?}",
+            events.len(),
+            expected_events,
+            missing_lines(&stdout_buf.snapshot(None), &stream_lines(&events, Stream::Stdout)),
+            missing_lines(&stderr_buf.snapshot(None), &stream_lines(&events, Stream::Stderr)),
+        );
+        drop(upstream);
         (events, exit_code)
+    }
+
+    #[derive(Clone, Copy)]
+    enum Stream {
+        Stdout,
+        Stderr,
+    }
+
+    fn stream_lines(events: &[RecordingEvent], stream: Stream) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|event| match (&event.event, stream) {
+                (ProtocolEvent::Process(ProcessEvent::Stdout(data)), Stream::Stdout)
+                | (ProtocolEvent::Process(ProcessEvent::Stderr(data)), Stream::Stderr) => {
+                    Some(String::from_utf8_lossy(data).into_owned())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn missing_lines(buffered: &[String], recorded: &[String]) -> Vec<String> {
+        buffered
+            .iter()
+            .filter(|line| !recorded.contains(line))
+            .cloned()
+            .collect()
+    }
+
+    #[proxima::test]
+    async fn bridge_records_every_line_of_a_burst_on_both_streams_exactly_once_in_order() {
+        let lines = 200;
+        let script = "for i in $(seq 1 200); do echo out$i; echo err$i 1>&2; done";
+        let (events, exit_code) = run_stage_attaching(script, true).await;
+        assert_eq!(exit_code, Some(0));
+        let expected_stdout: Vec<String> = (1..=lines).map(|index| format!("out{index}")).collect();
+        let expected_stderr: Vec<String> = (1..=lines).map(|index| format!("err{index}")).collect();
+        assert_eq!(stream_lines(&events, Stream::Stdout), expected_stdout);
+        assert_eq!(stream_lines(&events, Stream::Stderr), expected_stderr);
     }
 
     #[proxima::test]
