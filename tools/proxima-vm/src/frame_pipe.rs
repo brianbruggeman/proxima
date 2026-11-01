@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread::Thread;
 
 use crossbeam_queue::ArrayQueue;
 use proxima_primitives::pipe::Pipe;
@@ -35,6 +36,7 @@ struct Channel {
 #[derive(Debug, Clone)]
 pub struct FrameSink {
     channel: Arc<Channel>,
+    wake: Option<Thread>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +47,18 @@ pub struct FrameSource {
 /// A connected sink and source over one queue holding at most `capacity` frames.
 #[must_use]
 pub fn frame_channel(capacity: usize) -> (FrameSink, FrameSource) {
+    connected(capacity, None)
+}
+
+/// [`frame_channel`] whose sink unparks `consumer` after every frame it
+/// accepts or that is closed, so a consumer thread can park between frames
+/// instead of polling.
+#[must_use]
+pub fn frame_channel_waking(capacity: usize, consumer: Thread) -> (FrameSink, FrameSource) {
+    connected(capacity, Some(consumer))
+}
+
+fn connected(capacity: usize, wake: Option<Thread>) -> (FrameSink, FrameSource) {
     let channel = Arc::new(Channel {
         queue: ArrayQueue::new(capacity),
         closed: AtomicBool::new(false),
@@ -52,6 +66,7 @@ pub fn frame_channel(capacity: usize) -> (FrameSink, FrameSource) {
     (
         FrameSink {
             channel: channel.clone(),
+            wake,
         },
         FrameSource { channel },
     )
@@ -62,6 +77,9 @@ impl FrameSink {
     /// once it has drained what was already sent.
     pub fn close(&self) {
         self.channel.closed.store(true, Ordering::Release);
+        if let Some(consumer) = &self.wake {
+            consumer.unpark();
+        }
     }
 }
 
@@ -75,7 +93,11 @@ impl Pipe for FrameSink {
             self.channel
                 .queue
                 .push(frame)
-                .map_err(|_| FrameError::Full)
+                .map_err(|_| FrameError::Full)?;
+            if let Some(consumer) = &self.wake {
+                consumer.unpark();
+            }
+            Ok(())
         }
     }
 }
@@ -100,6 +122,9 @@ impl Pipe for FrameSource {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::sync::mpsc;
+    use std::thread;
+
     use super::*;
     use futures::FutureExt;
 
@@ -125,6 +150,31 @@ mod tests {
 
         assert_eq!(source.call(()).now_or_never().unwrap(), Ok(vec![9]));
         assert_eq!(source.call(()).now_or_never().unwrap(), Err(FrameError::Closed));
+    }
+
+    #[test]
+    fn a_waking_sink_unparks_the_consumer_after_a_push_and_after_a_close() {
+        let (ready_sender, ready_receiver) = mpsc::channel();
+        let consumer = thread::spawn(move || {
+            let (sink, source) = frame_channel_waking(4, thread::current());
+            ready_sender.send(sink).unwrap();
+            let mut seen = Vec::new();
+            loop {
+                match source.call(()).now_or_never().unwrap() {
+                    Ok(frame) => seen.push(frame),
+                    Err(FrameError::Empty) => thread::park(),
+                    Err(FrameError::Closed) => return seen,
+                    Err(FrameError::Full) => unreachable!("a source is never full"),
+                }
+            }
+        });
+        let sink = ready_receiver.recv().unwrap();
+
+        sink.call(vec![1]).now_or_never().unwrap().unwrap();
+        sink.call(vec![2]).now_or_never().unwrap().unwrap();
+        sink.close();
+
+        assert_eq!(consumer.join().unwrap(), vec![vec![1], vec![2]]);
     }
 
     #[test]

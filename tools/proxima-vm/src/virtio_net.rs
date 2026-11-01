@@ -171,6 +171,15 @@ where
         self.device.apply(access)
     }
 
+    #[must_use]
+    pub fn interrupt_pending(&self) -> bool {
+        self.device.interrupt_pending()
+    }
+
+    pub fn config_read(&self, offset: u64, length: usize) -> Result<u64, MmioError> {
+        self.device.read_config(offset, length)
+    }
+
     /// Walks every avail-ring entry published on the transmit queue since the
     /// last drain: each chain is one `virtio_net_hdr` followed by one
     /// Ethernet frame (concatenated across however many descriptors the
@@ -194,6 +203,7 @@ where
             self.forward(&frame.frame);
             drained.push(frame);
             complete(guest_memory, rings, &mut self.tx_used, head, 0)?;
+            self.device.raise_used_buffer();
         }
         Ok(drained)
     }
@@ -223,6 +233,7 @@ where
             self.rx_avail = self.rx_avail.wrapping_add(1);
             let written = write_rx_frame(guest_memory, rings, head, &frame)?;
             complete(guest_memory, rings, &mut self.rx_used, head, written)?;
+            self.device.raise_used_buffer();
             match written {
                 0 => self.frames_dropped += 1,
                 _ => {
@@ -783,5 +794,46 @@ mod tests {
 
         assert_eq!(up, MmioEffect::ReadValue(0x0001_0100));
         assert_eq!(down, MmioEffect::ReadValue(0x0000_0100));
+        assert!(transport.interrupt_pending(), "link change raises config-change");
+    }
+
+    #[test]
+    fn fill_rx_raises_used_buffer_only_when_it_completed_an_entry() {
+        let (mut transport, _from_guest, to_guest) = wired_transport();
+        let mut guest = Guest::new();
+        guest.post_rx_buffer(BUFFERS + 0x1000, 2048);
+
+        transport.fill_rx(&mut guest.memory).expect("nothing to deliver");
+        assert!(!transport.interrupt_pending());
+
+        send(&to_guest, arp_request_frame());
+        transport.fill_rx(&mut guest.memory).expect("fills");
+        assert!(transport.interrupt_pending());
+    }
+
+    #[test]
+    fn drain_tx_raises_used_buffer_after_completing_a_chain() {
+        let (mut transport, _from_guest, _to_guest) = wired_transport();
+        let mut guest = Guest::new();
+
+        transport.drain_tx(TX_QUEUE, &mut guest.memory).expect("empty ring");
+        assert!(!transport.interrupt_pending());
+
+        guest.transmit(&arp_request_frame());
+        transport.drain_tx(TX_QUEUE, &mut guest.memory).expect("drains");
+        assert!(transport.interrupt_pending());
+    }
+
+    #[test]
+    fn config_read_serves_the_mac_bytewise_through_the_transport() {
+        let (transport, _from_guest, _to_guest) = wired_transport();
+        let base = proxima_protocols::virtio::CONFIG_SPACE_BASE;
+
+        let bytes: Vec<u8> = (0..6)
+            .map(|index| transport.config_read(base + index, 1).unwrap() as u8)
+            .collect();
+
+        assert_eq!(bytes, OUR_MAC);
+        assert_eq!(transport.config_read(base + 6, 2).unwrap(), 1);
     }
 }

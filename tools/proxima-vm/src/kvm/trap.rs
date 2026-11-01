@@ -74,6 +74,7 @@ pub enum End {
     ResetPort,
     Shutdown,
     OutputOverflow,
+    Stopped,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

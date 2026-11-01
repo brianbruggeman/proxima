@@ -1,7 +1,7 @@
 //! The Linux/x86_64 KVM lane as pipes.
 //!
 //! The leaf is `kvm-ioctls` (the rust-vmm incumbent) plus the few `libc` calls
-//! it does not cover (`mmap`, `memfd_create`, `sigaction`, `pthread_kill`). Above
+//! it does not cover (`mmap`, `memfd_create`, `sigaction`, `tgkill`). Above
 //! it everything is a pipe:
 //!
 //! - the vCPU's exits and the watchdog's expiry are sources ([`TrapSource`]),
@@ -17,6 +17,7 @@
 pub mod describe;
 pub mod devices;
 pub mod dirty;
+pub mod doorbell;
 pub mod drive;
 pub mod elf_lane;
 pub mod error;
@@ -26,6 +27,7 @@ pub mod linux_lane;
 pub mod memory;
 pub mod pipes;
 pub mod probe;
+pub mod resident;
 pub mod scratch;
 pub mod serial;
 pub mod session;
