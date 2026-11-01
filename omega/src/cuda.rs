@@ -1495,6 +1495,76 @@ fn push_epilogue_body_steps(
     )
 }
 
+struct HoistedEpilogue {
+    before_loop: String,
+    in_loop: String,
+    value: String,
+}
+
+fn push_epilogue_operand_load(
+    source: &mut String,
+    index: usize,
+    rank: usize,
+    indent: &str,
+    coord: &impl Fn(usize) -> String,
+) {
+    source.push_str(&format!(
+        "{indent}long epi_off{index} = u.epilogue_operand_base[{index}];\n"
+    ));
+    for dim in 0..rank {
+        source.push_str(&format!(
+            "{indent}epi_off{index} += {} * u.epilogue_operand_strides[{index}][{dim}];\n",
+            coord(dim)
+        ));
+    }
+    source.push_str(&format!(
+        "{indent}epi_scratch[{index}] = epi{index}[epi_off{index}];\n"
+    ));
+}
+
+fn hoisted_broadcast_epilogue(
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    reduce_dims: &[u16],
+    rank: usize,
+    element_type: &str,
+    indent: &str,
+) -> HoistedEpilogue {
+    let operand_count = epilogue_operands.len();
+    let invariant_operand: Vec<bool> = epilogue_operands
+        .iter()
+        .map(|(_, layout, _)| reduce_dims.iter().all(|&dim| layout.stride(dim) == 0))
+        .collect();
+    let mut before_loop = format!("    {element_type} epi_scratch[{}];\n", operand_count + 1);
+    let mut in_loop = String::new();
+    let outer_coord = |dim: usize| format!("full_coord[{dim}]");
+    let inner_coord = |dim: usize| format!("broadcast_full_coord[{dim}]");
+    for (index, &invariant) in invariant_operand.iter().enumerate() {
+        if invariant {
+            push_epilogue_operand_load(&mut before_loop, index, rank, "    ", &outer_coord);
+        } else {
+            push_epilogue_operand_load(&mut in_loop, index, rank, indent, &inner_coord);
+        }
+    }
+    before_loop.push_str(&format!("    epi_scratch[{operand_count}] = accumulator;\n"));
+    let value = crate::epilogue::declare_steps_partitioned(
+        &mut before_loop,
+        &mut in_loop,
+        epilogue_body,
+        "epi_scratch",
+        "epi_step",
+        |operand| operand == operand_count || invariant_operand[operand],
+        scalar_op_expr,
+        |source, index, expr| {
+            source.push_str(&format!("    {element_type} epi_step{index} = {expr};\n"));
+        },
+        |source, index, expr| {
+            source.push_str(&format!("{indent}{element_type} epi_step{index} = {expr};\n"));
+        },
+    );
+    HoistedEpilogue { before_loop, in_loop, value }
+}
+
 /// Shared write tail for every CUDA reduce renderer that folds an output
 /// element ([`push_serial_reduce_body`], [`push_cooperative_reduce_body`]) —
 /// the CUDA counterpart of `crate::msl::push_reduce_epilogue_write`/
@@ -2906,6 +2976,21 @@ fn push_cooperative_reduce_body(
         for (index, dim) in output_axes.iter().enumerate() {
             source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
         }
+        let hoisted = (reduce_rank > 0
+            && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands))
+        .then(|| {
+            hoisted_broadcast_epilogue(
+                epilogue_body,
+                epilogue_operands,
+                reduce_dims,
+                rank,
+                element_type,
+                "        ",
+            )
+        });
+        if let Some(hoisted) = &hoisted {
+            source.push_str(&hoisted.before_loop);
+        }
         source.push_str(&format!(
             "    #pragma unroll 8\n    for (long r = {lane_start}; r < u.reduction_total; r += {lane_stride}) {{\n"
         ));
@@ -2940,17 +3025,26 @@ fn push_cooperative_reduce_body(
                     "        broadcast_out_offset += broadcast_full_coord[{dim}] * u.broadcast_out_strides[{dim}];\n"
                 ));
             }
-            push_reduce_epilogue_write(
-                source,
-                epilogue_body,
-                epilogue_operands,
-                rank,
-                element_type,
-                "        ",
-                |dim| format!("broadcast_full_coord[{dim}]"),
-                "accumulator",
-                "broadcast_out_offset",
-            );
+            match &hoisted {
+                Some(hoisted) => {
+                    source.push_str(&hoisted.in_loop);
+                    source.push_str(&format!(
+                        "        out[broadcast_out_offset] = {};\n",
+                        hoisted.value
+                    ));
+                }
+                None => push_reduce_epilogue_write(
+                    source,
+                    epilogue_body,
+                    epilogue_operands,
+                    rank,
+                    element_type,
+                    "        ",
+                    |dim| format!("broadcast_full_coord[{dim}]"),
+                    "accumulator",
+                    "broadcast_out_offset",
+                ),
+            }
         }
         source.push_str("    }\n");
         return Ok(());
