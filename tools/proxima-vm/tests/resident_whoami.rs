@@ -23,14 +23,14 @@ use futures::io::{AsyncReadExt, AsyncWriteExt};
 use http::{Request, Response};
 use proxima_net::frame_stack::{Driver, FrameUpstream};
 use proxima_primitives::pipe::Pipe;
-use proxima_primitives::stream::StreamUpstreamExt;
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::recorder::Recorder;
 use proxima_vm::frame_pipe::FrameError;
 use proxima_protocols::http1_codec::h1_client::encode_request_head;
 use proxima_vm::kernel_modules::load_modules;
-use proxima_vm::kvm::host_wire::{HOST_IP, HOST_MAC, ReadyRx, RingingTx, ZeroMint};
+use proxima_vm::frame_pipe::FrameSource;
+use proxima_vm::kvm::host_wire::{HOST_IP, HOST_MAC, RingingTx, ZeroMint, dial_guest_when_listening};
 use proxima_vm::kvm::resident::{HostLink, LinkConfig, ResidentLinux, net_device_cmdline};
 use proxima_vm::linux::LinuxBootInputs;
 use proxima_vm::linux::LinuxGuestLimits;
@@ -64,21 +64,19 @@ type Upstream = FrameUpstream<Tap, RingingTx, ZeroMint>;
 type Seen = Sender<String>;
 
 struct Tap {
-    inner: ReadyRx,
+    inner: FrameSource,
     seen: Seen,
 }
 
 impl Pipe for Tap {
     type In = ();
-    type Out = Option<Vec<u8>>;
+    type Out = Vec<u8>;
     type Err = FrameError;
 
-    fn call(&self, (): ()) -> impl Future<Output = Result<Option<Vec<u8>>, FrameError>> {
+    fn call(&self, (): ()) -> impl Future<Output = Result<Vec<u8>, FrameError>> {
         async move {
             let frame = self.inner.call(()).await?;
-            if let Some(bytes) = &frame {
-                self.seen.send(describe_frame(bytes)).map_err(|_| FrameError::Closed)?;
-            }
+            self.seen.send(describe_frame(&frame)).map_err(|_| FrameError::Closed)?;
             Ok(frame)
         }
     }
@@ -95,7 +93,7 @@ fn describe_frame(frame: &[u8]) -> String {
 
 fn dial_tapped(link: HostLink, seen: Seen) -> Upstream {
     let pipes = (
-        Tap { inner: ReadyRx(link.from_guest), seen },
+        Tap { inner: link.from_guest, seen },
         RingingTx { sink: link.to_guest, doorbell: link.doorbell },
         ZeroMint,
     );
@@ -175,17 +173,8 @@ async fn read_response(connection: &mut (impl AsyncReadExt + Unpin), answer: &mu
     }
 }
 
-async fn connect_when_listening(upstream: &Upstream) -> io::Result<impl AsyncReadExt + AsyncWriteExt + Unpin> {
-    loop {
-        match upstream.connect().await {
-            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {}
-            other => return other,
-        }
-    }
-}
-
 async fn fetch(upstream: &Upstream, request: &[u8], answer: &mut Answer) -> io::Result<()> {
-    let mut connection = connect_when_listening(upstream).await?;
+    let mut connection = dial_guest_when_listening(upstream).await?;
     connection.write_all(request).await?;
     read_response(&mut connection, answer).await?;
     connection.close().await

@@ -27,7 +27,7 @@ use super::sys;
 use super::uapi::{self, xdp_desc};
 use super::xsk::{RingSizes, UmemConfig, XskSocket};
 use crate::stack::{self, Action};
-use crate::tcp_dial::{DialGuard, DialLease};
+use crate::tcp_dial::{DEFAULT_RETRANSMIT, DialError, DialGuard, DialLease, SynStep, wake_after};
 use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
 use crate::tcp_stack::{ConnId, TcpStack};
 use futures::io::{AsyncRead, AsyncWrite};
@@ -45,6 +45,7 @@ use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 use std::time::Instant as StdInstant;
 
 const ETH: usize = 14;
@@ -65,6 +66,7 @@ struct State {
     our_ip: [u8; 4],
     our_port: u16,
     arp: HashMap<[u8; 4], [u8; 6]>,
+    arp_sent: HashMap<[u8; 4], StdInstant>,
 }
 
 struct Shared {
@@ -156,6 +158,7 @@ impl XdpStreamListener {
             our_ip,
             our_port,
             arp: HashMap::new(),
+            arp_sent: HashMap::new(),
         };
         Ok(Self {
             shared: Arc::new(Shared {
@@ -205,11 +208,15 @@ impl State {
                     if let Some((ip, mac)) = stack::parse_arp_reply(frame) {
                         self.arp.insert(ip, mac);
                         self.socket.umem_mut().free_frame(desc.addr);
-                    } else if let Some(inbound) = classify_tcp(frame, self.our_ip).filter(|inbound| self.stack.owns_port(inbound.destination_port)) {
+                    } else if let Some(inbound) = classify_tcp(frame, self.our_ip)
+                        .filter(|inbound| self.stack.owns_port(inbound.destination_port))
+                    {
                         self.socket.umem_mut().free_frame(desc.addr);
-                        let outbound = self
-                            .stack
-                            .on_inbound_to(inbound.destination_port, &inbound.borrow(), now);
+                        let outbound = self.stack.on_inbound_to(
+                            inbound.destination_port,
+                            &inbound.borrow(),
+                            now,
+                        );
                         for (peer, segment) in outbound {
                             self.tx_segment(peer, &segment, inbound.destination_port);
                         }
@@ -264,6 +271,44 @@ impl State {
         if self.socket.fill_needs_wakeup() {
             let _ = self.socket.wake_rx();
         }
+    }
+
+    fn retransmit_arp(&mut self, target: [u8; 4], cx: &mut Context<'_>) {
+        let due = self
+            .arp_sent
+            .get(&target)
+            .is_none_or(|sent| sent.elapsed() >= DEFAULT_RETRANSMIT);
+        if due {
+            self.send_arp_request(target);
+            self.arp_sent.insert(target, StdInstant::now());
+        }
+        let waited = self
+            .arp_sent
+            .get(&target)
+            .map_or(Duration::ZERO, StdInstant::elapsed);
+        wake_after(DEFAULT_RETRANSMIT.saturating_sub(waited), cx);
+    }
+
+    fn retransmit_syn(&mut self, dial: &mut DialGuard, cx: &mut Context<'_>) -> io::Result<()> {
+        let source_port = dial.connection().map_or(self.our_port, |(port, _, _)| port);
+        let remaining = match dial.next_syn(DEFAULT_RETRANSMIT) {
+            SynStep::Send(segments) => {
+                for (target, segment) in segments {
+                    self.tx_segment(*target, segment, source_port);
+                }
+                DEFAULT_RETRANSMIT
+            }
+            SynStep::Wait(remaining) => remaining,
+            SynStep::Exhausted => {
+                let attempts = dial.syn_transmissions();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    DialError::SynUnanswered { attempts },
+                ));
+            }
+        };
+        wake_after(remaining, cx);
+        Ok(())
     }
 
     fn send_arp_request(&mut self, target_ip: [u8; 4]) {
@@ -578,6 +623,7 @@ impl XdpStreamUpstream {
             our_ip,
             our_port,
             arp: HashMap::new(),
+            arp_sent: HashMap::new(),
         };
         Ok(Self {
             shared: Arc::new(Shared {
@@ -625,20 +671,21 @@ impl XdpStreamUpstream {
                 }
                 if dial.connected(&state.stack) {
                     while state.stack.poll_connected().is_some() {}
-                        let Some(dial) = operation.take() else {
-                            return Poll::Ready(Err(io::Error::other("missing dial ownership")));
-                        };
-                        let dial = dial.complete(&state.stack)?;
-                        return Poll::Ready(Ok(XdpStreamConnection {
-                            shared: Arc::clone(&self.shared),
-                            dial: Some(dial),
-                            id,
-                            peer: SocketAddr::V4(SocketAddrV4::new(
-                                Ipv4Addr::from(self.peer_ip),
-                                self.peer_port,
-                            )),
-                        }));
+                    let Some(dial) = operation.take() else {
+                        return Poll::Ready(Err(io::Error::other("missing dial ownership")));
+                    };
+                    let dial = dial.complete(&state.stack)?;
+                    return Poll::Ready(Ok(XdpStreamConnection {
+                        shared: Arc::clone(&self.shared),
+                        dial: Some(dial),
+                        id,
+                        peer: SocketAddr::V4(SocketAddrV4::new(
+                            Ipv4Addr::from(self.peer_ip),
+                            self.peer_port,
+                        )),
+                    }));
                 }
+                state.retransmit_syn(dial, context)?;
             } else if let Some(&mac) = state.arp.get(&self.peer_ip) {
                 let peer = Endpoint {
                     mac,
@@ -646,12 +693,14 @@ impl XdpStreamUpstream {
                     port: self.peer_port,
                 };
                 let outbound = dial.start(&mut state.stack, peer)?;
-                let source_port = dial.connection().map_or(state.our_port, |(port, _, _)| port);
+                let source_port = dial
+                    .connection()
+                    .map_or(state.our_port, |(port, _, _)| port);
                 for (target, segment) in outbound {
                     state.tx_segment(target, &segment, source_port);
                 }
             } else {
-                state.send_arp_request(self.peer_ip);
+                state.retransmit_arp(self.peer_ip, context);
             }
             if progressed {
                 state.wake_others(context);

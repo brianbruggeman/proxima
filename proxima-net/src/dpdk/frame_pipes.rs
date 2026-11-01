@@ -6,6 +6,8 @@
 use super::port::{self, Port};
 use super::{DpdkError, Eal, Mempool, RawMbuf};
 use core::cell::Cell;
+use core::future::poll_fn;
+use core::task::Poll;
 use core::mem::ManuallyDrop;
 use proxima_primitives::pipe::Pipe;
 use std::sync::Arc;
@@ -145,11 +147,18 @@ unsafe impl Send for DpdkRx {}
 
 impl Pipe for DpdkRx {
     type In = ();
-    type Out = Option<DpdkFrame>;
+    type Out = DpdkFrame;
     type Err = DpdkFrameError;
 
-    fn call(&self, _input: ()) -> impl Future<Output = Result<Option<DpdkFrame>, DpdkFrameError>> {
-        async move { Ok(self.take()) }
+    fn call(&self, _input: ()) -> impl Future<Output = Result<DpdkFrame, DpdkFrameError>> {
+        poll_fn(|context| match self.take() {
+            Some(frame) => Poll::Ready(Ok(frame)),
+            None => {
+                // a nic cannot push a wakeup: poll-mode drivers re-poll the ring, so the task wakes itself
+                context.waker().wake_by_ref();
+                Poll::Pending
+            }
+        })
     }
 }
 

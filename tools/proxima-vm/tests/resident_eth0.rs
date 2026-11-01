@@ -14,7 +14,6 @@ use bytes::Bytes;
 use futures::FutureExt;
 use proxima_primitives::pipe::Pipe;
 use proxima_protocols::inet::ethernet::{EtherType, EthernetFrame};
-use proxima_vm::frame_pipe::FrameError;
 use proxima_vm::kernel_modules::load_modules;
 use proxima_vm::kvm::resident::{LinkConfig, ResidentLinux, net_device_cmdline};
 use proxima_vm::linux::{LinuxBootInputs, LinuxGuestLimits, initramfs_with_modules};
@@ -68,14 +67,14 @@ fn a_resident_guest_sends_an_arp_request_for_the_gateway_from_eth0() {
     let mut seen = Vec::new();
 
     let found = loop {
-        match host.from_guest.call(()).now_or_never().expect("the frame pipe is ready") {
-            Ok(frame) if is_guest_arp_request_for_peer(&frame) => break true,
-            Ok(frame) => seen.push(frame.len()),
-            Err(FrameError::Empty) => match deadline.checked_duration_since(Instant::now()) {
+        match host.from_guest.call(()).now_or_never() {
+            Some(Ok(frame)) if is_guest_arp_request_for_peer(&frame) => break true,
+            Some(Ok(frame)) => seen.push(frame.len()),
+            None => match deadline.checked_duration_since(Instant::now()) {
                 Some(remaining) => thread::park_timeout(remaining),
                 None => break false,
             },
-            Err(_) => break false,
+            Some(Err(_)) => break false,
         }
     };
 

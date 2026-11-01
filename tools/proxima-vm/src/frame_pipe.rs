@@ -9,18 +9,19 @@
 //! The types exist only because `Pipe` is foreign to `ArrayQueue`: the orphan
 //! rule needs a local type to carry each impl.
 
+use std::future::poll_fn;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::Poll;
 use std::thread::Thread;
 
 use crossbeam_queue::ArrayQueue;
+use futures::task::AtomicWaker;
 use proxima_primitives::pipe::Pipe;
 
 /// Why a frame pipe did not move a frame this call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FrameError {
-    /// Source: nothing ready right now; try again.
-    Empty,
     /// Sink: the queue is at capacity; the frame was not taken.
     Full,
     /// Source: the sink end closed and everything it sent was drained.
@@ -31,6 +32,7 @@ pub enum FrameError {
 struct Channel {
     queue: ArrayQueue<Vec<u8>>,
     closed: AtomicBool,
+    consumer: AtomicWaker,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +64,7 @@ fn connected(capacity: usize, wake: Option<Thread>) -> (FrameSink, FrameSource) 
     let channel = Arc::new(Channel {
         queue: ArrayQueue::new(capacity),
         closed: AtomicBool::new(false),
+        consumer: AtomicWaker::new(),
     });
     (
         FrameSink {
@@ -77,6 +80,7 @@ impl FrameSink {
     /// once it has drained what was already sent.
     pub fn close(&self) {
         self.channel.closed.store(true, Ordering::Release);
+        self.channel.consumer.wake();
         if let Some(consumer) = &self.wake {
             consumer.unpark();
         }
@@ -94,6 +98,7 @@ impl Pipe for FrameSink {
                 .queue
                 .push(frame)
                 .map_err(|_| FrameError::Full)?;
+            self.channel.consumer.wake();
             if let Some(consumer) = &self.wake {
                 consumer.unpark();
             }
@@ -108,25 +113,32 @@ impl Pipe for FrameSource {
     type Err = FrameError;
 
     fn call(&self, _input: ()) -> impl Future<Output = Result<Vec<u8>, FrameError>> {
-        async move {
+        poll_fn(|context| {
+            if let Some(frame) = self.channel.queue.pop() {
+                return Poll::Ready(Ok(frame));
+            }
+            self.channel.consumer.register(context.waker());
             let closed = self.channel.closed.load(Ordering::Acquire);
             match self.channel.queue.pop() {
-                Some(frame) => Ok(frame),
-                None if closed => Err(FrameError::Closed),
-                None => Err(FrameError::Empty),
+                Some(frame) => Poll::Ready(Ok(frame)),
+                None if closed => Poll::Ready(Err(FrameError::Closed)),
+                None => Poll::Pending,
             }
-        }
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use std::sync::atomic::AtomicUsize;
     use std::sync::mpsc;
+    use std::task::Context;
     use std::thread;
 
     use super::*;
     use futures::FutureExt;
+    use futures::task::{ArcWake, waker};
 
     #[test]
     fn frames_arrive_in_order_then_empty_then_closed() {
@@ -137,7 +149,7 @@ mod tests {
 
         assert_eq!(source.call(()).now_or_never().unwrap(), Ok(vec![1]));
         assert_eq!(source.call(()).now_or_never().unwrap(), Ok(vec![2]));
-        assert_eq!(source.call(()).now_or_never().unwrap(), Err(FrameError::Empty));
+        assert!(source.call(()).now_or_never().is_none(), "an empty source is pending, not an error");
         sink.close();
         assert_eq!(source.call(()).now_or_never().unwrap(), Err(FrameError::Closed));
     }
@@ -160,11 +172,11 @@ mod tests {
             ready_sender.send(sink).unwrap();
             let mut seen = Vec::new();
             loop {
-                match source.call(()).now_or_never().unwrap() {
-                    Ok(frame) => seen.push(frame),
-                    Err(FrameError::Empty) => thread::park(),
-                    Err(FrameError::Closed) => return seen,
-                    Err(FrameError::Full) => unreachable!("a source is never full"),
+                match source.call(()).now_or_never() {
+                    Some(Ok(frame)) => seen.push(frame),
+                    None => thread::park(),
+                    Some(Err(FrameError::Closed)) => return seen,
+                    Some(Err(FrameError::Full)) => unreachable!("a source is never full"),
                 }
             }
         });
@@ -175,6 +187,30 @@ mod tests {
         sink.close();
 
         assert_eq!(consumer.join().unwrap(), vec![vec![1], vec![2]]);
+    }
+
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn a_pending_source_wakes_its_task_on_a_push_and_not_before() {
+        let (sink, source) = frame_channel(4);
+        let wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let task_waker = waker(Arc::clone(&wakes));
+        let mut context = Context::from_waker(&task_waker);
+        let mut receive = std::pin::pin!(source.call(()));
+
+        assert!(receive.as_mut().poll(&mut context).is_pending());
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 0, "a pending poll never wakes itself");
+        sink.call(vec![7]).now_or_never().unwrap().unwrap();
+
+        assert_eq!(wakes.0.load(Ordering::SeqCst), 1, "the push woke the parked task");
+        assert_eq!(receive.as_mut().poll(&mut context), Poll::Ready(Ok(vec![7])));
     }
 
     #[test]

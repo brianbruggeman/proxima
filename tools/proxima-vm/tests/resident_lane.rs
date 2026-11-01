@@ -34,7 +34,7 @@ fn link() -> LinkConfig {
 fn stop_ends_a_resident_guest_with_stopped_and_closes_the_guest_to_host_pipe() {
     let (resident, host) = ResidentLinux::start(boot_inputs(), link()).expect("the resident guest starts");
     assert!(resident.is_running(), "the vcpu thread runs the guest after start returns");
-    assert_eq!(host.from_guest.call(()).now_or_never().expect("ready"), Err(FrameError::Empty));
+    assert!(host.from_guest.call(()).now_or_never().is_none(), "an idle guest leaves the pipe pending");
 
     let outcome = resident.stop();
 
