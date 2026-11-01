@@ -1154,7 +1154,7 @@ simd-varint  = []
 # (macos/aarch64) through `proxima-vm`'s M1 dispatch loop — `tokio` for the
 # same reason `process` needs it (the factory registry only threads
 # `Arc<LogBufferRegistry>`-shaped state through the tokio-gated arms today).
-vm = ["tokio", "dep:proxima-vm"]
+vm = ["tokio", "dep:proxima-vm", "http-prime-deps"]
 proxima-onnx = ["dep:proxima-onnx"]
 proxima-tensor = ["dep:proxima-tensor"]
 

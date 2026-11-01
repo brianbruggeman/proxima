@@ -79,6 +79,23 @@ const LINUX_GUEST: &str = "uppercase-init";
 const LINUX_PIPE: &str = "shout-linux";
 const IMAGE_PIPE: &str = "probe-image";
 const DEFAULT_KERNEL: &str = "/boot/vmlinuz-linux";
+const RESIDENT_FLAG: &str = "--vm-registry-resident-child";
+const RESIDENT_PIPE: &str = "resident-whoami";
+const WHOAMI_FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tools/proxima-vm/tests/fixtures/oci/whoami-v1.10.2"
+);
+const WHOAMI_INDEX_DIGEST: &str =
+    "sha256:1474027c316661cdec87df2623e13a41e7e1ce0ba99c24917631de8f300b5420";
+const WHOAMI_BLOBS: [&str; 6] = [
+    WHOAMI_INDEX_DIGEST,
+    "sha256:7000846753fcc36eb2a1a3a21fe897da09c71e1d3b5381f912ea6e6e1c8871b6",
+    "sha256:ab0ca2603e47e42f7d45e094b6f4cecc5d5b7b0ef6ca89170ce1a771ed1a0066",
+    "sha256:1b5c60a1be3bf9cb17566bdad4cb1f36387367e56798bc307d394169f1e5d72d",
+    "sha256:1d12c9005bc5cd6824edcfe37f412c35922508f76cb4b854beb52f85c12a929b",
+    "sha256:0abc37d8af53c11b5d94e3b54eca06ac582fec2a9b56f7d3070bb54247aa8595",
+];
+const RESIDENT_REQUESTS: usize = 3;
 
 const MAX_SEGMENTS: usize = 8;
 const OUTPUT_CAPACITY: usize = 64 * 1024;
@@ -93,6 +110,7 @@ fn main() {
     let outcome = match arguments.first().map(String::as_str) {
         Some(PROBE_FLAG) => Some(run_probe_child(&arguments[1], &arguments[2])),
         Some(SERVE_FLAG) => Some(run_serve_child(&arguments[1], &arguments[2])),
+        Some(RESIDENT_FLAG) => Some(run_resident_child(&arguments[1], &arguments[2])),
         Some(BENCH_FLAG) => Some(run_bench_child(&arguments[1..])),
         Some(INSTRUMENT_FLAG) => Some(run_instrument_child(&arguments[1..])),
         _ => None,
@@ -124,6 +142,14 @@ fn main() {
             trial(
                 "a_tampered_cached_layer_fails_the_image_upstream_build_before_boot",
                 a_tampered_cached_layer_fails_the_image_upstream_build_before_boot,
+            ),
+            trial(
+                "a_resident_vm_upstream_boots_one_guest_and_serves_sequential_gets",
+                a_resident_vm_upstream_boots_one_guest_and_serves_sequential_gets,
+            ),
+            trial(
+                "a_resident_elf_guest_is_rejected_when_the_config_is_applied",
+                a_resident_elf_guest_is_rejected_when_the_config_is_applied,
             ),
             trial(
                 "missing_kernel_fails_when_the_config_is_applied",
@@ -290,6 +316,40 @@ fn run_serve_child(config_path: &str, mount_path: &str) -> Result<(), Box<dyn Er
         for handle in handles {
             handle.stop().await;
         }
+        Ok::<(), Box<dyn Error>>(())
+    })
+}
+
+fn get_request() -> Result<proxima::Request<Bytes>, Box<dyn Error>> {
+    Ok(proxima::Request::builder()
+        .method("GET")
+        .path("/")
+        .build()?)
+}
+
+/// args: `<config> <pipe>`. Builds the resident upstream once, sends
+/// `RESIDENT_REQUESTS` sequential GETs through its `PipeHandle`, and prints one
+/// `status=<code>` line per response, the first response's body, and
+/// `boots=<n>`: the count of guests this process started.
+fn run_resident_child(config_path: &str, pipe_name: &str) -> Result<(), Box<dyn Error>> {
+    let runtime = child_runtime(true)?;
+    runtime.block_on(async move {
+        let handle = build_pipe(config_path, pipe_name).await?;
+        let mut report = String::new();
+        for index in 0..RESIDENT_REQUESTS {
+            let response =
+                proxima_primitives::pipe::SendPipe::call(&handle, get_request()?).await?;
+            report.push_str(&format!("status={}\n", response.status));
+            let payload = response.collect_body().await?;
+            if index == 0 {
+                report.push_str(&format!("body={}\n", String::from_utf8_lossy(&payload)));
+            }
+        }
+        report.push_str(&format!(
+            "boots={}\n",
+            proxima::upstreams::vm_resident::guests_booted()
+        ));
+        std::io::stdout().write_all(report.as_bytes())?;
         Ok::<(), Box<dyn Error>>(())
     })
 }
@@ -1106,6 +1166,93 @@ fn config_only_linux_vm_upstream_runs_an_oci_image() {
         .expect("config-registered image upstream runs end to end");
 
     assert_eq!(response, b"exited:0");
+}
+
+fn vendored_whoami_blob(digest: &str) -> Vec<u8> {
+    let name = digest.strip_prefix("sha256:").expect("sha256 digest");
+    let raw: PathBuf = [WHOAMI_FIXTURE, "blobs", "sha256", name].iter().collect();
+    match std::fs::read(&raw) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            let hex_path = raw.with_extension("hex");
+            let text = std::fs::read_to_string(&hex_path)
+                .unwrap_or_else(|error| panic!("blob {} must exist raw or as .hex: {error}", raw.display()));
+            hex::decode(text.trim()).expect("vendored hex blob decodes")
+        }
+    }
+}
+
+fn seed_whoami_cache(cache_dir: &Path) {
+    use proxima_vm::oci::cache;
+    use proxima_vm::oci::digest::Digest;
+
+    for digest in WHOAMI_BLOBS {
+        cache::write(
+            cache_dir,
+            &Digest::parse(digest).expect("whoami digest parses"),
+            &vendored_whoami_blob(digest),
+        )
+        .expect("seed the blob cache from the vendored whoami fixture");
+    }
+}
+
+fn write_resident_config(directory: &Path, kernel: &str, extra: &str) -> PathBuf {
+    let config_path = directory.join("proxima-resident.toml");
+    let toml = format!(
+        "[upstreams.{RESIDENT_PIPE}]\ntype = \"vm\"\nkernel_path = \"{kernel}\"\nresident = true\n{extra}"
+    );
+    std::fs::write(&config_path, toml).expect("write resident TOML config");
+    config_path
+}
+
+/// The resident lifetime through `type = "vm"` with zero new Rust: the whoami
+/// image boots once when the config is applied, three sequential GETs reach it
+/// through `H1ClientUpstream` over `dial_guest`, all three answer 200, and the
+/// process started exactly one guest.
+fn a_resident_vm_upstream_boots_one_guest_and_serves_sequential_gets() {
+    let directory = tempfile::tempdir().expect("create tempdir for the guest build");
+    let oci_init = build_linux_bin(&directory.path().join("linux-target"), "oci-init");
+    let cache_dir = directory.path().join("oci-cache");
+    seed_whoami_cache(&cache_dir);
+    let extra = format!(
+        "image = \"traefik/whoami@{WHOAMI_INDEX_DIGEST}\"\noci_init_path = \"{}\"\nimage_cache_dir = \"{}\"\nguest_port = 80\n",
+        oci_init.display(),
+        cache_dir.display()
+    );
+    let config = write_resident_config(directory.path(), &host_kernel(), &extra);
+    let signed_self = SignedSelf::prepare();
+
+    let output = signed_self
+        .run(&[RESIDENT_FLAG, &config.to_string_lossy(), RESIDENT_PIPE], b"")
+        .expect("config-registered resident upstream serves sequential GETs");
+
+    let report = String::from_utf8(output).expect("child prints text");
+    let statuses: Vec<&str> = report.lines().filter(|line| line.starts_with("status=")).collect();
+    assert_eq!(statuses, vec!["status=200"; RESIDENT_REQUESTS], "{report}");
+    assert!(report.contains("GET / HTTP/1.1"), "whoami echoes the request line: {report}");
+    assert!(report.lines().any(|line| line == "boots=1"), "exactly one guest boots: {report}");
+}
+
+/// Sad path: `resident = true` on an elf guest fails when the config is
+/// applied, and the error names the field.
+fn a_resident_elf_guest_is_rejected_when_the_config_is_applied() {
+    let directory = tempfile::tempdir().expect("create tempdir");
+    let config_path = directory.path().join("proxima-resident-elf.toml");
+    std::fs::write(
+        &config_path,
+        format!("[upstreams.{PIPE}]\ntype = \"vm\"\nguest_image_path = \"/no/such/guest.elf\"\nresident = true\n"),
+    )
+    .expect("write resident elf config");
+    let signed_self = SignedSelf::prepare();
+
+    let error = signed_self
+        .run(&[PROBE_FLAG, &config_path.to_string_lossy(), PIPE], b"")
+        .expect_err("a resident elf guest cannot boot");
+
+    assert!(
+        error.contains("resident: only a Linux guest (kernel_path) can run resident"),
+        "the failure must come from validate and name the field: {error}"
+    );
 }
 
 /// Sad path: a layer altered in the cache fails the build of the upstream with both digests,

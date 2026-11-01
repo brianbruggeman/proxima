@@ -65,6 +65,8 @@ pub mod record;
 // that module's comment above).
 #[cfg(feature = "vm")]
 pub mod vm;
+#[cfg(all(feature = "vm", target_os = "linux", target_arch = "x86_64"))]
+pub mod vm_resident;
 #[cfg(feature = "recording")]
 pub use proxima_recording::replay;
 #[cfg(all(
