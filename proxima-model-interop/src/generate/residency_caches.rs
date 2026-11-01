@@ -2087,6 +2087,9 @@ pub(super) fn push_kv_named_blocks<'call>(
                     pass_row: *pass_row,
                     v_row: *v_row,
                 };
+                if device_resident.get(layer).copied().unwrap_or(false) {
+                    continue;
+                }
                 dense_attention_pad_scratch[layer].fill(cache, &shape, layer)?;
             }
             (LayerCacheState::ShortConv(_), LayerPadRowWidths::ShortConv { .. }) => {}
@@ -2136,6 +2139,16 @@ pub(super) fn push_kv_named_blocks<'call>(
                     v_row,
                 },
             ) => {
+                if device_resident.get(layer).copied().unwrap_or(false) {
+                    let resident_leaf = QuantizedBlock::Float32(&[]);
+                    named_blocks.extend([
+                        (k_first.as_str(), resident_leaf),
+                        (k_second.as_str(), resident_leaf),
+                        (k_pass.as_str(), resident_leaf),
+                        (v.as_str(), resident_leaf),
+                    ]);
+                    continue;
+                }
                 let shape = DenseAttentionPadShape {
                     bound_extent: kv_bound_extent,
                     even_odd_row: *even_odd_row,
@@ -2768,6 +2781,11 @@ pub struct BackendRuntime {
     /// `(state input, state output)` pairs the next CUDA evaluation keeps on the device; empty
     /// when no recurrent state is carried.
     carry_pairs: Vec<(NodeId, NodeId)>,
+    /// `(cache input, new-rows output)` pairs whose attention KV the next CUDA evaluation keeps on
+    /// the device; empty when no KV is carried.
+    kv_carry_pairs: Vec<(NodeId, NodeId)>,
+    kv_carry_cached_rows: u64,
+    kv_carry_accepted: bool,
     /// Per `new_count`, whether the first CUDA plan built for that width reads its
     /// `kv_cache.*` inputs only through fused `CachedAttention` ops, so the range may be
     /// bound padded to its bucket. Decided once per width, at that plan's first build.
@@ -2895,6 +2913,9 @@ impl BackendRuntime {
             plan_hits: 0,
             plan_misses: 0,
             carry_pairs: Vec::new(),
+            kv_carry_pairs: Vec::new(),
+            kv_carry_cached_rows: 0,
+            kv_carry_accepted: false,
             #[cfg(feature = "cuda")]
             cuda_kv_pad: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -3016,6 +3037,38 @@ impl BackendRuntime {
         #[cfg(not(feature = "cuda"))]
         let drained = Vec::new();
         Ok(drained)
+    }
+
+    /// Selects the `(cache input, new-rows output)` pairs whose attention KV the following
+    /// evaluations keep on the device, `cached_rows` being the valid host rows at the first
+    /// upload; an empty set restores host round trips and requires a prior drain.
+    pub(super) fn set_kv_carry(&mut self, pairs: Vec<(NodeId, NodeId)>, cached_rows: u64) {
+        self.kv_carry_pairs = pairs;
+        self.kv_carry_cached_rows = cached_rows;
+        self.kv_carry_accepted = false;
+    }
+
+    pub(super) fn set_kv_cached_rows(&mut self, cached_rows: u64) {
+        self.kv_carry_cached_rows = cached_rows;
+    }
+
+    /// Whether the last evaluation left the carried KV pairs on the device.
+    pub(super) fn kv_carry_accepted(&self) -> bool {
+        self.kv_carry_accepted
+    }
+
+    /// Reads the device-held attention KV back to the host, keyed by cache input node.
+    pub(super) fn drain_kv_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
+        #[cfg(feature = "cuda")]
+        {
+            let mut drained = Vec::new();
+            for plan in self.plans.values_mut() {
+                drained.extend(omega::backend::drain_cuda_appended_rows(plan)?);
+            }
+            Ok(drained)
+        }
+        #[cfg(not(feature = "cuda"))]
+        Ok(Vec::new())
     }
 
     /// Carried state bytes that crossed PCIe in either direction, summed over cached plans.
@@ -3181,6 +3234,14 @@ impl BackendRuntime {
         let resolve_us = resolve_started.elapsed().as_micros() as u64;
         #[cfg(feature = "cuda")]
         omega::backend::carry_cuda_state(plan, &self.carry_pairs);
+        #[cfg(feature = "cuda")]
+        if !self.kv_carry_pairs.is_empty() {
+            self.kv_carry_accepted = omega::backend::carry_cuda_rows(
+                plan,
+                &self.kv_carry_pairs,
+                self.kv_carry_cached_rows,
+            );
+        }
         let evaluated = execute_plan_named_with_expert_sources(plan, named, expert_sources)?;
         #[cfg(feature = "cuda")]
         debug!(
@@ -4816,6 +4877,18 @@ impl BackendRuntime {
     pub(super) fn set_state_carry(&mut self, _pairs: Vec<(NodeId, NodeId)>) {}
 
     pub(super) fn drain_state_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
+        Ok(Vec::new())
+    }
+
+    pub(super) fn set_kv_carry(&mut self, _pairs: Vec<(NodeId, NodeId)>, _cached_rows: u64) {}
+
+    pub(super) fn set_kv_cached_rows(&mut self, _cached_rows: u64) {}
+
+    pub(super) fn kv_carry_accepted(&self) -> bool {
+        false
+    }
+
+    pub(super) fn drain_kv_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
         Ok(Vec::new())
     }
 
