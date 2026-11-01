@@ -1,5 +1,5 @@
 //! Device-independent TCP stack driver. The frame device is three pipes: a
-//! source `() -> Option<Frame>` (`None` means nothing ready), a sink
+//! source `() -> Frame` (pending until a frame is ready), a sink
 //! `Frame -> ()`, and a mint `u16 -> Frame` that yields a blank frame of the
 //! requested length. A dpdk port, a virtio-net queue pair, or an in-memory
 //! channel all plug in by being those three pipes; the frame type is whatever
@@ -10,17 +10,19 @@
 //! The driver answers ARP/ICMP inline, routes TCP into the sans-IO
 //! [`TcpStack`], and refuses segments for closed ports with a RST so an active
 //! open to a port nobody listens on fails fast. Each pipe is polled once per
-//! call: a pipe that is not ready is [`DriverError::Stalled`], never a hang.
+//! call: the sink and mint must settle at once ([`DriverError::Stalled`]); the source parks the task on its waker.
 
 use crate::stack::{self, Action};
-use crate::tcp_dial::{DialGuard, DialLease};
+use crate::tcp_dial::{DialError, DialGuard, DialLease, SynStep, wake_after};
 use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
 use crate::tcp_stack::{ConnId, Outbound, TcpStack};
+use crossbeam_queue::SegQueue;
 use core::fmt::Debug;
 use core::future::Future;
 use core::pin::pin;
 use futures::FutureExt;
 use futures::io::{AsyncRead, AsyncWrite};
+use futures::task::{ArcWake, waker};
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::stream::{
     BindAddr, ConnectFuture, PeerInfo, StreamConnection, StreamListener, StreamUpstream,
@@ -36,7 +38,8 @@ use std::io;
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::{Context, Poll, Waker};
+use std::time::Duration;
 use std::time::Instant as StdInstant;
 use thiserror::Error;
 
@@ -48,6 +51,8 @@ const HEADERS: u16 = 54;
 const TCP_LEN: u16 = 20;
 const ARP_FRAME: u16 = 42;
 const TTL: u8 = 64;
+
+pub use crate::tcp_dial::DEFAULT_RETRANSMIT;
 
 /// Why the driver could not move a frame or build a segment. The pipe errors
 /// are carried whole so the log names which device failed and how.
@@ -162,6 +167,20 @@ fn classify_tcp(frame: &[u8], our_ip: [u8; 4]) -> Option<OwnedInbound> {
     })
 }
 
+/// Tasks parked on the rx source. The source holds one waker slot, so the
+/// driver registers this fan-out waker there and every parked task here.
+struct Waiters {
+    parked: SegQueue<Waker>,
+}
+
+impl ArcWake for Waiters {
+    fn wake_by_ref(arc_self: &Arc<Self>) {
+        while let Some(task) = arc_self.parked.pop() {
+            task.wake();
+        }
+    }
+}
+
 /// One TCP endpoint on one frame device: the sans-IO stack plus the ARP table
 /// and the three frame pipes it reads, writes and mints through.
 pub struct Driver<Rx, Tx, Mint> {
@@ -174,6 +193,10 @@ pub struct Driver<Rx, Tx, Mint> {
     our_ip: [u8; 4],
     our_port: u16,
     arp: HashMap<[u8; 4], [u8; 6]>,
+    arp_sent: HashMap<[u8; 4], StdInstant>,
+    retransmit: Duration,
+    waiters: Arc<Waiters>,
+    fan_out: Waker,
 }
 
 impl<Rx, Tx, Mint> Driver<Rx, Tx, Mint> {
@@ -186,7 +209,12 @@ impl<Rx, Tx, Mint> Driver<Rx, Tx, Mint> {
     ) -> Self {
         let our_ip = local.ip().octets();
         let our_port = local.port();
+        let waiters = Arc::new(Waiters { parked: SegQueue::new() });
         Self {
+            fan_out: waker(Arc::clone(&waiters)),
+            waiters,
+            arp_sent: HashMap::new(),
+            retransmit: DEFAULT_RETRANSMIT,
             rx,
             tx,
             mint,
@@ -199,6 +227,13 @@ impl<Rx, Tx, Mint> Driver<Rx, Tx, Mint> {
         }
     }
 
+    /// Interval before an unanswered ARP request is sent again.
+    #[must_use]
+    pub fn with_retransmit(mut self, interval: Duration) -> Self {
+        self.retransmit = interval;
+        self
+    }
+
     fn now(&self) -> TcpInstant {
         TcpInstant::from_micros(u64::try_from(self.start.elapsed().as_micros()).unwrap_or(u64::MAX))
     }
@@ -208,7 +243,7 @@ impl<Rx, Tx, Mint> Driver<Rx, Tx, Mint>
 where
     Mint: Pipe<In = u16>,
     Mint::Out: AsRef<[u8]> + AsMut<[u8]>,
-    Rx: Pipe<In = (), Out = Option<Mint::Out>>,
+    Rx: Pipe<In = (), Out = Mint::Out>,
     Tx: Pipe<In = Mint::Out, Out = ()>,
 {
     fn settle<Output>(
@@ -232,22 +267,64 @@ where
         Ok(frame)
     }
 
-    /// One rx burst: answer arp/icmp, route TCP through the stack, transmit replies.
+    fn poll_rx(&self) -> Poll<Result<Mint::Out, Rx::Err>> {
+        let mut fan_out = Context::from_waker(&self.fan_out);
+        pin!(self.rx.call(())).poll(&mut fan_out)
+    }
+
+    /// One rx burst: answer arp/icmp, route TCP through the stack, transmit
+    /// replies. When the source has nothing the calling task is parked and
+    /// woken by the next frame; a burst that moved frames wakes every parked
+    /// task, since the frames may belong to another connection.
     ///
     /// # Errors
     /// The first pipe or encode failure; frames already handled stay handled.
-    pub fn pump(&mut self) -> Result<(), DriverFailure<Rx, Tx, Mint>> {
+    pub fn pump(&mut self, cx: &Context<'_>) -> Result<(), DriverFailure<Rx, Tx, Mint>> {
+        self.waiters.parked.push(cx.waker().clone());
         let now = self.now();
+        let mut moved = false;
         for _ in 0..BURST {
-            let received = Self::settle(self.rx.call(()), "rx")?.map_err(DriverError::Rx)?;
-            let Some(mut frame) = received else {
-                return Ok(());
+            let Poll::Ready(received) = self.poll_rx() else {
+                break;
             };
+            let mut frame = received.map_err(DriverError::Rx)?;
+            moved = true;
             match stack::handle_frame(frame.as_mut(), self.our_mac, self.our_ip) {
                 Action::Transmit => self.transmit(frame)?,
                 Action::Drop => self.ingest(frame, now)?,
             }
         }
+        if moved {
+            ArcWake::wake_by_ref(&self.waiters);
+        }
+        Ok(())
+    }
+
+    fn retransmit_arp(&mut self, target: [u8; 4], cx: &mut Context<'_>) -> Result<(), DriverFailure<Rx, Tx, Mint>> {
+        let due = self.arp_sent.get(&target).is_none_or(|sent| sent.elapsed() >= self.retransmit);
+        if due {
+            self.send_arp_request(target)?;
+            self.arp_sent.insert(target, StdInstant::now());
+        }
+        let waited = self.arp_sent.get(&target).map_or(Duration::ZERO, StdInstant::elapsed);
+        wake_after(self.retransmit.saturating_sub(waited), cx);
+        Ok(())
+    }
+
+    fn retransmit_syn(&self, dial: &mut DialGuard, cx: &mut Context<'_>) -> io::Result<()> {
+        let source_port = dial.connection().map_or(self.our_port, |(port, _, _)| port);
+        let remaining = match dial.next_syn(self.retransmit) {
+            SynStep::Send(segments) => {
+                self.send_segments(segments, source_port).map_err(into_io)?;
+                self.retransmit
+            }
+            SynStep::Wait(remaining) => remaining,
+            SynStep::Exhausted => {
+                let attempts = dial.syn_transmissions();
+                return Err(io::Error::new(io::ErrorKind::TimedOut, DialError::SynUnanswered { attempts }));
+            }
+        };
+        wake_after(remaining, cx);
         Ok(())
     }
 
@@ -383,14 +460,14 @@ impl<Rx, Tx, Mint> StreamListener for FrameListener<Rx, Tx, Mint>
 where
     Mint: Pipe<In = u16> + Send + 'static,
     Mint::Out: AsRef<[u8]> + AsMut<[u8]>,
-    Rx: Pipe<In = (), Out = Option<Mint::Out>> + Send + 'static,
+    Rx: Pipe<In = (), Out = Mint::Out> + Send + 'static,
     Tx: Pipe<In = Mint::Out, Out = ()> + Send + 'static,
 {
     type Conn = FrameConnection<Rx, Tx, Mint>;
 
     fn poll_accept(&self, cx: &mut Context<'_>) -> Poll<io::Result<Self::Conn>> {
         let mut driver = locked!(self.shared, cx);
-        if let Err(error) = driver.pump() {
+        if let Err(error) = driver.pump(cx) {
             return Poll::Ready(Err(into_io(error)));
         }
         if let Some(id) = driver.stack.poll_accept() {
@@ -404,7 +481,6 @@ where
                 dial: None,
             }));
         }
-        cx.waker().wake_by_ref();
         Poll::Pending
     }
 
@@ -425,7 +501,7 @@ impl<Rx, Tx, Mint> StreamConnection for FrameConnection<Rx, Tx, Mint>
 where
     Mint: Pipe<In = u16> + Send + 'static,
     Mint::Out: AsRef<[u8]> + AsMut<[u8]>,
-    Rx: Pipe<In = (), Out = Option<Mint::Out>> + Send + 'static,
+    Rx: Pipe<In = (), Out = Mint::Out> + Send + 'static,
     Tx: Pipe<In = Mint::Out, Out = ()> + Send + 'static,
 {
     fn peer(&self) -> Option<PeerInfo> {
@@ -437,7 +513,7 @@ impl<Rx, Tx, Mint> AsyncRead for FrameConnection<Rx, Tx, Mint>
 where
     Mint: Pipe<In = u16> + Send + 'static,
     Mint::Out: AsRef<[u8]> + AsMut<[u8]>,
-    Rx: Pipe<In = (), Out = Option<Mint::Out>> + Send + 'static,
+    Rx: Pipe<In = (), Out = Mint::Out> + Send + 'static,
     Tx: Pipe<In = Mint::Out, Out = ()> + Send + 'static,
 {
     fn poll_read(
@@ -447,7 +523,7 @@ where
     ) -> Poll<io::Result<usize>> {
         let this = self.get_mut();
         let mut driver = locked!(this.shared, cx);
-        if let Err(error) = driver.pump() {
+        if let Err(error) = driver.pump(cx) {
             return Poll::Ready(Err(into_io(error)));
         }
         let read = match &this.dial {
@@ -461,7 +537,6 @@ where
             return Poll::Ready(Ok(0));
         }
         drop(driver);
-        cx.waker().wake_by_ref();
         Poll::Pending
     }
 }
@@ -470,7 +545,7 @@ impl<Rx, Tx, Mint> AsyncWrite for FrameConnection<Rx, Tx, Mint>
 where
     Mint: Pipe<In = u16> + Send + 'static,
     Mint::Out: AsRef<[u8]> + AsMut<[u8]>,
-    Rx: Pipe<In = (), Out = Option<Mint::Out>> + Send + 'static,
+    Rx: Pipe<In = (), Out = Mint::Out> + Send + 'static,
     Tx: Pipe<In = Mint::Out, Out = ()> + Send + 'static,
 {
     fn poll_write(
@@ -534,7 +609,7 @@ impl<Rx, Tx, Mint> StreamUpstream for FrameUpstream<Rx, Tx, Mint>
 where
     Mint: Pipe<In = u16> + Send + 'static,
     Mint::Out: AsRef<[u8]> + AsMut<[u8]>,
-    Rx: Pipe<In = (), Out = Option<Mint::Out>> + Send + 'static,
+    Rx: Pipe<In = (), Out = Mint::Out> + Send + 'static,
     Tx: Pipe<In = Mint::Out, Out = ()> + Send + 'static,
 {
     type Conn = FrameConnection<Rx, Tx, Mint>;
@@ -542,8 +617,8 @@ where
     fn connect_future(&self) -> ConnectFuture<'_, Self::Conn> {
         let mut operation = None;
         // ConnectFuture is the trait's boxed future type; the box is the trait's, not ours.
-        Box::pin(core::future::poll_fn(move |context| {
-            self.poll_dial(context, &mut operation)
+        Box::pin(core::future::poll_fn(move |cx| {
+            self.poll_dial(cx, &mut operation)
         }))
     }
 }
@@ -552,15 +627,15 @@ impl<Rx, Tx, Mint> FrameUpstream<Rx, Tx, Mint>
 where
     Mint: Pipe<In = u16>,
     Mint::Out: AsRef<[u8]> + AsMut<[u8]>,
-    Rx: Pipe<In = (), Out = Option<Mint::Out>>,
+    Rx: Pipe<In = (), Out = Mint::Out>,
     Tx: Pipe<In = Mint::Out, Out = ()>,
 {
     fn poll_dial(
         &self,
-        context: &mut Context<'_>,
+        cx: &mut Context<'_>,
         operation: &mut Option<DialGuard>,
     ) -> Poll<io::Result<FrameConnection<Rx, Tx, Mint>>> {
-        let mut driver = locked!(self.shared, context);
+        let mut driver = locked!(self.shared, cx);
         let Some(lease) = &self.shared.dial else {
             return Poll::Ready(Err(io::Error::other("missing upstream tuple lease")));
         };
@@ -570,7 +645,7 @@ where
         let Some(dial) = operation.as_mut() else {
             return Poll::Ready(Err(io::Error::other("missing dial ownership")));
         };
-        if let Err(error) = driver.pump() {
+        if let Err(error) = driver.pump(cx) {
             return Poll::Ready(Err(into_io(error)));
         }
         let peer_ip = self.peer.ip().octets();
@@ -591,6 +666,9 @@ where
                     peer: SocketAddr::V4(self.peer),
                 }));
             }
+            if let Err(error) = driver.retransmit_syn(dial, cx) {
+                return Poll::Ready(Err(error));
+            }
         } else if let Some(&mac) = driver.arp.get(&peer_ip) {
             let endpoint = Endpoint { mac, ip: peer_ip, port: self.peer.port() };
             let outbound = dial.start(&mut driver.stack, endpoint)?;
@@ -598,10 +676,9 @@ where
             if let Err(error) = driver.send_segments(&outbound, source_port) {
                 return Poll::Ready(Err(into_io(error)));
             }
-        } else if let Err(error) = driver.send_arp_request(peer_ip) {
+        } else if let Err(error) = driver.retransmit_arp(peer_ip, cx) {
             return Poll::Ready(Err(into_io(error)));
         }
-        context.waker().wake_by_ref();
         Poll::Pending
     }
 }
@@ -611,6 +688,7 @@ mod tests {
     use super::*;
     use core::convert::Infallible;
     use crossbeam_queue::ArrayQueue;
+    use futures::task::AtomicWaker;
     use futures::executor::block_on;
     use futures::future::{join, join_all};
     use futures::io::{AsyncReadExt, AsyncWriteExt};
@@ -619,9 +697,27 @@ mod tests {
     use proxima_protocols::http1_codec::h1_body::BodyFraming;
     use proxima_protocols::http1_codec::h1_client::encode_request_head;
     use proxima_protocols::http1_codec::h1_response::write_response_head;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Waker;
 
-    type Wire = Arc<ArrayQueue<Vec<u8>>>;
+    struct WireQueue {
+        frames: ArrayQueue<Vec<u8>>,
+        waker: AtomicWaker,
+    }
+
+    impl WireQueue {
+        fn new(capacity: usize) -> Wire {
+            Arc::new(Self { frames: ArrayQueue::new(capacity), waker: AtomicWaker::new() })
+        }
+
+        fn deliver(&self, frame: Vec<u8>) -> Result<(), Vec<u8>> {
+            let outcome = self.frames.push(frame);
+            self.waker.wake();
+            outcome
+        }
+    }
+
+    type Wire = Arc<WireQueue>;
 
     struct WireRx(Wire);
     struct WireTx(Wire);
@@ -634,11 +730,17 @@ mod tests {
 
     impl Pipe for WireRx {
         type In = ();
-        type Out = Option<Vec<u8>>;
+        type Out = Vec<u8>;
         type Err = Infallible;
 
-        fn call(&self, _input: ()) -> impl Future<Output = Result<Option<Vec<u8>>, Infallible>> {
-            async move { Ok(self.0.pop()) }
+        fn call(&self, _input: ()) -> impl Future<Output = Result<Vec<u8>, Infallible>> {
+            core::future::poll_fn(|cx| {
+                if let Some(frame) = self.0.frames.pop() {
+                    return Poll::Ready(Ok(frame));
+                }
+                self.0.waker.register(cx.waker());
+                self.0.frames.pop().map_or(Poll::Pending, |frame| Poll::Ready(Ok(frame)))
+            })
         }
     }
 
@@ -648,7 +750,7 @@ mod tests {
         type Err = WireFull;
 
         fn call(&self, frame: Vec<u8>) -> impl Future<Output = Result<(), WireFull>> {
-            async move { self.0.push(frame).map_err(|_| WireFull::AtCapacity) }
+            async move { self.0.deliver(frame).map_err(|_| WireFull::AtCapacity) }
         }
     }
 
@@ -690,8 +792,8 @@ mod tests {
     }
 
     fn wired(capacity: usize) -> (WirePipes, WirePipes) {
-        let to_server: Wire = Arc::new(ArrayQueue::new(capacity));
-        let to_client: Wire = Arc::new(ArrayQueue::new(capacity));
+        let to_server: Wire = WireQueue::new(capacity);
+        let to_client: Wire = WireQueue::new(capacity);
         (
             (WireRx(to_server.clone()), WireTx(to_client.clone()), WireMint),
             (WireRx(to_client), WireTx(to_server), WireMint),
@@ -812,6 +914,72 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::ConnectionRefused);
     }
 
+    struct WakeCount(AtomicUsize);
+
+    impl ArcWake for WakeCount {
+        fn wake_by_ref(arc_self: &Arc<Self>) {
+            arc_self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    struct SilentDial {
+        to_server: Wire,
+        to_client: Wire,
+        upstream: FrameUpstream<WireRx, WireTx, WireMint>,
+        wakes: Arc<WakeCount>,
+    }
+
+    fn silent_dial(retransmit: Duration) -> SilentDial {
+        let to_server = WireQueue::new(64);
+        let to_client = WireQueue::new(64);
+        let pipes = (WireRx(to_client.clone()), WireTx(to_server.clone()), WireMint);
+        let driver = Driver::new(pipes, CLIENT_MAC, CLIENT, 0x2000).with_retransmit(retransmit);
+        SilentDial {
+            to_server,
+            to_client,
+            upstream: FrameUpstream::new(driver, SERVER),
+            wakes: Arc::new(WakeCount(AtomicUsize::new(0))),
+        }
+    }
+
+    fn polls_pending(dial: &SilentDial, polls: usize) {
+        let task_waker = waker(Arc::clone(&dial.wakes));
+        let mut context = Context::from_waker(&task_waker);
+        let mut connect = pin!(dial.upstream.connect());
+        (0..polls).for_each(|_| assert!(connect.as_mut().poll(&mut context).is_pending(), "no frame ever arrives"));
+    }
+
+    #[test]
+    fn a_dial_with_no_frames_parks_without_waking_itself_and_sends_one_arp_before_the_deadline() {
+        let dial = silent_dial(Duration::from_secs(3600));
+
+        polls_pending(&dial, 5);
+
+        assert_eq!(dial.wakes.0.load(Ordering::SeqCst), 0, "nothing woke the task: no frame, no deadline");
+        assert_eq!(dial.to_server.frames.len(), 1, "one arp request until the retransmit deadline passes");
+    }
+
+    #[test]
+    fn a_dial_resends_its_arp_request_once_the_retransmit_deadline_has_passed() {
+        let dial = silent_dial(Duration::ZERO);
+
+        polls_pending(&dial, 3);
+
+        assert_eq!(dial.to_server.frames.len(), 3, "each poll past the deadline sends one arp request");
+        assert!(dial.wakes.0.load(Ordering::SeqCst) > 0, "a passed deadline wakes the task");
+    }
+
+    #[test]
+    fn a_frame_arriving_wakes_the_parked_dial_exactly_once() {
+        let dial = silent_dial(Duration::from_secs(3600));
+        polls_pending(&dial, 1);
+        assert_eq!(dial.wakes.0.load(Ordering::SeqCst), 0, "parked, not spinning");
+
+        dial.to_client.deliver(vec![0; 60]).expect("rx wire has room");
+
+        assert_eq!(dial.wakes.0.load(Ordering::SeqCst), 1, "the push woke the parked task");
+    }
+
     #[test]
     fn a_full_sink_surfaces_as_a_named_tx_error_not_a_dropped_segment() {
         let (_server_pipes, client_pipes) = wired(1);
@@ -823,5 +991,109 @@ mod tests {
         let overflow = driver.send_segment(endpoint, &segment, CLIENT.port());
 
         assert!(matches!(overflow, Err(DriverError::Tx(WireFull::AtCapacity))), "second frame meets a full sink");
+    }
+    struct SynCounts {
+        seen: AtomicUsize,
+        dropped: AtomicUsize,
+    }
+
+    struct SynDroppingTx {
+        wire: Wire,
+        drop_first: usize,
+        counts: Arc<SynCounts>,
+    }
+
+    impl Pipe for SynDroppingTx {
+        type In = Vec<u8>;
+        type Out = ();
+        type Err = WireFull;
+
+        fn call(&self, frame: Vec<u8>) -> impl Future<Output = Result<(), WireFull>> {
+            async move {
+                let is_syn = classify_tcp(&frame, SERVER.ip().octets())
+                    .is_some_and(|segment| segment.flags.syn && !segment.flags.ack);
+                if is_syn {
+                    let ordinal = self.counts.seen.fetch_add(1, Ordering::SeqCst);
+                    if ordinal < self.drop_first {
+                        self.counts.dropped.fetch_add(1, Ordering::SeqCst);
+                        return Ok(());
+                    }
+                }
+                self.wire.deliver(frame).map_err(|_| WireFull::AtCapacity)
+            }
+        }
+    }
+
+    struct LossyDial {
+        listener: FrameListener<WireRx, WireTx, WireMint>,
+        upstream: FrameUpstream<WireRx, SynDroppingTx, WireMint>,
+        counts: Arc<SynCounts>,
+    }
+
+    fn lossy_dial(drop_first: usize, retransmit: Duration) -> LossyDial {
+        let (server_pipes, (client_rx, client_tx, client_mint)) = wired(64);
+        let counts = Arc::new(SynCounts { seen: AtomicUsize::new(0), dropped: AtomicUsize::new(0) });
+        let lossy = SynDroppingTx { wire: client_tx.0, drop_first, counts: Arc::clone(&counts) };
+        let driver = Driver::new((client_rx, lossy, client_mint), CLIENT_MAC, CLIENT, 0x2000).with_retransmit(retransmit);
+        LossyDial {
+            listener: FrameListener::new(Driver::new(server_pipes, SERVER_MAC, SERVER, 0x1000), SERVER),
+            upstream: FrameUpstream::new(driver, SERVER),
+            counts,
+        }
+    }
+
+    #[test]
+    fn a_dial_whose_first_syn_is_lost_completes_on_the_retransmitted_syn() {
+        let dial = lossy_dial(1, Duration::ZERO);
+
+        let (accepted, connected) = block_on(join(dial.listener.accept(), dial.upstream.connect()));
+
+        accepted.expect("server accepts the retransmitted handshake");
+        connected.expect("dial completes after the retransmit");
+        assert_eq!(dial.counts.dropped.load(Ordering::SeqCst), 1, "exactly the first syn was lost");
+        assert!(dial.counts.seen.load(Ordering::SeqCst) >= 2, "a second syn crossed the wire");
+    }
+
+    #[test]
+    fn a_lost_syn_is_not_resent_before_the_retransmit_deadline() {
+        let dial = lossy_dial(1, Duration::from_secs(3600));
+        let mut context = Context::from_waker(Waker::noop());
+        let mut accept = pin!(dial.listener.accept());
+        let mut connect = pin!(dial.upstream.connect());
+
+        (0..16).for_each(|_| {
+            assert!(accept.as_mut().poll(&mut context).is_pending());
+            assert!(connect.as_mut().poll(&mut context).is_pending(), "the lost syn stalls the dial");
+        });
+
+        assert_eq!(dial.counts.seen.load(Ordering::SeqCst), 1, "one syn until the deadline passes");
+    }
+
+    #[test]
+    fn a_dial_whose_syn_is_never_answered_fails_with_a_named_error_after_the_retry_bound() {
+        let dial = lossy_dial(usize::MAX, Duration::ZERO);
+        let mut context = Context::from_waker(Waker::noop());
+        let mut accept = pin!(dial.listener.accept());
+        let mut connect = pin!(dial.upstream.connect());
+
+        let outcome = (0..256).find_map(|_| {
+            assert!(accept.as_mut().poll(&mut context).is_pending());
+            match connect.as_mut().poll(&mut context) {
+                Poll::Ready(result) => Some(result),
+                Poll::Pending => None,
+            }
+        });
+
+        let error = outcome.expect("dial gives up inside the poll budget").err().expect("an unanswered dial fails");
+        let expected_attempts = proxima_protocols::tcp::retx::MaxRetransmit::ABANDON_THRESHOLD + 1;
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            matches!(
+                error.get_ref().and_then(|source| source.downcast_ref::<DialError>()),
+                Some(DialError::SynUnanswered { attempts }) if *attempts == expected_attempts
+            ),
+            "error names the exhausted syn retransmits: {error}"
+        );
+        assert_eq!(dial.counts.dropped.load(Ordering::SeqCst), usize::from(expected_attempts));
     }
 }

@@ -1,9 +1,39 @@
 use crate::tcp_listener::Endpoint;
 use crate::tcp_stack::{ConnId, Outbound, TcpStack};
+use core::future::Future;
 use crossbeam_queue::SegQueue;
+use proxima_protocols::tcp::retx::MaxRetransmit;
+use proxima_protocols::tcp::rtt::RtoEstimator;
 use proxima_protocols::tcp::time::Instant;
 use std::io;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::Context;
+use std::time::{Duration, Instant as StdInstant};
+use thiserror::Error;
+
+/// Interval before an unanswered ARP request or SYN is sent again, and between
+/// dials to a port that refused; the TCP initial RTO.
+pub const DEFAULT_RETRANSMIT: Duration = Duration::from_micros(RtoEstimator::RTO_MIN.as_micros());
+
+pub(crate) fn wake_after(remaining: Duration, cx: &mut Context<'_>) {
+    let mut deadline = proxima_core::time::sleep(remaining);
+    if Pin::new(&mut deadline).poll(cx).is_ready() {
+        cx.waker().wake_by_ref();
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum DialError {
+    #[error("no syn-ack after {attempts} syn transmissions")]
+    SynUnanswered { attempts: u8 },
+}
+
+pub(crate) enum SynStep<'syn> {
+    Send(&'syn [Outbound]),
+    Wait(Duration),
+    Exhausted,
+}
 
 // Drop cannot wait for a driver lock, so a dropped dial parks its (id, isn)
 // here and the next lock holder cancels it against the stack.
@@ -28,6 +58,9 @@ impl DialLease {
         DialGuard {
             lease: Arc::clone(self),
             started: None,
+            syn: Vec::new(),
+            syn_sent: None,
+            syn_resends: 0,
         }
     }
 }
@@ -35,6 +68,9 @@ impl DialLease {
 pub(crate) struct DialGuard {
     lease: Arc<DialLease>,
     started: Option<(ConnId, u32)>,
+    syn: Vec<Outbound>,
+    syn_sent: Option<StdInstant>,
+    syn_resends: u8,
 }
 
 impl DialGuard {
@@ -54,7 +90,26 @@ impl DialGuard {
             )
         })?;
         self.started = Some((id, outbound[0].1.seq));
+        self.syn.clone_from(&outbound);
+        self.syn_sent = Some(StdInstant::now());
         Ok(outbound)
+    }
+
+    pub(crate) fn next_syn(&mut self, interval: Duration) -> SynStep<'_> {
+        let waited = self.syn_sent.map_or(Duration::ZERO, |sent| sent.elapsed());
+        if waited < interval {
+            return SynStep::Wait(interval - waited);
+        }
+        if self.syn_resends >= MaxRetransmit::ABANDON_THRESHOLD {
+            return SynStep::Exhausted;
+        }
+        self.syn_resends += 1;
+        self.syn_sent = Some(StdInstant::now());
+        SynStep::Send(&self.syn)
+    }
+
+    pub(crate) fn syn_transmissions(&self) -> u8 {
+        self.syn_resends + 1
     }
 
     pub(crate) fn owns(&self, stack: &TcpStack) -> bool {
@@ -266,5 +321,40 @@ mod tests {
 
         assert_eq!(error.kind(), io::ErrorKind::ConnectionReset);
         assert_eq!(untouched, [0x7f; 8]);
+    }
+
+    #[test]
+    fn an_unanswered_syn_waits_out_the_interval_before_it_is_resent() {
+        let mut stack = TcpStack::new(OUR_IP, 1234, 100);
+        let lease = Arc::new(DialLease::new());
+        let mut guard = lease.claim();
+        guard.start(&mut stack, PEER).expect("start dial");
+
+        let step = guard.next_syn(Duration::from_secs(3600));
+
+        assert!(matches!(step, SynStep::Wait(remaining) if remaining > Duration::from_secs(3599)));
+        assert_eq!(guard.syn_transmissions(), 1);
+    }
+
+    #[test]
+    fn an_unanswered_syn_is_resent_unchanged_until_the_abandon_threshold() {
+        let mut stack = TcpStack::new(OUR_IP, 1234, 100);
+        let lease = Arc::new(DialLease::new());
+        let mut guard = lease.claim();
+        let original = guard.start(&mut stack, PEER).expect("start dial");
+        let original_sequence = original[0].1.seq;
+
+        for _ in 0..MaxRetransmit::ABANDON_THRESHOLD {
+            let SynStep::Send(resent) = guard.next_syn(Duration::ZERO) else {
+                panic!("an expired syn below the threshold must be resent");
+            };
+            assert_eq!(resent.len(), 1);
+            assert_eq!(resent[0].0, PEER);
+            assert_eq!(resent[0].1.seq, original_sequence, "a resend reuses the isn");
+            assert!(resent[0].1.flags.syn);
+        }
+
+        assert!(matches!(guard.next_syn(Duration::ZERO), SynStep::Exhausted));
+        assert_eq!(guard.syn_transmissions(), MaxRetransmit::ABANDON_THRESHOLD + 1);
     }
 }

@@ -112,6 +112,7 @@ frame-stack = [
     "std",
     "dep:crossbeam-queue",
     "dep:thiserror",
+    "dep:proxima-core",
     "dep:futures",
     "dep:proxima-primitives",
     "proxima-primitives/std",
@@ -146,6 +147,7 @@ xdp = [
     "dep:proxima-primitives",
     "proxima-primitives/std",
     "dep:futures",
+    "dep:proxima-core",
     "dep:thiserror",
 ]
 

@@ -10,11 +10,13 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use futures::FutureExt;
+use futures::executor::block_on;
+use futures::future::join;
 use proxima_primitives::pipe::{AndThen, Pipe};
 use proxima_vm::elf::parse_elf;
 use proxima_vm::frame_pipe::{FrameError, FrameSink, FrameSource, frame_channel};
@@ -314,6 +316,13 @@ impl Recorder {
     }
 }
 
+async fn forward_until_closed<Relay>(relay: &Relay)
+where
+    Relay: Pipe<In = (), Out = (), Err = FrameError>,
+{
+    while relay.call(()).await != Err(FrameError::Closed) {}
+}
+
 #[proxima::test]
 async fn an_observe_pipe_between_device_and_peer_sees_every_frame_of_the_exchange() {
     let (to_guest, ingress) = frame_channel(64);
@@ -321,21 +330,22 @@ async fn an_observe_pipe_between_device_and_peer_sees_every_frame_of_the_exchang
     let (peer_tx, relay_rx) = frame_channel(64);
     let (relay_tx, peer_rx) = frame_channel(64);
     let (guest_recorder, peer_recorder) = (Recorder::new(), Recorder::new());
+    let egress_end = egress.clone();
     let guest = start_guest(ingress, egress, true);
 
-    let stop = Arc::new(AtomicBool::new(false));
     let relay = {
-        let (stop, guest_recorder, peer_recorder) = (stop.clone(), guest_recorder.clone(), peer_recorder.clone());
+        let (guest_recorder, peer_recorder) = (guest_recorder.clone(), peer_recorder.clone());
         let to_guest_end = to_guest.clone();
         thread::spawn(move || {
             let toward_peer = AndThen::new(AndThen::new(from_guest, guest_recorder), relay_tx);
             let toward_guest = AndThen::new(AndThen::new(relay_rx, peer_recorder), to_guest);
-            while !stop.load(Ordering::Acquire) {
-                toward_peer.call(()).now_or_never().expect("pipes are ready").ok();
-                if let Some(Err(FrameError::Closed)) = toward_guest.call(()).now_or_never() {
+            block_on(async {
+                join(forward_until_closed(&toward_peer), async {
+                    forward_until_closed(&toward_guest).await;
                     to_guest_end.close();
-                }
-            }
+                })
+                .await;
+            });
         })
     };
     let mut device = PipeDevice { inbound: peer_rx, outbound: peer_tx };
@@ -343,7 +353,7 @@ async fn an_observe_pipe_between_device_and_peer_sees_every_frame_of_the_exchang
     let outcome = ping_guest(&mut device, PING_COUNT, REPLY_DEADLINE);
     device.outbound.close();
     let run = guest.join().expect("guest thread");
-    stop.store(true, Ordering::Release);
+    egress_end.close();
     relay.join().expect("relay thread");
 
     let round_trips = outcome.expect("pings succeed through the relay unchanged");
