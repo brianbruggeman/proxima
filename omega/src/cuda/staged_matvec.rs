@@ -156,6 +156,7 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
     for index in 0..output_axes.len() {
         source.push_str(&format!("    long coord{index}_rows[{STAGED_ROWS_PER_WARP}];\n"));
     }
+    source.push_str(&format!("    __shared__ long block_row_byte[{}];\n", STAGED_WARPS * STAGED_ROWS_PER_WARP));
     source.push_str(&format!(
         "    const long first_row = ((long)blockIdx.x * {STAGED_WARPS} + (long)warp) * {STAGED_ROWS_PER_WARP};\n\
          \x20   long row_block[{STAGED_ROWS_PER_WARP}];\n\
@@ -182,45 +183,150 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
         }
     }
     let elements = plan.dot.elements;
+    let block_bytes = plan.dot.block_bytes;
     source.push_str(&format!(
         "        const long row_element = u.operand_base[{weight_slot}] + packed_row * {};\n\
          \x20       if (row_element % {elements} != 0) {{ __trap(); }}\n\
          \x20       row_block[row] = row_element / {elements};\n\
+         \x20       if (lane == 0u) {{ block_row_byte[warp * {STAGED_ROWS_PER_WARP} + row] = first_row + row < u.output_total ? row_block[row] * {block_bytes} : -1; }}\n\
          \x20   }}\n",
         plan.reduction
+    ));
+    source.push_str("    __syncthreads();\n");
+}
+
+/// Byte budget for one row's share of a weight tile: small enough that 32 rows
+/// fit beside the staged operand with several blocks resident per SM.
+const TILE_ROW_BYTES: usize = 320;
+
+/// How the reduction is cut into weight tiles: `blocks` packed blocks per tile,
+/// each row's tile copied as `segments` aligned 16-byte pieces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TilePlan {
+    blocks: usize,
+    tiles: usize,
+    total_blocks: usize,
+    segments: usize,
+    loads_per_thread: usize,
+}
+
+fn tile_plan(plan: &StagedMatvec) -> TilePlan {
+    let dot = &plan.dot;
+    let chunks_per_block = dot.elements / DOT_ELEMENTS;
+    let mut blocks = (32 / chunks_per_block).max(1);
+    while blocks > 1 && blocks * dot.block_bytes > TILE_ROW_BYTES {
+        blocks /= 2;
+    }
+    let total_blocks = usize::try_from(plan.reduction).unwrap_or(usize::MAX) / dot.elements;
+    let segments = (blocks * dot.block_bytes).div_ceil(16) + 1;
+    let rows = STAGED_WARPS * STAGED_ROWS_PER_WARP;
+    TilePlan {
+        blocks,
+        tiles: total_blocks.div_ceil(blocks),
+        total_blocks,
+        segments,
+        loads_per_thread: (rows * segments).div_ceil(STAGED_THREADS as usize),
+    }
+}
+
+/// Issues the global loads of tile `tile_expr` into the `prefetch` registers.
+fn push_tile_load(source: &mut String, plan: &StagedMatvec, tiles: &TilePlan, tile_expr: &str) {
+    let weight_slot = plan.weight_slot;
+    let tile_bytes = tiles.blocks * plan.dot.block_bytes;
+    let row_bytes = tiles.total_blocks * plan.dot.block_bytes;
+    let TilePlan {
+        segments,
+        loads_per_thread,
+        ..
+    } = *tiles;
+    let slots = STAGED_WARPS * STAGED_ROWS_PER_WARP * segments;
+    source.push_str(&format!(
+        "        #pragma unroll\n\
+         \x20       for (int load = 0; load < {loads_per_thread}; load++) {{\n\
+         \x20           const unsigned int slot = threadIdx.x + load * {STAGED_THREADS}u;\n\
+         \x20           prefetch[load] = make_uint4(0u, 0u, 0u, 0u);\n\
+         \x20           if (slot >= {slots}u) {{ continue; }}\n\
+         \x20           const long base = block_row_byte[slot / {segments}u];\n\
+         \x20           if (base < 0) {{ continue; }}\n\
+         \x20           const long start = base + (long)({tile_expr}) * {tile_bytes};\n\
+         \x20           const long aligned = start & ~15L;\n\
+         \x20           const long left_bytes = (long){row_bytes} - (long)({tile_expr}) * {tile_bytes};\n\
+         \x20           const long remaining_bytes = left_bytes < {tile_bytes} ? left_bytes : (long){tile_bytes};\n\
+         \x20           const unsigned int segment = slot % {segments}u;\n\
+         \x20           if ((long)segment * 16 < (start - aligned) + remaining_bytes) {{\n\
+         \x20               prefetch[load] = __ldg((const uint4 *)(in{weight_slot} + aligned) + segment);\n\
+         \x20           }}\n\
+         \x20       }}\n"
     ));
 }
 
 fn push_fold(source: &mut String, plan: &StagedMatvec) {
-    let weight_slot = plan.weight_slot;
     let BlockDot {
         name,
         elements,
         block_bytes,
         ..
     } = &plan.dot;
-    let chunks = plan.reduction / DOT_ELEMENTS as u64;
     let chunks_per_block = elements / DOT_ELEMENTS;
+    let tiles = tile_plan(plan);
+    let TilePlan {
+        blocks,
+        tiles: tile_count,
+        total_blocks,
+        segments,
+        loads_per_thread,
+    } = tiles;
+    let rows = STAGED_WARPS * STAGED_ROWS_PER_WARP;
+    let tile_bytes = blocks * block_bytes;
     source.push_str(&format!(
-        "    float accumulator[{STAGED_ROWS_PER_WARP}];\n\
+        "    __shared__ uint4 weight_tile[{}];\n\
+         \x20   float accumulator[{STAGED_ROWS_PER_WARP}];\n\
          \x20   #pragma unroll\n\
          \x20   for (int row = 0; row < {STAGED_ROWS_PER_WARP}; row++) {{ accumulator[row] = 0.0f; }}\n\
-         \x20   for (unsigned int chunk = lane; chunk < {chunks}u; chunk += 32u) {{\n\
-         \x20       const int4 low = *(const int4 *)(staged_q + chunk * 8u);\n\
-         \x20       const int4 high = *(const int4 *)(staged_q + chunk * 8u + 4u);\n\
-         \x20       const int activation[8] = {{ low.x, low.y, low.z, low.w, high.x, high.y, high.z, high.w }};\n\
-         \x20       const float activation_scale = staged_d[chunk];\n\
+         \x20   uint4 prefetch[{loads_per_thread}];\n\
+         \x20   {{\n",
+        rows * segments
+    ));
+    push_tile_load(source, plan, &tiles, "0");
+    source.push_str(&format!(
+        "    }}\n\
+         \x20   for (int tile = 0; tile < {tile_count}; tile++) {{\n\
          \x20       #pragma unroll\n\
-         \x20       for (int row = 0; row < {STAGED_ROWS_PER_WARP}; row++) {{\n\
-         \x20           if (first_row + row >= u.output_total) {{ continue; }}\n\
-         \x20           const unsigned char *block = in{weight_slot} + (row_block[row] + chunk / {chunks_per_block}u) * {block_bytes};\n\
-         \x20           int words[8];\n\
-         \x20           {name}_i8x32(block, chunk % {chunks_per_block}u, words);\n\
-         \x20           int dot = 0;\n\
-         \x20           #pragma unroll\n\
-         \x20           for (int word = 0; word < 8; word++) {{ dot = __dp4a(words[word], activation[word], dot); }}\n\
-         \x20           accumulator[row] += {name}_scale(block) * activation_scale * (float)dot;\n\
+         \x20       for (int load = 0; load < {loads_per_thread}; load++) {{\n\
+         \x20           const unsigned int slot = threadIdx.x + load * {STAGED_THREADS}u;\n\
+         \x20           if (slot < {}u) {{ weight_tile[slot] = prefetch[load]; }}\n\
          \x20       }}\n\
+         \x20       __syncthreads();\n\
+         \x20       if (tile + 1 < {tile_count}) {{\n",
+        rows * segments
+    ));
+    push_tile_load(source, plan, &tiles, "tile + 1");
+    source.push_str(&format!(
+        "        }}\n\
+         \x20       const int left_blocks = {total_blocks} - tile * {blocks};\n\
+         \x20       const unsigned int tile_chunks = (unsigned int)(left_blocks < {blocks} ? left_blocks : {blocks}) * {chunks_per_block}u;\n\
+         \x20       for (unsigned int local = lane; local < tile_chunks; local += 32u) {{\n\
+         \x20           const unsigned int chunk = (unsigned int)tile * {blocks}u * {chunks_per_block}u + local;\n\
+         \x20           const int4 low = *(const int4 *)(staged_q + chunk * 8u);\n\
+         \x20           const int4 high = *(const int4 *)(staged_q + chunk * 8u + 4u);\n\
+         \x20           const int activation[8] = {{ low.x, low.y, low.z, low.w, high.x, high.y, high.z, high.w }};\n\
+         \x20           const float activation_scale = staged_d[chunk];\n\
+         \x20           #pragma unroll\n\
+         \x20           for (int row = 0; row < {STAGED_ROWS_PER_WARP}; row++) {{\n\
+         \x20               const int local_row = (int)warp * {STAGED_ROWS_PER_WARP} + row;\n\
+         \x20               const long base = block_row_byte[local_row];\n\
+         \x20               if (base < 0) {{ continue; }}\n\
+         \x20               const unsigned int shift = (unsigned int)((base + (long)tile * {tile_bytes}) & 15L);\n\
+         \x20               const unsigned char *block = (const unsigned char *)(weight_tile + local_row * {segments}) + shift + (local / {chunks_per_block}u) * {block_bytes}u;\n\
+         \x20               int words[8];\n\
+         \x20               {name}_i8x32(block, local % {chunks_per_block}u, words);\n\
+         \x20               int dot = 0;\n\
+         \x20               #pragma unroll\n\
+         \x20               for (int word = 0; word < 8; word++) {{ dot = __dp4a(words[word], activation[word], dot); }}\n\
+         \x20               accumulator[row] += {name}_scale(block) * activation_scale * (float)dot;\n\
+         \x20           }}\n\
+         \x20       }}\n\
+         \x20       __syncthreads();\n\
          \x20   }}\n"
     ));
 }
