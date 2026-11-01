@@ -4512,7 +4512,7 @@ only the single-row decode kernel reads the half-width device cache",
                     // cache below is a growing `Vec`, not a preallocated
                     // device buffer, so there is no hard cap to clamp against.
                     let kv_bound_extent = cached_kv_extent(
-                        runtime.pads_cached_kv(),
+                        runtime.pads_cached_kv(new_count),
                         cached_len,
                         new_count,
                         serving_config.kv_bucket_tokens,
@@ -8162,7 +8162,7 @@ did not hold every cached position)",
         // yet -- residual, not fixed here.
         let lm_head_row_scalar = [(ids.len() - 1) as f32];
         let kv_bound_extent = cached_kv_extent(
-            runtime.pads_cached_kv(),
+            runtime.pads_cached_kv(ids.len()),
             0,
             ids.len(),
             serving_config.kv_bucket_tokens,
