@@ -54,7 +54,9 @@ const TRACE_MESSAGE: &str = "resident whoami answered";
 
 const HOST_PORT: u16 = 49152;
 const HOST_INITIAL_SEQUENCE: u32 = 0x4000;
-const WATCHDOG_MILLIS: u64 = 120_000;
+// a per-request watchdog this short would end the guest before eth0 is up, so
+// a 200 proves the resident lane does not arm it.
+const PER_REQUEST_WATCHDOG_MILLIS: u64 = 1;
 const ETHERNET_HEADER: usize = 14;
 const IPV4_PROTOCOL_OFFSET: usize = 23;
 const TCP_PROTOCOL: u8 = 6;
@@ -125,7 +127,7 @@ fn boot_inputs(image: &PulledImage) -> LinuxBootInputs {
         kernel: Bytes::from_static(common::kernel()),
         initramfs: Bytes::from(initramfs),
         cmdline: format!("{CMDLINE} {}", net_device_cmdline()),
-        limits: LinuxGuestLimits { watchdog_millis: WATCHDOG_MILLIS, ..LinuxGuestLimits::default() },
+        limits: LinuxGuestLimits { watchdog_millis: PER_REQUEST_WATCHDOG_MILLIS, ..LinuxGuestLimits::default() },
     }
 }
 
@@ -223,4 +225,6 @@ fn a_resident_whoami_guest_answers_an_http_get_from_the_host() {
     assert!(trace.contains(TRACE_MESSAGE), "timing record missing from trace after drain returned {drained} (managed drainer {}): {trace:?}", recorder.is_managed_drainer());
     assert!(trace.contains("start_to_first_200_ms"), "timing field missing from trace: {trace}");
     assert!(text.starts_with("HTTP/1.1 200"), "status line: {text}");
-    assert!(text.contains("GET / HTTP/1.1"), "whoami echoes the request line: {text}");}
+    assert!(text.contains("GET / HTTP/1.1"), "whoami echoes the request line: {text}");
+    assert!(was_running, "the guest was still running after it answered: {:?}", outcome.failure);
+}

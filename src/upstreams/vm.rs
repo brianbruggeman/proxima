@@ -246,7 +246,8 @@ pub struct VmConfig {
     pub ram_mib: u32,
 
     /// Linux guest wall-clock watchdog in milliseconds; a guest that never
-    /// powers off fails the call when it expires.
+    /// powers off fails the call when it expires. Per-request guests only: a
+    /// `resident` guest runs until the upstream is dropped.
     #[setting(default = 10000)]
     #[serde(default = "default_watchdog_millis")]
     #[builder(default = default_watchdog_millis())]
