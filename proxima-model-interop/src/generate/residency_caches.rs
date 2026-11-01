@@ -3004,11 +3004,17 @@ impl BackendRuntime {
 
     /// Reads the device-held recurrent state back to the host, keyed by output node.
     pub(super) fn drain_state_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
-        let mut drained = Vec::new();
         #[cfg(feature = "cuda")]
-        for plan in self.plans.values_mut() {
-            drained.extend(omega::backend::drain_cuda_carried(plan)?);
-        }
+        let drained = self
+            .plans
+            .values_mut()
+            .map(omega::backend::drain_cuda_carried)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .collect();
+        #[cfg(not(feature = "cuda"))]
+        let drained = Vec::new();
         Ok(drained)
     }
 
