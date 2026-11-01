@@ -2732,6 +2732,9 @@ pub struct BackendRuntime {
     resident_home: Option<(Arc<()>, resident_plans::PlanIdentity)>,
     pub(crate) plan_hits: usize,
     pub(crate) plan_misses: usize,
+    /// `(state input, state output)` pairs the next CUDA evaluation keeps on the device; empty
+    /// when no recurrent state is carried.
+    carry_pairs: Vec<(NodeId, NodeId)>,
     /// Misses served by refitting the previous plan in place
     /// ([`Self::take_near_plan`]) instead of building one -- a subset of
     /// `plan_misses`, so `plan_misses - plan_refits` is the number of plans
@@ -2853,6 +2856,7 @@ impl BackendRuntime {
             resident_home: None,
             plan_hits: 0,
             plan_misses: 0,
+            carry_pairs: Vec::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             plan_refits: 0,
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -2934,6 +2938,36 @@ impl BackendRuntime {
                 .is_some_and(omega::backend::GpuDriver::fuses_cached_attention)
     }
 
+    /// Whether recurrent state can stay on a CUDA device between evaluations.
+    pub(super) fn carries_state_on_device(&self) -> bool {
+        cfg!(feature = "cuda") && self.uses_gpu()
+    }
+
+    /// Selects the `(state input, state output)` pairs the following evaluations keep on the
+    /// device; an empty set restores host round trips and requires a prior drain.
+    pub(super) fn set_state_carry(&mut self, pairs: Vec<(NodeId, NodeId)>) {
+        self.carry_pairs = pairs;
+    }
+
+    /// Reads the device-held recurrent state back to the host, keyed by output node.
+    pub(super) fn drain_state_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
+        let mut drained = Vec::new();
+        #[cfg(feature = "cuda")]
+        for plan in self.plans.values_mut() {
+            drained.extend(omega::backend::drain_cuda_carried(plan)?);
+        }
+        Ok(drained)
+    }
+
+    /// Carried state bytes that crossed PCIe in either direction, summed over cached plans.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn state_carry_host_bytes(&self) -> u64 {
+        self.plans
+            .values()
+            .filter_map(omega::backend::cuda_carried_host_bytes)
+            .sum()
+    }
+
     /// `resident_names` -- the caller's own model-weight names, fixed for
     /// the whole [`LoadedModel::generate_with_serving_config`] call -- is
     /// handed to [`mark_resident`] exactly once per distinct [`Plan`] (right
@@ -2993,6 +3027,10 @@ impl BackendRuntime {
         };
         #[cfg(feature = "cuda")]
         Self::refit_near_cuda_plan(&mut self.plans, &shape, symbols, self.numeric_policy)?;
+        #[cfg(feature = "cuda")]
+        if !self.plans.contains_key(&shape) {
+            self.plans.values_mut().for_each(omega::backend::park_cuda_carried);
+        }
         #[cfg(feature = "cuda")]
         let misses_before = self.plan_misses;
         #[cfg(feature = "cuda")]
@@ -3078,6 +3116,8 @@ impl BackendRuntime {
         let plan_hit = self.plan_misses == misses_before;
         #[cfg(feature = "cuda")]
         let resolve_us = resolve_started.elapsed().as_micros() as u64;
+        #[cfg(feature = "cuda")]
+        omega::backend::carry_cuda_state(plan, &self.carry_pairs);
         let evaluated = execute_plan_named_with_expert_sources(plan, named, expert_sources)?;
         #[cfg(feature = "cuda")]
         debug!(
@@ -4345,6 +4385,8 @@ impl BackendRuntime {
         );
         if omega::backend::refit_cuda_symbols(&mut near, symbols, numeric_policy)? {
             cache.insert(shape.clone(), near);
+        } else {
+            omega::backend::park_cuda_carried(&mut near);
         }
         Ok(())
     }
@@ -4702,6 +4744,16 @@ impl BackendRuntime {
 
     pub(super) fn uses_gpu(&self) -> bool {
         false
+    }
+
+    pub(super) fn carries_state_on_device(&self) -> bool {
+        false
+    }
+
+    pub(super) fn set_state_carry(&mut self, _pairs: Vec<(NodeId, NodeId)>) {}
+
+    pub(super) fn drain_state_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
+        Ok(Vec::new())
     }
 
     pub(super) fn pads_cached_kv(&self) -> bool {

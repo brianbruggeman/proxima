@@ -27,6 +27,10 @@ trait DecodeStepEvaluator {
         runtime: &mut BackendRuntime,
         step: DecodeStepEvaluation<'_, '_, '_>,
     ) -> Result<Evaluated, InteropError>;
+
+    fn carries_recurrent_state(&self) -> bool {
+        false
+    }
 }
 
 struct SyncDecodeTokenProducer<'callback> {
@@ -52,6 +56,10 @@ impl AsyncTokenProducer for ContinueDecodeTokenProducer {
 struct SyncDecodeStepEvaluator;
 
 impl DecodeStepEvaluator for SyncDecodeStepEvaluator {
+    fn carries_recurrent_state(&self) -> bool {
+        true
+    }
+
     async fn evaluate_step(
         &mut self,
         runtime: &mut BackendRuntime,
@@ -4139,6 +4147,8 @@ only the single-row decode kernel reads the half-width device cache",
         let mut undelivered = 0usize;
         let loop_started = std::time::Instant::now();
         let mut step = 0usize;
+        let mut carried_layers: Vec<(usize, NodeId)> = Vec::new();
+        let mut carried_program = 0usize;
         'decode: while step < max_tokens {
             settled_tokens.clear();
             'evaluate: {
@@ -4448,6 +4458,25 @@ only the single-row decode kernel reads the half-width device cache",
                     #[cfg(feature = "instrument")]
                     let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
 
+                    let carry_state_this_step = evaluator.carries_recurrent_state()
+                        && runtime.carries_state_on_device()
+                        && new_count == 1
+                        && !speculative_step
+                        && self.ffn_routing != FfnRouting::Routed;
+                    if !carry_state_this_step && !carried_layers.is_empty() {
+                        flush_carried_state(runtime, &mut layer_caches, &carried_layers)?;
+                        carried_layers.clear();
+                        carried_program = 0;
+                    }
+                    if carry_state_this_step && carried_program != active_program.as_ptr() as usize {
+                        flush_carried_state(runtime, &mut layer_caches, &carried_layers)?;
+                        let layers = ssm_carry_layers(active_program, &cache_names, active_layer_roots);
+                        runtime.set_state_carry(
+                            layers.iter().map(|(_, input, output)| (*input, *output)).collect(),
+                        );
+                        carried_layers = layers.iter().map(|(layer, _, output)| (*layer, *output)).collect();
+                        carried_program = active_program.as_ptr() as usize;
+                    }
                     let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
                         self.weights.owned.len()
                             + self.weights.packed.len()
@@ -6357,7 +6386,9 @@ did not hold every cached position)",
                                     target_os = "macos"
                                 )))]
                                 let state_is_placed = false;
-                                let state_out_data = if state_is_placed {
+                                let state_is_carried = carried_layers.iter().any(|(carried, _)| *carried == layer)
+                                    && evaluated.get(*state_out).is_none();
+                                let state_out_data = if state_is_placed || state_is_carried {
                                     None
                                 } else {
                                     Some(
@@ -7200,6 +7231,12 @@ did not hold every cached position)",
             .into());
         };
         // a stop inside an accepted span leaves forwarded rows the caller never received
+        flush_carried_state(runtime, &mut layer_caches, &carried_layers)?;
+        #[cfg(feature = "cuda")]
+        debug!(
+            carried_host_bytes = runtime.state_carry_host_bytes(),
+            "recurrent state pcie bytes after device carry flush"
+        );
         let cached_len = settled_len - undelivered;
         if undelivered > 0 {
             for (widths, state) in layer_row_widths.iter().zip(&mut layer_caches) {
@@ -8380,4 +8417,50 @@ pub(super) fn map_expert_sources_to_segment<'source>(
         }
     }
     Ok(mapped)
+}
+
+fn ssm_carry_layers(
+    program: &[Op],
+    cache_names: &[LayerCacheNames],
+    layer_roots: &[LayerCacheRoots],
+) -> Vec<(usize, NodeId, NodeId)> {
+    let inputs: BTreeMap<&str, NodeId> = program
+        .iter()
+        .enumerate()
+        .filter_map(|(index, operation)| match operation {
+            Op::Input {
+                name: Some(name), ..
+            } => Some((name.as_str(), NodeId(index as u32))),
+            _ => None,
+        })
+        .collect();
+    layer_roots
+        .iter()
+        .zip(cache_names)
+        .enumerate()
+        .filter_map(|(layer, (roots, names))| match (roots, names) {
+            (LayerCacheRoots::Ssm { state_out, .. }, LayerCacheNames::Ssm { state, .. }) => inputs
+                .get(state.as_str())
+                .map(|input| (layer, *input, *state_out)),
+            _ => None,
+        })
+        .collect()
+}
+
+fn flush_carried_state(
+    runtime: &mut BackendRuntime,
+    layer_caches: &mut [LayerCacheState],
+    carried_layers: &[(usize, NodeId)],
+) -> Result<(), InteropError> {
+    for (output, values) in runtime.drain_state_carry()? {
+        let (layer, _) = carried_layers
+            .iter()
+            .find(|(_, node)| *node == output)
+            .ok_or(InteropError::MissingEvaluatedNode { node: output })?;
+        if let LayerCacheState::Ssm(cache) = &mut layer_caches[*layer] {
+            cache.state = values;
+        }
+    }
+    runtime.set_state_carry(Vec::new());
+    Ok(())
 }
