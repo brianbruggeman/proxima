@@ -7,8 +7,8 @@
 //!
 //! [`DEVICE_ID_NET`] plugs straight into `super::mmio::MmioDevice::new`
 //! (spec §5, Table 5.1: DeviceID 1). Feature offering is deliberately
-//! narrow: [`FEATURE_VERSION_1`](super::status::FEATURE_VERSION_1) plus
-//! [`FEATURE_NET_MAC`] only — this codec does not honor checksum offload,
+//! narrow: [`FEATURE_VERSION_1`](super::status::FEATURE_VERSION_1),
+//! [`FEATURE_NET_MAC`] and [`FEATURE_NET_STATUS`] only — this codec does not honor checksum offload,
 //! GSO, or merged RX buffers, so offering those bits would let a driver
 //! negotiate behavior the device never implements. `Negotiation`'s
 //! `acked ⊆ offered` check (`super::status`) makes over-offering a live
@@ -414,9 +414,10 @@ mod tests {
         assert_eq!(&frame_bytes[12..14], &[0x08, 0x06]);
     }
 
-    /// `FEATURE_NET_MAC` (bit 5) is the only device-specific bit this
-    /// codec offers alongside `VIRTIO_F_VERSION_1` — a driver that acks a
-    /// bit neither of those (e.g. `VIRTIO_NET_F_CSUM`, bit 0) is rejected by
+    /// `FEATURE_NET_MAC` (bit 5) is one of two device-specific bits this
+    /// codec offers alongside `VIRTIO_F_VERSION_1` (the other is
+    /// `FEATURE_NET_STATUS`) — a driver that acks a
+    /// bit none of those (e.g. `VIRTIO_NET_F_CSUM`, bit 0) is rejected by
     /// `Negotiation`'s `acked ⊆ offered` rule, proving the codec never
     /// silently promises checksum/GSO/merged-rxbuf behavior it does not
     /// implement.
