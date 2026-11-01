@@ -4,6 +4,7 @@ use alloc::string::String;
 use proxima_primitives::block_layout::{BlockLayout, Coded, Field};
 use proxima_primitives::float_layout::{FloatLayout, SignEncoding};
 
+use super::radix_dot::radix_block_dot;
 use crate::cuda_layout::layout_load_cuda;
 
 /// Elements one int8 dot step covers: eight `dp4a` words.
@@ -21,9 +22,13 @@ pub(super) struct BlockDot {
     pub block_bytes: usize,
 }
 
-/// `None` when the layout is not a single-plane linear code whose 32-element chunks are
-/// contiguous bit runs of 1, 2, 4 or 8 bits with an int8-representable affine value.
+/// `None` when the layout is neither a radix-packed code nor a single-plane linear code whose
+/// 32-element chunks are contiguous bit runs of 1, 2, 4 or 8 bits, or its affine value does not
+/// fit int8.
 pub(super) fn block_dot_i8(layout: &BlockLayout) -> Option<BlockDot> {
+    if layout.element.packed_radix > 1 {
+        return radix_block_dot(layout);
+    }
     let element = &layout.element;
     let bits = usize::from(element.low.bits);
     let elements = usize::from(layout.elements);
@@ -37,12 +42,8 @@ pub(super) fn block_dot_i8(layout: &BlockLayout) -> Option<BlockDot> {
         return None;
     }
     let chunk_base_bits = contiguous_chunk_base(element, elements, bits)?;
-    let scale_read = scale_read(&layout.scale)?;
     let name = layout_name(layout);
-    let mut helpers = layout_load_cuda(layout.scale.layout, &format!("{name}_scale_code"));
-    helpers.push_str(&format!(
-        "__device__ __forceinline__ float {name}_scale(const unsigned char *block) {{\n    return {name}_scale_code({scale_read});\n}}\n"
-    ));
+    let mut helpers = scale_helpers(layout, &name)?;
     helpers.push_str(&words_helper(&name, layout, bits, chunk_base_bits / 8)?);
     Some(BlockDot {
         name,
@@ -52,15 +53,26 @@ pub(super) fn block_dot_i8(layout: &BlockLayout) -> Option<BlockDot> {
     })
 }
 
-fn layout_name(layout: &BlockLayout) -> String {
+/// `<name>_scale(block)`: the block scale, read through the scale field's layout.
+pub(super) fn scale_helpers(layout: &BlockLayout, name: &str) -> Option<String> {
+    let scale_read = scale_read(&layout.scale)?;
+    let mut helpers = layout_load_cuda(layout.scale.layout, &format!("{name}_scale_code"));
+    helpers.push_str(&format!(
+        "__device__ __forceinline__ float {name}_scale(const unsigned char *block) {{\n    return {name}_scale_code({scale_read});\n}}\n"
+    ));
+    Some(helpers)
+}
+
+pub(super) fn layout_name(layout: &BlockLayout) -> String {
     let element = &layout.element;
     let scale = &layout.scale;
     format!(
-        "blockdot_e{}_b{}_c{}{}_at{}_m{}_z{}_s{}x{}at{}",
+        "blockdot_e{}_b{}_c{}{}r{}_at{}_m{}_z{}_s{}x{}at{}",
         layout.elements,
         layout.block_bytes,
         element.low.bits,
         sign_token(element.code),
+        element.packed_radix,
         element.low.base_bits,
         layout.multiplier,
         element.bias,
@@ -115,7 +127,7 @@ fn scale_read(field: &Field) -> Option<String> {
 
 /// `x * multiplier - bias` on each byte of `x`, exact because every result fits int8 and no
 /// byte product carries into its neighbour.
-fn affine(expression: &str, multiplier: i16, bias: i16, bits: usize) -> Option<String> {
+pub(super) fn affine(expression: &str, multiplier: i16, bias: i16, bits: usize) -> Option<String> {
     if multiplier == 1 && bias == 0 {
         return Some(expression.into());
     }
@@ -175,6 +187,9 @@ mod tests {
     fn single_plane_runs_lower_and_split_or_sub_block_layouts_do_not() {
         for layout in [BlockLayout::Q8_0, BlockLayout::Q1_0, BlockLayout::Q2_0, BlockLayout::PQ2_0] {
             assert!(block_dot_i8(&layout).is_some(), "{layout:?} is a contiguous linear run");
+        }
+        for layout in [BlockLayout::TQ1_0, BlockLayout::PTQ1_0] {
+            assert!(block_dot_i8(&layout).is_some(), "{layout:?} is a radix-packed byte code");
         }
         for layout in [BlockLayout::Q4_0, BlockLayout::Q5_0, BlockLayout::Q4_1, BlockLayout::Q4_K] {
             assert!(block_dot_i8(&layout).is_none(), "{layout:?} is not a single contiguous run");

@@ -72,6 +72,7 @@ use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use crate::msl::{Binding, Codec, PackedOperands};
 
 mod block_dot;
+mod radix_dot;
 mod mma_gemm;
 mod row_tile;
 mod staged_matvec;
