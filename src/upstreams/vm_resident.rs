@@ -19,6 +19,7 @@ use futures::executor::block_on;
 use futures::future::{Either, select};
 use futures::io::AsyncWriteExt;
 use proxima_http::http1::H1ClientUpstream;
+use proxima_core::time::{self, Instant};
 use proxima_net::frame_stack::FrameUpstream;
 use proxima_primitives::pipe::SendPipe;
 use proxima_vm::kernel_modules::load_modules;
@@ -103,10 +104,35 @@ fn resident_cmdline(cmdline: &str) -> String {
     format!("{} {RESIDENT_FLAG} {}", kept.join(" "), net_device_cmdline())
 }
 
+struct Timeline {
+    began: Instant,
+    last: Instant,
+}
+
+impl Timeline {
+    fn begin() -> Self {
+        let began = time::now();
+        Self { began, last: began }
+    }
+
+    fn lap(&mut self) -> (u64, u64) {
+        let now = time::now();
+        let elapsed_ms = millis(now.saturating_duration_since(self.began));
+        let phase_ms = millis(now.saturating_duration_since(self.last));
+        self.last = now;
+        (elapsed_ms, phase_ms)
+    }
+}
+
+fn millis(duration: Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
 fn initramfs(
     label: &str,
     root: &LinuxRoot,
     modules: &[proxima_vm::kernel_modules::KernelModule],
+    timeline: &mut Timeline,
 ) -> Result<Vec<u8>, ProximaError> {
     match root {
         LinuxRoot::Init { init_path } => {
@@ -120,25 +146,68 @@ fn initramfs(
                 .map_err(|error| upstream_error(label, reference, error))?;
             let pulled = oci::pull_blocking(cache_dir, &image)
                 .map_err(|error| upstream_error(label, reference, error))?;
+            let (elapsed_ms, phase_ms) = timeline.lap();
+            proxima_telemetry::info!(
+                label = %label,
+                phase = "image_pulled",
+                reference = %reference,
+                elapsed_ms,
+                phase_ms,
+                "resident guest image pulled and verified before the initramfs is built"
+            );
             oci::initramfs_with_modules(&pulled, &init, modules)
                 .map_err(|error| upstream_error(label, reference, error))
         }
     }
 }
 
-fn boot_inputs(label: &str, spec: &VmSpec, modules_root: &Path) -> Result<LinuxBootInputs, ProximaError> {
+fn boot_inputs(
+    label: &str,
+    spec: &VmSpec,
+    modules_root: &Path,
+    timeline: &mut Timeline,
+) -> Result<LinuxBootInputs, ProximaError> {
     let GuestSpec::Linux { kernel_path, root, cmdline, ram_mib, watchdog_millis } = &spec.guest else {
         return Err(ProximaError::Config(format!("vm `{label}`: a resident guest is a linux guest")));
     };
     let kernel = read_guest_file(label, "kernel", kernel_path)?;
+    let (elapsed_ms, phase_ms) = timeline.lap();
+    proxima_telemetry::info!(
+        label = %label,
+        phase = "kernel_read",
+        kernel_bytes = kernel.len(),
+        elapsed_ms,
+        phase_ms,
+        "resident guest kernel read from disk before modules are matched to its release"
+    );
     let release = kernel_release(&kernel).ok_or_else(|| {
         upstream_error(label, "parse kernel", format_args!("`{}` names no release", kernel_path.display()))
     })?;
     let modules = load_modules(&modules_root.join(&release), &NET_MODULES)
         .map_err(|error| upstream_error(label, "load net modules", error))?;
+    let (elapsed_ms, phase_ms) = timeline.lap();
+    proxima_telemetry::info!(
+        label = %label,
+        phase = "modules_loaded",
+        release = %release,
+        modules = modules.len(),
+        elapsed_ms,
+        phase_ms,
+        "resident guest net modules loaded for the kernel release"
+    );
+    let initramfs = initramfs(label, root, &modules, timeline)?;
+    let (elapsed_ms, phase_ms) = timeline.lap();
+    proxima_telemetry::info!(
+        label = %label,
+        phase = "initramfs_built",
+        initramfs_bytes = initramfs.len(),
+        elapsed_ms,
+        phase_ms,
+        "resident guest initramfs built, nothing left to read before the vm starts"
+    );
     Ok(LinuxBootInputs {
         kernel: Bytes::from(kernel),
-        initramfs: Bytes::from(initramfs(label, root, &modules)?),
+        initramfs: Bytes::from(initramfs),
         cmdline: resident_cmdline(cmdline),
         limits: LinuxGuestLimits {
             ram_mib: *ram_mib,
@@ -148,8 +217,10 @@ fn boot_inputs(label: &str, spec: &VmSpec, modules_root: &Path) -> Result<LinuxB
     })
 }
 
-async fn connect_when_listening(dial: &GuestDial) -> io::Result<()> {
-    dial_guest_when_listening(dial).await?.close().await
+async fn connect_when_listening(dial: &GuestDial) -> io::Result<u32> {
+    let (mut connection, dial_attempts) = dial_guest_when_listening(dial).await?;
+    connection.close().await?;
+    Ok(dial_attempts)
 }
 
 async fn pump_until_stopped(label: String, dial: GuestDial, mut stop: oneshot::Receiver<()>) {
@@ -179,9 +250,9 @@ fn spawn_pump(label: &str, dial: GuestDial) -> Result<oneshot::Sender<()>, Proxi
     Ok(stop_sender)
 }
 
-async fn await_listening(label: &str, dial: &GuestDial, limit: Duration) -> Result<(), ProximaError> {
-    match proxima_core::time::timeout(limit, connect_when_listening(dial)).await {
-        Ok(Ok(())) => Ok(()),
+async fn await_listening(label: &str, dial: &GuestDial, limit: Duration) -> Result<u32, ProximaError> {
+    match time::timeout(limit, connect_when_listening(dial)).await {
+        Ok(Ok(dial_attempts)) => Ok(dial_attempts),
         Ok(Err(error)) => Err(upstream_error(label, "dial the resident guest", error)),
         Err(_) => Err(upstream_error(label, "resident guest never listened", format_args!("{limit:?}"))),
     }
@@ -191,14 +262,40 @@ async fn await_listening(label: &str, dial: &GuestDial, limit: Duration) -> Resu
 /// is handed back only after the guest accepts a connection, so the first
 /// request never races the boot.
 pub(super) async fn build_resident(label: &str, spec: &VmSpec) -> Result<PipeHandle, ProximaError> {
-    let inputs = boot_inputs(label, spec, &spec.modules_root)?;
+    let mut timeline = Timeline::begin();
+    let inputs = boot_inputs(label, spec, &spec.modules_root, &mut timeline)?;
     let link = LinkConfig { mac: GUEST_MAC, frame_capacity: FRAME_CAPACITY, host_consumer: None };
     let (guest, host) =
         ResidentLinux::start(inputs, link).map_err(|error| upstream_error(label, "start the resident guest", error))?;
     GUESTS_BOOTED.fetch_add(1, Ordering::Relaxed);
+    let (elapsed_ms, phase_ms) = timeline.lap();
+    proxima_telemetry::info!(
+        label = %label,
+        phase = "guest_started",
+        elapsed_ms,
+        phase_ms,
+        "resident guest vcpu thread started, the host now waits for its server to listen"
+    );
     let dial = dial_guest(host, SocketAddrV4::new(GUEST_IP, spec.guest_port));
     let pump_stop = spawn_pump(label, dial.clone())?;
-    await_listening(label, &dial, Duration::from_millis(spec.connect_timeout_millis)).await?;
+    let (elapsed_ms, phase_ms) = timeline.lap();
+    proxima_telemetry::info!(
+        label = %label,
+        phase = "first_dial",
+        elapsed_ms,
+        phase_ms,
+        "frame pump spawned, the first dial is attempted next"
+    );
+    let dial_attempts = await_listening(label, &dial, Duration::from_millis(spec.connect_timeout_millis)).await?;
+    let (elapsed_ms, phase_ms) = timeline.lap();
+    proxima_telemetry::info!(
+        label = %label,
+        phase = "listening",
+        dial_attempts,
+        elapsed_ms,
+        phase_ms,
+        "resident guest accepted a connection, the upstream is ready for requests"
+    );
     let client = H1ClientUpstream::new(dial, GUEST_IP.to_string(), label);
     Ok(into_handle(ResidentVmUpstream { client, _pump_stop: pump_stop, guest }))
 }

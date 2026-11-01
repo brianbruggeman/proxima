@@ -79,14 +79,22 @@ pub fn dial_guest(link: HostLink, guest: SocketAddrV4) -> FrameUpstream<FrameSou
 /// Dials until the guest accepts, pausing one retransmit interval on the timer
 /// after each refusal so a guest still booting is not redialed in a tight loop.
 /// Bound it with `proxima_core::time::timeout`; any error but a refusal returns.
+/// The connection comes back with the number of dials it took, the accepted one included.
 ///
 /// # Errors
 /// The first dial error whose kind is not `ConnectionRefused`.
-pub async fn dial_guest_when_listening<Upstream: StreamUpstream>(upstream: &Upstream) -> io::Result<Upstream::Conn> {
+pub async fn dial_guest_when_listening<Upstream: StreamUpstream>(
+    upstream: &Upstream,
+) -> io::Result<(Upstream::Conn, u32)> {
+    let mut attempt: u32 = 1;
     loop {
         match upstream.connect().await {
-            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => sleep(DEFAULT_RETRANSMIT).await,
-            outcome => return outcome,
+            Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+                proxima_telemetry::debug!(attempt, "guest refused the dial, retrying after one retransmit interval");
+                attempt = attempt.saturating_add(1);
+                sleep(DEFAULT_RETRANSMIT).await;
+            }
+            outcome => return outcome.map(|conn| (conn, attempt)),
         }
     }
 }
