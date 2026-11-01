@@ -2024,16 +2024,13 @@ pub(crate) fn wide_cooperative_reduce_width(reduction_total: u64) -> u64 {
     )
 }
 
-/// One lane per four reduced elements, rounded up to whole simdgroups and
-/// held to `cap` -- the rule both [`wide_cooperative_reduce_width`] and
-/// [`broadcast_cooperative_reduce_width`] apply; they differ only in the cap.
+/// One lane per four reduced elements, rounded to a power of two and held between one
+/// simdgroup and `cap` -- the rule both [`wide_cooperative_reduce_width`] and
+/// [`broadcast_cooperative_reduce_width`] apply, shared with the CUDA emitter through
+/// [`crate::epilogue::reduce_block_width`]; they differ only in the cap.
 #[cfg(feature = "metal-wide-cooperative-reduce")]
 fn quarter_width(reduction_total: u64, cap: u64) -> u64 {
-    reduction_total
-        .div_ceil(4)
-        .max(1)
-        .next_multiple_of(SIMD_WIDTH)
-        .clamp(SIMD_WIDTH, cap)
+    crate::epilogue::reduce_block_width(reduction_total, 4, SIMD_WIDTH, cap)
 }
 
 /// The width of a reduce that carries a broadcast epilogue (the shape a
@@ -2070,7 +2067,7 @@ pub(super) fn cooperative_reduce_width(
         .iter()
         .map(|&dim| resolved.extents[dim as usize])
         .product();
-    if reduce_has_broadcast_epilogue(resolved) {
+    if crate::epilogue::broadcast_reduce_takes_block(resolved, quantized) {
         return broadcast_cooperative_reduce_width(reduction_total);
     }
     wide_cooperative_reduce_width(reduction_total)

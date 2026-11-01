@@ -66,6 +66,10 @@ use proxima_tensor::{
 };
 
 use crate::cuda_cached_attention::{cached_attention_entry_name, render_cached_attention_cuda};
+use crate::epilogue::{
+    broadcast_reduce_takes_block, epilogue_operand_is_loop_invariant, index32_reach_fits,
+    reduce_block_width,
+};
 use crate::error::EmitError;
 use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
@@ -1094,25 +1098,23 @@ pub(crate) const ATTENTION_BLOCK_WIDTH: u64 = ATTENTION_WARPS * WARP_SIZE;
 fn cooperative_width(resolved: &BoundOp, quantized: &[Option<Codec>]) -> u64 {
     let BoundOpKind::Reduce {
         output_axes,
-        epilogue_broadcast_axes,
         keep: Keep::Reduce,
         ..
     } = &resolved.kind
     else {
         return WARP_SIZE;
     };
-    let rows: u64 = output_axes
-        .iter()
-        .map(|dim| resolved.extents[*dim as usize])
-        .product();
-    if !epilogue_broadcast_axes.is_empty() && quantized.iter().all(Option::is_none) && rows == 1 {
+    if broadcast_reduce_takes_block(resolved, quantized) {
         let reduction_total: u64 = reduction_dims(resolved, output_axes)
             .iter()
             .map(|dim| resolved.extents[*dim as usize])
             .product();
-        (reduction_total / BLOCK_REDUCE_ELEMENTS_PER_THREAD)
-            .next_power_of_two()
-            .clamp(WARP_SIZE, MAX_BLOCK_REDUCE_WIDTH)
+        reduce_block_width(
+            reduction_total,
+            BLOCK_REDUCE_ELEMENTS_PER_THREAD,
+            WARP_SIZE,
+            MAX_BLOCK_REDUCE_WIDTH,
+        )
     } else {
         WARP_SIZE
     }
@@ -1579,7 +1581,7 @@ fn hoisted_broadcast_epilogue(
     let operand_count = epilogue_operands.len();
     let invariant_operand: Vec<bool> = epilogue_operands
         .iter()
-        .map(|(_, layout, _)| reduce_dims.iter().all(|&dim| layout.stride(dim) == 0))
+        .map(|operand| epilogue_operand_is_loop_invariant(operand, reduce_dims))
         .collect();
     let mut before_loop = format!("    {element_type} epi_scratch[{}];\n", operand_count + 1);
     let mut in_loop = String::new();
@@ -2884,7 +2886,7 @@ fn push_cooperative_reduce_body(
     let unit_fold = block_reduce
         && reduce_rank == 1
         && gather_count(resolved) == 0
-        && resolved.extents[reduce_dims[0] as usize] <= u64::from(u32::MAX);
+        && index32_reach_fits(resolved.extents[reduce_dims[0] as usize]);
     if !lean || guarded {
         if unit_fold {
             push_unit_stride_fold_header(source, resolved, output_axes);
@@ -3044,7 +3046,7 @@ fn push_cooperative_reduce_body(
             && reduce_rank == 1
             && gather_count(resolved) == 0
             && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
-            && resolved.extents[reduce_dims[0] as usize] <= u64::from(u32::MAX);
+            && index32_reach_fits(resolved.extents[reduce_dims[0] as usize]);
         let hoisted = (reduce_rank > 0
             && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands))
         .then(|| {

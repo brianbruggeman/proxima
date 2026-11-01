@@ -630,10 +630,9 @@ pub(super) fn epilogue_operand_is_loop_invariant(
     reduce_dims: &[u16],
     operand_index: usize,
 ) -> bool {
-    let Some((_, layout, lookup)) = epilogue_operands.get(operand_index) else {
-        return false;
-    };
-    lookup.is_none() && reduce_dims.iter().all(|&dim| layout.stride(dim) == 0)
+    epilogue_operands
+        .get(operand_index)
+        .is_some_and(|operand| crate::epilogue::epilogue_operand_is_loop_invariant(operand, reduce_dims))
 }
 
 /// [`push_body_steps`]'s counterpart for [`BoundOpKind::Reduce::
