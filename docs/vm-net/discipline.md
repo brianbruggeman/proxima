@@ -137,6 +137,29 @@ sent, and `sent: u32` indexes it.
 **Baseline saved:** criterion `--save-baseline per-byte`, 3 runs, worktree
 `proxima-tcp-stack` (branch `perf/tcp-stack-bytes` from 5fcf47e2).
 
+**Per-byte baseline, 3 runs (loadavg 4.3-8.5):** `on_inbound_to`+`read` 54 B
+1.449-1.463 us, 402 B 19.49-20.47 us, 1514 B 90.59-94.64 us;
+`write`+response+`read` 54 B 1.533-1.682 us, 402 B 19.79-23.00 us, 1514 B
+90.23-98.29 us; kernel loopback 12.83-14.89 us.
+
+### Changelog
+| Date | Change | Δ vs per-byte (criterion `--baseline per-byte`, default bench profile) | CoV / runs | Host loadout |
+|---|---|---|---|---|
+| 2026-11-01 | bulk `read` (5d375627) + per-segment receive hold, bulk window cap, acked send bytes released, `DataPath::snd_una` (f28b40ff); landed as 53428277 | `on_inbound_to`+`read`: 54 B 63.2 ns (−95.7%), 402 B 71.8 ns (−99.6%), 1514 B 82.8 ns (−99.9%); `write`+response+`read`: 54 B 119.3 ns (−92.2%), 402 B 139.3 ns (−99.3%), 1514 B 185.3 ns (−99.8%); same-code control (kernel loopback, unchanged code): −3.2% / −5.6% / +1.1% (p = 0.46) | 1 run; the same-code arm sets the noise floor at about ±6% | loadavg 34.9 at build start, 12.76 at run end; other sessions active |
+
+Mechanism of the delta: the cost was per payload byte (one `BTreeMap` insert
+and remove plus two `VecDeque` operations per byte); after the change the
+slope is ~0.01 ns per byte (402 → 1514 B adds 11 ns), i.e. bulk copies. Tests:
+`cargo val -p proxima-net --features frame-stack,xdp` 74/74, including the six
+new cases (gap fill, duplicate/overlap, held-segment overlap, bounded send
+buffer across many acked writes, receive and send across u32 sequence wrap).
+
+**Scope of the incumbent arm:** the kernel arm is a cross-thread loopback round
+trip through syscalls; the proxima arms are the in-process sans-IO stack with
+no thread hop. They are not the same scope, so the gap between them is not a
+like-for-like verdict. The comparable number is the end-to-end CPU per request
+through `proxima serve` (C1 table above), re-measured after both C1 and C2 land.
+
 ## Related defects found while measuring (not C1)
 
 | Defect | Evidence | State |
