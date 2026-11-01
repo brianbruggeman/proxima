@@ -102,8 +102,10 @@ pub(crate) fn render_cached_attention_cuda(
 
 const CACHED_ATTENTION_BODY: &str = "\
     const float negative_infinity = -__int_as_float(0x7f800000);
+    constexpr int warps = 4;
     const unsigned int lane = threadIdx.x & 31u;
-    const long vector_index = ((long)blockIdx.x * blockDim.x + threadIdx.x) / 32L;
+    const unsigned int warp = threadIdx.x >> 5u;
+    const long vector_index = (long)blockIdx.x;
     if (vector_index >= u_ptr->total_elements) { return; }
     const long query_row = vector_index / (kv_heads * query_groups);
     const long query_head = vector_index % (kv_heads * query_groups);
@@ -114,7 +116,7 @@ const CACHED_ATTENTION_BODY: &str = "\
     float sum = 0.0f;
     float weighted[(head_dim + 31) / 32];
     for (long slot = 0; slot < (head_dim + 31) / 32; slot++) { weighted[slot] = 0.0f; }
-    for (long key = 0; key <= last_key; key++) {
+    for (long key = (long)warp; key <= last_key; key += warps) {
         const bool cached = key < cached_key_rows;
         const long new_index = key - cached_key_rows;
         const long relative = (cached ? key - cached_key_rows : new_index) - query_row;
@@ -139,8 +141,29 @@ const CACHED_ATTENTION_BODY: &str = "\
         }
         maximum = next_max;
     }
+    __shared__ float shared_maximum[warps];
+    __shared__ float shared_sum[warps];
+    __shared__ float shared_weighted[warps * head_dim];
     for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {
-        out[vector_index * head_dim + dimension] = (sum == 0.0f) ? 0.0f : weighted[dimension / 32L] / sum;
+        shared_weighted[warp * head_dim + dimension] = weighted[dimension / 32L];
+    }
+    if (lane == 0u) {
+        shared_maximum[warp] = maximum;
+        shared_sum[warp] = sum;
+    }
+    __syncthreads();
+    float global_maximum = negative_infinity;
+    for (int source = 0; source < warps; source++) { global_maximum = fmaxf(global_maximum, shared_maximum[source]); }
+    float total = 0.0f;
+    for (int source = 0; source < warps; source++) {
+        total += (shared_maximum[source] == negative_infinity) ? 0.0f : shared_sum[source] * expf(shared_maximum[source] - global_maximum);
+    }
+    for (long dimension = (long)threadIdx.x; dimension < head_dim; dimension += (long)blockDim.x) {
+        float merged = 0.0f;
+        for (int source = 0; source < warps; source++) {
+            merged += (shared_maximum[source] == negative_infinity) ? 0.0f : shared_weighted[source * head_dim + dimension] * expf(shared_maximum[source] - global_maximum);
+        }
+        out[vector_index * head_dim + dimension] = (total == 0.0f) ? 0.0f : merged / total;
     }
 }
 ";

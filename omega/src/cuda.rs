@@ -302,6 +302,7 @@ fn extent_fields(
             threads: grid_threads(resolved, cooperative, row_tile, reduce_width)?,
             block_width: match &resolved.kind {
                 BoundOpKind::MoeTopK { expert_count, .. } => Some(moe_block_width(*expert_count)),
+                BoundOpKind::CachedAttention { .. } => Some(ATTENTION_BLOCK_WIDTH),
                 _ => cooperative.then_some(reduce_width),
             },
         },
@@ -1071,6 +1072,12 @@ fn bindings(resolved: &BoundOp) -> Vec<Binding> {
 /// cooperative reduce keeps one warp per output.
 const BLOCK_REDUCE_WIDTH: u64 = 256;
 
+/// Warps that share one attention vector (one query row of one head): each walks a
+/// strided subset of the keys and the block merges their softmax states.
+pub(crate) const ATTENTION_WARPS: u64 = 4;
+
+pub(crate) const ATTENTION_BLOCK_WIDTH: u64 = ATTENTION_WARPS * WARP_SIZE;
+
 fn cooperative_width(resolved: &BoundOp, quantized: &[Option<Codec>]) -> u64 {
     let BoundOpKind::Reduce {
         output_axes,
@@ -1167,7 +1174,7 @@ fn grid_threads(
             ..
         } => checked_product(
             resolved.node,
-            [*query_rows, *kv_heads, *query_groups, WARP_SIZE],
+            [*query_rows, *kv_heads, *query_groups, ATTENTION_BLOCK_WIDTH],
         ),
         BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
@@ -3687,6 +3694,25 @@ mod tests {
         assert!(kernel.source.contains("expf(maximum - next_max)"));
         assert!(kernel.source.contains("weighted[local_dimension] * rescale"));
         assert!(kernel.source.contains("__shfl_xor_sync(0xffffffffu, partial, offset)"));
+    }
+
+    /// One attention vector is one block of `ATTENTION_WARPS` warps, each on a
+    /// strided share of the keys, merged through shared memory.
+    #[test]
+    fn cached_attention_gives_each_vector_a_block_of_warps_that_merge_softmax_state() {
+        let op = attention_op_with(attention_kind(9, 5, 256, 256));
+        let kernel = emit_cuda(&op, &no_packed()).expect("two-range form emits");
+        let bytes = pack_cuda_uniforms(&op).expect("uniforms pack");
+        let vectors = i64::from_le_bytes(bytes.as_slice().try_into().expect("8 bytes")) as u64;
+
+        assert!(vectors > 0);
+        assert_eq!(kernel.grid.block_width, Some(ATTENTION_WARPS * WARP_SIZE));
+        assert_eq!(kernel.grid.threads, vectors * ATTENTION_WARPS * WARP_SIZE);
+        assert_eq!(kernel.grid.blocks(), vectors);
+        assert!(kernel.source.contains("constexpr int warps = 4;"));
+        assert!(kernel.source.contains("key += warps"));
+        assert!(kernel.source.contains("__syncthreads();"));
+        assert!(kernel.source.contains("shared_weighted[source * head_dim + dimension]"));
     }
 
     #[cfg(feature = "metal-attn-split-decode")]
