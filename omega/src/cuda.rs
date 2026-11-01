@@ -4358,12 +4358,31 @@ mod tests {
 
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("broadcast kernel emits");
-        assert_eq!(kernel.grid.threads, 4 * 8 * WARP_SIZE);
+        assert_eq!(kernel.grid.threads, 4 * WARP_SIZE);
         let uniforms = pack_cuda_uniforms(&bound).expect("broadcast uniforms pack");
         assert_eq!(
             i64::from_ne_bytes(uniforms[..8].try_into().expect("i64 output total")),
             32
         );
+    }
+
+    /// A single-row broadcast reduce keeps the one-warp-per-output-element
+    /// grid, so a decode step's launch shape is unchanged.
+    #[test]
+    fn a_single_row_broadcast_reduce_keeps_the_per_element_grid() {
+        let mut bound = matmul_reduce_op(1, 8, ScalarOp::Add);
+        let BoundOpKind::Reduce {
+            epilogue_broadcast_axes,
+            ..
+        } = &mut bound.kind
+        else {
+            panic!("matmul_reduce_op always builds a Keep::Reduce fold")
+        };
+        epilogue_broadcast_axes.push(1);
+
+        let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
+            .expect("broadcast kernel emits");
+        assert_eq!(kernel.grid.threads, 8 * WARP_SIZE);
     }
 
     #[test]
