@@ -13,7 +13,7 @@
 //! call: the sink and mint must settle at once ([`DriverError::Stalled`]); the source parks the task on its waker.
 
 use crate::stack::{self, Action};
-use crate::tcp_dial::{DialError, DialGuard, DialLease, SynStep, backoff_interval, resend_due, wake_after};
+use crate::tcp_dial::{Backoff, DialError, DialGuard, DialLease, SynStep, wake_after};
 use crate::tcp_listener::{Endpoint, Inbound, OutSegment};
 use crate::tcp_stack::{ConnId, Outbound, TcpStack};
 use core::fmt::Debug;
@@ -188,7 +188,7 @@ pub struct Driver<Rx, Tx, Mint> {
     our_port: u16,
     arp: HashMap<[u8; 4], [u8; 6]>,
     arp_sent: HashMap<[u8; 4], (ClockInstant, u32)>,
-    retransmit: Duration,
+    backoff: Backoff,
     connection_waiters: HashMap<ConnId, Waker>,
     accept_waiters: Vec<Waker>,
     arp_waiters: HashMap<[u8; 4], Vec<Waker>>,
@@ -209,7 +209,7 @@ impl<Rx, Tx, Mint> Driver<Rx, Tx, Mint> {
             accept_waiters: Vec::new(),
             arp_waiters: HashMap::new(),
             arp_sent: HashMap::new(),
-            retransmit: DEFAULT_RETRANSMIT,
+            backoff: Backoff::rfc(DEFAULT_RETRANSMIT),
             rx: Arc::new(AsyncMutex::new(rx)),
             tx,
             mint,
@@ -226,7 +226,23 @@ impl<Rx, Tx, Mint> Driver<Rx, Tx, Mint> {
     /// each further resend waits twice as long, up to the RFC 6298 maximum.
     #[must_use]
     pub fn with_retransmit(mut self, interval: Duration) -> Self {
-        self.retransmit = interval;
+        self.backoff.initial = interval;
+        self
+    }
+
+    /// Longest wait between resends; the doubling stops here instead of at the
+    /// RFC 6298 maximum. An initial interval above it is kept as is.
+    #[must_use]
+    pub fn with_retransmit_ceiling(mut self, ceiling: Duration) -> Self {
+        self.backoff.ceiling = ceiling;
+        self
+    }
+
+    /// Resends of one ARP request or SYN before the dial is abandoned; the
+    /// default is `MaxRetransmit::ABANDON_THRESHOLD`.
+    #[must_use]
+    pub fn with_max_resends(mut self, resends: u32) -> Self {
+        self.backoff.max_resends = resends;
         self
     }
 
@@ -297,7 +313,7 @@ where
     fn retransmit_arp(&mut self, target: [u8; 4], cx: &mut Context<'_>) -> Result<(), DriverFailure<Rx, Tx, Mint>> {
         let previous = self.arp_sent.get(&target).copied();
         let due = previous.is_none_or(|(sent, resends)| {
-            resend_due(self.retransmit, resends, time::now().saturating_duration_since(sent))
+            self.backoff.due(resends, time::now().saturating_duration_since(sent))
         });
         if due {
             self.send_arp_request(target)?;
@@ -308,16 +324,16 @@ where
             .arp_sent
             .get(&target)
             .map_or((Duration::ZERO, 0), |(sent, resends)| (time::now().saturating_duration_since(*sent), *resends));
-        wake_after(backoff_interval(self.retransmit, resends).saturating_sub(waited), cx);
+        wake_after(self.backoff.interval(resends).saturating_sub(waited), cx);
         Ok(())
     }
 
     fn retransmit_syn(&self, dial: &mut DialGuard, cx: &mut Context<'_>) -> io::Result<()> {
         let source_port = dial.connection().map_or(self.our_port, |(port, _, _)| port);
-        let remaining = match dial.next_syn(self.retransmit) {
+        let remaining = match dial.next_syn(self.backoff) {
             SynStep::Send(segments) => {
                 self.send_segments(segments, source_port).map_err(into_io)?;
-                dial.syn_interval(self.retransmit)
+                dial.syn_interval(self.backoff)
             }
             SynStep::Wait(remaining) => remaining,
             SynStep::Exhausted => {
@@ -759,7 +775,7 @@ where
             if let Err(error) = driver.send_segments(&outbound, source_port) {
                 return Poll::Ready(Err(into_io(error)));
             }
-            wake_after(driver.retransmit, cx);
+            wake_after(driver.backoff.initial, cx);
         } else {
             if let Err(error) = driver.retransmit_arp(peer_ip, cx) {
                 return Poll::Ready(Err(into_io(error)));
@@ -1342,7 +1358,7 @@ mod tests {
         });
 
         let error = outcome.expect("dial gives up inside the poll budget").err().expect("an unanswered dial fails");
-        let expected_attempts = proxima_protocols::tcp::retx::MaxRetransmit::ABANDON_THRESHOLD + 1;
+        let expected_attempts = u32::from(proxima_protocols::tcp::retx::MaxRetransmit::ABANDON_THRESHOLD) + 1;
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert!(
             matches!(
@@ -1351,6 +1367,6 @@ mod tests {
             ),
             "error names the exhausted syn retransmits: {error}"
         );
-        assert_eq!(dial.counts.dropped.load(Ordering::SeqCst), usize::from(expected_attempts));
+        assert_eq!(dial.counts.dropped.load(Ordering::SeqCst), usize::try_from(expected_attempts).expect("attempt count fits usize"));
     }
 }
