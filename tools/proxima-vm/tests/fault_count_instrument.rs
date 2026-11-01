@@ -22,6 +22,7 @@ use tempfile::TempDir;
 const PROBE_BINARY: &str = env!("CARGO_BIN_EXE_dispatch_probe");
 const ENTITLEMENTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/entitlements.plist");
 const GUEST_MANIFEST_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/guests/lambda");
+const GUEST_TARGET_DIR: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/lambda-guest");
 
 const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 const KVM_LANE: bool = cfg!(all(target_os = "linux", target_arch = "x86_64"));
@@ -60,7 +61,7 @@ struct SignedProbe {
 impl SignedProbe {
     fn prepare() -> Self {
         let directory = tempfile::tempdir().expect("create tempdir for the signed probe");
-        let guest_elf = build_guest_elf(&directory.path().join("guest-target"));
+        let guest_elf = build_guest_elf(Path::new(GUEST_TARGET_DIR));
         Self::prepare_with_guest_elf(directory, guest_elf)
     }
 

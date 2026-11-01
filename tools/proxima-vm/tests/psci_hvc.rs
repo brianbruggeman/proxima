@@ -24,6 +24,7 @@ use tempfile::TempDir;
 const PROBE_BINARY: &str = env!("CARGO_BIN_EXE_dispatch_probe");
 const ENTITLEMENTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/entitlements.plist");
 const GUEST_MANIFEST_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/guests/lambda");
+const GUEST_TARGET_DIR: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/lambda-guest");
 
 const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 
@@ -33,9 +34,8 @@ const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch
 const EXPECTED_PSCI_VERSION_BYTES: [u8; 4] = [0x02, 0x00, 0x00, 0x00];
 
 /// Builds `proxima-vm-guest-lambda-psci` for `aarch64-unknown-none` into a
-/// per-case tempdir's own `CARGO_TARGET_DIR` — same isolation
-/// `tests/dispatch_hypercall.rs::build_guest_elf` uses so parallel nextest
-/// cases never race on a shared build output.
+/// shared `CARGO_TARGET_DIR`: cargo's own lock serializes concurrent cases
+/// and later ones find the build fresh.
 fn build_psci_guest_elf(target_dir: &Path) -> PathBuf {
     let status = Command::new("cargo")
         .args([
@@ -69,7 +69,7 @@ impl SignedPsciProbe {
         let directory = tempfile::tempdir().expect("create tempdir for the signed probe");
         let path = directory.path().join("psci-dispatch-probe");
         std::fs::copy(Path::new(PROBE_BINARY), &path).expect("copy the built probe binary");
-        let guest_elf = build_psci_guest_elf(&directory.path().join("guest-target"));
+        let guest_elf = build_psci_guest_elf(Path::new(GUEST_TARGET_DIR));
 
         if HYPERVISOR_LANE {
             let status = Command::new("codesign")

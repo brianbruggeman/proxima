@@ -23,6 +23,7 @@ use std::process::Command;
 const PROBE_BINARY: &str = env!("CARGO_BIN_EXE_dispatch_probe");
 const ENTITLEMENTS: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/entitlements.plist");
 const GUEST_MANIFEST_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/guests/lambda");
+const GUEST_TARGET_DIR: &str = concat!(env!("CARGO_TARGET_TMPDIR"), "/lambda-guest");
 
 const HYPERVISOR_LANE: bool = cfg!(all(target_os = "macos", target_arch = "aarch64"));
 const KVM_LANE: bool = cfg!(all(target_os = "linux", target_arch = "x86_64"));
@@ -65,7 +66,7 @@ async fn guest_virtio_console_byte_arrives_through_a_real_vm_exit() {
     let directory = tempfile::tempdir().expect("create tempdir for the signed probe");
     let probe_path = directory.path().join("dispatch-probe");
     std::fs::copy(Path::new(PROBE_BINARY), &probe_path).expect("copy the built probe binary");
-    let guest_elf = build_guest_elf(&directory.path().join("guest-target"));
+    let guest_elf = build_guest_elf(Path::new(GUEST_TARGET_DIR));
 
     if HYPERVISOR_LANE {
         let status = Command::new("codesign")
