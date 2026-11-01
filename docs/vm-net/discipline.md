@@ -89,6 +89,61 @@ Status of the mechanism: **measured** (the count follows the toggle).
 |---|---|---|---|---|
 | 2026-11-01 | baseline: incumbent wake-all pump through `proxima serve`, c=1/8/64 | baseline | 1 run per arm (CoV not yet computed) | loadavg 4-5; my own builds idle at the time |
 | 2026-11-01 | single pump future + per-ConnId wakers (feat/frame-pump 472b3d01..94a0afe9) | bystander wakes per frame 7 → 0 at K=8; e2e CPU/request pending | counting test, deterministic | n/a |
+| 2026-11-01 | e2e after C1 + C2 landed (release e32ad0ec, `proxima serve`, same config and method as the baseline) | CPU/request c=1 266 → 218 us, c=8 325 → 184 us, c=64 2,346 → 190 us; rps c=1 4,567 → 5,302, c=8 5,665 → 6,645, c=64 (8 s) 3,238 → 6,577; c=64 15 s ×3: 6,450 / 6,450 / 6,484 rps, p50 10.0-10.2 ms, max 25.9-32.3 ms (was 8,252 ms); all 200 | 1 run per CPU row; 3 runs at c=64 (range 0.5%) | loadavg 1.98-9.80 |
+
+**After C1 + C2, against the home-turf arm (same session, alternating, c=64 15 s):**
+traefik + whoami ×2: 27,155 / 27,486 / 27,486 rps, p50 1.36-1.39 ms, max 30.9-45.7 ms.
+proxima resident whoami (one guest, one vCPU): 6,450-6,484 rps, p50 ~10 ms.
+proxima is at about 0.24× traefik's throughput at c=64. The p50 follows from the
+ceiling (64 in flight / ~6,500 rps ≈ 9.8 ms). The whole proxima process used
+999 ticks over 8 s at c=64 (about 1.25 cores), so host CPU is no longer the
+limit. Hypothesis, unmeasured: the ceiling is the single guest vCPU running
+whoami plus the guest kernel's network stack, against k3s's two replicas on the
+host kernel. Per-thread CPU at c=64 is the next measurement.
+
+**Per-thread CPU at c=64 (10 s, 6,540 rps):** `proxima-vm-resident-vcpu` 1001
+ticks (one core fully busy); the 8 `proxima-core` threads 13-34 ticks each.
+Measured: the ceiling is the guest's single vCPU thread.
+**Split of that vCPU core** (`/proc/<tid>/stat` fields 14, 15, 43; 10 s, 6,503
+rps): utime 787, stime 208, guest_time 659. Guest work 66%, host device
+emulation on the vCPU thread 13% (787 − 659), host kernel exit handling 21%.
+
+**Two resident guests behind `select = { algorithm = "round_robin" }`** (one
+composed pipe with two inline `type = "vm"` upstreams, `$M/resident-x2.toml`),
+c=64 15 s ×3 alternating with traefik:
+
+| arm | rps | p50 ms | p99 ms | max ms | loadavg 1m | design-favors |
+|---|---|---|---|---|---|---|
+| proxima, 2 guests × 1 vCPU | 12,668 / 12,824 / 12,665 | 1.51 / 1.66 / 1.38 | 18.6 / 18.3 / 18.7 | 43.9 / 233.8 / 21.4 | 1.08 / 7.08 / 16.41 | neutral |
+| traefik + whoami ×2 | 26,977 / 27,370 / 27,181 | 1.38 / 1.37 / 1.37 | 12.3 / 11.9 / 12.2 | 41.3 / 30.4 / 48.2 | 1.36 / 6.26 / 13.42 | incumbent |
+
+Both vCPU threads ran at about 100% of a core (1232+260 and 1191+300 ticks over
+15 s). VmRSS 431 MB with two guests (290 MB with one).
+
+**CPU per request, both sides, c=64 15 s** (utime+stime deltas, 100 ticks/s):
+
+| arm | rps | ok | ticks | CPU us/request | cores used | loadavg 1m |
+|---|---|---|---|---|---|---|
+| traefik 3303 + whoami 2328 + whoami 2313 + k3s-server 29 + containerd/shims 6 | 27,394 | 410,903 | 7,979 | 194.2 (excludes kernel softirq: iptables, conntrack, host net stack) | ~5.3 | 4.60 |
+| proxima, whole process, one resident guest (guest time included) | 6,646 | 99,647 | 1,866 | 187.3 | ~1.24 | 6.81 |
+
+Measured: CPU per request is about equal; the traefik figure omits kernel
+network time, so its true cost per request is higher than 194 us. The
+throughput gap is the number of cores each side can use (one guest vCPU vs
+~5.3 cores), and two guests doubled proxima's rps (6.5k to 12.7k).
+
+**Exits per request** (1,000 requests at c=1, all 200, `RUST_LOG=proxima_vm=debug`,
+counts from the journal after a cursor taken post-startup,
+`$M/ex-journal.txt`): mmio interrupt-path access 5.64, net rx queue filled
+2.06, rx serviced on doorbell 2.00, queue notify 1.06, net tx queue drained
+1.00. With the vCPU split above (13% host emulation + 21% host kernel per
+vCPU core), the exits are the candidate for the third of the core not spent in
+the guest; attribution of those 34% to these specific exits is unmeasured.
+
+**Implication:** two levers. (1) Let a workload use more cores: replicas or
+guest vCPUs. Today, N resident upstreams in one composed pipe with
+round-robin is expressible in config. (2) Fewer exits per request: virtio
+notification suppression / event index and interrupt acknowledgement.
 
 ## Per-piece decomposition (criterion, one bench file per piece)
 
