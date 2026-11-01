@@ -426,10 +426,9 @@ pub(crate) fn sentinel_text(sentinel: i64) -> &'static str {
 /// exit recovers `verb`/`pointer`/`length` from the vCPU
 /// (`src/backend_macos.c`'s and `src/kvm`'s
 /// `proxima_vm_run_dispatch_loop`, which `run_dispatch_loop` drives).
-/// `#[unsafe(no_mangle)]` is load-bearing: without it the C loop's
-/// `proxima_vm_dispatch_hypercall(...)` call sees no matching symbol at
-/// link time, since a bare `extern "C" fn` without it still gets a mangled
-/// Rust symbol name. `dispatcher` is typed `*const c_void` to match the C
+/// `no_mangle` is load-bearing on macOS aarch64, where that C loop is
+/// compiled: without it the C call sees no matching symbol at link time,
+/// since a bare `extern "C" fn` still gets a mangled Rust symbol name. `dispatcher` is typed `*const c_void` to match the C
 /// header's `const void *dispatcher` exactly; the cast to
 /// `FfiRecordingDispatcher` happens on the Rust side only, since
 /// `extern "C"` functions cannot be generic over the caller's dispatcher
@@ -442,7 +441,10 @@ pub(crate) fn sentinel_text(sentinel: i64) -> &'static str {
 /// must be valid for `guest_memory_length` bytes. `response_out` must be
 /// valid for `response_capacity` bytes and not alias `guest_memory`.
 #[cfg(feature = "std")]
-#[unsafe(no_mangle)]
+// only the macos backend's c loop links against this name (build.rs compiles
+// it for macos aarch64 alone); exporting it elsewhere collides when a test
+// binary holds two copies of this crate through the proxima-lib dev-dependency.
+#[cfg_attr(all(target_os = "macos", target_arch = "aarch64"), unsafe(no_mangle))]
 pub unsafe extern "C" fn proxima_vm_dispatch_hypercall(
     dispatcher: *const c_void,
     guest_memory: *const u8,
