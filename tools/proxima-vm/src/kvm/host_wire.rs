@@ -13,6 +13,7 @@ use core::future::Future;
 use std::io;
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::sync::Arc;
+use std::time::Duration;
 
 use proxima_core::time::sleep;
 use proxima_net::frame_stack::{DEFAULT_RETRANSMIT, Driver, FrameUpstream};
@@ -27,6 +28,8 @@ pub const HOST_IP: Ipv4Addr = Ipv4Addr::new(10, 0, 2, 2);
 pub const HOST_MAC: [u8; 6] = [0x02, 0x50, 0x58, 0x00, 0x02, 0x02];
 const HOST_PORT: u16 = 49152;
 const HOST_INITIAL_SEQUENCE: u32 = 0x4000;
+// the only loss on this link is a guest that has not finished booting, so the first resend comes quickly and backoff bounds the cost
+const LINK_RETRANSMIT: Duration = Duration::from_millis(10);
 
 /// `Vec<u8> -> ()`: the host-to-guest frame sink that rings the vCPU's
 /// doorbell after each accepted frame.
@@ -73,7 +76,8 @@ pub fn dial_guest(link: HostLink, guest: SocketAddrV4) -> FrameUpstream<FrameSou
         ZeroMint,
     );
     let local = SocketAddrV4::new(HOST_IP, HOST_PORT);
-    FrameUpstream::new(Driver::new(pipes, HOST_MAC, local, HOST_INITIAL_SEQUENCE), guest)
+    let driver = Driver::new(pipes, HOST_MAC, local, HOST_INITIAL_SEQUENCE).with_retransmit(LINK_RETRANSMIT);
+    FrameUpstream::new(driver, guest)
 }
 
 /// Dials until the guest accepts, pausing one retransmit interval on the timer

@@ -13,9 +13,24 @@ use proxima_core::time::{self, Instant as ClockInstant};
 use std::time::Duration;
 use thiserror::Error;
 
-/// Interval before an unanswered ARP request or SYN is sent again, and between
-/// dials to a port that refused; the TCP initial RTO.
+/// Initial interval before an unanswered ARP request or SYN is sent again
+/// (doubling on each resend), and between dials to a port that refused; the TCP
+/// initial RTO.
 pub const DEFAULT_RETRANSMIT: Duration = Duration::from_micros(RtoEstimator::RTO_MIN.as_micros());
+
+const BACKOFF_CAP: Duration = Duration::from_micros(RtoEstimator::RTO_MAX.as_micros());
+const MAX_DOUBLINGS: u32 = 16;
+
+/// RFC 6298 §5.5: the wait before resend `resends` doubles from `initial`, up to
+/// the RFC 6298 §2.5 maximum (an `initial` above that maximum is kept as is).
+pub(crate) fn backoff_interval(initial: Duration, resends: u32) -> Duration {
+    let doubled = initial.saturating_mul(1 << resends.min(MAX_DOUBLINGS));
+    doubled.min(BACKOFF_CAP.max(initial))
+}
+
+pub(crate) fn resend_due(initial: Duration, resends: u32, waited: Duration) -> bool {
+    waited >= backoff_interval(initial, resends)
+}
 
 pub(crate) fn wake_after(remaining: Duration, cx: &mut Context<'_>) {
     let mut deadline = proxima_core::time::sleep(remaining);
@@ -96,8 +111,17 @@ impl DialGuard {
         Ok(outbound)
     }
 
-    pub(crate) fn next_syn(&mut self, interval: Duration) -> SynStep<'_> {
+    pub(crate) fn syn_interval(&self, initial: Duration) -> Duration {
+        backoff_interval(initial, u32::from(self.syn_resends))
+    }
+
+    pub(crate) fn next_syn(&mut self, initial: Duration) -> SynStep<'_> {
         let waited = self.syn_sent.map_or(Duration::ZERO, |sent| time::now().saturating_duration_since(sent));
+        self.next_syn_after(initial, waited)
+    }
+
+    fn next_syn_after(&mut self, initial: Duration, waited: Duration) -> SynStep<'_> {
+        let interval = self.syn_interval(initial);
         if waited < interval {
             return SynStep::Wait(interval - waited);
         }
@@ -356,6 +380,85 @@ mod tests {
         }
 
         assert!(matches!(guard.next_syn(Duration::ZERO), SynStep::Exhausted));
+        assert_eq!(guard.syn_transmissions(), MaxRetransmit::ABANDON_THRESHOLD + 1);
+    }
+
+    const INITIAL: Duration = Duration::from_millis(10);
+
+    fn started_guard(stack: &mut TcpStack) -> DialGuard {
+        let lease = Arc::new(DialLease::new());
+        let mut guard = lease.claim();
+        guard.start(stack, PEER).expect("start dial");
+        guard
+    }
+
+
+    #[test]
+    fn the_wait_before_each_resend_doubles_from_the_initial_interval() {
+        let intervals: Vec<Duration> = (0..5).map(|resends| backoff_interval(INITIAL, resends)).collect();
+
+        let expected: Vec<Duration> = [10, 20, 40, 80, 160].into_iter().map(Duration::from_millis).collect();
+        assert_eq!(intervals, expected);
+    }
+
+    #[test]
+    fn the_backoff_is_capped_at_the_rfc_6298_maximum() {
+        let capped = Duration::from_micros(RtoEstimator::RTO_MAX.as_micros());
+
+        assert_eq!(backoff_interval(Duration::from_secs(20), 1), Duration::from_secs(40));
+        assert_eq!(backoff_interval(Duration::from_secs(20), 2), capped);
+        assert_eq!(backoff_interval(Duration::from_secs(20), 30), capped);
+        assert_eq!(backoff_interval(INITIAL, u32::MAX), capped);
+    }
+
+    #[test]
+    fn an_initial_interval_above_the_cap_is_never_shortened() {
+        assert_eq!(backoff_interval(Duration::from_secs(3600), 5), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn a_resend_is_due_exactly_when_the_backed_off_interval_has_elapsed() {
+        assert!(!resend_due(Duration::from_secs(10), 1, Duration::from_secs(15)));
+        assert!(resend_due(Duration::from_secs(10), 1, Duration::from_secs(20)));
+        assert!(resend_due(Duration::from_secs(10), 0, Duration::from_secs(15)));
+    }
+
+    #[test]
+    fn a_zero_initial_interval_stays_zero_however_many_resends() {
+        assert_eq!(backoff_interval(Duration::ZERO, 200), Duration::ZERO);
+    }
+
+    #[test]
+    fn the_kth_syn_resend_is_withheld_until_initial_times_two_to_the_k_has_elapsed() {
+        let mut stack = TcpStack::new(OUR_IP, 1234, 100);
+        let mut guard = started_guard(&mut stack);
+
+        for resend in 0..MaxRetransmit::ABANDON_THRESHOLD {
+            let interval = backoff_interval(INITIAL, u32::from(resend));
+            let SynStep::Wait(remaining) = guard.next_syn_after(INITIAL, interval / 2) else {
+                panic!("half the interval has elapsed before resend {resend}, so it must wait");
+            };
+            assert_eq!(remaining, interval / 2, "resend {resend} waits out the rest of {interval:?}");
+
+            let just_short = interval - Duration::from_nanos(1);
+            assert!(matches!(guard.next_syn_after(INITIAL, just_short), SynStep::Wait(_)), "resend {resend} is not due a nanosecond early");
+            assert!(matches!(guard.next_syn_after(INITIAL, interval), SynStep::Send(_)), "resend {resend} fires once {interval:?} has elapsed");
+            assert_eq!(guard.syn_interval(INITIAL), (interval * 2).min(BACKOFF_CAP), "the wait after resend {resend} doubles up to the cap");
+        }
+    }
+
+    #[test]
+    fn abandoning_after_the_threshold_still_reports_every_transmission() {
+        let mut stack = TcpStack::new(OUR_IP, 1234, 100);
+        let mut guard = started_guard(&mut stack);
+
+        for _ in 0..MaxRetransmit::ABANDON_THRESHOLD {
+            let due = guard.syn_interval(INITIAL);
+            assert!(matches!(guard.next_syn_after(INITIAL, due), SynStep::Send(_)));
+        }
+        let due = guard.syn_interval(INITIAL);
+
+        assert!(matches!(guard.next_syn_after(INITIAL, due), SynStep::Exhausted));
         assert_eq!(guard.syn_transmissions(), MaxRetransmit::ABANDON_THRESHOLD + 1);
     }
 }
