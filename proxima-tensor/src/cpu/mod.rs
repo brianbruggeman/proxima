@@ -245,6 +245,11 @@ pub use run_reduce_scan::*;
 pub use typed_eval::*;
 use width_kernels::*;
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+pub mod probes;
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests;

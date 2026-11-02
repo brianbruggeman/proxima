@@ -401,3 +401,7 @@ windows-sys = { version = "0.61", default-features = false, features = ["Win32_F
 
 [build-dependencies]
 proxima-build.workspace = true
+
+[[example]]
+name = "cpu_probes"
+required-features = ["test-support"]
