@@ -14,6 +14,12 @@ use crate::cuda_cached_attention_tiled::{
 };
 use crate::error::EmitError;
 
+/// Whether the kernel reads `new_key_rows`, `new_upper` and `cached_lower` from its uniforms: every
+/// multi-row form, so one kernel serves every chunk width instead of one per width.
+pub(crate) fn cached_attention_runtime_bounds(kind: &BoundOpKind) -> bool {
+    matches!(kind, BoundOpKind::CachedAttention { query_rows, .. } if *query_rows > 1)
+}
+
 pub(crate) fn cached_attention_entry_name(
     resolved: &BoundOp,
     class: CudaAttentionClass,
@@ -43,12 +49,19 @@ pub(crate) fn cached_attention_entry_name(
     let tile_token = cached_attention_tile_rows(&resolved.kind, numeric_policy)
         .map_or_else(String::new, |tile_rows| format!("_tq{tile_rows}{mma_token}"));
     let split_token = split_chunks.map_or_else(String::new, |chunks| format!("_sk{chunks}"));
+    let bounds_token = if cached_attention_runtime_bounds(&resolved.kind) {
+        String::from("_rtb")
+    } else {
+        format!(
+            "_n{new_key_rows}_l{}_u{}",
+            signed_name_part(*cached_lower_inclusive),
+            signed_name_part(*new_upper_inclusive),
+        )
+    };
     Ok(format!(
-        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_n{new_key_rows}{tile_token}{split_token}_s{:08x}_l{}_u{}",
+        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}{tile_token}{split_token}_s{:08x}{bounds_token}",
         class_tag(class),
         scale.to_bits(),
-        signed_name_part(*cached_lower_inclusive),
-        signed_name_part(*new_upper_inclusive),
     ))
 }
 
@@ -142,7 +155,27 @@ pub(crate) fn render_attention(
     let mut source = String::new();
     preamble(&mut source, "float");
     source.push_str(helpers);
-    source.push_str("struct Uniforms { long total_elements; };\n\n");
+    let runtime_bounds = cached_attention_runtime_bounds(&resolved.kind);
+    let (uniform_fields, bounds_decl) = if runtime_bounds {
+        (
+            " long new_key_rows; long new_upper; long cached_lower;",
+            String::from(
+                "const long new_key_rows = u_ptr->new_key_rows;\n\
+                 \x20   const long new_upper = u_ptr->new_upper;\n\
+                 \x20   const long cached_lower = u_ptr->cached_lower;",
+            ),
+        )
+    } else {
+        (
+            "",
+            format!(
+                "constexpr long new_key_rows = {new_key_rows}L;\n\
+                 \x20   constexpr long new_upper = {new_upper_inclusive}L;\n\
+                 \x20   constexpr long cached_lower = {cached_lower};"
+            ),
+        )
+    };
+    source.push_str(&format!("struct Uniforms {{ long total_elements;{uniform_fields} }};\n\n"));
     source.push_str(&format!(
         "extern \"C\" __global__ void {entry}(\n    {params},\n    float* __restrict__ out,\n    const Uniforms* __restrict__ u_ptr{extra_param}) {{\n"
     ));
@@ -153,9 +186,7 @@ pub(crate) fn render_attention(
          \x20   constexpr long rotary_dim = {rotary_dim};\n\
          \x20   constexpr long pair_dim = rotary_dim / 2;\n\
          \x20   constexpr long pass_dim = head_dim - rotary_dim;\n\
-         \x20   constexpr long new_key_rows = {new_key_rows}L;\n\
-         \x20   constexpr long new_upper = {new_upper_inclusive}L;\n\
-         \x20   constexpr long cached_lower = {cached_lower};\n\
+         \x20   {bounds_decl}\n\
          \x20   constexpr float scale = {scale};\n\
          \x20   {cached_rows_decl}\n\
          \x20   {pass_planes}",

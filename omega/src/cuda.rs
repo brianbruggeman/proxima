@@ -65,7 +65,9 @@ use proxima_tensor::{
     NumericRewrite, ReduceInit, ScalarOp, StepArg, admit,
 };
 
-use crate::cuda_cached_attention::{cached_attention_entry_name, render_cached_attention_cuda};
+use crate::cuda_cached_attention::{
+    cached_attention_entry_name, cached_attention_runtime_bounds, render_cached_attention_cuda,
+};
 use crate::cuda_cached_attention_tiled::cached_attention_tile_rows;
 use crate::epilogue::{
     broadcast_reduce_takes_block, epilogue_operand_is_loop_invariant, index32_reach_fits,
@@ -584,11 +586,19 @@ fn project_text_kind(kind: &BoundOpKind) -> BoundOpKind {
         BoundOpKind::CachedAttention {
             operands,
             cached_key_rows,
+            new_key_rows,
+            new_upper_inclusive,
+            cached_lower_inclusive,
             ..
         } => {
             project_operands(operands);
             if cuda_cached_attention_class(kind) == Some(CudaAttentionClass::CachedBound) {
                 *cached_key_rows = 1;
+            }
+            if cached_attention_runtime_bounds(kind) {
+                *new_key_rows = 0;
+                *new_upper_inclusive = 0;
+                *cached_lower_inclusive = 0;
             }
         }
         BoundOpKind::GatedDeltaNet { operands, .. }
@@ -884,8 +894,18 @@ pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitErro
             query_rows,
             kv_heads,
             query_groups,
+            new_key_rows,
+            new_upper_inclusive,
+            cached_lower_inclusive,
             ..
-        } => push_cuda_i64(&mut bytes, (query_rows * kv_heads * query_groups) as i64),
+        } => {
+            push_cuda_i64(&mut bytes, (query_rows * kv_heads * query_groups) as i64);
+            if cached_attention_runtime_bounds(&resolved.kind) {
+                push_cuda_i64(&mut bytes, *new_key_rows as i64);
+                push_cuda_i64(&mut bytes, *new_upper_inclusive);
+                push_cuda_i64(&mut bytes, *cached_lower_inclusive);
+            }
+        }
         BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
@@ -4203,10 +4223,52 @@ mod tests {
         let op = attention_op_with(kind);
 
         let bytes = pack_cuda_uniforms(&op).expect("uniforms pack");
-        let total = i64::from_le_bytes(bytes.as_slice().try_into().expect("8 bytes"));
+        let total = i64::from_le_bytes(bytes[..8].try_into().expect("8 bytes"));
 
-        assert_eq!(bytes.len(), 8);
         assert_eq!(total, 3 * 8);
+        assert_eq!(bytes.len(), 32, "a multi-row form also carries its row bounds");
+    }
+
+    fn multi_row_attention_op(rows: u64) -> BoundOp {
+        let mut kind = attention_kind(9, 5, 256, 256);
+        let BoundOpKind::CachedAttention {
+            query_rows,
+            new_key_rows,
+            new_upper_inclusive,
+            ..
+        } = &mut kind
+        else {
+            unreachable!("attention_kind always builds a CachedAttention kind");
+        };
+        *query_rows = rows;
+        *new_key_rows = rows;
+        *new_upper_inclusive = 0;
+        attention_op_with(kind)
+    }
+
+    #[test]
+    fn multi_row_kernel_text_is_independent_of_the_chunk_width() {
+        let wide = multi_row_attention_op(512);
+        let tail = multi_row_attention_op(277);
+
+        let wide_kernel = emit_cuda(&wide, &no_packed()).expect("512 rows emit");
+        let tail_kernel = emit_cuda(&tail, &no_packed()).expect("277 rows emit");
+
+        assert_eq!(wide_kernel.entry, tail_kernel.entry);
+        assert_eq!(wide_kernel.source, tail_kernel.source);
+        assert_ne!(
+            pack_cuda_uniforms(&wide).expect("wide packs"),
+            pack_cuda_uniforms(&tail).expect("tail packs"),
+            "the width reaches the kernel through its uniforms"
+        );
+    }
+
+    #[test]
+    fn single_row_kernel_keeps_its_bounds_as_constants() {
+        let kernel = emit_cuda(&attention_op_with(attention_kind(9, 5, 256, 256)), &no_packed())
+            .expect("decode form emits");
+
+        assert!(kernel.source.contains("constexpr long new_key_rows = 1L;"));
     }
 
     #[test]
