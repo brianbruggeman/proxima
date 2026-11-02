@@ -356,3 +356,119 @@ fn recurrent_mainline_production_decode_literal() {
         "the prompt token and the first generated token"
     );
 }
+
+#[cfg(feature = "proxima-storage")]
+mod served_weights {
+    use core::ops::ControlFlow;
+    use core::time::Duration;
+
+    use super::{LoadedModel, ServingConfig, tiny_ouro_gguf};
+    use crate::mapped_residency::WEIGHTS_REGION;
+    use crate::memory_reclaim::{ReclaimSettings, monotonic_now};
+    use crate::serving_settings::ServingSettings;
+    use crate::source::CheckpointMapping;
+
+    fn generate_ids(model: &LoadedModel<'_>) -> Vec<u32> {
+        model
+            .generate_from_ids(&[0], 3, &ServingConfig::default(), &mut |_| {
+                ControlFlow::Continue(())
+            })
+            .expect("generate from the tiny recurrent checkpoint")
+            .0
+    }
+
+    #[test]
+    fn served_weights_unpin_release_after_idle_and_refault_identical_ids() {
+        let directory = tempfile::tempdir().expect("checkpoint directory");
+        let path = directory.path().join("tiny-ouro.gguf");
+        std::fs::write(&path, tiny_ouro_gguf(2, false)).expect("write the tiny checkpoint");
+        let cold = directory.path().join("cold");
+        let reclaim = ReclaimSettings::builder()
+            .cold_dir(cold.to_string_lossy().into_owned())
+            .build();
+        let settings = ServingSettings::builder().reclaim(reclaim).build();
+        let source = CheckpointMapping::open_file(&path).expect("map the tiny checkpoint");
+        let model = source
+            .load_serving(&settings)
+            .expect("load through serving settings");
+        let residency = model
+            .residency
+            .as_ref()
+            .expect("load_serving tracks the weights");
+
+        let first = generate_ids(&model);
+
+        assert_eq!(
+            residency.pins(WEIGHTS_REGION),
+            0,
+            "an evaluation leaves nothing pinned"
+        );
+        assert!(residency.resident_bytes() > 0);
+        let idle = monotonic_now() + Duration::from_secs(301);
+        let released = residency
+            .reclaim(idle, || 0.1)
+            .expect("reclaim past the idle limit");
+        assert_eq!(
+            released
+                .iter()
+                .map(|entry| entry.region)
+                .collect::<Vec<_>>(),
+            [WEIGHTS_REGION]
+        );
+        assert_eq!(residency.resident_bytes(), 0);
+        assert_eq!(
+            generate_ids(&model),
+            first,
+            "released pages refault to the same ids"
+        );
+        assert!(residency.resident_bytes() > 0);
+        assert!(
+            cold.is_dir(),
+            "the cold tier directory was installed from the settings"
+        );
+    }
+
+    fn tracked_model(directory: &std::path::Path) -> CheckpointMapping {
+        let path = directory.join("tiny-ouro.gguf");
+        std::fs::write(&path, tiny_ouro_gguf(2, false)).expect("write the tiny checkpoint");
+        CheckpointMapping::open_file(&path).expect("map the tiny checkpoint")
+    }
+
+    #[test]
+    fn forward_entry_points_hold_the_pin_for_their_whole_call() {
+        let directory = tempfile::tempdir().expect("checkpoint directory");
+        let source = tracked_model(directory.path());
+        let model = source
+            .load_serving(&ServingSettings::builder().build())
+            .expect("load through serving settings");
+        let residency = model.residency.as_ref().expect("weights are tracked");
+
+        let (_runtime, pinned) = model.pinned_runtime(&ServingConfig::default());
+
+        assert!(pinned.is_some());
+        assert_eq!(residency.pins(WEIGHTS_REGION), 1);
+        drop(pinned);
+        assert_eq!(residency.pins(WEIGHTS_REGION), 0);
+    }
+
+    #[test]
+    fn decode_holds_the_pin_while_tokens_are_produced() {
+        let directory = tempfile::tempdir().expect("checkpoint directory");
+        let source = tracked_model(directory.path());
+        let model = source
+            .load_serving(&ServingSettings::builder().build())
+            .expect("load through serving settings");
+        let residency = model.residency.as_ref().expect("weights are tracked");
+        let mut pins_seen = Vec::new();
+
+        model
+            .generate_from_ids(&[0], 3, &ServingConfig::default(), &mut |_| {
+                pins_seen.push(residency.pins(WEIGHTS_REGION));
+                ControlFlow::Continue(())
+            })
+            .expect("generate from the tiny recurrent checkpoint");
+
+        assert!(!pins_seen.is_empty() && pins_seen.iter().all(|pins| *pins > 0));
+        assert_eq!(residency.pins(WEIGHTS_REGION), 0);
+    }
+}
