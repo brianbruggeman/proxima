@@ -97,7 +97,7 @@ impl<Item> Arena<Item> {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) const fn len(&self) -> usize {
         self.live
     }
@@ -112,7 +112,7 @@ impl<Item> Arena<Item> {
     }
 
     /// Bytes the slot storage holds, live or vacant.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn byte_len(&self) -> usize {
         self.slots.capacity() * size_of::<Slot<Item>>()
     }

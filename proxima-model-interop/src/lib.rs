@@ -165,6 +165,9 @@ pub use hf_config::{
 };
 #[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
+#[cfg(all(feature = "std", feature = "test-support"))]
+#[doc(hidden)]
+pub mod probes;
 #[cfg(feature = "std")]
 pub use lowering::{
     BoundProgram, FfnRouting, KvCacheShape, KvLayout, StepInput, StepState, bind_checkpoint,

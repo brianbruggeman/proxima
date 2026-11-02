@@ -10,7 +10,7 @@
 //! - on every long-context record the first divergence from the oracle is no
 //!   earlier than the feature-off build's, read from
 //!   `tests/fixtures/gemma4_e2b_feature_off_first_divergence.json`, which the
-//!   feature-off recorder below writes from the same oracle records;
+//!   `record_gemma4_feature_off_baseline` example writes from the same oracle records;
 //! - the answer substring holds for every record that names one.
 //!
 //! Every absent fixture fails loudly, naming the recipe: an `#[ignore]`d gate
@@ -249,7 +249,7 @@ async fn the_split_decode_form_matches_the_llama_cpp_greedy_ids() {
     let records = load_oracle_records();
     let baseline = read_fixture(
         &baseline_path(),
-        "record it by running `record_feature_off_first_divergences` on a build without metal-attn-split-decode",
+        "record it by running the `record_gemma4_feature_off_baseline` example on a build without metal-attn-split-decode",
     );
     let mut failures = Vec::new();
     let mut decoded_tokens = 0_usize;
@@ -306,37 +306,6 @@ async fn the_split_decode_form_matches_the_llama_cpp_greedy_ids() {
     );
 }
 
-#[cfg(not(feature = "metal-attn-split-decode"))]
-#[proxima::test]
-#[ignore = "recorder: run on a build WITHOUT metal-attn-split-decode to write the feature-off baseline"]
-async fn record_feature_off_first_divergences() {
-    let records = load_oracle_records();
-    let mut baseline = serde_json::Map::new();
-    with_mapped_blob(|bytes| {
-        report_prompt_ids(bytes, &records);
-        let model = load_model(bytes);
-        for record in &records {
-            let (ids, text) = decode(&model, record);
-            let (divergence, oracle_cut_len) = report_decode(record, &ids, &text);
-            if record.name.starts_with("long_") {
-                baseline.insert(
-                    record.name.clone(),
-                    Value::from(divergence.unwrap_or(oracle_cut_len) as u64),
-                );
-            }
-        }
-    });
-    assert!(
-        !baseline.is_empty(),
-        "the oracle fixture carries no long_ records to baseline"
-    );
-    std::fs::write(
-        baseline_path(),
-        serde_json::to_string_pretty(&Value::Object(baseline)).expect("serializes"),
-    )
-    .expect("the baseline fixture is writable");
-}
-
 #[cfg(feature = "metal-attn-split-rows")]
 fn decode_with_speculation(
     model: &LoadedModel<'_>,
@@ -382,7 +351,7 @@ async fn the_row_tiled_verify_matches_the_llama_cpp_greedy_ids_with_speculation_
     let records = load_oracle_records();
     let baseline = read_fixture(
         &baseline_path(),
-        "record it by running `record_feature_off_first_divergences` on a build without metal-attn-split-decode",
+        "record it by running the `record_gemma4_feature_off_baseline` example on a build without metal-attn-split-decode",
     );
     let mut failures = Vec::new();
     let mut decoded_tokens = 0_usize;

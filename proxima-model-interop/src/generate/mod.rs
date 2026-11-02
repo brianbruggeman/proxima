@@ -272,6 +272,8 @@ mod prewarm_queue;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prewarm_real_model_tests;
 mod prompt_cache;
+#[cfg(feature = "test-support")]
+pub(crate) use prompt_cache::probes as prompt_cache_probes;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prompt_cache_chunk_shift_real_model_tests;
 mod prompt_cache_key;

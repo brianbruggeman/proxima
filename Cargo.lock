@@ -4620,6 +4620,7 @@ dependencies = [
  "proxima-core",
  "proxima-gguf",
  "proxima-lib",
+ "proxima-model-interop",
  "proxima-omega",
  "proxima-prime",
  "proxima-primitives",
