@@ -22,7 +22,7 @@ use super::doorbell::Doorbell;
 use super::linux_lane::{LinuxOutcome, NetWiring};
 use super::trap::{End, Reply, RunError, Trap, VcpuExit};
 use crate::frame_pipe::{FrameSink, FrameSource, frame_channel, frame_channel_waking};
-use crate::linux::{LinuxBootInputs, boot_resident};
+use crate::linux::{LinuxBootInputs, boot_resident, console_tail};
 use crate::virtio_net::NetTransport;
 
 pub const NET_WINDOW_BASE: u64 = 0xd000_0000;
@@ -125,6 +125,8 @@ fn run_on_vcpu_thread(
             failure = ?outcome.failure,
             end = ?outcome.report.end,
             exits = outcome.report.exit_count,
+            console_dropped = outcome.report.console_dropped,
+            console_tail = ?console_tail(&outcome.report.console),
             "resident guest ended on its own; its link is closed for good"
         );
     }

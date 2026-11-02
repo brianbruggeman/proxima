@@ -204,7 +204,7 @@ pub fn unframe(transmitted: &[u8]) -> Result<&[u8], ProximaError> {
     }
 }
 
-fn console_tail(console: &[u8]) -> String {
+pub(crate) fn console_tail(console: &[u8]) -> String {
     let start = console.len().saturating_sub(CONSOLE_TAIL);
     String::from_utf8_lossy(&console[start..]).into_owned()
 }
