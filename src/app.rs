@@ -1224,7 +1224,7 @@ impl App {
         Ok(handles)
     }
 
-    fn bind_listener(&self, listen: &Value) -> Result<ListenerHandle, ProximaError> {
+    pub fn bind_listener(&self, listen: &Value) -> Result<ListenerHandle, ProximaError> {
         let protocol_name = listen
             .get("type")
             .and_then(Value::as_str)

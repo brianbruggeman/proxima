@@ -153,6 +153,32 @@ pub trait ControlPlane: Send + Sync + 'static {
         })
     }
 
+    /// Bind (or rebind) a named listener from a `[[listen]]`-shaped spec. The
+    /// returned status carries the bound address in `last_message`.
+    fn apply_listener<'lifetime>(
+        &'lifetime self,
+        name: &'lifetime str,
+        _spec: serde_json::Value,
+    ) -> Pin<Box<dyn Future<Output = Result<PipeStatus, ProximaError>> + Send + 'lifetime>> {
+        Box::pin(async move {
+            Err(ProximaError::NotFound(format!(
+                "control plane does not support `apply_listener`; received `{name}`"
+            )))
+        })
+    }
+
+    /// Stop and forget a named listener.
+    fn remove_listener<'lifetime>(
+        &'lifetime self,
+        name: &'lifetime str,
+    ) -> Pin<Box<dyn Future<Output = Result<PipeStatus, ProximaError>> + Send + 'lifetime>> {
+        Box::pin(async move {
+            Err(ProximaError::NotFound(format!(
+                "control plane does not support `remove_listener`; received `{name}`"
+            )))
+        })
+    }
+
     /// Oldest-first log snapshot; `max_lines` keeps the most-recent N,
     /// `None` returns all retained.
     fn logs<'lifetime>(
@@ -328,6 +354,42 @@ impl SendPipe for ControlPlanePipe {
                         Err(error) => Err(error),
                     }
                 }
+                ("POST", path) if let Some(name) = strip_listener_name(path, "/apply") => {
+                    let (_meta, body_bytes) = request.body_bytes().await?;
+                    if body_bytes.is_empty() {
+                        return Ok(Response::new(400)
+                            .with_body("apply requires a JSON body with the listener spec"));
+                    }
+                    let spec: serde_json::Value =
+                        serde_json::from_slice(&body_bytes).map_err(|err| {
+                            ProximaError::Config(format!("apply body must be JSON: {err}"))
+                        })?;
+                    match plane.apply_listener(name, spec).await {
+                        Ok(status) => json_response(200, &status),
+                        Err(ProximaError::NotFound(message)) => {
+                            Ok(Response::not_found().with_body(message))
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                ("POST", path) if let Some(name) = strip_listener_name(path, "/remove") => {
+                    match plane.remove_listener(name).await {
+                        Ok(status) => json_response(200, &status),
+                        Err(ProximaError::NotFound(message)) => {
+                            Ok(Response::not_found().with_body(message))
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
+                ("DELETE", path) if let Some(name) = strip_listener_name(path, "") => {
+                    match plane.remove_listener(name).await {
+                        Ok(status) => json_response(200, &status),
+                        Err(ProximaError::NotFound(message)) => {
+                            Ok(Response::not_found().with_body(message))
+                        }
+                        Err(error) => Err(error),
+                    }
+                }
                 ("POST", path) if let Some((name, action)) = strip_action_suffix(path) => {
                     let outcome = match action {
                         "start" => plane.start(name).await,
@@ -406,6 +468,16 @@ fn strip_action_suffix(path: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((name, action))
+}
+
+#[cfg(feature = "alloc")]
+fn strip_listener_name<'path>(path: &'path str, suffix: &str) -> Option<&'path str> {
+    let remainder = path.strip_prefix("/listeners/")?;
+    let name = remainder.strip_suffix(suffix)?;
+    if name.is_empty() || name.contains('/') {
+        return None;
+    }
+    Some(name)
 }
 
 #[cfg(feature = "alloc")]
