@@ -257,11 +257,11 @@ struct ReleasePlan {
 }
 
 impl ReleasePlan {
-    fn build(
-        resolved: &[BoundOp],
-        kernels: &[CudaKernel],
-        pinned: &BTreeSet<NodeId>,
-    ) -> Self {
+    fn build(resolved: &[BoundOp], kernels: &[CudaKernel], outputs: &[NodeId]) -> Self {
+        let extra = kernels
+            .iter()
+            .flat_map(|kernel| kernel.extra_outputs.iter().map(|(node, _)| *node));
+        let pinned: BTreeSet<NodeId> = outputs.iter().copied().chain(extra).collect();
         let mut produced: BTreeMap<NodeId, usize> = BTreeMap::new();
         let mut last_read: BTreeMap<NodeId, usize> = BTreeMap::new();
         for (position, (bound, kernel)) in resolved.iter().zip(kernels).enumerate() {
@@ -302,10 +302,46 @@ impl ReleasePlan {
                 }
             }
             for released in &self.release[position] {
-                *free.entry(lengths[released]).or_default() += 1;
+                let length = lengths.get(released).copied().unwrap_or_default();
+                *free.entry(length).or_default() += 1;
             }
         }
         created
+    }
+}
+
+/// The release schedule and pool size classes of one plan, built once and
+/// rebuilt only when a refit changes a kernel's output length.
+#[derive(Debug, Default)]
+struct PoolSchedule {
+    plan: ReleasePlan,
+    peak: BTreeMap<usize, usize>,
+}
+
+impl PoolSchedule {
+    fn build(resolved: &[BoundOp], kernels: &[CudaKernel], outputs: &[NodeId]) -> Self {
+        let plan = ReleasePlan::build(resolved, kernels, outputs);
+        let produced: Vec<(NodeId, usize)> = resolved
+            .iter()
+            .map(|bound| (bound.node, bound_output_len(bound)))
+            .collect();
+        let peak = plan.pool_shape(&produced);
+        Self { plan, peak }
+    }
+}
+
+fn bound_output_len(bound: &BoundOp) -> usize {
+    match &bound.kind {
+        BoundOpKind::Reduce {
+            keep: Keep::Reduce,
+            output_axes,
+            epilogue_broadcast_axes,
+            ..
+        } if epilogue_broadcast_axes.is_empty() => output_axes
+            .iter()
+            .map(|axis| bound.extents[*axis as usize] as usize)
+            .product(),
+        _ => bound.extents.iter().map(|extent| *extent as usize).product(),
     }
 }
 
@@ -439,6 +475,7 @@ pub struct CudaPlan {
     emit_reused: u64,
     pack_calls: u64,
     carry: Box<StateCarry>,
+    pool: Box<PoolSchedule>,
 }
 
 /// Recurrent state that stays on the device between calls: `pairs` maps a state input node to the
@@ -964,7 +1001,9 @@ impl CudaDriver {
             unfused,
             None,
         )?;
+        let pool = Box::new(PoolSchedule::build(&resolved, &kernels, outputs));
         let plan = CudaPlan {
+            pool,
             constraints: config.map(|value| value.constraints.clone()),
             block_contract: blocks
                 .iter()
@@ -2096,6 +2135,7 @@ impl CudaPlan {
         self.pack_calls += uniforms.len() as u64;
         self.numeric_policy = numeric_policy;
         self.shapes = shapes;
+        self.pool = Box::new(PoolSchedule::build(&resolved, &kernels, &self.outputs));
         self.resolved = resolved;
         self.functions = vec![None; kernels.len()];
         self.kernels = kernels;
@@ -2139,8 +2179,10 @@ impl CudaPlan {
             return Ok(None);
         };
         let touched = patches.len();
+        let mut lengths_moved = false;
         for (position, bound) in patches {
             let previous = std::mem::replace(&mut self.resolved[position], bound);
+            lengths_moved |= bound_output_len(&previous) != bound_output_len(&self.resolved[position]);
             let text_kept = crate::cuda::refit_kernel(
                 &previous,
                 &self.resolved[position],
@@ -2162,6 +2204,9 @@ impl CudaPlan {
                 })?;
         }
         self.patch_memo = Some((changed, positions));
+        if lengths_moved {
+            self.pool = Box::new(PoolSchedule::build(&self.resolved, &self.kernels, &self.outputs));
+        }
         Ok(Some(touched))
     }
 
@@ -2205,10 +2250,10 @@ impl CudaPlan {
             }
         }
         let mut host_workspace = 0_u64;
-        let release_plan = self.release_plan();
-        for (length, count) in self.pooled_peak(&release_plan)? {
-            for _ in 0..count {
-                add(length as u64 * 4)?;
+        let release_plan = &self.pool.plan;
+        for (length, count) in &self.pool.peak {
+            for _ in 0..*count {
+                add(*length as u64 * 4)?;
             }
         }
         for (bound, uniform) in self.resolved.iter().zip(&self.uniforms) {
@@ -2885,7 +2930,7 @@ impl CudaPlan {
         let dispatch_started = host_timing.then(std::time::Instant::now);
         let mut function_lookups = 0u64;
         let mut function_lookup_us = 0u64;
-        let release_plan = self.release_plan();
+        let release_plan = &self.pool.plan;
         for (position, (bound, (kernel, uniforms))) in self
             .resolved
             .iter()
@@ -2910,22 +2955,7 @@ impl CudaPlan {
                     kernel.bindings
                 );
             }
-            let output_len = match &bound.kind {
-                BoundOpKind::Reduce {
-                    keep: Keep::Reduce,
-                    output_axes,
-                    epilogue_broadcast_axes,
-                    ..
-                } if epilogue_broadcast_axes.is_empty() => output_axes
-                    .iter()
-                    .map(|axis| bound.extents[*axis as usize] as usize)
-                    .product(),
-                _ => bound
-                    .extents
-                    .iter()
-                    .map(|extent| *extent as usize)
-                    .product(),
-            };
+            let output_len = bound_output_len(bound);
             if trace {
                 eprintln!(
                     "cuda_trace: node={:?} kind={} extents={:?} bindings={:?} grid={} output_len={} uniforms={} detail={}",
@@ -3173,36 +3203,6 @@ impl CudaPlan {
             results,
             None,
         ))
-    }
-
-    fn release_plan(&self) -> ReleasePlan {
-        let carried = self
-            .carry
-            .pairs
-            .iter()
-            .chain(&self.carry.appends)
-            .flat_map(|(input, output)| [*input, *output]);
-        let extra = self
-            .kernels
-            .iter()
-            .flat_map(|kernel| kernel.extra_outputs.iter().map(|(node, _)| *node));
-        let pinned: BTreeSet<NodeId> = self
-            .outputs
-            .iter()
-            .copied()
-            .chain(carried)
-            .chain(extra)
-            .collect();
-        ReleasePlan::build(&self.resolved, &self.kernels, &pinned)
-    }
-
-    fn pooled_peak(&self, plan: &ReleasePlan) -> Result<BTreeMap<usize, usize>, CudaDriverError> {
-        let produced = self
-            .resolved
-            .iter()
-            .map(|bound| Ok((bound.node, (cuda_float_bytes(self.shapes.of(bound.node))? / 4) as usize)))
-            .collect::<Result<Vec<_>, CudaDriverError>>()?;
-        Ok(plan.pool_shape(&produced))
     }
 
     fn report_arena_footprint(&self) {
