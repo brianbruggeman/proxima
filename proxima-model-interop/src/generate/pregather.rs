@@ -2883,8 +2883,6 @@ impl<'file> LoadedModel<'file> {
             plan_life: Arc::new(()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_buffer_source: None,
-            #[cfg(feature = "cuda")]
-            cuda_resident: Arc::default(),
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
             weights: Arc::new(SharedWeights::new(bound.weights, file_bytes)),
@@ -3105,8 +3103,6 @@ impl<'file> LoadedModel<'file> {
             plan_life: Arc::new(()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_buffer_source: None,
-            #[cfg(feature = "cuda")]
-            cuda_resident: Arc::default(),
             prewarm_gate: PrewarmGate::new(),
             prewarm_queue: PrewarmQueue::new(),
             weights,

@@ -1532,7 +1532,7 @@ impl<'file> LoadedModel<'file> {
 
     /// The only way an entry point obtains a runtime: the pin is returned with it, so evaluation cannot run on released weights.
     pub(super) fn pinned_runtime(&self, serving_config: &ServingConfig) -> (BackendRuntime, Option<Pinned<'_, 'file>>) {
-        (self.backend_runtime(serving_config), self.pin_evaluation())
+        (BackendRuntime::new(serving_config), self.pin_evaluation())
     }
 
     pub(super) fn touch_region(&self, region: u64) {

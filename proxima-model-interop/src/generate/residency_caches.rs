@@ -6,8 +6,6 @@ use core::ops::ControlFlow;
 use omega::config::{RuntimeConfig, SelectionMode};
 
 use super::*;
-#[cfg(feature = "cuda")]
-use super::cuda_resident_plans::{CudaPlanIdentity, CudaPlanKey, CudaResidentPlans, same_width_class};
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use crate::cuda_async::{
     CudaGpuService, CudaPlanLease, CudaPlanOptions, OwnedBlock, OwnedGpuInputs,
@@ -2662,10 +2660,6 @@ pub struct BackendRuntime {
     resident_payload_comparison_passes: usize,
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
     cuda_resident_inputs: Option<OwnedGpuInputs>,
-    #[cfg(feature = "cuda")]
-    cuda_home: Option<(Arc<CudaResidentPlans>, CudaPlanIdentity)>,
-    #[cfg(feature = "cuda")]
-    active_cuda_shape: Option<CudaPlanKey>,
     pub(super) engine: Engine,
     /// Warmup deliberately retains the monolithic all-low source snapshot so
     /// the timed prefill can reuse its plans and Metal bindings. The real
@@ -2885,10 +2879,6 @@ impl BackendRuntime {
             resident_payload_comparison_passes: 0,
             #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
             cuda_resident_inputs: None,
-            #[cfg(feature = "cuda")]
-            cuda_home: None,
-            #[cfg(feature = "cuda")]
-            active_cuda_shape: None,
             engine: select_backend(config),
             retain_monolithic_prefill_sources: false,
             plans: alloc::collections::BTreeMap::new(),
@@ -3145,16 +3135,14 @@ impl BackendRuntime {
         #[cfg(feature = "cuda")]
         Self::refit_near_cuda_plan(&mut self.plans, &shape, symbols, self.numeric_policy)?;
         #[cfg(feature = "cuda")]
-        self.settle_cuda_plans(&shape);
-        #[cfg(not(feature = "cuda"))]
         if !self.plans.contains_key(&shape) {
-            self.plans.clear();
+            self.plans.values_mut().for_each(omega::backend::park_cuda_carried);
         }
         #[cfg(feature = "cuda")]
         let misses_before = self.plan_misses;
         #[cfg(feature = "cuda")]
         let resolve_started = std::time::Instant::now();
-        let plan = Self::resolve_kept_plan(
+        let plan = Self::resolve_cached_plan(
             &mut self.plans,
             &mut self.plan_hits,
             &mut self.plan_misses,
@@ -4522,7 +4510,6 @@ impl BackendRuntime {
         Ok(())
     }
 
-    #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
     #[cfg_attr(feature = "instrument", proxima_telemetry::instrument(level = "debug"))]
     pub(super) fn resolve_cached_plan<'cache, PlanKey, PlanType>(
         cache: &'cache mut alloc::collections::BTreeMap<PlanKey, PlanType>,
@@ -4564,57 +4551,6 @@ impl BackendRuntime {
         }
 
         result
-    }
-
-    pub(super) fn resolve_kept_plan<'cache, PlanType>(
-        cache: &'cache mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), PlanType>,
-        plan_hits: &mut usize,
-        plan_misses: &mut usize,
-        shape: (usize, usize, Vec<NodeId>, bool),
-        build: impl FnOnce() -> Result<PlanType, InteropError>,
-    ) -> Result<&'cache mut PlanType, InteropError> {
-        use alloc::collections::btree_map::Entry;
-
-        match cache.entry(shape) {
-            Entry::Occupied(entry) => {
-                *plan_hits += 1;
-                Ok(entry.into_mut())
-            }
-            Entry::Vacant(entry) => {
-                *plan_misses += 1;
-                Ok(entry.insert(build()?))
-            }
-        }
-    }
-
-    /// Parks the carried device state of every plan but the one about to run
-    /// when the running plan changes, then makes room for a miss by dropping
-    /// only the plans of the same width class: the decode plan and the wide
-    /// plan stay resident side by side.
-    #[cfg(feature = "cuda")]
-    fn settle_cuda_plans(&mut self, shape: &CudaPlanKey) {
-        if self.active_cuda_shape.as_ref() != Some(shape) {
-            self.plans
-                .iter_mut()
-                .filter(|(key, _)| *key != shape)
-                .for_each(|(_, plan)| omega::backend::park_cuda_carried(plan));
-            self.active_cuda_shape = Some(shape.clone());
-        }
-        if !self.plans.contains_key(shape) {
-            self.plans.retain(|key, _| !same_width_class(key, shape));
-        }
-    }
-
-    /// A runtime that resumes `home`'s resident plans when they were built
-    /// under the same [`CudaPlanIdentity`] as `config`, and returns them on drop.
-    #[cfg(feature = "cuda")]
-    pub(super) fn resuming_cuda(home: &Arc<CudaResidentPlans>, config: &ServingConfig) -> Self {
-        let mut runtime = Self::new(config);
-        if let Some(identity) = CudaPlanIdentity::of(config).filter(|_| runtime.uses_gpu()) {
-            runtime.plans = home.take(&identity);
-            runtime.cuda_home = Some((Arc::clone(home), identity));
-        }
-        runtime
     }
 
     pub(super) fn resolve_segment_plan<'cache, PlanType>(
@@ -6627,13 +6563,4 @@ where
             boundary_result
         },
     )
-}
-
-#[cfg(all(feature = "cuda", not(all(feature = "metal-output-placement", target_os = "macos"))))]
-impl Drop for BackendRuntime {
-    fn drop(&mut self) {
-        if let Some((home, identity)) = self.cuda_home.take() {
-            home.put(identity, core::mem::take(&mut self.plans));
-        }
-    }
 }
