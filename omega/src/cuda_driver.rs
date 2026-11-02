@@ -151,6 +151,8 @@ struct CompileCounters {
     disk_read_micros: AtomicU64,
     module_load_micros: AtomicU64,
     function_load_micros: AtomicU64,
+    build_micros: AtomicU64,
+    key_micros: AtomicU64,
     cubin_arch: OnceLock<&'static str>,
     header_digests: Mutex<BTreeMap<PathBuf, [u8; 32]>>,
     disk_store: PtxStore,
@@ -166,6 +168,8 @@ impl CompileCounters {
             disk_read_micros: AtomicU64::new(0),
             module_load_micros: AtomicU64::new(0),
             function_load_micros: AtomicU64::new(0),
+            build_micros: AtomicU64::new(0),
+            key_micros: AtomicU64::new(0),
             cubin_arch: OnceLock::new(),
             header_digests: Mutex::new(BTreeMap::new()),
             disk_store,
@@ -176,8 +180,10 @@ impl CompileCounters {
         counter.fetch_add(elapsed_micros(started), Ordering::Relaxed);
     }
 
-    fn lookup_micros(&self) -> [u64; 3] {
+    fn lookup_micros(&self) -> [u64; 5] {
         [
+            self.build_micros.load(Ordering::Relaxed),
+            self.key_micros.load(Ordering::Relaxed),
             self.disk_read_micros.load(Ordering::Relaxed),
             self.module_load_micros.load(Ordering::Relaxed),
             self.function_load_micros.load(Ordering::Relaxed),
@@ -490,6 +496,13 @@ impl CudaDriver {
 
     // nvrtc has the same panic-on-missing-library loader contract; a disk hit skips nvrtc and counts no compilation.
     fn build_kernel_module(&self, kernel: &CudaKernel) -> Result<Arc<CudaModule>, CudaDriverError> {
+        let started = Instant::now();
+        let module = self.build_kernel_module_untimed(kernel);
+        CompileCounters::add(&self.compile_counters.build_micros, started);
+        module
+    }
+
+    fn build_kernel_module_untimed(&self, kernel: &CudaKernel) -> Result<Arc<CudaModule>, CudaDriverError> {
         if !unsafe { nvrtc_sys::is_culib_present() } {
             return Err(CudaDriverError::Nvrtc("nvrtc library unavailable".into()));
         }
@@ -621,9 +634,12 @@ impl CudaDriver {
         header: Option<&[u8]>,
         options: &CompileOptions,
     ) -> Result<CacheKey, CudaDriverError> {
+        let started = Instant::now();
         let nvrtc = nvrtc_version()?;
         let capability = self.context.compute_capability()?;
-        Ok(CacheKey::new(source, header, nvrtc, options, capability))
+        let key = CacheKey::new(source, header, nvrtc, options, capability);
+        CompileCounters::add(&self.compile_counters.key_micros, started);
+        Ok(key)
     }
 
     fn record_compile(&self, entry: &str, source_bytes: usize, nvrtc_us: u64, load_us: u64) {
@@ -2903,10 +2919,12 @@ impl CudaPlan {
             );
             let lookup_after = self.driver.compile_counters.lookup_micros();
             eprintln!(
-                "cuda_host_timing: phase=lookup_split disk_read_ms={:.3} module_load_ms={:.3} function_load_ms={:.3}",
+                "cuda_host_timing: phase=lookup_split build_ms={:.3} key_ms={:.3} disk_read_ms={:.3} module_load_ms={:.3} function_load_ms={:.3}",
                 (lookup_after[0] - lookup_before[0]) as f64 / 1_000.0,
                 (lookup_after[1] - lookup_before[1]) as f64 / 1_000.0,
-                (lookup_after[2] - lookup_before[2]) as f64 / 1_000.0
+                (lookup_after[2] - lookup_before[2]) as f64 / 1_000.0,
+                (lookup_after[3] - lookup_before[3]) as f64 / 1_000.0,
+                (lookup_after[4] - lookup_before[4]) as f64 / 1_000.0
             );
             report_launch_profile(&self.arena.launch_profile, &kind_rows);
         }
