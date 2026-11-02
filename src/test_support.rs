@@ -238,7 +238,7 @@ async fn replay_cassette(
         .await
         .map_err(|error| {
             ProximaError::Record(format!(
-                "load cassette {}: {error}; delete the file or run with \
+                "load cassette {}: {error}; if it is missing, record it on a host that has the dependency, or delete a corrupt one, with \
                  PROXIMA_CASSETTE=record to re-record",
                 path.display()
             ))
@@ -577,13 +577,13 @@ impl SendPipe for RecordingTee {
             let response = match SendPipe::call(&inner, request).await {
                 Ok(response) => response,
                 Err(error) => {
-                    let nothing_recorded = seen
-                        .lock()
-                        .expect("cassette seen-keys registry")
-                        .is_empty();
+                    let nothing_recorded =
+                        seen.lock().expect("cassette seen-keys registry").is_empty();
                     let cleanup = if nothing_recorded {
-                        std::fs::remove_file(&path)
-                            .map_or_else(|failure| format!("; cleanup failed: {failure}"), |()| String::new())
+                        std::fs::remove_file(&path).map_or_else(
+                            |failure| format!("; cleanup failed: {failure}"),
+                            |()| String::new(),
+                        )
                     } else {
                         String::new()
                     };
