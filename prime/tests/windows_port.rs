@@ -898,7 +898,9 @@ fn register(
 ) -> std::io::Result<prime::os::reactor::SourceKey> {
     #[cfg(unix)]
     {
-        reactor.register(socket.as_raw_fd(), interest)
+        // SAFETY: the caller's UdpSocket stays open for the whole registration and is
+        // deregistered or the reactor dropped before the test ends.
+        unsafe { reactor.register(socket.as_raw_fd(), interest) }
     }
     #[cfg(windows)]
     {

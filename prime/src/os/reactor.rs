@@ -418,7 +418,14 @@ mod kqueue {
             self.live_sources
         }
 
-        pub fn register(&mut self, fd: RawFd, interest: Interest) -> io::Result<SourceKey> {
+        /// registers `fd` for `interest` and returns its slot key.
+        ///
+        /// # Safety
+        ///
+        /// `fd` must be an open descriptor owned by the caller for the whole
+        /// registration, and must be deregistered (or the reactor dropped)
+        /// before it is closed. the reactor stores only the raw number.
+        pub unsafe fn register(&mut self, fd: RawFd, interest: Interest) -> io::Result<SourceKey> {
             let key = self.claim_slot(fd, interest, SlotKind::Descriptor);
             let udata = pack_udata(key.index, key.generation);
             if let Err(error) =
@@ -938,7 +945,14 @@ mod epoll {
             self.wakeup.inner.needs_wake.store(false, Ordering::Release);
         }
 
-        pub fn register(&mut self, fd: RawFd, interest: Interest) -> io::Result<SourceKey> {
+        /// registers `fd` for `interest` and returns its slot key.
+        ///
+        /// # Safety
+        ///
+        /// `fd` must be an open descriptor owned by the caller for the whole
+        /// registration, and must be deregistered (or the reactor dropped)
+        /// before it is closed. the reactor stores only the raw number.
+        pub unsafe fn register(&mut self, fd: RawFd, interest: Interest) -> io::Result<SourceKey> {
             let generation = self.next_generation;
             self.next_generation = super::bump_generation(self.next_generation);
             let index = match self.free_head {
@@ -1343,9 +1357,8 @@ mod tests {
             let keys: Vec<SourceKey> = pairs
                 .iter()
                 .map(|(left, _)| {
-                    reactor
-                        .register(left.as_raw_fd(), Interest::Read)
-                        .expect("register")
+                    // SAFETY: the descriptor stays open for every reactor use in this test; closing it afterwards drops it from the kernel set.
+                    unsafe { reactor.register(left.as_raw_fd(), Interest::Read) }.expect("register")
                 })
                 .collect();
             for key in keys {
@@ -1366,9 +1379,8 @@ mod tests {
         let mut reactor = Reactor::new().expect("reactor");
         let (left, mut right) = socketpair();
         set_nonblocking(&left);
-        let key = reactor
-            .register(left.as_raw_fd(), Interest::Read)
-            .expect("register");
+        // SAFETY: the descriptor stays open for every reactor use in this test; closing it afterwards drops it from the kernel set.
+        let key = unsafe { reactor.register(left.as_raw_fd(), Interest::Read) }.expect("register");
         let count = Arc::new(AtomicUsize::new(0));
         assert!(reactor.set_read_waker(key, waker_for(&count)));
         // before any data, turn(0) is non-blocking → no events.
@@ -1392,9 +1404,8 @@ mod tests {
             assert_eq!(rc, 0, "fcntl O_NONBLOCK must succeed");
         }
         let mut reactor = Reactor::new().expect("reactor");
-        let key = reactor
-            .register(fds[0], Interest::Read)
-            .expect("register read end");
+        // SAFETY: the descriptor stays open for every reactor use in this test; closing it afterwards drops it from the kernel set.
+        let key = unsafe { reactor.register(fds[0], Interest::Read) }.expect("register read end");
         let count = Arc::new(AtomicUsize::new(0));
         assert!(reactor.set_read_waker(key, waker_for(&count)));
         // SAFETY: fds[1] is the write end opened above, closed exactly once.
@@ -1432,9 +1443,8 @@ mod tests {
         let mut reactor = Reactor::new().expect("reactor");
         let (left, mut right) = socketpair();
         set_nonblocking(&left);
-        let key = reactor
-            .register(left.as_raw_fd(), Interest::Read)
-            .expect("register");
+        // SAFETY: the descriptor stays open for every reactor use in this test; closing it afterwards drops it from the kernel set.
+        let key = unsafe { reactor.register(left.as_raw_fd(), Interest::Read) }.expect("register");
         let count = Arc::new(AtomicUsize::new(0));
         reactor.set_read_waker(key, waker_for(&count));
         reactor.deregister(key).expect("deregister");
@@ -1449,9 +1459,8 @@ mod tests {
         let mut reactor = Reactor::new().expect("reactor");
         let (left, _right) = socketpair();
         set_nonblocking(&left);
-        let key = reactor
-            .register(left.as_raw_fd(), Interest::Read)
-            .expect("register");
+        // SAFETY: the descriptor stays open for every reactor use in this test; closing it afterwards drops it from the kernel set.
+        let key = unsafe { reactor.register(left.as_raw_fd(), Interest::Read) }.expect("register");
         reactor.deregister(key).expect("deregister");
         let count = Arc::new(AtomicUsize::new(0));
         // setting waker on stale key must return false, not panic.
@@ -1465,12 +1474,10 @@ mod tests {
         let (left_b, mut right_b) = socketpair();
         set_nonblocking(&left_a);
         set_nonblocking(&left_b);
-        let key_a = reactor
-            .register(left_a.as_raw_fd(), Interest::Read)
-            .unwrap();
-        let key_b = reactor
-            .register(left_b.as_raw_fd(), Interest::Read)
-            .unwrap();
+        // SAFETY: the descriptor stays open for every reactor use in this test; closing it afterwards drops it from the kernel set.
+        let key_a = unsafe { reactor.register(left_a.as_raw_fd(), Interest::Read) }.unwrap();
+        // SAFETY: the descriptor stays open for every reactor use in this test; closing it afterwards drops it from the kernel set.
+        let key_b = unsafe { reactor.register(left_b.as_raw_fd(), Interest::Read) }.unwrap();
         let count_a = Arc::new(AtomicUsize::new(0));
         let count_b = Arc::new(AtomicUsize::new(0));
         reactor.set_read_waker(key_a, waker_for(&count_a));
@@ -1493,9 +1500,8 @@ mod tests {
         let mut reactor = Reactor::new().expect("reactor");
         let (left, _right) = socketpair();
         set_nonblocking(&left);
-        let key = reactor
-            .register(left.as_raw_fd(), Interest::Write)
-            .expect("register");
+        // SAFETY: the descriptor stays open for every reactor use in this test; closing it afterwards drops it from the kernel set.
+        let key = unsafe { reactor.register(left.as_raw_fd(), Interest::Write) }.expect("register");
         let count = Arc::new(AtomicUsize::new(0));
         reactor.set_write_waker(key, waker_for(&count));
         let fired = reactor.turn(Some(Duration::from_millis(50))).expect("turn");
