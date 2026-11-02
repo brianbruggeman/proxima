@@ -67,7 +67,7 @@ impl LoadedModel<'_> {
         on_branch: &mut dyn FnMut(usize),
     ) -> Result<Vec<Vec<u32>>, InteropError> {
         let effective = self.effective_serving_config(serving_config)?;
-        let mut runtime = BackendRuntime::new(&effective);
+        let (mut runtime, _pinned) = self.pinned_runtime(&effective);
         self.follow_up_branches(ids, &effective, &mut runtime, None, on_branch)
     }
 

@@ -2679,6 +2679,7 @@ pub(super) mod memory_fit_gate_tests {
             expert_slab: Mutex::new(crate::expert_slab::ExpertSlab::new()),
             expert_sidecar: None,
             prompt_cache: Mutex::new(crate::generate::PromptCache::new()),
+            residency: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: crate::generate::Arc::new(()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

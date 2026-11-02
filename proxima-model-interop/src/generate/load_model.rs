@@ -1035,6 +1035,8 @@ pub struct LoadedModel<'file> {
     /// type stays `Sync` behind an `Arc`); held only to take an entry out or
     /// put one back, never across a decode.
     pub(super) prompt_cache: Mutex<super::PromptCache>,
+    /// Weights and expert-sidecar mapping tracker; `None` leaves the model without idle or pressure release.
+    pub(super) residency: Option<Arc<crate::mapped_residency::MappedResidency<'file>>>,
     /// This model's identity for [`super::resident_plans`]: every thread's
     /// resident decode plans hold only a `Weak` to it, so dropping the model,
     /// or replacing the token because a `&mut self` method changed what a

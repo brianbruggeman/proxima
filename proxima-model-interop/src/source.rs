@@ -2,12 +2,15 @@
 
 use std::fs::File;
 use std::path::Path;
+use std::sync::Arc;
 
 use memmap2::MmapOptions;
 use proxima_storage::dax::{MappedRegion, PersistMode};
 use thiserror::Error;
 
-use crate::memory_reclaim::release_mapping;
+use crate::mapped_residency::MappedResidency;
+use crate::memory_reclaim::{monotonic_now, release_mapping};
+use crate::serving_settings::ServingSettings;
 use crate::{InteropError, LoadedModel};
 
 /// Errors opening a checkpoint through the configured storage source.
@@ -60,6 +63,16 @@ impl CheckpointMapping {
         }
     }
 
+    /// The file mapping to register with a `MappedResidency`; a DAX mapping has none.
+    #[must_use]
+    pub fn file_mapping(&self) -> Option<&memmap2::Mmap> {
+        match self {
+            Self::File { mapping, .. } => Some(mapping),
+            #[cfg(target_os = "linux")]
+            Self::Pmem(_) => None,
+        }
+    }
+
     /// The complete checkpoint byte view used by GGUF parsing and binding.
     #[must_use]
     pub fn bytes(&self) -> &[u8] {
@@ -68,6 +81,17 @@ impl CheckpointMapping {
             #[cfg(target_os = "linux")]
             Self::Pmem(mapping) => mapping.as_slice(),
         }
+    }
+
+    /// Loads like [`Self::load`], then installs the cold tier when `settings.reclaim.cold_dir` is set.
+    pub fn load_serving(&self, settings: &ServingSettings) -> Result<LoadedModel<'_>, CheckpointSourceError> {
+        let residency = Arc::new(MappedResidency::new(settings.reclaim.clone()));
+        if let Some(mapping) = self.file_mapping() {
+            residency.register_weights(mapping, monotonic_now());
+        }
+        let model = self.load()?.with_residency(residency);
+        model.install_cold_tier(&settings.reclaim)?;
+        Ok(model)
     }
 
     /// Parse and bind this mapping without copying its checkpoint bytes.

@@ -560,6 +560,12 @@ impl MappedExpertSidecar {
         Self::new_with_source_file(Arc::new(mapping), Some(source_file))
     }
 
+    /// The sidecar mapping to register with a `MappedResidency`.
+    #[must_use]
+    pub fn mapping(&self) -> &Arc<Mmap> {
+        &self.mapping
+    }
+
     /// Drops the sidecar mapping's pages from the resident set; the next expert read refaults them from the file.
     pub fn release_pages(&self) -> Result<(), InteropError> {
         release_mapping(&self.mapping)

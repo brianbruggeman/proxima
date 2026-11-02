@@ -6,6 +6,7 @@ use proxima_core::{ServingFsmError, ServingState};
 
 use super::drafter::{DrafterSet, draft_limit_for_step};
 use super::*;
+use crate::memory_reclaim::monotonic_now;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use crate::cuda_async::CudaGpuService;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
@@ -2182,6 +2183,9 @@ impl<'file> LoadedModel<'file> {
             sidecar.discard_checkpoint_expert_pages(self.checkpoint_mapping)?;
             omega::backend::unregister_checkpoint_mapping(self.checkpoint_mapping);
         }
+        if let Some(residency) = &self.residency {
+            residency.register_sidecar(Arc::clone(sidecar.mapping()), monotonic_now());
+        }
         self.expert_sidecar = Some(sidecar);
         self.clear_prompt_cache();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -2468,7 +2472,7 @@ impl<'file> LoadedModel<'file> {
             wants_bos(&self.vocab),
             self.vocab.add_eos_token().unwrap_or(false),
         )?;
-        let mut runtime = BackendRuntime::new(&serving_config);
+        let (mut runtime, _pinned) = self.pinned_runtime(&serving_config);
         let mut logits_sink = LogitsSink::Discard;
         let mut node_values_sink = NodeValuesSink::Discard;
         let mut evaluator = AsyncCudaDecodeStepEvaluator {
@@ -3453,6 +3457,7 @@ impl<'file> LoadedModel<'file> {
         speculative_stats: Option<&mut SpeculativeDecodeStats>,
         forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
+        let _pinned = self.pin_evaluation();
         let mut token_producer = SyncDecodeTokenProducer { callback: on_token };
         let outcome = self.with_draft_model(serving_config, |model_proposer| {
             poll_ready_decode(self.drive_serving_loop(
@@ -8095,7 +8100,7 @@ did not hold every cached position)",
             #[cfg(all(feature = "metal", target_os = "macos"))]
             omega::MathMode::default(),
         );
-        let mut runtime = BackendRuntime::new(&serving_config);
+        let (mut runtime, _pinned) = self.pinned_runtime(&serving_config);
         let mut steps = Vec::new();
         let mut node_values_sink = NodeValuesSink::Collect {
             nodes: node_ids,
@@ -8199,7 +8204,7 @@ did not hold every cached position)",
         #[cfg(feature = "gpu")]
         validate_omega_runtime_config(&serving_config)?;
         self.apply_context_resolution(&mut serving_config)?;
-        let mut runtime = BackendRuntime::new(&serving_config);
+        let (mut runtime, _pinned) = self.pinned_runtime(&serving_config);
         apply_serving_config(&serving_config, ids.len())?;
         let inputs = build_position_inputs(
             ids,
@@ -8380,7 +8385,7 @@ did not hold every cached position)",
                 #[cfg(all(feature = "metal", target_os = "macos"))]
                 omega::MathMode::default(),
             );
-            let mut runtime = BackendRuntime::new(&serving_config);
+            let (mut runtime, _pinned) = self.pinned_runtime(&serving_config);
             let mut captured = Vec::new();
             let mut logits_sink = LogitsSink::Collect(&mut captured);
             let mut on_token = |_event: TokenEvent<'_>| ControlFlow::Continue(());
