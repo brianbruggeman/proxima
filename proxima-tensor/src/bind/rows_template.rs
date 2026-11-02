@@ -127,24 +127,77 @@ fn is_attention(bound: &BoundOp) -> bool {
     matches!(bound.kind, BoundOpKind::CachedAttention { .. })
 }
 
-fn affine_columns(binds: &[(u64, &[BoundOp])], columns: &[Vec<i128>]) -> Option<Fields> {
-    let base_rows = i128::from(binds[0].0);
-    let run = i128::from(binds[1].0) - base_rows;
+fn affine_columns(rows: &[u64], columns: &[Vec<i128>]) -> Option<Fields> {
+    let base_rows = i128::from(rows[0]);
+    let run = i128::from(rows[1]) - base_rows;
     (0..columns[0].len())
         .map(|field| {
             let start = columns[0][field];
             let delta = columns[1][field] - start;
             let slope = (delta % run == 0).then_some(delta / run)?;
-            let holds = binds
+            let holds = rows
                 .iter()
                 .zip(columns)
-                .all(|((rows, _), column)| column[field] == start + slope * (i128::from(*rows) - base_rows));
+                .all(|(at, column)| column[field] == start + slope * (i128::from(*at) - base_rows));
             holds.then_some((start, slope))
         })
         .collect()
 }
 
+fn three_distinct_rows(rows: &[u64]) -> bool {
+    let mut distinct = rows.to_vec();
+    distinct.sort_unstable();
+    distinct.dedup();
+    rows.len() >= 3 && distinct.len() == rows.len()
+}
+
+fn node_columns(shapes: &Shapes) -> Vec<Vec<i128>> {
+    shapes
+        .extents()
+        .iter()
+        .map(|extents| extents.iter().map(|extent| i128::from(*extent)).collect())
+        .collect()
+}
+
+/// The template that reproduces every [`Shapes`] in `binds` (each `(rows, shapes)`, the first being
+/// the base), or `None` when fewer than three distinct row counts are given, the shape tables differ
+/// in node count or rank, or an extent is not affine in the row count.
+#[must_use]
+pub fn shapes_template(binds: &[(u64, &Shapes)]) -> Option<RowTemplate> {
+    let (base_rows, base) = binds.first()?;
+    let rows: Vec<u64> = binds.iter().map(|(at, _)| *at).collect();
+    let shaped = three_distinct_rows(&rows) && binds.iter().all(|(_, shapes)| shapes.extents().len() == base.extents().len());
+    shaped.then_some(())?;
+    let tables: Vec<Vec<Vec<i128>>> = binds.iter().map(|(_, shapes)| node_columns(shapes)).collect();
+    let positions = (0..base.extents().len())
+        .map(|node| {
+            let columns: Vec<Vec<i128>> = tables.iter().map(|table| table[node].clone()).collect();
+            let uniform = columns.iter().all(|column| column.len() == columns[0].len());
+            uniform.then(|| affine_columns(&rows, &columns)).flatten()
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some((*base_rows, positions))
+}
+
+/// The shapes a [`shapes_template`] gives at `rows`, or `None` when an extent leaves `u64`.
+#[must_use]
+pub fn apply_shapes_template(template: &RowTemplate, rows: u64) -> Option<Shapes> {
+    let (base_rows, positions) = template;
+    let delta = i128::from(rows) - i128::from(*base_rows);
+    positions
+        .iter()
+        .map(|fields| {
+            fields
+                .iter()
+                .map(|(start, slope)| u64::try_from(start + slope * delta).ok())
+                .collect::<Option<Vec<u64>>>()
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(Shapes::from_extents)
+}
+
 fn fit(binds: &[(u64, &[BoundOp])], position: usize) -> Option<Fields> {
+    let rows: Vec<u64> = binds.iter().map(|(at, _)| *at).collect();
     let reference = skeleton(&binds[0].1[position])?;
     let columns: Vec<Vec<i128>> = binds
         .iter()
@@ -154,7 +207,7 @@ fn fit(binds: &[(u64, &[BoundOp])], position: usize) -> Option<Fields> {
         })
         .collect::<Option<_>>()?;
     let uniform = columns.iter().all(|column| column.len() == columns[0].len());
-    uniform.then(|| affine_columns(binds, &columns)).flatten()
+    uniform.then(|| affine_columns(&rows, &columns)).flatten()
 }
 
 /// The template that reproduces every bind in `binds` (each `(rows, ops)`, the first being the
@@ -164,12 +217,8 @@ fn fit(binds: &[(u64, &[BoundOp])], position: usize) -> Option<Fields> {
 #[must_use]
 pub fn row_template(binds: &[(u64, &[BoundOp])]) -> Option<RowTemplate> {
     let (base_rows, base) = binds.first()?;
-    let mut distinct: Vec<u64> = binds.iter().map(|(rows, _)| *rows).collect();
-    distinct.sort_unstable();
-    distinct.dedup();
-    let shaped = binds.len() >= 3
-        && distinct.len() == binds.len()
-        && binds.iter().all(|(_, ops)| ops.len() == base.len());
+    let rows: Vec<u64> = binds.iter().map(|(at, _)| *at).collect();
+    let shaped = three_distinct_rows(&rows) && binds.iter().all(|(_, ops)| ops.len() == base.len());
     shaped.then_some(())?;
     let positions = (0..base.len())
         .map(|position| fit(binds, position))
@@ -219,7 +268,6 @@ pub fn apply_row_template(template: &RowTemplate, rows: u64, resolved: &mut [Bou
 }
 
 #[cfg(test)]
-#[allow(clippy::expect_used)]
 mod tests {
     use alloc::vec;
 
@@ -228,6 +276,8 @@ mod tests {
     use crate::map::{self, IndexMap};
     use crate::op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
     use crate::{NumericPolicy, bind_with_fusion, shape};
+
+    type Check = Result<(), &'static str>;
 
     fn matmul_program() -> (Vec<Op>, NodeId) {
         let mut program = Vec::new();
@@ -266,48 +316,86 @@ mod tests {
         (program, sum)
     }
 
-    fn bind_at(program: &[Op], output: NodeId, rows: u64) -> Vec<BoundOp> {
-        let shapes = shape::infer(program, &[rows]).expect("the program infers");
+    fn shapes_at(program: &[Op], rows: u64) -> Result<Shapes, &'static str> {
+        shape::infer(program, &[rows]).map_err(|_| "the program infers")
+    }
+
+    fn bind_at(program: &[Op], output: NodeId, rows: u64) -> Result<Vec<BoundOp>, &'static str> {
+        let shapes = shapes_at(program, rows)?;
         bind_with_fusion(program, &shapes, &[output], true, NumericPolicy::bit_exact())
-            .expect("the program binds")
+            .map_err(|_| "the program binds")
     }
 
     #[test]
-    fn a_template_fitted_at_three_row_counts_reproduces_a_fourth_bind() {
+    fn a_template_fitted_at_three_row_counts_reproduces_a_fourth_bind() -> Check {
         let (program, output) = matmul_program();
-        let (base, next, between) = (bind_at(&program, output, 16), bind_at(&program, output, 40), bind_at(&program, output, 28));
-        let template = row_template(&[(16, &base), (40, &next), (28, &between)]).expect("every integer is affine in rows");
+        let (base, next, between) = (
+            bind_at(&program, output, 16)?,
+            bind_at(&program, output, 40)?,
+            bind_at(&program, output, 28)?,
+        );
+        let template = row_template(&[(16, &base), (40, &next), (28, &between)]).ok_or("every integer is affine in rows")?;
 
         let mut moved = base.clone();
-        let attention = apply_row_template(&template, 123, &mut moved).expect("the template fits these ops");
+        let attention = apply_row_template(&template, 123, &mut moved).ok_or("the template fits these ops")?;
 
         assert!(attention.is_empty());
-        assert_eq!(moved, bind_at(&program, output, 123));
+        assert_eq!(moved, bind_at(&program, output, 123)?);
+        Ok(())
     }
 
     #[test]
-    fn two_binds_cannot_show_affinity() {
+    fn two_binds_cannot_show_affinity() -> Check {
         let (program, output) = matmul_program();
-        let (base, next) = (bind_at(&program, output, 16), bind_at(&program, output, 40));
+        let (base, next) = (bind_at(&program, output, 16)?, bind_at(&program, output, 40)?);
 
         assert_eq!(row_template(&[(16, &base), (40, &next)]), None);
+        Ok(())
     }
 
     #[test]
-    fn a_bind_that_is_not_on_the_line_refuses_the_template() {
+    fn a_bind_that_is_not_on_the_line_refuses_the_template() -> Check {
         let (program, output) = matmul_program();
-        let (base, next) = (bind_at(&program, output, 16), bind_at(&program, output, 40));
-        let mut off_line = bind_at(&program, output, 28);
+        let (base, next) = (bind_at(&program, output, 16)?, bind_at(&program, output, 40)?);
+        let mut off_line = bind_at(&program, output, 28)?;
         off_line[0].extents[0] += 1;
 
         assert_eq!(row_template(&[(16, &base), (40, &next), (28, &off_line)]), None);
+        Ok(())
     }
 
     #[test]
-    fn binds_of_different_structure_refuse_the_template() {
+    fn binds_of_different_structure_refuse_the_template() -> Check {
         let (program, output) = matmul_program();
-        let (base, next, between) = (bind_at(&program, output, 16), bind_at(&program, output, 40), bind_at(&program, output, 28));
+        let (base, next, between) = (
+            bind_at(&program, output, 16)?,
+            bind_at(&program, output, 40)?,
+            bind_at(&program, output, 28)?,
+        );
 
         assert_eq!(row_template(&[(16, &base), (40, &next[..next.len() - 1]), (28, &between)]), None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_shapes_template_reproduces_the_inferred_shapes_at_a_fourth_row_count() -> Check {
+        let (program, _) = matmul_program();
+        let (base, next, between) = (shapes_at(&program, 16)?, shapes_at(&program, 40)?, shapes_at(&program, 28)?);
+        let template = shapes_template(&[(16, &base), (40, &next), (28, &between)]).ok_or("every extent is affine in rows")?;
+
+        let moved = apply_shapes_template(&template, 123).ok_or("the template evaluates")?;
+
+        assert_eq!(moved, shapes_at(&program, 123)?);
+        Ok(())
+    }
+
+    #[test]
+    fn a_shapes_template_needs_three_distinct_row_counts() -> Check {
+        let (program, _) = matmul_program();
+        let (base, next) = (shapes_at(&program, 16)?, shapes_at(&program, 40)?);
+
+        assert_eq!(shapes_template(&[(16, &base), (40, &next)]), None);
+        assert_eq!(shapes_template(&[(16, &base), (40, &next), (16, &base)]), None);
+        Ok(())
     }
 }
