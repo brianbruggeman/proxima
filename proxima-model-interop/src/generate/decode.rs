@@ -2187,6 +2187,8 @@ impl<'file> LoadedModel<'file> {
             residency.register_sidecar(Arc::clone(sidecar.mapping()), monotonic_now());
         }
         self.expert_sidecar = Some(sidecar);
+        #[cfg(feature = "cuda")]
+        self.cuda_resident.clear();
         self.clear_prompt_cache();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         {
@@ -2510,7 +2512,12 @@ impl<'file> LoadedModel<'file> {
         BackendRuntime::resuming(&self.plan_life, serving_config)
     }
 
-    #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+    #[cfg(all(feature = "cuda", not(all(feature = "metal-output-placement", target_os = "macos"))))]
+    pub(super) fn backend_runtime(&self, serving_config: &ServingConfig) -> BackendRuntime {
+        BackendRuntime::resuming_cuda(&self.cuda_resident, serving_config)
+    }
+
+    #[cfg(all(not(feature = "cuda"), not(all(feature = "metal-output-placement", target_os = "macos"))))]
     pub(super) fn backend_runtime(&self, serving_config: &ServingConfig) -> BackendRuntime {
         BackendRuntime::new(serving_config)
     }
