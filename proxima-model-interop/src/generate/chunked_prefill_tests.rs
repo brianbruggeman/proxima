@@ -266,15 +266,22 @@ pub(super) fn gemma4_checkpoint() -> Vec<u8> {
 }
 
 pub(super) fn dense_checkpoint() -> Vec<u8> {
-    dense_checkpoint_with_experts(false)
+    dense_checkpoint_with_experts(false, DENSE_SEED)
+}
+
+#[cfg(feature = "cuda")]
+pub(super) fn dense_checkpoint_seeded(seed: u64) -> Vec<u8> {
+    dense_checkpoint_with_experts(false, seed)
 }
 
 pub(super) fn dense_moe_checkpoint() -> Vec<u8> {
-    dense_checkpoint_with_experts(true)
+    dense_checkpoint_with_experts(true, DENSE_SEED)
 }
 
-fn dense_checkpoint_with_experts(routed: bool) -> Vec<u8> {
-    let mut rng = Lcg(0x2545_f491_4f6c_dd1d);
+const DENSE_SEED: u64 = 0x2545_f491_4f6c_dd1d;
+
+fn dense_checkpoint_with_experts(routed: bool, seed: u64) -> Vec<u8> {
+    let mut rng = Lcg(seed);
     let projection = EMBEDDING;
     let mut specs = alloc::vec![
         spec("token_embd.weight", &[EMBEDDING, VOCAB], 1.0, 0.0, &mut rng),
