@@ -1443,6 +1443,18 @@ pub fn cuda_refit_counters(plan: &Plan) -> Option<[u64; 5]> {
     }
 }
 
+/// Whether a [`Plan::Cuda`] can be moved to another prefill row count by
+/// [`refit_cuda_symbols`] rather than rebuilt; `false` on every other arm. See
+/// [`cuda_driver::CudaPlan::rows_movable`].
+#[cfg(feature = "cuda-driver")]
+#[must_use]
+pub fn cuda_rows_movable(plan: &Plan) -> bool {
+    match plan {
+        Plan::Cuda(cuda_plan) => cuda_plan.rows_movable(),
+        _ => false,
+    }
+}
+
 /// Kernel identities of a CUDA plan, one per emitted kernel, or `None` for
 /// every other arm. The CUDA entry for a fused cached attention carries the
 /// `omega_cuda_cached_attention_` prefix, so a test can assert the fused form

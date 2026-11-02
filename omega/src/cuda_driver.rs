@@ -482,7 +482,8 @@ pub struct CudaPlan {
     patch_memo: Option<(Vec<NodeId>, Vec<usize>)>,
     // the row count the bound ops were last bound at, and the proof that every integer in them is affine in it: `None` until tried, `Some(None)` once refused
     bound_rows: u64,
-    rows_template: Option<Option<RowTemplate>>,
+    // boxed: keeps CudaPlan inside clippy's large_enum_variant gap against the cpu plan
+    rows_template: Box<Option<Option<RowTemplate>>>,
     // one resolved device function per kernel, so a launch skips the module-cache text comparison
     functions: Vec<Option<CudaFunction>>,
     emit_calls: u64,
@@ -1038,7 +1039,7 @@ impl CudaDriver {
             refit_calls: 0,
             patch_memo: None,
             bound_rows: symbols.first().copied().unwrap_or(0),
-            rows_template: None,
+            rows_template: Box::default(),
             emit_calls: 0,
             emit_reused: 0,
             pack_calls: 0,
@@ -2099,9 +2100,6 @@ impl CudaPlan {
         let infer_micros = infer_started.elapsed().as_micros() as u64;
         let same_policy = numeric_policy == self.numeric_policy;
         let rows = symbols.first().copied().unwrap_or(0);
-        if rows != self.bound_rows && !self.may_change_rows(rows) {
-            return Ok(false);
-        }
         if same_policy && rows != self.bound_rows {
             let repack_started = Instant::now();
             if let Some(op_count) = self.repack_rows(rows, &shapes, numeric_policy)? {
@@ -2217,7 +2215,7 @@ impl CudaPlan {
         self.kernels = kernels;
         self.uniforms = uniforms;
         let previous_rows = std::mem::replace(&mut self.bound_rows, rows);
-        if same_policy && previous_rows != rows && self.rows_template.is_none() {
+        if same_policy && previous_rows != rows && (*self.rows_template).is_none() {
             self.learn_row_template(&previous_bound, previous_rows, symbols, numeric_policy)?;
         }
         proxima_telemetry::debug!(
@@ -2239,13 +2237,13 @@ impl CudaPlan {
         Ok(true)
     }
 
-    /// Whether this plan may be moved to `rows` at all: only inside the wide prefill class, on
-    /// a program whose ops a row template can enumerate, and not after a template was refused.
-    /// A plan outside that is rebuilt instead, as it always was.
-    fn may_change_rows(&self, rows: u64) -> bool {
-        rows >= ROW_CLASS_MIN
-            && self.bound_rows >= ROW_CLASS_MIN
-            && !matches!(self.rows_template, Some(None))
+    /// Whether this plan can be moved to another row count: it is bound inside the wide prefill class,
+    /// its ops are kinds a row template can enumerate, and no template has been refused. A plan
+    /// that is not movable is rebuilt for a new row count.
+    #[must_use]
+    pub fn rows_movable(&self) -> bool {
+        self.bound_rows >= ROW_CLASS_MIN
+            && !matches!(*self.rows_template, Some(None))
             && rows_enumerable(&self.resolved)
     }
 
@@ -2262,7 +2260,7 @@ impl CudaPlan {
         if rows < ROW_CLASS_MIN || self.bound_rows < ROW_CLASS_MIN {
             return Ok(None);
         }
-        let Some(Some(template)) = &self.rows_template else {
+        let Some(Some(template)) = &*self.rows_template else {
             return Ok(None);
         };
         let mut next = self.resolved.clone();
@@ -2275,8 +2273,8 @@ impl CudaPlan {
             };
             next[position] = patched;
         }
-        for position in 0..next.len() {
-            self.follow_rows(position, &next[position], numeric_policy)?;
+        for (position, bound) in next.iter().enumerate() {
+            self.follow_rows(position, bound, numeric_policy)?;
         }
         *self.pool = PoolSchedule::build(&next, &self.kernels, &self.outputs);
         let count = next.len();
@@ -2368,7 +2366,7 @@ impl CudaPlan {
             middle_rows = middle,
             "cuda row template learned"
         );
-        self.rows_template = Some(template);
+        *self.rows_template = Some(template);
         Ok(())
     }
 
