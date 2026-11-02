@@ -2,6 +2,7 @@ use core::future::Future;
 use core::ops::ControlFlow;
 use core::task::{Context, Poll, Waker};
 
+use proxima_core::kv_carry::{Appended, Extent, KvCarry, KvCarryError, KvCommand, KvEvent, RowPair};
 use proxima_core::{ServingFsmError, ServingState};
 
 use super::drafter::{DrafterSet, draft_limit_for_step};
@@ -6877,21 +6878,29 @@ did not hold every cached position)",
                         if kv_on_device {
                             runtime.accept_kv_rows(emitted.len() as u64)?;
                         }
-                        if let ServingState::Rollback { snapshot, .. } = &settled {
-                            for (layer, widths) in layer_row_widths.iter().enumerate() {
-                                if kv_appended_view.get(layer).copied().unwrap_or(false) {
-                                    continue;
-                                }
-                                if let (
-                                    LayerPadRowWidths::Attention {
-                                        even_odd_row,
-                                        v_row,
-                                    },
+                        let host_layers: Vec<usize> = layer_row_widths
+                            .iter()
+                            .enumerate()
+                            .filter(|(layer, widths)| {
+                                matches!(widths, LayerPadRowWidths::Attention { .. })
+                                    && !kv_appended_view.get(*layer).copied().unwrap_or(false)
+                            })
+                            .map(|(layer, _)| layer)
+                            .collect();
+                        let truncations = host_kv_truncations(
+                            &host_layers,
+                            cached_len_before_step as u64,
+                            new_count as u64,
+                            emitted.len() as u64,
+                        )?;
+                        for command in truncations {
+                            if let KvCommand::Truncate { input: layer, to_rows } = command
+                                && let (
+                                    LayerPadRowWidths::Attention { even_odd_row, v_row },
                                     LayerCacheState::Attention(cache),
-                                ) = (widths, &mut layer_caches[layer])
-                                {
-                                    cache.try_truncate(*snapshot, *even_odd_row, *v_row)?;
-                                }
+                                ) = (&layer_row_widths[layer], &mut layer_caches[layer])
+                            {
+                                cache.try_truncate(to_rows as usize, *even_odd_row, *v_row)?;
                             }
                         }
                         // The verify batch evaluated one row past the last
@@ -8724,7 +8733,36 @@ fn kv_carry_leaves(
         .collect()
 }
 
+fn host_kv_truncations(
+    layers: &[usize],
+    cached_rows: u64,
+    appended_rows: u64,
+    kept_rows: u64,
+) -> Result<Vec<KvCommand<usize>>, KvCarryError<usize>> {
+    let mut carry = KvCarry::new();
+    let pairs = layers
+        .iter()
+        .map(|layer| RowPair { input: *layer, output: *layer, row_width: 1 })
+        .collect();
+    carry.step(KvEvent::Select { pairs })?;
+    for layer in layers {
+        carry.step(KvEvent::Resident { input: *layer, valid_rows: cached_rows, capacity_elements: u64::MAX })?;
+    }
+    let extents = layers
+        .iter()
+        .map(|layer| Extent { input: *layer, cached_rows: Some(cached_rows), extent_elements: 0 })
+        .collect();
+    carry.step(KvEvent::StepBegan { extents })?;
+    let appended = layers
+        .iter()
+        .map(|layer| Appended { input: *layer, new_rows: appended_rows })
+        .collect();
+    carry.step(KvEvent::RowsAppended { appended })?;
+    carry.step(KvEvent::Accepted { kept: kept_rows })
+}
+
 fn memoized_kv_leaves<'memo>(
+
     memo: &'memo mut BTreeMap<usize, Vec<KvCarryLeaf>>,
     program_address: usize,
     program: &[Op],
