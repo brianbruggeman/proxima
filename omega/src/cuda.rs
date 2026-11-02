@@ -367,6 +367,7 @@ fn extent_fields(
         None => CudaGridSpec {
             threads: grid_threads(
                 resolved,
+                numeric_policy,
                 cooperative,
                 cooperative && lane_major_reduce(resolved, quantized),
                 row_tile,
@@ -1211,6 +1212,7 @@ fn cooperative_width(resolved: &BoundOp, quantized: &[Option<Codec>]) -> u64 {
 
 fn grid_threads(
     resolved: &BoundOp,
+    numeric_policy: NumericPolicy,
     cooperative: bool,
     lane_major: bool,
     row_tile: Option<usize>,
@@ -1289,7 +1291,7 @@ fn grid_threads(
             kv_heads,
             query_groups,
             ..
-        } => match cached_attention_tile_rows(&resolved.kind) {
+        } => match cached_attention_tile_rows(&resolved.kind, numeric_policy) {
             Some(tile_rows) => checked_product(
                 resolved.node,
                 [query_rows.div_ceil(tile_rows), *kv_heads, ATTENTION_BLOCK_WIDTH],

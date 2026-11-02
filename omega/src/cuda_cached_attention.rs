@@ -40,7 +40,7 @@ pub(crate) fn cached_attention_entry_name(
         String::new()
     };
     let mma_token = if cached_attention_uses_mma(&resolved.kind, numeric_policy) { "_mma16x8x8h" } else { "" };
-    let tile_token = cached_attention_tile_rows(&resolved.kind)
+    let tile_token = cached_attention_tile_rows(&resolved.kind, numeric_policy)
         .map_or_else(String::new, |tile_rows| format!("_tq{tile_rows}{mma_token}"));
     let split_token = split_chunks.map_or_else(String::new, |chunks| format!("_sk{chunks}"));
     Ok(format!(
@@ -67,7 +67,7 @@ pub(crate) fn render_cached_attention_cuda(
 
 fn unsplit_tail(resolved: &BoundOp, numeric_policy: NumericPolicy) -> String {
     let body = if cached_attention_uses_mma(&resolved.kind, numeric_policy) { MMA_ATTENTION_BODY } else { TILED_ATTENTION_BODY };
-    match cached_attention_tile_rows(&resolved.kind) {
+    match cached_attention_tile_rows(&resolved.kind, numeric_policy) {
         Some(tile_rows) => format!("    constexpr int tile_rows = {tile_rows};\n{body}"),
         None => String::from(CACHED_ATTENTION_BODY),
     }

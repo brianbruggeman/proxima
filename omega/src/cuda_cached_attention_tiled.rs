@@ -6,11 +6,23 @@ const ATTENTION_TILE_MIN_ROWS: u64 = 16;
 
 const ATTENTION_TILE_HEAD_DIM: u64 = 128;
 
+const MMA_HEAD_DIMS: core::ops::RangeInclusive<u64> = 64..=256;
+
+const MMA_HEAD_DIM_STEP: u64 = 16;
+
 pub(crate) fn cached_attention_uses_mma(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
-    numeric_policy.activation_quantization && cached_attention_tile_rows(kind).is_some()
+    numeric_policy.activation_quantization && cached_attention_tile_rows(kind, numeric_policy).is_some()
 }
 
-pub(crate) fn cached_attention_tile_rows(kind: &BoundOpKind) -> Option<u64> {
+fn head_dim_fits(head_dim: u64, numeric_policy: NumericPolicy) -> bool {
+    if numeric_policy.activation_quantization {
+        MMA_HEAD_DIMS.contains(&head_dim) && head_dim % MMA_HEAD_DIM_STEP == 0
+    } else {
+        head_dim == ATTENTION_TILE_HEAD_DIM
+    }
+}
+
+pub(crate) fn cached_attention_tile_rows(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> Option<u64> {
     let BoundOpKind::CachedAttention {
         query_rows,
         query_groups,
@@ -23,7 +35,7 @@ pub(crate) fn cached_attention_tile_rows(kind: &BoundOpKind) -> Option<u64> {
     };
     let vector_planes = rotary_dim % 8 == 0 && (head_dim - rotary_dim) % 4 == 0;
     let fits = (1..=ATTENTION_TILE_ITEMS).contains(query_groups)
-        && *head_dim == ATTENTION_TILE_HEAD_DIM
+        && head_dim_fits(*head_dim, numeric_policy)
         && vector_planes;
     (fits && *query_rows >= ATTENTION_TILE_MIN_ROWS).then(|| ATTENTION_TILE_ITEMS / query_groups)
 }
