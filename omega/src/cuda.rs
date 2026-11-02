@@ -81,14 +81,14 @@ use crate::lowering::{
 
 mod block_dot;
 mod radix_dot;
-mod mma_gemm;
+pub(crate) mod mma_gemm;
 mod row_tile;
 mod split_attention;
 mod staged_matvec;
 use split_attention::{
     render_combine, split_chunks, split_pass, split_scratch_len, split_scratch_node,
 };
-use mma_gemm::{GEMM_THREADS, MMA_GEMM_HELPERS, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body};
+use mma_gemm::{GEMM_THREADS, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body};
 use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
 use staged_matvec::{
     STAGED_THREADS, push_staged_matvec_body, staged_matvec_plan, staged_matvec_threads, staged_prepass,
@@ -254,7 +254,7 @@ pub fn emit_cuda_on_device(
     let quantized = operand_codecs(resolved, packed_operands);
     let attention_chunks = split_chunks(&resolved.kind, device);
     let entry = match cuda_cached_attention_class(&resolved.kind) {
-        Some(class) => cached_attention_entry_name(resolved, class, attention_chunks)?,
+        Some(class) => cached_attention_entry_name(resolved, class, attention_chunks, numeric_policy)?,
         None => entry_name(resolved, packed_operands, &quantized, numeric_policy, device),
     };
     let source = match &resolved.kind {
@@ -275,7 +275,7 @@ pub fn emit_cuda_on_device(
         }
         BoundOpKind::CachedAttention { .. } => match attention_chunks {
             Some(chunks) => render_combine(resolved, &entry, chunks)?,
-            None => render_cached_attention_cuda(resolved, &entry)?,
+            None => render_cached_attention_cuda(resolved, &entry, numeric_policy)?,
         },
         BoundOpKind::GatedDeltaNet { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
@@ -3381,6 +3381,7 @@ fn render_reduce(
     let mut source = String::new();
     preamble(&mut source, element_type);
     if gemm.is_some() {
+        source.push_str(MMA_INSTRUCTION);
         source.push_str(MMA_GEMM_HELPERS);
     }
     if let Some(plan) = &staged {

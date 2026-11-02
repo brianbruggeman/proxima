@@ -4268,6 +4268,203 @@ async fn cuda_split_decode_attention_matches_f64_oracle(#[case] cached: usize) {
     assert!(worst < 1e-4, "cached={cached}: worst abs error {worst} vs f64 oracle");
 }
 
+fn prefill_attention_kind(
+    cached: u64,
+    rows: u64,
+    heads: u64,
+    groups: u64,
+    head_dim: u64,
+) -> proxima_tensor::BoundOpKind {
+    let proxima_tensor::BoundOpKind::CachedAttention {
+        cached_lower_inclusive,
+        new_upper_inclusive,
+        scale,
+        rotary_dim,
+        ..
+    } = causal_attention_kind(rows, heads, groups, head_dim)
+    else {
+        unreachable!("causal_attention_kind builds a CachedAttention kind");
+    };
+    let operand_count = if cached == 0 { 8 } else { 9 };
+    proxima_tensor::BoundOpKind::CachedAttention {
+        operands: (0..operand_count)
+            .map(|index| {
+                (
+                    NodeId(index),
+                    proxima_tensor::Layout { base: 0, strides: vec![1_i64].into() },
+                    None,
+                )
+            })
+            .collect(),
+        query_rows: rows,
+        cached_key_rows: cached,
+        new_key_rows: rows,
+        kv_heads: heads,
+        query_groups: groups,
+        head_dim,
+        rotary_dim,
+        scale,
+        cached_lower_inclusive,
+        new_upper_inclusive,
+    }
+}
+
+struct PrefillAttentionShape {
+    cached: usize,
+    rows: usize,
+    heads: usize,
+    groups: usize,
+    head_dim: usize,
+}
+
+fn prefill_attention_planes(shape: &PrefillAttentionShape) -> [Vec<f32>; 8] {
+    let pair = shape.head_dim / 2;
+    let query_heads = shape.heads * shape.groups;
+    let spread = |values: Vec<f32>| -> Vec<f32> { values.into_iter().map(|value| value * 4.0 - 2.0).collect() };
+    [
+        spread(random_vec(31, shape.rows * query_heads * pair)),
+        spread(random_vec(32, shape.rows * query_heads * pair)),
+        spread(random_vec(33, shape.cached.max(1) * shape.heads * pair)),
+        spread(random_vec(34, shape.cached.max(1) * shape.heads * pair)),
+        spread(random_vec(35, shape.rows * shape.heads * pair)),
+        spread(random_vec(36, shape.rows * shape.heads * pair)),
+        spread(random_vec(37, shape.cached.max(1) * shape.heads * shape.head_dim)),
+        spread(random_vec(38, shape.rows * shape.heads * shape.head_dim)),
+    ]
+}
+
+fn prefill_attention_oracle(shape: &PrefillAttentionShape, planes: &[Vec<f32>; 8]) -> Vec<f64> {
+    let PrefillAttentionShape { cached, rows, heads, groups, head_dim } = *shape;
+    let pair = head_dim / 2;
+    let query_heads = heads * groups;
+    let [query_low, query_high, cached_low, cached_high, new_low, new_high, cached_values, new_values] = planes;
+    let scale = 1.0 / (head_dim as f64).sqrt();
+    let mut out = vec![0.0; rows * query_heads * head_dim];
+    for row in 0..rows {
+        for head in 0..query_heads {
+            let kv = head / groups;
+            let query_base = row * query_heads * pair + head * pair;
+            let score = |key: usize| -> f64 {
+                let (low, high, base) = if key < cached {
+                    (cached_low, cached_high, key * heads * pair + kv * pair)
+                } else {
+                    (new_low, new_high, (key - cached) * heads * pair + kv * pair)
+                };
+                (0..pair)
+                    .map(|d| {
+                        f64::from(query_low[query_base + d]) * f64::from(low[base + d])
+                            + f64::from(query_high[query_base + d]) * f64::from(high[base + d])
+                    })
+                    .sum::<f64>()
+                    * scale
+            };
+            let scores: Vec<f64> = (0..cached + row + 1).map(score).collect();
+            let peak = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let weights: Vec<f64> = scores.iter().map(|value| (value - peak).exp()).collect();
+            let total: f64 = weights.iter().sum();
+            for d in 0..head_dim {
+                let mixed: f64 = weights
+                    .iter()
+                    .enumerate()
+                    .map(|(key, weight)| {
+                        let value = if key < cached {
+                            cached_values[key * heads * head_dim + kv * head_dim + d]
+                        } else {
+                            new_values[(key - cached) * heads * head_dim + kv * head_dim + d]
+                        };
+                        weight * f64::from(value)
+                    })
+                    .sum();
+                out[(row * query_heads + head) * head_dim + d] = mixed / total;
+            }
+        }
+    }
+    out
+}
+
+fn run_prefill_attention(shape: &PrefillAttentionShape, planes: &[Vec<f32>; 8], policy: NumericPolicy) -> (Vec<f32>, String, String) {
+    let PrefillAttentionShape { cached, rows, heads, groups, head_dim } = *shape;
+    let query_heads = heads * groups;
+    let op = proxima_tensor::BoundOp {
+        node: NodeId(20),
+        dtype: DType::FLOAT32,
+        extents: vec![rows as u64, heads as u64, groups as u64, head_dim as u64],
+        kind: prefill_attention_kind(cached as u64, rows as u64, heads as u64, groups as u64, head_dim as u64),
+    };
+    let kernel = omega::emit_cuda_with_policy(&op, &std::collections::BTreeMap::new(), policy).expect("attention emits");
+    let driver = omega::CudaDriver::new(0).expect("a real cuda device");
+    let mut arena = driver.new_arena();
+    let dummy = [0.0_f32];
+    let bound = [cached as f32];
+    let mut order: Vec<&[f32]> = if cached == 0 {
+        vec![&planes[0], &planes[1], &dummy, &dummy, &planes[4], &planes[5], &dummy, &planes[7]]
+    } else {
+        vec![&planes[0], &planes[1], &planes[2], &planes[3], &planes[4], &planes[5], &planes[6], &planes[7]]
+    };
+    if cached > 0 {
+        order.push(&bound);
+    }
+    for (index, values) in order.iter().enumerate() {
+        driver.upload_f32(&mut arena, NodeId(index as u32), values).expect("input uploads");
+    }
+    let vectors = (rows * query_heads) as i64;
+    driver
+        .launch_f32_persistent_sized(&mut arena, &kernel, &vectors.to_ne_bytes(), rows * query_heads * head_dim)
+        .expect("attention launches");
+    let actual = driver.read_f32(&arena, NodeId(20)).expect("output reads back");
+    (actual, kernel.entry.clone(), kernel.source.clone())
+}
+
+fn peak_relative_diff(actual: &[f32], expected: &[f64]) -> f64 {
+    let peak = expected.iter().fold(0.0f64, |largest, value| largest.max(value.abs()));
+    let worst = actual
+        .iter()
+        .zip(expected)
+        .map(|(got, want)| (f64::from(*got) - want).abs())
+        .fold(0.0, f64::max);
+    worst / peak
+}
+
+#[proxima::test]
+#[case::cached_0_512_rows_g2(0, 512, 4, 2)]
+#[case::cached_0_ragged_37_rows_g4(0, 37, 2, 4)]
+#[case::cached_0_ragged_45_rows_g1(0, 45, 2, 1)]
+#[case::cached_512_512_rows_g2(512, 512, 2, 2)]
+#[case::cached_512_ragged_37_rows_g4(512, 37, 2, 4)]
+#[case::cached_3584_ragged_37_rows_g1(3584, 37, 2, 1)]
+#[case::cached_3584_ragged_37_rows_g2(3584, 37, 2, 2)]
+#[case::cached_513_ragged_19_rows_g3(513, 19, 2, 3)]
+async fn mma_prefill_attention_matches_the_fp16_rounded_f64_oracle_on_cuda(
+    #[case] cached: usize,
+    #[case] rows: usize,
+    #[case] heads: usize,
+    #[case] groups: usize,
+) {
+    let shape = PrefillAttentionShape { cached, rows, heads, groups, head_dim: 128 };
+    let planes = prefill_attention_planes(&shape);
+    let rounded: [Vec<f32>; 8] = planes.each_ref().map(|plane| round_through_fp16(plane));
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true);
+
+    let (actual, entry, source) = run_prefill_attention(&shape, &planes, policy);
+    assert!(entry.contains("_mma16x8x8h"), "policy-on prefill attention did not take the mma kernel: {entry}");
+    assert!(source.contains("mma_m16n8k8("), "policy-on prefill attention source carries no mma instruction");
+    let (_, exact_entry, exact_source) = run_prefill_attention(&shape, &planes, NumericPolicy::bit_exact().with_reassociation(true));
+    assert!(
+        !exact_entry.contains("_mma16x8x8h") && !exact_source.contains("mma_m16n8k8("),
+        "policy-off prefill attention must keep the f32 kernel: {exact_entry}"
+    );
+
+    let against_rounded = peak_relative_diff(&actual, &prefill_attention_oracle(&shape, &rounded));
+    let against_unrounded = peak_relative_diff(&actual, &prefill_attention_oracle(&shape, &planes));
+    eprintln!("mma attention cached={cached} rows={rows} heads={heads} groups={groups} rounded={against_rounded} unrounded={against_unrounded}");
+    assert!(actual.iter().all(|value| value.is_finite()), "mma attention produced a non-finite value");
+    assert!(against_rounded < 2e-5, "cached={cached} rows={rows}: {against_rounded} of peak vs the fp16-rounded f64 oracle");
+    assert!(
+        against_unrounded > 2.0 * against_rounded,
+        "degenerate control: output matches the unrounded inputs ({against_unrounded}) as tightly as the rounded ones ({against_rounded})"
+    );
+}
+
 const POLICY_PREFILL_TOKENS: usize = 512;
 const POLICY_PREFILL_FEATURES: usize = 1024;
 const POLICY_PREFILL_DEPTH: usize = 1024;

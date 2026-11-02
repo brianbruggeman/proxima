@@ -2,13 +2,15 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{BoundOp, BoundOpKind, DType};
+use proxima_tensor::{BoundOp, BoundOpKind, DType, NumericPolicy};
 
+use crate::cuda::mma_gemm::MMA_INSTRUCTION;
 use crate::cuda::{
     CudaAttentionClass, cuda_cached_attention_class, cuda_float_literal, preamble,
 };
+use crate::cuda_cached_attention_mma::{MMA_ATTENTION_BODY, MMA_ATTENTION_HELPERS};
 use crate::cuda_cached_attention_tiled::{
-    TILED_ATTENTION_BODY, cached_attention_tile_rows,
+    TILED_ATTENTION_BODY, cached_attention_tile_rows, cached_attention_uses_mma,
 };
 use crate::error::EmitError;
 
@@ -16,6 +18,7 @@ pub(crate) fn cached_attention_entry_name(
     resolved: &BoundOp,
     class: CudaAttentionClass,
     split_chunks: Option<u64>,
+    numeric_policy: NumericPolicy,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         kv_heads,
@@ -36,8 +39,9 @@ pub(crate) fn cached_attention_entry_name(
     } else {
         String::new()
     };
+    let mma_token = if cached_attention_uses_mma(&resolved.kind, numeric_policy) { "_mma16x8x8h" } else { "" };
     let tile_token = cached_attention_tile_rows(&resolved.kind)
-        .map_or_else(String::new, |tile_rows| format!("_tq{tile_rows}"));
+        .map_or_else(String::new, |tile_rows| format!("_tq{tile_rows}{mma_token}"));
     let split_token = split_chunks.map_or_else(String::new, |chunks| format!("_sk{chunks}"));
     Ok(format!(
         "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_n{new_key_rows}{tile_token}{split_token}_s{:08x}_l{}_u{}",
@@ -51,13 +55,20 @@ pub(crate) fn cached_attention_entry_name(
 pub(crate) fn render_cached_attention_cuda(
     resolved: &BoundOp,
     entry: &str,
+    numeric_policy: NumericPolicy,
 ) -> Result<String, EmitError> {
-    render_attention(resolved, entry, "", &unsplit_tail(resolved))
+    let helpers = if cached_attention_uses_mma(&resolved.kind, numeric_policy) {
+        format!("{MMA_INSTRUCTION}{MMA_ATTENTION_HELPERS}")
+    } else {
+        String::new()
+    };
+    render_attention(resolved, entry, "", &unsplit_tail(resolved, numeric_policy), &helpers)
 }
 
-fn unsplit_tail(resolved: &BoundOp) -> String {
+fn unsplit_tail(resolved: &BoundOp, numeric_policy: NumericPolicy) -> String {
+    let body = if cached_attention_uses_mma(&resolved.kind, numeric_policy) { MMA_ATTENTION_BODY } else { TILED_ATTENTION_BODY };
     match cached_attention_tile_rows(&resolved.kind) {
-        Some(tile_rows) => format!("    constexpr int tile_rows = {tile_rows};\n{TILED_ATTENTION_BODY}"),
+        Some(tile_rows) => format!("    constexpr int tile_rows = {tile_rows};\n{body}"),
         None => String::from(CACHED_ATTENTION_BODY),
     }
 }
@@ -67,6 +78,7 @@ pub(crate) fn render_attention(
     entry: &str,
     extra_param: &str,
     tail: &str,
+    helpers: &str,
 ) -> Result<String, EmitError> {
     let Some(class) = cuda_cached_attention_class(&resolved.kind) else {
         return Err(EmitError::CudaUnsupportedOpKind {
@@ -129,6 +141,7 @@ pub(crate) fn render_attention(
     };
     let mut source = String::new();
     preamble(&mut source, "float");
+    source.push_str(helpers);
     source.push_str("struct Uniforms { long total_elements; };\n\n");
     source.push_str(&format!(
         "extern \"C\" __global__ void {entry}(\n    {params},\n    float* __restrict__ out,\n    const Uniforms* __restrict__ u_ptr{extra_param}) {{\n"
