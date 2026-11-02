@@ -4196,6 +4196,7 @@ only the single-row decode kernel reads the half-width device cache",
         let mut kv_carried: Vec<KvCarryLeaf> = Vec::new();
         let mut kv_carried_layers: Vec<bool> = vec![false; layer_caches.len()];
         let mut kv_carry_program = 0usize;
+        let mut kv_leaf_memo: BTreeMap<usize, Vec<KvCarryLeaf>> = BTreeMap::new();
         let mut kv_live = false;
         'decode: while step < max_tokens {
             settled_tokens.clear();
@@ -4546,20 +4547,32 @@ only the single-row decode kernel reads the half-width device cache",
                     }
                     let carry_kv_this_step = kv_carry_eligible
                         && runtime.carries_state_on_device()
-                        && !speculative_step
                         && self.ffn_routing != FfnRouting::Routed;
-                    if !kv_carried.is_empty()
-                        && (!carry_kv_this_step
-                            || kv_carry_program != active_program.as_ptr() as usize)
-                    {
+                    let program_address = active_program.as_ptr() as usize;
+                    let step_leaves = carry_kv_this_step.then(|| {
+                        memoized_kv_leaves(
+                            &mut kv_leaf_memo,
+                            program_address,
+                            active_program,
+                            &cache_names,
+                            active_layer_roots,
+                        )
+                        .to_vec()
+                    });
+                    let leaves_follow_program = step_leaves
+                        .as_deref()
+                        .is_some_and(|leaves| kv_leaves_share_inputs(&kv_carried, leaves));
+                    if !kv_carried.is_empty() && !leaves_follow_program {
                         flush_carried_kv(runtime, &mut layer_caches, &kv_carried)?;
                         kv_carried.clear();
                         kv_carried_layers.fill(false);
                         kv_carry_program = 0;
                         kv_live = false;
                     }
-                    if carry_kv_this_step && kv_carried.is_empty() {
-                        kv_carried = kv_carry_leaves(active_program, &cache_names, active_layer_roots);
+                    if let Some(leaves) = step_leaves
+                        && (kv_carried.is_empty() || kv_carry_program != program_address)
+                    {
+                        kv_carried = leaves;
                         for leaf in &kv_carried {
                             kv_carried_layers[leaf.layer] = true;
                         }
@@ -4567,7 +4580,7 @@ only the single-row decode kernel reads the half-width device cache",
                             kv_carried.iter().map(|leaf| (leaf.input, leaf.output)).collect(),
                             cached_len as u64,
                         );
-                        kv_carry_program = active_program.as_ptr() as usize;
+                        kv_carry_program = program_address;
                     } else if carry_kv_this_step {
                         runtime.set_kv_cached_rows(cached_len as u64);
                     }
@@ -6861,8 +6874,14 @@ did not hold every cached position)",
                         // the rows its snapshot names (`LayerCache::truncate`'s
                         // own doc -- proved against an incrementally-appended
                         // prefix in `layer_cache_truncate_tests`).
+                        if kv_on_device {
+                            runtime.accept_kv_rows(emitted.len() as u64)?;
+                        }
                         if let ServingState::Rollback { snapshot, .. } = &settled {
                             for (layer, widths) in layer_row_widths.iter().enumerate() {
+                                if kv_appended_view.get(layer).copied().unwrap_or(false) {
+                                    continue;
+                                }
                                 if let (
                                     LayerPadRowWidths::Attention {
                                         even_odd_row,
@@ -8584,6 +8603,7 @@ pub(super) fn map_expert_sources_to_segment<'source>(
     Ok(mapped)
 }
 
+#[derive(Clone)]
 struct KvCarryLeaf {
     input: NodeId,
     output: NodeId,
@@ -8704,7 +8724,27 @@ fn kv_carry_leaves(
         .collect()
 }
 
-fn write_kv_field(state: &mut LayerCacheState, field: usize, values: Vec<f32>) {
+fn memoized_kv_leaves<'memo>(
+    memo: &'memo mut BTreeMap<usize, Vec<KvCarryLeaf>>,
+    program_address: usize,
+    program: &[Op],
+    cache_names: &[LayerCacheNames],
+    layer_roots: &[LayerCacheRoots],
+) -> &'memo [KvCarryLeaf] {
+    memo.entry(program_address)
+        .or_insert_with(|| kv_carry_leaves(program, cache_names, layer_roots))
+}
+
+fn kv_leaves_share_inputs(carried: &[KvCarryLeaf], next: &[KvCarryLeaf]) -> bool {
+    carried.len() == next.len()
+        && carried
+            .iter()
+            .zip(next)
+            .all(|(left, right)| (left.input, left.layer, left.field) == (right.input, right.layer, right.field))
+}
+
+fn write_kv_field(
+state: &mut LayerCacheState, field: usize, values: Vec<f32>) {
     match (state, field) {
         (LayerCacheState::Attention(cache), 0) => cache.k_even = values,
         (LayerCacheState::Attention(cache), 1) => cache.k_odd = values,

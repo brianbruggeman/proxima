@@ -3045,7 +3045,7 @@ impl CudaPlan {
         self.carry.cached_rows = cached_rows;
         self.carry.fresh_cached_rows = Some(cached_rows);
         if self.carry.rows.selects(&wanted) {
-            return true;
+            return self.drive_rows(KvEvent::Select { pairs: wanted }).is_ok();
         }
         let appendable = self.constraints.is_none()
             && pairs

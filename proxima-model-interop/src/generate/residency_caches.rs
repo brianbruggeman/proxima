@@ -3190,6 +3190,18 @@ impl BackendRuntime {
         self.kv_carry_accepted
     }
 
+    /// The last evaluation kept `kept` of the KV rows it appended on the device; the rest are dropped
+    /// by moving the valid-row count back.
+    pub(super) fn accept_kv_rows(&mut self, kept: u64) -> Result<(), InteropError> {
+        #[cfg(feature = "cuda")]
+        if let Some(plan) = self.active_cuda_shape.as_ref().and_then(|shape| self.plans.get_mut(shape)) {
+            omega::backend::accept_cuda_rows(plan, kept)?;
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = kept;
+        Ok(())
+    }
+
     /// Reads the device-held attention KV back to the host, keyed by cache input node.
     pub(super) fn drain_kv_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
         #[cfg(feature = "cuda")]
@@ -5096,6 +5108,10 @@ impl BackendRuntime {
 
     pub(super) fn kv_carry_accepted(&self) -> bool {
         false
+    }
+
+    pub(super) fn accept_kv_rows(&mut self, _kept: u64) -> Result<(), InteropError> {
+        Ok(())
     }
 
     pub(super) fn drain_kv_carry(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, InteropError> {
