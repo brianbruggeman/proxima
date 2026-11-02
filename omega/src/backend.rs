@@ -224,11 +224,17 @@ impl GpuDriver {
 
     /// Capability only: whether this driver renders every `BoundOpKind::CachedAttention`
     /// it is handed, usable before a plan exists. The padding decision itself is the graph
-    /// property [`plan_pads_kv`]; wgpu runs the unfused chain and CUDA renders the fused
-    /// op only where its matcher accepts the form, so neither claims it up front.
+    /// property [`plan_pads_kv`]; wgpu runs the unfused chain. CUDA renders the fused op
+    /// where its matcher accepts the form, so the caller checks the built plan with
+    /// [`plan_pads_kv`] and refuses a plan that bound padded KV without it.
     #[must_use]
     pub const fn renders_fused_cached_attention(self) -> bool {
-        matches!(self, GpuDriver::Metal)
+        match self {
+            GpuDriver::Metal => true,
+            GpuDriver::Wgpu => false,
+            #[cfg(feature = "cuda-driver")]
+            GpuDriver::Cuda => true,
+        }
     }
 }
 
@@ -2021,14 +2027,11 @@ mod tests {
     static ENVIRONMENT_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
-    fn only_the_metal_driver_always_renders_the_fused_cached_attention_bound() {
+    fn metal_and_cuda_render_the_fused_cached_attention_bound_and_wgpu_does_not() {
         assert!(GpuDriver::Metal.renders_fused_cached_attention());
         assert!(!GpuDriver::Wgpu.renders_fused_cached_attention());
         #[cfg(feature = "cuda-driver")]
-        assert!(
-            !GpuDriver::Cuda.renders_fused_cached_attention(),
-            "cuda fuses per plan, decided by plan_pads_kv"
-        );
+        assert!(GpuDriver::Cuda.renders_fused_cached_attention());
     }
 
     #[test]

@@ -153,13 +153,13 @@ mod configured_runtime_tests {
 
     #[cfg(all(feature = "cuda", not(target_os = "macos")))]
     #[test]
-    fn a_cuda_prefill_binds_an_empty_cached_range_not_the_bucket() {
+    fn a_cuda_prefill_binds_the_bucket_before_any_plan_exists() {
         let runtime = gpu_runtime();
 
         assert!(runtime.uses_gpu());
         assert_eq!(
-            crate::generate::cached_kv_extent(runtime.pads_cached_kv(5), 0, 5, 32),
-            0
+            crate::generate::cached_kv_extent(runtime.pads_cached_kv(5), 0, 5, 32, 0),
+            32
         );
     }
 
@@ -171,7 +171,7 @@ mod configured_runtime_tests {
 
         assert!(!runtime.pads_cached_kv(1));
         assert_eq!(
-            crate::generate::cached_kv_extent(runtime.pads_cached_kv(1), 33, 1, 32),
+            crate::generate::cached_kv_extent(runtime.pads_cached_kv(1), 33, 1, 32, 0),
             33
         );
     }
@@ -188,7 +188,7 @@ mod configured_runtime_tests {
             "the decision is per plan width, a width with no built plan binds exact"
         );
         assert_eq!(
-            crate::generate::cached_kv_extent(runtime.pads_cached_kv(1), 33, 1, 32),
+            crate::generate::cached_kv_extent(runtime.pads_cached_kv(1), 33, 1, 32, 0),
             64
         );
     }
@@ -200,7 +200,7 @@ mod configured_runtime_tests {
 
         assert!(runtime.uses_gpu());
         assert_eq!(
-            crate::generate::cached_kv_extent(runtime.pads_cached_kv(5), 0, 5, 32),
+            crate::generate::cached_kv_extent(runtime.pads_cached_kv(5), 0, 5, 32, 0),
             32
         );
     }
@@ -3150,6 +3150,8 @@ impl BackendRuntime {
         if !self.plans.contains_key(&shape) {
             self.plans.clear();
         }
+        #[cfg(feature = "gpu")]
+        let bound_padded = self.pads_cached_kv(symbols[0] as usize);
         #[cfg(feature = "cuda")]
         let misses_before = self.plan_misses;
         #[cfg(feature = "cuda")]
@@ -3232,9 +3234,16 @@ impl BackendRuntime {
             Self::emit_plan_footprint_diff(&previous_footprint, &previous_kernel_keys, metal_plan);
         }
         #[cfg(feature = "gpu")]
-        self.kv_pad.entry(symbols[0] as usize).or_insert_with(|| {
-            omega::backend::plan_pads_kv(plan, |name| name.starts_with(KV_CACHE_INPUT_PREFIX))
-        });
+        {
+            let new_count = symbols[0] as usize;
+            let pads = *self.kv_pad.entry(new_count).or_insert_with(|| {
+                omega::backend::plan_pads_kv(plan, |name| name.starts_with(KV_CACHE_INPUT_PREFIX))
+            });
+            if bound_padded && !pads {
+                self.kv_pad.remove(&new_count);
+                return Err(InteropError::PaddedKvReadUnfused { new_count });
+            }
+        }
         #[cfg(feature = "cuda")]
         let plan_hit = self.plan_misses == misses_before;
         #[cfg(feature = "cuda")]
@@ -4493,7 +4502,7 @@ impl BackendRuntime {
 
     /// Moves the cached CUDA plan whose key differs from `shape` only in the KV
     /// length to `shape`'s symbols and re-keys it, so the lookup that follows is a
-    /// hit. The CUDA program runs the unfused chain, so every K/V-sized op changes
+    /// hit. Every K/V-sized op, the fused cached attention included, changes
     /// extents with the length but none changes structure.
     #[cfg(feature = "cuda")]
     pub(super) fn refit_near_cuda_plan(

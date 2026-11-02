@@ -1404,11 +1404,8 @@ fn entry_name(
         resolved,
         packed_operands,
         crate::identity::MetalOnlyExtras::default(),
-        // Cuda has no `BoundOpKind::CachedAttention` renderer
-        // (`proxima_tensor::bind::bind_with_fusion`'s own doc: this driver
-        // calls it with `fuse_cached_attention: false`), so a policy value
-        // never actually varies this identity string -- the default is
-        // correct, not a placeholder.
+        // the cached-attention kernel text (`cuda_cached_attention`) carries no
+        // numeric-policy value, so the default never varies this identity string
         proxima_tensor::NumericPolicy::default(),
     );
     format!("{identity}{}", text_plan_token(resolved, quantized, numeric_policy, device))

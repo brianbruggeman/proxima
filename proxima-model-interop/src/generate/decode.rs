@@ -3693,6 +3693,11 @@ impl<'file> LoadedModel<'file> {
         let draft_limit =
             speculative_draft_limit(&serving_config.speculative, forced_draft_width).unwrap_or(0);
         let ring_slack = ring_slack_rows(serving_config, forced_draft_width);
+        let kv_capacity = kv_extent(
+            positions_needed + draft_limit + 1,
+            self.serving_context_length(serving_config)? as usize,
+            serving_config.kv_bucket_tokens,
+        );
         let mut layer_caches: Vec<LayerCacheState> = match seed {
             Some(state) => state.layer_caches,
             None => self.fresh_layer_caches(
@@ -4572,16 +4577,15 @@ only the single-row decode kernel reads the half-width device cache",
                             / 1e6,
                         "named_blocks_phase"
                     );
-                    // Rounds `cached_len` up to `ServingConfig::kv_bucket_tokens`
-                    // (`kv_extent`'s own doc) -- `usize::MAX` in place of the
-                    // placed-KV path's fixed buffer capacity: the two-range KV
-                    // cache below is a growing `Vec`, not a preallocated
-                    // device buffer, so there is no hard cap to clamp against.
+                    // A padded plan binds the call's whole KV capacity: the fused
+                    // `CachedAttention` bound reads the live length at runtime, so
+                    // the symbol is constant for the call and the plan never refits.
                     let kv_bound_extent = cached_kv_extent(
                         runtime.pads_cached_kv(new_count),
                         cached_len,
                         new_count,
                         serving_config.kv_bucket_tokens,
+                        kv_capacity,
                     );
                     // `gqa_cached_forward_program_with_experts`'s own
                     // `cached_len` `Op::Input` -- always present regardless of
@@ -8286,6 +8290,7 @@ did not hold every cached position)",
             0,
             ids.len(),
             serving_config.kv_bucket_tokens,
+            0,
         );
 
         let sliding_len_scalar = sliding_cached_len_scalar(&layer_caches, 0);
