@@ -6,9 +6,12 @@
 //! queue and nothing here frames a byte.
 
 use core::pin::pin;
+use std::cell::Cell;
+use std::collections::BTreeSet;
 use std::io;
 use std::net::SocketAddrV4;
 use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::Duration;
@@ -21,7 +24,11 @@ use futures::io::AsyncWriteExt;
 use proxima_http::http1::H1ClientUpstream;
 use proxima_core::time::{self, Instant};
 use proxima_net::frame_stack::FrameUpstream;
-use proxima_primitives::pipe::SendPipe;
+use proxima_core::signal::{Signal, SignalGuard};
+use proxima_primitives::pipe::clock::TimeClock;
+use proxima_primitives::pipe::resilience::Retry;
+use proxima_primitives::pipe::{Backoff, Jitter, Pipe, RetryController, RetryRules, Retryable, SendPipe};
+use proxima_primitives::sync::watch;
 use proxima_vm::kernel_modules::load_modules;
 use proxima_vm::frame_pipe::FrameSource;
 use proxima_vm::kvm::host_wire::{RingingTx, ZeroMint, dial_guest, dial_guest_when_listening};
@@ -30,7 +37,10 @@ use proxima_vm::linux::{self, LinuxBootInputs, LinuxGuestLimits};
 use proxima_vm::oci;
 use proxima_vm::x86_boot::SetupHeader;
 
+use super::process::RestartPolicy;
 use super::vm::{GuestSpec, LinuxRoot, VmSpec, read_guest_file};
+use crate::SwappablePipe;
+use crate::control_plane::{PipeState, PipeStatus};
 use crate::error::ProximaError;
 use crate::pipe::{PipeHandle, into_handle};
 use crate::request::{Request, Response};
@@ -43,7 +53,13 @@ const RESIDENT_FLAG: &str = "proxima.resident";
 const MODULES_DISABLED: &str = "nomodules";
 const PUMP_THREAD: &str = "proxima-vm-resident-pump";
 
+const SUPERVISOR_THREAD: &str = "proxima-vm-resident-supervisor";
+// the kubernetes crash-loop ceiling, so a restart storm backs off like a pod's
+const RESTART_BACKOFF_MAX: Duration = Duration::from_secs(300);
+const RESTART_BACKOFF_FACTOR: u32 = 2;
+
 static GUESTS_BOOTED: AtomicU64 = AtomicU64::new(0);
+static GUEST_RESTARTS: AtomicU64 = AtomicU64::new(0);
 
 /// Resident guests this process has started; one per built resident upstream,
 /// however many requests they served.
@@ -54,21 +70,30 @@ pub fn guests_booted() -> u64 {
 
 type GuestDial = FrameUpstream<FrameSource, RingingTx, ZeroMint>;
 
-/// A guest kept up for the life of the upstream, the HTTP client that talks
-/// to it, and the stop half of the task pumping the guest's frames. The guest
-/// is stopped by `ResidentLinux`'s own drop, so it outlives no request and no
-/// handle: `client` drops first, then `pump_stop` ends the pump thread, and the
-/// vCPU thread is joined last.
+/// Resident guests booted again after one ended; read beside [`guests_booted`].
+#[must_use]
+pub fn guest_restarts() -> u64 {
+    GUEST_RESTARTS.load(Ordering::Relaxed)
+}
+
+/// The swappable HTTP client in front of whichever guest is current, the status
+/// the supervisor publishes, and the guard that ends the supervisor (and with it
+/// the guest) when the upstream drops.
 pub struct ResidentVmUpstream {
-    client: H1ClientUpstream<GuestDial>,
-    _pump_stop: oneshot::Sender<()>,
-    guest: ResidentLinux,
+    pipe: Arc<SwappablePipe>,
+    status: watch::Receiver<PipeStatus>,
+    _shutdown: SignalGuard,
 }
 
 impl ResidentVmUpstream {
     #[must_use]
     pub fn is_running(&self) -> bool {
-        self.guest.is_running()
+        self.status.borrow().state == PipeState::Running
+    }
+
+    #[must_use]
+    pub fn status(&self) -> watch::Receiver<PipeStatus> {
+        self.status.clone()
     }
 }
 
@@ -81,7 +106,7 @@ impl SendPipe for ResidentVmUpstream {
         &self,
         request: Request<Bytes>,
     ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
-        SendPipe::call(&self.client, request)
+        SendPipe::call(&*self.pipe, request)
     }
 }
 
@@ -223,7 +248,7 @@ async fn connect_when_listening(dial: &GuestDial) -> io::Result<u32> {
     Ok(dial_attempts)
 }
 
-async fn pump_until_stopped(label: String, dial: GuestDial, mut stop: oneshot::Receiver<()>) {
+async fn pump_until_stopped(label: String, dial: GuestDial, mut stop: oneshot::Receiver<()>, ended: Signal) {
     let failure = {
         let pump = pin!(dial.pump());
         match select(pump, &mut stop).await {
@@ -238,14 +263,15 @@ async fn pump_until_stopped(label: String, dial: GuestDial, mut stop: oneshot::R
             "resident guest frame pump ended while the upstream was live; its connections are dead"
         );
     }
+    ended.fire();
 }
 
-fn spawn_pump(label: &str, dial: GuestDial) -> Result<oneshot::Sender<()>, ProximaError> {
+fn spawn_pump(label: &str, dial: GuestDial, ended: Signal) -> Result<oneshot::Sender<()>, ProximaError> {
     let (stop_sender, stop_receiver) = oneshot::channel();
     let pump_label = label.to_owned();
     thread::Builder::new()
         .name(PUMP_THREAD.to_owned())
-        .spawn(move || block_on(pump_until_stopped(pump_label, dial, stop_receiver)))
+        .spawn(move || block_on(pump_until_stopped(pump_label, dial, stop_receiver, ended)))
         .map_err(|error| upstream_error(label, "spawn the frame pump", error))?;
     Ok(stop_sender)
 }
@@ -258,10 +284,35 @@ async fn await_listening(label: &str, dial: &GuestDial, limit: Duration) -> Resu
     }
 }
 
-/// Boots the guest once and returns the pipe that proxies into it. The pipe
-/// is handed back only after the guest accepts a connection, so the first
-/// request never races the boot.
-pub(super) async fn build_resident(label: &str, spec: &VmSpec) -> Result<PipeHandle, ProximaError> {
+
+struct Booted {
+    guest: ResidentLinux,
+    dial: GuestDial,
+    pump_stop: oneshot::Sender<()>,
+    pump_ended: Signal,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GuestEnd {
+    Ended,
+    Stopped,
+}
+
+impl Retryable for GuestEnd {
+    fn retry_status(&self) -> Option<u16> {
+        None
+    }
+
+    fn is_success(&self) -> bool {
+        true
+    }
+}
+
+fn guest_client(label: &str, dial: &GuestDial) -> PipeHandle {
+    into_handle(H1ClientUpstream::new(dial.clone(), GUEST_IP.to_string(), label))
+}
+
+async fn boot_guest(label: &str, spec: &VmSpec) -> Result<Booted, ProximaError> {
     let mut timeline = Timeline::begin();
     let inputs = boot_inputs(label, spec, &spec.modules_root, &mut timeline)?;
     let link = LinkConfig { mac: GUEST_MAC, frame_capacity: FRAME_CAPACITY, host_consumer: None };
@@ -277,7 +328,8 @@ pub(super) async fn build_resident(label: &str, spec: &VmSpec) -> Result<PipeHan
         "resident guest vcpu thread started, the host now waits for its server to listen"
     );
     let dial = dial_guest(host, SocketAddrV4::new(GUEST_IP, spec.guest_port));
-    let pump_stop = spawn_pump(label, dial.clone())?;
+    let pump_ended = Signal::new();
+    let pump_stop = spawn_pump(label, dial.clone(), pump_ended.clone())?;
     let (elapsed_ms, phase_ms) = timeline.lap();
     proxima_telemetry::info!(
         label = %label,
@@ -296,6 +348,164 @@ pub(super) async fn build_resident(label: &str, spec: &VmSpec) -> Result<PipeHan
         phase_ms,
         "resident guest accepted a connection, the upstream is ready for requests"
     );
-    let client = H1ClientUpstream::new(dial, GUEST_IP.to_string(), label);
-    Ok(into_handle(ResidentVmUpstream { client, _pump_stop: pump_stop, guest }))
+    Ok(Booted { guest, dial, pump_stop, pump_ended })
+}
+
+struct ResidentRun {
+    label: String,
+    spec: VmSpec,
+    pipe: Arc<SwappablePipe>,
+    shutdown: Signal,
+    status: watch::Sender<PipeStatus>,
+    first: Cell<Option<Booted>>,
+    restarts: Cell<u64>,
+}
+
+impl ResidentRun {
+    fn publish(&self, state: PipeState, message: Option<String>) {
+        let status = PipeStatus {
+            name: self.label.clone(),
+            state,
+            uptime_ms: None,
+            restart_count: self.restarts.get(),
+            last_message: message,
+        };
+        // no receiver left means the upstream was dropped, and nobody reads the status
+        let _ = self.status.send(status);
+    }
+
+    async fn next_guest(&self) -> Result<Booted, ProximaError> {
+        if let Some(first) = self.first.take() {
+            return Ok(first);
+        }
+        let booted = boot_guest(&self.label, &self.spec).await.inspect_err(|error| {
+            self.publish(PipeState::Failed, Some(error.to_string()));
+        })?;
+        self.pipe.swap(guest_client(&self.label, &booted.dial));
+        self.restarts.set(self.restarts.get() + 1);
+        GUEST_RESTARTS.fetch_add(1, Ordering::Relaxed);
+        Ok(booted)
+    }
+
+    fn end_of(&self, booted: Booted) -> Result<GuestEnd, ProximaError> {
+        let Booted { guest, pump_stop, .. } = booted;
+        let outcome = guest.stop();
+        drop(pump_stop);
+        match outcome.failure {
+            Some(failure) => {
+                self.publish(PipeState::Failed, Some(failure.clone()));
+                Err(upstream_error(&self.label, "resident guest ended", failure))
+            }
+            None => {
+                self.publish(PipeState::Stopped, Some("resident guest ended".to_owned()));
+                match self.spec.restart {
+                    RestartPolicy::Always => {
+                        Err(upstream_error(&self.label, "resident guest ended", "a clean end under restart always"))
+                    }
+                    RestartPolicy::OnFailure | RestartPolicy::Never => Ok(GuestEnd::Ended),
+                }
+            }
+        }
+    }
+
+    async fn run(&self) -> Result<GuestEnd, ProximaError> {
+        if self.shutdown.is_fired() {
+            return Ok(GuestEnd::Stopped);
+        }
+        let booted = self.next_guest().await?;
+        self.publish(PipeState::Running, None);
+        let ended = booted.pump_ended.fired();
+        match select(pin!(ended), pin!(self.shutdown.fired())).await {
+            Either::Left(_) => self.end_of(booted),
+            Either::Right(_) => Ok(GuestEnd::Stopped),
+        }
+    }
+}
+
+impl Pipe for ResidentRun {
+    type In = ();
+    type Out = GuestEnd;
+    type Err = ProximaError;
+
+    fn call(&self, _input: ()) -> impl Future<Output = Result<GuestEnd, ProximaError>> {
+        self.run()
+    }
+}
+
+fn restart_controller(spec: &VmSpec) -> RetryController {
+    let retry_on_error = !matches!(spec.restart, RestartPolicy::Never);
+    RetryController {
+        rules: RetryRules { retry_on_status: BTreeSet::new(), retry_on_error, idempotent_only: false },
+        backoff: Backoff::Exponential {
+            initial: Duration::from_millis(spec.restart_delay_ms),
+            factor: RESTART_BACKOFF_FACTOR,
+            max: RESTART_BACKOFF_MAX,
+        },
+        jitter: Jitter::None,
+        max_attempts: match spec.max_restart_attempts {
+            0 => u32::MAX,
+            restarts => restarts.saturating_add(1),
+        },
+        deadline: None,
+    }
+}
+
+fn spawn_supervisor(run: ResidentRun, controller: RetryController) -> Result<(), ProximaError> {
+    let label = run.label.clone();
+    let thread_label = label.clone();
+    thread::Builder::new()
+        .name(SUPERVISOR_THREAD.to_owned())
+        .spawn(move || {
+            let supervised = Retry::new(run, controller, TimeClock, 0);
+            match block_on(Pipe::call(&supervised, ())) {
+                Ok(end) => proxima_telemetry::info!(
+                    label = %thread_label,
+                    end = ?end,
+                    "resident guest supervisor finished, the restart policy declines another boot"
+                ),
+                Err(error) => proxima_telemetry::error!(
+                    label = %thread_label,
+                    error = %error,
+                    "resident guest supervisor gave up; the upstream serves no more requests"
+                ),
+            }
+        })
+        .map(drop)
+        .map_err(|error| upstream_error(&label, "spawn the guest supervisor", error))
+}
+
+/// Boots the guest and returns the pipe that proxies into it, served by a
+/// supervisor that boots a new guest when this one ends and the `RestartPolicy`
+/// allows. The pipe is handed back only after the first guest accepts a
+/// connection, so the first request never races the boot. Each restart rebuilds
+/// its boot inputs from the spec through the same path as the first boot, so
+/// no 25 MB image is held between boots.
+pub(super) async fn build_resident(label: &str, spec: &VmSpec) -> Result<PipeHandle, ProximaError> {
+    build_upstream(label, spec).await.map(into_handle)
+}
+
+/// [`build_resident`] before the pipe is erased, for a caller that reads the
+/// published [`ResidentVmUpstream::status`].
+pub async fn build_upstream(label: &str, spec: &VmSpec) -> Result<ResidentVmUpstream, ProximaError> {
+    let first = boot_guest(label, spec).await?;
+    let pipe = Arc::new(SwappablePipe::new(guest_client(label, &first.dial)));
+    let (status_sender, status) = watch::channel(PipeStatus {
+        name: label.to_owned(),
+        state: PipeState::Running,
+        uptime_ms: None,
+        restart_count: 0,
+        last_message: None,
+    });
+    let shutdown = Signal::new();
+    let run = ResidentRun {
+        label: label.to_owned(),
+        spec: spec.clone(),
+        pipe: pipe.clone(),
+        shutdown: shutdown.clone(),
+        status: status_sender,
+        first: Cell::new(Some(first)),
+        restarts: Cell::new(0),
+    };
+    spawn_supervisor(run, restart_controller(spec))?;
+    Ok(ResidentVmUpstream { pipe, status, _shutdown: shutdown.guard() })
 }

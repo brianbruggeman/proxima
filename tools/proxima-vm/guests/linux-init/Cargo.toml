@@ -55,6 +55,11 @@ path = "src/bin/oci.rs"
 name = "entry-probe"
 path = "src/bin/entry_probe.rs"
 
+# serves one HTTP request on 0.0.0.0:80 over the virtio net, then powers off: the resident-restart fixture
+[[bin]]
+name = "serve-once-init"
+path = "src/bin/serve_once.rs"
+
 [profile.release]
 opt-level = "s"
 lto = true
