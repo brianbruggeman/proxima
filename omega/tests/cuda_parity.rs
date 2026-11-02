@@ -3977,3 +3977,124 @@ mod pooled_intermediates {
         assert!(worst < 1e-4, "pooled chain diverges from cpu: worst relative {worst}");
     }
 }
+
+fn attention_oracle(
+    rows: usize,
+    heads: usize,
+    groups: usize,
+    head_dim: usize,
+    planes: &[Vec<f32>; 5],
+) -> Vec<f64> {
+    let pair = head_dim / 2;
+    let query_heads = heads * groups;
+    let [query_low, query_high, key_low, key_high, values] = planes;
+    let scale = 1.0 / (head_dim as f64).sqrt();
+    let mut out = vec![0.0; rows * query_heads * head_dim];
+    for row in 0..rows {
+        for head in 0..query_heads {
+            let kv = head / groups;
+            let dot = |key: usize| -> f64 {
+                (0..pair)
+                    .map(|d| {
+                        let q = row * query_heads * pair + head * pair + d;
+                        let k = key * heads * pair + kv * pair + d;
+                        f64::from(query_low[q]) * f64::from(key_low[k])
+                            + f64::from(query_high[q]) * f64::from(key_high[k])
+                    })
+                    .sum::<f64>()
+                    * scale
+            };
+            let scores: Vec<f64> = (0..=row).map(dot).collect();
+            let peak = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let weights: Vec<f64> = scores.iter().map(|score| (score - peak).exp()).collect();
+            let total: f64 = weights.iter().sum();
+            for d in 0..head_dim {
+                let mixed: f64 = weights
+                    .iter()
+                    .enumerate()
+                    .map(|(key, weight)| weight * f64::from(values[key * heads * head_dim + kv * head_dim + d]))
+                    .sum();
+                out[(row * query_heads + head) * head_dim + d] = mixed / total;
+            }
+        }
+    }
+    out
+}
+
+fn causal_attention_kind(rows: u64, heads: u64, groups: u64, head_dim: u64) -> proxima_tensor::BoundOpKind {
+    proxima_tensor::BoundOpKind::CachedAttention {
+        operands: (0..8)
+            .map(|index| {
+                (
+                    NodeId(index),
+                    proxima_tensor::Layout { base: 0, strides: vec![1_i64].into() },
+                    None,
+                )
+            })
+            .collect(),
+        query_rows: rows,
+        cached_key_rows: 0,
+        new_key_rows: rows,
+        kv_heads: heads,
+        query_groups: groups,
+        head_dim,
+        rotary_dim: head_dim,
+        scale: (1.0 / (head_dim as f64).sqrt()) as f32,
+        cached_lower_inclusive: i64::MIN,
+        new_upper_inclusive: 0,
+    }
+}
+
+#[proxima::test]
+#[case::tiled_prefill_512_rows_16q_8kv(512, 8, 2)]
+#[case::tiled_ragged_37_rows_16q_8kv(37, 8, 2)]
+#[case::tiled_ragged_37_rows_8q_2kv(37, 2, 4)]
+#[case::untiled_15_rows_16q_8kv(15, 8, 2)]
+#[case::untiled_single_row_decode(1, 8, 2)]
+async fn cuda_cached_attention_matches_f64_oracle_with_causal_mask(
+    #[case] rows: usize,
+    #[case] heads: usize,
+    #[case] groups: usize,
+) {
+    let head_dim = 128;
+    let pair = head_dim / 2;
+    let query_heads = heads * groups;
+    let planes = [
+        random_vec(11, rows * query_heads * pair),
+        random_vec(12, rows * query_heads * pair),
+        random_vec(13, rows * heads * pair),
+        random_vec(14, rows * heads * pair),
+        random_vec(15, rows * heads * head_dim),
+    ];
+    let op = proxima_tensor::BoundOp {
+        node: NodeId(8),
+        dtype: DType::FLOAT32,
+        extents: vec![rows as u64, heads as u64, groups as u64, head_dim as u64],
+        kind: causal_attention_kind(rows as u64, heads as u64, groups as u64, head_dim as u64),
+    };
+    let kernel = omega::emit_cuda(&op, &std::collections::BTreeMap::new()).expect("attention emits");
+    let driver = omega::CudaDriver::new(0).expect("a real cuda device");
+    let mut arena = driver.new_arena();
+    let dummy = [0.0_f32];
+    let order: [&[f32]; 8] = [
+        &planes[0], &planes[1], &dummy, &dummy, &planes[2], &planes[3], &dummy, &planes[4],
+    ];
+    for (index, values) in order.iter().enumerate() {
+        driver.upload_f32(&mut arena, NodeId(index as u32), values).expect("input uploads");
+    }
+    let vectors = (rows * query_heads) as i64;
+    driver
+        .launch_f32_persistent_sized(&mut arena, &kernel, &vectors.to_ne_bytes(), rows * query_heads * head_dim)
+        .expect("attention launches");
+    let actual = driver.read_f32(&arena, NodeId(8)).expect("output reads back");
+
+    let expected = attention_oracle(rows, heads, groups, head_dim, &planes);
+    let worst = actual
+        .iter()
+        .zip(&expected)
+        .map(|(got, want)| (f64::from(*got) - want).abs())
+        .fold(0.0, f64::max);
+    eprintln!("attention parity rows={rows} heads={heads} groups={groups} worst_abs={worst}");
+    assert_eq!(actual.len(), expected.len());
+    assert!(worst < 1e-4, "rows={rows}: worst abs error {worst} vs f64 oracle");
+}
