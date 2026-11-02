@@ -62,7 +62,7 @@ use alloc::vec::Vec;
 
 use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
-    ReduceInit, ScalarOp, StepArg,
+    NumericRewrite, ReduceInit, ScalarOp, StepArg, admit,
 };
 
 use crate::cuda_cached_attention::{cached_attention_entry_name, render_cached_attention_cuda};
@@ -74,7 +74,10 @@ use crate::epilogue::{
 use crate::error::EmitError;
 use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
-use crate::msl::{Binding, Codec, PackedOperands};
+use crate::lowering::{
+    Binding, Codec, PackedOperands, dispatch_bindings, gather_count, gather_is_reduction_invariant,
+    gather_slots, is_cooperative_reduce_op, reduction_dims,
+};
 
 mod block_dot;
 mod radix_dot;
@@ -311,7 +314,7 @@ pub fn emit_cuda_on_device(
     Ok(CudaKernel {
         source,
         entry,
-        bindings: bindings(resolved),
+        bindings: dispatch_bindings(resolved),
         grid,
         extra_outputs,
         prologue,
@@ -1123,60 +1126,6 @@ fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
     Ok(())
 }
 
-fn reduction_dims(resolved: &BoundOp, output_axes: &[u16]) -> Vec<u16> {
-    (0..resolved.extents.len() as u16)
-        .filter(|dim| !output_axes.contains(dim))
-        .collect()
-}
-
-fn gather_count(resolved: &BoundOp) -> usize {
-    resolved
-        .operands()
-        .iter()
-        .filter(|(_, _, gather)| gather.is_some())
-        .count()
-}
-
-/// For each operand, `Some(slot)` if it gathers — `slot` is its position
-/// among only the gathered operands, matching the order [`bindings`] appends
-/// `Indices` buffers in. Mirrors `crate::msl::gather_slots` exactly.
-fn gather_slots(resolved: &BoundOp) -> Vec<Option<usize>> {
-    let mut next = 0usize;
-    resolved
-        .operands()
-        .iter()
-        .map(|(_, _, gather)| {
-            gather.as_ref().map(|_| {
-                let slot = next;
-                next += 1;
-                slot
-            })
-        })
-        .collect()
-}
-
-fn bindings(resolved: &BoundOp) -> Vec<Binding> {
-    // `all_read_sources`, not `operands` -- a `BoundOpKind::Reduce` with a
-    // fused epilogue reads its `epilogue_operands` too, and those need a
-    // buffer bound at the exact `epi{index}` parameter position
-    // `kernel_signature` declares (see that function's own doc).
-    let mut bindings: Vec<Binding> = resolved
-        .all_read_sources()
-        .map(|(node, _, _)| Binding::Input(*node))
-        .collect();
-    for (_, _, gather) in resolved.operands() {
-        if let Some(gather_access) = gather {
-            bindings.push(Binding::Indices(gather_access.indices));
-        }
-    }
-    bindings.push(Binding::Output(resolved.node));
-    bindings.push(Binding::Uniforms);
-    if gather_count(resolved) > 0 {
-        bindings.push(Binding::Fault);
-    }
-    bindings
-}
-
 /// Threads that cooperate on one output row of a cooperative reduce. A
 /// broadcast-epilogue reduce over a single row (the decode-shaped norm) has one
 /// warp's worth of latency to hide, so it takes a whole block; every other
@@ -1360,22 +1309,6 @@ fn grid_threads(
     }
 }
 
-/// Whether every gathered operand selects the same index across the
-/// reduction. A zero index-layout stride on each reduction dim means one
-/// fetched index serves all lanes; any other stride selects a different
-/// row per reduction element and must stay serial. Mirrors
-/// `crate::msl::gather_is_reduction_invariant`.
-fn gather_is_reduction_invariant(resolved: &BoundOp, output_axes: &[u16]) -> bool {
-    let reduce_dims = reduction_dims(resolved, output_axes);
-    resolved.operands().iter().all(|(_, _, lookup)| {
-        lookup.as_ref().is_none_or(|lookup| {
-            reduce_dims
-                .iter()
-                .all(|&dim| lookup.index_layout.stride(dim) == 0)
-        })
-    })
-}
-
 /// Whether `resolved` is a `Keep::Reduce` fold whose `reduce_op` is
 /// associative and commutative and whose gathered operands (if any) are
 /// invariant over the reduction — the same set `crate::msl::reduce_is_cooperative`
@@ -1399,19 +1332,12 @@ fn reduce_is_cooperative(
             // the packed decode is still deterministic, but its reordered
             // f32 accumulation is a numeric-policy decision rather than an
             // unconditional backend rewrite.
-            numeric_policy.reassociation
+            admit(numeric_policy, NumericRewrite::TreeReduce).is_ok()
                 && gather_is_reduction_invariant(resolved, output_axes)
                 && is_cooperative_reduce_op(*reduce_op)
         }
         _ => false,
     }
-}
-
-fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
-    matches!(
-        op,
-        ScalarOp::Add | ScalarOp::Multiply | ScalarOp::Maximum | ScalarOp::Minimum
-    )
 }
 
 /// The `__shfl_down_sync` tree-reduction step for one cooperative

@@ -60,13 +60,18 @@
 //! upstream gate (`Float32` or `Float16` only) before a `BoundOp` ever
 //! reaches [`emit`].
 
+#[cfg(test)]
 use alloc::collections::BTreeMap;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_gguf::GgmlType;
-pub use proxima_primitives::Codec;
+pub use crate::lowering::{Binding, Codec, PackedOperands};
+pub(crate) use crate::lowering::{
+    dispatch_bindings, gather_count, gather_is_reduction_invariant, gather_slots,
+    is_cooperative_reduce_op, reduction_dims, with_reduction_dims,
+};
 use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
     NumericRewrite, ReduceInit, ScalarOp, StepArg, admit,

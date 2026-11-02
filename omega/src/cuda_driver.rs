@@ -34,15 +34,15 @@ use crate::cuda_kernel_cache::{
 };
 use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
-use crate::msl::{Binding, Codec, PackedOperands, gather_count};
+use crate::lowering::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{
     RefreshRefusal, changed_nodes, kv_read_only_by_fused_attention, refit_cached_attention_at,
     refresh_bound_ops, touched_positions, touches_changed,
 };
 use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Evaluated, Keep, NodeId, NumericPolicy, Op, QuantizedBlock,
-    Shapes, bind_unfused, bind_with_fusion, block_node_ids, correct_packed_matmul_layouts, infer,
-    prune_dead, resolve_named_blocks,
+    BoundOp, BoundOpKind, DType, Evaluated, Keep, NodeId, NumericPolicy, NumericRewrite, Op,
+    QuantizedBlock, Shapes, admit, bind_unfused, bind_with_fusion, block_node_ids,
+    correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks,
 };
 
 /// Errors from CUDA initialization, NVRTC compilation, or execution.
@@ -1797,7 +1797,8 @@ fn refresh_bound_resolved(
 fn cuda_supports_kind(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
     match kind {
         BoundOpKind::CachedAttention { .. } => {
-            numeric_policy.reassociation && cuda_cached_attention_class(kind).is_some()
+            admit(numeric_policy, NumericRewrite::ContextChunkMerge).is_ok()
+                && cuda_cached_attention_class(kind).is_some()
         }
         BoundOpKind::Elementwise { .. }
         | BoundOpKind::Reduce { .. }
@@ -3417,7 +3418,7 @@ mod tests {
     use crate::cuda::CudaGridSpec;
     use crate::cuda_kernel_cache::CacheKey;
     use crate::cuda_ptx_store::PtxStore;
-    use crate::msl::Codec;
+    use crate::lowering::Codec;
     use cudarc::nvrtc::{CompileOptions, Ptx};
     use proxima_tensor::{
         BoundOp, BoundOpKind, DType, NodeId, QuantizedBlock,

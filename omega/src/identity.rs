@@ -46,7 +46,7 @@ use proxima_tensor::{
     StepArg,
 };
 
-use crate::msl::PackedOperands;
+use crate::lowering::PackedOperands;
 
 /// Which renderer is asking [`kernel_identity`] for a fingerprint — selects
 /// only the name prefix. Every other axis is computed the same way for

@@ -6,9 +6,10 @@ use proxima_tensor::{BoundOp, BoundOpKind, NodeId};
 
 use super::{
     ATTENTION_BLOCK_WIDTH, Binding, CudaAttentionClass, CudaGridSpec, CudaKernel, EmitDevice,
-    EmitError, bindings, cuda_cached_attention_class,
+    EmitError, cuda_cached_attention_class,
 };
 use crate::cuda_cached_attention::render_attention;
+use crate::lowering::dispatch_bindings;
 use crate::cuda_cached_attention_tiled::cached_attention_tile_rows;
 
 /// Blocks per multiprocessor the split pass should launch so the device stays fed.
@@ -83,7 +84,7 @@ pub(super) fn split_pass(
     let tail = format!("    constexpr long chunks = {chunks}L;\n{SPLIT_BODY}");
     let source = render_attention(resolved, &split_entry, "", &tail)?;
     let scratch = split_scratch_node(resolved.node);
-    let bindings: Vec<Binding> = bindings(resolved)
+    let bindings: Vec<Binding> = dispatch_bindings(resolved)
         .into_iter()
         .map(|binding| match binding {
             Binding::Output(_) => Binding::Output(scratch),
