@@ -628,6 +628,10 @@ required-features = ["std", "metal", "instrument"]
 name = "speculative_decode_parity"
 required-features = ["std"]
 
+[[example]]
+name = "speculative_warm_bench"
+required-features = ["std"]
+
 # slice 20 (`speculative-decode-llama-parity/TASKS.md`): interleaved-pair
 # OFF/ON bench harness, GPU-utilization sampler, verify-width sweep. `metal`
 # required because `--gpu-layers all` and the ioreg sampler both need it --
