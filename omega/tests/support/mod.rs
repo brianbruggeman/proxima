@@ -539,7 +539,8 @@ pub fn qwen3_gqa_qk_norm_padded_cache_fixture(
     capacity: u64,
     pad_value: f32,
 ) -> (RealForwardFixture, RealForwardFixture) {
-    let (program, padded_symbols, roots, padded_source) = qwen3_gqa_qk_norm_forward_fixture(1, capacity);
+    let (program, padded_symbols, roots, padded_source) =
+        qwen3_gqa_qk_norm_forward_fixture(1, capacity);
     let (_, reference_symbols, _, _) = qwen3_gqa_qk_norm_forward_fixture(1, cached_len);
     let mut padded = padded_source.clone();
     let mut reference = padded_source;
@@ -550,7 +551,9 @@ pub fn qwen3_gqa_qk_norm_padded_cache_fixture(
         } else if name.starts_with("kv_cache.") || name.ends_with("_cache") {
             let row_stride = padded_data.len() / capacity as usize;
             let live = cached_len as usize * row_stride;
-            padded_data[live..].iter_mut().for_each(|value| *value = pad_value);
+            padded_data[live..]
+                .iter_mut()
+                .for_each(|value| *value = pad_value);
             reference_data.truncate(live);
         }
     }
