@@ -715,6 +715,23 @@ mod resident_cuda_plans {
     }
 
     #[test]
+    #[ignore = "needs the host-local qwen3-0.6b-q8_0.gguf and a CUDA device"]
+    fn a_longer_second_request_on_a_real_model_matches_a_fresh_model() {
+        let bytes = std::fs::read("/home/bix/models/qwen3-0.6b-q8_0.gguf")
+            .expect("read the host-local qwen3 checkpoint");
+        let parsed = parse_complete(&bytes).expect("parse qwen3");
+        let model = LoadedModel::load(&parsed, &bytes).expect("load qwen3");
+        let first_prompt: Vec<u32> = (100..149).collect();
+        let second_prompt: Vec<u32> = (100..160).collect();
+
+        let first = generate(&model, &first_prompt);
+        let second = generate(&model, &second_prompt);
+
+        assert_eq!(first, fresh_ids(&bytes, &first_prompt));
+        assert_eq!(second, fresh_ids(&bytes, &second_prompt));
+    }
+
+    #[test]
     fn a_request_after_a_carried_kv_request_does_not_see_its_rows() {
         let bytes = state_sensitive_ouro_gguf(2);
         let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
