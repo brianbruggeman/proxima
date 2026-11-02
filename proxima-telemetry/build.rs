@@ -64,6 +64,16 @@ fn emit_sizing_consts(out_dir: &Path) {
 
     let drain_batch = require_nonzero("drain.batch", resolve("drain", "batch"));
     let assist_batch = require_nonzero("drain.assist_batch", resolve("drain", "assist_batch"));
+    let ring_spans = require_nonzero("ring.spans", resolve("ring", "spans"));
+    let ring_events = require_nonzero("ring.events", resolve("ring", "events"));
+    let ring_logs = require_nonzero("ring.logs", resolve("ring", "logs"));
+    let ring_metrics = require_nonzero("ring.metrics", resolve("ring", "metrics"));
+    let ring_links = require_nonzero("ring.links", resolve("ring", "links"));
+    let ring_overflow_attrs = require_nonzero(
+        "ring.overflow_attrs",
+        resolve("ring", "overflow_attrs"),
+    );
+    let ring_span_obs = require_nonzero("ring.span_obs", resolve("ring", "span_obs"));
     let flush_interval_micros = require_nonzero(
         "pump.flush_interval_micros",
         resolve("pump", "flush_interval_micros"),
@@ -89,6 +99,20 @@ fn emit_sizing_consts(out_dir: &Path) {
          pub const DRAIN_BATCH: usize = {drain_batch};\n\
          /// Records a producer drains+exports on a full ring before retrying its push.\n\
          pub const DRAIN_ASSIST_BATCH: usize = {assist_batch};\n\
+         /// Per-core SpanRecord ring capacity (records, power of two).\n\
+         pub const RING_SPANS: usize = {ring_spans};\n\
+         /// Per-core EventRecord ring capacity (records, power of two).\n\
+         pub const RING_EVENTS: usize = {ring_events};\n\
+         /// Per-core LogRecord ring capacity (records, power of two).\n\
+         pub const RING_LOGS: usize = {ring_logs};\n\
+         /// Per-core MetricSample ring capacity (records, power of two).\n\
+         pub const RING_METRICS: usize = {ring_metrics};\n\
+         /// Per-core SpanLink ring capacity (records, power of two).\n\
+         pub const RING_LINKS: usize = {ring_links};\n\
+         /// Per-core overflow span-attribute ring capacity (records, power of two).\n\
+         pub const RING_OVERFLOW_ATTRS: usize = {ring_overflow_attrs};\n\
+         /// Per-core deferred span-observation ring capacity (records, power of two).\n\
+         pub const RING_SPAN_OBS: usize = {ring_span_obs};\n\
          /// Managed pump time-trigger flush interval in microseconds (default).\n\
          pub const FLUSH_INTERVAL_MICROS: u64 = {flush_interval_micros};\n\
          /// Compile-time emit severity floor (build.rs `[emit] max_level`): a record\n\

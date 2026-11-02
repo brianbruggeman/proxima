@@ -309,22 +309,22 @@ pub enum RecordSharing {
 }
 
 fn default_ring_spans() -> usize {
-    4096
+    crate::sized::RING_SPANS
 }
 fn default_ring_events() -> usize {
-    4096
+    crate::sized::RING_EVENTS
 }
 fn default_ring_logs() -> usize {
-    4096
+    crate::sized::RING_LOGS
 }
 fn default_ring_metrics() -> usize {
-    8192
+    crate::sized::RING_METRICS
 }
 fn default_ring_links() -> usize {
-    1024
+    crate::sized::RING_LINKS
 }
 fn default_ring_overflow_attrs() -> usize {
-    2048
+    crate::sized::RING_OVERFLOW_ATTRS
 }
 // drain/assist batch defaults trace to the build-time sizing TOML
 // (proxima-telemetry.toml -> crate::sized) so there is one source of truth; the
@@ -982,6 +982,50 @@ mod tests {
                 from_env.flush_interval_micros,
                 crate::sized::FLUSH_INTERVAL_MICROS,
                 "#[setting] flush_interval_micros literal drifted from sized::FLUSH_INTERVAL_MICROS"
+            );
+        });
+    }
+
+    #[test]
+    fn ring_capacities_agree_across_sized_default_builder_and_env() {
+        let sized = RingCapacities {
+            spans: crate::sized::RING_SPANS,
+            events: crate::sized::RING_EVENTS,
+            logs: crate::sized::RING_LOGS,
+            metrics: crate::sized::RING_METRICS,
+            links: crate::sized::RING_LINKS,
+            overflow_attrs: crate::sized::RING_OVERFLOW_ATTRS,
+            #[cfg(feature = "deferred-metric-fold")]
+            span_obs: crate::sized::RING_SPAN_OBS,
+        };
+        assert_eq!(RingCapacities::default(), sized);
+
+        let ring_fields = |cfg: &TelemetryConfig| {
+            [
+                cfg.ring_spans,
+                cfg.ring_events,
+                cfg.ring_logs,
+                cfg.ring_metrics,
+                cfg.ring_links,
+                cfg.ring_overflow_attrs,
+            ]
+        };
+        let expected = [
+            sized.spans,
+            sized.events,
+            sized.logs,
+            sized.metrics,
+            sized.links,
+            sized.overflow_attrs,
+        ];
+        assert_eq!(ring_fields(&TelemetryConfig::default()), expected);
+        assert_eq!(ring_fields(&TelemetryConfig::builder().build()), expected);
+        temp_env::with_vars::<&str, &str, _, _>([], || {
+            let from_env = TelemetryConfig::from_env().expect("from_env");
+            assert_eq!(
+                ring_fields(&from_env),
+                expected,
+                "#[setting] ring literal drifted from sized::RING_*"
             );
         });
     }
