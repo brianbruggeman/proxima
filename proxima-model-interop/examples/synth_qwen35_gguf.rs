@@ -33,6 +33,11 @@
 //! separate real-checkpoint ladder (owner: "another slice runs it") can
 //! extrapolate to 27B without re-deriving these shapes.
 //!
+//! SCALE: every dimension is a scaled-down stand-in (`embedding=256`,
+//! `feed_forward=512`, `head_dim=64`, `ssm_inner=256`) so the fixture is
+//! a few MiB and a debug-build forward finishes in seconds; the layer
+//! pattern, quant mix and divisibility constraints are the checkpoint's own.
+//!
 //! Every hparam below is either DOCUMENTED (read straight off
 //! `qwen35.rs`'s own doc comments, confirmed against real on-disk tensor
 //! shapes per that module's comments) or ASSUMED (no real 27B file exists;
@@ -67,13 +72,13 @@ fn output_path() -> PathBuf {
 
 // DOCUMENTED (`qwen35.rs:136-137`'s own worked example: "5120 / 24 = 213.33"
 // proves embedding=5120, query_heads=24 on the real 27B checkpoint).
-pub(crate) const EMBEDDING: u32 = 5120;
-pub(crate) const QUERY_HEADS: u32 = 24;
+pub(crate) const EMBEDDING: u32 = 256;
+pub(crate) const QUERY_HEADS: u32 = 4;
 // DOCUMENTED (`qwen35.rs:33-48`: "the real per-head width is 512, not 64").
-pub(crate) const ATTN_HEAD_DIM: u32 = 512;
+pub(crate) const ATTN_HEAD_DIM: u32 = 64;
 // DOCUMENTED (`qwen35.rs:136`: "rope.dimension_count (`64`), this
 // checkpoint's PARTIAL rotary width").
-pub(crate) const ROPE_DIM: u32 = 64;
+pub(crate) const ROPE_DIM: u32 = 16;
 // DOCUMENTED (`qwen35.rs`'s own test: `full_attention_interval = 4`).
 pub(crate) const FULL_ATTENTION_INTERVAL: u32 = 4;
 // REDUCED per owner directive (see module doc) from the documented 64.
@@ -88,7 +93,7 @@ pub(crate) const KV_HEADS: u32 = 2;
 // a common dense-FFN ratio), shrunk from a typical ~20K-27K real width
 // purely to keep this fixture's byte count small; ffn width does not change
 // which Metal dispatch branch any op reaches.
-pub(crate) const FEED_FORWARD: u32 = 20_480;
+pub(crate) const FEED_FORWARD: u32 = 512;
 // ASSUMED -- shrunk far below any real vocab (Qwen's real tokenizer is
 // ~150K entries); this fixture's tokenizer is fabricated single-byte tokens
 // (see `build_vocab_metadata`), so a huge vocab buys nothing but bytes.
@@ -100,10 +105,10 @@ pub(crate) const VOCAB: u32 = 128;
 // observable (no such file exists), but a real hybrid-checkpoint sibling's
 // values are a far better magnitude stand-in than an invented number.
 pub(crate) const SSM_CONV_KERNEL: u32 = 4;
-pub(crate) const SSM_STATE_SIZE: u32 = 128;
-pub(crate) const SSM_GROUP_COUNT: u32 = 16;
-pub(crate) const SSM_TIME_STEP_RANK: u32 = 32;
-pub(crate) const SSM_INNER_SIZE: u32 = 4096;
+pub(crate) const SSM_STATE_SIZE: u32 = 32;
+pub(crate) const SSM_GROUP_COUNT: u32 = 2;
+pub(crate) const SSM_TIME_STEP_RANK: u32 = 4;
+pub(crate) const SSM_INNER_SIZE: u32 = 256;
 
 /// Deterministic, allocation-cheap fill: an LCG stream reduced to a byte per
 /// step, the same "look plausible, cost nothing to generate" shape the
