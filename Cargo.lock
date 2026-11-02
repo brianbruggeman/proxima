@@ -4233,6 +4233,7 @@ dependencies = [
  "half",
  "libm",
  "memmap2",
+ "proxima-lib",
  "proxima-primitives",
  "proxima-telemetry",
  "serde",
