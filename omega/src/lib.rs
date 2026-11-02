@@ -52,6 +52,7 @@ pub mod cuda;
 mod cuda_cached_attention;
 #[cfg(feature = "cuda")]
 mod cuda_cached_attention_mma;
+#[cfg(feature = "cuda")]
 mod cuda_cached_attention_tiled;
 #[cfg(feature = "cuda")]
 pub mod cuda_layout;
