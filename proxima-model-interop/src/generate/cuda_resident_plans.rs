@@ -8,9 +8,10 @@
 //! instead: a runtime takes the entry at construction and puts it back in
 //! `Drop`, once per request, never inside the step loop.
 //!
-//! One plan is kept per class of `(new_count == 1, kv_bound_extent == 0)`: a
-//! decode plan, a one-token prefill, a wide prefill and a wide chunk over a
-//! warm cache. Refresh cannot cross either boundary, so a class never shares.
+//! One plan is kept per class of `(new_count == 1, kv_bound_extent == 0, outputs)`:
+//! a decode plan, a one-token prefill, a wide prefill and a wide chunk over a
+//! warm cache, each with and without the logits output. Refresh cannot cross
+//! any boundary, so a class never shares.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -118,13 +119,43 @@ fn drain_carry(plan: &mut Plan) -> bool {
 }
 
 /// Plans in different classes never evict each other and never refit into one
-/// another: refresh refuses to cross the one-row boundary or the empty-cache
-/// boundary (no cached attention to fuse), so a plan moved across either
-/// rebinds in full.
+/// another: refresh refuses to cross the one-row boundary, the empty-cache
+/// boundary (no cached attention to fuse) or a change of output set (the
+/// last prefill chunk reads logits, the chunks before it read none), so a plan
+/// moved across any of them rebinds in full.
 pub(super) fn same_width_class(left: &CudaPlanKey, right: &CudaPlanKey) -> bool {
     plan_class(left) == plan_class(right)
 }
 
-fn plan_class(key: &CudaPlanKey) -> (bool, bool) {
-    (key.0 == 1, key.1 == 0)
+fn plan_class(key: &CudaPlanKey) -> (bool, bool, &[NodeId]) {
+    (key.0 == 1, key.1 == 0, key.2.as_slice())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOGITS: u32 = 570;
+    const KV_ROWS: u32 = 120;
+
+    fn key(new_count: usize, kv_bound_extent: usize, outputs: &[u32]) -> CudaPlanKey {
+        (new_count, kv_bound_extent, outputs.iter().copied().map(NodeId).collect(), false)
+    }
+
+    #[proxima::test]
+    #[case::decode_steps_at_different_lengths_share(key(1, 512, &[LOGITS]), key(1, 640, &[LOGITS]), true)]
+    #[case::wide_chunks_over_warm_cache_share(key(512, 512, &[KV_ROWS]), key(512, 1024, &[KV_ROWS]), true)]
+    #[case::last_chunk_with_logits_is_not_the_chunk_without(key(512, 3584, &[KV_ROWS]), key(512, 3584, &[LOGITS]), false)]
+    #[case::cold_chunk_with_logits_is_not_the_cold_chunk_without(key(512, 0, &[KV_ROWS]), key(512, 0, &[LOGITS]), false)]
+    #[case::decode_is_not_a_one_token_prefill_over_empty_cache(key(1, 0, &[LOGITS]), key(1, 512, &[LOGITS]), false)]
+    #[case::wide_cold_is_not_wide_warm(key(512, 0, &[LOGITS]), key(512, 512, &[LOGITS]), false)]
+    #[case::wide_is_not_decode(key(512, 512, &[LOGITS]), key(1, 512, &[LOGITS]), false)]
+    async fn plans_share_a_class_only_when_refresh_can_move_one_to_the_other(
+        #[case] left: CudaPlanKey,
+        #[case] right: CudaPlanKey,
+        #[case] expected: bool,
+    ) {
+        assert_eq!(same_width_class(&left, &right), expected);
+        assert_eq!(same_width_class(&right, &left), expected);
+    }
 }
