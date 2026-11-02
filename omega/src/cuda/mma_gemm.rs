@@ -44,6 +44,7 @@ pub(super) struct MmaGemm {
     pub(super) weight: usize,
     pub(super) activation: usize,
     codec: Codec,
+    pub(super) single_activation: bool,
     pub(super) feature_positions: Vec<usize>,
     pub(super) token_positions: Vec<usize>,
 }
@@ -154,6 +155,7 @@ pub(super) fn mma_gemm_plan(
             weight,
             activation,
             codec,
+            single_activation: numeric_policy.activation_quantization,
             feature_positions,
             token_positions,
         },
@@ -342,6 +344,7 @@ pub(super) fn push_mma_gemm_body(
     let has_minimum = shape.has_minimum;
     let (block_bytes, block_elements) = (shape.block_bytes, shape.block_elements);
     let decode = shape.decode;
+    let single = plan.single_activation;
 
     source.push_str("    const int tid = (int)threadIdx.x;\n");
     source.push_str("    const int warp = tid >> 5;\n");
@@ -408,9 +411,11 @@ pub(super) fn push_mma_gemm_body(
     source.push_str(&format!(
         "    __shared__ __align__(16) __half act_high[{TOKEN_TILE}][{STAGE_PAD}];\n"
     ));
-    source.push_str(&format!(
-        "    __shared__ __align__(16) __half act_low[{TOKEN_TILE}][{STAGE_PAD}];\n"
-    ));
+    if !single {
+        source.push_str(&format!(
+            "    __shared__ __align__(16) __half act_low[{TOKEN_TILE}][{STAGE_PAD}];\n"
+        ));
+    }
     source.push_str(&format!(
         "    __shared__ float weight_scale[{FEATURE_TILE}][2];\n"
     ));
@@ -501,8 +506,11 @@ pub(super) fn push_mma_gemm_body(
         }
 ");
         source.push_str("        __align__(16) __half2 high_pairs[4];
-        __align__(16) __half2 low_pairs[4];
 ");
+        if !single {
+            source.push_str("        __align__(16) __half2 low_pairs[4];
+");
+        }
         if has_minimum {
             source.push_str("        float half_sum = 0.0f;
 ");
@@ -516,9 +524,14 @@ pub(super) fn push_mma_gemm_body(
 ");
         source.push_str("            high_pairs[pair] = __halves2half2(high_a, high_b);
 ");
-        source.push_str("            low_pairs[pair] = __halves2half2(__float2half_rn(act_values[2 * pair] - __half2float(high_a)), __float2half_rn(act_values[2 * pair + 1] - __half2float(high_b)));
+        if !single {
+            source.push_str("            low_pairs[pair] = __halves2half2(__float2half_rn(act_values[2 * pair] - __half2float(high_a)), __float2half_rn(act_values[2 * pair + 1] - __half2float(high_b)));
 ");
-        if has_minimum {
+        }
+        if has_minimum && single {
+            source.push_str("            half_sum += __half2float(high_a) + __half2float(high_b);
+");
+        } else if has_minimum {
             source.push_str("            half_sum += act_values[2 * pair] + act_values[2 * pair + 1];
 ");
         }
@@ -528,10 +541,12 @@ pub(super) fn push_mma_gemm_body(
             "        *(uint4 *)&act_high[{row}][load_segment] = *(const uint4 *)high_pairs;
 "
         ));
-        source.push_str(&format!(
-            "        *(uint4 *)&act_low[{row}][load_segment] = *(const uint4 *)low_pairs;
+        if !single {
+            source.push_str(&format!(
+                "        *(uint4 *)&act_low[{row}][load_segment] = *(const uint4 *)low_pairs;
 "
-        ));
+            ));
+        }
         if has_minimum {
             source.push_str("        half_sum += __shfl_xor_sync(0xffffffffu, half_sum, 1);
 ");
@@ -562,16 +577,21 @@ pub(super) fn push_mma_gemm_body(
                 const unsigned int a_high = *(const unsigned int *)&weight_q[warp_feature * 16 + group + 8][{k_base}];
 "
             ));
+            let low_mma = if single {
+                String::new()
+            } else {
+                format!("                    mma_m16n8k8(scratch{{tile}}, a_low, a_high, *(const unsigned int *)&act_low[token_row][{k_base}]);\n")
+            };
             for tile in 0..WARP_TILES {
                 source.push_str(&format!(
                     "                if (token_first + warp_token * {WARP_TOKENS} + {} < token_total) {{
                     const int token_row = warp_token * {WARP_TOKENS} + {} + group;
                     mma_m16n8k8(scratch{tile}, a_low, a_high, *(const unsigned int *)&act_high[token_row][{k_base}]);
-                    mma_m16n8k8(scratch{tile}, a_low, a_high, *(const unsigned int *)&act_low[token_row][{k_base}]);
-                }}
+{}                }}
 ",
                     tile * 8,
-                    tile * 8
+                    tile * 8,
+                    low_mma.replace("{tile}", &tile.to_string())
                 ));
             }
             source.push_str("            }

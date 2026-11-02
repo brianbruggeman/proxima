@@ -1411,8 +1411,9 @@ fn entry_name(
     let revision = if let Some(plan) = staged_matvec_plan(resolved, quantized, numeric_policy) {
         let global = if plan.scratch { "g" } else { "" };
         format!("_smv{}x{}{global}_gid64c9", staged_matvec::STAGED_WARPS, plan.dot.rows_per_warp)
-    } else if mma_gemm_plan(resolved, quantized, numeric_policy).is_some() {
-        String::from("_mma16x8x8_gid64c9")
+    } else if let Some(plan) = mma_gemm_plan(resolved, quantized, numeric_policy) {
+        let single = if plan.single_activation { "h" } else { "" };
+        format!("_mma16x8x8{single}_gid64c9")
     } else if row_tile_axis(resolved, quantized, numeric_policy).is_some() {
         format!("_rt{ROW_TILE}_gid64c9")
     } else if reduce_is_cooperative(resolved, quantized, numeric_policy)
