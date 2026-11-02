@@ -220,6 +220,8 @@ use weight_source::WeightSource;
 #[macro_use]
 mod pregather;
 #[macro_use]
+#[cfg(feature = "cuda")]
+mod cuda_resident_plans;
 mod residency_caches;
 #[macro_use]
 mod decode;
