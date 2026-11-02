@@ -204,36 +204,71 @@ async fn daemon_apply_updates_pipe_spec_and_exits_zero() {
     shutdown.stop();
 }
 
-#[proxima::test]
-async fn daemon_apply_unknown_pipe_returns_404() {
-    let dir = tempdir().expect("tempdir");
-    let socket = dir.path().join("proxima.sock");
-    let initial = json!({"synth": {"status": 200, "body": "v1"}});
-    let (_plane, shutdown) = spawn_daemon_with_real_plane(&socket, initial).await;
-
-    let spec_path = dir.path().join("ignored.json");
-    std::fs::write(&spec_path, b"{\"synth\":{\"body\":\"x\"}}").expect("write spec");
-
-    let output = Command::new(env!("CARGO_BIN_EXE_proxima"))
+async fn daemon_apply(
+    socket: &std::path::Path,
+    name: &str,
+    spec_path: &std::path::Path,
+) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_proxima"))
         .arg("daemon")
         .arg("--socket")
-        .arg(&socket)
+        .arg(socket)
         .arg("apply")
-        .arg("does-not-exist")
+        .arg(name)
         .arg("--spec")
-        .arg(&spec_path)
+        .arg(spec_path)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
         .await
-        .expect("spawn cli");
+        .expect("spawn cli")
+}
+
+#[proxima::test]
+async fn daemon_apply_creates_an_unregistered_pipe() {
+    let dir = tempdir().expect("tempdir");
+    let socket = dir.path().join("proxima.sock");
+    let initial = json!({"synth": {"status": 200, "body": "v1"}});
+    let (plane, shutdown) = spawn_daemon_with_real_plane(&socket, initial).await;
+    let spec_path = dir.path().join("greeter.json");
+    std::fs::write(&spec_path, br#"{"synth":{"status":200,"body":"hello"}}"#).expect("write spec");
+
+    let output = daemon_apply(&socket, "greeter", &spec_path).await;
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("404") || stderr.contains("not found"),
-        "stderr: {stderr}",
+        output.status.success(),
+        "exit: {} stderr: {stderr}",
+        output.status
     );
+    let status = plane
+        .status("greeter")
+        .await
+        .expect("apply registered greeter");
+    assert_eq!(status.name, "greeter");
+    shutdown.stop();
+}
 
+#[proxima::test]
+async fn daemon_apply_with_an_unbuildable_spec_fails_and_registers_nothing() {
+    let dir = tempdir().expect("tempdir");
+    let socket = dir.path().join("proxima.sock");
+    let initial = json!({"synth": {"status": 200, "body": "v1"}});
+    let (plane, shutdown) = spawn_daemon_with_real_plane(&socket, initial).await;
+    let spec_path = dir.path().join("ghost.json");
+    std::fs::write(&spec_path, br#"{"no-such-pipe-kind":{"x":1}}"#).expect("write spec");
+
+    let output = daemon_apply(&socket, "ghost", &spec_path).await;
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "unbuildable spec must fail; stderr: {stderr}"
+    );
+    assert!(
+        plane.status("ghost").await.is_err(),
+        "failed apply must not register ghost"
+    );
     shutdown.stop();
 }
 
