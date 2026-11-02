@@ -1000,16 +1000,10 @@ impl CudaDriver {
             }
         }
         let unfused = config.is_some_and(|value| !value.allow_fusion);
-        let (resolved, kernels, uniforms, _) = bind_and_emit(
-            program,
-            &shapes,
-            outputs,
-            &packed_operands,
-            numeric_policy,
-            self.device,
-            unfused,
-            None,
-        )?;
+        let (resolved, mut micros) =
+            bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, unfused)?;
+        let (kernels, uniforms) =
+            emit_and_pack(&resolved, None, &packed_operands, numeric_policy, self.device, &mut micros)?;
         let pool = Box::new(PoolSchedule::build(&resolved, &kernels, outputs));
         let plan = CudaPlan {
             pool,
@@ -1629,8 +1623,6 @@ impl CudaDriver {
     }
 }
 
-type LoweredOps = (Vec<BoundOp>, Vec<CudaKernel>, Vec<Vec<u8>>, LowerMicros);
-
 /// Kernels of the previous binding, moved into the next one wherever the bound op is unchanged.
 struct PriorKernels<'plan> {
     bound: &'plan [BoundOp],
@@ -1645,16 +1637,14 @@ struct LowerMicros {
     pack: u64,
 }
 
-fn bind_and_emit(
+fn bind_resolved(
     program: &[Op],
     shapes: &Shapes,
     outputs: &[NodeId],
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
-    device: EmitDevice,
     unfused: bool,
-    prior: Option<PriorKernels<'_>>,
-) -> Result<LoweredOps, CudaDriverError> {
+) -> Result<(Vec<BoundOp>, LowerMicros), CudaDriverError> {
     let bind_started = Instant::now();
     let bound = if unfused {
         bind_unfused(program, shapes, outputs, numeric_policy)
@@ -1674,13 +1664,11 @@ fn bind_and_emit(
     let mut resolved = prune_dead(bound, outputs);
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
     validate_resolved(&resolved, numeric_policy)?;
-    let mut micros = LowerMicros {
+    let micros = LowerMicros {
         bind: bind_started.elapsed().as_micros() as u64,
         ..LowerMicros::default()
     };
-    let (kernels, uniforms) =
-        emit_and_pack(&resolved, prior, packed_operands, numeric_policy, device, &mut micros)?;
-    Ok((resolved, kernels, uniforms, micros))
+    Ok((resolved, micros))
 }
 
 fn validate_resolved(
@@ -2129,15 +2117,21 @@ impl CudaPlan {
                     bound: &previous_bound,
                     kernels: std::mem::take(&mut self.kernels),
                 });
-                let (resolved, kernels, uniforms, micros) = bind_and_emit(
+                let (resolved, mut micros) = bind_resolved(
                     &self.program,
                     &shapes,
                     &self.outputs,
                     &self.packed_operands,
                     numeric_policy,
-                    self.driver.device,
                     false,
+                )?;
+                let (kernels, uniforms) = emit_and_pack(
+                    &resolved,
                     prior,
+                    &self.packed_operands,
+                    numeric_policy,
+                    self.driver.device,
+                    &mut micros,
                 )?;
                 ("full", 0, refused, resolved, kernels, uniforms, micros)
             }
