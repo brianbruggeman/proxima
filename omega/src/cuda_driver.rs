@@ -37,8 +37,8 @@ use crate::cuda_ptx_store::PtxStore;
 use crate::lowering::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{
     RefreshRefusal, changed_nodes, kv_read_only_by_fused_attention, refit_cached_attention_at,
-    RowTemplate, apply_row_template, refresh_bound_ops, refresh_cached_attention, row_template,
-    rows_enumerable,
+    RowTemplate, apply_row_template, apply_shapes_template, refresh_bound_ops, refresh_cached_attention,
+    row_template, rows_enumerable, shapes_template,
     touched_positions, touches_changed,
 };
 use proxima_tensor::{
@@ -402,6 +402,20 @@ struct LaunchProfile {
 /// The fewest rows the prefill kernels share one form for: below it cached attention runs untiled.
 const ROW_CLASS_MIN: u64 = 16;
 
+#[derive(Default)]
+struct FollowMicros {
+    grid: u64,
+    uniform: u64,
+    attention: u64,
+}
+
+fn learning_rows(rows: u64) -> Option<[u64; 2]> {
+    let mut others = [rows / 2, rows / 4, rows * 2]
+        .into_iter()
+        .filter(|candidate| *candidate >= ROW_CLASS_MIN && *candidate != rows);
+    Some([others.next()?, others.next()?])
+}
+
 const LAUNCH_PHASES: usize = 6;
 const LAUNCH_PHASE_NAMES: [&str; LAUNCH_PHASES] = [
     "upload_uniform",
@@ -484,6 +498,8 @@ pub struct CudaPlan {
     bound_rows: u64,
     // boxed: keeps CudaPlan inside clippy's large_enum_variant gap against the cpu plan
     rows_template: Box<Option<Option<RowTemplate>>>,
+    // the extents of every node as a line in the row count, valid while the other symbols equal the first element
+    shapes_template: Box<Option<(Vec<u64>, RowTemplate)>>,
     // one resolved device function per kernel, so a launch skips the module-cache text comparison
     functions: Vec<Option<CudaFunction>>,
     emit_calls: u64,
@@ -1015,7 +1031,7 @@ impl CudaDriver {
         let (kernels, uniforms) =
             emit_and_pack(&resolved, None, &packed_operands, numeric_policy, self.device, &mut micros)?;
         let pool = Box::new(PoolSchedule::build(&resolved, &kernels, outputs));
-        let plan = CudaPlan {
+        let mut plan = CudaPlan {
             pool,
             constraints: config.map(|value| value.constraints.clone()),
             block_contract: blocks
@@ -1040,6 +1056,7 @@ impl CudaDriver {
             patch_memo: None,
             bound_rows: symbols.first().copied().unwrap_or(0),
             rows_template: Box::default(),
+            shapes_template: Box::default(),
             emit_calls: 0,
             emit_reused: 0,
             pack_calls: 0,
@@ -1051,6 +1068,8 @@ impl CudaDriver {
             for kernel in &plan.kernels {
                 self.function_for(kernel)?;
             }
+        } else {
+            plan.learn_rows_at_build(symbols, numeric_policy);
         }
         Ok(plan)
     }
@@ -2092,11 +2111,7 @@ impl CudaPlan {
             return Ok(false);
         }
         let infer_started = Instant::now();
-        let shapes =
-            infer(&self.program, symbols).map_err(|_| CudaDriverError::UnsupportedGraph {
-                node: NodeId(0),
-                reason: "shape inference failed",
-            })?;
+        let shapes = self.shapes_for(symbols)?;
         let infer_micros = infer_started.elapsed().as_micros() as u64;
         let same_policy = numeric_policy == self.numeric_policy;
         let rows = symbols.first().copied().unwrap_or(0);
@@ -2263,6 +2278,7 @@ impl CudaPlan {
         let Some(Some(template)) = &*self.rows_template else {
             return Ok(None);
         };
+        let apply_started = Instant::now();
         let mut next = self.resolved.clone();
         let Some(attention) = apply_row_template(template, rows, &mut next) else {
             return Ok(None);
@@ -2273,14 +2289,26 @@ impl CudaPlan {
             };
             next[position] = patched;
         }
+        let apply_us = elapsed_micros(apply_started);
+        let mut follow = FollowMicros::default();
         for (position, bound) in next.iter().enumerate() {
-            self.follow_rows(position, bound, numeric_policy)?;
+            self.follow_rows(position, bound, numeric_policy, &mut follow)?;
         }
+        let pool_started = Instant::now();
         *self.pool = PoolSchedule::build(&next, &self.kernels, &self.outputs);
         let count = next.len();
         self.resolved = next;
         self.bound_rows = rows;
         self.patch_memo = None;
+        proxima_telemetry::debug!(
+            apply_us = apply_us,
+            grid_us = follow.grid,
+            uniform_us = follow.uniform,
+            attention_us = follow.attention,
+            pool_us = elapsed_micros(pool_started),
+            op_count = count as u64,
+            "cuda repack phases"
+        );
         Ok(Some(count))
     }
 
@@ -2289,12 +2317,14 @@ impl CudaPlan {
         position: usize,
         next: &BoundOp,
         numeric_policy: NumericPolicy,
+        follow: &mut FollowMicros,
     ) -> Result<(), CudaDriverError> {
         let emit_error = |error: crate::error::EmitError| CudaDriverError::Emit {
             node: next.node,
             error: error.to_string(),
         };
         let device = self.driver.device;
+        let grid_started = Instant::now();
         if matches!(next.kind, BoundOpKind::CachedAttention { .. }) {
             let kept = crate::cuda::refit_kernel(
                 &self.resolved[position],
@@ -2308,12 +2338,98 @@ impl CudaPlan {
             if !kept {
                 self.functions[position] = None;
             }
+            follow.attention += elapsed_micros(grid_started);
         } else {
             crate::cuda::refit_grid(&mut self.kernels[position], next, &self.packed_operands, numeric_policy, device)
                 .map_err(emit_error)?;
+            follow.grid += elapsed_micros(grid_started);
         }
+        let uniform_started = Instant::now();
         self.uniforms[position] = crate::cuda::pack_cuda_uniforms(next).map_err(emit_error)?;
+        follow.uniform += elapsed_micros(uniform_started);
         Ok(())
+    }
+
+    fn shapes_for(&self, symbols: &[u64]) -> Result<Shapes, CudaDriverError> {
+        let rows = symbols.first().copied().unwrap_or(0);
+        let tail = symbols.get(1..).unwrap_or(&[]);
+        let moved = (*self.shapes_template)
+            .as_ref()
+            .filter(|(known, _)| known.as_slice() == tail && rows >= ROW_CLASS_MIN)
+            .and_then(|(_, template)| apply_shapes_template(template, rows));
+        match moved {
+            Some(shapes) => Ok(shapes),
+            None => infer(&self.program, symbols).map_err(|_| CudaDriverError::UnsupportedGraph {
+                node: NodeId(0),
+                reason: "shape inference failed",
+            }),
+        }
+    }
+
+    fn bind_at_rows(
+        &self,
+        symbols: &[u64],
+        rows: u64,
+        numeric_policy: NumericPolicy,
+    ) -> Result<(Shapes, Vec<BoundOp>), CudaDriverError> {
+        let mut moved = symbols.to_vec();
+        moved[0] = rows;
+        let shapes = infer(&self.program, &moved).map_err(|_| CudaDriverError::UnsupportedGraph {
+            node: NodeId(0),
+            reason: "shape inference failed",
+        })?;
+        let (bound, _) = bind_resolved(
+            &self.program,
+            &shapes,
+            &self.outputs,
+            &self.packed_operands,
+            numeric_policy,
+            false,
+        )?;
+        Ok((shapes, bound))
+    }
+
+    /// Learns the row template when a wide-class plan is first built, by binding at two other
+    /// in-class row counts, so the first row change already repacks. A refused or failed
+    /// learning leaves the lazy learning at the first full refit in place.
+    fn learn_rows_at_build(&mut self, symbols: &[u64], numeric_policy: NumericPolicy) {
+        let rows = self.bound_rows;
+        let Some(others) = learning_rows(rows).filter(|_| !symbols.is_empty() && rows_enumerable(&self.resolved)) else {
+            return;
+        };
+        let started = Instant::now();
+        let learned = self.learn_from_binds(symbols, others, numeric_policy);
+        match learned {
+            Ok(fitted) => proxima_telemetry::debug!(
+                learn_us = elapsed_micros(started),
+                rows = rows,
+                fitted = fitted,
+                "cuda plan learned its row template at build"
+            ),
+            Err(error) => proxima_telemetry::debug!(
+                rows = rows,
+                error = %error,
+                "cuda row template not learned at build"
+            ),
+        }
+    }
+
+    fn learn_from_binds(
+        &mut self,
+        symbols: &[u64],
+        others: [u64; 2],
+        numeric_policy: NumericPolicy,
+    ) -> Result<bool, CudaDriverError> {
+        let [first_rows, second_rows] = others;
+        let (first_shapes, first) = self.bind_at_rows(symbols, first_rows, numeric_policy)?;
+        let (second_shapes, second) = self.bind_at_rows(symbols, second_rows, numeric_policy)?;
+        let shapes = shapes_template(&[
+            (first_rows, &first_shapes),
+            (second_rows, &second_shapes),
+            (self.bound_rows, &self.shapes),
+        ]);
+        *self.shapes_template = shapes.map(|template| (symbols[1..].to_vec(), template));
+        self.fit_row_template(&first, first_rows, &second, second_rows, numeric_policy)
     }
 
     /// After a row change that bound from scratch, proves from the old and new binds plus one
@@ -2333,41 +2449,41 @@ impl CudaPlan {
         if !in_class || previous.len() != self.resolved.len() {
             return Ok(());
         }
-        let mut middle_symbols = symbols.to_vec();
-        middle_symbols[0] = middle;
-        let middle_shapes =
-            infer(&self.program, &middle_symbols).map_err(|_| CudaDriverError::UnsupportedGraph {
-                node: NodeId(0),
-                reason: "shape inference failed",
-            })?;
-        let (between, _) = bind_resolved(
-            &self.program,
-            &middle_shapes,
-            &self.outputs,
-            &self.packed_operands,
-            numeric_policy,
-            false,
-        )?;
-        let same_text = self.text_is_row_independent(previous, &between, numeric_policy)?;
+        let (_, between) = self.bind_at_rows(symbols, middle, numeric_policy)?;
+        self.fit_row_template(previous, previous_rows, &between, middle, numeric_policy)?;
+        Ok(())
+    }
+
+    fn fit_row_template(
+        &mut self,
+        previous: &[BoundOp],
+        previous_rows: u64,
+        between: &[BoundOp],
+        middle: u64,
+        numeric_policy: NumericPolicy,
+    ) -> Result<bool, CudaDriverError> {
+        let rows = self.bound_rows;
+        let same_text = self.text_is_row_independent(previous, between, numeric_policy)?;
         let template = same_text
             .then(|| {
                 row_template(&[
                     (previous_rows, previous),
                     (rows, self.resolved.as_slice()),
-                    (middle, between.as_slice()),
+                    (middle, between),
                 ])
             })
             .flatten();
+        let fitted = template.is_some();
         proxima_telemetry::debug!(
             same_text = same_text,
-            fitted = template.is_some(),
+            fitted = fitted,
             rows = rows,
             previous_rows = previous_rows,
             middle_rows = middle,
             "cuda row template learned"
         );
         *self.rows_template = Some(template);
-        Ok(())
+        Ok(fitted)
     }
 
     fn text_is_row_independent(
