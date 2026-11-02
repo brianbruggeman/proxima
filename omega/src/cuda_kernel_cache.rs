@@ -445,7 +445,10 @@ mod tests {
         let mut entry = encode_entry(&base_key(), PTX);
         let index = HEADER_LEN + PTX.find("add_one").expect("ptx names the kernel");
         entry[index] ^= 0x01;
-        assert_eq!(decode_entry(&base_key(), &entry), Err(CacheEntryError::HashMismatch));
+        assert_eq!(
+            decode_entry(&base_key(), &entry),
+            Err(CacheEntryError::HashMismatch)
+        );
     }
 
     #[test]
@@ -469,7 +472,10 @@ mod tests {
         let entry = encode_entry(&base_key(), PTX);
         let mut magic = entry.clone();
         magic[0] ^= 0x01;
-        assert_eq!(decode_entry(&base_key(), &magic), Err(CacheEntryError::BadMagic));
+        assert_eq!(
+            decode_entry(&base_key(), &magic),
+            Err(CacheEntryError::BadMagic)
+        );
         let mut schema = entry.clone();
         schema[4] ^= 0x01;
         assert_eq!(
@@ -501,7 +507,10 @@ mod tests {
         let mut entry = encode_entry(&base_key(), &forged);
         let genuine = encode_entry(&base_key(), PTX);
         entry[48..HEADER_LEN].copy_from_slice(&genuine[48..HEADER_LEN]);
-        assert_eq!(decode_entry(&base_key(), &entry), Err(CacheEntryError::HashMismatch));
+        assert_eq!(
+            decode_entry(&base_key(), &entry),
+            Err(CacheEntryError::HashMismatch)
+        );
     }
 
     #[test]
@@ -514,7 +523,10 @@ mod tests {
         entry.extend_from_slice(&(payload.len() as u64).to_le_bytes());
         entry.extend_from_slice(&Sha256::digest(payload));
         entry.extend_from_slice(payload);
-        assert_eq!(decode_entry(&base_key(), &entry), Err(CacheEntryError::NotUtf8));
+        assert_eq!(
+            decode_entry(&base_key(), &entry),
+            Err(CacheEntryError::NotUtf8)
+        );
     }
 
     #[test]

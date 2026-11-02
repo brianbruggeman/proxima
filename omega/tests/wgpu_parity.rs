@@ -1005,7 +1005,8 @@ fn matmul_output_above_the_workgroup_dimension_limit_still_matches_cpu() {
         NumericPolicy::default(),
     )
     .expect("cpu plans the oversized-output matmul");
-    let cpu = execute_plan_named(&mut cpu_plan, &named).expect("cpu runs the oversized-output matmul");
+    let cpu =
+        execute_plan_named(&mut cpu_plan, &named).expect("cpu runs the oversized-output matmul");
 
     let mut wgpu_plan = omega::wgpu_driver::plan_named(&program, &[], &named, &[])
         .expect("omega::wgpu_driver plans the oversized-output matmul directly");
@@ -1020,7 +1021,10 @@ fn matmul_output_above_the_workgroup_dimension_limit_still_matches_cpu() {
         Some(width) => format!("cooperative (subgroup width {width})"),
         None => "serial (no fixed-width subgroup reported)".to_string(),
     };
-    eprintln!("wgpu reduce path taken: {path}, output_elements={} limit={limit}", m * n);
+    eprintln!(
+        "wgpu reduce path taken: {path}, output_elements={} limit={limit}",
+        m * n
+    );
     let wgpu = omega::wgpu_driver::execute_plan_named(&mut wgpu_plan, &named)
         .expect("omega::wgpu_driver runs the oversized-output matmul on a real device");
 

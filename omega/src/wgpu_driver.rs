@@ -1113,7 +1113,10 @@ fn pack_elementwise_uniforms(bound: &BoundOp, packed_operands: &PackedOperands) 
     bytes
 }
 
-fn pack_reduce_uniforms(bound: &BoundOp, packed_operands: &PackedOperands) -> Result<Vec<u8>, EmitError> {
+fn pack_reduce_uniforms(
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+) -> Result<Vec<u8>, EmitError> {
     let BoundOpKind::Reduce {
         output_axes,
         out_layout,

@@ -2885,8 +2885,8 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
         FloatLayout::BF16,
     );
     assert!(admitted_extras.dense_batched_gemm_axes.is_some());
-    let admitted_key = kernel_cache_key(&bound, &packed, admitted_policy)
-        .expect("admitted identity resolves");
+    let admitted_key =
+        kernel_cache_key(&bound, &packed, admitted_policy).expect("admitted identity resolves");
     let f32_layout_key = kernel_cache_key_for_grid_with_layout(
         &bound,
         &packed,
@@ -3011,13 +3011,17 @@ fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
         };
         let weight_offset = "(row_base + (long)w_k * w_stride)";
         if same_codecs {
-            assert!(original_kernel
-                .source
-                .contains("as_type<bfloat>(ushort((ushort)in0["));
+            assert!(
+                original_kernel
+                    .source
+                    .contains("as_type<bfloat>(ushort((ushort)in0[")
+            );
             assert!(original_kernel.source.contains("in1[aoff * 2]"));
-            assert!(reversed_kernel
-                .source
-                .contains("as_type<bfloat>(ushort((ushort)in1["));
+            assert!(
+                reversed_kernel
+                    .source
+                    .contains("as_type<bfloat>(ushort((ushort)in1[")
+            );
             assert!(reversed_kernel.source.contains("in0[aoff * 2]"));
             assert!(!original_kernel.source.contains("bf16_element(in"));
             assert!(!reversed_kernel.source.contains("bf16_element(in"));

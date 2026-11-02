@@ -52,7 +52,10 @@ fn reused_kernels_equal_fresh_emit_for_every_op_of_a_real_decode_program() {
             .expect("reuse succeeds");
     assert!(!resolved.is_empty(), "the decode program has ops");
     assert!(
-        previous.iter().zip(&resolved).any(|(old, new)| old.extents != new.extents),
+        previous
+            .iter()
+            .zip(&resolved)
+            .any(|(old, new)| old.extents != new.extents),
         "the cached length change must move at least one op extent"
     );
     assert_eq!(
@@ -62,9 +65,17 @@ fn reused_kernels_equal_fresh_emit_for_every_op_of_a_real_decode_program() {
     );
     for (bound, kernel) in resolved.iter().zip(&kernels) {
         let fresh = emit_cuda_with_policy(bound, &packed, policy).expect("fresh op emits");
-        assert_eq!(kernel.source, fresh.source, "source for node {:?}", bound.node);
+        assert_eq!(
+            kernel.source, fresh.source,
+            "source for node {:?}",
+            bound.node
+        );
         assert_eq!(kernel.entry, fresh.entry, "entry for node {:?}", bound.node);
-        assert_eq!(kernel.bindings, fresh.bindings, "bindings for node {:?}", bound.node);
+        assert_eq!(
+            kernel.bindings, fresh.bindings,
+            "bindings for node {:?}",
+            bound.node
+        );
         assert_eq!(kernel.grid, fresh.grid, "grid for node {:?}", bound.node);
         assert_eq!(kernel, &fresh, "whole kernel for node {:?}", bound.node);
     }

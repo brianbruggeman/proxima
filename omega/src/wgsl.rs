@@ -980,11 +980,17 @@ fn preamble(
 /// differing only in codec cannot share a compiled kernel), so a
 /// packed-free kernel's `Uniforms` struct, and its shared pipeline-cache
 /// identity, are byte-for-byte what they were before this fix.
-fn push_packed_row_uniform_fields(source: &mut String, operand_count: usize, quantized: &[Option<Codec>]) {
+fn push_packed_row_uniform_fields(
+    source: &mut String,
+    operand_count: usize,
+    quantized: &[Option<Codec>],
+) {
     if !quantized.iter().any(Option::is_some) {
         return;
     }
-    source.push_str(&format!("    packed_row_count: array<i32, {operand_count}>,\n"));
+    source.push_str(&format!(
+        "    packed_row_count: array<i32, {operand_count}>,\n"
+    ));
     source.push_str(&format!(
         "    packed_contraction_width: array<i32, {operand_count}>,\n"
     ));
@@ -1207,7 +1213,11 @@ fn codec_function_name(node: NodeId, codec: Codec) -> Result<&'static str, EmitE
 /// uniforms`/`pack_elementwise_uniforms` call this at BIND time, per node,
 /// to fill the new `packed_row_count`/`packed_contraction_width` uniform
 /// arrays this function's own runtime formula reads back per dispatch.
-pub(crate) fn packed_row_shape(resolved: &BoundOp, operand_index: usize, contraction_axes: &[u16]) -> (i64, i64) {
+pub(crate) fn packed_row_shape(
+    resolved: &BoundOp,
+    operand_index: usize,
+    contraction_axes: &[u16],
+) -> (i64, i64) {
     let no_conversion = (1, 1);
     let Some((_, layout, _)) = resolved.operands().get(operand_index) else {
         return no_conversion;
@@ -1237,7 +1247,11 @@ pub(crate) fn packed_row_shape(resolved: &BoundOp, operand_index: usize, contrac
     // a safe no-op once it is reached via division rather than compared
     // directly against a stride, so the check must happen BEFORE that
     // division, not be inferred from its result.
-    let min_contraction_stride = contraction_axes.iter().map(|&axis| layout.stride(axis)).min().unwrap_or(1);
+    let min_contraction_stride = contraction_axes
+        .iter()
+        .map(|&axis| layout.stride(axis))
+        .min()
+        .unwrap_or(1);
     if min_contraction_stride <= 1 {
         return no_conversion;
     }
@@ -1275,7 +1289,10 @@ pub(crate) fn packed_row_shape(resolved: &BoundOp, operand_index: usize, contrac
 /// split, e.g. `h`/`d`) or only another operand varies on (that operand's
 /// own broadcast batch axis, e.g. `s`). Empty when no such axis exists —
 /// `packed_row_shape` already treats an empty set as "nothing to convert".
-pub(crate) fn packed_contraction_axes_elementwise(resolved: &BoundOp, operand_index: usize) -> Vec<u16> {
+pub(crate) fn packed_contraction_axes_elementwise(
+    resolved: &BoundOp,
+    operand_index: usize,
+) -> Vec<u16> {
     let operands = resolved.operands();
     let Some((_, weight_layout, _)) = operands.get(operand_index) else {
         return Vec::new();
@@ -1287,7 +1304,9 @@ pub(crate) fn packed_contraction_axes_elementwise(resolved: &BoundOp, operand_in
                 && operands
                     .iter()
                     .enumerate()
-                    .any(|(other_index, (_, other_layout, _))| other_index != operand_index && other_layout.stride(axis) != 0)
+                    .any(|(other_index, (_, other_layout, _))| {
+                        other_index != operand_index && other_layout.stride(axis) != 0
+                    })
         })
         .collect()
 }
@@ -1298,7 +1317,9 @@ pub(crate) fn packed_contraction_axes_elementwise(resolved: &BoundOp, operand_in
 /// once, `wq`/`wk`'s contract one (`i`); `packed_row_shape` handles either
 /// count uniformly once it has the full set.
 pub(crate) fn packed_contraction_axes_reduce(resolved: &BoundOp, output_axes: &[u16]) -> Vec<u16> {
-    (0..resolved.extents.len() as u16).filter(|axis| !output_axes.contains(axis)).collect()
+    (0..resolved.extents.len() as u16)
+        .filter(|axis| !output_axes.contains(axis))
+        .collect()
 }
 
 /// Emits the runtime physical-offset conversion every packed-operand read

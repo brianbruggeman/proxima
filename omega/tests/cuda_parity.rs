@@ -715,8 +715,12 @@ fn faulting_node_for_two_gathers(
 
 #[test]
 fn a_fault_in_only_the_second_of_two_gathers_names_the_second_node() {
-    let (named_node, first, second) =
-        faulting_node_for_two_gathers(Engine::Gpu, Some(GpuDriver::Cuda), &[0.0, 3.0], &[1.0, 999.0]);
+    let (named_node, first, second) = faulting_node_for_two_gathers(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &[0.0, 3.0],
+        &[1.0, 999.0],
+    );
     assert_ne!(first, second);
     assert_eq!(named_node, second, "only the second gather faulted");
 }

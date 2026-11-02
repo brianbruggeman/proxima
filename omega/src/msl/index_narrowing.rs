@@ -23,8 +23,15 @@ pub(super) fn index_family(
             ..
         } => {
             if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
-                || dense_batched_gemm_block(resolved, quantized, numeric_policy, *reduce_op, *init, output_axes)
-                    .is_some()
+                || dense_batched_gemm_block(
+                    resolved,
+                    quantized,
+                    numeric_policy,
+                    *reduce_op,
+                    *init,
+                    output_axes,
+                )
+                .is_some()
             {
                 return None;
             }
