@@ -97,6 +97,9 @@ const WHOAMI_BLOBS: [&str; 6] = [
     "sha256:0abc37d8af53c11b5d94e3b54eca06ac582fec2a9b56f7d3070bb54247aa8595",
 ];
 const RESIDENT_REQUESTS: usize = 3;
+const RESTART_FLAG: &str = "--vm-registry-restart-child";
+const SERVE_ONCE_GUEST: &str = "serve-once-init";
+const RESTART_GET_LIMIT: Duration = Duration::from_secs(10);
 
 const MAX_SEGMENTS: usize = 8;
 const OUTPUT_CAPACITY: usize = 64 * 1024;
@@ -113,6 +116,7 @@ fn main() {
         Some(SERVE_FLAG) => Some(run_serve_child(&arguments[1], &arguments[2])),
         Some(RESIDENT_FLAG) => Some(run_resident_child(&arguments[1], &arguments[2], true)),
         Some(RESIDENT_BARE_FLAG) => Some(run_resident_child(&arguments[1], &arguments[2], false)),
+        Some(RESTART_FLAG) => Some(run_restart_child(&arguments[1..])),
         Some(BENCH_FLAG) => Some(run_bench_child(&arguments[1..])),
         Some(INSTRUMENT_FLAG) => Some(run_instrument_child(&arguments[1..])),
         _ => None,
@@ -152,6 +156,14 @@ fn main() {
             trial(
                 "a_resident_vm_upstream_serves_without_an_installed_runtime",
                 a_resident_vm_upstream_serves_without_an_installed_runtime,
+            ),
+            trial(
+                "a_resident_guest_that_ends_is_booted_again_under_restart_always",
+                a_resident_guest_that_ends_is_booted_again_under_restart_always,
+            ),
+            trial(
+                "a_resident_guest_that_ends_is_not_booted_again_under_restart_never",
+                a_resident_guest_that_ends_is_not_booted_again_under_restart_never,
             ),
             trial(
                 "a_resident_elf_guest_is_rejected_when_the_config_is_applied",
@@ -1251,6 +1263,100 @@ fn assert_resident_serves(child_flag: &str) {
     assert_eq!(statuses, vec!["status=200"; RESIDENT_REQUESTS], "{report}");
     assert!(report.contains("GET / HTTP/1.1"), "whoami echoes the request line: {report}");
     assert!(report.lines().any(|line| line == "boots=1"), "exactly one guest boots: {report}");
+}
+
+/// `serve-once-init` answers one HTTP request and powers the guest off, so the
+/// guest ends on its own without a watchdog. With `restart = "always"` and one
+/// allowed restart the supervisor boots a second guest, serves from it, and
+/// stops after it ends too: two boots, one restart.
+fn a_resident_guest_that_ends_is_booted_again_under_restart_always() {
+    let report = restart_report("always");
+
+    assert!(report.lines().any(|line| line == "first=200:serve-once-init"), "the first guest serves: {report}");
+    assert!(report.lines().any(|line| line == "served_after_restart=200:serve-once-init"), "requests after the restart are served: {report}");
+    assert!(report.lines().any(|line| line == "boots=2"), "one restart boots a second guest: {report}");
+    assert!(report.lines().any(|line| line == "restarts=1"), "the restart count is 1: {report}");
+    assert!(report.lines().any(|line| line == "after_supervisor=failed"), "the second guest has ended and nothing boots a third: {report}");
+}
+
+/// Control: the same self-ending guest under `restart = "never"` is booted once.
+fn a_resident_guest_that_ends_is_not_booted_again_under_restart_never() {
+    let report = restart_report("never");
+
+    assert!(report.lines().any(|line| line == "first=200:serve-once-init"), "the first guest serves: {report}");
+    assert!(report.lines().any(|line| line == "boots=1"), "no restart boots no second guest: {report}");
+    assert!(report.lines().any(|line| line == "restarts=0"), "the restart count stays 0: {report}");
+    assert!(!report.contains("served_after_restart"), "no guest exists to serve after the end: {report}");
+    assert!(report.lines().any(|line| line == "after_supervisor=failed"), "the second GET fails: {report}");
+}
+
+fn restart_report(restart: &str) -> String {
+    let directory = tempfile::tempdir().expect("create tempdir for the guest build");
+    let init = build_linux_bin(&directory.path().join("linux-target"), SERVE_ONCE_GUEST);
+    let signed_self = SignedSelf::prepare();
+    let output = signed_self
+        .run(
+            &[RESTART_FLAG, &host_kernel(), &init.to_string_lossy(), restart],
+            b"",
+        )
+        .expect("restart child reports");
+    String::from_utf8(output).expect("child prints text")
+}
+
+async fn get_outcome(upstream: &proxima::upstreams::vm_resident::ResidentVmUpstream) -> String {
+    let attempt = async {
+        let response = proxima_primitives::pipe::SendPipe::call(upstream, get_request()?).await?;
+        let status = response.status;
+        let payload = response.collect_body().await?;
+        Ok::<String, Box<dyn Error>>(format!("{status}:{}", String::from_utf8_lossy(&payload).trim_end()))
+    };
+    match tokio::time::timeout(RESTART_GET_LIMIT, attempt).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(_)) | Err(_) => "failed".to_owned(),
+    }
+}
+
+/// args: `<kernel> <serve-once-init> <always|never>`. Builds a resident upstream
+/// over the self-ending `serve-once-init`, GETs once, follows the published
+/// status until the supervisor finishes (the sender drops), GETs once while a
+/// restarted guest runs, and prints the process-wide boot and restart counts.
+fn run_restart_child(arguments: &[String]) -> Result<(), Box<dyn Error>> {
+    let [kernel, init, restart] = arguments else {
+        return Err("restart child takes <kernel> <serve-once-init> <always|never>".into());
+    };
+    let choice = match restart.as_str() {
+        "always" => proxima::upstreams::process::RestartChoice::Always,
+        "never" => proxima::upstreams::process::RestartChoice::Never,
+        other => return Err(format!("unknown restart policy `{other}`").into()),
+    };
+    let spec = proxima::upstreams::vm::VmConfig::builder()
+        .kernel_path(kernel.as_str())
+        .init_path(init.as_str())
+        .resident(true)
+        .restart(choice)
+        .restart_delay_ms(0)
+        .max_restart_attempts(1)
+        .build()
+        .into_spec()?;
+    child_runtime(true)?.block_on(async move {
+        let upstream = proxima::upstreams::vm_resident::build_upstream("restart-serve-once", &spec).await?;
+        let mut status = upstream.status();
+        let mut report = format!("first={}\n", get_outcome(&upstream).await);
+        while status.changed().await.is_ok() {
+            let snapshot = status.borrow_and_update().clone();
+            if snapshot.state == proxima::control_plane::PipeState::Running && snapshot.restart_count == 1 {
+                report.push_str(&format!("served_after_restart={}\n", get_outcome(&upstream).await));
+            }
+        }
+        report.push_str(&format!("after_supervisor={}\n", get_outcome(&upstream).await));
+        report.push_str(&format!(
+            "boots={}\nrestarts={}\n",
+            proxima::upstreams::vm_resident::guests_booted(),
+            proxima::upstreams::vm_resident::guest_restarts()
+        ));
+        std::io::stdout().write_all(report.as_bytes())?;
+        Ok::<(), Box<dyn Error>>(())
+    })
 }
 
 /// Sad path: `resident = true` on an elf guest fails when the config is

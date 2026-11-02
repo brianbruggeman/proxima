@@ -60,6 +60,8 @@ use crate::pipe_factory::PipeFactory;
 use crate::request::{Request, Response};
 use crate::runtime::Runtime;
 
+use super::process::{RestartChoice, RestartPolicy, default_restart_delay_ms};
+
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use super::vm_resident::build_resident;
 
@@ -182,6 +184,9 @@ pub struct VmSpec {
     pub guest_port: u16,
     pub connect_timeout_millis: u64,
     pub modules_root: PathBuf,
+    pub restart: RestartPolicy,
+    pub restart_delay_ms: u64,
+    pub max_restart_attempts: u32,
 }
 
 /// Typed config surface for the `vm` upstream -- either an ELF guest
@@ -310,6 +315,25 @@ pub struct VmConfig {
     #[serde(default = "default_modules_root")]
     #[builder(default = default_modules_root())]
     pub modules_root: String,
+
+    /// Whether a resident guest that ends is booted again. Defaults to `never`;
+    /// the same policy values as the `process` upstream.
+    #[setting(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub restart: RestartChoice,
+
+    /// Delay before a resident guest is booted again, in ms.
+    #[setting(default = 1000)]
+    #[serde(default = "default_restart_delay_ms")]
+    #[builder(default = default_restart_delay_ms())]
+    pub restart_delay_ms: u64,
+
+    /// Restart attempt ceiling (0 = unlimited).
+    #[setting(default)]
+    #[serde(default)]
+    #[builder(default)]
+    pub max_restart_attempts: u32,
 }
 
 impl Validate for VmConfig {
@@ -432,6 +456,12 @@ impl VmConfig {
                 "only a Linux guest (kernel_path) can run resident",
             ));
         }
+        if !self.resident && self.restart != RestartChoice::Never {
+            errors.push(ValidationMessage::new(
+                "restart",
+                "only a resident guest restarts",
+            ));
+        }
         if self.guest_port == 0 {
             errors.push(ValidationMessage::new("guest_port", "must be greater than zero"));
         }
@@ -501,6 +531,9 @@ impl VmConfig {
             guest_port: self.guest_port,
             connect_timeout_millis: self.connect_timeout_millis,
             modules_root: PathBuf::from(self.modules_root),
+            restart: self.restart.into(),
+            restart_delay_ms: self.restart_delay_ms,
+            max_restart_attempts: self.max_restart_attempts,
         })
     }
 }
@@ -1427,6 +1460,9 @@ mod tests {
                 guest_port: 80,
                 connect_timeout_millis: 60_000,
                 modules_root: PathBuf::from("/usr/lib/modules"),
+                restart: RestartPolicy::Never,
+                restart_delay_ms: 1_000,
+                max_restart_attempts: 0,
             },
         );
 

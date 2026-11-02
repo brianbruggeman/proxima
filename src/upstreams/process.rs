@@ -535,7 +535,7 @@ fn default_label() -> String {
     "process".to_string()
 }
 
-fn default_restart_delay_ms() -> u64 {
+pub(super) fn default_restart_delay_ms() -> u64 {
     1_000
 }
 
