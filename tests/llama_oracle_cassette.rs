@@ -1,15 +1,19 @@
 //! The llama.cpp incumbent as a recorded oracle. An external process is IO,
 //! IO is a pipe: `LlamaOracle` is a `Request -> Response` handler whose call
-//! spawns `llama-tokenize` / `llama-completion`. `#[cassette(..)]` records its
-//! traffic once; every later run replays it with the binaries absent.
+//! runs `llama-tokenize` and a one-shot `llama-server` `/completion` with
+//! `return_tokens`, so greedy ids are the generator's own. `#[cassette(..)]`
+//! records its traffic once; every later run replays it with no binaries.
 //!
-//! Record on a host that has the incumbent:
-//! `PROXIMA_CASSETTE=record cargo val -j 1 -p proxima --test llama_oracle_cassette`
+//! Record with a CPU build (cmake -DGGML_CUDA=OFF -DBUILD_SHARED_LIBS=OFF,
+//! targets llama-tokenize llama-server):
+//! `PROXIMA_LLAMA_BIN_DIR=<build>/bin PROXIMA_CASSETTE=record cargo val -p proxima-lib --features test-support --test llama_oracle_cassette`
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 use std::future::Future;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -18,8 +22,7 @@ use proxima::request::{Request, Response};
 use proxima::{PipeHandle, ProximaError};
 use proxima_primitives::pipe::SendPipe;
 
-const INCUMBENT_BIN_DIR: &str = "/home/bix/repos/llama.cpp-incumbent/build/bin";
-const CUDA_RUNTIME_DIR: &str = "/usr/local/lib/ollama.stale-0.5.7.bak";
+const BIN_DIR_VAR: &str = "PROXIMA_LLAMA_BIN_DIR";
 const MODEL: &str = "/home/bix/models/qwen3-0.6b-q8_0.gguf";
 const ABSENT_BIN_DIR: &str = "/nonexistent/llama-bin";
 const PROMPT: &str = "The capital of France is";
@@ -38,29 +41,102 @@ struct Greedy {
 
 #[derive(Clone)]
 struct LlamaOracle {
-    bin_dir: PathBuf,
+    bin_dir: Option<PathBuf>,
+}
+
+fn free_port() -> Result<u16, ProximaError> {
+    TcpListener::bind("127.0.0.1:0")
+        .and_then(|listener| listener.local_addr())
+        .map(|address| address.port())
+        .map_err(|error| ProximaError::Record(format!("reserve a port: {error}")))
+}
+
+fn wait_listening(server: &mut Child) -> Result<(), ProximaError> {
+    let stderr = server
+        .stderr
+        .take()
+        .ok_or_else(|| ProximaError::Record("llama-server stderr was not piped".into()))?;
+    let mut last = String::new();
+    for line in BufReader::new(stderr).lines() {
+        last = line.map_err(|error| ProximaError::Record(format!("read llama-server: {error}")))?;
+        if last.contains("listening on") {
+            return Ok(());
+        }
+    }
+    Err(ProximaError::Record(format!(
+        "llama-server exited before listening; last line: {last}"
+    )))
+}
+
+fn complete(port: u16, prompt: &str, count: usize) -> Result<Greedy, ProximaError> {
+    let payload = serde_json::json!({
+        "prompt": prompt,
+        "n_predict": count,
+        "temperature": 0,
+        "seed": 1,
+        "return_tokens": true,
+        "cache_prompt": false,
+    })
+    .to_string();
+    let reply = post(port, "/completion", &payload)?;
+    let parsed: ServerCompletion = serde_json::from_str(&reply)
+        .map_err(|error| ProximaError::Record(format!("parse completion `{reply}`: {error}")))?;
+    Ok(Greedy {
+        text: parsed.content,
+        ids: parsed.tokens,
+    })
+}
+
+fn post(port: u16, path: &str, payload: &str) -> Result<String, ProximaError> {
+    let fail = |error: std::io::Error| ProximaError::Record(format!("llama-server http: {error}"));
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).map_err(fail)?;
+    let head = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Type: application/json\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
+        payload.len()
+    );
+    stream.write_all(head.as_bytes()).map_err(fail)?;
+    stream.write_all(payload.as_bytes()).map_err(fail)?;
+    let mut raw = String::new();
+    stream.read_to_string(&mut raw).map_err(fail)?;
+    raw.split_once("\r\n\r\n")
+        .map(|(_, body)| body.to_string())
+        .ok_or_else(|| ProximaError::Record(format!("malformed http reply: {raw}")))
+}
+
+#[derive(Deserialize)]
+struct ServerCompletion {
+    content: String,
+    tokens: Vec<u32>,
 }
 
 impl LlamaOracle {
     fn incumbent() -> Self {
         Self {
-            bin_dir: PathBuf::from(INCUMBENT_BIN_DIR),
+            bin_dir: std::env::var_os(BIN_DIR_VAR).map(PathBuf::from),
         }
     }
 
     fn absent() -> Self {
         Self {
-            bin_dir: PathBuf::from(ABSENT_BIN_DIR),
+            bin_dir: Some(PathBuf::from(ABSENT_BIN_DIR)),
         }
     }
 
+    fn bin_dir(&self) -> Result<&PathBuf, ProximaError> {
+        self.bin_dir.as_ref().ok_or_else(|| {
+            ProximaError::Record(format!(
+                "{BIN_DIR_VAR} is not set; recording needs a CPU build of llama-tokenize and \
+                 llama-server, point {BIN_DIR_VAR} at its bin directory"
+            ))
+        })
+    }
+
     fn run(&self, binary: &str, args: &[&str]) -> Result<String, ProximaError> {
-        let program = self.bin_dir.join(binary);
-        let library_path = format!("{}:{CUDA_RUNTIME_DIR}", self.bin_dir.display());
+        let program = self.bin_dir()?.join(binary);
         let output = Command::new(&program)
             .args(args)
-            .env("LD_LIBRARY_PATH", library_path)
-            .stdin(std::process::Stdio::null())
+            .stdin(Stdio::null())
             .output()
             .map_err(|error| {
                 ProximaError::Record(format!("spawn {}: {error}", program.display()))
@@ -98,32 +174,31 @@ impl LlamaOracle {
     }
 
     fn greedy(&self, prompt: &str, count: usize) -> Result<Greedy, ProximaError> {
-        let count_arg = count.to_string();
-        let stdout = self.run(
-            "llama-completion",
-            &[
-                "-m", MODEL, "-p", prompt, "-n", &count_arg, "--temp", "0", "-ngl", "0", "-no-cnv",
-                "-s", "1",
-            ],
-        )?;
-        let generated = stdout
-            .strip_prefix(prompt)
-            .ok_or_else(|| {
-                ProximaError::Record(format!("stdout lacks the prompt echo: {stdout:?}"))
-            })?
-            .trim_end_matches('\n')
-            .to_string();
-        let ids = self.tokenize(&generated)?;
-        if ids.len() != count {
+        let port = free_port()?;
+        let mut server = self.spawn_server(port)?;
+        let outcome = wait_listening(&mut server).and_then(|()| complete(port, prompt, count));
+        let reaped = server.kill().and_then(|()| server.wait());
+        let greedy = outcome?;
+        reaped.map_err(|error| ProximaError::Record(format!("reap llama-server: {error}")))?;
+        if greedy.ids.len() != count {
             return Err(ProximaError::Record(format!(
-                "generated text {generated:?} retokenizes to {} ids, expected {count}",
-                ids.len()
+                "llama-server returned {} token ids for n_predict {count}",
+                greedy.ids.len()
             )));
         }
-        Ok(Greedy {
-            text: generated,
-            ids,
-        })
+        Ok(greedy)
+    }
+
+    fn spawn_server(&self, port: u16) -> Result<Child, ProximaError> {
+        let program = self.bin_dir()?.join("llama-server");
+        Command::new(&program)
+            .args(["-m", MODEL, "--host", "127.0.0.1", "--no-webui", "-np", "1"])
+            .args(["-c", "512", "--port", &port.to_string()])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|error| ProximaError::Record(format!("spawn {}: {error}", program.display())))
     }
 
     fn answer(&self, request: &Request<Bytes>) -> Result<Vec<u8>, ProximaError> {
@@ -223,7 +298,7 @@ async fn greedy_ids_match_the_incumbent(#[cassette(LlamaOracle::incumbent())] pi
         .expect("greedy");
 
     assert_eq!(answer.text, " Paris. The capital of France");
-    assert_eq!(answer.ids.len(), GREEDY_TOKENS);
+    assert_eq!(answer.ids, vec![12095, 13, 576, 6722, 315, 9625]);
 }
 
 #[proxima::test(cassette = "llama_greedy")]
@@ -235,7 +310,7 @@ async fn greedy_replays_with_the_binary_absent(
         .expect("greedy");
 
     assert_eq!(answer.text, " Paris. The capital of France");
-    assert_eq!(answer.ids.len(), GREEDY_TOKENS);
+    assert_eq!(answer.ids, vec![12095, 13, 576, 6722, 315, 9625]);
 }
 
 #[proxima::test(cassette = "llama_tokenize")]
