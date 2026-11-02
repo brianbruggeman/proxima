@@ -866,7 +866,8 @@ fn kernel_cache_state() -> String {
 
 fn orchestrate(args: &RunArgs<'_>) -> Result<(), BenchError> {
     let cache_state = kernel_cache_state();
-    let llama_prompt_ids = llama_tokenize(args.path, args.prompt, true)?;
+    // a format llama cannot open fails here too; its rows then report unsupported
+    let llama_prompt_ids = llama_tokenize(args.path, args.prompt, true).unwrap_or_default();
     let context = (llama_prompt_ids.len() + args.tokens).max(MIN_CONTEXT);
     let args = RunArgs { context, ..*args };
     let (quantized, quantized_run) = run_proxima_row(&args, "1")?;
@@ -887,7 +888,7 @@ fn orchestrate(args: &RunArgs<'_>) -> Result<(), BenchError> {
     );
     let proxima_prompt_ids = output_ids(&quantized_run.stdout, "prompt_ids").unwrap_or_default();
     let proxima_ids = output_ids(&quantized_run.stdout, "ids").unwrap_or_default();
-    let comparable = proxima_prompt_ids == llama_prompt_ids;
+    let comparable = !llama_prompt_ids.is_empty() && proxima_prompt_ids == llama_prompt_ids;
     let reference = Reference {
         prompt_ids: llama_prompt_ids,
         generated_ids: proxima_ids.clone(),
