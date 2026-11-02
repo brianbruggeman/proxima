@@ -307,11 +307,7 @@ pub fn emit_cuda_on_device(
         }
     };
     let (grid, extra_outputs) = extent_fields(resolved, &quantized, numeric_policy, device)?;
-    let prologue = match (staged_matvec_plan(resolved, &quantized, numeric_policy, device), attention_chunks) {
-        (Some(plan), _) if plan.scratch => vec![staged_prepass(resolved, &plan, &entry, &source)?],
-        (_, Some(chunks)) => vec![split_pass(resolved, &entry, chunks)?],
-        _ => Vec::new(),
-    };
+    let prologue = prologue_kernels(resolved, &quantized, numeric_policy, device, &entry, &source)?;
     Ok(CudaKernel {
         source,
         entry,
@@ -320,6 +316,26 @@ pub fn emit_cuda_on_device(
         extra_outputs,
         prologue,
     })
+}
+
+/// The kernels launched ahead of the op: they are sized by its extents like the grid, so a
+/// reused kernel rebuilds them rather than keeping the previous extents' launch.
+fn prologue_kernels(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+    entry: &str,
+    source: &str,
+) -> Result<Vec<CudaKernel>, EmitError> {
+    match (
+        staged_matvec_plan(resolved, quantized, numeric_policy, device),
+        split_chunks(&resolved.kind, device),
+    ) {
+        (Some(plan), _) if plan.scratch => Ok(vec![staged_prepass(resolved, &plan, entry, source)?]),
+        (_, Some(chunks)) => Ok(vec![split_pass(resolved, entry, chunks)?]),
+        _ => Ok(Vec::new()),
+    }
 }
 
 /// The `CudaKernel` fields that follow the op's extents rather than its text:
@@ -483,7 +499,7 @@ pub fn emit_cuda_reusing(
     for bound in resolved {
         let unchanged = previous
             .get_mut(&bound.node)
-            .filter(|(old, _)| same_emitted_text(old, bound, packed_operands))
+            .filter(|(old, _)| same_emitted_text(old, bound, packed_operands, numeric_policy, device))
             .and_then(|(_, kernel)| kernel.take());
         kernels.push(match unchanged {
             Some(kernel) => {
@@ -512,14 +528,11 @@ pub fn refit_kernel(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<bool, EmitError> {
-    if !same_emitted_text(old, new, packed_operands) {
+    if !same_emitted_text(old, new, packed_operands, numeric_policy, device) {
         *kernel = emit_cuda_on_device(new, packed_operands, numeric_policy, device)?;
         return Ok(false);
     }
-    let quantized = operand_codecs(new, packed_operands);
-    let (grid, extra_outputs) = extent_fields(new, &quantized, numeric_policy, device)?;
-    kernel.grid = grid;
-    kernel.extra_outputs = extra_outputs;
+    refit_extent_fields_in_place(kernel, new, packed_operands, numeric_policy, device)?;
     Ok(true)
 }
 
@@ -527,10 +540,30 @@ pub fn refit_kernel(
 /// to uniforms, so only each stride's zero pattern reaches the text. Extents
 /// reach the text only through packed-operand addressing, so an op that reads
 /// a packed operand also has to match on extents.
-fn same_emitted_text(old: &BoundOp, new: &BoundOp, packed: &PackedOperands) -> bool {
+fn same_emitted_text(
+    old: &BoundOp,
+    new: &BoundOp,
+    packed: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+) -> bool {
     old.dtype == new.dtype
         && project_text_kind(&old.kind) == project_text_kind(&new.kind)
         && (old.extents == new.extents || !(reads_packed(old, packed) || reads_packed(new, packed)))
+        && same_text_plan(old, new, packed, numeric_policy, device)
+}
+
+fn same_text_plan(
+    old: &BoundOp,
+    new: &BoundOp,
+    packed: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+) -> bool {
+    let old_codecs = operand_codecs(old, packed);
+    let new_codecs = operand_codecs(new, packed);
+    text_plan_token(old, &old_codecs, numeric_policy, device)
+        == text_plan_token(new, &new_codecs, numeric_policy, device)
 }
 
 fn reads_packed(resolved: &BoundOp, packed: &PackedOperands) -> bool {
@@ -622,11 +655,24 @@ fn refit_extent_fields(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<CudaKernel, EmitError> {
+    refit_extent_fields_in_place(&mut kernel, bound, packed_operands, numeric_policy, device)?;
+    Ok(kernel)
+}
+
+fn refit_extent_fields_in_place(
+    kernel: &mut CudaKernel,
+    bound: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+) -> Result<(), EmitError> {
     let quantized = operand_codecs(bound, packed_operands);
     let (grid, extra_outputs) = extent_fields(bound, &quantized, numeric_policy, device)?;
+    let prologue = prologue_kernels(bound, &quantized, numeric_policy, device, &kernel.entry, &kernel.source)?;
     kernel.grid = grid;
     kernel.extra_outputs = extra_outputs;
-    Ok(kernel)
+    kernel.prologue = prologue;
+    Ok(())
 }
 /// Packs the runtime ABI for the f32 elementwise CUDA kernels.
 ///
@@ -1437,6 +1483,17 @@ fn entry_name(
         // correct, not a placeholder.
         proxima_tensor::NumericPolicy::default(),
     );
+    format!("{identity}{}", text_plan_token(resolved, quantized, numeric_policy, device))
+}
+
+/// The extent-dependent choices that select a reduce kernel's emitted text: which
+/// matvec, gemm, row-tile or lane-major body the op's current extents qualify for.
+fn text_plan_token(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+) -> String {
     let activation_token = if numeric_policy.activation_quantization
         && q4_0_matvec(resolved, quantized).is_some()
     {
@@ -1459,7 +1516,7 @@ fn entry_name(
     } else {
         String::from("_gid64c8")
     };
-    format!("{identity}{activation_token}{revision}")
+    format!("{activation_token}{revision}")
 }
 
 /// The `(weight, activation)` operand slots of a Q4_0-weight matvec that the
@@ -1642,7 +1699,6 @@ fn push_unit_stride_fold_header(
     source: &mut String,
     resolved: &BoundOp,
     output_axes: &[u16],
-    reduce_dim: u16,
     lane_start: &str,
     lane_step: &str,
 ) {
@@ -1651,15 +1707,13 @@ fn push_unit_stride_fold_header(
             "    long off_base{index} = u.operand_base[{index}];\n"
         ));
         for dim in output_axes {
-            let stride = resolved.operands()[index].1.stride(*dim);
             source.push_str(&format!(
-                "    off_base{index} += full_coord[{dim}] * {stride}L;\n"
+                "    off_base{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
             ));
         }
     }
-    let reduction_total = resolved.extents[reduce_dim as usize];
     source.push_str(&format!(
-        "    #pragma unroll 8\n    for (unsigned int r = {lane_start}; r < {reduction_total}u; r += {lane_step}) {{\n"
+        "    #pragma unroll 8\n    for (unsigned int r = {lane_start}; r < (unsigned int)u.reduction_total; r += {lane_step}) {{\n"
     ));
 }
 
@@ -1712,11 +1766,11 @@ fn hoisted_broadcast_epilogue(
         if invariant {
             push_epilogue_operand_load(&mut before_loop, index, rank, "    ", &outer_coord);
         } else if unit_reduce {
-            let stride = epilogue_operands[index].1.stride(reduce_dims[0]);
+            let reduce_dim = reduce_dims[0];
             push_epilogue_operand_load(&mut before_loop, index, rank, "    ", &outer_coord);
             before_loop.push_str(&format!("    long epi_base{index} = epi_off{index};\n"));
             in_loop.push_str(&format!(
-                "{indent}epi_scratch[{index}] = epi{index}[epi_base{index} + (long)r * {stride}L];\n"
+                "{indent}epi_scratch[{index}] = epi{index}[epi_base{index} + (long)r * u.epilogue_operand_strides[{index}][{reduce_dim}]];\n"
             ));
         } else {
             push_epilogue_operand_load(&mut in_loop, index, rank, indent, &inner_coord);
@@ -2526,7 +2580,6 @@ fn push_reduction_coord_decompose(
     from: &str,
     reduce_rank: usize,
     reduce_rank_len: usize,
-    reduction_extents: &[u64],
     indent: &str,
 ) {
     source.push_str(&format!("{indent}long reduction_coord[{reduce_rank_len}];\n"));
@@ -2536,9 +2589,9 @@ fn push_reduction_coord_decompose(
     }
     source.push_str(&format!("{indent}long remaining_r = {from};\n"));
     for index in (0..reduce_rank).rev() {
-        let extent = reduction_extents[index];
         source.push_str(&format!(
-            "{indent}reduction_coord[{index}] = remaining_r % {extent}L; remaining_r /= {extent}L;\n"
+            "{indent}reduction_coord[{index}] = remaining_r % u.reduction_extents[{index}]; \
+             remaining_r /= u.reduction_extents[{index}];\n"
         ));
     }
 }
@@ -2973,10 +3026,6 @@ fn push_cooperative_reduce_body(
     // lane-strided walk made a warp touch 32 separated elements before
     // returning to the same quantization block.
     let packed_chunked = quantized.iter().any(Option::is_some);
-    let reduction_extents: Vec<u64> = reduce_dims
-        .iter()
-        .map(|dim| resolved.extents[*dim as usize])
-        .collect();
 
     let block_reduce = is_broadcast_epilogue && !packed_chunked;
     let lane_major = lane_major_reduce(resolved, quantized);
@@ -3018,9 +3067,14 @@ fn push_cooperative_reduce_body(
         source.push_str(&format!("    long output_coord[{output_rank_len}];\n"));
         source.push_str("    long remaining = output_index;\n");
         for index in (0..output_rank).rev() {
-            let extent = resolved.extents[output_axes[index] as usize];
+            let slot = if is_broadcast_epilogue {
+                usize::from(output_axes[index])
+            } else {
+                index
+            };
             source.push_str(&format!(
-                "    output_coord[{index}] = remaining % {extent}L; remaining /= {extent}L;\n"
+                "    output_coord[{index}] = remaining % u.output_extents[{slot}]; \
+                 remaining /= u.output_extents[{slot}];\n"
             ));
         }
         for (index, dim) in output_axes.iter().enumerate() {
@@ -3100,7 +3154,6 @@ fn push_cooperative_reduce_body(
                 source,
                 resolved,
                 output_axes,
-                reduce_dims[0],
                 fold_start,
                 &fold_step,
             );
@@ -3115,7 +3168,6 @@ fn push_cooperative_reduce_body(
                     "chunk",
                     reduce_rank,
                     reduce_rank_len,
-                    &reduction_extents,
                     "        ",
                 );
             }
@@ -3141,7 +3193,6 @@ fn push_cooperative_reduce_body(
                 "r",
                 reduce_rank,
                 reduce_rank_len,
-                &reduction_extents,
                 "        ",
             );
         }
@@ -3161,18 +3212,17 @@ fn push_cooperative_reduce_body(
                 let (_, layout, _) = &resolved.operands()[index];
                 push_packed_matmul_offset(source, index, layout, output_axes, resolved, "        ");
             } else if unit_fold {
-                let stride = resolved.operands()[index].1.stride(reduce_dims[0]);
+                let reduce_dim = reduce_dims[0];
                 source.push_str(&format!(
-                    "        long off{index} = off_base{index} + (long)r * {stride}L;\n"
+                    "        long off{index} = off_base{index} + (long)r * u.operand_strides[{index}][{reduce_dim}];\n"
                 ));
             } else {
                 source.push_str(&format!(
                     "        long off{index} = u.operand_base[{index}];\n"
                 ));
                 for dim in 0..rank {
-                    let stride = resolved.operands()[index].1.stride(dim as u16);
                     source.push_str(&format!(
-                        "        off{index} += full_coord[{dim}] * {stride}L;\n"
+                        "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
                     ));
                 }
             }

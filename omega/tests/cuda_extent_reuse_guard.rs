@@ -69,3 +69,28 @@ fn reused_kernels_equal_fresh_emit_for_every_op_of_a_real_decode_program() {
         assert_eq!(kernel, &fresh, "whole kernel for node {:?}", bound.node);
     }
 }
+
+#[test]
+fn reused_cooperative_kernels_equal_fresh_emit_across_cached_length_jumps() {
+    let policy = NumericPolicy::default().with_reassociation(true);
+    let packed = BTreeMap::new();
+    for (from, to) in [(8, 3), (3, 6), (0, 1), (1, 7), (31, 2), (2, 33)] {
+        let previous = resolved_at(from);
+        let resolved = resolved_at(to);
+        let previous_kernels = previous
+            .iter()
+            .map(|bound| emit_cuda_with_policy(bound, &packed, policy).expect("previous op emits"))
+            .collect::<Vec<_>>();
+        let (kernels, _) =
+            emit_cuda_reusing(&previous, previous_kernels, &resolved, &packed, policy, EmitDevice::default())
+                .expect("reuse succeeds");
+        for (bound, kernel) in resolved.iter().zip(&kernels) {
+            let fresh = emit_cuda_with_policy(bound, &packed, policy).expect("fresh op emits");
+            assert!(
+                kernel == &fresh,
+                "reused kernel for node {:?} moving {from} -> {to} differs from a fresh emit",
+                bound.node
+            );
+        }
+    }
+}
