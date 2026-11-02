@@ -37,7 +37,7 @@ use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
 use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, KvLayout, LoadedModel, ServingConfig, SpeculativeConfig,
+    GPU_LAYERS_ALL, KvLayout, LoadedModel, NgramMapParams, ServingConfig, SpeculativeConfig,
     SpeculativeDecodeStats, SpeculativeType, SpeculativeTypeSet, header_descriptor,
 };
 use proxima_telemetry::emit::{EnvFilter, global};
@@ -478,6 +478,17 @@ fn print_lever_config() {
     );
 }
 
+fn u16_flag(raw_args: &[String], flag: &str) -> (Option<u16>, [usize; 2]) {
+    let Some(flag_index) = raw_args.iter().position(|arg| arg == flag) else {
+        return (None, [usize::MAX; 2]);
+    };
+    let value = raw_args
+        .get(flag_index + 1)
+        .and_then(|text| text.parse::<u16>().ok())
+        .unwrap_or_else(|| panic!("{flag} needs a u16 value"));
+    (Some(value), [flag_index, flag_index + 1])
+}
+
 fn main() {
     print_lever_config();
     let raw_args: Vec<String> = env::args().skip(1).collect();
@@ -517,6 +528,8 @@ fn main() {
         .and_then(|flag_index| raw_args.get(flag_index + 1))
         .map(PathBuf::from);
     let telemetry_file_value_index = telemetry_file_flag_index.map(|flag_index| flag_index + 1);
+    let (ngram_size_n, size_n_indices) = u16_flag(&raw_args, "--ngram-size-n");
+    let (ngram_size_m, size_m_indices) = u16_flag(&raw_args, "--ngram-size-m");
     let mut args = raw_args
         .into_iter()
         .enumerate()
@@ -533,6 +546,8 @@ fn main() {
                 && Some(*index) != draft_model_value_index
                 && Some(*index) != telemetry_file_flag_index
                 && Some(*index) != telemetry_file_value_index
+                && !size_n_indices.contains(index)
+                && !size_m_indices.contains(index)
         })
         .map(|(_, arg)| arg);
     let model_path = args
@@ -631,8 +646,15 @@ fn main() {
         ..base_config
     };
 
+    let ngram_defaults = SpeculativeConfig::none().ngram_simple;
+    let ngram_simple = NgramMapParams {
+        size_n: ngram_size_n.unwrap_or(ngram_defaults.size_n),
+        size_m: ngram_size_m.unwrap_or(ngram_defaults.size_m),
+        ..ngram_defaults
+    };
     let speculative_on = SpeculativeConfig {
         speculative_types: drafter_types,
+        ngram_simple,
         draft_model_path: draft_model_path.as_deref(),
         ..SpeculativeConfig::none()
     };

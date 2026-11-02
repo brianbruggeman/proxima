@@ -374,4 +374,50 @@ mod tests {
         assert_eq!(draft_limit_for_step(100, 100, 48, 0), 0);
         assert_eq!(draft_limit_for_step(90, 100, 48, 0), 0);
     }
+
+    const PERIOD: [u32; 10] = [576, 3974, 13876, 38835, 34208, 916, 279, 15678, 5562, 13];
+
+    fn repeated_sentence_history() -> Vec<u32> {
+        let mut history: Vec<u32> = PERIOD.repeat(8);
+        history.extend_from_slice(&PERIOD[..3]);
+        history
+    }
+
+    fn ngram_simple_config(size_n: u16, size_m: u16) -> SpeculativeConfig<'static> {
+        SpeculativeConfig {
+            ngram_simple: NgramMapParams {
+                size_n,
+                size_m,
+                min_hits: 1,
+            },
+            ..SpeculativeConfig::ngram_simple()
+        }
+    }
+
+    #[test]
+    fn llama_default_sizes_never_draft_a_ten_token_period() {
+        let history = repeated_sentence_history();
+        let mut drafters = DrafterSet::build(&SpeculativeConfig::ngram_simple(), 4096);
+        let mut out = Vec::new();
+
+        drafters.draft(&history, PERIOD[3], 30, &mut out);
+
+        assert!(
+            out.is_empty(),
+            "the most recent match leaves period-1 = 9 tokens, below size_n = 12: {out:?}"
+        );
+    }
+
+    #[test]
+    fn short_ngram_sizes_draft_the_rest_of_a_repeated_sentence() {
+        let history = repeated_sentence_history();
+        let mut drafters = DrafterSet::build(&ngram_simple_config(4, 16), 4096);
+        let mut out = Vec::new();
+
+        drafters.draft(&history, PERIOD[3], 30, &mut out);
+
+        let mut expected = PERIOD[4..].to_vec();
+        expected.extend_from_slice(&PERIOD[..3]);
+        assert_eq!(out, expected);
+    }
 }
