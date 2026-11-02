@@ -258,7 +258,7 @@ fn refresh_across(
 
 #[proxima::test]
 #[case::cache_alone_moves(&[1, 33], &[1, 65])]
-async fn refresh_matches_a_fresh_bind_when_the_attention_query_rows_move(
+async fn refresh_matches_a_fresh_bind_when_only_the_kv_cache_length_moves(
     #[case] low: &[u64],
     #[case] high: &[u64],
 ) {
