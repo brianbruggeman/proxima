@@ -38,8 +38,8 @@ use crate::cuda_ptx_store::PtxStore;
 use crate::lowering::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{
     RefreshRefusal, changed_nodes, kv_read_only_by_fused_attention, refit_cached_attention_at,
-    RowTemplate, apply_row_template, apply_shapes_template, refresh_bound_ops, refresh_cached_attention,
-    row_template, rows_enumerable, shapes_template,
+    RowTemplate, SymbolsTemplate, apply_row_template, apply_symbols_template, refresh_bound_ops,
+    refresh_cached_attention, row_template, rows_enumerable, symbols_shapes_template,
     touched_positions, touches_changed,
 };
 use proxima_tensor::{
@@ -337,6 +337,14 @@ impl PoolSchedule {
         let peak = plan.pool_shape(&produced);
         Self { plan, peak }
     }
+
+    fn relength(&mut self, resolved: &[BoundOp]) {
+        let produced: Vec<(NodeId, usize)> = resolved
+            .iter()
+            .map(|bound| (bound.node, bound_output_len(bound)))
+            .collect();
+        self.peak = self.plan.pool_shape(&produced);
+    }
 }
 
 fn bound_output_len(bound: &BoundOp) -> usize {
@@ -500,7 +508,7 @@ pub struct CudaPlan {
     // boxed: keeps CudaPlan inside clippy's large_enum_variant gap against the cpu plan
     rows_template: Box<Option<Option<RowTemplate>>>,
     // the extents of every node as a line in the row count, valid while the other symbols equal the first element
-    shapes_template: Box<Option<(Vec<u64>, RowTemplate)>>,
+    shapes_template: Box<Option<SymbolsTemplate>>,
     // one resolved device function per kernel, so a launch skips the module-cache text comparison
     functions: Vec<Option<CudaFunction>>,
     emit_calls: u64,
@@ -2312,7 +2320,7 @@ impl CudaPlan {
             self.follow_rows(position, bound, numeric_policy, &mut follow)?;
         }
         let pool_started = Instant::now();
-        *self.pool = PoolSchedule::build(&next, &self.kernels, &self.outputs);
+        self.pool.relength(&next);
         let count = next.len();
         self.resolved = next;
         self.bound_rows = rows;
@@ -2369,11 +2377,10 @@ impl CudaPlan {
 
     fn shapes_for(&self, symbols: &[u64]) -> Result<Shapes, CudaDriverError> {
         let rows = symbols.first().copied().unwrap_or(0);
-        let tail = symbols.get(1..).unwrap_or(&[]);
         let moved = (*self.shapes_template)
             .as_ref()
-            .filter(|(known, _)| known.as_slice() == tail && rows >= ROW_CLASS_MIN)
-            .and_then(|(_, template)| apply_shapes_template(template, rows));
+            .filter(|(base, varying, _)| varying.first() != Some(&true) || rows >= ROW_CLASS_MIN || base.first() == Some(&rows))
+            .and_then(|template| apply_symbols_template(template, symbols));
         match moved {
             Some(shapes) => Ok(shapes),
             None => infer(&self.program, symbols).map_err(|_| CudaDriverError::UnsupportedGraph {
@@ -2411,6 +2418,7 @@ impl CudaPlan {
     /// learning leaves the lazy learning at the first full refit in place.
     fn learn_rows_at_build(&mut self, symbols: &[u64], numeric_policy: NumericPolicy) {
         let rows = self.bound_rows;
+        self.learn_shapes_template(symbols, learning_rows(rows));
         let Some(others) = learning_rows(rows).filter(|_| !symbols.is_empty() && rows_enumerable(&self.resolved)) else {
             return;
         };
@@ -2431,6 +2439,40 @@ impl CudaPlan {
         }
     }
 
+    /// Fits every extent affine in all symbols from shape inference at the build symbols, at two
+    /// other row counts when the plan is wide, at each later symbol moved alone, and at every
+    /// symbol moved together, so a refit at new row count and new kv skips inference.
+    fn learn_shapes_template(&mut self, symbols: &[u64], wide_rows: Option<[u64; 2]>) {
+        let moved_alone = |index: usize, value: u64| {
+            let mut moved = symbols.to_vec();
+            moved[index] = value;
+            moved
+        };
+        let mut points = vec![symbols.to_vec()];
+        points.extend(wide_rows.into_iter().flatten().map(|rows| moved_alone(0, rows)));
+        points.extend((1..symbols.len()).map(|index| moved_alone(index, symbols[index] + 1)));
+        let joint: Vec<u64> = symbols
+            .iter()
+            .enumerate()
+            .map(|(index, value)| match (index, wide_rows) {
+                (0, Some([_, second])) => second,
+                (0, None) => *value,
+                _ => value + 3,
+            })
+            .collect();
+        points.push(joint);
+        let inferred: Option<Vec<Shapes>> = points.iter().map(|point| infer(&self.program, point).ok()).collect();
+        let binds: Option<Vec<(&[u64], &Shapes)>> = inferred
+            .as_ref()
+            .map(|all| points.iter().map(Vec::as_slice).zip(all).collect());
+        *self.shapes_template = binds.as_deref().and_then(symbols_shapes_template);
+        proxima_telemetry::debug!(
+            fitted = self.shapes_template.is_some(),
+            symbol_count = symbols.len() as u64,
+            "cuda plan learned its shapes template at build"
+        );
+    }
+
     fn learn_from_binds(
         &mut self,
         symbols: &[u64],
@@ -2438,14 +2480,8 @@ impl CudaPlan {
         numeric_policy: NumericPolicy,
     ) -> Result<bool, CudaDriverError> {
         let [first_rows, second_rows] = others;
-        let (first_shapes, first) = self.bind_at_rows(symbols, first_rows, numeric_policy)?;
-        let (second_shapes, second) = self.bind_at_rows(symbols, second_rows, numeric_policy)?;
-        let shapes = shapes_template(&[
-            (first_rows, &first_shapes),
-            (second_rows, &second_shapes),
-            (self.bound_rows, &self.shapes),
-        ]);
-        *self.shapes_template = shapes.map(|template| (symbols[1..].to_vec(), template));
+        let (_, first) = self.bind_at_rows(symbols, first_rows, numeric_policy)?;
+        let (_, second) = self.bind_at_rows(symbols, second_rows, numeric_policy)?;
         self.fit_row_template(&first, first_rows, &second, second_rows, numeric_policy)
     }
 
@@ -2523,9 +2559,11 @@ impl CudaPlan {
                 proxima_telemetry::debug!(position = position as u64, kind = current.kind.name(), "row template refused: kernel text plan differs");
                 return Ok(false);
             }
-            if previous[position].extents != current.extents && !self.emits_same_text(&previous[position], position, numeric_policy)? {
-                proxima_telemetry::debug!(position = position as u64, kind = current.kind.name(), "row template refused: emitted text differs");
-                return Ok(false);
+            for other in [&previous[position], &between[position]] {
+                if other.extents != current.extents && !self.emits_same_text(other, position, numeric_policy)? {
+                    proxima_telemetry::debug!(position = position as u64, kind = current.kind.name(), "row template refused: emitted text differs");
+                    return Ok(false);
+                }
             }
         }
         Ok(true)
@@ -2543,7 +2581,16 @@ impl CudaPlan {
                 error: error.to_string(),
             })?;
         let after = &self.kernels[position];
-        Ok(before.entry == after.entry && before.source == after.source)
+        let prologue_text = |kernel: &crate::cuda::CudaKernel| -> Vec<(String, String)> {
+            kernel
+                .prologue
+                .iter()
+                .map(|prologue| (prologue.entry.clone(), prologue.source.clone()))
+                .collect()
+        };
+        Ok(before.entry == after.entry
+            && before.source == after.source
+            && prologue_text(&before) == prologue_text(after))
     }
 
     /// Moves the plan to `shapes` by patching only the cached-attention ops

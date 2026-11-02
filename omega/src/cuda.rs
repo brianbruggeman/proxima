@@ -94,6 +94,7 @@ use mma_gemm::{GEMM_THREADS, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_gemm_plan, m
 use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
 use staged_matvec::{
     STAGED_THREADS, push_staged_matvec_body, staged_matvec_plan, staged_matvec_threads, staged_prepass,
+    staged_prepass_grid,
     staged_scratch_len, staged_scratch_node,
 };
 
@@ -554,7 +555,18 @@ pub fn refit_grid(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<(), EmitError> {
-    refit_extent_fields_in_place(kernel, new, packed_operands, numeric_policy, device)
+    let quantized = operand_codecs(new, packed_operands);
+    let staged = staged_matvec_plan(new, &quantized, numeric_policy, device).filter(|plan| plan.scratch);
+    match (staged, kernel.prologue.as_mut_slice()) {
+        (Some(plan), [prepass]) => {
+            let (grid, extra_outputs) = extent_fields(new, &quantized, numeric_policy, device)?;
+            prepass.grid = staged_prepass_grid(&plan);
+            kernel.grid = grid;
+            kernel.extra_outputs = extra_outputs;
+            Ok(())
+        }
+        _ => refit_extent_fields_in_place(kernel, new, packed_operands, numeric_policy, device),
+    }
 }
 
 /// Whether two ops select the same kernel text, ignoring the extents that only reach the
