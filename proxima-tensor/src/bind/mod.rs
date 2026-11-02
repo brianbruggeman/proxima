@@ -120,8 +120,8 @@ pub use refit_cached_attention::{
 };
 pub use refresh::{RefreshRefusal, refresh_bound_ops};
 pub use rows_template::{
-    RowTemplate, apply_row_template, apply_shapes_template, refresh_cached_attention, row_template,
-    rows_enumerable, shapes_template,
+    RowTemplate, SymbolsTemplate, apply_row_template, apply_symbols_template, refresh_cached_attention, row_template,
+    rows_enumerable, symbols_shapes_template,
 };
 #[cfg(feature = "instrument")]
 pub use repeat_nodes::{RepeatNodeRefusal, apply_repeat_nodes};
