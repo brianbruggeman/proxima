@@ -3706,3 +3706,105 @@ async fn staged_matvec_chain_matches_the_f64_oracle_and_reports_event_time_on_cu
     assert_eq!(actual.len(), rows, "every row is compared");
     assert!(worst / magnitude < 1e-5, "{codec:?} {rows}x{k} disagrees with the walker: worst={worst} magnitude={magnitude}");
 }
+
+fn elementwise(program: &mut Vec<Op>, body: ScalarOp, rank: u16, operands: Vec<(NodeId, &[u16])>) -> NodeId {
+    let operands = operands
+        .into_iter()
+        .map(|(node, axes)| (node, IndexMap::Affine(map::projection(rank, axes))))
+        .collect();
+    append(program, Op::Elementwise { dtype: DType::FLOAT32, body, operands, name: None })
+}
+
+fn state_update_program(rows: u32, columns: u32, heads: u32) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let state = append_input(&mut program, DType::FLOAT32, vec![Extent::Static(rows), Extent::Static(columns), Extent::Static(heads)], "state");
+    let key = append_input(&mut program, DType::FLOAT32, vec![Extent::Static(rows), Extent::Static(heads)], "key");
+    let value = append_input(&mut program, DType::FLOAT32, vec![Extent::Static(columns), Extent::Static(heads)], "value");
+    let decay = append_input(&mut program, DType::FLOAT32, vec![Extent::Static(heads)], "decay");
+    let product = elementwise(&mut program, ScalarOp::Multiply, 3, vec![(state, &[0, 1, 2]), (key, &[0, 2])]);
+    let projected = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[1, 2])),
+            keep: Keep::Reduce,
+            name: Some("projected".into()),
+        }),
+    );
+    let residual = elementwise(&mut program, ScalarOp::Subtract, 2, vec![(value, &[0, 1]), (projected, &[0, 1])]);
+    let decayed = elementwise(&mut program, ScalarOp::Multiply, 3, vec![(state, &[0, 1, 2]), (decay, &[2])]);
+    let outer = elementwise(&mut program, ScalarOp::Multiply, 3, vec![(key, &[0, 2]), (residual, &[1, 2])]);
+    let next = elementwise(&mut program, ScalarOp::Add, 3, vec![(decayed, &[0, 1, 2]), (outer, &[0, 1, 2])]);
+    (program, next)
+}
+
+fn state_update_oracle(rows: usize, columns: usize, heads: usize, inputs: &[Vec<f32>; 4]) -> Vec<f64> {
+    let [state, key, value, decay] = inputs;
+    let at = |row: usize, column: usize, head: usize| (row * columns + column) * heads + head;
+    let mut next = vec![0.0f64; rows * columns * heads];
+    for column in 0..columns {
+        for head in 0..heads {
+            let projected: f64 = (0..rows)
+                .map(|row| f64::from(state[at(row, column, head)]) * f64::from(key[row * heads + head]))
+                .sum();
+            let residual = f64::from(value[column * heads + head]) - projected;
+            for row in 0..rows {
+                next[at(row, column, head)] = f64::from(state[at(row, column, head)]) * f64::from(decay[head])
+                    + f64::from(key[row * heads + head]) * residual;
+            }
+        }
+    }
+    next
+}
+
+/// A reduce over the slow axis of a state whose epilogue broadcasts the reduced vector back
+/// over the whole state: the lane-major lowering must equal the f64 host oracle, including
+/// when the output rows do not fill the last warp and when the reduction is shorter than the
+/// block's warp count.
+#[proxima::test]
+#[case::gated_delta_net_state_tail_warp(128, 33, 3)]
+#[case::state_rows_fewer_than_block_warps(3, 40, 2)]
+#[case::state_rows_not_a_warp_multiple(75, 16, 4)]
+async fn broadcast_epilogue_state_update_over_a_strided_reduction_equals_the_f64_oracle_on_cuda(
+    #[case] rows: usize,
+    #[case] columns: usize,
+    #[case] heads: usize,
+) {
+    let (program, next) = state_update_program(rows as u32, columns as u32, heads as u32);
+    let inputs = [
+        random_vec(51, rows * columns * heads),
+        random_vec(53, rows * heads),
+        random_vec(57, columns * heads),
+        random_vec(59, heads),
+    ];
+    let names = ["state", "key", "value", "decay"];
+    let named: Vec<(&str, QuantizedBlock<'_>)> = names
+        .iter()
+        .zip(&inputs)
+        .map(|(name, data)| (*name, QuantizedBlock::Float32(data)))
+        .collect();
+    let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[next], NumericPolicy::llama_relaxed())
+        .expect("the state update plans on cuda");
+    let identities = cuda_kernel_identities(&plan).expect("a cuda plan");
+    assert!(
+        identities.iter().any(|identity| identity.contains("_lm")),
+        "the strided reduction must lower lane-major, got {:?}",
+        identities.iter().map(|identity| identity.lines().next()).collect::<Vec<_>>()
+    );
+    let actual = execute_plan_named(&mut plan, &named).expect("the state update runs on cuda");
+
+    let expected = state_update_oracle(rows, columns, heads, &inputs);
+    let magnitude = expected.iter().fold(0.0f64, |largest, value| largest.max(value.abs()));
+    let worst = actual
+        .root()
+        .iter()
+        .zip(&expected)
+        .map(|(got, want)| (f64::from(*got) - want).abs())
+        .fold(0.0f64, f64::max);
+    assert_eq!(actual.root().len(), expected.len(), "every state element is compared");
+    assert!(worst / magnitude < 1e-4, "lane-major state update disagrees with the oracle: worst={worst} magnitude={magnitude}");
+}
