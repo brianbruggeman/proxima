@@ -19,10 +19,23 @@ pub fn plan_named_with_config(
         named,
         outputs,
         config,
-        &[],
-        false,
-        true,
+        PlacedPlanOptions {
+            placed_input_nodes: &[],
+            has_output_placements: false,
+            fuse_cached_attention: true,
+        },
     )
+}
+
+/// placement facts that travel together into [`plan_named_with_config_and_placed_inputs`].
+#[derive(Debug, Clone, Copy)]
+pub struct PlacedPlanOptions<'a> {
+    /// nodes whose inputs are caller-owned device buffers, e.g. the KV cache inputs of a decode step
+    pub placed_input_nodes: &'a [NodeId],
+    /// true when any output is bound to a caller-owned placed buffer
+    pub has_output_placements: bool,
+    /// whether cached-attention fusion is permitted for this plan
+    pub fuse_cached_attention: bool,
 }
 
 /// prepares a configured plan whose selected inputs are already device resident.
@@ -32,10 +45,13 @@ pub fn plan_named_with_config_and_placed_inputs(
     named: &[(&str, QuantizedBlock<'_>)],
     outputs: &[NodeId],
     config: &RuntimeConfig,
-    placed_input_nodes: &[NodeId],
-    has_output_placements: bool,
-    fuse_cached_attention: bool,
+    placement: PlacedPlanOptions<'_>,
 ) -> Result<Plan, MetalError> {
+    let PlacedPlanOptions {
+        placed_input_nodes,
+        has_output_placements,
+        fuse_cached_attention,
+    } = placement;
     config
         .validate()
         .map_err(|error| MetalError::CompileFailed {

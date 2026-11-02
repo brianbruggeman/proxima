@@ -4315,9 +4315,11 @@ impl BackendRuntime {
                 named,
                 outputs,
                 config,
-                &placed_input_nodes,
-                !output_placements.is_empty(),
-                numerics.fuse_cached_attention,
+                omega::metal::PlacedPlanOptions {
+                    placed_input_nodes: &placed_input_nodes,
+                    has_output_placements: !output_placements.is_empty(),
+                    fuse_cached_attention: numerics.fuse_cached_attention,
+                },
             )?
         } else {
             plan_named_with_placed_inputs(

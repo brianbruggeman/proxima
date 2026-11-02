@@ -271,8 +271,7 @@ fn audit_pipeline_key_on_hit(
     cache_key: &str,
     numeric_policy: NumericPolicy,
     dense_mma_input_layout: FloatLayout,
-    attention_mma_selection: crate::msl::AttentionMmaSelection,
-    attention_row_schedule: crate::msl::AttentionRowSchedule,
+    attention: super::arena_encode_dispatch_finish::AttentionKernelChoice,
 ) -> Result<(), MetalError> {
     if !pipeline_key_audit_enabled() {
         return Ok(());
@@ -291,8 +290,8 @@ fn audit_pipeline_key_on_hit(
         packed_operands,
         numeric_policy,
         false,
-        attention_mma_selection,
-        attention_row_schedule,
+        attention.mma_selection,
+        attention.row_schedule,
         dense_mma_input_layout,
     )?;
     let recomputed_sha256 = sha256_hex(kernel.source.as_bytes());
@@ -391,8 +390,10 @@ pub(super) fn pipeline_for(
             cache_key,
             numeric_policy,
             dense_mma_input_layout,
-            attention_mma_selection,
-            attention_row_schedule,
+            super::arena_encode_dispatch_finish::AttentionKernelChoice {
+                mma_selection: attention_mma_selection,
+                row_schedule: attention_row_schedule,
+            },
         )?;
         return Ok(pipeline);
     }
