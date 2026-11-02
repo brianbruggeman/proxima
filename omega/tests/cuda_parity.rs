@@ -20,6 +20,8 @@ use support::{
     real_forward_fixture,
 };
 
+use std::env;
+
 use omega::Codec;
 use proxima_gguf::quant::block_layout;
 use proxima_primitives::block_layout::BlockLayout;
@@ -3586,20 +3588,36 @@ fn carry_rows_rejects_a_pair_whose_row_widths_differ() {
 const NORM_EPSILON: f32 = 1e-5;
 const NORM_RUNS: usize = 3;
 const NORM_CHAIN: usize = 24;
-const BUSY_EXTENT: u32 = 1 << 26;
-const BUSY_DEPTH: usize = 40;
 
-/// Eight tanh passes over a large buffer keep the stream backlogged while the host
+// the backlog only makes event deltas device time; a correctness run needs neither it nor repeats,
+// and paying for it on a shared gpu pushed the chain cases past the harness timeout
+fn timing_requested() -> bool {
+    env::var_os("PROXIMA_CUDA_EVENT_TIMING").is_some()
+}
+
+fn busy_extent() -> u32 {
+    if timing_requested() { 1 << 26 } else { 1 << 10 }
+}
+
+fn busy_depth() -> usize {
+    if timing_requested() { 40 } else { 1 }
+}
+
+fn timed_runs(runs: usize) -> usize {
+    if timing_requested() { runs } else { 1 }
+}
+
+/// Tanh passes over a large buffer keep the stream backlogged while the host
 /// enqueues the norm chain, so event deltas between the norms are device time and
 /// not host launch latency.
 fn append_busy_chain(program: &mut Vec<Op>) -> NodeId {
     let mut node = input_leaf(
         program,
         DType::FLOAT32,
-        vec![Extent::Static(BUSY_EXTENT)],
+        vec![Extent::Static(busy_extent())],
         "busy",
     );
-    for _ in 0..BUSY_DEPTH {
+    for _ in 0..busy_depth() {
         node = append(
             program,
             Op::Elementwise {
@@ -3664,7 +3682,7 @@ async fn rmsnorm_broadcast_epilogue_reduce_matches_the_f64_oracle_on_cuda(
     let x = random_vec(11, (rows * width) as usize);
     let gamma: Vec<f32> = random_vec(13, width as usize).iter().map(|value| 1.0 + value * 0.5).collect();
     let eps = [NORM_EPSILON];
-    let busy = random_vec(17, BUSY_EXTENT as usize);
+    let busy = random_vec(17, busy_extent() as usize);
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
         ("busy", QuantizedBlock::Float32(&busy)),
         ("x", QuantizedBlock::Float32(&x)),
@@ -3690,7 +3708,7 @@ async fn rmsnorm_broadcast_epilogue_reduce_matches_the_f64_oracle_on_cuda(
         identities.iter().map(|identity| identity.lines().next()).collect::<Vec<_>>()
     );
     let mut actual = Vec::new();
-    for _ in 0..NORM_RUNS {
+    for _ in 0..timed_runs(NORM_RUNS) {
         actual = execute_plan_named(&mut plan, &named)
             .expect("the rmsnorm chain runs on cuda")
             .root()
@@ -3764,7 +3782,7 @@ async fn staged_matvec_chain_matches_the_f64_oracle_and_reports_event_time_on_cu
     let activations: Vec<Vec<f32>> = (0..MATVEC_CHAIN)
         .map(|index| on_the_int8_grid(&random_vec(43 + index as u64, k).iter().map(|value| value * 4.0 - 2.0).collect::<Vec<_>>()))
         .collect();
-    let busy = random_vec(17, BUSY_EXTENT as usize);
+    let busy = random_vec(17, busy_extent() as usize);
     let (program, roots, names) = matvec_chain_program(rows as u32, k as u32);
     let mut named: Vec<(&str, QuantizedBlock<'_>)> = vec![
         ("busy", QuantizedBlock::Float32(&busy)),
@@ -3774,7 +3792,7 @@ async fn staged_matvec_chain_matches_the_f64_oracle_and_reports_event_time_on_cu
     let policy = NumericPolicy::default().with_activation_quantization(true);
     let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &roots, policy)
         .expect("the matvec chain plans on cuda");
-    let actual = (0..MATVEC_RUNS)
+    let actual = (0..timed_runs(MATVEC_RUNS))
         .map(|_| {
             let evaluated = execute_plan_named(&mut plan, &named).expect("the matvec chain runs on cuda");
             evaluated.get(roots[0]).expect("the first matvec is a requested output").0.to_vec()
