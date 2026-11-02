@@ -238,8 +238,8 @@ enum ParamKind {
     ConfigValues(Vec<Expr>),
     /// the injected `TestCtx` cassette handle.
     Ctx,
-    /// a record/replay `PipeHandle` from `cx.cassette_pipe(inner)`; the held
-    /// expr is the real upstream recorded on first run, ignored on replay.
+    /// a record/replay `PipeHandle` from `cassette_pipe_lazy(&cx, || inner)`;
+    /// the held expr is the real upstream, evaluated only when recording.
     Cassette(Expr),
     /// a `ConfigFixture` = base config (the held expr) deep-merged with each
     /// `#[overlay_case(patch)]` row's patch. Consumes one row arg, like `Case`.
@@ -583,7 +583,7 @@ fn call_arg(
         }
         ParamKind::Ctx => quote!(_proxima_cx),
         ParamKind::Cassette(inner) => {
-            quote!(::proxima::test_support::cassette_pipe(&_proxima_cx, #inner).await.expect("cassette pipe"))
+            quote!(::proxima::test_support::cassette_pipe_lazy(&_proxima_cx, || #inner).await.expect("cassette pipe"))
         }
         ParamKind::Fixture(call) => call.clone(),
     }

@@ -2083,6 +2083,10 @@ required-features = ["macros", "http-hyper", "http3-quinn-compat"]
 # declare them explicitly. (runtime_conformance.rs cfg-gates its tokio module
 # internally, so it stays autodiscovered.)
 [[test]]
+name = "llama_oracle_cassette"
+required-features = ["test-support", "serve-prime"]
+
+[[test]]
 name = "framed_app"
 required-features = ["macros", "runtime-tokio"]
 
