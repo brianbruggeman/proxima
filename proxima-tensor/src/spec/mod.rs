@@ -77,19 +77,19 @@ mod short_conv_delta_net;
 mod attention_forward;
 #[macro_use]
 mod scheduled_cached;
+pub mod blocks;
 mod descriptor;
 mod gguf_descriptor;
 mod hybrid_forward;
 mod layer_runs;
 #[cfg(feature = "config")]
 mod program_spec;
-#[cfg(feature = "config")]
-mod run;
 mod recurrent_readout;
 #[cfg(all(test, feature = "config"))]
 #[allow(clippy::expect_used)]
 mod roundtrip;
-pub mod blocks;
+#[cfg(feature = "config")]
+mod run;
 mod two_block_attention;
 pub use crate::LoopCdMode;
 pub use crate::op::{SLIDING_CACHED_LEN_INPUT, SLIDING_KV_SYMBOL};

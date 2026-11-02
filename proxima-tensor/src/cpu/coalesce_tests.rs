@@ -596,7 +596,8 @@ fn a_trailing_unit_kept_axis_still_merges_into_the_row() {
         *out_layout = layout(0, &[1, 1, 0]);
     }
 
-    let merged = coalesce_dims(&op).expect("a kept extent-1 axis behind a wider one widens the row");
+    let merged =
+        coalesce_dims(&op).expect("a kept extent-1 axis behind a wider one widens the row");
 
     assert_eq!(merged.extents, vec![3, 4]);
 }
@@ -614,8 +615,18 @@ fn a_unit_row_matmul_fold_runs_identically_coalesced_and_not() {
     };
     let expected = reference_reduce(&case);
 
-    assert_same(&run_executor(&case), &expected, true, "coalesced unit-row fold");
-    assert_same(&run_executor_uncoalesced(&case), &expected, true, "uncoalesced unit-row fold");
+    assert_same(
+        &run_executor(&case),
+        &expected,
+        true,
+        "coalesced unit-row fold",
+    );
+    assert_same(
+        &run_executor_uncoalesced(&case),
+        &expected,
+        true,
+        "uncoalesced unit-row fold",
+    );
 }
 
 fn delta_net_state_fold() -> BoundOp {
