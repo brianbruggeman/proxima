@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::ffi::CString;
 use std::sync::{Arc, OnceLock};
+use std::thread;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -391,6 +392,7 @@ impl CudaDriver {
     /// visible NVIDIA device it returns a typed `Driver` error rather than
     /// pretending that emitted CUDA source is executable.
     pub fn new(ordinal: usize) -> Result<Self, CudaDriverError> {
+        prefetch_nvrtc_version();
         // the dynamic loader otherwise panics before it can return a driver error.
         if !unsafe { cuda_sys::is_culib_present() } {
             return Err(CudaDriverError::Driver(
@@ -503,9 +505,6 @@ impl CudaDriver {
     }
 
     fn build_kernel_module_untimed(&self, kernel: &CudaKernel) -> Result<Arc<CudaModule>, CudaDriverError> {
-        if !unsafe { nvrtc_sys::is_culib_present() } {
-            return Err(CudaDriverError::Nvrtc("nvrtc library unavailable".into()));
-        }
         let header_dir = cuda_header_dir(&kernel.source)?;
         let options = nvrtc_options(header_dir.as_deref());
         let header = self.header_stand_in(header_dir.as_deref())?;
@@ -523,6 +522,7 @@ impl CudaDriver {
             proxima_telemetry::debug!(entry = %kernel.entry, "kernel loaded from disk cache");
             return self.timed_load_module(Ptx::from_src(text));
         }
+        require_nvrtc()?;
         let nvrtc_started = Instant::now();
         let ptx = compile_ptx_with_opts(&kernel.source, options)
             .map_err(|error| CudaDriverError::Nvrtc(error.to_string()))?;
@@ -608,6 +608,7 @@ impl CudaDriver {
         header_dir: Option<&Path>,
         arch: &str,
     ) -> Option<Vec<u8>> {
+        require_nvrtc().ok()?;
         let started = Instant::now();
         let image = match compile_cubin(&kernel.source, header_dir, arch) {
             Ok(image) => image,
@@ -1743,6 +1744,13 @@ fn resolve_cuda_include_dir(
     }
 }
 
+fn require_nvrtc() -> Result<(), CudaDriverError> {
+    if unsafe { nvrtc_sys::is_culib_present() } {
+        return Ok(());
+    }
+    Err(CudaDriverError::Nvrtc("nvrtc library unavailable".into()))
+}
+
 fn elapsed_micros(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
@@ -1814,15 +1822,27 @@ unsafe fn read_cubin(program: nvrtc_sys::nvrtcProgram) -> Result<Vec<u8>, CudaDr
     Ok(image)
 }
 
-fn nvrtc_version() -> Result<(i32, i32), CudaDriverError> {
+static NVRTC_VERSION: OnceLock<Result<(i32, i32), String>> = OnceLock::new();
+
+fn query_nvrtc_version() -> Result<(i32, i32), String> {
     let mut major = 0;
     let mut minor = 0;
     match unsafe { nvrtc_sys::nvrtcVersion(&mut major, &mut minor) } {
         nvrtc_sys::nvrtcResult::NVRTC_SUCCESS => Ok((major, minor)),
-        status => Err(CudaDriverError::Nvrtc(format!(
-            "nvrtcVersion failed: {status:?}"
-        ))),
+        status => Err(format!("nvrtcVersion failed: {status:?}")),
     }
+}
+
+// the first nvrtc call dlopens the library (~190 ms); starting it at driver creation overlaps it with weight upload
+fn prefetch_nvrtc_version() {
+    thread::spawn(|| NVRTC_VERSION.get_or_init(query_nvrtc_version).is_ok());
+}
+
+fn nvrtc_version() -> Result<(i32, i32), CudaDriverError> {
+    NVRTC_VERSION
+        .get_or_init(query_nvrtc_version)
+        .clone()
+        .map_err(CudaDriverError::Nvrtc)
 }
 
 fn kernel_disk_store() -> PtxStore {

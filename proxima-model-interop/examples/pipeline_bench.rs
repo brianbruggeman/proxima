@@ -53,7 +53,7 @@
 use std::collections::HashMap;
 use std::env;
 use std::fs::{self, File};
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::ops::ControlFlow;
 use std::path::Path;
 use std::process::{Child, Command, ExitCode, Stdio};
@@ -107,6 +107,15 @@ const HEADER: [&str; 13] = [
     "peak_host_rss_mb",
     "peak_vram_mb",
 ];
+const WALL_HEADER: [&str; 7] = [
+    "row",
+    "run",
+    "cached_kb_before",
+    "cached_kb_after",
+    "wall_to_ready_ms",
+    "wall_to_first_token_ms",
+    "self-reported load_ms",
+];
 const SETTINGS_HEADER: [&str; 11] = [
     "row",
     "kv_precision",
@@ -149,11 +158,26 @@ enum BenchError {
 type Samples = HashMap<&'static str, Vec<f64>>;
 
 struct Measured {
+    wall: Wall,
     stdout: String,
     stderr: String,
     success: bool,
     peak_rss_mb: Option<f64>,
     peak_vram_mb: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct Wall {
+    ready_ms: Option<f64>,
+    first_byte_ms: Option<f64>,
+    cached_before_kb: u64,
+    cached_after_kb: u64,
+}
+
+struct Scan {
+    text: String,
+    first_byte_ms: Option<f64>,
+    marker_ms: Option<f64>,
 }
 
 struct VramSampler {
@@ -179,6 +203,14 @@ struct RowResult {
     loadavg_start: String,
     loadavg_end: String,
     supported: bool,
+    walls: Vec<WallRow>,
+}
+
+struct WallRow {
+    run: usize,
+    wall: Wall,
+    self_reported_load_ms: Option<f64>,
+    first_token_ms: Option<f64>,
 }
 
 fn io_error(path: &str) -> impl Fn(std::io::Error) -> BenchError + '_ {
@@ -322,6 +354,7 @@ fn run_child(args: &RunArgs<'_>) -> Result<(), BenchError> {
     generate(&model, args.prompt, WARMUP_TOKENS, args.context)?;
     let warmup_ms = millis(warmup_started);
     emit("device_warmup", &format!("ms={warmup_ms:.3}"));
+    emit("ready", "");
     let settings = config(args.context);
     emit(
         "config",
@@ -453,12 +486,49 @@ fn peak_rss_mb(stderr: &str) -> Option<f64> {
     Some(kilobytes / 1024.0)
 }
 
+fn cached_kb() -> u64 {
+    fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .find_map(|line| line.strip_prefix("Cached:"))
+                .and_then(|rest| rest.split_whitespace().next()?.parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+fn scan_stream<R: Read>(mut stream: R, marker: &str, started: Instant) -> Scan {
+    let mut bytes = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let mut first_byte_ms = None;
+    let mut marker_ms = None;
+    while let Ok(count) = stream.read(&mut chunk) {
+        if count == 0 {
+            break;
+        }
+        first_byte_ms.get_or_insert_with(|| millis(started));
+        bytes.extend_from_slice(&chunk[..count]);
+        if marker_ms.is_none() && !marker.is_empty() {
+            let found = String::from_utf8_lossy(&bytes).contains(marker);
+            marker_ms = found.then(|| millis(started));
+        }
+    }
+    Scan {
+        text: String::from_utf8_lossy(&bytes).into_owned(),
+        first_byte_ms,
+        marker_ms,
+    }
+}
+
 fn measure(
     program: &str,
     args: &[String],
     envs: &[(&str, String)],
+    ready_marker: &str,
 ) -> Result<Measured, BenchError> {
-    let child = Command::new("/usr/bin/time")
+    let cached_before_kb = cached_kb();
+    let started = Instant::now();
+    let mut child = Command::new("/usr/bin/time")
         .arg("-v")
         .arg(program)
         .args(args)
@@ -468,16 +538,30 @@ fn measure(
         .spawn()
         .map_err(io_error(program))?;
     let sampler = start_sampler(child.id())?;
-    let output = child.wait_with_output().map_err(io_error(program))?;
-    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = child.stdout.take().ok_or(BenchError::Sampler)?;
+    let stderr = child.stderr.take().ok_or(BenchError::Sampler)?;
+    let marker = ready_marker.to_owned();
+    let stdout_marker = marker.clone();
+    let stdout_reader = thread::spawn(move || scan_stream(stdout, &stdout_marker, started));
+    let stderr_reader = thread::spawn(move || scan_stream(stderr, &marker, started));
+    let status = child.wait().map_err(io_error(program))?;
+    let out = stdout_reader.join().map_err(|_| BenchError::Sampler)?;
+    let err = stderr_reader.join().map_err(|_| BenchError::Sampler)?;
     Ok(Measured {
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        peak_rss_mb: peak_rss_mb(&stderr),
-        stderr,
-        success: output.status.success(),
+        wall: Wall {
+            ready_ms: out.marker_ms.or(err.marker_ms),
+            first_byte_ms: out.first_byte_ms,
+            cached_before_kb,
+            cached_after_kb: cached_kb(),
+        },
+        stdout: out.text,
+        peak_rss_mb: peak_rss_mb(&err.text),
+        stderr: err.text,
+        success: status.success(),
         peak_vram_mb: finish_sampler(sampler)?,
     })
 }
+
 
 fn parse_stage_lines(stdout: &str) -> Vec<HashMap<String, String>> {
     stdout
@@ -705,6 +789,7 @@ fn llama_tokenize(path: &str, text: &str, add_bos: bool) -> Result<Vec<u32>, Ben
         &format!("{}/llama-tokenize", llama_dir()),
         &args,
         &llama_env(),
+        "",
     )?;
     parse_id_list(measured.stdout.trim()).ok_or(BenchError::Parse {
         what: "llama-tokenize",
@@ -779,13 +864,15 @@ fn run_llama_row(
         loadavg_start: load_average(),
         loadavg_end: String::new(),
         supported: true,
+        walls: Vec::new(),
     };
     let mut text = String::new();
-    for _ in 0..args.repeats {
+    for run in 1..=args.repeats {
         let measured = measure(
             &format!("{}/llama-completion", llama_dir()),
             &llama_args(args, kv_type, reference.flash_attention),
             &llama_env(),
+            "generate:",
         )?;
         if !measured.success {
             row.supported = false;
@@ -793,6 +880,12 @@ fn run_llama_row(
             break;
         }
         add_llama_run(&mut row.samples, &measured);
+        row.walls.push(WallRow {
+            run,
+            wall: measured.wall,
+            self_reported_load_ms: perf_line(&measured.stderr, "load time").map(|(time, _)| time),
+            first_token_ms: measured.wall.first_byte_ms,
+        });
         text = measured.stdout.trim_end_matches('\n').to_owned();
     }
     row.loadavg_end = load_average();
@@ -821,6 +914,7 @@ fn run_proxima_row(
         loadavg_start: load_average(),
         loadavg_end: String::new(),
         supported: true,
+        walls: Vec::new(),
     };
     let child_args = [
         args.path.to_owned(),
@@ -836,10 +930,53 @@ fn run_proxima_row(
             (CHILD_ENV, "1".to_owned()),
             (QUANTIZATION_ENV, quantization.to_owned()),
         ],
+        "stage=ready",
     )?;
     row.loadavg_end = load_average();
     row.samples = proxima_samples(&measured);
+    row.walls.push(proxima_wall_row(&measured));
     Ok((row, measured))
+}
+
+fn proxima_wall_row(measured: &Measured) -> WallRow {
+    let lines = parse_stage_lines(&measured.stdout);
+    let first_run = lines
+        .iter()
+        .find(|fields| fields.get("stage").is_some_and(|name| name == "run"));
+    let run_ms = |key: &str| first_run.and_then(|fields| fields.get(key)?.parse::<f64>().ok());
+    let first_token_ms = measured
+        .wall
+        .ready_ms
+        .zip(run_ms("tokenize_ms"))
+        .zip(run_ms("ttft_ms"))
+        .map(|((ready, tokenize), ttft)| ready + tokenize + ttft);
+    let self_reported_load_ms = stage_number(&lines, "load", "ms")
+        .zip(stage_number(&lines, "device_warmup", "ms"))
+        .map(|(open, warmup)| open + warmup);
+    WallRow {
+        run: 1,
+        wall: measured.wall,
+        self_reported_load_ms,
+        first_token_ms,
+    }
+}
+
+fn wall_cells(row: &RowResult) -> Vec<Vec<String>> {
+    let cell = |value: Option<f64>| value.map_or_else(|| "n/a".to_owned(), |ms| format!("{ms:.1}"));
+    row.walls
+        .iter()
+        .map(|entry| {
+            vec![
+                row.label.clone(),
+                entry.run.to_string(),
+                entry.wall.cached_before_kb.to_string(),
+                entry.wall.cached_after_kb.to_string(),
+                cell(entry.wall.ready_ms),
+                cell(entry.first_token_ms),
+                cell(entry.self_reported_load_ms),
+            ]
+        })
+        .collect()
 }
 
 fn settings_cells(
@@ -963,6 +1100,11 @@ fn orchestrate(args: &RunArgs<'_>) -> Result<(), BenchError> {
         settings_cells(&f16_row, context, flash_attention, "n/a (q8_1 matvec)"),
     ];
     println!("\n{}", render_table(&SETTINGS_HEADER, &settings));
+    let wall_rows: Vec<Vec<String>> = [&quantized, &plain, &f32_row, &f16_row]
+        .into_iter()
+        .flat_map(wall_cells)
+        .collect();
+    println!("\n{}", render_table(&WALL_HEADER, &wall_rows));
     let model = Path::new(args.path)
         .file_name()
         .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
