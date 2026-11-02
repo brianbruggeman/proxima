@@ -170,7 +170,18 @@ pub(super) fn push_row_tiled_cooperative_body(
     source.push_str(&format!(
         "    for (long chunk = (long)lane * 8; chunk < u.reduction_total; chunk += {WARP_SIZE} * 8) {{\n"
     ));
-    push_reduction_coord_decompose(source, "chunk", reduce_rank, reduce_rank.max(1), "        ");
+    let reduction_extents: Vec<u64> = reduce_dims
+        .iter()
+        .map(|dim| resolved.extents[*dim as usize])
+        .collect();
+    push_reduction_coord_decompose(
+        source,
+        "chunk",
+        reduce_rank,
+        reduce_rank.max(1),
+        &reduction_extents,
+        "        ",
+    );
     source.push_str("        long r = chunk;\n");
     for (index, &codec) in quantized.iter().enumerate() {
         let Some(codec) = codec else { continue };

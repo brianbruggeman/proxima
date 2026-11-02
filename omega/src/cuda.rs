@@ -2410,6 +2410,7 @@ fn push_reduction_coord_decompose(
     from: &str,
     reduce_rank: usize,
     reduce_rank_len: usize,
+    reduction_extents: &[u64],
     indent: &str,
 ) {
     source.push_str(&format!("{indent}long reduction_coord[{reduce_rank_len}];\n"));
@@ -2419,9 +2420,9 @@ fn push_reduction_coord_decompose(
     }
     source.push_str(&format!("{indent}long remaining_r = {from};\n"));
     for index in (0..reduce_rank).rev() {
+        let extent = reduction_extents[index];
         source.push_str(&format!(
-            "{indent}reduction_coord[{index}] = remaining_r % u.reduction_extents[{index}]; \
-             remaining_r /= u.reduction_extents[{index}];\n"
+            "{indent}reduction_coord[{index}] = remaining_r % {extent}L; remaining_r /= {extent}L;\n"
         ));
     }
 }
@@ -2789,6 +2790,10 @@ fn push_cooperative_reduce_body(
     // lane-strided walk made a warp touch 32 separated elements before
     // returning to the same quantization block.
     let packed_chunked = quantized.iter().any(Option::is_some);
+    let reduction_extents: Vec<u64> = reduce_dims
+        .iter()
+        .map(|dim| resolved.extents[*dim as usize])
+        .collect();
 
     let block_reduce = is_broadcast_epilogue && !packed_chunked;
     let (leader, lane_start, lane_stride) = if block_reduce {
@@ -2913,6 +2918,7 @@ fn push_cooperative_reduce_body(
                     "chunk",
                     reduce_rank,
                     reduce_rank_len,
+                    &reduction_extents,
                     "        ",
                 );
             }
@@ -2933,7 +2939,14 @@ fn push_cooperative_reduce_body(
             ));
         }
         if reduce_rank > 0 && !packed_chunked && !unit_fold {
-            push_reduction_coord_decompose(source, "r", reduce_rank, reduce_rank_len, "        ");
+            push_reduction_coord_decompose(
+                source,
+                "r",
+                reduce_rank,
+                reduce_rank_len,
+                &reduction_extents,
+                "        ",
+            );
         }
         if reduce_rank > 0 && !unit_fold {
             for (index, dim) in reduce_dims.iter().enumerate() {
@@ -2960,8 +2973,9 @@ fn push_cooperative_reduce_body(
                     "        long off{index} = u.operand_base[{index}];\n"
                 ));
                 for dim in 0..rank {
+                    let stride = resolved.operands()[index].1.stride(dim as u16);
                     source.push_str(&format!(
-                        "        off{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                        "        off{index} += full_coord[{dim}] * {stride}L;\n"
                     ));
                 }
             }
