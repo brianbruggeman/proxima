@@ -792,5 +792,9 @@ name = "decode_compare"
 required-features = ["std"]
 
 [[example]]
+name = "pipeline_bench"
+required-features = ["std"]
+
+[[example]]
 name = "descriptor_census"
 required-features = ["std"]
