@@ -15,6 +15,7 @@ use crate::error::EmitError;
 pub(crate) fn cached_attention_entry_name(
     resolved: &BoundOp,
     class: CudaAttentionClass,
+    split_chunks: Option<u64>,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         kv_heads,
@@ -37,8 +38,9 @@ pub(crate) fn cached_attention_entry_name(
     };
     let tile_token = cached_attention_tile_rows(&resolved.kind)
         .map_or_else(String::new, |tile_rows| format!("_tq{tile_rows}"));
+    let split_token = split_chunks.map_or_else(String::new, |chunks| format!("_sk{chunks}"));
     Ok(format!(
-        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_n{new_key_rows}{tile_token}_s{:08x}_l{}_u{}",
+        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_n{new_key_rows}{tile_token}{split_token}_s{:08x}_l{}_u{}",
         class_tag(class),
         scale.to_bits(),
         signed_name_part(*cached_lower_inclusive),
@@ -49,6 +51,22 @@ pub(crate) fn cached_attention_entry_name(
 pub(crate) fn render_cached_attention_cuda(
     resolved: &BoundOp,
     entry: &str,
+) -> Result<String, EmitError> {
+    render_attention(resolved, entry, "", &unsplit_tail(resolved))
+}
+
+fn unsplit_tail(resolved: &BoundOp) -> String {
+    match cached_attention_tile_rows(&resolved.kind) {
+        Some(tile_rows) => format!("    constexpr int tile_rows = {tile_rows};\n{TILED_ATTENTION_BODY}"),
+        None => String::from(CACHED_ATTENTION_BODY),
+    }
+}
+
+pub(crate) fn render_attention(
+    resolved: &BoundOp,
+    entry: &str,
+    extra_param: &str,
+    tail: &str,
 ) -> Result<String, EmitError> {
     let Some(class) = cuda_cached_attention_class(&resolved.kind) else {
         return Err(EmitError::CudaUnsupportedOpKind {
@@ -113,7 +131,7 @@ pub(crate) fn render_cached_attention_cuda(
     preamble(&mut source, "float");
     source.push_str("struct Uniforms { long total_elements; };\n\n");
     source.push_str(&format!(
-        "extern \"C\" __global__ void {entry}(\n    {params},\n    float* __restrict__ out,\n    const Uniforms* __restrict__ u_ptr) {{\n"
+        "extern \"C\" __global__ void {entry}(\n    {params},\n    float* __restrict__ out,\n    const Uniforms* __restrict__ u_ptr{extra_param}) {{\n"
     ));
     source.push_str(&format!(
         "    constexpr long kv_heads = {kv_heads};\n\
@@ -130,13 +148,7 @@ pub(crate) fn render_cached_attention_cuda(
          \x20   {pass_planes}",
         scale = cuda_float_literal(*scale),
     ));
-    match cached_attention_tile_rows(&resolved.kind) {
-        Some(tile_rows) => {
-            source.push_str(&format!("    constexpr int tile_rows = {tile_rows};\n"));
-            source.push_str(TILED_ATTENTION_BODY);
-        }
-        None => source.push_str(CACHED_ATTENTION_BODY),
-    }
+    source.push_str(tail);
     Ok(source)
 }
 
