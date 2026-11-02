@@ -490,7 +490,6 @@ impl<Key: Ord + Copy + Debug> StateSwap<Key> {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     extern crate std;
 
@@ -769,7 +768,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod state_swap_tests {
     extern crate std;
 

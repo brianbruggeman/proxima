@@ -2022,11 +2022,10 @@ pub fn drain_cuda_appended_rows(plan: &mut Plan) -> Result<Vec<(NodeId, Vec<f32>
 /// The kv carry state machine rejected the acceptance.
 #[cfg(feature = "cuda-driver")]
 pub fn accept_cuda_rows(plan: &mut Plan, kept: u64) -> Result<(), BackendError> {
-    match plan {
-        Plan::Cuda(cuda_plan) => Ok(cuda_plan.accept_rows(kept)?),
-        #[allow(unreachable_patterns)]
-        _ => Ok(()),
+    if let Plan::Cuda(cuda_plan) = plan {
+        cuda_plan.accept_rows(kept)?;
     }
+    Ok(())
 }
 
 /// Hands a [`Plan::Cuda`]'s device-carried state to the driver before the plan
