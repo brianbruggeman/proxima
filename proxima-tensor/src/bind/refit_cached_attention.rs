@@ -145,6 +145,15 @@ fn push_indices_node_into(map: &IndexMap, pending: &mut Vec<NodeId>) {
 }
 
 fn refit_one(bound: &BoundOp, next: &Shapes) -> Option<BoundOp> {
+    refit_attention(bound, next, false)
+}
+
+/// the refresh form: the query row count and output extents may follow the new shapes.
+pub(super) fn refresh_attention(bound: &BoundOp, next: &Shapes) -> Option<BoundOp> {
+    refit_attention(bound, next, true)
+}
+
+fn refit_attention(bound: &BoundOp, next: &Shapes, query_may_move: bool) -> Option<BoundOp> {
     let BoundOpKind::CachedAttention {
         operands,
         query_rows,
@@ -162,32 +171,45 @@ fn refit_one(bound: &BoundOp, next: &Shapes) -> Option<BoundOp> {
         return None;
     }
     let rows = |index: usize| next.of(operands.get(index)?.0).first().copied();
-    if next.of(bound.node) != bound.extents.as_slice() || rows(0)? != *query_rows {
+    let next_query_rows = rows(0)?;
+    let query_held = next.of(bound.node) == bound.extents.as_slice() && next_query_rows == *query_rows;
+    if !query_held && !query_may_move {
         return None;
     }
     let (refit_cached, refit_new) = if *cached_key_rows == 0 {
         let merged = rows(2)?;
-        (merged == rows(6)? && merged >= *query_rows).then_some((0, merged))?
+        (merged == rows(6)? && merged >= next_query_rows).then_some((0, merged))?
     } else {
         let (cached, new) = (rows(2)?, rows(4)?);
-        let consistent = rows(6)? == cached && rows(7)? == new && new == *new_key_rows;
+        let consistent = rows(6)? == cached && rows(7)? == new && new_rows_follow(new, next_query_rows, *query_rows, *new_key_rows);
         let in_range = new.checked_sub(1)?.checked_add(cached)? < F32_EXACT_INTEGER_BOUND;
         (consistent && cached > 0 && in_range).then_some((cached, new))?
     };
-    if has_pass_plane && !pass_planes_agree(operands, *query_rows, refit_cached, refit_new, next) {
+    if has_pass_plane && !pass_planes_agree(operands, next_query_rows, refit_cached, refit_new, next) {
         return None;
     }
     let mut patched = bound.clone();
     if let BoundOpKind::CachedAttention {
+        query_rows,
         cached_key_rows,
         new_key_rows,
         ..
     } = &mut patched.kind
     {
+        *query_rows = next_query_rows;
         *cached_key_rows = refit_cached;
         *new_key_rows = refit_new;
     }
+    patched.extents = next.of(bound.node).to_vec();
     Some(patched)
+}
+
+fn new_rows_follow(new: u64, next_query_rows: u64, query_rows: u64, new_key_rows: u64) -> bool {
+    if new_key_rows == query_rows {
+        new == next_query_rows
+    } else {
+        new == new_key_rows
+    }
 }
 
 /// The partial-rotary pass triple is always the last three operands
