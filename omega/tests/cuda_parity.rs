@@ -3895,3 +3895,85 @@ async fn broadcast_epilogue_state_update_over_a_strided_reduction_equals_the_f64
     assert_eq!(actual.root().len(), expected.len(), "every state element is compared");
     assert!(worst / magnitude < 1e-4, "lane-major state update disagrees with the oracle: worst={worst} magnitude={magnitude}");
 }
+
+mod pooled_intermediates {
+    use omega::CudaDriver;
+    use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, QuantizedBlock};
+
+    use super::{append_input, append_matmul, random_vec};
+    use omega::backend::{Engine, execute_plan_named, plan_named};
+
+    const ROWS: u32 = 4;
+    const WIDTH: u32 = 8;
+    const CHAIN: usize = 12;
+
+    fn chain_program() -> (Vec<proxima_tensor::Op>, NodeId) {
+        let mut program = Vec::new();
+        let square = vec![Extent::Static(WIDTH), Extent::Static(WIDTH)];
+        let mut activation = append_input(
+            &mut program,
+            DType::FLOAT32,
+            vec![Extent::Static(ROWS), Extent::Static(WIDTH)],
+            "x",
+        );
+        for link in 0..CHAIN {
+            let weight = append_input(&mut program, DType::FLOAT32, square.clone(), &format!("w{link}"));
+            activation = append_matmul(&mut program, activation, weight, ROWS, WIDTH, WIDTH);
+        }
+        (program, activation)
+    }
+
+    fn weights() -> Vec<Vec<f32>> {
+        (0..CHAIN)
+            .map(|link| {
+                random_vec(100 + link as u64, (WIDTH * WIDTH) as usize)
+                    .into_iter()
+                    .map(|value| value * 0.25)
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_long_chain_of_intermediates_allocates_fewer_buffers_than_it_has_nodes_and_matches_cpu() {
+        let (program, root) = chain_program();
+        let activation = random_vec(7, (ROWS * WIDTH) as usize);
+        let weights = weights();
+        let names: Vec<String> = (0..CHAIN).map(|link| format!("w{link}")).collect();
+        let mut named: Vec<(&str, QuantizedBlock<'_>)> =
+            vec![("x", QuantizedBlock::Float32(&activation))];
+        named.extend(
+            names
+                .iter()
+                .zip(&weights)
+                .map(|(name, values)| (name.as_str(), QuantizedBlock::Float32(values))),
+        );
+
+        let mut cpu_plan = plan_named(Engine::Cpu, None, &program, &[], &named, &[root], NumericPolicy::default())
+            .expect("cpu plans the matmul chain");
+        let expected = execute_plan_named(&mut cpu_plan, &named).expect("cpu runs the matmul chain");
+
+        let driver = CudaDriver::new(0).expect("a real cuda device");
+        let mut plan = driver
+            .plan(&program, &[], &[root], NumericPolicy::default(), &named)
+            .expect("cuda plans the matmul chain");
+        let actual = plan.execute_named(&named, None).expect("cuda runs the matmul chain");
+
+        let inputs = 1 + CHAIN as u64;
+        let uniforms_and_unpooled_intermediates = 2 * CHAIN as u64;
+        assert!(
+            plan.allocations() < inputs + uniforms_and_unpooled_intermediates,
+            "degenerate gate: allocations {} must undercut inputs plus one uniform and one buffer per link {}",
+            plan.allocations(),
+            inputs + uniforms_and_unpooled_intermediates
+        );
+        let worst = actual
+            .root()
+            .iter()
+            .zip(expected.root())
+            .map(|(got, want)| (got - want).abs() / want.abs().max(1e-6))
+            .fold(0.0f32, f32::max);
+        assert_eq!(actual.root().len(), (ROWS * WIDTH) as usize, "degenerate gate: output compared");
+        assert!(worst < 1e-4, "pooled chain diverges from cpu: worst relative {worst}");
+    }
+}
