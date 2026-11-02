@@ -1,20 +1,26 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use proxima_listen::handle::ListenerHandle;
 use proxima_primitives::sync::Mutex as TokioMutex;
 use proxima_telemetry::debug;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::SwapRegistry;
 use crate::app::{App, MountTarget};
 use crate::control_plane::{ControlPlane, PipeState, PipeStatus};
 use crate::error::ProximaError;
-use crate::load::Spec;
+use crate::load::{Spec, load};
 use crate::log_buffer::LogBufferRegistry;
+use crate::pipe::PipeHandle;
 use crate::telemetry::MetricsSnapshot;
+
+type ListenerSlot = Arc<TokioMutex<Option<ListenerHandle>>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PipeConfig {
@@ -31,12 +37,16 @@ pub struct PipeConfig {
 
 /// Clone-and-swap on every mutation — readers (`list`, `status`, log
 /// queries) take no lock and never see torn updates.
-#[derive(Clone, Default, Debug)]
+#[derive(Clone, Default)]
 pub struct DaemonState {
     pub configs: HashMap<String, PipeConfig>,
     pub running: HashSet<String>,
     pub started_at_unix_ms: HashMap<String, u64>,
     pub restart_counts: HashMap<String, u64>,
+    /// handle returned by `SwapRegistry::register`; every router that mounts
+    /// the pipe holds this, so a swap reaches all of them
+    pub swappables: HashMap<String, PipeHandle>,
+    pub listeners: HashMap<String, ListenerSlot>,
 }
 
 /// `ArcSwap` (not `Arc<ArcSwap<...>>`) — the plane is already shared
@@ -44,6 +54,7 @@ pub struct DaemonState {
 pub struct DaemonControlPlane {
     app: Arc<TokioMutex<App>>,
     state: ArcSwap<DaemonState>,
+    swaps: SwapRegistry,
     log_buffers: Arc<LogBufferRegistry>,
 }
 
@@ -60,10 +71,13 @@ impl DaemonControlPlane {
             running: HashSet::new(),
             started_at_unix_ms: HashMap::new(),
             restart_counts: HashMap::new(),
+            swappables: HashMap::new(),
+            listeners: HashMap::new(),
         };
         Self {
             app: Arc::new(TokioMutex::new(app)),
             state: ArcSwap::from_pointee(state),
+            swaps: SwapRegistry::new(),
             log_buffers,
         }
     }
@@ -179,12 +193,56 @@ impl DaemonControlPlane {
         self.mount_pipe(&config).await
     }
 
+    async fn build_handle(&self, config: &PipeConfig) -> Result<PipeHandle, ProximaError> {
+        let mut spec = config.spec.clone();
+        if let Value::Object(table) = &mut spec {
+            table
+                .entry("name")
+                .or_insert_with(|| Value::String(config.name.clone()));
+        }
+        let app = self.app.lock().await;
+        load(spec, app.load_context()).await
+    }
+
+    fn swappable_for(&self, name: &str, built: PipeHandle) -> PipeHandle {
+        let existing = self.state.load().swappables.get(name).cloned();
+        if let Some(handle) = existing
+            && self.swaps.swap(name, built.clone()).is_ok()
+        {
+            return handle;
+        }
+        let handle = self.swaps.register(name, built);
+        self.state.rcu(|previous| {
+            let mut next = (**previous).clone();
+            next.swappables.insert(name.to_string(), handle.clone());
+            Arc::new(next)
+        });
+        handle
+    }
+
+    fn listener_status(name: &str, state: PipeState, address: Option<SocketAddr>) -> PipeStatus {
+        PipeStatus {
+            name: name.to_string(),
+            state,
+            uptime_ms: None,
+            restart_count: 0,
+            last_message: address.map(|address| address.to_string()),
+        }
+    }
+
+    async fn stop_listener(slot: ListenerSlot) -> Option<SocketAddr> {
+        let handle = slot.lock().await.take()?;
+        let address = handle.bind_addr();
+        handle.stop().await;
+        address
+    }
+
     async fn mount_pipe(&self, config: &PipeConfig) -> Result<(), ProximaError> {
         let name = config.name.as_str();
+        let built = self.build_handle(config).await?;
+        let handle = self.swappable_for(name, built);
         let mut app = self.app.lock().await;
-        let handle = app
-            .pipe(&config.name, Spec::Inline(config.spec.clone()))
-            .await?;
+        app.pipe(name, Spec::Handle(handle.clone())).await?;
         let mount_path = format!("/{}/{{*path}}", config.name);
         if let Err(error) = app.mount(&mount_path, MountTarget::Handle(handle)) {
             // drop the just-registered pipe to avoid leaking a half-state
@@ -317,6 +375,49 @@ impl ControlPlane for DaemonControlPlane {
         })
     }
 
+    fn apply_listener<'lifetime>(
+        &'lifetime self,
+        name: &'lifetime str,
+        spec: Value,
+    ) -> Pin<Box<dyn Future<Output = Result<PipeStatus, ProximaError>> + Send + 'lifetime>> {
+        Box::pin(async move {
+            let handle = self.app.lock().await.bind_listener(&spec)?;
+            let address = handle.bind_addr();
+            let slot: ListenerSlot = Arc::new(TokioMutex::new(Some(handle)));
+            let previous = self.state.rcu(|previous| {
+                let mut next = (**previous).clone();
+                next.listeners.insert(name.to_string(), slot.clone());
+                Arc::new(next)
+            });
+            if let Some(old_slot) = previous.listeners.get(name).cloned() {
+                Self::stop_listener(old_slot).await;
+            }
+            debug!(listener = %name, ?address, "listener bound");
+            Ok(Self::listener_status(name, PipeState::Running, address))
+        })
+    }
+
+    fn remove_listener<'lifetime>(
+        &'lifetime self,
+        name: &'lifetime str,
+    ) -> Pin<Box<dyn Future<Output = Result<PipeStatus, ProximaError>> + Send + 'lifetime>> {
+        Box::pin(async move {
+            let previous = self.state.rcu(|previous| {
+                let mut next = (**previous).clone();
+                next.listeners.remove(name);
+                Arc::new(next)
+            });
+            let slot = previous
+                .listeners
+                .get(name)
+                .cloned()
+                .ok_or_else(|| ProximaError::NotFound(format!("listener `{name}`")))?;
+            let address = Self::stop_listener(slot).await;
+            debug!(listener = %name, ?address, "listener stopped");
+            Ok(Self::listener_status(name, PipeState::Stopped, address))
+        })
+    }
+
     fn apply<'lifetime>(
         &'lifetime self,
         name: &'lifetime str,
@@ -335,8 +436,8 @@ impl ControlPlane for DaemonControlPlane {
                     .unwrap_or_default(),
             };
             if self.is_running(name) {
-                let mut app = self.app.lock().await;
-                app.update_pipe(name, Spec::Inline(config.spec.clone())).await?;
+                let built = self.build_handle(&config).await?;
+                self.swaps.swap(name, built)?;
             } else {
                 self.mount_pipe(&config).await?;
             }
@@ -555,7 +656,14 @@ mod tests {
         assert_eq!(status.name, "fresh");
         assert_eq!(status.state, PipeState::Running);
         assert_eq!(call_through_router(&plane, "/fresh/x").await, b"fresh");
-        let stored = plane.state.load().configs.get("fresh").expect("config").spec.clone();
+        let stored = plane
+            .state
+            .load()
+            .configs
+            .get("fresh")
+            .expect("config")
+            .spec
+            .clone();
         assert_eq!(stored, spec);
     }
 
@@ -578,8 +686,125 @@ mod tests {
         let swapped = plane.apply("leaf", bad_spec).await;
         assert!(swapped.is_err(), "bad spec must fail to swap");
         assert_eq!(call_through_router(&plane, "/leaf/x").await, b"leaf");
-        let stored = plane.state.load().configs.get("leaf").expect("config").spec.clone();
+        let stored = plane
+            .state
+            .load()
+            .configs
+            .get("leaf")
+            .expect("config")
+            .spec
+            .clone();
         assert_eq!(stored, json!({"synth": {"status": 200, "body": "leaf"}}));
+    }
+
+    // the http listen protocol is registered only with these features (src/app.rs:328)
+    #[cfg(any(feature = "http1", feature = "http1-native"))]
+    mod listeners {
+        use super::*;
+        use std::io::{Read, Write};
+        use std::net::TcpStream;
+        use std::time::Duration;
+
+        fn listener_spec(pipe_name: &str) -> Value {
+            json!({"bind": "127.0.0.1:0", "mount": [{"path": "/", "pipe": pipe_name}]})
+        }
+
+        fn bound_address(status: &PipeStatus) -> SocketAddr {
+            status
+                .last_message
+                .as_deref()
+                .expect("listener status carries the bound address")
+                .parse()
+                .expect("bound address parses")
+        }
+
+        fn http_get(address: SocketAddr) -> std::io::Result<String> {
+            let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))?;
+            stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+            stream.write_all(b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?;
+            let mut response = String::new();
+            stream.read_to_string(&mut response)?;
+            Ok(response)
+        }
+
+        #[proxima::test]
+        async fn apply_listener_serves_a_mounted_pipe() {
+            let plane = fixture();
+            plane
+                .apply(
+                    "leaf",
+                    json!({"synth": {"status": 200, "body": "leaf-body"}}),
+                )
+                .await
+                .expect("apply pipe");
+
+            let status = plane
+                .apply_listener("front", listener_spec("leaf"))
+                .await
+                .expect("apply listener");
+
+            assert_eq!(status.state, PipeState::Running);
+            let response = http_get(bound_address(&status)).expect("get through listener");
+            assert!(response.starts_with("HTTP/1.1 200"), "got {response:?}");
+            assert!(response.ends_with("leaf-body"), "got {response:?}");
+        }
+
+        #[proxima::test]
+        async fn apply_swap_reaches_the_listener() {
+            let plane = fixture();
+            plane
+                .apply("leaf", json!({"synth": {"status": 200, "body": "leaf-v1"}}))
+                .await
+                .expect("apply pipe");
+            let status = plane
+                .apply_listener("front", listener_spec("leaf"))
+                .await
+                .expect("apply listener");
+            let address = bound_address(&status);
+            assert!(http_get(address).expect("first get").ends_with("leaf-v1"));
+
+            plane
+                .apply("leaf", json!({"synth": {"status": 200, "body": "leaf-v2"}}))
+                .await
+                .expect("swap pipe");
+
+            let response = http_get(address).expect("second get on the same listener");
+            assert!(response.ends_with("leaf-v2"), "got {response:?}");
+        }
+
+        #[proxima::test]
+        async fn remove_listener_stops_serving() {
+            let plane = fixture();
+            plane
+                .apply(
+                    "leaf",
+                    json!({"synth": {"status": 200, "body": "leaf-body"}}),
+                )
+                .await
+                .expect("apply pipe");
+            let status = plane
+                .apply_listener("front", listener_spec("leaf"))
+                .await
+                .expect("apply listener");
+            let address = bound_address(&status);
+            assert!(http_get(address).is_ok());
+
+            let removed = plane
+                .remove_listener("front")
+                .await
+                .expect("remove listener");
+
+            assert_eq!(removed.state, PipeState::Stopped);
+            let refused = (0..100_000).any(|_| {
+                std::thread::yield_now();
+                TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_err()
+            });
+            assert!(refused, "listener at {address} still accepts after remove");
+            assert!(matches!(
+                plane.remove_listener("front").await,
+                Err(ProximaError::NotFound(_))
+            ));
+        }
     }
 
     async fn call_through_router(plane: &DaemonControlPlane, path: &str) -> Vec<u8> {
