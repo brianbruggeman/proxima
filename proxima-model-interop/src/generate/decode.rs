@@ -139,6 +139,16 @@ type RetainedVerify = (
 /// emits nothing, matching llama-server's gate. Every public `generate*`
 /// funnels through [`LoadedModel::drive_serving_loop`], which calls this
 /// once on success.
+fn host_timing_mark(label: &str) {
+    if std::env::var_os("PROXIMA_CUDA_HOST_TIMING").is_none() {
+        return;
+    }
+    let micros = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_micros());
+    eprintln!("cuda_host_timing: mark={label} unix_us={micros}");
+}
+
 fn emit_request_speculative_stats(request: &SpeculativeDecodeStats) {
     if request.drafted_total == 0 {
         return;
@@ -3151,6 +3161,7 @@ impl<'file> LoadedModel<'file> {
         serving_config: ServingConfig,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
+        host_timing_mark("generate_streaming_entry");
         let serving_config = {
             let mut serving_config = serving_config;
             self.apply_command_buffer_chunks_default(&mut serving_config);
@@ -4147,6 +4158,7 @@ only the single-row decode kernel reads the half-width device cache",
         let mut undelivered = 0usize;
         let loop_started = std::time::Instant::now();
         let mut previous_eval_done: Option<std::time::Instant> = None;
+        host_timing_mark("decode_loop_start");
         let mut step = 0usize;
         let mut carried_layers: Vec<(usize, NodeId)> = Vec::new();
         let mut carried_program = 0usize;
@@ -7096,6 +7108,7 @@ did not hold every cached position)",
 
                         #[cfg(feature = "instrument")]
                         let greedy_pick_started = read_ticks();
+                        let select_started = std::time::Instant::now();
                         token_id = match greedy_device_token {
                             Some(picked) => picked,
                             None => select_decoded_token(
@@ -7108,6 +7121,13 @@ did not hold every cached position)",
                                 &mut rng,
                             )?,
                         };
+                        if host_timing {
+                            eprintln!(
+                                "cuda_host_timing: step={step} new_count={new_count} select_token_ms={:.3} since_eval_done_ms={:.3}",
+                                select_started.elapsed().as_secs_f64() * 1e3,
+                                previous_eval_done.map_or(0.0, |done| done.elapsed().as_secs_f64() * 1e3),
+                            );
+                        }
                         token_history.push(token_id);
                         #[cfg(feature = "instrument")]
                         let greedy_pick_ticks = elapsed_ticks(greedy_pick_started);
@@ -7286,6 +7306,9 @@ did not hold every cached position)",
                     token_producer,
                 )
                 .await?;
+                if step == 0 {
+                    host_timing_mark("first_token_delivered");
+                }
                 if let ControlFlow::Break(by_eos) = delivery {
                     stopped_by_eos = by_eos;
                     undelivered = settled_tokens.len() - offset - 1;
