@@ -300,6 +300,8 @@ mod speculative_telemetry_tests;
 mod tests_all;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod thread_index_census_tests;
+#[cfg(all(test, feature = "cuda"))]
+mod row_repack_tests;
 #[cfg(test)]
 mod verify_bound_tests;
 #[cfg(test)]

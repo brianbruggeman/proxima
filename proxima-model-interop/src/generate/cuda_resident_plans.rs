@@ -127,8 +127,11 @@ pub(super) fn same_width_class(left: &CudaPlanKey, right: &CudaPlanKey) -> bool 
     plan_class(left) == plan_class(right)
 }
 
-fn plan_class(key: &CudaPlanKey) -> (bool, bool, &[NodeId], u64) {
-    (key.0 == 1, key.1 == 0, key.2.as_slice(), key.4)
+/// Rows at which cached attention changes form: below it the untiled kernel, from it the tiled one.
+const WIDE_PREFILL_ROWS: usize = 16;
+
+fn plan_class(key: &CudaPlanKey) -> (bool, bool, bool, &[NodeId], u64) {
+    (key.0 == 1, key.0 < WIDE_PREFILL_ROWS, key.1 == 0, key.2.as_slice(), key.4)
 }
 
 #[cfg(test)]
@@ -150,6 +153,9 @@ mod tests {
     #[case::decode_is_not_a_one_token_prefill_over_empty_cache(key(1, 0, &[LOGITS]), key(1, 512, &[LOGITS]), false)]
     #[case::wide_cold_is_not_wide_warm(key(512, 0, &[LOGITS]), key(512, 512, &[LOGITS]), false)]
     #[case::wide_is_not_decode(key(512, 512, &[LOGITS]), key(1, 512, &[LOGITS]), false)]
+    #[case::tails_of_different_widths_share(key(277, 512, &[LOGITS]), key(389, 512, &[LOGITS]), true)]
+    #[case::a_short_tail_is_not_a_wide_one(key(5, 512, &[LOGITS]), key(277, 512, &[LOGITS]), false)]
+    #[case::the_smallest_wide_tail_shares_with_a_full_chunk(key(16, 512, &[KV_ROWS]), key(512, 512, &[KV_ROWS]), true)]
     async fn plans_share_a_class_only_when_refresh_can_move_one_to_the_other(
         #[case] left: CudaPlanKey,
         #[case] right: CudaPlanKey,
