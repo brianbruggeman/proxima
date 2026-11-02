@@ -3665,6 +3665,8 @@ fn matvec_chain_program(rows: u32, k: u32) -> (Vec<Op>, Vec<NodeId>, Vec<String>
 #[case::pq2_0_gate_up_12288_by_4096(Codec::Pq2_0, 12288, 4096)]
 #[case::pq2_0_down_4096_by_12288(Codec::Pq2_0, 4096, 12288)]
 #[case::ptq1_0_5120_by_17408(Codec::Ptq1_0, 5120, 17408)]
+#[case::q1_0_5120_by_17408(Codec::Q1_0, 5120, 17408)]
+#[case::q1_0_gate_17408_by_5120(Codec::Q1_0, 17408, 5120)]
 async fn staged_matvec_chain_matches_the_f64_oracle_and_reports_event_time_on_cuda(
     #[case] codec: Codec,
     #[case] rows: usize,

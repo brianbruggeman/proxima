@@ -181,7 +181,7 @@ fn words_helper(name: &str, layout: &BlockLayout, bits: usize, base_bytes: usize
             )
         }
         1 => format!(
-            "    unsigned int packed = (unsigned int)halves[0] | ((unsigned int)halves[1] << 16);\n    #pragma unroll\n    for (int word = 0; word < 8; word++) {{\n        unsigned int nibble = (packed >> (4 * word)) & 0xFu;\n        unsigned int spread = (nibble & 1u) | ((nibble & 2u) << 7) | ((nibble & 4u) << 14) | ((nibble & 8u) << 21);\n        words[word] = {};\n    }}\n",
+            "    unsigned int packed = (unsigned int)halves[0] | ((unsigned int)halves[1] << 16);\n    #pragma unroll\n    for (int word = 0; word < 8; word++) {{\n        unsigned int nibble = (packed >> (4 * word)) & 0xFu;\n        unsigned int spread = (nibble * 0x00204081u) & 0x01010101u;\n        words[word] = {};\n    }}\n",
             affine("spread", multiplier, bias, bits)?
         ),
         _ => return None,
