@@ -81,6 +81,16 @@ const DEFAULT_LLAMA_DIR: &str = "/home/bix/repos/llama.cpp-incumbent/build/bin";
 const DEFAULT_LLAMA_LD: &str =
     "/usr/local/lib/ollama.stale-0.5.7.bak:/home/bix/repos/llama.cpp-incumbent/build/bin";
 const WARMUP_TOKENS: usize = 2;
+const PROMPT_TOKENS_ENV: &str = "PIPELINE_BENCH_PROMPT_TOKENS";
+const PARAGRAPH: &str = "The history of computing is a story of steady abstraction. Early machines \
+were programmed by rewiring plugboards, then by punched cards, and later by assembly languages that \
+gave names to the numeric opcodes. Compilers followed, letting engineers describe what they wanted \
+in terms closer to mathematics than to registers. Operating systems arrived to share one expensive \
+machine among many people, and networks arrived to share information among many machines. Each \
+layer hid the details of the one beneath it, and each hidden detail eventually returned as a \
+performance problem that someone had to understand again from first principles. Today a single \
+graphics processor can perform trillions of arithmetic operations every second, yet moving the \
+numbers to where they are needed often costs more than computing with them.";
 const MIB: f64 = 1024.0 * 1024.0;
 const HEADER: [&str; 13] = [
     "row",
@@ -864,7 +874,46 @@ fn kernel_cache_state() -> String {
     format!("{directory} entries_at_start={entries}")
 }
 
+fn words_prompt(words: &[&str], count: usize) -> String {
+    words.iter().cycle().take(count).copied().collect::<Vec<_>>().join(" ")
+}
+
+fn sized_prompt(path: &str, target: usize) -> Result<String, BenchError> {
+    let file = File::open(path).map_err(io_error(path))?;
+    // the checkpoint is not written while this process reads it
+    let mapping = unsafe { Mmap::map(&file) }.map_err(io_error(path))?;
+    let parsed = parse_complete(&mapping).map_err(|error| BenchError::Gguf {
+        path: path.to_owned(),
+        message: error.to_string(),
+    })?;
+    let vocab = vocab_from_metadata(&parsed)?;
+    let words: Vec<&str> = PARAGRAPH.split_whitespace().collect();
+    let (mut low, mut high) = (1, target.max(1) * 2);
+    while low < high {
+        let mid = (low + high) / 2;
+        let ids = prompt_ids(&vocab, &words_prompt(&words, mid))?;
+        if ids.len() < target {
+            low = mid + 1;
+        } else {
+            high = mid;
+        }
+    }
+    Ok(words_prompt(&words, low))
+}
+
+fn prompt_tokens_target() -> Result<Option<usize>, BenchError> {
+    env::var(PROMPT_TOKENS_ENV).ok().map(parse_number).transpose()
+}
+
 fn orchestrate(args: &RunArgs<'_>) -> Result<(), BenchError> {
+    let sized = prompt_tokens_target()?
+        .map(|target| sized_prompt(args.path, target))
+        .transpose()?;
+    let args = RunArgs {
+        prompt: sized.as_deref().unwrap_or(args.prompt),
+        ..*args
+    };
+    let args = &args;
     let cache_state = kernel_cache_state();
     // a format llama cannot open fails here too; its rows then report unsupported
     let llama_prompt_ids = llama_tokenize(args.path, args.prompt, true).unwrap_or_default();
