@@ -11,6 +11,7 @@
 #   PROXIMA_TELEMETRY_DRAIN_BATCH=1024 \
 #   PROXIMA_TELEMETRY_DRAIN_ASSIST_BATCH=32 \
 #   PROXIMA_TELEMETRY_PUMP_FLUSH_INTERVAL_MICROS=500 \
+#   PROXIMA_TELEMETRY_RING_SPANS=2048 \
 #       cargo build -p proxima-telemetry
 
 [drain]
@@ -29,6 +30,38 @@ batch = 512
 # when there is no background drainer and emit amortization matters more than the
 # per-emit tail.
 assist_batch = 64
+
+[ring]
+# Per-core ring capacities (records). One ring set exists per core and is created
+# on that core's first emit; every slot's sequence counter is initialised at
+# creation, so slot bytes x capacity x cores is RESIDENT from the first emit, not
+# lazily touched. Raising a capacity multiplies resident heap by the core count
+# and absorbs longer bursts before a producer assists or drops; lowering it
+# shrinks resident heap and makes assist/drop fire sooner. Each must be a power
+# of two. Per-system override, e.g. `PROXIMA_TELEMETRY_RING_SPANS=1024 cargo build`;
+# the runtime `TelemetryConfig` ring_* fields override per-process.
+
+# SpanRecord slots per core.
+spans = 4096
+
+# EventRecord slots per core.
+events = 4096
+
+# LogRecord slots per core.
+logs = 4096
+
+# MetricSample slots per core.
+metrics = 8192
+
+# SpanLink slots per core.
+links = 1024
+
+# Overflow span-attribute slots per core (tags past a span's inline capacity).
+overflow_attrs = 2048
+
+# Deferred span-duration observation slots per core (feature
+# `deferred-metric-fold`; emitted always, consumed only under the feature).
+span_obs = 8192
 
 [pump]
 # How often the managed pump flushes when no ring fills — the TIME trigger of the

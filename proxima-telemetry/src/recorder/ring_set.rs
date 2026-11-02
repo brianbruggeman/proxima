@@ -58,14 +58,14 @@ pub struct RingCapacities {
 impl Default for RingCapacities {
     fn default() -> Self {
         Self {
-            spans: 4096,
-            events: 4096,
-            logs: 4096,
-            metrics: 8192,
-            links: 1024,
-            overflow_attrs: 2048,
+            spans: crate::sized::RING_SPANS,
+            events: crate::sized::RING_EVENTS,
+            logs: crate::sized::RING_LOGS,
+            metrics: crate::sized::RING_METRICS,
+            links: crate::sized::RING_LINKS,
+            overflow_attrs: crate::sized::RING_OVERFLOW_ATTRS,
             #[cfg(feature = "deferred-metric-fold")]
-            span_obs: 8192,
+            span_obs: crate::sized::RING_SPAN_OBS,
         }
     }
 }
