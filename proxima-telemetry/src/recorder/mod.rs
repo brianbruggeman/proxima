@@ -552,6 +552,26 @@ impl Drop for EmitShared {
         // that can export at teardown — and it runs once the last reference
         // (the recorder plus any still-live span guards) is gone.
         while drainer::drain_pass(self) > 0 {}
+        self.report_ring_pressure();
+    }
+}
+
+impl EmitShared {
+    // report_fault, not warn!: the rings are being torn down, so a record
+    // emitted here would never be exported.
+    fn report_ring_pressure(&self) {
+        let (dropped, assisted) = self
+            .initialised_ring_sets()
+            .fold((0, 0), |(dropped, assisted), ring_set| {
+                (dropped + ring_set.dropped(), assisted + ring_set.assisted())
+            });
+        if dropped == 0 && assisted == 0 {
+            return;
+        }
+        crate::fault::report_fault(&format!(
+            "telemetry rings overflowed; raise [ring] capacities dropped={dropped} assisted={assisted} core_count={}",
+            self.core_count()
+        ));
     }
 }
 
