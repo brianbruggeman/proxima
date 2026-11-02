@@ -4197,7 +4197,6 @@ only the single-row decode kernel reads the half-width device cache",
         let mut kv_carried: Vec<KvCarryLeaf> = Vec::new();
         let mut kv_carried_layers: Vec<bool> = vec![false; layer_caches.len()];
         let mut kv_carry_program = 0usize;
-        let mut kv_leaf_memo: BTreeMap<usize, Vec<KvCarryLeaf>> = BTreeMap::new();
         let mut kv_live = false;
         'decode: while step < max_tokens {
             settled_tokens.clear();
@@ -4550,20 +4549,24 @@ only the single-row decode kernel reads the half-width device cache",
                         && runtime.carries_state_on_device()
                         && self.ffn_routing != FfnRouting::Routed;
                     let program_address = active_program.as_ptr() as usize;
-                    let step_leaves = carry_kv_this_step.then(|| {
-                        memoized_kv_leaves(
-                            &mut kv_leaf_memo,
-                            program_address,
-                            active_program,
-                            &cache_names,
-                            active_layer_roots,
-                        )
-                        .to_vec()
-                    });
-                    let leaves_follow_program = step_leaves
-                        .as_deref()
-                        .is_some_and(|leaves| kv_leaves_share_inputs(&kv_carried, leaves));
-                    if !kv_carried.is_empty() && !leaves_follow_program {
+                    let verify_address = self
+                        .speculative_verify_program
+                        .as_ref()
+                        .map(|(program, ..)| program.as_ptr() as usize);
+                    let crosses_verify = kv_carry_program != program_address
+                        && (verify_address == Some(program_address)
+                            || verify_address == Some(kv_carry_program));
+                    let step_leaves = (carry_kv_this_step
+                        && (kv_carried.is_empty() || crosses_verify))
+                        .then(|| kv_carry_leaves(active_program, &cache_names, active_layer_roots));
+                    let leaves_follow_program = !crosses_verify
+                        || step_leaves
+                            .as_deref()
+                            .is_some_and(|leaves| kv_leaves_share_inputs(&kv_carried, leaves));
+                    if !kv_carried.is_empty()
+                        && (!carry_kv_this_step
+                            || (kv_carry_program != program_address && !leaves_follow_program))
+                    {
                         flush_carried_kv(runtime, &mut layer_caches, &kv_carried)?;
                         kv_carried.clear();
                         kv_carried_layers.fill(false);
@@ -4571,7 +4574,7 @@ only the single-row decode kernel reads the half-width device cache",
                         kv_live = false;
                     }
                     if let Some(leaves) = step_leaves
-                        && (kv_carried.is_empty() || kv_carry_program != program_address)
+                        .filter(|_| kv_carried.is_empty() || kv_carry_program != program_address)
                     {
                         kv_carried = leaves;
                         for leaf in &kv_carried {
@@ -8777,18 +8780,6 @@ fn host_kv_truncations(
         .collect();
     carry.step(KvEvent::RowsAppended { appended })?;
     carry.step(KvEvent::Accepted { kept: kept_rows })
-}
-
-fn memoized_kv_leaves<'memo>(
-
-    memo: &'memo mut BTreeMap<usize, Vec<KvCarryLeaf>>,
-    program_address: usize,
-    program: &[Op],
-    cache_names: &[LayerCacheNames],
-    layer_roots: &[LayerCacheRoots],
-) -> &'memo [KvCarryLeaf] {
-    memo.entry(program_address)
-        .or_insert_with(|| kv_carry_leaves(program, cache_names, layer_roots))
 }
 
 fn kv_leaves_share_inputs(carried: &[KvCarryLeaf], next: &[KvCarryLeaf]) -> bool {
