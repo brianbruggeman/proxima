@@ -2135,7 +2135,7 @@ impl CudaPlan {
         self.pack_calls += uniforms.len() as u64;
         self.numeric_policy = numeric_policy;
         self.shapes = shapes;
-        self.pool = Box::new(PoolSchedule::build(&resolved, &kernels, &self.outputs));
+        *self.pool = PoolSchedule::build(&resolved, &kernels, &self.outputs);
         self.resolved = resolved;
         self.functions = vec![None; kernels.len()];
         self.kernels = kernels;
@@ -2205,7 +2205,7 @@ impl CudaPlan {
         }
         self.patch_memo = Some((changed, positions));
         if lengths_moved {
-            self.pool = Box::new(PoolSchedule::build(&self.resolved, &self.kernels, &self.outputs));
+            *self.pool = PoolSchedule::build(&self.resolved, &self.kernels, &self.outputs);
         }
         Ok(Some(touched))
     }
