@@ -336,8 +336,14 @@ impl std::future::Future for Connect {
                         // TcpStream::ensure_registered will re-register
                         // for the needed interest on first I/O poll.
                         if let Some(owner) = owned_owner {
-                            let mut current = checked_reactor(&owner)?;
-                            current.deregister(owned_source)?;
+                            match checked_reactor(&owner) {
+                                Ok(mut current) => current.deregister(owned_source)?,
+                                Err(err) => {
+                                    // state is already Done, so Drop cannot release this slot.
+                                    owner.release_source(owned_source, owned_socket.into());
+                                    return Poll::Ready(Err(err));
+                                }
+                            }
                         }
                         Poll::Ready(Ok(TcpStream::from_socket(owned_socket)))
                     }
@@ -987,8 +993,14 @@ impl std::future::Future for UnixConnect {
                             unreachable!()
                         };
                         if let Some(owner) = owned_owner {
-                            let mut current = checked_reactor(&owner)?;
-                            current.deregister(owned_source)?;
+                            match checked_reactor(&owner) {
+                                Ok(mut current) => current.deregister(owned_source)?,
+                                Err(err) => {
+                                    // state is already Done, so Drop cannot release this slot.
+                                    owner.release_source(owned_source, owned_socket.into());
+                                    return Poll::Ready(Err(err));
+                                }
+                            }
                         }
                         Poll::Ready(Ok(UnixStream::from_socket(owned_socket)))
                     }
@@ -1787,7 +1799,10 @@ mod tests {
     use super::*;
     use crate::os::core_shard;
     use proxima_runtime::CoreId;
+    use std::future::poll_fn;
+    use std::net::TcpListener as StdTcpListener;
     use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::mpsc;
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
 
@@ -2208,6 +2223,98 @@ mod tests {
             "spurious poll returned Ready — spurious-poll bug regression: \
              Connect yielded a half-open TcpStream before the writable edge"
         );
+    }
+
+    fn live_sources_on_worker() -> usize {
+        core_shard::with_current_reactor(|reactor| reactor.live_sources()).expect("on a worker")
+    }
+
+    fn drain_cancellations_on_worker() {
+        core_shard::with_current_reactor(|reactor| reactor.turn(Some(Duration::ZERO)))
+            .expect("on a worker")
+            .expect("turn");
+    }
+
+    /// launches one worker, runs the future the factory builds, blocks on its
+    /// single result (no sleeps), then joins the worker.
+    fn run_on_worker<Output: Send + 'static>(
+        factory: impl FnOnce(mpsc::Sender<Output>) -> Pin<Box<dyn std::future::Future<Output = ()>>>
+        + Send
+        + 'static,
+    ) -> Output {
+        let (sender, receiver) = mpsc::channel();
+        let handle = core_shard::launch_with_lanes(CoreId(0), None, 2, 16).expect("launch");
+        handle
+            .dispatch_factory(Box::new(move || factory(sender)))
+            .expect("dispatch_factory");
+        let output = receiver.recv().expect("worker result");
+        handle.shutdown_and_join().expect("shutdown");
+        output
+    }
+
+    /// a Connect registered on worker A and polled from a thread that is not
+    /// that worker must fail with an error (not hang, not yield a stream), and
+    /// dropping it there must queue the slot for release so the owning
+    /// worker's live-source count returns to its prior value.
+    ///
+    /// proves: the off-worker release path (`release_socket` ->
+    /// `Wakeup::release_source` -> cancellation queue -> `Reactor::turn`).
+    /// does NOT prove: the `Outcome::Connected` arm's new `release_source` call,
+    /// which needs `checked_reactor` to fail after the poll-entry check passed
+    /// on the same thread; no seam can produce that, so it is covered by review.
+    #[test]
+    fn connect_polled_off_worker_errors_and_drop_releases_slot() {
+        let blackhole: SocketAddr = "192.0.2.1:80".parse().expect("addr");
+        let (before, pending, foreign_errored, after) = run_on_worker(move |sender| {
+            Box::pin(async move {
+                let before = live_sources_on_worker();
+                let mut connect = Box::pin(TcpStream::connect(blackhole));
+                let first = poll_fn(|cx| Poll::Ready(connect.as_mut().poll(cx))).await;
+                let pending = live_sources_on_worker();
+                let foreign_errored = if matches!(first, Poll::Pending) {
+                    std::thread::spawn(move || {
+                        let mut cx = Context::from_waker(Waker::noop());
+                        let polled = connect.as_mut().poll(&mut cx);
+                        matches!(polled, Poll::Ready(Err(_)))
+                    })
+                    .join()
+                    .expect("foreign thread")
+                } else {
+                    false
+                };
+                drain_cancellations_on_worker();
+                let after = live_sources_on_worker();
+                sender
+                    .send((before, pending, foreign_errored, after))
+                    .expect("send result");
+            })
+        });
+        assert_eq!(pending, before + 1, "pending connect must hold one slot");
+        assert!(foreign_errored, "off-worker poll must return Err");
+        assert_eq!(after, before, "slot must be released after drop + drain");
+    }
+
+    /// a Connect driven to completion on its owning worker against a real
+    /// loopback listener must leave no reactor slot behind once it yields the
+    /// stream (the `Outcome::Connected` deregister path, or the immediate-connect
+    /// path when the kernel completes synchronously).
+    #[test]
+    fn connect_completed_on_owning_worker_leaves_no_slot() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let (before, connected, after) = run_on_worker(move |sender| {
+            Box::pin(async move {
+                let before = live_sources_on_worker();
+                let connected = TcpStream::connect(addr).await.is_ok();
+                let after = live_sources_on_worker();
+                sender
+                    .send((before, connected, after))
+                    .expect("send result");
+            })
+        });
+        assert!(connected, "loopback connect must succeed");
+        assert_eq!(after, before, "no slot may remain after connect completes");
+        drop(listener);
     }
 
     /// worked example: bind a `UnixListener` in a tempdir (never a fixed
