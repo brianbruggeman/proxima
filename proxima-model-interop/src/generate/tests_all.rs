@@ -2684,8 +2684,6 @@ pub(super) mod memory_fit_gate_tests {
             plan_life: crate::generate::Arc::new(()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_buffer_source: None,
-            #[cfg(feature = "cuda")]
-            cuda_resident: crate::generate::Arc::default(),
             prewarm_gate: crate::generate::PrewarmGate::new(),
             prewarm_queue: crate::generate::PrewarmQueue::new(),
         }
