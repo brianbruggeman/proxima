@@ -1,0 +1,6 @@
+{"v":3,"id":"01M6F72M8155YC71X74PRFKRM6","ts_ms":0,"proto":"custom","kind":"cassette-meta","payload":{"recorded_at_ms":1793659588865,"recorder":"proxima 0.1.0","request_bodies":true}}
+{"v":3,"id":"01M6F72M81RD02M4S70M9ZP1GN","ts_ms":0,"proto":"http","phase":"started","ts":"1970-01-01T00:00:00Z","pipe":"cassette","request":{"method":"GET","path":"/cpu_greedy","query":{"model":"gemma4_e2b","n":"16","prompt":"The capital of France is"}}}
+{"v":3,"id":"01M6F72M81RD02M4S70M9ZP1GN","ts_ms":0,"proto":"http","phase":"request_ended"}
+{"v":3,"id":"01M6F72M81RD02M4S70M9ZP1GN","ts_ms":0,"proto":"http","phase":"response_started","status":200,"headers":[]}
+{"v":3,"id":"01M6F72M81RD02M4S70M9ZP1GN","ts_ms":0,"proto":"http","phase":"response_chunk","b64":"eyJ0ZXh0IjoiIFBhcmlzLlxuIiwiaWRzIjpbOTA3OSwyMzY3NjEsMTA2LDEwNiwxMDddfQ=="}
+{"v":3,"id":"01M6F72M81RD02M4S70M9ZP1GN","ts_ms":0,"proto":"http","phase":"ended","latency_ms":0,"meta":{"retries":0}}
