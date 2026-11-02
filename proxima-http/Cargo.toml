@@ -229,7 +229,7 @@ http-listener = [
 # `any_listener.rs`) — used by EVERY `.any()`-family consumer (h1, pgwire,
 # redis, kafka, mqtt, amqp, memcached, dns) whenever the bind spec carries a
 # unix-socket `path`, regardless of whether that consumer speaks HTTP.
-# `AcceptorFactory` was never extended to unix sockets, so the bind goes
+# `AcceptorFactory` was never extended to unix sockets, so on prime the bind goes
 # straight to `proxima_net::prime::PrimeUnixListener` (a `StreamListener`
 # over the prime reactor) — tokio-free, same trio `http1-stream-client` uses.
 uds-listener = [
@@ -237,6 +237,11 @@ uds-listener = [
     "proxima-net/prime",
     "proxima-net/runtime-prime-inbox-alloc",
 ]
+# a tokio-hosted process has no prime reactor to register the prime socket
+# with, so `serve_uds` binds `proxima_net::tokio::TokioUnixListener` whenever a
+# tokio reactor drives the serve task. Weak on `proxima-net` so it only adds the
+# tokio arm where `uds-listener` is already on.
+uds-listener-tokio = ["dep:tokio", "proxima-net?/tokio"]
 # TLS termination for the `listener` module (folded from the former
 # `proxima-listeners-http` crate's own `tls` feature).
 tls = [

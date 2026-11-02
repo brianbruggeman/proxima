@@ -50,7 +50,7 @@ use futures::channel::mpsc;
 use futures::channel::oneshot;
 use futures::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 use futures::stream::StreamExt;
-use proxima_telemetry::{debug, warn};
+use proxima_telemetry::{debug, error, warn};
 use serde_json::Value;
 
 use proxima_core::ProximaError;
@@ -66,16 +66,18 @@ use proxima_listen::any::{
     downcast_handler,
 };
 use proxima_listen::{ListenProtocol, ReadySignal, ServeContext};
+#[cfg(all(unix, feature = "uds-listener"))]
+use proxima_net::prime::PrimeUnixListener;
+#[cfg(all(unix, feature = "uds-listener", feature = "uds-listener-tokio"))]
+use proxima_net::tokio::TokioUnixListener;
 use proxima_primitives::pipe::handler::PipeHandle;
 use proxima_primitives::pipe::{Exhausted, FanIn, Pipe, Select, UnpinPipe};
 use proxima_primitives::stream::{
     DatagramFactory, DatagramSocket, PeerInfo, StreamConnection, TcpAcceptor,
 };
+#[cfg(all(unix, feature = "uds-listener"))]
+use proxima_primitives::stream::{StreamListener, StreamListenerExt};
 use proxima_primitives::sync::blocking::{Mutex, MutexGuard};
-#[cfg(all(unix, feature = "uds-listener"))]
-use proxima_net::prime::PrimeUnixListener;
-#[cfg(all(unix, feature = "uds-listener"))]
-use proxima_primitives::stream::StreamListenerExt;
 
 use crate::http1::serve::HttpListenerSpec;
 use crate::http1::serve::serve_connection as serve_h1_connection_shared;
@@ -1053,6 +1055,7 @@ async fn serve_via_factory(
         label.as_str(),
     )]);
 
+    let mut listener_failure = None;
     loop {
         futures::select_biased! {
             _ = (&mut shutdown).fuse() => break,
@@ -1105,12 +1108,20 @@ async fn serve_via_factory(
                     }
                     }
                 },
-                Err(error) => warn!(?error, "any listener accept failed"),
+                Err(error) if accept_error_is_per_connection(&error) => {
+                    debug!(?error, "any listener accept lost a peer before handoff");
+                }
+                Err(error) => {
+                    error!(?error, "any listener accept failed; listener stops accepting");
+                    listener_failure = Some(error);
+                    break;
+                }
             },
         }
     }
 
-    if let Some(quiesce_ms) = quiesce_duration_ms
+    if listener_failure.is_none()
+        && let Some(quiesce_ms) = quiesce_duration_ms
         && quiesce_ms > 0
     {
         admission.begin_quiesce();
@@ -1167,7 +1178,14 @@ async fn serve_via_factory(
                         }
                         }
                     }
-                    Err(error) => warn!(?error, "any listener accept during quiesce failed"),
+                    Err(error) if accept_error_is_per_connection(&error) => {
+                        debug!(?error, "any listener accept during quiesce lost a peer before handoff");
+                    }
+                    Err(error) => {
+                        error!(?error, "any listener accept during quiesce failed; listener stops accepting");
+                        listener_failure = Some(error);
+                        break;
+                    }
                 },
             }
         }
@@ -1193,7 +1211,21 @@ async fn serve_via_factory(
         )
         .await;
     }
-    Ok(())
+    listener_failure.map_or(Ok(()), |error| Err(ProximaError::Io(error)))
+}
+
+/// Whether an accept error belongs to one peer (it hung up between the
+/// kernel queueing it and our accept) rather than to the listener itself.
+/// Anything else repeats on every retry, so the loop must stop instead of
+/// spinning on it.
+fn accept_error_is_per_connection(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+    )
 }
 
 /// Drain phase: wait for BOTH the connection table (`core`) and the
@@ -1262,10 +1294,64 @@ async fn serve_uds(
     blacklist: Option<BlacklistTable>,
     spec: Arc<Value>,
     ready_signal: Option<ReadySignal>,
-    mut shutdown: oneshot::Receiver<()>,
+    shutdown: oneshot::Receiver<()>,
 ) -> Result<(), ProximaError> {
+    // the socket registers with whichever reactor polls it first, so bind the
+    // listener that matches the runtime driving this task.
+    #[cfg(feature = "uds-listener-tokio")]
+    if tokio::runtime::Handle::try_current().is_ok() {
+        let listener = TokioUnixListener::bind(path.clone())
+            .await
+            .map_err(|err| ProximaError::Io(std::io::Error::other(format!("bind uds: {err}"))))?;
+        return accept_uds(
+            listener,
+            path,
+            mode,
+            candidates,
+            global_cap,
+            handlers,
+            on_reject,
+            blacklist,
+            spec,
+            ready_signal,
+            shutdown,
+        )
+        .await;
+    }
     let listener = PrimeUnixListener::bind(path.clone())
         .map_err(|err| ProximaError::Io(std::io::Error::other(format!("bind uds: {err}"))))?;
+    accept_uds(
+        listener,
+        path,
+        mode,
+        candidates,
+        global_cap,
+        handlers,
+        on_reject,
+        blacklist,
+        spec,
+        ready_signal,
+        shutdown,
+    )
+    .await
+}
+
+#[cfg(all(unix, feature = "uds-listener"))]
+// same listener-scoped state as `serve_uds`, which only picks the listener.
+#[allow(clippy::too_many_arguments)]
+async fn accept_uds<Listener: StreamListener>(
+    listener: Listener,
+    path: std::path::PathBuf,
+    mode: Option<u32>,
+    candidates: Arc<[Arc<dyn AnyProtocol>]>,
+    global_cap: usize,
+    handlers: Arc<std::collections::BTreeMap<String, AnyHandler>>,
+    on_reject: Option<RejectHook>,
+    blacklist: Option<BlacklistTable>,
+    spec: Arc<Value>,
+    ready_signal: Option<ReadySignal>,
+    mut shutdown: oneshot::Receiver<()>,
+) -> Result<(), ProximaError> {
     if let Some(perm_bits) = mode {
         use std::os::unix::fs::PermissionsExt;
         let permissions = std::fs::Permissions::from_mode(perm_bits);
@@ -1329,7 +1415,14 @@ async fn serve_uds(
                     }
                     }
                 }
-                Err(error) => warn!(?error, "uds accept failed"),
+                Err(error) if accept_error_is_per_connection(&error) => {
+                    debug!(?error, "uds accept lost a peer before handoff");
+                }
+                Err(error) => {
+                    error!(?error, "uds accept failed; listener stops accepting");
+                    let _ = std::fs::remove_file(&path);
+                    return Err(ProximaError::Io(error));
+                }
             },
         }
     }
@@ -1624,6 +1717,34 @@ mod tests {
     use proxima_primitives::pipe::request::{Request, Response};
     #[cfg(all(feature = "tls", feature = "http1"))]
     use proxima_runtime::Runtime;
+
+    #[test]
+    fn a_peer_that_hung_up_before_accept_keeps_the_listener_accepting() {
+        let lost_peers = [
+            io::ErrorKind::ConnectionAborted,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::WouldBlock,
+        ];
+
+        let verdicts: Vec<bool> = lost_peers
+            .into_iter()
+            .map(|kind| accept_error_is_per_connection(&io::Error::from(kind)))
+            .collect();
+
+        assert_eq!(verdicts, [true; 4]);
+    }
+
+    #[test]
+    fn a_listener_that_cannot_poll_stops_accepting() {
+        let missing_reactor =
+            io::Error::other("socket polling requires an available prime reactor");
+        let emfile = 24;
+        let out_of_descriptors = io::Error::from_raw_os_error(emfile);
+
+        assert!(!accept_error_is_per_connection(&missing_reactor));
+        assert!(!accept_error_is_per_connection(&out_of_descriptors));
+    }
 
     // test-only `Runtime` whose `spawn_on_current_core` forwards to
     // `tokio::task::spawn_local` — stands in for an installed runtime so a
@@ -2089,7 +2210,8 @@ mod tests {
                     handlers.insert("h1".to_string(), erase_handler(into_handle(ConstantOk)));
                     let candidates: Arc<[Arc<dyn AnyProtocol>]> =
                         Arc::from(vec![Arc::new(H1AnyProtocol::new()) as Arc<dyn AnyProtocol>]);
-                    let protocol = AnyListenProtocol::from_candidates(candidates, Arc::new(handlers));
+                    let protocol =
+                        AnyListenProtocol::from_candidates(candidates, Arc::new(handlers));
                     let mut spec = serde_json::Map::new();
                     spec.insert(
                         "path".to_string(),
@@ -2100,16 +2222,26 @@ mod tests {
                     );
                     let (shutdown_tx, shutdown_rx) = oneshot::channel();
                     let bind: SocketAddr = "127.0.0.1:0".parse().expect("parse bind addr");
-                    let serve =
-                        protocol.serve(bind, into_handle(ConstantOk), &Value::Object(spec), context, shutdown_rx);
+                    let serve = protocol.serve(
+                        bind,
+                        into_handle(ConstantOk),
+                        &Value::Object(spec),
+                        context,
+                        shutdown_rx,
+                    );
 
                     // `join` polls `serve` first, so the bind has run before the client dials.
                     let client = async move {
                         let upstream = PrimeUnixUpstream::new(path);
-                        let mut conn = upstream.connect().await.map_err(|err| format!("connect: {err}"))?;
-                        conn.write_all(b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+                        let mut conn = upstream
+                            .connect()
                             .await
-                            .map_err(|err| format!("write: {err}"))?;
+                            .map_err(|err| format!("connect: {err}"))?;
+                        conn.write_all(
+                            b"GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                        )
+                        .await
+                        .map_err(|err| format!("write: {err}"))?;
                         conn.flush().await.map_err(|err| format!("flush: {err}"))?;
                         let mut response = Vec::new();
                         futures::AsyncReadExt::read_to_end(&mut conn, &mut response)
@@ -2119,7 +2251,8 @@ mod tests {
                         Ok::<String, String>(String::from_utf8_lossy(&response).into_owned())
                     };
                     let (served, response) = futures::future::join(serve, client).await;
-                    let _ = result_tx.send(served.map_err(|err| format!("serve: {err}")).and(response));
+                    let _ =
+                        result_tx.send(served.map_err(|err| format!("serve: {err}")).and(response));
                 }) as Pin<Box<dyn Future<Output = ()> + 'static>>
             }))
             .expect("dispatch_factory");
@@ -2130,8 +2263,17 @@ mod tests {
             .expect("uds round trip");
         handle.shutdown_and_join().expect("shutdown");
 
-        assert!(response.starts_with("HTTP/1.1 200"), "status line missing: {response:?}");
-        assert!(response.ends_with("ok"), "body must be the handler's `ok`: {response:?}");
-        assert!(!socket_path.exists(), "serve must unlink the socket on shutdown");
+        assert!(
+            response.starts_with("HTTP/1.1 200"),
+            "status line missing: {response:?}"
+        );
+        assert!(
+            response.ends_with("ok"),
+            "body must be the handler's `ok`: {response:?}"
+        );
+        assert!(
+            !socket_path.exists(),
+            "serve must unlink the socket on shutdown"
+        );
     }
 }
