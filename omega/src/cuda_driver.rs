@@ -1056,6 +1056,40 @@ impl CudaDriver {
         )
     }
 
+    /// Launches each of `kernel`'s prologue kernels on the stream ahead of it, sharing its
+    /// uniforms. A prologue's output lives in the arena under its own node and is sized by the
+    /// kernel's extra output of that node, so it is allocated once and read by the launch after.
+    fn launch_prologue(
+        &self,
+        arena: &mut CudaF32Arena,
+        kernel: &CudaKernel,
+        uniforms: &[u8],
+    ) -> Result<(), CudaDriverError> {
+        for prologue in &kernel.prologue {
+            let Some(Binding::Output(node)) = prologue
+                .bindings
+                .iter()
+                .find(|binding| matches!(binding, Binding::Output(_)))
+            else {
+                return Err(CudaDriverError::BindingContract);
+            };
+            let output_len = kernel
+                .extra_outputs
+                .iter()
+                .find_map(|(extra, length)| (extra == node).then_some(*length))
+                .ok_or(CudaDriverError::BindingContract)?;
+            self.launch_f32_persistent_sized_with_sync(
+                arena,
+                prologue,
+                uniforms,
+                output_len,
+                Completion::Defer(None),
+                None,
+            )?;
+        }
+        Ok(())
+    }
+
     fn launch_f32_persistent_sized_with_sync(
         &self,
         arena: &mut CudaF32Arena,
@@ -1069,6 +1103,7 @@ impl CudaDriver {
             Completion::Synchronize => (true, None),
             Completion::Defer(deferred_fault) => (false, deferred_fault),
         };
+        self.launch_prologue(arena, kernel, uniforms)?;
         let Some((output_index, Binding::Output(output_node))) = kernel
             .bindings
             .iter()
