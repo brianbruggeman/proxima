@@ -47,7 +47,18 @@ pub fn fixture(args: TokenStream, item: TokenStream) -> TokenStream {
 
 /// One test attribute that drives the body on proxima's prime runtime
 /// (tokio fallback via `runtime = "tokio"`). Subsumes `#[tokio::test]`;
-/// `#[rstest]` parameterization + cassette record/replay land in later slices.
+/// Parameterization (`#[case]`, `#[values]`) and cassette record/replay are
+/// part of it:
+///
+/// `cassette = "name"` binds the test to `<CARGO_MANIFEST_DIR>/tests/cassettes/<name>.jsonl`
+/// (`<name>__<case>.jsonl` per `#[case]`). A parameter marked
+/// `#[cassette(EXPR)] pipe: PipeHandle` is that file's record/replay pipe
+/// around the real upstream `EXPR`; `EXPR` is evaluated only when recording,
+/// so replay needs no binary, server, or dump. Mode comes from
+/// `PROXIMA_CASSETTE=record|replay`; unset means replay when the file exists
+/// and record otherwise. Replay of a request that was never recorded fails
+/// with `ProximaError::ReplayMiss`. A `TestCtx` parameter plus
+/// `proxima::test_support::cassette_pipe` is the manual form.
 ///
 /// ```
 /// #[proxima_macros::test]

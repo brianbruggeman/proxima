@@ -106,6 +106,42 @@ pub async fn cassette_pipe_with_hooks<P: Handler>(
     config: CassetteConfig,
     hooks: CassetteHooks,
 ) -> Result<PipeHandle, ProximaError> {
+    cassette_pipe_lazy_with_hooks(cx, || inner, config, hooks).await
+}
+
+/// [`cassette_pipe`] where the real upstream is built by `make_inner`, which
+/// runs only in record mode. Replay never calls it, so a constructor that
+/// opens a file, resolves a binary, or dials a host cannot break replay on a
+/// machine that lacks the dependency. The `#[cassette(EXPR)]` test parameter
+/// expands to this.
+///
+/// # Errors
+/// Same failure surface as [`cassette_pipe`].
+pub async fn cassette_pipe_lazy<P: Handler, Make: FnOnce() -> P>(
+    cx: &proxima_test::TestCtx,
+    make_inner: Make,
+) -> Result<PipeHandle, ProximaError> {
+    let cassette = cx
+        .cassette()
+        .expect("cassette_pipe called on a test without `cassette = \"...\"`");
+    let cassette_dir = cassette
+        .path
+        .parent()
+        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+    let config = CassetteConfig::resolve_for_dir(&cassette_dir)?;
+    cassette_pipe_lazy_with_hooks(cx, make_inner, config, CassetteHooks::default()).await
+}
+
+/// [`cassette_pipe_lazy`] with explicit config and hooks.
+///
+/// # Errors
+/// Same failure surface as [`cassette_pipe`].
+pub async fn cassette_pipe_lazy_with_hooks<P: Handler, Make: FnOnce() -> P>(
+    cx: &proxima_test::TestCtx,
+    make_inner: Make,
+    config: CassetteConfig,
+    hooks: CassetteHooks,
+) -> Result<PipeHandle, ProximaError> {
     let cassette = cx
         .cassette()
         .expect("cassette_pipe called on a test without `cassette = \"...\"`");
@@ -177,7 +213,8 @@ pub async fn cassette_pipe_with_hooks<P: Handler>(
             .await?;
             sink.flush().await?;
             Ok(into_handle(RecordingTee {
-                inner: into_handle(inner),
+                inner: into_handle(make_inner()),
+                path: cassette.path.clone(),
                 sink,
                 match_spec,
                 duplicates: config.duplicates,
@@ -452,6 +489,7 @@ fn deep_merge(base: &mut serde_json::Value, patch: serde_json::Value) {
 
 struct RecordingTee {
     inner: PipeHandle,
+    path: PathBuf,
     sink: DynRecordingSink,
     match_spec: MatchSpec,
     duplicates: DuplicatePolicy,
@@ -494,6 +532,7 @@ impl SendPipe for RecordingTee {
         request: Request<Bytes>,
     ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
         let inner = self.inner.clone();
+        let path = self.path.clone();
         let sink = self.sink.clone();
         let match_key = match_key_from_request_with(&request, self.match_spec);
         let request_body = request.payload.clone();
@@ -535,7 +574,28 @@ impl SendPipe for RecordingTee {
                 event: ProtocolEvent::Http(HttpEvent::RequestEnded),
             });
 
-            let response = SendPipe::call(&inner, request).await?;
+            let response = match SendPipe::call(&inner, request).await {
+                Ok(response) => response,
+                Err(error) => {
+                    let nothing_recorded = seen
+                        .lock()
+                        .expect("cassette seen-keys registry")
+                        .is_empty();
+                    let cleanup = if nothing_recorded {
+                        std::fs::remove_file(&path)
+                            .map_or_else(|failure| format!("; cleanup failed: {failure}"), |()| String::new())
+                    } else {
+                        String::new()
+                    };
+                    return Err(ProximaError::Record(format!(
+                        "recording cassette {} failed at the live upstream: {error}{cleanup}; \
+                         the cassette is missing or PROXIMA_CASSETTE=record is set, so the real \
+                         dependency must be present; record on a host that has it with \
+                         PROXIMA_CASSETTE=record, commit the file, replay with PROXIMA_CASSETTE=replay",
+                        path.display()
+                    )));
+                }
+            };
             let status = response.status;
             let pairs = header_pairs(&response.metadata);
             let body = response.collect_body().await?;
