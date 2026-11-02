@@ -24,7 +24,7 @@ use proxima_tensor::op::NodeId;
 
 use crate::serving::{GdnPrefillBackend, ServingConfig};
 
-pub(super) type CudaPlanKey = (usize, usize, Vec<NodeId>, bool);
+pub(super) type CudaPlanKey = (usize, usize, Vec<NodeId>, bool, u64);
 
 pub(super) type CudaPlans = BTreeMap<CudaPlanKey, Plan>;
 
@@ -127,8 +127,8 @@ pub(super) fn same_width_class(left: &CudaPlanKey, right: &CudaPlanKey) -> bool 
     plan_class(left) == plan_class(right)
 }
 
-fn plan_class(key: &CudaPlanKey) -> (bool, bool, &[NodeId]) {
-    (key.0 == 1, key.1 == 0, key.2.as_slice())
+fn plan_class(key: &CudaPlanKey) -> (bool, bool, &[NodeId], u64) {
+    (key.0 == 1, key.1 == 0, key.2.as_slice(), key.4)
 }
 
 #[cfg(test)]
@@ -139,7 +139,7 @@ mod tests {
     const KV_ROWS: u32 = 120;
 
     fn key(new_count: usize, kv_bound_extent: usize, outputs: &[u32]) -> CudaPlanKey {
-        (new_count, kv_bound_extent, outputs.iter().copied().map(NodeId).collect(), false)
+        (new_count, kv_bound_extent, outputs.iter().copied().map(NodeId).collect(), false, 0)
     }
 
     #[proxima::test]
