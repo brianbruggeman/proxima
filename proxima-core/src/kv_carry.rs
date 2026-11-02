@@ -167,16 +167,28 @@ impl<Key: Ord + Copy + Debug> KvCarry<Key> {
             KvEvent::StepBegan { extents } => self.begin(&extents),
             KvEvent::RowsAppended { appended } => self.append(&appended),
             KvEvent::Accepted { kept } => self.accept(kept),
-            KvEvent::Parked => Ok(self.release(|input, lane, _| KvCommand::Park {
-                input,
-                valid_rows: lane.valid_rows,
-            })),
-            KvEvent::Ended => Ok(self.release(|input, lane, pair| KvCommand::Drain {
-                input,
-                valid_rows: lane.valid_rows,
-                row_width: pair.row_width,
-            })),
+            KvEvent::Parked => Ok(self.park()),
+            KvEvent::Ended => Ok(self.end()),
         }
+    }
+
+    pub fn park(&mut self) -> Vec<KvCommand<Key>> {
+        self.release(|input, lane, _| KvCommand::Park {
+            input,
+            valid_rows: lane.valid_rows,
+        })
+    }
+
+    pub fn end(&mut self) -> Vec<KvCommand<Key>> {
+        self.release(|input, lane, pair| KvCommand::Drain {
+            input,
+            valid_rows: lane.valid_rows,
+            row_width: pair.row_width,
+        })
+    }
+
+    pub fn pairs(&self) -> impl Iterator<Item = &RowPair<Key>> {
+        self.pairs.values()
     }
 
     fn select(

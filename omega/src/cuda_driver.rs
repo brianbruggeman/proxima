@@ -26,6 +26,7 @@ use cudarc::driver::{
 use cudarc::nvrtc::sys as nvrtc_sys;
 use cudarc::nvrtc::result as nvrtc_result;
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
+use proxima_core::kv_carry::{Appended, Extent, KvCarry, KvCarryError, KvCommand, KvEvent, RowPair};
 use proxima_primitives::sync::blocking::Mutex;
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
@@ -107,6 +108,22 @@ pub enum CudaDriverError {
         new_elements: usize,
         capacity_elements: usize,
     },
+    #[error("CUDA kv carry state machine: {0}")]
+    KvCarry(String),
+}
+
+impl From<KvCarryError<NodeId>> for CudaDriverError {
+    fn from(error: KvCarryError<NodeId>) -> Self {
+        match error {
+            KvCarryError::Overflow { input, valid_elements, capacity_elements } => Self::AppendOverflow {
+                node: input,
+                valid_elements: valid_elements as usize,
+                new_elements: 0,
+                capacity_elements: capacity_elements as usize,
+            },
+            other => Self::KvCarry(other.to_string()),
+        }
+    }
 }
 
 impl From<DriverError> for CudaDriverError {
@@ -117,6 +134,13 @@ impl From<DriverError> for CudaDriverError {
 
 // keyed by the caller's (address, length) so a fresh plan or arena finds the weight another plan uploaded; the name only drives eviction.
 type ResidentBuffers = BTreeMap<(usize, usize), (String, CudaGraphBuffer)>;
+
+fn buffer_elements(buffer: &CudaGraphBuffer) -> u64 {
+    match buffer {
+        CudaGraphBuffer::F32(values) => values.len() as u64,
+        CudaGraphBuffer::Bytes(values) => values.len() as u64,
+    }
+}
 
 fn cuda_float_bytes(extents: &[u64]) -> Result<u64, CudaDriverError> {
     extents.iter().try_fold(4_u64, |bytes, extent| {
@@ -522,16 +546,14 @@ pub struct CudaPlan {
 /// Recurrent state that stays on the device between calls: `pairs` maps a state input node to the
 /// output node that produces its next value, `live` holds the inputs whose arena buffer is already
 /// current, and `host_bytes` counts every carried state byte that crossed PCIe in either direction.
-/// `appends` maps a cache input node to the output node whose rows are appended to it on the
-/// device, `append_rows` holds the valid row count of each live cache input.
+/// `rows` is the sans-IO [`KvCarry`] that decides every cache-input row append, growth, truncation and handover.
 #[derive(Debug, Default)]
 struct StateCarry {
     pairs: BTreeMap<NodeId, NodeId>,
     live: BTreeSet<NodeId>,
     host_bytes: u64,
-    appends: BTreeMap<NodeId, NodeId>,
-    append_rows: BTreeMap<NodeId, u64>,
-    append_cached_rows: u64,
+    rows: KvCarry<NodeId>,
+    cached_rows: u64,
 }
 
 /// Numeric and activation policy for one plan, plus the runtime config when the
@@ -3008,23 +3030,29 @@ impl CudaPlan {
     /// call's output rows are copied device-to-device onto the end of the valid rows, and the output
     /// is not read back. Returns `false` (carrying nothing) for a resource-constrained plan, an
     /// output that is not a plan output, or differing row widths. The same set keeps live state; a
-    /// different set requires [`Self::drain_appended_rows`] first.
+    /// different set requires [`Self::drain_appended_rows`] first. Every decision comes from
+    /// [`KvCarry`]; this method only runs the commands it returns.
     pub fn carry_rows(&mut self, pairs: &[(NodeId, NodeId)], cached_rows: u64) -> bool {
-        let wanted: BTreeMap<NodeId, NodeId> = pairs.iter().copied().collect();
-        if wanted == self.carry.appends {
+        let wanted: Vec<RowPair<NodeId>> = pairs
+            .iter()
+            .map(|(input, output)| RowPair {
+                input: *input,
+                output: *output,
+                row_width: self.row_width(*input),
+            })
+            .collect();
+        self.carry.cached_rows = cached_rows;
+        if self.carry.rows.selects(&wanted) {
             return true;
         }
         let appendable = self.constraints.is_none()
             && pairs
                 .iter()
                 .all(|(input, output)| self.appendable(*input, *output));
-        if !appendable || !self.carry.append_rows.is_empty() {
+        if !appendable || self.carry.rows.has_live() {
             return false;
         }
-        self.carry.appends = wanted;
-        self.carry.append_cached_rows = cached_rows;
-        self.adopt_parked_appends();
-        true
+        self.drive_rows(KvEvent::Select { pairs: wanted }).is_ok()
     }
 
     fn appendable(&self, input: NodeId, output: NodeId) -> bool {
@@ -3039,91 +3067,149 @@ impl CudaPlan {
         self.shapes.of(node).iter().skip(1).product()
     }
 
-    fn adopt_parked_appends(&mut self) {
-        let mut parked = self.driver.parked_appends.lock();
-        for input in self.carry.appends.keys() {
-            if let Some((rows, buffer)) = parked.remove(input) {
-                self.arena.buffers.insert(*input, buffer);
-                self.arena.resident_sources.remove(input);
-                self.carry.append_rows.insert(*input, rows);
+    fn drive_rows(&mut self, event: KvEvent<NodeId>) -> Result<Vec<(NodeId, Vec<f32>)>, CudaDriverError> {
+        let commands = self.carry.rows.step(event)?;
+        let mut drained = Vec::new();
+        for command in commands {
+            match command {
+                KvCommand::Adopt { input } => self.adopt_parked_rows(input)?,
+                KvCommand::Park { input, valid_rows } => self.park_rows(input, valid_rows),
+                KvCommand::Grow { input, to_elements, keep_elements } => {
+                    self.grow_cache(input, to_elements as usize, keep_elements as usize)?;
+                }
+                KvCommand::AppendCopy { input, output, offset_elements, count_elements } => {
+                    self.copy_rows(input, output, offset_elements as usize, count_elements as usize)?;
+                }
+                KvCommand::Truncate { .. } => {}
+                KvCommand::Drain { input, valid_rows, row_width } => {
+                    drained.extend(self.drain_rows(input, valid_rows, row_width)?);
+                }
             }
+        }
+        Ok(drained)
+    }
+
+    fn adopt_parked_rows(&mut self, input: NodeId) -> Result<(), CudaDriverError> {
+        let Some((valid_rows, buffer)) = self.driver.parked_appends.lock().remove(&input) else {
+            return Ok(());
+        };
+        let capacity_elements = buffer_elements(&buffer);
+        self.arena.buffers.insert(input, buffer);
+        self.arena.resident_sources.remove(&input);
+        self.carry
+            .rows
+            .step(KvEvent::Resident { input, valid_rows, capacity_elements })?;
+        Ok(())
+    }
+
+    fn park_rows(&mut self, input: NodeId, valid_rows: u64) {
+        if let Some(buffer) = self.arena.buffers.remove(&input) {
+            self.driver.parked_appends.lock().insert(input, (valid_rows, buffer));
         }
     }
 
     fn park_appended(&mut self) {
-        let live = std::mem::take(&mut self.carry.append_rows);
-        let mut parked = self.driver.parked_appends.lock();
-        for (input, rows) in live {
-            if let Some(buffer) = self.arena.buffers.remove(&input) {
-                parked.insert(input, (rows, buffer));
+        for command in self.carry.rows.park() {
+            if let KvCommand::Park { input, valid_rows } = command {
+                self.park_rows(input, valid_rows);
             }
         }
+    }
+
+    fn drain_rows(
+        &mut self,
+        input: NodeId,
+        valid_rows: u64,
+        row_width: u64,
+    ) -> Result<Option<(NodeId, Vec<f32>)>, CudaDriverError> {
+        let Some(buffer) = self.arena.buffers.remove(&input) else {
+            return Ok(None);
+        };
+        self.read_valid_rows(input, valid_rows, row_width, buffer).map(Some)
+    }
+
+    fn read_valid_rows(
+        &mut self,
+        input: NodeId,
+        valid_rows: u64,
+        row_width: u64,
+        buffer: CudaGraphBuffer,
+    ) -> Result<(NodeId, Vec<f32>), CudaDriverError> {
+        let CudaGraphBuffer::F32(slice) = buffer else {
+            return Err(CudaDriverError::BindingContract);
+        };
+        let valid = (valid_rows * row_width) as usize;
+        let values = self.driver.stream.clone_dtoh(&slice.slice(0..valid))?;
+        self.carry.host_bytes += (values.len() * std::mem::size_of::<f32>()) as u64;
+        Ok((input, values))
     }
 
     /// Reads the valid rows of every live appended cache back to the host, keyed by the cache
     /// INPUT node, and marks the device copies stale so the next call uploads its host block again.
     pub fn drain_appended_rows(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, CudaDriverError> {
-        self.park_appended();
+        let mut drained = self.drive_rows(KvEvent::Ended)?;
         let parked = std::mem::take(&mut *self.driver.parked_appends.lock());
-        let mut drained = Vec::with_capacity(parked.len());
-        for (input, (rows, buffer)) in parked {
-            let CudaGraphBuffer::F32(slice) = buffer else {
-                return Err(CudaDriverError::BindingContract);
-            };
-            let valid = (rows * self.row_width(input)) as usize;
-            let values = self.driver.stream.clone_dtoh(&slice.slice(0..valid))?;
-            self.carry.host_bytes += (values.len() * std::mem::size_of::<f32>()) as u64;
-            drained.push((input, values));
+        for (input, (valid_rows, buffer)) in parked {
+            let row_width = self.row_width(input);
+            drained.push(self.read_valid_rows(input, valid_rows, row_width, buffer)?);
         }
+        drained.sort_by_key(|(input, _)| *input);
         Ok(drained)
     }
 
-    fn grow_appended_inputs(&mut self) -> Result<(), CudaDriverError> {
-        let live: Vec<(NodeId, u64)> = self.carry.append_rows.iter().map(|(node, rows)| (*node, *rows)).collect();
-        for (input, rows) in live {
-            let needed = self.shapes.of(input).iter().product::<u64>() as usize;
-            let valid = (rows * self.row_width(input)) as usize;
-            let Some(CudaGraphBuffer::F32(current)) = self.arena.buffers.get(&input) else {
-                return Err(CudaDriverError::MissingBuffer(input));
-            };
-            if current.len() >= needed {
-                continue;
-            }
-            if valid > current.len() {
-                return Err(CudaDriverError::AppendOverflow {
-                    node: input,
-                    valid_elements: valid,
-                    new_elements: 0,
-                    capacity_elements: current.len(),
-                });
-            }
-            let mut grown = self.driver.stream.alloc_zeros::<f32>(needed)?;
-            if valid > 0 {
-                self.driver
-                    .stream
-                    .memcpy_dtod(&current.slice(0..valid), &mut grown.slice_mut(0..valid))?;
-            }
-            self.arena.allocations += 1;
-            self.arena.buffers.insert(input, CudaGraphBuffer::F32(grown));
-        }
-        Ok(())
+    fn begin_rows_step(&mut self) -> Result<(), CudaDriverError> {
+        let cached_rows = self.carry.cached_rows;
+        let extents: Vec<Extent<NodeId>> = self
+            .carry
+            .rows
+            .pairs()
+            .filter(|pair| self.carry.rows.is_live(&pair.input))
+            .map(|pair| Extent {
+                input: pair.input,
+                cached_rows,
+                extent_elements: self.shapes.of(pair.input).iter().product::<u64>(),
+            })
+            .collect();
+        self.drive_rows(KvEvent::StepBegan { extents }).map(|_| ())
     }
 
     fn append_new_rows(&mut self) -> Result<(), CudaDriverError> {
-        let pairs: Vec<(NodeId, NodeId)> = self.carry.appends.iter().map(|(input, output)| (*input, *output)).collect();
-        for (input, output) in pairs {
-            let Some(rows) = self.carry.append_rows.get(&input).copied() else {
-                continue;
-            };
-            let new_rows = self.shapes.of(output).first().copied().unwrap_or(0);
-            let width = self.row_width(input);
-            self.append_output(input, output, (rows * width) as usize, (new_rows * width) as usize)?;
-            self.carry.append_rows.insert(input, rows + new_rows);
+        let appended: Vec<Appended<NodeId>> = self
+            .carry
+            .rows
+            .pairs()
+            .filter(|pair| self.carry.rows.is_live(&pair.input))
+            .map(|pair| Appended {
+                input: pair.input,
+                new_rows: self.shapes.of(pair.output).first().copied().unwrap_or(0),
+            })
+            .collect();
+        self.drive_rows(KvEvent::RowsAppended { appended }).map(|_| ())
+    }
+
+    /// The verify step kept `kept` of the rows it appended; the rest are dropped by moving the
+    /// valid-row count back, with no device copy.
+    pub fn accept_rows(&mut self, kept: u64) -> Result<(), CudaDriverError> {
+        self.drive_rows(KvEvent::Accepted { kept }).map(|_| ())
+    }
+
+    fn grow_cache(&mut self, input: NodeId, to_elements: usize, keep_elements: usize) -> Result<(), CudaDriverError> {
+        let Some(CudaGraphBuffer::F32(current)) = self.arena.buffers.get(&input) else {
+            return Err(CudaDriverError::MissingBuffer(input));
+        };
+        let mut grown = self.driver.stream.alloc_zeros::<f32>(to_elements)?;
+        let preserved = keep_elements.min(current.len());
+        if preserved > 0 {
+            self.driver
+                .stream
+                .memcpy_dtod(&current.slice(0..preserved), &mut grown.slice_mut(0..preserved))?;
         }
+        self.arena.allocations += 1;
+        self.arena.buffers.insert(input, CudaGraphBuffer::F32(grown));
         Ok(())
     }
 
-    fn append_output(
+    fn copy_rows(
         &mut self,
         input: NodeId,
         output: NodeId,
@@ -3133,47 +3219,16 @@ impl CudaPlan {
         let Some(CudaGraphBuffer::F32(mut cache)) = self.arena.buffers.remove(&input) else {
             return Err(CudaDriverError::MissingBuffer(input));
         };
-        if offset + count > cache.len() {
-            match self.grown_cache(&cache, offset, offset + count) {
-                Ok(grown) => cache = grown,
-                Err(error) => {
-                    self.arena.buffers.insert(input, CudaGraphBuffer::F32(cache));
-                    return Err(error);
-                }
-            }
-        }
         let copied = match self.arena.buffers.get(&output) {
-            Some(CudaGraphBuffer::F32(source)) if source.len() >= count => {
-                if count == 0 {
-                    Ok(())
-                } else {
-                    self.driver
-                        .stream
-                        .memcpy_dtod(&source.slice(0..count), &mut cache.slice_mut(offset..offset + count))
-                        .map_err(CudaDriverError::from)
-                }
-            }
+            Some(CudaGraphBuffer::F32(source)) if source.len() >= count && offset + count <= cache.len() => self
+                .driver
+                .stream
+                .memcpy_dtod(&source.slice(0..count), &mut cache.slice_mut(offset..offset + count))
+                .map_err(CudaDriverError::from),
             _ => Err(CudaDriverError::MissingBuffer(output)),
         };
         self.arena.buffers.insert(input, CudaGraphBuffer::F32(cache));
         copied
-    }
-
-    fn grown_cache(
-        &mut self,
-        cache: &CudaSlice<f32>,
-        valid: usize,
-        required: usize,
-    ) -> Result<CudaSlice<f32>, CudaDriverError> {
-        let mut grown = self.driver.stream.alloc_zeros::<f32>(required.next_power_of_two())?;
-        let preserved = valid.min(cache.len());
-        if preserved > 0 {
-            self.driver
-                .stream
-                .memcpy_dtod(&cache.slice(0..preserved), &mut grown.slice_mut(0..preserved))?;
-        }
-        self.arena.allocations += 1;
-        Ok(grown)
     }
 
     /// Bytes of carried recurrent state that crossed PCIe in either direction so far.
@@ -3241,7 +3296,7 @@ impl CudaPlan {
             let source = (block_address(block), block_length(block));
             let resident = self.resident_nodes.binary_search(&node).is_ok()
                 || resident_names.is_some_and(|names| names.contains(name));
-            if self.carry.live.contains(&node) || self.carry.append_rows.contains_key(&node) {
+            if self.carry.live.contains(&node) || self.carry.rows.is_live(&node) {
                 continue;
             }
             if resident && self.arena.resident_sources.get(&node) == Some(&source) {
@@ -3300,9 +3355,14 @@ impl CudaPlan {
             if self.carry.pairs.contains_key(&node) {
                 self.carry.host_bytes += block_length(block) as u64;
             }
-            if self.carry.appends.contains_key(&node) {
+            if self.carry.rows.is_pair(&node) {
                 self.carry.host_bytes += block_length(block) as u64;
-                self.carry.append_rows.insert(node, self.carry.append_cached_rows);
+                let capacity_elements = self.arena.buffers.get(&node).map_or(0, buffer_elements);
+                self.carry.rows.step(KvEvent::Resident {
+                    input: node,
+                    valid_rows: self.carry.cached_rows,
+                    capacity_elements,
+                })?;
                 self.arena.resident_sources.remove(&node);
                 continue;
             }
@@ -3328,7 +3388,7 @@ impl CudaPlan {
                 upload_call_us as f64 / 1_000.0
             );
         }
-        self.grow_appended_inputs()?;
+        self.begin_rows_step()?;
         let upload_phase_us = elapsed_micros(phase_started);
         let submit_started = Instant::now();
         let trace = std::env::var_os("PROXIMA_CUDA_TRACE").is_some();
@@ -3607,7 +3667,7 @@ impl CudaPlan {
             if self.carry.pairs.iter().any(|(input, output)| output == node && self.carry.live.contains(input)) {
                 continue;
             }
-            if self.carry.appends.iter().any(|(input, output)| output == node && self.carry.append_rows.contains_key(input)) {
+            if self.carry.rows.pairs().any(|pair| pair.output == *node && self.carry.rows.is_live(&pair.input)) {
                 continue;
             }
             if trace_outputs {
