@@ -67,10 +67,7 @@ impl CompletionPort {
         Arc::clone(&self.handle)
     }
 
-    pub(crate) fn dequeue(
-        &mut self,
-        timeout: Option<Duration>,
-    ) -> io::Result<&[OVERLAPPED_ENTRY]> {
+    pub(crate) fn dequeue(&mut self, timeout: Option<Duration>) -> io::Result<&[OVERLAPPED_ENTRY]> {
         let mut removed = 0u32;
         let capacity = self.entries.len() as u32;
         // SAFETY: `entries` holds `capacity` writable slots and `removed` is a valid out-pointer.

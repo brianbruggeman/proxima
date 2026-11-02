@@ -386,7 +386,9 @@ where
 fn register_ring_fd_with_epoll(ring_fd: std::os::fd::RawFd) -> io::Result<()> {
     with_current_reactor(|reactor| {
         // ignore error if fd is already registered (idempotent on re-init).
-        let _ = reactor.register(ring_fd, Interest::Read);
+        // SAFETY: the ring fd is owned by the worker's uring for the thread's lifetime,
+        // which outlives the thread-local reactor registration.
+        let _ = unsafe { reactor.register(ring_fd, Interest::Read) };
     });
     Ok(())
 }

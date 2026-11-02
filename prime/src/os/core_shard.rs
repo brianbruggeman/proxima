@@ -1329,10 +1329,14 @@ fn worker_main_inverted(
     #[cfg(target_os = "linux")]
     let wake_async = {
         let prime_poll_fd = reactor.raw_poll_fd();
-        match tokio::io::unix::AsyncFd::with_interest(
-            InvertedWakeFd(prime_poll_fd),
-            tokio::io::Interest::READABLE,
-        ) {
+        // SAFETY: prime_poll_fd is the epfd owned by `reactor`, open until the reactor drops;
+        // `wake_async` is dropped explicitly before that at the end of this function.
+        match unsafe {
+            tokio::io::unix::AsyncFd::register_with_interest(
+                InvertedWakeFd(prime_poll_fd),
+                tokio::io::Interest::READABLE,
+            )
+        } {
             Ok(value) => value,
             Err(err) => {
                 error!(error = %err, core = core_id.0, "inverted wake AsyncFd registration failed");
@@ -1528,6 +1532,9 @@ fn worker_main_inverted(
 
     drop(_guards);
     drop(executor);
+    // wake_async is declared before reactor; drop it now so it deregisters before reactor closes epfd.
+    #[cfg(target_os = "linux")]
+    drop(wake_async);
 }
 
 /// per-iteration bounded yields that let sister-spawned tokio tasks make

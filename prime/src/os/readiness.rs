@@ -209,7 +209,8 @@ impl Readiness {
                 if duplicate < 0 {
                     return Err(io::Error::last_os_error());
                 }
-                self.registration = Registration::Owned(unsafe { OwnedSource::from_raw_fd(duplicate) });
+                self.registration =
+                    Registration::Owned(unsafe { OwnedSource::from_raw_fd(duplicate) });
             }
 
             let key = match self.source {
@@ -258,13 +259,14 @@ impl Readiness {
 
     fn register(&mut self, reactor: &mut Reactor) -> io::Result<SourceKey> {
         match &mut self.registration {
-            Registration::Owned(socket) => {
-                #[cfg(unix)]
-                let source = socket.as_raw_fd();
-                #[cfg(windows)]
-                let source = socket;
-                reactor.register(source, self.interest)
-            }
+            #[cfg(unix)]
+            // SAFETY: `socket` is owned by this Readiness (Registration::Owned), whose Drop
+            // deregisters the source before the socket closes.
+            Registration::Owned(socket) => unsafe {
+                reactor.register(socket.as_raw_fd(), self.interest)
+            },
+            #[cfg(windows)]
+            Registration::Owned(socket) => reactor.register(socket, self.interest),
             #[cfg(windows)]
             Registration::Completion(handle) => reactor.register_completion(taken(handle)?),
             #[cfg(windows)]
@@ -309,7 +311,9 @@ impl Drop for Readiness {
 
 #[cfg(windows)]
 fn taken(handle: &mut Option<OwnedHandle>) -> io::Result<OwnedHandle> {
-    handle.take().ok_or_else(|| io::Error::other("readiness source missing"))
+    handle
+        .take()
+        .ok_or_else(|| io::Error::other("readiness source missing"))
 }
 
 fn stale_registration() -> io::Error {
@@ -389,11 +393,10 @@ mod tests {
                 let mut gate = Readiness::writable(writer_fd);
                 let mut states = Vec::new();
                 for _ in 0..2 {
-                    let state = std::future::poll_fn(|context| {
-                        std::task::Poll::Ready(gate.poll(context))
-                    })
-                    .await
-                    .expect("poll write gate");
+                    let state =
+                        std::future::poll_fn(|context| std::task::Poll::Ready(gate.poll(context)))
+                            .await
+                            .expect("poll write gate");
                     states.push(state);
                 }
                 let drained = drain_all(peer_fd);
