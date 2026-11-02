@@ -31,7 +31,12 @@
 
 use core::ops::{ControlFlow, Range};
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
+
+use crate::block_file::model_digest;
+use crate::disk_cold_tier::DiskColdTier;
+use crate::memory_reclaim::{ReclaimSettings, RegionLedger, Released, monotonic_now, read_used_fraction};
 
 use proxima_telemetry::{debug, error, warn};
 
@@ -717,6 +722,8 @@ pub(super) struct PromptCache {
     follow_up_closing: Vec<u32>,
     eviction_rules: Vec<EvictionRule>,
     cold: Option<ColdSlot>,
+    ledger: RegionLedger,
+    clock: fn() -> Duration,
 }
 
 /// What the per-entry bloom filters say about a prompt whose prefix stopped
@@ -747,6 +754,8 @@ impl PromptCache {
             follow_up_closing: Vec::new(),
             eviction_rules: vec![EvictionRule::Branch, EvictionRule::Oldest],
             cold: None,
+            ledger: RegionLedger::new(),
+            clock: monotonic_now,
         }
     }
 
@@ -775,6 +784,28 @@ impl PromptCache {
             max_entries,
             byte_budget,
         });
+    }
+
+    #[cfg(test)]
+    pub(super) fn set_clock(&mut self, clock: fn() -> Duration) {
+        self.clock = clock;
+    }
+
+    /// Moves every hot entry idle for `idle_secs`, then the least recently used while `used_fraction` stays at `pressure_milli`, to the cold tier (or drops it when none is installed).
+    pub(super) fn reclaim(
+        &mut self,
+        idle_secs: u64,
+        pressure_milli: u32,
+        used_fraction: impl FnMut() -> f64,
+    ) -> Result<Vec<Released>, InteropError> {
+        let mut ledger = std::mem::take(&mut self.ledger);
+        let now = (self.clock)();
+        let released = ledger.reclaim(now, idle_secs, pressure_milli, used_fraction, |stamp, _| {
+            self.evict(stamp);
+            Ok(())
+        });
+        self.ledger = ledger;
+        released
     }
 
     pub(super) fn set_follow_up_closing(&mut self, closing: &[u32]) {
@@ -1029,6 +1060,7 @@ impl PromptCache {
             );
             return false;
         }
+        self.ledger.register(stamp, entry.byte_len() as u64, (self.clock)());
         self.entries.insert(stamp, entry);
         true
     }
@@ -1055,6 +1087,7 @@ impl PromptCache {
     }
 
     fn drop_entry(&mut self, stamp: u64) -> Option<CacheEntry> {
+        self.ledger.forget(stamp);
         let entry = self.entries.remove(&stamp)?;
         let entries = &self.entries;
         if let Err(lost) = self
@@ -1138,6 +1171,7 @@ impl PromptCache {
             self.drop_entry(stamp);
             return;
         }
+        self.ledger.forget(stamp);
         self.trim_cold();
     }
 
@@ -1455,11 +1489,43 @@ impl LoadedModel<'_> {
         (entry, report)
     }
 
+    /// Runs the idle and pressure reclaim pass over the prompt cache; a request boundary is its cadence. `0` in either threshold turns the pass off.
+    pub fn reclaim_prompt_cache(&self, config: &PromptCacheConfig) -> usize {
+        if config.idle_secs == 0 || config.pressure_milli == 0 {
+            return 0;
+        }
+        let pressure = || {
+            read_used_fraction().unwrap_or_else(|error| {
+                warn!(meminfo_error = %error, "memory pressure unreadable, treating it as none");
+                0.0
+            })
+        };
+        match self.prompt_cache.lock().reclaim(config.idle_secs, config.pressure_milli, pressure) {
+            Ok(released) => released.len(),
+            Err(error) => {
+                error!(reclaim_error = %error, "prompt cache reclaim pass failed");
+                0
+            }
+        }
+    }
+
+    /// Installs the directory-backed cold tier when `settings` names a directory; `false` leaves the cache without one.
+    pub fn install_cold_tier(&self, settings: &ReclaimSettings) -> Result<bool, InteropError> {
+        let Some(directory) = settings.cold_dir.as_deref() else {
+            return Ok(false);
+        };
+        let digest = model_digest(&self.program);
+        let tier = Arc::new(DiskColdTier::open(Path::new(directory), digest)?);
+        tier.install(self, settings.cold_max_entries as usize, settings.cold_byte_budget);
+        Ok(true)
+    }
+
     /// Hands a finished request's entry to the cache, `true` when it is held.
     pub(super) fn prompt_cache_store(&self, entry: CacheEntry, config: &PromptCacheConfig) -> bool {
         let cached_tokens = entry.state.cached_len;
         let checkpoints = entry.checkpoints.len();
         let entries = self.prompt_cache.lock().store(entry, config);
+        self.reclaim_prompt_cache(config);
         debug!(
             cache_stored_tokens = cached_tokens as u64,
             cache_checkpoints = checkpoints as u64,

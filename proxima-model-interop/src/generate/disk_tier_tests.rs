@@ -1,22 +1,25 @@
 #![allow(clippy::expect_used)]
 
 use std::path::Path;
+use std::time::Duration;
 
 use super::prompt_cache::{CacheEntry, PromptCache, thaw_best_cold};
 use super::*;
 use crate::block_file::MappedBlockFile;
-use crate::{ColdTier, InteropError, PrefixState};
+use crate::PrefixState;
 
-#[path = "../../tests/support/block_keys.rs"]
-mod block_keys;
-#[path = "../../tests/support/block_write.rs"]
-mod block_write;
-#[path = "../../tests/support/disk_tier.rs"]
-mod disk_tier;
+use crate::disk_cold_tier::DiskColdTier as DiskTier;
 
-use block_keys::chained_keys;
-use block_write::write_block_file;
-use disk_tier::{DiskTier, spilled_names};
+fn spilled_names(directory: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(directory)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    names
+}
 
 const TRACE_A: [u32; 4] = [818, 5279, 529, 7001];
 const TRACE_B: [u32; 4] = [2063, 10779, 78113, 236769];
@@ -305,4 +308,72 @@ fn tier_policy_oldest_rule_list_moves_a_different_entry_to_disk() {
         vec![(0, false), (1, true), (2, false)]
     );
     assert_eq!(oldest_cache.held(), vec![(0, true), (1, false), (2, false)]);
+}
+
+thread_local! {
+    static FAKE_SECONDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn fake_now() -> Duration {
+    Duration::from_secs(FAKE_SECONDS.with(std::cell::Cell::get))
+}
+
+fn clocked_disk_cache(directory: &Path) -> PromptCache {
+    let mut cache = disk_cache(directory, 4);
+    cache.set_clock(fake_now);
+    cache
+}
+
+#[test]
+fn cold_idle_entry_moves_to_the_disk_tier_at_300_seconds_and_not_at_299() {
+    let directory = tempfile::tempdir().expect("a temporary spill directory");
+    let mut cache = clocked_disk_cache(directory.path());
+    let config = enabled_config();
+    FAKE_SECONDS.with(|seconds| seconds.set(0));
+    cache.store(entry_with_rows(&TRACE_A), &config);
+    FAKE_SECONDS.with(|seconds| seconds.set(100));
+    cache.store(entry_with_rows(&TRACE_B), &config);
+
+    FAKE_SECONDS.with(|seconds| seconds.set(299));
+    let early = cache.reclaim(300, 900, || 0.1).expect("reclaim at 299s");
+    FAKE_SECONDS.with(|seconds| seconds.set(300));
+    let on_time = cache.reclaim(300, 900, || 0.1).expect("reclaim at 300s");
+
+    assert!(early.is_empty());
+    assert_eq!(on_time.len(), 1);
+    assert_eq!(cache.held(), vec![(0, true), (1, false)]);
+    assert_eq!(
+        spilled_names(directory.path()),
+        vec!["0000000000000000.pxkv".to_owned()]
+    );
+}
+
+#[test]
+fn cold_pressure_moves_the_least_recently_used_entry_first_and_it_promotes_back_identical() {
+    let directory = tempfile::tempdir().expect("a temporary spill directory");
+    let mut cache = clocked_disk_cache(directory.path());
+    let config = enabled_config();
+    let original = entry_with_rows(&TRACE_A).state.branch();
+    FAKE_SECONDS.with(|seconds| seconds.set(0));
+    cache.store(entry_with_rows(&TRACE_A), &config);
+    FAKE_SECONDS.with(|seconds| seconds.set(10));
+    cache.store(entry_with_rows(&TRACE_B), &config);
+
+    let used = std::cell::Cell::new(0.95);
+    let released = cache
+        .reclaim(300, 900, || used.get())
+        .expect("reclaim under pressure");
+    used.set(0.1);
+
+    assert_eq!(released.len(), 2);
+    assert_eq!(cache.held(), vec![(0, true), (1, true)]);
+
+    let shared = Mutex::new(cache);
+    let restored = thaw_best_cold(&shared, &prompt_after(&TRACE_A), &base_key(), &config);
+
+    assert!(restored.expect("the disk read succeeds"));
+    let guard = shared.lock();
+    let thawed = guard.entry(2).expect("the thawed entry is hot again");
+    assert_eq!(thawed.state.ids, original.ids);
+    assert_eq!(thawed.state.cached_len, original.cached_len);
 }
