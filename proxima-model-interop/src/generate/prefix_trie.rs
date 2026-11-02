@@ -642,7 +642,7 @@ impl PrefixTrie {
         best
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn node_count(&self) -> usize {
         self.nodes.len()
     }
@@ -652,7 +652,7 @@ impl PrefixTrie {
         self.links.len()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn byte_len(&self) -> usize {
         self.nodes.byte_len()
             + self.links.byte_len()

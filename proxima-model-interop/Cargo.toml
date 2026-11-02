@@ -12,6 +12,9 @@ include = ["src/**", "Cargo.toml", "README.md", "LICENSE*"]
 
 [features]
 default = []
+# bench/probe entry points over crate-private internals (`probes`), reached
+# by examples through a dev-dependency self edge so a normal build never has them
+test-support = []
 # the 250 mb codec saving only exists on the full checkpoint; minutes per run
 slow-tests = []
 # joins the final routed gather to the logits suffix without crossing a router boundary.
@@ -396,6 +399,7 @@ rustix.workspace = true
 # body is synchronous CPU work through `LoadedModel`'s own `Pipe`, matching
 # `generate.rs`'s own doc for why that pipe never yields.
 proxima = { workspace = true, features = ["test-support"] }
+proxima-model-interop = { path = ".", features = ["test-support"] }
 proxima-tokenizer = { path = "../proxima-tokenizer", version = "0.1.0", default-features = false, features = ["hf"] }
 tempfile.workspace = true
 temp-env.workspace = true
@@ -798,3 +802,27 @@ required-features = ["std"]
 [[example]]
 name = "descriptor_census"
 required-features = ["std"]
+
+[[example]]
+name = "decode_loop_wall_clock"
+required-features = ["std"]
+
+[[example]]
+name = "op_profile_step"
+required-features = ["std", "test-support"]
+
+[[example]]
+name = "prefill_ttft_850"
+required-features = ["std", "test-support"]
+
+[[example]]
+name = "residency_ladder"
+required-features = ["std", "test-support"]
+
+[[example]]
+name = "record_gemma4_feature_off_baseline"
+required-features = ["std"]
+
+[[example]]
+name = "prompt_cache_lookup_cost"
+required-features = ["std", "test-support"]

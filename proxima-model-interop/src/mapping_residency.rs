@@ -122,7 +122,7 @@ pub fn count_missing_pages(residency: &[i8]) -> usize {
 /// same `mincore` output shape [`count_missing_pages`] already tests against
 /// a hand-built vector.
 #[must_use]
-fn missing_byte_ranges(residency: &[i8], page: usize, bytes_len: usize) -> Vec<(usize, usize)> {
+pub(crate) fn missing_byte_ranges(residency: &[i8], page: usize, bytes_len: usize) -> Vec<(usize, usize)> {
     let mut ranges = Vec::new();
     let mut run_start: Option<usize> = None;
     for (page_index, state) in residency.iter().enumerate() {
@@ -148,7 +148,7 @@ fn missing_byte_ranges(residency: &[i8], page: usize, bytes_len: usize) -> Vec<(
 /// as [`InteropError::MappingNotResident`] with `bytes_total` pages all
 /// marked missing, since a probe that cannot run proves nothing about
 /// residency either way.
-fn probe_residency(bytes: &[u8]) -> Vec<i8> {
+pub(crate) fn probe_residency(bytes: &[u8]) -> Vec<i8> {
     if bytes.is_empty() {
         return Vec::new();
     }
@@ -232,7 +232,7 @@ fn forced_start_rung() -> ResidencyRung {
 /// and the ladder falls through to the existing error if pages are still
 /// missing, mirroring [`probe_residency`]'s own "a failed probe proves
 /// nothing" stance on a failed `mincore`.
-fn lock_resident(bytes: &[u8]) {
+pub(crate) fn lock_resident(bytes: &[u8]) {
     if bytes.is_empty() {
         return;
     }
@@ -566,83 +566,5 @@ mod tests {
             residency.len(),
             100.0 * total_missing as f64 / residency.len() as f64,
         );
-    }
-
-    /// ROW 542 root-cause: stages a second immediate prefault, an
-    /// `MADV_WILLNEED`, and an `mlock` against the same real recurrent-routed
-    /// mapping in sequence, timing and `mincore`-checking each one, so the
-    /// rung that actually resolves the holes ROW 535 hit is visible instead
-    /// of guessed. A near-zero elapsed time for a stage over a 24 GB mapping
-    /// (this module's own doc: a real touch is >= 500 ms) would mean that
-    /// stage's touch is a no-op the optimizer elided.
-    #[test]
-    #[ignore = "requires the real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
-    fn residency_ladder_stage_timings_on_the_real_qwen35moe_checkpoint() {
-        let path = std::env::var("PROXIMA_QWEN35MOE_GGUF").unwrap_or_else(|_| {
-            "/Users/brianbruggeman/.ollama/models/blobs/\
-             sha256-f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d"
-                .to_string()
-        });
-        if !std::path::Path::new(&path).exists() {
-            eprintln!("skipping: no checkpoint at {path} (set PROXIMA_QWEN35MOE_GGUF)");
-            return;
-        }
-        let file =
-            std::fs::File::open(&path).unwrap_or_else(|error| panic!("open {path}: {error}"));
-        // SAFETY: read-only mapping of a file this test does not write or
-        // truncate; the mapping is the whole test's scope.
-        let mapping =
-            unsafe { memmap2::Mmap::map(&file) }.expect("mmap the real checkpoint read-only");
-        let bytes: &[u8] = &mapping;
-
-        let report = |label: &str, elapsed: std::time::Duration, residency: &[i8]| {
-            let missing = count_missing_pages(residency);
-            let ranges = missing_byte_ranges(residency, omega::metal::page_size(), bytes.len());
-            let first_missing = ranges.first().map(|range| range.0);
-            let last_missing = ranges.last().map(|range| range.1);
-            eprintln!(
-                "{label}: {:.1} ms, missing_pages={missing} of {}, contiguous_runs={}, \
-                 first_missing_offset={first_missing:?}, last_missing_offset={last_missing:?}",
-                elapsed.as_secs_f64() * 1000.0,
-                residency.len(),
-                ranges.len(),
-            );
-        };
-
-        let started = std::time::Instant::now();
-        crate::loader::prefault(bytes).expect("first prefault must resolve or report");
-        let residency = super::probe_residency(bytes);
-        report("stage 1: prefault", started.elapsed(), &residency);
-
-        let started = std::time::Instant::now();
-        crate::loader::prefault(bytes).expect("second immediate prefault must resolve or report");
-        let residency = super::probe_residency(bytes);
-        report(
-            "stage 2: second immediate prefault",
-            started.elapsed(),
-            &residency,
-        );
-
-        let started = std::time::Instant::now();
-        // SAFETY: `bytes` is a live borrow for the duration of this call;
-        // `madvise` only advises the kernel and never writes through the
-        // pointer.
-        let advised = unsafe {
-            rustix::mm::madvise(
-                bytes.as_ptr().cast::<core::ffi::c_void>().cast_mut(),
-                bytes.len(),
-                rustix::mm::Advice::WillNeed,
-            )
-        };
-        if let Err(error) = advised {
-            eprintln!("stage 3: madvise(WILLNEED) failed: {error}");
-        }
-        let residency = super::probe_residency(bytes);
-        report("stage 3: madvise(WILLNEED)", started.elapsed(), &residency);
-
-        let started = std::time::Instant::now();
-        super::lock_resident(bytes);
-        let residency = super::probe_residency(bytes);
-        report("stage 4: mlock", started.elapsed(), &residency);
     }
 }

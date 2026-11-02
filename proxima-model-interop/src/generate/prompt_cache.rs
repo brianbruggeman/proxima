@@ -1264,12 +1264,12 @@ impl PromptCache {
         self.entries.get(&stamp)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn index_byte_len(&self) -> usize {
         self.index.byte_len()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub(super) fn index_node_count(&self) -> usize {
         self.index.node_count()
     }
@@ -1753,6 +1753,9 @@ impl<'file> LoadedModel<'file> {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod probes;
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -1762,37 +1765,12 @@ mod tests {
     use proptest::test_runner::{Config, TestRunner};
     use proxima_tensor::NumericPolicy;
 
+    use super::probes::*;
     use super::*;
     use crate::generate::chunk_shift::ChunkRun;
     use crate::serving::{ContextLength, GdnPrefillBackend};
 
     const ANY_OVERLAP: u32 = 0;
-
-    fn base_key() -> CacheKey {
-        CacheKey::of(&ServingConfig::default(), false, RopeScaling::None, 0, 0)
-    }
-
-    fn state_with_ids(ids: &[u32]) -> CacheEntry {
-        CacheEntry::new(
-            PrefixState {
-                ids: ids.to_vec(),
-                layer_caches: vec![LayerCacheState::SharedFromLayer],
-                cached_len: ids.len(),
-            },
-            base_key(),
-        )
-    }
-
-    fn shared_widths() -> Vec<LayerPadRowWidths> {
-        vec![LayerPadRowWidths::SharedFromLayer]
-    }
-
-    fn enabled_config() -> PromptCacheConfig {
-        PromptCacheConfig {
-            byte_budget: 1 << 20,
-            ..PromptCacheConfig::off()
-        }
-    }
 
     fn stored_conversation_and_squashed_prompt() -> (Vec<u32>, Vec<u32>) {
         let stored: Vec<u32> = (1..=40).collect();
@@ -3080,14 +3058,6 @@ mod tests {
         assert_eq!(PromptCache::new().store(checkpointed, &tight), None);
     }
 
-    fn naive_common_prefix(left: &[u32], right: &[u32]) -> usize {
-        let mut shared = 0;
-        while shared < left.len() && shared < right.len() && left[shared] == right[shared] {
-            shared += 1;
-        }
-        shared
-    }
-
     /// Over 10,000 generated pairs the prefix length equals a plain
     /// index scan. A six-token vocabulary and a generated shared head make
     /// every case a near-collision, the shape real prompts that differ late
@@ -3329,33 +3299,6 @@ mod tests {
         assert_eq!(after_report.path, CachePath::Extend);
     }
 
-    fn indexed_config(block_tokens: u32) -> PromptCacheConfig {
-        PromptCacheConfig {
-            block_tokens,
-            max_entries: 64,
-            ..enabled_config()
-        }
-    }
-
-    /// The scan `take_best` replaced: every entry's common prefix against the
-    /// prompt, the reusable ones, the longest, the most recently stored among
-    /// equals.
-    fn scan_reference(
-        stored: &[Vec<u32>],
-        prompt: &[u32],
-        min_similarity_milli: u32,
-    ) -> Option<(usize, usize)> {
-        stored
-            .iter()
-            .enumerate()
-            .map(|(position, ids)| (position, naive_common_prefix(ids, prompt), ids.len()))
-            .filter(|&(_, lcp, stored_len)| {
-                entry_is_reusable(lcp, stored_len, prompt.len(), min_similarity_milli)
-            })
-            .max_by_key(|&(position, lcp, _)| (lcp, position))
-            .map(|(position, lcp, _)| (position, lcp))
-    }
-
     /// Over 10,000 generated caches and prompts the block index nominates
     /// the same entry, at the same prefix length, as the scan it replaced. A
     /// four-token vocabulary and four-token blocks make most cases share
@@ -3558,141 +3501,6 @@ mod tests {
         assert_eq!(candidates.entries, 1);
         let blocks: Vec<usize> = candidates.blocks.iter().map(|(_, block)| *block).collect();
         assert!(blocks.starts_with(&[1, 2, 3, 4]), "{blocks:?}");
-    }
-
-    fn random_conversation(rng: &mut fastrand::Rng, tokens: usize) -> Vec<u32> {
-        std::iter::once(2)
-            .chain((1..tokens).map(|_| rng.u32(4..262_144)))
-            .collect()
-    }
-
-    fn median_nanos(mut samples: Vec<u128>) -> u128 {
-        samples.sort_unstable();
-        samples[samples.len() / 2]
-    }
-
-    /// Cost: the time one lookup takes with 4, 64, 256 and 1,024 cached
-    /// 1,024-token conversations (every one opening with the same BOS token),
-    /// for a prompt that extends one of them, for one that shares nothing past
-    /// BOS, and for the scan the index replaced. `lookup` is the candidate
-    /// search alone, timed over batches so the clock's tick (about 41 ns) is
-    /// a small part of each sample; `take` is the whole `take_best` (the
-    /// lookup, the entry's removal and rewind on a hit, the miss reason on a
-    /// miss), one call per sample. Median of the samples.
-    #[test]
-    #[ignore = "timing probe: run alone, it prints the numbers it measured"]
-    fn block_index_lookup_cost_against_the_entry_count() {
-        lookup_cost_probe(0);
-    }
-
-    /// The same probe over conversations that open with one shared 512-token
-    /// header (a system prompt) and differ after it.
-    #[test]
-    #[ignore = "timing probe: run alone, it prints the numbers it measured"]
-    fn block_index_lookup_cost_with_a_shared_header() {
-        lookup_cost_probe(512);
-    }
-
-    fn lookup_cost_probe(shared_header: usize) {
-        let header: Vec<u32> = if shared_header == 0 {
-            Vec::new()
-        } else {
-            random_conversation(&mut fastrand::Rng::with_seed(5), shared_header)
-        };
-        const SAMPLES: usize = 200;
-        const BATCH: u128 = 100;
-        const TAKES: usize = 2000;
-        let key = base_key();
-        for entry_count in [4_usize, 64, 256, 1024] {
-            let config = PromptCacheConfig {
-                byte_budget: 1 << 32,
-                max_entries: entry_count as u32,
-                ..indexed_config(64)
-            };
-            let mut rng = fastrand::Rng::with_seed(11);
-            let stored: Vec<Vec<u32>> = (0..entry_count)
-                .map(|_| {
-                    let tail = random_conversation(&mut rng, 1024 - shared_header);
-                    header.iter().copied().chain(tail).collect()
-                })
-                .collect();
-            let mut cache = PromptCache::new();
-            stored
-                .iter()
-                .for_each(|ids| assert!(cache.store(state_with_ids(ids), &config).is_some()));
-            let extends: Vec<u32> = stored[entry_count / 2]
-                .iter()
-                .copied()
-                .chain((0..100).map(|_| rng.u32(4..262_144)))
-                .collect();
-            let unrelated: Vec<u32> = header
-                .iter()
-                .copied()
-                .chain(random_conversation(&mut rng, 1124 - shared_header))
-                .collect();
-            let timed_take = |cache: &mut PromptCache, prompt: &[u32]| -> u128 {
-                median_nanos(
-                    (0..TAKES)
-                        .map(|_| {
-                            let started = std::time::Instant::now();
-                            let (taken, _) = cache.take_best(prompt, &key, &shared_widths(), 100);
-                            let nanos = started.elapsed().as_nanos();
-                            if let Some(entry) = taken {
-                                let mut whole = entry;
-                                whole.state.ids = stored[entry_count / 2].clone();
-                                whole.state.cached_len = whole.state.ids.len();
-                                cache.store(whole, &config);
-                            }
-                            nanos
-                        })
-                        .collect(),
-                )
-            };
-            let batched = |work: &dyn Fn()| -> u128 {
-                median_nanos(
-                    (0..SAMPLES)
-                        .map(|_| {
-                            let started = std::time::Instant::now();
-                            (0..BATCH).for_each(|_| work());
-                            started.elapsed().as_nanos() / BATCH
-                        })
-                        .collect(),
-                )
-            };
-            let lookup = |prompt: &[u32]| {
-                batched(&|| {
-                    std::hint::black_box(cache.best_candidate(prompt, &key, 100, false));
-                })
-            };
-            let scan = |prompt: &[u32]| {
-                batched(&|| {
-                    std::hint::black_box(scan_reference(&stored, prompt, 100));
-                })
-            };
-            let lookup_hit = lookup(&extends);
-            let lookup_miss = lookup(&unrelated);
-            let scan_hit = scan(&extends);
-            let scan_miss = scan(&unrelated);
-            let index_bytes = cache.index_byte_len();
-            let index_nodes = cache.index_node_count();
-            let bloom_bytes: usize = cache
-                .entries
-                .values()
-                .map(|entry| entry.bloom.as_ref().map_or(0, BlockBloom::byte_len))
-                .sum();
-            let take_hit = timed_take(&mut cache, &extends);
-            let take_miss = timed_take(&mut cache, &unrelated);
-            println!(
-                "BLOCK_INDEX header={shared_header} entries={entry_count} lookup_hit_ns={lookup_hit} lookup_miss_ns={lookup_miss} take_hit_ns={take_hit} take_miss_ns={take_miss} scan_hit_ns={scan_hit} scan_miss_ns={scan_miss} index_bytes={index_bytes} index_bytes_per_entry={} index_nodes={index_nodes} bloom_bytes_per_entry={} profile={}",
-                index_bytes / entry_count,
-                bloom_bytes / entry_count,
-                if cfg!(debug_assertions) {
-                    "debug"
-                } else {
-                    "release"
-                }
-            );
-        }
     }
 
     fn key_under(
