@@ -4146,6 +4146,7 @@ only the single-row decode kernel reads the half-width device cache",
         let mut settled_tokens: Vec<u32> = Vec::with_capacity(draft_limit + 1);
         let mut undelivered = 0usize;
         let loop_started = std::time::Instant::now();
+        let mut previous_eval_done: Option<std::time::Instant> = None;
         let mut step = 0usize;
         let mut carried_layers: Vec<(usize, NodeId)> = Vec::new();
         let mut carried_program = 0usize;
@@ -4449,6 +4450,8 @@ only the single-row decode kernel reads the half-width device cache",
                     let new_count = ids_for_step.len();
                     let host_timing = std::env::var_os("PROXIMA_CUDA_HOST_TIMING").is_some();
                     let step_prep_started = std::time::Instant::now();
+                    let post_eval_gap_ms = previous_eval_done
+                        .map_or(0.0, |done| step_prep_started.duration_since(done).as_secs_f64() * 1e3);
                     #[cfg(feature = "instrument")]
                     let apply_serving_config_started = read_ticks();
                     apply_serving_config(serving_config, cached_len + new_count)?;
@@ -4516,6 +4519,7 @@ only the single-row decode kernel reads the half-width device cache",
                     } else if carry_kv_this_step {
                         runtime.set_kv_cached_rows(cached_len as u64);
                     }
+                    let prep_carry_done = std::time::Instant::now();
                     let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
                         self.weights.owned.len()
                             + self.weights.packed.len()
@@ -5787,12 +5791,14 @@ did not hold every cached position)",
                     };
                     if host_timing {
                         eprintln!(
-                            "cuda_host_timing: step={step} new_count={new_count} since_loop_ms={:.3} prep_ms={:.3} eval_ms={:.3}",
+                            "cuda_host_timing: step={step} new_count={new_count} since_loop_ms={:.3} prep_ms={:.3} prep_carry_ms={:.3} eval_ms={:.3} post_eval_gap_ms={post_eval_gap_ms:.3}",
                             loop_started.elapsed().as_secs_f64() * 1e3,
                             step_eval_started.duration_since(step_prep_started).as_secs_f64() * 1e3,
+                            prep_carry_done.duration_since(step_prep_started).as_secs_f64() * 1e3,
                             step_eval_started.elapsed().as_secs_f64() * 1e3,
                         );
                     }
+                    previous_eval_done = Some(std::time::Instant::now());
                     if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() && step == 0 {
                         for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
                             let mut digest_nodes = vec![
@@ -6527,6 +6533,12 @@ did not hold every cached position)",
                                 "layer_roots/layer_caches built from the same layer_roots, in lockstep"
                             ),
                         }
+                    }
+                    if host_timing {
+                        eprintln!(
+                            "cuda_host_timing: step={step} new_count={new_count} since_eval_done_ms={:.3} phase=layer_cache_append_done",
+                            previous_eval_done.map_or(0.0, |done| done.elapsed().as_secs_f64() * 1e3),
+                        );
                     }
                     #[cfg(feature = "instrument")]
                     let layer_cache_append_ticks = elapsed_ticks(layer_cache_append_started);
