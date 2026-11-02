@@ -585,7 +585,12 @@ mod resident_cuda_plans {
 
     use proxima_gguf::parse_complete;
 
+    use proxima_gguf::types::GgmlType;
+    use proxima_tensor::spec::ModelDescriptor;
+
     use super::{LoadedModel, ServingConfig, state_sensitive_ouro_gguf};
+    use crate::{NgramMapParams, SpeculativeConfig, SpeculativeDecodeStats, SpeculativeType, SpeculativeTypeSet};
+    use crate::lowering::{KvLayout, header_descriptor};
     use crate::serving::{GPU_LAYERS_ALL, PromptCacheConfig};
 
     fn gpu_config() -> ServingConfig<'static> {
@@ -773,6 +778,77 @@ mod resident_cuda_plans {
         assert_eq!(repeated.ids, expected.ids, "repeated one-token prompt ids");
         assert_logits_close(&repeated.logits, &expected.logits);
     }
+
+    fn speculative_config(ngram: Option<(u16, u16)>) -> ServingConfig<'static> {
+        let defaults = SpeculativeConfig::none();
+        let speculative = ngram.map_or(defaults, |(size_n, size_m)| SpeculativeConfig {
+            speculative_types: SpeculativeTypeSet::single(SpeculativeType::NgramSimple),
+            ngram_simple: NgramMapParams { size_n, size_m, ..defaults.ngram_simple },
+            ..defaults
+        });
+        ServingConfig {
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            temperature: 0.8,
+            top_k: 8,
+            top_p: 0.95,
+            seed: 7,
+            speculative,
+            ..gpu_config()
+        }
+    }
+
+    fn speculative_model(bytes: &[u8]) -> LoadedModel<'_> {
+        let parsed = parse_complete(bytes).expect("parse the state sensitive GGUF");
+        let decode = header_descriptor(&parsed, KvLayout::Full).expect("read the header");
+        let armed = ModelDescriptor { speculative_verify: true, ..decode };
+        LoadedModel::load_with_descriptor(&parsed, bytes, &armed).expect("load with verify armed")
+    }
+
+    fn sampled(
+        model: &LoadedModel<'_>,
+        prompt: &[u32],
+        ngram: Option<(u16, u16)>,
+        width: Option<u16>,
+    ) -> (Vec<u32>, u64) {
+        let mut stats = SpeculativeDecodeStats::default();
+        let ids = model
+            .generate_from_ids_with_speculative_stats(
+                prompt,
+                48,
+                &speculative_config(ngram),
+                &mut |_| ControlFlow::Continue(()),
+                &mut stats,
+                width,
+            )
+            .expect("sampled decode through cuda")
+            .0;
+        (ids, stats.verify_steps)
+    }
+
+    #[proxima::test]
+    #[case::forced_two(None, Some(2))]
+    #[case::forced_five(None, Some(5))]
+    #[case::ngram_one_then_three(Some((1, 3)), None)]
+    #[case::ngram_two_then_four(Some((2, 4)), None)]
+    async fn sampled_speculation_keeps_the_carried_kv_in_step_with_the_host(
+        #[case] ngram: Option<(u16, u16)>,
+        #[case] width: Option<u16>,
+    ) {
+        let bytes = state_sensitive_ouro_gguf(2);
+        let model = speculative_model(&bytes);
+        let prompt = [3_u32, 9, 5, 12, 1, 7];
+        let plain = sampled(&model, &prompt, None, None).0;
+
+        let (speculative, verify_steps) = sampled(&model, &prompt, ngram, width);
+        let (second, _) = sampled(&model, &prompt, ngram, width);
+
+        assert!(verify_steps > 0, "drafts ran verify steps");
+        assert_eq!(speculative, plain, "first request equals plain sampled decode");
+        assert_eq!(second, plain, "second request equals plain sampled decode");
+    }
+
 }
 
 mod second_request_real_model {
