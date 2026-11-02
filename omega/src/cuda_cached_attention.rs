@@ -7,6 +7,9 @@ use proxima_tensor::{BoundOp, BoundOpKind, DType};
 use crate::cuda::{
     CudaAttentionClass, cuda_cached_attention_class, cuda_float_literal, preamble,
 };
+use crate::cuda_cached_attention_tiled::{
+    TILED_ATTENTION_BODY, cached_attention_tile_rows,
+};
 use crate::error::EmitError;
 
 pub(crate) fn cached_attention_entry_name(
@@ -32,8 +35,10 @@ pub(crate) fn cached_attention_entry_name(
     } else {
         String::new()
     };
+    let tile_token = cached_attention_tile_rows(&resolved.kind)
+        .map_or_else(String::new, |tile_rows| format!("_tq{tile_rows}"));
     Ok(format!(
-        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_n{new_key_rows}_s{:08x}_l{}_u{}",
+        "omega_cuda_cached_attention_{}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_n{new_key_rows}{tile_token}_s{:08x}_l{}_u{}",
         class_tag(class),
         scale.to_bits(),
         signed_name_part(*cached_lower_inclusive),
@@ -125,7 +130,13 @@ pub(crate) fn render_cached_attention_cuda(
          \x20   {pass_planes}",
         scale = cuda_float_literal(*scale),
     ));
-    source.push_str(CACHED_ATTENTION_BODY);
+    match cached_attention_tile_rows(&resolved.kind) {
+        Some(tile_rows) => {
+            source.push_str(&format!("    constexpr int tile_rows = {tile_rows};\n"));
+            source.push_str(TILED_ATTENTION_BODY);
+        }
+        None => source.push_str(CACHED_ATTENTION_BODY),
+    }
     Ok(source)
 }
 

@@ -66,6 +66,7 @@ use proxima_tensor::{
 };
 
 use crate::cuda_cached_attention::{cached_attention_entry_name, render_cached_attention_cuda};
+use crate::cuda_cached_attention_tiled::cached_attention_tile_rows;
 use crate::epilogue::{
     broadcast_reduce_takes_block, epilogue_operand_is_loop_invariant, index32_reach_fits,
     reduce_block_width,
@@ -1258,10 +1259,16 @@ fn grid_threads(
             kv_heads,
             query_groups,
             ..
-        } => checked_product(
-            resolved.node,
-            [*query_rows, *kv_heads, *query_groups, ATTENTION_BLOCK_WIDTH],
-        ),
+        } => match cached_attention_tile_rows(&resolved.kind) {
+            Some(tile_rows) => checked_product(
+                resolved.node,
+                [query_rows.div_ceil(tile_rows), *kv_heads, ATTENTION_BLOCK_WIDTH],
+            ),
+            None => checked_product(
+                resolved.node,
+                [*query_rows, *kv_heads, *query_groups, ATTENTION_BLOCK_WIDTH],
+            ),
+        },
         BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
         | BoundOpKind::GatedDeltaNet { .. }
