@@ -81,3 +81,33 @@ pub mod telemetry {
         })
     }
 }
+
+pub struct StreamedDecode {
+    pub ids: Vec<u32>,
+    pub prompt_token_count: usize,
+}
+
+pub fn stream_decode(
+    model: &proxima_model_interop::LoadedModel<'_>,
+    prompt: &str,
+    max_tokens: usize,
+    serving_config: proxima_model_interop::ServingConfig<'_>,
+) -> Result<StreamedDecode, String> {
+    use std::ops::ControlFlow;
+
+    use proxima_model_interop::Phase;
+
+    let mut prompt_token_count = 0;
+    let (ids, _text, _stopped_by_eos) = model
+        .generate_streaming(prompt, max_tokens, serving_config, &mut |event| {
+            if let Phase::Prefill { prompt_tokens } = event.phase {
+                prompt_token_count = prompt_tokens;
+            }
+            ControlFlow::Continue(())
+        })
+        .map_err(|error| format!("streamed decode: {error}"))?;
+    Ok(StreamedDecode {
+        ids,
+        prompt_token_count,
+    })
+}
