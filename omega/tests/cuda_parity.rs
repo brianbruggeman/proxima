@@ -4116,3 +4116,148 @@ async fn cuda_cached_attention_matches_f64_oracle_with_causal_mask(
     assert_eq!(actual.len(), expected.len());
     assert!(worst < 1e-4, "rows={rows}: worst abs error {worst} vs f64 oracle");
 }
+
+const POLICY_PREFILL_TOKENS: usize = 512;
+const POLICY_PREFILL_FEATURES: usize = 1024;
+const POLICY_PREFILL_DEPTH: usize = 1024;
+const POLICY_PREFILL_PROBES: [usize; 6] = [0, 1, 127, 128, 300, POLICY_PREFILL_TOKENS - 1];
+
+fn round_through_fp16(values: &[f32]) -> Vec<f32> {
+    values
+        .iter()
+        .map(|value| half::f16::from_f32(*value).to_f32())
+        .collect()
+}
+
+fn probed_oracle_max_diff(
+    output: &[f32],
+    weight: &[f32],
+    activation: &[f32],
+    max_magnitude: f32,
+) -> f32 {
+    let mut worst = 0.0f32;
+    for &token in &POLICY_PREFILL_PROBES {
+        for feature in 0..POLICY_PREFILL_FEATURES {
+            let weight_row = &weight[feature * POLICY_PREFILL_DEPTH..][..POLICY_PREFILL_DEPTH];
+            let exact: f64 = weight_row
+                .iter()
+                .enumerate()
+                .map(|(depth, value)| {
+                    f64::from(*value) * f64::from(activation[depth * POLICY_PREFILL_TOKENS + token])
+                })
+                .sum();
+            let got = output[feature * POLICY_PREFILL_TOKENS + token];
+            worst = worst.max((f64::from(got) - exact).abs() as f32);
+        }
+    }
+    worst / max_magnitude
+}
+
+fn run_policy_prefill(
+    weight_blocks: &[u8],
+    codec: Codec,
+    activation: &[f32],
+    activation_quantization: bool,
+) -> (Vec<f32>, Vec<String>) {
+    let (program, root) = packed_batched_program(
+        POLICY_PREFILL_FEATURES as u32,
+        POLICY_PREFILL_DEPTH as u32,
+        Some(POLICY_PREFILL_TOKENS as u32),
+        DType::UINT8,
+    );
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("weight", QuantizedBlock::Packed { codec, bytes: weight_blocks }),
+        ("activation", QuantizedBlock::Float32(activation)),
+    ];
+    let mut plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[root],
+        NumericPolicy::bit_exact()
+            .with_reassociation(true)
+            .with_activation_quantization(activation_quantization),
+    )
+    .expect("omega::backend plans the policy prefill matmul");
+    let identities = cuda_kernel_identities(&plan).expect("cuda plan exposes its kernels");
+    let output = execute_plan_named(&mut plan, &named)
+        .expect("omega::backend runs the policy prefill matmul")
+        .root()
+        .to_vec();
+    (output, identities)
+}
+
+fn assert_policy_prefill_parity(
+    codec_name: &str,
+    codec: Codec,
+    block_bytes: usize,
+    block_elements: usize,
+    quantize: fn(&[f32], &mut [u8]) -> Result<(), proxima_gguf::quant::QuantError>,
+    dequantize: fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>,
+) {
+    let blocks_per_row = POLICY_PREFILL_DEPTH / block_elements;
+    let weight_f32: Vec<f32> = random_vec(53, POLICY_PREFILL_FEATURES * POLICY_PREFILL_DEPTH)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let mut weight_blocks = vec![0u8; POLICY_PREFILL_FEATURES * blocks_per_row * block_bytes];
+    let mut dequantized = vec![0.0f32; weight_f32.len()];
+    for ((row_f32, row_blocks), row_dequantized) in weight_f32
+        .chunks_exact(POLICY_PREFILL_DEPTH)
+        .zip(weight_blocks.chunks_exact_mut(blocks_per_row * block_bytes))
+        .zip(dequantized.chunks_exact_mut(POLICY_PREFILL_DEPTH))
+    {
+        quantize(row_f32, row_blocks).expect("row length is a whole number of blocks");
+        dequantize(row_blocks, row_dequantized).expect("a whole number of packed blocks");
+    }
+    let activation: Vec<f32> = random_vec(59, POLICY_PREFILL_DEPTH * POLICY_PREFILL_TOKENS)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let rounded = round_through_fp16(&activation);
+
+    let (single, single_identities) = run_policy_prefill(&weight_blocks, codec, &activation, true);
+    assert!(
+        single_identities.iter().any(|identity| identity.contains("_mma16x8x8h_")),
+        "{codec_name}: policy-on prefill did not take the single-fp16 mma kernel: {single_identities:?}"
+    );
+    let (split, split_identities) = run_policy_prefill(&weight_blocks, codec, &activation, false);
+    assert!(
+        split_identities
+            .iter()
+            .all(|identity| !identity.contains("_mma16x8x8h_"))
+            && split_identities.iter().any(|identity| identity.contains("_mma16x8x8_")),
+        "{codec_name}: policy-off prefill must keep the hi/lo mma kernel: {split_identities:?}"
+    );
+
+    let max_magnitude = single.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let against_rounded = probed_oracle_max_diff(&single, &dequantized, &rounded, max_magnitude);
+    let against_unrounded = probed_oracle_max_diff(&single, &dequantized, &activation, max_magnitude);
+    assert!(
+        single.iter().all(|value| value.is_finite()) && against_rounded < 2e-5,
+        "{codec_name}: single-fp16 prefill disagrees with the fp16-rounded f64 oracle by {against_rounded} of peak"
+    );
+    assert!(
+        against_unrounded > 2.0 * against_rounded,
+        "{codec_name}: degenerate control: output matches the unrounded activations ({against_unrounded}) as tightly as the rounded ones ({against_rounded})"
+    );
+    let split_against_exact = probed_oracle_max_diff(&split, &dequantized, &activation, max_magnitude);
+    assert!(
+        split_against_exact < 1e-5,
+        "{codec_name}: policy-off prefill lost f32 activation precision: {split_against_exact} of peak"
+    );
+}
+
+#[test]
+fn policy_on_q8_0_prefill_matches_the_fp16_rounded_f64_oracle_on_cuda() {
+    use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
+    assert_policy_prefill_parity("q8_0", Codec::Q8_0, BLOCK_BYTES, QK8_0, quantize, dequantize);
+}
+
+#[test]
+fn policy_on_q2_0_prefill_matches_the_fp16_rounded_f64_oracle_on_cuda() {
+    use proxima_gguf::quant::q2_0::{BLOCK_BYTES, QK_Q2_0, dequantize, quantize};
+    assert_policy_prefill_parity("q2_0", Codec::Q2_0, BLOCK_BYTES, QK_Q2_0, quantize, dequantize);
+}
