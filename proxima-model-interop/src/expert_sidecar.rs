@@ -1940,7 +1940,11 @@ mod tests {
     use proxima_gguf::{GgmlType, TensorInfo};
     use proxima_tensor::NodeId;
     use std::io::{Cursor, Seek};
+    use std::time::Duration;
     use tempfile::tempfile;
+
+    use crate::mapped_residency::{EXPERT_SIDECAR_REGION, MappedResidency, WEIGHTS_REGION};
+    use crate::memory_reclaim::ReclaimSettings;
 
     #[test]
     fn file_backed_reads_do_not_touch_the_sidecar_mapping() {
@@ -2463,8 +2467,7 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn mapped_sidecar_switches_all_three_projection_sites_without_copying() {
+    fn three_projection_fixture() -> (Vec<u8>, Vec<u8>) {
         let values: [f32; 256] = core::array::from_fn(|index| index as f32 * 0.01 - 1.0);
         let mut checkpoint = vec![0_u8; 144 * 3];
         for projection in checkpoint.as_chunks_mut::<144>().0 {
@@ -2532,13 +2535,85 @@ mod tests {
             &mut bytes,
         )
         .expect("the three low-codec projections write");
+        (checkpoint, bytes.into_inner())
+    }
 
+    fn mapped_sidecar_file(sidecar_bytes: &[u8]) -> (std::fs::File, Arc<Mmap>) {
         let mut file = tempfile().expect("a temporary mapped sidecar opens");
-        file.write_all(bytes.get_ref())
+        file.write_all(sidecar_bytes)
             .expect("the complete sidecar writes");
         file.flush().expect("the sidecar reaches the mapping");
         let mapping =
             Arc::new(unsafe { MmapOptions::new().map(&file) }.expect("the sidecar maps read-only"));
+        (file, mapping)
+    }
+
+    fn bound_slab<'checkpoint>(
+        sidecar: &MappedExpertSidecar,
+        checkpoint: &'checkpoint [u8],
+    ) -> ExpertSlab<'checkpoint> {
+        let mut slab = ExpertSlab::new();
+        for (site, projection) in ExpertProjection::ALL.into_iter().enumerate() {
+            slab.bind_layer_stack(
+                site,
+                proxima_tensor::NodeId(site as u32),
+                Codec::Q4K,
+                &checkpoint[site * 144..(site + 1) * 144],
+                1,
+                1,
+                256,
+            )
+            .expect("the checkpoint projection binds");
+            slab.register_model_layer_site(0, projection, site);
+        }
+        sidecar
+            .install_low_copies(&mut slab, 1, 1)
+            .expect("attachment installs every low projection");
+        slab
+    }
+
+    #[test]
+    fn sidecar_pages_release_after_idle_and_refault_identical_reads() {
+        let (checkpoint, sidecar_bytes) = three_projection_fixture();
+        let (file, _) = mapped_sidecar_file(&sidecar_bytes);
+        let sidecar = MappedExpertSidecar::from_file(file).expect("the sidecar opens from file");
+        let slab = bound_slab(&sidecar, &checkpoint);
+        let (_checkpoint_file, checkpoint_mapping) = mapped_sidecar_file(&checkpoint);
+        let residency = MappedResidency::new(ReclaimSettings::builder().build());
+        residency.register_weights(checkpoint_mapping.as_ref(), Duration::ZERO);
+        residency.register_sidecar(Arc::clone(sidecar.mapping()), Duration::ZERO);
+        let mut scratch = ExpertSidecarReadScratch::default();
+        let page_in = |scratch: &mut ExpertSidecarReadScratch| {
+            residency.touch(EXPERT_SIDECAR_REGION, Duration::from_secs(1));
+            sidecar
+                .read_selected(0, &[0], &slab, scratch)
+                .expect("the routed expert pages in");
+            (scratch.ranges_read, scratch.bytes_read, sidecar.mapping().to_vec())
+        };
+        let first = page_in(&mut scratch);
+
+        residency.pin_all(Duration::from_secs(2));
+        let pinned = residency
+            .reclaim(Duration::from_secs(303), || 0.1)
+            .expect("reclaim while an evaluation is in flight");
+        residency.unpin_all(Duration::from_secs(2));
+        let idle = residency
+            .reclaim(Duration::from_secs(303), || 0.1)
+            .expect("reclaim past the idle limit");
+
+        assert!(pinned.is_empty(), "a pinned evaluation holds every region");
+        assert_eq!(
+            idle.iter().map(|entry| entry.region).collect::<Vec<_>>(),
+            [WEIGHTS_REGION, EXPERT_SIDECAR_REGION]
+        );
+        assert!(residency.touch(EXPERT_SIDECAR_REGION, Duration::from_secs(304)));
+        assert_eq!(page_in(&mut scratch), first);
+    }
+
+    #[test]
+    fn mapped_sidecar_switches_all_three_projection_sites_without_copying() {
+        let (checkpoint, sidecar_bytes) = three_projection_fixture();
+        let (_file, mapping) = mapped_sidecar_file(&sidecar_bytes);
         let sidecar = MappedExpertSidecar::new(mapping).expect("the mapped directory validates");
 
         let mut slab = ExpertSlab::new();
