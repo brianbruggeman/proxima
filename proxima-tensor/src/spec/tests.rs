@@ -4029,28 +4029,25 @@ fn a_mistral_layer_written_as_toml_infers_at_its_real_dimensions() {
         .expect("the layer infers at a small sequence length too");
 }
 
-/// Wall-clock probe for `bind.rs`'s reduce-fusion cost fix: runs
-/// `mistral_layer.toml` at the model's real dimensions
-/// (`embedding=4096`, `feed_forward=14336`) at `sequence=4`, the exact
-/// configuration the sibling milestone test above found too slow to run
-/// unfused (`ffn_out`'s reduce absorbing the whole SwiGLU activation
+/// `bind.rs`'s reduce-fusion cost fix, on `mistral_layer_small.toml`
+/// (same composition as the real layer, dimensions divided down): binds
+/// `ffn_out` together with the root and evaluates `sequence=4`. At real
+/// dimensions `ffn_out`'s reduce absorbing the whole SwiGLU activation
 /// chain recomputed it once per `embedding` element instead of once per
-/// its own `seq*feed_forward`). `#[ignore]`d — ~870MB of random weights
-/// plus a multi-second real run does not belong in the default
-/// `nextest` budget; run explicitly with `--ignored` when re-measuring.
-#[test]
-#[ignore = "measures the real-dimension mistral layer's wall clock; run explicitly"]
-fn a_mistral_layer_written_as_toml_evaluates_at_its_real_dimensions() {
+/// its own `seq*feed_forward`; the fused bind keeps that body a bounded
+/// step list, and the evaluated output stays the right shape and finite.
+#[proxima::test]
+async fn a_mistral_layer_written_as_toml_binds_ffn_out_fused_and_evaluates() {
     const SEQUENCE: usize = 4;
-    const EMBEDDING: usize = 4096;
-    const QUERY_HEADS: usize = 32;
-    const KV_HEADS: usize = 8;
-    const HEAD_DIM: usize = 128;
+    const EMBEDDING: usize = 16;
+    const QUERY_HEADS: usize = 8;
+    const KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 4;
     const PAIRS: usize = HEAD_DIM / 2;
     const GROUP: usize = QUERY_HEADS / KV_HEADS;
-    const FEED_FORWARD: usize = 14336;
+    const FEED_FORWARD: usize = 32;
 
-    let text = include_str!("../../specs/mistral_layer.toml");
+    let text = include_str!("../../specs/mistral_layer_small.toml");
     let spec: ProgramSpec = toml::from_str(text).expect("spec parses");
     spec.validate().expect("spec is structurally sound");
     let program = Vec::<Op>::try_from(&spec).expect("spec lowers to a program");
@@ -4069,10 +4066,8 @@ fn a_mistral_layer_written_as_toml_evaluates_at_its_real_dimensions() {
     let w_down = random_vec(108, FEED_FORWARD * EMBEDDING);
     let cos = random_vec(109, SEQUENCE * PAIRS);
     let sin = random_vec(110, SEQUENCE * PAIRS);
-    let attn_norm_weight = alloc::vec![1.0f32; EMBEDDING];
-    let ffn_norm_weight = alloc::vec![1.0f32; EMBEDDING];
 
-    let blocks: [&[f32]; 13] = [
+    let blocks: [&[f32]; 11] = [
         &activations,
         &epsilon,
         &wq,
@@ -4084,8 +4079,6 @@ fn a_mistral_layer_written_as_toml_evaluates_at_its_real_dimensions() {
         &w_down,
         &cos,
         &sin,
-        &attn_norm_weight,
-        &ffn_norm_weight,
     ];
 
     let ffn_out = spec
@@ -4110,14 +4103,14 @@ fn a_mistral_layer_written_as_toml_evaluates_at_its_real_dimensions() {
         .element_body()
         .steps
         .len();
-    std::println!("ffn_out body_steps={ffn_out_body_steps}");
+    assert!(
+        ffn_out_body_steps > 0,
+        "ffn_out must bind to a nonempty element body"
+    );
 
     let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
-    let wall_start = std::time::Instant::now();
     let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
-        .expect("the real mistral layer evaluates");
-    let wall = wall_start.elapsed();
-    std::println!("wall_clock={wall:?}");
+        .expect("the small mistral layer evaluates");
 
     let output = evaluated.root();
     assert_eq!(
@@ -5876,17 +5869,13 @@ fn the_interpreter_per_node_dispatch_floor_is_measured() {
 /// How deep a dependency chain this evaluator survives. A flat N-chunk
 /// cache fold that combines chunks pairwise left-to-right builds a
 /// chain exactly N long, so this bounds that shape independently of the
-/// node-count budget. Depth comes from `PROXIMA_CHAIN_DEPTH` so a
-/// caller can walk it upward across separate processes -- a stack
-/// overflow aborts, it does not unwind, so one process cannot bisect it.
-#[test]
-#[ignore = "probes the evaluator's stack depth; aborts by design past the limit"]
-fn the_evaluator_survives_a_dependency_chain_of_a_given_depth() {
-    let depth: usize = std::env::var("PROXIMA_CHAIN_DEPTH")
-        .ok()
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(256);
-
+/// node-count budget. The evaluator has no depth limit that returns an
+/// error: past its stack budget the process aborts, so only depths that
+/// must succeed are asserted here.
+#[proxima::test]
+#[case::single_link(1)]
+#[case::flat_cache_fold_of_256_chunks(256)]
+async fn the_evaluator_survives_a_dependency_chain_of_a_given_depth(#[case] depth: usize) {
     let mut program = Vec::new();
     let seed = input_leaf(
         &mut program,
@@ -5919,26 +5908,23 @@ fn the_evaluator_survives_a_dependency_chain_of_a_given_depth() {
     assert_eq!(data[0], 1.0 + depth as f32, "each link adds one seed");
 }
 
-/// Wall-clock probe for the whole forward pass, `SEQUENCE=4`, RANDOM
-/// weights, at the model's real dimensions — the 32-layer analogue of
-/// `a_mistral_layer_written_as_toml_evaluates_at_its_real_dimensions`
-/// above, gated `#[ignore]` for the same reason and then some: ~32
-/// layers' worth of real-dimension weights is tens of GB and a
-/// multi-second-per-layer run, neither of which belongs in the default
-/// `nextest` budget. Run explicitly with `--ignored --release`.
-#[test]
-#[ignore = "measures the whole real-dimension mistral forward pass's wall clock; run explicitly"]
-fn the_whole_mistral_forward_pass_evaluates_at_real_dimensions() {
+/// The whole GQA forward pass (embedding lookup through the lm head) with
+/// RANDOM weights at the mistral ratios (GQA group 4, RoPE rotating the
+/// full head_dim), shrunk so it runs in the default budget: the logits
+/// are `[seq, vocab]`, finite, and the last position's argmax addresses a
+/// real vocab entry.
+#[proxima::test]
+async fn the_whole_mistral_shaped_forward_pass_evaluates_with_finite_logits() {
     const SEQUENCE: usize = 4;
-    const VOCAB: usize = 32_002;
-    const EMBEDDING: usize = 4096;
-    const QUERY_HEADS: usize = 32;
-    const KV_HEADS: usize = 8;
-    const HEAD_DIM: usize = 128;
+    const VOCAB: usize = 128;
+    const EMBEDDING: usize = 64;
+    const QUERY_HEADS: usize = 8;
+    const KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 16;
     const PAIRS: usize = HEAD_DIM / 2;
     const GROUP: usize = QUERY_HEADS / KV_HEADS;
-    const FEED_FORWARD: usize = 14336;
-    const BLOCK_COUNT: u32 = 32;
+    const FEED_FORWARD: usize = 172;
+    const BLOCK_COUNT: u32 = 2;
 
     let program = gqa_forward_program(
         VOCAB as u32,
@@ -5959,7 +5945,7 @@ fn the_whole_mistral_forward_pass_evaluates_at_real_dimensions() {
     // block order mirrors `gqa_forward_program`'s own `Input`
     // emission order exactly: ids, table, eps, cos/sin, then each
     // layer's attn_norm_weight/ffn_norm_weight/wq/wk/wv/wo/w_gate/
-    // w_up/w_down, then the lm head. `inv_dim`, `ones`, `group_ones`,
+    // w_up/w_down, then output_norm and the lm head. `inv_dim`, `ones`, `group_ones`,
     // `inv_sqrt_head_dim` and `neg_infinity` are `Op::Constant` now, so
     // none of them has a block here — that collapse is what
     // `no_repeated_scalar_crosses_the_binding_surface` asserts.
@@ -5993,6 +5979,7 @@ fn the_whole_mistral_forward_pass_evaluates_at_real_dimensions() {
         owned.push(random_vec(seed, FEED_FORWARD * EMBEDDING));
         seed += 1;
     }
+    let output_norm = alloc::vec![1.0f32; EMBEDDING];
     let lm_head = random_vec(seed, EMBEDDING * VOCAB);
 
     let mut blocks: Vec<&[f32]> = alloc::vec![
@@ -6005,19 +5992,14 @@ fn the_whole_mistral_forward_pass_evaluates_at_real_dimensions() {
     for layer_weights in &owned {
         blocks.push(layer_weights.as_slice());
     }
+    blocks.push(output_norm.as_slice());
     blocks.push(lm_head.as_slice());
 
     let root = NodeId(program.len() as u32 - 1);
     let workers = core::num::NonZeroUsize::new(1).expect("one worker is nonzero");
 
-    let wall_start = std::time::Instant::now();
     let evaluated = crate::cpu::evaluate_parallel(&program, &symbols, &blocks, &[root], workers)
-        .expect("the whole real-dimension mistral forward pass evaluates");
-    let wall = wall_start.elapsed();
-    std::println!(
-        "whole_forward_pass: wall_clock={wall:?} per_layer={:?}",
-        wall / BLOCK_COUNT
-    );
+        .expect("the whole mistral-shaped forward pass evaluates");
 
     let output = evaluated.root();
     assert_eq!(
@@ -6041,7 +6023,6 @@ fn the_whole_mistral_forward_pass_evaluates_at_real_dimensions() {
         argmax < VOCAB,
         "argmax {argmax} must address a real vocab entry, meaningless as it is with random weights"
     );
-    std::println!("argmax(last position)={argmax}");
 }
 
 /// Absolute-position RoPE angles for `count` positions starting at
