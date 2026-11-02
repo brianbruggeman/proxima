@@ -2579,6 +2579,8 @@ impl CudaPlan {
         };
         let mut kind_rows: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
         let dispatch_started = host_timing.then(std::time::Instant::now);
+        let mut function_lookups = 0u64;
+        let mut function_lookup_us = 0u64;
         for (position, (bound, (kernel, uniforms))) in self
             .resolved
             .iter()
@@ -2662,7 +2664,10 @@ impl CudaPlan {
                         .map(|(_, offset, slots)| (array, *offset, *slots))
                 });
                 if self.functions[position].is_none() && !timing {
+                    let lookup_started = host_timing.then(Instant::now);
                     self.functions[position] = Some(self.driver.function_for(kernel)?);
+                    function_lookups += 1;
+                    function_lookup_us += lookup_started.map_or(0, elapsed_micros);
                 }
                 let launch_started = host_timing.then(Instant::now);
                 let launch = if timing {
@@ -2725,9 +2730,14 @@ impl CudaPlan {
         }
         if let Some(started) = dispatch_started {
             eprintln!(
-                "cuda_host_timing: phase=submit_ms value={:.3} nodes={}",
+                "cuda_host_timing: phase=submit_ms value={:.3} nodes={} function_lookups={} function_lookup_ms={:.3} compilations={} nvrtc_ms={:.3} load_ms={:.3}",
                 started.elapsed().as_secs_f64() * 1_000.0,
-                self.resolved.len()
+                self.resolved.len(),
+                function_lookups,
+                function_lookup_us as f64 / 1_000.0,
+                self.driver.kernel_compilations() - compilations_before,
+                (self.driver.nvrtc_micros() - nvrtc_before) as f64 / 1_000.0,
+                (self.driver.load_micros() - load_before) as f64 / 1_000.0
             );
             report_launch_profile(&self.arena.launch_profile, &kind_rows);
         }
