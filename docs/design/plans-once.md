@@ -1,5 +1,30 @@
 # plans once
 
+## revision after review (2026-11-02)
+
+An independent review, checked against the code, corrected this design:
+
+- **False claim below:** kernel text is not extent-agnostic. The CUDA attention
+  kernel bakes `new_key_rows`, `new_upper`, `cached_lower` (and `cached_key_rows`
+  in the Static class) as `constexpr` (`omega/src/cuda_cached_attention.rs:115-158`).
+  Launch grids are computed on the host from extents (`omega/src/cuda.rs`), and
+  `total_elements` is a product of extents, so uniforms are not affine everywhere.
+- **The smaller fix comes first.** The CachedBound attention class already reads
+  the live KV length at runtime (`cuda_cached_attention.rs:116`). Binding the
+  cached-KV symbol to KV capacity (today `cached_kv_extent` passes `usize::MAX`,
+  `proxima-model-interop/src/generate/load_model.rs:1497`, and pads only to a
+  32-token bucket) makes the decode key constant, so it is built once and never refit.
+- **Correctness gap:** the plan key has no program identity, while several programs
+  (decode, speculative verify, one-evaluation prefill widths, recurrent verify,
+  greedy-augmented) can share `(rows, kv, outputs)`. A content hash of the symbolic
+  program, computed once per program, goes into the key. That hash serves identity;
+  it does not skip binding.
+- **Deferred until measured:** symbolic shapes, class-parameterized bind and
+  device-side symbol evaluation (sections 1-3 below) wait for the measurement of the
+  remaining per-request rebind of a short last prefill chunk.
+
+## original design
+
 A model's execution plan is built once per structural class, at load. A request
 or a step changes only runtime values. Nothing is re-bound, re-fused, re-emitted,
 refit, patched, evicted or cached per step.
