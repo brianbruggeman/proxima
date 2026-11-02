@@ -1,10 +1,14 @@
-use proxima_tensor::BoundOpKind;
+use proxima_tensor::{BoundOpKind, NumericPolicy};
 
 const ATTENTION_TILE_ITEMS: u64 = 32;
 
 const ATTENTION_TILE_MIN_ROWS: u64 = 16;
 
 const ATTENTION_TILE_HEAD_DIM: u64 = 128;
+
+pub(crate) fn cached_attention_uses_mma(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
+    numeric_policy.activation_quantization && cached_attention_tile_rows(kind).is_some()
+}
 
 pub(crate) fn cached_attention_tile_rows(kind: &BoundOpKind) -> Option<u64> {
     let BoundOpKind::CachedAttention {

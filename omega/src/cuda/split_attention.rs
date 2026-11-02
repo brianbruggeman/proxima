@@ -72,6 +72,7 @@ pub(super) fn render_combine(
         entry,
         ",\n    const float* __restrict__ partials",
         &tail,
+        "",
     )
 }
 
@@ -82,7 +83,7 @@ pub(super) fn split_pass(
 ) -> Result<CudaKernel, EmitError> {
     let split_entry = format!("{entry}_split");
     let tail = format!("    constexpr long chunks = {chunks}L;\n{SPLIT_BODY}");
-    let source = render_attention(resolved, &split_entry, "", &tail)?;
+    let source = render_attention(resolved, &split_entry, "", &tail, "")?;
     let scratch = split_scratch_node(resolved.node);
     let bindings: Vec<Binding> = dispatch_bindings(resolved)
         .into_iter()

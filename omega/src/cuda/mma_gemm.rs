@@ -182,12 +182,15 @@ pub(super) fn mma_gemm_threads(resolved: &BoundOp, plan: &MmaGemm) -> u64 {
     feature_tiles * token_tiles * GEMM_THREADS
 }
 
-pub(super) const MMA_GEMM_HELPERS: &str = r#"
+pub(crate) const MMA_INSTRUCTION: &str = r#"
 __device__ __forceinline__ void mma_m16n8k8(float *c, unsigned int a0, unsigned int a1, unsigned int b0) {
     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};"
         : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
         : "r"(a0), "r"(a1), "r"(b0));
 }
+"#;
+
+pub(super) const MMA_GEMM_HELPERS: &str = r#"
 __device__ __forceinline__ float mma_half_scale(const unsigned char *bytes) {
     return __half2float(__ushort_as_half((unsigned short)((unsigned int)bytes[0] | ((unsigned int)bytes[1] << 8))));
 }
