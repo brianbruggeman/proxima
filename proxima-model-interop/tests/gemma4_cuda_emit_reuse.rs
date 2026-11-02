@@ -7,7 +7,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use omega::msl::Codec;
-use omega::{CudaKernel, PackedOperands, emit_cuda_reusing, emit_cuda_with_policy};
+use omega::{CudaKernel, EmitDevice, PackedOperands, emit_cuda_reusing, emit_cuda_with_policy};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
@@ -150,6 +150,7 @@ fn reused_cuda_source_equals_a_fresh_emit_for_every_op_across_kv_lengths() {
         &after,
         &packed,
         NumericPolicy::default(),
+        EmitDevice::default(),
     )
     .expect("the reuse path emits the decode program");
 
@@ -188,6 +189,7 @@ fn ops_reading_packed_operands_re_emit_when_their_extents_change() {
         &after,
         &packed,
         NumericPolicy::default(),
+        EmitDevice::default(),
     )
     .expect("the reuse path emits the decode program");
 
@@ -205,7 +207,7 @@ fn nothing_is_reused_when_the_previous_binding_is_empty() {
     let after = bound_at(&program, logits, 7);
 
     let (kernels, reused_count) =
-        emit_cuda_reusing(&[], Vec::new(), &after, &packed, NumericPolicy::default())
+        emit_cuda_reusing(&[], Vec::new(), &after, &packed, NumericPolicy::default(), EmitDevice::default())
             .expect("a cold emit succeeds");
 
     assert_eq!(reused_count, 0);

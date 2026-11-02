@@ -222,22 +222,38 @@ pub fn emit_cuda(
     emit_cuda_with_policy(resolved, packed_operands, NumericPolicy::default())
 }
 
+/// Device facts that shape emitted launch grids; the default is an unknown device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EmitDevice {
+    pub multiprocessors: u32,
+}
+
 pub fn emit_cuda_with_policy(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
 ) -> Result<CudaKernel, EmitError> {
+    emit_cuda_on_device(resolved, packed_operands, numeric_policy, EmitDevice::default())
+}
+
+/// Emits for a known device: launch grids are shaped to its multiprocessor count.
+pub fn emit_cuda_on_device(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
     let entry = match cuda_cached_attention_class(&resolved.kind) {
         Some(class) => cached_attention_entry_name(resolved, class)?,
-        None => entry_name(resolved, packed_operands, &quantized, numeric_policy),
+        None => entry_name(resolved, packed_operands, &quantized, numeric_policy, device),
     };
     let source = match &resolved.kind {
         BoundOpKind::Elementwise { .. } => render_elementwise(resolved, &entry, &quantized)?,
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
-        } => render_reduce(resolved, &entry, &quantized, numeric_policy)?,
+        } => render_reduce(resolved, &entry, &quantized, numeric_policy, device)?,
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => render_scan(resolved, &entry, &quantized)?,
@@ -282,8 +298,8 @@ pub fn emit_cuda_with_policy(
             });
         }
     };
-    let (grid, extra_outputs) = extent_fields(resolved, &quantized, numeric_policy)?;
-    let prologue = match staged_matvec_plan(resolved, &quantized, numeric_policy) {
+    let (grid, extra_outputs) = extent_fields(resolved, &quantized, numeric_policy, device)?;
+    let prologue = match staged_matvec_plan(resolved, &quantized, numeric_policy, device) {
         Some(plan) if plan.scratch => vec![staged_prepass(resolved, &plan, &entry, &source)?],
         _ => Vec::new(),
     };
@@ -304,12 +320,13 @@ fn extent_fields(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+    device: EmitDevice,
 ) -> Result<(CudaGridSpec, Vec<(NodeId, usize)>), EmitError> {
     let cooperative = reduce_is_cooperative(resolved, quantized, numeric_policy);
     let row_tile = row_tile_axis(resolved, quantized, numeric_policy);
     let gemm = mma_gemm_plan(resolved, quantized, numeric_policy);
     let reduce_width = cooperative_width(resolved, quantized);
-    let staged = staged_matvec_plan(resolved, quantized, numeric_policy);
+    let staged = staged_matvec_plan(resolved, quantized, numeric_policy, device);
     let grid = match gemm {
         _ if staged.is_some() => CudaGridSpec {
             threads: staged.as_ref().map_or(0, |plan| staged_matvec_threads(resolved, plan)),
@@ -439,6 +456,7 @@ pub fn emit_cuda_reusing(
     resolved: &[BoundOp],
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    device: EmitDevice,
 ) -> Result<(Vec<CudaKernel>, usize), (NodeId, EmitError)> {
     let mut previous: BTreeMap<NodeId, (&BoundOp, Option<CudaKernel>)> = previous_bound
         .iter()
@@ -455,10 +473,10 @@ pub fn emit_cuda_reusing(
         kernels.push(match unchanged {
             Some(kernel) => {
                 reused += 1;
-                refit_extent_fields(kernel, bound, packed_operands, numeric_policy)
+                refit_extent_fields(kernel, bound, packed_operands, numeric_policy, device)
                     .map_err(|error| (bound.node, error))?
             }
-            None => emit_cuda_with_policy(bound, packed_operands, numeric_policy)
+            None => emit_cuda_on_device(bound, packed_operands, numeric_policy, device)
                 .map_err(|error| (bound.node, error))?,
         });
     }
@@ -477,13 +495,14 @@ pub fn refit_kernel(
     kernel: &mut CudaKernel,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    device: EmitDevice,
 ) -> Result<bool, EmitError> {
     if !same_emitted_text(old, new, packed_operands) {
-        *kernel = emit_cuda_with_policy(new, packed_operands, numeric_policy)?;
+        *kernel = emit_cuda_on_device(new, packed_operands, numeric_policy, device)?;
         return Ok(false);
     }
     let quantized = operand_codecs(new, packed_operands);
-    let (grid, extra_outputs) = extent_fields(new, &quantized, numeric_policy)?;
+    let (grid, extra_outputs) = extent_fields(new, &quantized, numeric_policy, device)?;
     kernel.grid = grid;
     kernel.extra_outputs = extra_outputs;
     Ok(true)
@@ -586,9 +605,10 @@ fn refit_extent_fields(
     bound: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    device: EmitDevice,
 ) -> Result<CudaKernel, EmitError> {
     let quantized = operand_codecs(bound, packed_operands);
-    let (grid, extra_outputs) = extent_fields(bound, &quantized, numeric_policy)?;
+    let (grid, extra_outputs) = extent_fields(bound, &quantized, numeric_policy, device)?;
     kernel.grid = grid;
     kernel.extra_outputs = extra_outputs;
     Ok(kernel)
@@ -1388,6 +1408,7 @@ fn entry_name(
     packed_operands: &PackedOperands,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+    device: EmitDevice,
 ) -> String {
     let identity = crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Cuda,
@@ -1408,7 +1429,7 @@ fn entry_name(
     } else {
         ""
     };
-    let revision = if let Some(plan) = staged_matvec_plan(resolved, quantized, numeric_policy) {
+    let revision = if let Some(plan) = staged_matvec_plan(resolved, quantized, numeric_policy, device) {
         let global = if plan.scratch { "g" } else { "" };
         format!("_smv{}x{}{global}_gid64c9", staged_matvec::STAGED_WARPS, plan.rows)
     } else if let Some(plan) = mma_gemm_plan(resolved, quantized, numeric_policy) {
@@ -3328,6 +3349,7 @@ fn render_reduce(
     entry: &str,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+    device: EmitDevice,
 ) -> Result<String, EmitError> {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -3364,7 +3386,7 @@ fn render_reduce(
     let epilogue_operand_count = epilogue_operands.len();
 
     let gemm = mma_gemm_plan(resolved, quantized, numeric_policy);
-    let staged = staged_matvec_plan(resolved, quantized, numeric_policy);
+    let staged = staged_matvec_plan(resolved, quantized, numeric_policy, device);
     let mut source = String::new();
     preamble(&mut source, element_type);
     if gemm.is_some() {
@@ -4430,6 +4452,7 @@ mod tests {
                 core::slice::from_ref(&resolved),
                 &no_packed(),
                 NumericPolicy::default(),
+                EmitDevice::default(),
             )
             .expect("reuse succeeds");
             let fresh = emit_cuda(&resolved, &no_packed()).expect("emit succeeds");
@@ -4449,6 +4472,7 @@ mod tests {
             core::slice::from_ref(&resolved),
             &no_packed(),
             NumericPolicy::default(),
+            EmitDevice::default(),
         )
         .expect("reuse succeeds");
         let fresh = emit_cuda(&resolved, &no_packed()).expect("emit succeeds");
@@ -4709,12 +4733,13 @@ mod tests {
         let (bound, weight) = q4_0_matvec_op(8, 64, true);
         let packed = q4_0_packed(weight);
         let quantized = operand_codecs(&bound, &packed);
-        let flag_off = entry_name(&bound, &packed, &quantized, NumericPolicy::default());
+        let flag_off = entry_name(&bound, &packed, &quantized, NumericPolicy::default(), EmitDevice::default());
         let flag_on = entry_name(
             &bound,
             &packed,
             &quantized,
             NumericPolicy::default().with_activation_quantization(true),
+            EmitDevice::default(),
         );
 
         assert_eq!(
@@ -5275,7 +5300,7 @@ mod tests {
     #[test]
     fn render_reduce_rejects_an_elementwise_bound_op() {
         let bound = elementwise_tanh_op(8);
-        let error = render_reduce(&bound, "entry", &[None], NumericPolicy::bit_exact())
+        let error = render_reduce(&bound, "entry", &[None], NumericPolicy::bit_exact(), EmitDevice::default())
             .expect_err("an elementwise chain is not a Reduce fold");
         assert!(matches!(
             error,
@@ -5304,7 +5329,7 @@ mod tests {
         };
         epilogue_broadcast_axes.push(1);
 
-        let source = render_reduce(&bound, "entry", &[None], NumericPolicy::llama_relaxed())
+        let source = render_reduce(&bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default())
             .expect("broadcast emits");
         assert!(source.contains("broadcast_out_strides[2]"));
         assert!(source.contains("broadcast_full_coord[1]"));
@@ -5532,8 +5557,8 @@ mod tests {
         let packed = no_packed();
         let policy = NumericPolicy::default();
         assert_ne!(
-            entry_name(&fused, &packed, &[], policy),
-            entry_name(&bare, &packed, &[], policy),
+            entry_name(&fused, &packed, &[], policy, EmitDevice::default()),
+            entry_name(&bare, &packed, &[], policy, EmitDevice::default()),
             "a fused epilogue must never collide with the bare reduce's cache key \
              (crate::wgpu_driver::pipeline_for's own caching-by-name hazard)"
         );

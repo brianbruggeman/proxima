@@ -28,7 +28,7 @@ use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 use proxima_primitives::sync::blocking::Mutex;
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
-use crate::cuda::{CudaGridSpec, CudaKernel, cuda_cached_attention_class};
+use crate::cuda::{CudaGridSpec, CudaKernel, EmitDevice, cuda_cached_attention_class};
 use crate::cuda_kernel_cache::{
     CacheKey, decode_binary_entry, decode_entry, encode_binary_entry, encode_entry, header_digest,
 };
@@ -203,7 +203,7 @@ enum Completion<'fault> {
 #[derive(Debug, Clone)]
 pub struct CudaDriver {
     context: Arc<CudaContext>,
-    multiprocessors: u32,
+    device: EmitDevice,
     stream: Arc<CudaStream>,
     // synchronous ffi callers share these short cache mutations; compilation and dispatch happen outside the guard.
     modules: Arc<Mutex<BTreeMap<String, Vec<CachedCudaModule>>>>,
@@ -542,14 +542,14 @@ impl CudaDriver {
             ));
         }
         let context = CudaContext::new(ordinal)?;
-        let multiprocessors = multiprocessor_count(&context)?;
+        let device = EmitDevice { multiprocessors: multiprocessor_count(&context)? };
         // every launch runs on this one default stream, so per-buffer read/write events order nothing and cost two cuEventCreate per buffer
         unsafe { context.disable_event_tracking() };
         let stream = context.default_stream();
         Ok(Self {
             context,
             stream,
-            multiprocessors,
+            device,
             modules: Arc::new(Mutex::new(BTreeMap::new())),
             resident_buffers: Arc::new(Mutex::new(BTreeMap::new())),
             compile_counters: Arc::new(CompileCounters::new(kernel_disk_store())),
@@ -951,7 +951,6 @@ impl CudaDriver {
             exact_activations,
             config,
         } = policy;
-        let numeric_policy = numeric_policy.with_device_multiprocessors(self.multiprocessors);
         let blocks = resolve_named_blocks(program, named).map_err(|_| {
             CudaDriverError::UnsupportedGraph {
                 node: NodeId(0),
@@ -1007,6 +1006,7 @@ impl CudaDriver {
             outputs,
             &packed_operands,
             numeric_policy,
+            self.device,
             unfused,
             None,
         )?;
@@ -1651,6 +1651,7 @@ fn bind_and_emit(
     outputs: &[NodeId],
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    device: EmitDevice,
     unfused: bool,
     prior: Option<PriorKernels<'_>>,
 ) -> Result<LoweredOps, CudaDriverError> {
@@ -1678,7 +1679,7 @@ fn bind_and_emit(
         ..LowerMicros::default()
     };
     let (kernels, uniforms) =
-        emit_and_pack(&resolved, prior, packed_operands, numeric_policy, &mut micros)?;
+        emit_and_pack(&resolved, prior, packed_operands, numeric_policy, device, &mut micros)?;
     Ok((resolved, kernels, uniforms, micros))
 }
 
@@ -1697,6 +1698,7 @@ fn emit_and_pack(
     prior: Option<PriorKernels<'_>>,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    device: EmitDevice,
     micros: &mut LowerMicros,
 ) -> Result<(Vec<CudaKernel>, Vec<Vec<u8>>), CudaDriverError> {
     let emit_started = Instant::now();
@@ -1708,6 +1710,7 @@ fn emit_and_pack(
         resolved,
         packed_operands,
         numeric_policy,
+        device,
     )
     .map_err(|(node, error)| CudaDriverError::Emit {
         node,
@@ -2051,7 +2054,6 @@ impl CudaPlan {
         symbols: &[u64],
         numeric_policy: NumericPolicy,
     ) -> Result<bool, CudaDriverError> {
-        let numeric_policy = numeric_policy.with_device_multiprocessors(self.driver.multiprocessors);
         if self.constraints.is_some() {
             return Ok(false);
         }
@@ -2117,6 +2119,7 @@ impl CudaPlan {
                     Some(prior),
                     &self.packed_operands,
                     numeric_policy,
+                    self.driver.device,
                     &mut micros,
                 )?;
                 ("refresh", touched, "none", resolved, kernels, uniforms, micros)
@@ -2132,6 +2135,7 @@ impl CudaPlan {
                     &self.outputs,
                     &self.packed_operands,
                     numeric_policy,
+                    self.driver.device,
                     false,
                     prior,
                 )?;
@@ -2199,6 +2203,7 @@ impl CudaPlan {
                 &mut self.kernels[position],
                 &self.packed_operands,
                 numeric_policy,
+                self.driver.device,
             )
             .map_err(|error| CudaDriverError::Emit {
                 node: previous.node,

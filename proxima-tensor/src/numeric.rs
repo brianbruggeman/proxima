@@ -90,11 +90,6 @@ pub struct NumericPolicy {
     #[cfg_attr(feature = "config", setting(default = false))]
     #[cfg_attr(feature = "config", serde(default))]
     pub bf16_input_rounding: bool,
-    /// Multiprocessors on the target device, 0 when unknown. Not a permission: it shapes
-    /// launch grids so a small output still fills several waves of the device.
-    #[cfg_attr(feature = "config", setting(default = 0))]
-    #[cfg_attr(feature = "config", serde(default))]
-    pub device_multiprocessors: u32,
 }
 
 impl NumericPolicy {
@@ -110,7 +105,6 @@ impl NumericPolicy {
             epilogue_sources: false,
             activation_quantization: false,
             bf16_input_rounding: false,
-            device_multiprocessors: 0,
         }
     }
 
@@ -131,7 +125,6 @@ impl NumericPolicy {
             epilogue_sources: false,
             activation_quantization: false,
             bf16_input_rounding: false,
-            device_multiprocessors: 0,
         }
     }
 
@@ -148,7 +141,6 @@ impl NumericPolicy {
             epilogue_sources: false,
             activation_quantization: false,
             bf16_input_rounding: false,
-            device_multiprocessors: 0,
         }
     }
 
@@ -212,12 +204,6 @@ impl NumericPolicy {
     #[must_use]
     pub const fn with_activation_quantization(mut self, activation_quantization: bool) -> Self {
         self.activation_quantization = activation_quantization;
-        self
-    }
-
-    #[must_use]
-    pub const fn with_device_multiprocessors(mut self, device_multiprocessors: u32) -> Self {
-        self.device_multiprocessors = device_multiprocessors;
         self
     }
 

@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use omega::{emit_cuda_reusing, emit_cuda_with_policy};
+use omega::{EmitDevice, emit_cuda_reusing, emit_cuda_with_policy};
 use proxima_tensor::spec::qk_norm_cached_forward_program;
 use proxima_tensor::{BoundOp, NodeId, NumericPolicy, bind_with_fusion, infer, prune_dead};
 
@@ -48,7 +48,7 @@ fn reused_kernels_equal_fresh_emit_for_every_op_of_a_real_decode_program() {
         .map(|bound| emit_cuda_with_policy(bound, &packed, policy).expect("previous op emits"))
         .collect::<Vec<_>>();
     let (kernels, reused) =
-        emit_cuda_reusing(&previous, previous_kernels, &resolved, &packed, policy)
+        emit_cuda_reusing(&previous, previous_kernels, &resolved, &packed, policy, EmitDevice::default())
             .expect("reuse succeeds");
     assert!(!resolved.is_empty(), "the decode program has ops");
     assert!(

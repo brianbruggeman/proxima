@@ -6,6 +6,7 @@ use proxima_tensor::{BoundOp, BoundOpKind, DType, Keep, Layout, NodeId, NumericP
 
 use super::block_dot::{BlockDot, DOT_ELEMENTS, block_dot_i8};
 use super::{
+    EmitDevice,
     Codec, CudaGridSpec, CudaKernel, EmitError, WARP_SIZE, flat_packed_rows, gather_count, push_reduce_epilogue_write,
     reduction_dims,
 };
@@ -87,6 +88,7 @@ pub(super) fn staged_matvec_plan(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+    device: EmitDevice,
 ) -> Option<StagedMatvec> {
     if !numeric_policy.activation_quantization || resolved.dtype != DType::FLOAT32 {
         return None;
@@ -147,7 +149,7 @@ pub(super) fn staged_matvec_plan(
         reduce_extents,
         reduction,
         scratch: reduction + reduction / DOT_ELEMENTS as u64 * 4 > SMEM_STAGE_LIMIT_BYTES,
-        rows: shaped_rows(dot.rows_per_warp, output_total, numeric_policy.device_multiprocessors),
+        rows: shaped_rows(dot.rows_per_warp, output_total, device.multiprocessors),
         dot,
     })
 }
