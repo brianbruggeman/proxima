@@ -360,10 +360,11 @@ fn recurrent_mainline_production_decode_literal() {
 #[cfg(feature = "proxima-storage")]
 mod served_weights {
     use core::ops::ControlFlow;
+    use core::sync::atomic::{AtomicBool, Ordering};
     use core::time::Duration;
 
     use super::{LoadedModel, ServingConfig, tiny_ouro_gguf};
-    use crate::mapped_residency::WEIGHTS_REGION;
+    use crate::mapped_residency::{MappedResidency, WEIGHTS_REGION};
     use crate::memory_reclaim::{ReclaimSettings, monotonic_now};
     use crate::serving_settings::ServingSettings;
     use crate::source::CheckpointMapping;
@@ -449,6 +450,63 @@ mod served_weights {
         assert_eq!(residency.pins(WEIGHTS_REGION), 1);
         drop(pinned);
         assert_eq!(residency.pins(WEIGHTS_REGION), 0);
+    }
+
+    fn pins_observed_during(
+        residency: &MappedResidency<'_>,
+        forward: impl Fn() -> Result<(), crate::InteropError>,
+    ) {
+        let observed = AtomicBool::new(false);
+        let finished = AtomicBool::new(false);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !finished.load(Ordering::Acquire) {
+                    if residency.pins(WEIGHTS_REGION) > 0 {
+                        observed.store(true, Ordering::Release);
+                    }
+                    std::thread::yield_now();
+                }
+            });
+            (0..100_000)
+                .take_while(|_| !observed.load(Ordering::Acquire))
+                .for_each(|_| forward().expect("forward on the tiny recurrent checkpoint"));
+            finished.store(true, Ordering::Release);
+        });
+        assert!(
+            observed.load(Ordering::Acquire),
+            "a sampler saw the weights pinned during a forward call"
+        );
+        assert_eq!(residency.pins(WEIGHTS_REGION), 0);
+    }
+
+    #[test]
+    fn forward_node_values_from_ids_pins_while_it_runs() {
+        let directory = tempfile::tempdir().expect("checkpoint directory");
+        let source = tracked_model(directory.path());
+        let model = source
+            .load_serving(&ServingSettings::builder().build())
+            .expect("load through serving settings");
+        let residency = model.residency.as_ref().expect("weights are tracked");
+
+        pins_observed_during(residency, || {
+            model
+                .forward_node_values_from_ids(&[0, 1], &[], &ServingConfig::default())
+                .map(|_| ())
+        });
+    }
+
+    #[test]
+    fn forward_logits_on_backend_pins_while_it_runs() {
+        let directory = tempfile::tempdir().expect("checkpoint directory");
+        let source = tracked_model(directory.path());
+        let model = source
+            .load_serving(&ServingSettings::builder().build())
+            .expect("load through serving settings");
+        let residency = model.residency.as_ref().expect("weights are tracked");
+
+        pins_observed_during(residency, || {
+            model.forward_logits_on_backend("ab", 0).map(|_| ())
+        });
     }
 
     #[test]
