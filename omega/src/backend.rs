@@ -77,7 +77,7 @@ use proxima_tensor::cpu::ExpertSource;
 use proxima_tensor::{Evaluated, NodeId, NumericPolicy, Op, QuantizedBlock, TensorError};
 
 #[cfg(feature = "cpu")]
-use crate::msl::Codec;
+use crate::lowering::Codec;
 #[cfg(feature = "cpu")]
 use proxima_tensor::config::TensorExecutionConfig;
 #[cfg(feature = "cpu")]
@@ -398,7 +398,7 @@ pub enum Plan {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     Metal(MetalPlanHandle),
     #[cfg(feature = "wgpu-backend")]
-    Wgpu(wgpu_driver::WgpuPlan),
+    Wgpu(Box<wgpu_driver::WgpuPlan>),
     #[cfg(feature = "cuda-driver")]
     Cuda(Box<crate::cuda_driver::CudaPlan>),
 }
@@ -782,10 +782,10 @@ fn plan_configured_gpu(
         GpuDriver::Wgpu => {
             #[cfg(feature = "wgpu-backend")]
             {
-                Ok(Plan::Wgpu(
+                Ok(Plan::Wgpu(Box::new(
                     wgpu_driver::plan_named_with_config(config, program, symbols, named, outputs)
                         .map_err(map_wgpu_configuration_error)?,
-                ))
+                )))
             }
             #[cfg(not(feature = "wgpu-backend"))]
             {
@@ -1814,7 +1814,7 @@ fn plan_named_wgpu(
 ) -> Result<Plan, BackendError> {
     let plan =
         wgpu_driver::plan_named_with_policy(program, symbols, named, outputs, numeric_policy)?;
-    Ok(Plan::Wgpu(plan))
+    Ok(Plan::Wgpu(Box::new(plan)))
 }
 
 #[cfg(feature = "wgpu-backend")]

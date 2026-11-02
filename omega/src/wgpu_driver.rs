@@ -52,7 +52,7 @@ use proxima_tensor::{
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::error::EmitError;
-use crate::msl::{Binding, Codec, PackedOperands, gather_count};
+use crate::lowering::{Binding, Codec, PackedOperands, gather_count, reduction_dims};
 use crate::wgsl::{WgslCaps, WgslKernel, emit_wgsl_with_policy};
 
 /// How many adapter/device/queue triples [`acquire_device`] built — one per
@@ -480,6 +480,14 @@ fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
             codec: Codec::Fp6E3M2,
             bytes: _,
         } => "fp6_e3m2",
+        QuantizedBlock::Packed {
+            codec: Codec::Pq2_0,
+            bytes: _,
+        } => "pq2_0",
+        QuantizedBlock::Packed {
+            codec: Codec::Ptq1_0,
+            bytes: _,
+        } => "ptq1_0",
     }
 }
 
@@ -1007,12 +1015,6 @@ fn push_i32_row(bytes: &mut Vec<u8>, values: &[i64], width: usize) {
     for slot in 0..width {
         push_i32(bytes, values.get(slot).copied().unwrap_or(0) as i32);
     }
-}
-
-fn reduction_dims(bound: &BoundOp, output_axes: &[u16]) -> Vec<u16> {
-    (0..bound.extents.len() as u16)
-        .filter(|dim| !output_axes.contains(dim))
-        .collect()
 }
 
 /// Appends the four gather arrays [`crate::wgsl`]'s `push_gather_uniform_fields`
