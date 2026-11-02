@@ -4063,6 +4063,26 @@ fn attention_oracle(
     out
 }
 
+fn attention_uniform_bytes(op: &proxima_tensor::BoundOp) -> Vec<u8> {
+    let proxima_tensor::BoundOpKind::CachedAttention {
+        query_rows,
+        kv_heads,
+        query_groups,
+        new_key_rows,
+        new_upper_inclusive,
+        cached_lower_inclusive,
+        ..
+    } = &op.kind
+    else {
+        panic!("attention_uniform_bytes takes a CachedAttention op");
+    };
+    let mut words = vec![(query_rows * kv_heads * query_groups) as i64];
+    if *query_rows > 1 {
+        words.extend([*new_key_rows as i64, *new_upper_inclusive, *cached_lower_inclusive]);
+    }
+    words.iter().flat_map(|word| word.to_ne_bytes()).collect()
+}
+
 fn causal_attention_kind(rows: u64, heads: u64, groups: u64, head_dim: u64) -> proxima_tensor::BoundOpKind {
     proxima_tensor::BoundOpKind::CachedAttention {
         operands: (0..8)
@@ -4093,6 +4113,10 @@ fn causal_attention_kind(rows: u64, heads: u64, groups: u64, head_dim: u64) -> p
 #[case::tiled_ragged_37_rows_8q_2kv(37, 2, 4)]
 #[case::untiled_15_rows_16q_8kv(15, 8, 2)]
 #[case::untiled_single_row_decode(1, 8, 2)]
+#[case::untiled_tail_2(2, 8, 2)]
+#[case::tiled_tail_17(17, 8, 2)]
+#[case::tiled_tail_277(277, 8, 2)]
+#[case::tiled_tail_511(511, 8, 2)]
 async fn cuda_cached_attention_matches_f64_oracle_with_causal_mask(
     #[case] rows: usize,
     #[case] heads: usize,
@@ -4124,9 +4148,8 @@ async fn cuda_cached_attention_matches_f64_oracle_with_causal_mask(
     for (index, values) in order.iter().enumerate() {
         driver.upload_f32(&mut arena, NodeId(index as u32), values).expect("input uploads");
     }
-    let vectors = (rows * query_heads) as i64;
     driver
-        .launch_f32_persistent_sized(&mut arena, &kernel, &vectors.to_ne_bytes(), rows * query_heads * head_dim)
+        .launch_f32_persistent_sized(&mut arena, &kernel, &attention_uniform_bytes(&op), rows * query_heads * head_dim)
         .expect("attention launches");
     let actual = driver.read_f32(&arena, NodeId(8)).expect("output reads back");
 
@@ -4465,9 +4488,8 @@ fn run_prefill_attention(
     for (index, values) in order.iter().enumerate() {
         driver.upload_f32(&mut arena, NodeId(index as u32), values).expect("input uploads");
     }
-    let vectors = (rows * query_heads) as i64;
     driver
-        .launch_f32_persistent_sized(&mut arena, &kernel, &vectors.to_ne_bytes(), rows * query_heads * head_dim)
+        .launch_f32_persistent_sized(&mut arena, &kernel, &attention_uniform_bytes(&op), rows * query_heads * head_dim)
         .expect("attention launches");
     let actual = driver.read_f32(&arena, NodeId(30)).expect("output reads back");
     (actual, kernel.entry.clone(), kernel.source.clone())
@@ -4505,6 +4527,9 @@ fn peak_relative_diff(actual: &[f32], expected: &[f64]) -> f64 {
 #[case::partial_rotary_128_of_64_cached_0(0, 37, 2, 2, 128, 64)]
 #[case::partial_rotary_128_of_64_cached_300(300, 37, 2, 2, 128, 64)]
 #[case::partial_rotary_256_of_64_cached_300(300, 37, 2, 2, 256, 64)]
+#[case::tail_17_cached_300(300, 17, 2, 2, 128, 128)]
+#[case::tail_277_cached_300(300, 277, 2, 2, 128, 128)]
+#[case::tail_511_cached_300(300, 511, 2, 2, 128, 128)]
 async fn mma_prefill_attention_matches_the_fp16_rounded_f64_oracle_on_cuda(
     #[case] cached: usize,
     #[case] rows: usize,
