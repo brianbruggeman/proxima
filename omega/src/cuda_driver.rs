@@ -2317,7 +2317,18 @@ impl CudaPlan {
         let apply_us = elapsed_micros(apply_started);
         let mut follow = FollowMicros::default();
         for (position, bound) in next.iter().enumerate() {
+            let op_started = Instant::now();
             self.follow_rows(position, bound, numeric_policy, &mut follow)?;
+            let op_us = elapsed_micros(op_started);
+            if op_us >= 50 {
+                proxima_telemetry::debug!(
+                    position = position as u64,
+                    kind = bound.kind.name(),
+                    op_us = op_us,
+                    prologue = self.kernels[position].prologue.len() as u64,
+                    "cuda repack slow op"
+                );
+            }
         }
         let pool_started = Instant::now();
         self.pool.relength(&next);
@@ -2381,6 +2392,16 @@ impl CudaPlan {
             .as_ref()
             .filter(|(base, varying, _)| varying.first() != Some(&true) || rows >= ROW_CLASS_MIN || base.first() == Some(&rows))
             .and_then(|template| apply_symbols_template(template, symbols));
+        if moved.is_none() {
+            let template = (*self.shapes_template).as_ref();
+            proxima_telemetry::debug!(
+                has_template = template.is_some(),
+                base = ?template.map(|(base, _, _)| base.clone()),
+                varying = ?template.map(|(_, varying, _)| varying.clone()),
+                symbols = ?symbols,
+                "cuda shapes template did not apply"
+            );
+        }
         match moved {
             Some(shapes) => Ok(shapes),
             None => infer(&self.program, symbols).map_err(|_| CudaDriverError::UnsupportedGraph {
@@ -3846,8 +3867,10 @@ mod tests {
     use crate::cuda_ptx_store::PtxStore;
     use crate::lowering::Codec;
     use cudarc::nvrtc::{CompileOptions, Ptx};
+    use super::PoolSchedule;
     use proxima_tensor::{
-        BoundOp, BoundOpKind, DType, NodeId, QuantizedBlock,
+        BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
+        ReduceInit, ScalarOp, append, bind_with_fusion, infer, map,
     };
 
     const KERNEL_CACHE_DIR_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
@@ -4245,5 +4268,61 @@ mod tests {
                 assert!(message.contains("/nonexistent/cuda/include"), "{message}");
             },
         );
+    }
+
+    type RelengthFixture = (Vec<BoundOp>, Vec<crate::cuda::CudaKernel>, Vec<NodeId>);
+
+    fn relength_fixture(rows: u64) -> Result<RelengthFixture, String> {
+        let mut program = Vec::new();
+        let input = |shape: Vec<Extent>| Op::Input { dtype: DType::FLOAT32, shape, name: None };
+        let lhs = append(&mut program, input(vec![Extent::Symbolic(0), Extent::Static(8)]));
+        let rhs = append(&mut program, input(vec![Extent::Static(8), Extent::Static(4)]));
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                    (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
+                ],
+                name: None,
+            },
+        );
+        let sum = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let shapes = infer(&program, &[rows]).map_err(|error| format!("infer: {error:?}"))?;
+        let bound = bind_with_fusion(&program, &shapes, &[sum], true, NumericPolicy::bit_exact())
+            .map_err(|error| format!("bind: {error:?}"))?;
+        let kernels = bound
+            .iter()
+            .map(|op| crate::cuda::emit_cuda(op, &Default::default()).map_err(|error| format!("emit: {error:?}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok((bound, kernels, vec![sum]))
+    }
+
+    #[test]
+    fn relength_gives_the_schedule_a_rebuild_at_the_new_rows_would() -> Result<(), String> {
+        let (small, kernels, outputs) = relength_fixture(16)?;
+        let (large, _, _) = relength_fixture(64)?;
+        let mut moved = PoolSchedule::build(&small, &kernels, &outputs);
+
+        moved.relength(&large);
+
+        let rebuilt = PoolSchedule::build(&large, &kernels, &outputs);
+        assert_eq!(moved.peak, rebuilt.peak);
+        assert_eq!(format!("{:?}", moved.plan), format!("{:?}", rebuilt.plan));
+        Ok(())
     }
 }

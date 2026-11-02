@@ -4725,3 +4725,35 @@ fn policy_on_q2_0_prefill_matches_the_fp16_rounded_f64_oracle_on_cuda() {
     use proxima_gguf::quant::q2_0::{BLOCK_BYTES, QK_Q2_0, dequantize, quantize};
     assert_policy_prefill_parity("q2_0", Codec::Q2_0, BLOCK_BYTES, QK_Q2_0, quantize, dequantize);
 }
+
+#[proxima::test]
+#[case::rows_and_kv_both_move(&[4, 5], &[9, 12])]
+#[case::kv_alone_moves(&[4, 5], &[4, 11])]
+#[case::kv_shrinks(&[9, 12], &[6, 3])]
+async fn a_plan_refit_across_every_symbol_matches_a_plan_built_there(#[case] built: &[u64], #[case] moved: &[u64]) {
+    let program = appended_rows_program_with(Extent::Symbolic(1));
+    let policy = NumericPolicy::default();
+    let inputs_at = |symbols: &[u64]| {
+        let cache = padded_cache(&appended_row_block(0, symbols[0] as usize), symbols[0] as usize);
+        let row = appended_row_block(symbols[0] as usize, symbols[1] as usize);
+        (cache, row)
+    };
+    let run = |plan: &mut Plan, symbols: &[u64]| {
+        let (cache, row) = inputs_at(symbols);
+        let named: Vec<(&str, QuantizedBlock<'_>)> =
+            vec![("cache", QuantizedBlock::Float32(&cache)), ("row", QuantizedBlock::Float32(&row))];
+        let evaluated = execute_plan_named(plan, &named).expect("the plan executes");
+        let sum = evaluated.get(APPEND_COLUMN_SUM).expect("column sum").0.to_vec();
+        let rows = evaluated.get(APPENDED_ROWS).expect("appended rows").0.to_vec();
+        (sum, rows)
+    };
+    let (cache, row) = inputs_at(built);
+    let mut refit_plan = appended_rows_plan_with_symbols(&program, built, &cache, &row);
+    let refitted = omega::backend::refit_cuda_symbols(&mut refit_plan, moved, policy).expect("refit succeeds");
+    assert!(refitted, "the plan refits in place");
+
+    let (moved_cache, moved_row) = inputs_at(moved);
+    let mut fresh_plan = appended_rows_plan_with_symbols(&program, moved, &moved_cache, &moved_row);
+
+    assert_eq!(run(&mut refit_plan, moved), run(&mut fresh_plan, moved));
+}
