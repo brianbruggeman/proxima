@@ -348,13 +348,6 @@ pub enum InteropError {
     #[cfg(feature = "std")]
     #[error("a forward request must contain at least one token")]
     EmptyForwardTokens,
-
-    #[cfg(feature = "std")]
-    #[error(
-        "the {new_count}-row plan bound the padded KV range but reads it outside a fused cached attention"
-    )]
-    PaddedKvReadUnfused { new_count: usize },
-
     #[cfg(feature = "std")]
     #[error("forward token {token} at position {position} is outside vocabulary size {vocab}")]
     InvalidForwardToken {
