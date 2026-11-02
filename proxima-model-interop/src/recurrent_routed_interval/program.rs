@@ -22,8 +22,8 @@
 
 use proxima_tensor::spec::{
     CacheMask, CacheStrategy, ForwardProgram, ForwardRoots, KeySourceKind, LayerAttentionConfig,
-    LayerCacheRoots, LayerKind, LayerSchedule, LoopCdConfig, ModelDescriptor, MoeSites, RopeTableSel,
-    ValueSourceKind, build_forward,
+    LayerCacheRoots, LayerKind, LayerSchedule, LoopCdConfig, ModelDescriptor, MoeSites,
+    RopeTableSel, ValueSourceKind, build_forward,
 };
 use proxima_tensor::{Op, TensorError};
 

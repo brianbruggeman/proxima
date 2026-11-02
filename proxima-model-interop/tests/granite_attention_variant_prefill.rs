@@ -332,7 +332,11 @@ fn capture_attention_replay(
         "replay output span is incomplete"
     );
     assert!(
-        output.as_chunks::<4>().0.iter().any(|word| *word != [0x55; 4]),
+        output
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .any(|word| *word != [0x55; 4]),
         "replayed attention output contains only poison bytes"
     );
     CapturedReplay {
@@ -805,8 +809,7 @@ fn run_granite_viability_case(check: ViabilityCheck) {
         assert!(
             matched,
             "{} {arm} response failed the semantic check: expected={:?}, answer_check={answer_check:?}, relation_check={relation_check:?}, response={response:?}",
-            check.name,
-            check.expected_answer,
+            check.name, check.expected_answer,
         );
     }
     println!(
@@ -870,8 +873,9 @@ async fn card_23_legacy_dispatch_fails_selected_identity_control() {
             grid2d: None,
         },
     };
-    let error = assert_selected_dispatch_pair(std::slice::from_ref(&legacy), std::slice::from_ref(&legacy))
-        .expect_err("the control must reject identical legacy and selected identities");
+    let error =
+        assert_selected_dispatch_pair(std::slice::from_ref(&legacy), std::slice::from_ref(&legacy))
+            .expect_err("the control must reject identical legacy and selected identities");
     assert!(error.contains("kept legacy entry"));
 }
 
@@ -1168,9 +1172,13 @@ fn f32_output_difference(left: &[u8], right: &[u8]) -> Value {
     let mut max_absolute_difference = 0.0f32;
     let mut squared_difference_sum = 0.0f64;
     let mut non_finite_pairs = 0usize;
-    for (left_value, right_value) in left.as_chunks::<4>().0.iter().zip(right.as_chunks::<4>().0.iter()) {
-        let left_value =
-            f32::from_ne_bytes(*left_value);
+    for (left_value, right_value) in left
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(right.as_chunks::<4>().0.iter())
+    {
+        let left_value = f32::from_ne_bytes(*left_value);
         let right_value = f32::from_ne_bytes(*right_value);
         changed_bits += usize::from(left_value.to_bits() != right_value.to_bits());
         if left_value.is_finite() && right_value.is_finite() {

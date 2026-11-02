@@ -902,14 +902,15 @@ impl CudaGpuService<()> {
             while let Some(command) = owner_commands.recv_blocking() {
                 match command {
                     OwnerCommand::DeviceSnapshot { reply } => {
-                        let result = match driver.take().map_or_else(|| omega::CudaDriver::new(0), Ok) {
-                            Ok(created) => {
-                                let snapshot = created.device_snapshot();
-                                driver = Some(created);
-                                snapshot
-                            }
-                            Err(error) => Err(error),
-                        };
+                        let result =
+                            match driver.take().map_or_else(|| omega::CudaDriver::new(0), Ok) {
+                                Ok(created) => {
+                                    let snapshot = created.device_snapshot();
+                                    driver = Some(created);
+                                    snapshot
+                                }
+                                Err(error) => Err(error),
+                            };
                         let _ = reply.send(result);
                     }
                     OwnerCommand::RegisterGraph { graph, reply } => {
@@ -1095,8 +1096,10 @@ where
     pub fn register_cuda_plan(
         &self,
         plan: omega::CudaPlan,
-    ) -> Result<impl Future<Output = Result<CudaPlanLease, CudaPlanRegistryError>>, Box<omega::CudaPlan>>
-    {
+    ) -> Result<
+        impl Future<Output = Result<CudaPlanLease, CudaPlanRegistryError>>,
+        Box<omega::CudaPlan>,
+    > {
         let (reply, response) = oneshot::channel();
         let command = OwnerCommand::RegisterPlan { plan, reply };
         match self.commands.try_send(command) {

@@ -9,7 +9,11 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 
-const SCAN_ROOTS: &[&str] = &["proxima-model-interop/src", "proxima-tensor/src", "omega/src"];
+const SCAN_ROOTS: &[&str] = &[
+    "proxima-model-interop/src",
+    "proxima-tensor/src",
+    "omega/src",
+];
 
 const REGISTRY_FILES: &[&str] = &["src/profiles/mod.rs", "src/profiles/binding.rs"];
 
@@ -17,35 +21,151 @@ const EXTRA_NAMES: &[&str] = &["granitemoehybrid", "granite-embed-multi-311m"];
 
 // (file relative to the workspace root, quoted literal, why or remove-in tag)
 const ALLOWLIST: &[(&str, &str, &str)] = &[
-    ("proxima-model-interop/src/profiles/mod.rs", "gemma4", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "llama", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "mistral", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "mixtral", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "granitemoe", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "qwen2", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "qwen3", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "qwen3moe", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "qwen3_moe", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "qwen35", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "qwen35moe", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "lfm2", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "lfm2moe", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/mod.rs", "ouro", "boundary: FAMILY_PROFILES row"),
-    ("proxima-model-interop/src/profiles/binding.rs", "gemma4", "boundary: binding row (B3 may fold into mod.rs)"),
-    ("proxima-model-interop/src/profiles/binding.rs", "qwen35", "boundary: binding row (B3 may fold into mod.rs)"),
-    ("proxima-model-interop/src/profiles/binding.rs", "qwen35moe", "boundary: binding row (B3 may fold into mod.rs)"),
-    ("proxima-model-interop/src/profiles/binding.rs", "lfm2", "boundary: binding row (B3 may fold into mod.rs)"),
-    ("proxima-model-interop/src/profiles/binding.rs", "lfm2moe", "boundary: binding row (B3 may fold into mod.rs)"),
-    ("proxima-model-interop/src/profiles/binding.rs", "granitemoe", "boundary: binding row (B3 may fold into mod.rs)"),
-    ("proxima-model-interop/src/hf_config.rs", "lfm2", "remove-in: D1, D2"),
-    ("proxima-model-interop/src/hf_descriptor.rs", "ouro", "remove-in: D3"),
-    ("proxima-model-interop/src/cold_artifact.rs", "granitemoehybrid", "remove-in: B2"),
-    ("proxima-model-interop/src/draft_model_compatibility.rs", "llama", "remove-in: B1"),
-    ("proxima-model-interop/src/draft_model_compatibility.rs", "gemma4", "remove-in: B1"),
-    ("proxima-model-interop/src/draft_model_compatibility.rs", "lfm2", "remove-in: B1"),
-    ("proxima-model-interop/src/draft_model_compatibility.rs", "granite-embed-multi-311m", "remove-in: B1"),
-    ("proxima-model-interop/src/transform/mlx_config.rs", "granitemoe", "boundary: MLX FAMILIES rows"),
-    ("proxima-model-interop/src/transform/mlx_config.rs", "gemma4", "boundary: MLX FAMILIES rows; String::from at :356 removed in M1"),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "gemma4",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "llama",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "mistral",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "mixtral",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "granitemoe",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "qwen2",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "qwen3",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "qwen3moe",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "qwen3_moe",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "qwen35",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "qwen35moe",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "lfm2",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "lfm2moe",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
+        "ouro",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/binding.rs",
+        "gemma4",
+        "boundary: binding row (B3 may fold into mod.rs)",
+    ),
+    (
+        "proxima-model-interop/src/profiles/binding.rs",
+        "qwen35",
+        "boundary: binding row (B3 may fold into mod.rs)",
+    ),
+    (
+        "proxima-model-interop/src/profiles/binding.rs",
+        "qwen35moe",
+        "boundary: binding row (B3 may fold into mod.rs)",
+    ),
+    (
+        "proxima-model-interop/src/profiles/binding.rs",
+        "lfm2",
+        "boundary: binding row (B3 may fold into mod.rs)",
+    ),
+    (
+        "proxima-model-interop/src/profiles/binding.rs",
+        "lfm2moe",
+        "boundary: binding row (B3 may fold into mod.rs)",
+    ),
+    (
+        "proxima-model-interop/src/profiles/binding.rs",
+        "granitemoe",
+        "boundary: binding row (B3 may fold into mod.rs)",
+    ),
+    (
+        "proxima-model-interop/src/hf_config.rs",
+        "lfm2",
+        "remove-in: D1, D2",
+    ),
+    (
+        "proxima-model-interop/src/hf_descriptor.rs",
+        "ouro",
+        "remove-in: D3",
+    ),
+    (
+        "proxima-model-interop/src/cold_artifact.rs",
+        "granitemoehybrid",
+        "remove-in: B2",
+    ),
+    (
+        "proxima-model-interop/src/draft_model_compatibility.rs",
+        "llama",
+        "remove-in: B1",
+    ),
+    (
+        "proxima-model-interop/src/draft_model_compatibility.rs",
+        "gemma4",
+        "remove-in: B1",
+    ),
+    (
+        "proxima-model-interop/src/draft_model_compatibility.rs",
+        "lfm2",
+        "remove-in: B1",
+    ),
+    (
+        "proxima-model-interop/src/draft_model_compatibility.rs",
+        "granite-embed-multi-311m",
+        "remove-in: B1",
+    ),
+    (
+        "proxima-model-interop/src/transform/mlx_config.rs",
+        "granitemoe",
+        "boundary: MLX FAMILIES rows",
+    ),
+    (
+        "proxima-model-interop/src/transform/mlx_config.rs",
+        "gemma4",
+        "boundary: MLX FAMILIES rows; String::from at :356 removed in M1",
+    ),
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -111,7 +231,9 @@ fn is_test_cfg(attribute: &str) -> bool {
 
 fn item_head(trimmed: &str) -> &str {
     match trimmed.strip_prefix("pub") {
-        Some(rest) if rest.starts_with('(') => rest.split_once(") ").map_or(trimmed, |(_, head)| head),
+        Some(rest) if rest.starts_with('(') => {
+            rest.split_once(") ").map_or(trimmed, |(_, head)| head)
+        }
         Some(rest) if rest.starts_with(' ') => rest.trim_start(),
         _ => trimmed,
     }
@@ -169,13 +291,19 @@ fn logical_lines(text: &str) -> Vec<(usize, String)> {
 
 fn child_candidates(file: &Path, name: &str) -> [PathBuf; 2] {
     let parent = file.parent().unwrap_or(Path::new(""));
-    let stem = file.file_stem().and_then(|stem| stem.to_str()).unwrap_or_default();
+    let stem = file
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or_default();
     let dir = if matches!(stem, "mod" | "lib" | "main") {
         parent.to_path_buf()
     } else {
         parent.join(stem)
     };
-    [dir.join(format!("{name}.rs")), dir.join(name).join("mod.rs")]
+    [
+        dir.join(format!("{name}.rs")),
+        dir.join(name).join("mod.rs"),
+    ]
 }
 
 fn module_children(file: &Path, text: &str) -> Vec<(PathBuf, bool)> {
@@ -191,7 +319,11 @@ fn module_children(file: &Path, text: &str) -> Vec<(PathBuf, bool)> {
             continue;
         }
         if let Some(name) = file_mod_name(trimmed) {
-            children.extend(child_candidates(file, name).into_iter().map(|path| (path, gated)));
+            children.extend(
+                child_candidates(file, name)
+                    .into_iter()
+                    .map(|path| (path, gated)),
+            );
         }
         gated = false;
     }
@@ -199,7 +331,10 @@ fn module_children(file: &Path, text: &str) -> Vec<(PathBuf, bool)> {
 }
 
 fn test_only_files(sources: &[(PathBuf, String)]) -> HashSet<PathBuf> {
-    let texts: HashMap<&Path, &str> = sources.iter().map(|(path, text)| (path.as_path(), text.as_str())).collect();
+    let texts: HashMap<&Path, &str> = sources
+        .iter()
+        .map(|(path, text)| (path.as_path(), text.as_str()))
+        .collect();
     let mut frontier: Vec<PathBuf> = sources
         .iter()
         .flat_map(|(path, text)| module_children(path, text))
@@ -213,7 +348,11 @@ fn test_only_files(sources: &[(PathBuf, String)]) -> HashSet<PathBuf> {
         if !excluded.insert(next.clone()) {
             continue;
         }
-        frontier.extend(module_children(&next, text).into_iter().map(|(path, _)| path));
+        frontier.extend(
+            module_children(&next, text)
+                .into_iter()
+                .map(|(path, _)| path),
+        );
     }
     excluded
 }
@@ -298,7 +437,10 @@ fn scan_root(workspace: &Path, label: &str, names: &[String]) -> io::Result<Scan
         .map(|path| std::fs::read_to_string(&path).map(|text| (path, text)))
         .collect::<io::Result<Vec<_>>>()?;
     let excluded = test_only_files(&sources);
-    let mut scan = Scan { files: 0, hits: Vec::new() };
+    let mut scan = Scan {
+        files: 0,
+        hits: Vec::new(),
+    };
     for (path, text) in &sources {
         if excluded.contains(path) {
             continue;
@@ -331,7 +473,10 @@ fn pipeline_dispatches_on_capability_not_name() {
         let scan = scan_root(&workspace, label, &names).expect("walk scan root");
         scanned += scan.files;
         for hit in unlisted(&scan.hits, ALLOWLIST) {
-            violations.push(format!("{}:{}: quoted \"{}\" -> {}", hit.path, hit.line, hit.literal, hit.text));
+            violations.push(format!(
+                "{}:{}: quoted \"{}\" -> {}",
+                hit.path, hit.line, hit.literal, hit.text
+            ));
         }
     }
     assert!(
@@ -347,11 +492,17 @@ fn pipeline_dispatches_on_capability_not_name() {
 #[test]
 fn guard_scans_a_nonzero_file_set_per_root() {
     let names = family_names(Path::new(env!("CARGO_MANIFEST_DIR")));
-    assert!(names.iter().any(|name| name == "qwen35moe"), "name set lost the qwen35moe registry row: {names:?}");
+    assert!(
+        names.iter().any(|name| name == "qwen35moe"),
+        "name set lost the qwen35moe registry row: {names:?}"
+    );
     let workspace = workspace_root();
     for label in SCAN_ROOTS {
         let scan = scan_root(&workspace, label, &names).expect("walk scan root");
-        assert!(scan.files > 0, "{label} scanned 0 production files; the guard would pass vacuously");
+        assert!(
+            scan.files > 0,
+            "{label} scanned 0 production files; the guard would pass vacuously"
+        );
     }
 }
 
@@ -366,7 +517,11 @@ fn guard_flags_a_planted_family_literal_in_a_temp_tree() {
         "fn tier(name: &str) -> u8 {\n    match name {\n        \"qwen35\" => 1,\n        _ => 0,\n    }\n}\n#[cfg(test)]\nmod tests;\n",
     )
     .expect("write prod.rs");
-    std::fs::write(src.join("prod/tests.rs"), "const FIXTURE: &str = \"qwen35\";\n").expect("write tests.rs");
+    std::fs::write(
+        src.join("prod/tests.rs"),
+        "const FIXTURE: &str = \"qwen35\";\n",
+    )
+    .expect("write tests.rs");
     std::fs::write(
         src.join("inline.rs"),
         "#[cfg(test)]\nmod tests {\n    const FIXTURE: &str = \"qwen35\";\n}\nfn after() -> &'static str {\n    \"qwen35\"\n}\n",
@@ -375,13 +530,19 @@ fn guard_flags_a_planted_family_literal_in_a_temp_tree() {
 
     let names = vec!["qwen35".to_owned()];
     let scan = scan_root(&root, "planted/src", &names).expect("walk planted tree");
-    assert_eq!(scan.files, 2, "prod.rs and inline.rs are production; prod/tests.rs is cfg(test)");
+    assert_eq!(
+        scan.files, 2,
+        "prod.rs and inline.rs are production; prod/tests.rs is cfg(test)"
+    );
     let flagged: Vec<(String, usize)> = unlisted(&scan.hits, &[])
         .iter()
         .map(|hit| (hit.path.clone(), hit.line))
         .collect();
     assert_eq!(
         flagged,
-        vec![("planted/src/inline.rs".to_owned(), 6), ("planted/src/prod.rs".to_owned(), 3)],
+        vec![
+            ("planted/src/inline.rs".to_owned(), 6),
+            ("planted/src/prod.rs".to_owned(), 3)
+        ],
     );
 }

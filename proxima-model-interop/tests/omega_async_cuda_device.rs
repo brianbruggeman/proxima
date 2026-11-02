@@ -12,9 +12,8 @@ use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp};
 
 fn required_driver() -> CudaDriver {
-    CudaDriver::new(0).unwrap_or_else(|error| {
-        panic!("AC13 requires a visible CUDA device at ordinal 0: {error}")
-    })
+    CudaDriver::new(0)
+        .unwrap_or_else(|error| panic!("AC13 requires a visible CUDA device at ordinal 0: {error}"))
 }
 
 fn negate_program() -> Vec<Op> {

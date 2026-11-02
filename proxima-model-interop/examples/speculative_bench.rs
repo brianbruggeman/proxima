@@ -2964,9 +2964,7 @@ mod tests {
         assert!(is_build_process(
             "/private/tmp/cargo_target_long_ctx/release/deps/proxima_tensor-1234567890abcdef"
         ));
-        assert!(!is_build_process(
-            "/home/builder/.cargo/bin/sccache"
-        ));
+        assert!(!is_build_process("/home/builder/.cargo/bin/sccache"));
         assert!(!is_build_process("/tmp/cargo_target/debug/hello"));
         assert!(!is_build_process("COMM"));
     }

@@ -13,8 +13,8 @@ use proxima_model_interop::{
 use proxima_primitives::pipe::sans_io::Outcome;
 use proxima_safetensors::{Manifest, SafetensorsParser};
 use proxima_tensor::op::Op;
-use proxima_tensor::spec::build_forward;
 use proxima_tensor::process_usage;
+use proxima_tensor::spec::build_forward;
 
 const EXPORT_ENV: &str = "PROXIMA_GRANITE_PLAIN_EXPORT";
 const GGUF_ENV: &str = "PROXIMA_GRANITE_GGUF";

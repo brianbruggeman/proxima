@@ -33,7 +33,10 @@ fn main() {
         proxima_tensor::cpu::set_epilogue_fuse_enabled(false);
     }
     if let Ok(list) = env::var("PROXIMA_DESCRIBE_NODES") {
-        for node in list.split(',').filter_map(|value| value.parse::<u32>().ok()) {
+        for node in list
+            .split(',')
+            .filter_map(|value| value.parse::<u32>().ok())
+        {
             let node = proxima_tensor::NodeId(node);
             println!(
                 "{{\"describe_node\":{},\"kind\":{:?},\"dependencies\":{:?},\"description\":{:?}}}",
@@ -1054,7 +1057,11 @@ fn abs_difference(left: f32, right: f32) -> f64 {
         return 0.0;
     }
     let difference = f64::from((left - right).abs());
-    if difference.is_nan() { f64::INFINITY } else { difference }
+    if difference.is_nan() {
+        f64::INFINITY
+    } else {
+        difference
+    }
 }
 
 /// `|left - right| / max(1, |left|, |right|)`: an absolute bar below magnitude 1 and a relative bar

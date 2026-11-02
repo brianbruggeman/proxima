@@ -293,6 +293,8 @@ mod prompt_cache_real_model_tests;
 #[cfg(test)]
 mod recurrent_checkpoint_fixture;
 #[cfg(test)]
+mod recurrent_hf_tests;
+#[cfg(test)]
 mod recurrent_mainline_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod recurrent_metal_tests;
@@ -319,8 +321,6 @@ mod row_refit_oracle_tests;
 mod row_repack_tests;
 #[cfg(test)]
 mod verify_bound_tests;
-#[cfg(test)]
-mod recurrent_hf_tests;
 mod warm_buffers;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 pub use cuda_serving_pipe::CudaServingPipe;

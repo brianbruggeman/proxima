@@ -478,21 +478,21 @@ mod harness {
             let compiled = base
                 .with_kernel_variant(&source, &base.entry, threads, width, numeric_policy())
                 .unwrap_or_else(|error| panic!("variant {name} does not compile: {error}"));
-            let template = match std::fs::read_to_string(dir.join(name.replace(".metal", ".launch")))
-            {
-                Ok(text) => {
-                    let fields: Vec<u64> = text
-                        .split_whitespace()
-                        .map(|field| field.parse().expect("launch integer"))
-                        .collect();
-                    let [width_x, width_y] = fields[..] else {
-                        panic!("launch file holds `<width x> <width y>`, got {text:?}");
-                    };
-                    let threadgroups = compiled.grid.threads / (width_x * width_y);
-                    compiled.with_threadgroup_launch(threadgroups, width_x, width_y)
-                }
-                Err(_) => compiled,
-            };
+            let template =
+                match std::fs::read_to_string(dir.join(name.replace(".metal", ".launch"))) {
+                    Ok(text) => {
+                        let fields: Vec<u64> = text
+                            .split_whitespace()
+                            .map(|field| field.parse().expect("launch integer"))
+                            .collect();
+                        let [width_x, width_y] = fields[..] else {
+                            panic!("launch file holds `<width x> <width y>`, got {text:?}");
+                        };
+                        let threadgroups = compiled.grid.threads / (width_x * width_y);
+                        compiled.with_threadgroup_launch(threadgroups, width_x, width_y)
+                    }
+                    Err(_) => compiled,
+                };
             let narrowed: Vec<usize> =
                 std::fs::read_to_string(dir.join(name.replace(".metal", ".f16")))
                     .map(|text| {

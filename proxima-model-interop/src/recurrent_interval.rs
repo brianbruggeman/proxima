@@ -22,8 +22,7 @@ use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
     CacheMask, CacheStrategy, ForwardProgram, KeySourceKind, LayerAttentionConfig, LayerKind,
-    LoopCdConfig,
-    LayerSchedule, ModelDescriptor, RopeTableSel, ValueSourceKind, build_forward,
+    LayerSchedule, LoopCdConfig, ModelDescriptor, RopeTableSel, ValueSourceKind, build_forward,
 };
 
 use crate::bind::{

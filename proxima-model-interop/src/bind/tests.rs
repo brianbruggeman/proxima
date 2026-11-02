@@ -1611,7 +1611,11 @@ fn f16_token_embedding_binds_packed_not_widened_to_f32() {
         state.owned.is_empty(),
         "an f16 embedding must not dequantize into the owned f32 slot"
     );
-    assert_eq!(state.packed.len(), 1, "exactly one packed f16 table expected");
+    assert_eq!(
+        state.packed.len(),
+        1,
+        "exactly one packed f16 table expected"
+    );
     let (bound_name, block) = &state.packed[0];
     assert_eq!(bound_name, &name);
     assert!(
@@ -1656,10 +1660,24 @@ fn tied_f16_embedding_and_lm_head_bind_packed_over_the_same_bytes() {
         precision: &[],
     };
 
-    bind_gathered_as(&parsed, &file_bytes, &name, "token_embd.weight".into(), &mut state)
-        .expect("binds the embedding");
-    bind_matmul_weight_as(&parsed, &file_bytes, &name, "output.weight".into(), rows, k, &mut state)
-        .expect("binds the tied lm_head");
+    bind_gathered_as(
+        &parsed,
+        &file_bytes,
+        &name,
+        "token_embd.weight".into(),
+        &mut state,
+    )
+    .expect("binds the embedding");
+    bind_matmul_weight_as(
+        &parsed,
+        &file_bytes,
+        &name,
+        "output.weight".into(),
+        rows,
+        k,
+        &mut state,
+    )
+    .expect("binds the tied lm_head");
 
     assert!(state.owned.is_empty(), "no f32 widening for either binding");
     let spans: Vec<(*const u8, usize)> = state
@@ -1674,7 +1692,10 @@ fn tied_f16_embedding_and_lm_head_bind_packed_over_the_same_bytes() {
         })
         .collect();
     assert_eq!(spans.len(), 2);
-    assert_eq!(spans[0], spans[1], "both bindings borrow the same address and length");
+    assert_eq!(
+        spans[0], spans[1],
+        "both bindings borrow the same address and length"
+    );
 }
 
 /// A dense `F16` leaf the program reads whole (a norm-shaped tensor, not a
@@ -1702,8 +1723,19 @@ fn f16_dense_leaf_outside_the_gather_still_widens_to_owned_f32() {
     bind_dense_as(&parsed, &file_bytes, &name, name.clone(), &mut state)
         .expect("binds an f16 dense leaf");
 
-    assert!(state.packed.is_empty(), "a non-gathered f16 leaf must not bind packed");
-    assert_eq!(state.owned.len(), 1, "exactly one widened f32 leaf expected");
-    assert_eq!(state.owned[0].1.len(), rows * k, "widened to one f32 per element");
+    assert!(
+        state.packed.is_empty(),
+        "a non-gathered f16 leaf must not bind packed"
+    );
+    assert_eq!(
+        state.owned.len(),
+        1,
+        "exactly one widened f32 leaf expected"
+    );
+    assert_eq!(
+        state.owned[0].1.len(),
+        rows * k,
+        "widened to one f32 per element"
+    );
     assert_eq!(state.resident_bytes, rows * k * core::mem::size_of::<f32>());
 }

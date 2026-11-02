@@ -697,7 +697,10 @@ mod tests {
             },
             ..ServingConfig::default()
         };
-        assert_eq!(long_context_gpu_settings().as_serving_config(&[]), hand_built);
+        assert_eq!(
+            long_context_gpu_settings().as_serving_config(&[]),
+            hand_built
+        );
     }
 
     #[test]
