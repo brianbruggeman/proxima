@@ -4447,6 +4447,8 @@ only the single-row decode kernel reads the half-width device cache",
                     let step_started = read_ticks();
 
                     let new_count = ids_for_step.len();
+                    let host_timing = std::env::var_os("PROXIMA_CUDA_HOST_TIMING").is_some();
+                    let step_prep_started = std::time::Instant::now();
                     #[cfg(feature = "instrument")]
                     let apply_serving_config_started = read_ticks();
                     apply_serving_config(serving_config, cached_len + new_count)?;
@@ -5765,6 +5767,7 @@ did not hold every cached position)",
                         drop(slab_lock);
                         evaluated_in_step
                     };
+                    let step_eval_started = std::time::Instant::now();
                     let evaluated = match evaluated_in_step {
                         Some(value) => value,
                         None => {
@@ -5782,6 +5785,14 @@ did not hold every cached position)",
                                 .await?
                         }
                     };
+                    if host_timing {
+                        eprintln!(
+                            "cuda_host_timing: step={step} new_count={new_count} since_loop_ms={:.3} prep_ms={:.3} eval_ms={:.3}",
+                            loop_started.elapsed().as_secs_f64() * 1e3,
+                            step_eval_started.duration_since(step_prep_started).as_secs_f64() * 1e3,
+                            step_eval_started.elapsed().as_secs_f64() * 1e3,
+                        );
+                    }
                     if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() && step == 0 {
                         for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
                             let mut digest_nodes = vec![
