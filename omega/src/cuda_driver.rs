@@ -26,7 +26,10 @@ use cudarc::driver::{
 use cudarc::nvrtc::sys as nvrtc_sys;
 use cudarc::nvrtc::result as nvrtc_result;
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
-use proxima_core::kv_carry::{Appended, Extent, KvCarry, KvCarryError, KvCommand, KvEvent, RowPair};
+use proxima_core::kv_carry::{
+    Appended, Extent, KvCarry, KvCarryError, KvCommand, KvEvent, RowPair, StateCarryError, StateCommand, StateEvent,
+    StateSwap,
+};
 use proxima_primitives::sync::blocking::Mutex;
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
@@ -110,6 +113,12 @@ pub enum CudaDriverError {
     },
     #[error("CUDA kv carry state machine: {0}")]
     KvCarry(String),
+}
+
+impl From<StateCarryError<NodeId>> for CudaDriverError {
+    fn from(error: StateCarryError<NodeId>) -> Self {
+        Self::KvCarry(error.to_string())
+    }
 }
 
 impl From<KvCarryError<NodeId>> for CudaDriverError {
@@ -549,8 +558,7 @@ pub struct CudaPlan {
 /// `rows` is the sans-IO [`KvCarry`] that decides every cache-input row append, growth, truncation and handover.
 #[derive(Debug, Default)]
 struct StateCarry {
-    pairs: BTreeMap<NodeId, NodeId>,
-    live: BTreeSet<NodeId>,
+    state: StateSwap<NodeId>,
     host_bytes: u64,
     rows: KvCarry<NodeId>,
     cached_rows: u64,
@@ -2963,9 +2971,9 @@ impl CudaPlan {
     /// output differ in element count cannot swap buffers. Pairs equal to the current set keep
     /// their live device state; a different set requires [`Self::drain_carried`] first.
     pub fn carry_state(&mut self, pairs: &[(NodeId, NodeId)]) -> bool {
-        let wanted: BTreeMap<NodeId, NodeId> = pairs.iter().copied().collect();
-        if wanted == self.carry.pairs {
-            return true;
+        let wanted = pairs.to_vec();
+        if self.carry.state.selects(&wanted) {
+            return self.drive_state(StateEvent::Select { pairs: wanted }).is_ok();
         }
         let swappable = self.constraints.is_none()
             && pairs.iter().all(|(input, output)| {
@@ -2973,54 +2981,79 @@ impl CudaPlan {
                     && self.shapes.of(*input).iter().product::<u64>()
                         == self.shapes.of(*output).iter().product::<u64>()
             });
-        if !swappable || !self.carry.live.is_empty() {
+        if !swappable || self.carry.state.has_live() {
             return false;
         }
-        self.carry.pairs = wanted;
-        self.adopt_parked();
-        true
+        self.drive_state(StateEvent::Select { pairs: wanted }).is_ok()
     }
 
-    fn adopt_parked(&mut self) {
-        let mut parked = self.driver.parked_state.lock();
-        for input in self.carry.pairs.keys() {
-            if let Some((_, buffer)) = parked.remove(input) {
-                self.arena.buffers.insert(*input, buffer);
-                self.arena.resident_sources.remove(input);
-                self.carry.live.insert(*input);
+    fn drive_state(&mut self, event: StateEvent<NodeId>) -> Result<Vec<(NodeId, Vec<f32>)>, CudaDriverError> {
+        let commands = self.carry.state.step(event)?;
+        let mut drained = Vec::new();
+        for command in commands {
+            match command {
+                StateCommand::Adopt { input } => self.adopt_parked_state(input)?,
+                StateCommand::Swap { input, output } => self.swap_buffers(input, output),
+                StateCommand::Park { input, output } => self.park_state(input, output),
+                StateCommand::Drain { input, output } => {
+                    drained.extend(self.drain_state(input, output)?);
+                }
             }
+        }
+        Ok(drained)
+    }
+
+    fn adopt_parked_state(&mut self, input: NodeId) -> Result<(), CudaDriverError> {
+        let Some((_, buffer)) = self.driver.parked_state.lock().remove(&input) else {
+            return Ok(());
+        };
+        self.arena.buffers.insert(input, buffer);
+        self.arena.resident_sources.remove(&input);
+        self.carry.state.step(StateEvent::Resident { input })?;
+        Ok(())
+    }
+
+    fn park_state(&mut self, input: NodeId, output: NodeId) {
+        if let Some(buffer) = self.arena.buffers.remove(&input) {
+            self.driver.parked_state.lock().insert(input, (output, buffer));
         }
     }
 
-    /// Hands live carried state to the driver so the plan that replaces this one adopts it on
+    fn drain_state(&mut self, input: NodeId, output: NodeId) -> Result<Option<(NodeId, Vec<f32>)>, CudaDriverError> {
+        let Some(buffer) = self.arena.buffers.remove(&input) else {
+            return Ok(None);
+        };
+        self.read_state(output, buffer).map(Some)
+    }
+
+    fn read_state(&mut self, output: NodeId, buffer: CudaGraphBuffer) -> Result<(NodeId, Vec<f32>), CudaDriverError> {
+        let CudaGraphBuffer::F32(slice) = buffer else {
+            return Err(CudaDriverError::BindingContract);
+        };
+        let values = self.driver.stream.clone_dtoh(&slice)?;
+        self.carry.host_bytes += (values.len() * std::mem::size_of::<f32>()) as u64;
+        Ok((output, values))
+    }
+
+    /// Hands live carried state to the driver so the plan that replaces it adopts it on
     /// the device instead of re-uploading a stale host copy.
     pub fn park_carried(&mut self) {
         self.park_appended();
-        let live = std::mem::take(&mut self.carry.live);
-        let mut parked = self.driver.parked_state.lock();
-        for input in live {
-            let (Some(output), Some(buffer)) =
-                (self.carry.pairs.get(&input).copied(), self.arena.buffers.remove(&input))
-            else {
-                continue;
-            };
-            parked.insert(input, (output, buffer));
+        for command in self.carry.state.park() {
+            if let StateCommand::Park { input, output } = command {
+                self.park_state(input, output);
+            }
         }
     }
 
     /// Reads every live carried state back to the host, keyed by the output node that produces
     /// it, and marks the device copies stale so the next call uploads its host inputs again.
     pub fn drain_carried(&mut self) -> Result<Vec<(NodeId, Vec<f32>)>, CudaDriverError> {
-        self.park_carried();
+        self.park_appended();
+        let mut drained = self.drive_state(StateEvent::Ended)?;
         let parked = std::mem::take(&mut *self.driver.parked_state.lock());
-        let mut drained = Vec::with_capacity(parked.len());
         for (_, (output, buffer)) in parked {
-            let CudaGraphBuffer::F32(slice) = buffer else {
-                return Err(CudaDriverError::BindingContract);
-            };
-            let values = self.driver.stream.clone_dtoh(&slice)?;
-            self.carry.host_bytes += (values.len() * std::mem::size_of::<f32>()) as u64;
-            drained.push((output, values));
+            drained.push(self.read_state(output, buffer)?);
         }
         Ok(drained)
     }
@@ -3061,7 +3094,7 @@ impl CudaPlan {
         !self.shapes.of(input).is_empty()
             && !self.shapes.of(output).is_empty()
             && self.outputs.contains(&output)
-            && !self.carry.pairs.contains_key(&input)
+            && !self.carry.state.is_pair(&input)
             && self.row_width(input) == self.row_width(output)
     }
 
@@ -3240,21 +3273,29 @@ impl CudaPlan {
     }
 
     fn swap_carried_buffers(&mut self) {
-        for (input, output) in &self.carry.pairs {
-            if !(self.arena.buffers.contains_key(output) && self.arena.buffers.contains_key(input)) {
-                continue;
+        let ready: Vec<NodeId> = self
+            .carry
+            .state
+            .pairs()
+            .filter(|(input, output)| self.arena.buffers.contains_key(*output) && self.arena.buffers.contains_key(*input))
+            .map(|(input, _)| *input)
+            .collect();
+        if let Ok(commands) = self.carry.state.step(StateEvent::StepFinished { ready }) {
+            for command in commands {
+                if let StateCommand::Swap { input, output } = command {
+                    self.swap_buffers(input, output);
+                }
             }
-            let (Some(next), Some(previous)) = (
-                self.arena.buffers.remove(output),
-                self.arena.buffers.remove(input),
-            ) else {
-                continue;
-            };
-            self.arena.buffers.insert(*input, next);
-            self.arena.buffers.insert(*output, previous);
-            self.arena.resident_sources.remove(input);
-            self.carry.live.insert(*input);
         }
+    }
+
+    fn swap_buffers(&mut self, input: NodeId, output: NodeId) {
+        let (Some(next), Some(previous)) = (self.arena.buffers.remove(&output), self.arena.buffers.remove(&input)) else {
+            return;
+        };
+        self.arena.buffers.insert(input, next);
+        self.arena.buffers.insert(output, previous);
+        self.arena.resident_sources.remove(&input);
     }
 
     /// Executes the planned graph with name-resolved inputs and returns the
@@ -3298,7 +3339,7 @@ impl CudaPlan {
             let source = (block_address(block), block_length(block));
             let resident = self.resident_nodes.binary_search(&node).is_ok()
                 || resident_names.is_some_and(|names| names.contains(name));
-            if self.carry.live.contains(&node) || self.carry.rows.is_live(&node) {
+            if self.carry.state.is_live(&node) || self.carry.rows.is_live(&node) {
                 continue;
             }
             if resident && self.arena.resident_sources.get(&node) == Some(&source) {
@@ -3354,7 +3395,7 @@ impl CudaPlan {
                 }
             }
             upload_call_us += elapsed_micros(upload_call_started);
-            if self.carry.pairs.contains_key(&node) {
+            if self.carry.state.is_pair(&node) {
                 self.carry.host_bytes += block_length(block) as u64;
             }
             if self.carry.rows.is_pair(&node) {
@@ -3666,7 +3707,7 @@ impl CudaPlan {
         let mut results = Vec::with_capacity(self.outputs.len());
         let readback_started = timing.then(std::time::Instant::now);
         for node in &self.outputs {
-            if self.carry.pairs.iter().any(|(input, output)| output == node && self.carry.live.contains(input)) {
+            if self.carry.state.pairs().any(|(input, output)| output == node && self.carry.state.is_live(input)) {
                 continue;
             }
             if self.carry.rows.pairs().any(|pair| pair.output == *node && self.carry.rows.is_live(&pair.input)) {
