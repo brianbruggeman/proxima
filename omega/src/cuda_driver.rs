@@ -242,8 +242,107 @@ pub struct CudaF32Arena {
     uniforms: BTreeMap<NodeId, CudaSlice<u8>>,
     uniform_host: BTreeMap<NodeId, Vec<u8>>,
     resident_sources: BTreeMap<NodeId, (usize, usize)>,
+    pool: BTreeMap<usize, Vec<CudaSlice<f32>>>,
     allocations: u64,
     launch_profile: LaunchProfile,
+}
+
+/// Which intermediate buffers return to the arena pool after each launch.
+/// `release[position]` lists the nodes whose last reader is the kernel at
+/// `position`; `pooled` is every node that takes its buffer from the pool.
+#[derive(Debug, Default)]
+struct ReleasePlan {
+    release: Vec<Vec<NodeId>>,
+    pooled: BTreeSet<NodeId>,
+}
+
+impl ReleasePlan {
+    fn build(
+        resolved: &[BoundOp],
+        kernels: &[CudaKernel],
+        pinned: &BTreeSet<NodeId>,
+    ) -> Self {
+        let mut produced: BTreeMap<NodeId, usize> = BTreeMap::new();
+        let mut last_read: BTreeMap<NodeId, usize> = BTreeMap::new();
+        for (position, (bound, kernel)) in resolved.iter().zip(kernels).enumerate() {
+            let reads = kernel_read_nodes(kernel);
+            reads.for_each(|node| {
+                last_read.insert(node, position);
+            });
+            produced.insert(bound.node, position);
+        }
+        let mut plan = Self {
+            release: vec![Vec::new(); resolved.len()],
+            pooled: BTreeSet::new(),
+        };
+        for (bound, kernel) in resolved.iter().zip(kernels) {
+            let poolable = !pinned.contains(&bound.node)
+                && !matches!(bound.kind, BoundOpKind::Constant { .. })
+                && kernel.extra_outputs.is_empty();
+            if poolable {
+                let position = produced[&bound.node];
+                let last = last_read.get(&bound.node).copied().unwrap_or(position);
+                plan.release[last.max(position)].push(bound.node);
+                plan.pooled.insert(bound.node);
+            }
+        }
+        plan
+    }
+
+    fn pool_shape(&self, produced: &[(NodeId, usize)]) -> BTreeMap<usize, usize> {
+        let mut free: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut created: BTreeMap<usize, usize> = BTreeMap::new();
+        let lengths: BTreeMap<NodeId, usize> = produced.iter().copied().collect();
+        for (position, (node, length)) in produced.iter().enumerate() {
+            if self.pooled.contains(node) {
+                let available = free.entry(*length).or_default();
+                match available.checked_sub(1) {
+                    Some(remaining) => *available = remaining,
+                    None => *created.entry(*length).or_default() += 1,
+                }
+            }
+            for released in &self.release[position] {
+                *free.entry(lengths[released]).or_default() += 1;
+            }
+        }
+        created
+    }
+}
+
+fn kernel_read_nodes(kernel: &CudaKernel) -> impl Iterator<Item = NodeId> + '_ {
+    std::iter::once(kernel)
+        .chain(kernel.prologue.iter())
+        .flat_map(|launch| launch.bindings.iter())
+        .filter_map(|binding| match binding {
+            Binding::Input(node) | Binding::Indices(node) => Some(*node),
+            _ => None,
+        })
+}
+
+impl CudaF32Arena {
+    fn seat_pooled(&mut self, node: NodeId, length: usize) {
+        if self.buffers.contains_key(&node) {
+            return;
+        }
+        if let Some(buffer) = self.pool.get_mut(&length).and_then(Vec::pop) {
+            self.buffers.insert(node, CudaGraphBuffer::F32(buffer));
+        }
+    }
+
+    fn release_to_pool(&mut self, nodes: &[NodeId]) {
+        for node in nodes {
+            if let Some(CudaGraphBuffer::F32(buffer)) = self.buffers.remove(node) {
+                self.pool.entry(buffer.len()).or_default().push(buffer);
+            }
+        }
+    }
+
+    fn pool_bytes(&self) -> u64 {
+        self.pool
+            .iter()
+            .map(|(length, buffers)| (*length as u64) * 4 * buffers.len() as u64)
+            .sum()
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2106,9 +2205,17 @@ impl CudaPlan {
             }
         }
         let mut host_workspace = 0_u64;
+        let release_plan = self.release_plan();
+        for (length, count) in self.pooled_peak(&release_plan)? {
+            for _ in 0..count {
+                add(length as u64 * 4)?;
+            }
+        }
         for (bound, uniform) in self.resolved.iter().zip(&self.uniforms) {
             let bytes = cuda_float_bytes(self.shapes.of(bound.node))?;
+            let pooled = release_plan.pooled.contains(&bound.node);
             match self.arena.buffers.get(&bound.node) {
+                _ if pooled => {}
                 Some(CudaGraphBuffer::F32(buffer)) => {
                     let current = (buffer.len() as u64)
                         .checked_mul(4)
@@ -2262,10 +2369,9 @@ impl CudaPlan {
             })?;
         let retained = retained_graph
             .checked_add(retained_uniforms)
+            .and_then(|sum| sum.checked_add(self.arena.pool_bytes()))
             .ok_or(CudaDriverError::ResourceOverflow)?;
-        let additional = total
-            .checked_sub(retained)
-            .ok_or(CudaDriverError::ResourceOverflow)?;
+        let additional = total.saturating_sub(retained);
         // this is an observed free-capacity check; other contexts can allocate after it.
         let (free, _) = self.driver.memory_info()?;
         if additional > free as u64 {
@@ -2779,6 +2885,7 @@ impl CudaPlan {
         let dispatch_started = host_timing.then(std::time::Instant::now);
         let mut function_lookups = 0u64;
         let mut function_lookup_us = 0u64;
+        let release_plan = self.release_plan();
         for (position, (bound, (kernel, uniforms))) in self
             .resolved
             .iter()
@@ -2867,6 +2974,9 @@ impl CudaPlan {
                     function_lookups += 1;
                     function_lookup_us += lookup_started.map_or(0, elapsed_micros);
                 }
+                if release_plan.pooled.contains(&bound.node) {
+                    self.arena.seat_pooled(bound.node, output_len);
+                }
                 let launch_started = host_timing.then(Instant::now);
                 let launch = if timing {
                     self.driver.launch_f32_persistent_sized(
@@ -2925,6 +3035,7 @@ impl CudaPlan {
             if trace {
                 eprintln!("cuda_trace: node={:?} complete", bound.node);
             }
+            self.arena.release_to_pool(&release_plan.release[position]);
         }
         if let Some(started) = dispatch_started {
             eprintln!(
@@ -2947,6 +3058,7 @@ impl CudaPlan {
                 (lookup_after[4] - lookup_before[4]) as f64 / 1_000.0
             );
             report_launch_profile(&self.arena.launch_profile, &kind_rows);
+            self.report_arena_footprint();
         }
         self.append_new_rows()?;
         let submit_us = elapsed_micros(submit_started);
@@ -3061,6 +3173,71 @@ impl CudaPlan {
             results,
             None,
         ))
+    }
+
+    fn release_plan(&self) -> ReleasePlan {
+        let carried = self
+            .carry
+            .pairs
+            .iter()
+            .chain(&self.carry.appends)
+            .flat_map(|(input, output)| [*input, *output]);
+        let extra = self
+            .kernels
+            .iter()
+            .flat_map(|kernel| kernel.extra_outputs.iter().map(|(node, _)| *node));
+        let pinned: BTreeSet<NodeId> = self
+            .outputs
+            .iter()
+            .copied()
+            .chain(carried)
+            .chain(extra)
+            .collect();
+        ReleasePlan::build(&self.resolved, &self.kernels, &pinned)
+    }
+
+    fn pooled_peak(&self, plan: &ReleasePlan) -> Result<BTreeMap<usize, usize>, CudaDriverError> {
+        let produced = self
+            .resolved
+            .iter()
+            .map(|bound| Ok((bound.node, (cuda_float_bytes(self.shapes.of(bound.node))? / 4) as usize)))
+            .collect::<Result<Vec<_>, CudaDriverError>>()?;
+        Ok(plan.pool_shape(&produced))
+    }
+
+    fn report_arena_footprint(&self) {
+        let mut by_kind: BTreeMap<&str, (u64, u64, u64)> = BTreeMap::new();
+        let kinds: BTreeMap<NodeId, &str> = self
+            .resolved
+            .iter()
+            .map(|bound| (bound.node, bound.kind.name()))
+            .collect();
+        let mut total = 0_u64;
+        for (node, buffer) in &self.arena.buffers {
+            let bytes = match buffer {
+                CudaGraphBuffer::F32(values) => values.len() as u64 * 4,
+                CudaGraphBuffer::Bytes(values) => values.len() as u64,
+            };
+            let kind = kinds.get(node).copied().unwrap_or("input");
+            let row = by_kind.entry(kind).or_default();
+            row.0 += 1;
+            row.1 += bytes;
+            row.2 = row.2.max(bytes);
+            total += bytes;
+        }
+        let free = self.driver.memory_info().map_or(0, |(free, _)| free);
+        eprintln!(
+            "cuda_host_timing: arena buffers={} total_bytes={} resolved_nodes={} free_bytes={}",
+            self.arena.buffers.len(),
+            total,
+            self.resolved.len(),
+            free
+        );
+        for (kind, (count, bytes, largest)) in by_kind {
+            eprintln!(
+                "cuda_host_timing: arena_kind={kind} buffers={count} bytes={bytes} largest={largest}"
+            );
+        }
     }
 
     /// Number of device allocations made by the persistent graph arena.

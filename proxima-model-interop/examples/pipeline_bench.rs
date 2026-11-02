@@ -547,6 +547,9 @@ fn measure(
     let status = child.wait().map_err(io_error(program))?;
     let out = stdout_reader.join().map_err(|_| BenchError::Sampler)?;
     let err = stderr_reader.join().map_err(|_| BenchError::Sampler)?;
+    if env::var_os("PIPELINE_BENCH_ECHO_CHILD_STDERR").is_some() {
+        eprint!("{}", err.text);
+    }
     Ok(Measured {
         wall: Wall {
             ready_ms: out.marker_ms.or(err.marker_ms),
