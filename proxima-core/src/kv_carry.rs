@@ -49,7 +49,7 @@ pub struct RowPair<Key> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Extent<Key> {
     pub input: Key,
-    pub cached_rows: u64,
+    pub cached_rows: Option<u64>,
     pub extent_elements: u64,
 }
 
@@ -234,10 +234,10 @@ impl<Key: Ord + Copy + Debug> KvCarry<Key> {
             else {
                 continue;
             };
-            if lane.valid_rows != extent.cached_rows {
+            if let Some(cached_rows) = extent.cached_rows.filter(|rows| *rows != lane.valid_rows) {
                 return Err(KvCarryError::RowsDesynchronized {
                     input: extent.input,
-                    cached_rows: extent.cached_rows,
+                    cached_rows,
                     valid_rows: lane.valid_rows,
                 });
             }
@@ -391,7 +391,7 @@ mod tests {
     }
 
     fn begin(carry: &mut KvCarry<u32>, cached_rows: u64, extent_elements: u64) -> Vec<KvCommand<u32>> {
-        let extents = vec![Extent { input: INPUT, cached_rows, extent_elements }];
+        let extents = vec![Extent { input: INPUT, cached_rows: Some(cached_rows), extent_elements }];
         carry.step(KvEvent::StepBegan { extents }).expect("begin")
     }
 
@@ -478,7 +478,7 @@ mod tests {
     #[proxima::test]
     async fn a_step_that_disagrees_with_valid_rows_is_rejected() {
         let mut carry = resident(10, 64);
-        let extents = vec![Extent { input: INPUT, cached_rows: 9, extent_elements: 64 }];
+        let extents = vec![Extent { input: INPUT, cached_rows: Some(9), extent_elements: 64 }];
 
         let error = carry.step(KvEvent::StepBegan { extents }).expect_err("desync");
 
@@ -491,7 +491,7 @@ mod tests {
     #[proxima::test]
     async fn valid_rows_beyond_capacity_overflow() {
         let mut carry = resident(20, 64);
-        let extents = vec![Extent { input: INPUT, cached_rows: 20, extent_elements: 128 }];
+        let extents = vec![Extent { input: INPUT, cached_rows: Some(20), extent_elements: 128 }];
 
         let error = carry.step(KvEvent::StepBegan { extents }).expect_err("overflow");
 

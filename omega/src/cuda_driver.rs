@@ -554,6 +554,7 @@ struct StateCarry {
     host_bytes: u64,
     rows: KvCarry<NodeId>,
     cached_rows: u64,
+    fresh_cached_rows: Option<u64>,
 }
 
 /// Numeric and activation policy for one plan, plus the runtime config when the
@@ -3042,6 +3043,7 @@ impl CudaPlan {
             })
             .collect();
         self.carry.cached_rows = cached_rows;
+        self.carry.fresh_cached_rows = Some(cached_rows);
         if self.carry.rows.selects(&wanted) {
             return true;
         }
@@ -3158,7 +3160,7 @@ impl CudaPlan {
     }
 
     fn begin_rows_step(&mut self) -> Result<(), CudaDriverError> {
-        let cached_rows = self.carry.cached_rows;
+        let cached_rows = self.carry.fresh_cached_rows.take();
         let extents: Vec<Extent<NodeId>> = self
             .carry
             .rows
