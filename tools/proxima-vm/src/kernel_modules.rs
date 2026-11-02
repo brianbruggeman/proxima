@@ -59,6 +59,13 @@ fn path_of<'dep>(name: &str, dependencies: &HashMap<&'dep str, Vec<&'dep str>>) 
 /// Reads `wanted` and everything they depend on from `release_dir` (for
 /// example `/usr/lib/modules/7.2.11-arch1-1`), dependencies first.
 pub fn load_modules(release_dir: &Path, wanted: &[&str]) -> Result<Vec<KernelModule>, ProximaError> {
+    if !release_dir.try_exists().map_err(|error| ProximaError::Config(format!("cannot stat {}: {error}", release_dir.display())))? {
+        proxima_telemetry::debug!(
+            release_dir = %release_dir.display(),
+            "no module tree for this kernel release, so its drivers are built in and no modules ship"
+        );
+        return Ok(Vec::new());
+    }
     let dep_path = release_dir.join("modules.dep");
     let modules_dep = fs::read_to_string(&dep_path)
         .map_err(|error| ProximaError::Config(format!("cannot read {}: {error}", dep_path.display())))?;
@@ -96,6 +103,24 @@ mod tests {
 
         let names: Vec<&str> = ordered.iter().map(|path| module_name(path)).collect();
         assert_eq!(names, ["failover", "net_failover", "virtio_net"]);
+    }
+
+    #[test]
+    fn an_absent_module_tree_ships_zero_modules() {
+        let root = tempfile::tempdir().expect("tempdir");
+
+        let modules = load_modules(&root.path().join("7.2.11"), &["virtio_mmio", "virtio_net"]).expect("absent tree is not an error");
+
+        assert!(modules.is_empty());
+    }
+
+    #[test]
+    fn a_present_tree_without_modules_dep_is_an_error() {
+        let root = tempfile::tempdir().expect("tempdir");
+
+        let error = load_modules(root.path(), &["virtio_net"]).expect_err("tree without modules.dep");
+
+        assert!(error.to_string().contains("modules.dep"), "{error}");
     }
 
     #[test]

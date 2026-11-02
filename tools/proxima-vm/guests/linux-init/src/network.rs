@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io;
 use std::net::UdpSocket;
 use std::os::fd::AsRawFd;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::Duration;
 
@@ -37,9 +37,19 @@ fn load_module(path: &Path) -> io::Result<()> {
     if result == 0 { Ok(()) } else { Err(io::Error::last_os_error()) }
 }
 
-fn load_modules(label: &str) -> io::Result<()> {
-    let mut paths: Vec<_> = fs::read_dir(MODULES_DIR)?.map(|entry| entry.map(|found| found.path())).collect::<io::Result<_>>()?;
+fn module_paths(directory: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(error),
+    };
+    let mut paths: Vec<PathBuf> = entries.map(|entry| entry.map(|found| found.path())).collect::<io::Result<_>>()?;
     paths.sort();
+    Ok(paths)
+}
+
+fn load_modules(label: &str) -> io::Result<()> {
+    let paths = module_paths(Path::new(MODULES_DIR))?;
     for path in paths {
         match load_module(&path) {
             Ok(()) => println!("{label}: loaded {}", path.display()),
@@ -108,4 +118,47 @@ pub fn bring_up(label: &str) -> io::Result<UdpSocket> {
     bring_up_when_present(&socket, "eth0")?;
     println!("{label}: eth0 up 10.0.2.15/24");
     Ok(socket)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    use super::*;
+
+    #[test]
+    fn an_absent_modules_directory_has_nothing_to_load() {
+        let root = tempfile::tempdir().expect("tempdir");
+
+        let paths = module_paths(&root.path().join("modules")).expect("absent directory is not an error");
+
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn modules_load_in_name_order() {
+        let root = tempfile::tempdir().expect("tempdir");
+        for name in ["02-virtio_net.ko.zst", "01-virtio_mmio.ko.zst"] {
+            fs::write(root.path().join(name), b"module").expect("write module");
+        }
+
+        let paths = module_paths(root.path()).expect("directory reads");
+
+        let names: Vec<_> = paths.iter().filter_map(|path| path.file_name()?.to_str()).collect();
+        assert_eq!(names, ["01-virtio_mmio.ko.zst", "02-virtio_net.ko.zst"]);
+    }
+
+    #[test]
+    fn an_unreadable_modules_directory_is_still_an_error() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let modules = root.path().join("modules");
+        fs::create_dir(&modules).expect("create modules");
+        fs::set_permissions(&modules, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let readable_anyway = fs::read_dir(&modules).is_ok();
+
+        let outcome = module_paths(&modules);
+
+        fs::set_permissions(&modules, fs::Permissions::from_mode(0o755)).expect("restore");
+        assert!(readable_anyway || outcome.is_err(), "permission denied must surface");
+    }
 }
