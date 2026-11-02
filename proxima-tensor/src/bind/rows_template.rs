@@ -159,37 +159,90 @@ fn node_columns(shapes: &Shapes) -> Vec<Vec<i128>> {
         .collect()
 }
 
-/// The template that reproduces every [`Shapes`] in `binds` (each `(rows, shapes)`, the first being
-/// the base), or `None` when fewer than three distinct row counts are given, the shape tables differ
-/// in node count or rank, or an extent is not affine in the row count.
-#[must_use]
-pub fn shapes_template(binds: &[(u64, &Shapes)]) -> Option<RowTemplate> {
-    let (base_rows, base) = binds.first()?;
-    let rows: Vec<u64> = binds.iter().map(|(at, _)| *at).collect();
-    let shaped = three_distinct_rows(&rows) && binds.iter().all(|(_, shapes)| shapes.extents().len() == base.extents().len());
-    shaped.then_some(())?;
-    let tables: Vec<Vec<Vec<i128>>> = binds.iter().map(|(_, shapes)| node_columns(shapes)).collect();
-    let positions = (0..base.extents().len())
-        .map(|node| {
-            let columns: Vec<Vec<i128>> = tables.iter().map(|table| table[node].clone()).collect();
-            let uniform = columns.iter().all(|column| column.len() == columns[0].len());
-            uniform.then(|| affine_columns(&rows, &columns)).flatten()
-        })
-        .collect::<Option<Vec<_>>>()?;
-    Some((*base_rows, positions))
+/// `(symbol values of the base bind, which symbols the fit varied, one entry per node and
+/// dimension holding the constant followed by one coefficient per symbol)`.
+pub type SymbolsTemplate = (Vec<u64>, Vec<bool>, Vec<Vec<Vec<i128>>>);
+
+fn single_symbol_move(base: &[u64], symbols: &[u64]) -> Option<usize> {
+    let mut moved = (0..base.len()).filter(|index| base[*index] != symbols[*index]);
+    let index = moved.next()?;
+    moved.next().is_none().then_some(index)
 }
 
-/// The shapes a [`shapes_template`] gives at `rows`, or `None` when an extent leaves `u64`.
-#[must_use]
-pub fn apply_shapes_template(template: &RowTemplate, rows: u64) -> Option<Shapes> {
-    let (base_rows, positions) = template;
-    let delta = i128::from(rows) - i128::from(*base_rows);
-    positions
-        .iter()
-        .map(|fields| {
-            fields
+fn fitted_slopes(base: &[u64], tables: &[Vec<Vec<i128>>], binds: &[(&[u64], &Shapes)]) -> Vec<Option<Vec<Vec<i128>>>> {
+    (0..base.len())
+        .map(|symbol| {
+            let at = binds.iter().position(|(symbols, _)| single_symbol_move(base, symbols) == Some(symbol))?;
+            let run = i128::from(binds[at].0[symbol]) - i128::from(base[symbol]);
+            let slopes = tables[at]
                 .iter()
-                .map(|(start, slope)| u64::try_from(start + slope * delta).ok())
+                .zip(&tables[0])
+                .map(|(moved, start)| moved.iter().zip(start).map(|(end, begin)| (end - begin) / run).collect())
+                .collect();
+            Some(slopes)
+        })
+        .collect()
+}
+
+/// The template that reproduces every [`Shapes`] in `binds` (each `(symbol values, shapes)`, the
+/// first being the base) with every extent affine in all symbols, or `None` when a symbol that
+/// changed in some bind never changed alone, the shape tables differ in node count or rank, or an
+/// extent is not affine. A symbol no bind changed is pinned to the base value.
+#[must_use]
+pub fn symbols_shapes_template(binds: &[(&[u64], &Shapes)]) -> Option<SymbolsTemplate> {
+    let (base, base_shapes) = binds.first()?;
+    let width = base.len();
+    let shaped = binds
+        .iter()
+        .all(|(symbols, shapes)| symbols.len() == width && shapes.extents().len() == base_shapes.extents().len());
+    shaped.then_some(())?;
+    let tables: Vec<Vec<Vec<i128>>> = binds.iter().map(|(_, shapes)| node_columns(shapes)).collect();
+    let uniform = tables
+        .iter()
+        .all(|table| table.iter().zip(&tables[0]).all(|(column, first)| column.len() == first.len()));
+    uniform.then_some(())?;
+    let slopes = fitted_slopes(base, &tables, binds);
+    let varying: Vec<bool> = slopes.iter().map(Option::is_some).collect();
+    let nodes: Vec<Vec<Vec<i128>>> = (0..tables[0].len())
+        .map(|node| {
+            (0..tables[0][node].len())
+                .map(|dim| {
+                    let mut fields = vec![tables[0][node][dim]];
+                    fields.extend(slopes.iter().map(|slope| slope.as_ref().map_or(0, |per_node| per_node[node][dim])));
+                    fields
+                })
+                .collect()
+        })
+        .collect();
+    let template = (base.to_vec(), varying, nodes);
+    let reproduces = binds
+        .iter()
+        .all(|(symbols, shapes)| apply_symbols_template(&template, symbols).as_ref() == Some(*shapes));
+    let moved_somewhere = binds.iter().any(|(symbols, _)| symbols != base);
+    let checked_apart = binds.iter().filter(|(symbols, _)| symbols != base).count() > template.1.iter().filter(|varied| **varied).count();
+    (reproduces && moved_somewhere && checked_apart).then_some(template)
+}
+
+/// The shapes a [`symbols_shapes_template`] gives at `symbols`, or `None` when a symbol the fit
+/// pinned differs from its base value, the width differs, or an extent leaves `u64`.
+#[must_use]
+pub fn apply_symbols_template(template: &SymbolsTemplate, symbols: &[u64]) -> Option<Shapes> {
+    let (base, varying, nodes) = template;
+    let pinned_hold = symbols.len() == base.len()
+        && (0..base.len()).all(|index| varying[index] || symbols[index] == base[index]);
+    pinned_hold.then_some(())?;
+    nodes
+        .iter()
+        .map(|dims| {
+            dims.iter()
+                .map(|fields| {
+                    let moved: i128 = fields[1..]
+                        .iter()
+                        .zip(symbols.iter().zip(base))
+                        .map(|(slope, (now, was))| slope * (i128::from(*now) - i128::from(*was)))
+                        .sum();
+                    u64::try_from(fields[0] + moved).ok()
+                })
                 .collect::<Option<Vec<u64>>>()
         })
         .collect::<Option<Vec<_>>>()
@@ -377,25 +430,80 @@ mod tests {
         Ok(())
     }
 
+    fn two_symbol_program() -> Vec<Op> {
+        let mut program = Vec::new();
+        let input = |shape: Vec<Extent>| Op::Input {
+            dtype: DType::FLOAT32,
+            shape,
+            name: None,
+        };
+        append(&mut program, input(vec![Extent::Symbolic(0), Extent::Static(8)]));
+        append(&mut program, input(vec![Extent::Static(3), Extent::Symbolic(1)]));
+        program
+    }
+
+    fn shapes_for(program: &[Op], symbols: &[u64]) -> Result<Shapes, &'static str> {
+        shape::infer(program, symbols).map_err(|_| "the program infers")
+    }
+
     #[test]
-    fn a_shapes_template_reproduces_the_inferred_shapes_at_a_fourth_row_count() -> Check {
-        let (program, _) = matmul_program();
-        let (base, next, between) = (shapes_at(&program, 16)?, shapes_at(&program, 40)?, shapes_at(&program, 28)?);
-        let template = shapes_template(&[(16, &base), (40, &next), (28, &between)]).ok_or("every extent is affine in rows")?;
+    fn a_symbols_template_moves_rows_and_kv_together_to_an_unseen_pair() -> Check {
+        let program = two_symbol_program();
+        let at = |symbols: &[u64]| shapes_for(&program, symbols);
+        let (base, rows_move, rows_again, kv_move, joint) =
+            (at(&[16, 100])?, at(&[40, 100])?, at(&[28, 100])?, at(&[16, 101])?, at(&[40, 103])?);
+        let binds: [(&[u64], &Shapes); 5] = [
+            (&[16, 100], &base),
+            (&[40, 100], &rows_move),
+            (&[28, 100], &rows_again),
+            (&[16, 101], &kv_move),
+            (&[40, 103], &joint),
+        ];
 
-        let moved = apply_shapes_template(&template, 123).ok_or("the template evaluates")?;
+        let template = symbols_shapes_template(&binds).ok_or("every extent is affine in both symbols")?;
 
-        assert_eq!(moved, shapes_at(&program, 123)?);
+        let moved = apply_symbols_template(&template, &[123, 777]).ok_or("the template evaluates")?;
+        assert_eq!(moved, at(&[123, 777])?);
         Ok(())
     }
 
     #[test]
-    fn a_shapes_template_needs_three_distinct_row_counts() -> Check {
-        let (program, _) = matmul_program();
-        let (base, next) = (shapes_at(&program, 16)?, shapes_at(&program, 40)?);
+    fn a_symbols_template_pins_a_symbol_no_bind_moved() -> Check {
+        let program = two_symbol_program();
+        let at = |symbols: &[u64]| shapes_for(&program, symbols);
+        let (base, rows_move, rows_again) = (at(&[16, 100])?, at(&[40, 100])?, at(&[28, 100])?);
+        let binds: [(&[u64], &Shapes); 3] = [(&[16, 100], &base), (&[40, 100], &rows_move), (&[28, 100], &rows_again)];
 
-        assert_eq!(shapes_template(&[(16, &base), (40, &next)]), None);
-        assert_eq!(shapes_template(&[(16, &base), (40, &next), (16, &base)]), None);
+        let template = symbols_shapes_template(&binds).ok_or("rows alone is affine")?;
+
+        assert_eq!(apply_symbols_template(&template, &[64, 100]), Some(at(&[64, 100])?));
+        assert_eq!(apply_symbols_template(&template, &[64, 101]), None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_symbols_template_refuses_a_product_of_symbols() -> Check {
+        let product = |rows: u64, kv: u64| Shapes::from_extents(vec![vec![rows * kv]]);
+        let (base, rows_move, rows_again, kv_move, joint) =
+            (product(16, 100), product(40, 100), product(28, 100), product(16, 101), product(40, 103));
+        let binds: [(&[u64], &Shapes); 5] = [
+            (&[16, 100], &base),
+            (&[40, 100], &rows_move),
+            (&[28, 100], &rows_again),
+            (&[16, 101], &kv_move),
+            (&[40, 103], &joint),
+        ];
+
+        assert_eq!(symbols_shapes_template(&binds), None);
+        Ok(())
+    }
+
+    #[test]
+    fn a_symbols_template_needs_a_bind_that_checks_the_fit() -> Check {
+        let program = two_symbol_program();
+        let (base, rows_move) = (shapes_for(&program, &[16, 100])?, shapes_for(&program, &[40, 100])?);
+
+        assert_eq!(symbols_shapes_template(&[(&[16, 100], &base), (&[40, 100], &rows_move)]), None);
         Ok(())
     }
 }
