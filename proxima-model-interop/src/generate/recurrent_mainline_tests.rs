@@ -609,6 +609,15 @@ mod resident_cuda_plans {
         generate(&model, prompt)
     }
 
+    fn cpu_ids(bytes: &[u8], prompt: &[u32]) -> Vec<u32> {
+        let parsed = parse_complete(bytes).expect("parse the tiny recurrent GGUF");
+        let model = LoadedModel::load(&parsed, bytes).expect("load the cpu oracle model");
+        model
+            .generate_from_ids(prompt, 4, &ServingConfig::default(), &mut |_| ControlFlow::Continue(()))
+            .expect("generate on the tiny recurrent checkpoint on the cpu")
+            .0
+    }
+
     struct Decoded {
         ids: Vec<u32>,
         logits: Vec<Vec<f32>>,
@@ -708,7 +717,7 @@ mod resident_cuda_plans {
         ] {
             assert_eq!(
                 generate(&model, prompt),
-                fresh_ids(&bytes, prompt),
+                cpu_ids(&bytes, prompt),
                 "prompt {prompt:?} after earlier requests"
             );
         }
