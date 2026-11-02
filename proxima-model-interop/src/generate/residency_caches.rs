@@ -1,6 +1,7 @@
 #[cfg(feature = "gpu")]
 use conflaguration::Validate;
 use core::future::Future;
+use core::hash::{Hash, Hasher};
 use core::ops::ControlFlow;
 #[cfg(feature = "gpu")]
 use omega::config::{RuntimeConfig, SelectionMode};
@@ -161,6 +162,44 @@ mod configured_runtime_tests {
             crate::generate::cached_kv_extent(runtime.pads_cached_kv(5), 0, 5, 32, 256),
             0
         );
+    }
+
+    #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+    fn elementwise_program(body: ScalarOp) -> Vec<Op> {
+        vec![
+            Op::Input {
+                dtype: DType::FLOAT32,
+                shape: vec![Extent::Static(2)],
+                name: Some(String::from("values")),
+            },
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body,
+                operands: vec![(NodeId(0), IndexMap::Affine(map::projection(1, &[0])))],
+                name: Some(String::from("result")),
+            },
+        ]
+    }
+
+    #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+    #[test]
+    fn two_programs_with_equal_symbols_and_outputs_never_share_a_plan() {
+        let mut runtime = gpu_runtime();
+        let values = [("values", QuantizedBlock::Float32(&[3.0, -4.0]))];
+        let negate_program = elementwise_program(ScalarOp::Negate);
+        let identity_program = elementwise_program(ScalarOp::Identity);
+        let mut evaluate = |program: &[Op]| {
+            let evaluated = runtime
+                .evaluate(program, &[1, 1], &values, &[NodeId(1)], &BTreeSet::new(), None)
+                .expect("a two-element elementwise program evaluates");
+            evaluated.get(NodeId(1)).expect("the output node").0.to_vec()
+        };
+
+        let negated = evaluate(&negate_program);
+        let identity = evaluate(&identity_program);
+
+        assert_eq!(negated, [-3.0, 4.0]);
+        assert_eq!(identity, [3.0, -4.0], "the second program ran the first one's plan");
     }
 
     #[cfg(all(feature = "cuda", not(target_os = "macos")))]
@@ -2645,7 +2684,7 @@ pub(super) struct SsmPlacement<'buffers> {
 pub struct BackendRuntime {
     pub(super) omega_runtime: Option<omega::config::RuntimeConfig>,
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
-    cuda_plans: alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), CudaPlanLease>,
+    cuda_plans: alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool, u64), CudaPlanLease>,
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
     cuda_program: Vec<Op>,
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
@@ -2666,6 +2705,8 @@ pub struct BackendRuntime {
     cuda_home: Option<(Arc<CudaResidentPlans>, CudaPlanIdentity)>,
     #[cfg(feature = "cuda")]
     active_cuda_shape: Option<CudaPlanKey>,
+    #[cfg(feature = "gpu")]
+    program_identities: Vec<(usize, usize, u64)>,
     pub(super) engine: Engine,
     /// Warmup deliberately retains the monolithic all-low source snapshot so
     /// the timed prefill can reuse its plans and Metal bindings. The real
@@ -2700,7 +2741,7 @@ pub struct BackendRuntime {
     /// stayed flat over the same steps, proving the growth was not
     /// GPU-side). Clearing on miss keeps exactly the one entry worth
     /// keeping: the bucket a caller is currently inside.
-    pub(super) plans: alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), Plan>,
+    pub(super) plans: alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool, u64), Plan>,
     /// Plans for the stable pre-gather router/gather partitions. The segment
     /// programs reuse node IDs across layers, so this cache is keyed by the
     /// partition's address and shape rather than the ordinary decode key.
@@ -2744,7 +2785,7 @@ pub struct BackendRuntime {
     /// single-range plan satisfy a two-range lookup by coincidence of key.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) placed_plans:
-        alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), omega::metal::Plan>,
+        alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool, u64), omega::metal::Plan>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) placed_segment_plans:
         alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>, bool), omega::metal::Plan>,
@@ -2928,6 +2969,8 @@ impl BackendRuntime {
             kv_carry_accepted: false,
             #[cfg(feature = "gpu")]
             kv_pad: alloc::collections::BTreeMap::new(),
+            #[cfg(feature = "gpu")]
+            program_identities: Vec::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             plan_refits: 0,
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -3008,6 +3051,29 @@ impl BackendRuntime {
             .get(&new_count)
             .copied()
             .unwrap_or_else(|| self.driver_renders_fused_cached_attention())
+    }
+
+    /// A content hash of `program` with its symbolic extents unresolved, taken once per
+    /// program per runtime: plans are keyed by it, so two programs that share
+    /// `(new_count, kv_bound_extent, outputs)` never share a plan. A program is
+    /// recognised by its address and length, so every program handed to one runtime
+    /// must outlive it, as the decode loop's already do.
+    #[cfg(feature = "gpu")]
+    fn program_identity(&mut self, program: &[Op]) -> u64 {
+        let located = (program.as_ptr() as usize, program.len());
+        if let Some(&(_, _, content_hash)) = self
+            .program_identities
+            .iter()
+            .find(|&&(address, length, _)| (address, length) == located)
+        {
+            return content_hash;
+        }
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        format!("{program:?}").hash(&mut hasher);
+        let content_hash = hasher.finish();
+        self.program_identities
+            .push((located.0, located.1, content_hash));
+        content_hash
     }
 
     #[cfg(feature = "gpu")]
@@ -3112,6 +3178,7 @@ impl BackendRuntime {
             symbols[1] as usize,
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
+            self.program_identity(program),
         );
         let exact_activations = self.exact_activations;
         // prefill599 retarget: a genuine miss is about to clear `self.plans`
@@ -3333,6 +3400,7 @@ impl BackendRuntime {
             symbols.get(1).copied().unwrap_or_default() as usize,
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
+            self.program_identity(program),
         );
         if !self.cuda_plans.contains_key(&shape) {
             self.invalidate_async_program();
@@ -3848,6 +3916,7 @@ impl BackendRuntime {
             symbols.get(1).copied().unwrap_or_default() as usize,
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
+            self.program_identity(program),
         );
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
@@ -4475,9 +4544,9 @@ impl BackendRuntime {
     /// attention key range moved.
     #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
     pub(super) fn take_near_plan<PlanType>(
-        cache: &mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), PlanType>,
-        shape: &(usize, usize, Vec<NodeId>, bool),
-        compatible: impl Fn(&(usize, usize, Vec<NodeId>, bool), &(usize, usize, Vec<NodeId>, bool)) -> bool,
+        cache: &mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool, u64), PlanType>,
+        shape: &(usize, usize, Vec<NodeId>, bool, u64),
+        compatible: impl Fn(&(usize, usize, Vec<NodeId>, bool, u64), &(usize, usize, Vec<NodeId>, bool, u64)) -> bool,
     ) -> Option<PlanType> {
         if cache.contains_key(shape) {
             return None;
@@ -4485,7 +4554,7 @@ impl BackendRuntime {
         let near = cache
             .keys()
             .find(|key| {
-                key.0 == shape.0 && key.2 == shape.2 && key.3 == shape.3 && compatible(key, shape)
+                key.0 == shape.0 && key.2 == shape.2 && key.3 == shape.3 && key.4 == shape.4 && compatible(key, shape)
             })
             .cloned()?;
         cache.remove(&near)
@@ -4497,8 +4566,8 @@ impl BackendRuntime {
     /// extents with the length but none changes structure.
     #[cfg(feature = "cuda")]
     pub(super) fn refit_near_cuda_plan(
-        cache: &mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), Plan>,
-        shape: &(usize, usize, Vec<NodeId>, bool),
+        cache: &mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool, u64), Plan>,
+        shape: &(usize, usize, Vec<NodeId>, bool, u64),
         symbols: &[u64],
         numeric_policy: proxima_tensor::NumericPolicy,
     ) -> Result<(), InteropError> {
@@ -4570,10 +4639,10 @@ impl BackendRuntime {
     }
 
     pub(super) fn resolve_kept_plan<'cache, PlanType>(
-        cache: &'cache mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), PlanType>,
+        cache: &'cache mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool, u64), PlanType>,
         plan_hits: &mut usize,
         plan_misses: &mut usize,
-        shape: (usize, usize, Vec<NodeId>, bool),
+        shape: (usize, usize, Vec<NodeId>, bool, u64),
         build: impl FnOnce() -> Result<PlanType, InteropError>,
     ) -> Result<&'cache mut PlanType, InteropError> {
         use alloc::collections::btree_map::Entry;
