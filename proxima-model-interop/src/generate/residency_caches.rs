@@ -3138,7 +3138,7 @@ impl BackendRuntime {
         };
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let near_plan = if self.plan_refit {
-            Self::take_near_plan(&mut self.plans, &shape)
+            Self::take_near_plan(&mut self.plans, &shape, |_, _| true)
         } else {
             None
         };
@@ -3969,7 +3969,7 @@ impl BackendRuntime {
             &mut self.placed_plans
         };
         let near_plan = if self.plan_refit {
-            Self::take_near_plan(cache, &shape)
+            Self::take_near_plan(cache, &shape, |_, _| true)
         } else {
             None
         };
@@ -4477,13 +4477,16 @@ impl BackendRuntime {
     pub(super) fn take_near_plan<PlanType>(
         cache: &mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), PlanType>,
         shape: &(usize, usize, Vec<NodeId>, bool),
+        compatible: impl Fn(&(usize, usize, Vec<NodeId>, bool), &(usize, usize, Vec<NodeId>, bool)) -> bool,
     ) -> Option<PlanType> {
         if cache.contains_key(shape) {
             return None;
         }
         let near = cache
             .keys()
-            .find(|key| key.0 == shape.0 && key.2 == shape.2 && key.3 == shape.3)
+            .find(|key| {
+                key.0 == shape.0 && key.2 == shape.2 && key.3 == shape.3 && compatible(key, shape)
+            })
             .cloned()?;
         cache.remove(&near)
     }
@@ -4499,7 +4502,7 @@ impl BackendRuntime {
         symbols: &[u64],
         numeric_policy: proxima_tensor::NumericPolicy,
     ) -> Result<(), InteropError> {
-        let Some(mut near) = Self::take_near_plan(cache, shape) else {
+        let Some(mut near) = Self::take_near_plan(cache, shape, same_width_class) else {
             debug!(
                 new_count = shape.0 as u64,
                 kv_bound_extent = shape.1 as u64,

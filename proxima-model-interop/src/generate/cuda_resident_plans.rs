@@ -8,8 +8,9 @@
 //! instead: a runtime takes the entry at construction and puts it back in
 //! `Drop`, once per request, never inside the step loop.
 //!
-//! At most two plans are kept: one decode plan (`new_count == 1`) and one wide
-//! plan (a prompt chunk), because a wide plan's arena scales with its width.
+//! One plan is kept per class of `(new_count == 1, kv_bound_extent == 0)`: a
+//! decode plan, a one-token prefill, a wide prefill and a wide chunk over a
+//! warm cache. Refresh cannot cross either boundary, so a class never shares.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -116,7 +117,14 @@ fn drain_carry(plan: &mut Plan) -> bool {
     drain_cuda_appended_rows(plan).is_ok() && drain_cuda_carried(plan).is_ok()
 }
 
-/// A decode plan and a wide plan never evict each other.
+/// Plans in different classes never evict each other and never refit into one
+/// another: refresh refuses to cross the one-row boundary or the empty-cache
+/// boundary (no cached attention to fuse), so a plan moved across either
+/// rebinds in full.
 pub(super) fn same_width_class(left: &CudaPlanKey, right: &CudaPlanKey) -> bool {
-    (left.0 == 1) == (right.0 == 1)
+    plan_class(left) == plan_class(right)
+}
+
+fn plan_class(key: &CudaPlanKey) -> (bool, bool) {
+    (key.0 == 1, key.1 == 0)
 }
