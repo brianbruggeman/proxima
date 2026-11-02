@@ -6883,10 +6883,28 @@ did not hold every cached position)",
                             .enumerate()
                             .filter(|(layer, widths)| {
                                 matches!(widths, LayerPadRowWidths::Attention { .. })
-                                    && !kv_appended_view.get(*layer).copied().unwrap_or(false)
+                                    && !device_resident_view.get(*layer).copied().unwrap_or(false)
                             })
                             .map(|(layer, _)| layer)
                             .collect();
+                        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                        if let Some(device) = device_kv.as_ref() {
+                            let resident: Vec<usize> = device_resident_view
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, resident)| **resident)
+                                .map(|(layer, _)| layer)
+                                .collect();
+                            let commands = host_kv_truncations(
+                                &resident,
+                                cached_len_before_step as u64,
+                                new_count as u64,
+                                emitted.len() as u64,
+                            )?;
+                            for command in &commands {
+                                device.apply(command)?;
+                            }
+                        }
                         let truncations = host_kv_truncations(
                             &host_layers,
                             cached_len_before_step as u64,
