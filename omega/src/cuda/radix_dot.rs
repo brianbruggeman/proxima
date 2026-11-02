@@ -95,6 +95,9 @@ fn word_text(layout: &BlockLayout, sources: &[(usize, u32)], radix: u32, word: u
         })
         .collect();
     let runs: Vec<Option<(usize, u32)>> = per_chunk.iter().map(|codes| run_start(codes)).collect();
+    if let Some(text) = uniform_word(layout, &per_chunk, &runs, radix, word) {
+        return Some(text);
+    }
     let mut text = String::new();
     let mut branch = "if";
     for (chunk, codes) in per_chunk.iter().enumerate().filter(|(chunk, _)| runs[*chunk].is_none()) {
@@ -172,4 +175,90 @@ fn selector(runs: &[Option<(usize, u32)>], word: usize) -> Option<String> {
     Some(format!(
         "        const unsigned int selected{word} = (unsigned int)({table} >> ((chunk & 3u) * 16u)) & 0xFFFFu;\n"
     ))
+}
+
+/// One chunk position's way of decoding a word: which aligned 32-bit load, which bytes of it feed
+/// the even and odd 16-bit lanes, and the per-lane multipliers.
+#[derive(Clone, Copy)]
+struct WordSpec {
+    base: usize,
+    even_shift: u32,
+    odd_shift: u32,
+    mask: u32,
+    even_factor: u32,
+    odd_factor: u32,
+}
+
+fn run_spec((byte, factor): (usize, u32)) -> WordSpec {
+    WordSpec { base: byte, even_shift: 0, odd_shift: 8, mask: 0x00FF_00FF, even_factor: factor, odd_factor: factor }
+}
+
+/// Codes 0 and 2 share one byte and codes 1 and 3 share another, both inside one aligned word:
+/// each byte is multiplied by both of its lanes' factors in a single multiply.
+fn pair_spec(codes: &[(usize, u32)]) -> Option<WordSpec> {
+    let [(even_byte, first), (odd_byte, second), (even_again, third), (odd_again, fourth)] = *codes else {
+        return None;
+    };
+    let same_word = even_byte / 4 == odd_byte / 4;
+    (even_byte == even_again && odd_byte == odd_again && same_word && first < 256 && second < 256 && third < 256 && fourth < 256).then_some(WordSpec {
+        base: even_byte / 4 * 4,
+        even_shift: (even_byte % 4) as u32 * 8,
+        odd_shift: (odd_byte % 4) as u32 * 8,
+        mask: 0xFF,
+        even_factor: first | third << 16,
+        odd_factor: second | fourth << 16,
+    })
+}
+
+/// Every chunk position decodes with the same instruction stream, its parameters picked out of
+/// literals by the lane-invariant position, when each is a run or a byte pair.
+fn uniform_word(
+    layout: &BlockLayout,
+    per_chunk: &[&[(usize, u32)]],
+    runs: &[Option<(usize, u32)>],
+    radix: u32,
+    word: usize,
+) -> Option<String> {
+    let aligned = usize::from(layout.block_bytes).is_multiple_of(4);
+    let specs: Vec<WordSpec> = per_chunk
+        .iter()
+        .zip(runs)
+        .map(|(codes, run)| run.map(run_spec).or_else(|| pair_spec(codes)))
+        .collect::<Option<_>>()?;
+    let any_pair = runs.iter().any(Option::is_none);
+    let loadable = specs.iter().all(|spec| spec.base.is_multiple_of(4));
+    if !(aligned && any_pair && loadable) {
+        return None;
+    }
+    let pick = |value: fn(&WordSpec) -> u32| select_by_position(&specs.iter().map(value).collect::<Vec<_>>());
+    Some(format!(
+        "    {{\n\
+         \x20       const unsigned int packed{word} = *(const unsigned int *)(block + {base});\n\
+         \x20       unsigned int low = (((packed{word} >> {even_shift}) & {mask}) * {even_factor}) & 0x00FF00FFu;\n\
+         \x20       unsigned int high = (((packed{word} >> {odd_shift}) & {mask}) * {odd_factor}) & 0x00FF00FFu;\n\
+         \x20       words[{word}] = (int)__byte_perm(low * {radix}u, high * {radix}u, 0x7351u);\n\
+         \x20   }}\n",
+        base = pick(|spec| spec.base as u32),
+        even_shift = pick(|spec| spec.even_shift),
+        odd_shift = pick(|spec| spec.odd_shift),
+        mask = pick(|spec| spec.mask),
+        even_factor = pick(|spec| spec.even_factor),
+        odd_factor = pick(|spec| spec.odd_factor),
+    ))
+}
+
+fn select_by_position(values: &[u32]) -> String {
+    let last = values[values.len() - 1];
+    values
+        .iter()
+        .enumerate()
+        .rev()
+        .skip(1)
+        .fold(format!("{last}u"), |otherwise, (position, value)| {
+            if format!("{value}u") == otherwise {
+                otherwise
+            } else {
+                format!("(chunk == {position}u ? {value}u : {otherwise})")
+            }
+        })
 }

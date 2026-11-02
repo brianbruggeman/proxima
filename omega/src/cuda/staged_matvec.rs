@@ -307,6 +307,7 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
     let chunks_per_block = elements / DOT_ELEMENTS;
     let total_chunks = plan.reduction / DOT_ELEMENTS as u64;
     let (activation_sum, centered) = centering_text(*centering);
+    let position = if 32 % chunks_per_block == 0 { format!("lane % {chunks_per_block}u") } else { format!("chunk % {chunks_per_block}u") };
     source.push_str(&format!(
         "    const unsigned char *row_start[{rows}];\n\
          \x20   float accumulator[{rows}];\n\
@@ -329,7 +330,7 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
          \x20           if (row_start[row] == 0) {{ continue; }}\n\
          \x20           const unsigned char *block = row_start[row] + block_offset;\n\
          \x20           int words[8];\n\
-         \x20           {name}_i8x32(block, chunk % {chunks_per_block}u, words);\n\
+         \x20           {name}_i8x32(block, {position}, words);\n\
          \x20           int dot = 0;\n\
          \x20           #pragma unroll\n\
          \x20           for (int word = 0; word < 8; word++) {{ dot = __dp4a(words[word], activation[word], dot); }}\n\
