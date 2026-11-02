@@ -1,8 +1,6 @@
 #[cfg(feature = "gpu")]
 use conflaguration::Validate;
 use core::future::Future;
-#[cfg(feature = "gpu")]
-use core::hash::{Hash, Hasher};
 use core::ops::ControlFlow;
 #[cfg(feature = "gpu")]
 use omega::config::{RuntimeConfig, SelectionMode};
@@ -33,6 +31,7 @@ pub struct CudaGraphRequest<'request> {
     pub symbols: &'request [u64],
     pub named: &'request [(&'request str, QuantizedBlock<'request>)],
     pub outputs: &'request [NodeId],
+    pub program_hash: u64,
 }
 
 #[cfg(feature = "gpu")]
@@ -99,6 +98,7 @@ mod configured_runtime_tests {
         let first = runtime
             .evaluate(
                 &program,
+                0,
                 &[1, 1],
                 &[("values", QuantizedBlock::Float32(&[3.0, -4.0]))],
                 &[NodeId(1)],
@@ -110,6 +110,7 @@ mod configured_runtime_tests {
         let second = runtime
             .evaluate(
                 &program,
+                0,
                 &[1, 1],
                 &[("values", QuantizedBlock::Float32(&[5.0, -6.0]))],
                 &[NodeId(1)],
@@ -129,6 +130,7 @@ mod configured_runtime_tests {
         let error = refused
             .evaluate(
                 &program,
+                0,
                 &[1, 1],
                 &[("values", QuantizedBlock::Float32(&[3.0, -4.0]))],
                 &[NodeId(1)],
@@ -160,7 +162,7 @@ mod configured_runtime_tests {
 
         assert!(runtime.uses_gpu());
         assert_eq!(
-            crate::generate::cached_kv_extent(runtime.pads_cached_kv(5), 0, 5, 32, 256),
+            crate::generate::cached_kv_extent(runtime.pads_cached_kv(0, 5), 0, 5, 32, 256),
             0
         );
     }
@@ -191,7 +193,15 @@ mod configured_runtime_tests {
         let identity_program = elementwise_program(ScalarOp::Identity);
         let mut evaluate = |program: &[Op]| {
             let evaluated = runtime
-                .evaluate(program, &[1, 1], &values, &[NodeId(1)], &BTreeSet::new(), None)
+                .evaluate(
+                    program,
+                    crate::generate::program_hash(program),
+                    &[1, 1],
+                    &values,
+                    &[NodeId(1)],
+                    &BTreeSet::new(),
+                    None,
+                )
                 .expect("a two-element elementwise program evaluates");
             evaluated.get(NodeId(1)).expect("the output node").0.to_vec()
         };
@@ -205,13 +215,48 @@ mod configured_runtime_tests {
 
     #[cfg(all(feature = "cuda", not(target_os = "macos")))]
     #[test]
+    fn a_program_rebuilt_where_another_was_freed_gets_its_own_plan() {
+        let mut runtime = gpu_runtime();
+        let values = [("values", QuantizedBlock::Float32(&[3.0, -4.0]))];
+        let mut run = |body| {
+            let program = elementwise_program(body);
+            let evaluated = runtime
+                .evaluate(
+                    &program,
+                    crate::generate::program_hash(&program),
+                    &[1, 1],
+                    &values,
+                    &[NodeId(1)],
+                    &BTreeSet::new(),
+                    None,
+                )
+                .expect("a two-element elementwise program evaluates");
+            (
+                program.as_ptr() as usize,
+                evaluated.get(NodeId(1)).expect("the output node").0.to_vec(),
+            )
+        };
+
+        let (first_address, negated) = run(ScalarOp::Negate);
+        let (second_address, identity) = run(ScalarOp::Identity);
+
+        assert_eq!(negated, [-3.0, 4.0]);
+        assert_eq!(
+            identity,
+            [3.0, -4.0],
+            "program rebuilt at {second_address:#x} after {first_address:#x} was freed ran the freed one's plan"
+        );
+    }
+
+    #[cfg(all(feature = "cuda", not(target_os = "macos")))]
+    #[test]
     fn a_cuda_plan_whose_kv_has_a_non_fused_reader_keeps_the_exact_range() {
         let mut runtime = gpu_runtime();
-        runtime.kv_pad.insert(1, false);
+        runtime.kv_pad.insert((0, 1), false);
 
-        assert!(!runtime.pads_cached_kv(1));
+        assert!(!runtime.pads_cached_kv(0, 1));
         assert_eq!(
-            crate::generate::cached_kv_extent(runtime.pads_cached_kv(1), 33, 1, 32, 0),
+            crate::generate::cached_kv_extent(runtime.pads_cached_kv(0, 1), 33, 1, 32, 0),
             33
         );
     }
@@ -220,15 +265,15 @@ mod configured_runtime_tests {
     #[test]
     fn a_cuda_plan_whose_kv_is_read_only_by_fused_attention_binds_the_bucket() {
         let mut runtime = gpu_runtime();
-        runtime.kv_pad.insert(1, true);
+        runtime.kv_pad.insert((0, 1), true);
 
-        assert!(runtime.pads_cached_kv(1));
+        assert!(runtime.pads_cached_kv(0, 1));
         assert!(
-            !runtime.pads_cached_kv(5),
+            !runtime.pads_cached_kv(0, 5),
             "the decision is per plan width, a width with no built plan binds exact"
         );
         assert_eq!(
-            crate::generate::cached_kv_extent(runtime.pads_cached_kv(1), 33, 1, 32, 0),
+            crate::generate::cached_kv_extent(runtime.pads_cached_kv(0, 1), 33, 1, 32, 0),
             64
         );
     }
@@ -240,7 +285,7 @@ mod configured_runtime_tests {
 
         assert!(runtime.uses_gpu());
         assert_eq!(
-            crate::generate::cached_kv_extent(runtime.pads_cached_kv(5), 0, 5, 32, 0),
+            crate::generate::cached_kv_extent(runtime.pads_cached_kv(0, 5), 0, 5, 32, 0),
             32
         );
     }
@@ -2706,8 +2751,6 @@ pub struct BackendRuntime {
     cuda_home: Option<(Arc<CudaResidentPlans>, CudaPlanIdentity)>,
     #[cfg(feature = "cuda")]
     active_cuda_shape: Option<CudaPlanKey>,
-    #[cfg(feature = "gpu")]
-    program_identities: Vec<(usize, usize, u64)>,
     pub(super) engine: Engine,
     /// Warmup deliberately retains the monolithic all-low source snapshot so
     /// the timed prefill can reuse its plans and Metal bindings. The real
@@ -2786,7 +2829,7 @@ pub struct BackendRuntime {
     /// single-range plan satisfy a two-range lookup by coincidence of key.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) placed_plans:
-        alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool, u64), omega::metal::Plan>,
+        alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), omega::metal::Plan>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) placed_segment_plans:
         alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>, bool), omega::metal::Plan>,
@@ -2838,7 +2881,7 @@ pub struct BackendRuntime {
     /// `kv_cache.*` inputs only through fused `CachedAttention` ops, so the range may be
     /// bound padded to its bucket. Decided once per width, at that plan's first build.
     #[cfg(feature = "gpu")]
-    kv_pad: alloc::collections::BTreeMap<usize, bool>,
+    kv_pad: alloc::collections::BTreeMap<(u64, usize), bool>,
     /// Misses served by refitting the previous plan in place
     /// ([`Self::take_near_plan`]) instead of building one -- a subset of
     /// `plan_misses`, so `plan_misses - plan_refits` is the number of plans
@@ -2970,8 +3013,6 @@ impl BackendRuntime {
             kv_carry_accepted: false,
             #[cfg(feature = "gpu")]
             kv_pad: alloc::collections::BTreeMap::new(),
-            #[cfg(feature = "gpu")]
-            program_identities: Vec::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             plan_refits: 0,
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
@@ -3047,34 +3088,49 @@ impl BackendRuntime {
     /// (every reader of the `kv_cache.*` inputs a fused `CachedAttention`); before that, a
     /// driver that renders the fused op for every plan (Metal) pads, any other binds exact.
     #[cfg(feature = "gpu")]
-    pub(super) fn pads_cached_kv(&self, new_count: usize) -> bool {
+    pub(super) fn pads_cached_kv(&self, program_hash: u64, new_count: usize) -> bool {
         self.kv_pad
-            .get(&new_count)
+            .get(&(program_hash, new_count))
             .copied()
             .unwrap_or_else(|| self.driver_renders_fused_cached_attention())
     }
 
-    /// A content hash of `program` with its symbolic extents unresolved, taken once per
-    /// program per runtime: plans are keyed by it, so two programs that share
-    /// `(new_count, kv_bound_extent, outputs)` never share a plan. A program is
-    /// recognised by its address and length, so every program handed to one runtime
-    /// must outlive it, as the decode loop's already do.
+    /// Decides the padding of `program` at `new_count` rows before any plan for it
+    /// exists, by binding at `symbols` without emitting a kernel, so the first call binds
+    /// its cached range padded and no unpadded plan is built to find out. A probe that
+    /// cannot bind leaves the width undecided: it binds exact until a plan answers.
     #[cfg(feature = "gpu")]
-    fn program_identity(&mut self, program: &[Op]) -> u64 {
-        let located = (program.as_ptr() as usize, program.len());
-        if let Some(&(_, _, content_hash)) = self
-            .program_identities
-            .iter()
-            .find(|&&(address, length, _)| (address, length) == located)
-        {
-            return content_hash;
+    pub(super) fn settle_kv_padding(
+        &mut self,
+        program: &[Op],
+        program_hash: u64,
+        symbols: &[u64],
+        outputs: impl FnOnce() -> Vec<NodeId>,
+        named: &[(&str, QuantizedBlock<'_>)],
+    ) {
+        #[cfg(feature = "cuda")]
+        if self.uses_gpu() && !self.kv_pad.contains_key(&(program_hash, symbols[0] as usize)) {
+            let probed = omega::backend::probe_cuda_pads_kv(
+                program,
+                symbols,
+                &outputs(),
+                named,
+                self.numeric_policy,
+                |name| name.starts_with(KV_CACHE_INPUT_PREFIX),
+            );
+            match probed {
+                Ok(pads) => {
+                    self.kv_pad.insert((program_hash, symbols[0] as usize), pads);
+                }
+                Err(error) => debug!(
+                    error = %error,
+                    new_count = symbols[0],
+                    "kv padding probe could not bind, the width binds exact until a plan answers"
+                ),
+            }
         }
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        format!("{program:?}").hash(&mut hasher);
-        let content_hash = hasher.finish();
-        self.program_identities
-            .push((located.0, located.1, content_hash));
-        content_hash
+        #[cfg(not(feature = "cuda"))]
+        let _ = (program, program_hash, symbols, outputs, named);
     }
 
     #[cfg(feature = "gpu")]
@@ -3162,9 +3218,12 @@ impl BackendRuntime {
     // A modified expert table crosses the same backend boundary on every
     // engine. CPU consumes it; a GPU without expert-source bindings returns
     // a typed error instead of silently reading the original full stack.
+    // clippy::too_many_arguments: the program hash travels beside the program it identifies
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn evaluate(
         &mut self,
         program: &[Op],
+        program_hash: u64,
         symbols: &[u64],
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
@@ -3179,7 +3238,7 @@ impl BackendRuntime {
             symbols[1] as usize,
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
-            self.program_identity(program),
+            program_hash,
         );
         let exact_activations = self.exact_activations;
         // prefill599 retarget: a genuine miss is about to clear `self.plans`
@@ -3300,9 +3359,24 @@ impl BackendRuntime {
             Self::emit_plan_footprint_diff(&previous_footprint, &previous_kernel_keys, metal_plan);
         }
         #[cfg(feature = "gpu")]
-        self.kv_pad.entry(symbols[0] as usize).or_insert_with(|| {
-            omega::backend::plan_pads_kv(plan, |name| name.starts_with(KV_CACHE_INPUT_PREFIX))
-        });
+        {
+            let key = (program_hash, symbols[0] as usize);
+            #[cfg(feature = "cuda")]
+            let freshly_built = self.plan_misses != misses_before;
+            #[cfg(not(feature = "cuda"))]
+            let freshly_built = false;
+            if freshly_built || !self.kv_pad.contains_key(&key) {
+                let pads = omega::backend::plan_pads_kv(plan, |name| {
+                    name.starts_with(KV_CACHE_INPUT_PREFIX)
+                });
+                let probed = *self.kv_pad.entry(key).or_insert(pads);
+                if probed && !pads {
+                    return Err(InteropError::PaddedKvReadUnfused {
+                        new_count: symbols[0] as usize,
+                    });
+                }
+            }
+        }
         #[cfg(feature = "cuda")]
         let plan_hit = self.plan_misses == misses_before;
         #[cfg(feature = "cuda")]
@@ -3377,6 +3451,7 @@ impl BackendRuntime {
             symbols,
             named,
             outputs,
+            program_hash,
         } = request;
         if self.engine != Engine::Gpu {
             return Err(InteropError::AsyncCudaRequiresGpu);
@@ -3401,7 +3476,7 @@ impl BackendRuntime {
             symbols.get(1).copied().unwrap_or_default() as usize,
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
-            self.program_identity(program),
+            program_hash,
         );
         if !self.cuda_plans.contains_key(&shape) {
             self.invalidate_async_program();
@@ -3917,7 +3992,6 @@ impl BackendRuntime {
             symbols.get(1).copied().unwrap_or_default() as usize,
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
-            self.program_identity(program),
         );
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
@@ -5024,17 +5098,30 @@ impl BackendRuntime {
         Ok(Vec::new())
     }
 
-    pub(super) fn pads_cached_kv(&self, _new_count: usize) -> bool {
+    pub(super) fn pads_cached_kv(&self, _program_hash: u64, _new_count: usize) -> bool {
         false
+    }
+
+    pub(super) fn settle_kv_padding(
+        &mut self,
+        _program: &[Op],
+        _program_hash: u64,
+        _symbols: &[u64],
+        _outputs: impl FnOnce() -> Vec<NodeId>,
+        _named: &[(&str, QuantizedBlock<'_>)],
+    ) {
     }
 
     /// `resident_names` is unused on this backend: the CPU evaluator has no
     /// device buffer to cache, so there is nothing to mark resident. Carried
     /// anyway so both `BackendRuntime::evaluate` impls share one signature
     /// and the decode loop's call site never needs a `cfg` of its own.
+    // clippy::too_many_arguments: the program hash travels beside the program it identifies
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn evaluate(
         &mut self,
         program: &[Op],
+        _program_hash: u64,
         symbols: &[u64],
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
@@ -5085,6 +5172,7 @@ impl BackendRuntime {
     ) -> Result<Evaluated, InteropError> {
         self.evaluate(
             program,
+            0,
             symbols,
             named,
             outputs,
@@ -5161,6 +5249,7 @@ mod omega_async_serving_tests {
                 &service,
                 CudaGraphRequest {
                     program: &graph,
+                    program_hash: 0,
                     symbols: &[2, 1],
                     named: &named,
                     outputs: &[NodeId(1)],
@@ -5187,6 +5276,7 @@ mod omega_async_serving_tests {
         let sync_result = sync_runtime
             .evaluate(
                 &graph,
+                0,
                 &[2, 1],
                 &named,
                 &[NodeId(1)],
@@ -5231,6 +5321,7 @@ mod omega_async_serving_tests {
                     &service,
                     CudaGraphRequest {
                         program: &graph,
+                        program_hash: 0,
                         symbols: &[2, 1],
                         named: &named,
                         outputs: &[NodeId(1)],
@@ -5249,6 +5340,7 @@ mod omega_async_serving_tests {
             let sync_result = sync_runtime
                 .evaluate(
                     &graph,
+                    0,
                     &[2, 1],
                     &named,
                     &[NodeId(1)],
@@ -5316,6 +5408,7 @@ mod omega_async_serving_tests {
                     &service,
                     CudaGraphRequest {
                         program: &graph,
+                        program_hash: 0,
                         symbols: &[2, 1],
                         named: &named,
                         outputs: &[NodeId(1)],
@@ -5368,6 +5461,7 @@ mod omega_async_serving_tests {
                             &service,
                             CudaGraphRequest {
                                 program: &program(),
+                                program_hash: 0,
                                 symbols: &[2, 1],
                                 named: &[("values", QuantizedBlock::Float32(&values))],
                                 outputs: &[NodeId(1)],
@@ -5439,6 +5533,7 @@ mod omega_async_serving_tests {
                     &service,
                     CudaGraphRequest {
                         program: &program,
+                        program_hash: 0,
                         symbols: &[2, 1],
                         named: &named,
                         outputs: &[NodeId(1)],
@@ -5461,6 +5556,7 @@ mod omega_async_serving_tests {
                     &service,
                     CudaGraphRequest {
                         program: &program,
+                        program_hash: 0,
                         symbols: &[2, 1],
                         named: &[("values", QuantizedBlock::Float32(&resident_values))],
                         outputs: &[NodeId(1)],
@@ -5479,6 +5575,7 @@ mod omega_async_serving_tests {
                 &service,
                 CudaGraphRequest {
                     program: &program,
+                    program_hash: 0,
                     symbols: &[2, 1],
                     named: &[("values", QuantizedBlock::Float32(&resident_values))],
                     outputs: &[NodeId(1)],
@@ -5501,6 +5598,7 @@ mod omega_async_serving_tests {
                 &service,
                 CudaGraphRequest {
                     program: &program,
+                    program_hash: 0,
                     symbols: &[2, 1],
                     named: &[("values", QuantizedBlock::Float32(&replacement))],
                     outputs: &[NodeId(1)],
@@ -5537,6 +5635,7 @@ mod omega_async_serving_tests {
         .expect("cpu owner graph should evaluate");
         let owner_request = || CudaGraphRequest {
             program: &program,
+            program_hash: 0,
             symbols: &[2, 1],
             named: &owner_named,
             outputs: &[NodeId(1)],
@@ -5604,6 +5703,7 @@ mod omega_async_serving_tests {
         .expect("cpu replacement owner graph should evaluate");
         let second_owner_request = || CudaGraphRequest {
             program: &program,
+            program_hash: 0,
             symbols: &[2, 1],
             named: &second_owner_named,
             outputs: &[NodeId(1)],
@@ -5652,6 +5752,7 @@ mod omega_async_serving_tests {
                 &service,
                 CudaGraphRequest {
                     program: &program(),
+                    program_hash: 0,
                     symbols: &[2, 1],
                     named: &[("values", QuantizedBlock::Float32(&values))],
                     outputs: &[NodeId(1)],
@@ -5681,6 +5782,7 @@ mod omega_async_serving_tests {
                 &service,
                 CudaGraphRequest {
                     program: &program,
+                    program_hash: 0,
                     symbols: &[2, 1],
                     named: &[("values", QuantizedBlock::Float32(&first))],
                     outputs: &[NodeId(1)],
@@ -5702,6 +5804,7 @@ mod omega_async_serving_tests {
                 &service,
                 CudaGraphRequest {
                     program: &program,
+                    program_hash: 0,
                     symbols: &[3, 1],
                     named: &[("values", QuantizedBlock::Float32(&second))],
                     outputs: &[NodeId(1)],
@@ -5736,6 +5839,7 @@ mod omega_async_serving_tests {
                 &service,
                 CudaGraphRequest {
                     program: &program,
+                    program_hash: 0,
                     symbols: &[3, 1],
                     named: &[("values", QuantizedBlock::Float32(&second))],
                     outputs: &[NodeId(1)],
@@ -5778,6 +5882,7 @@ mod omega_async_serving_tests {
                 &service,
                 CudaGraphRequest {
                     program: &changed_program,
+                    program_hash: 0,
                     symbols: &[3, 1],
                     named: &[("values", QuantizedBlock::Float32(&second))],
                     outputs: &[NodeId(1)],

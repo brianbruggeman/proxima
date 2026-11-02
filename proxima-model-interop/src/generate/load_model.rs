@@ -1,6 +1,8 @@
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use super::device_kv::KvBufferSource;
 use super::residency_caches::BlockSummarizer;
+use core::hash::{Hash, Hasher};
+
 use super::*;
 
 /// How many of [`OpGpuTiming`]'s entries [`report_op_timings`] names
@@ -882,6 +884,7 @@ pub struct LoadedModel<'file> {
     pub(super) mapping_residency_rung: crate::mapping_residency::ResidencyRung,
     pub(super) vocab: Vocab,
     pub(super) program: Vec<Op>,
+    pub(super) program_hash: u64,
     pub(super) logits_root: NodeId,
     /// `proxima_tensor::spec::ForwardRoots::hidden` off the dense load path
     /// (`Self::load`/`Self::load_from_safetensors`, both wrapping
@@ -983,6 +986,7 @@ pub struct LoadedModel<'file> {
     /// `None` unless the descriptor arms verify -- built once, at load time,
     /// never per step, since the program itself never changes.
     pub(super) speculative_verify_program: Option<(Vec<Op>, NodeId, Vec<LayerCacheRoots>)>,
+    pub(super) speculative_verify_program_hash: u64,
     /// The decode descriptor of a recurrent target that arms verify
     /// ([`crate::lowering::recurrent_speculative_verify`]): a recurrent layer
     /// unrolls its scan per position, so its verify program is lowered per
@@ -1584,4 +1588,10 @@ pub(super) struct PreGatherContext<'context, 'mapping, 'file> {
     pub(super) ssm_placement: Option<&'context SsmPlacement<'context>>,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) dense_attention_placement: Option<&'context DenseAttentionPlacement<'context>>,
+}
+
+pub(super) fn program_hash(program: &[Op]) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    program.hash(&mut hasher);
+    hasher.finish()
 }

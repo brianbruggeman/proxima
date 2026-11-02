@@ -14,8 +14,12 @@ use crate::generate::CudaGraphRequest;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use proxima_core::ProximaError;
 
+/// One chunk width's program with its logits root, cache roots and content hash.
+type ChunkWidthProgram = (usize, Vec<Op>, NodeId, Vec<LayerCacheRoots>, u64);
+
 struct DecodeStepEvaluation<'step, 'name, 'block> {
     program: &'step [Op],
+    program_hash: u64,
     symbols: &'step [u64],
     named: &'step [(&'name str, QuantizedBlock<'block>)],
     outputs: &'step [NodeId],
@@ -68,6 +72,7 @@ impl DecodeStepEvaluator for SyncDecodeStepEvaluator {
     ) -> Result<Evaluated, InteropError> {
         runtime.evaluate(
             step.program,
+            step.program_hash,
             step.symbols,
             step.named,
             step.outputs,
@@ -109,6 +114,7 @@ where
                 self.service,
                 CudaGraphRequest {
                     program: step.program,
+                    program_hash: step.program_hash,
                     symbols: step.symbols,
                     named: step.named,
                     outputs: step.outputs,
@@ -4023,12 +4029,7 @@ impl<'file> LoadedModel<'file> {
         } else {
             Vec::new()
         };
-        let mut one_evaluation_prefill_programs: Vec<(
-            usize,
-            Vec<Op>,
-            NodeId,
-            Vec<LayerCacheRoots>,
-        )> = Vec::new();
+        let mut one_evaluation_prefill_programs: Vec<ChunkWidthProgram> = Vec::new();
         if self.single_position_step
             && let Some(hparams) = self.recurrent_routed_interval_hparams.as_ref()
         {
@@ -4053,7 +4054,14 @@ impl<'file> LoadedModel<'file> {
                             ),
                         }
                     })?;
-                one_evaluation_prefill_programs.push((width, program, roots.logits, layer_roots));
+                let prefill_hash = program_hash(&program);
+                one_evaluation_prefill_programs.push((
+                    width,
+                    program,
+                    roots.logits,
+                    layer_roots,
+                    prefill_hash,
+                ));
             }
         }
 
@@ -4099,7 +4107,7 @@ only the single-row decode kernel reads the half-width device cache",
         // allocation across the whole decode, per each drafter's own doc on
         // the reuse contract.
         let mut speculative_draft: Vec<u32> = Vec::new();
-        let mut recurrent_verify_programs: BTreeMap<usize, ForwardProgram> = BTreeMap::new();
+        let mut recurrent_verify_programs: BTreeMap<usize, (ForwardProgram, u64)> = BTreeMap::new();
         // the last verify step's evaluation, kept by ownership so a stop inside
         // its accepted span can resume each recurrent layer from an earlier row
         let mut retained_verify: Option<RetainedVerify> = None;
@@ -4161,6 +4169,8 @@ only the single-row decode kernel reads the half-width device cache",
             && std::env::var_os("PROXIMA_LOGITS_DIAG").is_none();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut greedy_program: Option<(Vec<Op>, NodeId, NodeId, PlacedBuffer)> = None;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut greedy_program_hash = 0u64;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut greedy_declined = false;
 
@@ -4312,11 +4322,14 @@ only the single-row decode kernel reads the half-width device cache",
                                 speculative_ids.len()
                             ))
                         })?;
-                    entry.insert(build_forward(&verify)?);
+                    let forward = build_forward(&verify)?;
+                    let forward_hash = program_hash(&forward.program);
+                    entry.insert((forward, forward_hash));
                 }
-                let recurrent_verify = recurrent_verify_programs
+                let (recurrent_verify, recurrent_verify_hash) = recurrent_verify_programs
                     .get(&speculative_ids.len())
-                    .filter(|_| speculative_step);
+                    .filter(|_| speculative_step)
+                    .map_or((None, 0), |(forward, hash)| (Some(forward), *hash));
                 if speculative_step {
                     state = state.enter_verify(speculative_draft.clone())?;
                 }
@@ -4426,30 +4439,42 @@ only the single-row decode kernel reads the half-width device cache",
                     // per-layer cache leaves, only `logits_root` differs
                     // (every new position's own row, not just the last).
                     #[allow(clippy::expect_used)]
-                    let (active_program, active_layer_roots, active_single_position_step) =
-                        if let Some(forward) = recurrent_verify {
-                            (&forward.program, &forward.layer_roots, false)
-                        } else if speculative_step {
-                            let (program, _logits_root, layer_roots) = self
-                                .speculative_verify_program
-                                .as_ref()
-                                .expect("speculative_step only set true when this is Some");
-                            (program, layer_roots, false)
-                        } else if one_evaluation_prefill {
-                            let (_offset, width) = one_evaluation_chunks[batch_index];
-                            // every width in `one_evaluation_chunks` was built into
-                            // `one_evaluation_prefill_programs` above, in the same loop.
-                            let (_, program, _logits_root, layer_roots) =
-                                one_evaluation_prefill_programs
-                                    .iter()
-                                    .find(|(built_width, ..)| *built_width == width)
-                                    .expect(
-                                        "chunk width program built above for every chunk width",
-                                    );
-                            (program, layer_roots, false)
-                        } else {
-                            (&self.program, &self.layer_roots, self.single_position_step)
-                        };
+                    let (
+                        active_program,
+                        active_layer_roots,
+                        active_single_position_step,
+                        active_program_hash,
+                    ) = if let Some(forward) = recurrent_verify {
+                        (&forward.program, &forward.layer_roots, false, recurrent_verify_hash)
+                    } else if speculative_step {
+                        let (program, _logits_root, layer_roots) = self
+                            .speculative_verify_program
+                            .as_ref()
+                            .expect("speculative_step only set true when this is Some");
+                        (
+                            program,
+                            layer_roots,
+                            false,
+                            self.speculative_verify_program_hash,
+                        )
+                    } else if one_evaluation_prefill {
+                        let (_offset, width) = one_evaluation_chunks[batch_index];
+                        // every width in `one_evaluation_chunks` was built into
+                        // `one_evaluation_prefill_programs` above, in the same loop.
+                        let (_, program, _logits_root, layer_roots, prefill_hash) =
+                            one_evaluation_prefill_programs
+                                .iter()
+                                .find(|(built_width, ..)| *built_width == width)
+                                .expect("chunk width program built above for every chunk width");
+                        (program, layer_roots, false, *prefill_hash)
+                    } else {
+                        (
+                            &self.program,
+                            &self.layer_roots,
+                            self.single_position_step,
+                            self.program_hash,
+                        )
+                    };
                     #[allow(clippy::expect_used)]
                     let active_logits_root = if let Some(forward) = recurrent_verify {
                         forward.logits
@@ -4580,8 +4605,16 @@ only the single-row decode kernel reads the half-width device cache",
                     // A padded plan binds the call's whole KV capacity: the fused
                     // `CachedAttention` bound reads the live length at runtime, so
                     // the symbol is constant for the call and the plan never refits.
+                    let probe_extent = kv_capacity.max(1) as u64;
+                    runtime.settle_kv_padding(
+                        active_program,
+                        active_program_hash,
+                        &[new_count as u64, probe_extent, probe_extent],
+                        || kv_padding_probe_roots(active_logits_root, active_layer_roots),
+                        &named_blocks,
+                    );
                     let kv_bound_extent = cached_kv_extent(
-                        runtime.pads_cached_kv(new_count),
+                        runtime.pads_cached_kv(active_program_hash, new_count),
                         cached_len,
                         new_count,
                         serving_config.kv_bucket_tokens,
@@ -4809,6 +4842,7 @@ did not hold every cached position)",
                                 let logits_buffer = allocate_placed_buffer(
                                     vocab_size * core::mem::size_of::<f32>(),
                                 )?;
+                                greedy_program_hash = program_hash(&program);
                                 greedy_program = Some((program, token, finite, logits_buffer));
                             }
                             None => {
@@ -4836,6 +4870,12 @@ did not hold every cached position)",
                     let active_program: &[Op] = match &greedy_program {
                         Some((program, ..)) if greedy_step => program,
                         _ => active_program,
+                    };
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let active_program_hash = if greedy_step {
+                        greedy_program_hash
+                    } else {
+                        active_program_hash
                     };
                     if active_program.iter().any(|operation| {
                         operation.name().is_some_and(|name| {
@@ -5727,6 +5767,7 @@ did not hold every cached position)",
                         } else if let Some(sources) = expert_source_substitutions {
                             Some(runtime.evaluate(
                                 active_program,
+                                active_program_hash,
                                 &symbols,
                                 &named_blocks,
                                 &roots,
@@ -5785,6 +5826,7 @@ did not hold every cached position)",
                         } else if let Some(sources) = expert_source_substitutions {
                             Some(runtime.evaluate(
                                 active_program,
+                                active_program_hash,
                                 &symbols,
                                 &named_blocks,
                                 &roots,
@@ -5807,6 +5849,7 @@ did not hold every cached position)",
                                     runtime,
                                     DecodeStepEvaluation {
                                         program: active_program,
+                                        program_hash: active_program_hash,
                                         symbols: &symbols,
                                         named: &named_blocks,
                                         outputs: &roots,
@@ -8286,7 +8329,7 @@ did not hold every cached position)",
         // yet -- residual, not fixed here.
         let lm_head_row_scalar = [(ids.len() - 1) as f32];
         let kv_bound_extent = cached_kv_extent(
-            runtime.pads_cached_kv(ids.len()),
+            runtime.pads_cached_kv(self.program_hash, ids.len()),
             0,
             ids.len(),
             serving_config.kv_bucket_tokens,
@@ -8338,6 +8381,7 @@ did not hold every cached position)",
         } else {
             runtime.evaluate(
                 &self.program,
+                self.program_hash,
                 &symbols,
                 &named_blocks,
                 node_ids,
@@ -8612,6 +8656,29 @@ fn kv_leaves<'names>(
         ],
         _ => Vec::new(),
     }
+}
+
+/// The output set a padding probe binds against: the logits root and every layer's
+/// cache roots, which is what an ordinary step requests. A probe that binds a different
+/// set than the plan does is caught when the plan answers (`PaddedKvReadUnfused`).
+fn kv_padding_probe_roots(
+    logits_root: NodeId,
+    layer_roots: &[LayerCacheRoots],
+) -> Vec<NodeId> {
+    let cache_roots = layer_roots.iter().flat_map(|roots| match roots {
+        LayerCacheRoots::Attention((even, odd, value)) => vec![*even, *odd, *value],
+        LayerCacheRoots::DenseAttention((first, second, pass, value)) => {
+            vec![*first, *second, *pass, *value]
+        }
+        LayerCacheRoots::ShortConv { state_out } => vec![*state_out],
+        LayerCacheRoots::Ssm {
+            qkv_mixed,
+            state_out,
+            ..
+        } => vec![*qkv_mixed, *state_out],
+        LayerCacheRoots::SharedFromLayer(_) => Vec::new(),
+    });
+    core::iter::once(logits_root).chain(cache_roots).collect()
 }
 
 fn kv_carry_leaves(
