@@ -552,10 +552,9 @@ pub struct CudaPlan {
     pool: Box<PoolSchedule>,
 }
 
-/// Recurrent state that stays on the device between calls: `pairs` maps a state input node to the
-/// output node that produces its next value, `live` holds the inputs whose arena buffer is already
-/// current, and `host_bytes` counts every carried state byte that crossed PCIe in either direction.
-/// `rows` is the sans-IO [`KvCarry`] that decides every cache-input row append, growth, truncation and handover.
+/// Device-carried state between calls. Both machines are sans-IO: [`StateSwap`] decides which recurrent
+/// state buffers swap and park, [`KvCarry`] every cache-input row append, growth, truncation and handover;
+/// `host_bytes` counts every carried byte that crossed PCIe in either direction.
 #[derive(Debug, Default)]
 struct StateCarry {
     state: StateSwap<NodeId>,
