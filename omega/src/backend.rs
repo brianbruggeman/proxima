@@ -1431,12 +1431,12 @@ pub fn refit_cuda_symbols(
     }
 }
 
-/// Cumulative `[refit calls, ops re-emitted, ops reused, ops repacked]` of a
+/// Cumulative `[refit calls, ops re-emitted, ops reused, ops repacked, row repacks]` of a
 /// [`Plan::Cuda`]; `None` on every other arm. See
 /// [`cuda_driver::CudaPlan::refit_counters`].
 #[cfg(feature = "cuda-driver")]
 #[must_use]
-pub fn cuda_refit_counters(plan: &Plan) -> Option<[u64; 4]> {
+pub fn cuda_refit_counters(plan: &Plan) -> Option<[u64; 5]> {
     match plan {
         Plan::Cuda(cuda_plan) => Some(cuda_plan.refit_counters()),
         _ => None,

@@ -37,7 +37,8 @@ use crate::cuda_ptx_store::PtxStore;
 use crate::lowering::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{
     RefreshRefusal, changed_nodes, kv_read_only_by_fused_attention, refit_cached_attention_at,
-    refresh_bound_ops, touched_positions, touches_changed,
+    RowTemplate, apply_row_template, refresh_bound_ops, refresh_cached_attention, row_template,
+    touched_positions, touches_changed,
 };
 use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Evaluated, Keep, NodeId, NumericPolicy, NumericRewrite, Op,
@@ -397,6 +398,9 @@ struct LaunchProfile {
     function_lookups: u64,
 }
 
+/// The fewest rows the prefill kernels share one form for: below it cached attention runs untiled.
+const ROW_CLASS_MIN: u64 = 16;
+
 const LAUNCH_PHASES: usize = 6;
 const LAUNCH_PHASE_NAMES: [&str; LAUNCH_PHASES] = [
     "upload_uniform",
@@ -475,11 +479,15 @@ pub struct CudaPlan {
     // cumulative per-plan totals; read by the decode path's per-step telemetry, never printed per dispatch.
     refit_calls: u64,
     patch_memo: Option<(Vec<NodeId>, Vec<usize>)>,
+    // the row count the bound ops were last bound at, and the proof that every integer in them is affine in it: `None` until tried, `Some(None)` once refused
+    bound_rows: u64,
+    rows_template: Option<Option<RowTemplate>>,
     // one resolved device function per kernel, so a launch skips the module-cache text comparison
     functions: Vec<Option<CudaFunction>>,
     emit_calls: u64,
     emit_reused: u64,
     pack_calls: u64,
+    repack_calls: u64,
     carry: Box<StateCarry>,
     pool: Box<PoolSchedule>,
 }
@@ -1028,9 +1036,12 @@ impl CudaDriver {
             resident_nodes: Box::default(),
             refit_calls: 0,
             patch_memo: None,
+            bound_rows: symbols.first().copied().unwrap_or(0),
+            rows_template: None,
             emit_calls: 0,
             emit_reused: 0,
             pack_calls: 0,
+            repack_calls: 0,
             carry: Box::default(),
         };
         if config.is_some() {
@@ -2086,6 +2097,26 @@ impl CudaPlan {
             })?;
         let infer_micros = infer_started.elapsed().as_micros() as u64;
         let same_policy = numeric_policy == self.numeric_policy;
+        let rows = symbols.first().copied().unwrap_or(0);
+        if same_policy && rows != self.bound_rows {
+            let repack_started = Instant::now();
+            if let Some(op_count) = self.repack_rows(rows, &shapes, numeric_policy)? {
+                self.refit_calls += 1;
+                self.emit_reused += op_count as u64;
+                self.pack_calls += op_count as u64;
+                self.repack_calls += 1;
+                self.shapes = shapes;
+                proxima_telemetry::debug!(
+                    infer_us = infer_micros,
+                    repack_us = elapsed_micros(repack_started),
+                    op_count = op_count,
+                    bind_path = "repack",
+                    refit_total = self.refit_calls,
+                    "cuda plan refit phases"
+                );
+                return Ok(true);
+            }
+        }
         if same_policy {
             let patch_started = Instant::now();
             if let Some(touched) = self.patch_cached_attention(&shapes, numeric_policy)? {
@@ -2181,6 +2212,10 @@ impl CudaPlan {
         self.functions = vec![None; kernels.len()];
         self.kernels = kernels;
         self.uniforms = uniforms;
+        let previous_rows = std::mem::replace(&mut self.bound_rows, rows);
+        if same_policy && previous_rows != rows && self.rows_template.is_none() {
+            self.learn_row_template(&previous_bound, previous_rows, symbols, numeric_policy)?;
+        }
         proxima_telemetry::debug!(
             infer_us = infer_micros,
             bind_us = micros.bind,
@@ -2198,6 +2233,172 @@ impl CudaPlan {
             "cuda plan refit phases"
         );
         Ok(true)
+    }
+
+    /// Moves the bound ops to `rows` through the proof learned at an earlier row change:
+    /// every integer is re-evaluated, the launch grids and uniforms follow, and nothing is
+    /// bound, fused or emitted. `Ok(None)` when no proof exists or either row count is
+    /// outside the class the proof covers.
+    fn repack_rows(
+        &mut self,
+        rows: u64,
+        shapes: &Shapes,
+        numeric_policy: NumericPolicy,
+    ) -> Result<Option<usize>, CudaDriverError> {
+        if rows < ROW_CLASS_MIN || self.bound_rows < ROW_CLASS_MIN {
+            return Ok(None);
+        }
+        let Some(Some(template)) = &self.rows_template else {
+            return Ok(None);
+        };
+        let mut next = self.resolved.clone();
+        let Some(attention) = apply_row_template(template, rows, &mut next) else {
+            return Ok(None);
+        };
+        for position in attention {
+            let Some(patched) = refresh_cached_attention(&next[position], shapes) else {
+                return Ok(None);
+            };
+            next[position] = patched;
+        }
+        for position in 0..next.len() {
+            self.follow_rows(position, &next[position], numeric_policy)?;
+        }
+        *self.pool = PoolSchedule::build(&next, &self.kernels, &self.outputs);
+        let count = next.len();
+        self.resolved = next;
+        self.bound_rows = rows;
+        self.patch_memo = None;
+        Ok(Some(count))
+    }
+
+    fn follow_rows(
+        &mut self,
+        position: usize,
+        next: &BoundOp,
+        numeric_policy: NumericPolicy,
+    ) -> Result<(), CudaDriverError> {
+        let emit_error = |error: crate::error::EmitError| CudaDriverError::Emit {
+            node: next.node,
+            error: error.to_string(),
+        };
+        let device = self.driver.device;
+        if matches!(next.kind, BoundOpKind::CachedAttention { .. }) {
+            let kept = crate::cuda::refit_kernel(
+                &self.resolved[position],
+                next,
+                &mut self.kernels[position],
+                &self.packed_operands,
+                numeric_policy,
+                device,
+            )
+            .map_err(emit_error)?;
+            if !kept {
+                self.functions[position] = None;
+            }
+        } else {
+            crate::cuda::refit_grid(&mut self.kernels[position], next, &self.packed_operands, numeric_policy, device)
+                .map_err(emit_error)?;
+        }
+        self.uniforms[position] = crate::cuda::pack_cuda_uniforms(next).map_err(emit_error)?;
+        Ok(())
+    }
+
+    /// After a row change that bound from scratch, proves from the old and new binds plus one
+    /// more at a row count between them that every integer in the ops is affine in the row
+    /// count and that every kernel text is the same, so the next change can be repacked.
+    fn learn_row_template(
+        &mut self,
+        previous: &[BoundOp],
+        previous_rows: u64,
+        symbols: &[u64],
+        numeric_policy: NumericPolicy,
+    ) -> Result<(), CudaDriverError> {
+        let rows = self.bound_rows;
+        let middle = previous_rows / 2 + rows / 2 + (previous_rows & rows & 1);
+        let distinct = middle != previous_rows && middle != rows;
+        let in_class = previous_rows >= ROW_CLASS_MIN && rows >= ROW_CLASS_MIN && distinct;
+        if !in_class || previous.len() != self.resolved.len() {
+            return Ok(());
+        }
+        let mut middle_symbols = symbols.to_vec();
+        middle_symbols[0] = middle;
+        let middle_shapes =
+            infer(&self.program, &middle_symbols).map_err(|_| CudaDriverError::UnsupportedGraph {
+                node: NodeId(0),
+                reason: "shape inference failed",
+            })?;
+        let (between, _) = bind_resolved(
+            &self.program,
+            &middle_shapes,
+            &self.outputs,
+            &self.packed_operands,
+            numeric_policy,
+            false,
+        )?;
+        let same_text = self.text_is_row_independent(previous, &between, numeric_policy)?;
+        let template = same_text
+            .then(|| {
+                row_template(&[
+                    (previous_rows, previous),
+                    (rows, self.resolved.as_slice()),
+                    (middle, between.as_slice()),
+                ])
+            })
+            .flatten();
+        proxima_telemetry::debug!(
+            same_text = same_text,
+            fitted = template.is_some(),
+            rows = rows,
+            previous_rows = previous_rows,
+            middle_rows = middle,
+            "cuda row template learned"
+        );
+        self.rows_template = Some(template);
+        Ok(())
+    }
+
+    fn text_is_row_independent(
+        &self,
+        previous: &[BoundOp],
+        between: &[BoundOp],
+        numeric_policy: NumericPolicy,
+    ) -> Result<bool, CudaDriverError> {
+        let device = self.driver.device;
+        let packed = &self.packed_operands;
+        for position in 0..previous.len() {
+            let current = &self.resolved[position];
+            let same_plan = |other: &BoundOp| {
+                between.len() == previous.len()
+                    && crate::cuda::same_text_modulo_extents(other, current, packed, numeric_policy, device)
+            };
+            let first = same_plan(&previous[position]);
+            let second = same_plan(&between[position]);
+            if !(first && second) {
+                proxima_telemetry::debug!(position = position as u64, kind = current.kind.name(), "row template refused: kernel text plan differs");
+                return Ok(false);
+            }
+            if previous[position].extents != current.extents && !self.emits_same_text(&previous[position], position, numeric_policy)? {
+                proxima_telemetry::debug!(position = position as u64, kind = current.kind.name(), "row template refused: emitted text differs");
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn emits_same_text(
+        &self,
+        previous: &BoundOp,
+        position: usize,
+        numeric_policy: NumericPolicy,
+    ) -> Result<bool, CudaDriverError> {
+        let before = crate::emit_cuda_on_device(previous, &self.packed_operands, numeric_policy, self.driver.device)
+            .map_err(|error| CudaDriverError::Emit {
+                node: previous.node,
+                error: error.to_string(),
+            })?;
+        let after = &self.kernels[position];
+        Ok(before.entry == after.entry && before.source == after.source)
     }
 
     /// Moves the plan to `shapes` by patching only the cached-attention ops
@@ -2252,14 +2453,15 @@ impl CudaPlan {
         Ok(Some(touched))
     }
 
-    /// Cumulative `[refit calls, ops re-emitted, ops reused, ops repacked]` since this plan was built.
+    /// Cumulative `[refit calls, ops re-emitted, ops reused, ops repacked, refits done as a row repack]` since this plan was built.
     #[must_use]
-    pub const fn refit_counters(&self) -> [u64; 4] {
+    pub const fn refit_counters(&self) -> [u64; 5] {
         [
             self.refit_calls,
             self.emit_calls,
             self.emit_reused,
             self.pack_calls,
+            self.repack_calls,
         ]
     }
 

@@ -68,7 +68,7 @@ use proxima_tensor::{
 use crate::cuda_cached_attention::{
     cached_attention_entry_name, cached_attention_runtime_bounds, render_cached_attention_cuda,
 };
-use crate::cuda_cached_attention_tiled::cached_attention_tile_rows;
+use crate::cuda_cached_attention_tiled::{ATTENTION_TILE_MIN_ROWS, cached_attention_tile_rows};
 use crate::epilogue::{
     broadcast_reduce_takes_block, epilogue_operand_is_loop_invariant, index32_reach_fits,
     reduce_block_width,
@@ -542,6 +542,35 @@ pub fn refit_kernel(
     Ok(true)
 }
 
+/// [`refit_kernel`] for an op already known to emit the same text: only the launch grid,
+/// extra outputs and prologue follow `new`'s extents.
+///
+/// # Errors
+/// The emit error of `new` when its grid cannot be derived.
+pub fn refit_grid(
+    kernel: &mut CudaKernel,
+    new: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+) -> Result<(), EmitError> {
+    refit_extent_fields_in_place(kernel, new, packed_operands, numeric_policy, device)
+}
+
+/// Whether two ops select the same kernel text, ignoring the extents that only reach the
+/// text through packed-operand addressing: [`same_emitted_text`] without that clause.
+pub fn same_text_modulo_extents(
+    old: &BoundOp,
+    new: &BoundOp,
+    packed: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    device: EmitDevice,
+) -> bool {
+    old.dtype == new.dtype
+        && project_text_kind(&old.kind) == project_text_kind(&new.kind)
+        && same_text_plan(old, new, packed, numeric_policy, device)
+}
+
 /// Whether two ops emit the same CUDA C text. Layout stride and base values go
 /// to uniforms, so only each stride's zero pattern reaches the text. Extents
 /// reach the text only through packed-operand addressing, so an op that reads
@@ -585,6 +614,7 @@ fn project_text_kind(kind: &BoundOpKind) -> BoundOpKind {
     match &mut projected {
         BoundOpKind::CachedAttention {
             operands,
+            query_rows,
             cached_key_rows,
             new_key_rows,
             new_upper_inclusive,
@@ -596,6 +626,7 @@ fn project_text_kind(kind: &BoundOpKind) -> BoundOpKind {
                 *cached_key_rows = 1;
             }
             if cached_attention_runtime_bounds(kind) {
+                *query_rows = (*query_rows).min(ATTENTION_TILE_MIN_ROWS);
                 *new_key_rows = 0;
                 *new_upper_inclusive = 0;
                 *cached_lower_inclusive = 0;
@@ -657,8 +688,8 @@ fn text_lookup(lookup: &Lookup) -> Lookup {
     Lookup {
         indices: lookup.indices,
         index_layout: text_layout(&lookup.index_layout),
-        element_stride: lookup.element_stride,
-        extent: lookup.extent,
+        element_stride: 0,
+        extent: 0,
     }
 }
 

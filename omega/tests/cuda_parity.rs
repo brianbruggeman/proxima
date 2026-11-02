@@ -3041,7 +3041,7 @@ fn refit_symbols_increments_refit_calls_once_per_call() {
         .expect("a cuda plan exposes its refit counters");
     assert_eq!(
         before,
-        [0, 0, 0, 0],
+        [0, 0, 0, 0, 0],
         "a freshly built plan has no refit history"
     );
 
@@ -3059,7 +3059,7 @@ fn refit_symbols_increments_refit_calls_once_per_call() {
     );
     assert_eq!(
         after,
-        [1, 0, op_count, 0],
+        [1, 0, op_count, 0, 0],
         "unchanged symbols re-emit and repack nothing: every op is reused as it stands"
     );
 }
