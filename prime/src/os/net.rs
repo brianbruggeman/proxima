@@ -335,16 +335,16 @@ impl std::future::Future for Connect {
                         // deregister the write-only registration;
                         // TcpStream::ensure_registered will re-register
                         // for the needed interest on first I/O poll.
-                        if let Some(owner) = owned_owner {
-                            match checked_reactor(&owner) {
-                                Ok(mut current) => current.deregister(owned_source)?,
-                                Err(err) => {
-                                    // state is already Done, so Drop cannot release this slot.
-                                    owner.release_source(owned_source, owned_socket.into());
-                                    return Poll::Ready(Err(err));
+                        let owned_socket = match owned_owner {
+                            Some(owner) => {
+                                let lookup = checked_reactor(&owner);
+                                match finish_connected(&owner, owned_source, owned_socket, lookup) {
+                                    Ok(socket) => socket,
+                                    Err(err) => return Poll::Ready(Err(err)),
                                 }
                             }
-                        }
+                            None => owned_socket,
+                        };
                         Poll::Ready(Ok(TcpStream::from_socket(owned_socket)))
                     }
 
@@ -992,16 +992,16 @@ impl std::future::Future for UnixConnect {
                         else {
                             unreachable!()
                         };
-                        if let Some(owner) = owned_owner {
-                            match checked_reactor(&owner) {
-                                Ok(mut current) => current.deregister(owned_source)?,
-                                Err(err) => {
-                                    // state is already Done, so Drop cannot release this slot.
-                                    owner.release_source(owned_source, owned_socket.into());
-                                    return Poll::Ready(Err(err));
+                        let owned_socket = match owned_owner {
+                            Some(owner) => {
+                                let lookup = checked_reactor(&owner);
+                                match finish_connected(&owner, owned_source, owned_socket, lookup) {
+                                    Ok(socket) => socket,
+                                    Err(err) => return Poll::Ready(Err(err)),
                                 }
                             }
-                        }
+                            None => owned_socket,
+                        };
                         Poll::Ready(Ok(UnixStream::from_socket(owned_socket)))
                     }
 
@@ -1286,6 +1286,30 @@ fn checked_reactor(owner: &Wakeup) -> io::Result<ReactorBorrow> {
         ));
     }
     Ok(reactor)
+}
+
+/// completes a connect whose state is already `Done`: deregisters the write-only
+/// registration through `reactor`, or, when the reactor lookup failed, queues the
+/// slot and socket for release on the owning worker via `Wakeup::release_source`.
+/// `Drop` cannot do that release because the state was replaced before this runs.
+/// takes the lookup result so a test can feed it the `Err` that a same-thread
+/// poll cannot produce after the poll-entry `checked_reactor` check passed.
+fn finish_connected(
+    owner: &Wakeup,
+    source: SourceKey,
+    socket: Socket,
+    reactor: io::Result<ReactorBorrow>,
+) -> io::Result<Socket> {
+    match reactor {
+        Ok(mut current) => {
+            current.deregister(source)?;
+            Ok(socket)
+        }
+        Err(err) => {
+            owner.release_source(source, socket.into());
+            Err(err)
+        }
+    }
 }
 
 fn check_owner(owner: &Option<Wakeup>) -> io::Result<()> {
@@ -2259,9 +2283,9 @@ mod tests {
     ///
     /// proves: the off-worker release path (`release_socket` ->
     /// `Wakeup::release_source` -> cancellation queue -> `Reactor::turn`).
-    /// does NOT prove: the `Outcome::Connected` arm's new `release_source` call,
-    /// which needs `checked_reactor` to fail after the poll-entry check passed
-    /// on the same thread; no seam can produce that, so it is covered by review.
+    /// does NOT prove: the `Outcome::Connected` arm's release, which needs the
+    /// reactor lookup to fail after the poll-entry check passed; that path is
+    /// `finish_connected`, covered by `finish_connected_releases_slot_when_reactor_lookup_fails`.
     #[test]
     fn connect_polled_off_worker_errors_and_drop_releases_slot() {
         let blackhole: SocketAddr = "192.0.2.1:80".parse().expect("addr");
@@ -2292,6 +2316,42 @@ mod tests {
         assert_eq!(pending, before + 1, "pending connect must hold one slot");
         assert!(foreign_errored, "off-worker poll must return Err");
         assert_eq!(after, before, "slot must be released after drop + drain");
+    }
+
+    /// the `Outcome::Connected` failure path: a connected loopback socket is
+    /// registered on the worker, then `finish_connected` is handed an `Err`
+    /// reactor lookup. it must return that error and queue the slot for release
+    /// so the worker's live-source count returns to its prior value.
+    #[test]
+    fn finish_connected_releases_slot_when_reactor_lookup_fails() {
+        let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let (before, registered, errored, after) = run_on_worker(move |sender| {
+            Box::pin(async move {
+                let socket = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP))
+                    .expect("socket");
+                socket.connect(&SockAddr::from(addr)).expect("loopback connect");
+                socket.set_nonblocking(true).expect("nonblocking");
+                let before = live_sources_on_worker();
+                let (source, owner) = core_shard::with_current_reactor(|reactor| {
+                    let key = register_socket(reactor, &socket, Interest::Write).expect("register");
+                    (key, reactor.wakeup())
+                })
+                .expect("on a worker");
+                let registered = live_sources_on_worker();
+                let lookup = Err(io::Error::other("owning worker gone"));
+                let errored = finish_connected(&owner, source, socket, lookup).is_err();
+                drain_cancellations_on_worker();
+                let after = live_sources_on_worker();
+                sender
+                    .send((before, registered, errored, after))
+                    .expect("send result");
+            })
+        });
+        assert_eq!(registered, before + 1, "registered socket must hold one slot");
+        assert!(errored, "failed lookup must surface as Err");
+        assert_eq!(after, before, "slot must be released after drain");
+        drop(listener);
     }
 
     /// a Connect driven to completion on its owning worker against a real
