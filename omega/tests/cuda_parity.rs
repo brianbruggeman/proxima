@@ -3162,6 +3162,30 @@ fn cuda_cached_attention_matches_cpu_at_two_cached_lens_in_one_bucket() {
     }
 }
 
+#[proxima::test]
+#[case::empty_cache(0)]
+#[case::one_live_row(1)]
+#[case::two_live_rows(2)]
+#[case::mid_bucket(17)]
+#[case::one_below_the_bucket(63)]
+#[case::full_bucket(64)]
+async fn cuda_cached_attention_bound_matches_the_exact_range_at_every_live_length(
+    #[case] cached_len: u64,
+) {
+    let (relative, identities) = padded_cache_relative_error(cached_len, f32::NAN, None);
+
+    assert!(
+        identities
+            .iter()
+            .any(|identity| identity.contains("omega_cuda_cached_attention_")),
+        "fused cached attention absent from the cuda plan: {identities:?}"
+    );
+    assert!(
+        relative < 1e-4,
+        "cached_len={cached_len} in a 64-row bucket: cuda vs the exact cpu range relative={relative}, tolerance 1e-4"
+    );
+}
+
 #[test]
 fn cuda_cached_attention_diverges_when_cached_len_is_wrong() {
     let (relative, _) = padded_cache_relative_error(31, 0.5, Some(32.0));
