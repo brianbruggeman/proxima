@@ -171,7 +171,7 @@ impl LoadedModel<'_> {
         on_chunk: &mut dyn FnMut(usize),
     ) -> Result<PrewarmReport, InteropError> {
         let effective = self.effective_serving_config(serving_config)?;
-        let mut runtime = BackendRuntime::new(&effective);
+        let (mut runtime, _pinned) = self.pinned_runtime(&effective);
         self.prewarm_ids(ids, &effective, &mut runtime, None, on_chunk)
     }
 
@@ -315,7 +315,7 @@ impl LoadedModel<'_> {
         serving_config: &ServingConfig,
     ) -> Result<Option<PrewarmReport>, InteropError> {
         let effective = self.effective_serving_config(serving_config)?;
-        let mut runtime = BackendRuntime::new(&effective);
+        let (mut runtime, _pinned) = self.pinned_runtime(&effective);
         self.run_queued_prewarm(&effective, &mut runtime)
     }
 
@@ -324,6 +324,7 @@ impl LoadedModel<'_> {
         effective: &ServingConfig,
         runtime: &mut BackendRuntime,
     ) -> Result<Option<PrewarmReport>, InteropError> {
+        let _pinned = self.pin_evaluation();
         self.prewarm_queue
             .run_next(|job| self.prewarm_queued(&job, effective, runtime))
             .transpose()

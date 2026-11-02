@@ -36,6 +36,7 @@ use std::time::Duration;
 
 use crate::block_file::model_digest;
 use crate::disk_cold_tier::DiskColdTier;
+use crate::mapped_residency::{MappedResidency, Pinned};
 use crate::memory_reclaim::{ReclaimSettings, RegionLedger, Released, monotonic_now, read_used_fraction};
 
 use proxima_telemetry::{debug, error, warn};
@@ -1383,7 +1384,7 @@ pub(super) fn thaw_best_cold(
     cache.lock().thaw(ticket.stamp, restored, key, config)
 }
 
-impl LoadedModel<'_> {
+impl<'file> LoadedModel<'file> {
     /// Drops every entry. A model-level input the key does not carry (the
     /// expert sidecar, [`Self::attach_expert_sidecar`]) just changed, so every
     /// stored row was built under a model this one no longer is.
@@ -1520,12 +1521,42 @@ impl LoadedModel<'_> {
         Ok(true)
     }
 
+    pub fn with_residency(mut self, residency: Arc<MappedResidency<'file>>) -> Self {
+        self.residency = Some(residency);
+        self
+    }
+
+    pub(super) fn pin_evaluation(&self) -> Option<Pinned<'_, 'file>> {
+        self.residency.as_deref().map(MappedResidency::pin)
+    }
+
+    /// The only way an entry point obtains a runtime: the pin is returned with it, so evaluation cannot run on released weights.
+    pub(super) fn pinned_runtime(&self, serving_config: &ServingConfig) -> (BackendRuntime, Option<Pinned<'_, 'file>>) {
+        (BackendRuntime::new(serving_config), self.pin_evaluation())
+    }
+
+    pub(super) fn touch_region(&self, region: u64) {
+        if let Some(residency) = &self.residency {
+            residency.touch(region, monotonic_now());
+        }
+    }
+
+    fn reclaim_mapped_regions(&self) {
+        let Some(residency) = &self.residency else {
+            return;
+        };
+        if let Err(error) = residency.reclaim_now() {
+            error!(reclaim_error = %error, "mapped region reclaim pass failed");
+        }
+    }
+
     /// Hands a finished request's entry to the cache, `true` when it is held.
     pub(super) fn prompt_cache_store(&self, entry: CacheEntry, config: &PromptCacheConfig) -> bool {
         let cached_tokens = entry.state.cached_len;
         let checkpoints = entry.checkpoints.len();
         let entries = self.prompt_cache.lock().store(entry, config);
         self.reclaim_prompt_cache(config);
+        self.reclaim_mapped_regions();
         debug!(
             cache_stored_tokens = cached_tokens as u64,
             cache_checkpoints = checkpoints as u64,

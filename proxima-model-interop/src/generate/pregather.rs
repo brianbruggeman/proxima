@@ -1545,6 +1545,7 @@ impl<'file> LoadedModel<'file> {
                     {
                         #[cfg(feature = "instrument")]
                         let sidecar_read_started = read_ticks();
+                        self.touch_region(crate::mapped_residency::EXPERT_SIDECAR_REGION);
                         sidecar.read_selected_with_checkpoint_admitting(
                             layer,
                             expert_slab.selected_experts(layer),
@@ -2877,6 +2878,7 @@ impl<'file> LoadedModel<'file> {
             expert_slab: Mutex::new(expert_slab),
             expert_sidecar: None,
             prompt_cache: Mutex::new(PromptCache::new()),
+            residency: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3096,6 +3098,7 @@ impl<'file> LoadedModel<'file> {
             expert_slab: Mutex::new(expert_slab),
             expert_sidecar: None,
             prompt_cache: Mutex::new(PromptCache::new()),
+            residency: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
