@@ -10,6 +10,16 @@ use proxima_primitives::sync::OnceCell;
 
 use proxima_primitives::pipe::SendPipe;
 
+#[cfg(any(
+    feature = "tokio-runtime",
+    all(
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc",
+        feature = "runtime-prime-reactor",
+        feature = "runtime-prime-bgpool"
+    )
+))]
+use crate::body::ResponseStream;
 use crate::client::request::RequestBuilder;
 use crate::error::ProximaError;
 use crate::load::{LoadContext, Spec, load};
@@ -373,8 +383,26 @@ impl Client {
         use crate::runtime::CoreId;
         let (sender, receiver) = futures::channel::oneshot::channel();
         let future = Box::pin(async move {
-            let result = SendPipe::call(&handle, request).await;
-            let _ = sender.send(result);
+            let mut sender = sender;
+            // the caller dropping its future drops the receiver; racing the
+            // call against that cancellation drops the call future, which
+            // closes the upstream socket instead of leaving it running detached.
+            let outcome = {
+                let call = std::pin::pin!(SendPipe::call(&handle, request));
+                let cancelled =
+                    std::pin::pin!(futures::future::poll_fn(|cx| sender.poll_canceled(cx)));
+                match futures::future::select(call, cancelled).await {
+                    futures::future::Either::Left((result, _)) => Some(result),
+                    futures::future::Either::Right(_) => None,
+                }
+            };
+            match outcome {
+                Some(Ok(response)) => Self::hand_back_streamed(response, sender).await,
+                Some(Err(error)) => {
+                    let _ = sender.send(Err(error));
+                }
+                None => {}
+            }
         });
         runtime
             .spawn_on_core(CoreId(0), future)
@@ -383,7 +411,64 @@ impl Client {
             .await
             .map_err(|_| ProximaError::Upstream("client dispatch cancelled".to_string()))?
     }
+
+    /// Runs on the worker. A streamed response body holds the live socket the
+    /// worker's reactor registered, and that socket only polls on the worker,
+    /// so the body is pumped here and the caller's thread reads the chunks
+    /// from a channel instead of the socket.
+    #[cfg(any(
+        feature = "tokio-runtime",
+        all(
+            feature = "runtime-prime-executor",
+            feature = "runtime-prime-inbox-alloc",
+            feature = "runtime-prime-reactor",
+            feature = "runtime-prime-bgpool"
+        )
+    ))]
+    async fn hand_back_streamed(
+        mut response: crate::request::Response<Bytes>,
+        sender: futures::channel::oneshot::Sender<
+            Result<crate::request::Response<Bytes>, ProximaError>,
+        >,
+    ) {
+        use futures::{SinkExt, StreamExt};
+
+        let Some(stream) = response.stream.take() else {
+            let _ = sender.send(Ok(response));
+            return;
+        };
+        let trailers = stream.trailers_slot().cloned();
+        let mut chunks = stream.into_chunk_stream();
+        let (mut forward, relayed) = futures::channel::mpsc::channel(RELAY_CHUNKS_IN_FLIGHT);
+        let mut relayed_stream = ResponseStream::new(relayed);
+        if let Some(slot) = trailers {
+            relayed_stream = relayed_stream.with_trailers_slot(slot);
+        }
+        response.stream = Some(relayed_stream);
+        if sender.send(Ok(response)).is_err() {
+            return;
+        }
+        while let Some(chunk) = chunks.next().await {
+            let failed = chunk.is_err();
+            if forward.send(chunk).await.is_err() || failed {
+                break;
+            }
+        }
+    }
 }
+
+/// how many body chunks the worker may run ahead of the calling thread; each
+/// chunk is at most one socket read, so this bounds the relay at a few reads.
+#[cfg(any(
+    feature = "tokio-runtime",
+    all(
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc",
+        feature = "runtime-prime-reactor",
+        feature = "runtime-prime-bgpool"
+    )
+))]
+const RELAY_CHUNKS_IN_FLIGHT: usize = 4;
 
 /// `Client` is itself a [`Handler`](crate::pipe::Handler): composing it as a transport
 /// stage routes the request through `Client::dispatch` (crate-private), so the
@@ -939,6 +1024,234 @@ mod tests {
         });
         assert_eq!(&body[..], b"hello");
         server.join().expect("server join");
+    }
+
+    /// regression: the response body of an off-worker `send()` is read on the
+    /// caller's thread, but the live socket it streams from is registered with
+    /// the prime worker's reactor. a body larger than the 16 KiB head scratch
+    /// leaves bytes on the socket, so `bytes()` polled off the worker failed
+    /// with `registered socket used off its owning prime worker`. `hop_onto`
+    /// now pumps the body on the worker and relays chunks over a channel.
+    /// repeated because the failure raced the worker's read.
+    #[cfg(all(
+        feature = "http-prime",
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc",
+        feature = "runtime-prime-reactor",
+        feature = "runtime-prime-bgpool"
+    ))]
+    #[test]
+    fn off_worker_send_reads_body_larger_than_head_scratch() {
+        use std::io::{Read as _, Write as _};
+        use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+        use std::sync::mpsc;
+
+        const ATTEMPTS: usize = 30;
+        const BODY_LEN: usize = 88 * 1024;
+        let expected: Vec<u8> = (0..BODY_LEN)
+            .map(|index| u8::try_from(index * 31 % 251).expect("fits in a byte"))
+            .collect();
+
+        let mut failures = Vec::new();
+        for attempt in 0..ATTEMPTS {
+            let (port_tx, port_rx) = mpsc::channel();
+            let body = expected.clone();
+            let server = std::thread::spawn(move || {
+                let listener =
+                    TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
+                port_tx
+                    .send(listener.local_addr().expect("addr").port())
+                    .expect("send port");
+                let (mut socket, _) = listener.accept().expect("accept");
+                let mut buffer = Vec::new();
+                let mut scratch = [0_u8; 1024];
+                loop {
+                    let read = socket.read(&mut scratch).expect("read");
+                    buffer.extend_from_slice(&scratch[..read]);
+                    if read == 0 || buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let mut response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    body.len()
+                )
+                .into_bytes();
+                response.extend_from_slice(&body);
+                socket.write_all(&response).expect("write");
+                socket.flush().expect("flush");
+            });
+            let port = port_rx.recv().expect("port");
+
+            // this libtest thread is not a prime worker; the body is polled here.
+            let outcome = futures::executor::block_on(async {
+                let client =
+                    Client::from_value(json!({ "http": format!("http://127.0.0.1:{port}") }))
+                        .expect("build");
+                let response = client
+                    .call("GET", "/v1/chat/completions")
+                    .send()
+                    .await
+                    .map_err(|error| format!("send: {error}"))?;
+                response
+                    .bytes()
+                    .await
+                    .map_err(|error| format!("bytes: {error}"))
+            });
+            match outcome {
+                Ok(received) if received[..] == expected[..] => {}
+                Ok(received) => failures.push(format!(
+                    "attempt {attempt}: body differs ({} of {} bytes)",
+                    received.len(),
+                    expected.len()
+                )),
+                Err(error) => failures.push(format!("attempt {attempt}: {error}")),
+            }
+            server.join().expect("server join");
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {ATTEMPTS} off-worker body reads failed: {failures:?}",
+            failures.len()
+        );
+    }
+
+    /// drives one POST whose upstream reads the request and never answers,
+    /// drops the caller's `send()` future (a caller's timeout) while the
+    /// client stays alive, and returns what the upstream saw on its socket.
+    /// the client must outlive the cancel: dropping it closes its pool, which
+    /// would mask a connection the pool kept.
+    #[cfg(all(
+        feature = "http-prime",
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc",
+        feature = "runtime-prime-reactor",
+        feature = "runtime-prime-bgpool"
+    ))]
+    fn dropped_send_observed_by_upstream(
+        spec_for: impl FnOnce(u16) -> serde_json::Value,
+    ) -> String {
+        use std::io::{ErrorKind, Read as _};
+        use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        const CLOSE_BOUND: Duration = Duration::from_secs(10);
+        let (port_tx, port_rx) = mpsc::channel();
+        let (request_read_tx, request_read_rx) = mpsc::channel();
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let listener =
+                TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0))).expect("bind");
+            port_tx
+                .send(listener.local_addr().expect("addr").port())
+                .expect("send port");
+            let (mut socket, _) = listener.accept().expect("accept");
+            socket
+                .set_read_timeout(Some(CLOSE_BOUND))
+                .expect("read timeout");
+            let mut buffer = Vec::new();
+            let mut scratch = [0_u8; 1024];
+            while !buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = socket.read(&mut scratch).expect("read request");
+                assert!(read > 0, "client closed before sending a full request");
+                buffer.extend_from_slice(&scratch[..read]);
+            }
+            request_read_tx.send(()).expect("signal request read");
+            let observed = match socket.read(&mut scratch) {
+                Ok(0) => "eof".to_string(),
+                Ok(read) => format!("unexpected {read} bytes"),
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) =>
+                {
+                    format!("still open after {CLOSE_BOUND:?}")
+                }
+                Err(error) => format!("reset: {error}"),
+            };
+            observed_tx.send(observed).expect("send observed");
+        });
+        let port = port_rx.recv().expect("port");
+
+        let (cancel_tx, cancel_rx) = futures::channel::oneshot::channel::<()>();
+        let canceller = std::thread::spawn(move || {
+            request_read_rx.recv().expect("request read signal");
+            cancel_tx.send(()).expect("cancel");
+        });
+
+        // the caller's thread is not a prime worker; select drops the send future
+        // when the cancel signal fires, as a caller's timeout would.
+        let client = Client::from_value(spec_for(port)).expect("build");
+        let cancelled = futures::executor::block_on(async {
+            let request = client
+                .call("POST", "/v1/chat/completions")
+                .header("authorization", "Bearer sk-test")
+                .json(&json!({ "model": "gpt-4o", "messages": [{ "role": "user", "content": "summarize notes.txt" }] }))
+                .expect("json body");
+            let send = std::pin::pin!(request.send());
+            matches!(
+                futures::future::select(send, cancel_rx).await,
+                futures::future::Either::Right(_)
+            )
+        });
+        assert!(cancelled, "send finished before the caller cancelled it");
+
+        let observed = observed_rx
+            .recv_timeout(CLOSE_BOUND + Duration::from_secs(5))
+            .expect("server observed the socket state");
+        canceller.join().expect("canceller join");
+        server.join().expect("server join");
+        drop(client);
+        observed
+    }
+
+    /// regression: dropping the outer `send()` future (a caller's timeout) left
+    /// the request running detached on the prime worker, then (after `hop_onto`
+    /// raced the call against the caller's cancellation) left its connection
+    /// in the h1 pool slot with the response unread. the socket must close
+    /// while the client that opened it is still alive.
+    #[cfg(all(
+        feature = "http-prime",
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc",
+        feature = "runtime-prime-reactor",
+        feature = "runtime-prime-bgpool"
+    ))]
+    #[test]
+    fn off_worker_send_dropped_by_caller_closes_the_upstream_socket() {
+        let observed = dropped_send_observed_by_upstream(
+            |port| json!({ "http": format!("http://127.0.0.1:{port}") }),
+        );
+        assert_eq!(observed, "eof", "upstream socket after caller dropped send");
+    }
+
+    /// the same cancellation through the spec ragd's llm provider builds:
+    /// a retry middleware sits between `dispatch` and the socket.
+    #[cfg(all(
+        feature = "http-prime",
+        feature = "runtime-prime-executor",
+        feature = "runtime-prime-inbox-alloc",
+        feature = "runtime-prime-reactor",
+        feature = "runtime-prime-bgpool"
+    ))]
+    #[test]
+    fn off_worker_send_dropped_by_caller_closes_the_socket_through_retry() {
+        let observed = dropped_send_observed_by_upstream(|port| {
+            json!({
+                "name": "ragd-llm",
+                "http": format!("http://127.0.0.1:{port}"),
+                "retry": {
+                    "max_attempts": 5,
+                    "base_delay_ms": 500,
+                    "max_delay_ms": 30_000,
+                    "retry_on_status": [408, 429, 500, 502, 503, 504],
+                    "retry_on_error": true,
+                },
+            })
+        });
+        assert_eq!(
+            observed, "eof",
+            "upstream socket after caller dropped send through retry"
+        );
     }
 
     /// Live oauth (#3) end-to-end through `proxima::Client` against real loopback
