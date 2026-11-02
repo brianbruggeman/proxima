@@ -347,19 +347,24 @@ async fn draft_simple_placed_models_keep_separate_resident_weights(#[case] gemma
 }
 
 #[proxima::test]
-#[case::cpu_binds_the_live_rows_only(false, 3, 4, 3)]
-#[case::cpu_prefill_binds_an_empty_cached_range(false, 0, 3, 0)]
-#[case::gpu_rounds_up_to_the_bucket(true, 3, 4, 32)]
-#[case::gpu_without_bucketing_binds_merged_len(true, 3, 4, 7)]
+#[case::cpu_binds_the_live_rows_only(false, 3, 4, 0, 3)]
+#[case::cpu_ignores_the_capacity(false, 3, 4, 256, 3)]
+#[case::cpu_prefill_binds_an_empty_cached_range(false, 0, 3, 0, 0)]
+#[case::gpu_rounds_up_to_the_bucket(true, 3, 4, 0, 32)]
+#[case::gpu_without_bucketing_binds_merged_len(true, 3, 4, 0, 7)]
+#[case::gpu_binds_the_capacity_at_every_length(true, 3, 4, 256, 256)]
+#[case::gpu_binds_the_same_capacity_deep_in_the_cache(true, 200, 1, 256, 256)]
+#[case::gpu_never_binds_below_the_live_rows(true, 300, 1, 256, 320)]
 async fn cached_kv_extent_pads_only_where_the_fused_bound_excludes_the_padding(
     #[case] padded: bool,
     #[case] cached_len: usize,
     #[case] new_count: usize,
+    #[case] capacity: usize,
     #[case] expected: usize,
 ) {
     let bucket_tokens = if expected == 7 { 1 } else { 32 };
     assert_eq!(
-        crate::generate::cached_kv_extent(padded, cached_len, new_count, bucket_tokens),
+        crate::generate::cached_kv_extent(padded, cached_len, new_count, bucket_tokens, capacity),
         expected
     );
 }

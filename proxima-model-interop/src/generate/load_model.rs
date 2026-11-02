@@ -1492,9 +1492,10 @@ pub(super) fn cached_kv_extent(
     cached_len: usize,
     new_count: usize,
     bucket_tokens: usize,
+    capacity: usize,
 ) -> usize {
     if padded {
-        kv_extent(cached_len + new_count, usize::MAX, bucket_tokens)
+        kv_extent(cached_len + new_count, usize::MAX, bucket_tokens).max(capacity)
     } else {
         cached_len
     }
