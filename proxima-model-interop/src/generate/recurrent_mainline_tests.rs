@@ -530,3 +530,89 @@ mod served_weights {
         assert_eq!(residency.pins(WEIGHTS_REGION), 0);
     }
 }
+
+#[cfg(feature = "cuda")]
+mod resident_cuda_plans {
+    use core::ops::ControlFlow;
+
+    use proxima_gguf::parse_complete;
+
+    use super::{LoadedModel, ServingConfig, tiny_ouro_gguf};
+    use crate::serving::{GPU_LAYERS_ALL, PromptCacheConfig};
+
+    fn gpu_config() -> ServingConfig<'static> {
+        ServingConfig {
+            gpu_layers: GPU_LAYERS_ALL,
+            prompt_cache: PromptCacheConfig::off(),
+            ..ServingConfig::default()
+        }
+    }
+
+    fn generate(model: &LoadedModel<'_>, prompt: &[u32]) -> Vec<u32> {
+        model
+            .generate_from_ids(prompt, 4, &gpu_config(), &mut |_| ControlFlow::Continue(()))
+            .expect("generate on the tiny recurrent checkpoint through cuda")
+            .0
+    }
+
+    fn fresh_ids(bytes: &[u8], prompt: &[u32]) -> Vec<u32> {
+        let parsed = parse_complete(bytes).expect("parse the tiny recurrent GGUF");
+        let model = LoadedModel::load(&parsed, bytes).expect("load a fresh model");
+        generate(&model, prompt)
+    }
+
+    #[test]
+    fn second_request_reuses_the_resident_plans_and_matches_a_fresh_model() {
+        let bytes = tiny_ouro_gguf(2, false);
+        let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+        let model = LoadedModel::load(&parsed, &bytes).expect("load");
+        let expected = fresh_ids(&bytes, &[0]);
+
+        let first = generate(&model, &[0]);
+        let resident = model.cuda_resident.len();
+        let config = gpu_config();
+        let mut runtime = model.backend_runtime(&config);
+        let (second, _, _, _) = model
+            .run_decode_loop_through_cache(
+                vec![0], &[], 4, &config, &mut runtime, None,
+                &mut super::super::LogitsSink::Discard,
+                &mut super::super::NodeValuesSink::Discard,
+                &mut |_| ControlFlow::Continue(()), None, true, None, None,
+            )
+            .expect("second request");
+
+        assert_eq!(first, expected, "first request equals a fresh model");
+        assert!(resident >= 1, "the first request left plans resident, got {resident}");
+        assert_eq!(runtime.plan_misses, 0, "the second request built no plan");
+        assert!(runtime.plan_hits > 0, "the second request hit the resident plans");
+        assert_eq!(second.len(), expected.len());
+    }
+
+    #[test]
+    fn a_different_prompt_length_on_the_reused_model_matches_a_fresh_model() {
+        let bytes = tiny_ouro_gguf(2, false);
+        let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+        let model = LoadedModel::load(&parsed, &bytes).expect("load");
+        generate(&model, &[0]);
+
+        for prompt in [&[0_u32, 1, 1][..], &[1, 0][..], &[0][..], &[1, 0, 0, 1, 0][..]] {
+            assert_eq!(
+                generate(&model, prompt),
+                fresh_ids(&bytes, prompt),
+                "prompt {prompt:?} after earlier requests"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_after_a_carried_kv_request_does_not_see_its_rows() {
+        let bytes = tiny_ouro_gguf(2, false);
+        let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+        let model = LoadedModel::load(&parsed, &bytes).expect("load");
+        let long = [0_u32, 1, 1, 0, 1, 0];
+        generate(&model, &long);
+
+        assert_eq!(generate(&model, &[1]), fresh_ids(&bytes, &[1]));
+        assert_eq!(generate(&model, &long), fresh_ids(&bytes, &long));
+    }
+}
