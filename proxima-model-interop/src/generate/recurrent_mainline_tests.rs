@@ -585,11 +585,7 @@ mod resident_cuda_plans {
 
     use proxima_gguf::parse_complete;
 
-    use proxima_gguf::types::GgmlType;
-    use proxima_tensor::spec::ModelDescriptor;
-
     use super::{LoadedModel, ServingConfig, state_sensitive_ouro_gguf};
-    use crate::lowering::{KvLayout, header_descriptor};
     use crate::serving::{GPU_LAYERS_ALL, PromptCacheConfig};
 
     fn gpu_config() -> ServingConfig<'static> {
@@ -718,87 +714,6 @@ mod resident_cuda_plans {
         }
     }
 
-    fn probe_prompt() -> String {
-        "The quick brown fox jumps over the lazy dog while a curious cat watches quietly from the garden wall. Pack my box with five dozen liquor jugs before the delivery truck arrives at noon. "
-            .repeat(4)
-    }
-
-    fn probe_config() -> ServingConfig<'static> {
-        ServingConfig {
-            gpu_layers: GPU_LAYERS_ALL,
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
-            flash_attention: false,
-            batch_size: 0,
-            ubatch_size: 0,
-            reasoning_budget: 0,
-            temperature: 0.0,
-            repeat_penalty: 1.0,
-            frequency_penalty: 0.0,
-            presence_penalty: 0.0,
-            ..ServingConfig::default()
-        }
-    }
-
-    fn probe_second_request(armed: bool, tokens: usize) -> Result<(), String> {
-        let bytes = std::fs::read("/home/bix/models/qwen3-0.6b-q8_0.gguf").expect("read qwen3");
-        let parsed = parse_complete(&bytes).expect("parse qwen3");
-        let model = if armed {
-            let decode = header_descriptor(&parsed, KvLayout::Full).expect("header");
-            let descriptor = ModelDescriptor {
-                speculative_verify: true,
-                ..decode
-            };
-            LoadedModel::load_with_descriptor(&parsed, &bytes, &descriptor)
-        } else {
-            LoadedModel::load(&parsed, &bytes)
-        }
-        .expect("load qwen3");
-        let prompt = probe_prompt();
-        model
-            .generate_with_serving_config(&prompt, tokens, probe_config())
-            .map_err(|error| format!("first: {error}"))?;
-        model
-            .generate_with_serving_config(&prompt, tokens, probe_config())
-            .map_err(|error| format!("second: {error}"))?;
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "needs the host-local qwen3-0.6b-q8_0.gguf and a CUDA device"]
-    fn the_armed_probe_shape_runs_a_second_request_on_a_real_model() {
-        probe_second_request(true, 40).expect("second request after the first");
-    }
-
-    #[test]
-    #[ignore = "needs the host-local qwen3-0.6b-q8_0.gguf and a CUDA device"]
-    fn an_unarmed_model_runs_a_second_request_on_a_real_model() {
-        probe_second_request(false, 40).expect("second request after the first");
-    }
-
-    #[test]
-    #[ignore = "needs the host-local qwen3-0.6b-q8_0.gguf and a CUDA device"]
-    fn a_four_token_armed_second_request_runs_on_a_real_model() {
-        probe_second_request(true, 4).expect("second request after the first");
-    }
-
-    #[test]
-    #[ignore = "needs the host-local qwen3-0.6b-q8_0.gguf and a CUDA device"]
-    fn a_longer_second_request_on_a_real_model_matches_a_fresh_model() {
-        let bytes = std::fs::read("/home/bix/models/qwen3-0.6b-q8_0.gguf")
-            .expect("read the host-local qwen3 checkpoint");
-        let parsed = parse_complete(&bytes).expect("parse qwen3");
-        let model = LoadedModel::load(&parsed, &bytes).expect("load qwen3");
-        let first_prompt: Vec<u32> = (100..149).collect();
-        let second_prompt: Vec<u32> = (100..160).collect();
-
-        let first = generate(&model, &first_prompt);
-        let second = generate(&model, &second_prompt);
-
-        assert_eq!(first, fresh_ids(&bytes, &first_prompt));
-        assert_eq!(second, fresh_ids(&bytes, &second_prompt));
-    }
-
     #[test]
     fn a_request_after_a_carried_kv_request_does_not_see_its_rows() {
         let bytes = state_sensitive_ouro_gguf(2);
@@ -848,5 +763,79 @@ mod resident_cuda_plans {
         assert_eq!(repeated.plan_misses, 0, "the prefill and decode plans stay resident");
         assert_eq!(repeated.ids, expected.ids, "repeated one-token prompt ids");
         assert_logits_close(&repeated.logits, &expected.logits);
+    }
+}
+
+mod second_request_real_model {
+    use proxima_gguf::parse_complete;
+    use proxima_gguf::types::GgmlType;
+    use proxima_tensor::spec::ModelDescriptor;
+
+    use super::{LoadedModel, ServingConfig};
+    use crate::lowering::{KvLayout, header_descriptor};
+    use crate::serving::GPU_LAYERS_ALL;
+
+    fn probe_prompt() -> String {
+        "The quick brown fox jumps over the lazy dog while a curious cat watches quietly from the garden wall. Pack my box with five dozen liquor jugs before the delivery truck arrives at noon. "
+            .repeat(4)
+    }
+
+    fn probe_config() -> ServingConfig<'static> {
+        ServingConfig {
+            gpu_layers: GPU_LAYERS_ALL,
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            batch_size: 0,
+            ubatch_size: 0,
+            reasoning_budget: 0,
+            temperature: 0.0,
+            repeat_penalty: 1.0,
+            frequency_penalty: 0.0,
+            presence_penalty: 0.0,
+            ..ServingConfig::default()
+        }
+    }
+
+    fn probe_second_request(armed: bool, tokens: usize) -> Result<(), String> {
+        let bytes = std::fs::read("/home/bix/models/qwen3-0.6b-q8_0.gguf").expect("read qwen3");
+        let parsed = parse_complete(&bytes).expect("parse qwen3");
+        let model = if armed {
+            let decode = header_descriptor(&parsed, KvLayout::Full).expect("header");
+            let descriptor = ModelDescriptor {
+                speculative_verify: true,
+                ..decode
+            };
+            LoadedModel::load_with_descriptor(&parsed, &bytes, &descriptor)
+        } else {
+            LoadedModel::load(&parsed, &bytes)
+        }
+        .expect("load qwen3");
+        let prompt = probe_prompt();
+        model
+            .generate_with_serving_config(&prompt, tokens, probe_config())
+            .map_err(|error| format!("first: {error}"))?;
+        model
+            .generate_with_serving_config(&prompt, tokens, probe_config())
+            .map_err(|error| format!("second: {error}"))?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "needs the host-local qwen3-0.6b-q8_0.gguf (any backend)"]
+    fn the_armed_probe_shape_runs_a_second_request_on_a_real_model() {
+        probe_second_request(true, 40).expect("second request after the first");
+    }
+
+    #[test]
+    #[ignore = "needs the host-local qwen3-0.6b-q8_0.gguf (any backend)"]
+    fn an_unarmed_model_runs_a_second_request_on_a_real_model() {
+        probe_second_request(false, 40).expect("second request after the first");
+    }
+
+    #[test]
+    #[ignore = "needs the host-local qwen3-0.6b-q8_0.gguf (any backend)"]
+    fn a_four_token_armed_second_request_runs_on_a_real_model() {
+        probe_second_request(true, 4).expect("second request after the first");
     }
 }
