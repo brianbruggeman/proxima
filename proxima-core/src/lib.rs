@@ -43,6 +43,8 @@ pub mod accept_rule;
 pub mod arch;
 #[cfg(feature = "alloc")]
 pub mod arena;
+#[cfg(feature = "alloc")]
+pub mod kv_carry;
 pub mod kv_decision;
 pub mod ring;
 #[cfg(feature = "alloc")]

@@ -4163,6 +4163,7 @@ dependencies = [
  "futures-timer",
  "loom",
  "pin-project-lite",
+ "proptest",
  "proxima-build",
  "proxima-lib",
  "proxima-test",

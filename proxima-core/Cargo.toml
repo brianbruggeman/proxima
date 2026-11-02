@@ -101,6 +101,7 @@ futures = { workspace = true, features = ["std", "executor"] }
 proxima = { package = "proxima-lib", path = "..", features = ["test-support"] }
 proxima-test = { path = "../proxima-test", features = ["alloc-count"] }
 temp-env.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true
