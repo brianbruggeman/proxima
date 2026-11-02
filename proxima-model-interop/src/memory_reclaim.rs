@@ -96,6 +96,10 @@ impl RegionLedger {
         self.regions.insert(region_id, region);
     }
 
+    pub fn restore(&mut self, region_id: u64, bytes: u64, last_used: Duration, pins: u32, resident: bool) {
+        self.regions.insert(region_id, Region { bytes, last_used, pins, resident });
+    }
+
     /// Returns whether the region had been released, so the caller reloads it.
     pub fn touch(&mut self, region: u64, now: Duration) -> bool {
         self.regions.get_mut(&region).is_some_and(|region| {
