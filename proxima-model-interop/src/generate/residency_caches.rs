@@ -16,7 +16,7 @@ use crate::cuda_async::{
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use proxima_core::ProximaError;
 use proxima_core::ServingState;
-#[cfg(all(feature = "instrument", feature = "gpu"))]
+#[cfg(all(feature = "instrument", any(test, all(feature = "metal", target_os = "macos"))))]
 use proxima_telemetry::metric::Counter;
 
 #[cfg(feature = "gpu")]
@@ -343,10 +343,10 @@ fn resident_payload_matches(owned: &OwnedBlock, source: QuantizedBlock<'_>) -> b
 /// "macos"))]` in `decode.rs`) require `metal`; an `instrument`-only build
 /// declared these statics with no reachable writer or reader at all, which
 /// `-D dead-code` correctly flagged.
-#[cfg(all(feature = "instrument", feature = "gpu"))]
+#[cfg(all(feature = "instrument", any(test, all(feature = "metal", target_os = "macos"))))]
 pub(super) static RESOLVE_PLAN_CALLS: Counter =
     Counter::new("proxima_model_interop.residency.resolve_plan_calls");
-#[cfg(all(feature = "instrument", feature = "gpu"))]
+#[cfg(all(feature = "instrument", any(test, all(feature = "metal", target_os = "macos"))))]
 pub(super) static RESOLVE_PLAN_TICKS: Counter =
     Counter::new("proxima_model_interop.residency.resolve_plan_ticks");
 
