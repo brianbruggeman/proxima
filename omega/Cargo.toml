@@ -578,6 +578,7 @@ const_format = { version = "0.2.36", default-features = false }
 bon = { workspace = true, optional = true, features = ["experimental-overwritable"] }
 proxima-onnx = { version = "0.1.0", path = "../proxima-onnx", features = ["std"], optional = true }
 proxima-mil = { version = "0.1.0", path = "../proxima-mil", features = ["std"], optional = true }
+proxima-core = { workspace = true, features = ["alloc"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # objc2: the message-send runtime (Retained<T>, extern_methods!) every Metal
