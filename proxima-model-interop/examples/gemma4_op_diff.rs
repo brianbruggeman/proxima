@@ -67,7 +67,10 @@ fn read_dump(path: &str) -> BTreeMap<String, Vec<Dumped>> {
             .map(|chunk| f32::from_le_bytes(*chunk))
             .collect();
         cursor += count * 4;
-        tensors.entry(name).or_default().push(Dumped { dims, values });
+        tensors
+            .entry(name)
+            .or_default()
+            .push(Dumped { dims, values });
     }
     tensors
 }
@@ -121,7 +124,10 @@ fn lookup(tensors: &BTreeMap<String, Vec<Dumped>>, label: &str) -> Dumped {
         .split_once('@')
         .map_or((label, None), |(spec, half)| (spec, Some(half)));
     let (name, occurrence) = spec.split_once('#').map_or((spec, None), |(name, index)| {
-        (name, Some(index.parse::<usize>().expect("occurrence index")))
+        (
+            name,
+            Some(index.parse::<usize>().expect("occurrence index")),
+        )
     });
     let entries = tensors
         .get(name)
@@ -155,8 +161,8 @@ fn score(reference: &Dumped, actual: &[f32], order: [usize; 3]) -> Scored {
                 let actual_index = order
                     .iter()
                     .fold(0, |index, axis| index * extents[*axis] + coordinates[*axis]);
-                let diff = f64::from(reference.values[reference_index])
-                    - f64::from(actual[actual_index]);
+                let diff =
+                    f64::from(reference.values[reference_index]) - f64::from(actual[actual_index]);
                 scored.squared_diff += diff * diff;
                 if diff.abs() > scored.max_abs_diff {
                     scored.max_abs_diff = diff.abs();
@@ -297,7 +303,11 @@ fn print_hashes(model: &LoadedModel, prompt: &str, range: &str, gpu_layers: i32)
             (state ^ u64::from(value.to_bits())).wrapping_mul(0x0100_0000_01b3)
         });
         let sum: f64 = data.iter().map(|value| f64::from(*value)).sum();
-        println!("node {} len {} sum {sum:.9} fnv {hash:016x}", id.0, data.len());
+        println!(
+            "node {} len {} sum {sum:.9} fnv {hash:016x}",
+            id.0,
+            data.len()
+        );
     }
 }
 
@@ -312,7 +322,12 @@ fn print_llama(path: &str, labels: &str) {
             sum,
             &entry.values[..entry.values.len().min(6)],
             &entry.values[entry.values.len().saturating_sub(4)..],
-            entry.values.iter().step_by(256).take(24).collect::<Vec<_>>(),
+            entry
+                .values
+                .iter()
+                .step_by(256)
+                .take(24)
+                .collect::<Vec<_>>(),
         );
     }
 }

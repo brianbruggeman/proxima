@@ -87,14 +87,14 @@ pub mod sliding_pattern;
 mod codec_policy_settings;
 #[cfg(feature = "std")]
 pub mod convert;
+#[cfg(feature = "std")]
+mod hf_descriptor;
 #[cfg(any(test, all(feature = "std", feature = "metal", target_os = "macos")))]
 mod memory_fit;
 #[cfg(feature = "std")]
 pub mod profiles;
 #[cfg(feature = "std")]
 mod prompt_cache_settings;
-#[cfg(feature = "std")]
-mod hf_descriptor;
 #[cfg(feature = "std")]
 mod quality;
 mod recurrent_config;
@@ -166,6 +166,8 @@ pub use hf_config::{
     HfConfig, architecture_from_hf_config, lfm_layer_kinds_from_manifest, parse_hf_config,
 };
 #[cfg(feature = "std")]
+pub use hf_descriptor::ouro_descriptor_from_hf_config;
+#[cfg(feature = "std")]
 pub use loader::{PREFAULT_OVERSUBSCRIBE, PREFAULT_STRIDE_BYTES, prefault};
 #[cfg(all(feature = "std", feature = "test-support"))]
 #[doc(hidden)]
@@ -185,8 +187,6 @@ pub use lowering::{
 };
 #[cfg(feature = "std")]
 pub use prompt_cache_settings::PromptCacheSettings;
-#[cfg(feature = "std")]
-pub use hf_descriptor::ouro_descriptor_from_hf_config;
 #[cfg(feature = "std")]
 pub use proxima_core::ServingState;
 #[cfg(all(feature = "std", feature = "instrument"))]

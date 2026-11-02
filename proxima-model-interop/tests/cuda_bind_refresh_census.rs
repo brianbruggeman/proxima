@@ -250,7 +250,6 @@ fn cuda_bind_refresh_census_across_kv_6_to_7() {
     );
 }
 
-
 fn touched_positions(
     resolved: &[BoundOp],
     program: &[Op],
@@ -300,11 +299,19 @@ fn refreshed_ops_equal_a_fresh_bind_position_by_position_kv_6_to_7() {
     let refreshed = refresh_touched(&resolved, &program, logits, &next, &touched)
         .expect("every touched op refreshes at kv 6 -> 7");
 
-    assert!(!touched.is_empty(), "no op touched by a kv 6->7 shape change");
-    assert_eq!(refreshed.len(), fresh.len(), "refresh preserves the op count");
+    assert!(
+        !touched.is_empty(),
+        "no op touched by a kv 6->7 shape change"
+    );
+    assert_eq!(
+        refreshed.len(),
+        fresh.len(),
+        "refresh preserves the op count"
+    );
     for (position, (refreshed_op, fresh_op)) in refreshed.iter().zip(&fresh).enumerate() {
         assert_eq!(
-            refreshed_op, fresh_op,
+            refreshed_op,
+            fresh_op,
             "position {position} (touched: {}) differs from a fresh bind at kv 7",
             touched.contains(&position)
         );

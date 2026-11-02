@@ -8,9 +8,9 @@
 
 mod compare;
 mod gpu;
-mod upload;
 mod probes;
 mod rows;
+mod upload;
 
 use std::sync::OnceLock;
 
@@ -19,8 +19,8 @@ use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
 
 use compare::{compare_bits, compare_codes};
 use gpu::{Gpu, read_words};
-use upload::{floats, words};
 use probes::{narrow, widen};
+use upload::{floats, words};
 
 const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     exponent_bits: 4,

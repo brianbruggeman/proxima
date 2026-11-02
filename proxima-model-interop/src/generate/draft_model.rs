@@ -93,7 +93,8 @@ fn draft_chain_proposer<'draft>(
     widths: &'draft [LayerPadRowWidths],
     serving_config: &ServingConfig<'draft>,
     target_vocab_size: usize,
-    #[cfg(all(feature = "metal", target_os = "macos"))] residency: &'draft mut omega::metal::ResidentContext,
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    residency: &'draft mut omega::metal::ResidentContext,
 ) -> impl FnMut(&[u32], usize, &mut Vec<u32>) -> Result<(), InteropError> + 'draft {
     let speculative = serving_config.speculative;
     let greedy = greedy_config(serving_config);
@@ -118,7 +119,14 @@ fn draft_chain_proposer<'draft>(
                 reason: "committed tokens must extend the retained draft prefix",
             });
         }
-        advance(draft, runtime, retained, &mut logits, &greedy, &committed[cached..])?;
+        advance(
+            draft,
+            runtime,
+            retained,
+            &mut logits,
+            &greedy,
+            &committed[cached..],
+        )?;
         let checkpoint = retained
             .as_ref()
             .and_then(RingCheckpoint::capture_for_speculation)

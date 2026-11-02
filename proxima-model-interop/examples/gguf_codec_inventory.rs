@@ -22,12 +22,18 @@ fn main() {
     let parsed = parse_complete(&bytes).expect("parse model");
     let mut by_type: BTreeMap<String, usize> = BTreeMap::new();
     for tensor in &parsed.tensors {
-        *by_type.entry(format!("{:?}", tensor.ggml_type)).or_default() += 1;
+        *by_type
+            .entry(format!("{:?}", tensor.ggml_type))
+            .or_default() += 1;
     }
     for (ggml_type, count) in &by_type {
         println!("{{\"type\":{ggml_type:?},\"tensors\":{count}}}");
     }
-    for tensor in parsed.tensors.iter().filter(|tensor| tensor.name.starts_with("blk.0.") || !tensor.name.starts_with("blk.")) {
+    for tensor in parsed
+        .tensors
+        .iter()
+        .filter(|tensor| tensor.name.starts_with("blk.0.") || !tensor.name.starts_with("blk."))
+    {
         println!(
             "{{\"name\":{:?},\"type\":\"{:?}\",\"dims\":{:?}}}",
             tensor.name, tensor.ggml_type, tensor.dims
