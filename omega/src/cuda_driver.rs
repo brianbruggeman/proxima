@@ -38,6 +38,7 @@ use crate::lowering::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{
     RefreshRefusal, changed_nodes, kv_read_only_by_fused_attention, refit_cached_attention_at,
     RowTemplate, apply_row_template, refresh_bound_ops, refresh_cached_attention, row_template,
+    rows_enumerable,
     touched_positions, touches_changed,
 };
 use proxima_tensor::{
@@ -2098,6 +2099,9 @@ impl CudaPlan {
         let infer_micros = infer_started.elapsed().as_micros() as u64;
         let same_policy = numeric_policy == self.numeric_policy;
         let rows = symbols.first().copied().unwrap_or(0);
+        if rows != self.bound_rows && !self.may_change_rows(rows) {
+            return Ok(false);
+        }
         if same_policy && rows != self.bound_rows {
             let repack_started = Instant::now();
             if let Some(op_count) = self.repack_rows(rows, &shapes, numeric_policy)? {
@@ -2233,6 +2237,16 @@ impl CudaPlan {
             "cuda plan refit phases"
         );
         Ok(true)
+    }
+
+    /// Whether this plan may be moved to `rows` at all: only inside the wide prefill class, on
+    /// a program whose ops a row template can enumerate, and not after a template was refused.
+    /// A plan outside that is rebuilt instead, as it always was.
+    fn may_change_rows(&self, rows: u64) -> bool {
+        rows >= ROW_CLASS_MIN
+            && self.bound_rows >= ROW_CLASS_MIN
+            && !matches!(self.rows_template, Some(None))
+            && rows_enumerable(&self.resolved)
     }
 
     /// Moves the bound ops to `rows` through the proof learned at an earlier row change:

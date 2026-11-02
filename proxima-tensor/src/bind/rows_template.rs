@@ -97,6 +97,15 @@ fn visit_integers(bound: &mut BoundOp, counts: bool, unsigned: Unsigned<'_>, sig
     }
 }
 
+/// Whether every op in `resolved` is a kind whose integers a [`RowTemplate`] can move.
+#[must_use]
+pub fn rows_enumerable(resolved: &[BoundOp]) -> bool {
+    resolved.iter().all(|bound| {
+        let mut copy = bound.clone();
+        visit_integers(&mut copy, true, &mut |_| {}, &mut |_| {})
+    })
+}
+
 fn integers(bound: &BoundOp) -> Option<Vec<i128>> {
     let values = RefCell::new(Vec::new());
     let mut copy = bound.clone();
