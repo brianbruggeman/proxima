@@ -424,9 +424,8 @@ fn fluent_and_toml_built_matmul_silu_softmax_run_bit_identical() {
     let mut lcg = Lcg(0x5eed_0003);
     let x: Vec<f32> = (0..8).map(|_| lcg.next_unit() - 0.5).collect();
     let w: Vec<f32> = (0..12).map(|_| lcg.next_unit() - 0.5).collect();
-    let root = NodeId(
-        u32::try_from(fluent_program.len() - 1).expect("program length fits a node id"),
-    );
+    let root =
+        NodeId(u32::try_from(fluent_program.len() - 1).expect("program length fits a node id"));
     let run = |program: &[Op]| {
         crate::cpu::evaluate_named(program, &[], &[("x", &x), ("w", &w)], &[root])
             .expect("matmul-silu-softmax evaluates on cpu")
