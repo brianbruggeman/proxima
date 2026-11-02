@@ -1,6 +1,7 @@
 #[cfg(feature = "gpu")]
 use conflaguration::Validate;
 use core::future::Future;
+#[cfg(feature = "gpu")]
 use core::hash::{Hash, Hasher};
 use core::ops::ControlFlow;
 #[cfg(feature = "gpu")]
