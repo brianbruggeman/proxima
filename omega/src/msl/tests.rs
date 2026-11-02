@@ -355,61 +355,7 @@ fn elementwise_tanh_op(extent: u32) -> BoundOp {
     .expect("one bound emitted")
 }
 
-pub(super) fn matmul_op(m: u32, k: u32, n: u32) -> BoundOp {
-    let mut program = Vec::new();
-    let lhs = append(
-        &mut program,
-        Op::Input {
-            dtype: DType::FLOAT32,
-            shape: vec![Extent::Static(m), Extent::Static(k)],
-            name: None,
-        },
-    );
-    let rhs = append(
-        &mut program,
-        Op::Input {
-            dtype: DType::FLOAT32,
-            shape: vec![Extent::Static(k), Extent::Static(n)],
-            name: None,
-        },
-    );
-    let product = append(
-        &mut program,
-        Op::Elementwise {
-            dtype: DType::FLOAT32,
-            body: ScalarOp::Multiply,
-            operands: vec![
-                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
-                (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
-            ],
-            name: None,
-        },
-    );
-    append(
-        &mut program,
-        Op::Reduce(Reduce {
-            dtype: DType::FLOAT32,
-            body: ScalarOp::Add,
-            init: ReduceInit::Zero,
-            operand: product,
-            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
-            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
-            keep: Keep::Reduce,
-            name: Some("matmul".into()),
-        }),
-    );
-    let shapes = infer(&program, &[]).expect("matmul infers");
-    bind(
-        &program,
-        &shapes,
-        &[terminal(&program)],
-        NumericPolicy::default(),
-    )
-    .expect("matmul lowers")
-    .into_iter()
-    .next()
-    .expect("one fused bound emitted")
-}
+pub(super) use super::golden_support::matmul_op;
 
 /// `[rows, k] x [tokens, k] -> [tokens, rows]`, reduced over `k`, with the
 /// packed weight and the activation EACH storing `k` as their own innermost

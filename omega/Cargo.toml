@@ -512,6 +512,9 @@ metal-reduction-literal = ["metal"]
 # positions never share a slot, so the arena cannot back base_table's
 # output_base -- only an explicit `output_placements` buffer can).
 metal-horizontal-merge = ["metal"]
+# Exposes the msl golden-rendering helpers the `record_*` examples use to
+# rewrite the checked-in kernel fixtures; hidden from the documented API.
+test-support = ["std"]
 # One `BoundOp` per (MoeSite, projection) instead of k: `proxima-tensor`'s
 # own `metal-moe-mul-mat-id` admission collapses the k round-sibling
 # gate/up/down `Reduce` nodes into one `BoundOp` carrying `round_count:
@@ -745,6 +748,14 @@ required-features = ["onnx-door", "mil-writer"]
 [[example]]
 name = "onnx_door_walkthrough"
 required-features = ["onnx-door"]
+
+[[example]]
+name = "record_attn_goldens"
+required-features = ["test-support"]
+
+[[example]]
+name = "record_scaled_e3m2_fixtures"
+required-features = ["test-support"]
 
 [dev-dependencies]
 anyhow = "1.0.104"

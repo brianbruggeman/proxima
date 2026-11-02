@@ -740,7 +740,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
 /// `u.splits == 1` this reduces to exactly the prior forced-`split = 0`
 /// copy-and-normalize, since the single live lane's rescale weight is
 /// always `1.0` (or `0.0` under the all-`-INFINITY`/empty-context corner).
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+#[cfg(any(test, feature = "test-support", all(feature = "metal", target_os = "macos")))]
 pub(super) fn render_cached_attention_merge(
     resolved: &BoundOp,
     entry: &str,
@@ -802,7 +802,7 @@ pub(super) fn render_cached_attention_merge(
 /// dependent steps instead of `head_dim / 32 * splits`. The partial for
 /// `(row, dim4, split)` sits at float4 index `(row * head_dim/4 + dim4) *
 /// splits + split`, which the lane-contiguous read here coalesces.
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+#[cfg(any(test, feature = "test-support", all(feature = "metal", target_os = "macos")))]
 fn interleaved_merge_body(
     entry: &str,
     element_type: &str,
@@ -884,7 +884,7 @@ const INTERLEAVED_SPLIT_SCRATCH: bool = cfg!(feature = "metal-attn-split-decode"
 /// `crate::metal`'s plan-resolution path calls this alongside `emit` for
 /// every position, exactly as it already calls `kernel_dispatch_shape`
 /// alongside `emit`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn emit_cached_attention_merge(
     resolved: &BoundOp,
     numeric_policy: NumericPolicy,
@@ -896,7 +896,7 @@ pub(crate) fn emit_cached_attention_merge(
     )
 }
 
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+#[cfg(any(test, feature = "test-support", all(feature = "metal", target_os = "macos")))]
 pub(crate) fn emit_cached_attention_merge_with_schedule(
     resolved: &BoundOp,
     numeric_policy: NumericPolicy,
@@ -933,7 +933,7 @@ pub(crate) fn emit_cached_attention_merge_with_schedule(
 /// with a simdgroup per potential split (llama.cpp's `32 * nwg` threads,
 /// `ggml-metal-ops.cpp:3712`), a pinned width `flat_grid2d` launches exactly;
 /// the row-major reduce is one simdgroup per row at the driver's width.
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+#[cfg(any(test, feature = "test-support", all(feature = "metal", target_os = "macos")))]
 fn merge_grid(node: NodeId, total_elements: u64) -> Result<GridSpec, EmitError> {
     let threadgroup_width =
         INTERLEAVED_SPLIT_SCRATCH.then_some(SIMD_WIDTH * crate::sized::ATTENTION_SPLIT_MAX);
