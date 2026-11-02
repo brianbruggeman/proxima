@@ -10,7 +10,6 @@ use super::{
 };
 use crate::cuda_cached_attention::render_attention;
 use crate::lowering::dispatch_bindings;
-use crate::cuda_cached_attention_tiled::cached_attention_tile_rows;
 
 /// Blocks per multiprocessor the split pass should launch so the device stays fed.
 const SPLIT_WAVES: u64 = 4;
@@ -32,7 +31,6 @@ pub(super) fn split_chunks(kind: &BoundOpKind, device: EmitDevice) -> Option<u64
     };
     let splittable = *query_rows == 1
         && device.multiprocessors > 0
-        && cached_attention_tile_rows(kind).is_none()
         && cuda_cached_attention_class(kind) == Some(CudaAttentionClass::CachedBound);
     let vectors = kv_heads * query_groups;
     let chunks = (u64::from(device.multiprocessors) * SPLIT_WAVES)

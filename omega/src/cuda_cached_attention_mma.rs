@@ -18,14 +18,15 @@ __device__ __forceinline__ void attention_split(float first, float second, unsig
 pub(crate) const MMA_ATTENTION_BODY: &str = "\
     constexpr int warps = 4;
     constexpr int items = tile_rows * (int)query_groups;
-    constexpr int key_tile = 32;
+    constexpr int threads = 128;
+    constexpr int key_tile = head_dim > 128 ? 16 : 32;
     constexpr int key_tiles = key_tile / 8;
     constexpr int dim_chunks = (int)head_dim / 4;
     constexpr int dim_steps = (int)head_dim / 8;
     constexpr int dim_tiles = (int)head_dim / 16;
     constexpr int query_stride = (int)head_dim + 8;
-    constexpr int loads = key_tile / warps;
-    static_assert(head_dim == 128);
+    constexpr int loads = key_tile * dim_chunks / threads;
+    static_assert(key_tile * dim_chunks % threads == 0);
     const float negative_infinity = -__int_as_float(0x7f800000);
     const int tid = (int)threadIdx.x;
     const int warp = tid >> 5;
@@ -47,7 +48,7 @@ pub(crate) const MMA_ATTENTION_BODY: &str = "\
     __shared__ __align__(16) __half tile_query[32 * query_stride];
     __shared__ __align__(16) __half tile_key[key_tile * query_stride];
     __shared__ __align__(16) __half tile_value[key_tile * query_stride];
-    for (int index = tid; index < 32 * dim_chunks; index += (int)blockDim.x) {
+    for (int index = tid; index < 32 * dim_chunks; index += threads) {
         const int item = index / dim_chunks;
         const int dimension = (index % dim_chunks) * 4;
         const long row = first_row + item / (int)query_groups;
@@ -93,10 +94,11 @@ pub(crate) const MMA_ATTENTION_BODY: &str = "\
     float4 key_regs[loads];
     float4 value_regs[loads];
     auto fetch = [&](long tile_start) {
-        const int dimension = lane * 4;
         #pragma unroll
         for (int load = 0; load < loads; load++) {
-            const long key = tile_start + warp + warps * load;
+            const int index = tid + load * threads;
+            const int dimension = (index % dim_chunks) * 4;
+            const long key = tile_start + index / dim_chunks;
             float4 key_value = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             float4 value_value = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
             if (key <= last_key) {
@@ -114,10 +116,11 @@ pub(crate) const MMA_ATTENTION_BODY: &str = "\
         }
     };
     auto stage = [&]() {
-        const int dimension = lane * 4;
         #pragma unroll
         for (int load = 0; load < loads; load++) {
-            const int offset = warp + warps * load;
+            const int index = tid + load * threads;
+            const int offset = index / dim_chunks;
+            const int dimension = (index % dim_chunks) * 4;
             *(unsigned int*)&tile_key[offset * query_stride + dimension] = attention_pack(key_regs[load].x, key_regs[load].y);
             *(unsigned int*)&tile_key[offset * query_stride + dimension + 2] = attention_pack(key_regs[load].z, key_regs[load].w);
             *(unsigned int*)&tile_value[offset * query_stride + dimension] = attention_pack(value_regs[load].x, value_regs[load].y);
