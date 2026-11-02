@@ -11,6 +11,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::ffi::CString;
+use std::ops::Range;
 use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -651,6 +652,32 @@ impl CudaDriver {
         self.resident_buffers
             .lock()
             .retain(|_, (name, _)| !released.contains(name.as_str()));
+    }
+
+    /// Evicts every device buffer cached for a host block inside one of these
+    /// host address ranges. The cache keys a weight by its host `(address,
+    /// length)`, which is sound only while that host allocation lives: the
+    /// owner of the host bytes calls this as it drops them, so a later
+    /// allocation at the same address can never resolve to a stale buffer.
+    pub fn release_resident_ranges(&self, ranges: &[Range<usize>]) {
+        let mut buffers = self.resident_buffers.lock();
+        let doomed: Vec<(usize, usize)> = ranges
+            .iter()
+            .flat_map(|range| {
+                buffers
+                    .range((range.start, 0)..(range.end, 0))
+                    .map(|(key, _)| *key)
+            })
+            .collect();
+        for key in doomed {
+            buffers.remove(&key);
+        }
+    }
+
+    /// Number of host blocks currently holding a cached resident device buffer.
+    #[must_use]
+    pub fn resident_buffer_count(&self) -> usize {
+        self.resident_buffers.lock().len()
     }
 
     /// Returns the CUDA driver's current `(free_bytes, total_bytes)` view.

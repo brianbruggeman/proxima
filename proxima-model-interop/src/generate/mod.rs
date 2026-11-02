@@ -114,6 +114,8 @@ use omega::backend::{
 // only the metal-gated `SharedWeights` drop calls these; ungated, they are unused on cuda-only builds.
 #[cfg(feature = "metal")]
 use omega::backend::{release_resident_names, unregister_checkpoint_mapping};
+#[cfg(feature = "cuda")]
+use omega::backend::release_resident_ranges;
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
 // `metal`+macos gate that type itself lives behind.
@@ -291,6 +293,8 @@ mod recurrent_verify_tests;
 mod resident_plans;
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 mod resident_plans_real_model_tests;
+#[cfg(all(test, feature = "cuda"))]
+mod resident_weights_tests;
 mod ring_checkpoint;
 mod serving_backend;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]

@@ -68,6 +68,7 @@
 
 use crate::config::{RuntimeConfig, SelectionMode};
 use conflaguration::Validate;
+use core::ops::Range;
 use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "cuda-driver")]
 use std::sync::OnceLock;
@@ -1643,6 +1644,32 @@ pub fn release_resident_names<'name>(names: impl IntoIterator<Item = &'name str>
     #[cfg(feature = "cuda-driver")]
     if let Some(Ok(driver)) = CUDA_DRIVER.get() {
         driver.release_resident_names(names);
+    }
+}
+
+/// Evicts the CUDA driver's resident device buffers whose host blocks lie in
+/// these host address ranges -- see
+/// [`CudaDriver::release_resident_ranges`] for why the owner of the host
+/// bytes must call this when it frees them. A no-op unless the CUDA driver
+/// is compiled in and was initialized.
+#[cfg(feature = "cuda-driver")]
+pub fn release_resident_ranges(ranges: &[Range<usize>]) {
+    if let Some(Ok(driver)) = CUDA_DRIVER.get() {
+        driver.release_resident_ranges(ranges);
+    }
+}
+
+#[cfg(not(feature = "cuda-driver"))]
+pub fn release_resident_ranges(_ranges: &[Range<usize>]) {}
+
+/// Number of host blocks holding a cached CUDA resident device buffer, or
+/// `None` when the CUDA driver was never initialized.
+#[cfg(feature = "cuda-driver")]
+#[must_use]
+pub fn cuda_resident_buffer_count() -> Option<usize> {
+    match CUDA_DRIVER.get() {
+        Some(Ok(driver)) => Some(driver.resident_buffer_count()),
+        _ => None,
     }
 }
 

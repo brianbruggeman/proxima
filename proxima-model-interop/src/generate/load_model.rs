@@ -2,6 +2,8 @@
 use super::device_kv::KvBufferSource;
 use super::residency_caches::BlockSummarizer;
 use core::hash::{Hash, Hasher};
+#[cfg(feature = "cuda")]
+use core::ops::Range;
 
 use super::*;
 
@@ -1241,8 +1243,8 @@ pub(super) struct SharedWeights<'file> {
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
     resident_identity: Arc<()>,
     #[cfg_attr(
-        not(feature = "metal"),
-        allow(dead_code, reason = "only `Drop`, itself `metal`-gated, reads this")
+        not(any(feature = "metal", feature = "cuda")),
+        allow(dead_code, reason = "only `Drop`, itself gpu-driver-gated, reads this")
     )]
     mapping: &'file [u8],
 }
@@ -1271,9 +1273,35 @@ impl<'file> core::ops::Deref for SharedWeights<'file> {
     }
 }
 
-#[cfg(feature = "metal")]
+#[cfg(any(feature = "metal", feature = "cuda"))]
 impl Drop for SharedWeights<'_> {
     fn drop(&mut self) {
+        #[cfg(feature = "cuda")]
+        release_resident_ranges(&self.host_ranges());
+        #[cfg(feature = "metal")]
+        self.release_metal_residency();
+    }
+}
+
+impl SharedWeights<'_> {
+    /// Every host byte range a resident device buffer for these weights can
+    /// be keyed under: the checkpoint mapping the borrowed blocks point into,
+    /// each borrowed block itself, and every buffer these weights own.
+    #[cfg(feature = "cuda")]
+    fn host_ranges(&self) -> Vec<Range<usize>> {
+        let owned = self.bound.owned.iter().map(|(_, values)| host_range(values.as_slice()));
+        let packed = self.bound.packed.iter().map(|(_, block)| block_host_range(block));
+        let packed_owned = self.bound.packed_owned.iter().map(|(_, bytes, _)| host_range(bytes.as_slice()));
+        [host_range(self.mapping)]
+            .into_iter()
+            .chain(owned)
+            .chain(packed)
+            .chain(packed_owned)
+            .collect()
+    }
+
+    #[cfg(feature = "metal")]
+    fn release_metal_residency(&self) {
         let names = self
             .bound
             .owned
@@ -1294,6 +1322,21 @@ impl Drop for SharedWeights<'_> {
             );
         release_resident_names(names);
         unregister_checkpoint_mapping(self.mapping);
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn host_range<Element>(values: &[Element]) -> Range<usize> {
+    let start = values.as_ptr() as usize;
+    start..start + size_of_val(values)
+}
+
+#[cfg(feature = "cuda")]
+fn block_host_range(block: &QuantizedBlock<'_>) -> Range<usize> {
+    match block {
+        QuantizedBlock::Float32(values) => host_range(values),
+        QuantizedBlock::Int32(values) => host_range(values),
+        QuantizedBlock::Packed { bytes, .. } => host_range(bytes),
     }
 }
 
