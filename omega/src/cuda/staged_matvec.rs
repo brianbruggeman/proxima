@@ -300,11 +300,13 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
         name,
         elements,
         block_bytes,
+        centering,
         ..
     } = &plan.dot;
     let rows = plan.dot.rows_per_warp;
     let chunks_per_block = elements / DOT_ELEMENTS;
     let total_chunks = plan.reduction / DOT_ELEMENTS as u64;
+    let (activation_sum, centered) = centering_text(*centering);
     source.push_str(&format!(
         "    const unsigned char *row_start[{rows}];\n\
          \x20   float accumulator[{rows}];\n\
@@ -320,6 +322,7 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
          \x20       const int4 high = *(const int4 *)(staged_q + chunk * 8u + 4u);\n\
          \x20       const int activation[8] = {{ low.x, low.y, low.z, low.w, high.x, high.y, high.z, high.w }};\n\
          \x20       const float activation_scale = staged_d[chunk];\n\
+         {activation_sum}\
          \x20       const unsigned int block_offset = (chunk / {chunks_per_block}u) * {block_bytes}u;\n\
          \x20       #pragma unroll\n\
          \x20       for (int row = 0; row < {rows}; row++) {{\n\
@@ -330,10 +333,29 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
          \x20           int dot = 0;\n\
          \x20           #pragma unroll\n\
          \x20           for (int word = 0; word < 8; word++) {{ dot = __dp4a(words[word], activation[word], dot); }}\n\
+         {centered}\
          \x20           accumulator[row] += {name}_scale(block) * activation_scale * (float)dot;\n\
          \x20       }}\n\
          \x20   }}\n"
     ));
+}
+
+// words carry raw codes so recentering is one subtraction per chunk, not a per-word swar sub
+fn centering_text(centering: Option<(i16, i16)>) -> (String, String) {
+    let Some((multiplier, bias)) = centering else {
+        return (String::new(), String::new());
+    };
+    let sum = if bias == 0 {
+        String::new()
+    } else {
+        "        int activation_sum = 0;\n        #pragma unroll\n        for (int word = 0; word < 8; word++) { activation_sum = __dp4a(0x01010101, activation[word], activation_sum); }\n".to_owned()
+    };
+    let centered = if bias == 0 {
+        format!("            dot = {multiplier} * dot;\n")
+    } else {
+        format!("            dot = {multiplier} * dot - {bias} * activation_sum;\n")
+    };
+    (sum, centered)
 }
 
 fn push_write(source: &mut String, resolved: &BoundOp, output_rank: usize, rows: usize) {

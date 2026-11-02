@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 
 use proxima_primitives::block_layout::{BlockLayout, Coded};
 
-use super::block_dot::{BlockDot, DOT_ELEMENTS, affine, layout_name, rows_per_warp, scale_helpers};
+use super::block_dot::{BlockDot, DOT_ELEMENTS, layout_name, rows_per_warp, scale_helpers};
 
 /// Codes one int8x4 word covers.
 const WORD_ELEMENTS: usize = 4;
@@ -18,11 +18,11 @@ pub(super) fn radix_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
     let element = &layout.element;
     let radix = u32::from(element.packed_radix);
     let elements = usize::from(layout.elements);
-    let code_bits = u32::BITS - (radix - 1).leading_zeros();
     let usable = layout.sub.is_none()
         && layout.min.is_none()
         && elements.is_multiple_of(DOT_ELEMENTS)
         && radix > 1
+        && radix < 128
         && radix * 255 < 1 << 16
         && codes_fit_int8(element, layout.multiplier, radix);
     if !usable {
@@ -32,7 +32,7 @@ pub(super) fn radix_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
     let name = layout_name(layout);
     let mut helpers = scale_helpers(layout, &name)?;
     let words = (0..DOT_ELEMENTS / WORD_ELEMENTS)
-        .map(|word| word_text(layout, &sources, radix, code_bits, word))
+        .map(|word| word_text(layout, &sources, radix, word))
         .collect::<Option<String>>()?;
     helpers.push_str(&format!(
         "__device__ __forceinline__ void {name}_i8x32(const unsigned char *block, unsigned int chunk, int *words) {{\n{words}}}\n"
@@ -43,6 +43,7 @@ pub(super) fn radix_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
         elements,
         block_bytes: usize::from(layout.block_bytes),
         rows_per_warp: rows_per_warp(true),
+        centering: Some((layout.multiplier, element.bias)),
     })
 }
 
@@ -85,7 +86,7 @@ fn run_start(sources: &[(usize, u32)]) -> Option<(usize, u32)> {
         .then_some((first_byte, factor))
 }
 
-fn word_text(layout: &BlockLayout, sources: &[(usize, u32)], radix: u32, code_bits: u32, word: usize) -> Option<String> {
+fn word_text(layout: &BlockLayout, sources: &[(usize, u32)], radix: u32, word: usize) -> Option<String> {
     let chunks = usize::from(layout.elements) / DOT_ELEMENTS;
     let per_chunk: Vec<&[(usize, u32)]> = (0..chunks)
         .map(|chunk| {
@@ -98,8 +99,7 @@ fn word_text(layout: &BlockLayout, sources: &[(usize, u32)], radix: u32, code_bi
     let mut branch = "if";
     for (chunk, codes) in per_chunk.iter().enumerate().filter(|(chunk, _)| runs[*chunk].is_none()) {
         let code = mixed_word(codes, radix);
-        let value = affine(&code, layout.multiplier, layout.element.bias, code_bits as usize)?;
-        text.push_str(&format!("    {branch} (chunk == {chunk}u) {{ words[{word}] = {value}; }}\n"));
+        text.push_str(&format!("    {branch} (chunk == {chunk}u) {{ words[{word}] = {code}; }}\n"));
         branch = "else if";
     }
     let run_chunks: Vec<(usize, u32)> = runs.iter().flatten().copied().collect();
@@ -107,7 +107,7 @@ fn word_text(layout: &BlockLayout, sources: &[(usize, u32)], radix: u32, code_bi
         return Some(text);
     }
     text.push_str(if branch == "if" { "    {\n" } else { "    else {\n" });
-    text.push_str(&run_word(layout, &runs, radix, code_bits, word)?);
+    text.push_str(&run_word(layout, &runs, radix, word)?);
     text.push_str("    }\n");
     Some(text)
 }
@@ -126,7 +126,7 @@ fn mixed_word(codes: &[(usize, u32)], radix: u32) -> String {
         .join(" | ")
 }
 
-fn run_word(layout: &BlockLayout, runs: &[Option<(usize, u32)>], radix: u32, code_bits: u32, word: usize) -> Option<String> {
+fn run_word(layout: &BlockLayout, runs: &[Option<(usize, u32)>], radix: u32, word: usize) -> Option<String> {
     let present: Vec<(usize, u32)> = runs.iter().flatten().copied().collect();
     let first = *present.first()?;
     let uniform = present.iter().all(|run| *run == first);
@@ -145,14 +145,11 @@ fn run_word(layout: &BlockLayout, runs: &[Option<(usize, u32)>], radix: u32, cod
             .collect::<Vec<_>>()
             .join(" | ")
     };
-    let value = affine("(low | (high << 8u))", layout.multiplier, layout.element.bias, code_bits as usize)?;
     text.push_str(&format!(
         "        const unsigned int packed{word} = {load};\n\
          \x20       unsigned int low = ((packed{word} & 0x00FF00FFu) * {factor}) & 0x00FF00FFu;\n\
          \x20       unsigned int high = (((packed{word} >> 8u) & 0x00FF00FFu) * {factor}) & 0x00FF00FFu;\n\
-         \x20       low = ((low * {radix}u) >> 8u) & 0x00FF00FFu;\n\
-         \x20       high = ((high * {radix}u) >> 8u) & 0x00FF00FFu;\n\
-         \x20       words[{word}] = {value};\n"
+         \x20       words[{word}] = (int)__byte_perm(low * {radix}u, high * {radix}u, 0x7351u);\n"
     ));
     Some(text)
 }
