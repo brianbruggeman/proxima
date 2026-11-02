@@ -2,10 +2,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{BoundOp, BoundOpKind, DType, Keep, Layout, NumericPolicy, ReduceInit, ScalarOp, StepArg};
+use proxima_tensor::{BoundOp, BoundOpKind, DType, Keep, Layout, NodeId, NumericPolicy, ReduceInit, ScalarOp, StepArg};
 
 use super::block_dot::{BlockDot, DOT_ELEMENTS, block_dot_i8};
-use super::{Codec, EmitError, flat_packed_rows, gather_count, push_reduce_epilogue_write, reduction_dims};
+use super::{
+    Codec, CudaGridSpec, CudaKernel, EmitError, WARP_SIZE, flat_packed_rows, gather_count, push_reduce_epilogue_write,
+    reduction_dims,
+};
+use crate::msl::Binding;
 
 /// Warps in one block of a staged matvec.
 pub(super) const STAGED_WARPS: usize = 8;
@@ -17,6 +21,21 @@ pub(super) const STAGED_THREADS: u64 = (STAGED_WARPS * 32) as u64;
 /// Largest reduction a block can stage: int8 values plus one f32 scale per
 /// 32 elements must fit the 48 KiB static shared-memory limit.
 const MAX_STAGED_REDUCTION: u64 = 32_768;
+
+/// Below this many bytes of int8 plus scales a block stages in shared memory: the extra
+/// launch of a global pre-pass costs more than the smem it would free.
+const SMEM_STAGE_LIMIT_BYTES: u64 = 4096;
+
+/// Global quantized-activation words are int8 groups of 32 followed by one f32 scale each.
+pub(super) fn staged_scratch_len(reduction: u64) -> usize {
+    (reduction / 4 + reduction / DOT_ELEMENTS as u64) as usize
+}
+
+/// The arena slot of a node's quantized activation; counted down from the top so it cannot
+/// meet a program node, which are numbered up from zero.
+pub(super) fn staged_scratch_node(node: NodeId) -> NodeId {
+    NodeId(u32::MAX - node.0)
+}
 
 /// `sum(packed * shared)` lowered as: the operand every output row reads at the
 /// same coordinates is staged once per block in shared memory, rounded to int8
@@ -33,6 +52,9 @@ pub(super) struct StagedMatvec {
     /// The reduced elements are one unit-stride run starting on a 16-byte boundary.
     pub contiguous_activation: bool,
     pub dot: BlockDot,
+    /// The activation is quantized into a global scratch by a pre-pass launch instead of
+    /// being staged in every block's shared memory.
+    pub scratch: bool,
 }
 
 fn is_contiguous_run(layout: &Layout, reduce_dims: &[u16], reduce_extents: &[u64]) -> bool {
@@ -109,6 +131,7 @@ pub(super) fn staged_matvec_plan(
         contiguous_activation,
         reduce_extents,
         reduction,
+        scratch: reduction + reduction / DOT_ELEMENTS as u64 * 4 > SMEM_STAGE_LIMIT_BYTES,
         dot,
     })
 }
@@ -203,7 +226,18 @@ fn push_contiguous_stage(source: &mut String, plan: &StagedMatvec) {
     ));
 }
 
+fn push_scratch_stage(source: &mut String, plan: &StagedMatvec) {
+    source.push_str(&format!(
+        "    const int *staged_q = staged_scratch;\n    const float *staged_d = (const float *)(staged_scratch + {});\n",
+        plan.reduction / 4
+    ));
+}
+
 fn push_stage(source: &mut String, plan: &StagedMatvec) {
+    if plan.scratch {
+        push_scratch_stage(source, plan);
+        return;
+    }
     if plan.contiguous_activation {
         push_contiguous_stage(source, plan);
         return;
@@ -251,7 +285,9 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
     for index in 0..output_axes.len() {
         source.push_str(&format!("    long coord{index}_rows[{rows}];\n"));
     }
-    source.push_str(&format!("    __shared__ long block_row_byte[{}];\n", STAGED_WARPS * rows));
+    if !plan.scratch {
+        source.push_str(&format!("    __shared__ long block_row_byte[{}];\n", STAGED_WARPS * rows));
+    }
     source.push_str(&format!(
         "    const long first_row = ((long)blockIdx.x * {STAGED_WARPS} + (long)warp) * {rows};\n\
          \x20   long row_block[{rows}];\n\
@@ -284,11 +320,18 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
         "        const long row_element = u.operand_base[{weight_slot}] + packed_row * {};\n\
          \x20       if (row_element % {elements} != 0) {{ __trap(); }}\n\
          \x20       row_block[row] = row_element / {elements};\n\
-         \x20       if (lane == 0u) {{ block_row_byte[warp * {rows} + row] = first_row + row < u.output_total ? row_block[row] * {block_bytes} : -1; }}\n\
+         {publish}\
          \x20   }}\n",
-        plan.reduction
+        plan.reduction,
+        publish = if plan.scratch {
+            String::new()
+        } else {
+            format!("        if (lane == 0u) {{ block_row_byte[warp * {rows} + row] = first_row + row < u.output_total ? row_block[row] * {block_bytes} : -1; }}\n")
+        }
     ));
-    source.push_str("    __syncthreads();\n");
+    if !plan.scratch {
+        source.push_str("    __syncthreads();\n");
+    }
 }
 
 /// Each lane folds chunks `lane, lane + 32, ...` of its warp's rows straight from global memory:
@@ -307,13 +350,18 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
     let chunks_per_block = elements / DOT_ELEMENTS;
     let total_chunks = plan.reduction / DOT_ELEMENTS as u64;
     let (activation_sum, centered) = centering_text(*centering);
+    let row_base = if plan.scratch {
+        format!("first_row + row < u.output_total ? row_block[row] * {block_bytes} : -1")
+    } else {
+        format!("block_row_byte[warp * {rows} + row]")
+    };
     let position = if 32 % chunks_per_block == 0 { format!("lane % {chunks_per_block}u") } else { format!("chunk % {chunks_per_block}u") };
     source.push_str(&format!(
         "    const unsigned char *row_start[{rows}];\n\
          \x20   float accumulator[{rows}];\n\
          \x20   #pragma unroll\n\
          \x20   for (int row = 0; row < {rows}; row++) {{\n\
-         \x20       const long base = block_row_byte[warp * {rows} + row];\n\
+         \x20       const long base = {row_base};\n\
          \x20       row_start[row] = base < 0 ? (const unsigned char *)0 : in{weight_slot} + base;\n\
          \x20       accumulator[row] = 0.0f;\n\
          \x20   }}\n\
@@ -339,6 +387,101 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
          \x20       }}\n\
          \x20   }}\n"
     ));
+}
+
+fn prepass_warps(plan: &StagedMatvec) -> u64 {
+    let groups = plan.reduction / DOT_ELEMENTS as u64;
+    if plan.contiguous_activation { groups.div_ceil(4) } else { groups }
+}
+
+fn contiguous_prepass_body(plan: &StagedMatvec) -> String {
+    let activation_slot = plan.activation_slot;
+    let groups = plan.reduction / DOT_ELEMENTS as u64;
+    format!(
+        "    const unsigned int lane = threadIdx.x & 31u;\n\
+         \x20   const unsigned int quad_in_group = lane & 7u;\n\
+         \x20   const unsigned int group = (blockIdx.x * {STAGED_WARPS}u + (threadIdx.x >> 5u)) * 4u + (lane >> 3u);\n\
+         \x20   const float4 *activation_quads = (const float4 *)(in{activation_slot} + u.operand_base[{activation_slot}]);\n\
+         \x20   const float4 value = group < {groups}u ? activation_quads[group * 8u + quad_in_group] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);\n\
+         \x20   float amax = fmaxf(fmaxf(fabsf(value.x), fabsf(value.y)), fmaxf(fabsf(value.z), fabsf(value.w)));\n\
+         \x20   amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 4));\n\
+         \x20   amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 2));\n\
+         \x20   amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, 1));\n\
+         \x20   if (group >= {groups}u) {{ return; }}\n\
+         \x20   const float scale = amax / 127.0f;\n\
+         \x20   const float inverse = amax == 0.0f ? 0.0f : 127.0f / amax;\n\
+         \x20   const int packed = (__float2int_rn(value.x * inverse) & 0xff)\n\
+         \x20       | ((__float2int_rn(value.y * inverse) & 0xff) << 8)\n\
+         \x20       | ((__float2int_rn(value.z * inverse) & 0xff) << 16)\n\
+         \x20       | (__float2int_rn(value.w * inverse) << 24);\n\
+         \x20   staged_scratch[group * 8u + quad_in_group] = packed;\n\
+         \x20   if (quad_in_group == 0u) {{ ((float *)staged_scratch)[{words}u + group] = scale; }}\n",
+        words = plan.reduction / 4,
+    )
+}
+
+fn strided_prepass_body(plan: &StagedMatvec) -> String {
+    let activation_slot = plan.activation_slot;
+    let groups = plan.reduction / DOT_ELEMENTS as u64;
+    let offset = activation_offset(plan, "(long)group * 32 + lane");
+    format!(
+        "    const unsigned int lane = threadIdx.x & 31u;\n\
+         \x20   const unsigned int group = blockIdx.x * {STAGED_WARPS}u + (threadIdx.x >> 5u);\n\
+         \x20   float value = 0.0f;\n\
+         \x20   if (group < {groups}u) {{\n\
+         {offset}\
+         \x20       value = in{activation_slot}[act_offset];\n\
+         \x20   }}\n\
+         \x20   float amax = fabsf(value);\n\
+         \x20   #pragma unroll\n\
+         \x20   for (int shift = 16; shift > 0; shift >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, shift)); }}\n\
+         \x20   if (group >= {groups}u) {{ return; }}\n\
+         \x20   const float scale = amax / 127.0f;\n\
+         \x20   const int level = amax == 0.0f ? 0 : __float2int_rn(value / scale);\n\
+         \x20   ((signed char *)staged_scratch)[group * 32u + lane] = (signed char)level;\n\
+         \x20   if (lane == 0u) {{ ((float *)staged_scratch)[{words}u + group] = scale; }}\n",
+        words = plan.reduction / 4,
+    )
+}
+
+/// The launch that fills the global quantized activation before the matvec reads it. It shares
+/// the matvec's `Uniforms` and helper preamble, taken from `main_source` up to its signature.
+pub(super) fn staged_prepass(
+    resolved: &BoundOp,
+    plan: &StagedMatvec,
+    entry: &str,
+    main_source: &str,
+) -> Result<CudaKernel, EmitError> {
+    let prefix_end = main_source.find("extern \"C\"").ok_or(EmitError::RenderKindMismatch {
+        node: resolved.node,
+        expected: "kernel signature",
+        found: "source without an extern entry",
+    })?;
+    let (activation_node, _, _) = &resolved.operands()[plan.activation_slot];
+    let activation_slot = plan.activation_slot;
+    let body = if plan.contiguous_activation { contiguous_prepass_body(plan) } else { strided_prepass_body(plan) };
+    let source = format!(
+        "{}extern \"C\" __global__ void __launch_bounds__({STAGED_THREADS}) {entry}_prepass(\n\
+         \x20   const float* __restrict__ in{activation_slot},\n\
+         \x20   int* __restrict__ staged_scratch,\n\
+         \x20   const Uniforms* __restrict__ u_ptr\n\
+         ) {{\n\
+         \x20   const Uniforms u = *u_ptr;\n\
+         {body}}}\n",
+        &main_source[..prefix_end]
+    );
+    Ok(CudaKernel {
+        source,
+        entry: format!("{entry}_prepass"),
+        bindings: vec![
+            Binding::Input(*activation_node),
+            Binding::Output(staged_scratch_node(resolved.node)),
+            Binding::Uniforms,
+        ],
+        grid: CudaGridSpec { threads: prepass_warps(plan) * WARP_SIZE, block_width: Some(STAGED_THREADS) },
+        extra_outputs: Vec::new(),
+        prologue: Vec::new(),
+    })
 }
 
 // words carry raw codes so recentering is one subtraction per chunk, not a per-word swar sub

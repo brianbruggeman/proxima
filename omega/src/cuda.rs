@@ -82,7 +82,10 @@ mod row_tile;
 mod staged_matvec;
 use mma_gemm::{GEMM_THREADS, MMA_GEMM_HELPERS, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body};
 use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
-use staged_matvec::{STAGED_THREADS, push_staged_matvec_body, staged_matvec_plan, staged_matvec_threads};
+use staged_matvec::{
+    STAGED_THREADS, push_staged_matvec_body, staged_matvec_plan, staged_matvec_threads, staged_prepass,
+    staged_scratch_len, staged_scratch_node,
+};
 
 /// Appended to a Q4_0 matvec's CUDA entry name only when
 /// `NumericPolicy::activation_quantization` is granted and the dp4a
@@ -279,13 +282,17 @@ pub fn emit_cuda_with_policy(
         }
     };
     let (grid, extra_outputs) = extent_fields(resolved, &quantized, numeric_policy)?;
+    let prologue = match staged_matvec_plan(resolved, &quantized, numeric_policy) {
+        Some(plan) if plan.scratch => vec![staged_prepass(resolved, &plan, &entry, &source)?],
+        _ => Vec::new(),
+    };
     Ok(CudaKernel {
         source,
         entry,
         bindings: bindings(resolved),
         grid,
         extra_outputs,
-        prologue: Vec::new(),
+        prologue,
     })
 }
 
@@ -333,9 +340,12 @@ fn extent_fields(
             limit: MAX_GRID_BLOCKS * grid.block_width_or_default(),
         });
     }
-    let extra_outputs = resolved
+    let mut extra_outputs = resolved
         .kind
         .moe_topk_extra_outputs(resolved.extents.iter().product::<u64>() as usize);
+    if let Some(plan) = staged.filter(|plan| plan.scratch) {
+        extra_outputs.push((staged_scratch_node(resolved.node), staged_scratch_len(plan.reduction)));
+    }
     Ok((grid, extra_outputs))
 }
 
@@ -1392,7 +1402,8 @@ fn entry_name(
         ""
     };
     let revision = if let Some(plan) = staged_matvec_plan(resolved, quantized, numeric_policy) {
-        format!("_smv{}x{}_gid64c9", staged_matvec::STAGED_WARPS, plan.dot.rows_per_warp)
+        let global = if plan.scratch { "g" } else { "" };
+        format!("_smv{}x{}{global}_gid64c9", staged_matvec::STAGED_WARPS, plan.dot.rows_per_warp)
     } else if mma_gemm_plan(resolved, quantized, numeric_policy).is_some() {
         String::from("_mma16x8x8_gid64c9")
     } else if row_tile_axis(resolved, quantized, numeric_policy).is_some() {
@@ -3395,6 +3406,13 @@ fn render_reduce(
             &format!("__global__ void __launch_bounds__({STAGED_THREADS}) "),
             1,
         );
+        if plan.scratch {
+            source = source.replacen(
+                "const Uniforms* __restrict__ u_ptr\n",
+                "const Uniforms* __restrict__ u_ptr,\n    const int* __restrict__ staged_scratch\n",
+                1,
+            );
+        }
         push_staged_matvec_body(&mut source, resolved, plan)?;
     } else if let Some(plan) = gemm {
         source = source.replacen(
