@@ -8,8 +8,10 @@
 //! zero Q, output and FFN (the branches add nothing, which isolates the
 //! per-pass output norm), unit gammas, epsilon one.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
+use proxima_tensor::test_support::Lcg;
 
 use proxima_gguf::{
     GgmlType, GgufModel, MetadataArray, MetadataValue, TensorPayload, write_complete,
@@ -52,7 +54,139 @@ fn tensor_set() -> Vec<(String, Vec<u64>, Vec<u8>)> {
 /// The tiny recurrent checkpoint as GGUF bytes: `num_loops` passes over one
 /// physical block, loop norm on.
 pub(super) fn tiny_ouro_gguf(num_loops: u32, skip_loop_final_norm: bool) -> Vec<u8> {
-    let payloads = tensor_set();
+    let geometry = Geometry {
+        hidden: 2,
+        feed_forward: 2,
+        vocabulary: 2,
+        epsilon: 1.0,
+    };
+    ouro_gguf(&tensor_set(), &geometry, num_loops, skip_loop_final_norm)
+}
+
+pub(super) const STATE_VOCABULARY: u32 = 16;
+
+fn seeded(generator: &mut Lcg, count: usize, scale: f32, offset: f32) -> Vec<f32> {
+    (0..count)
+        .map(|_| offset + scale * generator.next_unit())
+        .collect()
+}
+
+fn state_tensor_set(
+    hidden: usize,
+    feed_forward: usize,
+    vocabulary: usize,
+) -> Vec<(String, Vec<u64>, Vec<u8>)> {
+    let mut generator = Lcg(0x5EED_0A0B_0C0D_0E0F);
+    let square = hidden * hidden;
+    let entries: Vec<(&str, Vec<u64>, Vec<f32>)> = vec![
+        (
+            "token_embd.weight",
+            vec![hidden as u64, vocabulary as u64],
+            seeded(&mut generator, hidden * vocabulary, 1.0, 0.0),
+        ),
+        (
+            "blk.0.attn_norm.weight",
+            vec![hidden as u64],
+            seeded(&mut generator, hidden, 0.1, 1.0),
+        ),
+        (
+            "blk.0.ffn_norm.weight",
+            vec![hidden as u64],
+            seeded(&mut generator, hidden, 0.1, 1.0),
+        ),
+        (
+            "blk.0.post_attention_norm.weight",
+            vec![hidden as u64],
+            seeded(&mut generator, hidden, 0.1, 1.0),
+        ),
+        (
+            "blk.0.post_ffw_norm.weight",
+            vec![hidden as u64],
+            seeded(&mut generator, hidden, 0.1, 1.0),
+        ),
+        (
+            "blk.0.attn_q.weight",
+            vec![hidden as u64, hidden as u64],
+            seeded(&mut generator, square, 0.8, 0.0),
+        ),
+        (
+            "blk.0.attn_k.weight",
+            vec![hidden as u64, hidden as u64],
+            seeded(&mut generator, square, 0.8, 0.0),
+        ),
+        (
+            "blk.0.attn_v.weight",
+            vec![hidden as u64, hidden as u64],
+            seeded(&mut generator, square, 0.8, 0.0),
+        ),
+        (
+            "blk.0.attn_output.weight",
+            vec![hidden as u64, hidden as u64],
+            seeded(&mut generator, square, 0.8, 0.0),
+        ),
+        (
+            "blk.0.ffn_gate.weight",
+            vec![hidden as u64, feed_forward as u64],
+            seeded(&mut generator, hidden * feed_forward, 0.6, 0.0),
+        ),
+        (
+            "blk.0.ffn_up.weight",
+            vec![hidden as u64, feed_forward as u64],
+            seeded(&mut generator, hidden * feed_forward, 0.6, 0.0),
+        ),
+        (
+            "blk.0.ffn_down.weight",
+            vec![feed_forward as u64, hidden as u64],
+            seeded(&mut generator, hidden * feed_forward, 0.6, 0.0),
+        ),
+        (
+            "output_norm.weight",
+            vec![hidden as u64],
+            seeded(&mut generator, hidden, 0.1, 1.0),
+        ),
+        (
+            "output.weight",
+            vec![hidden as u64, vocabulary as u64],
+            seeded(&mut generator, hidden * vocabulary, 1.0, 0.0),
+        ),
+    ];
+    entries
+        .into_iter()
+        .map(|(name, dims, values)| (name.into(), dims, f32_bytes(&values)))
+        .collect()
+}
+
+/// A checkpoint whose logits depend on every earlier position: sixteen tokens,
+/// an 8-wide single head, and seeded dense Q, K, V, output, FFN and head weights
+/// (the tiny fixture zeroes Q, output and FFN, so stale cache state is invisible).
+pub(super) fn state_sensitive_ouro_gguf(num_loops: u32) -> Vec<u8> {
+    let geometry = Geometry {
+        hidden: 8,
+        feed_forward: 16,
+        vocabulary: STATE_VOCABULARY,
+        epsilon: 1e-5,
+    };
+    let tensors = state_tensor_set(8, 16, STATE_VOCABULARY as usize);
+    ouro_gguf(&tensors, &geometry, num_loops, false)
+}
+
+struct Geometry {
+    hidden: u32,
+    feed_forward: u32,
+    vocabulary: u32,
+    epsilon: f32,
+}
+
+fn ouro_gguf(
+    payloads: &[(String, Vec<u64>, Vec<u8>)],
+    geometry: &Geometry,
+    num_loops: u32,
+    skip_loop_final_norm: bool,
+) -> Vec<u8> {
+    let tokens: Vec<String> = (0..geometry.vocabulary)
+        .map(|index| format!("t{index}"))
+        .collect();
+    let scores = alloc::vec![0.0f32; tokens.len()];
     let tensors = payloads
         .iter()
         .map(|(name, dims, data)| TensorPayload {
@@ -69,15 +203,24 @@ pub(super) fn tiny_ouro_gguf(num_loops: u32, skip_loop_final_norm: bool) -> Vec<
                 "general.architecture".into(),
                 MetadataValue::String("ouro".into())
             ),
-            ("ouro.embedding_length".into(), MetadataValue::U32(2)),
-            ("ouro.feed_forward_length".into(), MetadataValue::U32(2)),
+            (
+                "ouro.embedding_length".into(),
+                MetadataValue::U32(geometry.hidden),
+            ),
+            (
+                "ouro.feed_forward_length".into(),
+                MetadataValue::U32(geometry.feed_forward),
+            ),
             ("ouro.attention.head_count".into(), MetadataValue::U32(1)),
             ("ouro.attention.head_count_kv".into(), MetadataValue::U32(1)),
             ("ouro.block_count".into(), MetadataValue::U32(1)),
-            ("ouro.rope.dimension_count".into(), MetadataValue::U32(2)),
+            (
+                "ouro.rope.dimension_count".into(),
+                MetadataValue::U32(geometry.hidden),
+            ),
             (
                 "ouro.attention.layer_norm_rms_epsilon".into(),
-                MetadataValue::F32(1.0),
+                MetadataValue::F32(geometry.epsilon),
             ),
             ("ouro.num_loops".into(), MetadataValue::U32(num_loops)),
             (
@@ -90,11 +233,11 @@ pub(super) fn tiny_ouro_gguf(num_loops: u32, skip_loop_final_norm: bool) -> Vec<
             ),
             (
                 "tokenizer.ggml.tokens".into(),
-                MetadataValue::Array(MetadataArray::String(alloc::vec!["a".into(), "b".into()])),
+                MetadataValue::Array(MetadataArray::String(tokens)),
             ),
             (
                 "tokenizer.ggml.scores".into(),
-                MetadataValue::Array(MetadataArray::F32(alloc::vec![0.0, 0.0])),
+                MetadataValue::Array(MetadataArray::F32(scores)),
             ),
         ],
         tensors,
