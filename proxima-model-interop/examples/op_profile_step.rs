@@ -18,8 +18,7 @@ mod real_model_probe;
 
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 mod profile {
-    use proxima_model_interop::probes;
-    use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, PromptCacheConfig, ServingConfig};
+        use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, PromptCacheConfig, ServingConfig};
 
     use super::real_model_probe;
 
@@ -99,7 +98,7 @@ mod profile {
         let prompt = real_model_probe::env_prompt(OPENCHAT_PROMPT);
 
         arm_profile_step(step);
-        let generated = probes::decode_plain(&model, &prompt, max_tokens, &openchat_config())
+        let generated = model.generate_with_serving_config(&prompt, max_tokens, openchat_config())
             .map_err(|error| format!("generate through the metal backend: {error}"))?;
         disarm_profile_step();
 
@@ -130,7 +129,7 @@ mod profile {
         let telemetry = real_model_probe::telemetry::install_stdout_telemetry()?;
 
         arm_profile_step("0");
-        let probe = probes::decode(&model, &prompt, 1, &serving_config)
+        let probe = real_model_probe::stream_decode(&model, &prompt, 1, serving_config)
             .map_err(|error| format!("prefill the ~850-token prompt with step 0 armed: {error}"))?;
         disarm_profile_step();
 

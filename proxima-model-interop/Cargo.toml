@@ -809,11 +809,11 @@ required-features = ["std"]
 
 [[example]]
 name = "op_profile_step"
-required-features = ["std", "test-support"]
+required-features = ["std"]
 
 [[example]]
 name = "prefill_ttft_850"
-required-features = ["std", "test-support"]
+required-features = ["std"]
 
 [[example]]
 name = "residency_ladder"

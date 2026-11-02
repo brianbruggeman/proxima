@@ -20,7 +20,6 @@ mod real_model_probe;
 mod ttft {
     use std::time::Instant;
 
-    use proxima_model_interop::probes;
     use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, PromptCacheConfig, ServingConfig};
 
     use super::real_model_probe;
@@ -72,7 +71,7 @@ mod ttft {
         let mut prompt_token_count = 0usize;
         for _run in 0..TIMED_RUNS {
             let start = Instant::now();
-            let probe = probes::decode(&model, &prompt, 1, &serving_config)
+            let probe = real_model_probe::stream_decode(&model, &prompt, 1, serving_config)
                 .map_err(|error| format!("prefill for one timed TTFT run: {error}"))?;
             ttft_ms.push(start.elapsed().as_secs_f64() * 1000.0);
             prompt_token_count = probe.prompt_token_count;
@@ -89,7 +88,7 @@ mod ttft {
             ));
         }
 
-        let identity = probes::decode(&model, &prompt, 8, &serving_config).map_err(|error| {
+        let identity = real_model_probe::stream_decode(&model, &prompt, 8, serving_config).map_err(|error| {
             format!("greedy-decode 8 tokens for the identity comparison: {error}")
         })?;
         println!("prefill_ttft_850 greedy_eight_token_ids={:?}", identity.ids);
