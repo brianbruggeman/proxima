@@ -112,7 +112,10 @@ fn bit_exact_policy_keeps_the_serial_fold_and_never_batches() {
         !source.contains("batch["),
         "no cooperative fold means no batched loads"
     );
-    assert!(source.contains("accumulator = seeded ? (accumulator + value) : value;"), "{source}");
+    assert!(
+        source.contains("accumulator = seeded ? (accumulator + value) : value;"),
+        "{source}"
+    );
 }
 
 #[cfg(all(
@@ -253,7 +256,10 @@ pub(super) mod normalization_rows {
         .expect("normalization row emits")
         .source;
         assert!(source.contains("ordered_fold = accumulator;"), "{source}");
-        assert!(source.contains("accumulator = seeded ? (accumulator + value) : value;"), "{source}");
+        assert!(
+            source.contains("accumulator = seeded ? (accumulator + value) : value;"),
+            "{source}"
+        );
         assert!(!source.contains("simd_sum"), "{source}");
         assert!(!source.contains("partials["), "{source}");
     }

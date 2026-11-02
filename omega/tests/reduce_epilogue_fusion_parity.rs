@@ -55,8 +55,7 @@ fn assert_parity_at_padding(padding: u64) {
     let output_roots = [roots[0]];
     let named = as_named_blocks(&owned);
 
-    let shapes =
-        infer(&program, &symbols).expect("single-range padded fixture infers");
+    let shapes = infer(&program, &symbols).expect("single-range padded fixture infers");
     let resolved = bind(&program, &shapes, &output_roots, NumericPolicy::default())
         .expect("single-range padded fixture binds");
     assert!(

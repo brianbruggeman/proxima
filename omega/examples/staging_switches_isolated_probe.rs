@@ -229,8 +229,14 @@ fn run() -> anyhow::Result<()> {
         blocks: &[QuantizedBlock<'_>],
         runs: usize,
     ) -> anyhow::Result<u64> {
-        let plan = omega::plan(program, &[], blocks, &[root], NumericPolicy::llama_relaxed())
-            .context("plan compiles")?;
+        let plan = omega::plan(
+            program,
+            &[],
+            blocks,
+            &[root],
+            NumericPolicy::llama_relaxed(),
+        )
+        .context("plan compiles")?;
         let mut samples = Vec::with_capacity(runs);
         for _ in 0..runs {
             let (_, timings) = omega::metal::execute_plan_op_timed(&plan, blocks, None)
@@ -378,8 +384,14 @@ fn run() -> anyhow::Result<()> {
                 vars.push((key, Some(value)));
             }
             let plan: anyhow::Result<_> = temp_env::with_vars(vars, || {
-                let plan = omega::plan(&program, &[], &blocks, &[sum], NumericPolicy::llama_relaxed())
-                    .context("plan compiles")?;
+                let plan = omega::plan(
+                    &program,
+                    &[],
+                    &blocks,
+                    &[sum],
+                    NumericPolicy::llama_relaxed(),
+                )
+                .context("plan compiles")?;
                 omega::metal::execute_plan_op_timed(&plan, &blocks, None)
                     .context("warm-up dispatch executes on a real device")?;
                 Ok(plan)

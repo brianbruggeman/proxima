@@ -156,9 +156,14 @@ pub(super) fn grid_threads_with_schedule(
                             .product()
                     }),
                 )?
-            } else if let Some(block) =
-                dense_batched_gemm_block(resolved, quantized, numeric_policy, *reduce_op, *init, output_axes)
-            {
+            } else if let Some(block) = dense_batched_gemm_block(
+                resolved,
+                quantized,
+                numeric_policy,
+                *reduce_op,
+                *init,
+                output_axes,
+            ) {
                 // Same tile-grid shape as the arm above -- the batch axes
                 // dispatch over `GridSpec::depth` (z), never widen this `x`
                 // thread count. Must stay in lock-step with
