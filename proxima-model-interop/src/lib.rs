@@ -64,6 +64,8 @@ mod lowering;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod mapping_residency;
 #[cfg(feature = "std")]
+pub mod mapped_residency;
+#[cfg(feature = "std")]
 pub mod memory_reclaim;
 pub mod pinned_source;
 #[cfg(feature = "std")]
