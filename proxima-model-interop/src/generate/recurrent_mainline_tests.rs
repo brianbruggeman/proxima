@@ -15,7 +15,7 @@ use proxima_tensor::LoopCdMode;
 use proxima_tensor::spec::{CacheMask, LayerCacheRoots, RecurrenceConfig, RopeLayout, RopePairing};
 
 use super::LoadedModel;
-use super::ouro_fixture::tiny_ouro_gguf;
+use super::ouro_fixture::{STATE_VOCABULARY, state_sensitive_ouro_gguf, tiny_ouro_gguf};
 use crate::error::InteropError;
 use crate::lowering::{KvLayout, bind_checkpoint, header_descriptor};
 use crate::profiles::family_profile;
@@ -357,6 +357,54 @@ fn recurrent_mainline_production_decode_literal() {
     );
 }
 
+fn last_position_logits(model: &LoadedModel<'_>, ids: &[u32]) -> Vec<f32> {
+    let flat = model
+        .forward_node_values_from_ids(ids, &[model.logits_root()], &ServingConfig::default())
+        .expect("evaluate the state-sensitive graph")
+        .remove(0);
+    let vocabulary = STATE_VOCABULARY as usize;
+    assert_eq!(
+        flat.len() % vocabulary,
+        0,
+        "logits are whole vocabulary rows"
+    );
+    flat[flat.len() - vocabulary..].to_vec()
+}
+
+#[test]
+fn recurrent_state_sensitive_fixture_last_logits_depend_on_earlier_tokens() {
+    let bytes = state_sensitive_ouro_gguf(2);
+    let parsed = parse_complete(&bytes).expect("parse the state-sensitive GGUF");
+    let model = LoadedModel::load(&parsed, &bytes).expect("load the state-sensitive model");
+
+    let baseline = last_position_logits(&model, &[3, 9, 5]);
+    let changed_first = last_position_logits(&model, &[4, 9, 5]);
+    let changed_middle = last_position_logits(&model, &[3, 10, 5]);
+    let repeat = last_position_logits(&model, &[3, 9, 5]);
+
+    let spread = |left: &[f32], right: &[f32]| {
+        left.iter()
+            .zip(right)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max)
+    };
+    assert_eq!(
+        spread(&baseline, &repeat),
+        0.0,
+        "the forward is deterministic"
+    );
+    assert!(
+        spread(&baseline, &changed_first) > 1e-3,
+        "an earlier prompt token must change the last logits, spread {}",
+        spread(&baseline, &changed_first)
+    );
+    assert!(
+        spread(&baseline, &changed_middle) > 1e-3,
+        "a middle prompt token must change the last logits, spread {}",
+        spread(&baseline, &changed_middle)
+    );
+}
+
 #[cfg(feature = "proxima-storage")]
 mod served_weights {
     use core::ops::ControlFlow;
@@ -537,7 +585,7 @@ mod resident_cuda_plans {
 
     use proxima_gguf::parse_complete;
 
-    use super::{LoadedModel, ServingConfig, tiny_ouro_gguf};
+    use super::{LoadedModel, ServingConfig, state_sensitive_ouro_gguf};
     use crate::serving::{GPU_LAYERS_ALL, PromptCacheConfig};
 
     fn gpu_config() -> ServingConfig<'static> {
@@ -574,13 +622,27 @@ mod resident_cuda_plans {
         let mut logits = Vec::new();
         let (ids, _, _, _) = model
             .run_decode_loop_through_cache(
-                prompt.to_vec(), &[], 4, &config, &mut runtime, None,
+                prompt.to_vec(),
+                &[],
+                4,
+                &config,
+                &mut runtime,
+                None,
                 &mut super::super::LogitsSink::Collect(&mut logits),
                 &mut super::super::NodeValuesSink::Discard,
-                &mut |_| ControlFlow::Continue(()), None, true, None, None,
+                &mut |_| ControlFlow::Continue(()),
+                None,
+                true,
+                None,
+                None,
             )
             .expect("decode on the tiny recurrent checkpoint through cuda");
-        Decoded { ids, logits, plan_hits: runtime.plan_hits, plan_misses: runtime.plan_misses }
+        Decoded {
+            ids,
+            logits,
+            plan_hits: runtime.plan_hits,
+            plan_misses: runtime.plan_misses,
+        }
     }
 
     fn assert_logits_close(actual: &[Vec<f32>], expected: &[Vec<f32>]) {
@@ -598,12 +660,12 @@ mod resident_cuda_plans {
 
     #[test]
     fn second_request_reuses_the_resident_plans_and_matches_a_fresh_model() {
-        let bytes = tiny_ouro_gguf(2, false);
+        let bytes = state_sensitive_ouro_gguf(2);
         let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
         let model = LoadedModel::load(&parsed, &bytes).expect("load");
         let fresh_parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
         let fresh_model = LoadedModel::load(&fresh_parsed, &bytes).expect("load a fresh model");
-        let long = [0_u32, 1, 1, 0, 1, 0];
+        let long = [3_u32, 9, 5, 12, 1, 7];
         let expected = decode(&fresh_model, &long);
 
         let first = generate(&model, &long);
@@ -611,22 +673,39 @@ mod resident_cuda_plans {
         let second = decode(&model, &long);
 
         assert_eq!(first, expected.ids, "first request equals a fresh model");
-        assert!(resident >= 1, "the first request left plans resident, got {resident}");
+        assert!(
+            resident >= 1,
+            "the first request left plans resident, got {resident}"
+        );
         assert_eq!(second.plan_misses, 0, "the second request built no plan");
-        assert!(second.plan_hits > 0, "the second request hit the resident plans");
-        assert!(!expected.logits.is_empty(), "the fresh model produced logits");
-        assert_eq!(second.ids, expected.ids, "reused plans change no sampled id");
+        assert!(
+            second.plan_hits > 0,
+            "the second request hit the resident plans"
+        );
+        assert!(
+            !expected.logits.is_empty(),
+            "the fresh model produced logits"
+        );
+        assert_eq!(
+            second.ids, expected.ids,
+            "reused plans change no sampled id"
+        );
         assert_logits_close(&second.logits, &expected.logits);
     }
 
     #[test]
     fn a_different_prompt_length_on_the_reused_model_matches_a_fresh_model() {
-        let bytes = tiny_ouro_gguf(2, false);
+        let bytes = state_sensitive_ouro_gguf(2);
         let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
         let model = LoadedModel::load(&parsed, &bytes).expect("load");
-        generate(&model, &[0]);
+        generate(&model, &[2]);
 
-        for prompt in [&[0_u32, 1, 1][..], &[1, 0][..], &[0][..], &[1, 0, 0, 1, 0][..]] {
+        for prompt in [
+            &[6_u32, 11, 1][..],
+            &[14, 0][..],
+            &[8][..],
+            &[13, 4, 10, 15, 2][..],
+        ] {
             assert_eq!(
                 generate(&model, prompt),
                 fresh_ids(&bytes, prompt),
@@ -637,13 +716,34 @@ mod resident_cuda_plans {
 
     #[test]
     fn a_request_after_a_carried_kv_request_does_not_see_its_rows() {
-        let bytes = tiny_ouro_gguf(2, false);
+        let bytes = state_sensitive_ouro_gguf(2);
         let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
         let model = LoadedModel::load(&parsed, &bytes).expect("load");
-        let long = [0_u32, 1, 1, 0, 1, 0];
+        let long = [3_u32, 9, 5, 12, 1, 7];
         generate(&model, &long);
 
-        assert_eq!(generate(&model, &[1]), fresh_ids(&bytes, &[1]));
+        assert_eq!(generate(&model, &[11]), fresh_ids(&bytes, &[11]));
         assert_eq!(generate(&model, &long), fresh_ids(&bytes, &long));
+    }
+
+    #[test]
+    fn a_different_prompt_after_a_long_one_matches_a_fresh_model_ids_and_logits() {
+        let bytes = state_sensitive_ouro_gguf(2);
+        let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+        let model = LoadedModel::load(&parsed, &bytes).expect("load");
+        let fresh_parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+        let fresh_model = LoadedModel::load(&fresh_parsed, &bytes).expect("load a fresh model");
+        let first_prompt = [3_u32, 9, 5, 12, 1, 7];
+        let second_prompt = [14_u32, 2, 8];
+        let expected = decode(&fresh_model, &second_prompt);
+
+        generate(&model, &first_prompt);
+        let reused = decode(&model, &second_prompt);
+
+        assert_eq!(
+            reused.ids, expected.ids,
+            "second prompt ids after the first"
+        );
+        assert_logits_close(&reused.logits, &expected.logits);
     }
 }
