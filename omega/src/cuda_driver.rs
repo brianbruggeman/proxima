@@ -2459,10 +2459,12 @@ impl CudaPlan {
         }
         if let Some(started) = upload_started {
             eprintln!(
-                "cuda_host_timing: phase=upload_ms value={:.3} resident_hits={} resident_misses={}",
+                "cuda_host_timing: phase=upload_ms value={:.3} resident_hits={} resident_misses={} packed_bytes={} upload_call_ms={:.3}",
                 started.elapsed().as_secs_f64() * 1_000.0,
                 resident_hits,
-                resident_misses
+                resident_misses,
+                self.driver.packed_upload_bytes() - upload_bytes_before,
+                upload_call_us as f64 / 1_000.0
             );
         }
         self.grow_appended_inputs()?;

@@ -906,14 +906,6 @@ fn prompt_tokens_target() -> Result<Option<usize>, BenchError> {
 }
 
 fn orchestrate(args: &RunArgs<'_>) -> Result<(), BenchError> {
-    let sized = prompt_tokens_target()?
-        .map(|target| sized_prompt(args.path, target))
-        .transpose()?;
-    let args = RunArgs {
-        prompt: sized.as_deref().unwrap_or(args.prompt),
-        ..*args
-    };
-    let args = &args;
     let cache_state = kernel_cache_state();
     // a format llama cannot open fails here too; its rows then report unsupported
     let llama_prompt_ids = llama_tokenize(args.path, args.prompt, true).unwrap_or_default();
@@ -1017,6 +1009,10 @@ fn parse_args() -> Result<(String, String, usize, usize, usize), BenchError> {
 
 fn main() -> ExitCode {
     let outcome = parse_args().and_then(|(path, prompt, tokens, repeats, context)| {
+        let sized = prompt_tokens_target()?
+            .map(|target| sized_prompt(&path, target))
+            .transpose()?;
+        let prompt = sized.unwrap_or(prompt);
         let args = RunArgs {
             path: &path,
             prompt: &prompt,
