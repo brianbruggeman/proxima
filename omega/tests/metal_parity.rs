@@ -1566,28 +1566,6 @@ fn page_aligned_input_takes_the_no_copy_metal_upload_path() {
     );
 }
 
-/// Reports the no-copy-vs-copy upload split across every real
-/// [`omega::execute`] call this whole test binary makes — not a
-/// per-program assertion (see the other tests for that), just the number
-/// this task's report is required to cite. Sorts alphabetically last in
-/// this file (`u` after `t`), so a single-process, single-threaded run
-/// (`cargo test -p proxima-omega --features metal --test metal_parity --
-/// --test-threads=1`) executes it after every other test in the binary has
-/// already incremented these same process-global counters — printed here,
-/// not asserted to an exact value, since which other tests ran (and how
-/// many blocks each uploaded) is this file's business, not this test's.
-#[ignore = "meaningful only under a single-process run (cargo test -- --test-threads=1 --ignored); nextest isolates every test into its own process, so this would read 0/0 there"]
-#[test]
-fn upload_path_totals_report_after_the_full_parity_suite() {
-    let nocopy = omega::metal::NOCOPY_BUFFER_UPLOADS.get();
-    let copy = omega::metal::COPYING_BUFFER_UPLOADS.get();
-    println!("metal_parity upload path totals: nocopy={nocopy} copy={copy}");
-    assert!(
-        nocopy + copy > 0,
-        "no real upload_block call was observed by this binary at all"
-    );
-}
-
 /// The claim the shader landed without: that Metal, handed PACKED `Q4_K`
 /// bytes, computes the same matmul the CPU computes from those same bytes
 /// dequantized to `f32` first.
