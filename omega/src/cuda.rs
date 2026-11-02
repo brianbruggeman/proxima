@@ -1526,6 +1526,7 @@ fn push_unit_stride_fold_header(
     source: &mut String,
     resolved: &BoundOp,
     output_axes: &[u16],
+    reduce_dim: u16,
     lane_start: &str,
     lane_step: &str,
 ) {
@@ -1534,13 +1535,15 @@ fn push_unit_stride_fold_header(
             "    long off_base{index} = u.operand_base[{index}];\n"
         ));
         for dim in output_axes {
+            let stride = resolved.operands()[index].1.stride(*dim);
             source.push_str(&format!(
-                "    off_base{index} += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+                "    off_base{index} += full_coord[{dim}] * {stride}L;\n"
             ));
         }
     }
+    let reduction_total = resolved.extents[reduce_dim as usize];
     source.push_str(&format!(
-        "    #pragma unroll 8\n    for (unsigned int r = {lane_start}; r < (unsigned int)u.reduction_total; r += {lane_step}) {{\n"
+        "    #pragma unroll 8\n    for (unsigned int r = {lane_start}; r < {reduction_total}u; r += {lane_step}) {{\n"
     ));
 }
 
@@ -2815,14 +2818,9 @@ fn push_cooperative_reduce_body(
         source.push_str(&format!("    long output_coord[{output_rank_len}];\n"));
         source.push_str("    long remaining = output_index;\n");
         for index in (0..output_rank).rev() {
-            let extent_slot = if is_broadcast_epilogue {
-                output_axes[index] as usize
-            } else {
-                index
-            };
+            let extent = resolved.extents[output_axes[index] as usize];
             source.push_str(&format!(
-                "    output_coord[{index}] = remaining % u.output_extents[{extent_slot}]; \
-                 remaining /= u.output_extents[{extent_slot}];\n"
+                "    output_coord[{index}] = remaining % {extent}L; remaining /= {extent}L;\n"
             ));
         }
         for (index, dim) in output_axes.iter().enumerate() {
@@ -2896,7 +2894,14 @@ fn push_cooperative_reduce_body(
             } else {
                 ("lane", "32u")
             };
-            push_unit_stride_fold_header(source, resolved, output_axes, fold_start, fold_step);
+            push_unit_stride_fold_header(
+                source,
+                resolved,
+                output_axes,
+                reduce_dims[0],
+                fold_start,
+                fold_step,
+            );
         } else if packed_chunked {
             source.push_str(&format!(
                 "    for (long chunk = (long)lane * 8; chunk < u.reduction_total; chunk += {} * 8) {{\n",
