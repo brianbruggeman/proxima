@@ -746,4 +746,22 @@ mod resident_cuda_plans {
         );
         assert_logits_close(&reused.logits, &expected.logits);
     }
+
+    #[test]
+    fn a_repeated_one_token_prompt_builds_no_plan_and_matches_a_fresh_model() {
+        let bytes = state_sensitive_ouro_gguf(2);
+        let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+        let model = LoadedModel::load(&parsed, &bytes).expect("load");
+        let fresh_parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+        let fresh_model = LoadedModel::load(&fresh_parsed, &bytes).expect("load a fresh model");
+        let prompt = [11_u32];
+        let expected = decode(&fresh_model, &prompt);
+
+        generate(&model, &prompt);
+        let repeated = decode(&model, &prompt);
+
+        assert_eq!(repeated.plan_misses, 0, "the prefill and decode plans stay resident");
+        assert_eq!(repeated.ids, expected.ids, "repeated one-token prompt ids");
+        assert_logits_close(&repeated.logits, &expected.logits);
+    }
 }
