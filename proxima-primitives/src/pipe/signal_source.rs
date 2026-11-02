@@ -103,7 +103,6 @@ mod tests {
         Pin::new(&mut call).poll(cx)
     }
 
-
     struct CountingWaker(AtomicUsize);
 
     impl Wake for CountingWaker {
@@ -179,7 +178,10 @@ mod tests {
 
         signal.fire();
 
-        assert!(counter.0.load(Ordering::Relaxed) >= 1, "fire must wake the parked fan-in");
+        assert!(
+            counter.0.load(Ordering::Relaxed) >= 1,
+            "fire must wake the parked fan-in"
+        );
         assert_eq!(poll_merge(&merge, &mut cx), Poll::Ready(Ok(())));
     }
 

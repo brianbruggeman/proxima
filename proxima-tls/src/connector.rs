@@ -508,9 +508,10 @@ mod tests {
     #[cfg(windows)]
     use windows_sys::Win32::Security::Cryptography::{
         CERT_STORE_ADD_ALWAYS, CERT_STORE_MAXIMUM_ALLOWED_FLAG, CERT_STORE_OPEN_EXISTING_FLAG,
-        CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_LOCAL_MACHINE, CertAddEncodedCertificateToStore,
-        CertCloseStore, CertDeleteCertificateFromStore, CertEnumCertificatesInStore,
-        CertFreeCertificateContext, CertOpenStore, HCERTSTORE, X509_ASN_ENCODING,
+        CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_LOCAL_MACHINE,
+        CertAddEncodedCertificateToStore, CertCloseStore, CertDeleteCertificateFromStore,
+        CertEnumCertificatesInStore, CertFreeCertificateContext, CertOpenStore, HCERTSTORE,
+        X509_ASN_ENCODING,
     };
 
     fn common_name(name: &str) -> DistinguishedName {

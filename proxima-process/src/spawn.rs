@@ -333,16 +333,27 @@ pub fn spawn(command: &CommandDescriptor, options: SpawnOptions) -> Result<Child
 /// threads. Options requiring child-side code before `exec` are rejected;
 /// they must use [`spawn`] through a single-threaded boundary.
 #[cfg(target_os = "linux")]
-pub fn spawn_external(command: &CommandDescriptor, options: SpawnOptions) -> Result<Child, ProximaError> {
+pub fn spawn_external(
+    command: &CommandDescriptor,
+    options: SpawnOptions,
+) -> Result<Child, ProximaError> {
     if options.dispatch_fd.is_some() || options.controlling_tty || options.umask.is_some() {
-        return Err(ProximaError::Body("posix_spawn external route does not support dispatch fd, controlling tty, or umask".to_owned()));
+        return Err(ProximaError::Body(
+            "posix_spawn external route does not support dispatch fd, controlling tty, or umask"
+                .to_owned(),
+        ));
     }
     spawn_posix(command, options.process_group)
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn spawn_external(_command: &CommandDescriptor, _options: SpawnOptions) -> Result<Child, ProximaError> {
-    Err(ProximaError::Body("posix_spawn external route is unavailable on this platform".to_owned()))
+pub fn spawn_external(
+    _command: &CommandDescriptor,
+    _options: SpawnOptions,
+) -> Result<Child, ProximaError> {
+    Err(ProximaError::Body(
+        "posix_spawn external route is unavailable on this platform".to_owned(),
+    ))
 }
 
 #[cfg(target_os = "linux")]
@@ -405,7 +416,10 @@ fn spawn_posix(command: &CommandDescriptor, process_group: bool) -> Result<Child
         return Err(posix_spawn_error("file-actions destroy", destroyed));
     }
     if attributes_destroyed != 0 {
-        return Err(posix_spawn_error("attributes destroy", attributes_destroyed));
+        return Err(posix_spawn_error(
+            "attributes destroy",
+            attributes_destroyed,
+        ));
     }
 
     Ok(parent_after_fork(pid, piped_pairs, process_group))
@@ -423,7 +437,9 @@ fn init_posix_attributes(process_group: bool) -> Result<libc::posix_spawnattr_t,
     if !process_group {
         return Ok(attributes);
     }
-    let flagged = unsafe { libc::posix_spawnattr_setflags(&mut attributes, libc::POSIX_SPAWN_SETSID as libc::c_short) };
+    let flagged = unsafe {
+        libc::posix_spawnattr_setflags(&mut attributes, libc::POSIX_SPAWN_SETSID as libc::c_short)
+    };
     if flagged != 0 {
         unsafe { libc::posix_spawnattr_destroy(&mut attributes) };
         return Err(posix_spawn_error("attributes setflags", flagged));
@@ -443,7 +459,13 @@ fn add_posix_stdio_actions(
             Stdio::Inherit => {}
             Stdio::Null => {
                 let result = unsafe {
-                    libc::posix_spawn_file_actions_addopen(actions, target, c"/dev/null".as_ptr(), libc::O_RDWR, 0)
+                    libc::posix_spawn_file_actions_addopen(
+                        actions,
+                        target,
+                        c"/dev/null".as_ptr(),
+                        libc::O_RDWR,
+                        0,
+                    )
                 };
                 if result != 0 {
                     return Err(posix_spawn_error("null stdio action", result));
@@ -454,7 +476,9 @@ fn add_posix_stdio_actions(
                 let pair = piped_pairs
                     .iter()
                     .find(|pair| pair.slot.child_fd() == target)
-                    .ok_or_else(|| ProximaError::Body(format!("missing pipe for child fd {target}")))?;
+                    .ok_or_else(|| {
+                        ProximaError::Body(format!("missing pipe for child fd {target}"))
+                    })?;
                 let source = pair.child_end.as_raw_fd();
                 add_dup_action(actions, source, target)?;
                 add_close_action(actions, pair.parent_end.as_raw_fd())?;
@@ -465,7 +489,8 @@ fn add_posix_stdio_actions(
         }
     }
     if let Some(directory) = command.current_dir.as_ref() {
-        let result = unsafe { libc::posix_spawn_file_actions_addchdir_np(actions, directory.as_ptr()) };
+        let result =
+            unsafe { libc::posix_spawn_file_actions_addchdir_np(actions, directory.as_ptr()) };
         if result != 0 {
             return Err(posix_spawn_error("working-directory action", result));
         }
@@ -474,7 +499,11 @@ fn add_posix_stdio_actions(
 }
 
 #[cfg(target_os = "linux")]
-fn add_dup_action(actions: &mut libc::posix_spawn_file_actions_t, source: RawFd, target: libc::c_int) -> Result<(), ProximaError> {
+fn add_dup_action(
+    actions: &mut libc::posix_spawn_file_actions_t,
+    source: RawFd,
+    target: libc::c_int,
+) -> Result<(), ProximaError> {
     if source == target {
         return Ok(());
     }
@@ -487,7 +516,10 @@ fn add_dup_action(actions: &mut libc::posix_spawn_file_actions_t, source: RawFd,
 }
 
 #[cfg(target_os = "linux")]
-fn add_close_action(actions: &mut libc::posix_spawn_file_actions_t, fd: RawFd) -> Result<(), ProximaError> {
+fn add_close_action(
+    actions: &mut libc::posix_spawn_file_actions_t,
+    fd: RawFd,
+) -> Result<(), ProximaError> {
     let result = unsafe { libc::posix_spawn_file_actions_addclose(actions, fd) };
     if result == 0 {
         Ok(())
@@ -498,7 +530,10 @@ fn add_close_action(actions: &mut libc::posix_spawn_file_actions_t, fd: RawFd) -
 
 #[cfg(target_os = "linux")]
 fn posix_spawn_error(operation: &str, code: libc::c_int) -> ProximaError {
-    ProximaError::Body(format!("posix_spawn {operation} failed: {}", std::io::Error::from_raw_os_error(code)))
+    ProximaError::Body(format!(
+        "posix_spawn {operation} failed: {}",
+        std::io::Error::from_raw_os_error(code)
+    ))
 }
 
 fn spawn_fork(command: &CommandDescriptor, options: SpawnOptions) -> Result<Child, ProximaError> {
@@ -830,8 +865,11 @@ mod tests {
             .map(|worker| {
                 thread::spawn(move || {
                     let mut command = CommandDescriptor::new(cstr("/bin/echo"));
-                    command.arg(cstr(&format!("worker {worker}"))).stdout(Stdio::Piped);
-                    let mut spawned = spawn_external(&command, SpawnOptions::default()).expect("posix_spawn");
+                    command
+                        .arg(cstr(&format!("worker {worker}")))
+                        .stdout(Stdio::Piped);
+                    let mut spawned =
+                        spawn_external(&command, SpawnOptions::default()).expect("posix_spawn");
                     let output = drain_to_string(spawned.stdout.take().expect("piped output"));
                     assert_eq!(output, format!("worker {worker}\n"));
                     let status = wait_child(spawned.pid);
@@ -848,13 +886,17 @@ mod tests {
     #[test]
     fn posix_spawn_honors_a_requested_process_group() {
         let mut command = CommandDescriptor::new(cstr("/bin/sh"));
-        command.arg(cstr("-c")).arg(cstr("read line")).stdin(Stdio::Piped);
+        command
+            .arg(cstr("-c"))
+            .arg(cstr("read line"))
+            .stdin(Stdio::Piped);
         let options = SpawnOptions {
             process_group: true,
             ..SpawnOptions::default()
         };
 
-        let mut spawned = spawn_external(&command, options).expect("posix_spawn with process group");
+        let mut spawned =
+            spawn_external(&command, options).expect("posix_spawn with process group");
 
         assert_eq!(unsafe { libc::getpgid(spawned.pid()) }, spawned.pid());
         spawned.kill_process_group().expect("kill process group");
@@ -873,24 +915,33 @@ mod tests {
             process_group: true,
             ..SpawnOptions::default()
         };
-        let mut spawned = spawn_external(&command, options).expect("posix_spawn with process group");
+        let mut spawned =
+            spawn_external(&command, options).expect("posix_spawn with process group");
 
         let grandchild = read_pid_line(spawned.stdout.take().expect("piped stdout"));
         spawned.kill_process_group().expect("kill process group");
         spawned.wait().expect("wait after group kill");
 
-        assert!(poll_until_gone(grandchild), "grandchild {grandchild} outlived the group kill");
+        assert!(
+            poll_until_gone(grandchild),
+            "grandchild {grandchild} outlived the group kill"
+        );
     }
 
     #[cfg(target_os = "linux")]
     #[test]
     fn posix_spawn_without_process_group_shares_our_group() {
         let mut command = CommandDescriptor::new(cstr("/bin/sh"));
-        command.arg(cstr("-c")).arg(cstr("read line")).stdin(Stdio::Piped);
+        command
+            .arg(cstr("-c"))
+            .arg(cstr("read line"))
+            .stdin(Stdio::Piped);
 
         let mut spawned = spawn_external(&command, SpawnOptions::default()).expect("posix_spawn");
 
-        assert_eq!(unsafe { libc::getpgid(spawned.pid()) }, unsafe { libc::getpgrp() });
+        assert_eq!(unsafe { libc::getpgid(spawned.pid()) }, unsafe {
+            libc::getpgrp()
+        });
         assert!(spawned.kill_process_group().is_err());
         spawned.kill().expect("kill");
         spawned.wait().expect("wait");
