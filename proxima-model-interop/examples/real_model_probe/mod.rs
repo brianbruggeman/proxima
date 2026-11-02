@@ -32,10 +32,7 @@ pub fn env_max_tokens(default_tokens: usize) -> usize {
 }
 
 #[cfg(all(feature = "metal", feature = "instrument"))]
-pub use telemetry::{TelemetryProbe, install_stdout_telemetry};
-
-#[cfg(all(feature = "metal", feature = "instrument"))]
-mod telemetry {
+pub mod telemetry {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;

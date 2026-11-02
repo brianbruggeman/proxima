@@ -88,7 +88,7 @@ mod profile {
     fn openchat(step: &str, max_tokens: usize) -> Result<(), String> {
         let model_path = std::env::var("PROXIMA_OPENCHAT_GGUF")
             .unwrap_or_else(|_| ServingConfig::default().model_path.to_string());
-        let telemetry = real_model_probe::install_stdout_telemetry()?;
+        let telemetry = real_model_probe::telemetry::install_stdout_telemetry()?;
         let mapped = real_model_probe::map_checkpoint(&model_path, "PROXIMA_OPENCHAT_GGUF")?;
         let file_bytes: &[u8] = &mapped;
         let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
@@ -127,7 +127,7 @@ mod profile {
             .map_err(|error| format!("load the qwen3 checkpoint: {error}"))?;
         let serving_config = qwen3_config()?;
         let prompt = PREFIX.repeat(5);
-        let telemetry = real_model_probe::install_stdout_telemetry()?;
+        let telemetry = real_model_probe::telemetry::install_stdout_telemetry()?;
 
         arm_profile_step("0");
         let probe = probes::decode(&model, &prompt, 1, &serving_config)
