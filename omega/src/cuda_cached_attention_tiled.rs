@@ -16,7 +16,7 @@ pub(crate) fn cached_attention_uses_mma(kind: &BoundOpKind, numeric_policy: Nume
 
 fn head_dim_fits(head_dim: u64, numeric_policy: NumericPolicy) -> bool {
     if numeric_policy.activation_quantization {
-        MMA_HEAD_DIMS.contains(&head_dim) && head_dim % MMA_HEAD_DIM_STEP == 0
+        MMA_HEAD_DIMS.contains(&head_dim) && head_dim.is_multiple_of(MMA_HEAD_DIM_STEP)
     } else {
         head_dim == ATTENTION_TILE_HEAD_DIM
     }
