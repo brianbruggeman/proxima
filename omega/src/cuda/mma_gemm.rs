@@ -480,6 +480,18 @@ pub(super) fn push_mma_gemm_body(
 "
             ));
         }
+        let last = reduce_rank - 1;
+        source.push_str(&format!(
+            "            const long segment_index = token_offset{rep} + reduce_offset;
+            if (u.operand_strides[{activation}][{inner}] == 1 && (u.reduction_extents[{last}] & 7) == 0 && (segment_index & 3) == 0) {{
+                const float4 first = *(const float4 *)(in{activation} + segment_index);
+                const float4 second = *(const float4 *)(in{activation} + segment_index + 4);
+                act_values[0] = first.x; act_values[1] = first.y; act_values[2] = first.z; act_values[3] = first.w;
+                act_values[4] = second.x; act_values[5] = second.y; act_values[6] = second.z; act_values[7] = second.w;
+            }} else {{
+",
+            inner = reduce_dims[last]
+        ));
         source.push_str("            #pragma unroll
             for (int slot = 0; slot < 8; slot++) {
 ");
@@ -487,7 +499,6 @@ pub(super) fn push_mma_gemm_body(
             "                act_values[slot] = in{activation}[token_offset{rep} + reduce_offset];
 "
         ));
-        let last = reduce_rank - 1;
         source.push_str(&format!(
             "                reduce_coord[{last}]++; reduce_offset += u.operand_strides[{activation}][{}];
 ",
@@ -503,6 +514,7 @@ pub(super) fn push_mma_gemm_body(
             ));
         }
         source.push_str("            }
+            }
         }
 ");
         source.push_str("        __align__(16) __half2 high_pairs[4];
