@@ -337,6 +337,12 @@ pub enum InteropError {
     #[error(transparent)]
     ServingFsm(#[from] proxima_core::ServingFsmError),
 
+    /// The kv carry state machine (`proxima_core::kv_carry::KvCarry`) rejected
+    /// a host-side truncation decision.
+    #[cfg(feature = "std")]
+    #[error(transparent)]
+    KvCarry(#[from] proxima_core::kv_carry::KvCarryError<usize>),
+
     /// [`crate::generate::LoadedModel`]'s evaluator ran but `node` (one of
     /// the logits root or a per-layer cache root) is absent from its
     /// output -- an interpreter/program-construction invariant violation
