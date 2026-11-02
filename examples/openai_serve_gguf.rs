@@ -51,6 +51,7 @@ use std::error::Error;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::future::Future;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -64,7 +65,9 @@ use proxima::request::{Request, Response};
 use proxima::runtime::PrimeServeExt;
 use proxima_gguf::pipe::parse_complete;
 use proxima_gguf::value::MetadataValue;
-use proxima_model_interop::{LoadedModel, MappedExpertSidecar, ServingConfig};
+use proxima_model_interop::{
+    CheckpointMapping, LoadedModel, MappedExpertSidecar, ServingConfig, ServingSettings,
+};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -238,16 +241,20 @@ fn main() -> Result<(), Box<dyn Error>> {
     }
 
     let load_started = Instant::now();
-    let file_bytes: &'static [u8] = Box::leak(std::fs::read(&gguf_path)?.into_boxed_slice());
-    let parsed =
-        parse_complete(file_bytes).map_err(|error| format!("gguf parse failed: {error}"))?;
+    let checkpoint: &'static CheckpointMapping = Box::leak(Box::new(
+        CheckpointMapping::open_file(Path::new(&gguf_path))
+            .map_err(|error| format!("checkpoint map failed: {error}"))?,
+    ));
+    let parsed = parse_complete(checkpoint.bytes())
+        .map_err(|error| format!("gguf parse failed: {error}"))?;
     let has_chat_template = matches!(
         parsed.metadata_value("tokenizer.chat_template"),
         Some(MetadataValue::String(_))
     );
     println!("has_chat_template = {has_chat_template}");
 
-    let mut model = LoadedModel::load(&parsed, file_bytes)
+    let mut model = checkpoint
+        .load_serving(&ServingSettings::builder().build())
         .map_err(|error| format!("weight load failed: {error}"))?;
     if let Some(mapping) = expert_sidecar {
         model
