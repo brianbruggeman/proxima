@@ -153,13 +153,13 @@ mod configured_runtime_tests {
 
     #[cfg(all(feature = "cuda", not(target_os = "macos")))]
     #[test]
-    fn a_cuda_prefill_binds_the_bucket_before_any_plan_exists() {
+    fn a_cuda_prefill_binds_an_empty_cached_range_not_the_bucket() {
         let runtime = gpu_runtime();
 
         assert!(runtime.uses_gpu());
         assert_eq!(
-            crate::generate::cached_kv_extent(runtime.pads_cached_kv(5), 0, 5, 32, 0),
-            32
+            crate::generate::cached_kv_extent(runtime.pads_cached_kv(5), 0, 5, 32, 256),
+            0
         );
     }
 
@@ -3150,8 +3150,6 @@ impl BackendRuntime {
         if !self.plans.contains_key(&shape) {
             self.plans.clear();
         }
-        #[cfg(feature = "gpu")]
-        let bound_padded = self.pads_cached_kv(symbols[0] as usize);
         #[cfg(feature = "cuda")]
         let misses_before = self.plan_misses;
         #[cfg(feature = "cuda")]
@@ -3234,16 +3232,9 @@ impl BackendRuntime {
             Self::emit_plan_footprint_diff(&previous_footprint, &previous_kernel_keys, metal_plan);
         }
         #[cfg(feature = "gpu")]
-        {
-            let new_count = symbols[0] as usize;
-            let pads = *self.kv_pad.entry(new_count).or_insert_with(|| {
-                omega::backend::plan_pads_kv(plan, |name| name.starts_with(KV_CACHE_INPUT_PREFIX))
-            });
-            if bound_padded && !pads {
-                self.kv_pad.remove(&new_count);
-                return Err(InteropError::PaddedKvReadUnfused { new_count });
-            }
-        }
+        self.kv_pad.entry(symbols[0] as usize).or_insert_with(|| {
+            omega::backend::plan_pads_kv(plan, |name| name.starts_with(KV_CACHE_INPUT_PREFIX))
+        });
         #[cfg(feature = "cuda")]
         let plan_hit = self.plan_misses == misses_before;
         #[cfg(feature = "cuda")]
