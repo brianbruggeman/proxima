@@ -1637,6 +1637,38 @@ struct LowerMicros {
     pack: u64,
 }
 
+/// Whether a plan built for `program` at `symbols` would bind its cached K/V range
+/// padded safely (see [`CudaPlan::pads_kv_safely`]), decided by binding alone: no
+/// kernel is emitted and no device is touched. `named` need only carry the weights;
+/// a missing input is not an error here, it just binds unpacked.
+///
+/// # Errors
+/// Shape inference or binding fails at `symbols`.
+pub fn probe_pads_kv(
+    program: &[Op],
+    symbols: &[u64],
+    outputs: &[NodeId],
+    named: &[(&str, QuantizedBlock<'_>)],
+    numeric_policy: NumericPolicy,
+    is_kv_input: impl Fn(&str) -> bool,
+) -> Result<bool, CudaDriverError> {
+    let packed_operands: PackedOperands = program
+        .iter()
+        .enumerate()
+        .filter_map(|(index, op)| {
+            let name = op.name().filter(|_| matches!(op, Op::Input { .. }))?;
+            let (_, block) = named.iter().find(|(candidate, _)| *candidate == name)?;
+            packed_codec(block).map(|codec| (NodeId(index as u32), codec))
+        })
+        .collect();
+    let shapes = infer(program, symbols).map_err(|_| CudaDriverError::UnsupportedGraph {
+        node: NodeId(0),
+        reason: "shape inference failed",
+    })?;
+    let (resolved, _) = bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, false)?;
+    Ok(kv_read_only_by_fused_attention(program, &resolved, outputs, is_kv_input))
+}
+
 fn bind_resolved(
     program: &[Op],
     shapes: &Shapes,

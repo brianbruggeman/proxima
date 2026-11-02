@@ -2909,6 +2909,7 @@ impl<'file> LoadedModel<'file> {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             mapping_residency_rung,
             vocab,
+            program_hash: program_hash(&bound.program),
             program: bound.program,
             logits_root: bound.logits_root,
             hidden_root: bound.hidden_root,
@@ -2928,6 +2929,9 @@ impl<'file> LoadedModel<'file> {
             checkpoint_bytes,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             single_range,
+            speculative_verify_program_hash: speculative_verify_program
+                .as_ref()
+                .map_or(0, |(program, ..)| program_hash(program)),
             speculative_verify_program,
             recurrent_speculative_verify,
             checkpoint_mapping: file_bytes,
@@ -3145,6 +3149,7 @@ impl<'file> LoadedModel<'file> {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             mapping_residency_rung: crate::mapping_residency::ResidencyRung::Prefault,
             vocab,
+            program_hash: program_hash(&program),
             program,
             logits_root,
             hidden_root,
@@ -3168,6 +3173,7 @@ impl<'file> LoadedModel<'file> {
             // maps to the sliding-pattern schedule source -- never eligible (same reasoning as
             // `Self::load`'s dense-path `None` above).
             speculative_verify_program: None,
+            speculative_verify_program_hash: 0,
             recurrent_speculative_verify: None,
             checkpoint_mapping: file_bytes,
         }

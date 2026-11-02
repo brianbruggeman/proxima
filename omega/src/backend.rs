@@ -1476,6 +1476,32 @@ pub fn plan_pads_kv(plan: &Plan, is_kv_input: impl Fn(&str) -> bool) -> bool {
     }
 }
 
+/// [`plan_pads_kv`]'s answer for the plan [`plan_named`] would build for `program` at
+/// `symbols`, decided before any plan exists: the program is bound, nothing is emitted.
+/// Lets the first call at a new width bind its KV range padded instead of building an
+/// unpadded plan to find out.
+///
+/// # Errors
+/// [`BackendError::Cuda`] when shape inference or binding fails at `symbols`.
+#[cfg(feature = "cuda-driver")]
+pub fn probe_cuda_pads_kv(
+    program: &[Op],
+    symbols: &[u64],
+    outputs: &[NodeId],
+    named: &[(&str, QuantizedBlock<'_>)],
+    numeric_policy: NumericPolicy,
+    is_kv_input: impl Fn(&str) -> bool,
+) -> Result<bool, BackendError> {
+    Ok(crate::cuda_driver::probe_pads_kv(
+        program,
+        symbols,
+        outputs,
+        named,
+        numeric_policy,
+        is_kv_input,
+    )?)
+}
+
 /// Sets [`metal::DispatchType`] on [`Plan::Metal`] -- see that type's own
 /// doc for the measured rationale (`proxima-tensor/docs/discipline.md` ROW
 /// 311/312). A no-op on every other arm: `Plan::Cpu`'s interpreter has no
