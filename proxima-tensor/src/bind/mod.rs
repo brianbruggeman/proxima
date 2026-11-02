@@ -119,7 +119,9 @@ pub use refit_cached_attention::{
     touches_changed,
 };
 pub use refresh::{RefreshRefusal, refresh_bound_ops};
-pub use rows_template::{RowTemplate, apply_row_template, refresh_cached_attention, row_template};
+pub use rows_template::{
+    RowTemplate, apply_row_template, refresh_cached_attention, row_template, rows_enumerable,
+};
 #[cfg(feature = "instrument")]
 pub use repeat_nodes::{RepeatNodeRefusal, apply_repeat_nodes};
 #[cfg(feature = "top-fraction-fusion")]

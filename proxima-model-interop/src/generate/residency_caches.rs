@@ -7,7 +7,9 @@ use omega::config::{RuntimeConfig, SelectionMode};
 
 use super::*;
 #[cfg(feature = "cuda")]
-use super::cuda_resident_plans::{CudaPlanIdentity, CudaPlanKey, CudaResidentPlans, same_width_class};
+use super::cuda_resident_plans::{
+    CudaPlanIdentity, CudaPlanKey, CudaResidentPlans, WIDE_PREFILL_ROWS, same_width_class,
+};
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use crate::cuda_async::{
     CudaGpuService, CudaPlanLease, CudaPlanOptions, OwnedBlock, OwnedGpuInputs,
@@ -4646,7 +4648,8 @@ impl BackendRuntime {
         numeric_policy: proxima_tensor::NumericPolicy,
     ) -> Result<(), InteropError> {
         let Some(mut near) = Self::take_near_plan(cache, shape, |key, wanted| {
-            key.3 == wanted.3 && key.4 == wanted.4 && same_width_class(key, wanted)
+            let moves_rows = key.0 == wanted.0 || (key.0 >= WIDE_PREFILL_ROWS && wanted.0 >= WIDE_PREFILL_ROWS);
+            moves_rows && key.3 == wanted.3 && key.4 == wanted.4 && same_width_class(key, wanted)
         }) else {
             debug!(
                 new_count = shape.0 as u64,

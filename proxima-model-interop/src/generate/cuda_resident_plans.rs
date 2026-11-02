@@ -128,7 +128,7 @@ pub(super) fn same_width_class(left: &CudaPlanKey, right: &CudaPlanKey) -> bool 
 }
 
 /// Rows at which cached attention changes form: below it the untiled kernel, from it the tiled one.
-const WIDE_PREFILL_ROWS: usize = 16;
+pub(super) const WIDE_PREFILL_ROWS: usize = 16;
 
 fn plan_class(key: &CudaPlanKey) -> (bool, bool, bool, &[NodeId], u64) {
     (key.0 == 1, key.0 < WIDE_PREFILL_ROWS, key.1 == 0, key.2.as_slice(), key.4)
