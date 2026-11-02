@@ -203,6 +203,7 @@ enum Completion<'fault> {
 #[derive(Debug, Clone)]
 pub struct CudaDriver {
     context: Arc<CudaContext>,
+    multiprocessors: u32,
     stream: Arc<CudaStream>,
     // synchronous ffi callers share these short cache mutations; compilation and dispatch happen outside the guard.
     modules: Arc<Mutex<BTreeMap<String, Vec<CachedCudaModule>>>>,
@@ -215,6 +216,11 @@ pub struct CudaDriver {
     parked_state: Arc<Mutex<BTreeMap<NodeId, (NodeId, CudaGraphBuffer)>>>,
     // appended-row caches whose plan was evicted: keyed by cache input node, valued by its valid row count and device buffer.
     parked_appends: Arc<Mutex<BTreeMap<NodeId, (u64, CudaGraphBuffer)>>>,
+}
+
+fn multiprocessor_count(context: &CudaContext) -> Result<u32, CudaDriverError> {
+    let count = context.attribute(cuda_sys::CUdevice_attribute_enum::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?;
+    Ok(u32::try_from(count).unwrap_or(0))
 }
 
 /// Device identity and successful graph upload/launch submissions from one CUDA driver.
@@ -536,12 +542,14 @@ impl CudaDriver {
             ));
         }
         let context = CudaContext::new(ordinal)?;
+        let multiprocessors = multiprocessor_count(&context)?;
         // every launch runs on this one default stream, so per-buffer read/write events order nothing and cost two cuEventCreate per buffer
         unsafe { context.disable_event_tracking() };
         let stream = context.default_stream();
         Ok(Self {
             context,
             stream,
+            multiprocessors,
             modules: Arc::new(Mutex::new(BTreeMap::new())),
             resident_buffers: Arc::new(Mutex::new(BTreeMap::new())),
             compile_counters: Arc::new(CompileCounters::new(kernel_disk_store())),
@@ -943,6 +951,7 @@ impl CudaDriver {
             exact_activations,
             config,
         } = policy;
+        let numeric_policy = numeric_policy.with_device_multiprocessors(self.multiprocessors);
         let blocks = resolve_named_blocks(program, named).map_err(|_| {
             CudaDriverError::UnsupportedGraph {
                 node: NodeId(0),
@@ -2042,6 +2051,7 @@ impl CudaPlan {
         symbols: &[u64],
         numeric_policy: NumericPolicy,
     ) -> Result<bool, CudaDriverError> {
+        let numeric_policy = numeric_policy.with_device_multiprocessors(self.driver.multiprocessors);
         if self.constraints.is_some() {
             return Ok(false);
         }
