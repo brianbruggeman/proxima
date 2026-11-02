@@ -176,6 +176,11 @@ impl DaemonControlPlane {
                 .cloned()
                 .ok_or_else(|| ProximaError::NotFound(format!("pipe `{name}`")))?
         };
+        self.mount_pipe(&config).await
+    }
+
+    async fn mount_pipe(&self, config: &PipeConfig) -> Result<(), ProximaError> {
+        let name = config.name.as_str();
         let mut app = self.app.lock().await;
         let handle = app
             .pipe(&config.name, Spec::Inline(config.spec.clone()))
@@ -318,30 +323,30 @@ impl ControlPlane for DaemonControlPlane {
         spec: Value,
     ) -> Pin<Box<dyn Future<Output = Result<PipeStatus, ProximaError>> + Send + 'lifetime>> {
         Box::pin(async move {
-            // Store the new config so subsequent inspection (list/status)
-            // reflects the spec actually in use.
-            self.state.rcu(|previous| {
-                let mut next = (**previous).clone();
-                let mut entry = next
+            let config = PipeConfig {
+                name: name.to_string(),
+                spec,
+                requires: self
+                    .state
+                    .load()
                     .configs
                     .get(name)
-                    .cloned()
-                    .unwrap_or_else(|| PipeConfig {
-                        name: name.to_string(),
-                        spec: serde_json::Value::Null,
-                        requires: Vec::new(),
-                    });
-                entry.spec = spec.clone();
-                next.configs.insert(name.to_string(), entry);
+                    .map(|existing| existing.requires.clone())
+                    .unwrap_or_default(),
+            };
+            if self.is_running(name) {
+                let mut app = self.app.lock().await;
+                app.update_pipe(name, Spec::Inline(config.spec.clone())).await?;
+            } else {
+                self.mount_pipe(&config).await?;
+            }
+            // recorded only after the build succeeded, so a rejected spec
+            // leaves the previous config (or none) in place
+            self.state.rcu(|previous| {
+                let mut next = (**previous).clone();
+                next.configs.insert(name.to_string(), config.clone());
                 Arc::new(next)
             });
-            // App::update_pipe rebuilds the pipe from the new spec and
-            // atomically rewrites every mount that pointed at the old handle.
-            // In-flight requests on the old handle complete; new requests hit
-            // the new impl.
-            let mut app = self.app.lock().await;
-            app.update_pipe(name, Spec::Inline(spec)).await?;
-            drop(app);
             Ok(self.build_status(name))
         })
     }
@@ -538,6 +543,43 @@ mod tests {
             .spec
             .clone();
         assert_eq!(stored, new_spec);
+    }
+
+    #[proxima::test]
+    async fn apply_creates_an_unregistered_pipe() {
+        let plane = fixture();
+        let spec = json!({"synth": {"status": 200, "body": "fresh"}});
+
+        let status = plane.apply("fresh", spec.clone()).await.expect("apply new");
+
+        assert_eq!(status.name, "fresh");
+        assert_eq!(status.state, PipeState::Running);
+        assert_eq!(call_through_router(&plane, "/fresh/x").await, b"fresh");
+        let stored = plane.state.load().configs.get("fresh").expect("config").spec.clone();
+        assert_eq!(stored, spec);
+    }
+
+    #[proxima::test]
+    async fn apply_with_a_bad_spec_leaves_no_config() {
+        let plane = fixture();
+        let bad_spec = json!({"no-such-pipe-kind": {"x": 1}});
+
+        let created = plane.apply("ghost", bad_spec.clone()).await;
+
+        assert!(created.is_err(), "bad spec must fail to build");
+        assert!(!plane.state.load().configs.contains_key("ghost"));
+        assert!(!plane.is_running("ghost"));
+        assert!(matches!(
+            plane.status("ghost").await,
+            Err(ProximaError::NotFound(_))
+        ));
+
+        plane.start("leaf").await.expect("start leaf");
+        let swapped = plane.apply("leaf", bad_spec).await;
+        assert!(swapped.is_err(), "bad spec must fail to swap");
+        assert_eq!(call_through_router(&plane, "/leaf/x").await, b"leaf");
+        let stored = plane.state.load().configs.get("leaf").expect("config").spec.clone();
+        assert_eq!(stored, json!({"synth": {"status": 200, "body": "leaf"}}));
     }
 
     async fn call_through_router(plane: &DaemonControlPlane, path: &str) -> Vec<u8> {
