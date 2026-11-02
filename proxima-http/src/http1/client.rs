@@ -1237,8 +1237,8 @@ mod tests {
     use super::*;
     use futures::StreamExt as _;
     use proxima_net::tokio::tokio_stream_upstream::TokioTcpUpstream;
-    use std::net::{Ipv4Addr, SocketAddr};
     use std::mem;
+    use std::net::{Ipv4Addr, SocketAddr};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
