@@ -478,8 +478,7 @@ async fn run_daemon(socket: PathBuf, action: DaemonAction) -> Result<(), Proxima
             http_call_over_uds(&socket, "POST", &format!("/pipes/{name}/apply"), body).await?
         }
     };
-    print_daemon_response(&action, response);
-    Ok(())
+    print_daemon_response(&action, response)
 }
 
 /// Reads a spec file (json, yaml, toml, ron, json5) and re-serializes it
@@ -631,11 +630,17 @@ fn find_double_crlf(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
 
-fn print_daemon_response(action: &DaemonAction, response: DaemonResponse) {
+fn print_daemon_response(
+    action: &DaemonAction,
+    response: DaemonResponse,
+) -> Result<(), ProximaError> {
     if response.status >= 400 {
         let body = String::from_utf8_lossy(&response.body);
         eprintln!("status: {} — {body}", response.status);
-        return;
+        return Err(ProximaError::Upstream(format!(
+            "daemon answered {}: {body}",
+            response.status
+        )));
     }
     match action {
         DaemonAction::List => print_list(response.body),
@@ -648,6 +653,7 @@ fn print_daemon_response(action: &DaemonAction, response: DaemonResponse) {
         | DaemonAction::Apply { .. } => print_status(response.body),
         DaemonAction::Reload => println!("ok"),
     }
+    Ok(())
 }
 
 fn print_logs(body: Vec<u8>) {
