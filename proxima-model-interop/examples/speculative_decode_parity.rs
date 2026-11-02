@@ -494,6 +494,8 @@ fn main() {
     let raw_args: Vec<String> = env::args().skip(1).collect();
     let seed_mismatch_control = raw_args.iter().any(|arg| arg == "--seed-mismatch-control");
     let arm_verify = raw_args.iter().any(|arg| arg == "--arm-verify");
+    let skip_off = raw_args.iter().any(|arg| arg == "--skip-off");
+    let repeat_off = raw_args.iter().any(|arg| arg == "--repeat-off");
     let forced_width_flag_index = raw_args
         .iter()
         .position(|arg| arg == "--forced-draft-width");
@@ -536,6 +538,8 @@ fn main() {
         .filter(move |(index, arg)| {
             arg != "--seed-mismatch-control"
                 && arg != "--arm-verify"
+                && arg != "--skip-off"
+                && arg != "--repeat-off"
                 && Some(*index) != forced_width_flag_index
                 && Some(*index) != forced_width_value_index
                 && Some(*index) != gpu_layers_flag_index
@@ -652,6 +656,18 @@ fn main() {
         size_m: ngram_size_m.unwrap_or(ngram_defaults.size_m),
         ..ngram_defaults
     };
+
+    if repeat_off && skip_off {
+        let first = model
+            .generate_with_serving_config(&prompt, max_tokens, greedy_config)
+            .unwrap_or_else(|error| panic!("first plain request: {error}"));
+        let second = model
+            .generate_with_serving_config(&format!("{prompt}Hello"), max_tokens, greedy_config)
+            .unwrap_or_else(|error| panic!("second plain request: {error}"));
+        println!("plain_twice identical = {}", first.0 == second.0);
+        return;
+    }
+
     let speculative_on = SpeculativeConfig {
         speculative_types: drafter_types,
         ngram_simple,
