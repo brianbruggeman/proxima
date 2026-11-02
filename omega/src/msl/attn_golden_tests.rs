@@ -1,7 +1,7 @@
 //! Byte-identity gate for the cached-attention kernels: every kernel text
 //! below must equal the text `main` emitted before `metal-attn-split-rows`
 //! existed. The goldens under `omega/tests/fixtures/attn_split_decode/` are
-//! recorded by running [`record_main_goldens`] on an unpatched export of
+//! recorded by running the `record_attn_goldens` example on an unpatched export of
 //! `main` (the recorder uses only `emit` and `emit_cached_attention_merge`,
 //! whose signatures did not change), once with no attention feature and once
 //! with `metal-attn-split-decode`; `attn_split_tests` compares the patched
@@ -17,11 +17,11 @@ use std::path::PathBuf;
 
 use super::*;
 
-pub(super) fn golden_dir() -> PathBuf {
+pub fn golden_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/attn_split_decode")
 }
 
-pub(super) fn attention_op(
+pub fn attention_op(
     operand_count: u32,
     groups: u64,
     head_dim: u64,
@@ -63,7 +63,7 @@ pub(super) fn attention_op(
 /// [`attention_op`] at `rows` new query rows with one new key per row, the
 /// shape speculative verify binds: eight query heads over one kv head.
 #[cfg(feature = "metal-attn-split-rows")]
-pub(super) fn attention_rows_op(
+pub fn attention_rows_op(
     operand_count: u32,
     groups: u64,
     head_dim: u64,
@@ -90,14 +90,14 @@ pub(super) fn attention_rows_op(
 /// File-name prefix of this build's goldens: the decode split changes the
 /// text of the cases it serves and the interleaved merge layout, so a build
 /// with it compares against goldens recorded with it.
-pub(super) const GOLDEN_PREFIX: &str = if cfg!(feature = "metal-attn-split-decode") {
+pub const GOLDEN_PREFIX: &str = if cfg!(feature = "metal-attn-split-decode") {
     "main_ds_"
 } else {
     "main_"
 };
 
 /// Every golden case: its name, the op, and the policy it renders under.
-pub(super) fn golden_cases() -> Vec<(&'static str, BoundOp, NumericPolicy)> {
+pub fn golden_cases() -> Vec<(&'static str, BoundOp, NumericPolicy)> {
     #[cfg(feature = "metal-attn-split-decode")]
     {
         let mut cases = base_golden_cases();
@@ -191,7 +191,7 @@ fn split_preamble(source: &str) -> (&str, &str) {
 
 /// The shared preamble every golden kernel renders under, stored once so the
 /// per-case goldens stay a few kilobytes of kernel text each.
-pub(super) fn preamble_of(op: &BoundOp, policy: NumericPolicy) -> String {
+pub fn preamble_of(op: &BoundOp, policy: NumericPolicy) -> String {
     let kernel = emit(op, &PackedOperands::new(), policy).expect("the golden fixture emits");
     split_preamble(&kernel.source).0.to_string()
 }
@@ -199,7 +199,7 @@ pub(super) fn preamble_of(op: &BoundOp, policy: NumericPolicy) -> String {
 /// The kernel body, then the merge kernel body when one follows, joined by a
 /// marker line so one file pins both. Each is rendered without its preamble;
 /// [`preamble_of`] pins that separately and the merge's is asserted equal.
-pub(super) fn rendered(op: &BoundOp, policy: NumericPolicy) -> String {
+pub fn rendered(op: &BoundOp, policy: NumericPolicy) -> String {
     let kernel = emit(op, &PackedOperands::new(), policy).expect("the golden fixture emits");
     let preamble = split_preamble(&kernel.source).0.to_string();
     let mut text = split_preamble(&kernel.source).1.to_string();
@@ -217,33 +217,12 @@ pub(super) fn rendered(op: &BoundOp, policy: NumericPolicy) -> String {
     text
 }
 
-#[test]
-#[ignore = "recorder: run on an unpatched export of main to write the goldens the gate compares"]
-fn record_main_goldens() {
-    let dir = golden_dir();
-    std::fs::create_dir_all(&dir).expect("the golden directory is creatable");
-    let cases = golden_cases();
-    assert!(!cases.is_empty(), "zero golden cases would record nothing");
-    let preamble = preamble_of(&cases[0].1, cases[0].2);
-    std::fs::write(dir.join(format!("{GOLDEN_PREFIX}preamble.msl")), &preamble)
-        .expect("the preamble golden is writable");
-    for (name, op, policy) in &cases {
-        assert_eq!(
-            preamble_of(op, *policy),
-            preamble,
-            "{name}: one preamble must serve every golden case"
-        );
-        let path = dir.join(format!("{GOLDEN_PREFIX}{name}.msl"));
-        std::fs::write(&path, rendered(op, *policy)).expect("the golden file is writable");
-    }
-}
-
 /// gemma4-E2B-shaped `CachedSoftmaxWeights` at one query row: eight attention
 /// rows, head_dim 256, the cached range at `cached_key_rows`. Layouts are the
 /// recognizer's for that op: cached scores keyed `[key, row]`, new scores
 /// `[row]`, new value `[row, dim]`.
 #[cfg(feature = "metal-wide-cooperative-reduce")]
-pub(super) fn softmax_weights_op(cached_key_rows: u64) -> BoundOp {
+pub fn softmax_weights_op(cached_key_rows: u64) -> BoundOp {
     let layout = |strides: &[i64]| Layout {
         base: 0,
         strides: strides.into(),
@@ -271,7 +250,7 @@ pub(super) fn softmax_weights_op(cached_key_rows: u64) -> BoundOp {
 }
 
 #[cfg(feature = "metal-wide-cooperative-reduce")]
-pub(super) fn softmax_weights_golden_cases() -> Vec<(&'static str, BoundOp)> {
+pub fn softmax_weights_golden_cases() -> Vec<(&'static str, BoundOp)> {
     vec![
         ("csw_k1_cached32", softmax_weights_op(32)),
         ("csw_k1_cached512", softmax_weights_op(512)),
@@ -280,22 +259,8 @@ pub(super) fn softmax_weights_golden_cases() -> Vec<(&'static str, BoundOp)> {
 }
 
 #[cfg(feature = "metal-wide-cooperative-reduce")]
-pub(super) fn softmax_weights_rendered(op: &BoundOp) -> String {
+pub fn softmax_weights_rendered(op: &BoundOp) -> String {
     let kernel = emit(op, &PackedOperands::new(), NumericPolicy::bit_exact())
         .expect("the softmax weights golden fixture emits");
     split_preamble(&kernel.source).1.to_string()
-}
-
-#[cfg(feature = "metal-wide-cooperative-reduce")]
-#[test]
-#[ignore = "recorder: run on an unpatched export of main to write the goldens the gate compares"]
-fn record_main_softmax_weights_goldens() {
-    let dir = golden_dir();
-    std::fs::create_dir_all(&dir).expect("the golden directory is creatable");
-    let cases = softmax_weights_golden_cases();
-    assert!(!cases.is_empty(), "zero golden cases would record nothing");
-    for (name, op) in &cases {
-        let path = dir.join(format!("main_{name}.msl"));
-        std::fs::write(&path, softmax_weights_rendered(op)).expect("the golden file is writable");
-    }
 }

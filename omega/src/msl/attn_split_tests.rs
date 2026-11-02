@@ -8,7 +8,7 @@ use super::*;
 /// and the two relaxed two-range cases it serves are recorded from the
 /// lane-span partial kernel (`[attention_decode]`), the one place those goldens
 /// differ from `main`; the merge text and the preamble are still `main`'s. They
-/// come from `attn_golden_tests::record_main_goldens`.
+/// come from the `record_attn_goldens` example.
 mod golden_identity {
     use super::super::attn_golden_tests::{
         GOLDEN_PREFIX, golden_cases, golden_dir, preamble_of, rendered,

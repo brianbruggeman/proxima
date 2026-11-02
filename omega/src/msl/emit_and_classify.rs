@@ -2611,7 +2611,7 @@ pub(super) fn split_bindings_with_scratch(resolved: &BoundOp) -> Vec<Binding> {
 /// output, and needs its own (smaller) `Uniforms` blob -- no operand inputs,
 /// no gather, no fault buffer, since the merge is pure scratch-to-output
 /// rescale-and-copy.
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+#[cfg(any(test, feature = "test-support", all(feature = "metal", target_os = "macos")))]
 pub(super) fn merge_bindings(resolved: &BoundOp) -> Vec<Binding> {
     alloc::vec![
         Binding::Scratch,

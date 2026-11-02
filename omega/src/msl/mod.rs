@@ -184,7 +184,7 @@ use cached_attention_row_tiled::render_cached_attention_row_tiled;
 // weights` is `pub(super)` on its own definition (`cached_softmax_weights_
 // render.rs`), and its only caller is `emit_and_classify::emit_inner`'s
 // `use super::*`.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) use cached_attention_render::emit_cached_attention_merge;
 #[cfg(any(
     all(test, feature = "metal-attn-variants"),
@@ -229,9 +229,14 @@ pub(crate) use tiled_gemm_cooperative_scan::wide_cooperative_reduce_width;
 // softmax_weights` itself emits.
 pub(crate) use kernel_types_identity::softmax_runtime_rows_override;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod attn_golden_tests;
+#[doc(hidden)]
+pub mod attn_golden_tests;
+#[cfg(any(test, feature = "test-support"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[doc(hidden)]
+pub mod golden_support;
 #[cfg(all(test, feature = "metal-attn-split-rows"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod attn_rows_tests;
