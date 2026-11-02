@@ -3968,6 +3968,7 @@ mod reduce_epilogue_fusion_tests {
     /// MEASURED, not derived: printed once via the per-kind buckets
     /// below so a future re-run can diff against this row's own
     /// numbers without re-deriving them from the dispatch census.
+    #[cfg(feature = "cached-attention-streaming")]
     #[test]
     fn reduce_epilogue_fusion_shrinks_the_real_openchat_single_range_program() {
         let (program, logits, cache_roots, _) =
