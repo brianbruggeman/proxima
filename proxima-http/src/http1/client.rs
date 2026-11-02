@@ -729,6 +729,7 @@ struct BodyPump<C: StreamConnection> {
     seed: Option<Vec<u8>>,
     parked: Option<ConnState<C>>,
     pool: Arc<ArrayQueue<ConnState<C>>>,
+    server_closes: bool,
     finished: bool,
 }
 
@@ -745,6 +746,7 @@ fn body_stream<C: StreamConnection>(
     seed: Vec<u8>,
     parked: ConnState<C>,
     pool: Arc<ArrayQueue<ConnState<C>>>,
+    server_closes: bool,
 ) -> impl futures::stream::Stream<Item = Result<Bytes, ProximaError>> + Send + 'static {
     let pump = BodyPump {
         conn: Some(conn),
@@ -752,6 +754,7 @@ fn body_stream<C: StreamConnection>(
         seed: Some(seed),
         parked: Some(parked),
         pool,
+        server_closes,
         finished: false,
     };
     futures::stream::unfold(pump, |mut pump| async move {
@@ -849,7 +852,9 @@ fn finish<C: StreamConnection>(
 ) -> Option<(Result<Bytes, ProximaError>, BodyPump<C>)> {
     if let (Some(conn), Some(mut parked)) = (pump.conn.take(), pump.parked.take()) {
         parked.conn = Some(conn);
-        park(&pump.pool, parked);
+        if !pump.server_closes {
+            park(&pump.pool, parked);
+        }
     }
     pump.finished = true;
     if out.is_empty() {
@@ -869,6 +874,13 @@ fn fail<C: StreamConnection>(
     pump.parked = None;
     pump.finished = true;
     Some((Err(ProximaError::Upstream(message)), pump))
+}
+
+// the peer shuts the socket after a close reply, so pooling it would fail the next call with no safe replay
+fn response_closes<P>(response: &Response<P>) -> bool {
+    response.metadata.get_str("connection").is_some_and(|value| {
+        value.split(',').any(|token| token.trim().eq_ignore_ascii_case("close"))
+    })
 }
 
 /// Return a connection at a clean message boundary to the idle queue; a full
@@ -1082,7 +1094,9 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
                         };
                         match result {
                             Ok(()) => {
-                                park(&self.idle, state);
+                                if !response_closes(&response) {
+                                    park(&self.idle, state);
+                                }
                                 Ok(response)
                             }
                             Err(err) => Err(err),
@@ -1097,7 +1111,14 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
                             ProximaError::Upstream("connection slot empty after head".into())
                         })?;
                         let stream =
-                            body_stream(conn, framing, seed, state, Arc::clone(&self.idle));
+                            body_stream(
+                            conn,
+                            framing,
+                            seed,
+                            state,
+                            Arc::clone(&self.idle),
+                            response_closes(&response),
+                        );
                         Ok(response.with_stream(ResponseStream::new(stream)))
                     }
                 }
@@ -1653,6 +1674,39 @@ mod tests {
                         .unwrap_or_else(|err| panic!("{preset:?} body {index} failed: {err}"));
                 }
             }
+        }
+    }
+
+    /// A `Connection: close` reply means the peer shuts the socket, so the
+    /// connection must not return to the idle pool under either body mode.
+    #[proxima::test(runtime = "tokio")]
+    async fn connection_close_reply_is_not_pooled() {
+        for preset in [ResponseHandling::Discard, ResponseHandling::Full] {
+            let listener = TcpListener::bind(SocketAddr::from((Ipv4Addr::LOCALHOST, 0)))
+                .await
+                .expect("bind");
+            let local = listener.local_addr().expect("local_addr");
+            tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept");
+                let _ = read_request_head(&mut socket).await;
+                socket
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    .await
+                    .expect("write response");
+            });
+            let client = H1ClientUpstream::new(TokioTcpUpstream::new(local), "example.com", "test")
+                .with_response(preset);
+            let request = Request::builder()
+                .method("GET")
+                .path("/")
+                .build()
+                .expect("request");
+            let response = SendPipe::call(&client, request).await.expect("call");
+            assert_eq!(response.status, 200, "{preset:?}");
+            if response.stream.is_some() {
+                response.collect_body().await.expect("body drains");
+            }
+            assert!(client.idle.is_empty(), "{preset:?} pooled a closing connection");
         }
     }
 
