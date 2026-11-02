@@ -3269,7 +3269,7 @@ impl BackendRuntime {
         };
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let near_plan = if self.plan_refit {
-            Self::take_near_plan(&mut self.plans, &shape, same_program_width)
+            Self::take_near_plan(&mut self.plans, &shape, |key, wanted, _| same_program_width(key, wanted))
         } else {
             None
         };
@@ -4117,7 +4117,7 @@ impl BackendRuntime {
             &mut self.placed_plans
         };
         let near_plan = if self.plan_refit {
-            Self::take_near_plan(cache, &shape, |key, wanted| {
+            Self::take_near_plan(cache, &shape, |key, wanted, _| {
                 key.0 == wanted.0 && key.2 == wanted.2 && key.3 == wanted.3
             })
         } else {
@@ -4627,12 +4627,15 @@ impl BackendRuntime {
     pub(super) fn take_near_plan<Key: Ord + Clone, PlanType>(
         cache: &mut alloc::collections::BTreeMap<Key, PlanType>,
         shape: &Key,
-        compatible: impl Fn(&Key, &Key) -> bool,
+        compatible: impl Fn(&Key, &Key, &PlanType) -> bool,
     ) -> Option<PlanType> {
         if cache.contains_key(shape) {
             return None;
         }
-        let near = cache.keys().find(|key| compatible(key, shape)).cloned()?;
+        let near = cache
+            .iter()
+            .find(|(key, plan)| compatible(key, shape, plan))
+            .map(|(key, _)| key.clone())?;
         cache.remove(&near)
     }
 
@@ -4647,8 +4650,11 @@ impl BackendRuntime {
         symbols: &[u64],
         numeric_policy: proxima_tensor::NumericPolicy,
     ) -> Result<(), InteropError> {
-        let Some(mut near) = Self::take_near_plan(cache, shape, |key, wanted| {
-            let moves_rows = key.0 == wanted.0 || (key.0 >= WIDE_PREFILL_ROWS && wanted.0 >= WIDE_PREFILL_ROWS);
+        let Some(mut near) = Self::take_near_plan(cache, shape, |key, wanted, plan| {
+            let moves_rows = key.0 == wanted.0
+                || (key.0 >= WIDE_PREFILL_ROWS
+                    && wanted.0 >= WIDE_PREFILL_ROWS
+                    && omega::backend::cuda_rows_movable(plan));
             moves_rows && key.3 == wanted.3 && key.4 == wanted.4 && same_width_class(key, wanted)
         }) else {
             debug!(

@@ -30,7 +30,7 @@ pub fn refresh_cached_attention(bound: &BoundOp, next: &Shapes) -> Option<BoundO
 
 fn visit_layout(layout: &mut Layout, signed: Signed<'_>) {
     signed(&mut layout.base);
-    layout.strides.iter_mut().for_each(|stride| signed(stride));
+    layout.strides.iter_mut().for_each(signed);
 }
 
 fn visit_lookup(lookup: &mut Lookup, unsigned: Unsigned<'_>, signed: Signed<'_>) {
@@ -52,7 +52,7 @@ fn visit_operands(operands: &mut BoundOperands, unsigned: Unsigned<'_>, signed: 
 /// `counts` adds a cached-attention op's row and key counts, which follow its operands' shapes
 /// rather than the row count alone, so only the structural comparison visits them.
 fn visit_integers(bound: &mut BoundOp, counts: bool, unsigned: Unsigned<'_>, signed: Signed<'_>) -> bool {
-    bound.extents.iter_mut().for_each(|extent| unsigned(extent));
+    bound.extents.iter_mut().for_each(&mut *unsigned);
     match &mut bound.kind {
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => true,
         BoundOpKind::Elementwise { operands, .. } | BoundOpKind::ElementwiseTwin { operands, .. } => {
@@ -87,7 +87,7 @@ fn visit_integers(bound: &mut BoundOp, counts: bool, unsigned: Unsigned<'_>, sig
             if counts {
                 [query_rows, cached_key_rows, new_key_rows]
                     .into_iter()
-                    .for_each(|count| unsigned(count));
+                    .for_each(unsigned);
             }
             signed(cached_lower_inclusive);
             signed(new_upper_inclusive);

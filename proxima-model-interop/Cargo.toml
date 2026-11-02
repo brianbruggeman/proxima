@@ -426,6 +426,10 @@ required-features = ["std"]
 name = "generate_compatibility_doc"
 
 [[example]]
+name = "plan_rows_diff"
+required-features = ["std", "cuda"]
+
+[[example]]
 name = "smollm2_logit_oracle_diff"
 required-features = ["std", "instrument"]
 
