@@ -257,7 +257,9 @@ use crate::{Binding, Codec, GridSpec, Kernel, PackedOperands};
 #[macro_use]
 mod device_buffers_arena_plan;
 mod configured;
-pub use configured::{plan_named_with_config, plan_named_with_config_and_placed_inputs};
+pub use configured::{
+    PlacedPlanOptions, plan_named_with_config, plan_named_with_config_and_placed_inputs,
+};
 #[macro_use]
 mod execute_and_hazards;
 #[macro_use]

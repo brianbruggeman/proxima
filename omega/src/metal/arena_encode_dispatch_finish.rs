@@ -885,6 +885,14 @@ fn resolve_route_prepass(
     }))
 }
 
+/// The attention kernel-selection pair that travels together through pipeline
+/// resolution and the instrument-only key audit.
+#[derive(Clone, Copy)]
+pub(super) struct AttentionKernelChoice {
+    pub(super) mma_selection: crate::msl::AttentionMmaSelection,
+    pub(super) row_schedule: crate::msl::AttentionRowSchedule,
+}
+
 /// One position's `(pipeline, bindings, grid, merge)`: the per-`bound` body
 /// of [`resolve_steps`], extracted so [`Plan::refit_symbols`] re-resolves
 /// only the positions it patched. A pure function of `bound` and the plan's
@@ -897,9 +905,12 @@ pub(super) fn resolve_step(
     numeric_policy: NumericPolicy,
     configured_dense_mma_input_layout: Option<FloatLayout>,
     math_mode: MathMode,
-    attention_mma_selection: crate::msl::AttentionMmaSelection,
-    attention_row_schedule: crate::msl::AttentionRowSchedule,
+    attention: AttentionKernelChoice,
 ) -> Result<ResolvedStep, MetalError> {
+    let AttentionKernelChoice {
+        mma_selection: attention_mma_selection,
+        row_schedule: attention_row_schedule,
+    } = attention;
     let (bindings, grid) = kernel_dispatch_shape_with_schedule(
         bound,
         packed_operands,
@@ -1078,8 +1089,10 @@ fn refit_steps(
                 plan.numeric_policy,
                 plan.dense_mma_input_layout,
                 plan.math_mode,
-                plan.attention_mma_selection,
-                plan.attention_row_schedule,
+                AttentionKernelChoice {
+                    mma_selection: plan.attention_mma_selection,
+                    row_schedule: plan.attention_row_schedule,
+                },
             )
             .map(|step| (*position, step))
         })
@@ -1164,8 +1177,10 @@ pub(super) fn resolve_steps(
             plan.numeric_policy,
             plan.dense_mma_input_layout,
             plan.math_mode,
-            plan.attention_mma_selection,
-            plan.attention_row_schedule,
+            AttentionKernelChoice {
+                mma_selection: plan.attention_mma_selection,
+                row_schedule: plan.attention_row_schedule,
+            },
         )?);
     }
     #[cfg(feature = "metal-horizontal-merge")]
