@@ -102,6 +102,7 @@ mod cached_attention_epilogue_liveness;
 mod identity_copy_alias;
 mod refit_cached_attention;
 mod refresh;
+mod rows_template;
 #[cfg(feature = "instrument")]
 mod repeat_nodes;
 #[cfg(feature = "top-fraction-fusion")]
@@ -118,6 +119,7 @@ pub use refit_cached_attention::{
     touches_changed,
 };
 pub use refresh::{RefreshRefusal, refresh_bound_ops};
+pub use rows_template::{RowTemplate, apply_row_template, refresh_cached_attention, row_template};
 #[cfg(feature = "instrument")]
 pub use repeat_nodes::{RepeatNodeRefusal, apply_repeat_nodes};
 #[cfg(feature = "top-fraction-fusion")]
