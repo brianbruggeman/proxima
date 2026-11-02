@@ -196,14 +196,22 @@ impl<Key: Ord + Copy + Debug> KvCarry<Key> {
         pairs: Vec<RowPair<Key>>,
     ) -> Result<Vec<KvCommand<Key>>, KvCarryError<Key>> {
         if self.selects(&pairs) {
-            return Ok(Vec::new());
+            return Ok(self.adoptions());
         }
         if !self.lanes.is_empty() {
             return Err(KvCarryError::PairsChangedWhileLive { live: self.lanes.len() });
         }
         self.pairs = pairs.into_iter().map(|pair| (pair.input, pair)).collect();
         self.phase = Phase::Idle;
-        Ok(self.pairs.keys().map(|input| KvCommand::Adopt { input: *input }).collect())
+        Ok(self.adoptions())
+    }
+
+    fn adoptions(&self) -> Vec<KvCommand<Key>> {
+        self.pairs
+            .keys()
+            .filter(|input| !self.lanes.contains_key(*input))
+            .map(|input| KvCommand::Adopt { input: *input })
+            .collect()
     }
 
     fn make_live(
@@ -456,13 +464,23 @@ mod tests {
     }
 
     #[proxima::test]
-    async fn selecting_the_same_pairs_again_is_silent() {
+    async fn selecting_the_same_pairs_again_is_silent_while_live() {
         let mut carry = resident(3, 64);
 
         let again = carry.step(KvEvent::Select { pairs: vec![pair()] }).expect("same pairs");
 
         assert!(again.is_empty());
         assert!(carry.is_live(&INPUT));
+    }
+
+    #[proxima::test]
+    async fn selecting_the_same_pairs_after_a_park_adopts_again() {
+        let mut carry = resident(3, 64);
+        carry.step(KvEvent::Parked).expect("park");
+
+        let again = carry.step(KvEvent::Select { pairs: vec![pair()] }).expect("same pairs");
+
+        assert_eq!(again, vec![KvCommand::Adopt { input: INPUT }]);
     }
 
     #[proxima::test]

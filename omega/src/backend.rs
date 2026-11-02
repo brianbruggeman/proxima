@@ -2015,6 +2015,20 @@ pub fn drain_cuda_appended_rows(plan: &mut Plan) -> Result<Vec<(NodeId, Vec<f32>
     }
 }
 
+/// The verify step kept `kept` of the rows it appended to the carried caches of a [`Plan::Cuda`];
+/// the rest are dropped by moving the valid-row count back, with no device copy.
+///
+/// # Errors
+/// The kv carry state machine rejected the acceptance.
+#[cfg(feature = "cuda-driver")]
+pub fn accept_cuda_rows(plan: &mut Plan, kept: u64) -> Result<(), BackendError> {
+    match plan {
+        Plan::Cuda(cuda_plan) => Ok(cuda_plan.accept_rows(kept)?),
+        #[allow(unreachable_patterns)]
+        _ => Ok(()),
+    }
+}
+
 /// Hands a [`Plan::Cuda`]'s device-carried state to the driver before the plan
 /// is evicted, so the plan that replaces it adopts the state on the device.
 #[cfg(feature = "cuda-driver")]
