@@ -544,8 +544,7 @@ mod diagnostic {
         let built = build_forward(&descriptor).map_err(io::Error::other)?;
         let mut zero_cap_descriptor = descriptor.clone();
         zero_cap_descriptor.loopcd.strength = 0.0;
-        let zero_cap_built =
-            build_forward(&zero_cap_descriptor).map_err(io::Error::other)?;
+        let zero_cap_built = build_forward(&zero_cap_descriptor).map_err(io::Error::other)?;
         let readouts = built
             .readouts
             .ok_or_else(|| invalid_data("adaptive graph has no readout roots"))?;

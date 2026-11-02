@@ -106,8 +106,8 @@ fn bench_wake_latency(criterion: &mut Criterion) {
             for _ in 0..iters {
                 let (left, mut right) = UnixStream::pair().unwrap();
                 left.set_nonblocking(true).unwrap();
-                let key = reactor
-                    .register(left.as_raw_fd(), Interest::Read)
+                // SAFETY: `left` stays open until after deregister below.
+                let key = unsafe { reactor.register(left.as_raw_fd(), Interest::Read) }
                     .expect("register");
                 reactor.set_read_waker(key, noop_waker());
                 let started = Instant::now();
@@ -176,8 +176,8 @@ fn bench_turn_n_ready(criterion: &mut Criterion) {
                 for _ in 0..N {
                     let (left, right) = UnixStream::pair().unwrap();
                     left.set_nonblocking(true).unwrap();
-                    let key = reactor
-                        .register(left.as_raw_fd(), Interest::Read)
+                    // SAFETY: `left` is kept in `pairs`, open for the reactor's whole lifetime.
+                    let key = unsafe { reactor.register(left.as_raw_fd(), Interest::Read) }
                         .expect("register");
                     reactor.set_read_waker(key, noop_waker());
                     pairs.push((left, right));

@@ -2243,6 +2243,9 @@ mod tests {
             .now_or_never()
             .expect("drain must observe a serve exit that happened before its first poll");
 
-        assert_eq!(report.cores_acked, 0, "no runtime installed, nothing to ack");
+        assert_eq!(
+            report.cores_acked, 0,
+            "no runtime installed, nothing to ack"
+        );
     }
 }
