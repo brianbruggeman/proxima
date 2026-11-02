@@ -26,6 +26,8 @@
 //! the kernel does not do, for an amortised `retain`-row move once every
 //! `retain + step` tokens.
 
+use proxima_core::kv_carry::KvCommand;
+
 use super::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -300,6 +302,29 @@ impl DeviceKvLayer {
         self.base_position = kept_first;
     }
 
+    /// A rewind to `to_rows` positions needs no copy: the valid rows are the host `cached_len`. It
+    /// only fails when a sliding layer already moved its window past the rewind point.
+    fn truncate(&self, to_rows: usize) -> Result<(), InteropError> {
+        if to_rows < self.base_position {
+            return Err(InteropError::RewindIntoSealed {
+                keep_positions: to_rows,
+                sealed_end: self.base_position,
+            });
+        }
+        Ok(())
+    }
+
+    /// The buffer is sized once at adopt; growth past it is a configuration error, not a reallocation.
+    fn fits(&self, to_elements: usize) -> Result<(), InteropError> {
+        let capacity_elements = self.capacity_rows * self.even_odd_row.max(1);
+        if to_elements > capacity_elements {
+            return Err(InteropError::UnsupportedServingConfig(alloc::format!(
+                "device kv layer holds {capacity_elements} elements per field, a step asked for {to_elements}"
+            )));
+        }
+        Ok(())
+    }
+
     fn input_row(&self, cached_len: usize) -> usize {
         self.window.map_or(0, |window| {
             cached_len - cached_len.min(window) - self.base_position
@@ -515,6 +540,25 @@ impl DeviceKv {
         for layer in self.layers.iter().flatten() {
             layer.commit(cached_len, new_count);
         }
+    }
+
+    /// Runs one [`KvCommand`] the kv carry state machine decided for layer `input`: a `Truncate` moves
+    /// no bytes (the valid rows are `cached_len`) and a `Grow` must fit the buffer sized at adopt. The
+    /// copy, park and drain commands have no device-side counterpart here.
+    pub(super) fn apply(&self, command: &KvCommand<usize>) -> Result<(), InteropError> {
+        match *command {
+            KvCommand::Truncate { input, to_rows } => self.resident(input)?.truncate(to_rows as usize),
+            KvCommand::Grow { input, to_elements, .. } => self.resident(input)?.fits(to_elements as usize),
+            _ => Ok(()),
+        }
+    }
+
+    fn resident(&self, layer: usize) -> Result<&DeviceKvLayer, InteropError> {
+        self.layers.get(layer).and_then(Option::as_ref).ok_or_else(|| {
+            InteropError::UnsupportedServingConfig(alloc::format!(
+                "layer {layer} keeps no device kv for a state machine command"
+            ))
+        })
     }
 
     /// One flag per layer, for the host paths that must skip a resident one.
