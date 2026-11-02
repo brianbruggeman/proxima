@@ -2279,16 +2279,6 @@ impl CudaPlan {
         Ok(true)
     }
 
-    /// Whether this plan can be moved to another row count: it is bound inside the wide prefill class,
-    /// its ops are kinds a row template can enumerate, and no template has been refused. A plan
-    /// that is not movable is rebuilt for a new row count.
-    #[must_use]
-    pub fn rows_movable(&self) -> bool {
-        self.bound_rows >= ROW_CLASS_MIN
-            && !matches!(*self.rows_template, Some(None))
-            && rows_enumerable(&self.resolved)
-    }
-
     /// Moves the bound ops to `rows` through the proof learned at an earlier row change:
     /// every integer is re-evaluated, the launch grids and uniforms follow, and nothing is
     /// bound, fused or emitted. `Ok(None)` when no proof exists or either row count is
