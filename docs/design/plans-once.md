@@ -54,7 +54,17 @@ Every plan defect found on 2026-11-02 lives in that compensating machinery:
 4. **Memory at class capacity.** Buffers and the pool schedule are sized for the
    class's maximum (prefill chunk width, KV capacity), once. Growth is a
    capacity event at the request edge, never a per-step rebuild.
-5. **What is deleted.** The refit, refresh, patch, full-rebind and prior-kernel
+5. **Content-addressed plan key.** A plan is identified by a hash of what it
+   was built from: the symbolic ops (with `Extent::Symbolic` slots, never resolved
+   values), the output set, the numeric policy and the class facts. The hash is
+   constant for a model's lifetime, so lookup hits on every step. It replaces the
+   hand-assembled keys (`CudaPlanKey = (usize, usize, Vec<NodeId>, bool)`,
+   `CudaPlanIdentity`'s field list, Metal's `(rows, kv, outputs, sources)` map key),
+   each of which can omit a field that changes the plan. Kernel modules already work
+   this way: `CacheKey` hashes the emitted source (`omega/src/cuda_kernel_cache.rs`).
+   Hashing bound ops instead would fold in the per-step extents and miss every
+   decode step.
+6. **What is deleted.** The refit, refresh, patch, full-rebind and prior-kernel
    reuse paths; the resident plan store and its classes, eviction, take/put and
    drain; per-step uniform repack. What stays: one plan per class, held by the
    loaded model.
