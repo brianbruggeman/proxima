@@ -61,6 +61,8 @@ mod loader;
 mod lowering;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 mod mapping_residency;
+#[cfg(feature = "std")]
+pub mod memory_reclaim;
 pub mod pinned_source;
 #[cfg(feature = "std")]
 pub mod recurrent_routed_interval;

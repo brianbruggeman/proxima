@@ -7,6 +7,7 @@ use memmap2::MmapOptions;
 use proxima_storage::dax::{MappedRegion, PersistMode};
 use thiserror::Error;
 
+use crate::memory_reclaim::release_mapping;
 use crate::{InteropError, LoadedModel};
 
 /// Errors opening a checkpoint through the configured storage source.
@@ -48,6 +49,15 @@ impl CheckpointMapping {
         })?;
         let mapping = MappedRegion::open(path, length, PersistMode::Dax)?;
         Ok(Self::Pmem(mapping))
+    }
+
+    /// Drops the weight mapping's pages from the resident set; the next read refaults them from the file. A DAX mapping has no page cache to drop.
+    pub fn release_pages(&self) -> Result<(), InteropError> {
+        match self {
+            Self::File { mapping, .. } => release_mapping(mapping),
+            #[cfg(target_os = "linux")]
+            Self::Pmem(_) => Ok(()),
+        }
     }
 
     /// The complete checkpoint byte view used by GGUF parsing and binding.

@@ -592,6 +592,10 @@ pub struct PromptCacheConfig {
     pub bloom_bits_per_entry: u32,
     /// Probes per block in that filter.
     pub bloom_hashes: u32,
+    /// Seconds an entry may sit unused before the reclaim pass moves it to the cold tier; `0` turns the pass off.
+    pub idle_secs: u64,
+    /// Used-memory fraction in thousandths at which the reclaim pass moves the least recently used entries out; `0` turns the pass off.
+    pub pressure_milli: u32,
 }
 
 impl PromptCacheConfig {
@@ -616,6 +620,8 @@ impl PromptCacheConfig {
             seal_horizon_rows: 256,
             bloom_bits_per_entry: 4096,
             bloom_hashes: 4,
+            idle_secs: 300,
+            pressure_milli: 900,
         }
     }
 

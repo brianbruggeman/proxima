@@ -103,6 +103,8 @@ impl PromptCacheSettings {
             seal_horizon_rows: self.seal_horizon_rows,
             bloom_bits_per_entry: self.bloom_bits_per_entry,
             bloom_hashes: self.bloom_hashes,
+            idle_secs: PromptCacheConfig::standard().idle_secs,
+            pressure_milli: PromptCacheConfig::standard().pressure_milli,
         }
     }
 }
