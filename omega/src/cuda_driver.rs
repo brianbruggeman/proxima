@@ -10,7 +10,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::ffi::CString;
+use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
@@ -21,12 +22,15 @@ use cudarc::driver::{
     PushKernelArg,
 };
 use cudarc::nvrtc::sys as nvrtc_sys;
+use cudarc::nvrtc::result as nvrtc_result;
 use cudarc::nvrtc::{CompileOptions, Ptx, compile_ptx_with_opts};
 use proxima_primitives::sync::blocking::Mutex;
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::cuda::{CudaGridSpec, CudaKernel, cuda_cached_attention_class};
-use crate::cuda_kernel_cache::{CacheKey, decode_entry, encode_entry};
+use crate::cuda_kernel_cache::{
+    CacheKey, decode_binary_entry, decode_entry, encode_binary_entry, encode_entry, header_digest,
+};
 use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
 use crate::msl::{Binding, Codec, PackedOperands, gather_count};
@@ -144,6 +148,11 @@ struct CompileCounters {
     nvrtc_micros: AtomicU64,
     load_micros: AtomicU64,
     disk_cache_hits: AtomicU64,
+    disk_read_micros: AtomicU64,
+    module_load_micros: AtomicU64,
+    function_load_micros: AtomicU64,
+    cubin_arch: OnceLock<&'static str>,
+    header_digests: Mutex<BTreeMap<PathBuf, [u8; 32]>>,
     disk_store: PtxStore,
 }
 
@@ -154,8 +163,25 @@ impl CompileCounters {
             nvrtc_micros: AtomicU64::new(0),
             load_micros: AtomicU64::new(0),
             disk_cache_hits: AtomicU64::new(0),
+            disk_read_micros: AtomicU64::new(0),
+            module_load_micros: AtomicU64::new(0),
+            function_load_micros: AtomicU64::new(0),
+            cubin_arch: OnceLock::new(),
+            header_digests: Mutex::new(BTreeMap::new()),
             disk_store,
         }
+    }
+
+    fn add(counter: &AtomicU64, started: Instant) {
+        counter.fetch_add(elapsed_micros(started), Ordering::Relaxed);
+    }
+
+    fn lookup_micros(&self) -> [u64; 3] {
+        [
+            self.disk_read_micros.load(Ordering::Relaxed),
+            self.module_load_micros.load(Ordering::Relaxed),
+            self.function_load_micros.load(Ordering::Relaxed),
+        ]
     }
 }
 
@@ -469,14 +495,20 @@ impl CudaDriver {
         }
         let header_dir = cuda_header_dir(&kernel.source)?;
         let options = nvrtc_options(header_dir.as_deref());
-        let header = cuda_header_bytes(header_dir.as_deref())?;
-        let key = self.kernel_cache_key(&kernel.source, header.as_deref(), &options)?;
-        if let Some(text) = cached_ptx(&self.compile_counters.disk_store, &key) {
+        let header = self.header_stand_in(header_dir.as_deref())?;
+        if let Some(module) = self.cubin_module(kernel, header_dir.as_deref(), header.as_ref()) {
+            return Ok(module);
+        }
+        let key = self.kernel_cache_key(&kernel.source, header.as_ref().map(|digest| digest.as_slice()), &options)?;
+        let read_started = Instant::now();
+        let cached = cached_ptx(&self.compile_counters.disk_store, &key);
+        CompileCounters::add(&self.compile_counters.disk_read_micros, read_started);
+        if let Some(text) = cached {
             self.compile_counters
                 .disk_cache_hits
                 .fetch_add(1, Ordering::Relaxed);
             proxima_telemetry::debug!(entry = %kernel.entry, "kernel loaded from disk cache");
-            return Ok(self.context.load_module(Ptx::from_src(text))?);
+            return self.timed_load_module(Ptx::from_src(text));
         }
         let nvrtc_started = Instant::now();
         let ptx = compile_ptx_with_opts(&kernel.source, options)
@@ -488,6 +520,99 @@ impl CudaDriver {
         let load_us = elapsed_micros(load_started);
         self.record_compile(&kernel.entry, kernel.source.len(), nvrtc_us, load_us);
         Ok(module)
+    }
+
+    fn header_stand_in(&self, header_dir: Option<&Path>) -> Result<Option<[u8; 32]>, CudaDriverError> {
+        let Some(dir) = header_dir else {
+            return Ok(None);
+        };
+        let mut digests = self.compile_counters.header_digests.lock();
+        if let Some(digest) = digests.get(dir) {
+            return Ok(Some(*digest));
+        }
+        let digest = header_digest(&cuda_header_bytes(header_dir)?.unwrap_or_default());
+        digests.insert(dir.to_path_buf(), digest);
+        Ok(Some(digest))
+    }
+
+    fn timed_load_module(&self, image: Ptx) -> Result<Arc<CudaModule>, CudaDriverError> {
+        let started = Instant::now();
+        let module = self.context.load_module(image);
+        CompileCounters::add(&self.compile_counters.module_load_micros, started);
+        Ok(module?)
+    }
+
+    fn cubin_arch(&self) -> Result<&'static str, CudaDriverError> {
+        if let Some(arch) = self.compile_counters.cubin_arch.get() {
+            return Ok(arch);
+        }
+        let (major, minor) = self.context.compute_capability()?;
+        let arch: &'static str = Box::leak(format!("sm_{major}{minor}").into_boxed_str());
+        Ok(self.compile_counters.cubin_arch.get_or_init(|| arch))
+    }
+
+    // a cubin loads without the driver JIT; any failure here falls back to the ptx path.
+    fn cubin_module(
+        &self,
+        kernel: &CudaKernel,
+        header_dir: Option<&Path>,
+        header: Option<&[u8; 32]>,
+    ) -> Option<Arc<CudaModule>> {
+        if std::env::var_os("PROXIMA_CUDA_PTX_ONLY").is_some() {
+            return None;
+        }
+        let arch = self.cubin_arch().ok()?;
+        let mut options = nvrtc_options(header_dir);
+        options.arch = Some(arch);
+        let key = self.kernel_cache_key(&kernel.source, header.map(|digest| digest.as_slice()), &options).ok()?;
+        let image = self
+            .cached_cubin(&key)
+            .or_else(|| self.compiled_cubin(kernel, &key, header_dir, arch))?;
+        match self.timed_load_module(Ptx::from_binary(image)) {
+            Ok(module) => Some(module),
+            Err(error) => {
+                proxima_telemetry::debug!(entry = %kernel.entry, error = %error, "cubin load refused; using ptx");
+                None
+            }
+        }
+    }
+
+    fn cached_cubin(&self, key: &CacheKey) -> Option<Vec<u8>> {
+        let started = Instant::now();
+        let entry = self.compile_counters.disk_store.get(&key.to_hex()).ok().flatten();
+        CompileCounters::add(&self.compile_counters.disk_read_micros, started);
+        let image = decode_binary_entry(key, &entry?).ok()?.to_vec();
+        self.compile_counters
+            .disk_cache_hits
+            .fetch_add(1, Ordering::Relaxed);
+        Some(image)
+    }
+
+    fn compiled_cubin(
+        &self,
+        kernel: &CudaKernel,
+        key: &CacheKey,
+        header_dir: Option<&Path>,
+        arch: &str,
+    ) -> Option<Vec<u8>> {
+        let started = Instant::now();
+        let image = match compile_cubin(&kernel.source, header_dir, arch) {
+            Ok(image) => image,
+            Err(error) => {
+                proxima_telemetry::debug!(entry = %kernel.entry, error = %error, "cubin compile refused; using ptx");
+                return None;
+            }
+        };
+        let nvrtc_us = elapsed_micros(started);
+        if let Err(error) = self
+            .compile_counters
+            .disk_store
+            .put(&key.to_hex(), &encode_binary_entry(key, &image))
+        {
+            proxima_telemetry::warn!(entry = %kernel.entry, error = %error, "cubin cache write failed; kernel stays uncached");
+        }
+        self.record_compile(&kernel.entry, kernel.source.len(), nvrtc_us, 0);
+        Some(image)
     }
 
     fn kernel_cache_key(
@@ -541,7 +666,10 @@ impl CudaDriver {
             Some((module, None)) => module,
             None => build_module()?,
         };
-        let function = module.load_function(entry)?;
+        let load_started = Instant::now();
+        let function = module.load_function(entry);
+        CompileCounters::add(&self.compile_counters.function_load_micros, load_started);
+        let function = function?;
         proxima_telemetry::debug!(
             entry = %entry,
             registers = function.num_regs().unwrap_or(-1),
@@ -1637,6 +1765,39 @@ fn nvrtc_options(header_dir: Option<&Path>) -> CompileOptions {
     options
 }
 
+fn compile_cubin(
+    source: &str,
+    header_dir: Option<&Path>,
+    arch: &str,
+) -> Result<Vec<u8>, CudaDriverError> {
+    let refused = |what: &str, error: &dyn std::fmt::Debug| CudaDriverError::Nvrtc(format!("{what}: {error:?}"));
+    let text = CString::new(source).map_err(|error| refused("kernel source", &error))?;
+    let program = nvrtc_result::create_program(&text, None).map_err(|error| refused("create", &error))?;
+    let mut flags = vec![format!("--gpu-architecture={arch}")];
+    if let Some(dir) = header_dir {
+        flags.push(format!("--include-path={}", dir.to_string_lossy()));
+    }
+    let image = unsafe { nvrtc_result::compile_program(program, &flags) }
+        .map_err(|error| refused("compile", &error))
+        .and_then(|()| unsafe { read_cubin(program) });
+    unsafe { nvrtc_result::destroy_program(program) }.map_err(|error| refused("destroy", &error))?;
+    image
+}
+
+unsafe fn read_cubin(program: nvrtc_sys::nvrtcProgram) -> Result<Vec<u8>, CudaDriverError> {
+    let mut size = 0usize;
+    let sized = unsafe { nvrtc_sys::nvrtcGetCUBINSize(program, &mut size) };
+    if sized != nvrtc_sys::nvrtcResult::NVRTC_SUCCESS {
+        return Err(CudaDriverError::Nvrtc(format!("cubin size: {sized:?}")));
+    }
+    let mut image = vec![0u8; size];
+    let read = unsafe { nvrtc_sys::nvrtcGetCUBIN(program, image.as_mut_ptr().cast()) };
+    if read != nvrtc_sys::nvrtcResult::NVRTC_SUCCESS {
+        return Err(CudaDriverError::Nvrtc(format!("cubin read: {read:?}")));
+    }
+    Ok(image)
+}
+
 fn nvrtc_version() -> Result<(i32, i32), CudaDriverError> {
     let mut major = 0;
     let mut minor = 0;
@@ -2409,6 +2570,7 @@ impl CudaPlan {
         let compilations_before = self.driver.kernel_compilations();
         let nvrtc_before = self.driver.nvrtc_micros();
         let load_before = self.driver.load_micros();
+        let lookup_before = self.driver.compile_counters.lookup_micros();
         let mut upload_call_us = 0u64;
         let mut resident_hits = 0usize;
         let mut resident_misses = 0usize;
@@ -2738,6 +2900,13 @@ impl CudaPlan {
                 self.driver.kernel_compilations() - compilations_before,
                 (self.driver.nvrtc_micros() - nvrtc_before) as f64 / 1_000.0,
                 (self.driver.load_micros() - load_before) as f64 / 1_000.0
+            );
+            let lookup_after = self.driver.compile_counters.lookup_micros();
+            eprintln!(
+                "cuda_host_timing: phase=lookup_split disk_read_ms={:.3} module_load_ms={:.3} function_load_ms={:.3}",
+                (lookup_after[0] - lookup_before[0]) as f64 / 1_000.0,
+                (lookup_after[1] - lookup_before[1]) as f64 / 1_000.0,
+                (lookup_after[2] - lookup_before[2]) as f64 / 1_000.0
             );
             report_launch_profile(&self.arena.launch_profile, &kind_rows);
         }

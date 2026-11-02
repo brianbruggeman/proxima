@@ -138,13 +138,19 @@ pub enum CacheEntryError {
 /// Header (magic, schema, key digest, payload length, payload sha256) followed by the PTX text.
 #[must_use]
 pub fn encode_entry(key: &CacheKey, payload: &str) -> Vec<u8> {
+    encode_binary_entry(key, payload.as_bytes())
+}
+
+/// Same framing as [`encode_entry`] for a binary payload such as a cubin image.
+#[must_use]
+pub fn encode_binary_entry(key: &CacheKey, payload: &[u8]) -> Vec<u8> {
     let mut entry = Vec::with_capacity(HEADER_LEN + payload.len());
     entry.extend_from_slice(&ENTRY_MAGIC);
     entry.extend_from_slice(&CACHE_SCHEMA_VERSION.to_le_bytes());
     entry.extend_from_slice(&key.0);
     entry.extend_from_slice(&(payload.len() as u64).to_le_bytes());
-    entry.extend_from_slice(&payload_digest(payload.as_bytes()));
-    entry.extend_from_slice(payload.as_bytes());
+    entry.extend_from_slice(&payload_digest(payload));
+    entry.extend_from_slice(payload);
     entry
 }
 
@@ -154,6 +160,15 @@ pub fn decode_entry<'entry>(
     key: &CacheKey,
     entry: &'entry [u8],
 ) -> Result<&'entry str, CacheEntryError> {
+    let payload = decode_binary_entry(key, entry)?;
+    std::str::from_utf8(payload).map_err(|_| CacheEntryError::NotUtf8)
+}
+
+/// Same verification as [`decode_entry`], handing back the raw payload bytes.
+pub fn decode_binary_entry<'entry>(
+    key: &CacheKey,
+    entry: &'entry [u8],
+) -> Result<&'entry [u8], CacheEntryError> {
     let truncated = || CacheEntryError::Truncated {
         needed: HEADER_LEN,
         found: entry.len(),
@@ -186,13 +201,19 @@ pub fn decode_entry<'entry>(
     if payload_digest(payload) != declared_digest {
         return Err(CacheEntryError::HashMismatch);
     }
-    std::str::from_utf8(payload).map_err(|_| CacheEntryError::NotUtf8)
+    Ok(payload)
 }
 
 fn take<const N: usize>(cursor: &mut &[u8]) -> Option<[u8; N]> {
     let (head, tail) = cursor.split_first_chunk::<N>()?;
     *cursor = tail;
     Some(*head)
+}
+
+/// Stand-in for the header bytes in [`CacheKey::new`], hashed once per header rather than once per kernel.
+#[must_use]
+pub fn header_digest(header: &[u8]) -> [u8; DIGEST_LEN] {
+    payload_digest(header)
 }
 
 fn payload_digest(payload: &[u8]) -> [u8; DIGEST_LEN] {
