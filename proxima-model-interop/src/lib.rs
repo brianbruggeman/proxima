@@ -37,6 +37,8 @@ pub mod cold_artifact;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 pub mod cuda_async;
 #[cfg(feature = "std")]
+pub mod disk_cold_tier;
+#[cfg(feature = "std")]
 mod dense;
 #[cfg(feature = "std")]
 mod draft_model_compatibility;

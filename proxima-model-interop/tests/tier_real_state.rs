@@ -6,7 +6,6 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use proxima_gguf::parse_complete;
-use proxima_model_interop::InteropError;
 use proxima_model_interop::block_file::{MappedBlockFile, decode_block};
 use proxima_model_interop::{LoadedModel, PrefixState, PromptCacheConfig, ServingConfig};
 
