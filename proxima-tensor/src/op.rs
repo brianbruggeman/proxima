@@ -17,6 +17,7 @@
 //! [`bind::bind`](crate::bind::bind) both rely on.
 
 use alloc::string::String;
+use core::hash::Hash;
 use alloc::vec::Vec;
 
 use crate::dtype::DType;
@@ -39,7 +40,7 @@ impl core::fmt::Display for NodeId {
 /// request arrives, so a program that cannot express one cannot describe a
 /// model that serves traffic. This is why rank and shape are values here and
 /// not type parameters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
 pub enum Extent {
@@ -70,7 +71,7 @@ pub const SLIDING_CACHED_LEN_INPUT: &str = "cached_len_swa";
 /// Composite activations desugar into several expressions — `gelu` is a
 /// handful of elementwise expressions, not a variant here — which costs
 /// expressions and buys a vocabulary that never grows.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
 pub enum ScalarOp {
@@ -134,7 +135,7 @@ impl ScalarOp {
 }
 
 /// Seed value for a reduce.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
 pub enum ReduceInit {
@@ -152,7 +153,7 @@ pub enum ReduceInit {
 /// The only thing separating a reduction from a scan. Log-depth prefix sum is
 /// a *scheduling* decision about a `Keep::Scan` reduce, not a different
 /// operation, which is why there is no separate `Scan` expression form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
 pub enum Keep {
@@ -164,7 +165,7 @@ pub enum Keep {
 
 /// A reduce's parameters, named because eight of them travel together
 /// through every pass and every backend.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 pub struct Reduce {
     pub dtype: DType,
@@ -279,6 +280,30 @@ pub enum Op {
         shape: Vec<Extent>,
         value: f32,
     },
+}
+
+/// `Constant`'s `f32` is hashed by bit pattern, so `Op` cannot derive `Hash`:
+/// an `f32` has no `Hash` impl because `0.0 == -0.0` while their bits differ.
+impl core::hash::Hash for Op {
+    fn hash<Hasher: core::hash::Hasher>(&self, state: &mut Hasher) {
+        core::mem::discriminant(self).hash(state);
+        match self {
+            Self::Input { dtype, shape, name } => (dtype, shape, name).hash(state),
+            Self::Elementwise {
+                dtype,
+                body,
+                operands,
+                name,
+            } => (dtype, body, operands, name).hash(state),
+            Self::Reduce(reduce) => reduce.hash(state),
+            Self::Iota { dtype, extent } => (dtype, extent).hash(state),
+            Self::Constant {
+                dtype,
+                shape,
+                value,
+            } => (dtype, shape, value.to_bits()).hash(state),
+        }
+    }
 }
 
 impl Op {
