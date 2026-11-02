@@ -24,7 +24,7 @@ const KV_CACHE_INPUT_PREFIX: &str = "kv_cache.";
 
 /// Whether two plan keys differ at most in the KV length: same new-token count,
 /// outputs, epilogue sources and program.
-#[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn same_program_width(
     left: &(usize, usize, Vec<NodeId>, bool, u64),
     right: &(usize, usize, Vec<NodeId>, bool, u64),
@@ -4646,7 +4646,7 @@ impl BackendRuntime {
         numeric_policy: proxima_tensor::NumericPolicy,
     ) -> Result<(), InteropError> {
         let Some(mut near) = Self::take_near_plan(cache, shape, |key, wanted| {
-            same_program_width(key, wanted) && same_width_class(key, wanted)
+            key.3 == wanted.3 && key.4 == wanted.4 && same_width_class(key, wanted)
         }) else {
             debug!(
                 new_count = shape.0 as u64,
