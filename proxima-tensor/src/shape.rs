@@ -59,6 +59,16 @@ impl Shapes {
         &self.extents[node.0 as usize]
     }
 
+    #[must_use]
+    pub fn from_extents(extents: Vec<Vec<u64>>) -> Self {
+        Self { extents }
+    }
+
+    #[must_use]
+    pub fn extents(&self) -> &[Vec<u64>] {
+        &self.extents
+    }
+
     fn push(&mut self, resolved: Vec<u64>) {
         self.extents.push(resolved);
     }
