@@ -345,7 +345,10 @@ mod tests {
 
     fn mismatched_codes(source: &[f32; BLOCK_ELEMENTS], block: &[u8; BLOCK_BYTES]) -> usize {
         let scale = half::f16::from_f32(
-            source.iter().fold(0.0f32, |peak, value| peak.max(value.abs())) / MAX_NORMAL_RATIO,
+            source
+                .iter()
+                .fold(0.0f32, |peak, value| peak.max(value.abs()))
+                / MAX_NORMAL_RATIO,
         )
         .to_f32();
         assert_eq!(
@@ -375,7 +378,10 @@ mod tests {
             .iter()
             .step_by(BLOCK_STRIDE)
             .fold((0usize, 0usize), |(blocks, mismatches), source| {
-                (blocks + 1, mismatches + mismatched_codes(source, &quantized(source)))
+                (
+                    blocks + 1,
+                    mismatches + mismatched_codes(source, &quantized(source)),
+                )
             });
 
         debug!(
@@ -383,7 +389,10 @@ mod tests {
             mismatches, "quant.scaled_float codes versus independent ocp table 4 encode"
         );
         assert!(blocks > 0, "the stride must sample at least one block");
-        assert_eq!(mismatches, 0, "codes differing from the OCP table 4 nearest-even encode");
+        assert_eq!(
+            mismatches, 0,
+            "codes differing from the OCP table 4 nearest-even encode"
+        );
     }
 
     #[test]
@@ -396,7 +405,11 @@ mod tests {
             .find(|source| source[0].abs() > 0.0)
             .expect("a block with a non-zero first weight");
         let mut block = quantized(source);
-        assert_eq!(mismatched_codes(source, &block), 0, "unperturbed block agrees");
+        assert_eq!(
+            mismatched_codes(source, &block),
+            0,
+            "unperturbed block agrees"
+        );
 
         block[SCALE_BYTES] ^= 1 << (FIELD_BITS - 2);
 

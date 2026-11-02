@@ -590,7 +590,10 @@ mod tests {
         let mut rng = Rng::with_seed(1);
 
         assert_eq!(sample_next_token(&logits, &[], greedy, &mut rng), Some(1));
-        assert_eq!(sample_next_token(&logits, &[0, 3], greedy, &mut rng), Some(1));
+        assert_eq!(
+            sample_next_token(&logits, &[0, 3], greedy, &mut rng),
+            Some(1)
+        );
         assert_eq!(
             sample_next_token(&[1.0, 3.0, 3.5, 2.0], &[], greedy, &mut rng),
             Some(2),
