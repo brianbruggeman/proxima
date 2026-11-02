@@ -1,8 +1,8 @@
 use proxima_primitives::float_layout::FloatLayout;
 
+use super::golden_support::{e3m2_kernel_source, full_matvec_source, matvec_source};
 #[cfg(feature = "metal-tiled-gemm")]
 use super::tests::{TILED_ADMITTED_TOKENS, gathered_matmul_op, tiled_gemm_op};
-use super::golden_support::{e3m2_kernel_source, full_matvec_source, matvec_source};
 use super::*;
 
 const ROW_BLOCKED_1024X512: &str =
@@ -150,10 +150,7 @@ fn scaled_e3m2_render_model_name_free() {
 
 #[cfg(all(
     feature = "std",
-    any(
-        all(feature = "metal", target_os = "macos"),
-        feature = "wgpu-backend"
-    )
+    any(all(feature = "metal", target_os = "macos"), feature = "wgpu-backend")
 ))]
 #[test]
 fn scaled_e3m2_bind_maps_a_packed_operand_to_its_codec_and_a_float_operand_to_none() {
