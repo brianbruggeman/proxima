@@ -38,7 +38,7 @@ use crate::op::{Extent, NodeId};
 pub use crate::sized::MAX_INLINE_TERMS;
 
 /// One `coeff * iter[axis]` contribution to an operand index.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 pub struct AxisTerm {
     pub axis: u16,
@@ -80,7 +80,7 @@ impl AxisTerm {
 /// iteration axis, and always bounds-checks this axis's address against the
 /// operand's real width, the same way a nonzero `offset` already forces a
 /// bounds check instead of a definer match.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 pub struct AxisIndex {
     pub terms: SmallVec<[AxisTerm; MAX_INLINE_TERMS]>,
@@ -154,7 +154,7 @@ impl AxisIndex {
 /// `axes` holds one [`AxisIndex`] per operand axis, so the operand's rank is
 /// `axes.len()` — which may be lower than `iter_rank` (a broadcast) or
 /// reorder it (a transpose).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 pub struct IndexPattern {
     pub iter_rank: u16,
@@ -212,7 +212,7 @@ pub struct IndexPattern {
 /// [`IndexMap::scatter_extent`]/[`IndexMap::scatter`] for the one pair of
 /// accessors that own this convention, so nothing outside `map.rs` reads or
 /// writes `base`'s `gathered_dim` offset directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
 #[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
 pub enum IndexMap {
