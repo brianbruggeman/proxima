@@ -3,7 +3,7 @@
 //! `valid_rows` is the only authority on how much of a carried cache is real. A rejected speculative row is dropped by moving that count back ([`KvCommand::Truncate`]); no bytes move.
 
 use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 use core::fmt::Debug;
 
 use thiserror::Error;
@@ -361,6 +361,134 @@ impl<Key: Ord + Copy + Debug> KvCarry<Key> {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateCommand<Key> {
+    Adopt { input: Key },
+    Swap { input: Key, output: Key },
+    Park { input: Key, output: Key },
+    Drain { input: Key, output: Key },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StateEvent<Key> {
+    Select { pairs: Vec<(Key, Key)> },
+    Resident { input: Key },
+    StepFinished { ready: Vec<Key> },
+    Parked,
+    Ended,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum StateCarryError<Key: Debug> {
+    #[error("state carry: the carried pair set cannot change while {live} inputs are live")]
+    PairsChangedWhileLive { live: usize },
+    #[error("state carry: input {input:?} is not a selected pair")]
+    UnknownInput { input: Key },
+}
+
+/// Recurrent state whose output buffer becomes the next call's input buffer: no rows, no growth, only which inputs are live and which swaps a finished step owes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateSwap<Key: Ord + Copy + Debug> {
+    pairs: BTreeMap<Key, Key>,
+    live: BTreeSet<Key>,
+}
+
+impl<Key: Ord + Copy + Debug> Default for StateSwap<Key> {
+    fn default() -> Self {
+        Self {
+            pairs: BTreeMap::new(),
+            live: BTreeSet::new(),
+        }
+    }
+}
+
+impl<Key: Ord + Copy + Debug> StateSwap<Key> {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    #[must_use]
+    pub fn selects(&self, pairs: &[(Key, Key)]) -> bool {
+        pairs.len() == self.pairs.len()
+            && pairs.iter().all(|(input, output)| self.pairs.get(input) == Some(output))
+    }
+
+    #[must_use]
+    pub fn has_live(&self) -> bool {
+        !self.live.is_empty()
+    }
+
+    #[must_use]
+    pub fn is_live(&self, input: &Key) -> bool {
+        self.live.contains(input)
+    }
+
+    #[must_use]
+    pub fn is_pair(&self, input: &Key) -> bool {
+        self.pairs.contains_key(input)
+    }
+
+    pub fn pairs(&self) -> impl Iterator<Item = (&Key, &Key)> {
+        self.pairs.iter()
+    }
+
+    pub fn park(&mut self) -> Vec<StateCommand<Key>> {
+        self.release(|input, output| StateCommand::Park { input, output })
+    }
+
+    pub fn step(&mut self, event: StateEvent<Key>) -> Result<Vec<StateCommand<Key>>, StateCarryError<Key>> {
+        match event {
+            StateEvent::Select { pairs } => self.select(pairs),
+            StateEvent::Resident { input } => self.make_live(input),
+            StateEvent::StepFinished { ready } => Ok(self.finish(&ready)),
+            StateEvent::Parked => Ok(self.park()),
+            StateEvent::Ended => Ok(self.release(|input, output| StateCommand::Drain { input, output })),
+        }
+    }
+
+    fn select(&mut self, pairs: Vec<(Key, Key)>) -> Result<Vec<StateCommand<Key>>, StateCarryError<Key>> {
+        if !self.selects(&pairs) {
+            if !self.live.is_empty() {
+                return Err(StateCarryError::PairsChangedWhileLive { live: self.live.len() });
+            }
+            self.pairs = pairs.into_iter().collect();
+        }
+        Ok(self
+            .pairs
+            .keys()
+            .filter(|input| !self.live.contains(*input))
+            .map(|input| StateCommand::Adopt { input: *input })
+            .collect())
+    }
+
+    fn make_live(&mut self, input: Key) -> Result<Vec<StateCommand<Key>>, StateCarryError<Key>> {
+        if !self.pairs.contains_key(&input) {
+            return Err(StateCarryError::UnknownInput { input });
+        }
+        self.live.insert(input);
+        Ok(Vec::new())
+    }
+
+    fn finish(&mut self, ready: &[Key]) -> Vec<StateCommand<Key>> {
+        let mut commands = Vec::new();
+        for input in ready {
+            if let Some(output) = self.pairs.get(input) {
+                self.live.insert(*input);
+                commands.push(StateCommand::Swap { input: *input, output: *output });
+            }
+        }
+        commands
+    }
+
+    fn release(&mut self, command: impl Fn(Key, Key) -> StateCommand<Key>) -> Vec<StateCommand<Key>> {
+        let live = core::mem::take(&mut self.live);
+        live.iter()
+            .filter_map(|input| self.pairs.get(input).map(|output| command(*input, *output)))
+            .collect()
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -637,5 +765,95 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod state_swap_tests {
+    extern crate std;
+
+    use std::vec;
+
+    use super::{StateCarryError, StateCommand, StateEvent, StateSwap};
+
+    const STATE: u32 = 3;
+    const NEXT_STATE: u32 = 203;
+
+    fn swapping() -> StateSwap<u32> {
+        let mut carry = StateSwap::new();
+        let adopt = carry
+            .step(StateEvent::Select { pairs: vec![(STATE, NEXT_STATE)] })
+            .expect("select");
+        assert_eq!(adopt, vec![StateCommand::Adopt { input: STATE }]);
+        carry
+    }
+
+    #[proxima::test]
+    async fn a_finished_step_swaps_the_ready_pair_and_makes_it_live() {
+        let mut carry = swapping();
+
+        let commands = carry.step(StateEvent::StepFinished { ready: vec![STATE] }).expect("finish");
+
+        assert_eq!(commands, vec![StateCommand::Swap { input: STATE, output: NEXT_STATE }]);
+        assert!(carry.is_live(&STATE));
+    }
+
+    #[proxima::test]
+    async fn a_finished_step_without_the_pair_ready_swaps_nothing() {
+        let mut carry = swapping();
+
+        let commands = carry.step(StateEvent::StepFinished { ready: vec![] }).expect("finish");
+
+        assert!(commands.is_empty());
+        assert!(!carry.is_live(&STATE));
+    }
+
+    #[proxima::test]
+    #[case::park_hands_the_output_name_over(false, StateCommand::Park { input: STATE, output: NEXT_STATE })]
+    #[case::end_drains_by_output(true, StateCommand::Drain { input: STATE, output: NEXT_STATE })]
+    async fn release_empties_the_live_set(#[case] ended: bool, #[case] expected: StateCommand<u32>) {
+        let mut carry = swapping();
+        carry.step(StateEvent::StepFinished { ready: vec![STATE] }).expect("finish");
+
+        let event = if ended { StateEvent::Ended } else { StateEvent::Parked };
+        let commands = carry.step(event).expect("release");
+
+        assert_eq!(commands, vec![expected]);
+        assert!(!carry.has_live());
+    }
+
+    #[proxima::test]
+    async fn selecting_the_same_pairs_after_a_park_adopts_again() {
+        let mut carry = swapping();
+        carry.step(StateEvent::StepFinished { ready: vec![STATE] }).expect("finish");
+        carry.step(StateEvent::Parked).expect("park");
+
+        let again = carry
+            .step(StateEvent::Select { pairs: vec![(STATE, NEXT_STATE)] })
+            .expect("same pairs");
+
+        assert_eq!(again, vec![StateCommand::Adopt { input: STATE }]);
+    }
+
+    #[proxima::test]
+    async fn changing_pairs_while_live_is_rejected() {
+        let mut carry = swapping();
+        carry.step(StateEvent::StepFinished { ready: vec![STATE] }).expect("finish");
+
+        let error = carry
+            .step(StateEvent::Select { pairs: vec![(4, 204)] })
+            .expect_err("live state blocks");
+
+        assert_eq!(error, StateCarryError::PairsChangedWhileLive { live: 1 });
+    }
+
+    #[proxima::test]
+    async fn an_unselected_input_cannot_become_resident() {
+        let mut carry = swapping();
+
+        let error = carry.step(StateEvent::Resident { input: 9 }).expect_err("unknown input");
+
+        assert_eq!(error, StateCarryError::UnknownInput { input: 9 });
     }
 }
