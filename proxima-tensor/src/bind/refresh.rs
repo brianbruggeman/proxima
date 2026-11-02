@@ -48,6 +48,7 @@ use crate::shape::Shapes;
 use super::builder_compose_window::{
     Constants, build_reduce_op, compose, compose_fused_operands, is_identity_projection,
 };
+use super::refit_cached_attention::refresh_attention;
 use super::types_layout_boundop::{BoundOp, BoundOpKind, ComposedBody, HeldElementwise};
 
 /// Why one retained [`BoundOp`] could not be refreshed in place.
@@ -356,8 +357,14 @@ fn refresh_one(
                 new_shapes,
             )
         }
-        BoundOpKind::CachedAttention { .. }
-        | BoundOpKind::CachedSoftmaxWeights { .. }
+        BoundOpKind::CachedAttention { .. } => {
+            refresh_attention(bound_op, new_shapes).ok_or(RefreshRefusal::MatcherFusedKind {
+                position,
+                node: bound_op.node,
+                kind: bound_op.kind.name(),
+            })
+        }
+        BoundOpKind::CachedSoftmaxWeights { .. }
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
         | BoundOpKind::TopFractionSelect { .. }

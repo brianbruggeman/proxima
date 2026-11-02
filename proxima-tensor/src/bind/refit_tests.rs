@@ -229,3 +229,63 @@ async fn refit_declines_a_partial_rotary_op_whose_pass_plane_rows_disagree() {
         "a new-key pass plane that reads the cached rows cannot be refit"
     );
 }
+
+fn refresh_across(
+    fixture: &Fixture,
+    low: &[u64],
+    high: &[u64],
+) -> (Result<Vec<BoundOp>, RefreshRefusal>, Vec<BoundOp>) {
+    let (low_shapes, low_bound) = bound_at(fixture, low, true);
+    let (high_shapes, high_bound) = bound_at(fixture, high, true);
+    let changed: BTreeSet<NodeId> = changed_nodes(&fixture.program, &low_shapes, &high_shapes)
+        .into_iter()
+        .collect();
+    let masks: Vec<u64> = low_bound
+        .iter()
+        .map(|bound| u64::from(touches_changed(bound, &fixture.program, &changed)))
+        .collect();
+    let refreshed = refresh_bound_ops(
+        &low_bound,
+        &fixture.program,
+        &fixture.outputs,
+        &high_shapes,
+        &masks,
+        1,
+        NumericPolicy::llama_relaxed(),
+    );
+    (refreshed, high_bound)
+}
+
+#[proxima::test]
+#[case::cache_alone_moves(&[1, 33], &[1, 65])]
+async fn refresh_matches_a_fresh_bind_when_the_attention_query_rows_move(
+    #[case] low: &[u64],
+    #[case] high: &[u64],
+) {
+    let fixture = single_range_fixture(2);
+
+    let (refreshed, fresh) = refresh_across(&fixture, low, high);
+
+    assert_eq!(
+        refreshed.expect("a cache-only move refreshes every touched op"),
+        fresh,
+        "refreshed ops differ from a fresh bind"
+    );
+}
+
+#[proxima::test]
+#[case::row_count_grows(&[1, 33], &[4, 37])]
+#[case::row_count_shrinks(&[4, 37], &[1, 38])]
+async fn refresh_refuses_where_the_row_count_changes_an_unfused_ops_fusion(
+    #[case] low: &[u64],
+    #[case] high: &[u64],
+) {
+    let fixture = single_range_fixture(2);
+
+    let (refreshed, _) = refresh_across(&fixture, low, high);
+
+    assert!(
+        matches!(refreshed, Err(RefreshRefusal::RecomposedBodyMismatch { .. })),
+        "an extent-1 row axis fuses differently from a multi-row one: {refreshed:?}"
+    );
+}
