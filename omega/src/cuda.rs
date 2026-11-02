@@ -312,7 +312,13 @@ fn extent_fields(
             block_width: Some(GEMM_THREADS),
         },
         None => CudaGridSpec {
-            threads: grid_threads(resolved, cooperative, row_tile, reduce_width)?,
+            threads: grid_threads(
+                resolved,
+                cooperative,
+                cooperative && lane_major_reduce(resolved, quantized),
+                row_tile,
+                reduce_width,
+            )?,
             block_width: match &resolved.kind {
                 BoundOpKind::MoeTopK { expert_count, .. } => Some(moe_block_width(*expert_count)),
                 BoundOpKind::CachedAttention { .. } => Some(ATTENTION_BLOCK_WIDTH),
@@ -1095,6 +1101,45 @@ pub(crate) const ATTENTION_WARPS: u64 = 4;
 
 pub(crate) const ATTENTION_BLOCK_WIDTH: u64 = ATTENTION_WARPS * WARP_SIZE;
 
+const LANE_MAJOR_WARPS: u64 = 4;
+
+const LANE_MAJOR_BLOCK_WIDTH: u64 = LANE_MAJOR_WARPS * WARP_SIZE;
+
+/// A broadcast-epilogue reduce whose reduction axis is strided for every operand while the
+/// last output axis is the contiguous one: lanes then own consecutive output elements, so
+/// every operand load and every epilogue store of a warp lands in one cache line, and the
+/// block's warps split the reduction and merge through shared memory.
+fn lane_major_reduce(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
+    let BoundOpKind::Reduce {
+        keep: Keep::Reduce,
+        output_axes,
+        epilogue_body,
+        epilogue_operands,
+        epilogue_broadcast_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return false;
+    };
+    let reduce_dims = reduction_dims(resolved, output_axes);
+    let (Some(&last_output), [reduce_dim]) = (output_axes.last(), reduce_dims.as_slice()) else {
+        return false;
+    };
+    let operands = resolved.operands();
+    let kept_rows: u64 = output_axes
+        .iter()
+        .map(|dim| resolved.extents[usize::from(*dim)])
+        .product();
+    !epilogue_broadcast_axes.is_empty()
+        && kept_rows > 1
+        && quantized.iter().all(Option::is_none)
+        && gather_count(resolved) == 0
+        && !reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
+        && index32_reach_fits(resolved.extents[usize::from(*reduce_dim)])
+        && operands.iter().all(|(_, layout, _)| layout.stride(*reduce_dim) != 1)
+        && operands.iter().any(|(_, layout, _)| layout.stride(last_output) == 1)
+}
+
 fn cooperative_width(resolved: &BoundOp, quantized: &[Option<Codec>]) -> u64 {
     let BoundOpKind::Reduce {
         output_axes,
@@ -1104,6 +1149,9 @@ fn cooperative_width(resolved: &BoundOp, quantized: &[Option<Codec>]) -> u64 {
     else {
         return WARP_SIZE;
     };
+    if lane_major_reduce(resolved, quantized) {
+        return LANE_MAJOR_BLOCK_WIDTH;
+    }
     if broadcast_reduce_takes_block(resolved, quantized) {
         let reduction_total: u64 = reduction_dims(resolved, output_axes)
             .iter()
@@ -1123,6 +1171,7 @@ fn cooperative_width(resolved: &BoundOp, quantized: &[Option<Codec>]) -> u64 {
 fn grid_threads(
     resolved: &BoundOp,
     cooperative: bool,
+    lane_major: bool,
     row_tile: Option<usize>,
     reduce_width: u64,
 ) -> Result<u64, EmitError> {
@@ -1139,6 +1188,12 @@ fn grid_threads(
                 .iter()
                 .map(|dim| resolved.extents[*dim as usize])
                 .product();
+            if lane_major {
+                return checked_product(
+                    resolved.node,
+                    [kept_rows.div_ceil(WARP_SIZE), LANE_MAJOR_BLOCK_WIDTH],
+                );
+            }
             let row_per_warp = cooperative && kept_rows > 1;
             let output_total: u64 = if epilogue_broadcast_axes.is_empty() || row_per_warp {
                 checked_product(
@@ -1342,6 +1397,10 @@ fn entry_name(
         String::from("_mma16x8x8_gid64c9")
     } else if row_tile_axis(resolved, quantized, numeric_policy).is_some() {
         format!("_rt{ROW_TILE}_gid64c9")
+    } else if reduce_is_cooperative(resolved, quantized, numeric_policy)
+        && lane_major_reduce(resolved, quantized)
+    {
+        format!("_lm{LANE_MAJOR_WARPS}_gid64c9")
     } else {
         String::from("_gid64c8")
     };
@@ -1502,6 +1561,8 @@ fn push_unit_stride_broadcast_loop(
     hoisted: &HoistedEpilogue,
     output_axes: &[u16],
     reduce_dim: u16,
+    lane_start: &str,
+    lane_step: &str,
 ) {
     source.push_str("    long out_row_base = u.out_base;\n");
     for dim in output_axes {
@@ -1512,9 +1573,9 @@ fn push_unit_stride_broadcast_loop(
     source.push_str(&format!(
         "    long out_reduce_stride = u.broadcast_out_strides[{reduce_dim}];\n"
     ));
-    source.push_str(
-        "    #pragma unroll 8\n    for (unsigned int r = tid; r < (unsigned int)u.reduction_total; r += blockDim.x) {\n",
-    );
+    source.push_str(&format!(
+        "    #pragma unroll 8\n    for (unsigned int r = {lane_start}; r < (unsigned int)u.reduction_total; r += {lane_step}) {{\n"
+    ));
     source.push_str(&hoisted.in_loop);
     source.push_str(&format!(
         "        out[out_row_base + (long)r * out_reduce_stride] = {};\n    }}\n",
@@ -2755,6 +2816,73 @@ fn push_lean_fold(
     Ok(())
 }
 
+fn push_lane_major_merge(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    element_type: &str,
+) -> Result<(), EmitError> {
+    source.push_str(&format!(
+        "    __shared__ {element_type} lane_partials[{LANE_MAJOR_WARPS}][{WARP_SIZE}];\n"
+    ));
+    source.push_str("    lane_partials[fold_warp][lane] = accumulator;\n");
+    source.push_str("    __syncthreads();\n");
+    source.push_str("    accumulator = lane_partials[0][lane];\n");
+    for warp in 1..LANE_MAJOR_WARPS {
+        let partial = format!("lane_partials[{warp}][lane]");
+        let combined = shuffle_combine_expr(resolved.node, reduce_op, "accumulator", &partial)?;
+        source.push_str(&format!("    accumulator = {combined};\n"));
+    }
+    source.push_str("    if (!in_range) { return; }\n");
+    Ok(())
+}
+
+fn push_shuffle_merge(
+    source: &mut String,
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    element_type: &str,
+    identity: &str,
+    block_reduce: bool,
+) -> Result<(), EmitError> {
+    source.push_str("    #pragma unroll\n");
+    source.push_str(&format!(
+        "    for (int shift = {}; shift > 0; shift >>= 1) {{\n",
+        WARP_SIZE / 2
+    ));
+    source.push_str(&format!(
+        "        {element_type} shuffled = __shfl_down_sync(0xffffffffu, accumulator, shift);\n"
+    ));
+    let shuffle_expr = shuffle_combine_expr(resolved.node, reduce_op, "accumulator", "shuffled")?;
+    source.push_str(&format!("        accumulator = {shuffle_expr};\n"));
+    source.push_str("    }\n");
+
+    if block_reduce {
+        source.push_str("    if (blockDim.x > 32u) {\n");
+        source.push_str(&format!(
+            "        __shared__ {element_type} warp_partials[32];\n"
+        ));
+        source.push_str("        if (lane == 0u) { warp_partials[tid >> 5u] = accumulator; }\n");
+        source.push_str("        __syncthreads();\n");
+        source.push_str(&format!(
+            "        accumulator = lane < (blockDim.x >> 5u) ? warp_partials[lane] : {identity};\n"
+        ));
+        source.push_str("        #pragma unroll\n");
+        source.push_str(&format!(
+            "        for (int shift = {}; shift > 0; shift >>= 1) {{\n",
+            WARP_SIZE / 2
+        ));
+        source.push_str(&format!(
+            "            {element_type} shuffled = __shfl_down_sync(0xffffffffu, accumulator, shift);\n"
+        ));
+        let second_expr =
+            shuffle_combine_expr(resolved.node, reduce_op, "accumulator", "shuffled")?;
+        source.push_str(&format!("            accumulator = {second_expr};\n"));
+        source.push_str("        }\n    }\n");
+    }
+    Ok(())
+}
+
 /// The warp-shuffle cooperative fold — the CUDA counterpart of
 /// `crate::msl::push_cooperative_reduce_body`'s non-tiled, non-row-blocked
 /// arm (this module has no port of either fast path; see the module doc).
@@ -2796,12 +2924,24 @@ fn push_cooperative_reduce_body(
         .collect();
 
     let block_reduce = is_broadcast_epilogue && !packed_chunked;
-    let (leader, lane_start, lane_stride) = if block_reduce {
+    let lane_major = lane_major_reduce(resolved, quantized);
+    let (leader, lane_start, lane_stride) = if lane_major {
+        ("fold_warp == 0u", "(long)fold_warp", format!("{LANE_MAJOR_WARPS}"))
+    } else if block_reduce {
         ("tid == 0u", "(long)tid", "(long)blockDim.x".to_string())
     } else {
         ("lane == 0u", "(long)lane", WARP_SIZE.to_string())
     };
-    if block_reduce {
+    if lane_major {
+        source.push_str("    unsigned int tid = threadIdx.x;\n");
+        source.push_str("    unsigned int lane = tid & 31u;\n");
+        source.push_str("    unsigned int fold_warp = tid >> 5u;\n");
+        source.push_str(&format!(
+            "    long output_index = (long)blockIdx.x * {WARP_SIZE}L + (long)lane;\n"
+        ));
+        source.push_str("    bool in_range = output_index < u.output_total;\n");
+        source.push_str("    if (!in_range) { output_index = 0; }\n");
+    } else if block_reduce {
         source.push_str("    long output_index = (long)blockIdx.x;\n");
         source.push_str("    if (output_index >= u.output_total) { return; }\n");
         source.push_str("    unsigned int tid = threadIdx.x;\n");
@@ -2894,10 +3034,12 @@ fn push_cooperative_reduce_body(
         && index32_reach_fits(resolved.extents[reduce_dims[0] as usize]);
     if !lean || guarded {
         if unit_fold {
-            let (fold_start, fold_step) = if block_reduce {
-                ("tid", "blockDim.x")
+            let (fold_start, fold_step) = if lane_major {
+                ("fold_warp", format!("{LANE_MAJOR_WARPS}u"))
+            } else if block_reduce {
+                ("tid", "blockDim.x".to_string())
             } else {
-                ("lane", "32u")
+                ("lane", "32u".to_string())
             };
             push_unit_stride_fold_header(
                 source,
@@ -2905,7 +3047,7 @@ fn push_cooperative_reduce_body(
                 output_axes,
                 reduce_dims[0],
                 fold_start,
-                fold_step,
+                &fold_step,
             );
         } else if packed_chunked {
             source.push_str(&format!(
@@ -3017,48 +3159,20 @@ fn push_cooperative_reduce_body(
         }
     }
 
-    source.push_str("    #pragma unroll\n");
-    source.push_str(&format!(
-        "    for (int shift = {}; shift > 0; shift >>= 1) {{\n",
-        WARP_SIZE / 2
-    ));
-    source.push_str(&format!(
-        "        {element_type} shuffled = __shfl_down_sync(0xffffffffu, accumulator, shift);\n"
-    ));
-    let shuffle_expr = shuffle_combine_expr(resolved.node, reduce_op, "accumulator", "shuffled")?;
-    source.push_str(&format!("        accumulator = {shuffle_expr};\n"));
-    source.push_str("    }\n");
-
-    if block_reduce {
-        source.push_str("    if (blockDim.x > 32u) {\n");
-        source.push_str(&format!(
-            "        __shared__ {element_type} warp_partials[32];\n"
-        ));
-        source.push_str("        if (lane == 0u) { warp_partials[tid >> 5u] = accumulator; }\n");
-        source.push_str("        __syncthreads();\n");
-        source.push_str(&format!(
-            "        accumulator = lane < (blockDim.x >> 5u) ? warp_partials[lane] : {identity};\n"
-        ));
-        source.push_str("        #pragma unroll\n");
-        source.push_str(&format!(
-            "        for (int shift = {}; shift > 0; shift >>= 1) {{\n",
-            WARP_SIZE / 2
-        ));
-        source.push_str(&format!(
-            "            {element_type} shuffled = __shfl_down_sync(0xffffffffu, accumulator, shift);\n"
-        ));
-        let second_expr =
-            shuffle_combine_expr(resolved.node, reduce_op, "accumulator", "shuffled")?;
-        source.push_str(&format!("            accumulator = {second_expr};\n"));
-        source.push_str("        }\n    }\n");
+    if lane_major {
+        push_lane_major_merge(source, resolved, reduce_op, element_type)?;
+    } else {
+        push_shuffle_merge(source, resolved, reduce_op, element_type, identity, block_reduce)?;
     }
 
     if is_broadcast_epilogue {
-        // Every lane participates in the broadcast write below. The
-        // down-shuffle tree leaves the complete reduction only in lane 0;
-        // without this broadcast, lanes 1..31 reuse their partial sums as
-        // if they were the norm, corrupting every other output coordinate.
-        source.push_str("    accumulator = __shfl_sync(0xffffffffu, accumulator, 0);\n");
+        if !lane_major {
+            // Every lane participates in the broadcast write below. The
+            // down-shuffle tree leaves the complete reduction only in lane 0;
+            // without this broadcast, lanes 1..31 reuse their partial sums as
+            // if they were the norm, corrupting every other output coordinate.
+            source.push_str("    accumulator = __shfl_sync(0xffffffffu, accumulator, 0);\n");
+        }
         // Recreate the non-reduction coordinate after the fold, whose loop
         // leaves `full_coord` holding its last reduction coordinate. Each
         // lane then owns a strided share of the full output row.
@@ -3090,7 +3204,19 @@ fn push_cooperative_reduce_body(
             source.push_str(&hoisted.before_loop);
         }
         if let (true, Some(hoisted)) = (unit_epilogue, &hoisted) {
-            push_unit_stride_broadcast_loop(source, hoisted, output_axes, reduce_dims[0]);
+            let (start, step) = if lane_major {
+                ("fold_warp", format!("{LANE_MAJOR_WARPS}u"))
+            } else {
+                ("tid", "blockDim.x".to_string())
+            };
+            push_unit_stride_broadcast_loop(
+                source,
+                hoisted,
+                output_axes,
+                reduce_dims[0],
+                start,
+                &step,
+            );
             return Ok(());
         }
         source.push_str(&format!(
