@@ -45,7 +45,7 @@ use crate::serving::{GdnPrefillBackend, ServingConfig};
 
 /// `(new_count, kv_bound_extent, outputs, epilogue_sources)` -- the key
 /// [`BackendRuntime::resolve_cached_plan`] already uses for placed plans.
-pub(super) type DecodePlanKey = (usize, usize, Vec<NodeId>, bool, u64);
+pub(super) type DecodePlanKey = (usize, usize, Vec<NodeId>, bool);
 
 /// The plans one runtime holds for a set of shapes, keyed by [`DecodePlanKey`].
 pub(super) type DecodePlans = BTreeMap<DecodePlanKey, Plan>;

@@ -22,6 +22,16 @@ use proxima_telemetry::metric::Counter;
 #[cfg(feature = "gpu")]
 const KV_CACHE_INPUT_PREFIX: &str = "kv_cache.";
 
+/// Whether two plan keys differ at most in the KV length: same new-token count,
+/// outputs, epilogue sources and program.
+#[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
+fn same_program_width(
+    left: &(usize, usize, Vec<NodeId>, bool, u64),
+    right: &(usize, usize, Vec<NodeId>, bool, u64),
+) -> bool {
+    left.0 == right.0 && left.2 == right.2 && left.3 == right.3 && left.4 == right.4
+}
+
 /// One CUDA graph to evaluate: the program, its shape symbols, its named
 /// inputs, and its requested outputs. Grouped so `evaluate_async` stays within
 /// the argument limit while every caller still names each piece.
@@ -97,8 +107,7 @@ mod configured_runtime_tests {
         let mut runtime = BackendRuntime::new(&config);
         let first = runtime
             .evaluate(
-                &program,
-                0,
+                (&program, 0),
                 &[1, 1],
                 &[("values", QuantizedBlock::Float32(&[3.0, -4.0]))],
                 &[NodeId(1)],
@@ -109,8 +118,7 @@ mod configured_runtime_tests {
         assert_eq!(first.get(NodeId(1)).expect("output").0, &[-3.0, 4.0]);
         let second = runtime
             .evaluate(
-                &program,
-                0,
+                (&program, 0),
                 &[1, 1],
                 &[("values", QuantizedBlock::Float32(&[5.0, -6.0]))],
                 &[NodeId(1)],
@@ -129,8 +137,7 @@ mod configured_runtime_tests {
         });
         let error = refused
             .evaluate(
-                &program,
-                0,
+                (&program, 0),
                 &[1, 1],
                 &[("values", QuantizedBlock::Float32(&[3.0, -4.0]))],
                 &[NodeId(1)],
@@ -194,8 +201,7 @@ mod configured_runtime_tests {
         let mut evaluate = |program: &[Op]| {
             let evaluated = runtime
                 .evaluate(
-                    program,
-                    crate::generate::program_hash(program),
+                    (program, crate::generate::program_hash(program)),
                     &[1, 1],
                     &values,
                     &[NodeId(1)],
@@ -222,8 +228,7 @@ mod configured_runtime_tests {
             let program = elementwise_program(body);
             let evaluated = runtime
                 .evaluate(
-                    &program,
-                    crate::generate::program_hash(&program),
+                    (&program, crate::generate::program_hash(&program)),
                     &[1, 1],
                     &values,
                     &[NodeId(1)],
@@ -3218,12 +3223,9 @@ impl BackendRuntime {
     // A modified expert table crosses the same backend boundary on every
     // engine. CPU consumes it; a GPU without expert-source bindings returns
     // a typed error instead of silently reading the original full stack.
-    // clippy::too_many_arguments: the program hash travels beside the program it identifies
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn evaluate(
         &mut self,
-        program: &[Op],
-        program_hash: u64,
+        (program, program_hash): (&[Op], u64),
         symbols: &[u64],
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
@@ -3265,7 +3267,7 @@ impl BackendRuntime {
         };
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let near_plan = if self.plan_refit {
-            Self::take_near_plan(&mut self.plans, &shape, |_, _| true)
+            Self::take_near_plan(&mut self.plans, &shape, same_program_width)
         } else {
             None
         };
@@ -4113,7 +4115,9 @@ impl BackendRuntime {
             &mut self.placed_plans
         };
         let near_plan = if self.plan_refit {
-            Self::take_near_plan(cache, &shape, |_, _| true)
+            Self::take_near_plan(cache, &shape, |key, wanted| {
+                key.0 == wanted.0 && key.2 == wanted.2 && key.3 == wanted.3
+            })
         } else {
             None
         };
@@ -4618,20 +4622,15 @@ impl BackendRuntime {
     /// makes a bucket crossing cheaper than a plan build when only the
     /// attention key range moved.
     #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
-    pub(super) fn take_near_plan<PlanType>(
-        cache: &mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool, u64), PlanType>,
-        shape: &(usize, usize, Vec<NodeId>, bool, u64),
-        compatible: impl Fn(&(usize, usize, Vec<NodeId>, bool, u64), &(usize, usize, Vec<NodeId>, bool, u64)) -> bool,
+    pub(super) fn take_near_plan<Key: Ord + Clone, PlanType>(
+        cache: &mut alloc::collections::BTreeMap<Key, PlanType>,
+        shape: &Key,
+        compatible: impl Fn(&Key, &Key) -> bool,
     ) -> Option<PlanType> {
         if cache.contains_key(shape) {
             return None;
         }
-        let near = cache
-            .keys()
-            .find(|key| {
-                key.0 == shape.0 && key.2 == shape.2 && key.3 == shape.3 && key.4 == shape.4 && compatible(key, shape)
-            })
-            .cloned()?;
+        let near = cache.keys().find(|key| compatible(key, shape)).cloned()?;
         cache.remove(&near)
     }
 
@@ -4646,7 +4645,9 @@ impl BackendRuntime {
         symbols: &[u64],
         numeric_policy: proxima_tensor::NumericPolicy,
     ) -> Result<(), InteropError> {
-        let Some(mut near) = Self::take_near_plan(cache, shape, same_width_class) else {
+        let Some(mut near) = Self::take_near_plan(cache, shape, |key, wanted| {
+            same_program_width(key, wanted) && same_width_class(key, wanted)
+        }) else {
             debug!(
                 new_count = shape.0 as u64,
                 kv_bound_extent = shape.1 as u64,
@@ -5116,12 +5117,9 @@ impl BackendRuntime {
     /// device buffer to cache, so there is nothing to mark resident. Carried
     /// anyway so both `BackendRuntime::evaluate` impls share one signature
     /// and the decode loop's call site never needs a `cfg` of its own.
-    // clippy::too_many_arguments: the program hash travels beside the program it identifies
-    #[allow(clippy::too_many_arguments)]
     pub(super) fn evaluate(
         &mut self,
-        program: &[Op],
-        _program_hash: u64,
+        (program, _program_hash): (&[Op], u64),
         symbols: &[u64],
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
@@ -5171,8 +5169,7 @@ impl BackendRuntime {
         >,
     ) -> Result<Evaluated, InteropError> {
         self.evaluate(
-            program,
-            0,
+            (program, 0),
             symbols,
             named,
             outputs,
@@ -5275,8 +5272,7 @@ mod omega_async_serving_tests {
         let mut sync_runtime = BackendRuntime::new(&cpu_serving);
         let sync_result = sync_runtime
             .evaluate(
-                &graph,
-                0,
+                (&graph, 0),
                 &[2, 1],
                 &named,
                 &[NodeId(1)],
@@ -5339,8 +5335,7 @@ mod omega_async_serving_tests {
             let mut sync_runtime = BackendRuntime::new(&cpu_serving);
             let sync_result = sync_runtime
                 .evaluate(
-                    &graph,
-                    0,
+                    (&graph, 0),
                     &[2, 1],
                     &named,
                     &[NodeId(1)],

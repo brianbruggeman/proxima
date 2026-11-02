@@ -71,8 +71,7 @@ impl DecodeStepEvaluator for SyncDecodeStepEvaluator {
         step: DecodeStepEvaluation<'_, '_, '_>,
     ) -> Result<Evaluated, InteropError> {
         runtime.evaluate(
-            step.program,
-            step.program_hash,
+            (step.program, step.program_hash),
             step.symbols,
             step.named,
             step.outputs,
@@ -5766,8 +5765,7 @@ did not hold every cached position)",
                             unreachable!("the profiler is compiled out without instrumentation")
                         } else if let Some(sources) = expert_source_substitutions {
                             Some(runtime.evaluate(
-                                active_program,
-                                active_program_hash,
+                                (active_program, active_program_hash),
                                 &symbols,
                                 &named_blocks,
                                 &roots,
@@ -5825,8 +5823,7 @@ did not hold every cached position)",
                             )?)
                         } else if let Some(sources) = expert_source_substitutions {
                             Some(runtime.evaluate(
-                                active_program,
-                                active_program_hash,
+                                (active_program, active_program_hash),
                                 &symbols,
                                 &named_blocks,
                                 &roots,
@@ -8380,8 +8377,7 @@ did not hold every cached position)",
             )?
         } else {
             runtime.evaluate(
-                &self.program,
-                self.program_hash,
+                (&self.program, self.program_hash),
                 &symbols,
                 &named_blocks,
                 node_ids,
