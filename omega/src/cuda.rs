@@ -80,7 +80,11 @@ mod block_dot;
 mod radix_dot;
 mod mma_gemm;
 mod row_tile;
+mod split_attention;
 mod staged_matvec;
+use split_attention::{
+    render_combine, split_chunks, split_pass, split_scratch_len, split_scratch_node,
+};
 use mma_gemm::{GEMM_THREADS, MMA_GEMM_HELPERS, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body};
 use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
 use staged_matvec::{
@@ -245,8 +249,9 @@ pub fn emit_cuda_on_device(
 ) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
+    let attention_chunks = split_chunks(&resolved.kind, device);
     let entry = match cuda_cached_attention_class(&resolved.kind) {
-        Some(class) => cached_attention_entry_name(resolved, class)?,
+        Some(class) => cached_attention_entry_name(resolved, class, attention_chunks)?,
         None => entry_name(resolved, packed_operands, &quantized, numeric_policy, device),
     };
     let source = match &resolved.kind {
@@ -265,7 +270,10 @@ pub fn emit_cuda_on_device(
                 kind: "cached_attention_packed_operand",
             });
         }
-        BoundOpKind::CachedAttention { .. } => render_cached_attention_cuda(resolved, &entry)?,
+        BoundOpKind::CachedAttention { .. } => match attention_chunks {
+            Some(chunks) => render_combine(resolved, &entry, chunks)?,
+            None => render_cached_attention_cuda(resolved, &entry)?,
+        },
         BoundOpKind::GatedDeltaNet { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
@@ -299,8 +307,9 @@ pub fn emit_cuda_on_device(
         }
     };
     let (grid, extra_outputs) = extent_fields(resolved, &quantized, numeric_policy, device)?;
-    let prologue = match staged_matvec_plan(resolved, &quantized, numeric_policy, device) {
-        Some(plan) if plan.scratch => vec![staged_prepass(resolved, &plan, &entry, &source)?],
+    let prologue = match (staged_matvec_plan(resolved, &quantized, numeric_policy, device), attention_chunks) {
+        (Some(plan), _) if plan.scratch => vec![staged_prepass(resolved, &plan, &entry, &source)?],
+        (_, Some(chunks)) => vec![split_pass(resolved, &entry, chunks)?],
         _ => Vec::new(),
     };
     Ok(CudaKernel {
@@ -363,6 +372,12 @@ fn extent_fields(
         .moe_topk_extra_outputs(resolved.extents.iter().product::<u64>() as usize);
     if let Some(plan) = staged.filter(|plan| plan.scratch) {
         extra_outputs.push((staged_scratch_node(resolved.node), staged_scratch_len(plan.reduction)));
+    }
+    if let Some(chunks) = split_chunks(&resolved.kind, device) {
+        extra_outputs.push((
+            split_scratch_node(resolved.node),
+            split_scratch_len(&resolved.kind, chunks),
+        ));
     }
     Ok((grid, extra_outputs))
 }

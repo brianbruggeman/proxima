@@ -4117,6 +4117,157 @@ async fn cuda_cached_attention_matches_f64_oracle_with_causal_mask(
     assert!(worst < 1e-4, "rows={rows}: worst abs error {worst} vs f64 oracle");
 }
 
+fn decode_attention_kind(
+    cached: u64,
+    heads: u64,
+    groups: u64,
+    head_dim: u64,
+) -> proxima_tensor::BoundOpKind {
+    let proxima_tensor::BoundOpKind::CachedAttention {
+        cached_lower_inclusive,
+        new_upper_inclusive,
+        scale,
+        rotary_dim,
+        ..
+    } = causal_attention_kind(1, heads, groups, head_dim)
+    else {
+        unreachable!("causal_attention_kind builds a CachedAttention kind");
+    };
+    proxima_tensor::BoundOpKind::CachedAttention {
+        operands: (0..9)
+            .map(|index| {
+                (
+                    NodeId(index),
+                    proxima_tensor::Layout { base: 0, strides: vec![1_i64].into() },
+                    None,
+                )
+            })
+            .collect(),
+        query_rows: 1,
+        cached_key_rows: cached,
+        new_key_rows: 1,
+        kv_heads: heads,
+        query_groups: groups,
+        head_dim,
+        rotary_dim,
+        scale,
+        cached_lower_inclusive,
+        new_upper_inclusive,
+    }
+}
+
+fn decode_attention_oracle(
+    cached: usize,
+    heads: usize,
+    groups: usize,
+    head_dim: usize,
+    planes: &[Vec<f32>; 7],
+) -> Vec<f64> {
+    let pair = head_dim / 2;
+    let [query_low, query_high, cached_low, cached_high, new_low, new_high, cached_values] = planes;
+    let scale = 1.0 / (head_dim as f64).sqrt();
+    let mut out = vec![0.0; heads * groups * head_dim];
+    for head in 0..heads * groups {
+        let kv = head / groups;
+        let score = |key: usize| -> f64 {
+            (0..pair)
+                .map(|d| {
+                    let q = head * pair + d;
+                    let (low, high) = if key < cached {
+                        (cached_low[key * heads * pair + kv * pair + d], cached_high[key * heads * pair + kv * pair + d])
+                    } else {
+                        (new_low[kv * pair + d], new_high[kv * pair + d])
+                    };
+                    f64::from(query_low[q]) * f64::from(low) + f64::from(query_high[q]) * f64::from(high)
+                })
+                .sum::<f64>()
+                * scale
+        };
+        let scores: Vec<f64> = (0..=cached).map(score).collect();
+        let peak = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let weights: Vec<f64> = scores.iter().map(|value| (value - peak).exp()).collect();
+        let total: f64 = weights.iter().sum();
+        for d in 0..head_dim {
+            let mixed: f64 = weights
+                .iter()
+                .enumerate()
+                .map(|(key, weight)| {
+                    let value = if key < cached {
+                        cached_values[key * heads * head_dim + kv * head_dim + d]
+                    } else {
+                        cached_values[cached * heads * head_dim + kv * head_dim + d]
+                    };
+                    weight * f64::from(value)
+                })
+                .sum();
+            out[head * head_dim + d] = mixed / total;
+        }
+    }
+    out
+}
+
+#[proxima::test]
+#[case::decode_cached_1(1)]
+#[case::decode_cached_37(37)]
+#[case::decode_cached_512(512)]
+#[case::decode_cached_2048(2048)]
+async fn cuda_split_decode_attention_matches_f64_oracle(#[case] cached: usize) {
+    let (heads, groups, head_dim) = (8_usize, 2_usize, 128_usize);
+    let pair = head_dim / 2;
+    let query_heads = heads * groups;
+    let cached_values_len = (cached + 1) * heads * head_dim;
+    let planes = [
+        random_vec(21, query_heads * pair),
+        random_vec(22, query_heads * pair),
+        random_vec(23, cached * heads * pair),
+        random_vec(24, cached * heads * pair),
+        random_vec(25, heads * pair),
+        random_vec(26, heads * pair),
+        random_vec(27, cached_values_len),
+    ];
+    let op = proxima_tensor::BoundOp {
+        node: NodeId(20),
+        dtype: DType::FLOAT32,
+        extents: vec![1, heads as u64, groups as u64, head_dim as u64],
+        kind: decode_attention_kind(cached as u64, heads as u64, groups as u64, head_dim as u64),
+    };
+    let packed = std::collections::BTreeMap::new();
+    let device = omega::EmitDevice { multiprocessors: 36 };
+    let kernel = omega::emit_cuda_on_device(&op, &packed, NumericPolicy::default(), device)
+        .expect("decode attention emits for a known device");
+    let unsplit = omega::emit_cuda(&op, &packed).expect("decode attention emits for an unknown device");
+    assert_eq!(kernel.prologue.len(), 1, "a known device splits the key range");
+    assert!(unsplit.prologue.is_empty(), "an unknown device keeps one block per vector");
+    let driver = omega::CudaDriver::new(0).expect("a real cuda device");
+    let mut arena = driver.new_arena();
+    let new_value = &planes[6][cached * heads * head_dim..];
+    let bound = [cached as f32];
+    let dummy = [0.0_f32];
+    let order: [&[f32]; 9] = [
+        &planes[0], &planes[1], &planes[2], &planes[3], &planes[4], &planes[5],
+        &planes[6][..cached.max(1) * heads * head_dim], new_value, &bound,
+    ];
+    for (index, values) in order.iter().enumerate() {
+        let values = if values.is_empty() { &dummy[..] } else { values };
+        driver.upload_f32(&mut arena, NodeId(index as u32), values).expect("input uploads");
+    }
+    let vectors = query_heads as i64;
+    driver
+        .launch_f32_persistent_sized(&mut arena, &kernel, &vectors.to_ne_bytes(), query_heads * head_dim)
+        .expect("split attention launches");
+    let actual = driver.read_f32(&arena, NodeId(20)).expect("output reads back");
+
+    let expected = decode_attention_oracle(cached, heads, groups, head_dim, &planes);
+    let worst = actual
+        .iter()
+        .zip(&expected)
+        .map(|(got, want)| (f64::from(*got) - want).abs())
+        .fold(0.0, f64::max);
+    eprintln!("split decode attention cached={cached} worst_abs={worst}");
+    assert_eq!(actual.len(), expected.len());
+    assert!(worst < 1e-4, "cached={cached}: worst abs error {worst} vs f64 oracle");
+}
+
 const POLICY_PREFILL_TOKENS: usize = 512;
 const POLICY_PREFILL_FEATURES: usize = 1024;
 const POLICY_PREFILL_DEPTH: usize = 1024;
