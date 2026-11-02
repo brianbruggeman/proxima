@@ -1,50 +1,54 @@
-//! End-to-end pipeline comparison, proxima against llama.cpp, one markdown table.
+//! End-to-end pipeline comparison, proxima against llama.cpp, apples to apples.
 //!
-//! Single command (CUDA, activation quantization under test):
+//! Single command (CUDA):
 //!
 //! ```text
 //! CARGO_TARGET_DIR=/mnt/data3/cargo-target-cuda-spec \
 //! LD_LIBRARY_PATH=/home/bix/proxima-cuda-runtime/lib \
 //! PROXIMA_CUDA_INCLUDE_PATH=/home/bix/proxima-cuda-runtime/include \
 //! cargo run -p proxima-model-interop --features cuda --example pipeline_bench -- \
-//!     /home/bix/models/qwen3-0.6b-q8_0.gguf "The capital of France is" 8
+//!     /home/bix/models/qwen3-0.6b-q8_0.gguf "The capital of France is" 8 [repeats]
 //! ```
 //!
-//! Usage: `pipeline_bench <model.gguf> [prompt] [tokens]`. The binary runs itself
-//! as the proxima child (`PIPELINE_BENCH_CHILD=1`) and `llama-simple` as the llama
-//! child, each under `/usr/bin/time -v` (peak host RSS) with an `nvidia-smi
+//! Usage: `pipeline_bench <model.gguf> [prompt] [tokens] [repeats]` (repeats
+//! default 3). The binary re-runs itself as the proxima child
+//! (`PIPELINE_BENCH_CHILD=1`) and runs `llama-completion` and `llama-tokenize`
+//! from `PIPELINE_BENCH_LLAMA_DIR` (library path `PIPELINE_BENCH_LLAMA_LD`),
+//! each child under `/usr/bin/time -v` (peak host RSS) with an `nvidia-smi
 //! --query-compute-apps` sampler at 100 ms filtered to the child's process tree
-//! (peak VRAM). Both engines get the same file, prompt, token count, greedy
-//! sampling and all layers offloaded. A llama child that exits non-zero prints as
-//! `unsupported format` (PQ2_0 / PTQ1_0 checkpoints).
+//! (peak VRAM).
 //!
-//! `DECODE_COMPARE_ACTIVATION_QUANTIZATION` is the setting under test: the
-//! orchestrator defaults it to `1` for the proxima child, `0` turns it off, and
-//! the value is printed in the notes. `PIPELINE_BENCH_LLAMA_DIR` and
-//! `PIPELINE_BENCH_LLAMA_LD` override the llama binary directory and its
-//! `LD_LIBRARY_PATH`.
+//! Rows: proxima with activation quantization on, proxima with it off, llama
+//! with f32 KV (matches proxima's `kv_cache_key_quant`/`kv_cache_value_quant`
+//! default) and llama with its default f16 KV. Every row reads the same gguf
+//! file, so a format llama cannot load shows `unsupported format` on its rows
+//! and is never substituted. The prompt ids come from both tokenizers and are
+//! compared before any row is marked comparable; generated ids are compared as
+//! leading-id matches (llama's text is re-tokenized with `llama-tokenize
+//! --no-bos`, since llama-completion prints no ids). llama gets the same
+//! context (`-c`), `-b/-ub`, `-ngl 99`, `-fa` as proxima's `ServingConfig`,
+//! printed in the settings table together with `PROXIMA_CUDA_KERNEL_CACHE_DIR`
+//! state, GPU compute-app count and load average before and after each row.
 //!
-//! Proxima child stdout carries one line per stage,
-//! `pipeline engine=proxima stage=<name> ms=...`:
-//! - `load`: open + mmap + gguf parse + vocab + `LoadedModel::load`.
-//! - `device_warmup`: a 2-token `generate_streaming` with the prompt cache off,
-//!   which is what makes weights resident on the device and compiles kernels;
-//!   the table's `load_ms` is `load + device_warmup`.
-//! - `tokenize`: `encode_with_bos_eos` on the prompt.
-//! - `ttft`: call start of the measured `generate_streaming` to the step-0 token
-//!   event; the library tokenizes and builds the runtime inside that call.
-//! - `prefill`: `ttft - tokenize`, derived because the library emits its prefill
-//!   event and the first token event at the same point.
-//! - `decode`: gaps between consecutive token events after the first.
-//! - `kv`: bytes computed from `kv_layers` at `kv_heads * head_dim * 8` per stored
-//!   position (the placed-KV formula in `memory_fit::kv_row_bytes`), at
-//!   prompt + generated positions, windowed layers capped at their window.
-//! - `total`: in-process wall from child start to generation end.
+//! Warm vs cold: the proxima child loads, runs one discarded 2-token generation
+//! (`device_warmup`: weights resident, kernels compiled, prompt cache off), then
+//! `repeats` measured generations in-process; llama runs `repeats` processes
+//! with its default empty warmup decode and reports each run's own `load time`.
+//! `load_ms` for proxima is `load + device_warmup`. Cells read
+//! `median [min-max]`.
 //!
-//! Llama columns come from `llama_perf_context_print`: `load time`, `prompt eval
-//! time` (prefill and ttft), `eval time` (decode mean; llama-simple exposes no
-//! per-token times), `total time` + load (total), and the `KV buffer size` log
-//! lines (kv). llama-simple does not time tokenization, so that cell is `n/a`.
+//! Proxima child stdout carries `pipeline engine=proxima stage=<name> ...`:
+//! `load`, `device_warmup`, `config`, `run idx=<i>` (tokenize, ttft, prefill,
+//! decode, total), `kv`. `ttft` is call start to step-0 token event (the
+//! library tokenizes and builds the runtime inside the call); `prefill` is
+//! `ttft - tokenize`, derived because the library fires its prefill event and
+//! the first token event together; `decode` is the gap between token events
+//! after the first. Llama columns come from `common_perf_print` (`load time`,
+//! `prompt eval time` for prefill and ttft, `eval time` mean for decode,
+//! `load + total time` for total). llama-completion does not time tokenization
+//! (`n/a`) and logs no KV size, so `kv_mib` for llama rows is computed from the
+//! checkpoint's `kv_layers` at `-c` positions and the row's KV byte width, and
+//! for proxima at prompt + generated positions at 8 bytes per head-dim element.
 
 use std::collections::HashMap;
 use std::env;
@@ -59,23 +63,27 @@ use std::time::Instant;
 use memmap2::Mmap;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
-    GPU_LAYERS_ALL, InteropError, LoadedModel, Phase, PromptCacheConfig, ServingConfig, TokenEvent,
-    kv_layers,
+    ContextLength, GPU_LAYERS_ALL, InteropError, LoadedModel, Phase, PromptCacheConfig,
+    ServingConfig, TokenEvent, kv_layers,
 };
 use proxima_tokenizer::gguf::vocab_from_metadata;
 use proxima_tokenizer::{TokenizerError, Vocab, encode_with_bos_eos};
 
 const DEFAULT_PROMPT: &str = "The capital of France is";
 const DEFAULT_TOKENS: usize = 16;
+const DEFAULT_REPEATS: usize = 3;
+const MIN_CONTEXT: usize = 512;
+const BATCH: u32 = 512;
 const CHILD_ENV: &str = "PIPELINE_BENCH_CHILD";
 const QUANTIZATION_ENV: &str = "DECODE_COMPARE_ACTIVATION_QUANTIZATION";
+const KERNEL_CACHE_ENV: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
 const DEFAULT_LLAMA_DIR: &str = "/home/bix/repos/llama.cpp-incumbent/build/bin";
 const DEFAULT_LLAMA_LD: &str =
     "/usr/local/lib/ollama.stale-0.5.7.bak:/home/bix/repos/llama.cpp-incumbent/build/bin";
 const WARMUP_TOKENS: usize = 2;
 const MIB: f64 = 1024.0 * 1024.0;
-const HEADER: [&str; 14] = [
-    "engine",
+const HEADER: [&str; 13] = [
+    "row",
     "load_ms",
     "tokenize_ms",
     "prompt_tokens",
@@ -85,15 +93,27 @@ const HEADER: [&str; 14] = [
     "decode_ms/tok(mean)",
     "decode_tok/s",
     "total_ms",
-    "wall_ms",
     "kv_mib",
     "peak_host_rss_mb",
     "peak_vram_mb",
 ];
+const SETTINGS_HEADER: [&str; 11] = [
+    "row",
+    "kv_precision",
+    "ctx",
+    "flash_attn",
+    "ngl",
+    "batch/ubatch",
+    "act_quant",
+    "gpu_apps_before",
+    "loadavg_start",
+    "loadavg_end",
+    "generated(n/leading_match)",
+];
 
 #[derive(Debug, thiserror::Error)]
 enum BenchError {
-    #[error("usage: pipeline_bench <model.gguf> [prompt] [tokens]")]
+    #[error("usage: pipeline_bench <model.gguf> [prompt] [tokens] [repeats]")]
     Usage,
     #[error("{path}: {source}")]
     Io {
@@ -106,21 +126,22 @@ enum BenchError {
     Interop(#[from] InteropError),
     #[error("tokenizer: {0}")]
     Tokenizer(#[from] TokenizerError),
-    #[error("token count {0:?} is not a number")]
+    #[error("{0:?} is not a number")]
     BadCount(String),
     #[error("generation produced no token events")]
     NoTokens,
     #[error("vram sampler thread panicked")]
     Sampler,
+    #[error("{what}: unparseable output {text:?}")]
+    Parse { what: &'static str, text: String },
 }
 
-type Stages = HashMap<String, HashMap<String, String>>;
+type Samples = HashMap<&'static str, Vec<f64>>;
 
 struct Measured {
     stdout: String,
     stderr: String,
     success: bool,
-    wall_ms: f64,
     peak_rss_mb: Option<f64>,
     peak_vram_mb: u64,
 }
@@ -128,6 +149,26 @@ struct Measured {
 struct VramSampler {
     process: Child,
     reader: JoinHandle<u64>,
+}
+
+#[derive(Clone, Copy)]
+struct RunArgs<'run> {
+    path: &'run str,
+    prompt: &'run str,
+    tokens: usize,
+    repeats: usize,
+    context: usize,
+}
+
+struct RowResult {
+    label: String,
+    kv_precision: String,
+    samples: Samples,
+    ids_note: String,
+    gpu_apps_before: usize,
+    loadavg_start: String,
+    loadavg_end: String,
+    supported: bool,
 }
 
 fn io_error(path: &str) -> impl Fn(std::io::Error) -> BenchError + '_ {
@@ -145,10 +186,13 @@ fn quantization_enabled() -> bool {
     env::var(QUANTIZATION_ENV).is_ok_and(|value| value != "0")
 }
 
-fn config() -> ServingConfig<'static> {
+fn config(context: usize) -> ServingConfig<'static> {
     let defaults = ServingConfig::default();
     ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
+        context_length: ContextLength::Within(u32::try_from(context).unwrap_or(u32::MAX)),
+        batch_size: BATCH,
+        ubatch_size: BATCH,
         numeric_policy: defaults
             .numeric_policy
             .with_activation_quantization(quantization_enabled()),
@@ -179,12 +223,12 @@ fn emit(stage: &str, fields: &str) {
     println!("pipeline engine=proxima stage={stage} {fields}");
 }
 
-fn kv_bytes(layers: &[(u32, u32, Option<u32>)], positions: u64) -> u64 {
+fn kv_bytes(layers: &[(u32, u32, Option<u32>)], positions: u64, element_bytes: u64) -> u64 {
     layers
         .iter()
         .map(|&(kv_heads, head_dim, window)| {
             let rows = window.map_or(positions, |rows| positions.min(u64::from(rows)));
-            u64::from(kv_heads) * u64::from(head_dim) * 8 * rows
+            u64::from(kv_heads) * u64::from(head_dim) * 2 * element_bytes * rows
         })
         .sum()
 }
@@ -195,7 +239,12 @@ struct Generation {
     text: String,
 }
 
-fn generate(model: &LoadedModel, prompt: &str, tokens: usize) -> Result<Generation, BenchError> {
+fn generate(
+    model: &LoadedModel,
+    prompt: &str,
+    tokens: usize,
+    context: usize,
+) -> Result<Generation, BenchError> {
     let mut token_ms = Vec::new();
     let started = Instant::now();
     let mut on_token = |event: TokenEvent<'_>| {
@@ -205,7 +254,7 @@ fn generate(model: &LoadedModel, prompt: &str, tokens: usize) -> Result<Generati
         ControlFlow::Continue(())
     };
     let (ids, text, _stopped) =
-        model.generate_streaming(prompt, tokens, config(), &mut on_token)?;
+        model.generate_streaming(prompt, tokens, config(context), &mut on_token)?;
     Ok(Generation {
         token_ms,
         ids,
@@ -213,41 +262,40 @@ fn generate(model: &LoadedModel, prompt: &str, tokens: usize) -> Result<Generati
     })
 }
 
-fn report_generation(
+fn report_run(
+    index: usize,
     generation: &Generation,
     tokenize_ms: f64,
     prompt_tokens: usize,
+    setup_ms: f64,
 ) -> Result<(), BenchError> {
     let ttft = *generation.token_ms.first().ok_or(BenchError::NoTokens)?;
+    let last = *generation.token_ms.last().ok_or(BenchError::NoTokens)?;
     let prefill = (ttft - tokenize_ms).max(f64::EPSILON);
     let steps: Vec<f64> = generation
         .token_ms
         .windows(2)
         .map(|pair| pair[1] - pair[0])
         .collect();
-    emit("ttft", &format!("ms={ttft:.3}"));
+    let decode_mean = mean(&steps).max(f64::EPSILON);
     emit(
-        "prefill",
+        "run",
         &format!(
-            "ms={prefill:.3} tok_s={:.3}",
-            prompt_tokens as f64 / prefill * 1000.0
-        ),
-    );
-    emit(
-        "decode",
-        &format!(
-            "ms_mean={:.3} ms_median={:.3} tok_s={:.3} steps={}",
-            mean(&steps),
+            "idx={index} tokenize_ms={tokenize_ms:.6} ttft_ms={ttft:.3} prefill_ms={prefill:.3} \
+             prefill_tps={:.3} decode_ms={decode_mean:.3} decode_median_ms={:.3} decode_tps={:.3} \
+             steps={} total_ms={:.3}",
+            prompt_tokens as f64 / prefill * 1000.0,
             median(&steps),
-            1000.0 / mean(&steps).max(f64::EPSILON),
-            steps.len()
+            1000.0 / decode_mean,
+            steps.len(),
+            setup_ms + tokenize_ms + last
         ),
     );
     Ok(())
 }
 
-fn run_child(path: &str, prompt: &str, tokens: usize) -> Result<(), BenchError> {
-    let process_started = Instant::now();
+fn run_child(args: &RunArgs<'_>) -> Result<(), BenchError> {
+    let path = args.path;
     let load_started = Instant::now();
     let file = File::open(path).map_err(io_error(path))?;
     // the checkpoint is not written while this process reads it
@@ -258,34 +306,59 @@ fn run_child(path: &str, prompt: &str, tokens: usize) -> Result<(), BenchError> 
     })?;
     let vocab = vocab_from_metadata(&parsed)?;
     let model = LoadedModel::load(&parsed, &mapping)?;
-    emit("load", &format!("ms={:.3}", millis(load_started)));
+    let load_ms = millis(load_started);
+    emit("load", &format!("ms={load_ms:.3}"));
     let warmup_started = Instant::now();
-    generate(&model, prompt, WARMUP_TOKENS)?;
+    generate(&model, args.prompt, WARMUP_TOKENS, args.context)?;
+    let warmup_ms = millis(warmup_started);
+    emit("device_warmup", &format!("ms={warmup_ms:.3}"));
+    let settings = config(args.context);
     emit(
-        "device_warmup",
-        &format!("ms={:.3}", millis(warmup_started)),
+        "config",
+        &format!(
+            "ctx={} kv_k={:?} kv_v={:?} flash_attention={} batch={} ubatch={} act_quant={}",
+            args.context,
+            settings.kv_cache_key_quant,
+            settings.kv_cache_value_quant,
+            settings.flash_attention,
+            settings.batch_size,
+            settings.ubatch_size,
+            u8::from(quantization_enabled())
+        ),
     );
-    let tokenize_started = Instant::now();
-    let ids = prompt_ids(&vocab, prompt)?;
-    let tokenize_ms = millis(tokenize_started);
-    emit(
-        "tokenize",
-        &format!("ms={tokenize_ms:.6} prompt_tokens={}", ids.len()),
-    );
-    let generation = generate(&model, prompt, tokens)?;
-    report_generation(&generation, tokenize_ms, ids.len())?;
-    let positions = (ids.len() + generation.ids.len()) as u64;
+    let mut last = None;
+    let mut prompt_token_ids = Vec::new();
+    for index in 0..args.repeats {
+        let tokenize_started = Instant::now();
+        prompt_token_ids = prompt_ids(&vocab, args.prompt)?;
+        let tokenize_ms = millis(tokenize_started);
+        let generation = generate(&model, args.prompt, args.tokens, args.context)?;
+        report_run(
+            index,
+            &generation,
+            tokenize_ms,
+            prompt_token_ids.len(),
+            load_ms + warmup_ms,
+        )?;
+        last = Some(generation);
+    }
+    let generation = last.ok_or(BenchError::NoTokens)?;
+    let layers = kv_layers(&parsed)?;
+    let positions = (prompt_token_ids.len() + generation.ids.len()) as u64;
     emit(
         "kv",
-        &format!("bytes={}", kv_bytes(&kv_layers(&parsed)?, positions)),
+        &format!(
+            "bytes={} llama_f32_ctx_bytes={} llama_f16_ctx_bytes={}",
+            kv_bytes(&layers, positions, 4),
+            kv_bytes(&layers, args.context as u64, 4),
+            kv_bytes(&layers, args.context as u64, 2)
+        ),
     );
-    emit("total", &format!("ms={:.3}", millis(process_started)));
     println!(
-        "output engine=proxima activation_quantization={} ids={:?} text={:?}",
-        u8::from(quantization_enabled()),
-        generation.ids,
-        generation.text
+        "output prompt_ids={prompt_token_ids:?} ids={:?}",
+        generation.ids
     );
+    println!("output text={:?}", generation.text);
     Ok(())
 }
 
@@ -350,6 +423,18 @@ fn finish_sampler(sampler: VramSampler) -> Result<u64, BenchError> {
     reader.join().map_err(|_| BenchError::Sampler)
 }
 
+fn gpu_app_count() -> usize {
+    Command::new("nvidia-smi")
+        .args(["--query-compute-apps=pid", "--format=csv,noheader"])
+        .output()
+        .map_or(0, |output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count()
+        })
+}
+
 fn peak_rss_mb(stderr: &str) -> Option<f64> {
     let line = stderr
         .lines()
@@ -363,7 +448,6 @@ fn measure(
     args: &[String],
     envs: &[(&str, String)],
 ) -> Result<Measured, BenchError> {
-    let started = Instant::now();
     let child = Command::new("/usr/bin/time")
         .arg("-v")
         .arg(program)
@@ -375,66 +459,99 @@ fn measure(
         .map_err(io_error(program))?;
     let sampler = start_sampler(child.id())?;
     let output = child.wait_with_output().map_err(io_error(program))?;
-    let wall_ms = millis(started);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     Ok(Measured {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         peak_rss_mb: peak_rss_mb(&stderr),
         stderr,
         success: output.status.success(),
-        wall_ms,
         peak_vram_mb: finish_sampler(sampler)?,
     })
 }
 
-fn parse_stages(stdout: &str) -> Stages {
-    let mut stages = Stages::new();
-    for line in stdout.lines().filter(|line| line.starts_with("pipeline ")) {
-        let fields: HashMap<String, String> = line
-            .split_whitespace()
-            .filter_map(|token| token.split_once('='))
-            .map(|(key, value)| (key.to_owned(), value.to_owned()))
-            .collect();
-        if let Some(stage) = fields.get("stage").cloned() {
-            stages.insert(stage, fields);
+fn parse_stage_lines(stdout: &str) -> Vec<HashMap<String, String>> {
+    stdout
+        .lines()
+        .filter(|line| line.starts_with("pipeline "))
+        .map(|line| {
+            line.split_whitespace()
+                .filter_map(|token| token.split_once('='))
+                .map(|(key, value)| (key.to_owned(), value.to_owned()))
+                .collect()
+        })
+        .collect()
+}
+
+fn stage_number(lines: &[HashMap<String, String>], stage: &str, key: &str) -> Option<f64> {
+    lines
+        .iter()
+        .find(|fields| fields.get("stage").is_some_and(|name| name == stage))?
+        .get(key)?
+        .parse()
+        .ok()
+}
+
+fn push(samples: &mut Samples, key: &'static str, value: Option<f64>) {
+    if let Some(number) = value {
+        samples.entry(key).or_default().push(number);
+    }
+}
+
+fn parse_id_list(text: &str) -> Option<Vec<u32>> {
+    let inner = text.trim().strip_prefix('[')?.strip_suffix(']')?;
+    inner
+        .split(',')
+        .filter(|part| !part.trim().is_empty())
+        .map(|part| part.trim().parse().ok())
+        .collect()
+}
+
+fn output_ids(stdout: &str, key: &str) -> Option<Vec<u32>> {
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("output prompt_ids="))?;
+    let start = line.find(&format!(" {key}="))? + key.len() + 2;
+    let rest = &line[start..];
+    parse_id_list(&rest[..=rest.find(']')?])
+}
+
+fn proxima_samples(measured: &Measured) -> Samples {
+    let lines = parse_stage_lines(&measured.stdout);
+    let mut samples = Samples::new();
+    let setup = stage_number(&lines, "load", "ms").zip(stage_number(&lines, "device_warmup", "ms"));
+    push(
+        &mut samples,
+        "load",
+        setup.map(|(open, warmup)| open + warmup),
+    );
+    for fields in lines
+        .iter()
+        .filter(|fields| fields.get("stage").is_some_and(|name| name == "run"))
+    {
+        for (key, field) in [
+            ("tokenize", "tokenize_ms"),
+            ("prefill", "prefill_ms"),
+            ("prefill_tps", "prefill_tps"),
+            ("ttft", "ttft_ms"),
+            ("decode", "decode_ms"),
+            ("decode_tps", "decode_tps"),
+            ("total", "total_ms"),
+        ] {
+            push(
+                &mut samples,
+                key,
+                fields.get(field).and_then(|text| text.parse().ok()),
+            );
         }
     }
-    stages
-}
-
-fn field(stages: &Stages, stage: &str, key: &str) -> Option<f64> {
-    stages.get(stage)?.get(key)?.parse().ok()
-}
-
-fn cell(value: Option<f64>, digits: usize) -> String {
-    value.map_or_else(|| "n/a".to_owned(), |number| format!("{number:.digits$}"))
-}
-
-fn proxima_row(measured: &Measured) -> Vec<String> {
-    let stages = parse_stages(&measured.stdout);
-    let load = field(&stages, "load", "ms").zip(field(&stages, "device_warmup", "ms"));
-    let kv_mib = field(&stages, "kv", "bytes").map(|bytes| bytes / MIB);
-    vec![
-        "proxima".to_owned(),
-        cell(load.map(|(open, warmup)| open + warmup), 1),
-        cell(field(&stages, "tokenize", "ms"), 4),
-        cell(field(&stages, "tokenize", "prompt_tokens"), 0),
-        cell(field(&stages, "prefill", "ms"), 2),
-        cell(field(&stages, "prefill", "tok_s"), 1),
-        cell(field(&stages, "ttft", "ms"), 2),
-        cell(field(&stages, "decode", "ms_mean"), 3),
-        cell(field(&stages, "decode", "tok_s"), 1),
-        cell(field(&stages, "total", "ms"), 1),
-        cell(Some(measured.wall_ms), 1),
-        cell(kv_mib, 2),
-        cell(measured.peak_rss_mb, 0),
-        cell(Some(measured.peak_vram_mb as f64), 0),
-    ]
+    push(&mut samples, "rss", measured.peak_rss_mb);
+    push(&mut samples, "vram", Some(measured.peak_vram_mb as f64));
+    samples
 }
 
 fn perf_line(stderr: &str, label: &str) -> Option<(f64, Option<f64>)> {
     stderr.lines().find_map(|line| {
-        let rest = line.split_once("llama_perf_context_print:")?.1.trim();
+        let rest = line.split_once("common_perf_print:")?.1.trim();
         let values = rest.strip_prefix(label)?.trim().strip_prefix('=')?;
         let mut tokens = values.split_whitespace();
         let time_ms: f64 = tokens.next()?.parse().ok()?;
@@ -446,60 +563,88 @@ fn perf_line(stderr: &str, label: &str) -> Option<(f64, Option<f64>)> {
     })
 }
 
-fn llama_kv_mib(stderr: &str) -> Option<f64> {
-    let sizes: Vec<f64> = stderr
-        .lines()
-        .filter_map(|line| {
-            line.split_once("KV buffer size =")?
-                .1
-                .split_whitespace()
-                .next()?
-                .parse()
-                .ok()
-        })
-        .collect();
-    (!sizes.is_empty()).then(|| sizes.iter().sum())
-}
-
-fn llama_row(measured: &Measured) -> Vec<String> {
+fn add_llama_run(samples: &mut Samples, measured: &Measured) {
     let stderr = &measured.stderr;
     let load = perf_line(stderr, "load time").map(|(time, _)| time);
     let prompt = perf_line(stderr, "prompt eval time");
     let decode = perf_line(stderr, "eval time");
     let total = perf_line(stderr, "total time").map(|(time, _)| time);
     let decode_mean = decode.and_then(|(time, runs)| runs.map(|count| time / count.max(1.0)));
+    push(samples, "load", load);
+    push(
+        samples,
+        "prompt_tokens",
+        prompt.and_then(|(_, count)| count),
+    );
+    push(samples, "prefill", prompt.map(|(time, _)| time));
+    push(
+        samples,
+        "prefill_tps",
+        prompt.and_then(|(time, count)| count.map(|tokens| tokens / time * 1000.0)),
+    );
+    push(samples, "ttft", prompt.map(|(time, _)| time));
+    push(samples, "decode", decode_mean);
+    push(
+        samples,
+        "decode_tps",
+        decode_mean.map(|mean_ms| 1000.0 / mean_ms),
+    );
+    push(
+        samples,
+        "total",
+        load.zip(total).map(|(open, run)| open + run),
+    );
+    push(samples, "rss", measured.peak_rss_mb);
+    push(samples, "vram", Some(measured.peak_vram_mb as f64));
+}
+
+fn spread(values: Option<&Vec<f64>>, digits: usize) -> String {
+    match values {
+        Some(found) if !found.is_empty() => {
+            let low = found.iter().copied().fold(f64::INFINITY, f64::min);
+            let high = found.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            format!(
+                "{:.digits$} [{low:.digits$}-{high:.digits$}]",
+                median(found)
+            )
+        }
+        _ => "n/a".to_owned(),
+    }
+}
+
+fn row_cells(row: &RowResult, kv_mib: Option<f64>, prompt_tokens: Option<usize>) -> Vec<String> {
+    if !row.supported {
+        let mut cells = vec![row.label.clone()];
+        cells.extend(HEADER[1..].iter().map(|_| "unsupported format".to_owned()));
+        return cells;
+    }
+    let samples = &row.samples;
+    let tokens = prompt_tokens.map_or_else(
+        || spread(samples.get("prompt_tokens"), 0),
+        |count| count.to_string(),
+    );
     vec![
-        "llama".to_owned(),
-        cell(load, 1),
-        "n/a".to_owned(),
-        cell(prompt.and_then(|(_, count)| count), 0),
-        cell(prompt.map(|(time, _)| time), 2),
-        cell(
-            prompt.and_then(|(time, count)| count.map(|tokens| tokens / time * 1000.0)),
-            1,
-        ),
-        cell(prompt.map(|(time, _)| time), 2),
-        cell(decode_mean, 3),
-        cell(decode_mean.map(|mean_ms| 1000.0 / mean_ms), 1),
-        cell(load.zip(total).map(|(open, run)| open + run), 1),
-        cell(Some(measured.wall_ms), 1),
-        cell(llama_kv_mib(stderr), 2),
-        cell(measured.peak_rss_mb, 0),
-        cell(Some(measured.peak_vram_mb as f64), 0),
+        row.label.clone(),
+        spread(samples.get("load"), 1),
+        spread(samples.get("tokenize"), 4),
+        tokens,
+        spread(samples.get("prefill"), 2),
+        spread(samples.get("prefill_tps"), 1),
+        spread(samples.get("ttft"), 2),
+        spread(samples.get("decode"), 3),
+        spread(samples.get("decode_tps"), 1),
+        spread(samples.get("total"), 1),
+        kv_mib.map_or_else(|| "n/a".to_owned(), |mib| format!("{mib:.2}")),
+        spread(samples.get("rss"), 0),
+        spread(samples.get("vram"), 0),
     ]
 }
 
-fn unsupported_row() -> Vec<String> {
-    let mut row = vec!["llama".to_owned()];
-    row.extend(HEADER[1..].iter().map(|_| "unsupported format".to_owned()));
-    row
-}
-
-fn render_table(rows: &[Vec<String>]) -> String {
+fn render_table(header: &[&str], rows: &[Vec<String>]) -> String {
     let line = |cells: Vec<&str>| format!("| {} |", cells.join(" | "));
     let mut lines = vec![
-        line(HEADER.to_vec()),
-        line(HEADER.iter().map(|_| "---").collect()),
+        line(header.to_vec()),
+        line(header.iter().map(|_| "---").collect()),
     ];
     lines.extend(
         rows.iter()
@@ -524,104 +669,315 @@ fn last_lines(text: &str, count: usize) -> String {
     lines[lines.len().saturating_sub(count)..].join(" / ")
 }
 
-fn run_llama(path: &str, prompt: &str, tokens: usize) -> Result<Measured, BenchError> {
-    let directory =
-        env::var("PIPELINE_BENCH_LLAMA_DIR").unwrap_or_else(|_| DEFAULT_LLAMA_DIR.to_owned());
-    let library_path =
-        env::var("PIPELINE_BENCH_LLAMA_LD").unwrap_or_else(|_| DEFAULT_LLAMA_LD.to_owned());
-    let args = [
+fn llama_dir() -> String {
+    env::var("PIPELINE_BENCH_LLAMA_DIR").unwrap_or_else(|_| DEFAULT_LLAMA_DIR.to_owned())
+}
+
+fn llama_env() -> [(&'static str, String); 1] {
+    [(
+        "LD_LIBRARY_PATH",
+        env::var("PIPELINE_BENCH_LLAMA_LD").unwrap_or_else(|_| DEFAULT_LLAMA_LD.to_owned()),
+    )]
+}
+
+fn llama_tokenize(path: &str, text: &str, add_bos: bool) -> Result<Vec<u32>, BenchError> {
+    let mut args = vec![
         "-m".to_owned(),
         path.to_owned(),
-        "-n".to_owned(),
-        tokens.to_string(),
-        "-ngl".to_owned(),
-        "99".to_owned(),
-        prompt.to_owned(),
+        "-p".to_owned(),
+        text.to_owned(),
     ];
-    measure(
-        &format!("{directory}/llama-simple"),
+    args.extend(["--ids".to_owned(), "--log-disable".to_owned()]);
+    if !add_bos {
+        args.push("--no-bos".to_owned());
+    }
+    let measured = measure(
+        &format!("{}/llama-tokenize", llama_dir()),
         &args,
-        &[("LD_LIBRARY_PATH", library_path)],
-    )
+        &llama_env(),
+    )?;
+    parse_id_list(measured.stdout.trim()).ok_or(BenchError::Parse {
+        what: "llama-tokenize",
+        text: last_lines(&measured.stdout, 3),
+    })
 }
 
-fn run_proxima(path: &str, prompt: &str, tokens: usize) -> Result<Measured, BenchError> {
+fn leading_match(left: &[u32], right: &[u32]) -> usize {
+    left.iter().zip(right).take_while(|(a, b)| a == b).count()
+}
+
+fn first_difference(left: &[u32], right: &[u32]) -> Option<usize> {
+    (left.len() != right.len())
+        .then(|| leading_match(left, right))
+        .or_else(|| left.iter().zip(right).position(|(a, b)| a != b))
+}
+
+fn llama_args(args: &RunArgs<'_>, kv_type: &str, flash_attention: bool) -> Vec<String> {
+    let mut command = vec![
+        "-m",
+        args.path,
+        "-p",
+        args.prompt,
+        "-ngl",
+        "99",
+        "-fa",
+        if flash_attention { "on" } else { "off" },
+        "-ctk",
+        kv_type,
+        "-ctv",
+        kv_type,
+        "--temp",
+        "0",
+        "--top-k",
+        "1",
+        "-no-cnv",
+        "--no-display-prompt",
+        "--perf",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<Vec<_>>();
+    for (flag, value) in [
+        ("-n", args.tokens.to_string()),
+        ("-c", args.context.to_string()),
+        ("-b", BATCH.to_string()),
+        ("-ub", BATCH.to_string()),
+    ] {
+        command.push(flag.to_owned());
+        command.push(value);
+    }
+    command
+}
+
+struct Reference {
+    prompt_ids: Vec<u32>,
+    generated_ids: Vec<u32>,
+    flash_attention: bool,
+}
+
+fn run_llama_row(
+    args: &RunArgs<'_>,
+    kv_type: &str,
+    reference: &Reference,
+) -> Result<RowResult, BenchError> {
+    let mut row = RowResult {
+        label: format!("llama (kv {kv_type})"),
+        kv_precision: kv_type.to_owned(),
+        samples: Samples::new(),
+        ids_note: String::new(),
+        gpu_apps_before: gpu_app_count(),
+        loadavg_start: load_average(),
+        loadavg_end: String::new(),
+        supported: true,
+    };
+    let mut text = String::new();
+    for _ in 0..args.repeats {
+        let measured = measure(
+            &format!("{}/llama-completion", llama_dir()),
+            &llama_args(args, kv_type, reference.flash_attention),
+            &llama_env(),
+        )?;
+        if !measured.success {
+            row.supported = false;
+            row.ids_note = last_lines(&measured.stderr, 4);
+            break;
+        }
+        add_llama_run(&mut row.samples, &measured);
+        text = measured.stdout.trim_end_matches('\n').to_owned();
+    }
+    row.loadavg_end = load_average();
+    if row.supported {
+        let ids = llama_tokenize(args.path, &text, false)?;
+        row.ids_note = format!(
+            "{}/{}",
+            ids.len(),
+            leading_match(&ids, &reference.generated_ids)
+        );
+    }
+    Ok(row)
+}
+
+fn run_proxima_row(
+    args: &RunArgs<'_>,
+    quantization: &str,
+) -> Result<(RowResult, Measured), BenchError> {
     let executable = env::current_exe().map_err(io_error("current_exe"))?;
-    let quantization = env::var(QUANTIZATION_ENV).unwrap_or_else(|_| "1".to_owned());
-    let args = [path.to_owned(), prompt.to_owned(), tokens.to_string()];
-    measure(
+    let mut row = RowResult {
+        label: format!("proxima (act_quant {quantization})"),
+        kv_precision: "pending".to_owned(),
+        samples: Samples::new(),
+        ids_note: String::new(),
+        gpu_apps_before: gpu_app_count(),
+        loadavg_start: load_average(),
+        loadavg_end: String::new(),
+        supported: true,
+    };
+    let child_args = [
+        args.path.to_owned(),
+        args.prompt.to_owned(),
+        args.tokens.to_string(),
+        args.repeats.to_string(),
+        args.context.to_string(),
+    ];
+    let measured = measure(
         &executable.to_string_lossy(),
-        &args,
+        &child_args,
         &[
             (CHILD_ENV, "1".to_owned()),
-            (QUANTIZATION_ENV, quantization),
+            (QUANTIZATION_ENV, quantization.to_owned()),
         ],
-    )
+    )?;
+    row.loadavg_end = load_average();
+    row.samples = proxima_samples(&measured);
+    Ok((row, measured))
 }
 
-fn output_line(measured: &Measured, prefix: &str) -> String {
-    measured
-        .stdout
-        .lines()
-        .find(|line| line.starts_with(prefix))
-        .map_or_else(|| format!("{prefix} missing"), str::to_owned)
+fn settings_cells(
+    row: &RowResult,
+    context: usize,
+    flash_attention: bool,
+    quant: &str,
+) -> Vec<String> {
+    vec![
+        row.label.clone(),
+        row.kv_precision.clone(),
+        context.to_string(),
+        if flash_attention { "on" } else { "off" }.to_owned(),
+        "all (99)".to_owned(),
+        format!("{BATCH}/{BATCH}"),
+        quant.to_owned(),
+        row.gpu_apps_before.to_string(),
+        row.loadavg_start.clone(),
+        row.loadavg_end.clone(),
+        row.ids_note.clone(),
+    ]
 }
 
-fn orchestrate(path: &str, prompt: &str, tokens: usize) -> Result<(), BenchError> {
-    let load_at_start = load_average();
-    let proxima = run_proxima(path, prompt, tokens)?;
-    let llama = run_llama(path, prompt, tokens)?;
-    let llama_row = if llama.success {
-        llama_row(&llama)
-    } else {
-        unsupported_row()
+fn kernel_cache_state() -> String {
+    let directory = env::var(KERNEL_CACHE_ENV).unwrap_or_else(|_| {
+        format!(
+            "{}/.cache/proxima/cuda-ptx",
+            env::var("HOME").unwrap_or_default()
+        )
+    });
+    let entries = fs::read_dir(&directory).map_or(0, Iterator::count);
+    format!("{directory} entries_at_start={entries}")
+}
+
+fn orchestrate(args: &RunArgs<'_>) -> Result<(), BenchError> {
+    let cache_state = kernel_cache_state();
+    let llama_prompt_ids = llama_tokenize(args.path, args.prompt, true)?;
+    let context = (llama_prompt_ids.len() + args.tokens).max(MIN_CONTEXT);
+    let args = RunArgs { context, ..*args };
+    let (quantized, quantized_run) = run_proxima_row(&args, "1")?;
+    let (plain, _) = run_proxima_row(&args, "0")?;
+    let lines = parse_stage_lines(&quantized_run.stdout);
+    let config_line = lines
+        .iter()
+        .find(|fields| fields.get("stage").is_some_and(|name| name == "config"))
+        .cloned()
+        .unwrap_or_default();
+    let flash_attention = config_line
+        .get("flash_attention")
+        .is_some_and(|value| value == "true");
+    let kv_precision = format!(
+        "{}/{}",
+        config_line.get("kv_k").map_or("?", String::as_str),
+        config_line.get("kv_v").map_or("?", String::as_str)
+    );
+    let proxima_prompt_ids = output_ids(&quantized_run.stdout, "prompt_ids").unwrap_or_default();
+    let proxima_ids = output_ids(&quantized_run.stdout, "ids").unwrap_or_default();
+    let comparable = proxima_prompt_ids == llama_prompt_ids;
+    let reference = Reference {
+        prompt_ids: llama_prompt_ids,
+        generated_ids: proxima_ids.clone(),
+        flash_attention,
     };
-    let rows = [proxima_row(&proxima), llama_row];
-    let model = Path::new(path)
+    let f32_row = run_llama_row(&args, "f32", &reference)?;
+    let f16_row = run_llama_row(&args, "f16", &reference)?;
+    let kv_bytes_of = |key: &str| stage_number(&lines, "kv", key).map(|bytes| bytes / MIB);
+    let quantized = RowResult {
+        kv_precision: kv_precision.clone(),
+        ids_note: format!("{}/{}", proxima_ids.len(), proxima_ids.len()),
+        ..quantized
+    };
+    let plain = RowResult {
+        kv_precision,
+        ids_note: format!("{}/{}", proxima_ids.len(), proxima_ids.len()),
+        ..plain
+    };
+    let tokens = Some(proxima_prompt_ids.len());
+    let rows = [
+        row_cells(&quantized, kv_bytes_of("bytes"), tokens),
+        row_cells(&plain, kv_bytes_of("bytes"), tokens),
+        row_cells(&f32_row, kv_bytes_of("llama_f32_ctx_bytes"), None),
+        row_cells(&f16_row, kv_bytes_of("llama_f16_ctx_bytes"), None),
+    ];
+    println!("{}", render_table(&HEADER, &rows));
+    let settings = [
+        settings_cells(&quantized, context, flash_attention, "1"),
+        settings_cells(&plain, context, flash_attention, "0"),
+        settings_cells(&f32_row, context, flash_attention, "n/a (q8_1 matvec)"),
+        settings_cells(&f16_row, context, flash_attention, "n/a (q8_1 matvec)"),
+    ];
+    println!("\n{}", render_table(&SETTINGS_HEADER, &settings));
+    let model = Path::new(args.path)
         .file_name()
         .map_or_else(String::new, |name| name.to_string_lossy().into_owned());
-    println!("{}", render_table(&rows));
     println!(
-        "\nnotes: model={model} prompt={prompt:?} n={tokens} load_average_at_start={load_at_start} {QUANTIZATION_ENV}={}",
-        env::var(QUANTIZATION_ENV).unwrap_or_else(|_| "1".to_owned())
+        "\nnotes: model={model} (same file for all rows) prompt={:?} n={} repeats={} kernel_cache={cache_state}",
+        args.prompt, args.tokens, args.repeats
     );
     println!(
-        "proxima stages:\n{}",
-        proxima
-            .stdout
-            .lines()
-            .filter(|line| line.starts_with("pipeline "))
-            .collect::<Vec<_>>()
-            .join("\n")
+        "prompt_ids comparable={comparable} proxima_count={} llama_count={} first_difference={:?}",
+        proxima_prompt_ids.len(),
+        reference.prompt_ids.len(),
+        first_difference(&proxima_prompt_ids, &reference.prompt_ids)
     );
-    if !proxima.success {
-        println!("proxima failed: {}", last_lines(&proxima.stderr, 6));
+    println!("proxima generated ids={proxima_ids:?}");
+    if !quantized_run.success {
+        println!("proxima failed: {}", last_lines(&quantized_run.stderr, 6));
     }
-    println!("{}", output_line(&proxima, "output engine=proxima"));
-    if llama.success {
-        println!("llama output: {:?}", llama.stdout.trim());
-    } else {
-        println!("llama unsupported format: {}", last_lines(&llama.stderr, 6));
+    for line in quantized_run
+        .stdout
+        .lines()
+        .filter(|line| line.starts_with("output text="))
+    {
+        println!("proxima {line}");
+    }
+    for row in [&f32_row, &f16_row].iter().filter(|row| !row.supported) {
+        println!("{} unsupported format: {}", row.label, row.ids_note);
     }
     Ok(())
 }
 
-fn parse_args() -> Result<(String, String, usize), BenchError> {
+fn parse_number(text: String) -> Result<usize, BenchError> {
+    text.parse().map_err(|_| BenchError::BadCount(text))
+}
+
+fn parse_args() -> Result<(String, String, usize, usize, usize), BenchError> {
     let mut args = env::args().skip(1);
     let path = args.next().ok_or(BenchError::Usage)?;
     let prompt = args.next().unwrap_or_else(|| DEFAULT_PROMPT.to_owned());
-    let tokens = args.next().map_or(Ok(DEFAULT_TOKENS), |text| {
-        text.parse().map_err(|_| BenchError::BadCount(text))
-    })?;
-    Ok((path, prompt, tokens))
+    let tokens = args.next().map_or(Ok(DEFAULT_TOKENS), parse_number)?;
+    let repeats = args.next().map_or(Ok(DEFAULT_REPEATS), parse_number)?;
+    let context = args.next().map_or(Ok(MIN_CONTEXT), parse_number)?;
+    Ok((path, prompt, tokens, repeats, context))
 }
 
 fn main() -> ExitCode {
-    let outcome = parse_args().and_then(|(path, prompt, tokens)| {
+    let outcome = parse_args().and_then(|(path, prompt, tokens, repeats, context)| {
+        let args = RunArgs {
+            path: &path,
+            prompt: &prompt,
+            tokens,
+            repeats,
+            context,
+        };
         if env::var_os(CHILD_ENV).is_some() {
-            run_child(&path, &prompt, tokens)
+            run_child(&args)
         } else {
-            orchestrate(&path, &prompt, tokens)
+            orchestrate(&args)
         }
     });
     match outcome {
