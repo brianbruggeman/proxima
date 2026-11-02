@@ -772,13 +772,11 @@ mod tests {
     }
 
     /// Reproduces the byte-level non-idempotence
-    /// [`quantize_is_idempotent_at_the_codec_grid`]'s doc comment names,
-    /// kept runnable rather than silently dropped -- this is evidence of
-    /// the upstream algorithm's own tie-breaking, not a bug this crate
-    /// owns; `#[ignore]`d so it never gates a normal run.
-    #[test]
-    #[ignore = "documents byte-level (not value-level) non-idempotence inherited from ggml's own reference search"]
-    fn quantize_can_be_byte_non_idempotent_at_the_codec_grid() {
+    /// [`quantize_is_idempotent_at_the_codec_grid`]'s doc comment names:
+    /// evidence of the upstream algorithm's own tie-breaking, not a bug
+    /// this crate owns.
+    #[proxima::test]
+    async fn quantize_can_be_byte_non_idempotent_at_the_codec_grid() {
         let elements = QK_K * 2;
         let input: Vec<f32> = (0..elements)
             .map(|index| (index as f32 * 0.17).cos() * 2.0)

@@ -37,3 +37,4 @@ tempfile.workspace = true
 temp-env.workspace = true
 proxima-telemetry = { workspace = true, features = ["emit", "std"] }
 memmap2 = "0.9.12"
+proxima = { workspace = true, features = ["test-support"] }
