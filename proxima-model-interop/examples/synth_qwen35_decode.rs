@@ -38,12 +38,12 @@ fn fixture_path() -> PathBuf {
 // is only meaningful if these match what was actually written to disk.
 const BLOCK_COUNT: u32 = 4;
 const FULL_ATTENTION_INTERVAL: u32 = 4;
-const ATTN_HEAD_DIM: u32 = 512;
+const ATTN_HEAD_DIM: u32 = 64;
 const KV_HEADS: u32 = 2;
-const SSM_STATE_SIZE: u32 = 128;
-const SSM_GROUP_COUNT: u32 = 16;
-const SSM_TIME_STEP_RANK: u32 = 32;
-const SSM_INNER_SIZE: u32 = 4096;
+const SSM_STATE_SIZE: u32 = 32;
+const SSM_GROUP_COUNT: u32 = 2;
+const SSM_TIME_STEP_RANK: u32 = 4;
+const SSM_INNER_SIZE: u32 = 256;
 const SSM_CONV_KERNEL: u32 = 4;
 const SERVING_CONTEXT: u32 = 256;
 const MAX_DEVICE_BUDGET_BYTES: u64 = 16 * 1024 * 1024 * 1024;

@@ -9,12 +9,10 @@
 //! dispatch classification a real checkpoint would, since neither depends
 //! on weight VALUES.
 //!
-//! `#[ignore]`d: a debug build of this forward over `embedding=5120,
-//! feed_forward=20480` takes minutes, not seconds (measured: a debug CPU
-//! decode of 8 tokens did not finish in 6 minutes; `cargo test --release`
-//! is required to run this in a reasonable time), the same convention
-//! `real_lfm2_checkpoint.rs`/`real_smollm2_checkpoint.rs` use for their own
-//! multi-GB fixtures.
+//! The fixture is scaled down (`embedding=256`, `feed_forward=512`; see
+//! `examples/synth_qwen35_gguf.rs`) so a debug-build forward finishes in
+//! seconds; the hybrid pattern (3 SSM + 1 attention layer) and the quant
+//! mix are the checkpoint's own.
 
 #![cfg(feature = "std")]
 #![allow(clippy::unwrap_used, clippy::expect_used, dead_code)]
@@ -88,9 +86,8 @@ fn supported_config(gpu_layers: i32) -> ServingConfig<'static> {
 /// `qwen35` bind + forward-program path
 /// (`proxima_model_interop::bind_program_leaves` /
 /// `recurrent_interval_forward_program`), not that its output means anything.
-#[test]
-#[ignore = "debug build: minutes, not seconds -- run with --release (see module doc)"]
-fn qwen35_hybrid_synthetic_fixture_decodes_on_cpu() {
+#[proxima::test]
+async fn qwen35_hybrid_synthetic_fixture_decodes_on_cpu() {
     let file_bytes = build_fixture_bytes();
     let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parse synthetic qwen35 gguf");
     let loaded = LoadedModel::load(&parsed, &file_bytes).expect("load synthetic qwen35 checkpoint");
@@ -110,9 +107,8 @@ fn qwen35_hybrid_synthetic_fixture_decodes_on_cpu() {
 /// only compiled when this crate's `metal` feature is on, same gate every
 /// other Metal-path test in this crate uses.
 #[cfg(all(feature = "metal", target_os = "macos"))]
-#[test]
-#[ignore = "debug build: minutes, not seconds -- run with --release (see module doc)"]
-fn qwen35_hybrid_synthetic_fixture_decodes_on_metal() {
+#[proxima::test]
+async fn qwen35_hybrid_synthetic_fixture_decodes_on_metal() {
     let file_bytes = build_fixture_bytes();
     let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parse synthetic qwen35 gguf");
     let loaded = LoadedModel::load(&parsed, &file_bytes).expect("load synthetic qwen35 checkpoint");
@@ -136,9 +132,8 @@ fn qwen35_hybrid_synthetic_fixture_decodes_on_metal() {
 /// defect is in the fused op's own CPU `state_out` flow
 /// (`proxima-tensor/src/cpu.rs::run_node_into_with_gdn_state`), not in the
 /// decode loop's placement bookkeeping.
-#[test]
-#[ignore = "debug build: minutes, not seconds -- run with --release (see module doc)"]
-fn qwen35_hybrid_synthetic_fixture_cpu_decode_row549_diagnostic() {
+#[proxima::test]
+async fn qwen35_hybrid_synthetic_fixture_cpu_decode_row549_diagnostic() {
     let file_bytes = build_fixture_bytes();
     let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parse synthetic qwen35 gguf");
     let loaded = LoadedModel::load(&parsed, &file_bytes).expect("load synthetic qwen35 checkpoint");
@@ -162,9 +157,8 @@ fn qwen35_hybrid_synthetic_fixture_cpu_decode_row549_diagnostic() {
 /// placement/readback path rather than the fused op's own math (already
 /// proven identical CPU-vs-CPU across the feature toggle).
 #[cfg(all(feature = "metal", target_os = "macos"))]
-#[test]
-#[ignore = "debug build: minutes, not seconds -- run with --release (see module doc)"]
-fn qwen35_hybrid_synthetic_fixture_metal_decode_row549_diagnostic() {
+#[proxima::test]
+async fn qwen35_hybrid_synthetic_fixture_metal_decode_row549_diagnostic() {
     let file_bytes = build_fixture_bytes();
     let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parse synthetic qwen35 gguf");
     let loaded = LoadedModel::load(&parsed, &file_bytes).expect("load synthetic qwen35 checkpoint");
@@ -193,9 +187,8 @@ fn qwen35_hybrid_synthetic_fixture_metal_decode_row549_diagnostic() {
 /// counter (`omega::metal::READBACK_CALLS`) stayed bounded by the token
 /// count once state/KV stop round-tripping through the host every step.
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
-#[test]
-#[ignore = "debug build: minutes, not seconds -- run with --release (see module doc)"]
-fn qwen35_full_graph_metal_places_state_and_bounds_readback() {
+#[proxima::test]
+async fn qwen35_full_graph_metal_places_state_and_bounds_readback() {
     let file_bytes = build_fixture_bytes();
     let parsed = proxima_gguf::parse_complete(&file_bytes).expect("parse synthetic qwen35 gguf");
 
