@@ -4204,10 +4204,11 @@ fn assert_policy_prefill_parity(
         .collect();
     let mut weight_blocks = vec![0u8; POLICY_PREFILL_FEATURES * blocks_per_row * block_bytes];
     let mut dequantized = vec![0.0f32; weight_f32.len()];
+    let depth = weight_f32.len() / POLICY_PREFILL_FEATURES;
     for ((row_f32, row_blocks), row_dequantized) in weight_f32
-        .chunks_exact(POLICY_PREFILL_DEPTH)
+        .chunks_exact(depth)
         .zip(weight_blocks.chunks_exact_mut(blocks_per_row * block_bytes))
-        .zip(dequantized.chunks_exact_mut(POLICY_PREFILL_DEPTH))
+        .zip(dequantized.chunks_exact_mut(depth))
     {
         quantize(row_f32, row_blocks).expect("row length is a whole number of blocks");
         dequantize(row_blocks, row_dequantized).expect("a whole number of packed blocks");
