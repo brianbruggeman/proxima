@@ -93,7 +93,7 @@ impl LlamaOracle {
             "llama-completion",
             &[
                 "-m", MODEL, "-p", prompt, "-n", &count_arg, "--temp", "0", "-ngl", "0", "-no-cnv",
-                "-s", "1", "--log-disable",
+                "-s", "1",
             ],
         )?;
         let generated = stdout
