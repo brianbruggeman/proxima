@@ -288,6 +288,11 @@ impl MappedBlockFile {
         Ok(Self { map })
     }
 
+    /// Drops the mapped pages from the resident set; the file backs them, so the next read refaults.
+    pub fn release_pages(&self) -> Result<(), InteropError> {
+        crate::memory_reclaim::release_mapping(&self.map)
+    }
+
     /// Decodes the mapped bytes as a borrowed view.
     pub fn view(&self) -> Result<BlockFileView<'_>, InteropError> {
         decode_block(&self.map)

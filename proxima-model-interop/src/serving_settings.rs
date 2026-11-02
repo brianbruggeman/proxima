@@ -14,11 +14,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::RopeScaling;
 use crate::codec_policy_settings::CodecPolicySettings;
+use crate::memory_reclaim::ReclaimSettings;
 use crate::prompt_cache_settings::PromptCacheSettings;
 use crate::serving::{
     ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH,
     DEFAULT_RESIDENT_KV_BYTES, DEFAULT_RESIDENT_PREFILL_PLAN_BYTES, DEFAULT_UBATCH_SIZE,
-    GdnPrefillBackend, NamePattern, PrefillConfig, ServingConfig, WeightPrecisionRule,
+    GdnPrefillBackend, NamePattern, PrefillConfig, PromptCacheConfig, ServingConfig,
+    WeightPrecisionRule,
 };
 use crate::serving_grammar::AssembleStep;
 use crate::speculative_settings::SpeculativeSettings;
@@ -397,6 +399,9 @@ pub struct ServingSettings {
     #[setting(nested, override_prefix = "PROXIMA_PROMPT_CACHE")]
     #[builder(default = PromptCacheSettings::builder().build())]
     pub prompt_cache: PromptCacheSettings,
+    #[setting(nested, override_prefix = "PROXIMA_RECLAIM")]
+    #[builder(default = ReclaimSettings::builder().build())]
+    pub reclaim: ReclaimSettings,
     #[setting(nested, override_prefix = "PROXIMA_CODEC_POLICY")]
     #[builder(default)]
     pub codec_policy: CodecPolicySettings,
@@ -511,7 +516,11 @@ impl ServingSettings {
                 .expert_residency_schedule
                 .as_expert_residency_schedule(),
             speculative: self.speculative.as_speculative_config(),
-            prompt_cache: self.prompt_cache.as_prompt_cache_config(),
+            prompt_cache: PromptCacheConfig {
+                idle_secs: self.reclaim.idle_secs,
+                pressure_milli: self.reclaim.pressure_milli,
+                ..self.prompt_cache.as_prompt_cache_config()
+            },
             ..ServingConfig::default()
         }
     }

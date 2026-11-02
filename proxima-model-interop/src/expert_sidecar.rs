@@ -20,6 +20,7 @@ use proxima_gguf::{GgmlType, ParsedGguf};
 
 use crate::bind::Codec;
 use crate::expert_slab::{ExpertProjection, ExpertSlab};
+use crate::memory_reclaim::release_mapping;
 use crate::residency::{ExpertAddress, ResidencyAction, ServeDecision, ServePrecision};
 use crate::{InteropError, recode_expert_into};
 #[cfg(any(test, feature = "gpu"))]
@@ -557,6 +558,11 @@ impl MappedExpertSidecar {
         #[cfg(unix)]
         mapping.advise(memmap2::Advice::Random)?;
         Self::new_with_source_file(Arc::new(mapping), Some(source_file))
+    }
+
+    /// Drops the sidecar mapping's pages from the resident set; the next expert read refaults them from the file.
+    pub fn release_pages(&self) -> Result<(), InteropError> {
+        release_mapping(&self.mapping)
     }
 
     #[must_use]
