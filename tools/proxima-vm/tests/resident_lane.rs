@@ -46,6 +46,22 @@ fn stop_ends_a_resident_guest_with_stopped_and_closes_the_guest_to_host_pipe() {
 }
 
 #[test]
+fn a_guest_that_ends_on_its_own_leaves_its_boot_console_in_the_outcome() {
+    let mut inputs = boot_inputs();
+    inputs.initramfs = Bytes::from(initramfs_from_init(&common::guest("uppercase-init")).expect("initramfs builds"));
+    let (resident, host) = ResidentLinux::start(inputs, link()).expect("the resident guest starts");
+
+    while futures::executor::block_on(host.from_guest.call(())).is_ok() {}
+    let outcome = resident.stop();
+
+    let console = String::from_utf8_lossy(&outcome.report.console);
+    assert_ne!(outcome.report.end, Some(End::Stopped), "the guest ended before the stop request");
+    assert!(console.contains("Linux version"), "console: {console}");
+    assert_eq!(outcome.report.console_dropped, 0);
+    assert!(outcome.report.console.len() <= LinuxGuestLimits::default().console_capacity);
+}
+
+#[test]
 fn ringing_the_doorbell_without_a_stop_leaves_the_guest_running() {
     let (resident, host) = ResidentLinux::start(boot_inputs(), link()).expect("the resident guest starts");
 
