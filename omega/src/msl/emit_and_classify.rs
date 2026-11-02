@@ -2411,22 +2411,6 @@ pub(crate) fn debug_tiled_gemm_classification(
     }
 }
 
-/// A route selected by the token axis has zero stride in contracted
-/// dimensions, so one fetched expert index can be shared by all lanes. Any
-/// nonzero stride would select different experts during the reduction and is
-/// therefore kept on the serial path.
-pub(super) fn gather_is_reduction_invariant(resolved: &BoundOp, output_axes: &[u16]) -> bool {
-    with_reduction_dims(resolved, output_axes, |reduce_dims| {
-        resolved.operands().iter().all(|(_, _, lookup)| {
-            lookup.as_ref().is_none_or(|lookup| {
-                reduce_dims
-                    .iter()
-                    .all(|&dim| lookup.index_layout.stride(dim) == 0)
-            })
-        })
-    })
-}
-
 /// `length >= COOPERATIVE_REDUCE_MIN_LEN`, factored out so clippy's
 /// `absurd_extreme_comparisons` lint has one site to allow rather than every
 /// call site: at the `omega-runtime.toml` default (0, `u64::MIN`) the
@@ -2476,13 +2460,6 @@ pub(super) fn reduction_len(resolved: &BoundOp, output_axes: &[u16]) -> u64 {
             .map(|&dim| resolved.extents[dim as usize])
             .product()
     })
-}
-
-pub(super) fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
-    matches!(
-        op,
-        ScalarOp::Add | ScalarOp::Multiply | ScalarOp::Maximum | ScalarOp::Minimum
-    )
 }
 
 /// The MSL SIMD-group reduction builtin that combines one lane's private
@@ -2599,62 +2576,8 @@ pub(super) fn validate(resolved: &BoundOp) -> Result<(), EmitError> {
     Ok(())
 }
 
-/// `pub(crate)`, not private: the Metal driver's uniforms packer
-/// (`crate::metal::pack_reduce_uniforms`) needs the exact same reduce-dim set
-/// this rendering uses, and duplicating the filter would risk the two
-/// drifting apart.
-pub(crate) fn reduction_dims(resolved: &BoundOp, output_axes: &[u16]) -> Vec<u16> {
-    (0..resolved.extents.len() as u16)
-        .filter(|dim| !output_axes.contains(dim))
-        .collect()
-}
-
-/// Rank every real bound op stays under; [`with_reduction_dims`] keeps the
-/// reduction axes on the stack up to it.
-const INLINE_REDUCTION_RANK: usize = 16;
-
-/// [`reduction_dims`] without the heap allocation, for the per-dispatch
-/// shape and cache-key paths (`grid_threads`, `tiled_gemm_threadgroup_width`)
-/// that run once per encoded op: the axes live in a stack array for any
-/// rank up to [`INLINE_REDUCTION_RANK`] and fall back to [`reduction_dims`]'s
-/// `Vec` past it.
-pub(super) fn with_reduction_dims<Output>(
-    resolved: &BoundOp,
-    output_axes: &[u16],
-    visit: impl FnOnce(&[u16]) -> Output,
-) -> Output {
-    let rank = resolved.extents.len();
-    if rank > INLINE_REDUCTION_RANK {
-        return visit(&reduction_dims(resolved, output_axes));
-    }
-    let mut axes = [0u16; INLINE_REDUCTION_RANK];
-    let mut count = 0;
-    for dim in (0..rank as u16).filter(|dim| !output_axes.contains(dim)) {
-        axes[count] = dim;
-        count += 1;
-    }
-    visit(&axes[..count])
-}
-
 pub(super) fn bindings(resolved: &BoundOp) -> Vec<Binding> {
-    // `all_read_sources`, not `operands` -- a `BoundOpKind::Reduce` with a
-    // fused epilogue reads its `epilogue_operands` too, and those need a
-    // buffer bound at the exact index `kernel_signature`'s `epi{index}`
-    // params claim (see that function's own doc).
-    let mut bindings: Vec<Binding> = resolved
-        .all_read_sources()
-        .map(|(node, _, _)| Binding::Input(*node))
-        .collect();
-    for (_, _, gather) in resolved.operands() {
-        if let Some(gather_access) = gather {
-            bindings.push(Binding::Indices(gather_access.indices));
-        }
-    }
-    bindings.push(Binding::Output(resolved.node));
-    bindings.push(Binding::Uniforms);
-    if gather_count(resolved) > 0 {
-        bindings.push(Binding::Fault);
-    }
+    let mut bindings = dispatch_bindings(resolved);
     if let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &resolved.kind {
         bindings.extend(
             round_routes
@@ -2743,35 +2666,6 @@ pub(crate) fn hazard_write_node(bindings: &[Binding]) -> Option<NodeId> {
         | Binding::Fault
         | Binding::Scratch => None,
     })
-}
-
-/// For each operand, `Some(slot)` if it gathers — `slot` is its position
-/// among only the gathered operands, 0-based, matching the order
-/// [`bindings`] appends `Indices` buffers and the order the `Uniforms`
-/// gather arrays are packed in. `pub(crate)` for the same reason
-/// [`reduction_dims`] is: the Metal driver's uniforms packer needs the exact
-/// same numbering.
-pub(crate) fn gather_slots(resolved: &BoundOp) -> Vec<Option<usize>> {
-    let mut next = 0usize;
-    resolved
-        .operands()
-        .iter()
-        .map(|(_, _, gather)| {
-            gather.as_ref().map(|_| {
-                let slot = next;
-                next += 1;
-                slot
-            })
-        })
-        .collect()
-}
-
-pub(crate) fn gather_count(resolved: &BoundOp) -> usize {
-    resolved
-        .operands()
-        .iter()
-        .filter(|(_, _, gather)| gather.is_some())
-        .count()
 }
 
 /// Total independent units of work `resolved` needs — see [`GridSpec`]'s doc

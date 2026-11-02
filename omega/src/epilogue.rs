@@ -24,7 +24,7 @@ use proxima_tensor::{ComposedBody, Layout, Lookup, NodeId, ScalarOp, StepArg};
 use proxima_tensor::{BoundOp, BoundOpKind};
 
 #[cfg(any(feature = "cuda", feature = "metal-wide-cooperative-reduce"))]
-use crate::msl::Codec;
+use crate::lowering::Codec;
 
 /// Declares one step per [`ComposedBody`] entry, in order, returning the
 /// declared name of the body's own result (its last step). `operand_prefix`

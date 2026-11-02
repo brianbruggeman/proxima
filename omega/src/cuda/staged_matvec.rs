@@ -10,7 +10,7 @@ use super::{
     Codec, CudaGridSpec, CudaKernel, EmitError, WARP_SIZE, flat_packed_rows, gather_count, push_reduce_epilogue_write,
     reduction_dims,
 };
-use crate::msl::Binding;
+use crate::lowering::Binding;
 
 /// Warps in one block of a staged matvec.
 pub(super) const STAGED_WARPS: usize = 8;

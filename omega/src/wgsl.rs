@@ -101,13 +101,16 @@ use alloc::vec::Vec;
 
 use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
-    ScalarOp,
+    NumericRewrite, ScalarOp, admit,
 };
 
 use crate::error::EmitError;
 use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
-use crate::msl::{Binding, Codec, PackedOperands, gather_count, gather_slots};
+use crate::lowering::{
+    Binding, Codec, PackedOperands, dispatch_bindings, gather_count, gather_slots,
+    is_cooperative_reduce_op, reduction_dims,
+};
 
 /// Threads per workgroup every v1 WGSL kernel dispatches with. See
 /// [`crate::sized::WORKGROUP_SIZE`] and `omega-runtime.toml`'s `[wgsl]`.
@@ -291,17 +294,10 @@ pub fn emit_wgsl_with_policy(
     Ok(WgslKernel {
         source,
         entry,
-        bindings: bindings(resolved),
+        bindings: dispatch_bindings(resolved),
         threads,
         workgroup_size,
     })
-}
-
-fn is_cooperative_reduce_op(op: ScalarOp) -> bool {
-    matches!(
-        op,
-        ScalarOp::Add | ScalarOp::Multiply | ScalarOp::Maximum | ScalarOp::Minimum
-    )
 }
 
 /// Whether `resolved` takes the SIMD-group-cooperative reduce path instead
@@ -325,7 +321,7 @@ fn reduce_is_cooperative(
                 epilogue_broadcast_axes,
                 ..
             } => {
-                numeric_policy.reassociation
+                admit(numeric_policy, NumericRewrite::TreeReduce).is_ok()
                     && !caps.force_serial_reductions
                     && epilogue_broadcast_axes.is_empty()
                     && gather_count(resolved) == 0
@@ -525,34 +521,6 @@ fn validate(resolved: &BoundOp, packed_operands: &PackedOperands) -> Result<(), 
         }
     }
     Ok(())
-}
-
-fn bindings(resolved: &BoundOp) -> Vec<Binding> {
-    // `all_read_sources`, not `operands` -- a `BoundOpKind::Reduce` with a
-    // fused epilogue reads its `epilogue_operands` too, and those need a
-    // buffer bound at the exact `@binding` index `preamble`'s `epi{index}`
-    // declarations claim (see that function's own doc).
-    let mut bindings: Vec<Binding> = resolved
-        .all_read_sources()
-        .map(|(node, _, _)| Binding::Input(*node))
-        .collect();
-    for (_, _, gather) in resolved.operands() {
-        if let Some(lookup) = gather {
-            bindings.push(Binding::Indices(lookup.indices));
-        }
-    }
-    bindings.push(Binding::Output(resolved.node));
-    bindings.push(Binding::Uniforms);
-    if gather_count(resolved) > 0 {
-        bindings.push(Binding::Fault);
-    }
-    bindings
-}
-
-fn reduction_dims(resolved: &BoundOp, output_axes: &[u16]) -> Vec<u16> {
-    (0..resolved.extents.len() as u16)
-        .filter(|dim| !output_axes.contains(dim))
-        .collect()
 }
 
 /// Widest grid a `wgsl` kernel indexes: its `gid` is `i32` and WGSL has no

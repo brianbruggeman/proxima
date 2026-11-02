@@ -71,6 +71,8 @@ pub mod error;
 mod grid;
 #[cfg(feature = "alloc")]
 mod identity;
+#[cfg(feature = "alloc")]
+mod lowering;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub mod metal;
 #[cfg(proxima_mlx)]

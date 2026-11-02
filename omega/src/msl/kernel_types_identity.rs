@@ -188,48 +188,6 @@ pub struct Kernel {
     pub grid: GridSpec,
 }
 
-/// What buffer index `n` in [`Kernel::bindings`] is for, in dispatch order:
-/// index `0..operands.len()` are inputs, then one `Indices` buffer per
-/// gathered operand (in operand order), then the output, then the uniforms
-/// blob (extents/strides/bases for this dispatch — see the module doc), then
-/// — only when the op gathers — the fault buffer.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Binding {
-    Input(NodeId),
-    /// Codec-specific payload bytes for a mixed expert source. The matching
-    /// [`Self::ExpertDescriptors`] binding selects the byte span and decoder
-    /// for each routed expert index.
-    ExpertPayloads(NodeId),
-    /// Per-expert codec and byte-span records for a mixed expert source.
-    /// Kept separate from [`Self::ExpertPayloads`] so the payloads remain
-    /// borrowed mapped ranges rather than one concatenated staging
-    /// allocation.
-    ExpertDescriptors(NodeId),
-    /// The `indices` buffer a gathered operand fetches from.
-    Indices(NodeId),
-    Output(NodeId),
-    Uniforms,
-    /// Present only when `gather_count` is nonzero: a `gather_count`-long
-    /// zero-initialized `atomic_uint` array. The kernel `atomic_fetch_max`s
-    /// an out-of-range fetched index (plus one, so zero means "no fault")
-    /// into its gathered operand's slot; the driver reads this back after
-    /// dispatch and turns a nonzero slot into the same
-    /// `TensorError::GatherIndexOutOfRange` `cpu::evaluate` would report —
-    /// see `push_gather_fetch`'s doc for how the check is emitted.
-    Fault,
-    /// `CachedAttention`'s cross-threadgroup key-split scratch — present
-    /// only when `cached_attention_merge_needed` admits
-    /// [`NumericRewrite::ContextSplitMerge`]. The split kernel WRITES it
-    /// (this binding replaces `Binding::Output` in that kernel's own
-    /// `bindings` list, since the split no longer writes the op's real
-    /// output directly); the merge kernel READS it. Not `NodeId`-keyed —
-    /// unlike every other binding, this buffer has no program node of its
-    /// own, so the identity a hazard tracker needs comes from
-    /// `crate::metal`'s own scratch-buffer pointer, resolved outside
-    /// `device_buffers` (see that crate's `BufferArena` scratch slot).
-    Scratch,
-}
-
 /// How many threads a driver must dispatch for this op — one per
 /// independent unit of work (output element for elementwise/reduce, output
 /// line for a scan). Unlike [`Kernel::source`], this genuinely is a function
@@ -2920,17 +2878,6 @@ pub(crate) const fn softmax_runtime_rows_override() -> bool {
     false
 }
 
-/// Every packed operand a bound program has, keyed by [`NodeId`] to its
-/// codec — the single source of truth [`emit`] (via the `quantized` slice it
-/// derives) and the Metal driver's `correct_packed_matmul_layouts` call both
-/// need, generalizing the Q4_K-only `BTreeSet<NodeId>` this crate carried
-/// before Q6_K support existed. `Codec` is `proxima_primitives::Codec` — the
-/// source-neutral packed-layout identity (see that type's own doc); this
-/// crate's per-codec derivations (`cache_token`, `block_bytes`,
-/// `supports_pair_dot`, `rows_per_simdgroup`, `from_quantized_block`) live as
-/// free functions in `crate::identity` since `Codec` is foreign here and
-/// cannot carry inherent methods (guiding-principles §20, no blanket impls).
-pub type PackedOperands = BTreeMap<NodeId, Codec>;
 
 /// For every slot of `operands`, the first slot that reads the same data: the
 /// same source node at the same layout through the same gather. A fused body
