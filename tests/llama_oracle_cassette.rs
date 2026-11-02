@@ -62,7 +62,9 @@ impl LlamaOracle {
             .env("LD_LIBRARY_PATH", library_path)
             .stdin(std::process::Stdio::null())
             .output()
-            .map_err(|error| ProximaError::Record(format!("spawn {}: {error}", program.display())))?;
+            .map_err(|error| {
+                ProximaError::Record(format!("spawn {}: {error}", program.display()))
+            })?;
         if !output.status.success() {
             return Err(ProximaError::Record(format!(
                 "{} exited {}: {}",
@@ -81,7 +83,15 @@ impl LlamaOracle {
     fn tokenize(&self, text: &str) -> Result<Vec<u32>, ProximaError> {
         let stdout = self.run(
             "llama-tokenize",
-            &["-m", MODEL, "--ids", "--no-bos", "--log-disable", "-p", text],
+            &[
+                "-m",
+                MODEL,
+                "--ids",
+                "--no-bos",
+                "--log-disable",
+                "-p",
+                text,
+            ],
         )?;
         serde_json::from_str(stdout.trim())
             .map_err(|error| ProximaError::Record(format!("parse ids `{stdout}`: {error}")))
@@ -98,7 +108,9 @@ impl LlamaOracle {
         )?;
         let generated = stdout
             .strip_prefix(prompt)
-            .ok_or_else(|| ProximaError::Record(format!("stdout lacks the prompt echo: {stdout:?}")))?
+            .ok_or_else(|| {
+                ProximaError::Record(format!("stdout lacks the prompt echo: {stdout:?}"))
+            })?
             .trim_end_matches('\n')
             .to_string();
         let ids = self.tokenize(&generated)?;
@@ -108,7 +120,10 @@ impl LlamaOracle {
                 ids.len()
             )));
         }
-        Ok(Greedy { text: generated, ids })
+        Ok(Greedy {
+            text: generated,
+            ids,
+        })
     }
 
     fn answer(&self, request: &Request<Bytes>) -> Result<Vec<u8>, ProximaError> {
@@ -126,7 +141,9 @@ impl LlamaOracle {
                     .query
                     .get_str("n")
                     .and_then(|raw| raw.parse().ok())
-                    .ok_or_else(|| ProximaError::Record("request lacks a numeric `n` query".into()))?;
+                    .ok_or_else(|| {
+                        ProximaError::Record("request lacks a numeric `n` query".into())
+                    })?;
                 encode(&self.greedy(&prompt, count)?)
             }
             other => Err(ProximaError::Record(format!(
@@ -184,9 +201,7 @@ fn france_ids() -> TokenIds {
 }
 
 #[proxima::test(cassette = "llama_tokenize")]
-async fn tokenize_matches_the_incumbent(
-    #[cassette(LlamaOracle::incumbent())] pipe: PipeHandle,
-) {
+async fn tokenize_matches_the_incumbent(#[cassette(LlamaOracle::incumbent())] pipe: PipeHandle) {
     let answer: TokenIds = ask(&pipe, "/tokenize", None).await.expect("tokenize");
 
     assert_eq!(answer, france_ids());
@@ -236,5 +251,8 @@ async fn an_unrecorded_request_is_a_replay_miss(
 
     let outcome = SendPipe::call(&pipe, request).await;
 
-    assert!(matches!(outcome, Err(ProximaError::ReplayMiss { .. })), "{outcome:?}");
+    assert!(
+        matches!(outcome, Err(ProximaError::ReplayMiss { .. })),
+        "{outcome:?}"
+    );
 }
