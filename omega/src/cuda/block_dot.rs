@@ -21,6 +21,7 @@ pub(super) struct BlockDot {
     pub elements: usize,
     pub block_bytes: usize,
     pub rows_per_warp: usize,
+    pub centering: Option<(i16, i16)>,
 }
 
 /// `None` when the layout is neither a radix-packed code nor a single-plane linear code whose
@@ -52,6 +53,7 @@ pub(super) fn block_dot_i8(layout: &BlockLayout) -> Option<BlockDot> {
         elements,
         block_bytes: usize::from(layout.block_bytes),
         rows_per_warp: rows_per_warp(false),
+        centering: None,
     })
 }
 
