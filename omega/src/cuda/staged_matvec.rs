@@ -22,6 +22,18 @@ pub(super) const STAGED_THREADS: u64 = (STAGED_WARPS * 32) as u64;
 /// 32 elements must fit the 48 KiB static shared-memory limit.
 const MAX_STAGED_REDUCTION: u64 = 32_768;
 
+/// Blocks per multiprocessor a small output should still launch so the device stays fed.
+const TARGET_WAVES: u64 = 3;
+
+fn shaped_rows(preferred: usize, output_total: u64, multiprocessors: u32) -> usize {
+    let wanted = u64::from(multiprocessors) * TARGET_WAVES;
+    let blocks = |rows: usize| output_total.div_ceil((STAGED_WARPS * rows) as u64);
+    (1..=preferred)
+        .rev()
+        .find(|rows| blocks(*rows) >= wanted)
+        .unwrap_or(1)
+}
+
 /// Below this many bytes of int8 plus scales a block stages in shared memory: the extra
 /// launch of a global pre-pass costs more than the smem it would free.
 const SMEM_STAGE_LIMIT_BYTES: u64 = 4096;
@@ -52,6 +64,9 @@ pub(super) struct StagedMatvec {
     /// The reduced elements are one unit-stride run starting on a 16-byte boundary.
     pub contiguous_activation: bool,
     pub dot: BlockDot,
+    /// Output rows one warp folds: the codec's preferred count, reduced until the launch spans
+    /// `TARGET_WAVES` waves of the device's multiprocessors.
+    pub rows: usize,
     /// The activation is quantized into a global scratch by a pre-pass launch instead of
     /// being staged in every block's shared memory.
     pub scratch: bool,
@@ -132,6 +147,7 @@ pub(super) fn staged_matvec_plan(
         reduce_extents,
         reduction,
         scratch: reduction + reduction / DOT_ELEMENTS as u64 * 4 > SMEM_STAGE_LIMIT_BYTES,
+        rows: shaped_rows(dot.rows_per_warp, output_total, numeric_policy.device_multiprocessors),
         dot,
     })
 }
@@ -145,7 +161,7 @@ pub(super) fn staged_matvec_threads(resolved: &BoundOp, plan: &StagedMatvec) -> 
             .product(),
         _ => 0,
     };
-    let rows_per_block = (STAGED_WARPS * plan.dot.rows_per_warp) as u64;
+    let rows_per_block = (STAGED_WARPS * plan.rows) as u64;
     output_total.div_ceil(rows_per_block) * STAGED_THREADS
 }
 
@@ -167,7 +183,7 @@ pub(super) fn push_staged_matvec_body(
     push_row_setup(source, resolved, plan, output_axes);
     push_stage(source, plan);
     push_direct_fold(source, plan);
-    push_write(source, resolved, output_axes.len(), plan.dot.rows_per_warp);
+    push_write(source, resolved, output_axes.len(), plan.rows);
     Ok(())
 }
 
@@ -279,7 +295,7 @@ fn push_stage(source: &mut String, plan: &StagedMatvec) {
 }
 
 fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, output_axes: &[u16]) {
-    let rows = plan.dot.rows_per_warp;
+    let rows = plan.rows;
     let weight_slot = plan.weight_slot;
     let (_, weight_layout, _) = &resolved.operands()[weight_slot];
     for index in 0..output_axes.len() {
@@ -346,7 +362,7 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
         centering,
         ..
     } = &plan.dot;
-    let rows = plan.dot.rows_per_warp;
+    let rows = plan.rows;
     let chunks_per_block = elements / DOT_ELEMENTS;
     let total_chunks = plan.reduction / DOT_ELEMENTS as u64;
     let (activation_sum, centered) = centering_text(*centering);
