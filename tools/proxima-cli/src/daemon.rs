@@ -11,8 +11,10 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use futures::channel::oneshot;
 use proxima::{
-    DynPipelineControlPlane, FsPipelineControlPlane, ListenProtocol, McpListenProtocol,
-    PipelineControlPlanePipe, ProximaError, ServeContext, into_handle, serve_h1_connection,
+    App, ControlPlanePipe, DaemonControlPlane, DynControlPlane, DynPipelineControlPlane,
+    FsPipelineControlPlane, ListenProtocol, McpListenProtocol, PipeHandle,
+    PipelineControlPlanePipe, ProximaError, RoutingPipe, ServeContext, into_handle,
+    serve_h1_connection,
 };
 #[cfg(unix)]
 use proxima::{HttpListenProtocol, ListenProtocolFluent};
@@ -164,8 +166,8 @@ async fn serve(
         as Arc<dyn proxima::runtime::Runtime>);
     let plane = Arc::new(FsPipelineControlPlane::open(&state_dir, recording_spigot).await?);
     let dyn_plane: DynPipelineControlPlane = plane.clone();
-    let pipe = PipelineControlPlanePipe::new(dyn_plane);
-    let handle = tensor_run::mount(into_handle(pipe));
+    let pipeline_handle = into_handle(PipelineControlPlanePipe::new(dyn_plane));
+    let handle = tensor_run::mount(mount_planes(pipeline_handle, workload_plane_handle()?));
     if stdio {
         return serve_stdio(handle).await;
     }
@@ -182,6 +184,21 @@ async fn serve(
         )
     })?;
     serve_unix(handle, &unix_path).await
+}
+
+fn workload_plane_handle() -> Result<PipeHandle, ProximaError> {
+    let plane: DynControlPlane = Arc::new(DaemonControlPlane::new(App::new()?, Vec::new()));
+    Ok(into_handle(ControlPlanePipe::new(plane)))
+}
+
+fn mount_planes(pipelines: PipeHandle, workloads: PipeHandle) -> PipeHandle {
+    into_handle(
+        RoutingPipe::new("proximad-planes")
+            .route("/pipelines", pipelines.clone())
+            .route("/pipelines/{*path}", pipelines.clone())
+            .route("/events", pipelines)
+            .fallback(workloads),
+    )
 }
 
 #[cfg(not(unix))]
