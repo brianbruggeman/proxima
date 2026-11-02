@@ -2293,13 +2293,16 @@ impl CudaPlan {
         let Some(CudaGraphBuffer::F32(mut cache)) = self.arena.buffers.remove(&input) else {
             return Err(CudaDriverError::MissingBuffer(input));
         };
+        if offset + count > cache.len() {
+            match self.grown_cache(&cache, offset, offset + count) {
+                Ok(grown) => cache = grown,
+                Err(error) => {
+                    self.arena.buffers.insert(input, CudaGraphBuffer::F32(cache));
+                    return Err(error);
+                }
+            }
+        }
         let copied = match self.arena.buffers.get(&output) {
-            _ if offset + count > cache.len() => Err(CudaDriverError::AppendOverflow {
-                node: input,
-                valid_elements: offset,
-                new_elements: count,
-                capacity_elements: cache.len(),
-            }),
             Some(CudaGraphBuffer::F32(source)) if source.len() >= count => {
                 if count == 0 {
                     Ok(())
@@ -2314,6 +2317,23 @@ impl CudaPlan {
         };
         self.arena.buffers.insert(input, CudaGraphBuffer::F32(cache));
         copied
+    }
+
+    fn grown_cache(
+        &mut self,
+        cache: &CudaSlice<f32>,
+        valid: usize,
+        required: usize,
+    ) -> Result<CudaSlice<f32>, CudaDriverError> {
+        let mut grown = self.driver.stream.alloc_zeros::<f32>(required.next_power_of_two())?;
+        let preserved = valid.min(cache.len());
+        if preserved > 0 {
+            self.driver
+                .stream
+                .memcpy_dtod(&cache.slice(0..preserved), &mut grown.slice_mut(0..preserved))?;
+        }
+        self.arena.allocations += 1;
+        Ok(grown)
     }
 
     /// Bytes of carried recurrent state that crossed PCIe in either direction so far.
