@@ -635,6 +635,9 @@ pub struct StaticArena {
     /// to the next node that needs an output; persists across calls, so a
     /// steady-state call allocates nothing.
     pub(super) free_buffers: Vec<Vec<f32>>,
+    /// Retired f64 island buffers ([`float64_island`]), reused by the next
+    /// call's FLOAT64 nodes the way `free_buffers` serves the f32 ones.
+    pub(super) wide_pool: Vec<Vec<f64>>,
     /// The most buffers the retirement schedule holds live at once, counted
     /// the way `evaluate_quantized_with_scratch` counts them (inputs live
     /// from the start, one per produced node, one per fused fire, one less
@@ -941,6 +944,7 @@ pub(super) fn build_static_arena_with_packed(
         materialize_packed,
         retires,
         free_buffers: Vec::new(),
+        wide_pool: Vec::new(),
         peak_live_buffers: 0,
     };
     arena.peak_live_buffers = arena.peak_live_under(&logical_retires);
@@ -1324,22 +1328,33 @@ pub(super) fn run_resolved_nodes_in_arena(
         let node = computed.node;
         if !arena.dead.contains(&node) {
             let program_len = arena.buffers.len();
-            match float64_island::step(computed, &arena.buffers, &mut wide, program_len)? {
+            match float64_island::step(
+                computed,
+                &arena.buffers,
+                &mut wide,
+                &mut arena.wide_pool,
+                &mut arena.free_buffers,
+                program_len,
+            )? {
                 float64_island::IslandStep::NotIsland => {}
                 float64_island::IslandStep::Wide => {
-                    float64_island::retire(&mut wide, &arena.retires[position]);
+                    float64_island::retire(
+                        &mut wide,
+                        &mut arena.wide_pool,
+                        &arena.retires[position],
+                    );
                     retire_arena_buffers(arena, position);
                     continue;
                 }
                 float64_island::IslandStep::Narrowed(values) => {
-                    let mut output = output_buffer(
-                        &mut arena.buffers[node.0 as usize],
-                        &mut arena.free_buffers,
-                        values.len(),
+                    if let Some(presized) = arena.buffers[node.0 as usize].replace(values) {
+                        arena.free_buffers.push(presized);
+                    }
+                    float64_island::retire(
+                        &mut wide,
+                        &mut arena.wide_pool,
+                        &arena.retires[position],
                     );
-                    output.copy_from_slice(&values);
-                    arena.buffers[node.0 as usize] = Some(output);
-                    float64_island::retire(&mut wide, &arena.retires[position]);
                     retire_arena_buffers(arena, position);
                     continue;
                 }
@@ -1529,7 +1544,7 @@ pub(super) fn run_resolved_nodes_in_arena(
                 arena.buffers[tail_node.0 as usize] = Some(output);
             }
         }
-        float64_island::retire(&mut wide, &arena.retires[position]);
+        float64_island::retire(&mut wide, &mut arena.wide_pool, &arena.retires[position]);
         retire_arena_buffers(arena, position);
     }
     Ok(())
