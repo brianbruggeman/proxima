@@ -3,6 +3,7 @@
 //! the program's own ops and points those gemms at it. The node's id is `program.len() + k`, so
 //! it never collides with a program node and never leaves the plan.
 
+use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use proxima_primitives::block_layout::BlockLayout;
@@ -38,20 +39,28 @@ fn activation_is_flat(bound: &BoundOp, layout: &Layout, tokens: u64, depth: u64)
     let BoundOpKind::Reduce { output_axes, .. } = &bound.kind else {
         return false;
     };
-    let live: Vec<u16> = (0..bound.extents.len() as u16)
+    let mut live: Vec<(i64, u16)> = (0..bound.extents.len() as u16)
         .filter(|axis| layout.stride(*axis) != 0)
+        .map(|axis| (layout.stride(axis), axis))
         .collect();
-    let [first, second] = live.as_slice() else {
+    live.sort_by_key(|(stride, _)| Reverse(*stride));
+    let Some((&(token_stride, token_axis), depth_axes)) = live.split_first() else {
         return false;
     };
-    let (token_axis, depth_axis) = if layout.stride(*second) == 1 { (*first, *second) } else { (*second, *first) };
+    let dense_run = depth_axes.iter().rev().try_fold(1i64, |expected, (stride, axis)| {
+        (*stride == expected).then(|| expected * bound.extents[usize::from(*axis)] as i64)
+    });
     layout.base == 0
-        && layout.stride(depth_axis) == 1
-        && layout.stride(token_axis) == depth as i64
-        && bound.extents[usize::from(depth_axis)] == depth
+        && dense_run == Some(depth as i64)
+        && token_stride == depth as i64
         && bound.extents[usize::from(token_axis)] == tokens
         && output_axes.contains(&token_axis)
-        && !output_axes.contains(&depth_axis)
+        && depth_axes.iter().all(|(_, axis)| !output_axes.contains(axis))
+}
+
+fn collapsed_extent(shape: &[u64]) -> Option<[u64; 2]> {
+    let (tokens, trailing) = shape.split_first()?;
+    (!trailing.is_empty()).then(|| [*tokens, trailing.iter().product()])
 }
 
 fn gemm_activation(
@@ -71,16 +80,13 @@ fn gemm_activation(
         _ => return None,
     };
     let (activation, layout, _) = operands.get(slot)?;
-    let shape = shapes.of(*activation);
-    let [tokens, depth] = shape else {
-        return None;
-    };
+    let [tokens, depth] = collapsed_extent(shapes.of(*activation))?;
     let float_node = matches!(program.get(activation.0 as usize)?.dtype(), DType::FLOAT32);
-    let served = if *tokens == 1 {
+    let served = if tokens == 1 {
         staged_matvec_serves(bound, packed, slot, policy)
     } else {
-        *tokens > 1
-            && activation_is_flat(bound, layout, *tokens, *depth)
+        tokens > 1
+            && activation_is_flat(bound, layout, tokens, depth)
             && int8_gemm_serves(bound, packed, slot, policy)
     };
     let eligible = float_node && depth.is_multiple_of(QUANTIZE_GROUP) && served;
@@ -156,7 +162,7 @@ pub(crate) fn derive_block_quantize(
     let mut repoints: BTreeMap<usize, Vec<(usize, NodeId)>> = BTreeMap::new();
     for (activation, consumers) in &activations {
         let derived = ids[activation];
-        let &[tokens, depth] = shapes.of(*activation) else {
+        let Some([tokens, depth]) = collapsed_extent(shapes.of(*activation)) else {
             continue;
         };
         let first = consumers.iter().map(|consumer| consumer.position).min().unwrap_or(0);
@@ -223,15 +229,20 @@ mod tests {
         append(program, Op::Input { dtype, shape, name: None })
     }
 
-    fn gemm(program: &mut Vec<Op>, weight: NodeId, activation: NodeId) -> NodeId {
+    fn gemm_over(program: &mut Vec<Op>, weight: NodeId, activation: NodeId, trailing: usize) -> NodeId {
+        let loops = (2 + trailing) as u16;
+        let reduced: Vec<u16> = (2..loops).collect();
+        let weight_axes: Vec<u16> = [&[1u16][..], &reduced].concat();
+        let activation_axes: Vec<u16> = [&[0u16][..], &reduced].concat();
+        let all: Vec<u16> = (0..loops).collect();
         let product = append(
             program,
             Op::Elementwise {
                 dtype: DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 operands: vec![
-                    (weight, IndexMap::Affine(projection(3, &[1, 2]))),
-                    (activation, IndexMap::Affine(projection(3, &[0, 2]))),
+                    (weight, IndexMap::Affine(projection(loops, &weight_axes))),
+                    (activation, IndexMap::Affine(projection(loops, &activation_axes))),
                 ],
                 name: None,
             },
@@ -243,23 +254,34 @@ mod tests {
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: product,
-                in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
-                out_map: IndexMap::Affine(projection(3, &[0, 1])),
+                in_map: IndexMap::Affine(projection(loops, &all)),
+                out_map: IndexMap::Affine(projection(loops, &[0, 1])),
                 keep: Keep::Reduce,
                 name: None,
             }),
         )
     }
 
+    fn wide_input(program: &mut Vec<Op>, dtype: DType, rows: u32) -> NodeId {
+        let shape = [rows, 4, 2, 16].map(Extent::Static).to_vec();
+        append(program, Op::Input { dtype, shape, name: None })
+    }
+
     fn fixture(tokens: u32, plain_reader: bool) -> Fixture {
+        build_fixture(tokens, plain_reader, false)
+    }
+
+    fn build_fixture(tokens: u32, plain_reader: bool, wide: bool) -> Fixture {
         let mut program = Vec::new();
-        let activation = input(&mut program, DType::FLOAT32, tokens);
-        let first = input(&mut program, DType::UINT8, FEATURES);
-        let second = input(&mut program, DType::UINT8, FEATURES);
-        let plain = input(&mut program, DType::FLOAT32, FEATURES);
-        let gate = gemm(&mut program, first, activation);
-        let up = gemm(&mut program, second, activation);
-        let sum = if plain_reader { gemm(&mut program, plain, activation) } else { gate };
+        let (make, trailing): (fn(&mut Vec<Op>, DType, u32) -> NodeId, usize) =
+            if wide { (wide_input, 3) } else { (input, 1) };
+        let activation = make(&mut program, DType::FLOAT32, tokens);
+        let first = make(&mut program, DType::UINT8, FEATURES);
+        let second = make(&mut program, DType::UINT8, FEATURES);
+        let plain = make(&mut program, DType::FLOAT32, FEATURES);
+        let gate = gemm_over(&mut program, first, activation, trailing);
+        let up = gemm_over(&mut program, second, activation, trailing);
+        let sum = if plain_reader { gemm_over(&mut program, plain, activation, trailing) } else { gate };
         let outputs = [gate, up, sum];
         let shapes = infer(&program, &[]).expect("program infers");
         let packed = PackedOperands::from([(first, Codec::Pq2_0), (second, Codec::Pq2_0)]);
@@ -338,6 +360,21 @@ mod tests {
         let fixture = fixture(1, true);
         let (derived, _) = derive(&fixture, granted(), GpuDriver::Cuda);
         assert_eq!(derived, fixture.resolved);
+    }
+
+    #[test]
+    fn a_contiguous_multi_axis_activation_gets_a_derived_node_over_its_flat_run() {
+        for tokens in [1, 3] {
+            let fixture = build_fixture(tokens, false, true);
+            let (derived, packed) = derive(&fixture, granted(), GpuDriver::Cuda);
+            let ids = derived_ids(&derived, fixture.program.len());
+            assert_eq!(ids.len(), 1, "{tokens} tokens");
+            assert_eq!(packed.get(&ids[0]), Some(&Codec::Q8_1));
+            let node = derived.iter().find(|bound| bound.node == ids[0]).expect("derived node present");
+            let bytes = u64::from(DEPTH) / QUANTIZE_GROUP * u64::from(BlockLayout::Q8_1.block_bytes);
+            assert_eq!(node.extents, vec![u64::from(tokens), bytes]);
+            assert_eq!(underive_block_quantize(&derived, fixture.program.len()), fixture.resolved);
+        }
     }
 
     #[test]

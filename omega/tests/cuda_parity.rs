@@ -4805,16 +4805,18 @@ async fn a_plan_refit_across_every_symbol_matches_a_plan_built_there(#[case] bui
 }
 
 fn int8_gemm_program(features: u32, depth: u32, tokens: u32) -> (Vec<Op>, NodeId) {
+    int8_gemm_program_over(features, &[depth], tokens)
+}
+
+fn int8_gemm_program_over(features: u32, trailing: &[u32], tokens: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let input = |program: &mut Vec<Op>, dtype, rows, name: &str| {
-        append(
-            program,
-            Op::Input { dtype, shape: vec![Extent::Static(rows), Extent::Static(depth)], name: Some(name.into()) },
-        )
+        let shape = std::iter::once(rows).chain(trailing.iter().copied()).map(Extent::Static).collect();
+        append(program, Op::Input { dtype, shape, name: Some(name.into()) })
     };
     let weight = input(&mut program, DType::UINT8, features, "weight");
     let activation = input(&mut program, DType::FLOAT32, tokens, "activation");
-    let sum = append_int8_gemm(&mut program, weight, activation, "int8_prefill_gemm");
+    let sum = append_int8_gemm_over(&mut program, weight, activation, "int8_prefill_gemm", trailing.len() as u16);
     (program, sum)
 }
 
@@ -4905,7 +4907,20 @@ fn assert_derived_matvec_parity(
     dequantize: fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>,
     shape: [usize; 3],
 ) {
+    assert_derived_parity(codec, block_bytes, block_elements, quantize, dequantize, shape, &[shape[1] as u32]);
+}
+
+fn assert_derived_parity(
+    codec: Codec,
+    block_bytes: usize,
+    block_elements: usize,
+    quantize: fn(&[f32], &mut [u8]) -> Result<(), proxima_gguf::quant::QuantError>,
+    dequantize: fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>,
+    shape: [usize; 3],
+    trailing: &[u32],
+) {
     let [features, depth, tokens] = shape;
+    assert_eq!(trailing.iter().product::<u32>() as usize, depth, "the trailing axes are the flat depth");
     let blocks_per_row = depth / block_elements;
     let weight_f32: Vec<f32> = random_vec(61, features * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
     let mut weight_blocks = vec![0u8; features * blocks_per_row * block_bytes];
@@ -4919,7 +4934,7 @@ fn assert_derived_matvec_parity(
         dequantize(row_blocks, row_dequantized).expect("a whole number of packed blocks");
     }
     let activation: Vec<f32> = random_vec(67, tokens * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
-    let (program, root) = int8_gemm_program(features as u32, depth as u32, tokens as u32);
+    let (program, root) = int8_gemm_program_over(features as u32, trailing, tokens as u32);
     let named: Vec<(&str, QuantizedBlock<'_>)> =
         vec![("weight", QuantizedBlock::Packed { codec, bytes: &weight_blocks }), ("activation", QuantizedBlock::Float32(&activation))];
     let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true);
@@ -4939,6 +4954,10 @@ fn assert_derived_matvec_parity(
             "the one-token matvec must read the derived q8_1 node: {identities:?}"
         );
     }
+    assert!(
+        identities.iter().all(|identity| !identity.contains("_prepass") && !identity.contains("_smv8x4g")),
+        "the activation must be quantized by the derived node, not an own prologue: {identities:?}"
+    );
     let reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, true), depth, tokens);
     let unquantized = gemm_rows_max_over_peak(&output, &dequantized, &activation, depth, tokens);
     println!("derived matvec {codec:?} {features}x{depth}x{tokens}: vs fp16-scale fake-quantized {reference:.3e}, vs unquantized {unquantized:.3e}");
@@ -4968,15 +4987,44 @@ async fn q8_0_matmul_fed_by_a_derived_node_matches_the_fake_quantized_reference_
     assert_derived_matvec_parity(Codec::Q8_0, BLOCK_BYTES, QK8_0, quantize, dequantize, *shape);
 }
 
+#[proxima::test]
+#[case::one_token(&[50, 1024, 1])]
+#[case::three_tokens(&[256, 1024, 3])]
+async fn pq2_0_matmul_over_a_rank_four_activation_is_derived_and_matches_the_fake_quantized_reference_on_cuda(
+    #[case] shape: &[usize; 3],
+) {
+    use proxima_gguf::quant::pq2_0::{BLOCK_BYTES, QK_PQ2_0, dequantize, quantize};
+    assert_derived_parity(Codec::Pq2_0, BLOCK_BYTES, QK_PQ2_0, quantize, dequantize, *shape, &[8, 4, 32]);
+}
+
+#[proxima::test]
+#[case::one_token(&[50, 1024, 1])]
+#[case::three_tokens(&[256, 1024, 3])]
+async fn q8_0_matmul_over_a_rank_four_activation_is_derived_and_matches_the_fake_quantized_reference_on_cuda(
+    #[case] shape: &[usize; 3],
+) {
+    use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
+    assert_derived_parity(Codec::Q8_0, BLOCK_BYTES, QK8_0, quantize, dequantize, *shape, &[8, 4, 32]);
+}
+
 fn append_int8_gemm(program: &mut Vec<Op>, weight: NodeId, activation: NodeId, name: &str) -> NodeId {
+    append_int8_gemm_over(program, weight, activation, name, 1)
+}
+
+fn append_int8_gemm_over(program: &mut Vec<Op>, weight: NodeId, activation: NodeId, name: &str, trailing: u16) -> NodeId {
+    let loops = 2 + trailing;
+    let reduced: Vec<u16> = (2..loops).collect();
+    let weight_axes = [&[0u16][..], &reduced].concat();
+    let activation_axes = [&[1u16][..], &reduced].concat();
+    let all: Vec<u16> = (0..loops).collect();
     let product = append(
         program,
         Op::Elementwise {
             dtype: DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
-                (weight, IndexMap::Affine(projection(3, &[0, 2]))),
-                (activation, IndexMap::Affine(projection(3, &[1, 2]))),
+                (weight, IndexMap::Affine(projection(loops, &weight_axes))),
+                (activation, IndexMap::Affine(projection(loops, &activation_axes))),
             ],
             name: None,
         },
@@ -4988,8 +5036,8 @@ fn append_int8_gemm(program: &mut Vec<Op>, weight: NodeId, activation: NodeId, n
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,
-            in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
-            out_map: IndexMap::Affine(projection(3, &[0, 1])),
+            in_map: IndexMap::Affine(projection(loops, &all)),
+            out_map: IndexMap::Affine(projection(loops, &[0, 1])),
             keep: Keep::Reduce,
             name: Some(name.into()),
         }),
