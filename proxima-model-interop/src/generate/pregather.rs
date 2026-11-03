@@ -2140,38 +2140,6 @@ impl<'file> LoadedModel<'file> {
                     },
                 )?;
                 if let Some((values, shape)) = evaluated.get(output_id) {
-                    if !is_router
-                        && std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_OUTPUT").is_some()
-                        && let (Some(selected_layer), Some(selected_position)) = (
-                            std::env::var("PROXIMA_DEBUG_GDN_LAYER")
-                                .ok()
-                                .and_then(|value| value.parse::<usize>().ok()),
-                            std::env::var("PROXIMA_DEBUG_GDN_POSITION")
-                                .ok()
-                                .and_then(|value| value.parse::<usize>().ok()),
-                        )
-                        && layer == selected_layer
-                        && let Some(&rows) = shape.first()
-                        && let Ok(rows) = usize::try_from(rows)
-                        && rows > 0
-                        && let Some(local_position) = selected_position.checked_sub(position_offset)
-                        && local_position < rows
-                    {
-                        let row_length = values.len() / rows;
-                        let row_start = local_position * row_length;
-                        trace!(
-                            layer = layer as u64,
-                            position = selected_position as u64,
-                            node = ?segment_output,
-                            shape = ?shape,
-                            first4 = ?values[row_start..row_start + row_length]
-                                .iter()
-                                .take(4)
-                                .copied()
-                                .collect::<Vec<_>>(),
-                            "moe_block_output"
-                        );
-                    }
                     if !is_router && values.iter().any(|value| !value.is_finite()) {
                         let first_nonfinite = values
                             .iter()

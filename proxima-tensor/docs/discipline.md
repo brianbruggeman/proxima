@@ -33668,7 +33668,7 @@ Gates, `CARGO_TARGET_DIR=/tmp/cargo_target_wf`:
 - `cargo nextest run -p proxima-model-interop --features std --test qwen35moe_one_shot_vs_sequential_parity -j 4`: 1 run, 1 passed.
 - `cargo nextest run -p proxima-model-interop --features metal,instrument --test-threads 4 --no-fail-fast`: 251 run, 243 passed, 8 failed (same named set as ROW 577/586/588/590), 65 skipped.
 
-Residual: the real defect (node `%6540`, one-evaluation prefill program/lookup for a real multi-layer checkpoint) is unisolated to a file:line and still open; next step is a `PROXIMA_DEBUG_GDN_ALL_BLOCKS`-style per-node dump of the one-evaluation prefill program at width 13 against the sequential program's own per-position graph, diffed node-for-node, to find where NodeId(6540) or its producer first stops matching.
+Residual: the real defect (node `%6540`, one-evaluation prefill program/lookup for a real multi-layer checkpoint) is unisolated to a file:line and still open; next step is a per-node trace-event dump of the one-evaluation prefill program at width 13 against the sequential program's own per-position graph, diffed node-for-node, to find where NodeId(6540) or its producer first stops matching.
 
 ## ROW 592 -- node %6540 root-caused: `qwen35moe_pre_gather_plan` reads `self.program`'s own node ids while `active_program` (the one-evaluation program) is a different graph; fixed, a second, distinct defect now blocks the acceptance bar
 

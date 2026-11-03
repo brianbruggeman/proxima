@@ -398,22 +398,6 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         "run_reduce_quantized shape resolved"
     );
 
-    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-        && (resolved.extents.len() == 5 || activation.len() == 7 * 4096)
-    {
-        eprintln!(
-            "gdn_projection_run reduce={} activation={} k={} rows={} leading={} extents={:?} output_axes={:?} weight_layout={weight_layout:?} activation_layout={activation_layout:?} activation_first={:?}",
-            resolved.node.0,
-            activation_node.0,
-            k,
-            rows,
-            leading_total,
-            resolved.extents,
-            output_axes,
-            &activation[..activation.len().min(8)],
-        );
-    }
-
     // `QuantizedBlock::block_layout` is the one per-codec
     // `(block_bytes, block_elements)` table -- `Q8_0`'s 32-element block is
     // the odd one out (the growable key/value context cache's rows are
@@ -976,19 +960,6 @@ pub(super) fn run_reduce_with_quantized_weights<B: Deref<Target = [f32]>>(
     exact_activations: bool,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
-    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-        && output.len() >= 4_096
-        && resolved.extents.len() == 4
-    {
-        eprintln!(
-            "quantized_reduce_candidate node={} output_len={} extents={:?} quantized_operand={:?} exact_activations={}",
-            resolved.node.0,
-            output.len(),
-            resolved.extents,
-            quantized_operand(resolved, quantized_weights).map(|node| node.0),
-            exact_activations,
-        );
-    }
     if let Some(weight_node) = quantized_operand(resolved, quantized_weights) {
         let weight_block =
             quantized_weights
