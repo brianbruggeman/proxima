@@ -2511,6 +2511,7 @@ fn qwen35_layer_residuals_track_llama_at_the_divergent_prefix() {
         )
         .expect("writes to a string");
     }
+    eprintln!("qwen35 per-layer last-position error vs llama.cpp:\n{report}");
     let worst = errors.iter().copied().fold(0.0, f64::max);
     assert!(
         errors[0] <= FIRST_MIXER_REL_L2_CEILING && worst <= LAYER_REL_L2_CEILING,

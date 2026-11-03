@@ -18,7 +18,7 @@ const BLOCK_ELEMENTS: usize = q8_0::QK8_0;
 
 pub(super) type ActivationDotFn = fn(&[u8], &[u8]) -> Result<f32, TensorError>;
 
-// ggml's cpu activation quantizer, not `quantize_row_q8_0_ref`: it scales by
+// ggml's cpu activation quantizer, not `quantize_row_q8_0_ref`: on x86 it scales by
 // `127 / amax` and rounds half to even (`ggml-cpu/arch/x86/quants.c`
 // `quantize_row_q8_0`, `_mm256_round_ps(.., _MM_ROUND_NEAREST)`), which flips
 // single codes against the reference's `round(x * (1 / d))`.
@@ -43,9 +43,23 @@ pub(super) fn quantize_row_q8_0_activation(
     Ok(())
 }
 
+// ggml's two simd paths disagree on the reciprocal: x86 multiplies by
+// `127 / amax` (`arch/x86/quants.c:333`), neon by `1 / (amax / 127)`
+// (`arch/arm/quants.c:63-64`); both round half to even.
+#[cfg(target_arch = "aarch64")]
+fn activation_reciprocal(amax: f32) -> f32 {
+    let scale = amax / 127.0;
+    if scale == 0.0 { 0.0 } else { 1.0 / scale }
+}
+
+#[cfg(not(target_arch = "aarch64"))]
+fn activation_reciprocal(amax: f32) -> f32 {
+    if amax == 0.0 { 0.0 } else { 127.0 / amax }
+}
+
 fn quantize_activation_block(block: &[f32], packed: &mut [u8]) {
     let amax = block.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
-    let inverse = if amax == 0.0 { 0.0 } else { 127.0 / amax };
+    let inverse = activation_reciprocal(amax);
     packed[..2].copy_from_slice(&half::f16::from_f32(amax / 127.0).to_le_bytes());
     for (code, value) in packed[2..].iter_mut().zip(block) {
         *code = ((value * inverse).round_ties_even() as i8).to_le_bytes()[0];
@@ -379,9 +393,20 @@ mod tests {
         (half::f16::from_f32(d).to_f32(), levels)
     }
 
+    #[cfg(target_arch = "aarch64")]
+    fn ggml_simd_reciprocal(amax: f32) -> f32 {
+        let d = amax / 127.0;
+        if d == 0.0 { 0.0 } else { 1.0 / d }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    fn ggml_simd_reciprocal(amax: f32) -> f32 {
+        if amax == 0.0 { 0.0 } else { 127.0 / amax }
+    }
+
     fn reference_quantize(x: &[f32]) -> (f32, Vec<i8>) {
         let amax = x.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
-        let id = if amax == 0.0 { 0.0 } else { 127.0 / amax };
+        let id = ggml_simd_reciprocal(amax);
         let levels = x.iter().map(|&value| (value * id).round_ties_even() as i8).collect();
         (half::f16::from_f32(amax / 127.0).to_f32(), levels)
     }
@@ -436,7 +461,7 @@ mod tests {
 
     proptest! {
         #[test]
-        fn activation_quantize_matches_ggml_avx2_quantize_row_q8_0(x in activation_strategy()) {
+        fn activation_quantize_matches_ggml_simd_quantize_row_q8_0(x in activation_strategy()) {
             let mut ours = vec![0u8; Q8_0_ACT_BLOCK_BYTES];
             prop_assert!(quantize_row_q8_0_activation(&x, &mut ours).is_ok());
             let (reference_d, reference_levels) = reference_quantize(&x);
