@@ -160,7 +160,7 @@ pub(super) fn prepare<'block>(
     // so neither has a quantized weight to offer this gate yet — see
     // `reject_non_float32`'s doc for what the empty set here is standing in
     // for and what `matmul_q4k_f32` covers instead.
-    reject_non_float32_with_islands(program, &BTreeSet::new(), true)?;
+    reject_non_float32(program, &BTreeSet::new())?;
 
     let root = program
         .len()
@@ -669,6 +669,7 @@ pub(super) fn static_resolved_nodes(
 ) -> BTreeSet<NodeId> {
     resolved
         .iter()
+        .filter(|computed| computed.dtype != DType::FLOAT64)
         .filter(|computed| {
             matches!(
                 computed.kind,
@@ -1317,9 +1318,27 @@ pub(super) fn run_resolved_nodes_in_arena(
         .and_then(|cohort| cohort.enter().ok());
     #[cfg(feature = "epilogue-profile-probe")]
     let reduce_nodes = epilogue_profile_reduce_flags(&arena.resolved, arena.buffers.len());
+    let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
     for position in 0..arena.resolved.len() {
         let computed = &arena.resolved[position];
         let node = computed.node;
+        if !arena.dead.contains(&node) {
+            let program_len = arena.buffers.len();
+            match float64_island::step(computed, &arena.buffers, &mut wide, program_len)? {
+                float64_island::IslandStep::NotIsland => {}
+                float64_island::IslandStep::Wide => {
+                    float64_island::retire(&mut wide, &arena.retires[position]);
+                    retire_arena_buffers(arena, position);
+                    continue;
+                }
+                float64_island::IslandStep::Narrowed(values) => {
+                    arena.buffers[node.0 as usize] = Some(values);
+                    float64_island::retire(&mut wide, &arena.retires[position]);
+                    retire_arena_buffers(arena, position);
+                    continue;
+                }
+            }
+        }
         // `arena.epilogue_fuse_skip` sits alongside `dead`/`static_nodes` as
         // a third reason this position's own `run_node_into` never runs --
         // unlike the other two, the skipped node is neither dead nor
@@ -1504,13 +1523,18 @@ pub(super) fn run_resolved_nodes_in_arena(
                 arena.buffers[tail_node.0 as usize] = Some(output);
             }
         }
-        for retired in &arena.retires[position] {
-            if let Some(buffer) = arena.buffers[retired.0 as usize].take() {
-                arena.free_buffers.push(buffer);
-            }
-        }
+        float64_island::retire(&mut wide, &arena.retires[position]);
+        retire_arena_buffers(arena, position);
     }
     Ok(())
+}
+
+fn retire_arena_buffers(arena: &mut StaticArena, position: usize) {
+    for retired in &arena.retires[position] {
+        if let Some(buffer) = arena.buffers[retired.0 as usize].take() {
+            arena.free_buffers.push(buffer);
+        }
+    }
 }
 
 /// One [`evaluate_named`] call's worth of graph identity: the SAME
