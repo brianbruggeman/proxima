@@ -20,6 +20,7 @@ use std::time::UNIX_EPOCH;
 use memmap2::Mmap;
 use proxima_gguf::parse_complete;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 const DONE_MARKER: &str = "export.done";
 const EXPECTED_FILES: [&str; 4] = [
@@ -43,7 +44,11 @@ struct Model {
 
 impl Model {
     fn gguf_path(&self) -> PathBuf {
-        proxima_model_interop::checkpoint_resolver::resolve_checkpoint(self.gguf_env, self.gguf, self.gguf_length)
+        proxima_model_interop::checkpoint_resolver::resolve_checkpoint(
+            self.gguf_env,
+            self.gguf,
+            self.gguf_length,
+        )
     }
 }
 
@@ -385,4 +390,58 @@ fn mlx_cli_export_e2b_config_carries_no_per_module_quantization_entries() {
         .count();
 
     assert_eq!(modules, 0);
+}
+
+const GRANITE_PRE_STREAMING_SHA256: [(&str, &str); 4] = [
+    (
+        "config.json",
+        "a1646d888be8786383769def3ccf1db14b9d7e06f6f12253821afd7e187589f8",
+    ),
+    (
+        "model.safetensors",
+        "0c0d1dbfd3d7ef46dbfe6c68ca9e4434a84479cb18b8feac8821351fe453acc0",
+    ),
+    (
+        "tokenizer_config.json",
+        "7e09d8fe308168b4c66617e7bab658ec67006af1ace248314791748fa4aad58b",
+    ),
+    (
+        "tokenizer.json",
+        "cdf382865f17ceede6a4fc9ff477db2d341a3cda8f6fc63368d8a0656a31930f",
+    ),
+];
+
+fn sha256_hex(path: &Path) -> String {
+    let digest = Sha256::digest(read(path).expect("read exported file"));
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+fn mlx_cli_export_granite_files_hash_to_the_export_that_held_every_tensor_in_memory() {
+    let directory = exported_directory(&GRANITE);
+
+    let actual: Vec<(&str, String)> = GRANITE_PRE_STREAMING_SHA256
+        .iter()
+        .map(|(name, _)| (*name, sha256_hex(&directory.join(name))))
+        .collect();
+
+    let expected: Vec<(&str, String)> = GRANITE_PRE_STREAMING_SHA256
+        .iter()
+        .map(|(name, hash)| (*name, (*hash).to_string()))
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
+fn mlx_cli_export_hash_control_a_flipped_byte_changes_the_digest() {
+    let directory = exported_directory(&GRANITE);
+    let mut bytes = read(directory.join("config.json")).expect("read config.json");
+    bytes[0] ^= 0x01;
+
+    let digest: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+
+    assert_ne!(digest, GRANITE_PRE_STREAMING_SHA256[0].1);
 }

@@ -195,6 +195,8 @@ mod mlx_plain_named;
 pub use mlx_plain_named::export_plain_named;
 
 #[cfg(feature = "std")]
+mod mlx_weight_plan;
+#[cfg(feature = "std")]
 mod mlx_packed_named;
 #[cfg(feature = "std")]
 pub use mlx_packed_named::export_affine_named;
@@ -202,7 +204,7 @@ pub use mlx_packed_named::export_affine_named;
 #[cfg(feature = "std")]
 mod mlx_directory;
 #[cfg(feature = "std")]
-pub use mlx_directory::{export_mlx_directory, mlx_directory_files};
+pub use mlx_directory::export_mlx_directory;
 
 #[cfg(feature = "std")]
 mod mlx_reference;

@@ -1,34 +1,20 @@
-//! The affine-quantized export of a GGUF as Hugging Face named tensors: the
-//! stored leaves of [`super::export_plain_named`] with every `.weight` matrix
-//! replaced by the `weight`, `scales` and `biases` triple of
-//! [`super::export_affine`], the rest cast to the export float dtype.
-//!
-//! One tensor is decoded, packed and dropped at a time, so peak memory is the
-//! packed output plus the largest single tensor as `f32`, not the whole model
-//! as `f32`. A matrix whose last axis is not a multiple of the group size
-//! stays float, as in mlx-lm. Quantization is uniform: one [`AffineParams`]
-//! for every matrix.
+//! The affine-quantized export of a GGUF as Hugging Face named tensors, whole:
+//! [`export_affine_named`] is [`super::mlx_weight_plan::WeightPlan`] with a
+//! quantization, converted eagerly. A caller that writes the weights to disk
+//! drives the plan block by block instead.
 
-use alloc::collections::BTreeMap;
-use alloc::format;
-use alloc::vec;
 use alloc::vec::Vec;
-use std::panic::resume_unwind;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
-use proxima_gguf::TensorInfo;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::DType;
 
-use super::mlx_affine::{AffineExport, AffineParams, export_affine};
+use super::mlx_affine::AffineParams;
 use super::mlx_conventions::QuantizedConventions;
-use super::mlx_names::{FusedName, Layout, MlxNames};
-use super::mlx_plain::{PlainTensor, export_plain_leaf};
-use super::mlx_plain_named::{interleave, leaf_names};
+use super::mlx_names::Layout;
+use super::mlx_plain::PlainTensor;
+use super::mlx_weight_plan::{WeightPlan, available_workers};
 use crate::error::InteropError;
 use crate::profiles::BindingProfile;
-
-type Directory<'parsed> = BTreeMap<&'parsed str, &'parsed TensorInfo>;
 
 /// Every exportable tensor of `parsed` quantized with `params`, float
 /// remainders and the `scales` and `biases` as `dtype`, named for `layout`
@@ -53,218 +39,17 @@ pub fn export_affine_named(
     hf_prefix: &str,
     conventions: QuantizedConventions,
 ) -> Result<Vec<PlainTensor>, InteropError> {
-    let names = conventions.apply(leaf_names(parsed, binding, layout, hf_prefix)?);
-    let workers = available_workers();
-    quantize_named(
+    let quantization = Some((params, conventions));
+    WeightPlan::new(
         parsed,
         file_bytes,
-        &names,
-        params,
         dtype,
-        conventions,
-        workers,
-    )
-}
-
-fn available_workers() -> usize {
-    std::thread::available_parallelism().map_or(1, |count| count.get())
-}
-
-fn quantize_named(
-    parsed: &ParsedGguf,
-    file_bytes: &[u8],
-    names: &MlxNames,
-    params: AffineParams,
-    dtype: DType,
-    conventions: QuantizedConventions,
-    workers: usize,
-) -> Result<Vec<PlainTensor>, InteropError> {
-    let directory: Directory = parsed
-        .tensors
-        .iter()
-        .map(|tensor| (tensor.name.as_str(), tensor))
-        .collect();
-    let load =
-        |tensor: &TensorInfo, kind: DType| export_plain_leaf(parsed, file_bytes, tensor, kind);
-    let mut groups = pack_singles(
-        names,
-        &directory,
-        &load,
-        (params, conventions),
-        dtype,
-        workers,
-    )?;
-    groups.extend(pack_fused(
-        names, &directory, &load, params, dtype, workers,
-    )?);
-    Ok(groups.into_iter().flatten().collect())
-}
-
-fn pack_singles(
-    names: &MlxNames,
-    directory: &Directory,
-    load: &(impl Fn(&TensorInfo, DType) -> Result<PlainTensor, InteropError> + Sync),
-    (base, conventions): (AffineParams, QuantizedConventions),
-    dtype: DType,
-    workers: usize,
-) -> Result<Vec<Vec<PlainTensor>>, InteropError> {
-    let leaves: Vec<(&TensorInfo, &String)> = names
-        .mapped
-        .iter()
-        .filter_map(|(leaf, hf)| directory.get(leaf.as_str()).map(|info| (*info, hf)))
-        .collect();
-    ordered_map(&leaves, workers, |&(info, hf)| {
-        let quantizable = hf.ends_with(".weight") && info.dims.len() >= 2;
-        let params = conventions.params_for(hf, base)?;
-        let read = |kind: DType| load(info, kind).map(|tensor| renamed(tensor, hf));
-        quantize_or_cast(read, quantizable, params, dtype)
-    })
-}
-
-fn pack_fused(
-    names: &MlxNames,
-    directory: &Directory,
-    load: &(impl Fn(&TensorInfo, DType) -> Result<PlainTensor, InteropError> + Sync),
-    params: AffineParams,
-    dtype: DType,
-    workers: usize,
-) -> Result<Vec<Vec<PlainTensor>>, InteropError> {
-    let groups = fused_groups(names, directory);
-    ordered_map(&groups, workers, |(hf, parts)| {
-        let read = |kind: DType| {
-            let loaded: Result<Vec<PlainTensor>, InteropError> =
-                parts.iter().map(|info| load(info, kind)).collect();
-            loaded.map(|loaded| interleave(hf, &loaded))
-        };
-        quantize_or_cast(read, true, params, dtype)
-    })
-}
-
-fn ordered_map<Item: Sync, Output: Send, Failure: Send>(
-    items: &[Item],
-    workers: usize,
-    work: impl Fn(&Item) -> Result<Output, Failure> + Sync,
-) -> Result<Vec<Output>, Failure> {
-    if workers <= 1 {
-        return items.iter().map(&work).collect();
-    }
-    let next = AtomicUsize::new(0);
-    let mut claimed: Vec<(usize, Result<Output, Failure>)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = (0..workers.min(items.len()))
-            .map(|_| scope.spawn(|| claim_in_turn(items, &next, &work)))
-            .collect();
-        handles
-            .into_iter()
-            .flat_map(|handle| handle.join().unwrap_or_else(|panic| resume_unwind(panic)))
-            .collect()
-    });
-    claimed.sort_unstable_by_key(|(index, _)| *index);
-    claimed.into_iter().map(|(_, result)| result).collect()
-}
-
-fn claim_in_turn<Item, Output, Failure>(
-    items: &[Item],
-    next: &AtomicUsize,
-    work: &impl Fn(&Item) -> Result<Output, Failure>,
-) -> Vec<(usize, Result<Output, Failure>)> {
-    std::iter::from_fn(|| {
-        let index = next.fetch_add(1, Ordering::Relaxed);
-        items.get(index).map(|item| (index, work(item)))
-    })
-    .collect()
-}
-
-fn renamed(mut tensor: PlainTensor, name: &str) -> PlainTensor {
-    tensor.name = name.into();
-    tensor
-}
-
-fn fused_groups<'names, 'parsed>(
-    names: &'names MlxNames,
-    directory: &Directory<'parsed>,
-) -> Vec<(&'names str, Vec<&'parsed TensorInfo>)> {
-    let targets: alloc::collections::BTreeSet<&str> =
-        names.fused.iter().map(|item| item.hf.as_str()).collect();
-    targets
-        .into_iter()
-        .filter_map(|target| {
-            let mut group: Vec<&FusedName> = names
-                .fused
-                .iter()
-                .filter(|item| item.hf == target)
-                .collect();
-            group.sort_by_key(|item| item.part);
-            let parts: Option<Vec<&TensorInfo>> = group
-                .iter()
-                .map(|item| directory.get(item.leaf.as_str()).copied())
-                .collect();
-            parts.map(|parts| (target, parts))
-        })
-        .collect()
-}
-
-fn quantize_or_cast(
-    read: impl Fn(DType) -> Result<PlainTensor, InteropError>,
-    quantizable: bool,
-    params: AffineParams,
-    dtype: DType,
-) -> Result<Vec<PlainTensor>, InteropError> {
-    if !quantizable {
-        return Ok(vec![read(dtype)?]);
-    }
-    match pack_tensor(&read(DType::FLOAT32)?, params, dtype)? {
-        Some(triple) => Ok(triple.into()),
-        None => Ok(vec![read(dtype)?]),
-    }
-}
-
-fn pack_tensor(
-    tensor: &PlainTensor,
-    params: AffineParams,
-    dtype: DType,
-) -> Result<Option<[PlainTensor; 3]>, InteropError> {
-    let columns = tensor
-        .shape
-        .last()
-        .map_or(0, |dim| usize::try_from(*dim).unwrap_or(0));
-    let values: Vec<f32> = tensor
-        .bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|word| f32::from_le_bytes(*word))
-        .collect();
-    let rows = values.len().checked_div(columns).unwrap_or(0);
-    let AffineExport::Packed(packed) = export_affine(&values, [rows, columns], params, dtype)?
-    else {
-        return Ok(None);
-    };
-    let Some(base) = tensor.name.strip_suffix(".weight") else {
-        return Ok(None);
-    };
-    let lead = &tensor.shape[..tensor.shape.len() - 1];
-    let shaped = |last: usize| [lead, &[last as u64]].concat();
-    let words = packed.weight.iter().flat_map(|word| word.to_le_bytes());
-    Ok(Some([
-        PlainTensor {
-            name: format!("{base}.weight"),
-            shape: shaped(packed.weight_shape[1]),
-            dtype: DType::UINT32,
-            bytes: words.collect(),
-        },
-        PlainTensor {
-            name: format!("{base}.scales"),
-            shape: shaped(packed.scales_shape[1]),
-            dtype: packed.dtype,
-            bytes: packed.scales,
-        },
-        PlainTensor {
-            name: format!("{base}.biases"),
-            shape: shaped(packed.scales_shape[1]),
-            dtype: packed.dtype,
-            bytes: packed.biases,
-        },
-    ]))
+        binding,
+        layout,
+        hf_prefix,
+        quantization,
+    )?
+    .convert_all(available_workers())
 }
 
 #[cfg(test)]
@@ -276,6 +61,8 @@ mod tests {
     use super::*;
     use crate::profiles::binding_profile;
     use crate::transform::STANDARD_LAYOUT;
+    use crate::transform::mlx_affine::{AffineExport, export_affine};
+    use crate::transform::mlx_plain::export_plain_tensor;
 
     const MATRIX: &str = "blk.0.ffn_down.weight";
     const NORM: &str = "blk.0.attn_norm.weight";
@@ -476,24 +263,18 @@ mod tests {
         ]);
         let parsed = parse_complete(&bytes).expect("parses the gguf just written");
         let binding = binding_profile("granitemoe").expect("granitemoe binding profile");
-        let conventions = QuantizedConventions::NONE;
-        let names = conventions.apply(
-            leaf_names(&parsed, &binding, STANDARD_LAYOUT, "model.")
-                .expect("maps every leaf of the fixture"),
-        );
         let params = AffineParams::new(4, 32).expect("grid member");
-        let quantize = |workers| {
-            quantize_named(
-                &parsed,
-                &bytes,
-                &names,
-                params,
-                DType::BFLOAT16,
-                conventions,
-                workers,
-            )
-            .expect("quantizes the fixture")
-        };
+        let plan = WeightPlan::new(
+            &parsed,
+            &bytes,
+            DType::BFLOAT16,
+            &binding,
+            STANDARD_LAYOUT,
+            "model.",
+            Some((params, QuantizedConventions::NONE)),
+        )
+        .expect("maps every leaf of the fixture");
+        let quantize = |workers| plan.convert_all(workers).expect("quantizes the fixture");
 
         let sequential = quantize(1);
 
@@ -511,5 +292,103 @@ mod tests {
         for workers in [2, 3, 8] {
             assert_eq!(quantize(workers), sequential, "workers={workers}");
         }
+    }
+
+    #[test]
+    fn plain_one_row_blocks_equal_the_whole_tensor_export_of_each_leaf() {
+        let bytes = matrix_and_norm();
+        let parsed = parse_complete(&bytes).expect("parses the gguf just written");
+        let binding = binding_profile("granitemoe").expect("granitemoe binding profile");
+        let mut plan = WeightPlan::new(
+            &parsed,
+            &bytes,
+            DType::BFLOAT16,
+            &binding,
+            STANDARD_LAYOUT,
+            "model.",
+            None,
+        )
+        .expect("maps every leaf of the fixture");
+        plan.block_elements = 1;
+
+        let blocked = plan.convert_all(2).expect("one-row blocks");
+
+        let whole = |leaf: &str| {
+            let info = parsed
+                .tensors
+                .iter()
+                .find(|tensor| tensor.name == leaf)
+                .unwrap();
+            let range = parsed.tensor_data_range(info, bytes.len() as u64).unwrap();
+            export_plain_tensor(
+                info,
+                &bytes[range.start as usize..range.end as usize],
+                DType::BFLOAT16,
+            )
+            .unwrap()
+            .bytes
+        };
+        assert_eq!(blocked.len(), 2);
+        assert_eq!(blocked[0].bytes, whole(MATRIX));
+        assert_eq!(blocked[1].bytes, whole(NORM));
+    }
+
+    #[test]
+    fn one_row_blocks_are_byte_equal_to_whole_tensor_blocks_and_headers_describe_every_tensor() {
+        let bytes = gguf_of(&[
+            (MATRIX, &[32, 2], GgmlType::Q8_0, &q8_0_matrix_bytes()),
+            (NORM, &[32], GgmlType::F32, &norm_bytes()),
+            (
+                "blk.0.ffn_gate_exps.weight",
+                &[32, 2],
+                GgmlType::Q8_0,
+                &q8_0_matrix_bytes(),
+            ),
+            (
+                "blk.0.ffn_up_exps.weight",
+                &[32, 2],
+                GgmlType::Q8_0,
+                &q8_0_matrix_bytes(),
+            ),
+        ]);
+        let parsed = parse_complete(&bytes).expect("parses the gguf just written");
+        let binding = binding_profile("granitemoe").expect("granitemoe binding profile");
+        let params = AffineParams::new(4, 32).expect("grid member");
+        let mut plan = WeightPlan::new(
+            &parsed,
+            &bytes,
+            DType::BFLOAT16,
+            &binding,
+            STANDARD_LAYOUT,
+            "model.",
+            Some((params, QuantizedConventions::NONE)),
+        )
+        .expect("maps every leaf of the fixture");
+        let whole = plan.convert_all(1).expect("whole-tensor blocks");
+
+        plan.block_elements = 1;
+        let blocks = plan.blocks();
+        let blocked = plan.convert_all(3).expect("one-row blocks");
+
+        assert_eq!(
+            blocks.len(),
+            5,
+            "two rows of the matrix, one of the norm, two experts of the fused pair"
+        );
+        assert_eq!(blocked, whole);
+        let headers = plan.headers().expect("headers");
+        assert_eq!(
+            headers
+                .iter()
+                .map(|header| (header.name.as_str(), header.dtype, header.shape.as_slice()))
+                .collect::<Vec<_>>(),
+            shapes_by_name(&whole)
+        );
+        assert!(
+            headers
+                .iter()
+                .zip(&whole)
+                .all(|(header, tensor)| header.byte_len() == tensor.bytes.len() as u64)
+        );
     }
 }

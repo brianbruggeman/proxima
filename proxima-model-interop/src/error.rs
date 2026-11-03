@@ -614,6 +614,21 @@ pub enum InteropError {
     #[error("leaves {leaves} have no stored tensor and no layout row for an mlx export")]
     MlxUnmappedLeaves { leaves: String },
 
+    /// The MLX export converted bytes for `tensor` that disagree with the
+    /// header written ahead of them, e.g. `model.layers.0.mlp.down_proj.scales`
+    /// converted to 63 bytes where the header promised 64.
+    #[error("mlx export of {tensor:?} produced {found} bytes where its header promised {expected}")]
+    MlxWeightMismatch {
+        tensor: String,
+        expected: u64,
+        found: u64,
+    },
+
+    /// A tensor planned as quantized came back as plain float from the
+    /// packing step, e.g. `model.layers.0.mlp.down_proj.weight`.
+    #[error("mlx export of {tensor:?} was planned quantized but packed as float")]
+    MlxWeightPlanMismatch { tensor: String },
+
     /// The MLX directory export could not read the GGUF or create or write one
     /// of the output files, e.g. `/models/granite/config.json`.
     #[cfg(feature = "std")]

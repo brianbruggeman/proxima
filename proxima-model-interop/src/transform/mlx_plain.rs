@@ -108,6 +108,49 @@ pub fn export_plain_tensor(
     })
 }
 
+/// Random access to the rows of one GGUF tensor, each decoded to `f32` on
+/// demand; the row is the contiguous axis the GGUF stores first.
+pub(super) struct RowReader<'data> {
+    kind: GgmlType,
+    data: &'data [u8],
+    row_bytes: usize,
+}
+
+impl<'data> RowReader<'data> {
+    pub(super) fn new(
+        parsed: &ParsedGguf,
+        file_bytes: &'data [u8],
+        tensor: &TensorInfo,
+    ) -> Result<Self, InteropError> {
+        let range = parsed.tensor_data_range(tensor, file_bytes.len() as u64)?;
+        let data = &file_bytes[range.start as usize..range.end as usize];
+        let row_elements = tensor.dims.first().copied().unwrap_or(0);
+        let rows = tensor
+            .element_count()
+            .checked_div(row_elements)
+            .ok_or(GgufError::Overflow {
+                context: "tensor row length",
+            })? as usize;
+        let row_bytes = data.len().checked_div(rows).unwrap_or(0);
+        Ok(Self {
+            kind: tensor.ggml_type,
+            data,
+            row_bytes,
+        })
+    }
+
+    pub(super) fn decode(&self, row: u64, into: &mut [f32]) -> Result<(), InteropError> {
+        let start = (row as usize) * self.row_bytes;
+        let bytes = self
+            .data
+            .get(start..start + self.row_bytes)
+            .ok_or(GgufError::Overflow {
+                context: "tensor row range",
+            })?;
+        decode_row(self.kind, bytes, into)
+    }
+}
+
 fn decode_row(kind: GgmlType, row: &[u8], scratch: &mut [f32]) -> Result<(), InteropError> {
     if kind == GgmlType::F32 {
         row.as_chunks::<4>()
@@ -120,7 +163,7 @@ fn decode_row(kind: GgmlType, row: &[u8], scratch: &mut [f32]) -> Result<(), Int
     Ok(dequantize(kind, row, scratch)?)
 }
 
-fn cast_row(dtype: DType, values: &[f32], out: &mut Vec<u8>) -> Option<()> {
+pub(super) fn cast_row(dtype: DType, values: &[f32], out: &mut Vec<u8>) -> Option<()> {
     if dtype == DType::BFLOAT16 {
         values
             .iter()
