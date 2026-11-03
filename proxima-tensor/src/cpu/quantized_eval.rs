@@ -777,6 +777,7 @@ fn evaluate_quantized_with_policy(
     #[cfg(feature = "cohort-staged-graph")]
     let mut staged_quantize_cache: Vec<Option<Arc<[u8]>>> = vec![None; program.len()];
     let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
+    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
     let mut position = 0usize;
     while position < resolved.len() {
         #[cfg(feature = "cohort-staged-graph")]
@@ -817,7 +818,14 @@ fn evaluate_quantized_with_policy(
         // schedule).
         let epilogue_fused_away = epilogue_fuse_skip.contains(&computed.node);
         let island_handled = !epilogue_fused_away
-            && match float64_island::step(computed, &buffers, &mut wide, program.len())? {
+            && match float64_island::step(
+                computed,
+                &buffers,
+                &mut wide,
+                &mut wide_pool,
+                free_buffers,
+                program.len(),
+            )? {
                 float64_island::IslandStep::NotIsland => false,
                 float64_island::IslandStep::Wide => true,
                 float64_island::IslandStep::Narrowed(values) => {
@@ -1029,7 +1037,11 @@ fn evaluate_quantized_with_policy(
                 peak_live_buffers = peak_live_buffers.max(live_now);
             }
         }
-        live_now = live_now.saturating_sub(float64_island::retire(&mut wide, &retires[position]));
+        live_now = live_now.saturating_sub(float64_island::retire(
+            &mut wide,
+            &mut wide_pool,
+            &retires[position],
+        ));
         for retired in &retires[position] {
             // NOT always a `Some` -> `None` transition, unlike
             // `evaluate_pooled`/`evaluate_parallel`'s identical loop: a
@@ -1694,8 +1706,16 @@ pub(super) fn evaluate_pooled(
     let mut peak_live_buffers = live_count(&buffers);
     let mut live_now = peak_live_buffers;
     let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
+    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
     for (position, computed) in resolved.iter().enumerate() {
-        let output = match float64_island::step(computed, &buffers, &mut wide, buffers.len())? {
+        let output = match float64_island::step(
+            computed,
+            &buffers,
+            &mut wide,
+            &mut wide_pool,
+            free_buffers,
+            buffers.len(),
+        )? {
             float64_island::IslandStep::Wide => None,
             float64_island::IslandStep::Narrowed(values) => Some(values),
             float64_island::IslandStep::NotIsland => {
@@ -1716,7 +1736,11 @@ pub(super) fn evaluate_pooled(
         }
         live_now += 1;
         peak_live_buffers = peak_live_buffers.max(live_now);
-        live_now = live_now.saturating_sub(float64_island::retire(&mut wide, &retires[position]));
+        live_now = live_now.saturating_sub(float64_island::retire(
+            &mut wide,
+            &mut wide_pool,
+            &retires[position],
+        ));
         for retired in &retires[position] {
             // `blocks: &[&[f32]]` means every node this evaluator ever
             // touches is float32 and lands in `buffers` -- no quantized-weight
@@ -1784,7 +1808,10 @@ pub(super) fn retire_into(
 /// `Vec::resize`'s growth path only fires, and only fills the delta, when
 /// `pool` had nothing big enough already, so the fill this replaces shrinks
 /// to zero once `pool` reaches its working set's high-water mark.
-pub(super) fn take_or_allocate(pool: &mut Vec<Vec<f32>>, required: usize) -> Vec<f32> {
+pub(super) fn take_or_allocate<T: Copy + Default>(
+    pool: &mut Vec<Vec<T>>,
+    required: usize,
+) -> Vec<T> {
     let best_fit = pool
         .iter()
         .enumerate()
@@ -1795,10 +1822,10 @@ pub(super) fn take_or_allocate(pool: &mut Vec<Vec<f32>>, required: usize) -> Vec
     match best_fit {
         Some(index) => {
             let mut buffer = pool.swap_remove(index);
-            buffer.resize(required, 0.0);
+            buffer.resize(required, T::default());
             buffer
         }
-        None => vec![0.0f32; required],
+        None => vec![T::default(); required],
     }
 }
 
@@ -1923,16 +1950,28 @@ pub fn evaluate_parallel(
     let mut peak_live_buffers = live_count(&buffers);
     let mut live_now = peak_live_buffers;
     let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
+    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
+    let mut narrow_pool: Vec<Vec<f32>> = Vec::new();
     for (position, computed) in resolved.iter().enumerate() {
-        let island = float64_island::step(computed, &buffers, &mut wide, buffers.len())?;
+        let island = float64_island::step(
+            computed,
+            &buffers,
+            &mut wide,
+            &mut wide_pool,
+            &mut narrow_pool,
+            buffers.len(),
+        )?;
         if !matches!(island, float64_island::IslandStep::NotIsland) {
             if let float64_island::IslandStep::Narrowed(values) = island {
                 buffers[computed.node.0 as usize] = Some(Cow::Owned(values));
             }
             live_now += 1;
             peak_live_buffers = peak_live_buffers.max(live_now);
-            live_now =
-                live_now.saturating_sub(float64_island::retire(&mut wide, &retires[position]));
+            live_now = live_now.saturating_sub(float64_island::retire(
+                &mut wide,
+                &mut wide_pool,
+                &retires[position],
+            ));
             for retired in &retires[position] {
                 if buffers[retired.0 as usize].take().is_some() {
                     live_now -= 1;

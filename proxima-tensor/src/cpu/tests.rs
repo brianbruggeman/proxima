@@ -14188,6 +14188,8 @@ fn evaluate_retirement_arena_pool_reaches_a_fixed_point_after_the_first_call() {
     evaluate_named_with_arena(&mut arena, &slices).expect("first call evaluates");
     let pooled_after_first = arena.free_buffers.len();
     let capacity_after_first: usize = arena.free_buffers.iter().map(Vec::capacity).sum();
+    let wide_pooled_after_first = arena.wide_pool.len();
+    let wide_capacity_after_first: usize = arena.wide_pool.iter().map(Vec::capacity).sum();
     evaluate_named_with_arena(&mut arena, &slices).expect("second call evaluates");
 
     assert!(
@@ -14199,6 +14201,16 @@ fn evaluate_retirement_arena_pool_reaches_a_fixed_point_after_the_first_call() {
         arena.free_buffers.iter().map(Vec::capacity).sum::<usize>(),
         capacity_after_first,
         "the second call must reuse the pooled storage instead of allocating"
+    );
+    assert!(
+        wide_pooled_after_first > 0,
+        "the decoder's f64 norm islands must have returned their buffers to the f64 pool"
+    );
+    assert_eq!(arena.wide_pool.len(), wide_pooled_after_first);
+    assert_eq!(
+        arena.wide_pool.iter().map(Vec::capacity).sum::<usize>(),
+        wide_capacity_after_first,
+        "the second call's f64 islands must reuse the pooled storage instead of allocating"
     );
 }
 
@@ -14505,7 +14517,10 @@ fn f16_packed_embedding_row_past_the_table_end_is_refused() {
     };
     let mut decoded = vec![0f32; dim];
     let outcome = dequantize_row(NodeId(0), &block, 1, dim, &mut decoded);
-    assert!(outcome.is_err(), "row 1 of a one-row f16 table must not decode");
+    assert!(
+        outcome.is_err(),
+        "row 1 of a one-row f16 table must not decode"
+    );
 }
 
 #[test]
@@ -14522,7 +14537,9 @@ fn float64_island_sums_squares_in_double_like_ggml_rms_norm() {
         &[island.narrowed],
     )
     .expect("the float64 island evaluates on the f32 pipeline");
-    let (ours, _) = evaluated.get(island.narrowed).expect("narrowed output present");
+    let (ours, _) = evaluated
+        .get(island.narrowed)
+        .expect("narrowed output present");
     let expected: Vec<f32> = data
         .chunks_exact(width)
         .map(|row| {
@@ -14534,10 +14551,17 @@ fn float64_island_sums_squares_in_double_like_ggml_rms_norm() {
         .chunks_exact(width)
         .map(|row| row.iter().map(|value| value * value).sum::<f32>() / width as f32)
         .collect();
-    assert_eq!(ours, expected.as_slice(), "the island must match the f64 reference bit for bit");
+    assert_eq!(
+        ours,
+        expected.as_slice(),
+        "the island must match the f64 reference bit for bit"
+    );
     let pooled = evaluate(&island.program, &[], &[data.as_slice()], &[island.narrowed])
         .expect("the float64 island evaluates on the pooled path");
-    assert_eq!(pooled.get(island.narrowed).expect("pooled output").0, expected.as_slice());
+    assert_eq!(
+        pooled.get(island.narrowed).expect("pooled output").0,
+        expected.as_slice()
+    );
     let parallel = evaluate_parallel(
         &island.program,
         &[],
@@ -14546,7 +14570,10 @@ fn float64_island_sums_squares_in_double_like_ggml_rms_norm() {
         core::num::NonZeroUsize::new(2).expect("two workers"),
     )
     .expect("the float64 island evaluates on the parallel path");
-    assert_eq!(parallel.get(island.narrowed).expect("parallel output").0, expected.as_slice());
+    assert_eq!(
+        parallel.get(island.narrowed).expect("parallel output").0,
+        expected.as_slice()
+    );
     assert_ne!(
         expected, single_precision,
         "the fixture must separate f64 from f32 accumulation or it proves nothing"

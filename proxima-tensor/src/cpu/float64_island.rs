@@ -9,20 +9,26 @@ pub(super) enum IslandStep {
     Narrowed(Vec<f32>),
 }
 
-/// Runs a FLOAT64 bound op in f64, or narrows an f32 identity reading one,
-/// leaving every other op to the f32 kernels. `wide` grows to the program
-/// length on the first FLOAT64 node, so an f32-only program never allocates it.
+/// Runs a FLOAT64 bound op in f64, or narrows an f32 identity reading one into
+/// a buffer from `narrow_pool`, leaving every other op to the f32 kernels.
+/// `wide` grows to the program length on the first FLOAT64 node, so an
+/// f32-only program never allocates it; a FLOAT64 node's buffer comes from
+/// `wide_pool`, where [`retire`] returns it, so a steady-state call that keeps
+/// its pools allocates nothing here.
 pub(super) fn step<B: Deref<Target = [f32]>>(
     computed: &BoundOp,
     buffers: &[Option<B>],
     wide: &mut Vec<Option<Cow<'static, [f64]>>>,
+    wide_pool: &mut Vec<Vec<f64>>,
+    narrow_pool: &mut Vec<Vec<f32>>,
     program_len: usize,
 ) -> Result<IslandStep, TensorError> {
     if computed.dtype == DType::FLOAT64 {
         if wide.is_empty() {
             wide.resize(program_len, None);
         }
-        let mut output = vec![0.0f64; node_output_len(computed)];
+        let mut output = take_or_allocate(wide_pool, node_output_len(computed));
+        output.fill(0.0);
         run_wide(computed, buffers, wide, &mut output)?;
         wide[computed.node.0 as usize] = Some(Cow::Owned(output));
         return Ok(IslandStep::Wide);
@@ -31,9 +37,13 @@ pub(super) fn step<B: Deref<Target = [f32]>>(
         return Ok(IslandStep::NotIsland);
     }
     match single_wide_operand(computed, wide) {
-        Some(source) => Ok(IslandStep::Narrowed(
-            source.iter().map(|&value| value as f32).collect(),
-        )),
+        Some(source) => {
+            let mut narrowed = take_or_allocate(narrow_pool, source.len());
+            for (slot, &value) in narrowed.iter_mut().zip(source) {
+                *slot = value as f32;
+            }
+            Ok(IslandStep::Narrowed(narrowed))
+        }
         None => Ok(IslandStep::NotIsland),
     }
 }
@@ -100,15 +110,26 @@ fn run_wide<B: Deref<Target = [f32]>>(
     }
 }
 
-/// Drops the f64 buffer of every node retiring at this position, the f64
-/// counterpart of each loop's own f32 retirement.
-pub(super) fn retire(wide: &mut [Option<Cow<'static, [f64]>>], retiring: &[NodeId]) -> usize {
+/// Returns the f64 buffer of every node retiring at this position to
+/// `wide_pool`, the f64 counterpart of each loop's own f32 retirement; the
+/// count is how many live buffers it ended.
+pub(super) fn retire(
+    wide: &mut [Option<Cow<'static, [f64]>>],
+    wide_pool: &mut Vec<Vec<f64>>,
+    retiring: &[NodeId],
+) -> usize {
     let mut dropped = 0;
     for node in retiring {
-        if let Some(slot) = wide.get_mut(node.0 as usize)
-            && slot.take().is_some()
-        {
-            dropped += 1;
+        let Some(slot) = wide.get_mut(node.0 as usize) else {
+            continue;
+        };
+        match slot.take() {
+            Some(Cow::Owned(buffer)) => {
+                wide_pool.push(buffer);
+                dropped += 1;
+            }
+            Some(Cow::Borrowed(_)) => dropped += 1,
+            None => {}
         }
     }
     dropped
