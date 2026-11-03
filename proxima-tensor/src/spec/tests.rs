@@ -21209,10 +21209,36 @@ mod recurrent_shared {
     use crate::shape::infer;
     const DENSE_NODES: usize = 268;
     const DENSE_DIGEST: u64 = 0x00e4_e873_ea47_5ea1;
-    const ROUTED_NODES: usize = 348;
-    const ROUTED_DIGEST: u64 = 0xbc72_2fb9_9e3e_63c8;
-    const DONOR_NODES: usize = 324;
-    const DONOR_DIGEST: u64 = 0x8b58_8aa4_4615_c13a;
+    const STACKED_COMBINED: bool = cfg!(feature = "moe-stacked-combine");
+    const STACKED: bool = cfg!(feature = "moe-stacked-experts") && !STACKED_COMBINED;
+    const ROUTED_NODES: usize = if STACKED_COMBINED {
+        352
+    } else if STACKED {
+        354
+    } else {
+        348
+    };
+    const ROUTED_DIGEST: u64 = if STACKED_COMBINED {
+        0xfd80_ba94_e80f_6148
+    } else if STACKED {
+        0x3610_3ce8_26e9_cfcc
+    } else {
+        0xbc72_2fb9_9e3e_63c8
+    };
+    const DONOR_NODES: usize = if STACKED_COMBINED {
+        328
+    } else if STACKED {
+        330
+    } else {
+        324
+    };
+    const DONOR_DIGEST: u64 = if STACKED_COMBINED {
+        0xb85b_a548_4ebf_8b6e
+    } else if STACKED {
+        0x9670_7730_5c1e_0d12
+    } else {
+        0x8b58_8aa4_4615_c13a
+    };
     const RING_NODES: usize = 277;
     const RING_DIGEST: u64 = 0x39a1_6ff2_0710_4f7f;
 

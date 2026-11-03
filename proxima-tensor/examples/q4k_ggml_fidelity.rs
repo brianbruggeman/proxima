@@ -39,12 +39,25 @@ struct GgmlTypeTraits {
     from_float_ref: *const c_void,
 }
 
-#[link(name = "c++")]
-unsafe extern "C" {}
-
+#[cfg(ggml_linked)]
 #[link(name = "ggml-base", kind = "static")]
 unsafe extern "C" {
     fn ggml_get_type_traits(type_: c_int) -> *const GgmlTypeTraits;
+}
+
+#[cfg(all(ggml_linked, target_os = "macos"))]
+#[link(name = "c++")]
+unsafe extern "C" {}
+
+#[cfg(all(ggml_linked, not(target_os = "macos")))]
+#[link(name = "stdc++")]
+#[link(name = "gomp")]
+#[link(name = "m")]
+unsafe extern "C" {}
+
+#[cfg(not(ggml_linked))]
+unsafe fn ggml_get_type_traits(_type: c_int) -> *const GgmlTypeTraits {
+    std::ptr::null()
 }
 
 /// One tensor's comparison against ggml's decoder, sorted worst-first for
@@ -96,6 +109,12 @@ fn ours(ggml_type: GgmlType, data: &[u8], out: &mut [f32]) -> Result<(), String>
 }
 
 fn main() {
+    if !cfg!(ggml_linked) {
+        eprintln!(
+            "built without ggml: set GGML_BUILD_DIR to a ggml build tree holding libggml-base.a and rebuild"
+        );
+        std::process::exit(2);
+    }
     let model = env::args()
         .nth(1)
         .map(PathBuf::from)
