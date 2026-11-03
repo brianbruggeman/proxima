@@ -224,6 +224,8 @@ mod gemm_tile;
 #[macro_use]
 mod gemm_dot_quant;
 mod gemm_q8_0_act;
+#[cfg(all(target_arch = "x86_64", feature = "q6k-int8-dot"))]
+mod gemm_q6k_avx2;
 #[cfg(target_arch = "x86_64")]
 mod dequant_x86;
 #[macro_use]
@@ -236,6 +238,8 @@ pub use arena::*;
 use coalesce::*;
 use elementwise_matmul::*;
 use gemm_q8_0_act::*;
+#[cfg(all(target_arch = "x86_64", feature = "q6k-int8-dot"))]
+use gemm_q6k_avx2::dot_q6k_q8k_block_avx2;
 pub use epilogue::*;
 pub use gemm_dot_quant::*;
 pub use gemm_q8k::*;
