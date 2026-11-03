@@ -71,7 +71,7 @@ fn assert_parity_at_shape(cached_len: u64, new_count: u64, padding: u64, policy:
          eight-operand two-range shape"
     );
 
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = evaluate_quantized_named_with_scratch(
         &program,

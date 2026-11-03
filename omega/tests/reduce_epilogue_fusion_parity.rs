@@ -66,7 +66,7 @@ fn assert_parity_at_padding(padding: u64) {
          reduce+elementwise pair or the fusion pass regressed"
     );
 
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = evaluate_quantized_named_with_scratch(
         &program,
@@ -319,7 +319,7 @@ fn the_rmsnorm_broadcast_epilogue_holds_parity_on_a_real_hidden_width() {
     ];
     let named = as_named_blocks(&named);
 
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = evaluate_quantized_named_with_scratch(
         &program,

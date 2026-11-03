@@ -51,7 +51,7 @@ fn parity_cell(cached_len: u64, new_count: u64, policy: NumericPolicy) -> f32 {
          BoundOpKind::CachedAttention or this parity check exercises the wrong kernel"
     );
 
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = evaluate_quantized_named_with_scratch(
         &program,

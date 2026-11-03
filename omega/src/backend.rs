@@ -83,7 +83,7 @@ use crate::lowering::Codec;
 use proxima_tensor::config::TensorExecutionConfig;
 #[cfg(feature = "cpu")]
 use proxima_tensor::cpu::{
-    cpu_tensor_reserved_bytes, evaluate_quantized_named_exact_with_scratch_and_experts,
+    BufferPools, cpu_tensor_reserved_bytes, evaluate_quantized_named_exact_with_scratch_and_experts,
     evaluate_quantized_named_with_config, evaluate_quantized_named_with_scratch_and_experts,
 };
 #[cfg(feature = "cpu")]
@@ -750,8 +750,7 @@ fn plan_configured_candidate(
                 program: program.to_vec(),
                 symbols: symbols.to_vec(),
                 outputs: outputs.to_vec(),
-                free_buffers: Vec::new(),
-                wide_pool: Vec::new(),
+                free_buffers: BufferPools::default(),
                 validated_weight_nodes: None,
                 exact_activations: config.exact_activations,
                 execution_config: Some(execution),
@@ -967,7 +966,7 @@ fn fill_candidate_identity(
                     symbols,
                     named,
                     outputs,
-                    &cpu.free_buffers,
+                    &cpu.free_buffers.0,
                     execution,
                 )?);
             }
@@ -1095,10 +1094,9 @@ pub struct CpuPlan {
     program: Vec<Op>,
     symbols: Vec<u64>,
     outputs: Vec<NodeId>,
-    free_buffers: Vec<Vec<f32>>,
-    /// Retired f64 norm-island buffers, reused by the next call the way
-    /// `free_buffers` serves the f32 ones.
-    wide_pool: Vec<Vec<f64>>,
+    /// Freed f32 node buffers and retired f64 norm-island ones, each reused
+    /// by the next call.
+    free_buffers: BufferPools,
     validated_weight_nodes: Option<std::collections::BTreeSet<NodeId>>,
     // `false` for every existing `plan_named`/`plan_named_cpu` caller --
     // routes through the SAME `q{4,5,6}k-int8-dot` fast path this plan
@@ -1767,8 +1765,7 @@ fn plan_named_cpu(
         program: program.to_vec(),
         symbols: symbols.to_vec(),
         outputs: outputs.to_vec(),
-        free_buffers: Vec::new(),
-        wide_pool: Vec::new(),
+        free_buffers: BufferPools::default(),
         validated_weight_nodes: None,
         exact_activations: false,
         execution_config: None,
@@ -1797,8 +1794,7 @@ fn plan_named_cpu_exact(
         program: program.to_vec(),
         symbols: symbols.to_vec(),
         outputs: outputs.to_vec(),
-        free_buffers: Vec::new(),
-        wide_pool: Vec::new(),
+        free_buffers: BufferPools::default(),
         validated_weight_nodes: None,
         exact_activations: true,
         execution_config: None,
@@ -1868,7 +1864,6 @@ fn execute_plan_named_cpu(
             &plan.outputs,
             (
                 &mut plan.free_buffers,
-                &mut plan.wide_pool,
                 &mut plan.validated_weight_nodes,
             ),
             expert_sources,
@@ -1881,7 +1876,6 @@ fn execute_plan_named_cpu(
             named,
             &plan.outputs,
             &mut plan.free_buffers,
-            &mut plan.wide_pool,
             &mut plan.validated_weight_nodes,
             expert_sources,
         )?
@@ -1892,7 +1886,6 @@ fn execute_plan_named_cpu(
             named,
             &plan.outputs,
             &mut plan.free_buffers,
-            &mut plan.wide_pool,
             &mut plan.validated_weight_nodes,
             expert_sources,
         )?

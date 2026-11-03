@@ -397,12 +397,13 @@ pub(super) fn find_epilogue_sources(consumer: &BoundOp, reduce_flags: &[bool]) -
 pub(super) fn reduce_epilogue_candidates(
     resolved: &[BoundOp],
     outputs: &[NodeId],
+    program: &[Op],
     widened: bool,
 ) -> Vec<(NodeId, NodeId)> {
     let reduce_flags = reduce_epilogue_source_flags(resolved);
     let reference_counts = resolved_reference_counts(resolved);
-    let dtype_of: BTreeMap<NodeId, DType> =
-        resolved.iter().map(|bound| (bound.node, bound.dtype)).collect();
+    let by_node: BTreeMap<NodeId, &BoundOp> =
+        resolved.iter().map(|bound| (bound.node, bound)).collect();
     let mut candidates = Vec::new();
     for bound in resolved {
         let sources = if widened {
@@ -419,16 +420,126 @@ pub(super) fn reduce_epilogue_candidates(
             if outputs.contains(&source) {
                 continue; // (b): a requested output must still materialize on its own.
             }
-            if dtype_of.get(&source).is_some_and(|source_dtype| *source_dtype != bound.dtype) {
-                continue; // a merged op evaluates in one dtype; a convert stays its own op.
-            }
-            if bound.dtype == DType::FLOAT64 {
-                continue; // no backend renders an f64 epilogue body.
+            let Some(source_bound) = by_node.get(&source).copied() else {
+                continue;
+            };
+            if !admits_epilogue_dtypes(bound, source_bound, resolved, outputs, program) {
+                continue; // a merged op crosses dtypes only at a widened norm's narrow.
             }
             candidates.push((bound.node, source));
         }
     }
     candidates
+}
+
+/// Whether `consumer` may merge onto `source`'s fold given their dtypes. A
+/// merge evaluates in one dtype, with exactly one exception: a fold over f32
+/// elements that accumulates in f64 (the widen it absorbed,
+/// ggml-cpu/ops.cpp:3957-3960) takes its f64 divide, then the f32 chain that
+/// opens with the narrowing identity. The divide merges only when that narrow
+/// is its sole reader, so no f64 epilogue is ever left without its narrow:
+/// nothing else in f64 has a kernel.
+#[cfg(feature = "reduce-epilogue-fusion")]
+pub(super) fn admits_epilogue_dtypes(
+    consumer: &BoundOp,
+    source: &BoundOp,
+    resolved: &[BoundOp],
+    outputs: &[NodeId],
+    program: &[Op],
+) -> bool {
+    if consumer.dtype == source.dtype && consumer.dtype != DType::FLOAT64 {
+        return true;
+    }
+    let BoundOpKind::Reduce {
+        accumulator: DType::FLOAT64,
+        operands: fold_operands,
+        epilogue_body,
+        epilogue_operands,
+        ..
+    } = &source.kind
+    else {
+        return false;
+    };
+    let BoundOpKind::Elementwise { body, operands } = &consumer.kind else {
+        return false;
+    };
+    let fresh = reduce_epilogue_is_identity_leaf(epilogue_body, epilogue_operands);
+    match (source.dtype, consumer.dtype) {
+        (DType::FLOAT64, DType::FLOAT64) => {
+            fresh
+                && fold_operands.iter().all(|(node, ..)| {
+                    program
+                        .get(node.0 as usize)
+                        .is_some_and(|op| op.dtype() == DType::FLOAT32)
+                })
+                && divides_source(body, operands, source.node)
+                && sole_reader_narrows(consumer.node, resolved, outputs)
+        }
+        (DType::FLOAT64, DType::FLOAT32) => {
+            !fresh && opens_with_narrow(body, operands, source.node)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn source_slots(operands: &BoundOperands, source: NodeId) -> Vec<u16> {
+    operands
+        .iter()
+        .enumerate()
+        .filter(|(_, (node, _, _))| *node == source)
+        .map(|(index, _)| index as u16)
+        .collect()
+}
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn reads_any(args: &[StepArg], slots: &[u16]) -> bool {
+    args.iter()
+        .any(|arg| matches!(arg, StepArg::Operand(slot) if slots.contains(slot)))
+}
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn divides_source(body: &ComposedBody, operands: &BoundOperands, source: NodeId) -> bool {
+    let slots = source_slots(operands, source);
+    matches!(body.steps.as_slice(), [step] if step.op == ScalarOp::Divide
+        && matches!(step.args.as_slice(), [StepArg::Operand(slot), divisor]
+            if slots.contains(slot) && !reads_any(core::slice::from_ref(divisor), &slots)))
+}
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn opens_with_narrow(body: &ComposedBody, operands: &BoundOperands, source: NodeId) -> bool {
+    let slots = source_slots(operands, source);
+    body.steps
+        .first()
+        .is_some_and(|step| step.op == ScalarOp::Identity && reads_any(&step.args, &slots))
+        && body
+            .steps
+            .iter()
+            .skip(1)
+            .all(|step| !reads_any(&step.args, &slots))
+}
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn sole_reader_narrows(node: NodeId, resolved: &[BoundOp], outputs: &[NodeId]) -> bool {
+    let mut readers = resolved
+        .iter()
+        .filter(|bound| bound.all_read_sources().any(|(source, ..)| *source == node));
+    match (readers.next(), readers.next()) {
+        (Some(reader), None) => {
+            !outputs.contains(&node)
+                && reader.dtype == DType::FLOAT32
+                && matches!(&reader.kind, BoundOpKind::Elementwise { body, operands }
+                    if opens_with_narrow(body, operands, node))
+        }
+        _ => false,
+    }
+}
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn reduce_epilogue_is_identity_leaf(body: &ComposedBody, operands: &BoundOperands) -> bool {
+    operands.is_empty()
+        && matches!(body.steps.as_slice(), [step] if step.op == ScalarOp::Identity
+            && matches!(step.args.as_slice(), [StepArg::Operand(0)]))
 }
 
 /// The bind-time rewrite [`bind_with_fusion`] runs whenever
@@ -450,13 +561,39 @@ pub(super) fn reduce_epilogue_candidates(
 /// wgpu/cuda for `CachedAttention`.
 #[cfg(feature = "reduce-epilogue-fusion")]
 pub(super) fn reduce_epilogue_fusion(
-    mut resolved: Vec<BoundOp>,
+    resolved: Vec<BoundOp>,
     outputs: &[NodeId],
+    program: &[Op],
     numeric_policy: NumericPolicy,
     widened: bool,
 ) -> Result<Vec<BoundOp>, TensorError> {
+    // a widened norm's divide and narrow fold first, so its f32 result is a
+    // fold by the round its tail is matched in -- the same round an f32 norm's
+    // fold already is, which is what the first-flagged-source rule depends on
+    let narrowed =
+        fuse_epilogues_to_fixpoint(resolved, outputs, program, numeric_policy, widened, true)?;
+    fuse_epilogues_to_fixpoint(narrowed, outputs, program, numeric_policy, widened, false)
+}
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn fuse_epilogues_to_fixpoint(
+    mut resolved: Vec<BoundOp>,
+    outputs: &[NodeId],
+    program: &[Op],
+    numeric_policy: NumericPolicy,
+    widened: bool,
+    wide_sources_only: bool,
+) -> Result<Vec<BoundOp>, TensorError> {
     for _ in 0..resolved.len() {
-        let candidates = reduce_epilogue_candidates(&resolved, outputs, widened);
+        let mut candidates = reduce_epilogue_candidates(&resolved, outputs, program, widened);
+        if wide_sources_only {
+            let wide: BTreeSet<NodeId> = resolved
+                .iter()
+                .filter(|bound| bound.dtype == DType::FLOAT64)
+                .map(|bound| bound.node)
+                .collect();
+            candidates.retain(|(_, source)| wide.contains(source));
+        }
         if candidates.is_empty() {
             return Ok(resolved);
         }

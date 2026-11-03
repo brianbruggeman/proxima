@@ -174,7 +174,7 @@ pub fn bind_with_fusion(
         } else {
             let widened = numeric_policy
                 .grants(NumericRewrite::WidenedReduceEpilogueFusion.required_permissions());
-            let epilogued = reduce_epilogue_fusion(built, outputs, numeric_policy, widened)?;
+            let epilogued = reduce_epilogue_fusion(built, outputs, program, numeric_policy, widened)?;
             #[cfg(feature = "instrument")]
             debug!(
                 stage = "after_reduce_epilogue_fusion",

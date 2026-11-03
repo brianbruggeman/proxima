@@ -117,7 +117,7 @@ async fn metal_sequence_position_slice_matches_cpu_and_source_row_at_position(
     let named: Vec<(&str, proxima_tensor::QuantizedBlock)> =
         vec![("x", proxima_tensor::QuantizedBlock::Float32(&x_data))];
 
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
         &fixture.program,

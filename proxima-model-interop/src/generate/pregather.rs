@@ -1459,7 +1459,7 @@ impl<'file> LoadedModel<'file> {
                         && let Some((q_product, _)) = operands.first()
                         && let Some(mapped_product) = mapping.get(q_product)
                     {
-                        let mut exact_scratch = Vec::new();
+                        let mut exact_scratch = proxima_tensor::cpu::BufferPools::default();
                         let mut exact_validated = None;
                         let exact = evaluate_quantized_named_exact_with_scratch_and_experts(
                             program,
@@ -1467,7 +1467,6 @@ impl<'file> LoadedModel<'file> {
                             &segment_named,
                             &requested_nodes,
                             &mut exact_scratch,
-                            &mut Vec::new(),
                             &mut exact_validated,
                             None,
                         )?;
@@ -1503,7 +1502,7 @@ impl<'file> LoadedModel<'file> {
                     if std::env::var_os("PROXIMA_DEBUG_EXPERT_ROUTER_PARITY").is_some()
                         && layer == debug_layer
                     {
-                        let mut scratch = Vec::new();
+                        let mut scratch = proxima_tensor::cpu::BufferPools::default();
                         let mut validated = None;
                         let expected = evaluate_quantized_named_exact_with_scratch_and_experts(
                             program,
@@ -1511,7 +1510,6 @@ impl<'file> LoadedModel<'file> {
                             &segment_named,
                             &requested_nodes,
                             &mut scratch,
-                            &mut Vec::new(),
                             &mut validated,
                             None,
                         )?;
@@ -1723,7 +1721,7 @@ impl<'file> LoadedModel<'file> {
                         && let Some((q_product, _)) = operands.first()
                         && let Some(mapped_product) = mapping.get(q_product)
                     {
-                        let mut exact_scratch = Vec::new();
+                        let mut exact_scratch = proxima_tensor::cpu::BufferPools::default();
                         let mut exact_validated = None;
                         let exact = evaluate_quantized_named_exact_with_scratch_and_experts(
                             program,
@@ -1731,7 +1729,6 @@ impl<'file> LoadedModel<'file> {
                             &segment_named,
                             &requested_nodes,
                             &mut exact_scratch,
-                            &mut Vec::new(),
                             &mut exact_validated,
                             Some(&mapped_expert_sources),
                         )?;
@@ -1754,7 +1751,7 @@ impl<'file> LoadedModel<'file> {
                         && std::env::var_os("PROXIMA_DEBUG_EXPERT_GATHER_PARITY").is_some())
                         || debug_nonfinite
                     {
-                        let mut scratch = Vec::new();
+                        let mut scratch = proxima_tensor::cpu::BufferPools::default();
                         let mut validated = None;
                         let expected = evaluate_quantized_named_exact_with_scratch_and_experts(
                             program,
@@ -1762,7 +1759,6 @@ impl<'file> LoadedModel<'file> {
                             &segment_named,
                             &requested_nodes,
                             &mut scratch,
-                            &mut Vec::new(),
                             &mut validated,
                             Some(&mapped_expert_sources),
                         )?;

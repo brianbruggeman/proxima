@@ -34,7 +34,7 @@ fn metal_runs_the_real_forward_graph_and_agrees_with_the_cpu() {
     let (program, symbols, roots, owned) = real_forward_fixture();
     let named = as_named_blocks(&owned);
 
-    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = evaluate_quantized_named_with_scratch(
         &program,
@@ -98,7 +98,7 @@ fn metal_agrees_with_cpu_on_a_nonempty_kv_cache() {
     let named = as_named_blocks(&owned);
     let all_nodes: Vec<NodeId> = (0..program.len() as u32).map(NodeId).collect();
 
-    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = evaluate_quantized_named_with_scratch(
         &program,
@@ -171,7 +171,7 @@ fn fused_cached_attention_root_agrees_between_cpu_and_metal() {
             .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
     );
 
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = evaluate_quantized_named_with_scratch(
         &program,

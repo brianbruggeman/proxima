@@ -195,6 +195,7 @@ fn config_plan_changed_input_codec_fails_before_mutation() {
             .expect("input contract fixture");
     let before = cpu_plan(&plan)
         .free_buffers
+        .0
         .iter()
         .map(Vec::capacity)
         .collect::<Vec<_>>();
@@ -218,6 +219,7 @@ fn config_plan_changed_input_codec_fails_before_mutation() {
     assert_eq!(
         cpu_plan(&plan)
             .free_buffers
+            .0
             .iter()
             .map(Vec::capacity)
             .collect::<Vec<_>>(),
@@ -513,7 +515,7 @@ fn config_cpu_budget_trims_retained_capacity_before_repeat() {
     retained.push(99.0);
     assert_eq!(retained.capacity(), 8);
     match &mut plan {
-        Plan::Cpu(cpu) => cpu.free_buffers.push(retained),
+        Plan::Cpu(cpu) => cpu.free_buffers.0.push(retained),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         Plan::Metal(_) => panic!("cpu requested"),
         #[cfg(feature = "wgpu-backend")]
@@ -528,7 +530,7 @@ fn config_cpu_budget_trims_retained_capacity_before_repeat() {
         &[-12.0, -19.0, -34.0, -37.0],
     );
     match &plan {
-        Plan::Cpu(cpu) => assert!(cpu.free_buffers.is_empty()),
+        Plan::Cpu(cpu) => assert!(cpu.free_buffers.0.is_empty()),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         Plan::Metal(_) => panic!("cpu requested"),
         #[cfg(feature = "wgpu-backend")]

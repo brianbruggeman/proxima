@@ -3881,7 +3881,7 @@ impl BackendRuntime {
             .and_then(|value| value.parse::<u32>().ok())
             .map(NodeId)
             .and_then(|selected| {
-                let mut scratch = Vec::new();
+                let mut scratch = proxima_tensor::cpu::BufferPools::default();
                 let mut validated = None;
                 let expected = evaluate_quantized_named_exact_with_scratch_and_experts(
                     program,
@@ -5016,7 +5016,7 @@ impl BackendRuntime {
             .and_then(|value| value.parse::<u32>().ok())
             .map(NodeId)
             .and_then(|selected| {
-                let mut scratch = Vec::new();
+                let mut scratch = proxima_tensor::cpu::BufferPools::default();
                 let mut validated = None;
                 let expected = if exact_activations {
                     evaluate_quantized_named_exact_with_scratch_and_experts(
@@ -5064,8 +5064,7 @@ impl BackendRuntime {
 /// loop body reads identically whether or not `metal` is compiled in.
 #[cfg(not(feature = "gpu"))]
 pub(crate) struct BackendRuntime {
-    pub(super) free_buffers: Vec<Vec<f32>>,
-    pub(super) wide_pool: Vec<Vec<f64>>,
+    pub(super) free_buffers: proxima_tensor::cpu::BufferPools,
     pub(super) validated_weight_nodes: Option<BTreeSet<NodeId>>,
     /// `ServingConfig::exact_activations`, read once at construction --
     /// see that field's own doc.
@@ -5076,8 +5075,7 @@ pub(crate) struct BackendRuntime {
 impl BackendRuntime {
     pub(crate) fn new(_config: &ServingConfig) -> Self {
         Self {
-            free_buffers: Vec::new(),
-            wide_pool: Vec::new(),
+            free_buffers: proxima_tensor::cpu::BufferPools::default(),
             validated_weight_nodes: None,
             exact_activations: _config.exact_activations,
         }
@@ -5150,7 +5148,6 @@ impl BackendRuntime {
                 named,
                 outputs,
                 &mut self.free_buffers,
-                &mut self.wide_pool,
                 &mut self.validated_weight_nodes,
                 expert_sources,
             )?);
@@ -5161,7 +5158,6 @@ impl BackendRuntime {
             named,
             outputs,
             &mut self.free_buffers,
-            &mut self.wide_pool,
             &mut self.validated_weight_nodes,
             expert_sources,
         )?)

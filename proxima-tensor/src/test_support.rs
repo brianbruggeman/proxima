@@ -188,3 +188,20 @@ pub fn widened_sum_of_squares(rows: u32, width: u32) -> WidenedSumOfSquares {
         narrowed,
     }
 }
+
+/// How many norms in `program` widen their squares to f64 -- each
+/// [`crate::spec::mean_of_squares`] island adds exactly two nodes over the old
+/// f32 form (the widen and the narrow), so a graph golden recorded before the
+/// islands differs by twice this.
+#[must_use]
+pub fn widened_norms(program: &[crate::op::Op]) -> usize {
+    program
+        .iter()
+        .filter(|expr| {
+            matches!(expr, crate::op::Op::Elementwise { dtype, body: crate::ScalarOp::Identity, operands, .. }
+                if *dtype == crate::DType::FLOAT64
+                    && operands.len() == 1
+                    && program[operands[0].0.0 as usize].dtype() == crate::DType::FLOAT32)
+        })
+        .count()
+}

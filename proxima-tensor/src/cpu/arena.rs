@@ -280,15 +280,13 @@ pub fn evaluate(
     blocks: &[&[f32]],
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
-    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
-    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
+    let mut pools = BufferPools::default();
     evaluate_pooled(
         program,
         symbols,
         blocks,
         outputs,
-        &mut free_buffers,
-        &mut wide_pool,
+        &mut pools,
     )
 }
 
@@ -508,10 +506,9 @@ pub fn evaluate_with_scratch(
     symbols: &[u64],
     blocks: &[&[f32]],
     outputs: &[NodeId],
-    scratch: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
 ) -> Result<Evaluated, TensorError> {
-    evaluate_pooled(program, symbols, blocks, outputs, scratch, wide_pool)
+    evaluate_pooled(program, symbols, blocks, outputs, pools)
 }
 
 /// A [`bind::bind`]-shaped execution plan whose per-node output storage is
@@ -1351,11 +1348,13 @@ pub(super) fn run_resolved_nodes_in_arena(
                         &mut wide,
                         &mut arena.wide_pool,
                         &arena.retires[position],
+                        |_| false,
                     );
                     retire_arena_buffers(arena, position);
                     continue;
                 }
-                float64_island::IslandStep::Narrowed(values) => {
+                float64_island::IslandStep::Narrowed(values)
+                | float64_island::IslandStep::WideWithCopy(values) => {
                     if let Some(presized) = arena.buffers[node.0 as usize].replace(values) {
                         arena.free_buffers.push(presized);
                     }
@@ -1363,6 +1362,7 @@ pub(super) fn run_resolved_nodes_in_arena(
                         &mut wide,
                         &mut arena.wide_pool,
                         &arena.retires[position],
+                        |_| false,
                     );
                     retire_arena_buffers(arena, position);
                     continue;
@@ -1553,7 +1553,7 @@ pub(super) fn run_resolved_nodes_in_arena(
                 arena.buffers[tail_node.0 as usize] = Some(output);
             }
         }
-        float64_island::retire(&mut wide, &mut arena.wide_pool, &arena.retires[position]);
+        float64_island::retire(&mut wide, &mut arena.wide_pool, &arena.retires[position], |_| false);
         retire_arena_buffers(arena, position);
     }
     Ok(())
@@ -2610,8 +2610,10 @@ pub(super) fn epilogue_fuse_plan(
                 out_scatter: None,
                 epilogue_body,
                 epilogue_operands,
+                accumulator,
                 ..
             } if reduce_epilogue_is_identity(epilogue_body, epilogue_operands)
+                && *accumulator == DType::FLOAT32
         );
         if !is_plain_reduce {
             continue;

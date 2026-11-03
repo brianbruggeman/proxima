@@ -68,7 +68,7 @@ fn evaluate_chain(program: &[Op], outputs: &[NodeId], allow_fusion: bool) -> Eva
         &[],
         &named,
         outputs,
-        (&mut Vec::new(), &mut Vec::new(), &mut None),
+        (&mut crate::cpu::BufferPools::default(), &mut None),
         None,
         &config,
     )
@@ -229,7 +229,7 @@ fn programmable_binding_unfused_projection() {
             &[],
             &packed_named,
             &[packed_output],
-            (&mut Vec::new(), &mut Vec::new(), &mut None),
+            (&mut crate::cpu::BufferPools::default(), &mut None),
             None,
             &config,
         )
@@ -313,7 +313,7 @@ fn programmable_binding_unfused_projection() {
         &[],
         &named,
         &[output],
-        (&mut Vec::new(), &mut Vec::new(), &mut None),
+        (&mut crate::cpu::BufferPools::default(), &mut None),
         None,
         &config,
     )
@@ -417,7 +417,7 @@ fn programmable_binding_signed_zero_permission() {
         &[],
         &named,
         &[output],
-        (&mut Vec::new(), &mut Vec::new(), &mut None),
+        (&mut crate::cpu::BufferPools::default(), &mut None),
         None,
         &config,
     )

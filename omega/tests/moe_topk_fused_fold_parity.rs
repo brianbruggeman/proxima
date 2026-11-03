@@ -177,7 +177,7 @@ fn moe_topk_fused_fold_parity_sweep_on_metal() {
                 })
                 .collect();
 
-            let mut free_buffers = Vec::new();
+            let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
             let mut validated = None;
             let cpu = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
                 &fixture.program,

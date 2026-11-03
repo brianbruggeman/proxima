@@ -2,12 +2,33 @@ use super::*;
 use crate::{BodyStep, Layout};
 
 /// What [`step`] did with one bound op: nothing (the f32 path runs it), a
-/// FLOAT64 node now held in the wide buffers, or an f32 narrowing of a wide
-/// operand ready for the f32 buffers.
+/// FLOAT64 node now held in the wide buffers, an f32 narrowing of a wide
+/// operand ready for the f32 buffers, or a FLOAT64 constant held wide that
+/// also leaves its exact f32 copy for the f32 buffers.
 pub(super) enum IslandStep {
     NotIsland,
     Wide,
     Narrowed(Vec<f32>),
+    WideWithCopy(Vec<f32>),
+}
+
+impl IslandStep {
+    /// How many nodes this step made live, for an evaluator's peak count: a
+    /// constant's wide buffer and its f32 copy are one node.
+    pub(super) fn live_buffers(&self) -> usize {
+        match self {
+            Self::NotIsland => 0,
+            Self::Wide | Self::Narrowed(_) | Self::WideWithCopy(_) => 1,
+        }
+    }
+
+    /// The f32 buffer this step leaves for the node, if any.
+    pub(super) fn into_f32(self) -> Option<Vec<f32>> {
+        match self {
+            Self::Narrowed(values) | Self::WideWithCopy(values) => Some(values),
+            Self::NotIsland | Self::Wide => None,
+        }
+    }
 }
 
 /// Runs a FLOAT64 bound op in f64, or narrows an f32 identity reading one into
@@ -31,8 +52,17 @@ pub(super) fn step<B: Deref<Target = [f32]>>(
         let mut output = take_or_allocate(wide_pool, node_output_len(computed));
         output.fill(0.0);
         run_wide(computed, buffers, wide, &mut output)?;
+        // an f64 constant's literal is an f32, so its f32 copy is exact: a
+        // fused f32 kernel reading the count a norm divides by gets it there
+        let constant_copy = matches!(computed.kind, BoundOpKind::Constant { .. }).then(|| {
+            let mut narrowed = take_or_allocate(narrow_pool, output.len());
+            for (slot, &value) in narrowed.iter_mut().zip(&output) {
+                *slot = value as f32;
+            }
+            narrowed
+        });
         wide[computed.node.0 as usize] = Some(Cow::Owned(output));
-        return Ok(IslandStep::Wide);
+        return Ok(constant_copy.map_or(IslandStep::Wide, IslandStep::WideWithCopy));
     }
     if wide.is_empty() || computed.dtype != DType::FLOAT32 {
         return Ok(IslandStep::NotIsland);
@@ -123,11 +153,13 @@ fn run_wide<B: Deref<Target = [f32]>>(
 
 /// Returns the f64 buffer of every node retiring at this position to
 /// `wide_pool`, the f64 counterpart of each loop's own f32 retirement; the
-/// count is how many live buffers it ended.
+/// count is how many live nodes it ended, leaving a node that also holds an
+/// f32 copy to the f32 retirement.
 pub(super) fn retire(
     wide: &mut [Option<Cow<'static, [f64]>>],
     wide_pool: &mut Vec<Vec<f64>>,
     retiring: &[NodeId],
+    counted_as_f32: impl Fn(NodeId) -> bool,
 ) -> usize {
     let mut dropped = 0;
     for node in retiring {
@@ -137,9 +169,9 @@ pub(super) fn retire(
         match slot.take() {
             Some(Cow::Owned(buffer)) => {
                 wide_pool.push(buffer);
-                dropped += 1;
+                dropped += usize::from(!counted_as_f32(*node));
             }
-            Some(Cow::Borrowed(_)) => dropped += 1,
+            Some(Cow::Borrowed(_)) => dropped += usize::from(!counted_as_f32(*node)),
             None => {}
         }
     }
@@ -272,4 +304,136 @@ fn sum_squared_rows_in_f64(
             coordinate[axis] = 0;
         }
     }
+}
+
+/// A fused reduce that accumulates in f64 while its result is f32: the norm
+/// whose reduce absorbed the widen and whose epilogue carries the f64 divide,
+/// the narrowing identity and the f32 tail. The fold sums in f64 (in ggml's
+/// order for a plain sum of squares), the epilogue runs in f64 up to and
+/// including its first identity of an earlier step -- the narrow -- and in
+/// f32 after it, so every value crosses to f32 exactly where the program says.
+pub(super) fn run_widened_fold_into<B: Deref<Target = [f32]>>(
+    computed: &BoundOp,
+    buffers: &[Option<B>],
+    output: &mut [f32],
+) -> Result<(), TensorError> {
+    let not_lowerable = |reason| TensorError::NotLowerable {
+        node: computed.node,
+        reason,
+    };
+    let BoundOpKind::Reduce {
+        element_body,
+        output_axes,
+        epilogue_body,
+        epilogue_operands,
+        epilogue_broadcast_axes,
+        out_layout,
+        ..
+    } = &computed.kind
+    else {
+        return Err(not_lowerable(
+            "only a reduce accumulates wider than its elements",
+        ));
+    };
+    let fold_extents: Vec<u64> = output_axes
+        .iter()
+        .map(|&axis| computed.extents[axis as usize])
+        .collect();
+    let mut fold = vec![0.0f64; node_output_len(computed)];
+    accumulate_f32_elements_in_f64(computed, element_body, buffers, &mut fold)?;
+    let operand_buffers: Vec<&[f32]> = epilogue_operands
+        .iter()
+        .map(|(node, _, lookup)| {
+            if lookup.is_some() {
+                return Err(not_lowerable(
+                    "reduce epilogue does not support a gathered operand",
+                ));
+            }
+            buffer_of(buffers, *node)
+        })
+        .collect::<Result<_, _>>()?;
+    let narrow = epilogue_body.steps.iter().position(|step| {
+        step.op == ScalarOp::Identity && matches!(step.args.as_slice(), [StepArg::Step(_)])
+    });
+    let walk: &[u64] = if epilogue_broadcast_axes.is_empty() {
+        &fold_extents
+    } else {
+        &computed.extents
+    };
+    let mut coordinate = vec![0u64; walk.len()];
+    let mut full_coordinate = vec![0u64; computed.extents.len()];
+    let mut wide_steps = vec![0.0f64; epilogue_body.steps.len()];
+    let mut narrow_steps = vec![0.0f32; epilogue_body.steps.len()];
+    let mut operand_values = vec![0.0f64; epilogue_operands.len() + 1];
+    for flat in 0..odometer_len(walk) {
+        unflatten_into(flat, walk, &mut coordinate);
+        if epilogue_broadcast_axes.is_empty() {
+            full_coordinate.fill(0);
+            for (index, &axis) in output_axes.iter().enumerate() {
+                full_coordinate[axis as usize] = coordinate[index];
+            }
+        } else {
+            full_coordinate.copy_from_slice(&coordinate);
+        }
+        let fold_offset = out_layout.offset_of(&full_coordinate) as usize;
+        let operand_coordinate = if epilogue_broadcast_axes.is_empty() {
+            &coordinate
+        } else {
+            &full_coordinate
+        };
+        for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
+            operand_values[slot] =
+                f64::from(operand_buffers[slot][layout.offset_of(operand_coordinate) as usize]);
+        }
+        operand_values[epilogue_operands.len()] = fold[fold_offset];
+        let value = mixed_epilogue(
+            computed.node,
+            epilogue_body,
+            narrow,
+            &operand_values,
+            &mut wide_steps,
+            &mut narrow_steps,
+        )?;
+        let target = if epilogue_broadcast_axes.is_empty() {
+            fold_offset
+        } else {
+            flat as usize
+        };
+        output[target] = value;
+    }
+    Ok(())
+}
+
+fn mixed_epilogue(
+    node: NodeId,
+    body: &ComposedBody,
+    narrow: Option<usize>,
+    operands: &[f64],
+    wide_steps: &mut [f64],
+    narrow_steps: &mut [f32],
+) -> Result<f32, TensorError> {
+    let wide_until = narrow.unwrap_or(body.steps.len());
+    for (index, step) in body.steps.iter().enumerate() {
+        if index < wide_until {
+            let mut args = [0.0f64; 3];
+            for (slot, arg) in step.args.iter().enumerate() {
+                args[slot] = match arg {
+                    StepArg::Operand(operand) => operands[*operand as usize],
+                    StepArg::Step(earlier) => wide_steps[*earlier as usize],
+                };
+            }
+            wide_steps[index] = <f64 as Element>::apply(node, step.op, &args[..step.args.len()])?;
+            narrow_steps[index] = wide_steps[index] as f32;
+        } else {
+            let mut args = [0.0f32; 3];
+            for (slot, arg) in step.args.iter().enumerate() {
+                args[slot] = match arg {
+                    StepArg::Operand(operand) => operands[*operand as usize] as f32,
+                    StepArg::Step(earlier) => narrow_steps[*earlier as usize],
+                };
+            }
+            narrow_steps[index] = apply_scalar_op(step.op, &args[..step.args.len()]);
+        }
+    }
+    Ok(narrow_steps[body.steps.len() - 1])
 }

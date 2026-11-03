@@ -133,7 +133,7 @@ fn assert_stacked_matches(token_count: u32) {
         ("expert_w_down", QuantizedBlock::Float32(&down)),
     ];
 
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
         &per_route.program,

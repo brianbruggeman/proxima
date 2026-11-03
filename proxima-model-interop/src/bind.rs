@@ -4412,7 +4412,7 @@ mod real_openchat_file {
         outputs.push(roots.logits);
         outputs.extend(layer_residuals.iter().copied());
 
-        let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+        let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
         let mut validated_weight_nodes: Option<alloc::collections::BTreeSet<op::NodeId>> = None;
         let cpu_evaluated = evaluate_quantized_named_with_scratch(
             &program,
@@ -4692,8 +4692,7 @@ mod real_openchat_file {
                 roots.push(*odd);
                 roots.push(*value);
             }
-            let mut free_buffers: Vec<Vec<f32>> = Vec::new();
-            let mut wide_pool: Vec<Vec<f64>> = Vec::new();
+            let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
             let mut validated_weight_nodes: Option<alloc::collections::BTreeSet<op::NodeId>> = None;
             let _ = evaluate_quantized_named_with_scratch(
                 &program,
@@ -4701,7 +4700,6 @@ mod real_openchat_file {
                 &named_blocks,
                 &roots,
                 &mut free_buffers,
-                &mut wide_pool,
                 &mut validated_weight_nodes,
             )
             .expect(

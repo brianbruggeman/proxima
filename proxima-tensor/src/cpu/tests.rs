@@ -13711,8 +13711,7 @@ fn requested_expert_stack_output_is_dequantized_through_an_expert_source() {
         &[],
         &blocks,
         &[stack],
-        &mut Vec::new(),
-        &mut Vec::new(),
+        &mut crate::cpu::BufferPools::default(),
         &mut None,
         Some(&sources),
     )
@@ -14282,7 +14281,7 @@ mod float_layout_evaluate {
             ("weight", QuantizedBlock::Packed { codec, bytes: rows }),
             ("activation", QuantizedBlock::Float32(x)),
         ];
-        let mut pool = Vec::new();
+        let mut pool = crate::cpu::BufferPools::default();
         let mut validated = None;
         evaluate_quantized_named_with_scratch_and_experts(
             program,
@@ -14290,7 +14289,6 @@ mod float_layout_evaluate {
             &named,
             &[sum],
             &mut pool,
-            &mut Vec::new(),
             &mut validated,
             None,
         )
@@ -14593,8 +14591,7 @@ fn the_decode_loop_reuses_its_f64_island_buffers_across_calls() {
         .iter()
         .map(|(name, values)| (name.as_str(), QuantizedBlock::Float32(values)))
         .collect();
-    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
-    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
+    let mut pools = crate::cpu::BufferPools::default();
     let mut validated = None;
     for _ in 0..2 {
         evaluate_quantized_named_with_scratch(
@@ -14602,22 +14599,20 @@ fn the_decode_loop_reuses_its_f64_island_buffers_across_calls() {
             &GRANITE_SYMBOLS,
             &blocks,
             &outputs,
-            &mut free_buffers,
-            &mut wide_pool,
+            &mut pools,
             &mut validated,
         )
         .expect("the decode loop evaluates the granite-shaped decoder");
     }
-    let wide_after_warmup = wide_pool.len();
-    let wide_capacity_after_warmup: usize = wide_pool.iter().map(Vec::capacity).sum();
+    let wide_after_warmup = pools.1.len();
+    let wide_capacity_after_warmup: usize = pools.1.iter().map(Vec::capacity).sum();
 
     evaluate_quantized_named_with_scratch(
         &program,
         &GRANITE_SYMBOLS,
         &blocks,
         &outputs,
-        &mut free_buffers,
-        &mut wide_pool,
+        &mut pools,
         &mut validated,
     )
     .expect("a warm decode call evaluates");
@@ -14626,9 +14621,9 @@ fn the_decode_loop_reuses_its_f64_island_buffers_across_calls() {
         wide_after_warmup > 0,
         "the decoder's f64 norm islands must leave their buffers in the caller's pool"
     );
-    assert_eq!(wide_pool.len(), wide_after_warmup);
+    assert_eq!(pools.1.len(), wide_after_warmup);
     assert_eq!(
-        wide_pool.iter().map(Vec::capacity).sum::<usize>(),
+        pools.1.iter().map(Vec::capacity).sum::<usize>(),
         wide_capacity_after_warmup,
         "a warm call must reuse the pooled f64 storage instead of allocating"
     );

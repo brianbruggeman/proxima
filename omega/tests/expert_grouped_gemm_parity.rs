@@ -218,7 +218,7 @@ fn run(case: &Case) -> Outputs {
         named.push(("gate", QuantizedBlock::Float32(&gate)));
     }
     let outputs = [output];
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let oracle = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
         &program,
@@ -423,7 +423,7 @@ fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
         ("activation", QuantizedBlock::Float32(&activation)),
     ];
     let outputs = [output];
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu_error = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
         &program,
