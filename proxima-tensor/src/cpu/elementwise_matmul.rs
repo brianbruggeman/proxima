@@ -828,6 +828,10 @@ pub(super) fn transpose_wide_to_output(
     session: Option<&MatmulSession<'_>>,
     output: &mut [f32],
 ) -> Result<(), TensorError> {
+    if leading_total == 1 && wide.len() == output.len() {
+        output.copy_from_slice(wide);
+        return Ok(());
+    }
     let serial = |output: &mut [f32]| {
         for row in 0..rows {
             for position in 0..leading_total {
