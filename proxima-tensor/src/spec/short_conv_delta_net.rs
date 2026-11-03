@@ -1125,32 +1125,27 @@ pub(super) fn l2norm_with_eps_map(
 ) -> Result<NodeId, TensorError> {
     let reduced = sum_map.split("->").next().unwrap_or(sum_map);
     let reduced_map = alloc::format!("{reduced}->{reduced}");
-    let squared = elementwise(
+    // ggml's `l2_norm_f32`: `1/fmaxf(sqrtf(sum), eps)` over a `ggml_float` sum
+    // (`ggml-cpu/ops.cpp:4327-4333`) -- eps floors the norm, it is not added
+    // under the root.
+    let sum_squares_wide = sum_of_squares(program, x, map, sum_map)?;
+    let sum_squares = elementwise(
         program,
         DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(x, map), (x, map)],
+        ScalarOp::Identity,
+        &[(sum_squares_wide, reduced_map.as_str())],
     )?;
-    let sum_squares = reduce(
+    let root = elementwise(
         program,
         DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        squared,
-        map,
-        sum_map,
-    )?;
-    let sum_squares_eps = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        &[(sum_squares, reduced_map.as_str()), (eps, eps_map)],
+        ScalarOp::SquareRoot,
+        &[(sum_squares, reduced_map.as_str())],
     )?;
     let norm = elementwise(
         program,
         DType::FLOAT32,
-        ScalarOp::SquareRoot,
-        &[(sum_squares_eps, reduced_map.as_str())],
+        ScalarOp::Maximum,
+        &[(root, reduced_map.as_str()), (eps, eps_map)],
     )?;
     let inv_norm = elementwise(
         program,

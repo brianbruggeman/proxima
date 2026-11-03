@@ -416,6 +416,33 @@ pub fn count_constant(program: &mut Vec<Op>, count: u32) -> NodeId {
     )
 }
 
+/// `sum(x*x)` per row as an f64 node: the f32 squares widened and summed in
+/// f64, ggml's `ggml_float` accumulator for both `rms_norm_f32`
+/// (`ggml-cpu/ops.cpp:3957-3960`) and `l2_norm_f32` (`ops.cpp:4327-4330`).
+pub fn sum_of_squares(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    full: &str,
+    reduce_out: &str,
+) -> Result<NodeId, TensorError> {
+    let squared = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Multiply,
+        &[(x, full), (x, full)],
+    )?;
+    let widened = elementwise(program, DType::FLOAT64, ScalarOp::Identity, &[(squared, full)])?;
+    reduce(
+        program,
+        DType::FLOAT64,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        widened,
+        full,
+        reduce_out,
+    )
+}
+
 /// `mean(x*x)` per row with ggml's CPU arithmetic: the f32 squares are summed
 /// in f64 (`ggml_float`), divided by the f64 `count` ([`count_constant`]), and
 /// only the mean narrows back to f32 (`ggml-cpu/ops.cpp:3957-3963`). `full`
@@ -432,22 +459,7 @@ pub fn mean_of_squares(
     row: &str,
     count_map: &str,
 ) -> Result<NodeId, TensorError> {
-    let squared = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(x, full), (x, full)],
-    )?;
-    let widened = elementwise(program, DType::FLOAT64, ScalarOp::Identity, &[(squared, full)])?;
-    let sum_squares = reduce(
-        program,
-        DType::FLOAT64,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        widened,
-        full,
-        reduce_out,
-    )?;
+    let sum_squares = sum_of_squares(program, x, full, reduce_out)?;
     let mean = elementwise(
         program,
         DType::FLOAT64,
