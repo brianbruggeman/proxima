@@ -176,20 +176,45 @@ pub(super) fn state_sensitive_ouro_gguf(num_loops: u32) -> Vec<u8> {
     ouro_gguf(&tensors, &geometry, num_loops, false)
 }
 
-/// The state-sensitive checkpoint at a serving head shape: two 128-wide query
-/// heads over one shared key/value head, the grouped geometry the CUDA tiled
-/// cached-attention body is selected for once a step carries sixteen or more rows.
-pub(super) fn grouped_state_sensitive_ouro_gguf(num_loops: u32) -> Vec<u8> {
-    let geometry = Geometry {
-        hidden: 256,
-        feed_forward: 64,
-        vocabulary: STATE_VOCABULARY,
-        epsilon: 1e-5,
-        heads: 2,
-        kv_heads: 1,
-    };
-    let tensors = state_tensor_set(256, 128, 64, STATE_VOCABULARY as usize);
-    ouro_gguf(&tensors, &geometry, num_loops, false)
+/// The grouped state-sensitive weights under a llama header: the dense family
+/// lowers its attention to one fused `CachedAttention` op, which the recurrent
+/// ouro schedule never does, so this is the checkpoint that reaches the CUDA
+/// tiled cached-attention body at sixteen or more rows.
+pub(super) fn grouped_llama_gguf() -> Vec<u8> {
+    let payloads: Vec<(String, Vec<u64>, Vec<u8>)> = state_tensor_set(256, 128, 64, STATE_VOCABULARY as usize)
+        .into_iter()
+        .filter(|(name, _, _)| !name.contains("post_attention_norm") && !name.contains("post_ffw_norm"))
+        .collect();
+    let tokens: Vec<String> = (0..STATE_VOCABULARY).map(|index| format!("t{index}")).collect();
+    let scores = alloc::vec![0.0f32; tokens.len()];
+    let tensors = payloads
+        .iter()
+        .map(|(name, dims, data)| TensorPayload {
+            name: name.clone(),
+            dims: dims.iter().copied().collect(),
+            ggml_type: GgmlType::F32,
+            data,
+        })
+        .collect();
+    write_complete(&GgufModel {
+        version: 3,
+        metadata: alloc::vec![
+            ("general.architecture".into(), MetadataValue::String("llama".into())),
+            ("llama.embedding_length".into(), MetadataValue::U32(256)),
+            ("llama.feed_forward_length".into(), MetadataValue::U32(64)),
+            ("llama.attention.head_count".into(), MetadataValue::U32(2)),
+            ("llama.attention.head_count_kv".into(), MetadataValue::U32(1)),
+            ("llama.block_count".into(), MetadataValue::U32(1)),
+            ("llama.context_length".into(), MetadataValue::U32(512)),
+            ("llama.rope.dimension_count".into(), MetadataValue::U32(128)),
+            ("llama.attention.layer_norm_rms_epsilon".into(), MetadataValue::F32(1e-5)),
+            ("tokenizer.ggml.model".into(), MetadataValue::String("llama".into())),
+            ("tokenizer.ggml.tokens".into(), MetadataValue::Array(MetadataArray::String(tokens))),
+            ("tokenizer.ggml.scores".into(), MetadataValue::Array(MetadataArray::F32(scores))),
+        ],
+        tensors,
+    })
+    .expect("write the grouped llama GGUF")
 }
 
 struct Geometry {
