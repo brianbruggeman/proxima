@@ -1,4 +1,5 @@
 use super::*;
+use crate::Layout;
 
 /// What [`step`] did with one bound op: nothing (the f32 path runs it), a
 /// FLOAT64 node now held in the wide buffers, or an f32 narrowing of a wide
@@ -98,11 +99,21 @@ fn run_wide<B: Deref<Target = [f32]>>(
             _ => run_elementwise_typed::<f64>(computed, wide, &[], output),
         },
         BoundOpKind::Reduce {
+            accumulator,
+            element_body,
             epilogue_body,
             epilogue_operands,
+            operands,
             ..
         } if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) => {
-            run_reduce_typed::<f64>(computed, wide, &[], output)
+            let reads_f32 = operands
+                .iter()
+                .any(|(node, _, _)| wide.get(node.0 as usize).is_none_or(Option::is_none));
+            if *accumulator == DType::FLOAT64 && reads_f32 {
+                accumulate_f32_elements_in_f64(computed, element_body, buffers, output)
+            } else {
+                run_reduce_typed::<f64>(computed, wide, &[], output)
+            }
         }
         _ => Err(not_lowerable(
             "only elementwise, reduce and constant ops run in f64",
@@ -133,4 +144,62 @@ pub(super) fn retire(
         }
     }
     dropped
+}
+
+/// A fold whose element body runs in f32 over f32 operands and whose sum
+/// accumulates in f64: `(ggml_float)(x * x)` summed, ggml's `rms_norm_f32`
+/// (`ggml-cpu/ops.cpp:3957-3960`). Walks the fold's whole iteration space
+/// once, row-major, evaluating the element body per point and adding it into
+/// the f64 output slot its output axes address.
+fn accumulate_f32_elements_in_f64<B: Deref<Target = [f32]>>(
+    computed: &BoundOp,
+    element_body: &ComposedBody,
+    buffers: &[Option<B>],
+    output: &mut [f64],
+) -> Result<(), TensorError> {
+    let not_lowerable = |reason| TensorError::NotLowerable {
+        node: computed.node,
+        reason,
+    };
+    let BoundOpKind::Reduce {
+        operands,
+        out_layout,
+        ..
+    } = &computed.kind
+    else {
+        return Err(not_lowerable("only a reduce accumulates wider than its elements"));
+    };
+    let sources: Vec<(&[f32], &Layout)> = operands
+        .iter()
+        .map(|(node, layout, lookup)| {
+            if lookup.is_some() {
+                return Err(not_lowerable("a widened accumulation does not gather"));
+            }
+            buffers
+                .get(node.0 as usize)
+                .and_then(Option::as_deref)
+                .map(|data| (data, layout))
+                .ok_or(not_lowerable("operand buffer missing at evaluation time"))
+        })
+        .collect::<Result<_, _>>()?;
+    output.fill(0.0);
+    let mut coordinate = vec![0u64; computed.extents.len()];
+    let mut operand_values = vec![0.0f32; sources.len()];
+    let mut step_values = vec![0.0f32; element_body.steps.len()];
+    let total: u64 = computed.extents.iter().product();
+    for _ in 0..total {
+        for (value, (data, layout)) in operand_values.iter_mut().zip(&sources) {
+            *value = data[layout.offset_of(&coordinate) as usize];
+        }
+        let element = apply_body(element_body, &operand_values, &mut step_values);
+        output[out_layout.offset_of(&coordinate) as usize] += f64::from(element);
+        for (axis, extent) in coordinate.iter_mut().zip(&computed.extents).rev() {
+            *axis += 1;
+            if *axis < *extent {
+                break;
+            }
+            *axis = 0;
+        }
+    }
+    Ok(())
 }

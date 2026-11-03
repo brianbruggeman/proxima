@@ -7340,7 +7340,7 @@ mod top_fraction_fusion_tests {
 }
 
 #[test]
-fn no_fused_body_spans_a_dtype_change() {
+fn only_an_f32_to_f64_widen_folds_into_a_reduce_as_its_accumulator() {
     let island = crate::test_support::widened_sum_of_squares(4, 8);
     let shapes = shape::infer(&island.program, &[]).expect("widened island infers");
     let permissive = NumericPolicy {
@@ -7355,12 +7355,23 @@ fn no_fused_body_spans_a_dtype_change() {
         let bound = bind_with_fusion(&island.program, &shapes, &[island.narrowed], true, policy)
             .expect("widened island binds");
         let bound_nodes: Vec<NodeId> = bound.iter().map(|op| op.node).collect();
-        for boundary in [island.squares, island.widened, island.narrowed] {
-            assert!(
-                bound_nodes.contains(&boundary),
-                "{boundary:?} sits on a dtype change and must stay its own op, bound {bound_nodes:?}"
-            );
-        }
+        assert!(
+            !bound_nodes.contains(&island.squares) && !bound_nodes.contains(&island.widened),
+            "the f32 squares and their widen fold into the f64 reduce as its accumulator, bound {bound_nodes:?}"
+        );
+        assert!(
+            bound_nodes.contains(&island.narrowed),
+            "the narrow back to f32 stays its own op, bound {bound_nodes:?}"
+        );
+        let fold = bound
+            .iter()
+            .find(|op| matches!(op.kind, BoundOpKind::Reduce { .. }))
+            .expect("the sum of squares binds as a reduce");
+        assert!(
+            matches!(fold.kind, BoundOpKind::Reduce { accumulator, ref operands, .. }
+                if accumulator == DType::FLOAT64 && operands.iter().all(|(node, _, _)| *node == island.input)),
+            "{fold:#?}"
+        );
         for op in &bound {
             assert_eq!(
                 op.dtype,

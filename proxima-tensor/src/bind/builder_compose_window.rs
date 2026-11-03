@@ -87,6 +87,24 @@ impl BoundOpBuilder {
         })
     }
 
+    // the one crossing a body may hold: an identity that widens a single f32
+    // operand to f64 is how a norm says "accumulate this sum in f64", so it
+    // stays held for the f64 reduce that absorbs it as its accumulator
+    fn widens_f32(&self, dtype: DType, body: ScalarOp, operands: &[(NodeId, IndexMap)]) -> bool {
+        let dtypes = self.dtypes.borrow();
+        dtype == DType::FLOAT64
+            && body == ScalarOp::Identity
+            && matches!(operands, [(operand, _)]
+                if dtypes.get(operand.0 as usize) == Some(&DType::FLOAT32))
+    }
+
+    fn is_held_widen(&self, node: NodeId) -> bool {
+        self.held
+            .borrow()
+            .get(&node)
+            .is_some_and(|held| self.widens_f32(held.dtype, held.body, &held.operands))
+    }
+
     /// Judge one expression: hold an elementwise op, or emit whatever is now
     /// ready.
     ///
@@ -196,7 +214,9 @@ impl BoundOpBuilder {
                     let still_live = !retires.contains(operand_node);
                     let non_identity = !is_identity_projection(map);
                     let not_held = !self.held.borrow().contains_key(operand_node);
-                    let dtype_boundary = self.crosses_dtype(*operand_node, *dtype);
+                    let widening = self.widens_f32(*dtype, *body, operands);
+                    let dtype_boundary = (self.crosses_dtype(*operand_node, *dtype) && !widening)
+                        || self.is_held_widen(*operand_node);
                     let fuses = !still_live && !non_identity && !not_held && !dtype_boundary;
                     #[cfg(feature = "instrument")]
                     {
@@ -241,7 +261,7 @@ impl BoundOpBuilder {
                 let converts = operands
                     .iter()
                     .any(|(operand_node, _)| self.crosses_dtype(*operand_node, *dtype));
-                if !self.allow_fusion || converts {
+                if !self.allow_fusion || (converts && !self.widens_f32(*dtype, *body, operands)) {
                     self.materialize_if_held(node, shapes, emitted)?;
                 }
             }
