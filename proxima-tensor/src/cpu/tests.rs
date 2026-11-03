@@ -7,8 +7,11 @@ use crate::spec::{elementwise as append_elementwise, embedding_lookup};
 
 use core::slice;
 
-use crate::test_support::Lcg;
+use crate::bind::{bind, bind_without_reduce_epilogue_fusion};
+use crate::test_support::{Lcg, WidenedSumOfSquares};
 use proptest::proptest;
+use proxima_primitives::block_on as block_on_pipe;
+use proxima_primitives::pipe::Pipe as PipeCall;
 
 /// `spec.rs`'s real `wo` shape (`ROW 431`,
 /// `append_gated_attention_only_with_taps`, `spec.rs:4358-4404`
@@ -14578,10 +14581,48 @@ fn float64_island_sums_squares_in_double_like_ggml_rms_norm() {
         parallel.get(island.narrowed).expect("parallel output").0,
         expected.as_slice()
     );
+    for (label, interpreted) in interpreted_island(&island, &data) {
+        assert_eq!(
+            interpreted, expected,
+            "the interpreter's {label} bind must accumulate in f64 like every other loop"
+        );
+    }
     assert_ne!(
         expected, single_precision,
         "the fixture must separate f64 from f32 accumulation or it proves nothing"
     );
+}
+
+fn interpreted_island(
+    island: &WidenedSumOfSquares,
+    data: &[f32],
+) -> Vec<(&'static str, Vec<f32>)> {
+    let shapes = shape::infer(&island.program, &[]).expect("widened island infers");
+    let outputs = [island.narrowed];
+    let fused = bind(&island.program, &shapes, &outputs, NumericPolicy::bit_exact())
+        .expect("the island binds fused");
+    let unfused = bind_without_reduce_epilogue_fusion(
+        &island.program,
+        &shapes,
+        &outputs,
+        false,
+        NumericPolicy::bit_exact(),
+    )
+    .expect("the island binds unfused");
+    [("fused", fused), ("unfused", unfused)]
+        .into_iter()
+        .map(|(label, bound)| {
+            let mut buffers: Vec<Option<Vec<f32>>> = alloc::vec![None; island.program.len()];
+            buffers[island.input.0 as usize] = Some(data.to_vec());
+            let interpreter = Interpreter::new(&mut buffers);
+            block_on_pipe(PipeCall::call(&interpreter, bound.into_iter().collect()))
+                .expect("the interpreter folds the island");
+            let values = interpreter
+                .get(island.narrowed)
+                .expect("the narrowed output is in the table");
+            (label, values)
+        })
+        .collect()
 }
 
 #[test]

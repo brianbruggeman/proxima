@@ -4309,7 +4309,7 @@ mod reduce_epilogue_fusion_tests {
                  max_abs_error={max_abs_error} max_rel_error={max_rel_error}"
             );
             assert!(
-                max_abs_error <= 1e-6 && max_rel_error <= 1e-6,
+                max_abs_error.to_bits() == 0,
                 "epilogue-fused output diverged from the unfused program at node {node:?}: \
                  max_abs_error={max_abs_error} max_rel_error={max_rel_error}"
             );
