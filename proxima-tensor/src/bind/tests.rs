@@ -7358,7 +7358,10 @@ fn no_fused_body_spans_a_dtype_change() {
         for op in &bound {
             assert_eq!(op.dtype, island.program[op.node.0 as usize].dtype(), "{op:?}");
         }
-        assert!(bound_nodes.contains(&island.sum) || bound_nodes.contains(&island.mean));
+        assert!(
+            bound_nodes.contains(&island.sum) || bound_nodes.contains(&island.mean),
+            "the f64 sum must be bound somewhere, bound {bound:#?}"
+        );
         assert!(!bound_nodes.contains(&island.input));
     }
 }

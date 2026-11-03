@@ -78,7 +78,13 @@ fn run_wide<B: Deref<Target = [f32]>>(
             }
             _ => run_elementwise_typed::<f64>(computed, wide, &[], output),
         },
-        BoundOpKind::Reduce { .. } => run_reduce_typed::<f64>(computed, wide, &[], output),
+        BoundOpKind::Reduce {
+            epilogue_body,
+            epilogue_operands,
+            ..
+        } if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) => {
+            run_reduce_typed::<f64>(computed, wide, &[], output)
+        }
         _ => Err(not_lowerable("only elementwise, reduce and constant ops run in f64")),
     }
 }

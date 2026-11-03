@@ -16,8 +16,9 @@ fn is_canonical_layout(layout: &Layout, extents: &[u64]) -> bool {
 /// unchanged, no [`Lookup`] on the read, and the read is canonical
 /// ([`is_canonical_layout`]) — the exact shape `omega_elementwise_r4_n1_identity`/
 /// `omega_elementwise_r2_n1_identity` (the decode census's 105 per-token
-/// dispatches) both have.
-fn identity_copy_source(bound: &BoundOp) -> Option<(NodeId, i64)> {
+/// dispatches) both have. A source of another dtype makes the identity a
+/// convert, not a copy, so it is never folded.
+fn identity_copy_source(bound: &BoundOp, program: &[Op]) -> Option<(NodeId, i64)> {
     let BoundOpKind::Elementwise { body, operands } = &bound.kind else {
         return None;
     };
@@ -31,6 +32,9 @@ fn identity_copy_source(bound: &BoundOp) -> Option<(NodeId, i64)> {
     if !is_identity_body
         || source_lookup.is_some()
         || !is_canonical_layout(source_layout, &bound.extents)
+        || program
+            .get(source.0 as usize)
+            .is_some_and(|source_op| source_op.dtype() != bound.dtype)
     {
         return None;
     }
@@ -62,13 +66,17 @@ fn rewrite_read_sources(
 /// Runs inside [`bind_with_fusion`] only, mirroring [`apply_gated_delta_net_fusion`]'s
 /// own placement — the general fusion pipeline every backend already shares,
 /// not a new one.
-pub(super) fn apply_identity_copy_alias(built: Vec<BoundOp>, outputs: &[NodeId]) -> Vec<BoundOp> {
+pub(super) fn apply_identity_copy_alias(
+    built: Vec<BoundOp>,
+    outputs: &[NodeId],
+    program: &[Op],
+) -> Vec<BoundOp> {
     let mut immediate: BTreeMap<NodeId, (NodeId, i64)> = BTreeMap::new();
     for bound in &built {
         if outputs.contains(&bound.node) {
             continue;
         }
-        if let Some(source) = identity_copy_source(bound) {
+        if let Some(source) = identity_copy_source(bound, program) {
             immediate.insert(bound.node, source);
         }
     }
@@ -218,7 +226,7 @@ mod tests {
         let built = alloc::vec![identity_op(10, 1), consumer_op(20, 10, 99)];
         let outputs = [NodeId(20)];
 
-        let rewritten = apply_identity_copy_alias(built, &outputs);
+        let rewritten = apply_identity_copy_alias(built, &outputs, &[]);
 
         assert_eq!(
             rewritten.len(),
@@ -249,7 +257,7 @@ mod tests {
         let built = alloc::vec![identity_op(10, 1), consumer_op(20, 10, 99)];
         let outputs = [NodeId(10), NodeId(20)];
 
-        let rewritten = apply_identity_copy_alias(built, &outputs);
+        let rewritten = apply_identity_copy_alias(built, &outputs, &[]);
 
         assert_eq!(
             rewritten.len(),
