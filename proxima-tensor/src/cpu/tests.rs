@@ -3,7 +3,10 @@ use crate::BFloat8;
 use crate::bind::BodyStep;
 use crate::map::{self, AxisTerm, IndexMap};
 use crate::op::{Extent, Reduce, append};
-use crate::spec::{elementwise as append_elementwise, embedding_lookup};
+use crate::spec::{
+    count_constant, elementwise as append_elementwise, embedding_lookup, input_leaf, rmsnorm,
+    scalar_constant,
+};
 
 use core::slice;
 
@@ -14593,14 +14596,99 @@ fn float64_island_sums_squares_in_double_like_ggml_rms_norm() {
     );
 }
 
-fn interpreted_island(
-    island: &WidenedSumOfSquares,
-    data: &[f32],
-) -> Vec<(&'static str, Vec<f32>)> {
+#[test]
+fn a_many_row_rms_norm_matches_the_row_by_row_f64_reference_fused_or_not() {
+    let (rows, width) = (11usize, 40usize);
+    let mut program = Vec::new();
+    let x = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(rows as u32), Extent::Static(width as u32)],
+        "x",
+    );
+    let gamma = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(width as u32)],
+        "gamma",
+    );
+    let eps = scalar_constant(&mut program, 1e-6);
+    let count = count_constant(&mut program, width as u32);
+    let normed = rmsnorm(&mut program, x, gamma, count, eps).expect("rms norm builds");
+    let mut lcg = Lcg(0x5eed);
+    let data: Vec<f32> = (0..rows * width)
+        .map(|index| lcg.next_unit() * if index % width == 0 { 4096.0 } else { 3.0 })
+        .collect();
+    let weights: Vec<f32> = (0..width).map(|_| lcg.next_unit() + 0.5).collect();
+    let expected: Vec<f32> = data
+        .chunks_exact(width)
+        .flat_map(|row| {
+            let sum = row
+                .iter()
+                .fold(0.0f64, |sum, value| sum + f64::from(value * value));
+            let inverse = 1.0 / (((sum / width as f64) as f32) + 1e-6).sqrt();
+            row.iter()
+                .zip(&weights)
+                .map(move |(value, weight)| value * inverse * weight)
+                .collect::<Vec<f32>>()
+        })
+        .collect();
+    let single_precision_means: Vec<f32> = data
+        .chunks_exact(width)
+        .map(|row| row.iter().map(|value| value * value).sum::<f32>() / width as f32)
+        .collect();
+    let double_precision_means: Vec<f32> = data
+        .chunks_exact(width)
+        .map(|row| {
+            let sum = row
+                .iter()
+                .fold(0.0f64, |sum, value| sum + f64::from(value * value));
+            (sum / width as f64) as f32
+        })
+        .collect();
+    assert_ne!(
+        single_precision_means, double_precision_means,
+        "the fixture must separate f64 from f32 accumulation or it proves nothing"
+    );
+    let evaluated = evaluate_quantized(
+        &program,
+        &[],
+        &[
+            QuantizedBlock::Float32(&data),
+            QuantizedBlock::Float32(&weights),
+        ],
+        &[normed],
+    )
+    .expect("the norm evaluates");
+    assert_eq!(
+        evaluated.get(normed).expect("norm output").0,
+        expected.as_slice()
+    );
+    let shapes = shape::infer(&program, &[]).expect("rms norm infers");
+    let fused = bind(&program, &shapes, &[normed], NumericPolicy::bit_exact()).expect("fused bind");
+    let mut buffers: Vec<Option<Vec<f32>>> = alloc::vec![None; program.len()];
+    buffers[x.0 as usize] = Some(data.clone());
+    buffers[gamma.0 as usize] = Some(weights.clone());
+    let interpreter = Interpreter::new(&mut buffers);
+    block_on_pipe(PipeCall::call(&interpreter, fused.into_iter().collect()))
+        .expect("the interpreter folds the norm");
+    assert_eq!(
+        interpreter.get(normed).expect("interpreted norm"),
+        expected,
+        "the bound norm, fused or not, must equal the row-by-row f64 reference"
+    );
+}
+
+fn interpreted_island(island: &WidenedSumOfSquares, data: &[f32]) -> Vec<(&'static str, Vec<f32>)> {
     let shapes = shape::infer(&island.program, &[]).expect("widened island infers");
     let outputs = [island.narrowed];
-    let fused = bind(&island.program, &shapes, &outputs, NumericPolicy::bit_exact())
-        .expect("the island binds fused");
+    let fused = bind(
+        &island.program,
+        &shapes,
+        &outputs,
+        NumericPolicy::bit_exact(),
+    )
+    .expect("the island binds fused");
     let unfused = bind_without_reduce_epilogue_fusion(
         &island.program,
         &shapes,

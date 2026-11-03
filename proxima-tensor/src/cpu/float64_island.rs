@@ -279,8 +279,9 @@ fn squared_rows<'data>(
     (squares && same_operand && reduced.len() == 1).then_some((data, layout, reduced[0]))
 }
 
-// summed strictly in order, one f64 add per element, the order ggml's scalar
-// `sum += (ggml_float)(x*x)` uses, so the f64 result matches it bit for bit
+// each row is summed strictly in order, one f64 add per element, the order
+// ggml's scalar `sum += (ggml_float)(x*x)` uses, so every row matches it bit
+// for bit; eight rows advance together only so their chains overlap
 fn sum_squared_rows_in_f64(
     (data, layout, reduced_axis): (&[f32], &Layout, usize),
     extents: &[u64],
@@ -291,14 +292,12 @@ fn sum_squared_rows_in_f64(
     let stride = layout.strides[reduced_axis];
     let row_count = extents.iter().product::<u64>() / width.max(1);
     let mut coordinate = vec![0u64; extents.len()];
+    let mut rows: Vec<(i64, usize)> = Vec::with_capacity(row_count as usize);
     for _ in 0..row_count {
-        let start = layout.offset_of(&coordinate);
-        let mut sum = 0.0f64;
-        for step in 0..width as i64 {
-            let value = data[(start + step * stride) as usize];
-            sum += f64::from(value * value);
-        }
-        output[out_layout.offset_of(&coordinate) as usize] = sum;
+        rows.push((
+            layout.offset_of(&coordinate),
+            out_layout.offset_of(&coordinate) as usize,
+        ));
         for axis in (0..extents.len())
             .rev()
             .filter(|axis| *axis != reduced_axis)
@@ -310,7 +309,46 @@ fn sum_squared_rows_in_f64(
             coordinate[axis] = 0;
         }
     }
+    if stride == 1 {
+        let row = |start: i64| &data[start as usize..start as usize + width as usize];
+        let (groups, remainder) = rows.as_chunks::<ROW_LANES>();
+        for group in groups {
+            let sums = sum_interleaved_rows(core::array::from_fn(|lane| row(group[lane].0)));
+            for (sum, (_, target)) in sums.iter().zip(group) {
+                output[*target] = *sum;
+            }
+        }
+        for (start, target) in remainder {
+            output[*target] = row(*start)
+                .iter()
+                .fold(0.0f64, |sum, value| sum + f64::from(value * value));
+        }
+        return;
+    }
+    for (start, target) in &rows {
+        let mut sum = 0.0f64;
+        for step in 0..width as i64 {
+            let value = data[(start + step * stride) as usize];
+            sum += f64::from(value * value);
+        }
+        output[*target] = sum;
+    }
 }
+
+fn sum_interleaved_rows(lanes: [&[f32]; ROW_LANES]) -> [f64; ROW_LANES] {
+    let width = lanes[0].len();
+    let lanes = lanes.map(|lane| &lane[..width]);
+    let mut sums = [0.0f64; ROW_LANES];
+    for index in 0..width {
+        for (sum, lane) in sums.iter_mut().zip(&lanes) {
+            let value = lane[index];
+            *sum += f64::from(value * value);
+        }
+    }
+    sums
+}
+
+const ROW_LANES: usize = 8;
 
 /// A fused reduce that accumulates in f64 while its result is f32: the norm
 /// whose reduce absorbed the widen and whose epilogue carries the f64 divide,
@@ -333,7 +371,7 @@ pub(super) fn run_widened_fold_into<B: Deref<Target = [f32]>>(
 fn run_widened_fold<B: Deref<Target = [f32]>>(
     computed: &BoundOp,
     buffers: &[Option<B>],
-    mut store: impl FnMut(usize, f64, f32),
+    store: impl FnMut(usize, f64, f32),
 ) -> Result<(), TensorError> {
     let not_lowerable = |reason| TensorError::NotLowerable {
         node: computed.node,
@@ -345,7 +383,6 @@ fn run_widened_fold<B: Deref<Target = [f32]>>(
         epilogue_body,
         epilogue_operands,
         epilogue_broadcast_axes,
-        out_layout,
         ..
     } = &computed.kind
     else {
@@ -353,15 +390,14 @@ fn run_widened_fold<B: Deref<Target = [f32]>>(
             "only a reduce accumulates wider than its elements",
         ));
     };
-    let broadcast = !epilogue_broadcast_axes.is_empty();
     let fold_extents: Vec<u64> = output_axes
         .iter()
         .map(|&axis| computed.extents[axis as usize])
         .collect();
-    let fold_len = if broadcast {
-        odometer_len(&fold_extents) as usize
-    } else {
+    let fold_len = if epilogue_broadcast_axes.is_empty() {
         node_output_len(computed)
+    } else {
+        odometer_len(&fold_extents) as usize
     };
     let mut fold = vec![0.0f64; fold_len];
     accumulate_f32_elements_in_f64(computed, element_body, buffers, &mut fold)?;
@@ -379,66 +415,207 @@ fn run_widened_fold<B: Deref<Target = [f32]>>(
     let narrow = epilogue_body.steps.iter().position(|step| {
         step.op == ScalarOp::Identity && matches!(step.args.as_slice(), [StepArg::Step(_)])
     });
-    let walk: &[u64] = if broadcast {
-        &computed.extents
+    if epilogue_broadcast_axes.is_empty() {
+        plain_widened_epilogue(computed, narrow, &fold, &operand_buffers, store)
     } else {
-        &fold_extents
+        broadcast_widened_epilogue(computed, narrow, &fold, &operand_buffers, store)
+    }
+}
+
+fn plain_widened_epilogue(
+    computed: &BoundOp,
+    narrow: Option<usize>,
+    fold: &[f64],
+    operand_buffers: &[&[f32]],
+    mut store: impl FnMut(usize, f64, f32),
+) -> Result<(), TensorError> {
+    let BoundOpKind::Reduce {
+        output_axes,
+        out_layout,
+        epilogue_body,
+        epilogue_operands,
+        ..
+    } = &computed.kind
+    else {
+        return Ok(());
     };
-    let mut coordinate = vec![0u64; walk.len()];
+    let fold_extents: Vec<u64> = output_axes
+        .iter()
+        .map(|&axis| computed.extents[axis as usize])
+        .collect();
+    let every_step: Vec<usize> = (0..epilogue_body.steps.len()).collect();
+    let mut coordinate = vec![0u64; fold_extents.len()];
     let mut full_coordinate = vec![0u64; computed.extents.len()];
-    let mut steps = (
-        vec![0.0f64; epilogue_body.steps.len()],
-        vec![0.0f32; epilogue_body.steps.len()],
-    );
+    let mut steps = step_scratch(epilogue_body);
     let mut operand_values = vec![0.0f64; epilogue_operands.len() + 1];
-    for flat in 0..odometer_len(walk) {
-        unflatten_into(flat, walk, &mut coordinate);
-        if broadcast {
-            full_coordinate.copy_from_slice(&coordinate);
-        } else {
-            full_coordinate.fill(0);
-            for (index, &axis) in output_axes.iter().enumerate() {
-                full_coordinate[axis as usize] = coordinate[index];
-            }
+    for flat in 0..odometer_len(&fold_extents) {
+        unflatten_into(flat, &fold_extents, &mut coordinate);
+        full_coordinate.fill(0);
+        for (index, &axis) in output_axes.iter().enumerate() {
+            full_coordinate[axis as usize] = coordinate[index];
         }
         let fold_offset = out_layout.offset_of(&full_coordinate) as usize;
-        let operand_coordinate = if broadcast {
-            &full_coordinate
-        } else {
-            &coordinate
-        };
         for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
             operand_values[slot] =
-                f64::from(operand_buffers[slot][layout.offset_of(operand_coordinate) as usize]);
+                f64::from(operand_buffers[slot][layout.offset_of(&coordinate) as usize]);
         }
         operand_values[epilogue_operands.len()] = fold[fold_offset];
-        let (wide_value, narrow_value) = mixed_epilogue(
-            computed.node,
-            epilogue_body,
-            narrow,
-            &operand_values,
-            &mut steps,
-        )?;
-        let target = if broadcast {
-            flat as usize
-        } else {
-            fold_offset
-        };
-        store(target, wide_value, narrow_value);
+        let mixed = (computed.node, epilogue_body, narrow);
+        evaluate_mixed(mixed, &every_step, &operand_values, &mut steps)?;
+        let (wide, narrowed) = last_step(&steps);
+        store(fold_offset, wide, narrowed);
     }
     Ok(())
 }
 
-fn mixed_epilogue(
-    node: NodeId,
-    body: &ComposedBody,
+/// The norm's shape: one fold value per row, re-broadcast over the rest of
+/// the full extents. Every step that reads only the fold and operands that
+/// do not vary along a broadcast axis -- a norm's divide, narrow, `+ eps`,
+/// root and reciprocal -- runs once per row; only the rest, the `x * inv * g`
+/// multiplies, runs per element, walking the innermost broadcast axis by
+/// stride. Hoisting changes where a step runs, never its inputs, so the
+/// values are the same ones the per-element form computes.
+fn broadcast_widened_epilogue(
+    computed: &BoundOp,
     narrow: Option<usize>,
+    fold: &[f64],
+    operand_buffers: &[&[f32]],
+    mut store: impl FnMut(usize, f64, f32),
+) -> Result<(), TensorError> {
+    let BoundOpKind::Reduce {
+        output_axes,
+        out_layout,
+        epilogue_body,
+        epilogue_operands,
+        epilogue_broadcast_axes,
+        ..
+    } = &computed.kind
+    else {
+        return Ok(());
+    };
+    let Some((&inner, outer_axes)) = epilogue_broadcast_axes.split_last() else {
+        return Ok(());
+    };
+    let mixed = (computed.node, epilogue_body, narrow);
+    let fold_slot = epilogue_operands.len();
+    let row_invariant_operand: Vec<bool> = epilogue_operands
+        .iter()
+        .map(|(_, layout, _)| {
+            epilogue_broadcast_axes
+                .iter()
+                .all(|&axis| layout.stride(axis) == 0)
+        })
+        .chain(core::iter::once(true))
+        .collect();
+    let (per_row, per_element) = split_by_row(epilogue_body, &row_invariant_operand);
+    let element_operands: Vec<(usize, i64)> = (0..fold_slot)
+        .filter(|slot| !row_invariant_operand[*slot])
+        .map(|slot| (slot, epilogue_operands[slot].1.stride(inner)))
+        .collect();
+    let row_major = row_major_strides(&computed.extents);
+    let fold_extents: Vec<u64> = output_axes
+        .iter()
+        .map(|&axis| computed.extents[axis as usize])
+        .collect();
+    let outer_extents: Vec<u64> = outer_axes
+        .iter()
+        .map(|&axis| computed.extents[axis as usize])
+        .collect();
+    let inner_extent = computed.extents[inner as usize];
+    let mut fold_coordinate = vec![0u64; fold_extents.len()];
+    let mut outer_coordinate = vec![0u64; outer_extents.len()];
+    let mut full_coordinate = vec![0u64; computed.extents.len()];
+    let mut element_bases = vec![0i64; element_operands.len()];
+    let mut steps = step_scratch(epilogue_body);
+    let mut operand_values = vec![0.0f64; fold_slot + 1];
+    for row in 0..odometer_len(&fold_extents) {
+        unflatten_into(row, &fold_extents, &mut fold_coordinate);
+        full_coordinate.fill(0);
+        for (index, &axis) in output_axes.iter().enumerate() {
+            full_coordinate[axis as usize] = fold_coordinate[index];
+        }
+        for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
+            if row_invariant_operand[slot] {
+                operand_values[slot] =
+                    f64::from(operand_buffers[slot][layout.offset_of(&full_coordinate) as usize]);
+            }
+        }
+        operand_values[fold_slot] = fold[out_layout.offset_of(&full_coordinate) as usize];
+        evaluate_mixed(mixed, &per_row, &operand_values, &mut steps)?;
+        for outer in 0..odometer_len(&outer_extents) {
+            unflatten_into(outer, &outer_extents, &mut outer_coordinate);
+            for (index, &axis) in outer_axes.iter().enumerate() {
+                full_coordinate[axis as usize] = outer_coordinate[index];
+            }
+            full_coordinate[inner as usize] = 0;
+            for (base, (slot, _)) in element_bases.iter_mut().zip(&element_operands) {
+                *base = epilogue_operands[*slot].1.offset_of(&full_coordinate);
+            }
+            let output_base: u64 = full_coordinate
+                .iter()
+                .zip(&row_major)
+                .map(|(coordinate, stride)| coordinate * stride)
+                .sum();
+            for position in 0..inner_extent {
+                for (base, (slot, stride)) in element_bases.iter().zip(&element_operands) {
+                    let offset = base + position as i64 * stride;
+                    operand_values[*slot] = f64::from(operand_buffers[*slot][offset as usize]);
+                }
+                evaluate_mixed(mixed, &per_element, &operand_values, &mut steps)?;
+                let (wide, narrowed) = last_step(&steps);
+                let target = output_base + position * row_major[inner as usize];
+                store(target as usize, wide, narrowed);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn row_major_strides(extents: &[u64]) -> Vec<u64> {
+    let mut strides = vec![1u64; extents.len()];
+    for axis in (0..extents.len().saturating_sub(1)).rev() {
+        strides[axis] = strides[axis + 1] * extents[axis + 1];
+    }
+    strides
+}
+
+fn step_scratch(body: &ComposedBody) -> (Vec<f64>, Vec<f32>) {
+    (
+        vec![0.0f64; body.steps.len()],
+        vec![0.0f32; body.steps.len()],
+    )
+}
+
+fn last_step(steps: &(Vec<f64>, Vec<f32>)) -> (f64, f32) {
+    let last = steps.0.len() - 1;
+    (steps.0[last], steps.1[last])
+}
+
+/// The steps whose inputs are fixed for a whole row, then the rest, each in
+/// body order.
+fn split_by_row(body: &ComposedBody, row_invariant_operand: &[bool]) -> (Vec<usize>, Vec<usize>) {
+    let mut row_invariant = vec![false; body.steps.len()];
+    for (index, step) in body.steps.iter().enumerate() {
+        row_invariant[index] = step.args.iter().all(|arg| match arg {
+            StepArg::Operand(slot) => row_invariant_operand[*slot as usize],
+            StepArg::Step(earlier) => row_invariant[*earlier as usize],
+        });
+    }
+    (0..body.steps.len()).partition(|index| row_invariant[*index])
+}
+
+/// Runs `indices` of the body: a step before the narrow in f64, the narrow
+/// and every step after it in f32.
+fn evaluate_mixed(
+    (node, body, narrow): (NodeId, &ComposedBody, Option<usize>),
+    indices: &[usize],
     operands: &[f64],
     steps: &mut (Vec<f64>, Vec<f32>),
-) -> Result<(f64, f32), TensorError> {
+) -> Result<(), TensorError> {
     let (wide_steps, narrow_steps) = steps;
     let wide_until = narrow.unwrap_or(body.steps.len());
-    for (index, step) in body.steps.iter().enumerate() {
+    for &index in indices {
+        let step = &body.steps[index];
         if index < wide_until {
             let mut args = [0.0f64; 3];
             for (slot, arg) in step.args.iter().enumerate() {
@@ -461,6 +638,5 @@ fn mixed_epilogue(
             wide_steps[index] = f64::from(narrow_steps[index]);
         }
     }
-    let last = body.steps.len() - 1;
-    Ok((wide_steps[last], narrow_steps[last]))
+    Ok(())
 }
