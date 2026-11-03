@@ -1088,6 +1088,10 @@ pub enum FuseDeclineReason {
     /// / `NotHeld` check above — that check has already passed by the time
     /// this one runs.
     BroadcastQuarantined,
+    /// the operand and its consumer are different float layouts (a widening or
+    /// narrowing convert): a held body evaluates in one element type, so the
+    /// operand materializes at the dtype boundary.
+    DtypeBoundary,
 }
 
 pub static FUSE_ELEMENTWISE_OPERAND_FIRED: Counter =
