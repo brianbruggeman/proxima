@@ -49,6 +49,8 @@ use proxima_tensor::spec::{
 };
 use sha2::{Digest, Sha256};
 
+mod common;
+
 const CAPTURE_ENV: &str = "PROXIMA_ARCH_DATA_CAPTURE";
 const CHECKPOINTS_TOML: &str = include_str!("fixtures/llama-parity/checkpoints.toml");
 
@@ -141,8 +143,22 @@ const ALL: [&Checkpoint; 8] = [
 ];
 
 impl Checkpoint {
+    fn recorded_length(&self) -> u64 {
+        let table: toml::Table = CHECKPOINTS_TOML.parse().expect("checkpoints.toml parses");
+        table["checkpoint"]
+            .as_array()
+            .expect("checkpoints.toml lists [[checkpoint]] tables")
+            .iter()
+            .find(|entry| entry["name"].as_str() == Some(self.name))
+            .and_then(|entry| entry["size_bytes"].as_integer())
+            .and_then(|length| u64::try_from(length).ok())
+            .unwrap_or(0)
+    }
+
     fn resolved_path(&self) -> String {
-        std::env::var(self.env).unwrap_or_else(|_| self.path.to_string())
+        common::resolve_checkpoint(self.env, self.path, self.recorded_length())
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn fixture(&self, extension: &str) -> PathBuf {
