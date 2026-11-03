@@ -266,3 +266,6 @@ mod twin_elementwise_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod coalesce_tests;
+
+#[cfg(test)]
+mod q8k_llama_reference_tests;
