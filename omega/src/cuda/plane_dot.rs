@@ -42,6 +42,7 @@ pub(super) fn split_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
         block_bytes: usize::from(layout.block_bytes),
         rows_per_warp: rows_per_warp(false),
         centering: None,
+        chunk_terms: None,
     })
 }
 

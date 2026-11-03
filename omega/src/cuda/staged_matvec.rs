@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use proxima_primitives::block_layout::BlockLayout;
 use proxima_tensor::{BoundOp, BoundOpKind, DType, Keep, Layout, NodeId, NumericPolicy, ReduceInit, ScalarOp, StepArg};
 
-use super::block_dot::{BlockDot, DOT_ELEMENTS, block_dot_i8};
+use super::block_dot::{BlockDot, ChunkTerms, DOT_ELEMENTS, block_dot_i8};
 use super::int8_gemm::{activation_block_offset, activation_code_offset, activation_code_words, activation_scale_offset};
 use super::{
     EmitDevice,
@@ -411,12 +411,16 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
         elements,
         block_bytes,
         centering,
+        chunk_terms,
         ..
     } = &plan.dot;
     let rows = plan.rows;
     let chunks_per_block = elements / DOT_ELEMENTS;
     let total_chunks = plan.reduction / DOT_ELEMENTS as u64;
-    let (activation_sum, centered) = centering_text(*centering);
+    let (activation_sum, centered) = match chunk_terms {
+        Some(terms) => (term_activation_sum(*terms), String::new()),
+        None => centering_text(*centering),
+    };
     let row_base = if plan.rows_in_shared() {
         format!("block_row_byte[warp * {rows} + row]")
     } else {
@@ -424,6 +428,7 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
     };
     let activation_load = plan.external.as_ref().map_or_else(staged_activation_load, external_activation_load);
     let position = if 32 % chunks_per_block == 0 { format!("lane % {chunks_per_block}u") } else { format!("chunk % {chunks_per_block}u") };
+    let row_fold = row_fold_text(name, &position, *chunk_terms, &centered);
     source.push_str(&format!(
         "    const unsigned char *row_start[{rows}];\n\
          \x20   float accumulator[{rows}];\n\
@@ -444,14 +449,50 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
          \x20           const unsigned char *block = row_start[row] + block_offset;\n\
          \x20           int words[8];\n\
          \x20           {name}_i8x32(block, {position}, words);\n\
-         \x20           int dot = 0;\n\
-         \x20           #pragma unroll\n\
-         \x20           for (int word = 0; word < 8; word++) {{ dot = __dp4a(words[word], activation[word], dot); }}\n\
-         {centered}\
-         \x20           accumulator[row] += {name}_scale(block) * activation_scale * (float)dot;\n\
+{row_fold}\
          \x20       }}\n\
          \x20   }}\n"
     ));
+}
+
+const DP4A_ROW: &str = "            #pragma unroll\n            for (int word = 0; word < 8; word++) { dot = __dp4a(words[word], activation[word], dot); }\n";
+
+/// The exact int32 sum of the chunk's activation codes, which the min term multiplies by the
+/// activation scale.
+fn term_activation_sum(terms: ChunkTerms) -> String {
+    if !terms.min {
+        return String::new();
+    }
+    "        int activation_sum = 0;\n        #pragma unroll\n        for (int word = 0; word < 8; word++) { activation_sum = __dp4a(0x01010101, activation[word], activation_sum); }\n".to_owned()
+}
+
+fn term_row_fold(name: &str, position: &str, terms: ChunkTerms) -> String {
+    let scale = |part: usize| format!("{name}_chunk_scale(block, {position}, {part}u)");
+    let mut text = if terms.parts == 1 {
+        format!("            int dot = 0;\n{DP4A_ROW}            float contribution = {} * (float)dot;\n", scale(0))
+    } else {
+        format!(
+            "            int dot_low = 0;\n            int dot_high = 0;\n            #pragma unroll\n            for (int word = 0; word < 4; word++) {{ dot_low = __dp4a(words[word], activation[word], dot_low); dot_high = __dp4a(words[4 + word], activation[4 + word], dot_high); }}\n            float contribution = {} * (float)dot_low + {} * (float)dot_high;\n",
+            scale(0),
+            scale(1)
+        )
+    };
+    text.push_str("            accumulator[row] += activation_scale * contribution;\n");
+    if terms.min {
+        text.push_str(&format!(
+            "            accumulator[row] += {name}_chunk_min(block, {position}) * activation_scale * (float)activation_sum;\n"
+        ));
+    }
+    text
+}
+
+fn row_fold_text(name: &str, position: &str, chunk_terms: Option<ChunkTerms>, centered: &str) -> String {
+    match chunk_terms {
+        Some(terms) => term_row_fold(name, position, terms),
+        None => format!(
+            "            int dot = 0;\n{DP4A_ROW}{centered}            accumulator[row] += {name}_scale(block) * activation_scale * (float)dot;\n"
+        ),
+    }
 }
 
 fn prepass_warps(plan: &StagedMatvec) -> u64 {

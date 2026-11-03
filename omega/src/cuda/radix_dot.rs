@@ -44,6 +44,7 @@ pub(super) fn radix_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
         block_bytes: usize::from(layout.block_bytes),
         rows_per_warp: rows_per_warp(true),
         centering: Some((layout.multiplier, element.bias)),
+        chunk_terms: None,
     })
 }
 

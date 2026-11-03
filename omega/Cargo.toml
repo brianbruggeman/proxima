@@ -767,7 +767,7 @@ moe_test_json = { version = "1.0.151", package = "serde_json", default-features 
 naga = { version = "30.0.1", features = ["wgsl-in"] }
 proxima = { workspace = true, features = ["test-support", "test-support-tokio"] }
 proxima-autograd = { path = "../proxima-autograd", version = "0.1.0" }
-proxima-gguf = { path = "../proxima-gguf", version = "0.1.0", features = ["std"] }
+proxima-gguf = { path = "../proxima-gguf", version = "0.1.0", features = ["std", "test-support"] }
 proxima-onnx = { path = "../proxima-onnx", version = "0.1.0" }
 proxima-safetensors = { path = "../proxima-safetensors", version = "0.1.0" }
 proxima-telemetry = { workspace = true, features = ["alloc"] }
