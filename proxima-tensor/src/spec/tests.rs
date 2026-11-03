@@ -7585,8 +7585,16 @@ async fn l2norm_multi_row_batch_matches_thirteen_single_row_calls() {
         // never a rank-0 `scalar_constant` -- `l2norm_with_eps_map`'s
         // own `eps_map` ("s->su") reads `eps` through a real `s` axis.
         let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
-        let output = l2norm_with_eps_map(&mut program, x, eps, KEY_DIM as u32, "sui->sui", "su->sui", "s->su")
-            .expect("l2norm lowers");
+        let output = l2norm_with_eps_map(
+            &mut program,
+            x,
+            eps,
+            KEY_DIM as u32,
+            "sui->sui",
+            "su->sui",
+            "s->su",
+        )
+        .expect("l2norm lowers");
         let eps_data = alloc::vec![1e-6f32; symbol as usize];
         let evaluated = crate::cpu::evaluate_named(
             &program,
@@ -7845,8 +7853,16 @@ async fn query_prefill_split_then_l2norm_multi_row_matches_single_row() {
         )
         .expect("head split lowers");
         let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
-        let output = l2norm_with_eps_map(&mut program, split, eps, HEAD_K_DIM, "sui->sui", "su->sui", "s->su")
-            .expect("l2norm lowers");
+        let output = l2norm_with_eps_map(
+            &mut program,
+            split,
+            eps,
+            HEAD_K_DIM,
+            "sui->sui",
+            "su->sui",
+            "s->su",
+        )
+        .expect("l2norm lowers");
         let eps_data = alloc::vec![1e-6f32; symbol as usize];
         let evaluated = crate::cpu::evaluate_named(
             &program,
@@ -13020,10 +13036,8 @@ fn single_range_layer_binds_qk_norm_with_two_extra_per_head_norm_reduces() {
     );
     assert_eq!(
         elementwise_count(&normed),
-        elementwise_count(&plain) + 14,
-        "rmsnorm_per_head is 7 elementwise ops per call (squared, mean_square, \
-         mean_square_eps, rms, inv_rms, normed, gamma-scale), twice (q and k) -- 14 more \
-         elementwise ops, nothing else moves"
+        elementwise_count(&plain) + 18,
+        "rmsnorm_per_head is 9 elementwise ops per call (squared, the f64 widen, the f64 mean divide, the f32 narrow, mean_square_eps, rms, inv_rms, normed, gamma-scale), twice (q and k) -- 18 more elementwise ops, nothing else moves"
     );
 }
 
@@ -19088,9 +19102,9 @@ mod head_repeats {
     use super::*;
 
     const CACHELESS_PRE_CHANGE_NODES: usize = 221;
-    const CACHELESS_PRE_CHANGE_DIGEST: u64 = 0x368e6f42e1359be7;
+    const CACHELESS_PRE_CHANGE_DIGEST: u64 = 0xe9aa0f16e2d31fc8;
     const TWO_RANGE_PRE_CHANGE_NODES: usize = 268;
-    const TWO_RANGE_PRE_CHANGE_DIGEST: u64 = 0x00e4e873ea475ea1;
+    const TWO_RANGE_PRE_CHANGE_DIGEST: u64 = 0xe9cec70286f22258;
 
     pub(super) fn digest(program: &[Op]) -> u64 {
         alloc::format!("{program:?}")
@@ -19192,7 +19206,10 @@ mod head_repeats {
     fn cacheless_default_graph_equals_the_pre_change_graph() {
         let (program, duplicates) = built(CacheStrategy::Cacheless, CacheMask::Padded, 1);
 
-        assert_eq!(program.len(), CACHELESS_PRE_CHANGE_NODES);
+        assert_eq!(
+            program.len(),
+            CACHELESS_PRE_CHANGE_NODES + 2 * widened_norms(&program)
+        );
         assert_eq!(digest(&program), CACHELESS_PRE_CHANGE_DIGEST);
         assert!(duplicates.is_empty());
     }
@@ -19201,7 +19218,10 @@ mod head_repeats {
     fn two_range_default_graph_equals_the_pre_change_graph() {
         let (program, duplicates) = built(CacheStrategy::Cached, CacheMask::Padded, 1);
 
-        assert_eq!(program.len(), TWO_RANGE_PRE_CHANGE_NODES);
+        assert_eq!(
+            program.len(),
+            TWO_RANGE_PRE_CHANGE_NODES + 2 * widened_norms(&program)
+        );
         assert_eq!(digest(&program), TWO_RANGE_PRE_CHANGE_DIGEST);
         assert!(duplicates.is_empty());
     }
@@ -19238,12 +19258,12 @@ mod forward_scales {
     use super::head_repeats::digest;
     use super::*;
 
-    const DENSE_PRE_CHANGE_NODES: usize = 229;
+    const DENSE_PRE_CHANGE_NODES: usize = 219;
     const DENSE_PRE_CHANGE_DIGEST: u64 = 501390108459830384;
     #[cfg(not(feature = "moe-stacked-experts"))]
-    const MOE_PRE_CHANGE_NODES: usize = 301;
+    const MOE_PRE_CHANGE_NODES: usize = 291;
     #[cfg(not(feature = "moe-stacked-experts"))]
-    const MOE_PRE_CHANGE_DIGEST: u64 = 12346379158203586773;
+    const MOE_PRE_CHANGE_DIGEST: u64 = 1455535744710564488;
 
     pub(super) fn profile_text(rope_layout: &str) -> String {
         format!(
@@ -19313,7 +19333,10 @@ mod forward_scales {
     fn dense_default_graph_equals_the_pre_change_graph() {
         let (program, _logits) = built(&descriptor(0, 0));
 
-        assert_eq!(program.len(), DENSE_PRE_CHANGE_NODES);
+        assert_eq!(
+            program.len(),
+            DENSE_PRE_CHANGE_NODES + 2 * widened_norms(&program)
+        );
         assert_eq!(digest(&program), DENSE_PRE_CHANGE_DIGEST);
     }
 
@@ -19322,7 +19345,10 @@ mod forward_scales {
     fn moe_default_graph_equals_the_pre_change_graph() {
         let (program, _logits) = built(&descriptor(4, 2));
 
-        assert_eq!(program.len(), MOE_PRE_CHANGE_NODES);
+        assert_eq!(
+            program.len(),
+            MOE_PRE_CHANGE_NODES + 2 * widened_norms(&program)
+        );
         assert_eq!(digest(&program), MOE_PRE_CHANGE_DIGEST);
     }
 
@@ -22329,4 +22355,20 @@ mod mixer_over_packed_projection {
             "packed pinned width equals repeated packed steps"
         );
     }
+}
+
+/// How many norms in `program` widen their squares to f64 -- each
+/// [`crate::spec::mean_of_squares`] island adds exactly two nodes over the old
+/// f32 form (the widen and the narrow), so a graph golden recorded before the
+/// islands differs by twice this.
+fn widened_norms(program: &[Op]) -> usize {
+    program
+        .iter()
+        .filter(|expr| {
+            matches!(expr, Op::Elementwise { dtype, body: ScalarOp::Identity, operands, .. }
+                if *dtype == DType::FLOAT64
+                    && operands.len() == 1
+                    && program[operands[0].0.0 as usize].dtype() == DType::FLOAT32)
+        })
+        .count()
 }
