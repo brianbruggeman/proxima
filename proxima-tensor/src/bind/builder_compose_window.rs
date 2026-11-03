@@ -77,15 +77,14 @@ impl BoundOpBuilder {
     }
 
     // a held body evaluates in one element type, so a float operand of a
-    // different layout (a widening or narrowing convert) must materialize;
-    // a bool mask feeding a float select is not a conversion
+    // different float layout (a widening or narrowing convert) must
+    // materialize; a bool mask or a packed integer weight read by a float
+    // body is not a conversion
     fn crosses_dtype(&self, operand: NodeId, consumer: DType) -> bool {
         let operand_dtype = self.dtypes.borrow().get(operand.0 as usize).copied();
-        matches!(
-            (operand_dtype, consumer),
-            (Some(DType::Layout(operand_layout)), DType::Layout(consumer_layout))
-                if operand_layout != consumer_layout
-        )
+        operand_dtype.is_some_and(|operand_dtype| {
+            operand_dtype.is_float() && consumer.is_float() && operand_dtype != consumer
+        })
     }
 
     /// Judge one expression: hold an elementwise op, or emit whatever is now
