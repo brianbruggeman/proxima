@@ -197,7 +197,8 @@ impl BoundOpBuilder {
                     let still_live = !retires.contains(operand_node);
                     let non_identity = !is_identity_projection(map);
                     let not_held = !self.held.borrow().contains_key(operand_node);
-                    let fuses = !still_live && !non_identity && !not_held;
+                    let dtype_boundary = self.crosses_dtype(*operand_node, *dtype);
+                    let fuses = !still_live && !non_identity && !not_held && !dtype_boundary;
                     #[cfg(feature = "instrument")]
                     {
                         let outcome = if fuses {
@@ -206,8 +207,10 @@ impl BoundOpBuilder {
                             Err(instrument::FuseDeclineReason::StillLive)
                         } else if non_identity {
                             Err(instrument::FuseDeclineReason::NonIdentityProjection)
-                        } else {
+                        } else if not_held {
                             Err(instrument::FuseDeclineReason::NotHeld)
+                        } else {
+                            Err(instrument::FuseDeclineReason::DtypeBoundary)
                         };
                         instrument::record_fuse_attempt(
                             *operand_node,
@@ -223,7 +226,7 @@ impl BoundOpBuilder {
                             "single-consumer elementwise composition decision -- still_live is gated by the requested output set"
                         );
                     }
-                    if !fuses || self.crosses_dtype(*operand_node, *dtype) {
+                    if !fuses {
                         self.materialize_if_held(*operand_node, shapes, emitted)?;
                     }
                     self.materialize_computed_indices(map, shapes, emitted)?;
@@ -245,6 +248,12 @@ impl BoundOpBuilder {
             }
             Op::Reduce(reduce) => {
                 if self.crosses_dtype(reduce.operand, reduce.dtype) {
+                    #[cfg(feature = "instrument")]
+                    instrument::record_fuse_attempt(
+                        reduce.operand,
+                        instrument::FuseSite::ReduceOperand,
+                        Err(instrument::FuseDeclineReason::DtypeBoundary),
+                    );
                     self.materialize_if_held(reduce.operand, shapes, emitted)?;
                 }
                 let window_elimination = self

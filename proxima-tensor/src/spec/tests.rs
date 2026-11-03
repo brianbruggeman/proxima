@@ -8203,7 +8203,8 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
             // chain, never an `Op::Input` leaf -- so this reason is
             // always costing, counted separately below rather than
             // folded into the free/costing split above.
-            (crate::instrument::FuseDeclineReason::BroadcastQuarantined, _) => {}
+            (crate::instrument::FuseDeclineReason::BroadcastQuarantined, _)
+            | (crate::instrument::FuseDeclineReason::DtypeBoundary, _) => {}
         }
     }
     let still_live_total = still_live_costing + still_live_free;
