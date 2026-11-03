@@ -102,7 +102,7 @@ const QWEN3: Checkpoint = Checkpoint {
 const QWEN35: Checkpoint = Checkpoint {
     name: "qwen35",
     env: "PROXIMA_ARCH_QWEN35_GGUF",
-    path: "/Users/brianbruggeman/.ollama/models/blobs/sha256-afb707b6b8fac6e475acc42bc8380fc0b8d2e0e4190be5a969fbf62fcc897db5",
+    path: "/mnt/data5/ollama/blobs/sha256-889ea3b9143cdc32146c7d530ce5f3d452ec18069086f6f4167ce9ae72a9691f",
     architecture: "qwen35",
     routed: false,
 };
