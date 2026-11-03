@@ -263,7 +263,7 @@ pub fn emit_cuda_on_device(
 ) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
-    reject_unserved_prequantized(resolved, &quantized, numeric_policy)?;
+    reject_unserved_prequantized(resolved, &quantized, numeric_policy, device)?;
     let attention_chunks = split_chunks(&resolved.kind, device);
     let entry = match cuda_cached_attention_class(&resolved.kind) {
         Some(class) => cached_attention_entry_name(resolved, class, attention_chunks, numeric_policy)?,
@@ -350,14 +350,32 @@ pub(crate) fn int8_gemm_serves(
     mma_gemm_plan(resolved, &quantized, numeric_policy).is_some_and(|plan| plan.int8.is_some())
 }
 
-/// A pre-quantized activation is readable only by the int8 gemm; any other consumer would read
-/// its bytes as floats, so it fails here instead of emitting a wrong kernel.
+/// Whether the staged matvec would serve `resolved` reading its operand in `activation_slot` as
+/// `block_q8_1` bytes.
+pub(crate) fn staged_matvec_serves(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    activation_slot: usize,
+    numeric_policy: NumericPolicy,
+) -> bool {
+    let mut quantized = operand_codecs(resolved, packed_operands);
+    let Some(slot) = quantized.get_mut(activation_slot) else {
+        return false;
+    };
+    *slot = Some(Codec::Q8_1);
+    staged_matvec_plan(resolved, &quantized, numeric_policy, EmitDevice::default()).is_some_and(|plan| plan.external)
+}
+
+/// A pre-quantized activation is readable only by the int8 gemm and the external-activation staged
+/// matvec; any other consumer would read its bytes as floats, so it fails here instead of emitting a wrong kernel.
 fn reject_unserved_prequantized(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+    device: EmitDevice,
 ) -> Result<(), EmitError> {
-    let served = mma_gemm_plan(resolved, quantized, numeric_policy).is_some_and(|plan| plan.int8.is_some());
+    let staged = staged_matvec_plan(resolved, quantized, numeric_policy, device).is_some_and(|plan| plan.external);
+    let served = staged || mma_gemm_plan(resolved, quantized, numeric_policy).is_some_and(|plan| plan.int8.is_some());
     if reads_prequantized_activation(quantized) && !served {
         return Err(EmitError::CudaUnsupportedOpKind {
             node: resolved.node,
@@ -1546,8 +1564,12 @@ fn text_plan_token(
         ""
     };
     let revision = if let Some(plan) = staged_matvec_plan(resolved, quantized, numeric_policy, device) {
-        let global = if plan.scratch { "g" } else { "" };
-        format!("_smv{}x{}{global}_gid64c9", staged_matvec::STAGED_WARPS, plan.rows)
+        let source = match (plan.scratch, plan.external) {
+            (_, true) => "q",
+            (true, false) => "g",
+            (false, false) => "",
+        };
+        format!("_smv{}x{}{source}_gid64c9", staged_matvec::STAGED_WARPS, plan.rows)
     } else if let Some(plan) = mma_gemm_plan(resolved, quantized, numeric_policy) {
         match &plan.int8 {
             Some(int8) => format!("_mma8x8x16s8c{}_gid64c9", int8.chunks),
@@ -3499,8 +3521,8 @@ fn render_reduce(
     let element_type = type_token(resolved.node, resolved.dtype)?;
     let epilogue_operand_count = epilogue_operands.len();
 
-    let gemm = mma_gemm_plan(resolved, quantized, numeric_policy);
     let staged = staged_matvec_plan(resolved, quantized, numeric_policy, device);
+    let gemm = mma_gemm_plan(resolved, quantized, numeric_policy).filter(|_| staged.is_none());
     let mut source = String::new();
     preamble(&mut source, element_type);
     if gemm.is_some() {

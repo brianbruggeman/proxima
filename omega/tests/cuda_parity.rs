@@ -4897,6 +4897,77 @@ async fn int8_prefill_gemm_matches_the_fake_quantized_activation_reference_on_cu
         "degenerate control: output matches the unquantized activations ({unquantized}) as tightly as the quantized ones ({block_scale_reference})");
 }
 
+fn assert_derived_matvec_parity(
+    codec: Codec,
+    block_bytes: usize,
+    block_elements: usize,
+    quantize: fn(&[f32], &mut [u8]) -> Result<(), proxima_gguf::quant::QuantError>,
+    dequantize: fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>,
+    shape: [usize; 3],
+) {
+    let [features, depth, tokens] = shape;
+    let blocks_per_row = depth / block_elements;
+    let weight_f32: Vec<f32> = random_vec(61, features * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let mut weight_blocks = vec![0u8; features * blocks_per_row * block_bytes];
+    let mut dequantized = vec![0.0f32; weight_f32.len()];
+    for ((row_f32, row_blocks), row_dequantized) in weight_f32
+        .chunks_exact(depth)
+        .zip(weight_blocks.chunks_exact_mut(blocks_per_row * block_bytes))
+        .zip(dequantized.chunks_exact_mut(depth))
+    {
+        quantize(row_f32, row_blocks).expect("row length is a whole number of blocks");
+        dequantize(row_blocks, row_dequantized).expect("a whole number of packed blocks");
+    }
+    let activation: Vec<f32> = random_vec(67, tokens * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let (program, root) = int8_gemm_program(features as u32, depth as u32, tokens as u32);
+    let named: Vec<(&str, QuantizedBlock<'_>)> =
+        vec![("weight", QuantizedBlock::Packed { codec, bytes: &weight_blocks }), ("activation", QuantizedBlock::Float32(&activation))];
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true);
+    let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[root], policy)
+        .expect("omega::backend plans the derived-activation matmul");
+    let identities = cuda_kernel_identities(&plan).expect("cuda plan exposes its kernels");
+    let output = execute_plan_named(&mut plan, &named).expect("omega::backend runs the derived-activation matmul").root().to_vec();
+
+    let (served, other) = if tokens == 1 { ("_smv", "_mma8x8x16s8") } else { ("_mma8x8x16s8", "_smv") };
+    assert!(
+        identities.iter().any(|identity| identity.contains(served)) && identities.iter().all(|identity| !identity.contains(other)),
+        "{codec:?} {features}x{depth}x{tokens} must take {served} and not {other}: {identities:?}"
+    );
+    if tokens == 1 {
+        assert!(
+            identities.iter().any(|identity| identity.contains("_smv") && identity.contains("q_gid64c9")),
+            "the one-token matvec must read the derived q8_1 node: {identities:?}"
+        );
+    }
+    let reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, true), depth, tokens);
+    let unquantized = gemm_rows_max_over_peak(&output, &dequantized, &activation, depth, tokens);
+    println!("derived matvec {codec:?} {features}x{depth}x{tokens}: vs fp16-scale fake-quantized {reference:.3e}, vs unquantized {unquantized:.3e}");
+    assert!(output.iter().all(|value| value.is_finite()) && reference < 2e-5,
+        "{codec:?} derived-activation matmul disagrees with the fake-quantized reference by {reference} of peak");
+    assert!(unquantized > 2.0 * reference,
+        "degenerate control: output matches the unquantized activations ({unquantized}) as tightly as the quantized ones ({reference})");
+}
+
+#[proxima::test]
+#[case::one_token_narrow_reduction(&[50, 128, 1])]
+#[case::one_token_wide_reduction(&[300, 8192, 1])]
+#[case::one_token_feature_tail(&[1000, 1024, 1])]
+#[case::several_tokens_take_the_mma_gemm(&[256, 1024, 3])]
+async fn pq2_0_matmul_fed_by_a_derived_node_matches_the_fake_quantized_reference_on_cuda(#[case] shape: &[usize; 3]) {
+    use proxima_gguf::quant::pq2_0::{BLOCK_BYTES, QK_PQ2_0, dequantize, quantize};
+    assert_derived_matvec_parity(Codec::Pq2_0, BLOCK_BYTES, QK_PQ2_0, quantize, dequantize, *shape);
+}
+
+#[proxima::test]
+#[case::one_token_narrow_reduction(&[50, 96, 1])]
+#[case::one_token_wide_reduction(&[300, 8192, 1])]
+#[case::one_token_feature_tail(&[1000, 1024, 1])]
+#[case::several_tokens_take_the_mma_gemm(&[256, 1024, 3])]
+async fn q8_0_matmul_fed_by_a_derived_node_matches_the_fake_quantized_reference_on_cuda(#[case] shape: &[usize; 3]) {
+    use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
+    assert_derived_matvec_parity(Codec::Q8_0, BLOCK_BYTES, QK8_0, quantize, dequantize, *shape);
+}
+
 fn append_int8_gemm(program: &mut Vec<Op>, weight: NodeId, activation: NodeId, name: &str) -> NodeId {
     let product = append(
         program,

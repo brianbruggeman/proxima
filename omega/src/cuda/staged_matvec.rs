@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 use proxima_tensor::{BoundOp, BoundOpKind, DType, Keep, Layout, NodeId, NumericPolicy, ReduceInit, ScalarOp, StepArg};
 
 use super::block_dot::{BlockDot, DOT_ELEMENTS, block_dot_i8};
+use super::int8_gemm::{activation_block_bytes, activation_code_offset};
 use super::{
     EmitDevice,
     Codec, CudaGridSpec, CudaKernel, EmitError, WARP_SIZE, flat_packed_rows, gather_count, push_reduce_epilogue_write,
@@ -71,6 +72,15 @@ pub(super) struct StagedMatvec {
     /// The activation is quantized into a global scratch by a pre-pass launch instead of
     /// being staged in every block's shared memory.
     pub scratch: bool,
+    /// The activation is a `block_q8_1` node a `BlockQuantize` already produced, so the matvec
+    /// neither stages nor pre-passes it.
+    pub external: bool,
+}
+
+impl StagedMatvec {
+    fn rows_in_shared(&self) -> bool {
+        !self.scratch && !self.external
+    }
 }
 
 fn is_contiguous_run(layout: &Layout, reduce_dims: &[u16], reduce_extents: &[u64]) -> bool {
@@ -110,9 +120,11 @@ pub(super) fn staged_matvec_plan(
     };
     let is_product = only_step.op == ScalarOp::Multiply
         && only_step.args == [StepArg::Operand(0), StepArg::Operand(1)];
-    let (weight_slot, activation_slot, codec) = match quantized {
-        [Some(codec), None] => (0, 1, *codec),
-        [None, Some(codec)] => (1, 0, *codec),
+    let (weight_slot, activation_slot, codec, external) = match quantized {
+        [Some(codec), None] => (0, 1, *codec, false),
+        [None, Some(codec)] => (1, 0, *codec, false),
+        [Some(codec), Some(Codec::Q8_1)] if *codec != Codec::Q8_1 => (0, 1, *codec, true),
+        [Some(Codec::Q8_1), Some(codec)] if *codec != Codec::Q8_1 => (1, 0, *codec, true),
         _ => return None,
     };
     let dot = block_dot_i8(&codec.block_layout()?)?;
@@ -130,6 +142,12 @@ pub(super) fn staged_matvec_plan(
         .iter()
         .all(|axis| activation_layout.stride(*axis) == 0 || resolved.extents[usize::from(*axis)] == 1);
     let contiguous_activation = is_contiguous_run(activation_layout, &reduce_dims, &reduce_extents);
+    let readable_activation = !external || (contiguous_activation && activation_layout.base == 0);
+    let weight_only: Vec<Option<Codec>> = quantized
+        .iter()
+        .enumerate()
+        .map(|(slot, codec)| if slot == activation_slot { None } else { *codec })
+        .collect();
     let output_total: u64 = output_axes.iter().map(|axis| resolved.extents[usize::from(*axis)]).product();
     let stageable = reduction > 0
         && output_total <= u64::from(u32::MAX)
@@ -139,8 +157,9 @@ pub(super) fn staged_matvec_plan(
         && stageable
         && shared_by_every_row
         && epilogue_broadcast_axes.is_empty()
+        && readable_activation
         && gather_count(resolved) == 0
-        && flat_packed_rows(resolved, quantized))
+        && flat_packed_rows(resolved, &weight_only))
     .then_some(StagedMatvec {
         weight_slot,
         activation_slot,
@@ -148,7 +167,8 @@ pub(super) fn staged_matvec_plan(
         contiguous_activation,
         reduce_extents,
         reduction,
-        scratch: reduction + reduction / DOT_ELEMENTS as u64 * 4 > SMEM_STAGE_LIMIT_BYTES,
+        scratch: !external && reduction + reduction / DOT_ELEMENTS as u64 * 4 > SMEM_STAGE_LIMIT_BYTES,
+        external,
         rows: shaped_rows(dot.rows_per_warp, output_total, device.multiprocessors),
         dot,
     })
@@ -252,6 +272,10 @@ fn push_scratch_stage(source: &mut String, plan: &StagedMatvec) {
 }
 
 fn push_stage(source: &mut String, plan: &StagedMatvec) {
+    if plan.external {
+        source.push_str(&format!("    const unsigned char *staged_blocks = in{};\n", plan.activation_slot));
+        return;
+    }
     if plan.scratch {
         push_scratch_stage(source, plan);
         return;
@@ -303,7 +327,7 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
     for index in 0..output_axes.len() {
         source.push_str(&format!("    long coord{index}_rows[{rows}];\n"));
     }
-    if !plan.scratch {
+    if plan.rows_in_shared() {
         source.push_str(&format!("    __shared__ long block_row_byte[{}];\n", STAGED_WARPS * rows));
     }
     source.push_str(&format!(
@@ -341,15 +365,37 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
          {publish}\
          \x20   }}\n",
         plan.reduction,
-        publish = if plan.scratch {
-            String::new()
-        } else {
+        publish = if plan.rows_in_shared() {
             format!("        if (lane == 0u) {{ block_row_byte[warp * {rows} + row] = first_row + row < u.output_total ? row_block[row] * {block_bytes} : -1; }}\n")
+        } else {
+            String::new()
         }
     ));
-    if !plan.scratch {
+    if plan.rows_in_shared() {
         source.push_str("    __syncthreads();\n");
     }
+}
+
+fn staged_activation_load() -> String {
+    "        const int4 low = *(const int4 *)(staged_q + chunk * 8u);\n\
+             const int4 high = *(const int4 *)(staged_q + chunk * 8u + 4u);\n\
+             const int activation[8] = { low.x, low.y, low.z, low.w, high.x, high.y, high.z, high.w };\n\
+             const float activation_scale = staged_d[chunk];\n"
+        .to_owned()
+}
+
+// a block_q8_1 stride is not a multiple of 16, so the codes load as 32-bit words
+fn external_activation_load() -> String {
+    let block_bytes = activation_block_bytes();
+    let code_offset = activation_code_offset();
+    format!(
+        "        const unsigned char *activation_block = staged_blocks + chunk * {block_bytes}u;\n\
+         \x20       const unsigned int *activation_codes = (const unsigned int *)(activation_block + {code_offset}u);\n\
+         \x20       int activation[8];\n\
+         \x20       #pragma unroll\n\
+         \x20       for (int word = 0; word < 8; word++) {{ activation[word] = (int)activation_codes[word]; }}\n\
+         \x20       const float activation_scale = __half2float(__ushort_as_half((unsigned short)(*(const unsigned int *)activation_block & 0xffffu)));\n"
+    )
 }
 
 /// Each lane folds chunks `lane, lane + 32, ...` of its warp's rows straight from global memory:
@@ -368,11 +414,12 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
     let chunks_per_block = elements / DOT_ELEMENTS;
     let total_chunks = plan.reduction / DOT_ELEMENTS as u64;
     let (activation_sum, centered) = centering_text(*centering);
-    let row_base = if plan.scratch {
-        format!("first_row + row < u.output_total ? row_block[row] * {block_bytes} : -1")
-    } else {
+    let row_base = if plan.rows_in_shared() {
         format!("block_row_byte[warp * {rows} + row]")
+    } else {
+        format!("first_row + row < u.output_total ? row_block[row] * {block_bytes} : -1")
     };
+    let activation_load = if plan.external { external_activation_load() } else { staged_activation_load() };
     let position = if 32 % chunks_per_block == 0 { format!("lane % {chunks_per_block}u") } else { format!("chunk % {chunks_per_block}u") };
     source.push_str(&format!(
         "    const unsigned char *row_start[{rows}];\n\
@@ -385,10 +432,7 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
          \x20   }}\n\
          \x20   #pragma unroll 2\n\
          \x20   for (unsigned int chunk = lane; chunk < {total_chunks}u; chunk += 32u) {{\n\
-         \x20       const int4 low = *(const int4 *)(staged_q + chunk * 8u);\n\
-         \x20       const int4 high = *(const int4 *)(staged_q + chunk * 8u + 4u);\n\
-         \x20       const int activation[8] = {{ low.x, low.y, low.z, low.w, high.x, high.y, high.z, high.w }};\n\
-         \x20       const float activation_scale = staged_d[chunk];\n\
+{activation_load}\
          {activation_sum}\
          \x20       const unsigned int block_offset = (chunk / {chunks_per_block}u) * {block_bytes}u;\n\
          \x20       #pragma unroll\n\

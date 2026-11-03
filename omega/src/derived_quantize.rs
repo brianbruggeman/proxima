@@ -1,5 +1,5 @@
 //! The quantized activation as a storage decision of one plan: where every consumer of an f32
-//! activation is an int8 gemm, the plan adds a single `BoundOpKind::BlockQuantize` node beside
+//! activation is an int8 gemm (several tokens) or a staged matvec (one token), the plan adds a single `BoundOpKind::BlockQuantize` node beside
 //! the program's own ops and points those gemms at it. The node's id is `program.len() + k`, so
 //! it never collides with a program node and never leaves the plan.
 
@@ -11,7 +11,7 @@ use proxima_tensor::{
 };
 
 use crate::backend::GpuDriver;
-use crate::cuda::{int8_gemm_serves, is_int8_weight};
+use crate::cuda::{int8_gemm_serves, staged_matvec_serves};
 use crate::identity::operand_codecs;
 use crate::lowering::{Codec, PackedOperands};
 
@@ -66,8 +66,8 @@ fn gemm_activation(
     };
     let codecs = operand_codecs(bound, packed);
     let slot = match codecs.as_slice() {
-        [Some(codec), None] if is_int8_weight(*codec) => 1,
-        [None, Some(codec)] if is_int8_weight(*codec) => 0,
+        [Some(codec), None] if *codec != Codec::Q8_1 => 1,
+        [None, Some(codec)] if *codec != Codec::Q8_1 => 0,
         _ => return None,
     };
     let (activation, layout, _) = operands.get(slot)?;
@@ -76,11 +76,14 @@ fn gemm_activation(
         return None;
     };
     let float_node = matches!(program.get(activation.0 as usize)?.dtype(), DType::FLOAT32);
-    let eligible = float_node
-        && *tokens > 1
-        && depth.is_multiple_of(QUANTIZE_GROUP)
-        && activation_is_flat(bound, layout, *tokens, *depth)
-        && int8_gemm_serves(bound, packed, slot, policy);
+    let served = if *tokens == 1 {
+        staged_matvec_serves(bound, packed, slot, policy)
+    } else {
+        *tokens > 1
+            && activation_is_flat(bound, layout, *tokens, *depth)
+            && int8_gemm_serves(bound, packed, slot, policy)
+    };
+    let eligible = float_node && depth.is_multiple_of(QUANTIZE_GROUP) && served;
     eligible.then_some((*activation, slot))
 }
 
@@ -205,7 +208,7 @@ mod tests {
         Extent, IndexMap, Reduce, ReduceInit, append, bind_with_fusion, correct_packed_matmul_layouts, infer, projection,
     };
 
-    const DEPTH: u32 = 64;
+    const DEPTH: u32 = 128;
     const FEATURES: u32 = 4;
 
     struct Fixture {
@@ -322,8 +325,17 @@ mod tests {
     }
 
     #[test]
-    fn a_single_token_plan_gets_no_derived_node() {
+    fn a_single_token_plan_gets_a_derived_node_for_the_staged_matvec() {
         let fixture = fixture(1, false);
+        let (derived, packed) = derive(&fixture, granted(), GpuDriver::Cuda);
+        let ids = derived_ids(&derived, fixture.program.len());
+        assert_eq!(ids.len(), 1);
+        assert_eq!(packed.get(&ids[0]), Some(&Codec::Q8_1));
+    }
+
+    #[test]
+    fn a_single_token_plan_with_a_non_eligible_reader_gets_no_derived_node() {
+        let fixture = fixture(1, true);
         let (derived, _) = derive(&fixture, granted(), GpuDriver::Cuda);
         assert_eq!(derived, fixture.resolved);
     }
