@@ -14507,3 +14507,36 @@ fn f16_packed_embedding_row_past_the_table_end_is_refused() {
     let outcome = dequantize_row(NodeId(0), &block, 1, dim, &mut decoded);
     assert!(outcome.is_err(), "row 1 of a one-row f16 table must not decode");
 }
+
+#[test]
+fn float64_island_sums_squares_in_double_like_ggml_rms_norm() {
+    let width = 32usize;
+    let island = crate::test_support::widened_sum_of_squares(2, width as u32);
+    let mut data = alloc::vec![1.0f32; 2 * width];
+    data[0] = 4096.0;
+    data[width] = 3.0;
+    let evaluated = evaluate_quantized(
+        &island.program,
+        &[],
+        &[QuantizedBlock::Float32(&data)],
+        &[island.narrowed],
+    )
+    .expect("the float64 island evaluates on the f32 pipeline");
+    let (ours, _) = evaluated.get(island.narrowed).expect("narrowed output present");
+    let expected: Vec<f32> = data
+        .chunks_exact(width)
+        .map(|row| {
+            let sum: f64 = row.iter().map(|value| f64::from(value * value)).sum();
+            (sum / width as f64) as f32
+        })
+        .collect();
+    let single_precision: Vec<f32> = data
+        .chunks_exact(width)
+        .map(|row| row.iter().map(|value| value * value).sum::<f32>() / width as f32)
+        .collect();
+    assert_eq!(ours, expected.as_slice(), "the island must match the f64 reference bit for bit");
+    assert_ne!(
+        expected, single_precision,
+        "the fixture must separate f64 from f32 accumulation or it proves nothing"
+    );
+}
