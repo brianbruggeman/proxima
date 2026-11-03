@@ -307,6 +307,18 @@ fn digest_hex_of_block(block: &QuantizedBlock<'_>) -> (String, usize, String) {
         QuantizedBlock::Packed { codec, bytes } => {
             (format!("{codec:?}"), bytes.len(), sha256_hex(&[bytes]))
         }
+        QuantizedBlock::PackedStrided {
+            codec,
+            bytes,
+            expert_bytes,
+            stride_bytes,
+        } => {
+            let runs: Vec<&[u8]> = (0..=(bytes.len() - expert_bytes) / stride_bytes)
+                .map(|expert| &bytes[expert * stride_bytes..expert * stride_bytes + expert_bytes])
+                .collect();
+            let logical_bytes = runs.iter().map(|run| run.len()).sum();
+            (format!("{codec:?}"), logical_bytes, sha256_hex(&runs))
+        }
     }
 }
 

@@ -388,6 +388,61 @@ pub(super) fn upload_resident_copy(
     Ok(buffer)
 }
 
+/// Gathers a strided expert stack into one new shared buffer, one memcpy per
+/// expert run, so kernels read the contiguous `[expert, ...]` layout. A
+/// resident name caches the buffer keyed on the span's first byte and logical
+/// length, exactly as [`upload_resident_copy`] does for a contiguous block.
+pub(super) fn upload_strided_runs(
+    device: &ProtocolObject<dyn MTLDevice>,
+    block: &QuantizedBlock<'_>,
+    resident_name: Option<&str>,
+) -> Result<MetalBuffer, MetalError> {
+    let (QuantizedBlock::PackedStrided { bytes, .. }, Some(runs), Some(byte_length)) =
+        (block, block.packed_runs(), block.packed_len())
+    else {
+        return Err(MetalError::CompileFailed {
+            log: "strided upload offered a block without strided runs".to_string(),
+        });
+    };
+    let pointer = bytes.as_ptr().cast::<c_void>();
+    if let Some(name) = resident_name
+        && let Some(existing) =
+            RESIDENT_BUFFERS.with(|cache| resident_name_lookup(cache, name, pointer, byte_length))?
+    {
+        counter!(RESIDENT_BUFFER_REUSES, 1);
+        return Ok(existing);
+    }
+    counter!(COPYING_BUFFER_UPLOADS, 1);
+    counter!(BLOCK_COPIED_BYTES, byte_length as u64);
+    let buffer = device
+        .newBufferWithLength_options(byte_length, MTLResourceOptions::StorageModeShared)
+        .ok_or_else(|| MetalError::CompileFailed {
+            log: "device refused to allocate a shared buffer for a strided expert stack"
+                .to_string(),
+        })?;
+    let mut offset = 0;
+    for run in runs {
+        // SAFETY: `buffer` holds `byte_length` bytes, the sum of every run, so
+        // each run lands inside it and cannot overlap the borrowed source.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                run.as_ptr(),
+                buffer.contents().as_ptr().cast::<u8>().add(offset),
+                run.len(),
+            );
+        }
+        offset += run.len();
+    }
+    if let Some(name) = resident_name {
+        RESIDENT_BUFFERS.with(|cache| {
+            cache
+                .borrow_mut()
+                .insert(name.to_string(), (pointer as usize, byte_length, buffer.clone()))
+        });
+    }
+    Ok(buffer)
+}
+
 /// Evicts every buffer a checkpoint's own resident weight names cached in
 /// `NOCOPY_BUFFERS`/`RESIDENT_BUFFERS` -- the drop-time counterpart to
 /// `upload_block_no_copy`/`upload_resident_copy`'s insert. Removing by

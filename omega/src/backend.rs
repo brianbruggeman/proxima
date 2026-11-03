@@ -1052,7 +1052,9 @@ fn block_codec_identity(block: QuantizedBlock<'_>) -> (Option<Codec>, bool) {
     match block {
         QuantizedBlock::Float32(_) => (None, false),
         QuantizedBlock::Int32(_) => (None, true),
-        QuantizedBlock::Packed { codec, .. } => (Some(codec), false),
+        QuantizedBlock::Packed { codec, .. } | QuantizedBlock::PackedStrided { codec, .. } => {
+            (Some(codec), false)
+        }
     }
 }
 

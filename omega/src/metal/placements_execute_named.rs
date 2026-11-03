@@ -800,6 +800,9 @@ pub(super) fn execute_plan_with_placements_inner(
             QuantizedBlock::Packed { bytes, .. } => {
                 upload_packed_bytes(&device, bytes, resident_name)?
             }
+            QuantizedBlock::PackedStrided { .. } => {
+                (upload_strided_runs(&device, &block, resident_name)?, 0)
+            }
         };
         device_buffers.insert(*node, buffer);
     }
@@ -2479,6 +2482,9 @@ pub fn execute_plan_timed(
             }
             QuantizedBlock::Packed { bytes, .. } => {
                 upload_packed_bytes(&device, bytes, resident_name)?
+            }
+            QuantizedBlock::PackedStrided { .. } => {
+                (upload_strided_runs(&device, &block, resident_name)?, 0)
             }
         };
         device_buffers.insert(*node, buffer);

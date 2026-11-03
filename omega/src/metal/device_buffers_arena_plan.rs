@@ -2003,7 +2003,9 @@ pub(super) fn block_identity_key(block: &QuantizedBlock<'_>) -> (usize, usize) {
     match block {
         QuantizedBlock::Float32(data) => (data.as_ptr().cast::<()>() as usize, size_of_val(*data)),
         QuantizedBlock::Int32(data) => (data.as_ptr().cast::<()>() as usize, size_of_val(*data)),
-        QuantizedBlock::Packed { bytes, .. } => (bytes.as_ptr().cast::<()>() as usize, bytes.len()),
+        QuantizedBlock::Packed { bytes, .. } | QuantizedBlock::PackedStrided { bytes, .. } => {
+            (bytes.as_ptr().cast::<()>() as usize, bytes.len())
+        }
     }
 }
 

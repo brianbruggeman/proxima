@@ -1484,7 +1484,9 @@ pub const BFLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::bf16::QK_BF16;
     )
 ))]
 pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Option<Codec> {
-    let QuantizedBlock::Packed { codec, .. } = block else {
+    let (QuantizedBlock::Packed { codec, .. } | QuantizedBlock::PackedStrided { codec, .. }) =
+        block
+    else {
         return None;
     };
     match codec {

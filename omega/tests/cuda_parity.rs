@@ -5602,3 +5602,152 @@ async fn q5_k_reader_and_q6_k_reader_share_one_derived_node_and_both_are_int8_on
 async fn q6_k_reader_and_q3_k_reader_share_one_derived_node_and_only_the_eligible_one_is_int8_on_cuda(#[case] tokens: usize) {
     assert_mixed_readers_parity(q6_k_reader(), q3_k_reader(), false, tokens);
 }
+
+fn gathered_expert_program(n_experts: u32, rows: u32, k: u32, seq: u32) -> (Vec<Op>, NodeId) {
+    use proxima_tensor::map::{AxisIndex, AxisTerm};
+
+    let mut program = Vec::new();
+    let weight = append_input(
+        &mut program,
+        DType::UINT8,
+        vec![
+            Extent::Static(n_experts),
+            Extent::Static(rows),
+            Extent::Static(k),
+        ],
+        "weight",
+    );
+    let route = append_input(&mut program, DType::INT32, vec![Extent::Static(seq)], "route");
+    let activation = append_input(
+        &mut program,
+        DType::FLOAT32,
+        vec![Extent::Static(seq), Extent::Static(k)],
+        "activation",
+    );
+    let axis = |dim: u16| AxisIndex {
+        terms: core::iter::once(AxisTerm::projection(dim)).collect(),
+        offset: 0,
+        len: None,
+    };
+    let gather_map = IndexMap::Computed {
+        indices: route,
+        index_map: map::projection(3, &[0]),
+        base: map::IndexPattern {
+            iter_rank: 3,
+            axes: vec![AxisIndex::default(), axis(1), axis(2)],
+        },
+        gathered_dim: 0,
+    };
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, gather_map),
+                (activation, IndexMap::Affine(map::projection(3, &[0, 2]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("gathered_expert_product".into()),
+        }),
+    );
+    (program, sum)
+}
+
+fn run_gathered_experts_on_cuda(
+    weight: QuantizedBlock<'_>,
+    shape: (u32, u32, u32),
+    route: &[f32],
+    activation: &[f32],
+) -> Vec<f32> {
+    let (n_experts, rows, k) = shape;
+    let (program, sum) = gathered_expert_program(n_experts, rows, k, route.len() as u32);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("weight", weight),
+        ("route", QuantizedBlock::Float32(route)),
+        ("activation", QuantizedBlock::Float32(activation)),
+    ];
+    let mut plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[sum],
+        NumericPolicy::default(),
+    )
+    .expect("omega::backend plans the routed expert reduce on cuda");
+    execute_plan_named(&mut plan, &named)
+        .expect("omega::backend runs the routed expert reduce on a real cuda device")
+        .root()
+        .to_vec()
+}
+
+#[test]
+fn a_strided_fused_gate_up_stack_uploads_and_routes_on_cuda_bit_identically_to_the_packed_copy() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+    let (n_experts, rows, k) = (4usize, 4usize, QK_K);
+    let half_bytes = rows * BLOCK_BYTES;
+    let mut fused = Vec::new();
+    for half in 0..n_experts * 2 {
+        let values: Vec<f32> = random_vec(501 + half as u64, rows * k)
+            .into_iter()
+            .map(|value| (value * 4.0 - 2.0) * (1.0 + half as f32))
+            .collect();
+        let mut encoded = vec![0u8; half_bytes];
+        for (row_values, row_blocks) in values.chunks_exact(k).zip(encoded.chunks_exact_mut(half_bytes / rows)) {
+            quantize(row_values, row_blocks).expect("row is one super-block");
+        }
+        fused.extend_from_slice(&encoded);
+    }
+    let route = [2.0f32, 0.0, 3.0, 1.0];
+    let activation: Vec<f32> = random_vec(601, route.len() * k)
+        .into_iter()
+        .map(|value| value * 2.0 - 1.0)
+        .collect();
+    let shape = (n_experts as u32, rows as u32, k as u32);
+
+    for half in 0..2usize {
+        let copy: Vec<u8> = (0..n_experts)
+            .flat_map(|expert| {
+                let start = (expert * 2 + half) * half_bytes;
+                fused[start..start + half_bytes].iter().copied()
+            })
+            .collect();
+        let span = &fused[half * half_bytes..(n_experts - 1) * 2 * half_bytes + (half + 1) * half_bytes];
+        let strided = QuantizedBlock::PackedStrided {
+            codec: Codec::Q4K,
+            bytes: span,
+            expert_bytes: half_bytes,
+            stride_bytes: 2 * half_bytes,
+        };
+        let copied = QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &copy,
+        };
+
+        let from_view = run_gathered_experts_on_cuda(strided, shape, &route, &activation);
+        let from_copy = run_gathered_experts_on_cuda(copied, shape, &route, &activation);
+
+        assert_eq!(from_view.len(), route.len() * rows, "degenerate gate: no outputs");
+        assert!(from_view.iter().any(|value| *value != 0.0), "degenerate gate: all zero");
+        assert_eq!(
+            from_view.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            from_copy.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            "half {half}: strided upload differs from the packed copy on cuda"
+        );
+    }
+}

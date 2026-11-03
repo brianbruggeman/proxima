@@ -101,7 +101,9 @@ pub fn plan_named_with_config_and_placed_inputs(
 
 fn input_contract(block: &QuantizedBlock<'_>) -> Result<(Option<Codec>, bool, usize), MetalError> {
     let codec = match block {
-        QuantizedBlock::Packed { codec, .. } => Some(*codec),
+        QuantizedBlock::Packed { codec, .. } | QuantizedBlock::PackedStrided { codec, .. } => {
+            Some(*codec)
+        }
         QuantizedBlock::Float32(_) => None,
         QuantizedBlock::Int32(_) => None,
     };
