@@ -88,3 +88,103 @@ impl Lcg {
         (bits as f32 / u32::MAX as f32) * 2.0 - 1.0
     }
 }
+
+/// The node ids [`widened_sum_of_squares`] built, named by their role.
+pub struct WidenedSumOfSquares {
+    pub program: alloc::vec::Vec<crate::op::Op>,
+    pub input: crate::op::NodeId,
+    pub squares: crate::op::NodeId,
+    pub widened: crate::op::NodeId,
+    pub sum: crate::op::NodeId,
+    pub mean: crate::op::NodeId,
+    pub narrowed: crate::op::NodeId,
+}
+
+/// `(ggml_float)(x*x)` summed, divided by `n` in double, narrowed to `f32`:
+/// llama.cpp's `rms_norm_f32` accumulation (`ggml-cpu/ops.cpp:3957-3964`)
+/// spelled in the IR's own dtypes, over a `[rows, width]` input.
+#[must_use]
+pub fn widened_sum_of_squares(rows: u32, width: u32) -> WidenedSumOfSquares {
+    use crate::dtype::DType;
+    use crate::map::{self, IndexMap};
+    use crate::op::{Extent, Keep, Op, Reduce, ReduceInit, ScalarOp, append};
+
+    let mut program = alloc::vec::Vec::new();
+    let full = || IndexMap::Affine(map::projection(2, &[0, 1]));
+    let row = || IndexMap::Affine(map::projection(1, &[0]));
+    let scalar = || IndexMap::Affine(map::projection(1, &[]));
+    let input = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: alloc::vec![Extent::Static(rows), Extent::Static(width)],
+            name: None,
+        },
+    );
+    let squares = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![(input, full()), (input, full())],
+            name: None,
+        },
+    );
+    let widened = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT64,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(squares, full())],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT64,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: widened,
+            in_map: full(),
+            out_map: IndexMap::Affine(map::projection(2, &[0])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let count = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::FLOAT64,
+            shape: alloc::vec::Vec::new(),
+            value: width as f32,
+        },
+    );
+    let mean = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT64,
+            body: ScalarOp::Divide,
+            operands: alloc::vec![(sum, row()), (count, scalar())],
+            name: None,
+        },
+    );
+    let narrowed = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(mean, row())],
+            name: None,
+        },
+    );
+    WidenedSumOfSquares {
+        program,
+        input,
+        squares,
+        widened,
+        sum,
+        mean,
+        narrowed,
+    }
+}
