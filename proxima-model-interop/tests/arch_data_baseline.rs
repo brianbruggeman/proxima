@@ -1321,8 +1321,12 @@ fn assert_llama_ids_for(
         let compared = &generated[..compared_len];
         if let Some(index) = first_divergence(&case.generated_ids, compared) {
             failures.push(format!(
-                "MODEL {} prompt {:?}: first divergent index {index}; llama {:?}, proxima {:?}",
-                checkpoint.name, case.prompt, case.generated_ids, generated
+                "MODEL {} prompt {:?}: first divergent index {index}; llama {:?}, proxima {:?}; {}",
+                checkpoint.name,
+                case.prompt,
+                case.generated_ids,
+                generated,
+                divergent_logits(model, case, index, &config)
             ));
         }
     }
@@ -1333,6 +1337,31 @@ fn assert_llama_ids_for(
         cases.len(),
         failures.join("\n")
     );
+}
+
+const DIVERGENT_TOP_LOGITS: usize = 5;
+
+fn divergent_logits(
+    model: &LoadedModel<'_>,
+    case: &LlamaCase,
+    index: usize,
+    config: &ServingConfig,
+) -> String {
+    let Some(forced) = case.generated_ids.get(..=index) else {
+        return format!("llama recorded no id at index {index}");
+    };
+    let rows = model
+        .teacher_forced_logits_from_ids(&case.prompt_ids, forced, config)
+        .unwrap_or_else(|error| panic!("teacher-forced logits failed: {error:?}"));
+    let row = &rows[index];
+    let mut ranked: Vec<(usize, f32)> = row.iter().copied().enumerate().collect();
+    ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+    ranked.truncate(DIVERGENT_TOP_LOGITS);
+    let llama_id = case.generated_ids[index] as usize;
+    format!(
+        "proxima teacher-forced top{DIVERGENT_TOP_LOGITS} at index {index} (id, logit) {ranked:?}; llama id {llama_id} logit {}",
+        row[llama_id]
+    )
 }
 
 const PREFILL_WIDTH_FLOOR_TOKENS: usize = 160;
@@ -1404,6 +1433,11 @@ fn llama_parity_lfm2() {
 #[test]
 fn llama_parity_qwen3() {
     llama_parity(&QWEN3);
+}
+
+#[test]
+fn llama_parity_qwen35() {
+    llama_parity(&QWEN35);
 }
 
 const FORCED_DRAFT_WIDTHS: [u16; 2] = [1, 3];
