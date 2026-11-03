@@ -112,6 +112,7 @@ fn duplicate_bound_op(original: &BoundOp, fresh: &mut u32) -> Option<BoundOp> {
             epilogue_body,
             epilogue_operands,
             epilogue_broadcast_axes,
+            accumulator,
         } => BoundOpKind::Reduce {
             element_body: element_body.clone(),
             reduce_op: *reduce_op,
@@ -124,6 +125,7 @@ fn duplicate_bound_op(original: &BoundOp, fresh: &mut u32) -> Option<BoundOp> {
             epilogue_body: epilogue_body.clone(),
             epilogue_operands: epilogue_operands.clone(),
             epilogue_broadcast_axes: epilogue_broadcast_axes.clone(),
+            accumulator: *accumulator,
         },
         BoundOpKind::BlockQuantize { operands, layout } => BoundOpKind::BlockQuantize {
             operands: operands.clone(),

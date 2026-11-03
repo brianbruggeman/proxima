@@ -236,6 +236,7 @@ fn reduce_case_with(seed: u64, integers: bool, generic: Option<bool>) -> Case {
                 epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
                 epilogue_operands: Vec::new(),
                 epilogue_broadcast_axes: smallvec![],
+                accumulator: DType::FLOAT32,
             },
         },
         buffers,
@@ -546,6 +547,7 @@ fn mnk_matmul_fold(m: u64, n: u64, k: u64) -> BoundOp {
             epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
             epilogue_operands: Vec::new(),
             epilogue_broadcast_axes: smallvec![],
+            accumulator: DType::FLOAT32,
         },
     }
 }
@@ -640,6 +642,7 @@ fn delta_net_state_fold() -> BoundOp {
             epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
             epilogue_operands: Vec::new(),
             epilogue_broadcast_axes: smallvec![],
+            accumulator: DType::FLOAT32,
         },
     }
 }
@@ -761,6 +764,7 @@ fn contiguous_generic_reduce(reduce_op: ScalarOp, init: ReduceInit) -> Case {
             epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
             epilogue_operands: Vec::new(),
             epilogue_broadcast_axes: smallvec![],
+            accumulator: DType::FLOAT32,
         },
     };
     Case {

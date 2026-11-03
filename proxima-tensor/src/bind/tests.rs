@@ -304,6 +304,7 @@ fn name_reports_the_variant_backends_render_error_messages_with() {
         epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
         epilogue_operands: Vec::new(),
         epilogue_broadcast_axes: SmallVec::new(),
+        accumulator: DType::FLOAT32,
     };
     let reduce_scan = BoundOpKind::Reduce {
         element_body: ComposedBody::leaf(ScalarOp::Identity),
@@ -320,6 +321,7 @@ fn name_reports_the_variant_backends_render_error_messages_with() {
         epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
         epilogue_operands: Vec::new(),
         epilogue_broadcast_axes: SmallVec::new(),
+        accumulator: DType::FLOAT32,
     };
 
     assert_eq!(cached_attention.name(), "cached_attention");

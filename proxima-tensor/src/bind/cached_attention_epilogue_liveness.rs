@@ -488,6 +488,7 @@ pub(super) fn reduce_epilogue_fusion(
                 out_scatter: None,
                 epilogue_body: inner_epilogue_body,
                 epilogue_operands: inner_epilogue_operands,
+                accumulator,
                 ..
             } = &reduce_bound.kind
             else {
@@ -555,6 +556,7 @@ pub(super) fn reduce_epilogue_fusion(
                     epilogue_body,
                     epilogue_operands,
                     epilogue_broadcast_axes: broadcast_axes,
+                    accumulator: *accumulator,
                 },
             };
             fused_by_consumer.insert(consumer, fused);
