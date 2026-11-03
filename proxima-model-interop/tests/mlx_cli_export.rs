@@ -21,8 +21,6 @@ use memmap2::Mmap;
 use proxima_gguf::parse_complete;
 use serde_json::Value;
 
-mod common;
-
 const DONE_MARKER: &str = "export.done";
 const EXPECTED_FILES: [&str; 4] = [
     "config.json",
@@ -45,7 +43,7 @@ struct Model {
 
 impl Model {
     fn gguf_path(&self) -> PathBuf {
-        common::resolve_checkpoint(self.gguf_env, self.gguf, self.gguf_length)
+        proxima_model_interop::checkpoint_resolver::resolve_checkpoint(self.gguf_env, self.gguf, self.gguf_length)
     }
 }
 

@@ -49,8 +49,6 @@ use proxima_tensor::spec::{
 };
 use sha2::{Digest, Sha256};
 
-mod common;
-
 const CAPTURE_ENV: &str = "PROXIMA_ARCH_DATA_CAPTURE";
 const CHECKPOINTS_TOML: &str = include_str!("fixtures/llama-parity/checkpoints.toml");
 
@@ -156,7 +154,7 @@ impl Checkpoint {
     }
 
     fn resolved_path(&self) -> String {
-        common::resolve_checkpoint(self.env, self.path, self.recorded_length())
+        proxima_model_interop::checkpoint_resolver::resolve_checkpoint(self.env, self.path, self.recorded_length())
             .to_string_lossy()
             .into_owned()
     }
