@@ -1723,29 +1723,14 @@ pub fn append_delta_net_sequence_tail_projected(
     ssm_out_head_major: bool,
     fold: Option<&HadamardFold>,
 ) -> Result<GdnSequenceTailTaps, TensorError> {
-    let squared = elementwise(
+    let mean_square = mean_of_squares(
         program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[
-            (tail.delta_out, "sjug->sjug"),
-            (tail.delta_out, "sjug->sjug"),
-        ],
-    )?;
-    let sum_squares = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        squared,
+        tail.delta_out,
+        tail.inv_head_v_dim,
         "sjug->sjug",
         "sug->sjug",
-    )?;
-    let mean_square = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(sum_squares, "sug->sug"), (tail.inv_head_v_dim, "->sug")],
+        "sug->sug",
+        "->sug",
     )?;
     let mean_square_eps = elementwise(
         program,
@@ -2734,26 +2719,14 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         // (llama.cpp's hybrid-model source, lines 243-250): `rmsnorm(out, weight) * output_gate(z)`,
         // `output_gate` per [`GdnOutputGate`] (silu for recurrent-interval, sigmoid for
         // qwen4exp, reference: PR 27742 line 2896-2899).
-        let squared = elementwise(
+        let mean_square = mean_of_squares(
             program,
-            DType::FLOAT32,
-            ScalarOp::Multiply,
-            &[(delta_out, "jug->jug"), (delta_out, "jug->jug")],
-        )?;
-        let sum_squares = reduce(
-            program,
-            DType::FLOAT32,
-            ScalarOp::Add,
-            ReduceInit::Zero,
-            squared,
+            delta_out,
+            inv_head_v_dim,
             "jug->jug",
             "ug->jug",
-        )?;
-        let mean_square = elementwise(
-            program,
-            DType::FLOAT32,
-            ScalarOp::Multiply,
-            &[(sum_squares, "ug->ug"), (inv_head_v_dim, "->ug")],
+            "ug->ug",
+            "->ug",
         )?;
         let mean_square_eps = elementwise(
             program,

@@ -353,7 +353,7 @@ pub fn qwen35_partial_rotary_forward_fixture(
         vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
         "x",
     );
-    let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+    let inv_dim = count_constant(&mut program, EMBEDDING);
     let eps = input_leaf(
         &mut program,
         DType::FLOAT32,
@@ -362,7 +362,7 @@ pub fn qwen35_partial_rotary_forward_fixture(
     );
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 1.0 / (ATTN_HEAD_DIM as f32).sqrt());
-    let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / ATTN_HEAD_DIM as f32);
+    let inv_attn_head_dim = count_constant(&mut program, ATTN_HEAD_DIM);
     let rotary_shape = vec![Extent::Symbolic(0), Extent::Static(PAIR_DIM)];
     let cos_new = input_leaf(&mut program, DType::FLOAT32, rotary_shape.clone(), "cos");
     let sin_new = input_leaf(&mut program, DType::FLOAT32, rotary_shape, "sin");

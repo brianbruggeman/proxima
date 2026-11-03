@@ -167,7 +167,7 @@ pub(super) fn hybrid_dense_forward(
         x = fold.restore_flat(&mut program, x, embedding)?;
     }
 
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let inv_dim = count_constant(&mut program, embedding);
     let eps = input_leaf(&mut program, DType::FLOAT32, alloc::vec![x_extent], "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let one = ones;
@@ -178,10 +178,10 @@ pub(super) fn hybrid_dense_forward(
     // real width, `modeling_qwen3_next.py:262,264`), not
     // `rotary_dim`-based.
     let inv_sqrt_attn_head_dim = scalar_constant(&mut program, score_multiplier);
-    let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / attn_head_dim as f32);
+    let inv_attn_head_dim = count_constant(&mut program, attn_head_dim);
     let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / libm::sqrtf(ssm_d_state as f32));
     let head_v_dim = ssm_d_inner / ssm_dt_rank;
-    let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
+    let inv_head_v_dim = count_constant(&mut program, head_v_dim);
     let cos_new = input_leaf(
         &mut program,
         DType::FLOAT32,
@@ -1104,13 +1104,13 @@ pub(super) fn hybrid_routed_forward(
     );
     let mut x = embedding_lookup(&mut program, table, ids);
 
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let inv_dim = count_constant(&mut program, embedding);
     let eps = input_leaf(&mut program, DType::FLOAT32, alloc::vec![x_extent], "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let one = ones;
 
     let inv_sqrt_attn_head_dim = scalar_constant(&mut program, attention.score_scale.multiplier());
-    let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / attn_head_dim as f32);
+    let inv_attn_head_dim = count_constant(&mut program, attn_head_dim);
     let cos_new = input_leaf(
         &mut program,
         DType::FLOAT32,
@@ -1131,7 +1131,7 @@ pub(super) fn hybrid_routed_forward(
         &mut program,
         1.0 / libm::sqrtf(descriptor.ssm_state_size as f32),
     );
-    let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim.max(1) as f32);
+    let inv_head_v_dim = count_constant(&mut program, head_v_dim.max(1));
     let head_eps = op::append(
         &mut program,
         Op::Constant {

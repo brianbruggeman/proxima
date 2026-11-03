@@ -89,7 +89,7 @@ fn build_fixture(positions: u32) -> RealDimsFixture {
         vec![Extent::Static(positions), Extent::Static(EMBEDDING)],
         "x",
     );
-    let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+    let inv_dim = count_constant(&mut program, EMBEDDING);
     let eps = input_leaf(
         &mut program,
         DType::FLOAT32,
@@ -104,7 +104,7 @@ fn build_fixture(positions: u32) -> RealDimsFixture {
     );
     let one = scalar_constant(&mut program, 1.0);
     let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (head_k_dim as f32).sqrt());
-    let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
+    let inv_head_v_dim = count_constant(&mut program, head_v_dim);
     let attn_norm_weight = input_leaf(
         &mut program,
         DType::FLOAT32,

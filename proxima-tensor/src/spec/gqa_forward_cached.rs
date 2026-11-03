@@ -55,7 +55,7 @@ pub fn gqa_forward_program(
     );
     let mut x = embedding_lookup(&mut program, table, ids);
 
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let inv_dim = count_constant(&mut program, embedding);
     let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     // attention's usual `1/sqrt(d_k)`, the same two IEEE ops the deleted
@@ -975,27 +975,7 @@ pub fn append_hyper_connection_mix(
     w_up: NodeId,
     w_inject: Option<NodeId>,
 ) -> Result<(NodeId, Option<NodeId>), TensorError> {
-    let squared = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(x, "shi->shi"), (x, "shi->shi")],
-    )?;
-    let sum_squares = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        squared,
-        "shi->shi",
-        "sh->shi",
-    )?;
-    let mean_square = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(sum_squares, "sh->sh"), (inv_dim, "->sh")],
-    )?;
+    let mean_square = mean_of_squares(program, x, inv_dim, "shi->shi", "sh->shi", "sh->sh", "->sh")?;
     let mean_square_eps = elementwise(
         program,
         DType::FLOAT32,

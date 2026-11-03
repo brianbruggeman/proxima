@@ -44,7 +44,7 @@ fn fixture(positions: u32) -> Fixture {
     let qkv_dim = 2 * key_dim + value_dim;
     let mut program = Vec::new();
     let x = leaf(&mut program, "x", vec![x_extent, Extent::Static(MODEL_DIM)]);
-    let inv_dim = scalar_constant(&mut program, 1.0 / MODEL_DIM as f32);
+    let inv_dim = count_constant(&mut program, MODEL_DIM);
     let eps = leaf(&mut program, "eps", vec![x_extent]);
     let head_eps = leaf(
         &mut program,
@@ -53,7 +53,7 @@ fn fixture(positions: u32) -> Fixture {
     );
     let one = scalar_constant(&mut program, 1.0);
     let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (HEAD_DIM as f32).sqrt());
-    let inv_head_v_dim = scalar_constant(&mut program, 1.0 / HEAD_DIM as f32);
+    let inv_head_v_dim = count_constant(&mut program, HEAD_DIM);
     let attn_norm_weight = leaf(&mut program, "attn_norm_weight", vec![Extent::Static(MODEL_DIM)]);
     let wqkv = leaf(&mut program, "wqkv", vec![Extent::Static(MODEL_DIM), Extent::Static(qkv_dim)]);
     let wqkv_gate = leaf(

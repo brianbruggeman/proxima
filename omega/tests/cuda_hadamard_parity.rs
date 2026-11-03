@@ -356,11 +356,11 @@ mod folded_attention {
             vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
             "x",
         );
-        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+        let inv_dim = count_constant(&mut program, EMBEDDING);
         let eps = input_leaf(&mut program, DType::FLOAT32, vec![Extent::Symbolic(0)], "eps");
         let ones = scalar_constant(&mut program, 1.0);
         let inv_sqrt = scalar_constant(&mut program, 1.0 / (HEAD_DIM as f32).sqrt());
-        let inv_head = scalar_constant(&mut program, 1.0 / HEAD_DIM as f32);
+        let inv_head = count_constant(&mut program, HEAD_DIM);
         let rotary_shape = vec![Extent::Symbolic(0), Extent::Static(PAIRS)];
         let cos = input_leaf(&mut program, DType::FLOAT32, rotary_shape.clone(), "cos");
         let sin = input_leaf(&mut program, DType::FLOAT32, rotary_shape, "sin");
@@ -628,11 +628,11 @@ mod packed_folded_attention {
             vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
             "x",
         );
-        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+        let inv_dim = count_constant(&mut program, EMBEDDING);
         let eps = input_leaf(&mut program, DType::FLOAT32, vec![Extent::Symbolic(0)], "eps");
         let ones = scalar_constant(&mut program, 1.0);
         let inv_sqrt = scalar_constant(&mut program, 1.0 / (HEAD_DIM as f32).sqrt());
-        let inv_head = scalar_constant(&mut program, 1.0 / HEAD_DIM as f32);
+        let inv_head = count_constant(&mut program, HEAD_DIM);
         let rotary_shape = vec![Extent::Symbolic(0), Extent::Static(PAIRS)];
         let cos = input_leaf(&mut program, DType::FLOAT32, rotary_shape.clone(), "cos");
         let sin = input_leaf(&mut program, DType::FLOAT32, rotary_shape, "sin");
