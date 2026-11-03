@@ -222,6 +222,7 @@ mod coalesce;
 mod gemm_tile;
 #[macro_use]
 mod gemm_dot_quant;
+mod gemm_q8_0_act;
 #[cfg(target_arch = "x86_64")]
 mod dequant_x86;
 #[macro_use]
@@ -233,6 +234,7 @@ mod typed_eval;
 pub use arena::*;
 use coalesce::*;
 use elementwise_matmul::*;
+use gemm_q8_0_act::*;
 pub use epilogue::*;
 pub use gemm_dot_quant::*;
 pub use gemm_q8k::*;

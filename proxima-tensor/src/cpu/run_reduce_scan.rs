@@ -604,6 +604,25 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         return Ok(());
     }
 
+    if !exact_activations
+        && weight_gather.is_none()
+        && let QuantizedBlock::Packed {
+            codec: codec @ (Codec::Q8_0 | Codec::Q5_0),
+            bytes: _,
+        } = weight_block
+    {
+        let wide = matmul_q8_0_activation_impl(
+            weights,
+            rows,
+            activation,
+            leading_total,
+            session,
+            activation_dot_for(codec),
+        )?;
+        transpose_wide_to_output(&wide, rows, leading_total, session, output)?;
+        return Ok(());
+    }
+
     // A gathered weight resolves one expert slab out of the stacked buffer
     // per position, using the same coordinate -> `Layout::offset_of`
     // machinery `fill_gather_cursors` uses for the dense f32 gather path
@@ -794,6 +813,17 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     matmul_q6k_f32(weights, rows, activation_row)?
                 }
             }
+            QuantizedBlock::Packed {
+                codec: codec @ (Codec::Q8_0 | Codec::Q5_0),
+                bytes: _,
+            } if !exact_activations => matmul_q8_0_activation_impl(
+                weights,
+                rows,
+                activation_row,
+                1,
+                session,
+                activation_dot_for(codec),
+            )?,
             // No `q3k-int8-dot` kernel exists yet -- `dot_q3k_f32`'s
             // dequantize-then-fold path is `Q3_K`'s only codec path,
             // unconditionally, unlike `Q4K`/`Q5K`/`Q6K` above which fall
