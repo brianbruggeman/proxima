@@ -327,6 +327,7 @@ fn main() {
     // count/bytes here (no backtrace) — the itemisation above already
     // proved the per-site breakdown; this only checks the totals move.
     let mut scratch: Vec<Vec<f32>> = Vec::new();
+    let mut wide_scratch: Vec<Vec<f64>> = Vec::new();
     for call_number in 1..=3 {
         RECORDS
             .lock()
@@ -334,7 +335,14 @@ fn main() {
             .clear();
         RECORDING.store(true, Ordering::Relaxed);
         let evaluated =
-            proxima_tensor::evaluate_with_scratch(&program, &[], &[&lhs, &rhs], &[], &mut scratch)
+            proxima_tensor::evaluate_with_scratch(
+                &program,
+                &[],
+                &[&lhs, &rhs],
+                &[],
+                &mut scratch,
+                &mut wide_scratch,
+            )
                 .expect("scratch gemm evaluates");
         RECORDING.store(false, Ordering::Relaxed);
         let records = RECORDS

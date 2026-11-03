@@ -13708,6 +13708,7 @@ fn requested_expert_stack_output_is_dequantized_through_an_expert_source() {
         &blocks,
         &[stack],
         &mut Vec::new(),
+        &mut Vec::new(),
         &mut None,
         Some(&sources),
     )

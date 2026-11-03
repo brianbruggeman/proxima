@@ -33,6 +33,7 @@ pub fn evaluate_quantized(
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
     let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
     let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
     evaluate_quantized_with_scratch(
         program,
@@ -40,6 +41,7 @@ pub fn evaluate_quantized(
         blocks,
         outputs,
         &mut free_buffers,
+        &mut wide_pool,
         &mut validated_weight_nodes,
     )
 }
@@ -59,6 +61,7 @@ pub fn evaluate_quantized_exact(
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
     let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
     let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
     evaluate_quantized_exact_with_scratch(
         program,
@@ -66,6 +69,7 @@ pub fn evaluate_quantized_exact(
         blocks,
         outputs,
         &mut free_buffers,
+        &mut wide_pool,
         &mut validated_weight_nodes,
     )
 }
@@ -112,6 +116,7 @@ pub fn evaluate_quantized_with_scratch(
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> Result<Evaluated, TensorError> {
     evaluate_quantized_with_scratch_impl(
@@ -120,6 +125,7 @@ pub fn evaluate_quantized_with_scratch(
         blocks,
         outputs,
         free_buffers,
+        wide_pool,
         validated_weight_nodes,
         false,
         None,
@@ -134,6 +140,7 @@ pub fn evaluate_quantized_exact_with_scratch(
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> Result<Evaluated, TensorError> {
     evaluate_quantized_with_scratch_impl(
@@ -142,6 +149,7 @@ pub fn evaluate_quantized_exact_with_scratch(
         blocks,
         outputs,
         free_buffers,
+        wide_pool,
         validated_weight_nodes,
         true,
         None,
@@ -163,6 +171,7 @@ pub fn evaluate_quantized_with_scratch_and_experts(
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
@@ -172,6 +181,7 @@ pub fn evaluate_quantized_with_scratch_and_experts(
         blocks,
         outputs,
         free_buffers,
+        wide_pool,
         validated_weight_nodes,
         false,
         expert_sources,
@@ -187,6 +197,7 @@ pub fn evaluate_quantized_exact_with_scratch_and_experts(
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
@@ -196,6 +207,7 @@ pub fn evaluate_quantized_exact_with_scratch_and_experts(
         blocks,
         outputs,
         free_buffers,
+        wide_pool,
         validated_weight_nodes,
         true,
         expert_sources,
@@ -391,6 +403,7 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     exact_activations: bool,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
@@ -401,6 +414,7 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
         blocks,
         outputs,
         free_buffers,
+        wide_pool,
         validated_weight_nodes,
         exact_activations,
         expert_sources,
@@ -424,6 +438,7 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     exact_activations: bool,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
@@ -431,7 +446,7 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
 ) -> Result<Evaluated, TensorError> {
     evaluate_quantized_with_policy(
         (program, symbols, blocks, outputs),
-        (free_buffers, validated_weight_nodes),
+        (free_buffers, wide_pool, validated_weight_nodes),
         expert_sources,
         (
             exact_activations,
@@ -452,7 +467,11 @@ pub fn evaluate_quantized_named_with_config<'block>(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
-    scratch: (&mut Vec<Vec<f32>>, &mut Option<BTreeSet<NodeId>>),
+    scratch: (
+        &mut Vec<Vec<f32>>,
+        &mut Vec<Vec<f64>>,
+        &mut Option<BTreeSet<NodeId>>,
+    ),
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     config: &TensorExecutionConfig,
 ) -> Result<Evaluated, TensorError> {
@@ -473,12 +492,16 @@ pub fn evaluate_quantized_named_with_config<'block>(
 
 fn evaluate_quantized_with_policy(
     inputs: (&[Op], &[u64], &[QuantizedBlock<'_>], &[NodeId]),
-    scratch: (&mut Vec<Vec<f32>>, &mut Option<BTreeSet<NodeId>>),
+    scratch: (
+        &mut Vec<Vec<f32>>,
+        &mut Vec<Vec<f64>>,
+        &mut Option<BTreeSet<NodeId>>,
+    ),
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     options: (bool, bool, bool, NumericPolicy, Option<u64>),
 ) -> Result<Evaluated, TensorError> {
     let (program, symbols, blocks, outputs) = inputs;
-    let (free_buffers, validated_weight_nodes) = scratch;
+    let (free_buffers, wide_pool, validated_weight_nodes) = scratch;
     let (
         exact_activations,
         fuse_cached_attention,
@@ -777,7 +800,6 @@ fn evaluate_quantized_with_policy(
     #[cfg(feature = "cohort-staged-graph")]
     let mut staged_quantize_cache: Vec<Option<Arc<[u8]>>> = vec![None; program.len()];
     let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
-    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
     let mut position = 0usize;
     while position < resolved.len() {
         #[cfg(feature = "cohort-staged-graph")]
@@ -822,7 +844,7 @@ fn evaluate_quantized_with_policy(
                 computed,
                 &buffers,
                 &mut wide,
-                &mut wide_pool,
+                wide_pool,
                 free_buffers,
                 program.len(),
             )? {
@@ -1039,7 +1061,7 @@ fn evaluate_quantized_with_policy(
         }
         live_now = live_now.saturating_sub(float64_island::retire(
             &mut wide,
-            &mut wide_pool,
+            wide_pool,
             &retires[position],
         ));
         for retired in &retires[position] {
@@ -1444,6 +1466,7 @@ pub fn evaluate_quantized_named<'block>(
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
     let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
     let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
     evaluate_quantized_named_with_scratch(
         program,
@@ -1451,6 +1474,7 @@ pub fn evaluate_quantized_named<'block>(
         named,
         outputs,
         &mut free_buffers,
+        &mut wide_pool,
         &mut validated_weight_nodes,
     )
 }
@@ -1531,6 +1555,7 @@ pub fn evaluate_quantized_named_with_scratch<'block>(
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> Result<Evaluated, TensorError> {
     // this name resolution runs before `evaluate_quantized`'s own setup
@@ -1551,6 +1576,7 @@ pub fn evaluate_quantized_named_with_scratch<'block>(
         &blocks,
         outputs,
         free_buffers,
+        wide_pool,
         validated_weight_nodes,
     )
 }
@@ -1567,6 +1593,7 @@ pub fn evaluate_quantized_named_exact_with_scratch<'block>(
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> Result<Evaluated, TensorError> {
     let blocks = resolve_named_blocks(program, named)?;
@@ -1576,6 +1603,7 @@ pub fn evaluate_quantized_named_exact_with_scratch<'block>(
         &blocks,
         outputs,
         free_buffers,
+        wide_pool,
         validated_weight_nodes,
     )
 }
@@ -1590,6 +1618,7 @@ pub fn evaluate_quantized_named_with_scratch_and_experts<'block>(
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
@@ -1600,6 +1629,7 @@ pub fn evaluate_quantized_named_with_scratch_and_experts<'block>(
         &blocks,
         outputs,
         free_buffers,
+        wide_pool,
         validated_weight_nodes,
         expert_sources,
     )
@@ -1619,6 +1649,7 @@ pub fn evaluate_quantized_named_with_scratch_and_experts_with_fusion<'block>(
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     fuse_cached_attention: bool,
@@ -1630,6 +1661,7 @@ pub fn evaluate_quantized_named_with_scratch_and_experts_with_fusion<'block>(
         &blocks,
         outputs,
         free_buffers,
+        wide_pool,
         validated_weight_nodes,
         false,
         expert_sources,
@@ -1646,6 +1678,7 @@ pub fn evaluate_quantized_named_exact_with_scratch_and_experts<'block>(
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
@@ -1656,6 +1689,7 @@ pub fn evaluate_quantized_named_exact_with_scratch_and_experts<'block>(
         &blocks,
         outputs,
         free_buffers,
+        wide_pool,
         validated_weight_nodes,
         expert_sources,
     )
@@ -1684,6 +1718,7 @@ pub(super) fn evaluate_pooled(
     blocks: &[&[f32]],
     outputs: &[NodeId],
     free_buffers: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
 ) -> Result<Evaluated, TensorError> {
     #[cfg(feature = "instrument")]
     let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::Prepare);
@@ -1706,13 +1741,12 @@ pub(super) fn evaluate_pooled(
     let mut peak_live_buffers = live_count(&buffers);
     let mut live_now = peak_live_buffers;
     let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
-    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
     for (position, computed) in resolved.iter().enumerate() {
         let output = match float64_island::step(
             computed,
             &buffers,
             &mut wide,
-            &mut wide_pool,
+            wide_pool,
             free_buffers,
             buffers.len(),
         )? {
@@ -1738,7 +1772,7 @@ pub(super) fn evaluate_pooled(
         peak_live_buffers = peak_live_buffers.max(live_now);
         live_now = live_now.saturating_sub(float64_island::retire(
             &mut wide,
-            &mut wide_pool,
+            wide_pool,
             &retires[position],
         ));
         for retired in &retires[position] {

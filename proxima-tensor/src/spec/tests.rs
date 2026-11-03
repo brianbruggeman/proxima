@@ -22268,6 +22268,7 @@ mod mixer_over_packed_projection {
             ("ssm_out", out_weight),
         ]);
         let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+        let mut wide_pool: Vec<Vec<f64>> = Vec::new();
         let mut validated_weight_nodes = None;
         let evaluated = evaluate_quantized_named_exact_with_scratch(
             &program,
@@ -22275,6 +22276,7 @@ mod mixer_over_packed_projection {
             &named,
             &[mixer_out, taps.qkv_mixed, taps.state_out],
             &mut free_buffers,
+            &mut wide_pool,
             &mut validated_weight_nodes,
         )
         .expect("the mixer evaluates");

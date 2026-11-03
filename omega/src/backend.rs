@@ -751,6 +751,7 @@ fn plan_configured_candidate(
                 symbols: symbols.to_vec(),
                 outputs: outputs.to_vec(),
                 free_buffers: Vec::new(),
+                wide_pool: Vec::new(),
                 validated_weight_nodes: None,
                 exact_activations: config.exact_activations,
                 execution_config: Some(execution),
@@ -1095,6 +1096,9 @@ pub struct CpuPlan {
     symbols: Vec<u64>,
     outputs: Vec<NodeId>,
     free_buffers: Vec<Vec<f32>>,
+    /// Retired f64 norm-island buffers, reused by the next call the way
+    /// `free_buffers` serves the f32 ones.
+    wide_pool: Vec<Vec<f64>>,
     validated_weight_nodes: Option<std::collections::BTreeSet<NodeId>>,
     // `false` for every existing `plan_named`/`plan_named_cpu` caller --
     // routes through the SAME `q{4,5,6}k-int8-dot` fast path this plan
@@ -1764,6 +1768,7 @@ fn plan_named_cpu(
         symbols: symbols.to_vec(),
         outputs: outputs.to_vec(),
         free_buffers: Vec::new(),
+        wide_pool: Vec::new(),
         validated_weight_nodes: None,
         exact_activations: false,
         execution_config: None,
@@ -1793,6 +1798,7 @@ fn plan_named_cpu_exact(
         symbols: symbols.to_vec(),
         outputs: outputs.to_vec(),
         free_buffers: Vec::new(),
+        wide_pool: Vec::new(),
         validated_weight_nodes: None,
         exact_activations: true,
         execution_config: None,
@@ -1860,7 +1866,11 @@ fn execute_plan_named_cpu(
             &plan.symbols,
             named,
             &plan.outputs,
-            (&mut plan.free_buffers, &mut plan.validated_weight_nodes),
+            (
+                &mut plan.free_buffers,
+                &mut plan.wide_pool,
+                &mut plan.validated_weight_nodes,
+            ),
             expert_sources,
             config,
         )?
@@ -1871,6 +1881,7 @@ fn execute_plan_named_cpu(
             named,
             &plan.outputs,
             &mut plan.free_buffers,
+            &mut plan.wide_pool,
             &mut plan.validated_weight_nodes,
             expert_sources,
         )?
@@ -1881,6 +1892,7 @@ fn execute_plan_named_cpu(
             named,
             &plan.outputs,
             &mut plan.free_buffers,
+            &mut plan.wide_pool,
             &mut plan.validated_weight_nodes,
             expert_sources,
         )?

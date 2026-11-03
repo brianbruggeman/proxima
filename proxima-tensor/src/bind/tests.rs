@@ -942,7 +942,7 @@ pub(super) fn qwen35_partial_rotary_attention_fixture() -> (
     Shapes,
 ) {
     use crate::op::Extent;
-    use crate::spec::{causal_mask, input_leaf, scalar_constant};
+    use crate::spec::{causal_mask, count_constant, input_leaf, scalar_constant};
 
     const KV_HEADS: usize = QWEN35_PARTIAL_ROTARY_KV_HEADS;
     const GROUP: usize = QWEN35_PARTIAL_ROTARY_GROUP;
