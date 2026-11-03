@@ -529,11 +529,14 @@ mod real_file {
         crate::checkpoint_resolver::require_checkpoint("PROXIMA_OPENCHAT_GGUF", FIXTURE_PATH, OPENCHAT_BYTES)
     }
 
+    /// Source: huggingface.co/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF
+    /// `resolve/main/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf`, 26_743_534_336 bytes,
+    /// sha256 5b890ef6225da0135d01f2acb37a01a3b7a2fcf7beff64ff62317863c4dc126e.
     fn mixtral_path() -> std::path::PathBuf {
         crate::checkpoint_resolver::require_checkpoint(
             "PROXIMA_MIXTRAL_GGUF",
             Q8_0_FIXTURE_PATH,
-            0,
+            26_743_534_336,
         )
     }
 
