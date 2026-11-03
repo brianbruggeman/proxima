@@ -431,7 +431,12 @@ pub fn sum_of_squares(
         ScalarOp::Multiply,
         &[(x, full), (x, full)],
     )?;
-    let widened = elementwise(program, DType::FLOAT64, ScalarOp::Identity, &[(squared, full)])?;
+    let widened = elementwise(
+        program,
+        DType::FLOAT64,
+        ScalarOp::Identity,
+        &[(squared, full)],
+    )?;
     reduce(
         program,
         DType::FLOAT64,

@@ -1096,66 +1096,90 @@ pub fn softplus(
     )
 }
 
-/// [`rmsnorm`]'s L2-normalize variant: `x / sqrt(sum(x^2) + eps)`, no
-/// mean-divide and no learnable `gamma` -- `ggml_l2_norm`
-/// (llama.cpp's hybrid-model source, lines 428-429, applied to `q_conv`/`k_conv` with no weight
-/// tensor), unlike [`rmsnorm`]'s `mean_square = sum_squares / dim` and its
-/// trailing `gamma` multiply. `map`/`sum_map` follow [`rmsnorm_per_head`]'s
-/// own per-axis convention so the same function serves whichever axis (head
-/// dim here, embedding elsewhere) is being normalized.
+/// The delta-net q/k L2 normalize exactly as llama.cpp builds it for its
+/// gated-delta-net families: `build_gdn_l2_norm` is
+/// `ggml_scale(ggml_rms_norm(x, eps / n), 1 / sqrtf(n))` (`src/models/models.h:14-17`,
+/// called from `src/models/qwen35.cpp:429-430`), not `ggml_l2_norm`. So the
+/// sum of squares is a [`mean_of_squares`] over the `width` normalized
+/// elements, `eps` is divided by `width` in f32, and the normalized row is
+/// scaled by `1 / sqrtf(width)`. `map`/`sum_map` follow [`rmsnorm_per_head`]'s
+/// per-axis convention.
 pub fn l2norm(
     program: &mut Vec<Op>,
     x: NodeId,
     eps: NodeId,
+    width: u32,
     map: &str,
     sum_map: &str,
 ) -> Result<NodeId, TensorError> {
     let reduced = sum_map.split("->").next().unwrap_or(sum_map);
     let reduced_map = alloc::format!("{reduced}->{reduced}");
-    l2norm_with_eps_map(program, x, eps, map, sum_map, reduced_map.as_str())
+    l2norm_with_eps_map(program, x, eps, width, map, sum_map, reduced_map.as_str())
 }
 
 pub(super) fn l2norm_with_eps_map(
     program: &mut Vec<Op>,
     x: NodeId,
     eps: NodeId,
+    width: u32,
     map: &str,
     sum_map: &str,
     eps_map: &str,
 ) -> Result<NodeId, TensorError> {
     let reduced = sum_map.split("->").next().unwrap_or(sum_map);
     let reduced_map = alloc::format!("{reduced}->{reduced}");
-    let sum_squares_wide = sum_of_squares(program, x, map, sum_map)?;
-    let sum_squares = elementwise(
+    let scalar_map = alloc::format!("->{reduced}");
+    let count = count_constant(program, width);
+    let width_f32 = scalar_constant(program, width as f32);
+    let mean_square = mean_of_squares(program, x, count, map, sum_map, &reduced_map, &scalar_map)?;
+    let eps_space = eps_map.split("->").next().unwrap_or(eps_map);
+    let eps_identity = alloc::format!("{eps_space}->{eps_space}");
+    let eps_scalar = alloc::format!("->{eps_space}");
+    let eps_per_element = elementwise(
         program,
         DType::FLOAT32,
-        ScalarOp::Identity,
-        &[(sum_squares_wide, reduced_map.as_str())],
+        ScalarOp::Divide,
+        &[(eps, eps_identity.as_str()), (width_f32, eps_scalar.as_str())],
     )?;
-    let sum_squares_eps = elementwise(
+    let mean_square_eps = elementwise(
         program,
         DType::FLOAT32,
         ScalarOp::Add,
-        &[(sum_squares, reduced_map.as_str()), (eps, eps_map)],
+        &[
+            (mean_square, reduced_map.as_str()),
+            (eps_per_element, eps_map),
+        ],
     )?;
-    let norm = elementwise(
+    let rms = elementwise(
         program,
         DType::FLOAT32,
         ScalarOp::SquareRoot,
-        &[(sum_squares_eps, reduced_map.as_str())],
+        &[(mean_square_eps, reduced_map.as_str())],
     )?;
-    let inv_norm = elementwise(
+    let inv_rms = elementwise(
         program,
         DType::FLOAT32,
         ScalarOp::Reciprocal,
-        &[(norm, reduced_map.as_str())],
+        &[(rms, reduced_map.as_str())],
     )?;
+    let normed = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Multiply,
+        &[(x, map), (inv_rms, sum_map)],
+    )?;
+    let unit_scale = scalar_constant(program, 1.0 / libm::sqrtf(width as f32));
     elementwise(
         program,
         DType::FLOAT32,
         ScalarOp::Multiply,
-        &[(x, map), (inv_norm, sum_map)],
+        &[(normed, map), (unit_scale, scalar_map_for(map).as_str())],
     )
+}
+
+fn scalar_map_for(map: &str) -> String {
+    let full = map.split("->").next().unwrap_or(map);
+    alloc::format!("->{full}")
 }
 
 /// `x * sigmoid(x)`, `ggml_silu`'s own contract (llama.cpp's hybrid-model source, lines 391-392, run on
@@ -1426,8 +1450,8 @@ pub fn append_delta_net_conv_branch(
         None,
     )?;
 
-    let q_conv = l2norm(program, q_raw, eps, "sw->sw", "s->sw")?;
-    let k_conv = l2norm(program, k_raw, eps, "sw->sw", "s->sw")?;
+    let q_conv = l2norm(program, q_raw, eps, key_dim, "sw->sw", "s->sw")?;
+    let k_conv = l2norm(program, k_raw, eps, key_dim, "sw->sw", "s->sw")?;
 
     Ok((q_conv, k_conv, v_conv))
 }
@@ -1762,8 +1786,7 @@ pub fn append_delta_net_sequence_tail_projected(
     )?;
     let projected = match fold {
         Some(fold) => {
-            let heads =
-                merge_head_axes(
+            let heads = merge_head_axes(
                 program,
                 gated,
                 "sgud",
@@ -2363,8 +2386,24 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         ScalarOp::Multiply,
         &[(k_raw, q_split_map.as_str()), (key_head_ones, "ui->sui")],
     )?;
-    let q_split = l2norm_with_eps_map(program, q_split_raw, eps, "sui->sui", "su->sui", "s->su")?;
-    let k_split = l2norm_with_eps_map(program, k_split_raw, eps, "sui->sui", "su->sui", "s->su")?;
+    let q_split = l2norm_with_eps_map(
+        program,
+        q_split_raw,
+        eps,
+        head_k_dim,
+        "sui->sui",
+        "su->sui",
+        "s->su",
+    )?;
+    let k_split = l2norm_with_eps_map(
+        program,
+        k_split_raw,
+        eps,
+        head_k_dim,
+        "sui->sui",
+        "su->sui",
+        "s->su",
+    )?;
 
     let q_repeated = repeat_kv_heads(program, q_split, kv_heads, group)?;
     let k_repeated = repeat_kv_heads(program, k_split, kv_heads, group)?;
@@ -2471,6 +2510,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         program,
         query_prefill_split,
         eps,
+        head_k_dim,
         "sui->sui",
         "su->sui",
         "s->su",
@@ -2479,6 +2519,7 @@ pub fn append_delta_net_mixer_with_taps_and_layout(
         program,
         key_prefill_split,
         eps,
+        head_k_dim,
         "sui->sui",
         "su->sui",
         "s->su",
