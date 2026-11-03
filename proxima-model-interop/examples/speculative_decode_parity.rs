@@ -191,6 +191,13 @@ fn run_pair(
         )
         .unwrap_or_else(|error| panic!("decode with speculation on: {error}"));
     let on_elapsed_ms = on_started.elapsed().as_secs_f64() * 1000.0;
+    if let Some(width) = forced_draft_width
+        && on_stats.verify_steps == 0
+    {
+        panic!(
+            "--forced-draft-width {width} ran zero verify steps: this checkpoint's descriptor leaves speculative_verify off, so the ON run silently decoded token by token; pass --arm-verify"
+        );
+    }
     recorder.drain();
 
     let verify_events = speculative_verify_events(capture);
