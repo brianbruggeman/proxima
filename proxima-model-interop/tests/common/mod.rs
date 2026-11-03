@@ -3,7 +3,11 @@ use std::fs::read_dir;
 use std::path::{Path, PathBuf};
 
 const MODEL_DIRS_ENV: &str = "PROXIMA_MODEL_DIRS";
-const DEFAULT_MODEL_DIRS: [&str; 2] = ["/mnt/data3/models", "/mnt/data5/models"];
+const DEFAULT_MODEL_DIRS: [&str; 3] = [
+    "/mnt/data3/models",
+    "/mnt/data5/models",
+    "/mnt/data5/ollama/blobs",
+];
 
 fn search_dirs() -> Vec<PathBuf> {
     if let Some(configured) = var_os(MODEL_DIRS_ENV) {

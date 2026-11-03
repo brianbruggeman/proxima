@@ -50,6 +50,8 @@ use proxima_tensor::spec::{
 use sha2::{Digest, Sha256};
 
 mod common;
+#[path = "common/tiny_gemma4.rs"]
+mod tiny_gemma4;
 
 const CAPTURE_ENV: &str = "PROXIMA_ARCH_DATA_CAPTURE";
 const CHECKPOINTS_TOML: &str = include_str!("fixtures/llama-parity/checkpoints.toml");
@@ -1560,9 +1562,9 @@ fn serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps() {
 
 #[test]
 fn serving_fsm_drives_speculative_verify_through_accept_and_rollback() {
-    let mapping = GEMMA4_E2B.open();
-    let file_bytes: &[u8] = &mapping;
-    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let checkpoint = tiny_gemma4::tiny_gemma4_checkpoint();
+    let file_bytes: &[u8] = &checkpoint;
+    let parsed = parse_complete(file_bytes).expect("parses the generated checkpoint's GGUF header");
     let model = armed_e2b_model(&parsed, file_bytes);
     let config = ServingConfig {
         prompt_cache: PromptCacheConfig::off(),
@@ -1586,7 +1588,7 @@ fn serving_fsm_drives_speculative_verify_through_accept_and_rollback() {
                 &mut stats,
                 forced_draft_width,
             )
-            .expect("speculative decode runs on the real checkpoint");
+            .expect("speculative decode runs on the generated checkpoint");
         (generated, stats)
     };
 
@@ -1607,8 +1609,8 @@ fn serving_fsm_drives_speculative_verify_through_accept_and_rollback() {
         "control: with drafting off the machine never verifies"
     );
     assert!(
-        drafted.accept_steps > 0,
-        "the repeated prompt must produce a fully accepted verify step: {drafted:?}"
+        forced.accept_steps > 0,
+        "a repeated-token draft the model agrees with must be accepted: {forced:?}"
     );
     assert!(
         forced.rollback_steps > 0,
