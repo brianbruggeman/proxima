@@ -37,7 +37,7 @@ use proxima_model_interop::{
 };
 use proxima_tensor::TensorError;
 use proxima_tensor::cpu::QuantizedBlock;
-use proxima_tensor::op::{Extent, Op};
+use proxima_tensor::op::{Extent, NodeId, Op};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, CacheMask, CacheStrategy, CachedLayerRoots, EmbeddingScale,
     ExpertGatingFunc, FfnCombination, ForwardProgram, KeySourceKind, LayerAttentionConfig,
@@ -2374,4 +2374,133 @@ fn window_ring_layers_follow_a_window_on_one_dense_layer() {
         ring_layers(&unwindowed).iter().all(|on_ring| !on_ring),
         "control: a header with no window puts no layer on the ring"
     );
+}
+
+fn consumers_of(model: &LoadedModel<'_>, target: NodeId) -> Vec<NodeId> {
+    (0..u32::try_from(model.node_count()).expect("node count fits u32"))
+        .map(NodeId)
+        .filter(|node| model.node_dependencies(*node).contains(&target))
+        .collect()
+}
+
+const QWEN35_LLAMA_LAST_ROWS: &str =
+    include_str!("fixtures/llama-parity/qwen35/llama_idx17_last_rows.txt");
+const QWEN35_DIVERGENT_CASE: usize = 2;
+const QWEN35_DIVERGENT_INDEX: usize = 17;
+const LAYER_REL_L2_FLOOR: f64 = 1e-3;
+
+fn llama_last_row(name: &str) -> Vec<f32> {
+    QWEN35_LLAMA_LAST_ROWS
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split(' ');
+            (fields.nth(1) == Some(name)).then(|| {
+                fields
+                    .skip(1)
+                    .map(|value| value.parse::<f32>().expect("a llama row value is an f32"))
+                    .collect()
+            })
+        })
+        .unwrap_or_else(|| panic!("llama rows fixture has no {name}"))
+}
+
+fn named_leaf(model: &LoadedModel<'_>, name: &str) -> NodeId {
+    (0..u32::try_from(model.node_count()).expect("node count fits u32"))
+        .map(NodeId)
+        .find(|node| model.node_name(*node) == Some(name))
+        .unwrap_or_else(|| panic!("qwen35 program has no leaf {name}"))
+}
+
+fn normed_residual(model: &LoadedModel<'_>, norm_weight: &str) -> NodeId {
+    let leaf = named_leaf(model, norm_weight);
+    let scaled = consumers_of(model, leaf)[0];
+    let normalized = model.node_dependencies(scaled)[0];
+    model.node_dependencies(normalized)[0]
+}
+
+fn qwen35_residual_nodes(model: &LoadedModel<'_>, layers: usize) -> Vec<(String, NodeId)> {
+    (0..layers)
+        .flat_map(|layer| {
+            let next_norm = if layer + 1 == layers {
+                "output_norm.weight".to_owned()
+            } else {
+                format!("blk.{}.attn_norm.weight", layer + 1)
+            };
+            [
+                (
+                    format!("attn_residual-{layer}"),
+                    normed_residual(model, &format!("blk.{layer}.post_attention_norm.weight")),
+                ),
+                (format!("l_out-{layer}"), normed_residual(model, &next_norm)),
+            ]
+        })
+        .collect()
+}
+
+fn row_error(ours: &[f32], theirs: &[f32]) -> (f64, f64) {
+    let max_abs = ours
+        .iter()
+        .zip(theirs)
+        .map(|(left, right)| f64::from((left - right).abs()))
+        .fold(0.0, f64::max);
+    let diff: f64 = ours.iter().zip(theirs).map(|(left, right)| f64::from(left - right).powi(2)).sum();
+    let norm: f64 = theirs.iter().map(|value| f64::from(*value).powi(2)).sum();
+    (max_abs, (diff / norm).sqrt())
+}
+
+fn subtract(minuend: &[f32], subtrahend: &[f32]) -> Vec<f32> {
+    minuend.iter().zip(subtrahend).map(|(left, right)| left - right).collect()
+}
+
+#[test]
+fn qwen35_layer_residuals_track_llama_at_the_divergent_prefix() {
+    let mapping = QWEN35.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let model = LoadedModel::load(&parsed, file_bytes).expect("qwen35 loads");
+    let case = &llama_cases(&QWEN35)[QWEN35_DIVERGENT_CASE];
+    let ids: Vec<u32> = case
+        .prompt_ids
+        .iter()
+        .chain(&case.generated_ids[..QWEN35_DIVERGENT_INDEX])
+        .copied()
+        .collect();
+    let layers = metadata_u32(&parsed, "qwen35.block_count").expect("qwen35 block count") as usize;
+    let nodes = qwen35_residual_nodes(&model, layers);
+    let node_ids: Vec<NodeId> = nodes.iter().map(|(_, node)| *node).collect();
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("qwen35 vocab");
+    let prefix = proxima_tokenizer::decode(&ids, &vocab).expect("decodes the prefix ids");
+    let reencoded = proxima_tokenizer::encode_with_bos_eos(&prefix, &vocab, false, false)
+        .expect("re-encodes the prefix");
+    assert_eq!(reencoded, ids, "the prefix text must tokenize back to llama's 74 ids");
+    let steps = model
+        .forward_cached_node_values_on_backend(&prefix, &node_ids, 0)
+        .expect("qwen35 forwards the 74-id prefix through the cached loop");
+    let values = steps.last().expect("the cached loop ran at least one step");
+    let ours: Vec<Vec<f32>> = values
+        .iter()
+        .map(|value| value[value.len() - 1024..].to_vec())
+        .collect();
+    let theirs: Vec<Vec<f32>> = nodes.iter().map(|(name, _)| llama_last_row(name)).collect();
+    let mut report = String::new();
+    let mut worst: f64 = 0.0;
+    for (index, (name, node)) in nodes.iter().enumerate() {
+        let (max_abs, rel_l2) = row_error(&ours[index], &theirs[index]);
+        let (delta_max, delta_rel) = if index == 0 {
+            (max_abs, rel_l2)
+        } else {
+            row_error(
+                &subtract(&ours[index], &ours[index - 1]),
+                &subtract(&theirs[index], &theirs[index - 1]),
+            )
+        };
+        worst = worst.max(rel_l2);
+        writeln!(
+            report,
+            "{name} {node:?} len {} max_abs {max_abs:.3e} rel_l2 {rel_l2:.3e} sublayer_delta max_abs {delta_max:.3e} rel_l2 {delta_rel:.3e}",
+            values[index].len()
+        )
+        .expect("writes to a string");
+    }
+    assert!(worst < LAYER_REL_L2_FLOOR, "per-layer last-position error vs llama.cpp:\n{report}");
 }
