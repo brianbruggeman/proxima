@@ -1462,19 +1462,20 @@ fn qwen35_dense_attention_f64_reference(
         }
     }
 
-    // Interleaved RoPE, `RopePairing::Interleaved`'s own `(2*i, 2*i+1)`
-    // pairing, over the first `rotary_dim` channels only. `cos_new`/
-    // `sin_new` are `[s, pair]`-shaped with `s == 1` in this fixture, so
-    // a bare `pair` index already reads position 0's own row.
+    // split-half RoPE, `(i, i + rotary_dim/2)` over the first `rotary_dim`
+    // channels: ggml rotates imrope exactly as neox (`ggml-cpu/ops.cpp:6209-6212`,
+    // `rotate_pairs(n_dims, n_dims/2, ..)`). `cos_new`/`sin_new` are
+    // `[s, pair]`-shaped with `s == 1` in this fixture, so a bare `pair` index
+    // already reads position 0's own row.
     let rotate = |source: &[f64], head_count: usize| -> (Vec<f64>, Vec<f64>) {
         let mut first = vec![0.0f64; head_count * PAIR_DIM];
         let mut second = vec![0.0f64; head_count * PAIR_DIM];
         for head in 0..head_count {
             for pair in 0..PAIR_DIM {
-                let even = source[head * ATTN_HEAD_DIM + 2 * pair];
-                let odd = source[head * ATTN_HEAD_DIM + 2 * pair + 1];
-                first[head * PAIR_DIM + pair] = even * cos_new[pair] - odd * sin_new[pair];
-                second[head * PAIR_DIM + pair] = odd * cos_new[pair] + even * sin_new[pair];
+                let lower = source[head * ATTN_HEAD_DIM + pair];
+                let upper = source[head * ATTN_HEAD_DIM + pair + PAIR_DIM];
+                first[head * PAIR_DIM + pair] = lower * cos_new[pair] - upper * sin_new[pair];
+                second[head * PAIR_DIM + pair] = upper * cos_new[pair] + lower * sin_new[pair];
             }
         }
         (first, second)
