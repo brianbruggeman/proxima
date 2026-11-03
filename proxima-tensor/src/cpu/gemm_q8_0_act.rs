@@ -3,12 +3,12 @@ use super::*;
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
     __m256i, _mm_add_epi32, _mm_and_si128, _mm_cvtph_ps, _mm_cvtsi32_si128, _mm_cvtsi128_si32,
-    _mm_cvtss_f32, _mm_loadu_si128, _mm_set1_epi8, _mm_shuffle_epi32, _mm_srli_epi16,
-    _mm_unpackhi_epi64, _mm256_and_si256, _mm256_andnot_si256, _mm256_castsi128_si256,
-    _mm256_castsi256_si128, _mm256_cmpeq_epi8, _mm256_extracti128_si256, _mm256_inserti128_si256,
-    _mm256_loadu_si256, _mm256_madd_epi16, _mm256_maddubs_epi16, _mm256_set1_epi8,
-    _mm256_set1_epi16, _mm256_set1_epi32, _mm256_setr_epi8, _mm256_shuffle_epi8, _mm256_sign_epi8,
-    _mm256_sub_epi8,
+    _mm_cvtss_f32, _mm_loadu_si128, _mm_mul_ss, _mm_set1_epi8, _mm_shuffle_epi32, _mm_shuffle_ps,
+    _mm_srli_epi16, _mm_unpackhi_epi64, _mm256_and_si256, _mm256_andnot_si256,
+    _mm256_castsi128_si256, _mm256_castsi256_si128, _mm256_cmpeq_epi8, _mm256_extracti128_si256,
+    _mm256_inserti128_si256, _mm256_loadu_si256, _mm256_madd_epi16, _mm256_maddubs_epi16,
+    _mm256_set1_epi8, _mm256_set1_epi16, _mm256_set1_epi32, _mm256_setr_epi8, _mm256_shuffle_epi8,
+    _mm256_sign_epi8, _mm256_sub_epi8,
 };
 
 use proxima_gguf::quant::{q5_0, q8_0};
@@ -189,9 +189,16 @@ fn avx2_available() -> bool {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,f16c")]
-unsafe fn scale_f16c(block: &[u8]) -> f32 {
-    let bits = i32::from(u16::from_le_bytes([block[0], block[1]]));
-    _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(bits)))
+unsafe fn scale_product_f16c(weight_block: &[u8], activation_block: &[u8]) -> f32 {
+    let weight_bits = u32::from(u16::from_le_bytes([weight_block[0], weight_block[1]]));
+    let activation_bits = u32::from(u16::from_le_bytes([
+        activation_block[0],
+        activation_block[1],
+    ]));
+    let both = _mm_cvtph_ps(_mm_cvtsi32_si128(
+        (weight_bits | (activation_bits << 16)) as i32,
+    ));
+    _mm_cvtss_f32(_mm_mul_ss(both, _mm_shuffle_ps(both, both, 0b01)))
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -205,14 +212,13 @@ unsafe fn row_q8_0_avx2(weight_row: &[u8], activation_q8_0: &[u8]) -> f32 {
         .zip(activation_q8_0.as_chunks::<Q8_0_ACT_BLOCK_BYTES>().0.iter())
     {
         // SAFETY: avx2 and f16c are enabled on this function; blocks are exact-size arrays.
-        let (block_sum, weight_scale, activation_scale) = unsafe {
+        let (block_sum, scale) = unsafe {
             (
                 block_sum_q8_0_avx2(weight_block, activation_block),
-                scale_f16c(weight_block),
-                scale_f16c(activation_block),
+                scale_product_f16c(weight_block, activation_block),
             )
         };
-        sum += (weight_scale * activation_scale) * block_sum as f32;
+        sum += scale * block_sum as f32;
     }
     sum
 }
@@ -228,14 +234,13 @@ unsafe fn row_q5_0_avx2(weight_row: &[u8], activation_q8_0: &[u8]) -> f32 {
         .zip(activation_q8_0.as_chunks::<Q8_0_ACT_BLOCK_BYTES>().0.iter())
     {
         // SAFETY: avx2 and f16c are enabled on this function; blocks are exact-size arrays.
-        let (block_sum, weight_scale, activation_scale) = unsafe {
+        let (block_sum, scale) = unsafe {
             (
                 block_sum_q5_0_avx2(weight_block, activation_block),
-                scale_f16c(weight_block),
-                scale_f16c(activation_block),
+                scale_product_f16c(weight_block, activation_block),
             )
         };
-        sum += (weight_scale * activation_scale) * block_sum as f32;
+        sum += scale * block_sum as f32;
     }
     sum
 }
