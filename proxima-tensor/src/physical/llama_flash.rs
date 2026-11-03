@@ -31,12 +31,9 @@ fn vec_dot_half(left: &[f32], right: &[f32]) -> f32 {
             }
         }
     }
-    for lane in 0..DOT_LANES {
-        sum[0][lane] += sum[2][lane];
-        sum[1][lane] += sum[3][lane];
-        sum[0][lane] += sum[1][lane];
-    }
-    let folded: [f32; 4] = core::array::from_fn(|lane| sum[0][lane] + sum[0][lane + 4]);
+    let lanes: [f32; DOT_LANES] =
+        core::array::from_fn(|lane| (sum[0][lane] + sum[2][lane]) + (sum[1][lane] + sum[3][lane]));
+    let folded: [f32; 4] = core::array::from_fn(|lane| lanes[lane] + lanes[lane + 4]);
     let reduced = (folded[0] + folded[1]) + (folded[2] + folded[3]);
     let mut total = f64::from(reduced);
     for index in main..left.len() {

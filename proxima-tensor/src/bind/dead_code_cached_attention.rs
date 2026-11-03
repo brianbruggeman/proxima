@@ -2393,6 +2393,16 @@ pub fn kv_read_only_by_fused_attention(
     !kv_nodes.is_empty() && fused_readers > 0 && !other_reader && !kv_is_output
 }
 
+
+/// llama.cpp's default flash arithmetic unless the policy grants the f32 online kernel.
+fn cached_attention_arithmetic(numeric_policy: NumericPolicy) -> CachedAttentionArithmetic {
+    if numeric_policy.flash_narrowing {
+        CachedAttentionArithmetic::OnlineF32
+    } else {
+        CachedAttentionArithmetic::LlamaFlash
+    }
+}
+
 #[cfg(test)]
 mod kv_padding_tests {
     use super::*;
@@ -2509,14 +2519,5 @@ mod kv_padding_tests {
             &[NodeId(0)],
             is_kv
         ));
-    }
-}
-
-/// llama.cpp's default flash arithmetic unless the policy grants the f32 online kernel.
-fn cached_attention_arithmetic(numeric_policy: NumericPolicy) -> CachedAttentionArithmetic {
-    if numeric_policy.flash_narrowing {
-        CachedAttentionArithmetic::OnlineF32
-    } else {
-        CachedAttentionArithmetic::LlamaFlash
     }
 }
