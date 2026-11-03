@@ -1195,7 +1195,7 @@ fn qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer() 
     let unfused = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
         .expect("plain bind succeeds");
     let fused =
-        bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
+        bind(&program, &shapes, &outputs, NumericPolicy::bit_exact().with_flash_narrowing(true)).expect("fused bind succeeds");
 
     let fused_attention_count = fused
         .iter()
@@ -1291,7 +1291,7 @@ fn qwen35_partial_rotary_cached_attention_fuses_without_pinning_the_attended_tap
     ];
 
     let fused =
-        bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
+        bind(&program, &shapes, &outputs, NumericPolicy::bit_exact().with_flash_narrowing(true)).expect("fused bind succeeds");
     let fused_attention_count = fused
         .iter()
         .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))

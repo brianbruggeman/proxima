@@ -5368,7 +5368,7 @@ fn cached_attention_single_range_fused_matches_the_unfused_program() {
                 .collect()
         };
 
-        let fused = bind_with_fusion(program, &shapes, &[root], true, NumericPolicy::default())
+        let fused = bind_with_fusion(program, &shapes, &[root], true, NumericPolicy::default().with_flash_narrowing(true))
             .expect("fused single-range bind succeeds");
         let unfused = bind_with_fusion(program, &shapes, &[root], false, NumericPolicy::default())
             .expect("unfused single-range bind succeeds");
@@ -6243,7 +6243,7 @@ fn a_cached_decode_step_matches_the_uncached_forward_pass_exactly() {
         prefill_roots.push(*value);
     }
     let prefill_symbols = [PROMPT_LEN as u64, 0u64];
-    let prefill_evaluated = crate::cpu::evaluate_named(
+    let prefill_evaluated = crate::test_support::evaluate_named_online_f32(
         &cached_program,
         &prefill_symbols,
         &prefill_named,
@@ -6295,7 +6295,7 @@ fn a_cached_decode_step_matches_the_uncached_forward_pass_exactly() {
     }
 
     let decode_symbols = [1u64, PROMPT_LEN as u64];
-    let decode_evaluated = crate::cpu::evaluate_named(
+    let decode_evaluated = crate::test_support::evaluate_named_online_f32(
         &cached_program,
         &decode_symbols,
         &decode_named,
@@ -20192,7 +20192,7 @@ mod dense_windows {
             let LayerCacheRoots::Attention((even, odd, value)) = layer_roots[0] else {
                 panic!("the one dense layer owns a plain cache root");
             };
-            let evaluated = crate::cpu::evaluate_named(
+            let evaluated = crate::test_support::evaluate_named_online_f32(
                 &program,
                 &[new_count as u64, cache.rows as u64],
                 &named,
