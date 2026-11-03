@@ -69,3 +69,4 @@ temp-env.workspace = true
 serde_json.workspace = true
 proxima-test = { workspace = true, features = ["alloc-count"] }
 serde = { workspace = true, features = ["derive"] }
+proxima-gguf = { workspace = true, features = ["test-support"] }

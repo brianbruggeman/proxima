@@ -272,8 +272,6 @@ fn decoding_a_truncated_multibyte_character_at_the_end_recovers_the_valid_prefix
 
 #[cfg(feature = "gguf")]
 mod real_fixture {
-    use std::path::Path;
-
     use super::*;
     use crate::gguf::vocab_from_metadata;
 
@@ -312,10 +310,12 @@ mod real_fixture {
     }
 
     fn load_real_vocab() -> Vocab {
-        let candidate = Path::new(
+        let candidate = proxima_gguf::checkpoint_resolver::require_checkpoint(
+            "PROXIMA_LLAMA_BPE_VOCAB_GGUF",
             "/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf",
+            7_818_140,
         );
-        let (parsed, _bytes) = proxima_gguf::edge::read_file(candidate)
+        let (parsed, _bytes) = proxima_gguf::edge::read_file(&candidate)
             .unwrap_or_else(|error| panic!("parse real gguf file {candidate:?}: {error:?}"));
         vocab_from_metadata(&parsed).expect("build vocab from real metadata")
     }

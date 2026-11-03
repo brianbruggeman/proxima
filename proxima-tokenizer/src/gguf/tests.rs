@@ -258,18 +258,14 @@ fn empty_pre_value_is_treated_as_missing() {
 /// Loads the real llama-bpe vocab fixture and confirms the exact
 /// metadata keys/types documented in this module's doc comment are
 /// what actually round-trips through `proxima-gguf`.
-/// `#[ignore]`d: depends on a sibling checkout that may not exist on
-/// every host.
 #[test]
-#[ignore = "depends on a real .gguf checkout outside this repo"]
 fn builds_a_vocab_from_the_real_llama_bpe_fixture() {
-    let candidate =
-        Path::new("/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf");
-    if !candidate.exists() {
-        eprintln!("no real .gguf found at {candidate:?}, skipping");
-        return;
-    }
-    let (parsed, _bytes) = proxima_gguf::edge::read_file(candidate).expect("parse real gguf file");
+    let candidate = proxima_gguf::checkpoint_resolver::require_checkpoint(
+        "PROXIMA_LLAMA_BPE_VOCAB_GGUF",
+        "/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf",
+        7_818_140,
+    );
+    let (parsed, _bytes) = proxima_gguf::edge::read_file(&candidate).expect("parse real gguf file");
     let vocab = vocab_from_metadata(&parsed).expect("builds vocab from real metadata");
     assert_eq!(vocab.len(), 128_256);
     assert_eq!(vocab.bos_token_id(), Some(128_000));

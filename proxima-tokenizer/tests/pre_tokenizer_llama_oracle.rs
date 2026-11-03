@@ -28,8 +28,11 @@ const GRANITE_MOE_BLOB_SHA256: &str =
     "cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
 
 fn ollama_blob(sha256: &str) -> PathBuf {
-    let home = std::env::var("HOME").expect("HOME is set");
-    PathBuf::from(home).join(format!(".ollama/models/blobs/sha256-{sha256}"))
+    proxima_gguf::checkpoint_resolver::require_checkpoint(
+        &format!("PROXIMA_GGUF_{}", &sha256[..8]),
+        &format!("/mnt/data5/ollama/blobs/sha256-{sha256}"),
+        0,
+    )
 }
 
 fn load_vocab(path: &PathBuf) -> Vocab {
@@ -114,7 +117,11 @@ fn assert_family_matches_llama(vocab: &Vocab, expected_pre: PreType, cases: &[(&
 
 #[test]
 fn llama3_digits_group_in_threes_like_llama() {
-    let vocab = load_vocab(&PathBuf::from(LLAMA_BPE_VOCAB));
+    let vocab = load_vocab(&proxima_gguf::checkpoint_resolver::require_checkpoint(
+        "PROXIMA_LLAMA_BPE_VOCAB_GGUF",
+        LLAMA_BPE_VOCAB,
+        7_818_140,
+    ));
     assert_family_matches_llama(&vocab, PreType::GroupedDigits, &family_cases!("llama3"));
 }
 
@@ -158,7 +165,11 @@ fn granite_refact_vocabulary_isolates_digits_like_llama() {
 
 #[test]
 fn deepseek_coder_without_a_pre_key_uses_the_default_split_like_llama() {
-    let path = PathBuf::from(DEEPSEEK_CODER_33B_NO_PRE);
+    let path = proxima_gguf::checkpoint_resolver::require_checkpoint(
+        "PROXIMA_DEEPSEEK_CODER_33B_GGUF",
+        DEEPSEEK_CODER_33B_NO_PRE,
+        0,
+    );
     let vocab = load_vocab(&path);
     assert_family_matches_llama(
         &vocab,
@@ -168,14 +179,11 @@ fn deepseek_coder_without_a_pre_key_uses_the_default_split_like_llama() {
 }
 
 fn host_local_vector_vocab(name: &str) -> PathBuf {
-    let dir = std::env::var("LLAMA_CPP_MODELS_DIR")
-        .unwrap_or_else(|_| panic!("set LLAMA_CPP_MODELS_DIR to llama.cpp's models/ directory holding ggml-vocab-{name}.gguf"));
-    let path = PathBuf::from(dir).join(format!("ggml-vocab-{name}.gguf"));
-    assert!(
-        path.exists(),
-        "{path:?} is absent; LLAMA_CPP_MODELS_DIR must name llama.cpp's models/ directory"
-    );
-    path
+    proxima_gguf::checkpoint_resolver::require_checkpoint(
+        &format!("PROXIMA_VOCAB_{}_GGUF", name.to_uppercase()),
+        &format!("ggml-vocab-{name}.gguf"),
+        0,
+    )
 }
 
 #[test]
