@@ -79,11 +79,11 @@ pub fn is_int8_weight(codec: Codec) -> bool {
 
 const ACTIVATION_LAYOUT: BlockLayout = BlockLayout::Q8_1;
 
-fn activation_block_bytes() -> usize {
+pub(super) fn activation_block_bytes() -> usize {
     usize::from(ACTIVATION_LAYOUT.block_bytes)
 }
 
-fn activation_code_offset() -> usize {
+pub(super) fn activation_code_offset() -> usize {
     ACTIVATION_LAYOUT.element.low.base_bits as usize / 8
 }
 
