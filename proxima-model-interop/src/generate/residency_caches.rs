@@ -3670,15 +3670,6 @@ impl BackendRuntime {
         let new_count = symbols.first().copied().unwrap_or_default() as usize;
         let kv_bound_extent = symbols.get(1).copied().unwrap_or_default() as usize;
         let exact_activations = self.exact_activations;
-        if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-            && program
-                .iter()
-                .any(|operation| operation.name() == Some("gdn_prefill.0.delta_out"))
-            && let Ok(shapes) = proxima_tensor::infer(program, symbols)
-            && let Ok(bound) = proxima_tensor::bind(program, &shapes, outputs, self.numeric_policy)
-        {
-            eprintln!("gdn_tail_bound {bound:#?}");
-        }
         let plan = Self::resolve_segment_plan(
             &mut self.segment_plans,
             &mut self.plan_hits,

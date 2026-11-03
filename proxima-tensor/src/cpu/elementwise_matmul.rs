@@ -735,18 +735,6 @@ pub(super) fn run_elementwise_range<B: Deref<Target = [f32]>>(
         instrument::record_elementwise_call_size(counters.output_writes);
         counters.commit(path, distinct_operand_elements);
     }
-    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-        && outer_start == 0
-        && resolved.extents.as_slice() == [7, 16, 512, 2048]
-        && output.len() >= 4
-    {
-        eprintln!(
-            "elementwise_candidate node={} extents={:?} first={:?}",
-            resolved.node.0,
-            resolved.extents,
-            &output[..4]
-        );
-    }
     Ok(())
 }
 
@@ -1276,22 +1264,6 @@ pub(super) fn build_matmul_stage_plan<'weights>(
         leading_total = leading_total as u64,
         "build_matmul_stage_plan shape resolved"
     );
-
-    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-        && (activation.len() == 7 * 2048 || activation.len() == 2048)
-    {
-        eprintln!(
-            "gdn_projection reduce={} activation={} k={} rows={} leading={} extents={:?} output_axes={:?} weight_layout={weight_layout:?} activation_layout={activation_layout:?} activation_first={:?}",
-            resolved.node.0,
-            activation_node.0,
-            k,
-            rows,
-            leading_total,
-            resolved.extents,
-            output_axes,
-            &activation[..activation.len().min(8)],
-        );
-    }
 
     // `QuantizedBlock::block_layout` is the one per-codec
     // `(block_bytes, block_elements)` table; see `run_reduce_quantized`'s

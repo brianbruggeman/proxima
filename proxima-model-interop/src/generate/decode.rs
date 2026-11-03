@@ -4165,7 +4165,6 @@ only the single-row decode kernel reads the half-width device cache",
             && sample_config.repeat_penalty == 1.0
             && sample_config.frequency_penalty == 0.0
             && sample_config.presence_penalty == 0.0
-            && std::env::var_os("PROXIMA_DEBUG_GDN_LOGITS").is_none()
             && std::env::var_os("PROXIMA_LOGITS_DIAG").is_none();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut greedy_program: Option<(Vec<Op>, NodeId, NodeId, PlacedBuffer)> = None;
@@ -5076,40 +5075,6 @@ did not hold every cached position)",
                             LayerCacheRoots::SharedFromLayer(_) => {}
                         }
                     }
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_OUTPUT").is_some()
-                        && let Some(target_layer) = std::env::var("PROXIMA_DEBUG_GDN_LAYER")
-                            .ok()
-                            .and_then(|value| value.parse::<usize>().ok())
-                        && let Some(diagnostic) = self.moe_layer_diagnostics.get(target_layer)
-                    {
-                        roots.push(diagnostic.block_output);
-                    }
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-                        && let Some(diagnostic) = self.moe_layer_diagnostics.first()
-                        && let Some(taps) = diagnostic.ssm_taps.clone()
-                    {
-                        roots.extend([
-                            taps.query_sequence,
-                            taps.key_sequence,
-                            taps.value_sequence,
-                            taps.gate_sequence,
-                            taps.beta_sequence,
-                            taps.z_sequence,
-                            taps.delta_out,
-                            taps.gated_value,
-                            taps.ssm_out_result,
-                            diagnostic.block_input,
-                            diagnostic.post_mixer_residual,
-                            diagnostic.router_logits,
-                        ]);
-                    }
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_BLOCKS").is_some() {
-                        roots.extend(
-                            self.moe_layer_diagnostics
-                                .iter()
-                                .map(|diagnostic| diagnostic.block_output),
-                        );
-                    }
                     if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() {
                         for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
                             if let Some(taps) = diagnostic.dense_attention_taps {
@@ -5883,92 +5848,6 @@ did not hold every cached position)",
                         );
                     }
                     previous_eval_done = Some(std::time::Instant::now());
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_ALL_DIGEST").is_some() && step == 0 {
-                        for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
-                            let mut digest_nodes = vec![
-                                ("post_mixer", diagnostic.post_mixer_residual),
-                                ("router", diagnostic.router_logits),
-                            ];
-                            if diagnostic.dense_attention_taps.is_some() {
-                                digest_nodes.push(("mixer_output", diagnostic.mixer_output));
-                                digest_nodes.push(("block_input", diagnostic.block_input));
-                            }
-                            for (label, node) in digest_nodes {
-                                let Some((values, shape)) = evaluated.get(node) else {
-                                    continue;
-                                };
-                                let row_count =
-                                    usize::try_from(shape.first().copied().unwrap_or(1))
-                                        .unwrap_or(1)
-                                        .max(1);
-                                let row_length = values.len() / row_count;
-                                let row_start =
-                                    row_length.saturating_mul(row_count.saturating_sub(1));
-                                trace!(
-                                    mode = if new_count > 1 { "scan" } else { "cached" },
-                                    layer = layer as u64,
-                                    label,
-                                    row = row_count.saturating_sub(1) as u64,
-                                    first4 = ?values
-                                        .get(row_start..row_start.saturating_add(row_length))
-                                        .unwrap_or_default()
-                                        .iter()
-                                        .take(4)
-                                        .copied()
-                                        .collect::<Vec<_>>(),
-                                    "gdn_all_digest"
-                                );
-                            }
-                        }
-                    }
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_DIGEST").is_some() && step == 0 {
-                        for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
-                            let Some((values, shape)) = evaluated.get(diagnostic.block_output)
-                            else {
-                                continue;
-                            };
-                            let row_count = usize::try_from(shape.first().copied().unwrap_or(1))
-                                .unwrap_or(1)
-                                .max(1);
-                            let row_length = values.len() / row_count;
-                            let row_start = row_length.saturating_mul(row_count.saturating_sub(1));
-                            trace!(
-                                mode = if new_count > 1 { "scan" } else { "cached" },
-                                layer = layer as u64,
-                                node = diagnostic.block_output.0,
-                                row = row_count.saturating_sub(1) as u64,
-                                first4 = ?values
-                                    .get(row_start..row_start.saturating_add(row_length))
-                                    .unwrap_or_default()
-                                    .iter()
-                                    .take(4)
-                                    .copied()
-                                    .collect::<Vec<_>>(),
-                                "gdn_block_digest"
-                            );
-                            if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE_ROWS").is_some()
-                                && row_length > 0
-                            {
-                                for row_index in 0..row_count {
-                                    let row_start = row_index * row_length;
-                                    trace!(
-                                        mode = if new_count > 1 { "scan" } else { "cached" },
-                                        layer = layer as u64,
-                                        node = diagnostic.block_output.0,
-                                        row = row_index as u64,
-                                        first4 = ?values
-                                            .get(row_start..row_start + row_length)
-                                            .unwrap_or_default()
-                                            .iter()
-                                            .take(4)
-                                            .copied()
-                                            .collect::<Vec<_>>(),
-                                        "gdn_block_row"
-                                    );
-                                }
-                            }
-                        }
-                    }
                     if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() && step == 0 {
                         for (layer, diagnostic) in self.moe_layer_diagnostics.iter().enumerate() {
                             let Some(taps) = diagnostic.dense_attention_taps else {
@@ -6004,11 +5883,6 @@ did not hold every cached position)",
                                 let Some((values, shape)) = evaluated.get(node) else {
                                     continue;
                                 };
-                                let row_count =
-                                    usize::try_from(shape.first().copied().unwrap_or(1))
-                                        .unwrap_or(1)
-                                        .max(1);
-                                let row_length = values.len() / row_count;
                                 trace!(
                                     mode = if new_count > 1 { "scan" } else { "cached" },
                                     layer = layer as u64,
@@ -6017,27 +5891,6 @@ did not hold every cached position)",
                                     first4 = ?values.iter().take(4).copied().collect::<Vec<_>>(),
                                     "dense_digest"
                                 );
-                                if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE_ROWS").is_some()
-                                    && row_length > 0
-                                {
-                                    for row_index in 0..row_count {
-                                        let row_start = row_index * row_length;
-                                        trace!(
-                                            mode = if new_count > 1 { "scan" } else { "cached" },
-                                            layer = layer as u64,
-                                            label,
-                                            row = row_index as u64,
-                                            first4 = ?values
-                                                .get(row_start..row_start + row_length)
-                                                .unwrap_or_default()
-                                                .iter()
-                                                .take(4)
-                                                .copied()
-                                                .collect::<Vec<_>>(),
-                                            "dense_row"
-                                        );
-                                    }
-                                }
                             }
                             if layer == 3 {
                                 for (label, node) in [
@@ -6214,139 +6067,6 @@ did not hold every cached position)",
                                     Ok(())
                                 },
                             )?;
-                        }
-                    }
-
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_BLOCK_OUTPUT").is_some()
-                        && let Some(target_layer) = std::env::var("PROXIMA_DEBUG_GDN_LAYER")
-                            .ok()
-                            .and_then(|value| value.parse::<usize>().ok())
-                        && let Some(diagnostic) = self.moe_layer_diagnostics.get(target_layer)
-                        && std::env::var("PROXIMA_DEBUG_GDN_POSITION")
-                            .ok()
-                            .and_then(|value| value.parse::<usize>().ok())
-                            .is_some_and(|target| cached_len + batch_index == target)
-                        && let Some((values, shape)) = evaluated.get(diagnostic.block_output)
-                    {
-                        let row_width = shape
-                            .first()
-                            .and_then(|extent| usize::try_from(*extent).ok())
-                            .and_then(|extent| values.len().checked_div(extent));
-                        let row = row_width
-                            .and_then(|width| values.get(..width))
-                            .unwrap_or(values);
-                        trace!(
-                            layer = target_layer as u64,
-                            position = (cached_len + batch_index) as u64,
-                            node = ?diagnostic.block_output,
-                            shape = ?shape,
-                            first4 = ?row.iter().take(4).copied().collect::<Vec<_>>(),
-                            "moe_monolithic_block_output"
-                        );
-                    }
-
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-                        && step == 0
-                        && let Some(diagnostic) = self.moe_layer_diagnostics.first()
-                        && let Some(taps) = diagnostic.ssm_taps.clone()
-                    {
-                        for (label, node) in [
-                            ("query_sequence", taps.query_sequence),
-                            ("key_sequence", taps.key_sequence),
-                            ("value_sequence", taps.value_sequence),
-                            ("gate_sequence", taps.gate_sequence),
-                            ("beta_sequence", taps.beta_sequence),
-                            ("z_sequence", taps.z_sequence),
-                            ("delta_out", taps.delta_out),
-                            ("gated_value", taps.gated_value),
-                            ("ssm_out_result", taps.ssm_out_result),
-                            ("block_input", diagnostic.block_input),
-                            ("post_mixer", diagnostic.post_mixer_residual),
-                            ("router", diagnostic.router_logits),
-                        ] {
-                            if let Some((values, shape)) = evaluated.get(node) {
-                                let first_row_len = if new_count > 1 {
-                                    values.len() / new_count
-                                } else {
-                                    values.len()
-                                };
-                                let row_dump =
-                                    std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE_ROWS").is_some();
-                                trace!(
-                                    mode = if new_count > 1 { "scan" } else { "cached" },
-                                    node = node.0,
-                                    id = label,
-                                    shape = ?shape,
-                                    first_row = ?&values[..values.len().min(first_row_len)],
-                                    "gdn_compare"
-                                );
-                                if row_dump && first_row_len > 0 {
-                                    for row_index in 0..new_count {
-                                        let start = row_index.saturating_mul(first_row_len);
-                                        let end = start.saturating_add(first_row_len);
-                                        if let Some(row) = values.get(start..end) {
-                                            trace!(
-                                                mode = if new_count > 1 { "scan" } else { "cached" },
-                                                node = node.0,
-                                                label,
-                                                row = row_index as u64,
-                                                values = ?row,
-                                                "gdn_compare_row"
-                                            );
-                                        }
-                                    }
-                                }
-                                if std::env::var_os("PROXIMA_DEBUG_GDN_ROW_DIGEST").is_some()
-                                    && first_row_len > 0
-                                {
-                                    for row_index in 0..new_count {
-                                        let start = row_index.saturating_mul(first_row_len);
-                                        let end = start.saturating_add(first_row_len);
-                                        if let Some(row) = values.get(start..end) {
-                                            let digest =
-                                                row.iter().take(4).copied().collect::<Vec<_>>();
-                                            trace!(
-                                                mode = if new_count > 1 { "scan" } else { "cached" },
-                                                node = node.0,
-                                                label,
-                                                row = row_index as u64,
-                                                first4 = ?digest,
-                                                "gdn_compare_digest"
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    if std::env::var_os("PROXIMA_DEBUG_GDN_ROUTER_LAYERS").is_some() && step == 0 {
-                        for (layer, router_node) in self.router_roots.iter().copied().enumerate() {
-                            let Some((values, shape)) = evaluated.get(router_node) else {
-                                continue;
-                            };
-                            let row_width = usize::try_from(
-                                shape
-                                    .last()
-                                    .copied()
-                                    .unwrap_or(self.architecture.expert_count as u64),
-                            )
-                            .unwrap_or(0);
-                            let rows = values.len().checked_div(row_width).unwrap_or(0);
-                            let row = values.get(..row_width).unwrap_or(values);
-                            let top = row
-                                .iter()
-                                .copied()
-                                .enumerate()
-                                .max_by(|left, right| left.1.total_cmp(&right.1));
-                            trace!(
-                                mode = if new_count > 1 { "scan" } else { "cached" },
-                                layer = layer as u64,
-                                node = router_node.0,
-                                shape = ?shape,
-                                rows = rows as u64,
-                                first_top = ?top,
-                                "gdn_router_layer"
-                            );
                         }
                     }
 
@@ -7099,25 +6819,6 @@ did not hold every cached position)",
                         }
                         #[cfg(feature = "instrument")]
                         let fetch_ticks = elapsed_ticks(fetch_started);
-                        if std::env::var_os("PROXIMA_DEBUG_GDN_LOGITS").is_some() {
-                            let mut ranked: Vec<usize> = (0..vocab_size).collect();
-                            ranked.sort_unstable_by(|left, right| {
-                                last_position[*right]
-                                    .total_cmp(&last_position[*left])
-                                    .then_with(|| left.cmp(right))
-                            });
-                            debug!(
-                                step = step as u64,
-                                batch_index = batch_index as u64,
-                                top = ?ranked
-                                    .iter()
-                                    .take(8)
-                                    .map(|index| (*index, last_position[*index]))
-                                    .collect::<Vec<_>>(),
-                                first = ?&last_position[..last_position.len().min(8)],
-                                "gdn_logits"
-                            );
-                        }
                         #[cfg(feature = "instrument")]
                         let argmax_started = read_ticks();
                         // intervention 2 (2026-09-22, OWNER_BRIEF_dominant_cost):

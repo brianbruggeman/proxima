@@ -139,30 +139,6 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
     moe_topk_extra_sink: Option<&mut Vec<f32>>,
     round_sink: Option<&mut Vec<Vec<f32>>>,
 ) -> Result<(), TensorError> {
-    let gdn_debug_q_reduce = std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-        && output.len() >= 4_096
-        && matches!(
-            &resolved.kind,
-            BoundOpKind::Reduce { element_body, .. }
-                if element_body.steps.len() == 1
-                    && element_body.steps[0].op == ScalarOp::Multiply
-        );
-    if std::env::var_os("PROXIMA_DEBUG_GDN_COMPARE").is_some()
-        && (resolved.node.0 == 41 || resolved.node.0 == 1264 || resolved.node.0 == 1265)
-    {
-        eprintln!(
-            "gdn_q_nodes node={} extents={:?} output_len={} operands={:?} kind={:?}",
-            resolved.node.0,
-            resolved.extents,
-            output.len(),
-            resolved
-                .operands()
-                .iter()
-                .map(|(node, _, _)| node.0)
-                .collect::<Vec<_>>(),
-            resolved.kind
-        );
-    }
     let result = match &resolved.kind {
         BoundOpKind::CachedAttention { .. } => {
             #[cfg(feature = "instrument")]
@@ -260,14 +236,6 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
         ),
     };
     result?;
-    if gdn_debug_q_reduce {
-        eprintln!(
-            "gdn_q_reduce_output node={} extents={:?} first={:?}",
-            resolved.node.0,
-            resolved.extents,
-            &output[..output.len().min(4)]
-        );
-    }
     apply_reduce_epilogue(resolved, buffers, output)
 }
 
