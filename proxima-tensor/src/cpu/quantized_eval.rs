@@ -261,11 +261,28 @@ fn lone_operand_row_shape(computed: &BoundOp, declared: &[u64]) -> Option<(usize
     let lone = matches!(computed.kind, BoundOpKind::Elementwise { .. })
         && matches!(computed.operands(), [(_, _, None)]);
     match declared {
-        [contraction, rows] if lone && *contraction > 1 && *rows > 1 => {
+        [contraction, rows]
+            if lone && reads_declared_axes_in_order(computed) && *contraction > 1 && *rows > 1 =>
+        {
             Some((*rows as usize, *contraction as usize))
         }
         _ => None,
     }
+}
+
+/// A lone read that makes the declared last axis its fastest iteration axis keeps the
+/// declared order, so the leaf follows the contraction-first convention. A read that
+/// transposes the leaf (the fused short-conv projection's input-by-output views) was
+/// declared in stored order, which the packed bytes already match.
+fn reads_declared_axes_in_order(computed: &BoundOp) -> bool {
+    let [(_, layout, None)] = computed.operands() else {
+        return false;
+    };
+    (0..computed.extents.len() as u16)
+        .filter(|axis| computed.extents[*axis as usize] > 1)
+        .map(|axis| layout.stride(axis))
+        .rfind(|stride| *stride != 0)
+        == Some(1)
 }
 
 pub(super) fn non_primary_operand_reads<'resolved>(

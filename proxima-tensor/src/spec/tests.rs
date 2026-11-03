@@ -6510,6 +6510,163 @@ fn architecture_matrix_shortconv_fused_projection_contracts_the_input_axis() {
     }
 }
 
+fn fused_projection_over_a_q4k_weight(held_activation: bool, packed_weight: bool) {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K};
+
+    const SEQUENCE: usize = 3;
+    let embedding = QK_K;
+    let rows = embedding * 3;
+    let in_proj_values = synth_row(7, rows * embedding, 1.0);
+    let packed = quantize_rows(&in_proj_values, rows, embedding);
+    let activation_values = synth_row(11, SEQUENCE * embedding, 1.0);
+    let gain_values = synth_row(13, SEQUENCE * embedding, 1.0);
+
+    let mut program = Vec::new();
+    let in_proj = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![
+            Extent::Static(rows as u32),
+            Extent::Static(embedding as u32)
+        ],
+        "in_proj",
+    );
+    let activation = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![
+            Extent::Static(SEQUENCE as u32),
+            Extent::Static(embedding as u32)
+        ],
+        "activation",
+    );
+    let gain = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![
+            Extent::Static(SEQUENCE as u32),
+            Extent::Static(embedding as u32)
+        ],
+        "gain",
+    );
+    let normed = if held_activation {
+        elementwise(
+            &mut program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            &[(activation, "sd->sd"), (gain, "sd->sd")],
+        )
+        .expect("the activation is a held elementwise product, as the operator norm is")
+    } else {
+        activation
+    };
+    let (b_proj, c_proj, x_proj) =
+        fused_short_conv_projections(&mut program, in_proj, embedding as u32)
+            .expect("B, C and x views slice from the fused projection");
+    let mut contract = |projection: NodeId| {
+        let product = elementwise(
+            &mut program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            &[(normed, "sd->sdg"), (projection, "dg->sdg")],
+        )
+        .expect("activation multiplies the projection view");
+        reduce(
+            &mut program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            product,
+            "sdg->sdg",
+            "sg->sdg",
+        )
+        .expect("the input axis reduces")
+    };
+    let outputs = [contract(b_proj), contract(c_proj), contract(x_proj)];
+
+    let evaluated = crate::cpu::evaluate_quantized(
+        &program,
+        &[],
+        &[
+            if packed_weight {
+                crate::cpu::QuantizedBlock::Packed {
+                    codec: Codec::Q4K,
+                    bytes: &packed,
+                }
+            } else {
+                crate::cpu::QuantizedBlock::Float32(&in_proj_values)
+            },
+            crate::cpu::QuantizedBlock::Float32(&activation_values),
+            crate::cpu::QuantizedBlock::Float32(&gain_values),
+        ],
+        &outputs,
+    )
+    .expect("fused projection views over the packed weight evaluate");
+
+    for (band, output) in outputs.iter().enumerate() {
+        let (values, shape) = evaluated.get(*output).expect("branch output exists");
+        assert_eq!(shape, [SEQUENCE as u64, embedding as u64], "band {band}");
+        let band_bytes =
+            &packed[band * embedding * BLOCK_BYTES..(band + 1) * embedding * BLOCK_BYTES];
+        for token in 0..SEQUENCE {
+            let normed_row: alloc::vec::Vec<f32> = (0..embedding)
+                .map(|channel| {
+                    activation_values[token * embedding + channel]
+                        * if held_activation {
+                            gain_values[token * embedding + channel]
+                        } else {
+                            1.0
+                        }
+                })
+                .collect();
+            let expected = if packed_weight {
+                matmul_q4k_active(band_bytes, embedding, &normed_row)
+            } else {
+                (0..embedding)
+                    .map(|channel| {
+                        let row = band * embedding + channel;
+                        (0..embedding)
+                            .map(|input| {
+                                in_proj_values[row * embedding + input] * normed_row[input]
+                            })
+                            .sum()
+                    })
+                    .collect()
+            };
+            let actual = &values[token * embedding..(token + 1) * embedding];
+            let worst = actual
+                .iter()
+                .zip(&expected)
+                .map(|(left, right)| (left - right).abs())
+                .fold(0.0f32, f32::max);
+            assert!(
+                worst < 0.5,
+                "band {band} token {token}: worst abs diff {worst} from the packed band matmul, actual[..4]={:?} expected[..4]={:?}",
+                &actual[..4],
+                &expected[..4]
+            );
+        }
+    }
+}
+
+#[test]
+fn architecture_matrix_shortconv_fused_projection_over_a_packed_q4k_weight_reads_each_band_for_a_plain_activation()
+ {
+    fused_projection_over_a_q4k_weight(false, true);
+}
+
+#[test]
+fn architecture_matrix_shortconv_fused_projection_over_a_packed_q4k_weight_reads_each_band_for_a_held_activation()
+ {
+    fused_projection_over_a_q4k_weight(true, true);
+}
+
+#[test]
+fn architecture_matrix_shortconv_fused_projection_over_an_f32_weight_reads_each_band_for_a_held_activation()
+ {
+    fused_projection_over_a_q4k_weight(true, false);
+}
+
 #[test]
 fn architecture_matrix_mixed_cached_conv_roots() {
     const EMBEDDING: u32 = 2;
