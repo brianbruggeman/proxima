@@ -7332,3 +7332,129 @@ mod top_fraction_fusion_tests {
         assert_eq!(fused_count(&fused), 1);
     }
 }
+
+struct WidenedSumOfSquares {
+    program: Vec<Op>,
+    input: NodeId,
+    squares: NodeId,
+    widened: NodeId,
+    sum: NodeId,
+    mean: NodeId,
+    narrowed: NodeId,
+}
+
+/// `(ggml_float)(x*x)` summed, divided by `n` in double, narrowed to `f32`:
+/// llama.cpp's `rms_norm_f32` accumulation (`ggml-cpu/ops.cpp:3957-3964`)
+/// spelled in the IR's own dtypes, over a `[rows, width]` input.
+fn widened_sum_of_squares(rows: u32, width: u32) -> WidenedSumOfSquares {
+    use crate::op::{Extent, Keep, Reduce, ReduceInit, append};
+
+    let mut program = Vec::new();
+    let full = || IndexMap::Affine(map::projection(2, &[0, 1]));
+    let row = || IndexMap::Affine(map::projection(1, &[0]));
+    let scalar = || IndexMap::Affine(map::projection(1, &[]));
+    let input = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: alloc::vec![Extent::Static(rows), Extent::Static(width)],
+            name: None,
+        },
+    );
+    let squares = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![(input, full()), (input, full())],
+            name: None,
+        },
+    );
+    let widened = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT64,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(squares, full())],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT64,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: widened,
+            in_map: full(),
+            out_map: IndexMap::Affine(map::projection(2, &[0])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let count = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::FLOAT64,
+            shape: Vec::new(),
+            value: width as f32,
+        },
+    );
+    let mean = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT64,
+            body: ScalarOp::Divide,
+            operands: alloc::vec![(sum, row()), (count, scalar())],
+            name: None,
+        },
+    );
+    let narrowed = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(mean, row())],
+            name: None,
+        },
+    );
+    WidenedSumOfSquares {
+        program,
+        input,
+        squares,
+        widened,
+        sum,
+        mean,
+        narrowed,
+    }
+}
+
+#[test]
+fn no_fused_body_spans_a_dtype_change() {
+    let island = widened_sum_of_squares(4, 8);
+    let shapes = shape::infer(&island.program, &[]).expect("widened island infers");
+    let permissive = NumericPolicy {
+        contraction: true,
+        reassociation: true,
+        nan_assumptions: true,
+        signed_zero: true,
+        approx_functions: true,
+        ..NumericPolicy::bit_exact()
+    };
+    for policy in [NumericPolicy::bit_exact(), permissive] {
+        let bound = bind_with_fusion(&island.program, &shapes, &[island.narrowed], true, policy)
+            .expect("widened island binds");
+        let bound_nodes: Vec<NodeId> = bound.iter().map(|op| op.node).collect();
+        for boundary in [island.squares, island.widened, island.narrowed] {
+            assert!(
+                bound_nodes.contains(&boundary),
+                "{boundary:?} sits on a dtype change and must stay its own op, bound {bound_nodes:?}"
+            );
+        }
+        for op in &bound {
+            assert_eq!(op.dtype, island.program[op.node.0 as usize].dtype(), "{op:?}");
+        }
+        assert!(bound_nodes.contains(&island.sum) || bound_nodes.contains(&island.mean));
+        assert!(!bound_nodes.contains(&island.input));
+    }
+}
