@@ -116,13 +116,16 @@ impl Top2 {
 fn config(gpu_layers: i32) -> ServingConfig<'static> {
     let defaults = ServingConfig::default();
     let activation_quantization = env::var_os("DECODE_COMPARE_ACTIVATION_QUANTIZATION").is_some();
-    let base_policy = match env::var("DECODE_COMPARE_POLICY").as_deref() {
-        Ok("exact") => NumericPolicy::bit_exact(),
-        _ => defaults.numeric_policy,
+    let (base_policy, llama_arithmetic) = match env::var("DECODE_COMPARE_POLICY").as_deref() {
+        Ok("exact") => (NumericPolicy::bit_exact(), false),
+        Ok("relaxed") => (defaults.numeric_policy, true),
+        _ => (defaults.numeric_policy, false),
     };
     ServingConfig {
         gpu_layers,
-        numeric_policy: base_policy.with_activation_quantization(activation_quantization),
+        numeric_policy: base_policy
+            .with_activation_quantization(activation_quantization || llama_arithmetic),
+        exact_activations: defaults.exact_activations && !llama_arithmetic,
         ..defaults
     }
 }
