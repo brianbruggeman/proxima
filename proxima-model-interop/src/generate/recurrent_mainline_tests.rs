@@ -11,6 +11,7 @@
 use core::ops::ControlFlow;
 
 use proxima_gguf::parse_complete;
+use proxima_tensor::op::NodeId;
 use proxima_tensor::LoopCdMode;
 use proxima_tensor::spec::{CacheMask, LayerCacheRoots, RecurrenceConfig, RopeLayout, RopePairing};
 
@@ -973,4 +974,26 @@ mod second_request_real_model {
     fn a_four_token_armed_second_request_runs_on_a_real_model() {
         probe_second_request(true, 4).expect("second request after the first");
     }
+}
+
+#[test]
+fn a_requested_early_residual_evaluates_through_the_f64_norm_islands() {
+    let bytes = tiny_ouro_gguf(2, false);
+    let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+    let model = LoadedModel::load(&parsed, &bytes).expect("load");
+    let node_count = u32::try_from(model.node_count()).expect("node count fits u32");
+    let middle = (node_count / 2..node_count)
+        .map(NodeId)
+        .find(|node| !matches!(model.node_kind(*node), "input" | "constant" | "iota"))
+        .expect("the tiny model computes something past its midpoint");
+
+    let values = model
+        .forward_node_values_from_ids(&[0], &[middle], &ServingConfig::default())
+        .expect("a requested subset binds with skipped nodes and still evaluates its norm islands");
+
+    assert!(
+        values[0].iter().all(|value| value.is_finite()),
+        "{:?}",
+        values[0]
+    );
 }
