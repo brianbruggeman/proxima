@@ -83,8 +83,9 @@ use crate::lowering::Codec;
 use proxima_tensor::config::TensorExecutionConfig;
 #[cfg(feature = "cpu")]
 use proxima_tensor::cpu::{
-    BufferPools, cpu_tensor_reserved_bytes, evaluate_quantized_named_exact_with_scratch_and_experts,
-    evaluate_quantized_named_with_config, evaluate_quantized_named_with_scratch_and_experts,
+    BufferPools, cpu_tensor_reserved_bytes,
+    evaluate_quantized_named_exact_with_scratch_and_experts, evaluate_quantized_named_with_config,
+    evaluate_quantized_named_with_scratch_and_experts,
 };
 #[cfg(feature = "cpu")]
 use proxima_tensor::resolve_named_blocks;
@@ -1862,10 +1863,7 @@ fn execute_plan_named_cpu(
             &plan.symbols,
             named,
             &plan.outputs,
-            (
-                &mut plan.free_buffers,
-                &mut plan.validated_weight_nodes,
-            ),
+            (&mut plan.free_buffers, &mut plan.validated_weight_nodes),
             expert_sources,
             config,
         )?

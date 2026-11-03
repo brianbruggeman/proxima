@@ -379,7 +379,11 @@ fn run_widened_fold<B: Deref<Target = [f32]>>(
     let narrow = epilogue_body.steps.iter().position(|step| {
         step.op == ScalarOp::Identity && matches!(step.args.as_slice(), [StepArg::Step(_)])
     });
-    let walk: &[u64] = if broadcast { &computed.extents } else { &fold_extents };
+    let walk: &[u64] = if broadcast {
+        &computed.extents
+    } else {
+        &fold_extents
+    };
     let mut coordinate = vec![0u64; walk.len()];
     let mut full_coordinate = vec![0u64; computed.extents.len()];
     let mut steps = (
@@ -398,7 +402,11 @@ fn run_widened_fold<B: Deref<Target = [f32]>>(
             }
         }
         let fold_offset = out_layout.offset_of(&full_coordinate) as usize;
-        let operand_coordinate = if broadcast { &full_coordinate } else { &coordinate };
+        let operand_coordinate = if broadcast {
+            &full_coordinate
+        } else {
+            &coordinate
+        };
         for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
             operand_values[slot] =
                 f64::from(operand_buffers[slot][layout.offset_of(operand_coordinate) as usize]);
@@ -411,7 +419,11 @@ fn run_widened_fold<B: Deref<Target = [f32]>>(
             &operand_values,
             &mut steps,
         )?;
-        let target = if broadcast { flat as usize } else { fold_offset };
+        let target = if broadcast {
+            flat as usize
+        } else {
+            fold_offset
+        };
         store(target, wide_value, narrow_value);
     }
     Ok(())
