@@ -4880,6 +4880,7 @@ impl BackendRuntime {
             symbols[1] as usize,
             outputs.to_vec(),
             self.numeric_policy.epilogue_sources,
+            crate::generate::program_hash(program),
         );
         let plan = Self::resolve_cached_plan(
             &mut self.plans,
@@ -4964,6 +4965,7 @@ impl BackendRuntime {
             symbols[1] as usize,
             profile_outputs.clone(),
             self.numeric_policy.epilogue_sources,
+            crate::generate::program_hash(program),
         );
         let plan = Self::resolve_cached_plan(
             &mut self.plans,
