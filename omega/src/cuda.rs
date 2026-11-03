@@ -85,6 +85,7 @@ use crate::lowering::{
 mod block_dot;
 mod block_quantize;
 mod int8_gemm;
+mod plane_dot;
 mod radix_dot;
 pub(crate) mod mma_gemm;
 mod row_tile;

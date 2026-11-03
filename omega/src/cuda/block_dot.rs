@@ -4,6 +4,7 @@ use alloc::string::String;
 use proxima_primitives::block_layout::{BlockLayout, Coded, Field};
 use proxima_primitives::float_layout::{FloatLayout, SignEncoding};
 
+use super::plane_dot::split_block_dot;
 use super::radix_dot::radix_block_dot;
 use crate::cuda_layout::layout_load_cuda;
 
@@ -24,13 +25,17 @@ pub(super) struct BlockDot {
     pub centering: Option<(i16, i16)>,
 }
 
-/// `None` when the layout is neither a radix-packed code nor a single-plane linear code whose
-/// 32-element chunks are contiguous bit runs of 1, 2, 4 or 8 bits, or its affine value does not
-/// fit int8.
+/// `None` when the layout is neither a radix-packed code, a single-plane linear code whose
+/// 32-element chunks are contiguous bit runs of 1, 2, 4 or 8 bits, nor a nibble-split code with an
+/// optional bit-run high plane, or its affine value does not fit int8.
 pub(super) fn block_dot_i8(layout: &BlockLayout) -> Option<BlockDot> {
     if layout.element.packed_radix > 1 {
         return radix_block_dot(layout);
     }
+    contiguous_block_dot(layout).or_else(|| split_block_dot(layout))
+}
+
+fn contiguous_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
     let element = &layout.element;
     let bits = usize::from(element.low.bits);
     let elements = usize::from(layout.elements);
@@ -112,7 +117,7 @@ fn signed_code(code: FloatLayout, raw: i32, bits: usize) -> Option<i32> {
     }
 }
 
-fn values_fit_int8(element: &Coded, multiplier: i16, bits: usize) -> bool {
+pub(super) fn values_fit_int8(element: &Coded, multiplier: i16, bits: usize) -> bool {
     (0..1i32 << bits).all(|raw| {
         signed_code(element.code, raw, bits)
             .map(|code| i32::from(multiplier) * code - i32::from(element.bias))
@@ -198,15 +203,18 @@ mod tests {
     use super::block_dot_i8;
 
     #[test]
-    fn single_plane_runs_lower_and_split_or_sub_block_layouts_do_not() {
+    fn contiguous_runs_and_nibble_split_codes_lower_and_min_or_sub_block_layouts_do_not() {
         for layout in [BlockLayout::Q8_0, BlockLayout::Q1_0, BlockLayout::Q2_0, BlockLayout::PQ2_0] {
             assert!(block_dot_i8(&layout).is_some(), "{layout:?} is a contiguous linear run");
         }
         for layout in [BlockLayout::TQ1_0, BlockLayout::PTQ1_0] {
             assert!(block_dot_i8(&layout).is_some(), "{layout:?} is a radix-packed byte code");
         }
-        for layout in [BlockLayout::Q4_0, BlockLayout::Q5_0, BlockLayout::Q4_1, BlockLayout::Q4_K] {
-            assert!(block_dot_i8(&layout).is_none(), "{layout:?} is not a single contiguous run");
+        for layout in [BlockLayout::Q4_0, BlockLayout::Q5_0] {
+            assert!(block_dot_i8(&layout).is_some(), "{layout:?} is a nibble-split code with an optional bit-run high plane");
+        }
+        for layout in [BlockLayout::Q4_1, BlockLayout::Q5_1, BlockLayout::Q4_K, BlockLayout::Q5_K, BlockLayout::Q6_K] {
+            assert!(block_dot_i8(&layout).is_none(), "{layout:?} carries a min or sub-block scales");
         }
     }
 
