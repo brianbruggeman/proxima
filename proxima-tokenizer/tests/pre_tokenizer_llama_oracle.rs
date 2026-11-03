@@ -18,10 +18,13 @@ use proxima_tokenizer::{Vocab, encode, gguf::vocab_from_metadata};
 
 const LLAMA_BPE_VOCAB: &str =
     "/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf";
-const DEEPSEEK_CODER_33B_NO_PRE: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/deepseek-coder-33B-instruct-GGUF/deepseek-coder-33b-instruct.Q4_K_S.gguf";
+// HF TheBloke/deepseek-coder-33B-instruct-GGUF x-linked-size 18891923456, x-linked-etag (sha256) 85805281d0431bb3d1dcd41b4b4811a17a09c5e0289a364d8d1a1b9ee2f6dd10
+const DEEPSEEK_CODER_33B_NO_PRE: &str = "/mnt/data5/models/deepseek-coder-33b-instruct.Q4_K_S.gguf";
+const DEEPSEEK_CODER_33B_BYTES: u64 = 18_891_923_456;
 const QWEN2_BLOB_SHA256: &str = "c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515";
 const QWEN3_BLOB_SHA256: &str = "a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f";
-const QWEN35_BLOB_SHA256: &str = "afb707b6b8fac6e475acc42bc8380fc0b8d2e0e4190be5a969fbf62fcc897db5";
+// afb707b6 is gone from the registry; checkpoints.toml re-pinned qwen35 to this blob, and the llama oracle ids are asserted against it
+const QWEN35_BLOB_SHA256: &str = "889ea3b9143cdc32146c7d530ce5f3d452ec18069086f6f4167ce9ae72a9691f";
 const QWEN35MOE_BLOB_SHA256: &str =
     "f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d";
 const GRANITE_MOE_BLOB_SHA256: &str =
@@ -168,7 +171,7 @@ fn deepseek_coder_without_a_pre_key_uses_the_default_split_like_llama() {
     let path = proxima_gguf::checkpoint_resolver::require_checkpoint(
         "PROXIMA_DEEPSEEK_CODER_33B_GGUF",
         DEEPSEEK_CODER_33B_NO_PRE,
-        0,
+        DEEPSEEK_CODER_33B_BYTES,
     );
     let vocab = load_vocab(&path);
     assert_family_matches_llama(
