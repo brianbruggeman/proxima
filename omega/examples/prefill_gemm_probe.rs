@@ -161,10 +161,11 @@ fn arbitrary_blocks(layout: &BlockLayout, blocks: usize, seed: u64) -> Vec<u8> {
 
 fn main() -> Result<(), ProbeError> {
     let mut args: Vec<String> = std::env::args().collect();
-    let load_path = args.iter().position(|arg| arg == "--load-source").map(|at| {
+    let mut load_paths = Vec::new();
+    while let Some(at) = args.iter().position(|arg| arg == "--load-source") {
         args.remove(at);
-        args.remove(at)
-    });
+        load_paths.push(args.remove(at));
+    }
     let dump_path = args.iter().position(|arg| arg == "--dump-source").map(|at| {
         args.remove(at);
         args.remove(at)
@@ -228,10 +229,14 @@ fn main() -> Result<(), ProbeError> {
             .collect();
         std::fs::write(&path, dump).map_err(|source| ProbeError::Io { path, source })?;
     }
-    if let Some(path) = load_path {
+    for spec in load_paths {
+        let (position, path) = match spec.split_once(':') {
+            Some((index, path)) => (index.parse().unwrap_or(0), path.to_owned()),
+            None => (0, spec),
+        };
         let source = std::fs::read_to_string(&path)
             .map_err(|source| ProbeError::Io { path, source })?;
-        if !cuda_replace_kernel_source(&mut plan, 0, source) {
+        if !cuda_replace_kernel_source(&mut plan, position, source) {
             return Err(ProbeError::NoFirstKernel);
         }
     }
