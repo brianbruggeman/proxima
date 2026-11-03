@@ -5818,7 +5818,8 @@ mod gated_delta_net_tests {
     #[test]
     fn qwen35moe_mixer_census_at_real_shape_with_gated_delta_net_fusion() {
         use crate::spec::{
-            GdnOutputGate, append_delta_net_mixer_with_taps_and_layout, input_leaf, scalar_constant,
+            GdnOutputGate, append_delta_net_mixer_with_taps_and_layout, count_constant, input_leaf,
+            scalar_constant,
         };
 
         let kv_heads: u32 = 16;
@@ -6162,7 +6163,8 @@ mod gated_delta_net_tests {
     #[test]
     fn qwen35moe_mixer_op_census_prints_every_bound_op() {
         use crate::spec::{
-            GdnOutputGate, append_delta_net_mixer_with_taps_and_layout, input_leaf, scalar_constant,
+            GdnOutputGate, append_delta_net_mixer_with_taps_and_layout, count_constant, input_leaf,
+            scalar_constant,
         };
 
         let kv_heads: u32 = 16;
