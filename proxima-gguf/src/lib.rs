@@ -62,6 +62,10 @@ pub mod writer;
 #[cfg(feature = "std")]
 pub mod edge;
 
+#[cfg(all(feature = "std", any(test, feature = "test-support")))]
+#[doc(hidden)]
+pub mod checkpoint_resolver;
+
 pub use error::GgufError;
 pub use parser::{GgufEvent, GgufParser};
 pub use pipe::{ParsedGguf, parse_complete};
