@@ -50,8 +50,6 @@ use proxima_tensor::spec::{
 use sha2::{Digest, Sha256};
 
 mod common;
-#[path = "common/tiny_gemma4.rs"]
-mod tiny_gemma4;
 
 const CAPTURE_ENV: &str = "PROXIMA_ARCH_DATA_CAPTURE";
 const CHECKPOINTS_TOML: &str = include_str!("fixtures/llama-parity/checkpoints.toml");
@@ -1562,7 +1560,7 @@ fn serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps() {
 
 #[test]
 fn serving_fsm_drives_speculative_verify_through_accept_and_rollback() {
-    let checkpoint = tiny_gemma4::tiny_gemma4_checkpoint();
+    let checkpoint = proxima_model_interop::gemma4_fixture::gemma4_checkpoint_with(256, Some(4096));
     let file_bytes: &[u8] = &checkpoint;
     let parsed = parse_complete(file_bytes).expect("parses the generated checkpoint's GGUF header");
     let model = armed_e2b_model(&parsed, file_bytes);
