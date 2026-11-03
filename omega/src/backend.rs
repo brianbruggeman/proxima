@@ -905,6 +905,29 @@ fn map_metal_configuration_error(error: MetalError) -> BackendError {
     }
 }
 
+// the identity a candidate reports is the graph its own driver binds: the gpu
+// drivers narrow f64 norm accumulations (`cuda_driver`, `wgpu_driver`, metal's
+// `prepare_uniforms_pack`), the cpu keeps them
+fn binding_policy(plan: &Plan, numeric: NumericPolicy) -> NumericPolicy {
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => numeric,
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Plan::Metal(_) => numeric.with_accumulator_narrowing(),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => numeric.with_accumulator_narrowing(),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => numeric.with_accumulator_narrowing(),
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend",
+            feature = "cuda-driver"
+        )))]
+        _ => match *plan {},
+    }
+}
+
 fn fill_candidate_identity(
     plan: &Plan,
     config: &RuntimeConfig,
@@ -915,10 +938,11 @@ fn fill_candidate_identity(
     measurement: &mut CandidateMeasurement,
 ) -> Result<(), BackendError> {
     let shapes = proxima_tensor::infer(program, symbols)?;
+    let numeric = binding_policy(plan, config.numeric);
     let resolved = if config.allow_fusion {
-        proxima_tensor::bind_with_fusion(program, &shapes, outputs, true, config.numeric)?
+        proxima_tensor::bind_with_fusion(program, &shapes, outputs, true, numeric)?
     } else {
-        proxima_tensor::bind_unfused(program, &shapes, outputs, config.numeric)?
+        proxima_tensor::bind_unfused(program, &shapes, outputs, numeric)?
     };
     measurement.resolved_op_count = resolved.len();
     measurement.kernel_identities = resolved
