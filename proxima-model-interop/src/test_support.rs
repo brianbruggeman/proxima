@@ -7,8 +7,9 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_gguf::{GgufModel, parse_complete, write_complete};
 
-#[path = "../tests/support/fixtures.rs"]
-pub(crate) mod fixtures;
+use crate::checkpoint_resolver::resolve_checkpoint;
+
+pub(crate) use crate::checkpoint_resolver as fixtures;
 
 /// `PROXIMA_MATH_MODE` read the same way every real-checkpoint decode test
 /// in this crate reads it: `"safe"` selects [`omega::MathMode::Safe`],
@@ -72,13 +73,17 @@ const GEMMA4_E2B_BLOB: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256
 /// `PROXIMA_ARCH_GRANITE_MOE_GGUF` names the granite-3.1-1b-a400m-moe checkpoint
 /// (sha256 cd60b3e8...df80); unset keeps the ollama blob on the author's host.
 pub(crate) fn granite_moe_gguf_path() -> String {
-    std::env::var("PROXIMA_ARCH_GRANITE_MOE_GGUF").unwrap_or_else(|_| GRANITE_MOE_BLOB.to_string())
+    resolve_checkpoint("PROXIMA_ARCH_GRANITE_MOE_GGUF", GRANITE_MOE_BLOB, 1_422_239_776)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// `PROXIMA_ARCH_GEMMA4_E2B_GGUF` names the gemma4 e2b checkpoint (sha256
 /// 3646b4c1...e6fd); unset keeps the ollama blob on the author's host.
 pub(crate) fn gemma4_e2b_arch_gguf_path() -> String {
-    std::env::var("PROXIMA_ARCH_GEMMA4_E2B_GGUF").unwrap_or_else(|_| GEMMA4_E2B_BLOB.to_string())
+    resolve_checkpoint("PROXIMA_ARCH_GEMMA4_E2B_GGUF", GEMMA4_E2B_BLOB, 3_349_514_112)
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[cfg(unix)]

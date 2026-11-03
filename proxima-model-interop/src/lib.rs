@@ -171,6 +171,9 @@ pub mod probes;
 #[cfg(any(test, feature = "test-support"))]
 #[doc(hidden)]
 pub mod gemma4_fixture;
+#[cfg(all(feature = "std", any(test, feature = "test-support")))]
+#[doc(hidden)]
+pub mod checkpoint_resolver;
 #[cfg(feature = "std")]
 pub use lowering::{
     BoundProgram, FfnRouting, KvCacheShape, KvLayout, StepInput, StepState, bind_checkpoint,
