@@ -7564,10 +7564,85 @@ fn a_narrowing_policy_binds_the_f64_island_as_one_f32_chain() {
     assert_eq!(accumulators(&gpu), [DType::FLOAT32], "{gpu:#?}");
     assert!(cpu.iter().any(|op| op.dtype == DType::FLOAT64), "{cpu:#?}");
     assert!(gpu.iter().all(|op| op.dtype == DType::FLOAT32), "{gpu:#?}");
-    let widened_extra = if cfg!(feature = "reduce-epilogue-fusion") { 0 } else { 1 };
+    let widened_extra = if cfg!(feature = "reduce-epilogue-fusion") {
+        0
+    } else {
+        1
+    };
     assert_eq!(
         cpu.len(),
         gpu.len() + widened_extra,
         "merged, the widened island binds as many ops as the narrowed one; unmerged the f64 divide is one more, cpu {cpu:#?} gpu {gpu:#?}"
+    );
+}
+
+#[test]
+fn half_precision_weights_read_by_an_f32_product_still_compose_into_the_reduce() {
+    use crate::op::{Extent, Keep, Reduce, ReduceInit, append};
+
+    let mut program = Vec::new();
+    let weights = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT16,
+            shape: alloc::vec![Extent::Static(6), Extent::Static(4)],
+            name: None,
+        },
+    );
+    let activations = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: alloc::vec![Extent::Static(3), Extent::Static(4)],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![
+                (weights, IndexMap::Affine(map::projection(3, &[1, 2]))),
+                (activations, IndexMap::Affine(map::projection(3, &[0, 2]))),
+            ],
+            name: None,
+        },
+    );
+    let projected = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let shapes = shape::infer(&program, &[]).expect("projection infers");
+
+    let bound = bind(&program, &shapes, &[projected], NumericPolicy::bit_exact())
+        .expect("projection binds");
+
+    let reads: Vec<NodeId> = bound
+        .iter()
+        .flat_map(|op| {
+            op.operands()
+                .iter()
+                .map(|(node, ..)| *node)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert_eq!(
+        bound.len(),
+        1,
+        "an exact half-to-f32 read is not a convert to materialize: {bound:#?}"
+    );
+    assert!(
+        reads.contains(&weights) && reads.contains(&activations),
+        "{reads:?}"
     );
 }

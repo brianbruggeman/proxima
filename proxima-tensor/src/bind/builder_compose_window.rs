@@ -77,13 +77,19 @@ impl BoundOpBuilder {
     }
 
     // a held body evaluates in one element type, so a float operand of a
-    // different float layout (a widening or narrowing convert) must
-    // materialize; a bool mask or a packed integer weight read by a float
-    // body is not a conversion
+    // different float layout (a rounding narrow, or any step into or out of
+    // the f64 table) must materialize; a bool mask or a packed integer weight
+    // read by a float body is not a conversion, and neither is a half or
+    // narrower float read by an f32 body: that widening is exact, and it is
+    // how half-precision weights feed an f32 matmul
     fn crosses_dtype(&self, operand: NodeId, consumer: DType) -> bool {
         let operand_dtype = self.dtypes.borrow().get(operand.0 as usize).copied();
         operand_dtype.is_some_and(|operand_dtype| {
-            operand_dtype.is_float() && consumer.is_float() && operand_dtype != consumer
+            let exact_widening = consumer == DType::FLOAT32 && operand_dtype.bits() < 32;
+            operand_dtype.is_float()
+                && consumer.is_float()
+                && operand_dtype != consumer
+                && !exact_widening
         })
     }
 
