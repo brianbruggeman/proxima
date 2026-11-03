@@ -8187,30 +8187,16 @@ did not hold every cached position)",
     }
 
     /// Captures `node_ids` after every stateful prompt-position evaluation
-    /// through the ordinary cached decode loop. This is the causal companion
-    /// to [`Self::forward_node_values_on_backend`], whose cache is always empty.
-    pub fn forward_cached_node_values_on_backend(
-        &self,
-        prompt: &str,
-        node_ids: &[NodeId],
-        gpu_layers: i32,
-    ) -> Result<Vec<Vec<Vec<f32>>>, InteropError> {
-        let serving_config = supported_serving_config(
-            gpu_layers,
-            #[cfg(all(feature = "metal", target_os = "macos"))]
-            omega::MathMode::default(),
-        );
-        self.forward_cached_node_values_with_serving_config(prompt, node_ids, &serving_config)
-    }
-
-    /// [`Self::forward_cached_node_values_on_backend`] under the caller's whole
-    /// [`ServingConfig`], so a diagnostic compares node values under the same
-    /// numeric choices (`exact_activations`, cache quantization) a decode uses.
+    /// through the ordinary cached decode loop, under the caller's whole
+    /// [`ServingConfig`] (backend via `gpu_layers`, `exact_activations`, cache
+    /// quantization) so a diagnostic sees the same numerics a decode uses. This
+    /// is the causal companion to [`Self::forward_node_values_on_backend`], whose
+    /// cache is always empty.
     ///
     /// # Errors
     ///
-    /// Same as [`Self::forward_cached_node_values_on_backend`].
-    pub fn forward_cached_node_values_with_serving_config(
+    /// Whatever the cached decode loop fails with for `prompt` under `serving_config`.
+    pub fn forward_cached_node_values_on_backend(
         &self,
         prompt: &str,
         node_ids: &[NodeId],

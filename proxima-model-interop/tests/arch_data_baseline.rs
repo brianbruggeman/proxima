@@ -1290,6 +1290,7 @@ fn assert_llama_ids_for(
     let config = ServingConfig {
         prompt_cache: PromptCacheConfig::off(),
         ubatch_size,
+        exact_activations: false,
         ..ServingConfig::default()
     };
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)
@@ -2475,7 +2476,7 @@ fn qwen35_layer_residuals_track_llama_at_the_divergent_prefix() {
         ..ServingConfig::default()
     };
     let steps = model
-        .forward_cached_node_values_with_serving_config(&prefix, &node_ids, &llama_numerics)
+        .forward_cached_node_values_on_backend(&prefix, &node_ids, &llama_numerics)
         .expect("qwen35 forwards the 74-id prefix through the cached loop");
     let values = steps.last().expect("the cached loop ran at least one step");
     let ours: Vec<Vec<f32>> = values
