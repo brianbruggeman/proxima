@@ -464,6 +464,15 @@ pub fn mean_of_squares(
     row: &str,
     count_map: &str,
 ) -> Result<NodeId, TensorError> {
+    let count_dtype = program
+        .get(count.0 as usize)
+        .map_or(DType::FLOAT32, Op::dtype);
+    if count_dtype != DType::FLOAT64 {
+        return Err(TensorError::NormCountNotFloat64 {
+            node: count,
+            dtype: count_dtype,
+        });
+    }
     let sum_squares = sum_of_squares(program, x, full, reduce_out)?;
     let mean = elementwise(
         program,

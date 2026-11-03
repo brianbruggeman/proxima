@@ -22360,3 +22360,36 @@ mod mixer_over_packed_projection {
     }
 }
 
+#[test]
+fn a_mean_of_squares_refuses_an_f32_reciprocal_where_its_f64_count_belongs() {
+    let mut program = Vec::new();
+    let x = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(1), Extent::Static(2)],
+        "x",
+    );
+    let reciprocal = scalar_constant(&mut program, 0.5);
+    let count = count_constant(&mut program, 2);
+
+    let refused = mean_of_squares(
+        &mut program,
+        x,
+        reciprocal,
+        "sd->sd",
+        "s->sd",
+        "s->s",
+        "->s",
+    );
+    let accepted = mean_of_squares(&mut program, x, count, "sd->sd", "s->sd", "s->s", "->s");
+
+    assert!(
+        matches!(
+            refused,
+            Err(TensorError::NormCountNotFloat64 { node, dtype })
+                if node == reciprocal && dtype == DType::FLOAT32
+        ),
+        "{refused:?}"
+    );
+    assert!(accepted.is_ok(), "{accepted:?}");
+}
