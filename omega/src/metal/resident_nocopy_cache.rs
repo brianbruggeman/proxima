@@ -1265,13 +1265,12 @@ pub(super) fn buffer_for(
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
     node: NodeId,
 ) -> Result<DeviceBuffer, MetalError> {
-    if env_flags::segment_host() && !device_buffers.contains_key(&node) {
-        eprintln!(
-            "metal missing operand node={node:?} available={:?}",
-            device_buffers.keys().collect::<Vec<_>>()
-        );
-    }
     device_buffers.get(&node).cloned().ok_or_else(|| {
+        debug!(
+            node = ?node,
+            available = ?device_buffers.keys().collect::<Vec<_>>(),
+            "metal operand buffer missing at execution time"
+        );
         TensorError::NotLowerable {
             node,
             reason: "operand buffer missing at execution time",
@@ -1332,10 +1331,9 @@ pub(super) fn bind_buffers(
                     })?
             }
             Binding::Input(node) | Binding::Indices(node) => {
-                if env_flags::segment_host() && !device_buffers.contains_key(node) {
-                    eprintln!("metal binding missing node={node:?} bindings={bindings:?}");
-                }
-                buffer_for(device_buffers, *node)?
+                buffer_for(device_buffers, *node).inspect_err(|_| {
+                    debug!(node = ?node, bindings = ?bindings, "metal binding references a missing node");
+                })?
             }
             Binding::ExpertPayloads(_) => expert_payloads
                 .map(|(buffer, offset)| (buffer.clone(), offset))

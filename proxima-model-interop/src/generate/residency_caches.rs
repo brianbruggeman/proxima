@@ -3664,7 +3664,7 @@ impl BackendRuntime {
             &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
         >,
     ) -> Result<Evaluated, InteropError> {
-        let host_timing = std::env::var_os("PROXIMA_DEBUG_SEGMENT_HOST").is_some();
+        let host_timing = event_enabled(module_path!(), Level::DEBUG);
         let resolve_started = std::time::Instant::now();
         let program_key = program.as_ptr() as usize;
         let new_count = symbols.first().copied().unwrap_or_default() as usize;
@@ -3744,31 +3744,31 @@ impl BackendRuntime {
         let result = execute_plan_named_with_expert_sources(plan, named, expert_sources)
             .map_err(InteropError::from);
         if host_timing {
-            eprintln!(
-                "recurrent segment host resolve_us={} execute_us={} plan_hits={} plan_misses={}",
-                resolve_elapsed_us,
-                execute_started.elapsed().as_micros(),
-                self.plan_hits,
-                self.plan_misses,
+            proxima_telemetry::debug!(
+                resolve_us = resolve_elapsed_us as u64,
+                execute_us = execute_started.elapsed().as_micros() as u64,
+                plan_hits = self.plan_hits as u64,
+                plan_misses = self.plan_misses as u64,
+                "recurrent segment host timing after plan execute"
             );
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
             {
                 let stage = metal_stage_totals();
-                eprintln!(
-                    "recurrent segment metal prepare_ms={:.3} emit_ms={:.3} pipeline_lookup_ms={:.3} op_setup_ms={:.3} gpu_exec_ms={:.3} encode_dispatch_ms={:.3} readback_ms={:.3} block_upload_ms={:.3} device_before={} device_after={} device_delta={}",
-                    ticks_to_nanos(stage.prepare_ticks) as f64 / 1_000_000.0,
-                    ticks_to_nanos(stage.emit_ticks) as f64 / 1_000_000.0,
-                    ticks_to_nanos(stage.pipeline_lookup_ticks) as f64 / 1_000_000.0,
-                    ticks_to_nanos(stage.op_setup_ticks) as f64 / 1_000_000.0,
-                    ticks_to_nanos(stage.gpu_exec_ticks) as f64 / 1_000_000.0,
-                    ticks_to_nanos(stage.encode_dispatch_ticks) as f64 / 1_000_000.0,
-                    ticks_to_nanos(stage.readback_ticks) as f64 / 1_000_000.0,
-                    ticks_to_nanos(stage.block_upload_ticks) as f64 / 1_000_000.0,
+                proxima_telemetry::debug!(
+                    prepare_ms = ticks_to_nanos(stage.prepare_ticks) as f64 / 1_000_000.0,
+                    emit_ms = ticks_to_nanos(stage.emit_ticks) as f64 / 1_000_000.0,
+                    pipeline_lookup_ms = ticks_to_nanos(stage.pipeline_lookup_ticks) as f64 / 1_000_000.0,
+                    op_setup_ms = ticks_to_nanos(stage.op_setup_ticks) as f64 / 1_000_000.0,
+                    gpu_exec_ms = ticks_to_nanos(stage.gpu_exec_ticks) as f64 / 1_000_000.0,
+                    encode_dispatch_ms = ticks_to_nanos(stage.encode_dispatch_ticks) as f64 / 1_000_000.0,
+                    readback_ms = ticks_to_nanos(stage.readback_ticks) as f64 / 1_000_000.0,
+                    block_upload_ms = ticks_to_nanos(stage.block_upload_ticks) as f64 / 1_000_000.0,
                     device_before,
-                    omega::metal::current_allocated_size().unwrap_or_default(),
-                    omega::metal::current_allocated_size()
+                    device_after = omega::metal::current_allocated_size().unwrap_or_default(),
+                    device_delta = omega::metal::current_allocated_size()
                         .unwrap_or_default()
                         .saturating_sub(device_before),
+                    "recurrent segment metal stage totals after plan execute"
                 );
             }
         }
@@ -6732,19 +6732,14 @@ where
     }
 
     for (local_position, row) in logits.chunks_exact(expert_count).enumerate() {
-        if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-            let nan_count = row.iter().filter(|value| value.is_nan()).count();
-            let min = row.iter().copied().fold(f32::INFINITY, f32::min);
-            let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            eprintln!(
-                "router logits layer={} position={} min={} max={} nan_count={}",
-                layer,
-                position_offset.saturating_add(local_position),
-                min,
-                max,
-                nan_count
-            );
-        }
+        proxima_telemetry::trace!(
+            layer = layer as u64,
+            position = position_offset.saturating_add(local_position) as u64,
+            min = row.iter().copied().fold(f32::INFINITY, f32::min),
+            max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max),
+            nan_count = row.iter().filter(|value| value.is_nan()).count() as u64,
+            "router logits row summary before top-k selection"
+        );
         scratch.clear();
         for (expert, &importance) in row.iter().enumerate() {
             let candidate = crate::residency::RoutedExpert { expert, importance };

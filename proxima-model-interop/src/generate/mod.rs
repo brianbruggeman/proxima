@@ -189,6 +189,10 @@ use omega::{
 // business-meaningful workflow fact, not an `instrument`-gated diagnostic,
 // so it must compile and fire under plain `--features std`.
 use proxima_telemetry::{debug, info, trace, warn};
+#[cfg(any(feature = "instrument", feature = "gpu", all(feature = "metal", target_os = "macos")))]
+use proxima_telemetry::emit::{Coord, global::decide};
+#[cfg(any(feature = "instrument", feature = "gpu", all(feature = "metal", target_os = "macos")))]
+use proxima_telemetry::level::Level;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::TensorError;
 #[cfg(feature = "instrument")]
@@ -213,6 +217,11 @@ use crate::serving::apply_serving_config;
 use crate::serving::{
     GdnPrefillBackend, PromptCacheConfig, ServingConfig, SpeculativeConfig, resolve_context_length,
 };
+
+#[cfg(any(feature = "instrument", feature = "gpu", all(feature = "metal", target_os = "macos")))]
+pub(crate) fn event_enabled(target: &str, level: Level) -> bool {
+    decide(target, Coord::from(level)).is_keep()
+}
 
 #[macro_use]
 mod load_model;

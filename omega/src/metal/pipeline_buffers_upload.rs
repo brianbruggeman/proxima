@@ -434,12 +434,11 @@ pub(super) fn pipeline_for(
         attention_row_schedule,
         dense_mma_input_layout,
     )?;
-    if env_flags::debug_metal_source() && env_flags::compare_bound_node() == Some(bound.node) {
-        eprintln!(
-            "metal_bound_source node={:?}\n{}",
-            bound.node, kernel.source
-        );
-    }
+    trace!(
+        node = ?bound.node,
+        source = %kernel.source,
+        "metal bound source emitted for a pipeline cache miss"
+    );
     #[cfg(feature = "instrument")]
     let captured_sha256 = capture_pipeline_source(&kernel, cache_key, math_mode);
     // Owner addition to Intervention 5 (RUN.md "Intervention 5"): one line

@@ -3643,14 +3643,10 @@ pub(super) fn encode_op(
             if let Some(codec) = uniform_codec {
                 cache_key.push_str("_uniform_expert_");
                 cache_key.push_str(crate::msl::codec_cache_token(codec));
-                if env_flags::debug_expert_emit() {
-                    eprintln!("expert lowering mode=uniform codec={codec:?} node={source_node:?}");
-                }
+                trace!(codec = ?codec, node = ?source_node, "expert lowering mode uniform");
             } else {
                 cache_key.push_str("_mixed_expert");
-                if env_flags::debug_expert_emit() {
-                    eprintln!("expert lowering mode=mixed node={source_node:?}");
-                }
+                trace!(node = ?source_node, "expert lowering mode mixed");
             }
             cache_key.push_str(&format!("_{binding_identity:?}"));
             let kernel = MIXED_KERNEL_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());

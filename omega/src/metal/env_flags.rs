@@ -14,6 +14,7 @@
 use std::ffi::OsString;
 use std::sync::OnceLock;
 
+#[cfg(feature = "instrument")]
 use proxima_tensor::NodeId;
 
 fn is_present(name: &str) -> bool {
@@ -32,24 +33,9 @@ fn node_ids(raw: &str) -> Vec<NodeId> {
         .collect()
 }
 
-pub(super) fn segment_host() -> bool {
-    static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| is_present("PROXIMA_DEBUG_SEGMENT_HOST"))
-}
-
 pub(super) fn encoder_error_status() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
     *CELL.get_or_init(|| is_one("PROXIMA_METAL_ENCODER_ERROR_STATUS"))
-}
-
-pub(super) fn debug_metal_source() -> bool {
-    static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| is_present("PROXIMA_DEBUG_METAL_SOURCE"))
-}
-
-pub(super) fn debug_placement_keys() -> bool {
-    static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| is_present("PROXIMA_DEBUG_PLACEMENT_KEYS"))
 }
 
 pub(super) fn boundaries_prefill() -> bool {
@@ -87,17 +73,6 @@ pub(super) fn nan_check() -> bool {
     *CELL.get_or_init(|| is_present("PROXIMA_METAL_NAN_CHECK"))
 }
 
-pub(super) fn debug_expert_emit() -> bool {
-    static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| is_present("PROXIMA_DEBUG_EXPERT_EMIT"))
-}
-
-#[cfg(feature = "instrument")]
-pub(super) fn debug_metal_stages() -> bool {
-    static CELL: OnceLock<bool> = OnceLock::new();
-    *CELL.get_or_init(|| is_present("PROXIMA_DEBUG_METAL_STAGES"))
-}
-
 #[cfg(feature = "instrument")]
 pub(super) fn repeat_verify() -> bool {
     static CELL: OnceLock<bool> = OnceLock::new();
@@ -119,6 +94,7 @@ pub(super) fn substitute_dump_dir() -> Option<&'static OsString> {
         .as_ref()
 }
 
+#[cfg(feature = "instrument")]
 pub(super) fn compare_bound_node() -> Option<NodeId> {
     static CELL: OnceLock<Option<NodeId>> = OnceLock::new();
     *CELL.get_or_init(|| {
@@ -178,9 +154,9 @@ mod tests {
     }
 
     #[test]
-    fn segment_host_reads_the_environment_once_per_process() {
-        let first = temp_env::with_var("PROXIMA_DEBUG_SEGMENT_HOST", Some("1"), segment_host);
-        let second = temp_env::with_var("PROXIMA_DEBUG_SEGMENT_HOST", None::<&str>, segment_host);
+    fn boundaries_prefill_reads_the_environment_once_per_process() {
+        let first = temp_env::with_var("PROXIMA_BOUNDARIES_PREFILL", Some("1"), boundaries_prefill);
+        let second = temp_env::with_var("PROXIMA_BOUNDARIES_PREFILL", None::<&str>, boundaries_prefill);
         assert_eq!(
             first, second,
             "the second read must serve the first read's value"
