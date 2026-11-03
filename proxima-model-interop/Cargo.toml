@@ -834,3 +834,8 @@ required-features = ["std"]
 [[example]]
 name = "prompt_cache_lookup_cost"
 required-features = ["std", "test-support"]
+
+# file-sink recorder around `export_mlx_directory`: the bytes held at each phase of the streaming export.
+[[example]]
+name = "mlx_export_telemetry"
+required-features = ["std"]

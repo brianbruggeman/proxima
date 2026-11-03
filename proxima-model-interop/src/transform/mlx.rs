@@ -1,14 +1,15 @@
 //! MLX shard assembly: the byte buffers and file names of an mlx-lm model
 //! directory's weight files, with no file ever opened.
 //!
-//! Composes [`proxima_safetensors::write_complete`] for each shard and
+//! Composes [`proxima_safetensors::encode_header`] for each shard and
 //! [`proxima_safetensors::parse_sharded_index`]'s document shape for the
 //! index. The cut mirrors mlx-lm's `make_shards`: tensors stay in order and a
 //! new shard starts when the next tensor would push the running total past the
-//! cap. A caller that owns the filesystem writes `shards` and `index` out; this
-//! module is the sans-IO half so the same assembly serves any edge.
+//! cap. [`MlxLayout`] is the cut and the headers, known before any payload
+//! exists, for a caller that streams the payload to its own files;
+//! [`MlxExport`] is the same shards with the bytes concatenated in memory.
 //!
-//! `write_complete` always writes its own `proxima_format_version` key into
+//! `encode_header` always writes its own `proxima_format_version` key into
 //! `__metadata__`; `format` is a different key, so both coexist in each shard.
 
 use alloc::collections::BTreeMap;
@@ -16,7 +17,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_safetensors::{SafetensorsError, SafetensorsModel, TensorPayload, write_complete};
+use proxima_safetensors::{SafetensorsError, TensorHeader, TensorPayload, encode_header};
 
 use crate::error::InteropError;
 
@@ -46,19 +47,38 @@ pub struct MlxExport {
     pub index: Option<Vec<u8>>,
 }
 
-impl MlxExport {
-    /// Cuts `tensors` into shards of at most `cap_bytes` payload bytes each
+/// One weight file before any payload exists: its name, the bytes of its
+/// safetensors header, and the tensors it holds in write order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MlxShardPlan {
+    pub file_name: String,
+    pub prefix: Vec<u8>,
+    pub tensors: Vec<TensorHeader>,
+}
+
+/// The shard cut and index of one MLX model directory, fixed from tensor
+/// names, dtypes and shapes alone. A writer emits each shard's `prefix` and
+/// then its tensors' bytes, in order; [`MlxExport::assemble`] is the same
+/// layout with the bytes concatenated in memory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MlxLayout {
+    pub shards: Vec<MlxShardPlan>,
+    pub index: Option<Vec<u8>>,
+}
+
+impl MlxLayout {
+    /// Cuts `headers` into shards of at most `cap_bytes` payload bytes each
     /// (a single tensor larger than the cap gets a shard of its own, as in
-    /// mlx-lm) and renders every shard plus the index when there are several.
-    /// Production callers pass [`MLX_MAX_SHARD_BYTES`].
+    /// mlx-lm), encodes every shard's header, and renders the index when there
+    /// are several. Production callers pass [`MLX_MAX_SHARD_BYTES`].
     ///
     /// # Errors
     ///
-    /// [`InteropError::Safetensors`] when `write_complete` rejects a tensor
-    /// (duplicate name, payload length not matching shape and dtype).
-    pub fn assemble(tensors: Vec<TensorPayload<'_>>, cap_bytes: u64) -> Result<Self, InteropError> {
-        let total_size: u64 = tensors.iter().map(payload_bytes).sum();
-        let groups = cut_shards(tensors, cap_bytes);
+    /// [`InteropError::Safetensors`] when a header is rejected (duplicate
+    /// name, unsupported dtype).
+    pub fn plan(headers: Vec<TensorHeader>, cap_bytes: u64) -> Result<Self, InteropError> {
+        let total_size: u64 = headers.iter().map(TensorHeader::byte_len).sum();
+        let groups = cut_shards(headers, cap_bytes);
         let shard_count = groups.len();
         let mut weight_map = BTreeMap::new();
         let mut shards = Vec::with_capacity(shard_count);
@@ -69,7 +89,7 @@ impl MlxExport {
                     .iter()
                     .map(|tensor| (tensor.name.clone(), file_name.clone())),
             );
-            shards.push(render_shard(group, file_name)?);
+            shards.push(plan_shard(group, file_name)?);
         }
         let index = (shard_count > 1)
             .then(|| render_index(total_size, &weight_map))
@@ -78,23 +98,71 @@ impl MlxExport {
     }
 }
 
-fn payload_bytes(tensor: &TensorPayload<'_>) -> u64 {
-    tensor.data.len() as u64
+impl MlxExport {
+    /// Cuts `tensors` into shards of at most `cap_bytes` payload bytes each
+    /// and renders every shard plus the index when there are several, as
+    /// [`MlxLayout::plan`] with the payloads appended.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::Safetensors`] when a tensor is rejected (duplicate
+    /// name, payload length not matching shape and dtype).
+    pub fn assemble(tensors: Vec<TensorPayload<'_>>, cap_bytes: u64) -> Result<Self, InteropError> {
+        let headers: Vec<TensorHeader> = tensors
+            .iter()
+            .map(|tensor| TensorHeader {
+                name: tensor.name.clone(),
+                dtype: tensor.dtype,
+                shape: tensor.shape.clone(),
+            })
+            .collect();
+        for (tensor, header) in tensors.iter().zip(&headers) {
+            if header.byte_len() != tensor.data.len() as u64 {
+                return Err(SafetensorsError::TensorDataLengthMismatch {
+                    tensor: tensor.name.clone(),
+                    expected: header.byte_len(),
+                    found: tensor.data.len() as u64,
+                }
+                .into());
+            }
+        }
+        let layout = MlxLayout::plan(headers, cap_bytes)?;
+        let mut payloads = tensors.into_iter();
+        let shards = layout
+            .shards
+            .into_iter()
+            .map(|shard| {
+                let mut bytes = shard.prefix;
+                payloads
+                    .by_ref()
+                    .take(shard.tensors.len())
+                    .for_each(|tensor| bytes.extend_from_slice(tensor.data));
+                MlxShard {
+                    file_name: shard.file_name,
+                    bytes,
+                }
+            })
+            .collect();
+        Ok(Self {
+            shards,
+            index: layout.index,
+        })
+    }
 }
 
-fn cut_shards<'a>(tensors: Vec<TensorPayload<'a>>, cap_bytes: u64) -> Vec<Vec<TensorPayload<'a>>> {
-    let mut groups: Vec<Vec<TensorPayload<'a>>> = Vec::new();
+fn cut_shards(headers: Vec<TensorHeader>, cap_bytes: u64) -> Vec<Vec<TensorHeader>> {
+    let mut groups: Vec<Vec<TensorHeader>> = Vec::new();
     let mut running = 0u64;
-    for tensor in tensors {
-        let size = payload_bytes(&tensor);
+    for header in headers {
+        let size = header.byte_len();
         match groups.last_mut() {
             Some(group) if running.saturating_add(size) <= cap_bytes => {
                 running += size;
-                group.push(tensor);
+                group.push(header);
             }
             _ => {
                 running = size;
-                groups.push(alloc::vec![tensor]);
+                groups.push(alloc::vec![header]);
             }
         }
     }
@@ -115,13 +183,14 @@ fn shard_file_name(position: usize, shard_count: usize) -> String {
     }
 }
 
-fn render_shard(
-    tensors: Vec<TensorPayload<'_>>,
-    file_name: String,
-) -> Result<MlxShard, InteropError> {
+fn plan_shard(tensors: Vec<TensorHeader>, file_name: String) -> Result<MlxShardPlan, InteropError> {
     let metadata = BTreeMap::from([(MLX_FORMAT_KEY.to_string(), MLX_FORMAT_VALUE.to_string())]);
-    let bytes = write_complete(&SafetensorsModel { tensors, metadata })?;
-    Ok(MlxShard { file_name, bytes })
+    let prefix = encode_header(&tensors, &metadata)?;
+    Ok(MlxShardPlan {
+        file_name,
+        prefix,
+        tensors,
+    })
 }
 
 fn render_index(

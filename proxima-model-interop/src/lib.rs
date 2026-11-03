@@ -257,4 +257,4 @@ pub use transform::{
 #[cfg(feature = "std")]
 pub use transform::{TokenizerFiles, copy_tokenizer, export_tokenizer};
 #[cfg(feature = "std")]
-pub use transform::{export_affine_named, export_mlx_directory, mlx_directory_files};
+pub use transform::{export_affine_named, export_mlx_directory};

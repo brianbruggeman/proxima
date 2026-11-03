@@ -1,21 +1,22 @@
 //! The plain export of a GGUF as Hugging Face named tensors: every stored
-//! leaf through [`super::export_plain`], renamed by [`super::dense_names`],
-//! with the halves of a fused HF tensor interleaved per expert into the one
-//! `[experts, parts * rows, in]` tensor the loader cuts back with
-//! `TensorAlias::Part`.
+//! leaf renamed by [`super::dense_names`], with the halves of a fused HF
+//! tensor interleaved per expert into the one `[experts, parts * rows, in]`
+//! tensor the loader cuts back with `TensorAlias::Part`.
 //!
 //! A leaf in the binding profile's `extra` list is a constant table the GGUF
 //! carries and a Hugging Face directory does not (`rope_freqs.weight`), so it
-//! is not exported.
+//! is not exported. [`export_plain_named`] is
+//! [`super::mlx_weight_plan::WeightPlan`] without a quantization, converted
+//! eagerly.
 
-use alloc::collections::{BTreeMap, BTreeSet};
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::DType;
 
 use super::mlx_names::{Layout, MlxNames, dense_names};
-use super::mlx_plain::{PlainTensor, export_plain};
+use super::mlx_plain::PlainTensor;
+use super::mlx_weight_plan::{WeightPlan, available_workers};
 use crate::error::InteropError;
 use crate::profiles::BindingProfile;
 
@@ -34,14 +35,8 @@ pub fn export_plain_named(
     layout: Layout,
     hf_prefix: &str,
 ) -> Result<Vec<PlainTensor>, InteropError> {
-    let names = leaf_names(parsed, binding, layout, hf_prefix)?;
-    let mut by_leaf: BTreeMap<_, _> = export_plain(parsed, file_bytes, dtype)?
-        .into_iter()
-        .map(|tensor| (tensor.name.clone(), tensor))
-        .collect();
-    let mut named = rename_mapped(&names, &mut by_leaf);
-    named.extend(fuse_halves(&names, &mut by_leaf));
-    Ok(named)
+    WeightPlan::new(parsed, file_bytes, dtype, binding, layout, hf_prefix, None)?
+        .convert_all(available_workers())
 }
 
 pub(super) fn leaf_names(
@@ -66,63 +61,5 @@ pub(super) fn leaf_names(
         false => Err(InteropError::MlxUnmappedLeaves {
             leaves: names.unmapped.join(", "),
         }),
-    }
-}
-
-fn rename_mapped(
-    names: &MlxNames,
-    by_leaf: &mut BTreeMap<alloc::string::String, PlainTensor>,
-) -> Vec<PlainTensor> {
-    names
-        .mapped
-        .iter()
-        .filter_map(|(leaf, hf_name)| {
-            by_leaf.remove(leaf).map(|mut tensor| {
-                tensor.name.clone_from(hf_name);
-                tensor
-            })
-        })
-        .collect()
-}
-
-fn fuse_halves(
-    names: &MlxNames,
-    by_leaf: &mut BTreeMap<alloc::string::String, PlainTensor>,
-) -> Vec<PlainTensor> {
-    let targets: BTreeSet<&str> = names.fused.iter().map(|item| item.hf.as_str()).collect();
-    targets
-        .into_iter()
-        .filter_map(|target| {
-            let mut group: Vec<_> = names
-                .fused
-                .iter()
-                .filter(|item| item.hf == target)
-                .collect();
-            group.sort_by_key(|item| item.part);
-            let parts: Option<Vec<PlainTensor>> = group
-                .iter()
-                .map(|item| by_leaf.remove(&item.leaf))
-                .collect();
-            parts.map(|parts| interleave(target, &parts))
-        })
-        .collect()
-}
-
-pub(super) fn interleave(name: &str, parts: &[PlainTensor]) -> PlainTensor {
-    let experts = usize::try_from(parts[0].shape[0]).unwrap_or(1);
-    let chunk = parts[0].bytes.len() / experts;
-    let mut bytes = Vec::with_capacity(chunk * experts * parts.len());
-    (0..experts).for_each(|expert| {
-        parts.iter().for_each(|part| {
-            bytes.extend_from_slice(&part.bytes[expert * chunk..(expert + 1) * chunk])
-        });
-    });
-    let mut shape = parts[0].shape.clone();
-    shape[1] *= parts.len() as u64;
-    PlainTensor {
-        name: name.into(),
-        shape,
-        dtype: parts[0].dtype,
-        bytes,
     }
 }

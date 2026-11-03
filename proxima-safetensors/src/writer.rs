@@ -52,8 +52,62 @@ pub struct SafetensorsModel<'a> {
 /// [`SafetensorsError::TensorDataLengthMismatch`] if a tensor's `data`
 /// doesn't match the byte length its `shape` and `dtype` imply.
 pub fn write_complete(model: &SafetensorsModel<'_>) -> Result<Vec<u8>, SafetensorsError> {
-    let mut seen_names: Vec<&str> = Vec::with_capacity(model.tensors.len());
-    let mut data = Vec::new();
+    let headers: Vec<TensorHeader> = model
+        .tensors
+        .iter()
+        .map(|tensor| TensorHeader {
+            name: tensor.name.clone(),
+            dtype: tensor.dtype,
+            shape: tensor.shape.clone(),
+        })
+        .collect();
+    let mut wire = encode_header(&headers, &model.metadata)?;
+    wire.reserve(model.tensors.iter().map(|tensor| tensor.data.len()).sum());
+    for (tensor, header) in model.tensors.iter().zip(&headers) {
+        let expected = header.byte_len();
+        if expected != tensor.data.len() as u64 {
+            return Err(SafetensorsError::TensorDataLengthMismatch {
+                tensor: tensor.name.clone(),
+                expected,
+                found: tensor.data.len() as u64,
+            });
+        }
+        wire.extend_from_slice(tensor.data);
+    }
+    Ok(wire)
+}
+
+/// One tensor's name, dtype and shape: everything a safetensors header
+/// records about it before any of its bytes exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TensorHeader {
+    pub name: String,
+    pub dtype: DType,
+    pub shape: Vec<u64>,
+}
+
+impl TensorHeader {
+    /// The byte length of the payload `dtype` and `shape` imply.
+    #[must_use]
+    pub fn byte_len(&self) -> u64 {
+        self.shape.iter().product::<u64>() * self.dtype.size_bytes() as u64
+    }
+}
+
+/// The bytes that precede the payload of a safetensors stream holding
+/// `tensors` in order: the little-endian header length and the header JSON.
+/// [`write_complete`] is this prefix followed by each tensor's bytes, so a
+/// caller that streams the payload writes this first and then the same bytes.
+///
+/// # Errors
+///
+/// As [`write_complete`], except [`SafetensorsError::TensorDataLengthMismatch`],
+/// which needs the payload.
+pub fn encode_header(
+    tensors: &[TensorHeader],
+    metadata: &BTreeMap<String, String>,
+) -> Result<Vec<u8>, SafetensorsError> {
+    let mut seen_names: Vec<&str> = Vec::with_capacity(tensors.len());
     let mut header = serde_json::Map::new();
 
     let mut meta_object = serde_json::Map::new();
@@ -61,7 +115,7 @@ pub fn write_complete(model: &SafetensorsModel<'_>) -> Result<Vec<u8>, Safetenso
         crate::sized::FORMAT_VERSION_KEY.to_string(),
         serde_json::Value::String(crate::version::current_version_string()),
     );
-    for (key, value) in &model.metadata {
+    for (key, value) in metadata {
         if key == crate::sized::FORMAT_VERSION_KEY {
             return Err(SafetensorsError::ReservedMetadataKey { key: key.clone() });
         }
@@ -72,7 +126,8 @@ pub fn write_complete(model: &SafetensorsModel<'_>) -> Result<Vec<u8>, Safetenso
         serde_json::Value::Object(meta_object),
     );
 
-    for tensor in &model.tensors {
+    let mut end = 0u64;
+    for tensor in tensors {
         if tensor.name == "__metadata__" {
             return Err(SafetensorsError::ReservedTensorName {
                 name: tensor.name.clone(),
@@ -91,19 +146,8 @@ pub fn write_complete(model: &SafetensorsModel<'_>) -> Result<Vec<u8>, Safetenso
                 dtype: alloc::format!("{:?}", tensor.dtype),
             })?;
 
-        let element_count: u64 = tensor.shape.iter().product();
-        let expected = element_count * tensor.dtype.size_bytes() as u64;
-        if expected != tensor.data.len() as u64 {
-            return Err(SafetensorsError::TensorDataLengthMismatch {
-                tensor: tensor.name.clone(),
-                expected,
-                found: tensor.data.len() as u64,
-            });
-        }
-
-        let start = data.len() as u64;
-        data.extend_from_slice(tensor.data);
-        let end = data.len() as u64;
+        let start = end;
+        end += tensor.byte_len();
 
         let mut entry = serde_json::Map::new();
         entry.insert(
@@ -127,11 +171,10 @@ pub fn write_complete(model: &SafetensorsModel<'_>) -> Result<Vec<u8>, Safetenso
         }
     })?;
 
-    let mut wire = Vec::with_capacity(8 + header_bytes.len() + data.len());
-    wire.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
-    wire.extend_from_slice(&header_bytes);
-    wire.extend_from_slice(&data);
-    Ok(wire)
+    let mut prefix = Vec::with_capacity(8 + header_bytes.len());
+    prefix.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
+    prefix.extend_from_slice(&header_bytes);
+    Ok(prefix)
 }
 
 #[cfg(test)]
