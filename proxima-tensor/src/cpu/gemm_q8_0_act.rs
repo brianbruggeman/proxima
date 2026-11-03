@@ -229,7 +229,6 @@ fn block_dot_row(
         .chunks_exact(weight_block_bytes)
         .zip(activation_q8_0.as_chunks::<Q8_0_ACT_BLOCK_BYTES>().0.iter())
     {
-        #[cfg(target_arch = "x86_64")]
         let block_sum = scalar(weight_block, activation_block);
         sum += (f16_scale(weight_block) * f16_scale(activation_block)) * block_sum as f32;
     }
