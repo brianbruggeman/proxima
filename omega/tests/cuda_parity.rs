@@ -4934,9 +4934,14 @@ fn assert_derived_parity(
         dequantize(row_blocks, row_dequantized).expect("a whole number of packed blocks");
     }
     let activation: Vec<f32> = random_vec(67, tokens * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let _ = assert_derived_parity_on(codec, &weight_blocks, &dequantized, &activation, shape, trailing);
+}
+
+fn assert_derived_parity_on(codec: Codec, weight_blocks: &[u8], dequantized: &[f32], activation: &[f32], shape: [usize; 3], trailing: &[u32]) -> Vec<f32> {
+    let [features, depth, tokens] = shape;
     let (program, root) = int8_gemm_program_over(features as u32, trailing, tokens as u32);
     let named: Vec<(&str, QuantizedBlock<'_>)> =
-        vec![("weight", QuantizedBlock::Packed { codec, bytes: &weight_blocks }), ("activation", QuantizedBlock::Float32(&activation))];
+        vec![("weight", QuantizedBlock::Packed { codec, bytes: weight_blocks }), ("activation", QuantizedBlock::Float32(activation))];
     let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true);
     let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[root], policy)
         .expect("omega::backend plans the derived-activation matmul");
@@ -4958,13 +4963,110 @@ fn assert_derived_parity(
         identities.iter().all(|identity| !identity.contains("_prepass") && !identity.contains("_smv8x4g")),
         "the activation must be quantized by the derived node, not an own prologue: {identities:?}"
     );
-    let reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, true), depth, tokens);
-    let unquantized = gemm_rows_max_over_peak(&output, &dequantized, &activation, depth, tokens);
+    let reference = gemm_rows_max_over_peak(&output, dequantized, &fake_quantize_blocks(activation, true), depth, tokens);
+    let unquantized = gemm_rows_max_over_peak(&output, dequantized, activation, depth, tokens);
     println!("derived matvec {codec:?} {features}x{depth}x{tokens}: vs fp16-scale fake-quantized {reference:.3e}, vs unquantized {unquantized:.3e}");
     assert!(output.iter().all(|value| value.is_finite()) && reference < 2e-5,
         "{codec:?} derived-activation matmul disagrees with the fake-quantized reference by {reference} of peak");
     assert!(unquantized > 2.0 * reference,
         "degenerate control: output matches the unquantized activations ({unquantized}) as tightly as the quantized ones ({reference})");
+    output
+}
+
+const QWEN2_MIXED_BLOB: &str = "/var/lib/ollama/blobs/sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515";
+const QWEN2_MIXED_BLOB_BYTES: u64 = 397_807_936;
+
+fn real_k_quant_tensor(ggml_type: proxima_gguf::GgmlType, ordinal: usize) -> (String, Vec<u8>, usize, usize) {
+    let path = proxima_gguf::checkpoint_resolver::require_checkpoint("PROXIMA_QWEN2_MIXED_GGUF", QWEN2_MIXED_BLOB, QWEN2_MIXED_BLOB_BYTES);
+    let bytes = std::fs::read(&path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let parsed = proxima_gguf::parse_complete(&bytes).expect("the checkpoint's directory parses");
+    let tensor = parsed
+        .tensors
+        .iter()
+        .filter(|tensor| tensor.ggml_type == ggml_type)
+        .nth(ordinal)
+        .unwrap_or_else(|| panic!("{} carries no {ggml_type:?} tensor number {ordinal}", path.display()));
+    let range = parsed.tensor_data_range(tensor, bytes.len() as u64).expect("the tensor lies inside the file");
+    let (depth, features) = (tensor.dims[0] as usize, tensor.dims[1] as usize);
+    (tensor.name.clone(), bytes[range.start as usize..range.end as usize].to_vec(), features, depth)
+}
+
+fn real_looking_activation(count: usize) -> Vec<f32> {
+    random_vec(79, count)
+        .into_iter()
+        .enumerate()
+        .map(|(index, value)| value * if index % 61 == 0 { 10.0 } else { 1.5 })
+        .collect()
+}
+
+fn cpu_q8k_dot_reference(
+    codec: Codec,
+    weight_blocks: &[u8],
+    dequantized: &[f32],
+    activation: &[f32],
+    output: &[f32],
+    shape: [usize; 3],
+) -> f64 {
+    use proxima_tensor::cpu::{dot_q4k_q8k_portable, dot_q5k_q8k_portable, dot_q6k_q8k_portable, quantize_row_q8k};
+    let [features, depth, tokens] = shape;
+    let block_bytes = codec.block_layout().map_or(1, |layout| usize::from(layout.block_bytes));
+    let row_bytes = depth / 256 * block_bytes;
+    let (mut worst, mut peak, mut cpu_error) = (0.0f64, 0.0f64, 0.0f64);
+    for token in 0..tokens {
+        let mut q8k = vec![0u8; depth / 256 * 292];
+        quantize_row_q8k(&activation[token * depth..][..depth], &mut q8k).expect("a whole number of q8_k blocks");
+        for feature in (0..features).step_by(features.div_ceil(256)) {
+            let row = &weight_blocks[feature * row_bytes..][..row_bytes];
+            let dot = match codec {
+                Codec::Q4K => dot_q4k_q8k_portable(row, &q8k),
+                Codec::Q5K => dot_q5k_q8k_portable(row, &q8k),
+                _ => dot_q6k_q8k_portable(row, &q8k),
+            }
+            .expect("the row and activation are whole super-blocks");
+            worst = worst.max((f64::from(output[feature * tokens + token]) - f64::from(dot)).abs());
+            peak = peak.max(f64::from(dot).abs());
+            let exact: f64 = dequantized[feature * depth..][..depth]
+                .iter()
+                .zip(&activation[token * depth..][..depth])
+                .map(|(left, right)| f64::from(*left) * f64::from(*right))
+                .sum();
+            cpu_error = cpu_error.max((exact - f64::from(dot)).abs());
+        }
+    }
+    println!("cpu q8_k dots vs exact f64 unquantized: {:.3e}", cpu_error / peak);
+    worst / peak
+}
+
+fn assert_real_tensor_parity(ggml_type: proxima_gguf::GgmlType, codec: Codec, ordinal: usize, tokens: usize) {
+    use proxima_gguf::quant::{q4_k, q5_k, q6_k};
+    let (name, blocks, features, depth) = real_k_quant_tensor(ggml_type, ordinal);
+    let mut dequantized = vec![0.0f32; features * depth];
+    let dequantize = match codec {
+        Codec::Q4K => q4_k::dequantize,
+        Codec::Q5K => q5_k::dequantize,
+        _ => q6_k::dequantize,
+    };
+    dequantize(&blocks, &mut dequantized).expect("a whole number of packed blocks");
+    let activation = real_looking_activation(tokens * depth);
+    let output = assert_derived_parity_on(codec, &blocks, &dequantized, &activation, [features, depth, tokens], &[depth as u32]);
+    let against_cpu = cpu_q8k_dot_reference(codec, &blocks, &dequantized, &activation, &output, [features, depth, tokens]);
+    println!("real {codec:?} tensor {name} {features}x{depth}x{tokens}: cuda vs cpu q8_k scalar dots {against_cpu:.3e}");
+    assert!(against_cpu < 3e-2, "{name} cuda int8 disagrees with the cpu q8_k reference by {against_cpu} of peak");
+}
+
+#[proxima::test]
+#[case::q4_k_one_token(proxima_gguf::GgmlType::Q4_K, Codec::Q4K, 0, 1)]
+#[case::q4_k_small_batch(proxima_gguf::GgmlType::Q4_K, Codec::Q4K, 0, 3)]
+#[case::q4_k_prefill(proxima_gguf::GgmlType::Q4_K, Codec::Q4K, 0, 24)]
+#[case::q6_k_one_token(proxima_gguf::GgmlType::Q6_K, Codec::Q6K, 0, 1)]
+#[case::q6_k_prefill(proxima_gguf::GgmlType::Q6_K, Codec::Q6K, 0, 24)]
+async fn real_qwen2_k_quant_tensors_match_the_references_on_cuda(
+    #[case] ggml_type: proxima_gguf::GgmlType,
+    #[case] codec: Codec,
+    #[case] ordinal: usize,
+    #[case] tokens: usize,
+) {
+    assert_real_tensor_parity(ggml_type, codec, ordinal, tokens);
 }
 
 #[proxima::test]
@@ -5053,7 +5155,7 @@ fn assert_f32_reader_matches(label: &str, output: &[f32], dequantized: &[f32], a
     let against_exact = gemm_rows_max_over_peak(output, dequantized, activation, depth, tokens);
     println!("{label} f32 reader at {tokens} tokens: vs fp16-rounded {against_rounded:.3e}, vs exact f32 {against_exact:.3e}");
     assert!(output.iter().all(|value| value.is_finite()));
-    let (oracle, other) = if tokens == 1 { (against_exact, against_rounded) } else { (against_rounded, against_exact) };
+    let (oracle, other) = (against_exact, against_rounded);
     assert!(oracle < 2e-5, "{label} reader disagrees with its f32-activation oracle by {oracle} of peak");
     assert!(other > 2.0 * oracle, "degenerate control: {label} output matches the wrong oracle ({other}) as tightly as the right one ({oracle})");
 }
@@ -5086,12 +5188,12 @@ fn assert_mixed_readers_parity(first: MixedReader, second: MixedReader, second_i
     println!("mixed readers {first_codec:?}+{second_codec:?} {features}x{depth}x{tokens}: {entries:?}");
     let count = |needle: &str| entries.iter().filter(|entry| entry.contains(needle)).count();
     assert_eq!(count("block_quantize"), 1, "exactly one derived quantize for both readers: {entries:?}");
-    let (int8_form, f32_form) = if tokens == 1 { ("_smv", "_smv") } else { ("_mma8x8x16s8", "_mma16x8x8h") };
+    let (int8_form, f32_form) = if tokens == 1 { ("_smv", "_smv") } else { ("_mma8x8x16s8", "a reduce that is not _mma8x8x16s8") };
     let int8_count = if tokens == 1 { entries.iter().filter(|entry| entry.contains("_smv") && entry.contains('q')).count() } else { count(int8_form) };
     let expected_int8 = if second_is_int8 { 2 } else { 1 };
     assert_eq!(int8_count, expected_int8, "{expected_int8} readers take the int8 form {int8_form}: {entries:?}");
     let plain_matvecs = entries.iter().filter(|entry| entry.contains("_reduce_") && !entry.contains("_smv") && !entry.contains("_mma")).count();
-    let f32_readers = if tokens == 1 { plain_matvecs } else { count(f32_form) };
+    let f32_readers = if tokens == 1 { plain_matvecs } else { entries.iter().filter(|entry| entry.contains("_reduce_") && !entry.contains(int8_form)).count() };
     assert_eq!(f32_readers, 2 - expected_int8, "{} readers keep the f32-activation form {f32_form}: {entries:?}", 2 - expected_int8);
 
     assert_int8_reader_matches(&format!("{first_codec:?}"), &first_out, &first_dequantized, &activation, depth, tokens);
@@ -5126,16 +5228,16 @@ fn pq2_0_reader() -> MixedReader {
 #[case::one_token(1)]
 #[case::three_tokens(3)]
 #[case::prefill_like(128)]
-async fn pq2_0_reader_and_q4_k_reader_share_one_derived_node_and_only_the_eligible_one_is_int8_on_cuda(#[case] tokens: usize) {
-    assert_mixed_readers_parity(pq2_0_reader(), q4_k_reader(), false, tokens);
+async fn pq2_0_reader_and_q3_k_reader_share_one_derived_node_and_only_the_eligible_one_is_int8_on_cuda(#[case] tokens: usize) {
+    assert_mixed_readers_parity(pq2_0_reader(), q3_k_reader(), false, tokens);
 }
 
 #[proxima::test]
 #[case::one_token(1)]
 #[case::three_tokens(3)]
 #[case::prefill_like(128)]
-async fn q8_0_reader_and_q4_k_reader_share_one_derived_node_and_only_the_eligible_one_is_int8_on_cuda(#[case] tokens: usize) {
-    assert_mixed_readers_parity(q8_0_reader(), q4_k_reader(), false, tokens);
+async fn q8_0_reader_and_q3_k_reader_share_one_derived_node_and_only_the_eligible_one_is_int8_on_cuda(#[case] tokens: usize) {
+    assert_mixed_readers_parity(q8_0_reader(), q3_k_reader(), false, tokens);
 }
 
 #[proxima::test]
@@ -5421,4 +5523,82 @@ fn one_block_quantize_feeds_two_int8_gemms_and_matches_the_fake_quantized_refere
     let agreement = max_over_peak(&output, &summed(&fake_quantize_blocks(&activation, true)));
     assert!(output.iter().all(|value| value.is_finite()) && agreement < 2e-5, "shared quantize disagrees by {agreement} of peak");
     assert!(max_over_peak(&output, &summed(&activation)) > 2.0 * agreement, "degenerate control: output matches the unquantized activations");
+}
+
+#[proxima::test]
+#[case::one_token_single_block(&[50, 256, 1])]
+#[case::one_token_two_blocks(&[300, 512, 1])]
+#[case::one_token_qwen2_ffn_depth(&[300, 4864, 1])]
+#[case::three_tokens(&[256, 512, 3])]
+#[case::three_tokens_qwen2_ffn_depth(&[256, 4864, 3])]
+#[case::prefill(&[256, 512, 128])]
+#[case::prefill_qwen2_ffn_depth(&[200, 4864, 128])]
+async fn q4_k_matmul_fed_by_a_derived_node_subtracts_the_min_term_against_the_activation_code_sum_on_cuda(#[case] shape: &[usize; 3]) {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_derived_matvec_parity(Codec::Q4K, BLOCK_BYTES, QK_K, quantize, dequantize, *shape);
+}
+
+#[proxima::test]
+#[case::one_token_single_block(&[50, 256, 1])]
+#[case::one_token_two_blocks(&[300, 512, 1])]
+#[case::one_token_qwen2_ffn_depth(&[300, 4864, 1])]
+#[case::three_tokens(&[256, 512, 3])]
+#[case::three_tokens_qwen2_ffn_depth(&[256, 4864, 3])]
+#[case::prefill(&[256, 512, 128])]
+#[case::prefill_qwen2_ffn_depth(&[200, 4864, 128])]
+async fn q5_k_matmul_fed_by_a_derived_node_subtracts_the_min_term_against_the_activation_code_sum_on_cuda(#[case] shape: &[usize; 3]) {
+    use proxima_gguf::quant::q5_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_derived_matvec_parity(Codec::Q5K, BLOCK_BYTES, QK_K, quantize, dequantize, *shape);
+}
+
+#[proxima::test]
+#[case::one_token_single_block(&[50, 256, 1])]
+#[case::one_token_two_blocks(&[300, 512, 1])]
+#[case::one_token_qwen2_ffn_depth(&[300, 4864, 1])]
+#[case::three_tokens(&[256, 512, 3])]
+#[case::three_tokens_qwen2_ffn_depth(&[256, 4864, 3])]
+#[case::prefill(&[256, 512, 128])]
+#[case::prefill_qwen2_ffn_depth(&[200, 4864, 128])]
+async fn q6_k_matmul_fed_by_a_derived_node_folds_two_int8_sub_scales_per_chunk_on_cuda(#[case] shape: &[usize; 3]) {
+    use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    assert_derived_matvec_parity(Codec::Q6K, BLOCK_BYTES, QK_K, quantize, dequantize, *shape);
+}
+
+fn q5_k_reader() -> MixedReader {
+    use proxima_gguf::quant::q5_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    (Codec::Q5K, packed_weight(79, [256, 512], [BLOCK_BYTES, QK_K], quantize, dequantize))
+}
+
+fn q6_k_reader() -> MixedReader {
+    use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    (Codec::Q6K, packed_weight(83, [256, 512], [BLOCK_BYTES, QK_K], quantize, dequantize))
+}
+
+fn q3_k_reader() -> MixedReader {
+    use proxima_gguf::quant::q3_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+    (Codec::Q3K, packed_weight(89, [256, 512], [BLOCK_BYTES, QK_K], quantize, dequantize))
+}
+
+#[proxima::test]
+#[case::one_token(1)]
+#[case::three_tokens(3)]
+#[case::prefill_like(128)]
+async fn q4_k_reader_and_q5_0_reader_share_one_derived_node_and_both_are_int8_on_cuda(#[case] tokens: usize) {
+    assert_mixed_readers_parity(q4_k_reader(), q5_0_reader(), true, tokens);
+}
+
+#[proxima::test]
+#[case::one_token(1)]
+#[case::three_tokens(3)]
+#[case::prefill_like(128)]
+async fn q5_k_reader_and_q6_k_reader_share_one_derived_node_and_both_are_int8_on_cuda(#[case] tokens: usize) {
+    assert_mixed_readers_parity(q5_k_reader(), q6_k_reader(), true, tokens);
+}
+
+#[proxima::test]
+#[case::one_token(1)]
+#[case::three_tokens(3)]
+#[case::prefill_like(128)]
+async fn q6_k_reader_and_q3_k_reader_share_one_derived_node_and_only_the_eligible_one_is_int8_on_cuda(#[case] tokens: usize) {
+    assert_mixed_readers_parity(q6_k_reader(), q3_k_reader(), false, tokens);
 }

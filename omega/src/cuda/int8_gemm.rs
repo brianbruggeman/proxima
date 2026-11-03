@@ -11,7 +11,7 @@ use alloc::string::String;
 use proxima_primitives::block_layout::BlockLayout;
 use proxima_tensor::{BoundOp, Layout, NumericPolicy};
 
-use super::block_dot::{BlockDot, DOT_ELEMENTS, block_dot_i8};
+use super::block_dot::{BlockDot, ChunkTerms, DOT_ELEMENTS, block_dot_i8};
 use super::mma_gemm::{MmaGemm, push_output_write, push_tile_origin};
 use super::{Codec, EmitError, reduction_dims};
 
@@ -121,7 +121,22 @@ pub(super) fn activation_code_words(layout: &BlockLayout, codes: &str, indent: &
     )
 }
 
-fn push_declarations(source: &mut String, chunks: usize) {
+fn push_term_declarations(source: &mut String, chunks: usize, terms: ChunkTerms) {
+    if terms.parts > 1 {
+        source.push_str(&format!("    __shared__ float weight_scales_high[{chunks}][{INT8_FEATURE_TILE}];\n"));
+    }
+    if terms.min {
+        source.push_str(&format!(
+            "    __shared__ float weight_mins[{chunks}][{INT8_FEATURE_TILE}];\n    __shared__ float act_sums[{INT8_TOKEN_TILE}][{chunks}];\n"
+        ));
+    }
+}
+
+fn push_declarations(source: &mut String, int8: &Int8Gemm) {
+    let chunks = int8.chunks;
+    if let Some(terms) = int8.dot.chunk_terms {
+        push_term_declarations(source, chunks, terms);
+    }
     let row = chunks * DOT_ELEMENTS + ROW_PAD;
     source.push_str(&format!(
         "    __shared__ __align__(16) signed char weight_tile[{INT8_FEATURE_TILE}][{row}];\n\
@@ -134,8 +149,58 @@ fn push_declarations(source: &mut String, chunks: usize) {
     ));
 }
 
+/// The statements that declare, compute and store the weight scales of one staged chunk.
+fn weight_scale_statements(int8: &Int8Gemm) -> (String, String, String) {
+    let name = &int8.dot.name;
+    let Some(terms) = int8.dot.chunk_terms else {
+        return (
+            "            float block_scale = 0.0f;\n".to_owned(),
+            format!("                block_scale = {name}_scale(block);\n"),
+            "            weight_scales[chunk][feature_local] = block_scale;\n".to_owned(),
+        );
+    };
+    let position = format!("(unsigned int)(element % {}) / 32u", int8.dot.elements);
+    let mut declare = "            float block_scale = 0.0f;\n".to_owned();
+    let mut compute = format!("                block_scale = {name}_chunk_scale(block, {position}, 0u);\n");
+    let mut store = "            weight_scales[chunk][feature_local] = block_scale;\n".to_owned();
+    if terms.parts > 1 {
+        declare.push_str("            float block_scale_high = 0.0f;\n");
+        compute.push_str(&format!("                block_scale_high = {name}_chunk_scale(block, {position}, 1u);\n"));
+        store.push_str("            weight_scales_high[chunk][feature_local] = block_scale_high;\n");
+    }
+    if terms.min {
+        declare.push_str("            float block_min = 0.0f;\n");
+        compute.push_str(&format!("                block_min = {name}_chunk_min(block, {position});\n"));
+        store.push_str("            weight_mins[chunk][feature_local] = block_min;\n");
+    }
+    (declare, compute, store)
+}
+
+/// The statements that declare, compute and store the staged chunk's activation scalar terms;
+/// `scale` is the C offset of the group's `d`; the sum is recomputed exactly from the staged codes.
+fn activation_term_statements(int8: &Int8Gemm, scale: &str) -> (String, String, String) {
+    let scale_statements = (
+        "            float step = 0.0f;\n".to_owned(),
+        format!("                step = mma_half_scale(bytes + {scale});\n"),
+        "            act_scales[token_local][chunk] = step;\n".to_owned(),
+    );
+    if !int8.dot.chunk_terms.is_some_and(|terms| terms.min) {
+        return scale_statements;
+    }
+    let (mut declare, mut compute, mut store) = scale_statements;
+    declare.push_str("            float act_sum = 0.0f;\n");
+    compute.push_str("                int code_sum = 0;\n");
+    for word in ["low.x", "low.y", "low.z", "low.w", "high.x", "high.y", "high.z", "high.w"] {
+        compute.push_str(&format!("                code_sum = __dp4a(0x01010101, (int){word}, code_sum);\n"));
+    }
+    compute.push_str("                act_sum = step * (float)code_sum;\n");
+    store.push_str("            act_sums[token_local][chunk] = act_sum;\n");
+    (declare, compute, store)
+}
+
 fn push_stage_weight(source: &mut String, plan: &MmaGemm, int8: &Int8Gemm) {
     let weight = plan.weight;
+    let (weight_declare, weight_compute, weight_store) = weight_scale_statements(int8);
     let (name, elements, block_bytes) = (&int8.dot.name, int8.dot.elements, int8.dot.block_bytes);
     let (chunks, items) = (int8.chunks, int8.chunks * INT8_FEATURE_TILE);
     source.push_str(&format!(
@@ -144,17 +209,17 @@ fn push_stage_weight(source: &mut String, plan: &MmaGemm, int8: &Int8Gemm) {
          \x20           const int chunk = item % {chunks};\n\
          \x20           const long feature = feature_first + feature_local;\n\
          \x20           int words[8] = {{0, 0, 0, 0, 0, 0, 0, 0}};\n\
-         \x20           float block_scale = 0.0f;\n\
+{weight_declare}\
          \x20           if (feature < feature_total) {{\n\
          \x20               const long element = u.operand_base[{weight}] + feature * u.reduction_total + slab_first + chunk * 32;\n\
          \x20               const unsigned char *block = in{weight} + (element / {elements}) * {block_bytes};\n\
          \x20               {name}_i8x32(block, (unsigned int)(element % {elements}) / 32u, words);\n\
-         \x20               block_scale = {name}_scale(block);\n\
+{weight_compute}\
          \x20           }}\n\
          \x20           uint4 *destination = (uint4 *)&weight_tile[feature_local][chunk * 32];\n\
          \x20           destination[0] = make_uint4((unsigned int)words[0], (unsigned int)words[1], (unsigned int)words[2], (unsigned int)words[3]);\n\
          \x20           destination[1] = make_uint4((unsigned int)words[4], (unsigned int)words[5], (unsigned int)words[6], (unsigned int)words[7]);\n\
-         \x20           weight_scales[chunk][feature_local] = block_scale;\n\
+{weight_store}\
          \x20       }}\n"
     ));
 }
@@ -165,6 +230,7 @@ fn push_stage_activation(source: &mut String, activation: usize, int8: &Int8Gemm
     let block = activation_block_offset(layout, "group");
     let scale = activation_scale_offset(layout, "group");
     let codes = activation_code_words(layout, &format!("(bytes + {})", activation_code_offset(layout, "group")), "                ");
+    let (act_declare, act_compute, act_store) = activation_term_statements(int8, &scale);
     source.push_str(&format!(
         "        for (int item = tid; item < {items}; item += {INT8_THREADS}) {{\n\
          \x20           const int token_local = item / {chunks};\n\
@@ -172,19 +238,19 @@ fn push_stage_activation(source: &mut String, activation: usize, int8: &Int8Gemm
          \x20           const long token = token_first + token_local;\n\
          \x20           uint4 low = make_uint4(0u, 0u, 0u, 0u);\n\
          \x20           uint4 high = make_uint4(0u, 0u, 0u, 0u);\n\
-         \x20           float step = 0.0f;\n\
+{act_declare}\
          \x20           if (token < token_total) {{\n\
          \x20               const long group = token * (u.reduction_total / 32) + slab_first / 32 + chunk;\n\
          \x20               const unsigned char *bytes = in{activation} + {block};\n\
          {codes}\
          \x20               low = activation_low;\n\
          \x20               high = activation_high;\n\
-         \x20               step = mma_half_scale(bytes + {scale});\n\
+{act_compute}\
          \x20           }}\n\
          \x20           uint4 *destination = (uint4 *)&act_tile[token_local][chunk * 32];\n\
          \x20           destination[0] = low;\n\
          \x20           destination[1] = high;\n\
-         \x20           act_scales[token_local][chunk] = step;\n\
+{act_store}\
          \x20       }}\n"
     ));
 }
@@ -226,6 +292,79 @@ fn push_compute(source: &mut String, chunks: usize) {
     ));
 }
 
+fn mma_steps(source: &mut String, first_step: usize, last_step: usize) {
+    source.push_str(&format!(
+        "            #pragma unroll\n\
+         \x20           for (int step = {first_step}; step < {last_step}; step++) {{\n\
+         \x20               const int depth_at = chunk * 32 + step * 16 + quad * 4;\n\
+         \x20               int fragment_a[4];\n\
+         \x20               int fragment_b[4];\n\
+         \x20               #pragma unroll\n\
+         \x20               for (int tile = 0; tile < 4; tile++) {{\n\
+         \x20                   fragment_a[tile] = *(const int *)&weight_tile[warp_feature * 32 + tile * 8 + group][depth_at];\n\
+         \x20                   fragment_b[tile] = *(const int *)&act_tile[warp_token * 32 + tile * 8 + group][depth_at];\n\
+         \x20               }}\n\
+         \x20               #pragma unroll\n\
+         \x20               for (int row = 0; row < 4; row++) {{\n\
+         \x20                   #pragma unroll\n\
+         \x20                   for (int col = 0; col < 4; col++) {{ mma_s8(accumulators[row][col], fragment_a[row], fragment_b[col]); }}\n\
+         \x20               }}\n\
+         \x20           }}\n"
+    ));
+}
+
+fn fold_part(source: &mut String, weight_scales: &str) {
+    source.push_str(&format!(
+        "            #pragma unroll\n\
+         \x20           for (int row = 0; row < 4; row++) {{\n\
+         \x20               const float weight_step = {weight_scales}[chunk][warp_feature * 32 + row * 8 + group];\n\
+         \x20               #pragma unroll\n\
+         \x20               for (int col = 0; col < 4; col++) {{\n\
+         \x20                   #pragma unroll\n\
+         \x20                   for (int pair = 0; pair < 2; pair++) {{\n\
+         \x20                       const float scale = weight_step * act_scales[warp_token * 32 + col * 8 + quad * 2 + pair][chunk];\n\
+         \x20                       flat[(row * 4 + col) * 2 + pair] += scale * (float)accumulators[row][col][pair];\n\
+         \x20                   }}\n\
+         \x20               }}\n\
+         \x20           }}\n"
+    ));
+}
+
+fn fold_min(source: &mut String) {
+    source.push_str(
+        "            #pragma unroll\n\
+         \x20           for (int row = 0; row < 4; row++) {\n\
+         \x20               const float weight_minimum = weight_mins[chunk][warp_feature * 32 + row * 8 + group];\n\
+         \x20               #pragma unroll\n\
+         \x20               for (int col = 0; col < 4; col++) {\n\
+         \x20                   #pragma unroll\n\
+         \x20                   for (int pair = 0; pair < 2; pair++) {\n\
+         \x20                       flat[(row * 4 + col) * 2 + pair] += weight_minimum * act_sums[warp_token * 32 + col * 8 + quad * 2 + pair][chunk];\n\
+         \x20                   }\n\
+         \x20               }\n\
+         \x20           }\n",
+    );
+}
+
+/// Each part of a chunk is its own run of mma steps folded with that part's scale, so a block
+/// whose sub-blocks are shorter than a chunk keeps one exact int32 sum per scale.
+fn push_compute_terms(source: &mut String, chunks: usize, terms: ChunkTerms) {
+    let steps_per_part = 2 / terms.parts;
+    source.push_str(&format!(
+        "        #pragma unroll\n        for (int chunk = 0; chunk < {chunks}; chunk++) {{\n"
+    ));
+    for part in 0..terms.parts {
+        source.push_str("            {\n            int accumulators[4][4][2] = {};\n");
+        mma_steps(source, part * steps_per_part, (part + 1) * steps_per_part);
+        fold_part(source, if part == 0 { "weight_scales" } else { "weight_scales_high" });
+        source.push_str("            }\n");
+    }
+    if terms.min {
+        fold_min(source);
+    }
+    source.push_str("        }\n");
+}
+
 pub(super) fn push_int8_gemm_body(
     source: &mut String,
     resolved: &BoundOp,
@@ -234,7 +373,7 @@ pub(super) fn push_int8_gemm_body(
     element_type: &str,
 ) -> Result<(), EmitError> {
     push_tile_origin(source, plan, INT8_FEATURE_TILE, INT8_TOKEN_TILE);
-    push_declarations(source, int8.chunks);
+    push_declarations(source, int8);
     let slab = int8.chunks * DOT_ELEMENTS;
     source.push_str(&format!(
         "    for (long slab_first = 0; slab_first < u.reduction_total; slab_first += {slab}) {{\n"
@@ -242,7 +381,10 @@ pub(super) fn push_int8_gemm_body(
     push_stage_weight(source, plan, int8);
     push_stage_activation(source, plan.activation, int8);
     source.push_str("        __syncthreads();\n");
-    push_compute(source, int8.chunks);
+    match int8.dot.chunk_terms {
+        Some(terms) => push_compute_terms(source, int8.chunks, terms),
+        None => push_compute(source, int8.chunks),
+    }
     source.push_str("        __syncthreads();\n    }\n");
     push_output_write(
         source,

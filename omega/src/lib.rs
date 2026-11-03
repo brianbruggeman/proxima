@@ -172,3 +172,6 @@ pub use wgpu_driver::{
 };
 #[cfg(feature = "wgpu-backend")]
 pub use wgsl::{WORKGROUP_SIZE, WgslCaps, WgslKernel, emit_wgsl};
+#[cfg(test)]
+#[cfg(feature = "cuda-driver")]
+mod int8_emit_snapshot;

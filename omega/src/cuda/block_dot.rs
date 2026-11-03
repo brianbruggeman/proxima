@@ -5,11 +5,22 @@ use proxima_primitives::block_layout::{BlockLayout, Coded, Field};
 use proxima_primitives::float_layout::{FloatLayout, SignEncoding};
 
 use super::plane_dot::split_block_dot;
+use super::sub_block_dot::sub_block_dot;
 use super::radix_dot::radix_block_dot;
 use crate::cuda_layout::layout_load_cuda;
 
 /// Elements one int8 dot step covers: eight `dp4a` words.
 pub(super) const DOT_ELEMENTS: usize = 32;
+
+/// What a block with per-chunk sub-block scales adds to the dot: `<name>_chunk_scale(block, chunk,
+/// part)` is the scale of the `part`-th run of `32 / parts` elements of the chunk (block scale times
+/// sub-block scale), and `<name>_chunk_min(block, chunk)` is the signed min term that multiplies the
+/// sum of the chunk's activation codes times the activation scale.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ChunkTerms {
+    pub parts: usize,
+    pub min: bool,
+}
 
 /// The int8 lowering of one [`BlockLayout`]: `<name>_i8x32(block, chunk, words)` writes the 32
 /// codes of chunk `chunk` as eight int8x4 words holding `multiplier * code - bias`, and
@@ -23,6 +34,7 @@ pub(super) struct BlockDot {
     pub block_bytes: usize,
     pub rows_per_warp: usize,
     pub centering: Option<(i16, i16)>,
+    pub chunk_terms: Option<ChunkTerms>,
 }
 
 /// `None` when the layout is neither a radix-packed code, a single-plane linear code whose
@@ -32,7 +44,9 @@ pub(super) fn block_dot_i8(layout: &BlockLayout) -> Option<BlockDot> {
     if layout.element.packed_radix > 1 {
         return radix_block_dot(layout);
     }
-    contiguous_block_dot(layout).or_else(|| split_block_dot(layout))
+    contiguous_block_dot(layout)
+        .or_else(|| split_block_dot(layout))
+        .or_else(|| sub_block_dot(layout))
 }
 
 fn contiguous_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
@@ -59,6 +73,7 @@ fn contiguous_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
         block_bytes: usize::from(layout.block_bytes),
         rows_per_warp: rows_per_warp(false),
         centering: None,
+        chunk_terms: None,
     })
 }
 
@@ -133,7 +148,7 @@ fn contiguous_chunk_base(element: &Coded, elements: usize, bits: usize) -> Optio
     (contiguous && base.is_multiple_of(16)).then_some(base)
 }
 
-fn scale_read(field: &Field) -> Option<String> {
+pub(super) fn scale_read(field: &Field) -> Option<String> {
     let offset = field.byte_offset;
     match field.layout.width() {
         16 if offset.is_multiple_of(2) => Some(format!(
@@ -213,8 +228,11 @@ mod tests {
         for layout in [BlockLayout::Q4_0, BlockLayout::Q5_0] {
             assert!(block_dot_i8(&layout).is_some(), "{layout:?} is a nibble-split code with an optional bit-run high plane");
         }
-        for layout in [BlockLayout::Q4_1, BlockLayout::Q5_1, BlockLayout::Q4_K, BlockLayout::Q5_K, BlockLayout::Q6_K] {
-            assert!(block_dot_i8(&layout).is_none(), "{layout:?} carries a min or sub-block scales");
+        for layout in [BlockLayout::Q4_K, BlockLayout::Q5_K, BlockLayout::Q6_K] {
+            assert!(block_dot_i8(&layout).is_some(), "{layout:?} carries sub-block scales the chunk terms describe");
+        }
+        for layout in [BlockLayout::Q4_1, BlockLayout::Q5_1, BlockLayout::Q3_K, BlockLayout::Q2_K] {
+            assert!(block_dot_i8(&layout).is_none(), "{layout:?} carries a whole-block min or a sub-block shape the lowering rejects");
         }
     }
 

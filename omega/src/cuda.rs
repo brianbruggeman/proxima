@@ -87,6 +87,7 @@ mod block_quantize;
 mod int8_gemm;
 mod plane_dot;
 mod radix_dot;
+mod sub_block_dot;
 pub(crate) mod mma_gemm;
 mod row_tile;
 mod split_attention;
@@ -4888,10 +4889,8 @@ mod tests {
 
         assert!(flag_off.prologue.is_empty());
         assert!(flag_on.prologue.is_empty());
-        assert_eq!(
-            flag_on.source.replace(&flag_on.entry, &flag_off.entry),
-            flag_off.source,
-        );
+        assert!(!flag_off.source.contains("blockdot_"));
+        assert!(flag_on.source.contains("blockdot_"), "the flag-on q4_0 matvec reads the layout-driven int8 dot");
         assert_ne!(flag_on.entry, flag_off.entry);
     }
 
