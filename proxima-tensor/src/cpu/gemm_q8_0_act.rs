@@ -18,13 +18,38 @@ const BLOCK_ELEMENTS: usize = q8_0::QK8_0;
 
 pub(super) type ActivationDotFn = fn(&[u8], &[u8]) -> Result<f32, TensorError>;
 
+// ggml's cpu activation quantizer, not `quantize_row_q8_0_ref`: it scales by
+// `127 / amax` and rounds half to even (`ggml-cpu/arch/x86/quants.c`
+// `quantize_row_q8_0`, `_mm256_round_ps(.., _MM_ROUND_NEAREST)`), which flips
+// single codes against the reference's `round(x * (1 / d))`.
 pub(super) fn quantize_row_q8_0_activation(
     activation: &[f32],
     output: &mut [u8],
 ) -> Result<(), TensorError> {
-    q8_0::quantize(activation, output).map_err(|_| TensorError::QuantizedShapeMismatch {
+    let shape_error = || TensorError::QuantizedShapeMismatch {
         reason: "q8_0 activation length is not a whole multiple of the q8_0 block size",
-    })
+    };
+    if !activation.len().is_multiple_of(BLOCK_ELEMENTS)
+        || output.len() != activation.len() / BLOCK_ELEMENTS * Q8_0_ACT_BLOCK_BYTES
+    {
+        return Err(shape_error());
+    }
+    for (block, packed) in activation
+        .chunks_exact(BLOCK_ELEMENTS)
+        .zip(output.chunks_exact_mut(Q8_0_ACT_BLOCK_BYTES))
+    {
+        quantize_activation_block(block, packed);
+    }
+    Ok(())
+}
+
+fn quantize_activation_block(block: &[f32], packed: &mut [u8]) {
+    let amax = block.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+    let inverse = if amax == 0.0 { 0.0 } else { 127.0 / amax };
+    packed[..2].copy_from_slice(&half::f16::from_f32(amax / 127.0).to_le_bytes());
+    for (code, value) in packed[2..].iter_mut().zip(block) {
+        *code = ((value * inverse).round_ties_even() as i8).to_le_bytes()[0];
+    }
 }
 
 fn f16_scale(block: &[u8]) -> f32 {
