@@ -40,6 +40,7 @@ use proxima_model_interop::{
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::recorder::Recorder;
+use proxima_tensor::NumericPolicy;
 use proxima_tokenizer::gguf::vocab_from_metadata;
 use proxima_tokenizer::{TokenizerError, Vocab, encode_with_bos_eos};
 
@@ -115,13 +116,37 @@ impl Top2 {
 fn config(gpu_layers: i32) -> ServingConfig<'static> {
     let defaults = ServingConfig::default();
     let activation_quantization = env::var_os("DECODE_COMPARE_ACTIVATION_QUANTIZATION").is_some();
+    let base_policy = match env::var("DECODE_COMPARE_POLICY").as_deref() {
+        Ok("exact") => NumericPolicy::bit_exact(),
+        _ => defaults.numeric_policy,
+    };
     ServingConfig {
         gpu_layers,
-        numeric_policy: defaults
-            .numeric_policy
-            .with_activation_quantization(activation_quantization),
+        numeric_policy: base_policy.with_activation_quantization(activation_quantization),
         ..defaults
     }
+}
+
+fn print_forced_top5(
+    model: &LoadedModel,
+    vocab: &Vocab,
+    prompt: &str,
+    forced_text: &str,
+    gpu_layers: i32,
+) -> Result<(), ExampleError> {
+    let forced: Vec<u32> = forced_text
+        .split(',')
+        .filter_map(|id| id.trim().parse().ok())
+        .collect();
+    let ids = prompt_ids(vocab, prompt)?;
+    let rows = model.teacher_forced_logits_from_ids(&ids, &forced, &config(gpu_layers))?;
+    for (index, row) in rows.iter().enumerate().take(forced.len()) {
+        let mut ranked: Vec<(usize, f32)> = row.iter().copied().enumerate().collect();
+        ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+        ranked.truncate(5);
+        println!("forced_top5 gpu_layers={gpu_layers} index={index} top5={ranked:?}");
+    }
+    Ok(())
 }
 
 fn prompt_ids(model_vocab: &Vocab, prompt: &str) -> Result<Vec<u32>, TokenizerError> {
@@ -248,6 +273,15 @@ fn run(path: &str, prompt: &str, tokens: usize, backends: Backends) -> Result<()
     let vocab = vocab_from_metadata(&parsed)?;
     let model = LoadedModel::load(&parsed, &mapping)?;
     println!("prompt_ids {:?}", prompt_ids(&vocab, prompt)?);
+    if let Ok(forced_text) = env::var("DECODE_COMPARE_FORCED_IDS") {
+        let gpu_layers = if matches!(backends, Backends::Cpu) {
+            0
+        } else {
+            GPU_LAYERS_ALL
+        };
+        print_forced_top5(&model, &vocab, prompt, &forced_text, gpu_layers)?;
+        return Ok(());
+    }
     let cpu = match backends {
         Backends::Both | Backends::Cpu => Some(decode(&model, prompt, tokens, 0)?),
         Backends::Cuda => None,
