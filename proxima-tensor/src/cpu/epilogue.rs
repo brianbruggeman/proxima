@@ -1471,6 +1471,7 @@ pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima
         Codec::BFloat8 => None,
         Codec::Q4_1
         | Codec::Q8_1
+        | Codec::Q8_1Grouped
         | Codec::Q8K
         | Codec::Iq1S
         | Codec::Iq1M
@@ -1527,6 +1528,7 @@ pub(super) const fn codec_matmul_f32_kernel(
         | Codec::Q6K
         | Codec::Q4_1
         | Codec::Q8_1
+        | Codec::Q8_1Grouped
         | Codec::Q8K
         | Codec::Iq1S
         | Codec::Iq1M
@@ -1581,6 +1583,7 @@ pub(super) const fn codec_dequantize_fn(
         | Codec::BFloat8
         | Codec::Q4_1
         | Codec::Q8_1
+        | Codec::Q8_1Grouped
         | Codec::Q8K
         | Codec::Iq1S
         | Codec::Iq1M
@@ -2211,6 +2214,7 @@ const fn codec_name_for_error(codec: Codec) -> &'static str {
         Codec::Iq3Xxs => "iq3_xxs",
         Codec::Q4_1 => "q4_1",
         Codec::Q8_1 => "q8_1",
+        Codec::Q8_1Grouped => "q8_1_grouped",
         Codec::Q8K => "q8_k",
         Codec::Iq1S => "iq1_s",
         Codec::Iq1M => "iq1_m",

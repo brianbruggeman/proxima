@@ -152,8 +152,8 @@ pub(super) fn mma_gemm_plan(
         .map(|&position| resolved.extents[output_axes[position] as usize])
         .product();
     let int8 = int8_gemm_plan(resolved, codec, numeric_policy, activation_layout, output_axes, prequantized);
-    let served = !prequantized || int8.is_some();
-    let several_tokens = token_total > 1 || prequantized;
+    let served = prequantized.is_none() || int8.is_some();
+    let several_tokens = token_total > 1 || prequantized.is_some();
     (served && !feature_positions.is_empty() && !token_positions.is_empty() && several_tokens).then_some(
         MmaGemm {
             weight,
@@ -169,12 +169,16 @@ pub(super) fn mma_gemm_plan(
 
 /// The weight slot, its codec, and whether the other slot is an activation a `BlockQuantize`
 /// already produced (a `Q8_1` byte operand beside a non-`Q8_1` weight).
-fn weight_slot(first: Option<Codec>, second: Option<Codec>) -> Option<(usize, Codec, bool)> {
+pub(super) fn weight_slot(first: Option<Codec>, second: Option<Codec>) -> Option<(usize, Codec, Option<Codec>)> {
     match (first, second) {
-        (Some(codec), None) => Some((0, codec, false)),
-        (None, Some(codec)) => Some((1, codec, false)),
-        (Some(codec), Some(Codec::Q8_1)) if codec != Codec::Q8_1 => Some((0, codec, true)),
-        (Some(Codec::Q8_1), Some(codec)) if codec != Codec::Q8_1 => Some((1, codec, true)),
+        (Some(codec), None) => Some((0, codec, None)),
+        (None, Some(codec)) => Some((1, codec, None)),
+        (Some(codec), Some(activation)) if activation.is_quantized_activation() && !codec.is_quantized_activation() => {
+            Some((0, codec, Some(activation)))
+        }
+        (Some(activation), Some(codec)) if activation.is_quantized_activation() && !codec.is_quantized_activation() => {
+            Some((1, codec, Some(activation)))
+        }
         _ => None,
     }
 }
@@ -182,7 +186,7 @@ fn weight_slot(first: Option<Codec>, second: Option<Codec>) -> Option<(usize, Co
 /// Whether the operand slots pair a packed weight with a pre-quantized activation, which only
 /// the int8 gemm can read.
 pub(super) fn reads_prequantized_activation(quantized: &[Option<Codec>]) -> bool {
-    matches!(quantized, [first, second] if weight_slot(*first, *second).is_some_and(|(_, _, prequantized)| prequantized))
+    matches!(quantized, [first, second] if weight_slot(*first, *second).is_some_and(|(_, _, prequantized)| prequantized.is_some()))
 }
 
 fn axes_product(resolved: &BoundOp, output_axes: &[u16], positions: &[usize]) -> u64 {

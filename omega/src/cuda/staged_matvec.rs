@@ -2,10 +2,11 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use proxima_primitives::block_layout::BlockLayout;
 use proxima_tensor::{BoundOp, BoundOpKind, DType, Keep, Layout, NodeId, NumericPolicy, ReduceInit, ScalarOp, StepArg};
 
 use super::block_dot::{BlockDot, DOT_ELEMENTS, block_dot_i8};
-use super::int8_gemm::{activation_block_bytes, activation_code_offset};
+use super::int8_gemm::{activation_block_offset, activation_code_offset, activation_code_words, activation_scale_offset};
 use super::{
     EmitDevice,
     Codec, CudaGridSpec, CudaKernel, EmitError, WARP_SIZE, flat_packed_rows, gather_count, push_reduce_epilogue_write,
@@ -72,14 +73,14 @@ pub(super) struct StagedMatvec {
     /// The activation is quantized into a global scratch by a pre-pass launch instead of
     /// being staged in every block's shared memory.
     pub scratch: bool,
-    /// The activation is a `block_q8_1` node a `BlockQuantize` already produced, so the matvec
+    /// The block layout of an activation a `BlockQuantize` already produced, so the matvec
     /// neither stages nor pre-passes it.
-    pub external: bool,
+    pub external: Option<BlockLayout>,
 }
 
 impl StagedMatvec {
     fn rows_in_shared(&self) -> bool {
-        !self.scratch && !self.external
+        !self.scratch && self.external.is_none()
     }
 }
 
@@ -121,10 +122,14 @@ pub(super) fn staged_matvec_plan(
     let is_product = only_step.op == ScalarOp::Multiply
         && only_step.args == [StepArg::Operand(0), StepArg::Operand(1)];
     let (weight_slot, activation_slot, codec, external) = match quantized {
-        [Some(codec), None] => (0, 1, *codec, false),
-        [None, Some(codec)] => (1, 0, *codec, false),
-        [Some(codec), Some(Codec::Q8_1)] if *codec != Codec::Q8_1 => (0, 1, *codec, true),
-        [Some(Codec::Q8_1), Some(codec)] if *codec != Codec::Q8_1 => (1, 0, *codec, true),
+        [Some(codec), None] => (0, 1, *codec, None),
+        [None, Some(codec)] => (1, 0, *codec, None),
+        [Some(codec), Some(activation)] if activation.is_quantized_activation() && !codec.is_quantized_activation() => {
+            (0, 1, *codec, Some(activation.block_layout()?))
+        }
+        [Some(activation), Some(codec)] if activation.is_quantized_activation() && !codec.is_quantized_activation() => {
+            (1, 0, *codec, Some(activation.block_layout()?))
+        }
         _ => return None,
     };
     let dot = block_dot_i8(&codec.block_layout()?)?;
@@ -142,7 +147,7 @@ pub(super) fn staged_matvec_plan(
         .iter()
         .all(|axis| activation_layout.stride(*axis) == 0 || resolved.extents[usize::from(*axis)] == 1);
     let contiguous_activation = is_contiguous_run(activation_layout, &reduce_dims, &reduce_extents);
-    let readable_activation = !external || (contiguous_activation && activation_layout.base == 0);
+    let readable_activation = external.is_none() || (contiguous_activation && activation_layout.base == 0);
     let weight_only: Vec<Option<Codec>> = quantized
         .iter()
         .enumerate()
@@ -167,7 +172,7 @@ pub(super) fn staged_matvec_plan(
         contiguous_activation,
         reduce_extents,
         reduction,
-        scratch: !external && reduction + reduction / DOT_ELEMENTS as u64 * 4 > SMEM_STAGE_LIMIT_BYTES,
+        scratch: external.is_none() && reduction + reduction / DOT_ELEMENTS as u64 * 4 > SMEM_STAGE_LIMIT_BYTES,
         external,
         rows: shaped_rows(dot.rows_per_warp, output_total, device.multiprocessors),
         dot,
@@ -272,7 +277,7 @@ fn push_scratch_stage(source: &mut String, plan: &StagedMatvec) {
 }
 
 fn push_stage(source: &mut String, plan: &StagedMatvec) {
-    if plan.external {
+    if plan.external.is_some() {
         source.push_str(&format!("    const unsigned char *staged_blocks = in{};\n", plan.activation_slot));
         return;
     }
@@ -384,17 +389,15 @@ fn staged_activation_load() -> String {
         .to_owned()
 }
 
-// a block_q8_1 stride is not a multiple of 16, so the codes load as 32-bit words
-fn external_activation_load() -> String {
-    let block_bytes = activation_block_bytes();
-    let code_offset = activation_code_offset();
+fn external_activation_load(layout: &BlockLayout) -> String {
+    let block = activation_block_offset(layout, "chunk");
+    let scale = activation_scale_offset(layout, "chunk");
+    let codes = activation_code_words(layout, &format!("(activation_block + {})", activation_code_offset(layout, "chunk")), "        ");
     format!(
-        "        const unsigned char *activation_block = staged_blocks + chunk * {block_bytes}u;\n\
-         \x20       const unsigned int *activation_codes = (const unsigned int *)(activation_block + {code_offset}u);\n\
-         \x20       int activation[8];\n\
-         \x20       #pragma unroll\n\
-         \x20       for (int word = 0; word < 8; word++) {{ activation[word] = (int)activation_codes[word]; }}\n\
-         \x20       const float activation_scale = __half2float(__ushort_as_half((unsigned short)(*(const unsigned int *)activation_block & 0xffffu)));\n"
+        "        const unsigned char *activation_block = staged_blocks + {block};\n\
+         {codes}\
+         \x20       const int activation[8] = {{ (int)activation_low.x, (int)activation_low.y, (int)activation_low.z, (int)activation_low.w, (int)activation_high.x, (int)activation_high.y, (int)activation_high.z, (int)activation_high.w }};\n\
+         \x20       const float activation_scale = __half2float(__ushort_as_half(*(const unsigned short *)(activation_block + {scale})));\n"
     )
 }
 
@@ -419,7 +422,7 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
     } else {
         format!("first_row + row < u.output_total ? row_block[row] * {block_bytes} : -1")
     };
-    let activation_load = if plan.external { external_activation_load() } else { staged_activation_load() };
+    let activation_load = plan.external.as_ref().map_or_else(staged_activation_load, external_activation_load);
     let position = if 32 % chunks_per_block == 0 { format!("lane % {chunks_per_block}u") } else { format!("chunk % {chunks_per_block}u") };
     source.push_str(&format!(
         "    const unsigned char *row_start[{rows}];\n\

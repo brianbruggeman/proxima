@@ -60,6 +60,7 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
+use proxima_primitives::block_layout::BlockLayout;
 use proxima_tensor::{
     BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
     NumericRewrite, ReduceInit, ScalarOp, StepArg, admit,
@@ -93,7 +94,7 @@ use split_attention::{
     render_combine, split_chunks, split_pass, split_scratch_len, split_scratch_node,
 };
 pub use int8_gemm::is_int8_weight;
-use block_quantize::{block_quantize_grid, block_quantize_groups, render_block_quantize};
+use block_quantize::{block_quantize_grid, block_quantize_groups, quantize_device, render_block_quantize};
 use int8_gemm::INT8_MMA_INSTRUCTION;
 use mma_gemm::{
     GEMM_THREADS, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body,
@@ -335,35 +336,37 @@ pub fn emit_cuda_on_device(
 }
 
 /// Whether the int8 gemm would serve `resolved` if its operand in `activation_slot` held
-/// `block_q8_1` bytes.
+/// activation blocks of the `activation` codec.
 pub(crate) fn int8_gemm_serves(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     activation_slot: usize,
+    activation: Codec,
     numeric_policy: NumericPolicy,
 ) -> bool {
     let mut quantized = operand_codecs(resolved, packed_operands);
     let Some(slot) = quantized.get_mut(activation_slot) else {
         return false;
     };
-    *slot = Some(Codec::Q8_1);
+    *slot = Some(activation);
     mma_gemm_plan(resolved, &quantized, numeric_policy).is_some_and(|plan| plan.int8.is_some())
 }
 
 /// Whether the staged matvec would serve `resolved` reading its operand in `activation_slot` as
-/// `block_q8_1` bytes.
+/// activation blocks of the `activation` codec.
 pub(crate) fn staged_matvec_serves(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     activation_slot: usize,
+    activation: Codec,
     numeric_policy: NumericPolicy,
 ) -> bool {
     let mut quantized = operand_codecs(resolved, packed_operands);
     let Some(slot) = quantized.get_mut(activation_slot) else {
         return false;
     };
-    *slot = Some(Codec::Q8_1);
-    staged_matvec_plan(resolved, &quantized, numeric_policy, EmitDevice::default()).is_some_and(|plan| plan.external)
+    *slot = Some(activation);
+    staged_matvec_plan(resolved, &quantized, numeric_policy, EmitDevice::default()).is_some_and(|plan| plan.external.is_some())
 }
 
 /// A pre-quantized activation is readable only by the int8 gemm and the external-activation staged
@@ -374,7 +377,7 @@ fn reject_unserved_prequantized(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<(), EmitError> {
-    let staged = staged_matvec_plan(resolved, quantized, numeric_policy, device).is_some_and(|plan| plan.external);
+    let staged = staged_matvec_plan(resolved, quantized, numeric_policy, device).is_some_and(|plan| plan.external.is_some());
     let served = staged || mma_gemm_plan(resolved, quantized, numeric_policy).is_some_and(|plan| plan.int8.is_some());
     if reads_prequantized_activation(quantized) && !served {
         return Err(EmitError::CudaUnsupportedOpKind {
@@ -474,27 +477,6 @@ const Q8_1_BLOCK_ELEMENTS: u64 = 32;
 
 const Q8_1_QUANTIZE_ENTRY: &str = "omega_cuda_q8_1_quantize";
 
-const Q8_1_QUANTIZE_DEVICE: &str = r#"
-__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long block, unsigned int lane) {
-    float x = in[block * 32 + lane];
-    float amax = fabsf(x);
-    for (int offset = 16; offset > 0; offset >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, offset)); }
-    float d = amax / 127.0f;
-    int q = amax == 0.0f ? 0 : (int)roundf(x / d);
-    int qsum = q;
-    for (int offset = 16; offset > 0; offset >>= 1) { qsum += __shfl_xor_sync(0xffffffffu, qsum, offset); }
-    unsigned char *bytes = (unsigned char *)out + block * 36;
-    if (lane == 0) {
-        unsigned short d_bits = __half_as_ushort(__float2half(d));
-        unsigned short s_bits = __half_as_ushort(__float2half(d * (float)qsum));
-        bytes[0] = (unsigned char)(d_bits & 0xffu);
-        bytes[1] = (unsigned char)(d_bits >> 8);
-        bytes[2] = (unsigned char)(s_bits & 0xffu);
-        bytes[3] = (unsigned char)(s_bits >> 8);
-    }
-    bytes[4 + lane] = (unsigned char)(signed char)q;
-}
-"#;
 
 const Q8_1_QUANTIZE_ENTRY_TEXT: &str = r#"
 extern "C" __global__ void omega_cuda_q8_1_quantize(const float *in, float *out, const int *u) {
@@ -533,7 +515,7 @@ pub fn emit_q8_1_quantize(
         });
     }
     Ok(CudaKernel {
-        source: ["#include <cuda_fp16.h>\n", Q8_1_QUANTIZE_DEVICE, Q8_1_QUANTIZE_ENTRY_TEXT].concat(),
+        source: ["#include <cuda_fp16.h>\n", &quantize_device(&BlockLayout::Q8_1), Q8_1_QUANTIZE_ENTRY_TEXT].concat(),
         entry: String::from(Q8_1_QUANTIZE_ENTRY),
         bindings: vec![
             Binding::Input(activation),
@@ -1564,7 +1546,7 @@ fn text_plan_token(
         ""
     };
     let revision = if let Some(plan) = staged_matvec_plan(resolved, quantized, numeric_policy, device) {
-        let source = match (plan.scratch, plan.external) {
+        let source = match (plan.scratch, plan.external.is_some()) {
             (_, true) => "q",
             (true, false) => "g",
             (false, false) => "",
@@ -2243,6 +2225,7 @@ fn operand_read(
             Codec::Q5_1
             | Codec::Q4_1
             | Codec::Q8_1
+            | Codec::Q8_1Grouped
             | Codec::Q8K
             | Codec::Iq1S
             | Codec::Iq1M

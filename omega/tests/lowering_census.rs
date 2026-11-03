@@ -133,6 +133,7 @@ fn codec_marker(codec: Codec) -> &'static str {
         | Codec::BFloat16
         | Codec::Q4_1
         | Codec::Q8_1
+        | Codec::Q8_1Grouped
         | Codec::Q8K
         | Codec::Iq1S
         | Codec::Iq1M

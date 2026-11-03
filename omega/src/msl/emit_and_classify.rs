@@ -2912,6 +2912,7 @@ const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
         | Codec::BFloat16
         | Codec::Q4_1
         | Codec::Q8_1
+        | Codec::Q8_1Grouped
         | Codec::Q8K
         | Codec::Iq1S
         | Codec::Iq1M

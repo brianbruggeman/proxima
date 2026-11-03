@@ -1130,6 +1130,7 @@ fn codec_function_name(node: NodeId, codec: Codec) -> Result<&'static str, EmitE
         | Codec::Q5_0
         | Codec::Q4_1
         | Codec::Q8_1
+        | Codec::Q8_1Grouped
         | Codec::Q8K
         | Codec::Iq1S
         | Codec::Iq1M

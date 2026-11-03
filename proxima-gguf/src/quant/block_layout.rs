@@ -88,6 +88,15 @@ fn sub_terms(layout: &BlockLayout, scale: f32, min: Option<f32>, block: &[u8]) -
         scales: [scale; MAX_SUB_BLOCKS],
         mins: [min.unwrap_or(0.0); MAX_SUB_BLOCKS],
     };
+    if layout.scale_runs.is_some() {
+        for run in 0..usize::from(layout.runs()).min(MAX_SUB_BLOCKS) {
+            let field = Field {
+                byte_offset: layout.run_scale_byte(run as u16) as u16,
+                ..layout.scale
+            };
+            terms.scales[run] = field_value(&field, block);
+        }
+    }
     if let Some(sub) = &layout.sub {
         for sub_block in 0..usize::from(sub.count).min(MAX_SUB_BLOCKS) {
             terms.scales[sub_block] = scale * sub_value(&sub.scale, sub_block, block);
@@ -105,7 +114,7 @@ pub fn dequantize_block(layout: &BlockLayout, block: &[u8], output: &mut [f32]) 
     let scale = field_value(&layout.scale, block);
     let min = layout.min.map(|field| field_value(&field, block));
     let terms = sub_terms(layout, scale, min, block);
-    let span = layout.sub.map_or(usize::from(layout.elements), |sub| {
+    let span = layout.sub.map_or(usize::from(layout.run_elements()), |sub| {
         usize::from(layout.elements / sub.count)
     });
     let element = &layout.element;

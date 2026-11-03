@@ -1132,6 +1132,7 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
         Some(
             Codec::Q4_1
             | Codec::Q8_1
+            | Codec::Q8_1Grouped
             | Codec::Q8K
             | Codec::Iq1S
             | Codec::Iq1M
@@ -1210,6 +1211,7 @@ fn codec_element_fn_name(codec: Codec) -> &'static str {
         Codec::Float16
         | Codec::Q4_1
         | Codec::Q8_1
+        | Codec::Q8_1Grouped
         | Codec::Q8K
         | Codec::Iq1S
         | Codec::Iq1M

@@ -1167,6 +1167,7 @@ pub(crate) fn as_block(
         | Codec::Fp6E3M2 => Some(proxima_tensor::cpu::QuantizedBlock::Packed { codec, bytes }),
         Codec::Q4_1
         | Codec::Q8_1
+        | Codec::Q8_1Grouped
         | Codec::Q8K
         | Codec::Iq1S
         | Codec::Iq1M
@@ -1273,6 +1274,7 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
         Codec::Q5_0 => "q5_0",
         Codec::Q4_1 => "q4_1",
         Codec::Q8_1 => "q8_1",
+        Codec::Q8_1Grouped => "q8_1_grouped",
         Codec::Q8K => "q8_k",
         Codec::Iq1S => "iq1_s",
         Codec::Iq1M => "iq1_m",
@@ -1335,7 +1337,7 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError>
         Codec::Pq2_0 => GgmlType::Pq2_0,
         Codec::Ptq1_0 => GgmlType::Ptq1_0,
         Codec::Fp6E3M2 => GgmlType::Fp6E3M2,
-        Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 => {
+        Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Q8_1Grouped => {
             return Err(InteropError::UnsupportedCodec { codec });
         }
     })
@@ -1870,6 +1872,7 @@ pub(crate) fn quantize_to_kind(
         // sidecar wire tag) but not a `recode_tensor` target/source yet.
         Codec::Q4_1 => Err(QuantError::UnsupportedCodec { codec: "q4_1" }),
         Codec::Q8_1 => Err(QuantError::UnsupportedCodec { codec: "q8_1" }),
+        Codec::Q8_1Grouped => Err(QuantError::UnsupportedCodec { codec: "q8_1_grouped" }),
         Codec::Q8K => Err(QuantError::UnsupportedCodec { codec: "q8_k" }),
         Codec::Iq1S => Err(QuantError::UnsupportedCodec { codec: "iq1_s" }),
         Codec::Iq1M => Err(QuantError::UnsupportedCodec { codec: "iq1_m" }),

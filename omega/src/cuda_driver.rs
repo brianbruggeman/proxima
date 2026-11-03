@@ -3876,6 +3876,7 @@ fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
         Codec::Q5_1
         | Codec::Q4_1
         | Codec::Q8_1
+        | Codec::Q8_1Grouped
         | Codec::Q8K
         | Codec::Iq1S
         | Codec::Iq1M
@@ -4012,6 +4013,7 @@ mod tests {
     use crate::cuda_ptx_store::PtxStore;
     use crate::lowering::Codec;
     use cudarc::nvrtc::{CompileOptions, Ptx};
+    use proxima_primitives::block_layout::BlockLayout;
     use super::PoolSchedule;
     use proxima_tensor::{
         BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
@@ -4020,10 +4022,11 @@ mod tests {
 
     const KERNEL_CACHE_DIR_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
 
-    const CUDA_UNPACKABLE: [Codec; 17] = [
+    const CUDA_UNPACKABLE: [Codec; 18] = [
         Codec::Q5_1,
         Codec::Q4_1,
         Codec::Q8_1,
+        Codec::Q8_1Grouped,
         Codec::Q8K,
         Codec::Iq1S,
         Codec::Iq1M,
@@ -4085,6 +4088,82 @@ mod tests {
             assert_eq!(packed_codec(&block), None, "{codec:?}");
             assert!(packed_bytes(&block).is_empty(), "{codec:?}");
         }
+    }
+
+    const QUANTIZE_ROWS: usize = 3;
+    const QUANTIZE_WIDTH: usize = 512;
+
+    fn activation_values() -> Vec<f32> {
+        let mut random = proxima_tensor::test_support::Lcg(0xfeed);
+        (0..QUANTIZE_ROWS * QUANTIZE_WIDTH)
+            .map(|index| random.next_unit() * (1.0 + (index % 7) as f32))
+            .collect()
+    }
+
+    fn quantize_on_gpu(driver: &CudaDriver, layout: BlockLayout, values: &[f32]) -> Vec<u8> {
+        let bytes = (QUANTIZE_WIDTH / usize::from(layout.elements) * usize::from(layout.block_bytes)) as u64;
+        let strides = [QUANTIZE_WIDTH as i64, 1].into_iter().collect();
+        let bound = BoundOp {
+            node: NodeId(1),
+            dtype: DType::UINT8,
+            extents: vec![QUANTIZE_ROWS as u64, bytes],
+            kind: BoundOpKind::BlockQuantize {
+                operands: vec![(NodeId(0), proxima_tensor::Layout { base: 0, strides }, None)],
+                layout: Box::new(layout),
+            },
+        };
+        let kernel = crate::cuda::emit_cuda_with_policy(&bound, &Default::default(), NumericPolicy::default())
+            .expect("a q8_1 run layout emits a quantize kernel");
+        let groups = (values.len() / 32) as i64;
+        let words = driver
+            .launch_f32(&kernel, &[values], &groups.to_le_bytes())
+            .expect("the quantize kernel launches");
+        let written = (bytes as usize) * QUANTIZE_ROWS;
+        words.iter().flat_map(|word| word.to_ne_bytes()).take(written).collect()
+    }
+
+    fn cpu_quantize(layout: &BlockLayout, values: &[f32]) -> Vec<u8> {
+        let blocks = values.len() / usize::from(layout.elements);
+        let mut packed = vec![0u8; blocks * usize::from(layout.block_bytes)];
+        proxima_gguf::quant::block_layout_encode::quantize(layout, values, &mut packed).expect("the cpu encoder takes the layout");
+        packed
+    }
+
+    fn regrouped(single: &[u8]) -> Vec<u8> {
+        single
+            .chunks(36 * 4)
+            .flat_map(|group| {
+                let headers = group.chunks(36).flat_map(|run| run[..4].to_vec());
+                let codes = group.chunks(36).flat_map(|run| run[4..].to_vec());
+                headers.chain(codes).collect::<Vec<u8>>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn gpu_grouped_quantize_is_the_q8_1_runs_regrouped_and_tracks_the_cpu_encoder() {
+        let driver = CudaDriver::new(0).expect("a cuda device");
+        let values = activation_values();
+        let single = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values);
+        let grouped = quantize_on_gpu(&driver, BlockLayout::Q8_1_GROUPED, &values);
+        assert_eq!(grouped, regrouped(&single), "each warp writes its own header word and codes");
+
+        let cpu = cpu_quantize(&BlockLayout::Q8_1_GROUPED, &values);
+        assert_eq!(grouped.len(), cpu.len());
+        let mut off_by_one = 0usize;
+        for (block, (gpu_block, cpu_block)) in grouped.chunks(144).zip(cpu.chunks(144)).enumerate() {
+            for run in 0..4 {
+                let header = run * 4..run * 4 + 2;
+                assert_eq!(gpu_block[header.clone()], cpu_block[header], "block {block} run {run}: f16 scale");
+                let codes = 16 + run * 32..16 + run * 32 + 32;
+                for (gpu_code, cpu_code) in gpu_block[codes.clone()].iter().zip(&cpu_block[codes]) {
+                    let gap = (i32::from(*gpu_code as i8) - i32::from(*cpu_code as i8)).abs();
+                    assert!(gap <= 1, "block {block} run {run}: codes differ by {gap}");
+                    off_by_one += usize::from(gap == 1);
+                }
+            }
+        }
+        assert!(off_by_one * 20 < grouped.len(), "{off_by_one} codes round differently against the f16 scale");
     }
 
     #[test]

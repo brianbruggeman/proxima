@@ -75,19 +75,20 @@ fn gemm_activation(
     };
     let codecs = operand_codecs(bound, packed);
     let slot = match codecs.as_slice() {
-        [Some(codec), None] if *codec != Codec::Q8_1 => 1,
-        [None, Some(codec)] if *codec != Codec::Q8_1 => 0,
+        [Some(codec), None] if !codec.is_quantized_activation() => 1,
+        [None, Some(codec)] if !codec.is_quantized_activation() => 0,
         _ => return None,
     };
     let (activation, layout, _) = operands.get(slot)?;
     let [tokens, depth] = collapsed_extent(shapes.of(*activation))?;
     let float_node = matches!(program.get(activation.0 as usize)?.dtype(), DType::FLOAT32);
+    let held = activation_codec(depth);
     let served = if tokens == 1 {
-        staged_matvec_serves(bound, packed, slot, policy)
+        staged_matvec_serves(bound, packed, slot, held, policy)
     } else {
         tokens > 1
             && activation_is_flat(bound, layout, tokens, depth)
-            && int8_gemm_serves(bound, packed, slot, policy)
+            && int8_gemm_serves(bound, packed, slot, held, policy)
     };
     let eligible = float_node && depth.is_multiple_of(QUANTIZE_GROUP) && served;
     eligible.then_some((*activation, slot))
@@ -110,14 +111,20 @@ fn consumers_by_activation(
     by_activation
 }
 
+/// The aligned grouped layout where the depth fills whole groups, else the plain 32-element one.
+fn activation_codec(depth: u64) -> Codec {
+    let grouped = BlockLayout::Q8_1_GROUPED;
+    if depth.is_multiple_of(u64::from(grouped.elements)) { Codec::Q8_1Grouped } else { Codec::Q8_1 }
+}
+
 fn quantize_op(derived: NodeId, activation: NodeId, extent: [u64; 2], template: &Layout) -> BoundOp {
     let [tokens, depth] = extent;
     let mut layout = template.clone();
     layout.base = 0;
     layout.strides.clear();
     layout.strides.extend([depth as i64, 1]);
-    let layout_q8 = BlockLayout::Q8_1;
-    let bytes = depth / QUANTIZE_GROUP * u64::from(layout_q8.block_bytes);
+    let layout_q8 = activation_codec(depth).block_layout().unwrap_or(BlockLayout::Q8_1);
+    let bytes = depth / u64::from(layout_q8.elements) * u64::from(layout_q8.block_bytes);
     BoundOp {
         node: derived,
         dtype: DType::UINT8,
@@ -171,7 +178,7 @@ pub(crate) fn derive_block_quantize(
         for consumer in consumers {
             repoints.entry(consumer.position).or_default().push((consumer.slot, derived));
         }
-        packed.insert(derived, Codec::Q8_1);
+        packed.insert(derived, activation_codec(depth));
     }
     let mut out = Vec::with_capacity(resolved.len() + ids.len());
     for (position, mut bound) in resolved.into_iter().enumerate() {
@@ -273,8 +280,10 @@ mod tests {
 
     fn build_fixture(tokens: u32, plain_reader: bool, wide: bool) -> Fixture {
         let mut program = Vec::new();
-        let (make, trailing): (fn(&mut Vec<Op>, DType, u32) -> NodeId, usize) =
-            if wide { (wide_input, 3) } else { (input, 1) };
+        let trailing = if wide { 3 } else { 1 };
+        let make = |program: &mut Vec<Op>, dtype, rows| {
+            if wide { wide_input(program, dtype, rows) } else { input(program, dtype, rows) }
+        };
         let activation = make(&mut program, DType::FLOAT32, tokens);
         let first = make(&mut program, DType::UINT8, FEATURES);
         let second = make(&mut program, DType::UINT8, FEATURES);
@@ -329,7 +338,7 @@ mod tests {
         let program_len = fixture.program.len();
         let ids = derived_ids(&derived, program_len);
         assert_eq!(ids, vec![NodeId(program_len as u32)]);
-        assert_eq!(packed.get(&ids[0]), Some(&Codec::Q8_1));
+        assert_eq!(packed.get(&ids[0]), Some(&Codec::Q8_1Grouped));
         let position = |node: NodeId| derived.iter().position(|bound| bound.node == node).expect("node present");
         let readers: Vec<usize> = (0..derived.len())
             .filter(|index| derived[*index].operands().iter().any(|(node, _, _)| *node == ids[0]) && !is_derived(&derived[*index], program_len))
@@ -352,7 +361,7 @@ mod tests {
         let (derived, packed) = derive(&fixture, granted(), GpuDriver::Cuda);
         let ids = derived_ids(&derived, fixture.program.len());
         assert_eq!(ids.len(), 1);
-        assert_eq!(packed.get(&ids[0]), Some(&Codec::Q8_1));
+        assert_eq!(packed.get(&ids[0]), Some(&Codec::Q8_1Grouped));
     }
 
     #[test]
@@ -369,12 +378,21 @@ mod tests {
             let (derived, packed) = derive(&fixture, granted(), GpuDriver::Cuda);
             let ids = derived_ids(&derived, fixture.program.len());
             assert_eq!(ids.len(), 1, "{tokens} tokens");
-            assert_eq!(packed.get(&ids[0]), Some(&Codec::Q8_1));
+            assert_eq!(packed.get(&ids[0]), Some(&Codec::Q8_1Grouped));
             let node = derived.iter().find(|bound| bound.node == ids[0]).expect("derived node present");
-            let bytes = u64::from(DEPTH) / QUANTIZE_GROUP * u64::from(BlockLayout::Q8_1.block_bytes);
+            let grouped = BlockLayout::Q8_1_GROUPED;
+            let bytes = u64::from(DEPTH) / u64::from(grouped.elements) * u64::from(grouped.block_bytes);
             assert_eq!(node.extents, vec![u64::from(tokens), bytes]);
             assert_eq!(underive_block_quantize(&derived, fixture.program.len()), fixture.resolved);
         }
+    }
+
+    #[test]
+    fn depth_picks_the_aligned_grouped_layout_only_when_it_fills_whole_groups() {
+        assert_eq!(activation_codec(4096), Codec::Q8_1Grouped);
+        assert_eq!(activation_codec(128), Codec::Q8_1Grouped);
+        assert_eq!(activation_codec(96), Codec::Q8_1);
+        assert_eq!(activation_codec(32), Codec::Q8_1);
     }
 
     #[test]

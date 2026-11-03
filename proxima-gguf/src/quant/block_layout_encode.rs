@@ -26,7 +26,7 @@ struct Linear {
     reach: f32,
     multiplier: f32,
     bias: f32,
-    sum_at: Option<usize>,
+    sum_gap: Option<usize>,
 }
 
 fn unsupported(reason: &'static str) -> QuantError {
@@ -67,17 +67,19 @@ fn touches(plane: &Plane, elements: usize, bytes: core::ops::Range<usize>) -> bo
 /// llama's `Q8_1` carries `s = d * sum(q)` in the two bytes after the scale; a layout whose planes
 /// leave those bytes unused (`BlockLayout::Q8_1`) is the one place the consumer reads it.
 fn sum_slot(layout: &BlockLayout) -> Option<usize> {
-    let start =
-        usize::from(layout.scale.byte_offset) + usize::from(layout.scale.layout.width()) / 8;
-    let bytes = start..start + SUM_BYTES;
+    let gap = usize::from(layout.scale.layout.width()) / 8;
     let elements = usize::from(layout.elements);
     let planes = [Some(layout.element.low), layout.element.high];
-    let free = bytes.end <= usize::from(layout.block_bytes)
-        && planes
-            .iter()
-            .flatten()
-            .all(|plane| !touches(plane, elements, bytes.clone()));
-    free.then_some(start)
+    let free = (0..layout.runs()).all(|run| {
+        let start = layout.run_scale_byte(run) + gap;
+        let bytes = start..start + SUM_BYTES;
+        bytes.end <= usize::from(layout.block_bytes)
+            && planes
+                .iter()
+                .flatten()
+                .all(|plane| !touches(plane, elements, bytes.clone()))
+    });
+    free.then_some(gap)
 }
 
 fn linear(layout: &BlockLayout) -> Result<Linear, QuantError> {
@@ -97,7 +99,7 @@ fn linear(layout: &BlockLayout) -> Result<Linear, QuantError> {
         reach,
         multiplier,
         bias,
-        sum_at: sum_slot(layout),
+        sum_gap: sum_slot(layout),
     })
 }
 
@@ -128,11 +130,42 @@ fn put_code(layout: &BlockLayout, cursors: &mut [PlaneCursor; 2], raw: u32, bloc
     }
 }
 
-fn put_scale(layout: &BlockLayout, code: u32, block: &mut [u8]) {
-    let offset = usize::from(layout.scale.byte_offset);
+fn put_scale(layout: &BlockLayout, offset: usize, code: u32, block: &mut [u8]) {
     let bytes = usize::from(layout.scale.layout.width()) / 8;
     for byte in 0..bytes {
         block[offset + byte] = (code >> (8 * byte)) as u8;
+    }
+}
+
+fn quantize_run(
+    layout: &BlockLayout,
+    shape: &Linear,
+    run: u16,
+    input: &[f32],
+    cursors: &mut [PlaneCursor; 2],
+    block: &mut [u8],
+) {
+    let peak = input
+        .iter()
+        .fold(0.0f32, |peak, value| peak.max(value.abs()));
+    let scale_code = encode(peak / shape.reach, layout.scale.layout);
+    let scale = decode(scale_code, layout.scale.layout);
+    let scale_at = layout.run_scale_byte(run);
+    put_scale(layout, scale_at, scale_code, block);
+    let mut value_sum = 0.0f32;
+    for value in input {
+        let code = shape.code_for(*value, scale);
+        put_code(
+            layout,
+            cursors,
+            encode(code as f32, layout.element.code),
+            block,
+        );
+        value_sum += shape.value_of(code);
+    }
+    if let Some(gap) = shape.sum_gap {
+        let at = scale_at + gap;
+        block[at..at + SUM_BYTES].copy_from_slice(&f16::from_f32(scale * value_sum).to_le_bytes());
     }
 }
 
@@ -146,29 +179,13 @@ fn quantize_block(
         return Err(QuantError::NonFiniteInput { codec: CODEC });
     }
     block.fill(0);
-    let peak = input
-        .iter()
-        .fold(0.0f32, |peak, value| peak.max(value.abs()));
-    let scale_code = encode(peak / shape.reach, layout.scale.layout);
-    let scale = decode(scale_code, layout.scale.layout);
-    put_scale(layout, scale_code, block);
     let mut cursors = [layout.element.low.cursor(), layout.element.low.cursor()];
     if let Some(high) = &layout.element.high {
         cursors[1] = high.cursor();
     }
-    let mut value_sum = 0.0f32;
-    for value in input {
-        let code = shape.code_for(*value, scale);
-        put_code(
-            layout,
-            &mut cursors,
-            encode(code as f32, layout.element.code),
-            block,
-        );
-        value_sum += shape.value_of(code);
-    }
-    if let Some(at) = shape.sum_at {
-        block[at..at + SUM_BYTES].copy_from_slice(&f16::from_f32(scale * value_sum).to_le_bytes());
+    let runs = input.chunks(usize::from(layout.run_elements()));
+    for (run, group) in runs.enumerate() {
+        quantize_run(layout, shape, run as u16, group, &mut cursors, block);
     }
     Ok(())
 }

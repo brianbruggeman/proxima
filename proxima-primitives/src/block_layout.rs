@@ -97,6 +97,14 @@ pub struct SubBlocks {
     pub min: Option<Coded>,
 }
 
+/// A block that holds `count` runs of codes, each with its own copy of the scale field (and of
+/// whatever the layout stores beside it) `stride_bytes` after the previous run's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ScaleRuns {
+    pub count: u16,
+    pub stride_bytes: u16,
+}
+
 /// The packing of one block of `elements` codes under a shared scale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct BlockLayout {
@@ -113,6 +121,9 @@ pub struct BlockLayout {
     /// Applied to the min term: 1 where the min is added (Q4_1), -1 where it is subtracted (Q4_K).
     pub min_multiplier: i8,
     pub sub: Option<SubBlocks>,
+    /// Independent scale fields, one per run of `elements / count` codes, for a block that packs
+    /// several runs behind aligned headers; excludes `sub` and `min`.
+    pub scale_runs: Option<ScaleRuns>,
 }
 
 const F16_SCALE: Field = field_at(FloatLayout::F16, 0);
@@ -219,6 +230,7 @@ const fn linear(
         scale: F16_SCALE,
         min,
         min_multiplier: 1,
+        scale_runs: None,
         sub: None,
     }
 }
@@ -345,6 +357,7 @@ impl BlockLayout {
         scale: field_at(FloatLayout::F16, 64),
         min: None,
         min_multiplier: 1,
+        scale_runs: None,
         sub: None,
     };
     pub const TQ1_0: Self = Self {
@@ -380,6 +393,7 @@ impl BlockLayout {
         scale: field_at(FloatLayout::F16, 52),
         min: None,
         min_multiplier: 1,
+        scale_runs: None,
         sub: None,
     };
 
@@ -416,6 +430,7 @@ impl BlockLayout {
         scale: field_at(FloatLayout::F16, 26),
         min: None,
         min_multiplier: 1,
+        scale_runs: None,
         sub: None,
     };
 
@@ -436,6 +451,7 @@ impl BlockLayout {
         scale: field_at(FloatLayout::F16, 80),
         min: Some(field_at(FloatLayout::F16, 82)),
         min_multiplier: -1,
+        scale_runs: None,
         sub: Some(SubBlocks {
             count: 16,
             scale: coded(
@@ -473,6 +489,7 @@ impl BlockLayout {
         scale: field_at(FloatLayout::F16, 108),
         min: None,
         min_multiplier: 1,
+        scale_runs: None,
         sub: Some(SubBlocks {
             count: 16,
             scale: coded(
@@ -496,6 +513,7 @@ impl BlockLayout {
         scale: F16_SCALE,
         min: Some(field_at(FloatLayout::F16, 2)),
         min_multiplier: -1,
+        scale_runs: None,
         sub: Some(k4_sub_blocks()),
     };
     pub const Q5_K: Self = Self {
@@ -515,6 +533,7 @@ impl BlockLayout {
         scale: F16_SCALE,
         min: Some(field_at(FloatLayout::F16, 2)),
         min_multiplier: -1,
+        scale_runs: None,
         sub: Some(k4_sub_blocks()),
     };
     pub const Q6_K: Self = Self {
@@ -538,6 +557,7 @@ impl BlockLayout {
         scale: field_at(FloatLayout::F16, 208),
         min: None,
         min_multiplier: 1,
+        scale_runs: None,
         sub: Some(SubBlocks {
             count: 16,
             scale: coded(
@@ -549,6 +569,27 @@ impl BlockLayout {
             min: None,
         }),
     };
+    /// Four `Q8_1` runs behind one 16-byte header, so every run's 32 codes start on a 16-byte
+    /// boundary: the activation layout of llama's `block_q8_1_mmq`.
+    pub const Q8_1_GROUPED: Self = Self {
+        elements: 128,
+        block_bytes: 144,
+        element: coded(
+            FloatLayout::INT8,
+            plane(8, 128, [digit(32, 8), digit(4, 256), NO_DIGIT, NO_DIGIT]),
+            None,
+            0,
+        ),
+        multiplier: 1,
+        scale: F16_SCALE,
+        min: None,
+        min_multiplier: 1,
+        sub: None,
+        scale_runs: Some(ScaleRuns {
+            count: 4,
+            stride_bytes: 4,
+        }),
+    };
     pub const Q8_K: Self = Self {
         elements: 256,
         block_bytes: 292,
@@ -557,8 +598,43 @@ impl BlockLayout {
         scale: field_at(FloatLayout::BF32, 0),
         min: None,
         min_multiplier: 1,
+        scale_runs: None,
         sub: None,
     };
+}
+
+impl BlockLayout {
+    /// Runs that carry their own scale: one for a layout without [`ScaleRuns`].
+    #[must_use]
+    pub const fn runs(&self) -> u16 {
+        match self.scale_runs {
+            Some(runs) => runs.count,
+            None => 1,
+        }
+    }
+
+    /// Codes per run.
+    #[must_use]
+    pub const fn run_elements(&self) -> u16 {
+        self.elements / self.runs()
+    }
+
+    /// Byte offset of run `run`'s scale field.
+    #[must_use]
+    pub const fn run_scale_byte(&self, run: u16) -> usize {
+        let stride = match self.scale_runs {
+            Some(runs) => runs.stride_bytes as usize,
+            None => 0,
+        };
+        self.scale.byte_offset as usize + run as usize * stride
+    }
+
+    /// Byte offset of run `run`'s first code, for a layout whose codes are one byte-aligned run
+    /// per scale run.
+    #[must_use]
+    pub const fn run_code_byte(&self, run: u16) -> usize {
+        self.element.low.address(run as usize * self.run_elements() as usize) / 8
+    }
 }
 
 /// Walks a plane's addresses for consecutive element indexes without dividing: the digits are an

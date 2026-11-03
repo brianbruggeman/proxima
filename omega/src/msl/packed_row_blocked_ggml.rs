@@ -748,6 +748,7 @@ pub(super) fn push_packed_row_blocked_body(
                 // `PackedOperands`'s closed population), kept exhaustive.
                 Codec::Q4_1
                 | Codec::Q8_1
+                | Codec::Q8_1Grouped
                 | Codec::Q8K
                 | Codec::Iq1S
                 | Codec::Iq1M

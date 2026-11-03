@@ -1,4 +1,5 @@
 use super::*;
+use proxima_primitives::block_layout::BlockLayout;
 
 /// MSL source for one `Q2_K` element. The byte layout and index arithmetic
 /// mirror `proxima_gguf::quant::q2_k::dequantize_block`: sixteen scale/min
@@ -1535,6 +1536,7 @@ pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
         // variant must force a decision at every match, not slip through.
         Codec::Q4_1 => "q4_1",
         Codec::Q8_1 => "q8_1",
+        Codec::Q8_1Grouped => "q8_1_grouped",
         Codec::Q8K => "q8k",
         Codec::Iq1S => "iq1s",
         Codec::Iq1M => "iq1m",
@@ -1582,6 +1584,7 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
         // shape table, never hand-invented.
         Codec::Q4_1 => GgmlType::Q4_1.block_layout().block_bytes as usize,
         Codec::Q8_1 => GgmlType::Q8_1.block_layout().block_bytes as usize,
+        Codec::Q8_1Grouped => BlockLayout::Q8_1_GROUPED.block_bytes as usize,
         Codec::Q8K => GgmlType::Q8_K.block_layout().block_bytes as usize,
         Codec::Iq1S => GgmlType::Iq1S.block_layout().block_bytes as usize,
         Codec::Iq1M => GgmlType::Iq1M.block_layout().block_bytes as usize,
@@ -1650,6 +1653,7 @@ pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
         // Unreachable by construction -- see `codec_cache_token`'s doc.
         Codec::Q4_1 => GgmlType::Q4_1.block_layout().block_elements as usize,
         Codec::Q8_1 => GgmlType::Q8_1.block_layout().block_elements as usize,
+        Codec::Q8_1Grouped => BlockLayout::Q8_1_GROUPED.elements as usize,
         Codec::Q8K => GgmlType::Q8_K.block_layout().block_elements as usize,
         Codec::Iq1S => GgmlType::Iq1S.block_layout().block_elements as usize,
         Codec::Iq1M => GgmlType::Iq1M.block_layout().block_elements as usize,
@@ -2002,6 +2006,7 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
         | Codec::BFloat16
         | Codec::Q4_1
         | Codec::Q8_1
+        | Codec::Q8_1Grouped
         | Codec::Q8K
         | Codec::Iq1S
         | Codec::Iq1M

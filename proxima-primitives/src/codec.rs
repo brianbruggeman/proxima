@@ -51,6 +51,7 @@ pub enum Codec {
     Bf8E5M2,
     Bf4E2M1,
     Fp6E3M2,
+    Q8_1Grouped,
 }
 
 impl Codec {
@@ -94,6 +95,7 @@ impl Codec {
             Codec::Fp6E3M2 => 32,
             Codec::Pq2_0 => 33,
             Codec::Ptq1_0 => 34,
+            Codec::Q8_1Grouped => 35,
         }
     }
 
@@ -136,8 +138,16 @@ impl Codec {
             32 => Some(Codec::Fp6E3M2),
             33 => Some(Codec::Pq2_0),
             34 => Some(Codec::Ptq1_0),
+            35 => Some(Codec::Q8_1Grouped),
             _ => None,
         }
+    }
+
+    /// Whether the buffer holds an activation a `BlockQuantize` node already quantized, whatever
+    /// its block layout.
+    #[must_use]
+    pub const fn is_quantized_activation(self) -> bool {
+        matches!(self, Codec::Q8_1 | Codec::Q8_1Grouped)
     }
 
     /// Weights per [`Codec::Fp6E3M2`] block, one f16 absmax scale each.
@@ -158,6 +168,7 @@ impl Codec {
             Codec::Q5_1 => Some(BlockLayout::Q5_1),
             Codec::Q8_0 => Some(BlockLayout::Q8_0),
             Codec::Q8_1 => Some(BlockLayout::Q8_1),
+            Codec::Q8_1Grouped => Some(BlockLayout::Q8_1_GROUPED),
             Codec::Q1_0 => Some(BlockLayout::Q1_0),
             Codec::Q2_0 => Some(BlockLayout::Q2_0),
             Codec::Pq2_0 => Some(BlockLayout::PQ2_0),
@@ -195,6 +206,7 @@ impl Codec {
             | Codec::Q5_0
             | Codec::Q4_1
             | Codec::Q8_1
+            | Codec::Q8_1Grouped
             | Codec::Q8K
             | Codec::Iq1S
             | Codec::Iq1M
@@ -259,8 +271,9 @@ mod tests {
             (Codec::Fp6E3M2, 32),
             (Codec::Pq2_0, 33),
             (Codec::Ptq1_0, 34),
+            (Codec::Q8_1Grouped, 35),
         ];
-        assert_eq!(variants.len(), 35);
+        assert_eq!(variants.len(), 36);
         for (codec, stable_tag) in variants {
             assert_eq!(codec.tag(), stable_tag);
             assert_eq!(Codec::from_tag(stable_tag), Some(codec));
@@ -274,8 +287,8 @@ mod tests {
     }
 
     #[test]
-    fn fp6_e3m2_codec_tag_35_rejected() {
-        assert_eq!(Codec::from_tag(35), None);
+    fn fp6_e3m2_codec_tag_36_rejected() {
+        assert_eq!(Codec::from_tag(36), None);
     }
 
     #[test]
@@ -286,7 +299,7 @@ mod tests {
 
     #[test]
     fn card_02_bf8_codec_rejects_unassigned_tag() {
-        assert_eq!(Codec::from_tag(35), None);
+        assert_eq!(Codec::from_tag(36), None);
         assert_eq!(Codec::from_tag(255), None);
     }
 }
