@@ -1204,3 +1204,28 @@ pub fn top_fraction_mask(
         None => Ok(selected),
     }
 }
+
+/// Every `Reduce Add` in `program` that sums an f32 square `x*x` (one
+/// `Multiply` reading the same node through the same map twice) in f32 -- a
+/// sum-of-squares norm that did not go through [`mean_of_squares`] and so
+/// accumulates in single precision where ggml's CPU norms use `ggml_float`.
+#[must_use]
+pub fn f32_sums_of_squares(program: &[Op]) -> Vec<NodeId> {
+    program
+        .iter()
+        .enumerate()
+        .filter_map(|(position, expr)| {
+            let Op::Reduce(fold) = expr else {
+                return None;
+            };
+            let squares_in_f32 = fold.dtype == DType::FLOAT32
+                && fold.body == ScalarOp::Add
+                && matches!(
+                    program.get(fold.operand.0 as usize),
+                    Some(Op::Elementwise { body: ScalarOp::Multiply, operands, .. })
+                        if operands.len() == 2 && operands[0] == operands[1]
+                );
+            squares_in_f32.then_some(NodeId(position as u32))
+        })
+        .collect()
+}
