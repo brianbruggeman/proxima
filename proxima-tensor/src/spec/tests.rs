@@ -16048,7 +16048,7 @@ mod gemma4_synthetic_parity {
                     count,
                     cached_len,
                     padding,
-                    NumericPolicy::llama_relaxed(),
+                    NumericPolicy::llama_relaxed().with_flash_narrowing(true),
                     is_cached_attention,
                 );
                 assert_eq!(
