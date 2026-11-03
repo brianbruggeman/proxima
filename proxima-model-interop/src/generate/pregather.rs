@@ -1009,7 +1009,6 @@ impl<'file> LoadedModel<'file> {
 
                 if layer == 3
                     && is_router
-                    && std::env::var_os("PROXIMA_DEBUG_DENSE_GRAPH").is_some()
                     && let Some(Op::Reduce(reduce)) = self.program.get(
                         self.moe_layer_diagnostics[layer]
                             .dense_attention_taps
@@ -2035,7 +2034,7 @@ impl<'file> LoadedModel<'file> {
                         readback_bytes,
                         "pre-gather segment returned requested payload bytes"
                     );
-                    if std::env::var_os("PROXIMA_DEBUG_MOE_REQUEST_BYTES").is_some() {
+                    if event_enabled(module_path!(), Level::TRACE) {
                         let mut returned = requested
                             .iter()
                             .filter_map(|(mapped, original)| {
@@ -2103,7 +2102,7 @@ impl<'file> LoadedModel<'file> {
                         continue;
                     }
                     let (values, shape) = evaluated.get(mapped).ok_or_else(|| {
-                        if std::env::var_os("PROXIMA_DEBUG_MOE_MISSING_NODE").is_some() {
+                        {
                             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                             let placed = plan.router_cut_placements.contains_key(&original);
                             #[cfg(not(all(

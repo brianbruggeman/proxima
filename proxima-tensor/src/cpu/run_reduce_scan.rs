@@ -1155,20 +1155,6 @@ pub(super) fn run_reduce_planned<B: Deref<Target = [f32]>>(
     output: &mut [f32],
     packed_width: Option<&PackedWidthPanels>,
 ) -> Result<(), TensorError> {
-    if std::env::var_os("PROXIMA_DEBUG_DENSE_DIGEST").is_some() && resolved.node.0 == 1265 {
-        let output_axes = match &resolved.kind {
-            BoundOpKind::Reduce { output_axes, .. } => output_axes.as_slice(),
-            _ => &[],
-        };
-        eprintln!(
-            "dense_reduce node={} output_len={} extents={:?} output_axes={:?} operands={:?}",
-            resolved.node.0,
-            output.len(),
-            resolved.extents,
-            output_axes,
-            resolved.operands(),
-        );
-    }
     // only the `aarch64` width-tile block below reads this; every other
     // target's caller always passes `None`, so name it used here rather
     // than at every non-aarch64 call site.

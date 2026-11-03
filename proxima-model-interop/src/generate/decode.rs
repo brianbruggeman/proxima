@@ -4112,9 +4112,9 @@ only the single-row decode kernel reads the half-width device cache",
         // its accepted span can resume each recurrent layer from an earlier row
         let mut retained_verify: Option<RetainedVerify> = None;
         let mut validated_programs: BTreeSet<usize> = BTreeSet::new();
-        // the two-layer cache checksum walks whole caches every step; only the diag knob pays for it
+        // the two-layer cache checksum walks whole caches every step; only an enabled debug level pays for it
         #[cfg(feature = "instrument")]
-        let cache_checksum_diag = std::env::var_os("PROXIMA_LOGITS_DIAG").is_some();
+        let cache_checksum_diag = event_enabled(module_path!(), Level::DEBUG);
         // the sliding-pattern family's attention layers keep their KV on the device from the call's first
         // evaluation (`DeviceKv`'s own doc); every other architecture keeps the host path
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -6674,16 +6674,14 @@ did not hold every cached position)",
                         break 'evaluate;
                     }
                     if is_last_step_batch {
-                        // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost):
-                        // one runtime knob, off by default and independent of
-                        // PROXIMA_DEBUG_METAL_STAGES, gates both the O(vocab_size)
+                        // the debug level being enabled gates both the O(vocab_size)
                         // non-finite scan below and the logits_hash FNV fold --
                         // neither feeds sample_next_token (it reads `last_position`
                         // directly).
                         #[cfg(feature = "instrument")]
                         let fetch_started = read_ticks();
                         #[cfg(any(feature = "instrument", feature = "gpu"))]
-                        let logits_diag_enabled = std::env::var_os("PROXIMA_LOGITS_DIAG").is_some();
+                        let logits_diag_enabled = event_enabled(module_path!(), Level::DEBUG);
                         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                         let greedy_device_token: Option<u32> = match (greedy_step, &greedy_program)
                         {
@@ -6825,8 +6823,8 @@ did not hold every cached position)",
                         // the O(vocab_size) argmax scan and its `debug!` line feed
                         // no consumer other than this diagnostic -- `sample_next_token`
                         // below reads `last_position` directly. Gate both on the same
-                        // `logits_diag_enabled` knob that already gates the logits_hash
-                        // fold, so the default (unset) path pays neither cost.
+                        // `logits_diag_enabled` check that already gates the logits_hash
+                        // fold, so a disabled debug level pays neither cost.
                         #[cfg(feature = "instrument")]
                         let (scan_ticks, debug_ticks) = if logits_diag_enabled {
                             let argmax_token =
@@ -6873,13 +6871,7 @@ did not hold every cached position)",
                         )))]
                         let barriers_step = 0_u64;
                         logits_sink.observe(last_position, barriers_step);
-                        // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost):
-                        // this eprintln is gated on PROXIMA_LOGITS_DIAG, not on
-                        // PROXIMA_DEBUG_METAL_STAGES or "instrument" -- off by
-                        // default. When set, one FNV1a64 fold over vocab_size f32
-                        // elements (4 bytes/element) plus an unbuffered stderr
-                        // write runs every decode step, same format as before so
-                        // the existing corpus tooling keeps working.
+                        // the hash folds the whole vocab every step, so it is gated on the debug level
                         #[cfg(feature = "instrument")]
                         let pre_logits_ticks = elapsed_ticks(pre_logits_started);
                         #[cfg(feature = "instrument")]
@@ -7753,10 +7745,9 @@ did not hold every cached position)",
                 #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
                 let barriers_step = 0_u64;
                 logits_sink.observe(last_position, barriers_step);
-                // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost): same
-                // PROXIMA_LOGITS_DIAG gate as the batch decode path's logits_hash.
+                // same debug-level gate as the batch decode path's logits_hash.
                 #[cfg(feature = "gpu")]
-                if std::env::var_os("PROXIMA_LOGITS_DIAG").is_some() {
+                if event_enabled(module_path!(), Level::DEBUG) {
                     debug!(
                         step = _step as u64,
                         hash = %format!("0x{:016x}", logits_bits_hash(last_position)),

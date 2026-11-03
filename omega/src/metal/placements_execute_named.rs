@@ -305,10 +305,12 @@ fn command_buffer_chunk_count(plan_chunks: u32, decode_shaped: bool) -> usize {
     // consumer below is compiled out) does not trip `unused_variables`.
     let _ = source;
     #[cfg(feature = "instrument")]
-    if env_flags::debug_metal_stages() {
-        let plan_shape = if decode_shaped { "decode" } else { "prefill" };
-        eprintln!("command_buffer_chunks={chunks} source={source} plan_shape={plan_shape}");
-    }
+    debug!(
+        chunks = chunks as u64,
+        source,
+        plan_shape = if decode_shaped { "decode" } else { "prefill" },
+        "command buffer chunk count resolved"
+    );
     chunks
 }
 
@@ -646,13 +648,11 @@ pub(super) fn execute_plan_with_placements_inner(
         .iter()
         .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
         .collect();
-    if env_flags::debug_placement_keys() {
-        eprintln!(
-            "metal placement keys inputs={:?} blocks={:?}",
-            input_placed.keys().collect::<Vec<_>>(),
-            prepared.block_nodes,
-        );
-    }
+    debug!(
+        inputs = ?input_placed.keys().collect::<Vec<_>>(),
+        blocks = ?prepared.block_nodes,
+        "metal placement keys for this execution"
+    );
     let output_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = output_placements
         .iter()
         .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
@@ -2372,14 +2372,12 @@ pub fn execute_plan_named_with_placements_and_expert_sources(
     let expert_stage_started = std::time::Instant::now();
     let expert_buffers = stage_expert_sources(plan, &blocks, expert_sources)?;
     #[cfg(feature = "instrument")]
-    if env_flags::debug_metal_stages() {
-        eprintln!(
-            "expert_source_stage_ms={} source_nodes={} staged_nodes={}",
-            expert_stage_started.elapsed().as_secs_f64() * 1e3,
-            expert_sources.len(),
-            expert_buffers.len(),
-        );
-    }
+    debug!(
+        stage_ms = expert_stage_started.elapsed().as_secs_f64() * 1e3,
+        source_nodes = expert_sources.len() as u64,
+        staged_nodes = expert_buffers.len() as u64,
+        "expert sources staged before placed execution"
+    );
     execute_plan_with_placements_inner(
         plan,
         &blocks,

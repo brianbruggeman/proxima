@@ -861,10 +861,8 @@ pub(super) fn emit_with_expert_sources_mode(
                 source_len = kernel.source.len() as u64,
                 "moe_expert_lowering"
             );
-            if std::env::var_os("PROXIMA_DEBUG_EXPERT_SOURCE_FULL").is_some()
-                && source_node == NodeId(3)
-            {
-                proxima_telemetry::debug!(
+            if source_node == NodeId(3) {
+                proxima_telemetry::trace!(
                     source_node = ?source_node,
                     source = %kernel.source,
                     "moe_expert_source_full"

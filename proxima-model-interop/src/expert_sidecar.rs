@@ -1460,19 +1460,17 @@ impl MappedExpertSidecar {
         checkpoint: &'file [u8],
         action: ResidencyAction,
     ) -> Result<(), InteropError> {
-        if std::env::var_os("PROXIMA_DEBUG_EXPERT_UPLOADS").is_some() {
-            let address = match action {
-                ResidencyAction::Page(address) | ResidencyAction::Evict(address) => address,
-            };
-            let codecs = ExpertProjection::ALL.map(|projection| {
+        let (ResidencyAction::Page(address) | ResidencyAction::Evict(address)) = action;
+        proxima_telemetry::debug!(
+            action = ?action,
+            layer = address.layer as u64,
+            expert = address.expert as u64,
+            codecs = ?ExpertProjection::ALL.map(|projection| {
                 self.descriptor(address, projection)
                     .map(|descriptor| (descriptor.source_codec, descriptor.target_codec))
-            });
-            eprintln!(
-                "expert sidecar action={action:?} layer={} expert={} codecs={codecs:?}",
-                address.layer, address.expert,
-            );
-        }
+            }),
+            "expert residency action applied to the sidecar slab"
+        );
         match action {
             ResidencyAction::Page(address) => self.promote_high(slab, checkpoint, address),
             ResidencyAction::Evict(address) => {
