@@ -6,12 +6,13 @@ use std::fs::read_dir;
 use std::path::{Path, PathBuf};
 
 pub const MODEL_DIRS_ENV: &str = "PROXIMA_MODEL_DIRS";
-const DEFAULT_MODEL_DIRS: [&str; 5] = [
+pub const LLAMA_CPP_DIR_ENV: &str = "PROXIMA_LLAMA_CPP_DIR";
+const DEFAULT_LLAMA_CPP_CHECKOUT: &str = "repos/llama.cpp-incumbent";
+const DEFAULT_MODEL_DIRS: [&str; 4] = [
     "/mnt/data3/models",
     "/mnt/data5/models",
     "/mnt/data5/models/infer-fixtures",
     "/mnt/data5/ollama/blobs",
-    "/home/bix/repos/llama.cpp-incumbent/models",
 ];
 
 /// `PROXIMA_MODEL_DIRS` when set, else `$HOME/models` followed by the shared model mounts.
@@ -24,7 +25,18 @@ pub fn model_search_dirs() -> Vec<PathBuf> {
     home_models
         .into_iter()
         .chain(DEFAULT_MODEL_DIRS.iter().map(PathBuf::from))
+        .chain(llama_cpp_models_dir())
         .collect()
+}
+
+/// `models/` under `PROXIMA_LLAMA_CPP_DIR`, else under `$HOME/repos/llama.cpp-incumbent`; llama.cpp ships its vocab-only ggufs there.
+fn llama_cpp_models_dir() -> Option<PathBuf> {
+    let checkout = var_os(LLAMA_CPP_DIR_ENV).map(PathBuf::from).or_else(|| {
+        var("HOME")
+            .ok()
+            .map(|home| Path::new(&home).join(DEFAULT_LLAMA_CPP_CHECKOUT))
+    })?;
+    Some(checkout.join("models"))
 }
 
 fn file_with_length(directory: &Path, length: u64) -> Option<PathBuf> {
