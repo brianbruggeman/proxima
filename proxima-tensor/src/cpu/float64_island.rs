@@ -31,7 +31,9 @@ pub(super) fn step<B: Deref<Target = [f32]>>(
         return Ok(IslandStep::NotIsland);
     }
     match single_wide_operand(computed, wide) {
-        Some(source) => Ok(IslandStep::Narrowed(source.iter().map(|&value| value as f32).collect())),
+        Some(source) => Ok(IslandStep::Narrowed(
+            source.iter().map(|&value| value as f32).collect(),
+        )),
         None => Ok(IslandStep::NotIsland),
     }
 }
@@ -56,7 +58,10 @@ fn run_wide<B: Deref<Target = [f32]>>(
     wide: &[Option<Cow<'static, [f64]>>],
     output: &mut [f64],
 ) -> Result<(), TensorError> {
-    let not_lowerable = |reason| TensorError::NotLowerable { node: computed.node, reason };
+    let not_lowerable = |reason| TensorError::NotLowerable {
+        node: computed.node,
+        reason,
+    };
     match &computed.kind {
         BoundOpKind::Constant { value } => {
             output.fill(f64::from(*value));
@@ -67,9 +72,13 @@ fn run_wide<B: Deref<Target = [f32]>>(
                 let narrow = buffers
                     .get(source.0 as usize)
                     .and_then(Option::as_deref)
-                    .ok_or(not_lowerable("a widening convert's f32 operand has no buffer"))?;
+                    .ok_or(not_lowerable(
+                        "a widening convert's f32 operand has no buffer",
+                    ))?;
                 if narrow.len() != output.len() {
-                    return Err(not_lowerable("a widening convert must read its operand one to one"));
+                    return Err(not_lowerable(
+                        "a widening convert must read its operand one to one",
+                    ));
                 }
                 for (slot, &value) in output.iter_mut().zip(narrow) {
                     *slot = f64::from(value);
@@ -85,16 +94,22 @@ fn run_wide<B: Deref<Target = [f32]>>(
         } if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) => {
             run_reduce_typed::<f64>(computed, wide, &[], output)
         }
-        _ => Err(not_lowerable("only elementwise, reduce and constant ops run in f64")),
+        _ => Err(not_lowerable(
+            "only elementwise, reduce and constant ops run in f64",
+        )),
     }
 }
 
 /// Drops the f64 buffer of every node retiring at this position, the f64
 /// counterpart of each loop's own f32 retirement.
-pub(super) fn retire(wide: &mut [Option<Cow<'static, [f64]>>], retiring: &[NodeId]) {
+pub(super) fn retire(wide: &mut [Option<Cow<'static, [f64]>>], retiring: &[NodeId]) -> usize {
+    let mut dropped = 0;
     for node in retiring {
-        if let Some(slot) = wide.get_mut(node.0 as usize) {
-            *slot = None;
+        if let Some(slot) = wide.get_mut(node.0 as usize)
+            && slot.take().is_some()
+        {
+            dropped += 1;
         }
     }
+    dropped
 }

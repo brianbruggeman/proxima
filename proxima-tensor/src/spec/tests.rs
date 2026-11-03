@@ -501,7 +501,7 @@ fn public_builders_compose_a_one_layer_forward_program() {
     );
     let embedded = embedding_lookup(&mut program, table, ids);
 
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let inv_dim = count_constant(&mut program, embedding as u32);
     // `eps` carries its own `s` (token) axis throughout this module's
     // rmsnorm-family ops (`rmsnorm`'s own `(eps, "s->s")`,
     // `append_hyper_connection_mix`'s `(eps, "s->sh")`) -- a per-token
@@ -10543,7 +10543,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
             alloc::vec![sequence_extent, Extent::Static(embedding)],
             "x",
         );
-        let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+        let inv_dim = count_constant(&mut program, embedding as u32);
         let eps = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -10558,7 +10558,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
         );
         let one = scalar_constant(&mut program, 1.0);
         let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (head_k_dim as f32).sqrt());
-        let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
+        let inv_head_v_dim = count_constant(&mut program, head_v_dim as u32);
         let attn_norm_weight = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -12809,7 +12809,7 @@ fn single_range_layer_with_order(
         alloc::vec![Extent::Symbolic(0), Extent::Static(embedding)],
         "x",
     );
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let inv_dim = count_constant(&mut program, embedding as u32);
     let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
@@ -12937,7 +12937,7 @@ fn single_range_layer_with_order(
         "ffn_down.weight",
     );
     let qk_norm_weights = qk_norm.then(|| {
-        let inv_head_dim = scalar_constant(&mut program, 1.0 / head_dim as f32);
+        let inv_head_dim = count_constant(&mut program, head_dim as u32);
         let q_norm_weight = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -13918,10 +13918,10 @@ mod gemma4_synthetic_parity {
             alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
             "x",
         );
-        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+        let inv_dim = count_constant(&mut program, EMBEDDING as u32);
         let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
         let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0);
-        let inv_head_dim = scalar_constant(&mut program, 1.0 / HEAD_DIM as f32);
+        let inv_head_dim = count_constant(&mut program, HEAD_DIM as u32);
         let cos = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -14112,7 +14112,7 @@ mod gemma4_synthetic_parity {
             "expert_x",
         );
         let ones = scalar_constant(&mut program, 1.0);
-        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+        let inv_dim = count_constant(&mut program, EMBEDDING as u32);
         // `eps` carries its own `s` (token) axis, matching every rmsnorm
         // caller's own fixture -- a rank-0 constant here mismatches
         // `rmsnorm`'s own `(eps, "s->s")` exact-shape operand.
@@ -18501,9 +18501,9 @@ mod gemma4_synthetic_parity {
             alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
             "x",
         );
-        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+        let inv_dim = count_constant(&mut program, EMBEDDING as u32);
         let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
-        let inv_head_dim = scalar_constant(&mut program, 1.0 / HEAD_DIM as f32);
+        let inv_head_dim = count_constant(&mut program, HEAD_DIM as u32);
         let attn_norm = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -18729,10 +18729,10 @@ mod gemma4_synthetic_parity {
                 alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING as u32)],
                 "x",
             );
-            let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+            let inv_dim = count_constant(&mut program, EMBEDDING as u32);
             let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
             let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0);
-            let inv_head_dim = scalar_constant(&mut program, 1.0 / HEAD_DIM as f32);
+            let inv_head_dim = count_constant(&mut program, HEAD_DIM as u32);
             let cos = input_leaf(
                 &mut program,
                 DType::FLOAT32,
@@ -22131,12 +22131,12 @@ mod mixer_over_packed_projection {
             alloc::vec![rows, Extent::Static(EMBEDDING as u32)],
             "x",
         );
-        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+        let inv_dim = count_constant(&mut program, EMBEDDING as u32);
         let eps = input_leaf(&mut program, DType::FLOAT32, alloc::vec![rows], "eps");
         let head_eps = leaf(&mut program, &[KV_HEADS, GROUP], "head_eps");
         let one = scalar_constant(&mut program, 1.0);
         let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (STATE as f32).sqrt());
-        let inv_head_v_dim = scalar_constant(&mut program, 1.0 / HEAD_V_DIM as f32);
+        let inv_head_v_dim = count_constant(&mut program, HEAD_V_DIM as u32);
         let attn_norm_weight = leaf(&mut program, &[EMBEDDING as u32], "attn_norm_weight");
         let wqkv = leaf(&mut program, &[EMBEDDING as u32, QKV], "wqkv");
         let wqkv_gate = leaf(&mut program, &[EMBEDDING as u32, INNER as u32], "wqkv_gate");

@@ -825,6 +825,10 @@ fn evaluate_quantized_with_policy(
                     true
                 }
             };
+        if island_handled {
+            live_now += 1;
+            peak_live_buffers = peak_live_buffers.max(live_now);
+        }
         if !epilogue_fused_away && !island_handled {
             #[cfg(feature = "instrument")]
             let alloc_started = instrument::read_ticks();
@@ -1025,7 +1029,7 @@ fn evaluate_quantized_with_policy(
                 peak_live_buffers = peak_live_buffers.max(live_now);
             }
         }
-        float64_island::retire(&mut wide, &retires[position]);
+        live_now = live_now.saturating_sub(float64_island::retire(&mut wide, &retires[position]));
         for retired in &retires[position] {
             // NOT always a `Some` -> `None` transition, unlike
             // `evaluate_pooled`/`evaluate_parallel`'s identical loop: a
@@ -1709,10 +1713,10 @@ pub(super) fn evaluate_pooled(
         };
         if let Some(output) = output {
             buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
-            live_now += 1;
         }
-        float64_island::retire(&mut wide, &retires[position]);
+        live_now += 1;
         peak_live_buffers = peak_live_buffers.max(live_now);
+        live_now = live_now.saturating_sub(float64_island::retire(&mut wide, &retires[position]));
         for retired in &retires[position] {
             // `blocks: &[&[f32]]` means every node this evaluator ever
             // touches is float32 and lands in `buffers` -- no quantized-weight
@@ -1924,10 +1928,11 @@ pub fn evaluate_parallel(
         if !matches!(island, float64_island::IslandStep::NotIsland) {
             if let float64_island::IslandStep::Narrowed(values) = island {
                 buffers[computed.node.0 as usize] = Some(Cow::Owned(values));
-                live_now += 1;
-                peak_live_buffers = peak_live_buffers.max(live_now);
             }
-            float64_island::retire(&mut wide, &retires[position]);
+            live_now += 1;
+            peak_live_buffers = peak_live_buffers.max(live_now);
+            live_now =
+                live_now.saturating_sub(float64_island::retire(&mut wide, &retires[position]));
             for retired in &retires[position] {
                 if buffers[retired.0 as usize].take().is_some() {
                     live_now -= 1;
@@ -2511,7 +2516,10 @@ pub(super) fn reject_non_float32(
         let is_unreferenced_input =
             matches!(expr, Op::Input { .. }) && !referenced_nodes.contains(&node);
         let is_wide_island_node = expr.dtype() == DType::FLOAT64
-            && matches!(expr, Op::Elementwise { .. } | Op::Reduce(_) | Op::Constant { .. });
+            && matches!(
+                expr,
+                Op::Elementwise { .. } | Op::Reduce(_) | Op::Constant { .. }
+            );
         if expr.dtype() != DType::FLOAT32
             && !index_nodes.contains(&node)
             && !is_quantized_weight
@@ -2555,10 +2563,7 @@ pub(super) fn reject_non_float32_outputs(
         let is_quantized_weight = quantized_weights.contains(&node)
             && (is_quantized_matmul_operand(program, node)
                 || is_quantized_gather_operand(program, node));
-        if expr.dtype() != DType::FLOAT32
-            && !index_nodes.contains(&node)
-            && !is_quantized_weight
-        {
+        if expr.dtype() != DType::FLOAT32 && !index_nodes.contains(&node) && !is_quantized_weight {
             return Err(TensorError::NotLowerable {
                 node,
                 reason: "this pipeline's buffers and SIMD kernels are f32-only; route a \

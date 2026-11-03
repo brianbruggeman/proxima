@@ -1542,7 +1542,7 @@ where
             scalar_constant(program, config.score_scale.multiplier())
         });
         let inv_head_dim = find_or_insert(&mut inv_head_dim_cache, config.head_dim, || {
-            scalar_constant(program, 1.0 / config.head_dim as f32)
+            count_constant(program, config.head_dim)
         });
         let (cos, sin) = match rope_table_cache
             .iter()
@@ -1725,7 +1725,7 @@ pub(crate) fn append_ple_flat_projections(
         alloc::vec![Extent::Static(ple_dim)],
         "per_layer_proj_norm.weight",
     );
-    let inv_ple_dim = scalar_constant(program, 1.0 / ple_dim as f32);
+    let inv_ple_dim = count_constant(program, ple_dim as u32);
 
     Ok(PleFlatProjections {
         proj_flat,
