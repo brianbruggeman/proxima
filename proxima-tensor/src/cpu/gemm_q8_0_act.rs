@@ -2,12 +2,13 @@ use super::*;
 
 #[cfg(target_arch = "x86_64")]
 use core::arch::x86_64::{
-    __m256i, _mm_add_epi32, _mm_and_si128, _mm_cvtsi128_si32, _mm_loadu_si128, _mm_set1_epi8,
-    _mm_shuffle_epi32, _mm_srli_epi16, _mm_unpackhi_epi64, _mm256_and_si256, _mm256_andnot_si256,
-    _mm256_castsi128_si256, _mm256_castsi256_si128, _mm256_cmpeq_epi8, _mm256_extracti128_si256,
-    _mm256_inserti128_si256, _mm256_loadu_si256, _mm256_madd_epi16, _mm256_maddubs_epi16,
-    _mm256_set1_epi8, _mm256_set1_epi16, _mm256_set1_epi32, _mm256_setr_epi8, _mm256_shuffle_epi8,
-    _mm256_sign_epi8, _mm256_sub_epi8,
+    __m256i, _mm_add_epi32, _mm_and_si128, _mm_cvtph_ps, _mm_cvtsi32_si128, _mm_cvtsi128_si32,
+    _mm_cvtss_f32, _mm_loadu_si128, _mm_set1_epi8, _mm_shuffle_epi32, _mm_srli_epi16,
+    _mm_unpackhi_epi64, _mm256_and_si256, _mm256_andnot_si256, _mm256_castsi128_si256,
+    _mm256_castsi256_si128, _mm256_cmpeq_epi8, _mm256_extracti128_si256, _mm256_inserti128_si256,
+    _mm256_loadu_si256, _mm256_madd_epi16, _mm256_maddubs_epi16, _mm256_set1_epi8,
+    _mm256_set1_epi16, _mm256_set1_epi32, _mm256_setr_epi8, _mm256_shuffle_epi8, _mm256_sign_epi8,
+    _mm256_sub_epi8,
 };
 
 use proxima_gguf::quant::{q5_0, q8_0};
@@ -137,14 +138,67 @@ pub(super) unsafe fn block_sum_q5_0_avx2(weight_block: &[u8], activation_block: 
     }
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(test, target_arch = "x86_64"))]
 fn avx2_available() -> bool {
     std::is_x86_feature_detected!("avx2")
 }
 
-#[cfg(not(target_arch = "x86_64"))]
-fn avx2_available() -> bool {
-    false
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn scale_f16c(block: &[u8]) -> f32 {
+    let bits = i32::from(u16::from_le_bytes([block[0], block[1]]));
+    _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(bits)))
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn row_q8_0_avx2(weight_row: &[u8], activation_q8_0: &[u8]) -> f32 {
+    let mut sum = 0.0f32;
+    for (weight_block, activation_block) in weight_row
+        .as_chunks::<{ q8_0::BLOCK_BYTES }>()
+        .0
+        .iter()
+        .zip(activation_q8_0.as_chunks::<Q8_0_ACT_BLOCK_BYTES>().0.iter())
+    {
+        // SAFETY: avx2 and f16c are enabled on this function; blocks are exact-size arrays.
+        let (block_sum, weight_scale, activation_scale) = unsafe {
+            (
+                block_sum_q8_0_avx2(weight_block, activation_block),
+                scale_f16c(weight_block),
+                scale_f16c(activation_block),
+            )
+        };
+        sum += (weight_scale * activation_scale) * block_sum as f32;
+    }
+    sum
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn row_q5_0_avx2(weight_row: &[u8], activation_q8_0: &[u8]) -> f32 {
+    let mut sum = 0.0f32;
+    for (weight_block, activation_block) in weight_row
+        .as_chunks::<{ q5_0::BLOCK_BYTES }>()
+        .0
+        .iter()
+        .zip(activation_q8_0.as_chunks::<Q8_0_ACT_BLOCK_BYTES>().0.iter())
+    {
+        // SAFETY: avx2 and f16c are enabled on this function; blocks are exact-size arrays.
+        let (block_sum, weight_scale, activation_scale) = unsafe {
+            (
+                block_sum_q5_0_avx2(weight_block, activation_block),
+                scale_f16c(weight_block),
+                scale_f16c(activation_block),
+            )
+        };
+        sum += (weight_scale * activation_scale) * block_sum as f32;
+    }
+    sum
+}
+
+#[cfg(target_arch = "x86_64")]
+fn row_kernels_available() -> bool {
+    std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("f16c")
 }
 
 fn block_dot_row(
@@ -152,7 +206,7 @@ fn block_dot_row(
     activation_q8_0: &[u8],
     weight_block_bytes: usize,
     scalar: fn(&[u8], &[u8]) -> i32,
-    #[cfg(target_arch = "x86_64")] vectorized: unsafe fn(&[u8], &[u8]) -> i32,
+    #[cfg(target_arch = "x86_64")] vectorized_row: unsafe fn(&[u8], &[u8]) -> f32,
 ) -> Result<f32, TensorError> {
     if !weight_row.len().is_multiple_of(weight_block_bytes) {
         return Err(TensorError::QuantizedShapeMismatch {
@@ -165,24 +219,18 @@ fn block_dot_row(
             reason: "q8_0 activation length does not match the weight row's block count",
         });
     }
-    let use_avx2 = avx2_available();
+    #[cfg(target_arch = "x86_64")]
+    if row_kernels_available() {
+        // SAFETY: avx2 and f16c were detected at runtime.
+        return Ok(unsafe { vectorized_row(weight_row, activation_q8_0) });
+    }
     let mut sum = 0.0f32;
     for (weight_block, activation_block) in weight_row
         .chunks_exact(weight_block_bytes)
         .zip(activation_q8_0.as_chunks::<Q8_0_ACT_BLOCK_BYTES>().0.iter())
     {
         #[cfg(target_arch = "x86_64")]
-        let block_sum = if use_avx2 {
-            // SAFETY: `use_avx2` is true only when avx2 was detected at runtime.
-            unsafe { vectorized(weight_block, activation_block) }
-        } else {
-            scalar(weight_block, activation_block)
-        };
-        #[cfg(not(target_arch = "x86_64"))]
-        let block_sum = {
-            let _ = use_avx2;
-            scalar(weight_block, activation_block)
-        };
+        let block_sum = scalar(weight_block, activation_block);
         sum += (f16_scale(weight_block) * f16_scale(activation_block)) * block_sum as f32;
     }
     Ok(sum)
@@ -195,7 +243,7 @@ pub(super) fn dot_q8_0_q8_0(weight_row: &[u8], activation_q8_0: &[u8]) -> Result
         activation_q8_0,
         q8_0::BLOCK_BYTES,
         block_sum_q8_0_scalar,
-        block_sum_q8_0_avx2,
+        row_q8_0_avx2,
     )
 }
 
@@ -216,7 +264,7 @@ pub(super) fn dot_q5_0_q8_0(weight_row: &[u8], activation_q8_0: &[u8]) -> Result
         activation_q8_0,
         q5_0::BLOCK_BYTES,
         block_sum_q5_0_scalar,
-        block_sum_q5_0_avx2,
+        row_q5_0_avx2,
     )
 }
 
@@ -365,6 +413,7 @@ mod tests {
             let ours = dot_q8_0_q8_0(&block, &packed).map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
             prop_assert_eq!(block_sum_q8_0_scalar(&block, &packed), expected_sum);
             prop_assert!((f64::from(ours) - expected).abs() <= 2e-6 * expected.abs().max(1e-6));
+            #[cfg(target_arch = "x86_64")]
             if avx2_available() {
                 // SAFETY: avx2 detected above.
                 prop_assert_eq!(unsafe { block_sum_q8_0_avx2(&block, &packed) }, expected_sum);
@@ -386,6 +435,7 @@ mod tests {
             let ours = dot_q5_0_q8_0(&block, &packed).map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
             prop_assert_eq!(block_sum_q5_0_scalar(&block, &packed), expected_sum);
             prop_assert!((f64::from(ours) - expected).abs() <= 2e-6 * expected.abs().max(1e-6));
+            #[cfg(target_arch = "x86_64")]
             if avx2_available() {
                 // SAFETY: avx2 detected above.
                 prop_assert_eq!(unsafe { block_sum_q5_0_avx2(&block, &packed) }, expected_sum);
