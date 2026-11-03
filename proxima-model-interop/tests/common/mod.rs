@@ -28,7 +28,8 @@ fn gguf_with_length(directory: &Path, length: u64) -> Option<PathBuf> {
         .map(|entry| entry.path())
 }
 
-/// Resolution order: the named env var, the recorded path, then any file of the
+/// Resolution order: the named env var, the recorded path, a file in the search dirs with the
+/// recorded file name (ollama blobs are named by their own sha256), then any file of the
 /// recorded byte length in `PROXIMA_MODEL_DIRS` (default `$HOME/models` and the
 /// shared model mounts). The length is the identity; a wrong file still fails
 /// its content fixtures.
@@ -38,6 +39,11 @@ pub fn resolve_checkpoint(env_name: &str, recorded: &str, length: u64) -> PathBu
     }
     if Path::new(recorded).exists() {
         return PathBuf::from(recorded);
+    }
+    let named = Path::new(recorded).file_name().map(PathBuf::from);
+    let by_name = named.and_then(|name| search_dirs().iter().map(|directory| directory.join(&name)).find(|path| path.is_file()));
+    if let Some(path) = by_name {
+        return path;
     }
     if length == 0 {
         return PathBuf::from(recorded);
