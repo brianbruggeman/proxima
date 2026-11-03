@@ -59,6 +59,8 @@ pub(super) fn tiny_ouro_gguf(num_loops: u32, skip_loop_final_norm: bool) -> Vec<
         feed_forward: 2,
         vocabulary: 2,
         epsilon: 1.0,
+        heads: 1,
+        kv_heads: 1,
     };
     ouro_gguf(&tensor_set(), &geometry, num_loops, skip_loop_final_norm)
 }
@@ -73,11 +75,13 @@ fn seeded(generator: &mut Lcg, count: usize, scale: f32, offset: f32) -> Vec<f32
 
 fn state_tensor_set(
     hidden: usize,
+    kv_width: usize,
     feed_forward: usize,
     vocabulary: usize,
 ) -> Vec<(String, Vec<u64>, Vec<u8>)> {
     let mut generator = Lcg(0x5EED_0A0B_0C0D_0E0F);
     let square = hidden * hidden;
+    let narrow = hidden * kv_width;
     let entries: Vec<(&str, Vec<u64>, Vec<f32>)> = vec![
         (
             "token_embd.weight",
@@ -111,13 +115,13 @@ fn state_tensor_set(
         ),
         (
             "blk.0.attn_k.weight",
-            vec![hidden as u64, hidden as u64],
-            seeded(&mut generator, square, 0.8, 0.0),
+            vec![hidden as u64, kv_width as u64],
+            seeded(&mut generator, narrow, 0.8, 0.0),
         ),
         (
             "blk.0.attn_v.weight",
-            vec![hidden as u64, hidden as u64],
-            seeded(&mut generator, square, 0.8, 0.0),
+            vec![hidden as u64, kv_width as u64],
+            seeded(&mut generator, narrow, 0.8, 0.0),
         ),
         (
             "blk.0.attn_output.weight",
@@ -165,8 +169,26 @@ pub(super) fn state_sensitive_ouro_gguf(num_loops: u32) -> Vec<u8> {
         feed_forward: 16,
         vocabulary: STATE_VOCABULARY,
         epsilon: 1e-5,
+        heads: 1,
+        kv_heads: 1,
     };
-    let tensors = state_tensor_set(8, 16, STATE_VOCABULARY as usize);
+    let tensors = state_tensor_set(8, 8, 16, STATE_VOCABULARY as usize);
+    ouro_gguf(&tensors, &geometry, num_loops, false)
+}
+
+/// The state-sensitive checkpoint at a serving head shape: two 128-wide query
+/// heads over one shared key/value head, the grouped geometry the CUDA tiled
+/// cached-attention body is selected for once a step carries sixteen or more rows.
+pub(super) fn grouped_state_sensitive_ouro_gguf(num_loops: u32) -> Vec<u8> {
+    let geometry = Geometry {
+        hidden: 256,
+        feed_forward: 64,
+        vocabulary: STATE_VOCABULARY,
+        epsilon: 1e-5,
+        heads: 2,
+        kv_heads: 1,
+    };
+    let tensors = state_tensor_set(256, 128, 64, STATE_VOCABULARY as usize);
     ouro_gguf(&tensors, &geometry, num_loops, false)
 }
 
@@ -175,6 +197,8 @@ struct Geometry {
     feed_forward: u32,
     vocabulary: u32,
     epsilon: f32,
+    heads: u32,
+    kv_heads: u32,
 }
 
 fn ouro_gguf(
@@ -211,12 +235,12 @@ fn ouro_gguf(
                 "ouro.feed_forward_length".into(),
                 MetadataValue::U32(geometry.feed_forward),
             ),
-            ("ouro.attention.head_count".into(), MetadataValue::U32(1)),
-            ("ouro.attention.head_count_kv".into(), MetadataValue::U32(1)),
+            ("ouro.attention.head_count".into(), MetadataValue::U32(geometry.heads)),
+            ("ouro.attention.head_count_kv".into(), MetadataValue::U32(geometry.kv_heads)),
             ("ouro.block_count".into(), MetadataValue::U32(1)),
             (
                 "ouro.rope.dimension_count".into(),
-                MetadataValue::U32(geometry.hidden),
+                MetadataValue::U32(geometry.hidden / geometry.heads),
             ),
             (
                 "ouro.attention.layer_norm_rms_epsilon".into(),
