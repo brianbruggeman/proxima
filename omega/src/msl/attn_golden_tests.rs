@@ -56,6 +56,7 @@ pub fn attention_op(
             scale: 1.0,
             cached_lower_inclusive,
             new_upper_inclusive: 0,
+                arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
         },
     }
 }

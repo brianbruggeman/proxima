@@ -5,6 +5,9 @@
 //! describe the operands and scalar domain needed when one bound step absorbs
 //! the attention subgraph.
 
+mod llama_flash;
+pub use llama_flash::stream_cached_attention_llama_flash;
+
 /// One key/value range (cached or new) for [`stream_cached_attention`].
 #[cfg(test)]
 pub struct AttentionRange<'buffer> {

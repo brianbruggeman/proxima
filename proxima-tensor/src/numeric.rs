@@ -90,6 +90,13 @@ pub struct NumericPolicy {
     #[cfg_attr(feature = "config", setting(default = false))]
     #[cfg_attr(feature = "config", serde(default))]
     pub bf16_input_rounding: bool,
+    /// Permits binding cached attention with the f32 online-softmax arithmetic instead of llama.cpp's
+    /// default flash arithmetic (f16 query/key/value, f16 accumulator). The CPU withholds it and
+    /// computes what the incumbent computes; a backend whose kernels are f32 until they emit f16
+    /// grants it, the way `accumulator_narrowing` lets a norm sum in f32.
+    #[cfg_attr(feature = "config", setting(default = false))]
+    #[cfg_attr(feature = "config", serde(default))]
+    pub flash_narrowing: bool,
     /// Permits narrowing a declared f64 accumulation island (an [`crate::op::Op`]
     /// whose dtype is [`crate::dtype::DType::FLOAT64`], e.g. the sum of squares
     /// [`crate::spec::mean_of_squares`] builds) to f32 before binding. A backend
@@ -126,6 +133,7 @@ impl NumericPolicy {
             epilogue_sources: false,
             activation_quantization: false,
             bf16_input_rounding: false,
+            flash_narrowing: false,
             accumulator_narrowing: false,
         }
     }
@@ -147,6 +155,7 @@ impl NumericPolicy {
             epilogue_sources: false,
             activation_quantization: false,
             bf16_input_rounding: false,
+            flash_narrowing: false,
             accumulator_narrowing: false,
         }
     }
@@ -164,6 +173,7 @@ impl NumericPolicy {
             epilogue_sources: false,
             activation_quantization: false,
             bf16_input_rounding: false,
+            flash_narrowing: false,
             accumulator_narrowing: false,
         }
     }
@@ -180,6 +190,7 @@ impl NumericPolicy {
             && (!required.epilogue_sources || self.epilogue_sources)
             && (!required.activation_quantization || self.activation_quantization)
             && (!required.bf16_input_rounding || self.bf16_input_rounding)
+            && (!required.flash_narrowing || self.flash_narrowing)
     }
 
     /// Fluent per-permission setters -- `#[non_exhaustive]` blocks a
@@ -234,6 +245,12 @@ impl NumericPolicy {
     #[must_use]
     pub const fn with_bf16_input_rounding(mut self, bf16_input_rounding: bool) -> Self {
         self.bf16_input_rounding = bf16_input_rounding;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_flash_narrowing(mut self, flash_narrowing: bool) -> Self {
+        self.flash_narrowing = flash_narrowing;
         self
     }
 }

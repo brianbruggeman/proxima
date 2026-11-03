@@ -11,7 +11,7 @@ readme = "README.md"
 include = ["src/**", "build.rs", "Cargo.toml", "proxima-tensor-runtime.toml", "examples/**", "benches/**", "README.md", "LICENSE*"]
 
 [features]
-default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot"]
+default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot", "cached-attention-streaming"]
 # `tensor-bgpool`/`tensor-cohort`/`cohort-staged-graph` are implied, not
 # opt-in: each was previously reachable only by naming a feature nothing
 # else turned on, so none of them ever executed in any default build.

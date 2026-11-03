@@ -1813,7 +1813,7 @@ fn bind_resolved(
     unfused: bool,
 ) -> Result<(Vec<BoundOp>, PackedOperands, LowerMicros), CudaDriverError> {
     // llama.cpp's cuda norms sum in float (`ggml-cuda/norm.cu:130-140`)
-    let numeric_policy = numeric_policy.with_accumulator_narrowing();
+    let numeric_policy = numeric_policy.with_accumulator_narrowing().with_flash_narrowing(true);
     let bind_started = Instant::now();
     let bound = if unfused {
         bind_unfused(program, shapes, outputs, numeric_policy)

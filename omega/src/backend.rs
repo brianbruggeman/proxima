@@ -914,11 +914,11 @@ fn binding_policy(plan: &Plan, numeric: NumericPolicy) -> NumericPolicy {
         #[cfg(feature = "cpu")]
         Plan::Cpu(_) => numeric,
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        Plan::Metal(_) => numeric.with_accumulator_narrowing(),
+        Plan::Metal(_) => numeric.with_accumulator_narrowing().with_flash_narrowing(true),
         #[cfg(feature = "wgpu-backend")]
-        Plan::Wgpu(_) => numeric.with_accumulator_narrowing(),
+        Plan::Wgpu(_) => numeric.with_accumulator_narrowing().with_flash_narrowing(true),
         #[cfg(feature = "cuda-driver")]
-        Plan::Cuda(_) => numeric.with_accumulator_narrowing(),
+        Plan::Cuda(_) => numeric.with_accumulator_narrowing().with_flash_narrowing(true),
         #[cfg(not(any(
             feature = "cpu",
             all(feature = "metal", target_os = "macos"),

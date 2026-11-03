@@ -799,8 +799,6 @@ pub(super) fn cached_attention_candidates(
     let mut candidates = Vec::new();
     let consumers = core::cell::OnceCell::new();
     let first_readers = core::cell::OnceCell::new();
-    #[cfg(not(feature = "metal-attn-split-decode"))]
-    let _ = numeric_policy;
     // resolved once: every caller supplies this leaf unconditionally
     // (`find_named_input`'s own doc), and both the padding-select walk below
     // and the ninth-operand push near the end of this loop need the SAME
@@ -1921,6 +1919,7 @@ pub(super) fn cached_attention_candidates(
                 scale: scale_value,
                 cached_lower_inclusive,
                 new_upper_inclusive: 0,
+                arithmetic: cached_attention_arithmetic(numeric_policy),
             },
         };
         #[cfg(feature = "instrument")]
@@ -1961,6 +1960,7 @@ pub(super) fn cached_attention_single_range_candidates(
     shapes: &Shapes,
     resolved: &[BoundOp],
     effective_outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
 ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
     let mut candidates = Vec::new();
     let consumers = core::cell::OnceCell::new();
@@ -2223,6 +2223,7 @@ pub(super) fn cached_attention_single_range_candidates(
                 scale: scale_value,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
+                arithmetic: cached_attention_arithmetic(numeric_policy),
             },
         };
         candidates.push((fused, absorbed));
@@ -2442,6 +2443,7 @@ mod kv_padding_tests {
                 scale: 1.0,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
+                arithmetic: CachedAttentionArithmetic::OnlineF32,
             },
             node,
         )
@@ -2507,5 +2509,14 @@ mod kv_padding_tests {
             &[NodeId(0)],
             is_kv
         ));
+    }
+}
+
+/// llama.cpp's default flash arithmetic unless the policy grants the f32 online kernel.
+fn cached_attention_arithmetic(numeric_policy: NumericPolicy) -> CachedAttentionArithmetic {
+    if numeric_policy.flash_narrowing {
+        CachedAttentionArithmetic::OnlineF32
+    } else {
+        CachedAttentionArithmetic::LlamaFlash
     }
 }
