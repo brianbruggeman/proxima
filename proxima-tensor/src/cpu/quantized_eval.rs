@@ -1025,10 +1025,8 @@ fn evaluate_quantized_with_policy(
                 peak_live_buffers = peak_live_buffers.max(live_now);
             }
         }
+        float64_island::retire(&mut wide, &retires[position]);
         for retired in &retires[position] {
-            if let Some(slot) = wide.get_mut(retired.0 as usize) {
-                *slot = None;
-            }
             // NOT always a `Some` -> `None` transition, unlike
             // `evaluate_pooled`/`evaluate_parallel`'s identical loop: a
             // `Q4_K`/`Q5_K`/`Q6_K`/`Q8_0` weight node is scheduled for
@@ -1691,18 +1689,29 @@ pub(super) fn evaluate_pooled(
     // quadratic cost this landing removes).
     let mut peak_live_buffers = live_count(&buffers);
     let mut live_now = peak_live_buffers;
+    let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
     for (position, computed) in resolved.iter().enumerate() {
-        #[cfg(feature = "instrument")]
-        let alloc_site_guard =
-            instrument::AllocSiteGuard::enter(instrument::AllocSite::OutputBuffer);
-        let mut output = take_or_allocate(free_buffers, node_output_len(computed));
-        #[cfg(feature = "instrument")]
-        drop(alloc_site_guard);
-        run_node_into(computed, &buffers, None, None, None, false, &mut output)?;
-        #[cfg(feature = "instrument")]
-        record_bound_op_operand_access(computed, &buffers);
-        buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
-        live_now += 1;
+        let output = match float64_island::step(computed, &buffers, &mut wide, buffers.len())? {
+            float64_island::IslandStep::Wide => None,
+            float64_island::IslandStep::Narrowed(values) => Some(values),
+            float64_island::IslandStep::NotIsland => {
+                #[cfg(feature = "instrument")]
+                let alloc_site_guard =
+                    instrument::AllocSiteGuard::enter(instrument::AllocSite::OutputBuffer);
+                let mut output = take_or_allocate(free_buffers, node_output_len(computed));
+                #[cfg(feature = "instrument")]
+                drop(alloc_site_guard);
+                run_node_into(computed, &buffers, None, None, None, false, &mut output)?;
+                #[cfg(feature = "instrument")]
+                record_bound_op_operand_access(computed, &buffers);
+                Some(output)
+            }
+        };
+        if let Some(output) = output {
+            buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
+            live_now += 1;
+        }
+        float64_island::retire(&mut wide, &retires[position]);
         peak_live_buffers = peak_live_buffers.max(live_now);
         for retired in &retires[position] {
             // `blocks: &[&[f32]]` means every node this evaluator ever
@@ -1909,7 +1918,23 @@ pub fn evaluate_parallel(
     // O(program.len()) full rescan per node.
     let mut peak_live_buffers = live_count(&buffers);
     let mut live_now = peak_live_buffers;
+    let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
     for (position, computed) in resolved.iter().enumerate() {
+        let island = float64_island::step(computed, &buffers, &mut wide, buffers.len())?;
+        if !matches!(island, float64_island::IslandStep::NotIsland) {
+            if let float64_island::IslandStep::Narrowed(values) = island {
+                buffers[computed.node.0 as usize] = Some(Cow::Owned(values));
+                live_now += 1;
+                peak_live_buffers = peak_live_buffers.max(live_now);
+            }
+            float64_island::retire(&mut wide, &retires[position]);
+            for retired in &retires[position] {
+                if buffers[retired.0 as usize].take().is_some() {
+                    live_now -= 1;
+                }
+            }
+            continue;
+        }
         let node_output = evaluate_node_parallel(computed, &buffers, workers)?;
         #[cfg(feature = "instrument")]
         let bookkeeping_start = instrument::read_ticks();

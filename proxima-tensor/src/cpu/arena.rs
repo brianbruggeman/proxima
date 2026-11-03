@@ -160,7 +160,7 @@ pub(super) fn prepare<'block>(
     // so neither has a quantized weight to offer this gate yet — see
     // `reject_non_float32`'s doc for what the empty set here is standing in
     // for and what `matmul_q4k_f32` covers instead.
-    reject_non_float32(program, &BTreeSet::new())?;
+    reject_non_float32_with_islands(program, &BTreeSet::new(), true)?;
 
     let root = program
         .len()

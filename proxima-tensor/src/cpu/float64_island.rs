@@ -82,3 +82,13 @@ fn run_wide<B: Deref<Target = [f32]>>(
         _ => Err(not_lowerable("only elementwise, reduce and constant ops run in f64")),
     }
 }
+
+/// Drops the f64 buffer of every node retiring at this position, the f64
+/// counterpart of each loop's own f32 retirement.
+pub(super) fn retire(wide: &mut [Option<Cow<'static, [f64]>>], retiring: &[NodeId]) {
+    for node in retiring {
+        if let Some(slot) = wide.get_mut(node.0 as usize) {
+            *slot = None;
+        }
+    }
+}
