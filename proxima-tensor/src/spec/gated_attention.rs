@@ -726,13 +726,16 @@ pub fn append_gated_attention_only_with_taps(
     let q_pass = per_head_channel_range(program, q, "h", attn_head_dim, rotary_dim, pass_dim)?;
     let k_pass = per_head_channel_range(program, k, "u", attn_head_dim, rotary_dim, pass_dim)?;
 
-    // Qwen3.5 uses interleaved MRoPE, including on QK-norm layers. The two
-    // returned planes remain separate cache roots, but each plane contains
-    // one member of every adjacent pair (`2*i`, `2*i+1`).
+    // "interleaved" in imrope names how frequency sections are assigned, not the
+    // element pairing: ggml rotates (i, i + rotary_dim/2) for imrope exactly as
+    // for neox (ggml-cpu/ops.cpp `GGML_ROPE_TYPE_IMROPE` -> `rotate_pairs(n_dims, n_dims/2)`).
+    let rope_pairing = RopePairing::SplitHalf {
+        pairs: rotary_dim / 2,
+    };
     let (rotated_q_first, rotated_q_second) =
-        fused_rope_pair(program, q, 'h', cos_new, sin_new, RopePairing::Interleaved)?;
+        fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
     let (rotated_k_new_first, rotated_k_new_second) =
-        fused_rope_pair(program, k, 'u', cos_new, sin_new, RopePairing::Interleaved)?;
+        fused_rope_pair(program, k, 'u', cos_new, sin_new, rope_pairing)?;
 
     let group_map_i = alloc::format!("s,{group}*u+g,i->sugi");
     let q_first_grouped = elementwise(
