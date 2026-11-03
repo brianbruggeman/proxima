@@ -13,6 +13,9 @@ readme.workspace = true
 default = ["std"]
 alloc = []
 float-layout-dtype = []
+# `checkpoint_resolver`: the one place real-checkpoint tests find their GGUF files, reused by
+# proxima-model-interop's tests
+test-support = ["std"]
 # runtime config surface ([`config::GgufParserConfig`]): conflaguration is
 # std-only (Settings/env/file), so it rides in only here -- the
 # no_std+alloc floor never sees it and always uses `crate::sized` directly.

@@ -14,7 +14,7 @@ include = ["src/**", "Cargo.toml", "README.md", "LICENSE*"]
 default = []
 # bench/probe entry points over crate-private internals (`probes`), reached
 # by examples through a dev-dependency self edge so a normal build never has them
-test-support = ["proxima-tensor/test-support"]
+test-support = ["proxima-tensor/test-support", "proxima-gguf/test-support"]
 # the 250 mb codec saving only exists on the full checkpoint; minutes per run
 slow-tests = []
 # joins the final routed gather to the logits suffix without crossing a router boundary.

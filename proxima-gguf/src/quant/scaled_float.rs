@@ -158,29 +158,32 @@ mod tests {
     extern crate std;
 
     use alloc::vec::Vec;
-    use std::path::Path;
 
     use proxima_telemetry::debug;
 
     use super::*;
-    use crate::quant::q8_0;
+    use crate::quant::{q8_0, real_weights};
     use crate::types::GgmlType;
 
     const GRANITE_DEFAULT: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
          sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";
+    const GRANITE_BYTES: u64 = 1_422_239_776;
     const MAX_NORMAL_RATIO: f32 = 28.0;
     const SUBNORMAL_HALF_SPACING: f32 = 0.03125;
     const FLOAT_SLACK_ULPS: f32 = 4.0;
 
     fn granite_q8_0_rows_1024x512() -> Vec<f32> {
-        let path = std::env::var("PROXIMA_ARCH_GRANITE_MOE_GGUF")
-            .unwrap_or_else(|_| GRANITE_DEFAULT.into());
-        assert!(
-            Path::new(&path).exists(),
-            "no granite gguf at {path}: set PROXIMA_ARCH_GRANITE_MOE_GGUF or stage the blob"
+        let path = crate::checkpoint_resolver::resolve_checkpoint(
+            "PROXIMA_ARCH_GRANITE_MOE_GGUF",
+            GRANITE_DEFAULT,
+            GRANITE_BYTES,
         );
-        let (parsed, bytes) =
-            crate::edge::read_file(Path::new(&path)).expect("granite blob must parse as gguf");
+        assert!(
+            path.exists(),
+            "no granite gguf at {}: set PROXIMA_ARCH_GRANITE_MOE_GGUF or stage the blob",
+            path.display()
+        );
+        let (mut file, parsed, file_len) = real_weights::open_gguf(&path);
         let rows: Vec<f32> = parsed
             .tensors
             .iter()
@@ -188,15 +191,10 @@ mod tests {
                 tensor.ggml_type == GgmlType::Q8_0 && tensor.dims.as_slice() == [1024, 512]
             })
             .flat_map(|tensor| {
-                let range = parsed
-                    .tensor_data_range(tensor, bytes.len() as u64)
-                    .expect("tensor range must fit the file");
+                let bytes =
+                    real_weights::read_tensor_prefix(&mut file, &parsed, file_len, tensor, usize::MAX);
                 let mut tensor_rows = alloc::vec![0.0f32; tensor.element_count() as usize];
-                q8_0::dequantize(
-                    &bytes[range.start as usize..range.end as usize],
-                    &mut tensor_rows,
-                )
-                .expect("well-formed q8_0 tensor");
+                q8_0::dequantize(&bytes, &mut tensor_rows).expect("well-formed q8_0 tensor");
                 tensor_rows
             })
             .collect();

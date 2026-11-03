@@ -106,19 +106,30 @@ pub(crate) mod real_weights {
     extern crate std;
 
     use alloc::vec::Vec;
+    use std::fs::File;
+    use std::io::{Read, Seek, SeekFrom};
     use std::path::Path;
 
-    /// `Qwen/Qwen3-1.7B`, `Q4_K_M`, host-local (same fixture
-    /// `proxima-model-interop::test_support::qwen3_gguf_path` resolves by
-    /// default) -- overridable so a host without this exact blob can point
-    /// at any local `Q4_K_M`-class checkpoint with a `token_embd.weight`
+    use crate::pipe::{ParsedGguf, parse_complete};
+    use crate::tensor::TensorInfo;
+
+    const QWEN3_BLOB: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
+         sha256-a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f";
+    const QWEN3_BLOB_BYTES: u64 = 5_225_374_496;
+
+    /// `Qwen3 8B`, `Q4_K_M` ollama blob (sha256 a3de86cd...686f), resolved by
+    /// `checkpoint_resolver::resolve_checkpoint` -- overridable through
+    /// `PROXIMA_QWEN3_GGUF` so a host without this exact blob can point at
+    /// any local `Q4_K_M`-class checkpoint with a `token_embd.weight`
     /// (`Q4_K`) and `output.weight` (`Q6_K`) tensor.
     fn qwen3_path() -> std::string::String {
-        std::env::var("PROXIMA_QWEN3_GGUF").unwrap_or_else(|_| {
-            "/Users/brianbruggeman/.ollama/models/blobs/\
-             sha256-3d0b790534fe4b79525fc3692950408dca41171676ed7e21db57af5c65ef6ab6"
-                .into()
-        })
+        crate::checkpoint_resolver::resolve_checkpoint(
+            "PROXIMA_QWEN3_GGUF",
+            QWEN3_BLOB,
+            QWEN3_BLOB_BYTES,
+        )
+        .to_string_lossy()
+        .into_owned()
     }
 
     /// Dequantizes `min_elements`-worth (rounded up to a whole number of
@@ -140,8 +151,7 @@ pub(crate) mod real_weights {
             Path::new(&path).exists(),
             "no host-local qwen3 gguf fixture at {path}: set PROXIMA_QWEN3_GGUF or stage one"
         );
-        let (parsed, bytes) =
-            crate::edge::read_file(Path::new(&path)).expect("qwen3 fixture must parse as gguf");
+        let (mut file, parsed, file_len) = open_gguf(Path::new(&path));
         let tensor = parsed
             .tensors
             .iter()
@@ -155,18 +165,49 @@ pub(crate) mod real_weights {
 
         let block_count = min_elements.div_ceil(super::q4_k::QK_K).max(1);
         let needed_bytes = super::q4_k::bytes_for_blocks(block_count);
-        let file_len = bytes.len() as u64;
-        let full_range = parsed
-            .tensor_data_range(tensor, file_len)
-            .expect("token_embd.weight range must fit the file");
-        let start = full_range.start as usize;
-        let end = (start + needed_bytes).min(full_range.end as usize);
-        let block_bytes = &bytes[start..end];
+        let block_bytes = read_tensor_prefix(&mut file, &parsed, file_len, tensor, needed_bytes);
 
         let element_count =
             super::q4_k::elements_for_blocks(block_bytes.len() / super::q4_k::BLOCK_BYTES);
         let mut output = alloc::vec![0.0f32; element_count];
-        super::q4_k::dequantize(block_bytes, &mut output).expect("well-formed q4_k byte run");
+        super::q4_k::dequantize(&block_bytes, &mut output).expect("well-formed q4_k byte run");
         output
+    }
+
+    /// Opens a GGUF and parses only its metadata region, so a multi-gigabyte
+    /// checkpoint costs the header, not the file, per test process.
+    pub(crate) fn open_gguf(path: &Path) -> (File, ParsedGguf, u64) {
+        let mut file = File::open(path).expect("gguf fixture must open");
+        let file_len = file.metadata().expect("gguf fixture metadata").len();
+        let mut header = Vec::new();
+        for cap in [4usize << 20, 16 << 20, 64 << 20, 128 << 20] {
+            header.resize(cap, 0);
+            file.seek(SeekFrom::Start(0)).expect("seek to gguf start");
+            let read = file.read(&mut header).expect("read gguf header region");
+            header.truncate(read);
+            if let Ok(parsed) = parse_complete(&header) {
+                return (file, parsed, file_len);
+            }
+        }
+        panic!("gguf metadata of {} did not fit in 128 MiB", path.display());
+    }
+
+    /// The first `max_bytes` of `tensor`'s data (all of it when shorter).
+    pub(crate) fn read_tensor_prefix(
+        file: &mut File,
+        parsed: &ParsedGguf,
+        file_len: u64,
+        tensor: &TensorInfo,
+        max_bytes: usize,
+    ) -> Vec<u8> {
+        let range = parsed
+            .tensor_data_range(tensor, file_len)
+            .expect("tensor range must fit the file");
+        let length = max_bytes.min((range.end - range.start) as usize);
+        let mut buffer = alloc::vec![0u8; length];
+        file.seek(SeekFrom::Start(range.start))
+            .expect("seek to tensor data");
+        file.read_exact(&mut buffer).expect("read tensor data");
+        buffer
     }
 }
