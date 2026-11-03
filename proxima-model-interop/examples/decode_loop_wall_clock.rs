@@ -18,8 +18,6 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use proxima_model_interop::{LoadedModel, ServingConfig};
-use proxima_primitives::block_on;
-use proxima_primitives::pipe::Pipe;
 
 const DEFAULT_PROMPT: &str = "GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:";
 
@@ -49,17 +47,23 @@ fn run() -> Result<(), String> {
 
     println!("prompt={prompt:?} max_tokens={max_tokens}");
     let decode_start = Instant::now();
-    let generated = block_on(model.call((prompt.clone(), max_tokens)))
-        .map_err(|error| format!("generate through the public Pipe path: {error}"))?;
+    let serving_config = ServingConfig {
+        exact_activations: std::env::var("PROXIMA_EXACT_ACTIVATIONS").map_or(true, |value| value != "0"),
+        ..ServingConfig::default()
+    };
+    let generated = model
+        .generate_with_serving_config(&prompt, max_tokens, serving_config)
+        .map_err(|error| format!("generate with the serving config: {error}"))?;
     let total_elapsed = decode_start.elapsed();
     let tokens_generated = generated.0.len();
     let mean_ms_per_token = total_elapsed.as_secs_f64() * 1000.0 / tokens_generated.max(1) as f64;
 
     println!(
-        "decode_summary tokens_generated={tokens_generated} stopped_by_eos={} total_wall_clock_ms={:.3} mean_ms_per_token={mean_ms_per_token:.3} generated_text={:?}",
+        "decode_summary tokens_generated={tokens_generated} stopped_by_eos={} total_wall_clock_ms={:.3} mean_ms_per_token={mean_ms_per_token:.3} generated_text={:?} ids={:?}",
         generated.2,
         total_elapsed.as_secs_f64() * 1000.0,
-        generated.1
+        generated.1,
+        generated.0
     );
 
     #[cfg(feature = "instrument")]
