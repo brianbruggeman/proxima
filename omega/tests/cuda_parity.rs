@@ -3659,7 +3659,7 @@ fn norm_program(rows: u32, width: u32) -> (Vec<Op>, Vec<NodeId>) {
     let mut program = Vec::new();
     let busy = append_busy_chain(&mut program);
     let eps_scalar = scalar_constant(&mut program, NORM_EPSILON);
-    let inv_width = scalar_constant(&mut program, 1.0 / width as f32);
+    let inv_width = count_constant(&mut program, width);
     let gamma = input_leaf(&mut program, DType::FLOAT32, vec![Extent::Static(width)], "gamma");
     let eps_row = input_leaf(&mut program, DType::FLOAT32, vec![Extent::Static(1)], "eps");
     let shape = if rows == 1 {

@@ -192,7 +192,7 @@ pub(super) mod hyper_connection_tests {
                 "w_inject",
             )
         });
-        let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+        let inv_dim = count_constant(&mut program, embedding as u32);
         let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
         let inv_hc = scalar_constant(&mut program, 1.0 / hc as f32);
         let one = scalar_constant(&mut program, 1.0);

@@ -696,14 +696,14 @@ pub fn gqa_single_range_cached_forward_program_with_biases(
         None
     };
 
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let inv_dim = count_constant(&mut program, embedding);
     let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / libm::sqrtf(head_dim as f32));
     // only materialized when a layer actually consumes it (`qk_norm`), same
     // guard `gqa_cached_forward_program_with_experts` uses so a dense
     // checkpoint's own node count is unaffected by this feature existing.
-    let inv_head_dim = qk_norm.then(|| scalar_constant(&mut program, 1.0 / head_dim as f32));
+    let inv_head_dim = qk_norm.then(|| count_constant(&mut program, head_dim));
     let cos_new = input_leaf(
         &mut program,
         DType::FLOAT32,

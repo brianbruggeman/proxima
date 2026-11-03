@@ -1930,7 +1930,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
         x = append_embedding_scale(&mut program, x, embedding, scale)?;
     }
 
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let inv_dim = count_constant(&mut program, embedding);
     let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
 
@@ -2588,14 +2588,14 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         x = append_embedding_scale(&mut program, x, embedding, scale)?;
     }
 
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let inv_dim = count_constant(&mut program, embedding);
     let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_head_dim = scalar_constant(&mut program, score_scale.multiplier());
     // only materialized when a layer actually consumes it (`qk_norm`), so a
     // dense checkpoint with no QK-norm keeps the identical node count this
     // function has always emitted.
-    let inv_head_dim = qk_norm.then(|| scalar_constant(&mut program, 1.0 / head_dim as f32));
+    let inv_head_dim = qk_norm.then(|| count_constant(&mut program, head_dim));
     let residual_scale = residual_scale.map(|scale| scalar_constant(&mut program, scale));
     let cos_new = input_leaf(
         &mut program,
@@ -3570,7 +3570,7 @@ mod ple_stage_b_tests {
             "post_mixer",
         );
         let ones = scalar_constant(&mut program, 1.0);
-        let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+        let inv_dim = count_constant(&mut program, embedding);
         let ffn_config = LayerFfnConfig {
             ple: true,
             output_scale: true,
@@ -3901,7 +3901,7 @@ mod exclusive_dense_post_norm_tests {
         );
         let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
         let ones = scalar_constant(&mut program, 1.0);
-        let inv_dim = scalar_constant(&mut program, 1.0 / EMBEDDING as f32);
+        let inv_dim = count_constant(&mut program, EMBEDDING);
 
         let ffn_config = LayerFfnConfig {
             exclusive_dense_post_norm,

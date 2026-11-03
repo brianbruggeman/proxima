@@ -53,7 +53,7 @@ fn qwen35_sequence_tail_projection_matches_cpu_on_packed_weight() {
         vec![Extent::Static(KV_HEADS), Extent::Static(GROUP)],
         "head_eps",
     );
-    let inv_head_v_dim = scalar_constant(&mut program, 1.0 / HEAD_DIM as f32);
+    let inv_head_v_dim = count_constant(&mut program, HEAD_DIM);
     let norm_weight = input_leaf(
         &mut program,
         DType::FLOAT32,

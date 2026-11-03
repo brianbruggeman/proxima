@@ -682,7 +682,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
         x = append_embedding_scale(&mut program, x, embedding, scale)?;
     }
 
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let inv_dim = count_constant(&mut program, embedding);
     let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
@@ -1216,7 +1216,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
         x = append_embedding_scale(&mut program, x, embedding, scale)?;
     }
 
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let inv_dim = count_constant(&mut program, embedding);
     let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
