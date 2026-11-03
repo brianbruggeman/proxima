@@ -22,7 +22,7 @@
 
 use proxima_tensor::spec::{
     Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
-    causal_mask, elementwise, embedding_lookup, input_leaf, reduce, rmsnorm, scalar_constant,
+    causal_mask, count_constant, elementwise, embedding_lookup, input_leaf, reduce, rmsnorm, scalar_constant,
     sigmoid, symbolic_leaf,
 };
 use proxima_tensor::{DType, Extent, ReduceInit, ScalarOp};
@@ -49,7 +49,7 @@ fn external_crate_composes_a_one_layer_forward_program() {
     );
     let embedded = embedding_lookup(&mut program, table, ids);
 
-    let inv_dim = scalar_constant(&mut program, 1.0 / embedding as f32);
+    let inv_dim = count_constant(&mut program, embedding);
     let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let one = scalar_constant(&mut program, 1.0);
 

@@ -969,7 +969,7 @@ pub(super) fn qwen35_partial_rotary_attention_fixture() -> (
     );
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 1.0 / (ATTN_HEAD_DIM as f32).sqrt());
-    let inv_attn_head_dim = scalar_constant(&mut program, 1.0 / ATTN_HEAD_DIM as f32);
+    let inv_attn_head_dim = count_constant(&mut program, ATTN_HEAD_DIM as u32);
     let rotary_shape = alloc::vec![Extent::Symbolic(0), Extent::Static(PAIR_DIM as u32)];
     let cos_new = input_leaf(&mut program, DType::FLOAT32, rotary_shape.clone(), "cos");
     let sin_new = input_leaf(&mut program, DType::FLOAT32, rotary_shape, "sin");
@@ -5839,7 +5839,7 @@ mod gated_delta_net_tests {
             alloc::vec![Extent::Symbolic(0), Extent::Static(model_dim)],
             "x",
         );
-        let inv_dim = scalar_constant(&mut program, 1.0 / model_dim as f32);
+        let inv_dim = count_constant(&mut program, model_dim as u32);
         let eps = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -5854,7 +5854,7 @@ mod gated_delta_net_tests {
         );
         let one = scalar_constant(&mut program, 1.0);
         let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (head_k_dim as f32).sqrt());
-        let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
+        let inv_head_v_dim = count_constant(&mut program, head_v_dim as u32);
         let attn_norm_weight = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -6183,7 +6183,7 @@ mod gated_delta_net_tests {
             alloc::vec![Extent::Symbolic(0), Extent::Static(model_dim)],
             "x",
         );
-        let inv_dim = scalar_constant(&mut program, 1.0 / model_dim as f32);
+        let inv_dim = count_constant(&mut program, model_dim as u32);
         let eps = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -6198,7 +6198,7 @@ mod gated_delta_net_tests {
         );
         let one = scalar_constant(&mut program, 1.0);
         let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (head_k_dim as f32).sqrt());
-        let inv_head_v_dim = scalar_constant(&mut program, 1.0 / head_v_dim as f32);
+        let inv_head_v_dim = count_constant(&mut program, head_v_dim as u32);
         let attn_norm_weight = input_leaf(
             &mut program,
             DType::FLOAT32,

@@ -1332,7 +1332,13 @@ pub(super) fn run_resolved_nodes_in_arena(
                     continue;
                 }
                 float64_island::IslandStep::Narrowed(values) => {
-                    arena.buffers[node.0 as usize] = Some(values);
+                    let mut output = output_buffer(
+                        &mut arena.buffers[node.0 as usize],
+                        &mut arena.free_buffers,
+                        values.len(),
+                    );
+                    output.copy_from_slice(&values);
+                    arena.buffers[node.0 as usize] = Some(output);
                     float64_island::retire(&mut wide, &arena.retires[position]);
                     retire_arena_buffers(arena, position);
                     continue;
