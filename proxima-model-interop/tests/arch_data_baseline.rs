@@ -2519,3 +2519,58 @@ fn qwen35_layer_residuals_track_llama_at_the_divergent_prefix() {
         errors[0]
     );
 }
+
+fn assert_norms_accumulate_in_f64(checkpoint: &Checkpoint) {
+    let mapping = checkpoint.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let bound = bind_checkpoint_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
+        .unwrap_or_else(|error| panic!("{}: bind failed: {error:?}", checkpoint.name));
+    let single = proxima_tensor::spec::f32_sums_of_squares(&bound.program);
+    assert!(
+        single.is_empty(),
+        "{}: every sum-of-squares norm must accumulate in f64 like ggml's CPU norms; f32 folds at {single:?}",
+        checkpoint.name
+    );
+}
+
+
+#[test]
+fn sum_of_squares_norms_accumulate_in_f64_gemma4_26b() {
+    assert_norms_accumulate_in_f64(&GEMMA4_26B);
+}
+
+#[test]
+fn sum_of_squares_norms_accumulate_in_f64_gemma4_e2b() {
+    assert_norms_accumulate_in_f64(&GEMMA4_E2B);
+}
+
+#[test]
+fn sum_of_squares_norms_accumulate_in_f64_openchat() {
+    assert_norms_accumulate_in_f64(&OPENCHAT);
+}
+
+#[test]
+fn sum_of_squares_norms_accumulate_in_f64_qwen2() {
+    assert_norms_accumulate_in_f64(&QWEN2);
+}
+
+#[test]
+fn sum_of_squares_norms_accumulate_in_f64_qwen3() {
+    assert_norms_accumulate_in_f64(&QWEN3);
+}
+
+#[test]
+fn sum_of_squares_norms_accumulate_in_f64_qwen35() {
+    assert_norms_accumulate_in_f64(&QWEN35);
+}
+
+#[test]
+fn sum_of_squares_norms_accumulate_in_f64_qwen35moe() {
+    assert_norms_accumulate_in_f64(&QWEN35MOE);
+}
+
+#[test]
+fn sum_of_squares_norms_accumulate_in_f64_granite_moe() {
+    assert_norms_accumulate_in_f64(&GRANITE_MOE);
+}
