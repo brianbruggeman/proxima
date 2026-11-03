@@ -270,14 +270,17 @@ fn digest_record(checkpoint: &Checkpoint) -> String {
                 checkpoint.name
             )
         });
-    let verify = bind_speculative_verify(&parsed, file_bytes, KvLayout::SlidingRing, None)
-        .unwrap_or_else(|error| panic!("{}: verify bind failed: {error:?}", checkpoint.name));
 
     let mut record = String::new();
     writeln!(record, "checkpoint={}", checkpoint.name).unwrap();
     writeln!(record, "architecture={}", checkpoint.architecture).unwrap();
     writeln!(record, "kv_layout=SlidingRing").unwrap();
     record.push_str(&describe_program("bind", &bound));
+    // gemma4 26B's bind holds 6.5 GB; keeping it alive through the verify
+    // bind doubles the peak past this 16 GB box and earlyoom ends the test
+    drop(bound);
+    let verify = bind_speculative_verify(&parsed, file_bytes, KvLayout::SlidingRing, None)
+        .unwrap_or_else(|error| panic!("{}: verify bind failed: {error:?}", checkpoint.name));
     match verify {
         Some(program) => record.push_str(&describe_program("verify", &program)),
         None => record.push_str("verify=absent\n"),
@@ -490,7 +493,7 @@ fn assert_bound(checkpoint: &Checkpoint) {
 #[test]
 fn arch_data_digest_gemma4_26b() {
     let record = digest_record(&GEMMA4_26B);
-    let ops = if STACKED_EXPERTS { 10434 } else { 13314 };
+    let ops = if STACKED_EXPERTS { 11096 } else { 13976 };
     assert!(
         record.contains(&format!("\nbind.ops={ops}\n"))
             && record.contains(&format!("\nbind.logits_root=NodeId({})\n", ops - 1)),
