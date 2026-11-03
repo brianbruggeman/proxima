@@ -21,6 +21,8 @@ use memmap2::Mmap;
 use proxima_gguf::parse_complete;
 use serde_json::Value;
 
+mod common;
+
 const DONE_MARKER: &str = "export.done";
 const EXPECTED_FILES: [&str; 4] = [
     "config.json",
@@ -35,13 +37,23 @@ const EXTRA_LEAF: &str = "rope_freqs.weight";
 struct Model {
     name: &'static str,
     gguf: &'static str,
+    gguf_env: &'static str,
+    gguf_length: u64,
     reference: &'static str,
     tower_prefixes: &'static [&'static str],
+}
+
+impl Model {
+    fn gguf_path(&self) -> PathBuf {
+        common::resolve_checkpoint(self.gguf_env, self.gguf, self.gguf_length)
+    }
 }
 
 const GRANITE: Model = Model {
     name: "granite",
     gguf: "/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80",
+    gguf_env: "PROXIMA_MLX_GRANITE_GGUF",
+    gguf_length: 1_422_239_776,
     reference: "granite-3.1-1b-a400m-moe",
     tower_prefixes: &[],
 };
@@ -49,6 +61,8 @@ const GRANITE: Model = Model {
 const E2B: Model = Model {
     name: "e2b",
     gguf: "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd",
+    gguf_env: "PROXIMA_MLX_E2B_GGUF",
+    gguf_length: 3_349_514_112,
     reference: "gemma4-e2b",
     tower_prefixes: &E2B_TOWER_PREFIXES,
 };
@@ -105,12 +119,15 @@ fn fingerprint(binary: &Path) -> String {
 
 fn run_cli(binary: &Path, model: &Model, directory: &Path) {
     assert!(
-        Path::new(model.gguf).exists(),
-        "host-local gguf blob missing at {}",
-        model.gguf
+        model.gguf_path().exists(),
+        "gguf blob missing at {}: set {}",
+        model.gguf_path().display(),
+        model.gguf_env
     );
     let output = Command::new(binary)
-        .args(["model", "export-mlx", model.gguf, "--out"])
+        .args(["model", "export-mlx"])
+        .arg(model.gguf_path())
+        .arg("--out")
         .arg(directory)
         .args(["--quantize", "4,64"])
         .output()
@@ -193,7 +210,7 @@ fn float_plus_quantized_leaves(names: &[String]) -> usize {
 }
 
 fn gguf_names(model: &Model) -> (u64, Vec<String>) {
-    let file = File::open(model.gguf).expect("open gguf blob");
+    let file = File::open(model.gguf_path()).expect("open gguf blob");
     let mapping = unsafe { Mmap::map(&file) }.expect("map gguf blob");
     let parsed = parse_complete(&mapping).expect("parse gguf header");
     let names = parsed
