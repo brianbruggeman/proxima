@@ -180,6 +180,7 @@ pub(super) fn state_sensitive_ouro_gguf(num_loops: u32) -> Vec<u8> {
 /// lowers its attention to one fused `CachedAttention` op, which the recurrent
 /// ouro schedule never does, so this is the checkpoint that reaches the CUDA
 /// tiled cached-attention body at sixteen or more rows.
+#[cfg(feature = "cuda")]
 pub(super) fn grouped_llama_gguf() -> Vec<u8> {
     let payloads: Vec<(String, Vec<u64>, Vec<u8>)> = state_tensor_set(256, 128, 64, STATE_VOCABULARY as usize)
         .into_iter()
