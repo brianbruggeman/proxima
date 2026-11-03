@@ -371,19 +371,19 @@ mod tests {
     use proptest::prelude::*;
     use proptest::test_runner::TestCaseError;
 
-    fn reference_nearest(value: f32) -> f32 {
-        libm::roundf(value)
+    fn writer_reference_quantize(x: &[f32]) -> (f32, Vec<i8>) {
+        let amax = x.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
+        let d = amax / 127.0;
+        let id = if d == 0.0 { 0.0 } else { 1.0 / d };
+        let levels = x.iter().map(|&value| libm::roundf(value * id) as i8).collect();
+        (half::f16::from_f32(d).to_f32(), levels)
     }
 
     fn reference_quantize(x: &[f32]) -> (f32, Vec<i8>) {
         let amax = x.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
-        let d = amax / 127.0;
-        let id = if d == 0.0 { 0.0 } else { 1.0 / d };
-        let levels = x
-            .iter()
-            .map(|&value| reference_nearest(value * id) as i8)
-            .collect();
-        (half::f16::from_f32(d).to_f32(), levels)
+        let id = if amax == 0.0 { 0.0 } else { 127.0 / amax };
+        let levels = x.iter().map(|&value| (value * id).round_ties_even() as i8).collect();
+        (half::f16::from_f32(amax / 127.0).to_f32(), levels)
     }
 
     fn reference_q5_0_codes(block: &[u8]) -> Vec<i32> {
@@ -412,15 +412,47 @@ mod tests {
         )
     }
 
+    #[test]
+    fn activation_ties_round_to_even_where_the_gguf_writer_rounds_away() {
+        let mut block = [0.0f32; 32];
+        block[0] = 127.0;
+        block[1] = 2.5;
+        block[2] = -3.5;
+        let mut activation = vec![0u8; Q8_0_ACT_BLOCK_BYTES];
+        let mut written = vec![0u8; q8_0::BLOCK_BYTES];
+        quantize_row_q8_0_activation(&block, &mut activation).expect("activation quantizes");
+        q8_0::quantize(&block, &mut written).expect("writer quantizes");
+        assert_eq!(
+            (activation[3].cast_signed(), activation[4].cast_signed()),
+            (2, -4),
+            "ggml's cpu quantizer rounds ties to even"
+        );
+        assert_eq!(
+            (written[3].cast_signed(), written[4].cast_signed()),
+            (3, -4),
+            "quantize_row_q8_0_ref rounds ties away from zero"
+        );
+    }
+
     proptest! {
         #[test]
-        fn activation_quantize_matches_llama_reference(x in activation_strategy()) {
+        fn activation_quantize_matches_ggml_avx2_quantize_row_q8_0(x in activation_strategy()) {
             let mut ours = vec![0u8; Q8_0_ACT_BLOCK_BYTES];
             prop_assert!(quantize_row_q8_0_activation(&x, &mut ours).is_ok());
             let (reference_d, reference_levels) = reference_quantize(&x);
             prop_assert_eq!(f16_scale(&ours).to_bits(), reference_d.to_bits());
             let ours_levels: Vec<i8> = ours[2..].iter().map(|&byte| byte.cast_signed()).collect();
             prop_assert_eq!(ours_levels, reference_levels);
+        }
+
+        #[test]
+        fn gguf_writer_quantize_stays_quantize_row_q8_0_ref(x in activation_strategy()) {
+            let mut written = vec![0u8; q8_0::BLOCK_BYTES];
+            prop_assert!(q8_0::quantize(&x, &mut written).is_ok());
+            let (reference_d, reference_levels) = writer_reference_quantize(&x);
+            prop_assert_eq!(f16_scale(&written).to_bits(), reference_d.to_bits());
+            let written_levels: Vec<i8> = written[2..].iter().map(|&byte| byte.cast_signed()).collect();
+            prop_assert_eq!(written_levels, reference_levels);
         }
 
         #[test]
