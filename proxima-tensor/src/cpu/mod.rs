@@ -234,6 +234,7 @@ mod gemm_q8k;
 mod width_kernels;
 #[macro_use]
 mod typed_eval;
+mod float64_island;
 pub use arena::*;
 use coalesce::*;
 use elementwise_matmul::*;
