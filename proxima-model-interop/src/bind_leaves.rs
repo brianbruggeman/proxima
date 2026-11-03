@@ -41,10 +41,10 @@ use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{Extent, Op, Reduce, ScalarOp};
 
 use crate::bind::{
-    BoundWeights, aligned_f32_view, as_block, bind_dense_as, bind_gathered_as, bind_matmul_weight_as,
-    bind_matmul_weight_paired, bind_matmul_weight_transposed_f32, bind_matmul_weight_triple,
-    bind_moe_expert_weights, bind_moe_stacked_experts, bind_native_f32, codec_from_ggml_type,
-    reinterpret_f32,
+    BoundWeights, aligned_f32_view, as_block, bind_dense_as, bind_gathered_as,
+    bind_matmul_weight_as, bind_matmul_weight_paired, bind_matmul_weight_transposed_f32,
+    bind_matmul_weight_triple, bind_moe_expert_weights, bind_moe_stacked_experts, bind_native_f32,
+    codec_from_ggml_type, reinterpret_f32,
 };
 
 use crate::error::InteropError;
@@ -717,6 +717,41 @@ mod tests {
     ) -> Result<BoundWeights<'file>, InteropError> {
         let parsed = parse_complete(bytes).expect("parses the gguf the encoder just wrote");
         bind_program_leaves(&parsed, bytes, program, binding, &[])
+    }
+
+    #[test]
+    fn a_qk_norm_on_a_later_attention_block_counts_as_the_checkpoint_carrying_one() {
+        let norm: Vec<f32> = (0..4).map(|value| value as f32).collect();
+        let bytes = gguf(&[
+            (
+                "blk.0.shortconv.conv.weight",
+                &[3, 4],
+                GgmlType::F32,
+                &f32_bytes(&[0.0; 12]),
+            ),
+            (
+                "blk.2.attn_q_norm.weight",
+                &[4],
+                GgmlType::F32,
+                &f32_bytes(&norm),
+            ),
+        ]);
+        let parsed = parse_complete(&bytes).expect("parses the gguf the encoder just wrote");
+
+        assert!(crate::bind::checkpoint_has_qk_norm(&parsed));
+    }
+
+    #[test]
+    fn a_checkpoint_without_any_attention_qk_norm_reports_none() {
+        let bytes = gguf(&[(
+            "blk.0.attn_q.weight",
+            &[4, 4],
+            GgmlType::F32,
+            &f32_bytes(&[0.0; 16]),
+        )]);
+        let parsed = parse_complete(&bytes).expect("parses the gguf the encoder just wrote");
+
+        assert!(!crate::bind::checkpoint_has_qk_norm(&parsed));
     }
 
     #[test]

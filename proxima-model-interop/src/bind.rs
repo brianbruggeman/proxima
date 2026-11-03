@@ -644,7 +644,7 @@ fn head_dim_from_metadata(
 }
 
 /// Whether `parsed`'s checkpoint carries per-head QK-norm weights
-/// (`blk.0.attn_q_norm.weight`) -- Qwen3's own `q_norm`/`k_norm`
+/// (`blk.N.attn_q_norm.weight` on any block, since a hybrid stack opens with convolution blocks that carry none) -- Qwen3's own `q_norm`/`k_norm`
 /// (`modeling_qwen3.py`'s `Qwen3Attention`), applied to `q`/`k` right after
 /// projection and before RoPE. Presence, not the architecture name, decides
 /// this -- the same "read the file, don't assume the shape" move
@@ -653,7 +653,12 @@ fn head_dim_from_metadata(
 /// `general.architecture` value is handled without a name-based dispatch.
 #[cfg(feature = "std")]
 pub(crate) fn checkpoint_has_qk_norm(parsed: &ParsedGguf) -> bool {
-    find_tensor(parsed, "blk.0.attn_q_norm.weight").is_ok()
+    parsed.tensors.iter().any(|tensor| {
+        tensor
+            .name
+            .strip_prefix("blk.")
+            .is_some_and(|rest| rest.ends_with(".attn_q_norm.weight"))
+    })
 }
 
 /// A checkpoint's on-disk tensor bytes, summed by class -- dense (per-layer
@@ -1872,7 +1877,9 @@ pub(crate) fn quantize_to_kind(
         // sidecar wire tag) but not a `recode_tensor` target/source yet.
         Codec::Q4_1 => Err(QuantError::UnsupportedCodec { codec: "q4_1" }),
         Codec::Q8_1 => Err(QuantError::UnsupportedCodec { codec: "q8_1" }),
-        Codec::Q8_1Grouped => Err(QuantError::UnsupportedCodec { codec: "q8_1_grouped" }),
+        Codec::Q8_1Grouped => Err(QuantError::UnsupportedCodec {
+            codec: "q8_1_grouped",
+        }),
         Codec::Q8K => Err(QuantError::UnsupportedCodec { codec: "q8_k" }),
         Codec::Iq1S => Err(QuantError::UnsupportedCodec { codec: "iq1_s" }),
         Codec::Iq1M => Err(QuantError::UnsupportedCodec { codec: "iq1_m" }),
