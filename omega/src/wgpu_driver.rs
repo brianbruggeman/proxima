@@ -642,7 +642,7 @@ fn plan_with_options(
         outputs.to_vec()
     };
     // the gpu incumbents sum norms in float (`ggml-cuda/norm.cu:130-140`)
-    let numeric_policy = numeric_policy.with_accumulator_narrowing();
+    let numeric_policy = numeric_policy.with_accumulator_narrowing().with_flash_narrowing(true);
     // no persistent arena to skip a dead slot inside between calls -- see
     // `proxima_tensor::prune_dead`'s own doc. `fuse_cached_attention: false`
     // because `crate::wgsl::emit_wgsl` has no renderer for

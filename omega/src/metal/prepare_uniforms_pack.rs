@@ -177,7 +177,7 @@ pub(super) fn prepare_with_options(
     counter!(PREPARE_VALIDATE_TICKS, elapsed_ticks(validate_started));
 
     // llama.cpp's metal norms sum in float (`ggml-metal/kernels/norm.metal:136-156`)
-    let numeric_policy = numeric_policy.with_accumulator_narrowing();
+    let numeric_policy = numeric_policy.with_accumulator_narrowing().with_flash_narrowing(true);
     #[cfg(feature = "instrument")]
     let bind_started = read_ticks();
     #[cfg(not(feature = "top-fraction-fusion"))]

@@ -118,6 +118,19 @@ impl ComposedBody {
     }
 }
 
+/// The arithmetic a [`BoundOpKind::CachedAttention`] computes. Part of the bound op, so the plan
+/// that executes it is keyed on it and it is never a runtime switch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum CachedAttentionArithmetic {
+    /// Online softmax and value sum in f32, what the GPU kernels run.
+    #[default]
+    OnlineF32,
+    /// llama.cpp's default flash attention on the CPU (`ggml-cpu/ops.cpp`
+    /// `ggml_compute_forward_flash_attn_ext_f16_one_chunk`): f16 query, key and value, f16
+    /// accumulator, f32 running sum.
+    LlamaFlash,
+}
+
 /// One tensor op with its addressing resolved: which buffers to read, at
 /// what layout, combined by which scalar op — and, for a reduce, how the
 /// reduction is shaped. Carries only what an executor needs, nothing about
@@ -218,6 +231,7 @@ pub enum BoundOpKind {
         scale: f32,
         cached_lower_inclusive: i64,
         new_upper_inclusive: i64,
+        arithmetic: CachedAttentionArithmetic,
     },
     /// One backend-neutral gated-delta-net recurrence step
     /// ([`crate::spec::append_delta_net_step`]'s own ~12-op chain,
@@ -897,6 +911,7 @@ impl BoundOp {
                 scale,
                 cached_lower_inclusive,
                 new_upper_inclusive,
+                arithmetic,
             } => BoundOpKind::CachedAttention {
                 operands: rebase_operands(operands, split_axis, chunk_start),
                 query_rows: *query_rows,
@@ -909,6 +924,7 @@ impl BoundOp {
                 scale: *scale,
                 cached_lower_inclusive: *cached_lower_inclusive,
                 new_upper_inclusive: *new_upper_inclusive,
+                arithmetic: *arithmetic,
             },
             BoundOpKind::Elementwise { body, operands } => BoundOpKind::Elementwise {
                 body: body.clone(),

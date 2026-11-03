@@ -356,6 +356,7 @@ fn cached_attention(query_groups: u64, new_key_rows: u64) -> BoundOp {
             scale: 0.5,
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
+                arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
         },
     }
 }

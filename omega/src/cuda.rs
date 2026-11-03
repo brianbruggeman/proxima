@@ -4203,6 +4203,7 @@ mod tests {
             scale: 1.0,
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
+                arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
         }
     }
 

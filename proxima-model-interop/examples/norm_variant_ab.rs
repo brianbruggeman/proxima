@@ -164,6 +164,7 @@ fn granite_dispatch_manifest(
             scale: 1.0,
             cached_lower_inclusive: -511,
             new_upper_inclusive: 0,
+                arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
         },
     };
     let mut packed_operands = PackedOperands::new();

@@ -560,6 +560,7 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         scale,
         cached_lower_inclusive,
         new_upper_inclusive,
+        arithmetic,
     } = &resolved.kind
     else {
         return Err(TensorError::NotLowerable {
@@ -769,40 +770,45 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         new_value_node = operands[7].0.0,
         "cached attention bound extents"
     );
-    let streamed = crate::physical::stream_cached_attention_split_gqa(
-        [query_even, query_odd],
-        [
-            [cached_key_even, cached_key_odd],
-            [new_key_even, new_key_odd],
+    let extents = crate::physical::AttentionExtents {
+        query_rows: *query_rows,
+        cached_key_rows: live_cached_key_rows,
+        new_key_rows: *new_key_rows,
+        kv_heads: *kv_heads,
+        query_groups: *query_groups,
+        head_dim: *head_dim,
+    };
+    let rotary = crate::physical::CachedAttentionRotary {
+        rotary_dim: *rotary_dim,
+        pass,
+    };
+    let score = crate::physical::CachedAttentionScore {
+        scale: *scale,
+        bands: [
+            crate::physical::CausalBand {
+                lower_inclusive: *cached_lower_inclusive,
+                upper_inclusive: i64::MAX,
+            },
+            crate::physical::CausalBand {
+                lower_inclusive: *cached_lower_inclusive,
+                upper_inclusive: new_upper_inclusive,
+            },
         ],
-        [cached_value, new_value],
-        output,
-        crate::physical::AttentionExtents {
-            query_rows: *query_rows,
-            cached_key_rows: live_cached_key_rows,
-            new_key_rows: *new_key_rows,
-            kv_heads: *kv_heads,
-            query_groups: *query_groups,
-            head_dim: *head_dim,
-        },
-        crate::physical::CachedAttentionRotary {
-            rotary_dim: *rotary_dim,
-            pass,
-        },
-        crate::physical::CachedAttentionScore {
-            scale: *scale,
-            bands: [
-                crate::physical::CausalBand {
-                    lower_inclusive: *cached_lower_inclusive,
-                    upper_inclusive: i64::MAX,
-                },
-                crate::physical::CausalBand {
-                    lower_inclusive: *cached_lower_inclusive,
-                    upper_inclusive: new_upper_inclusive,
-                },
-            ],
-        },
-    );
+    };
+    let planes = [query_even, query_odd];
+    let key_planes = [
+        [cached_key_even, cached_key_odd],
+        [new_key_even, new_key_odd],
+    ];
+    let value_planes = [cached_value, new_value];
+    let streamed = match arithmetic {
+        crate::bind::CachedAttentionArithmetic::OnlineF32 => crate::physical::stream_cached_attention_split_gqa(
+            planes, key_planes, value_planes, output, extents, rotary, score,
+        ),
+        crate::bind::CachedAttentionArithmetic::LlamaFlash => crate::physical::stream_cached_attention_llama_flash(
+            planes, key_planes, value_planes, output, &extents, &rotary, &score,
+        ),
+    };
     if streamed {
         Ok(())
     } else {

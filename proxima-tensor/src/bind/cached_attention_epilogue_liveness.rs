@@ -33,7 +33,7 @@ pub(super) fn bind_cached_attention_fusion(
         let mut initial_candidates =
             cached_attention_candidates(program, shapes, &built, outputs, false, numeric_policy);
         initial_candidates.extend(cached_attention_single_range_candidates(
-            program, shapes, &built, outputs,
+            program, shapes, &built, outputs, numeric_policy,
         ));
         if initial_candidates.is_empty() {
             return Ok(built);
@@ -114,7 +114,7 @@ pub(super) fn bind_cached_attention_fusion(
         let mut candidates =
             cached_attention_candidates(program, shapes, &rebuilt, outputs, true, numeric_policy);
         candidates.extend(cached_attention_single_range_candidates(
-            program, shapes, &rebuilt, outputs,
+            program, shapes, &rebuilt, outputs, numeric_policy,
         ));
         if candidates.is_empty() {
             return Ok(built);
