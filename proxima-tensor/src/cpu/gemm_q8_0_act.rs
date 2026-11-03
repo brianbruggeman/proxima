@@ -376,7 +376,7 @@ fn block_dot_rows<const WEIGHT_BLOCK_BYTES: usize>(
 ) -> Result<(), TensorError> {
     let block_count = row_bytes / WEIGHT_BLOCK_BYTES;
     if row_bytes == 0
-        || row_bytes % WEIGHT_BLOCK_BYTES != 0
+        || !row_bytes.is_multiple_of(WEIGHT_BLOCK_BYTES)
         || out.len().checked_mul(row_bytes) != Some(weights.len())
         || activation_q8_0.len() != block_count * Q8_0_ACT_BLOCK_BYTES
     {
