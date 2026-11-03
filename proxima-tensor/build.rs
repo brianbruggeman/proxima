@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use proxima_build::sizing::{SizingSource, require_nonzero};
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(ggml_linked)");
     emit_dotprod_cfg();
     emit_avx2_cfg();
     emit_sizing_consts();
@@ -32,19 +33,42 @@ fn main() {
             return;
         }
     };
-    let build_dir = PathBuf::from(&ggml_root).join("build");
+    let root = PathBuf::from(&ggml_root);
 
-    println!(
-        "cargo:rustc-link-search=native={}",
-        build_dir.join("src").display()
-    );
+    for search_dir in ggml_static_lib_dirs(&root) {
+        println!("cargo:rustc-link-search=native={}", search_dir.display());
+    }
     println!("cargo:rustc-link-lib=static=ggml-cpu");
     println!("cargo:rustc-link-lib=static=ggml-base");
     println!("cargo:rustc-link-lib=static=ggml");
-    println!("cargo:rustc-link-lib=framework=Accelerate");
-    println!("cargo:rustc-link-lib=framework=Foundation");
-    println!("cargo:rustc-link-lib=c++");
+    emit_ggml_runtime_libs();
+    println!("cargo:rustc-cfg=ggml_linked");
     println!("cargo:rerun-if-env-changed=GGML_BUILD_DIR");
+}
+
+/// Directories under a ggml checkout that can hold the static archives: the
+/// `build/src` layout a standalone ggml checkout produces, and the `ggml/src`
+/// and `src` layouts a llama.cpp or ggml cmake build tree produces.
+fn ggml_static_lib_dirs(root: &std::path::Path) -> Vec<PathBuf> {
+    ["build/src", "ggml/src", "src"]
+        .iter()
+        .map(|relative| root.join(relative))
+        .filter(|candidate| candidate.join("libggml-base.a").is_file())
+        .collect()
+}
+
+/// The system libraries the static ggml archives need: Accelerate and the
+/// libc++ runtime on macOS, libstdc++ and OpenMP elsewhere.
+fn emit_ggml_runtime_libs() {
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        println!("cargo:rustc-link-lib=framework=Accelerate");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=c++");
+        return;
+    }
+    println!("cargo:rustc-link-lib=stdc++");
+    println!("cargo:rustc-link-lib=gomp");
+    println!("cargo:rustc-link-lib=m");
 }
 
 /// Declares the `q4k_dotprod` cfg `cpu::dot_q4k_q8k`'s NEON kernel (feature

@@ -1749,7 +1749,8 @@ where
     let packed = packed_operands_of(program, named);
     let mut entry = checkout_arena(program, symbols, &effective_outputs, named, &packed)?;
     let arena = &mut entry.arena;
-    let run = bind_named_inputs_into_arena(arena, named, true)
+    let run = require_every_input_named(arena, named)
+        .and_then(|()| bind_named_inputs_into_arena(arena, named, true))
         .and_then(|()| run_resolved_nodes_in_arena(arena, &packed));
     match run {
         Ok(()) => {
@@ -1771,6 +1772,24 @@ where
             Ok(evaluated)
         }
         Err(error) => Err(error),
+    }
+}
+
+/// The process-wide cache is keyed by graph shape, not by caller, so an input
+/// an earlier caller bound as a call-invariant constant is still sitting in a
+/// checked-in arena; honoring `constant_bound` here would hand this caller
+/// that other caller's data in place of an [`TensorError::UnboundInputName`].
+fn require_every_input_named<Operand>(
+    arena: &StaticArena,
+    named: &[(&str, Operand)],
+) -> Result<(), TensorError> {
+    match arena
+        .input_names
+        .iter()
+        .find(|(_, name)| !named.iter().any(|(candidate, _)| candidate == name))
+    {
+        Some((_, name)) => Err(TensorError::UnboundInputName(name.clone())),
+        None => Ok(()),
     }
 }
 

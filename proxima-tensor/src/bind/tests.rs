@@ -6106,10 +6106,12 @@ mod gated_delta_net_tests {
         // 547). `2e-4`, matching `fused_and_unfused_gated_delta_net_agree_within_tolerance_at_real_qwen35moe_gqa_shape`'s
         // own bar and its own doc on why: a 128-term reduce's own
         // accumulation order differs between the recurrence scan and the
-        // unfused chain's reduce tree, and this shape's `key_dim = 128`
-        // (MEASURED here: 1.0002e-4, just over the tighter `1e-4` bar
-        // `mixer_out` happens to clear, under the `2e-4` one the wide
-        // reduce shape already carries elsewhere).
+        // unfused chain's reduce tree, and this shape's `key_dim = 128`.
+        // an elementwise relative error against a 1e-6 floor is dominated
+        // by cancelled near-zero elements (MEASURED: 4 of 524288 elements,
+        // worst fused -4.529953e-6 vs unfused -4.515052e-6, abs diff
+        // 1.9e-6 on a state whose largest magnitude is 12.18, i.e. 2 ulp),
+        // so the bound is 2e-4 relative plus 8 ulp of the state's scale.
         let unfused_with_state_buffers =
             run_resolved(program.len(), &unfused_with_state, inputs.clone());
         let state_leaf = unfused_with_state_buffers[taps.state_out.0 as usize]
@@ -6123,11 +6125,18 @@ mod gated_delta_net_tests {
         let fused_state_leaf = fused_with_state_buffers[taps.state_out.0 as usize]
             .as_ref()
             .expect("fused state leaf present");
-        let state_error = relative_error(fused_state_leaf, state_leaf);
+        let state_scale = state_leaf.iter().fold(0.0_f32, |acc, value| acc.max(value.abs()));
+        let rounding_floor = 8.0 * f32::EPSILON * state_scale;
+        let worst_excess = fused_state_leaf
+            .iter()
+            .zip(state_leaf)
+            .map(|(fused, unfused)| (fused - unfused).abs() - 2e-4 * unfused.abs())
+            .fold(f32::MIN, f32::max);
         assert!(
-            state_error <= 2e-4,
+            worst_excess <= rounding_floor,
             "the fused GatedDeltaNet's own state_out output must match the unfused chain's \
-             state leaf within 2e-4 relative error, got {state_error}"
+             state leaf within 2e-4 relative error plus a rounding floor of 8 ulp of the \
+             state's largest magnitude ({state_scale}), got excess {worst_excess} over floor {rounding_floor}"
         );
     }
 

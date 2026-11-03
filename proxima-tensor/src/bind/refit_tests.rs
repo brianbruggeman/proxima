@@ -284,8 +284,13 @@ async fn refresh_refuses_where_the_row_count_changes_an_unfused_ops_fusion(
 
     let (refreshed, _) = refresh_across(&fixture, low, high);
 
+    let first_refusal_is_expected = if cfg!(feature = "reduce-epilogue-fusion") {
+        matches!(refreshed, Err(RefreshRefusal::EpilogueFusionNotLocal { .. }))
+    } else {
+        matches!(refreshed, Err(RefreshRefusal::RecomposedBodyMismatch { .. }))
+    };
     assert!(
-        matches!(refreshed, Err(RefreshRefusal::RecomposedBodyMismatch { .. })),
+        first_refusal_is_expected,
         "an extent-1 row axis fuses differently from a multi-row one: {refreshed:?}"
     );
 }

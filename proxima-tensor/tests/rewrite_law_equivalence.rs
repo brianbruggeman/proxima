@@ -924,10 +924,21 @@ fn evaluate_retirement_clip_epilogue_arena_matches_the_packed_loop() {
     cpu::set_epilogue_fuse_enabled(true);
     assert_arena_matches_packed(&program, root, &named);
     let (hits, _elements, _nanos) = cpu::epilogue_fuse_totals();
-    assert!(
-        hits > 0,
-        "the clip epilogue never fired, so no fire position was exercised"
-    );
+    assert_arena_rewrite_fired(hits, "the clip epilogue");
+}
+
+fn assert_arena_rewrite_fired(hits: u64, rewrite: &str) {
+    if cfg!(feature = "reduce-epilogue-fusion") {
+        assert_eq!(
+            hits, 0,
+            "{rewrite} is fused at bind time under reduce-epilogue-fusion, so the arena rewrite has nothing left to fire on"
+        );
+    } else {
+        assert!(
+            hits > 0,
+            "{rewrite} never fired, so no fire position was exercised"
+        );
+    }
 }
 
 #[test]
@@ -951,8 +962,5 @@ fn evaluate_retirement_layer_norm_cluster_arena_matches_the_packed_loop() {
     cpu::set_epilogue_fuse_enabled(true);
     assert_arena_matches_packed(&program, root, &named);
     let (hits, _elements, _nanos) = cpu::layer_norm_cluster_totals();
-    assert!(
-        hits > 0,
-        "the layer-norm cluster never fired, so no deferred retirement was exercised"
-    );
+    assert_arena_rewrite_fired(hits, "the layer-norm cluster");
 }
