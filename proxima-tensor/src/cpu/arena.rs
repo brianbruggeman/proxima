@@ -282,7 +282,14 @@ pub fn evaluate(
 ) -> Result<Evaluated, TensorError> {
     let mut free_buffers: Vec<Vec<f32>> = Vec::new();
     let mut wide_pool: Vec<Vec<f64>> = Vec::new();
-    evaluate_pooled(program, symbols, blocks, outputs, &mut free_buffers, &mut wide_pool)
+    evaluate_pooled(
+        program,
+        symbols,
+        blocks,
+        outputs,
+        &mut free_buffers,
+        &mut wide_pool,
+    )
 }
 
 /// Same contract as [`evaluate`], but binds [`Op::Input`] inputs by
