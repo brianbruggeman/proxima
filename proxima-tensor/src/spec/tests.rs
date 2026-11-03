@@ -22550,3 +22550,180 @@ fn a_mean_of_squares_refuses_an_f32_reciprocal_where_its_f64_count_belongs() {
     );
     assert!(accepted.is_ok(), "{accepted:?}");
 }
+
+mod flash_attention_worked_example {
+    use super::*;
+    use crate::bind::{BoundOp, BoundOpKind, bind_with_fusion};
+    use crate::numeric::NumericPolicy;
+
+    const HEAD_DIM: usize = 64;
+    const ROWS: usize = 5;
+    const LAYER0_HEAD0: &[u8] =
+        include_bytes!("../../tests/fixtures/qwen2_layer0_head0_flash_attention.f32");
+
+    fn floats() -> Vec<f32> {
+        LAYER0_HEAD0
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
+            .collect()
+    }
+
+    fn halves(rows: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let pairs = HEAD_DIM / 2;
+        let mut first = Vec::new();
+        let mut second = Vec::new();
+        for row in rows.as_chunks::<HEAD_DIM>().0 {
+            first.extend_from_slice(&row[..pairs]);
+            second.extend_from_slice(&row[pairs..]);
+        }
+        (first, second)
+    }
+
+    fn attention_program() -> (Vec<Op>, NodeId) {
+        let pairs = (HEAD_DIM / 2) as u32;
+        let mut program = Vec::new();
+        let new_rows = |program: &mut Vec<Op>, name: &str, width: u32| {
+            input_leaf(
+                program,
+                DType::FLOAT32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(1), Extent::Static(width)],
+                name,
+            )
+        };
+        let cached_rows = |program: &mut Vec<Op>, name: &str, width: u32| {
+            input_leaf(
+                program,
+                DType::FLOAT32,
+                alloc::vec![Extent::Symbolic(1), Extent::Static(1), Extent::Static(width)],
+                name,
+            )
+        };
+        let q_even = new_rows(&mut program, "q_even", pairs);
+        let q_odd = new_rows(&mut program, "q_odd", pairs);
+        let k_even = new_rows(&mut program, "k_even", pairs);
+        let k_odd = new_rows(&mut program, "k_odd", pairs);
+        let v_new = new_rows(&mut program, "v_new", HEAD_DIM as u32);
+        let k_cache_even = cached_rows(&mut program, "k_cache_even", pairs);
+        let k_cache_odd = cached_rows(&mut program, "k_cache_odd", pairs);
+        let v_cache = cached_rows(&mut program, "v_cache", HEAD_DIM as u32);
+        let group_ones = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            alloc::vec![Extent::Static(1), Extent::Static(1)],
+            "group_ones",
+        );
+        let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
+        let _ = cached_len;
+        let inv_sqrt = scalar_constant(&mut program, 0.125);
+        let (is_future, neg_infinity) = causal_mask(&mut program).expect("causal mask builds");
+        let (q_even_grouped, q_odd_grouped) =
+            group_queries(&mut program, q_even, q_odd, 1, group_ones).expect("queries group");
+        let cached = append_cached_block_scores(
+            &mut program,
+            q_even_grouped,
+            q_odd_grouped,
+            k_cache_even,
+            k_cache_odd,
+            inv_sqrt,
+            None,
+        )
+        .expect("cached block scores");
+        let (attended, _) = append_local_block_and_combine(
+            &mut program,
+            q_even_grouped,
+            q_odd_grouped,
+            k_even,
+            k_odd,
+            v_new,
+            v_cache,
+            inv_sqrt,
+            cached,
+            is_future,
+            Some(neg_infinity),
+        )
+        .expect("local block combines");
+        (program, attended)
+    }
+
+    fn named_inputs(floats: &[f32]) -> Vec<(&'static str, Vec<f32>)> {
+        let block = ROWS * HEAD_DIM;
+        let (q_even, q_odd) = halves(&floats[..block]);
+        let (k_even, k_odd) = halves(&floats[block..2 * block]);
+        vec![
+            ("q_even", q_even),
+            ("q_odd", q_odd),
+            ("k_even", k_even),
+            ("k_odd", k_odd),
+            ("v_new", floats[2 * block..3 * block].to_vec()),
+            ("k_cache_even", vec![0.0; HEAD_DIM / 2]),
+            ("k_cache_odd", vec![0.0; HEAD_DIM / 2]),
+            ("v_cache", vec![0.0; HEAD_DIM]),
+            ("group_ones", vec![1.0]),
+            ("cached_len", vec![0.0]),
+        ]
+    }
+
+    fn max_error(engine: &[f32], llama: &[f32]) -> f32 {
+        engine
+            .iter()
+            .zip(llama)
+            .map(|(ours, theirs)| (ours - theirs).abs())
+            .fold(0.0, f32::max)
+    }
+
+    fn run(online_f32: bool) -> Vec<f32> {
+        let floats = floats();
+        let owned = named_inputs(&floats);
+        let named: Vec<(&str, &[f32])> = owned.iter().map(|(name, data)| (*name, data.as_slice())).collect();
+        let (program, attended) = attention_program();
+        let evaluated = if online_f32 {
+            crate::test_support::evaluate_named_online_f32(&program, &[ROWS as u64, 1], &named, &[attended])
+        } else {
+            crate::cpu::evaluate_named(&program, &[ROWS as u64, 1], &named, &[attended])
+        }
+        .expect("the flash worked example evaluates");
+        evaluated.get(attended).expect("attended present").0.to_vec()
+    }
+
+    #[test]
+    fn the_default_policy_fuses_and_binds_llamas_flash_arithmetic() {
+        let (program, attended) = attention_program();
+        let shapes = crate::shape::infer(&program, &[ROWS as u64, 1]).expect("shapes infer");
+        let bound = bind_with_fusion(&program, &shapes, &[attended], true, NumericPolicy::default())
+            .expect("default policy binds");
+        let granted = bind_with_fusion(
+            &program,
+            &shapes,
+            &[attended],
+            true,
+            NumericPolicy::default().with_flash_narrowing(true),
+        )
+        .expect("a policy granting flash narrowing binds");
+        let arithmetic = |ops: &[BoundOp]| {
+            ops.iter().find_map(|op| match op.kind {
+                BoundOpKind::CachedAttention { arithmetic, .. } => Some(arithmetic),
+                _ => None,
+            })
+        };
+        assert_eq!(arithmetic(&bound), Some(crate::bind::CachedAttentionArithmetic::LlamaFlash));
+        assert_eq!(arithmetic(&granted), Some(crate::bind::CachedAttentionArithmetic::OnlineF32));
+    }
+
+    #[test]
+    fn llamas_flash_arithmetic_reproduces_kqv_out_for_layer0_head0_of_qwen2() {
+        let block = ROWS * HEAD_DIM;
+        let llama = floats()[3 * block..4 * block].to_vec();
+        let flash = max_error(&run(false), &llama);
+        let online = max_error(&run(true), &llama);
+        assert!(
+            flash < 1.0e-7,
+            "llama's flash arithmetic must sit within f32 rounding of its own kqv_out, found {flash}"
+        );
+        assert!(
+            online > 1.0e-5,
+            "the f32 accumulator must stay measurably off llama or this fixture separates nothing, found {online}"
+        );
+    }
+}
