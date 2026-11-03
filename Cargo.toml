@@ -2230,17 +2230,3 @@ required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "run
 name = "bench_serve_http_concurrent"
 harness = false
 required-features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor", "runtime-prime-bgpool", "http1"]
-
-# real-checkpoint tests run numeric kernels and hash multi-gigabyte weight files in the dev
-# profile; optimizing only these crates keeps them inside the per-test limit without a release build.
-[profile.dev.package.proxima-tensor]
-opt-level = 3
-
-[profile.dev.package.proxima-gguf]
-opt-level = 3
-
-[profile.dev.package.sha2]
-opt-level = 3
-
-[profile.dev.package.proxima-model-interop]
-opt-level = 3
