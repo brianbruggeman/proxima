@@ -403,7 +403,7 @@ impl BoundOpBuilder {
 
     /// `bind_plain`'s reachability skip lane: advances the position
     /// counter and keeps every per-node bookkeeping vector
-    /// (`ones`/`is_iota`/`packed_mapping_subtree`/`constant_value`) aligned
+    /// (`ones`/`is_iota`/`packed_mapping_subtree`/`constant_value`/`dtypes`) aligned
     /// to it, without running any of [`push`](Self::push)'s binding work.
     /// Safe because a program only ever references backwards
     /// (`op.rs`'s own module doc), so no node this method skips can be an
@@ -415,6 +415,7 @@ impl BoundOpBuilder {
         self.is_iota.borrow_mut().push(false);
         self.packed_mapping_subtree.borrow_mut().push(false);
         self.constant_value.borrow_mut().push(None);
+        self.dtypes.borrow_mut().push(DType::Bool);
     }
 
     /// Flush every elementwise op still held: each was a requested output,
