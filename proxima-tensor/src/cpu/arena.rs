@@ -281,13 +281,7 @@ pub fn evaluate(
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
     let mut pools = BufferPools::default();
-    evaluate_pooled(
-        program,
-        symbols,
-        blocks,
-        outputs,
-        &mut pools,
-    )
+    evaluate_pooled(program, symbols, blocks, outputs, &mut pools)
 }
 
 /// Same contract as [`evaluate`], but binds [`Op::Input`] inputs by
@@ -1553,7 +1547,12 @@ pub(super) fn run_resolved_nodes_in_arena(
                 arena.buffers[tail_node.0 as usize] = Some(output);
             }
         }
-        float64_island::retire(&mut wide, &mut arena.wide_pool, &arena.retires[position], |_| false);
+        float64_island::retire(
+            &mut wide,
+            &mut arena.wide_pool,
+            &arena.retires[position],
+            |_| false,
+        );
         retire_arena_buffers(arena, position);
     }
     Ok(())
