@@ -43,7 +43,9 @@ use proxima_primitives::pipe::{Exhausted, FanIn, Pipe, Select, UnpinPipe};
 // recv()` over a channel or socket would have: it awaits (nothing to await
 // here, but the compiler doesn't know that — it is a genuine `async fn`),
 // and the only way to reach `UnpinPipe` from it, short of hand-writing a
-// poll struct, is to pay the box.
+// poll struct, is to pay the box. each test owns its own counter: tests in
+// one process run in any order or in parallel, so a shared one makes the
+// first-value assertion depend on scheduling.
 static RECV_CALLS: AtomicU8 = AtomicU8::new(0);
 
 #[piped(unpin, boxed)]
@@ -53,6 +55,16 @@ async fn recv(_: ()) -> Result<u8, Exhausted> {
 }
 
 impl DropSafe for recv {}
+
+static MERGED_CALLS: AtomicU8 = AtomicU8::new(0);
+
+#[piped(unpin, boxed)]
+async fn recv_merged(_: ()) -> Result<u8, Exhausted> {
+    let value = MERGED_CALLS.fetch_add(1, Ordering::Relaxed);
+    if value < 4 { Ok(value) } else { Err(Exhausted) }
+}
+
+impl DropSafe for recv_merged {}
 
 #[test]
 fn boxed_async_source_generates_a_working_unpin_pipe() {
@@ -67,10 +79,7 @@ fn boxed_async_source_generates_a_working_unpin_pipe() {
 
 #[test]
 fn boxed_async_source_composes_into_the_real_fan_in() {
-    // RECV_CALLS is process-wide; the previous test already advanced it, so
-    // only assert on shape (monotonic, terminates), not on absolute values —
-    // this test does not own the static exclusively.
-    let fan = FanIn::new([recv, recv, recv], Select::RoundRobin);
+    let fan = FanIn::new([recv_merged, recv_merged, recv_merged], Select::RoundRobin);
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
 
@@ -90,6 +99,6 @@ fn boxed_async_source_composes_into_the_real_fan_in() {
     );
     assert!(
         collected.windows(2).all(|pair| pair[0] < pair[1]),
-        "RECV_CALLS only increases, so drained values must be strictly increasing: {collected:?}"
+        "MERGED_CALLS only increases, so drained values must be strictly increasing: {collected:?}"
     );
 }
