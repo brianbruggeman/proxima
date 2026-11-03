@@ -85,7 +85,8 @@ pub(crate) const TILED_ATTENTION_BODY: &str = "\
     float4 accumulator[per_warp];
     for (int slot = 0; slot < per_warp; slot++) {
         const int item = warp * per_warp + slot;
-        item_row[slot] = (item < items) ? first_row + item / (int)query_groups : -1L;
+        const long row = first_row + item / (int)query_groups;
+        item_row[slot] = (item < items && row <= last_row) ? row : -1L;
         running_max[slot] = negative_infinity;
         running_sum[slot] = 0.0f;
         accumulator[slot] = make_float4(0.0f, 0.0f, 0.0f, 0.0f);
