@@ -7429,3 +7429,33 @@ fn half_precision_reduce_epilogues_still_merge_and_f64_ones_never_do() {
         assert_eq!(count_fused_epilogues(&bound), merged, "{dtype:?}: {bound:#?}");
     }
 }
+
+#[test]
+fn every_per_node_bookkeeping_vector_stays_aligned_across_skipped_nodes() {
+    let island = crate::test_support::widened_sum_of_squares(2, 4);
+    let shapes = shape::infer(&island.program, &[]).expect("widened island infers");
+    let builder = BoundOpBuilder::new(
+        alloc::vec![Vec::new(); island.program.len()],
+        NumericPolicy::bit_exact(),
+    );
+    let mut emitted = ReadyBatch::new();
+    for (position, expr) in island.program.iter().enumerate() {
+        if position % 2 == 0 {
+            builder.push_into(expr, &shapes, &mut emitted).expect("push binds");
+        } else {
+            builder.skip();
+        }
+    }
+    let nodes = island.program.len();
+    let lengths = [
+        builder.ones.borrow().len(),
+        builder.is_iota.borrow().len(),
+        builder.packed_mapping_subtree.borrow().len(),
+        builder.constant_value.borrow().len(),
+        builder.dtypes.borrow().len(),
+    ];
+    assert!(
+        lengths.iter().all(|length| *length == nodes),
+        "every per-node vector must hold one entry per pushed or skipped node, {nodes} nodes, lengths {lengths:?}"
+    );
+}
