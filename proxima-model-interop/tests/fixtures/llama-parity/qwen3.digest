@@ -1,12 +1,12 @@
 checkpoint=qwen3
 architecture=qwen3
 kv_layout=SlidingRing
-bind.ops=4098
-bind.ops_sha256=6d6fd4d07f4f9fd6331bbe3b566d912aee4551319a404e4a1383b233298cc6e7
-bind.logits_root=NodeId(4097)
-bind.hidden_root=Some(NodeId(4094))
-bind.residual_roots=36 sha256=bfe1fb381d4dd65ca6918460a91b9c4aebb188dacd738e59497231de31ab96a5
-bind.layer_roots=36 sha256=15e3b38aa80e4e46f8d9a8a2d2890bfaa7bb2d4f7bc6e80b95d40290d39b5fda
+bind.ops=4388
+bind.ops_sha256=1da435a737514e2e19091267f1a53c24d419bf3d1d6796933bbc4645b2a352c5
+bind.logits_root=NodeId(4387)
+bind.hidden_root=Some(NodeId(4384))
+bind.residual_roots=36 sha256=692a3ddd55a8b93d4d37dde8a3899443a6f49d82bb8f0fd7a890e2e5a260eb08
+bind.layer_roots=36 sha256=a8d78ba9a253209cf0738806782e7047c68886e70b09314e4174ed81a212d98c
 bind.router_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
 bind.single_position_step=false
 verify=absent
