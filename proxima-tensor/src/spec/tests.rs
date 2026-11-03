@@ -7585,7 +7585,7 @@ async fn l2norm_multi_row_batch_matches_thirteen_single_row_calls() {
         // never a rank-0 `scalar_constant` -- `l2norm_with_eps_map`'s
         // own `eps_map` ("s->su") reads `eps` through a real `s` axis.
         let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
-        let output = l2norm_with_eps_map(&mut program, x, eps, "sui->sui", "su->sui", "s->su")
+        let output = l2norm_with_eps_map(&mut program, x, eps, KEY_DIM as u32, "sui->sui", "su->sui", "s->su")
             .expect("l2norm lowers");
         let eps_data = alloc::vec![1e-6f32; symbol as usize];
         let evaluated = crate::cpu::evaluate_named(
@@ -7845,7 +7845,7 @@ async fn query_prefill_split_then_l2norm_multi_row_matches_single_row() {
         )
         .expect("head split lowers");
         let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
-        let output = l2norm_with_eps_map(&mut program, split, eps, "sui->sui", "su->sui", "s->su")
+        let output = l2norm_with_eps_map(&mut program, split, eps, HEAD_K_DIM, "sui->sui", "su->sui", "s->su")
             .expect("l2norm lowers");
         let eps_data = alloc::vec![1e-6f32; symbol as usize];
         let evaluated = crate::cpu::evaluate_named(
@@ -9847,7 +9847,7 @@ async fn l2norm_matches_a_hand_computed_unit_vector() {
         "eps",
     );
 
-    let out = l2norm(&mut program, x, eps, "sd->sd", "s->sd").expect("l2norm lowers");
+    let out = l2norm(&mut program, x, eps, 2, "sd->sd", "s->sd").expect("l2norm lowers");
 
     let x_data = [3.0f32, 4.0];
     let eps_data = [0.0f32];
