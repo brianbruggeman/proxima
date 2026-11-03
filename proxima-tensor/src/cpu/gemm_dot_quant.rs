@@ -1,5 +1,17 @@
 use super::*;
 
+#[cfg(target_arch = "x86_64")]
+use super::dequant_x86::{
+    dequantize_block_q4_k, dequantize_block_q5_0, dequantize_block_q6_k, dequantize_block_q8_0,
+};
+#[cfg(not(target_arch = "x86_64"))]
+use proxima_gguf::quant::{
+    q4_k::dequantize_block as dequantize_block_q4_k,
+    q5_0::dequantize_block as dequantize_block_q5_0,
+    q6_k::dequantize_block as dequantize_block_q6_k,
+    q8_0::dequantize_block as dequantize_block_q8_0,
+};
+
 /// The reduction-dim fast path's fold state, bundled for the same reason
 /// [`OperandSpan`] and `ScanState` are: keeps `reduce_dot_binary` under
 /// clippy's argument-count lint. `len` is the contraction length (`k`'s
@@ -1152,7 +1164,7 @@ pub(super) fn dot_q4k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, 
         .iter()
         .zip(activation.as_chunks::<Q4K_BLOCK_ELEMENTS>().0)
     {
-        proxima_gguf::quant::q4_k::dequantize_block(block, &mut scratch);
+        dequantize_block_q4_k(block, &mut scratch);
         // `DOT_LANES` (8) independent partial sums instead of one serial
         // mul_add chain -- reuses the same fold `reduce_dot_binary` already
         // uses for every f32 GEMM contraction (ROW 12, discipline.md);
@@ -1514,7 +1526,7 @@ pub(super) fn dot_q6k_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, 
         .iter()
         .zip(activation.as_chunks::<Q4K_BLOCK_ELEMENTS>().0)
     {
-        proxima_gguf::quant::q6_k::dequantize_block(block, &mut scratch);
+        dequantize_block_q6_k(block, &mut scratch);
         acc = dot_fold_fused_multiply_add(
             &scratch,
             activation_chunk,
@@ -1610,7 +1622,7 @@ pub(super) fn dot_q8_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32,
         .iter()
         .zip(activation.as_chunks::<Q8_0_BLOCK_ELEMENTS>().0)
     {
-        proxima_gguf::quant::q8_0::dequantize_block(block, &mut scratch);
+        dequantize_block_q8_0(block, &mut scratch);
         acc = dot_fold_fused_multiply_add(
             &scratch,
             activation_chunk,
@@ -1858,7 +1870,7 @@ pub(super) fn dot_q5_0_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32,
         .iter()
         .zip(activation.as_chunks::<Q5_0_BLOCK_ELEMENTS>().0)
     {
-        proxima_gguf::quant::q5_0::dequantize_block(block, &mut scratch);
+        dequantize_block_q5_0(block, &mut scratch);
         acc = dot_fold_fused_multiply_add(
             &scratch,
             activation_chunk,
