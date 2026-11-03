@@ -8200,7 +8200,23 @@ did not hold every cached position)",
             #[cfg(all(feature = "metal", target_os = "macos"))]
             omega::MathMode::default(),
         );
-        let (mut runtime, _pinned) = self.pinned_runtime(&serving_config);
+        self.forward_cached_node_values_with_serving_config(prompt, node_ids, &serving_config)
+    }
+
+    /// [`Self::forward_cached_node_values_on_backend`] under the caller's whole
+    /// [`ServingConfig`], so a diagnostic compares node values under the same
+    /// numeric choices (`exact_activations`, cache quantization) a decode uses.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`Self::forward_cached_node_values_on_backend`].
+    pub fn forward_cached_node_values_with_serving_config(
+        &self,
+        prompt: &str,
+        node_ids: &[NodeId],
+        serving_config: &ServingConfig,
+    ) -> Result<Vec<Vec<Vec<f32>>>, InteropError> {
+        let (mut runtime, _pinned) = self.pinned_runtime(serving_config);
         let mut steps = Vec::new();
         let mut node_values_sink = NodeValuesSink::Collect {
             nodes: node_ids,
@@ -8209,7 +8225,7 @@ did not hold every cached position)",
         let _ = self.run_decode_loop_observed_seeded(
             prompt,
             1,
-            &serving_config,
+            serving_config,
             &mut runtime,
             None,
             &mut LogitsSink::Discard,

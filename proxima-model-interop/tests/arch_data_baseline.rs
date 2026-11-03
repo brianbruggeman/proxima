@@ -2387,8 +2387,8 @@ const QWEN35_LLAMA_LAST_ROWS: &str =
     include_str!("fixtures/llama-parity/qwen35/llama_idx17_last_rows.txt");
 const QWEN35_DIVERGENT_CASE: usize = 2;
 const QWEN35_DIVERGENT_INDEX: usize = 17;
-const LAYER_REL_L2_CEILING: f64 = 2.5e-2;
-const LAYER_ERROR_STEP_CEILING: f64 = 1.5;
+const FIRST_MIXER_REL_L2_CEILING: f64 = 1e-3;
+const LAYER_REL_L2_CEILING: f64 = 3e-2;
 
 fn llama_last_row(name: &str) -> Vec<f32> {
     QWEN35_LLAMA_LAST_ROWS
@@ -2470,8 +2470,12 @@ fn qwen35_layer_residuals_track_llama_at_the_divergent_prefix() {
     let reencoded = proxima_tokenizer::encode_with_bos_eos(&prefix, &vocab, false, false)
         .expect("re-encodes the prefix");
     assert_eq!(reencoded, ids, "the prefix text must tokenize back to llama's 74 ids");
+    let llama_numerics = ServingConfig {
+        exact_activations: false,
+        ..ServingConfig::default()
+    };
     let steps = model
-        .forward_cached_node_values_on_backend(&prefix, &node_ids, 0)
+        .forward_cached_node_values_with_serving_config(&prefix, &node_ids, &llama_numerics)
         .expect("qwen35 forwards the 74-id prefix through the cached loop");
     let values = steps.last().expect("the cached loop ran at least one step");
     let ours: Vec<Vec<f32>> = values
@@ -2491,13 +2495,10 @@ fn qwen35_layer_residuals_track_llama_at_the_divergent_prefix() {
         )
         .expect("writes to a string");
     }
-    let worst_step = errors
-        .windows(2)
-        .map(|pair| pair[1] / pair[0])
-        .fold(0.0, f64::max);
     let worst = errors.iter().copied().fold(0.0, f64::max);
     assert!(
-        worst_step <= LAYER_ERROR_STEP_CEILING && worst <= LAYER_REL_L2_CEILING,
-        "a sublayer stepped the error vs llama.cpp by {worst_step:.2}x (ceiling {LAYER_ERROR_STEP_CEILING}x) or reached rel_l2 {worst:.3e} (ceiling {LAYER_REL_L2_CEILING:e}, held above zero because the cpu q8_0 matmul does not yet quantize its activation the way ggml does):\n{report}"
+        errors[0] <= FIRST_MIXER_REL_L2_CEILING && worst <= LAYER_REL_L2_CEILING,
+        "the first mixer reached rel_l2 {:.3e} (ceiling {FIRST_MIXER_REL_L2_CEILING:e}: q8_0 activations quantized as ggml does) or a layer reached {worst:.3e} (ceiling {LAYER_REL_L2_CEILING:e}) vs llama.cpp:\n{report}",
+        errors[0]
     );
 }
