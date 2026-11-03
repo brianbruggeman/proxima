@@ -422,8 +422,8 @@ pub(super) fn reduce_epilogue_candidates(
             if dtype_of.get(&source).is_some_and(|source_dtype| *source_dtype != bound.dtype) {
                 continue; // a merged op evaluates in one dtype; a convert stays its own op.
             }
-            if bound.dtype != DType::FLOAT32 {
-                continue; // only the f32 kernels render an epilogue body.
+            if bound.dtype == DType::FLOAT64 {
+                continue; // no backend renders an f64 epilogue body.
             }
             candidates.push((bound.node, source));
         }

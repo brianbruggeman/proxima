@@ -7365,3 +7365,67 @@ fn no_fused_body_spans_a_dtype_change() {
         assert!(!bound_nodes.contains(&island.input));
     }
 }
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+fn mean_of_rows(dtype: DType) -> (Vec<Op>, NodeId) {
+    use crate::op::{Extent, Keep, Reduce, ReduceInit, append};
+
+    let mut program = Vec::new();
+    let full = || IndexMap::Affine(map::projection(2, &[0, 1]));
+    let row = || IndexMap::Affine(map::projection(1, &[0]));
+    let input = append(
+        &mut program,
+        Op::Input {
+            dtype,
+            shape: alloc::vec![Extent::Static(4), Extent::Static(8)],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: input,
+            in_map: full(),
+            out_map: IndexMap::Affine(map::projection(2, &[0])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let count = append(
+        &mut program,
+        Op::Constant {
+            dtype,
+            shape: Vec::new(),
+            value: 8.0,
+        },
+    );
+    let mean = append(
+        &mut program,
+        Op::Elementwise {
+            dtype,
+            body: ScalarOp::Divide,
+            operands: alloc::vec![(sum, row()), (count, IndexMap::Affine(map::projection(1, &[])))],
+            name: None,
+        },
+    );
+    (program, mean)
+}
+
+#[cfg(feature = "reduce-epilogue-fusion")]
+#[test]
+fn half_precision_reduce_epilogues_still_merge_and_f64_ones_never_do() {
+    for (dtype, merged) in [
+        (DType::FLOAT16, 1),
+        (DType::FLOAT32, 1),
+        (DType::FLOAT64, 0),
+    ] {
+        let (program, mean) = mean_of_rows(dtype);
+        let shapes = shape::infer(&program, &[]).expect("mean-of-rows infers");
+        let bound = bind_with_fusion(&program, &shapes, &[mean], true, NumericPolicy::bit_exact())
+            .expect("mean-of-rows binds");
+        assert_eq!(count_fused_epilogues(&bound), merged, "{dtype:?}: {bound:#?}");
+    }
+}
