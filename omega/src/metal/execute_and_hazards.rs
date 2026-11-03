@@ -248,6 +248,9 @@ pub(super) fn execute_plan_inner(
             QuantizedBlock::Packed { bytes, .. } => {
                 upload_packed_bytes(&device, bytes, resident_name)?
             }
+            QuantizedBlock::PackedStrided { .. } => {
+                (upload_strided_runs(&device, &block, resident_name)?, 0)
+            }
         };
         plan.record_scoped_buffer("input", node, &buffer.0);
         device_buffers.insert(node, buffer);

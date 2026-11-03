@@ -1429,6 +1429,18 @@ pub enum QuantizedBlock<'a> {
     Float32(&'a [f32]),
     Int32(&'a [i32]),
     Packed { codec: Codec, bytes: &'a [u8] },
+    /// A gathered expert stack whose expert `e` begins at byte
+    /// `e * stride_bytes` of `bytes` instead of `e * expert_bytes`: the
+    /// gate half (or up half) of a fused gate/up tensor, where the other half
+    /// sits between consecutive experts. `bytes` runs from expert 0's first
+    /// byte to the last expert's final byte. Only the gathered reduce reads
+    /// it; [`Self::packed_bytes`] is `None` so every dense consumer rejects it.
+    PackedStrided {
+        codec: Codec,
+        bytes: &'a [u8],
+        expert_bytes: usize,
+        stride_bytes: usize,
+    },
 }
 
 impl<'a> From<&'a [f32]> for QuantizedBlock<'a> {
@@ -1923,8 +1935,40 @@ impl<'a> QuantizedBlock<'a> {
         match self {
             QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
             QuantizedBlock::Packed { bytes, .. } => Some(bytes),
+            QuantizedBlock::PackedStrided { .. } => None,
         }
     }
+
+    /// The packed bytes as the contiguous `[expert, ...]` stack a device
+    /// kernel expects, one slice per run: a single slice for [`Self::Packed`],
+    /// one per expert for [`Self::PackedStrided`]. A device upload copies each
+    /// run in turn, so the gather costs no host buffer. `None` for decoded
+    /// blocks.
+    #[must_use]
+    pub fn packed_runs(&self) -> Option<impl Iterator<Item = &'a [u8]> + use<'a>> {
+        let (bytes, run, stride) = match self {
+            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => return None,
+            QuantizedBlock::Packed { bytes, .. } => (*bytes, bytes.len(), bytes.len()),
+            QuantizedBlock::PackedStrided {
+                bytes,
+                expert_bytes,
+                stride_bytes,
+                ..
+            } => (*bytes, *expert_bytes, *stride_bytes),
+        };
+        Some(
+            bytes
+                .chunks(stride.max(1))
+                .map(move |chunk| &chunk[..run.min(chunk.len())]),
+        )
+    }
+
+    /// Byte length of [`Self::packed_runs`] laid end to end.
+    #[must_use]
+    pub fn packed_len(&self) -> Option<usize> {
+        self.packed_runs().map(|runs| runs.map(<[u8]>::len).sum())
+    }
+
 
     /// Packed-block `(block_bytes, block_elements)` footprint for this
     /// codec, or `None` for [`Self::Float32`]/[`Self::Int32`] (decoded
@@ -1938,7 +1982,9 @@ impl<'a> QuantizedBlock<'a> {
     /// `Q*_BLOCK_BYTES`/`Q*_BLOCK_ELEMENTS` constants.
     #[must_use]
     pub const fn block_layout(&self) -> Option<(usize, usize)> {
-        let QuantizedBlock::Packed { codec, .. } = self else {
+        let (QuantizedBlock::Packed { codec, .. } | QuantizedBlock::PackedStrided { codec, .. }) =
+            self
+        else {
             return None;
         };
         match codec {
@@ -1968,7 +2014,9 @@ impl<'a> QuantizedBlock<'a> {
     ) -> Option<fn(&[u8], usize, &[f32]) -> Result<Vec<f32>, TensorError>> {
         match self {
             QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
-            QuantizedBlock::Packed { codec, .. } => codec_matmul_f32_kernel(*codec),
+            QuantizedBlock::Packed { codec, .. } | QuantizedBlock::PackedStrided { codec, .. } => {
+                codec_matmul_f32_kernel(*codec)
+            }
         }
     }
 
@@ -1984,7 +2032,9 @@ impl<'a> QuantizedBlock<'a> {
     ) -> Option<fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>> {
         match self {
             QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
-            QuantizedBlock::Packed { codec, .. } => codec_dequantize_fn(*codec),
+            QuantizedBlock::Packed { codec, .. } | QuantizedBlock::PackedStrided { codec, .. } => {
+                codec_dequantize_fn(*codec)
+            }
         }
     }
 
@@ -2006,10 +2056,12 @@ impl<'a> QuantizedBlock<'a> {
                 codec: Codec::Q4K,
                 bytes,
             },
-            QuantizedBlock::Packed { codec, .. } => QuantizedBlock::Packed {
-                codec: *codec,
-                bytes,
-            },
+            QuantizedBlock::Packed { codec, .. } | QuantizedBlock::PackedStrided { codec, .. } => {
+                QuantizedBlock::Packed {
+                    codec: *codec,
+                    bytes,
+                }
+            }
         }
     }
 
@@ -2036,6 +2088,19 @@ impl<'a> QuantizedBlock<'a> {
         let (codec_name, bytes, block_bytes, blocks) = match self {
             QuantizedBlock::Float32(data) => return Ok(data.len()),
             QuantizedBlock::Int32(data) => return Ok(data.len()),
+            QuantizedBlock::PackedStrided {
+                codec,
+                bytes,
+                expert_bytes,
+                ..
+            } => {
+                let runs = self.packed_len().unwrap_or(0) / (*expert_bytes).max(1);
+                let run = QuantizedBlock::Packed {
+                    codec: *codec,
+                    bytes: &bytes[..(*expert_bytes).min(bytes.len())],
+                };
+                return Ok(run.element_count()? * runs);
+            }
             QuantizedBlock::Packed { codec, bytes } => match codec {
                 Codec::Q4K => (
                     "q4_k",

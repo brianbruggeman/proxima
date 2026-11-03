@@ -555,7 +555,7 @@ fn evaluate_quantized_with_policy(
                 buffers[node.0 as usize] =
                     Some(Cow::Owned(data.iter().map(|&value| value as f32).collect()));
             }
-            QuantizedBlock::Packed { .. } => {
+            QuantizedBlock::Packed { .. } | QuantizedBlock::PackedStrided { .. } => {
                 quantized_weights.insert(*node, block);
             }
         }

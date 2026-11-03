@@ -408,7 +408,20 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     if let QuantizedBlock::Int32(_) = weight_block {
         unreachable!("integer index blocks never enter quantized matmul")
     }
-    let weights = weight_block.packed_bytes().ok_or_else(shape_error)?;
+    let (weights, stride_bytes) = match weight_block {
+        QuantizedBlock::PackedStrided {
+            bytes,
+            expert_bytes,
+            stride_bytes,
+            ..
+        } if weight_gather.is_some() => (bytes, Some((stride_bytes, expert_bytes))),
+        QuantizedBlock::PackedStrided { .. } => {
+            return Err(TensorError::StridedBlockUnsupported {
+                consumer: "ungathered quantized reduce",
+            });
+        }
+        _ => (weight_block.packed_bytes().ok_or_else(shape_error)?, None),
+    };
     let (block_bytes, block_elements) = weight_block.block_layout().ok_or_else(shape_error)?;
     if k == 0 || rows == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
@@ -440,7 +453,28 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         // segment's bindings. Each position resolves its own entry below, so
         // validating the absent stack length here would reject the exact
         // residency path this reducer is meant to execute.
-        if expert_source.is_none() && weights.len() != expected_total_bytes {
+        let span_bytes = match stride_bytes {
+            Some((stride, run_bytes)) => {
+                if run_bytes != per_expert_bytes
+                    || stride < run_bytes
+                    || !stride.is_multiple_of(block_bytes)
+                {
+                    return Err(shape_error());
+                }
+                expert_count
+                    .checked_sub(1)
+                    .and_then(|gaps| gaps.checked_mul(stride))
+                    .and_then(|gaps_bytes| gaps_bytes.checked_add(per_expert_bytes))
+                    .ok_or_else(shape_error)?
+            }
+            None => expected_total_bytes,
+        };
+        let span_ok = if stride_bytes.is_some() {
+            weights.len() >= span_bytes
+        } else {
+            weights.len() == span_bytes
+        };
+        if expert_source.is_none() && !span_ok {
             return Err(shape_error());
         }
     } else {
@@ -707,11 +741,17 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                     codec = ?entry.block,
                     "proxima-debugger route: resolved expert_source entry"
                 );
+                if matches!(entry.block, QuantizedBlock::PackedStrided { .. }) {
+                    return Err(TensorError::StridedBlockUnsupported {
+                        consumer: "expert source entry",
+                    });
+                }
                 let bytes = entry.block.packed_bytes().ok_or_else(shape_error)?;
                 expert_entry = Some(entry);
                 bytes
             } else {
-                let start = expert_index as usize * per_expert_bytes;
+                let start = expert_index as usize
+                    * stride_bytes.map_or(per_expert_bytes, |(stride, _)| stride);
                 weights
                     .get(start..start + per_expert_bytes)
                     .ok_or_else(shape_error)?
@@ -725,7 +765,12 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         // was resolved, falling back to `weight_block`'s own discriminant
         // (paired with `weights` above, already re-sliced for this
         // position) on every path that predates `ExpertSource`.
-        let dispatch_block = expert_entry.map_or(weight_block, |entry| entry.block);
+        let resolved_weight = if stride_bytes.is_some() {
+            weight_block.with_bytes(weights)
+        } else {
+            weight_block
+        };
+        let dispatch_block = expert_entry.map_or(resolved_weight, |entry| entry.block);
         // proxima-debugger diagnostic: per-position, per-codec call timer
         // plus `rows * k` mac count -- localizes whether the missing 2x is
         // inside one codec's kernel (ns/mac far above the isolated
@@ -739,6 +784,11 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 unreachable!("integer index blocks never enter quantized dispatch")
             }
             QuantizedBlock::Float32(_) => return Err(shape_error()),
+            QuantizedBlock::PackedStrided { .. } => {
+                return Err(TensorError::StridedBlockUnsupported {
+                    consumer: "expert source entry",
+                });
+            }
             QuantizedBlock::Packed {
                 codec: Codec::Q4K,
                 bytes: _,
@@ -844,7 +894,9 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             // `weight_block` would count e.g. a `Q2_K` expert's macs/ticks
             // as `Q4_K` whenever the stack's OWN declared codec was `Q4_K`.
             match dispatch_block {
-                QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => {}
+                QuantizedBlock::Float32(_)
+                | QuantizedBlock::Int32(_)
+                | QuantizedBlock::PackedStrided { .. } => {}
                 QuantizedBlock::Packed {
                     codec: Codec::Q4K,
                     bytes: _,

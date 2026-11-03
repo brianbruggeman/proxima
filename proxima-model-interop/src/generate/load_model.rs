@@ -1336,7 +1336,9 @@ fn block_host_range(block: &QuantizedBlock<'_>) -> Range<usize> {
     match block {
         QuantizedBlock::Float32(values) => host_range(values),
         QuantizedBlock::Int32(values) => host_range(values),
-        QuantizedBlock::Packed { bytes, .. } => host_range(bytes),
+        QuantizedBlock::Packed { bytes, .. } | QuantizedBlock::PackedStrided { bytes, .. } => {
+            host_range(bytes)
+        }
     }
 }
 

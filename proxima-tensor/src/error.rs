@@ -113,6 +113,12 @@ pub enum TensorError {
         block_bytes: usize,
     },
 
+    /// A strided expert stack (`QuantizedBlock::PackedStrided`) reached a
+    /// consumer that reads a block as one contiguous run; only the gathered
+    /// reduce honours the stride.
+    #[error("strided expert stack `{consumer}` cannot be read as one contiguous packed block")]
+    StridedBlockUnsupported { consumer: &'static str },
+
     #[error("map `{0}` is not `operand->iteration` notation")]
     MalformedMap(alloc::string::String),
 

@@ -330,8 +330,9 @@ fn bind_join<'file>(
 
 /// Binds part `part` of `of` equal row slices of `tensor`, within every outer
 /// index past its row axis. One outer index borrows the slice out of the
-/// mapping; several outer indices are not contiguous, so each part is
-/// assembled into its own packed buffer by one memcpy per index.
+/// mapping; several outer indices are not contiguous, so the part
+/// binds as a strided view over the mapping (`QuantizedBlock::PackedStrided`),
+/// with no copy.
 fn bind_part<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
@@ -383,14 +384,17 @@ fn bind_part<'file>(
             ggml_type: tensor.ggml_type,
         }
     })?;
-    let mut assembled = Vec::with_capacity((part_bytes * outer) as usize);
-    for outer_index in 0..outer {
-        assembled.extend_from_slice(slice_of(outer_index));
-    }
-    state.resident_bytes += assembled.len();
-    state
-        .packed_owned
-        .push((leaf.name.into(), assembled, codec));
+    let first = (u64::from(part) * part_bytes) as usize;
+    let span_bytes = ((outer - 1) * outer_bytes + part_bytes) as usize;
+    state.packed.push((
+        leaf.name.into(),
+        QuantizedBlock::PackedStrided {
+            codec,
+            bytes: &source[first..first + span_bytes],
+            expert_bytes: part_bytes as usize,
+            stride_bytes: outer_bytes as usize,
+        },
+    ));
     Ok(())
 }
 
@@ -966,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn a_part_alias_over_a_stack_assembles_each_experts_half_into_its_own_buffer() {
+    fn a_part_alias_over_a_stack_binds_each_experts_half_as_a_strided_view_of_the_mapping() {
         let fused = quantized_rows(8, |row| (row / 4 * 10 + row % 4) as f32);
         let bytes = gguf(&[(
             "blk.0.ffn_gate_up_exps.weight",
@@ -981,18 +985,53 @@ mod tests {
         let weights = bind(&bytes, &program, &defaults()).expect("binds");
 
         assert!(
-            weights.packed().is_empty(),
-            "a stack's halves are not contiguous, so none borrow"
+            weights.packed_owned().is_empty(),
+            "no half is copied into an anonymous buffer"
         );
-        let [(gate_name, gate, gate_codec), (up_name, up, _)] = weights.packed_owned() else {
-            panic!("two assembled halves, got {}", weights.packed_owned().len());
+        let [(gate_name, gate), (up_name, up)] = weights.packed() else {
+            panic!("two strided halves, got {}", weights.packed().len());
         };
         assert_eq!(
             (gate_name.as_str(), up_name.as_str()),
             ("blk.0.ffn_gate_exps.weight", "blk.0.ffn_up_exps.weight")
         );
-        assert_eq!(*gate_codec, Codec::Q4K);
-        let near = |actual: Vec<f32>, expected: [f32; 4]| {
+        let mapping = bytes.as_ptr_range();
+        let expert_bytes = fused.len() / 4;
+        for (half, block) in [gate, up].into_iter().enumerate() {
+            let QuantizedBlock::PackedStrided {
+                codec: Codec::Q4K,
+                bytes: view,
+                expert_bytes: run,
+                stride_bytes: stride,
+            } = block
+            else {
+                panic!("expected a strided Q4K view, got {block:?}");
+            };
+            assert!(
+                mapping.contains(&view.as_ptr()) && view.as_ptr_range().end <= mapping.end,
+                "half {half} lies inside the source mapping"
+            );
+            assert_eq!((*run, *stride), (expert_bytes, 2 * expert_bytes));
+            for expert in 0..2usize {
+                let old_copy_start = expert * 2 * expert_bytes + half * expert_bytes;
+                assert_eq!(
+                    &view[expert * stride..expert * stride + run],
+                    &fused[old_copy_start..old_copy_start + expert_bytes],
+                    "half {half} expert {expert}"
+                );
+            }
+        }
+        let near = |block: &QuantizedBlock<'_>, expert: usize, expected: [f32; 2]| {
+            let QuantizedBlock::PackedStrided {
+                bytes: view,
+                expert_bytes: run,
+                stride_bytes: stride,
+                ..
+            } = block
+            else {
+                panic!("expected a strided view");
+            };
+            let actual = dequantized_row_values(&view[expert * stride..expert * stride + run], 2);
             assert!(
                 actual
                     .iter()
@@ -1001,8 +1040,10 @@ mod tests {
                 "{actual:?} vs {expected:?}"
             );
         };
-        near(dequantized_row_values(gate, 4), [0.0, 1.0, 10.0, 11.0]);
-        near(dequantized_row_values(up, 4), [2.0, 3.0, 12.0, 13.0]);
+        near(gate, 0, [0.0, 1.0]);
+        near(gate, 1, [10.0, 11.0]);
+        near(up, 0, [2.0, 3.0]);
+        near(up, 1, [12.0, 13.0]);
     }
 
     #[test]

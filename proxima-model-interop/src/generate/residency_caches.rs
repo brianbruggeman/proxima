@@ -392,7 +392,9 @@ fn resident_source_identity(block: QuantizedBlock<'_>) -> (usize, usize) {
             (values.as_ptr() as usize, core::mem::size_of_val(values))
         }
         QuantizedBlock::Int32(values) => (values.as_ptr() as usize, core::mem::size_of_val(values)),
-        QuantizedBlock::Packed { bytes, .. } => (bytes.as_ptr() as usize, bytes.len()),
+        QuantizedBlock::Packed { bytes, .. } | QuantizedBlock::PackedStrided { bytes, .. } => {
+            (bytes.as_ptr() as usize, bytes.len())
+        }
     }
 }
 

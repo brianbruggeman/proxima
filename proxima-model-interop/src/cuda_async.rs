@@ -649,7 +649,7 @@ fn block_byte_len(block: QuantizedBlock<'_>) -> Option<usize> {
     match block {
         QuantizedBlock::Float32(values) => values.len().checked_mul(size_of::<f32>()),
         QuantizedBlock::Int32(values) => values.len().checked_mul(size_of::<i32>()),
-        QuantizedBlock::Packed { bytes, .. } => Some(bytes.len()),
+        QuantizedBlock::Packed { .. } | QuantizedBlock::PackedStrided { .. } => block.packed_len(),
     }
 }
 
@@ -660,6 +660,16 @@ fn own_block(block: QuantizedBlock<'_>) -> OwnedBlock {
         QuantizedBlock::Packed { codec, bytes } => OwnedBlock::Packed {
             codec,
             bytes: Arc::from(bytes),
+        },
+        QuantizedBlock::PackedStrided { codec, .. } => OwnedBlock::Packed {
+            codec,
+            bytes: block
+                .packed_runs()
+                .into_iter()
+                .flatten()
+                .flatten()
+                .copied()
+                .collect(),
         },
     }
 }
@@ -1322,6 +1332,36 @@ mod tests {
             [(NodeId(1), 22)].into(),
         );
         service.shutdown().await.expect("owner should drain");
+    }
+
+    #[proxima::test]
+    async fn test_omega_async_owned_strided_block_equals_its_contiguous_runs() {
+        let experts = 3usize;
+        let run = 144usize;
+        let source: Vec<u8> = (0..experts * 2 * run).map(|index| (index % 251) as u8).collect();
+        let span = &source[run..run + (experts - 1) * 2 * run + run];
+        let strided = QuantizedBlock::PackedStrided {
+            codec: Codec::Q4K,
+            bytes: span,
+            expert_bytes: run,
+            stride_bytes: 2 * run,
+        };
+        let byte_budget = OwnedByteBudget::new(1 << 20).expect("valid test byte budget");
+
+        let owned = byte_budget
+            .copy_named_blocks(&[("up_exps", strided)])
+            .await
+            .expect("strided block should be admitted");
+
+        let expected: Vec<u8> = (0..experts)
+            .flat_map(|expert| source[(expert * 2 + 1) * run..(expert * 2 + 2) * run].to_vec())
+            .collect();
+        let OwnedBlock::Packed { codec, bytes } = &owned.blocks[0].block else {
+            panic!("expected an owned packed block");
+        };
+        assert_eq!(*codec, Codec::Q4K);
+        assert_eq!(bytes.as_ref(), expected.as_slice());
+        assert_eq!(owned.owned_bytes, "up_exps".len() + experts * run);
     }
 
     type CaptureQueue = CommandSender<(AdmittedGpuJob, Sender<Result<usize, GpuPipeError>>)>;

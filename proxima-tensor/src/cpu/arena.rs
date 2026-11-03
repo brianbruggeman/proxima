@@ -1178,7 +1178,7 @@ where
                 fill_integer_input(*node, slot, values)?;
                 continue;
             }
-            Some(QuantizedBlock::Packed { .. }) => continue,
+            Some(QuantizedBlock::Packed { .. } | QuantizedBlock::PackedStrided { .. }) => continue,
             // A name `build_static_arena_with_constants`'s own `constant_inputs`
             // loop already bound is correct in the arena right now without
             // being re-passed -- `require_all` asks "is every genuine input
@@ -1736,7 +1736,9 @@ where
         })
         .filter_map(|(name, operand)| match (*operand).into() {
             QuantizedBlock::Float32(data) => Some((*name, data)),
-            QuantizedBlock::Int32(_) | QuantizedBlock::Packed { .. } => None,
+            QuantizedBlock::Int32(_)
+            | QuantizedBlock::Packed { .. }
+            | QuantizedBlock::PackedStrided { .. } => None,
         })
         .collect();
     let arena =
@@ -1856,7 +1858,12 @@ where
 {
     let carries_packed = named
         .iter()
-        .any(|(_, operand)| matches!((*operand).into(), QuantizedBlock::Packed { .. }));
+        .any(|(_, operand)| {
+            matches!(
+                (*operand).into(),
+                QuantizedBlock::Packed { .. } | QuantizedBlock::PackedStrided { .. }
+            )
+        });
     if !carries_packed {
         return BTreeMap::new();
     }
@@ -1866,7 +1873,9 @@ where
             let name = program[node.0 as usize].name()?;
             let (_, operand) = named.iter().find(|(candidate, _)| *candidate == name)?;
             match (*operand).into() {
-                block @ QuantizedBlock::Packed { .. } => Some((node, block)),
+                block @ (QuantizedBlock::Packed { .. } | QuantizedBlock::PackedStrided { .. }) => {
+                    Some((node, block))
+                }
                 QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
             }
         })

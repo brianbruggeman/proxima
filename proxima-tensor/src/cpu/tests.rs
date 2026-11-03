@@ -10071,6 +10071,119 @@ fn evaluate_quantized_gathered_moe_weight_matches_the_routed_experts_own_matmul(
     }
 }
 
+fn fused_gate_up_experts(n_experts: usize, rows: usize, k: usize) -> (Vec<u8>, usize) {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, quantize};
+
+    let half_bytes = rows * (k / proxima_gguf::quant::q4_k::QK_K) * BLOCK_BYTES;
+    let mut fused = Vec::with_capacity(n_experts * 2 * half_bytes);
+    for half in 0..n_experts * 2 {
+        let values: Vec<f32> = random_vec(301 + half as u64, rows * k)
+            .into_iter()
+            .map(|value| (value * 4.0 - 2.0) * (1.0 + half as f32))
+            .collect();
+        let mut encoded = vec![0u8; half_bytes];
+        for (row_values, row_blocks) in values
+            .chunks_exact(k)
+            .zip(encoded.chunks_exact_mut(half_bytes / rows))
+        {
+            quantize(row_values, row_blocks).expect("row length is a whole number of super-blocks");
+        }
+        fused.extend_from_slice(&encoded);
+    }
+    (fused, half_bytes)
+}
+
+fn evaluate_gathered_halves(
+    weight: QuantizedBlock<'_>,
+    n_experts: u32,
+    rows: u32,
+    k: u32,
+) -> Result<Vec<f32>, TensorError> {
+    let route_data = [2.0f32, 0.0, 3.0, 1.0];
+    let activation: Vec<f32> = random_vec(411, route_data.len() * k as usize)
+        .into_iter()
+        .map(|value| value * 2.0 - 1.0)
+        .collect();
+    let (program, sum) =
+        gathered_quantized_matmul_program(n_experts, rows, k, route_data.len() as u32);
+    let blocks = [
+        weight,
+        QuantizedBlock::Float32(&route_data),
+        QuantizedBlock::Float32(&activation),
+    ];
+    evaluate_quantized(&program, &[], &blocks, &[sum]).map(|evaluated| evaluated.root().to_vec())
+}
+
+#[test]
+fn a_strided_gate_half_evaluates_bit_identically_to_the_packed_copy_of_that_half() {
+    let (n_experts, rows, k) = (4usize, 4usize, proxima_gguf::quant::q4_k::QK_K);
+    let (fused, half_bytes) = fused_gate_up_experts(n_experts, rows, k);
+    for half in 0..2usize {
+        let copy: Vec<u8> = (0..n_experts)
+            .flat_map(|expert| {
+                let start = expert * 2 * half_bytes + half * half_bytes;
+                fused[start..start + half_bytes].iter().copied()
+            })
+            .collect();
+        let strided = QuantizedBlock::PackedStrided {
+            codec: Codec::Q4K,
+            bytes: &fused[half * half_bytes..(n_experts - 1) * 2 * half_bytes + (half + 1) * half_bytes],
+            expert_bytes: half_bytes,
+            stride_bytes: 2 * half_bytes,
+        };
+        let copied = QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &copy,
+        };
+
+        let from_view = evaluate_gathered_halves(strided, n_experts as u32, rows as u32, k as u32)
+            .expect("strided gathered reduce evaluates");
+        let from_copy = evaluate_gathered_halves(copied, n_experts as u32, rows as u32, k as u32)
+            .expect("packed gathered reduce evaluates");
+
+        assert_eq!(
+            from_view.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            from_copy.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            "half {half}: strided view differs from the copy it replaces"
+        );
+    }
+}
+
+#[test]
+fn a_strided_block_whose_expert_run_disagrees_with_the_reduce_shape_is_refused() {
+    let (n_experts, rows, k) = (4usize, 4usize, proxima_gguf::quant::q4_k::QK_K);
+    let (fused, half_bytes) = fused_gate_up_experts(n_experts, rows, k);
+    let strided = QuantizedBlock::PackedStrided {
+        codec: Codec::Q4K,
+        bytes: &fused,
+        expert_bytes: half_bytes / 2,
+        stride_bytes: 2 * half_bytes,
+    };
+
+    let refused = evaluate_gathered_halves(strided, n_experts as u32, rows as u32, k as u32);
+
+    assert!(refused.is_err(), "got {refused:?}");
+}
+
+#[test]
+fn a_strided_block_has_no_contiguous_run_but_a_logical_stack_of_runs() {
+    let (n_experts, rows, k) = (4usize, 4usize, proxima_gguf::quant::q4_k::QK_K);
+    let (fused, half_bytes) = fused_gate_up_experts(n_experts, rows, k);
+    let strided = QuantizedBlock::PackedStrided {
+        codec: Codec::Q4K,
+        bytes: &fused[..(n_experts - 1) * 2 * half_bytes + half_bytes],
+        expert_bytes: half_bytes,
+        stride_bytes: 2 * half_bytes,
+    };
+
+    assert!(strided.packed_bytes().is_none());
+    assert_eq!(strided.packed_len(), Some(n_experts * half_bytes));
+    assert_eq!(strided.element_count().expect("whole blocks"), n_experts * rows * k);
+    let runs: Vec<&[u8]> = strided.packed_runs().expect("packed").collect();
+    assert_eq!(runs.len(), n_experts);
+    assert_eq!(runs[2], &fused[4 * half_bytes..5 * half_bytes]);
+}
+
 /// Shared rig for the `ExpertSource` tests below: binds
 /// [`gathered_quantized_matmul_program`]'s program, resolves the
 /// gathered reduce node's own [`BoundOp`], and hands back everything
@@ -10224,6 +10337,130 @@ fn expert_source_matches_stack_gather() {
         via_source, via_stack,
         "an ExpertSource aliasing one contiguous stack must be bit-identical to reading \
          that stack directly"
+    );
+}
+
+#[test]
+fn an_ungathered_reduce_refuses_a_strided_weight() {
+    let (rows, k) = (1usize, proxima_gguf::quant::q4_k::QK_K);
+    let (fused, half_bytes) = fused_gate_up_experts(2, rows, k);
+    let strided = QuantizedBlock::PackedStrided {
+        codec: Codec::Q4K,
+        bytes: &fused[..3 * half_bytes],
+        expert_bytes: half_bytes,
+        stride_bytes: 2 * half_bytes,
+    };
+    let x: Vec<f32> = random_vec(702, k);
+    let flat_layout = || bind::Layout {
+        base: 0,
+        strides: smallvec::smallvec![1],
+    };
+    let weight_layout = bind::Layout {
+        base: 0,
+        strides: smallvec::smallvec![k as i64, 1],
+    };
+    let activation_layout = bind::Layout {
+        base: 0,
+        strides: smallvec::smallvec![0, 1],
+    };
+    let resolved = BoundOp {
+        node: NodeId(2),
+        dtype: DType::FLOAT32,
+        extents: alloc::vec![rows as u64, k as u64],
+        kind: BoundOpKind::Reduce {
+            element_body: ComposedBody {
+                steps: alloc::vec![step(
+                    ScalarOp::Multiply,
+                    &[StepArg::Operand(0), StepArg::Operand(1)]
+                )],
+            },
+            reduce_op: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            keep: Keep::Reduce,
+            accumulator: DType::FLOAT32,
+            operands: alloc::vec![
+                (NodeId(0), weight_layout, None),
+                (NodeId(1), activation_layout, None),
+            ],
+            output_axes: smallvec::smallvec![0],
+            out_layout: flat_layout(),
+            out_scatter: None,
+            epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
+            epilogue_operands: Vec::new(),
+            epilogue_broadcast_axes: smallvec::smallvec![],
+        },
+    };
+    let buffers: Vec<Option<Cow<'_, [f32]>>> = alloc::vec![None, Some(Cow::Borrowed(x.as_slice()))];
+    let mut output = vec![0.0f32; rows];
+
+    let error = run_reduce_quantized(
+        &resolved,
+        &buffers,
+        strided,
+        NodeId(0),
+        None,
+        None,
+        false,
+        &mut output,
+    )
+    .expect_err("an ungathered reduce cannot honour a stride");
+
+    assert_eq!(
+        error,
+        TensorError::StridedBlockUnsupported {
+            consumer: "ungathered quantized reduce"
+        }
+    );
+}
+
+#[test]
+fn an_expert_source_entry_that_is_strided_is_refused() {
+    let (n_experts, rows, k) = (3u32, 4u32, proxima_gguf::quant::q4_k::QK_K as u32);
+    let (fused, half_bytes) = fused_gate_up_experts(n_experts as usize, rows as usize, k as usize);
+    let stacked: Vec<u8> = (0..n_experts as usize)
+        .flat_map(|expert| fused[expert * 2 * half_bytes..expert * 2 * half_bytes + half_bytes].to_vec())
+        .collect();
+    let route_data = [1.0f32];
+    let activation: Vec<f32> = random_vec(411, k as usize);
+    let (program, sum) = gathered_quantized_matmul_program(n_experts, rows, k, 1);
+    let weight_block = QuantizedBlock::Packed {
+        codec: Codec::Q4K,
+        bytes: &stacked,
+    };
+    let mut entries = expert_entries_from_stack(weight_block, n_experts as usize, rows, k, 0)
+        .expect("a block-aligned contiguous stack slices evenly");
+    entries[1] = ExpertEntry {
+        block: QuantizedBlock::PackedStrided {
+            codec: Codec::Q4K,
+            bytes: &fused[..half_bytes],
+            expert_bytes: half_bytes,
+            stride_bytes: 2 * half_bytes,
+        },
+        out_dim: rows,
+        in_dim: k,
+        epoch: 1,
+    };
+    let (resolved, buffers, weight_node) =
+        resolve_gathered_reduce_for_expert_source_test(&program, sum, &route_data, &activation);
+    let mut output = vec![0.0f32; rows as usize];
+
+    let error = run_reduce_quantized(
+        &resolved,
+        &buffers,
+        weight_block,
+        weight_node,
+        Some(ExpertSource::new(&entries)),
+        None,
+        false,
+        &mut output,
+    )
+    .expect_err("an expert source entry cannot be strided");
+
+    assert_eq!(
+        error,
+        TensorError::StridedBlockUnsupported {
+            consumer: "expert source entry"
+        }
     );
 }
 

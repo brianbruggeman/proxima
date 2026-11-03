@@ -168,6 +168,7 @@ fn cuda_input_contract(
         QuantizedBlock::Float32(_) => (None, false),
         QuantizedBlock::Int32(_) => (None, true),
         QuantizedBlock::Packed { codec, .. } => (Some(*codec), false),
+        QuantizedBlock::PackedStrided { codec, .. } => (Some(*codec), false),
     };
     Ok((
         codec,
@@ -1184,6 +1185,38 @@ impl CudaDriver {
             return Ok(());
         }
         let buffer = self.stream.clone_htod(values)?;
+        self.graph_uploads.fetch_add(1, Ordering::Relaxed);
+        arena
+            .buffers
+            .insert(node, CudaGraphBuffer::Bytes(Arc::new(buffer)));
+        arena.allocations += 1;
+        Ok(())
+    }
+
+    /// Uploads a strided expert stack as the contiguous `[expert, ...]` buffer
+    /// the kernels expect: one host-to-device copy per expert run into its
+    /// slot of a fresh device allocation, so no host-side gather buffer exists.
+    fn upload_runs(
+        &self,
+        arena: &mut CudaF32Arena,
+        node: NodeId,
+        block: &QuantizedBlock<'_>,
+    ) -> Result<(), CudaDriverError> {
+        let (Some(runs), Some(total)) = (block.packed_runs(), block.packed_len()) else {
+            return Err(CudaDriverError::UnsupportedGraph {
+                node,
+                reason: "block has no packed runs",
+            });
+        };
+        self.packed_upload_bytes
+            .fetch_add(total as u64, Ordering::Relaxed);
+        let mut buffer = self.stream.alloc_zeros::<u8>(total)?;
+        let mut offset = 0;
+        for run in runs {
+            let mut slot = buffer.slice_mut(offset..offset + run.len());
+            self.stream.memcpy_htod(run, &mut slot)?;
+            offset += run.len();
+        }
         self.graph_uploads.fetch_add(1, Ordering::Relaxed);
         arena
             .buffers
@@ -3434,8 +3467,14 @@ impl CudaPlan {
                             reason: "input codec differs from planned codec",
                         });
                     }
-                    self.driver
-                        .upload_bytes(&mut self.arena, node, packed_bytes(other))?;
+                    match other {
+                        QuantizedBlock::PackedStrided { .. } => self
+                            .driver
+                            .upload_runs(&mut self.arena, node, other)?,
+                        _ => self
+                            .driver
+                            .upload_bytes(&mut self.arena, node, packed_bytes(other))?,
+                    }
                 }
             }
             upload_call_us += elapsed_micros(upload_call_started);
@@ -3857,7 +3896,9 @@ impl CudaPlan {
 // decision here instead of slipping through a wildcard.
 fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
     crate::msl::codec_from_quantized_block(block)?;
-    let QuantizedBlock::Packed { codec, .. } = block else {
+    let (QuantizedBlock::Packed { codec, .. } | QuantizedBlock::PackedStrided { codec, .. }) =
+        block
+    else {
         return None;
     };
     match codec {
@@ -3902,7 +3943,9 @@ fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
 
 fn packed_bytes<'a>(block: &QuantizedBlock<'a>) -> &'a [u8] {
     match block {
-        QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => &[],
+        QuantizedBlock::Float32(_)
+        | QuantizedBlock::Int32(_)
+        | QuantizedBlock::PackedStrided { .. } => &[],
         QuantizedBlock::Packed { bytes, .. } => packed_codec(block).map_or(&[], |_| bytes),
     }
 }
@@ -3911,7 +3954,8 @@ fn block_address(block: &QuantizedBlock<'_>) -> usize {
     match block {
         QuantizedBlock::Float32(values) => values.as_ptr() as usize,
         QuantizedBlock::Int32(values) => values.as_ptr() as usize,
-        _ => packed_bytes(block).as_ptr() as usize,
+        QuantizedBlock::PackedStrided { bytes, .. } => bytes.as_ptr() as usize,
+        QuantizedBlock::Packed { .. } => packed_bytes(block).as_ptr() as usize,
     }
 }
 
@@ -3919,7 +3963,8 @@ fn block_length(block: &QuantizedBlock<'_>) -> usize {
     match block {
         QuantizedBlock::Float32(values) => std::mem::size_of_val(*values),
         QuantizedBlock::Int32(values) => std::mem::size_of_val(*values),
-        _ => packed_bytes(block).len(),
+        QuantizedBlock::PackedStrided { .. } => block.packed_len().unwrap_or(0),
+        QuantizedBlock::Packed { .. } => packed_bytes(block).len(),
     }
 }
 
