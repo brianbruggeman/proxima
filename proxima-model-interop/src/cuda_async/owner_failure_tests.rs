@@ -242,3 +242,15 @@ async fn test_omega_async_owner_failure_drains_every_accepted_job_and_restores_c
     assert_eq!(remaining_bytes, initial_bytes);
     shutdown.expect("owner should join after draining all accepted jobs");
 }
+
+#[proxima::test]
+async fn test_omega_async_register_graph_returns_registration_input_credit_before_reply() {
+    let service = CudaGpuService::start_fake().expect("fake owner should start");
+    let full_bytes = service.available_owned_host_bytes();
+    assert_eq!(full_bytes, DEFAULT_OWNED_HOST_BYTES);
+
+    let _lease = failing_fake_plan(&service).await;
+
+    assert_eq!(service.available_owned_host_bytes(), full_bytes);
+    service.shutdown().await.expect("owner should join");
+}

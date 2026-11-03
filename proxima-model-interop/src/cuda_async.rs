@@ -903,7 +903,7 @@ impl CudaGpuService<()> {
                         let _ = reply.send(result);
                     }
                     OwnerCommand::RegisterGraph { graph, reply } => {
-                        let result = (|| {
+                        let result = (|graph: OwnedGraph| {
                             #[cfg(test)]
                             if fake {
                                 owner_fake_plan_inputs.lock().push(FakePlanInputs {
@@ -953,7 +953,7 @@ impl CudaGpuService<()> {
                             plans
                                 .register(RegisteredPlan::Cuda(Box::new(plan)))
                                 .map_err(CudaPlanRegistrationError::from)
-                        })();
+                        })(graph);
                         if let Err(Ok(lease)) = reply.send(result) {
                             let _ = plans.retire(&lease);
                         }
