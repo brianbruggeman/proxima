@@ -216,6 +216,7 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
     shapes: &shape::Shapes,
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
     buffers: &mut [Option<Cow<'_, [f32]>>],
+    pool: &mut Vec<Vec<f32>>,
 ) -> Result<(), TensorError> {
     for (computed, operand, row_shape) in non_primary_operand_reads(resolved, quantized_weights) {
         #[cfg(not(feature = "instrument"))]
@@ -241,6 +242,7 @@ pub(super) fn materialize_quantized_weights_read_by_non_primary_operands(
             quantized_weights,
             row_shape,
             buffers,
+            pool,
         )?;
     }
     Ok(())
@@ -614,7 +616,14 @@ fn evaluate_quantized_with_policy(
         .collect();
     bind::correct_packed_matmul_layouts(&mut resolved, &dense_packed_nodes);
     for node in dense_packed_nodes {
-        materialize_quantized_weight_output(node, &shapes, &quantized_weights, None, &mut buffers)?;
+        materialize_quantized_weight_output(
+            node,
+            &shapes,
+            &quantized_weights,
+            None,
+            &mut buffers,
+            free_buffers,
+        )?;
         quantized_weights.remove(&node);
     }
     // standalone diagnostic operations and reduce epilogues read f32 buffers;
@@ -626,6 +635,7 @@ fn evaluate_quantized_with_policy(
         &shapes,
         &quantized_weights,
         &mut buffers,
+        free_buffers,
     )?;
     // The weight's own `NodeId` can ALSO be named directly in
     // `effective_outputs` (a caller inspecting a raw checkpoint tensor, not
@@ -642,6 +652,7 @@ fn evaluate_quantized_with_policy(
             &quantized_weights,
             None,
             &mut buffers,
+            free_buffers,
         )?;
     }
     let retires = node_retirement(&resolved, &effective_outputs);

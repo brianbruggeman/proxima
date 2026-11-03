@@ -2319,6 +2319,7 @@ pub(super) fn materialize_quantized_weight_output(
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock>,
     row_shape: Option<(usize, usize)>,
     buffers: &mut [Option<Cow<'_, [f32]>>],
+    pool: &mut Vec<Vec<f32>>,
 ) -> Result<(), TensorError> {
     if buffers[node.0 as usize].is_some() {
         return Ok(());
@@ -2332,7 +2333,7 @@ pub(super) fn materialize_quantized_weight_output(
         elements = element_count(shapes.of(node)),
         "materializing quantized weight for requested output"
     );
-    let mut dequantized = vec![0.0f32; element_count(shapes.of(node))];
+    let mut dequantized = take_or_allocate(pool, element_count(shapes.of(node)));
     dequantize_weight_into(node, block, row_shape, &mut dequantized)?;
     buffers[node.0 as usize] = Some(Cow::Owned(dequantized));
     Ok(())
