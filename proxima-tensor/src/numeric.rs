@@ -90,9 +90,30 @@ pub struct NumericPolicy {
     #[cfg_attr(feature = "config", setting(default = false))]
     #[cfg_attr(feature = "config", serde(default))]
     pub bf16_input_rounding: bool,
+    /// Permits narrowing a declared f64 accumulation island (an [`crate::op::Op`]
+    /// whose dtype is [`crate::dtype::DType::FLOAT64`], e.g. the sum of squares
+    /// [`crate::spec::mean_of_squares`] builds) to f32 before binding. A backend
+    /// whose incumbent accumulates norms in `float` grants it: llama.cpp's CUDA
+    /// `rms_norm_f32` (`ggml-cuda/norm.cu:130-140`, `float tmp`) and Metal
+    /// `kernel_rms_norm_fuse_impl` (`ggml-metal/kernels/norm.metal:136-156`,
+    /// `float sumf`, `mean = sumf/ne00`). The CPU withholds it: ggml's CPU norms
+    /// sum in `ggml_float` (`ggml-cpu/ops.cpp:3957-3963`).
+    #[cfg_attr(feature = "config", setting(default = false))]
+    #[cfg_attr(feature = "config", serde(default))]
+    pub accumulator_narrowing: bool,
 }
 
 impl NumericPolicy {
+    /// `self` with [`Self::accumulator_narrowing`] granted: what a backend whose
+    /// incumbent sums its norms in `float` binds with.
+    #[must_use]
+    pub const fn with_accumulator_narrowing(self) -> Self {
+        Self {
+            accumulator_narrowing: true,
+            ..self
+        }
+    }
+
     /// Bit-parity with [`crate::cpu::evaluate`] -- no permission granted.
     #[must_use]
     pub const fn bit_exact() -> Self {
@@ -105,6 +126,7 @@ impl NumericPolicy {
             epilogue_sources: false,
             activation_quantization: false,
             bf16_input_rounding: false,
+            accumulator_narrowing: false,
         }
     }
 
@@ -125,6 +147,7 @@ impl NumericPolicy {
             epilogue_sources: false,
             activation_quantization: false,
             bf16_input_rounding: false,
+            accumulator_narrowing: false,
         }
     }
 
@@ -141,6 +164,7 @@ impl NumericPolicy {
             epilogue_sources: false,
             activation_quantization: false,
             bf16_input_rounding: false,
+            accumulator_narrowing: false,
         }
     }
 
@@ -301,6 +325,7 @@ impl NumericRewrite {
             },
             Self::Bf16InputRounding => NumericPolicy {
                 bf16_input_rounding: true,
+                accumulator_narrowing: false,
                 ..NumericPolicy::bit_exact()
             },
             Self::FmaContraction => NumericPolicy {

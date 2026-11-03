@@ -12,7 +12,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::spec::{
-    GdnOutputGate, SsmMixerTaps, append_delta_net_mixer_with_taps, input_leaf, scalar_constant,
+    GdnOutputGate, SsmMixerTaps, append_delta_net_mixer_with_taps, input_leaf, count_constant, scalar_constant,
 };
 use proxima_tensor::test_support::{ParityRun, compare_rows_relative_to_norm};
 use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock};
