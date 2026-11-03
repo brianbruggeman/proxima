@@ -11378,7 +11378,7 @@ async fn qwen35_prefill_scan_and_tail_match_repeated_mixer_steps() {
         alloc::vec![Extent::Static(1), Extent::Static(2)],
         "tail_head_eps",
     );
-    let tail_inv_head_v_dim = scalar_constant(&mut tail_program, 1.0);
+    let tail_inv_head_v_dim = count_constant(&mut tail_program, 1);
     let tail_norm_weight = input_leaf(
         &mut tail_program,
         DType::FLOAT32,
@@ -21238,7 +21238,7 @@ mod recurrent_shared {
     use crate::cpu::evaluate_named;
     use crate::shape::infer;
     const DENSE_NODES: usize = 268;
-    const DENSE_DIGEST: u64 = 0x00e4_e873_ea47_5ea1;
+    const DENSE_DIGEST: u64 = 0xe9ce_c702_86f2_2258;
     const STACKED_COMBINED: bool = cfg!(feature = "moe-stacked-combine");
     const STACKED: bool = cfg!(feature = "moe-stacked-experts") && !STACKED_COMBINED;
     const ROUTED_NODES: usize = if STACKED_COMBINED {
@@ -21249,11 +21249,11 @@ mod recurrent_shared {
         348
     };
     const ROUTED_DIGEST: u64 = if STACKED_COMBINED {
-        0xfd80_ba94_e80f_6148
+        0x8205_c9ce_f2dc_5e9d
     } else if STACKED {
-        0x3610_3ce8_26e9_cfcc
+        0xdc7d_8b87_62d9_6496
     } else {
-        0xbc72_2fb9_9e3e_63c8
+        0x37ec_5efd_1b63_5b32
     };
     const DONOR_NODES: usize = if STACKED_COMBINED {
         328
@@ -21263,14 +21263,14 @@ mod recurrent_shared {
         324
     };
     const DONOR_DIGEST: u64 = if STACKED_COMBINED {
-        0xb85b_a548_4ebf_8b6e
+        0xe812_54fc_d309_14bb
     } else if STACKED {
-        0x9670_7730_5c1e_0d12
+        0xe827_bbe8_6c3f_ca8e
     } else {
-        0x8b58_8aa4_4615_c13a
+        0x1c28_c203_a55c_fe18
     };
     const RING_NODES: usize = 277;
-    const RING_DIGEST: u64 = 0x39a1_6ff2_0710_4f7f;
+    const RING_DIGEST: u64 = 0xba7a_1721_bcc4_dd67;
 
     fn tiny_descriptor(iterations: u32) -> ModelDescriptor {
         let mut descriptor = sized_descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
@@ -21438,7 +21438,10 @@ mod recurrent_shared {
     fn assert_matches_pre_change(descriptor: &ModelDescriptor, nodes: usize, digest: u64) {
         let built = build_forward(descriptor).expect("ordinary descriptor lowers");
 
-        assert_eq!(built.program.len(), nodes);
+        assert_eq!(
+            built.program.len(),
+            nodes + 2 * widened_norms(&built.program)
+        );
         assert_eq!(head_repeats::digest(&built.program), digest);
         assert!(built.readouts.is_none());
     }
@@ -21780,7 +21783,7 @@ mod recurrent_shared {
             vec![Extent::Static(1)],
             "epsilon",
         );
-        let inverse = scalar_constant(&mut program, 0.5);
+        let inverse = count_constant(&mut program, 2);
         let reference_normalized =
             rmsnorm(&mut program, reference, gamma, inverse, epsilon).expect("first norm");
         let terminal_normalized =
