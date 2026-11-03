@@ -1505,6 +1505,9 @@ pub(super) fn node_output_len(resolved: &BoundOp) -> usize {
 /// `shapes.and_then(builder).and_then(interpreter)` chain with no adapter.
 pub struct Interpreter<'buffers, B: Deref<Target = [f32]> + Sync> {
     pub(super) buffers: RefCell<&'buffers mut [Option<B>]>,
+    /// The f64 values of a norm's widened accumulation, beside the f32
+    /// table, so an f64 island evaluates in f64 here as in every other loop.
+    wide: RefCell<Vec<Option<Cow<'static, [f64]>>>>,
 }
 
 impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'buffers, B> {
@@ -1518,6 +1521,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
     pub fn new(buffers: &'buffers mut [Option<B>]) -> Self {
         Self {
             buffers: RefCell::new(buffers),
+            wide: RefCell::new(Vec::new()),
         }
     }
 
@@ -1544,6 +1548,9 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
     /// per-node path both bottom out in this one written-once loop.
     fn fold(&self, ready: &[BoundOp]) -> Result<(), TensorError> {
         for resolved in ready {
+            if self.fold_island(resolved)? {
+                continue;
+            }
             let mut output = vec![0.0f32; node_output_len(resolved)];
             // `state_out` (ROW 547, `docs/discipline.md`): `GatedDeltaNet`'s
             // own second output. `Vec::new()` costs nothing until
@@ -1599,6 +1606,27 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
             }
         }
         Ok(())
+    }
+
+    /// Runs `resolved` through the f64 island when it is one, reporting
+    /// whether it did; the interpreter keeps every buffer, so nothing
+    /// retires and the pools only ever hand out fresh storage.
+    fn fold_island(&self, resolved: &BoundOp) -> Result<bool, TensorError> {
+        let mut buffers = self.buffers.borrow_mut();
+        let program_len = buffers.len();
+        let island = float64_island::step(
+            resolved,
+            &buffers,
+            &mut self.wide.borrow_mut(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            program_len,
+        )?;
+        let handled = island.live_buffers() > 0;
+        if let Some(values) = island.into_f32() {
+            (*buffers)[resolved.node.0 as usize] = Some(B::from(values));
+        }
+        Ok(handled)
     }
 }
 

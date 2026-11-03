@@ -145,6 +145,12 @@ fn run_wide<B: Deref<Target = [f32]>>(
                 run_reduce_typed::<f64>(computed, wide, &[], output)
             }
         }
+        BoundOpKind::Reduce {
+            accumulator: DType::FLOAT64,
+            ..
+        } => run_widened_fold(computed, buffers, |target, widened, _| {
+            output[target] = widened;
+        }),
         _ => Err(not_lowerable(
             "only elementwise, reduce and constant ops run in f64",
         )),
@@ -308,14 +314,26 @@ fn sum_squared_rows_in_f64(
 
 /// A fused reduce that accumulates in f64 while its result is f32: the norm
 /// whose reduce absorbed the widen and whose epilogue carries the f64 divide,
-/// the narrowing identity and the f32 tail. The fold sums in f64 (in ggml's
-/// order for a plain sum of squares), the epilogue runs in f64 up to and
-/// including its first identity of an earlier step -- the narrow -- and in
-/// f32 after it, so every value crosses to f32 exactly where the program says.
+/// the narrowing identity and the f32 tail.
 pub(super) fn run_widened_fold_into<B: Deref<Target = [f32]>>(
     computed: &BoundOp,
     buffers: &[Option<B>],
     output: &mut [f32],
+) -> Result<(), TensorError> {
+    run_widened_fold(computed, buffers, |target, _, narrowed| {
+        output[target] = narrowed;
+    })
+}
+
+/// The fold sums f32 elements in f64 (in ggml's order for a plain sum of
+/// squares) and the epilogue runs in f64 up to its narrow -- the first
+/// identity of an earlier step -- and in f32 after it, so every value crosses
+/// to f32 exactly where the program says. `store` gets each result's offset
+/// with its f64 and f32 values; an epilogue with no narrow yet is all f64.
+fn run_widened_fold<B: Deref<Target = [f32]>>(
+    computed: &BoundOp,
+    buffers: &[Option<B>],
+    mut store: impl FnMut(usize, f64, f32),
 ) -> Result<(), TensorError> {
     let not_lowerable = |reason| TensorError::NotLowerable {
         node: computed.node,
@@ -335,11 +353,17 @@ pub(super) fn run_widened_fold_into<B: Deref<Target = [f32]>>(
             "only a reduce accumulates wider than its elements",
         ));
     };
+    let broadcast = !epilogue_broadcast_axes.is_empty();
     let fold_extents: Vec<u64> = output_axes
         .iter()
         .map(|&axis| computed.extents[axis as usize])
         .collect();
-    let mut fold = vec![0.0f64; node_output_len(computed)];
+    let fold_len = if broadcast {
+        odometer_len(&fold_extents) as usize
+    } else {
+        node_output_len(computed)
+    };
+    let mut fold = vec![0.0f64; fold_len];
     accumulate_f32_elements_in_f64(computed, element_body, buffers, &mut fold)?;
     let operand_buffers: Vec<&[f32]> = epilogue_operands
         .iter()
@@ -355,51 +379,40 @@ pub(super) fn run_widened_fold_into<B: Deref<Target = [f32]>>(
     let narrow = epilogue_body.steps.iter().position(|step| {
         step.op == ScalarOp::Identity && matches!(step.args.as_slice(), [StepArg::Step(_)])
     });
-    let walk: &[u64] = if epilogue_broadcast_axes.is_empty() {
-        &fold_extents
-    } else {
-        &computed.extents
-    };
+    let walk: &[u64] = if broadcast { &computed.extents } else { &fold_extents };
     let mut coordinate = vec![0u64; walk.len()];
     let mut full_coordinate = vec![0u64; computed.extents.len()];
-    let mut wide_steps = vec![0.0f64; epilogue_body.steps.len()];
-    let mut narrow_steps = vec![0.0f32; epilogue_body.steps.len()];
+    let mut steps = (
+        vec![0.0f64; epilogue_body.steps.len()],
+        vec![0.0f32; epilogue_body.steps.len()],
+    );
     let mut operand_values = vec![0.0f64; epilogue_operands.len() + 1];
     for flat in 0..odometer_len(walk) {
         unflatten_into(flat, walk, &mut coordinate);
-        if epilogue_broadcast_axes.is_empty() {
+        if broadcast {
+            full_coordinate.copy_from_slice(&coordinate);
+        } else {
             full_coordinate.fill(0);
             for (index, &axis) in output_axes.iter().enumerate() {
                 full_coordinate[axis as usize] = coordinate[index];
             }
-        } else {
-            full_coordinate.copy_from_slice(&coordinate);
         }
         let fold_offset = out_layout.offset_of(&full_coordinate) as usize;
-        let operand_coordinate = if epilogue_broadcast_axes.is_empty() {
-            &coordinate
-        } else {
-            &full_coordinate
-        };
+        let operand_coordinate = if broadcast { &full_coordinate } else { &coordinate };
         for (slot, (_, layout, _)) in epilogue_operands.iter().enumerate() {
             operand_values[slot] =
                 f64::from(operand_buffers[slot][layout.offset_of(operand_coordinate) as usize]);
         }
         operand_values[epilogue_operands.len()] = fold[fold_offset];
-        let value = mixed_epilogue(
+        let (wide_value, narrow_value) = mixed_epilogue(
             computed.node,
             epilogue_body,
             narrow,
             &operand_values,
-            &mut wide_steps,
-            &mut narrow_steps,
+            &mut steps,
         )?;
-        let target = if epilogue_broadcast_axes.is_empty() {
-            fold_offset
-        } else {
-            flat as usize
-        };
-        output[target] = value;
+        let target = if broadcast { flat as usize } else { fold_offset };
+        store(target, wide_value, narrow_value);
     }
     Ok(())
 }
@@ -409,9 +422,9 @@ fn mixed_epilogue(
     body: &ComposedBody,
     narrow: Option<usize>,
     operands: &[f64],
-    wide_steps: &mut [f64],
-    narrow_steps: &mut [f32],
-) -> Result<f32, TensorError> {
+    steps: &mut (Vec<f64>, Vec<f32>),
+) -> Result<(f64, f32), TensorError> {
+    let (wide_steps, narrow_steps) = steps;
     let wide_until = narrow.unwrap_or(body.steps.len());
     for (index, step) in body.steps.iter().enumerate() {
         if index < wide_until {
@@ -433,7 +446,9 @@ fn mixed_epilogue(
                 };
             }
             narrow_steps[index] = apply_scalar_op(step.op, &args[..step.args.len()]);
+            wide_steps[index] = f64::from(narrow_steps[index]);
         }
     }
-    Ok(narrow_steps[body.steps.len() - 1])
+    let last = body.steps.len() - 1;
+    Ok((wide_steps[last], narrow_steps[last]))
 }
