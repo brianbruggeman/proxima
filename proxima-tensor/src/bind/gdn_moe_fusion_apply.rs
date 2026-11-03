@@ -10,7 +10,8 @@ pub fn bind_unfused(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
-    bind_plain_with_fusion(program, shapes, outputs, numeric_policy, false)
+    let narrowed = narrow_accumulations(program, numeric_policy);
+    bind_plain_with_fusion(&narrowed, shapes, outputs, numeric_policy, false)
 }
 
 pub fn bind(
@@ -33,6 +34,8 @@ pub fn bind_without_reduce_epilogue_fusion(
     fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
+    let narrowed = narrow_accumulations(program, numeric_policy);
+    let program: &[Op] = &narrowed;
     admit(numeric_policy, NumericRewrite::IdentityElimination)?;
     admit(numeric_policy, NumericRewrite::ChainFusion)?;
     let built = bind_cached_attention_fusion(
@@ -77,6 +80,8 @@ pub fn bind_with_fusion(
     fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
+    let narrowed = narrow_accumulations(program, numeric_policy);
+    let program: &[Op] = &narrowed;
     // The three rewrites this crate ships unconditionally today are
     // bit-exact by construction (identity elimination, chain fusion --
     // both inside `bind_cached_attention_fusion`'s own `bind_plain` --
@@ -1729,4 +1734,32 @@ pub(super) fn apply_moe_round_group_fusion(
         rewritten.push(bound);
     }
     Ok(rewritten)
+}
+
+/// `program` with every FLOAT64 elementwise, reduce and constant narrowed to
+/// FLOAT32 when `numeric_policy` grants
+/// [`NumericPolicy::accumulator_narrowing`], so a backend whose incumbent sums
+/// its norms in `float` binds the f64 accumulation islands as the f32 chain it
+/// renders; borrowed unchanged otherwise.
+pub(super) fn narrow_accumulations(
+    program: &[Op],
+    numeric_policy: NumericPolicy,
+) -> alloc::borrow::Cow<'_, [Op]> {
+    let widened = |expr: &Op| expr.dtype() == DType::FLOAT64;
+    if !numeric_policy.accumulator_narrowing || !program.iter().any(widened) {
+        return alloc::borrow::Cow::Borrowed(program);
+    }
+    alloc::borrow::Cow::Owned(program.iter().map(narrow_op).collect())
+}
+
+fn narrow_op(expr: &Op) -> Op {
+    let mut narrowed = expr.clone();
+    match &mut narrowed {
+        Op::Elementwise { dtype, .. } | Op::Constant { dtype, .. } if *dtype == DType::FLOAT64 => {
+            *dtype = DType::FLOAT32;
+        }
+        Op::Reduce(fold) if fold.dtype == DType::FLOAT64 => fold.dtype = DType::FLOAT32,
+        _ => {}
+    }
+    narrowed
 }

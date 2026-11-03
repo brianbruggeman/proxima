@@ -31,7 +31,7 @@ use omega::backend::{
 use proxima_tensor::NumericPolicy;
 use proxima_tensor::infer;
 use proxima_tensor::spec::{
-    input_leaf, qk_norm_cached_forward_program, rmsnorm, rmsnorm_per_head, scalar_constant,
+    input_leaf, qk_norm_cached_forward_program, rmsnorm, rmsnorm_per_head, count_constant, scalar_constant,
 };
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{

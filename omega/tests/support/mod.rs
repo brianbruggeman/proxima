@@ -326,7 +326,7 @@ pub fn qwen35_partial_rotary_forward_fixture(
     cached_len: u64,
 ) -> RealForwardFixture {
     use proxima_tensor::spec::{
-        append_gated_attention_only_with_taps, causal_mask, input_leaf, scalar_constant,
+        append_gated_attention_only_with_taps, causal_mask, input_leaf, count_constant, scalar_constant,
     };
     use proxima_tensor::{DType, Extent};
 

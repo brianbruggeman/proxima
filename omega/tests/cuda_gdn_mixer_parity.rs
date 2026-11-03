@@ -9,7 +9,7 @@ use omega::Codec;
 use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_tensor::spec::{
     GdnOutputGate, SsmMixerTaps, append_delta_net_mixer_with_taps_and_layout, input_leaf,
-    scalar_constant,
+    count_constant, scalar_constant,
 };
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, QuantizedBlock, infer};

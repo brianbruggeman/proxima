@@ -327,7 +327,7 @@ fn folded_projection_on_a_packed_ternary_weight_matches_its_float_decode() {
 mod folded_attention {
     use super::*;
     use proxima_tensor::spec::{
-        DenseAttentionTaps, append_gated_attention_only_with_taps, causal_mask, scalar_constant,
+        DenseAttentionTaps, append_gated_attention_only_with_taps, causal_mask, count_constant, scalar_constant,
     };
     use proxima_tensor::{append, infer};
 
@@ -570,7 +570,7 @@ mod packed_folded_attention {
     use super::*;
     use proxima_gguf::quant::ptq1_0::{BLOCK_BYTES, QK_PTQ1_0, dequantize, quantize};
     use proxima_tensor::spec::{
-        append_gated_attention_only_with_taps, causal_mask, scalar_constant,
+        append_gated_attention_only_with_taps, causal_mask, count_constant, scalar_constant,
     };
     use proxima_tensor::{append, infer};
 
