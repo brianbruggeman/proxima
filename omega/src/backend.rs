@@ -1149,7 +1149,7 @@ pub fn plan_named(
         Engine::Cpu => {
             #[cfg(feature = "cpu")]
             {
-                plan_named_cpu(_program, _symbols, _named, _outputs)
+                plan_named_cpu(_program, _symbols, _named, _outputs, _numeric_policy)
             }
             #[cfg(not(feature = "cpu"))]
             {
@@ -1751,6 +1751,7 @@ fn plan_named_cpu(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'_>)],
     outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
 ) -> Result<Plan, BackendError> {
     // fails fast on an unresolvable name here, mirroring `metal::plan_named`'s
     // own eager check, even though the CPU evaluator itself re-resolves names
@@ -1775,7 +1776,8 @@ fn plan_named_cpu(
         validated_weight_nodes: None,
         step: CpuStepPlan::new(),
         exact_activations: false,
-        execution_config: None,
+        execution_config: (numeric_policy != NumericPolicy::default())
+            .then(|| TensorExecutionConfig::builder().numeric(numeric_policy).build()),
         input_contract: Vec::new(),
     })))
 }
