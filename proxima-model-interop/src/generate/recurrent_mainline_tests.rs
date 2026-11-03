@@ -15,7 +15,7 @@ use proxima_tensor::LoopCdMode;
 use proxima_tensor::spec::{CacheMask, LayerCacheRoots, RecurrenceConfig, RopeLayout, RopePairing};
 
 use super::LoadedModel;
-use super::ouro_fixture::{STATE_VOCABULARY, grouped_state_sensitive_ouro_gguf, state_sensitive_ouro_gguf, tiny_ouro_gguf};
+use super::ouro_fixture::{STATE_VOCABULARY, grouped_llama_gguf, state_sensitive_ouro_gguf, tiny_ouro_gguf};
 use crate::error::InteropError;
 use crate::lowering::{KvLayout, bind_checkpoint, header_descriptor};
 use crate::profiles::family_profile;
@@ -588,7 +588,7 @@ mod resident_cuda_plans {
     use proxima_gguf::types::GgmlType;
     use proxima_tensor::spec::ModelDescriptor;
 
-    use super::{LoadedModel, ServingConfig, grouped_state_sensitive_ouro_gguf, state_sensitive_ouro_gguf};
+    use super::{LoadedModel, ServingConfig, grouped_llama_gguf, state_sensitive_ouro_gguf};
     use crate::{NgramMapParams, SpeculativeConfig, SpeculativeDecodeStats, SpeculativeType, SpeculativeTypeSet};
     use crate::lowering::{KvLayout, header_descriptor};
     use crate::serving::{GPU_LAYERS_ALL, PromptCacheConfig};
@@ -885,7 +885,7 @@ mod resident_cuda_plans {
     #[case::one_row_past_two_tiles(32)]
     #[case::two_rows_past_two_tiles(33)]
     async fn wide_forced_verify_over_grouped_heads_matches_greedy_decode(#[case] width: u16) {
-        let bytes = grouped_state_sensitive_ouro_gguf(2);
+        let bytes = grouped_llama_gguf();
         let model = speculative_model(&bytes);
         let prompt = [3_u32, 9, 5, 12, 1, 7, 3, 9, 5, 12, 1, 7, 14, 2, 8, 6, 11, 4, 10];
         let plain = greedy(&model, &prompt, None).0;
