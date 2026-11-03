@@ -279,19 +279,18 @@ fn row_kernels_available() -> bool {
         && std::is_x86_feature_detected!("fma")
 }
 
-fn block_dot_row(
+fn block_dot_row<const WEIGHT_BLOCK_BYTES: usize>(
     weight_row: &[u8],
     activation_q8_0: &[u8],
-    weight_block_bytes: usize,
     scalar: fn(&[u8], &[u8]) -> i32,
     #[cfg(target_arch = "x86_64")] vectorized_row: unsafe fn(&[u8], &[u8]) -> f32,
 ) -> Result<f32, TensorError> {
-    if !weight_row.len().is_multiple_of(weight_block_bytes) {
+    if !weight_row.len().is_multiple_of(WEIGHT_BLOCK_BYTES) {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "weight row length is not a whole multiple of its codec's block size",
         });
     }
-    let block_count = weight_row.len() / weight_block_bytes;
+    let block_count = weight_row.len() / WEIGHT_BLOCK_BYTES;
     if activation_q8_0.len() != block_count * Q8_0_ACT_BLOCK_BYTES {
         return Err(TensorError::QuantizedShapeMismatch {
             reason: "q8_0 activation length does not match the weight row's block count",
@@ -304,7 +303,7 @@ fn block_dot_row(
     }
     let mut sum = 0.0f32;
     for (weight_block, activation_block) in weight_row
-        .chunks_exact(weight_block_bytes)
+        .chunks_exact(WEIGHT_BLOCK_BYTES)
         .zip(activation_q8_0.as_chunks::<Q8_0_ACT_BLOCK_BYTES>().0.iter())
     {
         let block_sum = scalar(weight_block, activation_block);
@@ -315,10 +314,9 @@ fn block_dot_row(
 
 #[cfg(target_arch = "x86_64")]
 pub(super) fn dot_q8_0_q8_0(weight_row: &[u8], activation_q8_0: &[u8]) -> Result<f32, TensorError> {
-    block_dot_row(
+    block_dot_row::<{ q8_0::BLOCK_BYTES }>(
         weight_row,
         activation_q8_0,
-        q8_0::BLOCK_BYTES,
         block_sum_q8_0_scalar,
         row_q8_0_avx2,
     )
@@ -326,20 +324,14 @@ pub(super) fn dot_q8_0_q8_0(weight_row: &[u8], activation_q8_0: &[u8]) -> Result
 
 #[cfg(not(target_arch = "x86_64"))]
 pub(super) fn dot_q8_0_q8_0(weight_row: &[u8], activation_q8_0: &[u8]) -> Result<f32, TensorError> {
-    block_dot_row(
-        weight_row,
-        activation_q8_0,
-        q8_0::BLOCK_BYTES,
-        block_sum_q8_0_scalar,
-    )
+    block_dot_row::<{ q8_0::BLOCK_BYTES }>(weight_row, activation_q8_0, block_sum_q8_0_scalar)
 }
 
 #[cfg(target_arch = "x86_64")]
 pub(super) fn dot_q5_0_q8_0(weight_row: &[u8], activation_q8_0: &[u8]) -> Result<f32, TensorError> {
-    block_dot_row(
+    block_dot_row::<{ q5_0::BLOCK_BYTES }>(
         weight_row,
         activation_q8_0,
-        q5_0::BLOCK_BYTES,
         block_sum_q5_0_scalar,
         row_q5_0_avx2,
     )
@@ -347,12 +339,7 @@ pub(super) fn dot_q5_0_q8_0(weight_row: &[u8], activation_q8_0: &[u8]) -> Result
 
 #[cfg(not(target_arch = "x86_64"))]
 pub(super) fn dot_q5_0_q8_0(weight_row: &[u8], activation_q8_0: &[u8]) -> Result<f32, TensorError> {
-    block_dot_row(
-        weight_row,
-        activation_q8_0,
-        q5_0::BLOCK_BYTES,
-        block_sum_q5_0_scalar,
-    )
+    block_dot_row::<{ q5_0::BLOCK_BYTES }>(weight_row, activation_q8_0, block_sum_q5_0_scalar)
 }
 
 pub(super) fn activation_dot_for(codec: Codec) -> ActivationDotFn {
