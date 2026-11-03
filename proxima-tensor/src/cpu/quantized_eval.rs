@@ -572,7 +572,7 @@ fn evaluate_quantized_with_policy(
 
     let quantized_weight_nodes: BTreeSet<NodeId> = quantized_weights.keys().copied().collect();
     if validated_weight_nodes.as_ref() != Some(&quantized_weight_nodes) {
-        reject_non_float32_with_islands(program, &quantized_weight_nodes, true)?;
+        reject_non_float32(program, &quantized_weight_nodes)?;
         // cloned, not moved: the outputs-only check right below still needs
         // its own copy of this same set — see `reject_non_float32_outputs`'s
         // own doc for why that check cannot ride this cache.
@@ -2482,19 +2482,11 @@ pub(super) fn live_count<B>(buffers: &[Option<B>]) -> usize {
 // separately-tested execution path for that shape today; wiring a quantized
 // buffer through `evaluate`'s own `blocks` array and `run_reduce`'s NEON
 // tile is the remaining integration work this does not yet do.
+// every evaluator loop runs `float64_island::step`, so a FLOAT64
+// elementwise, reduce or constant is admitted; any other non-f32 node is not
 pub(super) fn reject_non_float32(
     program: &[Op],
     quantized_weights: &BTreeSet<NodeId>,
-) -> Result<(), TensorError> {
-    reject_non_float32_with_islands(program, quantized_weights, false)
-}
-
-// only `evaluate_quantized`'s main loop runs `float64_island::step`; every
-// other caller keeps rejecting FLOAT64 nodes rather than run them in f32
-pub(super) fn reject_non_float32_with_islands(
-    program: &[Op],
-    quantized_weights: &BTreeSet<NodeId>,
-    float64_islands: bool,
 ) -> Result<(), TensorError> {
     let index_nodes = index_node_ids(program);
     let referenced_nodes = referenced_node_ids(program);
@@ -2518,8 +2510,7 @@ pub(super) fn reject_non_float32_with_islands(
         // node that IS unconditionally evaluated, so it stays rejected.
         let is_unreferenced_input =
             matches!(expr, Op::Input { .. }) && !referenced_nodes.contains(&node);
-        let is_wide_island_node = float64_islands
-            && expr.dtype() == DType::FLOAT64
+        let is_wide_island_node = expr.dtype() == DType::FLOAT64
             && matches!(expr, Op::Elementwise { .. } | Op::Reduce(_) | Op::Constant { .. });
         if expr.dtype() != DType::FLOAT32
             && !index_nodes.contains(&node)
