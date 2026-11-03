@@ -35,8 +35,10 @@ pub(super) fn quantize_row_q8_0_activation(
         return Err(shape_error());
     }
     for (block, packed) in activation
-        .chunks_exact(BLOCK_ELEMENTS)
-        .zip(output.chunks_exact_mut(Q8_0_ACT_BLOCK_BYTES))
+        .as_chunks::<BLOCK_ELEMENTS>()
+        .0
+        .iter()
+        .zip(output.as_chunks_mut::<Q8_0_ACT_BLOCK_BYTES>().0.iter_mut())
     {
         quantize_activation_block(block, packed);
     }
@@ -57,7 +59,10 @@ fn activation_reciprocal(amax: f32) -> f32 {
     if amax == 0.0 { 0.0 } else { 127.0 / amax }
 }
 
-fn quantize_activation_block(block: &[f32], packed: &mut [u8]) {
+fn quantize_activation_block(
+    block: &[f32; BLOCK_ELEMENTS],
+    packed: &mut [u8; Q8_0_ACT_BLOCK_BYTES],
+) {
     let amax = block.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
     let inverse = activation_reciprocal(amax);
     packed[..2].copy_from_slice(&half::f16::from_f32(amax / 127.0).to_le_bytes());
@@ -389,7 +394,10 @@ mod tests {
         let amax = x.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
         let d = amax / 127.0;
         let id = if d == 0.0 { 0.0 } else { 1.0 / d };
-        let levels = x.iter().map(|&value| libm::roundf(value * id) as i8).collect();
+        let levels = x
+            .iter()
+            .map(|&value| libm::roundf(value * id) as i8)
+            .collect();
         (half::f16::from_f32(d).to_f32(), levels)
     }
 
@@ -407,7 +415,10 @@ mod tests {
     fn reference_quantize(x: &[f32]) -> (f32, Vec<i8>) {
         let amax = x.iter().fold(0.0f32, |acc, value| acc.max(value.abs()));
         let id = ggml_simd_reciprocal(amax);
-        let levels = x.iter().map(|&value| (value * id).round_ties_even() as i8).collect();
+        let levels = x
+            .iter()
+            .map(|&value| (value * id).round_ties_even() as i8)
+            .collect();
         (half::f16::from_f32(amax / 127.0).to_f32(), levels)
     }
 
