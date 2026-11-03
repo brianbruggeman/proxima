@@ -122,7 +122,7 @@ fn elementwise_tanh_runs_on_cuda_at_cpu_parity() {
         &[],
         &named,
         &[],
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the elementwise chain on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
@@ -196,7 +196,7 @@ fn reduce_add_runs_on_cuda_at_cpu_parity_via_the_cooperative_warp_shuffle_path()
         &[],
         &named,
         &[],
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the row sum on cpu");
     let cpu =
@@ -271,7 +271,7 @@ fn scan_cumsum_runs_on_cuda_at_cpu_parity() {
         &[],
         &named,
         &[],
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the cumsum on cpu");
     let cpu =
@@ -391,7 +391,7 @@ fn the_two_layer_mlp_runs_on_cuda_at_cpu_parity() {
         &[],
         &named,
         &[],
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the mlp on cpu");
     let cpu =
@@ -511,7 +511,7 @@ fn embedding_lookup_runs_on_cuda_at_cpu_parity_for_integer_valued_inputs() {
         &[],
         &named,
         &[],
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the gather on cpu");
     let cpu =
@@ -902,7 +902,7 @@ fn assert_packed_codec_parity(
         &[],
         &f32_named,
         &[f32_sum],
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the dequantized oracle on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &f32_named)
@@ -1732,7 +1732,7 @@ fn the_full_mistral_cached_forward_runs_on_cuda_at_cpu_parity() {
         &symbols,
         &named,
         &roots,
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the real forward on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
@@ -1803,7 +1803,7 @@ fn the_qwen3_gqa_qk_norm_forward_runs_on_cuda_at_cpu_parity() {
         &symbols,
         &named,
         &roots,
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the qk-norm forward on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
@@ -1925,7 +1925,7 @@ fn the_qwen3_gqa_qk_norm_forward_runs_on_cuda_at_cpu_parity_with_head_dim_wider_
         &symbols,
         &named,
         &roots,
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the wide-head-dim qk-norm forward on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
@@ -2036,7 +2036,7 @@ fn the_qwen3_multi_token_prefill_runs_on_cuda_at_cpu_parity() {
         &symbols,
         &named,
         &roots,
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the multi-token prefill on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
@@ -2147,7 +2147,7 @@ fn the_qwen3_real_scale_forward_runs_on_cuda_at_cpu_parity() {
         &symbols,
         &named,
         &roots,
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the real-scale forward on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
@@ -2209,7 +2209,7 @@ fn the_qwen3_gqa_qk_norm_decode_step_after_a_prefill_runs_on_cuda_at_cpu_parity(
         &symbols,
         &named,
         &roots,
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the post-prefill decode step on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
@@ -2272,7 +2272,7 @@ fn embedding_lookup_runs_on_cuda_at_cpu_parity_for_int32_token_blocks() {
         &[],
         &named,
         &[],
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the int32 gather on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
@@ -2381,7 +2381,7 @@ fn int32_typed_route_reduce_runs_on_cuda_with_gathered_rows_equal_to_cpu() {
         &[],
         &named,
         &[],
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the int32 route gather on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
@@ -3105,7 +3105,7 @@ fn padded_cache_relative_error(
         &reference.1,
         &reference_named,
         &reference.2,
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the live reference on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &reference_named)
@@ -3270,7 +3270,7 @@ fn partial_rotary_relative_error(cached_extent: u64, cached_len: u64) -> (f32, V
         &symbols,
         &named,
         &roots,
-        NumericPolicy::default(),
+        NumericPolicy::default().with_flash_narrowing(true),
     )
     .expect("omega::backend plans the partial-rotary fixture on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
@@ -3997,7 +3997,7 @@ mod pooled_intermediates {
 
         let driver = CudaDriver::new(0).expect("a real cuda device");
         let mut plan = driver
-            .plan(&program, &[], &[root], NumericPolicy::default(), &named)
+            .plan(&program, &[], &[root], NumericPolicy::default().with_flash_narrowing(true), &named)
             .expect("cuda plans the matmul chain");
         let actual = plan.execute_named(&named, None).expect("cuda runs the matmul chain");
 
