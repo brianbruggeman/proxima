@@ -11065,6 +11065,7 @@ fn reduce_epilogue_only_quantized_weight_is_materialized_before_evaluation() {
         &shapes,
         &quantized_weights,
         &mut buffers,
+        &mut Vec::new(),
     )
     .expect("the widened scan dequantizes a Reduce epilogue's own quantized operand");
     assert!(
@@ -13333,6 +13334,7 @@ async fn packed_gather_preserves_scaled_rows(#[case] count: u32) {
         &shapes,
         &weights,
         &mut buffers,
+        &mut Vec::new(),
     )
     .expect("direct row gathering needs no full table");
     assert!(buffers[table.0 as usize].is_none());
@@ -13346,6 +13348,7 @@ async fn packed_gather_preserves_scaled_rows(#[case] count: u32) {
         &shapes,
         &weights,
         &mut buffers,
+        &mut Vec::new(),
     )
     .expect("the unfenced control expands the table");
     assert_eq!(
@@ -13491,6 +13494,7 @@ fn packed_gather_preserves_noncanonical_layout_fallback() {
         &shapes,
         &weights,
         &mut buffers,
+        &mut Vec::new(),
     )
     .expect("a strided consumer retains its full-table fallback");
     assert!(buffers[table.0 as usize].is_some());
@@ -13638,6 +13642,7 @@ fn packed_gather_expert_slab_is_one_definition_for_dispatch_and_materialization(
         &shapes,
         &weights,
         &mut buffers,
+        &mut Vec::new(),
     )
     .expect("a direct slab gather needs no full stack");
     assert!(buffers[stack.0 as usize].is_none());
@@ -13687,6 +13692,7 @@ fn packed_gather_expert_slab_with_strided_layout_is_materialized() {
         &shapes,
         &weights,
         &mut buffers,
+        &mut Vec::new(),
     )
     .expect("a strided slab consumer reads a dequantized stack");
     assert_eq!(
