@@ -169,7 +169,7 @@ fn block_dot_row(
     let mut sum = 0.0f32;
     for (weight_block, activation_block) in weight_row
         .chunks_exact(weight_block_bytes)
-        .zip(activation_q8_0.chunks_exact(Q8_0_ACT_BLOCK_BYTES))
+        .zip(activation_q8_0.as_chunks::<Q8_0_ACT_BLOCK_BYTES>().0.iter())
     {
         #[cfg(target_arch = "x86_64")]
         let block_sum = if use_avx2 {
