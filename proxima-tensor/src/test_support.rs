@@ -205,3 +205,35 @@ pub fn widened_norms(program: &[crate::op::Op]) -> usize {
         })
         .count()
 }
+
+/// `crate::cpu::evaluate_named` with the f32 online-softmax cached attention: a reference for
+/// tests that compare a fused op against an unfused f32 program, which cannot state llama's f16
+/// flash arithmetic.
+///
+/// # Errors
+/// What [`crate::cpu::evaluate_quantized_named_with_config`] raises.
+pub fn evaluate_named_online_f32(
+    program: &[crate::op::Op],
+    symbols: &[u64],
+    named: &[(&str, &[f32])],
+    outputs: &[crate::op::NodeId],
+) -> Result<crate::Evaluated, crate::TensorError> {
+    let blocks: alloc::vec::Vec<(&str, crate::QuantizedBlock<'_>)> = named
+        .iter()
+        .map(|(name, data)| (*name, crate::QuantizedBlock::Float32(data)))
+        .collect();
+    let config = crate::config::TensorExecutionConfig::builder()
+        .numeric(crate::NumericPolicy::bit_exact().with_flash_narrowing(true))
+        .build();
+    let mut pools = crate::cpu::BufferPools::default();
+    let mut validated = None;
+    crate::cpu::evaluate_quantized_named_with_config(
+        program,
+        symbols,
+        &blocks,
+        outputs,
+        (&mut pools, &mut validated),
+        None,
+        &config,
+    )
+}
