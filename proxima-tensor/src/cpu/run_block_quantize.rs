@@ -71,7 +71,7 @@ mod tests {
     }
 
     fn encode(layout: &BlockLayout, values: &[f32]) -> Result<Vec<u8>, TensorError> {
-        let op = bound(*layout, row_width(layout));
+        let op = bound(*layout, (values.len() / ROWS as usize) as u32);
         let mut output = vec![0.0f32; op.extents.iter().product::<u64>() as usize];
         let buffers = [Some(values), None];
         run_block_quantize(&op, &buffers, &mut output)?;
@@ -127,6 +127,22 @@ mod tests {
     }
 
     #[test]
+    fn grouped_q8_1_holds_four_independent_q8_1_runs_behind_one_aligned_header() {
+        let grouped = BlockLayout::Q8_1_GROUPED;
+        let values = inputs(&BlockLayout::Q8_1, 0xa11);
+        let packed = encode(&grouped, &values).expect("the grouped layout encodes");
+        let runs = encode(&BlockLayout::Q8_1, &values).expect("q8_1 encodes the same values");
+        assert_eq!(packed.len(), values.len() / 128 * 144);
+        for (group, block) in packed.chunks(144).enumerate() {
+            for run in 0..4 {
+                let single = &runs[(group * 4 + run) * 36..][..36];
+                assert_eq!(&block[run * 4..][..4], &single[..4], "group {group} run {run} header");
+                assert_eq!(&block[16 + run * 32..][..32], &single[4..], "group {group} run {run} codes");
+            }
+        }
+    }
+
+    #[test]
     fn every_linear_codec_layout_round_trips_within_its_stated_error() {
         let layouts = linear_layouts();
         let codecs: Vec<Codec> = layouts.iter().map(|(codec, _)| *codec).collect();
@@ -139,6 +155,7 @@ mod tests {
             Codec::Q1_0,
             Codec::Q2_0,
             Codec::Pq2_0,
+            Codec::Q8_1Grouped,
         ];
         assert_eq!(
             codecs, expected,

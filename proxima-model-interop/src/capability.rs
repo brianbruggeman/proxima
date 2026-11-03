@@ -316,6 +316,7 @@ pub mod quant_format {
             Codec::Fp6E3M2 => "FP6_E3M2",
             Codec::Q4_1 => "Q4_1",
             Codec::Q8_1 => "Q8_1",
+            Codec::Q8_1Grouped => "Q8_1_GROUPED",
             Codec::Q8K => "Q8_K",
             Codec::Iq1S => "IQ1_S",
             Codec::Iq1M => "IQ1_M",

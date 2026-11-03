@@ -32,6 +32,7 @@ __device__ __forceinline__ void mma_s8(int *acc, int fragment_a, int fragment_b)
 pub(super) struct Int8Gemm {
     pub(super) dot: BlockDot,
     pub(super) chunks: usize,
+    pub(super) activation: BlockLayout,
 }
 
 fn chunks_per_slab(reduction: u64) -> usize {
@@ -50,11 +51,12 @@ pub(super) fn int8_gemm_plan(
     numeric_policy: NumericPolicy,
     activation_layout: &Layout,
     output_axes: &[u16],
-    prequantized: bool,
+    prequantized: Option<Codec>,
 ) -> Option<Int8Gemm> {
-    if !numeric_policy.activation_quantization || !prequantized || activation_layout.base != 0 {
+    if !numeric_policy.activation_quantization || activation_layout.base != 0 {
         return None;
     }
+    let activation = prequantized?.block_layout()?;
     let dot = int8_dot(codec)?;
     let reduction: u64 = reduction_dims(resolved, output_axes)
         .iter()
@@ -63,6 +65,7 @@ pub(super) fn int8_gemm_plan(
     Some(Int8Gemm {
         chunks: chunks_per_slab(reduction),
         dot,
+        activation,
     })
 }
 
@@ -77,14 +80,45 @@ pub fn is_int8_weight(codec: Codec) -> bool {
     int8_dot(codec).is_some()
 }
 
-const ACTIVATION_LAYOUT: BlockLayout = BlockLayout::Q8_1;
-
-pub(super) fn activation_block_bytes() -> usize {
-    usize::from(ACTIVATION_LAYOUT.block_bytes)
+fn run_term(layout: &BlockLayout, group: &str, base: usize, next: usize) -> String {
+    match layout.runs() {
+        1 => format!("{base}"),
+        runs => format!("{base} + (({group}) % {runs}) * {}", next - base),
+    }
 }
 
-pub(super) fn activation_code_offset() -> usize {
-    ACTIVATION_LAYOUT.element.low.base_bits as usize / 8
+/// C expression for the byte offset of the block holding 32-element group `group`.
+pub(super) fn activation_block_offset(layout: &BlockLayout, group: &str) -> String {
+    format!("(({group}) / {}) * {}", layout.runs(), layout.block_bytes)
+}
+
+/// C expression for group `group`'s scale header, relative to its block.
+pub(super) fn activation_scale_offset(layout: &BlockLayout, group: &str) -> String {
+    run_term(layout, group, layout.run_scale_byte(0), layout.run_scale_byte(layout.runs().min(2) - 1))
+}
+
+/// C expression for group `group`'s first code, relative to its block.
+pub(super) fn activation_code_offset(layout: &BlockLayout, group: &str) -> String {
+    run_term(layout, group, layout.run_code_byte(0), layout.run_code_byte(layout.runs().min(2) - 1))
+}
+
+/// Whether every group's 32 codes start on a 16-byte boundary, so two `uint4` loads read them.
+pub(super) fn activation_codes_are_16_byte_aligned(layout: &BlockLayout) -> bool {
+    layout.block_bytes.is_multiple_of(16) && (0..layout.runs()).all(|run| layout.run_code_byte(run).is_multiple_of(16))
+}
+
+/// C statements declaring `int4 activation_low, activation_high`: the 32 int8 codes at `codes`.
+pub(super) fn activation_code_words(layout: &BlockLayout, codes: &str, indent: &str) -> String {
+    if activation_codes_are_16_byte_aligned(layout) {
+        return format!(
+            "{indent}const uint4 activation_low = ((const uint4 *){codes})[0];\n{indent}const uint4 activation_high = ((const uint4 *){codes})[1];\n"
+        );
+    }
+    format!(
+        "{indent}const unsigned int *activation_words = (const unsigned int *){codes};\n\
+         {indent}const uint4 activation_low = make_uint4(activation_words[0], activation_words[1], activation_words[2], activation_words[3]);\n\
+         {indent}const uint4 activation_high = make_uint4(activation_words[4], activation_words[5], activation_words[6], activation_words[7]);\n"
+    )
 }
 
 fn push_declarations(source: &mut String, chunks: usize) {
@@ -125,9 +159,12 @@ fn push_stage_weight(source: &mut String, plan: &MmaGemm, int8: &Int8Gemm) {
     ));
 }
 
-fn push_stage_activation(source: &mut String, activation: usize, chunks: usize) {
+fn push_stage_activation(source: &mut String, activation: usize, int8: &Int8Gemm) {
+    let (chunks, layout) = (int8.chunks, &int8.activation);
     let items = chunks * INT8_TOKEN_TILE;
-    let (block_bytes, code_offset) = (activation_block_bytes(), activation_code_offset());
+    let block = activation_block_offset(layout, "group");
+    let scale = activation_scale_offset(layout, "group");
+    let codes = activation_code_words(layout, &format!("(bytes + {})", activation_code_offset(layout, "group")), "                ");
     source.push_str(&format!(
         "        for (int item = tid; item < {items}; item += {INT8_THREADS}) {{\n\
          \x20           const int token_local = item / {chunks};\n\
@@ -137,11 +174,12 @@ fn push_stage_activation(source: &mut String, activation: usize, chunks: usize) 
          \x20           uint4 high = make_uint4(0u, 0u, 0u, 0u);\n\
          \x20           float step = 0.0f;\n\
          \x20           if (token < token_total) {{\n\
-         \x20               const unsigned char *block = in{activation} + (token * (u.reduction_total / 32) + slab_first / 32 + chunk) * {block_bytes};\n\
-         \x20               const unsigned int *codes = (const unsigned int *)(block + {code_offset});\n\
-         \x20               low = make_uint4(codes[0], codes[1], codes[2], codes[3]);\n\
-         \x20               high = make_uint4(codes[4], codes[5], codes[6], codes[7]);\n\
-         \x20               step = mma_half_scale(block);\n\
+         \x20               const long group = token * (u.reduction_total / 32) + slab_first / 32 + chunk;\n\
+         \x20               const unsigned char *bytes = in{activation} + {block};\n\
+         {codes}\
+         \x20               low = activation_low;\n\
+         \x20               high = activation_high;\n\
+         \x20               step = mma_half_scale(bytes + {scale});\n\
          \x20           }}\n\
          \x20           uint4 *destination = (uint4 *)&act_tile[token_local][chunk * 32];\n\
          \x20           destination[0] = low;\n\
@@ -202,7 +240,7 @@ pub(super) fn push_int8_gemm_body(
         "    for (long slab_first = 0; slab_first < u.reduction_total; slab_first += {slab}) {{\n"
     ));
     push_stage_weight(source, plan, int8);
-    push_stage_activation(source, plan.activation, int8.chunks);
+    push_stage_activation(source, plan.activation, int8);
     source.push_str("        __syncthreads();\n");
     push_compute(source, int8.chunks);
     source.push_str("        __syncthreads();\n    }\n");

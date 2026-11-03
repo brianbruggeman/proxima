@@ -564,6 +564,7 @@ mod gated {
             Some(Codec::Fp6E3M2) => 'F',
             Some(Codec::Q4_1) => 'a',
             Some(Codec::Q8_1) => 'c',
+            Some(Codec::Q8_1Grouped) => 'd',
             Some(Codec::Q8K) => 'e',
             Some(Codec::Iq1S) => 'g',
             Some(Codec::Iq1M) => 'i',

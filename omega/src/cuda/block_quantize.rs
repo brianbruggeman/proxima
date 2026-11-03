@@ -1,14 +1,17 @@
 //! `BoundOpKind::BlockQuantize` as a normal kernel: one warp quantizes each 32-element group of
-//! the dense f32 source into `block_q8_1` bytes, written through the output's f32 words. The
-//! output holds `block_bytes / 4` words per group, so the layout's block size must be word-sized.
+//! the dense f32 source into a `block_q8_1`-style run, written through the output's f32 words.
+//! Where the run's scale header and codes sit comes from the block layout's run geometry, so a
+//! warp writes only its own header and codes. The output holds `block_bytes / 4` words per block,
+//! so the layout's block size must be word-sized.
 
 use alloc::format;
 use alloc::string::String;
 
 use proxima_primitives::block_layout::BlockLayout;
+use proxima_primitives::float_layout::FloatLayout;
 use proxima_tensor::{BoundOp, BoundOpKind};
 
-use super::{CudaGridSpec, EmitError, MAX_GRID_BLOCKS, Q8_1_QUANTIZE_DEVICE};
+use super::{CudaGridSpec, EmitError, MAX_GRID_BLOCKS};
 use crate::grid::checked_product;
 
 const QUANTIZE_THREADS: u64 = 256;
@@ -19,6 +22,27 @@ fn unsupported(resolved: &BoundOp, kind: &'static str) -> EmitError {
         node: resolved.node,
         kind,
     }
+}
+
+fn codes_are_byte_runs(layout: &BlockLayout) -> bool {
+    let element = &layout.element;
+    let run = usize::from(layout.run_elements());
+    element.code == FloatLayout::INT8
+        && element.high.is_none()
+        && element.low.bits == 8
+        && (0..usize::from(layout.elements))
+            .all(|index| element.low.address(index) == layout.run_code_byte((index / run) as u16) * 8 + index % run * 8)
+}
+
+fn is_q8_1_run_layout(layout: &BlockLayout) -> bool {
+    layout.run_elements() == GROUP_ELEMENTS as u16
+        && layout.scale.layout == FloatLayout::F16
+        && layout.min.is_none()
+        && layout.sub.is_none()
+        && layout.multiplier == 1
+        && layout.element.bias == 0
+        && codes_are_byte_runs(layout)
+        && (0..layout.runs()).all(|run| layout.run_scale_byte(run) + 4 <= usize::from(layout.block_bytes))
 }
 
 fn servable_layout(resolved: &BoundOp) -> Result<&BlockLayout, EmitError> {
@@ -32,7 +56,7 @@ fn servable_layout(resolved: &BoundOp) -> Result<&BlockLayout, EmitError> {
     let dense_source = operands
         .first()
         .is_some_and(|(_, layout, _)| layout.base == 0 && layout.strides.last() == Some(&1));
-    match (**layout == BlockLayout::Q8_1, layout.block_bytes % 4 == 0, dense_source) {
+    match (is_q8_1_run_layout(layout), layout.block_bytes % 4 == 0, dense_source) {
         (true, true, true) => Ok(layout),
         (false, _, _) => Err(unsupported(resolved, "block_quantize_layout")),
         (_, false, _) => Err(unsupported(resolved, "block_quantize_block_bytes_not_word_sized")),
@@ -42,7 +66,8 @@ fn servable_layout(resolved: &BoundOp) -> Result<&BlockLayout, EmitError> {
 
 pub(super) fn block_quantize_groups(resolved: &BoundOp) -> Result<u64, EmitError> {
     let layout = servable_layout(resolved)?;
-    Ok(resolved.extents.iter().product::<u64>() / u64::from(layout.block_bytes))
+    let blocks = resolved.extents.iter().product::<u64>() / u64::from(layout.block_bytes);
+    Ok(blocks * u64::from(layout.runs()))
 }
 
 pub(super) fn block_quantize_grid(resolved: &BoundOp) -> Result<CudaGridSpec, EmitError> {
@@ -61,10 +86,43 @@ pub(super) fn block_quantize_grid(resolved: &BoundOp) -> Result<CudaGridSpec, Em
     Ok(grid)
 }
 
+/// The device function one warp runs on one 32-element group `group` of `layout`: absmax scale,
+/// codes, and the scaled code sum beside the scale, at the group's run offsets.
+pub(super) fn quantize_device(layout: &BlockLayout) -> String {
+    let runs = layout.runs();
+    let (scale_base, scale_stride) = (layout.run_scale_byte(0), layout.run_scale_byte(runs.min(2) - 1) - layout.run_scale_byte(0));
+    let (code_base, code_stride) = (layout.run_code_byte(0), layout.run_code_byte(runs.min(2) - 1) - layout.run_code_byte(0));
+    format!(
+        "__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long group, unsigned int lane) {{\n\
+         \x20   float x = in[group * 32 + lane];\n\
+         \x20   float amax = fabsf(x);\n\
+         \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, offset)); }}\n\
+         \x20   float d = amax / 127.0f;\n\
+         \x20   int q = amax == 0.0f ? 0 : (int)roundf(x / d);\n\
+         \x20   int qsum = q;\n\
+         \x20   for (int offset = 16; offset > 0; offset >>= 1) {{ qsum += __shfl_xor_sync(0xffffffffu, qsum, offset); }}\n\
+         \x20   unsigned char *bytes = (unsigned char *)out + (group / {runs}) * {block_bytes};\n\
+         \x20   const long run = group % {runs};\n\
+         \x20   unsigned char *header = bytes + {scale_base} + run * {scale_stride};\n\
+         \x20   if (lane == 0) {{\n\
+         \x20       unsigned short d_bits = __half_as_ushort(__float2half(d));\n\
+         \x20       unsigned short s_bits = __half_as_ushort(__float2half(d * (float)qsum));\n\
+         \x20       header[0] = (unsigned char)(d_bits & 0xffu);\n\
+         \x20       header[1] = (unsigned char)(d_bits >> 8);\n\
+         \x20       header[2] = (unsigned char)(s_bits & 0xffu);\n\
+         \x20       header[3] = (unsigned char)(s_bits >> 8);\n\
+         \x20   }}\n\
+         \x20   bytes[{code_base} + run * {code_stride} + lane] = (unsigned char)(signed char)q;\n\
+         }}\n",
+        block_bytes = layout.block_bytes,
+    )
+}
+
 pub(super) fn render_block_quantize(resolved: &BoundOp, entry: &str) -> Result<String, EmitError> {
-    servable_layout(resolved)?;
+    let layout = servable_layout(resolved)?;
+    let device = quantize_device(layout);
     Ok(format!(
-        "#include <cuda_fp16.h>\n{Q8_1_QUANTIZE_DEVICE}\n\
+        "#include <cuda_fp16.h>\n{device}\n\
          struct Uniforms {{ long groups; }};\n\n\
          extern \"C\" __global__ void __launch_bounds__({QUANTIZE_THREADS}) {entry}(\n\
          \x20   const float* __restrict__ in0,\n\

@@ -206,6 +206,7 @@ fn source_codec_name(codec: Codec) -> &'static str {
         Codec::Q5_0 => "q5_0",
         Codec::Q4_1 => "q4_1",
         Codec::Q8_1 => "q8_1",
+        Codec::Q8_1Grouped => "q8_1_grouped",
         Codec::Q8K => "q8_k",
         Codec::Iq1S => "iq1_s",
         Codec::Iq1M => "iq1_m",
@@ -256,6 +257,7 @@ fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<
         // `proxima_gguf::quant` bindings nor `QuantizedBlock` decode.
         Codec::Q4_1 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q4_1" }),
         Codec::Q8_1 => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q8_1" }),
+        Codec::Q8_1Grouped => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q8_1_grouped" }),
         Codec::Q8K => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "q8_k" }),
         Codec::Iq1S => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq1_s" }),
         Codec::Iq1M => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "iq1_m" }),
