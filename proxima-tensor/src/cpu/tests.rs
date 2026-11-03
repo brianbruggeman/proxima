@@ -14535,6 +14535,18 @@ fn float64_island_sums_squares_in_double_like_ggml_rms_norm() {
         .map(|row| row.iter().map(|value| value * value).sum::<f32>() / width as f32)
         .collect();
     assert_eq!(ours, expected.as_slice(), "the island must match the f64 reference bit for bit");
+    let pooled = evaluate(&island.program, &[], &[data.as_slice()], &[island.narrowed])
+        .expect("the float64 island evaluates on the pooled path");
+    assert_eq!(pooled.get(island.narrowed).expect("pooled output").0, expected.as_slice());
+    let parallel = evaluate_parallel(
+        &island.program,
+        &[],
+        &[data.as_slice()],
+        &[island.narrowed],
+        core::num::NonZeroUsize::new(2).expect("two workers"),
+    )
+    .expect("the float64 island evaluates on the parallel path");
+    assert_eq!(parallel.get(island.narrowed).expect("parallel output").0, expected.as_slice());
     assert_ne!(
         expected, single_precision,
         "the fixture must separate f64 from f32 accumulation or it proves nothing"
