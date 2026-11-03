@@ -6127,7 +6127,9 @@ mod gated_delta_net_tests {
         let fused_state_leaf = fused_with_state_buffers[taps.state_out.0 as usize]
             .as_ref()
             .expect("fused state leaf present");
-        let state_scale = state_leaf.iter().fold(0.0_f32, |acc, value| acc.max(value.abs()));
+        let state_scale = state_leaf
+            .iter()
+            .fold(0.0_f32, |acc, value| acc.max(value.abs()));
         let rounding_floor = 8.0 * f32::EPSILON * state_scale;
         let worst_excess = fused_state_leaf
             .iter()
@@ -7356,7 +7358,11 @@ fn no_fused_body_spans_a_dtype_change() {
             );
         }
         for op in &bound {
-            assert_eq!(op.dtype, island.program[op.node.0 as usize].dtype(), "{op:?}");
+            assert_eq!(
+                op.dtype,
+                island.program[op.node.0 as usize].dtype(),
+                "{op:?}"
+            );
         }
         assert!(
             bound_nodes.contains(&island.sum) || bound_nodes.contains(&island.mean),
@@ -7407,7 +7413,10 @@ fn mean_of_rows(dtype: DType) -> (Vec<Op>, NodeId) {
         Op::Elementwise {
             dtype,
             body: ScalarOp::Divide,
-            operands: alloc::vec![(sum, row()), (count, IndexMap::Affine(map::projection(1, &[])))],
+            operands: alloc::vec![
+                (sum, row()),
+                (count, IndexMap::Affine(map::projection(1, &[])))
+            ],
             name: None,
         },
     );
@@ -7426,7 +7435,11 @@ fn half_precision_reduce_epilogues_still_merge_and_f64_ones_never_do() {
         let shapes = shape::infer(&program, &[]).expect("mean-of-rows infers");
         let bound = bind_with_fusion(&program, &shapes, &[mean], true, NumericPolicy::bit_exact())
             .expect("mean-of-rows binds");
-        assert_eq!(count_fused_epilogues(&bound), merged, "{dtype:?}: {bound:#?}");
+        assert_eq!(
+            count_fused_epilogues(&bound),
+            merged,
+            "{dtype:?}: {bound:#?}"
+        );
     }
 }
 
@@ -7441,7 +7454,9 @@ fn every_per_node_bookkeeping_vector_stays_aligned_across_skipped_nodes() {
     let mut emitted = ReadyBatch::new();
     for (position, expr) in island.program.iter().enumerate() {
         if position % 2 == 0 {
-            builder.push_into(expr, &shapes, &mut emitted).expect("push binds");
+            builder
+                .push_into(expr, &shapes, &mut emitted)
+                .expect("push binds");
         } else {
             builder.skip();
         }
@@ -7457,5 +7472,35 @@ fn every_per_node_bookkeeping_vector_stays_aligned_across_skipped_nodes() {
     assert!(
         lengths.iter().all(|length| *length == nodes),
         "every per-node vector must hold one entry per pushed or skipped node, {nodes} nodes, lengths {lengths:?}"
+    );
+}
+
+#[test]
+fn a_narrowing_policy_binds_the_f64_island_as_one_f32_chain() {
+    let island = crate::test_support::widened_sum_of_squares(4, 8);
+    let shapes = shape::infer(&island.program, &[]).expect("widened island infers");
+    let cpu = bind_with_fusion(
+        &island.program,
+        &shapes,
+        &[island.narrowed],
+        true,
+        NumericPolicy::bit_exact(),
+    )
+    .expect("cpu policy binds");
+    let gpu = bind_with_fusion(
+        &island.program,
+        &shapes,
+        &[island.narrowed],
+        true,
+        NumericPolicy::bit_exact().with_accumulator_narrowing(),
+    )
+    .expect("narrowing policy binds");
+    assert!(cpu.iter().any(|op| op.dtype == DType::FLOAT64), "{cpu:#?}");
+    assert!(gpu.iter().all(|op| op.dtype == DType::FLOAT32), "{gpu:#?}");
+    assert!(
+        gpu.len() < cpu.len(),
+        "with no dtype boundary left the f32 chain fuses again: {} narrowed ops vs {} widened",
+        gpu.len(),
+        cpu.len()
     );
 }
