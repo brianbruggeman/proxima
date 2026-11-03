@@ -222,6 +222,8 @@ mod coalesce;
 mod gemm_tile;
 #[macro_use]
 mod gemm_dot_quant;
+#[cfg(target_arch = "x86_64")]
+mod dequant_x86;
 #[macro_use]
 mod gemm_q8k;
 #[macro_use]
