@@ -64,6 +64,7 @@ pub fn family_profile(family: &str) -> Result<FamilyProfile, InteropError> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use std::path::Path;
     use proxima_tensor::spec::{
         Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
         FfnRouting, KvCacheShape, RopePairing, ScheduleSource,
@@ -267,16 +268,29 @@ mod tests {
         }
     }
 
+    fn gguf_dump_entry(line: &str) -> Option<(&str, &str)> {
+        line.splitn(3, " | ").nth(2)?.split_once(" = ")
+    }
+
+    fn model_loader_entry(line: &str) -> Option<(&str, &str)> {
+        let (_, entry) = line.split_once(": - kv ")?.1.split_once(':')?;
+        let (typed_key, value) = entry.split_once(" = ")?;
+        Some((typed_key.split_whitespace().next()?, value))
+    }
+
     fn fixture_kv(fixture: &str) -> Vec<(String, String)> {
-        let path = format!(
-            "{}/tests/fixtures/llama-parity/{fixture}/gguf_kv.txt",
-            env!("CARGO_MANIFEST_DIR")
-        );
+        let directory = format!("{}/tests/fixtures/llama-parity/{fixture}", env!("CARGO_MANIFEST_DIR"));
+        let gguf_dump = format!("{directory}/gguf_kv.txt");
+        let (path, parse): (String, fn(&str) -> Option<(&str, &str)>) =
+            if Path::new(&gguf_dump).is_file() {
+                (gguf_dump, gguf_dump_entry)
+            } else {
+                (format!("{directory}/llama_model_loader_kv.txt"), model_loader_entry)
+            };
         let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
         let entries: Vec<(String, String)> = text
             .lines()
-            .filter_map(|line| line.splitn(3, " | ").nth(2))
-            .filter_map(|entry| entry.split_once(" = "))
+            .filter_map(parse)
             .map(|(key, value)| {
                 (
                     key.trim().to_string(),
@@ -323,7 +337,7 @@ mod tests {
 
     #[test]
     fn qwen35_headers_carry_the_partial_rotary_width_the_profile_pairs_split_half() {
-        for fixture in ["qwen35", "qwen35moe"] {
+        for (fixture, sections) in [("qwen35", "[11, 11, 10, 0]"), ("qwen35moe", "[11, 11, 10]")] {
             let kv = fixture_kv(fixture);
             let family =
                 kv_value(&kv, "general.architecture").expect("header names its architecture");
@@ -340,7 +354,7 @@ mod tests {
             );
             assert_eq!(
                 kv_value(&kv, &format!("{family}.rope.dimension_sections")).as_deref(),
-                Some("[11, 11, 10]"),
+                Some(sections),
                 "{fixture}"
             );
             let profile =
