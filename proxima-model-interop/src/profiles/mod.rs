@@ -281,16 +281,22 @@ mod tests {
     fn fixture_kv(fixture: &str) -> Vec<(String, String)> {
         let directory = format!("{}/tests/fixtures/llama-parity/{fixture}", env!("CARGO_MANIFEST_DIR"));
         let gguf_dump = format!("{directory}/gguf_kv.txt");
-        let (path, parse): (String, fn(&str) -> Option<(&str, &str)>) =
-            if Path::new(&gguf_dump).is_file() {
-                (gguf_dump, gguf_dump_entry)
-            } else {
-                (format!("{directory}/llama_model_loader_kv.txt"), model_loader_entry)
-            };
+        let from_gguf_dump = Path::new(&gguf_dump).is_file();
+        let path = if from_gguf_dump {
+            gguf_dump
+        } else {
+            format!("{directory}/llama_model_loader_kv.txt")
+        };
         let text = std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{path}: {error}"));
         let entries: Vec<(String, String)> = text
             .lines()
-            .filter_map(parse)
+            .filter_map(|line| {
+                if from_gguf_dump {
+                    gguf_dump_entry(line)
+                } else {
+                    model_loader_entry(line)
+                }
+            })
             .map(|(key, value)| {
                 (
                     key.trim().to_string(),
