@@ -6,11 +6,12 @@ use std::fs::read_dir;
 use std::path::{Path, PathBuf};
 
 pub const MODEL_DIRS_ENV: &str = "PROXIMA_MODEL_DIRS";
-const DEFAULT_MODEL_DIRS: [&str; 4] = [
+const DEFAULT_MODEL_DIRS: [&str; 5] = [
     "/mnt/data3/models",
     "/mnt/data5/models",
     "/mnt/data5/models/infer-fixtures",
     "/mnt/data5/ollama/blobs",
+    "/home/bix/repos/llama.cpp-incumbent/models",
 ];
 
 /// `PROXIMA_MODEL_DIRS` when set, else `$HOME/models` followed by the shared model mounts.
