@@ -1,8 +1,5 @@
 //! The generated checkpoints the unit tests and `tests/` drive models with; compiled only for
 //! unit tests or under `test-support`, so a normal build never carries them.
-// workspace denies expect_used; a failed fixture must abort the test with its message
-#![allow(clippy::expect_used)]
-
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use arrayvec::ArrayVec;
@@ -70,8 +67,9 @@ pub fn encode_with(
             }
             let mut bytes =
                 alloc::vec![0u8; (tensor.values.len() / q8_0::QK8_0) * q8_0::BLOCK_BYTES];
-            q8_0::quantize(&tensor.values, &mut bytes)
-                .expect("the synthetic tensor holds whole q8_0 blocks");
+            if let Err(error) = q8_0::quantize(&tensor.values, &mut bytes) {
+                panic!("the synthetic tensor {} must hold whole q8_0 blocks: {error:?}", tensor.name);
+            }
             (GgmlType::Q8_0, bytes)
         })
         .collect();
@@ -89,7 +87,10 @@ pub fn encode_with(
             })
             .collect(),
     };
-    write_complete(&model).expect("the synthetic checkpoint encodes")
+    match write_complete(&model) {
+        Ok(bytes) => bytes,
+        Err(error) => panic!("the synthetic checkpoint must encode: {error:?}"),
+    }
 }
 
 pub fn key(name: &str, value: MetadataValue) -> (String, MetadataValue) {
