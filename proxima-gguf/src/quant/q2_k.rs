@@ -726,7 +726,6 @@ mod tests {
     #[cfg(feature = "std")]
     mod q2_k_real_tensor {
         use std::io::{Read, Seek, SeekFrom};
-        use std::path::Path;
 
         use proxima_telemetry::debug;
 
@@ -735,7 +734,8 @@ mod tests {
         use crate::quant::{q4_k, q6_k};
         use crate::types::GgmlType;
 
-        const REAL_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3d0b790534fe4b79525fc3692950408dca41171676ed7e21db57af5c65ef6ab6";
+        const REAL_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-a3de86cd1c132c822487ededd47a324c50491393e6565cd14bafa40d0b8e686f";
+        const REAL_GGUF_BYTES: u64 = 5_225_374_496;
 
         fn parse_header(file: &mut std::fs::File) -> crate::pipe::ParsedGguf {
             let mut header_buf = Vec::new();
@@ -766,11 +766,12 @@ mod tests {
         /// test round-trips through the new `Q2_K` codec under test.
         #[test]
         fn q2_k_round_trip_on_real_ffn_down_weights() {
-            if !Path::new(REAL_GGUF_PATH).exists() {
-                eprintln!("skipping: {REAL_GGUF_PATH} not present on this host");
-                return;
-            }
-            let mut file = std::fs::File::open(REAL_GGUF_PATH).expect("open real gguf checkpoint");
+            let path = crate::checkpoint_resolver::require_checkpoint(
+                "PROXIMA_QWEN3_GGUF",
+                REAL_GGUF_PATH,
+                REAL_GGUF_BYTES,
+            );
+            let mut file = std::fs::File::open(&path).expect("open real gguf checkpoint");
             let file_len = file.metadata().expect("stat real gguf checkpoint").len();
             let parsed = parse_header(&mut file);
 

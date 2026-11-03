@@ -64,3 +64,19 @@ pub fn resolve_checkpoint(env_name: &str, recorded: &str, length: u64) -> PathBu
         .find_map(|directory| file_with_length(directory, length))
         .unwrap_or_else(|| PathBuf::from(recorded))
 }
+
+/// [`resolve_checkpoint`] that fails the calling test loudly when nothing resolves, so a missing
+/// fixture is a red test rather than a silent pass.
+///
+/// # Panics
+/// If the resolved path does not exist.
+#[must_use]
+pub fn require_checkpoint(env_name: &str, recorded: &str, length: u64) -> PathBuf {
+    let path = resolve_checkpoint(env_name, recorded, length);
+    assert!(
+        path.exists(),
+        "no gguf fixture at {}: set {env_name} or stage the blob (recorded {recorded})",
+        path.display()
+    );
+    path
+}
