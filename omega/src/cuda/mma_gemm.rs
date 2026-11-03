@@ -19,6 +19,7 @@ use proxima_tensor::{
     BoundOp, BoundOpKind, DType, Keep, NumericPolicy, ReduceInit, ScalarOp, StepArg,
 };
 
+use super::int8_gemm::{INT8_FEATURE_TILE, INT8_TOKEN_TILE, Int8Gemm, int8_gemm_plan, push_int8_gemm_body};
 use super::{
     Codec, EmitError, PQ2_0_BLOCK_BYTES, PQ2_0_BLOCK_ELEMENTS, Q1_0_BLOCK_BYTES,
     Q1_0_BLOCK_ELEMENTS, Q2_0_BLOCK_BYTES, Q2_0_BLOCK_ELEMENTS, Q4_0_BLOCK_BYTES,
@@ -45,6 +46,7 @@ pub(super) struct MmaGemm {
     pub(super) activation: usize,
     codec: Codec,
     pub(super) single_activation: bool,
+    pub(super) int8: Option<Int8Gemm>,
     pub(super) feature_positions: Vec<usize>,
     pub(super) token_positions: Vec<usize>,
 }
@@ -108,11 +110,10 @@ pub(super) fn mma_gemm_plan(
     let [first, second] = quantized else {
         return None;
     };
-    let (weight, codec) = match (first, second) {
-        (Some(codec), None) => (0, *codec),
-        (None, Some(codec)) => (1, *codec),
-        _ => return None,
-    };
+    let (weight, codec, prequantized) = weight_slot(*first, *second)?;
+    let mut weights_only = [*first, *second];
+    weights_only[1 - weight] = None;
+    let quantized = &weights_only[..];
     codec_shape(codec)?;
     let activation = 1 - weight;
     let operands = resolved.operands();
@@ -150,16 +151,38 @@ pub(super) fn mma_gemm_plan(
         .iter()
         .map(|&position| resolved.extents[output_axes[position] as usize])
         .product();
-    (!feature_positions.is_empty() && !token_positions.is_empty() && token_total > 1).then_some(
+    let int8 = int8_gemm_plan(resolved, codec, numeric_policy, activation_layout, output_axes, prequantized);
+    let served = !prequantized || int8.is_some();
+    let several_tokens = token_total > 1 || prequantized;
+    (served && !feature_positions.is_empty() && !token_positions.is_empty() && several_tokens).then_some(
         MmaGemm {
             weight,
             activation,
             codec,
             single_activation: numeric_policy.activation_quantization,
+            int8,
             feature_positions,
             token_positions,
         },
     )
+}
+
+/// The weight slot, its codec, and whether the other slot is an activation a `BlockQuantize`
+/// already produced (a `Q8_1` byte operand beside a non-`Q8_1` weight).
+fn weight_slot(first: Option<Codec>, second: Option<Codec>) -> Option<(usize, Codec, bool)> {
+    match (first, second) {
+        (Some(codec), None) => Some((0, codec, false)),
+        (None, Some(codec)) => Some((1, codec, false)),
+        (Some(codec), Some(Codec::Q8_1)) if codec != Codec::Q8_1 => Some((0, codec, true)),
+        (Some(Codec::Q8_1), Some(codec)) if codec != Codec::Q8_1 => Some((1, codec, true)),
+        _ => None,
+    }
+}
+
+/// Whether the operand slots pair a packed weight with a pre-quantized activation, which only
+/// the int8 gemm can read.
+pub(super) fn reads_prequantized_activation(quantized: &[Option<Codec>]) -> bool {
+    matches!(quantized, [first, second] if weight_slot(*first, *second).is_some_and(|(_, _, prequantized)| prequantized))
 }
 
 fn axes_product(resolved: &BoundOp, output_axes: &[u16], positions: &[usize]) -> u64 {
@@ -169,16 +192,25 @@ fn axes_product(resolved: &BoundOp, output_axes: &[u16], positions: &[usize]) ->
         .product()
 }
 
-/// Thread count for the launch: one 256-thread block per 64-feature by
-/// 64-token tile.
+pub(super) fn gemm_tiles(plan: &MmaGemm) -> (usize, usize) {
+    if plan.int8.is_some() {
+        (INT8_FEATURE_TILE, INT8_TOKEN_TILE)
+    } else {
+        (FEATURE_TILE, TOKEN_TILE)
+    }
+}
+
+/// Thread count for the launch: one 256-thread block per feature by token
+/// tile of the plan's body.
 pub(super) fn mma_gemm_threads(resolved: &BoundOp, plan: &MmaGemm) -> u64 {
     let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         return 0;
     };
+    let (feature_tile, token_tile) = gemm_tiles(plan);
     let feature_tiles = axes_product(resolved, output_axes, &plan.feature_positions)
-        .div_ceil(FEATURE_TILE as u64);
+        .div_ceil(feature_tile as u64);
     let token_tiles =
-        axes_product(resolved, output_axes, &plan.token_positions).div_ceil(TOKEN_TILE as u64);
+        axes_product(resolved, output_axes, &plan.token_positions).div_ceil(token_tile as u64);
     feature_tiles * token_tiles * GEMM_THREADS
 }
 
@@ -323,19 +355,16 @@ pub(super) fn push_mma_gemm_body(
     plan: &MmaGemm,
     element_type: &str,
 ) -> Result<(), EmitError> {
-    let BoundOpKind::Reduce {
-        output_axes,
-        epilogue_body,
-        epilogue_operands,
-        ..
-    } = &resolved.kind
-    else {
+    let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         return Err(EmitError::RenderKindMismatch {
             node: resolved.node,
             expected: "keep::reduce fold",
             found: resolved.kind.name(),
         });
     };
+    if let Some(int8) = &plan.int8 {
+        return push_int8_gemm_body(source, resolved, plan, int8, element_type);
+    }
     let shape = codec_shape(plan.codec).ok_or(EmitError::CudaUnsupportedCodec {
         node: resolved.node,
     })?;
@@ -343,39 +372,12 @@ pub(super) fn push_mma_gemm_body(
     let activation = plan.activation;
     let reduce_dims = reduction_dims(resolved, output_axes);
     let reduce_rank = reduce_dims.len();
-    let output_rank = output_axes.len();
     let has_minimum = shape.has_minimum;
     let (block_bytes, block_elements) = (shape.block_bytes, shape.block_elements);
     let decode = shape.decode;
     let single = plan.single_activation;
 
-    source.push_str("    const int tid = (int)threadIdx.x;\n");
-    source.push_str("    const int warp = tid >> 5;\n");
-    source.push_str("    const int lane = tid & 31;\n");
-    source.push_str("    const int group = lane >> 2;\n");
-    source.push_str("    const int quad = lane & 3;\n");
-    source.push_str("    const int warp_feature = warp & 3;\n");
-    source.push_str("    const int warp_token = warp >> 2;\n");
-    source.push_str("    long feature_total = 1;\n");
-    for &position in &plan.feature_positions {
-        source.push_str(&format!(
-            "    feature_total *= u.output_extents[{position}];\n"
-        ));
-    }
-    source.push_str("    long token_total = 1;\n");
-    for &position in &plan.token_positions {
-        source.push_str(&format!(
-            "    token_total *= u.output_extents[{position}];\n"
-        ));
-    }
-    source.push_str(&format!(
-        "    const long feature_tiles = (feature_total + {FEATURE_TILE} - 1) / {FEATURE_TILE};\n"
-    ));
-    source.push_str("    const long feature_first = ((long)blockIdx.x % feature_tiles) * ");
-    source.push_str(&format!("{FEATURE_TILE};\n"));
-    source.push_str(&format!(
-        "    const long token_first = ((long)blockIdx.x / feature_tiles) * {TOKEN_TILE};\n"
-    ));
+    push_tile_origin(source, plan, FEATURE_TILE, TOKEN_TILE);
     source.push_str("    const int load_row = tid >> 2;
 ");
     source.push_str("    const int load_segment = (tid & 3) * 8;
@@ -672,41 +674,87 @@ pub(super) fn push_mma_gemm_body(
             ));
         }
     }
-    source.push_str("    #pragma unroll 1
-    for (int index = 0; index < 32; index++) {
-");
-    source.push_str("        const int tile = index >> 2;
-        const int slot = index & 3;
-");
-    source.push_str("        const long feature = feature_first + warp_feature * 16 + group + (slot >> 1) * 8;
-");
-    source.push_str("        const long token = token_first + warp_token * 64 + tile * 8 + quad * 2 + (slot & 1);
-");
-    source.push_str("        if (feature >= feature_total || token >= token_total) { continue; }
-");
-    source.push_str(&format!("        long output_coord[{output_rank}];
-"));
-    source.push_str("        long feature_rest = feature;
-        long token_rest = token;
-");
+    push_output_write(
+        source,
+        resolved,
+        plan,
+        element_type,
+        "        const int tile = index >> 2;\n        const int slot = index & 3;\n",
+        "feature_first + warp_feature * 16 + group + (slot >> 1) * 8",
+        "token_first + warp_token * 64 + tile * 8 + quad * 2 + (slot & 1)",
+    )
+}
+
+pub(super) fn push_tile_origin(
+    source: &mut String,
+    plan: &MmaGemm,
+    feature_tile: usize,
+    token_tile: usize,
+) {
+    source.push_str("    const int tid = (int)threadIdx.x;\n    const int warp = tid >> 5;\n");
+    source.push_str("    const int lane = tid & 31;\n    const int group = lane >> 2;\n");
+    source.push_str("    const int quad = lane & 3;\n    const int warp_feature = warp & 3;\n");
+    source.push_str("    const int warp_token = warp >> 2;\n    long feature_total = 1;\n");
+    for &position in &plan.feature_positions {
+        source.push_str(&format!("    feature_total *= u.output_extents[{position}];\n"));
+    }
+    source.push_str("    long token_total = 1;\n");
+    for &position in &plan.token_positions {
+        source.push_str(&format!("    token_total *= u.output_extents[{position}];\n"));
+    }
+    source.push_str(&format!(
+        "    const long feature_tiles = (feature_total + {feature_tile} - 1) / {feature_tile};\n\
+         \x20   const long feature_first = ((long)blockIdx.x % feature_tiles) * {feature_tile};\n\
+         \x20   const long token_first = ((long)blockIdx.x / feature_tiles) * {token_tile};\n"
+    ));
+}
+
+pub(super) fn push_output_write(
+    source: &mut String,
+    resolved: &BoundOp,
+    plan: &MmaGemm,
+    element_type: &str,
+    index_setup: &str,
+    feature_expr: &str,
+    token_expr: &str,
+) -> Result<(), EmitError> {
+    let BoundOpKind::Reduce {
+        output_axes,
+        epilogue_body,
+        epilogue_operands,
+        ..
+    } = &resolved.kind
+    else {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "keep::reduce fold",
+            found: resolved.kind.name(),
+        });
+    };
+    let output_rank = output_axes.len();
+    source.push_str(&format!(
+        "    #pragma unroll 1\n    for (int index = 0; index < 32; index++) {{\n{index_setup}\
+         \x20       const long feature = {feature_expr};\n\
+         \x20       const long token = {token_expr};\n\
+         \x20       if (feature >= feature_total || token >= token_total) {{ continue; }}\n\
+         \x20       long output_coord[{output_rank}];\n\
+         \x20       long feature_rest = feature;\n\
+         \x20       long token_rest = token;\n"
+    ));
     for &position in plan.feature_positions.iter().rev() {
         source.push_str(&format!(
-            "        output_coord[{position}] = feature_rest % u.output_extents[{position}]; feature_rest /= u.output_extents[{position}];
-"
+            "        output_coord[{position}] = feature_rest % u.output_extents[{position}]; feature_rest /= u.output_extents[{position}];\n"
         ));
     }
     for &position in plan.token_positions.iter().rev() {
         source.push_str(&format!(
-            "        output_coord[{position}] = token_rest % u.output_extents[{position}]; token_rest /= u.output_extents[{position}];
-"
+            "        output_coord[{position}] = token_rest % u.output_extents[{position}]; token_rest /= u.output_extents[{position}];\n"
         ));
     }
-    source.push_str("        long out_offset = u.out_base;
-");
+    source.push_str("        long out_offset = u.out_base;\n");
     for (position, axis) in output_axes.iter().enumerate() {
         source.push_str(&format!(
-            "        out_offset += output_coord[{position}] * u.out_strides[{axis}];
-"
+            "        out_offset += output_coord[{position}] * u.out_strides[{axis}];\n"
         ));
     }
     push_reduce_epilogue_write(
@@ -720,7 +768,6 @@ pub(super) fn push_mma_gemm_body(
         "flat[index]",
         "out_offset",
     );
-    source.push_str("    }
-");
+    source.push_str("    }\n");
     Ok(())
 }

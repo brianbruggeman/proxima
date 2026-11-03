@@ -1,3 +1,5 @@
+use alloc::boxed::Box;
+
 use super::*;
 
 /// One operand's address into its own buffer, expressed directly in an
@@ -563,6 +565,13 @@ pub enum BoundOpKind {
     /// and unlike [`BoundOpKind::Iota`] not even a dependence on position —
     /// an executor writes `value` to every element of `BoundOp::extents`.
     Constant { value: f32 },
+    /// One dense `f32` source quantized along its last axis into `layout`'s blocks; `BoundOp::extents`
+    /// is the output byte shape. No program op yields it: a backend derives it per plan.
+    BlockQuantize {
+        operands: BoundOperands,
+        // boxed because the inline layout table makes every BoundOpKind 536 bytes
+        layout: Box<BlockLayout>,
+    },
 }
 
 impl BoundOpKind {
@@ -642,6 +651,7 @@ impl BoundOpKind {
             BoundOpKind::RoundBatchedReduce { .. } => "round_batched_reduce fold",
             BoundOpKind::Iota => "iota",
             BoundOpKind::Constant { .. } => "constant",
+            BoundOpKind::BlockQuantize { .. } => "block_quantize",
         }
     }
 }
@@ -667,7 +677,8 @@ impl BoundOp {
             | BoundOpKind::Elementwise { operands, .. }
             | BoundOpKind::ElementwiseTwin { operands, .. }
             | BoundOpKind::Reduce { operands, .. }
-            | BoundOpKind::RoundBatchedReduce { operands, .. } => operands,
+            | BoundOpKind::RoundBatchedReduce { operands, .. }
+            | BoundOpKind::BlockQuantize { operands, .. } => operands,
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => &[],
         }
     }
@@ -704,6 +715,7 @@ impl BoundOp {
             | BoundOpKind::TopFractionSelect { .. }
             | BoundOpKind::Elementwise { .. }
             | BoundOpKind::ElementwiseTwin { .. }
+            | BoundOpKind::BlockQuantize { .. }
             | BoundOpKind::Iota
             | BoundOpKind::Constant { .. } => &[],
         };
@@ -722,6 +734,7 @@ impl BoundOp {
             | BoundOpKind::CachedSoftmaxWeights { .. }
             | BoundOpKind::GatedDeltaNet { .. }
             | BoundOpKind::MoeTopK { .. }
+            | BoundOpKind::BlockQuantize { .. }
             | BoundOpKind::TopFractionSelect { .. } => &EMPTY_BODY,
             BoundOpKind::Elementwise { body, .. } | BoundOpKind::ElementwiseTwin { body, .. } => {
                 body
@@ -856,7 +869,7 @@ impl BoundOp {
             // reads) that splitting it across workers is not worth the
             // bookkeeping; `None` here just means a caller runs it as one
             // chunk, the same as any other unsplittable op.
-            BoundOpKind::Iota | BoundOpKind::Constant { .. } => None,
+            BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::BlockQuantize { .. } => None,
         }
     }
 
@@ -899,6 +912,7 @@ impl BoundOp {
             // this-slice's decode-only shape, never worth chunking), kept
             // explicit for the same reason `Iota`/`Constant` below are.
             kind @ (BoundOpKind::GatedDeltaNet { .. }
+            | BoundOpKind::BlockQuantize { .. }
             | BoundOpKind::MoeTopK { .. }
             | BoundOpKind::TopFractionSelect { .. }
             | BoundOpKind::CachedSoftmaxWeights { .. }

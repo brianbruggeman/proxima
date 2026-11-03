@@ -284,6 +284,7 @@ pub(super) fn non_primary_operand_reads<'resolved>(
                 | BoundOpKind::GatedDeltaNet { .. }
                 | BoundOpKind::MoeTopK { .. }
                 | BoundOpKind::TopFractionSelect { .. }
+                | BoundOpKind::BlockQuantize { .. }
                 | BoundOpKind::Iota
                 | BoundOpKind::Constant { .. } => &[],
             };
@@ -2511,7 +2512,10 @@ pub(super) fn reject_non_float32_outputs(
         let is_quantized_weight = quantized_weights.contains(&node)
             && (is_quantized_matmul_operand(program, node)
                 || is_quantized_gather_operand(program, node));
-        if expr.dtype() != DType::FLOAT32 && !index_nodes.contains(&node) && !is_quantized_weight {
+        if expr.dtype() != DType::FLOAT32
+            && !index_nodes.contains(&node)
+            && !is_quantized_weight
+        {
             return Err(TensorError::NotLowerable {
                 node,
                 reason: "this pipeline's buffers and SIMD kernels are f32-only; route a \

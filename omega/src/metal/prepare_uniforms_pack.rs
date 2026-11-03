@@ -922,6 +922,7 @@ pub(super) fn pack_uniforms_byte_len(bound: &BoundOp, numeric_policy: NumericPol
         // `pack_leaf_uniforms` already packs for `Iota`/`Constant`.
         BoundOpKind::MoeTopK { .. } => WORD,
         BoundOpKind::TopFractionSelect { .. } => WORD,
+        BoundOpKind::BlockQuantize { .. } => WORD,
     }
 }
 
@@ -1041,6 +1042,9 @@ pub(super) fn pack_uniforms_into_with_schedule(
                 push_i64(scratch, *cached_key_rows as i64);
             }
             Ok(())
+        }
+        BoundOpKind::BlockQuantize { .. } => {
+            Err(EmitError::BlockQuantizeNotSupported { node: bound.node })
         }
     }
 }

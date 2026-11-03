@@ -243,6 +243,9 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
             instrument::record_op_kind(instrument::OpKind::Scan);
             run_scan(resolved, buffers, output)
         }
+        BoundOpKind::BlockQuantize { .. } => {
+            super::run_block_quantize::run_block_quantize(resolved, buffers, output)
+        }
         BoundOpKind::Iota => run_iota(output),
         BoundOpKind::Constant { value } => run_constant(*value, output),
         BoundOpKind::RoundBatchedReduce { .. } => run_round_batched_reduce(

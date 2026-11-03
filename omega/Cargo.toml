@@ -794,3 +794,11 @@ required-features = ["metal"]
 name = "wide_cooperative_reduce"
 harness = false
 required-features = ["metal"]
+
+[[example]]
+name = "prefill_gemm_probe"
+required-features = ["cuda-driver", "cpu"]
+
+[[example]]
+name = "prefill_gemm_int8_probe"
+required-features = ["cuda-driver", "cpu"]

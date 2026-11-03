@@ -212,6 +212,7 @@ mod epilogue;
 mod quantized_eval;
 #[macro_use]
 mod run_node;
+mod run_block_quantize;
 #[macro_use]
 mod elementwise_matmul;
 #[macro_use]

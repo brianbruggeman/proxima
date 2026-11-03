@@ -233,6 +233,18 @@ impl GpuDriver {
     pub const fn renders_fused_cached_attention(self) -> bool {
         matches!(self, GpuDriver::Metal)
     }
+
+    /// Capability only: whether this driver lowers `BoundOpKind::BlockQuantize`, so the
+    /// int8 activation rewrite may insert the op into a program bound for it. Metal and
+    /// wgpu never see the op.
+    #[must_use]
+    pub const fn lowers_block_quantize(self) -> bool {
+        match self {
+            GpuDriver::Metal | GpuDriver::Wgpu => false,
+            #[cfg(feature = "cuda-driver")]
+            GpuDriver::Cuda => true,
+        }
+    }
 }
 
 /// Emits the telemetry event for an unrecognized `OMEGA_BACKEND` value.
@@ -1448,6 +1460,24 @@ pub fn cuda_refit_counters(plan: &Plan) -> Option<[u64; 5]> {
 /// every other arm. The CUDA entry for a fused cached attention carries the
 /// `omega_cuda_cached_attention_` prefix, so a test can assert the fused form
 /// was actually emitted rather than a silent fallback to the unfused chain.
+#[cfg(feature = "cuda-driver")]
+#[must_use]
+pub fn cuda_replace_kernel_source(plan: &mut Plan, position: usize, source: String) -> bool {
+    match plan {
+        Plan::Cuda(cuda_plan) => cuda_plan.replace_kernel_source(position, source),
+        _ => false,
+    }
+}
+
+#[cfg(feature = "cuda-driver")]
+#[must_use]
+pub fn cuda_kernel_launches(plan: &Plan) -> Option<Vec<String>> {
+    match plan {
+        Plan::Cuda(cuda_plan) => Some(cuda_plan.kernel_launches()),
+        _ => None,
+    }
+}
+
 #[cfg(feature = "cuda-driver")]
 #[must_use]
 pub fn cuda_kernel_identities(plan: &Plan) -> Option<Vec<String>> {

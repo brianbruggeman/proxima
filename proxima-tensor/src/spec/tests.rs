@@ -8104,6 +8104,9 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
             }
             crate::bind::BoundOpKind::Constant { .. } => constant += 1,
             crate::bind::BoundOpKind::Iota => iota += 1,
+            crate::bind::BoundOpKind::BlockQuantize { .. } => {
+                panic!("this Mistral cached-forward program never binds a BlockQuantize op")
+            }
             // This program never binds a Qwen3.5 GDN mixer, so a
             // `gated-delta-net-fusion` build never produces this kind
             // here -- an arm is still required once the variant exists

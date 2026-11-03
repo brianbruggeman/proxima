@@ -264,6 +264,14 @@ pub enum TensorError {
         expert_used_count: u32,
     },
 
+    /// A [`crate::bind::BoundOpKind::BlockQuantize`] whose block layout the layout-driven encoder cannot
+    /// produce, e.g. sub-blocks or a stored min.
+    #[error("block quantize at node {node} cannot encode its layout: {cause}")]
+    BlockQuantizeLayout {
+        node: NodeId,
+        cause: proxima_gguf::quant::QuantError,
+    },
+
     /// [`crate::spec::stack_selected_routes`] casts its `routes` slice length
     /// to a `u32` `Op::Iota` extent; a caller that hands it more than
     /// `u32::MAX` selected routes has no valid axis to stack them onto.

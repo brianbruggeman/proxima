@@ -89,6 +89,11 @@ pub enum EmitError {
     )]
     GatedDeltaNetNotSupported { node: NodeId },
 
+    /// No metal emitter renders [`proxima_tensor::BoundOpKind::BlockQuantize`] yet; the CPU
+    /// interpreter runs it.
+    #[error("node {node} is a block quantize op, which no metal emitter in this crate supports yet")]
+    BlockQuantizeNotSupported { node: NodeId },
+
     /// Candidate B's integration (`R9/PROGRESS.md`'s own "Candidate B"
     /// sections): `crate::msl::render_cached_softmax_weights` renders this
     /// kind now -- this variant stays reachable for the precondition checks

@@ -115,6 +115,31 @@ fn digest(
     })
 }
 
+fn print_gemm_operands(
+    program: &[Op],
+    packed: &BTreeMap<NodeId, Codec>,
+    policy: NumericPolicy,
+    resolved: &[BoundOp],
+) -> Result<(), DiffError> {
+    for op in resolved {
+        let kernel = emit_cuda_with_policy(op, packed, policy).map_err(failed)?;
+        if !kernel.entry.contains("mma16x8x8") {
+            continue;
+        }
+        let operands: Vec<String> = op
+            .operands()
+            .iter()
+            .map(|(node, layout, _)| {
+                let shape = format!("{:?}", program[node.0 as usize]);
+                let head: String = shape.chars().take(40).collect();
+                format!("node{} codec={:?} layout={layout:?} {head}", node.0, packed.get(node))
+            })
+            .collect();
+        println!("gemm entry={} dtype={:?} operands={operands:#?}", kernel.entry, op.dtype);
+    }
+    Ok(())
+}
+
 fn bind_at(
     program: &[Op],
     symbols: &[u64],
@@ -126,6 +151,9 @@ fn bind_at(
     let bound = bind_with_fusion(program, &shapes, outputs, policy.reassociation, policy).map_err(failed)?;
     let mut resolved = prune_dead(bound, outputs);
     correct_packed_matmul_layouts(&mut resolved, &packed.keys().copied().collect());
+    if env::var_os("PLAN_ROWS_DIFF_GEMM").is_some() && symbols[0] == 512 {
+        print_gemm_operands(program, packed, policy, &resolved)?;
+    }
     resolved.iter().map(|op| digest(op, packed, policy)).collect()
 }
 

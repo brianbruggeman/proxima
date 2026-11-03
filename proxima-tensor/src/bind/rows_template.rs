@@ -55,6 +55,10 @@ fn visit_integers(bound: &mut BoundOp, counts: bool, unsigned: Unsigned<'_>, sig
     bound.extents.iter_mut().for_each(&mut *unsigned);
     match &mut bound.kind {
         BoundOpKind::Iota | BoundOpKind::Constant { .. } => true,
+        BoundOpKind::BlockQuantize { operands, .. } => {
+            visit_operands(operands, unsigned, signed);
+            true
+        }
         BoundOpKind::Elementwise { operands, .. } | BoundOpKind::ElementwiseTwin { operands, .. } => {
             visit_operands(operands, unsigned, signed);
             true
@@ -207,7 +211,7 @@ pub fn symbols_shapes_template(binds: &[(&[u64], &Shapes)]) -> Option<SymbolsTem
         .map(|node| {
             (0..tables[0][node].len())
                 .map(|dim| {
-                    let mut fields = vec![tables[0][node][dim]];
+                    let mut fields = alloc::vec![tables[0][node][dim]];
                     fields.extend(slopes.iter().map(|slope| slope.as_ref().map_or(0, |per_node| per_node[node][dim])));
                     fields
                 })

@@ -219,6 +219,7 @@ pub mod similarity;
 pub mod error;
 #[cfg(feature = "instrument")]
 pub mod instrument;
+
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod live;
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -308,7 +309,7 @@ pub use live::annotate;
 pub use lowered::Lowered;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use map::{AxisIndex, AxisTerm, IndexMap, IndexPattern, affine, projection};
-#[cfg(any(feature = "std", feature = "alloc"))]
+
 pub use numeric::{NumericPolicy, NumericRewrite, admit};
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};

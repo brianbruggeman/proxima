@@ -39,6 +39,8 @@ use crate::cuda_kernel_cache::{
 };
 use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
+use crate::backend::GpuDriver;
+use crate::derived_quantize::{derive_block_quantize, underive_block_quantize};
 use crate::lowering::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{
     RefreshRefusal, changed_nodes, kv_read_only_by_fused_attention, refit_cached_attention_at,
@@ -391,6 +393,9 @@ fn bound_output_len(bound: &BoundOp) -> usize {
             .iter()
             .map(|axis| bound.extents[*axis as usize] as usize)
             .product(),
+        BoundOpKind::BlockQuantize { .. } => {
+            bound.extents.iter().map(|extent| *extent as usize).product::<usize>() / std::mem::size_of::<f32>()
+        }
         _ => bound.extents.iter().map(|extent| *extent as usize).product(),
     }
 }
@@ -1091,7 +1096,7 @@ impl CudaDriver {
             }
         }
         let unfused = config.is_some_and(|value| !value.allow_fusion);
-        let (resolved, mut micros) =
+        let (resolved, packed_operands, mut micros) =
             bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, unfused)?;
         let (kernels, uniforms) =
             emit_and_pack(&resolved, None, &packed_operands, numeric_policy, self.device, &mut micros)?;
@@ -1762,7 +1767,7 @@ pub fn probe_pads_kv(
         node: NodeId(0),
         reason: "shape inference failed",
     })?;
-    let (resolved, _) = bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, false)?;
+    let (resolved, _, _) = bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, false)?;
     Ok(kv_read_only_by_fused_attention(program, &resolved, outputs, is_kv_input))
 }
 
@@ -1773,7 +1778,7 @@ fn bind_resolved(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     unfused: bool,
-) -> Result<(Vec<BoundOp>, LowerMicros), CudaDriverError> {
+) -> Result<(Vec<BoundOp>, PackedOperands, LowerMicros), CudaDriverError> {
     let bind_started = Instant::now();
     let bound = if unfused {
         bind_unfused(program, shapes, outputs, numeric_policy)
@@ -1792,12 +1797,14 @@ fn bind_resolved(
     })?;
     let mut resolved = prune_dead(bound, outputs);
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
+    let mut packed = packed_operands.clone();
+    let resolved = derive_block_quantize(resolved, program, shapes, &mut packed, numeric_policy, GpuDriver::Cuda);
     validate_resolved(&resolved, numeric_policy)?;
     let micros = LowerMicros {
         bind: bind_started.elapsed().as_micros() as u64,
         ..LowerMicros::default()
     };
-    Ok((resolved, micros))
+    Ok((resolved, packed, micros))
 }
 
 fn validate_resolved(
@@ -1900,11 +1907,13 @@ fn refresh_bound_resolved(
     shapes: &Shapes,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
-) -> Result<(Vec<BoundOp>, usize), RefreshRefusal> {
+) -> Result<(Vec<BoundOp>, PackedOperands, usize), RefreshRefusal> {
     let changed: BTreeSet<NodeId> = (0..program.len())
         .map(|position| NodeId(position as u32))
         .filter(|node| previous_shapes.of(*node) != shapes.of(*node))
         .collect();
+    let base = underive_block_quantize(previous, program.len());
+    let previous = base.as_slice();
     let masks: Vec<u64> = previous
         .iter()
         .map(|bound| u64::from(touches_changed(bound, program, &changed)))
@@ -1920,7 +1929,9 @@ fn refresh_bound_resolved(
         numeric_policy,
     )?;
     correct_packed_matmul_layouts(&mut refreshed, &packed_operands.keys().copied().collect());
-    Ok((refreshed, touched))
+    let mut packed = packed_operands.clone();
+    let refreshed = derive_block_quantize(refreshed, program, shapes, &mut packed, numeric_policy, GpuDriver::Cuda);
+    Ok((refreshed, packed, touched))
 }
 
 fn cuda_supports_kind(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
@@ -1933,6 +1944,7 @@ fn cuda_supports_kind(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool
         | BoundOpKind::Reduce { .. }
         | BoundOpKind::Iota
         | BoundOpKind::Constant { .. }
+        | BoundOpKind::BlockQuantize { .. }
         | BoundOpKind::MoeTopK { .. } => true,
         _ => false,
     }
@@ -2238,7 +2250,8 @@ impl CudaPlan {
             .map_err(refresh_refusal_name)
         };
         let (bind_path, touched, refused, resolved, kernels, uniforms, micros) = match refresh {
-            Ok((resolved, touched)) => {
+            Ok((resolved, packed, touched)) => {
+                self.packed_operands = packed;
                 let mut micros = LowerMicros {
                     bind: refresh_started.elapsed().as_micros() as u64,
                     ..LowerMicros::default()
@@ -2263,7 +2276,7 @@ impl CudaPlan {
                     bound: &previous_bound,
                     kernels: std::mem::take(&mut self.kernels),
                 });
-                let (resolved, mut micros) = bind_resolved(
+                let (resolved, packed, mut micros) = bind_resolved(
                     &self.program,
                     &shapes,
                     &self.outputs,
@@ -2271,6 +2284,7 @@ impl CudaPlan {
                     numeric_policy,
                     false,
                 )?;
+                self.packed_operands = packed;
                 let (kernels, uniforms) = emit_and_pack(
                     &resolved,
                     prior,
@@ -2453,7 +2467,7 @@ impl CudaPlan {
             node: NodeId(0),
             reason: "shape inference failed",
         })?;
-        let (bound, _) = bind_resolved(
+        let (bound, _, _) = bind_resolved(
             &self.program,
             &shapes,
             &self.outputs,
@@ -2598,6 +2612,9 @@ impl CudaPlan {
     ) -> Result<bool, CudaDriverError> {
         let device = self.driver.device;
         let packed = &self.packed_operands;
+        if between.len() != previous.len() || previous.len() != self.resolved.len() {
+            return Ok(false);
+        }
         for position in 0..previous.len() {
             let current = &self.resolved[position];
             let same_plan = |other: &BoundOp| {
@@ -2744,7 +2761,10 @@ impl CudaPlan {
             }
         }
         for (bound, uniform) in self.resolved.iter().zip(&self.uniforms) {
-            let bytes = cuda_float_bytes(self.shapes.of(bound.node))?;
+            let bytes = match &bound.kind {
+                BoundOpKind::BlockQuantize { .. } => bound_output_len(bound) as u64 * 4,
+                _ => cuda_float_bytes(self.shapes.of(bound.node))?,
+            };
             let pooled = release_plan.pooled.contains(&bound.node);
             match self.arena.buffers.get(&bound.node) {
                 _ if pooled => {}
@@ -2914,6 +2934,29 @@ impl CudaPlan {
             });
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub fn kernel_launches(&self) -> Vec<String> {
+        self.kernels
+            .iter()
+            .map(|kernel| {
+                format!(
+                    "entry={} grid_threads={} block_width={:?}",
+                    kernel.entry,
+                    kernel.grid.threads,
+                    kernel.grid.block_width_or_default()
+                )
+            })
+            .collect()
+    }
+
+    #[must_use]
+    pub fn replace_kernel_source(&mut self, position: usize, source: String) -> bool {
+        self.kernels
+            .get_mut(position)
+            .map(|kernel| kernel.source = source)
+            .is_some()
     }
 
     #[must_use]

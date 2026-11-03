@@ -82,6 +82,8 @@ use crate::lowering::{
 };
 
 mod block_dot;
+mod block_quantize;
+mod int8_gemm;
 mod radix_dot;
 pub(crate) mod mma_gemm;
 mod row_tile;
@@ -90,7 +92,13 @@ mod staged_matvec;
 use split_attention::{
     render_combine, split_chunks, split_pass, split_scratch_len, split_scratch_node,
 };
-use mma_gemm::{GEMM_THREADS, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body};
+pub use int8_gemm::is_int8_weight;
+use block_quantize::{block_quantize_grid, block_quantize_groups, render_block_quantize};
+use int8_gemm::INT8_MMA_INSTRUCTION;
+use mma_gemm::{
+    GEMM_THREADS, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body,
+    reads_prequantized_activation,
+};
 use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
 use staged_matvec::{
     STAGED_THREADS, push_staged_matvec_body, staged_matvec_plan, staged_matvec_threads, staged_prepass,
@@ -255,6 +263,7 @@ pub fn emit_cuda_on_device(
 ) -> Result<CudaKernel, EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
+    reject_unserved_prequantized(resolved, &quantized, numeric_policy)?;
     let attention_chunks = split_chunks(&resolved.kind, device);
     let entry = match cuda_cached_attention_class(&resolved.kind) {
         Some(class) => cached_attention_entry_name(resolved, class, attention_chunks, numeric_policy)?,
@@ -305,6 +314,7 @@ pub fn emit_cuda_on_device(
                 kind: "cached_softmax_weights",
             });
         }
+        BoundOpKind::BlockQuantize { .. } => render_block_quantize(resolved, &entry)?,
         BoundOpKind::ElementwiseTwin { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
@@ -322,6 +332,39 @@ pub fn emit_cuda_on_device(
         extra_outputs,
         prologue,
     })
+}
+
+/// Whether the int8 gemm would serve `resolved` if its operand in `activation_slot` held
+/// `block_q8_1` bytes.
+pub(crate) fn int8_gemm_serves(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    activation_slot: usize,
+    numeric_policy: NumericPolicy,
+) -> bool {
+    let mut quantized = operand_codecs(resolved, packed_operands);
+    let Some(slot) = quantized.get_mut(activation_slot) else {
+        return false;
+    };
+    *slot = Some(Codec::Q8_1);
+    mma_gemm_plan(resolved, &quantized, numeric_policy).is_some_and(|plan| plan.int8.is_some())
+}
+
+/// A pre-quantized activation is readable only by the int8 gemm; any other consumer would read
+/// its bytes as floats, so it fails here instead of emitting a wrong kernel.
+fn reject_unserved_prequantized(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+) -> Result<(), EmitError> {
+    let served = mma_gemm_plan(resolved, quantized, numeric_policy).is_some_and(|plan| plan.int8.is_some());
+    if reads_prequantized_activation(quantized) && !served {
+        return Err(EmitError::CudaUnsupportedOpKind {
+            node: resolved.node,
+            kind: "block_quantize_consumer",
+        });
+    }
+    Ok(())
 }
 
 /// The kernels launched ahead of the op: they are sized by its extents like the grid, so a
@@ -353,6 +396,9 @@ fn extent_fields(
     numeric_policy: NumericPolicy,
     device: EmitDevice,
 ) -> Result<(CudaGridSpec, Vec<(NodeId, usize)>), EmitError> {
+    if matches!(resolved.kind, BoundOpKind::BlockQuantize { .. }) {
+        return Ok((block_quantize_grid(resolved)?, Vec::new()));
+    }
     let cooperative = reduce_is_cooperative(resolved, quantized, numeric_policy);
     let row_tile = row_tile_axis(resolved, quantized, numeric_policy);
     let gemm = mma_gemm_plan(resolved, quantized, numeric_policy);
@@ -393,7 +439,7 @@ fn extent_fields(
     let mut extra_outputs = resolved
         .kind
         .moe_topk_extra_outputs(resolved.extents.iter().product::<u64>() as usize);
-    if let Some(plan) = staged.filter(|plan| plan.scratch) {
+    if let Some(plan) = staged.as_ref().filter(|plan| plan.scratch) {
         extra_outputs.push((staged_scratch_node(resolved.node), staged_scratch_len(plan.reduction)));
     }
     if let Some(chunks) = split_chunks(&resolved.kind, device) {
@@ -410,12 +456,8 @@ const Q8_1_BLOCK_ELEMENTS: u64 = 32;
 
 const Q8_1_QUANTIZE_ENTRY: &str = "omega_cuda_q8_1_quantize";
 
-const Q8_1_QUANTIZE_SOURCE: &str = r#"#include <cuda_fp16.h>
-extern "C" __global__ void omega_cuda_q8_1_quantize(const float *in, float *out, const int *u) {
-    long gid = (long)blockIdx.x * blockDim.x + threadIdx.x;
-    long block = gid / 32;
-    unsigned int lane = (unsigned int)(gid & 31);
-    if (block >= u[0]) return;
+const Q8_1_QUANTIZE_DEVICE: &str = r#"
+__device__ __forceinline__ void omega_q8_1_quantize_block(const float *in, float *out, long block, unsigned int lane) {
     float x = in[block * 32 + lane];
     float amax = fabsf(x);
     for (int offset = 16; offset > 0; offset >>= 1) { amax = fmaxf(amax, __shfl_xor_sync(0xffffffffu, amax, offset)); }
@@ -433,6 +475,15 @@ extern "C" __global__ void omega_cuda_q8_1_quantize(const float *in, float *out,
         bytes[3] = (unsigned char)(s_bits >> 8);
     }
     bytes[4 + lane] = (unsigned char)(signed char)q;
+}
+"#;
+
+const Q8_1_QUANTIZE_ENTRY_TEXT: &str = r#"
+extern "C" __global__ void omega_cuda_q8_1_quantize(const float *in, float *out, const int *u) {
+    long gid = (long)blockIdx.x * blockDim.x + threadIdx.x;
+    long block = gid / 32;
+    if (block >= u[0]) return;
+    omega_q8_1_quantize_block(in, out, block, (unsigned int)(gid & 31));
 }
 "#;
 
@@ -464,7 +515,7 @@ pub fn emit_q8_1_quantize(
         });
     }
     Ok(CudaKernel {
-        source: String::from(Q8_1_QUANTIZE_SOURCE),
+        source: ["#include <cuda_fp16.h>\n", Q8_1_QUANTIZE_DEVICE, Q8_1_QUANTIZE_ENTRY_TEXT].concat(),
         entry: String::from(Q8_1_QUANTIZE_ENTRY),
         bindings: vec![
             Binding::Input(activation),
@@ -649,7 +700,8 @@ fn project_text_kind(kind: &BoundOpKind) -> BoundOpKind {
         | BoundOpKind::TopFractionSelect { operands, .. }
         | BoundOpKind::Elementwise { operands, .. }
         | BoundOpKind::ElementwiseTwin { operands, .. }
-        | BoundOpKind::CachedSoftmaxWeights { operands, .. } => project_operands(operands),
+        | BoundOpKind::CachedSoftmaxWeights { operands, .. }
+        | BoundOpKind::BlockQuantize { operands, .. } => project_operands(operands),
         BoundOpKind::Reduce {
             operands,
             out_layout,
@@ -932,6 +984,9 @@ pub(crate) fn pack_cuda_uniforms(resolved: &BoundOp) -> Result<Vec<u8>, EmitErro
         }
         BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::MoeTopK { .. } => {
             push_cuda_i64(&mut bytes, resolved.extents.iter().product::<u64>() as i64);
+        }
+        BoundOpKind::BlockQuantize { .. } => {
+            push_cuda_i64(&mut bytes, block_quantize_groups(resolved)? as i64);
         }
         BoundOpKind::CachedAttention {
             query_rows,
@@ -1370,6 +1425,7 @@ fn grid_threads(
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. }
+        | BoundOpKind::BlockQuantize { .. }
         | BoundOpKind::ElementwiseTwin { .. } => extents_product(),
     }
 }
@@ -1493,8 +1549,13 @@ fn text_plan_token(
         let global = if plan.scratch { "g" } else { "" };
         format!("_smv{}x{}{global}_gid64c9", staged_matvec::STAGED_WARPS, plan.rows)
     } else if let Some(plan) = mma_gemm_plan(resolved, quantized, numeric_policy) {
-        let single = if plan.single_activation { "h" } else { "" };
-        format!("_mma16x8x8{single}_gid64c9")
+        match &plan.int8 {
+            Some(int8) => format!("_mma8x8x16s8c{}_gid64c9", int8.chunks),
+            None => {
+                let single = if plan.single_activation { "h" } else { "" };
+                format!("_mma16x8x8{single}_gid64c9")
+            }
+        }
     } else if row_tile_axis(resolved, quantized, numeric_policy).is_some() {
         format!("_rt{ROW_TILE}_gid64c9")
     } else if reduce_is_cooperative(resolved, quantized, numeric_policy)
@@ -3445,6 +3506,10 @@ fn render_reduce(
     if gemm.is_some() {
         source.push_str(MMA_INSTRUCTION);
         source.push_str(MMA_GEMM_HELPERS);
+    }
+    if let Some(int8) = gemm.as_ref().and_then(|plan| plan.int8.as_ref()) {
+        source.push_str(INT8_MMA_INSTRUCTION);
+        source.push_str(&int8.dot.helpers);
     }
     if let Some(plan) = &staged {
         source.push_str(&plan.dot.helpers);

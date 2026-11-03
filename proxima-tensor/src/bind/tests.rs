@@ -1822,6 +1822,7 @@ fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
             | BoundOpKind::ElementwiseTwin { operands, .. }
             | BoundOpKind::Reduce { operands, .. }
             | BoundOpKind::RoundBatchedReduce { operands, .. } => operands,
+            BoundOpKind::BlockQuantize { operands, .. } => operands,
             BoundOpKind::Iota
             | BoundOpKind::Constant { .. }
             | BoundOpKind::GatedDeltaNet { .. }

@@ -141,6 +141,7 @@ fn reduce_output_len(chunk: &proxima_tensor::BoundOp) -> usize {
         | proxima_tensor::BoundOpKind::MoeTopK { .. }
         | proxima_tensor::BoundOpKind::TopFractionSelect { .. }
         | proxima_tensor::BoundOpKind::RoundBatchedReduce { .. }
+        | proxima_tensor::BoundOpKind::BlockQuantize { .. }
         | proxima_tensor::BoundOpKind::Iota
         | proxima_tensor::BoundOpKind::Constant { .. } => {
             chunk.extents.iter().product::<u64>() as usize
