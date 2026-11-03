@@ -22094,7 +22094,7 @@ mod recurrent_shared {
 
 mod mixer_over_packed_projection {
     use super::*;
-    use crate::cpu::{QuantizedBlock, evaluate_quantized_named};
+    use crate::cpu::{QuantizedBlock, evaluate_quantized_named_exact_with_scratch};
     use crate::test_support::Lcg;
     use proxima_gguf::quant::q8_0;
 
@@ -22234,11 +22234,15 @@ mod mixer_over_packed_projection {
             ("state_in", QuantizedBlock::Float32(state)),
             ("ssm_out", out_weight),
         ]);
-        let evaluated = evaluate_quantized_named(
+        let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+        let mut validated_weight_nodes = None;
+        let evaluated = evaluate_quantized_named_exact_with_scratch(
             &program,
             &[rows as u64],
             &named,
             &[mixer_out, taps.qkv_mixed, taps.state_out],
+            &mut free_buffers,
+            &mut validated_weight_nodes,
         )
         .expect("the mixer evaluates");
         let read = |node: NodeId| evaluated.get(node).expect("requested node").0.to_vec();
