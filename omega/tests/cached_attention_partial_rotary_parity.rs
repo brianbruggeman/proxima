@@ -66,7 +66,7 @@ fn assert_partial_rotary_parity_at(cached_extent: u64, cached_len: u64, policy: 
          eight base sources, the runtime cached_len, and the three pass-plane sources"
     );
 
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = evaluate_quantized_named_with_scratch(
         &program,

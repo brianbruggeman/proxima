@@ -326,8 +326,7 @@ fn main() {
     // the way `evaluate_parallel_with_scratch` already does? Plain
     // count/bytes here (no backtrace) — the itemisation above already
     // proved the per-site breakdown; this only checks the totals move.
-    let mut scratch: Vec<Vec<f32>> = Vec::new();
-    let mut wide_scratch: Vec<Vec<f64>> = Vec::new();
+    let mut scratch = proxima_tensor::cpu::BufferPools::default();
     for call_number in 1..=3 {
         RECORDS
             .lock()
@@ -341,7 +340,6 @@ fn main() {
                 &[&lhs, &rhs],
                 &[],
                 &mut scratch,
-                &mut wide_scratch,
             )
                 .expect("scratch gemm evaluates");
         RECORDING.store(false, Ordering::Relaxed);
@@ -354,6 +352,6 @@ fn main() {
         println!(
             "evaluate_with_scratch call {call_number}: allocations={call_count} bytes={call_bytes}"
         );
-        evaluated.into_scratch(&mut scratch);
+        evaluated.into_scratch(&mut scratch.0);
     }
 }

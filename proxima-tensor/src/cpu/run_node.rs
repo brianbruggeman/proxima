@@ -139,6 +139,15 @@ pub(super) fn run_node_into_with_round_sink<B: Deref<Target = [f32]> + Sync>(
     moe_topk_extra_sink: Option<&mut Vec<f32>>,
     round_sink: Option<&mut Vec<Vec<f32>>>,
 ) -> Result<(), TensorError> {
+    if let BoundOpKind::Reduce {
+        accumulator: DType::FLOAT64,
+        keep: Keep::Reduce,
+        ..
+    } = &resolved.kind
+        && resolved.dtype == DType::FLOAT32
+    {
+        return super::float64_island::run_widened_fold_into(resolved, buffers, output);
+    }
     let result = match &resolved.kind {
         BoundOpKind::CachedAttention { .. } => {
             #[cfg(feature = "instrument")]

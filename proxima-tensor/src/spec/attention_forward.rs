@@ -1635,7 +1635,7 @@ pub(crate) struct PleFlatProjections {
     pub(crate) proj_flat: NodeId,
     pub(crate) emb_flat: NodeId,
     pub(crate) proj_norm_weight: NodeId,
-    pub(crate) inv_ple_dim: NodeId,
+    pub(crate) ple_dim_count: NodeId,
 }
 
 /// Stage A preamble (the reference Go source, lines 1276-1301): the per-token matmul
@@ -1725,13 +1725,13 @@ pub(crate) fn append_ple_flat_projections(
         alloc::vec![Extent::Static(ple_dim)],
         "per_layer_proj_norm.weight",
     );
-    let inv_ple_dim = count_constant(program, ple_dim as u32);
+    let ple_dim_count = count_constant(program, ple_dim);
 
     Ok(PleFlatProjections {
         proj_flat,
         emb_flat,
         proj_norm_weight,
-        inv_ple_dim,
+        ple_dim_count,
     })
 }
 
@@ -1760,7 +1760,7 @@ pub(crate) fn append_ple_combined(
         program,
         proj_view,
         flat.proj_norm_weight,
-        flat.inv_ple_dim,
+        flat.ple_dim_count,
         eps,
         "l",
     )?;
@@ -3700,7 +3700,7 @@ mod ple_single_reduce_parity_tests {
             program,
             proj_slice,
             flat.proj_norm_weight,
-            flat.inv_ple_dim,
+            flat.ple_dim_count,
             eps,
         )
         .expect("per-layer rmsnorm lowers");

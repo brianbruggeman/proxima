@@ -180,7 +180,7 @@ fn moe_gather_parity_f32_bit_exact_on_metal() {
         .expect("gathered expert product fixture binds");
     let _ = resolved;
 
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
         &program,
@@ -285,7 +285,7 @@ fn moe_gather_parity_q8_0_within_measured_tolerance_on_metal() {
 
     let shapes = infer(&program, &symbols).expect("q8_0 gathered expert fixture infers");
 
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
         &program,
@@ -456,7 +456,7 @@ fn kquant_gather_parity<Q>(
     let _shapes = infer(&program, &symbols)
         .unwrap_or_else(|error| panic!("{codec_name} gathered expert fixture infers: {error:?}"));
 
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
         &program,

@@ -501,7 +501,7 @@ fn public_builders_compose_a_one_layer_forward_program() {
     );
     let embedded = embedding_lookup(&mut program, table, ids);
 
-    let inv_dim = count_constant(&mut program, embedding as u32);
+    let inv_dim = count_constant(&mut program, embedding);
     // `eps` carries its own `s` (token) axis throughout this module's
     // rmsnorm-family ops (`rmsnorm`'s own `(eps, "s->s")`,
     // `append_hyper_connection_mix`'s `(eps, "s->sh")`) -- a per-token
@@ -10559,7 +10559,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
             alloc::vec![sequence_extent, Extent::Static(embedding)],
             "x",
         );
-        let inv_dim = count_constant(&mut program, embedding as u32);
+        let inv_dim = count_constant(&mut program, embedding);
         let eps = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -10574,7 +10574,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps_
         );
         let one = scalar_constant(&mut program, 1.0);
         let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (head_k_dim as f32).sqrt());
-        let inv_head_v_dim = count_constant(&mut program, head_v_dim as u32);
+        let inv_head_v_dim = count_constant(&mut program, head_v_dim);
         let attn_norm_weight = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -12825,7 +12825,7 @@ fn single_range_layer_with_order(
         alloc::vec![Extent::Symbolic(0), Extent::Static(embedding)],
         "x",
     );
-    let inv_dim = count_constant(&mut program, embedding as u32);
+    let inv_dim = count_constant(&mut program, embedding);
     let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_head_dim = scalar_constant(&mut program, 1.0 / (head_dim as f32).sqrt());
@@ -12953,7 +12953,7 @@ fn single_range_layer_with_order(
         "ffn_down.weight",
     );
     let qk_norm_weights = qk_norm.then(|| {
-        let inv_head_dim = count_constant(&mut program, head_dim as u32);
+        let inv_head_dim = count_constant(&mut program, head_dim);
         let q_norm_weight = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -19208,7 +19208,7 @@ mod head_repeats {
 
         assert_eq!(
             program.len(),
-            CACHELESS_PRE_CHANGE_NODES + 2 * widened_norms(&program)
+            CACHELESS_PRE_CHANGE_NODES + 2 * crate::test_support::widened_norms(&program)
         );
         assert_eq!(digest(&program), CACHELESS_PRE_CHANGE_DIGEST);
         assert!(duplicates.is_empty());
@@ -19220,7 +19220,7 @@ mod head_repeats {
 
         assert_eq!(
             program.len(),
-            TWO_RANGE_PRE_CHANGE_NODES + 2 * widened_norms(&program)
+            TWO_RANGE_PRE_CHANGE_NODES + 2 * crate::test_support::widened_norms(&program)
         );
         assert_eq!(digest(&program), TWO_RANGE_PRE_CHANGE_DIGEST);
         assert!(duplicates.is_empty());
@@ -19335,7 +19335,7 @@ mod forward_scales {
 
         assert_eq!(
             program.len(),
-            DENSE_PRE_CHANGE_NODES + 2 * widened_norms(&program)
+            DENSE_PRE_CHANGE_NODES + 2 * crate::test_support::widened_norms(&program)
         );
         assert_eq!(digest(&program), DENSE_PRE_CHANGE_DIGEST);
     }
@@ -19347,7 +19347,7 @@ mod forward_scales {
 
         assert_eq!(
             program.len(),
-            MOE_PRE_CHANGE_NODES + 2 * widened_norms(&program)
+            MOE_PRE_CHANGE_NODES + 2 * crate::test_support::widened_norms(&program)
         );
         assert_eq!(digest(&program), MOE_PRE_CHANGE_DIGEST);
     }
@@ -21440,7 +21440,7 @@ mod recurrent_shared {
 
         assert_eq!(
             built.program.len(),
-            nodes + 2 * widened_norms(&built.program)
+            nodes + 2 * crate::test_support::widened_norms(&built.program)
         );
         assert_eq!(head_repeats::digest(&built.program), digest);
         assert!(built.readouts.is_none());
@@ -22165,7 +22165,7 @@ mod mixer_over_packed_projection {
         let head_eps = leaf(&mut program, &[KV_HEADS, GROUP], "head_eps");
         let one = scalar_constant(&mut program, 1.0);
         let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (STATE as f32).sqrt());
-        let inv_head_v_dim = count_constant(&mut program, HEAD_V_DIM as u32);
+        let inv_head_v_dim = count_constant(&mut program, HEAD_V_DIM);
         let attn_norm_weight = leaf(&mut program, &[EMBEDDING as u32], "attn_norm_weight");
         let wqkv = leaf(&mut program, &[EMBEDDING as u32, QKV], "wqkv");
         let wqkv_gate = leaf(&mut program, &[EMBEDDING as u32, INNER as u32], "wqkv_gate");
@@ -22267,8 +22267,7 @@ mod mixer_over_packed_projection {
             ("state_in", QuantizedBlock::Float32(state)),
             ("ssm_out", out_weight),
         ]);
-        let mut free_buffers: Vec<Vec<f32>> = Vec::new();
-        let mut wide_pool: Vec<Vec<f64>> = Vec::new();
+        let mut free_buffers = crate::cpu::BufferPools::default();
         let mut validated_weight_nodes = None;
         let evaluated = evaluate_quantized_named_exact_with_scratch(
             &program,
@@ -22276,7 +22275,6 @@ mod mixer_over_packed_projection {
             &named,
             &[mixer_out, taps.qkv_mixed, taps.state_out],
             &mut free_buffers,
-            &mut wide_pool,
             &mut validated_weight_nodes,
         )
         .expect("the mixer evaluates");
@@ -22362,18 +22360,3 @@ mod mixer_over_packed_projection {
     }
 }
 
-/// How many norms in `program` widen their squares to f64 -- each
-/// [`crate::spec::mean_of_squares`] island adds exactly two nodes over the old
-/// f32 form (the widen and the narrow), so a graph golden recorded before the
-/// islands differs by twice this.
-fn widened_norms(program: &[Op]) -> usize {
-    program
-        .iter()
-        .filter(|expr| {
-            matches!(expr, Op::Elementwise { dtype, body: ScalarOp::Identity, operands, .. }
-                if *dtype == DType::FLOAT64
-                    && operands.len() == 1
-                    && program[operands[0].0.0 as usize].dtype() == DType::FLOAT32)
-        })
-        .count()
-}

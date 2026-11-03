@@ -329,8 +329,7 @@ pub fn short_conv_forward_values(
     named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
 
     let symbols = [ids.len() as u64];
-    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
-    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
 
     let mut outputs: Vec<NodeId> = vec![logits_root];
@@ -342,7 +341,6 @@ pub fn short_conv_forward_values(
         &named_blocks,
         &outputs,
         &mut free_buffers,
-        &mut wide_pool,
         &mut validated_weight_nodes,
     )?;
 

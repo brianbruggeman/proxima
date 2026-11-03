@@ -418,8 +418,7 @@ fn q8_0_matmul_weight_binds_packed_and_matches_a_dequantized_oracle() {
         &[],
         &named,
         &[sum],
-        &mut alloc::vec::Vec::new(),
-        &mut alloc::vec::Vec::new(),
+        &mut proxima_tensor::cpu::BufferPools::default(),
         &mut None,
     )
         .expect("evaluate the bound q8_0 packed weight through the real interpreter");

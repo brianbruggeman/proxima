@@ -309,7 +309,7 @@ fn mixed_q2k_q4k_expert_source_executes_on_metal() {
     let source = ExpertSource::with_selected_expert_ids(&entries, &selected);
     let sources = BTreeMap::from([(NodeId(0), source)]);
 
-    let mut cpu_scratch = Vec::new();
+    let mut cpu_scratch = proxima_tensor::cpu::BufferPools::default();
     let mut validated_weight_nodes = None;
     let expected = evaluate_quantized_named_exact_with_scratch_and_experts(
         &program,
@@ -390,7 +390,7 @@ fn q3k_q4k_seven_rows_route_distinct_high_experts_matches_cpu() {
         .collect();
     let source = ExpertSource::with_selected_expert_ids(&entries, &route_ids);
     let sources = BTreeMap::from([(NodeId(0), source)]);
-    let mut cpu_scratch = Vec::new();
+    let mut cpu_scratch = proxima_tensor::cpu::BufferPools::default();
     let mut validated_weight_nodes = None;
     let expected = evaluate_quantized_named_exact_with_scratch_and_experts(
         &program,
@@ -637,7 +637,7 @@ fn mixed_kernel_cache_keeps_each_route_index_binding() {
     let selected = [0_u32, 1_u32];
     let source = ExpertSource::with_selected_expert_ids(&entries, &selected);
     let sources = BTreeMap::from([(NodeId(0), source), (NodeId(1), source)]);
-    let mut cpu_scratch = Vec::new();
+    let mut cpu_scratch = proxima_tensor::cpu::BufferPools::default();
     let mut validated_weight_nodes = None;
     let expected = evaluate_quantized_named_exact_with_scratch_and_experts(
         &program,

@@ -274,7 +274,7 @@ fn run(case: &Case) -> Outputs {
         &activation,
         &gate,
     );
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let oracle = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
         &reference_program,
@@ -515,7 +515,7 @@ fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
         &activation,
         &[],
     );
-    let mut free_buffers = Vec::new();
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let cpu_error = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
         &reference_program,

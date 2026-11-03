@@ -451,10 +451,15 @@ fn cached_attention_rewrite_replaces_the_bound_attention_subgraph() {
     let rewritten = bind(&program, &shapes, outputs, NumericPolicy::bit_exact())
         .expect("rewritten bind succeeds");
 
-    assert_eq!(plain.len(), 47, "fixture baseline bound operation count");
+    let widened = 2 * crate::test_support::widened_norms(&program);
+    assert_eq!(
+        plain.len(),
+        47 + widened,
+        "fixture baseline bound operation count, plus the divide and narrow each f64 norm island binds"
+    );
     assert_eq!(
         cached_only.len(),
-        25,
+        25 + widened,
         "fixture cached-attention-only fused bound operation count"
     );
     // `reduce-epilogue-fusion` is a second, independent bind-time pass
@@ -469,7 +474,7 @@ fn cached_attention_rewrite_replaces_the_bound_attention_subgraph() {
     #[cfg(feature = "reduce-epilogue-fusion")]
     assert_eq!(
         cached_only.len() - rewritten.len(),
-        count_fused_epilogues(&rewritten),
+        count_fused_epilogues(&rewritten) + widened,
         "every bound op the reduce-epilogue pass removed corresponds to \
          one reduce in the rewritten program that actually carries a \
          fused epilogue"
@@ -555,24 +560,41 @@ fn row_364_per_layer_bound_op_list() {
 
     for (index, op) in bound.iter().enumerate() {
         match &op.kind {
-            BoundOpKind::Elementwise { body, .. } => {
+            BoundOpKind::Elementwise { body, operands } => {
                 let step_ops: Vec<ScalarOp> = body.steps.iter().map(|step| step.op).collect();
-                std::println!("row364 index={index} kind=elementwise step_ops={step_ops:?}");
+                let reads: Vec<u32> = operands.iter().map(|(node, ..)| node.0).collect();
+                std::println!(
+                    "row364 index={index} node={} dtype={:?} kind=elementwise step_ops={step_ops:?} reads={reads:?}",
+                    op.node.0,
+                    op.dtype
+                );
             }
             BoundOpKind::Reduce {
                 epilogue_body,
                 epilogue_broadcast_axes,
+                operands,
+                epilogue_operands,
                 ..
             } => {
                 let epilogue_ops: Vec<ScalarOp> =
                     epilogue_body.steps.iter().map(|step| step.op).collect();
+                let reads: Vec<u32> = operands.iter().map(|(node, ..)| node.0).collect();
+                let epilogue_reads: Vec<u32> =
+                    epilogue_operands.iter().map(|(node, ..)| node.0).collect();
                 std::println!(
-                    "row364 index={index} kind={} epilogue_broadcast_axes={epilogue_broadcast_axes:?} epilogue_ops={epilogue_ops:?}",
+                    "row364 index={index} node={} dtype={:?} kind={} epilogue_broadcast_axes={epilogue_broadcast_axes:?} epilogue_ops={epilogue_ops:?} reads={reads:?} epilogue_reads={epilogue_reads:?}",
+                    op.node.0,
+                    op.dtype,
                     op.kind.name()
                 );
             }
             _ => {
-                std::println!("row364 index={index} kind={}", op.kind.name());
+                std::println!(
+                    "row364 index={index} node={} dtype={:?} kind={}",
+                    op.node.0,
+                    op.dtype,
+                    op.kind.name()
+                );
             }
         }
     }
@@ -775,10 +797,11 @@ fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_s
     .expect("cached-attention-only bind succeeds");
     let rewritten =
         bind(&program, &shapes, &outputs, NumericPolicy::bit_exact()).expect("fused bind succeeds");
+    let widened = 2 * crate::test_support::widened_norms(&program);
 
     assert_eq!(
         plain.len(),
-        875,
+        875 + widened,
         "openchat-shaped single-range baseline bound operation count \
          (939 -> 875 is `134975f83`'s reachable-only `bind_plain` landing -- \
          `bind_plain` now skips ops outside `live::reachable`'s backward \
@@ -790,13 +813,13 @@ fn single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_s
     );
     assert_eq!(
         cached_only.len(),
-        619,
+        619 + widened,
         "openchat-shaped single-range cached-attention-only fused bound operation count"
     );
     #[cfg(feature = "reduce-epilogue-fusion")]
     assert_eq!(
         cached_only.len() - rewritten.len(),
-        count_fused_epilogues(&rewritten),
+        count_fused_epilogues(&rewritten) + widened,
         "every bound op the reduce-epilogue pass removed corresponds to \
          one reduce in the rewritten program that actually carries a \
          fused epilogue"
@@ -4057,7 +4080,7 @@ mod reduce_epilogue_fusion_tests {
         // stopped firing, not merely "fewer than before".
         assert_eq!(
             attention_only.len(),
-            619,
+            619 + 2 * crate::test_support::widened_norms(&program),
             "cached-attention-only baseline shifted; re-derive before trusting the epilogue delta below"
         );
         assert_eq!(
@@ -5842,7 +5865,7 @@ mod gated_delta_net_tests {
             alloc::vec![Extent::Symbolic(0), Extent::Static(model_dim)],
             "x",
         );
-        let inv_dim = count_constant(&mut program, model_dim as u32);
+        let inv_dim = count_constant(&mut program, model_dim);
         let eps = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -5857,7 +5880,7 @@ mod gated_delta_net_tests {
         );
         let one = scalar_constant(&mut program, 1.0);
         let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (head_k_dim as f32).sqrt());
-        let inv_head_v_dim = count_constant(&mut program, head_v_dim as u32);
+        let inv_head_v_dim = count_constant(&mut program, head_v_dim);
         let attn_norm_weight = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -6187,7 +6210,7 @@ mod gated_delta_net_tests {
             alloc::vec![Extent::Symbolic(0), Extent::Static(model_dim)],
             "x",
         );
-        let inv_dim = count_constant(&mut program, model_dim as u32);
+        let inv_dim = count_constant(&mut program, model_dim);
         let eps = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -6202,7 +6225,7 @@ mod gated_delta_net_tests {
         );
         let one = scalar_constant(&mut program, 1.0);
         let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0 / (head_k_dim as f32).sqrt());
-        let inv_head_v_dim = count_constant(&mut program, head_v_dim as u32);
+        let inv_head_v_dim = count_constant(&mut program, head_v_dim);
         let attn_norm_weight = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -7361,7 +7384,7 @@ fn only_an_f32_to_f64_widen_folds_into_a_reduce_as_its_accumulator() {
         );
         assert!(
             bound_nodes.contains(&island.narrowed),
-            "the narrow back to f32 stays its own op, bound {bound_nodes:?}"
+            "the narrow back to f32 is bound, alone or as the merged fold's id, bound {bound_nodes:?}"
         );
         let fold = bound
             .iter()
@@ -7379,10 +7402,28 @@ fn only_an_f32_to_f64_widen_folds_into_a_reduce_as_its_accumulator() {
                 "{op:?}"
             );
         }
-        assert!(
-            bound_nodes.contains(&island.sum) || bound_nodes.contains(&island.mean),
-            "the f64 sum must be bound somewhere, bound {bound:#?}"
-        );
+        let epilogue_ops: Vec<ScalarOp> = match &fold.kind {
+            BoundOpKind::Reduce { epilogue_body, .. } => {
+                epilogue_body.steps.iter().map(|step| step.op).collect()
+            }
+            _ => Vec::new(),
+        };
+        if cfg!(feature = "reduce-epilogue-fusion") {
+            assert_eq!(
+                (fold.node, fold.dtype, epilogue_ops.as_slice()),
+                (
+                    island.narrowed,
+                    DType::FLOAT32,
+                    [ScalarOp::Identity, ScalarOp::Divide, ScalarOp::Identity].as_slice()
+                ),
+                "the f64 divide and the narrow merge onto the fold, narrow kept, bound {bound:#?}"
+            );
+        } else {
+            assert!(
+                bound_nodes.contains(&island.sum) && bound_nodes.contains(&island.mean),
+                "unmerged, the f64 sum and mean bind as their own ops, bound {bound:#?}"
+            );
+        }
         assert!(!bound_nodes.contains(&island.input));
     }
 }
@@ -7510,12 +7551,23 @@ fn a_narrowing_policy_binds_the_f64_island_as_one_f32_chain() {
         NumericPolicy::bit_exact().with_accumulator_narrowing(),
     )
     .expect("narrowing policy binds");
+    let accumulators = |bound: &[BoundOp]| -> Vec<DType> {
+        bound
+            .iter()
+            .filter_map(|op| match op.kind {
+                BoundOpKind::Reduce { accumulator, .. } => Some(accumulator),
+                _ => None,
+            })
+            .collect()
+    };
+    assert_eq!(accumulators(&cpu), [DType::FLOAT64], "{cpu:#?}");
+    assert_eq!(accumulators(&gpu), [DType::FLOAT32], "{gpu:#?}");
     assert!(cpu.iter().any(|op| op.dtype == DType::FLOAT64), "{cpu:#?}");
     assert!(gpu.iter().all(|op| op.dtype == DType::FLOAT32), "{gpu:#?}");
-    assert!(
-        gpu.len() < cpu.len(),
-        "with no dtype boundary left the f32 chain fuses again: {} narrowed ops vs {} widened",
-        gpu.len(),
-        cpu.len()
+    let widened_extra = if cfg!(feature = "reduce-epilogue-fusion") { 0 } else { 1 };
+    assert_eq!(
+        cpu.len(),
+        gpu.len() + widened_extra,
+        "merged, the widened island binds as many ops as the narrowed one; unmerged the f64 divide is one more, cpu {cpu:#?} gpu {gpu:#?}"
     );
 }

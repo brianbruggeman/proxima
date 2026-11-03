@@ -1,6 +1,11 @@
 use super::*;
 use crate::live;
 
+/// The buffers a CPU evaluation reuses across calls: `.0` holds freed f32
+/// node outputs, `.1` the f64 ones of a norm's widened accumulation. A caller
+/// that keeps one across decode steps allocates neither after the first.
+pub type BufferPools = (Vec<Vec<f32>>, Vec<Vec<f64>>);
+
 /// [`evaluate`]'s counterpart for a program with one `Q4_K`-quantized weight
 /// operand — the entry point that actually reaches [`matmul_q4k_f32`], which
 /// [`evaluate`]/[`evaluate_parallel`] cannot: their `blocks: &[&[f32]]`
@@ -32,16 +37,14 @@ pub fn evaluate_quantized(
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
-    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
-    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
+    let mut pools = BufferPools::default();
     let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
     evaluate_quantized_with_scratch(
         program,
         symbols,
         blocks,
         outputs,
-        &mut free_buffers,
-        &mut wide_pool,
+        &mut pools,
         &mut validated_weight_nodes,
     )
 }
@@ -60,16 +63,14 @@ pub fn evaluate_quantized_exact(
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
-    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
-    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
+    let mut pools = BufferPools::default();
     let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
     evaluate_quantized_exact_with_scratch(
         program,
         symbols,
         blocks,
         outputs,
-        &mut free_buffers,
-        &mut wide_pool,
+        &mut pools,
         &mut validated_weight_nodes,
     )
 }
@@ -115,8 +116,7 @@ pub fn evaluate_quantized_with_scratch(
     symbols: &[u64],
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> Result<Evaluated, TensorError> {
     evaluate_quantized_with_scratch_impl(
@@ -124,8 +124,7 @@ pub fn evaluate_quantized_with_scratch(
         symbols,
         blocks,
         outputs,
-        free_buffers,
-        wide_pool,
+        pools,
         validated_weight_nodes,
         false,
         None,
@@ -139,8 +138,7 @@ pub fn evaluate_quantized_exact_with_scratch(
     symbols: &[u64],
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> Result<Evaluated, TensorError> {
     evaluate_quantized_with_scratch_impl(
@@ -148,8 +146,7 @@ pub fn evaluate_quantized_exact_with_scratch(
         symbols,
         blocks,
         outputs,
-        free_buffers,
-        wide_pool,
+        pools,
         validated_weight_nodes,
         true,
         None,
@@ -170,8 +167,7 @@ pub fn evaluate_quantized_with_scratch_and_experts(
     symbols: &[u64],
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
@@ -180,8 +176,7 @@ pub fn evaluate_quantized_with_scratch_and_experts(
         symbols,
         blocks,
         outputs,
-        free_buffers,
-        wide_pool,
+        pools,
         validated_weight_nodes,
         false,
         expert_sources,
@@ -196,8 +191,7 @@ pub fn evaluate_quantized_exact_with_scratch_and_experts(
     symbols: &[u64],
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
@@ -206,8 +200,7 @@ pub fn evaluate_quantized_exact_with_scratch_and_experts(
         symbols,
         blocks,
         outputs,
-        free_buffers,
-        wide_pool,
+        pools,
         validated_weight_nodes,
         true,
         expert_sources,
@@ -402,8 +395,7 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
     symbols: &[u64],
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     exact_activations: bool,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
@@ -413,8 +405,7 @@ pub(super) fn evaluate_quantized_with_scratch_impl(
         symbols,
         blocks,
         outputs,
-        free_buffers,
-        wide_pool,
+        pools,
         validated_weight_nodes,
         exact_activations,
         expert_sources,
@@ -437,8 +428,7 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
     symbols: &[u64],
     blocks: &[QuantizedBlock],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     exact_activations: bool,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
@@ -446,7 +436,7 @@ pub fn evaluate_quantized_with_scratch_impl_with_fusion(
 ) -> Result<Evaluated, TensorError> {
     evaluate_quantized_with_policy(
         (program, symbols, blocks, outputs),
-        (free_buffers, wide_pool, validated_weight_nodes),
+        (pools, validated_weight_nodes),
         expert_sources,
         (
             exact_activations,
@@ -467,11 +457,7 @@ pub fn evaluate_quantized_named_with_config<'block>(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
-    scratch: (
-        &mut Vec<Vec<f32>>,
-        &mut Vec<Vec<f64>>,
-        &mut Option<BTreeSet<NodeId>>,
-    ),
+    scratch: (&mut BufferPools, &mut Option<BTreeSet<NodeId>>),
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     config: &TensorExecutionConfig,
 ) -> Result<Evaluated, TensorError> {
@@ -492,16 +478,12 @@ pub fn evaluate_quantized_named_with_config<'block>(
 
 fn evaluate_quantized_with_policy(
     inputs: (&[Op], &[u64], &[QuantizedBlock<'_>], &[NodeId]),
-    scratch: (
-        &mut Vec<Vec<f32>>,
-        &mut Vec<Vec<f64>>,
-        &mut Option<BTreeSet<NodeId>>,
-    ),
+    scratch: (&mut BufferPools, &mut Option<BTreeSet<NodeId>>),
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     options: (bool, bool, bool, NumericPolicy, Option<u64>),
 ) -> Result<Evaluated, TensorError> {
     let (program, symbols, blocks, outputs) = inputs;
-    let (free_buffers, wide_pool, validated_weight_nodes) = scratch;
+    let ((free_buffers, wide_pool), validated_weight_nodes) = scratch;
     let (
         exact_activations,
         fuse_cached_attention,
@@ -839,24 +821,26 @@ fn evaluate_quantized_with_policy(
         // (never touches `bind::bind`, never touches `node_retirement`'s own
         // schedule).
         let epilogue_fused_away = epilogue_fuse_skip.contains(&computed.node);
-        let island_handled = !epilogue_fused_away
-            && match float64_island::step(
+        let island_live = if epilogue_fused_away {
+            0
+        } else {
+            let island = float64_island::step(
                 computed,
                 &buffers,
                 &mut wide,
                 wide_pool,
                 free_buffers,
                 program.len(),
-            )? {
-                float64_island::IslandStep::NotIsland => false,
-                float64_island::IslandStep::Wide => true,
-                float64_island::IslandStep::Narrowed(values) => {
-                    buffers[computed.node.0 as usize] = Some(Cow::Owned(values));
-                    true
-                }
-            };
+            )?;
+            let live = island.live_buffers();
+            if let Some(values) = island.into_f32() {
+                buffers[computed.node.0 as usize] = Some(Cow::Owned(values));
+            }
+            live
+        };
+        let island_handled = island_live > 0;
         if island_handled {
-            live_now += 1;
+            live_now += island_live;
             peak_live_buffers = peak_live_buffers.max(live_now);
         }
         if !epilogue_fused_away && !island_handled {
@@ -1063,6 +1047,7 @@ fn evaluate_quantized_with_policy(
             &mut wide,
             wide_pool,
             &retires[position],
+            |node| buffers[node.0 as usize].is_some(),
         ));
         for retired in &retires[position] {
             // NOT always a `Some` -> `None` transition, unlike
@@ -1465,16 +1450,14 @@ pub fn evaluate_quantized_named<'block>(
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
-    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
-    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
+    let mut pools = BufferPools::default();
     let mut validated_weight_nodes: Option<BTreeSet<NodeId>> = None;
     evaluate_quantized_named_with_scratch(
         program,
         symbols,
         named,
         outputs,
-        &mut free_buffers,
-        &mut wide_pool,
+        &mut pools,
         &mut validated_weight_nodes,
     )
 }
@@ -1554,8 +1537,7 @@ pub fn evaluate_quantized_named_with_scratch<'block>(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> Result<Evaluated, TensorError> {
     // this name resolution runs before `evaluate_quantized`'s own setup
@@ -1575,8 +1557,7 @@ pub fn evaluate_quantized_named_with_scratch<'block>(
         symbols,
         &blocks,
         outputs,
-        free_buffers,
-        wide_pool,
+        pools,
         validated_weight_nodes,
     )
 }
@@ -1592,8 +1573,7 @@ pub fn evaluate_quantized_named_exact_with_scratch<'block>(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
 ) -> Result<Evaluated, TensorError> {
     let blocks = resolve_named_blocks(program, named)?;
@@ -1602,8 +1582,7 @@ pub fn evaluate_quantized_named_exact_with_scratch<'block>(
         symbols,
         &blocks,
         outputs,
-        free_buffers,
-        wide_pool,
+        pools,
         validated_weight_nodes,
     )
 }
@@ -1617,8 +1596,7 @@ pub fn evaluate_quantized_named_with_scratch_and_experts<'block>(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
@@ -1628,8 +1606,7 @@ pub fn evaluate_quantized_named_with_scratch_and_experts<'block>(
         symbols,
         &blocks,
         outputs,
-        free_buffers,
-        wide_pool,
+        pools,
         validated_weight_nodes,
         expert_sources,
     )
@@ -1648,8 +1625,7 @@ pub fn evaluate_quantized_named_with_scratch_and_experts_with_fusion<'block>(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
     fuse_cached_attention: bool,
@@ -1660,8 +1636,7 @@ pub fn evaluate_quantized_named_with_scratch_and_experts_with_fusion<'block>(
         symbols,
         &blocks,
         outputs,
-        free_buffers,
-        wide_pool,
+        pools,
         validated_weight_nodes,
         false,
         expert_sources,
@@ -1677,8 +1652,7 @@ pub fn evaluate_quantized_named_exact_with_scratch_and_experts<'block>(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'block>)],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
     validated_weight_nodes: &mut Option<BTreeSet<NodeId>>,
     expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
 ) -> Result<Evaluated, TensorError> {
@@ -1688,8 +1662,7 @@ pub fn evaluate_quantized_named_exact_with_scratch_and_experts<'block>(
         symbols,
         &blocks,
         outputs,
-        free_buffers,
-        wide_pool,
+        pools,
         validated_weight_nodes,
         expert_sources,
     )
@@ -1717,9 +1690,9 @@ pub(super) fn evaluate_pooled(
     symbols: &[u64],
     blocks: &[&[f32]],
     outputs: &[NodeId],
-    free_buffers: &mut Vec<Vec<f32>>,
-    wide_pool: &mut Vec<Vec<f64>>,
+    pools: &mut BufferPools,
 ) -> Result<Evaluated, TensorError> {
+    let (free_buffers, wide_pool) = pools;
     #[cfg(feature = "instrument")]
     let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::Prepare);
     let Prepared {
@@ -1742,16 +1715,19 @@ pub(super) fn evaluate_pooled(
     let mut live_now = peak_live_buffers;
     let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
     for (position, computed) in resolved.iter().enumerate() {
-        let output = match float64_island::step(
+        let island = float64_island::step(
             computed,
             &buffers,
             &mut wide,
             wide_pool,
             free_buffers,
             buffers.len(),
-        )? {
+        )?;
+        let live = island.live_buffers().max(1);
+        let output = match island {
             float64_island::IslandStep::Wide => None,
-            float64_island::IslandStep::Narrowed(values) => Some(values),
+            float64_island::IslandStep::Narrowed(values)
+            | float64_island::IslandStep::WideWithCopy(values) => Some(values),
             float64_island::IslandStep::NotIsland => {
                 #[cfg(feature = "instrument")]
                 let alloc_site_guard =
@@ -1768,12 +1744,13 @@ pub(super) fn evaluate_pooled(
         if let Some(output) = output {
             buffers[computed.node.0 as usize] = Some(Cow::Owned(output));
         }
-        live_now += 1;
+        live_now += live;
         peak_live_buffers = peak_live_buffers.max(live_now);
         live_now = live_now.saturating_sub(float64_island::retire(
             &mut wide,
             wide_pool,
             &retires[position],
+            |node| buffers[node.0 as usize].is_some(),
         ));
         for retired in &retires[position] {
             // `blocks: &[&[f32]]` means every node this evaluator ever
@@ -1995,16 +1972,18 @@ pub fn evaluate_parallel(
             &mut narrow_pool,
             buffers.len(),
         )?;
-        if !matches!(island, float64_island::IslandStep::NotIsland) {
-            if let float64_island::IslandStep::Narrowed(values) = island {
+        let island_live = island.live_buffers();
+        if island_live > 0 {
+            if let Some(values) = island.into_f32() {
                 buffers[computed.node.0 as usize] = Some(Cow::Owned(values));
             }
-            live_now += 1;
+            live_now += island_live;
             peak_live_buffers = peak_live_buffers.max(live_now);
             live_now = live_now.saturating_sub(float64_island::retire(
                 &mut wide,
                 &mut wide_pool,
                 &retires[position],
+                |node| buffers[node.0 as usize].is_some(),
             ));
             for retired in &retires[position] {
                 if buffers[retired.0 as usize].take().is_some() {
@@ -2049,6 +2028,12 @@ pub fn evaluate_parallel(
         }
         live_now += 1;
         peak_live_buffers = peak_live_buffers.max(live_now);
+        live_now = live_now.saturating_sub(float64_island::retire(
+            &mut wide,
+            &mut wide_pool,
+            &retires[position],
+            |node| buffers[node.0 as usize].is_some(),
+        ));
         for retired in &retires[position] {
             // same liveness-gated decrement as `evaluate_pooled`'s identical
             // loop -- `blocks: &[&[f32]]` means no quantized-weight split
