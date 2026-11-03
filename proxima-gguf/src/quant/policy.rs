@@ -405,7 +405,7 @@ mod real_file {
         let parsed = parse_metadata(
             "PROXIMA_MIXTRAL_GGUF",
             MIXTRAL_PATH,
-            0,
+            26_743_534_336,
             &[16 << 20, 64 << 20, 128 << 20],
         );
         let policy = PrecisionPolicy::llama_cpp_q4_k_s_moe_8_expert();
