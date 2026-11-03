@@ -2288,6 +2288,8 @@ pub fn dot_q6k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, Tens
         });
     }
 
+    #[cfg(all(target_arch = "x86_64", not(q4k_dotprod)))]
+    let use_avx2 = std::is_x86_feature_detected!("avx2");
     let mut acc = 0.0f32;
     for (weight_block, q8k_block) in weight_row
         .as_chunks::<Q6K_BLOCK_BYTES>()
@@ -2299,7 +2301,14 @@ pub fn dot_q6k_q8k(weight_row: &[u8], activation_q8k: &[u8]) -> Result<f32, Tens
         // SAFETY: `q4k_dotprod` is emitted by build.rs only for aarch64
         // targets, all of which carry FEAT_DotProd.
         let block_sum = unsafe { dot_q6k_q8k_block_neon_dotprod(weight_block, q8k_block) };
-        #[cfg(not(q4k_dotprod))]
+        #[cfg(all(target_arch = "x86_64", not(q4k_dotprod)))]
+        let block_sum = if use_avx2 {
+            // SAFETY: `use_avx2` is true only when avx2 was detected at runtime.
+            unsafe { dot_q6k_q8k_block_avx2(weight_block, q8k_block) }
+        } else {
+            dot_q6k_q8k_block_scalar(weight_block, q8k_block)
+        };
+        #[cfg(all(not(q4k_dotprod), not(target_arch = "x86_64")))]
         let block_sum = dot_q6k_q8k_block_scalar(weight_block, q8k_block);
         acc += block_sum;
     }
