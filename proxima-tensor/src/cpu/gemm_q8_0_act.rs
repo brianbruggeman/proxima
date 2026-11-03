@@ -303,7 +303,9 @@ fn block_dot_row<const WEIGHT_BLOCK_BYTES: usize>(
     }
     let mut sum = 0.0f32;
     for (weight_block, activation_block) in weight_row
-        .chunks_exact(WEIGHT_BLOCK_BYTES)
+        .as_chunks::<WEIGHT_BLOCK_BYTES>()
+        .0
+        .iter()
         .zip(activation_q8_0.as_chunks::<Q8_0_ACT_BLOCK_BYTES>().0.iter())
     {
         let block_sum = scalar(weight_block, activation_block);
