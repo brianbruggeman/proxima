@@ -264,20 +264,20 @@ fn run(path: &str, prompt: &str, tokens: usize, backends: Backends) -> Result<()
         return Ok(());
     }
     let (cuda, cuda_text, cuda_timing) = decode(&model, prompt, tokens, GPU_LAYERS_ALL)?;
-    if let Ok(extra) = env::var("DECODE_COMPARE_EXTRA_PROMPTS") {
-        for (index, extra_prompt) in extra.split(";;").enumerate() {
-            eprintln!("extra_prompt index={index} bytes={}", extra_prompt.len());
-            let (_, _, extra_timing) = decode(&model, extra_prompt, 2, GPU_LAYERS_ALL)?;
-            eprintln!(
-                "extra_prompt_done index={index} prefill_ms={:.3}",
-                extra_timing.prefill_ms
-            );
-        }
-    }
     if let Some((_, _, cpu_timing)) = &cpu {
         cpu_timing.report("cpu");
     }
     cuda_timing.report("cuda");
+    if let Ok(extra) = env::var("DECODE_COMPARE_EXTRA_PROMPTS") {
+        for (index, extra_prompt) in extra.split(";;").enumerate() {
+            let (_, _, extra_timing) = decode(&model, extra_prompt, 2, GPU_LAYERS_ALL)?;
+            println!(
+                "extra_prompt_done index={index} bytes={} prefill_ms={:.3}",
+                extra_prompt.len(),
+                extra_timing.prefill_ms
+            );
+        }
+    }
     println!("decode_text backend=cuda ids={cuda:?} text={cuda_text:?}");
     match cpu {
         Some((cpu_ids, cpu_text, _)) => {
