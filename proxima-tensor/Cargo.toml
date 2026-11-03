@@ -356,6 +356,10 @@ required-features = ["dynamic-elision-probe"]
 name = "bench_cached_attention"
 harness = false
 
+[[bench]]
+name = "bench_norm_accumulation"
+harness = false
+
 [[example]]
 name = "q4k_ggml_fidelity"
 required-features = ["ggml-bench", "instrument"]
