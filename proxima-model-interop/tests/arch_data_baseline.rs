@@ -1276,6 +1276,7 @@ fn assert_llama_ids(
         &llama_cases(checkpoint),
         LLAMA_GENERATED_TOKENS,
         ServingConfig::default().ubatch_size,
+        ServingConfig::default().exact_activations,
     );
 }
 
@@ -1286,11 +1287,12 @@ fn assert_llama_ids_for(
     cases: &[LlamaCase],
     generated_tokens: usize,
     ubatch_size: u32,
+    exact_activations: bool,
 ) {
     let config = ServingConfig {
         prompt_cache: PromptCacheConfig::off(),
         ubatch_size,
-        exact_activations: false,
+        exact_activations,
         ..ServingConfig::default()
     };
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(parsed)
@@ -1388,6 +1390,7 @@ fn prefill_width_parity_with_llama(checkpoint: &Checkpoint) {
         &cases,
         PREFILL_WIDTH_GENERATED_TOKENS,
         WHOLE_PROMPT_UBATCH,
+        ServingConfig::default().exact_activations,
     );
 }
 
@@ -1437,8 +1440,20 @@ fn llama_parity_qwen3() {
 }
 
 #[test]
-fn llama_parity_qwen35() {
-    llama_parity(&QWEN35);
+fn llama_parity_qwen35_with_q8_0_activations_like_ggml() {
+    let mapping = QWEN35.open();
+    let file_bytes: &[u8] = &mapping;
+    let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
+    let model = LoadedModel::load(&parsed, file_bytes).expect("qwen35 loads");
+    assert_llama_ids_for(
+        &QWEN35,
+        &parsed,
+        &model,
+        &llama_cases(&QWEN35),
+        LLAMA_GENERATED_TOKENS,
+        ServingConfig::default().ubatch_size,
+        false,
+    );
 }
 
 const FORCED_DRAFT_WIDTHS: [u16; 2] = [1, 3];
