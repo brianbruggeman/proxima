@@ -124,6 +124,8 @@ use core::arch::x86_64::{
     _mm256_madd_epi16, _mm256_maddubs_epi16, _mm256_set1_epi8, _mm256_set1_epi16,
     _mm256_srli_epi16,
 };
+#[cfg(target_arch = "x86_64")]
+use core::arch::x86_64::{_mm256_fmadd_ps, _mm256_loadu_ps, _mm256_setzero_ps, _mm256_storeu_ps};
 use core::cell::RefCell;
 use core::future::Future;
 use core::mem::size_of;
@@ -179,7 +181,8 @@ use half::{bf16, f16};
 // modules `QuantizedBlock::element_count` composes down to, not the scalar
 // float types.
 use proxima_gguf::quant::{
-    bf16 as gguf_bf16, f16 as gguf_f16, iq2_xs, iq3_xxs, iq4_nl, pq2_0, ptq1_0, q1_0, q2_0, q2_k, q3_k, q4_0, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0,
+    bf16 as gguf_bf16, f16 as gguf_f16, iq2_xs, iq3_xxs, iq4_nl, pq2_0, ptq1_0, q1_0, q2_0, q2_k,
+    q3_k, q4_0, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0,
 };
 
 use crate::bind::{

@@ -57,8 +57,60 @@ pub(super) const FUSED_MULTIPLY_ADD: bool =
 /// Numerically this moves *toward* the infinitely-precise result (one
 /// rounding per term, not two), so it stays inside the 1e-5 relative
 /// tolerance ROW 12 already established for this fold.
-#[inline(always)]
+#[inline]
 pub(super) fn dot_fold_fused_multiply_add(slice_a: &[f32], slice_b: &[f32], fold: DotFold) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if DOT_LANES == 8 && fma_runtime_available() {
+        // SAFETY: `fma_runtime_available` confirmed avx, avx2 and fma on this cpu.
+        return unsafe { dot_fold_fused_multiply_add_fma(slice_a, slice_b, fold) };
+    }
+    dot_fold_fused_multiply_add_portable(slice_a, slice_b, fold)
+}
+
+#[cfg(target_arch = "x86_64")]
+pub(super) fn fma_runtime_available() -> bool {
+    std::is_x86_feature_detected!("avx2") && std::is_x86_feature_detected!("fma")
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma")]
+pub(super) unsafe fn dot_fold_fused_multiply_add_fma(
+    slice_a: &[f32],
+    slice_b: &[f32],
+    fold: DotFold,
+) -> f32 {
+    let (chunks_a, remainder_a) = slice_a.as_chunks::<8>();
+    let (chunks_b, remainder_b) = slice_b.as_chunks::<8>();
+    let mut lanes = _mm256_setzero_ps();
+    for (chunk_a, chunk_b) in chunks_a.iter().zip(chunks_b) {
+        // SAFETY: each chunk is exactly 8 f32 (32 bytes); loadu has no alignment requirement.
+        let (value_a, value_b) = unsafe {
+            (
+                _mm256_loadu_ps(chunk_a.as_ptr()),
+                _mm256_loadu_ps(chunk_b.as_ptr()),
+            )
+        };
+        lanes = _mm256_fmadd_ps(value_a, value_b, lanes);
+    }
+    let mut lane_values = [0.0f32; 8];
+    // SAFETY: `lane_values` is 8 f32 (32 bytes); storeu has no alignment requirement.
+    unsafe { _mm256_storeu_ps(lane_values.as_mut_ptr(), lanes) };
+    let mut acc = fold.init;
+    for &lane in &lane_values {
+        acc += lane;
+    }
+    for (&value_a, &value_b) in remainder_a.iter().zip(remainder_b) {
+        acc = value_a.mul_add(value_b, acc);
+    }
+    acc
+}
+
+#[inline(always)]
+pub(super) fn dot_fold_fused_multiply_add_portable(
+    slice_a: &[f32],
+    slice_b: &[f32],
+    fold: DotFold,
+) -> f32 {
     let (chunks_a, remainder_a) = slice_a.as_chunks::<DOT_LANES>();
     let (chunks_b, remainder_b) = slice_b.as_chunks::<DOT_LANES>();
     let mut lanes = [0.0f32; DOT_LANES];
@@ -2555,4 +2607,35 @@ pub fn matmul_bf4_e2m1_f32(
                 }))
         },
     )
+}
+
+#[cfg(all(test, target_arch = "x86_64"))]
+mod fold_tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn finite_f32() -> impl Strategy<Value = f32> {
+        -1000.0f32..1000.0f32
+    }
+
+    proptest! {
+        #[test]
+        fn fma_fold_is_bit_identical_to_portable_fold(
+            pairs in prop::collection::vec((finite_f32(), finite_f32()), 0..700),
+            init in finite_f32(),
+        ) {
+            if !fma_runtime_available() {
+                return Ok(());
+            }
+            let slice_a: Vec<f32> = pairs.iter().map(|pair| pair.0).collect();
+            let slice_b: Vec<f32> = pairs.iter().map(|pair| pair.1).collect();
+            let fold = DotFold { len: slice_a.len(), init, seeded: true };
+
+            let portable = dot_fold_fused_multiply_add_portable(&slice_a, &slice_b, fold);
+            // SAFETY: guarded by `fma_runtime_available` above.
+            let vectorized = unsafe { dot_fold_fused_multiply_add_fma(&slice_a, &slice_b, fold) };
+
+            prop_assert_eq!(portable.to_bits(), vectorized.to_bits());
+        }
+    }
 }
