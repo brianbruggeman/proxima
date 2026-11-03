@@ -776,6 +776,7 @@ fn evaluate_quantized_with_policy(
     // hits/step (ROW 140's own measured hit count).
     #[cfg(feature = "cohort-staged-graph")]
     let mut staged_quantize_cache: Vec<Option<Arc<[u8]>>> = vec![None; program.len()];
+    let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
     let mut position = 0usize;
     while position < resolved.len() {
         #[cfg(feature = "cohort-staged-graph")]
@@ -815,7 +816,16 @@ fn evaluate_quantized_with_policy(
         // (never touches `bind::bind`, never touches `node_retirement`'s own
         // schedule).
         let epilogue_fused_away = epilogue_fuse_skip.contains(&computed.node);
-        if !epilogue_fused_away {
+        let island_handled = !epilogue_fused_away
+            && match float64_island::step(computed, &buffers, &mut wide, program.len())? {
+                float64_island::IslandStep::NotIsland => false,
+                float64_island::IslandStep::Wide => true,
+                float64_island::IslandStep::Narrowed(values) => {
+                    buffers[computed.node.0 as usize] = Some(Cow::Owned(values));
+                    true
+                }
+            };
+        if !epilogue_fused_away && !island_handled {
             #[cfg(feature = "instrument")]
             let alloc_started = instrument::read_ticks();
             let mut output = take_or_allocate(free_buffers, node_output_len(computed));
@@ -2470,10 +2480,13 @@ pub(super) fn reject_non_float32(
         // node that IS unconditionally evaluated, so it stays rejected.
         let is_unreferenced_input =
             matches!(expr, Op::Input { .. }) && !referenced_nodes.contains(&node);
+        let is_wide_island_node = expr.dtype() == DType::FLOAT64
+            && matches!(expr, Op::Elementwise { .. } | Op::Reduce(_) | Op::Constant { .. });
         if expr.dtype() != DType::FLOAT32
             && !index_nodes.contains(&node)
             && !is_quantized_weight
             && !is_unreferenced_input
+            && !is_wide_island_node
         {
             return Err(TensorError::NotLowerable {
                 node,
