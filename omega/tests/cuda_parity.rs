@@ -5007,6 +5007,108 @@ async fn q8_0_matmul_over_a_rank_four_activation_is_derived_and_matches_the_fake
     assert_derived_parity(Codec::Q8_0, BLOCK_BYTES, QK8_0, quantize, dequantize, *shape, &[8, 4, 32]);
 }
 
+fn packed_weight(
+    seed: u64,
+    shape: [usize; 2],
+    layout: [usize; 2],
+    quantize: fn(&[f32], &mut [u8]) -> Result<(), proxima_gguf::quant::QuantError>,
+    dequantize: fn(&[u8], &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError>,
+) -> (Vec<u8>, Vec<f32>) {
+    let [features, depth] = shape;
+    let [block_bytes, block_elements] = layout;
+    let row_bytes = depth / block_elements * block_bytes;
+    let source: Vec<f32> = random_vec(seed, features * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let mut blocks = vec![0u8; features * row_bytes];
+    let mut dequantized = vec![0.0f32; source.len()];
+    for ((row_source, row_blocks), row_dequantized) in source
+        .chunks_exact(depth)
+        .zip(blocks.chunks_exact_mut(row_bytes))
+        .zip(dequantized.chunks_exact_mut(depth))
+    {
+        quantize(row_source, row_blocks).expect("row length is a whole number of blocks");
+        dequantize(row_blocks, row_dequantized).expect("a whole number of packed blocks");
+    }
+    (blocks, dequantized)
+}
+
+fn kernel_entries(identities: &[String]) -> Vec<&str> {
+    identities.iter().filter_map(|identity| identity.lines().next()).collect()
+}
+
+fn assert_mixed_readers_parity(codec: Codec, eligible_weight: (Vec<u8>, Vec<f32>), tokens: usize) {
+    use proxima_gguf::quant::q5_0::{BLOCK_BYTES, QK5_0, dequantize, quantize};
+    let (features, depth) = (256usize, 512usize);
+    let (eligible_blocks, eligible_dequantized) = eligible_weight;
+    let (q5_blocks, q5_dequantized) = packed_weight(71, [features, depth], [BLOCK_BYTES, QK5_0], quantize, dequantize);
+    let activation: Vec<f32> = random_vec(59, tokens * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let mut program = Vec::new();
+    let shape = |rows: usize| vec![Extent::Static(rows as u32), Extent::Static(depth as u32)];
+    let eligible_node = append_input(&mut program, DType::UINT8, shape(features), "eligible_weight");
+    let q5_node = append_input(&mut program, DType::UINT8, shape(features), "q5_weight");
+    let activation_node = append_input(&mut program, DType::FLOAT32, shape(tokens), "activation");
+    let eligible = append_int8_gemm(&mut program, eligible_node, activation_node, "eligible_reader_gemm");
+    let ineligible = append_int8_gemm(&mut program, q5_node, activation_node, "q5_0_reader_gemm");
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("eligible_weight", QuantizedBlock::Packed { codec, bytes: &eligible_blocks }),
+        ("q5_weight", QuantizedBlock::Packed { codec: Codec::Q5_0, bytes: &q5_blocks }),
+        ("activation", QuantizedBlock::Float32(&activation)),
+    ];
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true);
+    let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[eligible, ineligible], policy)
+        .expect("omega::backend plans the mixed-reader program");
+    let identities = cuda_kernel_identities(&plan).expect("cuda plan exposes its kernels");
+    let evaluated = execute_plan_named(&mut plan, &named).expect("omega::backend runs the mixed-reader program");
+    let eligible_out = evaluated.get(eligible).expect("eligible output").0.to_vec();
+    let q5_out = evaluated.get(ineligible).expect("q5_0 output").0.to_vec();
+
+    let entries = kernel_entries(&identities);
+    println!("mixed readers {codec:?}+Q5_0 {features}x{depth}x{tokens}: {entries:?}");
+    let count = |needle: &str| entries.iter().filter(|entry| entry.contains(needle)).count();
+    assert_eq!(count("block_quantize"), 1, "exactly one derived quantize for both readers: {entries:?}");
+    let (int8_form, f32_form) = if tokens == 1 { ("_smv", "_smv") } else { ("_mma8x8x16s8", "_mma16x8x8h") };
+    let int8_count = if tokens == 1 { entries.iter().filter(|entry| entry.contains("_smv") && entry.contains('q')).count() } else { count(int8_form) };
+    assert_eq!(int8_count, 1, "the eligible reader alone takes the int8 form {int8_form}: {entries:?}");
+    let plain_matvecs = entries.iter().filter(|entry| entry.contains("_reduce_") && !entry.contains("_smv") && !entry.contains("_mma")).count();
+    let f32_readers = if tokens == 1 { plain_matvecs } else { count(f32_form) };
+    assert_eq!(f32_readers, 1, "the Q5_0 reader keeps its f32-activation form, not {f32_form}: {entries:?}");
+
+    let eligible_reference = gemm_rows_max_over_peak(&eligible_out, &eligible_dequantized, &fake_quantize_blocks(&activation, true), depth, tokens);
+    let eligible_unquantized = gemm_rows_max_over_peak(&eligible_out, &eligible_dequantized, &activation, depth, tokens);
+    assert!(eligible_out.iter().all(|value| value.is_finite()) && eligible_reference < 2e-5,
+        "eligible reader disagrees with the fake-quantized reference by {eligible_reference} of peak");
+    assert!(eligible_unquantized > 2.0 * eligible_reference,
+        "degenerate control: eligible output matches the unquantized activations ({eligible_unquantized}) as tightly as the quantized ones ({eligible_reference})");
+
+    let rounded = round_through_fp16(&activation);
+    let q5_rounded = gemm_rows_max_over_peak(&q5_out, &q5_dequantized, &rounded, depth, tokens);
+    let q5_exact = gemm_rows_max_over_peak(&q5_out, &q5_dequantized, &activation, depth, tokens);
+    println!("q5_0 reader at {tokens} tokens: vs fp16-rounded {q5_rounded:.3e}, vs exact f32 {q5_exact:.3e}");
+    assert!(q5_out.iter().all(|value| value.is_finite()));
+    let (oracle, other) = if tokens == 1 { (q5_exact, q5_rounded) } else { (q5_rounded, q5_exact) };
+    assert!(oracle < 2e-5, "Q5_0 reader disagrees with its f32-activation oracle by {oracle} of peak");
+    assert!(other > 2.0 * oracle,"degenerate control: Q5_0 output matches the wrong oracle ({other}) as tightly as the right one ({oracle})");
+}
+
+#[proxima::test]
+#[case::one_token(1)]
+#[case::three_tokens(3)]
+#[case::prefill_like(128)]
+async fn pq2_0_reader_and_q5_0_reader_share_one_derived_node_and_only_the_eligible_one_is_int8_on_cuda(#[case] tokens: usize) {
+    use proxima_gguf::quant::pq2_0::{BLOCK_BYTES, QK_PQ2_0, dequantize, quantize};
+    let weight = packed_weight(53, [256, 512], [BLOCK_BYTES, QK_PQ2_0], quantize, dequantize);
+    assert_mixed_readers_parity(Codec::Pq2_0, weight, tokens);
+}
+
+#[proxima::test]
+#[case::one_token(1)]
+#[case::three_tokens(3)]
+#[case::prefill_like(128)]
+async fn q8_0_reader_and_q5_0_reader_share_one_derived_node_and_only_the_eligible_one_is_int8_on_cuda(#[case] tokens: usize) {
+    use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
+    let weight = packed_weight(53, [256, 512], [BLOCK_BYTES, QK8_0], quantize, dequantize);
+    assert_mixed_readers_parity(Codec::Q8_0, weight, tokens);
+}
+
 fn append_int8_gemm(program: &mut Vec<Op>, weight: NodeId, activation: NodeId, name: &str) -> NodeId {
     append_int8_gemm_over(program, weight, activation, name, 1)
 }

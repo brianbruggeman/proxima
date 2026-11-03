@@ -1,7 +1,8 @@
-//! The quantized activation as a storage decision of one plan: where every consumer of an f32
-//! activation is an int8 gemm (several tokens) or a staged matvec (one token), the plan adds a single `BoundOpKind::BlockQuantize` node beside
-//! the program's own ops and points those gemms at it. The node's id is `program.len() + k`, so
-//! it never collides with a program node and never leaves the plan.
+//! The quantized activation as a storage decision of one plan: where at least one consumer of an
+//! f32 activation is an int8 gemm (several tokens) or a staged matvec (one token), the plan adds a
+//! single `BoundOpKind::BlockQuantize` node beside the program's own ops and points those eligible
+//! readers at it; every other reader keeps the f32 activation. The node's id is
+//! `program.len() + k`, so it never collides with a program node and never leaves the plan.
 
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
@@ -25,14 +26,6 @@ struct Consumer {
 
 fn is_derived(bound: &BoundOp, program_len: usize) -> bool {
     bound.node.0 as usize >= program_len && matches!(bound.kind, BoundOpKind::BlockQuantize { .. })
-}
-
-fn reads_of(resolved: &[BoundOp], node: NodeId) -> usize {
-    resolved
-        .iter()
-        .flat_map(BoundOp::all_read_sources)
-        .filter(|(source, _, _)| *source == node)
-        .count()
 }
 
 fn activation_is_flat(bound: &BoundOp, layout: &Layout, tokens: u64, depth: u64) -> bool {
@@ -107,7 +100,6 @@ fn consumers_by_activation(
             by_activation.entry(activation).or_default().push(Consumer { position, slot });
         }
     }
-    by_activation.retain(|activation, consumers| reads_of(resolved, *activation) == consumers.len());
     by_activation
 }
 
@@ -144,9 +136,9 @@ fn repoint(bound: &mut BoundOp, slot: usize, derived: NodeId) {
     }
 }
 
-/// Adds one q8_1 quantize node per activation whose every reader is an int8 gemm this backend
-/// serves, positioned just before the first such gemm, and records it in `packed` as a `Q8_1`
-/// operand. The same inputs always yield the same ids and positions.
+/// Adds one q8_1 quantize node per activation that has an int8 gemm reader this backend serves,
+/// positioned just before the first such gemm, repoints only those readers, and records the node
+/// in `packed` as a `Q8_1` operand. The same inputs always yield the same ids and positions.
 pub(crate) fn derive_block_quantize(
     resolved: Vec<BoundOp>,
     program: &[Op],
@@ -348,11 +340,65 @@ mod tests {
         assert_eq!(derive(&fixture, granted(), GpuDriver::Cuda).0, derived, "derivation is deterministic");
     }
 
+    fn readers_of(resolved: &[BoundOp], node: NodeId) -> Vec<NodeId> {
+        resolved
+            .iter()
+            .filter(|bound| matches!(bound.kind, BoundOpKind::Reduce { .. }))
+            .filter(|bound| bound.operands().iter().any(|(source, _, _)| *source == node))
+            .map(|bound| bound.node)
+            .collect()
+    }
+
+    fn assert_mixed_readers_share_one_derived_node(tokens: u32) {
+        let fixture = fixture(tokens, true);
+        let (derived, packed) = derive(&fixture, granted(), GpuDriver::Cuda);
+        let program_len = fixture.program.len();
+        let ids = derived_ids(&derived, program_len);
+        assert_eq!(ids, vec![NodeId(program_len as u32)], "{tokens} tokens");
+        assert_eq!(packed.get(&ids[0]), Some(&Codec::Q8_1Grouped));
+        let activation = NodeId(0);
+        let eligible = readers_of(&derived, ids[0]);
+        let original = readers_of(&fixture.resolved, activation);
+        assert_eq!(original.len(), 3, "{tokens} tokens");
+        assert_eq!(eligible, original[..2].to_vec(), "{tokens} tokens");
+        let ineligible = readers_of(&derived, activation).into_iter().filter(|node| !eligible.contains(node));
+        assert_eq!(ineligible.collect::<Vec<_>>(), original[2..].to_vec(), "{tokens} tokens");
+        assert_eq!(underive_block_quantize(&derived, program_len), fixture.resolved);
+    }
+
     #[test]
-    fn a_non_eligible_reader_leaves_the_activation_f32() {
-        let fixture = fixture(3, true);
+    fn a_non_eligible_reader_keeps_the_f32_activation_while_eligible_readers_share_one_derived_node() {
+        assert_mixed_readers_share_one_derived_node(3);
+    }
+
+    #[test]
+    fn mixed_readers_are_handled_for_the_staged_matvec_too() {
+        assert_mixed_readers_share_one_derived_node(1);
+    }
+
+    #[test]
+    fn an_activation_with_only_non_eligible_readers_gets_no_derived_node() {
+        for tokens in [1, 3] {
+            let mut fixture = fixture(tokens, true);
+            fixture.packed.clear();
+            let (derived, _) = derive(&fixture, granted(), GpuDriver::Cuda);
+            assert_eq!(derived, fixture.resolved, "{tokens} tokens");
+        }
+    }
+
+    #[test]
+    fn the_derived_node_sits_before_the_first_eligible_reader_not_the_first_reader() {
+        let mut fixture = fixture(3, true);
+        let program_len = fixture.program.len();
+        let plain_reader = fixture.resolved.pop().expect("plain reader is last");
+        fixture.resolved.insert(0, plain_reader.clone());
         let (derived, _) = derive(&fixture, granted(), GpuDriver::Cuda);
-        assert_eq!(derived, fixture.resolved);
+        let ids = derived_ids(&derived, program_len);
+        let position = derived.iter().position(|bound| bound.node == ids[0]).expect("derived present");
+        assert_eq!(derived[0], plain_reader, "ineligible reader stays first and unchanged");
+        assert_eq!(position, 1);
+        assert!(readers_of(&derived, ids[0]).contains(&derived[position + 1].node));
+        assert_eq!(derive(&fixture, granted(), GpuDriver::Cuda).0, derived, "derivation is deterministic");
     }
 
     #[test]
@@ -362,13 +408,6 @@ mod tests {
         let ids = derived_ids(&derived, fixture.program.len());
         assert_eq!(ids.len(), 1);
         assert_eq!(packed.get(&ids[0]), Some(&Codec::Q8_1Grouped));
-    }
-
-    #[test]
-    fn a_single_token_plan_with_a_non_eligible_reader_gets_no_derived_node() {
-        let fixture = fixture(1, true);
-        let (derived, _) = derive(&fixture, granted(), GpuDriver::Cuda);
-        assert_eq!(derived, fixture.resolved);
     }
 
     #[test]
