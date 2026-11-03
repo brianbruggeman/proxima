@@ -38,6 +38,9 @@ pub struct BoundOpBuilder {
     /// keeps the actual stride literal (not just whether it is `1.0`), which
     /// [`eliminate_masked_window_reduce`]'s in-bounds proof needs.
     pub(super) constant_value: RefCell<Vec<Option<f32>>>,
+    /// `dtypes[node.0]` is the pushed node's own [`Op::dtype`]: a held body must
+    /// never span a dtype change, so composition compares these.
+    pub(super) dtypes: RefCell<Vec<DType>>,
     /// The [`NumericPolicy`] every [`Constants`] this builder hands to
     /// [`push_canonical_step`] carries — governs whether the
     /// `x+0` ([`NumericRewrite::IdentityEliminationSignedZero`]) and
@@ -59,6 +62,7 @@ impl BoundOpBuilder {
             is_iota: RefCell::new(Vec::new()),
             packed_mapping_subtree: RefCell::new(Vec::new()),
             constant_value: RefCell::new(Vec::new()),
+            dtypes: RefCell::new(Vec::new()),
             numeric_policy,
             allow_fusion: true,
         }
@@ -70,6 +74,18 @@ impl BoundOpBuilder {
     pub fn with_fusion(mut self, allow_fusion: bool) -> Self {
         self.allow_fusion = allow_fusion;
         self
+    }
+
+    // a held body evaluates in one element type, so a float operand of a
+    // different layout (a widening or narrowing convert) must materialize;
+    // a bool mask feeding a float select is not a conversion
+    fn crosses_dtype(&self, operand: NodeId, consumer: DType) -> bool {
+        let operand_dtype = self.dtypes.borrow().get(operand.0 as usize).copied();
+        matches!(
+            (operand_dtype, consumer),
+            (Some(DType::Layout(operand_layout)), DType::Layout(consumer_layout))
+                if operand_layout != consumer_layout
+        )
     }
 
     /// Judge one expression: hold an elementwise op, or emit whatever is now
@@ -110,6 +126,7 @@ impl BoundOpBuilder {
         self.is_iota
             .borrow_mut()
             .push(matches!(expr, Op::Iota { .. }));
+        self.dtypes.borrow_mut().push(expr.dtype());
         let packed_mapping = match expr {
             Op::Elementwise { operands, .. } => {
                 let direct = operands
@@ -206,7 +223,7 @@ impl BoundOpBuilder {
                             "single-consumer elementwise composition decision -- still_live is gated by the requested output set"
                         );
                     }
-                    if !fuses {
+                    if !fuses || self.crosses_dtype(*operand_node, *dtype) {
                         self.materialize_if_held(*operand_node, shapes, emitted)?;
                     }
                     self.materialize_computed_indices(map, shapes, emitted)?;
@@ -219,11 +236,17 @@ impl BoundOpBuilder {
                         operands: operands.clone(),
                     },
                 );
-                if !self.allow_fusion {
+                let converts = operands
+                    .iter()
+                    .any(|(operand_node, _)| self.crosses_dtype(*operand_node, *dtype));
+                if !self.allow_fusion || converts {
                     self.materialize_if_held(node, shapes, emitted)?;
                 }
             }
             Op::Reduce(reduce) => {
+                if self.crosses_dtype(reduce.operand, reduce.dtype) {
+                    self.materialize_if_held(reduce.operand, shapes, emitted)?;
+                }
                 let window_elimination = self
                     .allow_fusion
                     .then(|| {
