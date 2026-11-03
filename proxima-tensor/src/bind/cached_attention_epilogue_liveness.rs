@@ -404,6 +404,14 @@ pub(super) fn reduce_epilogue_candidates(
     let reference_counts = resolved_reference_counts(resolved);
     let by_node: BTreeMap<NodeId, &BoundOp> =
         resolved.iter().map(|bound| (bound.node, bound)).collect();
+    let mut sole_readers: BTreeMap<NodeId, &BoundOp> = BTreeMap::new();
+    for bound in resolved {
+        for (source, ..) in bound.all_read_sources() {
+            if reference_counts.get(source).copied() == Some(1) && !outputs.contains(source) {
+                sole_readers.insert(*source, bound);
+            }
+        }
+    }
     let mut candidates = Vec::new();
     for bound in resolved {
         let sources = if widened {
@@ -423,7 +431,12 @@ pub(super) fn reduce_epilogue_candidates(
             let Some(source_bound) = by_node.get(&source).copied() else {
                 continue;
             };
-            if !admits_epilogue_dtypes(bound, source_bound, resolved, outputs, program) {
+            if !admits_epilogue_dtypes(
+                bound,
+                source_bound,
+                sole_readers.get(&bound.node).copied(),
+                program,
+            ) {
                 continue; // a merged op crosses dtypes only at a widened norm's narrow.
             }
             candidates.push((bound.node, source));
@@ -443,8 +456,7 @@ pub(super) fn reduce_epilogue_candidates(
 pub(super) fn admits_epilogue_dtypes(
     consumer: &BoundOp,
     source: &BoundOp,
-    resolved: &[BoundOp],
-    outputs: &[NodeId],
+    consumer_reader: Option<&BoundOp>,
     program: &[Op],
 ) -> bool {
     if consumer.dtype == source.dtype && consumer.dtype != DType::FLOAT64 {
@@ -473,7 +485,11 @@ pub(super) fn admits_epilogue_dtypes(
                         .is_some_and(|op| op.dtype() == DType::FLOAT32)
                 })
                 && divides_source(body, operands, source.node)
-                && sole_reader_narrows(consumer.node, resolved, outputs)
+                && consumer_reader.is_some_and(|reader| {
+                    reader.dtype == DType::FLOAT32
+                        && matches!(&reader.kind, BoundOpKind::Elementwise { body, operands }
+                            if opens_with_narrow(body, operands, consumer.node))
+                })
         }
         (DType::FLOAT64, DType::FLOAT32) => {
             !fresh && opens_with_narrow(body, operands, source.node)
@@ -517,22 +533,6 @@ fn opens_with_narrow(body: &ComposedBody, operands: &BoundOperands, source: Node
             .iter()
             .skip(1)
             .all(|step| !reads_any(&step.args, &slots))
-}
-
-#[cfg(feature = "reduce-epilogue-fusion")]
-fn sole_reader_narrows(node: NodeId, resolved: &[BoundOp], outputs: &[NodeId]) -> bool {
-    let mut readers = resolved
-        .iter()
-        .filter(|bound| bound.all_read_sources().any(|(source, ..)| *source == node));
-    match (readers.next(), readers.next()) {
-        (Some(reader), None) => {
-            !outputs.contains(&node)
-                && reader.dtype == DType::FLOAT32
-                && matches!(&reader.kind, BoundOpKind::Elementwise { body, operands }
-                    if opens_with_narrow(body, operands, node))
-        }
-        _ => false,
-    }
 }
 
 #[cfg(feature = "reduce-epilogue-fusion")]
