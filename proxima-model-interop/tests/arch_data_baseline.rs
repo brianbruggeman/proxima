@@ -2527,9 +2527,14 @@ fn assert_norms_accumulate_in_f64(checkpoint: &Checkpoint) {
     let bound = bind_checkpoint_with_kv_layout(&parsed, file_bytes, KvLayout::SlidingRing)
         .unwrap_or_else(|error| panic!("{}: bind failed: {error:?}", checkpoint.name));
     let single = proxima_tensor::spec::f32_sums_of_squares(&bound.program);
+    let consumer_chains: Vec<String> = single
+        .iter()
+        .take(4)
+        .map(|fold| norm_tail(&bound.program, *fold))
+        .collect();
     assert!(
         single.is_empty(),
-        "{}: every sum-of-squares norm must accumulate in f64 like ggml's CPU norms; f32 folds at {single:?}",
+        "{}: every sum-of-squares norm must accumulate in f64 like ggml's CPU norms; f32 folds at {single:?}; first tails {consumer_chains:#?}",
         checkpoint.name
     );
 }
@@ -2573,4 +2578,30 @@ fn sum_of_squares_norms_accumulate_in_f64_qwen35moe() {
 #[test]
 fn sum_of_squares_norms_accumulate_in_f64_granite_moe() {
     assert_norms_accumulate_in_f64(&GRANITE_MOE);
+}
+
+fn norm_tail(program: &[Op], fold: NodeId) -> String {
+    let mut chain = Vec::new();
+    let mut current = fold;
+    for _ in 0..4 {
+        let Some((position, expr)) = program.iter().enumerate().find(|(_, expr)| match expr {
+            Op::Elementwise { operands, .. } => operands.iter().any(|(node, _)| *node == current),
+            _ => false,
+        }) else {
+            break;
+        };
+        if let Op::Elementwise { body, operands, .. } = expr {
+            let leaves: Vec<String> = operands
+                .iter()
+                .filter_map(|(node, _)| match &program[node.0 as usize] {
+                    Op::Constant { value, .. } => Some(format!("const {value}")),
+                    Op::Input { name, .. } => Some(format!("input {name:?}")),
+                    _ => None,
+                })
+                .collect();
+            chain.push(format!("{body:?}{leaves:?}"));
+        }
+        current = NodeId(u32::try_from(position).expect("node fits u32"));
+    }
+    chain.join(" -> ")
 }
