@@ -2,7 +2,7 @@ checkpoint=qwen35
 architecture=qwen35
 kv_layout=SlidingRing
 bind.ops=4443
-bind.ops_sha256=256c1ce37eb1416f5d072e198676cbb8cf1352845592544e7fe84790026cbb5d
+bind.ops_sha256=277bc9c57c5e4280cab47021b3bd414179b94e6d3d089c6c506d113b15dcd1b8
 bind.logits_root=NodeId(4442)
 bind.hidden_root=None
 bind.residual_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
