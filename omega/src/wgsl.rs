@@ -267,6 +267,12 @@ pub fn emit_wgsl_with_policy(
                 kind: "cached_softmax_weights",
             });
         }
+        BoundOpKind::BlockQuantize { .. } => {
+            return Err(EmitError::UnsupportedOpKind {
+                node: resolved.node,
+                kind: "block_quantize",
+            });
+        }
         BoundOpKind::ElementwiseTwin { .. } => {
             return Err(EmitError::UnsupportedOpKind {
                 node: resolved.node,
@@ -569,6 +575,7 @@ fn grid_threads(resolved: &BoundOp) -> Result<u64, EmitError> {
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. }
+        | BoundOpKind::BlockQuantize { .. }
         | BoundOpKind::ElementwiseTwin { .. } => extents_product(),
     }
 }

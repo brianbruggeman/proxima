@@ -4803,3 +4803,333 @@ async fn a_plan_refit_across_every_symbol_matches_a_plan_built_there(#[case] bui
 
     assert_eq!(run(&mut refit_plan, moved), run(&mut fresh_plan, moved));
 }
+
+fn int8_gemm_program(features: u32, depth: u32, tokens: u32) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let input = |program: &mut Vec<Op>, dtype, rows, name: &str| {
+        append(
+            program,
+            Op::Input { dtype, shape: vec![Extent::Static(rows), Extent::Static(depth)], name: Some(name.into()) },
+        )
+    };
+    let weight = input(&mut program, DType::UINT8, features, "weight");
+    let activation = input(&mut program, DType::FLOAT32, tokens, "activation");
+    let sum = append_int8_gemm(&mut program, weight, activation, "int8_prefill_gemm");
+    (program, sum)
+}
+
+fn fake_quantize_blocks(activation: &[f32], scale_through_fp16: bool) -> Vec<f32> {
+    activation
+        .as_chunks::<32>().0.iter()
+        .flat_map(|group| {
+            let step = group.iter().fold(0.0f32, |peak, value| peak.max(value.abs())) / 127.0;
+            // llama.cpp stores the q8_1 scale as half2 ds (ggml-common.h:265, mmq.cuh:41), so the device rounds it to f16
+            let used = if scale_through_fp16 { half::f16::from_f32(step).to_f32() } else { step };
+            group.iter().map(move |value| if step == 0.0 { 0.0 } else { (value / step).round() * used })
+        })
+        .collect()
+}
+
+fn gemm_rows_max_over_peak(output: &[f32], weight: &[f32], activation: &[f32], depth: usize, tokens: usize) -> f64 {
+    let features = weight.len() / depth;
+    let stride = features.div_ceil(256);
+    let (mut worst, mut peak) = (0.0f64, 0.0f64);
+    for feature in (0..features).step_by(stride) {
+        for token in 0..tokens {
+            let exact: f64 = weight[feature * depth..][..depth]
+                .iter()
+                .zip(&activation[token * depth..][..depth])
+                .map(|(left, right)| f64::from(*left) * f64::from(*right))
+                .sum();
+            worst = worst.max((f64::from(output[feature * tokens + token]) - exact).abs());
+            peak = peak.max(exact.abs());
+        }
+    }
+    worst / peak
+}
+
+#[proxima::test]
+#[case::square_tokens_multiple_of_tile(4096, 4096, 512)]
+#[case::token_tail_not_multiple_of_tile(1024, 4096, 100)]
+#[case::narrow_depth_odd_tokens(640, 1024, 77)]
+#[case::feature_tail_not_multiple_of_tile(1000, 1024, 77)]
+async fn int8_prefill_gemm_matches_the_fake_quantized_activation_reference_on_cuda(
+    #[case] features: usize,
+    #[case] depth: usize,
+    #[case] tokens: usize,
+) {
+    use proxima_gguf::quant::pq2_0::{BLOCK_BYTES, QK_PQ2_0, dequantize, quantize};
+    let blocks_per_row = depth / QK_PQ2_0;
+    let weight_f32: Vec<f32> = random_vec(53, features * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let mut weight_blocks = vec![0u8; features * blocks_per_row * BLOCK_BYTES];
+    let mut dequantized = vec![0.0f32; weight_f32.len()];
+    for ((row_f32, row_blocks), row_dequantized) in weight_f32
+        .chunks_exact(depth)
+        .zip(weight_blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        .zip(dequantized.chunks_exact_mut(depth))
+    {
+        quantize(row_f32, row_blocks).expect("row length is a whole number of blocks");
+        dequantize(row_blocks, row_dequantized).expect("a whole number of packed blocks");
+    }
+    let activation: Vec<f32> = random_vec(59, tokens * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let (program, root) = int8_gemm_program(features as u32, depth as u32, tokens as u32);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("weight", QuantizedBlock::Packed { codec: Codec::Pq2_0, bytes: &weight_blocks }),
+        ("activation", QuantizedBlock::Float32(&activation)),
+    ];
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true);
+    let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[root], policy)
+        .expect("omega::backend plans the int8 prefill matmul");
+    let identities = cuda_kernel_identities(&plan).expect("cuda plan exposes its kernels");
+    let output = execute_plan_named(&mut plan, &named).expect("omega::backend runs the int8 prefill matmul").root().to_vec();
+
+    assert!(
+        identities.iter().any(|identity| identity.contains("_mma8x8x16s8c")),
+        "the activation-quantized prefill gemm did not take the int8 mma kernel: {identities:?}"
+    );
+    let block_scale_reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, true), depth, tokens);
+    let f32_scale_reference = gemm_rows_max_over_peak(&output, &dequantized, &fake_quantize_blocks(&activation, false), depth, tokens);
+    let unquantized = gemm_rows_max_over_peak(&output, &dequantized, &activation, depth, tokens);
+    println!("int8 gemm {features}x{depth}x{tokens}: vs fp16-scale fake-quantized {block_scale_reference:.3e}, vs f32-scale fake-quantized {f32_scale_reference:.3e}, vs unquantized {unquantized:.3e}");
+    assert!(output.iter().all(|value| value.is_finite()) && block_scale_reference < 2e-5,
+        "int8 gemm disagrees with the fake-quantized reference by {block_scale_reference} of peak");
+    assert!(unquantized > 2.0 * block_scale_reference,
+        "degenerate control: output matches the unquantized activations ({unquantized}) as tightly as the quantized ones ({block_scale_reference})");
+}
+
+fn append_int8_gemm(program: &mut Vec<Op>, weight: NodeId, activation: NodeId, name: &str) -> NodeId {
+    let product = append(
+        program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, IndexMap::Affine(projection(3, &[0, 2]))),
+                (activation, IndexMap::Affine(projection(3, &[1, 2]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some(name.into()),
+        }),
+    )
+}
+
+fn append_binary(program: &mut Vec<Op>, body: ScalarOp, left: NodeId, right: NodeId) -> NodeId {
+    append(
+        program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body,
+            operands: vec![
+                (left, IndexMap::Affine(projection(2, &[0, 1]))),
+                (right, IndexMap::Affine(projection(2, &[0, 1]))),
+            ],
+            name: None,
+        },
+    )
+}
+
+fn append_unary(program: &mut Vec<Op>, body: ScalarOp, source: NodeId) -> NodeId {
+    append(
+        program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body,
+            operands: vec![(source, IndexMap::Affine(projection(2, &[0, 1])))],
+            name: None,
+        },
+    )
+}
+
+fn append_plus_one(program: &mut Vec<Op>, source: NodeId) -> NodeId {
+    let one = scalar_constant(program, 1.0);
+    append(
+        program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            operands: vec![
+                (source, IndexMap::Affine(projection(2, &[0, 1]))),
+                (one, IndexMap::Affine(projection(2, &[]))),
+            ],
+            name: None,
+        },
+    )
+}
+
+fn pq2_weight(seed: u64, features: usize, depth: usize) -> (Vec<u8>, Vec<f32>) {
+    use proxima_gguf::quant::pq2_0::{BLOCK_BYTES, QK_PQ2_0, dequantize, quantize};
+    let blocks_per_row = depth / QK_PQ2_0;
+    let source: Vec<f32> = random_vec(seed, features * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let mut blocks = vec![0u8; features * blocks_per_row * BLOCK_BYTES];
+    let mut dequantized = vec![0.0f32; source.len()];
+    for ((row_source, row_blocks), row_dequantized) in source
+        .chunks_exact(depth)
+        .zip(blocks.chunks_exact_mut(blocks_per_row * BLOCK_BYTES))
+        .zip(dequantized.chunks_exact_mut(depth))
+    {
+        quantize(row_source, row_blocks).expect("row length is a whole number of blocks");
+        dequantize(row_blocks, row_dequantized).expect("a whole number of packed blocks");
+    }
+    (blocks, dequantized)
+}
+
+fn exact_gemm(weight: &[f32], activation: &[f32], depth: usize, tokens: usize) -> Vec<f64> {
+    let features = weight.len() / depth;
+    (0..features * tokens)
+        .map(|index| {
+            let (feature, token) = (index / tokens, index % tokens);
+            weight[feature * depth..][..depth]
+                .iter()
+                .zip(&activation[token * depth..][..depth])
+                .map(|(left, right)| f64::from(*left) * f64::from(*right))
+                .sum()
+        })
+        .collect()
+}
+
+fn max_over_peak(output: &[f32], reference: &[f64]) -> f64 {
+    let worst = output.iter().zip(reference).map(|(got, want)| (f64::from(*got) - want).abs()).fold(0.0, f64::max);
+    worst / reference.iter().fold(0.0f64, |peak, value| peak.max(value.abs()))
+}
+
+fn run_int8_epilogue_plan(
+    program: &[Op],
+    root: NodeId,
+    named: &[(&str, QuantizedBlock<'_>)],
+) -> (Vec<f32>, Vec<String>) {
+    let policy = NumericPolicy::bit_exact().with_reassociation(true).with_activation_quantization(true);
+    let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), program, &[], named, &[root], policy)
+        .expect("omega::backend plans the int8 gemm with a fused epilogue");
+    let identities = cuda_kernel_identities(&plan).expect("cuda plan exposes its kernels");
+    let output = execute_plan_named(&mut plan, named).expect("omega::backend runs the fused int8 gemm").root().to_vec();
+    (output, identities)
+}
+
+fn assert_int8_epilogue_kernel(identities: &[String]) {
+    assert!(
+        identities.iter().any(|identity| identity.contains("_mma8x8x16s8") && identity.contains("epi")),
+        "no int8 mma kernel carries the fused epilogue: {:?}",
+        identities.iter().map(|identity| identity.lines().next()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn int8_prefill_gemm_with_a_fused_residual_add_matches_the_fake_quantized_reference_on_cuda() {
+    let (features, depth, tokens) = (256usize, 512usize, 77usize);
+    let (weight_blocks, dequantized) = pq2_weight(53, features, depth);
+    let activation: Vec<f32> = random_vec(59, tokens * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let residual = random_vec(61, features * tokens);
+    let mut program = Vec::new();
+    let shape = |rows: usize| vec![Extent::Static(rows as u32), Extent::Static(depth as u32)];
+    let weight = append_input(&mut program, DType::UINT8, shape(features), "weight");
+    let activation_node = append_input(&mut program, DType::FLOAT32, shape(tokens), "activation");
+    let residual_node =
+        append_input(&mut program, DType::FLOAT32, vec![Extent::Static(features as u32), Extent::Static(tokens as u32)], "residual");
+    let sum = append_int8_gemm(&mut program, weight, activation_node, "int8_residual_gemm");
+    let root = append_binary(&mut program, ScalarOp::Add, sum, residual_node);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("weight", QuantizedBlock::Packed { codec: Codec::Pq2_0, bytes: &weight_blocks }),
+        ("activation", QuantizedBlock::Float32(&activation)),
+        ("residual", QuantizedBlock::Float32(&residual)),
+    ];
+    let (output, identities) = run_int8_epilogue_plan(&program, root, &named);
+
+    assert_int8_epilogue_kernel(&identities);
+    let reference: Vec<f64> = exact_gemm(&dequantized, &fake_quantize_blocks(&activation, true), depth, tokens)
+        .into_iter()
+        .zip(&residual)
+        .map(|(product, addend)| product + f64::from(*addend))
+        .collect();
+    let unquantized: Vec<f64> = exact_gemm(&dequantized, &activation, depth, tokens)
+        .into_iter()
+        .zip(&residual)
+        .map(|(product, addend)| product + f64::from(*addend))
+        .collect();
+    let agreement = max_over_peak(&output, &reference);
+    assert!(output.iter().all(|value| value.is_finite()) && agreement < 2e-5, "residual epilogue disagrees by {agreement} of peak");
+    assert!(max_over_peak(&output, &unquantized) > 2.0 * agreement, "degenerate control: output matches the unquantized activations");
+}
+
+#[test]
+fn int8_prefill_gemm_with_a_fused_swiglu_matches_the_fake_quantized_reference_on_cuda() {
+    let (features, depth, tokens) = (256usize, 512usize, 77usize);
+    let (gate_blocks, gate_dequantized) = pq2_weight(53, features, depth);
+    let (up_blocks, up_dequantized) = pq2_weight(67, features, depth);
+    let activation: Vec<f32> = random_vec(59, tokens * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let mut program = Vec::new();
+    let shape = |rows: usize| vec![Extent::Static(rows as u32), Extent::Static(depth as u32)];
+    let gate_weight = append_input(&mut program, DType::UINT8, shape(features), "gate_weight");
+    let up_weight = append_input(&mut program, DType::UINT8, shape(features), "up_weight");
+    let activation_node = append_input(&mut program, DType::FLOAT32, shape(tokens), "activation");
+    let gate = append_int8_gemm(&mut program, gate_weight, activation_node, "int8_gate_gemm");
+    let up = append_int8_gemm(&mut program, up_weight, activation_node, "int8_up_gemm");
+    let negated = append_unary(&mut program, ScalarOp::Negate, gate);
+    let exponential = append_unary(&mut program, ScalarOp::Exponential, negated);
+    let denominator = append_plus_one(&mut program, exponential);
+    let sigmoid = append_unary(&mut program, ScalarOp::Reciprocal, denominator);
+    let silu = append_binary(&mut program, ScalarOp::Multiply, gate, sigmoid);
+    let root = append_binary(&mut program, ScalarOp::Multiply, silu, up);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("gate_weight", QuantizedBlock::Packed { codec: Codec::Pq2_0, bytes: &gate_blocks }),
+        ("up_weight", QuantizedBlock::Packed { codec: Codec::Pq2_0, bytes: &up_blocks }),
+        ("activation", QuantizedBlock::Float32(&activation)),
+    ];
+    let (output, identities) = run_int8_epilogue_plan(&program, root, &named);
+
+    assert_int8_epilogue_kernel(&identities);
+    let swiglu = |activations: &[f32]| -> Vec<f64> {
+        let gates = exact_gemm(&gate_dequantized, activations, depth, tokens);
+        let ups = exact_gemm(&up_dequantized, activations, depth, tokens);
+        gates.into_iter().zip(ups).map(|(gate, up)| gate / (1.0 + (-gate).exp()) * up).collect()
+    };
+    let agreement = max_over_peak(&output, &swiglu(&fake_quantize_blocks(&activation, true)));
+    assert!(output.iter().all(|value| value.is_finite()) && agreement < 2e-5, "swiglu epilogue disagrees by {agreement} of peak");
+    assert!(max_over_peak(&output, &swiglu(&activation)) > 2.0 * agreement, "degenerate control: output matches the unquantized activations");
+}
+
+#[test]
+fn one_block_quantize_feeds_two_int8_gemms_and_matches_the_fake_quantized_reference_on_cuda() {
+    let (features, depth, tokens) = (256usize, 512usize, 77usize);
+    let (gate_blocks, gate_dequantized) = pq2_weight(53, features, depth);
+    let (up_blocks, up_dequantized) = pq2_weight(67, features, depth);
+    let activation: Vec<f32> = random_vec(59, tokens * depth).into_iter().map(|value| value * 4.0 - 2.0).collect();
+    let mut program = Vec::new();
+    let shape = |rows: usize| vec![Extent::Static(rows as u32), Extent::Static(depth as u32)];
+    let gate_weight = append_input(&mut program, DType::UINT8, shape(features), "gate_weight");
+    let up_weight = append_input(&mut program, DType::UINT8, shape(features), "up_weight");
+    let activation_node = append_input(&mut program, DType::FLOAT32, shape(tokens), "activation");
+    let gate = append_int8_gemm(&mut program, gate_weight, activation_node, "shared_gate_gemm");
+    let up = append_int8_gemm(&mut program, up_weight, activation_node, "shared_up_gemm");
+    let root = append_binary(&mut program, ScalarOp::Add, gate, up);
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("gate_weight", QuantizedBlock::Packed { codec: Codec::Pq2_0, bytes: &gate_blocks }),
+        ("up_weight", QuantizedBlock::Packed { codec: Codec::Pq2_0, bytes: &up_blocks }),
+        ("activation", QuantizedBlock::Float32(&activation)),
+    ];
+    let (output, identities) = run_int8_epilogue_plan(&program, root, &named);
+
+    let entries: Vec<&str> = identities.iter().filter_map(|identity| identity.lines().next()).collect();
+    let quantizers = entries.iter().filter(|entry| entry.contains("block_quantize")).count();
+    let gemms = entries.iter().filter(|entry| entry.contains("_mma8x8x16s8")).count();
+    assert_eq!((quantizers, gemms), (1, 2), "one shared quantize node must feed two int8 gemms: {entries:?}");
+    let summed = |activations: &[f32]| -> Vec<f64> {
+        let gates = exact_gemm(&gate_dequantized, activations, depth, tokens);
+        let ups = exact_gemm(&up_dequantized, activations, depth, tokens);
+        gates.into_iter().zip(ups).map(|(gate, up)| gate + up).collect()
+    };
+    let agreement = max_over_peak(&output, &summed(&fake_quantize_blocks(&activation, true)));
+    assert!(output.iter().all(|value| value.is_finite()) && agreement < 2e-5, "shared quantize disagrees by {agreement} of peak");
+    assert!(max_over_peak(&output, &summed(&activation)) > 2.0 * agreement, "degenerate control: output matches the unquantized activations");
+}

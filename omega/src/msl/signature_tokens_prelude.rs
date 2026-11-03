@@ -291,6 +291,11 @@ pub(super) fn grid_threads_with_schedule(
                 wide_cooperative_reduce_width(*cached_key_rows),
             ],
         )?,
+        BoundOpKind::BlockQuantize { .. } => {
+            return Err(EmitError::BlockQuantizeNotSupported {
+                node: resolved.node,
+            });
+        }
     };
     Ok(threads)
 }
@@ -625,6 +630,10 @@ pub(super) fn entry_name_with_schedule(
                 )
             }
         }
+        BoundOpKind::BlockQuantize { layout, .. } => format!(
+            "omega_block_quantize_e{}_b{}",
+            layout.elements, layout.block_bytes
+        ),
     };
     let gather_bits: String = resolved
         .operands()

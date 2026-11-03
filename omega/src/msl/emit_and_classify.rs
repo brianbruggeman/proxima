@@ -327,6 +327,9 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
         BoundOpKind::GatedDeltaNet { .. } => render_gated_delta_net(resolved, &entry),
         BoundOpKind::MoeTopK { .. } => render_moe_topk(resolved, &entry),
         BoundOpKind::TopFractionSelect { .. } => render_top_fraction_select(resolved, &entry),
+        BoundOpKind::BlockQuantize { .. } => Err(EmitError::BlockQuantizeNotSupported {
+            node: resolved.node,
+        }),
     }?;
     let source = match index_family(resolved, &quantized, numeric_policy) {
         Some(family) if extras.coord_index32 => apply_index_family(family, source),

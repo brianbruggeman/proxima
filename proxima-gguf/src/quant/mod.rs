@@ -15,6 +15,7 @@
 
 pub mod bf16;
 pub mod block_layout;
+pub mod block_layout_encode;
 pub mod bf4_e2m1;
 pub mod bf8_e5m2;
 pub mod cold_float;
@@ -59,6 +60,8 @@ pub enum QuantError {
     UnsupportedCodec { codec: &'static str },
     #[error("codec {codec} cannot represent a non-finite input")]
     NonFiniteInput { codec: &'static str },
+    #[error("block layout cannot be encoded: {reason}")]
+    UnsupportedBlockLayout { reason: &'static str },
     #[error("input length {found} bytes is not a multiple of the {codec} block size {block_bytes}")]
     InputNotBlockMultiple {
         codec: &'static str,

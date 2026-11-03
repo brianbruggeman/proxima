@@ -935,6 +935,12 @@ pub(super) fn run_typed_program<T: Element>(
                     reason: "round-batched reduce binding is not wired into the typed executor",
                 });
             }
+            BoundOpKind::BlockQuantize { .. } => {
+                return Err(TensorError::NotLowerable {
+                    node: node.node,
+                    reason: "block quantize binding runs on the f32 executor only",
+                });
+            }
             BoundOpKind::Iota => run_iota_typed(&mut output),
             BoundOpKind::Constant { value } => run_constant_typed(*value, &mut output),
         }
@@ -1124,6 +1130,12 @@ where
                         reason: "round-batched reduce binding is not wired into the widened executor",
                     });
                 }
+                BoundOpKind::BlockQuantize { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "block quantize binding runs on the f32 executor only",
+                    });
+                }
                 BoundOpKind::Iota => run_iota_typed(&mut output),
                 BoundOpKind::Constant { value } => run_constant_typed(*value, &mut output),
             }
@@ -1199,6 +1211,12 @@ where
                     return Err(TensorError::NotLowerable {
                         node: node.node,
                         reason: "round-batched reduce binding is not wired into the widened executor",
+                    });
+                }
+                BoundOpKind::BlockQuantize { .. } => {
+                    return Err(TensorError::NotLowerable {
+                        node: node.node,
+                        reason: "block quantize binding runs on the f32 executor only",
                     });
                 }
                 BoundOpKind::Iota => run_iota_typed(&mut output),

@@ -1403,7 +1403,8 @@ pub(super) fn classify_kind(bound: &BoundOp, packed_operands: &PackedOperands) -
         | BoundOpKind::GatedDeltaNet { .. }
         | BoundOpKind::MoeTopK { .. }
         | BoundOpKind::TopFractionSelect { .. }
-        | BoundOpKind::RoundBatchedReduce { .. } => bound.kind.name(),
+        | BoundOpKind::RoundBatchedReduce { .. }
+        | BoundOpKind::BlockQuantize { .. } => bound.kind.name(),
         BoundOpKind::Reduce {
             keep: Keep::Scan, ..
         } => bound.kind.name(),

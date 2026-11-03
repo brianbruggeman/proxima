@@ -69,6 +69,7 @@ fn max_node_id(built: &[BoundOp]) -> u32 {
             | BoundOpKind::Elementwise { .. }
             | BoundOpKind::Reduce { .. }
             | BoundOpKind::TopFractionSelect { .. }
+            | BoundOpKind::BlockQuantize { .. }
             | BoundOpKind::Iota
             | BoundOpKind::Constant { .. } => {}
         }
@@ -123,6 +124,10 @@ fn duplicate_bound_op(original: &BoundOp, fresh: &mut u32) -> Option<BoundOp> {
             epilogue_body: epilogue_body.clone(),
             epilogue_operands: epilogue_operands.clone(),
             epilogue_broadcast_axes: epilogue_broadcast_axes.clone(),
+        },
+        BoundOpKind::BlockQuantize { operands, layout } => BoundOpKind::BlockQuantize {
+            operands: operands.clone(),
+            layout: layout.clone(),
         },
         BoundOpKind::Iota => BoundOpKind::Iota,
         BoundOpKind::Constant { value } => BoundOpKind::Constant { value: *value },

@@ -61,6 +61,7 @@ use core::cell::{Cell, RefCell};
 use core::future::Future;
 
 use arrayvec::ArrayVec;
+use proxima_primitives::block_layout::BlockLayout;
 use proxima_primitives::pipe::Pipe;
 use smallvec::SmallVec;
 

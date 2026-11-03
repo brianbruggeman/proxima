@@ -321,7 +321,8 @@ impl Op {
     #[must_use]
     pub fn name(&self) -> Option<&str> {
         match self {
-            Self::Input { name, .. } | Self::Elementwise { name, .. } => name.as_deref(),
+            Self::Input { name, .. }
+            | Self::Elementwise { name, .. } => name.as_deref(),
             Self::Reduce(reduce) => reduce.name.as_deref(),
             Self::Iota { .. } | Self::Constant { .. } => None,
         }

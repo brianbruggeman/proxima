@@ -1286,6 +1286,7 @@ pub(super) fn arena_node_kind_label(kind: &BoundOpKind) -> &'static str {
         BoundOpKind::ElementwiseTwin { .. } => "elementwise_twin",
         BoundOpKind::Reduce { .. } => "reduce",
         BoundOpKind::RoundBatchedReduce { .. } => "round_batched_reduce",
+        BoundOpKind::BlockQuantize { .. } => "block_quantize",
         BoundOpKind::Iota => "iota",
         BoundOpKind::Constant { .. } => "constant",
         BoundOpKind::CachedAttention { .. } => "cached_attention",

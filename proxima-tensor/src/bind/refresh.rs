@@ -314,7 +314,7 @@ fn refresh_one(
     new_shapes: &Shapes,
 ) -> Result<BoundOp, RefreshRefusal> {
     match &bound_op.kind {
-        BoundOpKind::Iota | BoundOpKind::Constant { .. } => Ok(BoundOp {
+        BoundOpKind::Iota | BoundOpKind::Constant { .. } | BoundOpKind::BlockQuantize { .. } => Ok(BoundOp {
             extents: new_shapes.of(bound_op.node).to_vec(),
             ..bound_op.clone()
         }),

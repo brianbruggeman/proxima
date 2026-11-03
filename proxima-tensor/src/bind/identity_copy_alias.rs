@@ -151,6 +151,9 @@ pub(super) fn apply_identity_copy_alias(built: Vec<BoundOp>, outputs: &[NodeId])
                 rewrite_read_sources(operands, &alias_of);
                 rewrite_read_sources(epilogue_operands, &alias_of);
             }
+            BoundOpKind::BlockQuantize { operands, .. } => {
+                rewrite_read_sources(operands, &alias_of);
+            }
             BoundOpKind::Iota | BoundOpKind::Constant { .. } => {}
         }
         rewritten.push(bound);

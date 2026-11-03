@@ -828,6 +828,10 @@ mod gated {
                     )
                 }
             }
+            BoundOpKind::BlockQuantize { layout, .. } => format!(
+                "{prefix}_block_quantize_e{}_b{}",
+                layout.elements, layout.block_bytes
+            ),
         };
 
         let gather_bits: String = resolved

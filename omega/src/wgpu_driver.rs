@@ -1257,6 +1257,7 @@ fn pack_uniforms(bound: &BoundOp, packed_operands: &PackedOperands) -> Result<Ve
         | BoundOpKind::TopFractionSelect { .. }
         | BoundOpKind::RoundBatchedReduce { .. }
         | BoundOpKind::CachedSoftmaxWeights { .. }
+        | BoundOpKind::BlockQuantize { .. }
         | BoundOpKind::ElementwiseTwin { .. } => Ok(pack_leaf_uniforms(bound)),
     }
 }
