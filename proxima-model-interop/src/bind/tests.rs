@@ -413,7 +413,14 @@ fn q8_0_matmul_weight_binds_packed_and_matches_a_dequantized_oracle() {
             proxima_tensor::cpu::QuantizedBlock::Float32(activation.as_slice()),
         ),
     ];
-    let evaluated = proxima_tensor::cpu::evaluate_quantized_named(&program, &[], &named, &[sum])
+    let evaluated = proxima_tensor::cpu::evaluate_quantized_named_exact_with_scratch(
+        &program,
+        &[],
+        &named,
+        &[sum],
+        &mut alloc::vec::Vec::new(),
+        &mut None,
+    )
         .expect("evaluate the bound q8_0 packed weight through the real interpreter");
     let ours = evaluated.root();
 
