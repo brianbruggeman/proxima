@@ -1,12 +1,12 @@
 checkpoint=openchat
 architecture=llama
 kv_layout=SlidingRing
-bind.ops=3069
-bind.ops_sha256=56d2bbdf22ece3291b2753456752dff1ab05238022803759dd0065690a5b4d5b
-bind.logits_root=NodeId(3068)
-bind.hidden_root=Some(NodeId(3065))
-bind.residual_roots=32 sha256=750cc7678c6a5682a0d3fe067edc99b3dcebb1d60b3777bc01064cc09dd0c26e
-bind.layer_roots=32 sha256=61bcd28b9e3144d4b4001efc0ac189b58b414c72d791fecbcf9faecbb26ce680
+bind.ops=3199
+bind.ops_sha256=67a10a3a22436da8197baddf343daba6a5b5ab0144be8b6193fadb9b9ae1b554
+bind.logits_root=NodeId(3198)
+bind.hidden_root=Some(NodeId(3195))
+bind.residual_roots=32 sha256=bc291cdb56f13117db2188178602a407fa83a6c437ed2d0f28dbbbdf152c8f04
+bind.layer_roots=32 sha256=1d5cb18048470e28c7dcb733e5778db17a08e29fe4fc2e1c11e328b234a5bae1
 bind.router_roots=0 sha256=4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945
 bind.single_position_step=false
 verify=absent
