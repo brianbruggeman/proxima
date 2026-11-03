@@ -401,6 +401,62 @@ pub fn scalar_constant(program: &mut Vec<Op>, value: f32) -> NodeId {
     )
 }
 
+/// The element count a norm averages over, as an f64 scalar: [`mean_of_squares`]
+/// divides by it in double the way ggml's `rms_norm_f32` divides its
+/// `ggml_float` sum by `ne00` (`ggml-cpu/ops.cpp:3963`). Every count a model
+/// normalizes over is far below 2^24, so the `f32` literal holds it exactly.
+pub fn count_constant(program: &mut Vec<Op>, count: u32) -> NodeId {
+    op::append(
+        program,
+        Op::Constant {
+            dtype: DType::FLOAT64,
+            shape: Vec::new(),
+            value: count as f32,
+        },
+    )
+}
+
+/// `mean(x*x)` per row with ggml's CPU arithmetic: the f32 squares are summed
+/// in f64 (`ggml_float`), divided by the f64 `count` ([`count_constant`]), and
+/// only the mean narrows back to f32 (`ggml-cpu/ops.cpp:3957-3963`). `full`
+/// walks every element (`"sd->sd"`), `reduce_out` folds the normalized axis
+/// away (`"s->sd"`), `row` reads one value per row (`"s->s"`) and `count_map`
+/// broadcasts the count (`"->s"`). A backend
+/// whose incumbent sums in f32 narrows this island with its own numeric policy.
+pub fn mean_of_squares(
+    program: &mut Vec<Op>,
+    x: NodeId,
+    count: NodeId,
+    full: &str,
+    reduce_out: &str,
+    row: &str,
+    count_map: &str,
+) -> Result<NodeId, TensorError> {
+    let squared = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Multiply,
+        &[(x, full), (x, full)],
+    )?;
+    let widened = elementwise(program, DType::FLOAT64, ScalarOp::Identity, &[(squared, full)])?;
+    let sum_squares = reduce(
+        program,
+        DType::FLOAT64,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        widened,
+        full,
+        reduce_out,
+    )?;
+    let mean = elementwise(
+        program,
+        DType::FLOAT64,
+        ScalarOp::Divide,
+        &[(sum_squares, row), (count, count_map)],
+    )?;
+    elementwise(program, DType::FLOAT32, ScalarOp::Identity, &[(mean, row)])
+}
+
 /// `table[ids[s], d]`, the exact pattern `shape.rs`'s
 /// `embedding_lookup_program` unit test documents: `ids` selects `table`'s
 /// vocab axis, `d` passes through as a plain projection. Every forward
@@ -518,30 +574,10 @@ pub fn rmsnorm(
     program: &mut Vec<Op>,
     x: NodeId,
     gamma: NodeId,
-    inv_dim: NodeId,
+    count: NodeId,
     eps: NodeId,
 ) -> Result<NodeId, TensorError> {
-    let squared = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(x, "sd->sd"), (x, "sd->sd")],
-    )?;
-    let sum_squares = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        squared,
-        "sd->sd",
-        "s->sd",
-    )?;
-    let mean_square = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(sum_squares, "s->s"), (inv_dim, "->s")],
-    )?;
+    let mean_square = mean_of_squares(program, x, count, "sd->sd", "s->sd", "s->s", "->s")?;
     let mean_square_eps = elementwise(
         program,
         DType::FLOAT32,
@@ -766,40 +802,25 @@ pub fn rmsnorm_per_head(
     program: &mut Vec<Op>,
     x: NodeId,
     gamma: NodeId,
-    inv_head_dim: NodeId,
+    head_dim_count: NodeId,
     eps: NodeId,
     head: &str,
 ) -> Result<NodeId, TensorError> {
     let full = alloc::format!("s{head}d->s{head}d");
     let identity = alloc::format!("s{head}->s{head}");
     let broadcast_over_d = alloc::format!("s{head}->s{head}d");
-    let inv_head_dim_map = alloc::format!("->s{head}");
+    let count_map = alloc::format!("->s{head}");
     let eps_map = alloc::format!("s->s{head}");
     let gamma_map = alloc::format!("d->s{head}d");
 
-    let squared = elementwise(
+    let mean_square = mean_of_squares(
         program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(x, full.as_str()), (x, full.as_str())],
-    )?;
-    let sum_squares = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        squared,
-        full.as_str(),
-        broadcast_over_d.as_str(),
-    )?;
-    let mean_square = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[
-            (sum_squares, identity.as_str()),
-            (inv_head_dim, inv_head_dim_map.as_str()),
-        ],
+        x,
+        head_dim_count,
+        &full,
+        &broadcast_over_d,
+        &identity,
+        &count_map,
     )?;
     let mean_square_eps = elementwise(
         program,
@@ -844,39 +865,24 @@ pub fn rmsnorm_per_head(
 pub fn rmsnorm_per_head_no_scale(
     program: &mut Vec<Op>,
     x: NodeId,
-    inv_head_dim: NodeId,
+    head_dim_count: NodeId,
     eps: NodeId,
     head: &str,
 ) -> Result<NodeId, TensorError> {
     let full = alloc::format!("s{head}d->s{head}d");
     let identity = alloc::format!("s{head}->s{head}");
     let broadcast_over_d = alloc::format!("s{head}->s{head}d");
-    let inv_head_dim_map = alloc::format!("->s{head}");
+    let count_map = alloc::format!("->s{head}");
     let eps_map = alloc::format!("s->s{head}");
 
-    let squared = elementwise(
+    let mean_square = mean_of_squares(
         program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[(x, full.as_str()), (x, full.as_str())],
-    )?;
-    let sum_squares = reduce(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Add,
-        ReduceInit::Zero,
-        squared,
-        full.as_str(),
-        broadcast_over_d.as_str(),
-    )?;
-    let mean_square = elementwise(
-        program,
-        DType::FLOAT32,
-        ScalarOp::Multiply,
-        &[
-            (sum_squares, identity.as_str()),
-            (inv_head_dim, inv_head_dim_map.as_str()),
-        ],
+        x,
+        head_dim_count,
+        &full,
+        &broadcast_over_d,
+        &identity,
+        &count_map,
     )?;
     let mean_square_eps = elementwise(
         program,
