@@ -346,8 +346,8 @@ fn run_child(args: &RunArgs<'_>) -> Result<(), BenchError> {
         path: path.to_owned(),
         message: error.to_string(),
     })?;
-    let vocab = vocab_from_metadata(&parsed)?;
     let model = LoadedModel::load(&parsed, &mapping)?;
+    let vocab = model.vocab();
     let load_ms = millis(load_started);
     emit("load", &format!("ms={load_ms:.3}"));
     let warmup_started = Instant::now();
@@ -373,7 +373,7 @@ fn run_child(args: &RunArgs<'_>) -> Result<(), BenchError> {
     let mut prompt_token_ids = Vec::new();
     for index in 0..args.repeats {
         let tokenize_started = Instant::now();
-        prompt_token_ids = prompt_ids(&vocab, args.prompt)?;
+        prompt_token_ids = prompt_ids(vocab, args.prompt)?;
         let tokenize_ms = millis(tokenize_started);
         let generation = generate(&model, args.prompt, args.tokens, args.context)?;
         report_run(

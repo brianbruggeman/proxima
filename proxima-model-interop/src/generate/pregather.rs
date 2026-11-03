@@ -29,6 +29,11 @@ fn canonical_safetensors_descriptor(
 
 impl<'file> LoadedModel<'file> {
     #[must_use]
+    pub fn vocab(&self) -> &Vocab {
+        &self.vocab
+    }
+
+    #[must_use]
     pub fn token_id_for_piece(&self, piece: &str) -> Option<u32> {
         self.vocab.token_id(piece)
     }
