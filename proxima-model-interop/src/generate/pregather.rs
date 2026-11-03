@@ -1467,6 +1467,7 @@ impl<'file> LoadedModel<'file> {
                             &segment_named,
                             &requested_nodes,
                             &mut exact_scratch,
+                            &mut Vec::new(),
                             &mut exact_validated,
                             None,
                         )?;
@@ -1510,6 +1511,7 @@ impl<'file> LoadedModel<'file> {
                             &segment_named,
                             &requested_nodes,
                             &mut scratch,
+                            &mut Vec::new(),
                             &mut validated,
                             None,
                         )?;
@@ -1729,6 +1731,7 @@ impl<'file> LoadedModel<'file> {
                             &segment_named,
                             &requested_nodes,
                             &mut exact_scratch,
+                            &mut Vec::new(),
                             &mut exact_validated,
                             Some(&mapped_expert_sources),
                         )?;
@@ -1759,6 +1762,7 @@ impl<'file> LoadedModel<'file> {
                             &segment_named,
                             &requested_nodes,
                             &mut scratch,
+                            &mut Vec::new(),
                             &mut validated,
                             Some(&mapped_expert_sources),
                         )?;

@@ -5065,6 +5065,7 @@ impl BackendRuntime {
 #[cfg(not(feature = "gpu"))]
 pub(crate) struct BackendRuntime {
     pub(super) free_buffers: Vec<Vec<f32>>,
+    pub(super) wide_pool: Vec<Vec<f64>>,
     pub(super) validated_weight_nodes: Option<BTreeSet<NodeId>>,
     /// `ServingConfig::exact_activations`, read once at construction --
     /// see that field's own doc.
@@ -5076,6 +5077,7 @@ impl BackendRuntime {
     pub(crate) fn new(_config: &ServingConfig) -> Self {
         Self {
             free_buffers: Vec::new(),
+            wide_pool: Vec::new(),
             validated_weight_nodes: None,
             exact_activations: _config.exact_activations,
         }
@@ -5148,6 +5150,7 @@ impl BackendRuntime {
                 named,
                 outputs,
                 &mut self.free_buffers,
+                &mut self.wide_pool,
                 &mut self.validated_weight_nodes,
                 expert_sources,
             )?);
@@ -5158,6 +5161,7 @@ impl BackendRuntime {
             named,
             outputs,
             &mut self.free_buffers,
+            &mut self.wide_pool,
             &mut self.validated_weight_nodes,
             expert_sources,
         )?)

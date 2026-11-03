@@ -281,7 +281,8 @@ pub fn evaluate(
     outputs: &[NodeId],
 ) -> Result<Evaluated, TensorError> {
     let mut free_buffers: Vec<Vec<f32>> = Vec::new();
-    evaluate_pooled(program, symbols, blocks, outputs, &mut free_buffers)
+    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
+    evaluate_pooled(program, symbols, blocks, outputs, &mut free_buffers, &mut wide_pool)
 }
 
 /// Same contract as [`evaluate`], but binds [`Op::Input`] inputs by
@@ -501,8 +502,9 @@ pub fn evaluate_with_scratch(
     blocks: &[&[f32]],
     outputs: &[NodeId],
     scratch: &mut Vec<Vec<f32>>,
+    wide_pool: &mut Vec<Vec<f64>>,
 ) -> Result<Evaluated, TensorError> {
-    evaluate_pooled(program, symbols, blocks, outputs, scratch)
+    evaluate_pooled(program, symbols, blocks, outputs, scratch, wide_pool)
 }
 
 /// A [`bind::bind`]-shaped execution plan whose per-node output storage is
