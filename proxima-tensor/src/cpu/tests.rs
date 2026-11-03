@@ -14580,3 +14580,51 @@ fn float64_island_sums_squares_in_double_like_ggml_rms_norm() {
         "the fixture must separate f64 from f32 accumulation or it proves nothing"
     );
 }
+
+#[test]
+fn the_decode_loop_reuses_its_f64_island_buffers_across_calls() {
+    let (program, outputs, named) = granite_decoder_fixture();
+    let blocks: Vec<(&str, QuantizedBlock)> = named
+        .iter()
+        .map(|(name, values)| (name.as_str(), QuantizedBlock::Float32(values)))
+        .collect();
+    let mut free_buffers: Vec<Vec<f32>> = Vec::new();
+    let mut wide_pool: Vec<Vec<f64>> = Vec::new();
+    let mut validated = None;
+    for _ in 0..2 {
+        evaluate_quantized_named_with_scratch(
+            &program,
+            &GRANITE_SYMBOLS,
+            &blocks,
+            &outputs,
+            &mut free_buffers,
+            &mut wide_pool,
+            &mut validated,
+        )
+        .expect("the decode loop evaluates the granite-shaped decoder");
+    }
+    let wide_after_warmup = wide_pool.len();
+    let wide_capacity_after_warmup: usize = wide_pool.iter().map(Vec::capacity).sum();
+
+    evaluate_quantized_named_with_scratch(
+        &program,
+        &GRANITE_SYMBOLS,
+        &blocks,
+        &outputs,
+        &mut free_buffers,
+        &mut wide_pool,
+        &mut validated,
+    )
+    .expect("a warm decode call evaluates");
+
+    assert!(
+        wide_after_warmup > 0,
+        "the decoder's f64 norm islands must leave their buffers in the caller's pool"
+    );
+    assert_eq!(wide_pool.len(), wide_after_warmup);
+    assert_eq!(
+        wide_pool.iter().map(Vec::capacity).sum::<usize>(),
+        wide_capacity_after_warmup,
+        "a warm call must reuse the pooled f64 storage instead of allocating"
+    );
+}
