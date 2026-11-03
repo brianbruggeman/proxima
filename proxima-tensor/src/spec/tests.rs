@@ -603,7 +603,7 @@ fn public_builders_compose_a_one_layer_forward_program() {
         },
     );
     let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
-    let inv_head_v_dim = scalar_constant(&mut program, 1.0);
+    let inv_head_v_dim = count_constant(&mut program, 1);
     let attn_norm_weight = input_leaf(
         &mut program,
         DType::FLOAT32,
@@ -6734,7 +6734,7 @@ async fn architecture_matrix_lfm_cached_mixer_step() {
         alloc::vec![Extent::Static(L_CACHE)],
         "roll_indices",
     );
-    let inv_dim = scalar_constant(&mut program, 1.0);
+    let inv_dim = count_constant(&mut program, 1);
     let eps = input_leaf(
         &mut program,
         DType::FLOAT32,
@@ -6857,7 +6857,7 @@ async fn architecture_matrix_lfm_prefill_mixer_state() {
         "roll_indices",
     );
     let cache_position = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cache_position");
-    let inv_dim = scalar_constant(&mut program, 1.0);
+    let inv_dim = count_constant(&mut program, 1);
     let eps = scalar_constant(&mut program, 1.0e-6);
     let prefill_len = core::num::NonZeroU32::new(1).expect("prefill length is nonzero");
     let mut reference_program = program.clone();
@@ -7124,7 +7124,7 @@ fn assert_lfm_two_token_prefill_history_is_consumed() {
             value: 1.0,
         },
     );
-    let inv_dim = scalar_constant(&mut program, 1.0);
+    let inv_dim = count_constant(&mut program, 1);
     let eps = scalar_constant(&mut program, 1.0e-6);
     let prefill_len = core::num::NonZeroU32::new(2).expect("two-token prefill is nonzero");
     let (prefill_output, prefill_state) = append_short_conv_prefill_mixer(
@@ -9281,7 +9281,7 @@ async fn rmsnorm_per_head_matches_a_hand_computed_rms_norm() {
             name: Some("eps".into()),
         },
     );
-    let inv_head_dim = scalar_constant(&mut program, 0.5);
+    let inv_head_dim = count_constant(&mut program, 2);
     let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, "h")
         .expect("per-head rmsnorm lowers");
 
@@ -9337,7 +9337,7 @@ async fn rmsnorm_per_head_hand_computed_check_actually_detects_a_wrong_gamma() {
             name: Some("eps".into()),
         },
     );
-    let inv_head_dim = scalar_constant(&mut program, 0.5);
+    let inv_head_dim = count_constant(&mut program, 2);
     let output = rmsnorm_per_head(&mut program, x, gamma, inv_head_dim, eps, "h")
         .expect("per-head rmsnorm lowers");
 
@@ -10222,7 +10222,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
         alloc::vec![Extent::Static(positions), Extent::Static(1)],
         "x",
     );
-    let inv_dim = scalar_constant(&mut static_program, 1.0);
+    let inv_dim = count_constant(&mut static_program, 1);
     let eps = input_leaf(
         &mut static_program,
         DType::FLOAT32,
@@ -10237,7 +10237,7 @@ async fn qwen35_ssm_mixer_one_evaluation_matches_repeated_single_position_steps(
     );
     let one = scalar_constant(&mut static_program, 1.0);
     let inv_sqrt_key_dim = scalar_constant(&mut static_program, 1.0);
-    let inv_head_v_dim = scalar_constant(&mut static_program, 1.0);
+    let inv_head_v_dim = count_constant(&mut static_program, 1);
     let attn_norm_weight = input_leaf(
         &mut static_program,
         DType::FLOAT32,
@@ -10970,7 +10970,7 @@ fn build_ssm_mixer_test_program(output_gate: GdnOutputGate) -> (Vec<Op>, NodeId,
         alloc::vec![Extent::Symbolic(0), Extent::Static(1)],
         "x",
     );
-    let inv_dim = scalar_constant(&mut program, 1.0);
+    let inv_dim = count_constant(&mut program, 1);
     let eps = input_leaf(
         &mut program,
         DType::FLOAT32,
@@ -10985,7 +10985,7 @@ fn build_ssm_mixer_test_program(output_gate: GdnOutputGate) -> (Vec<Op>, NodeId,
     );
     let one = scalar_constant(&mut program, 1.0);
     let inv_sqrt_key_dim = scalar_constant(&mut program, 1.0);
-    let inv_head_v_dim = scalar_constant(&mut program, 1.0);
+    let inv_head_v_dim = count_constant(&mut program, 1);
     let attn_norm_weight = input_leaf(
         &mut program,
         DType::FLOAT32,
@@ -11544,7 +11544,7 @@ fn evaluate_dense_attention_test_program(
     let ffn_shape = alloc::vec![Extent::Static(1), Extent::Static(1)];
 
     let x = input_leaf(&mut program, DType::FLOAT32, scalar_shape.clone(), "x");
-    let inv_dim = scalar_constant(&mut program, 1.0);
+    let inv_dim = count_constant(&mut program, 1);
     let eps = input_leaf(
         &mut program,
         DType::FLOAT32,
@@ -11553,7 +11553,7 @@ fn evaluate_dense_attention_test_program(
     );
     let ones = scalar_constant(&mut program, 1.0);
     let inv_sqrt_attn_head_dim = scalar_constant(&mut program, 0.5);
-    let inv_attn_head_dim = scalar_constant(&mut program, 0.25);
+    let inv_attn_head_dim = count_constant(&mut program, 4);
     let cos_new = input_leaf(&mut program, DType::FLOAT32, rotary_shape.clone(), "cos");
     let sin_new = input_leaf(&mut program, DType::FLOAT32, rotary_shape, "sin");
     let group_ones = op::append(
@@ -11769,7 +11769,7 @@ fn dense_attention_only_test_inputs(
     let norm_shape = alloc::vec![Extent::Static(4)];
 
     let x = input_leaf(program, DType::FLOAT32, scalar_shape, "x");
-    let inv_dim = scalar_constant(program, 1.0);
+    let inv_dim = count_constant(program, 1);
     let eps = input_leaf(
         program,
         DType::FLOAT32,
@@ -11778,7 +11778,7 @@ fn dense_attention_only_test_inputs(
     );
     let ones = scalar_constant(program, 1.0);
     let inv_sqrt_attn_head_dim = scalar_constant(program, 0.5);
-    let inv_attn_head_dim = scalar_constant(program, 0.25);
+    let inv_attn_head_dim = count_constant(program, 4);
     let cos_new = input_leaf(program, DType::FLOAT32, rotary_shape.clone(), "cos");
     let sin_new = input_leaf(program, DType::FLOAT32, rotary_shape, "sin");
     let group_ones = op::append(
@@ -12590,7 +12590,7 @@ async fn qwen35_gdn_sequence_tail_matches_repeated_one_position_graphs() {
         alloc::vec![Extent::Static(1), Extent::Static(1)],
         "head_eps",
     );
-    let inv_head_v_dim = scalar_constant(&mut program, 0.5);
+    let inv_head_v_dim = count_constant(&mut program, 2);
     let norm_weight = input_leaf(
         &mut program,
         DType::FLOAT32,
@@ -19238,10 +19238,10 @@ mod forward_scales {
     use super::head_repeats::digest;
     use super::*;
 
-    const DENSE_PRE_CHANGE_NODES: usize = 219;
-    const DENSE_PRE_CHANGE_DIGEST: u64 = 15935147422027473347;
+    const DENSE_PRE_CHANGE_NODES: usize = 229;
+    const DENSE_PRE_CHANGE_DIGEST: u64 = 501390108459830384;
     #[cfg(not(feature = "moe-stacked-experts"))]
-    const MOE_PRE_CHANGE_NODES: usize = 291;
+    const MOE_PRE_CHANGE_NODES: usize = 301;
     #[cfg(not(feature = "moe-stacked-experts"))]
     const MOE_PRE_CHANGE_DIGEST: u64 = 12346379158203586773;
 

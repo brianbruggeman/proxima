@@ -960,7 +960,7 @@ pub(super) fn qwen35_partial_rotary_attention_fixture() -> (
         alloc::vec![Extent::Symbolic(0), Extent::Static(1)],
         "x",
     );
-    let inv_dim = scalar_constant(&mut program, 1.0);
+    let inv_dim = count_constant(&mut program, 1);
     let eps = input_leaf(
         &mut program,
         DType::FLOAT32,
