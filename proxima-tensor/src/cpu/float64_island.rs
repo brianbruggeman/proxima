@@ -1,5 +1,5 @@
 use super::*;
-use crate::Layout;
+use crate::{BodyStep, Layout};
 
 /// What [`step`] did with one bound op: nothing (the f32 path runs it), a
 /// FLOAT64 node now held in the wide buffers, or an f32 narrowing of a wide
@@ -167,7 +167,9 @@ fn accumulate_f32_elements_in_f64<B: Deref<Target = [f32]>>(
         ..
     } = &computed.kind
     else {
-        return Err(not_lowerable("only a reduce accumulates wider than its elements"));
+        return Err(not_lowerable(
+            "only a reduce accumulates wider than its elements",
+        ));
     };
     let sources: Vec<(&[f32], &Layout)> = operands
         .iter()
@@ -183,6 +185,10 @@ fn accumulate_f32_elements_in_f64<B: Deref<Target = [f32]>>(
         })
         .collect::<Result<_, _>>()?;
     output.fill(0.0);
+    if let Some(row_squares) = squared_rows(computed, element_body, &sources) {
+        sum_squared_rows_in_f64(row_squares, &computed.extents, out_layout, output);
+        return Ok(());
+    }
     let mut coordinate = vec![0u64; computed.extents.len()];
     let mut operand_values = vec![0.0f32; sources.len()];
     let mut step_values = vec![0.0f32; element_body.steps.len()];
@@ -202,4 +208,68 @@ fn accumulate_f32_elements_in_f64<B: Deref<Target = [f32]>>(
         }
     }
     Ok(())
+}
+
+/// The squared operand and its single reduced axis when the fold is a sum of
+/// squares -- the shape every norm binds to, which
+/// [`sum_squared_rows_in_f64`] sums without the generic body interpreter.
+fn squared_rows<'data>(
+    computed: &BoundOp,
+    element_body: &ComposedBody,
+    sources: &[(&'data [f32], &'data Layout)],
+) -> Option<(&'data [f32], &'data Layout, usize)> {
+    let BoundOpKind::Reduce {
+        operands,
+        output_axes,
+        ..
+    } = &computed.kind
+    else {
+        return None;
+    };
+    let squares = matches!(
+        element_body.steps.as_slice(),
+        [BodyStep { op: ScalarOp::Multiply, args }, rest @ ..]
+            if args.as_slice() == [StepArg::Operand(0), StepArg::Operand(1)]
+                && rest.iter().all(|step| step.op == ScalarOp::Identity)
+    );
+    let same_operand = matches!(operands.as_slice(), [(left, left_layout, None), (right, right_layout, None)]
+        if left == right && left_layout == right_layout);
+    let reduced: Vec<usize> = (0..computed.extents.len())
+        .filter(|axis| !output_axes.contains(&(*axis as u16)))
+        .collect();
+    let (data, layout) = *sources.first()?;
+    (squares && same_operand && reduced.len() == 1).then_some((data, layout, reduced[0]))
+}
+
+// summed strictly in order, one f64 add per element, the order ggml's scalar
+// `sum += (ggml_float)(x*x)` uses, so the f64 result matches it bit for bit
+fn sum_squared_rows_in_f64(
+    (data, layout, reduced_axis): (&[f32], &Layout, usize),
+    extents: &[u64],
+    out_layout: &Layout,
+    output: &mut [f64],
+) {
+    let width = extents[reduced_axis];
+    let stride = layout.strides[reduced_axis];
+    let row_count = extents.iter().product::<u64>() / width.max(1);
+    let mut coordinate = vec![0u64; extents.len()];
+    for _ in 0..row_count {
+        let start = layout.offset_of(&coordinate);
+        let mut sum = 0.0f64;
+        for step in 0..width as i64 {
+            let value = data[(start + step * stride) as usize];
+            sum += f64::from(value * value);
+        }
+        output[out_layout.offset_of(&coordinate) as usize] = sum;
+        for axis in (0..extents.len())
+            .rev()
+            .filter(|axis| *axis != reduced_axis)
+        {
+            coordinate[axis] += 1;
+            if coordinate[axis] < extents[axis] {
+                break;
+            }
+            coordinate[axis] = 0;
+        }
+    }
 }
