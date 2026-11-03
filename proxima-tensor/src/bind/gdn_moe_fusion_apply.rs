@@ -192,7 +192,7 @@ pub fn bind_with_fusion(
     let built = if identity_copy_alias_disabled {
         built
     } else {
-        apply_identity_copy_alias(built, outputs)
+        apply_identity_copy_alias(built, outputs, program)
     };
     Ok(built)
 }

@@ -401,6 +401,8 @@ pub(super) fn reduce_epilogue_candidates(
 ) -> Vec<(NodeId, NodeId)> {
     let reduce_flags = reduce_epilogue_source_flags(resolved);
     let reference_counts = resolved_reference_counts(resolved);
+    let dtype_of: BTreeMap<NodeId, DType> =
+        resolved.iter().map(|bound| (bound.node, bound.dtype)).collect();
     let mut candidates = Vec::new();
     for bound in resolved {
         let sources = if widened {
@@ -416,6 +418,12 @@ pub(super) fn reduce_epilogue_candidates(
             }
             if outputs.contains(&source) {
                 continue; // (b): a requested output must still materialize on its own.
+            }
+            if dtype_of.get(&source).is_some_and(|source_dtype| *source_dtype != bound.dtype) {
+                continue; // a merged op evaluates in one dtype; a convert stays its own op.
+            }
+            if bound.dtype != DType::FLOAT32 {
+                continue; // only the f32 kernels render an epilogue body.
             }
             candidates.push((bound.node, source));
         }
