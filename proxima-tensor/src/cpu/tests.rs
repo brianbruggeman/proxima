@@ -234,6 +234,7 @@ fn run_reduce_quantized_rejects_a_composed_body_wider_than_a_bare_weight_activat
             epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
             epilogue_operands: Vec::new(),
             epilogue_broadcast_axes: smallvec::smallvec![],
+            accumulator: DType::FLOAT32,
         },
     };
     let buffers: Vec<Option<Cow<'_, [f32]>>> = alloc::vec![
@@ -2355,6 +2356,7 @@ fn scan_width_unary_stride_two_matches_a_running_sum_reference() {
             },
             epilogue_operands: Vec::new(),
             epilogue_broadcast_axes: smallvec::smallvec![],
+            accumulator: DType::FLOAT32,
         },
     };
 
@@ -11013,6 +11015,7 @@ fn reduce_epilogue_only_quantized_weight_is_materialized_before_evaluation() {
                 None,
             )],
             epilogue_broadcast_axes: smallvec::smallvec![],
+            accumulator: DType::FLOAT32,
         },
     };
 
@@ -13001,6 +13004,7 @@ fn round_batched_reduce_matches_k_sequential_reduces() {
         epilogue_body,
         epilogue_operands,
         epilogue_broadcast_axes,
+        accumulator: _,
     } = bound_round0.kind.clone()
     else {
         panic!("round0 must bind to a plain Reduce before the hand-collapse below");

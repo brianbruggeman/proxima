@@ -9550,6 +9550,7 @@ mod epilogue_operand_reuse {
             epilogue_body,
             epilogue_operands,
             epilogue_broadcast_axes,
+            accumulator: _,
         } = kind
         else {
             panic!("packed_row_multi_token_op always builds a Keep::Reduce fold")

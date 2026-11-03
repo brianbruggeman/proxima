@@ -446,6 +446,13 @@ pub enum BoundOpKind {
         /// bind time rather than emit a wrong kernel (`omega::msl`'s own
         /// `EmitError` does this for Metal).
         epilogue_broadcast_axes: SmallVec<[u16; MAX_INLINE_RANK]>,
+        /// The type the fold accumulates in. Equal to the element type except for
+        /// a norm whose f32 squares the program widens to f64 before summing
+        /// ([`crate::spec::mean_of_squares`]): the widen is absorbed here and the
+        /// kernel sums in f64, ggml's `ggml_float` (`ggml-cpu/ops.cpp:3957-3960`);
+        /// the epilogue then runs its leading f64 steps up to the narrowing
+        /// identity in f64 and the rest in f32.
+        accumulator: DType,
     },
     /// `k` round-sibling folds (the same [`ScalarOp`]/[`ReduceInit`]/
     /// `operands` shape, differing only in which route each round gathers)
@@ -929,6 +936,7 @@ impl BoundOp {
                 epilogue_body,
                 epilogue_operands,
                 epilogue_broadcast_axes,
+                accumulator,
             } => BoundOpKind::Reduce {
                 element_body: element_body.clone(),
                 reduce_op: *reduce_op,
@@ -962,6 +970,7 @@ impl BoundOp {
                 // over an axis is not implemented), so this stays a plain
                 // clone rather than needing its own rebase.
                 epilogue_broadcast_axes: epilogue_broadcast_axes.clone(),
+                accumulator: *accumulator,
             },
             // unreachable in practice: `split_axis` returns `None` for
             // `RoundBatchedReduce` (see its own arm above), kept explicit

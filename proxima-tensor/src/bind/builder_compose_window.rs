@@ -830,6 +830,7 @@ pub(super) fn build_reduce_op(
             epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
             epilogue_operands: Vec::new(),
             epilogue_broadcast_axes: SmallVec::new(),
+            accumulator: reduce.dtype,
         },
     })
 }

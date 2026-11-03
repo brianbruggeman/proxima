@@ -1724,6 +1724,7 @@ pub(super) fn cached_attention_candidates(
                     epilogue_body,
                     epilogue_operands,
                     epilogue_broadcast_axes: SmallVec::new(),
+                    accumulator: DType::FLOAT32,
                 },
             };
 

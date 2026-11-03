@@ -325,6 +325,7 @@ pub(super) fn run_round_batched_reduce<B: Deref<Target = [f32]> + Sync>(
                 epilogue_body: epilogue_body.clone(),
                 epilogue_operands: epilogue_operands.clone(),
                 epilogue_broadcast_axes: epilogue_broadcast_axes.clone(),
+                accumulator: resolved.dtype,
             },
         };
         if round == 0 {

@@ -1711,6 +1711,7 @@ pub(super) fn apply_moe_round_group_fusion(
                 epilogue_body,
                 epilogue_operands,
                 epilogue_broadcast_axes,
+                accumulator: _,
             } = bound.kind
             {
                 bound.kind = BoundOpKind::RoundBatchedReduce {
