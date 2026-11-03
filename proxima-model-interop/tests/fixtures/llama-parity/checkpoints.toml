@@ -80,3 +80,13 @@ sha256 = "cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80"
 size_bytes = 1422239776
 size_note = "library/granite3.1-moe:1b, 1B-a400M MoE (expert_count 32, 8 used), Q8_0, 1.4 GB"
 present = true
+
+[[checkpoint]]
+name = "lfm2"
+path = "/Users/brianbruggeman/.lmstudio/models/LiquidAI/LFM2.5-8B-A1B-GGUF/LFM2.5-8B-A1B-Q4_K_M.gguf"
+env = "PROXIMA_ARCH_LFM2_GGUF"
+architecture = "lfm2moe"
+sha256 = "4923ec14f06b968b74d663e5949867d2d9c3bf13a20b8be1a9f9af39989b2bb0"
+size_bytes = 5155564768
+size_note = "hf.co/LiquidAI/LFM2.5-8B-A1B-GGUF:Q4_K_M via ollama pull, 5.2 GB; sha256 equals the blob name"
+present = true
