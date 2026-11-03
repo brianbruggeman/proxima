@@ -150,6 +150,11 @@ pub enum TensorError {
     )]
     NonIntegerIndices { node: NodeId, dtype: DType },
 
+    #[error(
+        "norm count node {node} is {dtype:?}; a mean of squares divides its f64 sum by an f64 count (spec::count_constant)"
+    )]
+    NormCountNotFloat64 { node: NodeId, dtype: DType },
+
     #[error("node {node} gathered_dim {dim} is out of range for the operand's rank")]
     GatheredDimOutOfRange { node: NodeId, dim: u16 },
 

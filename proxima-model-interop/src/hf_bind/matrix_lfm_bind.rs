@@ -162,14 +162,7 @@ fn architecture_matrix_lfm_global_leaves() {
             name: Some("output_norm.weight".into()),
         },
     );
-    let inverse_width = append(
-        &mut program,
-        Op::Constant {
-            dtype: DType::FLOAT32,
-            shape: Vec::new(),
-            value: 0.5,
-        },
-    );
+    let width = proxima_tensor::spec::count_constant(&mut program, 2);
     let epsilon = append(
         &mut program,
         Op::Constant {
@@ -178,9 +171,8 @@ fn architecture_matrix_lfm_global_leaves() {
             value: 0.0,
         },
     );
-    let normed =
-        proxima_tensor::spec::rmsnorm(&mut program, hidden, output_norm, inverse_width, epsilon)
-            .expect("global output norm composes from existing operations");
+    let normed = proxima_tensor::spec::rmsnorm(&mut program, hidden, output_norm, width, epsilon)
+        .expect("global output norm composes from existing operations");
     let output_weight = append(
         &mut program,
         Op::Input {
