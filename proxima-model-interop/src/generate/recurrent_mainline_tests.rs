@@ -15,7 +15,7 @@ use proxima_tensor::LoopCdMode;
 use proxima_tensor::spec::{CacheMask, LayerCacheRoots, RecurrenceConfig, RopeLayout, RopePairing};
 
 use super::LoadedModel;
-use super::ouro_fixture::{STATE_VOCABULARY, state_sensitive_ouro_gguf, tiny_ouro_gguf};
+use super::ouro_fixture::{STATE_VOCABULARY, grouped_state_sensitive_ouro_gguf, state_sensitive_ouro_gguf, tiny_ouro_gguf};
 use crate::error::InteropError;
 use crate::lowering::{KvLayout, bind_checkpoint, header_descriptor};
 use crate::profiles::family_profile;
@@ -588,7 +588,7 @@ mod resident_cuda_plans {
     use proxima_gguf::types::GgmlType;
     use proxima_tensor::spec::ModelDescriptor;
 
-    use super::{LoadedModel, ServingConfig, state_sensitive_ouro_gguf};
+    use super::{LoadedModel, ServingConfig, grouped_state_sensitive_ouro_gguf, state_sensitive_ouro_gguf};
     use crate::{NgramMapParams, SpeculativeConfig, SpeculativeDecodeStats, SpeculativeType, SpeculativeTypeSet};
     use crate::lowering::{KvLayout, header_descriptor};
     use crate::serving::{GPU_LAYERS_ALL, PromptCacheConfig};
@@ -847,6 +847,55 @@ mod resident_cuda_plans {
         assert!(verify_steps > 0, "drafts ran verify steps");
         assert_eq!(speculative, plain, "first request equals plain sampled decode");
         assert_eq!(second, plain, "second request equals plain sampled decode");
+    }
+
+    fn greedy_config() -> ServingConfig<'static> {
+        ServingConfig {
+            kv_cache_key_quant: GgmlType::F32,
+            kv_cache_value_quant: GgmlType::F32,
+            flash_attention: false,
+            temperature: 0.0,
+            speculative: SpeculativeConfig::none(),
+            ..gpu_config()
+        }
+    }
+
+    fn greedy(model: &LoadedModel<'_>, prompt: &[u32], width: Option<u16>) -> (Vec<u32>, u64) {
+        let mut stats = SpeculativeDecodeStats::default();
+        let ids = model
+            .generate_from_ids_with_speculative_stats(
+                prompt,
+                24,
+                &greedy_config(),
+                &mut |_| ControlFlow::Continue(()),
+                &mut stats,
+                width,
+            )
+            .expect("greedy decode through cuda")
+            .0;
+        (ids, stats.verify_steps)
+    }
+
+    #[proxima::test]
+    #[case::one_full_query_tile(15)]
+    #[case::one_row_past_a_tile(16)]
+    #[case::two_rows_past_a_tile(17)]
+    #[case::three_rows_past_a_tile(18)]
+    #[case::two_full_query_tiles(31)]
+    #[case::one_row_past_two_tiles(32)]
+    #[case::two_rows_past_two_tiles(33)]
+    async fn wide_forced_verify_over_grouped_heads_matches_greedy_decode(#[case] width: u16) {
+        let bytes = grouped_state_sensitive_ouro_gguf(2);
+        let model = speculative_model(&bytes);
+        let prompt = [3_u32, 9, 5, 12, 1, 7, 3, 9, 5, 12, 1, 7, 14, 2, 8, 6, 11, 4, 10];
+        let plain = greedy(&model, &prompt, None).0;
+
+        let (first, verify_steps) = greedy(&model, &prompt, Some(width));
+        let (second, _) = greedy(&model, &prompt, Some(width));
+
+        assert!(verify_steps > 0, "a forced draft of width {width} ran verify steps");
+        assert_eq!(first, plain, "width {width}: first wide verify request equals greedy decode");
+        assert_eq!(second, plain, "width {width}: second wide verify request equals greedy decode");
     }
 
 }
