@@ -4580,6 +4580,52 @@ async fn exact_policy_keeps_the_f32_prefill_attention_kernel_and_mma_stays_off(#
     assert_eq!(tiled, head_dim == 128, "the f32 tiled kernel serves only head_dim 128: {}", kernel.entry);
 }
 
+#[proxima::test]
+#[case::one_row_past_a_tile(0, 17)]
+#[case::three_rows_past_a_tile(0, 19)]
+#[case::one_row_past_two_tiles_cached(300, 33)]
+#[case::two_rows_past_two_tiles_cached(300, 34)]
+#[case::full_tile_control(300, 32)]
+async fn tiled_prefill_attention_never_stores_past_the_last_query_row(#[case] cached: usize, #[case] rows: usize) {
+    let shape = PrefillAttentionShape { cached, rows, heads: 1, groups: 2, head_dim: 128, rotary_dim: 128 };
+    let planes = prefill_attention_planes(&shape);
+    let row_width = shape.heads * shape.groups * shape.head_dim;
+    let padded_rows = rows.div_ceil(16) * 16 + 16;
+    let op = proxima_tensor::BoundOp {
+        node: NodeId(30),
+        dtype: DType::FLOAT32,
+        extents: vec![rows as u64, 1, 2, 128],
+        kind: prefill_attention_kind(&shape),
+    };
+    let exact = NumericPolicy::bit_exact().with_reassociation(true);
+    let kernel = omega::emit_cuda_with_policy(&op, &std::collections::BTreeMap::new(), exact).expect("tiled attention emits");
+    assert!(kernel.entry.contains("_tq16"), "exact policy at head_dim 128 and two groups takes the 16-row tiled body: {}", kernel.entry);
+    let driver = omega::CudaDriver::new(0).expect("a real cuda device");
+    let mut arena = driver.new_arena();
+    let dummy = [0.0_f32];
+    let bound = [cached as f32];
+    let [query_low, query_high, cached_low, cached_high, new_low, new_high, cached_values, new_values, ..] = &planes;
+    let order: Vec<&[f32]> = if cached == 0 {
+        vec![query_low, query_high, &dummy, &dummy, new_low, new_high, &dummy, new_values]
+    } else {
+        vec![query_low, query_high, cached_low, cached_high, new_low, new_high, cached_values, new_values, &bound]
+    };
+    for (index, values) in order.iter().enumerate() {
+        driver.upload_f32(&mut arena, NodeId(index as u32), values).expect("input uploads");
+    }
+
+    driver
+        .launch_f32_persistent_sized(&mut arena, &kernel, &attention_uniform_bytes(&op), padded_rows * row_width)
+        .expect("tiled attention launches");
+    let actual = driver.read_f32(&arena, NodeId(30)).expect("output reads back");
+
+    let (live, past) = actual.split_at(rows * row_width);
+    let stray = past.iter().position(|value| *value != 0.0).map(|index| (index / row_width + rows, past[index]));
+    assert_eq!(stray, None, "rows={rows}: the tiled body stored past query row {} (first stray row, value)", rows - 1);
+    let relative = peak_relative_diff(live, &prefill_attention_oracle(&shape, &planes));
+    assert!(relative < 1e-5, "rows={rows} cached={cached}: live rows are {relative} of peak from the f64 oracle");
+}
+
 const POLICY_PREFILL_TOKENS: usize = 512;
 const POLICY_PREFILL_FEATURES: usize = 1024;
 const POLICY_PREFILL_DEPTH: usize = 1024;
