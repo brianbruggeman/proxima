@@ -48,7 +48,8 @@ fn run() -> Result<(), String> {
     println!("prompt={prompt:?} max_tokens={max_tokens}");
     let decode_start = Instant::now();
     let serving_config = ServingConfig {
-        exact_activations: std::env::var("PROXIMA_EXACT_ACTIVATIONS").map_or(true, |value| value != "0"),
+        exact_activations: std::env::var("PROXIMA_EXACT_ACTIVATIONS")
+            .map_or(true, |value| value != "0"),
         ..ServingConfig::default()
     };
     let generated = model
@@ -65,6 +66,36 @@ fn run() -> Result<(), String> {
         generated.1,
         generated.0
     );
+    if let Ok(forced_text) = std::env::var("PROXIMA_FORCED_IDS") {
+        let forced: Vec<u32> = forced_text
+            .split(',')
+            .filter_map(|id| id.trim().parse().ok())
+            .collect();
+        let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+            .map_err(|error| format!("vocab: {error:?}"))?;
+        let wants_bos = vocab
+            .add_bos_token()
+            .unwrap_or_else(|| vocab.bos_token_id().is_some());
+        let prompt_ids = proxima_tokenizer::encode_with_bos_eos(&prompt, &vocab, wants_bos, false)
+            .map_err(|error| format!("tokenize: {error:?}"))?;
+        let probe_config = ServingConfig {
+            exact_activations: std::env::var("PROXIMA_EXACT_ACTIVATIONS")
+                .map_or(true, |value| value != "0"),
+            ..ServingConfig::default()
+        };
+        let rows = model
+            .teacher_forced_logits_from_ids(&prompt_ids, &forced, &probe_config)
+            .map_err(|error| format!("teacher forced logits: {error:?}"))?;
+        for (index, row) in rows.iter().enumerate().take(forced.len()) {
+            let mut ranked: Vec<(usize, f32)> = row.iter().copied().enumerate().collect();
+            ranked.sort_by(|left, right| right.1.total_cmp(&left.1).then(left.0.cmp(&right.0)));
+            ranked.truncate(5);
+            println!(
+                "forced_top5 index={index} top5={ranked:?} forced_id={} forced_logit={}",
+                forced[index], row[forced[index] as usize]
+            );
+        }
+    }
 
     #[cfg(feature = "instrument")]
     {
