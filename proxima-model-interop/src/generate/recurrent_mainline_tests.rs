@@ -15,7 +15,7 @@ use proxima_tensor::LoopCdMode;
 use proxima_tensor::spec::{CacheMask, LayerCacheRoots, RecurrenceConfig, RopeLayout, RopePairing};
 
 use super::LoadedModel;
-use super::ouro_fixture::{STATE_VOCABULARY, grouped_llama_gguf, state_sensitive_ouro_gguf, tiny_ouro_gguf};
+use super::ouro_fixture::{STATE_VOCABULARY, state_sensitive_ouro_gguf, tiny_ouro_gguf};
 use crate::error::InteropError;
 use crate::lowering::{KvLayout, bind_checkpoint, header_descriptor};
 use crate::profiles::family_profile;
@@ -588,7 +588,8 @@ mod resident_cuda_plans {
     use proxima_gguf::types::GgmlType;
     use proxima_tensor::spec::ModelDescriptor;
 
-    use super::{LoadedModel, ServingConfig, grouped_llama_gguf, state_sensitive_ouro_gguf};
+    use super::super::ouro_fixture::grouped_llama_gguf;
+    use super::{LoadedModel, ServingConfig, state_sensitive_ouro_gguf};
     use crate::{NgramMapParams, SpeculativeConfig, SpeculativeDecodeStats, SpeculativeType, SpeculativeTypeSet};
     use crate::lowering::{KvLayout, header_descriptor};
     use crate::serving::{GPU_LAYERS_ALL, PromptCacheConfig};
