@@ -344,10 +344,115 @@ pub(super) fn dot_q5_0_q8_0(weight_row: &[u8], activation_q8_0: &[u8]) -> Result
     block_dot_row::<{ q5_0::BLOCK_BYTES }>(weight_row, activation_q8_0, block_sum_q5_0_scalar)
 }
 
-pub(super) fn activation_dot_for(codec: Codec) -> ActivationDotFn {
+pub(super) type ActivationRowsFn = fn(&[u8], usize, &[u8], &mut [f32]) -> Result<(), TensorError>;
+
+pub(super) type ActivationKernels = (ActivationDotFn, ActivationRowsFn);
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c,fma")]
+unsafe fn rows_q8_0_avx2(weights: &[u8], row_bytes: usize, activation: &[u8], out: &mut [f32]) {
+    for (slot, row) in out.iter_mut().zip(weights.chunks_exact(row_bytes)) {
+        // SAFETY: avx2, f16c and fma are enabled on this function.
+        *slot = unsafe { row_q8_0_avx2(row, activation) };
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c,fma")]
+unsafe fn rows_q5_0_avx2(weights: &[u8], row_bytes: usize, activation: &[u8], out: &mut [f32]) {
+    for (slot, row) in out.iter_mut().zip(weights.chunks_exact(row_bytes)) {
+        // SAFETY: avx2, f16c and fma are enabled on this function.
+        *slot = unsafe { row_q5_0_avx2(row, activation) };
+    }
+}
+
+fn block_dot_rows<const WEIGHT_BLOCK_BYTES: usize>(
+    weights: &[u8],
+    row_bytes: usize,
+    activation_q8_0: &[u8],
+    out: &mut [f32],
+    dot_row: ActivationDotFn,
+    #[cfg(target_arch = "x86_64")] vectorized_rows: unsafe fn(&[u8], usize, &[u8], &mut [f32]),
+) -> Result<(), TensorError> {
+    let block_count = row_bytes / WEIGHT_BLOCK_BYTES;
+    if row_bytes == 0
+        || row_bytes % WEIGHT_BLOCK_BYTES != 0
+        || out.len().checked_mul(row_bytes) != Some(weights.len())
+        || activation_q8_0.len() != block_count * Q8_0_ACT_BLOCK_BYTES
+    {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight rows or q8_0 activation do not match the codec's block layout",
+        });
+    }
+    #[cfg(target_arch = "x86_64")]
+    if row_kernels_available() {
+        // SAFETY: avx2, f16c and fma were detected at runtime; shapes were checked above.
+        unsafe { vectorized_rows(weights, row_bytes, activation_q8_0, out) };
+        return Ok(());
+    }
+    for (slot, row) in out.iter_mut().zip(weights.chunks_exact(row_bytes)) {
+        *slot = dot_row(row, activation_q8_0)?;
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn rows_q8_0_q8_0(
+    weights: &[u8],
+    row_bytes: usize,
+    activation_q8_0: &[u8],
+    out: &mut [f32],
+) -> Result<(), TensorError> {
+    block_dot_rows::<{ q8_0::BLOCK_BYTES }>(
+        weights,
+        row_bytes,
+        activation_q8_0,
+        out,
+        dot_q8_0_q8_0,
+        rows_q8_0_avx2,
+    )
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn rows_q8_0_q8_0(
+    weights: &[u8],
+    row_bytes: usize,
+    activation_q8_0: &[u8],
+    out: &mut [f32],
+) -> Result<(), TensorError> {
+    block_dot_rows::<{ q8_0::BLOCK_BYTES }>(weights, row_bytes, activation_q8_0, out, dot_q8_0_q8_0)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn rows_q5_0_q8_0(
+    weights: &[u8],
+    row_bytes: usize,
+    activation_q8_0: &[u8],
+    out: &mut [f32],
+) -> Result<(), TensorError> {
+    block_dot_rows::<{ q5_0::BLOCK_BYTES }>(
+        weights,
+        row_bytes,
+        activation_q8_0,
+        out,
+        dot_q5_0_q8_0,
+        rows_q5_0_avx2,
+    )
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn rows_q5_0_q8_0(
+    weights: &[u8],
+    row_bytes: usize,
+    activation_q8_0: &[u8],
+    out: &mut [f32],
+) -> Result<(), TensorError> {
+    block_dot_rows::<{ q5_0::BLOCK_BYTES }>(weights, row_bytes, activation_q8_0, out, dot_q5_0_q8_0)
+}
+pub(super) fn activation_dot_for(codec: Codec) -> ActivationKernels {
     match codec {
-        Codec::Q5_0 => dot_q5_0_q8_0,
-        _ => dot_q8_0_q8_0,
+        Codec::Q5_0 => (dot_q5_0_q8_0, rows_q5_0_q8_0),
+        _ => (dot_q8_0_q8_0, rows_q8_0_q8_0),
     }
 }
 
@@ -357,7 +462,7 @@ pub(super) fn matmul_q8_0_activation_impl(
     activation: &[f32],
     leading_total: usize,
     session: Option<&MatmulSession<'_>>,
-    dot: ActivationDotFn,
+    (dot, rows_kernel): ActivationKernels,
 ) -> Result<Vec<f32>, TensorError> {
     if rows == 0 || !weights.len().is_multiple_of(rows) {
         return Err(TensorError::QuantizedShapeMismatch {
@@ -390,6 +495,11 @@ pub(super) fn matmul_q8_0_activation_impl(
                 }
                 Ok(())
             })
+        }
+        None if leading_total == 1 => {
+            let mut output = vec![0.0f32; rows];
+            rows_kernel(weights, row_bytes, &quantized, &mut output)?;
+            Ok(output)
         }
         None => weights.chunks_exact(row_bytes).try_fold(
             Vec::with_capacity(rows * leading_total),
@@ -641,6 +751,52 @@ mod tests {
             let q8_ours = dot_q8_0_q8_0(&q8_row, &activation)
                 .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
             prop_assert_eq!(q8_ours.to_bits(), q8_expected.to_bits());
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn batched_rows_equal_the_per_row_dots_bit_for_bit(
+            raw in prop::collection::vec(any::<u8>(), 6 * 5 * q5_0::BLOCK_BYTES),
+            raw_q8 in prop::collection::vec(any::<u8>(), 6 * 5 * q8_0::BLOCK_BYTES),
+            x in prop::collection::vec(-4.0f32..4.0f32, 5 * 32),
+        ) {
+            let mut activation = vec![0u8; 5 * Q8_0_ACT_BLOCK_BYTES];
+            prop_assert!(quantize_row_q8_0_activation(&x, &mut activation).is_ok());
+
+            let q5_weights: Vec<u8> = raw
+                .chunks(q5_0::BLOCK_BYTES)
+                .flat_map(|block| finite_scale(block.to_vec()))
+                .collect();
+            let q5_row_bytes = 5 * q5_0::BLOCK_BYTES;
+            let mut q5_batched = vec![0.0f32; 6];
+            prop_assert!(rows_q5_0_q8_0(&q5_weights, q5_row_bytes, &activation, &mut q5_batched).is_ok());
+            for (row, batched) in q5_weights.chunks(q5_row_bytes).zip(&q5_batched) {
+                let single = dot_q5_0_q8_0(row, &activation)
+                    .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
+                prop_assert_eq!(single.to_bits(), batched.to_bits());
+            }
+
+            let q8_weights: Vec<u8> = raw_q8
+                .chunks(q8_0::BLOCK_BYTES)
+                .flat_map(|block| finite_scale(block.to_vec()))
+                .collect();
+            let q8_row_bytes = 5 * q8_0::BLOCK_BYTES;
+            let mut q8_batched = vec![0.0f32; 6];
+            prop_assert!(rows_q8_0_q8_0(&q8_weights, q8_row_bytes, &activation, &mut q8_batched).is_ok());
+            for (row, batched) in q8_weights.chunks(q8_row_bytes).zip(&q8_batched) {
+                let single = dot_q8_0_q8_0(row, &activation)
+                    .map_err(|error| TestCaseError::fail(format!("{error:?}")))?;
+                prop_assert_eq!(single.to_bits(), batched.to_bits());
+            }
+        }
+
+        #[test]
+        fn batched_rows_reject_shapes_that_do_not_match_the_block_layout(rows in 1usize..4) {
+            let weights = vec![0u8; rows * 3 * q5_0::BLOCK_BYTES];
+            let activation = vec![0u8; 2 * Q8_0_ACT_BLOCK_BYTES];
+            let mut out = vec![0.0f32; rows];
+            prop_assert!(rows_q5_0_q8_0(&weights, 3 * q5_0::BLOCK_BYTES, &activation, &mut out).is_err());
         }
     }
 }
