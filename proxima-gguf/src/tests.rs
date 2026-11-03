@@ -504,6 +504,39 @@ mod real_file {
     /// unlike [`FIXTURE_PATH`]'s dense 7B model, which has none.
     const Q8_0_FIXTURE_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO-GGUF/Nous-Hermes-2-Mixtral-8x7B-DPO.Q4_K_S.gguf";
 
+    const OPENCHAT_BYTES: u64 = 4_140_385_376;
+
+    /// Qwen3-0.6B `Q8_0`: every weight matrix is `Q8_0`, which the type-selected
+    /// slice test needs and a `Q4_K_S` checkpoint lacks.
+    fn q8_0_path() -> std::path::PathBuf {
+        crate::checkpoint_resolver::require_checkpoint(
+            "PROXIMA_Q8_0_GGUF",
+            "/Users/brianbruggeman/models/qwen3-0.6b-q8_0.gguf",
+            639_446_688,
+        )
+    }
+
+    /// Qwen2.5-7B-Instruct `Q3_K_M`, which stores both `Q6_K` and `Q5_K` tensors.
+    fn q3_k_m_path() -> std::path::PathBuf {
+        crate::checkpoint_resolver::require_checkpoint(
+            "PROXIMA_Q3_K_M_GGUF",
+            "/Users/brianbruggeman/models/qwen2.5-7b-instruct-q3_k_m.gguf",
+            3_808_391_072,
+        )
+    }
+
+    fn openchat_path() -> std::path::PathBuf {
+        crate::checkpoint_resolver::require_checkpoint("PROXIMA_OPENCHAT_GGUF", FIXTURE_PATH, OPENCHAT_BYTES)
+    }
+
+    fn mixtral_path() -> std::path::PathBuf {
+        crate::checkpoint_resolver::require_checkpoint(
+            "PROXIMA_MIXTRAL_GGUF",
+            Q8_0_FIXTURE_PATH,
+            0,
+        )
+    }
+
     /// Sample cap in bytes, rounded down to a whole number of `Q4_K`
     /// blocks: 2 MiB gives ~14.5k blocks, ~3.7M weights -- enough for a
     /// real histogram without reading gigabytes.
@@ -511,11 +544,8 @@ mod real_file {
 
     #[test]
     fn dequantizes_a_real_q4_k_tensor_slice() {
-        let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
+        let path = openchat_path();
+        let path = path.as_path();
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -607,11 +637,8 @@ mod real_file {
 
     #[test]
     fn dequantizes_a_real_q8_0_tensor_slice() {
-        let path = std::path::Path::new(Q8_0_FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {Q8_0_FIXTURE_PATH}");
-            return;
-        }
+        let path = q8_0_path();
+        let path = path.as_path();
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -714,11 +741,8 @@ mod real_file {
 
     #[test]
     fn dequantizes_a_real_q6_k_tensor_slice() {
-        let path = std::path::Path::new(Q8_0_FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {Q8_0_FIXTURE_PATH}");
-            return;
-        }
+        let path = q3_k_m_path();
+        let path = path.as_path();
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -810,11 +834,8 @@ mod real_file {
 
     #[test]
     fn dequantizes_a_real_q5_k_tensor_slice() {
-        let path = std::path::Path::new(Q8_0_FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {Q8_0_FIXTURE_PATH}");
-            return;
-        }
+        let path = q3_k_m_path();
+        let path = path.as_path();
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -910,11 +931,8 @@ mod real_file {
     /// gap shows up as a named, counted `GgmlType`, not a silent skip.
     #[test]
     fn every_mixtral_tensor_has_a_codec_or_is_native() {
-        let path = std::path::Path::new(Q8_0_FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {Q8_0_FIXTURE_PATH}");
-            return;
-        }
+        let path = mixtral_path();
+        let path = path.as_path();
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
 
@@ -1142,12 +1160,10 @@ mod real_file {
     /// the "plain `Q4_K`" sample for those two roles.
     #[test]
     fn role_precision_error_vs_bytes_curve_from_real_tensors() {
-        let mixtral_path = std::path::Path::new(Q8_0_FIXTURE_PATH);
-        let openchat_path = std::path::Path::new(FIXTURE_PATH);
-        if !mixtral_path.exists() || !openchat_path.exists() {
-            eprintln!("skipping: host-local gguf fixtures not both present");
-            return;
-        }
+        let mixtral_path = mixtral_path();
+        let mixtral_path = mixtral_path.as_path();
+        let openchat_path = openchat_path();
+        let openchat_path = openchat_path.as_path();
 
         let mut mixtral_file = std::fs::File::open(mixtral_path).expect("open mixtral fixture");
         let mixtral_len = mixtral_file.metadata().expect("stat mixtral fixture").len();
@@ -1262,11 +1278,8 @@ mod real_file {
     /// concatenated weight buffer (zero-copy only if adjacent).
     #[test]
     fn ffn_gate_and_up_adjacency_per_layer() {
-        let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
+        let path = openchat_path();
+        let path = path.as_path();
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
@@ -1332,11 +1345,8 @@ mod real_file {
     /// adjacency/codec claim -- see `debug!`'s own fields for the numbers.
     #[test]
     fn attn_q_k_v_adjacency_per_layer() {
-        let path = std::path::Path::new(FIXTURE_PATH);
-        if !path.exists() {
-            eprintln!("skipping: no host-local gguf fixture at {FIXTURE_PATH}");
-            return;
-        }
+        let path = openchat_path();
+        let path = path.as_path();
 
         let mut file = std::fs::File::open(path).expect("open host-local gguf fixture");
         let file_len = file.metadata().expect("stat gguf fixture").len();
