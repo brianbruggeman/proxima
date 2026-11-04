@@ -6168,7 +6168,7 @@ fn a_cached_decode_step_matches_the_uncached_forward_pass_exactly() {
     uncached_named.push(("output.weight", lm_head.as_slice()));
 
     let uncached_root = NodeId(uncached_program.len() as u32 - 1);
-    let uncached_evaluated = crate::cpu::evaluate_named(
+    let uncached_evaluated = crate::test_support::evaluate_named_online_f32(
         &uncached_program,
         &[SEQUENCE as u64],
         &uncached_named,
@@ -14247,7 +14247,7 @@ mod gemma4_synthetic_parity {
             named.push(("wv", wv_data.as_slice()));
         }
 
-        let evaluated = crate::cpu::evaluate_named(&program, &[seq as u64], &named, &[output])
+        let evaluated = crate::test_support::evaluate_named_online_f32(&program, &[seq as u64], &named, &[output])
             .expect("isolated attention mixer evaluates");
         evaluated
             .get(output)
@@ -14330,7 +14330,7 @@ mod gemma4_synthetic_parity {
             ("blk.0.ffn_up_exps.weight", weights.up_exps.as_slice()),
             ("blk.0.ffn_down_exps.weight", weights.down_exps.as_slice()),
         ];
-        let evaluated = crate::cpu::evaluate_named(&program, &[seq as u64], &named, &[output])
+        let evaluated = crate::test_support::evaluate_named_online_f32(&program, &[seq as u64], &named, &[output])
             .expect("isolated routed expert ffn evaluates");
         evaluated
             .get(output)
@@ -14414,7 +14414,7 @@ mod gemma4_synthetic_parity {
                     ("blk.0.ffn_up.weight", layer0.ffn_up.as_slice()),
                     ("blk.0.ffn_down.weight", layer0.ffn_down.as_slice()),
                 ];
-                let evaluated = crate::cpu::evaluate_named(&program, &[1], &named, &[output])
+                let evaluated = crate::test_support::evaluate_named_online_f32(&program, &[1], &named, &[output])
                     .expect("isolated dense ffn evaluates");
                 evaluated
                     .get(output)
@@ -14670,7 +14670,7 @@ mod gemma4_synthetic_parity {
                 layer1.down_exps_scale.as_slice()
             ),
         ];
-        let evaluated = crate::cpu::evaluate_named(&program, &[SEQ as u64], &named, &[logits])
+        let evaluated = crate::test_support::evaluate_named_online_f32(&program, &[SEQ as u64], &named, &[logits])
             .expect("the full gemma4-shaped program evaluates");
         let engine_logits = evaluated.get(logits).expect("logits present").0.to_vec();
 
@@ -15064,7 +15064,7 @@ mod gemma4_synthetic_parity {
         zero_named.push(("kv_cache.1.k_odd", zero_even_odd.as_slice()));
         zero_named.push(("kv_cache.1.v", zero_v.as_slice()));
         let symbols = [SEQ as u64, SEQ as u64];
-        let zero_evaluated = crate::cpu::evaluate_named(&program, &symbols, &zero_named, &[logits])
+        let zero_evaluated = crate::test_support::evaluate_named_online_f32(&program, &symbols, &zero_named, &[logits])
             .expect("zero-cache decode-loop-realistic call evaluates");
         let zero_logits = zero_evaluated
             .get(logits)
@@ -15085,7 +15085,7 @@ mod gemma4_synthetic_parity {
         folded_named.push(("kv_cache.1.k_odd", layer1_k_odd.as_slice()));
         folded_named.push(("kv_cache.1.v", layer1_v.as_slice()));
         let folded_evaluated =
-            crate::cpu::evaluate_named(&program, &symbols, &folded_named, &[logits])
+            crate::test_support::evaluate_named_online_f32(&program, &symbols, &folded_named, &[logits])
                 .expect("self-folded merged-cache call evaluates");
         let folded_logits = folded_evaluated
             .get(logits)
@@ -15384,7 +15384,7 @@ mod gemma4_synthetic_parity {
         named.push(("kv_cache.1.v", zero_v.as_slice()));
 
         let symbols = [SEQ as u64, SEQ as u64];
-        let evaluated = crate::cpu::evaluate_named(&program, &symbols, &named, &[logits])
+        let evaluated = crate::test_support::evaluate_named_online_f32(&program, &symbols, &named, &[logits])
             .expect("two-range decode-loop-realistic call evaluates");
         let engine_logits = evaluated.get(logits).expect("logits present").0.to_vec();
         let diff = max_abs_diff(&engine_logits, &reference_logits);
@@ -16366,7 +16366,7 @@ mod gemma4_synthetic_parity {
             .expect("the cacheless gemma4-shaped shared-kv program lowers");
 
         let cacheless_symbols = [SEQ as u64];
-        let cacheless_evaluated = crate::cpu::evaluate_named(
+        let cacheless_evaluated = crate::test_support::evaluate_named_online_f32(
             &cacheless_program,
             &cacheless_symbols,
             &named,
@@ -16419,7 +16419,7 @@ mod gemma4_synthetic_parity {
 
         let cached_symbols = [SEQ as u64, SEQ as u64];
         let cached_evaluated =
-            crate::cpu::evaluate_named(&cached_program, &cached_symbols, &named, &[cached_logits])
+            crate::test_support::evaluate_named_online_f32(&cached_program, &cached_symbols, &named, &[cached_logits])
                 .expect("two-range shared-kv call evaluates");
         let cached_logits_values = cached_evaluated
             .get(cached_logits)
@@ -16747,7 +16747,7 @@ mod gemma4_synthetic_parity {
         named.push(("kv_cache.1.v", zero_v.as_slice()));
 
         let symbols = [SEQ as u64, SEQ as u64];
-        let evaluated = crate::cpu::evaluate_named(&program, &symbols, &named, &[logits])
+        let evaluated = crate::test_support::evaluate_named_online_f32(&program, &symbols, &named, &[logits])
             .expect("build_forward's padded-mask program evaluates");
         let engine_logits = evaluated.get(logits).expect("logits present").0.to_vec();
         let diff = max_abs_diff(&engine_logits, &reference_logits);
@@ -17161,7 +17161,7 @@ mod gemma4_synthetic_parity {
             step1_roots.push(*value);
         }
         let step1_evaluated =
-            crate::cpu::evaluate_named(&program, &step1_symbols, &step1_named, &step1_roots)
+            crate::test_support::evaluate_named_online_f32(&program, &step1_symbols, &step1_named, &step1_roots)
                 .expect("two-range decode step 1 evaluates");
         let layer0_k_even = step1_evaluated
             .get(cache_roots[0].0)
@@ -17215,7 +17215,7 @@ mod gemma4_synthetic_parity {
         step2_named.push(("kv_cache.1.v", layer1_v.as_slice()));
         let step2_symbols = [1u64, 2u64];
         let step2_evaluated =
-            crate::cpu::evaluate_named(&program, &step2_symbols, &step2_named, &[logits])
+            crate::test_support::evaluate_named_online_f32(&program, &step2_symbols, &step2_named, &[logits])
                 .expect("two-range decode step 2 evaluates");
         let step2_logits = step2_evaluated
             .get(logits)
@@ -17482,7 +17482,7 @@ mod gemma4_synthetic_parity {
         one_shot_named.push(("kv_cache.1.k_odd", empty.as_slice()));
         one_shot_named.push(("kv_cache.1.v", empty.as_slice()));
         let one_shot_symbols = [SEQ as u64, 0u64];
-        let one_shot_evaluated = crate::cpu::evaluate_named(
+        let one_shot_evaluated = crate::test_support::evaluate_named_online_f32(
             &program_all,
             &one_shot_symbols,
             &one_shot_named,
@@ -17559,7 +17559,7 @@ mod gemma4_synthetic_parity {
                 step_roots.push(*value);
             }
             let step_evaluated =
-                crate::cpu::evaluate_named(&program_last, &step_symbols, &step_named, &step_roots)
+                crate::test_support::evaluate_named_online_f32(&program_last, &step_symbols, &step_named, &step_roots)
                     .unwrap_or_else(|error| {
                         panic!("incremental decode step {step} (id={id}) evaluates: {error:?}")
                     });
@@ -17903,7 +17903,7 @@ mod gemma4_synthetic_parity {
                 for (even, odd, value) in roots {
                     step_roots.extend([*even, *odd, *value]);
                 }
-                let evaluated = crate::cpu::evaluate_named(program, &symbols, &named, &step_roots)
+                let evaluated = crate::test_support::evaluate_named_online_f32(program, &symbols, &named, &step_roots)
                     .expect("the decode step evaluates");
                 let step_logits = evaluated.get(logits).expect("logits present").0.to_vec();
                 let fresh: Vec<[Vec<f32>; 3]> = roots
@@ -18159,7 +18159,7 @@ mod gemma4_synthetic_parity {
             ("wq", weights.wq.as_slice()),
         ];
         let evaluated =
-            crate::cpu::evaluate_named(&program, &[1], &named, &[q_raw]).expect("q_raw evaluates");
+            crate::test_support::evaluate_named_online_f32(&program, &[1], &named, &[q_raw]).expect("q_raw evaluates");
         let engine_q = evaluated.get(q_raw).expect("q_raw present").0.to_vec();
 
         let mut reference_q = alloc::vec![0.0f32; QUERY_HEADS * HEAD_DIM];
@@ -18241,7 +18241,7 @@ mod gemma4_synthetic_parity {
             ("attended", attended.as_slice()),
             ("wo", weights.wo.as_slice()),
         ];
-        let evaluated = crate::cpu::evaluate_named(&program, &[1], &named, &[attn_out])
+        let evaluated = crate::test_support::evaluate_named_online_f32(&program, &[1], &named, &[attn_out])
             .expect("attn_out evaluates");
         let engine_out = evaluated
             .get(attn_out)
@@ -18512,7 +18512,7 @@ mod gemma4_synthetic_parity {
             ("k_odd", k_odd.as_slice()),
             ("v", v.as_slice()),
         ];
-        let evaluated = crate::cpu::evaluate_named(&program, &[1], &named, &[attended])
+        let evaluated = crate::test_support::evaluate_named_online_f32(&program, &[1], &named, &[attended])
             .expect("attended evaluates");
         let engine_attended = evaluated
             .get(attended)
@@ -18796,7 +18796,7 @@ mod gemma4_synthetic_parity {
             ("wv", weights.wv.as_ref().expect("sliding").as_slice()),
         ];
         let evaluated =
-            crate::cpu::evaluate_named(&program, &[1], &named, &[normed, q_raw, q, k_raw, k, v])
+            crate::test_support::evaluate_named_online_f32(&program, &[1], &named, &[normed, q_raw, q, k_raw, k, v])
                 .expect("intermediate taps evaluate");
 
         let engine_normed = evaluated.get(normed).expect("normed present").0.to_vec();
@@ -19120,7 +19120,7 @@ mod gemma4_synthetic_parity {
                 ("wv_z", wv_data.as_slice()),
             ];
 
-            let evaluated = crate::cpu::evaluate_named(
+            let evaluated = crate::test_support::evaluate_named_online_f32(
                 &program,
                 &[seq as u64],
                 &named,
@@ -22754,4 +22754,21 @@ mod flash_attention_worked_example {
             "the f32 online form must stay measurably off the tiled arithmetic, found {one_chunk_form}"
         );
     }
+}
+
+#[test]
+fn the_cacheless_forward_pass_binds_one_fused_attention_per_layer_under_the_default_policy() {
+    use crate::bind::{BoundOpKind, bind_with_fusion};
+    use crate::numeric::NumericPolicy;
+    let program = gqa_forward_program(128, 64, 172, 8, 4, 16, 2, 0, 0)
+        .expect("the forward pass lowers to a program");
+    let root = NodeId(program.len() as u32 - 1);
+    let shapes = crate::shape::infer(&program, &[5]).expect("shapes infer");
+    let bound = bind_with_fusion(&program, &shapes, &[root], true, NumericPolicy::default())
+        .expect("default policy binds");
+    let fused = bound
+        .iter()
+        .filter(|op| matches!(op.kind, BoundOpKind::CachedAttention { .. }))
+        .count();
+    assert_eq!(fused, 2, "one fused attention for each of the two layers");
 }

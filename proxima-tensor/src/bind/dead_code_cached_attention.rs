@@ -2027,9 +2027,10 @@ pub(super) fn cached_attention_single_range_candidates(
         let [(mask, _), (negative_infinity, _), (scores_scaled, _)] = mask_parts else {
             continue;
         };
-        let Some(cached_len_node) = exact_merged_causal_mask_cached_len(program, *mask) else {
+        let cached_len_node = exact_merged_causal_mask_cached_len(program, *mask);
+        if cached_len_node.is_none() && !is_exact_causal_mask(program, *mask) {
             continue;
-        };
+        }
         if constant_value(program, *negative_infinity) != Some(f32::NEG_INFINITY) {
             continue;
         }
@@ -2120,17 +2121,19 @@ pub(super) fn cached_attention_single_range_candidates(
         // (`exact_merged_causal_mask_cached_len` captured it above as
         // `cached_len_node`) -- carried through as this op's ninth operand
         // and read at execution time, never baked from a shape difference.
-        if !shapes.of(cached_len_node).is_empty() {
+        if cached_len_node.is_some_and(|node| !shapes.of(node).is_empty()) {
             continue;
         }
-        let cached_len_operand = (
-            cached_len_node,
-            Layout {
-                base: 0,
-                strides: SmallVec::new(),
-            },
-            None,
-        );
+        let cached_len_operand = cached_len_node.map(|node| {
+            (
+                node,
+                Layout {
+                    base: 0,
+                    strides: SmallVec::new(),
+                },
+                None,
+            )
+        });
         let pair_dim = query_shape[3];
         // Rank 5, matching `key_strides`/`value_strides` below: the fused
         // reduce's own iteration space is `[s, t, kv_heads, query_groups,
@@ -2180,7 +2183,7 @@ pub(super) fn cached_attention_single_range_candidates(
         let dependencies = dependencies
             .difference(&source_nodes.into_iter().collect())
             .copied()
-            .filter(|node| *node != cached_len_node)
+            .filter(|node| Some(*node) != cached_len_node)
             .collect::<BTreeSet<_>>();
         if dependencies
             .iter()
@@ -2212,7 +2215,7 @@ pub(super) fn cached_attention_single_range_candidates(
         if !discovery && !resolved.iter().any(|bound| bound.node == output) {
             continue;
         }
-        operands.push(cached_len_operand);
+        operands.extend(cached_len_operand);
         let fused = BoundOp {
             node: output,
             dtype: DType::FLOAT32,
