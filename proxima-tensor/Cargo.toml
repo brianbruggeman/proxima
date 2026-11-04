@@ -409,3 +409,7 @@ proxima-build.workspace = true
 [[example]]
 name = "cpu_probes"
 required-features = ["test-support"]
+
+[[bench]]
+name = "bench_q8_0_activation_matmul"
+harness = false

@@ -8,7 +8,7 @@ use core::arch::x86_64::{
     _mm256_castsi128_si256, _mm256_cmpeq_epi8, _mm256_cvtepi32_ps, _mm256_extractf128_ps,
     _mm256_fmadd_ps, _mm256_inserti128_si256, _mm256_loadu_si256, _mm256_madd_epi16,
     _mm256_maddubs_epi16, _mm256_set1_epi8, _mm256_set1_epi16, _mm256_set1_epi32, _mm256_set1_ps,
-    _mm256_setr_epi8, _mm256_setzero_ps, _mm256_shuffle_epi8, _mm256_sign_epi8, _mm256_sub_epi8,
+    _mm256_setr_epi8, _mm256_setzero_ps, _mm256_shuffle_epi8, _mm256_storeu_si256, _mm256_loadu_ps, _mm256_andnot_ps, _mm256_max_ps, _mm256_cvtps_epi32, _mm256_packs_epi16, _mm256_packs_epi32, _mm256_permutevar8x32_epi32, _mm256_setr_epi32, _mm_max_ps, _mm_max_ss, _mm256_sign_epi8, _mm256_sub_epi8, _mm256_mul_ps,
 };
 
 #[cfg(all(test, target_arch = "x86_64"))]
@@ -46,6 +46,12 @@ pub(super) fn quantize_row_q8_0_activation(
         .iter()
         .zip(output.as_chunks_mut::<Q8_0_ACT_BLOCK_BYTES>().0.iter_mut())
     {
+        #[cfg(target_arch = "x86_64")]
+        if std::is_x86_feature_detected!("avx2") {
+            // SAFETY: avx2 was detected at runtime.
+            unsafe { quantize_block_avx2(block, packed) };
+            continue;
+        }
         quantize_activation_block(block, packed);
     }
     Ok(())
@@ -64,6 +70,49 @@ fn activation_reciprocal(amax: f32) -> f32 {
 fn activation_reciprocal(amax: f32) -> f32 {
     if amax == 0.0 { 0.0 } else { 127.0 / amax }
 }
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn horizontal_max_f32(lanes: __m256) -> f32 {
+    let folded = _mm_max_ps(_mm256_extractf128_ps(lanes, 1), _mm256_castps256_ps128(lanes));
+    let folded = _mm_max_ps(folded, _mm_movehl_ps(folded, folded));
+    _mm_cvtss_f32(_mm_max_ss(folded, _mm_movehdup_ps(folded)))
+}
+
+// same arithmetic as `quantize_activation_block`: |x| max, `x * inverse`, round half to
+// even (`cvtps_epi32` under the default rounding mode), narrowed with saturation
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn quantize_block_avx2(block: &[f32; BLOCK_ELEMENTS], packed: &mut [u8; Q8_0_ACT_BLOCK_BYTES]) {
+    // SAFETY: avx2 is enabled; `block` is 32 readable floats and `packed[2..]` 32 writable bytes.
+    unsafe {
+        let sign_mask = _mm256_set1_ps(-0.0);
+        let lanes = [
+            _mm256_loadu_ps(block.as_ptr()),
+            _mm256_loadu_ps(block.as_ptr().add(8)),
+            _mm256_loadu_ps(block.as_ptr().add(16)),
+            _mm256_loadu_ps(block.as_ptr().add(24)),
+        ];
+        let magnitudes = lanes.map(|lane| _mm256_andnot_ps(sign_mask, lane));
+        let widest = _mm256_max_ps(
+            _mm256_max_ps(magnitudes[0], magnitudes[1]),
+            _mm256_max_ps(magnitudes[2], magnitudes[3]),
+        );
+        let amax = horizontal_max_f32(widest);
+        let inverse = _mm256_set1_ps(activation_reciprocal(amax));
+        let codes = lanes.map(|lane| _mm256_cvtps_epi32(_mm256_mul_ps(lane, inverse)));
+        let narrowed = _mm256_packs_epi16(
+            _mm256_packs_epi32(codes[0], codes[1]),
+            _mm256_packs_epi32(codes[2], codes[3]),
+        );
+        let ordered = _mm256_permutevar8x32_epi32(
+            narrowed,
+            _mm256_setr_epi32(0, 4, 1, 5, 2, 6, 3, 7),
+        );
+        _mm256_storeu_si256(packed[2..].as_mut_ptr().cast(), ordered);
+        packed[..2].copy_from_slice(&half::f16::from_f32(amax / 127.0).to_le_bytes());
+    }
+}
+
 
 fn quantize_activation_block(
     block: &[f32; BLOCK_ELEMENTS],
@@ -140,12 +189,19 @@ unsafe fn signed_dot(weights: __m256i, activations: __m256i) -> __m256i {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
-unsafe fn block_lanes_q8_0_avx2(weight_block: &[u8], activation_block: &[u8]) -> __m256i {
+unsafe fn unpack_q8_0_codes(weight_block: &[u8]) -> __m256i {
     let weight_codes = &weight_block[2..2 + BLOCK_ELEMENTS];
+    // SAFETY: the slice is exactly 32 readable bytes; loadu needs no alignment.
+    unsafe { _mm256_loadu_si256(weight_codes.as_ptr().cast()) }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn block_lanes_q8_0_avx2(weight_block: &[u8], activation_block: &[u8]) -> __m256i {
     let activation_codes = &activation_block[2..2 + BLOCK_ELEMENTS];
-    // SAFETY: both slices are exactly 32 readable bytes; loadu needs no alignment.
+    // SAFETY: avx2 is enabled; the slice is exactly 32 readable bytes.
     unsafe {
-        let weights = _mm256_loadu_si256(weight_codes.as_ptr().cast());
+        let weights = unpack_q8_0_codes(weight_block);
         let activations = _mm256_loadu_si256(activation_codes.as_ptr().cast());
         signed_dot(weights, activations)
     }
@@ -154,6 +210,18 @@ unsafe fn block_lanes_q8_0_avx2(weight_block: &[u8], activation_block: &[u8]) ->
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn block_lanes_q5_0_avx2(weight_block: &[u8], activation_block: &[u8]) -> __m256i {
+    let activation_codes = &activation_block[2..2 + BLOCK_ELEMENTS];
+    // SAFETY: avx2 is enabled; the slice is exactly 32 readable bytes.
+    unsafe {
+        let weights = unpack_q5_0_codes(weight_block);
+        let activations = _mm256_loadu_si256(activation_codes.as_ptr().cast());
+        signed_dot(weights, activations)
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn unpack_q5_0_codes(weight_block: &[u8]) -> __m256i {
     let high_bits = i32::from_le_bytes([
         weight_block[2],
         weight_block[3],
@@ -161,7 +229,6 @@ unsafe fn block_lanes_q5_0_avx2(weight_block: &[u8], activation_block: &[u8]) ->
         weight_block[5],
     ]);
     let nibbles = &weight_block[6..6 + BLOCK_ELEMENTS / 2];
-    let activation_codes = &activation_block[2..2 + BLOCK_ELEMENTS];
     let spread = _mm256_shuffle_epi8(
         _mm256_set1_epi32(high_bits),
         _mm256_setr_epi8(
@@ -175,16 +242,14 @@ unsafe fn block_lanes_q5_0_avx2(weight_block: &[u8], activation_block: &[u8]) ->
     );
     let bit_set = _mm256_cmpeq_epi8(_mm256_and_si256(spread, bit_masks), bit_masks);
     let missing_fifth_bit = _mm256_andnot_si256(bit_set, _mm256_set1_epi8(16));
-    // SAFETY: `nibbles` is 16 readable bytes and `activation_codes` 32; loadu needs no alignment.
+    // SAFETY: `nibbles` is 16 readable bytes; loadu needs no alignment.
     unsafe {
         let packed = _mm_loadu_si128(nibbles.as_ptr().cast());
         let low_mask = _mm_set1_epi8(0x0f);
         let low = _mm_and_si128(packed, low_mask);
         let high = _mm_and_si128(_mm_srli_epi16(packed, 4), low_mask);
         let codes = _mm256_inserti128_si256(_mm256_castsi128_si256(low), high, 1);
-        let weights = _mm256_sub_epi8(codes, missing_fifth_bit);
-        let activations = _mm256_loadu_si256(activation_codes.as_ptr().cast());
-        signed_dot(weights, activations)
+        _mm256_sub_epi8(codes, missing_fifth_bit)
     }
 }
 
@@ -346,7 +411,9 @@ pub(super) fn dot_q5_0_q8_0(weight_row: &[u8], activation_q8_0: &[u8]) -> Result
 
 pub(super) type ActivationRowsFn = fn(&[u8], usize, &[u8], &mut [f32]) -> Result<(), TensorError>;
 
-pub(super) type ActivationKernels = (ActivationDotFn, ActivationRowsFn);
+
+
+pub(super) type ActivationKernels = (ActivationDotFn, ActivationRowsFn, ActivationUnitsFn);
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,f16c,fma")]
@@ -364,6 +431,252 @@ unsafe fn rows_q5_0_avx2(weights: &[u8], row_bytes: usize, activation: &[u8], ou
         // SAFETY: avx2, f16c and fma are enabled on this function.
         *slot = unsafe { row_q5_0_avx2(row, activation) };
     }
+}
+
+pub(super) struct UnitOperands<'a> {
+    pub(super) weight_rows: &'a [u8],
+    pub(super) row_bytes: usize,
+    pub(super) activations: &'a [u8],
+    pub(super) activation_row_bytes: usize,
+    pub(super) activation_scales: &'a [f32],
+    pub(super) positions: usize,
+}
+
+impl UnitOperands<'_> {
+    fn rows(&self) -> usize {
+        self.weight_rows.len() / self.row_bytes
+    }
+
+    fn blocks(&self) -> usize {
+        self.activation_row_bytes / Q8_0_ACT_BLOCK_BYTES
+    }
+
+    fn is_consistent(&self, weight_block_bytes: usize, out_len: usize) -> bool {
+        self.row_bytes != 0
+            && self.row_bytes.is_multiple_of(weight_block_bytes)
+            && self.weight_rows.len().is_multiple_of(self.row_bytes)
+            && self.activation_row_bytes == self.row_bytes / weight_block_bytes * Q8_0_ACT_BLOCK_BYTES
+            && self.activations.len() == self.positions * self.activation_row_bytes
+            && self.activation_scales.len() == self.positions * self.blocks()
+            && out_len == self.rows() * self.positions
+    }
+}
+
+pub(super) type ActivationUnitsFn = fn(&UnitOperands<'_>, &mut [f32]) -> Result<(), TensorError>;
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2")]
+unsafe fn unpack_weight_codes<const FIVE_BIT: bool>(weight_block: &[u8]) -> __m256i {
+    // SAFETY: avx2 is enabled on this function.
+    unsafe {
+        if FIVE_BIT {
+            unpack_q5_0_codes(weight_block)
+        } else {
+            unpack_q8_0_codes(weight_block)
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn f16_bits_to_f32(bytes: &[u8]) -> f32 {
+    let bits = i32::from(u16::from_le_bytes([bytes[0], bytes[1]]));
+    _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(bits)))
+}
+
+// weight rows unpacked once per unit (not once per activation row): sign-extended codes,
+// their magnitudes, and the f16 scales widened to f32, so the tile loop below is loads + dots.
+#[cfg(target_arch = "x86_64")]
+struct UnpackedRows {
+    codes: Vec<u8>,
+    magnitudes: Vec<u8>,
+    scales: Vec<f32>,
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn unpack_rows<const FIVE_BIT: bool>(
+    operands: &UnitOperands<'_>,
+    rows: usize,
+    unpacked: &mut UnpackedRows,
+) {
+    let weight_block_bytes = if FIVE_BIT { q5_0::BLOCK_BYTES } else { q8_0::BLOCK_BYTES };
+    let weight_rows = operands.weight_rows;
+    let blocks = operands.blocks();
+    for row in 0..rows {
+        for block in 0..blocks {
+            let start = row * operands.row_bytes + block * weight_block_bytes;
+            let weight_block = &weight_rows[start..start + weight_block_bytes];
+            let destination = (row * blocks + block) * BLOCK_ELEMENTS;
+            // SAFETY: avx2 and f16c are enabled on this function; destinations are 32-byte windows.
+            unsafe {
+                let codes = unpack_weight_codes::<FIVE_BIT>(weight_block);
+                let magnitudes = _mm256_sign_epi8(codes, codes);
+                _mm256_storeu_si256(unpacked.codes[destination..destination + BLOCK_ELEMENTS].as_mut_ptr().cast(), codes);
+                _mm256_storeu_si256(unpacked.magnitudes[destination..destination + BLOCK_ELEMENTS].as_mut_ptr().cast(), magnitudes);
+                unpacked.scales[row * blocks + block] = f16_bits_to_f32(weight_block);
+            }
+        }
+    }
+}
+
+// ROWS weight rows x TILE activation rows (ggml's gemm4xN register tile): every output
+// keeps `row_*_avx2`'s per-block lane order and single fma chain, so results are
+// bit-identical to the row dots.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c,fma")]
+unsafe fn tile_avx2<const ROWS: usize, const TILE: usize>(
+    operands: &UnitOperands<'_>,
+    unpacked: &UnpackedRows,
+    first_row: usize,
+    position: usize,
+    out: &mut [f32],
+) {
+    let blocks = operands.blocks();
+    let mut accumulators = [[_mm256_setzero_ps(); TILE]; ROWS];
+    let ones = _mm256_set1_epi16(1);
+    for block in 0..blocks {
+        for lane in 0..TILE {
+            let tile_position = position + lane;
+            let codes_start = tile_position * operands.activation_row_bytes
+                + block * Q8_0_ACT_BLOCK_BYTES
+                + 2;
+            let activation_codes = &operands.activations[codes_start..codes_start + BLOCK_ELEMENTS];
+            // SAFETY: avx2 and fma are enabled on this function; every pointer below addresses a
+            // whole 32-byte block inside buffers sized by `UnitOperands::is_consistent` and `unpack_rows`.
+            unsafe {
+                let activations = _mm256_loadu_si256(activation_codes.as_ptr().cast());
+                let activation_scale = _mm256_set1_ps(
+                    *operands.activation_scales.get_unchecked(tile_position * blocks + block),
+                );
+                for row in 0..ROWS {
+                    let row_block = (first_row + row) * blocks + block;
+                    let offset = row_block * BLOCK_ELEMENTS;
+                    let codes = _mm256_loadu_si256(unpacked.codes.as_ptr().add(offset).cast());
+                    let magnitudes = _mm256_loadu_si256(unpacked.magnitudes.as_ptr().add(offset).cast());
+                    let signed = _mm256_sign_epi8(activations, codes);
+                    let lanes = _mm256_cvtepi32_ps(_mm256_madd_epi16(
+                        _mm256_maddubs_epi16(magnitudes, signed),
+                        ones,
+                    ));
+                    let weight_scale = _mm256_set1_ps(*unpacked.scales.get_unchecked(row_block));
+                    let scale = _mm256_mul_ps(weight_scale, activation_scale);
+                    accumulators[row][lane] = _mm256_fmadd_ps(scale, lanes, accumulators[row][lane]);
+                }
+            }
+        }
+    }
+    for (row, row_accumulators) in accumulators.into_iter().enumerate() {
+        for (lane, accumulator) in row_accumulators.into_iter().enumerate() {
+            // SAFETY: avx2 is enabled on this function.
+            out[(first_row + row) * operands.positions + position + lane] =
+                unsafe { horizontal_sum_f32(accumulator) };
+        }
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c,fma")]
+unsafe fn group_avx2<const ROWS: usize>(
+    operands: &UnitOperands<'_>,
+    unpacked: &UnpackedRows,
+    first_row: usize,
+    positions: core::ops::Range<usize>,
+    out: &mut [f32],
+) {
+    let mut position = positions.start;
+    while position + TILE_POSITIONS <= positions.end {
+        // SAFETY: avx2, f16c and fma are enabled on this function.
+        unsafe { tile_avx2::<ROWS, TILE_POSITIONS>(operands, unpacked, first_row, position, out) };
+        position += TILE_POSITIONS;
+    }
+    while position < positions.end {
+        // SAFETY: avx2, f16c and fma are enabled on this function.
+        unsafe { tile_avx2::<ROWS, 1>(operands, unpacked, first_row, position, out) };
+        position += 1;
+    }
+}
+
+// cache blocking: a position block's activation rows stay in L2 while every row group of
+// the unit sweeps them, so each activation byte crosses L3 once per unit, not once per group
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c,fma")]
+unsafe fn units_avx2<const FIVE_BIT: bool>(operands: &UnitOperands<'_>, out: &mut [f32]) {
+    let rows = operands.rows();
+    let blocks = operands.blocks();
+    let mut unpacked = UnpackedRows {
+        codes: vec![0; rows * blocks * BLOCK_ELEMENTS],
+        magnitudes: vec![0; rows * blocks * BLOCK_ELEMENTS],
+        scales: vec![0.0; rows * blocks],
+    };
+    // SAFETY: avx2, f16c and fma are enabled on this function.
+    unsafe { unpack_rows::<FIVE_BIT>(operands, rows, &mut unpacked) };
+    let grouped = rows / TILE_ROWS * TILE_ROWS;
+    for block_start in (0..operands.positions).step_by(POSITION_BLOCK) {
+        let block_range = block_start..(block_start + POSITION_BLOCK).min(operands.positions);
+        for first_row in (0..grouped).step_by(TILE_ROWS) {
+            // SAFETY: avx2, f16c and fma are enabled on this function.
+            unsafe { group_avx2::<TILE_ROWS>(operands, &unpacked, first_row, block_range.clone(), out) };
+        }
+        for first_row in grouped..rows {
+            // SAFETY: avx2, f16c and fma are enabled on this function.
+            unsafe { group_avx2::<1>(operands, &unpacked, first_row, block_range.clone(), out) };
+        }
+    }
+}
+
+const TILE_POSITIONS: usize = 2;
+const TILE_ROWS: usize = 4;
+const POSITION_BLOCK: usize = 64;
+pub(super) const UNIT_ROWS: usize = 16;
+
+fn units_of<const WEIGHT_BLOCK_BYTES: usize>(
+    operands: &UnitOperands<'_>,
+    out: &mut [f32],
+    dot_row: ActivationDotFn,
+    #[cfg(target_arch = "x86_64")] vectorized: unsafe fn(&UnitOperands<'_>, &mut [f32]),
+) -> Result<(), TensorError> {
+    if !operands.is_consistent(WEIGHT_BLOCK_BYTES, out.len()) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight rows or q8_0 activation do not match the codec's block layout",
+        });
+    }
+    #[cfg(target_arch = "x86_64")]
+    if row_kernels_available() {
+        // SAFETY: avx2, f16c and fma were detected at runtime; shapes were checked above.
+        unsafe { vectorized(operands, out) };
+        return Ok(());
+    }
+    for (row, weight_row) in operands.weight_rows.chunks_exact(operands.row_bytes).enumerate() {
+        for position in 0..operands.positions {
+            let start = position * operands.activation_row_bytes;
+            out[row * operands.positions + position] = dot_row(
+                weight_row,
+                &operands.activations[start..start + operands.activation_row_bytes],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+fn units_q8_0_q8_0(operands: &UnitOperands<'_>, out: &mut [f32]) -> Result<(), TensorError> {
+    units_of::<{ q8_0::BLOCK_BYTES }>(operands, out, dot_q8_0_q8_0, units_avx2::<false>)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn units_q8_0_q8_0(operands: &UnitOperands<'_>, out: &mut [f32]) -> Result<(), TensorError> {
+    units_of::<{ q8_0::BLOCK_BYTES }>(operands, out, dot_q8_0_q8_0)
+}
+
+#[cfg(target_arch = "x86_64")]
+fn units_q5_0_q8_0(operands: &UnitOperands<'_>, out: &mut [f32]) -> Result<(), TensorError> {
+    units_of::<{ q5_0::BLOCK_BYTES }>(operands, out, dot_q5_0_q8_0, units_avx2::<true>)
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+fn units_q5_0_q8_0(operands: &UnitOperands<'_>, out: &mut [f32]) -> Result<(), TensorError> {
+    units_of::<{ q5_0::BLOCK_BYTES }>(operands, out, dot_q5_0_q8_0)
 }
 
 fn block_dot_rows<const WEIGHT_BLOCK_BYTES: usize>(
@@ -451,9 +764,26 @@ fn rows_q5_0_q8_0(
 }
 pub(super) fn activation_dot_for(codec: Codec) -> ActivationKernels {
     match codec {
-        Codec::Q5_0 => (dot_q5_0_q8_0, rows_q5_0_q8_0),
-        _ => (dot_q8_0_q8_0, rows_q8_0_q8_0),
+        Codec::Q5_0 => (dot_q5_0_q8_0, rows_q5_0_q8_0, units_q5_0_q8_0),
+        _ => (dot_q8_0_q8_0, rows_q8_0_q8_0, units_q8_0_q8_0),
     }
+}
+
+pub fn matmul_q8_0_activation_f32(
+    codec: Codec,
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+    leading_total: usize,
+) -> Result<Vec<f32>, TensorError> {
+    matmul_q8_0_activation_impl(
+        weights,
+        rows,
+        activation,
+        leading_total,
+        None,
+        activation_dot_for(codec),
+    )
 }
 
 pub(super) fn matmul_q8_0_activation_impl(
@@ -462,7 +792,7 @@ pub(super) fn matmul_q8_0_activation_impl(
     activation: &[f32],
     leading_total: usize,
     session: Option<&MatmulSession<'_>>,
-    (dot, rows_kernel): ActivationKernels,
+    (dot, rows_kernel, units_kernel): ActivationKernels,
 ) -> Result<Vec<f32>, TensorError> {
     if rows == 0 || !weights.len().is_multiple_of(rows) {
         return Err(TensorError::QuantizedShapeMismatch {
@@ -485,35 +815,64 @@ pub(super) fn matmul_q8_0_activation_impl(
     quantize_row_q8_0_activation(activation, &mut quantized)?;
 
     let row_bytes = weights.len() / rows;
-    match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => {
-            matmul_rows_threaded(rows, leading_total, workers, session, k, |row, slot| {
-                let weight_row = &weights[row * row_bytes..(row + 1) * row_bytes];
-                for (position, output_slot) in slot.iter_mut().enumerate() {
-                    let start = position * quantized_row_bytes;
-                    *output_slot = dot(weight_row, &quantized[start..start + quantized_row_bytes])?;
+    if leading_total > 1 {
+        let activation_scales: Vec<f32> = quantized
+            .chunks_exact(Q8_0_ACT_BLOCK_BYTES)
+            .map(f16_scale)
+            .collect();
+        let run_group = |first_row: usize, group_rows: usize, out: &mut [f32]| {
+            let operands = UnitOperands {
+                weight_rows: &weights[first_row * row_bytes..(first_row + group_rows) * row_bytes],
+                row_bytes,
+                activations: &quantized,
+                activation_row_bytes: quantized_row_bytes,
+                activation_scales: &activation_scales,
+                positions: leading_total,
+            };
+            units_kernel(&operands, &mut out[..group_rows * leading_total])
+        };
+        return match quantized_matmul_workers(rows, activation.len()) {
+            Some(workers) => {
+                let units = rows.div_ceil(UNIT_ROWS);
+                let mut output = matmul_rows_threaded(
+                    units,
+                    UNIT_ROWS * leading_total,
+                    workers,
+                    session,
+                    k,
+                    |unit, slot| {
+                        let first_row = unit * UNIT_ROWS;
+                        run_group(first_row, UNIT_ROWS.min(rows - first_row), slot)
+                    },
+                )?;
+                output.truncate(rows * leading_total);
+                Ok(output)
+            }
+            None => {
+                let mut output = vec![0.0f32; rows * leading_total];
+                for first_row in (0..rows).step_by(UNIT_ROWS) {
+                    let group_rows = UNIT_ROWS.min(rows - first_row);
+                    run_group(
+                        first_row,
+                        group_rows,
+                        &mut output[first_row * leading_total..],
+                    )?;
                 }
-                Ok(())
-            })
-        }
-        None if leading_total == 1 => {
+                Ok(output)
+            }
+        };
+    }
+    match quantized_matmul_workers(rows, activation.len()) {
+        Some(workers) => matmul_rows_threaded(rows, 1, workers, session, k, |row, slot| {
+            let weight_row = &weights[row * row_bytes..(row + 1) * row_bytes];
+            slot[0] = dot(weight_row, &quantized)?;
+            Ok(())
+        }),
+        None => {
             let mut output = vec![0.0f32; rows];
             rows_kernel(weights, row_bytes, &quantized, &mut output)?;
             Ok(output)
         }
-        None => weights.chunks_exact(row_bytes).try_fold(
-            Vec::with_capacity(rows * leading_total),
-            |mut output, weight_row| {
-                for position in 0..leading_total {
-                    let start = position * quantized_row_bytes;
-                    output.push(dot(
-                        weight_row,
-                        &quantized[start..start + quantized_row_bytes],
-                    )?);
-                }
-                Ok::<Vec<f32>, TensorError>(output)
-            },
-        ),
     }
 }
 
