@@ -64,7 +64,10 @@ pub enum Formatter {
     /// Pretty single-line console text.
     #[default]
     Text,
-    /// One JSON object per record (proxima's own shape).
+    /// One JSON object per record (proxima's own shape). Finite floating tags
+    /// remain JSON numbers; non-finite floating tags become strings spelled
+    /// `NaN`, `inf`, or `-inf`. JSON output does not preserve scalar kind for
+    /// these values (a literal string `NaN` is indistinguishable) or NaN payload bits.
     Json,
 }
 
