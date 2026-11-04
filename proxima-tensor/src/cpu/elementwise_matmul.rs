@@ -29,9 +29,23 @@ pub(super) fn run_elementwise_dispatch<B: Deref<Target = [f32]> + Sync>(
     output: &mut [f32],
 ) -> Result<(), TensorError> {
     match coalesce_dims(resolved) {
+        // a fully coalesced node is one flat span with a single outer position, which the
+        // row split cannot divide; the as-bound axes can, and every element is independent
+        Some(coalesced)
+            if session.is_some()
+                && element_count(&resolved.extents) >= PARALLEL_THRESHOLD
+                && outer_positions(&coalesced) < 2 =>
+        {
+            run_elementwise_dispatch_planned(resolved, buffers, session, output)
+        }
         Some(coalesced) => run_elementwise_dispatch_planned(&coalesced, buffers, session, output),
         None => run_elementwise_dispatch_planned(resolved, buffers, session, output),
     }
+}
+
+fn outer_positions(resolved: &BoundOp) -> usize {
+    let (outer_extents, _) = split_innermost(&resolved.extents);
+    odometer_len(outer_extents) as usize
 }
 
 /// [`run_elementwise_dispatch`] on the axes exactly as bound, with no
