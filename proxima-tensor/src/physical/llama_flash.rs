@@ -231,9 +231,6 @@ mod x86 {
 struct Scratch {
     keys: alloc::vec::Vec<u16>,
     values: alloc::vec::Vec<u16>,
-    query: alloc::vec::Vec<u16>,
-    accumulator: alloc::vec::Vec<u16>,
-    staging: alloc::vec::Vec<f32>,
 }
 
 #[cfg(feature = "std")]
@@ -246,7 +243,6 @@ struct Range<'buffer> {
     pass_keys: Option<&'buffer [f32]>,
     values: &'buffer [f32],
     rows: usize,
-    is_cached: bool,
 }
 
 fn resized<T: Clone + Default>(buffer: &mut alloc::vec::Vec<T>, length: usize) {
@@ -282,19 +278,20 @@ pub fn stream_cached_attention_llama_flash(
     #[cfg(feature = "std")]
     {
         SCRATCH.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut scratch) => run(&mut scratch, queries, keys, values, output, extents, rotary, score),
-            Err(_) => run(&mut Scratch::default(), queries, keys, values, output, extents, rotary, score),
+            Ok(mut scratch) => run(&mut scratch, None, queries, keys, values, output, extents, rotary, score),
+            Err(_) => run(&mut Scratch::default(), None, queries, keys, values, output, extents, rotary, score),
         })
     }
     #[cfg(not(feature = "std"))]
     {
-        run(&mut Scratch::default(), queries, keys, values, output, extents, rotary, score)
+        run(&mut Scratch::default(), None, queries, keys, values, output, extents, rotary, score)
     }
 }
 
 #[expect(clippy::too_many_arguments, reason = "the layout bundle of the public entry, passed through")]
 fn run(
     scratch: &mut Scratch,
+    workers_override: Option<usize>,
     queries: [&[f32]; 2],
     keys: [[&[f32]; 2]; 2],
     values: [&[f32]; 2],
@@ -329,22 +326,17 @@ fn run(
             pass_keys: rotary.pass.as_ref().map(|plane| plane.cached_key),
             values: values[0],
             rows: cached_rows,
-            is_cached: true,
         },
         Range {
             keys: keys[1],
             pass_keys: rotary.pass.as_ref().map(|plane| plane.new_key),
             values: values[1],
             rows: new_rows,
-            is_cached: false,
         },
     ];
     let row_width = kv_heads * head_dim;
     resized(&mut scratch.keys, (cached_rows + new_rows) * row_width);
     resized(&mut scratch.values, (cached_rows + new_rows) * row_width);
-    resized(&mut scratch.query, head_dim);
-    resized(&mut scratch.accumulator, head_dim);
-    resized(&mut scratch.staging, head_dim);
     let mut base = 0;
     for range in &ranges {
         for key_row in 0..range.rows {
@@ -367,27 +359,139 @@ fn run(
         }
         base += range.rows;
     }
-    for query_row in 0..query_rows {
+    let shared = Shared {
+        kernels,
+        queries,
+        pass_query: rotary.pass.as_ref().map(|plane| plane.query),
+        keys: &scratch.keys,
+        values: &scratch.values,
+        score,
+        cached_rows,
+        new_rows,
+        kv_heads,
+        groups,
+        pair_dim,
+        pass_dim,
+        head_dim,
+        row_width,
+    };
+    let row_len = kv_heads * groups * head_dim;
+    let workers = workers_override.unwrap_or_else(|| worker_count(query_rows, cached_rows + new_rows, row_len));
+    if workers <= 1 {
+        let mut local = Local::new(head_dim);
+        for (query_row, out) in output.chunks_mut(row_len).enumerate() {
+            shared.attend_row(query_row, out, &mut local);
+        }
+        return true;
+    }
+    #[cfg(feature = "std")]
+    {
+        let rows_per_worker = query_rows.div_ceil(workers);
+        let shared = &shared;
+        std::thread::scope(|scope| {
+            for (index, block) in output.chunks_mut(rows_per_worker * row_len).enumerate() {
+                scope.spawn(move || {
+                    let mut local = Local::new(head_dim);
+                    for (offset, out) in block.chunks_mut(row_len).enumerate() {
+                        shared.attend_row(index * rows_per_worker + offset, out, &mut local);
+                    }
+                });
+            }
+        });
+    }
+    true
+}
+
+/// Threads only pay for multi-row calls (prefill, verify); each worker owns whole query rows, so the
+/// output blocks are disjoint and the result is the single-threaded result bit for bit.
+fn worker_count(query_rows: usize, key_rows: usize, row_len: usize) -> usize {
+    #[cfg(feature = "std")]
+    {
+        const MIN_WORK: usize = 1 << 21;
+        if query_rows < 2 || query_rows * key_rows * row_len < MIN_WORK {
+            return 1;
+        }
+        std::thread::available_parallelism().map_or(1, usize::from).min(query_rows)
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        let _ = (query_rows, key_rows, row_len);
+        1
+    }
+}
+
+struct Local {
+    query: alloc::vec::Vec<u16>,
+    accumulator: alloc::vec::Vec<u16>,
+    staging: alloc::vec::Vec<f32>,
+}
+
+impl Local {
+    fn new(head_dim: usize) -> Self {
+        Self {
+            query: alloc::vec![0; head_dim],
+            accumulator: alloc::vec![0; head_dim],
+            staging: alloc::vec![0.0; head_dim],
+        }
+    }
+}
+
+struct Shared<'call> {
+    kernels: HalfKernels,
+    queries: [&'call [f32]; 2],
+    pass_query: Option<&'call [f32]>,
+    keys: &'call [u16],
+    values: &'call [u16],
+    score: &'call CachedAttentionScore,
+    cached_rows: usize,
+    new_rows: usize,
+    kv_heads: usize,
+    groups: usize,
+    pair_dim: usize,
+    pass_dim: usize,
+    head_dim: usize,
+    row_width: usize,
+}
+
+impl Shared<'_> {
+    /// One query row across every head: `ggml_compute_forward_flash_attn_ext_f16_one_chunk`'s outer
+    /// loop body (`ops.cpp:8698-8848`).
+    fn attend_row(&self, query_row: usize, out: &mut [f32], local: &mut Local) {
+        let Self {
+            kernels,
+            queries,
+            pass_query,
+            keys,
+            values,
+            score,
+            cached_rows,
+            new_rows,
+            kv_heads,
+            groups,
+            pair_dim,
+            pass_dim,
+            head_dim,
+            row_width,
+        } = *self;
         for kv_head in 0..kv_heads {
             for group in 0..groups {
                 let query_head = kv_head * groups + group;
                 let query_start = (query_row * kv_heads * groups + query_head) * pair_dim;
                 let pass_start = (query_row * kv_heads * groups + query_head) * pass_dim;
-                scratch.staging[..pair_dim].copy_from_slice(&queries[0][query_start..query_start + pair_dim]);
-                scratch.staging[pair_dim..2 * pair_dim].copy_from_slice(&queries[1][query_start..query_start + pair_dim]);
-                if let Some(plane) = rotary.pass.as_ref() {
-                    scratch.staging[2 * pair_dim..head_dim].copy_from_slice(&plane.query[pass_start..pass_start + pass_dim]);
+                local.staging[..pair_dim].copy_from_slice(&queries[0][query_start..query_start + pair_dim]);
+                local.staging[pair_dim..2 * pair_dim].copy_from_slice(&queries[1][query_start..query_start + pair_dim]);
+                if let Some(plane) = pass_query {
+                    local.staging[2 * pair_dim..head_dim].copy_from_slice(&plane[pass_start..pass_start + pass_dim]);
                 }
-                kernels.convert(&scratch.staging[..head_dim], &mut scratch.query[..head_dim]);
-                scratch.accumulator[..head_dim].fill(0);
+                kernels.convert(&local.staging[..head_dim], &mut local.query[..head_dim]);
+                local.accumulator[..head_dim].fill(0);
                 let mut running_sum = 0.0f32;
                 let mut running_max = f32::NEG_INFINITY;
-                let mut base = 0;
-                for (range_index, range) in ranges.iter().enumerate() {
+                for (range_index, (base, rows)) in [(0, cached_rows), (cached_rows, new_rows)].into_iter().enumerate() {
                     let band = &score.bands[range_index];
-                    for key_row in 0..range.rows {
-                        let key_position = if range.is_cached {
-                            key_row as i64 - extents.cached_key_rows as i64
+                    for key_row in 0..rows {
+                        let key_position = if range_index == 0 {
+                            key_row as i64 - cached_rows as i64
                         } else {
                             key_row as i64
                         };
@@ -396,32 +500,31 @@ fn run(
                             continue;
                         }
                         let target = (base + key_row) * row_width + kv_head * head_dim;
-                        let weighted = kernels.dot(&scratch.keys[target..target + head_dim], &scratch.query[..head_dim]) * score.scale;
+                        let weighted = kernels.dot(&keys[target..target + head_dim], &local.query[..head_dim]) * score.scale;
                         let previous_max = running_max;
                         let mut rescale = 1.0f32;
                         let mut weight = 1.0f32;
                         if weighted > running_max {
                             running_max = weighted;
                             rescale = expf(previous_max - running_max);
-                            kernels.scale(&mut scratch.accumulator[..head_dim], rescale);
+                            kernels.scale(&mut local.accumulator[..head_dim], rescale);
                         } else {
                             weight = expf(weighted - running_max);
                         }
-                        kernels.mad(&mut scratch.accumulator[..head_dim], &scratch.values[target..target + head_dim], weight);
+                        kernels.mad(&mut local.accumulator[..head_dim], &values[target..target + head_dim], weight);
                         running_sum = running_sum * rescale + weight;
                     }
-                    base += range.rows;
                 }
                 let inverse = if running_sum == 0.0 { 0.0 } else { 1.0 / running_sum };
-                let output_start = (query_row * kv_heads * groups + query_head) * head_dim;
-                for (slot, bits) in output[output_start..output_start + head_dim].iter_mut().zip(&scratch.accumulator[..head_dim]) {
+                let output_start = query_head * head_dim;
+                for (slot, bits) in out[output_start..output_start + head_dim].iter_mut().zip(&local.accumulator[..head_dim]) {
                     *slot = half_value(*bits) * inverse;
                 }
             }
         }
     }
-    true
 }
+
 
 #[cfg(test)]
 mod tests {
@@ -463,5 +566,69 @@ mod tests {
                 assert_eq!(converted, expected, "convert n={length}");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod threading_tests {
+    use super::super::{CausalBand, CachedAttentionScore};
+    use super::*;
+
+    fn random(state: &mut u64, length: usize) -> alloc::vec::Vec<f32> {
+        (0..length)
+            .map(|_| {
+                *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((*state >> 33) as f32 / (1u64 << 31) as f32) * 6.0 - 3.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn worker_threads_reproduce_the_single_thread_result_bit_for_bit() {
+        let (rows, cached, kv_heads, groups, head_dim) = (24usize, 40usize, 2usize, 3usize, 64usize);
+        let pair = head_dim / 2;
+        let mut state = 0x1234_5678_9abc_def0u64;
+        let query_even = random(&mut state, rows * kv_heads * groups * pair);
+        let query_odd = random(&mut state, rows * kv_heads * groups * pair);
+        let cached_even = random(&mut state, cached * kv_heads * pair);
+        let cached_odd = random(&mut state, cached * kv_heads * pair);
+        let new_even = random(&mut state, rows * kv_heads * pair);
+        let new_odd = random(&mut state, rows * kv_heads * pair);
+        let cached_value = random(&mut state, cached * kv_heads * head_dim);
+        let new_value = random(&mut state, rows * kv_heads * head_dim);
+        let extents = AttentionExtents {
+            query_rows: rows as u64,
+            cached_key_rows: cached as u64,
+            new_key_rows: rows as u64,
+            kv_heads: kv_heads as u64,
+            query_groups: groups as u64,
+            head_dim: head_dim as u64,
+        };
+        let rotary = CachedAttentionRotary { rotary_dim: head_dim as u64, pass: None };
+        let score = CachedAttentionScore {
+            scale: 0.125,
+            bands: [
+                CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },
+                CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+            ],
+        };
+        let mut outputs = alloc::vec::Vec::new();
+        for workers in [1usize, 2, 5] {
+            let mut output = alloc::vec![0f32; rows * kv_heads * groups * head_dim];
+            assert!(run(
+                &mut Scratch::default(),
+                Some(workers),
+                [&query_even, &query_odd],
+                [[&cached_even, &cached_odd], [&new_even, &new_odd]],
+                [&cached_value, &new_value],
+                &mut output,
+                &extents,
+                &rotary,
+                &score,
+            ));
+            outputs.push(output.iter().map(|value| value.to_bits()).collect::<alloc::vec::Vec<u32>>());
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        assert_eq!(outputs[0], outputs[2]);
     }
 }
