@@ -14,8 +14,11 @@ use half::f16;
 
 use super::{AttentionExtents, CachedAttentionRotary, CachedAttentionScore};
 
+#[cfg(any(not(target_arch = "aarch64"), test))]
 const STEP: usize = 32;
+#[cfg(any(not(target_arch = "aarch64"), test))]
 const LANES: usize = 8;
+#[cfg(any(not(target_arch = "aarch64"), test))]
 const ARRAYS: usize = 4;
 
 fn half_bits(value: f32) -> u16 {
@@ -29,7 +32,17 @@ fn half_value(bits: u16) -> f32 {
 /// Which instruction set the half-precision kernels run on, decided once per call.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum HalfKernels {
+    /// The AVX2 order of ggml, computed operation for operation without vector instructions.
+    #[cfg(any(not(target_arch = "aarch64"), test))]
     Scalar,
+    /// ggml built with `__ARM_FEATURE_FP16_VECTOR_ARITHMETIC` (`simd-mappings.h:263-302`): the dot and the
+    /// accumulator updates run in f16 arithmetic.
+    #[cfg(any(target_arch = "aarch64", test))]
+    NeonFp16,
+    /// ggml built for NEON without f16 vector arithmetic (`simd-mappings.h:307-328`): f32 four-lane
+    /// accumulators stepping 16, f16 storage.
+    #[cfg(any(target_arch = "aarch64", test))]
+    NeonF32,
     #[cfg(all(feature = "std", target_arch = "x86_64"))]
     Avx2,
 }
@@ -43,7 +56,21 @@ impl HalfKernels {
         {
             return Self::Avx2;
         }
+        #[cfg(target_arch = "aarch64")]
+        {
+            #[cfg(feature = "std")]
+            return Self::for_aarch64(std::arch::is_aarch64_feature_detected!("fp16"));
+            #[cfg(not(feature = "std"))]
+            return Self::for_aarch64(cfg!(target_feature = "fp16"));
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         Self::Scalar
+    }
+
+    /// The kernel family an aarch64 host runs, by whether it has f16 vector arithmetic.
+    #[cfg(any(target_arch = "aarch64", test))]
+    pub(super) const fn for_aarch64(has_fp16_vectors: bool) -> Self {
+        if has_fp16_vectors { Self::NeonFp16 } else { Self::NeonF32 }
     }
 
     /// f32 to f16 bits, `ggml_fp32_to_fp16_row` / `_mm256_cvtps_ph(.., 0)`.
@@ -51,7 +78,10 @@ impl HalfKernels {
         match self {
             #[cfg(all(feature = "std", target_arch = "x86_64"))]
             Self::Avx2 => unsafe { x86::convert(source, destination) },
+            #[cfg(any(not(target_arch = "aarch64"), test))]
             Self::Scalar => scalar::convert(source, destination),
+            #[cfg(any(target_arch = "aarch64", test))]
+            Self::NeonFp16 | Self::NeonF32 => scalar::convert(source, destination),
         }
     }
 
@@ -60,7 +90,12 @@ impl HalfKernels {
         match self {
             #[cfg(all(feature = "std", target_arch = "x86_64"))]
             Self::Avx2 => unsafe { x86::dot(key, query) },
+            #[cfg(any(not(target_arch = "aarch64"), test))]
             Self::Scalar => scalar::dot(key, query),
+            #[cfg(any(target_arch = "aarch64", test))]
+            Self::NeonFp16 => neon_twin::dot_fp16(key, query),
+            #[cfg(any(target_arch = "aarch64", test))]
+            Self::NeonF32 => neon_twin::dot_f32(key, query),
         }
     }
 
@@ -69,7 +104,12 @@ impl HalfKernels {
         match self {
             #[cfg(all(feature = "std", target_arch = "x86_64"))]
             Self::Avx2 => unsafe { x86::scale(accumulator, factor) },
+            #[cfg(any(not(target_arch = "aarch64"), test))]
             Self::Scalar => scalar::scale(accumulator, factor),
+            #[cfg(any(target_arch = "aarch64", test))]
+            Self::NeonFp16 => neon_twin::scale_fp16(accumulator, factor),
+            #[cfg(any(target_arch = "aarch64", test))]
+            Self::NeonF32 => neon_twin::scale_f32(accumulator, factor),
         }
     }
 
@@ -78,13 +118,132 @@ impl HalfKernels {
         match self {
             #[cfg(all(feature = "std", target_arch = "x86_64"))]
             Self::Avx2 => unsafe { x86::mad(accumulator, row, factor) },
+            #[cfg(any(not(target_arch = "aarch64"), test))]
             Self::Scalar => scalar::mad(accumulator, row, factor),
+            #[cfg(any(target_arch = "aarch64", test))]
+            Self::NeonFp16 => neon_twin::mad_fp16(accumulator, row, factor),
+            #[cfg(any(target_arch = "aarch64", test))]
+            Self::NeonF32 => neon_twin::mad_f32(accumulator, row, factor),
+        }
+    }
+}
+
+#[cfg(any(target_arch = "aarch64", test))]
+pub(super) mod neon_twin {
+    //! Scalar twins of ggml's aarch64 half-precision kernels, expanded from the macros in
+    //! `ggml-cpu/simd-mappings.h`; real NEON intrinsics can replace them once there is hardware to verify on.
+
+    use half::f16;
+
+    use super::{half_bits, half_value};
+
+    const FP16_STEP: usize = 32;
+    const FP16_LANES: usize = 8;
+    const F32_STEP: usize = 16;
+    const F32_LANES: usize = 4;
+
+    /// One f16 operation: the exact result rounded to nearest even, `vfmaq_f16` and `vaddq_f16`.
+    fn round_half(value: f64) -> f32 {
+        f16::from_f64(value).to_f32()
+    }
+
+    /// `GGML_F16x8_FMA` over eight lanes in f16: `vfmaq_f16(acc, a, b)` rounds `acc + a*b` once.
+    fn fma_half(accumulator: f32, left: f32, right: f32) -> f32 {
+        round_half(f64::from(left) * f64::from(right) + f64::from(accumulator))
+    }
+
+    /// `ggml_vec_dot_f16` with `GGML_F16x8_*` (`vec.cpp:345-367`, `simd-mappings.h:275-292`).
+    pub(in crate::physical) fn dot_fp16(key: &[u16], query: &[u16]) -> f32 {
+        let main = key.len() & !(FP16_STEP - 1);
+        let mut sum = [[0f32; FP16_LANES]; 4];
+        for step in (0..main).step_by(FP16_STEP) {
+            for (array, lanes) in sum.iter_mut().enumerate() {
+                for (lane, accumulator) in lanes.iter_mut().enumerate() {
+                    let index = step + array * FP16_LANES + lane;
+                    *accumulator = fma_half(*accumulator, half_value(key[index]), half_value(query[index]));
+                }
+            }
+        }
+        let add_half = |left: f32, right: f32| round_half(f64::from(left + right));
+        let first: [f32; FP16_LANES] = core::array::from_fn(|lane| add_half(sum[0][lane], sum[2][lane]));
+        let second: [f32; FP16_LANES] = core::array::from_fn(|lane| add_half(sum[1][lane], sum[3][lane]));
+        let folded: [f32; FP16_LANES] = core::array::from_fn(|lane| add_half(first[lane], second[lane]));
+        let lanes: [f32; 4] = core::array::from_fn(|lane| folded[lane] + folded[lane + 4]);
+        let mut total = f64::from((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]));
+        for index in main..key.len() {
+            total += f64::from(half_value(key[index]) * half_value(query[index]));
+        }
+        total as f32
+    }
+
+    /// `ggml_vec_scale_f16`: the factor becomes an f16 (`vdupq_n_f16`), the vector lanes multiply in f16.
+    pub(in crate::physical) fn scale_fp16(accumulator: &mut [u16], factor: f32) {
+        let main = accumulator.len() & !(FP16_STEP - 1);
+        let factor_half = half_value(half_bits(factor));
+        for (index, value) in accumulator.iter_mut().enumerate() {
+            let multiplier = if index < main { factor_half } else { factor };
+            *value = half_bits(half_value(*value) * multiplier);
+        }
+    }
+
+    /// `ggml_vec_mad_f16`: vector lanes `vfmaq_f16(acc, x, f16(v))`, leftovers multiply then add in f32.
+    pub(in crate::physical) fn mad_fp16(accumulator: &mut [u16], row: &[u16], factor: f32) {
+        let main = accumulator.len() & !(FP16_STEP - 1);
+        let factor_half = half_value(half_bits(factor));
+        for (index, value) in accumulator.iter_mut().enumerate() {
+            *value = if index < main {
+                half_bits(fma_half(half_value(*value), half_value(row[index]), factor_half))
+            } else {
+                half_bits(half_value(*value) + half_value(row[index]) * factor)
+            };
+        }
+    }
+
+    /// `ggml_vec_dot_f16` with `GGML_F32Cx4_*` (`simd-mappings.h:307-328`, `GGML_F32x4_REDUCE`).
+    pub(in crate::physical) fn dot_f32(key: &[u16], query: &[u16]) -> f32 {
+        let main = key.len() & !(F32_STEP - 1);
+        let mut sum = [[0f32; F32_LANES]; 4];
+        for step in (0..main).step_by(F32_STEP) {
+            for (array, lanes) in sum.iter_mut().enumerate() {
+                for (lane, accumulator) in lanes.iter_mut().enumerate() {
+                    let index = step + array * F32_LANES + lane;
+                    *accumulator = libm::fmaf(half_value(key[index]), half_value(query[index]), *accumulator);
+                }
+            }
+        }
+        let lanes: [f32; F32_LANES] =
+            core::array::from_fn(|lane| (sum[0][lane] + sum[2][lane]) + (sum[1][lane] + sum[3][lane]));
+        let mut total = f64::from((lanes[0] + lanes[1]) + (lanes[2] + lanes[3]));
+        for index in main..key.len() {
+            total += f64::from(half_value(key[index]) * half_value(query[index]));
+        }
+        total as f32
+    }
+
+    pub(in crate::physical) fn scale_f32(accumulator: &mut [u16], factor: f32) {
+        for value in accumulator {
+            *value = half_bits(half_value(*value) * factor);
+        }
+    }
+
+    /// `GGML_F32Cx4_FMA` is `vfmaq_f32` on widened values, the store rounds to f16; step 16 (`:307`).
+    pub(in crate::physical) fn mad_f32(accumulator: &mut [u16], row: &[u16], factor: f32) {
+        let main = accumulator.len() & !(F32_STEP - 1);
+        for (index, value) in accumulator.iter_mut().enumerate() {
+            let updated = if index < main {
+                libm::fmaf(half_value(row[index]), factor, half_value(*value))
+            } else {
+                half_value(*value) + half_value(row[index]) * factor
+            };
+            *value = half_bits(updated);
         }
     }
 }
 
 pub(super) mod scalar {
-    use super::{ARRAYS, LANES, STEP, half_bits, half_value};
+    #[cfg(any(not(target_arch = "aarch64"), test))]
+    use super::{ARRAYS, LANES, STEP, half_value};
+    use super::half_bits;
 
     pub(in crate::physical) fn convert(source: &[f32], destination: &mut [u16]) {
         for (slot, value) in destination.iter_mut().zip(source) {
@@ -94,6 +253,7 @@ pub(super) mod scalar {
 
     /// Four eight-lane fma accumulators stepping 32, the `GGML_F32x8_REDUCE` tree
     /// (`simd-mappings.h:602-620`), then the leftovers in double (`vec.cpp:365-367`).
+    #[cfg(any(not(target_arch = "aarch64"), test))]
     pub(in crate::physical) fn dot(key: &[u16], query: &[u16]) -> f32 {
         let main = key.len() & !(STEP - 1);
         let mut sum = [[0f32; LANES]; ARRAYS];
@@ -115,6 +275,7 @@ pub(super) mod scalar {
         total as f32
     }
 
+    #[cfg(any(not(target_arch = "aarch64"), test))]
     pub(in crate::physical) fn scale(accumulator: &mut [u16], factor: f32) {
         for value in accumulator {
             *value = half_bits(half_value(*value) * factor);
@@ -122,6 +283,7 @@ pub(super) mod scalar {
     }
 
     /// The first `n & ~31` lanes fuse, the leftover lanes multiply then add (`vec.h` mad_f16).
+    #[cfg(any(not(target_arch = "aarch64"), test))]
     pub(in crate::physical) fn mad(accumulator: &mut [u16], row: &[u16], factor: f32) {
         let main = accumulator.len() & !(STEP - 1);
         for (index, value) in accumulator.iter_mut().enumerate() {
@@ -645,5 +807,129 @@ mod threading_tests {
         }
         assert_eq!(outputs[0], outputs[1]);
         assert_eq!(outputs[0], outputs[2]);
+    }
+}
+
+#[cfg(test)]
+mod aarch64_twin_tests {
+    use half::f16;
+
+    use super::*;
+
+    fn bits(values: &[f32]) -> alloc::vec::Vec<u16> {
+        values.iter().map(|value| half_bits(*value)).collect()
+    }
+
+    fn fixed_key() -> alloc::vec::Vec<u16> {
+        bits(&(0..64).map(|index| ((index * 7 % 13) as f32 - 6.0) * 0.375).collect::<alloc::vec::Vec<f32>>())
+    }
+
+    fn fixed_query() -> alloc::vec::Vec<u16> {
+        bits(&(0..64).map(|index| ((index * 5 % 11) as f32 - 5.0) * 0.5).collect::<alloc::vec::Vec<f32>>())
+    }
+
+    fn half(value: f64) -> f32 {
+        f16::from_f64(value).to_f32()
+    }
+
+    /// `GGML_F16x8_*` expanded by hand: four `float16x8_t` registers, `vfmaq_f16` per step, the
+    /// `vaddq_f16` tree, `vcvt_f32_f16` of the low and high halves, `vaddvq_f32`.
+    fn hand_expanded_fp16_dot(key: &[u16], query: &[u16]) -> f32 {
+        let mut x0 = [0f32; 8];
+        let mut x1 = [0f32; 8];
+        let mut x2 = [0f32; 8];
+        let mut x3 = [0f32; 8];
+        for step in [0usize, 32] {
+            for lane in 0..8 {
+                let product = |register: usize| {
+                    let index = step + register * 8 + lane;
+                    f64::from(half_value(key[index])) * f64::from(half_value(query[index]))
+                };
+                x0[lane] = half(product(0) + f64::from(x0[lane]));
+                x1[lane] = half(product(1) + f64::from(x1[lane]));
+                x2[lane] = half(product(2) + f64::from(x2[lane]));
+                x3[lane] = half(product(3) + f64::from(x3[lane]));
+            }
+        }
+        for lane in 0..8 {
+            x0[lane] = half(f64::from(x0[lane]) + f64::from(x2[lane]));
+            x1[lane] = half(f64::from(x1[lane]) + f64::from(x3[lane]));
+            x0[lane] = half(f64::from(x0[lane]) + f64::from(x1[lane]));
+        }
+        let t0 = [x0[0], x0[1], x0[2], x0[3]];
+        let t1 = [x0[4], x0[5], x0[6], x0[7]];
+        let summed = [t0[0] + t1[0], t0[1] + t1[1], t0[2] + t1[2], t0[3] + t1[3]];
+        ((summed[0] + summed[1]) + (summed[2] + summed[3])) as f64 as f32
+    }
+
+    /// `GGML_F32Cx4_*` expanded by hand: four `float32x4_t` registers stepping 16, `vfmaq_f32`,
+    /// `GGML_F32x4_REDUCE`.
+    fn hand_expanded_f32_dot(key: &[u16], query: &[u16]) -> f32 {
+        let mut registers = [[0f32; 4]; 4];
+        for step in [0usize, 16, 32, 48] {
+            for (register, lanes) in registers.iter_mut().enumerate() {
+                for (lane, slot) in lanes.iter_mut().enumerate() {
+                    let index = step + register * 4 + lane;
+                    *slot = half_value(key[index]).mul_add(half_value(query[index]), *slot);
+                }
+            }
+        }
+        let mut folded = [0f32; 4];
+        for lane in 0..4 {
+            let low = registers[0][lane] + registers[2][lane];
+            let high = registers[1][lane] + registers[3][lane];
+            folded[lane] = low + high;
+        }
+        (folded[0] + folded[1]) + (folded[2] + folded[3])
+    }
+
+    #[test]
+    fn the_fp16_twin_matches_the_hand_expanded_macro_sequence() {
+        let (key, query) = (fixed_key(), fixed_query());
+        assert_eq!(neon_twin::dot_fp16(&key, &query).to_bits(), hand_expanded_fp16_dot(&key, &query).to_bits());
+    }
+
+    #[test]
+    fn the_f32_twin_matches_the_hand_expanded_macro_sequence() {
+        let (key, query) = (fixed_key(), fixed_query());
+        assert_eq!(neon_twin::dot_f32(&key, &query).to_bits(), hand_expanded_f32_dot(&key, &query).to_bits());
+    }
+
+    #[test]
+    fn the_fp16_accumulator_updates_round_the_factor_and_every_product_to_f16() {
+        let mut accumulator = bits(&[0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8].repeat(8));
+        let row = bits(&[1.5, -2.25, 3.125, 0.0625, -0.5, 4.0, -1.75, 0.3].repeat(8));
+        let factor = 0.333_333_34f32;
+        let expected: alloc::vec::Vec<u16> = accumulator
+            .iter()
+            .zip(&row)
+            .map(|(value, x)| half_bits(half(f64::from(half_value(*x)) * f64::from(half(f64::from(factor))) + f64::from(half_value(*value)))))
+            .collect();
+        neon_twin::mad_fp16(&mut accumulator, &row, factor);
+        assert_eq!(accumulator, expected);
+        let mut scaled = bits(&[1.0, 2.0, 3.0, 4.0].repeat(16));
+        neon_twin::scale_fp16(&mut scaled, factor);
+        let expected_scaled: alloc::vec::Vec<u16> = bits(&[1.0, 2.0, 3.0, 4.0].repeat(16))
+            .iter()
+            .map(|value| half_bits(half_value(*value) * half(f64::from(factor))))
+            .collect();
+        assert_eq!(scaled, expected_scaled);
+    }
+
+    #[test]
+    fn an_aarch64_host_selects_the_twin_its_f16_vector_support_names() {
+        assert_eq!(HalfKernels::for_aarch64(true), HalfKernels::NeonFp16);
+        assert_eq!(HalfKernels::for_aarch64(false), HalfKernels::NeonF32);
+    }
+
+    #[test]
+    fn the_three_families_disagree_on_a_dot_that_f16_accumulation_rounds() {
+        let mut values = alloc::vec![1024.0f32; 32];
+        values.extend(core::iter::repeat_n(0.75f32, 32));
+        let key = bits(&values);
+        let query = bits(&[1.0; 64]);
+        let avx = scalar::dot(&key, &query);
+        let fp16 = neon_twin::dot_fp16(&key, &query);
+        assert_ne!(avx.to_bits(), fp16.to_bits(), "the f16 accumulating dot must visibly differ from the f32 accumulating one");
     }
 }
