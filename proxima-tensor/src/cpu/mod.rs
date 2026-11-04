@@ -227,6 +227,8 @@ mod gemm_dot_quant;
 mod gemm_q8_0_act;
 #[cfg(all(target_arch = "x86_64", feature = "q6k-int8-dot"))]
 mod gemm_q6k_avx2;
+#[cfg(all(target_arch = "x86_64", feature = "q4k-int8-dot", feature = "q6k-int8-dot"))]
+mod gemm_kquant_tile;
 #[cfg(target_arch = "x86_64")]
 mod dequant_x86;
 #[macro_use]
