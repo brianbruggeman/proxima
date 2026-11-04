@@ -268,3 +268,28 @@ fn an_empty_prompt_is_refused_before_any_prefill() {
         );
     });
 }
+
+#[cfg(not(feature = "gpu"))]
+#[test]
+fn a_cpu_decode_binds_once_per_width_class_while_the_kv_length_grows() {
+    with_dense_model(|model| {
+        let config = ServingConfig::default();
+        let mut runtime = BackendRuntime::new(&config);
+
+        let (ids, _text, _stopped) = model
+            .run_decode_loop("\u{0}\u{1}", 6, &config, &mut runtime)
+            .expect("the tiny model decodes six tokens");
+
+        assert!(
+            ids.len() >= 3,
+            "control: the decode must take more forward steps than there are width classes, got {} tokens",
+            ids.len()
+        );
+        assert_eq!(
+            runtime.cpu_plan_binds(),
+            2,
+            "one bind for the prompt width and one for the decode width across {} tokens",
+            ids.len()
+        );
+    });
+}

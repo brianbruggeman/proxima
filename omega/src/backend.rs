@@ -74,7 +74,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use proxima_tensor::cpu::ExpertSource;
+use proxima_tensor::cpu::{CpuStepPlan, ExpertSource};
 use proxima_tensor::{Evaluated, NodeId, NumericPolicy, Op, QuantizedBlock, TensorError};
 
 #[cfg(feature = "cpu")]
@@ -84,8 +84,7 @@ use proxima_tensor::config::TensorExecutionConfig;
 #[cfg(feature = "cpu")]
 use proxima_tensor::cpu::{
     BufferPools, cpu_tensor_reserved_bytes,
-    evaluate_quantized_named_exact_with_scratch_and_experts, evaluate_quantized_named_with_config,
-    evaluate_quantized_named_with_scratch_and_experts,
+    evaluate_quantized_named_with_config,
 };
 #[cfg(feature = "cpu")]
 use proxima_tensor::resolve_named_blocks;
@@ -753,6 +752,7 @@ fn plan_configured_candidate(
                 outputs: outputs.to_vec(),
                 free_buffers: BufferPools::default(),
                 validated_weight_nodes: None,
+                step: CpuStepPlan::new(),
                 exact_activations: config.exact_activations,
                 execution_config: Some(execution),
                 input_contract,
@@ -1101,6 +1101,9 @@ pub struct CpuPlan {
     /// by the next call.
     free_buffers: BufferPools,
     validated_weight_nodes: Option<std::collections::BTreeSet<NodeId>>,
+    /// The bound step this plan retains between calls: bound on the first call and then
+    /// only patched when [`refit_cpu_symbols`] moves the symbols.
+    step: CpuStepPlan,
     // `false` for every existing `plan_named`/`plan_named_cpu` caller --
     // routes through the SAME `q{4,5,6}k-int8-dot` fast path this plan
     // always has. `true` only for a plan built via `plan_named_cpu_exact`
@@ -1770,6 +1773,7 @@ fn plan_named_cpu(
         outputs: outputs.to_vec(),
         free_buffers: BufferPools::default(),
         validated_weight_nodes: None,
+        step: CpuStepPlan::new(),
         exact_activations: false,
         execution_config: None,
         input_contract: Vec::new(),
@@ -1799,6 +1803,7 @@ fn plan_named_cpu_exact(
         outputs: outputs.to_vec(),
         free_buffers: BufferPools::default(),
         validated_weight_nodes: None,
+        step: CpuStepPlan::new(),
         exact_activations: true,
         execution_config: None,
         input_contract: Vec::new(),
@@ -1869,28 +1874,41 @@ fn execute_plan_named_cpu(
             expert_sources,
             config,
         )?
-    } else if plan.exact_activations {
-        evaluate_quantized_named_exact_with_scratch_and_experts(
-            &plan.program,
-            &plan.symbols,
-            named,
-            &plan.outputs,
-            &mut plan.free_buffers,
-            &mut plan.validated_weight_nodes,
-            expert_sources,
-        )?
     } else {
-        evaluate_quantized_named_with_scratch_and_experts(
-            &plan.program,
-            &plan.symbols,
+        plan.step.execute(
+            (&plan.program, 0),
+            (&plan.symbols, &plan.outputs),
             named,
-            &plan.outputs,
             &mut plan.free_buffers,
-            &mut plan.validated_weight_nodes,
             expert_sources,
+            plan.exact_activations,
         )?
     };
     Ok(evaluated)
+}
+
+/// Moves a cached [`Plan::Cpu`] to `symbols`; the next execute patches only the bound
+/// ops those symbols reach instead of binding the whole program again. `false` on every
+/// other arm, so the caller builds a fresh plan.
+#[must_use]
+pub fn refit_cpu_symbols(plan: &mut Plan, symbols: &[u64]) -> bool {
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(cpu_plan) if cpu_plan.execution_config.is_none() => {
+            cpu_plan.symbols = symbols.to_vec();
+            true
+        }
+        _ => {
+            let _ = symbols;
+            false
+        }
+    }
+}
+
+/// Whether `plan` is a [`Plan::Cpu`].
+#[must_use]
+pub fn is_cpu_plan(plan: &Plan) -> bool {
+    matches!(plan, Plan::Cpu(_))
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]

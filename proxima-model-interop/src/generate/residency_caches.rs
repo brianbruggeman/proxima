@@ -19,12 +19,11 @@ use proxima_core::ServingState;
 #[cfg(all(feature = "instrument", any(test, all(feature = "metal", target_os = "macos"))))]
 use proxima_telemetry::metric::Counter;
 
-#[cfg(feature = "gpu")]
 const KV_CACHE_INPUT_PREFIX: &str = "kv_cache.";
 
 /// Whether two plan keys differ at most in the KV length: same new-token count,
 /// outputs, epilogue sources and program.
-#[cfg(all(feature = "metal", target_os = "macos"))]
+#[cfg(feature = "gpu")]
 fn same_program_width(
     left: &(usize, usize, Vec<NodeId>, bool, u64),
     right: &(usize, usize, Vec<NodeId>, bool, u64),
@@ -2893,7 +2892,7 @@ pub struct BackendRuntime {
     /// ([`Self::take_near_plan`]) instead of building one -- a subset of
     /// `plan_misses`, so `plan_misses - plan_refits` is the number of plans
     /// actually built.
-    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[cfg(feature = "gpu")]
     pub(crate) plan_refits: usize,
     /// Resident weight blocks new plans resolved from the process-global
     /// caches instead of uploading, summed over this runtime's steps.
@@ -2903,7 +2902,7 @@ pub struct BackendRuntime {
     #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
     pub(crate) plan_handoff_reuses: u64,
     /// `ServingConfig::plan_refit`, read once at construction.
-    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[cfg(feature = "gpu")]
     pub(super) plan_refit: bool,
     /// `ServingConfig::exact_activations`, read once at construction --
     /// `Self::evaluate`'s `Engine::Cpu` arm plans through
@@ -3020,11 +3019,11 @@ impl BackendRuntime {
             kv_carry_accepted: false,
             #[cfg(feature = "gpu")]
             kv_pad: alloc::collections::BTreeMap::new(),
-            #[cfg(all(feature = "metal", target_os = "macos"))]
+            #[cfg(feature = "gpu")]
             plan_refits: 0,
             #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
             plan_handoff_reuses: 0,
-            #[cfg(all(feature = "metal", target_os = "macos"))]
+            #[cfg(feature = "gpu")]
             plan_refit: config.plan_refit && config.omega_runtime.is_none(),
             exact_activations: config.exact_activations,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3115,6 +3114,21 @@ impl BackendRuntime {
         outputs: impl FnOnce() -> Vec<NodeId>,
         named: &[(&str, QuantizedBlock<'_>)],
     ) {
+        if !self.uses_gpu() && !self.kv_pad.contains_key(&(program_hash, symbols[0] as usize)) {
+            match proxima_tensor::cpu::probe_kv_padding(program, symbols, &outputs(), |name| {
+                name.starts_with(KV_CACHE_INPUT_PREFIX)
+            }) {
+                Ok(pads) => {
+                    self.kv_pad.insert((program_hash, symbols[0] as usize), pads);
+                }
+                Err(error) => debug!(
+                    error = %error,
+                    new_count = symbols[0],
+                    "kv padding probe could not bind, the width binds exact"
+                ),
+            }
+            return;
+        }
         #[cfg(feature = "cuda")]
         if self.uses_gpu() && !self.kv_pad.contains_key(&(program_hash, symbols[0] as usize)) {
             let probed = omega::backend::probe_cuda_pads_kv(
@@ -3279,9 +3293,13 @@ impl BackendRuntime {
         } else {
             None
         };
-        #[cfg(all(feature = "metal", target_os = "macos"))]
+        #[cfg(feature = "gpu")]
         let near_plan = if self.plan_refit {
-            Self::take_near_plan(&mut self.plans, &shape, |key, wanted, _| same_program_width(key, wanted))
+            Self::take_near_plan(&mut self.plans, &shape, |key, wanted, plan| {
+                same_program_width(key, wanted)
+                    && (cfg!(all(feature = "metal", target_os = "macos"))
+                        || omega::backend::is_cpu_plan(plan))
+            })
         } else {
             None
         };
@@ -3303,12 +3321,17 @@ impl BackendRuntime {
             &mut self.plan_misses,
             shape,
             || {
-                #[cfg(all(feature = "metal", target_os = "macos"))]
-                if let Some(mut near) = near_plan
-                    && refit_symbols(&mut near, symbols)?
-                {
-                    self.plan_refits += 1;
-                    return Ok(near);
+                #[cfg(feature = "gpu")]
+                if let Some(mut near) = near_plan {
+                    if omega::backend::refit_cpu_symbols(&mut near, symbols) {
+                        self.plan_refits += 1;
+                        return Ok(near);
+                    }
+                    #[cfg(all(feature = "metal", target_os = "macos"))]
+                    if refit_symbols(&mut near, symbols)? {
+                        self.plan_refits += 1;
+                        return Ok(near);
+                    }
                 }
                 let mut plan = if let Some(config) = &self.omega_runtime {
                     plan_with_omega_config(config, program, symbols, named, outputs)?
@@ -3381,7 +3404,7 @@ impl BackendRuntime {
             let freshly_built = self.plan_misses != misses_before;
             #[cfg(not(feature = "cuda"))]
             let freshly_built = false;
-            if freshly_built || !self.kv_pad.contains_key(&key) {
+            if matches!(self.engine, Engine::Gpu) && (freshly_built || !self.kv_pad.contains_key(&key)) {
                 let pads = omega::backend::plan_pads_kv(plan, |name| {
                     name.starts_with(KV_CACHE_INPUT_PREFIX)
                 });
@@ -4626,7 +4649,7 @@ impl BackendRuntime {
     /// `refit_symbols` on it before building from scratch, which is what
     /// makes a bucket crossing cheaper than a plan build when only the
     /// attention key range moved.
-    #[cfg(any(all(feature = "metal", target_os = "macos"), feature = "cuda"))]
+    #[cfg(feature = "gpu")]
     pub(super) fn take_near_plan<Key: Ord + Clone, PlanType>(
         cache: &mut alloc::collections::BTreeMap<Key, PlanType>,
         shape: &Key,
@@ -5071,16 +5094,33 @@ pub(crate) struct BackendRuntime {
     /// `ServingConfig::exact_activations`, read once at construction --
     /// see that field's own doc.
     pub(super) exact_activations: bool,
+    /// One bound step per `(program hash, new-token count)` class: the decode width and
+    /// each prompt width keep their own, so a step changes only the symbols the plan
+    /// patches, never the plan.
+    cpu_plans: alloc::collections::BTreeMap<(u64, usize), proxima_tensor::cpu::CpuStepPlan>,
+    /// Whether the cached K/V range of a `(program hash, new-token count)` class binds
+    /// padded to its capacity bucket, as `proxima_tensor::cpu::probe_kv_padding` decided.
+    kv_pad: alloc::collections::BTreeMap<(u64, usize), bool>,
 }
 
 #[cfg(not(feature = "gpu"))]
 impl BackendRuntime {
+    const CPU_PLAN_CLASSES: usize = 8;
+
     pub(crate) fn new(_config: &ServingConfig) -> Self {
         Self {
             free_buffers: proxima_tensor::cpu::BufferPools::default(),
             validated_weight_nodes: None,
             exact_activations: _config.exact_activations,
+            cpu_plans: alloc::collections::BTreeMap::new(),
+            kv_pad: alloc::collections::BTreeMap::new(),
         }
+    }
+
+    /// Full binds the retained CPU steps have performed, summed over classes.
+    #[cfg(test)]
+    pub(super) fn cpu_plan_binds(&self) -> u64 {
+        self.cpu_plans.values().map(proxima_tensor::cpu::CpuStepPlan::binds).sum()
     }
 
     pub(super) fn uses_gpu(&self) -> bool {
@@ -5113,18 +5153,41 @@ impl BackendRuntime {
         Ok(Vec::new())
     }
 
-    pub(super) fn pads_cached_kv(&self, _program_hash: u64, _new_count: usize) -> bool {
-        false
+    /// Whether the cached K/V range binds padded: only once the probe found every reader
+    /// of the cache a fused cached attention, whose runtime bound excludes the pad rows.
+    pub(super) fn pads_cached_kv(&self, program_hash: u64, new_count: usize) -> bool {
+        self.kv_pad
+            .get(&(program_hash, new_count))
+            .copied()
+            .unwrap_or(false)
     }
 
+    /// Decides the padding of `program` at `new_count` rows by binding at `symbols`
+    /// without executing, so the first call of a class already binds its range padded.
     pub(super) fn settle_kv_padding(
         &mut self,
-        _program: &[Op],
-        _program_hash: u64,
-        _symbols: &[u64],
-        _outputs: impl FnOnce() -> Vec<NodeId>,
+        program: &[Op],
+        program_hash: u64,
+        symbols: &[u64],
+        outputs: impl FnOnce() -> Vec<NodeId>,
         _named: &[(&str, QuantizedBlock<'_>)],
     ) {
+        let key = (program_hash, symbols[0] as usize);
+        if self.kv_pad.contains_key(&key) {
+            return;
+        }
+        match proxima_tensor::cpu::probe_kv_padding(program, symbols, &outputs(), |name| {
+            name.starts_with(KV_CACHE_INPUT_PREFIX)
+        }) {
+            Ok(pads) => {
+                self.kv_pad.insert(key, pads);
+            }
+            Err(error) => debug!(
+                error = %error,
+                new_count = symbols[0],
+                "kv padding probe could not bind, the width binds exact"
+            ),
+        }
     }
 
     /// `resident_names` is unused on this backend: the CPU evaluator has no
@@ -5133,7 +5196,7 @@ impl BackendRuntime {
     /// and the decode loop's call site never needs a `cfg` of its own.
     pub(super) fn evaluate(
         &mut self,
-        (program, _program_hash): (&[Op], u64),
+        (program, program_hash): (&[Op], u64),
         symbols: &[u64],
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
@@ -5143,6 +5206,45 @@ impl BackendRuntime {
         >,
     ) -> Result<Evaluated, InteropError> {
         trace!(rows = symbols[0], "backend evaluation");
+        let key = (program_hash, symbols[0] as usize);
+        if !self.cpu_plans.contains_key(&key) && self.cpu_plans.len() >= Self::CPU_PLAN_CLASSES {
+            self.cpu_plans.clear();
+        }
+        let plan = self.cpu_plans.entry(key).or_default();
+        let evaluated = plan.execute(
+            (program, program_hash),
+            (symbols, outputs),
+            named,
+            &mut self.free_buffers,
+            expert_sources,
+            self.exact_activations,
+        )?;
+        debug!(
+            program_hash = program_hash,
+            new_count = symbols[0],
+            kv_extent = symbols.get(1).copied().unwrap_or_default(),
+            binds = plan.binds(),
+            refits = plan.refits(),
+            refusals = plan.refusals(),
+            "cpu step plan resolved"
+        );
+        Ok(evaluated)
+    }
+
+    /// Evaluates one graph partition through the same reusable CPU scratch
+    /// state as the decode path. The partition owns its node numbering and
+    /// therefore cannot share the decode path's plan classes, so it binds per call.
+    pub(crate) fn evaluate_segment(
+        &mut self,
+        program: &[Op],
+        symbols: &[u64],
+        named: &[(&str, QuantizedBlock<'_>)],
+        outputs: &[NodeId],
+        _resident_names: &BTreeSet<&str>,
+        expert_sources: Option<
+            &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
+        >,
+    ) -> Result<Evaluated, InteropError> {
         if self.exact_activations {
             return Ok(evaluate_quantized_named_exact_with_scratch_and_experts(
                 program,
@@ -5163,33 +5265,6 @@ impl BackendRuntime {
             &mut self.validated_weight_nodes,
             expert_sources,
         )?)
-    }
-
-    /// Evaluates one graph partition through the same reusable CPU scratch
-    /// state as [`Self::evaluate`]. The partition owns its node numbering and
-    /// therefore cannot alias the decode path's plan cache; CPU has no plan
-    /// cache, so the only safe reusable state is the evaluator's scratch pool
-    /// and weight-validation set. Keeping this method beside the Metal
-    /// implementation gives routed callers one backend-independent seam.
-    pub(crate) fn evaluate_segment(
-        &mut self,
-        program: &[Op],
-        symbols: &[u64],
-        named: &[(&str, QuantizedBlock<'_>)],
-        outputs: &[NodeId],
-        resident_names: &BTreeSet<&str>,
-        expert_sources: Option<
-            &alloc::collections::BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>,
-        >,
-    ) -> Result<Evaluated, InteropError> {
-        self.evaluate(
-            (program, 0),
-            symbols,
-            named,
-            outputs,
-            resident_names,
-            expert_sources,
-        )
     }
 }
 
