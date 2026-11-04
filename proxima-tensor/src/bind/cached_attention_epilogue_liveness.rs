@@ -12,18 +12,25 @@ pub(super) fn bind_cached_attention_fusion(
     fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
-    let built = bind_plain(program, shapes, outputs, numeric_policy)?;
     #[cfg(not(feature = "cached-attention-streaming"))]
     {
         let _ = fuse_cached_attention;
-        Ok(built)
+        bind_plain(program, shapes, outputs, numeric_policy)
     }
 
     #[cfg(feature = "cached-attention-streaming")]
     {
         if !fuse_cached_attention {
-            return Ok(built);
+            return bind_plain(program, shapes, outputs, numeric_policy);
         }
+        // without the metal split-kv arms every pin a candidate needs is a node of `program`, so
+        // discovery reads the program alone and the graph binds once with those nodes pinned; the
+        // metal arms read resolved layouts to decide, so they keep the two-pass form
+        #[cfg(feature = "metal-fuse-attn-decode")]
+        let (built, discovery) = (Some(bind_plain(program, shapes, outputs, numeric_policy)?), false);
+        #[cfg(not(feature = "metal-fuse-attn-decode"))]
+        let (built, discovery): (Option<Vec<BoundOp>>, bool) = (None, true);
+        let discovery_resolved: &[BoundOp] = built.as_deref().unwrap_or(&[]);
         // `false`: this discovery pass finds anchors `bind_plain` has already
         // folded into their single consumer (the recurrent-interval family's own `attended` tap,
         // `bind.rs:993`'s `elementwise_operand_fuse`) precisely so their node
@@ -31,12 +38,15 @@ pub(super) fn bind_cached_attention_fusion(
         // rebuild -- requiring a resolved binding here would make discovery
         // depend on the very materialization it exists to produce.
         let mut initial_candidates =
-            cached_attention_candidates(program, shapes, &built, outputs, false, numeric_policy);
+            cached_attention_candidates(program, shapes, discovery_resolved, outputs, false, numeric_policy, discovery);
         initial_candidates.extend(cached_attention_single_range_candidates(
-            program, shapes, &built, outputs, numeric_policy,
+            program, shapes, discovery_resolved, outputs, numeric_policy, discovery,
         ));
         if initial_candidates.is_empty() {
-            return Ok(built);
+            return match built {
+                Some(built) => Ok(built),
+                None => bind_plain(program, shapes, outputs, numeric_policy),
+            };
         }
         let mut planning_outputs = outputs.to_vec();
         if planning_outputs.is_empty() {
@@ -112,12 +122,15 @@ pub(super) fn bind_cached_attention_fusion(
         }
         let rebuilt = bind_plain(program, shapes, &planning_outputs, numeric_policy)?;
         let mut candidates =
-            cached_attention_candidates(program, shapes, &rebuilt, outputs, true, numeric_policy);
+            cached_attention_candidates(program, shapes, &rebuilt, outputs, true, numeric_policy, false);
         candidates.extend(cached_attention_single_range_candidates(
-            program, shapes, &rebuilt, outputs, numeric_policy,
+            program, shapes, &rebuilt, outputs, numeric_policy, false,
         ));
         if candidates.is_empty() {
-            return Ok(built);
+            return match built {
+                Some(built) => Ok(built),
+                None => bind_plain(program, shapes, outputs, numeric_policy),
+            };
         }
         let fused_by_node = candidates
             .iter()

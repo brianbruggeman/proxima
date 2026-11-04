@@ -875,7 +875,7 @@ fn single_range_fusion_declares_an_empty_cached_range_not_a_duplicated_capacity(
         .expect("plain bind succeeds");
 
     let candidates =
-        cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs, NumericPolicy::bit_exact().with_flash_narrowing(true));
+        cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs, NumericPolicy::bit_exact().with_flash_narrowing(true), false);
     assert!(
         !candidates.is_empty(),
         "the fixture must still produce a fusable single-range candidate"
@@ -1791,6 +1791,7 @@ fn a_perturbed_pass_plane_map_declines_the_qwen35_fusion() {
         &outputs,
         true,
         NumericPolicy::bit_exact(),
+        false,
     );
     assert!(
         candidates.is_empty(),
@@ -1832,7 +1833,7 @@ fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
     let mut resolved = bind_plain(&program, &shapes, &outputs, NumericPolicy::bit_exact())
         .expect("plain bind succeeds");
 
-    let baseline = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs, NumericPolicy::bit_exact().with_flash_narrowing(true));
+    let baseline = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs, NumericPolicy::bit_exact().with_flash_narrowing(true), false);
     assert!(
         !baseline.is_empty(),
         "the unpatched fixture must still produce a fusable candidate"
@@ -1869,7 +1870,7 @@ fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
         }
     }
 
-    let patched = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs, NumericPolicy::bit_exact().with_flash_narrowing(true));
+    let patched = cached_attention_single_range_candidates(&program, &shapes, &resolved, &outputs, NumericPolicy::bit_exact().with_flash_narrowing(true), false);
     assert!(
         patched.is_empty(),
         "a gathered source must abort the candidate, not just shrink its operand list"
