@@ -5,6 +5,8 @@ use super::dequant_x86::{
 };
 use core::arch::x86_64::{_mm256_fmadd_ps, _mm256_loadu_ps, _mm256_setzero_ps, _mm256_storeu_ps};
 
+type DecodeBlock = fn(&[u8], &mut [f32]);
+
 const TILE_ROWS: usize = 2;
 const TILE_POSITIONS: usize = 4;
 const LANES: usize = 8;
@@ -103,7 +105,7 @@ unsafe fn unit(
     weight_rows: &[u8],
     row_bytes: usize,
     block_bytes: usize,
-    decode: fn(&[u8], &mut [f32]),
+    decode: DecodeBlock,
     out: &mut [f32],
 ) {
     let rows = weight_rows.len() / row_bytes;
@@ -139,16 +141,16 @@ pub(super) fn matmul_exact_wide(
     activation: &[f32],
     positions: usize,
     session: Option<&MatmulSession<'_>>,
-    shape: (usize, usize, fn(&[u8], &mut [f32])),
+    codec: Codec,
 ) -> Option<Result<Vec<f32>, TensorError>> {
-    let (block_bytes, block_elements, decode) = shape;
+    let (block_bytes, block_elements, decode) = codec_shape(codec)?;
     if !fma_runtime_available() {
         return None;
     }
     let k = activation.len() / positions;
     let row_bytes = weights.len() / rows;
     if k == 0
-        || row_bytes % block_bytes != 0
+        || !row_bytes.is_multiple_of(block_bytes)
         || row_bytes / block_bytes * block_elements != k
         || activation.len() != k * positions
     {
@@ -190,7 +192,7 @@ pub(super) fn matmul_exact_wide(
     })
 }
 
-pub(super) fn codec_shape(codec: Codec) -> Option<(usize, usize, fn(&[u8], &mut [f32]))> {
+fn codec_shape(codec: Codec) -> Option<(usize, usize, DecodeBlock)> {
     match codec {
         Codec::Q4K => Some((Q4K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, dequantize_block_q4_k)),
         Codec::Q6K => Some((Q6K_BLOCK_BYTES, Q4K_BLOCK_ELEMENTS, dequantize_block_q6_k)),
@@ -234,14 +236,15 @@ mod tests {
 
     #[test]
     fn exact_wide_tile_is_bit_identical_to_the_per_position_f32_kernels() {
-        let kernels: [(Codec, usize, fn(&[u8], &[f32]) -> Result<f32, TensorError>); 4] = [
-            (Codec::Q4K, 256, dot_q4k_f32),
-            (Codec::Q6K, 256, dot_q6k_f32),
-            (Codec::Q5_0, 32, dot_q5_0_f32),
-            (Codec::Q8_0, 32, dot_q8_0_f32),
-        ];
+        let codecs = [(Codec::Q4K, 256usize), (Codec::Q6K, 256), (Codec::Q5_0, 32), (Codec::Q8_0, 32)];
         let shapes = [(1usize, 2usize), (3, 5), (2, 4), (5, 7), (16, 33), (17, 66), (9, 129)];
-        for (codec, block_elements, dot) in kernels {
+        for (codec, block_elements) in codecs {
+            let dot = match codec {
+                Codec::Q4K => dot_q4k_f32,
+                Codec::Q6K => dot_q6k_f32,
+                Codec::Q5_0 => dot_q5_0_f32,
+                _ => dot_q8_0_f32,
+            };
             for (rows, positions) in shapes {
                 let blocks = if block_elements == 256 { 3 } else { 24 };
                 let k = blocks * block_elements;
@@ -250,8 +253,8 @@ mod tests {
                     .into_iter()
                     .map(|byte| (f32::from(byte) - 127.5) / 37.0)
                     .collect();
-                let shape = codec_shape(codec).expect("codec has an exact wide shape");
-                let wide = matmul_exact_wide(&weights, rows, &activation, positions, None, shape)
+                
+                let wide = matmul_exact_wide(&weights, rows, &activation, positions, None, codec)
                     .expect("avx2 and fma are present on the test host")
                     .expect("wide matmul runs");
                 let row_bytes = weights.len() / rows;
@@ -277,8 +280,8 @@ mod tests {
     fn exact_wide_rejects_an_activation_that_does_not_match_the_row_layout() {
         let weights = weight_rows(Codec::Q8_0, 2, 3, 1);
         let activation = vec![0.5f32; 2 * (3 * 32 + 1)];
-        let shape = codec_shape(Codec::Q8_0).expect("q8_0 has an exact wide shape");
-        let result = matmul_exact_wide(&weights, 2, &activation, 2, None, shape)
+        
+        let result = matmul_exact_wide(&weights, 2, &activation, 2, None, Codec::Q8_0)
             .expect("avx2 and fma are present on the test host");
         assert!(result.is_err());
     }
