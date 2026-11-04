@@ -4764,6 +4764,41 @@ fn assert_policy_prefill_parity(
 }
 
 #[test]
+fn f16_weight_prefill_takes_the_mma_kernel_and_matches_the_f64_oracle_on_cuda() {
+    let weight_f32: Vec<f32> = random_vec(61, POLICY_PREFILL_FEATURES * POLICY_PREFILL_DEPTH)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+    let rounded_weight = round_through_fp16(&weight_f32);
+    let weight_bytes: Vec<u8> = weight_f32
+        .iter()
+        .flat_map(|value| half::f16::from_f32(*value).to_le_bytes())
+        .collect();
+    let activation: Vec<f32> = random_vec(67, POLICY_PREFILL_DEPTH * POLICY_PREFILL_TOKENS)
+        .into_iter()
+        .map(|value| value * 4.0 - 2.0)
+        .collect();
+
+    let (output, identities) = run_policy_prefill(&weight_bytes, Codec::Float16, &activation, false);
+
+    assert!(
+        identities.iter().any(|identity| identity.contains("_mma16x8x8_")),
+        "f16 weight prefill did not take the mma kernel: {identities:?}"
+    );
+    let max_magnitude = output.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let against_stored = probed_oracle_max_diff(&output, &rounded_weight, &activation, max_magnitude);
+    let against_unrounded = probed_oracle_max_diff(&output, &weight_f32, &activation, max_magnitude);
+    assert!(
+        output.iter().all(|value| value.is_finite()) && against_stored < 1e-5,
+        "f16 weight prefill disagrees with the f64 oracle over the stored halves by {against_stored} of peak"
+    );
+    assert!(
+        against_unrounded > 2.0 * against_stored,
+        "degenerate control: output matches the pre-rounding weights ({against_unrounded}) as tightly as the stored halves ({against_stored})"
+    );
+}
+
+#[test]
 fn policy_on_q8_0_prefill_matches_the_fp16_rounded_f64_oracle_on_cuda() {
     use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
     assert_policy_prefill_parity("q8_0", Codec::Q8_0, BLOCK_BYTES, QK8_0, quantize, dequantize);

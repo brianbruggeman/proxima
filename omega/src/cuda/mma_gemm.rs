@@ -44,7 +44,7 @@ const STAGE_PAD: usize = 40;
 pub(super) struct MmaGemm {
     pub(super) weight: usize,
     pub(super) activation: usize,
-    codec: Codec,
+    pub(super) codec: Codec,
     pub(super) single_activation: bool,
     pub(super) int8: Option<Int8Gemm>,
     pub(super) feature_positions: Vec<usize>,
@@ -69,6 +69,7 @@ fn codec_shape(codec: Codec) -> Option<CodecShape> {
         Codec::Q1_0 => ("mma_decode_q1_0", Q1_0_BLOCK_BYTES, Q1_0_BLOCK_ELEMENTS, false),
         Codec::Q2_0 => ("mma_decode_q2_0", Q2_0_BLOCK_BYTES, Q2_0_BLOCK_ELEMENTS, false),
         Codec::Pq2_0 => ("mma_decode_q2_0", PQ2_0_BLOCK_BYTES, PQ2_0_BLOCK_ELEMENTS, false),
+        Codec::Float16 => ("mma_decode_f16", 2, 1, false),
         _ => return None,
     };
     Some(CodecShape {
@@ -223,6 +224,14 @@ __device__ __forceinline__ void mma_m16n8k8(float *c, unsigned int a0, unsigned 
     asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5}, {%6}, {%0,%1,%2,%3};"
         : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
         : "r"(a0), "r"(a1), "r"(b0));
+}
+"#;
+
+pub(super) const MMA_F16_HELPER: &str = r#"
+__device__ __forceinline__ void mma_decode_f16(const unsigned char *block, unsigned int within, __half2 *out, float *scale, float *minimum) {
+    *scale = 1.0f;
+    *minimum = 0.0f;
+    *(uint4 *)out = *(const uint4 *)block;
 }
 "#;
 
@@ -451,7 +460,7 @@ pub(super) fn push_mma_gemm_body(
     source.push_str("        if (feature_ok) {\n");
     source.push_str("            long element = weight_row + stage_first + load_segment;\n");
     source.push_str(&format!(
-        "            const unsigned char *block = in{weight} + (element / {block_elements}) * {block_bytes};\n"
+        "            const unsigned char *block = (const unsigned char *)in{weight} + (element / {block_elements}) * {block_bytes};\n"
     ));
     source.push_str(&format!(
         "            {decode}(block, (unsigned int)(element % {block_elements}), weight_pairs, &scale, &minimum);\n"
