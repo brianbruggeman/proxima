@@ -250,8 +250,21 @@ struct Range<'buffer> {
 }
 
 fn resized<T: Clone + Default>(buffer: &mut alloc::vec::Vec<T>, length: usize) {
-    buffer.clear();
-    buffer.resize(length, T::default());
+    if buffer.len() < length {
+        buffer.resize(length, T::default());
+    }
+}
+
+/// `expf` of the platform math library, the function ggml calls (`ops.cpp:8768`, `:8774`).
+fn expf(value: f32) -> f32 {
+    #[cfg(feature = "std")]
+    {
+        value.exp()
+    }
+    #[cfg(not(feature = "std"))]
+    {
+        libm::expf(value)
+    }
 }
 
 /// [`super::stream_cached_attention_split_gqa`]'s contract and layouts, computed the way llama.cpp's
@@ -363,10 +376,10 @@ fn run(
                 scratch.staging[..pair_dim].copy_from_slice(&queries[0][query_start..query_start + pair_dim]);
                 scratch.staging[pair_dim..2 * pair_dim].copy_from_slice(&queries[1][query_start..query_start + pair_dim]);
                 if let Some(plane) = rotary.pass.as_ref() {
-                    scratch.staging[2 * pair_dim..].copy_from_slice(&plane.query[pass_start..pass_start + pass_dim]);
+                    scratch.staging[2 * pair_dim..head_dim].copy_from_slice(&plane.query[pass_start..pass_start + pass_dim]);
                 }
-                kernels.convert(&scratch.staging, &mut scratch.query);
-                scratch.accumulator.fill(0);
+                kernels.convert(&scratch.staging[..head_dim], &mut scratch.query[..head_dim]);
+                scratch.accumulator[..head_dim].fill(0);
                 let mut running_sum = 0.0f32;
                 let mut running_max = f32::NEG_INFINITY;
                 let mut base = 0;
@@ -383,25 +396,25 @@ fn run(
                             continue;
                         }
                         let target = (base + key_row) * row_width + kv_head * head_dim;
-                        let weighted = kernels.dot(&scratch.keys[target..target + head_dim], &scratch.query) * score.scale;
+                        let weighted = kernels.dot(&scratch.keys[target..target + head_dim], &scratch.query[..head_dim]) * score.scale;
                         let previous_max = running_max;
                         let mut rescale = 1.0f32;
                         let mut weight = 1.0f32;
                         if weighted > running_max {
                             running_max = weighted;
-                            rescale = libm::expf(previous_max - running_max);
-                            kernels.scale(&mut scratch.accumulator, rescale);
+                            rescale = expf(previous_max - running_max);
+                            kernels.scale(&mut scratch.accumulator[..head_dim], rescale);
                         } else {
-                            weight = libm::expf(weighted - running_max);
+                            weight = expf(weighted - running_max);
                         }
-                        kernels.mad(&mut scratch.accumulator, &scratch.values[target..target + head_dim], weight);
+                        kernels.mad(&mut scratch.accumulator[..head_dim], &scratch.values[target..target + head_dim], weight);
                         running_sum = running_sum * rescale + weight;
                     }
                     base += range.rows;
                 }
                 let inverse = if running_sum == 0.0 { 0.0 } else { 1.0 / running_sum };
                 let output_start = (query_row * kv_heads * groups + query_head) * head_dim;
-                for (slot, bits) in output[output_start..output_start + head_dim].iter_mut().zip(&scratch.accumulator) {
+                for (slot, bits) in output[output_start..output_start + head_dim].iter_mut().zip(&scratch.accumulator[..head_dim]) {
                     *slot = half_value(*bits) * inverse;
                 }
             }
