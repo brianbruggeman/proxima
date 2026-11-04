@@ -1797,6 +1797,7 @@ fn plan_named_cpu_exact(
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'_>)],
     outputs: &[NodeId],
+    flash_narrowing: bool,
 ) -> Result<Plan, BackendError> {
     resolve_named_blocks(program, named)?;
     Ok(Plan::Cpu(Box::new(CpuPlan {
@@ -1805,7 +1806,7 @@ fn plan_named_cpu_exact(
         outputs: outputs.to_vec(),
         free_buffers: BufferPools::default(),
         validated_weight_nodes: None,
-        step: CpuStepPlan::new(),
+        step: CpuStepPlan::with_numeric_policy(NumericPolicy::bit_exact().with_flash_narrowing(flash_narrowing)),
         exact_activations: true,
         execution_config: None,
         input_contract: Vec::new(),
@@ -1837,7 +1838,7 @@ pub fn plan_named_exact(
         Engine::Cpu => {
             #[cfg(feature = "cpu")]
             {
-                plan_named_cpu_exact(_program, _symbols, _named, _outputs)
+                plan_named_cpu_exact(_program, _symbols, _named, _outputs, _numeric_policy.flash_narrowing)
             }
             #[cfg(not(feature = "cpu"))]
             {

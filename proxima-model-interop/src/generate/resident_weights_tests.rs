@@ -1,6 +1,7 @@
 use core::ops::ControlFlow;
 
 use proxima_gguf::parse_complete;
+use proxima_tensor::NumericPolicy;
 
 use super::chunked_prefill_tests::{dense_checkpoint, dense_checkpoint_seeded};
 use super::{LoadedModel, LogitsSink, NodeValuesSink, ServingConfig};
@@ -10,10 +11,17 @@ const NEW_TOKENS: usize = 3;
 
 type Outcome<Value = ()> = Result<Value, String>;
 
+/// The cpu oracle runs the f32 online attention the gpu binds, not llama's f16 flash form the cpu binds by default.
+fn oracle_policy(gpu_layers: i32) -> NumericPolicy {
+    let policy = ServingConfig::default().numeric_policy;
+    if gpu_layers == 0 { policy.with_flash_narrowing(true) } else { policy }
+}
+
 fn serving_config(gpu_layers: i32) -> ServingConfig<'static> {
     ServingConfig {
         gpu_layers,
         prompt_cache: PromptCacheConfig::off(),
+        numeric_policy: oracle_policy(gpu_layers),
         ..ServingConfig::default()
     }
 }

@@ -22,6 +22,7 @@ fn cpu_config() -> ServingConfig<'static> {
     ServingConfig {
         gpu_layers: 0,
         prompt_cache: PromptCacheConfig::off(),
+        numeric_policy: ServingConfig::default().numeric_policy.with_flash_narrowing(true),
         ..ServingConfig::default()
     }
 }
