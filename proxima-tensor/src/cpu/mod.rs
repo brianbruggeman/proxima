@@ -225,6 +225,8 @@ mod gemm_tile;
 #[macro_use]
 mod gemm_dot_quant;
 mod gemm_q8_0_act;
+#[cfg(target_arch = "x86_64")]
+mod gemm_exact_wide;
 #[cfg(all(target_arch = "x86_64", feature = "q6k-int8-dot"))]
 mod gemm_q6k_avx2;
 #[cfg(all(target_arch = "x86_64", feature = "q4k-int8-dot", feature = "q6k-int8-dot"))]
