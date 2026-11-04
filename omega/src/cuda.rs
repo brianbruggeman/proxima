@@ -99,7 +99,7 @@ pub use int8_gemm::is_int8_weight;
 use block_quantize::{block_quantize_grid, block_quantize_groups, quantize_device, render_block_quantize};
 use int8_gemm::INT8_MMA_INSTRUCTION;
 use mma_gemm::{
-    GEMM_THREADS, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body,
+    GEMM_THREADS, MMA_F16_HELPER, MMA_GEMM_HELPERS, MMA_INSTRUCTION, mma_gemm_plan, mma_gemm_threads, push_mma_gemm_body,
     reads_prequantized_activation,
 };
 use row_tile::{ROW_TILE, push_row_tiled_cooperative_body, row_tile_axis};
@@ -3513,6 +3513,9 @@ fn render_reduce(
     if gemm.is_some() {
         source.push_str(MMA_INSTRUCTION);
         source.push_str(MMA_GEMM_HELPERS);
+        if gemm.as_ref().is_some_and(|plan| plan.codec == Codec::Float16) {
+            source.push_str(MMA_F16_HELPER);
+        }
     }
     if let Some(int8) = gemm.as_ref().and_then(|plan| plan.int8.as_ref()) {
         source.push_str(INT8_MMA_INSTRUCTION);
