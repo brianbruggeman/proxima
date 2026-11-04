@@ -391,10 +391,35 @@ mod x86 {
 }
 
 /// Per-call working set, kept per thread so a steady-state call allocates nothing.
+/// Per-call choices that are not part of the data layout.
+#[derive(Clone, Copy)]
+struct Options {
+    workers: Option<usize>,
+    interleaved: bool,
+}
+
+/// The head vector as ggml lays it out: split halves or interleaved pairs, then the pass-through tail.
+fn assemble_head(target: &mut [f32], even: &[f32], odd: &[f32], pass: Option<&[f32]>, interleaved: bool) {
+    let pair = even.len();
+    if interleaved {
+        for index in 0..pair {
+            target[2 * index] = even[index];
+            target[2 * index + 1] = odd[index];
+        }
+    } else {
+        target[..pair].copy_from_slice(even);
+        target[pair..2 * pair].copy_from_slice(odd);
+    }
+    if let Some(tail) = pass {
+        target[2 * pair..2 * pair + tail.len()].copy_from_slice(tail);
+    }
+}
+
 #[derive(Default)]
 struct Scratch {
     keys: alloc::vec::Vec<u16>,
     values: alloc::vec::Vec<u16>,
+    stage: alloc::vec::Vec<f32>,
 }
 
 #[cfg(feature = "std")]
@@ -430,6 +455,7 @@ fn expf(value: f32) -> f32 {
 /// [`super::stream_cached_attention_split_gqa`]'s contract and layouts, computed the way llama.cpp's
 /// default CPU attention computes them.
 #[must_use]
+#[expect(clippy::too_many_arguments, reason = "the layout bundle of the sibling online kernel plus the head-vector order")]
 pub fn stream_cached_attention_llama_flash(
     queries: [&[f32]; 2],
     keys: [[&[f32]; 2]; 2],
@@ -438,24 +464,25 @@ pub fn stream_cached_attention_llama_flash(
     extents: &AttentionExtents,
     rotary: &CachedAttentionRotary<'_>,
     score: &CachedAttentionScore,
+    interleaved: bool,
 ) -> bool {
     #[cfg(feature = "std")]
     {
         SCRATCH.with(|cell| match cell.try_borrow_mut() {
-            Ok(mut scratch) => run(&mut scratch, None, queries, keys, values, output, extents, rotary, score),
-            Err(_) => run(&mut Scratch::default(), None, queries, keys, values, output, extents, rotary, score),
+            Ok(mut scratch) => run(&mut scratch, Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score),
+            Err(_) => run(&mut Scratch::default(), Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score),
         })
     }
     #[cfg(not(feature = "std"))]
     {
-        run(&mut Scratch::default(), None, queries, keys, values, output, extents, rotary, score)
+        run(&mut Scratch::default(), Options { workers: None, interleaved }, queries, keys, values, output, extents, rotary, score)
     }
 }
 
 #[expect(clippy::too_many_arguments, reason = "the layout bundle of the public entry, passed through")]
 fn run(
     scratch: &mut Scratch,
-    workers_override: Option<usize>,
+    options: Options,
     queries: [&[f32]; 2],
     keys: [[&[f32]; 2]; 2],
     values: [&[f32]; 2],
@@ -501,6 +528,7 @@ fn run(
     let row_width = kv_heads * head_dim;
     resized(&mut scratch.keys, (cached_rows + new_rows) * row_width);
     resized(&mut scratch.values, (cached_rows + new_rows) * row_width);
+    resized(&mut scratch.stage, head_dim);
     let mut base = 0;
     for range in &ranges {
         for key_row in 0..range.rows {
@@ -509,11 +537,14 @@ fn run(
                 let pass_source = (key_row * kv_heads + kv_head) * pass_dim;
                 let target = (base + key_row) * row_width + kv_head * head_dim;
                 let destination = &mut scratch.keys[target..target + head_dim];
-                kernels.convert(&range.keys[0][source..source + pair_dim], &mut destination[..pair_dim]);
-                kernels.convert(&range.keys[1][source..source + pair_dim], &mut destination[pair_dim..2 * pair_dim]);
-                if let Some(pass_keys) = range.pass_keys {
-                    kernels.convert(&pass_keys[pass_source..pass_source + pass_dim], &mut destination[2 * pair_dim..]);
-                }
+                assemble_head(
+                    &mut scratch.stage[..head_dim],
+                    &range.keys[0][source..source + pair_dim],
+                    &range.keys[1][source..source + pair_dim],
+                    range.pass_keys.map(|pass_keys| &pass_keys[pass_source..pass_source + pass_dim]),
+                    options.interleaved,
+                );
+                kernels.convert(&scratch.stage[..head_dim], destination);
                 let value_source = (key_row * kv_heads + kv_head) * head_dim;
                 kernels.convert(
                     &range.values[value_source..value_source + head_dim],
@@ -538,11 +569,12 @@ fn run(
         pass_dim,
         head_dim,
         row_width,
+        interleaved: options.interleaved,
     };
     let tiled = (query_rows >= tiled::TILE_Q).then(|| tiled::TiledData::build(&shared));
     let tiled = tiled.as_ref();
     let row_len = kv_heads * groups * head_dim;
-    let workers = workers_override.unwrap_or_else(|| worker_count(query_rows, cached_rows + new_rows, row_len));
+    let workers = options.workers.unwrap_or_else(|| worker_count(query_rows, cached_rows + new_rows, row_len));
     if workers <= 1 {
         let mut local = Local::new(head_dim);
         for (query_row, out) in output.chunks_mut(row_len).enumerate() {
@@ -619,6 +651,7 @@ struct Shared<'call> {
     pass_dim: usize,
     head_dim: usize,
     row_width: usize,
+    interleaved: bool,
 }
 
 impl Shared<'_> {
@@ -640,17 +673,20 @@ impl Shared<'_> {
             pass_dim,
             head_dim,
             row_width,
+            interleaved,
         } = *self;
         for kv_head in 0..kv_heads {
             for group in 0..groups {
                 let query_head = kv_head * groups + group;
                 let query_start = (query_row * kv_heads * groups + query_head) * pair_dim;
                 let pass_start = (query_row * kv_heads * groups + query_head) * pass_dim;
-                local.staging[..pair_dim].copy_from_slice(&queries[0][query_start..query_start + pair_dim]);
-                local.staging[pair_dim..2 * pair_dim].copy_from_slice(&queries[1][query_start..query_start + pair_dim]);
-                if let Some(plane) = pass_query {
-                    local.staging[2 * pair_dim..head_dim].copy_from_slice(&plane[pass_start..pass_start + pass_dim]);
-                }
+                assemble_head(
+                    &mut local.staging[..head_dim],
+                    &queries[0][query_start..query_start + pair_dim],
+                    &queries[1][query_start..query_start + pair_dim],
+                    pass_query.map(|plane| &plane[pass_start..pass_start + pass_dim]),
+                    interleaved,
+                );
                 kernels.convert(&local.staging[..head_dim], &mut local.query[..head_dim]);
                 local.accumulator[..head_dim].fill(0);
                 let mut running_sum = 0.0f32;
@@ -794,7 +830,7 @@ mod threading_tests {
             let mut output = alloc::vec![0f32; rows * kv_heads * groups * head_dim];
             assert!(run(
                 &mut Scratch::default(),
-                Some(workers),
+                Options { workers: Some(workers), interleaved: false },
                 [&query_even, &query_odd],
                 [[&cached_even, &cached_odd], [&new_even, &new_odd]],
                 [&cached_value, &new_value],
@@ -931,5 +967,115 @@ mod aarch64_twin_tests {
         let avx = scalar::dot(&key, &query);
         let fp16 = neon_twin::dot_fp16(&key, &query);
         assert_ne!(avx.to_bits(), fp16.to_bits(), "the f16 accumulating dot must visibly differ from the f32 accumulating one");
+    }
+}
+
+#[cfg(test)]
+mod pairing_order_tests {
+    use super::super::{CachedAttentionScore, CausalBand};
+    use super::*;
+
+    fn random(state: &mut u64, length: usize) -> alloc::vec::Vec<f32> {
+        (0..length)
+            .map(|_| {
+                *state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                ((*state >> 33) as f32 / (1u64 << 31) as f32) * 16.0 - 8.0
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_head_vector_lies_in_memory_as_the_pairing_names() {
+        let even = [10.0f32, 11.0, 12.0];
+        let odd = [20.0f32, 21.0, 22.0];
+        let tail = [30.0f32, 31.0];
+        let mut split = [0f32; 8];
+        let mut interleaved = [0f32; 8];
+        assemble_head(&mut split, &even, &odd, Some(&tail), false);
+        assemble_head(&mut interleaved, &even, &odd, Some(&tail), true);
+        assert_eq!(split, [10.0, 11.0, 12.0, 20.0, 21.0, 22.0, 30.0, 31.0]);
+        assert_eq!(interleaved, [10.0, 20.0, 11.0, 21.0, 12.0, 22.0, 30.0, 31.0]);
+    }
+
+    /// One query row, one kv head, every key visible: the kernel and a memory-order reference built
+    /// from the scalar twins must agree for each pairing, and the two pairings must not agree.
+    #[test]
+    fn the_dot_sums_in_memory_order_for_both_pairings() {
+        let (keys, head_dim) = (6usize, 64usize);
+        let pair = head_dim / 2;
+        let mut state = 0xfeed_beef_1234_5678u64;
+        let query_even = random(&mut state, pair);
+        let query_odd = random(&mut state, pair);
+        let key_even = random(&mut state, keys * pair);
+        let key_odd = random(&mut state, keys * pair);
+        let values = random(&mut state, keys * head_dim);
+        let extents = AttentionExtents {
+            query_rows: 1,
+            cached_key_rows: 0,
+            new_key_rows: keys as u64,
+            kv_heads: 1,
+            query_groups: 1,
+            head_dim: head_dim as u64,
+        };
+        let rotary = CachedAttentionRotary { rotary_dim: head_dim as u64, pass: None };
+        let score = CachedAttentionScore {
+            scale: 0.125,
+            bands: [
+                CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },
+                CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },
+            ],
+        };
+        let reference = |interleaved: bool| -> alloc::vec::Vec<u32> {
+            let mut query = alloc::vec![0f32; head_dim];
+            assemble_head(&mut query, &query_even, &query_odd, None, interleaved);
+            let query: alloc::vec::Vec<u16> = query.iter().map(|value| half_bits(*value)).collect();
+            let mut accumulator = alloc::vec![0u16; head_dim];
+            let (mut max, mut sum) = (f32::NEG_INFINITY, 0.0f32);
+            for key in 0..keys {
+                let mut row = alloc::vec![0f32; head_dim];
+                assemble_head(&mut row, &key_even[key * pair..][..pair], &key_odd[key * pair..][..pair], None, interleaved);
+                let row: alloc::vec::Vec<u16> = row.iter().map(|value| half_bits(*value)).collect();
+                let weighted = scalar::dot(&row, &query) * 0.125;
+                let (mut rescale, mut weight) = (1.0f32, 1.0f32);
+                if weighted > max {
+                    rescale = expf(max - weighted);
+                    max = weighted;
+                    scalar::scale(&mut accumulator, rescale);
+                } else {
+                    weight = expf(weighted - max);
+                }
+                let value: alloc::vec::Vec<u16> = values[key * head_dim..][..head_dim].iter().map(|raw| half_bits(*raw)).collect();
+                scalar::mad(&mut accumulator, &value, weight);
+                sum = sum * rescale + weight;
+            }
+            accumulator.iter().map(|bits| (half_value(*bits) * (1.0 / sum)).to_bits()).collect()
+        };
+        let mut results = alloc::vec::Vec::new();
+        for interleaved in [false, true] {
+            let mut output = alloc::vec![0f32; head_dim];
+            assert!(stream_cached_attention_llama_flash(
+                [&query_even, &query_odd],
+                [[&[], &[]], [&key_even, &key_odd]],
+                [&[], &values],
+                &mut output,
+                &extents,
+                &rotary,
+                &score,
+                interleaved,
+            ));
+            let bits: alloc::vec::Vec<u32> = output.iter().map(|value| value.to_bits()).collect();
+            assert_eq!(bits, reference(interleaved), "kernel vs memory-order reference, interleaved={interleaved}");
+            results.push(bits);
+        }
+        let dot_in = |interleaved: bool, key: usize| {
+            let mut query = alloc::vec![0f32; head_dim];
+            assemble_head(&mut query, &query_even, &query_odd, None, interleaved);
+            let mut row = alloc::vec![0f32; head_dim];
+            assemble_head(&mut row, &key_even[key * pair..][..pair], &key_odd[key * pair..][..pair], None, interleaved);
+            let to_bits = |values: &[f32]| values.iter().map(|value| half_bits(*value)).collect::<alloc::vec::Vec<u16>>();
+            scalar::dot(&to_bits(&row), &to_bits(&query)).to_bits()
+        };
+        let differing_keys = (0..keys).filter(|key| dot_in(false, *key) != dot_in(true, *key)).count();
+        assert!(differing_keys > 0, "summing the same products in the two memory orders must round differently for some key");
     }
 }

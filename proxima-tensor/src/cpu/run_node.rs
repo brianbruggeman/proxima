@@ -805,8 +805,8 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         crate::bind::CachedAttentionArithmetic::OnlineF32 => crate::physical::stream_cached_attention_split_gqa(
             planes, key_planes, value_planes, output, extents, rotary, score,
         ),
-        crate::bind::CachedAttentionArithmetic::LlamaFlash => crate::physical::stream_cached_attention_llama_flash(
-            planes, key_planes, value_planes, output, &extents, &rotary, &score,
+        crate::bind::CachedAttentionArithmetic::LlamaFlash { interleaved } => crate::physical::stream_cached_attention_llama_flash(
+            planes, key_planes, value_planes, output, &extents, &rotary, &score, *interleaved,
         ),
     };
     if streamed {

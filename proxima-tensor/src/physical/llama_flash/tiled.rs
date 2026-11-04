@@ -234,12 +234,13 @@ impl Shared<'_> {
                 let query_start = (query_row * self.kv_heads * self.groups + query_head) * self.pair_dim;
                 let pass_start = (query_row * self.kv_heads * self.groups + query_head) * self.pass_dim;
                 let query = &mut local.staging[..head_dim];
-                query[..self.pair_dim].copy_from_slice(&self.queries[0][query_start..query_start + self.pair_dim]);
-                query[self.pair_dim..2 * self.pair_dim]
-                    .copy_from_slice(&self.queries[1][query_start..query_start + self.pair_dim]);
-                if let Some(plane) = self.pass_query {
-                    query[2 * self.pair_dim..].copy_from_slice(&plane[pass_start..pass_start + self.pass_dim]);
-                }
+                super::assemble_head(
+                    query,
+                    &self.queries[0][query_start..query_start + self.pair_dim],
+                    &self.queries[1][query_start..query_start + self.pair_dim],
+                    self.pass_query.map(|plane| &plane[pass_start..pass_start + self.pass_dim]),
+                    self.interleaved,
+                );
                 let accumulator = &mut local.acc32[..head_dim];
                 accumulator.fill(0.0);
                 let mut running_max = f32::NEG_INFINITY;

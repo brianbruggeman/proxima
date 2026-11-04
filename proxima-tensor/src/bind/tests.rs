@@ -7648,3 +7648,35 @@ fn half_precision_weights_read_by_an_f32_product_still_compose_into_the_reduce()
         "{reads:?}"
     );
 }
+
+#[test]
+#[cfg(feature = "cached-attention-streaming")]
+fn the_fused_op_records_which_memory_order_the_rope_pairing_gives_the_head_vector() {
+    let arithmetic_of = |program: &[Op], root: NodeId, roots: &[crate::spec::CachedLayerRoots]| {
+        let shapes = crate::shape::infer(program, &[1, 1]).expect("fixture infers");
+        let mut requested = alloc::vec![root];
+        for cache_roots in roots {
+            requested.extend_from_slice(&[cache_roots.0, cache_roots.1, cache_roots.2]);
+        }
+        let bound = bind(program, &shapes, &requested, NumericPolicy::bit_exact()).expect("fused bind succeeds");
+        bound
+            .iter()
+            .find_map(|op| match op.kind {
+                BoundOpKind::CachedAttention { arithmetic, .. } => Some(arithmetic),
+                _ => None,
+            })
+            .expect("one fused attention")
+    };
+    let (interleaved_program, interleaved_root, interleaved_roots) =
+        crate::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, 1).expect("interleaved fixture builds");
+    let (split_program, split_root, split_roots) =
+        crate::spec::qk_norm_cached_forward_program(32, 16, 24, 4, 2, 4, 1).expect("split-half fixture builds");
+    assert_eq!(
+        arithmetic_of(&interleaved_program, interleaved_root, &interleaved_roots),
+        CachedAttentionArithmetic::LlamaFlash { interleaved: true }
+    );
+    assert_eq!(
+        arithmetic_of(&split_program, split_root, &split_roots),
+        CachedAttentionArithmetic::LlamaFlash { interleaved: false }
+    );
+}
