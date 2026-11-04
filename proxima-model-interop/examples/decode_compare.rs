@@ -274,6 +274,9 @@ fn run(path: &str, prompt: &str, tokens: usize, backends: Backends) -> Result<()
         message: error.to_string(),
     })?;
     let vocab = vocab_from_metadata(&parsed)?;
+    if env::var("PROXIMA_PREFAULT").is_ok_and(|value| value == "1") {
+        proxima_model_interop::prefault(&mapping)?;
+    }
     let model = LoadedModel::load(&parsed, &mapping)?;
     println!("prompt_ids {:?}", prompt_ids(&vocab, prompt)?);
     if let Ok(forced_text) = env::var("DECODE_COMPARE_FORCED_IDS") {

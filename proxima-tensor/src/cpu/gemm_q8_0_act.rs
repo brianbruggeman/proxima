@@ -533,10 +533,10 @@ unsafe fn tile_avx2<const ROWS: usize, const TILE: usize>(
     out: &mut [f32],
 ) {
     let blocks = operands.blocks();
-    let mut accumulators = [[_mm256_setzero_ps(); TILE]; ROWS];
+    let mut accumulators = [[_mm256_setzero_ps(); ROWS]; TILE];
     let ones = _mm256_set1_epi16(1);
     for block in 0..blocks {
-        for lane in 0..TILE {
+        for (lane, lane_accumulators) in accumulators.iter_mut().enumerate() {
             let tile_position = position + lane;
             let codes_start = tile_position * operands.activation_row_bytes
                 + block * Q8_0_ACT_BLOCK_BYTES
@@ -549,7 +549,7 @@ unsafe fn tile_avx2<const ROWS: usize, const TILE: usize>(
                 let activation_scale = _mm256_set1_ps(
                     *operands.activation_scales.get_unchecked(tile_position * blocks + block),
                 );
-                for row in 0..ROWS {
+                for (row, accumulator) in lane_accumulators.iter_mut().enumerate() {
                     let row_block = (first_row + row) * blocks + block;
                     let offset = row_block * BLOCK_ELEMENTS;
                     let codes = _mm256_loadu_si256(unpacked.codes.as_ptr().add(offset).cast());
@@ -561,13 +561,13 @@ unsafe fn tile_avx2<const ROWS: usize, const TILE: usize>(
                     ));
                     let weight_scale = _mm256_set1_ps(*unpacked.scales.get_unchecked(row_block));
                     let scale = _mm256_mul_ps(weight_scale, activation_scale);
-                    accumulators[row][lane] = _mm256_fmadd_ps(scale, lanes, accumulators[row][lane]);
+                    *accumulator = _mm256_fmadd_ps(scale, lanes, *accumulator);
                 }
             }
         }
     }
-    for (row, row_accumulators) in accumulators.into_iter().enumerate() {
-        for (lane, accumulator) in row_accumulators.into_iter().enumerate() {
+    for (lane, lane_accumulators) in accumulators.into_iter().enumerate() {
+        for (row, accumulator) in lane_accumulators.into_iter().enumerate() {
             // SAFETY: avx2 is enabled on this function.
             out[(first_row + row) * operands.positions + position + lane] =
                 unsafe { horizontal_sum_f32(accumulator) };
@@ -625,8 +625,11 @@ unsafe fn units_avx2<const FIVE_BIT: bool>(operands: &UnitOperands<'_>, out: &mu
     }
 }
 
+#[cfg(target_arch = "x86_64")]
 const TILE_POSITIONS: usize = 2;
+#[cfg(target_arch = "x86_64")]
 const TILE_ROWS: usize = 4;
+#[cfg(target_arch = "x86_64")]
 const POSITION_BLOCK: usize = 64;
 pub(super) const UNIT_ROWS: usize = 16;
 
@@ -817,8 +820,10 @@ pub(super) fn matmul_q8_0_activation_impl(
     let row_bytes = weights.len() / rows;
     if leading_total > 1 {
         let activation_scales: Vec<f32> = quantized
-            .chunks_exact(Q8_0_ACT_BLOCK_BYTES)
-            .map(f16_scale)
+            .as_chunks::<Q8_0_ACT_BLOCK_BYTES>()
+            .0
+            .iter()
+            .map(|block| f16_scale(block))
             .collect();
         let run_group = |first_row: usize, group_rows: usize, out: &mut [f32]| {
             let operands = UnitOperands {
@@ -1053,6 +1058,95 @@ mod tests {
             .collect();
         let pairs = [folded[0] + folded[2], folded[1] + folded[3]];
         pairs[0] + pairs[1]
+    }
+
+    fn lcg_bytes(seed: u64, length: usize) -> Vec<u8> {
+        let mut state = seed;
+        (0..length)
+            .map(|_| {
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    fn lcg_activation(seed: u64, length: usize) -> Vec<f32> {
+        lcg_bytes(seed, length)
+            .into_iter()
+            .map(|byte| (f32::from(byte) - 127.5) / 40.0)
+            .collect()
+    }
+
+    fn weight_rows_of(codec: Codec, rows: usize, blocks: usize, seed: u64) -> Vec<u8> {
+        let block_bytes = if codec == Codec::Q5_0 { q5_0::BLOCK_BYTES } else { q8_0::BLOCK_BYTES };
+        lcg_bytes(seed, rows * blocks * block_bytes)
+            .chunks(block_bytes)
+            .flat_map(|block| finite_scale(block.to_vec()))
+            .collect()
+    }
+
+    #[test]
+    fn multi_row_tile_is_bit_identical_to_the_per_position_row_dots() {
+        let shapes = [
+            (1usize, 2usize),
+            (3, 5),
+            (4, 2),
+            (5, 3),
+            (16, 64),
+            (17, 66),
+            (9, 129),
+            (64, 130),
+        ];
+        for codec in [Codec::Q5_0, Codec::Q8_0] {
+            for (rows, positions) in shapes {
+                let blocks = 7;
+                let k = blocks * BLOCK_ELEMENTS;
+                let weights = weight_rows_of(codec, rows, blocks, 11 + rows as u64);
+                let activation = lcg_activation(29 + positions as u64, positions * k);
+                let (dot, _, _) = activation_dot_for(codec);
+                let wide = matmul_q8_0_activation_impl(&weights, rows, &activation, positions, None, activation_dot_for(codec))
+                    .expect("multi-row tile runs");
+                let mut quantized = vec![0u8; positions * blocks * Q8_0_ACT_BLOCK_BYTES];
+                quantize_row_q8_0_activation(&activation, &mut quantized).expect("activation quantizes");
+                let row_bytes = weights.len() / rows;
+                let activation_row_bytes = blocks * Q8_0_ACT_BLOCK_BYTES;
+                for row in 0..rows {
+                    for position in 0..positions {
+                        let expected = dot(
+                            &weights[row * row_bytes..(row + 1) * row_bytes],
+                            &quantized[position * activation_row_bytes..(position + 1) * activation_row_bytes],
+                        )
+                        .expect("row dot runs");
+                        assert_eq!(
+                            wide[row * positions + position].to_bits(),
+                            expected.to_bits(),
+                            "{codec:?} rows={rows} positions={positions} row={row} position={position}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn multi_row_tile_rejects_an_activation_that_is_not_a_whole_block_multiple() {
+        let weights = weight_rows_of(Codec::Q5_0, 4, 3, 7);
+        let activation = lcg_activation(3, 2 * (3 * BLOCK_ELEMENTS + 1));
+        assert!(
+            matmul_q8_0_activation_impl(&weights, 4, &activation, 2, None, activation_dot_for(Codec::Q5_0)).is_err()
+        );
+    }
+
+    #[test]
+    fn avx2_activation_quantizer_matches_the_scalar_reference_on_real_range_activations() {
+        let activation = lcg_activation(41, 16 * BLOCK_ELEMENTS);
+        let mut vectorized = vec![0u8; 16 * Q8_0_ACT_BLOCK_BYTES];
+        quantize_row_q8_0_activation(&activation, &mut vectorized).expect("activation quantizes");
+        for (block, packed) in activation.as_chunks::<BLOCK_ELEMENTS>().0.iter().zip(vectorized.as_chunks::<Q8_0_ACT_BLOCK_BYTES>().0) {
+            let mut scalar = [0u8; Q8_0_ACT_BLOCK_BYTES];
+            quantize_activation_block(block, &mut scalar);
+            assert_eq!(&scalar, packed);
+        }
     }
 
     #[cfg(target_arch = "x86_64")]

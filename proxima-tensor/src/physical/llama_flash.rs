@@ -584,14 +584,18 @@ fn run(
     }
     #[cfg(feature = "std")]
     {
-        let rows_per_worker = query_rows.div_ceil(workers);
         let shared = &shared;
+        let mut assignments: alloc::vec::Vec<alloc::vec::Vec<(usize, &mut [f32])>> =
+            (0..workers).map(|_| alloc::vec::Vec::new()).collect();
+        for (query_row, out) in output.chunks_mut(row_len).enumerate() {
+            assignments[query_row % workers].push((query_row, out));
+        }
         std::thread::scope(|scope| {
-            for (index, block) in output.chunks_mut(rows_per_worker * row_len).enumerate() {
+            for assignment in assignments {
                 scope.spawn(move || {
                     let mut local = Local::new(head_dim);
-                    for (offset, out) in block.chunks_mut(row_len).enumerate() {
-                        shared.attend(tiled, index * rows_per_worker + offset, out, &mut local);
+                    for (query_row, out) in assignment {
+                        shared.attend(tiled, query_row, out, &mut local);
                     }
                 });
             }
