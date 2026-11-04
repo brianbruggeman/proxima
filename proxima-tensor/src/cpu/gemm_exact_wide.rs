@@ -132,17 +132,18 @@ unsafe fn unit(
     }
 }
 
-/// Wide (`[row][position]`) result of `rows` quantized weight rows against `positions`
+/// Fills `output` (`[position][row]`) with `rows` quantized weight rows against `positions`
 /// f32 activation rows, bit-identical to calling the codec's per-position
-/// `dot_*_f32` kernel for every output. `None` when the host lacks avx2 or fma.
-pub(super) fn matmul_exact_wide(
+/// `dot_*_f32` kernel for every output. `None` when the codec has no decoder here or the
+/// host lacks avx2 or fma.
+pub(super) fn matmul_exact_into_positions(
     weights: &[u8],
     rows: usize,
     activation: &[f32],
     positions: usize,
     session: Option<&MatmulSession<'_>>,
-    codec: Codec,
-) -> Option<Result<Vec<f32>, TensorError>> {
+    (codec, output): (Codec, &mut [f32]),
+) -> Option<Result<(), TensorError>> {
     let (block_bytes, block_elements, decode) = codec_shape(codec)?;
     if !fma_runtime_available() {
         return None;
@@ -160,36 +161,14 @@ pub(super) fn matmul_exact_wide(
     }
     let operands = ExactOperands { activation, k, positions, block_elements };
     let unit_rows = unit_row_budget(k);
-    let run_unit = |first_row: usize, out: &mut [f32]| {
-        let group_rows = unit_rows.min(rows - first_row);
+    let run_unit = |first_row: usize, group_rows: usize, scratch: &mut [f32]| {
         let unit_weights = &weights[first_row * row_bytes..(first_row + group_rows) * row_bytes];
         // SAFETY: avx2 and fma were detected above; shapes were checked above.
-        unsafe { unit(&operands, unit_weights, row_bytes, block_bytes, decode, &mut out[..group_rows * positions]) };
+        unsafe { unit(&operands, unit_weights, row_bytes, block_bytes, decode, scratch) };
+        Ok(())
     };
-    Some(match quantized_matmul_workers(rows, activation.len()) {
-        Some(workers) => matmul_rows_threaded(
-            rows.div_ceil(unit_rows),
-            unit_rows * positions,
-            workers,
-            session,
-            k,
-            |unit_index, slot| {
-                run_unit(unit_index * unit_rows, slot);
-                Ok(())
-            },
-        )
-        .map(|mut output| {
-            output.truncate(rows * positions);
-            output
-        }),
-        None => {
-            let mut output = vec![0.0f32; rows * positions];
-            for first_row in (0..rows).step_by(unit_rows) {
-                run_unit(first_row, &mut output[first_row * positions..]);
-            }
-            Ok(output)
-        }
-    })
+    let workers = quantized_matmul_workers(rows, activation.len());
+    Some(matmul_units_to_positions(rows, positions, unit_rows, k, (workers, session), output, run_unit))
 }
 
 fn codec_shape(codec: Codec) -> Option<(usize, usize, DecodeBlock)> {
@@ -254,9 +233,10 @@ mod tests {
                     .map(|byte| (f32::from(byte) - 127.5) / 37.0)
                     .collect();
                 
-                let wide = matmul_exact_wide(&weights, rows, &activation, positions, None, codec)
+                let mut transposed = vec![0.0f32; rows * positions];
+                matmul_exact_into_positions(&weights, rows, &activation, positions, None, (codec, &mut transposed))
                     .expect("avx2 and fma are present on the test host")
-                    .expect("wide matmul runs");
+                    .expect("exact matmul runs");
                 let row_bytes = weights.len() / rows;
                 for row in 0..rows {
                     for position in 0..positions {
@@ -266,7 +246,7 @@ mod tests {
                         )
                         .expect("per-position kernel runs");
                         assert_eq!(
-                            wide[row * positions + position].to_bits(),
+                            transposed[position * rows + row].to_bits(),
                             expected.to_bits(),
                             "{codec:?} rows={rows} positions={positions} row={row} position={position}"
                         );
@@ -281,7 +261,8 @@ mod tests {
         let weights = weight_rows(Codec::Q8_0, 2, 3, 1);
         let activation = vec![0.5f32; 2 * (3 * 32 + 1)];
         
-        let result = matmul_exact_wide(&weights, 2, &activation, 2, None, Codec::Q8_0)
+        let mut sink = vec![0.0f32; 4];
+        let result = matmul_exact_into_positions(&weights, 2, &activation, 2, None, (Codec::Q8_0, &mut sink))
             .expect("avx2 and fma are present on the test host");
         assert!(result.is_err());
     }
