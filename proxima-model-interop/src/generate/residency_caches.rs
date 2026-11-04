@@ -2345,8 +2345,10 @@ pub(crate) fn build_position_inputs(
 
     let mut cos = alloc::vec![1.0f32; new_count * pairs];
     let mut sin = alloc::vec![0.0f32; new_count * pairs];
+    let theta_scale = rope_freq_base.powf(-2.0f32 / f32_from_u32(head_dim));
     for offset in 0..new_count {
         let position = (start_position + offset) as f32;
+        let mut iterated_theta = position;
         for pair_index in 0..head_dim / 2 {
             // Qwen3.6 text positions use three MRoPE sections (11, 11, 10
             // pairs). Each section restarts its local frequency index; the
@@ -2355,17 +2357,14 @@ pub(crate) fn build_position_inputs(
             let pair = pair_index as usize;
             let mut theta = match &inv_frequencies {
                 Some(frequencies) => position * frequencies[pair],
-                None => {
-                    position
-                        * rope_freq_base
-                            .powf(-f32_from_u32(2 * pair_index) / f32_from_u32(head_dim))
-                }
+                None => iterated_theta,
             };
             if let Some(factor) = rope_freqs.and_then(|freqs| freqs.get(pair)) {
                 theta /= factor;
             }
             cos[offset * pairs + pair] = theta.cos() * attention_factor;
             sin[offset * pairs + pair] = theta.sin() * attention_factor;
+            iterated_theta *= theta_scale;
         }
     }
 
