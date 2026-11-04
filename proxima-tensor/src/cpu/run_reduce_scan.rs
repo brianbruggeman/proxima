@@ -646,21 +646,17 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         && leading_total > 1
         && weight_gather.is_none()
         && let QuantizedBlock::Packed { codec, bytes: _ } = weight_block
+        && let Some(wide) = super::gemm_exact_wide::matmul_exact_wide(
+            weights,
+            rows,
+            activation,
+            leading_total,
+            session,
+            codec,
+        )
     {
-        let shape = super::gemm_exact_wide::codec_shape(codec);
-        if let Some(shape) = shape
-            && let Some(wide) = super::gemm_exact_wide::matmul_exact_wide(
-                weights,
-                rows,
-                activation,
-                leading_total,
-                session,
-                shape,
-            )
-        {
-            transpose_wide_to_output(&wide?, rows, leading_total, session, output)?;
-            return Ok(());
-        }
+        transpose_wide_to_output(&wide?, rows, leading_total, session, output)?;
+        return Ok(());
     }
 
     // A gathered weight resolves one expert slab out of the stacked buffer
