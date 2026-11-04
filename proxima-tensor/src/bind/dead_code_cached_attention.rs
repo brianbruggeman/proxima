@@ -2410,6 +2410,38 @@ pub fn kv_read_only_by_fused_attention(
 }
 
 
+/// [`kv_read_only_by_fused_attention`] decided from the program alone, without binding it: the
+/// fusion candidates are the ones discovery finds, and a reader is any program op the fusion does
+/// not absorb. An op that bind would drop as dead still counts as a reader, so the answer can only
+/// be more conservative (exact binding), never grant padding the bound graph would refuse.
+pub fn kv_read_only_by_fused_attention_in_program(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
+    is_kv_input: impl Fn(&str) -> bool,
+) -> bool {
+    let kv_nodes: BTreeSet<NodeId> = program
+        .iter()
+        .enumerate()
+        .filter_map(|(index, op)| match op {
+            Op::Input { name: Some(name), .. } if is_kv_input(name) => Some(NodeId(index as u32)),
+            _ => None,
+        })
+        .collect();
+    let mut candidates = cached_attention_candidates(program, shapes, &[], outputs, false, numeric_policy, true);
+    candidates.extend(cached_attention_single_range_candidates(program, shapes, &[], outputs, numeric_policy, true));
+    let covered: BTreeSet<NodeId> = candidates
+        .iter()
+        .flat_map(|(fused, absorbed)| absorbed.iter().copied().chain([fused.node]))
+        .collect();
+    let other_reader = program.iter().enumerate().any(|(index, op)| {
+        !covered.contains(&NodeId(index as u32)) && op.dependencies().iter().any(|node| kv_nodes.contains(node))
+    });
+    let kv_is_output = outputs.iter().any(|node| kv_nodes.contains(node));
+    !kv_nodes.is_empty() && !candidates.is_empty() && !other_reader && !kv_is_output
+}
+
 /// llama.cpp's default flash arithmetic unless the policy grants the f32 online kernel.
 fn cached_attention_arithmetic(
     numeric_policy: NumericPolicy,

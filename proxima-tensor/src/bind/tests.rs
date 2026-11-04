@@ -7680,3 +7680,35 @@ fn the_fused_op_records_which_memory_order_the_rope_pairing_gives_the_head_vecto
         CachedAttentionArithmetic::LlamaFlash { interleaved: false }
     );
 }
+
+#[test]
+#[cfg(feature = "cached-attention-streaming")]
+fn the_program_level_kv_padding_probe_agrees_with_the_bound_graph_probe() {
+    let is_kv = |name: &str| name.starts_with("kv_cache.");
+    let fixtures = [
+        crate::spec::gqa_cached_forward_program(32, 16, 24, 4, 2, 4, 2).expect("interleaved fixture builds"),
+        crate::spec::qk_norm_cached_forward_program(32, 16, 24, 4, 2, 4, 2).expect("split-half fixture builds"),
+    ];
+    for (program, root, roots) in fixtures {
+        let shapes = crate::shape::infer(&program, &[1, 6]).expect("fixture infers");
+        let mut requested = alloc::vec![root];
+        for cache_roots in &roots {
+            requested.extend_from_slice(&[cache_roots.0, cache_roots.1, cache_roots.2]);
+        }
+        let policy = NumericPolicy::bit_exact();
+        let bound = bind_with_fusion(&program, &shapes, &requested, true, policy).expect("fused bind succeeds");
+        let by_graph = kv_read_only_by_fused_attention(&program, &bound, &requested, is_kv);
+        let by_program = kv_read_only_by_fused_attention_in_program(&program, &shapes, &requested, policy, is_kv);
+        assert!(by_graph, "control: the fixture's kv inputs are read only by the fused attention");
+        assert_eq!(by_program, by_graph, "the program-level probe must give the bound graph's answer");
+        let kv_input = program
+            .iter()
+            .position(|op| matches!(op, Op::Input { name: Some(name), .. } if is_kv(name)))
+            .map(|index| NodeId(index as u32));
+        if let Some(kv_input) = kv_input {
+            let mut exposing = requested.clone();
+            exposing.push(kv_input);
+            assert!(!kv_read_only_by_fused_attention_in_program(&program, &shapes, &exposing, policy, is_kv));
+        }
+    }
+}
