@@ -97,6 +97,10 @@ fn gemma4_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
         .collect()
 }
 
+fn narrowed_policy() -> NumericPolicy {
+    NumericPolicy::default().with_accumulator_narrowing()
+}
+
 fn decode_program() -> (Vec<Op>, NodeId) {
     let schedule = gemma4_schedule(&SLIDING_PATTERN);
     let (program, logits, _layer_roots, _moe_sites, _head_repeats) =
@@ -123,7 +127,7 @@ fn decode_program() -> (Vec<Op>, NodeId) {
 
 fn bound_at(program: &[Op], logits: NodeId, kv_length: u64) -> Vec<BoundOp> {
     let shapes = infer(program, &[1, kv_length]).expect("decode program infers at the kv length");
-    let bound = bind_with_fusion(program, &shapes, &[logits], false, NumericPolicy::default())
+    let bound = bind_with_fusion(program, &shapes, &[logits], false, narrowed_policy())
         .expect("decode program binds at the kv length");
     prune_dead(bound, &[logits])
 }
@@ -131,7 +135,7 @@ fn bound_at(program: &[Op], logits: NodeId, kv_length: u64) -> Vec<BoundOp> {
 fn fresh_kernels(bound: &[BoundOp], packed: &PackedOperands) -> Vec<CudaKernel> {
     bound
         .iter()
-        .map(|op| emit_cuda_with_policy(op, packed, NumericPolicy::default()))
+        .map(|op| emit_cuda_with_policy(op, packed, narrowed_policy()))
         .collect::<Result<_, _>>()
         .expect("every bound op of the decode program emits cuda source")
 }
@@ -149,7 +153,7 @@ fn reused_cuda_source_equals_a_fresh_emit_for_every_op_across_kv_lengths() {
         previous_kernels,
         &after,
         &packed,
-        NumericPolicy::default(),
+        narrowed_policy(),
         EmitDevice::default(),
     )
     .expect("the reuse path emits the decode program");
@@ -188,7 +192,7 @@ fn ops_reading_packed_operands_re_emit_when_their_extents_change() {
         previous_kernels,
         &after,
         &packed,
-        NumericPolicy::default(),
+        narrowed_policy(),
         EmitDevice::default(),
     )
     .expect("the reuse path emits the decode program");
@@ -207,7 +211,7 @@ fn nothing_is_reused_when_the_previous_binding_is_empty() {
     let after = bound_at(&program, logits, 7);
 
     let (kernels, reused_count) =
-        emit_cuda_reusing(&[], Vec::new(), &after, &packed, NumericPolicy::default(), EmitDevice::default())
+        emit_cuda_reusing(&[], Vec::new(), &after, &packed, narrowed_policy(), EmitDevice::default())
             .expect("a cold emit succeeds");
 
     assert_eq!(reused_count, 0);
