@@ -795,6 +795,7 @@ pub(super) fn cached_attention_candidates(
     effective_outputs: &[NodeId],
     require_output_resolved: bool,
     numeric_policy: NumericPolicy,
+    discovery: bool,
 ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
     let mut candidates = Vec::new();
     let consumers = core::cell::OnceCell::new();
@@ -1228,6 +1229,10 @@ pub(super) fn cached_attention_candidates(
         }
         let mut operands = Vec::with_capacity(source_nodes.len());
         for source in &source_nodes {
+            if discovery {
+                operands.push((*source, Layout { base: 0, strides: SmallVec::new() }, None));
+                continue;
+            }
             let Some((_, layout, lookup)) = first_readers
                 .get_or_init(|| first_reader_operands(resolved))
                 .get(source)
@@ -1486,14 +1491,15 @@ pub(super) fn cached_attention_candidates(
             0,
             1,
         ];
-        if operands[0].1.strides.as_slice() != query_strides
-            || operands[1].1.strides.as_slice() != query_strides
-            || operands[2].1.strides.as_slice() != key_strides
-            || operands[3].1.strides.as_slice() != key_strides
-            || operands[4].1.strides.as_slice() != key_strides
-            || operands[5].1.strides.as_slice() != key_strides
-            || operands[6].1.strides.as_slice() != value_strides
-            || operands[7].1.strides.as_slice() != value_strides
+        if !discovery
+            && (operands[0].1.strides.as_slice() != query_strides
+                || operands[1].1.strides.as_slice() != query_strides
+                || operands[2].1.strides.as_slice() != key_strides
+                || operands[3].1.strides.as_slice() != key_strides
+                || operands[4].1.strides.as_slice() != key_strides
+                || operands[5].1.strides.as_slice() != key_strides
+                || operands[6].1.strides.as_slice() != value_strides
+                || operands[7].1.strides.as_slice() != value_strides)
         {
             #[cfg(feature = "instrument")]
             debug!(
@@ -1788,9 +1794,10 @@ pub(super) fn cached_attention_candidates(
                 || new_key_pass_shape[2] != pass_dim
                 || cached_key_pass_shape[0] != cached_key_shape[0]
                 || new_key_pass_shape[0] != new_key_shape[0]
-                || operands[8].1.strides.as_slice() != pass_query_strides
-                || operands[9].1.strides.as_slice() != pass_key_strides
-                || operands[10].1.strides.as_slice() != pass_key_strides
+                || (!discovery
+                    && (operands[8].1.strides.as_slice() != pass_query_strides
+                        || operands[9].1.strides.as_slice() != pass_key_strides
+                        || operands[10].1.strides.as_slice() != pass_key_strides))
             {
                 #[cfg(feature = "instrument")]
                 debug!(
@@ -1961,6 +1968,7 @@ pub(super) fn cached_attention_single_range_candidates(
     resolved: &[BoundOp],
     effective_outputs: &[NodeId],
     numeric_policy: NumericPolicy,
+    discovery: bool,
 ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
     let mut candidates = Vec::new();
     let consumers = core::cell::OnceCell::new();
@@ -2058,6 +2066,10 @@ pub(super) fn cached_attention_single_range_candidates(
         ];
         let mut operands = Vec::with_capacity(source_nodes.len());
         for source in source_nodes {
+            if discovery {
+                operands.push((source, Layout { base: 0, strides: SmallVec::new() }, None));
+                continue;
+            }
             let Some((_, layout, lookup)) = first_readers
                 .get_or_init(|| first_reader_operands(resolved))
                 .get(&source)
@@ -2148,14 +2160,15 @@ pub(super) fn cached_attention_single_range_candidates(
             0,
             1,
         ];
-        if operands[0].1.strides.as_slice() != query_strides
-            || operands[1].1.strides.as_slice() != query_strides
-            || operands[2].1.strides.as_slice() != key_strides
-            || operands[3].1.strides.as_slice() != key_strides
-            || operands[4].1.strides.as_slice() != key_strides
-            || operands[5].1.strides.as_slice() != key_strides
-            || operands[6].1.strides.as_slice() != value_strides
-            || operands[7].1.strides.as_slice() != value_strides
+        if !discovery
+            && (operands[0].1.strides.as_slice() != query_strides
+                || operands[1].1.strides.as_slice() != query_strides
+                || operands[2].1.strides.as_slice() != key_strides
+                || operands[3].1.strides.as_slice() != key_strides
+                || operands[4].1.strides.as_slice() != key_strides
+                || operands[5].1.strides.as_slice() != key_strides
+                || operands[6].1.strides.as_slice() != value_strides
+                || operands[7].1.strides.as_slice() != value_strides)
         {
             continue;
         }
@@ -2196,7 +2209,7 @@ pub(super) fn cached_attention_single_range_candidates(
         if absorbed.is_empty() {
             continue;
         }
-        if !resolved.iter().any(|bound| bound.node == output) {
+        if !discovery && !resolved.iter().any(|bound| bound.node == output) {
             continue;
         }
         operands.push(cached_len_operand);
