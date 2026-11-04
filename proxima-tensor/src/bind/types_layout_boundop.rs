@@ -128,7 +128,10 @@ pub enum CachedAttentionArithmetic {
     /// llama.cpp's default flash attention on the CPU (`ggml-cpu/ops.cpp`
     /// `ggml_compute_forward_flash_attn_ext_f16_one_chunk`): f16 query, key and value, f16
     /// accumulator, f32 running sum.
-    LlamaFlash,
+    LlamaFlash {
+        /// Whether the head vector lies in memory as interleaved pairs (`2i`, `2i+1`) rather than split halves.
+        interleaved: bool,
+    },
 }
 
 /// One tensor op with its addressing resolved: which buffers to read, at

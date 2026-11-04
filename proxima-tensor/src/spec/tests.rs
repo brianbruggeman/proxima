@@ -22719,7 +22719,7 @@ mod flash_attention_worked_example {
                 _ => None,
             })
         };
-        assert_eq!(arithmetic(&bound), Some(crate::bind::CachedAttentionArithmetic::LlamaFlash));
+        assert_eq!(arithmetic(&bound), Some(crate::bind::CachedAttentionArithmetic::LlamaFlash { interleaved: false }));
         assert_eq!(arithmetic(&granted), Some(crate::bind::CachedAttentionArithmetic::OnlineF32));
     }
 

@@ -1926,7 +1926,7 @@ pub(super) fn cached_attention_candidates(
                 scale: scale_value,
                 cached_lower_inclusive,
                 new_upper_inclusive: 0,
-                arithmetic: cached_attention_arithmetic(numeric_policy),
+                arithmetic: cached_attention_arithmetic(numeric_policy, program, query_even),
             },
         };
         #[cfg(feature = "instrument")]
@@ -2239,7 +2239,7 @@ pub(super) fn cached_attention_single_range_candidates(
                 scale: scale_value,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
-                arithmetic: cached_attention_arithmetic(numeric_policy),
+                arithmetic: cached_attention_arithmetic(numeric_policy, program, query_even),
             },
         };
         candidates.push((fused, absorbed));
@@ -2411,12 +2411,34 @@ pub fn kv_read_only_by_fused_attention(
 
 
 /// llama.cpp's default flash arithmetic unless the policy grants the f32 online kernel.
-fn cached_attention_arithmetic(numeric_policy: NumericPolicy) -> CachedAttentionArithmetic {
+fn cached_attention_arithmetic(
+    numeric_policy: NumericPolicy,
+    program: &[Op],
+    rotated_query: NodeId,
+) -> CachedAttentionArithmetic {
     if numeric_policy.flash_narrowing {
         CachedAttentionArithmetic::OnlineF32
     } else {
-        CachedAttentionArithmetic::LlamaFlash
+        CachedAttentionArithmetic::LlamaFlash {
+            interleaved: rope_pairs_are_interleaved(program, rotated_query),
+        }
     }
+}
+
+/// RoPE's first output reads its source through `2*i` for interleaved pairs and `i` for split halves
+/// (`RopePairing::offsets`), so the index map says which order the head vector lies in memory.
+fn rope_pairs_are_interleaved(program: &[Op], rotated_first: NodeId) -> bool {
+    let Some(difference) = binary_elementwise(program, rotated_first, ScalarOp::Subtract) else {
+        return false;
+    };
+    let Some([(_, source_map), ..]) = elementwise_operands(program, difference[0], ScalarOp::Multiply) else {
+        return false;
+    };
+    source_map
+        .affine()
+        .axes
+        .last()
+        .is_some_and(|axis| axis.terms.iter().any(|term| term.coeff == 2))
 }
 
 #[cfg(test)]
