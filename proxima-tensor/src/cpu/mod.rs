@@ -240,6 +240,7 @@ pub use arena::*;
 use coalesce::*;
 use elementwise_matmul::*;
 use gemm_q8_0_act::*;
+pub use gemm_q8_0_act::matmul_q8_0_activation_f32;
 #[cfg(all(target_arch = "x86_64", feature = "q6k-int8-dot"))]
 use gemm_q6k_avx2::dot_q6k_q8k_block_avx2;
 pub use epilogue::*;
