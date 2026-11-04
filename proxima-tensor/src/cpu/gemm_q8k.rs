@@ -1764,7 +1764,22 @@ pub(super) fn matmul_q4k_q8k_f32_impl(
     );
 
     let row_bytes = weights.len() / rows;
-    match quantized_matmul_workers(rows, activation.len()) {
+    let workers = quantized_matmul_workers(rows, activation.len());
+    #[cfg(all(target_arch = "x86_64", feature = "q4k-int8-dot", feature = "q6k-int8-dot"))]
+    if leading_total > 1
+        && let Some(workers) = workers
+        && let Some(tiled) = super::gemm_kquant_tile::matmul_tiled::<false>(
+            weights,
+            rows,
+            &activation_q8k,
+            leading_total,
+            workers,
+            session,
+        )
+    {
+        return tiled;
+    }
+    match workers {
         Some(workers) => {
             matmul_rows_threaded(rows, leading_total, workers, session, k, |row, slot| {
                 let start = row * row_bytes;
@@ -2579,6 +2594,23 @@ pub fn matmul_q6k_q8k_f32(
     matmul_q6k_q8k_f32_impl(weights, rows, activation, 1, None)
 }
 
+/// [`matmul_q6k_q8k_f32`] over `leading_total` positions: the multi-position
+/// wide fold prefill dispatches to, callable from a bench or example.
+///
+/// # Errors
+/// Same as [`matmul_q6k_q8k_f32`], plus `leading_total == 0` or
+/// `activation.len()` not a whole multiple of `leading_total`.
+#[cfg(feature = "q6k-int8-dot")]
+pub fn matmul_q6k_q8k_f32_wide(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+    leading_total: usize,
+) -> Result<Vec<f32>, TensorError> {
+    matmul_q6k_q8k_f32_impl(weights, rows, activation, leading_total, None)
+}
+
+
 /// [`matmul_q6k_q8k_f32`]'s body, plus `leading_total` (the sequence-position
 /// count [`run_reduce_quantized`] derives as `activation.len() / k`) and the
 /// [`CohortSession`] a caller already inside a forward pass's session can
@@ -2622,7 +2654,22 @@ pub(super) fn matmul_q6k_q8k_f32_impl(
     quantize_row_q8k_dispatch(activation, &mut activation_q8k, session)?;
 
     let row_bytes = weights.len() / rows;
-    match quantized_matmul_workers(rows, activation.len()) {
+    let workers = quantized_matmul_workers(rows, activation.len());
+    #[cfg(all(target_arch = "x86_64", feature = "q4k-int8-dot", feature = "q6k-int8-dot"))]
+    if leading_total > 1
+        && let Some(workers) = workers
+        && let Some(tiled) = super::gemm_kquant_tile::matmul_tiled::<true>(
+            weights,
+            rows,
+            &activation_q8k,
+            leading_total,
+            workers,
+            session,
+        )
+    {
+        return tiled;
+    }
+    match workers {
         Some(workers) => {
             matmul_rows_threaded(rows, leading_total, workers, session, k, |row, slot| {
                 let start = row * row_bytes;

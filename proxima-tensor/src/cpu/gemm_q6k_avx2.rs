@@ -9,7 +9,7 @@ use core::arch::x86_64::{
 };
 
 #[target_feature(enable = "avx2")]
-unsafe fn lane_levels(ql_pair: __m256i, high_pairs: __m256i, lane: usize) -> __m256i {
+pub(super) unsafe fn lane_levels(ql_pair: __m256i, high_pairs: __m256i, lane: usize) -> __m256i {
     let low_mask = _mm256_set1_epi8(0x0f);
     let pair_mask = _mm256_set1_epi8(0x03);
     let low_shift = _mm_cvtsi32_si128(if lane < 2 { 0 } else { 4 });
