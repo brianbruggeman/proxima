@@ -287,17 +287,11 @@ pub fn probe_kv_padding(
     }
     let shapes = shape::infer(program, symbols)?;
     let (_, effective_outputs) = effective_step_outputs(program, outputs)?;
-    let resolved = bind::bind_with_fusion(
+    Ok(bind::kv_read_only_by_fused_attention_in_program(
         program,
         &shapes,
         &effective_outputs,
-        true,
         NumericPolicy::bit_exact(),
-    )?;
-    Ok(bind::kv_read_only_by_fused_attention(
-        program,
-        &resolved,
-        &effective_outputs,
         is_kv_input,
     ))
 }
