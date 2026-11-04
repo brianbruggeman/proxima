@@ -495,6 +495,43 @@ pub fn evaluate_quantized_named_with_config<'block>(
     )
 }
 
+/// Everything one evaluation derives from the program, the symbols, the requested
+/// outputs and the KIND of each weight block, and nothing from any block's bytes:
+/// the bound ops, their retirement schedule and the fusion schedules. Built once per
+/// structural class by [`CpuStepPlan`]; the one-shot entry points build and drop it.
+pub(super) struct StepPrepared {
+    pub(super) shapes: shape::Shapes,
+    pub(super) root: NodeId,
+    pub(super) effective_outputs: Vec<NodeId>,
+    pub(super) planning_outputs: Vec<NodeId>,
+    dense_packed_nodes: BTreeSet<NodeId>,
+    pub(super) unadjusted: Vec<BoundOp>,
+    resolved: Vec<BoundOp>,
+    retires: Vec<Vec<NodeId>>,
+    epilogue_fuse_plan: SingleHopEpiloguePlan,
+    layer_norm_cluster_plan: BTreeMap<NodeId, LayerNormClusterPlan>,
+    rewrite_fires: Vec<RewriteFire>,
+    epilogue_fuse_skip: BTreeSet<NodeId>,
+    epilogue_fuse_fire_at: FireAt,
+    layer_norm_cluster_fire_at: FireAt,
+    layer_norm_cluster_keepalive: BTreeMap<NodeId, usize>,
+    layer_norm_cluster_retire_at: BTreeMap<usize, Vec<NodeId>>,
+}
+
+/// The bind switches a prepared step depends on.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct StepOptions {
+    pub(super) fuse_cached_attention: bool,
+    pub(super) allow_fusion: bool,
+    pub(super) numeric_policy: NumericPolicy,
+}
+
+/// The per-call half of an evaluation: this call's input buffers and its packed weights.
+pub(super) struct StepInputs<'call> {
+    buffers: Vec<Option<Cow<'call, [f32]>>>,
+    quantized_weights: BTreeMap<NodeId, QuantizedBlock<'call>>,
+}
+
 fn evaluate_quantized_with_policy(
     inputs: (&[Op], &[u64], &[QuantizedBlock<'_>], &[NodeId]),
     scratch: (&mut BufferPools, &mut Option<BTreeSet<NodeId>>),
@@ -502,7 +539,7 @@ fn evaluate_quantized_with_policy(
     options: (bool, bool, bool, NumericPolicy, Option<u64>),
 ) -> Result<Evaluated, TensorError> {
     let (program, symbols, blocks, outputs) = inputs;
-    let ((free_buffers, wide_pool), validated_weight_nodes) = scratch;
+    let (pools, validated_weight_nodes) = scratch;
     let (
         exact_activations,
         fuse_cached_attention,
@@ -510,12 +547,6 @@ fn evaluate_quantized_with_policy(
         numeric_policy,
         max_host_tensor_bytes,
     ) = options;
-    // brackets the portion of evaluate_quantized that is neither the
-    // per-node loop below nor run_node_into itself -- shape::infer,
-    // bind::bind, node_retirement, and the buffers table setup all run
-    // here. Committed once, at the end of the call, via
-    // `instrument::record_evaluate_quantized_phase` -- see that function's
-    // own doc for why this replaced a per-call `DIAG` eprintln.
     #[cfg(feature = "instrument")]
     let setup_started = instrument::read_ticks();
     #[cfg(feature = "instrument")]
@@ -533,10 +564,68 @@ fn evaluate_quantized_with_policy(
             &shapes,
             blocks,
             outputs,
-            free_buffers,
+            &mut pools.0,
             (numeric_policy, allow_fusion, limit),
         )?;
     }
+    let mut inputs = bind_step_blocks(program, &shapes, blocks)?;
+    effective_step_outputs(program, outputs)?;
+    let quantized_weight_nodes: BTreeSet<NodeId> =
+        inputs.quantized_weights.keys().copied().collect();
+    if validated_weight_nodes.as_ref() != Some(&quantized_weight_nodes) {
+        reject_non_float32(program, &quantized_weight_nodes)?;
+        *validated_weight_nodes = Some(quantized_weight_nodes);
+    }
+    let options = StepOptions {
+        fuse_cached_attention,
+        allow_fusion,
+        numeric_policy,
+    };
+    let prepared = prepare_step(program, shapes, &inputs.quantized_weights, outputs, options)?;
+    materialize_step_inputs(program, &prepared, &mut inputs, &mut pools.0)?;
+    #[cfg(feature = "instrument")]
+    let setup_ticks = instrument::elapsed_ticks(setup_started);
+    #[cfg(feature = "instrument")]
+    drop(setup_alloc_guard);
+    run_prepared_step(
+        &prepared,
+        program,
+        inputs,
+        pools,
+        expert_sources,
+        (exact_activations, max_host_tensor_bytes),
+        #[cfg(feature = "instrument")]
+        setup_ticks,
+    )
+}
+
+pub(super) fn effective_step_outputs(
+    program: &[Op],
+    outputs: &[NodeId],
+) -> Result<(NodeId, Vec<NodeId>), TensorError> {
+    let root = program
+        .len()
+        .checked_sub(1)
+        .map(|last| NodeId(last as u32))
+        .ok_or(TensorError::Empty)?;
+    for output in outputs {
+        if output.0 as usize >= program.len() {
+            return Err(TensorError::UnknownOutput(*output));
+        }
+    }
+    let effective_outputs = if outputs.is_empty() {
+        vec![root]
+    } else {
+        outputs.to_vec()
+    };
+    Ok((root, effective_outputs))
+}
+
+pub(super) fn bind_step_blocks<'call>(
+    program: &[Op],
+    shapes: &shape::Shapes,
+    blocks: &[QuantizedBlock<'call>],
+) -> Result<StepInputs<'call>, TensorError> {
     let block_nodes = block_node_ids(program);
     if blocks.len() != block_nodes.len() {
         return Err(TensorError::InputCountMismatch {
@@ -544,7 +633,6 @@ fn evaluate_quantized_with_policy(
             found: blocks.len(),
         });
     }
-
     let mut quantized_weights: BTreeMap<NodeId, QuantizedBlock> = BTreeMap::new();
     let mut buffers: Vec<Option<Cow<[f32]>>> = vec![None; program.len()];
     for (node, block) in block_nodes.iter().zip(blocks.iter().copied()) {
@@ -577,46 +665,61 @@ fn evaluate_quantized_with_policy(
             }
         }
     }
+    Ok(StepInputs {
+        buffers,
+        quantized_weights,
+    })
+}
 
-    let root = program
-        .len()
-        .checked_sub(1)
-        .map(|last| NodeId(last as u32))
-        .ok_or(TensorError::Empty)?;
-    for output in outputs {
-        if output.0 as usize >= program.len() {
-            return Err(TensorError::UnknownOutput(*output));
-        }
-    }
-    let effective_outputs: Vec<NodeId> = if outputs.is_empty() {
-        vec![root]
-    } else {
-        outputs.to_vec()
-    };
-
+pub(super) fn prepare_step(
+    program: &[Op],
+    shapes: shape::Shapes,
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock<'_>>,
+    outputs: &[NodeId],
+    options: StepOptions,
+) -> Result<StepPrepared, TensorError> {
+    let (root, effective_outputs) = effective_step_outputs(program, outputs)?;
     let quantized_weight_nodes: BTreeSet<NodeId> = quantized_weights.keys().copied().collect();
-    if validated_weight_nodes.as_ref() != Some(&quantized_weight_nodes) {
-        reject_non_float32(program, &quantized_weight_nodes)?;
-        // cloned, not moved: the outputs-only check right below still needs
-        // its own copy of this same set — see `reject_non_float32_outputs`'s
-        // own doc for why that check cannot ride this cache.
-        *validated_weight_nodes = Some(quantized_weight_nodes.clone());
-    }
     reject_non_float32_outputs(program, &quantized_weight_nodes, &effective_outputs)?;
-
     let planning_outputs =
-        quantized_gather_planning_outputs(program, &quantized_weights, &effective_outputs);
-    let mut resolved = if allow_fusion {
+        quantized_gather_planning_outputs(program, quantized_weights, &effective_outputs);
+    let unadjusted = bind_step_ops(program, &shapes, &planning_outputs, options)?;
+    Ok(assemble_step(
+        program,
+        quantized_weights,
+        (shapes, root, effective_outputs, planning_outputs),
+        unadjusted,
+    ))
+}
+
+pub(super) fn bind_step_ops(
+    program: &[Op],
+    shapes: &shape::Shapes,
+    planning_outputs: &[NodeId],
+    options: StepOptions,
+) -> Result<Vec<BoundOp>, TensorError> {
+    if options.allow_fusion {
         bind::bind_with_fusion(
             program,
-            &shapes,
-            &planning_outputs,
-            fuse_cached_attention,
-            numeric_policy,
-        )?
+            shapes,
+            planning_outputs,
+            options.fuse_cached_attention,
+            options.numeric_policy,
+        )
     } else {
-        bind::bind_unfused(program, &shapes, &planning_outputs, numeric_policy)?
-    };
+        bind::bind_unfused(program, shapes, planning_outputs, options.numeric_policy)
+    }
+}
+
+pub(super) fn assemble_step(
+    program: &[Op],
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock<'_>>,
+    request: (shape::Shapes, NodeId, Vec<NodeId>, Vec<NodeId>),
+    unadjusted: Vec<BoundOp>,
+) -> StepPrepared {
+    let (shapes, root, effective_outputs, planning_outputs) = request;
+    let quantized_weight_nodes: BTreeSet<NodeId> = quantized_weights.keys().copied().collect();
+    let mut resolved = unadjusted.clone();
     bind::correct_materialized_packed_matmul_layouts(&mut resolved, &quantized_weight_nodes);
     let dense_packed_nodes: BTreeSet<NodeId> = quantized_weights
         .iter()
@@ -632,75 +735,18 @@ fn evaluate_quantized_with_policy(
         })
         .collect();
     bind::correct_packed_matmul_layouts(&mut resolved, &dense_packed_nodes);
-    for node in dense_packed_nodes {
-        materialize_quantized_weight_output(
-            node,
-            &shapes,
-            &quantized_weights,
-            None,
-            &mut buffers,
-            free_buffers,
-        )?;
-        quantized_weights.remove(&node);
-    }
-    // standalone diagnostic operations and reduce epilogues read f32 buffers;
-    // direct packed gathers and reduction folds retain their packed operands.
-    materialize_quantized_weights_read_by_non_primary_operands(
-        #[cfg(feature = "instrument")]
-        program,
-        &resolved,
-        &shapes,
-        &quantized_weights,
-        &mut buffers,
-        free_buffers,
-    )?;
-    // The weight's own `NodeId` can ALSO be named directly in
-    // `effective_outputs` (a caller inspecting a raw checkpoint tensor, not
-    // just the activation that multiplies it) with no live `Elementwise`
-    // consumer at all left in `resolved` -- e.g. its usual multiply fused
-    // cleanly into its reduce because that multiply itself was never a
-    // requested output. The scan above never visits such a weight (nothing
-    // in `resolved` reads it as a plain operand), so it needs this second,
-    // direct pass over the request itself.
-    for &output in &effective_outputs {
-        materialize_quantized_weight_output(
-            output,
-            &shapes,
-            &quantized_weights,
-            None,
-            &mut buffers,
-            free_buffers,
-        )?;
-    }
+    let remaining_weights: BTreeMap<NodeId, QuantizedBlock> = quantized_weights
+        .iter()
+        .filter(|(node, _)| !dense_packed_nodes.contains(node))
+        .map(|(node, block)| (*node, *block))
+        .collect();
     let retires = node_retirement(&resolved, &effective_outputs);
-    // ROW 181 profile-gate probe: `evaluate_named` no longer reaches this
-    // loop (it routes through `evaluate_named_via_arena` ->
-    // `run_resolved_nodes_in_arena` instead, see that function's own doc)
-    // -- what still walks HERE is `evaluate_quantized_named`/`evaluate_quantized`/
-    // `evaluate` whenever a real quantized (non-`Float32`) block is present,
-    // `StaticArena` carrying no quantized-weight support today.
-    #[cfg(feature = "epilogue-profile-probe")]
-    let epilogue_profile_reduce_nodes = epilogue_profile_reduce_flags(&resolved, program.len());
-    // `docs/discipline.md` ROW 183 Phase 2 / ROW 204, now driven through
-    // `run_rewrite_worklist` (`docs/rewrite-algebra.md` §8): reduce `NodeId`
-    // -> (consumer's `resolved` index, fire position), computed once per
-    // call from `resolved`'s own already-bound structure (never `bind::bind`
-    // itself). `epilogue_fuse_skip` is the plan's own value set, re-derived
-    // rather than stored twice, so there is exactly one source of truth for
-    // "which consumer position gets skipped". `epilogue_fuse_fire_at` groups
-    // the SAME plan by its own `fire_position` value, so the main loop can
-    // ask "does anything fire here" in O(1) per position instead of
-    // scanning the whole plan every iteration.
-    let (mut epilogue_fuse_plan, mut layer_norm_cluster_plan, rewrite_fires) = if allow_fusion {
-        run_rewrite_worklist(
-            &resolved,
-            program.len(),
-            &effective_outputs,
-            &quantized_weights,
-        )
-    } else {
-        (BTreeMap::new(), BTreeMap::new(), Vec::new())
-    };
+    let (mut epilogue_fuse_plan, mut layer_norm_cluster_plan, rewrite_fires) = run_rewrite_worklist(
+        &resolved,
+        program.len(),
+        &effective_outputs,
+        &remaining_weights,
+    );
     #[cfg(feature = "std")]
     if std::env::var_os("PROXIMA_DISABLE_LAYER_NORM_CLUSTER").is_some() {
         layer_norm_cluster_plan.clear();
@@ -710,30 +756,117 @@ fn evaluate_quantized_with_policy(
         epilogue_fuse_plan.clear();
         layer_norm_cluster_plan.clear();
     }
-    record_rewrite_engine_fires(&rewrite_fires);
     let (epilogue_fuse_skip, epilogue_fuse_fire_at, layer_norm_cluster_fire_at) =
         fusion_schedule(&resolved, &epilogue_fuse_plan, &layer_norm_cluster_plan);
-    // `docs/discipline.md` ROW 204: `node_retirement`'s own schedule (built
-    // above, before this plan existed) frees `x` at `E2`'s real original
-    // position -- often EARLIER than a cluster's own `fire_position`, since
-    // `gamma`/`beta` are commonly lowered right next to the `LayerNorm`
-    // site itself, AFTER `E2` in program order (confirmed against the real
-    // BGE graph: every one of the 25 sites' own `fire_position` measured
-    // 2-3 positions past `E2`'s). `layer_norm_cluster_keepalive` names
-    // every such node and the position it must survive to;
-    // `layer_norm_cluster_retire_at` is that SAME information regrouped by
-    // where the deferred retirement actually fires -- two views of one
-    // fact, not two sources of truth (built from each other, one line
-    // down).
     let layer_norm_cluster_keepalive =
         layer_norm_cluster_keepalive(&resolved, &layer_norm_cluster_plan);
-    let layer_norm_cluster_retire_at: BTreeMap<usize, Vec<NodeId>> = {
-        let mut grouped: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
-        for (&node, &keep_until) in &layer_norm_cluster_keepalive {
-            grouped.entry(keep_until).or_default().push(node);
-        }
-        grouped
-    };
+    let mut layer_norm_cluster_retire_at: BTreeMap<usize, Vec<NodeId>> = BTreeMap::new();
+    for (&node, &keep_until) in &layer_norm_cluster_keepalive {
+        layer_norm_cluster_retire_at
+            .entry(keep_until)
+            .or_default()
+            .push(node);
+    }
+    StepPrepared {
+        shapes,
+        root,
+        effective_outputs,
+        planning_outputs,
+        dense_packed_nodes,
+        unadjusted,
+        resolved,
+        retires,
+        epilogue_fuse_plan,
+        layer_norm_cluster_plan,
+        rewrite_fires,
+        epilogue_fuse_skip,
+        epilogue_fuse_fire_at,
+        layer_norm_cluster_fire_at,
+        layer_norm_cluster_keepalive,
+        layer_norm_cluster_retire_at,
+    }
+}
+
+pub(super) fn materialize_step_inputs(
+    program: &[Op],
+    prepared: &StepPrepared,
+    inputs: &mut StepInputs<'_>,
+    free_buffers: &mut Vec<Vec<f32>>,
+) -> Result<(), TensorError> {
+    let StepInputs {
+        buffers,
+        quantized_weights,
+    } = inputs;
+    for node in &prepared.dense_packed_nodes {
+        materialize_quantized_weight_output(
+            *node,
+            &prepared.shapes,
+            quantized_weights,
+            None,
+            buffers,
+            free_buffers,
+        )?;
+        quantized_weights.remove(node);
+    }
+    materialize_quantized_weights_read_by_non_primary_operands(
+        #[cfg(feature = "instrument")]
+        program,
+        &prepared.resolved,
+        &prepared.shapes,
+        quantized_weights,
+        buffers,
+        free_buffers,
+    )?;
+    #[cfg(not(feature = "instrument"))]
+    let _ = program;
+    for &output in &prepared.effective_outputs {
+        materialize_quantized_weight_output(
+            output,
+            &prepared.shapes,
+            quantized_weights,
+            None,
+            buffers,
+            free_buffers,
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn run_prepared_step(
+    prepared: &StepPrepared,
+    program: &[Op],
+    inputs: StepInputs<'_>,
+    pools: &mut BufferPools,
+    expert_sources: Option<&BTreeMap<NodeId, ExpertSource<'_>>>,
+    mode: (bool, Option<u64>),
+    #[cfg(feature = "instrument")] setup_ticks: u64,
+) -> Result<Evaluated, TensorError> {
+    let (free_buffers, wide_pool) = pools;
+    let (exact_activations, max_host_tensor_bytes) = mode;
+    let StepInputs {
+        mut buffers,
+        quantized_weights,
+    } = inputs;
+    let StepPrepared {
+        shapes,
+        root,
+        effective_outputs,
+        resolved,
+        retires,
+        epilogue_fuse_plan,
+        layer_norm_cluster_plan,
+        rewrite_fires,
+        epilogue_fuse_skip,
+        epilogue_fuse_fire_at,
+        layer_norm_cluster_fire_at,
+        layer_norm_cluster_keepalive,
+        layer_norm_cluster_retire_at,
+        ..
+    } = prepared;
+    let root = *root;
+    record_rewrite_engine_fires(rewrite_fires);
+    #[cfg(feature = "epilogue-profile-probe")]
+    let epilogue_profile_reduce_nodes = epilogue_profile_reduce_flags(resolved, program.len());
 
     // peak live-buffer BYTE count (not slot count -- a 12-entry live set
     // could be 12 MiB or 12 GiB), fed to
@@ -769,10 +902,6 @@ fn evaluate_quantized_with_policy(
     // an instrumented run.
     #[cfg(feature = "instrument")]
     let mut loop_overhead_ticks: u64 = 0;
-    #[cfg(feature = "instrument")]
-    let setup_ticks = instrument::elapsed_ticks(setup_started);
-    #[cfg(feature = "instrument")]
-    drop(setup_alloc_guard);
     // Entered ONCE, before the node loop -- not per matmul call -- so the
     // wake this session amortizes is paid once per forward pass, the same
     // amortization `prime/src/os/cohort.rs`'s own module doc measures
@@ -814,7 +943,7 @@ fn evaluate_quantized_with_policy(
     while position < resolved.len() {
         #[cfg(feature = "cohort-staged-graph")]
         if !exact_activations && let Some(session_ref) = session.as_ref() {
-            let run_end = staged_batch_run_end(&resolved, position, &quantized_weights);
+            let run_end = staged_batch_run_end(resolved, position, &quantized_weights);
             if run_end - position >= STAGED_BATCH_MIN_LEN {
                 #[cfg(feature = "instrument")]
                 let batch_started = instrument::read_ticks();
@@ -826,7 +955,7 @@ fn evaluate_quantized_with_policy(
                     expert_sources,
                     session_ref,
                     free_buffers,
-                    &retires,
+                    retires,
                     &mut live_now,
                     &mut staged_quantize_cache,
                 )?;
@@ -1150,8 +1279,8 @@ fn evaluate_quantized_with_policy(
     let finish_started = instrument::read_ticks();
 
     let result = finish(
-        &shapes,
-        &effective_outputs,
+        shapes,
+        effective_outputs,
         buffers,
         root,
         peak_live_buffers,

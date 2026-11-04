@@ -210,6 +210,7 @@ mod arena;
 mod epilogue;
 #[macro_use]
 mod quantized_eval;
+mod step_plan;
 #[macro_use]
 mod run_node;
 mod run_block_quantize;
@@ -253,6 +254,7 @@ use gemm_tile::PackedWidthPanels;
 #[cfg(target_arch = "aarch64")]
 pub use gemm_tile::*;
 pub use quantized_eval::*;
+pub use step_plan::{CpuStepPlan, probe_kv_padding};
 pub use run_node::*;
 pub use run_reduce_scan::*;
 pub use typed_eval::*;
