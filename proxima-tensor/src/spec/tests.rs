@@ -22558,11 +22558,14 @@ mod flash_attention_worked_example {
 
     const HEAD_DIM: usize = 64;
     const ROWS: usize = 5;
+    const PREFILL_ROWS: usize = 68;
     const LAYER0_HEAD0: &[u8] =
         include_bytes!("../../tests/fixtures/qwen2_layer0_head0_flash_attention.f32");
+    const PREFILL_68: &str =
+        include_str!("../../tests/fixtures/qwen2_layer0_head0_flash_prefill68.hex");
 
-    fn floats() -> Vec<f32> {
-        LAYER0_HEAD0
+    fn floats(bytes: &[u8]) -> Vec<f32> {
+        bytes
             .as_chunks::<4>()
             .0
             .iter()
@@ -22647,8 +22650,8 @@ mod flash_attention_worked_example {
         (program, attended)
     }
 
-    fn named_inputs(floats: &[f32]) -> Vec<(&'static str, Vec<f32>)> {
-        let block = ROWS * HEAD_DIM;
+    fn named_inputs(floats: &[f32], rows: usize) -> Vec<(&'static str, Vec<f32>)> {
+        let block = rows * HEAD_DIM;
         let (q_even, q_odd) = halves(&floats[..block]);
         let (k_even, k_odd) = halves(&floats[block..2 * block]);
         vec![
@@ -22673,15 +22676,24 @@ mod flash_attention_worked_example {
             .fold(0.0, f32::max)
     }
 
-    fn run(online_f32: bool) -> Vec<f32> {
-        let floats = floats();
-        let owned = named_inputs(&floats);
+    fn hex_floats(text: &str) -> Vec<f32> {
+        text.lines()
+            .map(|line| f32::from_bits(u32::from_str_radix(line, 16).expect("fixture lines are f32 bit patterns")))
+            .collect()
+    }
+
+    fn run(online_f32: bool, bytes: &[u8], rows: usize) -> Vec<f32> {
+        run_values(online_f32, floats(bytes), rows)
+    }
+
+    fn run_values(online_f32: bool, floats: Vec<f32>, rows: usize) -> Vec<f32> {
+        let owned = named_inputs(&floats, rows);
         let named: Vec<(&str, &[f32])> = owned.iter().map(|(name, data)| (*name, data.as_slice())).collect();
         let (program, attended) = attention_program();
         let evaluated = if online_f32 {
-            crate::test_support::evaluate_named_online_f32(&program, &[ROWS as u64, 1], &named, &[attended])
+            crate::test_support::evaluate_named_online_f32(&program, &[rows as u64, 1], &named, &[attended])
         } else {
-            crate::cpu::evaluate_named(&program, &[ROWS as u64, 1], &named, &[attended])
+            crate::cpu::evaluate_named(&program, &[rows as u64, 1], &named, &[attended])
         }
         .expect("the flash worked example evaluates");
         evaluated.get(attended).expect("attended present").0.to_vec()
@@ -22714,9 +22726,9 @@ mod flash_attention_worked_example {
     #[test]
     fn llamas_flash_arithmetic_reproduces_kqv_out_for_layer0_head0_of_qwen2() {
         let block = ROWS * HEAD_DIM;
-        let llama = floats()[3 * block..4 * block].to_vec();
-        let flash = max_error(&run(false), &llama);
-        let online = max_error(&run(true), &llama);
+        let llama = floats(LAYER0_HEAD0)[3 * block..4 * block].to_vec();
+        let flash = max_error(&run(false, LAYER0_HEAD0, ROWS), &llama);
+        let online = max_error(&run(true, LAYER0_HEAD0, ROWS), &llama);
         assert!(
             flash < 1.0e-7,
             "llama's flash arithmetic must sit within f32 rounding of its own kqv_out, found {flash}"
@@ -22724,6 +22736,22 @@ mod flash_attention_worked_example {
         assert!(
             online > 1.0e-5,
             "the f32 accumulator must stay measurably off llama or this fixture separates nothing, found {online}"
+        );
+    }
+
+    #[test]
+    fn llamas_tiled_prefill_arithmetic_reproduces_kqv_out_across_a_key_tile_boundary() {
+        let block = PREFILL_ROWS * HEAD_DIM;
+        let llama = hex_floats(PREFILL_68)[3 * block..4 * block].to_vec();
+        let tiled = max_error(&run_values(false, hex_floats(PREFILL_68), PREFILL_ROWS), &llama);
+        let one_chunk_form = max_error(&run_values(true, hex_floats(PREFILL_68), PREFILL_ROWS), &llama);
+        assert!(
+            tiled < 1.0e-7,
+            "llama's tiled prefill arithmetic must sit within f32 rounding of its own kqv_out, found {tiled}"
+        );
+        assert!(
+            one_chunk_form > 1.0e-6,
+            "the f32 online form must stay measurably off the tiled arithmetic, found {one_chunk_form}"
         );
     }
 }

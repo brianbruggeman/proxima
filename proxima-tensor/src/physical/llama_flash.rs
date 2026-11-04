@@ -8,6 +8,8 @@
 //! (`simd-mappings.h:635-683`), loads `_mm256_cvtph_ps`, stores `_mm256_cvtps_ph(.., 0)`
 //! (round to nearest even). The scalar twin computes the same values operation for operation.
 
+mod tiled;
+
 use half::f16;
 
 use super::{AttentionExtents, CachedAttentionRotary, CachedAttentionScore};
@@ -375,12 +377,14 @@ fn run(
         head_dim,
         row_width,
     };
+    let tiled = (query_rows >= tiled::TILE_Q).then(|| tiled::TiledData::build(&shared));
+    let tiled = tiled.as_ref();
     let row_len = kv_heads * groups * head_dim;
     let workers = workers_override.unwrap_or_else(|| worker_count(query_rows, cached_rows + new_rows, row_len));
     if workers <= 1 {
         let mut local = Local::new(head_dim);
         for (query_row, out) in output.chunks_mut(row_len).enumerate() {
-            shared.attend_row(query_row, out, &mut local);
+            shared.attend(tiled, query_row, out, &mut local);
         }
         return true;
     }
@@ -393,7 +397,7 @@ fn run(
                 scope.spawn(move || {
                     let mut local = Local::new(head_dim);
                     for (offset, out) in block.chunks_mut(row_len).enumerate() {
-                        shared.attend_row(index * rows_per_worker + offset, out, &mut local);
+                        shared.attend(tiled, index * rows_per_worker + offset, out, &mut local);
                     }
                 });
             }
@@ -424,6 +428,7 @@ struct Local {
     query: alloc::vec::Vec<u16>,
     accumulator: alloc::vec::Vec<u16>,
     staging: alloc::vec::Vec<f32>,
+    acc32: alloc::vec::Vec<f32>,
 }
 
 impl Local {
@@ -432,6 +437,7 @@ impl Local {
             query: alloc::vec![0; head_dim],
             accumulator: alloc::vec![0; head_dim],
             staging: alloc::vec![0.0; head_dim],
+            acc32: alloc::vec![0.0; head_dim],
         }
     }
 }
@@ -525,6 +531,15 @@ impl Shared<'_> {
     }
 }
 
+
+impl Shared<'_> {
+    fn attend(&self, tiled: Option<&tiled::TiledData>, query_row: usize, out: &mut [f32], local: &mut Local) {
+        match tiled {
+            Some(data) => self.attend_row_tiled(data, query_row, out, local),
+            None => self.attend_row(query_row, out, local),
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests {
