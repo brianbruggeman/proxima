@@ -786,6 +786,7 @@ pub fn matmul_q8_0_activation_f32(
         leading_total,
         None,
         activation_dot_for(codec),
+        None,
     )
 }
 
@@ -796,6 +797,7 @@ pub(super) fn matmul_q8_0_activation_impl(
     leading_total: usize,
     session: Option<&MatmulSession<'_>>,
     (dot, rows_kernel, units_kernel): ActivationKernels,
+    output: Option<&mut [f32]>,
 ) -> Result<Vec<f32>, TensorError> {
     if rows == 0 || !weights.len().is_multiple_of(rows) {
         return Err(TensorError::QuantizedShapeMismatch {
@@ -836,7 +838,20 @@ pub(super) fn matmul_q8_0_activation_impl(
             };
             units_kernel(&operands, &mut out[..group_rows * leading_total])
         };
-        return match quantized_matmul_workers(rows, activation.len()) {
+        let workers = quantized_matmul_workers(rows, activation.len());
+        if let Some(output) = output {
+            matmul_units_to_positions(
+                rows,
+                leading_total,
+                UNIT_ROWS,
+                k,
+                (workers, session),
+                output,
+                run_group,
+            )?;
+            return Ok(Vec::new());
+        }
+        return match workers {
             Some(workers) => {
                 let units = rows.div_ceil(UNIT_ROWS);
                 let mut output = matmul_rows_threaded(
@@ -1104,7 +1119,7 @@ mod tests {
                 let weights = weight_rows_of(codec, rows, blocks, 11 + rows as u64);
                 let activation = lcg_activation(29 + positions as u64, positions * k);
                 let (dot, _, _) = activation_dot_for(codec);
-                let wide = matmul_q8_0_activation_impl(&weights, rows, &activation, positions, None, activation_dot_for(codec))
+                let wide = matmul_q8_0_activation_impl(&weights, rows, &activation, positions, None, activation_dot_for(codec), None)
                     .expect("multi-row tile runs");
                 let mut quantized = vec![0u8; positions * blocks * Q8_0_ACT_BLOCK_BYTES];
                 quantize_row_q8_0_activation(&activation, &mut quantized).expect("activation quantizes");
@@ -1129,11 +1144,36 @@ mod tests {
     }
 
     #[test]
+    fn position_major_output_is_the_transpose_of_the_wide_result_bit_for_bit() {
+        for codec in [Codec::Q5_0, Codec::Q8_0] {
+            for (rows, positions) in [(3usize, 5usize), (16, 64), (17, 66), (64, 130)] {
+                let blocks = 7;
+                let weights = weight_rows_of(codec, rows, blocks, 3 + rows as u64);
+                let activation = lcg_activation(9 + positions as u64, positions * blocks * BLOCK_ELEMENTS);
+                let wide = matmul_q8_0_activation_impl(&weights, rows, &activation, positions, None, activation_dot_for(codec), None)
+                    .expect("wide matmul runs");
+                let mut direct = vec![f32::NAN; rows * positions];
+                matmul_q8_0_activation_impl(&weights, rows, &activation, positions, None, activation_dot_for(codec), Some(&mut direct))
+                    .expect("position-major matmul runs");
+                for row in 0..rows {
+                    for position in 0..positions {
+                        assert_eq!(
+                            direct[position * rows + row].to_bits(),
+                            wide[row * positions + position].to_bits(),
+                            "{codec:?} rows={rows} positions={positions} row={row} position={position}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn multi_row_tile_rejects_an_activation_that_is_not_a_whole_block_multiple() {
         let weights = weight_rows_of(Codec::Q5_0, 4, 3, 7);
         let activation = lcg_activation(3, 2 * (3 * BLOCK_ELEMENTS + 1));
         assert!(
-            matmul_q8_0_activation_impl(&weights, 4, &activation, 2, None, activation_dot_for(Codec::Q5_0)).is_err()
+            matmul_q8_0_activation_impl(&weights, 4, &activation, 2, None, activation_dot_for(Codec::Q5_0), None).is_err()
         );
     }
 

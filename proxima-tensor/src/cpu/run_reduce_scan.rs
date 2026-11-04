@@ -629,6 +629,7 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             bytes: _,
         } = weight_block
     {
+        let direct = (leading_total > 1).then_some(&mut *output);
         let wide = matmul_q8_0_activation_impl(
             weights,
             rows,
@@ -636,7 +637,11 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
             leading_total,
             session,
             activation_dot_for(codec),
+            direct,
         )?;
+        if leading_total > 1 {
+            return Ok(());
+        }
         transpose_wide_to_output(&wide, rows, leading_total, session, output)?;
         return Ok(());
     }
@@ -646,16 +651,16 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         && leading_total > 1
         && weight_gather.is_none()
         && let QuantizedBlock::Packed { codec, bytes: _ } = weight_block
-        && let Some(wide) = super::gemm_exact_wide::matmul_exact_wide(
+        && let Some(filled) = super::gemm_exact_wide::matmul_exact_into_positions(
             weights,
             rows,
             activation,
             leading_total,
             session,
-            codec,
+            (codec, &mut *output),
         )
     {
-        transpose_wide_to_output(&wide?, rows, leading_total, session, output)?;
+        filled?;
         return Ok(());
     }
 
@@ -875,6 +880,7 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
                 1,
                 session,
                 activation_dot_for(codec),
+                None,
             )?,
             // No `q3k-int8-dot` kernel exists yet -- `dot_q3k_f32`'s
             // dequantize-then-fold path is `Q3_K`'s only codec path,

@@ -2803,3 +2803,57 @@ pub(super) unsafe fn gemm_tile_neon<const ROWS: usize>(
         }
     }
 }
+
+/// Runs `units` of `unit_rows` weight rows through `run_unit(first_row, group_rows, scratch)`,
+/// where `scratch` is that unit's `[row][position]` block, and writes each unit's results
+/// straight into `output` as `[position][row]` -- the layout the consumer reads -- so no
+/// full-size `[row][position]` buffer is allocated or transposed afterwards.
+pub(super) fn matmul_units_to_positions<Run>(
+    rows: usize,
+    positions: usize,
+    unit_rows: usize,
+    contraction_width: usize,
+    dispatch: (Option<usize>, Option<&MatmulSession<'_>>),
+    output: &mut [f32],
+    run_unit: Run,
+) -> Result<(), TensorError>
+where
+    Run: Fn(usize, usize, &mut [f32]) -> Result<(), TensorError> + Sync,
+{
+    if output.len() != rows * positions {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "output length is not rows times positions",
+        });
+    }
+    let (workers, session) = dispatch;
+    let output_address = output.as_mut_ptr() as usize;
+    let scatter = |unit: usize| -> Result<(), TensorError> {
+        let first_row = unit * unit_rows;
+        let group_rows = unit_rows.min(rows - first_row);
+        let mut scratch = vec![0.0f32; group_rows * positions];
+        run_unit(first_row, group_rows, &mut scratch)?;
+        for position in 0..positions {
+            for row in 0..group_rows {
+                // SAFETY: each unit owns the distinct elements `(position, first_row..first_row + group_rows)`
+                // of `output`, which has `rows * positions` elements and outlives this call: the threaded
+                // dispatch blocks until every unit has retired.
+                unsafe {
+                    (output_address as *mut f32)
+                        .add(position * rows + first_row + row)
+                        .write(scratch[row * positions + position]);
+                }
+            }
+        }
+        Ok(())
+    };
+    let units = rows.div_ceil(unit_rows);
+    match workers {
+        Some(workers) => {
+            matmul_rows_threaded(units, 1, workers, session, contraction_width * unit_rows * positions, |unit, _| {
+                scatter(unit)
+            })?;
+            Ok(())
+        }
+        None => (0..units).try_for_each(scatter),
+    }
+}
