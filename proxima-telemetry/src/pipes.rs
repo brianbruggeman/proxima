@@ -1798,7 +1798,8 @@ fn json_scalar(value: &ScalarValue) -> alloc::string::String {
     match value {
         ScalarValue::I64(raw) => alloc::format!("{raw}"),
         ScalarValue::U64(raw) => alloc::format!("{raw}"),
-        ScalarValue::F64(raw) => alloc::format!("{raw}"),
+        ScalarValue::F64(raw) if raw.is_finite() => alloc::format!("{raw}"),
+        ScalarValue::F64(raw) => json_string(&alloc::format!("{raw}")),
         ScalarValue::Bool(raw) => alloc::format!("{raw}"),
         ScalarValue::Str(text) => json_string(text),
         ScalarValue::Bytes(raw) => match core::str::from_utf8(raw) {
@@ -5029,6 +5030,94 @@ mod format_log_tests {
             line.contains("blocks=28287040"),
             "line missing numeric tag: {line}"
         );
+    }
+
+    #[test]
+    fn json_formatter_preserves_non_finite_float_tags() {
+        const ORACLE: &str = r#"{"tags":{"nan":"NaN","positive_infinity":"inf","negative_infinity":"-inf","finite":0.01,"literal_nan":"NaN","nested":{"array":["NaN","inf","-inf",0.01],"map":{"nan":"NaN","positive_infinity":"inf","negative_infinity":"-inf","finite":0.01},"mixed":[{"nan":"NaN"},["inf",{"negative_infinity":"-inf","finite":0.01}]]}}}"#;
+
+        fn assert_oracle_tags(json: &str) {
+            let parsed: serde_json::Value =
+                serde_json::from_str(json).expect("JSON formatter output must be strict JSON");
+            let expected: serde_json::Value =
+                serde_json::from_str(ORACLE).expect("literal oracle must be strict JSON");
+            assert_eq!(parsed["tags"], expected["tags"]);
+        }
+
+        let mut record = tagged_log();
+        record.attrs = smallvec::smallvec![
+            Tag::Scalar {
+                key: "nan",
+                value: ScalarValue::F64(f64::NAN)
+            },
+            Tag::Scalar {
+                key: "positive_infinity",
+                value: ScalarValue::F64(f64::INFINITY)
+            },
+            Tag::Scalar {
+                key: "negative_infinity",
+                value: ScalarValue::F64(f64::NEG_INFINITY)
+            },
+            Tag::Scalar {
+                key: "finite",
+                value: ScalarValue::F64(0.01)
+            },
+            Tag::Scalar {
+                key: "literal_nan",
+                value: ScalarValue::Str("NaN")
+            },
+            Tag::Structured {
+                key: "nested",
+                value: NestedValue::Kv(&[
+                    (
+                        "array",
+                        NestedValue::Array(&[
+                            NestedValue::Scalar(ScalarValue::F64(f64::NAN)),
+                            NestedValue::Scalar(ScalarValue::F64(f64::INFINITY)),
+                            NestedValue::Scalar(ScalarValue::F64(f64::NEG_INFINITY)),
+                            NestedValue::Scalar(ScalarValue::F64(0.01)),
+                        ])
+                    ),
+                    (
+                        "map",
+                        NestedValue::Kv(&[
+                            ("nan", NestedValue::Scalar(ScalarValue::F64(f64::NAN))),
+                            (
+                                "positive_infinity",
+                                NestedValue::Scalar(ScalarValue::F64(f64::INFINITY))
+                            ),
+                            (
+                                "negative_infinity",
+                                NestedValue::Scalar(ScalarValue::F64(f64::NEG_INFINITY))
+                            ),
+                            ("finite", NestedValue::Scalar(ScalarValue::F64(0.01))),
+                        ])
+                    ),
+                    (
+                        "mixed",
+                        NestedValue::Array(&[
+                            NestedValue::Kv(&[(
+                                "nan",
+                                NestedValue::Scalar(ScalarValue::F64(f64::NAN))
+                            )]),
+                            NestedValue::Array(&[
+                                NestedValue::Scalar(ScalarValue::F64(f64::INFINITY)),
+                                NestedValue::Kv(&[
+                                    (
+                                        "negative_infinity",
+                                        NestedValue::Scalar(ScalarValue::F64(f64::NEG_INFINITY))
+                                    ),
+                                    ("finite", NestedValue::Scalar(ScalarValue::F64(0.01))),
+                                ]),
+                            ]),
+                        ])
+                    ),
+                ]),
+            },
+        ];
+
+        assert_oracle_tags(ORACLE);
+        assert_oracle_tags(&render(&record, LogFormat::Json));
     }
 
     #[test]
