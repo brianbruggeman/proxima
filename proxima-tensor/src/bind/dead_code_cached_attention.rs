@@ -2414,6 +2414,7 @@ pub fn kv_read_only_by_fused_attention(
 /// fusion candidates are the ones discovery finds, and a reader is any program op the fusion does
 /// not absorb. An op that bind would drop as dead still counts as a reader, so the answer can only
 /// be more conservative (exact binding), never grant padding the bound graph would refuse.
+#[cfg(feature = "cached-attention-streaming")]
 pub fn kv_read_only_by_fused_attention_in_program(
     program: &[Op],
     shapes: &Shapes,
@@ -2443,6 +2444,7 @@ pub fn kv_read_only_by_fused_attention_in_program(
 }
 
 /// llama.cpp's default flash arithmetic unless the policy grants the f32 online kernel.
+#[cfg(feature = "cached-attention-streaming")]
 fn cached_attention_arithmetic(
     numeric_policy: NumericPolicy,
     program: &[Op],
@@ -2459,6 +2461,7 @@ fn cached_attention_arithmetic(
 
 /// RoPE's first output reads its source through `2*i` for interleaved pairs and `i` for split halves
 /// (`RopePairing::offsets`), so the index map says which order the head vector lies in memory.
+#[cfg(feature = "cached-attention-streaming")]
 fn rope_pairs_are_interleaved(program: &[Op], rotated_first: NodeId) -> bool {
     let Some(difference) = binary_elementwise(program, rotated_first, ScalarOp::Subtract) else {
         return false;

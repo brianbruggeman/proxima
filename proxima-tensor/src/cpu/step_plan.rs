@@ -21,18 +21,31 @@ struct PlanState {
 /// kinds reuses it outright when the symbols are unchanged, and patches only the
 /// bound ops a changed symbol reaches ([`bind::refresh_bound_ops`]) when they move.
 /// A call whose class differs, or whose patch is refused, binds afresh.
-#[derive(Default)]
 pub struct CpuStepPlan {
+    numeric_policy: NumericPolicy,
     state: Option<PlanState>,
     binds: u64,
     refits: u64,
     refusals: u64,
 }
 
+impl Default for CpuStepPlan {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CpuStepPlan {
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self::with_numeric_policy(NumericPolicy::bit_exact())
+    }
+
+    /// A plan whose steps bind under `numeric_policy`, so a caller that grants the f32 online
+    /// attention gets the arithmetic a gpu binds.
+    #[must_use]
+    pub fn with_numeric_policy(numeric_policy: NumericPolicy) -> Self {
+        Self { numeric_policy, state: None, binds: 0, refits: 0, refusals: 0 }
     }
 
     /// Full binds performed so far: the first call of a class, and every refused patch.
@@ -98,7 +111,7 @@ impl CpuStepPlan {
         let options = StepOptions {
             fuse_cached_attention: true,
             allow_fusion: true,
-            numeric_policy: NumericPolicy::bit_exact(),
+            numeric_policy: self.numeric_policy,
         };
         let same_class = |state: &PlanState| {
             state.program_key == program_key
@@ -276,15 +289,13 @@ fn bind_class(
 ///
 /// # Errors
 /// Shape inference or binding failures at `symbols`.
+#[cfg(feature = "cached-attention-streaming")]
 pub fn probe_kv_padding(
     program: &[Op],
     symbols: &[u64],
     outputs: &[NodeId],
     is_kv_input: impl Fn(&str) -> bool,
 ) -> Result<bool, TensorError> {
-    if !cfg!(feature = "cached-attention-streaming") {
-        return Ok(false);
-    }
     let shapes = shape::infer(program, symbols)?;
     let (_, effective_outputs) = effective_step_outputs(program, outputs)?;
     Ok(bind::kv_read_only_by_fused_attention_in_program(
@@ -294,6 +305,18 @@ pub fn probe_kv_padding(
         NumericPolicy::bit_exact(),
         is_kv_input,
     ))
+}
+
+/// Without cached-attention streaming nothing is fused, so no cache range can bind padded.
+#[cfg(not(feature = "cached-attention-streaming"))]
+#[expect(clippy::missing_errors_doc, reason = "the streaming-enabled build documents the errors")]
+pub fn probe_kv_padding(
+    _program: &[Op],
+    _symbols: &[u64],
+    _outputs: &[NodeId],
+    _is_kv_input: impl Fn(&str) -> bool,
+) -> Result<bool, TensorError> {
+    Ok(false)
 }
 
 #[cfg(test)]

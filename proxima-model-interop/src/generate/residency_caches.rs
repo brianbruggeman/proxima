@@ -5093,6 +5093,8 @@ pub(crate) struct BackendRuntime {
     /// `ServingConfig::exact_activations`, read once at construction --
     /// see that field's own doc.
     pub(super) exact_activations: bool,
+    /// The numeric policy CPU steps bind under: bit exact except for the one permission a caller grants.
+    cpu_numeric_policy: proxima_tensor::NumericPolicy,
     /// One bound step per `(program hash, new-token count)` class: the decode width and
     /// each prompt width keep their own, so a step changes only the symbols the plan
     /// patches, never the plan.
@@ -5111,6 +5113,8 @@ impl BackendRuntime {
             free_buffers: proxima_tensor::cpu::BufferPools::default(),
             validated_weight_nodes: None,
             exact_activations: _config.exact_activations,
+            cpu_numeric_policy: proxima_tensor::NumericPolicy::bit_exact()
+                .with_flash_narrowing(_config.numeric_policy.flash_narrowing),
             cpu_plans: alloc::collections::BTreeMap::new(),
             kv_pad: alloc::collections::BTreeMap::new(),
         }
@@ -5209,7 +5213,11 @@ impl BackendRuntime {
         if !self.cpu_plans.contains_key(&key) && self.cpu_plans.len() >= Self::CPU_PLAN_CLASSES {
             self.cpu_plans.clear();
         }
-        let plan = self.cpu_plans.entry(key).or_default();
+        let policy = self.cpu_numeric_policy;
+        let plan = self
+            .cpu_plans
+            .entry(key)
+            .or_insert_with(|| proxima_tensor::cpu::CpuStepPlan::with_numeric_policy(policy));
         let evaluated = plan.execute(
             (program, program_hash),
             (symbols, outputs),

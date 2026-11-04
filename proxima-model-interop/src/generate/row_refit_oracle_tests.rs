@@ -1,6 +1,7 @@
 use core::ops::ControlFlow;
 
 use proxima_gguf::parse_complete;
+use proxima_tensor::NumericPolicy;
 
 use super::chunked_prefill_tests::dense_checkpoint;
 use super::ouro_fixture::{STATE_VOCABULARY, state_sensitive_ouro_gguf};
@@ -23,10 +24,17 @@ fn ouro_checkpoint() -> Vec<u8> {
     state_sensitive_ouro_gguf(2)
 }
 
+/// The cpu oracle runs the f32 online attention the gpu binds, not llama's f16 flash form the cpu binds by default.
+fn oracle_policy(gpu_layers: i32) -> NumericPolicy {
+    let policy = ServingConfig::default().numeric_policy;
+    if gpu_layers == 0 { policy.with_flash_narrowing(true) } else { policy }
+}
+
 fn serving_config(gpu_layers: i32) -> ServingConfig<'static> {
     ServingConfig {
         gpu_layers,
         prompt_cache: PromptCacheConfig::off(),
+        numeric_policy: oracle_policy(gpu_layers),
         ..ServingConfig::default()
     }
 }
