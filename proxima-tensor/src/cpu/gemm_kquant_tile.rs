@@ -146,7 +146,7 @@ unsafe fn tile<const SIX_BIT: bool, const ROWS: usize, const TILE: usize>(
                 *slot = operands.activation_q8k.as_ptr().add((position + lane) * row_bytes + block * Q8K_BLOCK_BYTES);
             }
             for sub_block in 0..SUB_BLOCKS {
-                for row in 0..ROWS {
+                for (row, row_accumulators) in accumulators.iter_mut().enumerate() {
                     let row_block = (first_row + row) * operands.blocks + block;
                     let levels = _mm256_loadu_si256(
                         unpacked.levels.as_ptr().add((row_block * SUB_BLOCKS + sub_block) * SUB_BLOCK_ELEMENTS).cast(),
@@ -154,12 +154,12 @@ unsafe fn tile<const SIX_BIT: bool, const ROWS: usize, const TILE: usize>(
                     let scales = _mm256_loadu_si256(
                         unpacked.scales.as_ptr().add((row_block * SUB_BLOCKS + sub_block) * 16).cast(),
                     );
-                    for lane in 0..TILE {
+                    for (lane, accumulator) in row_accumulators.iter_mut().enumerate() {
                         let activations = _mm256_loadu_si256(
                             activation_blocks[lane].add(Q8K_QS_OFFSET + sub_block * SUB_BLOCK_ELEMENTS).cast(),
                         );
-                        accumulators[row][lane] = _mm256_add_epi32(
-                            accumulators[row][lane],
+                        *accumulator = _mm256_add_epi32(
+                            *accumulator,
                             _mm256_madd_epi16(_mm256_maddubs_epi16(levels, activations), scales),
                         );
                     }
@@ -282,4 +282,91 @@ pub(super) fn matmul_tiled<const SIX_BIT: bool>(
         output.truncate(rows * leading_total);
         output
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lcg_bytes(seed: u64, length: usize) -> Vec<u8> {
+        let mut state = seed;
+        (0..length)
+            .map(|_| {
+                state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+                (state >> 33) as u8
+            })
+            .collect()
+    }
+
+    fn finite_f16(seed: u64) -> [u8; 2] {
+        half::f16::from_f32((seed % 97) as f32 / 211.0 + 0.003).to_le_bytes()
+    }
+
+    fn weight_rows(six_bit: bool, rows: usize, blocks: usize, seed: u64) -> Vec<u8> {
+        let block_bytes = if six_bit { Q6K_BLOCK_BYTES } else { Q4K_BLOCK_BYTES };
+        let mut bytes = lcg_bytes(seed, rows * blocks * block_bytes);
+        for (index, block) in bytes.chunks_exact_mut(block_bytes).enumerate() {
+            let scale = finite_f16(seed + index as u64);
+            let minimum = finite_f16(seed * 3 + index as u64);
+            if six_bit {
+                block[Q6K_D_OFFSET..Q6K_D_OFFSET + 2].copy_from_slice(&scale);
+            } else {
+                block[Q4K_D_OFFSET..Q4K_D_OFFSET + 2].copy_from_slice(&scale);
+                block[Q4K_DMIN_OFFSET..Q4K_DMIN_OFFSET + 2].copy_from_slice(&minimum);
+            }
+        }
+        bytes
+    }
+
+    fn activation_of(seed: u64, length: usize) -> Vec<f32> {
+        lcg_bytes(seed, length)
+            .into_iter()
+            .map(|byte| (f32::from(byte) - 127.5) / 37.0)
+            .collect()
+    }
+
+    fn tiled_equals_row_dots(six_bit: bool) {
+        let shapes = [(1usize, 2usize), (3, 5), (4, 2), (9, 17), (16, 33), (17, 40), (8, 129)];
+        let dot: fn(&[u8], &[u8]) -> Result<f32, TensorError> = if six_bit { dot_q6k_q8k } else { dot_q4k_q8k };
+        for (rows, positions) in shapes {
+            let blocks = 3;
+            let weights = weight_rows(six_bit, rows, blocks, 5 + rows as u64);
+            let activation = activation_of(17 + positions as u64, positions * blocks * Q4K_BLOCK_ELEMENTS);
+            let mut q8k = vec![0u8; positions * blocks * Q8K_BLOCK_BYTES];
+            quantize_row_q8k(&activation, &mut q8k).expect("activation quantizes");
+            let tiled = if six_bit {
+                matmul_tiled::<true>(&weights, rows, &q8k, positions, 4, None)
+            } else {
+                matmul_tiled::<false>(&weights, rows, &q8k, positions, 4, None)
+            }
+            .expect("avx2 and fma are present on the test host")
+            .expect("tiled matmul runs");
+            let row_bytes = weights.len() / rows;
+            let q8k_row_bytes = blocks * Q8K_BLOCK_BYTES;
+            for row in 0..rows {
+                for position in 0..positions {
+                    let expected = dot(
+                        &weights[row * row_bytes..(row + 1) * row_bytes],
+                        &q8k[position * q8k_row_bytes..(position + 1) * q8k_row_bytes],
+                    )
+                    .expect("row dot runs");
+                    assert_eq!(
+                        tiled[row * positions + position].to_bits(),
+                        expected.to_bits(),
+                        "six_bit={six_bit} rows={rows} positions={positions} row={row} position={position}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn q4_k_tile_is_bit_identical_to_the_per_position_row_dots() {
+        tiled_equals_row_dots(false);
+    }
+
+    #[test]
+    fn q6_k_tile_is_bit_identical_to_the_per_position_row_dots() {
+        tiled_equals_row_dots(true);
+    }
 }
