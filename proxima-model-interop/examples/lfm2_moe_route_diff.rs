@@ -42,7 +42,7 @@ use proxima_model_interop::{
 };
 use proxima_tensor::dtype::DType;
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
-use proxima_tensor::spec::scheduled_forward_program_with_experts;
+use proxima_tensor::spec::{SharedExpertWidth, scheduled_forward_program_with_experts};
 
 fn read_oracle_route(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path)
@@ -79,6 +79,7 @@ fn layer_boundary_node_id(architecture: &ShortConvHparams, depth: u32) -> NodeId
         None,
         false,
         None,
+        SharedExpertWidth::NONE,
     )
     .expect("build shallow throwaway lfm2 program");
 
@@ -100,6 +101,7 @@ fn layer_boundary_node_id(architecture: &ShortConvHparams, depth: u32) -> NodeId
         None,
         false,
         None,
+        SharedExpertWidth::NONE,
     )
     .expect("build deep throwaway lfm2 program");
 
@@ -293,6 +295,7 @@ fn main() {
             None,
             false,
             None,
+            SharedExpertWidth::NONE,
         )
         .expect("build full lfm2 program to scan for route nodes");
 

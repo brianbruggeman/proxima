@@ -35,7 +35,7 @@ use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::level::Level;
 use proxima_telemetry::recorder::Recorder;
 use proxima_tensor::op::NodeId;
-use proxima_tensor::spec::scheduled_forward_program_with_experts;
+use proxima_tensor::spec::{SharedExpertWidth, scheduled_forward_program_with_experts};
 
 fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path)
@@ -90,6 +90,7 @@ fn layer_boundary_node_id(architecture: &ShortConvHparams, depth: u32) -> NodeId
         None,
         false,
         None,
+        SharedExpertWidth::NONE,
     )
     .expect("build shallow throwaway lfm2 program");
 
@@ -111,6 +112,7 @@ fn layer_boundary_node_id(architecture: &ShortConvHparams, depth: u32) -> NodeId
         None,
         false,
         None,
+        SharedExpertWidth::NONE,
     )
     .expect("build deep throwaway lfm2 program");
 

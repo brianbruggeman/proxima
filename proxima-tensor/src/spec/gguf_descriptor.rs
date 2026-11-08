@@ -68,6 +68,17 @@ pub fn sliding_pattern_descriptor_from_gguf(
             parsed.tensors.iter().any(|tensor| tensor.name == name)
         })
         .collect();
+    // the shared expert's gate is per-layer the same way: a checkpoint whose
+    // routed blocks carry `ffn_gate_inp_shexp.weight` scales the shared output
+    // by it, one whose blocks carry only `ffn_{gate,up,down}_shexp.weight` adds
+    // it unscaled (flint's directory has no gate tensor on any of its 47 routed
+    // blocks)
+    let shared_gate_layers: Vec<bool> = (0..block_count)
+        .map(|layer| {
+            let name = format!("blk.{layer}.ffn_gate_inp_shexp.weight");
+            parsed.tensors.iter().any(|tensor| tensor.name == name)
+        })
+        .collect();
     let ple_dim = metadata_u32_optional(parsed, &key("embedding_length_per_layer_input"));
     let shared_kv_layers = metadata_u32_optional(parsed, &key("attention.shared_kv_layers"));
     let query_heads = metadata_u32(parsed, &key("attention.head_count"))?;
@@ -194,6 +205,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
                 attention,
                 ffn: LayerFfnConfig {
                     dense_feed_forward: Some(feed_forward),
+                    shared_expert_gate: shared_gate_layers[layer],
                     ..ffn
                 },
             }

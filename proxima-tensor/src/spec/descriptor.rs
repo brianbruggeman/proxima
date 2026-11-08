@@ -984,6 +984,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                     descriptor.head_repeats,
                     descriptor.recurrence,
                     descriptor.loopcd,
+                    SharedExpertWidth(descriptor.expert_shared_feed_forward),
                 )?;
             Ok(ForwardProgram {
                 program,
@@ -1025,6 +1026,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                     descriptor.logit_softcap,
                     descriptor.last_row_only,
                     descriptor.ple_dim,
+                    SharedExpertWidth(descriptor.expert_shared_feed_forward),
                     descriptor.head_repeats,
                 )?;
             Ok(ForwardProgram {

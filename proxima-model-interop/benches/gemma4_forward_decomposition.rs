@@ -131,7 +131,7 @@ use proxima_tensor::instrument::ticks_to_nanos;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule, RopePairing,
-    RopeTableSel, ValueSourceKind, scheduled_forward_program_with_experts,
+    RopeTableSel, SharedExpertWidth, ValueSourceKind, scheduled_forward_program_with_experts,
 };
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::test_support::Lcg;
@@ -324,6 +324,7 @@ fn sliding_layer_schedule() -> Vec<LayerSchedule> {
         exclusive_dense_post_norm: true,
         activation: Activation::GeluTanh,
         ple: false,
+        shared_expert_gate: true,
     };
     let attention = LayerAttentionConfig {
         head_dim: HEAD_DIM_SWA,
@@ -531,6 +532,7 @@ fn bench_one_layer(c: &mut Criterion) {
             None,
             true,
             None,
+            SharedExpertWidth::NONE,
         )
         .expect("one-layer gemma4-shaped program lowers at this width");
 

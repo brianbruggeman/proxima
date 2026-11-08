@@ -13,7 +13,7 @@ use proxima_tensor::bind::{RefreshRefusal, refresh_bound_ops, touches_changed};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
-    ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind,
+    ParallelDenseMoeConfig, RopePairing, RopeTableSel, SharedExpertWidth, ValueSourceKind,
     scheduled_two_range_cached_forward_program_with_experts,
 };
 use proxima_tensor::{
@@ -51,6 +51,7 @@ fn gemma4_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
         exclusive_dense_post_norm: false,
         activation: Activation::GeluTanh,
         ple: false,
+        shared_expert_gate: true,
     };
     sliding_pattern
         .iter()
@@ -122,6 +123,7 @@ fn decode_program() -> (Vec<Op>, NodeId) {
             true,
             None,
             false,
+            SharedExpertWidth::NONE,
         )
         .expect("the gemma4-shaped two-range decode program lowers at the synthetic width");
     (program, logits)

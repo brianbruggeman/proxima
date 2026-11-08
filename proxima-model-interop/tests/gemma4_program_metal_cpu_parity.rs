@@ -63,7 +63,7 @@ use proxima_model_interop::sliding_pattern::program::sliding_rope_table;
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
-    ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind,
+    ParallelDenseMoeConfig, RopePairing, RopeTableSel, SharedExpertWidth, ValueSourceKind,
     scheduled_forward_program_with_experts,
 };
 use proxima_tensor::test_support::Lcg;
@@ -129,6 +129,7 @@ fn gemma4_synthetic_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
         exclusive_dense_post_norm: false,
         activation: Activation::GeluTanh,
         ple: false,
+        shared_expert_gate: true,
     };
     sliding_pattern
         .iter()
@@ -275,6 +276,7 @@ fn logits_relative_error(layer_count: u32) -> f32 {
         None,
         false,
         None,
+        SharedExpertWidth::NONE,
     )
     .expect("the gemma4-shaped forward program lowers at the synthetic architecture's width");
 

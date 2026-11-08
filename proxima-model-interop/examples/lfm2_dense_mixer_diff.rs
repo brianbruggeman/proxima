@@ -44,7 +44,7 @@ use proxima_model_interop::{
     ShortConvHparams, short_conv_architecture_from_metadata, short_conv_forward_values,
 };
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
-use proxima_tensor::spec::scheduled_forward_program_with_experts;
+use proxima_tensor::spec::{SharedExpertWidth, scheduled_forward_program_with_experts};
 
 fn read_oracle_activation(path: &PathBuf) -> Vec<f32> {
     let bytes = fs::read(path)
@@ -226,6 +226,7 @@ fn main() {
             None,
             false,
             None,
+            SharedExpertWidth::NONE,
         )
         .expect("build full lfm2 program to walk this layer's node ids");
 

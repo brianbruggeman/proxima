@@ -42,8 +42,8 @@ use proxima_tensor::spec::{
     Activation, AttentionScoreScale, CacheMask, CacheStrategy, CachedLayerRoots, EmbeddingScale,
     ExpertGatingFunc, FfnCombination, ForwardProgram, KeySourceKind, LayerAttentionConfig,
     LayerCacheRoots, LayerFfnConfig, LayerKind, LayerSchedule, ModelDescriptor,
-    ParallelDenseMoeConfig, RopePairing, RopeTableSel, SLIDING_KV_SYMBOL, ValueSourceKind,
-    build_forward, gqa_cached_forward_program_with_experts_and_layer_taps,
+    ParallelDenseMoeConfig, RopePairing, RopeTableSel, SLIDING_KV_SYMBOL, SharedExpertWidth,
+    ValueSourceKind, build_forward, gqa_cached_forward_program_with_experts_and_layer_taps,
     gqa_descriptor_from_shape, scheduled_two_range_cached_forward_program_with_experts,
     sliding_pattern_descriptor_from_gguf,
 };
@@ -936,6 +936,7 @@ fn gemma4_26b_hand_written_layers() -> Vec<LayerSchedule> {
         exclusive_dense_post_norm: false,
         activation: Activation::GeluTanh,
         ple: false,
+        shared_expert_gate: true,
     };
     (0..30u32)
         .map(|layer| {
@@ -1026,6 +1027,7 @@ fn descriptor_real_dims_gemma4_26b_program_equals_direct_builder() {
             true,
             None,
             false,
+            SharedExpertWidth(descriptor.expert_shared_feed_forward),
         )
         .expect("direct real-dims build");
 

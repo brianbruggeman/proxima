@@ -646,6 +646,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
     embedding_scale: Option<EmbeddingScale>,
     logit_softcap: Option<f32>,
     last_row_only: bool,
+    expert_shared_feed_forward: SharedExpertWidth,
 ) -> Result<(Vec<Op>, NodeId, Vec<CachedLayerRoots>, MoeSites), TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -871,6 +872,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
             embedding,
             feed_forward,
             expert_feed_forward,
+            expert_shared_feed_forward,
             expert_count,
             expert_used_count,
             leading_dense_block_count,
@@ -1046,6 +1048,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts(
     // slot 1, and its mask reads the ring's own live-row count. `false`
     // leaves the program node-for-node what it was before the ring existed.
     sliding_kv_ring: bool,
+    expert_shared_feed_forward: SharedExpertWidth,
 ) -> Result<TwoRangeForwardProgram, TensorError> {
     scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
         vocab,
@@ -1064,6 +1067,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts(
         ple_dim,
         sliding_kv_ring,
         1,
+        expert_shared_feed_forward,
     )
 }
 
@@ -1088,6 +1092,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
     ple_dim: Option<u32>,
     sliding_kv_ring: bool,
     head_repeats: u32,
+    expert_shared_feed_forward: SharedExpertWidth,
 ) -> Result<TwoRangeForwardProgram, TensorError> {
     let (program, logits, layer_roots, moe_sites, duplicate_head_roots, _) =
         scheduled_two_range_cached_forward_program_with_layer_roots(
@@ -1110,6 +1115,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
             head_repeats,
             None,
             LoopCdConfig::default(),
+            expert_shared_feed_forward,
         )?;
     let mut cache_roots = Vec::with_capacity(layer_roots.len());
     for roots in layer_roots {
@@ -1156,6 +1162,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     head_repeats: u32,
     recurrence: Option<RecurrenceConfig>,
     loopcd: LoopCdConfig,
+    expert_shared_feed_forward: SharedExpertWidth,
 ) -> Result<TwoRangeLayerRootForwardProgram, TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -1416,6 +1423,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                 embedding,
                 feed_forward,
                 expert_feed_forward,
+                expert_shared_feed_forward,
                 expert_count,
                 expert_used_count,
                 leading_dense_block_count,
@@ -1649,6 +1657,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             embedding,
             feed_forward,
             expert_feed_forward,
+            expert_shared_feed_forward,
             expert_count,
             expert_used_count,
             leading_dense_block_count,

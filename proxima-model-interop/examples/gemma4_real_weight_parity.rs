@@ -21,7 +21,7 @@ use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
     Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
     KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind, LayerSchedule,
-    ParallelDenseMoeConfig, RopePairing, RopeTableSel, ValueSourceKind,
+    ParallelDenseMoeConfig, RopePairing, RopeTableSel, SharedExpertWidth, ValueSourceKind,
     scheduled_forward_program_with_experts,
 };
 
@@ -66,6 +66,7 @@ fn gemma4_program(
         exclusive_dense_post_norm: false,
         activation: Activation::GeluTanh,
         ple: false,
+        shared_expert_gate: true,
     };
     let schedule: Vec<LayerSchedule> = architecture
         .sliding_window_pattern
@@ -137,6 +138,7 @@ fn gemma4_program(
         logit_softcap,
         true,
         None,
+        SharedExpertWidth::NONE,
     )
     .expect("build gemma4 program (mirrors bind_checkpoint)");
     (program, logits)
