@@ -15,6 +15,7 @@ use alloc::format;
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
+use proxima_gguf::value::MetadataValue;
 
 use crate::bind::{
     metadata_bool_per_layer, metadata_f32_optional, metadata_str, metadata_u32,
@@ -96,7 +97,27 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<SlidingPatternHparams, Inter
         &prefix("rope.freq_base"),
         proxima_tensor::sized::ROPE_FREQ_BASE_DEFAULT,
     );
-    let rope_dimension_count = metadata_u32(parsed, &prefix("rope.dimension_count"))?;
+    let head_count = metadata_u32(parsed, &prefix("attention.head_count"))?;
+    // llama.cpp seeds both head widths with `n_embd / n_head` (and 0 when there
+    // are no heads) before `attention.key_length` / `attention.value_length`
+    // override them (`llama-model.cpp`, `n_embd_head_k_full` / `_v_full`)
+    let default_head_width = embedding.checked_div(head_count).unwrap_or(0);
+    let key_length =
+        metadata_u32_optional_or(parsed, &prefix("attention.key_length"), default_head_width);
+    let value_length = metadata_u32_optional_or(
+        parsed,
+        &prefix("attention.value_length"),
+        default_head_width,
+    );
+    // a checkpoint that attends every layer at one head width omits the swa
+    // overrides and the rope width; each falls back to the width it pairs
+    // against, which is what makes the flint capture read as 128 throughout
+    let key_length_swa =
+        metadata_u32_optional_or(parsed, &prefix("attention.key_length_swa"), key_length);
+    let value_length_swa =
+        metadata_u32_optional_or(parsed, &prefix("attention.value_length_swa"), value_length);
+    let rope_dimension_count =
+        metadata_u32_optional_or(parsed, &prefix("rope.dimension_count"), key_length);
     let feed_forward_by_layer =
         metadata_u32_per_layer(parsed, &prefix("feed_forward_length"), block_count)?;
     let feed_forward = *feed_forward_by_layer.first().unwrap_or(&0);
@@ -115,18 +136,18 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<SlidingPatternHparams, Inter
         expert_feed_forward: metadata_u32_optional(parsed, &prefix("expert_feed_forward_length")),
         expert_count: metadata_u32_optional(parsed, &prefix("expert_count")),
         expert_used_count: metadata_u32_optional(parsed, &prefix("expert_used_count")),
-        head_count: metadata_u32(parsed, &prefix("attention.head_count"))?,
+        head_count,
         kv_heads_by_layer,
         rms_epsilon: metadata_f32_optional(
             parsed,
             &prefix("attention.layer_norm_rms_epsilon"),
             1e-6,
         ),
-        key_length: metadata_u32(parsed, &prefix("attention.key_length"))?,
-        value_length: metadata_u32(parsed, &prefix("attention.value_length"))?,
+        key_length,
+        value_length,
         sliding_window: metadata_u32(parsed, &prefix("attention.sliding_window"))?,
-        key_length_swa: metadata_u32(parsed, &prefix("attention.key_length_swa"))?,
-        value_length_swa: metadata_u32(parsed, &prefix("attention.value_length_swa"))?,
+        key_length_swa,
+        value_length_swa,
         sliding_window_pattern,
         shared_kv_layers: metadata_u32_optional(parsed, &prefix("attention.shared_kv_layers")),
         rope_freq_base,
@@ -179,8 +200,20 @@ pub fn kv_layers_from_metadata(
         parsed,
         &prefix("attention.shared_kv_layers"),
     ));
-    let key_length = metadata_u32(parsed, &prefix("attention.key_length"))?;
-    let key_length_swa = metadata_u32(parsed, &prefix("attention.key_length_swa"))?;
+    // same optional-read semantics as `from_metadata`: absent or not a `u32`
+    // falls back, so every reader of this key agrees on one header
+    let key_length = match parsed
+        .metadata_value(&prefix("attention.key_length"))
+        .and_then(MetadataValue::as_u32)
+    {
+        Some(width) => width,
+        // llama.cpp seeds the width with `n_embd / n_head` when the key is absent
+        None => metadata_u32(parsed, &prefix("embedding_length"))?
+            .checked_div(metadata_u32(parsed, &prefix("attention.head_count"))?)
+            .unwrap_or(0),
+    };
+    let key_length_swa =
+        metadata_u32_optional_or(parsed, &prefix("attention.key_length_swa"), key_length);
     let sliding_window = metadata_u32(parsed, &prefix("attention.sliding_window"))?;
 
     Ok(sliding_window_pattern
@@ -200,10 +233,27 @@ pub fn kv_layers_from_metadata(
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+    use alloc::format;
+    use alloc::string::String;
     use alloc::vec;
+    use alloc::vec::Vec;
+
+    use proxima_gguf::pipe::ParsedGguf;
+    use proxima_gguf::value::{MetadataArray, MetadataValue};
+    use proxima_tensor::spec::{
+        LayerSchedule, ModelDescriptor, RopePairing, sliding_pattern_descriptor_from_gguf,
+    };
 
     use crate::memory_fit::{MemoryBudget, WeightClassBytes};
-    use crate::test_support::gemma4_e2b_header as e2b_header;
+    use crate::oracle_fixtures::{
+        HeaderEntry, header_scalar, parse_header, parse_layer_patterns, read_fixture,
+    };
+    use crate::profiles::family_profile;
+    use crate::test_support::{
+        gemma4_e2b_header as e2b_header, parsed_header_with_token_embedding,
+    };
+
+    use super::{SlidingPatternHparams, from_metadata, kv_layers_from_metadata};
 
     const CONTEXT: u32 = 131_072;
 
@@ -241,5 +291,490 @@ mod tests {
         let capped = MemoryBudget::derive(WeightClassBytes::default(), &layers, CONTEXT, 0, 0);
 
         assert_eq!(capped.kv_cache_bytes, 1_623_195_648);
+    }
+
+    /// R2's own literals for the flint capture. Deliberately not derived from
+    /// the capture the header is built from, or the comparison could not fail.
+    const FLINT_WIDTH: u32 = 128;
+    const FLINT_WINDOW: u32 = 513;
+    /// Only the `token_embd.weight` row's shape is read (`vocab_from_token_embedding`),
+    /// so a small vocabulary keeps the fixture at 64 KB instead of the capture's
+    /// 1.2 GB table.
+    const FLINT_VOCAB: u32 = 8;
+
+    /// The capture's own scalar values (`tests/fixtures/flint/gguf_kv_loader.txt`),
+    /// read out of the fixture rather than retyped, so a changed capture cannot
+    /// leave this test passing against stale literals.
+    fn flint_capture() -> Vec<HeaderEntry> {
+        let text = read_fixture("gguf_kv_loader.txt");
+        parse_header(&text)
+    }
+
+    fn captured_scalar<'a>(entries: &'a [HeaderEntry], key: &str) -> &'a str {
+        header_scalar(entries, key)
+    }
+
+    fn captured_u32(entries: &[HeaderEntry], key: &str) -> u32 {
+        let text = captured_scalar(entries, key);
+        text.parse()
+            .unwrap_or_else(|error| panic!("{key} = {text}: {error}"))
+    }
+
+    fn captured_f32(entries: &[HeaderEntry], key: &str) -> f32 {
+        let text = captured_scalar(entries, key);
+        text.parse()
+            .unwrap_or_else(|error| panic!("{key} = {text}: {error}"))
+    }
+
+    /// One per-layer boolean array out of the committed capture: the loader
+    /// truncates every value at 40 characters, so the full arrays live in
+    /// `layer_patterns.txt`.
+    fn flint_layer_pattern(key: &str) -> Vec<bool> {
+        let text = read_fixture("layer_patterns.txt");
+        parse_layer_patterns(&text)
+            .remove(key)
+            .unwrap_or_else(|| panic!("layer_patterns.txt carries no {key}"))
+    }
+
+    /// The flint capture's own header, with `attention.key_length_swa`,
+    /// `attention.value_length_swa`, `rope.dimension_count` and
+    /// `rope.dimension_count_swa` absent because the real header carries none
+    /// of them.
+    fn flint_metadata() -> Vec<(&'static str, MetadataValue)> {
+        let entries = flint_capture();
+        let u32_of = |key| MetadataValue::U32(captured_u32(&entries, key));
+        let f32_of = |key| MetadataValue::F32(captured_f32(&entries, key));
+        vec![
+            (
+                "general.architecture",
+                MetadataValue::String(String::from(captured_scalar(
+                    &entries,
+                    "general.architecture",
+                ))),
+            ),
+            ("flint.block_count", u32_of("flint.block_count")),
+            ("flint.context_length", u32_of("flint.context_length")),
+            ("flint.embedding_length", u32_of("flint.embedding_length")),
+            (
+                "flint.feed_forward_length",
+                u32_of("flint.feed_forward_length"),
+            ),
+            (
+                "flint.attention.head_count",
+                u32_of("flint.attention.head_count"),
+            ),
+            (
+                "flint.attention.head_count_kv",
+                u32_of("flint.attention.head_count_kv"),
+            ),
+            ("flint.rope.freq_base", f32_of("flint.rope.freq_base")),
+            (
+                "flint.attention.layer_norm_rms_epsilon",
+                f32_of("flint.attention.layer_norm_rms_epsilon"),
+            ),
+            ("flint.expert_count", u32_of("flint.expert_count")),
+            ("flint.expert_used_count", u32_of("flint.expert_used_count")),
+            (
+                "flint.expert_gating_func",
+                u32_of("flint.expert_gating_func"),
+            ),
+            (
+                "flint.attention.key_length",
+                u32_of("flint.attention.key_length"),
+            ),
+            (
+                "flint.attention.value_length",
+                u32_of("flint.attention.value_length"),
+            ),
+            (
+                "flint.expert_feed_forward_length",
+                u32_of("flint.expert_feed_forward_length"),
+            ),
+            (
+                "flint.expert_shared_feed_forward_length",
+                u32_of("flint.expert_shared_feed_forward_length"),
+            ),
+            (
+                "flint.leading_dense_block_count",
+                u32_of("flint.leading_dense_block_count"),
+            ),
+            (
+                "flint.expert_shared_count",
+                u32_of("flint.expert_shared_count"),
+            ),
+            (
+                "flint.expert_weights_scale",
+                f32_of("flint.expert_weights_scale"),
+            ),
+            (
+                "flint.attention.sliding_window",
+                u32_of("flint.attention.sliding_window"),
+            ),
+            (
+                "flint.attention.sliding_window_pattern",
+                MetadataValue::Array(MetadataArray::Bool(flint_layer_pattern(
+                    "flint.attention.sliding_window_pattern",
+                ))),
+            ),
+            (
+                "flint.attention.rope_pattern",
+                MetadataValue::Array(MetadataArray::Bool(flint_layer_pattern(
+                    "flint.attention.rope_pattern",
+                ))),
+            ),
+        ]
+    }
+
+    fn flint_parsed(metadata: Vec<(&'static str, MetadataValue)>) -> ParsedGguf {
+        let embedding = captured_u32(&flint_capture(), "flint.embedding_length");
+        parsed_header_with_token_embedding(metadata, embedding, FLINT_VOCAB)
+    }
+
+    /// The header reader under test is generic; the profile only supplies the
+    /// layout knobs the header does not carry (RoPE pairing, score scale,
+    /// activation). gemma4's file stands in until `profiles/flint.toml` lands,
+    /// which is why the split-half pairing below is the one assertion here that
+    /// reads the profile rather than the header.
+    fn flint_descriptor(parsed: &ParsedGguf) -> ModelDescriptor {
+        flint_descriptor_result(parsed).expect("the flint header must build a descriptor")
+    }
+
+    fn flint_descriptor_result(
+        parsed: &ParsedGguf,
+    ) -> Result<ModelDescriptor, proxima_tensor::error::TensorError> {
+        let profile = family_profile("gemma4")
+            .expect("gemma4 supplies the seating knobs this header does not carry");
+        sliding_pattern_descriptor_from_gguf(parsed, false, &profile)
+    }
+
+    fn flint_descriptor_error(parsed: &ParsedGguf) -> proxima_tensor::error::TensorError {
+        flint_descriptor_result(parsed).expect_err("this header is outside the engine's shape")
+    }
+
+    /// Every width R2 names, plus the per-layer schedule, as one predicate so
+    /// the control proves the same comparison rejects a mutated header. Four of
+    /// the six widths are the fallback chain (the capture omits those keys), so
+    /// they move together; the assertions that can fail on their own are
+    /// `key_length` against the capture and each layer's window against the
+    /// captured array.
+    fn sliding_pattern_header_problem(
+        hparams: &SlidingPatternHparams,
+        descriptor: &ModelDescriptor,
+        captured: &[bool],
+    ) -> Option<String> {
+        for (name, found) in [
+            ("key_length", hparams.key_length),
+            ("value_length", hparams.value_length),
+            ("key_length_swa", hparams.key_length_swa),
+            ("value_length_swa", hparams.value_length_swa),
+            ("rope_dimension_count", hparams.rope_dimension_count),
+            ("rope_dimension_count_swa", hparams.rope_dimension_count_swa),
+        ] {
+            if found != FLINT_WIDTH {
+                return Some(format!("{name} = {found}, expected {FLINT_WIDTH}"));
+            }
+        }
+
+        if hparams.sliding_window_pattern != captured {
+            return Some(String::from(
+                "sliding_window_pattern differs from the captured 49-entry array",
+            ));
+        }
+        for (index, layer) in descriptor.layers.iter().enumerate() {
+            let attention = &layer.attention;
+            if attention.head_dim != FLINT_WIDTH {
+                return Some(format!(
+                    "layer {index} head_dim {}, expected {FLINT_WIDTH}",
+                    attention.head_dim
+                ));
+            }
+            let expected_pairs = RopePairing::SplitHalf {
+                pairs: FLINT_WIDTH / 2,
+            };
+            if attention.rope_pairing != expected_pairs {
+                return Some(format!(
+                    "layer {index} rope pairing {:?}, expected {expected_pairs:?}",
+                    attention.rope_pairing
+                ));
+            }
+            let expected_window = captured[index].then_some(FLINT_WINDOW);
+            if attention.mask_window != expected_window {
+                return Some(format!(
+                    "layer {index} window {:?}, expected {expected_window:?} from the capture",
+                    attention.mask_window
+                ));
+            }
+        }
+        None
+    }
+
+    /// The flint capture omits four width keys. R2: the reader still builds a
+    /// descriptor, every layer reports the capture's own 128 rather than a
+    /// missing-key error, and a header that does carry the swa keys keeps them.
+    #[test]
+    fn sliding_pattern_header_derives_the_flint_capture_widths_and_keeps_explicit_swa_keys() {
+        let parsed = flint_parsed(flint_metadata());
+        let hparams = from_metadata(&parsed)
+            .expect("the flint capture carries every key from_metadata reads");
+        let descriptor = flint_descriptor(&parsed);
+        let captured = flint_layer_pattern("flint.attention.sliding_window_pattern");
+
+        if let Some(problem) = sliding_pattern_header_problem(&hparams, &descriptor, &captured) {
+            panic!("{problem}");
+        }
+
+        let kv_layers = kv_layers_from_metadata(&parsed)
+            .expect("the flint capture carries every key kv_layers_from_metadata reads");
+        assert_eq!(
+            kv_layers.len(),
+            captured.len(),
+            "one KV-owning layer per block"
+        );
+        for (index, &(kv_heads, head_dim, window)) in kv_layers.iter().enumerate() {
+            assert_eq!(kv_heads, 4, "layer {index} keeps four kv heads");
+            assert_eq!(head_dim, FLINT_WIDTH, "layer {index} attends at 128");
+            let expected_window = captured[index].then_some(FLINT_WINDOW);
+            assert_eq!(window, expected_window, "layer {index} window");
+        }
+
+        let mut explicit = flint_metadata();
+        explicit.push(("flint.attention.key_length_swa", MetadataValue::U32(96)));
+        explicit.push(("flint.attention.value_length_swa", MetadataValue::U32(96)));
+        let parsed = flint_parsed(explicit);
+        let hparams = from_metadata(&parsed)
+            .expect("an explicit swa width does not remove a key from_metadata reads");
+        assert_eq!(hparams.key_length_swa, 96, "an explicit swa key wins");
+        assert_eq!(
+            hparams.value_length_swa, 96,
+            "an explicit swa value key wins"
+        );
+        assert_eq!(
+            hparams.rope_dimension_count_swa, FLINT_WIDTH,
+            "an absent rope.dimension_count_swa falls back to the full rotary width, not to the \
+             narrower swa head (llama-model.cpp: n_rot_swa = n_rot_full)"
+        );
+
+        let descriptor = flint_descriptor(&parsed);
+        let sliding: Vec<&LayerSchedule> = descriptor
+            .layers
+            .iter()
+            .filter(|layer| layer.attention.mask_window.is_some())
+            .collect();
+        assert!(
+            !sliding.is_empty(),
+            "the captured pattern must select at least one sliding layer"
+        );
+        for layer in sliding {
+            assert_eq!(
+                layer.attention.head_dim, 96,
+                "an explicit key_length_swa overrides the derived head width"
+            );
+            assert_eq!(
+                layer.attention.rope_pairing,
+                RopePairing::SplitHalf {
+                    pairs: FLINT_WIDTH / 2
+                },
+                "the sliding rotary width still comes from the full one, so it does not follow \
+                 the explicit swa head width"
+            );
+        }
+
+        let mut explicit_rope = flint_metadata();
+        explicit_rope.push(("flint.rope.dimension_count_swa", MetadataValue::U32(64)));
+        let parsed = flint_parsed(explicit_rope);
+        let hparams = from_metadata(&parsed).expect("an explicit swa rotary width reads");
+        assert_eq!(
+            hparams.rope_dimension_count_swa, 64,
+            "an explicit swa rope key wins"
+        );
+        let descriptor = flint_descriptor(&parsed);
+        for layer in &descriptor.layers {
+            let expected_pairs = if layer.attention.mask_window.is_some() {
+                32
+            } else {
+                FLINT_WIDTH / 2
+            };
+            assert_eq!(
+                layer.attention.rope_pairing,
+                RopePairing::SplitHalf {
+                    pairs: expected_pairs
+                },
+                "only the sliding layers take the explicit swa rotary width"
+            );
+        }
+
+        let mut no_value_length = flint_metadata();
+        no_value_length.retain(|(key, _)| *key != "flint.attention.value_length");
+        let parsed = flint_parsed(no_value_length);
+        let hparams = from_metadata(&parsed).expect("an absent value_length reads");
+        assert_eq!(
+            hparams.value_length, 64,
+            "flint: 2048 / 32, the same fallback llama.cpp computes before the key is read"
+        );
+        assert_eq!(
+            hparams.value_length_swa, 64,
+            "an absent value_length_swa then falls back to the derived value_length"
+        );
+
+        let mut zero_rope = flint_metadata();
+        zero_rope.push(("flint.rope.dimension_count", MetadataValue::U32(0)));
+        let parsed = flint_parsed(zero_rope);
+        let hparams = from_metadata(&parsed).expect("an explicit zero rotary width reads");
+        assert_eq!(
+            hparams.rope_dimension_count, 0,
+            "a present zero wins over the head width, as llama.cpp's key read does"
+        );
+        assert_eq!(hparams.rope_dimension_count_swa, 0);
+        let descriptor = flint_descriptor(&parsed);
+        for (index, layer) in descriptor.layers.iter().enumerate() {
+            assert_eq!(
+                layer.attention.rope_pairing,
+                RopePairing::SplitHalf { pairs: 0 },
+                "layer {index}: the descriptor keeps the explicit zero, so both readers agree"
+            );
+        }
+
+        // llama.cpp defaults the head width to n_embd / n_head when the key is absent
+        let mut no_widths = flint_metadata();
+        no_widths.retain(|(key, _)| {
+            *key != "flint.attention.key_length" && *key != "flint.attention.value_length"
+        });
+        let parsed = flint_parsed(no_widths);
+        let hparams = from_metadata(&parsed).expect("an absent head width reads");
+        assert_eq!(
+            hparams.key_length, 64,
+            "flint: 2048 / 32, the width llama.cpp seeds before the key is read"
+        );
+        let descriptor = flint_descriptor(&parsed);
+        for (index, layer) in descriptor.layers.iter().enumerate() {
+            assert_eq!(
+                layer.attention.head_dim, 64,
+                "layer {index}: the descriptor derives the same width"
+            );
+            assert_eq!(
+                layer.attention.rope_pairing,
+                RopePairing::SplitHalf { pairs: 32 },
+                "layer {index}: the derived rotary width follows the derived head width"
+            );
+        }
+
+        // one head width for K and V is an engine boundary, refused rather than mis-scaled
+        let mut unequal_full = flint_metadata();
+        for entry in &mut unequal_full {
+            if entry.0 == "flint.attention.value_length" {
+                entry.1 = MetadataValue::U32(96);
+            }
+        }
+        let parsed = flint_parsed(unequal_full);
+        let error = flint_descriptor_error(&parsed);
+        assert!(
+            matches!(
+                error,
+                proxima_tensor::error::TensorError::GgufUnequalValueWidth {
+                    kind: "full",
+                    key_length: FLINT_WIDTH,
+                    value_length: 96
+                }
+            ),
+            "an unequal value width must be refused by name, got {error:?}"
+        );
+
+        let mut unequal_sliding = flint_metadata();
+        unequal_sliding.push(("flint.attention.key_length_swa", MetadataValue::U32(96)));
+        let parsed = flint_parsed(unequal_sliding);
+        let hparams = from_metadata(&parsed)
+            .expect("the reviewable header still yields widths; the descriptor is what refuses");
+        assert_eq!(
+            hparams.value_length_swa, FLINT_WIDTH,
+            "an absent value_length_swa falls back to value_length, which is why the pair is unequal"
+        );
+        let error = flint_descriptor_error(&parsed);
+        assert!(
+            matches!(
+                error,
+                proxima_tensor::error::TensorError::GgufUnequalValueWidth {
+                    kind: "sliding",
+                    key_length: 96,
+                    value_length: 128
+                }
+            ),
+            "the sliding pair is refused on the same rule, got {error:?}"
+        );
+    }
+
+    /// R2's other half: the committed gemma4 fixture reports its own explicit
+    /// widths (256 sliding / 512 full), not the flint fallback. The fixture is
+    /// the KV-relevant subset of that header, so this is the reader that carries
+    /// every key it has.
+    #[test]
+    fn sliding_pattern_header_reports_the_gemma4_fixture_widths() {
+        let layers = kv_layers_from_metadata(&e2b_header())
+            .expect("the e2b header carries every key kv_layers_from_metadata reads");
+
+        assert_eq!(layers.len(), 15, "35 blocks minus 20 shared-KV layers");
+        for (index, &(kv_heads, head_dim, window)) in layers.iter().enumerate() {
+            assert_eq!(kv_heads, 1);
+            if index % 5 == 4 {
+                assert_eq!((head_dim, window), (512, None), "full layer {index}");
+            } else {
+                assert_eq!(
+                    (head_dim, window),
+                    (256, Some(512)),
+                    "sliding layer {index}"
+                );
+            }
+        }
+    }
+
+    /// AC23 control: the same comparison the test above trusts must reject a
+    /// mutated capture, or it proves nothing about the real one.
+    #[test]
+    fn control_rejects_mutated_sliding_pattern_header() {
+        let captured = flint_layer_pattern("flint.attention.sliding_window_pattern");
+        let parsed = flint_parsed(flint_metadata());
+        let hparams = from_metadata(&parsed).expect("the capture reads");
+        let descriptor = flint_descriptor(&parsed);
+        assert_eq!(
+            sliding_pattern_header_problem(&hparams, &descriptor, &captured),
+            None,
+            "the captured header passes its own comparison"
+        );
+
+        // both widths move together, so the descriptor still builds and the
+        // header comparison is what rejects the mutant
+        let mut narrowed = flint_metadata();
+        for entry in &mut narrowed {
+            if entry.0 == "flint.attention.key_length" || entry.0 == "flint.attention.value_length"
+            {
+                entry.1 = MetadataValue::U32(64);
+            }
+        }
+        let parsed = flint_parsed(narrowed);
+        let hparams = from_metadata(&parsed).expect("a narrower head width still reads");
+        let descriptor = flint_descriptor(&parsed);
+        let problem = sliding_pattern_header_problem(&hparams, &descriptor, &captured)
+            .expect("a mutated key_length must fail the width comparison");
+        assert!(
+            problem.starts_with("key_length = 64"),
+            "the failure names the mutated width, got: {problem}"
+        );
+
+        let mut flipped = flint_metadata();
+        for entry in &mut flipped {
+            if entry.0 == "flint.attention.sliding_window_pattern"
+                && let MetadataValue::Array(MetadataArray::Bool(pattern)) = &mut entry.1
+            {
+                pattern[0] = !pattern[0];
+            }
+        }
+        let parsed = flint_parsed(flipped);
+        let hparams = from_metadata(&parsed).expect("a flipped schedule entry still reads");
+        let descriptor = flint_descriptor(&parsed);
+        let problem = sliding_pattern_header_problem(&hparams, &descriptor, &captured)
+            .expect("a flipped schedule entry must fail the capture comparison");
+        assert!(
+            problem.contains("sliding_window_pattern"),
+            "the failure names the schedule it compared, got: {problem}"
+        );
     }
 }

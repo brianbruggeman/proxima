@@ -49,17 +49,52 @@ pub fn sliding_pattern_descriptor_from_gguf(
     let expert_count = metadata_u32_optional(parsed, &key("expert_count"));
     let ple_dim = metadata_u32_optional(parsed, &key("embedding_length_per_layer_input"));
     let shared_kv_layers = metadata_u32_optional(parsed, &key("attention.shared_kv_layers"));
-    let key_length = metadata_u32(parsed, &key("attention.key_length"))?;
-    let key_length_swa = metadata_u32(parsed, &key("attention.key_length_swa"))?;
+    let query_heads = metadata_u32(parsed, &key("attention.head_count"))?;
+    // llama.cpp seeds both head widths with `n_embd / n_head` before the keys
+    // override them (`llama-model.cpp`, `n_embd_head_k_full` / `_v_full`)
+    let default_head_width = if query_heads == 0 { 0 } else { embedding / query_heads };
+    let key_length = match metadata_u32_option(parsed, &key("attention.key_length")) {
+        Some(width) => width,
+        // llama.cpp's zero-head branch leaves every width at 0, but this engine
+        // has no zero-width attention to build, so a header with no head count
+        // and no key width is still missing the key
+        None if default_head_width == 0 => return Err(missing(&key("attention.key_length"))),
+        None => default_head_width,
+    };
+    // a checkpoint whose sliding layers attend at the same head width as its
+    // full layers omits the swa override; the key only exists for checkpoints
+    // that differ (the flint capture carries neither, gemma4 carries both)
+    let key_length_swa =
+        metadata_u32_option(parsed, &key("attention.key_length_swa")).unwrap_or(key_length);
+    // this engine's attention graph carries a single head width for K and V
+    let value_length = metadata_u32_option(parsed, &key("attention.value_length"))
+        .unwrap_or(default_head_width);
+    let value_length_swa =
+        metadata_u32_option(parsed, &key("attention.value_length_swa")).unwrap_or(value_length);
+    for (kind, key_width, value_width) in [
+        ("full", key_length, value_length),
+        ("sliding", key_length_swa, value_length_swa),
+    ] {
+        if key_width != value_width {
+            return Err(TensorError::GgufUnequalValueWidth {
+                kind,
+                key_length: key_width,
+                value_length: value_width,
+            });
+        }
+    }
     let sliding_window = metadata_u32(parsed, &key("attention.sliding_window"))?;
     let softcap = metadata_f32_optional(parsed, &key("final_logit_softcapping"), 0.0);
     let rotary_dim = rotary_or_head_dim(
-        metadata_u32_optional(parsed, &key("rope.dimension_count")),
+        metadata_u32_option(parsed, &key("rope.dimension_count")),
         key_length,
     );
+    // llama.cpp carries one rotary width per layer kind and derives the swa one
+    // from the full one (`llama-model.cpp`: `n_rot_swa = n_rot_full` before
+    // `rope.dimension_count_swa` overrides it), never from the swa head width
     let rotary_dim_swa = rotary_or_head_dim(
-        metadata_u32_optional(parsed, &key("rope.dimension_count_swa")),
-        key_length_swa,
+        metadata_u32_option(parsed, &key("rope.dimension_count_swa")),
+        rotary_dim,
     );
 
     let ffn = LayerFfnConfig {
@@ -154,7 +189,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         embedding,
         feed_forward: feed_forward_by_layer.first().copied().unwrap_or(0),
         expert_feed_forward: metadata_u32_optional(parsed, &key("expert_feed_forward_length")),
-        query_heads: metadata_u32(parsed, &key("attention.head_count"))?,
+        query_heads,
         block_count,
         expert_count,
         expert_used_count: metadata_u32_optional(parsed, &key("expert_used_count")),
@@ -236,17 +271,20 @@ fn metadata_u32(parsed: &ParsedGguf, key: &str) -> Result<u32, TensorError> {
 }
 
 fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
-    parsed
-        .metadata_value(key)
-        .and_then(MetadataValue::as_u32)
-        .unwrap_or(0)
+    metadata_u32_option(parsed, key).unwrap_or(0)
 }
 
-const fn rotary_or_head_dim(rope_dimension_count: u32, head_dim: u32) -> u32 {
-    if rope_dimension_count == 0 {
-        head_dim
-    } else {
-        rope_dimension_count
+/// A present key wins even when it is `0` -- llama.cpp's `get_key` reports
+/// absent and zero differently (`llama-model-loader.cpp`), and an explicit
+/// rotary width of zero is a checkpoint asking for no rotation.
+fn metadata_u32_option(parsed: &ParsedGguf, key: &str) -> Option<u32> {
+    parsed.metadata_value(key).and_then(MetadataValue::as_u32)
+}
+
+const fn rotary_or_head_dim(rope_dimension_count: Option<u32>, head_dim: u32) -> u32 {
+    match rope_dimension_count {
+        Some(count) => count,
+        None => head_dim,
     }
 }
 

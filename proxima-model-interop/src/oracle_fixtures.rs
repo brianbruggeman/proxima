@@ -59,10 +59,10 @@ const FIXTURE_DIGESTS: [(&str, &str); 5] = [
 ];
 
 #[derive(Clone)]
-struct HeaderEntry {
-    key: String,
-    kind: String,
-    value: String,
+pub(crate) struct HeaderEntry {
+    pub(crate) key: String,
+    pub(crate) kind: String,
+    pub(crate) value: String,
 }
 
 impl HeaderEntry {
@@ -82,13 +82,13 @@ struct TensorRow {
     dimensions: Vec<u64>,
 }
 
-fn fixture_path(name: &str) -> PathBuf {
+pub(crate) fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join(FIXTURE_DIRECTORY)
         .join(name)
 }
 
-fn read_fixture(name: &str) -> String {
+pub(crate) fn read_fixture(name: &str) -> String {
     let path = fixture_path(name);
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
@@ -107,7 +107,7 @@ fn verify_fixture_digests() {
 }
 
 /// The loader writes `- kv   0: <key> <type> = <value>`; comments start with `#`.
-fn parse_header(text: &str) -> Vec<HeaderEntry> {
+pub(crate) fn parse_header(text: &str) -> Vec<HeaderEntry> {
     text.lines()
         .filter_map(|line| {
             let rest = line.strip_prefix("- kv")?;
@@ -133,7 +133,7 @@ fn header_entry<'a>(entries: &'a [HeaderEntry], key: &str) -> &'a HeaderEntry {
         .unwrap_or_else(|| panic!("the captured header has no {key} entry"))
 }
 
-fn header_scalar<'a>(entries: &'a [HeaderEntry], key: &str) -> &'a str {
+pub(crate) fn header_scalar<'a>(entries: &'a [HeaderEntry], key: &str) -> &'a str {
     &header_entry(entries, key).value
 }
 
@@ -172,7 +172,7 @@ fn parse_tensor_rows(text: &str) -> Vec<TensorRow> {
 }
 
 /// `<metadata key> = [true, false, ...]`, one entry per block.
-fn parse_layer_patterns(text: &str) -> BTreeMap<String, Vec<bool>> {
+pub(crate) fn parse_layer_patterns(text: &str) -> BTreeMap<String, Vec<bool>> {
     text.lines()
         .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
         .filter_map(|line| {

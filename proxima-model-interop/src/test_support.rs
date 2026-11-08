@@ -3,9 +3,10 @@
 //! `real_openchat_file`) -- kept as ONE definition here rather than a
 //! private copy per module, per guiding-principle 1 (reuse first).
 
+use arrayvec::ArrayVec;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
-use proxima_gguf::{GgufModel, parse_complete, write_complete};
+use proxima_gguf::{GgmlType, GgufModel, TensorPayload, parse_complete, write_complete};
 
 use crate::checkpoint_resolver::resolve_checkpoint;
 
@@ -73,17 +74,25 @@ const GEMMA4_E2B_BLOB: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256
 /// `PROXIMA_ARCH_GRANITE_MOE_GGUF` names the granite-3.1-1b-a400m-moe checkpoint
 /// (sha256 cd60b3e8...df80); unset keeps the ollama blob on the author's host.
 pub(crate) fn granite_moe_gguf_path() -> String {
-    resolve_checkpoint("PROXIMA_ARCH_GRANITE_MOE_GGUF", GRANITE_MOE_BLOB, 1_422_239_776)
-        .to_string_lossy()
-        .into_owned()
+    resolve_checkpoint(
+        "PROXIMA_ARCH_GRANITE_MOE_GGUF",
+        GRANITE_MOE_BLOB,
+        1_422_239_776,
+    )
+    .to_string_lossy()
+    .into_owned()
 }
 
 /// `PROXIMA_ARCH_GEMMA4_E2B_GGUF` names the gemma4 e2b checkpoint (sha256
 /// 3646b4c1...e6fd); unset keeps the ollama blob on the author's host.
 pub(crate) fn gemma4_e2b_arch_gguf_path() -> String {
-    resolve_checkpoint("PROXIMA_ARCH_GEMMA4_E2B_GGUF", GEMMA4_E2B_BLOB, 3_349_514_112)
-        .to_string_lossy()
-        .into_owned()
+    resolve_checkpoint(
+        "PROXIMA_ARCH_GEMMA4_E2B_GGUF",
+        GEMMA4_E2B_BLOB,
+        3_349_514_112,
+    )
+    .to_string_lossy()
+    .into_owned()
 }
 
 #[cfg(unix)]
@@ -193,23 +202,66 @@ pub(crate) fn gemma4_e2b_header() -> ParsedGguf {
     ])
 }
 
+/// [`parsed_header`] plus one `token_embd.weight` row, because
+/// `vocab_from_token_embedding` -- and therefore `hparams::from_metadata` and
+/// `sliding_pattern_descriptor_from_gguf` -- size the vocabulary off that
+/// tensor's own directory entry. Only the row's shape is read, so the bytes are
+/// a fixed ramp rather than a real table: the capture's own 150144 x 2048 row
+/// would be a 1.2 GB F32 payload the header tests have no use for.
+pub(crate) fn parsed_header_with_token_embedding(
+    metadata: Vec<(&str, MetadataValue)>,
+    embedding: u32,
+    vocab: u32,
+) -> ParsedGguf {
+    let elements = u64::from(embedding) * u64::from(vocab);
+    let bytes: Vec<u8> = (0..elements * 4)
+        .map(|offset| (offset % 251) as u8)
+        .collect();
+    let leaked: &'static [u8] = Vec::leak(bytes);
+    encode_and_parse(
+        GgufModel {
+            version: 3,
+            metadata: metadata
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+            tensors: vec![TensorPayload {
+                name: String::from("token_embd.weight"),
+                dims: [u64::from(embedding), u64::from(vocab)]
+                    .into_iter()
+                    .collect::<ArrayVec<u64, 4>>(),
+                ggml_type: GgmlType::F32,
+                data: leaked,
+            }],
+        },
+        "a header plus token_embd.weight",
+    )
+}
+
 /// A header-only GGUF (no tensors) whose metadata is exactly `metadata`,
 /// written by the real encoder and parsed back by the real decoder -- the
 /// bytes a checkpoint's own header would hand `crate::lowering::kv_layers` and
-/// friends. The buffer is leaked because the parsed view borrows it; a test
-/// fixture, not a hot path.
+/// friends.
 pub(crate) fn parsed_header(metadata: Vec<(&str, MetadataValue)>) -> ParsedGguf {
-    let model = GgufModel {
-        version: 3,
-        metadata: metadata
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value))
-            .collect(),
-        tensors: Vec::new(),
-    };
+    encode_and_parse(
+        GgufModel {
+            version: 3,
+            metadata: metadata
+                .into_iter()
+                .map(|(key, value)| (key.to_string(), value))
+                .collect(),
+            tensors: Vec::new(),
+        },
+        "a tensor-less gguf model",
+    )
+}
+
+/// The buffer is leaked because the parsed view borrows it; a test fixture, not
+/// a hot path.
+fn encode_and_parse(model: GgufModel<'_>, what: &str) -> ParsedGguf {
     let bytes = match write_complete(&model) {
         Ok(bytes) => bytes,
-        Err(error) => panic!("a tensor-less gguf model must encode: {error:?}"),
+        Err(error) => panic!("{what} must encode: {error:?}"),
     };
     let leaked: &'static [u8] = Vec::leak(bytes);
     match parse_complete(leaked) {
