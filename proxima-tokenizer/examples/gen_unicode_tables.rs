@@ -14,6 +14,7 @@ const FLAG_NUMBER: u16 = 0x0002;
 const FLAG_LETTER: u16 = 0x0004;
 const FLAG_MARK: u16 = 0x0010;
 const FLAG_PUNCT: u16 = 0x0020;
+const FLAG_SYMBOL: u16 = 0x0040;
 const RANGES_HEADER: &str = "unicode_ranges_flags";
 const WHITESPACE_HEADER: &str = "unicode_set_whitespace";
 
@@ -47,6 +48,7 @@ fn class_bits(flags: u16) -> u8 {
         (FLAG_LETTER, 2),
         (FLAG_MARK, 4),
         (FLAG_PUNCT, 8),
+        (FLAG_SYMBOL, 16),
     ] {
         if flags & flag != 0 {
             bits |= bit;
@@ -102,13 +104,14 @@ fn render(
     )?;
     writeln!(
         out,
-        "//! `\\p{{N}}` / `\\p{{L}}` / `\\p{{M}}` / `\\p{{P}}` / `\\s` tables llama.cpp's"
+        "//! `\\p{{N}}` / `\\p{{L}}` / `\\p{{M}}` / `\\p{{P}}` / `\\p{{S}}` / `\\s` tables llama.cpp's"
     )?;
     writeln!(out, "//! pre-tokenizers read.\n")?;
     writeln!(out, "pub(super) const NUMBER: u8 = 1;")?;
     writeln!(out, "pub(super) const LETTER: u8 = 2;")?;
     writeln!(out, "pub(super) const MARK: u8 = 4;")?;
-    writeln!(out, "pub(super) const PUNCT: u8 = 8;\n")?;
+    writeln!(out, "pub(super) const PUNCT: u8 = 8;")?;
+    writeln!(out, "pub(super) const SYMBOL: u8 = 16;\n")?;
     writeln!(
         out,
         "pub(super) static CLASS_RANGES: [(u32, u8); {}] = [",

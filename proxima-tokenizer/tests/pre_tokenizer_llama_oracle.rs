@@ -267,3 +267,20 @@ fn digit_isolated_gpt2_splits_non_ascii_digit_runs_like_llama_refact() {
     let vocab = load_vocab(&host_local_vector_vocab("refact"));
     assert_non_ascii_digit_runs_match_llama(&vocab, &non_ascii_digit_cases!("refact"));
 }
+
+/// `LLAMA_VOCAB_PRE_TYPE_FLINT` (`tokenizer.ggml.pre = "flint"`, oracle
+/// llama.cpp b12110/cd959bae9 -- the pre type does not exist at f1ea20621):
+/// digit runs of three, CJK runs, then letter-or-mark words that keep their
+/// possessive suffix attached. The contractions and the mark-bearing cases are
+/// where this rule and the llama3 one part company, which is why the shared
+/// text set has both.
+#[test]
+fn flint_keeps_possessives_and_marks_on_the_word_like_llama() {
+    let path = proxima_gguf::checkpoint_resolver::require_checkpoint(
+        "PROXIMA_FLINT_GGUF",
+        "/Users/brianbruggeman/models/llm/flint-gguf/flint-UD-Q4_K_XL.gguf",
+        25_054_688_704,
+    );
+    let vocab = load_vocab(&path);
+    assert_family_matches_llama(&vocab, PreType::Flint, &family_cases!("flint"));
+}

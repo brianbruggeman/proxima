@@ -1,8 +1,9 @@
 //! The GPT-2-family pretokenizers: split raw text into pretoken spans
 //! *before* byte-level BPE runs on each one independently. The rule is
 //! chosen by [`PreType`], which a GGUF carries as `tokenizer.ggml.pre`;
-//! each variant mirrors one `LLAMA_VOCAB_PRE_TYPE_*` of llama.cpp f1ea20621
-//! (`src/llama-vocab.cpp` regexes, `src/unicode.cpp` matchers):
+//! each variant mirrors one `LLAMA_VOCAB_PRE_TYPE_*` (`src/llama-vocab.cpp`
+//! regexes, `src/unicode.cpp` matchers) of llama.cpp f1ea20621, except
+//! [`PreType::Flint`], which first appears at cd959bae9:
 //!
 //! ```text
 //! grouped-digits  (?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])
@@ -22,9 +23,10 @@
 use alloc::vec::Vec;
 
 use crate::pretokenize_passes::{
-    DEFAULT_PASSES, DIGIT_ISOLATED_GPT2_PASSES, FALCON_PASSES, GPT2_PASSES, Pass, run_passes,
+    DEFAULT_PASSES, DIGIT_ISOLATED_GPT2_PASSES, FALCON_PASSES, FLINT_PASSES, GPT2_PASSES, Pass,
+    run_passes,
 };
-use crate::unicode_tables::{CLASS_RANGES, LETTER, MARK, NUMBER, PUNCT, WHITESPACE};
+use crate::unicode_tables::{CLASS_RANGES, LETTER, MARK, NUMBER, PUNCT, SYMBOL, WHITESPACE};
 
 /// Which pre-split rule a vocab's `tokenizer.ggml.pre` selects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,6 +54,13 @@ pub enum PreType {
     /// `LLAMA_VOCAB_PRE_TYPE_FALCON`: punctuation runs including the backtick,
     /// the gpt2 word regex, then ASCII digit triples.
     Falcon,
+    /// `LLAMA_VOCAB_PRE_TYPE_FLINT` (`llama-vocab.cpp:285-290`, cd959bae9):
+    /// digit runs of up to three, CJK runs, then a word alternation of
+    /// letter-or-mark runs that keep their possessive attached. The two word
+    /// branches spell `\p{Lu}`/`\p{Ll}` separately, but
+    /// `unicode_regex_split` (`unicode.cpp:1491-1512`) collapses every letter
+    /// category onto one byte before matching, so they reduce to one class.
+    Flint,
 }
 
 impl PreType {
@@ -61,6 +70,7 @@ impl PreType {
             Self::Gpt2 => Some(&GPT2_PASSES),
             Self::DigitIsolatedGpt2 => Some(&DIGIT_ISOLATED_GPT2_PASSES),
             Self::Falcon => Some(&FALCON_PASSES),
+            Self::Flint => Some(&FLINT_PASSES),
             Self::GroupedDigits | Self::SingleDigit | Self::SingleDigitMarks => None,
         }
     }
@@ -98,7 +108,7 @@ pub(crate) fn is_digit(character: char) -> bool {
     class_bits(character) & NUMBER != 0
 }
 
-fn is_mark(character: char) -> bool {
+pub(crate) fn is_mark(character: char) -> bool {
     class_bits(character) & MARK != 0
 }
 
@@ -106,11 +116,15 @@ pub(crate) fn is_punctuation(character: char) -> bool {
     class_bits(character) & PUNCT != 0
 }
 
+pub(crate) fn is_symbol(character: char) -> bool {
+    class_bits(character) & SYMBOL != 0
+}
+
 pub(crate) fn is_whitespace(character: char) -> bool {
     WHITESPACE.binary_search(&u32::from(character)).is_ok()
 }
 
-fn contraction_len(chars: &[char]) -> Option<usize> {
+pub(crate) fn contraction_len(chars: &[char]) -> Option<usize> {
     if chars.first().copied() != Some('\'') {
         return None;
     }
@@ -284,7 +298,7 @@ fn match_punct(chars: &[char], pre_type: PreType) -> Option<usize> {
 /// `\s*[\r\n]+`, consuming only through the last newline in the leading
 /// whitespace run (matching PCRE's greedy-then-backtrack behavior for
 /// this pattern).
-fn match_whitespace_with_newline(chars: &[char]) -> Option<usize> {
+pub(crate) fn match_whitespace_with_newline(chars: &[char]) -> Option<usize> {
     let first = *chars.first()?;
     if !is_whitespace(first) {
         return None;
@@ -304,7 +318,7 @@ fn match_whitespace_with_newline(chars: &[char]) -> Option<usize> {
 /// last char (left for the next pretoken to pick up via
 /// [`match_words`]/[`match_punct`]'s optional lead), and always at
 /// least one char.
-fn match_trailing_whitespace(chars: &[char]) -> Option<usize> {
+pub(crate) fn match_trailing_whitespace(chars: &[char]) -> Option<usize> {
     let first = *chars.first()?;
     if !is_whitespace(first) {
         return None;
@@ -423,6 +437,58 @@ mod tests {
             spans_under("a`b1234", PreType::Falcon),
             ["a", "`", "b", "123", "4"]
         );
+    }
+
+    #[test]
+    fn flint_rule_keeps_a_possessive_on_the_word_it_belongs_to() {
+        // llama-vocab.cpp's flint branch spells the possessive as a suffix of
+        // the word rather than a leading alternative, and unicode_regex_split
+        // collapses `\p{Ll}` into the same letter byte the run matches, so the
+        // apostrophe form stays whole (llama3 splits "don't" into "don"+"'t").
+        // One suffix, not a chain: the second possessive starts a new pretoken.
+        assert_eq!(
+            spans_under("don't've we'll", PreType::Flint),
+            ["don't", "'ve", " we'll"]
+        );
+        assert_eq!(spans("don't"), ["don", "'t"]);
+    }
+
+    #[test]
+    fn flint_rule_cuts_digit_runs_into_threes_before_the_word_rule_runs() {
+        assert_eq!(
+            spans_under("v2024 42", PreType::Flint),
+            ["v", "202", "4", " ", "42"]
+        );
+    }
+
+    #[test]
+    fn flint_rule_keeps_cjk_and_mark_runs_whole() {
+        // one alternation class, so han, hiragana and katakana share a run
+        assert_eq!(
+            spans_under("\u{6211}\u{60f3}\u{3042}\u{30a2}x", PreType::Flint),
+            ["\u{6211}\u{60f3}\u{3042}\u{30a2}", "x"]
+        );
+        assert_eq!(
+            spans_under("cafe\u{301} au", PreType::Flint),
+            ["cafe\u{301}", " au"]
+        );
+    }
+
+    #[test]
+    fn flint_rule_takes_symbols_into_the_punctuation_run() {
+        // `[\p{P}\p{S}]`, not `\p{P}` alone: an emoji and a currency sign join
+        // the run, which the category-P-only class the default pre-split uses
+        // would leave unmatched.
+        assert_eq!(
+            spans_under("(\u{20ac}10\u{1f680})", PreType::Flint),
+            ["(\u{20ac}", "10", "\u{1f680})"]
+        );
+    }
+
+    #[test]
+    fn flint_rule_covers_the_input_contiguously() {
+        let text = "  Hello, y'all! \u{1f601} \u{6211}\u{60f3} 1234567 caf\u{e9}\u{301}\u{200b}\n";
+        assert_eq!(spans_under(text, PreType::Flint).concat(), text);
     }
 
     #[test]

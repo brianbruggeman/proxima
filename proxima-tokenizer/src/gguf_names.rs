@@ -21,8 +21,9 @@ pub(crate) const MODEL_BYTE_LEVEL_BPE: &str = "gpt2";
 
 impl PreType {
     /// Maps a `tokenizer.ggml.pre` value exactly as llama.cpp's
-    /// `llama_vocab::impl::load` does (`llama-vocab.cpp:2168-2425`), for the
-    /// pre types whose rule this scanner expresses. `None` for every other
+    /// `llama_vocab::impl::load` does (`llama-vocab.cpp:2168-2425` at f1ea20621;
+    /// `"flint"` is that file's `:2472-2474` at cd959bae9), for the pre types
+    /// whose rule this scanner expresses. `None` for every other
     /// value, including ones llama.cpp itself accepts. Names whose branch also
     /// sets an encode-affecting flag this crate does not model (`add_sep` on
     /// jina-v1-en, jina-v2-code and roberta-bpe) are not mapped.
@@ -42,6 +43,7 @@ impl PreType {
             "starcoder" | "refact" | "command-r" | "smollm" | "codeshell" | "exaone"
             | "minerva-7b" | "mellum2" => Some(Self::DigitIsolatedGpt2),
             "falcon" => Some(Self::Falcon),
+            "flint" => Some(Self::Flint),
             _ => None,
         }
     }

@@ -6,6 +6,9 @@ CPU-only, Release: `cmake -S . -B <build> -DGGML_METAL=OFF -DGGML_BLAS=OFF -DLLA
 then `cmake --build <build> --target llama-tokenize`). `tools/tokenize/tokenize.cpp:146` loads with
 `vocab_only = true`, so no weights are read.
 
+The `flint` family is the exception: its pre type first appears at b12110/cd959bae9, so those ids come from
+that build (`llama-b12110-bin-macos-arm64`, the release asset for the commit), captured with the same command.
+
 Command per fixture, no BOS (the Rust tests call `encode`, which adds none):
 
     llama-tokenize -m <gguf> --ids --log-disable --no-escape --no-bos -f texts/<name>.txt > <family>/<name>.ids
@@ -19,6 +22,7 @@ Command per fixture, no BOS (the Rust tests call `encode`, which adds none):
 | qwen35moe | Ollama blob sha256 f5ee307a2982106a6eb82b62b2c00b575c9072145a759ae4660378acda8dcf2d | `qwen35` | QWEN35 |
 | granite_moe | Ollama blob sha256 cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 (granite3.1-moe:1b) | `refact` | REFACT |
 | deepseek_coder_33b_no_pre | `~/.lmstudio/models/TheBloke/deepseek-coder-33B-instruct-GGUF/deepseek-coder-33b-instruct.Q4_K_S.gguf` (vocab only; the file carries no `tokenizer.ggml.pre`, llama.cpp logs "missing pre-tokenizer type, using: 'default'") | none | DEFAULT (four-pass regex) |
+| flint | `/Users/brianbruggeman/models/llm/flint-gguf/flint-UD-Q4_K_XL.gguf` (sha256 63c2ecc4…, 25 GB; `llama-tokenize` reads its metadata region only) | `flint` | FLINT |
 
 `texts/*.txt` are the exact input bytes, shared by every family: prices, dates and times, phone-like numbers,
 version strings, 1..8 digit runs (2 vs 3 digit boundary), large and decimal numbers, code and CSV with numbers,
