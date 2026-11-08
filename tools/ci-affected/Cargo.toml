@@ -1,0 +1,21 @@
+[package]
+name = "ci-affected"
+description = "Decide which CI areas a change set touches, considering the Cargo dependency graph when the repo is a Cargo workspace"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "ci-affected"
+path = "src/main.rs"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+toml.workspace = true
+
+[lints]
+workspace = true

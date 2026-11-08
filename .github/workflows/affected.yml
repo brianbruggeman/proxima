@@ -4,7 +4,7 @@ name: affected
 # (`uses: ./.github/workflows/affected.yml`) and gate their root jobs on its
 # outputs (`if: needs.changes.outputs.<area> == 'true'`). Forces every area on
 # for release tags, manual dispatch, and first-push/diff-failure (fail safe).
-# Detection logic + the area map live in scripts/ci-affected.py + .github/ci-areas.toml.
+# Detection logic + the area map live in tools/ci-affected + .github/ci-areas.toml.
 
 on:
   workflow_call:
@@ -55,4 +55,4 @@ jobs:
         run: |
           base="${{ github.event.before || github.event.pull_request.base.sha }}"
           head="${{ github.sha }}"
-          python3 scripts/ci-affected.py --base "$base" --head "$head"
+          cargo run --quiet -p ci-affected -- --base "$base" --head "$head"
