@@ -16,6 +16,7 @@ MSL kernel emission from the `proxima-tensor` `BoundOp` descriptor: the emit hal
 - `alloc` (`no_std` + alloc): adds the MSL emitter
 - `std` (default): adds `std::error::Error` and the backend-agnostic plan/execute pair
 - backend and optimisation features (`cpu`, `metal`, `cuda`, `wgpu-backend`, `onnx-door`, `mil-writer`, ...) are listed under `[features]` in `Cargo.toml`; all are additive.
+- `cuda` emits both card-C dialects from the one renderer: CUDA C for NVIDIA and HIP C++ for AMD ROCm, with the dialect and wavefront width selected per emit (`emit_hip_at_wave`: 64-lane CDNA, 32-lane RDNA); `cuda-driver` adds `cuda_driver::rocm`, which resolves `libamdhip64`/`libhiprtc` at run time.
 
 ## License
 

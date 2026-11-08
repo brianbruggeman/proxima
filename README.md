@@ -239,7 +239,7 @@ codec.
 |---|---|
 | `proxima-tensor` | a program is a `Vec<Op>` with three op forms (Input, Elementwise, Reduce) and an affine index-map grammar; shape inference, binding, fusion and partitioning are independent of any model family. |
 | `proxima-autograd` | reverse-mode autodiff as an adjoint transform over a program; Adam is elementwise update nodes, no `Optimizer` trait. |
-| `omega` | kernel emission from the bound tensor descriptor (MSL, WGSL, CUDA) with CPU, Metal, wgpu and CUDA backends behind `plan_named`; `RuntimeConfig` is its [conflaguration surface](docs/configuration.md#omega-tensor-execution). |
+| `omega` | kernel emission from the bound tensor descriptor (MSL, WGSL, CUDA, HIP) with CPU, Metal, wgpu and CUDA backends behind `plan_named` (HIP/ROCm emission and a run-time-resolved HIP boundary sit inside the CUDA lane); `RuntimeConfig` is its [conflaguration surface](docs/configuration.md#omega-tensor-execution). |
 | `proxima-gguf` `proxima-safetensors` | sans-IO format readers: byte-fed state machines over header, metadata, and tensor directory. The caller owns getting bytes in. |
 | `proxima-model-interop` | the GGUF <-> safetensors transform over named tensors, and `LoadedModel` generation and `ServingConfig` serving over `omega`. |
 | `proxima-onnx` | sans-IO ONNX parser over the protobuf wire walker, plus `NodeProto -> Op` lowering onto the closed op algebra. |

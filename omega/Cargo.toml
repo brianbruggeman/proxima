@@ -246,6 +246,12 @@ metal = [
 # `format!`), the same alloc-tier shape `msl.rs` takes, and had no floor of
 # its own before this -- `--no-default-features --features cuda` failed to
 # resolve `alloc::string::String` until this line named the real dependency.
+# Card-C source emission, both vendors: CUDA C for NVIDIA and HIP C++ for AMD
+# ROCm from the one renderer in `cuda.rs`, selected by `cuda::Target` (wavefront
+# width, includes, bfloat spelling, shuffle-mask width). HIP is a
+# source-compatible dialect of CUDA's kernel language, not a second backend, so
+# it carries no second module, feature or crate. `emit_hip_at_wave` names the
+# wavefront width: 64 for CDNA, 32 for RDNA.
 cuda = ["alloc"]
 # Real CUDA driver boundary: NVRTC compiles emitted CUDA C to PTX and cudarc
 # loads/launches it through the CUDA Driver API. The model graph still needs

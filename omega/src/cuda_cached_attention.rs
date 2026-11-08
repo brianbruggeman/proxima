@@ -153,7 +153,7 @@ pub(crate) fn render_attention(
         )
     };
     let mut source = String::new();
-    preamble(&mut source, "float");
+    preamble(crate::cuda::target::Target::CUDA, &mut source, "float");
     source.push_str(helpers);
     let runtime_bounds = cached_attention_runtime_bounds(&resolved.kind);
     let (uniform_fields, bounds_decl) = if runtime_bounds {

@@ -5,6 +5,7 @@
 //! accumulates exactly in int32 and is folded into the f32 accumulator as
 //! `weight_scale * activation_scale * sum`.
 
+use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::String;
 

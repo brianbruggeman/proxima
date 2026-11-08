@@ -65,6 +65,7 @@ pub(crate) enum KernelLanguage {
     Metal,
     Wgsl,
     Cuda,
+    Hip,
 }
 
 /// The axes ONLY [`KernelLanguage::Metal`] varies its compiled kernel on —
@@ -536,6 +537,7 @@ mod gated {
                 KernelLanguage::Metal => "omega",
                 KernelLanguage::Wgsl => "omega_wgsl",
                 KernelLanguage::Cuda => "omega_cuda",
+                KernelLanguage::Hip => "omega_hip",
             }
         }
     }

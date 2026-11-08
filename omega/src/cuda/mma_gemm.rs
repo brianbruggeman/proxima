@@ -12,7 +12,7 @@
 //! `crate::msl::split_token_feature_axes`, not ported from that source.
 
 use alloc::format;
-use alloc::string::String;
+use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_tensor::{
