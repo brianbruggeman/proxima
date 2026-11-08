@@ -790,9 +790,12 @@ pub(super) fn hybrid_dense_forward(
 }
 
 /// Composes [`elementwise`]/[`reduce`] for the two dense matvecs,
-/// [`silu`]/[`sigmoid`] for the two activations -- every op here is one of
-/// proxima's own public `spec` builders (this module's own doc names the
-/// primitives), never a new one.
+/// [`append_activation`]/[`sigmoid`] for the two activations -- every op here is
+/// one of proxima's own public `spec` builders (this module's own doc names the
+/// primitives), never a new one. `activation` is the layer's own, so a gated
+/// checkpoint whose shared expert is not SiLU lowers the same shape as an
+/// ungated one; every caller in tree is SiLU, which reproduces the previous
+/// node-for-node output.
 ///
 /// # Errors
 ///
@@ -807,6 +810,7 @@ pub fn append_sigmoid_gated_shared_expert(
     up_shexp: NodeId,
     down_shexp: NodeId,
     one: NodeId,
+    activation: Activation,
 ) -> Result<NodeId, TensorError> {
     let gate_product = elementwise(
         program,
@@ -823,7 +827,7 @@ pub fn append_sigmoid_gated_shared_expert(
         "sdf->sdf",
         "sf->sdf",
     )?;
-    let gate_silu = silu(program, gate_proj, one, "sf->sf")?;
+    let gate_activated = append_activation(program, gate_proj, one, activation, "sf")?;
 
     let up_product = elementwise(
         program,
@@ -845,7 +849,7 @@ pub fn append_sigmoid_gated_shared_expert(
         program,
         DType::FLOAT32,
         ScalarOp::Multiply,
-        &[(gate_silu, "sf->sf"), (up_proj, "sf->sf")],
+        &[(gate_activated, "sf->sf"), (up_proj, "sf->sf")],
     )?;
 
     let down_product = elementwise(
@@ -980,6 +984,7 @@ fn append_shared_expert_moe_ffn(
             up_shexp,
             down_shexp,
             one,
+            shared_activation,
         )?,
         // no gate tensor in the checkpoint: the shared expert's output is added
         // unscaled (flint), so the gate leaf must never be declared
