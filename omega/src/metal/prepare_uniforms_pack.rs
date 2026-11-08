@@ -1319,8 +1319,8 @@ pub(super) mod pack_uniforms_byte_len_tests {
     #[cfg(feature = "metal-attn-split-decode")]
     use proxima_tensor::Layout;
     use proxima_tensor::{
-        BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce,
-        ReduceInit, ScalarOp, append, bind, infer, map,
+        BoundOp, BoundOpKind, CachedAttentionArithmetic, DType, Extent, IndexMap, Keep, NodeId,
+        NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map,
     };
 
     use super::{pack_uniforms, pack_uniforms_byte_len};
@@ -1358,6 +1358,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
                 scale: 1.0,
                 cached_lower_inclusive: -511,
                 new_upper_inclusive: 0,
+                arithmetic: CachedAttentionArithmetic::OnlineF32,
             },
         };
         let policy = NumericPolicy::llama_relaxed();
@@ -1410,6 +1411,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
                 scale: 1.0,
                 cached_lower_inclusive: -511,
                 new_upper_inclusive: 0,
+                arithmetic: CachedAttentionArithmetic::OnlineF32,
             },
         };
         let policy = NumericPolicy::llama_relaxed();

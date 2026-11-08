@@ -4,7 +4,7 @@
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
 use proxima_primitives::Codec;
 use proxima_tensor::spec::{
-    GdnSequenceTail, append_delta_net_sequence_tail_with_taps, input_leaf, count_constant, scalar_constant,
+    GdnSequenceTail, append_delta_net_sequence_tail_with_taps, count_constant, input_leaf,
 };
 use proxima_tensor::{DType, Extent, NumericPolicy, Op, QuantizedBlock};
 
