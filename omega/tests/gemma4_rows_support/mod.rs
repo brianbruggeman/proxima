@@ -109,6 +109,7 @@ fn attention(
         value_norm: true,
         qk_norm: true,
         attention_sinks: false,
+        rope: true,
     }
 }
 

@@ -73,6 +73,7 @@ fn gemma4_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 }
             } else {
                 LayerAttentionConfig {
@@ -92,6 +93,7 @@ fn gemma4_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 }
             };
             LayerSchedule {

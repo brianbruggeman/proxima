@@ -680,6 +680,7 @@ pub fn gqa_descriptor_from_shape(
         value_norm: profile.value_norm,
         qk_norm,
         attention_sinks: false,
+        rope: true,
     };
 
     let layers: Vec<LayerSchedule> = (0..block_count)
@@ -941,6 +942,18 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
             .iter()
             .any(|layer| layer.kind == LayerKind::Gdn)
     {
+        // the gated/hybrid engines rotate every attention layer from their own
+        // table with no per-layer rope channel, so a rope-off layer is named
+        // instead of built with a rotation nothing asked for; a Gdn layer's own
+        // attention config is held unread, so its flag is not a request
+        refuse_when(
+            descriptor
+                .layers
+                .iter()
+                .any(|layer| layer.kind == LayerKind::Attention && !layer.attention.rope),
+            "build_forward(gated/hybrid)",
+            "a layer with rope off (this engine has no per-layer rope channel)",
+        )?;
         return if descriptor
             .layers
             .iter()
@@ -1088,6 +1101,17 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                     .any(|layer| layer.ffn.combination == FfnCombination::RoutedWithSharedExpert),
                 "build_forward(CacheMask::Bounded)",
                 "a routed-with-shared-expert FFN (this engine lowers the routed branch only)",
+            )?;
+            // same class as the sink refusal above: this engine rotates from one
+            // table for every layer, so a rope-off layer built here would apply a
+            // rotation the checkpoint never asked for
+            refuse_when(
+                descriptor
+                    .layers
+                    .iter()
+                    .any(|layer| !layer.attention.rope),
+                "build_forward(CacheMask::Bounded)",
+                "a layer with rope off (this engine has no per-layer rope channel)",
             )?;
             if descriptor.layers.iter().any(|layer| {
                 LayerAttentionConfig {

@@ -259,6 +259,21 @@ impl RopePairing {
             Self::SplitHalf { pairs } => (alloc::format!("i@{pairs}"), alloc::format!("i+{pairs}")),
         }
     }
+
+    /// [`Self::offsets`] with the pair count on BOTH halves. The rotating path
+    /// gets `i`'s extent from the cos/sin operand; a rope-off layer has no such
+    /// operand, and only a `coeff == 1`, `offset == 0` single term defines an
+    /// extent from the source's own shape, so `2*i` (and `i + pairs`) would be
+    /// an unconstrained dimension without the explicit `@`.
+    pub(super) fn offsets_sized(self, pairs: u32) -> (alloc::string::String, alloc::string::String) {
+        match self {
+            Self::Interleaved => (
+                alloc::format!("2*i@{pairs}"),
+                alloc::format!("2*i+1@{pairs}"),
+            ),
+            Self::SplitHalf { .. } => (alloc::format!("i@{pairs}"), alloc::format!("i+{pairs}@{pairs}")),
+        }
+    }
 }
 
 /// Builds RoPE for one tensor (`source`, e.g. `q`/`k`/`k_new`, addressed
@@ -363,6 +378,45 @@ pub fn fused_rope_pair(
     )?;
 
     Ok((rotated_same, rotated_partner))
+}
+
+/// [`fused_rope_pair`]'s own two output halves with NO rotation: llama.cpp's
+/// `has_rope(il) == false` (`llama.hparams.rope_pattern`, GGUF
+/// `<arch>.attention.rope_pattern`) means the layer applies no `ggml_rope_ext`
+/// to `Q`/`K` at all, so its positional information is a plain pass-through.
+///
+/// The shapes and offsets are [`fused_rope_pair`]'s own (the score still splits
+/// the head axis into two pairs), the body is [`ScalarOp::Identity`] instead of
+/// the cos/sin terms, and no trig leaf is read -- so a rope-off layer declares
+/// no `rope_cos`/`rope_sin` input at all, which is what makes the absence
+/// visible in the bound leaf set rather than a table of ones.
+pub fn unrotated_head_pair(
+    program: &mut Vec<Op>,
+    source: NodeId,
+    head_letter: char,
+    pairing: RopePairing,
+    pairs: u32,
+) -> Result<(NodeId, NodeId), TensorError> {
+    let out_axes = alloc::format!("s{head_letter}i");
+    let (same_offset, partner_offset) = pairing.offsets_sized(pairs);
+
+    let same_pattern = alloc::format!("s,{head_letter},{same_offset}->{out_axes}");
+    let partner_pattern = alloc::format!("s,{head_letter},{partner_offset}->{out_axes}");
+
+    let same = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Identity,
+        &[(source, same_pattern.as_str())],
+    )?;
+    let partner = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Identity,
+        &[(source, partner_pattern.as_str())],
+    )?;
+
+    Ok((same, partner))
 }
 
 /// `[?0]`-shaped bound leaf. `eps` is the only caller left: RMSNorm's
