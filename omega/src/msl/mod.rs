@@ -126,6 +126,10 @@ mod selection_render;
 mod elementwise_reduce_core;
 #[macro_use]
 mod packed_row_blocked_ggml;
+#[cfg(feature = "metal-algebra-monomorph")]
+mod packed_layout;
+#[cfg(feature = "metal-q4_0-grouped")]
+mod q4_0_planes;
 #[macro_use]
 mod tiled_gemm_cooperative_scan;
 mod expert_grouped_gemm;

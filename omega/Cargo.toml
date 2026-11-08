@@ -387,6 +387,19 @@ metal-plan-stable-buffers = ["metal"]
 # does: the eligibility gate and kernel body live in `msl.rs` (alloc-tier),
 # but the dispatch geometry only has meaning for a Metal dispatch.
 metal-q4k-split-k = ["metal"]
+# the grouped Q4_0 weight layout: 288-byte groups of 16 blocks laid out as
+# `[16 x 16 nibble bytes][16 x 2 scale bytes]`, so a matvec lane reads one
+# aligned 8-byte vector plus one 2-byte scale instead of five loads out of the
+# middle of ggml's interleaved 18-byte blocks (`msl::q4_0_planes`).
+#
+# NOT part of `metal`, for the same reason `metal-q4k-split-k` is not: the
+# layout is only readable when the WEIGHTS were repacked at bind time, and that
+# bind-side permutation is not wired yet. Enabling this feature alone emits a
+# kernel that reads the grouped layout against interleaved bytes. The
+# permutation itself is implemented and value-preserving (its tests pass under
+# this feature, against `proxima_gguf`'s own dequantizer), so the remaining work
+# is the bind-side buffer, not the layout.
+metal-q4_0-grouped = ["metal"]
 # `nsg=2` threadgroup geometry for the row-blocked packed path (`msl.rs`'s
 # `tiled_gemm_threadgroup_width`), mirroring ggml's `N_SG_Q4_K`
 # (`ggml-metal-impl.h:33`): 2 simdgroups cooperate per threadgroup instead of
@@ -484,6 +497,12 @@ metal-q4k-ggml-port = ["metal"]
 # `docs/model-interop/discipline.md` carries the quiet-box decode-step seal
 # that earned the default).
 metal-q4_0-native = ["metal"]
+# S0/S1 of `specs/algebra-monomorphization.md`: the byte-layout table plus the
+# per-layout sub-block fold that the generic packed matvec monomorphizes over.
+# NOT part of `metal` -- nothing wires it into the emitter yet, so enabling it
+# changes no emitted kernel; it exists to be verified against proxima-gguf's own
+# dequantizer before S2 replaces a body.
+metal-algebra-monomorph = ["metal"]
 # REFERENCE ONLY -- deliberately NOT a member of `metal` (owner direction,
 # 2026-11-08): the ported body exists to be an oracle and a timing comparator for
 # our own Q4_0 matvec, never the shipped path. Enable it explicitly to reproduce
