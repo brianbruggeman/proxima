@@ -75,11 +75,11 @@ impl HeaderEntry {
 }
 
 #[derive(Clone)]
-struct TensorRow {
-    name: String,
-    ggml_type: String,
-    size_bytes: u64,
-    dimensions: Vec<u64>,
+pub(crate) struct TensorRow {
+    pub(crate) name: String,
+    pub(crate) ggml_type: String,
+    pub(crate) size_bytes: u64,
+    pub(crate) dimensions: Vec<u64>,
 }
 
 pub(crate) fn fixture_path(name: &str) -> PathBuf {
@@ -138,7 +138,7 @@ pub(crate) fn header_scalar<'a>(entries: &'a [HeaderEntry], key: &str) -> &'a st
 }
 
 /// `tensor   0: name = output.weight, type = q8_0, size_bytes = 326713344, dims = (2048, 150144, 1, 1)`
-fn parse_tensor_rows(text: &str) -> Vec<TensorRow> {
+pub(crate) fn parse_tensor_rows(text: &str) -> Vec<TensorRow> {
     text.lines()
         .filter_map(|line| {
             let rest = line.strip_prefix("tensor")?;

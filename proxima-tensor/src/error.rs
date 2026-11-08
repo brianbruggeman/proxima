@@ -477,6 +477,16 @@ pub enum TensorError {
         found: usize,
     },
 
+    /// `<arch>.expert_gating_func` named a routing function this engine has no
+    /// implementation for (llama.cpp's `llama_expert_gating_func_type` values
+    /// `SOFTMAX_WEIGHT` = 3 and `SQRT_SOFTPLUS` = 4). Serving the family
+    /// profile's default instead would route with different math than the
+    /// checkpoint was trained with.
+    #[error(
+        "expert_gating_func {value} has no routing function in this engine (only softmax = 1 and sigmoid = 2 are implemented)"
+    )]
+    GgufUnsupportedExpertGating { value: u32 },
+
     /// The attention graph carries one head width for K and V, so a checkpoint
     /// whose `attention.value_length` differs from `attention.key_length` cannot
     /// be expressed. Refusing names both widths; silently attending at the key
