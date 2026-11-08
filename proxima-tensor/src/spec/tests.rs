@@ -19573,6 +19573,133 @@ mod ffn_combination_shapes {
         assert_eq!(built.program.len(), PARALLEL_DENSE_MOE_NODES);
         assert_eq!(digest(&built.program), PARALLEL_DENSE_MOE_DIGEST);
     }
+
+    /// `append_dense_swiglu_ffn`'s own body before `append_swiglu_ffn` was
+    /// extracted from it, kept here so the extraction has an artifact and not a
+    /// memory: a digest alone cannot say which graph it pins.
+    fn pre_extraction_dense_swiglu(
+        program: &mut Vec<Op>,
+        layer: u32,
+        normed: NodeId,
+        embedding: u32,
+        feed_forward: u32,
+        ones: NodeId,
+        activation: Activation,
+    ) -> NodeId {
+        let w_gate = input_leaf(
+            program,
+            DType::FLOAT32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+            &alloc::format!("blk.{layer}.ffn_gate.weight"),
+        );
+        let w_up = input_leaf(
+            program,
+            DType::FLOAT32,
+            alloc::vec![Extent::Static(embedding), Extent::Static(feed_forward)],
+            &alloc::format!("blk.{layer}.ffn_up.weight"),
+        );
+        let w_down = input_leaf(
+            program,
+            DType::FLOAT32,
+            alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
+            &alloc::format!("blk.{layer}.ffn_down.weight"),
+        );
+        let gate_product = elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            &[(normed, "sd->sdg"), (w_gate, "dg->sdg")],
+        )
+        .expect("the gate product lowers");
+        let gate = reduce(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            gate_product,
+            "sdg->sdg",
+            "sg->sdg",
+        )
+        .expect("the gate reduce lowers");
+        let up_product = elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            &[(normed, "sd->sdg"), (w_up, "dg->sdg")],
+        )
+        .expect("the up product lowers");
+        let up = reduce(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            up_product,
+            "sdg->sdg",
+            "sg->sdg",
+        )
+        .expect("the up reduce lowers");
+        let activated_gate =
+            append_activation(program, gate, ones, activation, "sg").expect("the gate activates");
+        let ffn_hidden = elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            &[(activated_gate, "sg->sg"), (up, "sg->sg")],
+        )
+        .expect("the hidden product lowers");
+        let down_product = elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
+        )
+        .expect("the down product lowers");
+        reduce(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            down_product,
+            "sgd->sgd",
+            "sd->sgd",
+        )
+        .expect("the down reduce lowers")
+    }
+
+    #[test]
+    fn the_extracted_swiglu_appends_the_pre_extraction_sequence() {
+        let build = |frozen: bool| {
+            let mut program = Vec::new();
+            let normed = input_leaf(
+                &mut program,
+                DType::FLOAT32,
+                alloc::vec![Extent::Symbolic(0), Extent::Static(4)],
+                "normed",
+            );
+            let ones = scalar_constant(&mut program, 1.0);
+            let out = if frozen {
+                pre_extraction_dense_swiglu(&mut program, 3, normed, 4, 6, ones, Activation::Silu)
+            } else {
+                append_dense_swiglu_ffn(
+                    &mut program,
+                    3,
+                    normed,
+                    4,
+                    6,
+                    ones,
+                    Activation::Silu,
+                )
+                .expect("the extracted dense SwiGLU lowers")
+            };
+            (program, out)
+        };
+
+        let (extracted, extracted_root) = build(false);
+        let (frozen, frozen_root) = build(true);
+
+        assert_eq!(extracted, frozen, "the extraction appends the frozen sequence");
+        assert_eq!(extracted_root, frozen_root);
+    }
 }
 
 mod forward_scales {
