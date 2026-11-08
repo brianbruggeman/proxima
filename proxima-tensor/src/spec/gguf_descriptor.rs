@@ -37,6 +37,15 @@ pub fn sliding_pattern_descriptor_from_gguf(
     sliding_kv_ring: bool,
     profile: &FamilyProfile,
 ) -> Result<ModelDescriptor, TensorError> {
+    // three of this reader's facts are per-layer *presence* -- a sink leaf, a
+    // shared expert's gate, and a full layer's own value projection -- so a parse
+    // that carries metadata but no directory cannot describe this schedule.
+    // Refusing beats deriving "absent" for all 49 layers and lowering a program
+    // no checkpoint of this shape could have produced.
+    if parsed.tensors.is_empty() {
+        return Err(missing("tensor directory"));
+    }
+
     let family = metadata_str(parsed, "general.architecture")?;
     let key = |name: &str| format!("{family}.{name}");
 
