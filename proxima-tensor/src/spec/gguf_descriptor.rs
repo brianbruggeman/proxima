@@ -26,7 +26,12 @@ use super::*;
 /// is absent or has an unsupported wire type;
 /// [`TensorError::GgufPerLayerLengthMismatch`] when a per-layer array is not
 /// `block_count` long; [`TensorError::GgufVocabShapeMismatch`] when the
-/// embedding table does not divide by `embedding_length`.
+/// embedding table does not divide by `embedding_length`;
+/// [`TensorError::GgufUnequalValueWidth`] when a layer kind's
+/// `attention.value_length` differs from its `attention.key_length`, which this
+/// engine's single head width cannot express; and
+/// [`TensorError::GgufUnsupportedExpertGating`] when `expert_gating_func` names
+/// a routing function this engine has no implementation for.
 pub fn sliding_pattern_descriptor_from_gguf(
     parsed: &ParsedGguf,
     sliding_kv_ring: bool,
@@ -47,12 +52,28 @@ pub fn sliding_pattern_descriptor_from_gguf(
     let feed_forward_by_layer =
         metadata_u32_per_layer(parsed, &key("feed_forward_length"), block_count)?;
     let expert_count = metadata_u32_optional(parsed, &key("expert_count"));
+    // llama.cpp's `leading_dense_block_count` selects the dense branch per
+    // layer; a dense-only checkpoint keeps the old "every layer dense" default
+    let leading_dense_block_count = metadata_u32_option(parsed, &key("leading_dense_block_count"))
+        .unwrap_or(if expert_count > 0 { 0 } else { block_count });
+    let expert_shared_feed_forward =
+        metadata_u32_optional(parsed, &key("expert_shared_feed_forward_length"));
+    let expert_gating =
+        expert_gating_func(metadata_u32_optional(parsed, &key("expert_gating_func")))?;
+    // sinks are a per-layer tensor, not a header scalar: the leaf's presence is
+    // the schedule
+    let sink_layers: Vec<bool> = (0..block_count)
+        .map(|layer| {
+            let name = format!("blk.{layer}.attn_sinks.weight");
+            parsed.tensors.iter().any(|tensor| tensor.name == name)
+        })
+        .collect();
     let ple_dim = metadata_u32_optional(parsed, &key("embedding_length_per_layer_input"));
     let shared_kv_layers = metadata_u32_optional(parsed, &key("attention.shared_kv_layers"));
     let query_heads = metadata_u32(parsed, &key("attention.head_count"))?;
     // llama.cpp seeds both head widths with `n_embd / n_head` before the keys
     // override them (`llama-model.cpp`, `n_embd_head_k_full` / `_v_full`)
-    let default_head_width = if query_heads == 0 { 0 } else { embedding / query_heads };
+    let default_head_width = embedding.checked_div(query_heads).unwrap_or(0);
     let key_length = match metadata_u32_option(parsed, &key("attention.key_length")) {
         Some(width) => width,
         // llama.cpp's zero-head branch leaves every width at 0, but this engine
@@ -67,8 +88,8 @@ pub fn sliding_pattern_descriptor_from_gguf(
     let key_length_swa =
         metadata_u32_option(parsed, &key("attention.key_length_swa")).unwrap_or(key_length);
     // this engine's attention graph carries a single head width for K and V
-    let value_length = metadata_u32_option(parsed, &key("attention.value_length"))
-        .unwrap_or(default_head_width);
+    let value_length =
+        metadata_u32_option(parsed, &key("attention.value_length")).unwrap_or(default_head_width);
     let value_length_swa =
         metadata_u32_option(parsed, &key("attention.value_length_swa")).unwrap_or(value_length);
     for (kind, key_width, value_width) in [
@@ -97,9 +118,12 @@ pub fn sliding_pattern_descriptor_from_gguf(
         rotary_dim,
     );
 
+    let profile_ffn = profile.layer_ffn(expert_count);
     let ffn = LayerFfnConfig {
         ple: ple_dim > 0,
-        ..profile.layer_ffn(expert_count)
+        // the header's own gating value wins over the profile's when it names one
+        routed_gating: expert_gating.unwrap_or(profile_ffn.routed_gating),
+        ..profile_ffn
     };
     let sliding = LayerAttentionConfig {
         head_dim: key_length_swa,
@@ -149,6 +173,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
             };
             let attention = LayerAttentionConfig {
                 kv_heads,
+                attention_sinks: sink_layers[layer],
                 ..template
             };
             // a shared layer's V is already post-norm, re-norming would double-apply
@@ -195,7 +220,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         expert_used_count: metadata_u32_optional(parsed, &key("expert_used_count")),
         // an exclusive (dense-only) layer takes the dense branch when layer < this, so
         // block_count keeps the unbound routed branch from ever being built
-        leading_dense_block_count: if expert_count > 0 { 0 } else { block_count },
+        leading_dense_block_count,
         l_cache: 0,
         embedding_scale: profile.embedding_scale,
         logit_softcap: (softcap > 0.0).then_some(softcap),
@@ -224,7 +249,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         hadamard_block: 0,
         hadamard_gdn_v_grouped: false,
         hadamard_latent_embedding: false,
-        expert_shared_feed_forward: 0,
+        expert_shared_feed_forward,
         prefill_width: None,
         gated_attention: false,
         recurrence: None,
@@ -279,6 +304,19 @@ fn metadata_u32_optional(parsed: &ParsedGguf, key: &str) -> u32 {
 /// rotary width of zero is a checkpoint asking for no rotation.
 fn metadata_u32_option(parsed: &ParsedGguf, key: &str) -> Option<u32> {
     parsed.metadata_value(key).and_then(MetadataValue::as_u32)
+}
+
+/// The header's own gating value, llama.cpp's `llama_expert_gating_func_type`
+/// (`1` softmax, `2` sigmoid; `0` none, absent). `3` (`SOFTMAX_WEIGHT`) and `4`
+/// (`SQRT_SOFTPLUS`) are real values this engine has no function for, so they
+/// are refused by name rather than served with the profile's default.
+fn expert_gating_func(value: u32) -> Result<Option<ExpertGatingFunc>, TensorError> {
+    match value {
+        0 => Ok(None),
+        1 => Ok(Some(ExpertGatingFunc::Softmax)),
+        2 => Ok(Some(ExpertGatingFunc::Sigmoid)),
+        other => Err(TensorError::GgufUnsupportedExpertGating { value: other }),
+    }
 }
 
 const fn rotary_or_head_dim(rope_dimension_count: Option<u32>, head_dim: u32) -> u32 {

@@ -202,22 +202,42 @@ pub(crate) fn gemma4_e2b_header() -> ParsedGguf {
     ])
 }
 
-/// [`parsed_header`] plus one `token_embd.weight` row, because
-/// `vocab_from_token_embedding` -- and therefore `hparams::from_metadata` and
-/// `sliding_pattern_descriptor_from_gguf` -- size the vocabulary off that
-/// tensor's own directory entry. Only the row's shape is read, so the bytes are
-/// a fixed ramp rather than a real table: the capture's own 150144 x 2048 row
-/// would be a 1.2 GB F32 payload the header tests have no use for.
-pub(crate) fn parsed_header_with_token_embedding(
+/// [`parsed_header`] plus one `token_embd.weight` row (the vocabulary is
+/// sized off that tensor's directory entry) and one 1-D `F32` row per
+/// `(name, length)`, so a header-only fixture can carry the tensor *names* a
+/// reader probes -- a per-layer sink leaf is the one fact a checkpoint states
+/// through its tensor directory rather than a metadata key. The bytes are never
+/// read; only the directory entry is.
+pub(crate) fn parsed_header_with_extra_tensors(
     metadata: Vec<(&str, MetadataValue)>,
     embedding: u32,
     vocab: u32,
+    extra: &[(&str, u64)],
 ) -> ParsedGguf {
+    let mut tensors = Vec::with_capacity(extra.len() + 1);
     let elements = u64::from(embedding) * u64::from(vocab);
-    let bytes: Vec<u8> = (0..elements * 4)
+    let table: Vec<u8> = (0..elements * 4)
         .map(|offset| (offset % 251) as u8)
         .collect();
-    let leaked: &'static [u8] = Vec::leak(bytes);
+    let leaked: &'static [u8] = Vec::leak(table);
+    tensors.push(TensorPayload {
+        name: String::from("token_embd.weight"),
+        dims: [u64::from(embedding), u64::from(vocab)]
+            .into_iter()
+            .collect::<ArrayVec<u64, 4>>(),
+        ggml_type: GgmlType::F32,
+        data: leaked,
+    });
+    for &(name, length) in extra {
+        let row: Vec<u8> = (0..length * 4).map(|offset| (offset % 251) as u8).collect();
+        let row: &'static [u8] = Vec::leak(row);
+        tensors.push(TensorPayload {
+            name: name.to_string(),
+            dims: [length].into_iter().collect::<ArrayVec<u64, 4>>(),
+            ggml_type: GgmlType::F32,
+            data: row,
+        });
+    }
     encode_and_parse(
         GgufModel {
             version: 3,
@@ -225,16 +245,9 @@ pub(crate) fn parsed_header_with_token_embedding(
                 .into_iter()
                 .map(|(key, value)| (key.to_string(), value))
                 .collect(),
-            tensors: vec![TensorPayload {
-                name: String::from("token_embd.weight"),
-                dims: [u64::from(embedding), u64::from(vocab)]
-                    .into_iter()
-                    .collect::<ArrayVec<u64, 4>>(),
-                ggml_type: GgmlType::F32,
-                data: leaked,
-            }],
+            tensors,
         },
-        "a header plus token_embd.weight",
+        "a header plus its probed tensor rows",
     )
 }
 

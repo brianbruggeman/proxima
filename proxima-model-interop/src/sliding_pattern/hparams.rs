@@ -77,6 +77,14 @@ pub struct SlidingPatternHparams {
     /// check is what gates both the tensor names and the schedule's
     /// `LayerFfnConfig::ple` flag on it.
     pub ple_dim: u32,
+    /// `{family}.expert_shared_count` -- the header's shared-expert count (`2`
+    /// on the flint capture). `0` when the key is absent. The capture's
+    /// `ffn_*_shexp` rows are one `(2048, 1024)` triple per routed layer with no
+    /// expert axis, i.e. a single 1024-wide shared FFN, so this count is a
+    /// header fact rather than a width multiplier here; nothing consumes it yet
+    /// (the bind takes the descriptor, not this struct) and whether it becomes
+    /// one is the shared-expert lowering's decision.
+    pub expert_shared_count: u32,
 }
 
 pub fn from_metadata(parsed: &ParsedGguf) -> Result<SlidingPatternHparams, InteropError> {
@@ -136,6 +144,7 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<SlidingPatternHparams, Inter
         expert_feed_forward: metadata_u32_optional(parsed, &prefix("expert_feed_forward_length")),
         expert_count: metadata_u32_optional(parsed, &prefix("expert_count")),
         expert_used_count: metadata_u32_optional(parsed, &prefix("expert_used_count")),
+        expert_shared_count: metadata_u32_optional(parsed, &prefix("expert_shared_count")),
         head_count,
         kv_heads_by_layer,
         rms_epsilon: metadata_f32_optional(
@@ -249,9 +258,9 @@ mod tests {
         HeaderEntry, header_scalar, parse_header, parse_layer_patterns, read_fixture,
     };
     use crate::profiles::family_profile;
-    use crate::test_support::{
-        gemma4_e2b_header as e2b_header, parsed_header_with_token_embedding,
-    };
+    use proxima_tensor::spec::ExpertGatingFunc;
+
+    use crate::test_support::{gemma4_e2b_header as e2b_header, parsed_header_with_extra_tensors};
 
     use super::{SlidingPatternHparams, from_metadata, kv_layers_from_metadata};
 
@@ -426,8 +435,83 @@ mod tests {
     }
 
     fn flint_parsed(metadata: Vec<(&'static str, MetadataValue)>) -> ParsedGguf {
+        flint_parsed_with(metadata, &[])
+    }
+
+    /// The capture's own 779-tensor directory is what states sink presence, so
+    /// a fixture that probes it has to carry the leaves: every block on the
+    /// real checkpoint has `blk.{layer}.attn_sinks.weight` of dims `(32,)`.
+    fn flint_parsed_with(
+        metadata: Vec<(&'static str, MetadataValue)>,
+        extra: &[(&str, u64)],
+    ) -> ParsedGguf {
         let embedding = captured_u32(&flint_capture(), "flint.embedding_length");
-        parsed_header_with_token_embedding(metadata, embedding, FLINT_VOCAB)
+        parsed_header_with_extra_tensors(metadata, embedding, FLINT_VOCAB, extra)
+    }
+
+    /// The capture's own sink rows, so a name or pattern disagreement between
+    /// the reader and the real checkpoint is visible.
+    fn flint_sink_tensors() -> Vec<(String, u64)> {
+        let text = read_fixture("tensor_dir.txt");
+        crate::oracle_fixtures::parse_tensor_rows(&text)
+            .into_iter()
+            .filter(|row| row.name.ends_with(".attn_sinks.weight"))
+            .map(|row| {
+                let width = *row
+                    .dimensions
+                    .first()
+                    .unwrap_or_else(|| panic!("{} has no dimensions", row.name));
+                (row.name, width)
+            })
+            .collect()
+    }
+
+    fn flint_sink_refs(sinks: &[(String, u64)]) -> Vec<(&str, u64)> {
+        sinks
+            .iter()
+            .map(|(name, dim)| (name.as_str(), *dim))
+            .collect()
+    }
+
+    /// Every fact R3 names, read back off the descriptor and the header carrier,
+    /// as one predicate so the control proves the same comparison rejects a
+    /// mutated header.
+    fn flint_dense_shared_problem(
+        hparams: &SlidingPatternHparams,
+        descriptor: &ModelDescriptor,
+    ) -> Option<String> {
+        if hparams.expert_shared_count != 2 {
+            return Some(format!(
+                "expert_shared_count = {}, expected 2",
+                hparams.expert_shared_count
+            ));
+        }
+        if descriptor.leading_dense_block_count != 2 {
+            return Some(format!(
+                "leading_dense_block_count = {}, expected 2",
+                descriptor.leading_dense_block_count
+            ));
+        }
+        if descriptor.expert_shared_feed_forward != 1_024 {
+            return Some(format!(
+                "expert_shared_feed_forward = {}, expected 1024",
+                descriptor.expert_shared_feed_forward
+            ));
+        }
+        for (index, layer) in descriptor.layers.iter().enumerate() {
+            if layer.ffn.routed_gating != ExpertGatingFunc::Sigmoid {
+                return Some(format!(
+                    "layer {index} routed_gating {:?}, expected sigmoid from expert_gating_func = 2",
+                    layer.ffn.routed_gating
+                ));
+            }
+            if !layer.attention.attention_sinks {
+                return Some(format!(
+                    "layer {index} declares no sink leaf, expected blk.{index}.attn_sinks.weight"
+                ));
+            }
+        }
+        None
     }
 
     /// The header reader under test is generic; the profile only supplies the
@@ -442,8 +526,18 @@ mod tests {
     fn flint_descriptor_result(
         parsed: &ParsedGguf,
     ) -> Result<ModelDescriptor, proxima_tensor::error::TensorError> {
-        let profile = family_profile("gemma4")
-            .expect("gemma4 supplies the seating knobs this header does not carry");
+        flint_descriptor_with_profile(parsed, "gemma4")
+    }
+
+    /// The reader is generic and takes any profile; naming the family lets a
+    /// test pick a profile whose own routing function differs from the header's,
+    /// which is what makes the value table's arms distinguishable.
+    fn flint_descriptor_with_profile(
+        parsed: &ParsedGguf,
+        family: &str,
+    ) -> Result<ModelDescriptor, proxima_tensor::error::TensorError> {
+        let profile = family_profile(family)
+            .unwrap_or_else(|_| panic!("{family} supplies the seating knobs this header lacks"));
         sliding_pattern_descriptor_from_gguf(parsed, false, &profile)
     }
 
@@ -699,6 +793,199 @@ mod tests {
                 }
             ),
             "the sliding pair is refused on the same rule, got {error:?}"
+        );
+    }
+
+    /// R3: the four header facts flint states as data, read back through the
+    /// descriptor and the header carrier, with every absent key keeping the
+    /// pre-change default.
+    #[test]
+    fn flint_reader_leading_dense_and_shared_() {
+        let sinks = flint_sink_tensors();
+        let parsed = flint_parsed_with(flint_metadata(), &flint_sink_refs(&sinks));
+        let hparams = from_metadata(&parsed)
+            .expect("the flint capture carries every key from_metadata reads");
+        let descriptor = flint_descriptor(&parsed);
+
+        if let Some(problem) = flint_dense_shared_problem(&hparams, &descriptor) {
+            panic!("{problem}");
+        }
+
+        // one row only: the leaf is resolved per layer, not "any sink row sets
+        // every layer"
+        let partial: Vec<(String, u64)> = sinks.iter().take(1).cloned().collect();
+        let parsed = flint_parsed_with(flint_metadata(), &flint_sink_refs(&partial));
+        let descriptor = flint_descriptor(&parsed);
+        assert!(
+            descriptor.layers[0].attention.attention_sinks,
+            "blk.0's own row declares layer 0's leaf"
+        );
+        assert!(
+            descriptor.layers[1..]
+                .iter()
+                .all(|layer| !layer.attention.attention_sinks),
+            "a layer with no row declares no leaf"
+        );
+
+        // the value table's other arms, under a profile whose own routing
+        // function is sigmoid so the header's value is the only difference
+        let refs = flint_sink_refs(&sinks);
+        let mut absent = flint_metadata();
+        absent.retain(|(key, _)| *key != "flint.expert_gating_func");
+        for (label, value, expected) in [
+            ("absent", None, ExpertGatingFunc::Sigmoid),
+            ("zero", Some(0), ExpertGatingFunc::Sigmoid),
+            ("softmax", Some(1), ExpertGatingFunc::Softmax),
+            ("sigmoid", Some(2), ExpertGatingFunc::Sigmoid),
+        ] {
+            let mut metadata = absent.clone();
+            if let Some(value) = value {
+                metadata.push(("flint.expert_gating_func", MetadataValue::U32(value)));
+            }
+            let parsed = flint_parsed_with(metadata, &refs);
+            let descriptor = flint_descriptor_with_profile(&parsed, "lfm2moe")
+                .expect("a supported gating value builds");
+            for layer in &descriptor.layers {
+                assert_eq!(
+                    layer.ffn.routed_gating, expected,
+                    "expert_gating_func {label}: the header value decides the routing function"
+                );
+            }
+        }
+
+        let mut bare = flint_metadata();
+        bare.retain(|(key, _)| {
+            !matches!(
+                *key,
+                "flint.leading_dense_block_count"
+                    | "flint.expert_shared_feed_forward_length"
+                    | "flint.expert_gating_func"
+                    | "flint.expert_shared_count"
+            )
+        });
+        let parsed = flint_parsed_with(bare, &[]);
+        let hparams = from_metadata(&parsed).expect("the four keys are optional");
+        let descriptor = flint_descriptor(&parsed);
+
+        assert_eq!(
+            hparams.expert_shared_count, 0,
+            "an absent shared-expert count is 0, not a guess"
+        );
+        assert_eq!(
+            descriptor.leading_dense_block_count, 0,
+            "a mixture-of-experts checkpoint with no leading dense count keeps the \
+             pre-change default of no dense layers"
+        );
+        assert_eq!(
+            descriptor.expert_shared_feed_forward, 0,
+            "an absent shared-expert width is 0, not the dense width"
+        );
+
+        let profile_gating = family_profile("gemma4")
+            .expect("gemma4 is embedded")
+            .ffn
+            .routed_gating;
+        for (index, layer) in descriptor.layers.iter().enumerate() {
+            assert_eq!(
+                layer.ffn.routed_gating, profile_gating,
+                "layer {index}: an absent gating value keeps the profile's own function"
+            );
+            assert!(
+                !layer.attention.attention_sinks,
+                "layer {index}: no sink tensor row, no sink leaf"
+            );
+        }
+
+        // the other arm of the fallback: a dense checkpoint has no leading
+        // routed layers, which is spelled block_count
+        let mut dense = flint_metadata();
+        dense.retain(|(key, _)| {
+            !matches!(
+                *key,
+                "flint.expert_count" | "flint.leading_dense_block_count"
+            )
+        });
+        let parsed = flint_parsed_with(dense, &[]);
+        let dense_descriptor = flint_descriptor(&parsed);
+        assert_eq!(
+            dense_descriptor.leading_dense_block_count, 49,
+            "a checkpoint with no experts is dense on every layer"
+        );
+    }
+
+    /// AC24 control: the same comparison must reject a mutated capture, or the
+    /// header it trusts proves nothing.
+    #[test]
+    fn control_flint_reader_leading_dense_() {
+        let sinks = flint_sink_tensors();
+        let refs = flint_sink_refs(&sinks);
+        let parsed = flint_parsed_with(flint_metadata(), &refs);
+        let hparams = from_metadata(&parsed).expect("the capture reads");
+        let descriptor = flint_descriptor(&parsed);
+        assert_eq!(
+            flint_dense_shared_problem(&hparams, &descriptor),
+            None,
+            "the captured header passes its own comparison"
+        );
+
+        for (key, value, names) in [
+            ("flint.expert_shared_count", 3_u32, "expert_shared_count"),
+            (
+                "flint.leading_dense_block_count",
+                1,
+                "leading_dense_block_count",
+            ),
+            (
+                "flint.expert_shared_feed_forward_length",
+                512,
+                "expert_shared_feed_forward",
+            ),
+            ("flint.expert_gating_func", 1, "routed_gating"),
+        ] {
+            let mut mutated = flint_metadata();
+            for entry in &mut mutated {
+                if entry.0 == key {
+                    entry.1 = MetadataValue::U32(value);
+                }
+            }
+            let parsed = flint_parsed_with(mutated, &refs);
+            let hparams = from_metadata(&parsed).expect("a mutated value still reads");
+            let descriptor = flint_descriptor(&parsed);
+            let problem = flint_dense_shared_problem(&hparams, &descriptor)
+                .unwrap_or_else(|| panic!("{key} = {value} must fail the comparison"));
+            assert!(
+                problem.contains(names),
+                "the failure names {names}, got: {problem}"
+            );
+        }
+
+        // llama.cpp defines 3 (SOFTMAX_WEIGHT) and 4 (SQRT_SOFTPLUS); this
+        // engine has no such function, so naming one is refused rather than
+        // served with the profile's default
+        let mut unsupported = flint_metadata();
+        for entry in &mut unsupported {
+            if entry.0 == "flint.expert_gating_func" {
+                entry.1 = MetadataValue::U32(3);
+            }
+        }
+        let parsed = flint_parsed_with(unsupported, &refs);
+        let error = flint_descriptor_error(&parsed);
+        assert!(
+            matches!(
+                error,
+                proxima_tensor::error::TensorError::GgufUnsupportedExpertGating { value: 3 }
+            ),
+            "an unimplemented gating function must be refused by name, got {error:?}"
+        );
+
+        let parsed = flint_parsed_with(flint_metadata(), &[]);
+        let hparams = from_metadata(&parsed).expect("the capture reads without tensor rows");
+        let descriptor = flint_descriptor(&parsed);
+        let problem = flint_dense_shared_problem(&hparams, &descriptor)
+            .expect("dropping the sink rows must fail the comparison");
+        assert!(
+            problem.contains("declares no sink leaf"),
+            "the failure names the missing sink leaf, got: {problem}"
         );
     }
 
