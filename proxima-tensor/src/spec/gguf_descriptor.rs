@@ -199,6 +199,10 @@ pub fn sliding_pattern_descriptor_from_gguf(
             } else {
                 full.clone()
             };
+            // a sliding layer always reads its own projection: the incumbent's
+            // loader requires that row too, so a missing one is a checkpoint
+            // error that fails loudly at bind. A full layer may legitimately
+            // carry none, and only the directory can say which it is.
             let attention = LayerAttentionConfig {
                 kv_heads,
                 attention_sinks: sink_layers[layer],

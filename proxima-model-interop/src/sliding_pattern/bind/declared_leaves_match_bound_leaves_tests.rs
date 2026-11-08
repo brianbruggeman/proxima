@@ -103,9 +103,12 @@ fn e2b_shaped(shared_kv_layers: u32) -> (ParsedGguf, SlidingPatternHparams) {
     (parsed, architecture)
 }
 
-/// The leaf names of `suffix` a checkpoint with this header stores a
-/// tensor for: own-KV layers carry K and its norm, and V where the
-/// sliding pattern or a shared-KV header says so.
+/// The leaf names of `suffix` this fixture's checkpoint stores: own-KV layers
+/// carry K and its norm, and V where the sliding pattern or a shared-KV header
+/// says so. This writes the directory; it is not a restatement of the reader,
+/// which reads presence -- the assertions compare the lowered program against
+/// these rows, so a reader that desugared its own rule instead of reading the
+/// file would fail here.
 fn stored_leaf_names(
     architecture: &SlidingPatternHparams,
     suffix: &str,
