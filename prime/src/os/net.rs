@@ -1794,7 +1794,9 @@ fn register_socket(
     socket: &Socket,
     interest: Interest,
 ) -> io::Result<SourceKey> {
-    reactor.register(socket.as_raw_fd(), interest)
+    // SAFETY: the socket is borrowed by this call and the reactor stores only its raw fd, so the
+    // descriptor cannot close while the source is registered.
+    unsafe { reactor.register(socket.as_raw_fd(), interest) }
 }
 
 #[cfg(windows)]
