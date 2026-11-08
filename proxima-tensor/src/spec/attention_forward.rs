@@ -455,8 +455,9 @@ const fn default_shared_expert_gate() -> bool {
 /// [`ModelDescriptor::expert_shared_feed_forward`] as a parameter type, so a
 /// call site cannot hand one of the neighbouring `u32` slots (`head_repeats`,
 /// `block_count`, `expert_used_count`) a shared width or the reverse: those are
-/// all plain `u32` and an adjacent swap compiles. Every builder takes this
-/// wrapper; `.0` is the width.
+/// all plain `u32` and an adjacent swap compiles. Every scheduled builder takes
+/// this wrapper (`.0` is the width); the recurrent-hybrid engine reads
+/// [`ModelDescriptor::expert_shared_feed_forward`] itself.
 ///
 /// Example: flint's header states `expert_shared_feed_forward_length = 1024`
 /// while its shared tensors are `(2048, 1024)` and `(1024, 2048)`.
