@@ -55,3 +55,9 @@ Run tooling cards 00a, 00a1, 00a2, and 00b–00l, followed by frontend slices 01
 | 13d | [copyable authoring journey example](cards/13d-authoring-journey.md) | AC13d.1–AC13d.3 | `/private/tmp/proxima-python-card-13d` | `python3 proxima-tensor/specs/python-frontend/scripts/capture_validation.py --root /private/tmp/proxima-python-frontend/evidence/card-13d/session -- uv run --project python -m pytest python/tests/test_authoring_journey.py -q -s` | `examples=1 graph_matches=1 payload_matches=1 whole_program_calls=1 per_operation_calls=0 literal_matches=1 rust_incumbent_matches=1 same_comparator_incumbent_passes=1 comparator=exact_bytes` | [ ] | one concern; one <=30-minute slice; close after captured post-push stage reader; Card 00l/AC10 verifies full landing proof |
 
 Plan revision closure precedes Card 00a and is not card evidence. After that revision is committed, fetch origin/main, create Card 00a's dedicated worktree, start its timer, then begin the continuous bootstrap transcript before inspection.
+
+## struck
+
+2026-11-07: all 49 cards are struck. Their functional commands invoked
+`proxima-tensor/specs/python-frontend/scripts/{capture_validation,check_cards,check_evidence,check_plan_bootstrap,seed_bootstrap}.py`,
+which are deleted with the rest of the python tree. Do not start Card 00a.

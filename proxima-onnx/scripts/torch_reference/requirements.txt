@@ -1,3 +1,0 @@
-torch==2.13.0
-onnx==1.22.0
-numpy

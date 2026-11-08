@@ -18,9 +18,6 @@ PERSISTENT_DAEMON_NAMES='cdb-daemon|sccache|rust-analyzer'
 
 LLAMA_BENCH_BINARY="/Users/brianbruggeman/repos/others/llama.cpp/build/bin/llama-bench"
 OPENCHAT_GGUF_MODEL="/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf"
-TORCH_REFERENCE_ROOT="$PROXIMA_MAIN_ROOT/proxima-onnx/scripts/torch_reference"
-TORCH_VENV_PYTHON="$TORCH_REFERENCE_ROOT/venv/bin/python"
-TORCH_TRAIN_BENCH_SCRIPT="$TORCH_REFERENCE_ROOT/train_bench.py"
 
 ORCH2_WORKTREE="$SLOT_ZERO_ROOT/proxima-wt-orch2"
 NANOFIX_WORKTREE="$SLOT_ZERO_ROOT/proxima-wt-nanofix"
@@ -68,9 +65,6 @@ require_executable() {
 preflight_required_artifacts() {
   require_executable "incumbent llama-bench binary" "$LLAMA_BENCH_BINARY"
   require_file "openchat Q4_K_S gguf model" "$OPENCHAT_GGUF_MODEL"
-  require_executable "torch reference venv interpreter" "$TORCH_VENV_PYTHON"
-  require_file "torch train_bench.py" "$TORCH_TRAIN_BENCH_SCRIPT"
-  require_file "torch diagnostics.py" "$TORCH_REFERENCE_ROOT/diagnostics.py"
 }
 
 current_load_one_minute() {
@@ -264,17 +258,9 @@ else
   skip_cell "09-proxima-train-step-bench" "$train_step_missing_reason"
 fi
 
-# accelerate spawns its own threads regardless of torch.set_num_threads, so
-# an unpinned "t=1" arm is not actually single-threaded and the pair would
-# be a lie; diagnostics.py:report_and_verify_threads prints
-# VECLIB_MAXIMUM_THREADS as <unset> unless this pins it alongside
-# OMP_NUM_THREADS.
-run_cell "10-torch-train-step-threads-1" "$TORCH_REFERENCE_ROOT" \
-  env VECLIB_MAXIMUM_THREADS=1 OMP_NUM_THREADS=1 \
-  "$TORCH_VENV_PYTHON" "$TORCH_TRAIN_BENCH_SCRIPT" --threads 1 --warmup 20 --steps 200
-
-run_cell "11-torch-train-step-threads-8" "$TORCH_REFERENCE_ROOT" \
-  env VECLIB_MAXIMUM_THREADS=8 OMP_NUM_THREADS=8 \
-  "$TORCH_VENV_PYTHON" "$TORCH_TRAIN_BENCH_SCRIPT" --threads 8 --warmup 20 --steps 200
+# the torch reference arms are gone with the python tree: proxima carries no
+# python, so there is no torch harness to compare a train step against.
+skip_cell "10-torch-train-step-threads-1" "python reference removed: proxima carries no python"
+skip_cell "11-torch-train-step-threads-8" "python reference removed: proxima carries no python"
 
 echo "sealed-pass: complete, logs under $OUTPUT_ROOT"

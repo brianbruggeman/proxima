@@ -1,6 +1,6 @@
 # Proxima Tensor Python frontend
 
-status: draft
+status: struck
 owner: brian
 created: 2026-10-08
 
@@ -143,3 +143,11 @@ Source inspection and the Sol review of the current `codex/preserve-main-work-20
 - `Cargo.toml` and tensor manifests had no PyO3 dependency in the inspected checkout. Cards 01a and 01e must recheck the fetched main tree, target matrix, feature policy, and Python packaging toolchain.
 
 Memory MCP tools were not exposed to the planning session. Repository-resident `ai_docs/AGENT.md`, `ai_docs/index.jsonl`, `ai_docs/task-routes.jsonl`, and `ai_docs/invariants.jsonl` were consulted. This card set adds the Python frontend route/index entry; Card 01f verifies exactly one record of each and refreshes them if the architecture investigation changes the path.
+
+## struck
+
+2026-11-07: the python tree was removed from proxima and the rule is that
+proxima needs python nowhere. Every card here ran through
+`proxima-tensor/specs/python-frontend/scripts/*.py`, all of which are deleted,
+so the whole plan is struck rather than resumed. A Python authoring surface is
+not a direction this repo carries.

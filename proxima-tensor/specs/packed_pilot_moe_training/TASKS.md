@@ -11,3 +11,9 @@
 Last completed slice: 3
 Next action: build the packed cross-entropy graph on Metal, starting from a spec that preserves this CPU report as its oracle
 Open question, if any: none; this contract retains the synthetic pilot boundary
+
+## struck
+
+2026-11-07: the python validator named by the rows above was removed with the
+rest of the python tree. The recorded outputs stand as history; re-running them
+needs a Rust validator.
