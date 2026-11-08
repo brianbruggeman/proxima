@@ -731,7 +731,6 @@ struct BodyPump<C: StreamConnection> {
     pool: Arc<ArrayQueue<ConnState<C>>>,
     server_closes: bool,
     finished: bool,
-    server_closes: bool,
 }
 
 /// Build the lazy response-body stream. Decodes the body off `conn`
@@ -757,7 +756,6 @@ fn body_stream<C: StreamConnection>(
         pool,
         server_closes,
         finished: false,
-        server_closes,
     };
     futures::stream::unfold(pump, |mut pump| async move {
         if pump.finished {
@@ -884,12 +882,6 @@ fn fail<C: StreamConnection>(
 fn response_closes<P>(response: &Response<P>) -> bool {
     response.metadata.get_str("connection").is_some_and(|value| {
         value.split(',').any(|token| token.trim().eq_ignore_ascii_case("close"))
-// a `Connection: close` reply means the peer shuts the socket, so pooling it fails the next non-idempotent call with no safe replay
-fn response_closes<P>(response: &Response<P>) -> bool {
-    response.metadata.get_str("connection").is_some_and(|value| {
-        value
-            .split(',')
-            .any(|token| token.trim().eq_ignore_ascii_case("close"))
     })
 }
 
@@ -1122,16 +1114,13 @@ impl<U: StreamUpstream> H1ClientUpstream<U> {
                         })?;
                         let stream =
                             body_stream(
-                        let server_closes = response_closes(&response);
-                        let stream = body_stream(
-                            conn,
-                            framing,
-                            seed,
-                            state,
-                            Arc::clone(&self.idle),
-                            response_closes(&response),
-                            server_closes,
-                        );
+                                conn,
+                                framing,
+                                seed,
+                                state,
+                                Arc::clone(&self.idle),
+                                response_closes(&response),
+                            );
                         Ok(response.with_stream(ResponseStream::new(stream)))
                     }
                 }
