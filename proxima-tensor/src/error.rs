@@ -477,6 +477,19 @@ pub enum TensorError {
         found: usize,
     },
 
+    /// The attention graph carries one head width for K and V, so a checkpoint
+    /// whose `attention.value_length` differs from `attention.key_length` cannot
+    /// be expressed. Refusing names both widths; silently attending at the key
+    /// width would compute the wrong values.
+    #[error(
+        "{kind} attention.value_length {value_length} differs from attention.key_length {key_length}: this engine carries one head width for K and V"
+    )]
+    GgufUnequalValueWidth {
+        kind: &'static str,
+        key_length: u32,
+        value_length: u32,
+    },
+
     /// `token_embd.weight`'s element count does not divide by `embedding_length`,
     /// so no vocab size exists.
     #[error(
