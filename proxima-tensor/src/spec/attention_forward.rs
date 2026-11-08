@@ -328,10 +328,14 @@ pub enum FfnCombination {
     ParallelDenseMoe(ParallelDenseMoeConfig),
     /// A routed expert FFN plus a shared expert every token also runs, summed
     /// into the residual: the shared expert is a SwiGLU of width
-    /// [`ModelDescriptor::expert_shared_feed_forward`], scaled per token by
-    /// `sigmoid(x @ ffn_gate_inp_shexp)`. Lowered only by the recurrent-hybrid
-    /// engine ([`build_forward`] over a schedule holding a [`LayerKind::Gdn`]
-    /// layer), which has no dense FFN branch to select between.
+    /// [`ModelDescriptor::expert_shared_feed_forward`] over
+    /// `blk.{layer}.ffn_{gate,up,down}_shexp.weight`. Whether it is scaled per
+    /// token by `sigmoid(x @ ffn_gate_inp_shexp)` is
+    /// [`LayerFfnConfig::shared_expert_gate`], because checkpoints differ:
+    /// qwen3.5-MoE carries that gate, flint's shared expert has no such tensor
+    /// and its output is added unscaled. The layer's dense branch runs where
+    /// `layer < leading_dense_block_count`, exactly as
+    /// [`Self::Exclusive`]'s does (flint's first two blocks are dense).
     RoutedWithSharedExpert,
 }
 
@@ -411,6 +415,16 @@ pub struct LayerFfnConfig {
     /// unmodified residual.
     #[serde(default)]
     pub ple: bool,
+    /// `true` scales [`FfnCombination::RoutedWithSharedExpert`]'s shared
+    /// expert output by `sigmoid(x @ blk.{layer}.ffn_gate_inp_shexp.weight)`,
+    /// the shape qwen3.5-MoE's converter writes. `false` adds the shared
+    /// output unscaled and declares no gate leaf at all, which is flint's
+    /// shape: its directory carries `ffn_{gate,up,down}_shexp.weight` and no
+    /// `ffn_gate_inp_shexp.weight` on any routed block
+    /// (`proxima-model-interop/tests/fixtures/flint/tensor_dir.txt`). Absent
+    /// keeps `true`, the only shape the field's first reader lowered.
+    #[serde(default = "default_shared_expert_gate")]
+    pub shared_expert_gate: bool,
 }
 
 impl LayerFfnConfig {
@@ -429,8 +443,33 @@ impl LayerFfnConfig {
             dense_feed_forward: None,
             exclusive_dense_post_norm: false,
             ple: false,
+            shared_expert_gate: default_shared_expert_gate(),
         }
     }
+}
+
+const fn default_shared_expert_gate() -> bool {
+    true
+}
+
+/// [`ModelDescriptor::expert_shared_feed_forward`] as a parameter type, so a
+/// call site cannot hand one of the neighbouring `u32` slots (`head_repeats`,
+/// `block_count`, `expert_used_count`) a shared width or the reverse: those are
+/// all plain `u32` and an adjacent swap compiles. Every builder takes this
+/// wrapper; `.0` is the width.
+///
+/// Example: flint's header states `expert_shared_feed_forward_length = 1024`
+/// while its shared tensors are `(2048, 1024)` and `(1024, 2048)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SharedExpertWidth(pub u32);
+
+impl SharedExpertWidth {
+    /// The width a checkpoint with no shared expert carries: every builder
+    /// ignores it unless a layer's combination is
+    /// [`FfnCombination::RoutedWithSharedExpert`], and
+    /// [`append_shared_expert_ffn`] refuses a zero width rather than building a
+    /// zero-wide SwiGLU.
+    pub const NONE: Self = Self(0);
 }
 
 /// Technique: Gemma unscaled attention score (`ScoreScale::Unscaled`) -- see `docs/design/technique-taxonomy.md#attention`.
@@ -1020,6 +1059,29 @@ pub(crate) fn append_dense_swiglu_ffn(
         alloc::vec![Extent::Static(feed_forward), Extent::Static(embedding)],
         &alloc::format!("blk.{layer}.ffn_down.weight"),
     );
+    append_swiglu_ffn(program, normed, w_gate, w_up, w_down, ones, activation)
+}
+
+/// The three-weight SwiGLU triple every FFN branch in this module runs
+/// (`silu(x @ gate) * (x @ up)`, then `@ down`), factored out of
+/// [`append_dense_swiglu_ffn`] node-for-node so a caller whose weights are not
+/// the dense branch's own `ffn_{gate,up,down}.weight` names -- the shared
+/// expert's `ffn_*_shexp.weight` leaves -- runs the identical op sequence
+/// instead of a copy of it.
+///
+/// # Errors
+///
+/// [`TensorError`] when a map or extent fails to build, which only a
+/// mismatched `[embedding, feed_forward]` pair can cause.
+pub(crate) fn append_swiglu_ffn(
+    program: &mut Vec<Op>,
+    normed: NodeId,
+    w_gate: NodeId,
+    w_up: NodeId,
+    w_down: NodeId,
+    ones: NodeId,
+    activation: Activation,
+) -> Result<NodeId, TensorError> {
     let gate_product = elementwise(
         program,
         DType::FLOAT32,
@@ -1073,6 +1135,97 @@ pub(crate) fn append_dense_swiglu_ffn(
         down_product,
         "sgd->sgd",
         "sd->sgd",
+    )
+}
+
+/// [`FfnCombination::RoutedWithSharedExpert`]'s shared half: a SwiGLU of
+/// width `shared_feed_forward` over `blk.{layer}.ffn_{gate,up,down}_shexp.weight`,
+/// optionally scaled per token by `sigmoid(x @ blk.{layer}.ffn_gate_inp_shexp.weight)`.
+/// `gated = false` declares no gate leaf, so a checkpoint whose directory has
+/// no such tensor binds a program with none (flint), and `true` reproduces
+/// the qwen3.5-MoE shape the recurrent-hybrid engine lowers.
+///
+/// # Errors
+///
+/// [`TensorError`] when a map or extent fails to build, or when
+/// `shared_feed_forward` is `0` -- a routed-with-shared layer whose header
+/// names no shared width cannot lower.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn append_shared_expert_ffn(
+    program: &mut Vec<Op>,
+    layer: u32,
+    normed: NodeId,
+    embedding: u32,
+    shared_feed_forward: u32,
+    ones: NodeId,
+    activation: Activation,
+    gated: bool,
+) -> Result<NodeId, TensorError> {
+    if shared_feed_forward == 0 {
+        return Err(TensorError::UnsupportedInBuilder {
+            builder: "append_shared_expert_ffn",
+            feature: "a shared expert with no expert_shared_feed_forward width",
+        });
+    }
+    let w_gate = input_leaf(
+        program,
+        DType::FLOAT32,
+        alloc::vec![
+            Extent::Static(embedding),
+            Extent::Static(shared_feed_forward)
+        ],
+        &alloc::format!("blk.{layer}.ffn_gate_shexp.weight"),
+    );
+    let w_up = input_leaf(
+        program,
+        DType::FLOAT32,
+        alloc::vec![
+            Extent::Static(embedding),
+            Extent::Static(shared_feed_forward)
+        ],
+        &alloc::format!("blk.{layer}.ffn_up_shexp.weight"),
+    );
+    let w_down = input_leaf(
+        program,
+        DType::FLOAT32,
+        alloc::vec![
+            Extent::Static(shared_feed_forward),
+            Extent::Static(embedding)
+        ],
+        &alloc::format!("blk.{layer}.ffn_down_shexp.weight"),
+    );
+    let shared_out = append_swiglu_ffn(program, normed, w_gate, w_up, w_down, ones, activation)?;
+    if !gated {
+        return Ok(shared_out);
+    }
+
+    let w_gate_inp = input_leaf(
+        program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(embedding)],
+        &alloc::format!("blk.{layer}.ffn_gate_inp_shexp.weight"),
+    );
+    let gate_product = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Multiply,
+        &[(normed, "sd->sd"), (w_gate_inp, "d->sd")],
+    )?;
+    let gate_logit = reduce(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        gate_product,
+        "sd->sd",
+        "s->sd",
+    )?;
+    let shared_gate = sigmoid(program, gate_logit, ones, "s->s")?;
+    elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Multiply,
+        &[(shared_out, "sd->sd"), (shared_gate, "s->sd")],
     )
 }
 
@@ -1242,7 +1395,9 @@ pub(crate) fn append_routed_expert_ffn(
 
 /// One layer's post-attention/FFN sequence -- `ffn_norm`, then
 /// [`FfnCombination::Exclusive`] (dense XOR routed, selected by
-/// `layer < leading_dense_block_count`) or
+/// `layer < leading_dense_block_count`),
+/// [`FfnCombination::RoutedWithSharedExpert`] (the same selection, with
+/// [`append_shared_expert_ffn`]'s shared SwiGLU added to the routed branch) or
 /// [`FfnCombination::ParallelDenseMoe`] (both branches, each optionally
 /// sub-normed, summed, optionally normed again), then the residual add
 /// and optional `layer_output_scale`. Extracted node-for-node out of
@@ -1271,6 +1426,7 @@ pub(crate) fn append_layer_ffn(
     embedding: u32,
     feed_forward: u32,
     expert_feed_forward: u32,
+    expert_shared_feed_forward: SharedExpertWidth,
     expert_count: u32,
     expert_used_count: u32,
     leading_dense_block_count: u32,
@@ -1286,7 +1442,8 @@ pub(crate) fn append_layer_ffn(
     let feed_forward = ffn_config.dense_feed_forward.unwrap_or(feed_forward);
 
     let ffn_out = match ffn_config.combination {
-        FfnCombination::Exclusive => {
+        FfnCombination::Exclusive | FfnCombination::RoutedWithSharedExpert => {
+            let with_shared = ffn_config.combination == FfnCombination::RoutedWithSharedExpert;
             if layer < leading_dense_block_count {
                 let dense_out = append_dense_swiglu_ffn(
                     program,
@@ -1309,7 +1466,7 @@ pub(crate) fn append_layer_ffn(
                     dense_out
                 }
             } else {
-                append_routed_expert_ffn(
+                let routed_out = append_routed_expert_ffn(
                     program,
                     layer,
                     normed2,
@@ -1327,14 +1484,28 @@ pub(crate) fn append_layer_ffn(
                     inv_dim,
                     eps,
                     moe_sites,
-                )?
+                )?;
+                if !with_shared {
+                    routed_out
+                } else {
+                    let shared_out = append_shared_expert_ffn(
+                        program,
+                        layer,
+                        normed2,
+                        embedding,
+                        expert_shared_feed_forward.0,
+                        ones,
+                        ffn_config.activation,
+                        ffn_config.shared_expert_gate,
+                    )?;
+                    elementwise(
+                        program,
+                        DType::FLOAT32,
+                        ScalarOp::Add,
+                        &[(routed_out, "sd->sd"), (shared_out, "sd->sd")],
+                    )?
+                }
             }
-        }
-        FfnCombination::RoutedWithSharedExpert => {
-            return Err(TensorError::UnsupportedInBuilder {
-                builder: "append_layer_ffn",
-                feature: "FfnCombination::RoutedWithSharedExpert (lowered by the hybrid engine)",
-            });
         }
         FfnCombination::ParallelDenseMoe(parallel_config) => {
             let dense_out = append_dense_swiglu_ffn(
@@ -1874,6 +2045,10 @@ pub(crate) fn ple_layer_input(
 /// INJECTS it (Stage B) when its own `schedule[layer].ffn.ple` is also
 /// `true`. `None` (every caller before Gemma 4 E2B) skips Stage A
 /// entirely, reproducing this function's prior program byte-for-byte.
+/// `expert_shared_feed_forward` is [`ModelDescriptor::expert_shared_feed_forward`]
+/// -- the width [`FfnCombination::RoutedWithSharedExpert`]'s shared SwiGLU
+/// reads, ignored by every other combination (`0` for a checkpoint with no
+/// shared expert).
 #[allow(clippy::too_many_arguments)]
 pub fn scheduled_forward_program_with_experts(
     vocab: u32,
@@ -1891,6 +2066,7 @@ pub fn scheduled_forward_program_with_experts(
     logit_softcap: Option<f32>,
     last_row_only: bool,
     ple_dim: Option<u32>,
+    expert_shared_feed_forward: SharedExpertWidth,
 ) -> Result<(Vec<Op>, NodeId, MoeSites, alloc::vec::Vec<NodeId>), TensorError> {
     scheduled_forward_program_with_experts_and_head_repeats(
         vocab,
@@ -1908,6 +2084,7 @@ pub fn scheduled_forward_program_with_experts(
         logit_softcap,
         last_row_only,
         ple_dim,
+        expert_shared_feed_forward,
         1,
     )
 }
@@ -1934,6 +2111,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
     logit_softcap: Option<f32>,
     last_row_only: bool,
     ple_dim: Option<u32>,
+    expert_shared_feed_forward: SharedExpertWidth,
     head_repeats: u32,
 ) -> Result<(Vec<Op>, NodeId, MoeSites, alloc::vec::Vec<NodeId>), TensorError> {
     if schedule.len() != block_count as usize {
@@ -2228,6 +2406,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
             embedding,
             feed_forward,
             expert_feed_forward,
+            expert_shared_feed_forward,
             expert_count,
             expert_used_count,
             leading_dense_block_count,
@@ -3621,6 +3800,7 @@ mod ple_stage_b_tests {
             embedding,
             1,
             0,
+            SharedExpertWidth::NONE,
             0,
             0,
             1,
@@ -3952,6 +4132,7 @@ mod exclusive_dense_post_norm_tests {
             EMBEDDING,
             FEED_FORWARD,
             0,
+            SharedExpertWidth::NONE,
             0,
             0,
             1,

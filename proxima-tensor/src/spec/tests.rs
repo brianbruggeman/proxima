@@ -6721,6 +6721,7 @@ fn architecture_matrix_mixed_cached_conv_roots() {
             1,
             None,
             LoopCdConfig::default(),
+            SharedExpertWidth::NONE,
         )
         .expect("mixed attention and short-convolution schedule lowers");
 
@@ -9610,7 +9611,22 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
 
     let build_start = std::time::Instant::now();
     let (program, _logits, _moe_sites, _head_repeats) = scheduled_forward_program_with_experts(
-        128_000, 2048, 7168, 1792, 32, 24, 32, 4, 2, 3, &schedule, None, None, false, None,
+        128_000,
+        2048,
+        7168,
+        1792,
+        32,
+        24,
+        32,
+        4,
+        2,
+        3,
+        &schedule,
+        None,
+        None,
+        false,
+        None,
+        SharedExpertWidth::NONE,
     )
     .expect("the hybrid forward pass lowers to a program");
     let build_elapsed = build_start.elapsed();
@@ -9662,7 +9678,22 @@ async fn lfm2_forward_program_rejects_a_layer_schedule_length_mismatch() {
         },
     ];
     let error = scheduled_forward_program_with_experts(
-        128_000, 2048, 7168, 1792, 32, 24, 32, 4, 2, 3, &schedule, None, None, false, None,
+        128_000,
+        2048,
+        7168,
+        1792,
+        32,
+        24,
+        32,
+        4,
+        2,
+        3,
+        &schedule,
+        None,
+        None,
+        false,
+        None,
+        SharedExpertWidth::NONE,
     )
     .expect_err("2 schedule entries against block_count=24 must be rejected");
     assert!(
@@ -14492,6 +14523,7 @@ mod gemma4_synthetic_parity {
             exclusive_dense_post_norm: false,
             activation: Activation::GeluTanh,
             ple: false,
+            shared_expert_gate: true,
         };
         let schedule = alloc::vec![
             LayerSchedule {
@@ -14555,6 +14587,7 @@ mod gemma4_synthetic_parity {
             Some(SOFTCAP),
             false,
             None,
+            SharedExpertWidth::NONE,
         )
         .expect("the real gemma4-shaped forward program lowers");
 
@@ -14880,6 +14913,7 @@ mod gemma4_synthetic_parity {
             exclusive_dense_post_norm: false,
             activation: Activation::GeluTanh,
             ple: false,
+            shared_expert_gate: true,
         };
         let schedule = alloc::vec![
             LayerSchedule {
@@ -14942,6 +14976,7 @@ mod gemma4_synthetic_parity {
                 Some(EmbeddingScale::Sqrt),
                 Some(SOFTCAP),
                 false,
+                SharedExpertWidth::NONE,
             )
             .expect("the single-range cached gemma4-shaped program lowers");
 
@@ -15201,6 +15236,7 @@ mod gemma4_synthetic_parity {
             exclusive_dense_post_norm: false,
             activation: Activation::GeluTanh,
             ple: false,
+            shared_expert_gate: true,
         };
         let schedule = alloc::vec![
             LayerSchedule {
@@ -15265,6 +15301,7 @@ mod gemma4_synthetic_parity {
                 false,
                 None,
                 false,
+                SharedExpertWidth::NONE,
             )
             .expect("the two-range cached gemma4-shaped program lowers");
 
@@ -15499,6 +15536,7 @@ mod gemma4_synthetic_parity {
                 true,
                 None,
                 false,
+                SharedExpertWidth::NONE,
             )
             .expect("the gemma4-shaped two-range recognizer fixture lowers");
 
@@ -15682,6 +15720,7 @@ mod gemma4_synthetic_parity {
                 exclusive_dense_post_norm: false,
                 activation: Activation::GeluTanh,
                 ple: false,
+                shared_expert_gate: true,
             };
             let attention =
                 |window: Option<u32>, value: ValueSourceKind, full: bool| LayerAttentionConfig {
@@ -15751,8 +15790,7 @@ mod gemma4_synthetic_parity {
                     Some(SOFTCAP),
                     false,
                     None,
-                    false,
-                )
+                    false, 0,)
                 .expect("the gemma4-shaped two-range program lowers at any new_count");
             let embedding_table = wave("token_embd.weight", VOCAB * EMBEDDING);
             let mut tied_lm_head = alloc::vec![0.0f32; EMBEDDING * VOCAB];
@@ -16129,6 +16167,7 @@ mod gemma4_synthetic_parity {
             exclusive_dense_post_norm: false,
             activation: Activation::GeluTanh,
             ple: false,
+            shared_expert_gate: true,
         };
         let sliding_attention = LayerAttentionConfig {
             head_dim: HEAD_DIM as u32,
@@ -16377,6 +16416,7 @@ mod gemma4_synthetic_parity {
                 Some(SOFTCAP),
                 false,
                 None,
+                SharedExpertWidth::NONE,
             )
             .expect("the cacheless gemma4-shaped shared-kv program lowers");
 
@@ -16411,6 +16451,7 @@ mod gemma4_synthetic_parity {
                 false,
                 None,
                 false,
+                SharedExpertWidth::NONE,
             )
             .expect("the two-range cached gemma4-shaped shared-kv program lowers");
 
@@ -16538,6 +16579,7 @@ mod gemma4_synthetic_parity {
             exclusive_dense_post_norm: false,
             activation: Activation::GeluTanh,
             ple: false,
+            shared_expert_gate: true,
         };
         let layers = alloc::vec![
             LayerSchedule {
@@ -16981,6 +17023,7 @@ mod gemma4_synthetic_parity {
             exclusive_dense_post_norm: false,
             activation: Activation::GeluTanh,
             ple: false,
+            shared_expert_gate: true,
         };
         let schedule = alloc::vec![
             LayerSchedule {
@@ -17045,6 +17088,7 @@ mod gemma4_synthetic_parity {
                 false,
                 None,
                 false,
+                SharedExpertWidth::NONE,
             )
             .expect("the two-range cached gemma4-shaped program lowers");
 
@@ -17302,6 +17346,7 @@ mod gemma4_synthetic_parity {
             exclusive_dense_post_norm: false,
             activation: Activation::GeluTanh,
             ple: false,
+            shared_expert_gate: true,
         };
         let schedule = alloc::vec![
             LayerSchedule {
@@ -17484,6 +17529,7 @@ mod gemma4_synthetic_parity {
                 false,
                 None,
                 false,
+                SharedExpertWidth::NONE,
             )
             .expect("the all-positions two-range cached program lowers");
 
@@ -17542,6 +17588,7 @@ mod gemma4_synthetic_parity {
                 true,
                 None,
                 false,
+                SharedExpertWidth::NONE,
             )
             .expect("the last-row-only two-range cached program lowers");
 
@@ -17735,6 +17782,7 @@ mod gemma4_synthetic_parity {
             exclusive_dense_post_norm: false,
             activation: Activation::GeluTanh,
             ple: false,
+            shared_expert_gate: true,
         };
         let attention =
             |window: Option<u32>, source: KeySourceKind, value: ValueSourceKind, full: bool| {
@@ -17837,6 +17885,7 @@ mod gemma4_synthetic_parity {
                 true,
                 None,
                 ring,
+                SharedExpertWidth::NONE,
             )
             .expect("the five-layer two-range cached program lowers")
         };
@@ -18010,6 +18059,7 @@ mod gemma4_synthetic_parity {
             exclusive_dense_post_norm: false,
             activation: Activation::GeluTanh,
             ple: false,
+            shared_expert_gate: true,
         };
         let entry = |window: Option<u32>, value_source_kind: ValueSourceKind| LayerSchedule {
             kind: LayerKind::Attention,
@@ -18054,6 +18104,7 @@ mod gemma4_synthetic_parity {
                 true,
                 None,
                 ring,
+                SharedExpertWidth::NONE,
             )
             .expect("the two-layer two-range cached program lowers")
             .0
@@ -21229,17 +21280,351 @@ mod hybrid_routed_descriptor {
     }
 
     #[test]
-    fn a_shared_expert_ffn_is_refused_by_the_attention_engines() {
-        let mut attention_only = descriptor(&[LayerKind::Attention, LayerKind::Attention]);
-        attention_only.gated_attention = false;
-        attention_only.cache_strategy = CacheStrategy::Cacheless;
-        attention_only.cache_mask = CacheMask::Padded;
+    fn an_attention_only_shared_expert_schedule_lowers_with_the_shared_leaves() {
+        for (strategy, mask) in [
+            (CacheStrategy::Cacheless, CacheMask::Padded),
+            (CacheStrategy::Cached, CacheMask::Padded),
+        ] {
+            let mut ungated = descriptor(&[LayerKind::Attention, LayerKind::Attention]);
+            ungated.gated_attention = false;
+            ungated.cache_strategy = strategy;
+            ungated.cache_mask = mask;
+            // flint's own shape: the leading block is dense and carries no
+            // expert or shared-expert tensor at all
+            ungated.leading_dense_block_count = 1;
+            ungated.feed_forward = 4;
+            for layer in &mut ungated.layers {
+                layer.ffn.shared_expert_gate = false;
+            }
+            let mut gated = ungated.clone();
+            for layer in &mut gated.layers {
+                layer.ffn.shared_expert_gate = true;
+            }
 
-        let outcome = build_forward(&attention_only);
+            let ungated_program = build_forward(&ungated)
+                .unwrap_or_else(|error| panic!("{strategy:?}/{mask:?} ungated: {error}"))
+                .program;
+            let gated_program = build_forward(&gated)
+                .unwrap_or_else(|error| panic!("{strategy:?}/{mask:?} gated: {error}"))
+                .program;
+            let names = |program: &[Op]| -> Vec<String> {
+                program
+                    .iter()
+                    .filter_map(|operation| match operation {
+                        Op::Input {
+                            name: Some(name), ..
+                        } => Some(name.to_string()),
+                        _ => None,
+                    })
+                    .collect()
+            };
+            let leaves_matching = |program: &[Op], needle: &str| -> Vec<String> {
+                names(program)
+                    .into_iter()
+                    .filter(|name| name.contains(needle))
+                    .collect()
+            };
+            let gate_leaf = |program: &[Op]| -> usize {
+                names(program)
+                    .iter()
+                    .filter(|name| name.ends_with("ffn_gate_inp_shexp.weight"))
+                    .count()
+            };
+
+            assert_eq!(
+                leaves_matching(&ungated_program, "_shexp.weight"),
+                [
+                    "blk.1.ffn_gate_shexp.weight",
+                    "blk.1.ffn_up_shexp.weight",
+                    "blk.1.ffn_down_shexp.weight",
+                ],
+                "{strategy:?}/{mask:?} ungated"
+            );
+            assert_eq!(
+                leaves_matching(&ungated_program, "_exps.weight"),
+                [
+                    "blk.1.ffn_gate_exps.weight",
+                    "blk.1.ffn_up_exps.weight",
+                    "blk.1.ffn_down_exps.weight",
+                ],
+                "{strategy:?}/{mask:?}: the leading dense block binds no expert tensor"
+            );
+            assert_eq!(
+                leaves_matching(&ungated_program, "blk.0.ffn_gate.weight"),
+                ["blk.0.ffn_gate.weight"],
+                "{strategy:?}/{mask:?}: the leading block stays the dense triple"
+            );
+            assert_eq!(
+                gate_leaf(&ungated_program),
+                0,
+                "{strategy:?}/{mask:?} ungated"
+            );
+            assert_eq!(gate_leaf(&gated_program), 1, "{strategy:?}/{mask:?} gated");
+            assert_eq!(
+                gated_program.len() - ungated_program.len(),
+                8,
+                "{strategy:?}/{mask:?}: the gate adds its leaf, the projection's multiply+reduce, the four-op sigmoid and the scaling multiply"
+            );
+        }
+    }
+
+    #[test]
+    fn a_routed_hybrid_without_a_shared_gate_lowers_without_the_gate_leaf() {
+        let mut ungated = descriptor(&[LayerKind::Gdn, LayerKind::Attention]);
+        for layer in &mut ungated.layers {
+            layer.ffn.shared_expert_gate = false;
+        }
+
+        let lowered = build_forward(&ungated).expect("the ungated routed hybrid lowers");
+        let names: Vec<&str> = lowered
+            .program
+            .iter()
+            .filter_map(|operation| match operation {
+                Op::Input {
+                    name: Some(name), ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
 
         assert!(
-            matches!(outcome, Err(TensorError::UnsupportedInBuilder { .. })),
+            !names
+                .iter()
+                .any(|name| name.ends_with("ffn_gate_inp_shexp.weight")),
+            "no gate tensor exists in an ungated checkpoint: {names:?}"
+        );
+        assert_eq!(
+            names
+                .iter()
+                .filter(|name| name.contains("_shexp.weight"))
+                .count(),
+            6,
+            "three shared leaves on each of the two routed layers: {names:?}"
+        );
+    }
+
+    #[test]
+    fn a_shared_expert_layer_with_no_shared_width_is_refused_by_name() {
+        let mut widthless = descriptor(&[LayerKind::Attention, LayerKind::Attention]);
+        widthless.gated_attention = false;
+        widthless.cache_strategy = CacheStrategy::Cacheless;
+        widthless.cache_mask = CacheMask::Padded;
+        widthless.expert_shared_feed_forward = 0;
+
+        let outcome = build_forward(&widthless);
+
+        assert!(
+            matches!(
+                &outcome,
+                Err(TensorError::UnsupportedInBuilder { feature, .. })
+                    if feature.contains("expert_shared_feed_forward")
+            ),
             "{outcome:?}"
+        );
+    }
+}
+
+mod routed_with_shared_expert {
+    use super::*;
+    use crate::cpu::evaluate_named;
+
+    const LAYER: u32 = 2;
+    const EMBEDDING: u32 = 2;
+
+    /// The hand-worked answer for the layer this module builds, derived on
+    /// paper from the two branches' definitions and carried at f64 precision
+    /// (the comparison, not the constant, sets the tolerance). Taking the
+    /// embedding `[0.5, -1.0]` through the ffn norm
+    /// (`gamma [2.0, 0.5]`, `eps 1e-6`) gives `[1.264910, -0.632455]`; the
+    /// router logits are that vector (`gate_inp` is the identity), sigmoid
+    /// selects expert 0, and the selected weight renormalizes to one. Expert
+    /// 0's SwiGLU (`gate [[1,0],[0,2]]`, `up` all ones, `down` identity) is
+    /// `[0.623895, -0.176104]`; the identity-shaped shared SwiGLU over the
+    /// same input is `[0.623895, -0.138781]`; their sum plus the residual is
+    /// `[1.747790, -1.314885]`.
+    const PAPER: [f64; 2] = [1.747_790_304_014_545_5, -1.314_884_976_624_105_3];
+
+    /// The same layer with `ffn_gate_inp_shexp` present (qwen3.5-MoE's shape):
+    /// the shared half scales by `sigmoid(1.264910) = 0.779870`, so the FFN
+    /// output is `routed + 0.779870 * shared` and the layer output is
+    /// `[1.610452, -1.284335]`.
+    const PAPER_GATED: [f64; 2] = [1.610_452_381_370_316_7, -1.284_335_051_205_595_3];
+
+    /// Two routes instead of one: the selected weights no longer cancel
+    /// (`sigmoid` scores `[0.779870, 0.346954]` renormalized to
+    /// `[0.692096, 0.307904]`), so this case fails if the gating function, the
+    /// router projection or the renormalization is wrong. Expert 1
+    /// (`gate [[0,1],[1,0]]`, `up` all twos, `down` [[0,1],[1,0]]) contributes
+    /// `[1.247790, -0.277563]`.
+    const PAPER_TWO_ROUTES: [f64; 2] = [1.939_890_326_388_492_8, -1.346_124_719_377_241_9];
+
+    /// `ffn_down_shexp[0][0]` doubled: the shared half's first component
+    /// doubles, so the layer output moves to `[2.371685, -1.314885]`.
+    const PAPER_SHARED_DOWN_DOUBLED: [f64; 2] = [2.371_685_456_021_818_4, -1.314_884_976_624_105_3];
+
+    /// the band the f32 evaluator is allowed against the f64 paper. Measured
+    /// on this host, the largest component delta is 2.1e-7 for the two
+    /// single-route cases and 4.3e-7 for the doubled-weight control, so this
+    /// leaves ~23x headroom for a backend with a different rounding policy
+    /// while staying four orders under the control's 0.62 perturbation.
+    const PAPER_TOLERANCE: f64 = 1.0e-5;
+
+    fn layer_program(gated: bool, expert_used_count: u32) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let post_mixer = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            alloc::vec![Extent::Symbolic(0), Extent::Static(EMBEDDING)],
+            "post_mixer",
+        );
+        let ffn_norm_weight = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            alloc::vec![Extent::Static(EMBEDDING)],
+            &alloc::format!("blk.{LAYER}.ffn_norm.weight"),
+        );
+        let eps = symbolic_leaf(&mut program, DType::FLOAT32, "eps");
+        let ones = scalar_constant(&mut program, 1.0);
+        let inv_dim = count_constant(&mut program, EMBEDDING);
+        let config = LayerFfnConfig {
+            combination: FfnCombination::RoutedWithSharedExpert,
+            routed_gating: ExpertGatingFunc::Sigmoid,
+            routed_expert_bias: false,
+            shared_expert_gate: gated,
+            ..LayerFfnConfig::exclusive()
+        };
+        let mut moe_sites = Vec::new();
+        let root = append_layer_ffn(
+            &mut program,
+            LAYER,
+            post_mixer,
+            ffn_norm_weight,
+            EMBEDDING,
+            EMBEDDING,
+            EMBEDDING,
+            SharedExpertWidth(EMBEDDING),
+            2,
+            expert_used_count,
+            LAYER,
+            ones,
+            inv_dim,
+            eps,
+            &config,
+            None,
+            0,
+            &mut moe_sites,
+        )
+        .expect("the routed-with-shared layer lowers");
+
+        assert_eq!(moe_sites.len(), 1, "one router site for the routed branch");
+        (program, root)
+    }
+
+    fn named_inputs(gated: bool, shared_down_leading: f32) -> Vec<(String, Vec<f32>)> {
+        let tensor = |name: &str| alloc::format!("blk.{LAYER}.{name}");
+        let mut named = alloc::vec![
+            ("post_mixer".to_string(), alloc::vec![0.5, -1.0]),
+            (tensor("ffn_norm.weight"), alloc::vec![2.0, 0.5]),
+            ("eps".to_string(), alloc::vec![1.0e-6]),
+            (
+                tensor("ffn_gate_inp.weight"),
+                alloc::vec![1.0, 0.0, 0.0, 1.0],
+            ),
+            (
+                tensor("ffn_gate_exps.weight"),
+                alloc::vec![1.0, 0.0, 0.0, 2.0, 0.0, 1.0, 1.0, 0.0],
+            ),
+            (
+                tensor("ffn_up_exps.weight"),
+                alloc::vec![1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+            ),
+            (
+                tensor("ffn_down_exps.weight"),
+                alloc::vec![1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0],
+            ),
+            (
+                tensor("ffn_gate_shexp.weight"),
+                alloc::vec![1.0, 0.0, 0.0, 1.0],
+            ),
+            (
+                tensor("ffn_up_shexp.weight"),
+                alloc::vec![1.0, 1.0, 1.0, 1.0],
+            ),
+            (
+                tensor("ffn_down_shexp.weight"),
+                alloc::vec![shared_down_leading, 0.0, 0.0, 1.0],
+            ),
+        ];
+        if gated {
+            named.push((tensor("ffn_gate_inp_shexp.weight"), alloc::vec![1.0, 0.0]));
+        }
+        named
+    }
+
+    fn evaluate(gated: bool, shared_down_leading: f32, expert_used_count: u32) -> Vec<f32> {
+        let (program, root) = layer_program(gated, expert_used_count);
+        let named = named_inputs(gated, shared_down_leading);
+        let borrowed: Vec<(&str, &[f32])> = named
+            .iter()
+            .map(|(name, values)| (name.as_str(), values.as_slice()))
+            .collect();
+        let evaluated = evaluate_named(&program, &[1], &borrowed, &[root])
+            .expect("the hand-worked layer evaluates on the cpu");
+
+        evaluated
+            .get(root)
+            .expect("the layer root is a requested output")
+            .0
+            .to_vec()
+    }
+
+    fn matches_paper(observed: &[f32], paper: [f64; 2]) -> bool {
+        observed.len() == paper.len()
+            && observed
+                .iter()
+                .zip(paper)
+                .all(|(got, want)| (f64::from(*got) - want).abs() < PAPER_TOLERANCE)
+    }
+
+    #[test]
+    fn routed_with_shared_expert_literal_matches_the_hand_worked_layer() {
+        let ungated = evaluate(false, 1.0, 1);
+        let gated = evaluate(true, 1.0, 1);
+        let two_routes = evaluate(false, 1.0, 2);
+
+        assert!(
+            matches_paper(&ungated, PAPER),
+            "unscaled shared expert (flint): {ungated:?} vs hand-worked {PAPER:?}"
+        );
+        assert!(
+            matches_paper(&gated, PAPER_GATED),
+            "sigmoid-gated shared expert (qwen3.5-MoE): {gated:?} vs hand-worked {PAPER_GATED:?}"
+        );
+        assert!(
+            matches_paper(&two_routes, PAPER_TWO_ROUTES),
+            "two routes (the router weight no longer cancels): {two_routes:?} vs hand-worked {PAPER_TWO_ROUTES:?}"
+        );
+        assert!(
+            !matches_paper(&gated, PAPER),
+            "the two shapes must differ: {gated:?}"
+        );
+        assert!(
+            !matches_paper(&two_routes, PAPER),
+            "a second route moves the combination weight: {two_routes:?}"
+        );
+    }
+
+    #[test]
+    fn control_routed_with_shared_expert_rejects_a_perturbed_shared_weight() {
+        let perturbed = evaluate(false, 2.0, 1);
+
+        assert!(
+            !matches_paper(&perturbed, PAPER),
+            "the paper's answer must not fit a doubled shared down weight: {perturbed:?}"
+        );
+        assert!(
+            matches_paper(&perturbed, PAPER_SHARED_DOWN_DOUBLED),
+            "the doubled weight moves exactly the shared half: {perturbed:?} vs hand-worked {PAPER_SHARED_DOWN_DOUBLED:?}"
         );
     }
 }
@@ -23063,6 +23448,7 @@ mod attention_sinks {
                 single.embedding_scale,
                 single.logit_softcap,
                 single.last_row_only,
+                SharedExpertWidth::NONE,
             )
             .expect("the single-range cached program lowers");
         assert_sink_leaves(

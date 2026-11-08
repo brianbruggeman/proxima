@@ -917,9 +917,13 @@ fn append_shared_expert_router(
 }
 
 /// Runs `x`'s post-attention-norm hidden state through the routed
-/// [`append_moe_ffn`] plus the gated shared expert, and adds the result back
+/// [`append_moe_ffn`] plus the shared expert, and adds the result back
 /// onto `mixer_out` (the pre-FFN residual stream) -- the one FFN sub-block
 /// shape every `recurrent-routed` layer shares, dense-attention or GDN alike.
+/// `gate_inp_shexp` is `Some` for a checkpoint whose directory carries
+/// `blk.{layer}.ffn_gate_inp_shexp.weight` ([`append_sigmoid_gated_shared_expert`])
+/// and `None` for one whose shared expert is added unscaled
+/// ([`append_swiglu_ffn`], flint's shape).
 #[allow(clippy::too_many_arguments)]
 fn append_shared_expert_moe_ffn(
     program: &mut Vec<Op>,
@@ -935,10 +939,11 @@ fn append_shared_expert_moe_ffn(
     expert_w_down: NodeId,
     expert_count: u32,
     expert_used_count: u32,
-    gate_inp_shexp: NodeId,
+    gate_inp_shexp: Option<NodeId>,
     gate_shexp: NodeId,
     up_shexp: NodeId,
     down_shexp: NodeId,
+    shared_activation: Activation,
 ) -> Result<(NodeId, MoeSite, NodeId, NodeId, NodeId, NodeId), TensorError> {
     // `append_moe_ffn`'s own leading two ops, shared with the batched GDN
     // prefill route so both paths select experts from the same algebra.
@@ -966,15 +971,28 @@ fn append_shared_expert_moe_ffn(
         strategy: MoeProjectionStrategy::production(),
     };
     let (routed_out, moe_site) = append_moe_ffn(program, layer, normed, &moe_spec)?;
-    let shared_out = append_sigmoid_gated_shared_expert(
-        program,
-        normed,
-        gate_inp_shexp,
-        gate_shexp,
-        up_shexp,
-        down_shexp,
-        one,
-    )?;
+    let shared_out = match gate_inp_shexp {
+        Some(gate_inp_shexp) => append_sigmoid_gated_shared_expert(
+            program,
+            normed,
+            gate_inp_shexp,
+            gate_shexp,
+            up_shexp,
+            down_shexp,
+            one,
+        )?,
+        // no gate tensor in the checkpoint: the shared expert's output is added
+        // unscaled (flint), so the gate leaf must never be declared
+        None => append_swiglu_ffn(
+            program,
+            normed,
+            gate_shexp,
+            up_shexp,
+            down_shexp,
+            one,
+            shared_activation,
+        )?,
+    };
 
     let ffn_out = elementwise(
         program,
@@ -1028,10 +1046,12 @@ pub struct MoeLayerDiagnostics {
 }
 
 /// Gated-DeltaNet layers interleaved with gated dense attention over a routed
-/// FFN plus a sigmoid-gated shared expert, lowered from one [`ModelDescriptor`]:
-/// layer kinds from `layers[i].kind`, the recurrence shape from the `ssm_*`
-/// fields, the routed experts from `expert_*`, and the shared expert from
-/// `expert_shared_feed_forward`. `prefill_width` pins the position axis to a
+/// FFN plus a shared expert, lowered from one [`ModelDescriptor`]: layer kinds
+/// from `layers[i].kind`, the recurrence shape from the `ssm_*` fields, the
+/// routed experts from `expert_*`, and the shared expert from
+/// `expert_shared_feed_forward`, gated per layer by
+/// [`LayerFfnConfig::shared_expert_gate`] -- `sigmoid(x @ ffn_gate_inp_shexp)`
+/// when the checkpoint carries that tensor, added unscaled when it does not. `prefill_width` pins the position axis to a
 /// literal extent, which is the only way
 /// [`append_delta_net_mixer_with_taps_and_layout`]'s M > 1 branch (its scan is
 /// unrolled in Rust) is reached; the symbolic per-step program takes the
@@ -1041,8 +1061,9 @@ pub struct MoeLayerDiagnostics {
 /// [`append_gated_attention_only_with_taps`] and
 /// [`append_delta_net_mixer_with_taps_and_layout`] per layer, [`rmsnorm`] for the
 /// post-attention norm, [`append_moe_ffn`] for the routed FFN,
-/// [`append_sigmoid_gated_shared_expert`] for the shared expert, and
-/// [`elementwise`]/[`reduce`] for the residual adds and `lm_head`.
+/// [`append_sigmoid_gated_shared_expert`] or [`append_swiglu_ffn`] for the
+/// shared expert, and [`elementwise`]/[`reduce`] for the residual adds and
+/// `lm_head`.
 #[allow(clippy::too_many_lines)]
 pub(super) fn hybrid_routed_forward(
     descriptor: &ModelDescriptor,
@@ -1627,12 +1648,14 @@ pub(super) fn hybrid_routed_forward(
             ],
             &alloc::format!("blk.{layer}.ffn_down_exps.weight"),
         );
-        let gate_inp_shexp = input_leaf(
-            &mut program,
-            DType::FLOAT32,
-            alloc::vec![Extent::Static(embedding)],
-            &alloc::format!("blk.{layer}.ffn_gate_inp_shexp.weight"),
-        );
+        let gate_inp_shexp = schedule.ffn.shared_expert_gate.then(|| {
+            input_leaf(
+                &mut program,
+                DType::FLOAT32,
+                alloc::vec![Extent::Static(embedding)],
+                &alloc::format!("blk.{layer}.ffn_gate_inp_shexp.weight"),
+            )
+        });
         let gate_shexp = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -1686,6 +1709,7 @@ pub(super) fn hybrid_routed_forward(
             gate_shexp,
             up_shexp,
             down_shexp,
+            schedule.ffn.activation,
         )?;
         layer_diagnostics.push(MoeLayerDiagnostics {
             block_input,

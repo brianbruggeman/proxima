@@ -14,7 +14,7 @@
 
 use proxima_tensor::spec::{
     AttentionScoreScale, EmbeddingScale, KeySourceKind, LayerAttentionConfig, LayerFfnConfig,
-    LayerKind, LayerSchedule, RopePairing, RopeTableSel, ValueSourceKind,
+    LayerKind, LayerSchedule, RopePairing, RopeTableSel, SharedExpertWidth, ValueSourceKind,
     scheduled_two_range_cached_forward_program_with_experts,
 };
 use proxima_tensor::test_support::Lcg;
@@ -231,6 +231,7 @@ pub fn fixture_with(rows: usize, cached_len: usize, geometry: Geometry) -> Fixtu
             false,
             None,
             false,
+            SharedExpertWidth::NONE,
         )
         .expect("the gemma4-shaped two-range program lowers");
     let symbols = vec![rows as u64, bucket_for(cached_len) as u64];
