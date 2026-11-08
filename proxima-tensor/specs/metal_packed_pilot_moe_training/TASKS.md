@@ -11,3 +11,9 @@
 Last completed slice: all three slices completed
 Result: AC1 and AC2 ran; the retained BF8/BF4 payload passed schema validation
 Open question, if any: none; this step is a backend parity fixture only
+
+## struck
+
+2026-11-07: the python validator named by the rows above was removed with the
+rest of the python tree. The recorded outputs stand as history; re-running them
+needs a Rust validator.

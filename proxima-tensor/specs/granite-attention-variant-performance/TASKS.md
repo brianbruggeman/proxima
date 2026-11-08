@@ -50,3 +50,7 @@ Open question: what device-level behavior produces the long-prompt selected-slow
 ## struck
 
 - Timing Cards 27–28 were removed from `granite-attention-numeric-matrix` before implementation because the numeric-matrix spec forbids timing in implementation cards; this spec owns those measurements.
+
+2026-11-07: the python validator named by the rows above was removed with the
+rest of the python tree. The recorded outputs stand as history; re-running them
+needs a Rust validator.

@@ -42,3 +42,7 @@ Open question, if any: whole-layer/request performance mechanism; the isolated r
 ## struck
 
 - none
+
+2026-11-07: the python validator named by the rows above was removed with the
+rest of the python tree. The recorded outputs stand as history; re-running them
+needs a Rust validator.

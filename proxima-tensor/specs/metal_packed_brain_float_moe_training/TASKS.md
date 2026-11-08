@@ -11,3 +11,9 @@
 Last completed slice: 3
 Next action: continue through `metal_packed_brain_float_moe_training_loop`; the admitted scope currently covers two Metal steps with host sparse coalescing and Adam
 Open question, if any: none; optimizer and sparse coalescing remain host-side in this slice
+
+## struck
+
+2026-11-07: the python validator named by the rows above was removed with the
+rest of the python tree. The recorded outputs stand as history; re-running them
+needs a Rust validator.

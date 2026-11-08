@@ -11,3 +11,9 @@
 Last completed slice: 3
 Next action: continue the larger training build-out from the next indexed task route; this admitted loop records repeated execution only, not convergence or scale
 Open question, if any: none; training remains limited to the fixed three-expert fixture with host sparse updates
+
+## struck
+
+2026-11-07: the python validator named by the rows above was removed with the
+rest of the python tree. The recorded outputs stand as history; re-running them
+needs a Rust validator.
