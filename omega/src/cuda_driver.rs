@@ -4597,3 +4597,971 @@ mod tests {
         Ok(())
     }
 }
+
+// ---- ROCm runtime boundary -------------------------------------------------
+
+#[cfg(unix)]
+pub mod rocm {
+    //! The ROCm runtime boundary over the HIP half of the [`crate::cuda`] emitter.
+    //!
+    //! `crate::cuda` is deliberately usable without ROCm: it emits HIP C++ text
+    //! and links nothing. This module is the separate runtime half. It resolves
+    //! `libamdhip64` and `libhiprtc` at run time — no link-time dependency, no
+    //! headers, no build-script probing — compiles emitted source to a code
+    //! object with hipRTC, loads the code object, and launches kernels through the
+    //! HIP module API.
+    //!
+    //! # Why `dlopen` and not a `-sys` crate
+    //!
+    //! A ROCm build must stay buildable on a host with no ROCm installed — the
+    //! same property `cuda` (emitter) keeps against `cuda-driver`, and what lets
+    //! this crate's macOS CI gate compile the lane. A `hip-sys` dependency
+    //! requires headers and a link path at BUILD time; resolving symbols at RUN
+    //! time turns "no ROCm here" into a typed
+    //! [`HipDriverError::RuntimeNotInstalled`] instead of a build failure.
+    //!
+    //! # What is proven where
+    //!
+    //! The device path is only reachable when `libamdhip64` resolves and a GPU is
+    //! present. This host has neither, so what is exercised here is: the
+    //! symbol-resolution contract (an absent runtime is a typed error naming the
+    //! sonames tried), the launch-geometry arithmetic, and the binding contract
+    //! that rejects a kernel whose parameters are not `inputs, output, uniforms`.
+    //! Numerical parity on a real device is a separate gate that needs the
+    //! hardware; [`HipDevice::smoke_add_one`] is that gate's entry point.
+    //!
+    //! # Scope
+    //!
+    //! [`HipDevice::launch_f32`] runs any [`HipKernel`] whose bindings are
+    //! `Input.., Output, Uniforms` — the same contract
+    //! [`crate::cuda_driver::CudaDriver::launch_f32`] enforces — so an emitted
+    //! elementwise/reduce/scan op can be checked against the CPU oracle on a
+    //! device. A module cache keyed on the kernel's `entry`, multi-kernel graph
+    //! planning, and KV residency are the plan layer's, exactly as they are for
+    //! the CUDA lane; this module is the device boundary beneath them.
+
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+    use core::ffi::{c_char, c_int, c_void};
+
+    use std::ffi::{CStr, CString};
+    use std::ptr;
+    use std::sync::Arc;
+
+    use crate::cuda::HipKernel;
+    use crate::lowering::Binding;
+
+    /// Shared objects the runtime half probes, in order. The versioned names come
+    /// first so a host with several ROCm installs resolves the one on its linker
+    /// path rather than an arbitrary sibling.
+    pub const RUNTIME_LIBRARIES: [&str; 4] = [
+        "libamdhip64.so.6",
+        "libamdhip64.so",
+        "libamdhip64.so.5",
+        "libamdhip64.dylib",
+    ];
+
+    /// hipRTC — the runtime compiler the emitter's source needs.
+    pub const RTC_LIBRARIES: [&str; 3] = ["libhiprtc.so.6", "libhiprtc.so", "libhiprtc.dylib"];
+
+    /// `hipMemcpyHostToDevice`.
+    const MEMCPY_HOST_TO_DEVICE: c_int = 1;
+    /// `hipMemcpyDeviceToHost`.
+    const MEMCPY_DEVICE_TO_HOST: c_int = 2;
+    const HIP_SUCCESS: c_int = 0;
+    const RTC_SUCCESS: c_int = 0;
+    const RTLD_NOW: c_int = 2;
+
+    /// Errors from loading the ROCm runtime, compiling HIP C++, or executing.
+    #[derive(Debug, thiserror::Error)]
+    pub enum HipDriverError {
+        #[error("ROCm runtime is not installed; tried: {tried}")]
+        RuntimeNotInstalled { tried: String },
+        #[error("hipRTC is not installed; tried: {tried}")]
+        RtcNotInstalled { tried: String },
+        #[error("ROCm library `{library}` does not export `{symbol}`")]
+        MissingSymbol {
+            library: &'static str,
+            symbol: &'static str,
+        },
+        #[error("HIP `{call}` failed with code {code}: {message}")]
+        Runtime {
+            call: &'static str,
+            code: c_int,
+            message: String,
+        },
+        #[error("hipRTC `{call}` failed with code {code}: {message}")]
+        Rtc {
+            call: &'static str,
+            code: c_int,
+            message: String,
+        },
+        #[error("hipRTC rejected the emitted source:\n{log}")]
+        CompileLog { log: String },
+        #[error("kernel binding contract is not inputs, output, uniforms")]
+        BindingContract,
+        #[error("launch argument count does not match the kernel's bindings")]
+        ArgumentCountMismatch,
+        #[error("device ordinal {ordinal} is out of range; this host exposes {count}")]
+        DeviceOutOfRange { ordinal: c_int, count: c_int },
+        #[error("a launch of {threads} threads needs more blocks than the launch index holds")]
+        GridTooLarge { threads: u64 },
+        #[error("smoke input is too large for the launch ABI: {0} elements")]
+        InputTooLarge(usize),
+    }
+
+    #[cfg(target_os = "linux")]
+    #[link(name = "dl")]
+    unsafe extern "C" {
+        fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn dlclose(handle: *mut c_void) -> c_int;
+        fn dlerror() -> *mut c_char;
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    unsafe extern "C" {
+        fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+        fn dlclose(handle: *mut c_void) -> c_int;
+        fn dlerror() -> *mut c_char;
+    }
+
+    type HipInit = unsafe extern "C" fn(u32) -> c_int;
+    type HipGetDeviceCount = unsafe extern "C" fn(*mut c_int) -> c_int;
+    type HipSetDevice = unsafe extern "C" fn(c_int) -> c_int;
+    type HipDeviceGetName = unsafe extern "C" fn(*mut c_char, c_int, c_int) -> c_int;
+    type HipDeviceSynchronize = unsafe extern "C" fn() -> c_int;
+    type HipMalloc = unsafe extern "C" fn(*mut *mut c_void, usize) -> c_int;
+    type HipFree = unsafe extern "C" fn(*mut c_void) -> c_int;
+    type HipMemcpy = unsafe extern "C" fn(*mut c_void, *const c_void, usize, c_int) -> c_int;
+    type HipGetErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
+    type HipModuleLoadData = unsafe extern "C" fn(*mut *mut c_void, *const c_void) -> c_int;
+    type HipModuleGetFunction =
+        unsafe extern "C" fn(*mut *mut c_void, *mut c_void, *const c_char) -> c_int;
+    type HipModuleLaunchKernel = unsafe extern "C" fn(
+        *mut c_void,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        *mut c_void,
+        *mut *mut c_void,
+        *mut *mut c_void,
+    ) -> c_int;
+    type HipModuleUnload = unsafe extern "C" fn(*mut c_void) -> c_int;
+
+    type RtcCreateProgram = unsafe extern "C" fn(
+        *mut *mut c_void,
+        *const c_char,
+        *const c_char,
+        c_int,
+        *const *const c_char,
+        *const *const c_char,
+    ) -> c_int;
+    type RtcCompileProgram =
+        unsafe extern "C" fn(*mut c_void, c_int, *const *const c_char) -> c_int;
+    type RtcSizeQuery = unsafe extern "C" fn(*mut c_void, *mut usize) -> c_int;
+    type RtcWriteText = unsafe extern "C" fn(*mut c_void, *mut c_char) -> c_int;
+    type RtcDestroyProgram = unsafe extern "C" fn(*mut *mut c_void) -> c_int;
+    type RtcGetErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
+
+    /// One `dlopen` handle. Kept alive for as long as any symbol resolved from it
+    /// is callable, which is why every device, module and buffer holds an `Arc`
+    /// of the [`HipApi`] that owns it.
+    struct Library(*mut c_void);
+
+    impl core::fmt::Debug for Library {
+        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            formatter.write_str("Library")
+        }
+    }
+
+    impl Drop for Library {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // SAFETY: the handle came from `dlopen` and is closed exactly once.
+                unsafe { dlclose(self.0) };
+            }
+        }
+    }
+
+    // SAFETY: a `dlopen` handle is process-global library state, not thread-affine
+    // data, and `dlclose` runs only when the last `Arc` owning it drops.
+    unsafe impl Send for Library {}
+    // SAFETY: see above.
+    unsafe impl Sync for Library {}
+
+    fn last_dl_error() -> String {
+        // SAFETY: `dlerror` returns NULL or a NUL-terminated string owned by libdl.
+        let message = unsafe { dlerror() };
+        if message.is_null() {
+            return String::from("unknown dlopen failure");
+        }
+        // SAFETY: non-NULL pointer from `dlerror`, valid until the next libdl call.
+        unsafe { CStr::from_ptr(message) }
+            .to_string_lossy()
+            .into_owned()
+    }
+
+    fn open_library(
+        candidates: &[&'static str],
+        absent: fn(String) -> HipDriverError,
+    ) -> Result<Library, HipDriverError> {
+        let mut tried = Vec::new();
+        for name in candidates {
+            let Ok(name_c) = CString::new(*name) else {
+                continue;
+            };
+            // SAFETY: `name_c` is NUL-terminated and outlives the call.
+            let handle = unsafe { dlopen(name_c.as_ptr(), RTLD_NOW) };
+            if !handle.is_null() {
+                return Ok(Library(handle));
+            }
+            tried.push(format!("{name} ({})", last_dl_error()));
+        }
+        Err(absent(tried.join(", ")))
+    }
+
+    fn resolve<T: Copy>(
+        library: &Library,
+        library_name: &'static str,
+        symbol: &'static str,
+    ) -> Result<T, HipDriverError> {
+        let Ok(symbol_c) = CString::new(symbol) else {
+            return Err(HipDriverError::MissingSymbol {
+                library: library_name,
+                symbol,
+            });
+        };
+        // SAFETY: `library` is open and `symbol_c` is NUL-terminated.
+        let address = unsafe { dlsym(library.0, symbol_c.as_ptr()) };
+        if address.is_null() {
+            return Err(HipDriverError::MissingSymbol {
+                library: library_name,
+                symbol,
+            });
+        }
+        // SAFETY: the caller names `T` as the exported signature of `symbol`; a
+        // function pointer is pointer-sized on every target this crate builds for.
+        Ok(unsafe { core::mem::transmute_copy::<*mut c_void, T>(&address) })
+    }
+
+    /// The resolved ROCm entry points, shared by every device, module and buffer.
+    ///
+    /// Holding the two library handles is what keeps the resolved pointers
+    /// callable for the lifetime of the `Arc`.
+    #[derive(Debug)]
+    pub struct HipApi {
+        _runtime: Library,
+        _rtc: Library,
+        hip_init: HipInit,
+        hip_get_device_count: HipGetDeviceCount,
+        hip_set_device: HipSetDevice,
+        hip_device_get_name: HipDeviceGetName,
+        hip_device_synchronize: HipDeviceSynchronize,
+        hip_malloc: HipMalloc,
+        hip_free: HipFree,
+        hip_memcpy: HipMemcpy,
+        hip_get_error_string: HipGetErrorString,
+        hip_module_load_data: HipModuleLoadData,
+        hip_module_get_function: HipModuleGetFunction,
+        hip_module_launch_kernel: HipModuleLaunchKernel,
+        hip_module_unload: HipModuleUnload,
+        rtc_create_program: RtcCreateProgram,
+        rtc_compile_program: RtcCompileProgram,
+        rtc_get_program_log_size: RtcSizeQuery,
+        rtc_get_program_log: RtcWriteText,
+        rtc_get_code_size: RtcSizeQuery,
+        rtc_get_code: RtcWriteText,
+        rtc_destroy_program: RtcDestroyProgram,
+        rtc_get_error_string: RtcGetErrorString,
+    }
+
+    impl HipApi {
+        /// Resolves the HIP runtime and hipRTC. A host without ROCm installed
+        /// returns [`HipDriverError::RuntimeNotInstalled`] naming every soname
+        /// probed, never a panic and never a link failure.
+        ///
+        /// # Errors
+        /// [`HipDriverError::RuntimeNotInstalled`] or
+        /// [`HipDriverError::RtcNotInstalled`] when a library is absent, and
+        /// [`HipDriverError::MissingSymbol`] when a library resolves but does not
+        /// export a function this boundary needs.
+        pub fn load() -> Result<Arc<Self>, HipDriverError> {
+            let runtime = open_library(&RUNTIME_LIBRARIES, |tried| {
+                HipDriverError::RuntimeNotInstalled { tried }
+            })?;
+            let rtc = open_library(&RTC_LIBRARIES, |tried| HipDriverError::RtcNotInstalled { tried })?;
+            let runtime_name = "libamdhip64";
+            let rtc_name = "libhiprtc";
+            Ok(Arc::new(Self {
+                hip_init: resolve(&runtime, runtime_name, "hipInit")?,
+                hip_get_device_count: resolve(&runtime, runtime_name, "hipGetDeviceCount")?,
+                hip_set_device: resolve(&runtime, runtime_name, "hipSetDevice")?,
+                hip_device_get_name: resolve(&runtime, runtime_name, "hipDeviceGetName")?,
+                hip_device_synchronize: resolve(&runtime, runtime_name, "hipDeviceSynchronize")?,
+                hip_malloc: resolve(&runtime, runtime_name, "hipMalloc")?,
+                hip_free: resolve(&runtime, runtime_name, "hipFree")?,
+                hip_memcpy: resolve(&runtime, runtime_name, "hipMemcpy")?,
+                hip_get_error_string: resolve(&runtime, runtime_name, "hipGetErrorString")?,
+                hip_module_load_data: resolve(&runtime, runtime_name, "hipModuleLoadData")?,
+                hip_module_get_function: resolve(&runtime, runtime_name, "hipModuleGetFunction")?,
+                hip_module_launch_kernel: resolve(&runtime, runtime_name, "hipModuleLaunchKernel")?,
+                hip_module_unload: resolve(&runtime, runtime_name, "hipModuleUnload")?,
+                rtc_create_program: resolve(&rtc, rtc_name, "hiprtcCreateProgram")?,
+                rtc_compile_program: resolve(&rtc, rtc_name, "hiprtcCompileProgram")?,
+                rtc_get_program_log_size: resolve(&rtc, rtc_name, "hiprtcGetProgramLogSize")?,
+                rtc_get_program_log: resolve(&rtc, rtc_name, "hiprtcGetProgramLog")?,
+                rtc_get_code_size: resolve(&rtc, rtc_name, "hiprtcGetCodeSize")?,
+                rtc_get_code: resolve(&rtc, rtc_name, "hiprtcGetCode")?,
+                rtc_destroy_program: resolve(&rtc, rtc_name, "hiprtcDestroyProgram")?,
+                rtc_get_error_string: resolve(&rtc, rtc_name, "hiprtcGetErrorString")?,
+                _runtime: runtime,
+                _rtc: rtc,
+            }))
+        }
+
+        /// Whether the ROCm runtime resolves on this host. A caller choosing
+        /// between drivers before any device work reads this.
+        #[must_use]
+        pub fn is_available() -> bool {
+            Self::load().is_ok()
+        }
+
+        fn runtime_error(&self, call: &'static str, code: c_int) -> HipDriverError {
+            // SAFETY: `hipGetErrorString` returns a NUL-terminated static string
+            // for any code, including one it does not recognize.
+            let message = unsafe { CStr::from_ptr((self.hip_get_error_string)(code)) }
+                .to_string_lossy()
+                .into_owned();
+            HipDriverError::Runtime { call, code, message }
+        }
+
+        fn rtc_error(&self, call: &'static str, code: c_int) -> HipDriverError {
+            // SAFETY: same contract as `hipGetErrorString`.
+            let message = unsafe { CStr::from_ptr((self.rtc_get_error_string)(code)) }
+                .to_string_lossy()
+                .into_owned();
+            HipDriverError::Rtc { call, code, message }
+        }
+
+        fn initialize(&self) -> Result<(), HipDriverError> {
+            // SAFETY: `hipInit` takes a flags word that must be 0.
+            let status = unsafe { (self.hip_init)(0) };
+            if status != HIP_SUCCESS {
+                return Err(self.runtime_error("hipInit", status));
+            }
+            Ok(())
+        }
+
+        fn device_count(&self) -> Result<c_int, HipDriverError> {
+            let mut count: c_int = 0;
+            // SAFETY: `count` is a valid out-parameter.
+            let status = unsafe { (self.hip_get_device_count)(&mut count) };
+            if status != HIP_SUCCESS {
+                return Err(self.runtime_error("hipGetDeviceCount", status));
+            }
+            Ok(count)
+        }
+
+        fn device_name(&self, ordinal: c_int) -> Result<String, HipDriverError> {
+            let mut buffer = [0 as c_char; 256];
+            // SAFETY: `buffer` is 256 bytes, which is the length passed.
+            let status = unsafe { (self.hip_device_get_name)(buffer.as_mut_ptr(), 256, ordinal) };
+            if status != HIP_SUCCESS {
+                return Err(self.runtime_error("hipDeviceGetName", status));
+            }
+            // SAFETY: `hipDeviceGetName` NUL-terminates within the buffer.
+            Ok(unsafe { CStr::from_ptr(buffer.as_ptr()) }
+                .to_string_lossy()
+                .into_owned())
+        }
+    }
+
+    /// A device allocation with the runtime handle that must free it.
+    pub struct HipBuffer {
+        api: Arc<HipApi>,
+        pointer: *mut c_void,
+        bytes: usize,
+    }
+
+    impl core::fmt::Debug for HipBuffer {
+        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            formatter
+                .debug_struct("HipBuffer")
+                .field("bytes", &self.bytes)
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl HipBuffer {
+        #[must_use]
+        pub fn bytes(&self) -> usize {
+            self.bytes
+        }
+    }
+
+    impl Drop for HipBuffer {
+        fn drop(&mut self) {
+            if !self.pointer.is_null() {
+                // SAFETY: the pointer came from `hipMalloc` on the same device and
+                // is freed exactly once, when the last owner drops it.
+                unsafe { (self.api.hip_free)(self.pointer) };
+            }
+        }
+    }
+
+    /// A loaded code object. Dropping it unloads the module, so a function handle
+    /// obtained from it must not outlive it.
+    pub struct HipModule {
+        api: Arc<HipApi>,
+        handle: *mut c_void,
+    }
+
+    impl core::fmt::Debug for HipModule {
+        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+            formatter.write_str("HipModule")
+        }
+    }
+
+    impl HipModule {
+        /// The entry point `name` inside this module.
+        ///
+        /// # Errors
+        /// [`HipDriverError::Runtime`] when the module has no such symbol.
+        pub fn function(&self, name: &str) -> Result<*mut c_void, HipDriverError> {
+            let Ok(name_c) = CString::new(name) else {
+                return Err(HipDriverError::BindingContract);
+            };
+            let mut function = ptr::null_mut();
+            // SAFETY: `self.handle` is a live module; `name_c` is NUL-terminated.
+            let status =
+                unsafe { (self.api.hip_module_get_function)(&mut function, self.handle, name_c.as_ptr()) };
+            if status != HIP_SUCCESS {
+                return Err(self.api.runtime_error("hipModuleGetFunction", status));
+            }
+            Ok(function)
+        }
+    }
+
+    impl Drop for HipModule {
+        fn drop(&mut self) {
+            if !self.handle.is_null() {
+                // SAFETY: the handle came from `hipModuleLoadData` and is unloaded once.
+                unsafe { (self.api.hip_module_unload)(self.handle) };
+            }
+        }
+    }
+
+    /// One ROCm device, resolved through the runtime API.
+    #[derive(Debug)]
+    pub struct HipDevice {
+        api: Arc<HipApi>,
+        ordinal: c_int,
+        name: String,
+    }
+
+    impl HipDevice {
+        /// The devices this host exposes. An empty vector means the runtime loaded
+        /// but sees no GPU.
+        ///
+        /// # Errors
+        /// [`HipDriverError::Runtime`] when `hipInit` or `hipGetDeviceCount` fails.
+        pub fn devices() -> Result<Vec<String>, HipDriverError> {
+            let api = HipApi::load()?;
+            api.initialize()?;
+            let count = api.device_count()?;
+            (0..count).map(|ordinal| api.device_name(ordinal)).collect()
+        }
+
+        /// Opens `ordinal`, making it the current device for every launch issued
+        /// through this value.
+        ///
+        /// # Errors
+        /// [`HipDriverError::RuntimeNotInstalled`] or
+        /// [`HipDriverError::RtcNotInstalled`] when ROCm is absent,
+        /// [`HipDriverError::DeviceOutOfRange`] past the device count, and
+        /// [`HipDriverError::Runtime`] when the device cannot be selected.
+        pub fn open(ordinal: c_int) -> Result<Self, HipDriverError> {
+            let api = HipApi::load()?;
+            api.initialize()?;
+            let count = api.device_count()?;
+            if ordinal < 0 || ordinal >= count {
+                return Err(HipDriverError::DeviceOutOfRange { ordinal, count });
+            }
+            // SAFETY: the ordinal was bounds-checked against the device count.
+            let status = unsafe { (api.hip_set_device)(ordinal) };
+            if status != HIP_SUCCESS {
+                return Err(api.runtime_error("hipSetDevice", status));
+            }
+            let name = api.device_name(ordinal)?;
+            Ok(Self { api, ordinal, name })
+        }
+
+        #[must_use]
+        pub fn name(&self) -> &str {
+            &self.name
+        }
+
+        #[must_use]
+        pub fn ordinal(&self) -> c_int {
+            self.ordinal
+        }
+
+        #[must_use]
+        pub fn api(&self) -> &Arc<HipApi> {
+            &self.api
+        }
+
+        /// Compiles HIP C++ to a loadable code object.
+        ///
+        /// # Errors
+        /// [`HipDriverError::CompileLog`] with the compiler's own log when the
+        /// source is rejected, [`HipDriverError::Rtc`] when hipRTC itself fails,
+        /// and [`HipDriverError::Runtime`] when the object cannot be loaded.
+        pub fn compile(&self, source: &str, options: &[&str]) -> Result<HipModule, HipDriverError> {
+            let Ok(source_c) = CString::new(source) else {
+                return Err(HipDriverError::BindingContract);
+            };
+            let Ok(name_c) = CString::new("proxima_hip") else {
+                return Err(HipDriverError::BindingContract);
+            };
+            let mut program = ptr::null_mut();
+            // SAFETY: all pointers are valid for the duration of the call; there
+            // are no header sources, so those arrays are NULL/0.
+            let status = unsafe {
+                (self.api.rtc_create_program)(
+                    &mut program,
+                    source_c.as_ptr(),
+                    name_c.as_ptr(),
+                    0,
+                    ptr::null(),
+                    ptr::null(),
+                )
+            };
+            if status != RTC_SUCCESS {
+                return Err(self.api.rtc_error("hiprtcCreateProgram", status));
+            }
+
+            let options_c = options
+                .iter()
+                .filter_map(|option| CString::new(*option).ok())
+                .collect::<Vec<_>>();
+            let option_pointers = options_c
+                .iter()
+                .map(|option| option.as_ptr())
+                .collect::<Vec<_>>();
+            let option_count = c_int::try_from(option_pointers.len()).unwrap_or(c_int::MAX);
+            // SAFETY: `program` is live; every option pointer is NUL-terminated
+            // and outlives the call.
+            let status = unsafe {
+                (self.api.rtc_compile_program)(program, option_count, option_pointers.as_ptr())
+            };
+            if status != RTC_SUCCESS {
+                let log = self.program_log(program);
+                // SAFETY: `program` is live and is destroyed exactly once.
+                unsafe { (self.api.rtc_destroy_program)(&mut program) };
+                return Err(HipDriverError::CompileLog { log });
+            }
+
+            let mut code_size: usize = 0;
+            // SAFETY: `program` is live and `code_size` is a valid out-parameter.
+            let status = unsafe { (self.api.rtc_get_code_size)(program, &mut code_size) };
+            if status != RTC_SUCCESS {
+                // SAFETY: `program` is live and is destroyed exactly once.
+                unsafe { (self.api.rtc_destroy_program)(&mut program) };
+                return Err(self.api.rtc_error("hiprtcGetCodeSize", status));
+            }
+            let mut code = vec![0u8; code_size];
+            // SAFETY: the buffer is exactly `code_size` bytes, as the API expects.
+            let status = unsafe { (self.api.rtc_get_code)(program, code.as_mut_ptr().cast::<c_char>()) };
+            // SAFETY: `program` is live and is destroyed exactly once.
+            unsafe { (self.api.rtc_destroy_program)(&mut program) };
+            if status != RTC_SUCCESS {
+                return Err(self.api.rtc_error("hiprtcGetCode", status));
+            }
+
+            let mut handle = ptr::null_mut();
+            // SAFETY: `code` holds a complete code object; HIP copies it.
+            let status =
+                unsafe { (self.api.hip_module_load_data)(&mut handle, code.as_ptr().cast::<c_void>()) };
+            if status != HIP_SUCCESS {
+                return Err(self.api.runtime_error("hipModuleLoadData", status));
+            }
+            Ok(HipModule {
+                api: Arc::clone(&self.api),
+                handle,
+            })
+        }
+
+        fn program_log(&self, program: *mut c_void) -> String {
+            let mut size: usize = 0;
+            // SAFETY: `program` is live and `size` is a valid out-parameter.
+            let status = unsafe { (self.api.rtc_get_program_log_size)(program, &mut size) };
+            if status != RTC_SUCCESS || size == 0 {
+                return String::from("hipRTC produced no log");
+            }
+            let mut log = vec![0 as c_char; size];
+            // SAFETY: the buffer is exactly `size` bytes, which is what the API writes.
+            let status = unsafe { (self.api.rtc_get_program_log)(program, log.as_mut_ptr()) };
+            if status != RTC_SUCCESS {
+                return String::from("hipRTC produced an unreadable log");
+            }
+            // SAFETY: the log is NUL-terminated within `size` bytes.
+            unsafe { CStr::from_ptr(log.as_ptr()) }
+                .to_string_lossy()
+                .into_owned()
+        }
+
+        /// Uploads `values` as an `f32` device buffer.
+        ///
+        /// # Errors
+        /// [`HipDriverError::Runtime`] when the allocation or copy fails.
+        pub fn upload_f32(&self, values: &[f32]) -> Result<HipBuffer, HipDriverError> {
+            self.upload_bytes(f32_as_bytes(values))
+        }
+
+        /// Uploads raw bytes (uniforms, packed weight blocks).
+        ///
+        /// # Errors
+        /// [`HipDriverError::Runtime`] when the allocation or copy fails.
+        pub fn upload_bytes(&self, bytes: &[u8]) -> Result<HipBuffer, HipDriverError> {
+            let requested = bytes.len().max(1);
+            let mut pointer = ptr::null_mut();
+            // SAFETY: `pointer` is a valid out-parameter.
+            let status = unsafe { (self.api.hip_malloc)(&mut pointer, requested) };
+            if status != HIP_SUCCESS {
+                return Err(self.api.runtime_error("hipMalloc", status));
+            }
+            let buffer = HipBuffer {
+                api: Arc::clone(&self.api),
+                pointer,
+                bytes: requested,
+            };
+            if !bytes.is_empty() {
+                // SAFETY: `pointer` holds `requested >= bytes.len()` bytes.
+                let status = unsafe {
+                    (self.api.hip_memcpy)(
+                        pointer,
+                        bytes.as_ptr().cast::<c_void>(),
+                        bytes.len(),
+                        MEMCPY_HOST_TO_DEVICE,
+                    )
+                };
+                if status != HIP_SUCCESS {
+                    return Err(self.api.runtime_error("hipMemcpy", status));
+                }
+            }
+            Ok(buffer)
+        }
+
+        /// Allocates a zeroed `f32` buffer of `elements`.
+        ///
+        /// # Errors
+        /// [`HipDriverError::Runtime`] when the allocation fails.
+        pub fn allocate_f32(&self, elements: usize) -> Result<HipBuffer, HipDriverError> {
+            let bytes = elements
+                .checked_mul(core::mem::size_of::<f32>())
+                .ok_or(HipDriverError::InputTooLarge(elements))?;
+            self.upload_bytes(&vec![0u8; bytes])
+        }
+
+        /// Reads `elements` `f32` values back from `buffer`.
+        ///
+        /// # Errors
+        /// [`HipDriverError::InputTooLarge`] when the request exceeds the
+        /// allocation, [`HipDriverError::Runtime`] when the copy fails.
+        pub fn download_f32(
+            &self,
+            buffer: &HipBuffer,
+            elements: usize,
+        ) -> Result<Vec<f32>, HipDriverError> {
+            let bytes = elements
+                .checked_mul(core::mem::size_of::<f32>())
+                .ok_or(HipDriverError::InputTooLarge(elements))?;
+            if bytes > buffer.bytes {
+                return Err(HipDriverError::InputTooLarge(elements));
+            }
+            let mut values = vec![0f32; elements];
+            // SAFETY: the destination holds `bytes`, and the source allocation is
+            // at least `bytes` by the check above.
+            let status = unsafe {
+                (self.api.hip_memcpy)(
+                    values.as_mut_ptr().cast::<c_void>(),
+                    buffer.pointer,
+                    bytes,
+                    MEMCPY_DEVICE_TO_HOST,
+                )
+            };
+            if status != HIP_SUCCESS {
+                return Err(self.api.runtime_error("hipMemcpy", status));
+            }
+            Ok(values)
+        }
+
+        /// Blocks until every queued launch on this device has completed.
+        ///
+        /// # Errors
+        /// [`HipDriverError::Runtime`] when synchronization fails.
+        pub fn synchronize(&self) -> Result<(), HipDriverError> {
+            // SAFETY: no arguments beyond the implicit current device.
+            let status = unsafe { (self.api.hip_device_synchronize)() };
+            if status != HIP_SUCCESS {
+                return Err(self.api.runtime_error("hipDeviceSynchronize", status));
+            }
+            Ok(())
+        }
+
+        /// Launches one emitted kernel over `inputs`, returning the output.
+        ///
+        /// The parameter order comes from [`HipKernel::bindings`], never from
+        /// parsing source text: `Input` count must equal `inputs.len()`, followed
+        /// by exactly one `Output` and one `Uniforms`. The output length is
+        /// [`HipKernel::grid`]'s thread count, the same contract the CUDA lane's
+        /// `launch_f32` applies.
+        ///
+        /// # Errors
+        /// [`HipDriverError::BindingContract`] for a kernel outside that contract,
+        /// [`HipDriverError::GridTooLarge`] past the launch index,
+        /// [`HipDriverError::CompileLog`] when the emitted source does not compile,
+        /// and [`HipDriverError::Runtime`] for any device call.
+        pub fn launch_f32(
+            &self,
+            kernel: &HipKernel,
+            inputs: &[&[f32]],
+            uniforms: &[u8],
+        ) -> Result<Vec<f32>, HipDriverError> {
+            check_binding_contract(kernel, inputs.len())?;
+            if kernel.bindings.len() != inputs.len() + 2 {
+                return Err(HipDriverError::ArgumentCountMismatch);
+            }
+            let output_len = usize::try_from(kernel.grid.threads)
+                .map_err(|_| HipDriverError::InputTooLarge(usize::MAX))?;
+            let (blocks, block_width) = launch_geometry(kernel)?;
+
+            let module = self.compile(&kernel.source, &[])?;
+            let function = module.function(&kernel.entry)?;
+
+            let device_inputs = inputs
+                .iter()
+                .map(|input| self.upload_f32(input))
+                .collect::<Result<Vec<_>, _>>()?;
+            let device_output = self.allocate_f32(output_len)?;
+            let device_uniforms = self.upload_bytes(uniforms)?;
+
+            let mut parameters: Vec<*mut c_void> = device_inputs
+                .iter()
+                .map(|input| (&raw const input.pointer).cast_mut().cast::<c_void>())
+                .collect();
+            parameters.push((&raw const device_output.pointer).cast_mut().cast::<c_void>());
+            parameters.push((&raw const device_uniforms.pointer).cast_mut().cast::<c_void>());
+
+            // SAFETY: every parameter points at a live `*mut c_void` holding a
+            // device allocation of the size the emitted kernel expects, and the
+            // block/grid values were derived from the same `grid` the kernel was
+            // emitted for. `blocks` and `block_width` fit `u32` by
+            // `launch_geometry`'s checks.
+            let status = unsafe {
+                (self.api.hip_module_launch_kernel)(
+                    function,
+                    u32::try_from(blocks).unwrap_or(u32::MAX),
+                    1,
+                    1,
+                    u32::try_from(block_width).unwrap_or(u32::MAX),
+                    1,
+                    1,
+                    0,
+                    ptr::null_mut(),
+                    parameters.as_mut_ptr(),
+                    ptr::null_mut(),
+                )
+            };
+            if status != HIP_SUCCESS {
+                return Err(self.api.runtime_error("hipModuleLaunchKernel", status));
+            }
+            self.synchronize()?;
+            self.download_f32(&device_output, output_len)
+        }
+
+        /// The driver-boundary smoke: one add-one kernel through compile, upload,
+        /// launch, synchronize and readback.
+        ///
+        /// # Errors
+        /// As [`HipDevice::launch_f32`], plus [`HipDriverError::InputTooLarge`].
+        pub fn smoke_add_one(&self, input: &[f32]) -> Result<Vec<f32>, HipDriverError> {
+            if input.is_empty() {
+                return Ok(Vec::new());
+            }
+            let kernel = add_one_kernel(input.len());
+            let count =
+                u32::try_from(input.len()).map_err(|_| HipDriverError::InputTooLarge(input.len()))?;
+            let mut uniforms = vec![0u8; core::mem::size_of::<u32>()];
+            uniforms.copy_from_slice(&count.to_ne_bytes());
+            self.launch_f32(&kernel, &[input], &uniforms)
+        }
+    }
+
+    /// The `f32 -> u8` view an upload needs without a `bytemuck` dependency:
+    /// `f32` has no padding and no invalid bit patterns, and the slice is only
+    /// read.
+    fn f32_as_bytes(values: &[f32]) -> &[u8] {
+        // SAFETY: reinterpreting `&[f32]` as `&[u8]` is sound for reads; the
+        // length is scaled by the element size.
+        unsafe { core::slice::from_raw_parts(values.as_ptr().cast::<u8>(), core::mem::size_of_val(values)) }
+    }
+
+    /// (blocks, block width) for one launch, refusing a grid past the launch index.
+    /// HIP's `gridDim.x` ceiling is `2^31 - 1`, the same value the CUDA lane's
+    /// emit-time check uses.
+    fn launch_geometry(kernel: &HipKernel) -> Result<(u64, u64), HipDriverError> {
+        let blocks = kernel.grid.blocks();
+        if blocks > u64::from(i32::MAX as u32) {
+            return Err(HipDriverError::GridTooLarge {
+                threads: kernel.grid.threads,
+            });
+        }
+        Ok((blocks, kernel.grid.block_width_or_default()))
+    }
+
+    /// The launch contract, separated from the device so it is checkable without
+    /// hardware.
+    fn check_binding_contract(kernel: &HipKernel, inputs: usize) -> Result<(), HipDriverError> {
+        let input_count = kernel
+            .bindings
+            .iter()
+            .take_while(|binding| matches!(binding, Binding::Input(_)))
+            .count();
+        let contract = input_count == inputs
+            && matches!(kernel.bindings.get(input_count), Some(Binding::Output(_)))
+            && matches!(
+                kernel.bindings.get(input_count + 1),
+                Some(Binding::Uniforms)
+            );
+        if !contract {
+            return Err(HipDriverError::BindingContract);
+        }
+        Ok(())
+    }
+
+    /// A hand-authored add-one kernel: the driver-boundary oracle, deliberately
+    /// not produced by the emitter so a failure isolates the launch path from the
+    /// renderer. Its layout is the same `inputs, output, uniforms` contract every
+    /// emitted kernel follows.
+    fn add_one_kernel(elements: usize) -> HipKernel {
+        HipKernel {
+            source: String::from(
+                "extern \"C\" __global__ void proxima_add_one(\n\
+                 \x20   const float *in, float *out, const unsigned int *u\n\
+                 ) {\n\
+                 \x20   unsigned int i = blockIdx.x * blockDim.x + threadIdx.x;\n\
+                 \x20   if (i < u[0]) out[i] = in[i] + 1.0f;\n\
+                 }\n",
+            ),
+            entry: String::from("proxima_add_one"),
+            bindings: vec![
+                Binding::Input(proxima_tensor::NodeId(0)),
+                Binding::Output(proxima_tensor::NodeId(1)),
+                Binding::Uniforms,
+            ],
+            grid: crate::cuda::HipGridSpec {
+                threads: elements as u64,
+                block_width: None,
+            },
+            extra_outputs: Vec::new(),
+            prologue: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    mod rocm_tests {
+        use super::*;
+
+        #[test]
+        fn an_absent_runtime_is_a_typed_error_naming_the_sonames_tried() {
+            match HipApi::load() {
+                // a host with ROCm installed: the absent-runtime contract is
+                // unexercised and the device test below is the live one
+                Ok(_) => {}
+                Err(HipDriverError::RuntimeNotInstalled { tried }) => {
+                    assert!(tried.contains("libamdhip64"), "tried: {tried}");
+                }
+                Err(other) => panic!("unexpected load error: {other:?}"),
+            }
+        }
+
+        #[test]
+        fn the_add_one_skeleton_is_inside_the_launch_contract() {
+            let kernel = add_one_kernel(64);
+            check_binding_contract(&kernel, 1).expect("one input, one output, uniforms");
+        }
+
+        #[test]
+        fn a_kernel_without_a_uniforms_slot_is_refused() {
+            let mut kernel = add_one_kernel(64);
+            kernel.bindings.pop();
+            assert!(matches!(
+                check_binding_contract(&kernel, 1),
+                Err(HipDriverError::BindingContract)
+            ));
+        }
+
+        #[test]
+        fn a_kernel_with_the_wrong_input_count_is_refused() {
+            let kernel = add_one_kernel(64);
+            assert!(matches!(
+                check_binding_contract(&kernel, 0),
+                Err(HipDriverError::BindingContract)
+            ));
+            assert!(matches!(
+                check_binding_contract(&kernel, 2),
+                Err(HipDriverError::BindingContract)
+            ));
+        }
+
+        #[test]
+        fn launch_geometry_covers_every_thread_at_the_default_block_width() {
+            let mut kernel = add_one_kernel(1000);
+            let (blocks, width) = launch_geometry(&kernel).expect("a 1000-thread launch fits");
+            assert_eq!(width, crate::cuda::DEFAULT_BLOCK_WIDTH);
+            assert_eq!(blocks, 1000u64.div_ceil(crate::cuda::DEFAULT_BLOCK_WIDTH));
+
+            kernel.grid.block_width = Some(64);
+            let (blocks, width) = launch_geometry(&kernel).expect("a pinned-width launch fits");
+            assert_eq!(width, 64);
+            assert_eq!(blocks, 16);
+        }
+
+        #[test]
+        fn a_launch_past_the_grid_index_is_refused_before_any_device_call() {
+            let mut kernel = add_one_kernel(1);
+            kernel.grid.threads =
+                (u64::from(i32::MAX as u32) + 1) * crate::cuda::DEFAULT_BLOCK_WIDTH;
+            assert!(matches!(
+                launch_geometry(&kernel),
+                Err(HipDriverError::GridTooLarge { .. })
+            ));
+        }
+
+        #[test]
+        fn the_smoke_matches_the_host_oracle_when_a_device_is_present() {
+            let Ok(device) = HipDevice::open(0) else {
+                return;
+            };
+            let input = [0.0f32, 1.0, -2.5, 42.0, 1e6];
+            let output = device.smoke_add_one(&input).expect("the smoke kernel runs");
+            assert_eq!(output.len(), input.len());
+            for (index, (found, expected)) in output.iter().zip(input.iter()).enumerate() {
+                assert!(
+                    (found - (expected + 1.0)).abs() < 1e-6,
+                    "element {index}: {found} vs {}",
+                    expected + 1.0
+                );
+            }
+        }
+    }
+}

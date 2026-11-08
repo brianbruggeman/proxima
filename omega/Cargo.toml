@@ -253,11 +253,12 @@ metal = [
 # it carries no second module, feature or crate. `emit_hip_at_wave` names the
 # wavefront width: 64 for CDNA, 32 for RDNA.
 cuda = ["alloc"]
-# Real CUDA driver boundary: NVRTC compiles emitted CUDA C to PTX and cudarc
-# loads/launches it through the CUDA Driver API. The model graph still needs
-# a binding/argument packer before it can use this for full inference; the
-# feature nevertheless makes device initialization and kernel dispatch a real,
-# typed capability rather than leaving CUDA as source text only.
+# Real card-C driver boundary. NVRTC + cudarc compile and launch the CUDA
+# dialect; `cuda_driver::rocm` resolves `libamdhip64`/`libhiprtc` at run time
+# and compiles/launches the HIP dialect without a link-time ROCm dependency.
+# The model graph still needs a binding/argument packer before either can run
+# full inference; the feature makes device initialization and kernel dispatch a
+# real, typed capability rather than leaving both as source text only.
 cuda-driver = [
     "std",
     "cuda",
