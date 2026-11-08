@@ -223,7 +223,6 @@ metal = [
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
     "metal-q4k-ggml-port",
-    "metal-q4_0-native",
     "metal-tiled-gemm",
     "metal-grouped-gemm",
     "metal-attn-split-decode",
@@ -485,6 +484,16 @@ metal-q4k-ggml-port = ["metal"]
 # `docs/model-interop/discipline.md` carries the quiet-box decode-step seal
 # that earned the default).
 metal-q4_0-native = ["metal"]
+# REFERENCE ONLY -- deliberately NOT a member of `metal` (owner direction,
+# 2026-11-08): the ported body exists to be an oracle and a timing comparator for
+# our own Q4_0 matvec, never the shipped path. Enable it explicitly to reproduce
+# the reference numbers; the default build emits our own body.
+#
+# its own discipline row (ROW C4.22) measured the ported geometry at 5.26-5.50 ms
+# for the Q4_0 family against the previous body's 7.33-7.54, and decode
+# 14.86-15.63 against 16.61-17.45 ms/token -- so demoting it is expected to cost
+# roughly 30% on the Q4_0 family until our own body is improved past it. that
+# regression is the point: it makes our body the thing under measurement.
 # Bakes a packed-row-blocked op's flattened reduction length
 # (`reduction_len`, the same product `pack_reduce_uniforms` writes into
 # `u.reduction_total`) as a compiled literal instead of reading the runtime
@@ -789,6 +798,7 @@ toml.workspace = true
 name = "metal_vs_cpu"
 harness = false
 required-features = ["metal"]
+
 
 [[bench]]
 name = "wide_cooperative_reduce"

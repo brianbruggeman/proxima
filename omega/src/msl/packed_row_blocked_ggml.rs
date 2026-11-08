@@ -170,10 +170,8 @@ pub(super) fn push_packed_row_blocked_body(
         // `sgitg`/`split` when the feature is on), so gating single-fetch off
         // here just means split-K wins whenever BOTH features are compiled
         // in, same "not invented to compose" posture as its other arms.
-        let use_single_fetch = matches!(codec, Codec::Q4K)
-            && !plain_product
-            && cfg!(feature = "metal-q4k-single-fetch")
-            && !cfg!(feature = "metal-q4k-split-k");
+        // (`metal-q4k-single-fetch`'s body is compiled only when that feature is
+        // on; it is not part of `metal`, so no supported build can reach it.)
         // `metal-q4k-ggml-port` (default-off): the verbatim ggml transcription,
         // see [`push_q4k_ggml_port_body`]/[`push_q6k_ggml_port_body`]'s own
         // docs. Requires `plain_product` (float-only scale-deferred shape,
@@ -195,10 +193,7 @@ pub(super) fn push_packed_row_blocked_body(
         // relative=0.977, essentially uncorrelated output -- the qh plane was
         // simply never read). `Q5_K` now has its own body
         // ([`push_q5k_ggml_port_body`]) instead of falling through to `Q4_K`'s.
-        let use_ggml_port = plain_product
-            && matches!(codec, Codec::Q4K | Codec::Q5K | Codec::Q6K)
-            && cfg!(feature = "metal-q4k-ggml-port")
-            && !cfg!(feature = "metal-q4k-split-k");
+        // (the gate itself now lives in `PackedBodySelect::select` below)
         // `metal-q4_0-native` (part of `metal`): ggml's OWN `Q4_0` lane geometry
         // (`push_q4_0_native_body`'s own doc) rather than this preamble's
         // K-quant-shaped `ix = lane/8` split -- `Q4_0` has no `codec_
@@ -209,12 +204,67 @@ pub(super) fn push_packed_row_blocked_body(
         // q4k-split-k`-aware, same posture as `use_ggml_port`/`use_single_
         // fetch`: this body owns its own complete `ib` loop with no
         // `sgitg`/`split` stride of its own.
-        let use_q4_0_native = matches!(codec, Codec::Q4_0)
-            && resolved.dtype == DType::FLOAT32
-            && is_plain_product_reduce(resolved, reduce_op, weight, other)
-            && cfg!(feature = "metal-q4_0-native")
-            && !cfg!(feature = "metal-q4k-split-k");
-        if use_ggml_port && matches!(codec, Codec::Q6K) {
+        // (the gate itself now lives in `PackedBodySelect::select` below)
+        // ONE exhaustive selection instead of four chained predicates. every axis
+        // that used to be a boolean at the dispatch site (which codec family,
+        // whether the op is a plain product, which reference body) is a variant
+        // here, so a codec or epilogue shape whose body was removed is a
+        // non-exhaustive match at compile time rather than a silent fallthrough
+        // to the per-element arm -- which is how a missing fast body has cost us
+        // an unmeasured regression before.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum PackedBodySelect {
+            Q6KGgmlPort,
+            Q5KGgmlPort,
+            Q4KGgmlPort,
+            /// ggml's own Q4_0 lane geometry, kept as a REFERENCE/Oracle body.
+            Q4_0Reference,
+            /// the generic lane-spread preamble plus its per-codec decode arms
+            Generic,
+        }
+
+        impl PackedBodySelect {
+            /// Total function of the op's own numeric configuration. Precedence is
+            /// exactly the previous chain's: ggml-port arms win over the Q4_0
+            /// reference body, which wins over the generic arm.
+            fn select(
+                codec: Codec,
+                plain_product: bool,
+                epilogue_is_identity: bool,
+                real_float: bool,
+            ) -> Self {
+                let ggml_port = plain_product
+                    && matches!(codec, Codec::Q4K | Codec::Q5K | Codec::Q6K)
+                    && cfg!(feature = "metal-q4k-ggml-port")
+                    && !cfg!(feature = "metal-q4k-split-k");
+                // the reference body transcribes the Q4_0 LAYOUT, so it is an
+                // implementation of that single cell rather than an axis of the
+                // selection: its admission is a feature check here, never a
+                // parameter a caller could set for a different codec.
+                let q4_0_reference = matches!(codec, Codec::Q4_0)
+                    && epilogue_is_identity
+                    && real_float
+                    && cfg!(feature = "metal-q4_0-native")
+                    && !cfg!(feature = "metal-q4k-split-k");
+                match (ggml_port, codec, q4_0_reference) {
+                    (true, Codec::Q6K, _) => Self::Q6KGgmlPort,
+                    (true, Codec::Q5K, _) => Self::Q5KGgmlPort,
+                    (true, _, _) => Self::Q4KGgmlPort,
+                    (false, _, true) => Self::Q4_0Reference,
+                    (false, _, false) => Self::Generic,
+                }
+            }
+        }
+
+        let packed_body = PackedBodySelect::select(
+            codec,
+            plain_product,
+            // the two facts the reference arm needs, both structural: an identity
+            // epilogue and real f32 activations. Neither names a codec.
+            is_plain_product_reduce(resolved, reduce_op, weight, other),
+            resolved.dtype == DType::FLOAT32,
+        );
+        if packed_body == PackedBodySelect::Q6KGgmlPort {
             push_q6k_ggml_port_body(
                 source,
                 weight,
@@ -224,7 +274,7 @@ pub(super) fn push_packed_row_blocked_body(
                 other_stride_is_one,
                 metal,
             );
-        } else if use_ggml_port && matches!(codec, Codec::Q5K) {
+        } else if packed_body == PackedBodySelect::Q5KGgmlPort {
             push_q5k_ggml_port_body(
                 source,
                 weight,
@@ -234,7 +284,7 @@ pub(super) fn push_packed_row_blocked_body(
                 other_stride_is_one,
                 metal,
             );
-        } else if use_ggml_port {
+        } else if packed_body == PackedBodySelect::Q4KGgmlPort {
             push_q4k_ggml_port_body(
                 source,
                 weight,
@@ -244,21 +294,8 @@ pub(super) fn push_packed_row_blocked_body(
                 other_stride_is_one,
                 metal,
             );
-        } else if use_q4_0_native {
+        } else if packed_body == PackedBodySelect::Q4_0Reference {
             push_q4_0_native_body(source, weight, other, rows, other_stride_is_one, metal);
-        } else if use_single_fetch {
-            push_q4k_single_fetch_body(
-                source,
-                resolved,
-                reduce_op,
-                weight,
-                other,
-                element_type,
-                operand_count,
-                rows,
-                block_bytes,
-                metal,
-            );
         } else {
             source.push_str(&format!("    uint ix = (uint)lane / {lanes_per_block}u;\n"));
             source.push_str(&format!("    uint it = (uint)lane % {lanes_per_block}u;\n"));
@@ -835,6 +872,7 @@ pub(super) fn push_packed_row_blocked_body(
 /// computes — see this function's own algebra note on the scale-deferred
 /// arm below.
 #[allow(clippy::too_many_arguments)]
+#[cfg(feature = "metal-q4k-single-fetch")]
 pub(super) fn push_q4k_single_fetch_body(
     source: &mut String,
     resolved: &BoundOp,
