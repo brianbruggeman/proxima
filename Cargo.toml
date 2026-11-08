@@ -47,6 +47,7 @@ members = [
     "proxima-intercept",
     "proxima-tls",
     "tools/ci-affected",
+    "tools/gguf-kv-extract",
     "tools/proxima-cli",
     "tools/proxima-vm",
     "tools/rekt",

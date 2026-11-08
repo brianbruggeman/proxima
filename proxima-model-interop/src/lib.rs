@@ -67,6 +67,8 @@ mod mapping_residency;
 pub mod mapped_residency;
 #[cfg(feature = "std")]
 pub mod memory_reclaim;
+#[cfg(test)]
+mod oracle_fixtures;
 pub mod pinned_source;
 #[cfg(feature = "std")]
 pub mod recurrent_routed_interval;

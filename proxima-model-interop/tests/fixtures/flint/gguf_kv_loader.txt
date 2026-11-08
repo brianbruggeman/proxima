@@ -1,0 +1,60 @@
+# flint checkpoint header: the real GGUF's own metadata, dumped by llama.cpp's model loader.
+# oracle tool: llama.cpp build b12110, commit cd959bae9 (independent of proxima's parser).
+# capture command: llama-cli -m /Users/brianbruggeman/models/llm/flint-gguf/flint-UD-Q4_K_XL.gguf -p hi -n 1 -ngl 0 -v --log-file <log>
+# model sha256: 63c2ecc461ca545134b670c660e76fa20f47240f8d39b6510bfd21c4dd6e072f
+# model size_bytes: 25054688704
+# llama.cpp truncates every value at 40 chars (llama-model-loader.cpp:815, MAX_VALUE_LEN); the type
+# column keeps each array's element type and exact length, and layer_patterns.txt holds the full
+# per-layer arrays that truncation would otherwise cut.
+- kv   0:                       general.architecture str              = flint
+- kv   1:                               general.type str              = model
+- kv   2:                     general.sampling.top_k i32              = 20
+- kv   3:                     general.sampling.top_p f32              = 0.950000
+- kv   4:                      general.sampling.temp f32              = 1.000000
+- kv   5:                               general.name str              = Flint Preview
+- kv   6:                         general.size_label str              = 256x2.1B
+- kv   7:                            general.license str              = other
+- kv   8:                       general.license.name str              = flint-preview
+- kv   9:                               general.tags arr[str,2]       = ["unsloth", "text-generation"]
+- kv  10:                          flint.block_count u32              = 49
+- kv  11:                       flint.context_length u32              = 262144
+- kv  12:                     flint.embedding_length u32              = 2048
+- kv  13:                  flint.feed_forward_length u32              = 6144
+- kv  14:                 flint.attention.head_count u32              = 32
+- kv  15:              flint.attention.head_count_kv u32              = 4
+- kv  16:                       flint.rope.freq_base f32              = 10000.000000
+- kv  17:     flint.attention.layer_norm_rms_epsilon f32              = 0.000001
+- kv  18:                         flint.expert_count u32              = 256
+- kv  19:                    flint.expert_used_count u32              = 6
+- kv  20:                   flint.expert_gating_func u32              = 2
+- kv  21:                 flint.attention.key_length u32              = 128
+- kv  22:               flint.attention.value_length u32              = 128
+- kv  23:           flint.expert_feed_forward_length u32              = 512
+- kv  24:    flint.expert_shared_feed_forward_length u32              = 1024
+- kv  25:            flint.leading_dense_block_count u32              = 2
+- kv  26:                  flint.expert_shared_count u32              = 2
+- kv  27:                  flint.expert_weights_norm bool             = true
+- kv  28:                 flint.expert_weights_scale f32              = 1.000000
+- kv  29:             flint.attention.sliding_window u32              = 513
+- kv  30:     flint.attention.sliding_window_pattern arr[bool,49]     = [false, false, true, true, true, fals...
+- kv  31:               flint.attention.rope_pattern arr[bool,49]     = [false, false, true, true, true, fals...
+- kv  32:                       tokenizer.ggml.model str              = gpt2
+- kv  33:                         tokenizer.ggml.pre str              = flint
+- kv  34:                      tokenizer.ggml.tokens arr[str,150144]  = ["!", "\"", "#", "$", "%", "&", "'", ...
+- kv  35:                  tokenizer.ggml.token_type arr[i32,150144]  = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, ...
+- kv  36:                      tokenizer.ggml.merges arr[str,149744]  = ["Ġ Ġ", "Ġ t", "ĠĠ ĠĠ", "i n",...
+- kv  37:                tokenizer.ggml.bos_token_id u32              = 150000
+- kv  38:                tokenizer.ggml.eos_token_id u32              = 150001
+- kv  39:            tokenizer.ggml.padding_token_id u32              = 150001
+- kv  40:               tokenizer.ggml.add_bos_token bool             = false
+- kv  41:               tokenizer.ggml.add_eos_token bool             = false
+- kv  42:                    tokenizer.chat_template str              = {%- macro flint_text(t) -%}\n{%- if t ...
+- kv  43:               tokenizer.ggml.eog_token_ids arr[i32,4]       = [150001, 150003, 150005, 150018]
+- kv  44:               general.quantization_version u32              = 2
+- kv  45:                          general.file_type u32              = 15
+- kv  46:                      quantize.imatrix.file str              = flint-preview-GGUF/imatrix_unsloth.gg...
+- kv  47:                   quantize.imatrix.dataset str              = unsloth_calibration_flint-preview.txt
+- kv  48:             quantize.imatrix.entries_count u32              = 531
+- kv  49:              quantize.imatrix.chunks_count u32              = 687
+- kv  50:                       general.quantized_by str              = Unsloth
+- kv  51:                           general.repo_url str              = https://huggingface.co/unsloth

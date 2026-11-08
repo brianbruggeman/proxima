@@ -1,0 +1,10 @@
+# flint checkpoint per-layer arrays, in full: the two 49-entry boolean patterns the reader consumes.
+# captured by tools/gguf-kv-extract, a standalone GGUF header reader that shares no code with
+# proxima-gguf, so the oracle for these entries is not the reader they hold to account. llama.cpp's
+# own model loader corroborates the length and the leading entries in gguf_kv.txt (arr[bool,49]).
+# capture command: cargo run -p gguf-kv-extract -- /Users/brianbruggeman/models/llm/flint-gguf/flint-UD-Q4_K_XL.gguf
+# model sha256: 63c2ecc461ca545134b670c660e76fa20f47240f8d39b6510bfd21c4dd6e072f
+# model size_bytes: 25054688704
+# format: <metadata key> = [<one entry per block, block order>]
+flint.attention.sliding_window_pattern = [false, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, false]
+flint.attention.rope_pattern = [false, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, false]

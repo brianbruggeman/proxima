@@ -1,0 +1,19 @@
+[
+  {
+    "name": "capital_of_france",
+    "prompt": "The capital of France is",
+    "prompt_ids": [630, 6963, 297, 9865, 332],
+    "generated_ids": [12834, 332, 260, 2964, 1382, 90118, 2747, 13, 450, 6963, 297, 9865, 332, 12834, 332, 260],
+    "generated_text": " Paris is a simple true/false question. The capital of France is Paris is a",
+    "llama_build": "b12110",
+    "llama_commit": "cd959bae9",
+    "command": "llama-server -m /Users/brianbruggeman/models/llm/flint-gguf/flint-UD-Q4_K_XL.gguf -c 4096 -ngl 99 --port 18114 --no-warmup --no-webui; POST /completion {\"prompt\":\"The capital of France is\",\"temperature\":0,\"n_predict\":16,\"cache_prompt\":false,\"return_tokens\":true,\"seed\":0}",
+    "sampling": {
+      "temperature": 0,
+      "seed": 0,
+      "n_predict": 16,
+      "cache_prompt": false
+    },
+    "note": "two runs of the identical request returned the identical ids; the header's tokenizer.ggml.add_bos_token is false, so prompt_ids carries no BOS"
+  }
+]
