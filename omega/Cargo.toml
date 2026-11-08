@@ -818,6 +818,10 @@ name = "metal_vs_cpu"
 harness = false
 required-features = ["metal"]
 
+[[bench]]
+name = "attn_single_row"
+harness = false
+required-features = ["metal"]
 
 [[bench]]
 name = "wide_cooperative_reduce"
@@ -831,3 +835,8 @@ required-features = ["cuda-driver", "cpu"]
 [[example]]
 name = "prefill_gemm_int8_probe"
 required-features = ["cuda-driver", "cpu"]
+
+[[bench]]
+name = "q4_0_matvec"
+harness = false
+required-features = ["metal"]
