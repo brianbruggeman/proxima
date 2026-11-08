@@ -86,6 +86,14 @@ pub(super) fn prepare_with_options(
     placed_input_nodes: &[NodeId],
 ) -> Result<Prepared, MetalError> {
     let (numeric_policy, fuse_cached_attention, allow_fusion) = policy;
+    // this driver binds with `accumulator_narrowing` (see below), so an f64
+    // accumulation island never reaches a device buffer: narrow once here so
+    // the dtype gate, the inferred shapes and the bind all read one program
+    let numeric_policy = numeric_policy
+        .with_accumulator_narrowing()
+        .with_flash_narrowing(true);
+    let narrowed = narrow_accumulations(program, numeric_policy);
+    let program: &[Op] = &narrowed;
     #[cfg(feature = "instrument")]
     let infer_started = read_ticks();
     #[allow(unused_mut)]
@@ -176,8 +184,6 @@ pub(super) fn prepare_with_options(
     #[cfg(feature = "instrument")]
     counter!(PREPARE_VALIDATE_TICKS, elapsed_ticks(validate_started));
 
-    // llama.cpp's metal norms sum in float (`ggml-metal/kernels/norm.metal:136-156`)
-    let numeric_policy = numeric_policy.with_accumulator_narrowing().with_flash_narrowing(true);
     #[cfg(feature = "instrument")]
     let bind_started = read_ticks();
     #[cfg(not(feature = "top-fraction-fusion"))]

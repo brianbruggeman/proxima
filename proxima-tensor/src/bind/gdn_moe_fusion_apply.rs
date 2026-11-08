@@ -1742,7 +1742,11 @@ pub(super) fn apply_moe_round_group_fusion(
 /// [`NumericPolicy::accumulator_narrowing`], so a backend whose incumbent sums
 /// its norms in `float` binds the f64 accumulation islands as the f32 chain it
 /// renders; borrowed unchanged otherwise.
-pub(super) fn narrow_accumulations(
+///
+/// Public because a GPU driver applies it once, before its own dtype gate and
+/// its bind: [`bind_unfused`]/[`bind_with_fusion`] narrow internally, so a
+/// gate reading the raw program would reject an island the bind then narrows.
+pub fn narrow_accumulations(
     program: &[Op],
     numeric_policy: NumericPolicy,
 ) -> alloc::borrow::Cow<'_, [Op]> {
