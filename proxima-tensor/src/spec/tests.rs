@@ -19486,6 +19486,45 @@ mod head_repeats {
     }
 }
 
+mod ffn_combination_shapes {
+    use super::head_repeats::{descriptor, digest};
+    use super::*;
+
+    const PARALLEL_DENSE_MOE_NODES: usize = 478;
+    const PARALLEL_DENSE_MOE_DIGEST: u64 = 4080907218641689219;
+
+    /// Gemma 4's combination runs BOTH FFNs and its dense half reads
+    /// `append_dense_swiglu_ffn`, which now delegates to `append_swiglu_ffn`.
+    /// The two `Exclusive` digests below prove the wrapper for one caller; this
+    /// pins the parallel caller's whole program, so the extraction is covered on
+    /// both paths and not argued from one.
+    #[test]
+    fn parallel_dense_moe_program_matches_the_pre_extraction_graph() {
+        let mut gemma = descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
+        gemma.expert_count = 2;
+        gemma.expert_used_count = 1;
+        gemma.expert_feed_forward = 4;
+        for layer in &mut gemma.layers {
+            layer.ffn = LayerFfnConfig {
+                combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
+                    dense_post_norm: true,
+                    routed_post_norm: true,
+                    combined_post_norm: true,
+                    routed_pre_norm: true,
+                    router_scale: true,
+                    expert_output_scale: true,
+                }),
+                ..LayerFfnConfig::exclusive()
+            };
+        }
+
+        let built = build_forward(&gemma).expect("the parallel descriptor lowers");
+
+        assert_eq!(built.program.len(), PARALLEL_DENSE_MOE_NODES);
+        assert_eq!(digest(&built.program), PARALLEL_DENSE_MOE_DIGEST);
+    }
+}
+
 mod forward_scales {
     use super::head_repeats::digest;
     use super::*;
