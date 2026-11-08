@@ -14,7 +14,8 @@ use proxima_autograd::adjoint::{Differentiated, GatheredContribution, differenti
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_autograd::sparse::dedupe_and_sum_rows;
 use proxima_tensor::cpu::{
-    ExpertEntry, ExpertSource, QuantizedBlock, evaluate_quantized_named_with_scratch_and_experts,
+    BufferPools, ExpertEntry, ExpertSource, QuantizedBlock,
+    evaluate_quantized_named_with_scratch_and_experts,
 };
 use proxima_tensor::map::{AxisIndex, AxisTerm, IndexPattern};
 use proxima_tensor::op::{self, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
@@ -388,7 +389,7 @@ fn run_cpu(
         &[],
         &named,
         &outputs,
-        &mut Vec::new(),
+        &mut BufferPools::default(),
         &mut None,
         Some(&expert_sources),
     )
@@ -1256,7 +1257,7 @@ fn run_pilot_batch(
                 &[],
                 &named,
                 &outputs,
-                &mut Vec::new(),
+                &mut BufferPools::default(),
                 &mut None,
                 Some(&expert_sources),
             )
@@ -1508,7 +1509,7 @@ fn evaluate_pilot_cpu(
         &[],
         &named,
         &outputs,
-        &mut Vec::new(),
+        &mut BufferPools::default(),
         &mut None,
         Some(&expert_sources),
     )

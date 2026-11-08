@@ -6514,7 +6514,9 @@ pub(super) mod horizontal_merge_grouping_tests {
 pub(super) mod attention_scratch_len_tests {
     use alloc::vec;
 
-    use proxima_tensor::{BoundOpKind, DType, Layout, NodeId, NumericPolicy};
+    use proxima_tensor::{
+        BoundOpKind, CachedAttentionArithmetic, DType, Layout, NodeId, NumericPolicy,
+    };
 
     #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
     use crate::msl::AttentionRowSchedule;
@@ -6564,6 +6566,7 @@ pub(super) mod attention_scratch_len_tests {
                 scale: 0.5,
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
+                arithmetic: CachedAttentionArithmetic::OnlineF32,
             },
         }
     }
@@ -6699,6 +6702,7 @@ pub(super) mod attention_scratch_len_tests {
                 scale: 1.0,
                 cached_lower_inclusive: if head_dim == 256 { -511 } else { i64::MIN },
                 new_upper_inclusive: 0,
+                arithmetic: CachedAttentionArithmetic::OnlineF32,
             },
         }
     }
