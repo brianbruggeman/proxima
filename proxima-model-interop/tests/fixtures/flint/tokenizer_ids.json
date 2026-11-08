@@ -1,0 +1,11 @@
+[
+  {
+    "name": "flint_window_sentence",
+    "text": "The flint checkpoint has 49 blocks, 256 experts (6 used), and a 513-token window.\n",
+    "ids": [630, 123339, 42559, 648, 220, 1529, 8894, 11, 220, 4892, 9097, 330, 21, 1066, 651, 299, 260, 220, 14138, 62817, 4350, 501],
+    "llama_build": "b12110",
+    "llama_commit": "cd959bae9",
+    "command": "llama-server -m /Users/brianbruggeman/models/llm/flint-gguf/flint-UD-Q4_K_XL.gguf -c 4096 -ngl 99 --port 18114 --no-warmup --no-webui; POST /tokenize {\"content\":\"The flint checkpoint has 49 blocks, 256 experts (6 used), and a 513-token window.\\n\"}",
+    "note": "tokenizer.ggml.pre is flint, tokenizer.ggml.model is gpt2, and add_bos_token is false, so the ids carry no BOS"
+  }
+]

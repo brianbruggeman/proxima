@@ -1,0 +1,16 @@
+[package]
+name = "gguf-kv-extract"
+description = "Print a GGUF header's boolean per-layer arrays without sharing code with proxima-gguf"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "gguf-kv-extract"
+path = "src/main.rs"
+
+[lints]
+workspace = true
