@@ -743,7 +743,11 @@ impl Shared<'_> {
     }
 }
 
-#[cfg(test)]
+// The AVX2 arm is the only one that runs a different implementation from the
+// scalar twin it is compared against, so this module exists where that arm can
+// be selected; the aarch64 twins are checked against their hand-expanded macro
+// sequences in `aarch64_twin_tests` instead.
+#[cfg(all(test, not(target_arch = "aarch64")))]
 mod tests {
     use super::*;
 
@@ -968,7 +972,7 @@ mod aarch64_twin_tests {
         values.extend(core::iter::repeat_n(0.75f32, 32));
         let key = bits(&values);
         let query = bits(&[1.0; 64]);
-        let avx = scalar::dot(&key, &query);
+        let avx = HalfKernels::Scalar.dot(&key, &query);
         let fp16 = neon_twin::dot_fp16(&key, &query);
         assert_ne!(avx.to_bits(), fp16.to_bits(), "the f16 accumulating dot must visibly differ from the f32 accumulating one");
     }
@@ -1029,6 +1033,9 @@ mod pairing_order_tests {
                 CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },
             ],
         };
+        // the reference runs the same kernel family the op does, so this
+        // comparison isolates memory order from accumulation precision
+        let kernels = HalfKernels::detect();
         let reference = |interleaved: bool| -> alloc::vec::Vec<u32> {
             let mut query = alloc::vec![0f32; head_dim];
             assemble_head(&mut query, &query_even, &query_odd, None, interleaved);
@@ -1039,17 +1046,17 @@ mod pairing_order_tests {
                 let mut row = alloc::vec![0f32; head_dim];
                 assemble_head(&mut row, &key_even[key * pair..][..pair], &key_odd[key * pair..][..pair], None, interleaved);
                 let row: alloc::vec::Vec<u16> = row.iter().map(|value| half_bits(*value)).collect();
-                let weighted = scalar::dot(&row, &query) * 0.125;
+                let weighted = kernels.dot(&row, &query) * 0.125;
                 let (mut rescale, mut weight) = (1.0f32, 1.0f32);
                 if weighted > max {
                     rescale = expf(max - weighted);
                     max = weighted;
-                    scalar::scale(&mut accumulator, rescale);
+                    kernels.scale(&mut accumulator, rescale);
                 } else {
                     weight = expf(weighted - max);
                 }
                 let value: alloc::vec::Vec<u16> = values[key * head_dim..][..head_dim].iter().map(|raw| half_bits(*raw)).collect();
-                scalar::mad(&mut accumulator, &value, weight);
+                kernels.mad(&mut accumulator, &value, weight);
                 sum = sum * rescale + weight;
             }
             accumulator.iter().map(|bits| (half_value(*bits) * (1.0 / sum)).to_bits()).collect()
@@ -1077,7 +1084,7 @@ mod pairing_order_tests {
             let mut row = alloc::vec![0f32; head_dim];
             assemble_head(&mut row, &key_even[key * pair..][..pair], &key_odd[key * pair..][..pair], None, interleaved);
             let to_bits = |values: &[f32]| values.iter().map(|value| half_bits(*value)).collect::<alloc::vec::Vec<u16>>();
-            scalar::dot(&to_bits(&row), &to_bits(&query)).to_bits()
+            kernels.dot(&to_bits(&row), &to_bits(&query)).to_bits()
         };
         let differing_keys = (0..keys).filter(|key| dot_in(false, *key) != dot_in(true, *key)).count();
         assert!(differing_keys > 0, "summing the same products in the two memory orders must round differently for some key");

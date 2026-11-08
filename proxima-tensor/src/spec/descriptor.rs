@@ -679,6 +679,7 @@ pub fn gqa_descriptor_from_shape(
         score_scale: profile.score_scale(head_dim),
         value_norm: profile.value_norm,
         qk_norm,
+        attention_sinks: false,
     };
 
     let layers: Vec<LayerSchedule> = (0..block_count)
@@ -1059,6 +1060,21 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
             // structurally wrong program with no error at all, the exact
             // failure mode `TensorError::UnsupportedInBuilder`'s own doc
             // says to raise instead of work around.
+            // A sink-bearing schedule is refused before the uniformity gate so
+            // the error names the missing capability rather than "make your
+            // layers agree": this engine has no per-layer attention channel
+            // beyond the mask window, and a program that binds the tensor but
+            // never adds it to the denominator would produce wrong logits with
+            // no error anywhere. Every layer is checked, not just the first, so
+            // a schedule that sets the knob only on a later layer is still named.
+            refuse_when(
+                descriptor
+                    .layers
+                    .iter()
+                    .any(|layer| layer.attention.attention_sinks),
+                "build_forward(CacheMask::Bounded)",
+                "attention sinks (this engine has no per-layer sink channel)",
+            )?;
             if descriptor.layers.iter().any(|layer| {
                 LayerAttentionConfig {
                     mask_window: first.attention.mask_window,

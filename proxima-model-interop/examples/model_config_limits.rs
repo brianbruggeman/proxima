@@ -55,6 +55,17 @@ fn main() {
         refusal_of(&split_half)
     );
 
+    let sinks = with_layers(granite(), |layer| LayerSchedule {
+        attention: LayerAttentionConfig {
+            attention_sinks: true,
+            ..layer.attention.clone()
+        },
+        ..layer.clone()
+    });
+    let sinks_refusal = refusal_of(&sinks);
+    assert!(sinks_refusal.contains("attention sinks"), "{sinks_refusal}");
+    println!("per-head attention sinks on the bounded cache engine: {sinks_refusal}");
+
     let padded = ModelDescriptor {
         cache_mask: CacheMask::Padded,
         ..granite()

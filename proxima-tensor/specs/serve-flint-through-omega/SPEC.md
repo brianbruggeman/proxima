@@ -26,7 +26,7 @@ premise: the spec must be replaced by an engine-redesign spec rather than patche
 | R2 | The generic sliding-pattern header reader builds a descriptor for a checkpoint that omits `attention.key_length_swa`, `attention.value_length_swa`, and `rope.dimension_count`; the descriptor reports key/value length 128 and rope dimension 128 on both sliding and full layers (literal values from the flint header), explicit swa keys still win, and the gemma4 fixture reports its own literal values. | yes |
 | R3 | The generic reader reads `leading_dense_block_count=2`, `expert_shared_count=2`, `expert_shared_feed_forward_length=1024`, and `expert_gating_func` (generic value table) from the flint header, and records sink presence from a `blk.0.attn_sinks.weight` leaf; absent keys keep pre-change defaults. | yes |
 | R4 | `{arch}.attention.rope_pattern` selects rope per layer from data; the flint descriptor's per-layer selection equals the committed 49-entry array, and a checkpoint without the key is unchanged. | yes |
-| R5 | The scheduled engine lowers `FfnCombination::RoutedWithSharedExpert` (replacing the refusal at `proxima-tensor/src/spec/attention_forward.rs:1301`) through the generic shared-expert primitives, selected by profile data, and the resulting FFN output equals a hand-worked literal reference for one synthetic layer; dense-only and routed-only programs are unchanged. | yes |
+| R5 | The scheduled engine lowers `FfnCombination::RoutedWithSharedExpert` (replacing the refusal at `proxima-tensor/src/spec/attention_forward.rs:1332`) through the generic shared-expert primitives, selected by profile data, and the resulting FFN output equals a hand-worked literal reference for one synthetic layer; dense-only and routed-only programs are unchanged. | yes |
 | R6 | Attention sinks are a generic capability: a descriptor knob (default off), a `blk.{layer}.attn_sinks.weight` program leaf, a CPU evaluator equal to a hand-worked softmax-with-sink literal, and omega MSL emission equal to that same literal on Metal. | yes |
 | R7 | Loading the real flint GGUF binds all 779 tensors with zero `UnknownTensor`, zero unbound leaves, and zero unclaimed tensors. | yes |
 | R8 | Flint's non-header values live only in `proxima-model-interop/src/profiles/flint.toml`; no non-test source file outside `profiles/` contains the literal `flint`. Test code may name the family and its keys, because asserting them is the test's job; the scan AC reads non-test source only. | yes |
@@ -156,7 +156,7 @@ Source pointers (absolute):
 
 - `/Users/brianbruggeman/repos/slot-0/proxima/proxima-model-interop/src/profiles/mod.rs`
 - `/Users/brianbruggeman/repos/slot-0/proxima/proxima-model-interop/src/sliding_pattern/hparams.rs`
-- `/Users/brianbruggeman/repos/slot-0/proxima/proxima-tensor/src/spec/attention_forward.rs:1301`
+- `/Users/brianbruggeman/repos/slot-0/proxima/proxima-tensor/src/spec/attention_forward.rs:1332`
 - `/Users/brianbruggeman/repos/slot-0/proxima/proxima-tensor/src/spec/descriptor.rs:148`
 - `/Users/brianbruggeman/repos/slot-0/proxima/proxima-model-interop/src/generate/pregather.rs:2746`
 - `/Users/brianbruggeman/repos/slot-0/proxima/proxima-tokenizer/src/gguf.rs:17-62`

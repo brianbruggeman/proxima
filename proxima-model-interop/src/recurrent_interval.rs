@@ -381,6 +381,7 @@ pub fn descriptor_from_architecture(
         score_scale: profile.score_scale(architecture.attn_head_dim),
         value_norm: profile.value_norm,
         qk_norm: profile.qk_norm,
+        attention_sinks: false,
     };
     let ffn = profile.layer_ffn(0);
     let layers = architecture

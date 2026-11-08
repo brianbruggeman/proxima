@@ -517,10 +517,42 @@ pub struct LayerAttentionConfig {
     /// the choice was data.
     #[serde(default = "default_qk_norm")]
     pub qk_norm: bool,
+    /// Per-head attention sink weight: one learned scalar per query head, the
+    /// checkpoint's `blk.{layer}.attn_sinks.weight` leaf (flint carries one on
+    /// every block, dims `(32,)` = one per query head) that the attention
+    /// denominator will read as an extra addend before the value mix. This
+    /// field declares the leaf, and the binder binds it; no emitted program
+    /// reads it yet, so setting it changes the leaf set and not a single
+    /// number. `false` -- and
+    /// an absent key in a config file -- declares no leaf, which is the node
+    /// set every schedule had before sinks were data. Declared by every
+    /// lowerer that reads this config per layer (the scheduled prefill builder,
+    /// both cached scheduled builders, both hybrid builders); the positional
+    /// builders carry no per-layer attention config beyond the mask window, and
+    /// the bounded engine refuses a schedule that sets this rather than binding
+    /// a leaf no term reads -- recorded in the spec's open items.
+    #[serde(default)]
+    pub attention_sinks: bool,
 }
 
 pub(super) const fn default_qk_norm() -> bool {
     true
+}
+
+/// Declares [`LayerAttentionConfig::attention_sinks`]'s weight leaf, the tensor
+/// the attention denominator will read as an extra addend. Nothing reads the
+/// node yet, so it is a declaration only: what it changes is the program's leaf
+/// set, which is what the checkpoint directory is compared against -- that
+/// comparison is not built yet, and lands with the bind census. An `Op::Input`
+/// emits no [`BoundOp`](crate::bind::BoundOp), so the extra node adds no
+/// dispatch at all -- only the resident binding.
+pub(super) fn declare_attention_sink_leaf(program: &mut Vec<Op>, layer: u32, query_heads: u32) {
+    let _ = input_leaf(
+        program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(query_heads)],
+        &alloc::format!("blk.{layer}.attn_sinks.weight"),
+    );
 }
 
 /// One block's complete per-layer choice -- [`scheduled_forward_program_with_experts`]
@@ -2028,6 +2060,9 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                     ],
                     &alloc::format!("blk.{layer}.attn_q.weight"),
                 );
+                if config.attention_sinks {
+                    declare_attention_sink_leaf(&mut program, layer, query_heads);
+                }
                 let key_source = match config.key_source_kind {
                     KeySourceKind::ProjectedK => {
                         let wk = input_leaf(
@@ -3234,6 +3269,7 @@ pub fn recurrent_interval_forward_program_with_last_row(
         score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(attn_head_dim),
         value_norm: false,
         qk_norm: true,
+        attention_sinks: false,
     };
     let layers = (0..block_count)
         .map(|layer| LayerSchedule {
