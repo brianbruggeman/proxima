@@ -1221,20 +1221,20 @@ pub(crate) fn append_swiglu_ffn(
 /// # Errors
 ///
 /// [`TensorError`] when a map or extent fails to build, or when
-/// `shared_feed_forward` is `0` -- a routed-with-shared layer whose header
-/// names no shared width cannot lower.
+/// `shared_feed_forward`'s width is `0` -- a routed-with-shared layer whose
+/// header names no shared width cannot lower.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn append_shared_expert_ffn(
     program: &mut Vec<Op>,
     layer: u32,
     normed: NodeId,
     embedding: u32,
-    shared_feed_forward: u32,
+    shared_feed_forward: SharedExpertWidth,
     ones: NodeId,
     activation: Activation,
     gated: bool,
 ) -> Result<NodeId, TensorError> {
-    if shared_feed_forward == 0 {
+    if shared_feed_forward.0 == 0 {
         return Err(TensorError::UnsupportedInBuilder {
             builder: "append_shared_expert_ffn",
             feature: "a shared expert with no expert_shared_feed_forward width",
@@ -1245,7 +1245,7 @@ pub(crate) fn append_shared_expert_ffn(
         DType::FLOAT32,
         alloc::vec![
             Extent::Static(embedding),
-            Extent::Static(shared_feed_forward)
+            Extent::Static(shared_feed_forward.0)
         ],
         &alloc::format!("blk.{layer}.ffn_gate_shexp.weight"),
     );
@@ -1254,7 +1254,7 @@ pub(crate) fn append_shared_expert_ffn(
         DType::FLOAT32,
         alloc::vec![
             Extent::Static(embedding),
-            Extent::Static(shared_feed_forward)
+            Extent::Static(shared_feed_forward.0)
         ],
         &alloc::format!("blk.{layer}.ffn_up_shexp.weight"),
     );
@@ -1262,7 +1262,7 @@ pub(crate) fn append_shared_expert_ffn(
         program,
         DType::FLOAT32,
         alloc::vec![
-            Extent::Static(shared_feed_forward),
+            Extent::Static(shared_feed_forward.0),
             Extent::Static(embedding)
         ],
         &alloc::format!("blk.{layer}.ffn_down_shexp.weight"),
@@ -1566,7 +1566,7 @@ pub(crate) fn append_layer_ffn(
                         layer,
                         normed2,
                         embedding,
-                        expert_shared_feed_forward.0,
+                        expert_shared_feed_forward,
                         ones,
                         ffn_config.activation,
                         ffn_config.shared_expert_gate,
