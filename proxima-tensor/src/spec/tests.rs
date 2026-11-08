@@ -21839,10 +21839,7 @@ mod routed_with_shared_expert {
             ),
         ];
         if gated {
-            named.push((
-                tensor("ffn_gate_inp_shexp.weight"),
-                alloc::vec![1.0, 0.5],
-            ));
+            named.push((tensor("ffn_gate_inp_shexp.weight"), alloc::vec![1.0, 0.5]));
         }
         named
     }
