@@ -15808,7 +15808,9 @@ mod gemma4_synthetic_parity {
                     Some(SOFTCAP),
                     false,
                     None,
-                    false, 0,)
+                    false,
+                    SharedExpertWidth::NONE,
+                )
                 .expect("the gemma4-shaped two-range program lowers at any new_count");
             let embedding_table = wave("token_embd.weight", VOCAB * EMBEDDING);
             let mut tied_lm_head = alloc::vec![0.0f32; EMBEDDING * VOCAB];
@@ -21636,6 +21638,23 @@ mod hybrid_routed_descriptor {
     }
 
     #[test]
+    fn a_routed_hybrid_with_no_shared_width_is_refused_by_name() {
+        let mut widthless = descriptor(&[LayerKind::Gdn, LayerKind::Attention]);
+        widthless.expert_shared_feed_forward = 0;
+
+        let outcome = build_forward(&widthless);
+
+        assert!(
+            matches!(
+                &outcome,
+                Err(TensorError::UnsupportedInBuilder { feature, .. })
+                    if feature.contains("expert_shared_feed_forward")
+            ),
+            "the hybrid engine builds the shared leaves at this extent, so it must refuse: {outcome:?}"
+        );
+    }
+
+    #[test]
     fn a_bounded_cached_shared_expert_schedule_is_refused_by_name() {
         let mut bounded = descriptor(&[LayerKind::Attention, LayerKind::Attention]);
         bounded.gated_attention = false;
@@ -21643,6 +21662,17 @@ mod hybrid_routed_descriptor {
         bounded.cache_mask = CacheMask::Bounded;
 
         let outcome = build_forward(&bounded);
+        // the same descriptor lowers on the padded engine, so the refusal is
+        // attributable to this engine and this combination rather than to one of
+        // the gates that arm applies to any schedule
+        let padded = ModelDescriptor {
+            cache_mask: CacheMask::Padded,
+            ..bounded
+        };
+        assert!(
+            build_forward(&padded).is_ok(),
+            "the descriptor itself is lowerable; only the bounded arm is not"
+        );
 
         assert!(
             matches!(
@@ -21684,43 +21714,46 @@ mod routed_with_shared_expert {
 
     /// The hand-worked answer for the layer this module builds, derived on
     /// paper from the two branches' definitions and carried at f64 precision
-    /// (the comparison, not the constant, sets the tolerance). Taking the
-    /// embedding `[0.5, -1.0]` through the ffn norm
-    /// (`gamma [2.0, 0.5]`, `eps 1e-6`) gives `[1.264910, -0.632455]`; the
-    /// router logits are that vector (`gate_inp` is the identity), sigmoid
-    /// selects expert 0, and the selected weight renormalizes to one. Expert
-    /// 0's SwiGLU (`gate [[1,0],[0,2]]`, `up` all ones, `down` identity) is
-    /// `[0.623895, -0.176104]`; the identity-shaped shared SwiGLU over the
-    /// same input is `[0.623895, -0.138781]`; their sum plus the residual is
-    /// `[1.747790, -1.314885]`.
-    const PAPER: [f64; 2] = [1.747_790_304_014_545_5, -1.314_884_976_624_105_3];
+    /// (the comparison, not the constant, sets the tolerance).
+    ///
+    /// The embedding `[0.5, -1.0]` through the ffn norm (`gamma [2.0, 0.5]`,
+    /// `eps 1e-6`) gives `[1.264910, -0.632455]`. `ffn_gate_inp.weight` is
+    /// `[[1, 0.5], [0.25, 1]]` in the builder's declared `[embedding, expert]`
+    /// order, so the one-route logit is `1.106796` (sigmoid `0.751531`).
+    /// Expert 0's SwiGLU is `[0.756891, 0.378446]`, the shared SwiGLU
+    /// `[0.756891, 0.336286]`, and their sum plus the residual is
+    /// `[2.013783, -0.285268]`.
+    const PAPER: [f64; 2] = [2.013_782_890_483_746_3, -0.285_268_027_897_971_1];
 
     /// The same layer with `ffn_gate_inp_shexp` present (qwen3.5-MoE's shape):
-    /// the shared half scales by `sigmoid(1.264910) = 0.779870`, so the FFN
-    /// output is `routed + 0.779870 * shared` and the layer output is
-    /// `[1.610452, -1.284335]`.
-    const PAPER_GATED: [f64; 2] = [1.610_452_381_370_316_7, -1.284_335_051_205_595_3];
+    /// the shared half scales by `sigmoid(1.264910 * 1 + -0.632455 * 0.5) =
+    /// 0.720850`, so the layer output is `[1.802497, -0.379142]`.
+    const PAPER_GATED: [f64; 2] = [1.802_496_756_190_242, -0.379_142_284_392_197];
 
-    /// Two routes instead of one: the selected weights no longer cancel
-    /// (`sigmoid` scores `[0.779870, 0.346954]` renormalized to
-    /// `[0.692096, 0.307904]`), so this case fails if the gating function, the
-    /// router projection or the renormalization is wrong. Expert 1
-    /// (`gate [[0,1],[1,0]]`, `up` all twos, `down` [[0,1],[1,0]]) contributes
-    /// `[1.247790, -0.277563]`.
-    const PAPER_TWO_ROUTES: [f64; 2] = [1.939_890_326_388_492_8, -1.346_124_719_377_241_9];
+    /// Two routes instead of one. `ffn_gate_inp.weight` is declared
+    /// `[embedding, expert]` by the builder, so the same flat vector that gave
+    /// one route's logit gives `[1.106796, 0.0]` here; the sigmoid scores
+    /// `[0.751531, 0.5]` renormalize to `[0.600489, 0.399511]`, expert 1
+    /// contributes `[-0.147558, -0.295116]`, and the layer output is
+    /// `[1.652446, -0.554363]`. This is the case that fails if the gating
+    /// function, the router projection, its axis order or the renormalization
+    /// is wrong -- the symmetric fixture this replaced could not see the axis
+    /// order at all, which is exactly what it hid here.
+    const PAPER_TWO_ROUTES: [f64; 2] = [1.652_445_719_705_219_6, -0.554_363_176_588_171_8];
 
     /// `ffn_down_shexp[0][0]` doubled: the shared half's first component
-    /// doubles, so the layer output moves to `[2.371685, -1.314885]`.
-    const PAPER_SHARED_DOWN_DOUBLED: [f64; 2] = [2.371_685_456_021_818_4, -1.314_884_976_624_105_3];
+    /// doubles, so the layer output moves to `[2.770674, -0.285268]`.
+    const PAPER_SHARED_DOWN_DOUBLED: [f64; 2] = [2.770_674_335_725_62, -0.285_268_027_897_971_1];
 
-    /// the band the f32 evaluator is allowed against the f64 paper. Measured
-    /// on this host, the largest component delta is 2.1e-7 for the two
-    /// single-route cases and 4.3e-7 for the doubled-weight control, so this
-    /// leaves ~23x headroom for a backend with a different rounding policy
-    /// while staying four orders under the control's 0.62 perturbation.
+    /// the band the f32 evaluator is allowed against the f64 paper. Measured on
+    /// this host, the largest component delta is 2.1e-7 for the two single-route
+    /// cases and 4.3e-7 for the doubled-weight control, so this leaves ~23x
+    /// headroom for a backend with a different rounding policy while staying
+    /// four orders under the control's 0.62 perturbation.
     const PAPER_TOLERANCE: f64 = 1.0e-5;
 
     fn layer_program(gated: bool, expert_used_count: u32) -> (Vec<Op>, NodeId) {
+        let mut moe_sites = Vec::new();
         let mut program = Vec::new();
         let post_mixer = input_leaf(
             &mut program,
@@ -21744,7 +21777,6 @@ mod routed_with_shared_expert {
             shared_expert_gate: gated,
             ..LayerFfnConfig::exclusive()
         };
-        let mut moe_sites = Vec::new();
         let root = append_layer_ffn(
             &mut program,
             LAYER,
@@ -21779,35 +21811,38 @@ mod routed_with_shared_expert {
             ("eps".to_string(), alloc::vec![1.0e-6]),
             (
                 tensor("ffn_gate_inp.weight"),
-                alloc::vec![1.0, 0.0, 0.0, 1.0],
+                alloc::vec![1.0, 0.5, 0.25, 1.0],
             ),
             (
                 tensor("ffn_gate_exps.weight"),
-                alloc::vec![1.0, 0.0, 0.0, 2.0, 0.0, 1.0, 1.0, 0.0],
+                alloc::vec![1.0, 0.25, 0.5, 2.0, 0.25, 1.0, 1.0, 0.5],
             ),
             (
                 tensor("ffn_up_exps.weight"),
-                alloc::vec![1.0, 1.0, 1.0, 1.0, 2.0, 2.0, 2.0, 2.0],
+                alloc::vec![1.0, 0.5, 0.25, 1.0, 2.0, 1.0, 0.5, 2.0],
             ),
             (
                 tensor("ffn_down_exps.weight"),
-                alloc::vec![1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0],
+                alloc::vec![1.0, 0.5, 0.0, 1.0, 0.5, 1.0, 1.0, 0.5],
             ),
             (
                 tensor("ffn_gate_shexp.weight"),
-                alloc::vec![1.0, 0.0, 0.0, 1.0],
+                alloc::vec![1.0, 0.25, 0.5, 1.0],
             ),
             (
                 tensor("ffn_up_shexp.weight"),
-                alloc::vec![1.0, 1.0, 1.0, 1.0],
+                alloc::vec![1.0, 0.75, 0.25, 1.0],
             ),
             (
                 tensor("ffn_down_shexp.weight"),
-                alloc::vec![shared_down_leading, 0.0, 0.0, 1.0],
+                alloc::vec![shared_down_leading, 0.5, 0.0, 1.0],
             ),
         ];
         if gated {
-            named.push((tensor("ffn_gate_inp_shexp.weight"), alloc::vec![1.0, 0.0]));
+            named.push((
+                tensor("ffn_gate_inp_shexp.weight"),
+                alloc::vec![1.0, 0.5],
+            ));
         }
         named
     }
