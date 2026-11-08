@@ -19680,16 +19680,8 @@ mod ffn_combination_shapes {
             let out = if frozen {
                 pre_extraction_dense_swiglu(&mut program, 3, normed, 4, 6, ones, Activation::Silu)
             } else {
-                append_dense_swiglu_ffn(
-                    &mut program,
-                    3,
-                    normed,
-                    4,
-                    6,
-                    ones,
-                    Activation::Silu,
-                )
-                .expect("the extracted dense SwiGLU lowers")
+                append_dense_swiglu_ffn(&mut program, 3, normed, 4, 6, ones, Activation::Silu)
+                    .expect("the extracted dense SwiGLU lowers")
             };
             (program, out)
         };
@@ -19697,7 +19689,10 @@ mod ffn_combination_shapes {
         let (extracted, extracted_root) = build(false);
         let (frozen, frozen_root) = build(true);
 
-        assert_eq!(extracted, frozen, "the extraction appends the frozen sequence");
+        assert_eq!(
+            extracted, frozen,
+            "the extraction appends the frozen sequence"
+        );
         assert_eq!(extracted_root, frozen_root);
     }
 }
