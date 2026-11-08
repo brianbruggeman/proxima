@@ -72,6 +72,7 @@ pub fn descriptor_from_architecture(
         value_norm: profile.value_norm,
         qk_norm: profile.qk_norm,
         attention_sinks: false,
+        rope: true,
     };
     let ffn = profile.layer_ffn(architecture.expert_count);
     let layers = architecture

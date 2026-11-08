@@ -58,6 +58,7 @@ fn main() {
     let sinks = with_layers(granite(), |layer| LayerSchedule {
         attention: LayerAttentionConfig {
             attention_sinks: true,
+            rope: true,
             ..layer.attention.clone()
         },
         ..layer.clone()

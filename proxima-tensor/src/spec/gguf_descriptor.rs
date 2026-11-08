@@ -58,6 +58,29 @@ pub fn sliding_pattern_descriptor_from_gguf(
         &key("attention.sliding_window_pattern"),
         block_count,
     )?;
+    // llama.cpp seeds every layer's `rope_pattern` entry to 1 and lets the
+    // checkpoint override per layer (`llama-model.cpp`: std::fill(..., 1)),
+    // so an absent key rotates every layer and a present one is read as data
+    // llama.cpp declares this one as `std::array<uint32_t>` and reads it with
+    // `get_arr`, which converts a bool or integer array alike, so both spellings
+    // are the same fact here
+    let rope_pattern_key = key("attention.rope_pattern");
+    let rope_pattern = match parsed.metadata_value(&rope_pattern_key) {
+        Some(MetadataValue::Array(MetadataArray::Bool(values))) => {
+            per_layer_len(&rope_pattern_key, block_count, values.len())?;
+            values.clone()
+        }
+        Some(MetadataValue::Array(MetadataArray::U32(values))) => {
+            per_layer_len(&rope_pattern_key, block_count, values.len())?;
+            values.iter().map(|&value| value != 0).collect()
+        }
+        Some(MetadataValue::Array(MetadataArray::I32(values))) => {
+            per_layer_len(&rope_pattern_key, block_count, values.len())?;
+            values.iter().map(|&value| value != 0).collect()
+        }
+        Some(_) => return Err(missing(&rope_pattern_key)),
+        None => alloc::vec![true; block_count as usize],
+    };
     let feed_forward_by_layer =
         metadata_u32_per_layer(parsed, &key("feed_forward_length"), block_count)?;
     let expert_count = metadata_u32_optional(parsed, &key("expert_count"));
@@ -168,6 +191,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         value_norm: profile.value_norm,
         qk_norm: profile.qk_norm,
         attention_sinks: false,
+        rope: true,
     };
     let full = LayerAttentionConfig {
         head_dim: key_length,
@@ -211,6 +235,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
                 } else {
                     ValueSourceKind::SharedWithKey
                 },
+                rope: rope_pattern[layer],
                 ..template
             };
             // a shared layer's V is already post-norm, re-norming would double-apply

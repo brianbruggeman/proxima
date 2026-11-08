@@ -574,9 +574,23 @@ pub struct LayerAttentionConfig {
     /// spec's open items.
     #[serde(default)]
     pub attention_sinks: bool,
+    /// Whether this layer rotates `Q`/`K` at all: `<arch>.attention.rope_pattern`
+    /// selects it per layer (llama.cpp's `llama_hparams::has_rope`, the
+    /// `rope_pattern` array `granite-swa.cpp` reads), and the flint capture
+    /// marks its full-attention blocks off. `false` reads the two head halves
+    /// straight ([`unrotated_head_pair`]) and declares no rope-table leaf, so a
+    /// rope-off program carries no `rope_cos`/`rope_sin` input at all. `true` --
+    /// and an absent key in a config file -- reproduces every schedule that
+    /// predates the pattern being data.
+    #[serde(default = "default_rope")]
+    pub rope: bool,
 }
 
 pub(super) const fn default_qk_norm() -> bool {
+    true
+}
+
+pub(super) const fn default_rope() -> bool {
     true
 }
 
@@ -687,8 +701,10 @@ pub(crate) struct AttentionLayerResources {
     pub(crate) group: u32,
     pub(crate) inv_sqrt_head_dim: NodeId,
     pub(crate) inv_head_dim: NodeId,
-    pub(crate) cos: NodeId,
-    pub(crate) sin: NodeId,
+    /// This layer's own rotation tables, or `None` when
+    /// [`LayerAttentionConfig::rope`] is off -- the case in which no table
+    /// leaf is declared and the head halves are read unrotated.
+    pub(crate) rope: Option<(NodeId, NodeId)>,
     pub(crate) group_ones: NodeId,
     pub(crate) is_future: NodeId,
     pub(crate) neg_infinity: NodeId,
@@ -774,10 +790,11 @@ pub(super) fn gather_last_row(
 /// path's own generated program bytes never change shape because this
 /// function exists next to it.
 ///
-/// `value_source` ([`ValueSource`]), `rope_pairing` ([`RopePairing`]), the
-/// `is_future`/`neg_infinity` pair (built by [`causal_mask`] or
-/// [`causal_mask_windowed`] at the call site), and `post_attention_norm_weight`
-/// are this mixer's per-call knobs -- the heterogeneous-layer building
+/// `value_source` ([`ValueSource`]), `rope` ([`LayerAttentionConfig::rope`]'s
+/// own tables, `None` for a layer that does not rotate at all), `rope_pairing`
+/// ([`RopePairing`]), the `is_future`/`neg_infinity` pair (built by
+/// [`causal_mask`] or [`causal_mask_windowed`] at the call site), and
+/// `post_attention_norm_weight` are this mixer's per-call knobs -- the heterogeneous-layer building
 /// block a caller composes per layer, rather than this function guessing a
 /// model's shape from its own parameters. Every caller in this crate today
 /// passes `ValueSource::Projected(wv)`, `RopePairing::Interleaved`,
@@ -801,8 +818,8 @@ pub fn append_attention_mixer(
     eps: NodeId,
     inv_sqrt_head_dim: NodeId,
     inv_head_dim: NodeId,
-    cos: NodeId,
-    sin: NodeId,
+    rope: Option<(NodeId, NodeId)>,
+    pairs: u32,
     group_ones: NodeId,
     is_future: NodeId,
     neg_infinity: NodeId,
@@ -869,8 +886,10 @@ pub fn append_attention_mixer(
                 Some(gamma) => rmsnorm_per_head(program, k_raw, gamma, inv_head_dim, eps, "u")?,
                 None => k_raw,
             };
-            let (rotated_even, rotated_odd) =
-                fused_rope_pair(program, k, 'u', cos, sin, rope_pairing)?;
+            let (rotated_even, rotated_odd) = match rope {
+                Some((cos, sin)) => fused_rope_pair(program, k, 'u', cos, sin, rope_pairing)?,
+                None => unrotated_head_pair(program, k, 'u', rope_pairing, pairs)?,
+            };
             (rotated_even, rotated_odd, Some(k_raw))
         }
         KeySource::Shared {
@@ -915,7 +934,10 @@ pub fn append_attention_mixer(
         v_raw
     };
 
-    let (rotated_q_even, rotated_q_odd) = fused_rope_pair(program, q, 'h', cos, sin, rope_pairing)?;
+    let (rotated_q_even, rotated_q_odd) = match rope {
+        Some((cos, sin)) => fused_rope_pair(program, q, 'h', cos, sin, rope_pairing)?,
+        None => unrotated_head_pair(program, q, 'h', rope_pairing, pairs)?,
+    };
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
@@ -1823,29 +1845,31 @@ where
         let inv_head_dim = find_or_insert(&mut inv_head_dim_cache, config.head_dim, || {
             count_constant(program, config.head_dim)
         });
-        let (cos, sin) = match rope_table_cache
-            .iter()
-            .find(|(table, ..)| *table == config.rope_table)
-        {
-            Some((_, _, cos, sin)) => (*cos, *sin),
-            None => {
-                let pairs = config.head_dim / 2;
-                let cos = input_leaf(
-                    program,
-                    DType::FLOAT32,
-                    alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
-                    &config.rope_table.cos_name,
-                );
-                let sin = input_leaf(
-                    program,
-                    DType::FLOAT32,
-                    alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
-                    &config.rope_table.sin_name,
-                );
-                rope_table_cache.push((config.rope_table.clone(), pairs, cos, sin));
-                (cos, sin)
+        let rope = config.rope.then(|| {
+            match rope_table_cache
+                .iter()
+                .find(|(table, ..)| *table == config.rope_table)
+            {
+                Some((_, _, cos, sin)) => (*cos, *sin),
+                None => {
+                    let pairs = config.head_dim / 2;
+                    let cos = input_leaf(
+                        program,
+                        DType::FLOAT32,
+                        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+                        &config.rope_table.cos_name,
+                    );
+                    let sin = input_leaf(
+                        program,
+                        DType::FLOAT32,
+                        alloc::vec![Extent::Symbolic(0), Extent::Static(pairs)],
+                        &config.rope_table.sin_name,
+                    );
+                    rope_table_cache.push((config.rope_table.clone(), pairs, cos, sin));
+                    (cos, sin)
+                }
             }
-        };
+        });
         let group_ones = find_or_insert(&mut group_ones_cache, (config.kv_heads, group), || {
             op::append(
                 program,
@@ -1876,8 +1900,7 @@ where
             group,
             inv_sqrt_head_dim,
             inv_head_dim,
-            cos,
-            sin,
+            rope,
             group_ones,
             is_future,
             neg_infinity,
@@ -2298,8 +2321,8 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                 let group = resources.group;
                 let inv_sqrt_head_dim = resources.inv_sqrt_head_dim;
                 let inv_head_dim = resources.inv_head_dim;
-                let cos = resources.cos;
-                let sin = resources.sin;
+                let rope = resources.rope;
+                let pairs = head_dim / 2;
                 let group_ones = resources.group_ones;
                 let is_future = resources.is_future;
                 let neg_infinity = resources.neg_infinity;
@@ -2403,8 +2426,8 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                     eps,
                     inv_sqrt_head_dim,
                     inv_head_dim,
-                    cos,
-                    sin,
+                    rope,
+                    pairs,
                     group_ones,
                     is_future,
                     neg_infinity,
@@ -3526,6 +3549,7 @@ pub fn recurrent_interval_forward_program_with_last_row(
         value_norm: false,
         qk_norm: true,
         attention_sinks: false,
+        rope: true,
     };
     let layers = (0..block_count)
         .map(|layer| LayerSchedule {

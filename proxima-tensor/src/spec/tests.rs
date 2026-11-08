@@ -6700,6 +6700,7 @@ fn architecture_matrix_mixed_cached_conv_roots() {
         value_norm: false,
         qk_norm: true,
         attention_sinks: false,
+        rope: true,
     };
     let schedule = alloc::vec![
         LayerSchedule {
@@ -9618,6 +9619,7 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
                 value_norm: false,
                 qk_norm: true,
                 attention_sinks: false,
+                rope: true,
             },
             ffn: LayerFfnConfig::exclusive(),
         })
@@ -9678,6 +9680,7 @@ async fn lfm2_forward_program_rejects_a_layer_schedule_length_mismatch() {
         value_norm: false,
         qk_norm: true,
         attention_sinks: false,
+        rope: true,
     };
     let schedule = [
         LayerSchedule {
@@ -14253,8 +14256,8 @@ mod gemma4_synthetic_parity {
             eps,
             inv_sqrt_head_dim,
             inv_head_dim,
-            cos,
-            sin,
+            Some((cos, sin)),
+            PAIRS as u32,
             group_ones,
             is_future,
             neg_infinity,
@@ -14563,6 +14566,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -14585,6 +14589,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -14953,6 +14958,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -14975,6 +14981,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -15276,6 +15283,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -15298,6 +15306,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -15511,6 +15520,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: LayerFfnConfig::exclusive(),
             },
@@ -15533,6 +15543,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: LayerFfnConfig::exclusive(),
             },
@@ -15765,6 +15776,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 };
             alloc::vec![
                 LayerSchedule {
@@ -16206,6 +16218,7 @@ mod gemma4_synthetic_parity {
             value_norm: true,
             qk_norm: true,
             attention_sinks: false,
+            rope: true,
         };
         let full_donor_attention = LayerAttentionConfig {
             head_dim: HEAD_DIM as u32,
@@ -16224,6 +16237,7 @@ mod gemma4_synthetic_parity {
             value_norm: true,
             qk_norm: true,
             attention_sinks: false,
+            rope: true,
         };
         let shared_attention = LayerAttentionConfig {
             head_dim: HEAD_DIM as u32,
@@ -16246,6 +16260,7 @@ mod gemma4_synthetic_parity {
             value_norm: false,
             qk_norm: true,
             attention_sinks: false,
+            rope: true,
         };
         let schedule = alloc::vec![
             LayerSchedule {
@@ -16621,6 +16636,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -16643,6 +16659,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -17065,6 +17082,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -17087,6 +17105,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -17388,6 +17407,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -17410,6 +17430,7 @@ mod gemma4_synthetic_parity {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn: ffn_config,
             },
@@ -17830,6 +17851,7 @@ mod gemma4_synthetic_parity {
                     value_norm: matches!(source, KeySourceKind::ProjectedK),
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 }
             };
         let window = Some(SWA_WINDOW as u32);
@@ -18100,6 +18122,7 @@ mod gemma4_synthetic_parity {
                 value_norm: true,
                 qk_norm: true,
                 attention_sinks: false,
+                rope: true,
             },
             ffn: ffn_config,
         };
@@ -19088,8 +19111,8 @@ mod gemma4_synthetic_parity {
                 eps,
                 inv_sqrt_head_dim,
                 inv_head_dim,
-                cos,
-                sin,
+                Some((cos, sin)),
+                PAIRS as u32,
                 group_ones,
                 is_future,
                 neg_infinity,
@@ -19121,8 +19144,8 @@ mod gemma4_synthetic_parity {
                 eps,
                 inv_sqrt_head_dim,
                 inv_head_dim,
-                cos,
-                sin,
+                Some((cos, sin)),
+                PAIRS as u32,
                 group_ones,
                 is_future,
                 neg_infinity,
@@ -19159,8 +19182,8 @@ mod gemma4_synthetic_parity {
                 eps,
                 inv_sqrt_head_dim,
                 inv_head_dim,
-                cos,
-                sin,
+                Some((cos, sin)),
+                PAIRS as u32,
                 group_ones,
                 is_future,
                 neg_infinity,
@@ -19388,6 +19411,7 @@ mod head_repeats {
             value_norm: false,
             qk_norm: true,
             attention_sinks: false,
+            rope: true,
         };
         let layers = (0..2)
             .map(|_| LayerSchedule {
@@ -21031,6 +21055,7 @@ mod hybrid_dense_descriptor {
             value_norm: false,
             qk_norm: true,
             attention_sinks: false,
+            rope: true,
         };
         let layers = kinds
             .iter()
@@ -21320,6 +21345,7 @@ mod hybrid_routed_descriptor {
             value_norm: false,
             qk_norm: true,
             attention_sinks: false,
+            rope: true,
         };
         let ffn = LayerFfnConfig {
             combination: FfnCombination::RoutedWithSharedExpert,
@@ -24004,5 +24030,178 @@ mod attention_sinks {
             attended_agrees(&flag_off, &without_sink_literal),
             "the flag-off program {flag_off:?} must equal the sink-less literal {without_sink_literal:?}"
         );
+    }
+}
+
+/// `unrotated_head_pair` is `fused_rope_pair` at an identity rotation: a
+/// `has_rope = false` layer (GGUF `<arch>.attention.rope_pattern`, llama.cpp's
+/// `llama_hparams::has_rope`) reads its two score halves straight off the head
+/// axis instead of rotating them. The expected halves are hand-worked from
+/// `x = [1, 2, 3, 4]` over one head; the same `x` through a real rotation is
+/// the control that the comparison can tell the two apart.
+#[test]
+fn unrotated_head_pair_reads_the_score_halves_straight() {
+    const X: [f32; 4] = [1.0, 2.0, 3.0, 4.0];
+
+    fn source_leaf(program: &mut Vec<Op>) -> NodeId {
+        input_leaf(
+            program,
+            DType::FLOAT32,
+            alloc::vec![Extent::Static(1), Extent::Static(1), Extent::Static(4)],
+            "x",
+        )
+    }
+
+    for (pairing, expected_first, expected_second) in [
+        (RopePairing::Interleaved, [1.0_f32, 3.0], [2.0_f32, 4.0]),
+        // the pairing's own count is deliberately NOT the extent the caller
+        // passes, so a `offsets_sized` that reached for `self.pairs` would read
+        // the wrong halves instead of agreeing by coincidence
+        (
+            RopePairing::SplitHalf { pairs: 9 },
+            [1.0_f32, 2.0],
+            [3.0_f32, 4.0],
+        ),
+    ] {
+        let mut program = Vec::new();
+        let source = source_leaf(&mut program);
+        let (first, second) = unrotated_head_pair(&mut program, source, 'h', pairing, 2)
+            .expect("the unrotated pair builds over a [1, heads, head_dim] source");
+        let evaluated = crate::cpu::evaluate(&program, &[], &[&X], &[first, second])
+            .expect("the unrotated pair evaluates");
+        assert_eq!(
+            evaluated.get(first).expect("first half").0,
+            expected_first.as_slice(),
+            "{pairing:?}: the first half is read straight off the head axis"
+        );
+        assert_eq!(
+            evaluated.get(second).expect("second half").0,
+            expected_second.as_slice(),
+            "{pairing:?}: the second half is read straight off the head axis"
+        );
+    }
+
+    // the same source under the two tables a caller could hand it: cos = 1,
+    // sin = 0 is the identity rotation and must return the halves above; a
+    // quarter turn must move both, so the comparison is not blind to rotation
+    for (cosine, sine, expected_first, expected_second) in [
+        ([1.0_f32; 2], [0.0_f32; 2], [1.0_f32, 3.0], [2.0_f32, 4.0]),
+        ([0.0_f32; 2], [1.0_f32; 2], [-2.0_f32, -4.0], [1.0_f32, 3.0]),
+    ] {
+        let mut program = Vec::new();
+        let source = source_leaf(&mut program);
+        let cosine_leaf = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            alloc::vec![Extent::Static(1), Extent::Static(2)],
+            "cos",
+        );
+        let sine_leaf = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            alloc::vec![Extent::Static(1), Extent::Static(2)],
+            "sin",
+        );
+        let (first, second) = fused_rope_pair(
+            &mut program,
+            source,
+            'h',
+            cosine_leaf,
+            sine_leaf,
+            RopePairing::Interleaved,
+        )
+        .expect("the rotation builds over the same source");
+        let evaluated =
+            crate::cpu::evaluate(&program, &[], &[&X, &cosine, &sine], &[first, second])
+                .expect("the rotation evaluates");
+        assert_eq!(
+            evaluated.get(first).expect("first half").0,
+            expected_first.as_slice(),
+            "cos {cosine:?} sin {sine:?}: the rotated first half"
+        );
+        assert_eq!(
+            evaluated.get(second).expect("second half").0,
+            expected_second.as_slice(),
+            "cos {cosine:?} sin {sine:?}: the rotated second half"
+        );
+    }
+}
+
+/// `LayerAttentionConfig::rope` at the two ends a descriptor can reach: the
+/// engines that build from a per-layer schedule honour it, and the two with one
+/// table for every layer refuse it by name rather than rotate a layer the
+/// checkpoint did not ask to rotate.
+mod per_layer_rope {
+    use super::*;
+
+    fn descriptor(mask: CacheMask, rope: bool) -> ModelDescriptor {
+        let mut model = super::head_repeats::descriptor(CacheStrategy::Cached, mask, 1);
+        for layer in &mut model.layers {
+            layer.attention.rope = rope;
+        }
+        model
+    }
+
+    fn rope_leaves(program: &[Op]) -> Vec<&str> {
+        program
+            .iter()
+            .filter_map(|op| match op {
+                Op::Input {
+                    name: Some(name), ..
+                } if name.starts_with("rope_cos") || name.starts_with("rope_sin") =>
+                {
+                    Some(name.as_str())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The padded two-range engine is the sliding-pattern family's production
+    /// path, and it takes the flag: a rope-off schedule brings no table leaf
+    /// with it, which is the same absence the reader wrote.
+    #[test]
+    fn the_padded_engine_builds_a_rope_off_layer_without_a_table_leaf() {
+        let rotating = build_forward(&descriptor(CacheMask::Padded, true))
+            .expect("a rotating schedule lowers");
+        assert_eq!(
+            rope_leaves(&rotating.program),
+            alloc::vec!["rope_cos", "rope_sin"],
+            "one table per shared config, read by both layers"
+        );
+
+        let unrotated = build_forward(&descriptor(CacheMask::Padded, false))
+            .expect("a rope-off schedule lowers");
+        assert!(
+            rope_leaves(&unrotated.program).is_empty(),
+            "no layer rotates, so no table is declared: {:?}",
+            rope_leaves(&unrotated.program)
+        );
+    }
+
+    /// `CacheMask::Bounded` and the gated/hybrid engine each rotate from one
+    /// table for every layer. Building a rope-off layer there would apply a
+    /// rotation nothing asked for, so the schedule is refused by name instead.
+    #[test]
+    fn the_engines_without_a_per_layer_rope_channel_refuse_it_by_name() {
+        let mut gated = descriptor(CacheMask::Padded, false);
+        gated.gated_attention = true;
+
+        for (builder, model) in [
+            ("build_forward(CacheMask::Bounded)", descriptor(CacheMask::Bounded, false)),
+            ("build_forward(gated/hybrid)", gated),
+        ] {
+            let error = build_forward(&model)
+                .err()
+                .unwrap_or_else(|| panic!("{builder}: a rope-off layer must be refused"));
+            assert!(
+                matches!(
+                    error,
+                    TensorError::UnsupportedInBuilder { builder: named, feature }
+                        if named == builder && feature.contains("rope off")
+                ),
+                "{builder}: the refusal must name the missing channel, got {error:?}"
+            );
+        }
     }
 }

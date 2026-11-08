@@ -252,6 +252,7 @@ mod tests {
     use proxima_gguf::tensor::TensorInfo;
     use proxima_gguf::types::GgmlType;
     use proxima_gguf::value::{MetadataArray, MetadataValue};
+    use proxima_tensor::op::Op;
     use proxima_tensor::spec::{
         ForwardProgram, LayerSchedule, ModelDescriptor, RopePairing, ValueSourceKind, build_forward,
         sliding_pattern_descriptor_from_gguf,
@@ -1186,4 +1187,141 @@ mod tests {
             "the failure names the schedule it compared, got: {problem}"
         );
     }
+
+    /// R4's own comparison: every layer's rope selection against the capture's
+    /// 49-entry array, as one predicate so the control proves the same
+    /// comparison rejects a mutated header.
+    fn flint_rope_pattern_problem(descriptor: &ModelDescriptor, captured: &[bool]) -> Option<String> {
+        if descriptor.layers.len() != captured.len() {
+            return Some(format!(
+                "{} layers, expected one per captured entry ({})",
+                descriptor.layers.len(),
+                captured.len()
+            ));
+        }
+        for (index, layer) in descriptor.layers.iter().enumerate() {
+            if layer.attention.rope != captured[index] {
+                return Some(format!(
+                    "layer {index} rope {}, expected {} from the captured rope_pattern",
+                    layer.attention.rope, captured[index]
+                ));
+            }
+        }
+        None
+    }
+
+    /// R4: `{arch}.attention.rope_pattern` selects rope per layer from data. The
+    /// capture answers both ways -- its sliding layers rotate, its full ones do
+    /// not -- so a reader that returned one constant for the whole schedule
+    /// cannot pass; the lowered program is the other half of the same fact, with
+    /// the full layers declaring no table leaf at all.
+    #[test]
+    fn flint_reader_rope_pattern_selects_rope_per_layer() {
+        let captured = flint_layer_pattern("flint.attention.rope_pattern");
+        let parsed = flint_parsed(flint_metadata());
+        let descriptor = flint_descriptor(&parsed);
+
+        if let Some(problem) = flint_rope_pattern_problem(&descriptor, &captured) {
+            panic!("{problem}");
+        }
+        assert!(
+            captured.contains(&true) && captured.contains(&false),
+            "the captured pattern states both answers, or the per-layer assertion is vacuous"
+        );
+
+        // the descriptor's answer reaches the engine: the sliding layers bind
+        // their own table, and no full-layer table is declared by anything
+        let forward =
+            build_forward(&descriptor).expect("the flint schedule builds the padded cached program");
+        let mut leaves: Vec<&str> = forward
+            .program
+            .iter()
+            .filter_map(|op| match op {
+                Op::Input {
+                    name: Some(name), ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        leaves.sort_unstable();
+        leaves.dedup();
+        assert!(
+            leaves.contains(&"rope_cos_swa") && leaves.contains(&"rope_sin_swa"),
+            "the sliding layers rotate, so their table is bound: {leaves:?}"
+        );
+        assert!(
+            !leaves.contains(&"rope_cos") && !leaves.contains(&"rope_sin"),
+            "every full layer is rope-off, so no full-layer table may be declared: {leaves:?}"
+        );
+
+        // llama.cpp seeds every entry to 1 before the key is read, so an absent
+        // pattern leaves the schedule it had before the key was data
+        let mut absent = flint_metadata();
+        absent.retain(|(key, _)| *key != "flint.attention.rope_pattern");
+        let parsed = flint_parsed(absent);
+        let descriptor = flint_descriptor(&parsed);
+        assert!(
+            descriptor
+                .layers
+                .iter()
+                .all(|layer| layer.attention.rope),
+            "a checkpoint with no rope_pattern rotates every layer"
+        );
+    }
+
+    /// AC25 control: the same comparison must reject a mutated capture, or the
+    /// header it trusts proves nothing.
+    #[test]
+    fn control_rejects_mutated_rope_pattern() {
+        let captured = flint_layer_pattern("flint.attention.rope_pattern");
+        let parsed = flint_parsed(flint_metadata());
+        let descriptor = flint_descriptor(&parsed);
+        assert_eq!(
+            flint_rope_pattern_problem(&descriptor, &captured),
+            None,
+            "the captured header passes its own comparison"
+        );
+
+        // one flipped entry in the header's own array must be visible
+        let mut flipped = flint_metadata();
+        for entry in &mut flipped {
+            if entry.0 == "flint.attention.rope_pattern"
+                && let MetadataValue::Array(MetadataArray::Bool(pattern)) = &mut entry.1
+            {
+                pattern[5] = !pattern[5];
+            }
+        }
+        let parsed = flint_parsed(flipped);
+        let descriptor = flint_descriptor(&parsed);
+        let problem = flint_rope_pattern_problem(&descriptor, &captured)
+            .expect("a flipped rope entry must fail the capture comparison");
+        assert!(
+            problem.contains("layer 5 rope"),
+            "the failure names the layer it compared, got: {problem}"
+        );
+
+        // a short array is refused by name rather than padded or truncated
+        let mut short = flint_metadata();
+        for entry in &mut short {
+            if entry.0 == "flint.attention.rope_pattern"
+                && let MetadataValue::Array(MetadataArray::Bool(pattern)) = &mut entry.1
+            {
+                pattern.truncate(48);
+            }
+        }
+        let parsed = flint_parsed(short);
+        let error = flint_descriptor_error(&parsed);
+        assert!(
+            matches!(
+                error,
+                proxima_tensor::error::TensorError::GgufPerLayerLengthMismatch {
+                    ref key,
+                    expected: 49,
+                    found: 48,
+                } if key.as_str() == "flint.attention.rope_pattern"
+            ),
+            "a 48-entry rope pattern must be refused by name, got {error:?}"
+        );
+    }
+
 }

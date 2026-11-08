@@ -980,6 +980,7 @@ fn gemma4_26b_hand_written_layers() -> Vec<LayerSchedule> {
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks: false,
+                    rope: true,
                 },
                 ffn,
             }

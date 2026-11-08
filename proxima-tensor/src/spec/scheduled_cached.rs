@@ -41,8 +41,8 @@ pub fn append_single_range_cached_attention(
     eps: NodeId,
     inv_sqrt_head_dim: NodeId,
     inv_head_dim: NodeId,
-    cos_new: NodeId,
-    sin_new: NodeId,
+    rope: Option<(NodeId, NodeId)>,
+    pairs: u32,
     group_ones: NodeId,
     is_future: NodeId,
     neg_infinity: NodeId,
@@ -133,10 +133,14 @@ pub fn append_single_range_cached_attention(
         v_new_raw
     };
 
-    let (rotated_q_even, rotated_q_odd) =
-        fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
-    let (rotated_k_new_even, rotated_k_new_odd) =
-        fused_rope_pair(program, k_new, 'u', cos_new, sin_new, rope_pairing)?;
+    let (rotated_q_even, rotated_q_odd) = match rope {
+        Some((cos, sin)) => fused_rope_pair(program, q, 'h', cos, sin, rope_pairing)?,
+        None => unrotated_head_pair(program, q, 'h', rope_pairing, pairs)?,
+    };
+    let (rotated_k_new_even, rotated_k_new_odd) = match rope {
+        Some((cos, sin)) => fused_rope_pair(program, k_new, 'u', cos, sin, rope_pairing)?,
+        None => unrotated_head_pair(program, k_new, 'u', rope_pairing, pairs)?,
+    };
 
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
     let q_even_grouped = elementwise(
@@ -452,8 +456,8 @@ pub fn append_two_range_cached_attention(
     eps: NodeId,
     inv_sqrt_head_dim: NodeId,
     inv_head_dim: NodeId,
-    cos_new: NodeId,
-    sin_new: NodeId,
+    rope: Option<(NodeId, NodeId)>,
+    pairs: u32,
     group_ones: NodeId,
     is_future_local: NodeId,
     neg_infinity_local: NodeId,
@@ -526,8 +530,10 @@ pub fn append_two_range_cached_attention(
                 Some(gamma) => rmsnorm_per_head(program, k_new_raw, gamma, inv_head_dim, eps, "u")?,
                 None => k_new_raw,
             };
-            let (rotated_even, rotated_odd) =
-                fused_rope_pair(program, k_new, 'u', cos_new, sin_new, rope_pairing)?;
+            let (rotated_even, rotated_odd) = match rope {
+                Some((cos, sin)) => fused_rope_pair(program, k_new, 'u', cos, sin, rope_pairing)?,
+                None => unrotated_head_pair(program, k_new, 'u', rope_pairing, pairs)?,
+            };
             (Some(k_new_raw), rotated_even, rotated_odd)
         }
         KeySource::Shared {
@@ -565,8 +571,10 @@ pub fn append_two_range_cached_attention(
         v_new_raw
     };
 
-    let (rotated_q_even, rotated_q_odd) =
-        fused_rope_pair(program, q, 'h', cos_new, sin_new, rope_pairing)?;
+    let (rotated_q_even, rotated_q_odd) = match rope {
+        Some((cos, sin)) => fused_rope_pair(program, q, 'h', cos, sin, rope_pairing)?,
+        None => unrotated_head_pair(program, q, 'h', rope_pairing, pairs)?,
+    };
 
     let (q_even_grouped, q_odd_grouped) =
         group_queries(program, rotated_q_even, rotated_q_odd, group, group_ones)?;
@@ -856,8 +864,8 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
             eps,
             resources.inv_sqrt_head_dim,
             resources.inv_head_dim,
-            resources.cos,
-            resources.sin,
+            resources.rope,
+            pairs,
             resources.group_ones,
             resources.is_future,
             resources.neg_infinity,
@@ -1626,8 +1634,8 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             eps,
             resources.inv_sqrt_head_dim,
             resources.inv_head_dim,
-            resources.cos,
-            resources.sin,
+            resources.rope,
+            pairs,
             resources.group_ones,
             resources.is_future,
             resources.neg_infinity,
