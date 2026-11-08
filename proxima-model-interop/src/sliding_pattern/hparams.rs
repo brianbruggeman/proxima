@@ -796,6 +796,43 @@ mod tests {
         );
     }
 
+    /// R5: the shared expert's gate is a per-layer tensor, so the reader must
+    /// take its presence from the directory the way the sink leaf does -- flint
+    /// carries `ffn_{gate,up,down}_shexp.weight` on every routed block and no
+    /// `ffn_gate_inp_shexp.weight` anywhere, so every block is ungated.
+    #[test]
+    fn flint_routed_blocks_declare_no_shared_expert_gate() {
+        let sinks = flint_sink_tensors();
+        let refs = flint_sink_refs(&sinks);
+        let plain = flint_descriptor(&flint_parsed_with(flint_metadata(), &refs));
+        assert!(
+            plain
+                .layers
+                .iter()
+                .all(|layer| !layer.ffn.shared_expert_gate),
+            "the capture has no gate row, so no layer declares one"
+        );
+
+        // planting the gate row on one block turns that block's gate on and
+        // leaves every other block alone -- the same per-layer rule the sink
+        // test asserts, and the control that the flag can move at all
+        let mut planted: Vec<(&str, u64)> = refs.clone();
+        planted.push(("blk.2.ffn_gate_inp_shexp.weight", 2048));
+        let gated = flint_descriptor(&flint_parsed_with(flint_metadata(), &planted));
+        assert!(
+            gated.layers[2].ffn.shared_expert_gate,
+            "blk.2 declares its own row"
+        );
+        assert!(
+            gated
+                .layers
+                .iter()
+                .enumerate()
+                .all(|(layer, entry)| layer == 2 || !entry.ffn.shared_expert_gate),
+            "no other block declares a gate"
+        );
+    }
+
     /// R3: the four header facts flint states as data, read back through the
     /// descriptor and the header carrier, with every absent key keeping the
     /// pre-change default.
