@@ -10,10 +10,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);

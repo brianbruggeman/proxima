@@ -13,9 +13,9 @@
 //! format, not a value `ggml_type` a `.gguf` tensor directory names. That
 //! 34-byte figure is cross-checked here at compile time against
 //! [`crate::types::GgmlType::Q8_0`]'s already-landed
-//! [`crate::types::GgmlType::block_layout`] rather than re-typed by hand.
+//! [`crate::types::GgmlType::wire_shape`] rather than re-typed by hand.
 
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 use crate::quant::{QuantError, float_layout};
 use crate::types::GgmlType;
@@ -27,12 +27,12 @@ const CODEC: &str = "q8_0";
 pub const QK8_0: usize = 32;
 
 /// Bytes per block. Derived from the already-landed
-/// [`crate::types::GgmlType::block_layout`] (`types.rs`), not re-typed —
+/// [`crate::types::GgmlType::wire_shape`] (`types.rs`), not re-typed —
 /// that table was itself checked against `ggml-common.h`'s
 /// `static_assert(sizeof(block_q8_0) == sizeof(ggml_half) + QK8_0, ...)`
 /// at `ggml-common.h:214`.
 pub const BLOCK_BYTES: usize = {
-    let layout = GgmlType::Q8_0.block_layout();
+    let layout = GgmlType::Q8_0.wire_shape();
     assert!(
         layout.block_elements as usize == QK8_0,
         "GgmlType::Q8_0 block_elements drifted from QK8_0"

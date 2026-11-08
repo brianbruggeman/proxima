@@ -20,7 +20,7 @@ pub struct TensorInfo {
     pub ggml_type: GgmlType,
     /// Byte offset from the start of the data section (already validated
     /// contiguous-and-aligned by the parser — see
-    /// `GgmlType::block_layout` and `gguf.cpp:622-636`'s `GGML_PAD` walk).
+    /// `GgmlType::wire_shape` and `gguf.cpp:622-636`'s `GGML_PAD` walk).
     pub offset: u64,
 }
 
@@ -45,7 +45,7 @@ impl TensorInfo {
     /// instead of its declared type.
     #[must_use]
     pub fn nbytes_as(&self, ggml_type: GgmlType) -> Option<u64> {
-        let layout = ggml_type.block_layout();
+        let layout = ggml_type.wire_shape();
         let elements = self.element_count();
         let blocks = elements.checked_div(layout.block_elements)?;
         blocks.checked_mul(layout.block_bytes)

@@ -22,10 +22,8 @@ use proxima_onnx::messages::{
 };
 use proxima_onnx::pipe::parse_complete;
 use proxima_onnx::write_model_proto;
-use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, NodeId, Op, ScalarOp, Shapes, affine, append, infer,
-    projection,
-};
+use proxima_tensor::{AxisTerm, Extent, IndexMap, NodeId, Op, ScalarOp, Shapes, affine, append, infer, projection};
+use proxima_numeric::{DType};
 
 const ITERATIONS: usize = 100_000;
 const OUTPUT: &str = "y";

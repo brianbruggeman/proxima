@@ -1,7 +1,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use proxima_primitives::block_layout::{BlockLayout, Plane};
+use proxima_numeric::block_layout::{BlockLayout, Plane};
 
 use super::block_dot::{BlockDot, DOT_ELEMENTS, affine, layout_name, rows_per_warp, scale_helpers, values_fit_int8};
 
@@ -84,7 +84,7 @@ fn words_helper(name: &str, layout: &BlockLayout, low_bytes: usize, high_bytes: 
 
 #[cfg(test)]
 mod tests {
-    use proxima_primitives::block_layout::BlockLayout;
+    use proxima_numeric::block_layout::BlockLayout;
 
     use super::split_block_dot;
 

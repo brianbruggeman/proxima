@@ -24,7 +24,7 @@ Major issues:
 - The deletions break AC23 (`before.txt:494-495,502`).
 - Slice 8.1's validation test is `#[ignore]`d and blind to the defect.
 - Default F16 has no admission site that knows the arch or backend, and breaks the CPU path.
-- It duplicates `GgmlType::block_layout` and `proxima_gguf::quant::q8_0::quantize`.
+- It duplicates `GgmlType::wire_shape` and `proxima_gguf::quant::q8_0::quantize`.
 - It collides with slot-0-ea's dirty omega files beyond `cached_attention_render.rs`.
 
 Kept from v1 as findings, not as design:

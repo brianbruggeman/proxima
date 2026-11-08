@@ -15,9 +15,8 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{
-    DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// `Input(extent) -> body_0(x) -> body_1(...) -> ... -> body_n(...)`, the
 /// same shape [`decode_step_telemetry_budget`]'s `chained_unary_program`

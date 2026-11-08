@@ -101,7 +101,7 @@ fn map_uses(operand: NodeId, map: &IndexMap) -> Vec<NodeId> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::dtype::DType;
+    use proxima_numeric::DType;
     use crate::map;
     use crate::op::{Extent, Keep, Reduce, ReduceInit, ScalarOp, append};
 

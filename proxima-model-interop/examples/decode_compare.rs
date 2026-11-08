@@ -40,7 +40,7 @@ use proxima_model_interop::{
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::recorder::Recorder;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 use proxima_tokenizer::gguf::vocab_from_metadata;
 use proxima_tokenizer::{TokenizerError, Vocab, encode_with_bos_eos};
 

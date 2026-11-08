@@ -33,7 +33,8 @@ use proxima_tensor::spec::{
     input_leaf, scalar_constant,
 };
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{DType, Extent, NumericPolicy};
+use proxima_tensor::{Extent};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);

@@ -1,4 +1,5 @@
-use proxima_tensor::{BoundOpKind, NumericPolicy};
+use proxima_tensor::{BoundOpKind};
+use proxima_numeric::{NumericPolicy};
 
 const ATTENTION_TILE_ITEMS: u64 = 32;
 

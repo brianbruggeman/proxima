@@ -1,9 +1,8 @@
 use alloc::collections::BTreeMap;
 
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
-use proxima_tensor::{
-    BoundOp, DType, Extent, IndexMap, NodeId, NumericPolicy, Op, ScalarOp, append, bind, infer, map,
-};
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_tensor::{BoundOp, Extent, IndexMap, NodeId, Op, ScalarOp, append, bind, infer, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 use crate::cuda::emit_cuda;
 use crate::cuda_layout::{layout_load_cuda, layout_store_cuda};

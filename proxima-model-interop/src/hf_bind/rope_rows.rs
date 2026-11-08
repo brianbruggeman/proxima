@@ -8,7 +8,7 @@
 //! of width four is the smallest that tells the orders apart.
 
 use proxima_safetensors::{SafetensorsModel, TensorPayload, parse_complete, write_complete};
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 use super::*;
 

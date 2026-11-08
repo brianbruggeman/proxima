@@ -6,7 +6,8 @@ use std::time::Duration;
 use proxima_core::ProximaError;
 use proxima_primitives::pipe::CreditAcquireError;
 use proxima_tensor::cpu::QuantizedBlock;
-use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op};
+use proxima_tensor::{Extent, NodeId, Op};
+use proxima_numeric::{DType, NumericPolicy};
 use std::sync::Arc;
 
 use super::{

@@ -12,9 +12,8 @@
 mod upload {
     use std::process::ExitCode;
 
-    use proxima_tensor::{
-        DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+    use proxima_numeric::{DType, NumericPolicy};
 
     fn tanh_chain(elements: u32) -> Vec<Op> {
         let mut program = Vec::new();

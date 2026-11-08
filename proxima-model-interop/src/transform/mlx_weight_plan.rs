@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use proxima_gguf::TensorInfo;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_safetensors::TensorHeader;
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 use super::mlx_affine::{AffineExport, AffineParams, export_affine};
 use super::mlx_conventions::QuantizedConventions;

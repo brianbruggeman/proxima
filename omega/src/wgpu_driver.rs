@@ -44,11 +44,8 @@ use std::sync::mpsc;
 
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
-use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
-    QuantizedBlock, Shapes, TensorError, bind_unfused, bind_without_reduce_epilogue_fusion, infer,
-    prune_dead, resolve_named_blocks,
-};
+use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError, bind_unfused, bind_without_reduce_epilogue_fusion, infer, prune_dead, resolve_named_blocks};
+use proxima_numeric::{DType, NumericPolicy};
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
 use crate::error::EmitError;
@@ -1893,7 +1890,8 @@ pub fn execute_plan_named(
 mod tests {
     use alloc::vec;
 
-    use proxima_tensor::{DType, Extent, IndexMap, ScalarOp, append, bind, map};
+    use proxima_tensor::{Extent, IndexMap, ScalarOp, append, bind, map};
+    use proxima_numeric::{DType};
 
     use super::*;
 
@@ -1921,7 +1919,7 @@ mod tests {
             &program,
             &shapes,
             &[tanh],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         bound.into_iter().next().expect("one bound op")
@@ -1987,10 +1985,8 @@ mod tests {
 mod block_node_attribution_tests {
     use alloc::vec;
 
-    use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, Reduce, ReduceInit, ScalarOp, TensorError, append,
-        projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, Keep, Reduce, ReduceInit, ScalarOp, TensorError, append, projection};
+    use proxima_numeric::{DType};
 
     use super::{Codec, NodeId, Op, QuantizedBlock, WgpuError, plan};
 

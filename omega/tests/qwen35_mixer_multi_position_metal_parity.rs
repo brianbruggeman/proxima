@@ -15,7 +15,8 @@ use proxima_tensor::spec::{
     GdnOutputGate, SsmMixerTaps, append_delta_net_mixer_with_taps, input_leaf, count_constant, scalar_constant,
 };
 use proxima_tensor::test_support::{ParityRun, compare_rows_relative_to_norm};
-use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock};
+use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock};
+use proxima_numeric::{DType, NumericPolicy};
 
 const KEY_DIM: u32 = 2048;
 const VALUE_DIM: u32 = 4096;

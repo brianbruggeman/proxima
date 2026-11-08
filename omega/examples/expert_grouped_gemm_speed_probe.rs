@@ -48,7 +48,14 @@ use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, quantize};
     feature = "instrument",
     target_os = "macos"
 ))]
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-grouped-gemm",
+    feature = "instrument",
+    target_os = "macos"
+))]
+use proxima_numeric::{DType, NumericPolicy};
 #[cfg(all(
     feature = "metal",
     feature = "metal-grouped-gemm",
@@ -69,10 +76,7 @@ use proxima_tensor::test_support::Lcg;
     feature = "instrument",
     target_os = "macos"
 ))]
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append};
 
 fn main() -> anyhow::Result<()> {
     #[cfg(all(

@@ -9,12 +9,10 @@ use proxima_tensor::spec::{
     Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
     input_leaf, scalar_constant,
 };
-use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer,
-    map,
-};
+use proxima_tensor::{AxisTerm, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
+use proxima_numeric::{DType};
 
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 use super::*;
 
@@ -1230,7 +1228,7 @@ fn q4k_row_blocked_matmul_uses_paired_nibble_decode() {
 mod horizontal_merge_base_table_splice_tests {
     use alloc::collections::BTreeMap;
 
-    use proxima_tensor::NumericPolicy;
+    use proxima_numeric::NumericPolicy;
 
     use super::super::{Codec, EmitError, emit, splice_horizontal_merge_base_table};
     use super::matmul_op;
@@ -1418,7 +1416,7 @@ fn round_batched_matmul_op(round_count: u32) -> BoundOp {
 mod round_batched_reduce_base_table_splice_tests {
     use alloc::collections::BTreeMap;
 
-    use proxima_tensor::NumericPolicy;
+    use proxima_numeric::NumericPolicy;
 
     use super::super::{
         Binding, Codec, EmitError, emit, round_zero_reduce_bound,
@@ -7617,7 +7615,7 @@ fn softmax_runtime_rows_on_changes_only_the_bound_and_the_name() {
 mod flat_grid_form {
     use alloc::collections::BTreeMap;
 
-    use proxima_tensor::NumericPolicy;
+    use proxima_numeric::NumericPolicy;
 
     use super::*;
 
@@ -10064,7 +10062,7 @@ mod tiled_decode_description {
 
         assert_eq!(
             classify(&q4_0),
-            Some(TiledGemmRejection::CodecSwitchedOff { codec: Codec::Q4_0 })
+            Some(TiledGemmRejection::CodecSwitchedOff { codec: "q4_0" })
         );
         assert_eq!(classify(&q8_0), None, "the Q4_0 switch is Q4_0's alone");
     }
@@ -10116,7 +10114,9 @@ mod tiled_decode_description {
         );
         assert_eq!(
             classify(Some(&listed)),
-            Some(TiledGemmRejection::CodecSwitchedOff { codec }),
+            Some(TiledGemmRejection::CodecSwitchedOff {
+                codec: codec.name().unwrap_or("unnamed"),
+            }),
             "{codec:?}: a listed codec is kept off, spaces around a name are ignored"
         );
         assert_eq!(

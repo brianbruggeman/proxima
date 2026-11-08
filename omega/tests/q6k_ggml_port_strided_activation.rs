@@ -12,12 +12,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
-    ReduceInit, ScalarOp, affine, append, projection,
-};
+use proxima_tensor::{AxisTerm, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, affine, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);

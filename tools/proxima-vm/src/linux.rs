@@ -19,9 +19,13 @@ use crate::kvm::linux_lane::{LinuxOutcome, LinuxReport, LinuxRun, Load, NetWirin
 #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 use crate::kvm::trap::End;
 use crate::kernel_modules::KernelModule;
-use crate::x86_boot::{BOOT_PARAMS_SIZE, BootPlan, GDT_ADDRESS, PAGE_TABLES_ADDRESS, SetupHeader, fill_boot_params};
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+use crate::x86_boot::{
+    BOOT_PARAMS_SIZE, BootPlan, GDT_ADDRESS, PAGE_TABLES_ADDRESS, SetupHeader, fill_boot_params,
+};
 
 const FRAME_PREFIX: usize = 8;
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 const CONSOLE_TAIL: usize = 1024;
 const DEVICE_MODE: u32 = 0o020_600;
 const INIT_MODE: u32 = 0o100_755;
@@ -204,6 +208,7 @@ pub fn unframe(transmitted: &[u8]) -> Result<&[u8], ProximaError> {
     }
 }
 
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) fn console_tail(console: &[u8]) -> String {
     let start = console.len().saturating_sub(CONSOLE_TAIL);
     String::from_utf8_lossy(&console[start..]).into_owned()

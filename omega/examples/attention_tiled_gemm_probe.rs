@@ -35,10 +35,8 @@
 use std::collections::BTreeSet;
 
 use proxima_tensor::spec::gqa_cached_forward_program;
-use proxima_tensor::{
-    BoundOpKind, Keep, NodeId, NumericPolicy, Op, ScalarOp, bind, correct_packed_matmul_layouts,
-    infer,
-};
+use proxima_tensor::{BoundOpKind, Keep, NodeId, Op, ScalarOp, bind, correct_packed_matmul_layouts, infer};
+use proxima_numeric::{NumericPolicy};
 
 #[cfg(feature = "instrument")]
 struct RejectionShape {

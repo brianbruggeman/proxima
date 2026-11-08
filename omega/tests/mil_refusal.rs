@@ -29,10 +29,8 @@ use proxima_mil::census::Refusal;
 use proxima_mil::writer::{MilError, MilPackage};
 use proxima_onnx::lower::lower_graph;
 use proxima_onnx::pipe::parse_complete;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, Lowered, NodeId, Op, Reduce, ReduceInit, ScalarOp, Shapes,
-    projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, Lowered, NodeId, Op, Reduce, ReduceInit, ScalarOp, Shapes, projection};
+use proxima_numeric::{DType};
 use tempfile::TempDir;
 
 type LaneDoor<W> = Door<OnnxReader, W>;

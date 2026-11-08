@@ -3,7 +3,7 @@
 //! Teaching pointer: a thin wrapper over the generic [`float_layout`] codec with the saturating
 //! E5M2 layout, so infinities never reach stored weights.
 
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 use crate::quant::float_layout;
 

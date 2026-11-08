@@ -6,9 +6,8 @@
 #![allow(clippy::expect_used)]
 
 use omega::CudaDriver;
-use proxima_tensor::{
-    DType, Extent, IndexMap, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, map,
-};
+use proxima_tensor::{Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn main() {
     match CudaDriver::new(0) {

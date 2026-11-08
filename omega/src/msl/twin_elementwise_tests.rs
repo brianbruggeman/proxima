@@ -6,7 +6,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use proxima_tensor::spec::{RopePairing, fused_rope_pair, input_leaf};
-use proxima_tensor::{DType, Extent, NumericPolicy, Op, bind, fuse_twin_elementwise, infer};
+use proxima_tensor::{Extent, Op, bind, fuse_twin_elementwise, infer};
+use proxima_numeric::{DType, NumericPolicy};
 
 use super::*;
 

@@ -1,10 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
-use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, NodeId, NumericPolicy, Op, ScalarOp, TensorError, append,
-    bind, infer, map,
-};
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_tensor::{AxisTerm, Extent, IndexMap, NodeId, Op, ScalarOp, TensorError, append, bind, infer, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 use super::prepare_uniforms_pack::{device_element_bytes, reject_unsupported_gpu_dtype};
 use crate::msl::emit;

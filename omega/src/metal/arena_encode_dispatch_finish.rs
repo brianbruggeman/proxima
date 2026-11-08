@@ -1,7 +1,7 @@
 use super::*;
 #[cfg(feature = "instrument")]
 use objc2_metal::MTLBlitCommandEncoder;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 #[cfg(feature = "instrument")]
 use std::borrow::Borrow;
 /// CARD 6.5: device output arena, hung off the cached [`Plan`] and built
@@ -4655,7 +4655,8 @@ pub(super) mod operand_tensor_bytes_tests {
     use core::slice;
 
     use objc2_metal::MTLBuffer;
-    use proxima_tensor::{AlignedBuffer, DType, Extent, Op, infer};
+    use proxima_tensor::{AlignedBuffer, Extent, Op, infer};
+    use proxima_numeric::{DType};
 
     use super::{
         BTreeSet, Codec, NodeId, PackedOperands, device_and_queue, element_count,
@@ -4999,10 +5000,8 @@ pub(super) mod arena_tests {
     use alloc::vec;
 
     use objc2_metal::MTLDevice;
-    use proxima_tensor::{
-        DType, Extent, IndexMap, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, cpu,
-        projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, cpu, projection};
+    use proxima_numeric::{DType, NumericPolicy};
 
     use super::{
         DispatchType, arena_placement, device_and_queue, execute_plan,
@@ -5702,10 +5701,8 @@ pub(super) mod arena_tests {
 pub(super) mod block_node_attribution_tests {
     use alloc::vec;
 
-    use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
-        ReduceInit, ScalarOp, TensorError, append, projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, TensorError, append, projection};
+    use proxima_numeric::{DType, NumericPolicy};
 
     use super::{MetalError, plan};
 
@@ -5787,7 +5784,7 @@ pub(super) mod block_node_attribution_tests {
         // the opposite order.
         let blocks = [
             QuantizedBlock::Packed {
-                codec: proxima_primitives::Codec::Q6K,
+                codec: proxima_numeric::codec::Codec::Q6K,
                 bytes: &packed_weight,
             },
             QuantizedBlock::Float32(&activation_data),
@@ -5837,7 +5834,7 @@ pub(super) mod block_node_attribution_tests {
         let blocks = [
             QuantizedBlock::Float32(&activation_data),
             QuantizedBlock::Packed {
-                codec: proxima_primitives::Codec::Q6K,
+                codec: proxima_numeric::codec::Codec::Q6K,
                 bytes: &packed_weight,
             },
         ];
@@ -5856,10 +5853,8 @@ pub(super) mod block_node_attribution_tests {
 pub(super) mod hazard_tracker_tests {
     use std::collections::BTreeMap;
 
-    use proxima_tensor::{
-        Extent, IndexMap, Keep, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append, bind,
-        infer, projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, projection};
+    use proxima_numeric::{NumericPolicy};
 
     #[cfg(feature = "instrument")]
     use super::record_hazard_class;
@@ -6514,9 +6509,8 @@ pub(super) mod horizontal_merge_grouping_tests {
 pub(super) mod attention_scratch_len_tests {
     use alloc::vec;
 
-    use proxima_tensor::{
-        BoundOpKind, CachedAttentionArithmetic, DType, Layout, NodeId, NumericPolicy,
-    };
+    use proxima_tensor::{BoundOpKind, CachedAttentionArithmetic, Layout, NodeId};
+    use proxima_numeric::{DType, NumericPolicy};
 
     #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
     use crate::msl::AttentionRowSchedule;
@@ -6873,7 +6867,8 @@ pub(super) mod attention_scratch_len_tests {
 pub(super) mod plan_query_rows_tests {
     use alloc::vec;
 
-    use proxima_tensor::{BoundOpKind, DType, Layout, NodeId};
+    use proxima_tensor::{BoundOpKind, Layout, NodeId};
+    use proxima_numeric::{DType};
 
     use super::{ARENA_TRANSIENT_CAP, BoundOp, plan_bind_row_count};
 
@@ -7071,7 +7066,8 @@ pub(super) mod expert_payload_descriptor_tests {
         selected_expert_arena_descriptors, selected_expert_payloads,
     };
     use proxima_tensor::cpu::{ExpertEntry, ExpertPayloadSpan, ExpertSource, QuantizedBlock};
-    use proxima_tensor::{ComposedBody, DType, Layout, Lookup, NodeId, ScalarOp};
+    use proxima_tensor::{ComposedBody, Layout, Lookup, NodeId, ScalarOp};
+    use proxima_numeric::{DType};
 
     #[test]
     fn live_input_mask_filters_dead_expert_blocks_and_keeps_requested_roots() {
@@ -7602,10 +7598,8 @@ mod extra_output_slot_tests {
     use alloc::vec::Vec;
 
     use proxima_tensor::spec::{RopePairing, fused_rope_pair, input_leaf};
-    use proxima_tensor::{
-        BoundOpKind, DType, Extent, Layout, NodeId, NumericPolicy, bind, fuse_twin_elementwise,
-        infer,
-    };
+    use proxima_tensor::{BoundOpKind, Extent, Layout, NodeId, bind, fuse_twin_elementwise, infer};
+    use proxima_numeric::{DType, NumericPolicy};
 
     use super::{BoundOp, extra_output_slots};
     use crate::{PackedOperands, emit};
@@ -7793,7 +7787,8 @@ mod route_fault_decode_tests {
     use alloc::vec;
 
     use objc2_metal::MTLBuffer;
-    use proxima_tensor::{BoundOpKind, DType, NodeId};
+    use proxima_tensor::{BoundOpKind, NodeId};
+    use proxima_numeric::{DType};
 
     use super::{
         BoundOp, MetalError, allocate_fault_buffer, check_gather_fault, device_and_queue,

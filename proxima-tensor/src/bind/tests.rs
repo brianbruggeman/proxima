@@ -108,10 +108,7 @@ fn maximum_of_nan_and_negative_infinity_differs_by_numeric_policy() {
         "BitExact must compute the real max(NaN, -inf) == -inf, not eliminate the op"
     );
 
-    let nan_assumption_policy = NumericPolicy {
-        nan_assumptions: true,
-        ..NumericPolicy::bit_exact()
-    };
+    let nan_assumption_policy = NumericPolicy::bit_exact().with_nan_assumptions(true);
     let nan_assumption_bound =
         bind_with_fusion(&program, &shapes, &[output], true, nan_assumption_policy)
             .expect("nan-assumption bind succeeds");
@@ -190,10 +187,7 @@ fn add_zero_to_negative_zero_differs_by_numeric_policy() {
         "BitExact must compute the real (-0.0)+0.0 == +0.0, not eliminate the op and keep -0.0"
     );
 
-    let signed_zero_policy = NumericPolicy {
-        signed_zero: true,
-        ..NumericPolicy::bit_exact()
-    };
+    let signed_zero_policy = NumericPolicy::bit_exact().with_signed_zero(true);
     let signed_zero_bound =
         bind_with_fusion(&program, &shapes, &[output], true, signed_zero_policy)
             .expect("signed-zero bind succeeds");
@@ -250,10 +244,7 @@ fn nan_assumption_alone_does_not_eliminate_add_zero() {
         },
     );
     let shapes = shape::infer(&program, &[]).expect("x+0 program infers");
-    let nan_assumption_policy = NumericPolicy {
-        nan_assumptions: true,
-        ..NumericPolicy::bit_exact()
-    };
+    let nan_assumption_policy = NumericPolicy::bit_exact().with_nan_assumptions(true);
     let bound = bind_with_fusion(&program, &shapes, &[output], true, nan_assumption_policy)
         .expect("nan-assumption bind succeeds");
     let buffers = run_resolved(
@@ -1878,7 +1869,7 @@ fn a_gathered_source_aborts_the_single_range_candidate_entirely() {
     );
 }
 
-use crate::dtype::DType;
+use proxima_numeric::DType;
 use crate::map;
 use crate::op::{Extent, append};
 
@@ -7369,14 +7360,12 @@ mod top_fraction_fusion_tests {
 fn only_an_f32_to_f64_widen_folds_into_a_reduce_as_its_accumulator() {
     let island = crate::test_support::widened_sum_of_squares(4, 8);
     let shapes = shape::infer(&island.program, &[]).expect("widened island infers");
-    let permissive = NumericPolicy {
-        contraction: true,
-        reassociation: true,
-        nan_assumptions: true,
-        signed_zero: true,
-        approx_functions: true,
-        ..NumericPolicy::bit_exact()
-    };
+    let permissive = NumericPolicy::bit_exact()
+        .with_contraction(true)
+        .with_reassociation(true)
+        .with_nan_assumptions(true)
+        .with_signed_zero(true)
+        .with_approx_functions(true);
     for policy in [NumericPolicy::bit_exact(), permissive] {
         let bound = bind_with_fusion(&island.program, &shapes, &[island.narrowed], true, policy)
             .expect("widened island binds");

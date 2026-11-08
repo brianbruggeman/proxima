@@ -18,11 +18,12 @@
 #[cfg(feature = "metal-buffer-pool")]
 use proxima_tensor::Reduce;
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
-use proxima_tensor::{BoundOpKind, NodeId, NumericPolicy, bind, infer};
+use proxima_tensor::{BoundOpKind, NodeId, bind, infer};
+use proxima_numeric::{NumericPolicy};
 #[cfg(feature = "metal-buffer-pool")]
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, Op, QuantizedBlock, ReduceInit, ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, Op, QuantizedBlock, ReduceInit, ScalarOp, append, projection};
+#[cfg(feature = "metal-buffer-pool")]
+use proxima_numeric::DType;
 
 mod support;
 use support::{as_named_blocks, real_forward_fixture, real_forward_fixture_with_cached_len};

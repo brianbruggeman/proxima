@@ -89,10 +89,8 @@ fn run() {
 
     use proxima_tensor::process_usage;
     use proxima_tensor::test_support::Lcg;
-    use proxima_tensor::{
-        AlignedBuffer, DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce,
-        ReduceInit, ScalarOp, append, projection,
-    };
+    use proxima_tensor::{AlignedBuffer, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+    use proxima_numeric::{DType};
 
     const DIMENSION: usize = 768;
     const TOP_K: usize = 20;
@@ -310,7 +308,7 @@ fn run() {
                 &[],
                 &blocks,
                 &[sum],
-                proxima_tensor::NumericPolicy::default(),
+                proxima_numeric::NumericPolicy::default(),
             )
             .map_err(|error| format!("plan failed at rows={rows}: {error}"))?;
             omega::execute_plan(&resolved, &blocks)

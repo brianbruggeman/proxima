@@ -42,10 +42,8 @@ use half::bf16;
 use proxima_primitives::pipe::Pipe;
 use proxima_tensor::bind::{READY_BATCH_CAPACITY, ReadyBatch};
 use proxima_tensor::cpu::QuantizedBlock;
-use proxima_tensor::{
-    BFloat8, BoundOp, BoundOpKind, Interpreter, NodeId, NumericPolicy, Op, bind_with_fusion,
-    block_node_ids, infer,
-};
+use proxima_tensor::{BFloat8, BoundOp, BoundOpKind, Interpreter, NodeId, Op, bind_with_fusion, block_node_ids, infer};
+use proxima_numeric::{NumericPolicy};
 
 mod gemma4_rows_support;
 mod support;

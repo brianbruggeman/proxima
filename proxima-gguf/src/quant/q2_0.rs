@@ -40,7 +40,7 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
 }
 
 const _: () = {
-    assert!(GgmlType::Q2_0.block_layout().block_bytes as usize == BLOCK_BYTES);
+    assert!(GgmlType::Q2_0.wire_shape().block_bytes as usize == BLOCK_BYTES);
 };
 
 /// PrismML's `quantize_row_q2_0_ref` / `quantize_row_pq2_0_ref` body, shared by the two group

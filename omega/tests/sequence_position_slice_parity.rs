@@ -12,7 +12,8 @@
 
 use proxima_tensor::spec::{elementwise, input_leaf, reduce};
 use proxima_tensor::test_support::{ParityRun, compare_rows_relative_to_norm};
-use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, ReduceInit, ScalarOp};
+use proxima_tensor::{Extent, NodeId, Op, ReduceInit, ScalarOp};
+use proxima_numeric::{DType, NumericPolicy};
 
 const SEQUENCE_LEN: u32 = 13;
 const HEAD_DIM: u32 = 128;

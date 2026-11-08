@@ -26,7 +26,7 @@
 use omega::AttentionVariant;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::MathMode;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 
 use crate::rope_scaling::RopeScaling;
 use crate::serving::{AttentionConfig, GdnPrefillBackend, ServingConfig};

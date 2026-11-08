@@ -10,10 +10,8 @@
 
 use std::process::Command;
 
-use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit,
-    ScalarOp, append, bind, infer, map,
-};
+use proxima_tensor::{AxisTerm, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
+use proxima_numeric::{DType, NumericPolicy};
 #[cfg(feature = "cached-attention-streaming")]
 use proxima_tensor::{BoundOp, BoundOpKind, Layout};
 
@@ -56,7 +54,7 @@ fn elementwise_tanh_kernel() -> omega::Kernel {
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("elementwise emits")
 }
@@ -95,7 +93,7 @@ fn elementwise_erf_kernel() -> omega::Kernel {
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("erf emits")
 }
@@ -154,7 +152,7 @@ fn fused_matmul_kernel() -> omega::Kernel {
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("matmul emits")
 }
@@ -225,7 +223,7 @@ fn tiled_gemm_q4k_kernel() -> omega::Kernel {
     let weight_node = nests[0].operands()[0].0;
     let mut q4k = std::collections::BTreeMap::new();
     q4k.insert(weight_node, omega::Codec::Q4K);
-    let kernel = omega::emit(&nests[0], &q4k, proxima_tensor::NumericPolicy::default())
+    let kernel = omega::emit(&nests[0], &q4k, proxima_numeric::NumericPolicy::default())
         .expect("tiled gemm emits");
     assert!(
         kernel.source.contains("simdgroup_multiply_accumulate"),
@@ -269,7 +267,7 @@ fn cumsum_kernel() -> omega::Kernel {
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("cumsum emits")
 }
@@ -329,7 +327,7 @@ fn embedding_lookup_kernel() -> omega::Kernel {
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("embedding lookup emits")
 }
@@ -411,7 +409,7 @@ fn embedding_matmul_kernel() -> omega::Kernel {
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("embedding matmul emits")
 }
@@ -440,7 +438,7 @@ fn iota_kernel() -> omega::Kernel {
     omega::emit(
         &nests[0],
         &std::collections::BTreeMap::new(),
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("iota emits")
 }
@@ -481,7 +479,7 @@ fn cached_attention_kernel() -> omega::Kernel {
     omega::emit(
         &bound,
         &std::collections::BTreeMap::new(),
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("cached attention emits")
 }

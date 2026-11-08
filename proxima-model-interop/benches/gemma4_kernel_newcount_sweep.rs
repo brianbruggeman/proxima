@@ -81,16 +81,14 @@ use proxima_gguf::pipe::ParsedGguf;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_gguf::types::GgmlType;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_tensor::instrument::ticks_to_nanos;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_tensor::test_support::Lcg;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// `gemma4:e2b-it-qat`'s real blob — same checkpoint the sibling
 /// decomposition bench and `omega/tests/q4_0_real_checkpoint_parity.rs`

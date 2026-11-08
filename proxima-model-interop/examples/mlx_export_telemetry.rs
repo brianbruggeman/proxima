@@ -10,7 +10,7 @@ use proxima_model_interop::{AffineParams, export_mlx_directory};
 use proxima_telemetry::emit::{EnvFilter, global};
 use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::recorder::Recorder;
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 fn quantization(text: &str) -> Result<AffineParams, Box<dyn Error>> {
     let (bits, group) = text.split_once(',').ok_or("expected bits,group")?;

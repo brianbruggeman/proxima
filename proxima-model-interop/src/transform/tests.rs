@@ -3,7 +3,7 @@ use alloc::vec;
 
 use proxima_gguf::{GgmlType, parse_complete, write_complete};
 use proxima_safetensors::parse_complete as parse_safetensors;
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 use super::*;
 

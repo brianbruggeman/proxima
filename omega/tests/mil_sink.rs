@@ -17,10 +17,8 @@ use proxima_mil::weights::SourceDType;
 use proxima_mil::writer::{MilError, MilPackage, MilRequest, MilWriter, WeightView};
 use proxima_onnx::lower::lower_graph;
 use proxima_onnx::pipe::parse_complete;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, Lowered, NodeId, Op, Reduce, ReduceInit, ScalarOp, infer,
-    projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, Lowered, NodeId, Op, Reduce, ReduceInit, ScalarOp, infer, projection};
+use proxima_numeric::{DType};
 
 fn lowered_mlp() -> Lowered {
     let bytes = two_layer_mlp_bytes();

@@ -21,9 +21,8 @@ use omega::door::{Pins, Reader};
 use omega::onnx_door::OnnxReader;
 use proxima_mil::weights::SourceDType;
 use proxima_mil::writer::{MilError, MilPackage, MilRequest, MilWriter, WeightView};
-use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, NodeId, Op, ScalarOp, affine, append, infer, projection,
-};
+use proxima_tensor::{AxisTerm, Extent, IndexMap, NodeId, Op, ScalarOp, affine, append, infer, projection};
+use proxima_numeric::{DType};
 
 const BGE_MATMUL_NODES: usize = 96;
 const BGE_GATHER_NODES: usize = 39;

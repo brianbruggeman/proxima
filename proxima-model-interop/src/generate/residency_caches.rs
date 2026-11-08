@@ -77,7 +77,8 @@ mod configured_runtime_tests {
     use super::*;
     use crate::generate::prompt_cache_key::CacheKey;
     use proxima_tensor::map::{self, IndexMap};
-    use proxima_tensor::{DType, ScalarOp};
+    use proxima_tensor::{ScalarOp};
+    use proxima_numeric::{DType};
 
     #[test]
     fn configured_runtime_plans_once_and_zero_budget_refuses() {
@@ -2693,7 +2694,7 @@ pub(super) fn select_backend(config: &ServingConfig) -> Engine {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(super) struct PlanNumerics<'config> {
     pub(super) math_mode: omega::metal::MathMode,
-    pub(super) numeric_policy: proxima_tensor::NumericPolicy,
+    pub(super) numeric_policy: proxima_numeric::NumericPolicy,
     pub(super) dispatch_type: omega::metal::DispatchType,
     #[cfg(feature = "metal-attn-variants")]
     pub(super) attention_variant: Option<omega::AttentionVariant>,
@@ -2713,6 +2714,15 @@ pub(super) struct PlanNumerics<'config> {
     /// same program/outputs.
     pub(super) fuse_cached_attention: bool,
     pub(super) omega_runtime: Option<&'config RuntimeConfig>,
+}
+
+/// The placed-input/placed-output slice pair `build_placed_plan` needs, grouped so the signature
+/// stays one argument away from clippy's threshold and the two slices cannot be swapped.
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+#[derive(Clone, Copy)]
+pub(super) struct PlacedIo<'buffers> {
+    pub(super) input: &'buffers [(NodeId, &'buffers PlacedBuffer, usize)],
+    pub(super) output: &'buffers [(NodeId, &'buffers PlacedBuffer, usize)],
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -2810,7 +2820,7 @@ pub struct BackendRuntime {
     /// is present unconditionally (its own doc), and `omega::backend::
     /// plan_named`'s signature now takes it on every engine arm, not only
     /// the Metal one.
-    pub(super) numeric_policy: proxima_tensor::NumericPolicy,
+    pub(super) numeric_policy: proxima_numeric::NumericPolicy,
     #[cfg(all(
         feature = "metal",
         feature = "metal-attn-variants",
@@ -3977,8 +3987,10 @@ impl BackendRuntime {
                     named,
                     outputs,
                     resident_names,
-                    bindings.input_placements,
-                    bindings.output_placements,
+                    PlacedIo {
+                        input: bindings.input_placements,
+                        output: bindings.output_placements,
+                    },
                     &numerics,
                 )
             },
@@ -4045,8 +4057,10 @@ impl BackendRuntime {
                     named,
                     outputs,
                     resident_names,
-                    input_placements,
-                    output_placements,
+                    PlacedIo {
+                        input: input_placements,
+                        output: output_placements,
+                    },
                     &numerics,
                 )
             },
@@ -4161,8 +4175,10 @@ impl BackendRuntime {
                 named,
                 outputs,
                 resident_names,
-                input_placements,
-                output_placements,
+                PlacedIo {
+                    input: input_placements,
+                    output: output_placements,
+                },
                 &numerics,
             )
         };
@@ -4302,10 +4318,11 @@ impl BackendRuntime {
         named: &[(&str, QuantizedBlock<'_>)],
         outputs: &[NodeId],
         resident_names: &BTreeSet<&str>,
-        input_placements: &[(NodeId, &PlacedBuffer, usize)],
-        output_placements: &[(NodeId, &PlacedBuffer, usize)],
+        placed: PlacedIo<'_>,
         numerics: &PlanNumerics<'_>,
     ) -> Result<omega::metal::Plan, InteropError> {
+        let input_placements = placed.input;
+        let output_placements = placed.output;
         let placed_input_nodes: Vec<NodeId> =
             input_placements.iter().map(|(node, _, _)| *node).collect();
         let mut plan = if let Some(config) = numerics.omega_runtime {
@@ -4417,8 +4434,10 @@ impl BackendRuntime {
                     named,
                     outputs,
                     resident_names,
-                    input_placements,
-                    output_placements,
+                    PlacedIo {
+                        input: input_placements,
+                        output: output_placements,
+                    },
                     &numerics,
                 )
             },
@@ -4504,8 +4523,10 @@ impl BackendRuntime {
                     named,
                     outputs,
                     resident_names,
-                    input_placements,
-                    output_placements,
+                    PlacedIo {
+                        input: input_placements,
+                        output: output_placements,
+                    },
                     &numerics,
                 )
             },
@@ -4675,7 +4696,7 @@ impl BackendRuntime {
         cache: &mut alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool, u64), Plan>,
         shape: &(usize, usize, Vec<NodeId>, bool, u64),
         symbols: &[u64],
-        numeric_policy: proxima_tensor::NumericPolicy,
+        numeric_policy: proxima_numeric::NumericPolicy,
     ) -> Result<(), InteropError> {
         let Some(mut near) = Self::take_near_plan(cache, shape, |key, wanted, _| {
             key.3 == wanted.3 && key.4 == wanted.4 && same_width_class(key, wanted)
@@ -5096,7 +5117,7 @@ pub(crate) struct BackendRuntime {
     /// see that field's own doc.
     pub(super) exact_activations: bool,
     /// The numeric policy CPU steps bind under: bit exact except for the one permission a caller grants.
-    cpu_numeric_policy: proxima_tensor::NumericPolicy,
+    cpu_numeric_policy: proxima_numeric::NumericPolicy,
     /// One bound step per `(program hash, new-token count)` class: the decode width and
     /// each prompt width keep their own, so a step changes only the symbols the plan
     /// patches, never the plan.
@@ -5115,7 +5136,7 @@ impl BackendRuntime {
             free_buffers: proxima_tensor::cpu::BufferPools::default(),
             validated_weight_nodes: None,
             exact_activations: _config.exact_activations,
-            cpu_numeric_policy: proxima_tensor::NumericPolicy::bit_exact()
+            cpu_numeric_policy: proxima_numeric::NumericPolicy::bit_exact()
                 .with_flash_narrowing(_config.numeric_policy.flash_narrowing),
             cpu_plans: alloc::collections::BTreeMap::new(),
             kv_pad: alloc::collections::BTreeMap::new(),
@@ -5289,7 +5310,8 @@ mod omega_async_serving_tests {
     use proxima::CoreId;
     use proxima_primitives::pipe::CreditAcquireError;
     use proxima_tensor::map::{self, IndexMap};
-    use proxima_tensor::{DType, ScalarOp};
+    use proxima_tensor::{ScalarOp};
+    use proxima_numeric::{DType};
     use std::boxed::Box;
     use std::sync::mpsc;
     use std::time::Duration;

@@ -15,7 +15,8 @@
 use std::process::Command;
 
 use omega::{Kernel, PackedOperands};
-use proxima_tensor::{BoundOp, BoundOpKind, DType, Layout, NodeId, NumericPolicy};
+use proxima_tensor::{BoundOp, BoundOpKind, Layout, NodeId};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn decode_attention(head_dim: u64, cached_key_rows: u64, lower: i64) -> BoundOp {
     let layout = Layout {

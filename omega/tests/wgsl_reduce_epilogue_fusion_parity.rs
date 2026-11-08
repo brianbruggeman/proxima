@@ -20,7 +20,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
-use proxima_tensor::{BoundOpKind, NumericPolicy, bind};
+use proxima_tensor::{BoundOpKind, bind};
+use proxima_numeric::{NumericPolicy};
 
 mod support;
 use support::{as_named_blocks, real_single_range_forward_fixture_with_padding};

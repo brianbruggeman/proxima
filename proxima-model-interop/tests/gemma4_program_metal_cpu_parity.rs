@@ -67,7 +67,8 @@ use proxima_tensor::spec::{
     scheduled_forward_program_with_experts,
 };
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
+use proxima_tensor::{Op, QuantizedBlock, block_node_ids, infer};
+use proxima_numeric::{NumericPolicy};
 
 const WIDTH: u32 = 5;
 

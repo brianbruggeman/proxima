@@ -3,7 +3,7 @@
 use proxima_autograd::adjoint::differentiate;
 use proxima_autograd::sparse::dedupe_and_sum_rows;
 use proxima_tensor::cpu::evaluate_named;
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, AxisIndex, AxisTerm, IndexMap, IndexPattern};
 use proxima_tensor::op::{self, Extent, Keep, Op, Reduce, ReduceInit, ScalarOp};
 

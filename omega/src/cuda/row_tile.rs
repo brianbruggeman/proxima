@@ -1,7 +1,8 @@
 use alloc::format;
 use alloc::string::{String, ToString};
 
-use proxima_tensor::{BoundOp, BoundOpKind, Keep, NumericPolicy};
+use proxima_tensor::{BoundOp, BoundOpKind, Keep};
+use proxima_numeric::{NumericPolicy};
 
 use super::{
     Codec, EmitError, WARP_SIZE, chunk_codec, cooperative_identity_token, fold_init_tokens, gather_count,

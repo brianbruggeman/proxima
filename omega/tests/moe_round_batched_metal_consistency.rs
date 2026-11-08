@@ -28,10 +28,8 @@ use proxima_tensor::spec::{
     elementwise, gathered_expert_product, input_leaf, reduce, scalar_constant,
 };
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    BoundOpKind, DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock, ReduceInit, ScalarOp,
-    append,
-};
+use proxima_tensor::{BoundOpKind, Extent, NodeId, Op, QuantizedBlock, ReduceInit, ScalarOp, append};
+use proxima_numeric::{DType, NumericPolicy};
 
 const EMBEDDING: u32 = 256;
 const EXPERT_HIDDEN: u32 = 64;

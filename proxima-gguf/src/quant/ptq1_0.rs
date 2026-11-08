@@ -77,7 +77,7 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
 }
 
 const _: () = {
-    assert!(GgmlType::Ptq1_0.block_layout().block_bytes as usize == BLOCK_BYTES);
+    assert!(GgmlType::Ptq1_0.wire_shape().block_bytes as usize == BLOCK_BYTES);
 };
 
 fn ternary(value: f32, inverse: f32) -> u32 {

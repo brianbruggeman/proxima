@@ -13,10 +13,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, evaluate, infer, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, evaluate, infer, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// Peak-magnitude-normalized relative error, never per-row -- a per-row
 /// relative error explodes at zero crossings (a near-zero reference makes an

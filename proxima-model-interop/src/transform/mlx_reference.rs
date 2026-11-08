@@ -19,7 +19,7 @@ mod tests {
     use proxima_gguf::parse_complete;
     use proxima_gguf::pipe::ParsedGguf;
     use proxima_safetensors::{TensorPayload, map_dtype, parse_complete as parse_safetensors};
-    use proxima_tensor::DType;
+    use proxima_numeric::DType;
     use serde_json::Value;
 
     use crate::bind::{ModelHparams, architecture_from_metadata};

@@ -24,7 +24,7 @@
 use std::io::{Read, Seek, SeekFrom};
 
 use proxima_safetensors::{Manifest, SafetensorsParser};
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 const REAL_QWEN3_SAFETENSORS_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/lmstudio-community/Qwen3-30B-A3B-MLX-4bit/model-00001-of-00004.safetensors";
 

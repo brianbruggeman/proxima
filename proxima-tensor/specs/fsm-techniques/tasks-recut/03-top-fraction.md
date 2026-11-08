@@ -1317,7 +1317,8 @@ The row-count threshold used by the Metal and kernel-count cards is the producti
      #![allow(clippy::unwrap_used, clippy::expect_used)]
 
      use proxima_tensor::spec::{input_leaf, top_fraction_mask};
-     use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock};
+     use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock};
+     use proxima_numeric::{DType, NumericPolicy};
 
      const TWELVE_SCORES: [f32; 12] = [0.5, 3.0, 1.5, 3.0, 0.1, 2.5, 0.9, 4.0, 1.1, 2.0, 0.3, 5.0];
 
@@ -1519,9 +1520,8 @@ The row-count threshold used by the Metal and kernel-count cards is the producti
      use omega::sized::SELECTION_TOP_FRACTION_MIN_ROWS;
      use omega::{Binding, PackedOperands, emit};
      use proxima_tensor::spec::{input_leaf, top_fraction_mask};
-     use proxima_tensor::{
-         BoundOp, DType, Extent, NumericPolicy, bind_with_fusion, bind_with_top_fraction, infer,
-     };
+     use proxima_tensor::{BoundOp, Extent, bind_with_fusion, bind_with_top_fraction, infer};
+     use proxima_numeric::{DType, NumericPolicy};
 
      fn bound_lists(rows: u64) -> (Vec<BoundOp>, Vec<BoundOp>) {
          let mut program = Vec::new();

@@ -152,7 +152,7 @@ pub fn recode_expert_into(
     scratch: &mut [f32],
     output: &mut [u8],
 ) -> Result<usize, InteropError> {
-    let source_layout = crate::bind::codec_to_ggml_type(source_codec)?.block_layout();
+    let source_layout = crate::bind::codec_to_ggml_type(source_codec)?.wire_shape();
     let block_bytes = source_layout.block_bytes as usize;
     let block_elements = source_layout.block_elements as usize;
     if !source_bytes.len().is_multiple_of(block_bytes) {
@@ -225,6 +225,7 @@ fn source_codec_name(codec: Codec) -> &'static str {
         Codec::Q2_0 => "q2_0",
         Codec::Pq2_0 => "pq2_0",
         Codec::Ptq1_0 => "ptq1_0",
+        _ => "unnamed",
     }
 }
 
@@ -284,6 +285,7 @@ fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<
         Codec::Pq2_0 => {
             Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "pq2_0" })
         }
+        _ => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "unnamed" }),
     }
     .map_err(InteropError::from)
 }
@@ -917,7 +919,7 @@ impl<'file> ExpertSlab<'file> {
                 .filter_map(Option::as_ref)
                 .map(|expert| {
                     expert.entry().ok_or(InteropError::UnsupportedCodec {
-                        codec: expert.codec,
+                        codec: crate::error::codec_name(expert.codec),
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -969,7 +971,7 @@ impl<'file> ExpertSlab<'file> {
                 .filter_map(Option::as_ref)
                 .map(|expert| {
                     expert.entry().ok_or(InteropError::UnsupportedCodec {
-                        codec: expert.codec,
+                        codec: crate::error::codec_name(expert.codec),
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -1051,7 +1053,9 @@ impl<'file> ExpertSlab<'file> {
                                 expert.entry_with_codec(bytes, codec.unwrap_or(expert.codec))
                             },
                         )
-                        .ok_or(InteropError::UnsupportedCodec { codec: used_codec })
+                        .ok_or(InteropError::UnsupportedCodec {
+                            codec: crate::error::codec_name(used_codec),
+                        })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let projection =

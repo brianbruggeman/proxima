@@ -478,7 +478,7 @@ impl GgufParser {
             return Ok(false);
         };
 
-        let block_size = ggml_type.block_layout().block_elements;
+        let block_size = ggml_type.wire_shape().block_elements;
         let row_len = dims.first().copied().unwrap_or(1);
         if block_size == 0 || row_len % block_size != 0 {
             return Err(GgufError::RowSizeNotBlockMultiple {
@@ -595,7 +595,7 @@ impl GgufParser {
             .iter_mut()
             .filter(|tensor| tensor.ggml_type == GgmlType::Q2_0)
         {
-            let block_size = GgmlType::Pq2_0.block_layout().block_elements;
+            let block_size = GgmlType::Pq2_0.wire_shape().block_elements;
             let row_len = tensor.dims.first().copied().unwrap_or(1);
             if row_len % block_size != 0 {
                 return Err(GgufError::RowSizeNotBlockMultiple {

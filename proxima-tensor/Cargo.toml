@@ -26,7 +26,6 @@ default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot", "cac
 # (~1.03x combined noise, i.e. a tie, not a regression).
 std = ["alloc", "thiserror/std", "tensor-bgpool", "tensor-cohort", "cohort-staged-graph", "dep:libc"]
 alloc = []
-float-layout-dtype = ["proxima-gguf/float-layout-dtype"]
 # Cached-attention graph rewrite. Default-off in this crate's own `default`
 # (no checkpoint/differential harness lives here), but ROW 282 folds it into
 # `metal`'s default shape one level up (`omega`, `proxima-model-interop`) now
@@ -55,7 +54,7 @@ metal-attn-split-rows = ["metal-attn-split-decode"]
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
 # AffineMap/validate) never sees this feature.
-config = ["std", "dep:bon", "dep:conflaguration", "smallvec/serde"]
+config = ["std", "dep:bon", "dep:conflaguration", "smallvec/serde", "proxima-numeric/config"]
 # Correctness proof (`spec.rs`'s `cpu_mask_zero_ulp`) for the general
 # bucketing mechanism `proxima-model-interop`'s placed-KV Metal decode path
 # relies on: rounding the growing KV extent (`Extent::Symbolic(1)` in
@@ -286,6 +285,7 @@ proxima-gguf = { workspace = true, default-features = false, features = ["alloc"
 # proxima-primitives/src/pipe/mod.rs), so `default-features = false` already
 # reaches them at every tier this crate has, alloc included.
 proxima-primitives = { workspace = true }
+proxima-numeric = { version = "0.1.0", path = "../proxima-numeric", default-features = false }
 proxima-telemetry = { workspace = true, optional = true }
 serde = { workspace = true, features = ["alloc", "derive"] }
 smallvec.workspace = true

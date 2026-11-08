@@ -39,9 +39,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::Criterion;
-use proxima_tensor::{
-    DType, Extent, IndexMap, NodeId, Op, ScalarOp, TypedBuffer, append, evaluate_typed, map,
-};
+use proxima_tensor::{Extent, IndexMap, NodeId, Op, ScalarOp, TypedBuffer, append, evaluate_typed, map};
+use proxima_numeric::{DType};
 
 /// One `Conv` layer's window-materialize shape: `c` input channels, `oh`/`ow`
 /// output spatial extent, `kh`/`kw` kernel extent (stride/dilation fixed at

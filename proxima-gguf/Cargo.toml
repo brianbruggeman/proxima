@@ -12,7 +12,6 @@ readme.workspace = true
 [features]
 default = ["std"]
 alloc = []
-float-layout-dtype = []
 # `checkpoint_resolver`: the one place real-checkpoint tests find their GGUF files, reused by
 # proxima-model-interop's tests
 test-support = ["std"]
@@ -26,6 +25,7 @@ arrayvec.workspace = true
 half = { version = "2.7.1", default-features = false }
 libm = { version = "0.2.16", default-features = false }
 proxima-primitives = { workspace = true, default-features = false }
+proxima-numeric = { version = "0.1.0", path = "../proxima-numeric", default-features = false, features = ["alloc"] }
 thiserror.workspace = true
 bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }

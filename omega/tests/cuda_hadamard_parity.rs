@@ -9,7 +9,8 @@ use omega::Codec;
 use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_tensor::spec::{HadamardFold, input_leaf, merge_head_axes};
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock};
+use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock};
+use proxima_numeric::{DType, NumericPolicy};
 
 const BLOCK: u32 = 1024;
 const OUTER: usize = 32;

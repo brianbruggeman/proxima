@@ -4,7 +4,7 @@
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 use proxima_tensor::LoopCdMode;
 use proxima_tokenizer::Vocab;
 

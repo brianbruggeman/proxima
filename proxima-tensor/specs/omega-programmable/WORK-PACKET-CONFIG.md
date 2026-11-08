@@ -12,7 +12,7 @@ Extend `omega::config::RuntimeConfig` in place. Keep `engine: String = "cpu"`,
 
 | Field | Type and default | Consumer |
 |---|---|---|
-| numeric | existing `proxima_tensor::NumericPolicy`, bit_exact | configured binder/emitter; no duplicate numeric-policy type |
+| numeric | existing `proxima_numeric::NumericPolicy`, bit_exact | configured binder/emitter; no duplicate numeric-policy type |
 | constraints | `ResourceConstraints`, all None | backend and concrete payload allocation owners |
 | selection | `SelectionConfig`, configured mode | cold configured planner/measurement selection |
 

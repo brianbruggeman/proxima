@@ -1,6 +1,6 @@
 use super::*;
 use conflaguration::Validate;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 
 #[test]
 fn grouped_gathered_expert_product_infers_selected_axis() {
@@ -4107,7 +4107,7 @@ async fn a_mistral_layer_written_as_toml_binds_ffn_out_fused_and_evaluates() {
         &program,
         &shapes,
         &[root, ffn_out],
-        crate::numeric::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("the real layer binds");
     let ffn_out_body_steps = bound
@@ -4417,7 +4417,7 @@ fn the_chunked_cache_fold_node_budget_is_measured_before_it_is_built() {
         &cached_program,
         &cached_shapes,
         &cached_outputs,
-        crate::numeric::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("the cached program binds")
     .len();
@@ -4512,7 +4512,7 @@ fn the_single_range_cache_fold_node_budget_is_measured_against_the_two_range_bas
         &two_range_shapes,
         &two_range_outputs,
         false,
-        crate::numeric::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the two-range cached program binds")
     .len();
@@ -4546,7 +4546,7 @@ fn the_single_range_cache_fold_node_budget_is_measured_against_the_two_range_bas
         &single_range_shapes,
         &single_range_outputs,
         false,
-        crate::numeric::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the single-range cached program binds")
     .len();
@@ -5222,7 +5222,7 @@ fn cached_attention_single_range_fused_matches_the_unfused_program() {
         BoundOp, BoundOpKind, READY_BATCH_CAPACITY, ReadyBatch, bind_with_fusion, block_node_ids,
     };
     use crate::cpu::Interpreter;
-    use crate::numeric::NumericPolicy;
+    use proxima_numeric::NumericPolicy;
     use proxima_primitives::pipe::Pipe;
 
     const VOCAB: u32 = 5;
@@ -5730,7 +5730,7 @@ fn bound_ops_are_classified_variant_or_invariant_in_cached_len() {
         &program,
         &shapes_a,
         &outputs,
-        crate::numeric::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("cached_len=50 binds");
     let shapes_b =
@@ -5739,7 +5739,7 @@ fn bound_ops_are_classified_variant_or_invariant_in_cached_len() {
         &program,
         &shapes_b,
         &outputs,
-        crate::numeric::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("cached_len=51 binds");
 
@@ -8194,7 +8194,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
         &shapes,
         &outputs,
         false,
-        crate::numeric::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the program binds");
     // `reduce-epilogue-fusion` is a bind-time REWRITE gated only by this
@@ -9043,7 +9043,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
             &shapes,
             &outputs,
             true,
-            crate::numeric::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("the program binds with fusion enabled");
         let fused_cached_attention = fused
@@ -9125,7 +9125,7 @@ fn paired_gate_up_reduce_removes_one_reduce_per_layer_relative_to_the_baseline()
         &baseline_shapes,
         &baseline_outputs,
         false,
-        crate::numeric::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the baseline program binds");
     let baseline_reduce_total = baseline_bound
@@ -9150,7 +9150,7 @@ fn paired_gate_up_reduce_removes_one_reduce_per_layer_relative_to_the_baseline()
         &paired_shapes,
         &paired_outputs,
         false,
-        crate::numeric::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the paired program binds");
     let paired_reduce_total = paired_bound
@@ -9270,7 +9270,7 @@ fn fused_qkv_reduce_adds_one_dispatch_per_layer_relative_to_the_baseline() {
         &baseline_shapes,
         &baseline_outputs,
         false,
-        crate::numeric::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the baseline program binds");
     let baseline_total = baseline_bound.len();
@@ -9296,7 +9296,7 @@ fn fused_qkv_reduce_adds_one_dispatch_per_layer_relative_to_the_baseline() {
         &fused_shapes,
         &fused_outputs,
         false,
-        crate::numeric::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the fused-qkv program binds");
     let fused_total = fused_bound.len();
@@ -15577,7 +15577,7 @@ mod gemma4_synthetic_parity {
         // which no longer fires there once the new arm accepts.
         let accepted_under = |new_count: u64,
                               kv_extent: u64,
-                              policy: crate::numeric::NumericPolicy|
+                              policy: proxima_numeric::NumericPolicy|
          -> (usize, usize) {
             let shapes = crate::shape::infer(&program, &[new_count, kv_extent])
                 .expect("the gemma4-shaped recognizer fixture shape-infers");
@@ -15605,7 +15605,7 @@ mod gemma4_synthetic_parity {
             accepted_under(
                 new_count,
                 kv_extent,
-                crate::numeric::NumericPolicy::llama_relaxed(),
+                proxima_numeric::NumericPolicy::llama_relaxed(),
             )
         };
         let (decode_softmax_weights, decode_accepted) = accepted(1, SWA_WINDOW as u64 / 2);
@@ -15652,7 +15652,7 @@ mod gemma4_synthetic_parity {
             let (bit_exact_softmax_weights, bit_exact_attention) = accepted_under(
                 1,
                 SWA_WINDOW as u64 / 2,
-                crate::numeric::NumericPolicy::bit_exact(),
+                proxima_numeric::NumericPolicy::bit_exact(),
             );
             assert_eq!(
                 (bit_exact_softmax_weights, bit_exact_attention),
@@ -15716,7 +15716,7 @@ mod gemma4_synthetic_parity {
             block_node_ids,
         };
         use crate::cpu::Interpreter;
-        use crate::numeric::NumericPolicy;
+        use proxima_numeric::NumericPolicy;
 
         const KEY_ROWS_TOTAL: usize = 8;
 
@@ -23248,7 +23248,7 @@ fn a_mean_of_squares_refuses_an_f32_reciprocal_where_its_f64_count_belongs() {
 mod flash_attention_worked_example {
     use super::*;
     use crate::bind::{BoundOp, BoundOpKind, bind_with_fusion};
-    use crate::numeric::NumericPolicy;
+    use proxima_numeric::NumericPolicy;
 
     const HEAD_DIM: usize = 64;
     const ROWS: usize = 5;
@@ -23470,7 +23470,7 @@ mod flash_attention_worked_example {
 #[test]
 fn the_cacheless_forward_pass_binds_one_fused_attention_per_layer_under_the_default_policy() {
     use crate::bind::{BoundOpKind, bind_with_fusion};
-    use crate::numeric::NumericPolicy;
+    use proxima_numeric::NumericPolicy;
     let program = gqa_forward_program(128, 64, 172, 8, 4, 16, 2, 0, 0)
         .expect("the forward pass lowers to a program");
     let root = NodeId(program.len() as u32 - 1);
@@ -23642,7 +23642,7 @@ mod attention_sinks {
             &shapes,
             &[decode.logits],
             true,
-            crate::numeric::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("the sink leaf the denominator reads binds instead of rejecting the program");
 

@@ -6,8 +6,8 @@ use proxima_gguf::quant::scaled_float::{BLOCK_BYTES, BLOCK_ELEMENTS, dequantize_
 use proxima_gguf::quant::{f16, q4_0, q8_0};
 use proxima_gguf::tensor::MAX_DIMS;
 use proxima_gguf::{GgmlType, GgufModel, TensorPayload, parse_complete, write_complete};
-use proxima_primitives::Codec;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::codec::Codec;
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_tensor::cpu::QuantizedBlock;
 
 use super::{convert_codec, policy_selects};

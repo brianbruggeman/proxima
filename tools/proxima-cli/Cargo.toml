@@ -25,6 +25,7 @@ path = "src/daemon.rs"
 vm = ["proxima/vm"]
 
 [dependencies]
+proxima-numeric = { version = "0.1.0", path = "../../proxima-numeric" }
 proxima = { workspace = true, features = ["runtime-tokio", "tokio", "http1-native", "http1"] }
 clap = { workspace = true, features = ["derive", "env"] }
 mimalloc.workspace = true

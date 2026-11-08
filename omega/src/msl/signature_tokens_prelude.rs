@@ -1,5 +1,5 @@
 use super::*;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 pub(super) const SELECTION_THREADGROUP_WIDTH: u64 = 1024;
 
@@ -321,38 +321,10 @@ pub(super) fn type_token(node: NodeId, dtype: DType) -> Result<&'static str, Emi
     device_scalar_token(dtype).ok_or(EmitError::UnsupportedDType { node, dtype })
 }
 
-/// The MSL scalar a device buffer of `dtype` holds, or `None` for a dtype this backend never
-/// emits. The one place both [`type_token`] and the Metal buffer code (upload, read-back, sizing)
-/// ask, so a buffer's element type and its byte width cannot disagree.
-#[cfg(not(feature = "float-layout-dtype"))]
-pub(crate) fn device_scalar_token(dtype: DType) -> Option<&'static str> {
-    match dtype {
-        DType::FLOAT16 => Some("half"),
-        DType::FLOAT32
-        | DType::BFLOAT16
-        | DType::Bool
-        | DType::INT8
-        | DType::UINT8
-        | DType::INT32
-        | DType::UINT32 => Some("float"),
-        DType::INT16
-        | DType::UINT16
-        | DType::INT64
-        | DType::UINT64
-        | DType::INT128
-        | DType::UINT128
-        | DType::BFLOAT8
-        | DType::FP6_E3_M2
-        | DType::FLOAT64 => None,
-        DType::Layout(_) => None,
-    }
-}
-
 /// The MSL scalar a device buffer of `dtype` holds, selected by the layout's fields: `half` where
 /// the fields equal binary16's ([`layout_render::hardware_type`]), `float` for every other layout
 /// (the kernel computes in binary32 and the host narrows through the layout codec at the buffer
 /// boundary). `None` for a dtype this backend never emits.
-#[cfg(feature = "float-layout-dtype")]
 pub(crate) fn device_scalar_token(dtype: DType) -> Option<&'static str> {
     match dtype {
         DType::Layout(layout) => match layout_render::hardware_type(&layout) {
@@ -1158,6 +1130,7 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
             | Codec::Ptq1_0
             | Codec::BFloat8,
         ) => format!("in{index}[{offset}]"),
+        _ => format!("in{index}[{offset}]"),
     }
 }
 
@@ -1236,6 +1209,7 @@ fn codec_element_fn_name(codec: Codec) -> &'static str {
         | Codec::Pq2_0
         | Codec::Ptq1_0
         | Codec::BFloat8 => "unreachable_element_fn",
+        _ => "unreachable_element_fn",
     }
 }
 

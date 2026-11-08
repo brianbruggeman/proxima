@@ -6,8 +6,8 @@ use objc2_foundation::NSString;
 use objc2_metal::{
     MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice, MTLLanguageVersion, MTLLibrary,
 };
-use proxima_primitives::block_layout::BlockLayout;
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::block_layout::BlockLayout;
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
 
 use super::layout_render::{block_unpack_msl, hardware_type, layout_load_msl, layout_store_msl};
 #[cfg(all(feature = "metal", target_os = "macos"))]

@@ -27,10 +27,8 @@ use std::mem::size_of;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use proxima_gguf::quant::q4_0;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// `[rows, k] x [k, 1] -> [rows, 1]`, the shape [`crate::`]'s packed-weight gate
 /// uses: a packed weight operand, an f32 activation, a multiply, and a reduce
@@ -110,7 +108,7 @@ fn bench_q4_0_matvec(criterion: &mut Criterion) {
             (
                 "weight",
                 QuantizedBlock::Packed {
-                    codec: proxima_primitives::Codec::Q4_0,
+                    codec: proxima_numeric::codec::Codec::Q4_0,
                     bytes: &weight_bytes,
                 },
             ),

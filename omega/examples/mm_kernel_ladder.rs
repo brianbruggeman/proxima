@@ -46,10 +46,8 @@ mod ladder {
     };
     use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, quantize};
     use proxima_tensor::test_support::Lcg;
-    use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp,
-        append, bind, correct_packed_matmul_layouts, infer, projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind, correct_packed_matmul_layouts, infer, projection};
+    use proxima_numeric::{DType, NumericPolicy};
 
     type Device = Retained<ProtocolObject<dyn MTLDevice>>;
     type Queue = Retained<ProtocolObject<dyn MTLCommandQueue>>;

@@ -30,9 +30,8 @@ use proxima_telemetry::emit::EnvFilter;
 use proxima_telemetry::emit::global;
 use proxima_telemetry::pipes::CountingPipe;
 use proxima_telemetry::recorder::Recorder;
-use proxima_tensor::{
-    DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 const EXTENT: u32 = 8;
 

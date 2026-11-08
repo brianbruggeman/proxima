@@ -24,20 +24,18 @@ use std::env;
 
 use omega::Codec;
 use proxima_gguf::quant::block_layout;
-use proxima_primitives::block_layout::BlockLayout;
+use proxima_numeric::block_layout::BlockLayout;
 use omega::backend::{
     BackendError, Engine, GpuDriver, Plan, cuda_kernel_identities, execute_plan_named, plan_named,
 };
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 use proxima_tensor::infer;
 use proxima_tensor::spec::{
     input_leaf, qk_norm_cached_forward_program, rmsnorm, rmsnorm_per_head, count_constant, scalar_constant,
 };
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, map, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, map, projection};
+use proxima_numeric::{DType};
 
 const BATCH: u32 = 4;
 const IN_FEATURES: u32 = 8;
@@ -2869,7 +2867,8 @@ mod resident_weights {
 
     use omega::{Codec, CudaDriver, CudaPlan};
     use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, quantize};
-    use proxima_tensor::{NumericPolicy, QuantizedBlock};
+    use proxima_tensor::{QuantizedBlock};
+    use proxima_numeric::{NumericPolicy};
 
     use super::{DType, packed_matmul_program, random_vec};
 
@@ -3944,7 +3943,8 @@ async fn broadcast_epilogue_state_update_over_a_strided_reduction_equals_the_f64
 
 mod pooled_intermediates {
     use omega::CudaDriver;
-    use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, QuantizedBlock};
+    use proxima_tensor::{Extent, NodeId, QuantizedBlock};
+    use proxima_numeric::{DType, NumericPolicy};
 
     use super::{append_input, append_matmul, random_vec};
     use omega::backend::{Engine, execute_plan_named, plan_named};

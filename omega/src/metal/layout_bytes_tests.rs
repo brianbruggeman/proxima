@@ -1,5 +1,5 @@
 use objc2_metal::{MTLBuffer, MTLDevice, MTLResourceOptions};
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
 
 use super::device_buffers_arena_plan::device_and_queue;
 use crate::Codec;

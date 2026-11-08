@@ -55,7 +55,7 @@ mod tests {
     use alloc::string::String;
     use alloc::vec;
     use alloc::vec::Vec;
-    use proxima_tensor::DType;
+    use proxima_numeric::DType;
 
     /// Builds a real safetensors wire buffer in memory: `[u64 LE header
     /// len][header JSON][raw tensor bytes, contiguous, in declaration

@@ -1,4 +1,4 @@
-#![cfg(all(feature = "metal", feature = "float-layout-dtype", target_os = "macos"))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! Parity of the one MSL emitter (`omega::msl::layout_render`) against the CPU codec
@@ -15,7 +15,7 @@ mod upload;
 use std::sync::OnceLock;
 
 use proxima_gguf::quant::float_layout::{decode, encode};
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
 
 use compare::{compare_bits, compare_codes};
 use gpu::{Gpu, read_words};
@@ -379,9 +379,8 @@ fn float_layout_parity_control_wrong_bias_decode_differs() {
 
 #[test]
 fn float_layout_parity_control_int32_operand_still_rejected() {
-    use proxima_tensor::{
-        DType, Extent, IndexMap, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, map,
-    };
+    use proxima_tensor::{Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, map};
+    use proxima_numeric::{DType, NumericPolicy};
 
     let mut program = Vec::new();
     let source = append(

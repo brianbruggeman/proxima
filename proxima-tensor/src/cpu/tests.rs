@@ -6365,7 +6365,7 @@ fn peak_live_buffers_on_a_tanh_chain_stays_small_under_evaluate_parallel() {
 fn execute_composes_through_pipe_ext_matching_the_free_function() {
     use crate::bind::BoundOpBuilder;
     use crate::live;
-    use crate::numeric::NumericPolicy;
+    use proxima_numeric::NumericPolicy;
     use crate::shape::ShapeTable;
     use proxima_primitives::block_on;
     use proxima_primitives::pipe::{Pipe, PipeExt};
@@ -14494,7 +14494,6 @@ fn evaluate_retirement_arena_keeps_inputs_statics_and_outputs_resident() {
     }
 }
 
-#[cfg(feature = "float-layout-dtype")]
 mod float_layout_evaluate {
     use super::*;
 

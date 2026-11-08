@@ -323,7 +323,7 @@ pub fn probe_kv_padding(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::dtype::DType;
+    use proxima_numeric::DType;
     use crate::map::{self, IndexMap};
     use crate::op::{Extent, Keep, ReduceInit, append};
 

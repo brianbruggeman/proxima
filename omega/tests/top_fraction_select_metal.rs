@@ -7,7 +7,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::spec::{input_leaf, top_fraction_mask};
-use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock};
+use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock};
+use proxima_numeric::{DType, NumericPolicy};
 
 const TWELVE_SCORES: [f32; 12] = [0.5, 3.0, 1.5, 3.0, 0.1, 2.5, 0.9, 4.0, 1.1, 2.0, 0.3, 5.0];
 

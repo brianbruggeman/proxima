@@ -2,7 +2,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_primitives::block_layout::{BlockLayout, Coded};
+use proxima_numeric::block_layout::{BlockLayout, Coded};
 
 use super::block_dot::{BlockDot, DOT_ELEMENTS, layout_name, rows_per_warp, scale_helpers};
 

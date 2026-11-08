@@ -2,8 +2,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_primitives::block_layout::{BlockLayout, Coded, Field, Plane};
-use proxima_primitives::float_layout::SignEncoding;
+use proxima_numeric::block_layout::{BlockLayout, Coded, Field, Plane};
+use proxima_numeric::float_layout::SignEncoding;
 
 use super::block_dot::{
     BlockDot, ChunkTerms, DOT_ELEMENTS, affine, layout_name, rows_per_warp, scale_helpers, scale_read, values_fit_int8,
@@ -200,7 +200,7 @@ fn min_chunk_helpers(name: &str, layout: &BlockLayout, field: Field, coded: Code
 
 #[cfg(test)]
 mod tests {
-    use proxima_primitives::block_layout::BlockLayout;
+    use proxima_numeric::block_layout::BlockLayout;
 
     use super::sub_block_dot;
     use crate::cuda::block_dot::ChunkTerms;
@@ -227,7 +227,7 @@ mod tests {
 
 #[cfg(all(test, feature = "cuda-driver"))]
 mod device_scale_dump {
-    use proxima_primitives::block_layout::BlockLayout;
+    use proxima_numeric::block_layout::BlockLayout;
     use proxima_tensor::NodeId;
 
     use super::sub_block_dot;

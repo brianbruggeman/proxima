@@ -11,14 +11,11 @@
 
 use conflaguration::Validate;
 use omega::MetalError;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::spec::{ProgramSpec, elementwise};
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    AxisIndex, AxisTerm, BoundOpKind, DType, Extent, IndexMap, IndexPattern, Keep, NodeId,
-    NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, TensorError, affine, append,
-    bind, evaluate, infer, projection,
-};
+use proxima_tensor::{AxisIndex, AxisTerm, BoundOpKind, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, TensorError, affine, append, bind, evaluate, infer, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// The last node `program` builds -- what every fixture in this file treats
 /// as "the answer" by construction. `bind_plain`'s reachability pass

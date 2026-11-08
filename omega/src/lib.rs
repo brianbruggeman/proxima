@@ -90,22 +90,20 @@ pub mod sized;
 pub mod wgpu_driver;
 #[cfg(feature = "wgpu-backend")]
 pub mod wgsl;
-#[cfg(all(feature = "wgpu-backend", feature = "float-layout-dtype"))]
+#[cfg(feature = "wgpu-backend")]
 pub mod wgsl_layout;
 #[cfg(all(
     test,
     feature = "cuda",
     feature = "wgpu-backend",
-    feature = "float-layout-dtype"
 ))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_text_tests;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{
-    CudaGridSpec, CudaKernel, EmitDevice, HIP_WAVE64, HipGridSpec, HipKernel, HipWave, WARP_SIZE, emit_cuda,
-    emit_cuda_on_device, emit_cuda_reusing, emit_cuda_with_policy, emit_hip, emit_hip_at_wave,
-    emit_hip_reusing, emit_hip_with_policy, refit_hip_grid, refit_hip_kernel,
+    CudaGridSpec, CudaKernel, EmitDevice, WARP_SIZE, emit_cuda, emit_cuda_on_device, emit_cuda_reusing,
+    emit_cuda_with_policy,
 };
 #[cfg(feature = "cuda-driver")]
 pub use cuda_driver::CudaF32Arena;
@@ -113,8 +111,6 @@ pub use cuda_driver::CudaF32Arena;
 pub use cuda_driver::CudaPlan;
 #[cfg(feature = "cuda-driver")]
 pub use cuda_driver::{CudaDeviceSnapshot, CudaDriver, CudaDriverError};
-#[cfg(all(feature = "cuda-driver", unix))]
-pub use cuda_driver::rocm::{HipApi, HipBuffer, HipDevice, HipDriverError, HipModule};
 pub use error::EmitError;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 pub use metal::{

@@ -139,7 +139,7 @@ pub fn gguf_tensor_as_f32(
 /// owned decode to fall back to -- [`gguf_tensor_as_f32`] has never had an
 /// `F16`/`Bf16` arm and gains none here. `proxima_tensor::cpu::matmul_f16_f32`/
 /// `matmul_bf16_f32` (the sole consumers of a [`proxima_tensor::cpu::QuantizedBlock::Packed`]
-/// carrying [`proxima_primitives::Codec::Float16`]/[`proxima_primitives::Codec::BFloat16`])
+/// carrying [`proxima_numeric::codec::Codec::Float16`]/[`proxima_numeric::codec::Codec::BFloat16`])
 /// walk the exact same
 /// `rows` contiguous per-row byte layout the k-quant matmul family does, so
 /// this function's existing "bytes straight out of the file, no transpose"
@@ -1126,7 +1126,7 @@ impl<'file> BoundWeights<'file> {
     }
 }
 
-/// [`proxima_primitives::Codec`] re-exported at this crate's root -- see
+/// [`proxima_numeric::codec::Codec`] re-exported at this crate's root -- see
 /// its own doc for why the identity is a payload-less enum living in
 /// `proxima-primitives`, not here. The free functions below are this
 /// crate's [`Codec`] methods: a foreign type cannot host inherent impls,
@@ -1134,7 +1134,7 @@ impl<'file> BoundWeights<'file> {
 /// `proxima-tensor`, so the methods these need live here as plain
 /// functions over `Codec` rather than as an extension trait.
 #[cfg(feature = "std")]
-pub use proxima_primitives::Codec;
+pub use proxima_numeric::codec::Codec;
 
 /// Borrows `bytes` as the [`proxima_tensor::cpu::QuantizedBlock`] variant
 /// `codec` names -- the deferred half of the split [`BoundWeights::packed_owned`]'s
@@ -1187,6 +1187,7 @@ pub(crate) fn as_block(
         | Codec::BFloat8
         | Codec::Bf8E5M2
         | Codec::Bf4E2M1 => None,
+        _ => None,
     }
 }
 
@@ -1298,12 +1299,13 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
         Codec::Q2_0 => "q2_0",
         Codec::Pq2_0 => "pq2_0",
         Codec::Ptq1_0 => "ptq1_0",
+        _ => "unnamed",
     }
 }
 
 /// The on-disk [`GgmlType`] `codec` packs bytes as -- the reverse of
 /// [`codec_from_ggml_type`], needed by [`codec_byte_len_for`] to look up a
-/// codec's block layout without re-typing [`GgmlType::block_layout`]'s
+/// codec's block layout without re-typing [`GgmlType::wire_shape`]'s
 /// numbers a second time here. The proxima brain-float encodings (`BFloat8`,
 /// `Bf8E5M2`, `Bf4E2M1`) have no GGML wire type and return
 /// [`InteropError::UnsupportedCodec`]; `Fp6E3M2` maps to its proxima-own id.
@@ -1343,8 +1345,9 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError>
         Codec::Ptq1_0 => GgmlType::Ptq1_0,
         Codec::Fp6E3M2 => GgmlType::Fp6E3M2,
         Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Q8_1Grouped => {
-            return Err(InteropError::UnsupportedCodec { codec });
+            return Err(InteropError::UnsupportedCodec { codec: crate::error::codec_name(codec) });
         }
+        _ => return Err(InteropError::UnsupportedCodec { codec: crate::error::codec_name(codec) }),
     })
 }
 
@@ -1359,7 +1362,7 @@ pub(crate) fn codec_byte_len_for(
     codec: Codec,
     element_count: usize,
 ) -> Result<usize, InteropError> {
-    let layout = codec_to_ggml_type(codec)?.block_layout();
+    let layout = codec_to_ggml_type(codec)?.wire_shape();
     Ok((element_count as u64 / layout.block_elements * layout.block_bytes) as usize)
 }
 
@@ -1791,7 +1794,7 @@ fn recode_tensor<'file>(
                 target,
             }
         })?;
-        let layout = target.block_layout();
+        let layout = target.wire_shape();
         let element_count = decoded.len() as u64;
         if layout.block_elements == 0 || !element_count.is_multiple_of(layout.block_elements) {
             return Err(InteropError::Quant(QuantError::InputNotElementMultiple {
@@ -1902,6 +1905,7 @@ pub(crate) fn quantize_to_kind(
         Codec::Bf8E5M2 => Err(QuantError::UnsupportedCodec { codec: "bf8_e5m2" }),
         Codec::Bf4E2M1 => Err(QuantError::UnsupportedCodec { codec: "bf4_e2m1" }),
         Codec::Fp6E3M2 => Err(QuantError::UnsupportedCodec { codec: "fp6_e3m2" }),
+        _ => Err(QuantError::UnsupportedCodec { codec: "fp6_e3m2" }),
     }
 }
 
@@ -3469,9 +3473,9 @@ mod real_openchat_file {
 
     use proxima_gguf::GgmlType;
     use proxima_gguf::quant::q4_k;
-    use proxima_primitives::Codec;
+    use proxima_numeric::codec::Codec;
     use proxima_primitives::pipe::Pipe;
-    use proxima_tensor::DType;
+    use proxima_numeric::DType;
     use proxima_tensor::cpu::{
         QuantizedBlock, evaluate_named, evaluate_quantized_named_with_scratch,
     };
@@ -4439,7 +4443,7 @@ mod real_openchat_file {
             &symbols,
             &named_blocks,
             &outputs,
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("metal plan builds for the bounded output set");
         let metal_evaluated = execute_plan_named(&mut metal_plan, &named_blocks)

@@ -21,7 +21,8 @@ use proxima_tensor::spec::{
     Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
     input_leaf, scalar_constant,
 };
-use proxima_tensor::{DType, Extent, NumericPolicy, QuantizedBlock};
+use proxima_tensor::{Extent, QuantizedBlock};
+use proxima_numeric::{DType, NumericPolicy};
 
 const EXPERT_COUNT: u32 = 256;
 const EXPERT_USED_COUNT: u32 = 8;

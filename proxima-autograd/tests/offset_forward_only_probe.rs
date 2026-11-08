@@ -6,7 +6,7 @@
 extern crate alloc;
 
 use proxima_tensor::cpu::evaluate_named;
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, AxisTerm, IndexMap};
 use proxima_tensor::op::{self, Extent, Op, ScalarOp};
 

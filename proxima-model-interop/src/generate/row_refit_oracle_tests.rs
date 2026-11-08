@@ -1,7 +1,7 @@
 use core::ops::ControlFlow;
 
 use proxima_gguf::parse_complete;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 
 use super::chunked_prefill_tests::dense_checkpoint;
 use super::ouro_fixture::{STATE_VOCABULARY, state_sensitive_ouro_gguf};

@@ -1,7 +1,7 @@
 use core::ops::ControlFlow;
 
 use proxima_gguf::parse_complete;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 
 use super::chunked_prefill_tests::{dense_checkpoint, dense_checkpoint_seeded};
 use super::{LoadedModel, LogitsSink, NodeValuesSink, ServingConfig};

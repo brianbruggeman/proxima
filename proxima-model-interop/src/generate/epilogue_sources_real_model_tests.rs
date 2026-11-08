@@ -15,7 +15,7 @@ use std::fs::File;
 use memmap2::Mmap;
 use omega::MathMode;
 use proxima_gguf::parse_complete;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 
 use super::prefix_resume_long_prompt_tests::greedy_config;
 use super::{BackendRuntime, LogitsSink, NodeValuesSink};

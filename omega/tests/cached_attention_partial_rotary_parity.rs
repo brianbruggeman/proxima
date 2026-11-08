@@ -22,7 +22,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
-use proxima_tensor::{BoundOpKind, NumericPolicy, bind};
+use proxima_tensor::{BoundOpKind, bind};
+use proxima_numeric::{NumericPolicy};
 
 mod support;
 use support::{as_named_blocks, production_numeric_policy, qwen35_partial_rotary_forward_fixture};

@@ -16,7 +16,7 @@
 //! fusion, activation mode and the host tensor payload ceiling. Parallel
 //! helpers continue to use the build-time parallel sizing constants.
 
-use crate::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 use bon::Builder;
 use conflaguration::{Settings, Validate, ValidationMessage};
 use serde::{Deserialize, Serialize};
@@ -218,11 +218,11 @@ mod tests {
                 let from_builder = TensorExecutionConfig::builder()
                     .allow_fusion(false)
                     .exact_activations(true)
-                    .numeric(NumericPolicy {
-                        contraction: true,
-                        reassociation: true,
-                        ..NumericPolicy::bit_exact()
-                    })
+                    .numeric(
+                        NumericPolicy::bit_exact()
+                            .with_contraction(true)
+                            .with_reassociation(true),
+                    )
                     .build();
                 assert_eq!(from_env.allow_fusion, from_builder.allow_fusion);
                 assert_eq!(from_env.exact_activations, from_builder.exact_activations);

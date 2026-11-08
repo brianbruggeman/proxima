@@ -9,10 +9,8 @@ mod lab {
     use std::time::Instant;
 
     use omega::backend::{self, Engine, GpuDriver, Plan};
-    use proxima_tensor::{
-        DType, Extent, IndexMap, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp, append,
-        projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, projection};
+    use proxima_numeric::{DType, NumericPolicy};
     use serde::{Deserialize, Serialize};
     use serde_json::{Value, json};
 

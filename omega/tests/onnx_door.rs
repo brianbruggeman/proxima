@@ -23,7 +23,7 @@ use proxima_onnx::messages::{
 };
 use proxima_onnx::{LowerError, write_model_proto};
 use proxima_primitives::pipe::{Pipe, PipeExt};
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 
 const MLP_INPUT: [f32; 6] = [1.0, 0.5, -1.0, 0.0, 2.0, 1.0];
 const MLP_SOFTMAX: [f32; 4] = [0.599_888_4, 0.400_111_6, 0.434_749_25, 0.565_250_74];

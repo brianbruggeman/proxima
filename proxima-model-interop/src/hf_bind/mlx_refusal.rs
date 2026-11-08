@@ -12,7 +12,7 @@ use alloc::format;
 use alloc::string::String;
 
 use proxima_safetensors::{Manifest, TensorEntry};
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 use crate::error::InteropError;
 

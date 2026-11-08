@@ -1914,10 +1914,10 @@ const LINEAR_LAYOUT_MAX_ELEMENTS: usize = 128;
 
 /// [`dot_q5_0_f32`]'s mechanism for the 1- and 2-bit scalar codecs: each
 /// block is decoded by [`proxima_gguf::quant::block_layout::dequantize_block`]
-/// from the codec's own [`proxima_primitives::block_layout::BlockLayout`], then folded against the matching
+/// from the codec's own [`proxima_numeric::block_layout::BlockLayout`], then folded against the matching
 /// activation slice.
 fn dot_linear_layout_f32(
-    layout: &proxima_primitives::block_layout::BlockLayout,
+    layout: &proxima_numeric::block_layout::BlockLayout,
     weight_row: &[u8],
     activation: &[f32],
 ) -> Result<f32, TensorError> {
@@ -1940,7 +1940,11 @@ fn dot_linear_layout_f32(
         .chunks_exact(block_bytes)
         .zip(activation.chunks_exact(block_elements))
     {
-        proxima_gguf::quant::block_layout::dequantize_block(layout, block, decoded);
+        proxima_gguf::quant::block_layout::dequantize_block(layout, block, decoded).map_err(
+            |_cause| TensorError::QuantizedShapeMismatch {
+                reason: "a weight block does not decode to the layout's element count",
+            },
+        )?;
         acc = dot_fold_fused_multiply_add(
             decoded,
             activation_chunk,
@@ -1972,7 +1976,7 @@ pub fn matmul_q1_0_f32(
         "weight byte length is not a whole multiple of the row count",
         |row, activation_row| {
             dot_linear_layout_f32(
-                &proxima_primitives::block_layout::BlockLayout::Q1_0,
+                &proxima_numeric::block_layout::BlockLayout::Q1_0,
                 row,
                 activation_row,
             )
@@ -1997,7 +2001,7 @@ pub fn matmul_q2_0_f32(
         "weight byte length is not a whole multiple of the row count",
         |row, activation_row| {
             dot_linear_layout_f32(
-                &proxima_primitives::block_layout::BlockLayout::Q2_0,
+                &proxima_numeric::block_layout::BlockLayout::Q2_0,
                 row,
                 activation_row,
             )
@@ -2022,7 +2026,7 @@ pub fn matmul_pq2_0_f32(
         "weight byte length is not a whole multiple of the row count",
         |row, activation_row| {
             dot_linear_layout_f32(
-                &proxima_primitives::block_layout::BlockLayout::PQ2_0,
+                &proxima_numeric::block_layout::BlockLayout::PQ2_0,
                 row,
                 activation_row,
             )
@@ -2551,7 +2555,7 @@ pub(super) fn dot_fp6_e3m2_f32(weight_row: &[u8], activation: &[f32]) -> Result<
         .try_fold(0.0f32, |acc, (block, activation_chunk)| {
             proxima_gguf::quant::scaled_float::dequantize_block(
                 block,
-                proxima_primitives::float_layout::FloatLayout::E3M2,
+                proxima_numeric::float_layout::FloatLayout::E3M2,
                 &mut scratch,
             )
             .map_err(|_| TensorError::QuantizedShapeMismatch {

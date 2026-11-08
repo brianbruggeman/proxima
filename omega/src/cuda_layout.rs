@@ -7,7 +7,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 use crate::msl::layout_render::{hardware_type, layout_load_msl, layout_store_msl};
 

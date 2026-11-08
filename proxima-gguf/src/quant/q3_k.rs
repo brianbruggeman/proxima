@@ -16,7 +16,7 @@
 //! [`super::q4_k`]/[`super::q5_k`]/[`super::q8_0`] where it leads. That
 //! 110-byte figure is cross-checked here at compile time against
 //! [`crate::types::GgmlType::Q3_K`]'s already-landed
-//! [`crate::types::GgmlType::block_layout`] rather than re-typed by hand.
+//! [`crate::types::GgmlType::wire_shape`] rather than re-typed by hand.
 //!
 //! Shared with [`super::q6_k`]: the super-block/sub-block shape (16
 //! sub-blocks of 16), no per-sub-block min (`x = d*sc*q`, not
@@ -54,12 +54,12 @@ const HMASK_BYTES: usize = QK_K / 8;
 const QS_BYTES: usize = QK_K / 4;
 
 /// Bytes per super-block. Derived from the already-landed
-/// [`crate::types::GgmlType::block_layout`] (`types.rs`), not re-typed —
+/// [`crate::types::GgmlType::wire_shape`] (`types.rs`), not re-typed —
 /// that table was itself checked against `ggml-common.h`'s
 /// `static_assert(sizeof(block_q3_K) == sizeof(ggml_half) + QK_K/4 +
 /// QK_K/8 + 12, ...)` at `ggml-common.h:279`.
 pub const BLOCK_BYTES: usize = {
-    let layout = GgmlType::Q3_K.block_layout();
+    let layout = GgmlType::Q3_K.wire_shape();
     assert!(
         layout.block_elements as usize == QK_K,
         "GgmlType::Q3_K block_elements drifted from QK_K"

@@ -26,7 +26,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_tensor::spec::{append_delta_net_step, elementwise};
-use proxima_tensor::{BoundOpKind, DType, Extent, NodeId, NumericPolicy, Op, ScalarOp, append};
+use proxima_tensor::{BoundOpKind, Extent, NodeId, Op, ScalarOp, append};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// Deterministic, non-degenerate fill -- real-shaped small values, never
 /// all-zero/all-one filler (guiding-principle 9).

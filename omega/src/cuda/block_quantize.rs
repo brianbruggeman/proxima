@@ -7,8 +7,8 @@
 use alloc::format;
 use alloc::string::String;
 
-use proxima_primitives::block_layout::BlockLayout;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::block_layout::BlockLayout;
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_tensor::{BoundOp, BoundOpKind};
 
 use super::{CudaGridSpec, EmitError, MAX_GRID_BLOCKS};

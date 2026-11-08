@@ -23,7 +23,6 @@ default = ["std", "metal", "cpu"]
 std = ["alloc", "thiserror/std", "proxima-tensor/std", "proxima-tensor/config", "dep:conflaguration", "dep:serde", "dep:proxima-telemetry", "proxima-telemetry/std", "proxima-telemetry/emit"]
 mlx-gdn = ["std"]
 alloc = []
-float-layout-dtype = ["proxima-tensor/float-layout-dtype", "proxima-gguf/float-layout-dtype"]
 cached-attention-streaming = ["proxima-tensor/cached-attention-streaming"]
 # Passthrough (implied by `metal-attn-split-decode`) to `proxima-tensor/metal-fuse-attn-decode` (the
 # gemma4-shaped windowed/padded cached-attention matcher extension) -- same
@@ -607,6 +606,7 @@ wgpu = { version = "30.0.1", default-features = false, features = [
     "vulkan",
 ], optional = true }
 proxima-primitives = { version = "0.1.0", path = "../proxima-primitives", default-features = false }
+proxima-numeric = { version = "0.1.0", path = "../proxima-numeric" }
 sha2 = { workspace = true, optional = true }
 proxima-tensor = { version = "0.1.0", path = "../proxima-tensor", default-features = false, features = ["alloc"] }
 const_format = { version = "0.2.36", default-features = false }

@@ -61,11 +61,9 @@ use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
-use proxima_primitives::block_layout::BlockLayout;
-use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
-    NumericRewrite, ReduceInit, ScalarOp, StepArg, admit,
-};
+use proxima_numeric::block_layout::BlockLayout;
+use proxima_tensor::{BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp, StepArg};
+use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 use crate::cuda_cached_attention::{
     cached_attention_entry_name, cached_attention_runtime_bounds, render_cached_attention_cuda,
@@ -204,7 +202,8 @@ impl CudaGridSpec {
 /// # Examples
 ///
 /// ```
-/// use proxima_tensor::{DType, Extent, IndexMap, Op, ScalarOp, append, map};
+/// use proxima_numeric::DType;
+/// use proxima_tensor::{Extent, IndexMap, Op, ScalarOp, append, map};
 ///
 /// let mut program = Vec::new();
 /// let source = append(
@@ -233,7 +232,7 @@ impl CudaGridSpec {
 ///     &program,
 ///     &shapes,
 ///     &[activated],
-///     proxima_tensor::NumericPolicy::default(),
+///     proxima_numeric::NumericPolicy::default(),
 /// )?;
 /// let packed_operands = omega::PackedOperands::new();
 /// let kernel = omega::emit_cuda(&bound_ops[0], &packed_operands)?;
@@ -1714,7 +1713,7 @@ fn entry_name(
         crate::identity::MetalOnlyExtras::default(),
         // the cached-attention kernel text (`cuda_cached_attention`) carries no
         // numeric-policy value, so the default never varies this identity string
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     );
     format!(
         "{identity}{}{}",
@@ -2457,6 +2456,9 @@ fn operand_read(
             | Codec::Bf4E2M1
             | Codec::Fp6E3M2,
         ) => Err(EmitError::CudaUnsupportedCodec { node }),
+        // the list above is the whole wire set as of this commit; a format added later lands
+        // here rather than being read as raw bytes, and `omega::msl` makes the same choice
+        _ => Err(EmitError::CudaUnsupportedCodec { node }),
     }
 }
 
@@ -4411,10 +4413,8 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use proxima_tensor::{
-        AxisTerm, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind,
-        infer, map,
-    };
+    use proxima_tensor::{AxisTerm, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
+    use proxima_numeric::{DType};
 
     use super::*;
     use crate::msl::{CachedAttentionForm, cached_attention_form};
@@ -4708,7 +4708,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         bound.into_iter().next().expect("one bound op")
@@ -4744,7 +4744,7 @@ mod tests {
                 &program,
                 &shapes,
                 &[NodeId(0)],
-                proxima_tensor::NumericPolicy::default(),
+                proxima_numeric::NumericPolicy::default(),
             )
             .expect("leaf binding succeeds")
             .pop()
@@ -4927,7 +4927,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         bound.into_iter().next().expect("one bound op")
@@ -5223,7 +5223,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         bound.into_iter().next().expect("one bound op")
@@ -5287,7 +5287,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("embedding lookup lowers")
         .into_iter()
@@ -5363,7 +5363,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
@@ -5465,7 +5465,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("gathered reduce lowers")
         .into_iter()
@@ -5673,7 +5673,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
@@ -5707,7 +5707,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
@@ -5917,7 +5917,7 @@ mod tests {
             &program,
             &shapes,
             &[consumer],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         bound
@@ -6149,7 +6149,8 @@ impl HipWave {
 /// # Examples
 ///
 /// ```
-/// use proxima_tensor::{DType, Extent, IndexMap, Op, ScalarOp, append, map};
+/// use proxima_numeric::DType;
+/// use proxima_tensor::{Extent, IndexMap, Op, ScalarOp, append, map};
 ///
 /// let mut program = Vec::new();
 /// let source = append(
@@ -6175,7 +6176,7 @@ impl HipWave {
 ///     &program,
 ///     &shapes,
 ///     &[activated],
-///     proxima_tensor::NumericPolicy::default(),
+///     proxima_numeric::NumericPolicy::default(),
 /// )?;
 /// let packed_operands = omega::PackedOperands::new();
 /// let kernel = omega::emit_hip(&bound_ops[0], &packed_operands)?;
@@ -6194,7 +6195,7 @@ pub fn emit_hip(
 
 /// [`emit_hip`] under an explicit numeric policy. A policy that admits no
 /// rewrite renders the serial fold; the cooperative wave fold is selected
-/// only when [`proxima_tensor::admit`] grants `NumericRewrite::TreeReduce`,
+/// only when [`proxima_numeric::admit`] grants `NumericRewrite::TreeReduce`,
 /// the same gate the CUDA lane applies.
 ///
 /// # Errors
@@ -6306,9 +6307,8 @@ pub fn refit_hip_grid(
 #[cfg(test)]
 mod rocm_tests {
     use alloc::vec;
-        use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map,
-    };
+        use proxima_tensor::{Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
+        use proxima_numeric::{DType};
 
     use super::*;
     

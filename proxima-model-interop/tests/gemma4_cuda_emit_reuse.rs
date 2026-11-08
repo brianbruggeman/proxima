@@ -14,7 +14,8 @@ use proxima_tensor::spec::{
     ParallelDenseMoeConfig, RopePairing, RopeTableSel, SharedExpertWidth, ValueSourceKind,
     scheduled_two_range_cached_forward_program_with_experts,
 };
-use proxima_tensor::{BoundOp, NodeId, NumericPolicy, Op, bind_with_fusion, infer, prune_dead};
+use proxima_tensor::{BoundOp, NodeId, Op, bind_with_fusion, infer, prune_dead};
+use proxima_numeric::{NumericPolicy};
 
 const VOCAB: u32 = 6;
 const EMBEDDING: u32 = 16;

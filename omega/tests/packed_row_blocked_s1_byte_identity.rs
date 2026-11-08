@@ -42,10 +42,8 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
-    projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 const QK_K: usize = 256;
 
@@ -155,7 +153,7 @@ fn single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_bod
     let kernel = omega::emit(
         resolved,
         &packed_operands,
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the synthetic program emits");
 

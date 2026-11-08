@@ -53,7 +53,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
-use crate::dtype::DType;
+use proxima_numeric::DType;
 use crate::error::TensorError;
 #[cfg(feature = "instrument")]
 use crate::instrument;

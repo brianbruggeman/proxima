@@ -347,7 +347,7 @@ fn bind_part<'file>(
         [row_length, rows, ..] => (*row_length, *rows),
         _ => (0, 0),
     };
-    let layout = tensor.ggml_type.block_layout();
+    let layout = tensor.ggml_type.wire_shape();
     let invalid = || InteropError::TensorPartInvalid {
         tensor: tensor.name.clone(),
         rows,
@@ -613,7 +613,8 @@ mod tests {
     use arrayvec::ArrayVec;
     use proxima_gguf::quant::q4_k;
     use proxima_gguf::{GgufModel, TensorPayload, parse_complete, write_complete};
-    use proxima_tensor::{DType, IndexMap, Keep, NodeId, ReduceInit, append, map};
+    use proxima_tensor::{IndexMap, Keep, NodeId, ReduceInit, append, map};
+    use proxima_numeric::{DType};
 
     use super::*;
     use crate::Codec;

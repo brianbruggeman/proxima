@@ -58,9 +58,8 @@ mod imp {
         MTLLibrary, MTLMathMode, MTLResourceOptions, MTLSize,
     };
     use omega::PackedOperands;
-    use proxima_tensor::{
-        BoundOp, BoundOpKind, CachedAttentionArithmetic, DType, Layout, NodeId, NumericPolicy,
-    };
+    use proxima_tensor::{BoundOp, BoundOpKind, CachedAttentionArithmetic, Layout, NodeId};
+    use proxima_numeric::{DType, NumericPolicy};
 
     const HEADS: usize = 8;
     const SIMD_WIDTH: u64 = 32;

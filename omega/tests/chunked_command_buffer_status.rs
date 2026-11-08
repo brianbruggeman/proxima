@@ -10,10 +10,8 @@
 #![cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{
-    DType, Evaluated, Extent, IndexMap, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp,
-    append, evaluate, projection,
-};
+use proxima_tensor::{Evaluated, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, evaluate, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// Same shape as `metal_parity.rs`'s own `assert_parity` (1e-6 max-abs-diff
 /// tolerance): a GPU run under [`MathMode::default`]'s `Relaxed` mode is

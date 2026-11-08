@@ -44,7 +44,7 @@ use core::convert::Infallible;
 use core::future::Future;
 
 use proxima_primitives::pipe::Pipe;
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::op::{NodeId, Op, ScalarOp};
 
 use crate::expr;

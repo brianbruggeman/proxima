@@ -4,11 +4,11 @@
 //! [`crate::PromptCacheSettings`]: one owned data shape carrying `bon::Builder`,
 //! `serde` (TOML) and `conflaguration::{Settings, Validate}` (`PROXIMA_CODEC_POLICY_*`
 //! env), so the three surfaces build the same value. [`CodecPolicyWeights::codec`]
-//! lowers the choice to the [`proxima_primitives::Codec`] the checkpoint stores.
+//! lowers the choice to the [`proxima_numeric::codec::Codec`] the checkpoint stores.
 
 use bon::Builder;
 use conflaguration::{Settings, Validate};
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_CLASSES: [&str; 7] = [

@@ -40,7 +40,7 @@ use proxima_gguf::pipe::parse_complete;
 use proxima_model_interop::{
     ShortConvHparams, short_conv_architecture_from_metadata, short_conv_forward_values,
 };
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::{SharedExpertWidth, scheduled_forward_program_with_experts};
 

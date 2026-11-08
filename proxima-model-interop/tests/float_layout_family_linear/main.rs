@@ -1,4 +1,4 @@
-#![cfg(all(feature = "metal", feature = "float-layout-dtype", target_os = "macos"))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! The linear block family (Q8_0, Q4_0, Q5_0, Q4_1, Q5_1, Q8_1, Q1_0, Q2_0) as configured
@@ -13,8 +13,8 @@ mod gpu;
 mod linear_targets;
 mod reencode;
 
-use proxima_primitives::Codec;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::codec::Codec;
+use proxima_numeric::float_layout::FloatLayout;
 
 use fixtures::{FIXTURE_ELEMENTS, cpu_decode, layout_of, metal_decode, mismatches, recorded};
 

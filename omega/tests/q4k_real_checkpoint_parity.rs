@@ -32,12 +32,10 @@ use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::q4_k;
 use proxima_gguf::types::GgmlType;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, evaluate, map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, evaluate, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// real GGUF checkpoint path, overridable via `PROXIMA_BENCH_GGUF_PATH` --
 /// the hardcoded default only ever resolves on the machine it was captured

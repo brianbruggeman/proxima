@@ -15,8 +15,8 @@ use proxima_gguf::quant::QuantError;
 use proxima_gguf::quant::scaled_float::{BLOCK_BYTES, BLOCK_ELEMENTS, quantize_block};
 use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::{GgmlType, GgufModel, TensorPayload, write_complete};
-use proxima_primitives::Codec;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::codec::Codec;
+use proxima_numeric::float_layout::FloatLayout;
 
 use crate::bind::gguf_tensor_as_f32;
 use crate::codec_policy_settings::CodecPolicySettings;
@@ -80,7 +80,9 @@ fn target_layout(policy: &CodecPolicySettings) -> Result<Option<FloatLayout>, In
     match policy.weights.codec() {
         None => Ok(None),
         Some(Codec::Fp6E3M2) => Ok(Some(FloatLayout::E3M2)),
-        Some(codec) => Err(InteropError::ConversionTargetUnsupported { codec }),
+        Some(codec) => Err(InteropError::ConversionTargetUnsupported {
+            codec: crate::error::codec_name(codec),
+        }),
     }
 }
 

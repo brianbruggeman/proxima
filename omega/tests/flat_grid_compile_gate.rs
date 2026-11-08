@@ -16,10 +16,8 @@ use std::process::Command;
 
 use omega::msl::Grid2DForm;
 use omega::{Codec, Kernel};
-use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, Layout, NodeId, NumericPolicy, Op, Reduce,
-    ReduceInit, ScalarOp, append, bind, infer, map,
-};
+use proxima_tensor::{BoundOp, BoundOpKind, Extent, IndexMap, Keep, Layout, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn terminal(program: &[Op]) -> NodeId {
     NodeId((program.len() - 1) as u32)

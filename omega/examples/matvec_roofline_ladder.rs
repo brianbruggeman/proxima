@@ -173,13 +173,10 @@ mod ladder {
     use proxima_gguf::pipe::ParsedGguf;
     use proxima_gguf::quant::{QuantError, q4_k, q5_k, q6_k};
     use proxima_gguf::types::GgmlType;
-    use proxima_primitives::Codec;
+    use proxima_numeric::codec::Codec;
     use proxima_tensor::test_support::Lcg;
-    use proxima_tensor::{
-        BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op,
-        QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, bind, correct_packed_matmul_layouts,
-        infer, map,
-    };
+    use proxima_tensor::{BoundOp, BoundOpKind, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, bind, correct_packed_matmul_layouts, infer, map};
+    use proxima_numeric::{DType, NumericPolicy};
 
     use crate::support::production_numeric_policy;
 

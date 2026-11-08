@@ -1,6 +1,6 @@
 use proxima_gguf::quant::{bf4_e2m1, bf8_e5m2, bf16, q2_k, q3_k, q4_k, q5_k, scaled_float};
-use proxima_primitives::Codec;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::codec::Codec;
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_tensor::BFloat8;
 
 use crate::codebook;

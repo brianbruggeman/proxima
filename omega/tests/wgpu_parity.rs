@@ -27,7 +27,7 @@ use support::{as_named_blocks, real_forward_fixture};
 
 use omega::Codec;
 use omega::backend::{BackendError, Engine, GpuDriver, execute_plan_named, plan_named};
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 
 /// `reduce-epilogue-fusion`'s bind-time pass fuses ANY sole elementwise
 /// consumer of a reduce, program-wide. `render_reduce`/
@@ -45,10 +45,8 @@ fn is_epilogue_rejection(error: &BackendError) -> bool {
     error.to_string().contains("fused epilogue")
 }
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    AxisIndex, AxisTerm, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, QuantizedBlock,
-    Reduce, ReduceInit, ScalarOp, TensorError, append, map, projection,
-};
+use proxima_tensor::{AxisIndex, AxisTerm, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, TensorError, append, map, projection};
+use proxima_numeric::{DType};
 
 const BATCH: u32 = 4;
 const IN_FEATURES: u32 = 8;

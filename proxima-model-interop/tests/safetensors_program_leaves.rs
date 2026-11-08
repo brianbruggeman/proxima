@@ -8,7 +8,7 @@ use std::vec::Vec;
 use proxima_model_interop::profiles::{BindingProfile, TensorAlias};
 use proxima_model_interop::{BoundWeights, Codec, InteropError, bind_safetensors_program_leaves};
 use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};

@@ -41,7 +41,7 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
 }
 
 const _: () = {
-    assert!(GgmlType::Pq2_0.block_layout().block_bytes as usize == BLOCK_BYTES);
+    assert!(GgmlType::Pq2_0.wire_shape().block_bytes as usize == BLOCK_BYTES);
 };
 
 /// Quantizes whole 128-element runs of `f32` into `PQ2_0` blocks.

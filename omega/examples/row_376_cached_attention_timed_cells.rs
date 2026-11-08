@@ -38,7 +38,7 @@ mod fixture;
 mod cells {
     use std::time::Instant;
 
-    use proxima_tensor::NumericPolicy;
+    use proxima_numeric::NumericPolicy;
 
     use crate::fixture::{HEAD_DIM, KV_HEADS, LAYERS, build_fixture};
     use crate::support::as_named_blocks;

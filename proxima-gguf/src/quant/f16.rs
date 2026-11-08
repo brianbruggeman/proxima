@@ -1,5 +1,5 @@
 //! `F16`: IEEE-754 binary16, one element per 2-byte "block"
-//! ([`crate::types::GgmlType::F16`]'s own [`crate::types::GgmlType::block_layout`]
+//! ([`crate::types::GgmlType::F16`]'s own [`crate::types::GgmlType::wire_shape`]
 //! already reports `block_elements: 1, block_bytes: 2` — not a codec this
 //! module invents, just the shape that table already names).
 //!
@@ -20,7 +20,7 @@ use crate::quant::QuantError;
 const CODEC: &str = "f16";
 
 /// Elements per "block" — always 1, [`crate::types::GgmlType::F16`]'s own
-/// [`crate::types::GgmlType::block_layout`] agrees.
+/// [`crate::types::GgmlType::wire_shape`] agrees.
 pub const QK_F16: usize = 1;
 
 /// Bytes per "block" — 2, an IEEE-754 binary16 value.

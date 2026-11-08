@@ -1,6 +1,6 @@
 use super::*;
 use proxima_gguf::quant::{QuantError, scaled_float};
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 fn dequantize_bf8_e5m2(
     bytes: &[u8],
@@ -1415,7 +1415,7 @@ pub fn arena_named_input<'arena>(arena: &'arena StaticArena, name: &str) -> Opti
 /// same [`Op::Input`] program order [`evaluate`]'s `blocks` already uses --
 /// one binding convention, not three.
 ///
-/// `Packed`'s own `codec` is `proxima_primitives::Codec` -- the one
+/// `Packed`'s own `codec` is `proxima_numeric::codec::Codec` -- the one
 /// source-neutral codec identity `Codec`'s own doc names as replacing this
 /// type's former 14 separate per-codec discriminants (`Q4K`, `Q5K`, ...). A
 /// real `Packed` only ever carries a codec `codec_to_decodable_ggml_type`
@@ -1452,11 +1452,11 @@ impl<'a> From<&'a [f32]> for QuantizedBlock<'a> {
 /// The [`proxima_gguf::GgmlType`] `codec` names, for every `Codec` a
 /// [`QuantizedBlock::Packed`] actually carries -- the single Codec->GgmlType
 /// table [`QuantizedBlock::block_layout`] composes down to instead of
-/// restating [`proxima_gguf::GgmlType::block_layout`]'s own per-codec byte
+/// restating [`proxima_gguf::GgmlType::wire_shape`]'s own per-codec byte
 /// constants a second time. `None` for the 16 `Codec` variants this crate's
 /// packed-block construction sites never produce (see [`QuantizedBlock`]'s
 /// own doc). Free function, not an inherent method or a trait -- `Codec` is
-/// `proxima_primitives::Codec`, foreign to this crate (guiding-principles
+/// `proxima_numeric::codec::Codec`, foreign to this crate (guiding-principles
 /// §20 rules out a blanket impl / newtype to host one).
 #[must_use]
 pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima_gguf::GgmlType> {
@@ -1495,6 +1495,7 @@ pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima
         | Codec::Tq20
         | Codec::Mxfp4
         | Codec::Nvfp4 => None,
+        _ => None,
     }
 }
 
@@ -1552,6 +1553,7 @@ pub(super) const fn codec_matmul_f32_kernel(
         | Codec::Tq20
         | Codec::Mxfp4
         | Codec::Nvfp4 => None,
+        _ => None,
     }
 }
 
@@ -1607,6 +1609,7 @@ pub(super) const fn codec_dequantize_fn(
         | Codec::Tq20
         | Codec::Mxfp4
         | Codec::Nvfp4 => None,
+        _ => None,
     }
 }
 
@@ -1976,7 +1979,7 @@ impl<'a> QuantizedBlock<'a> {
     /// entry -- the one table `run_reduce_quantized`, `build_matmul_stage_plan`,
     /// and `dequantize_row` all compose down to instead of each
     /// hand-matching the same per-codec constants a second and third time.
-    /// Sourced from [`proxima_gguf::GgmlType::block_layout`], the
+    /// Sourced from [`proxima_gguf::GgmlType::wire_shape`], the
     /// authoritative on-disk-layout table `codec_to_decodable_ggml_type`
     /// resolves `codec` against, rather than a parallel hand-copied set of
     /// `Q*_BLOCK_BYTES`/`Q*_BLOCK_ELEMENTS` constants.
@@ -1987,7 +1990,7 @@ impl<'a> QuantizedBlock<'a> {
         else {
             return None;
         };
-        match codec {
+        match *codec {
             Codec::Bf8E5M2 => return Some((1, 1)),
             Codec::Bf4E2M1 => return Some((1, 2)),
             Codec::Fp6E3M2 => {
@@ -1998,7 +2001,7 @@ impl<'a> QuantizedBlock<'a> {
         let Some(ggml_type) = codec_to_decodable_ggml_type(*codec) else {
             return None;
         };
-        let layout = ggml_type.block_layout();
+        let layout = ggml_type.wire_shape();
         Some((layout.block_bytes as usize, layout.block_elements as usize))
     }
 
@@ -2101,7 +2104,7 @@ impl<'a> QuantizedBlock<'a> {
                 };
                 return Ok(run.element_count()? * runs);
             }
-            QuantizedBlock::Packed { codec, bytes } => match codec {
+            QuantizedBlock::Packed { codec, bytes } => match *codec {
                 Codec::Q4K => (
                     "q4_k",
                     bytes.len(),
@@ -2232,7 +2235,7 @@ impl<'a> QuantizedBlock<'a> {
                 // this type's own doc.
                 other => {
                     return Err(TensorError::PackedBlockBytesNotAMultiple {
-                        codec: codec_name_for_error(*other),
+                        codec: codec_name_for_error(other),
                         bytes: bytes.len(),
                         block_bytes: 0,
                     });
@@ -2257,43 +2260,9 @@ fn whole_blocks(byte_len: usize, block_bytes: usize, block_elements: usize) -> O
 /// [`QuantizedBlock::Packed`] -- reached only if [`QuantizedBlock::element_count`]
 /// is ever called on a block a caller assembled by hand from a codec outside
 /// this crate's own construction sites, never through normal GGUF loading.
-const fn codec_name_for_error(codec: Codec) -> &'static str {
-    match codec {
-        Codec::Q4K => "q4_k",
-        Codec::Q5K => "q5_k",
-        Codec::Q6K => "q6_k",
-        Codec::Q8_0 => "q8_0",
-        Codec::Q3K => "q3_k",
-        Codec::Q4_0 => "q4_0",
-        Codec::Float16 => "float16",
-        Codec::BFloat16 => "bfloat16",
-        Codec::BFloat8 => "bfloat8",
-        Codec::Bf8E5M2 => "bf8_e5m2",
-        Codec::Bf4E2M1 => "bf4_e2m1",
-        Codec::Fp6E3M2 => "fp6_e3m2",
-        Codec::Q2K => "q2_k",
-        Codec::Q5_1 => "q5_1",
-        Codec::Q5_0 => "q5_0",
-        Codec::Iq4Nl => "iq4_nl",
-        Codec::Iq2Xs => "iq2_xs",
-        Codec::Iq3Xxs => "iq3_xxs",
-        Codec::Q4_1 => "q4_1",
-        Codec::Q8_1 => "q8_1",
-        Codec::Q8_1Grouped => "q8_1_grouped",
-        Codec::Q8K => "q8_k",
-        Codec::Iq1S => "iq1_s",
-        Codec::Iq1M => "iq1_m",
-        Codec::Iq2Xxs => "iq2_xxs",
-        Codec::Iq2S => "iq2_s",
-        Codec::Iq3S => "iq3_s",
-        Codec::Iq4Xs => "iq4_xs",
-        Codec::Tq10 => "tq1_0",
-        Codec::Tq20 => "tq2_0",
-        Codec::Mxfp4 => "mxfp4",
-        Codec::Nvfp4 => "nvfp4",
-        Codec::Q1_0 => "q1_0",
-        Codec::Q2_0 => "q2_0",
-        Codec::Pq2_0 => "pq2_0",
-        Codec::Ptq1_0 => "ptq1_0",
+fn codec_name_for_error(codec: Codec) -> &'static str {
+    match codec.name() {
+        Some(name) => name,
+        None => "unnamed",
     }
 }

@@ -708,7 +708,7 @@ fn write_attn_layer0_failure_report(
     symbols: &[u64],
     named_blocks: &[(&str, QuantizedBlock<'_>)],
     fused_resolved: &[proxima_tensor::BoundOp],
-    numeric_policy: proxima_tensor::NumericPolicy,
+    numeric_policy: proxima_numeric::NumericPolicy,
     metal_unfused_full: &[u32],
     metal_fused_full: &[u32],
     metal_unfused_logits_full: &[u32],
@@ -1070,7 +1070,7 @@ fn write_attn_layer0_failure_report(
         symbols,
         named_blocks,
         &[attended_node],
-        proxima_tensor::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
         &placed_input_nodes,
         true,
     );
@@ -4606,7 +4606,7 @@ only the single-row decode kernel reads the half-width device cache",
                     }
                     for (name, bytes, kind) in &self.weights.packed_owned {
                         let block = crate::bind::as_block(*kind, bytes)
-                            .ok_or(InteropError::UnsupportedCodec { codec: *kind })?;
+                            .ok_or(InteropError::UnsupportedCodec { codec: crate::error::codec_name(*kind) })?;
                         named_blocks.push((name.as_str(), block));
                     }
                     #[cfg(feature = "instrument")]
@@ -7426,7 +7426,7 @@ did not hold every cached position)",
                 }
                 for (name, bytes, kind) in &self.weights.packed_owned {
                     let block = crate::bind::as_block(*kind, bytes)
-                        .ok_or(InteropError::UnsupportedCodec { codec: *kind })?;
+                        .ok_or(InteropError::UnsupportedCodec { codec: crate::error::codec_name(*kind) })?;
                     named_blocks.push((name.as_str(), block));
                 }
                 named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
@@ -8050,7 +8050,7 @@ did not hold every cached position)",
         }
         for (name, bytes, kind) in &self.weights.packed_owned {
             let block = crate::bind::as_block(*kind, bytes)
-                .ok_or(InteropError::UnsupportedCodec { codec: *kind })?;
+                .ok_or(InteropError::UnsupportedCodec { codec: crate::error::codec_name(*kind) })?;
             named_blocks.push((name.as_str(), block));
         }
         // `gqa_cached_forward_program_with_experts`'s own `cached_len`

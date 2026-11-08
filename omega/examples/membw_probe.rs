@@ -131,9 +131,8 @@ fn run_cpu_arm() {
 
 #[cfg(all(feature = "metal", feature = "cpu", target_os = "macos"))]
 fn run_metal_arm() {
-    use proxima_tensor::{
-        DType, Extent, IndexMap, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, map,
-    };
+    use proxima_tensor::{Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, map};
+    use proxima_numeric::{DType, NumericPolicy};
 
     // pipe question: `Op::Elementwise` with a unary `Negate` body and an
     // identity index map is an existing primitive -- one GPU thread reads

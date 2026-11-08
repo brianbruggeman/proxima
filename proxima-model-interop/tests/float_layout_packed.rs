@@ -1,4 +1,4 @@
-#![cfg(all(feature = "metal", feature = "float-layout-dtype", target_os = "macos"))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! The packed matvec arms (`omega/src/msl/packed_row_blocked_ggml.rs`) against an f64 dot-product
@@ -14,13 +14,11 @@
 mod rows;
 
 use proxima_gguf::quant::{bf4_e2m1, bf8_e5m2, bf16, scaled_float};
-use proxima_primitives::Codec;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::codec::Codec;
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 const ACTIVATION_SEED: u64 = 0xac71_f10a;
 
@@ -256,11 +254,11 @@ fn float_layout_packed_codec_layout_table_matches_constants() {
     ];
 
     for (codec, layout) in expected {
-        assert_eq!(codec.layout(), Some(layout), "{codec:?}");
+        assert_eq!(codec.element_layout(), Some(layout), "{codec:?}");
     }
     let with_layout = (0..=u8::MAX)
         .filter_map(Codec::from_tag)
-        .filter(|codec| codec.layout().is_some())
+        .filter(|codec| codec.element_layout().is_some())
         .count();
     assert_eq!(
         with_layout,

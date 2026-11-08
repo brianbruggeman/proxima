@@ -1,8 +1,9 @@
 use super::*;
 use crate::config::ResourceConstraints;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::map::{self, IndexMap};
-use proxima_tensor::{DType, Extent, ScalarOp, bind_unfused, bind_with_fusion, infer};
+use proxima_tensor::{Extent, ScalarOp, bind_unfused, bind_with_fusion, infer};
+use proxima_numeric::{DType};
 #[cfg(any(
     all(feature = "metal", target_os = "macos"),
     feature = "wgpu-backend",

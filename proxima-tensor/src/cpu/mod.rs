@@ -166,7 +166,7 @@ use std::thread;
 
 use prime::os::background::ProximaBackgroundPool;
 use prime::os::cohort::{ChunkIndex, CohortRound, CohortSession, ThreadCohort};
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_primitives::block_on;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::pipe::fan_in::Quorum;
@@ -192,14 +192,14 @@ use crate::bind::{
 #[cfg(feature = "config")]
 use crate::config::TensorExecutionConfig;
 use crate::convert::{Convert, SimdConvert};
-use crate::dtype::DType;
+use proxima_numeric::DType;
 use crate::error::TensorError;
 #[cfg(feature = "instrument")]
 use crate::instrument;
 #[cfg(feature = "instrument")]
 use crate::instrument::{KernelCounters, Path};
 use crate::map::IndexMap;
-use crate::numeric::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 use crate::op::{Keep, NodeId, Op, ReduceInit, ScalarOp};
 use crate::shape;
 use crate::sized::COHORT_SPIN_POLLS;

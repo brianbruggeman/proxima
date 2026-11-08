@@ -90,7 +90,7 @@ use alloc::vec::Vec;
 use core::future::Future;
 
 use proxima_primitives::pipe::Pipe;
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::IndexMap;
 use proxima_tensor::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use proxima_tensor::shape::{self, Shapes};

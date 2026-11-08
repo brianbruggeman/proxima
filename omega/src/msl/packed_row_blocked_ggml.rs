@@ -809,6 +809,12 @@ pub(super) fn push_packed_row_blocked_body(
                         codec: "unsupported",
                     });
                 }
+                _ => {
+                    return Err(EmitError::NonKQuantCodec {
+                        node: resolved.node,
+                        codec: "unsupported",
+                    });
+                }
             }
             source.push_str("        }\n");
             source.push_str(&format!(

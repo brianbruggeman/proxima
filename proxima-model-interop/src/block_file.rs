@@ -673,7 +673,7 @@ mod tests {
             let mut program = Vec::new();
             let _ = proxima_tensor::spec::input_leaf(
                 &mut program,
-                proxima_tensor::DType::FLOAT32,
+                proxima_numeric::DType::FLOAT32,
                 vec![proxima_tensor::Extent::Static(4)],
                 name,
             );

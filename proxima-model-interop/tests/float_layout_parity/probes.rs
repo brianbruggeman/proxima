@@ -1,6 +1,6 @@
 use omega::msl::layout_render::{layout_load_msl, layout_store_msl};
 use proxima_gguf::quant::float_layout::{decode, encode};
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 const HEADER: &str = "#include <metal_stdlib>\nusing namespace metal;\n";
 

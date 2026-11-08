@@ -19,16 +19,14 @@
 #![cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::instrument::path_totals;
 use proxima_tensor::map::{self, AxisIndex, AxisTerm};
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, bind, infer,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, bind, infer};
+use proxima_numeric::{DType};
 
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 
 /// `NumericPolicy::default()` (bit-exact `Safe` math mode), NOT
 /// `llama_relaxed()` -- this test's whole point is a bit-exact `==`

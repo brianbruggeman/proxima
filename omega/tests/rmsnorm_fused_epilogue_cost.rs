@@ -50,10 +50,8 @@
 use std::time::Instant;
 
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce,
-    ReduceInit, ScalarOp, append, bind, infer, projection,
-};
+use proxima_tensor::{BoundOp, BoundOpKind, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 mod support;
 use support::{as_named_blocks, production_numeric_policy};

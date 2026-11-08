@@ -33,7 +33,7 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 use proxima_primitives::pipe::sans_io::{ByteStreamParser, Outcome};
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 use crate::dtype::map_dtype;
 use crate::error::SafetensorsError;

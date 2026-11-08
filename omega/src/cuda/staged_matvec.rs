@@ -4,8 +4,9 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use proxima_primitives::block_layout::BlockLayout;
-use proxima_tensor::{BoundOp, BoundOpKind, DType, Keep, Layout, NodeId, NumericPolicy, ReduceInit, ScalarOp, StepArg};
+use proxima_numeric::block_layout::BlockLayout;
+use proxima_tensor::{BoundOp, BoundOpKind, Keep, Layout, NodeId, ReduceInit, ScalarOp, StepArg};
+use proxima_numeric::{DType, NumericPolicy};
 
 use super::block_dot::{BlockDot, ChunkTerms, DOT_ELEMENTS, block_dot_i8};
 use super::int8_gemm::{activation_block_offset, activation_code_offset, activation_code_words, activation_scale_offset};

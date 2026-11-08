@@ -2,7 +2,8 @@ use std::io;
 
 use omega::backend::{self, Engine, GpuDriver, Plan};
 use omega::config::RuntimeConfig;
-use proxima_tensor::{NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp};
+use proxima_tensor::{NodeId, Op, QuantizedBlock, ScalarOp};
+use proxima_numeric::{NumericPolicy};
 use serde_json::{Value, json};
 
 use super::graph::Graph;

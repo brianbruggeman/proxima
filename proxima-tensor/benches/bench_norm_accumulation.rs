@@ -20,7 +20,8 @@ use proxima_tensor::cpu::{BufferPools, QuantizedBlock, evaluate_quantized_with_s
 use proxima_tensor::spec::{
     count_constant, elementwise, input_leaf, reduce, rmsnorm, scalar_constant,
 };
-use proxima_tensor::{DType, Extent, NodeId, Op, ReduceInit, ScalarOp};
+use proxima_tensor::{Extent, NodeId, Op, ReduceInit, ScalarOp};
+use proxima_numeric::{DType};
 
 const SHAPES: [(u32, u32); 3] = [(1, 1024), (1, 4096), (32, 1024)];
 

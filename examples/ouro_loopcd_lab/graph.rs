@@ -4,7 +4,8 @@ use proxima_tensor::spec::{
     RopePairing, causal_mask, elementwise, fused_rope_pair, input_leaf, reduce, rmsnorm,
     scalar_constant,
 };
-use proxima_tensor::{DType, Extent, NodeId, Op, ReduceInit, ScalarOp};
+use proxima_tensor::{Extent, NodeId, Op, ReduceInit, ScalarOp};
+use proxima_numeric::{DType};
 
 pub struct Graph {
     pub program: Vec<Op>,

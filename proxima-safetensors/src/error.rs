@@ -39,7 +39,7 @@ pub enum SafetensorsError {
     #[error("tensor {tensor:?} field {field} has the wrong shape")]
     InvalidField { tensor: String, field: &'static str },
 
-    /// The safetensors `dtype` string has no `proxima_tensor::DType`
+    /// The safetensors `dtype` string has no `proxima_numeric::DType`
     /// counterpart at this commit.
     #[error("tensor {tensor:?} has unsupported dtype {dtype:?}")]
     UnsupportedDtype { tensor: String, dtype: String },

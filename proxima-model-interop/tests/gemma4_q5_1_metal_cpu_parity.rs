@@ -66,10 +66,11 @@ use std::fs::File;
 use proxima_gguf::parse_complete;
 use proxima_gguf::quant::q5_1::{BLOCK_BYTES, QK5_1, dequantize};
 use proxima_gguf::types::GgmlType;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::map::projection;
 use proxima_tensor::op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
-use proxima_tensor::{DType, IndexMap, QuantizedBlock};
+use proxima_tensor::{IndexMap, QuantizedBlock};
+use proxima_numeric::{DType};
 
 /// [`proxima_tensor::cpu::tests::quantized_matmul_program`]'s own shape,
 /// rebuilt here with only public `proxima_tensor` API (that function is
@@ -260,7 +261,7 @@ fn metal_matches_cpu_on_real_q5_1_down_projection_bytes() {
         &[],
         &blocks,
         &[sum],
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("metal evaluates the real q5_1 quantized matmul");
     let metal_values = metal.get(sum).expect("metal produced the matmul output").0;

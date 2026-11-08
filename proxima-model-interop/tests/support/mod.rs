@@ -60,13 +60,13 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
 /// `proxima_gguf::quant` ships (`Q4_K`/`Q5_K`/`Q3_K`/`Q6_K`/`Q8_0`); `F32` is a
 /// plain little-endian reinterpret. For a `GgmlType` this workspace has no
 /// encoder for at all (`Q4_0`/`Q5_0`/`Q2_K`), returns a
-/// correctly-*sized* buffer (`GgmlType::block_layout`, the same arithmetic
+/// correctly-*sized* buffer (`GgmlType::wire_shape`, the same arithmetic
 /// `ggml_nbytes` uses) with no encoder run over it: `bind::gguf_tensor_as_f32`
 /// rejects those types by `GgmlType` alone before ever reading a byte
 /// (`InteropError::UnrepresentableGgmlType`), so what those bytes contain
 /// cannot affect the capability-matrix cells that construct one.
 pub fn encode_weights(codec: GgmlType, values: &[f32]) -> Vec<u8> {
-    let layout = codec.block_layout();
+    let layout = codec.wire_shape();
     let blocks = values.len() as u64 / layout.block_elements;
     let byte_len = (blocks * layout.block_bytes) as usize;
     match codec {

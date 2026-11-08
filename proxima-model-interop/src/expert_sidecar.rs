@@ -673,7 +673,7 @@ impl MappedExpertSidecar {
             });
             let block = crate::bind::as_block(descriptor.target_codec, &self.mapping[range])
                 .ok_or(InteropError::UnsupportedCodec {
-                    codec: descriptor.target_codec,
+                    codec: crate::error::codec_name(descriptor.target_codec),
                 })?;
             entries.push(ExpertEntry {
                 block,
@@ -1832,7 +1832,7 @@ pub fn write_expert_sidecar<W: Write + Seek>(
             destination.write_all(&expert.to_le_bytes())?;
             destination.write_all(&spec.out_dim.to_le_bytes())?;
             destination.write_all(&spec.in_dim.to_le_bytes())?;
-            destination.write_all(&[codec_tag(source_codec), codec_tag(spec.target_codec)])?;
+            destination.write_all(&[codec_tag(source_codec)?, codec_tag(spec.target_codec)?])?;
             destination.write_all(&(projection_bytes.len() as u16).to_le_bytes())?;
             destination.write_all(projection_bytes)?;
             destination.write_all(&source_offset.to_le_bytes())?;
@@ -1876,8 +1876,13 @@ fn packed_kind(ggml_type: GgmlType, tensor: &str) -> Result<Codec, InteropError>
 /// crate's own local copy drifted out of sync the moment `Codec` grew past
 /// the 11 codecs the sidecar format currently packs; see [`codec_from_tag`]
 /// for why the sidecar's own accepted range stays 0..=10 regardless).
-fn codec_tag(codec: Codec) -> u8 {
-    codec.tag()
+fn codec_tag(codec: Codec) -> Result<u8, InteropError> {
+    codec.tag().ok_or_else(|| {
+        invalid_sidecar(format!(
+            "codec {} has no sidecar wire tag",
+            codec.name().unwrap_or("unnamed")
+        ))
+    })
 }
 
 fn codec_from_tag(tag: u8) -> Result<Codec, InteropError> {
@@ -2453,7 +2458,7 @@ mod tests {
         unknown_codec.extend_from_slice(&0u32.to_le_bytes());
         unknown_codec.extend_from_slice(&1u32.to_le_bytes());
         unknown_codec.extend_from_slice(&256u32.to_le_bytes());
-        unknown_codec.extend_from_slice(&[255, codec_tag(Codec::Q2K)]);
+        unknown_codec.extend_from_slice(&[255, codec_tag(Codec::Q2K).expect("q2_k carries a wire tag")]);
         unknown_codec.extend_from_slice(&0u16.to_le_bytes());
         unknown_codec.extend_from_slice(&0u64.to_le_bytes());
         unknown_codec.extend_from_slice(&144u64.to_le_bytes());

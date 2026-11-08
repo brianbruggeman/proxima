@@ -232,12 +232,8 @@ use proxima_tensor::instrument::{
 };
 #[cfg(any(not(feature = "metal-buffer-pool"), test))]
 use proxima_tensor::node_last_reader;
-use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Evaluated, Keep, Lookup, NodeId, NumericPolicy, Op,
-    QuantizedBlock, Shapes, TensorError, block_node_ids, correct_packed_matmul_layouts,
-    index_node_ids, infer, node_retirement, prune_dead, refit_cached_attention_rows,
-    resolve_named_blocks,
-};
+use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError, block_node_ids, correct_packed_matmul_layouts, index_node_ids, infer, node_retirement, prune_dead, refit_cached_attention_rows, resolve_named_blocks};
+use proxima_numeric::{DType, NumericPolicy};
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
 #[cfg(feature = "instrument")]
@@ -526,10 +522,10 @@ pub fn pack_uniforms_for(
     prepare_uniforms_pack::pack_uniforms(bound, numeric_policy)
 }
 
-#[cfg(all(test, feature = "float-layout-dtype"))]
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_admission_tests;
-#[cfg(all(test, feature = "float-layout-dtype"))]
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_bytes_tests;
 #[cfg(test)]

@@ -17,10 +17,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 use core::f32::consts::{FRAC_1_SQRT_2, FRAC_2_SQRT_PI};
 
-use proxima_tensor::{
-    AxisIndex, DType, Extent, IndexMap, IndexPattern, NodeId, Op, ReduceInit, ScalarOp, append,
-    projection,
-};
+use proxima_tensor::{AxisIndex, Extent, IndexMap, IndexPattern, NodeId, Op, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType};
 
 use super::{
     FoldState, LowerError, Value, attr_float, attr_int, attr_ints, attr_str, bind_output,

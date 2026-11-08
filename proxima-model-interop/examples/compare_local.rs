@@ -16,7 +16,9 @@ use omega::backend::{Engine, GpuDriver};
 #[cfg(feature = "metal")]
 use proxima_gguf::{MetadataValue, ParsedGguf};
 #[cfg(feature = "metal")]
-use proxima_tensor::{DType, Extent, IndexMap, NodeId, Op, ScalarOp, append, projection};
+use proxima_tensor::{Extent, IndexMap, NodeId, Op, ScalarOp, append, projection};
+#[cfg(feature = "metal")]
+use proxima_numeric::{DType};
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -376,7 +378,7 @@ fn replay_reciprocal(backend: &str, requested_roots: &[NodeId], gpu_layers: &[Ve
         &[],
         &named,
         &[output_node],
-        proxima_tensor::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("plan reciprocal replay");
     let mut replayed = Vec::new();
@@ -456,7 +458,7 @@ fn replay_square_root(backend: &str, requested_roots: &[NodeId], gpu_layers: &[V
         &[],
         &named,
         &[output_node],
-        proxima_tensor::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("plan square-root replay");
     let mut replayed = Vec::new();
@@ -560,7 +562,7 @@ fn replay_epsilon_add(
         &[],
         &named,
         &[output_node],
-        proxima_tensor::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("plan epsilon replay");
     let mut replayed = Vec::new();
@@ -657,7 +659,7 @@ fn replay_mean_square(backend: &str, requested_roots: &[NodeId], gpu_layers: &[V
         &[],
         &named,
         &[output_node],
-        proxima_tensor::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("plan mean-square replay");
     let mut replayed = Vec::new();
@@ -749,7 +751,7 @@ fn replay_sum_squares(backend: &str, requested_roots: &[NodeId], gpu_layers: &[V
         &[],
         &named,
         &[output_node],
-        proxima_tensor::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("plan sum-squares replay");
     let mut replayed = Vec::new();
@@ -862,7 +864,7 @@ fn replay_residual_add(backend: &str, requested_roots: &[NodeId], gpu_layers: &[
         &[],
         &named,
         &[output_node],
-        proxima_tensor::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("plan residual-add replay");
     let mut replayed = Vec::new();
@@ -948,7 +950,7 @@ fn replay_node70_reduce(backend: &str, requested_roots: &[NodeId], cpu_layers: &
         &[],
         &named,
         &[output_node],
-        proxima_tensor::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("plan CPU node-70 replay");
     let mut cpu_replayed = Vec::new();
@@ -984,7 +986,7 @@ fn replay_node70_reduce(backend: &str, requested_roots: &[NodeId], cpu_layers: &
         &[],
         &named,
         &[output_node],
-        proxima_tensor::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("plan GPU node-70 replay");
     let mut gpu_replayed = Vec::new();

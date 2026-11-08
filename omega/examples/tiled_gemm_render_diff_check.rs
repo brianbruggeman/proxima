@@ -27,10 +27,8 @@ fn run() -> anyhow::Result<()> {
     use anyhow::Context;
     use std::collections::{BTreeMap, BTreeSet};
 
-    use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp,
-        append, bind, correct_packed_matmul_layouts, infer, projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind, correct_packed_matmul_layouts, infer, projection};
+    use proxima_numeric::{DType, NumericPolicy};
 
     // -- Q4_0 tiled program: restated verbatim from
     // `tiled_gemm_ggml_incumbent_arms.rs::gate_program` (this repo's own

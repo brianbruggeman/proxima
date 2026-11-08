@@ -12,15 +12,14 @@
 use std::collections::BTreeMap;
 
 use proxima_gguf::quant::{q2_k, q3_k, q4_k};
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::cpu::{
     ExpertEntry, ExpertSource, QuantizedBlock,
     evaluate_quantized_named_exact_with_scratch_and_experts,
 };
 use proxima_tensor::map::{self, AxisIndex, AxisTerm};
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
+use proxima_numeric::{DType, NumericPolicy};
 
 const EXPERTS: usize = 3;
 // The real qwen35moe gate/up expert projections are 512 x 2048. Keeping the

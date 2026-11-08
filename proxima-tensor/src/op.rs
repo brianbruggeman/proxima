@@ -20,7 +20,7 @@ use alloc::string::String;
 use core::hash::Hash;
 use alloc::vec::Vec;
 
-use crate::dtype::DType;
+use proxima_numeric::DType;
 use crate::map::IndexMap;
 
 /// Index of an [`Op`] in the program slice.

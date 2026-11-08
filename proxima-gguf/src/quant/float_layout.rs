@@ -3,4 +3,4 @@
 //! The codec lives in `proxima-primitives` so format frontends such as GGUF and safetensors use
 //! the same layout-driven conversion code.
 
-pub use proxima_primitives::float_layout_codec::{decode, encode, encode_counting};
+pub use proxima_numeric::float_layout_codec::{decode, encode, encode_counting};

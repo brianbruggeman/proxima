@@ -14,9 +14,8 @@
 #![cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{
-    DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// `Input(extent) -> Elementwise(Identity)` — the smallest program whose
 /// output is byte-exact-equal to its input, so parity between what was

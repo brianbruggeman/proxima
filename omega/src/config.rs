@@ -5,8 +5,8 @@
 //! and has no environment or file access.
 
 use conflaguration::{FromEnvStr, Settings, Validate, ValidationMessage};
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding};
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding};
+use proxima_numeric::NumericPolicy;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::error::Error as StdError;

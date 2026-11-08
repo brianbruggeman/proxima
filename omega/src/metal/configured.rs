@@ -1,6 +1,6 @@
 use super::*;
 use conflaguration::Validate;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 /// prepares the existing [`Plan`] using explicit [`RuntimeConfig`] policy.
 ///

@@ -9,7 +9,8 @@ use omega::CudaDriver;
 use proxima_model_interop::cuda_async::{CudaGpuService, CudaPlanOptions, OwnedInputError};
 use proxima_primitives::pipe::CreditAcquireError;
 use proxima_tensor::map::{self, IndexMap};
-use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp};
+use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock, ScalarOp};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn required_driver() -> CudaDriver {
     CudaDriver::new(0)

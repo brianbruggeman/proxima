@@ -9,8 +9,9 @@ use alloc::borrow::ToOwned;
 use alloc::format;
 use alloc::string::String;
 
-use proxima_primitives::block_layout::BlockLayout;
-use proxima_tensor::{BoundOp, Layout, NumericPolicy};
+use proxima_numeric::block_layout::BlockLayout;
+use proxima_tensor::{BoundOp, Layout};
+use proxima_numeric::{NumericPolicy};
 
 use super::block_dot::{BlockDot, ChunkTerms, DOT_ELEMENTS, block_dot_i8};
 use super::mma_gemm::{MmaGemm, push_output_write, push_tile_origin};

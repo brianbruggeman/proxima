@@ -1,6 +1,6 @@
 use half::{bf16, f16};
 use proxima_gguf::quant::float_layout::{decode, encode};
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
 
 const SAMPLE_LEN: u32 = 1 << 20;
 const SAMPLE_STRIDE: u32 = 4093;

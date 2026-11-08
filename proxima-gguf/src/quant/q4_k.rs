@@ -10,7 +10,7 @@
 //! `K_SCALE_SIZE` is 12 (`ggml-common.h:89-90`). That 144-byte figure is
 //! cross-checked here at compile time against
 //! [`crate::types::GgmlType::Q4_K`]'s already-landed
-//! [`crate::types::GgmlType::block_layout`] rather than re-typed by hand.
+//! [`crate::types::GgmlType::wire_shape`] rather than re-typed by hand.
 
 use crate::quant::QuantError;
 use crate::types::GgmlType;
@@ -33,12 +33,12 @@ pub const SUB_BLOCKS: usize = QK_K / SUB_BLOCK_ELEMENTS;
 pub const K_SCALE_SIZE: usize = 12;
 
 /// Bytes per super-block. Derived from the already-landed
-/// [`crate::types::GgmlType::block_layout`] (`types.rs`), not re-typed —
+/// [`crate::types::GgmlType::wire_shape`] (`types.rs`), not re-typed —
 /// that table was itself checked against `ggml-common.h`'s
 /// `static_assert(sizeof(block_q4_K) == 2*sizeof(ggml_half) +
 /// K_SCALE_SIZE + QK_K/2, ...)` at `ggml-common.h:296`.
 pub const BLOCK_BYTES: usize = {
-    let layout = GgmlType::Q4_K.block_layout();
+    let layout = GgmlType::Q4_K.wire_shape();
     assert!(
         layout.block_elements as usize == QK_K,
         "GgmlType::Q4_K block_elements drifted from QK_K"

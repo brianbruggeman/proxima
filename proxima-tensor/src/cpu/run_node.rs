@@ -1836,7 +1836,7 @@ pub(super) fn fill_gather_cursors<'a, B: Deref<Target = [f32]>>(
         let _ = source;
         *slot = gather
             .as_ref()
-            .map(|gather_access| {
+            .map(|gather_access| -> Result<GatherCursor<'a>, TensorError> {
                 let buffer = buffer_of(buffers, gather_access.indices)?;
                 let offset = gather_access.index_layout.offset_of(coordinate);
                 #[cfg(feature = "instrument")]
@@ -1878,7 +1878,7 @@ pub(super) fn fill_gather_cursors_typed<'a>(
         let _ = source;
         *slot = gather
             .as_ref()
-            .map(|gather_access| {
+            .map(|gather_access| -> Result<GatherCursor<'a, i64>, TensorError> {
                 let buffer = index_buffers[gather_access.indices.0 as usize]
                     .as_deref()
                     .ok_or(TensorError::NotLowerable {

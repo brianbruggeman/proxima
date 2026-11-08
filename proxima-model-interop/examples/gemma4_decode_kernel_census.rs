@@ -1499,7 +1499,8 @@ mod real_program_names {
     use proxima_gguf::parse_complete;
     use proxima_model_interop::{bind_checkpoint, bind_symbols};
     use proxima_tensor::spec::LayerCacheRoots;
-    use proxima_tensor::{NodeId, NumericPolicy, bind_with_fusion, infer, prune_dead};
+    use proxima_tensor::{NodeId, bind_with_fusion, infer, prune_dead};
+    use proxima_numeric::{NumericPolicy};
 
     use super::*;
 

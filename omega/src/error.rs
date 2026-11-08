@@ -1,5 +1,5 @@
-use proxima_primitives::Codec;
-use proxima_tensor::{DType, NodeId};
+use proxima_tensor::{NodeId};
+use proxima_numeric::{DType};
 
 /// Everything [`crate::msl::emit`] can reject.
 ///
@@ -211,9 +211,11 @@ pub enum EmitError {
     #[error("node {node} cannot select cached-attention K reuse: {reason}")]
     CachedAttentionKvReuseNotSupported { node: NodeId, reason: &'static str },
 
-    /// A packed scalar codec reached an op whose renderer has no reader for it.
-    #[error("node {node} reads packed codec {codec:?}, which this metal renderer does not support")]
-    PackedCodecNotSupported { node: NodeId, codec: Codec },
+    /// A packed scalar codec reached an op whose renderer has no reader for it. Carries the
+    /// codec's name: `NumericFormat` is a 520-byte constant description, and a variant holding
+    /// one widened every `Result` in this crate.
+    #[error("node {node} reads packed codec {codec}, which this metal renderer does not support")]
+    PackedCodecNotSupported { node: NodeId, codec: &'static str },
 
     /// `omega::execute`'s own upstream gate (`reject_unsupported_gpu_dtype`)
     /// never lets anything but `Float32`/`Float16` reach [`crate::msl::emit`]

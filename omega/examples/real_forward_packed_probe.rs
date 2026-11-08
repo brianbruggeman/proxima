@@ -23,9 +23,8 @@
 use std::collections::BTreeSet;
 
 use proxima_tensor::spec::gqa_cached_forward_program;
-use proxima_tensor::{
-    BoundOpKind, Keep, NodeId, NumericPolicy, bind, correct_packed_matmul_layouts, infer,
-};
+use proxima_tensor::{BoundOpKind, Keep, NodeId, bind, correct_packed_matmul_layouts, infer};
+use proxima_numeric::{NumericPolicy};
 
 /// One row of step 1's rejection table: how many ops in this (tensor family,
 /// gate) bucket share this shape, and the shape itself -- printed rather than
@@ -225,7 +224,7 @@ fn main() {
         let kernel = omega::emit(
             op,
             &packed_operands,
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("the real forward's own bound ops emit");
         // `q4k_run8`/`q4k_element`'s own FUNCTION DEFINITIONS are always

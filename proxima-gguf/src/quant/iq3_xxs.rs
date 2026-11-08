@@ -21,25 +21,25 @@
 //! region -- the struct declares one flat `qs[96]` array, not two separate
 //! fields). Cross-checked here at compile time against
 //! [`crate::types::GgmlType::Iq3Xxs`]'s already-landed
-//! [`crate::types::GgmlType::block_layout`] rather than re-typed by hand.
+//! [`crate::types::GgmlType::wire_shape`] rather than re-typed by hand.
 //!
 //! Per-element decode (`dequantize_row_iq3_xxs`, `ggml-quants.c:2287-2305`):
 //! `qs[0..64]` holds 64 single-byte indices into
-//! [`crate::quant::tables::iq3xxs_grid::IQ3XXS_GRID`] (a FULL byte index,
+//! [`proxima_numeric::tables::IQ3XXS_GRID`] (a FULL byte index,
 //! unlike `IQ2_XS`'s 9-bit field -- the grid only has 256 entries here);
 //! `qs[64..96]` holds 8 packed 32-bit little-endian words, one per
 //! sub-block, whose top 4 bits are the sub-block's scale nibble (`db = d *
 //! (0.5 + nibble) * 0.5`) and whose low 28 bits carry four 7-bit sign
 //! indices (one per 8-element group) into the SAME
-//! [`crate::quant::tables::iq2xs_grid::KSIGNS_IQ2XS`] table `IQ2_XS` uses
+//! [`proxima_numeric::tables::KSIGNS_IQ2XS`] table `IQ2_XS` uses
 //! (`ggml-quants.c:2294` calls `ksigns_iq2xs` directly -- not a distinct
 //! `IQ3_XXS`-owned sign table). Each group reads TWO grid entries (4 bytes
 //! each), the first filling lanes `0..4`, the second lanes `4..8`, each
 //! byte negated per its own bit in the shared sign lookup.
 
 use crate::quant::QuantError;
-use crate::quant::tables::iq2xs_grid::{KMASK_IQ2XS, KSIGNS_IQ2XS};
-use crate::quant::tables::iq3xxs_grid::IQ3XXS_GRID;
+use proxima_numeric::tables::{KMASK_IQ2XS, KSIGNS_IQ2XS};
+use proxima_numeric::tables::IQ3XXS_GRID;
 use crate::types::GgmlType;
 
 /// This codec's name as it appears in a rendered [`QuantError`] message.
@@ -49,12 +49,12 @@ const CODEC: &str = "iq3_xxs";
 pub const QK_K: usize = 256;
 
 /// Bytes per super-block. Derived from the already-landed
-/// [`crate::types::GgmlType::block_layout`] (`types.rs`), not re-typed --
+/// [`crate::types::GgmlType::wire_shape`] (`types.rs`), not re-typed --
 /// that table was itself checked against `ggml-common.h`'s
 /// `static_assert(sizeof(block_iq3_xxs) == sizeof(ggml_half) +
 /// 3*(QK_K/8), ...)` at `ggml-common.h:369`.
 pub const BLOCK_BYTES: usize = {
-    let layout = GgmlType::Iq3Xxs.block_layout();
+    let layout = GgmlType::Iq3Xxs.wire_shape();
     assert!(
         layout.block_elements as usize == QK_K,
         "GgmlType::Iq3Xxs block_elements drifted from QK_K"

@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use proxima_gguf::pipe::parse_complete;
 use proxima_gguf::types::GgmlType;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::cpu::{
     matmul_q4k_q8k_f32_wide, matmul_q6k_q8k_f32_wide, matmul_q8_0_activation_f32,
 };

@@ -58,10 +58,8 @@ use omega::execute;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::test_support::Lcg;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {

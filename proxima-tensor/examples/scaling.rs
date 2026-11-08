@@ -15,10 +15,8 @@
 use std::num::NonZeroUsize;
 use std::time::{Duration, Instant};
 
-use proxima_tensor::{
-    Extent, IndexMap, NodeId, NumericPolicy, Op, ReduceInit, ScalarOp, append, bind, evaluate,
-    evaluate_parallel, infer, map,
-};
+use proxima_tensor::{Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, bind, evaluate, evaluate_parallel, infer, map};
+use proxima_numeric::{NumericPolicy};
 
 /// Same GEMM, RHS stored transposed (`[n, k]`, ggml's own `mul_mat`
 /// layout) instead of `[k, n]` — copied verbatim from `profile_hot.rs`.
@@ -27,7 +25,7 @@ fn matmul_program_rhs_transposed(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let lhs = append(
         &mut program,
         Op::Input {
-            dtype: proxima_tensor::DType::FLOAT32,
+            dtype: proxima_numeric::DType::FLOAT32,
             shape: vec![Extent::Static(m), Extent::Static(k)],
             name: None,
         },
@@ -35,7 +33,7 @@ fn matmul_program_rhs_transposed(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let rhs = append(
         &mut program,
         Op::Input {
-            dtype: proxima_tensor::DType::FLOAT32,
+            dtype: proxima_numeric::DType::FLOAT32,
             shape: vec![Extent::Static(n), Extent::Static(k)],
             name: None,
         },
@@ -43,7 +41,7 @@ fn matmul_program_rhs_transposed(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: proxima_tensor::DType::FLOAT32,
+            dtype: proxima_numeric::DType::FLOAT32,
             body: ScalarOp::Multiply,
             operands: vec![
                 (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
@@ -55,7 +53,7 @@ fn matmul_program_rhs_transposed(m: u32, k: u32, n: u32) -> (Vec<Op>, NodeId) {
     let sum = append(
         &mut program,
         Op::Reduce(proxima_tensor::Reduce {
-            dtype: proxima_tensor::DType::FLOAT32,
+            dtype: proxima_numeric::DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
             operand: product,

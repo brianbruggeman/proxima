@@ -43,10 +43,8 @@ use proxima_autograd::adjoint::differentiate;
 use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 const IN_DIM: usize = 3;
 const HIDDEN_DIM: usize = 4;

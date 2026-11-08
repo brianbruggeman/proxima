@@ -48,11 +48,8 @@ use proxima_tensor::bind::{
     refresh_cached_attention, row_template, rows_enumerable, symbols_shapes_template,
     touched_positions, touches_changed,
 };
-use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Evaluated, Keep, NodeId, NumericPolicy, NumericRewrite, Op,
-    QuantizedBlock, Shapes, admit, bind_unfused, bind_with_fusion, block_node_ids,
-    correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks,
-};
+use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Keep, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, bind_with_fusion, block_node_ids, correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks};
+use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 /// Errors from CUDA initialization, NVRTC compilation, or execution.
 #[derive(Debug, thiserror::Error)]
@@ -3901,7 +3898,7 @@ fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
     else {
         return None;
     };
-    match codec {
+    match *codec {
         Codec::Q2K
         | Codec::Q3K
         | Codec::Q4K
@@ -3938,6 +3935,9 @@ fn packed_codec(block: &QuantizedBlock<'_>) -> Option<Codec> {
         | Codec::Bf8E5M2
         | Codec::Bf4E2M1
         | Codec::Fp6E3M2 => None,
+        // the list above is the whole wire set as of this commit; a format added later is
+        // reported as having no CUDA packed kernel rather than silently admitted
+        _ => None,
     }
 }
 
@@ -4060,12 +4060,10 @@ mod tests {
     use crate::cuda_ptx_store::PtxStore;
     use crate::lowering::Codec;
     use cudarc::nvrtc::{CompileOptions, Ptx};
-    use proxima_primitives::block_layout::BlockLayout;
+    use proxima_numeric::block_layout::BlockLayout;
     use super::PoolSchedule;
-    use proxima_tensor::{
-        BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
-        ReduceInit, ScalarOp, append, bind_with_fusion, infer, map,
-    };
+    use proxima_tensor::{BoundOp, BoundOpKind, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, bind_with_fusion, infer, map};
+    use proxima_numeric::{DType, NumericPolicy};
 
     const KERNEL_CACHE_DIR_VAR: &str = "PROXIMA_CUDA_KERNEL_CACHE_DIR";
 

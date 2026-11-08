@@ -1,5 +1,5 @@
 use proxima_gguf::quant::float_layout::decode;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Comparison {

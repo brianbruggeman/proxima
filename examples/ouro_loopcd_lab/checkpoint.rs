@@ -7,7 +7,7 @@ use std::process::Command;
 use memmap2::{Mmap, MmapOptions};
 use omega::backend;
 use proxima_model_interop::{HfConfig, parse_hf_config};
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_safetensors::Manifest;
 use proxima_tensor::QuantizedBlock;
 use proxima_tokenizer::Vocab;

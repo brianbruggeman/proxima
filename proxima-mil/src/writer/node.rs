@@ -1,7 +1,8 @@
 //! One program node to its MIL operations, in the block's order.
 
 use half::f16;
-use proxima_tensor::{DType, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
+use proxima_tensor::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
+use proxima_numeric::{DType};
 
 use super::message::{
     Immediate, Kind, Name, attribute_blob, attribute_immediate, begin_operation, input_immediate,

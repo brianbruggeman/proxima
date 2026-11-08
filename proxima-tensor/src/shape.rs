@@ -29,7 +29,7 @@ use core::future::Future;
 
 use proxima_primitives::pipe::Pipe;
 
-use crate::dtype::DType;
+use proxima_numeric::DType;
 use crate::error::TensorError;
 use crate::map::{AxisIndex, IndexMap, IndexPattern};
 use crate::op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
@@ -993,7 +993,7 @@ pub fn symbol_dependency_masks(program: &[Op]) -> Vec<u64> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::dtype::DType;
+    use proxima_numeric::DType;
     use crate::map::{self, AxisTerm};
     use crate::op::{Extent, ReduceInit, ScalarOp, append};
 

@@ -28,10 +28,9 @@ use fixture::{
 };
 use objc2_metal::MTLBuffer;
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
-use proxima_primitives::Codec;
-use proxima_tensor::{
-    DType, Extent, IndexMap, NodeId, NumericPolicy, Op, ScalarOp, append, projection,
-};
+use proxima_numeric::codec::Codec;
+use proxima_tensor::{Extent, IndexMap, NodeId, Op, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// The baseline this whole design note measures against: `metal-horizontal-merge`
 /// OFF (this crate's own default), eight real dispatches, output bit-exact vs

@@ -8,7 +8,7 @@
 use alloc::format;
 use alloc::string::String;
 
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
 
 use crate::msl::layout_render::{
     F32_ABS_MASK, F32_FRACTION_BITS, F32_INFINITY_BITS, F32_QUIET_BIT, exponent_ones,

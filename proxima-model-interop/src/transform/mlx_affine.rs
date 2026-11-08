@@ -14,7 +14,7 @@
 use alloc::vec::Vec;
 
 use half::{bf16, f16};
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 use crate::error::InteropError;
 

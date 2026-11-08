@@ -25,10 +25,8 @@ use proxima_telemetry::pipes::InMemoryPipe;
 use proxima_telemetry::recorder::Recorder;
 use proxima_telemetry::tag::Tag;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, evaluate, infer, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, evaluate, infer, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);

@@ -20,8 +20,8 @@
 //! Inside a field the code is the layout's own: sign at bit 5, exponent bits 4..2, mantissa
 //! bits 1..0. The element is `scale_f16 * decode(field)`.
 
-use proxima_primitives::codec::Codec;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::codec::Codec;
+use proxima_numeric::float_layout::FloatLayout;
 
 use crate::quant::QuantError;
 use crate::quant::float_layout::{decode, encode};

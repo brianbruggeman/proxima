@@ -6,7 +6,7 @@
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 use super::mlx_affine::AffineParams;
 use super::mlx_conventions::QuantizedConventions;

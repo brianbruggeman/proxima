@@ -18,7 +18,7 @@ use proxima_model_interop::{
     HfConfig, RecurrentConfig, ouro_descriptor_from_hf_config, parse_hf_config,
 };
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]
 use proxima_tensor::QuantizedBlock;
 #[cfg(all(feature = "proxima-tensor", target_os = "macos"))]

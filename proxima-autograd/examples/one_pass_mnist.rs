@@ -108,7 +108,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_arguments)]
 
 use proxima_autograd::activation::relu;
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::test_support::Lcg;

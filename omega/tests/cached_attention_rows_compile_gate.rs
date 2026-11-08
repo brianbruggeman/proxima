@@ -13,7 +13,8 @@
 use std::process::Command;
 
 use omega::{Kernel, PackedOperands};
-use proxima_tensor::{BoundOp, BoundOpKind, DType, Layout, NodeId, NumericPolicy};
+use proxima_tensor::{BoundOp, BoundOpKind, Layout, NodeId};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn layout(strides: &[i64]) -> Layout {
     Layout {

@@ -2,11 +2,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::spec::{
     GdnSequenceTail, append_delta_net_sequence_tail_with_taps, count_constant, input_leaf,
 };
-use proxima_tensor::{DType, Extent, NumericPolicy, Op, QuantizedBlock};
+use proxima_tensor::{Extent, Op, QuantizedBlock};
+use proxima_numeric::{DType, NumericPolicy};
 
 #[test]
 fn qwen35_sequence_tail_projection_matches_cpu_on_packed_weight() {

@@ -3,10 +3,8 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer,
-    map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
+use proxima_numeric::{DType};
 
 use super::*;
 

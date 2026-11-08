@@ -38,7 +38,7 @@ use core::cell::RefCell;
 use omega::PlacedBuffer;
 use omega::metal::{DispatchType, MathMode, Plan};
 use proxima_gguf::GgmlType;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 use proxima_tensor::op::NodeId;
 
 use crate::serving::{GdnPrefillBackend, ServingConfig};

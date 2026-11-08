@@ -21,7 +21,8 @@ use proxima_telemetry::export::{Exporter, Formatter};
 use proxima_telemetry::recorder::Recorder;
 use proxima_tensor::instrument::ticks_to_nanos;
 use proxima_tensor::spec::input_leaf;
-use proxima_tensor::{DType, Extent, QuantizedBlock};
+use proxima_tensor::{Extent, QuantizedBlock};
+use proxima_numeric::{DType};
 use proxima_tokenizer::bpe::decode_ids;
 use serde_json::{Value, json};
 
@@ -103,7 +104,7 @@ pub(super) fn cached(arguments: &Arguments) -> io::Result<()> {
         numeric_policy: arguments
             .omega_config
             .as_ref()
-            .map_or(proxima_tensor::NumericPolicy::llama_relaxed(), |config| {
+            .map_or(proxima_numeric::NumericPolicy::llama_relaxed(), |config| {
                 config.numeric
             }),
         ..ServingConfig::default()
