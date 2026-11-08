@@ -46,6 +46,7 @@ members = [
     "proxima-tokenizer",
     "proxima-intercept",
     "proxima-tls",
+    "tools/ci-affected",
     "tools/proxima-cli",
     "tools/proxima-vm",
     "tools/rekt",

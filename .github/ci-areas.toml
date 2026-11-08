@@ -1,4 +1,4 @@
-# CI areas for change-scoped gates (consumed by scripts/ci-affected.py).
+# CI areas for change-scoped gates (consumed by tools/ci-affected).
 # An area runs when a changed file is in one of its packages' Cargo
 # dependency closure, OR matches one of its path globs. A change to a shared
 # leaf crate fans out to every area that depends on it automatically.
@@ -79,7 +79,7 @@ packages = [
     # is not reached by it. Each crate below owns a cell in a script this area
     # runs, yet editing it left `nostd=false` and the whole workflow skipped —
     # a gate that cannot be triggered proves nothing. Verified with the
-    # detector itself: `python3 scripts/ci-affected.py --changed
+    # detector itself: `cargo run -q -p ci-affected -- --changed
     # proxima-redis/src/lib.rs` printed `nostd=false` before this block.
     # thumbv7m-cliff-gate.sh + tokio-free-floor.sh bare-tier cells:
     "proxima-redis",
