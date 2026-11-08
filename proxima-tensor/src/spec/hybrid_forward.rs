@@ -1081,6 +1081,14 @@ pub(super) fn hybrid_routed_forward(
         BUILDER,
         "a schedule whose length is not block_count",
     )?;
+    // this engine builds `ffn_*_shexp.weight` at this extent directly, so a zero
+    // width would lower a real program with zero-wide shared matrices; the
+    // scheduled engine refuses the same case in `append_shared_expert_ffn`
+    refuse_when(
+        descriptor.expert_shared_feed_forward == 0,
+        BUILDER,
+        "a shared expert with no expert_shared_feed_forward width",
+    )?;
     refuse_when(
         descriptor
             .layers
