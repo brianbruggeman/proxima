@@ -47,6 +47,7 @@ pub fn append_single_range_cached_attention(
     is_future: NodeId,
     neg_infinity: NodeId,
     group: u32,
+    attention_sink: Option<NodeId>,
     attn_norm_weight: NodeId,
     q_norm_weight: Option<NodeId>,
     k_norm_weight: Option<NodeId>,
@@ -228,6 +229,14 @@ pub fn append_single_range_cached_attention(
         "stug->stug",
         "sug->stug",
     )?;
+    let (score_max, sink_weight) = match attention_sink {
+        Some(sink) => {
+            let (score_max, sink_weight) =
+                append_attention_sink_addend(program, sink, score_max, group)?;
+            (score_max, Some(sink_weight))
+        }
+        None => (score_max, None),
+    };
     let shifted = elementwise(
         program,
         DType::FLOAT32,
@@ -249,6 +258,7 @@ pub fn append_single_range_cached_attention(
         "stug->stug",
         "sug->stug",
     )?;
+    let weight_sum = add_attention_sink_weight(program, weight_sum, sink_weight)?;
     let inv_weight_sum = elementwise(
         program,
         DType::FLOAT32,
@@ -450,6 +460,7 @@ pub fn append_two_range_cached_attention(
     is_future_cached: NodeId,
     neg_infinity_cached: NodeId,
     group: u32,
+    attention_sink: Option<NodeId>,
     attn_norm_weight: NodeId,
     q_norm_weight: Option<NodeId>,
     key_source: KeySource,
@@ -580,6 +591,8 @@ pub fn append_two_range_cached_attention(
         score_cached_scaled,
         is_future_local,
         Some(neg_infinity_local),
+        attention_sink,
+        group,
     )?;
 
     let wo_product = elementwise(
@@ -742,9 +755,9 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
             ],
             &alloc::format!("blk.{layer}.attn_q.weight"),
         );
-        if config.attention_sinks {
-            declare_attention_sink_leaf(&mut program, layer, query_heads);
-        }
+        let attention_sink = config
+            .attention_sinks
+            .then(|| declare_attention_sink_leaf(&mut program, layer, query_heads));
         let wk = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -849,6 +862,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
             resources.is_future,
             resources.neg_infinity,
             group,
+            attention_sink,
             attn_norm_weight,
             q_norm_weight,
             k_norm_weight,
@@ -1455,9 +1469,9 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             ],
             &alloc::format!("blk.{layer}.attn_q.weight"),
         );
-        if config.attention_sinks {
-            declare_attention_sink_leaf(&mut program, layer, query_heads);
-        }
+        let attention_sink = config
+            .attention_sinks
+            .then(|| declare_attention_sink_leaf(&mut program, layer, query_heads));
         // the E2B checkpoint shares BOTH `K` and `V` from the same donor layer
         // (`KeySourceKind::SharedFromLayer`'s own doc: ollama's own
         // the reference Go source reads one donor's `sharedHistory` for both, never `K`
@@ -1620,6 +1634,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             is_future_cached,
             neg_infinity_cached,
             group,
+            attention_sink,
             attn_norm_weight,
             q_norm_weight,
             key_source,

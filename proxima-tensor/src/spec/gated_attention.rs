@@ -444,6 +444,7 @@ pub fn append_gated_attention_only(
     is_future: NodeId,
     cached_len: NodeId,
     group: u32,
+    attention_sink: Option<NodeId>,
     rotary_dim: u32,
     attn_head_dim: u32,
     attn_norm_weight: NodeId,
@@ -473,6 +474,7 @@ pub fn append_gated_attention_only(
         is_future,
         cached_len,
         group,
+        attention_sink,
         rotary_dim,
         attn_head_dim,
         attn_norm_weight,
@@ -596,6 +598,7 @@ pub fn append_gated_attention_only_with_taps(
     is_future: NodeId,
     cached_len: NodeId,
     group: u32,
+    attention_sink: Option<NodeId>,
     rotary_dim: u32,
     attn_head_dim: u32,
     attn_norm_weight: NodeId,
@@ -1003,6 +1006,14 @@ pub fn append_gated_attention_only_with_taps(
         ScalarOp::Maximum,
         &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")],
     )?;
+    let (global_max, sink_weight) = match attention_sink {
+        Some(sink) => {
+            let (global_max, sink_weight) =
+                append_attention_sink_addend(program, sink, global_max, group)?;
+            (global_max, Some(sink_weight))
+        }
+        None => (global_max, None),
+    };
 
     let shifted_cached = elementwise(
         program,
@@ -1056,6 +1067,7 @@ pub fn append_gated_attention_only_with_taps(
         ScalarOp::Add,
         &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")],
     )?;
+    let weight_sum = add_attention_sink_weight(program, weight_sum, sink_weight)?;
     let inv_weight_sum = elementwise(
         program,
         DType::FLOAT32,
@@ -1227,6 +1239,7 @@ pub fn append_gated_attention_layer(
     is_future: NodeId,
     cached_len: NodeId,
     group: u32,
+    attention_sink: Option<NodeId>,
     rotary_dim: u32,
     attn_head_dim: u32,
     attn_norm_weight: NodeId,
@@ -1260,6 +1273,7 @@ pub fn append_gated_attention_layer(
         is_future,
         cached_len,
         group,
+        attention_sink,
         rotary_dim,
         attn_head_dim,
         attn_norm_weight,

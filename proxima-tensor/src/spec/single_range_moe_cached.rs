@@ -1173,6 +1173,8 @@ pub fn append_gqa_cached_routed_layer(
         score_cached_scaled,
         is_future,
         Some(neg_infinity),
+        None,
+        group,
     )?;
 
     let wo_product = elementwise(

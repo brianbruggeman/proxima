@@ -753,6 +753,8 @@ pub fn append_gqa_cached_layer(
         score_cached_scaled,
         is_future,
         None,
+        None,
+        group,
     )?;
 
     #[cfg(feature = "instrument")]

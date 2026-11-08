@@ -560,17 +560,15 @@ pub struct LayerAttentionConfig {
     /// Per-head attention sink weight: one learned scalar per query head, the
     /// checkpoint's `blk.{layer}.attn_sinks.weight` leaf (flint carries one on
     /// every block, dims `(32,)` = one per query head) that the attention
-    /// denominator will read as an extra addend before the value mix. This
-    /// field declares the leaf, and the binder binds it; no emitted program
-    /// reads it yet, so setting it changes the leaf set and not a single
-    /// number. `false` -- and
-    /// an absent key in a config file -- declares no leaf, which is the node
-    /// set every schedule had before sinks were data. Declared by every
+    /// denominator reads as an extra addend before the value mix. `false` --
+    /// and an absent key in a config file -- declares no leaf, which is the
+    /// node set every schedule had before sinks were data. Declared by every
     /// lowerer that reads this config per layer (the scheduled prefill builder,
     /// both cached scheduled builders, both hybrid builders); the positional
     /// builders carry no per-layer attention config beyond the mask window, and
-    /// the bounded engine refuses a schedule that sets this rather than binding
-    /// a leaf no term reads -- recorded in the spec's open items.
+    /// the bounded engine refuses a schedule that sets this rather than
+    /// lowering a program with no per-layer sink channel -- recorded in the
+    /// spec's open items.
     #[serde(default)]
     pub attention_sinks: bool,
 }
@@ -579,20 +577,84 @@ pub(super) const fn default_qk_norm() -> bool {
     true
 }
 
-/// Declares [`LayerAttentionConfig::attention_sinks`]'s weight leaf, the tensor
-/// the attention denominator will read as an extra addend. Nothing reads the
-/// node yet, so it is a declaration only: what it changes is the program's leaf
-/// set, which is what the checkpoint directory is compared against -- that
-/// comparison is not built yet, and lands with the bind census. An `Op::Input`
-/// emits no [`BoundOp`](crate::bind::BoundOp), so the extra node adds no
-/// dispatch at all -- only the resident binding.
-pub(super) fn declare_attention_sink_leaf(program: &mut Vec<Op>, layer: u32, query_heads: u32) {
-    let _ = input_leaf(
+/// Declares [`LayerAttentionConfig::attention_sinks`]'s weight leaf and
+/// returns the node every sink-bearing denominator reads. An `Op::Input`
+/// emits no [`BoundOp`](crate::bind::BoundOp), so the leaf itself adds no
+/// dispatch -- only the resident binding, plus the term
+/// [`append_attention_sink_addend`] lowers over it.
+pub(super) fn declare_attention_sink_leaf(
+    program: &mut Vec<Op>,
+    layer: u32,
+    query_heads: u32,
+) -> NodeId {
+    input_leaf(
         program,
         DType::FLOAT32,
         alloc::vec![Extent::Static(query_heads)],
         &alloc::format!("blk.{layer}.attn_sinks.weight"),
-    );
+    )
+}
+
+/// The attention denominator's sink addend, spelled the way the incumbent
+/// spells it (`ggml_compute_forward_soft_max_f32`'s `sk` branch, llama.cpp
+/// `cd959bae9`, `ggml/src/ggml-cpu/ops.cpp:5670-5680`): one learned scalar
+/// per query head joins the row maximum, and
+/// `exp(sink - max)` joins the exponential sum -- so a head may attend to
+/// "nothing" and contribute no value, which is why the widened maximum is
+/// what the shifted score weights read too: the whole row is normalized by
+/// the sink-inclusive denominator, not merely extended by one addend.
+///
+/// `sink` is `blk.{layer}.attn_sinks.weight`, indexed by query head
+/// `h = group*u + g`; `group` is the query-heads-per-key-head ratio `scores`
+/// already carries as its `g` axis. Returns the widened maximum plus the
+/// single addend the caller folds into its own `weight_sum` once that reduce
+/// exists -- splitting the two is what lets the maximum reach the `shifted`
+/// node before the sum is computed.
+pub(super) fn append_attention_sink_addend(
+    program: &mut Vec<Op>,
+    sink: NodeId,
+    score_max: NodeId,
+    group: u32,
+) -> Result<(NodeId, NodeId), TensorError> {
+    let sink_map = alloc::format!("{group}*u+g->sug");
+    let max_with_sink = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Maximum,
+        &[(score_max, "sug->sug"), (sink, sink_map.as_str())],
+    )?;
+    let sink_shifted = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Subtract,
+        &[(sink, sink_map.as_str()), (max_with_sink, "sug->sug")],
+    )?;
+    let sink_weight = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Exponential,
+        &[(sink_shifted, "sug->sug")],
+    )?;
+    Ok((max_with_sink, sink_weight))
+}
+
+/// Folds [`append_attention_sink_addend`]'s `sink_weight` into the softmax's
+/// own exponential sum; a sink-less layer returns `weight_sum` untouched, so
+/// the default-off graph stays node-for-node identical.
+pub(super) fn add_attention_sink_weight(
+    program: &mut Vec<Op>,
+    weight_sum: NodeId,
+    sink_weight: Option<NodeId>,
+) -> Result<NodeId, TensorError> {
+    match sink_weight {
+        Some(sink_weight) => elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            &[(weight_sum, "sug->sug"), (sink_weight, "sug->sug")],
+        ),
+        None => Ok(weight_sum),
+    }
 }
 
 /// One block's complete per-layer choice -- [`scheduled_forward_program_with_experts`]
@@ -742,6 +804,7 @@ pub fn append_attention_mixer(
     is_future: NodeId,
     neg_infinity: NodeId,
     group: u32,
+    attention_sink: Option<NodeId>,
     attn_norm_weight: NodeId,
     q_norm_weight: Option<NodeId>,
     wq: NodeId,
@@ -941,6 +1004,14 @@ pub fn append_attention_mixer(
         "stug->stug",
         "sug->stug",
     )?;
+    let (score_max, sink_weight) = match attention_sink {
+        Some(sink) => {
+            let (score_max, sink_weight) =
+                append_attention_sink_addend(program, sink, score_max, group)?;
+            (score_max, Some(sink_weight))
+        }
+        None => (score_max, None),
+    };
     let shifted = elementwise(
         program,
         DType::FLOAT32,
@@ -962,6 +1033,7 @@ pub fn append_attention_mixer(
         "stug->stug",
         "sug->stug",
     )?;
+    let weight_sum = add_attention_sink_weight(program, weight_sum, sink_weight)?;
     let inv_weight_sum = elementwise(
         program,
         DType::FLOAT32,
@@ -2239,9 +2311,9 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                     ],
                     &alloc::format!("blk.{layer}.attn_q.weight"),
                 );
-                if config.attention_sinks {
-                    declare_attention_sink_leaf(&mut program, layer, query_heads);
-                }
+                let attention_sink = config
+                    .attention_sinks
+                    .then(|| declare_attention_sink_leaf(&mut program, layer, query_heads));
                 let key_source = match config.key_source_kind {
                     KeySourceKind::ProjectedK => {
                         let wk = input_leaf(
@@ -2334,6 +2406,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
                     is_future,
                     neg_infinity,
                     group,
+                    attention_sink,
                     attn_norm_weight,
                     q_norm_weight,
                     wq,

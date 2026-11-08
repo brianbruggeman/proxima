@@ -468,6 +468,7 @@ pub fn qwen35_partial_rotary_forward_fixture(
         is_future,
         cached_len_node,
         GROUP,
+        None,
         ROTARY_DIM,
         ATTN_HEAD_DIM,
         attn_norm_weight,

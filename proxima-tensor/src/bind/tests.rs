@@ -1108,6 +1108,7 @@ pub(super) fn qwen35_partial_rotary_attention_fixture() -> (
         is_future,
         cached_len,
         GROUP as u32,
+        None,
         ROTARY_DIM as u32,
         ATTN_HEAD_DIM as u32,
         attn_norm_weight,
