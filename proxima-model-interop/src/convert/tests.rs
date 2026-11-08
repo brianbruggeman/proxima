@@ -211,26 +211,31 @@ fn convert_codec_selection_expert_and_attention_projections_only() {
 }
 
 #[test]
+#[ignore = "requires a real checkpoint: set PROXIMA_FIXTURES to a dir holding manifest.jsonl"]
 fn convert_codec_source_f32_within_block_bound() {
     assert_converted_within_block_bound(GgmlType::F32);
 }
 
 #[test]
+#[ignore = "requires a real checkpoint: set PROXIMA_FIXTURES to a dir holding manifest.jsonl"]
 fn convert_codec_source_f16_within_block_bound() {
     assert_converted_within_block_bound(GgmlType::F16);
 }
 
 #[test]
+#[ignore = "requires a real checkpoint: set PROXIMA_FIXTURES to a dir holding manifest.jsonl"]
 fn convert_codec_source_q8_0_within_block_bound() {
     assert_converted_within_block_bound(GgmlType::Q8_0);
 }
 
 #[test]
+#[ignore = "requires a real checkpoint: set PROXIMA_FIXTURES to a dir holding manifest.jsonl"]
 fn convert_codec_source_q4_0_within_block_bound() {
     assert_converted_within_block_bound(GgmlType::Q4_0);
 }
 
 #[test]
+#[ignore = "requires a real checkpoint: set PROXIMA_FIXTURES to a dir holding manifest.jsonl"]
 fn convert_codec_checkpoint_reloads_with_every_tensor_present() {
     let weights = granite_q8_0_weights();
     let slice = &weights[..(ROW_ELEMENTS * 4) as usize];
@@ -306,6 +311,7 @@ fn convert_codec_checkpoint_moe_q8_0_saves_250mb() {
 }
 
 #[test]
+#[ignore = "requires a real checkpoint: set PROXIMA_FIXTURES to a dir holding manifest.jsonl"]
 fn fp6_e3m2_bind_packed_block_borrows_the_converted_tensor_bytes() {
     let weights = granite_q8_0_weights();
     let source_file = single_tensor_checkpoint(GgmlType::Q8_0, &weights);

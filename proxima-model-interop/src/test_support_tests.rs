@@ -18,6 +18,7 @@ fn fixture_constant_unset_variable_names_variable_and_row() {
 }
 
 #[test]
+#[ignore = "requires a real checkpoint: set PROXIMA_FIXTURES to a dir holding manifest.jsonl"]
 fn fixture_constant_rows_resolve_or_name_the_row() {
     let manifest_path =
         fixture_manifest().expect("PROXIMA_FIXTURES or a model dir must hold manifest.jsonl");

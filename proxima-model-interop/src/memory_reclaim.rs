@@ -362,7 +362,19 @@ mod tests {
         assert_eq!(used_fraction_of_meminfo("MemTotal: 5 kB\n"), None);
     }
 
+    /// Off linux the live read has no `/proc/meminfo`; it must report that as a
+    /// typed error rather than panicking or returning a fabricated fraction.
     #[test]
+    #[cfg(not(target_os = "linux"))]
+    fn live_meminfo_reports_an_error_off_linux() {
+        assert!(
+            read_used_fraction().is_err(),
+            "a host without /proc/meminfo must surface the read failure"
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
     fn live_meminfo_is_a_fraction() {
         let used = read_used_fraction().expect("proc meminfo readable on linux");
         assert!((0.0..=1.0).contains(&used));
