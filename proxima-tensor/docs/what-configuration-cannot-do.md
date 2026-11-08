@@ -103,6 +103,26 @@ The refusal (`descriptor.rs:799-811`) is about weights as much as engines: over 
 whose q and k rows the converter already permuted (see the rope section of the first guide), the
 lowering derives the one pairing it can express from `qk_norm` and refuses any other.
 
+A schedule that sets per-head attention sinks is refused by the same engine for a sharper
+reason: `CacheMask::Bounded` builds from flat scalars and has no per-layer channel for the
+`blk.{layer}.attn_sinks.weight` leaf, so binding the tensor without a term that reads it would
+produce wrong logits with no error anywhere.
+
+```rust
+    let sinks = with_layers(granite(), |layer| LayerSchedule {
+        attention: LayerAttentionConfig { attention_sinks: true, ..layer.attention.clone() },
+        ..layer.clone()
+    });
+```
+
+```
+per-head attention sinks on the bounded cache engine: build_forward(CacheMask::Bounded) does not support attention sinks (this engine has no per-layer sink channel)
+```
+
+The scheduled engines (cacheless prefill, both cached scheduled builders, both hybrid builders)
+do read the knob: they declare the leaf so the checkpoint's tensor is claimed, and the sink term
+that reads it is a separate capability with its own hand-worked literal.
+
 A key no field reads, and a variant no enum names, fail at parse time with the list of what is
 allowed:
 

@@ -68,6 +68,7 @@ fn gemma4_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 }
             } else {
                 LayerAttentionConfig {
@@ -86,6 +87,7 @@ fn gemma4_schedule(sliding_pattern: &[bool]) -> Vec<LayerSchedule> {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 }
             };
             LayerSchedule {

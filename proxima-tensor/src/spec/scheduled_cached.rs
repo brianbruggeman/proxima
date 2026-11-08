@@ -741,6 +741,9 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
             ],
             &alloc::format!("blk.{layer}.attn_q.weight"),
         );
+        if config.attention_sinks {
+            declare_attention_sink_leaf(&mut program, layer, query_heads);
+        }
         let wk = input_leaf(
             &mut program,
             DType::FLOAT32,
@@ -1444,6 +1447,9 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             ],
             &alloc::format!("blk.{layer}.attn_q.weight"),
         );
+        if config.attention_sinks {
+            declare_attention_sink_leaf(&mut program, layer, query_heads);
+        }
         // the E2B checkpoint shares BOTH `K` and `V` from the same donor layer
         // (`KeySourceKind::SharedFromLayer`'s own doc: ollama's own
         // the reference Go source reads one donor's `sharedHistory` for both, never `K`

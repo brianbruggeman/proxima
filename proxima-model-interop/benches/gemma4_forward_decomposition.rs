@@ -341,6 +341,7 @@ fn sliding_layer_schedule() -> Vec<LayerSchedule> {
         score_scale: AttentionScoreScale::Unscaled,
         value_norm: true,
         qk_norm: true,
+        attention_sinks: false,
     };
     vec![LayerSchedule {
         kind: LayerKind::Attention,

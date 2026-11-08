@@ -6685,6 +6685,7 @@ fn architecture_matrix_mixed_cached_conv_roots() {
         score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(2),
         value_norm: false,
         qk_norm: true,
+        attention_sinks: false,
     };
     let schedule = alloc::vec![
         LayerSchedule {
@@ -9601,6 +9602,7 @@ async fn the_whole_lfm2_forward_pass_infers_at_real_dimensions() {
                 score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
                 value_norm: false,
                 qk_norm: true,
+                attention_sinks: false,
             },
             ffn: LayerFfnConfig::exclusive(),
         })
@@ -9645,6 +9647,7 @@ async fn lfm2_forward_program_rejects_a_layer_schedule_length_mismatch() {
         score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
         value_norm: false,
         qk_norm: true,
+        attention_sinks: false,
     };
     let schedule = [
         LayerSchedule {
@@ -14509,6 +14512,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -14530,6 +14534,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -14895,6 +14900,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -14916,6 +14922,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -15214,6 +15221,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -15235,6 +15243,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -15446,6 +15455,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: LayerFfnConfig::exclusive(),
             },
@@ -15467,6 +15477,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: LayerFfnConfig::exclusive(),
             },
@@ -15696,6 +15707,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 };
             alloc::vec![
                 LayerSchedule {
@@ -16134,6 +16146,7 @@ mod gemma4_synthetic_parity {
             score_scale: AttentionScoreScale::Unscaled,
             value_norm: true,
             qk_norm: true,
+            attention_sinks: false,
         };
         let full_donor_attention = LayerAttentionConfig {
             head_dim: HEAD_DIM as u32,
@@ -16151,6 +16164,7 @@ mod gemma4_synthetic_parity {
             score_scale: AttentionScoreScale::Unscaled,
             value_norm: true,
             qk_norm: true,
+            attention_sinks: false,
         };
         let shared_attention = LayerAttentionConfig {
             head_dim: HEAD_DIM as u32,
@@ -16172,6 +16186,7 @@ mod gemma4_synthetic_parity {
             // `proxima-model-interop`).
             value_norm: false,
             qk_norm: true,
+            attention_sinks: false,
         };
         let schedule = alloc::vec![
             LayerSchedule {
@@ -16543,6 +16558,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -16564,6 +16580,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -16984,6 +17001,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -17005,6 +17023,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -17303,6 +17322,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -17324,6 +17344,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
+                    attention_sinks: false,
                 },
                 ffn: ffn_config,
             },
@@ -17740,6 +17761,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: matches!(source, KeySourceKind::ProjectedK),
                     qk_norm: true,
+                    attention_sinks: false,
                 }
             };
         let window = Some(SWA_WINDOW as u32);
@@ -18007,6 +18029,7 @@ mod gemma4_synthetic_parity {
                 score_scale: AttentionScoreScale::Unscaled,
                 value_norm: true,
                 qk_norm: true,
+                attention_sinks: false,
             },
             ffn: ffn_config,
         };
@@ -19290,6 +19313,7 @@ mod head_repeats {
             score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(4),
             value_norm: false,
             qk_norm: true,
+            attention_sinks: false,
         };
         let layers = (0..2)
             .map(|_| LayerSchedule {
@@ -20721,6 +20745,7 @@ mod hybrid_dense_descriptor {
             score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(ATTN_HEAD_DIM),
             value_norm: false,
             qk_norm: true,
+            attention_sinks: false,
         };
         let layers = kinds
             .iter()
@@ -20994,7 +21019,7 @@ mod hybrid_dense_descriptor {
 mod hybrid_routed_descriptor {
     use super::*;
 
-    fn descriptor(kinds: &[LayerKind]) -> ModelDescriptor {
+    pub(super) fn descriptor(kinds: &[LayerKind]) -> ModelDescriptor {
         let attention = LayerAttentionConfig {
             head_dim: 4,
             kv_heads: 1,
@@ -21009,6 +21034,7 @@ mod hybrid_routed_descriptor {
             score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(4),
             value_norm: false,
             qk_norm: true,
+            attention_sinks: false,
         };
         let ffn = LayerFfnConfig {
             combination: FfnCombination::RoutedWithSharedExpert,
@@ -22729,10 +22755,25 @@ mod flash_attention_worked_example {
         let llama = floats(LAYER0_HEAD0)[3 * block..4 * block].to_vec();
         let flash = max_error(&run(false, LAYER0_HEAD0, ROWS), &llama);
         let online = max_error(&run(true, LAYER0_HEAD0, ROWS), &llama);
-        assert!(
-            flash < 1.0e-7,
-            "llama's flash arithmetic must sit within f32 rounding of its own kqv_out, found {flash}"
-        );
+        // the captured kqv_out is llama.cpp's f32-accumulating arithmetic; a
+        // host whose detected family rounds to f16 per product runs a different
+        // kernel (llama.cpp dispatches one too), so the f32 bound only applies
+        // where the family accumulates in f32
+        #[cfg(target_arch = "aarch64")]
+        let f32_accumulating = !std::arch::is_aarch64_feature_detected!("fp16");
+        #[cfg(not(target_arch = "aarch64"))]
+        let f32_accumulating = true;
+        if f32_accumulating {
+            assert!(
+                flash < 1.0e-7,
+                "llama's flash arithmetic must sit within f32 rounding of its own kqv_out, found {flash}"
+            );
+        } else {
+            assert!(
+                (1.0e-5..1.0e-2).contains(&flash),
+                "the f16-accumulating family must sit measurably off llama's f32 capture without losing the arithmetic, found {flash}"
+            );
+        }
         assert!(
             online > 1.0e-5,
             "the f32 accumulator must stay measurably off llama or this fixture separates nothing, found {online}"
@@ -22771,4 +22812,319 @@ fn the_cacheless_forward_pass_binds_one_fused_attention_per_layer_under_the_defa
         .filter(|op| matches!(op.kind, BoundOpKind::CachedAttention { .. }))
         .count();
     assert_eq!(fused, 2, "one fused attention for each of the two layers");
+}
+
+/// `LayerAttentionConfig::attention_sinks`: the data knob and the weight leaf
+/// it declares, ahead of the denominator term that reads it. The flint
+/// checkpoint carries `blk.{layer}.attn_sinks.weight` on all 49 blocks, dims
+/// `(32,)` -- one learned scalar per query head.
+mod attention_sinks {
+    use super::*;
+
+    const SINK_LEAF_SUFFIX: &str = ".attn_sinks.weight";
+    const FLINT_QUERY_HEADS: u32 = 32;
+    /// flint's own head ratio (`head_count = 32`, `head_count_kv = 4` in the
+    /// captured header), so the sink width is exercised at the group the real
+    /// checkpoint reshapes with
+    const FLINT_KV_HEADS: u32 = 4;
+
+    fn sink_leaves(program: &[Op]) -> Vec<String> {
+        program
+            .iter()
+            .filter_map(|op| match op {
+                Op::Input {
+                    name: Some(name), ..
+                } if name.ends_with(SINK_LEAF_SUFFIX) => Some(name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The one comparison both the program test and its control run, so the
+    /// control exercises the assertion rather than a copy of it.
+    fn assert_sink_leaves(program: &[Op], expected: &[&str]) {
+        assert_eq!(
+            sink_leaves(program),
+            expected
+                .iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<String>>()
+        );
+    }
+
+    fn sink_shape(program: &[Op], name: &str) -> Vec<Extent> {
+        program
+            .iter()
+            .find_map(|op| match op {
+                Op::Input {
+                    name: Some(declared),
+                    shape,
+                    ..
+                } if declared == name => Some(shape.clone()),
+                _ => None,
+            })
+            .expect("the named sink leaf is declared")
+    }
+
+    /// The descriptor the head-repeat baselines already pin
+    /// (`TWO_RANGE_PRE_CHANGE_NODES` / `CACHELESS_PRE_CHANGE_NODES`), so the
+    /// default-off graph is covered by a digest rather than by this test's own
+    /// expectation, with `sinks` forced onto every layer.
+    fn scheduled(
+        strategy: CacheStrategy,
+        mask: CacheMask,
+        sinks: bool,
+        query_heads: u32,
+        kv_heads: u32,
+    ) -> ModelDescriptor {
+        let mut model = super::head_repeats::descriptor(strategy, mask, 1);
+        model.query_heads = query_heads;
+        for layer in &mut model.layers {
+            layer.attention.kv_heads = kv_heads;
+            layer.attention.attention_sinks = sinks;
+        }
+        model
+    }
+
+    fn lowered(model: &ModelDescriptor) -> ForwardProgram {
+        build_forward(model).expect("the scheduled program lowers")
+    }
+
+    #[test]
+    fn attention_sink_descriptor_defaults_off_and_sinks_survive_a_descriptor_round_trip() {
+        let baseline = super::head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
+        assert!(
+            baseline
+                .layers
+                .iter()
+                .all(|layer| !layer.attention.attention_sinks),
+            "a descriptor written before sinks were data declares none"
+        );
+
+        // a whole descriptor (not just the attention block) whose toml has no
+        // attention_sinks key at all -- the shape every committed config
+        // fixture and every saved checkpoint profile has
+        let text = toml::to_string(&baseline).expect("the descriptor serializes to toml");
+        assert!(
+            text.contains("attention_sinks"),
+            "the key is written when on and when off"
+        );
+        let without_key = text
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("attention_sinks"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let absent: ModelDescriptor =
+            toml::from_str(&without_key).expect("a descriptor without the key parses");
+        assert!(
+            absent
+                .layers
+                .iter()
+                .all(|layer| !layer.attention.attention_sinks),
+            "an absent attention_sinks key is off, not an error"
+        );
+
+        let mut sinks = baseline;
+        for layer in &mut sinks.layers {
+            layer.attention.attention_sinks = true;
+        }
+        let restored: ModelDescriptor = toml::from_str(
+            &toml::to_string(&sinks).expect("the sink descriptor serializes to toml"),
+        )
+        .expect("the sink descriptor parses back");
+        assert_eq!(restored, sinks, "sinks survive the descriptor round trip");
+    }
+
+    #[test]
+    fn attention_sink_program_declares_one_leaf_per_sink_layer_and_none_when_off() {
+        // decode: the two-range engine the sliding-pattern family's production
+        // path calls, at the real checkpoint's query-head width
+        let off = lowered(&scheduled(
+            CacheStrategy::Cached,
+            CacheMask::Padded,
+            false,
+            FLINT_QUERY_HEADS,
+            FLINT_KV_HEADS,
+        ));
+        assert_sink_leaves(&off.program, &[]);
+        crate::shape::infer(&off.program, &[1, 0]).expect("the off program infers");
+
+        let decode = lowered(&scheduled(
+            CacheStrategy::Cached,
+            CacheMask::Padded,
+            true,
+            FLINT_QUERY_HEADS,
+            FLINT_KV_HEADS,
+        ));
+        assert_sink_leaves(
+            &decode.program,
+            &["blk.0.attn_sinks.weight", "blk.1.attn_sinks.weight"],
+        );
+        assert_eq!(
+            sink_shape(&decode.program, "blk.1.attn_sinks.weight"),
+            alloc::vec![Extent::Static(FLINT_QUERY_HEADS)],
+            "one learned scalar per query head, the width the flint capture carries"
+        );
+        let shapes =
+            crate::shape::infer(&decode.program, &[1, 0]).expect("the flag-on program infers");
+        crate::bind::bind_with_fusion(
+            &decode.program,
+            &shapes,
+            &[decode.logits],
+            true,
+            crate::numeric::NumericPolicy::default(),
+        )
+        .expect("the declared-but-unread sink leaf binds instead of rejecting the program");
+
+        // prefill: the cacheless engine
+        let prefill = lowered(&scheduled(
+            CacheStrategy::Cacheless,
+            CacheMask::Padded,
+            true,
+            FLINT_QUERY_HEADS,
+            FLINT_KV_HEADS,
+        ));
+        assert_sink_leaves(
+            &prefill.program,
+            &["blk.0.attn_sinks.weight", "blk.1.attn_sinks.weight"],
+        );
+        assert_eq!(
+            sink_shape(&prefill.program, "blk.0.attn_sinks.weight"),
+            alloc::vec![Extent::Static(FLINT_QUERY_HEADS)],
+            "the prefill engine declares the same per-head width"
+        );
+
+        // both hybrid engines read the same per-layer config: the dense one at
+        // the checkpoint's head ratio, the routed one at its own shared-expert
+        // schedule
+        let mut hybrid = super::hybrid_dense_descriptor::descriptor(&[
+            LayerKind::Attention,
+            LayerKind::Attention,
+        ]);
+        hybrid.query_heads = FLINT_QUERY_HEADS;
+        for layer in &mut hybrid.layers {
+            layer.attention.kv_heads = FLINT_KV_HEADS;
+            layer.attention.attention_sinks = true;
+        }
+        let hybrid_dense = build_forward(&hybrid)
+            .expect("the hybrid dense schedule lowers")
+            .program;
+        assert_sink_leaves(
+            &hybrid_dense,
+            &["blk.0.attn_sinks.weight", "blk.1.attn_sinks.weight"],
+        );
+        assert_eq!(
+            sink_shape(&hybrid_dense, "blk.0.attn_sinks.weight"),
+            alloc::vec![Extent::Static(FLINT_QUERY_HEADS)],
+            "the hybrid dense engine declares the same per-head width"
+        );
+
+        let mut routed = super::hybrid_routed_descriptor::descriptor(&[
+            LayerKind::Attention,
+            LayerKind::Attention,
+        ]);
+        for layer in &mut routed.layers {
+            layer.attention.attention_sinks = true;
+        }
+        let hybrid_routed = build_forward(&routed)
+            .expect("the routed hybrid schedule lowers")
+            .program;
+        assert_sink_leaves(
+            &hybrid_routed,
+            &["blk.0.attn_sinks.weight", "blk.1.attn_sinks.weight"],
+        );
+        assert_eq!(
+            sink_shape(&hybrid_routed, "blk.0.attn_sinks.weight"),
+            alloc::vec![Extent::Static(routed.query_heads)],
+            "the routed hybrid engine declares one scalar per query head too"
+        );
+
+        // the single-range cached builder has no `build_forward` route; call it
+        // directly so its declaration site is exercised flag-on too
+        let single = scheduled(
+            CacheStrategy::Cached,
+            CacheMask::Bounded,
+            true,
+            FLINT_QUERY_HEADS,
+            FLINT_KV_HEADS,
+        );
+        let (single_program, _single_logits, _single_roots, _single_moe) =
+            scheduled_single_range_cached_forward_program_with_experts(
+                single.vocab,
+                single.embedding,
+                single.feed_forward,
+                single.expert_feed_forward,
+                single.query_heads,
+                single.block_count,
+                single.expert_count,
+                single.expert_used_count,
+                single.leading_dense_block_count,
+                &single.layers,
+                single.embedding_scale,
+                single.logit_softcap,
+                single.last_row_only,
+            )
+            .expect("the single-range cached program lowers");
+        assert_sink_leaves(
+            &single_program,
+            &["blk.0.attn_sinks.weight", "blk.1.attn_sinks.weight"],
+        );
+        assert_eq!(
+            sink_shape(&single_program, "blk.0.attn_sinks.weight"),
+            alloc::vec![Extent::Static(FLINT_QUERY_HEADS)],
+            "the single-range cached engine declares the same per-head width"
+        );
+
+        // the bounded engine has no per-layer channel, so it refuses the
+        // schedule instead of lowering a program that binds the tensor and
+        // never adds it to the denominator
+        let bounded = scheduled(
+            CacheStrategy::Cached,
+            CacheMask::Bounded,
+            true,
+            FLINT_QUERY_HEADS,
+            FLINT_KV_HEADS,
+        );
+        assert!(
+            matches!(
+                build_forward(&bounded),
+                Err(TensorError::UnsupportedInBuilder { feature, .. })
+                    if feature.contains("attention sinks")
+            ),
+            "a sink-bearing schedule on the bounded engine is a named refusal"
+        );
+        // the refusal reads every layer, not just the first, so the error names
+        // sinks even when only a layer after the first sets the knob
+        let mut below_first = bounded.clone();
+        below_first.layers[0].attention.attention_sinks = false;
+        assert!(
+            matches!(
+                build_forward(&below_first),
+                Err(TensorError::UnsupportedInBuilder { feature, .. })
+                    if feature.contains("attention sinks")
+            ),
+            "a sink on a layer after the first still gets the sink-named refusal"
+        );
+    }
+
+    #[test]
+    fn control_rejects_planted_sink_node() {
+        let mut planted = lowered(&scheduled(
+            CacheStrategy::Cached,
+            CacheMask::Padded,
+            false,
+            FLINT_QUERY_HEADS,
+            FLINT_KV_HEADS,
+        ))
+        .program;
+
+        assert_sink_leaves(&planted, &[]);
+        super::attention_forward::declare_attention_sink_leaf(&mut planted, 0, FLINT_QUERY_HEADS);
+        assert_eq!(
+            sink_leaves(&planted),
+            alloc::vec!["blk.0.attn_sinks.weight".to_string()],
+            "the same comparison the program test runs sees a planted node, so its \
+             empty-set assertion is not vacuous"
+        );
+    }
 }

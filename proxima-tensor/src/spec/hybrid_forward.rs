@@ -261,6 +261,9 @@ pub(super) fn hybrid_dense_forward(
                 ],
                 &alloc::format!("blk.{layer}.attn_q.weight"),
             );
+            if descriptor.layers[layer as usize].attention.attention_sinks {
+                declare_attention_sink_leaf(&mut program, layer, query_heads);
+            }
             // A pure reshape (multiply by a broadcast-ones constant), the
             // same lossless-reshape donor trick `wk`/`wv` already use below
             // -- NEVER `per_head_channel_slice` on this packed leaf. That
@@ -1215,6 +1218,9 @@ pub(super) fn hybrid_routed_forward(
                     ],
                     &alloc::format!("blk.{layer}.attn_q.weight"),
                 );
+                if descriptor.layers[layer as usize].attention.attention_sinks {
+                    declare_attention_sink_leaf(&mut program, layer, descriptor.query_heads);
+                }
                 let qg_head_ones = op::append(
                     &mut program,
                     Op::Constant {
