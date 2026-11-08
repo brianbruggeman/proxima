@@ -28,6 +28,7 @@ members = [
     "proxima-mlir",
     "proxima-model-interop",
     "proxima-mqtt",
+    "proxima-numeric",
     "proxima-onnx",
     "proxima-patterns",
     "proxima-test",
@@ -118,6 +119,7 @@ proxima-test = { path = "proxima-test", version = "0.1.0" }
 proxima-net = { path = "proxima-net", version = "0.1.0", default-features = false }
 proxima-pgwire = { path = "proxima-pgwire", version = "0.1.0" }
 proxima-primitives = { path = "proxima-primitives", version = "0.1.0", default-features = false }
+proxima-numeric = { path = "proxima-numeric", version = "0.1.0", default-features = false }
 proxima-process = { path = "proxima-process", version = "0.1.0", default-features = false }
 proxima-protocols = { path = "proxima-protocols", version = "0.1.0", default-features = false }
 proxima-quic = { path = "proxima-quic", version = "0.1.0", default-features = false }
@@ -396,6 +398,7 @@ proxima-vm = { version = "0.1.0", path = "tools/proxima-vm", default-features = 
 proxima-onnx = { workspace = true, features = ["std"], optional = true }
 proxima-tensor = { workspace = true, features = ["std"], optional = true }
 proxima-tokenizer = { version = "0.1.0", path = "proxima-tokenizer", features = ["gguf"] }
+proxima-numeric = { version = "0.1.0", path = "proxima-numeric" }
 
 [dependencies.tracing-subscriber]
 workspace = true
