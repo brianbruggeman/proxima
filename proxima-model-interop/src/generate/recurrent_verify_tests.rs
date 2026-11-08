@@ -15,7 +15,7 @@ use crate::{ContextLength, SpeculativeConfig};
 
 use super::drafter::DrafterSet;
 use super::recurrent_checkpoint_fixture::{
-    HEAD_DIM, LAYERS, QUERY_HEADS, recurrent_checkpoint, recurrent_checkpoint_shaped,
+    HEAD_DIM, INNER, LAYERS, QUERY_HEADS, recurrent_checkpoint, recurrent_checkpoint_shaped,
     recurrent_checkpoint_with_eos,
 };
 use super::{
@@ -24,7 +24,16 @@ use super::{
 };
 
 const PROMPT: [u32; 3] = [49, 50, 51];
-const COMPARISON_ROUNDOFF: f32 = 64.0 * f32::EPSILON;
+/// The verify path evaluates several rows in one grouped kernel while the
+/// decode path evaluates one row at a time, so the same products are summed in
+/// different orders -- the difference is order of evaluation, not weight type.
+/// Each of the fixture's `LAYERS` recurrent layers contributes up to one
+/// rounding per accumulated product over its longest reduction (`INNER`, the
+/// `ssm_out` input width), and the layers compound, so the bound is
+/// `LAYERS * INNER` roundings. A tolerance tighter than that asserts
+/// bit-identity between kernels that are not bit-identical; the module's
+/// changed-prompt control still has to exceed this same bound.
+const COMPARISON_ROUNDOFF: f32 = (LAYERS * INNER) as f32 * f32::EPSILON;
 
 fn load_armed<'file>(
     parsed: &ParsedGguf,
