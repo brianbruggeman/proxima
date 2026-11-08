@@ -19486,6 +19486,56 @@ mod head_repeats {
     }
 }
 
+mod directory_less_parse {
+    use super::*;
+    use proxima_gguf::pipe::ParsedGguf;
+
+    fn profile() -> FamilyProfile {
+        FamilyProfile {
+            embedding_scale: None,
+            ffn: LayerFfnConfig::exclusive(),
+            parallel_dense_moe: None,
+            score_scale_inverse_sqrt_head_dim: true,
+            value_norm: false,
+            qk_norm: true,
+            rope_layout: RopeLayout::SplitHalf,
+            recurrence: None,
+            speculative_verify: false,
+            schedule_source: ScheduleSource::SlidingPattern,
+            kv_cache_shape: KvCacheShape::Uniform,
+            ffn_routing: FfnRouting::Dense,
+            command_buffer_chunks: 1,
+            ssm_v_head_reordered: false,
+        }
+    }
+
+    /// Three of this reader's facts are per-layer tensor presence -- the sink
+    /// leaf, the shared expert's gate, and a full layer's own value projection.
+    /// A parse that carries metadata but no directory would derive "absent" for
+    /// every layer and lower a program no checkpoint of that shape carries, so
+    /// the refusal has to come before any metadata read.
+    #[test]
+    fn a_parse_without_a_tensor_directory_is_refused_before_the_metadata() {
+        let parsed = ParsedGguf {
+            version: 3,
+            tensor_count: 0,
+            kv_count: 0,
+            metadata: Vec::new(),
+            tensors: Vec::new(),
+            data_offset: 0,
+            alignment: 32,
+        };
+
+        let error = sliding_pattern_descriptor_from_gguf(&parsed, false, &profile())
+            .expect_err("a directory-less parse cannot describe a sliding-pattern schedule");
+
+        assert!(
+            matches!(&error, TensorError::MissingGgufEntry { name } if name.contains("tensor directory")),
+            "{error:?}"
+        );
+    }
+}
+
 mod ffn_combination_shapes {
     use super::head_repeats::{descriptor, digest};
     use super::*;
