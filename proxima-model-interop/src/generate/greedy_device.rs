@@ -61,7 +61,8 @@ pub(super) fn device_token(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_tensor::{DType, NumericPolicy, cpu::QuantizedBlock, spec::input_leaf};
+    use proxima_tensor::{cpu::QuantizedBlock, spec::input_leaf};
+    use proxima_numeric::{DType, NumericPolicy};
     use proxima_tokenizer::{SamplingConfig, sample_next_token};
 
     const VOCAB: usize = 262_144;

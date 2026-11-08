@@ -9,7 +9,7 @@ use omega::{AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
 use proxima_gguf::types::GgmlType;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 use serde::{Deserialize, Serialize};
 
 use crate::RopeScaling;

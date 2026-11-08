@@ -2,12 +2,10 @@ use core::mem::size_of;
 
 use objc2_metal::MTLBuffer;
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
-    projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 pub const ROUNDS: usize = 8;
 pub const IN_DIM: usize = 2048;

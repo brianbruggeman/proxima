@@ -13,7 +13,7 @@ mod tests {
     use std::path::Path;
 
     use half::bf16;
-    use proxima_tensor::DType;
+    use proxima_numeric::DType;
 
     use crate::transform::{AffineExport, AffinePacked, AffineParams, export_affine};
 

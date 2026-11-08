@@ -16,11 +16,10 @@
 use half::bf16;
 use omega::backend::{execute_plan_named, plan_named_with_config};
 use omega::config::RuntimeConfig;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::spec::{elementwise, input_leaf, reduce};
-use proxima_tensor::{
-    DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock, ReduceInit, ScalarOp,
-};
+use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock, ReduceInit, ScalarOp};
+use proxima_numeric::{DType, NumericPolicy};
 
 const FIXTURE: &[u8] = include_bytes!("fixtures/ouro_1_4b_q_proj_row0_and_token504_embedding.bf16");
 const WEIGHT_BYTES: usize = 4096;

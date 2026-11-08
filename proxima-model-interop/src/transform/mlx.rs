@@ -212,7 +212,7 @@ fn render_index(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use proxima_safetensors::{parse_complete, parse_sharded_index};
-    use proxima_tensor::DType;
+    use proxima_numeric::DType;
 
     use super::*;
 

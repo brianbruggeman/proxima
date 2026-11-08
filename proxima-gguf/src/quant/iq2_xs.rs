@@ -19,22 +19,22 @@
 //! (`ggml_half d`, 32 packed `u16` grid+sign entries, 8 sub-block scale
 //! nibble-pairs). Cross-checked here at compile time against
 //! [`crate::types::GgmlType::Iq2Xs`]'s already-landed
-//! [`crate::types::GgmlType::block_layout`] rather than re-typed by hand.
+//! [`crate::types::GgmlType::wire_shape`] rather than re-typed by hand.
 //!
 //! Per-element decode (`dequantize_row_iq2_xs`, `ggml-quants.c:2229-2240`):
 //! the 256 elements split into 8 sub-blocks of 32 (`ib32`); each sub-block's
 //! `scales` byte holds two nibbles -- low nibble scales its first 16
 //! elements, high nibble its last 16 -- via `db = d * (0.5 + nibble) *
 //! 0.25`. Each sub-block's 4 `qs` entries (one per 8-element group) pack a
-//! 9-bit index into [`crate::quant::tables::iq2xs_grid::IQ2XS_GRID`] (low 9
+//! 9-bit index into [`proxima_numeric::tables::IQ2XS_GRID`] (low 9
 //! bits) and a 7-bit index into
-//! [`crate::quant::tables::iq2xs_grid::KSIGNS_IQ2XS`] (remaining bits): the
+//! [`proxima_numeric::tables::KSIGNS_IQ2XS`] (remaining bits): the
 //! grid entry's 8 packed bytes (read little-endian) are the group's 8
 //! magnitude values, each negated per its own bit in the sign lookup byte
-//! (tested against [`crate::quant::tables::iq2xs_grid::KMASK_IQ2XS`]).
+//! (tested against [`proxima_numeric::tables::KMASK_IQ2XS`]).
 
 use crate::quant::QuantError;
-use crate::quant::tables::iq2xs_grid::{IQ2XS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
+use proxima_numeric::tables::{IQ2XS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
 use crate::types::GgmlType;
 
 /// This codec's name as it appears in a rendered [`QuantError`] message.
@@ -44,12 +44,12 @@ const CODEC: &str = "iq2_xs";
 pub const QK_K: usize = 256;
 
 /// Bytes per super-block. Derived from the already-landed
-/// [`crate::types::GgmlType::block_layout`] (`types.rs`), not re-typed --
+/// [`crate::types::GgmlType::wire_shape`] (`types.rs`), not re-typed --
 /// that table was itself checked against `ggml-common.h`'s
 /// `static_assert(sizeof(block_iq2_xs) == sizeof(ggml_half) +
 /// QK_K/8*sizeof(uint16_t) + QK_K/32, ...)` at `ggml-common.h:351`.
 pub const BLOCK_BYTES: usize = {
-    let layout = GgmlType::Iq2Xs.block_layout();
+    let layout = GgmlType::Iq2Xs.wire_shape();
     assert!(
         layout.block_elements as usize == QK_K,
         "GgmlType::Iq2Xs block_elements drifted from QK_K"

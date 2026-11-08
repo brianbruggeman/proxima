@@ -24,12 +24,10 @@ use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::q4_k::{self, BLOCK_BYTES, QK_K, quantize};
 use proxima_gguf::types::GgmlType;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, evaluate, map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, evaluate, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn real_gguf_path() -> String {
     std::env::var("PROXIMA_BENCH_GGUF_PATH").unwrap_or_else(|_| {

@@ -97,9 +97,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_tensor::{
-    AxisIndex, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, ScalarOp, projection,
-};
+use proxima_tensor::{AxisIndex, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, ScalarOp, projection};
+use proxima_numeric::{DType};
 use thiserror::Error;
 
 use crate::writer::{push_i32, push_i64, push_len, push_packed_f32, push_packed_i64, push_str};
@@ -1675,7 +1674,7 @@ mod tests {
         let x = append(
             &mut program,
             Op::Input {
-                dtype: proxima_tensor::DType::FLOAT32,
+                dtype: proxima_numeric::DType::FLOAT32,
                 shape: vec![Extent::Static(2), Extent::Static(3), Extent::Static(4)],
                 name: Some("x".to_string()),
             },
@@ -1718,7 +1717,7 @@ mod tests {
         let reduced = append(
             &mut program,
             Op::Reduce(proxima_tensor::Reduce {
-                dtype: proxima_tensor::DType::FLOAT32,
+                dtype: proxima_numeric::DType::FLOAT32,
                 body: ScalarOp::Add,
                 init: ReduceInit::Zero,
                 operand: x,
@@ -1781,7 +1780,7 @@ mod tests {
         let x = append(
             &mut Vec::new(),
             Op::Input {
-                dtype: proxima_tensor::DType::FLOAT32,
+                dtype: proxima_numeric::DType::FLOAT32,
                 shape: vec![],
                 name: None,
             },
@@ -1908,7 +1907,7 @@ mod tests {
         let x = append(
             &mut program,
             Op::Input {
-                dtype: proxima_tensor::DType::FLOAT32,
+                dtype: proxima_numeric::DType::FLOAT32,
                 shape: vec![Extent::Static(4)],
                 name: Some("x".to_string()),
             },
@@ -1924,7 +1923,7 @@ mod tests {
         let scanned = append(
             &mut program,
             Op::Reduce(proxima_tensor::Reduce {
-                dtype: proxima_tensor::DType::FLOAT32,
+                dtype: proxima_numeric::DType::FLOAT32,
                 body: ScalarOp::Multiply,
                 init: ReduceInit::One,
                 operand: x,

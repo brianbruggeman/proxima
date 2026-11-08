@@ -22,7 +22,8 @@ use proxima_gguf::parse_complete;
 use proxima_model_interop::{KvLayout, bind_checkpoint_with_kv_layout, bind_symbols, symbols};
 use proxima_tensor::bind::{BoundOpKind, prune_dead};
 use proxima_tensor::spec::LayerCacheRoots;
-use proxima_tensor::{DType, NodeId, NumericPolicy, bind_with_fusion, infer};
+use proxima_tensor::{NodeId, bind_with_fusion, infer};
+use proxima_numeric::{DType, NumericPolicy};
 
 const GEMMA4_E2B_DEFAULT_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
      sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";

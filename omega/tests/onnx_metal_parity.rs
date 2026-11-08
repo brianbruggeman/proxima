@@ -24,7 +24,8 @@
 use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_onnx::lower::lower_graph;
 use proxima_onnx::pipe::parse_complete;
-use proxima_tensor::{NumericPolicy, QuantizedBlock};
+use proxima_tensor::{QuantizedBlock};
+use proxima_numeric::{NumericPolicy};
 
 fn f32_bytes(values: &[f32]) -> Vec<u8> {
     values

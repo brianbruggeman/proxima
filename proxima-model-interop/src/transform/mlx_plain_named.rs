@@ -12,7 +12,7 @@
 use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 use super::mlx_names::{Layout, MlxNames, dense_names};
 use super::mlx_plain::PlainTensor;

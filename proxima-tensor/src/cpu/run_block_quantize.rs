@@ -37,8 +37,8 @@ mod tests {
     use crate::test_support::Lcg;
     use proxima_gguf::quant::QuantError;
     use proxima_gguf::quant::block_layout::dequantize;
-    use proxima_primitives::Codec;
-    use proxima_primitives::block_layout::BlockLayout;
+    use proxima_numeric::codec::Codec;
+    use proxima_numeric::block_layout::BlockLayout;
 
     const ROWS: u32 = 3;
     const BLOCKS_PER_ROW: u32 = 4;
@@ -152,6 +152,7 @@ mod tests {
             Codec::Q5_0,
             Codec::Q8_1,
             Codec::Q8K,
+            Codec::Tq20,
             Codec::Q1_0,
             Codec::Q2_0,
             Codec::Pq2_0,

@@ -15,7 +15,8 @@ use proxima_tensor::spec::{
     input_leaf, scalar_constant,
 };
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{DType, Extent, NumericPolicy};
+use proxima_tensor::{Extent};
+use proxima_numeric::{DType, NumericPolicy};
 
 const EXPERT_COUNT: u32 = 256;
 const EXPERT_USED_COUNT: u32 = 8;

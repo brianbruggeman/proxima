@@ -16,7 +16,8 @@
 
 use proxima_tensor::spec::{RopePairing, fused_rope_pair, input_leaf};
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock, evaluate};
+use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock, evaluate};
+use proxima_numeric::{DType, NumericPolicy};
 
 const SEQUENCE: u32 = 3;
 const HEADS: u32 = 2;

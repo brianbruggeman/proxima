@@ -507,7 +507,7 @@ mod tests {
 
     use super::*;
     use crate::cpu;
-    use crate::dtype::DType;
+    use proxima_numeric::DType;
     use crate::map::{self, IndexMap};
     use crate::op::{ScalarOp, append};
 

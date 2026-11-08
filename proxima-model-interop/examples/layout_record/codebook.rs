@@ -1,6 +1,6 @@
 use proxima_gguf::quant::iq4_nl::KVALUES_IQ4NL;
-use proxima_gguf::quant::tables::iq2xs_grid::{IQ2XS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
-use proxima_gguf::quant::tables::iq3xxs_grid::IQ3XXS_GRID;
+use proxima_numeric::tables::{IQ2XS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
+use proxima_numeric::tables::IQ3XXS_GRID;
 
 use crate::error::RecordError;
 use crate::linear::{absolute_max, put_f16};

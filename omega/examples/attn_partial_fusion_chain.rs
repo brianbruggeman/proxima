@@ -62,7 +62,8 @@ mod imp {
     // `omega::Binding`/`omega::GridSpec` by name, only reads fields off the
     // `Kernel` value `omega_emit` returns, so no alias is needed for those two.
     use omega::{PackedOperands, emit as omega_emit};
-    use proxima_tensor::{BoundOp, BoundOpKind, DType, Layout, NodeId, NumericPolicy};
+    use proxima_tensor::{BoundOp, BoundOpKind, Layout, NodeId};
+    use proxima_numeric::{DType, NumericPolicy};
 
     // the OFF chain's dispatch order is read from `<nodes_dir>/manifest.txt`
     // (`attn_node_dump`'s emission order = the production plan's node order

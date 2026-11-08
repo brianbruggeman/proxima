@@ -12,7 +12,7 @@ use alloc::collections::BTreeMap;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 use crate::dtype::dtype_to_wire;
 use crate::error::SafetensorsError;

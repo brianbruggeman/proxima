@@ -56,7 +56,7 @@ use proxima_autograd::train::{State, train_step};
 #[cfg(not(feature = "train-step-profile"))]
 use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
 use proxima_tensor::cpu::{StaticArena, build_static_arena, evaluate_named_with_arena};
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 

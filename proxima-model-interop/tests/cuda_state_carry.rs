@@ -5,7 +5,8 @@ use std::string::String;
 
 use omega::CudaDriver;
 use proxima_tensor::map::{self, IndexMap};
-use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock, ScalarOp};
+use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock, ScalarOp};
+use proxima_numeric::{DType, NumericPolicy};
 
 const STATE: NodeId = NodeId(0);
 const NEXT_STATE: NodeId = NodeId(2);

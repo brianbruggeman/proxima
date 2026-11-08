@@ -24,12 +24,10 @@ use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::q3_k;
 use proxima_gguf::types::GgmlType;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, evaluate, map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, evaluate, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// Real `Q3_K_M` GGUF checkpoint path, required via `PROXIMA_Q3K_GGUF` -- the
 /// file has no in-repo home and no default location.

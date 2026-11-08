@@ -128,11 +128,11 @@ fn lcg_bytes(len: usize, seed: u64) -> Vec<u8> {
 }
 
 fn block_elements(ggml_type: GgmlType) -> u64 {
-    ggml_type.block_layout().block_elements
+    ggml_type.wire_shape().block_elements
 }
 
 fn tensor_bytes(elements: u64, ggml_type: GgmlType) -> u64 {
-    let layout = ggml_type.block_layout();
+    let layout = ggml_type.wire_shape();
     (elements / layout.block_elements) * layout.block_bytes
 }
 

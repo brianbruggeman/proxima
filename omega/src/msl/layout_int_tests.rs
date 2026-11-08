@@ -2,7 +2,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_gguf::quant::float_layout::{decode, encode};
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding};
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding};
 
 use super::layout_render::layout_load_msl;
 use super::scaled_float_render::{

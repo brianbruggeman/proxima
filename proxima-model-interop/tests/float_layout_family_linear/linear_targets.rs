@@ -1,8 +1,8 @@
 use proxima_gguf::GgmlType;
-use proxima_primitives::block_layout::BlockLayout;
+use proxima_numeric::block_layout::BlockLayout;
 
-use proxima_primitives::block_layout::Coded;
-use proxima_primitives::float_layout::SignEncoding;
+use proxima_numeric::block_layout::Coded;
+use proxima_numeric::float_layout::SignEncoding;
 
 use crate::reencode::{Target, put_field, write_coded};
 

@@ -25,7 +25,8 @@ use proxima_tensor::spec::{
     causal_mask, count_constant, elementwise, embedding_lookup, input_leaf, reduce, rmsnorm, scalar_constant,
     sigmoid, symbolic_leaf,
 };
-use proxima_tensor::{DType, Extent, ReduceInit, ScalarOp};
+use proxima_tensor::{Extent, ReduceInit, ScalarOp};
+use proxima_numeric::{DType};
 
 #[test]
 fn external_crate_composes_a_one_layer_forward_program() {

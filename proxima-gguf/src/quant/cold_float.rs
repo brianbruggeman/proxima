@@ -1,6 +1,6 @@
 //! Caller-buffer transforms for cold, packed low-precision tensor payloads.
 
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
 
 use crate::quant::{QuantError, float_layout};
 
@@ -138,7 +138,7 @@ fn read_bits(input: &[u8], offset: usize, width: usize) -> u32 {
 mod tests {
     use super::{dequantize, quantize_bf16, quantize_f32};
     use crate::quant::QuantError;
-    use proxima_primitives::float_layout::FloatLayout;
+    use proxima_numeric::float_layout::FloatLayout;
 
     #[test]
     fn bf16_tensor_bytes_convert_to_each_packed_cold_float_format() {

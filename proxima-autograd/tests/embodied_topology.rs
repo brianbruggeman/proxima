@@ -55,7 +55,7 @@ extern crate alloc;
 
 use proxima_autograd::activation;
 use proxima_tensor::cpu::evaluate_named;
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, NodeId, Op, ScalarOp};
 use serde::{Deserialize, Serialize};

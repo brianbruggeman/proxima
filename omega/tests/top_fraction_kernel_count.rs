@@ -4,9 +4,8 @@
 use omega::sized::SELECTION_TOP_FRACTION_MIN_ROWS;
 use omega::{Binding, PackedOperands, emit};
 use proxima_tensor::spec::{input_leaf, top_fraction_mask};
-use proxima_tensor::{
-    BoundOp, DType, Extent, NumericPolicy, bind_with_fusion, bind_with_top_fraction, infer,
-};
+use proxima_tensor::{BoundOp, Extent, bind_with_fusion, bind_with_top_fraction, infer};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn bound_lists(rows: u64) -> (Vec<BoundOp>, Vec<BoundOp>) {
     let mut program = Vec::new();

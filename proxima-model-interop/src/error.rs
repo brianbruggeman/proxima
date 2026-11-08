@@ -5,8 +5,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_gguf::GgmlType;
-use proxima_primitives::Codec;
-use proxima_tensor::DType;
+use proxima_numeric::DType;
+#[cfg(feature = "std")]
+use proxima_numeric::codec::Codec;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -141,9 +142,11 @@ pub enum InteropError {
     #[error("prefault: {0}")]
     PrefaultPoolUnavailable(String),
 
-    /// `codec` has no decoder or GGML wire-layout mapping in this crate.
-    #[error("codec {codec:?} is unsupported by this interop path")]
-    UnsupportedCodec { codec: Codec },
+    /// `codec` has no decoder or GGML wire-layout mapping in this crate. Carries the codec's
+    /// name, not the codec: `NumericFormat` is a 520-byte constant description, and putting it in
+    /// an error variant widened every `Result` in this crate.
+    #[error("codec {codec} is unsupported by this interop path")]
+    UnsupportedCodec { codec: &'static str },
 
     /// `crate::bind::gguf_tensor_as_packed_block` (`std`-gated) found `tensor` stored as
     /// `F32` but its absolute file offset is not a multiple of
@@ -1017,9 +1020,10 @@ pub enum InteropError {
     AffineDTypeUnsupported { dtype: DType },
 
     /// A conversion policy named a target codec that has no block encoder in
-    /// `convert_codec` (the `std` feature).
-    #[error("conversion to codec {codec:?} is not supported")]
-    ConversionTargetUnsupported { codec: Codec },
+    /// `convert_codec` (the `std` feature). Carries the codec's name for the same reason
+    /// [`Self::UnsupportedCodec`] does.
+    #[error("conversion to codec {codec} is not supported")]
+    ConversionTargetUnsupported { codec: &'static str },
 
     /// A tensor selected for block conversion has a first dimension that is not a whole
     /// number of blocks, so its rows cannot be re-encoded without padding.
@@ -1031,4 +1035,12 @@ pub enum InteropError {
         row_elements: u64,
         block_elements: usize,
     },
+}
+
+/// The name an [`interop`](crate) error carries for a codec it cannot serve. Every caller is
+/// `std`-gated, so the helper is too.
+#[cfg(feature = "std")]
+#[must_use]
+pub(crate) fn codec_name(codec: Codec) -> &'static str {
+    codec.name().unwrap_or("unnamed")
 }

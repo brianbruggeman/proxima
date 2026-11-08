@@ -140,7 +140,7 @@ fn prismml_wire_ids_and_block_sizes_match_ggml_h_and_ggml_common_h() {
         (GgmlType::Pq2_0, 142, 128, 34),
     ];
     for (kind, wire, elements, bytes) in spec {
-        let layout = kind.block_layout();
+        let layout = kind.wire_shape();
         assert_eq!(kind.to_wire(), wire, "{kind:?} wire id");
         assert_eq!(GgmlType::from_wire(wire), Some(kind), "{kind:?} decodes");
         assert_eq!(layout.block_elements, elements, "{kind:?} block elements");

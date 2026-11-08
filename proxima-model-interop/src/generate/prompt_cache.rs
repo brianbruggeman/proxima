@@ -1763,7 +1763,7 @@ mod tests {
 
     use proptest::collection::vec;
     use proptest::test_runner::{Config, TestRunner};
-    use proxima_tensor::NumericPolicy;
+    use proxima_numeric::NumericPolicy;
 
     use super::probes::*;
     use super::*;

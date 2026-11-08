@@ -21,7 +21,7 @@
               (specs/algebra-monomorphization.md)"
 )]
 
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 
 /// the byte layout a packed-row matvec body is specialized for. one variant per
 /// layout the emitter can address -- distinct codecs share a variant only when

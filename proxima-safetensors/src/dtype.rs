@@ -1,10 +1,10 @@
-//! Safetensors `dtype` string -> [`proxima_tensor::DType`] mapping.
+//! Safetensors `dtype` string -> [`proxima_numeric::DType`] mapping.
 //!
 //! The full dtype vocabulary (`BOOL, F4, F6_E2M3, F6_E3M2, U8, I8, F8_E5M2,
 //! F8_E4M3, F8_E8M0, F8_E4M3FNUZ, F8_E5M2FNUZ, I16, U16, F16, BF16, I32,
 //! U32, F32, C64, F64, I64, U64`) was checked against the reference
 //! `huggingface/safetensors` crate's `Dtype` enum
-//! (`safetensors/src/tensor.rs` on `main`). `proxima_tensor::DType` was
+//! (`safetensors/src/tensor.rs` on `main`). `proxima_numeric::DType` was
 //! widened on `a0f5f97` to add `Int16, UInt16, Int64, UInt64, Int128,
 //! UInt128, Float64`, so `I16, U16, I64, U64, F64` now have counterparts
 //! and are mapped below. `C64` (complex) and the sub-byte / 8-bit float
@@ -16,15 +16,15 @@
 use alloc::vec;
 use alloc::vec::Vec;
 
-use proxima_primitives::float_layout::FloatLayout;
-use proxima_primitives::float_layout_codec::decode;
-use proxima_tensor::DType;
+use proxima_numeric::float_layout::FloatLayout;
+use proxima_numeric::float_layout_codec::decode;
+use proxima_numeric::DType;
 
 use crate::error::SafetensorsError;
 
 /// Maps a safetensors `dtype` string onto the `DType` this crate compiles
 /// against. Returns [`SafetensorsError::UnsupportedDtype`] for any
-/// safetensors dtype `proxima_tensor::DType` cannot represent yet.
+/// safetensors dtype `proxima_numeric::DType` cannot represent yet.
 pub fn map_dtype(tensor: &str, dtype: &str) -> Result<DType, SafetensorsError> {
     match dtype {
         "BOOL" => Ok(DType::Bool),
@@ -183,7 +183,7 @@ mod tests {
     }
 
     /// The dtype widening in `a0f5f97` added `Int16, UInt16, Int64,
-    /// UInt64, Float64` to `proxima_tensor::DType`, so these five wire
+    /// UInt64, Float64` to `proxima_numeric::DType`, so these five wire
     /// strings — previously `UnsupportedDtype` — now map to real variants.
     #[proxima::test]
     #[case::int16("I16", DType::INT16)]

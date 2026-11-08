@@ -55,7 +55,8 @@ use proxima_gguf::parse_complete;
 use proxima_model_interop::{bind_checkpoint, bind_symbols};
 use proxima_tensor::bind::{BoundOp, BoundOpKind};
 use proxima_tensor::spec::LayerCacheRoots;
-use proxima_tensor::{NodeId, NumericPolicy, Op, bind_with_fusion, infer, prune_dead};
+use proxima_tensor::{NodeId, Op, bind_with_fusion, infer, prune_dead};
+use proxima_numeric::{NumericPolicy};
 
 const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 

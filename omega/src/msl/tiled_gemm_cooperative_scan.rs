@@ -1,6 +1,6 @@
 use super::*;
 #[cfg(feature = "metal-tiled-gemm")]
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 /// `simdgroup_matrix`-tiled Q4_K x F32 GEMM (`docs/discipline.md` ROW 109,
 /// superseding ROW 107's single-simdgroup design) -- ports

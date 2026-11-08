@@ -1,16 +1,16 @@
 //! `Bf16` (`bfloat16`): one element per 2-byte "block"
 //! ([`crate::types::GgmlType::Bf16`]'s own
-//! [`crate::types::GgmlType::block_layout`] already reports
+//! [`crate::types::GgmlType::wire_shape`] already reports
 //! `block_elements: 1, block_bytes: 2`). Same non-block, no-scale shape as
 //! [`crate::quant::f16`].
 //!
 //! Teaching pointer: this module is the `BF16` instance of the one float
 //! codec, [`crate::quant::float_layout`], over
-//! [`proxima_primitives::float_layout::FloatLayout::BF16`]; it holds no float
+//! [`proxima_numeric::float_layout::FloatLayout::BF16`]; it holds no float
 //! arithmetic of its own. Widening `bf16 -> f32` is exact; the narrowing
 //! direction, [`quantize`], rounds to nearest with ties to the even code.
 
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 use crate::quant::QuantError;
 use crate::quant::float_layout;

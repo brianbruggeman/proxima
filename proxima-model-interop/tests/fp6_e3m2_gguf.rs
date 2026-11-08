@@ -15,9 +15,9 @@ use proxima_gguf::{GgmlType, GgufModel, TensorPayload, parse_complete, write_com
 use proxima_model_interop::InteropError;
 use proxima_model_interop::dtype_to_ggml;
 use proxima_model_interop::safetensors_to_gguf;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_safetensors::{SafetensorsModel, TensorPayload as SafetensorsPayload};
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 const GRANITE_DEFAULT: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
      sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80";

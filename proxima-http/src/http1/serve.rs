@@ -886,9 +886,11 @@ where
                 read_buf,
                 &mut body_tx,
                 &cancel,
-                "streaming_some_runtime",
-                trace_id.as_deref(),
-                admission_outcome,
+                PumpIdentity {
+                    route: "streaming_some_runtime",
+                    trace_id: trace_id.as_deref(),
+                    admission: admission_outcome,
+                },
             )
             .await;
             publish_pending_trailers(connection, &request_trailers_slot);
@@ -1140,10 +1142,12 @@ where
                     reader,
                     read_buf,
                     &mut body_tx,
-                        &cancel,
-                        "streaming_no_runtime",
-                        trace_id.as_deref(),
-                        admission_outcome,
+                    &cancel,
+                    PumpIdentity {
+                        route: "streaming_no_runtime",
+                        trace_id: trace_id.as_deref(),
+                        admission: admission_outcome,
+                    },
                 ));
                 // `dispatch_pending` (a plain bool, checked OUTSIDE the
                 // poll_fn closure) gates whether the closure below even
@@ -1425,6 +1429,15 @@ enum BodyReadOutcome {
     Cancelled,
 }
 
+/// What a pumped body belongs to: the route it was admitted on, the trace that admitted it, and
+/// the admission decision the pump reports against on every chunk.
+#[derive(Clone, Copy)]
+struct PumpIdentity<'a> {
+    route: &'static str,
+    trace_id: Option<&'a [u8]>,
+    admission: RequestAdmit,
+}
+
 /// Drive the connection's body decoder, copying each emitted chunk
 /// into the bounded `body_tx`. Returns on `BodyEnd` (success) or on
 /// any of the `PumpError` conditions. The caller is responsible for
@@ -1435,13 +1448,14 @@ async fn pump_body_stream<R>(
     read_buf: &mut [u8],
     body_tx: &mut mpsc::Sender<Result<Bytes, ProximaError>>,
     cancel: &proxima_core::signal::Signal,
-    route: &'static str,
-    trace_id: Option<&[u8]>,
-    admission_outcome: RequestAdmit,
+    identity: PumpIdentity<'_>,
 ) -> Result<(), PumpError>
 where
     R: AsyncRead + Unpin,
 {
+    let route = identity.route;
+    let trace_id = identity.trace_id;
+    let admission_outcome = identity.admission;
     loop {
         let outcome = match connection.poll() {
             Ok(value) => value,

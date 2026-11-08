@@ -13,10 +13,8 @@
 
 use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, dequantize, quantize};
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
-    ReduceInit, ScalarOp, affine, append, projection,
-};
+use proxima_tensor::{AxisTerm, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, affine, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 const RELATIVE_TOLERANCE: f32 = 1e-5;
 

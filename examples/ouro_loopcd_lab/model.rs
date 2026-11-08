@@ -6,7 +6,7 @@ use proxima_model_interop::{
     LoadedModel, PromptCacheConfig, RecurrentConfig, ServingConfig, SpeculativeConfig,
     ouro_descriptor_from_hf_config,
 };
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 use proxima_tensor::op::NodeId;
 use proxima_tensor::spec::LoopCdMode;
 use serde_json::{Value, json};

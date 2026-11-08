@@ -14,7 +14,7 @@
 use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
 #[cfg(feature = "instrument")]
 use omega::metal::metal_stage_totals;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 
 mod support;
 use support::{as_named_blocks, real_forward_fixture};

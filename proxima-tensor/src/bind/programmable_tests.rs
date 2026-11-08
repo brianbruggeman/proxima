@@ -214,7 +214,7 @@ fn programmable_binding_unfused_projection() {
         (
             "weight",
             QuantizedBlock::Packed {
-                codec: proxima_primitives::Codec::BFloat16,
+                codec: proxima_numeric::codec::Codec::BFloat16,
                 bytes: &packed_weights,
             },
         ),

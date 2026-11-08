@@ -99,10 +99,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
-    NumericRewrite, ScalarOp, admit,
-};
+use proxima_tensor::{BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, ScalarOp};
+use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 use crate::error::EmitError;
 use crate::grid::checked_product;
@@ -401,18 +399,9 @@ fn cooperative_identity_token(node: NodeId, op: ScalarOp) -> Result<&'static str
     }
 }
 
-#[cfg(not(feature = "float-layout-dtype"))]
-fn type_token(node: NodeId, dtype: DType, caps: WgslCaps) -> Result<&'static str, EmitError> {
-    match dtype {
-        DType::FLOAT32 | DType::BFLOAT16 => Ok("f32"),
-        DType::FLOAT16 if caps.shader_f16 => Ok("f16"),
-        other => Err(EmitError::UnsupportedDType { node, dtype: other }),
-    }
-}
 
 /// `f16` where the layout's fields equal binary16's and the adapter offers `shader-f16`, `f32` for
 /// every other layout (buffers speak `array<f32>`; the layout codec narrows at the host boundary).
-#[cfg(feature = "float-layout-dtype")]
 fn type_token(node: NodeId, dtype: DType, caps: WgslCaps) -> Result<&'static str, EmitError> {
     match dtype {
         DType::Layout(layout) if layout.width() <= 32 => {
@@ -600,7 +589,7 @@ fn entry_name(resolved: &BoundOp, packed_operands: &PackedOperands) -> String {
         // Wgpu has no `BoundOpKind::CachedAttention` renderer either (same
         // `fuse_cached_attention: false` call in `wgpu_driver.rs`), so a
         // policy value never actually varies this identity string.
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
 }
 
@@ -2126,7 +2115,8 @@ mod tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
-    use proxima_tensor::{DType, Extent, IndexMap, Op, ScalarOp, append, bind, infer, map};
+    use proxima_tensor::{Extent, IndexMap, Op, ScalarOp, append, bind, infer, map};
+    use proxima_numeric::{DType};
 
     use super::*;
 
@@ -2154,7 +2144,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         bound.into_iter().next().expect("one bound op")
@@ -2214,7 +2204,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
@@ -2249,7 +2239,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
@@ -2283,7 +2273,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
@@ -2330,7 +2320,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
@@ -2392,7 +2382,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         bound
@@ -2501,7 +2491,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");
@@ -2532,7 +2522,7 @@ mod tests {
             &program,
             &shapes,
             &[NodeId((program.len() - 1) as u32)],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("bind succeeds");
         let bound = bound.into_iter().next().expect("one bound op");

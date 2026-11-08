@@ -21,7 +21,7 @@
 //! (`kvalues_iq4nl`, `ggml-common.h:1077-1079`) trained to fit weight
 //! distributions better than a uniform 4-bit ladder. Cross-checked here at
 //! compile time against [`crate::types::GgmlType::Iq4Nl`]'s already-landed
-//! [`crate::types::GgmlType::block_layout`] rather than re-typed by hand.
+//! [`crate::types::GgmlType::wire_shape`] rather than re-typed by hand.
 
 use crate::quant::QuantError;
 use crate::types::GgmlType;
@@ -33,12 +33,12 @@ const CODEC: &str = "iq4_nl";
 pub const QK4_NL: usize = 32;
 
 /// Bytes per block. Derived from the already-landed
-/// [`crate::types::GgmlType::block_layout`] (`types.rs`), not re-typed --
+/// [`crate::types::GgmlType::wire_shape`] (`types.rs`), not re-typed --
 /// that table was itself checked against `ggml-common.h`'s
 /// `static_assert(sizeof(block_iq4_nl) == sizeof(ggml_half) + QK4_NL/2,
 /// ...)` at `ggml-common.h:410`.
 pub const BLOCK_BYTES: usize = {
-    let layout = GgmlType::Iq4Nl.block_layout();
+    let layout = GgmlType::Iq4Nl.wire_shape();
     assert!(
         layout.block_elements as usize == QK4_NL,
         "GgmlType::Iq4Nl block_elements drifted from QK4_NL"

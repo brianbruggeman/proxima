@@ -28,7 +28,7 @@ redesigned before adding a GPU training path.
 ## architecture
 
 Add BF8 E5M2 as Codec tag 29 and BF4 E2M1 as Codec tag 30 to the existing
-source-neutral proxima_primitives::Codec identity. Codec tags serialize this
+source-neutral proxima_numeric::codec::Codec identity. Codec tags serialize this
 project's sidecar identity; they are not GGML type numbers. Keep the byte
 contracts in proxima-gguf as scalar decode oracles. Do not add either encoding
 to proxima_gguf::GgmlType or its wire map. Keep the GGUF adapter's
@@ -40,7 +40,7 @@ Represent a packed table entry as the existing ExpertEntry whose block is
 QuantizedBlock::Packed { codec, bytes }, with its existing out_dim/in_dim
 shape. For BF8, block_layout is (1 byte, 1 element); for BF4 it is (1 byte,
 2 elements), with the first value in the low nibble. Compute these scalar
-layouts directly from Codec rather than calling GgmlType::block_layout.
+layouts directly from Codec rather than calling GgmlType::wire_shape.
 ExpertSource::entry resolves the route to the caller-owned byte span.
 QuantizedBlock::matmul_f32_kernel dispatches the matching CPU kernel, and
 run_reduce_quantized passes that selected slice directly to it. Under the

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 
 use crate::backend::{BackendError, Engine, GpuDriver};
 

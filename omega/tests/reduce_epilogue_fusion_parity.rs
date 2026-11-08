@@ -21,10 +21,8 @@
 
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Extent, IndexMap, Keep, NumericPolicy, Op, Reduce, ReduceInit,
-    ScalarOp, append, bind, infer, projection,
-};
+use proxima_tensor::{BoundOp, BoundOpKind, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 mod support;
 use support::{as_named_blocks, real_single_range_forward_fixture_with_padding};

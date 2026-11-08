@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use clap::{Args, Subcommand, ValueEnum};
 use proxima_model_interop::{AffineParams, export_mlx_directory};
 use proxima_telemetry::error;
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 #[derive(Args, Debug)]
 pub struct ModelArgs {

@@ -79,7 +79,7 @@ fn main() {
             .iter()
             .find(|tensor| tensor.name == name)
             .expect("axis-confirmation tensor present");
-        let layout = tensor.ggml_type.block_layout();
+        let layout = tensor.ggml_type.wire_shape();
         println!(
             "{name}: dims={:?} ggml_type={:?} block_elements={} block_bytes={}",
             tensor.dims, tensor.ggml_type, layout.block_elements, layout.block_bytes
@@ -110,7 +110,7 @@ fn dump_fused_gate_up_layout(parsed: &proxima_gguf::ParsedGguf, file_bytes: &[u8
     let ne2 = dims[2] as usize; // 128 experts
     let expert_feed_forward = ne1 / 2;
 
-    let layout = tensor.ggml_type.block_layout();
+    let layout = tensor.ggml_type.wire_shape();
     let block_elements = layout.block_elements as usize;
     let block_bytes = layout.block_bytes as usize;
     let bytes_per_row = (ne0 / block_elements) * block_bytes;

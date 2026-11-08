@@ -12,7 +12,8 @@ use proxima_tensor::spec::{
     count_constant, scalar_constant,
 };
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, QuantizedBlock, infer};
+use proxima_tensor::{Extent, NodeId, QuantizedBlock, infer};
+use proxima_numeric::{DType, NumericPolicy};
 
 const KV_HEADS: u32 = 16;
 const GROUP: u32 = 3;

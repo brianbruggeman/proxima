@@ -39,6 +39,9 @@ use super::{
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 #[allow(unused_imports)]
 use super::PlanNumerics;
+#[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
+#[allow(unused_imports)]
+use super::PlacedIo;
 
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -84,7 +87,9 @@ pub(super) mod tests {
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_tensor::cpu::{ExpertEntry, ExpertSource, QuantizedBlock};
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    use proxima_tensor::{DType, Extent, Op};
+    use proxima_tensor::{Extent, Op};
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    use proxima_numeric::{DType};
     use proxima_tokenizer::Vocab;
 
     #[test]
@@ -368,7 +373,7 @@ pub(super) mod tests {
         let mut hits = 0;
         let mut misses = 0;
         let roots = vec![NodeId(41)];
-        let off = proxima_tensor::NumericPolicy::llama_relaxed();
+        let off = proxima_numeric::NumericPolicy::llama_relaxed();
         let on = off.with_epilogue_sources(true);
 
         let unwidened = super::BackendRuntime::resolve_cached_plan(
@@ -2354,9 +2359,8 @@ pub(super) mod placed_plan_mode_tests {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use proxima_tensor::{
-        DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, projection};
+    use proxima_numeric::{DType};
 
     use super::BackendRuntime;
 
@@ -2399,11 +2403,10 @@ pub(super) mod placed_plan_mode_tests {
             &named,
             &[identity_node],
             &resident_names,
-            &[],
-            &[],
+            super::PlacedIo { input: &[], output: &[] },
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
-                numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),
+                numeric_policy: proxima_numeric::NumericPolicy::bit_exact(),
                 dispatch_type: omega::metal::DispatchType::Serial,
                 #[cfg(feature = "metal-attn-variants")]
                 attention_variant: None,
@@ -2429,14 +2432,14 @@ pub(super) mod placed_plan_mode_tests {
         );
         assert_eq!(
             plan.numeric_policy(),
-            proxima_tensor::NumericPolicy::bit_exact(),
+            proxima_numeric::NumericPolicy::bit_exact(),
             "a freshly built placed plan must carry the caller's OWN numeric policy -- the \
              policy `plan_named_placed` was constructed under, never a later math-mode setter"
         );
     }
 
     /// Names the invariant `build_placed_plan`'s construction-time wiring
-    /// preserves: a caller declaring [`proxima_tensor::NumericPolicy::llama_relaxed`]
+    /// preserves: a caller declaring [`proxima_numeric::NumericPolicy::llama_relaxed`]
     /// (this crate's own default, `ServingConfig::numeric_policy`'s doc)
     /// alongside `MathMode::Safe` (a narrower compiled mode than the bound
     /// policy grants) must still see `llama_relaxed()` on the resulting
@@ -2457,11 +2460,10 @@ pub(super) mod placed_plan_mode_tests {
             &named,
             &[identity_node],
             &resident_names,
-            &[],
-            &[],
+            super::PlacedIo { input: &[], output: &[] },
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
-                numeric_policy: proxima_tensor::NumericPolicy::llama_relaxed(),
+                numeric_policy: proxima_numeric::NumericPolicy::llama_relaxed(),
                 dispatch_type: omega::metal::DispatchType::Serial,
                 #[cfg(feature = "metal-attn-variants")]
                 attention_variant: None,
@@ -2475,7 +2477,7 @@ pub(super) mod placed_plan_mode_tests {
 
         assert_eq!(
             plan.numeric_policy(),
-            proxima_tensor::NumericPolicy::llama_relaxed(),
+            proxima_numeric::NumericPolicy::llama_relaxed(),
             "the plan's bound numeric_policy must be exactly what it was constructed under, \
              regardless of the narrower compiled math_mode -- if this reads bit_exact(), the \
              construction-time wiring in build_placed_plan regressed"
@@ -2498,11 +2500,10 @@ pub(super) mod placed_plan_mode_tests {
             &named,
             &[identity_node],
             &resident_names,
-            &[],
-            &[],
+            super::PlacedIo { input: &[], output: &[] },
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Fast,
-                numeric_policy: proxima_tensor::NumericPolicy::bit_exact(),
+                numeric_policy: proxima_numeric::NumericPolicy::bit_exact(),
                 dispatch_type: omega::metal::DispatchType::Serial,
                 #[cfg(feature = "metal-attn-variants")]
                 attention_variant: None,
@@ -4356,7 +4357,8 @@ pub(super) mod memory_fit_gate_tests {
         use proxima_tensor::shape::{
             symbol_dependency_iteration_mask, symbol_dependency_output_masks,
         };
-        use proxima_tensor::{NumericPolicy, bind_with_fusion, infer};
+        use proxima_tensor::{bind_with_fusion, infer};
+        use proxima_numeric::{NumericPolicy};
 
         use super::super::LoadedModel;
         use crate::lowering::symbols;

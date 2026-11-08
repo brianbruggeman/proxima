@@ -9,10 +9,11 @@
 //! settle whether a foreign caller's quantized embedding table lowers.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::spec::{embedding_lookup, input_leaf};
-use proxima_tensor::{DType, Extent};
+use proxima_tensor::{Extent};
+use proxima_numeric::{DType};
 
 fn filled(seed: u64, len: usize) -> Vec<f32> {
     let mut state = seed;

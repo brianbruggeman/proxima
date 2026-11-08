@@ -16,7 +16,7 @@
 //! 18 bytes per 32 elements (`ggml_half d`, 16 packed nibble bytes). Cross-
 //! checked here at compile time against
 //! [`crate::types::GgmlType::Q4_0`]'s already-landed
-//! [`crate::types::GgmlType::block_layout`] rather than re-typed by hand --
+//! [`crate::types::GgmlType::wire_shape`] rather than re-typed by hand --
 //! this is the simplest legacy quant format this crate carries: no
 //! sub-block scale/min hierarchy the way `Q4_K`/`Q5_K`/`Q6_K` have, and no
 //! second `min` field the way `Q4_1` (`ggml-common.h:174-182`) has.
@@ -31,12 +31,12 @@ const CODEC: &str = "q4_0";
 pub const QK4_0: usize = 32;
 
 /// Bytes per block. Derived from the already-landed
-/// [`crate::types::GgmlType::block_layout`] (`types.rs`), not re-typed --
+/// [`crate::types::GgmlType::wire_shape`] (`types.rs`), not re-typed --
 /// that table was itself checked against `ggml-common.h`'s
 /// `static_assert(sizeof(block_q4_0) == sizeof(ggml_half) + QK4_0 / 2, ...)`
 /// at `ggml-common.h:172`.
 pub const BLOCK_BYTES: usize = {
-    let layout = GgmlType::Q4_0.block_layout();
+    let layout = GgmlType::Q4_0.wire_shape();
     assert!(
         layout.block_elements as usize == QK4_0,
         "GgmlType::Q4_0 block_elements drifted from QK4_0"

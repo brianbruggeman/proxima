@@ -122,8 +122,9 @@
 //! tuned kernel:
 //!
 //! ```
+//! use proxima_numeric::DType;
 //! use proxima_tensor::{
-//!     append, map, DType, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp,
+//!     append, map, Extent, IndexMap, Keep, Op, Reduce, ReduceInit, ScalarOp,
 //! };
 //!
 //! let mut program = Vec::new();
@@ -204,9 +205,6 @@ pub mod config;
 pub mod convert;
 #[cfg(feature = "std")]
 pub mod cpu;
-pub mod dtype;
-#[cfg(feature = "config")]
-mod dtype_spelling;
 #[cfg(feature = "std")]
 pub mod gdn;
 #[cfg(feature = "std")]
@@ -228,11 +226,6 @@ pub mod lowered;
 pub mod map;
 #[cfg(feature = "std")]
 pub mod process_usage;
-// pure over `NumericPolicy`/`NumericRewrite`/`TensorError` -- no alloc, no
-// std -- so it lives ungated at the same `alloc`+ tier `error` needs for the
-// `TensorError` variant it constructs.
-#[cfg(any(feature = "std", feature = "alloc"))]
-pub mod numeric;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub mod op;
 /// representation boundary at which completed recurrent states are contrasted.
@@ -300,7 +293,6 @@ pub use cpu::{
     evaluate_parallel, evaluate_typed, evaluate_with_scratch, resolve_named_blocks,
     resolve_named_blocks_with_experts,
 };
-pub use dtype::DType;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use error::TensorError;
 #[cfg(any(feature = "std", feature = "alloc"))]
@@ -310,7 +302,6 @@ pub use lowered::Lowered;
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use map::{AxisIndex, AxisTerm, IndexMap, IndexPattern, affine, projection};
 
-pub use numeric::{NumericPolicy, NumericRewrite, admit};
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
 #[cfg(any(feature = "std", feature = "alloc"))]

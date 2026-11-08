@@ -67,7 +67,7 @@
 
 use alloc::vec::Vec;
 
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 

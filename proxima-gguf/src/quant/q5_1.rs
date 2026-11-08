@@ -23,7 +23,7 @@
 //! 24 bytes per 32 elements (`ggml_half d`, `ggml_half m`, 4 bytes of
 //! packed 5th bits, 16 packed nibble bytes). Cross-checked here at compile
 //! time against [`crate::types::GgmlType::Q5_1`]'s already-landed
-//! [`crate::types::GgmlType::block_layout`] rather than re-typed by hand.
+//! [`crate::types::GgmlType::wire_shape`] rather than re-typed by hand.
 //!
 //! Per-element decode (`dequantize_row_q5_1`, `ggml-quants.c:323-339`):
 //! the 32 elements split into two 16-wide halves, low nibble of `qs[j]` for
@@ -44,12 +44,12 @@ const CODEC: &str = "q5_1";
 pub const QK5_1: usize = 32;
 
 /// Bytes per block. Derived from the already-landed
-/// [`crate::types::GgmlType::block_layout`] (`types.rs`), not re-typed --
+/// [`crate::types::GgmlType::wire_shape`] (`types.rs`), not re-typed --
 /// that table was itself checked against `ggml-common.h`'s
 /// `static_assert(sizeof(block_q5_1) == 2 * sizeof(ggml_half) +
 /// sizeof(uint32_t) + QK5_1 / 2, ...)` at `ggml-common.h:207`.
 pub const BLOCK_BYTES: usize = {
-    let layout = GgmlType::Q5_1.block_layout();
+    let layout = GgmlType::Q5_1.wire_shape();
     assert!(
         layout.block_elements as usize == QK5_1,
         "GgmlType::Q5_1 block_elements drifted from QK5_1"

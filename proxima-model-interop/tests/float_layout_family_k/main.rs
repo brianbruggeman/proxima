@@ -1,4 +1,4 @@
-#![cfg(all(feature = "metal", feature = "float-layout-dtype", target_os = "macos"))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! The K family (Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q8_K) as nested `BlockLayout`s: the CPU block
@@ -16,9 +16,9 @@ mod k_targets;
 #[path = "../float_layout_family_linear/reencode.rs"]
 mod reencode;
 
-use proxima_primitives::Codec;
-use proxima_primitives::block_layout::BlockLayout;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::codec::Codec;
+use proxima_numeric::block_layout::BlockLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 use fixtures::{cpu_decode, layout_of, metal_decode, mismatches, recorded};
 

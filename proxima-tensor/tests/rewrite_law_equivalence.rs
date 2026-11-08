@@ -22,10 +22,8 @@ use proxima_tensor::cpu::{
     self, QuantizedBlock, build_static_arena, evaluate, evaluate_named, evaluate_named_with_arena,
     evaluate_quantized_named,
 };
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
-    map, shape,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, map, shape};
+use proxima_numeric::{DType, NumericPolicy};
 use std::sync::Mutex;
 
 /// `EPILOGUE_FUSE_ENABLED` (`cpu.rs`) is one process-wide `AtomicBool` --

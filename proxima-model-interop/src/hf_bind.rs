@@ -40,7 +40,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_safetensors::{Manifest, TensorEntry};
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{Extent, Op};
 use proxima_tensor::spec::{LayerSchedule, ModelDescriptor, RopePairing};
@@ -366,25 +366,16 @@ fn expert_row_part<T: Copy>(
 /// dtype the gathered kernel rejects (`run_reduce_quantized` refuses a
 /// `Float32` weight block), which keeps the dequantize-and-transpose path
 /// [`crate::bind::bind_moe_stacked_experts`] keeps for the same reason.
-#[cfg(not(feature = "float-layout-dtype"))]
-fn expert_stack_codec(dtype: DType) -> Option<Codec> {
-    match dtype {
-        DType::BFLOAT16 => Some(Codec::BFloat16),
-        DType::FLOAT16 => Some(Codec::Float16),
-        _ => None,
-    }
-}
-
+///
 /// Selects the codec whose layout fields equal the stored element type's, among the two the
 /// gathered kernel serves; every other layout keeps the dequantize-and-transpose path.
-#[cfg(feature = "float-layout-dtype")]
 fn expert_stack_codec(dtype: DType) -> Option<Codec> {
     let DType::Layout(layout) = dtype else {
         return None;
     };
     [Codec::BFloat16, Codec::Float16].into_iter().find(|codec| {
         codec
-            .layout()
+            .element_layout()
             .is_some_and(|candidate| candidate.same_format(&layout))
     })
 }
@@ -1511,13 +1502,11 @@ mod rope_rows;
 mod tests {
     use alloc::vec;
 
-    #[cfg(feature = "float-layout-dtype")]
-    use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
+    use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
     use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
 
     use super::*;
 
-    #[cfg(feature = "float-layout-dtype")]
     #[test]
     fn float_layout_packed_hf_bind_maps_dtype_to_codec_by_fields() {
         let binary16_by_fields = FloatLayout {
@@ -2254,7 +2243,7 @@ mod tests {
         let activation_node = proxima_tensor::op::append(
             &mut program,
             proxima_tensor::op::Op::Input {
-                dtype: proxima_tensor::dtype::DType::FLOAT32,
+                dtype: proxima_numeric::DType::FLOAT32,
                 shape: alloc::vec![proxima_tensor::op::Extent::Static(in_dim as u32)],
                 name: Some("activation".into()),
             },
@@ -2262,7 +2251,7 @@ mod tests {
         let weight_node = proxima_tensor::op::append(
             &mut program,
             proxima_tensor::op::Op::Input {
-                dtype: proxima_tensor::dtype::DType::FLOAT32,
+                dtype: proxima_numeric::DType::FLOAT32,
                 shape: alloc::vec![
                     proxima_tensor::op::Extent::Static(in_dim as u32),
                     proxima_tensor::op::Extent::Static(out_dim as u32)
@@ -2273,7 +2262,7 @@ mod tests {
         let product = proxima_tensor::op::append(
             &mut program,
             proxima_tensor::op::Op::Elementwise {
-                dtype: proxima_tensor::dtype::DType::FLOAT32,
+                dtype: proxima_numeric::DType::FLOAT32,
                 body: proxima_tensor::op::ScalarOp::Multiply,
                 operands: alloc::vec![
                     (
@@ -2297,7 +2286,7 @@ mod tests {
         let logits = proxima_tensor::op::append(
             &mut program,
             proxima_tensor::op::Op::Reduce(proxima_tensor::op::Reduce {
-                dtype: proxima_tensor::dtype::DType::FLOAT32,
+                dtype: proxima_numeric::DType::FLOAT32,
                 body: proxima_tensor::op::ScalarOp::Add,
                 init: proxima_tensor::op::ReduceInit::Zero,
                 operand: product,

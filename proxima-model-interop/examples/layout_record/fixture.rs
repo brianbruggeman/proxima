@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use sha2::{Digest, Sha256};
 
 use crate::error::RecordError;

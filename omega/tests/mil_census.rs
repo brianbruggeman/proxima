@@ -20,10 +20,8 @@ use anyhow::{Context, Result, ensure};
 use omega::door::{Pins, Reader};
 use omega::onnx_door::OnnxReader;
 use proxima_mil::census::{MilCensus, MilForm, Refusal, SCALAR_OPS, census, scalar_form};
-use proxima_tensor::{
-    AxisTerm, DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, affine,
-    append, projection,
-};
+use proxima_tensor::{AxisTerm, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, affine, append, projection};
+use proxima_numeric::{DType};
 
 const BGE_MATMUL_NODES: usize = 96;
 const MNIST_MODEL: &str =

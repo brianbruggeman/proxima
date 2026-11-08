@@ -14,9 +14,8 @@ use proxima_mil::census::{SCALAR_OPS, scalar_form};
 use proxima_mil::weights::BlobWriter;
 use proxima_mil::wire::{Encoder, WireError};
 use proxima_mil::writer::{Context, MilRequest, MilWriter, emit_node};
-use proxima_tensor::{
-    DType, Extent, IndexMap, NodeId, Op, ScalarOp, Shapes, append, infer, projection,
-};
+use proxima_tensor::{Extent, IndexMap, NodeId, Op, ScalarOp, Shapes, append, infer, projection};
+use proxima_numeric::{DType};
 
 const CARGO_TOML: &str = include_str!("../Cargo.toml");
 const WIRE_SOURCE: &str = include_str!("../src/wire.rs");

@@ -16,10 +16,8 @@ use std::num::NonZeroUsize;
 use std::time::Instant;
 
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append,
-    evaluate_parallel, map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, evaluate_parallel, map};
+use proxima_numeric::{DType};
 
 fn random_vec(seed: u64, count: usize, scale: f32) -> Vec<f32> {
     let mut lcg = Lcg(seed);

@@ -2,11 +2,9 @@
 #![allow(clippy::expect_used)]
 
 use proxima_gguf::quant::q2_k;
-use proxima_primitives::Codec;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, evaluate, map,
-};
+use proxima_numeric::codec::Codec;
+use proxima_tensor::{Extent, IndexMap, Keep, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, evaluate, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 fn matmul_program(rows: u32, width: u32, weight_dtype: DType) -> Vec<Op> {
     let mut program = Vec::new();

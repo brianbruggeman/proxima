@@ -7,10 +7,11 @@ use std::fs::File;
 use memmap2::Mmap;
 use omega::msl::Grid2DForm;
 use proxima_gguf::parse_complete;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::spec::LayerCacheRoots;
-use proxima_tensor::{NodeId, NumericPolicy, Op, bind_with_fusion, infer};
+use proxima_tensor::{NodeId, Op, bind_with_fusion, infer};
+use proxima_numeric::{NumericPolicy};
 
 use crate::bind::BoundWeights;
 use crate::bind_checkpoint;

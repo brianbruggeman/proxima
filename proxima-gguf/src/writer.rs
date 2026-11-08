@@ -141,7 +141,7 @@ fn check_tensors(tensors: &[TensorPayload<'_>]) -> Result<(), GgufError> {
         }
         seen.push(tensor.name.as_str());
 
-        let block_size = tensor.ggml_type.block_layout().block_elements;
+        let block_size = tensor.ggml_type.wire_shape().block_elements;
         let row_len = tensor.dims.first().copied().unwrap_or(1);
         if block_size == 0 || row_len % block_size != 0 {
             return Err(GgufError::RowSizeNotBlockMultiple {

@@ -29,7 +29,8 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{BoundOpKind, NodeId, NumericPolicy, bind_with_fusion, infer};
+use proxima_tensor::{BoundOpKind, NodeId, bind_with_fusion, infer};
+use proxima_numeric::{NumericPolicy};
 
 mod gemma4_rows_support;
 mod support;

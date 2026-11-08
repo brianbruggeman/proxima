@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use bon::Builder;
 use conflaguration::Settings;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 use serde::{Deserialize, Serialize};
 
 use crate::backend::{Engine, GpuDriver};

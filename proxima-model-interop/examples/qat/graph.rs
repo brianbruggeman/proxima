@@ -6,7 +6,8 @@ use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_model_interop::bind_symbols;
 use proxima_tensor::op::{Extent, NodeId, Op, Reduce, append};
 use proxima_tensor::spec::{ForwardProgram, ModelDescriptor, build_forward};
-use proxima_tensor::{AxisIndex, DType, IndexMap, IndexPattern, Shapes, infer};
+use proxima_tensor::{AxisIndex, IndexMap, IndexPattern, Shapes, infer};
+use proxima_numeric::{DType};
 
 use super::QatError;
 

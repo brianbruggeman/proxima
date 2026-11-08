@@ -15,10 +15,8 @@ use omega::metal::metal_stage_totals;
 
 mod lookup {
     use omega::MetalError;
-    use proxima_tensor::{
-        AxisIndex, AxisTerm, DType, Extent, IndexMap, IndexPattern, NodeId, NumericPolicy, Op,
-        QuantizedBlock, ScalarOp, TensorError, append, projection,
-    };
+    use proxima_tensor::{AxisIndex, AxisTerm, Extent, IndexMap, IndexPattern, NodeId, Op, QuantizedBlock, ScalarOp, TensorError, append, projection};
+    use proxima_numeric::{DType, NumericPolicy};
 
     use super::metal_stage_totals;
 
@@ -142,7 +140,8 @@ mod routed_moe {
         Activation, ExpertGatingFunc, MoeFfnSpec, MoeProjectionStrategy, MoeRouter, append_moe_ffn,
         input_leaf, scalar_constant,
     };
-    use proxima_tensor::{DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock};
+    use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock};
+    use proxima_numeric::{DType, NumericPolicy};
 
     const EXPERT_COUNT: u32 = 32;
     const EXPERTS_USED: u32 = 8;

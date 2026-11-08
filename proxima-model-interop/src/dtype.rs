@@ -7,8 +7,8 @@
 //! `GgmlType` counterpart since ggml never defined them.
 
 use proxima_gguf::GgmlType;
-use proxima_primitives::float_layout::FloatLayout;
-use proxima_tensor::DType;
+use proxima_numeric::float_layout::FloatLayout;
+use proxima_numeric::DType;
 
 /// `None` for any block-quantized or otherwise non-scalar `GgmlType` —
 /// there is no flat, per-element safetensors dtype that could represent

@@ -105,7 +105,7 @@ pub struct WidenedSumOfSquares {
 /// spelled in the IR's own dtypes, over a `[rows, width]` input.
 #[must_use]
 pub fn widened_sum_of_squares(rows: u32, width: u32) -> WidenedSumOfSquares {
-    use crate::dtype::DType;
+    use proxima_numeric::DType;
     use crate::map::{self, IndexMap};
     use crate::op::{Extent, Keep, Op, Reduce, ReduceInit, ScalarOp, append};
 
@@ -199,9 +199,9 @@ pub fn widened_norms(program: &[crate::op::Op]) -> usize {
         .iter()
         .filter(|expr| {
             matches!(expr, crate::op::Op::Elementwise { dtype, body: crate::ScalarOp::Identity, operands, .. }
-                if *dtype == crate::DType::FLOAT64
+                if *dtype == proxima_numeric::DType::FLOAT64
                     && operands.len() == 1
-                    && program[operands[0].0.0 as usize].dtype() == crate::DType::FLOAT32)
+                    && program[operands[0].0.0 as usize].dtype() == proxima_numeric::DType::FLOAT32)
         })
         .count()
 }
@@ -223,7 +223,7 @@ pub fn evaluate_named_online_f32(
         .map(|(name, data)| (*name, crate::QuantizedBlock::Float32(data)))
         .collect();
     let config = crate::config::TensorExecutionConfig::builder()
-        .numeric(crate::NumericPolicy::bit_exact().with_flash_narrowing(true))
+        .numeric(proxima_numeric::NumericPolicy::bit_exact().with_flash_narrowing(true))
         .build();
     let mut pools = crate::cpu::BufferPools::default();
     let mut validated = None;

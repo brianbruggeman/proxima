@@ -15,13 +15,11 @@ use cudarc::nvrtc::{CompileOptions, compile_ptx_with_opts};
 use omega::Codec;
 use omega::backend::{Engine, GpuDriver, execute_plan_named, plan_named};
 use proxima_gguf::quant::block_layout;
-use proxima_primitives::block_layout::BlockLayout;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::block_layout::BlockLayout;
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 type Failure = Box<dyn Error>;
 

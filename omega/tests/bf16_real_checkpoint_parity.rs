@@ -25,12 +25,10 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_safetensors::{Manifest, SafetensorsParser};
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, evaluate, map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, evaluate, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 const REAL_QWEN3_SAFETENSORS_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/lmstudio-community/Qwen3-30B-A3B-MLX-4bit/model-00001-of-00004.safetensors";
 

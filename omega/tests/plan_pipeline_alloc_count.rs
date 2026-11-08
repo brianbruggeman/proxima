@@ -11,9 +11,8 @@
 #![cfg(all(feature = "alloc-count", feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{
-    DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 use proxima_test::alloc_count::{CountingAllocator, allocations, recorded_sizes, reset};
 
 #[global_allocator]

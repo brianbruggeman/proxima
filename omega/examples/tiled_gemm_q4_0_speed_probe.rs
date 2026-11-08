@@ -22,14 +22,13 @@ use anyhow::Context;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_gguf::quant::q4_0::{BLOCK_BYTES, QK4_0, quantize};
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
+use proxima_numeric::{DType, NumericPolicy};
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_tensor::test_support::Lcg;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
 
 fn main() -> anyhow::Result<()> {
     #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]

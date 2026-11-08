@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 use omega::msl::layout_render::block_unpack_msl;
 use proxima_gguf::quant::block_layout;
-use proxima_primitives::Codec;
-use proxima_primitives::block_layout::BlockLayout;
+use proxima_numeric::codec::Codec;
+use proxima_numeric::block_layout::BlockLayout;
 
 use crate::gpu::{Gpu, read_words};
 

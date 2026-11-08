@@ -16,13 +16,12 @@
 use half::{bf16, f16};
 use omega::backend::{execute_plan_named, plan_named_with_config};
 use omega::config::{DenseMmaInputLayout, RuntimeConfig};
-use proxima_primitives::Codec;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::codec::Codec;
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_tensor::spec::{elementwise, input_leaf, reduce};
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, NodeId, NumericPolicy, Op, QuantizedBlock, ReduceInit, ScalarOp,
-};
+use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock, ReduceInit, ScalarOp};
+use proxima_numeric::{DType, NumericPolicy};
 
 const TOKENS: u32 = 197;
 const FEATURES: u32 = 45;

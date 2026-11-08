@@ -1,7 +1,7 @@
 use half::bf16;
 use proxima_gguf::quant::float_layout::{decode, encode, encode_counting};
 use proxima_gguf::quant::{bf4_e2m1, bf8_e5m2};
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 fn positive_finite_codes(layout: FloatLayout) -> Vec<u32> {
     (0..1u32 << (layout.width() - 1))

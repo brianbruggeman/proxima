@@ -136,10 +136,8 @@ use proxima_tensor::spec::{
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::test_support::Lcg;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, block_node_ids, infer, map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, block_node_ids, infer, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// `gemma4:e2b-it-qat`'s real blob (task brief).
 #[cfg(all(feature = "metal", target_os = "macos"))]

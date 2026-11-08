@@ -164,7 +164,7 @@ async fn real_qwen35moe_width_13_plan_names_node_6540() {
         &program,
         &shapes,
         &[roots.logits],
-        proxima_tensor::NumericPolicy::bit_exact(),
+        proxima_numeric::NumericPolicy::bit_exact(),
     )
     .expect("bind admits the real width-13 program");
     eprintln!("resolved.len() = {}", resolved.len());

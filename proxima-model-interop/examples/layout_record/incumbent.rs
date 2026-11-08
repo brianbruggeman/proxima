@@ -1,7 +1,7 @@
 use proxima_gguf::GgmlType;
 use proxima_gguf::quant::{bf4_e2m1, bf8_e5m2, dispatch, scaled_float};
-use proxima_primitives::Codec;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::codec::Codec;
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_tensor::BFloat8;
 
 use crate::error::RecordError;
@@ -63,7 +63,7 @@ impl Incumbent {
     }
 
     fn ggml_geometry(kind: GgmlType) -> (usize, usize) {
-        let layout = kind.block_layout();
+        let layout = kind.wire_shape();
         (layout.block_elements as usize, layout.block_bytes as usize)
     }
 

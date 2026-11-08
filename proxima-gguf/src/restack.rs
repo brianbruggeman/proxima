@@ -24,7 +24,7 @@
 //! # Why concatenation is valid for a quantized dtype
 //!
 //! Every ggml block-quantized type packs a fixed element count per block
-//! ([`crate::types::GgmlType::block_layout`] — `256` elements / `144`
+//! ([`crate::types::GgmlType::wire_shape`] — `256` elements / `144`
 //! bytes for `Q4_K`, the type Mixtral's expert weights use). The GGUF
 //! parser already rejects any tensor whose first dimension isn't a
 //! multiple of its type's block size
@@ -218,7 +218,7 @@ pub fn plan_stack(experts: &[&TensorInfo]) -> Result<StackPlan, RestackError> {
         .copied()
         .ok_or(RestackError::EmptyExpertGroup)?;
 
-    let layout = first.ggml_type.block_layout();
+    let layout = first.ggml_type.wire_shape();
     let elements = first.element_count();
     if layout.block_elements == 0 || elements % layout.block_elements != 0 {
         return Err(RestackError::NotBlockMultiple {

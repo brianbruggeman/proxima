@@ -1,8 +1,8 @@
 use proxima_gguf::quant::dispatch;
 use proxima_gguf::quant::float_layout::{decode, encode};
 use proxima_gguf::{GgmlType, GgufModel, ParsedGguf, TensorPayload, write_complete};
-use proxima_primitives::block_layout::{Coded, Plane};
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::block_layout::{Coded, Plane};
+use proxima_numeric::float_layout::FloatLayout;
 
 /// Where a shipped tensor goes: its family codec and the function that produces the family
 /// bytes from the shipped bytes and their decoded values.

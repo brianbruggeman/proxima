@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use memmap2::MmapOptions;
+#[cfg(target_os = "linux")]
 use proxima_storage::dax::{MappedRegion, PersistMode};
 use thiserror::Error;
 

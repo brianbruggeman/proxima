@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use proxima_gguf::GgmlType;
 use proxima_gguf::quant::dispatch;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 
 use checkpoint::Checkpoint;
 use error::RecordError;

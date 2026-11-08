@@ -58,7 +58,7 @@ use proxima_autograd::adjoint::differentiate_wanted;
 use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_autograd::train::fit;
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 

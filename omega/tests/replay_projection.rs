@@ -18,10 +18,8 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use proxima_tensor::spec::{elementwise, scalar_constant};
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 const TOKENS: u32 = 600;
 const EMBEDDING: u32 = 1536;

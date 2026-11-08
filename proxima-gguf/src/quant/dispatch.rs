@@ -6,7 +6,7 @@
 //! missing arm is an explicit capability result, never an accidental byte
 //! reinterpretation.
 
-use proxima_primitives::block_layout::BlockLayout;
+use proxima_numeric::block_layout::BlockLayout;
 
 use super::{
     QuantError, bf16, block_layout, f16, iq2_xs, iq3_xxs, iq4_nl, q2_k, q3_k, q4_k, q5_k, q6_k,

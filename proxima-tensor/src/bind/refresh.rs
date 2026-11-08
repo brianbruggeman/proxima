@@ -41,7 +41,7 @@ use core::cell::RefCell;
 
 use crate::live;
 use crate::map::IndexMap;
-use crate::numeric::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 use crate::op::{NodeId, Op, ScalarOp};
 use crate::shape::Shapes;
 
@@ -528,11 +528,12 @@ fn refresh_reduce(
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::dtype::DType;
+    use proxima_numeric::DType;
     use crate::map::{self, IndexMap};
     use crate::op::{Extent, Keep, ReduceInit, append};
     use crate::shape;
-    use crate::{NumericPolicy, bind_with_fusion};
+    use crate::{bind_with_fusion};
+    use proxima_numeric::{NumericPolicy};
 
     fn per_position_masks(program: &[Op], resolved: &[BoundOp]) -> Vec<u64> {
         let node_masks = shape::symbol_dependency_output_masks(program);

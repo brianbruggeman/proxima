@@ -19,7 +19,7 @@ use memmap2::Mmap;
 use proxima_gguf::parse_complete;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_safetensors::TensorHeader;
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 use super::mlx::{MLX_INDEX_FILE_NAME, MLX_MAX_SHARD_BYTES, MlxLayout, MlxShardPlan};
 use super::mlx_affine::AffineParams;

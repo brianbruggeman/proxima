@@ -1,9 +1,9 @@
 use proxima_gguf::GgmlType;
 use proxima_gguf::quant::float_layout::decode;
-use proxima_primitives::block_layout::BlockLayout;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::block_layout::BlockLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
-use proxima_primitives::block_layout::Plane;
+use proxima_numeric::block_layout::Plane;
 
 use crate::reencode::{Target, put_field, write_coded};
 

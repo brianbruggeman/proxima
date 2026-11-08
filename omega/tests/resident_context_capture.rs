@@ -2,9 +2,8 @@
 
 use omega::metal::ResidentContext;
 use omega::{execute_plan, plan, set_capture_step, take_captured_dispatches};
-use proxima_tensor::{
-    DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 #[test]
 fn resident_context_keeps_real_dispatch_captures_with_their_owner() {

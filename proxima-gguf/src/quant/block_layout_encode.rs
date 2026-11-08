@@ -1,7 +1,7 @@
 //! The encoder that inverts [`super::block_layout`]'s walker for the linear layouts: integer
 //! element codes under one shared scale, no min and no sub-blocks.
 //!
-//! Teaching pointer: `proxima_primitives::block_layout::BlockLayout` is the data, the walker in
+//! Teaching pointer: `proxima_numeric::block_layout::BlockLayout` is the data, the walker in
 //! [`super::block_layout`] decodes it, and this module is its inverse, so a format that decodes
 //! through the walker encodes here without a per-codec quantizer. The scale is the block's
 //! absolute maximum over the largest code magnitude the layout represents on both sides of zero,
@@ -9,8 +9,8 @@
 //! round against the scale the decoder will use.
 
 use half::f16;
-use proxima_primitives::block_layout::{BlockLayout, Plane, PlaneCursor};
-use proxima_primitives::float_layout_codec::{decode, encode};
+use proxima_numeric::block_layout::{BlockLayout, Plane, PlaneCursor};
+use proxima_numeric::float_layout_codec::{decode, encode};
 
 use crate::quant::QuantError;
 

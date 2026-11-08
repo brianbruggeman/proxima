@@ -24,9 +24,8 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use proxima_tensor::{
-    DType, Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate, map,
-};
+use proxima_tensor::{Extent, IndexMap, NodeId, Op, ReduceInit, ScalarOp, append, evaluate, map};
+use proxima_numeric::{DType};
 
 struct ItemizingAllocator;
 

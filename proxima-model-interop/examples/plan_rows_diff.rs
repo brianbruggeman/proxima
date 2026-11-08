@@ -13,10 +13,8 @@ use omega::emit_cuda_with_policy;
 use proxima_gguf::{GgmlType, parse_complete};
 use proxima_model_interop::{Codec, KvLayout, bind_checkpoint_with_kv_layout};
 use proxima_tensor::spec::LayerCacheRoots;
-use proxima_tensor::{
-    BoundOp, NodeId, NumericPolicy, Op, bind_with_fusion, correct_packed_matmul_layouts, infer,
-    prune_dead,
-};
+use proxima_tensor::{BoundOp, NodeId, Op, bind_with_fusion, correct_packed_matmul_layouts, infer, prune_dead};
+use proxima_numeric::{NumericPolicy};
 
 const ROW_COUNTS: [u64; 5] = [2, 17, 277, 511, 512];
 

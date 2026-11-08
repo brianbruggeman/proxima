@@ -59,7 +59,7 @@ use omega::config::RuntimeConfig;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
 use proxima_gguf::types::GgmlType;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 
 use crate::error::InteropError;
 use crate::recurrent_config::RecurrentConfig;
@@ -923,7 +923,7 @@ pub struct ServingConfig<'model> {
     /// stays reachable as an explicit override, not the default.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub math_mode: MathMode,
-    /// Not an upstream llama-server flag -- `proxima_tensor::NumericPolicy`,
+    /// Not an upstream llama-server flag -- `proxima_numeric::NumericPolicy`,
     /// the richer permission set `MathMode` only narrows
     /// (`omega::metal::numeric_policy_as_metal_math_mode`'s own doc).
     /// `generate.rs`'s `BackendRuntime` reads this once per call and passes
@@ -2085,7 +2085,7 @@ mod tests {
     /// 170 per-token norm applies of a dense decode step to zero.
     #[test]
     fn default_numeric_policy_admits_the_widened_reduce_epilogue_fusion() {
-        let widened = proxima_tensor::NumericRewrite::WidenedReduceEpilogueFusion;
+        let widened = proxima_numeric::NumericRewrite::WidenedReduceEpilogueFusion;
 
         assert!(
             ServingConfig::default()

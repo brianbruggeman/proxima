@@ -19,7 +19,7 @@ use half::{bf16, f16};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::quant::dispatch::dequantize;
 use proxima_gguf::{GgmlType, GgufError, TensorInfo};
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 use crate::error::InteropError;
 

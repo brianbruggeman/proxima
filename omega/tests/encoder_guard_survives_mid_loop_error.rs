@@ -25,7 +25,8 @@
 #![cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{DType, Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, map};
+use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, map};
+use proxima_numeric::{DType};
 
 /// A single-axis Iota at `u32::MAX` elements (a ~17.2 GiB single-buffer
 /// request) was NOT enough to force `newBufferWithLength_options` to
@@ -96,7 +97,7 @@ fn execute_plan_survives_an_error_encoded_after_the_first_op() {
         &symbols,
         &blocks,
         &outputs,
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("planning is pure CPU-side shape/symbol work — it never touches the device");
 

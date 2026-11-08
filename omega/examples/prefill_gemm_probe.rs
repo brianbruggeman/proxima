@@ -14,12 +14,10 @@ use omega::backend::{
     BackendError, Engine, GpuDriver, cuda_kernel_identities, cuda_kernel_launches,
     cuda_replace_kernel_source, execute_plan_named, plan_named,
 };
-use proxima_primitives::block_layout::BlockLayout;
+use proxima_numeric::block_layout::BlockLayout;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 #[derive(Debug, thiserror::Error)]
 enum ProbeError {

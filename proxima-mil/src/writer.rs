@@ -17,7 +17,8 @@ use core::future::{Future, ready};
 use core::marker::PhantomData;
 
 use proxima_primitives::pipe::Pipe;
-use proxima_tensor::{DType, NodeId, Op, Shapes, TensorError};
+use proxima_tensor::{NodeId, Op, Shapes, TensorError};
+use proxima_numeric::{DType};
 
 use crate::census::NoMilForm;
 use crate::sized;

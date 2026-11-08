@@ -17,13 +17,11 @@ fn main() {
 #[cfg(all(feature = "metal", feature = "cpu", target_os = "macos"))]
 fn run() {
     use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
-    use proxima_primitives::Codec;
+    use proxima_numeric::codec::Codec;
     use proxima_tensor::cpu::evaluate_quantized;
     use proxima_tensor::test_support::Lcg;
-    use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-        append, projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+    use proxima_numeric::{DType};
 
     fn random_vec(seed: u64, count: usize) -> Vec<f32> {
         let mut lcg = Lcg(seed);
@@ -128,7 +126,7 @@ fn run() {
             &[],
             &blocks,
             &[sum],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("metal plans");
         let metal = omega::execute_plan(&plan, &blocks).expect("metal runs");

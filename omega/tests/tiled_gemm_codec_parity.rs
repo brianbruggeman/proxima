@@ -27,13 +27,11 @@
 
 use proxima_gguf::quant::{f16, q3_k, q4_0, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0};
 use proxima_gguf::types::GgmlType;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::map::{self, AxisIndex, AxisTerm};
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append};
+use proxima_numeric::{DType, NumericPolicy};
 use rayon::prelude::*;
 
 const RELATIVE_TOLERANCE: f32 = 2.0e-3;
@@ -65,7 +63,7 @@ fn ggml_type(codec: Codec) -> GgmlType {
 }
 
 fn row_bytes(codec: Codec, row_length: usize) -> usize {
-    let layout = ggml_type(codec).block_layout();
+    let layout = ggml_type(codec).wire_shape();
     let elements = layout.block_elements as usize;
     assert_eq!(
         row_length % elements,

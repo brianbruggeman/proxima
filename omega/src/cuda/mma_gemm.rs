@@ -15,9 +15,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Keep, NumericPolicy, ReduceInit, ScalarOp, StepArg,
-};
+use proxima_tensor::{BoundOp, BoundOpKind, Keep, ReduceInit, ScalarOp, StepArg};
+use proxima_numeric::{DType, NumericPolicy};
 
 use super::int8_gemm::{INT8_FEATURE_TILE, INT8_TOKEN_TILE, Int8Gemm, int8_gemm_plan, push_int8_gemm_body};
 use super::{

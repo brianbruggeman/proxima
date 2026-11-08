@@ -1,5 +1,5 @@
 use alloc::borrow::ToOwned;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 use super::*;
 
@@ -252,7 +252,7 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
     {
         return Err(EmitError::PackedCodecNotSupported {
             node: resolved.node,
-            codec: *codec,
+            codec: codec.name().unwrap_or("unnamed"),
         });
     }
     let grid = grid_spec_with_tile_height(
@@ -2932,6 +2932,7 @@ const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
         | Codec::BFloat8
         | Codec::Bf8E5M2
         | Codec::Bf4E2M1 => None,
+        _ => None,
     }
 }
 
@@ -3160,7 +3161,7 @@ pub enum TiledGemmRejection {
     /// A/B controls `tiled_gemm_q4_0_override` and `tiled_gemm_codec_disabled`
     /// document. A codec with no `tiled_decode` description is rejected
     /// earlier, as `NotPackedRowBlock(NotKQuantCodec)`.
-    CodecSwitchedOff { codec: Codec },
+    CodecSwitchedOff { codec: &'static str },
     /// `reduce_op`/`init` are not the plain `Add`-from-`Zero` shape
     /// `simdgroup_matrix` accumulation requires.
     NotAddZeroReduce,
@@ -3332,7 +3333,9 @@ pub(super) fn classify_tiled_gemm(
         // control for any codec.
         if (codec == Codec::Q4_0 && !tiled_gemm_q4_0_override()) || tiled_gemm_codec_disabled(codec)
         {
-            return Err(TiledGemmRejection::CodecSwitchedOff { codec });
+            return Err(TiledGemmRejection::CodecSwitchedOff {
+                codec: codec.name().unwrap_or("unnamed"),
+            });
         }
         // `simdgroup_multiply_accumulate` IS a sum-of-products -- there is
         // no hardware knob for `Maximum`/`Subtract`/etc, so this only ever

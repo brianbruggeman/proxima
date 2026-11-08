@@ -16,10 +16,8 @@
 
 use proxima_tensor::cpu::evaluate_quantized;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce, ReduceInit,
-    ScalarOp, append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 #[derive(Clone, Copy)]
 enum Codec {
@@ -213,7 +211,7 @@ fn run_case(codec: Codec, tokens: usize) {
     let kernel = omega::emit(
         resolved,
         &packed_operands,
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the synthetic program emits");
     // `metal-tiled-gemm` (`crate::sized::TILED_GEMM_MIN_TOKENS`, default 8)

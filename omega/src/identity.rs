@@ -39,12 +39,10 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_primitives::Codec;
-use proxima_primitives::float_layout::FloatLayout;
-use proxima_tensor::{
-    BoundOp, ComposedBody, Keep, Layout, Lookup, NodeId, NumericPolicy, ReduceInit, ScalarOp,
-    StepArg,
-};
+use proxima_numeric::codec::Codec;
+use proxima_numeric::float_layout::FloatLayout;
+use proxima_tensor::{BoundOp, ComposedBody, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp, StepArg};
+use proxima_numeric::{NumericPolicy};
 
 use crate::lowering::PackedOperands;
 
@@ -363,7 +361,7 @@ pub(crate) struct MetalOnlyExtras {
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
-/// permission (`proxima_tensor::NumericPolicy`'s own eight `pub bool`
+/// permission (`proxima_numeric::NumericPolicy`'s own eight `pub bool`
 /// fields), rendered via a const lookup table (no `alloc`, no `format!`) so
 /// two `Plan`s agreeing on every structural field but compiled under
 /// different permission sets never share a `PIPELINE_CACHE` entry
@@ -527,7 +525,8 @@ pub(crate) fn signed_name_part(value: i64) -> String {
 mod gated {
     use alloc::string::ToString;
 
-    use proxima_tensor::{BoundOpKind, DType};
+    use proxima_tensor::{BoundOpKind};
+    use proxima_numeric::{DType};
 
     use super::*;
 
@@ -549,6 +548,8 @@ mod gated {
     /// operands differing only in codec can share one compiled kernel.
     fn codec_token(codec: Option<Codec>) -> char {
         match codec {
+            // these letters are a frozen kernel-identity contract: every rendered entry
+            // name carries one, and `omega/tests/*` assert on markers like `cFfB1`.
             Some(Codec::Q2K) => '2',
             Some(Codec::Q3K) => '3',
             Some(Codec::Q4K) => '4',
@@ -586,6 +587,7 @@ mod gated {
             Some(Codec::Pq2_0) => 'W',
             Some(Codec::Ptq1_0) => 'X',
             None => 'f',
+            Some(_) => '?',
         }
     }
 
@@ -1001,7 +1003,7 @@ mod numeric_policy_cache_token_tests {
     //! policy -- this replaces `metal::math_mode_cache_key_tests`, which
     //! proved the same fact for the coarser, now-removed `MathMode` token.
 
-    use proxima_tensor::NumericPolicy;
+    use proxima_numeric::NumericPolicy;
 
     use super::numeric_policy_cache_token;
 

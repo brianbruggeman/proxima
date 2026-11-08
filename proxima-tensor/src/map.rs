@@ -180,7 +180,7 @@ pub struct IndexPattern {
 /// cannot nest inside another gather. This is enforced by the type, not a
 /// runtime check.
 ///
-/// `indices` is an integer [`crate::dtype::DType`] logically, but every
+/// `indices` is an integer [`proxima_numeric::DType`] logically, but every
 /// backend this crate ships (`cpu.rs`'s interpreter, `omega`'s Metal driver)
 /// carries every buffer as f32 — including `indices` — rather than plumbing
 /// a second integer-buffer kind through the stack for this one case. f32's
@@ -219,7 +219,7 @@ pub enum IndexMap {
     Affine(IndexPattern),
     Computed {
         /// The node supplying fetched index values; must be a backwards
-        /// reference with an integer [`crate::dtype::DType`].
+        /// reference with an integer [`proxima_numeric::DType`].
         indices: NodeId,
         /// How the iteration space addresses the `indices` tensor.
         index_map: IndexPattern,

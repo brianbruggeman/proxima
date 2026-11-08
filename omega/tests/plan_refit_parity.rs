@@ -24,7 +24,8 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::{NodeId, NumericPolicy};
+use proxima_tensor::{NodeId};
+use proxima_numeric::{NumericPolicy};
 
 mod support;
 use support::{

@@ -18,6 +18,7 @@ alloc = []
 std = ["alloc", "thiserror/std", "dep:bon", "dep:conflaguration", "dep:serde"]
 
 [dependencies]
+proxima-numeric = { version = "0.1.0", path = "../proxima-numeric", default-features = false, features = ["alloc"] }
 bon = { workspace = true, optional = true }
 bytes = { workspace = true }
 conflaguration = { workspace = true, features = ["derive", "toml"], optional = true }

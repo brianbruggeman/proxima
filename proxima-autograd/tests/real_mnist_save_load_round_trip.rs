@@ -27,7 +27,7 @@ use proxima_autograd::loss::softmax_cross_entropy;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_autograd::persist::{load_state, save_state};
 use proxima_autograd::train::fit;
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 
@@ -782,7 +782,7 @@ fn trained_mlp_survives_a_save_load_round_trip_at_identical_accuracy() {
             .unwrap_or_else(|| panic!("{name} present in the parsed manifest"));
         assert_eq!(
             entry.dtype,
-            proxima_tensor::DType::FLOAT32,
+            proxima_numeric::DType::FLOAT32,
             "{name} dtype must round-trip as Float32"
         );
         assert_eq!(entry.shape, shape, "{name} shape must round-trip exactly");

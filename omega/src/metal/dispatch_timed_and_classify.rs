@@ -1504,10 +1504,8 @@ pub(super) mod classify_kind_packed_row_marker_tests {
     use alloc::collections::BTreeMap;
     use alloc::vec;
 
-    use proxima_tensor::{
-        AxisIndex, AxisTerm, BoundOp, DType, Extent, IndexMap, IndexPattern, NumericPolicy, Op,
-        Reduce, ReduceInit, ScalarOp, append, bind, bind_with_fusion, infer, map,
-    };
+    use proxima_tensor::{AxisIndex, AxisTerm, BoundOp, Extent, IndexMap, IndexPattern, Op, Reduce, ReduceInit, ScalarOp, append, bind, bind_with_fusion, infer, map};
+    use proxima_numeric::{DType, NumericPolicy};
 
     use proxima_tensor::NodeId;
     use proxima_tensor::spec::{

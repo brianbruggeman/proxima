@@ -1,8 +1,8 @@
 use std::io::Write;
 
 use moe_test_json as serde_json;
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::NumericPolicy;
 use tempfile::NamedTempFile;
 
 use super::{

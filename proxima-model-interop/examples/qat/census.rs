@@ -3,10 +3,8 @@ use std::collections::BTreeMap;
 use omega::{MetalError, PackedOperands, emit, plan};
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{Extent, NodeId, Op};
-use proxima_tensor::{
-    BoundOp, DType, NumericPolicy, Shapes, TensorError, bind, bind_with_fusion, block_node_ids,
-    infer,
-};
+use proxima_tensor::{BoundOp, Shapes, TensorError, bind, bind_with_fusion, block_node_ids, infer};
+use proxima_numeric::{DType, NumericPolicy};
 
 use super::QatError;
 use super::graph::{StepGraph, op_name};

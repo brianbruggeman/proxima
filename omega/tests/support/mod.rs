@@ -25,7 +25,8 @@ use proxima_tensor::spec::{
     qk_norm_cached_forward_program,
 };
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{NodeId, NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
+use proxima_tensor::{NodeId, Op, QuantizedBlock, block_node_ids, infer};
+use proxima_numeric::{NumericPolicy};
 
 /// The numeric policy production actually runs under --
 /// `proxima-model-interop/src/serving.rs:255`'s `ServingConfig::default()`
@@ -328,7 +329,8 @@ pub fn qwen35_partial_rotary_forward_fixture(
     use proxima_tensor::spec::{
         append_gated_attention_only_with_taps, causal_mask, input_leaf, count_constant, scalar_constant,
     };
-    use proxima_tensor::{DType, Extent};
+    use proxima_tensor::{Extent};
+    use proxima_numeric::{DType};
 
     const KV_HEADS: u32 = 2;
     const GROUP: u32 = 8;

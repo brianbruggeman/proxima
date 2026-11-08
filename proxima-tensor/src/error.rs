@@ -1,5 +1,5 @@
-use crate::dtype::DType;
-use crate::numeric::{NumericPolicy, NumericRewrite};
+use proxima_numeric::DType;
+use proxima_numeric::{NumericError, NumericPolicy, NumericRewrite};
 use crate::op::{NodeId, ScalarOp};
 
 /// Every fault [`shape::infer`](crate::shape::infer) and the rest of the
@@ -391,15 +391,20 @@ pub enum TensorError {
     )]
     SharedKvUnsupportedInCachedForward { layer: u32, source_layer: u32 },
 
-    /// [`crate::numeric::admit`] rejected a rewrite: `granted` does not
+    /// [`proxima_numeric::admit`] rejected a rewrite: `granted` does not
     /// grant every permission `rewrite`'s
-    /// [`crate::numeric::NumericRewrite::required_permissions`] names.
+    /// [`proxima_numeric::NumericRewrite::required_permissions`] names.
     #[error("{rewrite:?} needs permissions {required:?}, granted {granted:?}")]
     NumericPolicyTooStrict {
         rewrite: NumericRewrite,
         required: NumericPolicy,
         granted: NumericPolicy,
     },
+
+    /// Any other numeric failure, carried through unchanged so the tensor layer
+    /// never invents a second spelling for a numeric error.
+    #[error(transparent)]
+    Numeric(NumericError),
 
     /// `crate::shape::fold_iteration_extents` re-derives a [`crate::op::Reduce`]'s
     /// iteration extents from its already-resolved operand shape and does not
@@ -506,4 +511,21 @@ pub enum TensorError {
         "token_embd.weight has {elements} elements, which does not divide evenly by embedding_length {embedding}"
     )]
     GgufVocabShapeMismatch { elements: u64, embedding: u32 },
+}
+
+impl From<NumericError> for TensorError {
+    fn from(error: NumericError) -> Self {
+        match error {
+            NumericError::PolicyTooStrict {
+                rewrite,
+                required,
+                granted,
+            } => Self::NumericPolicyTooStrict {
+                rewrite,
+                required,
+                granted,
+            },
+            other => Self::Numeric(other),
+        }
+    }
 }

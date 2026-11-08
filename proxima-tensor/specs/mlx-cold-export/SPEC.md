@@ -81,7 +81,7 @@ bf16 tensor in `plain/`, so the packing input is an external file, not a dequant
 
 Signatures, in words: `export_plain` takes a `ParsedGguf` and the file bytes it was parsed from
 (the pair `gguf_to_safetensors` takes, `transform.rs:53`), a `BindingProfile` and a
-`proxima_tensor::DType` (`proxima-tensor/src/dtype.rs:17`, restricted to BF16, F16 or F32 and
+`proxima_numeric::DType` (`proxima-numeric/src/dtype.rs:16`, restricted to BF16, F16 or F32 and
 refused with a typed error otherwise) and returns an `MlxExport` or an `InteropError`;
 `export_affine` takes the same with `AffineParams` in place of the dtype; `pack_affine` takes an
 f32 slice, `out`, `inp`, `AffineParams` and a caller buffer. `MlxExport` is new and holds the

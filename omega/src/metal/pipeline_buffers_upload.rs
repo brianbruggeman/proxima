@@ -1,5 +1,5 @@
 use super::*;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 #[cfg(feature = "instrument")]
 use sha2::{Digest, Sha256};

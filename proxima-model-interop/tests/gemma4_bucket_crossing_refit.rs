@@ -25,10 +25,8 @@ use proxima_gguf::parse_complete;
 use proxima_model_interop::{KvLayout, bind_checkpoint_with_kv_layout, bind_symbols, symbols};
 use proxima_tensor::bind::{BoundOp, BoundOpKind};
 use proxima_tensor::spec::LayerCacheRoots;
-use proxima_tensor::{
-    NodeId, NumericPolicy, Op, Shapes, bind_with_fusion, dead_resolved_nodes, infer, prune_dead,
-    refit_cached_attention_rows,
-};
+use proxima_tensor::{NodeId, Op, Shapes, bind_with_fusion, dead_resolved_nodes, infer, prune_dead, refit_cached_attention_rows};
+use proxima_numeric::{NumericPolicy};
 
 const SLIDING_WINDOW: usize = 512;
 

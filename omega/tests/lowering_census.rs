@@ -39,10 +39,8 @@
 use std::collections::BTreeMap;
 
 use omega::msl::{Codec, PackedOperands, emit};
-use proxima_tensor::{
-    BoundOp, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit,
-    ScalarOp, append, bind, infer, map,
-};
+use proxima_tensor::{BoundOp, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 /// The last node `program` builds -- what every fixture in this file treats
 /// as "the answer" by construction. `bind_plain`'s reachability pass
@@ -158,6 +156,7 @@ fn codec_marker(codec: Codec) -> &'static str {
         | Codec::Fp6E3M2 => {
             unreachable!("WEIGHT_FAMILIES never assigns a non-K-quant codec")
         }
+        _ => unreachable!("WEIGHT_FAMILIES never assigns a codec outside this table"),
     }
 }
 

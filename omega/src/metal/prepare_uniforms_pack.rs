@@ -1090,7 +1090,8 @@ pub(super) mod numeric_policy_construction_tests {
 
     use alloc::vec;
 
-    use proxima_tensor::{DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, append, map};
+    use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, append, map};
+    use proxima_numeric::{DType, NumericPolicy};
 
     use super::{MathMode, MetalError, metal_math_mode_as_numeric_policy, plan};
 
@@ -1324,10 +1325,8 @@ pub(super) mod pack_uniforms_byte_len_tests {
 
     #[cfg(feature = "metal-attn-split-decode")]
     use proxima_tensor::Layout;
-    use proxima_tensor::{
-        BoundOp, BoundOpKind, CachedAttentionArithmetic, DType, Extent, IndexMap, Keep, NodeId,
-        NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map,
-    };
+    use proxima_tensor::{BoundOp, BoundOpKind, CachedAttentionArithmetic, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
+    use proxima_numeric::{DType, NumericPolicy};
 
     use super::{pack_uniforms, pack_uniforms_byte_len};
 
@@ -1967,12 +1966,9 @@ pub(super) fn device_element_bytes(dtype: DType) -> usize {
     }
 }
 
-#[cfg(not(feature = "float-layout-dtype"))]
 fn is_gpu_float(dtype: DType) -> bool {
-    matches!(dtype, DType::FLOAT32 | DType::FLOAT16)
-}
-
-#[cfg(feature = "float-layout-dtype")]
-fn is_gpu_float(dtype: DType) -> bool {
-    matches!(dtype, DType::Layout(_))
+    match dtype {
+        DType::Layout(layout) => layout.exponent_bits > 0 && layout.width() <= 32,
+        DType::Bool => false,
+    }
 }

@@ -2,13 +2,11 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use omega::emit;
-use proxima_primitives::Codec as PrimitiveCodec;
+use proxima_numeric::codec::Codec as PrimitiveCodec;
 use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized};
 use proxima_tensor::spec::{gathered_expert_product, input_leaf};
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
-    bind, infer, map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
+use proxima_numeric::{DType, NumericPolicy};
 use std::collections::{BTreeMap, BTreeSet};
 
 const BF8_BYTES: [u8; 12] = [

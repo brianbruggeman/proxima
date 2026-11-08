@@ -43,5 +43,5 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
 }
 
 const _: () = {
-    assert!(GgmlType::Q8_1.block_layout().block_bytes as usize == BLOCK_BYTES);
+    assert!(GgmlType::Q8_1.wire_shape().block_bytes as usize == BLOCK_BYTES);
 };

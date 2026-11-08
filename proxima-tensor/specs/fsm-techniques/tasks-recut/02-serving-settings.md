@@ -1095,7 +1095,7 @@ Each item is a place where the spec, a sketch, the previous cut or a sibling car
 11. CC-1 (a hash-chain cache key over layer groups) and CC-2 (an exactness contract on a plan) change the key's shape for producers that do not exist yet (non-identity codecs, adapters, steering). The key gains exactly one field here (`read`); the chain arrives with its first producer.
 12. CC-4 (a replay deeper than the seal horizon) is the replay-versus-seal row in the rectify slice (FT7.7, amended above). Its second half, "the widest verify shape", is not built here: the width is computed by `interop/generate/kv_ring.rs::speculative_draft_limit`, a `pub(super)` function, and a settings row would copy its body.
 13. `kv.eviction` is a settings-only list passed to a setter (decision D1). It is therefore outside `ServingConfig`, and the cache key; no field of it can change a cached row (it picks which entry a full cache gives up, not what a row holds). There is no tier list in settings (see "dropped").
-14. `conflaguration::Error` and `proxima_tensor::NumericPolicy` are `#[non_exhaustive]`: tests match `Error::Validation` with `let .. else`, and build a `NumericPolicy` by assigning fields on `bit_exact()`.
+14. `conflaguration::Error` and `proxima_numeric::NumericPolicy` are `#[non_exhaustive]`: tests match `Error::Validation` with `let .. else`, and build a `NumericPolicy` by assigning fields on `bit_exact()`.
 
 ## slice exit
 

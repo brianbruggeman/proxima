@@ -122,6 +122,12 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
         "boundary: binding row (B3 may fold into mod.rs)",
     ),
     (
+        "proxima-model-interop/src/gemma4_fixture.rs",
+        "gemma4",
+        "boundary: synthetic checkpoint header, not dispatch -- the fixture writes the family a \
+         checkpoint would declare, and every reader interprets it through src/profiles/",
+    ),
+    (
         "proxima-model-interop/src/hf_config.rs",
         "lfm2",
         "remove-in: D1, D2",

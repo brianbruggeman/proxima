@@ -57,7 +57,7 @@ use proxima_autograd::adjoint::differentiate;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_autograd::sparse;
 use proxima_tensor::cpu::evaluate_named;
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::shape;

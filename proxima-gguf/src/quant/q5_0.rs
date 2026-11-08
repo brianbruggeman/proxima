@@ -7,7 +7,7 @@ use crate::types::GgmlType;
 
 pub const QK5_0: usize = 32;
 pub const BLOCK_BYTES: usize = {
-    let layout = GgmlType::Q5_0.block_layout();
+    let layout = GgmlType::Q5_0.wire_shape();
     assert!(layout.block_elements as usize == QK5_0);
     layout.block_bytes as usize
 };

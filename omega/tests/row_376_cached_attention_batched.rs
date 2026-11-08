@@ -72,7 +72,7 @@ mod fixture;
 mod support;
 
 use fixture::build_fixture;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 use support::as_named_blocks;
 
 /// The block-staged Q·K/softmax/V rewrite (`omega::msl::block_width_for`,

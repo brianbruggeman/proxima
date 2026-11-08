@@ -9,7 +9,7 @@
 //! `tests/capability_matrix.rs` actually drives through
 //! `crate::LoadedModel`'s (`std`-gated) public `Pipe`; `quant_format`'s
 //! table (built in `examples/generate_compatibility_doc.rs`,
-//! `metal`-feature-gated) mirrors every [`proxima_primitives::Codec`]
+//! `metal`-feature-gated) mirrors every [`proxima_numeric::codec::Codec`]
 //! variant against the CPU kernel (`proxima_tensor::cpu::QuantizedBlock`).
 
 use alloc::string::String;
@@ -263,7 +263,7 @@ pub fn supported_dense_cpu_codecs() -> Vec<GgmlType> {
         .collect()
 }
 
-/// Every [`proxima_primitives::Codec`] variant against the CPU kernel
+/// Every [`proxima_numeric::codec::Codec`] variant against the CPU kernel
 /// (`proxima_tensor::cpu::QuantizedBlock`, the same enum
 /// [`crate::bind::gguf_tensor_as_packed_block`] returns) -- built from an
 /// exhaustive `match` on `Codec` with no `_` arm below -- `proxima_primitives`
@@ -287,13 +287,13 @@ pub mod quant_format {
     use alloc::string::String;
     use core::fmt::Write as _;
 
-    use proxima_primitives::Codec;
+    use proxima_numeric::codec::Codec;
 
-    /// This codec's GGML-style display name, matching
-    /// `proxima_tensor::cpu::epilogue::codec_name_for_error`'s own per-codec
-    /// strings (uppercased to match [`super::GgmlCell::codec_name`]'s
-    /// convention elsewhere in this file), not restated as a second
-    /// independent copy of that mapping.
+    /// This codec's GGML-style display name for the rendered capability table, in GGML's own
+    /// uppercase vocabulary (`Q4_K`, `F16`, `BF16`) to match [`super::GgmlCell::codec_name`]
+    /// elsewhere in this file. The canonical lowercase spelling a config, a wire tag or an error
+    /// message uses is `NumericFormat::name()`; a report is the one place the two differ, and the
+    /// report is what a reader compares against llama.cpp's tables.
     const fn codec_name(codec: Codec) -> &'static str {
         match codec {
             Codec::Q2K => "Q2_K",
@@ -332,6 +332,7 @@ pub mod quant_format {
             Codec::Q2_0 => "Q2_0",
             Codec::Pq2_0 => "PQ2_0",
             Codec::Ptq1_0 => "PTQ1_0",
+            _ => "UNKNOWN",
         }
     }
 
@@ -369,7 +370,7 @@ pub mod quant_format {
     }
 
     /// Every [`Codec`] variant, exhaustively -- adding another to
-    /// `proxima_primitives::Codec` without adding it here is a compile
+    /// `proxima_numeric::codec::Codec` without adding it here is a compile
     /// error, not a silently stale doc.
     ///
     /// `pub(super)` so [`super::quant_format_tests`] can derive its row-count
@@ -502,7 +503,7 @@ mod quant_format_tests {
         assert_eq!(
             ALL_CODECS.len(),
             35,
-            "proxima_primitives::Codec carries 35 variants today"
+            "proxima_numeric::codec::Codec carries 35 variants today"
         );
     }
 

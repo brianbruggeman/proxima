@@ -48,9 +48,8 @@ fn run() {
     use std::time::Instant;
 
     use proxima_tensor::instrument::ticks_to_nanos;
-    use proxima_tensor::{
-        DType, Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, map,
-    };
+    use proxima_tensor::{Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, map};
+    use proxima_numeric::{DType};
 
     fn elementwise_add_program(elements: u32) -> (Vec<Op>, NodeId) {
         let mut program = Vec::new();
@@ -95,7 +94,7 @@ fn run() {
             &[],
             &blocks,
             &[sum],
-            proxima_tensor::NumericPolicy::default(),
+            proxima_numeric::NumericPolicy::default(),
         )
         .expect("probe plans");
         // warm-up: pipeline compile happens on the first call

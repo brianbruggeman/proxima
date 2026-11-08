@@ -145,7 +145,7 @@ mod tests {
 
     use proxima_primitives::pipe::sans_io::Outcome;
     use proxima_safetensors::{SafetensorsModel, SafetensorsParser, TensorPayload, write_complete};
-    use proxima_tensor::DType;
+    use proxima_numeric::DType;
     use proxima_tensor::op::Extent;
 
     use super::*;

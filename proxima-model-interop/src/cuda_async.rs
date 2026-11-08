@@ -16,7 +16,7 @@ use conflaguration::Validate;
 use omega::config::{RuntimeConfig, SelectionMode};
 use prime::os::background::ProximaBackgroundPool;
 use proxima_core::ProximaError;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_primitives::pipe::PipeExt;
 use proxima_primitives::pipe::{
     CreditAcquireError, CreditCapacityError, CreditGate, CreditLease, Pipe,
@@ -26,7 +26,8 @@ use proxima_primitives::sync::blocking::Mutex;
 use proxima_primitives::sync::mpsc::{Sender as CommandSender, channel as command_channel};
 use proxima_primitives::sync::oneshot;
 use proxima_tensor::cpu::QuantizedBlock;
-use proxima_tensor::{NodeId, NumericPolicy, Op};
+use proxima_tensor::{NodeId, Op};
+use proxima_numeric::{NumericPolicy};
 
 const MAX_CUDA_PLANS: usize = 32;
 const DEFAULT_OWNED_HOST_BYTES: usize = 256 * 1024 * 1024;
@@ -1298,11 +1299,12 @@ mod tests {
     use core::pin::pin;
     use core::task::Poll;
     use prime::os::background::ProximaBackgroundPool;
-    use proxima_primitives::Codec;
+    use proxima_numeric::codec::Codec;
     use proxima_primitives::pipe::{CreditAcquireError, CreditGate, Pipe, PipeExt};
     use proxima_primitives::sync::oneshot::Sender;
     use proxima_tensor::cpu::QuantizedBlock;
-    use proxima_tensor::{DType, Extent, NodeId, Op};
+    use proxima_tensor::{Extent, NodeId, Op};
+    use proxima_numeric::{DType};
     use std::collections::BTreeSet;
     use std::sync::Arc;
 

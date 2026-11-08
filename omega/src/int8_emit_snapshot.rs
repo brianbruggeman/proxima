@@ -4,10 +4,8 @@
 //! `sub_block_dot`, through the same derive-then-emit sequence a plan runs; the k-quant fixtures were
 //! captured from the emitter at the commit that introduced them and pin their kernel text.
 
-use proxima_tensor::{
-    BoundOp, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce, ReduceInit, ScalarOp, append,
-    bind_with_fusion, correct_packed_matmul_layouts, infer, projection,
-};
+use proxima_tensor::{BoundOp, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind_with_fusion, correct_packed_matmul_layouts, infer, projection};
+use proxima_numeric::{DType, NumericPolicy};
 
 use crate::backend::GpuDriver;
 use crate::cuda::emit_cuda_with_policy;

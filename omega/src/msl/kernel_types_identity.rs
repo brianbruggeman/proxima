@@ -1,5 +1,4 @@
 use super::*;
-use proxima_primitives::block_layout::BlockLayout;
 
 /// MSL source for one `Q2_K` element. The byte layout and index arithmetic
 /// mirror `proxima_gguf::quant::q2_k::dequantize_block`: sixteen scale/min
@@ -288,7 +287,8 @@ pub struct Grid2DSpec {
 /// # Examples
 ///
 /// ```
-/// use proxima_tensor::{DType, Extent, IndexMap, Op, ScalarOp, append, map};
+/// use proxima_numeric::DType;
+/// use proxima_tensor::{Extent, IndexMap, Op, ScalarOp, append, map};
 ///
 /// let mut program = Vec::new();
 /// let source = append(
@@ -317,13 +317,13 @@ pub struct Grid2DSpec {
 ///     &program,
 ///     &shapes,
 ///     &[activated],
-///     proxima_tensor::NumericPolicy::default(),
+///     proxima_numeric::NumericPolicy::default(),
 /// )?;
 ///
 /// // no packed (quantized/half-precision) operand in this program, so an
 /// // empty codec table is exactly right -- see `PackedOperands`'s own doc.
 /// let packed_operands = omega::PackedOperands::new();
-/// let kernel = omega::emit(&bound_ops[0], &packed_operands, proxima_tensor::NumericPolicy::default())?;
+/// let kernel = omega::emit(&bound_ops[0], &packed_operands, proxima_numeric::NumericPolicy::default())?;
 /// assert!(kernel.source.contains("kernel void"));
 /// assert!(kernel.source.contains("tanh("));
 /// assert_eq!(kernel.bindings.len(), 3); // one input, one output, uniforms
@@ -1467,7 +1467,7 @@ pub const BFLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::bf16::QK_BF16;
 /// `Int32`) and for the codecs with no `Codec`/unpack-kernel entry anywhere
 /// yet ([`Codec::Iq4Nl`]/`Iq2Xs`/`Iq3Xxs`) — decode-only, CPU-side
 /// so far (see `proxima_tensor::cpu`). Free function, not an inherent
-/// method: `Codec` is `proxima_primitives::Codec`, foreign to this crate
+/// method: `Codec` is `proxima_numeric::codec::Codec`, foreign to this crate
 /// (guiding-principles §20 rules out a blanket impl / newtype to host one).
 // arm-only-used: every real caller (`wgpu_driver::packed_operands_of`, `metal::device_buffers_arena_plan::
 // packed_operands_of`, this doc's own list) lives behind a driver feature
@@ -1489,7 +1489,7 @@ pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Op
     else {
         return None;
     };
-    match codec {
+    match *codec {
         Codec::Q2K
         | Codec::Q3K
         | Codec::Q4K
@@ -1557,8 +1557,14 @@ pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
         Codec::Q2_0 => "q2_0",
         Codec::Pq2_0 => "pq2_0",
         Codec::Ptq1_0 => "ptq1_0",
+        _ => "unrecognised",
     }
 }
+
+// The token spellings above are a frozen operator contract: `PROXIMA_TILED_GEMM_DISABLE`
+// and `omega/tests/*` name codecs by them (`f16`, `q3k`, `q4k`, `q5k`, `q6k`), which is
+// NOT the canonical config spelling `NumericFormat::name()` returns (`float16`, `q3_k`).
+// Renaming them silently disables nothing, so they stay as they were.
 
 /// Bytes one block of this codec occupies — the multiplier [`operand_read`]
 /// and the row-blocked path need to step between blocks. Element count per
@@ -1566,46 +1572,7 @@ pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
 /// (`Q4K`/`Q5K`/`Q6K`) but NOT by `Q8_0`, which uses its own, much smaller
 /// [`Q8_0_BLOCK_ELEMENTS`].
 pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
-    match codec {
-        Codec::Q2K => Q2K_BLOCK_BYTES,
-        Codec::Q3K => Q3K_BLOCK_BYTES,
-        Codec::Q4K => Q4K_BLOCK_BYTES,
-        Codec::Q5K => Q5K_BLOCK_BYTES,
-        Codec::Q6K => Q6K_BLOCK_BYTES,
-        Codec::Q8_0 => Q8_0_BLOCK_BYTES,
-        Codec::Q4_0 => Q4_0_BLOCK_BYTES,
-        Codec::Q5_1 => Q5_1_BLOCK_BYTES,
-        Codec::Q5_0 => Q5_0_BLOCK_BYTES,
-        Codec::Float16 => FLOAT16_BLOCK_BYTES,
-        Codec::BFloat16 => BFLOAT16_BLOCK_BYTES,
-        Codec::BFloat8 => 1,
-        Codec::Bf8E5M2 | Codec::Bf4E2M1 => 1,
-        Codec::Fp6E3M2 => Codec::FP6_E3M2_BLOCK_BYTES,
-        // Unreachable by construction -- see `codec_cache_token`'s doc.
-        // Sourced from `GgmlType::block_layout`, the authoritative block
-        // shape table, never hand-invented.
-        Codec::Q4_1 => GgmlType::Q4_1.block_layout().block_bytes as usize,
-        Codec::Q8_1 => GgmlType::Q8_1.block_layout().block_bytes as usize,
-        Codec::Q8_1Grouped => BlockLayout::Q8_1_GROUPED.block_bytes as usize,
-        Codec::Q8K => GgmlType::Q8_K.block_layout().block_bytes as usize,
-        Codec::Iq1S => GgmlType::Iq1S.block_layout().block_bytes as usize,
-        Codec::Iq1M => GgmlType::Iq1M.block_layout().block_bytes as usize,
-        Codec::Iq2Xxs => GgmlType::Iq2Xxs.block_layout().block_bytes as usize,
-        Codec::Iq2Xs => GgmlType::Iq2Xs.block_layout().block_bytes as usize,
-        Codec::Iq2S => GgmlType::Iq2S.block_layout().block_bytes as usize,
-        Codec::Iq3Xxs => GgmlType::Iq3Xxs.block_layout().block_bytes as usize,
-        Codec::Iq3S => GgmlType::Iq3S.block_layout().block_bytes as usize,
-        Codec::Iq4Nl => GgmlType::Iq4Nl.block_layout().block_bytes as usize,
-        Codec::Iq4Xs => GgmlType::Iq4Xs.block_layout().block_bytes as usize,
-        Codec::Tq10 => GgmlType::Tq10.block_layout().block_bytes as usize,
-        Codec::Tq20 => GgmlType::Tq20.block_layout().block_bytes as usize,
-        Codec::Mxfp4 => GgmlType::Mxfp4.block_layout().block_bytes as usize,
-        Codec::Nvfp4 => GgmlType::Nvfp4.block_layout().block_bytes as usize,
-        Codec::Q1_0 => GgmlType::Q1_0.block_layout().block_bytes as usize,
-        Codec::Q2_0 => GgmlType::Q2_0.block_layout().block_bytes as usize,
-        Codec::Pq2_0 => GgmlType::Pq2_0.block_layout().block_bytes as usize,
-        Codec::Ptq1_0 => GgmlType::Ptq1_0.block_layout().block_bytes as usize,
-    }
+    codec.packed_bytes() as usize
 }
 
 /// Bytes `push_packed_row_blocked_body`'s single-row `else` arm steps by
@@ -1640,41 +1607,7 @@ pub(crate) const fn codec_row_block_step_bytes(codec: Codec) -> usize {
 /// are both unconditional alloc-tier callers, so this is no longer behind
 /// any caller's own feature the way it once was.
 pub(crate) const fn codec_block_elements(codec: Codec) -> usize {
-    match codec {
-        Codec::Q2K | Codec::Q3K | Codec::Q4K | Codec::Q5K | Codec::Q6K => Q4K_BLOCK_ELEMENTS,
-        Codec::Q8_0 => Q8_0_BLOCK_ELEMENTS,
-        Codec::Q4_0 => Q4_0_BLOCK_ELEMENTS,
-        Codec::Q5_1 => Q5_1_BLOCK_ELEMENTS,
-        Codec::Q5_0 => Q5_0_BLOCK_ELEMENTS,
-        Codec::Float16 => FLOAT16_BLOCK_ELEMENTS,
-        Codec::BFloat16 => BFLOAT16_BLOCK_ELEMENTS,
-        Codec::BFloat8 => 1,
-        Codec::Bf8E5M2 => 1,
-        Codec::Bf4E2M1 => 2,
-        Codec::Fp6E3M2 => Codec::FP6_E3M2_BLOCK_ELEMENTS,
-        // Unreachable by construction -- see `codec_cache_token`'s doc.
-        Codec::Q4_1 => GgmlType::Q4_1.block_layout().block_elements as usize,
-        Codec::Q8_1 => GgmlType::Q8_1.block_layout().block_elements as usize,
-        Codec::Q8_1Grouped => BlockLayout::Q8_1_GROUPED.elements as usize,
-        Codec::Q8K => GgmlType::Q8_K.block_layout().block_elements as usize,
-        Codec::Iq1S => GgmlType::Iq1S.block_layout().block_elements as usize,
-        Codec::Iq1M => GgmlType::Iq1M.block_layout().block_elements as usize,
-        Codec::Iq2Xxs => GgmlType::Iq2Xxs.block_layout().block_elements as usize,
-        Codec::Iq2Xs => GgmlType::Iq2Xs.block_layout().block_elements as usize,
-        Codec::Iq2S => GgmlType::Iq2S.block_layout().block_elements as usize,
-        Codec::Iq3Xxs => GgmlType::Iq3Xxs.block_layout().block_elements as usize,
-        Codec::Iq3S => GgmlType::Iq3S.block_layout().block_elements as usize,
-        Codec::Iq4Nl => GgmlType::Iq4Nl.block_layout().block_elements as usize,
-        Codec::Iq4Xs => GgmlType::Iq4Xs.block_layout().block_elements as usize,
-        Codec::Tq10 => GgmlType::Tq10.block_layout().block_elements as usize,
-        Codec::Tq20 => GgmlType::Tq20.block_layout().block_elements as usize,
-        Codec::Mxfp4 => GgmlType::Mxfp4.block_layout().block_elements as usize,
-        Codec::Nvfp4 => GgmlType::Nvfp4.block_layout().block_elements as usize,
-        Codec::Q1_0 => GgmlType::Q1_0.block_layout().block_elements as usize,
-        Codec::Q2_0 => GgmlType::Q2_0.block_layout().block_elements as usize,
-        Codec::Pq2_0 => GgmlType::Pq2_0.block_layout().block_elements as usize,
-        Codec::Ptq1_0 => GgmlType::Ptq1_0.block_layout().block_elements as usize,
-    }
+    codec.packed_elements() as usize
 }
 
 /// Elements one decode call of the tiled and expert-grouped GEMM stagers writes:
@@ -2035,6 +1968,7 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
             SCALED_E3M2_DECODE_MSL,
         )),
         Codec::Bf8E5M2 | Codec::Bf4E2M1 => None,
+        _ => None,
     }
 }
 

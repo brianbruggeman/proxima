@@ -18,10 +18,8 @@
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
 use proxima_tensor::cpu::evaluate_quantized;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp,
-    append, projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType};
 
 fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     let mut lcg = Lcg(seed);
@@ -228,7 +226,7 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
         &program,
         &shapes,
         &[sum],
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());
@@ -239,7 +237,7 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
     let kernel = omega::emit(
         resolved,
         &packed_operands,
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the synthetic program emits");
     assert!(
@@ -254,7 +252,7 @@ fn metal_takes_the_tiled_path_and_agrees_with_the_independent_reference_on_a_two
         &[],
         &blocks,
         &[sum],
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("metal plans the matmul");
     let metal =
@@ -334,7 +332,7 @@ fn metal_decode_shaped_attention_matmul_stays_on_the_row_blocked_vector_path() {
         &program,
         &shapes,
         &[sum],
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the synthetic program binds");
     proxima_tensor::correct_packed_matmul_layouts(&mut bound, &[NodeId(0)].into_iter().collect());
@@ -345,7 +343,7 @@ fn metal_decode_shaped_attention_matmul_stays_on_the_row_blocked_vector_path() {
     let kernel = omega::emit(
         resolved,
         &packed_operands,
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("the synthetic program emits");
 

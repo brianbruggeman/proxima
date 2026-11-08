@@ -7,10 +7,9 @@
 use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
-use proxima_primitives::block_layout::BlockLayout;
-use proxima_tensor::{
-    BoundOp, BoundOpKind, DType, Keep, Layout, NodeId, NumericPolicy, NumericRewrite, Op, ScalarOp, Shapes, admit,
-};
+use proxima_numeric::block_layout::BlockLayout;
+use proxima_tensor::{BoundOp, BoundOpKind, Keep, Layout, NodeId, Op, ScalarOp, Shapes};
+use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 use crate::backend::GpuDriver;
 use crate::cuda::{int8_gemm_serves, staged_matvec_serves};

@@ -22,9 +22,10 @@ use proxima_model_interop::recurrent_routed_interval::hparams::{
     LayerKind, RecurrentRoutedIntervalHparams,
 };
 use proxima_model_interop::recurrent_routed_interval::recurrent_routed_interval_forward_program_at_width;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{NumericPolicy, Op, QuantizedBlock, block_node_ids, infer};
+use proxima_tensor::{Op, QuantizedBlock, block_node_ids, infer};
+use proxima_numeric::{NumericPolicy};
 
 const WIDTH: u32 = 13;
 

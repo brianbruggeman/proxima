@@ -13,7 +13,7 @@
 
 use alloc::vec::Vec;
 
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
 
 use crate::activation;

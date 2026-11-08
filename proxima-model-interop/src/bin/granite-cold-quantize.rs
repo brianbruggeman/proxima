@@ -6,7 +6,7 @@ use std::process;
 use proxima_model_interop::cold_artifact::{
     ColdScaleMode, compare_checkpoint, convert_checkpoint_with_scale,
 };
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 const REPOSITORY: &str = "ibm-granite/granite-4.0-micro-base";
 const REVISION: &str = "98e1d641451818f6c8e6b17c1c359b5b4ac495d0";

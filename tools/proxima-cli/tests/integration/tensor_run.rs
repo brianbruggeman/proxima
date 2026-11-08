@@ -14,7 +14,7 @@ use std::process::{Child, ChildStdout, Command, Output, Stdio};
 
 use proxima_cli::tensor_wire::decode_response;
 use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 use proxima_tensor::spec::ProgramSpec;
 use proxima_tensor::test_support::Lcg;
 use tempfile::{TempDir, tempdir};

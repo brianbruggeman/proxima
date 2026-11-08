@@ -349,6 +349,7 @@ where
 /// of guest memory (`payload` is the bytes at `[pointer, pointer + length)`),
 /// or could not be (`None`: the range left guest memory).
 #[cfg(feature = "std")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 pub(crate) fn dispatch_captured<D>(
     dispatcher: &D,
     verb: u16,

@@ -45,7 +45,6 @@ pub mod q8_0;
 pub mod q8_1;
 pub mod q8_k;
 pub mod scaled_float;
-pub mod tables;
 
 use thiserror::Error;
 

@@ -1,5 +1,5 @@
 use const_format::formatcp;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 use super::*;
 

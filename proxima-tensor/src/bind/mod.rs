@@ -61,11 +61,11 @@ use core::cell::{Cell, RefCell};
 use core::future::Future;
 
 use arrayvec::ArrayVec;
-use proxima_primitives::block_layout::BlockLayout;
+use proxima_numeric::block_layout::BlockLayout;
 use proxima_primitives::pipe::Pipe;
 use smallvec::SmallVec;
 
-use crate::dtype::DType;
+use proxima_numeric::DType;
 use crate::error::TensorError;
 #[cfg(feature = "instrument")]
 use crate::instrument;
@@ -73,7 +73,7 @@ use crate::live;
 #[cfg(feature = "cached-attention-streaming")]
 use crate::map;
 use crate::map::{AxisIndex, AxisTerm, IndexMap, IndexPattern};
-use crate::numeric::{NumericPolicy, NumericRewrite, admit};
+use proxima_numeric::{NumericPolicy, NumericRewrite, admit};
 use crate::op::{Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use crate::shape::{self, Shapes};
 #[cfg(feature = "instrument")]

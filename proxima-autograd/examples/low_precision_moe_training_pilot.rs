@@ -9,12 +9,12 @@ use proxima_autograd::adjoint::differentiate;
 use proxima_autograd::low_precision::WeightFormat;
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_autograd::sparse::dedupe_and_sum_rows;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::cpu::{
     BufferPools, ExpertEntry, ExpertSource, QuantizedBlock, evaluate_named,
     evaluate_quantized_named_with_scratch_and_experts,
 };
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, AxisIndex, AxisTerm, IndexMap, IndexPattern};
 use proxima_tensor::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use proxima_tensor::process_usage;

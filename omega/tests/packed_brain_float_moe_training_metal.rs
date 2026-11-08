@@ -20,7 +20,8 @@ use proxima_tensor::cpu::{
 use proxima_tensor::map::{AxisIndex, AxisTerm, IndexPattern};
 use proxima_tensor::op::{self, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use proxima_tensor::spec::gathered_expert_product;
-use proxima_tensor::{DType, Extent, IndexMap, NumericPolicy, map};
+use proxima_tensor::{Extent, IndexMap, map};
+use proxima_numeric::{DType, NumericPolicy};
 
 #[path = "../../proxima-autograd/examples/low_precision_moe_training_pilot.rs"]
 pub mod pilot;

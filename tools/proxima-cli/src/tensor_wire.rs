@@ -5,7 +5,7 @@ use proxima_safetensors::sized::HEADER_LEN_BYTES;
 use proxima_safetensors::{
     SafetensorsModel, TensorEntry, TensorPayload, dtype_to_wire, parse_complete, write_complete,
 };
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 pub const PLAN_KEY: &str = "plan";
 
@@ -142,7 +142,7 @@ fn read_f32_entry(entry: &TensorEntry, data: &[u8]) -> Result<TensorRecord, Prox
 #[allow(clippy::expect_used)]
 mod tests {
     use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
-    use proxima_tensor::DType;
+    use proxima_numeric::DType;
     use proxima_tensor::spec::ProgramSpec;
     use proxima_tensor::test_support::Lcg;
 

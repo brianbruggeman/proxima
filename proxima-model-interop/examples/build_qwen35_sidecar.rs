@@ -89,9 +89,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .iter()
         .map(|spec| {
             let layout = match spec.target_codec {
-                Codec::Q2K => proxima_gguf::types::GgmlType::Q2_K.block_layout(),
-                Codec::Q4K => proxima_gguf::types::GgmlType::Q4_K.block_layout(),
-                Codec::Q6K => proxima_gguf::types::GgmlType::Q6_K.block_layout(),
+                Codec::Q2K => proxima_gguf::types::GgmlType::Q2_K.wire_shape(),
+                Codec::Q4K => proxima_gguf::types::GgmlType::Q4_K.wire_shape(),
+                Codec::Q6K => proxima_gguf::types::GgmlType::Q6_K.wire_shape(),
                 _ => unreachable!("target codec is selected from the three packed codecs"),
             };
             (spec.out_dim as usize * spec.in_dim as usize / layout.block_elements as usize)

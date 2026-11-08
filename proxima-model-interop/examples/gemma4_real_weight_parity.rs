@@ -694,7 +694,7 @@ fn main() {
         .iter()
         .find(|tensor| tensor.name == "token_embd.weight")
         .expect("token_embd.weight tensor present");
-    let layout = tensor.ggml_type.block_layout();
+    let layout = tensor.ggml_type.wire_shape();
     assert_eq!(
         tensor.ggml_type,
         proxima_gguf::types::GgmlType::Q6_K,
@@ -1764,7 +1764,7 @@ fn main() {
         .tensor_data_range(fused_tensor, file_bytes.len() as u64)
         .expect("fused tensor data range");
     let fused_source = &file_bytes[fused_range.start as usize..fused_range.end as usize];
-    let fused_layout = fused_ggml_type.block_layout();
+    let fused_layout = fused_ggml_type.wire_shape();
     let bytes_per_row_gateup =
         (embedding as u64 / fused_layout.block_elements) * fused_layout.block_bytes;
     let gate_bytes = architecture.expert_feed_forward as u64 * bytes_per_row_gateup;
@@ -1780,7 +1780,7 @@ fn main() {
         .tensor_data_range(down_tensor, file_bytes.len() as u64)
         .expect("down tensor data range");
     let down_full_source = &file_bytes[down_range.start as usize..down_range.end as usize];
-    let down_layout = down_ggml_type.block_layout();
+    let down_layout = down_ggml_type.wire_shape();
     let bytes_per_row_down = (architecture.expert_feed_forward as u64 / down_layout.block_elements)
         * down_layout.block_bytes;
     let per_expert_bytes_down = embedding as u64 * bytes_per_row_down;

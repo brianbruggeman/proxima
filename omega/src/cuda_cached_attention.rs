@@ -2,7 +2,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{BoundOp, BoundOpKind, DType, NumericPolicy};
+use proxima_tensor::{BoundOp, BoundOpKind};
+use proxima_numeric::{DType, NumericPolicy};
 
 use crate::cuda::mma_gemm::MMA_INSTRUCTION;
 use crate::cuda::{

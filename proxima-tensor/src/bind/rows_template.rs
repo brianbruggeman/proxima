@@ -329,10 +329,11 @@ mod tests {
     use alloc::vec;
 
     use super::*;
-    use crate::dtype::DType;
+    use proxima_numeric::DType;
     use crate::map::{self, IndexMap};
     use crate::op::{Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
-    use crate::{NumericPolicy, bind_with_fusion, shape};
+    use crate::{bind_with_fusion, shape};
+    use proxima_numeric::{NumericPolicy};
 
     type Check = Result<(), &'static str>;
 

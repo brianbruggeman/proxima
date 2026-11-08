@@ -30,7 +30,8 @@ use proxima_tensor::bind::BoundOp;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::spec::LayerCacheRoots;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use proxima_tensor::{NodeId, NumericPolicy, bind_with_fusion, infer, prune_dead};
+use proxima_tensor::{NodeId, bind_with_fusion, infer, prune_dead};
+use proxima_numeric::{NumericPolicy};
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";

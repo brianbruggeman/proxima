@@ -68,10 +68,8 @@ fn run() -> anyhow::Result<()> {
     use proxima_gguf::parser::{GgufEvent, GgufParser};
     use proxima_gguf::pipe::ParsedGguf;
     use proxima_gguf::types::GgmlType;
-    use proxima_tensor::{
-        DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, QuantizedBlock, Reduce,
-        ReduceInit, ScalarOp, append, bind, correct_packed_matmul_layouts, infer, projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, bind, correct_packed_matmul_layouts, infer, projection};
+    use proxima_numeric::{DType, NumericPolicy};
 
     const REAL_GEMMA4_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
     const TOKENS: u32 = 510;

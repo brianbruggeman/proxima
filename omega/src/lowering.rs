@@ -1,7 +1,7 @@
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
-pub use proxima_primitives::Codec;
+pub use proxima_numeric::codec::Codec;
 use proxima_tensor::{BoundOp, NodeId, ScalarOp};
 
 /// What buffer index `n` in [`Kernel::bindings`] is for, in dispatch order:
@@ -50,7 +50,7 @@ pub enum Binding {
 /// codec — the single source of truth [`emit`] (via the `quantized` slice it
 /// derives) and the Metal driver's `correct_packed_matmul_layouts` call both
 /// need, generalizing the Q4_K-only `BTreeSet<NodeId>` this crate carried
-/// before Q6_K support existed. `Codec` is `proxima_primitives::Codec` — the
+/// before Q6_K support existed. `Codec` is `proxima_numeric::codec::Codec` — the
 /// source-neutral packed-layout identity (see that type's own doc); this
 /// crate's per-codec derivations (`cache_token`, `block_bytes`,
 /// `supports_pair_dot`, `rows_per_simdgroup`, `from_quantized_block`) live as
@@ -160,7 +160,7 @@ pub fn dispatch_bindings(resolved: &BoundOp) -> Vec<Binding> {
 
 #[cfg(test)]
 mod tests {
-    use proxima_tensor::{NumericPolicy, NumericRewrite, admit};
+    use proxima_numeric::{NumericPolicy, NumericRewrite, admit};
 
     fn policy_from_bits(bits: u8) -> NumericPolicy {
         NumericPolicy::bit_exact()

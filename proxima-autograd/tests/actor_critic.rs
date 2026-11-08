@@ -52,7 +52,7 @@ use proxima_autograd::activation::{relu, softmax};
 use proxima_autograd::adjoint::{Differentiated, differentiate};
 use proxima_autograd::optimizer::{AdamConfig, AdamOperands, adam_step, step_input};
 use proxima_tensor::cpu::{Evaluated, evaluate_named};
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 

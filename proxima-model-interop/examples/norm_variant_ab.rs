@@ -59,7 +59,8 @@ use omega::{
 };
 
 #[cfg(feature = "metal-attn-variants")]
-use proxima_tensor::{BoundOp, BoundOpKind, DType, Layout, NodeId, NumericPolicy};
+use proxima_tensor::{BoundOp, BoundOpKind, Layout, NodeId};
+use proxima_numeric::{DType, NumericPolicy};
 
 #[cfg(feature = "metal-attn-variants")]
 fn parse_attention_variant(value: &str) -> Result<AttentionVariant, String> {
@@ -315,7 +316,7 @@ mod attention_variant_tests {
         assert_eq!(selected_manifest.cache_codec, Some(omega::Codec::BFloat16));
         assert_eq!(
             selected_manifest.accumulator,
-            proxima_tensor::DType::FLOAT32
+            proxima_numeric::DType::FLOAT32
         );
         assert_ne!(
             selected_manifest.dispatch_identity,
@@ -370,7 +371,7 @@ mod harness {
     use proxima_gguf::parse_complete;
     use proxima_gguf::types::GgmlType;
     use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig, TokenEvent};
-    use proxima_tensor::NumericPolicy;
+    use proxima_numeric::NumericPolicy;
 
     use super::attention_reference;
     use super::cell::Cell;

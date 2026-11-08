@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 use omega::backend::{Plan, carry_cuda_rows, carry_cuda_state, drain_cuda_appended_rows, drain_cuda_carried};
 use proxima_gguf::GgmlType;
 use proxima_primitives::sync::blocking::Mutex;
-use proxima_tensor::NumericPolicy;
+use proxima_numeric::NumericPolicy;
 use proxima_tensor::op::NodeId;
 
 use crate::serving::{GdnPrefillBackend, ServingConfig};

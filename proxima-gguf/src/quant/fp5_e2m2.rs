@@ -3,7 +3,7 @@
 //! Teaching pointer: wraps the generic [`float_layout`] codec with [`FloatLayout::E2M2`]; only the
 //! non-finite rejection lives here. Packed storage is [`crate::quant::cold_float`].
 
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 use crate::quant::QuantError;
 use crate::quant::float_layout;

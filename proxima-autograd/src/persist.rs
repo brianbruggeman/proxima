@@ -27,7 +27,7 @@ use std::path::Path;
 use proxima_safetensors::{
     HEADER_LEN_BYTES, SafetensorsError, SafetensorsModel, SafetensorsParser, TensorPayload,
 };
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 use proxima_tensor::op::{Extent, Op};
 
 use crate::train::State;
@@ -239,7 +239,7 @@ pub fn load_state(program: &[Op], path: &Path) -> Result<State, PersistError> {
 mod tests {
     use alloc::vec;
 
-    use proxima_tensor::dtype::DType as TensorDType;
+    use proxima_numeric::DType as TensorDType;
     use proxima_tensor::op::{self, Extent, NodeId};
 
     use super::*;
@@ -360,11 +360,11 @@ mod tests {
             .expect("manifest parses");
 
         let w_entry = manifest.tensor("w").expect("w present in the manifest");
-        assert_eq!(w_entry.dtype, proxima_tensor::DType::FLOAT32);
+        assert_eq!(w_entry.dtype, proxima_numeric::DType::FLOAT32);
         assert_eq!(w_entry.shape, vec![2, 3]);
 
         let b_entry = manifest.tensor("b").expect("b present in the manifest");
-        assert_eq!(b_entry.dtype, proxima_tensor::DType::FLOAT32);
+        assert_eq!(b_entry.dtype, proxima_numeric::DType::FLOAT32);
         assert_eq!(b_entry.shape, vec![3]);
     }
 

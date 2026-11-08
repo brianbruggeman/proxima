@@ -1,9 +1,10 @@
 use std::io;
 
 use omega::config::RuntimeConfig;
-use proxima_primitives::Codec;
+use proxima_numeric::codec::Codec;
 use proxima_tensor::spec::{RopePairing, fused_rope_pair, input_leaf};
-use proxima_tensor::{DType, Extent, QuantizedBlock};
+use proxima_tensor::{Extent, QuantizedBlock};
+use proxima_numeric::{DType};
 use serde_json::{Value, json};
 
 use super::engine::Executor;

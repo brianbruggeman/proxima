@@ -1,5 +1,5 @@
 use super::*;
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 /// A live Metal buffer handle — the shape every device-buffer table and
 /// return value in this file traffics in.
@@ -824,7 +824,7 @@ pub struct Plan {
     /// context-chunk merge) consults it via [`Plan::numeric_policy`].
     pub(super) numeric_policy: NumericPolicy,
     /// Operand fragment format used by dense tiled matrix multiplication.
-    pub(super) dense_mma_input_layout: Option<proxima_primitives::float_layout::FloatLayout>,
+    pub(super) dense_mma_input_layout: Option<proxima_numeric::float_layout::FloatLayout>,
     /// MMA selection that keys every attention pipeline this plan resolves.
     pub(super) attention_mma_selection: crate::msl::AttentionMmaSelection,
     /// Row schedule (K/V reuse and tile height) that keys every attention pipeline this plan resolves.

@@ -16,6 +16,7 @@ std = ["alloc", "thiserror/std"]
 alloc-count = ["std"]
 
 [dependencies]
+proxima-numeric = { version = "0.1.0", path = "../proxima-numeric" }
 half = { version = "2.7.1", default-features = false }
 proxima-primitives = { workspace = true, default-features = false, optional = true }
 proxima-tensor = { workspace = true, optional = true }

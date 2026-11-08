@@ -17,7 +17,8 @@
 use std::collections::BTreeMap;
 
 use proxima_tensor::spec::gqa_cached_forward_program;
-use proxima_tensor::{NumericPolicy, bind, infer};
+use proxima_tensor::{bind, infer};
+use proxima_numeric::{NumericPolicy};
 
 fn main() {
     // openchat-3.5-1210 / Mistral-7B
@@ -86,7 +87,7 @@ fn main() {
     let mut source_len_max = 0usize;
     let mut tiled_gemm_kernels = 0usize;
     for op in &bound {
-        match omega::emit(op, &no_packed, proxima_tensor::NumericPolicy::default()) {
+        match omega::emit(op, &no_packed, proxima_numeric::NumericPolicy::default()) {
             Ok(kernel) => {
                 emitted += 1;
                 source_len_total += kernel.source.len();

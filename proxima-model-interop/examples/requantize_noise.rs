@@ -22,7 +22,7 @@ use proxima_gguf::quant::q8_0::{self, BLOCK_BYTES, QK8_0};
 use proxima_gguf::quant::scaled_float as fp6;
 use proxima_gguf::{GgmlType, GgufModel, TensorPayload, parse_complete, write_complete};
 use proxima_model_interop::{CodecPolicySettings, gguf_tensor_as_f32, policy_selects};
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 const USAGE: &str = "usage: requantize_noise [--rms | --bits <0|7|6|5>] --policy <default|class,class> --job <source>=<output> ...";
 

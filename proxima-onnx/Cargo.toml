@@ -69,6 +69,7 @@ tile-pipeline-bench = ["std"]
 stage-parallel-bench = ["tile-pipeline-bench"]
 
 [dependencies]
+proxima-numeric = { version = "0.1.0", path = "../proxima-numeric" }
 proxima-primitives = { workspace = true, default-features = false }
 proxima-protocols = { workspace = true, default-features = false, features = ["protobuf_wire"] }
 thiserror.workspace = true
@@ -83,7 +84,7 @@ workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 temp-env.workspace = true
-proxima-tensor = { features = ["std", "test-support"], path = "../proxima-tensor", version = "0.1.0", default-features = false }
+proxima-tensor = { features = ["std", "test-support", "config"], path = "../proxima-tensor", version = "0.1.0", default-features = false }
 criterion.workspace = true
 proxima-core = { path = "../proxima-core", version = "0.1.0", default-features = false, features = ["alloc"] }
 hdrhistogram.workspace = true

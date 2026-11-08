@@ -469,7 +469,7 @@ mod tests {
     use alloc::vec;
 
     use proxima_tensor::cpu;
-    use proxima_tensor::dtype::DType;
+    use proxima_numeric::DType;
     use proxima_tensor::map::{self, IndexMap};
     use proxima_tensor::op::{Extent, NodeId, Op, ScalarOp, append};
 

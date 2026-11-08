@@ -66,16 +66,13 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_gguf::GgmlType;
 pub use crate::lowering::{Binding, Codec, PackedOperands};
 pub(crate) use crate::lowering::{
     dispatch_bindings, gather_count, gather_is_reduction_invariant, gather_slots,
     is_cooperative_reduce_op, reduction_dims, with_reduction_dims,
 };
-use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DType, Keep, Layout, Lookup, NodeId, NumericPolicy,
-    NumericRewrite, ReduceInit, ScalarOp, StepArg, admit,
-};
+use proxima_tensor::{BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp, StepArg};
+use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 // `QuantizedBlock` itself is re-exported from the crate root only behind
 // `std` (see `proxima_tensor::lib`'s own `#[cfg(feature = "std")]` on it),
 // so `codec_from_quantized_block` -- the only user of it in this
@@ -253,10 +250,10 @@ mod cooperative_fold_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod index_narrowing_tests;
-#[cfg(all(test, feature = "float-layout-dtype"))]
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_int_tests;
-#[cfg(all(test, feature = "float-layout-dtype"))]
+#[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_render_tests;
 #[cfg(test)]

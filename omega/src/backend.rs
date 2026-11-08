@@ -75,7 +75,8 @@ use std::sync::OnceLock;
 use std::time::Instant;
 
 use proxima_tensor::cpu::{CpuStepPlan, ExpertSource};
-use proxima_tensor::{Evaluated, NodeId, NumericPolicy, Op, QuantizedBlock, TensorError};
+use proxima_tensor::{Evaluated, NodeId, Op, QuantizedBlock, TensorError};
+use proxima_numeric::{NumericPolicy};
 
 #[cfg(feature = "cpu")]
 use crate::lowering::Codec;
@@ -469,7 +470,8 @@ impl CandidateMeasurement {
 /// # {
 /// use omega::backend::{plan_named_with_config, execute_plan_named};
 /// use omega::config::RuntimeConfig;
-/// use proxima_tensor::{DType, Extent, NodeId, Op, QuantizedBlock, ScalarOp};
+/// use proxima_numeric::DType;
+/// use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock, ScalarOp};
 /// use proxima_tensor::map::{self, IndexMap};
 /// let program = vec![
 ///     Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(2)], name: Some("input".into()) },
@@ -2158,9 +2160,8 @@ mod tests {
     use proxima_tensor::NodeId;
     use proxima_tensor::cpu::ExpertSource;
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    use proxima_tensor::{
-        DType, Extent, IndexMap, NumericPolicy, Op, QuantizedBlock, ScalarOp, append, projection,
-    };
+    use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+    use proxima_numeric::{DType, NumericPolicy};
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use super::MetalError;
@@ -2292,7 +2293,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                proxima_tensor::NumericPolicy::default(),
+                proxima_numeric::NumericPolicy::default(),
             ),
             "cpu engine must not be selectable when its feature is off",
         );
@@ -2316,7 +2317,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                proxima_tensor::NumericPolicy::default(),
+                proxima_numeric::NumericPolicy::default(),
             ),
             "metal driver must not be selectable when its feature is off",
         );
@@ -2390,7 +2391,7 @@ mod tests {
                 &[],
                 &[],
                 &[],
-                proxima_tensor::NumericPolicy::default(),
+                proxima_numeric::NumericPolicy::default(),
             ),
             "gpu with no driver compiled must never silently run on cpu",
         );

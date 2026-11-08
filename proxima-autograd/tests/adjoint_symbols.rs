@@ -21,7 +21,7 @@ use proxima_autograd::AutogradError;
 use proxima_autograd::adjoint::{Differentiated, differentiate, differentiate_bound};
 use proxima_tensor::TensorError;
 use proxima_tensor::cpu::evaluate_named;
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 use proxima_tensor::shape;

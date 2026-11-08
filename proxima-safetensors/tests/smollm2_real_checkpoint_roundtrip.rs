@@ -22,7 +22,7 @@ use std::io::{Read, Seek, SeekFrom};
 use proxima_safetensors::{
     Manifest, SafetensorsModel, SafetensorsParser, TensorPayload, write_complete,
 };
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 
 const REAL_SMOLLM2_SAFETENSORS_PATH: &str =
     "/Users/brianbruggeman/.lmstudio/models/HuggingFaceTB/SmolLM2-135M-Instruct/model.safetensors";

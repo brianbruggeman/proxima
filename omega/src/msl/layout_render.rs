@@ -1,6 +1,6 @@
 //! The one MSL emitter over a [`FloatLayout`]: load (decode) and store (encode) from the fields.
 //!
-//! Teaching pointer: `proxima_primitives::float_layout_codec::{decode, encode}` is the CPU algorithm
+//! Teaching pointer: `proxima_numeric::float_layout_codec::{decode, encode}` is the CPU algorithm
 //! and this module renders the same integer steps as MSL, so the two agree code for code. A layout
 //! whose fields equal a Metal hardware type (`float`, `half`, `bfloat`) renders through that type's
 //! conversion; every other layout renders as field arithmetic whose only inputs are the numeric
@@ -12,8 +12,8 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_primitives::block_layout::{BlockLayout, CodeRegion, Coded, Field, Plane};
-use proxima_primitives::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::block_layout::{BlockLayout, CodeRegion, Coded, Field, Plane};
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
 
 pub(crate) const F32_FRACTION_BITS: u32 = 23;
 pub(crate) const F32_INFINITY_BITS: u32 = 0x7f80_0000;

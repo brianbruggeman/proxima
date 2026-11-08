@@ -6,12 +6,12 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::mem;
 use std::path::{Component, Path, PathBuf};
 
-use proxima_primitives::float_layout::FloatLayout;
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_primitives::pipe::sans_io::Outcome;
 use proxima_safetensors::{
     MAX_HEADER_BYTES, Manifest, SafetensorsParser, TensorEntry, parse_sharded_index,
 };
-use proxima_tensor::DType;
+use proxima_numeric::DType;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -865,9 +865,9 @@ mod tests {
         convert_checkpoint, convert_checkpoint_with_scale, parse_format, safe_shard_path,
     };
     use proxima_gguf::quant::cold_float::dequantize;
-    use proxima_primitives::float_layout::FloatLayout;
+    use proxima_numeric::float_layout::FloatLayout;
     use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
-    use proxima_tensor::DType;
+    use proxima_numeric::DType;
     use std::collections::BTreeMap;
     use std::fs;
     use std::path::Path;

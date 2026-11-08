@@ -108,7 +108,7 @@ fn real_blocks_use_only_the_three_ternary_code_points() {
 
 #[test]
 fn prismml_wire_id_and_block_size_match_ggml_h_and_ggml_common_h() {
-    let layout = GgmlType::Ptq1_0.block_layout();
+    let layout = GgmlType::Ptq1_0.wire_shape();
     assert_eq!(GgmlType::Ptq1_0.to_wire(), 143);
     assert_eq!(GgmlType::from_wire(143), Some(GgmlType::Ptq1_0));
     assert_eq!(layout.block_elements, 128);

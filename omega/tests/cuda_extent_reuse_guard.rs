@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 
 use omega::{EmitDevice, emit_cuda_reusing, emit_cuda_with_policy};
 use proxima_tensor::spec::qk_norm_cached_forward_program;
-use proxima_tensor::{BoundOp, NodeId, NumericPolicy, bind_with_fusion, infer, prune_dead};
+use proxima_tensor::{BoundOp, NodeId, bind_with_fusion, infer, prune_dead};
+use proxima_numeric::{NumericPolicy};
 
 const VOCAB: u32 = 64;
 const EMBEDDING: u32 = 512;

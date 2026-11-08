@@ -23,7 +23,8 @@
 
 use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::instrument::{path_totals, reset_path};
-use proxima_tensor::{BoundOpKind, NumericPolicy, bind, infer};
+use proxima_tensor::{BoundOpKind, bind, infer};
+use proxima_numeric::{NumericPolicy};
 
 mod support;
 use support::{as_named_blocks, production_numeric_policy, qwen3_gqa_qk_norm_forward_fixture};

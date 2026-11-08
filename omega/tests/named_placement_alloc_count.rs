@@ -3,10 +3,8 @@
 
 use std::collections::BTreeMap;
 
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append,
-    projection,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType};
 use proxima_test::alloc_count::{CountingAllocator, recorded_sizes, reset};
 
 #[global_allocator]
@@ -45,7 +43,7 @@ fn a_named_placed_input_does_not_allocate_a_tensor_sized_placeholder() {
         &[],
         &[("state", QuantizedBlock::Float32(&state))],
         &[state_sum],
-        proxima_tensor::NumericPolicy::default(),
+        proxima_numeric::NumericPolicy::default(),
     )
     .expect("plans a production-sized recurrent-state reduction");
     let state_buffer = omega::allocate_placed_buffer(STATE_BYTES)

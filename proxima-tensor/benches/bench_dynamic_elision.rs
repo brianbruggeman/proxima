@@ -48,9 +48,8 @@ use criterion::Criterion;
 use proxima_tensor::cpu::{
     build_static_arena, evaluate_named_with_arena, evaluate_named_with_arena_masked,
 };
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, map};
+use proxima_numeric::{DType};
 
 /// One block-topology size: `num_blocks` independent `[block_out,
 /// block_in] @ [block_in]` matmuls. `large` is exactly 4x `small`'s total

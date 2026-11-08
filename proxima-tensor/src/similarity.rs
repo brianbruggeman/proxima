@@ -17,7 +17,7 @@ use alloc::vec::Vec;
 
 use crate::TensorError;
 use crate::cpu::evaluate;
-use crate::dtype::DType;
+use proxima_numeric::DType;
 use crate::map::{self, IndexMap};
 use crate::op::{self, Extent, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp};
 

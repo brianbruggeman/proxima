@@ -28,10 +28,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use criterion::Criterion;
-use proxima_tensor::{
-    DType, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, TypedBuffer, append,
-    evaluate_typed, map,
-};
+use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, TypedBuffer, append, evaluate_typed, map};
+use proxima_numeric::{DType};
 
 /// One `Conv` layer's shape: `co` output channels, `ci` input channels,
 /// `oy`/`ox` output spatial extent, `kh`/`kw` kernel extent -- exactly the

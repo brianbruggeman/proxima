@@ -36,7 +36,7 @@
 
 use alloc::vec::Vec;
 
-use proxima_tensor::dtype::DType;
+use proxima_numeric::DType;
 use proxima_tensor::map::{self, IndexMap};
 use proxima_tensor::op::{NodeId, Op, ReduceInit, ScalarOp};
 
@@ -60,7 +60,7 @@ use crate::expr;
 ///
 /// ```
 /// use proxima_autograd::norm::dropout;
-/// use proxima_tensor::dtype::DType;
+/// use proxima_numeric::DType;
 /// use proxima_tensor::op::{self, Extent, Op};
 ///
 /// let mut program = Vec::new();

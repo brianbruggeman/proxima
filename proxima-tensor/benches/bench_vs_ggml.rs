@@ -29,10 +29,8 @@ use std::time::Duration;
 use criterion::Criterion;
 use ggml_ffi::*;
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{
-    AxisIndex, AxisTerm, DType, Extent, IndexMap, Keep, NodeId, NumericPolicy, Op, Reduce,
-    ReduceInit, ScalarOp, append, evaluate, evaluate_parallel, map,
-};
+use proxima_tensor::{AxisIndex, AxisTerm, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, evaluate, evaluate_parallel, map};
+use proxima_numeric::{DType, NumericPolicy};
 use std::hint::black_box;
 
 /// The last node `program` builds -- what every fixture in this file treats

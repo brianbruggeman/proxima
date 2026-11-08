@@ -180,7 +180,7 @@ const PTQ1_0_WIRE: i32 = 143;
 /// `uint16_t` (`ggml-common.h:6`), `QK_K` is 256 (`ggml-common.h:89`),
 /// `K_SCALE_SIZE` is 12 (`ggml-common.h:90`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BlockLayout {
+pub struct WireBlockShape {
     pub block_elements: u64,
     pub block_bytes: u64,
 }
@@ -394,9 +394,9 @@ impl GgmlType {
     /// `blck_size`/`type_size`, `ggml.c:1174,1178`). Dequantizing the
     /// packed values themselves stays out of scope; this only sizes them.
     #[must_use]
-    pub const fn block_layout(self) -> BlockLayout {
-        const fn layout(block_elements: u64, block_bytes: u64) -> BlockLayout {
-            BlockLayout {
+    pub const fn wire_shape(self) -> WireBlockShape {
+        const fn layout(block_elements: u64, block_bytes: u64) -> WireBlockShape {
+            WireBlockShape {
                 block_elements,
                 block_bytes,
             }
@@ -492,22 +492,22 @@ mod tests {
     #[test]
     fn ggml_type_block_layout_matches_known_sizes() {
         assert_eq!(
-            GgmlType::F32.block_layout(),
-            BlockLayout {
+            GgmlType::F32.wire_shape(),
+            WireBlockShape {
                 block_elements: 1,
                 block_bytes: 4
             }
         );
         assert_eq!(
-            GgmlType::Q4_0.block_layout(),
-            BlockLayout {
+            GgmlType::Q4_0.wire_shape(),
+            WireBlockShape {
                 block_elements: 32,
                 block_bytes: 18
             }
         );
         assert_eq!(
-            GgmlType::Q6_K.block_layout(),
-            BlockLayout {
+            GgmlType::Q6_K.wire_shape(),
+            WireBlockShape {
                 block_elements: 256,
                 block_bytes: 210
             }

@@ -46,10 +46,8 @@ use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
 pub use proxima_tensor::Lowered;
-use proxima_tensor::{
-    AxisIndex, AxisTerm, DType, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, Reduce,
-    ReduceInit, ScalarOp, append, projection,
-};
+use proxima_tensor::{AxisIndex, AxisTerm, Extent, IndexMap, IndexPattern, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, projection};
+use proxima_numeric::{DType};
 use thiserror::Error;
 
 use crate::messages::{

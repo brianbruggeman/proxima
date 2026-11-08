@@ -291,6 +291,7 @@ include = ["src/**", "Cargo.toml", "README.md", "LICENSE*"]
 name = "proxima"
 
 [dependencies]
+proxima-numeric = { version = "0.1.0", path = "proxima-numeric" }
 proxima-macros = { workspace = true, optional = true }
 proxima-test = { workspace = true }
 proxima-core = { workspace = true }
@@ -398,7 +399,6 @@ proxima-vm = { version = "0.1.0", path = "tools/proxima-vm", default-features = 
 proxima-onnx = { workspace = true, features = ["std"], optional = true }
 proxima-tensor = { workspace = true, features = ["std"], optional = true }
 proxima-tokenizer = { version = "0.1.0", path = "proxima-tokenizer", features = ["gguf"] }
-proxima-numeric = { version = "0.1.0", path = "proxima-numeric" }
 
 [dependencies.tracing-subscriber]
 workspace = true
