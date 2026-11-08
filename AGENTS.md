@@ -188,4 +188,15 @@ Messages are lowercase, terse, causal — they say *why*; the fields carry *what
 
 ## Build
 
+### Landing gate
+
+`scripts/feature-target-gate.sh` compiles every **test target** of the crates a branch touches, once per
+feature that gates test-only code (`std` and `std,metal-attn-split-rows` for `proxima-tensor`; `std`,
+`std,metal,instrument` and `std,cuda` for `proxima-model-interop`). It exists because
+`cargo check --all-targets --features std` prints `Finished` for every target whose gating feature is
+unset, and a dependency's tests are never built by its consumers — so an uncompilable
+`#[cfg(feature = "...")]` test module is invisible to every other gate. Twice on 2026-11-08 a builder
+call site went stale inside `#[cfg(feature = "metal-attn-split-rows")]` and no named acceptance command
+compiled it. Run the script before the final commit; `pre-push` runs it for pushes to `main`.
+
 Prefer debug builds for speed. Release only for CLI testing or timing.
