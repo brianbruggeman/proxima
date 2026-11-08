@@ -7,8 +7,19 @@
 //! Falcon   [\p{P}\$\+<=>\^~\|`]+ |  gpt2  |  [0-9][0-9][0-9]
 //! Gpt2     gpt2
 //! DigitIsolatedGpt2   \p{N}  |  gpt2
+//! Flint    \p{N}{1,3}  |  [一-龥぀-ゟ゠-ヿ]+  |  flint-word
 //! gpt2 = 's|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)
+//! flint-word = [^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?
+//!            | ?[\p{P}\p{S}]+[\r\n]* | \s*[\r\n]+ | \s+(?!\S) | \s+
 //! ```
+//!
+//! The flint rule is `llm_tokenizer_bpe`'s `LLAMA_VOCAB_PRE_TYPE_FLINT` case at
+//! llama.cpp cd959bae9 `src/llama-vocab.cpp:285-290`. It has no hand-written
+//! matcher (`unicode_regex_split_custom`, `src/unicode.cpp:1219-1256`), so it
+//! runs the generic `std::regex`-over-collapsed-text path, where
+//! `unicode_regex_split` (`src/unicode.cpp:1491-1512`) collapses `\p{Lu}`,
+//! `\p{Lt}`, `\p{Lm}`, `\p{Lo}` and `\p{Ll}` onto one LETTER byte -- which is
+//! why the two case-alternatives here are one letter-or-mark class.
 //!
 //! Class passes keep matches and the gaps between them as pieces
 //! (`unicode_regex_split_stl`); the gpt2 pass is llama.cpp's hand-written
@@ -21,7 +32,10 @@
 
 use alloc::vec::Vec;
 
-use crate::pretokenize::{is_digit, is_letter, is_punctuation, is_whitespace};
+use crate::pretokenize::{
+    contraction_len as possessive_len, is_digit, is_letter, is_mark, is_punctuation, is_symbol,
+    is_whitespace, match_trailing_whitespace, match_whitespace_with_newline,
+};
 
 const ASCII_PUNCT_CLASS: &str = "!\"#%&'()*,-./:;?@[\\]_{}$+<=>^~|";
 
@@ -42,6 +56,12 @@ pub(crate) enum Pass {
     EachDigit,
     /// `[0-9][0-9][0-9]`
     AsciiDigitTriples,
+    /// `\p{N}{1,3}` -- any digit run, in threes counted from the left
+    NumberTriples,
+    /// `[一-龥぀-ゟ゠-ヿ]+`
+    CjkRuns,
+    /// The flint word alternation, see this module's doc block.
+    FlintWords,
 }
 
 pub(crate) const DEFAULT_PASSES: [Pass; 4] = [
@@ -57,6 +77,7 @@ pub(crate) const FALCON_PASSES: [Pass; 3] = [
 ];
 pub(crate) const GPT2_PASSES: [Pass; 1] = [Pass::Gpt2Words];
 pub(crate) const DIGIT_ISOLATED_GPT2_PASSES: [Pass; 2] = [Pass::EachDigit, Pass::Gpt2Words];
+pub(crate) const FLINT_PASSES: [Pass; 3] = [Pass::NumberTriples, Pass::CjkRuns, Pass::FlintWords];
 
 pub(crate) fn run_passes(chars: &[char], passes: &[Pass]) -> Pieces {
     if chars.is_empty() {
@@ -71,6 +92,9 @@ pub(crate) fn run_passes(chars: &[char], passes: &[Pass]) -> Pieces {
             Pass::DigitRuns => split_runs(chars, &pieces, is_digit),
             Pass::EachDigit => split_each(chars, &pieces, is_digit),
             Pass::AsciiDigitTriples => split_digit_triples(chars, &pieces),
+            Pass::NumberTriples => split_number_triples(chars, &pieces),
+            Pass::CjkRuns => split_runs(chars, &pieces, is_cjk_run_char),
+            Pass::FlintWords => split_flint_words(chars, &pieces),
         };
     }
     pieces
@@ -147,6 +171,143 @@ fn split_digit_triples(chars: &[char], pieces: &[(usize, usize)]) -> Pieces {
     out
 }
 
+/// `\p{N}{1,3}`: every digit run cut into threes counted from the left.
+fn split_number_triples(chars: &[char], pieces: &[(usize, usize)]) -> Pieces {
+    let mut out = Vec::with_capacity(pieces.len());
+    for &(start, end) in pieces {
+        let mut gap_start = start;
+        let mut index = start;
+        while index < end {
+            if !is_digit(chars[index]) {
+                index += 1;
+                continue;
+            }
+            if gap_start < index {
+                out.push((gap_start, index));
+            }
+            let mut chunk_end = index;
+            while chunk_end < end && chunk_end - index < 3 && is_digit(chars[chunk_end]) {
+                chunk_end += 1;
+            }
+            out.push((index, chunk_end));
+            index = chunk_end;
+            gap_start = index;
+        }
+        if gap_start < end {
+            out.push((gap_start, end));
+        }
+    }
+    out
+}
+
+/// `[一-龥぀-ゟ゠-ヿ]+`: CJK unified ideographs through U+9FA5, hiragana, katakana.
+fn is_cjk_run_char(character: char) -> bool {
+    matches!(
+        character,
+        '\u{4E00}'..='\u{9FA5}' | '\u{3040}'..='\u{309F}' | '\u{30A0}'..='\u{30FF}'
+    )
+}
+
+fn split_flint_words(chars: &[char], pieces: &[(usize, usize)]) -> Pieces {
+    let mut out = Vec::with_capacity(pieces.len());
+    for &(start, end) in pieces {
+        let mut gap_start = start;
+        let mut position = start;
+        while position < end {
+            match flint_token_len(&chars[position..end]) {
+                Some(length) => {
+                    if gap_start < position {
+                        out.push((gap_start, position));
+                    }
+                    out.push((position, position + length));
+                    position += length;
+                    gap_start = position;
+                }
+                None => position += 1,
+            }
+        }
+        if gap_start < end {
+            out.push((gap_start, end));
+        }
+    }
+    out
+}
+
+/// The first alternative of the flint rule that matches at the start of
+/// `chars`, in llama.cpp's order. `None` means no alternative matches here, so
+/// the char joins the gap `unicode_regex_split_stl` keeps between matches.
+fn flint_token_len(chars: &[char]) -> Option<usize> {
+    flint_word_len(chars)
+        .or_else(|| flint_punct_len(chars))
+        .or_else(|| match_whitespace_with_newline(chars))
+        .or_else(|| match_trailing_whitespace(chars))
+}
+
+/// `[^\r\n\p{L}\p{N}]?[\p{L}\p{M}]+(?:'[sS]|...[dD])?`, with the possessive
+/// kept on the word it belongs to rather than split off.
+fn flint_word_len(chars: &[char]) -> Option<usize> {
+    let first = *chars.first()?;
+    let lead = if is_word_char(first) {
+        0
+    } else if flint_can_lead(first) && chars.get(1).is_some_and(|next| is_word_char(*next)) {
+        1
+    } else {
+        return None;
+    };
+    let run = chars[lead..]
+        .iter()
+        .take_while(|character| is_word_char(**character))
+        .count();
+    if run == 0 {
+        return None;
+    }
+    let word_end = lead + run;
+    Some(word_end + possessive_len(&chars[word_end..]).unwrap_or(0))
+}
+
+fn is_word_char(character: char) -> bool {
+    is_letter(character) || is_mark(character)
+}
+
+fn flint_can_lead(character: char) -> bool {
+    character != '\r' && character != '\n' && !is_word_char(character) && !is_digit(character)
+}
+
+/// ` ?[\p{P}\p{S}]+[\r\n]*`
+fn flint_punct_len(chars: &[char]) -> Option<usize> {
+    let first = *chars.first()?;
+    let lead = if is_punct_or_symbol(first) {
+        0
+    } else if first == ' ' && chars.get(1).is_some_and(|next| is_punct_or_symbol(*next)) {
+        1
+    } else {
+        return None;
+    };
+    let run = chars[lead..]
+        .iter()
+        .take_while(|character| is_punct_or_symbol(**character))
+        .count();
+    if run == 0 {
+        return None;
+    }
+    let after_punct = lead + run;
+    let newline_run = chars[after_punct..]
+        .iter()
+        .take_while(|character| **character == '\r' || **character == '\n')
+        .count();
+    Some(after_punct + newline_run)
+}
+
+/// `[\p{P}\p{S}]`: ASCII punctuation is the same set either way, so only the
+/// non-ASCII range needs the table's two category bits.
+fn is_punct_or_symbol(character: char) -> bool {
+    if character.is_ascii() {
+        character.is_ascii_punctuation()
+    } else {
+        is_punctuation(character) || is_symbol(character)
+    }
+}
+
 fn split_gpt2_words(chars: &[char], pieces: &[(usize, usize)]) -> Pieces {
     let mut out = Vec::with_capacity(pieces.len());
     for &(start, end) in pieces {
@@ -160,7 +321,7 @@ fn split_gpt2_words(chars: &[char], pieces: &[(usize, usize)]) -> Pieces {
     out
 }
 
-fn contraction_len(chars: &[char]) -> Option<usize> {
+fn gpt2_contraction_len(chars: &[char]) -> Option<usize> {
     if chars.first() != Some(&'\'') {
         return None;
     }
@@ -183,7 +344,7 @@ fn is_symbol_run_char(character: char) -> bool {
 }
 
 fn gpt2_token_len(chars: &[char]) -> usize {
-    if let Some(length) = contraction_len(chars) {
+    if let Some(length) = gpt2_contraction_len(chars) {
         return length;
     }
     let lead = usize::from(chars[0] == ' ');

@@ -1,3 +1,5 @@
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 use super::*;
@@ -147,6 +149,7 @@ fn pre_value_selects_the_pre_split_the_way_llama_cpp_maps_it() {
         ("deepseek-r1-qwen", PreType::SingleDigit),
         ("qwen35", PreType::SingleDigitMarks),
         ("default", PreType::Default),
+        ("flint", PreType::Flint),
     ] {
         let vocab = vocab_from_metadata(&byte_level_metadata(Some(pre)))
             .expect("a mapped pre value builds a vocab");
@@ -721,5 +724,197 @@ fn real_gemma4_vocab_merges_space_into_the_following_word() {
     assert_eq!(
         ids, expected_ids,
         "space must merge into the following word as its ▁ prefix, one id per word"
+    );
+}
+
+/// The flint checkpoint this spec serves (`general.architecture = flint`,
+/// sha256 63c2ecc4…): the tokenizer oracle was captured from it with
+/// llama.cpp b12110/cd959bae9, so the vocab under test is the same one the
+/// captured ids came from.
+const FLINT_GGUF: &str = "/Users/brianbruggeman/models/llm/flint-gguf/flint-UD-Q4_K_XL.gguf";
+const FLINT_GGUF_BYTES: u64 = 25_054_688_704;
+const FLINT_TOKENIZER_IDS: &str =
+    "../proxima-model-interop/tests/fixtures/flint/tokenizer_ids.json";
+
+/// reads only the metadata region of a real gguf (the growing-buffer
+/// `parse_complete` loop the openchat loader above uses), so a 25 GB checkpoint
+/// costs a few MiB of reads and never touches its tensor payload
+fn load_vocab_from_header_region(path: &Path) -> Vocab {
+    let mut file =
+        File::open(path).unwrap_or_else(|error| panic!("open real gguf fixture {path:?}: {error}"));
+    let mut header = Vec::new();
+    for capacity in [4usize << 20, 16 << 20, 64 << 20, 256 << 20] {
+        header.resize(capacity, 0);
+        file.seek(SeekFrom::Start(0)).expect("seek to gguf start");
+        let read = file.read(&mut header).expect("read gguf header region");
+        header.truncate(read);
+        if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header) {
+            return vocab_from_metadata(&parsed).expect("builds a vocab from real metadata");
+        }
+    }
+    panic!("gguf metadata region did not fit in 256 MiB of {path:?}");
+}
+
+/// The first position where the two id runs disagree, or `None` when they are
+/// identical -- the same comparison `proxima-model-interop`'s greedy-parity
+/// test applies to the committed llama.cpp ids (R10), restated here because a
+/// length difference must diverge at the shorter run rather than read as a
+/// match. A workspace dependency the other way would be a cycle: that crate
+/// depends on this one.
+fn first_id_divergence(expected: &[u32], actual: &[u32]) -> Option<usize> {
+    let shared = expected.len().min(actual.len());
+    (0..shared)
+        .find(|&index| expected[index] != actual[index])
+        .or_else(|| (expected.len() != actual.len()).then_some(shared))
+}
+
+/// The captured tokenizer record: the sample text llama.cpp tokenized and the
+/// ids it produced, with the build and command that produced them.
+fn flint_tokenizer_capture() -> (String, Vec<u32>) {
+    let text = std::fs::read_to_string(FLINT_TOKENIZER_IDS)
+        .unwrap_or_else(|error| panic!("read {FLINT_TOKENIZER_IDS}: {error}"));
+    let records: serde_json::Value = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("{FLINT_TOKENIZER_IDS} is not json: {error}"));
+    let record = records
+        .as_array()
+        .and_then(|records| records.first())
+        .unwrap_or_else(|| panic!("{FLINT_TOKENIZER_IDS} holds no capture record"));
+    let sample = record["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{FLINT_TOKENIZER_IDS}: the record has no text"))
+        .to_owned();
+    let ids = record["ids"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{FLINT_TOKENIZER_IDS}: the record has no ids array"))
+        .iter()
+        .map(|raw| {
+            u32::try_from(
+                raw.as_u64()
+                    .unwrap_or_else(|| panic!("{FLINT_TOKENIZER_IDS}: an id is not an integer")),
+            )
+            .unwrap_or_else(|error| panic!("{FLINT_TOKENIZER_IDS}: {error}"))
+        })
+        .collect();
+    (sample, ids)
+}
+
+/// the ids llama.cpp b12110 produced for the shared contraction text, captured
+/// with the same command as the rest of `llama-pre-tokenize`; the split under
+/// test and the llama3 one disagree on it, the captured sample sentence alone
+/// they do not
+const FLINT_CONTRACTIONS_TEXT: &str =
+    include_str!("../../tests/fixtures/llama-pre-tokenize/texts/arithmetic_with_contractions.txt");
+const FLINT_CONTRACTIONS_IDS: &str =
+    include_str!("../../tests/fixtures/llama-pre-tokenize/flint/arithmetic_with_contractions.ids");
+
+fn flint_contractions_ids() -> Vec<u32> {
+    serde_json::from_str(FLINT_CONTRACTIONS_IDS)
+        .unwrap_or_else(|error| panic!("flint contractions ids are not json: {error}"))
+}
+
+/// R9/AC11: `tokenizer.ggml.pre = "flint"` resolves to the flint pre-split,
+/// encoding that checkpoint's own sample text reproduces llama.cpp b12110's ids
+/// exactly and decodes back to the same text, and so does a text the flint and
+/// llama3 splits tokenize differently -- the sample sentence alone is
+/// reproduced by the llama3 split too, so it cannot show which rule ran.
+#[test]
+fn flint_pre_reads_the_gguf_and_reproduces_the_llama_cpp_ids() {
+    let path = proxima_gguf::checkpoint_resolver::require_checkpoint(
+        "PROXIMA_FLINT_GGUF",
+        FLINT_GGUF,
+        FLINT_GGUF_BYTES,
+    );
+    let vocab = load_vocab_from_header_region(&path);
+    assert_eq!(
+        vocab.pre_type(),
+        PreType::Flint,
+        "tokenizer.ggml.pre = \"flint\" on this checkpoint"
+    );
+    assert_eq!(vocab.len(), 150_144, "the captured token array length");
+
+    let (sample, captured_ids) = flint_tokenizer_capture();
+    assert_eq!(captured_ids.len(), 22, "the capture is a 22-id run");
+
+    let ids = crate::encode(&sample, &vocab).expect("encodes the captured sample text");
+    if let Some(index) = first_id_divergence(&captured_ids, &ids) {
+        panic!("id {index} differs: llama.cpp {captured_ids:?}, ours {ids:?} for {sample:?}");
+    }
+
+    let decoded = crate::decode(&ids, &vocab).expect("decodes the captured sample text");
+    assert_eq!(decoded, sample, "decode must recover the exact sample text");
+
+    let contractions_ids = flint_contractions_ids();
+    let contractions = crate::encode(FLINT_CONTRACTIONS_TEXT, &vocab)
+        .expect("encodes the captured contraction text");
+    if let Some(index) = first_id_divergence(&contractions_ids, &contractions) {
+        panic!(
+            "contraction text id {index} differs: llama.cpp {contractions_ids:?}, ours \
+             {contractions:?} for {FLINT_CONTRACTIONS_TEXT:?}"
+        );
+    }
+}
+
+/// AC17, the control AC11 is measured against: the captured ids pass that same
+/// comparison as their own reference, it reports a single planted id and a
+/// truncated run, and the same comparison rejects the llama3 split on a text
+/// the two rules disagree about -- so a mapping onto that rule cannot pass.
+#[test]
+fn control_flint_tokenizer_rejects_a_perturbed_id_run() {
+    let (_, captured_ids) = flint_tokenizer_capture();
+    assert!(
+        captured_ids.len() > 7,
+        "the capture is {} ids, too short to plant one at index 7",
+        captured_ids.len()
+    );
+
+    assert_eq!(
+        first_id_divergence(&captured_ids, &captured_ids),
+        None,
+        "the captured ids pass the comparison as their own reference"
+    );
+
+    let mut planted = captured_ids.clone();
+    planted[7] ^= 1;
+    assert_eq!(
+        first_id_divergence(&captured_ids, &planted),
+        Some(7),
+        "a comparison that cannot name a planted divergence proves nothing"
+    );
+    assert_eq!(
+        first_id_divergence(&captured_ids, &captured_ids[..captured_ids.len() - 1]),
+        Some(captured_ids.len() - 1),
+        "a truncated run diverges at the shorter length, not at a false match"
+    );
+
+    let path = proxima_gguf::checkpoint_resolver::require_checkpoint(
+        "PROXIMA_FLINT_GGUF",
+        FLINT_GGUF,
+        FLINT_GGUF_BYTES,
+    );
+    let vocab = load_vocab_from_header_region(&path);
+    let contractions_ids = flint_contractions_ids();
+    let under_the_llama3_rule = crate::encode(
+        FLINT_CONTRACTIONS_TEXT,
+        &vocab.with_pre_type(PreType::GroupedDigits),
+    )
+    .expect("encodes the contraction text under the llama3 split");
+    assert!(
+        first_id_divergence(&contractions_ids, &under_the_llama3_rule).is_some(),
+        "the llama3 split must not reproduce these ids, or the comparison proves nothing about \
+         the flint rule"
+    );
+
+    // the two splits differ on the attached possessive, not on case: llama.cpp
+    // collapses every letter category to one byte before matching, so a case
+    // change is never a boundary
+    assert_eq!(
+        crate::pretokenize::pretokenize("AbcDef", PreType::Flint),
+        crate::pretokenize::pretokenize("AbcDef", PreType::GroupedDigits),
+        "the collapsed class means case changes are not boundaries in this rule"
+    );
+    assert_ne!(
+        crate::pretokenize::pretokenize("don't", PreType::Flint),
+        crate::pretokenize::pretokenize("don't", PreType::GroupedDigits),
+        "but a possessive stays on its word, where llama3 splits it off"
     );
 }
