@@ -103,8 +103,9 @@ mod layout_text_tests;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{
-    CudaGridSpec, CudaKernel, EmitDevice, WARP_SIZE, emit_cuda, emit_cuda_on_device, emit_cuda_reusing,
-    emit_cuda_with_policy,
+    CudaGridSpec, CudaKernel, EmitDevice, HIP_WAVE64, HipGridSpec, HipKernel, HipWave, WARP_SIZE, emit_cuda,
+    emit_cuda_on_device, emit_cuda_reusing, emit_cuda_with_policy, emit_hip, emit_hip_at_wave,
+    emit_hip_reusing, emit_hip_with_policy, refit_hip_grid, refit_hip_kernel,
 };
 #[cfg(feature = "cuda-driver")]
 pub use cuda_driver::CudaF32Arena;
