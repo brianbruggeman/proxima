@@ -29,16 +29,25 @@ pub(super) fn find_axis(space: &[char], letter: char, notation: &str) -> Result<
 
 /// Parse `operand->iteration` into a full [`IndexPattern`], where an operand
 /// axis is either the legacy bare letter (`ik->ijk`, one axis per character)
-/// or, once the operand side contains a comma, one axis-expression per
-/// comma-separated term (`"s,2*i->si"`). The comma is what selects the
-/// richer grammar, so a legacy notation with no comma parses identically to
-/// [`parse_projection`] and every existing spelling is unaffected.
+/// or one axis-expression per comma-separated term (`"s,2*i->si"`). A comma
+/// selects the richer grammar, and so does an expression character a
+/// bare-letter map cannot contain (`*`, `+`, `@`): `"2*u+g->sug"` is one
+/// operand axis read through a scaled, shifted address (a flat per-head
+/// weight indexed as `kv_head * group + query_head`) and has no second axis
+/// to comma-separate. Every legacy spelling stays on the character-per-axis
+/// path, so it parses identically to [`parse_projection`]; a map that is
+/// neither (`"3->s"`) still raises [`TensorError::UnknownIndexLetter`] rather
+/// than silently becoming a constant-only axis.
 pub(super) fn parse_operand_pattern(notation: &str) -> Result<IndexPattern, TensorError> {
     let (operand, iteration) = notation
         .split_once("->")
         .ok_or_else(|| TensorError::MalformedMap(notation.to_string()))?;
     let space: Vec<char> = iteration.chars().collect();
-    let axes = if operand.contains(',') {
+    let expression_grammar = operand.contains(',')
+        || operand
+            .chars()
+            .any(|letter| matches!(letter, '*' | '+' | '@'));
+    let axes = if expression_grammar {
         operand
             .split(',')
             .map(|token| parse_axis_expr(token, &space, notation))

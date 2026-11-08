@@ -129,6 +129,11 @@ pub(super) fn append_cached_block_scores(
 /// `neg_infinity_local` is the caller's `-inf` constant for the causal mask;
 /// `None` emits it here, between the local scores and their select, which is
 /// where the dense builder always emitted it and where the program digests pin it.
+///
+/// `attention_sink` is the layer's `blk.N.attn_sinks.weight` leaf when the
+/// schedule sets the knob; `group` is the query-heads-per-key-head ratio the
+/// sink's per-query-head index composes with, and is read only when a sink is
+/// present.
 #[expect(
     clippy::too_many_arguments,
     reason = "the combine reads both blocks' operands; folding them into a struct would be a type that only carries arguments"
@@ -145,6 +150,8 @@ pub(super) fn append_local_block_and_combine(
     score_cached_scaled: NodeId,
     is_future_local: NodeId,
     neg_infinity_local: Option<NodeId>,
+    attention_sink: Option<NodeId>,
+    group: u32,
 ) -> Result<(NodeId, NodeId), TensorError> {
     let score_new_even_product = elementwise(
         program,
@@ -236,6 +243,14 @@ pub(super) fn append_local_block_and_combine(
         ScalarOp::Maximum,
         &[(score_max_cached, "sug->sug"), (score_max_new, "sug->sug")],
     )?;
+    let (global_max, sink_weight) = match attention_sink {
+        Some(sink) => {
+            let (global_max, sink_weight) =
+                append_attention_sink_addend(program, sink, global_max, group)?;
+            (global_max, Some(sink_weight))
+        }
+        None => (global_max, None),
+    };
 
     let shifted_cached = elementwise(
         program,
@@ -289,6 +304,7 @@ pub(super) fn append_local_block_and_combine(
         ScalarOp::Add,
         &[(sum_cached, "sug->sug"), (sum_new, "sug->sug")],
     )?;
+    let weight_sum = add_attention_sink_weight(program, weight_sum, sink_weight)?;
     let inv_weight_sum = elementwise(
         program,
         DType::FLOAT32,
