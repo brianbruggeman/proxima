@@ -21404,6 +21404,25 @@ mod hybrid_routed_descriptor {
     }
 
     #[test]
+    fn a_bounded_cached_shared_expert_schedule_is_refused_by_name() {
+        let mut bounded = descriptor(&[LayerKind::Attention, LayerKind::Attention]);
+        bounded.gated_attention = false;
+        bounded.cache_strategy = CacheStrategy::Cached;
+        bounded.cache_mask = CacheMask::Bounded;
+
+        let outcome = build_forward(&bounded);
+
+        assert!(
+            matches!(
+                &outcome,
+                Err(TensorError::UnsupportedInBuilder { feature, .. })
+                    if feature.contains("routed-with-shared-expert")
+            ),
+            "the bounded engine lowers the routed branch only, so it must refuse this schedule: {outcome:?}"
+        );
+    }
+
+    #[test]
     fn a_shared_expert_layer_with_no_shared_width_is_refused_by_name() {
         let mut widthless = descriptor(&[LayerKind::Attention, LayerKind::Attention]);
         widthless.gated_attention = false;

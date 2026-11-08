@@ -1077,6 +1077,18 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                 "build_forward(CacheMask::Bounded)",
                 "attention sinks (this engine has no per-layer sink channel)",
             )?;
+            // the same class one sub-block later: this arm never reads a
+            // layer's `ffn` config, so a shared-expert schedule would lower its
+            // routed branch with `ffn_{gate,up,down}_shexp.weight` bound by
+            // nothing and nothing added to the residual
+            refuse_when(
+                descriptor
+                    .layers
+                    .iter()
+                    .any(|layer| layer.ffn.combination == FfnCombination::RoutedWithSharedExpert),
+                "build_forward(CacheMask::Bounded)",
+                "a routed-with-shared-expert FFN (this engine lowers the routed branch only)",
+            )?;
             if descriptor.layers.iter().any(|layer| {
                 LayerAttentionConfig {
                     mask_window: first.attention.mask_window,
