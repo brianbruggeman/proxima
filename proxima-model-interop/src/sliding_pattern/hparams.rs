@@ -250,7 +250,8 @@ mod tests {
     use proxima_gguf::pipe::ParsedGguf;
     use proxima_gguf::value::{MetadataArray, MetadataValue};
     use proxima_tensor::spec::{
-        LayerSchedule, ModelDescriptor, RopePairing, sliding_pattern_descriptor_from_gguf,
+        LayerSchedule, ModelDescriptor, RopePairing, ValueSourceKind,
+        sliding_pattern_descriptor_from_gguf,
     };
 
     use crate::memory_fit::{MemoryBudget, WeightClassBytes};
@@ -449,13 +450,14 @@ mod tests {
         parsed_header_with_extra_tensors(metadata, embedding, FLINT_VOCAB, extra)
     }
 
-    /// The capture's own sink rows, so a name or pattern disagreement between
-    /// the reader and the real checkpoint is visible.
-    fn flint_sink_tensors() -> Vec<(String, u64)> {
+    /// The capture's own rows whose name ends in `suffix`, so a name or
+    /// pattern disagreement between the reader and the real checkpoint is
+    /// visible.
+    fn flint_tensor_rows(suffix: &str) -> Vec<(String, u64)> {
         let text = read_fixture("tensor_dir.txt");
         crate::oracle_fixtures::parse_tensor_rows(&text)
             .into_iter()
-            .filter(|row| row.name.ends_with(".attn_sinks.weight"))
+            .filter(|row| row.name.ends_with(suffix))
             .map(|row| {
                 let width = *row
                     .dimensions
@@ -464,6 +466,10 @@ mod tests {
                 (row.name, width)
             })
             .collect()
+    }
+
+    fn flint_sink_tensors() -> Vec<(String, u64)> {
+        flint_tensor_rows(".attn_sinks.weight")
     }
 
     fn flint_sink_refs(sinks: &[(String, u64)]) -> Vec<(&str, u64)> {
@@ -830,6 +836,57 @@ mod tests {
                 .enumerate()
                 .all(|(layer, entry)| layer == 2 || !entry.ffn.shared_expert_gate),
             "no other block declares a gate"
+        );
+    }
+
+    /// R5's sibling defect: a full layer's value source is a fact about the
+    /// directory, not about `attention.shared_kv_layers`. flint declares no
+    /// shared-KV count and ships `attn_v.weight` on all 49 blocks, so every
+    /// layer projects its own value; dropping one block's row makes exactly
+    /// that block share the key projection.
+    #[test]
+    fn flint_full_layers_project_their_own_value_from_the_directory() {
+        let mut rows = flint_sink_tensors();
+        rows.extend(flint_tensor_rows(".attn_v.weight"));
+        let refs: Vec<(&str, u64)> = rows
+            .iter()
+            .map(|(name, width)| (name.as_str(), *width))
+            .collect();
+        let projected = flint_descriptor(&flint_parsed_with(flint_metadata(), &refs));
+        assert_eq!(
+            projected
+                .layers
+                .iter()
+                .filter(|layer| layer.attention.value_source_kind == ValueSourceKind::ProjectedV)
+                .count(),
+            49,
+            "every block carries its own attn_v row"
+        );
+
+        let without_block_zero: Vec<(&str, u64)> = refs
+            .iter()
+            .copied()
+            .filter(|(name, _)| *name != "blk.0.attn_v.weight")
+            .collect();
+        let shared = flint_descriptor(&flint_parsed_with(flint_metadata(), &without_block_zero));
+        assert_eq!(
+            shared.layers[0].attention.value_source_kind,
+            ValueSourceKind::SharedWithKey,
+            "a full block with no attn_v row shares the key projection"
+        );
+        assert_eq!(
+            shared.layers[1].attention.value_source_kind,
+            ValueSourceKind::ProjectedV,
+            "block 1 still has its own row"
+        );
+        assert_eq!(
+            shared
+                .layers
+                .iter()
+                .filter(|layer| layer.attention.value_source_kind == ValueSourceKind::SharedWithKey)
+                .count(),
+            1,
+            "exactly the block whose row was removed"
         );
     }
 

@@ -68,6 +68,14 @@ pub fn sliding_pattern_descriptor_from_gguf(
             parsed.tensors.iter().any(|tensor| tensor.name == name)
         })
         .collect();
+    // a full layer's own value projection is per-layer too, and it is the
+    // directory that can say whether the checkpoint carries one
+    let attn_v_layers: Vec<bool> = (0..block_count)
+        .map(|layer| {
+            let name = format!("blk.{layer}.attn_v.weight");
+            parsed.tensors.iter().any(|tensor| tensor.name == name)
+        })
+        .collect();
     // the shared expert's gate is per-layer the same way: a checkpoint whose
     // routed blocks carry `ffn_gate_inp_shexp.weight` scales the shared output
     // by it, one whose blocks carry only `ffn_{gate,up,down}_shexp.weight` adds
@@ -155,12 +163,12 @@ pub fn sliding_pattern_descriptor_from_gguf(
     let full = LayerAttentionConfig {
         head_dim: key_length,
         mask_window: None,
-        // moe checkpoints (shared_kv_layers == 0) have no attn_v on full layers
-        value_source_kind: if shared_kv_layers > 0 {
-            ValueSourceKind::ProjectedV
-        } else {
-            ValueSourceKind::SharedWithKey
-        },
+        // a full layer's V comes from its own projection when the directory
+        // carries the row; a checkpoint whose full layers have none shares the
+        // key projection (`shared_kv_layers` alone cannot decide this: flint
+        // declares no such key and still carries `attn_v.weight` on all 49
+        // blocks, 14 of which are non-sliding)
+        value_source_kind: ValueSourceKind::ProjectedV,
         rope_table: RopeTableSel {
             cos_name: "rope_cos".into(),
             sin_name: "rope_sin".into(),
@@ -185,6 +193,11 @@ pub fn sliding_pattern_descriptor_from_gguf(
             let attention = LayerAttentionConfig {
                 kv_heads,
                 attention_sinks: sink_layers[layer],
+                value_source_kind: if is_sliding || attn_v_layers[layer] {
+                    template.value_source_kind
+                } else {
+                    ValueSourceKind::SharedWithKey
+                },
                 ..template
             };
             // a shared layer's V is already post-norm, re-norming would double-apply

@@ -62,23 +62,44 @@ fn e2b_shaped(shared_kv_layers: u32) -> (ParsedGguf, SlidingPatternHparams) {
         ),
     ];
     let table = [0u8; 1536 * 4];
-    let model = GgufModel {
-        version: 3,
-        metadata: metadata
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value))
-            .collect(),
-        tensors: alloc::vec![TensorPayload {
+    let encode = |tensor_names: &[String]| {
+        let mut tensors = alloc::vec![TensorPayload {
             name: "token_embd.weight".to_string(),
             dims: ArrayVec::from_iter([1536u64, 1]),
             ggml_type: GgmlType::F32,
             data: &table,
-        }],
+        }];
+        for name in tensor_names {
+            tensors.push(TensorPayload {
+                name: name.clone(),
+                dims: ArrayVec::from_iter([1u64]),
+                ggml_type: GgmlType::F32,
+                data: &table[..4],
+            });
+        }
+        let model = GgufModel {
+            version: 3,
+            metadata: metadata
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), value.clone()))
+                .collect(),
+            tensors,
+        };
+        let bytes = write_complete(&model).expect("the e2b-shaped model encodes");
+        parse_complete(&bytes).expect("bytes the encoder just wrote parse")
     };
-    let bytes = write_complete(&model).expect("the e2b-shaped model encodes");
-    let parsed = parse_complete(&bytes).expect("bytes the encoder just wrote parse");
+
+    // the checkpoint's own directory, not an empty one: the reader decides a
+    // layer's value source from these rows, so a header with no rows would be a
+    // header no checkpoint with this shape could have
+    let header_only = encode(&[]);
     let architecture =
-        from_metadata(&parsed).expect("gemma4 hparams parse from the e2b-shaped header");
+        from_metadata(&header_only).expect("gemma4 hparams parse from the e2b-shaped header");
+    let mut stored: alloc::vec::Vec<String> = alloc::vec::Vec::new();
+    for suffix in ["attn_k.weight", "attn_k_norm.weight", "attn_v.weight"] {
+        stored.extend(stored_leaf_names(&architecture, suffix));
+    }
+    let parsed = encode(&stored);
     (parsed, architecture)
 }
 
