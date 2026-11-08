@@ -1,0 +1,33 @@
+[package]
+name = "proxima-numeric"
+description = "The one place this workspace defines, describes or converts a number: `FloatLayout` scalars, `BlockLayout` quantized blocks, explicit level sets, and the conversion traits."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+thiserror.workspace = true
+
+conflaguration = { workspace = true, features = ["derive"], optional = true }
+
+[features]
+default = ["std"]
+# tier 1: no_std + alloc. no path in this crate allocates, so the surface is
+# identical to bare no_std minus nothing.
+alloc = []
+# tier 2: std-only conveniences.
+std = ["alloc"]
+# config surface for `NumericPolicy` / `Numerics`: conflaguration `Settings`.
+config = ["std", "dep:conflaguration"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+toml.workspace = true

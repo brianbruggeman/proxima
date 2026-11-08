@@ -4033,6 +4033,7 @@ dependencies = [
  "libm",
  "proxima-gguf",
  "proxima-lib",
+ "proxima-numeric",
  "proxima-primitives",
  "proxima-safetensors",
  "proxima-telemetry",
@@ -4095,6 +4096,7 @@ dependencies = [
  "postcard",
  "proxima-lib",
  "proxima-model-interop",
+ "proxima-numeric",
  "proxima-safetensors",
  "proxima-telemetry",
  "proxima-tensor",
@@ -4248,6 +4250,7 @@ dependencies = [
  "libm",
  "memmap2",
  "proxima-lib",
+ "proxima-numeric",
  "proxima-primitives",
  "proxima-telemetry",
  "serde",
@@ -4457,6 +4460,7 @@ dependencies = [
  "proxima-model-interop",
  "proxima-mqtt",
  "proxima-net",
+ "proxima-numeric",
  "proxima-omega",
  "proxima-onnx",
  "proxima-patterns",
@@ -4598,6 +4602,7 @@ version = "0.1.0"
 dependencies = [
  "half",
  "proxima-build",
+ "proxima-numeric",
  "proxima-onnx",
  "proxima-primitives",
  "proxima-tensor",
@@ -4635,6 +4640,7 @@ dependencies = [
  "proxima-gguf",
  "proxima-lib",
  "proxima-model-interop",
+ "proxima-numeric",
  "proxima-omega",
  "proxima-prime",
  "proxima-primitives",
@@ -4701,6 +4707,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "proxima-numeric"
+version = "0.1.0"
+dependencies = [
+ "conflaguration",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "toml 0.8.23",
+]
+
+[[package]]
 name = "proxima-omega"
 version = "0.1.0"
 dependencies = [
@@ -4726,6 +4743,7 @@ dependencies = [
  "proxima-gguf",
  "proxima-lib",
  "proxima-mil",
+ "proxima-numeric",
  "proxima-onnx",
  "proxima-primitives",
  "proxima-safetensors",
@@ -4754,6 +4772,7 @@ dependencies = [
  "hdrhistogram",
  "proxima-core",
  "proxima-gguf",
+ "proxima-numeric",
  "proxima-primitives",
  "proxima-protocols",
  "proxima-tensor",
@@ -5147,6 +5166,7 @@ dependencies = [
  "half",
  "proxima-codec",
  "proxima-lib",
+ "proxima-numeric",
  "proxima-primitives",
  "proxima-tensor",
  "serde",
@@ -5244,6 +5264,7 @@ dependencies = [
  "proxima-clock",
  "proxima-gguf",
  "proxima-lib",
+ "proxima-numeric",
  "proxima-prime",
  "proxima-primitives",
  "proxima-telemetry",
