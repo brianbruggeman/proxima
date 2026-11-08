@@ -113,6 +113,8 @@ pub use cuda_driver::CudaF32Arena;
 pub use cuda_driver::CudaPlan;
 #[cfg(feature = "cuda-driver")]
 pub use cuda_driver::{CudaDeviceSnapshot, CudaDriver, CudaDriverError};
+#[cfg(all(feature = "cuda-driver", unix))]
+pub use cuda_driver::rocm::{HipApi, HipBuffer, HipDevice, HipDriverError, HipModule};
 pub use error::EmitError;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 pub use metal::{
