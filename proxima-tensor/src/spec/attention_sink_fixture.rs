@@ -4,13 +4,17 @@
 //! (SPEC `serve-flint-through-omega`'s own "one hand-worked literal, not
 //! against each other").
 //!
-//! Gated exactly like `crate::test_support`: compiled for this crate's own
-//! tests and for a downstream crate that asks for the `test-support` feature,
-//! never in a shipping build.
+//! Gated for this crate's own tests, and for a downstream crate that asks for
+//! `test-support` AND `std` (`hand_worked_attended` uses `f32::exp`), never in
+//! a shipping build. The gate is deliberately narrow on the feature path
+//! because a `test-support` build still compiles as LIBRARY code, where
+//! `clippy::expect_used` is denied -- which is why
+//! [`sink_combine_program`] returns its `Result` instead of unwrapping it.
 
 use super::*;
 
-/// The CPU evaluator's sink term against a literal computed by hand from
+/// The sink term's worked example for BOTH backends -- the CPU literal test
+/// and `omega`'s Metal parity test -- against a literal computed by hand from
 /// the definition, not from the graph. The incumbent is llama.cpp
 /// `cd959bae9`'s `ggml_compute_forward_soft_max_f32` (`ggml/src/ggml-cpu/
 /// ops.cpp:5670-5680`): each head's sink joins the row maximum
@@ -27,37 +31,29 @@ use super::*;
 /// so both sides of the incumbent's `MAX(max, sink)` run.
 const SINK_KV_HEADS: u32 = 2;
 const SINK_GROUP: u32 = 2;
-pub const SINK_QUERY_HEADS: u32 = SINK_KV_HEADS * SINK_GROUP;
+const SINK_QUERY_HEADS: u32 = SINK_KV_HEADS * SINK_GROUP;
 const INV_SQRT_HEAD_DIM: f32 = 0.5;
 /// cached block scores at `s = 0`, `[t][u][g]`
-const CACHED_SCORES: [[[f32; 2]; 2]; 2] = [
-    [[0.5, -0.25], [0.125, 0.375]],
-    [[-1.0, 0.75], [0.25, -0.5]],
-];
+const CACHED_SCORES: [[[f32; 2]; 2]; 2] =
+    [[[0.5, -0.25], [0.125, 0.375]], [[-1.0, 0.75], [0.25, -0.5]]];
 /// `[u][g][i]`
-const Q_EVEN: [[[f32; 2]; 2]; 2] = [
-    [[0.5, -0.25], [1.0, 0.25]],
-    [[0.25, 0.75], [-0.5, 1.0]],
-];
-const Q_ODD: [[[f32; 2]; 2]; 2] = [
-    [[0.75, 0.5], [-0.5, 1.5]],
-    [[1.25, -0.75], [0.25, 0.5]],
-];
+const Q_EVEN: [[[f32; 2]; 2]; 2] = [[[0.5, -0.25], [1.0, 0.25]], [[0.25, 0.75], [-0.5, 1.0]]];
+const Q_ODD: [[[f32; 2]; 2]; 2] = [[[0.75, 0.5], [-0.5, 1.5]], [[1.25, -0.75], [0.25, 0.5]]];
 /// `[u][i]`
 const K_EVEN: [[f32; 2]; 2] = [[1.0, 0.5], [-0.5, 1.5]];
 const K_ODD: [[f32; 2]; 2] = [[-0.5, 0.25], [0.75, -1.0]];
 /// `[t][u][d]`
-const V_CACHE: [[[f32; 2]; 2]; 2] = [
-    [[1.0, 0.25], [-0.25, 0.5]],
-    [[-0.5, 0.75], [0.75, -1.0]],
-];
+const V_CACHE: [[[f32; 2]; 2]; 2] = [[[1.0, 0.25], [-0.25, 0.5]], [[-0.5, 0.75], [0.75, -1.0]]];
 /// `[u][d]`
 const V_NEW: [[f32; 2]; 2] = [[0.5, -0.25], [0.125, 0.875]];
 /// one learned scalar per query head, `[h]` with `h = group*u + g`
 pub const SINKS: [f32; 4] = [2.0, -1.0, 0.5, 3.0];
 pub const SINK_LEAF_NAME: &str = "blk.0.attn_sinks.weight";
 
-pub fn sink_combine_program(attention_sink: bool) -> (Vec<Op>, NodeId) {
+///
+/// # Errors
+/// What [`append_local_block_and_combine`] raises while lowering.
+pub fn sink_combine_program(attention_sink: bool) -> Result<(Vec<Op>, NodeId), TensorError> {
     let mut program = Vec::new();
     let query = |program: &mut Vec<Op>, name: &str| {
         input_leaf(
@@ -133,9 +129,8 @@ pub fn sink_combine_program(attention_sink: bool) -> (Vec<Op>, NodeId) {
         Some(neg_infinity),
         sink,
         SINK_GROUP,
-    )
-    .expect("the two-block combine with a sink lowers");
-    (program, attended)
+    )?;
+    Ok((program, attended))
 }
 
 fn flatten2(values: &[[f32; 2]; 2]) -> Vec<f32> {
@@ -169,7 +164,7 @@ pub fn sink_combine_inputs(attention_sink: bool) -> Vec<(&'static str, Vec<f32>)
     named
 }
 
-pub fn sink_leaf(program: &mut Vec<Op>) -> NodeId {
+fn sink_leaf(program: &mut Vec<Op>) -> NodeId {
     input_leaf(
         program,
         DType::FLOAT32,
@@ -200,18 +195,17 @@ pub fn hand_worked_attended(sink: Option<[f32; 4]>) -> Vec<f32> {
             if let Some(sink) = sink {
                 maximum = maximum.max(sink[query_head]);
             }
-            let weights: Vec<f32> =
-                scores.iter().map(|score| (score - maximum).exp()).collect();
+            let weights: Vec<f32> = scores.iter().map(|score| (score - maximum).exp()).collect();
             let sum_cached = weights[0] + weights[1];
             let sum_new = weights[2];
             let mut denominator = sum_cached + sum_new;
             if let Some(sink) = sink {
                 denominator += (sink[query_head] - maximum).exp();
             }
-            let cached_d0 = weights[0] * V_CACHE[0][key_head][0]
-                + weights[1] * V_CACHE[1][key_head][0];
-            let cached_d1 = weights[0] * V_CACHE[0][key_head][1]
-                + weights[1] * V_CACHE[1][key_head][1];
+            let cached_d0 =
+                weights[0] * V_CACHE[0][key_head][0] + weights[1] * V_CACHE[1][key_head][0];
+            let cached_d1 =
+                weights[0] * V_CACHE[0][key_head][1] + weights[1] * V_CACHE[1][key_head][1];
             attended.push((cached_d0 + weights[2] * V_NEW[key_head][0]) / denominator);
             attended.push((cached_d1 + weights[2] * V_NEW[key_head][1]) / denominator);
         }
@@ -219,8 +213,9 @@ pub fn hand_worked_attended(sink: Option<[f32; 4]>) -> Vec<f32> {
     attended
 }
 
-/// The one comparison both tests run, so the control exercises the
-/// assertion rather than a copy of it.
+/// The one comparison every sink test runs (the CPU literal test, its control,
+/// and both `omega` tests), so each control exercises the assertion rather
+/// than a copy of it.
 pub fn attended_agrees(actual: &[f32], expected: &[f32]) -> bool {
     actual.len() == expected.len()
         && actual
