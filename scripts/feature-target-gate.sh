@@ -49,18 +49,20 @@ matrix=(
     "proxima-model-interop:std,metal,instrument"
     "proxima-model-interop:std,cuda"
     "proxima-omega:"
+    "proxima-numeric:std"
+    "proxima-numeric:config"
+    "proxima-gguf:"
 )
 
 changed_crates() {
     if [ "$all" = 1 ]; then
-        printf '%s\n' proxima-tensor proxima-model-interop proxima-omega
+        printf '%s\n' proxima-tensor proxima-model-interop proxima-omega proxima-numeric proxima-gguf
         return
     fi
     git diff --name-only "$base"...HEAD 2>/dev/null \
         | cut -d/ -f1 \
-        | sed -e 's/^omega$/proxima-omega/' \
         | sort -u \
-        | grep -Ex 'proxima-tensor|proxima-model-interop|proxima-omega' || true
+        | grep -Ex 'proxima-tensor|proxima-model-interop|proxima-omega|proxima-numeric|proxima-gguf' || true
 }
 
 # a gate measures the working tree, not the commit: say which one, because a
