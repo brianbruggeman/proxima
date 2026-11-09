@@ -120,11 +120,15 @@ Workflow for a fresh session (absolute paths):
   reduce(exp(new)))`), so it has no place for the sink's third `exp(sink - peak)`
   addend -- the question is whether a sink-bearing program still fuses and would
   therefore drop that addend inside the kernel, or declines and runs the generic
-  per-node path. Measured, and NOT answered: the flint-shaped two-range program
-  (`scheduled(...)` at `CacheMask::Padded`, flag-on AND flag-off) binds **0**
-  fused steps with `NumericPolicy::default()`, and still 0 with
-  `--features metal-fuse-attn-decode`, so that fixture cannot attribute the count
-  to the sink. The CPU/Metal parity now landed proves the term is read on the
+  per-node path. Measured, and NOT answered:
+  `attention_sink_fusion_census_reports_the_same_decision_with_and_without_the_sink`
+  (`proxima-tensor/src/spec/tests.rs`) binds the flint-shaped two-range program
+  (`scheduled(...)` at `CacheMask::Padded`) flag-on and flag-off and asserts the
+  fused step counts are EQUAL -- both 0 under `NumericPolicy::default()`, and
+  still 0 with `--features metal-fuse-attn-decode` when checked by hand -- so
+  that fixture cannot attribute the count to the sink. The census fails the
+  moment a sink change starts choosing a different kernel, which is when this
+  item must be rewritten with the pair of numbers. The CPU/Metal parity now landed proves the term is read on the
   generic path only; it says nothing about flint's real decode path if that path
   fuses. Closing this needs a bind census over the *production* two-range program
   (the shape `append_two_range_cached_attention` builds through the sliding-pattern
