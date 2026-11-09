@@ -25,8 +25,9 @@ enum Outcome {
     Refused,
 }
 
-const SHIPPED: [(&str, Outcome); 14] = [
+const SHIPPED: [(&str, Outcome); 15] = [
     ("gemma4", Outcome::Bound),
+    ("flint", Outcome::Bound),
     ("llama", Outcome::Bound),
     ("mistral", Outcome::Bound),
     ("mixtral", Outcome::Bound),
@@ -71,13 +72,30 @@ fn uniform_descriptor(profile: &FamilyProfile, outcome: Outcome) -> ModelDescrip
     descriptor
 }
 
+/// The captured sliding-pattern checkpoint's own header, with the sink leaves
+/// its directory carries. The other two sliding-pattern families share the
+/// gemma4 synthetic header because they are read by the same reader; this one
+/// has its real capture committed, so the row is measured on the checkpoint
+/// rather than on a stand-in.
+fn flint_capture_descriptor() -> ModelDescriptor {
+    let sinks = crate::test_support::flint_tensor_rows(".attn_sinks.weight");
+    let refs: Vec<(&str, u64)> = sinks
+        .iter()
+        .map(|(name, width)| (name.as_str(), *width))
+        .collect();
+    let parsed =
+        crate::test_support::flint_parsed_with(crate::test_support::flint_metadata(), &refs);
+    header_descriptor(&parsed, KvLayout::Full).expect("the captured header reads as a descriptor")
+}
+
 fn descriptor_for(family: &str, outcome: Outcome) -> ModelDescriptor {
     let profile = family_profile(family).expect("every shipped family has an embedded profile");
-    match profile.schedule_source {
-        ScheduleSource::Uniform => uniform_descriptor(&profile, outcome),
-        ScheduleSource::SlidingPattern => header_of(&gemma4_checkpoint()),
-        ScheduleSource::RecurrentInterval => header_of(&recurrent_checkpoint(false)),
-        ScheduleSource::RecurrentRoutedInterval => header_of(&recurrent_checkpoint(true)),
+    match (profile.schedule_source, family) {
+        (ScheduleSource::SlidingPattern, "flint") => flint_capture_descriptor(),
+        (ScheduleSource::SlidingPattern, _) => header_of(&gemma4_checkpoint()),
+        (ScheduleSource::Uniform, _) => uniform_descriptor(&profile, outcome),
+        (ScheduleSource::RecurrentInterval, _) => header_of(&recurrent_checkpoint(false)),
+        (ScheduleSource::RecurrentRoutedInterval, _) => header_of(&recurrent_checkpoint(true)),
     }
 }
 

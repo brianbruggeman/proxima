@@ -1,0 +1,24 @@
+score_scale_inverse_sqrt_head_dim = true
+value_norm = false
+qk_norm = true
+rope_layout = "split_half"
+schedule_source = "sliding_pattern"
+kv_cache_shape = "custom"
+ffn_routing = "routed"
+
+[ffn]
+post_attention_norm = false
+combination = "RoutedWithSharedExpert"
+output_scale = false
+routed_gating = "Sigmoid"
+# the capture's own directory carries no `ffn_exp_probs_b.bias` row; the reader
+# has no presence channel for it yet (card PROXIMAOMEGA-19), so this value is the
+# family's and a bias-bearing checkpoint of this family would be lowered without
+# the term
+routed_expert_bias = false
+activation = "Silu"
+exclusive_dense_post_norm = false
+# the capture's directory carries `ffn_{gate,up,down}_shexp.weight` and no
+# `ffn_gate_inp_shexp.weight`; the reader overrides this per layer from the
+# directory, which is the authority
+shared_expert_gate = false
