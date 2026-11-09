@@ -14,10 +14,10 @@
 //! a widening convert composed from the existing `half` crate dependency.
 
 pub mod bf16;
-pub mod block_layout;
-pub mod block_layout_encode;
 pub mod bf4_e2m1;
 pub mod bf8_e5m2;
+pub mod block_layout;
+pub mod block_layout_encode;
 pub mod cold_float;
 pub mod dispatch;
 pub mod f16;
@@ -25,13 +25,15 @@ pub mod float_layout;
 pub mod fp5_e2m2;
 pub mod fp6_e3m2;
 pub mod iq2_xs;
+pub mod iq3_s;
 pub mod iq3_xxs;
 pub mod iq4_nl;
+pub mod iq4_xs;
 pub mod policy;
-pub mod q1_0;
-pub mod q2_0;
 pub mod pq2_0;
 pub mod ptq1_0;
+pub mod q1_0;
+pub mod q2_0;
 pub mod q2_k;
 pub mod q3_k;
 pub mod q4_0;

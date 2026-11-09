@@ -1,11 +1,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use proxima_numeric::codec::Codec;
 use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
-use proxima_tensor::{AxisTerm, Extent, IndexMap, NodeId, Op, ScalarOp, TensorError, append, bind, infer, map};
 use proxima_numeric::{DType, NumericPolicy};
+use proxima_tensor::{
+    AxisTerm, Extent, IndexMap, NodeId, Op, ScalarOp, TensorError, append, bind, infer, map,
+};
 
 use super::prepare_uniforms_pack::{device_element_bytes, reject_unsupported_gpu_dtype};
+use super::{MetalError, packed_operands_of};
 use crate::msl::emit;
+use proxima_tensor::cpu::QuantizedBlock;
 
 const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     exponent_bits: 4,
@@ -190,4 +195,68 @@ fn float_layout_admit_buffer_bytes_derive_from_layout_fields() {
     let observed = cases.map(|(dtype, _)| device_element_bytes(dtype));
 
     assert_eq!(observed, cases.map(|(_, bytes)| bytes));
+}
+
+/// A `QuantizedBlock::Packed` whose codec has no Metal unpack kernel must be a
+/// typed refusal, never a silent read of packed bytes as `f32` elements.
+///
+/// Before this check, `packed_operands_of` simply left such an operand off the
+/// packed table, so `reject_unsupported_gpu_dtype` saw an ordinary float node
+/// and the kernel decoded bytes as floats -- a flint-shaped checkpoint served
+/// garbage ids with no error anywhere. `Iq4Xs`/`Iq3S` now have unpack kernels;
+/// `Iq4Nl` still does not, and is the codec this test pins the refusal on.
+#[test]
+fn a_packed_codec_without_a_metal_unpack_kernel_is_refused_by_name() {
+    let nodes = [NodeId(1), NodeId(2)];
+    let q4k_bytes = vec![0u8; proxima_gguf::quant::q4_k::BLOCK_BYTES];
+    let iq4_xs_bytes = vec![0u8; proxima_gguf::quant::iq4_xs::BLOCK_BYTES];
+    let iq4_nl_bytes = vec![0u8; proxima_gguf::quant::iq4_nl::BLOCK_BYTES];
+
+    let accepted = packed_operands_of(
+        &[nodes[0], nodes[1]],
+        &[
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &q4k_bytes,
+            },
+            QuantizedBlock::Packed {
+                codec: Codec::Iq4Xs,
+                bytes: &iq4_xs_bytes,
+            },
+        ],
+    )
+    .expect("both codecs have unpack kernels");
+    assert_eq!(
+        accepted.get(&nodes[1]),
+        Some(&Codec::Iq4Xs),
+        "the iq4_xs operand stays packed on device"
+    );
+
+    let refusal = packed_operands_of(
+        &nodes,
+        &[
+            QuantizedBlock::Float32(&[]),
+            QuantizedBlock::Packed {
+                codec: Codec::Iq4Nl,
+                bytes: &iq4_nl_bytes,
+            },
+        ],
+    )
+    .expect_err("iq4_nl has no Metal unpack kernel");
+    assert!(
+        matches!(
+            refusal,
+            MetalError::UnsupportedPackedCodec {
+                node,
+                codec: "iq4_nl",
+            } if node == nodes[1]
+        ),
+        "the refusal names the node and codec, got {refusal:?}"
+    );
+
+    // the non-quantized carrier is not a refusal: a Float32 block is exactly
+    // what "no codec" means
+    packed_operands_of(&[nodes[0]], &[QuantizedBlock::Float32(&[])]).expect(
+        "a Float32 carrier legitimately has no codec; only a PACKED block without a kernel is refused",
+    );
 }

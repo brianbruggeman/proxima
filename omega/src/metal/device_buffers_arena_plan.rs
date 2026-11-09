@@ -316,6 +316,17 @@ pub enum MetalError {
     Tensor(#[from] TensorError),
     #[error(transparent)]
     Emit(#[from] EmitError),
+    #[error(
+        "metal has no unpack kernel for node {node}'s packed codec {codec}; refusing rather than \
+         reading its packed bytes as f32 elements"
+    )]
+    UnsupportedPackedCodec {
+        node: NodeId,
+        /// The codec's own name, never the enum: `Codec` is a layout-carrying
+        /// value large enough to push this error past clippy's size lint, and
+        /// nothing reads the discriminant back.
+        codec: &'static str,
+    },
     #[error("metal expert source table for node {node} is not a uniform packed codec: {reason}")]
     ExpertSourceUnsupported { node: NodeId, reason: &'static str },
     #[error("metal expert source for node {node} is not resident for routed expert {expert}")]
@@ -2528,10 +2539,19 @@ impl Plan {
 }
 
 /// Which of `block_nodes`' entries carry a codec [`crate::msl::emit`] has an
-/// unpack kernel for (`Q3_K`, `Q4_K`, `Q5_K`, `Q6_K`, `Q8_0`, `Q4_0`, `Q5_1`,
-/// `Q5_0`, `Float16`, `BFloat16`), keyed to its [`Codec`] — the single place this crate
-/// decides "packed AND which codec," shared by [`plan`] and [`prepare`] so
-/// the two cannot drift on it. `Float16` earns a codec slot despite needing
+/// unpack kernel for, keyed to its [`Codec`] — the single place this crate
+/// decides "packed AND which codec", shared by [`plan`] and [`prepare`] so the
+/// two cannot drift on it. The set is exactly
+/// [`crate::msl::metal_operand_read_decodes`]: this emitter's arm list, not the
+/// driver-neutral [`crate::msl::codec_from_quantized_block`] (which also admits
+/// the four codecs only CUDA unpacks).
+///
+/// # Errors
+/// [`MetalError::UnsupportedPackedCodec`] for a packed block this emitter cannot
+/// read. Leaving such an operand OFF the table is not a refusal: its bytes then
+/// look like `f32` elements to every read and to
+/// `reject_unsupported_gpu_dtype`'s own exemption, which is the silent
+/// wrong-bits upload this check exists for. `Float16` earns a codec slot despite needing
 /// no unpack FUNCTION (see `msl::FLOAT16_BLOCK_BYTES`'s own doc) because its
 /// buffer still needs a non-`float`, non-`uchar` binding type -- `None`
 /// would route it through `Float32`'s plain-array path and bind it as the
@@ -2540,19 +2560,35 @@ impl Plan {
 pub(super) fn packed_operands_of(
     block_nodes: &[NodeId],
     blocks: &[QuantizedBlock<'_>],
-) -> PackedOperands {
-    block_nodes
-        .iter()
-        .zip(blocks.iter())
-        // decode-only codecs (CPU-only, see `proxima_tensor::cpu`) and the
-        // two non-quantized carriers fall out of `Codec::
-        // from_quantized_block` as `None`, exactly like before, and hit
-        // `reject_unsupported_gpu_dtype`'s ordinary rejection rather than a
-        // silent, wrong-shape upload.
-        .filter_map(|(node, block)| {
-            crate::msl::codec_from_quantized_block(block).map(|codec| (*node, codec))
-        })
-        .collect()
+) -> Result<PackedOperands, MetalError> {
+    let mut operands = PackedOperands::new();
+    for (node, block) in block_nodes.iter().zip(blocks.iter()) {
+        let (QuantizedBlock::Packed { codec, .. }
+        | QuantizedBlock::PackedStrided { codec, .. }) = block
+        else {
+            // a non-quantized carrier (`Float32`/`Int32`) has no codec by
+            // definition and stays off this table
+            continue;
+        };
+        // Two different questions, both of which must be yes: some backend
+        // consumes these bytes (`codec_from_quantized_block`, driver-neutral --
+        // CUDA serves four codecs Metal cannot read), and THIS emitter has an
+        // `operand_read` arm for the codec. Leaving an unreadable operand off
+        // the table is not a refusal: its bytes would then look like `f32`
+        // elements to every read and to `reject_unsupported_gpu_dtype`'s own
+        // exemption, which is the silent wrong-bits upload this check exists
+        // for.
+        let readable = crate::msl::codec_from_quantized_block(block).is_some()
+            && crate::msl::metal_operand_read_decodes(*codec);
+        if !readable {
+            return Err(MetalError::UnsupportedPackedCodec {
+                node: *node,
+                codec: codec.name().unwrap_or("unnamed"),
+            });
+        }
+        operands.insert(*node, *codec);
+    }
+    Ok(operands)
 }
 
 /// The [`Codec`] one expert-table entry's block carries, restricted to

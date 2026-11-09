@@ -336,12 +336,17 @@ pub mod quant_format {
         }
     }
 
-    /// `true` for exactly the 21 [`Codec`] variants with a CPU decode path:
-    /// the 18 `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type`
+    /// `true` for exactly the 23 [`Codec`] variants with a CPU decode path:
+    /// the 20 `proxima_tensor::cpu::epilogue::codec_to_decodable_ggml_type`
     /// maps to `Some`, plus `Bf8E5M2`, `Bf4E2M1` and `Fp6E3M2`, which
-    /// `codec_matmul_f32_kernel` dispatches to dedicated kernels. `false` for
-    /// the other 14 -- no construction site in this crate or `proxima_tensor`
-    /// ever builds a `QuantizedBlock::Packed` carrying one of them.
+    /// `codec_matmul_f32_kernel` dispatches to dedicated kernels (a `true`
+    /// here is a claim about the REAL path: decode via
+    /// `codec_dequantize_fn` and a row kernel via `codec_matmul_f32_kernel`,
+    /// both of which this list is kept in step with -- `Iq4Xs`/`Iq3S` joined
+    /// with their decoders, since a checkpoint that stores its routed experts
+    /// in them cannot be served without that pair). `false` for the remaining 12 -- no construction site in
+    /// this crate or `proxima_tensor` ever builds a `QuantizedBlock::Packed`
+    /// carrying one of them.
     const fn cpu_kernel_supported(codec: Codec) -> bool {
         matches!(
             codec,
@@ -366,6 +371,8 @@ pub mod quant_format {
                 | Codec::Bf8E5M2
                 | Codec::Bf4E2M1
                 | Codec::Fp6E3M2
+                | Codec::Iq4Xs
+                | Codec::Iq3S
         )
     }
 

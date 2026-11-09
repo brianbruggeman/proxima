@@ -4254,6 +4254,7 @@ dependencies = [
  "proxima-primitives",
  "proxima-telemetry",
  "serde",
+ "sha2 0.10.9",
  "temp-env",
  "tempfile",
  "thiserror 2.0.19",
