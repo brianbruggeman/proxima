@@ -470,7 +470,7 @@ pub fn plane_span(plane: &Plane, elements: usize) -> usize {
 /// The walker indexes bytes and arrays directly, so this is what turns a caller-built
 /// [`crate::BlockLayout`] that lies about its geometry into a typed error instead of a panic. It
 /// runs once per payload, never per block.
-fn geometry_fits(format: &NumericFormat) -> Result<(), NumericError> {
+pub(crate) fn geometry_fits(format: &NumericFormat) -> Result<(), NumericError> {
     let unsound = |reason: &'static str| NumericError::InvalidGeometry {
         format: format_name(format),
         reason,
