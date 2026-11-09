@@ -24,6 +24,7 @@ fn dense_architecture() -> ModelHparams {
         vocab: 2,
         embedding: 2,
         feed_forward: 2,
+        expert_feed_forward: 2,
         query_heads: 1,
         kv_heads: 1,
         kv_heads_by_layer: vec![1],

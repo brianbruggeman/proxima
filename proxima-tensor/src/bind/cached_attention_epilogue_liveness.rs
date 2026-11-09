@@ -12,22 +12,67 @@ pub(super) fn bind_cached_attention_fusion(
     fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
+    bind_cached_attention_fusion_with_packed_leaves(
+        program,
+        shapes,
+        outputs,
+        fuse_cached_attention,
+        numeric_policy,
+        &BTreeSet::new(),
+    )
+}
+
+/// [`bind_cached_attention_fusion`] with the caller's packed-leaf set, which
+/// [`bind_plain_with_fusion_packed`] hands the builder -- see
+/// [`BoundOpBuilder::packed_leaves`].
+pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    fuse_cached_attention: bool,
+    numeric_policy: NumericPolicy,
+    packed_leaves: &BTreeSet<NodeId>,
+) -> Result<Vec<BoundOp>, TensorError> {
     #[cfg(not(feature = "cached-attention-streaming"))]
     {
         let _ = fuse_cached_attention;
-        bind_plain(program, shapes, outputs, numeric_policy)
+        bind_plain_with_fusion_packed(
+            program,
+            shapes,
+            outputs,
+            numeric_policy,
+            true,
+            packed_leaves,
+        )
     }
 
     #[cfg(feature = "cached-attention-streaming")]
     {
         if !fuse_cached_attention {
-            return bind_plain(program, shapes, outputs, numeric_policy);
+            return bind_plain_with_fusion_packed(
+                program,
+                shapes,
+                outputs,
+                numeric_policy,
+                true,
+                packed_leaves,
+            );
         }
         // without the metal split-kv arms every pin a candidate needs is a node of `program`, so
         // discovery reads the program alone and the graph binds once with those nodes pinned; the
         // metal arms read resolved layouts to decide, so they keep the two-pass form
         #[cfg(feature = "metal-fuse-attn-decode")]
-        let (built, discovery) = (Some(bind_plain(program, shapes, outputs, numeric_policy)?), false);
+        let (built, discovery) = (
+            Some(bind_plain_with_fusion_packed(
+                program,
+                shapes,
+                outputs,
+                numeric_policy,
+                true,
+                packed_leaves,
+            )?),
+            false,
+        );
         #[cfg(not(feature = "metal-fuse-attn-decode"))]
         let (built, discovery): (Option<Vec<BoundOp>>, bool) = (None, true);
         let discovery_resolved: &[BoundOp] = built.as_deref().unwrap_or(&[]);
@@ -37,15 +82,34 @@ pub(super) fn bind_cached_attention_fusion(
         // id can be pinned into `planning_outputs` below and survive the
         // rebuild -- requiring a resolved binding here would make discovery
         // depend on the very materialization it exists to produce.
-        let mut initial_candidates =
-            cached_attention_candidates(program, shapes, discovery_resolved, outputs, false, numeric_policy, discovery);
+        let mut initial_candidates = cached_attention_candidates(
+            program,
+            shapes,
+            discovery_resolved,
+            outputs,
+            false,
+            numeric_policy,
+            discovery,
+        );
         initial_candidates.extend(cached_attention_single_range_candidates(
-            program, shapes, discovery_resolved, outputs, numeric_policy, discovery,
+            program,
+            shapes,
+            discovery_resolved,
+            outputs,
+            numeric_policy,
+            discovery,
         ));
         if initial_candidates.is_empty() {
             return match built {
                 Some(built) => Ok(built),
-                None => bind_plain(program, shapes, outputs, numeric_policy),
+                None => bind_plain_with_fusion_packed(
+                    program,
+                    shapes,
+                    outputs,
+                    numeric_policy,
+                    true,
+                    packed_leaves,
+                ),
             };
         }
         let mut planning_outputs = outputs.to_vec();
@@ -120,16 +184,42 @@ pub(super) fn bind_cached_attention_fusion(
                 _ => {}
             }
         }
-        let rebuilt = bind_plain(program, shapes, &planning_outputs, numeric_policy)?;
-        let mut candidates =
-            cached_attention_candidates(program, shapes, &rebuilt, outputs, true, numeric_policy, false);
+        let rebuilt = bind_plain_with_fusion_packed(
+            program,
+            shapes,
+            &planning_outputs,
+            numeric_policy,
+            true,
+            packed_leaves,
+        )?;
+        let mut candidates = cached_attention_candidates(
+            program,
+            shapes,
+            &rebuilt,
+            outputs,
+            true,
+            numeric_policy,
+            false,
+        );
         candidates.extend(cached_attention_single_range_candidates(
-            program, shapes, &rebuilt, outputs, numeric_policy, false,
+            program,
+            shapes,
+            &rebuilt,
+            outputs,
+            numeric_policy,
+            false,
         ));
         if candidates.is_empty() {
             return match built {
                 Some(built) => Ok(built),
-                None => bind_plain(program, shapes, outputs, numeric_policy),
+                None => bind_plain_with_fusion_packed(
+                    program,
+                    shapes,
+                    outputs,
+                    numeric_policy,
+                    true,
+                    packed_leaves,
+                ),
             };
         }
         let fused_by_node = candidates
@@ -1005,6 +1095,20 @@ pub(super) fn compose_reduce_epilogue(
 /// exactly [`program`]'s own positions: an unreachable position is skipped
 /// via [`BoundOpBuilder::skip`], never renumbered, since every backward
 /// reference elsewhere in the program is a raw index into this same slice.
+/// [`bind_plain_with_fusion`] at fusion enabled -- the plain elementwise/reduce
+/// chain every caller that wants no cached-attention splice binds, and the
+/// reference shape the fusion passes' own tests compare against.
+///
+/// NOT the choke point every `bind` route passes through any more:
+/// [`bind_plain_with_fusion_packed`] is, because it is the one that carries the
+/// caller's packed-leaf set (ROW 431's materialization depends on it). This
+/// wrapper keeps the plain call sites and their tests reading the same name.
+//
+// live only where something asks for the plain chain: the top-fraction
+// fusion pass's own rebind, and the tests that compare a fused graph against
+// it. `bind_cached_attention_fusion` reaches `bind_plain_with_fusion_packed`
+// directly, so a default build has no caller.
+#[cfg(any(test, feature = "top-fraction-fusion"))]
 pub(super) fn bind_plain(
     program: &[Op],
     shapes: &Shapes,
@@ -1021,9 +1125,31 @@ pub(super) fn bind_plain_with_fusion(
     numeric_policy: NumericPolicy,
     allow_fusion: bool,
 ) -> Result<Vec<BoundOp>, TensorError> {
+    bind_plain_with_fusion_packed(
+        program,
+        shapes,
+        outputs,
+        numeric_policy,
+        allow_fusion,
+        &BTreeSet::new(),
+    )
+}
+
+/// [`bind_plain_with_fusion`] carrying the caller's [`BoundOpBuilder::packed_leaves`]
+/// -- the set of `Op::Input` leaves this caller binds as packed blocks.
+pub(super) fn bind_plain_with_fusion_packed(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
+    allow_fusion: bool,
+    packed_leaves: &BTreeSet<NodeId>,
+) -> Result<Vec<BoundOp>, TensorError> {
     let retires = live::annotate(program, outputs);
     let reachable = live::reachable(program, outputs);
-    let building = BoundOpBuilder::new(retires, numeric_policy).with_fusion(allow_fusion);
+    let building = BoundOpBuilder::new(retires, numeric_policy)
+        .with_fusion(allow_fusion)
+        .with_packed_leaves(packed_leaves.clone());
     let mut built = Vec::new();
     let mut ready = ReadyBatch::new();
     for (position, expr) in program.iter().enumerate() {

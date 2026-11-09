@@ -23,6 +23,32 @@ pub fn bind(
     bind_with_fusion(program, shapes, outputs, true, numeric_policy)
 }
 
+/// [`bind`] for a caller that binds some of `program`'s `Op::Input` leaves as
+/// packed (quantized) blocks: `packed_leaves` names them so
+/// [`BoundOpBuilder`] materializes a composed activation feeding a reduction
+/// over one, instead of leaving the CPU's packed-reduce path a body its
+/// admission contract refuses (a bare weight-times-activation product).
+///
+/// The quantized evaluators are the callers -- [`crate::cpu`]'s pooled and
+/// arena paths both know which nodes they bound packed bytes for, and nothing
+/// in `program` itself says so.
+pub fn bind_with_packed_leaves(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    packed_leaves: &BTreeSet<NodeId>,
+    numeric_policy: NumericPolicy,
+) -> Result<Vec<BoundOp>, TensorError> {
+    bind_with_fusion_and_packed_leaves(
+        program,
+        shapes,
+        outputs,
+        true,
+        numeric_policy,
+        packed_leaves,
+    )
+}
+
 /// Binds the graph with cached-attention/chain fusion but leaves reduction
 /// epilogues as separate operations for backends whose lowering does not yet
 /// support broadcast epilogue operands. This is a capability boundary, not a
@@ -80,6 +106,26 @@ pub fn bind_with_fusion(
     fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
+    bind_with_fusion_and_packed_leaves(
+        program,
+        shapes,
+        outputs,
+        fuse_cached_attention,
+        numeric_policy,
+        &BTreeSet::new(),
+    )
+}
+
+/// [`bind_with_fusion`] carrying the caller's packed-leaf set -- see
+/// [`bind_with_packed_leaves`].
+pub fn bind_with_fusion_and_packed_leaves(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    fuse_cached_attention: bool,
+    numeric_policy: NumericPolicy,
+    packed_leaves: &BTreeSet<NodeId>,
+) -> Result<Vec<BoundOp>, TensorError> {
     let narrowed = narrow_accumulations(program, numeric_policy);
     let program: &[Op] = &narrowed;
     // The three rewrites this crate ships unconditionally today are
@@ -94,12 +140,13 @@ pub fn bind_with_fusion(
     #[cfg(feature = "std")]
     let fuse_cached_attention =
         fuse_cached_attention && env::var_os("PROXIMA_DISABLE_CACHED_ATTENTION_FUSION").is_none();
-    let built = bind_cached_attention_fusion(
+    let built = bind_cached_attention_fusion_with_packed_leaves(
         program,
         shapes,
         outputs,
         fuse_cached_attention,
         numeric_policy,
+        packed_leaves,
     )?;
     #[cfg(feature = "instrument")]
     debug!(
@@ -128,6 +175,7 @@ pub fn bind_with_fusion(
             outputs,
             fuse_cached_attention,
             numeric_policy,
+            packed_leaves,
         )?
     };
     #[cfg(feature = "moe-topk-fusion")]
@@ -147,6 +195,7 @@ pub fn bind_with_fusion(
             outputs,
             fuse_cached_attention,
             numeric_policy,
+            packed_leaves,
         )?
     };
     #[cfg(feature = "metal-moe-mul-mat-id")]
@@ -174,7 +223,8 @@ pub fn bind_with_fusion(
         } else {
             let widened = numeric_policy
                 .grants(NumericRewrite::WidenedReduceEpilogueFusion.required_permissions());
-            let epilogued = reduce_epilogue_fusion(built, outputs, program, numeric_policy, widened)?;
+            let epilogued =
+                reduce_epilogue_fusion(built, outputs, program, numeric_policy, widened)?;
             #[cfg(feature = "instrument")]
             debug!(
                 stage = "after_reduce_epilogue_fusion",
@@ -1245,7 +1295,7 @@ pub(super) fn moe_topk_candidates(
 /// finds candidates against `built`, widens the planning outputs to `scores`
 /// (the one true operand every candidate needs materialized), rebinds, then
 /// matches again against the wider `resolved` set before rewriting. Runs
-/// inside [`bind_with_fusion`] only -- never [`bind_plain`], the same rule
+/// inside [`bind_with_fusion`] only -- never [`bind_plain_with_fusion`], the same rule
 /// [`apply_gated_delta_net_fusion`] follows.
 #[cfg(feature = "moe-topk-fusion")]
 pub(super) fn apply_moe_topk_fusion(
@@ -1255,6 +1305,7 @@ pub(super) fn apply_moe_topk_fusion(
     outputs: &[NodeId],
     fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
+    packed_leaves: &BTreeSet<NodeId>,
 ) -> Result<Vec<BoundOp>, TensorError> {
     let initial_candidates = moe_topk_candidates(program, shapes, &built, outputs);
     if initial_candidates.is_empty() {
@@ -1292,12 +1343,13 @@ pub(super) fn apply_moe_topk_fusion(
     }
     // a plain rebind drops every `CachedAttention` spliced into `built`, and
     // only that fused op's runtime bound masks the zero-padded kv bucket
-    let rebuilt = bind_cached_attention_fusion(
+    let rebuilt = bind_cached_attention_fusion_with_packed_leaves(
         program,
         shapes,
         &planning_outputs,
         fuse_cached_attention,
         numeric_policy,
+        packed_leaves,
     )?;
     let candidates = moe_topk_candidates(program, shapes, &rebuilt, outputs);
     if candidates.is_empty() {
@@ -1336,6 +1388,7 @@ pub(super) fn apply_gated_delta_net_fusion(
     outputs: &[NodeId],
     fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
+    packed_leaves: &BTreeSet<NodeId>,
 ) -> Result<Vec<BoundOp>, TensorError> {
     let initial_candidates = gated_delta_net_candidates(program, shapes, &built, outputs);
     if initial_candidates.is_empty() {
@@ -1369,12 +1422,13 @@ pub(super) fn apply_gated_delta_net_fusion(
     // full-attention/gated-delta-net model (recurrent-routed) loses all of its
     // cached-attention fusion the moment this feature is compiled in
     // (row 565: `built` measured 9-10 `CachedAttention` ops, `rebuilt` measured 0).
-    let rebuilt = bind_cached_attention_fusion(
+    let rebuilt = bind_cached_attention_fusion_with_packed_leaves(
         program,
         shapes,
         &planning_outputs,
         fuse_cached_attention,
         numeric_policy,
+        packed_leaves,
     )?;
     let candidates = gated_delta_net_candidates(program, shapes, &rebuilt, outputs);
     if candidates.is_empty() {

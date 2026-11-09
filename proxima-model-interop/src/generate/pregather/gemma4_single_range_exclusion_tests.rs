@@ -12,6 +12,7 @@ fn gemma4_e2b_shaped_model_architecture() -> ModelHparams {
         vocab: 1,
         embedding: 1536,
         feed_forward: 6144,
+        expert_feed_forward: 6144,
         query_heads: 8,
         kv_heads: 1,
         kv_heads_by_layer: alloc::vec![1; 35],

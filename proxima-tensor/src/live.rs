@@ -49,7 +49,7 @@ pub fn annotate(program: &[Op], outputs: &[NodeId]) -> Vec<Vec<NodeId>> {
 
 /// Every node reachable from `outputs` through `uses` — operands, gather
 /// indices, and a data-dependent reduce `out_map`'s own indices. This is
-/// `bind::bind_plain`'s reachability pass: a
+/// `bind::bind_plain_with_fusion`'s reachability pass: a
 /// program built once and bound for several output sets (ROW 541,
 /// `docs/discipline.md` — a prefill tap a decode-only `outputs` never
 /// requests) only ever binds the ops this set names, never the whole
@@ -101,9 +101,9 @@ fn map_uses(operand: NodeId, map: &IndexMap) -> Vec<NodeId> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use proxima_numeric::DType;
     use crate::map;
     use crate::op::{Extent, Keep, Reduce, ReduceInit, ScalarOp, append};
+    use proxima_numeric::DType;
 
     fn leaf(program: &mut Vec<Op>) -> NodeId {
         append(

@@ -343,6 +343,7 @@ pub fn sliding_pattern_hparams(hparams: &SlidingPatternHparams) -> ModelHparams 
         vocab: hparams.vocab,
         embedding: hparams.embedding,
         feed_forward: hparams.feed_forward,
+        expert_feed_forward: hparams.expert_feed_forward,
         query_heads: hparams.head_count,
         kv_heads,
         kv_heads_by_layer: hparams.kv_heads_by_layer.clone(),

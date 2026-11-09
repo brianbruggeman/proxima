@@ -683,7 +683,13 @@ pub(super) fn prepare_step(
     reject_non_float32_outputs(program, &quantized_weight_nodes, &effective_outputs)?;
     let planning_outputs =
         quantized_gather_planning_outputs(program, quantized_weights, &effective_outputs);
-    let unadjusted = bind_step_ops(program, &shapes, &planning_outputs, options)?;
+    let unadjusted = bind_step_ops(
+        program,
+        &shapes,
+        &planning_outputs,
+        options,
+        &quantized_weight_nodes,
+    )?;
     Ok(assemble_step(
         program,
         quantized_weights,
@@ -692,19 +698,46 @@ pub(super) fn prepare_step(
     ))
 }
 
+/// The `Op::Input` nodes this step binds as packed (quantized) blocks -- the set
+/// [`BoundOpBuilder::packed_leaves`] needs so a composed activation feeding a
+/// packed reduction materializes instead of reaching
+/// `packed_reduce_activation_operand`'s refusal.
+///
+/// `blocks` is the per-`block_node_ids` slice the caller already validated
+/// length-exactly; a `Float32`/`Int32` carrier is not packed and stays out.
+#[must_use]
+pub(super) fn packed_leaf_nodes(
+    program: &[Op],
+    blocks: &[QuantizedBlock<'_>],
+) -> BTreeSet<NodeId> {
+    block_node_ids(program)
+        .into_iter()
+        .zip(blocks)
+        .filter(|(_, block)| {
+            matches!(
+                block,
+                QuantizedBlock::Packed { .. } | QuantizedBlock::PackedStrided { .. }
+            )
+        })
+        .map(|(node, _)| node)
+        .collect()
+}
+
 pub(super) fn bind_step_ops(
     program: &[Op],
     shapes: &shape::Shapes,
     planning_outputs: &[NodeId],
     options: StepOptions,
+    packed_leaves: &BTreeSet<NodeId>,
 ) -> Result<Vec<BoundOp>, TensorError> {
     if options.allow_fusion {
-        bind::bind_with_fusion(
+        bind::bind_with_fusion_and_packed_leaves(
             program,
             shapes,
             planning_outputs,
             options.fuse_cached_attention,
             options.numeric_policy,
+            packed_leaves,
         )
     } else {
         bind::bind_unfused(program, shapes, planning_outputs, options.numeric_policy)
@@ -1278,13 +1311,7 @@ pub(super) fn run_prepared_step(
     #[cfg(feature = "instrument")]
     let finish_started = instrument::read_ticks();
 
-    let result = finish(
-        shapes,
-        effective_outputs,
-        buffers,
-        root,
-        peak_live_buffers,
-    );
+    let result = finish(shapes, effective_outputs, buffers, root, peak_live_buffers);
     // real signal (peak live bytes, per-phase wall time) committed once per
     // call into the crate's own counter mechanism -- see
     // `instrument::record_evaluate_quantized_phase`'s own doc for why this
@@ -1331,8 +1358,16 @@ pub fn cpu_tensor_reserved_bytes(
     } else {
         outputs.to_vec()
     };
+    let packed_leaves = packed_leaf_nodes(program, &blocks);
     let resolved = if config.allow_fusion {
-        bind::bind_with_fusion(program, &shapes, &effective_outputs, true, config.numeric)?
+        bind::bind_with_fusion_and_packed_leaves(
+            program,
+            &shapes,
+            &effective_outputs,
+            true,
+            config.numeric,
+            &packed_leaves,
+        )?
     } else {
         bind::bind_unfused(program, &shapes, &effective_outputs, config.numeric)?
     };
@@ -1366,8 +1401,16 @@ fn validate_host_tensor_budget(
             return Err(TensorError::UnknownOutput(*output));
         }
     }
+    let packed_leaves = packed_leaf_nodes(program, blocks);
     let resolved = if allow_fusion {
-        bind::bind_with_fusion(program, shapes, &effective_outputs, true, numeric_policy)?
+        bind::bind_with_fusion_and_packed_leaves(
+            program,
+            shapes,
+            &effective_outputs,
+            true,
+            numeric_policy,
+            &packed_leaves,
+        )?
     } else {
         bind::bind_unfused(program, shapes, &effective_outputs, numeric_policy)?
     };

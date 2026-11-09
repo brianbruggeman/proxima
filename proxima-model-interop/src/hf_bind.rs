@@ -39,8 +39,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_safetensors::{Manifest, TensorEntry};
 use proxima_numeric::DType;
+use proxima_safetensors::{Manifest, TensorEntry};
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{Extent, Op};
 use proxima_tensor::spec::{LayerSchedule, ModelDescriptor, RopePairing};
@@ -1572,6 +1572,7 @@ mod tests {
             vocab: 3,
             embedding: 4,
             feed_forward: 8,
+            expert_feed_forward: 8,
             query_heads: 2,
             kv_heads: 1,
             kv_heads_by_layer: vec![1],

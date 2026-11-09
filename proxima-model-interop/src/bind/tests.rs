@@ -421,7 +421,7 @@ fn q8_0_matmul_weight_binds_packed_and_matches_a_dequantized_oracle() {
         &mut proxima_tensor::cpu::BufferPools::default(),
         &mut None,
     )
-        .expect("evaluate the bound q8_0 packed weight through the real interpreter");
+    .expect("evaluate the bound q8_0 packed weight through the real interpreter");
     let ours = evaluated.root();
 
     let mut dequantized_weight = alloc::vec![0.0f32; Q8_0_TEST_ROWS * Q8_0_TEST_K];
@@ -754,6 +754,7 @@ fn architecture_from_metadata_reads_real_keys_and_derives_vocab_from_tensor_shap
             vocab: 3,
             embedding: 8,
             feed_forward: 32,
+            expert_feed_forward: 0,
             query_heads: 2,
             kv_heads: 1,
             kv_heads_by_layer: vec![1; 4],

@@ -576,7 +576,7 @@ pub struct LayerAttentionConfig {
     pub attention_sinks: bool,
     /// Whether this layer rotates `Q`/`K` at all: `<arch>.attention.rope_pattern`
     /// selects it per layer (llama.cpp's `llama_hparams::has_rope`, the
-    /// `rope_pattern` array `granite-swa.cpp` reads), and the flint capture
+    /// `rope_pattern` array `granite-swa.cpp` reads), and the captured sliding-pattern checkpoint
     /// marks its full-attention blocks off. `false` reads the two head halves
     /// straight ([`unrotated_head_pair`]) and declares no rope-table leaf, so a
     /// rope-off program carries no `rope_cos`/`rope_sin` input at all. `true` --

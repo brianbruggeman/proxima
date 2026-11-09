@@ -48,6 +48,18 @@ pub struct BoundOpBuilder {
     /// identity eliminations fire, on top of the always-on `x*1` case.
     pub(super) numeric_policy: NumericPolicy,
     pub(super) allow_fusion: bool,
+    /// The program's `Op::Input` leaves whose buffer the caller binds as a
+    /// packed (quantized) block rather than an `f32` array. A reduction reading
+    /// one takes [`crate::cpu::run_reduce_quantized`]'s packed fast path, whose
+    /// admission contract is a bare two-operand product -- so a composed
+    /// activation over such a leaf must materialize here, exactly as a packed
+    /// *mapping* already does (docs/discipline.md ROW 431).
+    ///
+    /// The binder cannot derive this: packedness is a property of the bytes the
+    /// caller binds, not of the program, and [`Self::packed_mapping_subtree`]
+    /// only sees the map shape. The quantized evaluator, which does know, passes
+    /// the set through [`crate::bind::bind_with_packed_leaves`].
+    pub(super) packed_leaves: BTreeSet<NodeId>,
 }
 
 impl BoundOpBuilder {
@@ -65,7 +77,17 @@ impl BoundOpBuilder {
             dtypes: RefCell::new(Vec::new()),
             numeric_policy,
             allow_fusion: true,
+            packed_leaves: BTreeSet::new(),
         }
+    }
+
+    /// Declares which of the program's `Op::Input` leaves bind packed bytes --
+    /// see this builder's own `packed_leaves` field for why only the caller can
+    /// say.
+    #[must_use]
+    pub fn with_packed_leaves(mut self, packed_leaves: BTreeSet<NodeId>) -> Self {
+        self.packed_leaves = packed_leaves;
+        self
     }
 
     /// Control composition of held nodes; disabled nodes materialize separately.
@@ -151,6 +173,7 @@ impl BoundOpBuilder {
             .push(matches!(expr, Op::Iota { .. }));
         self.dtypes.borrow_mut().push(expr.dtype());
         let packed_mapping = match expr {
+            Op::Input { .. } => self.packed_leaves.contains(&node),
             Op::Elementwise { operands, .. } => {
                 let direct = operands
                     .iter()
