@@ -1,7 +1,9 @@
-//! The attention sink's Metal parity tests, in their own module so a
-//! `--no-default-features --features metal` build compiles them: `backend`'s
-//! `programmable_tests` module is gated on the `cpu` feature, which is what AC8
-//! and AC20 are NOT about.
+//! The attention sink's Metal parity tests, in their own module because
+//! `backend`'s `programmable_tests` is gated on the `cpu` feature, which is not
+//! what AC8 and AC20 are about. (This is a coupling fix, not a reachability
+//! claim: `--no-default-features --features metal` does not build at all --
+//! `backend.rs` loses `Plan::Cpu`/`CpuStepPlan` under that feature set, three
+//! pre-existing errors from `7144a43b2`, untouched here.)
 
 use super::*;
 use crate::config::ResourceConstraints;
