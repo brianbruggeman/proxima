@@ -36,7 +36,7 @@ pub(super) fn run_resolved(
 
 /// The last node `program` builds -- what every fixture in this module
 /// treats as "the answer" by construction (`op.rs`'s own doc: "the last
-/// element is the root"). [`bind_plain`]'s reachability pass (ROW 541,
+/// element is the root"). [`bind_plain_with_fusion`]'s reachability pass (ROW 541,
 /// `docs/discipline.md`) now binds only what `outputs` actually names,
 /// so a fixture that wants its whole constructed chain bound must pass
 /// this instead of `&[]` -- an empty `outputs` correctly binds nothing.
@@ -1151,7 +1151,7 @@ pub(super) fn qwen35_partial_rotary_attention_fixture() -> (
 /// fuses into exactly one [`BoundOpKind::CachedAttention`] carrying the
 /// full eight-base + `cached_len` + three-pass-plane operand set, and
 /// the fusion strictly reduces the bound-op count relative to the
-/// unfused elementwise/reduce chain [`bind_plain`] already produces
+/// unfused elementwise/reduce chain [`bind_plain_with_fusion`] already produces
 /// (the census, ROW 558 `docs/discipline.md`).
 ///
 /// Also asserts numeric parity against the unfused chain (item (a) of
@@ -7701,4 +7701,159 @@ fn the_program_level_kv_padding_probe_agrees_with_the_bound_graph_probe() {
             assert!(!kv_read_only_by_fused_attention_in_program(&program, &shapes, &exposing, policy, is_kv));
         }
     }
+}
+
+/// A reduce over `composed_activation * packed_weight` keeps a bare
+/// weight-times-activation body only when the binder is told which leaves bind
+/// packed bytes.
+///
+/// This is the hermetic twin of the 25 GiB run that found the defect: the
+/// binder infers packedness from a MAP (`packed_mapping_subtree`), which a plain
+/// identity-mapped weight leaf never has, so without the caller's set the
+/// activation stays fused into the reduce and
+/// `run_reduce_quantized`'s admission contract (`packed_reduce_activation_operand`)
+/// refuses it at the first decode step. Three assertions:
+///
+/// 1. an empty packed set leaves the composed body fused (more than one step);
+/// 2. naming the weight leaf materializes the activation, leaving exactly the
+///    bare two-operand product the packed kernel admits;
+/// 3. naming a node that is not an `Op::Input` is inert -- the same binding as
+///    the empty set -- so a caller cannot smuggle a computed node in.
+#[test]
+fn a_packed_leaf_named_by_the_caller_materializes_its_composed_activation() {
+    const REDUCTION: u32 = 8;
+    const ROWS: u32 = 4;
+
+    let mut program = Vec::new();
+    // the activation spans the whole iteration space (sequence, output row,
+    // contraction), which is what keeps the binder's broadcast quarantine from
+    // materializing it before the reduce sees it
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: alloc::vec![
+                Extent::Symbolic(0),
+                Extent::Static(ROWS),
+                Extent::Static(REDUCTION)
+            ],
+            name: None,
+        },
+    );
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: alloc::vec![Extent::Static(REDUCTION), Extent::Static(ROWS)],
+            name: None,
+        },
+    );
+    // The activation's own composed chain, broadcast across the output axis --
+    // exactly the shape flint's attention-output reduce had: the chain spans
+    // the WHOLE iteration space, so the binder's broadcast quarantine does not
+    // materialize it and it fuses into the reduce body instead.
+    let squared = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![
+                (activation, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                (activation, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+            ],
+            name: None,
+        },
+    );
+    // iteration axes are (sequence, output row, contraction) -- the same
+    // convention `matmul_program` above uses
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Multiply,
+            operands: alloc::vec![
+                (squared, IndexMap::Affine(map::projection(3, &[0, 1, 2]))),
+                (weight, IndexMap::Affine(map::projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            init: crate::op::ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: None,
+        }),
+    );
+    let shapes = crate::shape::infer(&program, &[1]).expect("the fixture infers");
+
+    let body_of = |bound: &[BoundOp]| -> (usize, usize) {
+        let reduce = bound
+            .iter()
+            .find(|op| op.node == sum)
+            .expect("the reduce binds");
+        let BoundOpKind::Reduce {
+            element_body,
+            operands,
+            ..
+        } = &reduce.kind
+        else {
+            panic!("node {sum:?} binds as a reduce");
+        };
+        (element_body.steps.len(), operands.len())
+    };
+
+    let unfused =
+        bind(&program, &shapes, &[sum], NumericPolicy::bit_exact()).expect("a plain bind succeeds");
+    let (steps, operands) = body_of(&unfused);
+    assert!(
+        steps > 1,
+        "without a packed-leaf set the activation stays fused into the reduce body \
+         ({steps} steps, {operands} operands) -- that is the shape the packed kernel refuses"
+    );
+
+    let packed = BTreeSet::from([weight]);
+    let materialized = bind_with_packed_leaves(
+        &program,
+        &shapes,
+        &[sum],
+        &packed,
+        NumericPolicy::bit_exact(),
+    )
+    .expect("a packed-leaf bind succeeds");
+    let (steps, operands) = body_of(&materialized);
+    assert_eq!(
+        (steps, operands),
+        (1, 2),
+        "naming the packed weight must leave the bare two-operand product the packed kernel admits"
+    );
+    assert!(
+        materialized.iter().any(|op| op.node == squared),
+        "the composed activation must materialize as its own bound op, not vanish into the reduce"
+    );
+    assert!(
+        materialized.len() > unfused.len(),
+        "materializing the activation costs exactly the op the fused bind had absorbed"
+    );
+
+    let inert = BTreeSet::from([sum]);
+    let unchanged = bind_with_packed_leaves(
+        &program,
+        &shapes,
+        &[sum],
+        &inert,
+        NumericPolicy::bit_exact(),
+    )
+    .expect("a bind with a non-input id still succeeds");
+    assert_eq!(
+        unchanged.len(),
+        unfused.len(),
+        "a node that is not an Op::Input is ignored, so the binding is the plain one"
+    );
 }

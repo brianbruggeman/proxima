@@ -158,10 +158,11 @@ pub fn recurrent_interval_architecture_from_metadata(
     let ssm_time_step_rank = metadata_u32(parsed, &format!("{architecture}.ssm.time_step_rank"))?;
     let ssm_inner_size = metadata_u32(parsed, &format!("{architecture}.ssm.inner_size"))?;
 
-    let v_head_reordered = match parsed.metadata_value(&format!("{architecture}.ssm.v_head_reordered")) {
-        Some(MetadataValue::Bool(value)) => *value,
-        _ => family_profile(architecture)?.ssm_v_head_reordered,
-    };
+    let v_head_reordered =
+        match parsed.metadata_value(&format!("{architecture}.ssm.v_head_reordered")) {
+            Some(MetadataValue::Bool(value)) => *value,
+            _ => family_profile(architecture)?.ssm_v_head_reordered,
+        };
 
     let hadamard = prism_hadamard_from_metadata(parsed)?;
     let layer_kinds = (0..block_count)
@@ -482,6 +483,7 @@ pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHpara
         vocab: hparams.vocab,
         embedding: hparams.embedding,
         feed_forward: hparams.feed_forward,
+        expert_feed_forward: 0,
         query_heads: hparams.query_heads,
         kv_heads: hparams.kv_heads,
         kv_heads_by_layer: vec![hparams.kv_heads; hparams.block_count as usize],

@@ -240,6 +240,14 @@ pub fn gguf_tensor_as_packed_block<'a>(
             codec: Codec::Iq3Xxs,
             bytes,
         }),
+        GgmlType::Iq3S => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Iq3S,
+            bytes,
+        }),
+        GgmlType::Iq4Xs => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: Codec::Iq4Xs,
+            bytes,
+        }),
         GgmlType::Iq4Nl => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
             codec: Codec::Iq4Nl,
             bytes,
@@ -401,6 +409,19 @@ pub struct ModelHparams {
     pub vocab: u32,
     pub embedding: u32,
     pub feed_forward: u32,
+    /// `{architecture}.expert_feed_forward_length` -- one routed expert's own
+    /// FFN width. Zero means the KEY is absent (every dense checkpoint, and a
+    /// family that declares only `feed_forward_length`), and readers then fall
+    /// back to [`Self::feed_forward`].
+    ///
+    /// Distinct from [`Self::feed_forward`] on every checkpoint that declares
+    /// both: the captured sliding-pattern checkpoint's `feed_forward_length` is
+    /// 6144 (its two leading dense blocks) while
+    /// `expert_feed_forward_length` is 512 (its 256 routed experts), so reading
+    /// the expert slab's `[out, in]` pair off [`Self::feed_forward`] hands every
+    /// entry a shape the gathered reduce refuses
+    /// (`TensorError::ExpertSourceShapeMismatch`).
+    pub expert_feed_forward: u32,
     pub query_heads: u32,
     /// The uniform `{architecture}.attention.head_count_kv` value consumed by
     /// the existing dense-program builders. It is zero when
@@ -763,6 +784,10 @@ pub fn architecture_from_metadata(parsed: &ParsedGguf) -> Result<ModelHparams, I
         vocab,
         embedding,
         feed_forward,
+        expert_feed_forward: metadata_u32_optional(
+            parsed,
+            &alloc::format!("{architecture}.expert_feed_forward_length"),
+        ),
         query_heads,
         kv_heads,
         kv_heads_by_layer,
@@ -1138,13 +1163,16 @@ pub use proxima_numeric::codec::Codec;
 
 /// Borrows `bytes` as the [`proxima_tensor::cpu::QuantizedBlock`] variant
 /// `codec` names -- the deferred half of the split [`BoundWeights::packed_owned`]'s
-/// own doc describes. `None` for a codec [`Codec`] now identifies (GPU
-/// dispatch, sidecar wire tag) that [`proxima_tensor::cpu::QuantizedBlock`]
-/// has never grown a CPU decode variant for -- the recognized
-/// formats (`Q4_1`/`Q8_1`/`Q8K`/the `Iq*` family minus `Iq4Nl`/`Iq2Xs`/
-/// `Iq3Xxs`/`Tq10`/`Tq20`/`Mxfp4`/`Nvfp4`/`Q1_0`/`Q2_0`) are identity-only
-/// today; a caller reaching one propagates [`InteropError::UnsupportedCodec`]
-/// rather than panicking.
+/// own doc describes. `None` for a codec this binder does not construct a
+/// packed block for; a caller reaching one propagates
+/// [`InteropError::UnsupportedCodec`] rather than panicking.
+///
+/// The list is the expert slab's coverage, not the decoder catalogue: it names
+/// the codecs [`crate::expert_slab`] can page
+/// (`crate::bind::quantized_block_as_owned_bytes`, 8 codecs) plus the ones this
+/// binder re-hands as a borrowed block. Decoders for `Iq4Xs`/`Iq3S` exist
+/// (`proxima_gguf::quant`) and are what the serve path uses, but the paged slab
+/// does not bind them yet -- see the spec's `## codec detail`.
 #[cfg(feature = "std")]
 pub(crate) fn as_block(
     codec: Codec,
@@ -1345,9 +1373,15 @@ pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError>
         Codec::Ptq1_0 => GgmlType::Ptq1_0,
         Codec::Fp6E3M2 => GgmlType::Fp6E3M2,
         Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Q8_1Grouped => {
-            return Err(InteropError::UnsupportedCodec { codec: crate::error::codec_name(codec) });
+            return Err(InteropError::UnsupportedCodec {
+                codec: crate::error::codec_name(codec),
+            });
         }
-        _ => return Err(InteropError::UnsupportedCodec { codec: crate::error::codec_name(codec) }),
+        _ => {
+            return Err(InteropError::UnsupportedCodec {
+                codec: crate::error::codec_name(codec),
+            });
+        }
     })
 }
 
@@ -2518,25 +2552,33 @@ pub(crate) fn build_expert_slab<'file>(
         return slab;
     }
     let block_nodes = proxima_tensor::block_node_ids(program);
+    // one routed expert's own width, which the capture declares separately from the
+    // dense blocks' `feed_forward` (6144 dense, 512 expert); a checkpoint with
+    // a single declared width leaves `expert_feed_forward` zero
+    let expert_feed_forward = if architecture.expert_feed_forward != 0 {
+        architecture.expert_feed_forward
+    } else {
+        architecture.feed_forward
+    };
     for layer in 0..architecture.block_count {
         for (projection_kind, projection, out_dim, in_dim) in [
             (
                 crate::expert_slab::ExpertProjection::Gate,
                 "ffn_gate",
-                architecture.feed_forward,
+                expert_feed_forward,
                 architecture.embedding,
             ),
             (
                 crate::expert_slab::ExpertProjection::Up,
                 "ffn_up",
-                architecture.feed_forward,
+                expert_feed_forward,
                 architecture.embedding,
             ),
             (
                 crate::expert_slab::ExpertProjection::Down,
                 "ffn_down",
                 architecture.embedding,
-                architecture.feed_forward,
+                expert_feed_forward,
             ),
         ] {
             let name = alloc::format!("blk.{layer}.{projection}_exps.weight");
@@ -3473,9 +3515,9 @@ mod real_openchat_file {
 
     use proxima_gguf::GgmlType;
     use proxima_gguf::quant::q4_k;
+    use proxima_numeric::DType;
     use proxima_numeric::codec::Codec;
     use proxima_primitives::pipe::Pipe;
-    use proxima_numeric::DType;
     use proxima_tensor::cpu::{
         QuantizedBlock, evaluate_named, evaluate_quantized_named_with_scratch,
     };

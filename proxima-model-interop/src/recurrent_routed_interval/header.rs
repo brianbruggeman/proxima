@@ -24,6 +24,7 @@ pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHpara
         vocab: hparams.vocab,
         embedding: hparams.embedding,
         feed_forward: hparams.expert_feed_forward,
+        expert_feed_forward: hparams.expert_feed_forward,
         query_heads: hparams.query_heads,
         kv_heads: hparams.kv_heads_by_layer.iter().copied().max().unwrap_or(0),
         kv_heads_by_layer: hparams.kv_heads_by_layer.clone(),

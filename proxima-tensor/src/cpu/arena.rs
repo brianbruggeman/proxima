@@ -780,10 +780,11 @@ pub(super) fn build_static_arena_with_packed(
         buffers[node.0 as usize] = Some(vec![0.0f32; element_count(shapes.of(*node))]);
     }
 
-    let resolved = bind::bind(
+    let resolved = bind::bind_with_packed_leaves(
         program,
         &shapes,
         &effective_outputs,
+        &packed_nodes,
         NumericPolicy::bit_exact(),
     )?;
     let dead = dead_resolved_nodes(&resolved, &effective_outputs);
@@ -1856,14 +1857,12 @@ pub(super) fn packed_operands_of<'operand, Operand>(
 where
     Operand: Into<QuantizedBlock<'operand>> + Copy,
 {
-    let carries_packed = named
-        .iter()
-        .any(|(_, operand)| {
-            matches!(
-                (*operand).into(),
-                QuantizedBlock::Packed { .. } | QuantizedBlock::PackedStrided { .. }
-            )
-        });
+    let carries_packed = named.iter().any(|(_, operand)| {
+        matches!(
+            (*operand).into(),
+            QuantizedBlock::Packed { .. } | QuantizedBlock::PackedStrided { .. }
+        )
+    });
     if !carries_packed {
         return BTreeMap::new();
     }

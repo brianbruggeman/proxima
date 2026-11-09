@@ -10,6 +10,7 @@ fn gemma4_shaped_hparams(sliding_rope: Option<SlidingRope>) -> ModelHparams {
         vocab: 262_144,
         embedding: 1536,
         feed_forward: 6144,
+        expert_feed_forward: 6144,
         query_heads: 8,
         kv_heads: 1,
         kv_heads_by_layer: vec![1; 35],

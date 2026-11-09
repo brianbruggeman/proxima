@@ -321,6 +321,7 @@ pub fn architecture_from_hf_config(config: &HfConfig) -> Result<ModelHparams, In
         vocab: config.vocab_size,
         embedding: config.hidden_size,
         feed_forward,
+        expert_feed_forward: config.moe_intermediate_size.unwrap_or(0),
         query_heads: config.num_attention_heads,
         kv_heads,
         kv_heads_by_layer,

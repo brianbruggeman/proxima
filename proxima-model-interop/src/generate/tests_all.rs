@@ -38,10 +38,10 @@ use super::{
 // the explicit import is the one form both builds agree on.
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 #[allow(unused_imports)]
-use super::PlanNumerics;
+use super::PlacedIo;
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 #[allow(unused_imports)]
-use super::PlacedIo;
+use super::PlanNumerics;
 
 #[cfg(all(test, feature = "std"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -84,12 +84,12 @@ pub(super) mod tests {
         assert!(!moe_expert_prefetch_requested(false));
         assert!(moe_expert_prefetch_requested(true));
     }
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    use proxima_numeric::DType;
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_tensor::cpu::{ExpertEntry, ExpertSource, QuantizedBlock};
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_tensor::{Extent, Op};
-    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    use proxima_numeric::{DType};
     use proxima_tokenizer::Vocab;
 
     #[test]
@@ -2359,8 +2359,10 @@ pub(super) mod placed_plan_mode_tests {
     use alloc::string::String;
     use alloc::vec::Vec;
 
-    use proxima_tensor::{Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, projection};
-    use proxima_numeric::{DType};
+    use proxima_numeric::DType;
+    use proxima_tensor::{
+        Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, projection,
+    };
 
     use super::BackendRuntime;
 
@@ -2403,7 +2405,10 @@ pub(super) mod placed_plan_mode_tests {
             &named,
             &[identity_node],
             &resident_names,
-            super::PlacedIo { input: &[], output: &[] },
+            super::PlacedIo {
+                input: &[],
+                output: &[],
+            },
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_numeric::NumericPolicy::bit_exact(),
@@ -2460,7 +2465,10 @@ pub(super) mod placed_plan_mode_tests {
             &named,
             &[identity_node],
             &resident_names,
-            super::PlacedIo { input: &[], output: &[] },
+            super::PlacedIo {
+                input: &[],
+                output: &[],
+            },
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_numeric::NumericPolicy::llama_relaxed(),
@@ -2500,7 +2508,10 @@ pub(super) mod placed_plan_mode_tests {
             &named,
             &[identity_node],
             &resident_names,
-            super::PlacedIo { input: &[], output: &[] },
+            super::PlacedIo {
+                input: &[],
+                output: &[],
+            },
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Fast,
                 numeric_policy: proxima_numeric::NumericPolicy::bit_exact(),
@@ -2573,6 +2584,7 @@ pub(super) mod memory_fit_gate_tests {
             vocab: 1,
             embedding: 1,
             feed_forward: 1,
+            expert_feed_forward: 1,
             query_heads: 1,
             kv_heads: 2,
             kv_heads_by_layer: vec![2; 2],
@@ -4352,13 +4364,13 @@ pub(super) mod memory_fit_gate_tests {
     mod symbol_dependency_kv_bucket_crossing {
         use memmap2::Mmap;
         use proxima_gguf::parse_complete;
+        use proxima_numeric::NumericPolicy;
         use proxima_tensor::bind::{BoundOp, BoundOpKind};
         use proxima_tensor::op::{Keep, Op};
         use proxima_tensor::shape::{
             symbol_dependency_iteration_mask, symbol_dependency_output_masks,
         };
         use proxima_tensor::{bind_with_fusion, infer};
-        use proxima_numeric::{NumericPolicy};
 
         use super::super::LoadedModel;
         use crate::lowering::symbols;
