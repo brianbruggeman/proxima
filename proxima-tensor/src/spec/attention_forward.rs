@@ -332,10 +332,11 @@ pub enum FfnCombination {
     /// `blk.{layer}.ffn_{gate,up,down}_shexp.weight`. Whether it is scaled per
     /// token by `sigmoid(x @ ffn_gate_inp_shexp)` is
     /// [`LayerFfnConfig::shared_expert_gate`], because checkpoints differ:
-    /// qwen3.5-MoE carries that gate, flint's shared expert has no such tensor
-    /// and its output is added unscaled. The layer's dense branch runs where
-    /// `layer < leading_dense_block_count`, exactly as
-    /// [`Self::Exclusive`]'s does (flint's first two blocks are dense).
+    /// qwen3.5-MoE carries that gate; the captured sliding-pattern checkpoint's
+    /// shared expert has no such tensor and its output is added unscaled. The
+    /// layer's dense branch runs where `layer < leading_dense_block_count`,
+    /// exactly as [`Self::Exclusive`]'s does (the same checkpoint's first two
+    /// blocks are dense).
     RoutedWithSharedExpert,
 }
 
@@ -418,11 +419,12 @@ pub struct LayerFfnConfig {
     /// `true` scales [`FfnCombination::RoutedWithSharedExpert`]'s shared
     /// expert output by `sigmoid(x @ blk.{layer}.ffn_gate_inp_shexp.weight)`,
     /// the shape qwen3.5-MoE's converter writes. `false` adds the shared
-    /// output unscaled and declares no gate leaf at all, which is flint's
-    /// shape: its directory carries `ffn_{gate,up,down}_shexp.weight` and no
-    /// `ffn_gate_inp_shexp.weight` on any routed block
-    /// (`proxima-model-interop/tests/fixtures/flint/tensor_dir.txt`). Absent
-    /// keeps `true`, the only shape the field's first reader lowered.
+    /// output unscaled and declares no gate leaf at all, the shape a checkpoint
+    /// whose routed blocks carry `ffn_{gate,up,down}_shexp.weight` and no
+    /// `ffn_gate_inp_shexp.weight` has -- which is what
+    /// [`sliding_pattern_descriptor_from_gguf`](crate::spec::sliding_pattern_descriptor_from_gguf)
+    /// reads off such a checkpoint's tensor directory. Absent keeps `true`, the
+    /// only shape the field's first reader lowered.
     #[serde(default = "default_shared_expert_gate")]
     pub shared_expert_gate: bool,
 }
@@ -459,7 +461,7 @@ const fn default_shared_expert_gate() -> bool {
 /// this wrapper (`.0` is the width); the recurrent-hybrid engine reads
 /// [`ModelDescriptor::expert_shared_feed_forward`] itself.
 ///
-/// Example: flint's header states `expert_shared_feed_forward_length = 1024`
+/// Example: a captured header states `expert_shared_feed_forward_length = 1024`
 /// while its shared tensors are `(2048, 1024)` and `(1024, 2048)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SharedExpertWidth(pub u32);
@@ -558,9 +560,10 @@ pub struct LayerAttentionConfig {
     #[serde(default = "default_qk_norm")]
     pub qk_norm: bool,
     /// Per-head attention sink weight: one learned scalar per query head, the
-    /// checkpoint's `blk.{layer}.attn_sinks.weight` leaf (flint carries one on
-    /// every block, dims `(32,)` = one per query head) that the attention
-    /// denominator reads as an extra addend before the value mix. `false` --
+    /// checkpoint's `blk.{layer}.attn_sinks.weight` leaf (the captured
+    /// sliding-pattern checkpoint carries one on every block, dims `(32,)` = one
+    /// per query head) that the attention denominator reads as an extra addend
+    /// before the value mix. `false` --
     /// and an absent key in a config file -- declares no leaf, which is the
     /// node set every schedule had before sinks were data. Declared by every
     /// lowerer that reads this config per layer (the scheduled prefill builder,
@@ -1215,7 +1218,7 @@ pub(crate) fn append_swiglu_ffn(
 /// width `shared_feed_forward` over `blk.{layer}.ffn_{gate,up,down}_shexp.weight`,
 /// optionally scaled per token by `sigmoid(x @ blk.{layer}.ffn_gate_inp_shexp.weight)`.
 /// `gated = false` declares no gate leaf, so a checkpoint whose directory has
-/// no such tensor binds a program with none (flint), and `true` reproduces
+/// no such tensor binds a program with none, and `true` reproduces
 /// the qwen3.5-MoE shape the recurrent-hybrid engine lowers.
 ///
 /// # Errors
