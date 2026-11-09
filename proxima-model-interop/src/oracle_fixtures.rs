@@ -290,6 +290,69 @@ fn tensor_problem(rows: &[TensorRow]) -> Option<String> {
     None
 }
 
+/// The captured greedy run slice 12 holds the engine to: the prompt text
+/// llama.cpp tokenized and the sixteen ids a temperature-0 completion
+/// produced from it (plus the build that produced them, for the failure
+/// message).
+pub(crate) struct CapturedGreedyRun {
+    pub(crate) prompt: String,
+    pub(crate) generated_ids: Vec<u32>,
+    pub(crate) llama_build: String,
+}
+
+/// [`CapturedGreedyRun`] read out of `llama_ids.json`, with the fixture digests
+/// re-verified first: the parity test then cannot be satisfied by an edited
+/// capture, and the check costs one sha256 over five small files.
+///
+/// # Panics
+///
+/// If a fixture's bytes no longer match its pinned digest, or if
+/// `llama_ids.json` is missing a field this contract requires.
+pub(crate) fn captured_greedy_run() -> CapturedGreedyRun {
+    verify_fixture_digests();
+    let llama = json_fixture(LLAMA_ID_FIXTURE);
+    let record = first_record(&llama, LLAMA_ID_FIXTURE);
+    let prompt = record
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{LLAMA_ID_FIXTURE} has no prompt string"))
+        .to_string();
+    let llama_build = record
+        .get("llama_build")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("{LLAMA_ID_FIXTURE} names no llama.cpp build"))
+        .to_string();
+    CapturedGreedyRun {
+        prompt,
+        generated_ids: record_ids(record, "generated_ids", LLAMA_ID_FIXTURE),
+        llama_build,
+    }
+}
+
+/// [`captured_greedy_run`] is what the parity test compares against, so it gets
+/// its own contract: the capture's prompt, sixteen ids, and the build that
+/// produced them. Without this, a helper that silently returned an empty id list
+/// would make the parity assertion compare nothing and pass.
+#[test]
+fn the_captured_greedy_run_carries_the_prompt_and_its_sixteen_ids() {
+    let run = captured_greedy_run();
+    assert_eq!(
+        run.prompt, "The capital of France is",
+        "the capture's own prompt text"
+    );
+    assert_eq!(run.generated_ids.len(), 16, "sixteen greedy steps");
+    assert_eq!(
+        run.generated_ids.first().copied(),
+        Some(12834),
+        "the first id the capture produced"
+    );
+    assert!(
+        run.llama_build.starts_with('b'),
+        "the capture names its llama.cpp build, got {:?}",
+        run.llama_build
+    );
+}
+
 #[test]
 fn flint_fixture_header_matches_the_captured_checkpoint() {
     verify_fixture_digests();

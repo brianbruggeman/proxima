@@ -112,10 +112,10 @@ use omega::backend::{
     plan_named, plan_named_exact,
 };
 // only the metal-gated `SharedWeights` drop calls these; ungated, they are unused on cuda-only builds.
-#[cfg(feature = "metal")]
-use omega::backend::{release_resident_names, unregister_checkpoint_mapping};
 #[cfg(feature = "cuda")]
 use omega::backend::release_resident_ranges;
+#[cfg(feature = "metal")]
+use omega::backend::{release_resident_names, unregister_checkpoint_mapping};
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
 // `metal`+macos gate that type itself lives behind.
@@ -188,11 +188,19 @@ use omega::{
 // per-request `draft_n`/`draft_n_accepted` event (the spec) is a
 // business-meaningful workflow fact, not an `instrument`-gated diagnostic,
 // so it must compile and fire under plain `--features std`.
-use proxima_telemetry::{debug, info, trace, warn};
-#[cfg(any(feature = "instrument", feature = "gpu", all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    feature = "instrument",
+    feature = "gpu",
+    all(feature = "metal", target_os = "macos")
+))]
 use proxima_telemetry::emit::{Coord, global::decide};
-#[cfg(any(feature = "instrument", feature = "gpu", all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    feature = "instrument",
+    feature = "gpu",
+    all(feature = "metal", target_os = "macos")
+))]
 use proxima_telemetry::level::Level;
+use proxima_telemetry::{debug, info, trace, warn};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_tensor::TensorError;
 #[cfg(feature = "instrument")]
@@ -218,7 +226,11 @@ use crate::serving::{
     GdnPrefillBackend, PromptCacheConfig, ServingConfig, SpeculativeConfig, resolve_context_length,
 };
 
-#[cfg(any(feature = "instrument", feature = "gpu", all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    feature = "instrument",
+    feature = "gpu",
+    all(feature = "metal", target_os = "macos")
+))]
 pub(crate) fn event_enabled(target: &str, level: Level) -> bool {
     decide(target, Coord::from(level)).is_keep()
 }
@@ -261,6 +273,10 @@ mod draft_simple_tests;
 mod drafter;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod epilogue_sources_real_model_tests;
+#[cfg(test)]
+mod flint_bind_tests;
+#[cfg(test)]
+mod flint_greedy_parity_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod follow_up_conditioning_tests;
 #[cfg(test)]
@@ -307,6 +323,10 @@ mod resident_plans_real_model_tests;
 #[cfg(all(test, feature = "cuda"))]
 mod resident_weights_tests;
 mod ring_checkpoint;
+#[cfg(all(test, feature = "cuda"))]
+mod row_refit_oracle_tests;
+#[cfg(all(test, feature = "cuda"))]
+mod row_repack_tests;
 mod serving_backend;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod speculative_default_on_tests;
@@ -315,10 +335,6 @@ mod speculative_telemetry_tests;
 mod tests_all;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod thread_index_census_tests;
-#[cfg(all(test, feature = "cuda"))]
-mod row_refit_oracle_tests;
-#[cfg(all(test, feature = "cuda"))]
-mod row_repack_tests;
 #[cfg(test)]
 mod verify_bound_tests;
 mod warm_buffers;
