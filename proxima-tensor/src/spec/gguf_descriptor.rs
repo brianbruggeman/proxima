@@ -88,8 +88,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
     // the shared expert's gate is per-layer the same way: a checkpoint whose
     // routed blocks carry `ffn_gate_inp_shexp.weight` scales the shared output
     // by it, one whose blocks carry only `ffn_{gate,up,down}_shexp.weight` adds
-    // it unscaled (flint's directory has no gate tensor on any of its 47 routed
-    // blocks)
+    // it unscaled
     let shared_gate_layers: Vec<bool> = (0..block_count)
         .map(|layer| {
             let name = format!("blk.{layer}.ffn_gate_inp_shexp.weight");
@@ -112,7 +111,8 @@ pub fn sliding_pattern_descriptor_from_gguf(
     };
     // a checkpoint whose sliding layers attend at the same head width as its
     // full layers omits the swa override; the key only exists for checkpoints
-    // that differ (the flint capture carries neither, gemma4 carries both)
+    // that differ (the captured sliding-pattern checkpoint carries neither,
+    // gemma4 carries both)
     let key_length_swa =
         metadata_u32_option(parsed, &key("attention.key_length_swa")).unwrap_or(key_length);
     // this engine's attention graph carries a single head width for K and V
@@ -174,9 +174,9 @@ pub fn sliding_pattern_descriptor_from_gguf(
         mask_window: None,
         // a full layer's V comes from its own projection when the directory
         // carries the row; a checkpoint whose full layers have none shares the
-        // key projection (`shared_kv_layers` alone cannot decide this: flint
-        // declares no such key and still carries `attn_v.weight` on all 49
-        // blocks, 14 of which are non-sliding)
+        // key projection (`shared_kv_layers` alone cannot decide this: the
+        // captured sliding-pattern checkpoint declares no such key and still
+        // carries `attn_v.weight` on all 49 blocks, 14 of them non-sliding)
         value_source_kind: ValueSourceKind::ProjectedV,
         rope_table: RopeTableSel {
             cos_name: "rope_cos".into(),

@@ -1,8 +1,8 @@
 //! The attention sink's worked example, shared by the CPU literal test
 //! (`spec::tests::attention_sinks`) and the Metal parity test in `omega`, so
 //! both backends validate ONE hand-derived literal instead of each other
-//! (SPEC `serve-flint-through-omega`'s own "one hand-worked literal, not
-//! against each other").
+//! (the serving spec under `proxima-tensor/specs/`: one hand-worked literal, not
+//! each backend against the other).
 //!
 //! Gated for this crate's own tests, and for a downstream crate that asks for
 //! `test-support` AND `std` (`hand_worked_attended` uses `f32::exp`), never in

@@ -929,7 +929,7 @@ fn append_shared_expert_router(
 /// `gate_inp_shexp` is `Some` for a checkpoint whose directory carries
 /// `blk.{layer}.ffn_gate_inp_shexp.weight` ([`append_sigmoid_gated_shared_expert`])
 /// and `None` for one whose shared expert is added unscaled
-/// ([`append_swiglu_ffn`], flint's shape).
+/// ([`append_swiglu_ffn`], the captured sliding-pattern checkpoint's shape).
 #[allow(clippy::too_many_arguments)]
 fn append_shared_expert_moe_ffn(
     program: &mut Vec<Op>,
@@ -989,7 +989,7 @@ fn append_shared_expert_moe_ffn(
             shared_activation,
         )?,
         // no gate tensor in the checkpoint: the shared expert's output is added
-        // unscaled (flint), so the gate leaf must never be declared
+        // unscaled, so the gate leaf must never be declared
         None => append_swiglu_ffn(
             program,
             normed,
