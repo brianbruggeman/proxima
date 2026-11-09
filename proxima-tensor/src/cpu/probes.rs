@@ -405,7 +405,7 @@ pub fn attention_tile_shapes_nano() {
 /// `col_tiles = 7/8 = 0` — so every element falls through the same
 /// scalar column-tail loop the untiled path already uses, measuring
 /// only the tile/outer-loop overhead with no compensating NEON work);
-/// `admitted` runs whichever `VECS` [`width_tile_vecs_for`] actually
+/// `admitted` runs whichever `VECS` `width_tile_vecs_for` actually
 /// selects for that `N` (`1` at `N=7`, `2` at `N=8/9`, identical to
 /// `forced_vecs2` at `N=8/9`). Run via the `cpu_probes` example.
 #[cfg(target_arch = "aarch64")]

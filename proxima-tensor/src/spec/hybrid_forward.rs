@@ -792,7 +792,7 @@ pub(super) fn hybrid_dense_forward(
 }
 
 /// Composes [`elementwise`]/[`reduce`] for the two dense matvecs,
-/// [`append_activation`]/[`sigmoid`] for the two activations -- every op here is
+/// `append_activation`/`sigmoid` for the two activations -- every op here is
 /// one of proxima's own public `spec` builders (this module's own doc names the
 /// primitives), never a new one. `activation` is the layer's own, so a gated
 /// checkpoint whose shared expert is not SiLU lowers the same shape as an

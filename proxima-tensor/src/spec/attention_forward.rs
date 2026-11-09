@@ -468,7 +468,7 @@ impl SharedExpertWidth {
     /// The width a checkpoint with no shared expert carries: every builder
     /// ignores it unless a layer's combination is
     /// [`FfnCombination::RoutedWithSharedExpert`], and
-    /// [`append_shared_expert_ffn`] refuses a zero width rather than building a
+    /// `append_shared_expert_ffn` refuses a zero width rather than building a
     /// zero-wide SwiGLU.
     pub const NONE: Self = Self(0);
 }

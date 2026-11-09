@@ -4,7 +4,7 @@ use alloc::vec::Vec;
 pub use proxima_numeric::codec::Codec;
 use proxima_tensor::{BoundOp, NodeId, ScalarOp};
 
-/// What buffer index `n` in [`Kernel::bindings`] is for, in dispatch order:
+/// What buffer index `n` in `Kernel::bindings` is for, in dispatch order:
 /// index `0..operands.len()` are inputs, then one `Indices` buffer per
 /// gathered operand (in operand order), then the output, then the uniforms
 /// blob (extents/strides/bases for this dispatch — see the module doc), then
@@ -35,7 +35,7 @@ pub enum Binding {
     Fault,
     /// `CachedAttention`'s cross-threadgroup key-split scratch — present
     /// only when `cached_attention_merge_needed` admits
-    /// [`NumericRewrite::ContextSplitMerge`]. The split kernel WRITES it
+    /// `NumericRewrite::ContextSplitMerge`. The split kernel WRITES it
     /// (this binding replaces `Binding::Output` in that kernel's own
     /// `bindings` list, since the split no longer writes the op's real
     /// output directly); the merge kernel READS it. Not `NodeId`-keyed —
@@ -47,7 +47,7 @@ pub enum Binding {
 }
 
 /// Every packed operand a bound program has, keyed by [`NodeId`] to its
-/// codec — the single source of truth [`emit`] (via the `quantized` slice it
+/// codec — the single source of truth `emit` (via the `quantized` slice it
 /// derives) and the Metal driver's `correct_packed_matmul_layouts` call both
 /// need, generalizing the Q4_K-only `BTreeSet<NodeId>` this crate carried
 /// before Q6_K support existed. `Codec` is `proxima_numeric::codec::Codec` — the
