@@ -131,9 +131,14 @@ fn values(count: usize, seed: u64) -> Vec<f32> {
         .collect()
 }
 
+/// Formats the pre-move encoder refused and this one writes. Pinned so a format that starts
+/// encoding cannot slip in without a reviewer seeing it; the bytes for these are pinned by
+/// `proxima-numeric`'s own hand-computed OCP MX vectors instead of by a pre-move capture.
+const NEWLY_ENCODABLE: [&str; 5] = ["mxfp4", "nvfp4", "tq1_0", "fp6_e3m2", "ptq1_0"];
+
 #[test]
 fn every_encodable_layout_reproduces_the_pre_move_bytes() {
-    let mut checked = 0;
+    let mut encodable: Vec<&str> = Vec::new();
     for format in NumericFormat::ALL {
         let Some(layout) = format.block_layout() else {
             continue;
@@ -142,16 +147,33 @@ fn every_encodable_layout_reproduces_the_pre_move_bytes() {
             continue;
         }
         let name = format.name().expect("every format is named");
-        let (pinned_name, pinned) = ORACLE[checked];
-        assert_eq!(name, pinned_name, "oracle rows are in NumericFormat::ALL order");
-        let input = values(usize::from(layout.elements) * 3, u64::from(layout.block_bytes) + 17);
+        let input = values(
+            usize::from(layout.elements) * 3,
+            u64::from(layout.block_bytes) + 17,
+        );
         let blocks = input.len() / usize::from(layout.elements);
         let mut packed = vec![0u8; blocks * usize::from(layout.block_bytes)];
         quantize(&layout, &input, &mut packed).expect("a supported layout encodes");
         let hexed: String = packed.iter().map(|byte| format!("{byte:02x}")).collect();
-        let expected = pinned.concat();
-        assert_eq!(hexed, expected, "{name} bytes");
-        checked += 1;
+        match ORACLE.iter().find(|(pinned, _)| *pinned == name) {
+            Some((_, pinned)) => assert_eq!(hexed, pinned.concat(), "{name} bytes"),
+            None => assert!(
+                NEWLY_ENCODABLE.contains(&name),
+                "{name} encodes and appears in neither the pre-move oracle nor the newly-encodable list"
+            ),
+        }
+        encodable.push(name);
     }
-    assert_eq!(checked, ORACLE.len(), "pinned: every encodable layout is covered");
+    let captured: Vec<&str> = ORACLE.iter().map(|(name, _)| *name).collect();
+    for name in &captured {
+        assert!(
+            encodable.contains(name),
+            "the pre-move encoder wrote {name} and this one does not"
+        );
+    }
+    assert_eq!(
+        encodable.len(),
+        captured.len() + NEWLY_ENCODABLE.len(),
+        "pinned: every encodable layout is accounted for, old or new"
+    );
 }
