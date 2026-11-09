@@ -20,6 +20,9 @@ use crate::error::InteropError;
 
 mod binding;
 
+#[cfg(test)]
+mod scan;
+
 pub use binding::{BindingProfile, TensorAlias, binding_profile};
 
 pub(crate) const FAMILY_PROFILES: &[(&str, &str)] = &[
