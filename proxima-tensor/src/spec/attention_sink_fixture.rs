@@ -48,7 +48,7 @@ const V_CACHE: [[[f32; 2]; 2]; 2] = [[[1.0, 0.25], [-0.25, 0.5]], [[-0.5, 0.75],
 const V_NEW: [[f32; 2]; 2] = [[0.5, -0.25], [0.125, 0.875]];
 /// one learned scalar per query head, `[h]` with `h = group*u + g`
 pub const SINKS: [f32; 4] = [2.0, -1.0, 0.5, 3.0];
-pub(crate) const SINK_LEAF_NAME: &str = "blk.0.attn_sinks.weight";
+pub(super) const SINK_LEAF_NAME: &str = "blk.0.attn_sinks.weight";
 
 /// # Errors
 /// What `append_local_block_and_combine` raises while lowering.
