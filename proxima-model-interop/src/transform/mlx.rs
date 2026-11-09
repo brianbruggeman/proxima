@@ -101,7 +101,7 @@ impl MlxLayout {
 impl MlxExport {
     /// Cuts `tensors` into shards of at most `cap_bytes` payload bytes each
     /// and renders every shard plus the index when there are several, as
-    /// [`MlxLayout::plan`] with the payloads appended.
+    /// `MlxLayout::plan` with the payloads appended.
     ///
     /// # Errors
     ///
