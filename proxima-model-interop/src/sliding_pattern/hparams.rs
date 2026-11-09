@@ -249,14 +249,20 @@ mod tests {
     use alloc::vec::Vec;
 
     use proxima_gguf::pipe::ParsedGguf;
+    use proxima_gguf::tensor::TensorInfo;
+    use proxima_gguf::types::GgmlType;
     use proxima_gguf::value::{MetadataArray, MetadataValue};
     use proxima_tensor::spec::{
-        LayerSchedule, ModelDescriptor, RopePairing, ValueSourceKind,
+        ForwardProgram, LayerSchedule, ModelDescriptor, RopePairing, ValueSourceKind, build_forward,
         sliding_pattern_descriptor_from_gguf,
     };
 
+    use crate::bind_leaves::{BindCensus, bind_census};
+    use crate::error::InteropError;
+    use crate::lowering::step_input_names;
     use crate::memory_fit::{MemoryBudget, WeightClassBytes};
-    use crate::profiles::family_profile;
+    use crate::oracle_fixtures::read_fixture;
+    use crate::profiles::{binding_profile, family_profile};
     use proxima_tensor::spec::ExpertGatingFunc;
 
     use crate::test_support::{
@@ -318,6 +324,188 @@ mod tests {
             .iter()
             .map(|(name, dim)| (name.as_str(), *dim))
             .collect()
+    }
+
+    /// The capture's own 779-row tensor directory in the shape the parser hands
+    /// the binder. Payload offsets stay `0` because the census compares names,
+    /// and the row set, ggml types and dims are the committed capture's own.
+    fn flint_tensor_directory() -> Vec<TensorInfo> {
+        crate::oracle_fixtures::parse_tensor_rows(&read_fixture("tensor_dir.txt"))
+            .into_iter()
+            .map(|row| TensorInfo {
+                name: row.name,
+                dims: row.dimensions.iter().copied().collect(),
+                ggml_type: ggml_type_named(&row.ggml_type),
+                offset: 0,
+            })
+            .collect()
+    }
+
+    /// The eight ggml types the capture stores, named by the fixture's own
+    /// column. A type this map does not name is a changed capture, not a test
+    /// this fixture should silently skip.
+    fn ggml_type_named(name: &str) -> GgmlType {
+        match name {
+            "f32" => GgmlType::F32,
+            "q8_0" => GgmlType::Q8_0,
+            "q5_K" => GgmlType::Q5_K,
+            "q4_K" => GgmlType::Q4_K,
+            "q6_K" => GgmlType::Q6_K,
+            "bf16" => GgmlType::Bf16,
+            "iq4_xs" => GgmlType::Iq4Xs,
+            "iq3_s" => GgmlType::Iq3S,
+            other => {
+                panic!("tensor_dir.txt carries ggml type {other:?}, which this map does not name")
+            }
+        }
+    }
+
+    /// The captured header plus the captured directory: the checkpoint a real
+    /// load reads, minus the 23 GiB of payload the census does not touch.
+    fn flint_checkpoint() -> ParsedGguf {
+        let mut parsed = flint_parsed_with(flint_metadata(), &[]);
+        parsed.tensors = flint_tensor_directory();
+        parsed.tensor_count = parsed.tensors.len() as u64;
+        parsed
+    }
+
+    /// The descriptor and the forward program a real flint load lowers.
+    fn flint_forward(parsed: &ParsedGguf) -> (ModelDescriptor, ForwardProgram) {
+        let profile = family_profile("flint").expect("the shipped flint profile parses");
+        let descriptor = sliding_pattern_descriptor_from_gguf(parsed, false, &profile)
+            .expect("the captured header and the shipped profile lower");
+        let forward =
+            build_forward(&descriptor).expect("the captured schedule builds a forward program");
+        (descriptor, forward)
+    }
+
+    fn flint_census(
+        parsed: &ParsedGguf,
+        descriptor: &ModelDescriptor,
+        forward: &ForwardProgram,
+    ) -> BindCensus {
+        let binding = binding_profile("flint").expect("the binding defaults parse");
+        let runtime = step_input_names(descriptor, &forward.program);
+        bind_census(parsed, &forward.program, &binding, &runtime)
+    }
+
+    /// R7: the real capture's 779 tensors are exactly the weights the lowered
+    /// program reads -- no leaf without a tensor, no tensor without a leaf.
+    ///
+    /// The census is the load path's own gate (`crate::lowering`'s
+    /// `bind_descriptor` runs it before returning), so this asserts the same
+    /// comparison a `LoadedModel::load` on this checkpoint makes.
+    #[test]
+    fn flint_bind_all_tensors_() {
+        let parsed = flint_checkpoint();
+        assert_eq!(
+            parsed.tensors.len(),
+            779,
+            "the capture's own tensor directory is the oracle this test reads"
+        );
+        let (descriptor, forward) = flint_forward(&parsed);
+
+        let declared: alloc::collections::BTreeSet<&str> = forward
+            .program
+            .iter()
+            .filter_map(|op| match op {
+                proxima_tensor::op::Op::Input {
+                    name: Some(name), ..
+                } => Some(name.as_str()),
+                _ => None,
+            })
+            .collect();
+        let runtime = step_input_names(&descriptor, &forward.program);
+        assert!(
+            runtime.iter().any(|name| name == "ids") && runtime.iter().any(|name| name == "eps"),
+            "the step feeds its own scalar and RoPE leaves; a census that classified nothing as \
+             runtime would report every one of them unbound"
+        );
+        assert_eq!(
+            runtime
+                .iter()
+                .filter(|name| name.starts_with("kv_cache."))
+                .count(),
+            49 * 3,
+            "every one of the 49 blocks owns its k_even/k_odd/v cache row"
+        );
+        assert_eq!(
+            declared.len(),
+            779 + runtime.len(),
+            "the program names the capture's 779 weights and nothing else beyond the step inputs"
+        );
+
+        let census = flint_census(&parsed, &descriptor, &forward);
+
+        assert_eq!(
+            census.unbound_leaves,
+            Vec::<String>::new(),
+            "every weight leaf the program reads must be in the capture"
+        );
+        assert_eq!(
+            census.unclaimed_tensors,
+            Vec::<String>::new(),
+            "every tensor the capture stores must be read by some leaf"
+        );
+        assert_eq!(census, BindCensus::default());
+    }
+
+    /// AC27: the census the test above trusts must reject a directory one
+    /// tensor short, and name the tensor -- otherwise it proves nothing about
+    /// the real one. Both directions are checked: a dropped weight and a
+    /// planted extra.
+    #[test]
+    fn control_rejects_missing_tensor() {
+        let parsed = flint_checkpoint();
+        let (descriptor, forward) = flint_forward(&parsed);
+        assert_eq!(
+            flint_census(&parsed, &descriptor, &forward),
+            BindCensus::default(),
+            "the capture passes its own comparison"
+        );
+
+        // a norm the profile declares, not the directory: dropping it cannot
+        // also drop the leaf, which is what makes it a missing-tensor control
+        let dropped = "blk.0.attn_q_norm.weight";
+        let mut short = parsed.clone();
+        short.tensors.retain(|tensor| tensor.name != dropped);
+        short.tensor_count = short.tensors.len() as u64;
+        let census = flint_census(&short, &descriptor, &forward);
+        assert_eq!(
+            census.unbound_leaves,
+            alloc::vec![String::from(dropped)],
+            "the census names exactly the leaf the short directory cannot satisfy"
+        );
+        assert!(
+            census.unclaimed_tensors.is_empty(),
+            "dropping a tensor leaves nothing unclaimed, got {:?}",
+            census.unclaimed_tensors
+        );
+        assert!(matches!(
+            census.first_problem(),
+            Some(InteropError::UnboundWeightLeaf { leaf }) if leaf == dropped
+        ));
+
+        let mut planted = parsed.clone();
+        let extra = String::from("blk.0.ffn_up_extra.weight");
+        planted.tensors.push(TensorInfo {
+            name: extra.clone(),
+            dims: alloc::vec![2048u64, 6144].into_iter().collect(),
+            ggml_type: GgmlType::Q8_0,
+            offset: 0,
+        });
+        planted.tensor_count = planted.tensors.len() as u64;
+        let census = flint_census(&planted, &descriptor, &forward);
+        assert_eq!(
+            census.unclaimed_tensors,
+            alloc::vec![extra.clone()],
+            "a tensor no leaf reads is reported by name"
+        );
+        assert!(census.unbound_leaves.is_empty());
+        assert!(matches!(
+            census.first_problem(),
+            Some(InteropError::UnclaimedTensor { tensor }) if tensor == extra
+        ));
     }
 
     /// Every fact R3 names, read back off the descriptor and the header carrier,
