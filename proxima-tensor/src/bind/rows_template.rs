@@ -22,7 +22,7 @@ pub type RowTemplate = (u64, Vec<Fields>);
 type Unsigned<'visit> = &'visit mut dyn FnMut(&mut u64);
 type Signed<'visit> = &'visit mut dyn FnMut(&mut i64);
 
-/// [`refresh_attention`] for a caller outside this crate: the op moved to `next`'s shapes.
+/// `refresh_attention` for a caller outside this crate: the op moved to `next`'s shapes.
 #[must_use]
 pub fn refresh_cached_attention(bound: &BoundOp, next: &Shapes) -> Option<BoundOp> {
     refresh_attention(bound, next)
