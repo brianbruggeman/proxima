@@ -114,34 +114,27 @@ Workflow for a fresh session (absolute paths):
   at load. Closing it needs either a presence channel on the descriptor's inputs or the load-time directory census of
   slice 9 (`AC9`).
 
-- **A sink-bearing decode program's fusion status is unmeasured.** The fused
-  `BoundOpKind::CachedAttention` step derives its denominator from two zero-init
-  Add reduces (`cached_attention_candidates` walks `Add(reduce(exp(cached)),
-  reduce(exp(new)))`), so it has no place for the sink's third `exp(sink - peak)`
-  addend -- the question is whether a sink-bearing program still fuses and would
-  therefore drop that addend inside the kernel, or declines and runs the generic
-  per-node path. Measured, and NOT answered:
-  `attention_sink_fusion_census_reports_the_same_decision_with_and_without_the_sink`
-  (`proxima-tensor/src/spec/tests.rs`) binds the flint-shaped two-range program
-  (`scheduled(...)` at `CacheMask::Padded`) flag-on and flag-off and asserts the
-  fused step counts are the PAIR `(0, 0)` under `NumericPolicy::default()` -- plus
-  no sink leaf flag-off and one per layer flag-on, which is what stops a dead knob
-  passing it -- and the pair is still `(0, 0)` when the census is run with
-  `--features metal-fuse-attn-decode`, `metal-attn-split-decode`,
-  `metal-attn-split-rows` and `cached-attention-streaming` (checked by hand, not a
-  CI cell). So that fixture cannot attribute the count to the sink. The census asserts the
-  ABSOLUTE pair `(0, 0)` plus one declared sink leaf per layer on the flag-on
-  program, so it fails both when a dead knob makes the two arms identical and
-  when a sink starts riding the fused kernel; either way this item must be
-  rewritten with the numbers the test prints. The CPU/Metal parity now landed proves the term is read on the
-  generic path only; it says nothing about flint's real decode path if that path
-  fuses. Closing this needs a bind census over the *production* two-range program
-  (the shape `append_two_range_cached_attention` builds through the sliding-pattern
-  reader, not the synthetic descriptor) counting `CachedAttention` steps flag-on
-  vs flag-off, then either a fused-kernel sink operand or a decline guard.
-
-Card PROXIMAOMEGA-11 (slice 8) landing record. Classification: omega, feature (generic engine capability proven on a second backend), known oracle (the hand-worked literal slice 7 committed, plus llama.cpp `cd959bae9`'s `soft_max_f32` sink branch), boundary = none (no wire format, schema, emit path or public API moves), blast radius = one crate (a gated fixture module) plus tests in a second. Panel: skills `algorithm-development` + `validate-slice`; area expert `proxima-critic`; implementer `card-worker-lean`; independent reviewer `proxima-test-writer`; postmortem `postmortem-expert`; persona `persona-literal`. What this slice found and discarded, recorded because it was nearly landed: a full re-derivation of the slice-7 denominator term (`append_attention_sink_term`/`append_sink_to_denominator`, a mixer fixture, a parser-grammar change) was written against the shared tree's stale working copy of `attention_forward.rs`, which predates slice 7; HEAD already carries the same formulation (`append_attention_sink_addend`/`add_attention_sink_weight`, `ggml-cpu/ops.cpp:5670-5680`), so that work was a duplicate and was removed rather than committed, and the slice was replayed on `ticket/PROXIMAOMEGA-11` from `106699a8` in worktree `~/repos/slot-0/proxima-wt-omega11`.
-
-## struck
-
+- **A sink-bearing program cannot reach a fused `CachedAttention` step, in any
+  measured configuration -- so the correctness half of this question is
+  ANSWERED, and the perf half is what stays open.** The fused step derives its
+  denominator from two zero-init Add reduces, so a sink's third `exp(sink - peak)`
+  addend has no place in it; the danger was a program that fused anyway and
+  dropped the term inside the kernel. Measured matrix (`scheduled(...)` with the
+  flint head ratio, `NumericPolicy::default()`, fused steps sink-off ->
+  sink-on): `Cached/Padded` `0 -> 0` (this is the sliding-pattern family's
+  production path, `generate/decode.rs`), `Cached/Bounded` `2 -> refused by name`
+  (`UnsupportedInBuilder { feature: "attention sinks (this engine has no
+  per-layer sink channel)" }`, `descriptor.rs:1072-1078`), `Cacheless/Padded`
+  `2 -> 0`, `Cacheless/Bounded` `2 -> 0`. No configuration is non-zero on both
+  sides, so no reachable sink-bearing program can lose the addend that way. What
+  the matrix does show is a real PERF consequence: where the same program fuses
+  without a sink (the two cacheless arms, 2 steps), adding one moves it to the
+  generic per-node path (0 steps). Flint's *serving* path is unaffected today
+  because its two-range decode program takes 0 fused steps with the sink off too
+  -- i.e. that path is not fused at all. The census
+  (`attention_sink_fusion_census_reports_the_same_decision_with_and_without_the_sink`)
+  pins the production pair `(0, 0)` plus the declared-leaf assertions, so any
+  move is loud. Reopening this needs either a fused kernel that learns to read a
+  sink (then the census fails and this note gets the new pair) or a measurement
+  of what the cacheless 2 -> 0 costs on a real prefill.
 - **The sliding-pattern reader's full-layer V source (struck: closed).** Found while landing slice 5, where it was first recorded as an open item under proposed card PROXIMAOMEGA-16. The reader decided a full layer's `value_source_kind` from `attention.shared_kv_layers` alone ("moe checkpoints have no attn_v on full layers"); flint declares no such key and carries `attn_v.weight` on all 49 blocks, so its 14 non-sliding blocks (indices 0,1,5,...,48) would have lowered with V taken from the key projection while `blk.{n}.attn_v.weight` was bound by nothing. Closed in the same branch by the presence rule the shared-expert gate already uses: `blk.{layer}.attn_v.weight` present -> `ProjectedV`, absent -> `SharedWithKey`, with `flint_full_layers_project_their_own_value_from_the_directory` proving both directions from the capture. gemma4's own program is pinned by `arch_data_digest_gemma4_26b` and `arch_data_digest_gemma4_e2b`, which hash every op against committed fixtures and pass at this tip (host-gated on the staged checkpoints, not CI-hermetic); its checkpoint's *header* is still not in tree, so the rule is covered by digest rather than by reading gemma4's directory.
