@@ -5,20 +5,28 @@
 //!
 //! - `Scalar(layout)` — one value per element, through [`crate::float_layout_codec::encode`],
 //!   whose rounding and special-value policy are the format's own.
-//! - `Block(layout)` — a run of codes under a shared absolute-maximum scale, fitted per run and
-//!   written back through the layout's own planes. Ported from `proxima-gguf`'s
-//!   `block_layout_encode`, which is now a thin adapter over this.
-//! - `Levels` with a linear ladder (ternary) — the same machinery: a trit *is* a narrow integer
-//!   code under the layout's bias and step.
+//! - `Block(layout)` with integer codes — a run of codes under a shared absolute-maximum scale,
+//!   fitted per run and written back through the layout's own planes. Ported from
+//!   `proxima-gguf`'s `block_layout_encode`, which is now a thin adapter over this.
+//! - `Block(layout)` with float codes — the OCP MX and NV `E2M1` fields and the FP6 `E3M2` field:
+//!   the code is a small float, so the nearest code is the nearest representable value, chosen
+//!   through [`crate::float_layout_codec::encode`] rather than by rounding a ratio.
+//! - mixed-radix packings (`TQ1_0`, `PTQ1_0`) — a code is a base-3 lane of a shared storage word,
+//!   so the writer assembles the whole word and stores it once; `pack_digits` is the exact inverse
+//!   of the decoder's lane extraction, checked over every digit string the packings can produce.
+//! - `Levels` with a linear ladder (ternary) — the same machinery as an integer code: a trit *is*
+//!   a narrow integer code under the layout's bias and step.
 //! - `Levels(Explicit)` — IQ4_NL's trained 16-entry ladder: the scale is fitted so the block peak
 //!   lands on the largest table magnitude, and every code is the nearest table entry.
 //!
-//! Refused, with the reason: a block layout with sub-blocks or a stored min (one absolute-maximum
-//! scale cannot express them), a mixed-radix packed code, a code wider than 12 bits, and a trained
-//! grid codebook (quantizing into an IQ2_XS/IQ3_XXS grid needs a search over the codebook, and six
-//! of those codebooks are not in this crate at all).
+//! The census test pins which of the 36 formats land in which arm. Two families refuse, each
+//! because one shared absolute-maximum scale is the wrong model rather than because the code is
+//! missing: the K-quants (a sub-block scale and a stored min per sub-block, chosen by a
+//! quantization-aware search) and the trained codebooks (`IQ1_*`..`IQ4_XS`, whose tables the
+//! walker does not carry).
 
 use crate::block_layout::{BlockLayout, Plane, PlaneCursor};
+use crate::convert::{Overflow, Rounding};
 use crate::error::NumericError;
 use crate::float_layout::FloatLayout;
 use crate::float_layout_codec;
@@ -27,11 +35,23 @@ use crate::format::{LevelTable, NumericFormat};
 const MAX_CODE_BITS: u8 = 12;
 const SUM_BYTES: usize = 2;
 
+/// Which writer a layout's element codes need.
+#[derive(Debug, Clone, Copy)]
+enum Codes {
+    /// Narrow integers under the layout's multiplier and bias: every one-, two-, four- and
+    /// eight-bit code this workspace stores.
+    Integer { lowest: i32, highest: i32 },
+    /// A float layout's own values: the OCP MX and NV `E2M1` and FP6 `E3M2` fields, whose code is
+    /// a small float rather than an integer, so the nearest code is the nearest *representable
+    /// value* and not a rounded ratio.
+    Float,
+}
+
 /// A layout's code range and value mapping, read once per run of blocks.
 #[derive(Debug, Clone, Copy)]
 struct Linear {
-    lowest: i32,
-    highest: i32,
+    codes: Codes,
+    code_layout: FloatLayout,
     reach: f32,
     multiplier: f32,
     bias: f32,
@@ -42,41 +62,62 @@ fn code_bits(layout: &BlockLayout) -> u8 {
     layout.element.low.bits + layout.element.high.map_or(0, |plane| plane.bits)
 }
 
-fn code_range(layout: &BlockLayout) -> (i32, i32) {
-    (0..1u32 << code_bits(layout)).fold((i32::MAX, i32::MIN), |(lowest, highest), raw| {
-        #[expect(
-            clippy::cast_possible_truncation,
-            reason = "the point of the walk is the integer the code decodes to"
-        )]
-        let code = float_layout_codec::decode(raw, layout.element.code) as i32;
-        (lowest.min(code), highest.max(code))
-    })
+/// How many codes a layout holds: a mixed-radix packing names its radix, every other code its
+/// plane width.
+fn code_space(layout: &BlockLayout) -> u32 {
+    if layout.element.packed_radix > 1 {
+        u32::from(layout.element.packed_radix)
+    } else {
+        1u32 << code_bits(layout)
+    }
 }
 
-fn check_linear(layout: &BlockLayout) -> Result<(), &'static str> {
+/// The lowest and highest value a code stands for, over the layout's whole code space. Codes that
+/// decode to a non-finite value are not levels and are skipped.
+fn code_value_range(layout: &BlockLayout) -> (f32, f32) {
+    (0..code_space(layout)).fold(
+        (f32::INFINITY, f32::NEG_INFINITY),
+        |(lowest, highest), raw| {
+            let value = float_layout_codec::decode(raw, layout.element.code);
+            if value.is_finite() {
+                (lowest.min(value), highest.max(value))
+            } else {
+                (lowest, highest)
+            }
+        },
+    )
+}
+
+fn check_linear(layout: &BlockLayout) -> Result<bool, &'static str> {
     if layout.sub.is_some() {
         return Err("sub-blocks carry their own scales");
     }
     if layout.min.is_some() {
         return Err("a stored min is not an absolute-maximum scale");
     }
-    if layout.element.packed_radix > 1 {
-        return Err("mixed-radix packed codes");
+    if layout.element.packed_radix > 1 && layout.runs() > 1 {
+        return Err("mixed-radix codes spread over several scale runs");
     }
-    if layout.element.code.exponent_bits != 0 || code_bits(layout) > MAX_CODE_BITS {
-        return Err("element codes are not narrow integers");
+    if code_bits(layout) > MAX_CODE_BITS {
+        return Err("element codes wider than the encoder walks");
     }
-    Ok(())
+    if layout.element.code.exponent_bits == 0 {
+        return Ok(false);
+    }
+    float_layout_codec::layout_supported(&layout.element.code)
+        .map(|()| true)
+        .map_err(|_| "element codes outside the scalar codec")
 }
 
 fn touches(plane: &Plane, elements: usize, bytes: core::ops::Range<usize>) -> bool {
     (0..elements).any(|index| bytes.contains(&(plane.address(index) / 8)))
 }
 
-/// llama's `Q8_1` carries `s = d * sum(q)` in the two bytes after the scale; a layout whose planes
-/// leave those bytes unused is the one place the consumer reads it.
+/// llama's `Q8_1` carries `s = d * sum(q)` in the two bytes after the scale; a layout that leaves
+/// those bytes free -- no code there, and no other run's scale there -- is the one place a
+/// consumer reads it.
 fn sum_slot(layout: &BlockLayout) -> Option<usize> {
-    let gap = usize::from(layout.scale.layout.width()) / 8;
+    let gap = usize::from(layout.scale.layout.width()).div_ceil(8);
     let elements = usize::from(layout.elements);
     let planes = [Some(layout.element.low), layout.element.high];
     let free = (0..layout.runs()).all(|run| {
@@ -87,24 +128,40 @@ fn sum_slot(layout: &BlockLayout) -> Option<usize> {
                 .iter()
                 .flatten()
                 .all(|plane| !touches(plane, elements, bytes.clone()))
+            && (0..layout.runs()).all(|other| {
+                let at = layout.run_scale_byte(other);
+                bytes.end <= at || bytes.start >= at + gap
+            })
     });
     free.then_some(gap)
 }
 
 fn linear(layout: &BlockLayout) -> Result<Linear, &'static str> {
-    check_linear(layout)?;
-    let (lowest, highest) = code_range(layout);
+    let float_codes = check_linear(layout)?;
+    let (lowest_code, highest_code) = code_value_range(layout);
     let multiplier = f32::from(layout.multiplier);
     let bias = f32::from(layout.element.bias);
-    let value_low = multiplier * lowest as f32 - bias;
-    let value_high = multiplier * highest as f32 - bias;
+    let value_low = multiplier * lowest_code - bias;
+    let value_high = multiplier * highest_code - bias;
     let reach = value_high.min(-value_low);
     if reach <= 0.0 {
         return Err("no code magnitude on both sides of zero");
     }
+    let codes = if float_codes {
+        Codes::Float
+    } else {
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a narrow integer code decodes to its own integer, so the walk is exact"
+        )]
+        Codes::Integer {
+            lowest: lowest_code as i32,
+            highest: highest_code as i32,
+        }
+    };
     Ok(Linear {
-        lowest,
-        highest,
+        codes,
+        code_layout: layout.element.code,
         reach,
         multiplier,
         bias,
@@ -113,14 +170,14 @@ fn linear(layout: &BlockLayout) -> Result<Linear, &'static str> {
 }
 
 impl Linear {
-    fn code_for(&self, value: f32, scale: f32) -> i32 {
+    fn code_for(&self, value: f32, scale: f32, (lowest, highest): (i32, i32)) -> i32 {
         let scaled = if scale == 0.0 { 0.0 } else { value / scale };
         #[expect(
             clippy::cast_possible_truncation,
             reason = "the quotient is clamped into the code range immediately after"
         )]
         let code = libm::roundf((scaled + self.bias) / self.multiplier) as i32;
-        code.clamp(self.lowest, self.highest)
+        code.clamp(lowest, highest)
     }
 
     fn value_of(&self, code: i32) -> f32 {
@@ -129,16 +186,28 @@ impl Linear {
 }
 
 fn put_bits(plane: &Plane, cursor: &mut PlaneCursor, bits: u32, block: &mut [u8]) {
-    let address = cursor.address();
-    let mask = (1u32 << plane.bits) - 1;
-    #[expect(
-        clippy::cast_possible_truncation,
-        reason = "a code plane is at most 12 bits and never straddles a byte it was not built to"
-    )]
-    {
-        block[address / 8] |= ((bits & mask) << (address % 8)) as u8;
-    }
+    put_bits_at(plane.bits, cursor.address(), bits, block);
     cursor.advance();
+}
+
+fn put_bits_at(width: u8, at: usize, bits: u32, block: &mut [u8]) {
+    let mask = (1u32 << width) - 1;
+    let mut value = bits & mask;
+    let mut address = at;
+    let mut written = 0u32;
+    while written < u32::from(width) {
+        let within = (address % 8) as u32;
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "a byte-wide write of the low eight bits"
+        )]
+        {
+            block[address / 8] |= (value << within) as u8;
+        }
+        value >>= 8 - within;
+        written += 8 - within;
+        address += usize::from(8 - within as u8);
+    }
 }
 
 fn cursors_of(layout: &BlockLayout) -> [PlaneCursor; 2] {
@@ -158,15 +227,41 @@ fn put_code(layout: &BlockLayout, cursors: &mut [PlaneCursor; 2], raw: u32, bloc
 }
 
 fn put_scale(layout: &BlockLayout, offset: usize, code: u32, block: &mut [u8]) {
-    let bytes = usize::from(layout.scale.layout.width()) / 8;
+    let bytes = usize::from(layout.scale.layout.width().div_ceil(8));
     for byte in 0..bytes {
         block[offset + byte] = (code >> (8 * byte)) as u8;
     }
 }
 
+/// The scale a block's peak is stored at, read back so the codes round against the value the
+/// decoder will use.
+///
+/// A scale with a mantissa rounds to the nearest stored value; that is the incumbent's rule and it
+/// keeps the top element within one code step. A scale with **no** mantissa (`E8M0`, one bit of
+/// resolution) cannot: rounding `peak / reach` down to the nearest power of two is a 41% error and
+/// the peak then clamps to the largest code, so the quotient is rounded *away from zero* instead
+/// and the block peak always lands inside the code range.
+fn stored_scale(peak: f32, reach: f32, layout: FloatLayout) -> (u32, f32) {
+    let rounding = if layout.mantissa_bits == 0 {
+        Rounding::AwayFromZero
+    } else {
+        Rounding::NearestTiesEven
+    };
+    let mut nan_count = 0;
+    let code = float_layout_codec::encode_with(
+        peak / reach,
+        layout,
+        rounding,
+        Overflow::Format,
+        &mut nan_count,
+    );
+    (code, float_layout_codec::decode(code, layout))
+}
+
 fn quantize_run(
     layout: &BlockLayout,
     shape: &Linear,
+    bounds: (i32, i32),
     run: u16,
     input: &[f32],
     cursors: &mut [PlaneCursor; 2],
@@ -175,13 +270,12 @@ fn quantize_run(
     let peak = input
         .iter()
         .fold(0.0f32, |peak, value| peak.max(value.abs()));
-    let scale_code = float_layout_codec::encode(peak / shape.reach, layout.scale.layout);
-    let scale = float_layout_codec::decode(scale_code, layout.scale.layout);
+    let (scale_code, scale) = stored_scale(peak, shape.reach, layout.scale.layout);
     let scale_at = layout.run_scale_byte(run);
     put_scale(layout, scale_at, scale_code, block);
     let mut value_sum = 0.0f32;
     for value in input {
-        let code = shape.code_for(*value, scale);
+        let code = shape.code_for(*value, scale, bounds);
         put_code(
             layout,
             cursors,
@@ -203,11 +297,26 @@ fn quantize_block(
     input: &[f32],
     block: &mut [u8],
 ) -> Result<(), NumericError> {
+    if layout.element.packed_radix > 1 {
+        return quantize_radix_block(layout, shape, input, block);
+    }
+    if matches!(shape.codes, Codes::Float) {
+        let code_layout = shape.code_layout;
+        return quantize_coded_block(layout, shape.reach, input, block, |target| {
+            float_layout_codec::encode(target, code_layout)
+        });
+    }
     if input.iter().any(|value| !value.is_finite()) {
         return Err(NumericError::NonFinite {
             format: format_of(layout),
         });
     }
+    let Codes::Integer { lowest, highest } = shape.codes else {
+        return Err(NumericError::UnsupportedEncode {
+            format: format_of(layout),
+            reason: "a non-integer code reached the integer writer",
+        });
+    };
     block.fill(0);
     let mut cursors = cursors_of(layout);
     for (run, group) in input
@@ -218,19 +327,136 @@ fn quantize_block(
             clippy::cast_possible_truncation,
             reason = "a block holds at most 32 runs and each is at most 256 elements"
         )]
-        quantize_run(layout, shape, run as u16, group, &mut cursors, block);
+        quantize_run(
+            layout,
+            shape,
+            (lowest, highest),
+            run as u16,
+            group,
+            &mut cursors,
+            block,
+        );
     }
     Ok(())
 }
 
-/// A block whose codes index a trained ladder: the scale places the block peak on `reach`, then
-/// every code is the table entry nearest the scaled value.
-fn quantize_ladder_block(
+/// The most lanes a shared storage word carries (`TQ1_0` packs five trits into one byte).
+const MAX_LANES: usize = 8;
+
+/// The digits a storage word holds, read exactly as [`crate::decode`] reads them.
+fn unpack_digits(word: u32, lanes: usize, radix: u32, bits: u8, out: &mut [u32]) {
+    let span = (1u32 << bits) - 1;
+    for (lane, slot) in out.iter_mut().take(lanes).enumerate() {
+        let factor = radix.pow(lane as u32);
+        let residue = word.wrapping_mul(factor) & span;
+        *slot = (residue * radix) >> bits;
+    }
+}
+
+/// The storage word whose lanes unpack to `digits`, or `None` when no byte of the word space
+/// carries exactly this digit string.
+///
+/// The ideal word is the base-`radix` integer scaled into `bits`; the floor of that can lose the
+/// last lane, so the candidates around it are tried and the first exact one wins. The exhaustive
+/// test covers every digit string the workspace's packings can produce.
+fn pack_digits(digits: &[u32], radix: u32, bits: u8) -> Option<u32> {
+    let span = 1u32 << bits;
+    let lanes = digits.len();
+    let total = radix.checked_pow(lanes as u32)?;
+    let mut integer = 0u32;
+    for digit in digits {
+        integer = integer * radix + *digit;
+    }
+    let base = integer.saturating_mul(span) / total;
+    let mut candidate = base.saturating_sub(1);
+    let mut unpacked = [0u32; MAX_LANES];
+    while candidate <= base + 2 && candidate < span {
+        unpack_digits(candidate, lanes, radix, bits, &mut unpacked);
+        if unpacked[..lanes] == *digits {
+            return Some(candidate);
+        }
+        candidate += 1;
+    }
+    None
+}
+
+/// A block whose codes share storage words: `TQ1_0` and `PTQ1_0` pack five base-3 digits into one
+/// byte, so a code is a lane of a word rather than a field of its own. One scale per block, the
+/// same absolute-maximum rule as every other block format.
+fn quantize_radix_block(
     layout: &BlockLayout,
-    table: &[i8],
+    shape: &Linear,
+    input: &[f32],
+    block: &mut [u8],
+) -> Result<(), NumericError> {
+    if input.iter().any(|value| !value.is_finite()) {
+        return Err(NumericError::NonFinite {
+            format: format_of(layout),
+        });
+    }
+    block.fill(0);
+    let peak = input
+        .iter()
+        .fold(0.0f32, |peak, value| peak.max(value.abs()));
+    let (scale_code, scale) = stored_scale(peak, shape.reach, layout.scale.layout);
+    put_scale(layout, layout.run_scale_byte(0), scale_code, block);
+    let Codes::Integer { lowest, highest } = shape.codes else {
+        return Err(NumericError::UnsupportedEncode {
+            format: format_of(layout),
+            reason: "a non-integer code reached the mixed-radix writer",
+        });
+    };
+    let bounds = (lowest, highest);
+    let coded = &layout.element;
+    let radix = u32::from(coded.packed_radix);
+    for region in coded
+        .regions
+        .iter()
+        .take(usize::from(coded.region_count))
+    {
+        let axis = usize::from(region.digit_axis);
+        let lanes = usize::from(region.source.digits[axis].radix);
+        let before = region
+            .source
+            .digits
+            .iter()
+            .take(axis)
+            .fold(1usize, |product, digit| product * usize::from(digit.radix));
+        let start = usize::from(region.start);
+        let elements = usize::from(region.elements);
+        for word in 0..before.min(elements) {
+            let mut digits = [0u32; MAX_LANES];
+            let mut present = 0usize;
+            for (lane, slot) in digits.iter_mut().take(lanes).enumerate() {
+                let local = word + lane * before;
+                if local >= elements {
+                    break;
+                }
+                let code = shape.code_for(input[start + local], scale, bounds);
+                *slot = float_layout_codec::encode(code as f32, coded.code);
+                present += 1;
+            }
+            let Some(packed) = pack_digits(&digits[..present], radix, region.source.bits) else {
+                return Err(NumericError::UnsupportedEncode {
+                    format: format_of(layout),
+                    reason: "a packed-radix word with no exact storage",
+                });
+            };
+            put_bits_at(region.source.bits, region.source.address(word), packed, block);
+        }
+    }
+    Ok(())
+}
+
+/// A block whose code is picked from a discrete set rather than computed as a ratio: a trained
+/// ladder (`IQ4_NL`), or a float element layout (`E2M1`, `E3M2`). The scale places the block peak
+/// on `reach`, then `choose` maps the scaled value to its code.
+fn quantize_coded_block(
+    layout: &BlockLayout,
     reach: f32,
     input: &[f32],
     block: &mut [u8],
+    choose: impl Fn(f32) -> u32,
 ) -> Result<(), NumericError> {
     if input.iter().any(|value| !value.is_finite()) {
         return Err(NumericError::NonFinite {
@@ -246,8 +472,7 @@ fn quantize_ladder_block(
         let peak = group
             .iter()
             .fold(0.0f32, |peak, value| peak.max(value.abs()));
-        let scale_code = float_layout_codec::encode(peak / reach, layout.scale.layout);
-        let scale = float_layout_codec::decode(scale_code, layout.scale.layout);
+        let (scale_code, scale) = stored_scale(peak, reach, layout.scale.layout);
         #[expect(
             clippy::cast_possible_truncation,
             reason = "a block holds at most 32 runs"
@@ -256,8 +481,7 @@ fn quantize_ladder_block(
         put_scale(layout, scale_at, scale_code, block);
         for value in group {
             let target = if scale == 0.0 { 0.0 } else { value / scale };
-            let code = nearest_level(table, target);
-            put_code(layout, &mut cursors, code, block);
+            put_code(layout, &mut cursors, choose(target), block);
         }
     }
     Ok(())
@@ -372,7 +596,9 @@ pub fn encode_blocks(
                     let reach = ladder_reach(table);
                     for (group, block) in values.chunks(elements).zip(out.chunks_mut(block_bytes))
                     {
-                        quantize_ladder_block(&layout, table, reach, group, block)?;
+                        quantize_coded_block(&layout, reach, group, block, |target| {
+                            nearest_level(table, target)
+                        })?;
                     }
                     Ok(block_count)
                 }
@@ -455,10 +681,9 @@ mod tests {
         out
     }
 
-    /// The scale the decoder reads back: the quotient stored as a binary16.
-    fn stored_scale(peak: f32, reach: f32) -> f32 {
-        let code = float_layout_codec::encode(peak / reach, FloatLayout::F16);
-        float_layout_codec::decode(code, FloatLayout::F16)
+    /// The scale the decoder reads back, for the formats whose scale is a binary16.
+    fn grid_scale(peak: f32, reach: f32) -> f32 {
+        stored_scale(peak, reach, FloatLayout::F16).1
     }
 
     fn peak_of(block: &[f32]) -> f32 {
@@ -516,7 +741,7 @@ mod tests {
         for (originals, decodes) in input.chunks(256).zip(restored.chunks(256)) {
             let peak = peak_of(originals);
             let bound = peak / 2.0 + 2.0 * peak * F16_EPSILON;
-            let scale = stored_scale(peak, 1.0);
+            let scale = grid_scale(peak, 1.0);
             for (original, restore) in originals.iter().zip(decodes) {
                 assert!(
                     (original - restore).abs() <= bound,
@@ -539,7 +764,7 @@ mod tests {
         let restored = decoded(&format, &packed(&format, &input));
         for (originals, decodes) in input.chunks(32).zip(restored.chunks(32)) {
             let peak = peak_of(originals);
-            let scale = stored_scale(peak, ladder_reach(&table));
+            let scale = grid_scale(peak, ladder_reach(&table));
             let bound = 12.5 * scale + 2.0 * peak * F16_EPSILON;
             for (original, restore) in originals.iter().zip(decodes) {
                 assert!(
@@ -553,6 +778,170 @@ mod tests {
                         .any(|level| (f32::from(*level) - units).abs() < 1.0e-5),
                     "a code lands on a trained level, not {units}"
                 );
+            }
+        }
+    }
+
+    /// The OCP MX v1.0 `E2M1` magnitude grid (§5.3.2 Table 4), ascending: the code for each is the
+    /// index, and the sign bit is code 8.
+    const E2M1_GRID: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
+
+    #[test]
+    fn mxfp4_writes_the_ocp_mx_block_byte_for_byte() {
+        // one shared E8M0 scale byte (127 = 2^0), then element i in the low nibble of byte 1+(i%16)
+        // and element i+16 in its high nibble; the grid is its own code, so the block is the codes
+        // in order
+        let mut input = std::vec![0.0f32; 32];
+        for (index, value) in E2M1_GRID.iter().enumerate() {
+            input[index] = *value;
+            input[index + 8] = -*value;
+        }
+        let mut block = std::vec![0u8; 17];
+        encode_blocks(&NumericFormat::Mxfp4, &input, &mut block).expect("mxfp4 encodes");
+        let mut expected = std::vec![127u8];
+        expected.extend(0u8..16);
+        assert_eq!(block, expected, "OCP MX E2M1 grid at scale 2^0");
+    }
+
+    #[test]
+    fn nvfp4_writes_one_e4m3_scale_per_sixteen_and_six_bit_fields_do_not_straddle() {
+        let mut input = std::vec![0.0f32; 64];
+        for (index, value) in E2M1_GRID.iter().enumerate() {
+            input[index] = *value;
+            input[index + 8] = -*value;
+        }
+        let mut block = std::vec![0u8; 36];
+        encode_blocks(&NumericFormat::Nvfp4, &input, &mut block).expect("nvfp4 encodes");
+        // E4M3FN(1.0) is code 56, and the three runs above zero keep a zero scale
+        let mut expected = std::vec![56u8, 0, 0, 0];
+        expected.extend(0u8..16);
+        expected.extend(std::iter::repeat_n(0u8, 16));
+        assert_eq!(block, expected, "one E4M3 scale per 16 elements");
+    }
+
+    #[test]
+    fn fp6_e3m2_writes_six_bit_fields_across_byte_boundaries() {
+        // 28 is E3M2's largest magnitude (2^4 * 1.75, §5.3.2 Table 4), so a block of ones sits on
+        // the top code 0b011111; six-bit fields do not divide a byte, so laid LSB-first they repeat
+        // with period 3 bytes: byte0 111_01111, byte1 11_01111_1, byte2 1_01111_11
+        let input = std::vec![1.0f32; 32];
+        let mut block = std::vec![0u8; 26];
+        encode_blocks(&NumericFormat::Fp6E3M2, &input, &mut block).expect("fp6 e3m2 encodes");
+        let scale = uint16_bytes(&block[0..2]);
+        let straddled: std::vec::Vec<u8> = (0..24).map(|step| [0xdf, 0xf7, 0x7d][step % 3]).collect();
+        assert_eq!(&block[2..], &straddled[..], "six-bit top codes across byte borders");
+        let mut wide = std::vec![0.0f32; 32];
+        decode_blocks(&NumericFormat::Fp6E3M2, &block, &mut wide).expect("it decodes");
+        for value in &wide {
+            assert_eq!(value.to_bits(), (28.0 * scale).to_bits(), "the top code is 28");
+        }
+        assert!(
+            (scale * 28.0 - 1.0).abs() < 1.0e-3,
+            "the f16 scale carries the peak over the largest code, got {scale}"
+        );
+    }
+
+    fn uint16_bytes(bytes: &[u8]) -> f32 {
+        float_layout_codec::decode(u32::from(u16::from_le_bytes([bytes[0], bytes[1]])), FloatLayout::F16)
+    }
+
+    #[test]
+    fn every_encodable_format_round_trips_its_own_values_and_the_census_is_pinned() {
+        let mut encodable = std::vec::Vec::new();
+        let mut refused = std::vec::Vec::new();
+        for format in NumericFormat::ALL {
+            let elements = usize::from(format.elements_per_block());
+            let bytes = usize::from(format.bytes_per_block());
+            let input: std::vec::Vec<f32> = (0..elements)
+                .map(|index| (index % 7) as f32 / 4.0 - 0.75)
+                .collect();
+            let mut packed = std::vec![0u8; bytes];
+            match encode_blocks(&format, &input, &mut packed) {
+                Ok(blocks) => {
+                    assert_eq!(blocks, 1, "{format:?} is one block");
+                    let mut wide = std::vec![0.0f32; elements];
+                    decode_blocks(&format, &packed, &mut wide).expect("what this encoder wrote decodes");
+                    let mut again = std::vec![0u8; bytes];
+                    encode_blocks(&format, &wide, &mut again).expect("a decoded block re-encodes");
+                    let mut twice = std::vec![0.0f32; elements];
+                    decode_blocks(&format, &again, &mut twice).expect("the second pass decodes");
+                    for (once, twice) in wide.iter().zip(&twice) {
+                        assert_eq!(
+                            once.to_bits(),
+                            twice.to_bits(),
+                            "{format:?} drifted on a second pass"
+                        );
+                    }
+                    encodable.push(format.name().unwrap_or("?"));
+                }
+                Err(NumericError::UnsupportedEncode { reason, .. }) => {
+                    assert!(!reason.is_empty(), "{format:?} refuses without a reason");
+                    refused.push(format.name().unwrap_or("?"));
+                }
+                Err(other) => panic!("{format:?} refused with {other:?}, not UnsupportedEncode"),
+            }
+        }
+        assert_eq!(
+            refused,
+            [
+                "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "q5_1", "q4_1", "iq1_s", "iq1_m",
+                "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "iq3_s", "iq4_xs",
+            ],
+            "pinned: the formats a shared scale cannot express"
+        );
+        assert_eq!(
+            encodable.len() + refused.len(),
+            NumericFormat::ALL.len(),
+            "pinned: every format is classified"
+        );
+        assert_eq!(encodable.len(), 21, "pinned: formats with an encoder");
+    }
+
+    #[test]
+    fn every_legal_base_three_word_has_an_exact_storage() {
+        // five trits in a byte is 3^5 = 243 digit strings; four trits (TQ1_0's last region) is 81
+        let mut checked = 0;
+        for (lanes, total) in [(5usize, 243u32), (4, 81)] {
+            for integer in 0..total {
+                let mut digits = [0u32; MAX_LANES];
+                let mut rest = integer;
+                for lane in (0..lanes).rev() {
+                    digits[lane] = rest % 3;
+                    rest /= 3;
+                }
+                let packed = pack_digits(&digits[..lanes], 3, 8)
+                    .unwrap_or_else(|| panic!("{lanes} trits {integer} have no exact byte"));
+                let mut back = [0u32; MAX_LANES];
+                unpack_digits(packed, lanes, 3, 8, &mut back);
+                assert_eq!(back[..lanes], digits[..lanes], "trits {integer}");
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 324, "pinned: every base-3 word this workspace packs");
+    }
+
+    #[test]
+    fn ternary_radix_round_trips_onto_three_trits() {
+        for format in [NumericFormat::Tq10, NumericFormat::Ptq1_0] {
+            let input = values(usize::from(format.elements_per_block()) * 2, 0x723);
+            let bytes = packed(&format, &input);
+            let restored = decoded(&format, &bytes);
+            let elements = usize::from(format.elements_per_block());
+            for (originals, decodes) in input.chunks(elements).zip(restored.chunks(elements)) {
+                let peak = peak_of(originals);
+                let scale = grid_scale(peak, 1.0);
+                let bound = peak / 2.0 + 2.0 * peak * F16_EPSILON;
+                for (original, restore) in originals.iter().zip(decodes) {
+                    assert!(
+                        (original - restore).abs() <= bound,
+                        "{format:?}: {original} decoded to {restore}, bound {bound}"
+                    );
+                    let trit = restore / scale;
+                    assert!(
+                        (trit - trit.round()).abs() < 1.0e-5 && trit.abs() <= 1.0,
+                        "{format:?}: {trit} is not a trit"
+                    );
+                }
             }
         }
     }

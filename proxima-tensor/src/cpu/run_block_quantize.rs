@@ -85,7 +85,7 @@ mod tests {
         values
     }
 
-    fn linear_layouts() -> Vec<(Codec, BlockLayout)> {
+    fn encodable_layouts() -> Vec<(Codec, BlockLayout)> {
         (0..=u8::MAX)
             .filter_map(Codec::from_tag)
             .filter_map(|codec| codec.block_layout().map(|layout| (codec, layout)))
@@ -97,9 +97,28 @@ mod tests {
         half::f16::from_le_bytes([block[at], block[at + 1]]).to_f32()
     }
 
+    /// Narrow integer codes: one step of the ratio the layout's multiplier describes.
+    fn integer_code(layout: &BlockLayout) -> bool {
+        layout.element.code.exponent_bits == 0
+    }
+
+    /// The scale the encoder will store for this block peak, read back through the scale layout.
+    fn scale_of(layout: &BlockLayout, peak: f32) -> f32 {
+        let reach = block_layout_encode::reach(layout).expect("an encodable layout has a reach");
+        let code = proxima_numeric::float_layout_codec::encode(peak / reach, layout.scale.layout);
+        proxima_numeric::float_layout_codec::decode(code, layout.scale.layout)
+    }
+
     fn stated_error(layout: &BlockLayout, peak: f32) -> f32 {
-        let reach = block_layout_encode::reach(layout).expect("a linear layout has a reach");
-        f32::from(layout.multiplier) * (peak / reach) / 2.0 + 2.0 * peak * F16_EPSILON
+        if integer_code(layout) {
+            let reach = block_layout_encode::reach(layout).expect("an encodable layout has a reach");
+            f32::from(layout.multiplier) * (peak / reach) / 2.0 + 2.0 * peak * F16_EPSILON
+        } else {
+            // a float element code sits on a geometric grid: the widest step is at the top
+            // exponent (two units for E2M1, four for E3M2), so half of it is two units of scale,
+            // plus the scale's own rounding
+            2.5 * scale_of(layout, peak) + 2.0 * peak * F16_EPSILON
+        }
     }
 
     #[test]
@@ -143,8 +162,8 @@ mod tests {
     }
 
     #[test]
-    fn every_linear_codec_layout_round_trips_within_its_stated_error() {
-        let layouts = linear_layouts();
+    fn every_encodable_codec_layout_round_trips_within_its_stated_error() {
+        let layouts = encodable_layouts();
         let codecs: Vec<Codec> = layouts.iter().map(|(codec, _)| *codec).collect();
         let expected = [
             Codec::Q8_0,
@@ -152,15 +171,20 @@ mod tests {
             Codec::Q5_0,
             Codec::Q8_1,
             Codec::Q8K,
+            Codec::Tq10,
             Codec::Tq20,
+            Codec::Mxfp4,
+            Codec::Nvfp4,
             Codec::Q1_0,
             Codec::Q2_0,
+            Codec::Fp6E3M2,
             Codec::Pq2_0,
+            Codec::Ptq1_0,
             Codec::Q8_1Grouped,
         ];
         assert_eq!(
             codecs, expected,
-            "the codecs a shared absolute-maximum scale encodes"
+            "the codecs one scale per run encodes, in wire-tag order"
         );
         for (codec, layout) in layouts {
             let values = inputs(&layout, 0x5eed ^ u64::from(layout.block_bytes));
@@ -187,10 +211,13 @@ mod tests {
     }
 
     #[test]
-    fn encoding_a_decoded_run_reproduces_the_same_bytes() {
-        for (codec, layout) in linear_layouts() {
+    fn encoding_a_decoded_integer_run_reproduces_the_same_bytes() {
+        for (codec, layout) in encodable_layouts() {
+            if !integer_code(&layout) {
+                continue;
+            }
             let values = inputs(&layout, 0xfeed ^ u64::from(layout.block_bytes));
-            let first = encode(&layout, &values).expect("a linear layout encodes");
+            let first = encode(&layout, &values).expect("an encodable layout encodes");
             let second =
                 encode(&layout, &decoded(&layout, &first)).expect("the decoded run encodes");
             assert_eq!(first, second, "{codec:?} is not idempotent on its own grid");
@@ -198,13 +225,31 @@ mod tests {
     }
 
     #[test]
+    fn encoding_a_decoded_float_code_run_keeps_every_value() {
+        // a power-of-two scale can step down on a second pass, so the bytes are not fixed; the
+        // values are, because every element of the grid stays representable at any such scale
+        let mut checked = 0;
+        for (codec, layout) in encodable_layouts() {
+            if integer_code(&layout) {
+                continue;
+            }
+            let values = inputs(&layout, 0xbeef ^ u64::from(layout.block_bytes));
+            let once = decoded(
+                &layout,
+                &encode(&layout, &values).expect("an encodable layout encodes"),
+            );
+            let twice = decoded(&layout, &encode(&layout, &once).expect("the decoded run encodes"));
+            assert_eq!(once, twice, "{codec:?} drifted on a second pass");
+            checked += 1;
+        }
+        assert_eq!(checked, 3, "pinned: formats whose element code is a float");
+    }
+
+    #[test]
     fn layouts_with_sub_blocks_or_a_min_are_a_typed_error() {
-        let refused = [
-            BlockLayout::Q4_1,
-            BlockLayout::Q4_K,
-            BlockLayout::Q6_K,
-            BlockLayout::TQ1_0,
-        ];
+        // TQ1_0 is not here: it has neither a sub-block nor a stored min, and its base-3 packing
+        // encodes through the shared writer now (proxima-numeric pins that split per format)
+        let refused = [BlockLayout::Q4_1, BlockLayout::Q4_K, BlockLayout::Q6_K];
         for layout in refused {
             let error =
                 encode(&layout, &inputs(&layout, 7)).expect_err("not a shared-scale linear layout");
