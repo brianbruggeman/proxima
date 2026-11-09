@@ -267,6 +267,23 @@ pub enum InteropError {
     #[error("tensor {tensor:?} has {rows} rows, which do not split into {of} whole-block parts")]
     TensorPartInvalid { tensor: String, rows: u64, of: u32 },
 
+    /// `crate::bind_leaves::bind_census`: the lowered program reads a weight
+    /// leaf the checkpoint's tensor directory does not name and no step input
+    /// feeds. Left to the decode step this surfaces as an unbound input at the
+    /// first call; a caller that bound a zero-filled buffer in its place would
+    /// serve wrong numbers with no error at all.
+    #[error(
+        "program leaf {leaf:?} has no tensor in the checkpoint directory and is not a step input"
+    )]
+    UnboundWeightLeaf { leaf: String },
+
+    /// `crate::bind_leaves::bind_census`: the checkpoint carries a tensor the
+    /// lowered program never reads -- a weight silently dropped by the header
+    /// reader or the profile (llama.cpp refuses the same shape as an unknown
+    /// tensor).
+    #[error("checkpoint tensor {tensor:?} is claimed by no program leaf")]
+    UnclaimedTensor { tensor: String },
+
     /// The uniform header reader: the header's `<arch>.rope.dimension_count`
     /// differs from the head width, so RoPE rotates only part of each head.
     #[error(

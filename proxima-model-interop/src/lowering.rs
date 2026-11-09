@@ -26,10 +26,10 @@ use proxima_tensor::spec::{
 };
 
 use crate::bind::{BoundWeights, ModelHparams, bind_native_f32, metadata_str};
-use crate::bind_leaves::{bind_missing_leaves, bind_program_leaves};
+use crate::bind_leaves::{bind_census, bind_missing_leaves, bind_program_leaves};
 use crate::error::InteropError;
 use crate::hf_bind::{HfShard, bind_safetensors_shards};
-use crate::profiles::{binding_profile, family_profile};
+use crate::profiles::{BindingProfile, binding_profile, family_profile};
 use crate::recurrent_config::RecurrentConfig;
 use crate::recurrent_routed_interval::MoeLayerDiagnostics;
 
@@ -382,14 +382,73 @@ fn bind_descriptor<'file>(
     descriptor: &ModelDescriptor,
 ) -> Result<BoundProgram<'file>, InteropError> {
     let forward = build_forward(descriptor)?;
-    let weights = bind_program_leaves(
-        parsed,
-        file_bytes,
-        &forward.program,
-        &binding_profile(&architecture.family)?,
-        &[],
-    )?;
+    let binding = binding_profile(&architecture.family)?;
+    let weights = bind_program_leaves(parsed, file_bytes, &forward.program, &binding, &[])?;
+    refuse_incomplete_bind(parsed, &forward.program, &binding, descriptor)?;
     Ok(bound_program(weights, architecture, forward, descriptor))
+}
+
+/// Refuses a program whose weight leaves and whose checkpoint directory do not
+/// name the same set. Both entry points that lower a program call this -- the
+/// header's own descriptor ([`bind_descriptor`]) and a caller's edited one
+/// ([`BoundProgram::lowered_from`]) -- because the config seam is exactly where
+/// a leaf gets *added*, and `bind_missing_leaves` binds nothing for a leaf the
+/// directory does not name.
+fn refuse_incomplete_bind(
+    parsed: &ParsedGguf,
+    program: &[Op],
+    binding: &BindingProfile,
+    descriptor: &ModelDescriptor,
+) -> Result<(), InteropError> {
+    let census = bind_census(
+        parsed,
+        program,
+        binding,
+        &step_input_names(descriptor, program),
+    );
+    match census.first_problem() {
+        Some(problem) => Err(problem),
+        None => Ok(()),
+    }
+}
+
+/// Every program leaf the decode step feeds rather than the checkpoint
+/// storing: the step's own builtin blocks (`ids`, `eps`, the RoPE tables, the
+/// row selectors), each layer's cache rows, and the routed prefill scratch.
+///
+/// [`bind_census`] needs this set to tell a runtime leaf from a weight the
+/// directory dropped, which is why it is derived from the descriptor's own
+/// layer data (the RoPE table names, the cache rows) rather than a literal
+/// list: a family whose `RopeTableSel` names its tables differently is still
+/// classified correctly.
+pub(crate) fn step_input_names(descriptor: &ModelDescriptor, program: &[Op]) -> Vec<String> {
+    program
+        .iter()
+        .filter_map(|op| match op {
+            Op::Input {
+                name: Some(name), ..
+            } => Some(name),
+            _ => None,
+        })
+        .filter(|name| {
+            matches!(
+                name.as_str(),
+                "ids"
+                    | "eps"
+                    | "cached_len"
+                    | "lm_head_row"
+                    | proxima_tensor::op::SLIDING_CACHED_LEN_INPUT
+            ) || name.starts_with("kv_cache.")
+                || name.starts_with("ssm_cache.")
+                || name.starts_with("shortconv_cache.")
+                || name.starts_with("gdn_prefill.")
+                || descriptor.layers.iter().any(|layer| {
+                    layer.attention.rope_table.cos_name == **name
+                        || layer.attention.rope_table.sin_name == **name
+                })
+        })
+        .cloned()
+        .collect()
 }
 
 /// The policy `descriptor` lowers under, in the shape serving admission
@@ -660,13 +719,9 @@ impl<'file> BoundProgram<'file> {
             layer_diagnostics,
             readouts,
         } = build_forward(descriptor)?;
-        bind_missing_leaves(
-            parsed,
-            file_bytes,
-            &program,
-            &binding_profile(&self.architecture.family)?,
-            &mut self.weights,
-        )?;
+        let binding = binding_profile(&self.architecture.family)?;
+        bind_missing_leaves(parsed, file_bytes, &program, &binding, &mut self.weights)?;
+        refuse_incomplete_bind(parsed, &program, &binding, descriptor)?;
         Ok(Self {
             architecture: self
                 .architecture

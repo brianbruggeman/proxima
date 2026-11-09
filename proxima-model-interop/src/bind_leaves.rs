@@ -176,6 +176,165 @@ pub(crate) fn bind_missing_leaves<'file>(
     Ok(())
 }
 
+/// What a lowered program and a checkpoint's tensor directory disagree
+/// about: every list is empty for a directory that stores exactly the weights
+/// the program reads, and each entry names the leaf or tensor responsible.
+///
+/// [`bind_census`] computes this from names alone -- no tensor bytes are read
+/// -- so the load path can prove the leaf set against a directory before (or
+/// without) mapping the checkpoint, which is what makes the comparison usable
+/// as a load-time gate and as a test over a captured directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BindCensus {
+    /// Program leaves the directory names neither directly nor through a
+    /// [`BindingProfile`] alias, and that no step input feeds: a weight the
+    /// lowered program would ask for at the first decode step.
+    pub unbound_leaves: Vec<String>,
+    /// Directory tensors no program leaf, alias, per-expert stack or
+    /// [`BindingProfile::extra`] entry claims: a weight the checkpoint carries
+    /// that the lowered program never reads.
+    pub unclaimed_tensors: Vec<String>,
+}
+
+impl BindCensus {
+    /// The first disagreement, as the typed refusal a load path returns.
+    #[must_use]
+    pub(crate) fn first_problem(&self) -> Option<InteropError> {
+        if let Some(leaf) = self.unbound_leaves.first() {
+            return Some(InteropError::UnboundWeightLeaf { leaf: leaf.clone() });
+        }
+        self.unclaimed_tensors
+            .first()
+            .map(|tensor| InteropError::UnclaimedTensor {
+                tensor: tensor.clone(),
+            })
+    }
+}
+
+/// Compares `program`'s weight leaves against `parsed`'s tensor directory.
+///
+/// `runtime_inputs` names the leaves the decode step feeds instead of the
+/// checkpoint storing them (`ids`, `rope_cos`, every `kv_cache.*` row, ...);
+/// without it a runtime leaf and a dropped weight are indistinguishable, which
+/// is the silent-drop class this census exists to close. [`crate::lowering`]'s
+/// own step-input rule is the caller a load path uses.
+///
+/// A gathered rank-3 leaf the directory does not name whole is claimed by its
+/// per-expert rows (`blk.{layer}.{projection}.{expert}.weight`), the same
+/// convention [`bind_per_expert_stack`] binds.
+#[must_use]
+pub(crate) fn bind_census<'parsed>(
+    parsed: &'parsed ParsedGguf,
+    program: &[Op],
+    binding: &BindingProfile,
+    runtime_inputs: &[String],
+) -> BindCensus {
+    let directory: BTreeMap<&'parsed str, &'parsed TensorInfo> = parsed
+        .tensors
+        .iter()
+        .map(|tensor| (tensor.name.as_str(), tensor))
+        .collect();
+    let runtime: BTreeSet<&str> = runtime_inputs.iter().map(String::as_str).collect();
+    // a Hadamard-folded checkpoint's rotation/sign leaves come from metadata,
+    // not the tensor directory -- `bind_missing_leaves` binds them the same way
+    let prism = prism_hadamard_from_metadata(parsed).ok().flatten();
+    let mut claimed: BTreeSet<&'parsed str> = BTreeSet::new();
+    let mut declared: BTreeSet<&str> = BTreeSet::new();
+    let mut unbound_leaves = Vec::new();
+
+    for op in program {
+        let Op::Input {
+            shape,
+            name: Some(leaf),
+            ..
+        } = op
+        else {
+            continue;
+        };
+        if !declared.insert(leaf.as_str()) || runtime.contains(leaf.as_str()) {
+            continue;
+        }
+        if prism
+            .as_ref()
+            .is_some_and(|prism| prism.leaf(leaf).is_some())
+        {
+            continue;
+        }
+        match resolve(&directory, binding, leaf) {
+            Some(Source::Direct(tensor)) => {
+                claimed.insert(tensor.name.as_str());
+            }
+            Some(Source::Part { tensor, .. }) => {
+                claimed.insert(tensor.name.as_str());
+            }
+            Some(Source::Join(names)) => {
+                for name in &names {
+                    if let Some((stored, _)) = directory.get_key_value(name.as_str()) {
+                        claimed.insert(stored);
+                    }
+                }
+            }
+            None => {
+                let per_expert = expert_stack_parts(leaf).is_some_and(|(layer, projection)| {
+                    let found = claim_per_expert_rows(&directory, &mut claimed, layer, projection);
+                    expert_extent(shape) == Some(found)
+                });
+                if !per_expert {
+                    unbound_leaves.push(leaf.clone());
+                }
+            }
+        }
+    }
+    for name in &binding.extra {
+        if let Some((stored, _)) = directory.get_key_value(name.as_str()) {
+            claimed.insert(stored);
+        }
+    }
+
+    let unclaimed_tensors = directory
+        .keys()
+        .filter(|name| !claimed.contains(*name))
+        .map(|name| String::from(*name))
+        .collect();
+    BindCensus {
+        unbound_leaves,
+        unclaimed_tensors,
+    }
+}
+
+/// The expert count a gathered leaf declares, or `None` when its first extent
+/// is symbolic: a stack the program cannot size is not one a directory can be
+/// compared against.
+fn expert_extent(shape: &[Extent]) -> Option<usize> {
+    match shape.first() {
+        Some(Extent::Static(experts)) => Some(*experts as usize),
+        _ => None,
+    }
+}
+
+/// Claims every `blk.{layer}.{projection}.{expert}.weight` row a gathered leaf
+/// would be restacked from, and reports how many exist.
+fn claim_per_expert_rows<'parsed>(
+    directory: &BTreeMap<&'parsed str, &'parsed TensorInfo>,
+    claimed: &mut BTreeSet<&'parsed str>,
+    layer: u32,
+    projection: &str,
+) -> usize {
+    let prefix = format!("blk.{layer}.{projection}.");
+    let rows: Vec<&'parsed str> = directory
+        .keys()
+        .copied()
+        .filter(|name| {
+            name.strip_prefix(prefix.as_str())
+                .and_then(|rest| rest.strip_suffix(".weight"))
+                .is_some_and(|expert| expert.parse::<u32>().is_ok())
+        })
+        .collect();
+    let found = rows.len();
+    claimed.extend(rows);
+    found
+}
+
 struct Leaf<'program> {
     name: &'program str,
     shape: &'program [Extent],
@@ -612,6 +771,7 @@ fn contraction_order(
 mod tests {
     use arrayvec::ArrayVec;
     use proxima_gguf::quant::q4_k;
+    use proxima_gguf::value::{MetadataArray, MetadataValue};
     use proxima_gguf::{GgufModel, TensorPayload, parse_complete, write_complete};
     use proxima_tensor::{IndexMap, Keep, NodeId, ReduceInit, append, map};
     use proxima_numeric::{DType};
@@ -625,9 +785,19 @@ mod tests {
     }
 
     fn gguf(tensors: &[(&str, &[u64], GgmlType, &[u8])]) -> Vec<u8> {
+        gguf_with_metadata(&[], tensors)
+    }
+
+    fn gguf_with_metadata(
+        metadata: &[(&str, MetadataValue)],
+        tensors: &[(&str, &[u64], GgmlType, &[u8])],
+    ) -> Vec<u8> {
         let model = GgufModel {
             version: 3,
-            metadata: Vec::new(),
+            metadata: metadata
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), value.clone()))
+                .collect(),
             tensors: tensors
                 .iter()
                 .map(|(name, extents, ggml_type, data)| TensorPayload {
@@ -1204,6 +1374,91 @@ mod tests {
             (values[0] - 1.0).abs() < 0.5 && (values[1] - 2.0).abs() < 0.5,
             "input row 0, both outputs: {:?}",
             &values[..2]
+        );
+    }
+
+    fn hadamard_metadata() -> Vec<(&'static str, MetadataValue)> {
+        alloc::vec![
+            ("prism.hadamard.version", MetadataValue::U32(1)),
+            ("prism.hadamard.block_size", MetadataValue::U32(8)),
+            (
+                "prism.hadamard.sign_widths",
+                MetadataValue::Array(MetadataArray::I32(alloc::vec![8])),
+            ),
+            (
+                "prism.hadamard.sign_values",
+                MetadataValue::Array(MetadataArray::I32(alloc::vec![1, 1, 1, -1, 1, 1, -1, 1])),
+            ),
+        ]
+    }
+
+    /// A checkpoint that stores one tensor per expert
+    /// (`blk.{layer}.{projection}.{expert}.weight`, the Mixtral convention)
+    /// satisfies a gathered `_exps.weight` leaf the directory does not name
+    /// whole, exactly as `bind_per_expert_stack` restacks it. Without this the
+    /// census would refuse every per-expert-tensor checkpoint as missing the
+    /// stack it can build.
+    #[test]
+    fn a_gathered_leaf_is_claimed_by_the_per_expert_rows_it_restacks() {
+        let stored = f32_bytes(&[0.0; 2 * 4]);
+        let rows: [(&str, &[u64], GgmlType, &[u8]); 2] = [
+            ("blk.0.ffn_gate.0.weight", &[4, 2], GgmlType::F32, &stored),
+            ("blk.0.ffn_gate.1.weight", &[4, 2], GgmlType::F32, &stored),
+        ];
+        let mut program = Vec::new();
+        input(&mut program, "blk.0.ffn_gate_exps.weight", &[2, 4, 2]);
+
+        let bytes = gguf(&rows);
+        let parsed = parse_complete(&bytes).expect("parses");
+        let census = bind_census(&parsed, &program, &defaults(), &[]);
+        assert_eq!(
+            census,
+            BindCensus::default(),
+            "the two per-expert rows are what the stack leaf is built from"
+        );
+
+        // one expert short: the leaf declares two, so the stack cannot be built
+        let short = gguf(&rows[..1]);
+        let parsed = parse_complete(&short).expect("parses");
+        let census = bind_census(&parsed, &program, &defaults(), &[]);
+        assert_eq!(
+            census.unbound_leaves,
+            alloc::vec![String::from("blk.0.ffn_gate_exps.weight")],
+            "a stack the directory cannot complete is the unbound weight, not a claimed one"
+        );
+        assert!(
+            census.unclaimed_tensors.is_empty(),
+            "the row it does carry belongs to the incomplete stack, got {:?}",
+            census.unclaimed_tensors
+        );
+    }
+
+    /// A Hadamard-folded checkpoint states its rotation and sign leaves as
+    /// metadata, not as tensors, so the census must read the same source the
+    /// binder does -- a directory-only comparison would refuse every such
+    /// checkpoint as missing its own weight.
+    #[test]
+    fn a_hadamard_leaf_the_metadata_supplies_is_not_an_unbound_weight() {
+        let mut program = Vec::new();
+        input(&mut program, "prism.hadamard.signs.8", &[8]);
+        let profile = defaults();
+
+        let plain = gguf(&[]);
+        let parsed = parse_complete(&plain).expect("parses");
+        let census = bind_census(&parsed, &program, &profile, &[]);
+        assert_eq!(
+            census.unbound_leaves,
+            alloc::vec![String::from("prism.hadamard.signs.8")],
+            "without the metadata the leaf has no source at all"
+        );
+
+        let folded = gguf_with_metadata(&hadamard_metadata(), &[]);
+        let parsed = parse_complete(&folded).expect("parses");
+        let census = bind_census(&parsed, &program, &profile, &[]);
+        assert_eq!(
+            census,
+            BindCensus::default(),
+            "the metadata states the leaf, so the directory need not"
         );
     }
 }
