@@ -2,11 +2,11 @@
 //! do not carry, one TOML file per family, embedded with `include_str!` so no
 //! runtime file IO is needed.
 //!
-//! This directory is the only place a family name appears. The loader is keyed
-//! by the string the checkpoint itself declares (`general.architecture` on the
-//! GGUF path, `model_type` on the HF path), so both paths read the same file.
-//! A family with no file is an error naming it: [`family_profile`] never falls
-//! back to another family's values.
+//! This directory is the only place a family name is DATA: the values a
+//! family's checkpoint does not state, keyed by the string the checkpoint itself
+//! declares (`general.architecture` on the GGUF path, `model_type` on the HF
+//! path), so both paths read the same file. A family with no file is an error
+//! naming it: [`family_profile`] never falls back to another family's values.
 //!
 //! The parsed value is a [`proxima_tensor::spec::FamilyProfile`], built from
 //! the descriptor's own enums; `proxima_tensor::spec::sliding_pattern_descriptor_from_gguf`
@@ -24,6 +24,7 @@ pub use binding::{BindingProfile, TensorAlias, binding_profile};
 
 pub(crate) const FAMILY_PROFILES: &[(&str, &str)] = &[
     ("gemma4", include_str!("gemma4.toml")),
+    ("flint", include_str!("flint.toml")),
     ("llama", include_str!("llama.toml")),
     ("mistral", include_str!("mistral.toml")),
     ("mixtral", include_str!("mixtral.toml")),
@@ -74,7 +75,7 @@ mod tests {
     fn every_embedded_profile_parses() {
         assert_eq!(
             FAMILY_PROFILES.len(),
-            14,
+            15,
             "one row per embedded family string"
         );
         for (family, _) in FAMILY_PROFILES {
@@ -123,6 +124,75 @@ mod tests {
         assert_eq!(profile.ffn.activation, Activation::Silu);
         assert_eq!(profile.ffn.combination, FfnCombination::Exclusive);
         assert_eq!(profile.embedding_scale, None);
+    }
+
+    /// The family's non-header values are data, and each one the capture itself
+    /// can speak to is checked against the capture: the tensor directory states
+    /// which norm and scale leaves the checkpoint carries. Provenance for the
+    /// rest is the incumbent's own model file, llama.cpp `src/models/flint.cpp`
+    /// at `origin/master` (fetched 2026-11-08): it applies RMSNorm to Q and K
+    /// before RoPE, scales scores by `1/sqrt(n_embd_head)`, passes V through
+    /// unnormalized, runs SiLU on the dense branch, the routed branch and the
+    /// shared expert, and adds the shared expert unscaled.
+    #[test]
+    fn flint_profile_is_data_carrying_every_value_the_capture_cannot_state() {
+        let profile = family_profile("flint").expect("flint profile embedded");
+        let rows = crate::oracle_fixtures::parse_tensor_rows(
+            &crate::oracle_fixtures::read_fixture("tensor_dir.txt"),
+        );
+        let carries = |suffix: &str| rows.iter().any(|row| row.name.ends_with(suffix));
+
+        assert!(
+            carries("blk.0.attn_q_norm.weight") && carries("blk.0.attn_k_norm.weight"),
+            "the capture carries per-head Q and K norm weights, which is qk_norm"
+        );
+        assert!(
+            !carries("ffn_exp_probs_b.bias"),
+            "the capture carries no routing bias, so the profile must not declare one"
+        );
+        assert!(
+            !carries("post_attention_norm.weight")
+                && !carries("layer_output_scale.weight")
+                && !carries("post_ffw_norm.weight"),
+            "the capture carries no post-attention norm, layer scale or dense post norm"
+        );
+
+        assert!(profile.qk_norm);
+        assert!(!profile.value_norm);
+        assert_eq!(profile.embedding_scale, None);
+        assert_eq!(
+            profile.rope_pairing(128),
+            RopePairing::SplitHalf { pairs: 64 }
+        );
+        assert_eq!(
+            profile.score_scale(128),
+            AttentionScoreScale::InverseSqrtQueryPreAttnScalar(128)
+        );
+        assert_eq!(profile.schedule_source, ScheduleSource::SlidingPattern);
+        assert_eq!(profile.kv_cache_shape, KvCacheShape::Custom);
+        assert_eq!(profile.ffn_routing, FfnRouting::Routed);
+        assert_eq!(
+            profile.layer_ffn(256).combination,
+            FfnCombination::RoutedWithSharedExpert
+        );
+        assert_eq!(
+            profile.layer_ffn(0).combination,
+            FfnCombination::RoutedWithSharedExpert
+        );
+        assert!(profile.parallel_dense_moe.is_none());
+        assert_eq!(profile.ffn.activation, Activation::Silu);
+        assert_eq!(profile.ffn.routed_gating, ExpertGatingFunc::Sigmoid);
+        assert!(!profile.ffn.routed_expert_bias);
+        assert!(
+            !profile.ffn.shared_expert_gate,
+            "the capture carries no ffn_gate_inp_shexp.weight, so the shared expert is unscaled"
+        );
+        assert!(!profile.ffn.post_attention_norm);
+        assert!(!profile.ffn.output_scale);
+        assert!(!profile.ffn.exclusive_dense_post_norm);
+        assert!(profile.recurrence.is_none());
+        assert!(!profile.speculative_verify);
+        assert_eq!(profile.command_buffer_chunks, 1);
     }
 
     #[test]
@@ -189,6 +259,13 @@ mod tests {
                 8,
             ),
             (
+                "flint",
+                ScheduleSource::SlidingPattern,
+                KvCacheShape::Custom,
+                FfnRouting::Routed,
+                1,
+            ),
+            (
                 "qwen35",
                 ScheduleSource::RecurrentInterval,
                 KvCacheShape::Custom,
@@ -234,6 +311,8 @@ mod tests {
     /// GRANITE_MOE is NORM (`src/llama-model.cpp:3019`, the group returns at :3039).
     /// OURO is NORM (the pinned llama.cpp selects `ROPE_TYPE_NORM`, and its converter permutes the
     /// Q/K rows into the adjacent layout).
+    /// FLINT is in the NEOX group (`src/llama-model.cpp`'s `llama_model_rope_type`, fetched
+    /// 2026-11-08).
     #[test]
     fn every_profile_pairs_rope_as_llama_cpp_rope_type_says() {
         let table = [
@@ -246,6 +325,7 @@ mod tests {
             ("qwen3moe", true),
             ("qwen3_moe", true),
             ("gemma4", true),
+            ("flint", true),
             ("qwen35", true),
             ("qwen35moe", true),
             ("lfm2", true),

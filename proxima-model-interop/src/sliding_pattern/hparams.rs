@@ -78,12 +78,12 @@ pub struct SlidingPatternHparams {
     /// `LayerFfnConfig::ple` flag on it.
     pub ple_dim: u32,
     /// `{family}.expert_shared_count` -- the header's shared-expert count (`2`
-    /// on the flint capture). `0` when the key is absent. The capture's
-    /// `ffn_*_shexp` rows are one `(2048, 1024)` triple per routed layer with no
-    /// expert axis, i.e. a single 1024-wide shared FFN, so this count is a
-    /// header fact rather than a width multiplier here; nothing consumes it yet
-    /// (the bind takes the descriptor, not this struct) and whether it becomes
-    /// one is the shared-expert lowering's decision.
+    /// on the captured sliding-pattern checkpoint). `0` when the key is absent.
+    /// The capture's `ffn_*_shexp` rows are one `(2048, 1024)` triple per routed
+    /// layer with no expert axis, i.e. a single 1024-wide shared FFN, so this
+    /// count is a header fact rather than a width multiplier here; nothing
+    /// consumes it yet (the bind takes the descriptor, not this struct) and
+    /// whether it becomes one is the shared-expert lowering's decision.
     pub expert_shared_count: u32,
 }
 
@@ -119,7 +119,8 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<SlidingPatternHparams, Inter
     );
     // a checkpoint that attends every layer at one head width omits the swa
     // overrides and the rope width; each falls back to the width it pairs
-    // against, which is what makes the flint capture read as 128 throughout
+    // against, which is what makes the captured sliding-pattern header read as
+    // 128 throughout
     let key_length_swa =
         metadata_u32_optional_or(parsed, &prefix("attention.key_length_swa"), key_length);
     let value_length_swa =
@@ -255,13 +256,13 @@ mod tests {
     };
 
     use crate::memory_fit::{MemoryBudget, WeightClassBytes};
-    use crate::oracle_fixtures::{
-        HeaderEntry, header_scalar, parse_header, parse_layer_patterns, read_fixture,
-    };
     use crate::profiles::family_profile;
     use proxima_tensor::spec::ExpertGatingFunc;
 
-    use crate::test_support::{gemma4_e2b_header as e2b_header, parsed_header_with_extra_tensors};
+    use crate::test_support::{
+        flint_layer_pattern, flint_metadata, flint_parsed, flint_parsed_with, flint_tensor_rows,
+        gemma4_e2b_header as e2b_header,
+    };
 
     use super::{SlidingPatternHparams, from_metadata, kv_layers_from_metadata};
 
@@ -307,166 +308,6 @@ mod tests {
     /// the capture the header is built from, or the comparison could not fail.
     const FLINT_WIDTH: u32 = 128;
     const FLINT_WINDOW: u32 = 513;
-    /// Only the `token_embd.weight` row's shape is read (`vocab_from_token_embedding`),
-    /// so a small vocabulary keeps the fixture at 64 KB instead of the capture's
-    /// 1.2 GB table.
-    const FLINT_VOCAB: u32 = 8;
-
-    /// The capture's own scalar values (`tests/fixtures/flint/gguf_kv_loader.txt`),
-    /// read out of the fixture rather than retyped, so a changed capture cannot
-    /// leave this test passing against stale literals.
-    fn flint_capture() -> Vec<HeaderEntry> {
-        let text = read_fixture("gguf_kv_loader.txt");
-        parse_header(&text)
-    }
-
-    fn captured_scalar<'a>(entries: &'a [HeaderEntry], key: &str) -> &'a str {
-        header_scalar(entries, key)
-    }
-
-    fn captured_u32(entries: &[HeaderEntry], key: &str) -> u32 {
-        let text = captured_scalar(entries, key);
-        text.parse()
-            .unwrap_or_else(|error| panic!("{key} = {text}: {error}"))
-    }
-
-    fn captured_f32(entries: &[HeaderEntry], key: &str) -> f32 {
-        let text = captured_scalar(entries, key);
-        text.parse()
-            .unwrap_or_else(|error| panic!("{key} = {text}: {error}"))
-    }
-
-    /// One per-layer boolean array out of the committed capture: the loader
-    /// truncates every value at 40 characters, so the full arrays live in
-    /// `layer_patterns.txt`.
-    fn flint_layer_pattern(key: &str) -> Vec<bool> {
-        let text = read_fixture("layer_patterns.txt");
-        parse_layer_patterns(&text)
-            .remove(key)
-            .unwrap_or_else(|| panic!("layer_patterns.txt carries no {key}"))
-    }
-
-    /// The flint capture's own header, with `attention.key_length_swa`,
-    /// `attention.value_length_swa`, `rope.dimension_count` and
-    /// `rope.dimension_count_swa` absent because the real header carries none
-    /// of them.
-    fn flint_metadata() -> Vec<(&'static str, MetadataValue)> {
-        let entries = flint_capture();
-        let u32_of = |key| MetadataValue::U32(captured_u32(&entries, key));
-        let f32_of = |key| MetadataValue::F32(captured_f32(&entries, key));
-        vec![
-            (
-                "general.architecture",
-                MetadataValue::String(String::from(captured_scalar(
-                    &entries,
-                    "general.architecture",
-                ))),
-            ),
-            ("flint.block_count", u32_of("flint.block_count")),
-            ("flint.context_length", u32_of("flint.context_length")),
-            ("flint.embedding_length", u32_of("flint.embedding_length")),
-            (
-                "flint.feed_forward_length",
-                u32_of("flint.feed_forward_length"),
-            ),
-            (
-                "flint.attention.head_count",
-                u32_of("flint.attention.head_count"),
-            ),
-            (
-                "flint.attention.head_count_kv",
-                u32_of("flint.attention.head_count_kv"),
-            ),
-            ("flint.rope.freq_base", f32_of("flint.rope.freq_base")),
-            (
-                "flint.attention.layer_norm_rms_epsilon",
-                f32_of("flint.attention.layer_norm_rms_epsilon"),
-            ),
-            ("flint.expert_count", u32_of("flint.expert_count")),
-            ("flint.expert_used_count", u32_of("flint.expert_used_count")),
-            (
-                "flint.expert_gating_func",
-                u32_of("flint.expert_gating_func"),
-            ),
-            (
-                "flint.attention.key_length",
-                u32_of("flint.attention.key_length"),
-            ),
-            (
-                "flint.attention.value_length",
-                u32_of("flint.attention.value_length"),
-            ),
-            (
-                "flint.expert_feed_forward_length",
-                u32_of("flint.expert_feed_forward_length"),
-            ),
-            (
-                "flint.expert_shared_feed_forward_length",
-                u32_of("flint.expert_shared_feed_forward_length"),
-            ),
-            (
-                "flint.leading_dense_block_count",
-                u32_of("flint.leading_dense_block_count"),
-            ),
-            (
-                "flint.expert_shared_count",
-                u32_of("flint.expert_shared_count"),
-            ),
-            (
-                "flint.expert_weights_scale",
-                f32_of("flint.expert_weights_scale"),
-            ),
-            (
-                "flint.attention.sliding_window",
-                u32_of("flint.attention.sliding_window"),
-            ),
-            (
-                "flint.attention.sliding_window_pattern",
-                MetadataValue::Array(MetadataArray::Bool(flint_layer_pattern(
-                    "flint.attention.sliding_window_pattern",
-                ))),
-            ),
-            (
-                "flint.attention.rope_pattern",
-                MetadataValue::Array(MetadataArray::Bool(flint_layer_pattern(
-                    "flint.attention.rope_pattern",
-                ))),
-            ),
-        ]
-    }
-
-    fn flint_parsed(metadata: Vec<(&'static str, MetadataValue)>) -> ParsedGguf {
-        flint_parsed_with(metadata, &[])
-    }
-
-    /// The capture's own 779-tensor directory is what states sink presence, so
-    /// a fixture that probes it has to carry the leaves: every block on the
-    /// real checkpoint has `blk.{layer}.attn_sinks.weight` of dims `(32,)`.
-    fn flint_parsed_with(
-        metadata: Vec<(&'static str, MetadataValue)>,
-        extra: &[(&str, u64)],
-    ) -> ParsedGguf {
-        let embedding = captured_u32(&flint_capture(), "flint.embedding_length");
-        parsed_header_with_extra_tensors(metadata, embedding, FLINT_VOCAB, extra)
-    }
-
-    /// The capture's own rows whose name ends in `suffix`, so a name or
-    /// pattern disagreement between the reader and the real checkpoint is
-    /// visible.
-    fn flint_tensor_rows(suffix: &str) -> Vec<(String, u64)> {
-        let text = read_fixture("tensor_dir.txt");
-        crate::oracle_fixtures::parse_tensor_rows(&text)
-            .into_iter()
-            .filter(|row| row.name.ends_with(suffix))
-            .map(|row| {
-                let width = *row
-                    .dimensions
-                    .first()
-                    .unwrap_or_else(|| panic!("{} has no dimensions", row.name));
-                (row.name, width)
-            })
-            .collect()
-    }
 
     fn flint_sink_tensors() -> Vec<(String, u64)> {
         flint_tensor_rows(".attn_sinks.weight")
@@ -522,9 +363,8 @@ mod tests {
 
     /// The header reader under test is generic; the profile only supplies the
     /// layout knobs the header does not carry (RoPE pairing, score scale,
-    /// activation). gemma4's file stands in until `profiles/flint.toml` lands,
-    /// which is why the split-half pairing below is the one assertion here that
-    /// reads the profile rather than the header.
+    /// activation, the FFN combination). This is the checkpoint's own profile,
+    /// so the descriptor these assertions read is the one a load builds.
     fn flint_descriptor(parsed: &ParsedGguf) -> ModelDescriptor {
         flint_descriptor_result(parsed).expect("the flint header must build a descriptor")
     }
@@ -532,7 +372,7 @@ mod tests {
     fn flint_descriptor_result(
         parsed: &ParsedGguf,
     ) -> Result<ModelDescriptor, proxima_tensor::error::TensorError> {
-        flint_descriptor_with_profile(parsed, "gemma4")
+        flint_descriptor_with_profile(parsed, "flint")
     }
 
     /// The reader is generic and takes any profile; naming the family lets a
@@ -975,8 +815,8 @@ mod tests {
             "an absent shared-expert width is 0, not the dense width"
         );
 
-        let profile_gating = family_profile("gemma4")
-            .expect("gemma4 is embedded")
+        let profile_gating = family_profile("flint")
+            .expect("flint is embedded")
             .ffn
             .routed_gating;
         for (index, layer) in descriptor.layers.iter().enumerate() {

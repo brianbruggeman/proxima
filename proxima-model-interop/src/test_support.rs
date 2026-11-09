@@ -9,6 +9,9 @@ use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_gguf::{GgmlType, GgufModel, TensorPayload, parse_complete, write_complete};
 
 use crate::checkpoint_resolver::resolve_checkpoint;
+use crate::oracle_fixtures::{
+    HeaderEntry, header_scalar, parse_header, parse_layer_patterns, parse_tensor_rows, read_fixture,
+};
 
 pub(crate) use crate::checkpoint_resolver as fixtures;
 
@@ -249,6 +252,162 @@ pub(crate) fn parsed_header_with_extra_tensors(
         },
         "a header plus its probed tensor rows",
     )
+}
+
+/// The flint capture's own header, as every reader of a sliding-pattern
+/// checkpoint sees it: the loader's scalars, the full per-layer arrays from
+/// `layer_patterns.txt`, and the sink leaves the tensor directory states.
+///
+/// `attention.key_length_swa`, `attention.value_length_swa`,
+/// `rope.dimension_count` and `rope.dimension_count_swa` are absent because the
+/// real header carries none of them, which is the fallback chain R2 pins.
+pub(crate) fn flint_metadata() -> Vec<(&'static str, MetadataValue)> {
+    let entries = flint_capture();
+    let u32_of = |key| MetadataValue::U32(captured_u32(&entries, key));
+    let f32_of = |key| MetadataValue::F32(captured_f32(&entries, key));
+    vec![
+        (
+            "general.architecture",
+            MetadataValue::String(String::from(captured_scalar(
+                &entries,
+                "general.architecture",
+            ))),
+        ),
+        ("flint.block_count", u32_of("flint.block_count")),
+        ("flint.context_length", u32_of("flint.context_length")),
+        ("flint.embedding_length", u32_of("flint.embedding_length")),
+        (
+            "flint.feed_forward_length",
+            u32_of("flint.feed_forward_length"),
+        ),
+        (
+            "flint.attention.head_count",
+            u32_of("flint.attention.head_count"),
+        ),
+        (
+            "flint.attention.head_count_kv",
+            u32_of("flint.attention.head_count_kv"),
+        ),
+        ("flint.rope.freq_base", f32_of("flint.rope.freq_base")),
+        (
+            "flint.attention.layer_norm_rms_epsilon",
+            f32_of("flint.attention.layer_norm_rms_epsilon"),
+        ),
+        ("flint.expert_count", u32_of("flint.expert_count")),
+        ("flint.expert_used_count", u32_of("flint.expert_used_count")),
+        (
+            "flint.expert_gating_func",
+            u32_of("flint.expert_gating_func"),
+        ),
+        (
+            "flint.attention.key_length",
+            u32_of("flint.attention.key_length"),
+        ),
+        (
+            "flint.attention.value_length",
+            u32_of("flint.attention.value_length"),
+        ),
+        (
+            "flint.expert_feed_forward_length",
+            u32_of("flint.expert_feed_forward_length"),
+        ),
+        (
+            "flint.expert_shared_feed_forward_length",
+            u32_of("flint.expert_shared_feed_forward_length"),
+        ),
+        (
+            "flint.leading_dense_block_count",
+            u32_of("flint.leading_dense_block_count"),
+        ),
+        (
+            "flint.expert_shared_count",
+            u32_of("flint.expert_shared_count"),
+        ),
+        (
+            "flint.expert_weights_scale",
+            f32_of("flint.expert_weights_scale"),
+        ),
+        (
+            "flint.attention.sliding_window",
+            u32_of("flint.attention.sliding_window"),
+        ),
+        (
+            "flint.attention.sliding_window_pattern",
+            MetadataValue::Array(MetadataArray::Bool(flint_layer_pattern(
+                "flint.attention.sliding_window_pattern",
+            ))),
+        ),
+        (
+            "flint.attention.rope_pattern",
+            MetadataValue::Array(MetadataArray::Bool(flint_layer_pattern(
+                "flint.attention.rope_pattern",
+            ))),
+        ),
+    ]
+}
+
+/// Only `token_embd.weight`'s shape is read off the table, so a small vocabulary
+/// keeps the fixture at 64 KB instead of the capture's 1.2 GB table.
+pub(crate) const FLINT_VOCAB: u32 = 8;
+
+/// The capture's own scalars, read out of the committed fixture rather than
+/// retyped, so a changed capture cannot leave a test passing against stale
+/// literals.
+fn flint_capture() -> Vec<HeaderEntry> {
+    parse_header(&read_fixture("gguf_kv_loader.txt"))
+}
+
+fn captured_scalar<'a>(entries: &'a [HeaderEntry], key: &str) -> &'a str {
+    header_scalar(entries, key)
+}
+
+fn captured_u32(entries: &[HeaderEntry], key: &str) -> u32 {
+    let text = captured_scalar(entries, key);
+    text.parse()
+        .unwrap_or_else(|error| panic!("{key} = {text}: {error}"))
+}
+
+fn captured_f32(entries: &[HeaderEntry], key: &str) -> f32 {
+    let text = captured_scalar(entries, key);
+    text.parse()
+        .unwrap_or_else(|error| panic!("{key} = {text}: {error}"))
+}
+
+/// One per-layer boolean array out of the committed capture: the loader
+/// truncates every value at 40 characters, so the full arrays live in
+/// `layer_patterns.txt`.
+pub(crate) fn flint_layer_pattern(key: &str) -> Vec<bool> {
+    parse_layer_patterns(&read_fixture("layer_patterns.txt"))
+        .remove(key)
+        .unwrap_or_else(|| panic!("layer_patterns.txt carries no {key}"))
+}
+
+/// The capture's own rows whose name ends in `suffix`, so a name or pattern
+/// disagreement between a reader and the real checkpoint is visible.
+pub(crate) fn flint_tensor_rows(suffix: &str) -> Vec<(String, u64)> {
+    parse_tensor_rows(&read_fixture("tensor_dir.txt"))
+        .into_iter()
+        .filter(|row| row.name.ends_with(suffix))
+        .map(|row| {
+            let width = *row
+                .dimensions
+                .first()
+                .unwrap_or_else(|| panic!("{} has no dimensions", row.name));
+            (row.name, width)
+        })
+        .collect()
+}
+
+pub(crate) fn flint_parsed(metadata: Vec<(&'static str, MetadataValue)>) -> ParsedGguf {
+    flint_parsed_with(metadata, &[])
+}
+
+pub(crate) fn flint_parsed_with(
+    metadata: Vec<(&'static str, MetadataValue)>,
+    extra: &[(&str, u64)],
+) -> ParsedGguf {
+    let embedding = captured_u32(&flint_capture(), "flint.embedding_length");
+    parsed_header_with_extra_tensors(metadata, embedding, FLINT_VOCAB, extra)
 }
 
 /// A header-only GGUF (no tensors) whose metadata is exactly `metadata`,

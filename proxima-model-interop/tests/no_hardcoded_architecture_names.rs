@@ -28,6 +28,11 @@ const ALLOWLIST: &[(&str, &str, &str)] = &[
     ),
     (
         "proxima-model-interop/src/profiles/mod.rs",
+        "flint",
+        "boundary: FAMILY_PROFILES row",
+    ),
+    (
+        "proxima-model-interop/src/profiles/mod.rs",
         "llama",
         "boundary: FAMILY_PROFILES row",
     ),
