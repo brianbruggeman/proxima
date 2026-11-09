@@ -58,6 +58,7 @@ changed_crates() {
     fi
     git diff --name-only "$base"...HEAD 2>/dev/null \
         | cut -d/ -f1 \
+        | sed -e 's/^omega$/proxima-omega/' \
         | sort -u \
         | grep -Ex 'proxima-tensor|proxima-model-interop|proxima-omega' || true
 }
