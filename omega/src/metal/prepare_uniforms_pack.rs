@@ -148,13 +148,14 @@ pub(super) fn prepare_with_options(
         }
     }
 
-    let packed_operands = packed_operands_of(&block_nodes, blocks);
+    let packed_operands = packed_operands_of(&block_nodes, blocks)?;
     // every packed codec's declared dtype is the "these are bytes" marker
     // `reject_unsupported_gpu_dtype`'s own doc already claims as its
-    // exemption's rationale -- not just the codecs `packed_operands` above
-    // has a kernel for, so any future codec added to `QuantizedBlock` before
-    // it has an unpack kernel here still gets the right dtype exemption
-    // rather than an unrelated "not float" rejection. Reads
+    // exemption's rationale, and the set is exactly the codecs
+    // `packed_operands_of` has a kernel for: a packed block with no Metal
+    // decoder is refused by that function (`UnsupportedPackedCodec`) before
+    // this line runs, so it never reaches this rejection as "not float" and
+    // never reaches a kernel as if it were `f32` either. Reads
     // `packed_operands`'s own keys rather than re-zipping `block_nodes`
     // against `blocks` a second time, so this set can never disagree with
     // the codec table above on which nodes are packed.
@@ -1090,8 +1091,8 @@ pub(super) mod numeric_policy_construction_tests {
 
     use alloc::vec;
 
-    use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, append, map};
     use proxima_numeric::{DType, NumericPolicy};
+    use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, append, map};
 
     use super::{MathMode, MetalError, metal_math_mode_as_numeric_policy, plan};
 
@@ -1323,10 +1324,13 @@ pub(super) mod pack_uniforms_byte_len_tests {
     use alloc::vec;
     use alloc::vec::Vec;
 
+    use proxima_numeric::{DType, NumericPolicy};
     #[cfg(feature = "metal-attn-split-decode")]
     use proxima_tensor::Layout;
-    use proxima_tensor::{BoundOp, BoundOpKind, CachedAttentionArithmetic, Extent, IndexMap, Keep, NodeId, Op, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
-    use proxima_numeric::{DType, NumericPolicy};
+    use proxima_tensor::{
+        BoundOp, BoundOpKind, CachedAttentionArithmetic, Extent, IndexMap, Keep, NodeId, Op,
+        Reduce, ReduceInit, ScalarOp, append, bind, infer, map,
+    };
 
     use super::{pack_uniforms, pack_uniforms_byte_len};
 

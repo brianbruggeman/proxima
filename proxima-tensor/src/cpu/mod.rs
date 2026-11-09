@@ -181,8 +181,8 @@ use half::{bf16, f16};
 // modules `QuantizedBlock::element_count` composes down to, not the scalar
 // float types.
 use proxima_gguf::quant::{
-    bf16 as gguf_bf16, f16 as gguf_f16, iq2_xs, iq3_xxs, iq4_nl, pq2_0, ptq1_0, q1_0, q2_0, q2_k,
-    q3_k, q4_0, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0,
+    bf16 as gguf_bf16, f16 as gguf_f16, iq2_xs, iq3_s, iq3_xxs, iq4_nl, iq4_xs, pq2_0, ptq1_0,
+    q1_0, q2_0, q2_k, q3_k, q4_0, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0,
 };
 
 use crate::bind::{
@@ -192,17 +192,17 @@ use crate::bind::{
 #[cfg(feature = "config")]
 use crate::config::TensorExecutionConfig;
 use crate::convert::{Convert, SimdConvert};
-use proxima_numeric::DType;
 use crate::error::TensorError;
 #[cfg(feature = "instrument")]
 use crate::instrument;
 #[cfg(feature = "instrument")]
 use crate::instrument::{KernelCounters, Path};
 use crate::map::IndexMap;
-use proxima_numeric::NumericPolicy;
 use crate::op::{Keep, NodeId, Op, ReduceInit, ScalarOp};
 use crate::shape;
 use crate::sized::COHORT_SPIN_POLLS;
+use proxima_numeric::DType;
+use proxima_numeric::NumericPolicy;
 
 #[macro_use]
 mod arena;
@@ -224,15 +224,19 @@ mod coalesce;
 mod gemm_tile;
 #[macro_use]
 mod gemm_dot_quant;
-mod gemm_q8_0_act;
-#[cfg(target_arch = "x86_64")]
-mod gemm_exact_wide;
-#[cfg(all(target_arch = "x86_64", feature = "q6k-int8-dot"))]
-mod gemm_q6k_avx2;
-#[cfg(all(target_arch = "x86_64", feature = "q4k-int8-dot", feature = "q6k-int8-dot"))]
-mod gemm_kquant_tile;
 #[cfg(target_arch = "x86_64")]
 mod dequant_x86;
+#[cfg(target_arch = "x86_64")]
+mod gemm_exact_wide;
+#[cfg(all(
+    target_arch = "x86_64",
+    feature = "q4k-int8-dot",
+    feature = "q6k-int8-dot"
+))]
+mod gemm_kquant_tile;
+#[cfg(all(target_arch = "x86_64", feature = "q6k-int8-dot"))]
+mod gemm_q6k_avx2;
+mod gemm_q8_0_act;
 #[macro_use]
 mod gemm_q8k;
 #[macro_use]
@@ -243,12 +247,12 @@ mod float64_island;
 pub use arena::*;
 use coalesce::*;
 use elementwise_matmul::*;
-use gemm_q8_0_act::*;
-pub use gemm_q8_0_act::matmul_q8_0_activation_f32;
-#[cfg(all(target_arch = "x86_64", feature = "q6k-int8-dot"))]
-use gemm_q6k_avx2::dot_q6k_q8k_block_avx2;
 pub use epilogue::*;
 pub use gemm_dot_quant::*;
+#[cfg(all(target_arch = "x86_64", feature = "q6k-int8-dot"))]
+use gemm_q6k_avx2::dot_q6k_q8k_block_avx2;
+pub use gemm_q8_0_act::matmul_q8_0_activation_f32;
+use gemm_q8_0_act::*;
 pub use gemm_q8k::*;
 // every item gemm_tile exports `pub` is aarch64-gated; glob re-exporting an
 // empty pub set fails to compile on other targets. `PackedWidthPanels` stays
@@ -259,9 +263,9 @@ use gemm_tile::PackedWidthPanels;
 #[cfg(target_arch = "aarch64")]
 pub use gemm_tile::*;
 pub use quantized_eval::*;
-pub use step_plan::{CpuStepPlan, probe_kv_padding};
 pub use run_node::*;
 pub use run_reduce_scan::*;
+pub use step_plan::{CpuStepPlan, probe_kv_padding};
 pub use typed_eval::*;
 use width_kernels::*;
 

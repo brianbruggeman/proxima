@@ -1148,6 +1148,14 @@ fn packed_block<'a>(codec: &str, bytes: &'a [u8]) -> QuantizedBlock<'a> {
             codec: Codec::Iq3Xxs,
             bytes,
         },
+        "iq3_s" => QuantizedBlock::Packed {
+            codec: Codec::Iq3S,
+            bytes,
+        },
+        "iq4_xs" => QuantizedBlock::Packed {
+            codec: Codec::Iq4Xs,
+            bytes,
+        },
         "float16" => QuantizedBlock::Packed {
             codec: Codec::Float16,
             bytes,
@@ -1175,6 +1183,8 @@ fn packed_block<'a>(codec: &str, bytes: &'a [u8]) -> QuantizedBlock<'a> {
 #[case::iq4_nl_five_blocks("iq4_nl", iq4_nl::BLOCK_BYTES, iq4_nl::QK4_NL, 5)]
 #[case::iq2_xs_two_super_blocks("iq2_xs", iq2_xs::BLOCK_BYTES, iq2_xs::QK_K, 2)]
 #[case::iq3_xxs_three_super_blocks("iq3_xxs", iq3_xxs::BLOCK_BYTES, iq3_xxs::QK_K, 3)]
+#[case::iq3_s_two_super_blocks("iq3_s", iq3_s::BLOCK_BYTES, iq3_s::QK_K, 2)]
+#[case::iq4_xs_two_super_blocks("iq4_xs", iq4_xs::BLOCK_BYTES, iq4_xs::QK_K, 2)]
 #[case::float16_seven_elements("float16", gguf_f16::BLOCK_BYTES, 1, 7)]
 #[case::bfloat16_two_elements("bfloat16", gguf_bf16::BLOCK_BYTES, 1, 2)]
 async fn quantized_block_element_count_multiplies_block_count_by_elements_per_block(
@@ -3489,7 +3499,7 @@ fn dead_node_program() -> (Vec<Op>, NodeId, NodeId) {
 }
 
 /// `dead` (zero consumers, not requested) never reaches `resolved` at
-/// all -- [`bind::bind_plain`]'s reachability pass (ROW 541,
+/// all -- [`bind::bind_plain_with_fusion`]'s reachability pass (ROW 541,
 /// `docs/discipline.md`) skips it at bind time, before this arena's own
 /// [`StaticArena::dead`]/`run_resolved_nodes_in_arena` skip machinery
 /// (ROW 166's) ever sees it, so `dead` is stronger than "bound but
@@ -3661,7 +3671,7 @@ fn build_static_arena_runs_a_live_constant_once_and_never_again() {
 /// The other half of ROW 174's same contract, mirroring
 /// [`build_static_arena_does_not_elide_a_dead_node_that_is_also_a_requested_output`]:
 /// a `Constant` with zero consumers is never bound at all --
-/// [`bind::bind_plain`]'s reachability pass (ROW 541, `docs/discipline.md`)
+/// [`bind::bind_plain_with_fusion`]'s reachability pass (ROW 541, `docs/discipline.md`)
 /// skips it before `dead_resolved_nodes`/`static_resolved_nodes` ever run
 /// over `resolved` -- so it lands in neither `dead` nor `static_nodes`,
 /// stronger than ROW 174's original "bound but skipped" guarantee.
@@ -3845,7 +3855,7 @@ fn f32_block(program: &mut Vec<Op>, shape: &[Extent]) -> NodeId {
 
 /// The last node `program` builds -- what a fixture that appends its
 /// nodes in dependency order and never binds anything past its own
-/// "answer" treats as the requested output. `bind::bind_plain`'s
+/// "answer" treats as the requested output. `bind::bind_plain_with_fusion`'s
 /// reachability pass (ROW 541, `docs/discipline.md`) binds only what
 /// `outputs` names, so a direct `bind::bind` call in this module must
 /// pass this instead of `&[]` -- an empty `outputs` correctly binds
@@ -6365,8 +6375,8 @@ fn peak_live_buffers_on_a_tanh_chain_stays_small_under_evaluate_parallel() {
 fn execute_composes_through_pipe_ext_matching_the_free_function() {
     use crate::bind::BoundOpBuilder;
     use crate::live;
-    use proxima_numeric::NumericPolicy;
     use crate::shape::ShapeTable;
+    use proxima_numeric::NumericPolicy;
     use proxima_primitives::block_on;
     use proxima_primitives::pipe::{Pipe, PipeExt};
 
@@ -10130,7 +10140,8 @@ fn a_strided_gate_half_evaluates_bit_identically_to_the_packed_copy_of_that_half
             .collect();
         let strided = QuantizedBlock::PackedStrided {
             codec: Codec::Q4K,
-            bytes: &fused[half * half_bytes..(n_experts - 1) * 2 * half_bytes + (half + 1) * half_bytes],
+            bytes: &fused
+                [half * half_bytes..(n_experts - 1) * 2 * half_bytes + (half + 1) * half_bytes],
             expert_bytes: half_bytes,
             stride_bytes: 2 * half_bytes,
         };
@@ -10145,8 +10156,14 @@ fn a_strided_gate_half_evaluates_bit_identically_to_the_packed_copy_of_that_half
             .expect("packed gathered reduce evaluates");
 
         assert_eq!(
-            from_view.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
-            from_copy.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+            from_view
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
+            from_copy
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>(),
             "half {half}: strided view differs from the copy it replaces"
         );
     }
@@ -10181,7 +10198,10 @@ fn a_strided_block_has_no_contiguous_run_but_a_logical_stack_of_runs() {
 
     assert!(strided.packed_bytes().is_none());
     assert_eq!(strided.packed_len(), Some(n_experts * half_bytes));
-    assert_eq!(strided.element_count().expect("whole blocks"), n_experts * rows * k);
+    assert_eq!(
+        strided.element_count().expect("whole blocks"),
+        n_experts * rows * k
+    );
     let runs: Vec<&[u8]> = strided.packed_runs().expect("packed").collect();
     assert_eq!(runs.len(), n_experts);
     assert_eq!(runs[2], &fused[4 * half_bytes..5 * half_bytes]);
@@ -10421,7 +10441,9 @@ fn an_expert_source_entry_that_is_strided_is_refused() {
     let (n_experts, rows, k) = (3u32, 4u32, proxima_gguf::quant::q4_k::QK_K as u32);
     let (fused, half_bytes) = fused_gate_up_experts(n_experts as usize, rows as usize, k as usize);
     let stacked: Vec<u8> = (0..n_experts as usize)
-        .flat_map(|expert| fused[expert * 2 * half_bytes..expert * 2 * half_bytes + half_bytes].to_vec())
+        .flat_map(|expert| {
+            fused[expert * 2 * half_bytes..expert * 2 * half_bytes + half_bytes].to_vec()
+        })
         .collect();
     let route_data = [1.0f32];
     let activation: Vec<f32> = random_vec(411, k as usize);

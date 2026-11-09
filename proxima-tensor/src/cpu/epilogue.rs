@@ -1428,7 +1428,10 @@ pub fn arena_named_input<'arena>(arena: &'arena StaticArena, name: &str) -> Opti
 pub enum QuantizedBlock<'a> {
     Float32(&'a [f32]),
     Int32(&'a [i32]),
-    Packed { codec: Codec, bytes: &'a [u8] },
+    Packed {
+        codec: Codec,
+        bytes: &'a [u8],
+    },
     /// A gathered expert stack whose expert `e` begins at byte
     /// `e * stride_bytes` of `bytes` instead of `e * expert_bytes`: the
     /// gate half (or up half) of a fused gate/up tensor, where the other half
@@ -1477,6 +1480,8 @@ pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima
         Codec::Iq4Nl => Some(proxima_gguf::GgmlType::Iq4Nl),
         Codec::Iq2Xs => Some(proxima_gguf::GgmlType::Iq2Xs),
         Codec::Iq3Xxs => Some(proxima_gguf::GgmlType::Iq3Xxs),
+        Codec::Iq3S => Some(proxima_gguf::GgmlType::Iq3S),
+        Codec::Iq4Xs => Some(proxima_gguf::GgmlType::Iq4Xs),
         Codec::Float16 => Some(proxima_gguf::GgmlType::F16),
         Codec::BFloat16 => Some(proxima_gguf::GgmlType::Bf16),
         Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Fp6E3M2 => None,
@@ -1489,8 +1494,6 @@ pub(super) const fn codec_to_decodable_ggml_type(codec: Codec) -> Option<proxima
         | Codec::Iq1M
         | Codec::Iq2Xxs
         | Codec::Iq2S
-        | Codec::Iq3S
-        | Codec::Iq4Xs
         | Codec::Tq10
         | Codec::Tq20
         | Codec::Mxfp4
@@ -1530,6 +1533,8 @@ pub(super) const fn codec_matmul_f32_kernel(
         Codec::Iq4Nl => Some(matmul_iq4_nl_f32),
         Codec::Iq2Xs => Some(matmul_iq2_xs_f32),
         Codec::Iq3Xxs => Some(matmul_iq3_xxs_f32),
+        Codec::Iq3S => Some(matmul_iq3_s_f32),
+        Codec::Iq4Xs => Some(matmul_iq4_xs_f32),
         Codec::Float16 => Some(matmul_f16_f32),
         Codec::BFloat16 => Some(matmul_bf16_f32),
         Codec::Bf8E5M2 => Some(matmul_bf8_e5m2_f32),
@@ -1547,8 +1552,6 @@ pub(super) const fn codec_matmul_f32_kernel(
         | Codec::Iq1M
         | Codec::Iq2Xxs
         | Codec::Iq2S
-        | Codec::Iq3S
-        | Codec::Iq4Xs
         | Codec::Tq10
         | Codec::Tq20
         | Codec::Mxfp4
@@ -1587,6 +1590,8 @@ pub(super) const fn codec_dequantize_fn(
         Codec::Ptq1_0 => Some(ptq1_0::dequantize),
         Codec::Iq2Xs => Some(iq2_xs::dequantize),
         Codec::Iq3Xxs => Some(iq3_xxs::dequantize),
+        Codec::Iq3S => Some(iq3_s::dequantize),
+        Codec::Iq4Xs => Some(iq4_xs::dequantize),
         Codec::Float16 => Some(gguf_f16::dequantize),
         Codec::BFloat16 => Some(gguf_bf16::dequantize),
         Codec::Bf8E5M2 => Some(dequantize_bf8_e5m2),
@@ -1603,8 +1608,6 @@ pub(super) const fn codec_dequantize_fn(
         | Codec::Iq1M
         | Codec::Iq2Xxs
         | Codec::Iq2S
-        | Codec::Iq3S
-        | Codec::Iq4Xs
         | Codec::Tq10
         | Codec::Tq20
         | Codec::Mxfp4
@@ -1972,7 +1975,6 @@ impl<'a> QuantizedBlock<'a> {
         self.packed_runs().map(|runs| runs.map(<[u8]>::len).sum())
     }
 
-
     /// Packed-block `(block_bytes, block_elements)` footprint for this
     /// codec, or `None` for [`Self::Float32`]/[`Self::Int32`] (decoded
     /// values, not packed blocks) or a [`Codec`] with no decodable-here
@@ -2176,6 +2178,18 @@ impl<'a> QuantizedBlock<'a> {
                     bytes.len(),
                     iq3_xxs::BLOCK_BYTES,
                     iq3_xxs::blocks_for_bytes(bytes.len()).map(iq3_xxs::elements_for_blocks),
+                ),
+                Codec::Iq3S => (
+                    "iq3_s",
+                    bytes.len(),
+                    iq3_s::BLOCK_BYTES,
+                    iq3_s::blocks_for_bytes(bytes.len()).map(iq3_s::elements_for_blocks),
+                ),
+                Codec::Iq4Xs => (
+                    "iq4_xs",
+                    bytes.len(),
+                    iq4_xs::BLOCK_BYTES,
+                    iq4_xs::blocks_for_bytes(bytes.len()).map(iq4_xs::elements_for_blocks),
                 ),
                 // f16/bf16 blocks and scalar bf8 bytes each hold one element,
                 // so their storage-unit count is already the element count.

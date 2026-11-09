@@ -9,8 +9,8 @@
 use proxima_numeric::block_layout::BlockLayout;
 
 use super::{
-    QuantError, bf16, block_layout, f16, iq2_xs, iq3_xxs, iq4_nl, q2_k, q3_k, q4_k, q5_k, q6_k,
-    q8_k,
+    QuantError, bf16, block_layout, f16, iq2_xs, iq3_s, iq3_xxs, iq4_nl, iq4_xs, q2_k, q3_k, q4_k,
+    q5_k, q6_k, q8_k,
 };
 use crate::types::GgmlType;
 
@@ -38,8 +38,10 @@ pub fn dequantize(kind: GgmlType, data: &[u8], output: &mut [f32]) -> Result<(),
         GgmlType::Q8_1 => block_layout::dequantize(&BlockLayout::Q8_1, data, output),
         GgmlType::Q8_K => q8_k::dequantize(data, output),
         GgmlType::Iq2Xs => iq2_xs::dequantize(data, output),
+        GgmlType::Iq3S => iq3_s::dequantize(data, output),
         GgmlType::Iq3Xxs => iq3_xxs::dequantize(data, output),
         GgmlType::Iq4Nl => iq4_nl::dequantize(data, output),
+        GgmlType::Iq4Xs => iq4_xs::dequantize(data, output),
         other => Err(QuantError::UnsupportedCodec {
             codec: other.name(),
         }),

@@ -1,0 +1,27 @@
+{
+  "gguf": "/Users/brianbruggeman/models/llm/flint-gguf/flint-UD-Q4_K_XL.gguf",
+  "version": 3,
+  "blocks": 4,
+  "tensors": {
+    "iq3_s": {
+      "name": "blk.2.ffn_gate_exps.weight",
+      "dims": [
+        2048,
+        512,
+        256
+      ],
+      "first_block_offset": 980635008,
+      "blocks": 4
+    },
+    "iq4_xs": {
+      "name": "blk.19.ffn_down_exps.weight",
+      "dims": [
+        512,
+        2048,
+        256
+      ],
+      "first_block_offset": 10669382144,
+      "blocks": 4
+    }
+  }
+}

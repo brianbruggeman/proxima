@@ -948,6 +948,13 @@ pub(super) fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(Q2K_UNPACK_MSL);
     source.push('\n');
+    // the two `IQ` codecs the captured sliding-pattern checkpoint stores its
+    // routed experts in; spliced unconditionally for the same reason `Q2K_UNPACK_MSL`
+    // is -- an unused `static inline` costs nothing in the compiled AIR.
+    source.push_str(IQ4_XS_UNPACK_MSL);
+    source.push('\n');
+    source.push_str(IQ3_S_UNPACK_MSL);
+    source.push('\n');
     // emitted unconditionally, the same way `PROXIMA_ERF_FN` is: a
     // `static inline` the kernel never calls costs nothing in the compiled
     // AIR, and making it conditional would mean threading "does this kernel
@@ -1101,11 +1108,24 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
         Some(Codec::Fp6E3M2) => format!(
             "scaled_e3m2_element(in{index} + ({offset} / {FP6_E3M2_ELEMENTS}) * {FP6_E3M2_BYTES}, (uint)({offset} % {FP6_E3M2_ELEMENTS}))"
         ),
-        // No Metal unpack kernel exists for any of these 18 -- `PackedOperands`
-        // is only ever populated via `codec_from_quantized_block`, which
-        // maps just the 11 codecs above, so this arm is unreachable by
-        // construction; kept exhaustive so a future codec forces a decision
-        // here rather than slipping through.
+        // both `IQ` codecs the captured sliding-pattern checkpoint stores routed experts in,
+        // decoded by the `*_element` helpers `preamble` splices
+        Some(Codec::Iq4Xs) => format!(
+            "iq4_xs_element(in{index} + ({offset} / {IQ4_XS_BLOCK_ELEMENTS}) * {IQ4_XS_BLOCK_BYTES}, (uint)({offset} % {IQ4_XS_BLOCK_ELEMENTS}))"
+        ),
+        Some(Codec::Iq3S) => format!(
+            "iq3_s_element(in{index} + ({offset} / {IQ3_S_BLOCK_ELEMENTS}) * {IQ3_S_BLOCK_BYTES}, (uint)({offset} % {IQ3_S_BLOCK_ELEMENTS}))"
+        ),
+        // No Metal unpack kernel exists for these 21 names (the 20 below plus
+        // `Float16`, whose buffer binds as `half` and never takes a per-element
+        // decode). `PackedOperands` reaches this emitter only through
+        // `metal_operand_read_decodes`, which admits exactly the 16 codecs with
+        // an arm above, so this arm is unreachable by construction; kept
+        // exhaustive so a future codec forces a decision here rather than
+        // slipping through (that is how `Q1_0`/`Q2_0`/`Pq2_0`/`Ptq1_0`/
+        // `BFloat8` were found: the old driver-neutral admission list claimed
+        // them, this match did not, and the fall-through read packed bytes as
+        // `f32`).
         Some(
             Codec::Q4_1
             | Codec::Q8_1
@@ -1117,9 +1137,7 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
             | Codec::Iq2Xs
             | Codec::Iq2S
             | Codec::Iq3Xxs
-            | Codec::Iq3S
             | Codec::Iq4Nl
-            | Codec::Iq4Xs
             | Codec::Tq10
             | Codec::Tq20
             | Codec::Mxfp4
@@ -1186,6 +1204,8 @@ fn codec_element_fn_name(codec: Codec) -> &'static str {
         Codec::Bf8E5M2 => "bf8_e5m2_element",
         Codec::Bf4E2M1 => "bf4_e2m1_element",
         Codec::Fp6E3M2 => "scaled_e3m2_element",
+        Codec::Iq4Xs => "iq4_xs_element",
+        Codec::Iq3S => "iq3_s_element",
         Codec::Float16
         | Codec::Q4_1
         | Codec::Q8_1
@@ -1197,9 +1217,7 @@ fn codec_element_fn_name(codec: Codec) -> &'static str {
         | Codec::Iq2Xs
         | Codec::Iq2S
         | Codec::Iq3Xxs
-        | Codec::Iq3S
         | Codec::Iq4Nl
-        | Codec::Iq4Xs
         | Codec::Tq10
         | Codec::Tq20
         | Codec::Mxfp4

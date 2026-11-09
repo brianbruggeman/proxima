@@ -2329,6 +2329,154 @@ pub fn matmul_iq3_xxs_f32(
     )
 }
 
+/// Bytes per `IQ4_XS` super-block -- 136 bytes for 256 elements
+/// ([`Codec::Iq4Xs`]'s own doc).
+pub(super) const IQ4_XS_BLOCK_BYTES: usize = proxima_gguf::quant::iq4_xs::BLOCK_BYTES;
+
+/// Decoded `f32` elements per `IQ4_XS` super-block (`QK_K`, 256).
+pub(super) const IQ4_XS_BLOCK_ELEMENTS: usize = proxima_gguf::quant::iq4_xs::QK_K;
+
+/// [`dot_iq3_xxs_f32`]'s mechanism applied to `IQ4_XS`: dequantizes one
+/// 256-element super-block at a time into a reused stack buffer via
+/// [`proxima_gguf::quant::iq4_xs::dequantize_block`], then folds against the
+/// matching activation slice with the same [`dot_fold_fused_multiply_add`]
+/// fold. No `dot_fn_for` entry exists for this codec either.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`IQ4_XS_BLOCK_BYTES`], or `activation.len()` does not
+/// equal the row's block count times [`IQ4_XS_BLOCK_ELEMENTS`].
+pub(super) fn dot_iq4_xs_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(IQ4_XS_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the iq4_xs block size",
+        });
+    }
+    let block_count = weight_row.len() / IQ4_XS_BLOCK_BYTES;
+    if activation.len() != block_count * IQ4_XS_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; IQ4_XS_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .as_chunks::<IQ4_XS_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<IQ4_XS_BLOCK_ELEMENTS>().0)
+    {
+        proxima_gguf::quant::iq4_xs::dequantize_block(block, &mut scratch);
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold {
+                len: IQ4_XS_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `IQ4_XS`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector -- `dot_iq4_xs_f32`'s per-row kernel.
+///
+/// # Errors
+/// Propagates `dot_iq4_xs_f32`'s [`TensorError::QuantizedShapeMismatch`],
+/// or reports the same error if `weights.len()` is not a whole multiple of
+/// `rows`.
+pub fn matmul_iq4_xs_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_iq4_xs_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_iq4_xs_f32,
+    )
+}
+
+/// Bytes per `IQ3_S` super-block -- 110 bytes for 256 elements
+/// ([`Codec::Iq3S`]'s own doc).
+pub(super) const IQ3_S_BLOCK_BYTES: usize = proxima_gguf::quant::iq3_s::BLOCK_BYTES;
+
+/// Decoded `f32` elements per `IQ3_S` super-block (`QK_K`, 256).
+pub(super) const IQ3_S_BLOCK_ELEMENTS: usize = proxima_gguf::quant::iq3_s::QK_K;
+
+/// [`dot_iq3_xxs_f32`]'s mechanism applied to `IQ3_S`: dequantizes one
+/// 256-element super-block at a time into a reused stack buffer via
+/// [`proxima_gguf::quant::iq3_s::dequantize_block`], then folds against the
+/// matching activation slice with the same [`dot_fold_fused_multiply_add`]
+/// fold. No `dot_fn_for` entry exists for this codec either.
+///
+/// # Errors
+/// [`TensorError::QuantizedShapeMismatch`] if `weight_row.len()` is not a
+/// whole multiple of [`IQ3_S_BLOCK_BYTES`], or `activation.len()` does not
+/// equal the row's block count times [`IQ3_S_BLOCK_ELEMENTS`].
+pub(super) fn dot_iq3_s_f32(weight_row: &[u8], activation: &[f32]) -> Result<f32, TensorError> {
+    if !weight_row.len().is_multiple_of(IQ3_S_BLOCK_BYTES) {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "weight row length is not a whole multiple of the iq3_s block size",
+        });
+    }
+    let block_count = weight_row.len() / IQ3_S_BLOCK_BYTES;
+    if activation.len() != block_count * IQ3_S_BLOCK_ELEMENTS {
+        return Err(TensorError::QuantizedShapeMismatch {
+            reason: "activation length does not match the weight row's decoded element count",
+        });
+    }
+
+    let mut scratch = [0.0f32; IQ3_S_BLOCK_ELEMENTS];
+    let mut acc = 0.0f32;
+    for (block, activation_chunk) in weight_row
+        .as_chunks::<IQ3_S_BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(activation.as_chunks::<IQ3_S_BLOCK_ELEMENTS>().0)
+    {
+        proxima_gguf::quant::iq3_s::dequantize_block(block, &mut scratch);
+        acc = dot_fold_fused_multiply_add(
+            &scratch,
+            activation_chunk,
+            DotFold {
+                len: IQ3_S_BLOCK_ELEMENTS,
+                init: acc,
+                seeded: true,
+            },
+        );
+    }
+    Ok(acc)
+}
+
+/// A full `IQ3_S`-quantized weight matrix (`rows` x `k`) times one `f32`
+/// activation vector -- `dot_iq3_s_f32`'s per-row kernel.
+///
+/// # Errors
+/// Propagates `dot_iq3_s_f32`'s [`TensorError::QuantizedShapeMismatch`],
+/// or reports the same error if `weights.len()` is not a whole multiple of
+/// `rows`.
+pub fn matmul_iq3_s_f32(
+    weights: &[u8],
+    rows: usize,
+    activation: &[f32],
+) -> Result<Vec<f32>, TensorError> {
+    matmul_quantized_dispatch(
+        weights,
+        rows,
+        activation,
+        "matmul_iq3_s_f32 called with zero rows",
+        "weight byte length is not a whole multiple of the row count",
+        dot_iq3_s_f32,
+    )
+}
+
 /// Bytes per half-precision element -- both [`Codec::Float16`]
 /// and [`Codec::BFloat16`] are 2-byte formats
 /// ([`DType::size_bytes`] agrees for both).

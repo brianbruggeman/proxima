@@ -5,9 +5,11 @@
 //! the exact source line range (guiding-principles principle 10, attribution).
 
 pub mod iq2xs_grid;
+pub mod iq3s_grid;
 pub mod iq3xxs_grid;
 
 pub use iq2xs_grid::{IQ2XS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
+pub use iq3s_grid::IQ3S_GRID;
 pub use iq3xxs_grid::IQ3XXS_GRID;
 
 /// The non-linear 4-bit codebook every IQ4_NL nibble indexes into
