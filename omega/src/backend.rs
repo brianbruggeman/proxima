@@ -74,7 +74,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::OnceLock;
 use std::time::Instant;
 
-use proxima_tensor::cpu::{CpuStepPlan, ExpertSource};
+#[cfg(feature = "cpu")]
+use proxima_tensor::cpu::CpuStepPlan;
+use proxima_tensor::cpu::ExpertSource;
 use proxima_tensor::{Evaluated, NodeId, Op, QuantizedBlock, TensorError};
 use proxima_numeric::{NumericPolicy};
 
@@ -594,7 +596,11 @@ fn candidate_is_better(candidate: &CandidateMeasurement, incumbent: &CandidateMe
         && candidate.execution_sum_ns < incumbent.execution_sum_ns
 }
 
-#[cfg(any(test, feature = "wgpu-backend", feature = "cuda-driver"))]
+#[cfg(any(
+    feature = "wgpu-backend",
+    feature = "cuda-driver",
+    all(test, feature = "cpu")
+))]
 pub(crate) fn checked_resource_sum(values: impl IntoIterator<Item = u64>) -> Option<u64> {
     values.into_iter().try_fold(0_u64, u64::checked_add)
 }
@@ -1090,7 +1096,7 @@ fn validate_input_contract(
 /// caller-owned pieces that DO persist across calls: the program itself
 /// (owned, so the [`Plan`] outlives the caller's borrowed slices) and the
 /// reusable scratch
-/// [`evaluate_quantized_named_with_scratch_and_experts`] takes, so
+/// `evaluate_quantized_named_with_scratch_and_experts` takes, so
 /// repeated [`execute_plan_named`] calls keep reusing the same buffers
 /// instead of reintroducing the per-call allocation that function's own
 /// `scratch` parameters exist to avoid.
@@ -1534,6 +1540,8 @@ pub fn plan_pads_kv(plan: &Plan, is_kv_input: impl Fn(&str) -> bool) -> bool {
         Plan::Metal(metal_plan) => metal_plan.pads_kv_safely(is_kv_input),
         #[cfg(feature = "cuda-driver")]
         Plan::Cuda(cuda_plan) => cuda_plan.pads_kv_safely(is_kv_input),
+        // only reachable while a variant this arm is not naming exists
+        #[cfg(any(feature = "cpu", feature = "wgpu-backend"))]
         _ => {
             let _ = is_kv_input;
             false
@@ -1910,10 +1918,19 @@ pub fn refit_cpu_symbols(plan: &mut Plan, symbols: &[u64]) -> bool {
     }
 }
 
-/// Whether `plan` is a [`Plan::Cpu`].
+/// Whether `plan` is a [`Plan::Cpu`]: always `false` in a build without the
+/// `cpu` feature, where the variant does not exist.
 #[must_use]
 pub fn is_cpu_plan(plan: &Plan) -> bool {
-    matches!(plan, Plan::Cpu(_))
+    #[cfg(feature = "cpu")]
+    {
+        matches!(plan, Plan::Cpu(_))
+    }
+    #[cfg(not(feature = "cpu"))]
+    {
+        let _ = plan;
+        false
+    }
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
