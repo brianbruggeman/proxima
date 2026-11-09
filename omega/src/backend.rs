@@ -2149,6 +2149,11 @@ pub fn cuda_carried_host_bytes(plan: &Plan) -> Option<u64> {
 #[allow(clippy::expect_used)]
 mod programmable_tests;
 
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+// hand-built fixtures: an expect failure IS the test failing, same as `mod tests` below.
+#[allow(clippy::expect_used)]
+mod attention_sink_tests;
+
 #[cfg(test)]
 // test fixtures below are hand-built to succeed; an expect/unwrap failure IS
 // the test failing, same convention as every `omega/tests/*.rs` file.

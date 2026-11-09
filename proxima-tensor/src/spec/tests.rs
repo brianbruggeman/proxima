@@ -23490,10 +23490,13 @@ fn the_cacheless_forward_pass_binds_one_fused_attention_per_layer_under_the_defa
 /// `(32,)` -- one learned scalar per query head.
 mod attention_sinks {
     use super::attention_sink_fixture::{
-        SINKS, SINK_LEAF_NAME, attended_agrees, hand_worked_attended, sink_combine_inputs,
+        SINK_LEAF_NAME, SINKS, attended_agrees, hand_worked_attended, sink_combine_inputs,
         sink_combine_program,
     };
     use super::*;
+    use crate::bind::{BoundOpKind, bind_with_fusion};
+    use crate::shape::infer;
+    use proxima_numeric::NumericPolicy;
 
     const SINK_LEAF_SUFFIX: &str = ".attn_sinks.weight";
     const FLINT_QUERY_HEADS: u32 = 32;
@@ -23909,15 +23912,22 @@ mod attention_sinks {
     }
 
     /// Census, not a correctness gate: the two-range flint-shaped program's
-    /// fused `CachedAttention` step count with the sink flag off and on, which
-    /// is the only place row 8's "fusion consequence unmeasured" claim can be
-    /// re-proved from the tree. Asserting EQUALITY is the point -- it is true
-    /// today (both counts are 0), and it fails the moment a sink change starts
-    /// choosing a different kernel, which is exactly when that note's open item
-    /// has to be rewritten with the new pair of numbers.
+    /// fused `CachedAttention` step count with the sink flag off and on, plus
+    /// the proof that the flag reached the graph at all. This is the only place
+    /// TASKS.md row 8's "fusion consequence unmeasured" claim can be re-proved
+    /// from the tree, so it asserts the ABSOLUTE pair `(0, 0)` rather than the
+    /// two counts being equal:
+    ///
+    /// - equal-with-both-fused is the interesting regression (a sink riding a
+    ///   kernel that has no place for its addend) and equality alone passes it;
+    /// - the leaf assertions are what stop a dead knob (both programs identical,
+    ///   both counts 0) from satisfying the census vacuously.
+    ///
+    /// A changed pair means the sink now chooses a kernel, so the row's open
+    /// item must be rewritten with the numbers this test prints.
     #[test]
     fn attention_sink_fusion_census_reports_the_same_decision_with_and_without_the_sink() {
-        let fused_steps = |sinks: bool| {
+        let census = |sinks: bool| {
             let program = lowered(&scheduled(
                 CacheStrategy::Cached,
                 CacheMask::Padded,
@@ -23925,34 +23935,45 @@ mod attention_sinks {
                 FLINT_QUERY_HEADS,
                 FLINT_KV_HEADS,
             ));
-            let shapes =
-                crate::shape::infer(&program.program, &[1, 0]).expect("the census program infers");
-            crate::bind::bind_with_fusion(
+            let leaves = sink_leaves(&program.program);
+            let shapes = infer(&program.program, &[1, 0]).expect("the census program infers");
+            let fused = bind_with_fusion(
                 &program.program,
                 &shapes,
                 &[program.logits],
                 true,
-                proxima_numeric::NumericPolicy::default(),
+                NumericPolicy::default(),
             )
             .expect("the census program binds")
             .iter()
-            .filter(|op| matches!(op.kind, crate::bind::BoundOpKind::CachedAttention { .. }))
-            .count()
+            .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+            .count();
+            (leaves, fused)
         };
-        let sinks_off = fused_steps(false);
-        let sinks_on = fused_steps(true);
+
+        let (sinks_off_leaves, sinks_off) = census(false);
+        let (sinks_on_leaves, sinks_on) = census(true);
+        assert!(
+            sinks_off_leaves.is_empty(),
+            "the sink-off arm must declare no sink leaf, found {sinks_off_leaves:?}"
+        );
         assert_eq!(
-            sinks_off, sinks_on,
-            "fused cached-attention steps: sink off {sinks_off}, sink on {sinks_on} -- an \
-             unequal pair means the sink now chooses a different kernel, so the sink's fusion \
-             consequence is measured and TASKS.md row 8's open item must be rewritten"
+            sinks_on_leaves.len(),
+            2,
+            "the sink-on arm must declare one leaf per layer, found {sinks_on_leaves:?}"
+        );
+        assert_eq!(
+            (sinks_off, sinks_on),
+            (0, 0),
+            "fused cached-attention steps: sink off {sinks_off}, sink on {sinks_on} -- this \
+             pair is what row 8's open item records as the unmeasured case; if it moved, the \
+             sink now chooses a kernel and that item must be rewritten with these numbers"
         );
     }
 
     #[test]
     fn attention_sink_cpu_literal_matches_the_hand_worked_softmax_with_sink() {
-        let (program, attended) =
-            sink_combine_program(true).expect("the sink combine lowers");
+        let (program, attended) = sink_combine_program(true).expect("the sink combine lowers");
         assert_sink_joins_the_row_maximum(&program);
 
         let actual = evaluate(&program, attended, true);
@@ -23965,8 +23986,7 @@ mod attention_sinks {
 
     #[test]
     fn control_attention_sink_cpu_rejects_the_sink_less_literal() {
-        let (program, attended) =
-            sink_combine_program(true).expect("the sink combine lowers");
+        let (program, attended) = sink_combine_program(true).expect("the sink combine lowers");
         let with_sink = evaluate(&program, attended, true);
         let without_sink_literal = hand_worked_attended(None);
         assert!(
