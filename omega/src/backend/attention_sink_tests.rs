@@ -1,9 +1,9 @@
 //! The attention sink's Metal parity tests, in their own module because
 //! `backend`'s `programmable_tests` is gated on the `cpu` feature, which is not
-//! what AC8 and AC20 are about. (This is a coupling fix, not a reachability
-//! claim: `--no-default-features --features metal` does not build at all --
-//! `backend.rs` loses `Plan::Cpu`/`CpuStepPlan` under that feature set, three
-//! pre-existing errors from `7144a43b2`, untouched here.)
+//! what AC8 and AC20 are about. A `--no-default-features --features metal` build
+//! now compiles and runs them (`cargo val -p proxima-omega --no-default-features
+//! --features metal --lib`, 623 tests discovered), which needed the
+//! `Plan::Cpu`-absent cfg gaps in `backend.rs` closed first.
 
 use super::*;
 use crate::config::ResourceConstraints;
