@@ -16,7 +16,11 @@ llama.cpp greedy id sequence and serving through `POST /v1/chat/send` with ollam
 
 A working flint load or generation that requires a conditional on the string `flint`
 outside `proxima-model-interop/src/profiles/` and the test fixtures refutes the data-only
-premise: the spec must be replaced by an engine-redesign spec rather than patched.
+premise: the spec must be replaced by an engine-redesign spec rather than patched. The
+conditional is looked for in the three crates that turn `general.architecture` into a model
+graph -- `proxima-model-interop`, `proxima-tensor`, `proxima-omega`. `proxima-tokenizer` is
+outside that set: its `tokenizer.ggml.pre` table is keyed by the checkpoint's own pre-type
+string, and R9 requires the flint entry there.
 
 ## requirements
 
@@ -29,7 +33,7 @@ premise: the spec must be replaced by an engine-redesign spec rather than patche
 | R5 | The scheduled engine lowers `FfnCombination::RoutedWithSharedExpert` (replacing the refusal at `proxima-tensor/src/spec/attention_forward.rs:1332`) through the generic shared-expert primitives, selected by profile data, and the resulting FFN output equals a hand-worked literal reference for one synthetic layer; dense-only and routed-only programs are unchanged. | yes |
 | R6 | Attention sinks are a generic capability: a descriptor knob (default off), a `blk.{layer}.attn_sinks.weight` program leaf, a CPU evaluator equal to a hand-worked softmax-with-sink literal, and omega MSL emission equal to that same literal on Metal. | yes |
 | R7 | Loading the real flint GGUF binds all 779 tensors with zero `UnknownTensor`, zero unbound leaves, and zero unclaimed tensors. | yes |
-| R8 | Flint's non-header values live only in `proxima-model-interop/src/profiles/flint.toml`; no non-test source file outside `profiles/` contains the literal `flint`. Test code may name the family and its keys, because asserting them is the test's job; the scan AC reads non-test source only. | yes |
+| R8 | Flint's non-header values live only in `proxima-model-interop/src/profiles/flint.toml`; no non-test source file in the three crates that turn `general.architecture` into a model graph (`proxima-model-interop`, `proxima-tensor`, `proxima-omega`) contains the literal `flint` outside `profiles/` -- doc comments included; a path under `tests/`, a `tests.rs`/`*_tests.rs` file, a file gated whole by `#![cfg(...)]`, and an item or out-of-line module a release build cannot compile are test code. `proxima-tokenizer`'s `tokenizer.ggml.pre` table is keyed by the checkpoint's own pre-type string, not by its architecture, and R9 owns its entry. Test code may name the family and its keys, because asserting them is the test's job. | yes |
 | R9 | `tokenizer.ggml.pre = "flint"` resolves through the existing pre-type table; encoding the fixture sample text equals the llama.cpp ids and decoding round-trips. | yes |
 | R10 | The committed llama.cpp greedy ids pass the same id comparator the parity test uses (the oracle control), and `LoadedModel::load` + generate on the flint GGUF reproduces those ids on CPU and on Metal with neither arm skipped. | yes |
 | R11 | RAGD's `ProximaProvider` serves flint end to end: `GET /v1/llm` reports three roles, all `provider: proxima`; `POST /v1/chat/send` returns at least one part with route tag `llm-only`, with ollama stopped. | yes |
