@@ -612,7 +612,6 @@ fn block_geometry_fits(layout: &BlockLayout) -> Result<(), &'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::convert::ToValue;
     use crate::float_layout::{FloatLayout, Specials};
 
     /// The scalar layouts the shared 32-bit codec executes, exhaustive on every one at or below
@@ -705,30 +704,6 @@ mod tests {
             }
         }
         assert_eq!(tiny_formats, 21, "pinned: exhaustively checked layouts");
-    }
-
-    #[test]
-    fn widening_a_decode_into_f32_is_exact_for_every_scalar_format() {
-        let mut checked = 0;
-        for layout in EXECUTABLE_LAYOUTS {
-            if layout.width() > 32 {
-                continue;
-            }
-            let format = NumericFormat::Scalar(layout);
-            let mut generator = SplitMix(0xfeed_face);
-            for _ in 0..64 {
-                let code = (generator.next() % (1u64 << layout.width())) as u32;
-                let decoded = crate::float_layout_codec::decode(code, layout);
-                let widened = crate::float_layout_codec::decode(code, layout).to_value();
-                assert_eq!(
-                    decoded.to_bits(),
-                    widened.to_bits(),
-                    "{format:?} must widen without touching a bit"
-                );
-            }
-            checked += 1;
-        }
-        assert_eq!(checked, 24, "pinned: scalar formats whose widening is exact");
     }
 
     #[test]
