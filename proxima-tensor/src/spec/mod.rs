@@ -91,8 +91,9 @@ mod roundtrip;
 #[cfg(feature = "config")]
 mod run;
 /// the attention sink's worked example, shared with `omega`'s Metal parity
-/// test so both backends pin one hand-derived literal
-#[cfg(any(test, feature = "test-support"))]
+/// test so both backends pin one hand-derived literal. `std` on the feature
+/// path because the hand-worked literal uses `f32::exp`.
+#[cfg(any(test, all(feature = "test-support", feature = "std")))]
 pub mod attention_sink_fixture;
 mod two_block_attention;
 pub use crate::LoopCdMode;

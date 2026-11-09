@@ -23910,7 +23910,8 @@ mod attention_sinks {
 
     #[test]
     fn attention_sink_cpu_literal_matches_the_hand_worked_softmax_with_sink() {
-        let (program, attended) = sink_combine_program(true);
+        let (program, attended) =
+            sink_combine_program(true).expect("the sink combine lowers");
         assert_sink_joins_the_row_maximum(&program);
 
         let actual = evaluate(&program, attended, true);
@@ -23923,7 +23924,8 @@ mod attention_sinks {
 
     #[test]
     fn control_attention_sink_cpu_rejects_the_sink_less_literal() {
-        let (program, attended) = sink_combine_program(true);
+        let (program, attended) =
+            sink_combine_program(true).expect("the sink combine lowers");
         let with_sink = evaluate(&program, attended, true);
         let without_sink_literal = hand_worked_attended(None);
         assert!(
@@ -23934,7 +23936,8 @@ mod attention_sinks {
         // and the sink-less literal IS what the flag-off program computes, so
         // the rejected literal is the right one for its own graph rather than
         // a number that could never match anything
-        let (flag_off_program, flag_off_attended) = sink_combine_program(false);
+        let (flag_off_program, flag_off_attended) =
+            sink_combine_program(false).expect("the flag-off sink combine lowers");
         let flag_off = evaluate(&flag_off_program, flag_off_attended, false);
         assert!(
             attended_agrees(&flag_off, &without_sink_literal),

@@ -1,9 +1,11 @@
 use super::*;
 use crate::config::ResourceConstraints;
+use proxima_numeric::DType;
 use proxima_numeric::codec::Codec;
 use proxima_tensor::map::{self, IndexMap};
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use proxima_tensor::spec::attention_sink_fixture as sink;
 use proxima_tensor::{Extent, ScalarOp, bind_unfused, bind_with_fusion, infer};
-use proxima_numeric::{DType};
 #[cfg(any(
     all(feature = "metal", target_os = "macos"),
     feature = "wgpu-backend",
@@ -1180,8 +1182,7 @@ fn config_cuda_same_shape_execution_resource_census() {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]
 fn attention_sink_metal_parity_literal_matches_the_hand_worked_softmax_with_sink() {
-    use proxima_tensor::spec::attention_sink_fixture as sink;
-    let (program, attended) = sink::sink_combine_program(true);
+    let (program, attended) = sink::sink_combine_program(true).expect("the sink combine lowers");
     let owned = sink::sink_combine_inputs(true);
     let values: Vec<(&str, QuantizedBlock<'_>)> = owned
         .iter()
@@ -1195,9 +1196,22 @@ fn attention_sink_metal_parity_literal_matches_the_hand_worked_softmax_with_sink
         Some(GpuDriver::Metal),
         "the sink term must be dispatched on Metal, not quietly run on the CPU"
     );
-    let executed = execute_plan_named(&mut plan, &values).expect("Metal must evaluate the sink combine");
-    let (observed, shape) = executed.get(attended).expect("the attended values are a requested output");
-    assert_eq!(shape, [1, 2, 2, 2], "one query row x 2 key heads x 2 query heads x value width 2");
+    // the report's driver is the REQUESTED one; the plan variant is what
+    // decides dispatch, and the Metal driver has no CPU arm
+    assert!(
+        matches!(plan, Plan::Metal(_)),
+        "the sink combine must plan as a Metal plan, not fall back to the CPU evaluator"
+    );
+    let executed =
+        execute_plan_named(&mut plan, &values).expect("Metal must evaluate the sink combine");
+    let (observed, shape) = executed
+        .get(attended)
+        .expect("the attended values are a requested output");
+    assert_eq!(
+        shape,
+        [1, 2, 2, 2],
+        "one query row x 2 key heads x 2 query heads x value width 2"
+    );
 
     let expected = sink::hand_worked_attended(Some(sink::SINKS));
     assert!(
@@ -1220,17 +1234,20 @@ fn attention_sink_metal_parity_literal_matches_the_hand_worked_softmax_with_sink
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]
 fn control_attention_sink_metal_parity_rejects_a_perturbed_literal() {
-    use proxima_tensor::spec::attention_sink_fixture as sink;
-    let (program, attended) = sink::sink_combine_program(true);
+    let (program, attended) = sink::sink_combine_program(true).expect("the sink combine lowers");
     let owned = sink::sink_combine_inputs(true);
     let values: Vec<(&str, QuantizedBlock<'_>)> = owned
         .iter()
         .map(|(name, data)| (*name, QuantizedBlock::Float32(data.as_slice())))
         .collect();
-    let (mut plan, _) = plan_named_with_config(&metal_config(), &program, &[], &values, &[attended])
-        .expect("the sink combine must plan for Metal");
-    let executed = execute_plan_named(&mut plan, &values).expect("Metal must evaluate the sink combine");
-    let (observed, _) = executed.get(attended).expect("the attended values are a requested output");
+    let (mut plan, _) =
+        plan_named_with_config(&metal_config(), &program, &[], &values, &[attended])
+            .expect("the sink combine must plan for Metal");
+    let executed =
+        execute_plan_named(&mut plan, &values).expect("Metal must evaluate the sink combine");
+    let (observed, _) = executed
+        .get(attended)
+        .expect("the attended values are a requested output");
 
     let literal = sink::hand_worked_attended(Some(sink::SINKS));
     assert!(
