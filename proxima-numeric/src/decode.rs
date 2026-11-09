@@ -567,10 +567,17 @@ fn block_geometry_fits(layout: &BlockLayout) -> Result<(), &'static str> {
             return Err("a scale or min field outside the block");
         }
     }
-    if let Some(runs) = layout.scale_runs
-        && (runs.count == 0 || !elements.is_multiple_of(usize::from(runs.count)))
-    {
-        return Err("a scale-run count that does not divide the element count");
+    if let Some(runs) = layout.scale_runs {
+        let count = usize::from(runs.count);
+        if count == 0 || !elements.is_multiple_of(count) {
+            return Err("a scale-run count that does not divide the element count");
+        }
+        let scale_bytes = usize::from(layout.scale.layout.width().div_ceil(8));
+        let last =
+            usize::from(layout.scale.byte_offset) + (count - 1) * usize::from(runs.stride_bytes);
+        if last + scale_bytes > usize::from(layout.block_bytes) {
+            return Err("a scale run outside the block");
+        }
     }
     if let Some(sub) = &layout.sub {
         let count = usize::from(sub.count);
@@ -840,6 +847,28 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn a_scale_run_that_walks_off_the_block_is_a_typed_error() {
+        // four runs of 32 values over a 144-byte block; a 64-byte stride puts the fourth scale at
+        // byte 192, so the walker would read two bytes past the block instead of calling the
+        // layout unsound
+        let mut lying = BlockLayout::Q8_1_GROUPED;
+        lying.scale_runs = Some(crate::block_layout::ScaleRuns {
+            count: 4,
+            stride_bytes: 64,
+        });
+        let error = decode_blocks(
+            &NumericFormat::Block(lying),
+            &[0_u8; 144],
+            &mut [0.0; 128],
+        )
+        .expect_err("a scale run outside the block is unsound");
+        assert!(
+            matches!(error, NumericError::InvalidGeometry { .. }),
+            "{error:?}"
+        );
     }
 
     #[test]
