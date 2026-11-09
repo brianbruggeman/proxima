@@ -14,13 +14,14 @@
 //!   own layout: ternary, IQ4_NL's trained ladder, and the IQ magnitude codebooks.
 //!
 //! [`NumericFormat`] unites the three; [`decode::decode_blocks`] is the one place they become numbers;
-//! [`convert`] is the one place a value narrows into one with a named rounding and overflow
-//! policy; [`DType`], [`NumericPolicy`] and [`Numerics`] are the numeric decisions a tensor
-//! operation and a serving plan carry.
+//! [`encode::encode_blocks`] is the inverse; [`Numeric`] is the value that carries a format so one
+//! call converts across any two of them; [`convert`] is where a value narrows into one with a named
+//! rounding and overflow policy; [`DType`], [`NumericPolicy`] and [`Numerics`] are the numeric
+//! decisions a tensor operation and a serving plan carry.
 //!
 //! Teaching pointer: start at [`NumericFormat::ALL`] to see every format this workspace knows,
-//! then [`decode::decode_blocks`] for the conversion surface. The per-format routines in
-//! `proxima-gguf::quant::*` are the incumbents this crate is checked against.
+//! then [`Numeric::decode`] and [`Numeric::to`] for the conversion surface. The per-format routines
+//! in `proxima-gguf::quant::*` are the incumbents this crate is checked against.
 
 #![cfg_attr(not(feature = "std"), no_std)]
 #![forbid(unsafe_code)]
@@ -43,8 +44,8 @@ pub mod codec {
 }
 pub mod convert;
 pub mod decode;
-pub mod encode;
 pub mod dtype;
+pub mod encode;
 pub mod error;
 pub mod float_layout;
 pub mod float_layout_codec;
@@ -52,16 +53,16 @@ pub mod format;
 pub mod numeric;
 pub mod numerics;
 pub mod tables;
+pub mod value;
 
 pub use block_layout::{BlockLayout, Coded, Field, Plane};
-pub use convert::{
-    FromValue, NumericValue, Overflow, Rounding, ToValue, narrow_to_format, narrow_to_layout,
-};
+pub use convert::{Overflow, Rounding, narrow_to_format, narrow_to_layout};
 pub use decode::{decode_block, decode_blocks, decode_scalar, encode_scalar};
-pub use encode::{encode_blocks, reach};
 pub use dtype::DType;
+pub use encode::{encode_blocks, reach};
 pub use error::NumericError;
 pub use float_layout::{FloatLayout, SignEncoding, Specials};
 pub use format::{LevelFormat, LevelGeometry, LevelTable, NumericFormat};
 pub use numeric::{NumericPolicy, NumericRewrite, admit};
 pub use numerics::Numerics;
+pub use value::Numeric;
