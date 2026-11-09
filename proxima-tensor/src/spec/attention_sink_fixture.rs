@@ -8,8 +8,8 @@
 //! `test-support` AND `std` (`hand_worked_attended` uses `f32::exp`), never in
 //! a shipping build. The gate is deliberately narrow on the feature path
 //! because a `test-support` build still compiles as LIBRARY code, where
-//! `clippy::expect_used` is denied -- which is why
-//! [`sink_combine_program`] returns its `Result` instead of unwrapping it.
+//! `clippy::expect_used` is denied -- which is why `sink_combine_program`
+//! returns its `Result` instead of unwrapping it.
 
 use super::*;
 
@@ -48,11 +48,10 @@ const V_CACHE: [[[f32; 2]; 2]; 2] = [[[1.0, 0.25], [-0.25, 0.5]], [[-0.5, 0.75],
 const V_NEW: [[f32; 2]; 2] = [[0.5, -0.25], [0.125, 0.875]];
 /// one learned scalar per query head, `[h]` with `h = group*u + g`
 pub const SINKS: [f32; 4] = [2.0, -1.0, 0.5, 3.0];
-pub const SINK_LEAF_NAME: &str = "blk.0.attn_sinks.weight";
+pub(crate) const SINK_LEAF_NAME: &str = "blk.0.attn_sinks.weight";
 
-///
 /// # Errors
-/// What [`append_local_block_and_combine`] raises while lowering.
+/// What `append_local_block_and_combine` raises while lowering.
 pub fn sink_combine_program(attention_sink: bool) -> Result<(Vec<Op>, NodeId), TensorError> {
     let mut program = Vec::new();
     let query = |program: &mut Vec<Op>, name: &str| {
