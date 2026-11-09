@@ -71,6 +71,16 @@ foreign types invisibly. If you cannot delete one without minting a type to host
 the impl instead, stop — that newtype is the blanket impl under a new name, and
 the defect is the trait that needed one. Report it; do not compensate for it.
 
+## Committing in this repo
+
+Name the paths. `git commit --only <paths>` commits exactly those paths and ignores the index;
+`git add <paths>` stages exactly those paths. This working tree routinely carries hundreds of
+unrelated dirty files, and that is not an attribution problem — the paths are the attribution.
+Never rebuild the tree in a scratch worktree, and never classify hunks, to separate authorship:
+if you catch yourself generating a tree, you have skipped the primitive. See
+`~/.agents/skills/coherent-commit/SKILL.md` and
+`slot-0/analysis/postmortem-2026-11-08-numeric-landing.md`.
+
 ## Source rules
 
 - edition 2024, never 2021. clippy pedantic, deny warnings.
