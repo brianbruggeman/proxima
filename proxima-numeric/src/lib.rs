@@ -43,6 +43,7 @@ pub mod codec {
 }
 pub mod convert;
 pub mod decode;
+pub mod encode;
 pub mod dtype;
 pub mod error;
 pub mod float_layout;
@@ -57,6 +58,7 @@ pub use convert::{
     FromValue, NumericValue, Overflow, Rounding, ToValue, narrow_to_format, narrow_to_layout,
 };
 pub use decode::{decode_block, decode_blocks, decode_scalar, encode_scalar};
+pub use encode::{encode_blocks, reach};
 pub use dtype::DType;
 pub use error::NumericError;
 pub use float_layout::{FloatLayout, SignEncoding, Specials};

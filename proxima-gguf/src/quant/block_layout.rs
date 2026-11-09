@@ -63,6 +63,11 @@ fn numeric_reason(error: &NumericError) -> &'static str {
         NumericError::NoDecoder { .. } => "no decoder for this format",
         NumericError::LevelOutOfTable { .. } => "a code outside the level table",
         NumericError::InvalidGeometry { .. } => "a layout that cannot address its own block",
+        NumericError::UnsupportedEncode { .. } => "the format has no encoder in this workspace",
+        NumericError::InputNotElementMultiple { .. } => {
+            "input is not a whole number of blocks"
+        }
+        NumericError::NonFinite { .. } => "the format has no encoding for a non-finite value",
         NumericError::PolicyTooStrict { .. } => "numeric policy too strict",
     }
 }

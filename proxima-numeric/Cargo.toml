@@ -1,6 +1,6 @@
 [package]
 name = "proxima-numeric"
-description = "The one place this workspace defines, describes or converts a number: `FloatLayout` scalars, `BlockLayout` quantized blocks, explicit level sets, and the conversion traits."
+description = "The one place this workspace defines, describes or converts a number: `FloatLayout` scalars, `BlockLayout` quantized blocks, explicit level sets, and `Numeric`, the value that carries its format and converts across every one of them."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +14,7 @@ serde = { workspace = true, features = ["derive"] }
 thiserror.workspace = true
 
 conflaguration = { workspace = true, features = ["derive"], optional = true }
+libm = { version = "0.2.16", default-features = false }
 
 [features]
 default = ["std"]

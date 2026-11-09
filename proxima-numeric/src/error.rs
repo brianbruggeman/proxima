@@ -42,6 +42,19 @@ pub enum NumericError {
         format: &'static str,
         reason: &'static str,
     },
+    #[error("{format} cannot be encoded: {reason}")]
+    UnsupportedEncode {
+        format: &'static str,
+        reason: &'static str,
+    },
+    #[error("{format} takes a whole number of blocks; {found} values is not")]
+    InputNotElementMultiple {
+        format: &'static str,
+        found: usize,
+        elements: usize,
+    },
+    #[error("{format} has no encoding for a non-finite value")]
+    NonFinite { format: &'static str },
     #[error("numeric policy {granted:?} does not grant {rewrite:?}, which needs {required:?}")]
     PolicyTooStrict {
         rewrite: NumericRewrite,
