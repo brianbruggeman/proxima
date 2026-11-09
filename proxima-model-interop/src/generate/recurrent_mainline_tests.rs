@@ -139,6 +139,31 @@ fn recurrent_mainline_depth_follows_the_header() {
     assert_eq!(model.recurrent_config().iterations, Some(1));
 }
 
+/// The config seam is where a leaf gets ADDED (`BoundProgram::lowered_from`), so
+/// an edited descriptor that names a weight the checkpoint does not store must
+/// be refused at load: `bind_missing_leaves` binds nothing for such a leaf, and
+/// before this gate the failure surfaced at the first decode step as
+/// `MissingStepInput`.
+#[test]
+fn a_descriptor_naming_a_leaf_the_checkpoint_lacks_is_refused_at_load() {
+    let bytes = tiny_ouro_gguf(1, false);
+    let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+    let mut descriptor = header_descriptor(&parsed, KvLayout::SlidingRing)
+        .expect("the tiny header lowers");
+    descriptor.layers[0].attention.attention_sinks = true;
+
+    let refused = LoadedModel::load_with_descriptor(&parsed, &bytes, &descriptor);
+
+    assert!(
+        matches!(
+            &refused,
+            Err(InteropError::UnboundWeightLeaf { leaf }) if leaf == "blk.0.attn_sinks.weight"
+        ),
+        "got {:?}",
+        refused.err().map(|error| error.to_string())
+    );
+}
+
 #[test]
 fn recurrent_mainline_physical_weights_once() {
     let bytes = tiny_ouro_gguf(2, false);
