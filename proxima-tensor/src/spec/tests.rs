@@ -23908,6 +23908,47 @@ mod attention_sinks {
         );
     }
 
+    /// Census, not a correctness gate: the two-range flint-shaped program's
+    /// fused `CachedAttention` step count with the sink flag off and on, which
+    /// is the only place row 8's "fusion consequence unmeasured" claim can be
+    /// re-proved from the tree. Asserting EQUALITY is the point -- it is true
+    /// today (both counts are 0), and it fails the moment a sink change starts
+    /// choosing a different kernel, which is exactly when that note's open item
+    /// has to be rewritten with the new pair of numbers.
+    #[test]
+    fn attention_sink_fusion_census_reports_the_same_decision_with_and_without_the_sink() {
+        let fused_steps = |sinks: bool| {
+            let program = lowered(&scheduled(
+                CacheStrategy::Cached,
+                CacheMask::Padded,
+                sinks,
+                FLINT_QUERY_HEADS,
+                FLINT_KV_HEADS,
+            ));
+            let shapes =
+                crate::shape::infer(&program.program, &[1, 0]).expect("the census program infers");
+            crate::bind::bind_with_fusion(
+                &program.program,
+                &shapes,
+                &[program.logits],
+                true,
+                proxima_numeric::NumericPolicy::default(),
+            )
+            .expect("the census program binds")
+            .iter()
+            .filter(|op| matches!(op.kind, crate::bind::BoundOpKind::CachedAttention { .. }))
+            .count()
+        };
+        let sinks_off = fused_steps(false);
+        let sinks_on = fused_steps(true);
+        assert_eq!(
+            sinks_off, sinks_on,
+            "fused cached-attention steps: sink off {sinks_off}, sink on {sinks_on} -- an \
+             unequal pair means the sink now chooses a different kernel, so the sink's fusion \
+             consequence is measured and TASKS.md row 8's open item must be rewritten"
+        );
+    }
+
     #[test]
     fn attention_sink_cpu_literal_matches_the_hand_worked_softmax_with_sink() {
         let (program, attended) =
