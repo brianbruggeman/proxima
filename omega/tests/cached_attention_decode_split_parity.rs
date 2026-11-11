@@ -817,8 +817,37 @@ fn attention_gpu_ns(timings: &[omega::metal::OpGpuTiming]) -> (u64, usize) {
         .fold((0, 0), |(total, ops), timing| (total + timing.gpu_ns, ops + 1))
 }
 
-/// Per-step GPU time of the decode-split attention ops with the K cache as binary16 and as Q4_0,
-/// interleaved so box load lands on both arms alike. Reports min / median / max of the sample.
+/// The K and V cache leaves of the fixture with K stored as `key_format` (binary16 when `None`) and V as binary16.
+#[cfg(all(feature = "instrument", feature = "metal-output-placement"))]
+fn timed_cache_leaves(fixture: &Fixture, key_format: Option<NumericFormat>) -> Vec<(String, omega::Codec, Vec<u8>)> {
+    fixture
+        .named
+        .iter()
+        .filter(|(name, _)| is_kv_cache(name))
+        .map(|(name, data)| match key_format {
+            Some(format) if is_key_leaf(name) => (name.clone(), format, block_round_trip(&format, data).0),
+            _ => (name.clone(), omega::Codec::Float16, half_bytes(data)),
+        })
+        .collect()
+}
+
+#[cfg(all(feature = "instrument", feature = "metal-output-placement"))]
+fn timed_blocks<'a>(
+    fixture: &'a Fixture,
+    leaves: &'a [(String, omega::Codec, Vec<u8>)],
+) -> Vec<(&'a str, QuantizedBlock<'a>)> {
+    fixture
+        .named
+        .iter()
+        .map(|(name, data)| match leaves.iter().find(|(leaf, _, _)| leaf == name) {
+            Some((_, codec, bytes)) => (name.as_str(), QuantizedBlock::Packed { codec: *codec, bytes }),
+            None => (name.as_str(), QuantizedBlock::Float32(data)),
+        })
+        .collect()
+}
+
+/// Per-step GPU time of the decode-split attention ops with the K cache as binary16, Q4_0 and Q8_0,
+/// interleaved so box load lands on every arm alike. Reports min / median / max of the sample.
 #[cfg(all(feature = "instrument", feature = "metal-output-placement"))]
 #[test]
 fn cached_attention_decode_split_times_a_binary16_k_cache_against_a_q4_0_k_cache() {
@@ -827,87 +856,50 @@ fn cached_attention_decode_split_times_a_binary16_k_cache_against_a_q4_0_k_cache
     let (head_dim, cached_len) = (256, 1099);
     let fixture = gqa_decode_fixture(cached_len, head_dim);
     let output_roots = [fixture.roots[0]];
-    let q4_0 = NumericFormat::Q4_0;
+    let arms = [
+        ("k=binary16 v=binary16", None),
+        ("k=q4_0 v=binary16", Some(NumericFormat::Q4_0)),
+        ("k=q8_0 v=binary16", Some(NumericFormat::Q8_0)),
+    ];
+    let leaves: Vec<_> = arms.iter().map(|(_, format)| timed_cache_leaves(&fixture, *format)).collect();
+    let blocks: Vec<_> = leaves.iter().map(|arm_leaves| timed_blocks(&fixture, arm_leaves)).collect();
+    let plans: Vec<_> = blocks
+        .iter()
+        .zip(&arms)
+        .map(|(arm_blocks, (label, _))| {
+            omega::plan_named(&fixture.program, &fixture.symbols, arm_blocks, &output_roots, policy)
+                .unwrap_or_else(|error| panic!("metal plans the {label} decode program: {error:?}"))
+        })
+        .collect();
 
-    let half_leaves: Vec<(String, omega::Codec, Vec<u8>)> = fixture
-        .named
-        .iter()
-        .filter(|(name, _)| is_kv_cache(name))
-        .map(|(name, data)| (name.clone(), omega::Codec::Float16, half_bytes(data)))
-        .collect();
-    let block_leaves: Vec<(String, omega::Codec, Vec<u8>)> = fixture
-        .named
-        .iter()
-        .filter(|(name, _)| is_kv_cache(name))
-        .map(|(name, data)| {
-            if is_key_leaf(name) {
-                (name.clone(), q4_0, block_round_trip(&q4_0, data).0)
-            } else {
-                (name.clone(), omega::Codec::Float16, half_bytes(data))
-            }
-        })
-        .collect();
-    let named_with = |leaves: &'_ [(String, omega::Codec, Vec<u8>)]| -> Vec<(String, Vec<f32>, Option<usize>)> {
-        fixture
-            .named
-            .iter()
-            .map(|(name, data)| (name.clone(), data.clone(), leaves.iter().position(|(leaf, _, _)| leaf == name)))
-            .collect()
-    };
-    let half_owned = named_with(&half_leaves);
-    let block_owned = named_with(&block_leaves);
-    let half_blocks: Vec<(&str, QuantizedBlock<'_>)> = half_owned
-        .iter()
-        .map(|(name, data, leaf)| match leaf {
-            Some(index) => (name.as_str(), QuantizedBlock::Packed { codec: half_leaves[*index].1, bytes: &half_leaves[*index].2 }),
-            None => (name.as_str(), QuantizedBlock::Float32(data)),
-        })
-        .collect();
-    let block_blocks: Vec<(&str, QuantizedBlock<'_>)> = block_owned
-        .iter()
-        .map(|(name, data, leaf)| match leaf {
-            Some(index) => (name.as_str(), QuantizedBlock::Packed { codec: block_leaves[*index].1, bytes: &block_leaves[*index].2 }),
-            None => (name.as_str(), QuantizedBlock::Float32(data)),
-        })
-        .collect();
-    let half_plan = omega::plan_named(&fixture.program, &fixture.symbols, &half_blocks, &output_roots, policy)
-        .expect("metal plans the binary16 decode program");
-    let block_plan = omega::plan_named(&fixture.program, &fixture.symbols, &block_blocks, &output_roots, policy)
-        .expect("metal plans the Q4_0 K decode program");
-
-    let mut half_ns = Vec::new();
-    let mut block_ns = Vec::new();
+    let mut samples: Vec<Vec<u64>> = arms.iter().map(|_| Vec::new()).collect();
     for _ in 0..SAMPLES {
-        let (_, timings) = omega::execute_plan_named_with_placements_op_timed(&half_plan, &half_blocks, &[], &[])
-            .expect("the binary16 plan times");
-        let (nanos, ops) = attention_gpu_ns(&timings);
-        assert_eq!(ops, LAYERS as usize, "one decode-split attention op per layer");
-        half_ns.push(nanos);
-        let (_, timings) = omega::execute_plan_named_with_placements_op_timed(&block_plan, &block_blocks, &[], &[])
-            .expect("the Q4_0 K plan times");
-        block_ns.push(attention_gpu_ns(&timings).0);
+        for (arm, plan) in plans.iter().enumerate() {
+            let (_, timings) = omega::execute_plan_named_with_placements_op_timed(plan, &blocks[arm], &[], &[])
+                .expect("the plan times");
+            let (nanos, ops) = attention_gpu_ns(&timings);
+            assert_eq!(ops, LAYERS as usize, "one decode-split attention op per layer");
+            samples[arm].push(nanos);
+        }
     }
-    half_ns.sort_unstable();
-    block_ns.sort_unstable();
-    let summary = |label: &str, sorted: &[u64]| {
+    for ((label, _), sample) in arms.iter().zip(&mut samples) {
+        sample.sort_unstable();
         eprintln!(
             "decode_split attention gpu_ns head_dim={head_dim} cached_len={cached_len} layers={LAYERS} {label}: min={} median={} max={} samples={}",
-            sorted[0],
-            sorted[sorted.len() / 2],
-            sorted[sorted.len() - 1],
-            sorted.len()
+            sample[0],
+            sample[sample.len() / 2],
+            sample[sample.len() - 1],
+            sample.len()
         );
-    };
-    summary("k=binary16 v=binary16", &half_ns);
-    summary("k=q4_0 v=binary16", &block_ns);
+        assert!(sample[0] > 0, "the {label} arm must report attention time");
+    }
+    let plane_elements = head_dim as usize / 2;
     eprintln!(
-        "k bytes per row per kv head: binary16={} q4_0={} (even + odd planes: {} vs {})",
-        (head_dim as usize / 2) * 2,
-        NumericFormat::Q4_0.packed_len(head_dim as usize / 2).expect("whole blocks"),
-        2 * (head_dim as usize / 2) * 2,
-        2 * NumericFormat::Q4_0.packed_len(head_dim as usize / 2).expect("whole blocks"),
+        "k bytes per row per kv head: binary16={} q4_0={} q8_0={}",
+        plane_elements * 2,
+        NumericFormat::Q4_0.packed_len(plane_elements).expect("whole blocks"),
+        NumericFormat::Q8_0.packed_len(plane_elements).expect("whole blocks"),
     );
-    assert!(half_ns[0] > 0 && block_ns[0] > 0, "both arms must report attention time");
 }
 
 #[test]
