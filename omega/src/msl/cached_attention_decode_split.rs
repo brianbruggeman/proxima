@@ -147,8 +147,8 @@ pub(super) fn render_cached_attention_decode_split(
                 value_pointers.1,
             ]
             .join(POINTER_SEPARATOR);
-            let generic_loop = batch_loop(
-                "batch_start < num_local_keys",
+            let mixed_loop = batch_loop(
+                MIXED_BATCH_CONDITION,
                 GENERIC_STEP_SETUP,
                 &generic_pointers,
                 &branchy_load(key_load),
@@ -161,7 +161,14 @@ pub(super) fn render_cached_attention_decode_split(
                 key_load.0,
                 value_load.0,
             );
-            format!("{cached_loop}{generic_loop}")
+            let new_loop = batch_loop(
+                "batch_start < num_local_keys",
+                NEW_ONLY_STEP_SETUP,
+                &[key_pointers.1, value_pointers.1].join(POINTER_SEPARATOR),
+                key_load.1,
+                value_load.1,
+            );
+            format!("{cached_loop}{mixed_loop}{new_loop}")
         }
     };
     let substitutions = [
@@ -224,6 +231,18 @@ pub(super) fn index_literal(value: i64, index_type: &str, literal_suffix: &str) 
 // cached keys have the lowest indices, so a batch whose last key is cached has only cached keys; the
 // batches are the same ones the generic loop would run, so the accumulation order is unchanged
 const CACHED_ONLY_BATCH_CONDITION: &str = "batch_start < num_local_keys && slice_start + (batch_start + (@INDEX@)batch * (@INDEX@)keys_in_flight - 1@L@) * chunks < cached_key_rows";
+
+// the cached-only loop has run every batch whose last key is cached, so a batch whose first key is still cached
+// holds both ranges; the batches after it are new-only
+const MIXED_BATCH_CONDITION: &str = "batch_start < num_local_keys && slice_start + batch_start * chunks < cached_key_rows";
+
+const NEW_ONLY_STEP_SETUP: &str = "@INDEX@ local_index = batch_start + (@INDEX@)step * (@INDEX@)keys_in_flight + (@INDEX@)ty;
+                @INDEX@ new_index = slice_start + local_index * chunks - cached_key_rows;
+                bool live = local_index < num_local_keys;
+                if (live && new_index - query_row > new_upper) { live = false; }
+                valid[step] = live;
+                @INDEX@ kbase = new_index * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
+                @KV_POINTERS@";
 
 const CACHED_ONLY_STEP_SETUP: &str = "@INDEX@ local_index = batch_start + (@INDEX@)step * (@INDEX@)keys_in_flight + (@INDEX@)ty;
                 @INDEX@ key = slice_start + local_index * chunks;
