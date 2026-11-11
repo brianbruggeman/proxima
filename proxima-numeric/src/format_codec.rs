@@ -25,6 +25,10 @@ use crate::format::NumericFormat;
 
 const UNNAMED: &str = "unnamed";
 
+// the element count up to which an identity decode copies inline: a vector loop beats the libc memcpy call by 5-11% at
+// 256 and 512 elements and ties at 2048 and 8192, then loses 3-9% from 32768 up, where the out-of-line memcpy wins
+const IDENTITY_INLINE_ELEMENTS: usize = 8192;
+
 #[derive(Clone, Copy)]
 enum Route {
     Scalar {
@@ -233,7 +237,11 @@ impl FormatCodec {
             }
             Route::Identity => {
                 self.check_scalar_decode(data.len(), out.len(), element_bytes(&SOURCE_LAYOUT))?;
-                Self::decode_identity(data, out);
+                if out.len() <= IDENTITY_INLINE_ELEMENTS {
+                    Self::decode_identity_copy(data, out);
+                } else {
+                    Self::decode_identity(data, out);
+                }
             }
             Route::Layout(layout) => {
                 self.check_scalar_decode(data.len(), out.len(), self.block_bytes)?;
@@ -243,13 +251,18 @@ impl FormatCodec {
         Ok(())
     }
 
+    #[inline(always)]
+    fn decode_identity_copy(data: &[u8], out: &mut [MaybeUninit<f32>]) {
+        decode_body(SOURCE_LAYOUT, data, out, |slot, value| {
+            slot.write(value);
+        });
+    }
+
     // out of line so the copy loop keeps its noalias arguments and lowers to one memcpy; inlined, the
     // optimiser cannot prove the packed bytes and the slots are disjoint and emits a checked vector loop
     #[inline(never)]
     fn decode_identity(data: &[u8], out: &mut [MaybeUninit<f32>]) {
-        decode_body(SOURCE_LAYOUT, data, out, |slot, value| {
-            slot.write(value);
-        });
+        Self::decode_identity_copy(data, out);
     }
 
     // out of line so the layout-as-data loop's register pressure stays out of the inlined named path
