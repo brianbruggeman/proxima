@@ -355,6 +355,45 @@ const fn reads_codes_in_place(layout: &BlockLayout) -> bool {
     true
 }
 
+/// Whether one byte of the low plane carries two codes, element `index` in its low half and element
+/// `index + elements / 2` in its high half, and the single bit-plane word above them holds element
+/// `index`'s bit at bit `index`. Decode then converts each pair from one 32-bit lane per code, which
+/// the optimiser widens with one table lookup per four codes; staging the codes as bytes first hands
+/// it a byte-to-float conversion that it widens in three steps per four codes.
+const fn pairs_halves_with_high_word(layout: &BlockLayout) -> bool {
+    let low = &layout.element.low;
+    let high = match &layout.element.high {
+        Some(plane) => plane,
+        None => return false,
+    };
+    let elements = layout.elements as usize;
+    if !is_high_single_word(layout)
+        || high.bits != 1
+        || low.bits * 2 != 8
+        || !low.base_bits.is_multiple_of(8)
+        || layout.elements < 2 * low.bits as u16
+    {
+        return false;
+    }
+    let mut index = 0;
+    while index < elements {
+        if high.address(index) != high.base_bits as usize + index {
+            return false;
+        }
+        index += 1;
+    }
+    let half = elements / 2;
+    index = 0;
+    while index < half {
+        let byte_address = low.base_bits as usize + 8 * index;
+        if low.address(index) != byte_address || low.address(index + half) != byte_address + low.bits as usize {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 /// [`walk_plane`] one run at a time: visits `(first_index, byte_address)` for each run of the
 /// innermost digit's radix elements, in index order.
 #[inline(always)]
@@ -411,7 +450,13 @@ fn integer_factor(layout: &BlockLayout, raw: u32) -> i32 {
 }
 
 #[inline(always)]
-fn decode_chunk<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool, const IN_PLACE: bool>(
+fn decode_chunk<
+    const ELEMENTS: usize,
+    const BYTES: usize,
+    const BY_WORD: bool,
+    const IN_PLACE: bool,
+    const PAIRED: bool,
+>(
     layout: &BlockLayout,
     block: &[u8; BYTES],
     out: &mut [MaybeUninit<f32>; ELEMENTS],
@@ -451,9 +496,43 @@ fn decode_chunk<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool, 
         }
         return;
     }
+    if PAIRED {
+        decode_halves(layout, block, out, value_of);
+        return;
+    }
     let codes = gather_codes::<ELEMENTS, BYTES>(layout, block);
     for (slot, &byte) in out.iter_mut().zip(&codes) {
         slot.write(value_of(u32::from(byte)));
+    }
+}
+
+/// Decodes a layout that [`pairs_halves_with_high_word`]: each low-plane byte gives the code of
+/// element `index` and of element `index + elements / 2`, each joined to its bit of the high word.
+#[inline(always)]
+fn decode_halves<const ELEMENTS: usize, const BYTES: usize>(
+    layout: &BlockLayout,
+    block: &[u8; BYTES],
+    out: &mut [MaybeUninit<f32>; ELEMENTS],
+    value_of: impl Fn(u32) -> f32,
+) {
+    let nibble = layout.element.low.bits as u32;
+    let mask = u32::MAX >> (32 - nibble);
+    let high_word = match &layout.element.high {
+        Some(plane) => read_bits(block, plane.base_bits as usize, 32),
+        None => 0,
+    };
+    let first = layout.element.low.base_bits as usize / 8;
+    let half = ELEMENTS / 2;
+    // one call of `value_of` per code, not two per pair: a closure with two call sites is left out
+    // of line, a call per element
+    let bit = 1 << nibble;
+    for (index, &byte) in block[first..first + half].iter().enumerate() {
+        let byte = u32::from(byte);
+        let below = (byte & mask) | (((high_word >> index) << nibble) & bit);
+        let above = (byte >> nibble) | ((high_word >> (index + half - nibble as usize)) & bit);
+        for (side, code) in [below, above].into_iter().enumerate() {
+            out[side * half + index].write(value_of(code));
+        }
     }
 }
 
@@ -491,7 +570,13 @@ fn unpack_runs<const ELEMENTS: usize, const BYTES: usize>(
 }
 
 #[inline(always)]
-fn decode_run<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool, const IN_PLACE: bool>(
+fn decode_run<
+    const ELEMENTS: usize,
+    const BYTES: usize,
+    const BY_WORD: bool,
+    const IN_PLACE: bool,
+    const PAIRED: bool,
+>(
     layout: BlockLayout,
     data: &[u8],
     out: &mut [MaybeUninit<f32>],
@@ -499,7 +584,7 @@ fn decode_run<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool, co
     let blocks = data.as_chunks::<BYTES>().0;
     let slots = out.as_chunks_mut::<ELEMENTS>().0;
     for (block, slot) in blocks.iter().zip(slots) {
-        decode_chunk::<ELEMENTS, BYTES, BY_WORD, IN_PLACE>(&layout, block, slot);
+        decode_chunk::<ELEMENTS, BYTES, BY_WORD, IN_PLACE, PAIRED>(&layout, block, slot);
     }
 }
 
@@ -751,6 +836,7 @@ macro_rules! resolve_named_block {
                 const SCALE_OWNED: bool = scale_owns_its_bytes(&BlockLayout::$name);
                 const UNPACK_BY_WORD: bool = unpacks_by_word(&BlockLayout::$name);
                 const IN_PLACE: bool = reads_codes_in_place(&BlockLayout::$name);
+                const PAIRED: bool = pairs_halves_with_high_word(&BlockLayout::$name);
                 let encode: Option<EncodeFn> = match FIT {
                     Fit::Runtime => None,
                     _ => Some(|values, out| {
@@ -763,7 +849,7 @@ macro_rules! resolve_named_block {
                     }),
                 };
                 let decode: DecodeFn = |data, out| {
-                    decode_run::<ELEMENTS, BYTES, UNPACK_BY_WORD, IN_PLACE>(BlockLayout::$name, data, out);
+                    decode_run::<ELEMENTS, BYTES, UNPACK_BY_WORD, IN_PLACE, PAIRED>(BlockLayout::$name, data, out);
                 };
                 return Some(FormatCodec::table(encode, decode, ELEMENTS, BYTES));
             }
@@ -1089,6 +1175,14 @@ mod tests {
         assert_ne!(codes[0], 0, "the first code must be nonzero to be lost");
         assert_eq!(read_bits(&block, 0, 12), encode(scale, layout.scale.layout) & 0xfff, "the 12 scale bits");
         assert_eq!(gather_codes::<32, 18>(&layout, &block), codes, "every code, the first one beside the scale");
+    }
+
+    #[test]
+    fn only_a_nibble_plane_with_one_bit_word_above_it_pairs_halves() {
+        assert!(pairs_halves_with_high_word(&BlockLayout::Q5_0) && pairs_halves_with_high_word(&BlockLayout::Q5_1));
+        for layout in [BlockLayout::Q4_0, BlockLayout::Q4_1, BlockLayout::Q8_0, BlockLayout::Q2_0, BlockLayout::TQ2_0] {
+            assert!(!pairs_halves_with_high_word(&layout), "{layout:?} has no one-bit word above a nibble plane");
+        }
     }
 
     #[test]
