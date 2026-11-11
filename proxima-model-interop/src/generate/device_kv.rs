@@ -37,7 +37,7 @@ fn unsupported_cache(kind: &impl core::fmt::Debug) -> InteropError {
     ))
 }
 
-/// The codec the cached-attention emitter reads a cache of `format` with, asked of the emitter itself: `None` when the graph's outputs land in the cache directly, `Some` when each step is narrowed into it, and the emitter's own refusal for a format no kernel form reads.
+// the emitter alone knows which formats a kernel reads, so its answer and its refusal are passed through rather than re-derived here
 fn kernel_codec(format: &NumericFormat) -> Result<Option<NumericFormat>, InteropError> {
     omega::cached_attention_kv_codec_for(format).map_err(|error| match error {
         omega::EmitError::CachedAttentionKvCodecNotSupported { reason, .. } => {
@@ -1332,11 +1332,15 @@ mod tests {
         assert_eq!(restored.v, expected_value);
     }
 
+    include!("../../../proxima-numeric/tests/support/production_text.rs");
+
     fn identifiers_after<'text>(text: &'text str, prefix: &str) -> Vec<&'text str> {
         text.match_indices(prefix)
-            .map(|(at, _)| {
-                let tail = &text[at + prefix.len()..];
-                let end = tail.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(tail.len());
+            .map(|(offset, _)| {
+                let tail = &text[offset + prefix.len()..];
+                let end = tail
+                    .find(|character: char| !character.is_alphanumeric() && character != '_')
+                    .unwrap_or(tail.len());
                 &tail[..end]
             })
             .collect()
@@ -1344,21 +1348,42 @@ mod tests {
 
     #[test]
     fn device_kv_production_text_names_no_scalar_format_and_no_layout() {
-        let production = include_str!("device_kv.rs").split("#[cfg(test)]").next().expect("split yields the text before the test module");
+        let production = production_of(include_str!("device_kv.rs"));
         let format_names = ["Float32", "Float16", "BFloat16", "BFloat8"];
 
         let named: Vec<&str> = ["NumericFormat::", "Codec::"]
             .into_iter()
-            .flat_map(|prefix| identifiers_after(production, prefix))
+            .flat_map(|prefix| identifiers_after(&production, prefix))
             .filter(|name| format_names.contains(name))
             .collect();
-        let layouts: Vec<&str> = identifiers_after(production, "FloatLayout::")
+        let layouts: Vec<&str> = identifiers_after(&production, "FloatLayout::")
             .into_iter()
-            .filter(|name| name.starts_with(|c: char| c.is_ascii_uppercase()))
+            .filter(|name| name.starts_with(|first: char| first.is_ascii_uppercase()))
             .collect();
 
         assert_eq!(named, Vec::<&str>::new());
         assert_eq!(layouts, Vec::<&str>::new());
+    }
+
+    #[test]
+    fn device_kv_production_text_has_no_kv_element_type_and_names_ggml_type_only_in_cache_format() {
+        let production = production_of(include_str!("device_kv.rs"));
+        let lines: Vec<&str> = production.lines().collect();
+        let start = lines
+            .iter()
+            .position(|line| line.contains("fn cache_format("))
+            .expect("cache_format is the one place a GgmlType becomes a format");
+        let end = end_of_item(&lines, start);
+
+        let outside_cache_format: Vec<&str> = lines[..start]
+            .iter()
+            .chain(&lines[end..])
+            .filter(|line| !line.trim_start().starts_with("//") && line.contains("GgmlType"))
+            .copied()
+            .collect();
+
+        assert!(!production.contains("KvElement"), "the cache element is a NumericFormat, not a parallel enum");
+        assert_eq!(outside_cache_format, Vec::<&str>::new());
     }
 
     #[test]

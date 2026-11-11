@@ -1280,4 +1280,31 @@ mod tests {
 
         assert!(refused.is_err());
     }
+
+    fn unnamed_e8m3() -> FloatLayout {
+        FloatLayout { mantissa_bits: 3, ..FloatLayout::BF16 }
+    }
+
+    #[test]
+    fn an_unnamed_mantissa_prefix_layout_truncates_and_skips_the_magic_add() {
+        let e8m3 = unnamed_e8m3();
+
+        assert!(truncates_f32(&e8m3, Rounding::NearestTiesEven, Overflow::Format));
+        assert!(!magic_add_selected(&e8m3));
+    }
+
+    #[test]
+    fn a_layout_that_is_not_a_prefix_of_binary32_takes_the_magic_add_even_when_respelled() {
+        let respelled_f16 = FloatLayout { bias_override: Some(FloatLayout::F16.bias()), ..FloatLayout::F16 };
+
+        assert!(magic_add_selected(&respelled_f16));
+        assert!(!truncates_f32(&respelled_f16, Rounding::NearestTiesEven, Overflow::Format));
+    }
+
+    #[test]
+    fn a_non_default_rounding_disables_the_truncation_route() {
+        let e8m3 = unnamed_e8m3();
+
+        assert!(!truncates_f32(&e8m3, Rounding::TowardZero, Overflow::Format));
+    }
 }

@@ -2107,6 +2107,7 @@ mod placed_format_tests {
     use proxima_tensor::BFloat8;
 
     fn stored_bytes(buffer: &PlacedBuffer, len: usize) -> Vec<u8> {
+        // the buffer is cpu-visible placed memory with no gpu work in flight and callers pass at most its length
         unsafe { core::slice::from_raw_parts(buffer.contents().as_ptr().cast::<u8>(), len) }.to_vec()
     }
 
