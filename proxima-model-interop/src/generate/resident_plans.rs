@@ -112,6 +112,9 @@ pub(super) struct PlanIdentity {
     /// Element type of the device-resident KV: a plan binds its cached K/V
     /// operands with this codec, so a plan built for one cannot serve the other.
     kv_cache_element: GgmlType,
+    /// Element type of the value cache; admission lets it differ from the key's
+    /// (a block key layout beside a narrow scalar value).
+    kv_value_cache_element: GgmlType,
 }
 
 impl PlanIdentity {
@@ -126,8 +129,7 @@ impl PlanIdentity {
             recurrent: _,
             parallel_sequences: _,
             kv_cache_key_quant,
-            // equal to the key type for every admitted config
-            kv_cache_value_quant: _,
+            kv_cache_value_quant,
             flash_attention: _,
             // chunk widths pick which shapes occur, and the shape is in the plan key
             batch_size: _,
@@ -222,6 +224,7 @@ impl PlanIdentity {
             prefill_one_evaluation,
             prefill_chunk_positions,
             kv_cache_element: kv_cache_key_quant,
+            kv_value_cache_element: kv_cache_value_quant,
         }
     }
 }
@@ -695,6 +698,21 @@ mod tests {
         };
 
         assert_ne!(PlanIdentity::of(&f32_cache), PlanIdentity::of(&f16_cache));
+    }
+
+    #[test]
+    fn identity_separates_plans_whose_value_cache_format_alone_differs() {
+        let f16_values = ServingConfig {
+            kv_cache_key_quant: GgmlType::Q4_0,
+            kv_cache_value_quant: GgmlType::F16,
+            ..ServingConfig::default()
+        };
+        let bf16_values = ServingConfig {
+            kv_cache_value_quant: GgmlType::Bf16,
+            ..f16_values
+        };
+
+        assert_ne!(PlanIdentity::of(&f16_values), PlanIdentity::of(&bf16_values));
     }
 
     #[test]

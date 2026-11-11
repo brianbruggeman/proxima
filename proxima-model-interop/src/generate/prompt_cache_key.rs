@@ -26,6 +26,7 @@
 use omega::AttentionVariant;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::MathMode;
+use proxima_gguf::types::GgmlType;
 use proxima_numeric::NumericPolicy;
 
 use crate::rope_scaling::RopeScaling;
@@ -95,6 +96,12 @@ pub(super) struct CacheKey {
     /// Which cached rows a decode step reads; rows computed under a skipped
     /// read are not the rows a dense read computes.
     pub(super) read: ReadSpec,
+    /// `-ctk`: the format the key rows are rounded to on the device cache;
+    /// the flush hands those rounded rows back to the stored state.
+    pub(super) kv_cache_key_quant: GgmlType,
+    /// `-ctv`: the same for the value rows; it can differ from the key's
+    /// format (a block key layout beside a narrow scalar value).
+    pub(super) kv_cache_value_quant: GgmlType,
 }
 
 impl CacheKey {
@@ -121,9 +128,9 @@ impl CacheKey {
             recurrent: _,
             // admission rejects every value but 1
             parallel_sequences: _,
-            // admission rejects every value but F32
-            kv_cache_key_quant: _,
-            kv_cache_value_quant: _,
+            // admitted narrow formats round the rows `DeviceKv::flush` hands back to the stored state
+            kv_cache_key_quant,
+            kv_cache_value_quant,
             // admission rejects true
             flash_attention: _,
             // chunk widths: a resume already starts its prefill at an
@@ -255,6 +262,8 @@ impl CacheKey {
             ring_slack_rows,
             ring_write_offset,
             read,
+            kv_cache_key_quant,
+            kv_cache_value_quant,
         }
     }
 }
@@ -282,6 +291,40 @@ mod tests {
 
         assert_ne!(dense_key, operand_key);
         assert_eq!(dense_key, default_key);
+    }
+
+    #[test]
+    fn cache_key_separates_every_kv_cache_format_pair() {
+        let pairs = [
+            (GgmlType::F32, GgmlType::F32),
+            (GgmlType::F16, GgmlType::F16),
+            (GgmlType::Bf16, GgmlType::Bf16),
+            (GgmlType::Q8_0, GgmlType::Q8_0),
+            (GgmlType::Q4_0, GgmlType::F16),
+            (GgmlType::Q4_0, GgmlType::Bf16),
+            (GgmlType::F16, GgmlType::Bf16),
+        ];
+        let keys: Vec<CacheKey> = pairs
+            .iter()
+            .map(|&(key_quant, value_quant)| {
+                let config = ServingConfig {
+                    kv_cache_key_quant: key_quant,
+                    kv_cache_value_quant: value_quant,
+                    ..ServingConfig::default()
+                };
+                CacheKey::of(&config, false, RopeScaling::None, 0, 0)
+            })
+            .collect();
+
+        for (left, left_key) in keys.iter().enumerate() {
+            for (right, right_key) in keys.iter().enumerate().skip(left + 1) {
+                assert_ne!(
+                    left_key, right_key,
+                    "{:?} and {:?} share a cache key",
+                    pairs[left], pairs[right]
+                );
+            }
+        }
     }
 
     #[test]
