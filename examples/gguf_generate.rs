@@ -67,6 +67,7 @@ use proxima_model_interop::Phase;
 use proxima_model_interop::ServingConfig;
 use proxima_model_interop::SpeculativeSettings;
 use proxima_model_interop::TokenEvent;
+use proxima_numeric::NumericFormat;
 use proxima_tensor::process_usage;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Settings)]
@@ -391,8 +392,8 @@ fn supported_serving_config<'model>(
     };
     let mut serving_config = ServingConfig {
         model_path,
-        kv_cache_key_quant: proxima_gguf::types::GgmlType::F32,
-        kv_cache_value_quant: proxima_gguf::types::GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

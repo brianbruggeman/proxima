@@ -16,7 +16,7 @@
 
 use std::path::PathBuf;
 
-use proxima_gguf::types::GgmlType;
+use proxima_numeric::NumericFormat;
 use proxima_model_interop::{ContextLength, GPU_LAYERS_ALL, LoadedModel, ServingConfig};
 
 const FIXTURE_ENV: &str = "PROXIMA_SYNTH_QWEN35_GGUF";
@@ -123,8 +123,8 @@ fn decode(
     let config = ServingConfig {
         model_path: &model_path,
         context_length: ContextLength::Within(SERVING_CONTEXT),
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

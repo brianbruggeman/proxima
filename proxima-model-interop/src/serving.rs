@@ -26,11 +26,11 @@
 //! The section grammar in `serving_grammar.rs` derives serde; the `Copy` structs
 //! in this module do not.
 //!
-//! `kv_cache_key_quant`/`kv_cache_value_quant` reuse
-//! [`proxima_gguf::types::GgmlType`] rather than minting a parallel quant
-//! enum -- llama.cpp's own `--cache-type-k`/`-ctv` accept exactly this
-//! type-name vocabulary (`f16`, `q8_0`, `q4_0`, ...), and that is the same
-//! enum [`crate::bind`] already decodes GGUF tensor bytes against.
+//! `kv_cache_key_quant`/`kv_cache_value_quant` hold a
+//! [`proxima_numeric::NumericFormat`] rather than minting a parallel quant
+//! enum -- llama.cpp's own `--cache-type-k`/`-ctv` type-name vocabulary
+//! (`f16`, `q8_0`, `q4_0`, ...) is the format's own name set, and the cache
+//! format is the same type the kernels' codec queries take.
 //! `gpu_layers` reuses llama.cpp's own `n_gpu_layers` convention -- a plain
 //! `i32` where `-1` means "every layer" and `>= 0` is an explicit count --
 //! instead of a bespoke `enum { None, Count(u32), All }`; that sentinel is
@@ -59,7 +59,7 @@ use omega::config::RuntimeConfig;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
 use proxima_gguf::types::GgmlType;
-use proxima_numeric::NumericPolicy;
+use proxima_numeric::{NumericFormat, NumericPolicy};
 
 use crate::error::InteropError;
 use crate::kv_cache_format;
@@ -803,15 +803,16 @@ pub struct ServingConfig<'model> {
     pub omega_runtime: Option<&'model RuntimeConfig>,
     /// `-np`: number of parallel sequence slots served at once.
     pub parallel_sequences: u32,
-    /// `-ctk`: KV cache key-tensor storage type. `F32`, or `F16` for the
+    /// `-ctk`: KV cache key-tensor storage format. `Float32`, or `Float16` for the
     /// device-resident KV of the two-range decode loop on Metal (llama.cpp's
     /// own default, `common/common.h` `cache_type_k`); the prompt is still
     /// prefilled into the f32 host cache and rounded to f16 when decode
-    /// adopts it. Must equal `kv_cache_value_quant`.
-    pub kv_cache_key_quant: GgmlType,
-    /// `-ctv`: KV cache value-tensor storage type; same admitted set as
-    /// `kv_cache_key_quant`.
-    pub kv_cache_value_quant: GgmlType,
+    /// adopts it. K and V may differ; `kv_cache_format::admit_pair` decides
+    /// which key/value pairs are admitted.
+    pub kv_cache_key_quant: NumericFormat,
+    /// `-ctv`: KV cache value-tensor storage format; paired with
+    /// `kv_cache_key_quant` through `kv_cache_format::admit_pair`.
+    pub kv_cache_value_quant: NumericFormat,
     /// `-fa`: fused flash-attention kernel instead of the naive
     /// multiply-then-reduce attention graph.
     pub flash_attention: bool,
@@ -1278,8 +1279,8 @@ impl Default for ServingConfig<'static> {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: DEFAULT_BATCH_SIZE,
             ubatch_size: DEFAULT_UBATCH_SIZE,
@@ -1417,7 +1418,7 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
         )));
     }
 
-    kv_cache_format::admit_pair(config.kv_cache_key_quant, config.kv_cache_value_quant)?;
+    kv_cache_format::admit_pair(&config.kv_cache_key_quant, &config.kv_cache_value_quant)?;
 
     if config.flash_attention {
         return Err(InteropError::UnsupportedServingConfig(
@@ -1637,8 +1638,8 @@ mod tests {
             "-c unset resolves to the limit"
         );
         assert_eq!(config.parallel_sequences, 1, "-np 1");
-        assert_eq!(config.kv_cache_key_quant, GgmlType::F32, "-ctk f32");
-        assert_eq!(config.kv_cache_value_quant, GgmlType::F32, "-ctv f32");
+        assert_eq!(config.kv_cache_key_quant, NumericFormat::Float32, "-ctk f32");
+        assert_eq!(config.kv_cache_value_quant, NumericFormat::Float32, "-ctv f32");
         assert!(!config.flash_attention, "-fa off");
         assert_eq!(config.batch_size, 2048, "-b 2048");
         assert_eq!(config.ubatch_size, 512, "-ub 512");
@@ -1713,7 +1714,7 @@ mod tests {
             ..ServingConfig::default()
         };
         let q4_0_keys = ServingConfig {
-            kv_cache_key_quant: GgmlType::Q4_0,
+            kv_cache_key_quant: NumericFormat::Q4_0,
             ..ServingConfig::default()
         };
 
@@ -1732,8 +1733,8 @@ mod tests {
     #[test]
     fn serving_admits_an_f16_cache_for_both_keys_and_values() {
         let f16_pair = ServingConfig {
-            kv_cache_key_quant: GgmlType::F16,
-            kv_cache_value_quant: GgmlType::F16,
+            kv_cache_key_quant: NumericFormat::Float16,
+            kv_cache_value_quant: NumericFormat::Float16,
             ..ServingConfig::default()
         };
 
@@ -1746,8 +1747,8 @@ mod tests {
     #[test]
     fn serving_refuses_an_f16_cache_when_no_kernel_reads_it() {
         let f16_pair = ServingConfig {
-            kv_cache_key_quant: GgmlType::F16,
-            kv_cache_value_quant: GgmlType::F16,
+            kv_cache_key_quant: NumericFormat::Float16,
+            kv_cache_value_quant: NumericFormat::Float16,
             ..ServingConfig::default()
         };
 
@@ -1764,8 +1765,8 @@ mod tests {
     #[test]
     fn serving_refuses_a_mixed_f16_f32_pair() {
         let mixed_pair = ServingConfig {
-            kv_cache_key_quant: GgmlType::F16,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float16,
+            kv_cache_value_quant: NumericFormat::Float32,
             ..ServingConfig::default()
         };
 
@@ -1779,13 +1780,13 @@ mod tests {
     #[test]
     fn serving_admits_a_bf16_cache_pair_and_names_the_format_of_a_refused_quantized_cache() {
         let bf16_pair = ServingConfig {
-            kv_cache_key_quant: GgmlType::Bf16,
-            kv_cache_value_quant: GgmlType::Bf16,
+            kv_cache_key_quant: NumericFormat::BFloat16,
+            kv_cache_value_quant: NumericFormat::BFloat16,
             ..ServingConfig::default()
         };
         let q8_0_pair = ServingConfig {
-            kv_cache_key_quant: GgmlType::Q8_0,
-            kv_cache_value_quant: GgmlType::Q8_0,
+            kv_cache_key_quant: NumericFormat::Q8_0,
+            kv_cache_value_quant: NumericFormat::Q8_0,
             ..ServingConfig::default()
         };
 
@@ -1824,8 +1825,8 @@ mod tests {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -1904,8 +1905,8 @@ mod tests {
     #[test]
     fn multiple_parallel_sequences_reaches_its_error() {
         let config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -1942,8 +1943,8 @@ mod tests {
     #[test]
     fn nonzero_min_p_in_range_applies_without_error() {
         let config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -1958,8 +1959,8 @@ mod tests {
     #[test]
     fn min_p_outside_the_valid_range_reaches_its_error() {
         let config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -1975,8 +1976,8 @@ mod tests {
     #[test]
     fn negative_repeat_last_n_reaches_its_error() {
         let config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -2012,8 +2013,8 @@ mod tests {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: DEFAULT_BATCH_SIZE,
             ubatch_size: DEFAULT_UBATCH_SIZE,
@@ -2145,8 +2146,8 @@ mod tests {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: DEFAULT_BATCH_SIZE,
             ubatch_size: DEFAULT_UBATCH_SIZE,
@@ -2251,8 +2252,8 @@ mod tests {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: DEFAULT_BATCH_SIZE,
             ubatch_size: DEFAULT_UBATCH_SIZE,
@@ -2347,8 +2348,8 @@ mod tests {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: DEFAULT_BATCH_SIZE,
             ubatch_size: DEFAULT_UBATCH_SIZE,
@@ -2428,8 +2429,8 @@ mod tests {
     #[test]
     fn zero_kv_bucket_tokens_reaches_its_error() {
         let config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -2445,8 +2446,8 @@ mod tests {
 
     fn supported_default() -> ServingConfig<'static> {
         ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,

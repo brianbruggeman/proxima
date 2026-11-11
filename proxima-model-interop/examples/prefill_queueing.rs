@@ -29,7 +29,7 @@ mod harness {
 
     use memmap2::{Mmap, MmapOptions};
     use proxima_gguf::parse_complete;
-    use proxima_gguf::types::GgmlType;
+    use proxima_numeric::NumericFormat;
     use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig, TokenEvent};
     use proxima_telemetry::export::Exporter;
     use proxima_telemetry::recorder::Recorder;
@@ -41,8 +41,8 @@ mod harness {
     fn serving_config() -> ServingConfig<'static> {
         ServingConfig {
             gpu_layers: GPU_LAYERS_ALL,
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,

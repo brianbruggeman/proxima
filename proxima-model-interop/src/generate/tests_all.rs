@@ -75,6 +75,8 @@ pub(super) mod tests {
     use proxima_gguf::value::MetadataArray;
     use proxima_gguf::value::MetadataValue as Value;
     use proxima_gguf::{GgmlType as WireType, GgufModel, TensorPayload, write_complete};
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    use proxima_numeric::NumericFormat;
     use proxima_tensor::NodeId;
     use proxima_tensor::cpu::Evaluated;
 
@@ -1252,8 +1254,8 @@ pub(super) mod tests {
             .expect("loads the minimal one-layer MoE checkpoint through the public path");
 
         let base_config = ServingConfig {
-            kv_cache_key_quant: WireType::F32,
-            kv_cache_value_quant: WireType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -1347,8 +1349,8 @@ pub(super) mod tests {
         let loaded = LoadedModel::load(&parsed, &file_bytes)
             .expect("loads the minimal one-layer MoE checkpoint through the public path");
         let base_config = ServingConfig {
-            kv_cache_key_quant: WireType::F32,
-            kv_cache_value_quant: WireType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -1609,8 +1611,8 @@ pub(super) mod tests {
             .expect("loads the minimal one-layer qwen35 checkpoint through the public path");
 
         let base_config = ServingConfig {
-            kv_cache_key_quant: WireType::F32,
-            kv_cache_value_quant: WireType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -1879,8 +1881,8 @@ pub(super) mod tests {
             .expect("loads the minimal one-layer qwen35 checkpoint through the public path");
 
         let base_config = ServingConfig {
-            kv_cache_key_quant: WireType::F32,
-            kv_cache_value_quant: WireType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -4163,6 +4165,7 @@ pub(super) mod memory_fit_gate_tests {
     mod gemma4_dispatch_type_byte_gate {
         use memmap2::Mmap;
         use proxima_gguf::parse_complete;
+        use proxima_numeric::NumericFormat;
 
         use super::super::{BackendRuntime, ControlFlow, LoadedModel, LogitsSink, NodeValuesSink};
         use crate::serving::ServingConfig;
@@ -4182,8 +4185,8 @@ pub(super) mod memory_fit_gate_tests {
             let serving_config = ServingConfig {
                 dispatch_type,
                 temperature: 0.0,
-                kv_cache_key_quant: proxima_gguf::types::GgmlType::F32,
-                kv_cache_value_quant: proxima_gguf::types::GgmlType::F32,
+                kv_cache_key_quant: NumericFormat::Float32,
+                kv_cache_value_quant: NumericFormat::Float32,
                 flash_attention: false,
                 batch_size: 0,
                 ubatch_size: 0,

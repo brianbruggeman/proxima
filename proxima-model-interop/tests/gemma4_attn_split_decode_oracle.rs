@@ -27,7 +27,7 @@ use std::path::PathBuf;
 
 use memmap2::Mmap;
 use proxima_gguf::parse_complete;
-use proxima_gguf::types::GgmlType;
+use proxima_numeric::NumericFormat;
 use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig};
 #[cfg(feature = "metal-attn-split-rows")]
 use proxima_model_interop::{SpeculativeConfig, SpeculativeDecodeStats, TokenEvent};
@@ -162,8 +162,8 @@ fn load_model(bytes: &[u8]) -> LoadedModel<'_> {
 fn serving_config() -> ServingConfig<'static> {
     ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

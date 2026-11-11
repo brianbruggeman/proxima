@@ -57,7 +57,7 @@ use memmap2::{Mmap, MmapOptions};
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_gguf::parse_complete;
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
-use proxima_gguf::types::GgmlType;
+use proxima_numeric::NumericFormat;
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 use proxima_model_interop::{
     GPU_LAYERS_ALL, LoadedModel, NgramMapParams, NgramModParams, Phase, PrefixState, ServingConfig,
@@ -1787,8 +1787,8 @@ fn verify_prefix_resume_matches_full_decode(
 fn base_serving_config(gpu_layers: i32) -> ServingConfig<'static> {
     ServingConfig {
         gpu_layers,
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

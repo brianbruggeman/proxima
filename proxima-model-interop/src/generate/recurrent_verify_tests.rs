@@ -4,7 +4,7 @@
 use alloc::vec::Vec;
 use core::ops::ControlFlow;
 
-use proxima_gguf::GgmlType;
+use proxima_numeric::NumericFormat;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::ModelDescriptor;
 
@@ -49,8 +49,8 @@ fn load_armed<'file>(
 
 fn config() -> ServingConfig<'static> {
     ServingConfig {
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

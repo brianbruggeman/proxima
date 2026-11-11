@@ -22,7 +22,7 @@ use std::path::Path;
 
 use memmap2::Mmap;
 use proxima_gguf::parse_complete;
-use proxima_gguf::types::GgmlType;
+use proxima_numeric::NumericFormat;
 use proxima_model_interop::{
     DEFAULT_UBATCH_SIZE, GPU_LAYERS_ALL, LoadedModel, PromptCacheConfig, ServingConfig,
 };
@@ -63,8 +63,8 @@ fn prompt_of_971_tokens(vocab: &proxima_tokenizer::Vocab) -> (String, usize) {
 fn serving_config(ubatch_size: u32) -> ServingConfig<'static> {
     ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         reasoning_budget: 0,
         prompt_cache: PromptCacheConfig::off(),

@@ -345,7 +345,7 @@ qat = ["std", "metal", "proxima-autograd"]
 rustix = ["dep:rustix"]
 
 [dependencies]
-proxima-numeric = { version = "0.1.0", path = "../proxima-numeric" }
+proxima-numeric = { version = "0.1.0", path = "../proxima-numeric", features = ["config"] }
 arrayvec.workspace = true
 bon = { workspace = true, optional = true }
 conflaguration = { workspace = true, optional = true }

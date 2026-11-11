@@ -63,7 +63,6 @@ use memmap2::Advice;
 use memmap2::Mmap;
 #[cfg(feature = "mlx-gdn")]
 use omega::mlx;
-use proxima_gguf::GgmlType;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::sync::blocking::Mutex;

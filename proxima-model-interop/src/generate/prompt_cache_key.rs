@@ -26,8 +26,7 @@
 use omega::AttentionVariant;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::MathMode;
-use proxima_gguf::types::GgmlType;
-use proxima_numeric::NumericPolicy;
+use proxima_numeric::{NumericFormat, NumericPolicy};
 
 use crate::rope_scaling::RopeScaling;
 use crate::serving::{AttentionConfig, GdnPrefillBackend, ServingConfig};
@@ -98,10 +97,10 @@ pub(super) struct CacheKey {
     pub(super) read: ReadSpec,
     /// `-ctk`: the format the key rows are rounded to on the device cache;
     /// the flush hands those rounded rows back to the stored state.
-    pub(super) kv_cache_key_quant: GgmlType,
+    pub(super) kv_cache_key_quant: NumericFormat,
     /// `-ctv`: the same for the value rows; it can differ from the key's
     /// format (a block key layout beside a narrow scalar value).
-    pub(super) kv_cache_value_quant: GgmlType,
+    pub(super) kv_cache_value_quant: NumericFormat,
 }
 
 impl CacheKey {
@@ -296,13 +295,13 @@ mod tests {
     #[test]
     fn cache_key_separates_every_kv_cache_format_pair() {
         let pairs = [
-            (GgmlType::F32, GgmlType::F32),
-            (GgmlType::F16, GgmlType::F16),
-            (GgmlType::Bf16, GgmlType::Bf16),
-            (GgmlType::Q8_0, GgmlType::Q8_0),
-            (GgmlType::Q4_0, GgmlType::F16),
-            (GgmlType::Q4_0, GgmlType::Bf16),
-            (GgmlType::F16, GgmlType::Bf16),
+            (NumericFormat::Float32, NumericFormat::Float32),
+            (NumericFormat::Float16, NumericFormat::Float16),
+            (NumericFormat::BFloat16, NumericFormat::BFloat16),
+            (NumericFormat::Q8_0, NumericFormat::Q8_0),
+            (NumericFormat::Q4_0, NumericFormat::Float16),
+            (NumericFormat::Q4_0, NumericFormat::BFloat16),
+            (NumericFormat::Float16, NumericFormat::BFloat16),
         ];
         let keys: Vec<CacheKey> = pairs
             .iter()

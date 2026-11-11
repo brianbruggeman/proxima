@@ -4,7 +4,7 @@
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use proxima_gguf::GgmlType;
+use proxima_numeric::NumericFormat;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::test_support::Lcg;
 
@@ -184,8 +184,8 @@ fn dense_checkpoint_with_experts(routed: bool, seed: u64) -> Vec<u8> {
 
 pub(super) fn config(ubatch_size: u32) -> ServingConfig<'static> {
     ServingConfig {
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size,

@@ -228,7 +228,7 @@ pub use serving_grammar::{AssembleStep, ReadSpec};
 pub use serving_settings::AttentionTileHeightSetting;
 #[cfg(feature = "std")]
 pub use serving_settings::{
-    AdmissionScheduleSettings, CacheType, ExpertResidencyScheduleSettings, PhaseScheduleSettings,
+    AdmissionScheduleSettings, ExpertResidencyScheduleSettings, PhaseScheduleSettings,
     ServingSettings, WeightPrecisionRuleSettings,
 };
 #[cfg(feature = "std")]
