@@ -40,6 +40,7 @@ pub struct Plane {
 impl Plane {
     /// The bit address of the plane's value for element `index`.
     #[must_use]
+    #[inline(always)]
     pub const fn address(&self, index: usize) -> usize {
         let mut remaining = index;
         let mut address = self.base_bits as usize;
@@ -672,7 +673,48 @@ impl BlockLayout {
     }
 }
 
+/// The one list of block layouts the compile-time block codec instantiates, as constant names and
+/// spellings: `named_block_table!(callback!(prefix...))` expands to
+/// `callback! { prefix... [ (NAME, "spelling"), ... ] }`, as `named_layout_table!` does for scalars.
+/// A row is admitted by [`BlockLayout::is_simple`] (checked at compile time where the codec expands
+/// it); the K-quant, grouped and codebook families keep the runtime walker. The third column is
+/// whether the row's encode is instantiated: `false` marks a layout whose rounding rule the
+/// description does not carry and no incumbent in this workspace checks (`tq2_0` ties to even in
+/// llama.cpp's `nearest_int`, where the fit here rounds ties away), so it decodes only.
+macro_rules! named_block_table {
+    ($callback:ident ! ( $($prefix:tt)* )) => {
+        $callback! {
+            $($prefix)*
+            [
+                (Q4_0, "q4_0", true),
+                (Q4_1, "q4_1", true),
+                (Q5_0, "q5_0", true),
+                (Q5_1, "q5_1", true),
+                (Q8_0, "q8_0", true),
+                (Q8_1, "q8_1", true),
+                (Q8_K, "q8_k", true),
+                (Q1_0, "q1_0", true),
+                (Q2_0, "q2_0", true),
+                (PQ2_0, "pq2_0", true),
+                (TQ2_0, "tq2_0", false),
+                (MXFP4, "mxfp4", true),
+                (FP6_E3M2, "fp6_e3m2", true),
+            ]
+        }
+    };
+}
+
+pub(crate) use named_block_table;
+
 impl BlockLayout {
+    /// A layout with one scale (and at most one min) for the whole block and codes read straight
+    /// from bit planes: no sub-blocks, no per-run scales, no mixed-radix words. The family the
+    /// compile-time block codec instantiates.
+    #[must_use]
+    pub const fn is_simple(&self) -> bool {
+        self.sub.is_none() && self.scale_runs.is_none() && self.element.packed_radix <= 1
+    }
+
     /// Runs that carry their own scale: one for a layout without [`ScaleRuns`], and one for a
     /// layout that declares zero runs (a caller-built layout; [`crate::decode::decode_blocks`]
     /// rejects it) so the division below stays total.
