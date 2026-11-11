@@ -23,7 +23,7 @@
 
 use core::mem::MaybeUninit;
 
-use crate::block_codec::{DecodeFn, EncodeFn};
+use crate::block_codec::{BlockDecodeFn, BlockEncodeFn, DecodeFn, EncodeFn};
 use crate::block_layout::BlockLayout;
 use crate::error::NumericError;
 use crate::float_layout::{FloatLayout, named_layout_table};
@@ -45,8 +45,8 @@ enum Route {
         decode: DecodeFn,
     },
     Block {
-        encode: Option<EncodeFn>,
-        decode: DecodeFn,
+        encode: Option<BlockEncodeFn>,
+        decode: BlockDecodeFn,
     },
     Identity,
     Layout(FloatLayout),
@@ -58,8 +58,9 @@ enum Route {
 ///
 /// A scalar is a block of one element, so one type and one window check serve both: a call sizes
 /// the packed range from the element count, checks the window holds it, then makes one indirect
-/// call. The scalar and identity routes size the range inline by `len * width`; the rest take the
-/// out-of-line path.
+/// call. The scalar and identity routes size the range inline by `len * width`, and a block route
+/// inside its instantiation, where the element count and block bytes are literals, so no route
+/// divides at run time; only a layout with no compile-time instantiation takes the out-of-line path.
 ///
 /// Example: a 16-bit layout storing 512 values takes 1 KiB of output; `Q4_0` storing 64 values
 /// takes 36 bytes.
@@ -72,19 +73,23 @@ pub struct FormatCodec {
 }
 
 impl FormatCodec {
-    pub(crate) const fn table(
-        encode: Option<EncodeFn>,
-        decode: DecodeFn,
+    pub(crate) const fn scalar_table(encode: Option<EncodeFn>, decode: DecodeFn, block_bytes: usize) -> Self {
+        Self {
+            route: Route::Scalar { encode, decode },
+            elements: 1,
+            block_bytes,
+            format: UNNAMED,
+        }
+    }
+
+    pub(crate) const fn block_table(
+        encode: Option<BlockEncodeFn>,
+        decode: BlockDecodeFn,
         elements: usize,
         block_bytes: usize,
     ) -> Self {
-        let route = if elements == 1 {
-            Route::Scalar { encode, decode }
-        } else {
-            Route::Block { encode, decode }
-        };
         Self {
-            route,
+            route: Route::Block { encode, decode },
             elements,
             block_bytes,
             format: UNNAMED,
@@ -115,14 +120,13 @@ impl FormatCodec {
         }
         let codec = named_layout_table!(dispatch_named_layout!(
             *layout,
-            NAMED => Some(Self::table(
+            NAMED => Some(Self::scalar_table(
                 Some(|values, out| encode_body(NAMED, values, out)),
                 |data, out| {
                     decode_body(NAMED, data, out, |slot, value| {
                         slot.write(value);
                     });
                 },
-                1,
                 element_bytes(&NAMED),
             )),
             else is_storable(layout).then(|| Self {
@@ -218,6 +222,7 @@ impl FormatCodec {
                 run(values, window);
                 Ok(bytes)
             }
+            Route::Block { encode: Some(run), .. } => self.encode_block(*run, values, out),
             Route::Identity => {
                 let bytes = values.len() * element_bytes(&SOURCE_LAYOUT);
                 let Some(window) = out.get_mut(..bytes) else {
@@ -228,6 +233,19 @@ impl FormatCodec {
             }
             _ => self.encode_general(values, out),
         }
+    }
+
+    // the instantiation sizes and checks the window against literals, so no divide runs here; the fault
+    // is built on the cold path from the lengths this call saw
+    #[inline(always)]
+    fn encode_block(&self, run: BlockEncodeFn, values: &[f32], out: &mut [u8]) -> Result<usize, NumericError> {
+        let window_len = out.len();
+        run(values, out).ok_or_else(|| self.encode_fault(values.len(), window_len))
+    }
+
+    #[inline(always)]
+    fn decode_block(&self, run: BlockDecodeFn, data: &[u8], out: &mut [MaybeUninit<f32>]) -> Result<usize, NumericError> {
+        run(data, out).ok_or_else(|| self.decode_fault(data.len(), out.len()))
     }
 
     #[inline(never)]
@@ -242,7 +260,8 @@ impl FormatCodec {
             return Err(self.encode_fault(values.len(), out.len()));
         };
         match &self.route {
-            Route::Scalar { encode: Some(run), .. } | Route::Block { encode: Some(run), .. } => run(values, window),
+            Route::Block { encode: Some(run), .. } => return self.encode_block(*run, values, out),
+            Route::Scalar { encode: Some(run), .. } => run(values, window),
             Route::Layout(layout) => encode_body(*layout, values, window),
             Route::Identity => encode_body(SOURCE_LAYOUT, values, window),
             Route::Scalar { encode: None, .. } | Route::Block { encode: None, .. } => {
@@ -274,6 +293,7 @@ impl FormatCodec {
                 decode(window, out);
                 Ok(bytes)
             }
+            Route::Block { decode, .. } => self.decode_block(*decode, data, out),
             Route::Identity => {
                 let bytes = out.len() * element_bytes(&SOURCE_LAYOUT);
                 let Some(window) = data.get(..bytes) else {
@@ -299,7 +319,8 @@ impl FormatCodec {
             return Err(self.decode_fault(data.len(), out.len()));
         };
         match &self.route {
-            Route::Scalar { decode, .. } | Route::Block { decode, .. } => decode(window, out),
+            Route::Block { decode, .. } => return self.decode_block(*decode, data, out),
+            Route::Scalar { decode, .. } => decode(window, out),
             Route::Layout(layout) => Self::decode_layout(layout, window, out),
             Route::Identity => Self::decode_identity(window, out),
         }
