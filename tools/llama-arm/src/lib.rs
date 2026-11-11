@@ -17,7 +17,7 @@
 pub mod bindings;
 mod decode;
 
-pub use decode::{GPU_LAYERS, GreedyRun, greedy_decode, masked_top2, tokenize};
+pub use decode::{DecodeRequest, GPU_LAYERS, GreedyRun, KvType, greedy_decode, greedy_decode_runs, masked_top2, tokenize};
 
 use std::env;
 use std::fs;
