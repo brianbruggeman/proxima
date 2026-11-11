@@ -3724,8 +3724,11 @@ impl<'file> LoadedModel<'file> {
         let draft_limit =
             speculative_draft_limit(&serving_config.speculative, forced_draft_width).unwrap_or(0);
         let ring_slack = ring_slack_rows(serving_config, forced_draft_width);
+        // a step starts with fewer than max_tokens emitted, so its merged length
+        // is at most positions_needed - 1 + draft_limit; one more row of slack
+        // would push a prompt that ends on a bucket edge into the next bucket
         let kv_capacity = kv_extent(
-            positions_needed + draft_limit + 1,
+            positions_needed + draft_limit,
             self.serving_context_length(serving_config)? as usize,
             serving_config.kv_bucket_tokens,
         );
@@ -4696,6 +4699,16 @@ format; only the single-row decode kernel reads it from the device cache",
                         new_count,
                         serving_config.kv_bucket_tokens,
                         kv_capacity,
+                    );
+                    debug!(
+                        step = step as u64,
+                        cached_len = cached_len as u64,
+                        new_count = new_count as u64,
+                        positions_needed = positions_needed as u64,
+                        draft_limit = draft_limit as u64,
+                        kv_capacity = kv_capacity as u64,
+                        kv_bound_extent = kv_bound_extent as u64,
+                        "decode_kv_bound: the plan's kv symbol is the call capacity, so every step of a call shares one plan"
                     );
                     // `gqa_cached_forward_program_with_experts`'s own
                     // `cached_len` `Op::Input` -- always present regardless of

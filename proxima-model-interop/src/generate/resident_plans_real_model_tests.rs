@@ -17,9 +17,10 @@ const PROMPT: &str = "<|turn>user\nWhich of these is smaller in size: a hippopot
 const OTHER_PROMPT: &str =
     "<|turn>user\nName a prime number greater than ten.<turn|>\n<|turn>model\n";
 
-/// The prompt is 26 tokens and `kv_bucket_tokens` is 32: five tokens keep every
-/// decode step of a generation in one bucket, so the plan one generation
-/// leaves resident is an exact hit for the next.
+/// The prompt is 27 tokens with its BOS and `kv_bucket_tokens` is 32: five
+/// tokens need 32 positions, so every decode step of a generation binds one
+/// 32-row capacity and the plan one generation leaves resident is an exact
+/// hit for the next.
 const TOKENS: usize = 5;
 
 struct Generation {
