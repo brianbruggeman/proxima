@@ -3827,10 +3827,10 @@ impl<'file> LoadedModel<'file> {
                     pass_row_bytes: pass_row * core::mem::size_of::<f32>(),
                     value_row_bytes: v_row * core::mem::size_of::<f32>(),
                 };
-                omega::metal::zero_placed_buffer(&buffers.k_first, even_odd_byte_length);
-                omega::metal::zero_placed_buffer(&buffers.k_second, even_odd_byte_length);
-                omega::metal::zero_placed_buffer(&buffers.k_pass, pass_byte_length);
-                omega::metal::zero_placed_buffer(&buffers.value, value_byte_length);
+                omega::metal::zero_placed_buffer(&buffers.k_first, even_odd_byte_length)?;
+                omega::metal::zero_placed_buffer(&buffers.k_second, even_odd_byte_length)?;
+                omega::metal::zero_placed_buffer(&buffers.k_pass, pass_byte_length)?;
+                omega::metal::zero_placed_buffer(&buffers.value, value_byte_length)?;
                 Ok(Some(buffers))
             })
             .collect::<Result<_, _>>()?;
@@ -3924,8 +3924,8 @@ impl<'file> LoadedModel<'file> {
                 (buffer, widths)
             {
                 let byte_length = state_len * core::mem::size_of::<f32>();
-                omega::metal::zero_placed_buffer(input, byte_length);
-                omega::metal::zero_placed_buffer(output, byte_length);
+                omega::metal::zero_placed_buffer(input, byte_length)?;
+                omega::metal::zero_placed_buffer(output, byte_length)?;
             }
         }
 
@@ -5268,7 +5268,7 @@ did not hold every cached position)",
                                         omega::placed_buffer_identity(input_buffer) as u64,
                                     state_out_placed_ptr =
                                         omega::placed_buffer_identity(output_buffer) as u64,
-                                    state_in_first4 = ?read_placed_buffer_f32(input_buffer, 0, 4),
+                                    state_in_first4 = ?try_read_placed_buffer_f32(input_buffer, 0, 4),
                                     "row 555: interop layer-0 ssm placement pre-dispatch"
                                 );
                             }
@@ -5295,7 +5295,7 @@ did not hold every cached position)",
                     if let Some(device) = device_kv.as_mut() {
                         let sliding_bound = sliding_ring_geometry(&layer_caches)
                             .map_or(0, |ring| ring.bound_extent(kv_bound_extent));
-                        device.ready_step(cached_len, new_count, sliding_bound);
+                        device.ready_step(cached_len, new_count, sliding_bound)?;
                     }
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if let Some(device) = device_kv.as_ref() {
@@ -5779,7 +5779,7 @@ did not hold every cached position)",
                                 layer = 0_u64,
                                 state_out_placed_ptr =
                                     omega::placed_buffer_identity(output_buffer) as u64,
-                                state_out_first4 = ?read_placed_buffer_f32(output_buffer, 0, 4),
+                                state_out_first4 = ?try_read_placed_buffer_f32(output_buffer, 0, 4),
                                 "row 555: interop layer-0 ssm placement post-dispatch"
                             );
                         }
@@ -6710,8 +6710,11 @@ did not hold every cached position)",
                             match (greedy_step, &greedy_program, greedy_device_token) {
                                 (true, _, Some(_)) => &[],
                                 (true, Some((_, _, _, logits_buffer)), None) => {
-                                    placed_logits =
-                                        omega::read_placed_buffer_f32(logits_buffer, 0, vocab_size);
+                                    placed_logits = omega::try_read_placed_buffer_f32(
+                                        logits_buffer,
+                                        0,
+                                        vocab_size,
+                                    )?;
                                     &placed_logits
                                 }
                                 _ => {
@@ -7352,9 +7355,9 @@ did not hold every cached position)",
         // `ServingConfig::default`'s `kv_bucket_tokens: 32` buckets on
         // every build regardless of which cargo features are enabled.
         for layer in 0..block_count {
-            omega::metal::zero_placed_buffer(&k_even_buffers[layer], capacity_even_odd);
-            omega::metal::zero_placed_buffer(&k_odd_buffers[layer], capacity_even_odd);
-            omega::metal::zero_placed_buffer(&v_buffers[layer], capacity_v);
+            omega::metal::zero_placed_buffer(&k_even_buffers[layer], capacity_even_odd)?;
+            omega::metal::zero_placed_buffer(&k_odd_buffers[layer], capacity_even_odd)?;
+            omega::metal::zero_placed_buffer(&v_buffers[layer], capacity_v)?;
         }
 
         let kv_cache_names: Vec<(String, String, String)> = (0..block_count)

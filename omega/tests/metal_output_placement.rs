@@ -54,7 +54,7 @@ fn a_placed_input_can_be_planned_without_a_named_host_payload() {
     let placed_input_node = proxima_tensor::NodeId(0);
     let input_buffer =
         omega::allocate_placed_buffer(BYTES).expect("allocates the caller-owned input buffer");
-    omega::zero_placed_buffer(&input_buffer, BYTES);
+    omega::zero_placed_buffer(&input_buffer, BYTES).expect("zeroes the whole input buffer");
 
     let plan = omega::plan_named_with_placed_inputs(
         &program,
@@ -103,7 +103,8 @@ fn a_placed_input_can_be_planned_without_a_named_host_payload() {
     )
     .expect("executes with the placed input and output buffers");
     assert_eq!(
-        omega::read_placed_buffer_f32(&output_buffer, 0, EXTENT as usize),
+        omega::try_read_placed_buffer_f32(&output_buffer, 0, EXTENT as usize)
+            .expect("EXTENT f32s fit the output buffer"),
         vec![0.0; EXTENT as usize],
         "the placed-input sentinel must not be uploaded as a host payload"
     );
@@ -166,9 +167,11 @@ fn a_placed_buffer_holds_both_runs_data_at_their_own_offsets() {
     )
     .expect("second run, against the SAME plan and buffer, writes at a non-zero offset");
 
-    let at_offset_zero = omega::read_placed_buffer_f32(&buffer, 0, EXTENT as usize);
+    let at_offset_zero = omega::try_read_placed_buffer_f32(&buffer, 0, EXTENT as usize)
+        .expect("EXTENT f32s fit the buffer at offset zero");
     let at_second_offset =
-        omega::read_placed_buffer_f32(&buffer, SECOND_RUN_OFFSET, EXTENT as usize);
+        omega::try_read_placed_buffer_f32(&buffer, SECOND_RUN_OFFSET, EXTENT as usize)
+            .expect("the second run's EXTENT f32s fit the buffer");
 
     assert_eq!(
         at_offset_zero, first_run,
@@ -324,7 +327,8 @@ fn a_program_reads_a_placed_write_from_a_later_op_in_the_same_call() {
          `finish` must not copy them into `Evaluated` too; a `Some` here would mean the \
          skip-placed-readback optimization regressed"
     );
-    let placed_bytes = omega::read_placed_buffer_f32(&buffer, ROW_OFFSET, ROW_LEN as usize);
+    let placed_bytes = omega::try_read_placed_buffer_f32(&buffer, ROW_OFFSET, ROW_LEN as usize)
+        .expect("the placed row lies inside the buffer");
     assert_eq!(
         placed_bytes, new_row,
         "the placed write itself must still have happened -- only the redundant \
@@ -388,7 +392,8 @@ fn a_four_dimensional_state_round_trips_through_placement() {
     )
     .expect("executes the four-dimensional placed state");
     assert_eq!(
-        omega::read_placed_buffer_f32(&output_buffer, 0, STATE_ELEMENTS),
+        omega::try_read_placed_buffer_f32(&output_buffer, 0, STATE_ELEMENTS)
+            .expect("STATE_ELEMENTS f32s fit the output buffer"),
         state,
         "placement must preserve every element of the four-dimensional state"
     );
@@ -402,7 +407,8 @@ fn a_four_dimensional_state_round_trips_through_placement() {
     )
     .expect("executes an in-place four-dimensional recurrent state");
     assert_eq!(
-        omega::read_placed_buffer_f32(&output_buffer, 0, STATE_ELEMENTS),
+        omega::try_read_placed_buffer_f32(&output_buffer, 0, STATE_ELEMENTS)
+            .expect("STATE_ELEMENTS f32s fit the output buffer"),
         state,
         "same-offset input/output placement must preserve the recurrent state"
     );
@@ -455,7 +461,8 @@ fn the_overlapping_call_runs_its_closure_once_and_returns_the_plain_calls_output
 
     assert_eq!(ran.get(), 1, "the closure runs exactly once per call");
     assert_eq!(
-        omega::read_placed_buffer_f32(&buffer, 0, input.len()),
+        omega::try_read_placed_buffer_f32(&buffer, 0, input.len())
+            .expect("the input's f32s fit the buffer"),
         input.to_vec(),
         "overlapped host work does not change what the GPU wrote"
     );

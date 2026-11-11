@@ -5533,7 +5533,8 @@ pub(super) mod arena_tests {
             .expect("plans the three-stage chain");
         let cache_rows = crate::allocate_placed_buffer(12 * size_of::<f32>())
             .expect("allocates a buffer longer than the output it receives");
-        crate::zero_placed_buffer(&cache_rows, 12 * size_of::<f32>());
+        crate::zero_placed_buffer(&cache_rows, 12 * size_of::<f32>())
+            .expect("the zeroed range is the whole 12-f32 allocation");
 
         let evaluated = execute_plan_with_placements(
             &resolved_plan,
@@ -5560,12 +5561,14 @@ pub(super) mod arena_tests {
         );
         let (expected_placed, _shape) = cpu_oracle.get(stage_one).expect("oracle has stage_one");
         assert_eq!(
-            crate::read_placed_buffer_f32(&cache_rows, 8 * size_of::<f32>(), 4),
+            crate::try_read_placed_buffer_f32(&cache_rows, 8 * size_of::<f32>(), 4)
+                .expect("the placed rows are f32s 8..12 of a 12-f32 allocation"),
             expected_placed,
             "the placed rows are the oracle's, written at the requested byte offset"
         );
         assert_eq!(
-            crate::read_placed_buffer_f32(&cache_rows, 0, 8),
+            crate::try_read_placed_buffer_f32(&cache_rows, 0, 8)
+                .expect("the first 8 f32s of a 12-f32 allocation"),
             vec![0.0f32; 8],
             "nothing before the offset is touched"
         );

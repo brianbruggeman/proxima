@@ -103,10 +103,12 @@ fn run_on_prefilled_output(
     prefill_bits: u32,
 ) -> Vec<f32> {
     let buffer: PlacedBuffer = omega::allocate_placed_buffer(OUTPUT_BYTES).expect("allocates the caller-owned output slot");
-    omega::write_placed_buffer_f32(&buffer, 0, &vec![f32::from_bits(prefill_bits); OUTPUT_COUNT]);
+    omega::try_write_placed_buffer_f32(&buffer, 0, &vec![f32::from_bits(prefill_bits); OUTPUT_COUNT])
+        .expect("OUTPUT_COUNT f32s fit the OUTPUT_BYTES slot");
     omega::execute_plan_with_placements(plan, blocks, &[], &[(sum, &buffer, 0)], &mut Vec::new())
         .expect("executes the short-reduction projection into the prefilled slot");
-    omega::read_placed_buffer_f32(&buffer, 0, OUTPUT_COUNT)
+    omega::try_read_placed_buffer_f32(&buffer, 0, OUTPUT_COUNT)
+        .expect("OUTPUT_COUNT f32s fit the OUTPUT_BYTES slot")
 }
 
 fn first_difference(left: &[f32], right: &[f32]) -> Option<(usize, usize, f32, f32)> {

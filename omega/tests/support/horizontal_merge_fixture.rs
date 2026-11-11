@@ -300,13 +300,14 @@ impl Fixture {
 
     pub fn assert_outputs_match_reference(&self, relative_tolerance: f32) {
         for round in 0..ROUNDS {
-            // `read_placed_buffer_f32` takes a byte offset, not an element
+            // `try_read_placed_buffer_f32` takes a byte offset, not an element
             // count -- round 0 (offset 0) hid this by coincidence.
-            let actual = omega::read_placed_buffer_f32(
+            let actual = omega::try_read_placed_buffer_f32(
                 &self.output_buffer,
                 round * OUT_DIM * size_of::<f32>(),
                 OUT_DIM,
-            );
+            )
+            .expect("each round's output row lies inside the output buffer");
             for (index, (&value, &reference)) in
                 actual.iter().zip(self.expected[round].iter()).enumerate()
             {

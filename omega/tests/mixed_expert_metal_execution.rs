@@ -562,7 +562,8 @@ fn mixed_expert_source_and_recurrent_state_placement_share_one_execution() {
         "the placed root readback must carry the same recurrent state as its caller-owned buffer"
     );
     assert_eq!(
-        omega::read_placed_buffer_f32(&output_buffer, 0, STATE_ELEMENTS),
+        omega::try_read_placed_buffer_f32(&output_buffer, 0, STATE_ELEMENTS)
+            .expect("STATE_ELEMENTS f32s fit the output buffer"),
         state,
         "the recurrent state must survive the mixed-codec expert execution"
     );

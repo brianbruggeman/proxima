@@ -173,7 +173,7 @@ use omega::execute_plan_named_with_placements_op_timed;
     feature = "instrument",
     target_os = "macos"
 ))]
-use omega::read_placed_buffer_f32;
+use omega::try_read_placed_buffer_f32;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use omega::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,

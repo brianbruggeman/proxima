@@ -100,11 +100,12 @@ fn dispatch_and_hazard_counts_match_the_design_note() {
     if let Ok(path) = std::env::var("PROXIMA_ROW570_DUMP") {
         let mut bytes = Vec::with_capacity(ROUNDS * OUT_DIM * size_of::<f32>());
         for round in 0..ROUNDS {
-            let values = omega::read_placed_buffer_f32(
+            let values = omega::try_read_placed_buffer_f32(
                 &fixture.output_buffer,
                 round * OUT_DIM * size_of::<f32>(),
                 OUT_DIM,
-            );
+            )
+            .expect("each round's output row lies inside the output buffer");
             bytes.extend(values.iter().flat_map(|value| value.to_le_bytes()));
         }
         std::fs::write(&path, &bytes).expect("writes the row570 on/off comparison dump");
@@ -355,11 +356,12 @@ fn raw_split_member_forces_its_own_dispatch() {
     }
 
     for (round, round_expected) in expected.iter().enumerate() {
-        let actual = omega::read_placed_buffer_f32(
+        let actual = omega::try_read_placed_buffer_f32(
             &output_buffer,
             round * RAW_SPLIT_SIZE * size_of::<f32>(),
             RAW_SPLIT_SIZE,
-        );
+        )
+        .expect("each round's output row lies inside the output buffer");
         for (index, (&value, &reference)) in actual.iter().zip(round_expected.iter()).enumerate() {
             let scale = reference.abs().max(f32::MIN_POSITIVE);
             let relative = (value - reference).abs() / scale;
