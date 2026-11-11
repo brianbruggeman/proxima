@@ -19,7 +19,7 @@ use crate::block_layout::BlockLayout;
 use crate::error::NumericError;
 use crate::float_layout::{FloatLayout, named_layout_table};
 use crate::float_layout_codec::{
-    decode_body, dispatch_named_layout, element_bytes, encode_body, is_storable,
+    SOURCE_LAYOUT, decode_body, dispatch_named_layout, element_bytes, encode_body, is_storable,
 };
 use crate::format::NumericFormat;
 
@@ -27,10 +27,15 @@ const UNNAMED: &str = "unnamed";
 
 #[derive(Clone, Copy)]
 enum Route {
-    Named {
+    Scalar {
         encode: Option<EncodeFn>,
         decode: DecodeFn,
     },
+    Block {
+        encode: Option<EncodeFn>,
+        decode: DecodeFn,
+    },
+    Identity,
     Layout(FloatLayout),
 }
 
@@ -58,10 +63,24 @@ impl FormatCodec {
         elements: usize,
         block_bytes: usize,
     ) -> Self {
+        let route = if elements == 1 {
+            Route::Scalar { encode, decode }
+        } else {
+            Route::Block { encode, decode }
+        };
         Self {
-            route: Route::Named { encode, decode },
+            route,
             elements,
             block_bytes,
+            format: UNNAMED,
+        }
+    }
+
+    const fn identity() -> Self {
+        Self {
+            route: Route::Identity,
+            elements: 1,
+            block_bytes: element_bytes(&SOURCE_LAYOUT),
             format: UNNAMED,
         }
     }
@@ -76,6 +95,9 @@ impl FormatCodec {
     /// or empty.
     #[must_use]
     pub fn scalar(layout: &FloatLayout) -> Option<Self> {
+        if layout.is_identity_of(&SOURCE_LAYOUT) {
+            return Some(Self::identity().named_as(&NumericFormat::Scalar(*layout)));
+        }
         let codec = named_layout_table!(dispatch_named_layout!(
             *layout,
             NAMED => Some(Self::table(
@@ -140,7 +162,7 @@ impl FormatCodec {
     /// Whether this format has an encode instantiation.
     #[must_use]
     pub const fn can_encode(&self) -> bool {
-        !matches!(self.route, Route::Named { encode: None, .. })
+        !matches!(self.route, Route::Scalar { encode: None, .. } | Route::Block { encode: None, .. })
     }
 
     /// Packed bytes for `elements` values, `None` when `elements` is not whole blocks. A scalar
@@ -165,24 +187,29 @@ impl FormatCodec {
     /// [`NumericError::OutputSizeMismatch`] when `out` is not exactly the packed byte count; the
     /// output is unwritten in each case.
     #[must_use = "an error leaves the output unwritten"]
+    #[inline(always)]
     pub fn encode(&self, values: &[f32], out: &mut [u8]) -> Result<(), NumericError> {
-        match self.route {
-            Route::Named { encode: Some(run), .. } => {
-                self.check_encode(values.len(), out.len())?;
+        match &self.route {
+            Route::Scalar { encode: Some(run), .. } => {
+                self.check_scalar_encode(values.len(), out.len(), self.block_bytes)?;
                 run(values, out);
+                Ok(())
             }
-            Route::Named { encode: None, .. } => {
-                return Err(NumericError::UnsupportedEncode {
-                    format: self.format,
-                    reason: "no compile-time encode for this layout's fit",
-                });
+            Route::Block { encode: Some(run), .. } => {
+                self.check_block_encode(values.len(), out.len())?;
+                run(values, out);
+                Ok(())
             }
-            Route::Layout(layout) => {
-                self.check_encode(values.len(), out.len())?;
-                encode_body(layout, values, out);
+            Route::Identity => {
+                self.check_scalar_encode(values.len(), out.len(), element_bytes(&SOURCE_LAYOUT))?;
+                encode_body(SOURCE_LAYOUT, values, out);
+                Ok(())
             }
+            Route::Scalar { encode: None, .. } | Route::Block { encode: None, .. } => {
+                Err(self.unsupported_encode())
+            }
+            Route::Layout(layout) => self.encode_layout(layout, values, out),
         }
-        Ok(())
     }
 
     /// Decodes whole blocks of `data` into the caller-owned, possibly uninitialised `out`,
@@ -193,57 +220,115 @@ impl FormatCodec {
     /// [`NumericError::OutputSizeMismatch`] when `out` is not one slot per element; nothing is
     /// written in either case.
     #[must_use = "an error leaves the output uninitialised"]
+    #[inline(always)]
     pub fn decode(&self, data: &[u8], out: &mut [MaybeUninit<f32>]) -> Result<(), NumericError> {
-        self.check_decode(data.len(), out.len())?;
-        match self.route {
-            Route::Named { decode, .. } => decode(data, out),
-            Route::Layout(layout) => decode_body(layout, data, out, |slot, value| {
-                slot.write(value);
-            }),
+        match &self.route {
+            Route::Scalar { decode, .. } => {
+                self.check_scalar_decode(data.len(), out.len(), self.block_bytes)?;
+                decode(data, out);
+            }
+            Route::Block { decode, .. } => {
+                self.check_block_decode(data.len(), out.len())?;
+                decode(data, out);
+            }
+            Route::Identity => {
+                self.check_scalar_decode(data.len(), out.len(), element_bytes(&SOURCE_LAYOUT))?;
+                Self::decode_identity(data, out);
+            }
+            Route::Layout(layout) => {
+                self.check_scalar_decode(data.len(), out.len(), self.block_bytes)?;
+                Self::decode_layout(layout, data, out);
+            }
         }
         Ok(())
     }
 
-    #[inline(always)]
-    fn check_encode(&self, values: usize, out: usize) -> Result<(), NumericError> {
-        let Some(expected) = self.packed_len(values) else {
-            return Err(NumericError::InputNotElementMultiple {
-                format: self.format,
-                found: values,
-                elements: self.elements,
-            });
-        };
-        if out != expected {
-            return Err(NumericError::OutputSizeMismatch { found: out, expected });
-        }
+    // out of line so the copy loop keeps its noalias arguments and lowers to one memcpy; inlined, the
+    // optimiser cannot prove the packed bytes and the slots are disjoint and emits a checked vector loop
+    #[inline(never)]
+    fn decode_identity(data: &[u8], out: &mut [MaybeUninit<f32>]) {
+        decode_body(SOURCE_LAYOUT, data, out, |slot, value| {
+            slot.write(value);
+        });
+    }
+
+    // out of line so the layout-as-data loop's register pressure stays out of the inlined named path
+    #[inline(never)]
+    fn encode_layout(&self, layout: &FloatLayout, values: &[f32], out: &mut [u8]) -> Result<(), NumericError> {
+        self.check_scalar_encode(values.len(), out.len(), self.block_bytes)?;
+        encode_body(*layout, values, out);
         Ok(())
     }
 
+    #[inline(never)]
+    fn decode_layout(layout: &FloatLayout, data: &[u8], out: &mut [MaybeUninit<f32>]) {
+        decode_body(*layout, data, out, |slot, value| {
+            slot.write(value);
+        });
+    }
+
+    // a scalar route is a block of one element, so the size tie is one multiply, and the width is a
+    // literal where the route fixes it
     #[inline(always)]
-    fn check_decode(&self, data: usize, out: usize) -> Result<(), NumericError> {
-        if self.elements == 1 {
-            return if data == out * self.block_bytes {
-                Ok(())
-            } else {
-                Err(self.decode_mismatch(data, out))
-            };
+    fn check_scalar_encode(&self, values: usize, out: usize, width: usize) -> Result<(), NumericError> {
+        if out == values * width { Ok(()) } else { Err(self.encode_fault(values, out)) }
+    }
+
+    #[inline(always)]
+    fn check_scalar_decode(&self, data: usize, out: usize, width: usize) -> Result<(), NumericError> {
+        if data == out * width { Ok(()) } else { Err(self.decode_fault(data, out)) }
+    }
+
+    #[inline(always)]
+    fn check_block_encode(&self, values: usize, out: usize) -> Result<(), NumericError> {
+        match self.packed_len(values) {
+            Some(expected) if expected == out => Ok(()),
+            _ => Err(self.encode_fault(values, out)),
         }
-        if !data.is_multiple_of(self.block_bytes) {
-            return Err(NumericError::InputNotBlockMultiple {
-                format: self.format,
-                found: data,
-                block_bytes: self.block_bytes,
-            });
-        }
-        if out == data / self.block_bytes * self.elements {
+    }
+
+    #[inline(always)]
+    fn check_block_decode(&self, data: usize, out: usize) -> Result<(), NumericError> {
+        let whole = data.is_multiple_of(self.block_bytes);
+        if whole && out == data / self.block_bytes * self.elements {
             Ok(())
         } else {
-            Err(self.decode_mismatch(data, out))
+            Err(self.decode_fault(data, out))
         }
     }
 
     #[cold]
-    fn decode_mismatch(&self, data: usize, slots: usize) -> NumericError {
+    #[inline(never)]
+    fn unsupported_encode(&self) -> NumericError {
+        NumericError::UnsupportedEncode {
+            format: self.format,
+            reason: "no compile-time encode for this layout's fit",
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn encode_fault(&self, values: usize, out: usize) -> NumericError {
+        match self.packed_len(values) {
+            Some(expected) => NumericError::OutputSizeMismatch { found: out, expected },
+            None => NumericError::InputNotElementMultiple {
+                format: self.format,
+                found: values,
+                elements: self.elements,
+            },
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn decode_fault(&self, data: usize, slots: usize) -> NumericError {
+        if self.elements != 1 && !data.is_multiple_of(self.block_bytes) {
+            return NumericError::InputNotBlockMultiple {
+                format: self.format,
+                found: data,
+                block_bytes: self.block_bytes,
+            };
+        }
         NumericError::OutputSizeMismatch {
             found: slots,
             expected: data / self.block_bytes * self.elements,
@@ -328,13 +413,29 @@ mod tests {
         let mut resolved = Vec::new();
         for (layout, name) in crate::float_layout::NAMED_LAYOUTS {
             if let Some(codec) = FormatCodec::scalar(&layout) {
-                assert!(matches!(codec.route, Route::Named { .. }), "{name} must take the named route");
+                assert!(
+                    matches!(codec.route, Route::Scalar { .. } | Route::Identity),
+                    "{name} must take a compile-time route"
+                );
                 resolved.push(name);
             }
         }
 
         assert!(resolved.len() >= 8, "the scan reached only {resolved:?}");
         assert!(resolved.contains(&"bfloat16") && resolved.contains(&"float8_e4m3fn"));
+    }
+
+    #[test]
+    fn a_layout_that_is_the_source_layout_encodes_as_a_byte_copy_and_keeps_a_signalling_nan_payload() {
+        let codec = FormatCodec::scalar(&SOURCE_LAYOUT).expect("the source layout resolves");
+        let signalling = f32::from_bits(0x7fa0_1234);
+        let mut packed = [0u8; 8];
+
+        codec.encode(&[1.5, signalling], &mut packed).expect("sizes match");
+
+        assert!(matches!(codec.route, Route::Identity));
+        assert_eq!(packed[..4], 1.5_f32.to_le_bytes());
+        assert_eq!(packed[4..], 0x7fa0_1234_u32.to_le_bytes());
     }
 
     #[test]
