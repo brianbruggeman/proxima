@@ -27,7 +27,7 @@
 //! `retain + step` tokens.
 
 use proxima_core::kv_carry::KvCommand;
-use proxima_numeric::{NumericError, NumericFormat, ScalarCodec};
+use proxima_numeric::{FormatCodec, NumericError, NumericFormat};
 
 use super::*;
 
@@ -94,8 +94,8 @@ struct DeviceKvLayer {
     /// buffers have completed.
     staging: Option<[PlacedBuffer; 3]>,
     format: NumericFormat,
-    /// The format's scalar codec, resolved once at allocation.
-    codec: ScalarCodec,
+    /// The format's codec, resolved once at allocation.
+    codec: FormatCodec,
     even_odd_row: usize,
     v_row: usize,
     even_odd_row_bytes: usize,
@@ -157,9 +157,9 @@ impl DeviceKvLayer {
         format: &NumericFormat,
     ) -> Result<Self, InteropError> {
         let narrow_codec = kernel_codec(format)?;
-        let codec = ScalarCodec::for_format(format).ok_or_else(|| {
+        let codec = FormatCodec::for_format(format).ok_or_else(|| {
             InteropError::UnsupportedServingConfig(alloc::format!(
-                "device kv cache format {format:?} is not a scalar layout the slice codec can execute"
+                "device kv cache format {format:?} has no slice codec"
             ))
         })?;
         let row_bytes = |row: usize| {
@@ -1645,6 +1645,26 @@ mod tests {
         .expect("a Q8_0 device cache has no read path");
 
         assert!(error.to_string().contains("device kv cache type"));
+    }
+
+    #[test]
+    fn every_block_format_a_codec_resolves_is_still_refused_by_the_kernel_classifier() {
+        let mut resolved = 0usize;
+        for format in NumericFormat::ALL
+            .iter()
+            .filter(|format| !matches!(format, NumericFormat::Scalar(_)))
+        {
+            if FormatCodec::for_format(format).is_none() {
+                continue;
+            }
+            resolved += 1;
+
+            let refusal = kernel_codec(format);
+
+            assert!(matches!(refusal, Err(InteropError::UnsupportedServingConfig(_))), "{format:?}");
+        }
+
+        assert_eq!(resolved, 13);
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use super::*;
 #[cfg(feature = "metal-output-placement")]
-use proxima_numeric::{NumericError, ScalarCodec};
+use proxima_numeric::{FormatCodec, NumericError};
 
 /// Resolves a program into a reusable [`Plan`]. `blocks` is read for its
 /// CODECS and shapes only — the data is not captured, so the same plan runs
@@ -1341,29 +1341,43 @@ pub fn write_placed_buffer_f32(buffer: &PlacedBuffer, byte_offset: usize, values
 /// Encodes `values` into the cache format `codec` was resolved for, at `byte_offset`: the one
 /// store for every cache format.
 ///
-/// Composes [`proxima_numeric::ScalarCodec`], resolved once at allocation with
-/// [`proxima_numeric::ScalarCodec::for_format`]: the call is one indirect jump to the instantiation
+/// Composes [`proxima_numeric::FormatCodec`], resolved once at allocation with
+/// [`proxima_numeric::FormatCodec::for_format`]: the call is one indirect jump to the instantiation
 /// with the layout as a literal, where [`proxima_numeric::encode::encode_blocks`] re-matches the
-/// format on every call. Same in-flight and bounds contract as [`write_placed_buffer_f32`].
+/// format on every call. Scalar and block formats place alike; the byte range is the codec's whole-block
+/// geometry. Same in-flight and bounds contract as [`write_placed_buffer_f32`].
 ///
 /// # Errors
-/// [`NumericError::OutputSizeMismatch`] never for a well-formed call; the destination is sized from
-/// `values.len()` and the codec's element width.
+/// [`NumericError::InputNotElementMultiple`] when `values.len()` is not whole blocks of the codec's
+/// format, and the codec's own refusal for a format with no encode.
 #[cfg(feature = "metal-output-placement")]
 pub fn write_placed_buffer(
     buffer: &PlacedBuffer,
     byte_offset: usize,
-    codec: &ScalarCodec,
+    codec: &FormatCodec,
     values: &[f32],
 ) -> Result<(), NumericError> {
+    let packed_bytes = placed_byte_len(codec, values.len())?;
     // SAFETY: shared memory with no command buffer in flight; the caller keeps the packed range inside the allocation.
     let destination = unsafe {
         core::slice::from_raw_parts_mut(
             buffer.contents().as_ptr().cast::<u8>().add(byte_offset),
-            values.len() * codec.element_bytes(),
+            packed_bytes,
         )
     };
     codec.encode(values, destination)
+}
+
+/// The byte length of `element_count` elements of `codec`'s format, from whole-block geometry.
+#[cfg(feature = "metal-output-placement")]
+fn placed_byte_len(codec: &FormatCodec, element_count: usize) -> Result<usize, NumericError> {
+    codec
+        .packed_len(element_count)
+        .ok_or(NumericError::InputNotElementMultiple {
+            format: codec.format_name(),
+            found: element_count,
+            elements: codec.elements(),
+        })
 }
 
 /// Decodes `element_count` elements at `byte_offset` to `f32`, the inverse of
@@ -1371,19 +1385,21 @@ pub fn write_placed_buffer(
 /// precedes the write.
 ///
 /// # Errors
-/// [`NumericError::OutputSizeMismatch`] never for a well-formed call.
+/// [`NumericError::InputNotElementMultiple`] when `element_count` is not whole blocks of the
+/// codec's format.
 #[cfg(feature = "metal-output-placement")]
 pub fn read_placed_buffer(
     buffer: &PlacedBuffer,
     byte_offset: usize,
-    codec: &ScalarCodec,
+    codec: &FormatCodec,
     element_count: usize,
 ) -> Result<Vec<f32>, NumericError> {
+    let packed_bytes = placed_byte_len(codec, element_count)?;
     // SAFETY: same contract as `write_placed_buffer`; the source is the packed range inside the allocation.
     let source = unsafe {
         core::slice::from_raw_parts(
             buffer.contents().as_ptr().cast::<u8>().add(byte_offset),
-            element_count * codec.element_bytes(),
+            packed_bytes,
         )
     };
     let mut decoded: Vec<f32> = Vec::with_capacity(element_count);
@@ -1399,16 +1415,18 @@ pub fn read_placed_buffer(
 /// ranges stay inside them and no command buffer may be in flight (caller contract).
 ///
 /// # Errors
-/// [`NumericError::OutputSizeMismatch`] never for a well-formed call.
+/// [`NumericError::InputNotElementMultiple`] when `element_count` is not whole blocks of the
+/// codec's format.
 #[cfg(feature = "metal-output-placement")]
 pub fn narrow_placed_buffer(
     source: &PlacedBuffer,
     source_byte_offset: usize,
     destination: &PlacedBuffer,
     destination_byte_offset: usize,
-    codec: &ScalarCodec,
+    codec: &FormatCodec,
     element_count: usize,
 ) -> Result<(), NumericError> {
+    let packed_bytes = placed_byte_len(codec, element_count)?;
     // SAFETY: idle shared buffers (every placed execute waits), in-bounds ranges, distinct allocations.
     let (rows, packed) = unsafe {
         (
@@ -1427,7 +1445,7 @@ pub fn narrow_placed_buffer(
                     .as_ptr()
                     .cast::<u8>()
                     .add(destination_byte_offset),
-                element_count * codec.element_bytes(),
+                packed_bytes,
             ),
         )
     };
@@ -2092,8 +2110,8 @@ mod placed_format_tests {
         unsafe { core::slice::from_raw_parts(buffer.contents().as_ptr().cast::<u8>(), len) }.to_vec()
     }
 
-    fn codec(format: &NumericFormat) -> ScalarCodec {
-        ScalarCodec::for_format(format).expect("a scalar format resolves")
+    fn codec(format: &NumericFormat) -> FormatCodec {
+        FormatCodec::for_format(format).expect("a scalar format resolves")
     }
 
     #[test]
@@ -2270,8 +2288,40 @@ mod placed_format_tests {
     }
 
     #[test]
-    fn a_block_format_has_no_scalar_codec_to_place_through() {
-        assert!(ScalarCodec::for_format(&NumericFormat::Q4_0).is_none());
+    fn a_q4_0_placed_round_trip_stores_the_host_encode_and_reads_the_host_decode_bit_for_bit() {
+        let values = k_like_rows(96);
+        let q4_0 = codec(&NumericFormat::Q4_0);
+        let packed_len = q4_0.packed_len(values.len()).expect("96 values are three whole blocks");
+        let mut host_packed = vec![0u8; packed_len];
+        q4_0.encode(&values, &mut host_packed).expect("host encodes q4_0");
+        let mut host_slots = vec![core::mem::MaybeUninit::<f32>::uninit(); values.len()];
+        q4_0.decode(&host_packed, &mut host_slots).expect("host decodes q4_0");
+        let host_decoded: Vec<u32> = host_slots
+            .iter()
+            .map(|slot| unsafe { slot.assume_init() }.to_bits())
+            .collect();
+        let buffer = allocate_placed_buffer(packed_len).expect("allocates q4_0 fixture bytes");
+
+        write_placed_buffer(&buffer, 0, &q4_0, &values).expect("q4_0 places");
+        let placed = read_placed_buffer(&buffer, 0, &q4_0, values.len()).expect("q4_0 reads back");
+
+        assert_eq!(packed_len, 54);
+        assert_eq!(stored_bytes(&buffer, packed_len), host_packed);
+        let placed_bits: Vec<u32> = placed.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(placed_bits, host_decoded);
+    }
+
+    #[test]
+    fn a_placed_element_count_that_is_not_whole_blocks_is_an_error_naming_the_format() {
+        let q4_0 = codec(&NumericFormat::Q4_0);
+        let buffer = allocate_placed_buffer(64).expect("allocates fixture bytes");
+
+        let refused = read_placed_buffer(&buffer, 0, &q4_0, 33);
+
+        assert_eq!(
+            refused,
+            Err(NumericError::InputNotElementMultiple { format: "q4_0", found: 33, elements: 32 })
+        );
     }
 
     /// Deterministic roughly-gaussian rows with a few outlier channels, the shape a K projection has.

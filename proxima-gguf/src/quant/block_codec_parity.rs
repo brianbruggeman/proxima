@@ -1,4 +1,4 @@
-//! `proxima_numeric::BlockCodec` against this crate's per-format routines, the incumbents
+//! `proxima_numeric::FormatCodec` (block layouts) against this crate's per-format routines, the incumbents
 //! (principle 14): encode bytes and decode bits must be identical, NaN, infinity and zero blocks
 //! included, with the incumbent's handling as the oracle.
 
@@ -8,7 +8,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 
-use proxima_numeric::{BlockCodec, BlockLayout};
+use proxima_numeric::{BlockLayout, FormatCodec};
 
 use crate::quant::QuantError;
 use crate::quant::{q1_0, q2_0, pq2_0, q4_0, q4_1, q5_0, q5_1, q8_0, q8_1, q8_k};
@@ -85,14 +85,15 @@ fn bytes_of(state: &mut u64, count: usize) -> Vec<u8> {
     (0..count).map(|_| (next(state) >> 24) as u8).collect()
 }
 
-fn new_decode(codec: &BlockCodec, data: &[u8]) -> Vec<f32> {
+fn new_decode(codec: &FormatCodec, data: &[u8]) -> Vec<f32> {
     let mut slots = vec![MaybeUninit::<f32>::uninit(); data.len() / codec.block_bytes() * codec.elements()];
     codec.decode(data, &mut slots).expect("whole blocks decode");
+    // decode returned ok, which initialises every slot
     slots.iter().map(|slot| unsafe { slot.assume_init() }).collect()
 }
 
 fn encode_mismatches(case: &Case, values: &[f32]) -> usize {
-    let codec = BlockCodec::resolve(&case.layout).expect("a simple layout resolves");
+    let codec = FormatCodec::block(&case.layout).expect("a simple layout resolves");
     let encode = case.encode.expect("this case has an incumbent encode");
     let blocks = values.len() / codec.elements();
     let mut expected = vec![0u8; blocks * codec.block_bytes()];
@@ -121,7 +122,7 @@ fn both_nan_blocks(layout: &BlockLayout, data: &[u8], block_bytes: usize) -> Vec
 /// IEEE 754 leaves open which operand's payload a two-NaN add returns, so a both-NaN block's
 /// elements compare by NaN-ness; every other element compares by bits.
 fn decode_mismatches(case: &Case, data: &[u8], both_nan: &[bool]) -> usize {
-    let codec = BlockCodec::resolve(&case.layout).expect("a simple layout resolves");
+    let codec = FormatCodec::block(&case.layout).expect("a simple layout resolves");
     let mut expected = vec![0.0f32; data.len() / codec.block_bytes() * codec.elements()];
     (case.decode)(data, &mut expected).expect("incumbent decodes");
     let got = new_decode(&codec, data);
@@ -144,7 +145,7 @@ fn decode_mismatches(case: &Case, data: &[u8], both_nan: &[bool]) -> usize {
 #[test]
 fn encode_bytes_equal_the_incumbent_quantize_on_kv_like_values() {
     for case in cases().iter().filter(|case| case.encode.is_some()) {
-        let elements = BlockCodec::resolve(&case.layout).expect("resolves").elements();
+        let elements = FormatCodec::block(&case.layout).expect("resolves").elements();
         let values = kv_like(65_536 / elements * elements);
 
         assert_eq!(encode_mismatches(case, &values), 0, "{}", case.name);
@@ -154,7 +155,7 @@ fn encode_bytes_equal_the_incumbent_quantize_on_kv_like_values() {
 #[test]
 fn encode_bytes_equal_the_incumbent_quantize_on_nan_inf_zero_and_tie_blocks() {
     for case in cases().iter().filter(|case| case.encode.is_some()) {
-        let elements = BlockCodec::resolve(&case.layout).expect("resolves").elements();
+        let elements = FormatCodec::block(&case.layout).expect("resolves").elements();
 
         assert_eq!(encode_mismatches(case, &special_blocks(elements)), 0, "{}", case.name);
     }
@@ -164,7 +165,7 @@ fn encode_bytes_equal_the_incumbent_quantize_on_nan_inf_zero_and_tie_blocks() {
 fn decode_bits_equal_the_incumbent_dequantize_on_arbitrary_block_bytes() {
     let mut state = 0xdead_beef_cafe_f00du64;
     for case in cases() {
-        let codec = BlockCodec::resolve(&case.layout).expect("resolves");
+        let codec = FormatCodec::block(&case.layout).expect("resolves");
         let data = bytes_of(&mut state, 4096 * codec.block_bytes());
         let both_nan = both_nan_blocks(&case.layout, &data, codec.block_bytes());
         if case.layout.min.is_some() && matches!(case.name, "q4_1" | "q5_1") {
@@ -180,7 +181,7 @@ fn decode_bits_equal_the_incumbent_dequantize_on_arbitrary_block_bytes() {
 fn decode_bits_equal_the_incumbent_dequantize_on_encoded_kv_values() {
     for case in cases() {
         let Some(encode) = case.encode else { continue };
-        let codec = BlockCodec::resolve(&case.layout).expect("resolves");
+        let codec = FormatCodec::block(&case.layout).expect("resolves");
         let values = kv_like(16_384 / codec.elements() * codec.elements());
         let mut packed = vec![0u8; values.len() / codec.elements() * codec.block_bytes()];
         encode(&values, &mut packed).expect("incumbent encodes");
@@ -191,7 +192,7 @@ fn decode_bits_equal_the_incumbent_dequantize_on_encoded_kv_values() {
 
 #[test]
 fn a_block_codec_refuses_a_partial_block_and_a_wrong_output_size() {
-    let codec = BlockCodec::resolve(&BlockLayout::Q4_0).expect("q4_0 resolves");
+    let codec = FormatCodec::block(&BlockLayout::Q4_0).expect("q4_0 resolves");
     let mut out = [0u8; 18];
 
     assert!(codec.encode(&[0.0; 31], &mut out).is_err());
@@ -202,6 +203,6 @@ fn a_block_codec_refuses_a_partial_block_and_a_wrong_output_size() {
 #[test]
 fn layouts_outside_the_simple_family_do_not_resolve() {
     for layout in [BlockLayout::Q4_K, BlockLayout::Q6_K, BlockLayout::NVFP4, BlockLayout::Q8_1_GROUPED, BlockLayout::TQ1_0] {
-        assert!(BlockCodec::resolve(&layout).is_none());
+        assert!(FormatCodec::block(&layout).is_none());
     }
 }
