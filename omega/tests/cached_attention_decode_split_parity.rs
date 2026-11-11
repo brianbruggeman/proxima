@@ -205,13 +205,7 @@ fn parity_cell(cached_len: u64, head_dim: u32, half_kv: bool) -> f32 {
         );
     }
 
-    let cpu = evaluate_gpu_oracle(
-        &fixture.program,
-        &fixture.symbols,
-        &named,
-        &output_roots,
-        policy,
-    );
+    let cpu = evaluate_gpu_oracle(&fixture.program, &fixture.symbols, &named, &output_roots);
     let metal_named: Vec<(&str, QuantizedBlock<'_>)> = named
         .iter()
         .map(
@@ -714,7 +708,7 @@ fn block_key_cell(format: NumericFormat, cached_len: u64, head_dim: u32) -> Bloc
     }
 
     let host_blocks = as_named_blocks(&host_named);
-    let cpu = evaluate_gpu_oracle(&fixture.program, &fixture.symbols, &host_blocks, &output_roots, policy);
+    let cpu = evaluate_gpu_oracle(&fixture.program, &fixture.symbols, &host_blocks, &output_roots);
 
     let block_blocks: Vec<(&str, QuantizedBlock<'_>)> = fixture
         .named

@@ -53,7 +53,7 @@ fn parity_cell(cached_len: u64, new_count: u64, policy: NumericPolicy) -> f32 {
          BoundOpKind::CachedAttention or this parity check exercises the wrong kernel"
     );
 
-    let cpu = evaluate_gpu_oracle(&program, &symbols, &named, &output_roots, policy);
+    let cpu = evaluate_gpu_oracle(&program, &symbols, &named, &output_roots);
 
     reset_path();
     let plan = omega::plan_named(&program, &symbols, &named, &output_roots, policy)
