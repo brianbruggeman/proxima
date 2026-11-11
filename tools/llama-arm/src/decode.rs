@@ -10,9 +10,60 @@ use std::slice;
 use std::time::Instant;
 
 use crate::bindings::{
-    ggml_type_GGML_TYPE_F16, llama_context, llama_flash_attn_type_LLAMA_FLASH_ATTN_TYPE_ENABLED, llama_model,
+    ggml_type, ggml_type_GGML_TYPE_BF16, ggml_type_GGML_TYPE_F16, ggml_type_GGML_TYPE_F32, llama_context,
+    llama_flash_attn_type_LLAMA_FLASH_ATTN_TYPE_ENABLED, llama_model,
 };
 use crate::{LlamaApi, LoadError};
+
+/// KV cache element types the scoreboard sends llama (`-ctk`/`-ctv` names).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KvType {
+    F32,
+    F16,
+    Bf16,
+}
+
+impl KvType {
+    /// parses the llama-server flag spelling (`f32`, `f16`, `bf16`).
+    #[must_use]
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "f32" => Some(Self::F32),
+            "f16" => Some(Self::F16),
+            "bf16" => Some(Self::Bf16),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F16 => "f16",
+            Self::Bf16 => "bf16",
+        }
+    }
+
+    fn ggml(self) -> ggml_type {
+        match self {
+            Self::F32 => ggml_type_GGML_TYPE_F32,
+            Self::F16 => ggml_type_GGML_TYPE_F16,
+            Self::Bf16 => ggml_type_GGML_TYPE_BF16,
+        }
+    }
+}
+
+/// one in-process decode request: the same inputs the scoreboard gives the other arms.
+pub struct DecodeRequest<'a> {
+    pub model_path: &'a Path,
+    pub prompt: &'a [i32],
+    pub n_ctx: u32,
+    pub n_predict: usize,
+    pub type_k: KvType,
+    pub type_v: KvType,
+    /// fresh contexts decoded from one loaded model; run 0 is the cold one.
+    pub runs: usize,
+}
 
 /// every layer on Metal; larger than any model's layer count, which llama clamps.
 pub const GPU_LAYERS: i32 = 99;
@@ -108,40 +159,52 @@ pub fn greedy_decode(
     n_ctx: u32,
     n_predict: usize,
 ) -> Result<GreedyRun, LoadError> {
+    let request = DecodeRequest {
+        model_path,
+        prompt,
+        n_ctx,
+        n_predict,
+        type_k: KvType::F16,
+        type_v: KvType::F16,
+        runs: 1,
+    };
+    greedy_decode_runs(api, &request)?.pop().ok_or(LoadError::ContextInit)
+}
+
+/// loads the model once and decodes `request.runs` times, each in a fresh flash-attention context
+/// of `request.n_ctx` (an empty KV, like llama-server with `cache_prompt` false).
+///
+/// # Errors
+/// as [`greedy_decode`]; the first failing run ends the call.
+pub fn greedy_decode_runs(api: &LlamaApi, request: &DecodeRequest) -> Result<Vec<GreedyRun>, LoadError> {
     // safety: backend init/free bracket every handle created below
     unsafe { api.llama_backend_init() };
-    let outcome = load_model(api, model_path, false).and_then(|model| {
-        let run = run_in_context(api, model, prompt, n_ctx, n_predict);
-        // safety: `model` is live, its context was freed inside `run_in_context`
+    let outcome = load_model(api, request.model_path, false).and_then(|model| {
+        let runs = (0..request.runs).map(|_| run_in_context(api, model, request)).collect();
+        // safety: `model` is live, every context was freed inside `run_in_context`
         unsafe { api.llama_model_free(model) };
-        run
+        runs
     });
     // safety: nothing created after init is still live
     unsafe { api.llama_backend_free() };
     outcome
 }
 
-fn run_in_context(
-    api: &LlamaApi,
-    model: *mut llama_model,
-    prompt: &[i32],
-    n_ctx: u32,
-    n_predict: usize,
-) -> Result<GreedyRun, LoadError> {
+fn run_in_context(api: &LlamaApi, model: *mut llama_model, request: &DecodeRequest) -> Result<GreedyRun, LoadError> {
     // safety: layouts match the gated build; `model` is live for the whole call
     let context = unsafe {
         let mut params = api.llama_context_default_params();
-        params.n_ctx = n_ctx;
-        params.n_batch = params.n_batch.max(u32::try_from(prompt.len()).unwrap_or(u32::MAX));
-        params.type_k = ggml_type_GGML_TYPE_F16;
-        params.type_v = ggml_type_GGML_TYPE_F16;
+        params.n_ctx = request.n_ctx;
+        params.n_batch = params.n_batch.max(u32::try_from(request.prompt.len()).unwrap_or(u32::MAX));
+        params.type_k = request.type_k.ggml();
+        params.type_v = request.type_v.ggml();
         params.flash_attn_type = llama_flash_attn_type_LLAMA_FLASH_ATTN_TYPE_ENABLED;
         api.llama_init_from_model(model, params)
     };
     if context.is_null() {
         return Err(LoadError::ContextInit);
     }
-    let run = decode_steps(api, model, context, prompt, n_predict);
+    let run = decode_steps(api, model, context, request.prompt, request.n_predict);
     // safety: `context` is live and nothing borrows it past this point
     unsafe { api.llama_free(context) };
     run

@@ -14,7 +14,7 @@
 //! `-ctk/-ctv`, `--no-warmup`, `--seed 1`. Request 1 is the cold TTFT; request 2 is the warm TTFT
 //! and the decode. Both send the prompt as the token-id array proxima's tokenizer produced
 //! (`encode_with_bos_eos` under `wants_bos`, mirrored here because `wants_bos` is crate-private),
-//! `n_predict` 128, temperature 0, top_k 1, seed 1, `cache_prompt` false, `ignore_eos` true,
+//! `n_predict` 128, temperature 0, `top_k` 1, seed 1, `cache_prompt` false, `ignore_eos` true,
 //! `return_tokens` true. Metrics come from the response `timings` object.
 //!
 //! The HTTP client below is a minimal copy of the one in `decode_arms.rs`; examples cannot share
@@ -23,10 +23,19 @@
 //! Parity record (I1..I11 of the kv-epic architecture, part A, plus I12 incumbent build: the
 //! server's startup `build NNNNN (commit)` line must equal `--llama-commit`): a row whose record has any
 //! unequal invariant is INVALID, is listed in `scoreboard.md` with the failing invariants, and is
-//! excluded from every mean. Quiet gate: before each process, no cargo/rustc/nextest/kv_scoreboard
-//! /llama-server process other than this one, and load1 below the limit for the hold window; if
+//! excluded from every mean. Quiet gate: before each process, no `cargo`/`rustc`/`nextest`/`kv_scoreboard`
+//! /`llama-server` process other than this one, and load1 below the limit for the hold window; if
 //! it never clears within the wait limit the row is not run and is INVALID on I10. Run the built
 //! binary directly, not under `cargo run`, whose own process is a gate hit.
+//!
+//! llama-inproc arm (`--llama-inproc PATH/inproc_arm`, built from `tools/llama-arm`, never a
+//! dependency of this crate): one process per cell, the pinned libllama taken from the server's own
+//! install directory behind the arm's sha256 + build-number gate, the same prompt ids, `n_predict`,
+//! KV types and padded `-c`. Proxima's `step_time` lines and the arm's are both parsed into
+//! `TokenRecord`s and reduced by the one `decode_span_ms_per_token`; the server's
+//! `timings.predicted_per_token_ms` stays its own `server_predicted_per_token_ms` column, so the
+//! difference between the two is the server's overhead. `--prompts` / `--kvs` select a subset of
+//! cells; `--quiet-gate off` runs without waiting and marks every row INVALID on I10.
 //!
 //! Output directory gets `raw.tsv` (one row per process with the parity columns), `logs/` (each
 //! child's stderr) and `scoreboard.md`.
@@ -64,19 +73,22 @@ const GATE_POLL: Duration = Duration::from_secs(2);
 const MAX_TOKENS: usize = 128;
 const LLAMA_KV_PAD: usize = 256;
 const BASE_PORT: u16 = 18_200;
-const MEGABYTE: f64 = 1_000_000.0;
 const BUSY_PATTERN: &str = "cargo|rustc|nextest|kv_scoreboard|llama-server";
 const INVARIANT_COUNT: usize = 12;
 const INVARIANT_NAMES: [&str; INVARIANT_COUNT] = [
     "I1", "I2", "I3", "I4", "I5", "I6", "I7", "I8", "I9", "I10", "I11", "I12",
 ];
 const PROXIMA_SPAN_DEFINITION: &str =
-    "ttft=run=done ttft_ms_precise (float ms from loop start); decode=decode_step_ms_per_token (sum decode step_ns, steps>=1, over N-1)";
+    "PROXIMA ttft=run=done ttft_ms_precise (float ms from loop start); decode=decode_span_ms_per_token over step_time records (sum decode elapsed_ns, index>=1, over those records)";
 const PROXIMA_LEGACY_DEFINITION: &str =
     "LEGACY ttft=prefill step_ns incl tokenize+setup; decode=decode_ms_per_token (wall-prefill)/(N-1) incl polling";
 const LLAMA_METRIC_DEFINITION: &str =
-    "ttft=timings.prompt_ms of one llama_decode prefill; decode=timings.predicted_per_second (slot t_gen)";
-const TSV_HEADER: &str = "round\tengine\tlabel\tprompt\tkv\tload1\tfootprint_bytes\tgpu_peak_bytes\tgpu_steady_bytes\tttft_cold_ms\tttft_warm_run1_ms\tttft_warm_run2_ms\ttok_s_run0\ttok_s_run1\ttok_s_run2\texit_code\tllama_kv_buffer_mib\tllama_n_ctx\tcapacity\tI1\tI2\tI3\tI4\tI5\tI6\tI7\tI8\tI9\tI10\tI11\tI12\tvalid\tfirst_divergence\tgen_llama\tgen_proxima\tmodel_sha256\tbinary_sha256\tfeatures\tllama_build\tlegacy_ttft_cold_ms\tlegacy_ttft_warm_run1_ms\tlegacy_ttft_warm_run2_ms\tlegacy_tok_s_run0\tlegacy_tok_s_run1\tlegacy_tok_s_run2\tmetric_definition\tquiet_gate\tnote";
+    "SERVER ttft=timings.prompt_ms of one llama_decode prefill; decode=timings.predicted_per_second (slot t_gen, includes server overhead); server_predicted_per_token_ms=timings.predicted_per_token_ms";
+const INPROC_METRIC_DEFINITION: &str =
+    "INPROC ttft=prefill record elapsed_ns (llama_decode+llama_synchronize); decode=decode_span_ms_per_token over step_time records (same reducer as PROXIMA, no server)";
+/// the incumbent build number the in-process arm's load gate must report (I12).
+const PINNED_LLAMA_BUILD: u32 = 11_671;
+const TSV_HEADER: &str = "round\tengine\tlabel\tprompt\tkv\tload1\tfootprint_bytes\tgpu_peak_bytes\tgpu_steady_bytes\tttft_cold_ms\tttft_warm_run1_ms\tttft_warm_run2_ms\ttok_s_run0\ttok_s_run1\ttok_s_run2\texit_code\tllama_kv_buffer_mib\tllama_n_ctx\tcapacity\tI1\tI2\tI3\tI4\tI5\tI6\tI7\tI8\tI9\tI10\tI11\tI12\tvalid\tfirst_divergence\tgen_llama\tgen_proxima\tmodel_sha256\tbinary_sha256\tfeatures\tllama_build\tlegacy_ttft_cold_ms\tlegacy_ttft_warm_run1_ms\tlegacy_ttft_warm_run2_ms\tlegacy_tok_s_run0\tlegacy_tok_s_run1\tlegacy_tok_s_run2\tdecode_ms_per_token_run1\tserver_predicted_per_token_ms\tmetric_definition\tquiet_gate\tnote";
 
 #[derive(Debug, Error)]
 enum HarnessError {
@@ -124,6 +136,10 @@ impl Prompt {
             Prompt::Long => "long",
         }
     }
+
+    fn parse(text: &str) -> Option<Prompt> {
+        ALL_PROMPTS.into_iter().find(|prompt| prompt.name() == text)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -142,6 +158,10 @@ impl Kv {
             Kv::Bf16 => "BF16",
             Kv::Q4K => "Q4K",
         }
+    }
+
+    fn parse(text: &str) -> Option<Kv> {
+        ALL_KV.into_iter().find(|kv| kv.name() == text)
     }
 
     fn proxima_env(self) -> Vec<(&'static str, &'static str)> {
@@ -173,7 +193,21 @@ const ALL_PROMPTS: [Prompt; 2] = [Prompt::Short, Prompt::Long];
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum Engine {
     Proxima { binary: PathBuf },
+    /// `llama-server`, the HTTP arm
     Llama,
+    /// the `llama-arm` `inproc_arm` bin: the same libllama build, no server
+    LlamaInproc { binary: PathBuf },
+}
+
+impl Engine {
+    /// the arms whose rows are compared in an invariant: proxima and the server meet in
+    /// both directions; the in-process arm is judged against the server only.
+    fn pairs_with(&self, other: &Engine) -> bool {
+        matches!(
+            (self, other),
+            (Engine::Proxima { .. } | Engine::LlamaInproc { .. }, Engine::Llama) | (Engine::Llama, Engine::Proxima { .. })
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -189,6 +223,7 @@ impl Cell {
         match self.engine {
             Engine::Proxima { .. } => "proxima",
             Engine::Llama => "llama",
+            Engine::LlamaInproc { .. } => "llama-inproc",
         }
     }
 
@@ -197,8 +232,9 @@ impl Cell {
     }
 }
 
-/// Cell order is fixed: prompt, then kv, then each proxima binary, then llama when it has an arm.
-fn cell_order(proxima: &[(String, PathBuf)]) -> Vec<Cell> {
+/// Cell order is fixed: prompt, then kv, then each proxima binary, then llama-server and the
+/// in-process llama arm when llama has an arm for that KV pair.
+fn cell_order(proxima: &[(String, PathBuf)], inproc: Option<&Path>) -> Vec<Cell> {
     let mut cells = Vec::new();
     for prompt in ALL_PROMPTS {
         for kv in ALL_KV {
@@ -219,6 +255,12 @@ fn cell_order(proxima: &[(String, PathBuf)]) -> Vec<Cell> {
                     prompt,
                     kv,
                 });
+                cells.extend(inproc.map(|binary| Cell {
+                    engine: Engine::LlamaInproc { binary: binary.to_path_buf() },
+                    label: "llama-inproc".to_owned(),
+                    prompt,
+                    kv,
+                }));
             }
         }
     }
@@ -272,19 +314,41 @@ struct Metrics {
     gpu_steady_bytes: Option<u64>,
 }
 
-fn number_after(line: &str, key: &str, field: &'static str) -> Result<f64, HarnessError> {
-    let bad = || HarnessError::BadNumber {
+fn bad_number(line: &str, field: &'static str) -> HarnessError {
+    HarnessError::BadNumber {
         field,
         line: line.to_owned(),
-    };
-    let start = line.find(key).ok_or_else(bad)? + key.len();
+    }
+}
+
+/// The numeric token right after `key` in `line`.
+fn numeric_token<'a>(line: &'a str, key: &str, field: &'static str) -> Result<&'a str, HarnessError> {
+    let start = line.find(key).ok_or_else(|| bad_number(line, field))? + key.len();
     let rest = line[start..].trim_start();
     let end = rest
         .find(|character: char| {
             !(character.is_ascii_digit() || matches!(character, '.' | '-' | 'e' | 'E' | '+'))
         })
         .unwrap_or(rest.len());
-    rest[..end].parse().map_err(|_| bad())
+    Ok(&rest[..end])
+}
+
+fn number_after(line: &str, key: &str, field: &'static str) -> Result<f64, HarnessError> {
+    numeric_token(line, key, field)?.parse().map_err(|_| bad_number(line, field))
+}
+
+/// A whole-number field (byte or token counts) read as an integer, never through a float.
+fn count_after(line: &str, key: &str, field: &'static str) -> Result<u64, HarnessError> {
+    numeric_token(line, key, field)?.parse().map_err(|_| bad_number(line, field))
+}
+
+/// `value / 1e6` as float: nanoseconds to milliseconds, bytes to megabytes.
+fn per_million(value: u64) -> f64 {
+    Duration::from_nanos(value).as_secs_f64() * 1e3
+}
+
+fn count_as_f64(count: usize) -> f64 {
+    f64::from(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
 /// Reads `/usr/bin/time -l`'s `peak memory footprint` line (bytes).
@@ -310,7 +374,7 @@ fn run_index_of(line: &str) -> Option<usize> {
 }
 
 fn mean(values: &[f64]) -> f64 {
-    values.iter().sum::<f64>() / values.len() as f64
+    values.iter().sum::<f64>() / count_as_f64(values.len())
 }
 
 /// Proxima child log: prefill `step_ns` per run and `decode_ms_per_token` per `run=done`.
@@ -331,10 +395,9 @@ fn parse_proxima(text: &str) -> Result<Metrics, HarnessError> {
                 run,
                 number_after(line, "decode_ms_per_token=", "decode_ms_per_token")?,
             );
-            let peak = number_after(line, "gpu_peak_bytes=", "gpu_peak_bytes")?.round() as u64;
+            let peak = count_after(line, "gpu_peak_bytes=", "gpu_peak_bytes")?;
             gpu_peak = Some(gpu_peak.map_or(peak, |seen| seen.max(peak)));
-            gpu_steady =
-                Some(number_after(line, "steady_gpu_bytes=", "steady_gpu_bytes")?.round() as u64);
+            gpu_steady = Some(count_after(line, "steady_gpu_bytes=", "steady_gpu_bytes")?);
         }
     }
     let cold = *prefill_ms
@@ -362,27 +425,141 @@ fn parse_proxima(text: &str) -> Result<Metrics, HarnessError> {
     })
 }
 
-/// The llama-span metrics card PAR1c adds to each `run=done` line: `ttft_ms_precise` (float ms
-/// from loop start) and `decode_step_ms_per_token` (sum of decode `step_ns` for steps >= 1, over
-/// N-1, float ms). `Some` only when runs 0, 1 and 2 each have a `run=done` line carrying both
-/// fields and every `run=done` line does; GPU columns are carried over from the legacy parse.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SpanPhase {
+    Prefill,
+    Decode,
+}
+
+/// One generated token as an arm reports it: its step index, the phase that produced it, and the
+/// wall ns of the evaluation behind it. Proxima's `step_time` lines and the `inproc_arm` bin's
+/// lines are both this record; nothing downstream knows which arm wrote them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TokenRecord {
+    index: usize,
+    phase: SpanPhase,
+    elapsed_ns: u64,
+}
+
+impl TokenRecord {
+    /// llama-server's `predicted_ms` span: one `llama_decode` per generated token after the first.
+    /// The prefill record and decode index 0 (the prompt's own evaluation) are outside it.
+    fn counts_toward_decode_span(self) -> bool {
+        self.phase == SpanPhase::Decode && self.index >= 1
+    }
+}
+
+/// THE decode-span definition, written once: summed `elapsed_ns` of the records
+/// `counts_toward_decode_span` admits, over their count, in float ms. `None` when no record is
+/// admitted, because a run with no decode steps has no ms/token and must not read as 0.
+fn decode_span_ms_per_token(records: &[TokenRecord]) -> Option<f64> {
+    let (total_ns, count) = records
+        .iter()
+        .filter(|record| record.counts_toward_decode_span())
+        .fold((0_u64, 0_usize), |(total, count), record| (total + record.elapsed_ns, count + 1));
+    (count > 0).then(|| per_million(total_ns) / count_as_f64(count))
+}
+
+fn prefill_ms(records: &[TokenRecord]) -> Option<f64> {
+    records
+        .iter()
+        .find(|record| record.phase == SpanPhase::Prefill)
+        .map(|record| per_million(record.elapsed_ns))
+}
+
+fn field_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    line.split_whitespace().find_map(|token| token.strip_prefix(key))
+}
+
+/// Every `step_time run_index= step= step_ns= phase=` line of an arm's log, grouped by run.
+fn parse_token_records(text: &str) -> BTreeMap<usize, Vec<TokenRecord>> {
+    let mut runs: BTreeMap<usize, Vec<TokenRecord>> = BTreeMap::new();
+    for line in text.lines().filter(|line| line.contains("step_time")) {
+        let parsed = (|| {
+            let run = field_value(line, "run_index=")?.parse().ok()?;
+            let index = field_value(line, "step=")?.parse().ok()?;
+            let elapsed_ns = field_value(line, "step_ns=")?.parse().ok()?;
+            let phase = match field_value(line, "phase=")? {
+                "prefill" => SpanPhase::Prefill,
+                "decode" => SpanPhase::Decode,
+                _ => return None,
+            };
+            Some((run, TokenRecord { index, phase, elapsed_ns }))
+        })();
+        if let Some((run, record)) = parsed {
+            runs.entry(run).or_default().push(record);
+        }
+    }
+    runs
+}
+
+/// Decode ms/token for runs 0, 1 and 2 from the shared reducer; `None` unless all three reduce.
+fn decode_by_run(records: &BTreeMap<usize, Vec<TokenRecord>>) -> Option<[f64; 3]> {
+    let run = |index: usize| decode_span_ms_per_token(records.get(&index)?);
+    Some([run(0)?, run(1)?, run(2)?])
+}
+
+fn tok_s_from(decode_ms: [f64; 3]) -> (Option<f64>, Vec<f64>) {
+    (Some(1000.0 / decode_ms[0]), vec![1000.0 / decode_ms[1], 1000.0 / decode_ms[2]])
+}
+
+/// Proxima's span metrics: `ttft_ms_precise` (float ms from loop start) from each `run=done`
+/// line, decode from the shared reducer over the run's `step_time` records. `Some` only when runs
+/// 0, 1 and 2 each have both; GPU columns are carried over from the legacy parse.
 fn parse_proxima_span(text: &str, legacy: &Metrics) -> Option<Metrics> {
     let mut ttft: BTreeMap<usize, f64> = BTreeMap::new();
-    let mut decode: BTreeMap<usize, f64> = BTreeMap::new();
     for line in text.lines().filter(|line| line.contains("run=done")) {
         let run = run_index_of(line)?;
         ttft.insert(run, number_after(line, "ttft_ms_precise=", "ttft_ms_precise").ok()?);
-        let step = number_after(line, "decode_step_ms_per_token=", "decode_step_ms_per_token").ok()?;
-        decode.insert(run, step);
     }
-    let pick = |map: &BTreeMap<usize, f64>, run: usize| map.get(&run).copied();
+    let (tok_s_run0, tok_s) = tok_s_from(decode_by_run(&parse_token_records(text))?);
     Some(Metrics {
-        ttft_cold_ms: Some(pick(&ttft, 0)?),
-        ttft_warm_ms: vec![pick(&ttft, 1)?, pick(&ttft, 2)?],
-        tok_s: vec![1000.0 / pick(&decode, 1)?, 1000.0 / pick(&decode, 2)?],
-        tok_s_run0: Some(1000.0 / pick(&decode, 0)?),
+        ttft_cold_ms: Some(*ttft.get(&0)?),
+        ttft_warm_ms: vec![*ttft.get(&1)?, *ttft.get(&2)?],
+        tok_s,
+        tok_s_run0,
         gpu_peak_bytes: legacy.gpu_peak_bytes,
         gpu_steady_bytes: legacy.gpu_steady_bytes,
+    })
+}
+
+/// The in-process llama arm's metrics: prefill record as TTFT, decode from the same reducer.
+fn parse_inproc_span(text: &str) -> Option<Metrics> {
+    let records = parse_token_records(text);
+    let prefill = |run: usize| prefill_ms(records.get(&run)?);
+    let (tok_s_run0, tok_s) = tok_s_from(decode_by_run(&records)?);
+    Some(Metrics {
+        ttft_cold_ms: Some(prefill(0)?),
+        ttft_warm_ms: vec![prefill(1)?, prefill(2)?],
+        tok_s,
+        tok_s_run0,
+        ..Metrics::default()
+    })
+}
+
+/// What the in-process arm's `gate` line reports: the load gate's identity and the settings the
+/// context was created with.
+#[derive(Debug, Clone, PartialEq)]
+struct InprocGate {
+    sha256: String,
+    build: u32,
+    type_k: String,
+    type_v: String,
+    flash_attn: bool,
+    /// the `n_ctx` the arm requested; the bindings expose no read-back of llama's own value
+    n_ctx_requested: usize,
+}
+
+fn parse_inproc_gate(text: &str) -> Option<InprocGate> {
+    let line = text.lines().find(|line| line.contains("llama_arm gate "))?;
+    let value = |key: &str| field_value(line, key);
+    Some(InprocGate {
+        sha256: value("sha256=")?.to_owned(),
+        build: value("build=")?.parse().ok()?,
+        type_k: value("type_k=")?.to_owned(),
+        type_v: value("type_v=")?.to_owned(),
+        flash_attn: value("flash_attn=")? == "enabled",
+        n_ctx_requested: value("n_ctx=")?.parse().ok()?,
     })
 }
 
@@ -413,8 +590,10 @@ fn parse_proxima_detail(text: &str) -> Result<ProximaDetail, HarnessError> {
         if let Some(start) = line.find(" ids=[") {
             ids.insert(run, parse_id_list(&line[start + " ids=".len()..]));
         } else if line.contains("run=done") {
-            let generated = number_after(line, "tokens_generated=", "tokens_generated")? as usize;
-            let prompt = number_after(line, "prompt_token_count=", "prompt_token_count")? as usize;
+            let generated = usize::try_from(count_after(line, "tokens_generated=", "tokens_generated")?)
+                .map_err(|_| bad_number(line, "tokens_generated"))?;
+            let prompt = usize::try_from(count_after(line, "prompt_token_count=", "prompt_token_count")?)
+                .map_err(|_| bad_number(line, "prompt_token_count"))?;
             done.insert(run, (generated, prompt));
         }
     }
@@ -447,6 +626,7 @@ struct LlamaResponse {
     predicted_n: usize,
     predicted_ms: f64,
     predicted_per_second: f64,
+    predicted_per_token_ms: f64,
     top_k: i64,
     temperature: f64,
     seed: i64,
@@ -462,7 +642,7 @@ fn parse_llama_response(body: &str) -> Result<LlamaResponse, HarnessError> {
         object
             .get(key)
             .and_then(Value::as_u64)
-            .map(|number| number as usize)
+            .and_then(|number| usize::try_from(number).ok())
             .ok_or_else(|| bad(key))
     };
     let ids = value
@@ -486,6 +666,7 @@ fn parse_llama_response(body: &str) -> Result<LlamaResponse, HarnessError> {
         predicted_n: count(timings, "predicted_n")?,
         predicted_ms: float(timings, "predicted_ms")?,
         predicted_per_second: float(timings, "predicted_per_second")?,
+        predicted_per_token_ms: float(timings, "predicted_per_token_ms")?,
         top_k: settings.get("top_k").and_then(Value::as_i64).ok_or_else(|| bad("top_k"))?,
         temperature: float(settings, "temperature")?,
         seed: settings.get("seed").and_then(Value::as_i64).ok_or_else(|| bad("seed"))?,
@@ -550,7 +731,7 @@ fn sample_mean_cov(values: &[f64]) -> Option<(f64, Option<f64>)> {
         return Some((center, None));
     }
     let variance =
-        values.iter().map(|value| (value - center).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
+        values.iter().map(|value| (value - center).powi(2)).sum::<f64>() / count_as_f64(values.len() - 1);
     Some((center, Some(variance.sqrt() / center * 100.0)))
 }
 
@@ -624,6 +805,8 @@ fn busy_from_pgrep(output: &str, own_pid: u32, parent_pid: u32) -> Vec<String> {
 enum GateOutcome {
     Clear { waited_secs: u64 },
     Refused(String),
+    /// `--quiet-gate off`: the process ran without waiting; I10 fails, so the row is INVALID
+    Skipped,
 }
 
 impl GateOutcome {
@@ -631,7 +814,12 @@ impl GateOutcome {
         match self {
             GateOutcome::Clear { waited_secs } => format!("clear after {waited_secs}s"),
             GateOutcome::Refused(reason) => format!("refused: {reason}"),
+            GateOutcome::Skipped => "skipped: --quiet-gate off".to_owned(),
         }
+    }
+
+    fn may_run(&self) -> bool {
+        !matches!(self, GateOutcome::Refused(_))
     }
 }
 
@@ -692,11 +880,27 @@ struct LlamaEvidence {
     log: LlamaLog,
 }
 
+/// What an `inproc_arm` process reported: its ids and counts (same lines proxima prints) and the
+/// load gate it ran behind.
+#[derive(Debug, Clone, PartialEq)]
+struct InprocEvidence {
+    detail: ProximaDetail,
+    gate: InprocGate,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum Evidence {
     None,
     Proxima(ProximaDetail),
     Llama(Box<LlamaEvidence>),
+    Inproc(Box<InprocEvidence>),
+}
+
+fn inproc_evidence(row: Option<&Row>) -> Option<&InprocEvidence> {
+    match &row?.evidence {
+        Evidence::Inproc(evidence) => Some(evidence),
+        _ => None,
+    }
 }
 
 /// Run-wide facts the parity record compares rows against.
@@ -758,6 +962,7 @@ fn evaluate(row: &Row, peer: Option<&Row>, facts: &Facts) -> Parity {
     let (proxima_row, llama_row) = match row.cell.engine {
         Engine::Proxima { .. } => (Some(row), peer),
         Engine::Llama => (peer, Some(row)),
+        Engine::LlamaInproc { .. } => return evaluate_inproc(row, peer, facts),
     };
     let llama = llama_evidence(llama_row);
     let proxima = proxima_detail(proxima_row);
@@ -817,74 +1022,125 @@ fn evaluate(row: &Row, peer: Option<&Row>, facts: &Facts) -> Parity {
         _ => Check::Held,
     };
 
-    let i6 = if !paired {
-        no_peer()
-    } else {
-        llama.map_or_else(
-            || missing("llama evidence"),
-            |evidence| Check::require(evidence.log.flash_attn == Some(true), || "llama flash_attn not enabled".to_owned()),
-        )
+    let on_pair = |judge: &dyn Fn(&LlamaEvidence) -> Check| {
+        if paired { llama.map_or_else(|| missing("llama evidence"), judge) } else { no_peer() }
     };
-    let i7 = if !paired {
-        no_peer()
-    } else {
-        llama.map_or_else(
-            || missing("llama evidence"),
-            |evidence| {
-                let expected = llama_padded_capacity(row.capacity);
-                Check::require(evidence.log.n_ctx_seq == Some(expected), || {
-                    format!("llama n_ctx {:?}, expected {expected} (ours {})", evidence.log.n_ctx_seq, row.capacity)
-                })
-            },
-        )
-    };
+    let i6 = on_pair(&|evidence| {
+        Check::require(evidence.log.flash_attn == Some(true), || "llama flash_attn not enabled".to_owned())
+    });
+    let i7 = on_pair(&|evidence| {
+        let expected = llama_padded_capacity(row.capacity);
+        Check::require(evidence.log.n_ctx_seq == Some(expected), || {
+            format!("llama n_ctx {:?}, expected {expected} (ours {})", evidence.log.n_ctx_seq, row.capacity)
+        })
+    });
     let i8 = Check::require(!row.binary_sha256.is_empty() && !row.debug_build, || {
         "binary sha missing or debug build".to_owned()
     });
     let i9 = proxima_row.map_or(Check::Held, |proxima_row| {
         Check::require(proxima_row.span_metrics, || "binary predates llama-span metrics".to_owned())
     });
-    let i10 = match &row.gate {
-        GateOutcome::Clear { .. } => Check::require(row.load1 < facts.load_limit, || {
-            format!("load1 {:.2} at launch", row.load1)
-        }),
-        GateOutcome::Refused(reason) => Check::Failed(reason.clone()),
-    };
+    let i10 = quiet_check(row, facts);
     let i11 = llama.map_or(Check::Held, |evidence| {
         let warm = &evidence.warm;
         Check::require(warm.top_k == 1 && warm.temperature == 0.0 && warm.seed == 1, || {
             format!("llama sampler top_k {} temperature {} seed {}", warm.top_k, warm.temperature, warm.seed)
         })
     });
-    let i12 = if !paired {
-        no_peer()
-    } else {
-        llama.map_or_else(
-            || missing("llama evidence"),
-            |evidence| {
-                Check::require(
-                    evidence.log.build.as_ref().is_some_and(|(_, commit)| *commit == facts.llama_commit),
-                    || format!("llama build {:?}, required commit {}", evidence.log.build, facts.llama_commit),
-                )
-            },
+    let i12 = on_pair(&|evidence| {
+        Check::require(
+            evidence.log.build.as_ref().is_some_and(|(_, commit)| *commit == facts.llama_commit),
+            || format!("llama build {:?}, required commit {}", evidence.log.build, facts.llama_commit),
         )
-    };
+    });
     Parity {
         checks: [i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12],
     }
 }
 
+fn quiet_check(row: &Row, facts: &Facts) -> Check {
+    match &row.gate {
+        GateOutcome::Clear { .. } => Check::require(row.load1 < facts.load_limit, || {
+            format!("load1 {:.2} at launch", row.load1)
+        }),
+        GateOutcome::Refused(reason) => Check::Failed(reason.clone()),
+        GateOutcome::Skipped => Check::Failed("quiet gate skipped".to_owned()),
+    }
+}
+
+/// I1..I12 for the in-process llama arm. Its identity checks read the arm's own `gate` line (I12:
+/// the pinned build number; I8: a recorded sha256, here libllama's) and its context settings (I5,
+/// I6, I7); the pair checks (I3 EOG, I4) compare against the same cell's `llama-server` row, whose
+/// absence marks them not applicable. The sampler is greedy by construction (I11).
+fn evaluate_inproc(row: &Row, server_peer: Option<&Row>, facts: &Facts) -> Parity {
+    let evidence = inproc_evidence(Some(row));
+    let server = llama_evidence(server_peer);
+    let without_peer = || Check::NotApplicable("no llama-server row in this cell".to_owned());
+    let judge = |check: &dyn Fn(&InprocEvidence) -> Check| {
+        evidence.map_or_else(|| Check::Failed("no llama-arm output".to_owned()), check)
+    };
+    let i1 = Check::require(!facts.model_sha256.is_empty(), || "model sha missing".to_owned());
+    let i2 = judge(&|found| {
+        Check::require(found.detail.prompt_token_count == row.sent_ids, || {
+            format!("llama-arm reports {} prompt ids, {} sent", found.detail.prompt_token_count, row.sent_ids)
+        })
+    });
+    let i3 = judge(&|found| {
+        let emitted: Vec<u64> = server
+            .map(|peer| found.detail.ids.iter().copied().filter(|id| peer.log.eog_ids.contains(id)).collect())
+            .unwrap_or_default();
+        Check::require(found.detail.tokens_generated == MAX_TOKENS && emitted.is_empty(), || {
+            format!("{} tokens (required {MAX_TOKENS}), EOG ids emitted {emitted:?}", found.detail.tokens_generated)
+        })
+    });
+    let i4 = match (evidence, server) {
+        (Some(found), Some(peer)) => first_divergence(&found.detail.ids, &peer.warm.ids)
+            .map_or(Check::Held, |position| Check::Failed(format!("first divergence at {position}"))),
+        (None, _) => Check::Failed("no llama-arm output".to_owned()),
+        (_, None) => without_peer(),
+    };
+    let i5 = judge(&|found| match row.cell.kv.llama_types() {
+        Some((key, value)) => Check::require(found.gate.type_k == key && found.gate.type_v == value, || {
+            format!("llama-arm KV types {}/{}, expected {key}/{value}", found.gate.type_k, found.gate.type_v)
+        }),
+        None => Check::Failed("llama-inproc row for a pair it cannot flash".to_owned()),
+    });
+    let i6 = judge(&|found| Check::require(found.gate.flash_attn, || "llama-arm flash_attn not enabled".to_owned()));
+    let i7 = judge(&|found| {
+        let expected = llama_padded_capacity(row.capacity);
+        Check::require(found.gate.n_ctx_requested == expected, || {
+            format!("llama-arm n_ctx {}, expected {expected} (ours {})", found.gate.n_ctx_requested, row.capacity)
+        })
+    });
+    let i8 = Check::require(!row.binary_sha256.is_empty() && !row.debug_build, || {
+        "gate sha missing or debug llama-arm build".to_owned()
+    });
+    let i9 = Check::require(row.span_metrics, || "no step_time records for runs 0..2".to_owned());
+    let i10 = quiet_check(row, facts);
+    let i11 = Check::Held;
+    let i12 = judge(&|found| {
+        Check::require(found.gate.build == PINNED_LLAMA_BUILD && found.gate.sha256 == row.binary_sha256, || {
+            format!("llama-arm gate build {} (required {PINNED_LLAMA_BUILD})", found.gate.build)
+        })
+    });
+    Parity {
+        checks: [i1, i2, i3, i4, i5, i6, i7, i8, i9, i10, i11, i12],
+    }
+}
+
+/// The row an invariant compares `row` against in the same (round, prompt, kv) cell group.
+fn find_peer<'a>(rows: &'a [Row], row: &Row) -> Option<&'a Row> {
+    rows.iter().find(|other| {
+        other.round == row.round
+            && other.cell.group() == row.cell.group()
+            && row.cell.engine.pairs_with(&other.cell.engine)
+    })
+}
+
 fn evaluate_all(rows: &mut [Row], facts: &Facts) {
     let parities: Vec<Parity> = rows
         .iter()
-        .map(|row| {
-            let peer = rows.iter().find(|other| {
-                other.round == row.round
-                    && other.cell.group() == row.cell.group()
-                    && (other.cell.engine == Engine::Llama) != (row.cell.engine == Engine::Llama)
-            });
-            evaluate(row, peer, facts)
-        })
+        .map(|row| evaluate(row, find_peer(rows, row), facts))
         .collect();
     for (row, parity) in rows.iter_mut().zip(parities) {
         row.parity = parity;
@@ -900,26 +1156,51 @@ fn fmt_bytes(value: Option<u64>) -> String {
 }
 
 fn divergence_text(row: &Row, peer: Option<&Row>) -> String {
-    let (proxima, llama) = match row.cell.engine {
+    let (ours, server) = match row.cell.engine {
         Engine::Proxima { .. } => (proxima_detail(Some(row)), llama_evidence(peer)),
         Engine::Llama => (proxima_detail(peer), llama_evidence(Some(row))),
+        Engine::LlamaInproc { .. } => (inproc_evidence(Some(row)).map(|found| &found.detail), llama_evidence(peer)),
     };
-    match (proxima, llama) {
+    match (ours, server) {
         (Some(detail), Some(evidence)) => first_divergence(&detail.ids, &evidence.warm.ids)
             .map_or_else(|| "none".to_owned(), |position| position.to_string()),
         _ => "-".to_owned(),
     }
 }
 
+/// The llama-side evidence a row's llama columns show: the server's own, or the in-process arm's.
+fn llama_columns(row: &Row, peer: Option<&Row>) -> (String, String, String) {
+    if let Some(found) = inproc_evidence(Some(row)) {
+        let build = format!("build {} (inproc gate)", found.gate.build);
+        return (found.detail.tokens_generated.to_string(), build, found.gate.n_ctx_requested.to_string());
+    }
+    let server = llama_evidence(Some(row)).or_else(|| llama_evidence(peer));
+    let generated = server.map_or_else(|| "-".to_owned(), |evidence| evidence.warm.predicted_n.to_string());
+    let build = server
+        .and_then(|evidence| evidence.log.build.as_ref())
+        .map_or_else(|| "-".to_owned(), |(number, commit)| format!("build {number} ({commit})"));
+    let n_ctx = llama_evidence(Some(row))
+        .and_then(|evidence| evidence.log.n_ctx_seq)
+        .map_or_else(|| "-".to_owned(), |ctx| ctx.to_string());
+    (generated, build, n_ctx)
+}
+
 fn tsv_line(row: &Row, peer: Option<&Row>, facts: &Facts) -> String {
     let sample = |samples: &[f64], index: usize| fmt_opt(samples.get(index).copied());
-    let llama = llama_evidence(Some(row)).or_else(|| llama_evidence(peer));
     let proxima = proxima_detail(Some(row)).or_else(|| proxima_detail(peer));
+    let (gen_llama, llama_build, llama_n_ctx) = llama_columns(row, peer);
     let definition = match (&row.cell.engine, row.span_metrics) {
         (Engine::Proxima { .. }, true) => PROXIMA_SPAN_DEFINITION,
         (Engine::Proxima { .. }, false) => PROXIMA_LEGACY_DEFINITION,
         (Engine::Llama, _) => LLAMA_METRIC_DEFINITION,
+        (Engine::LlamaInproc { .. }, _) => INPROC_METRIC_DEFINITION,
     };
+    let reduced_ms = match row.cell.engine {
+        Engine::Llama => None,
+        _ if row.span_metrics => row.metrics.tok_s.first().map(|tok_s| 1000.0 / tok_s),
+        _ => None,
+    };
+    let server_ms = llama_evidence(Some(row)).map(|evidence| evidence.warm.predicted_per_token_ms);
     let legacy = row.legacy.clone().unwrap_or_default();
     let checks: Vec<String> = row.parity.checks.iter().map(Check::text).collect();
     let fields = [
@@ -940,7 +1221,7 @@ fn tsv_line(row: &Row, peer: Option<&Row>, facts: &Facts) -> String {
         sample(&row.metrics.tok_s, 1),
         row.exit_code.to_string(),
         llama_evidence(Some(row)).map_or_else(|| "-".to_owned(), |evidence| format!("{:.2}", evidence.log.kv_buffer_mib)),
-        llama_evidence(Some(row)).and_then(|evidence| evidence.log.n_ctx_seq).map_or_else(|| "-".to_owned(), |ctx| ctx.to_string()),
+        llama_n_ctx,
         row.capacity.to_string(),
         checks[0].clone(),
         checks[1].clone(),
@@ -956,20 +1237,20 @@ fn tsv_line(row: &Row, peer: Option<&Row>, facts: &Facts) -> String {
         checks[11].clone(),
         if row.parity.valid() { "valid" } else { "INVALID" }.to_owned(),
         divergence_text(row, peer),
-        llama.map_or_else(|| "-".to_owned(), |evidence| evidence.warm.predicted_n.to_string()),
+        gen_llama,
         proxima.map_or_else(|| "-".to_owned(), |detail| detail.tokens_generated.to_string()),
         facts.model_sha256.clone(),
         row.binary_sha256.clone(),
         row.features.clone(),
-        llama
-            .and_then(|evidence| evidence.log.build.as_ref())
-            .map_or_else(|| "-".to_owned(), |(number, commit)| format!("build {number} ({commit})")),
+        llama_build,
         fmt_opt(legacy.ttft_cold_ms),
         sample(&legacy.ttft_warm_ms, 0),
         sample(&legacy.ttft_warm_ms, 1),
         fmt_opt(legacy.tok_s_run0),
         sample(&legacy.tok_s, 0),
         sample(&legacy.tok_s, 1),
+        fmt_opt(reduced_ms),
+        fmt_opt(server_ms),
         definition.to_owned(),
         row.gate.text(),
         row.note.clone(),
@@ -998,7 +1279,7 @@ fn collect(rows: &[&Row], pick: impl Fn(&Row) -> Vec<f64>) -> Vec<f64> {
 }
 
 fn bytes_to_megabytes(bytes: Option<u64>) -> Vec<f64> {
-    bytes.map(|bytes| bytes as f64 / MEGABYTE).into_iter().collect()
+    bytes.map(per_million).into_iter().collect()
 }
 
 /// One markdown table per (prompt, kv); one table row per cell; each metric as
@@ -1071,9 +1352,19 @@ struct Config {
     kv_bucket: usize,
     features: String,
     llama_commit: String,
+    /// path of the `llama-arm` `inproc_arm` bin; adds the llama-inproc arm
+    llama_inproc: Option<PathBuf>,
+    prompts: Vec<Prompt>,
+    kvs: Vec<Kv>,
+    /// false runs every process without waiting; every such row is INVALID on I10
+    quiet_gate: bool,
 }
 
-const VALUE_FLAGS: [&str; 12] = [
+const VALUE_FLAGS: [&str; 16] = [
+    "--quiet-gate",
+    "--llama-inproc",
+    "--prompts",
+    "--kvs",
     "--out",
     "--model",
     "--llama",
@@ -1128,9 +1419,12 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
             .map(PathBuf::from)
             .ok_or(HarnessError::MissingFlag(flag))
     };
-    if proxima.is_empty() {
+    let llama_inproc = values.get("--llama-inproc").map(PathBuf::from);
+    if proxima.is_empty() && llama_inproc.is_none() {
         return Err(HarnessError::MissingFlag("--prox"));
     }
+    let prompts = parse_names(&values, "--prompts", "short|long", ALL_PROMPTS, Prompt::parse)?;
+    let kvs = parse_names(&values, "--kvs", "F32|F16|BF16|Q4K", ALL_KV, Kv::parse)?;
     let rounds: usize = parse_value(&values, "--rounds", "a positive integer", DEFAULT_ROUNDS)?;
     if rounds == 0 {
         return Err(HarnessError::BadValue {
@@ -1164,7 +1458,35 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
             .get("--features")
             .cloned()
             .unwrap_or_else(|| "unrecorded".to_owned()),
+        llama_inproc,
+        prompts,
+        kvs,
+        quiet_gate: match values.get("--quiet-gate").map(String::as_str) {
+            None | Some("on") => true,
+            Some("off") => false,
+            Some(other) => {
+                return Err(HarnessError::BadValue { flag: "--quiet-gate", expected: "on|off", got: other.to_owned() });
+            }
+        },
     })
+}
+
+/// A comma-separated subset of a closed set (`--prompts short`); absent means the whole set.
+fn parse_names<T: Copy, const COUNT: usize>(
+    values: &BTreeMap<String, String>,
+    flag: &'static str,
+    expected: &'static str,
+    all: [T; COUNT],
+    parse: fn(&str) -> Option<T>,
+) -> Result<Vec<T>, HarnessError> {
+    let Some(text) = values.get(flag) else {
+        return Ok(all.to_vec());
+    };
+    text.split(',')
+        .map(|name| {
+            parse(name.trim()).ok_or_else(|| HarnessError::BadValue { flag, expected, got: name.to_owned() })
+        })
+        .collect()
 }
 
 fn load1() -> f64 {
@@ -1194,8 +1516,8 @@ fn tokenize_like_proxima(text: &str, vocab: &Vocab) -> Result<Vec<u32>, HarnessE
     let add_bos = vocab
         .add_bos_token()
         .unwrap_or_else(|| vocab.bos_token_id().is_some());
-    let add_eos = vocab.add_eos_token().unwrap_or(false);
-    proxima_tokenizer::encode_with_bos_eos(text, vocab, add_bos, add_eos)
+    let wants_eos = vocab.add_eos_token().unwrap_or(false);
+    proxima_tokenizer::encode_with_bos_eos(text, vocab, add_bos, wants_eos)
         .map_err(|source| HarnessError::Tokenize(format!("{source:?}")))
 }
 
@@ -1217,7 +1539,7 @@ fn own_busy_processes() -> Vec<String> {
     let text = output.map(|output| String::from_utf8_lossy(&output.stdout).into_owned()).unwrap_or_default();
     // SAFETY: getppid takes no arguments and cannot fail.
     let parent = unsafe { libc::getppid() };
-    busy_from_pgrep(&text, std::process::id(), parent as u32)
+    busy_from_pgrep(&text, std::process::id(), u32::try_from(parent).unwrap_or(0))
 }
 
 fn wait_for_quiet(config: &GateConfig) -> GateOutcome {
@@ -1341,7 +1663,7 @@ impl TimedServer {
         None
     }
 
-    fn wait_ready(&self, port: u16, seconds: u64) -> bool {
+    fn wait_ready(port: u16, seconds: u64) -> bool {
         let started = Instant::now();
         while started.elapsed() < Duration::from_secs(seconds) {
             let answer = http_exchange(port, "GET", "/health", "", Duration::from_secs(5)).unwrap_or_default();
@@ -1373,7 +1695,7 @@ struct RunContext<'a> {
 fn run_llama(context: &RunContext, cell: &Cell, row: &mut Row) -> Result<(), HarnessError> {
     let server = TimedServer::spawn(context.config, context.prompt.capacity, cell.kv, context.port, &context.log_path)?;
     let outcome = (|| {
-        if !server.wait_ready(context.port, 180) {
+        if !TimedServer::wait_ready(context.port, 180) {
             return Err(HarnessError::Server("never became healthy".to_owned()));
         }
         let body = completion_body(&context.prompt.ids);
@@ -1429,6 +1751,41 @@ fn run_proxima(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) 
     row.metrics = span.unwrap_or_else(|| legacy.clone());
     row.legacy = Some(legacy);
     row.evidence = Evidence::Proxima(parse_proxima_detail(&combined)?);
+    Ok(())
+}
+
+/// One `inproc_arm` process under `/usr/bin/time -l`: same prompt ids, `n_predict`, KV types and
+/// padded `-c` as the server arm, libllama taken from the server's own install directory so both
+/// arms load the same build. Its row's `binary_sha256` is the gate's libllama sha256 (I12); the
+/// arm bin's own sha256 goes in the note.
+fn run_inproc(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) -> Result<(), HarnessError> {
+    let (type_k, type_v) = cell.kv.llama_types().ok_or_else(|| HarnessError::Server("no llama arm for this KV".to_owned()))?;
+    let ids: Vec<String> = context.prompt.ids.iter().map(u32::to_string).collect();
+    let library_dir = context.config.llama.parent().unwrap_or(Path::new("."));
+    let output = Command::new(&context.config.time_bin)
+        .arg("-l")
+        .arg(binary)
+        .arg("--model")
+        .arg(&context.config.model)
+        .args(["--ids", &ids.join(",")])
+        .args(["--n-ctx", &llama_padded_capacity(context.prompt.capacity).to_string()])
+        .args(["--n-predict", &MAX_TOKENS.to_string(), "--runs", "3"])
+        .args(["--type-k", type_k, "--type-v", type_v])
+        .env("LLAMA_LIB_DIR", library_dir)
+        .env("GGML_METAL_RESIDENCY_KEEP_ALIVE_S", "1")
+        .output()
+        .map_err(|source| HarnessError::Server(format!("spawn failed: {source}")))?;
+    row.exit_code = output.status.code().unwrap_or(-1);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    fs::write(&context.log_path, &stderr).map_err(io_error(&context.log_path))?;
+    row.footprint_bytes = parse_footprint_bytes(&stderr).ok();
+    let gate = parse_inproc_gate(&stderr).ok_or(HarnessError::MissingLine("llama_arm gate line"))?;
+    row.binary_sha256.clone_from(&gate.sha256);
+    let metrics = parse_inproc_span(&stderr);
+    row.span_metrics = metrics.is_some();
+    row.metrics = metrics.unwrap_or_default();
+    let detail = parse_proxima_detail(&stderr)?;
+    row.evidence = Evidence::Inproc(Box::new(InprocEvidence { detail, gate }));
     Ok(())
 }
 
@@ -1498,16 +1855,17 @@ fn run(config: &Config) -> Result<(), HarnessError> {
         llama_commit: config.llama_commit.clone(),
     };
     let llama_identity = arm_identity(&config.llama)?;
-    let cells = cell_order(&config.proxima);
+    let mut cells = cell_order(&config.proxima, config.llama_inproc.as_deref());
+    cells.retain(|cell| config.prompts.contains(&cell.prompt) && config.kvs.contains(&cell.kv));
     let mut rows = Vec::new();
     for (step, (round, index)) in round_plan(config.rounds, cells.len()).into_iter().enumerate() {
         let cell = &cells[index];
         let prompt = &prompts[&cell.prompt];
         let identity = match &cell.engine {
-            Engine::Proxima { binary } => arm_identity(binary)?,
+            Engine::Proxima { binary } | Engine::LlamaInproc { binary } => arm_identity(binary)?,
             Engine::Llama => ArmIdentity { sha256: llama_identity.sha256.clone(), debug_build: false },
         };
-        let gate = wait_for_quiet(&config.gate);
+        let gate = if config.quiet_gate { wait_for_quiet(&config.gate) } else { GateOutcome::Skipped };
         let mut row = blank_row(round, cell, prompt, &identity, config, gate.clone());
         let context = RunContext {
             config,
@@ -1516,16 +1874,20 @@ fn run(config: &Config) -> Result<(), HarnessError> {
             port: BASE_PORT + u16::try_from(step % 1000).unwrap_or(0),
             log_path: logs.join(format!("r{round}-{}-{}-{}-{}.err", cell.engine_name(), cell.label, cell.prompt.name(), cell.kv.name())),
         };
-        if let GateOutcome::Clear { .. } = gate {
+        if gate.may_run() {
             let outcome = match &cell.engine {
                 Engine::Proxima { binary } => run_proxima(&context, cell, binary, &mut row),
                 Engine::Llama => run_llama(&context, cell, &mut row),
+                Engine::LlamaInproc { binary } => {
+                    row.note = format!("llama-arm bin sha256 {}", identity.sha256);
+                    run_inproc(&context, cell, binary, &mut row)
+                }
             };
             if let Err(error) = outcome {
-                row.note = error.to_string();
+                row.note = format!("{}; {error}", row.note);
             }
         } else {
-            row.note = "not run: quiet gate refused".to_owned();
+            "not run: quiet gate refused".clone_into(&mut row.note);
         }
         println!("round {} {} {} {} {} exit {} {}", context.round, cell.engine_name(), cell.label, cell.prompt.name(), cell.kv.name(), row.exit_code, row.note);
         rows.push(row);
@@ -1537,12 +1899,7 @@ fn run(config: &Config) -> Result<(), HarnessError> {
 fn write_outputs(config: &Config, cells: &[Cell], rows: &[Row], facts: &Facts) -> Result<(), HarnessError> {
     let mut tsv = format!("{TSV_HEADER}\n");
     for row in rows {
-        let peer = rows.iter().find(|other| {
-            other.round == row.round
-                && other.cell.group() == row.cell.group()
-                && (other.cell.engine == Engine::Llama) != (row.cell.engine == Engine::Llama)
-        });
-        let _ = writeln!(tsv, "{}", tsv_line(row, peer, facts));
+        let _ = writeln!(tsv, "{}", tsv_line(row, find_peer(rows, row), facts));
     }
     let tsv_path = config.out.join("raw.tsv");
     fs::write(&tsv_path, &tsv).map_err(io_error(&tsv_path))?;
@@ -1765,6 +2122,7 @@ mod tests {
             prompt_ms: 80.0,
             predicted_ms: 1000.0,
             predicted_per_second: 128.0,
+            predicted_per_token_ms: 1000.0 / 128.0,
             top_k: 1,
             temperature: 0.0,
             seed: 1,
@@ -1971,22 +2329,22 @@ mod tests {
         assert!(!rows[0].parity.valid());
     }
 
-    // synthetic until card PAR1c lands: built from the field names the card specifies,
-    // `ttft_ms_precise` and `decode_step_ms_per_token`, appended to real run=done lines
+    // built from real run=done lines: `ttft_ms_precise` appended to each, plus two decode
+    // `step_time` records per run whose step_ns are exactly 8.0, 10.0 and 12.5 ms
     fn span_log() -> String {
-        PROX_LOG
-            .lines()
-            .map(|line| {
-                let extra = match run_index_of(line).filter(|_| line.contains("run=done")) {
-                    Some(0) => " ttft_ms_precise=300.5 decode_step_ms_per_token=8.0",
-                    Some(1) => " ttft_ms_precise=80.25 decode_step_ms_per_token=10.0",
-                    Some(2) => " ttft_ms_precise=90.75 decode_step_ms_per_token=12.5",
-                    _ => "",
-                };
-                format!("{line}{extra}")
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
+        let done = PROX_LOG.lines().map(|line| {
+            let extra = match run_index_of(line).filter(|_| line.contains("run=done")) {
+                Some(0) => " ttft_ms_precise=300.5",
+                Some(1) => " ttft_ms_precise=80.25",
+                Some(2) => " ttft_ms_precise=90.75",
+                _ => "",
+            };
+            format!("{line}{extra}")
+        });
+        let records = [(0, 8_000_000_u64), (1, 10_000_000), (2, 12_500_000)].into_iter().flat_map(|(run, nanos)| {
+            (1..=2).map(move |step| format!("INFO decode_gbps_baseline: step_time run_index={run} step={step} step_ms=0 step_ns={nanos} phase=decode"))
+        });
+        done.chain(records).collect::<Vec<_>>().join("\n")
     }
 
     #[test]
@@ -2004,9 +2362,164 @@ mod tests {
 
     #[test]
     fn one_run_done_line_missing_a_span_field_rejects_the_whole_span_parse() {
-        let partial = span_log().replacen(" decode_step_ms_per_token=12.5", "", 1);
+        let partial = span_log().replacen(" ttft_ms_precise=90.75", "", 1);
         let legacy = parse_proxima(&partial).expect("legacy parses");
         assert!(parse_proxima_span(&partial, &legacy).is_none());
+    }
+
+    #[test]
+    fn a_run_without_decode_step_records_rejects_the_whole_span_parse() {
+        let partial: String = span_log().lines().filter(|line| !(line.contains("run_index=2 step=") && line.contains("phase=decode"))).collect::<Vec<_>>().join("\n");
+        let legacy = parse_proxima(&partial).expect("legacy parses");
+        assert!(partial.contains("run_index=2 ") && parse_proxima_span(&partial, &legacy).is_none());
+    }
+
+    const STEP_TIMES_FIXTURE: &str = include_str!("../tests/fixtures/decode_gbps_baseline_step_times.log");
+
+    fn record(index: usize, phase: SpanPhase, elapsed_ns: u64) -> TokenRecord {
+        TokenRecord { index, phase, elapsed_ns }
+    }
+
+    #[test]
+    fn the_reducer_gives_the_same_ms_per_token_for_the_same_records_whichever_arm_wrote_them() {
+        let llama_arm_text = STEP_TIMES_FIXTURE.replace("INFO decode_gbps_baseline:", "llama_arm");
+        assert_ne!(llama_arm_text, STEP_TIMES_FIXTURE, "the arm prefix must differ for the control to mean anything");
+        let from_proxima = decode_span_ms_per_token(&parse_token_records(STEP_TIMES_FIXTURE)[&0]).expect("127 decode records");
+        let from_llama = decode_span_ms_per_token(&parse_token_records(&llama_arm_text)[&0]).expect("127 decode records");
+        assert_eq!(from_proxima.to_bits(), from_llama.to_bits());
+        assert!((from_proxima - 9.851_366_795).abs() < 1e-9, "real 128-token run: got {from_proxima}");
+    }
+
+    #[test]
+    fn prefill_records_are_excluded_from_the_decode_span() {
+        let decode = [record(1, SpanPhase::Decode, 9_000_000), record(2, SpanPhase::Decode, 11_000_000)];
+        let with_prefill = [record(0, SpanPhase::Prefill, 400_000_000), decode[0], decode[1]];
+        assert_eq!(decode_span_ms_per_token(&with_prefill), Some(10.0));
+        assert_eq!(decode_span_ms_per_token(&decode), Some(10.0));
+        assert_eq!(prefill_ms(&with_prefill), Some(400.0));
+    }
+
+    #[test]
+    fn a_prefill_record_mislabelled_decode_changes_the_ms_per_token() {
+        let honest = [
+            record(0, SpanPhase::Prefill, 400_000_000),
+            record(1, SpanPhase::Decode, 9_000_000),
+            record(2, SpanPhase::Prefill, 300_000_000),
+            record(3, SpanPhase::Decode, 11_000_000),
+        ];
+        let mut mislabelled = honest;
+        mislabelled[2].phase = SpanPhase::Decode;
+        assert_eq!(decode_span_ms_per_token(&honest), Some(10.0));
+        assert_eq!(decode_span_ms_per_token(&mislabelled), Some((9.0 + 300.0 + 11.0) / 3.0));
+    }
+
+    #[test]
+    fn a_step_zero_prefill_record_is_excluded_by_index_even_when_mislabelled_decode() {
+        let mut records = [record(0, SpanPhase::Prefill, 400_000_000), record(1, SpanPhase::Decode, 9_000_000)];
+        let honest = decode_span_ms_per_token(&records);
+        records[0].phase = SpanPhase::Decode;
+        assert_eq!(decode_span_ms_per_token(&records), honest);
+    }
+
+    #[test]
+    fn no_admitted_record_is_none_not_zero() {
+        assert_eq!(decode_span_ms_per_token(&[]), None);
+        assert_eq!(decode_span_ms_per_token(&[record(0, SpanPhase::Prefill, 5), record(0, SpanPhase::Decode, 5)]), None);
+    }
+
+    const INPROC_GATE_LINE: &str = "llama_arm gate sha256=d54034a90777fb94ce2b8c6638b71a7cde7beb29ed7e160c0622ca894f36cabc build=11671 type_k=f16 type_v=f16 flash_attn=enabled n_ctx=256 n_predict=128 runs=3";
+
+    fn inproc_log() -> String {
+        let steps = (0..3).flat_map(|run| {
+            let prefill = format!("llama_arm step_time run_index={run} step=0 step_ms=80 step_ns=80500000 phase=prefill");
+            let decode = (1..=3).map(move |step| format!("llama_arm step_time run_index={run} step={step} step_ms=9 step_ns=9250000 phase=decode"));
+            std::iter::once(prefill).chain(decode)
+        });
+        std::iter::once(INPROC_GATE_LINE.to_owned()).chain(steps).collect::<Vec<_>>().join("\n")
+    }
+
+    #[test]
+    fn inproc_log_gives_prefill_ttft_and_reducer_tok_s_for_all_three_runs() {
+        let metrics = parse_inproc_span(&inproc_log()).expect("three runs of records");
+        assert!(close(metrics.ttft_cold_ms, 80.5));
+        assert_eq!(metrics.ttft_warm_ms, vec![80.5, 80.5]);
+        assert!(close(metrics.tok_s_run0, 1000.0 / 9.25));
+        assert_eq!(metrics.tok_s, vec![1000.0 / 9.25, 1000.0 / 9.25]);
+        let gate = parse_inproc_gate(&inproc_log()).expect("gate line");
+        assert_eq!((gate.build, gate.type_k.as_str(), gate.flash_attn, gate.n_ctx_requested), (11_671, "f16", true, 256));
+        assert!(parse_inproc_span("llama_arm gate sha256=x").is_none());
+    }
+
+    const LLAMA_ARM_FIXTURE: &str = include_str!("fixtures/llama_arm_step_times.log");
+
+    #[test]
+    fn a_real_inproc_arm_log_reduces_to_the_sum_of_its_127_decode_records_over_127() {
+        let records = parse_token_records(LLAMA_ARM_FIXTURE);
+        assert_eq!(records.len(), 3);
+        for run in records.values() {
+            assert_eq!(run.iter().filter(|found| found.phase == SpanPhase::Prefill).count(), 1);
+            assert_eq!(run.iter().filter(|found| found.counts_toward_decode_span()).count(), 127);
+        }
+        let by_hand: u64 = records[&1].iter().filter(|found| found.phase == SpanPhase::Decode && found.index >= 1).map(|found| found.elapsed_ns).sum();
+        let reduced = decode_span_ms_per_token(&records[&1]).expect("127 decode records");
+        assert!((reduced - by_hand as f64 / 127.0 / 1e6).abs() < 1e-12);
+        let gate = parse_inproc_gate(LLAMA_ARM_FIXTURE).expect("gate line");
+        assert_eq!((gate.build, gate.flash_attn), (PINNED_LLAMA_BUILD, true));
+        assert!(parse_inproc_span(LLAMA_ARM_FIXTURE).is_some());
+    }
+
+    fn inproc_row(ids: Vec<u64>, build: u32) -> Row {
+        let gate = InprocGate {
+            sha256: "deadbeef".to_owned(),
+            build,
+            type_k: "f16".to_owned(),
+            type_v: "f16".to_owned(),
+            flash_attn: true,
+            n_ctx_requested: 256,
+        };
+        let detail = ProximaDetail { tokens_generated: ids.len(), ids, prompt_token_count: 27 };
+        let evidence = Evidence::Inproc(Box::new(InprocEvidence { detail, gate }));
+        row(Engine::LlamaInproc { binary: PathBuf::from("/bin/inproc_arm") }, evidence)
+    }
+
+    #[test]
+    fn an_inproc_row_with_the_same_ids_as_the_server_has_no_failing_invariant() {
+        let ids: Vec<u64> = (1000..1128).collect();
+        let server = llama_row(ids.clone());
+        let inproc = inproc_row(ids, PINNED_LLAMA_BUILD);
+        assert_eq!(evaluate(&inproc, Some(&server), &facts()).failing(), Vec::<String>::new());
+        assert_eq!(divergence_text(&inproc, Some(&server)), "none");
+    }
+
+    #[test]
+    fn an_inproc_row_names_the_first_divergence_from_the_server_ids() {
+        let ids: Vec<u64> = (1000..1128).collect();
+        let mut other = ids.clone();
+        other[40] = 7;
+        let server = llama_row(ids);
+        let inproc = inproc_row(other, PINNED_LLAMA_BUILD);
+        assert_eq!(evaluate(&inproc, Some(&server), &facts()).failing(), vec!["I4 first divergence at 40".to_owned()]);
+        assert_eq!(divergence_text(&inproc, Some(&server)), "40");
+    }
+
+    #[test]
+    fn an_inproc_gate_reporting_another_build_fails_i12() {
+        let inproc = inproc_row((1000..1128).collect(), 11_670);
+        let failing = evaluate(&inproc, None, &facts()).failing();
+        assert_eq!(failing, vec!["I12 llama-arm gate build 11670 (required 11671)".to_owned()]);
+    }
+
+    #[test]
+    fn an_inproc_row_pairs_with_the_server_row_and_the_tsv_carries_gate_sha_and_build() {
+        let ids: Vec<u64> = (1000..1128).collect();
+        let mut rows = vec![inproc_row(ids.clone(), PINNED_LLAMA_BUILD), llama_row(ids), proxima_row((1000..1128).collect(), 27)];
+        evaluate_all(&mut rows, &facts());
+        assert_eq!(find_peer(&rows, &rows[0]).map(|peer| peer.cell.engine_name()), Some("llama"));
+        assert_eq!(find_peer(&rows, &rows[2]).map(|peer| peer.cell.engine_name()), Some("llama"));
+        let line = tsv_line(&rows[0], find_peer(&rows, &rows[0]), &facts());
+        assert_eq!(line.split('\t').count(), TSV_HEADER.split('\t').count());
+        assert!(line.contains("\tdeadbeef\t") && line.contains("\tbuild 11671 (inproc gate)\t"), "{line}");
+        assert!(line.contains("INPROC ttft="));
     }
 
     #[test]
@@ -2076,9 +2589,24 @@ mod tests {
     #[test]
     fn llama_has_no_arm_for_the_q4_key_row_and_cells_follow_the_row_space() {
         let proxima = vec![("new".to_owned(), PathBuf::from("/bin/a"))];
-        let cells = cell_order(&proxima);
+        let cells = cell_order(&proxima, None);
         assert_eq!(cells.len(), 2 * (4 + 3));
         assert!(!cells.iter().any(|cell| cell.engine == Engine::Llama && cell.kv == Kv::Q4K));
+    }
+
+    #[test]
+    fn the_inproc_arm_gets_a_cell_wherever_the_server_has_one_and_flags_select_a_subset() {
+        let inproc = PathBuf::from("/bin/inproc_arm");
+        let cells = cell_order(&[], Some(&inproc));
+        assert_eq!(cells.len(), 2 * 3 * 2);
+        assert!(cells.iter().all(|cell| cell.kv != Kv::Q4K));
+        let base = ["--out", "o", "--model", "m", "--llama", "l", "--long-prompt-file", "p", "--llama-commit", "ba3c05f71"];
+        let mut arguments: Vec<String> = base.iter().map(|text| (*text).to_owned()).collect();
+        arguments.extend(["--llama-inproc", "/bin/inproc_arm", "--prompts", "short", "--kvs", "F16"].map(str::to_owned));
+        let config = parse_config(arguments.clone()).expect("an inproc arm alone is an arm");
+        assert_eq!((config.prompts, config.kvs), (vec![Prompt::Short], vec![Kv::F16]));
+        arguments.extend(["--kvs", "F8"].map(str::to_owned));
+        assert!(parse_config(arguments).is_err());
     }
 
     #[test]
@@ -2087,7 +2615,7 @@ mod tests {
             ("new".to_owned(), PathBuf::from("/bin/a")),
             ("old".to_owned(), PathBuf::from("/bin/b")),
         ];
-        let cells = cell_order(&proxima);
+        let cells = cell_order(&proxima, None);
         assert_eq!(cells.len(), 2 * (4 * 2 + 3));
         let plan = round_plan(5, cells.len());
         assert_eq!(plan.len(), 5 * cells.len());
