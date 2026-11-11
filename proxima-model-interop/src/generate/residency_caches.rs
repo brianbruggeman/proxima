@@ -3083,7 +3083,23 @@ impl BackendRuntime {
     /// after a half-width adoption would read binary16 bytes as f32.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) fn drop_decode_plans(&mut self) {
+        #[cfg(feature = "instrument")]
+        let drop_started = proxima_tensor::instrument::read_ticks();
+        let plans_dropped = self.decode_plans.len() as u64;
         self.decode_plans.clear();
+        #[cfg(feature = "instrument")]
+        debug!(
+            plans_dropped,
+            drop_ns = proxima_tensor::instrument::ticks_to_nanos(
+                proxima_tensor::instrument::elapsed_ticks(drop_started)
+            ),
+            "decode_plans_dropped: a narrow device-kv adoption invalidates the f32-bound decode plans, so the next evaluate rebuilds one"
+        );
+        #[cfg(not(feature = "instrument"))]
+        debug!(
+            plans_dropped,
+            "decode_plans_dropped: a narrow device-kv adoption invalidates the f32-bound decode plans, so the next evaluate rebuilds one"
+        );
     }
 
     /// Whether this call's [`ServingConfig`] selected the Gpu engine --
@@ -4753,7 +4769,18 @@ impl BackendRuntime {
             }
             Entry::Vacant(entry) => {
                 *plan_misses += 1;
+                #[cfg(feature = "instrument")]
+                let build_started = proxima_tensor::instrument::read_ticks();
                 let plan = build()?;
+                #[cfg(feature = "instrument")]
+                debug!(
+                    plan_misses = *plan_misses as u64,
+                    plan_hits = *plan_hits as u64,
+                    build_ns = proxima_tensor::instrument::ticks_to_nanos(
+                        proxima_tensor::instrument::elapsed_ticks(build_started)
+                    ),
+                    "decode_plan_built: no resident plan matched this shape key, so one was lowered and bound"
+                );
                 Ok(entry.insert(plan))
             }
         };
