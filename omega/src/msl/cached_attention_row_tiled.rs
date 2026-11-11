@@ -255,17 +255,11 @@ pub(super) fn render_cached_attention_row_tiled_with(
             reason: "shared K staging exceeds the configured threadgroup-memory budget",
         });
     }
-    let cached_type = match cached_kv_codec {
-        None => "float",
-        Some(Codec::BFloat16) => "ushort",
-        Some(Codec::BFloat8) => "uchar",
-        Some(_) => {
-            return Err(EmitError::CachedAttentionKvCodecNotSupported {
-                node: resolved.node,
-                reason: "row-tiled attention reads cached K/V as F32, BFloat16, or BFloat8",
-            });
-        }
-    };
+    let cached_type =
+        row_tiled_cached_type(cached_kv_codec).ok_or(EmitError::CachedAttentionKvCodecNotSupported {
+            node: resolved.node,
+            reason: ROW_TILED_KV_REASON,
+        })?;
     let substitutions = [
         ("@KV_TYPE@", cached_type.to_string()),
         (

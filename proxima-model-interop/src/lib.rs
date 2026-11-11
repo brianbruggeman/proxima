@@ -105,6 +105,7 @@ mod prism_hadamard;
 #[cfg(feature = "std")]
 mod recurrent_settings;
 pub mod rope_scaling;
+mod kv_cache_format;
 mod serving;
 mod serving_grammar;
 #[cfg(feature = "std")]

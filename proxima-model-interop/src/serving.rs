@@ -62,6 +62,7 @@ use proxima_gguf::types::GgmlType;
 use proxima_numeric::NumericPolicy;
 
 use crate::error::InteropError;
+use crate::kv_cache_format;
 use crate::recurrent_config::RecurrentConfig;
 use crate::rope_scaling::RopeScaling;
 use crate::serving_grammar::{AssembleStep, ReadSpec};
@@ -1416,23 +1417,7 @@ pub fn apply_serving_config(config: &ServingConfig, sequence: usize) -> Result<(
         )));
     }
 
-    let kv_cache_pair_supported = matches!(
-        (config.kv_cache_key_quant, config.kv_cache_value_quant),
-        (GgmlType::F32, GgmlType::F32) | (GgmlType::F16, GgmlType::F16)
-    );
-    if !kv_cache_pair_supported {
-        return Err(InteropError::UnsupportedServingConfig(format!(
-            "kv_cache_key_quant={:?} kv_cache_value_quant={:?} (-ctk/-ctv): the cached \
-             attention kernels read an f32 cache everywhere, and the single-row decode kernel \
-             also reads an f16 cache held in the device-resident KV, with key and value in the \
-             same type; a quantized cache (Q8_0, Q4_0, ...) has no read path -- the quantized \
-             matmul dispatch only handles a flat `weight[rows, k] x activation[batch, k]` \
-             matmul, while the cached-attention reduces are batched reduces over a shared \
-             kv-head axis, which the blocking check in `proxima_tensor::cpu::run_reduce_quantized` \
-             rejects",
-            config.kv_cache_key_quant, config.kv_cache_value_quant
-        )));
-    }
+    kv_cache_format::admit_pair(config.kv_cache_key_quant, config.kv_cache_value_quant)?;
 
     if config.flash_attention {
         return Err(InteropError::UnsupportedServingConfig(
@@ -1762,6 +1747,27 @@ mod tests {
             .expect_err("an f16 key with an f32 value cache must be refused");
 
         assert!(mixed_error.to_string().contains("kv_cache_value_quant"));
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn serving_admits_a_bf16_cache_pair_and_names_the_format_of_a_refused_quantized_cache() {
+        let bf16_pair = ServingConfig {
+            kv_cache_key_quant: GgmlType::Bf16,
+            kv_cache_value_quant: GgmlType::Bf16,
+            ..ServingConfig::default()
+        };
+        let q8_0_pair = ServingConfig {
+            kv_cache_key_quant: GgmlType::Q8_0,
+            kv_cache_value_quant: GgmlType::Q8_0,
+            ..ServingConfig::default()
+        };
+
+        apply_serving_config(&bf16_pair, 1).expect("a bf16 key and value cache is admitted");
+        let q8_0_error = apply_serving_config(&q8_0_pair, 1)
+            .expect_err("a q8_0 cache has no kernel read path");
+
+        assert!(q8_0_error.to_string().contains("Q8_0"), "{q8_0_error}");
     }
 
     /// A config with every unimplemented knob switched to its

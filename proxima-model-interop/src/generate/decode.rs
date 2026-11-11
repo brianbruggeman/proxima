@@ -7,6 +7,7 @@ use proxima_core::{ServingFsmError, ServingState};
 
 use super::drafter::{DrafterSet, draft_limit_for_step};
 use super::*;
+use crate::kv_cache_format;
 use crate::memory_reclaim::monotonic_now;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use crate::cuda_async::CudaGpuService;
@@ -3600,7 +3601,7 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if !force_two_range
             && runtime.is_metal()
-            && serving_config.kv_cache_key_quant == GgmlType::F32
+            && kv_cache_format::is_binary32(serving_config.kv_cache_key_quant)
             && let Some(single_range) = &self.single_range
         {
             let mut placed_token_error: Option<InteropError> = None;
@@ -4092,11 +4093,12 @@ impl<'file> LoadedModel<'file> {
             (!drafter_set.is_empty() || model_proposer.is_some() || forced_draft_width.is_some())
                 && rings_cover_speculation(&layer_caches, draft_limit)
                 && !(self.recurrent_speculative_verify.is_some() && recurrent_state_is_placed);
-        if speculative_enabled && serving_config.kv_cache_key_quant == GgmlType::F16 {
-            return Err(InteropError::UnsupportedServingConfig(String::from(
-                "kv_cache_key_quant=f16 with speculative decoding: a verify step attends several \
-query rows against the cached range through the row-tiled kernel, which reads an f32 cache; \
-only the single-row decode kernel reads the half-width device cache",
+        if speculative_enabled && !kv_cache_format::row_tiled_reads(serving_config.kv_cache_key_quant) {
+            return Err(InteropError::UnsupportedServingConfig(alloc::format!(
+                "kv_cache_key_quant={:?} with speculative decoding: a verify step attends several \
+query rows against the cached range through the row-tiled kernel, which does not read this cache \
+format; only the single-row decode kernel reads it from the device cache",
+                serving_config.kv_cache_key_quant
             )));
         }
         // One draft buffer, reused every step -- every drafter's own
@@ -4188,7 +4190,7 @@ only the single-row decode kernel reads the half-width device cache",
         let mut step = 0usize;
         let mut carried_layers: Vec<(usize, NodeId)> = Vec::new();
         let mut carried_program = 0usize;
-        let kv_carry_eligible = serving_config.kv_cache_key_quant == GgmlType::F32
+        let kv_carry_eligible = kv_cache_format::is_binary32(serving_config.kv_cache_key_quant)
             && layer_caches.iter().all(|state| match state {
                 LayerCacheState::Attention(cache) => cache.ring.is_none(),
                 _ => true,
@@ -4702,12 +4704,12 @@ only the single-row decode kernel reads the half-width device cache",
                     // calls -- position/RoPE inputs, `cached_len`/`lm_head_row`,
                     // `sliding_rope_inputs`' leaves, and every KV/SSM
                     // cache leaf -- so the leaf names are fed identically whether decoding or tapping one node.
-                    // a binary16 cache is read only by the decode-split kernel, so it is adopted at the first
+                    // a narrow cache is read only by the decode-split kernel, so it is adopted at the first
                     // decode step; an f32 cache is adopted before the first evaluation and takes the prefill rows
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if !device_kv_attempted
                         && device_kv_eligible
-                        && (serving_config.kv_cache_key_quant != GgmlType::F16
+                        && (!kv_cache_format::is_narrow(serving_config.kv_cache_key_quant)
                             || (cached_len > 0 && is_last_step_batch))
                         && new_count <= device_kv_step_rows
                     {
@@ -4784,13 +4786,14 @@ only the single-row decode kernel reads the half-width device cache",
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let device_kv_resident = false;
                     if cached_len > 0
-                        && serving_config.kv_cache_key_quant == GgmlType::F16
+                        && kv_cache_format::is_narrow(serving_config.kv_cache_key_quant)
                         && !device_kv_resident
                     {
-                        return Err(InteropError::UnsupportedServingConfig(String::from(
-                            "kv_cache_key_quant=f16: the half-width cache lives in the device-resident KV, \
+                        return Err(InteropError::UnsupportedServingConfig(alloc::format!(
+                            "kv_cache_key_quant={:?}: the narrow cache lives in the device-resident KV, \
 which this decode did not adopt (a non-Metal backend, a recurrent layer, or a host cache that \
 did not hold every cached position)",
+                            serving_config.kv_cache_key_quant
                         )));
                     }
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
