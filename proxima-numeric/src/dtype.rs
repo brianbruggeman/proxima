@@ -1,4 +1,5 @@
 use crate::float_layout::FloatLayout;
+use crate::format::NumericFormat;
 
 /// Element encoding carried by a tensor operation.
 ///
@@ -70,9 +71,9 @@ impl DType {
 
     /// The number this dtype is stored as; `Bool` has no numeric format.
     #[must_use]
-    pub const fn format(self) -> Option<crate::NumericFormat> {
+    pub const fn format(self) -> Option<NumericFormat> {
         match self {
-            Self::Layout(layout) => Some(crate::NumericFormat::Scalar(layout)),
+            Self::Layout(layout) => Some(NumericFormat::Scalar(layout)),
             Self::Bool => None,
         }
     }
@@ -129,13 +130,13 @@ impl DType {
     }
 
     /// The `NumericFormat` that describes the same elements: a layout is its `Scalar`, `Bool` is
-    /// the two-level ladder [`crate::NumericFormat::Bool`]. Total, so a caller migrates by calling
+    /// the two-level ladder [`NumericFormat::Bool`]. Total, so a caller migrates by calling
     /// this once at the boundary.
     #[must_use]
-    pub const fn numeric_format(self) -> crate::NumericFormat {
+    pub const fn numeric_format(self) -> NumericFormat {
         match self {
-            Self::Layout(layout) => crate::NumericFormat::Scalar(layout),
-            Self::Bool => crate::NumericFormat::Bool,
+            Self::Layout(layout) => NumericFormat::Scalar(layout),
+            Self::Bool => NumericFormat::Bool,
         }
     }
 }
