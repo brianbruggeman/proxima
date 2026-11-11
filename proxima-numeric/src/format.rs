@@ -302,14 +302,33 @@ impl NumericFormat {
         }
     }
 
-    /// The exact packing of a block format; `None` for a scalar and for a trained codebook whose
-    /// code address is not an affine map.
+    /// The packing of a format whose values the layout alone determines: every `Block`, and a
+    /// `Levels` format only when its level map is the layout's own linear ladder
+    /// ([`LevelFormat::ladder`]). `None` for a scalar, for a trained codebook, and for a format
+    /// whose level table is not that ladder (IQ4_NL, IQ4_XS, IQ3_S): a reader of the layout alone
+    /// would decode those with the wrong levels. Such a caller reads [`LevelFormat::packing`] and
+    /// [`LevelFormat::levels`] explicitly.
     #[must_use]
     pub const fn block_layout(&self) -> Option<BlockLayout> {
         match self {
             Self::Scalar(_) => None,
             Self::Block(layout) => Some(*layout),
-            Self::Levels(levels) => levels.packing(),
+            Self::Levels(levels) => match levels.packing() {
+                Some(layout) => match (levels.levels, LevelFormat::ladder(&layout)) {
+                    (
+                        LevelTable::Linear { count, zero_point, step },
+                        LevelTable::Linear {
+                            count: own_count,
+                            zero_point: own_zero_point,
+                            step: own_step,
+                        },
+                    ) if count == own_count && zero_point == own_zero_point && step == own_step => {
+                        Some(layout)
+                    }
+                    _ => None,
+                },
+                None => None,
+            },
         }
     }
 
