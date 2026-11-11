@@ -11,6 +11,8 @@
 //! crate asks [`layout_supported`] first, so an out-of-domain layout is a typed error rather than
 //! a panic.
 
+use half::f16;
+
 use crate::convert::{Overflow, Rounding};
 use crate::float_layout::{
     FloatLayout, NanNarrow, NanWiden, SignEncoding, Specials, named_layout_table,
@@ -330,7 +332,7 @@ const fn min_u64(left: u64, right: u64) -> u64 {
 /// and leave the counter alone.
 #[must_use]
 #[inline(always)]
-pub const fn encode_counting(value: f32, layout: FloatLayout, nan_count: &mut u64) -> u32 {
+pub fn encode_counting(value: f32, layout: FloatLayout, nan_count: &mut u64) -> u32 {
     encode_with(
         value,
         layout,
@@ -347,7 +349,7 @@ pub const fn encode_counting(value: f32, layout: FloatLayout, nan_count: &mut u6
 /// subnormal flushing follow [`encode_counting`].
 #[must_use]
 #[inline(always)]
-pub const fn encode_with(
+pub fn encode_with(
     value: f32,
     layout: FloatLayout,
     rounding: Rounding,
@@ -363,6 +365,9 @@ pub const fn encode_with(
     let bits = value.to_bits();
     if layout.is_identity_of(&SOURCE_LAYOUT) {
         return bits;
+    }
+    if encodes_as_binary16(&layout, rounding, overflow) {
+        return u32::from(f16::from_f32(value).to_bits());
     }
     let bits = without_unrepresentable_sign(bits, &layout);
     if truncates_f32(&layout, rounding, overflow) {
@@ -405,6 +410,20 @@ const fn truncates_f32(layout: &FloatLayout, rounding: Rounding, overflow: Overf
     matches!(rounding, Rounding::NearestTiesEven)
         && matches!(overflow, Overflow::Format)
         && layout.is_mantissa_prefix_of(&SOURCE_LAYOUT)
+}
+
+// the cpu converts binary16 in one instruction and `half` keeps a software path where it has none; keyed on the layout's format, never its name
+#[inline(always)]
+const fn is_binary16(layout: &FloatLayout) -> bool {
+    layout.is_identity_of(&NATIVE_HALF_LAYOUT)
+}
+
+// the default rounding and overflow are what that instruction does
+#[inline(always)]
+const fn encodes_as_binary16(layout: &FloatLayout, rounding: Rounding, overflow: Overflow) -> bool {
+    matches!(rounding, Rounding::NearestTiesEven)
+        && matches!(overflow, Overflow::Format)
+        && is_binary16(layout)
 }
 
 // same default rounding and overflow as the prefix route, for the layouts that are not a prefix
@@ -553,7 +572,7 @@ const fn rounded_shifted(shifted: u32, shift: u32, implicit_one_is_low_bit: bool
 /// Encodes `value` into `layout`; the same rounding as [`encode_counting`] without the counter.
 #[must_use]
 #[inline(always)]
-pub const fn encode(value: f32, layout: FloatLayout) -> u32 {
+pub fn encode(value: f32, layout: FloatLayout) -> u32 {
     let mut ignored_nan_count = 0;
     encode_counting(value, layout, &mut ignored_nan_count)
 }
@@ -599,7 +618,16 @@ const fn finite_magnitude_bits(exponent: u32, mantissa: u32, layout: &FloatLayou
 /// policy returns the pattern unchanged.
 #[must_use]
 #[inline(always)]
-pub const fn decode(code: u32, layout: FloatLayout) -> f32 {
+pub fn decode(code: u32, layout: FloatLayout) -> f32 {
+    if is_binary16(&layout) {
+        return f16::from_bits(code as u16).to_f32();
+    }
+    decode_fields(code, layout)
+}
+
+// the field arithmetic for any layout; the binary16 slice route calls it because the loop vectorizes: on aarch64 it is 128-bit lanes, eight codes per pass, 4 static instructions per code against 5 for a per-code fcvt loop
+#[inline(always)]
+const fn decode_fields(code: u32, layout: FloatLayout) -> f32 {
     if layout.exponent_bits == 0 {
         return integer_decode(code, &layout);
     }
@@ -694,6 +722,9 @@ const fn straight_line_finite_bits(code: u32, layout: &FloatLayout) -> u32 {
 
 // the f32 the graph computes in; every slice converts from or to it
 pub(crate) const SOURCE_LAYOUT: FloatLayout = FloatLayout::BF32;
+
+// the one layout `half` converts: one instruction where the build target has a half conversion, a software conversion where it has none
+const NATIVE_HALF_LAYOUT: FloatLayout = FloatLayout::F16;
 
 // plain data, so the hot path builds no error text; the caller makes a NumericError on the cold path
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -832,6 +863,15 @@ pub(crate) fn decode_body<Slot>(
         for (pair, value) in pairs.iter().zip(out.iter_mut()) {
             let bits = embedded_bits_narrow(u16::from_le_bytes(*pair), widen, &layout);
             write(value, f32::from_bits(bits));
+        }
+        return;
+    }
+    if bytes == 2 && is_binary16(&layout) {
+        let Some(pairs) = exact_chunks::<2>(data, out.len()) else {
+            return;
+        };
+        for (pair, value) in pairs.iter().zip(out.iter_mut()) {
+            write(value, decode_fields(u32::from(u16::from_le_bytes(*pair)), layout));
         }
         return;
     }
@@ -1322,6 +1362,44 @@ mod tests {
         let respelled_f16 = FloatLayout { bias_override: Some(FloatLayout::F16.bias()), ..FloatLayout::F16 };
 
         assert!(!widens_by_embedding(&respelled_f16));
+    }
+
+    #[test]
+    fn a_respelled_f16_is_binary16_and_its_neighbouring_formats_are_not() {
+        let respelled_f16 = FloatLayout { bias_override: Some(FloatLayout::F16.bias()), ..FloatLayout::F16 };
+
+        assert!(is_binary16(&FloatLayout::F16));
+        assert!(is_binary16(&respelled_f16));
+        assert!(!is_binary16(&FloatLayout::BF16));
+        assert!(!is_binary16(&FloatLayout::E5M2));
+        assert!(!is_binary16(&FloatLayout::BF32));
+    }
+
+    #[test]
+    fn only_the_default_rounding_and_overflow_encode_binary16_natively() {
+        let f16_layout = FloatLayout::F16;
+
+        assert!(encodes_as_binary16(&f16_layout, Rounding::NearestTiesEven, Overflow::Format));
+        assert!(!encodes_as_binary16(&f16_layout, Rounding::TowardZero, Overflow::Format));
+        assert!(!encodes_as_binary16(&f16_layout, Rounding::NearestTiesEven, Overflow::Saturate));
+    }
+
+    #[test]
+    fn the_native_binary16_decode_equals_the_field_arithmetic_for_every_code() {
+        let mismatches = (0..=u32::from(u16::MAX))
+            .filter(|&code| decode(code, FloatLayout::F16).to_bits() != decode_fields(code, FloatLayout::F16).to_bits())
+            .count();
+
+        assert_eq!(mismatches, 0, "codes where the cpu conversion and the field arithmetic differ");
+    }
+
+    #[test]
+    fn a_saturating_f16_encode_keeps_the_field_arithmetic_and_clamps_an_overflow() {
+        let mut nan_count = 0;
+
+        let code = encode_with(1.0e6, FloatLayout::F16, Rounding::NearestTiesEven, Overflow::Saturate, &mut nan_count);
+
+        assert_eq!(code, 0x7bff, "the largest finite binary16, 65504.0");
     }
 
     fn e8m3_oracle(code: u32) -> f32 {

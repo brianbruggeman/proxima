@@ -553,7 +553,11 @@ mod tests {
 
         assert_eq!(format_name_tokens(&codec), Vec::<String>::new());
         assert_eq!(format_name_tokens(&bridge), Vec::<String>::new());
-        assert_eq!(layout_constants(&codec), ["BF32"], "the documented source layout, SOURCE_LAYOUT");
+        assert_eq!(
+            layout_constants(&codec),
+            ["BF32", "F16"],
+            "the documented source layout, SOURCE_LAYOUT, and the one the cpu converts natively, NATIVE_HALF_LAYOUT"
+        );
         assert_eq!(layout_constants(&bridge), Vec::<&str>::new());
     }
 
