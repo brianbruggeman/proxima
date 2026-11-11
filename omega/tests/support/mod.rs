@@ -24,6 +24,8 @@ use proxima_tensor::spec::{
     DuplicateHeadPosition, gqa_cached_forward_program, gqa_single_range_cached_forward_program,
     qk_norm_cached_forward_program,
 };
+use proxima_tensor::config::TensorExecutionConfig;
+use proxima_tensor::cpu::{BufferPools, Evaluated, evaluate_quantized_named_with_config};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{NodeId, Op, QuantizedBlock, block_node_ids, infer};
 use proxima_numeric::{NumericPolicy};
@@ -306,6 +308,35 @@ pub fn as_named_blocks(owned: &[(String, Vec<f32>)]) -> Vec<(&str, QuantizedBloc
         .iter()
         .map(|(name, data)| (name.as_str(), QuantizedBlock::Float32(data.as_slice())))
         .collect()
+}
+
+/// The CPU oracle for a GPU parity gate: `policy` with flash narrowing granted.
+/// Without the grant the CPU binds `CachedAttentionArithmetic::LlamaFlash`
+/// (llama.cpp's f16 query, key, value and accumulator); the GPU kernels run
+/// `OnlineF32`, so the two would differ by f16 rounding in the fused attention
+/// op and the gate would measure that, not the kernel.
+pub fn evaluate_gpu_oracle(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+    policy: NumericPolicy,
+) -> Evaluated {
+    let config = TensorExecutionConfig::builder()
+        .numeric(policy.with_flash_narrowing(true))
+        .build();
+    let mut free_buffers = BufferPools::default();
+    let mut validated = None;
+    evaluate_quantized_named_with_config(
+        program,
+        symbols,
+        named,
+        outputs,
+        (&mut free_buffers, &mut validated),
+        None,
+        &config,
+    )
+    .expect("the cpu oracle evaluates the program")
 }
 
 /// qwen35's real partial-rotary dense-attention chain

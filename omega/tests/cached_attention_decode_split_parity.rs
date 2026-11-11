@@ -27,7 +27,7 @@ use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{BFloat8, BoundOpKind, NodeId, Op, bind, infer};
 
 mod support;
-use support::{as_named_blocks, production_numeric_policy};
+use support::{as_named_blocks, evaluate_gpu_oracle, production_numeric_policy};
 
 const VOCAB: u32 = 64;
 const EMBEDDING: u32 = 512;
@@ -205,17 +205,13 @@ fn parity_cell(cached_len: u64, head_dim: u32, half_kv: bool) -> f32 {
         );
     }
 
-    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
-    let mut validated = None;
-    let cpu = evaluate_quantized_named_with_scratch(
+    let cpu = evaluate_gpu_oracle(
         &fixture.program,
         &fixture.symbols,
         &named,
         &output_roots,
-        &mut free_buffers,
-        &mut validated,
-    )
-    .expect("cpu runs the decode program");
+        policy,
+    );
     let metal_named: Vec<(&str, QuantizedBlock<'_>)> = named
         .iter()
         .map(

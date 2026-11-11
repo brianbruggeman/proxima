@@ -26,7 +26,9 @@ use proxima_tensor::{Extent, IndexMap, Keep, Op, QuantizedBlock, ReduceInit, Sca
 use proxima_numeric::DType;
 
 mod support;
-use support::{as_named_blocks, real_forward_fixture, real_forward_fixture_with_cached_len};
+use support::{
+    as_named_blocks, evaluate_gpu_oracle, real_forward_fixture, real_forward_fixture_with_cached_len,
+};
 
 #[test]
 fn metal_runs_the_real_forward_graph_and_agrees_with_the_cpu() {
@@ -172,17 +174,13 @@ fn fused_cached_attention_root_agrees_between_cpu_and_metal() {
             .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
     );
 
-    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
-    let mut validated = None;
-    let cpu = evaluate_quantized_named_with_scratch(
+    let cpu = evaluate_gpu_oracle(
         &program,
         &symbols,
         &named,
         &output_roots,
-        &mut free_buffers,
-        &mut validated,
-    )
-    .expect("cpu runs the fused cached root");
+        NumericPolicy::default(),
+    );
     let plan = omega::plan_named(
         &program,
         &symbols,
