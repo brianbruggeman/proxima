@@ -53,7 +53,7 @@ use std::path::{Path, PathBuf};
 const MODEL_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/\
 sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
 #[cfg(all(feature = "metal", target_os = "macos"))]
-const DEFAULT_OUT_DIR: &str = "/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/m0";
+const DEFAULT_OUT_DIR: &str = "target/gemma4-decode-kernel-census";
 #[cfg(all(feature = "metal", target_os = "macos"))]
 const DEFAULT_PROMPT: &str = "<|turn>user\nWhich of these is smaller in size: a hippopotamus or a large office building?<turn|>\n<|turn>model\n";
 #[cfg(all(feature = "metal", target_os = "macos"))]

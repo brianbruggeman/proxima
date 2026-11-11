@@ -48,9 +48,12 @@ struct Arguments {
 impl Arguments {
     fn parse() -> io::Result<Self> {
         let mut arguments = Self {
-            checkpoint: PathBuf::from(
-                "/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/models/ouro-1.4b",
-            ),
+            checkpoint: PathBuf::from(env::var("PROXIMA_OURO_MODEL_DIR").unwrap_or_else(|_| {
+                format!(
+                    "{}/.cache/proxima/models/ouro-1.4b",
+                    env::var("HOME").unwrap_or_default()
+                )
+            })),
             output: None,
             prefix: vec![19556, 905, 30],
             mode: Mode::F32,
