@@ -446,7 +446,7 @@ fn encode_run<const ELEMENTS: usize, const BYTES: usize>(
 }
 
 macro_rules! resolve_named_block {
-    ($layout:expr, [ $(($name:ident, $text:literal, $encodes:literal)),* $(,)? ]) => {{
+    ($layout:expr, [ $(($name:ident, $text:literal)),* $(,)? ]) => {{
         $(
             if *$layout == BlockLayout::$name {
                 const _: () = assert!(BlockLayout::$name.is_simple());
@@ -454,15 +454,11 @@ macro_rules! resolve_named_block {
                 const _: () = assert!(code_bits(&BlockLayout::$name) <= 8);
                 const ELEMENTS: usize = BlockLayout::$name.elements as usize;
                 const BYTES: usize = BlockLayout::$name.block_bytes as usize;
-                let encode: Option<EncodeFn> = match (fit_of(&BlockLayout::$name), $encodes) {
-                    (Fit::Runtime, _) | (_, false) => None,
+                const FIT: Fit = fit_of(&BlockLayout::$name);
+                let encode: Option<EncodeFn> = match FIT {
+                    Fit::Runtime => None,
                     _ => Some(|values, out| {
-                        encode_run::<ELEMENTS, BYTES>(
-                            BlockLayout::$name,
-                            fit_of(&BlockLayout::$name),
-                            values,
-                            out,
-                        );
+                        encode_run::<ELEMENTS, BYTES>(BlockLayout::$name, FIT, values, out);
                     }),
                 };
                 let decode: DecodeFn =
