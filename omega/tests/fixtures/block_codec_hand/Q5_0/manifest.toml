@@ -1,0 +1,7 @@
+format = "Q5_0"
+elements = 4096
+source = "checkpoint"
+origin = "sha256-c5396e06af294bd101b30dce59131a76d2b773e76950acc870eda801d3ab0515 tensor blk.0.ffn_gate.weight byte_offset 154169920 (host: ~/.ollama/models/blobs)"
+hand_string = "omega::Q5_0_UNPACK_MSL (q5_0_element)"
+captured_at = "proxima main 1c10af62, before the hand string was deleted"
+math_mode = "MTLMathMode::Safe via proxima-model-interop/tests/float_layout_parity/gpu.rs"

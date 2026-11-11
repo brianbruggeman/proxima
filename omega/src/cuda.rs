@@ -4220,7 +4220,7 @@ pub const Q8_0_BLOCK_BYTES: usize = proxima_gguf::quant::q8_0::BLOCK_BYTES;
 pub const Q8_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q8_0::QK8_0;
 
 /// CUDA C source for unpacking one element of a `Q4_0` block — ports
-/// `crate::msl::Q4_0_UNPACK_MSL`'s `q4_0_element` exactly: llama.cpp's
+/// `crate::msl::q4_0_unpack_msl`'s `q4_0_element` exactly: llama.cpp's
 /// simplest legacy 4-bit format, `value = (nibble - 8) * d`.
 pub const Q4_0_UNPACK_CUDA: &str = "\
 __device__ __forceinline__ float q4_0_element(const unsigned char *block, unsigned int index) {
@@ -4251,7 +4251,7 @@ pub const Q4_0_BLOCK_BYTES: usize = proxima_gguf::quant::q4_0::BLOCK_BYTES;
 pub const Q4_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_0::QK4_0;
 
 /// CUDA C source for unpacking one element of a `Q5_0` block — ports
-/// `crate::msl::Q5_0_UNPACK_MSL`'s `q5_0_element` exactly: 22-byte block,
+/// `crate::msl::q5_0_unpack_msl`'s `q5_0_element` exactly: 22-byte block,
 /// `d` f16 at 0, `qh` at 2, `qs` nibbles at 6, `value = (level - 16) * d`.
 pub const Q5_0_UNPACK_CUDA: &str = "\
 __device__ __forceinline__ float q5_0_element(const unsigned char *block, unsigned int index) {

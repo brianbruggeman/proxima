@@ -482,6 +482,17 @@ pub fn block_k_refusal(format: &NumericFormat) -> Result<&BlockLayout, &'static 
 /// The helpers `name_*` are the layout loads of the code, scale and min layouts.
 #[must_use]
 pub fn block_unpack_msl(layout: &BlockLayout, name: &str) -> String {
+    let element = block_element_msl(layout, name);
+    let run = block_run_msl(layout, name);
+    format!("{element}{run}")
+}
+
+/// [`block_unpack_msl`] without the four-wide `name_run` accessor: the scalar `name(block, index)`
+/// and its `name_*` load helpers only. A format whose callers read one element at a time (the
+/// legacy `q4_0_element`, `q5_0_element`, `q5_1_element` accessors) renders this, so no unused
+/// four-wide body enters the translation unit.
+#[must_use]
+pub fn block_element_msl(layout: &BlockLayout, name: &str) -> String {
     let mut helpers = layout_load_msl(layout.element.code, &format!("{name}_code"));
     helpers.push_str(&layout_load_msl(
         layout.scale.layout,
@@ -545,9 +556,8 @@ pub fn block_unpack_msl(layout: &BlockLayout, name: &str) -> String {
             layout.min_multiplier
         ));
     }
-    let run = block_run_msl(layout, name);
     format!(
-        "{helpers}\nstatic inline float {name}(device const uchar *block, uint index) {{\n{body}    return value;\n}}\n{run}"
+        "{helpers}\nstatic inline float {name}(device const uchar *block, uint index) {{\n{body}    return value;\n}}\n"
     )
 }
 

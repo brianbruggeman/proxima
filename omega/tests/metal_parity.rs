@@ -2237,7 +2237,7 @@ fn codec_matmul_program(
 /// instead of one test per cell. `float32`/`q4_k`/`q5_k`/`q6_k`/`q8_0`/`q4_0`
 /// all have a real Metal unpack kernel today -- `q8_0`/`q4_0`'s are the
 /// fully generic per-element path (`omega::msl::Q8_0_UNPACK_MSL`/
-/// `Q4_0_UNPACK_MSL`), not the row-blocked fast path the K-quants take,
+/// `q4_0_unpack_msl`), not the row-blocked fast path the K-quants take,
 /// since their 32-element flat blocks have no analogue to the K-quants'
 /// shared 256-element super-block.
 ///
