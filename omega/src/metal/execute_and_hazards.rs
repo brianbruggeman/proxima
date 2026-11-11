@@ -2299,6 +2299,7 @@ mod placed_format_tests {
         q4_0.decode(&host_packed, &mut host_slots).expect("host decodes q4_0");
         let host_decoded: Vec<u32> = host_slots
             .iter()
+            // decode returned Ok, which initialises every slot of its output
             .map(|slot| unsafe { slot.assume_init() }.to_bits())
             .collect();
         let buffer = allocate_placed_buffer(packed_len).expect("allocates q4_0 fixture bytes");
@@ -2318,6 +2319,50 @@ mod placed_format_tests {
         let buffer = allocate_placed_buffer(64).expect("allocates fixture bytes");
 
         let refused = read_placed_buffer(&buffer, 0, &q4_0, 33);
+
+        assert_eq!(
+            refused,
+            Err(NumericError::InputNotElementMultiple { format: "q4_0", found: 33, elements: 32 })
+        );
+    }
+
+    #[test]
+    fn narrowing_kv_like_rows_to_q4_0_stores_the_host_encode_bytes() {
+        let values = k_like_rows(96);
+        let q4_0 = codec(&NumericFormat::Q4_0);
+        let packed_len = q4_0.packed_len(values.len()).expect("96 values are three whole blocks");
+        let mut host_packed = vec![0u8; packed_len];
+        q4_0.encode(&values, &mut host_packed).expect("host encodes q4_0");
+        let staging = allocate_placed_buffer(values.len() * 4).expect("allocates the f32 staging rows");
+        let cache = allocate_placed_buffer(packed_len).expect("allocates the q4_0 cache bytes");
+        write_placed_buffer_f32(&staging, 0, &values);
+
+        narrow_placed_buffer(&staging, 0, &cache, 0, &q4_0, values.len()).expect("q4_0 narrows");
+
+        assert_eq!(packed_len, 54);
+        assert_eq!(stored_bytes(&cache, packed_len), host_packed);
+    }
+
+    #[test]
+    fn narrowing_a_placed_element_count_that_is_not_whole_blocks_is_an_error_naming_the_format() {
+        let q4_0 = codec(&NumericFormat::Q4_0);
+        let staging = allocate_placed_buffer(33 * 4).expect("allocates the f32 staging rows");
+        let cache = allocate_placed_buffer(64).expect("allocates fixture bytes");
+
+        let refused = narrow_placed_buffer(&staging, 0, &cache, 0, &q4_0, 33);
+
+        assert_eq!(
+            refused,
+            Err(NumericError::InputNotElementMultiple { format: "q4_0", found: 33, elements: 32 })
+        );
+    }
+
+    #[test]
+    fn writing_a_placed_element_count_that_is_not_whole_blocks_is_an_error_naming_the_format() {
+        let q4_0 = codec(&NumericFormat::Q4_0);
+        let buffer = allocate_placed_buffer(64).expect("allocates fixture bytes");
+
+        let refused = write_placed_buffer(&buffer, 0, &q4_0, &k_like_rows(33));
 
         assert_eq!(
             refused,
