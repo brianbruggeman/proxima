@@ -7,10 +7,13 @@
 //! row of the block table ([`crate::block_layout::named_block_table`]), each with the layout as a
 //! literal constant, so every shift, mask, plane address and magic number is folded from the
 //! layout's fields. Resolve at allocation time and keep the `Copy` value: a call is then one
-//! indirect jump, where [`crate::encode::encode_blocks`] re-matches the format on every call. A
-//! scalar layout without a name resolves to the same loop with the layout as data, so every
-//! supported scalar layout has a codec; a block layout outside the table has none and keeps
-//! [`crate::encode::encode_blocks`] and [`crate::decode::decode_blocks`].
+//! indirect jump, where [`crate::encode::encode_blocks`] re-resolves the format on every call and
+//! routes a block or level format here when [`FormatCodec::can_encode`] (adding a typed refusal of
+//! non-finite input and an exact-size output). A scalar layout without a name resolves to the same
+//! loop with the layout as data, so every supported scalar layout has a codec; a block layout
+//! outside the table has none and keeps [`crate::decode::decode_blocks`] for decode, and a block
+//! layout whose fit has no instantiation (a stored min, K-quants, mixed-radix, float codes) has a
+//! decode instantiation only and keeps the walker in [`crate::encode::encode_blocks`] for encode.
 //!
 //! One window contract serves every caller. [`FormatCodec::encode`] writes the packed form of
 //! `values` into the front of `out`, [`FormatCodec::decode`] reads the packed range for `out.len()`
