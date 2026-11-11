@@ -1,48 +1,57 @@
-//! Byte-for-byte oracle for the block encoder: the bytes every layout this crate encodes produced
-//! before the quantizer moved into `proxima_numeric`, captured from the implementation it replaced.
+//! Byte-for-byte oracle for the block encoder: for every layout this crate encodes, the bytes an
+//! independent encoder writes for the same input, so a layout that stops encoding or starts
+//! producing different bytes fails here rather than downstream in a quantized checkpoint.
 //!
-//! The input is a deterministic splitmix stream, identical on both sides, so a disagreement is a
-//! disagreement about the encoder and never about the data. A layout that stops encoding, or that
-//! starts producing different bytes, fails here rather than downstream in a quantized checkpoint.
+//! The input is a deterministic splitmix stream, identical on every side, so a disagreement is a
+//! disagreement about the encoder and never about the data. Who the oracle is depends on the layout:
+//!
+//! - `LLAMA`: llama.cpp's own `quantize_row_<t>_ref`, called through dlopen on libggml-base.dylib
+//!   (built 2026-09-06 14:34 local; llama.cpp checkout f1ea206218210afb913ae2f5d2c51faed35915da).
+//! - `PORTS`: this crate's ports of llama's `quantize_row_*_ref` for the layouts llama.cpp does not
+//!   export a reference quantizer for.
+//! - `WALKER`: the bytes the shared walker (`proxima_numeric::encode`) wrote when captured, for the
+//!   layouts no other encoder exists for. This one is a regression freeze, not a correctness
+//!   oracle: llama.cpp's `quantize_row_q8_K_ref` disagrees with it on every block.
 
+use proxima_gguf::quant::QuantError;
 use proxima_gguf::quant::block_layout_encode::{quantize, reach};
+use proxima_gguf::quant::{pq2_0, q1_0, q2_0};
 use proxima_numeric::NumericFormat;
 
-/// Every layout the pre-move encoder accepted, with the bytes it produced for [`values`].
-///
-/// Pinned by count: a new encodable layout must be added here, so the oracle cannot silently stop
-/// covering one. The rows are in [`NumericFormat::ALL`] order.
-const ORACLE: [(&str, &[&str]); 10] = [
+type Port = fn(&[f32], &mut [u8]) -> Result<(), QuantError>;
+
+/// Three blocks of each layout, as llama.cpp's reference quantizer writes them, in hex.
+const LLAMA: [(&str, &str); 5] = [
     (
         "q8_0",
-        &[
-            "6932fbf11d19055fa211dd3b0f255701fce8d300f2ea7f0df631bc0b092804f6ed42b12f09394feccaa7e8566d60dffe",
-            "3df1d658f1e929a6c48c35fdeb20d5a4f88193f1ec32e0f2db27cb7f101b302b1cc646030af8b9b956410808d733be35",
-            "9e05141d35fd",
-        ],
+        "6932fbf11d19055fa211dd3b0f255701fce8d300f2ea7f0df631bc0b092804f6ed42b12f09394feccaa7e8566d60dffe3df1d658f1e929a6c38c35fdeb20d5a4f88193f1ec32e0f2db27cb7f101b302b1cc646030af8b9b956410808d733be359e05141d35fd",
     ),
     (
         "q4_0",
-        &[
-            "794388789a772b959887593927fc8c7a686af8422381a188799a46437896b8c676e63791aa4376a96aa58b9e68497684",
-            "937d8159794b",
-        ],
+        "8ac288a77699f57c7889b6e7f90383a6a8a619421280a088799a46337895b8d566e63790b54276a96ba48b9f68396584937e8059794b",
     ),
     (
         "q5_0",
-        &[
-            "453f9b6693f02104ee92f6fcd6509ea3b636032d415ff93ca855bb728b1cb152bb7067f2f72a819ea4dacef7743f5bf7",
-            "4dcf71f0a924f7e730af5667f70cf0d272a2",
-        ],
+        "d1bee4996e1fef0c328e09143bb0727c5aeb0de2cfa1a93ca855bb729b1cb052cb7066f2f82a719eb5eadff7fdbee618b2389f1057dc182ac061baa90804203e9d6e",
     ),
     (
         "q8_1",
-        &[
-            "e23269cc0bdbef0126f0bcf61dff00000caf00dff528d650a308dee84413d57fffdd33eccd32cc57f66b0a0f140713d4",
-            "5812fa071cbcd0ff7d1325d543db22f2fbdb3021520d7ffc1f32bc57ee2f4f0959d910f0fd3d1569f110063eca451f7f",
-            "fc113ab7ce752c0ffcddfce5",
-        ],
+        "e23269cc0bdbef0126f0bcf61dff00000caf00dff528d650a308dee84413d57fffdd33eccd32cc57f66b0a0f140713d45812fa071cbcd0ff7d1325d543db22f2fbdb3021520d7ffc1f32bc57ee2f4f0959d910f0fd3d1569f110063eca451f7ffc113ab7ce752c0ffcddfce5",
     ),
+    (
+        "tq2_0",
+        "5591554565149499955145555694959559454656559511515545551215915155655655651a551555654554545559595565455495595545651594511159456554bb4e55559459955565558556915551554555555551596666555551555555556554995615195555555554551559555666541591516545655555555545645556195559e44e5155655565561995555656a456555555655555559551555555555555915965554545545419515155554594951959555555561195554555645455554555565656b74e",
+    ),
+];
+
+const PORTS: [(&str, Port); 3] = [
+    ("q1_0", q1_0::quantize),
+    ("q2_0", q2_0::quantize),
+    ("pq2_0", pq2_0::quantize),
+];
+
+/// Layouts with no other encoder, with the bytes the walker produced for [`values`].
+const WALKER: [(&str, &[&str]); 2] = [
     (
         "q8_k",
         &[
@@ -65,38 +74,6 @@ const ORACLE: [(&str, &[&str]); 10] = [
             "93f7df14283761ef0015d8cb23c7d3fb1d08f71898f5f9f53439e8c7d80714fef2ccc0fe1109041fe34b0ef8e801d952",
             "2ed8fef72d06fff2e2030e2db52e5e450824cb291b95b7ef0ed445340000000000000000000000000000000000000000",
             "000000000000000000000000",
-        ],
-    ),
-    (
-        "tq2_0",
-        &[
-            "5591554565149499955145555694959559454656559511515545551215915155655655651a5515556545545455595955",
-            "65455495595545651594511159456554bb4e555594599555655585569155515545555555515966665555515555555565",
-            "54995615195555555554551559555666541591516545655555555545645556195559e44e5155655565561995555656a4",
-            "565555556555555595515555555555559159655545455454195151555545949519595555555611955545556454555545",
-            "55565656b74e",
-        ],
-    ),
-    (
-        "q1_0",
-        &[
-            "b54e16fbe51830052caeb6e82a06a041366fea4e5ec919208d8bc114e09a102fe1f1c311cc4e8daa34c3467b1c437324",
-            "2d51c0830529",
-        ],
-    ),
-    (
-        "q2_0",
-        &[
-            "8a4e55559556555481554015551554159549b54e55598154551555155155561555496554ea4e95565595411555155691",
-            "554055545556",
-        ],
-    ),
-    (
-        "pq2_0",
-        &[
-            "de4e5549555655565555555555555551555155595556a05544555965541955655558d24e155625555655515155555548",
-            "555555569655545555555595555a555545564555ed4e5895505555515545655055549855655552955665555955599955",
-            "455564555505",
         ],
     ),
     (
@@ -133,11 +110,15 @@ fn values(count: usize, seed: u64) -> Vec<f32> {
 
 /// Formats the pre-move encoder refused and this one writes. Pinned so a format that starts
 /// encoding cannot slip in without a reviewer seeing it; the bytes for these are pinned by
-/// `proxima-numeric`'s own hand-computed OCP MX vectors instead of by a pre-move capture.
+/// `proxima-numeric`'s own hand-computed OCP MX vectors instead.
 const NEWLY_ENCODABLE: [&str; 5] = ["mxfp4", "nvfp4", "tq1_0", "fp6_e3m2", "ptq1_0"];
 
+fn hex_of(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 #[test]
-fn every_encodable_layout_reproduces_the_pre_move_bytes() {
+fn every_encodable_layout_equals_its_independent_encoder_bytes() {
     let mut encodable: Vec<&str> = Vec::new();
     for format in NumericFormat::ALL {
         let Some(layout) = format.block_layout() else {
@@ -154,26 +135,35 @@ fn every_encodable_layout_reproduces_the_pre_move_bytes() {
         let blocks = input.len() / usize::from(layout.elements);
         let mut packed = vec![0u8; blocks * usize::from(layout.block_bytes)];
         quantize(&layout, &input, &mut packed).expect("a supported layout encodes");
-        let hexed: String = packed.iter().map(|byte| format!("{byte:02x}")).collect();
-        match ORACLE.iter().find(|(pinned, _)| *pinned == name) {
-            Some((_, pinned)) => assert_eq!(hexed, pinned.concat(), "{name} bytes"),
-            None => assert!(
+        let hexed = hex_of(&packed);
+        if let Some((_, llama)) = LLAMA.iter().find(|(pinned, _)| *pinned == name) {
+            assert_eq!(hexed, *llama, "{name} bytes against llama.cpp");
+        } else if let Some((_, port)) = PORTS.iter().find(|(pinned, _)| *pinned == name) {
+            let mut incumbent = vec![0u8; packed.len()];
+            port(&input, &mut incumbent).expect("the port encodes finite values");
+            assert_eq!(hexed, hex_of(&incumbent), "{name} bytes against the gguf port");
+        } else if let Some((_, frozen)) = WALKER.iter().find(|(pinned, _)| *pinned == name) {
+            assert_eq!(hexed, frozen.concat(), "{name} bytes against the frozen walker capture");
+        } else {
+            assert!(
                 NEWLY_ENCODABLE.contains(&name),
-                "{name} encodes and appears in neither the pre-move oracle nor the newly-encodable list"
-            ),
+                "{name} encodes and appears in no oracle table or the newly-encodable list"
+            );
         }
         encodable.push(name);
     }
-    let captured: Vec<&str> = ORACLE.iter().map(|(name, _)| *name).collect();
-    for name in &captured {
-        assert!(
-            encodable.contains(name),
-            "the pre-move encoder wrote {name} and this one does not"
-        );
+    let pinned: Vec<&str> = LLAMA
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(PORTS.iter().map(|(name, _)| *name))
+        .chain(WALKER.iter().map(|(name, _)| *name))
+        .collect();
+    for name in &pinned {
+        assert!(encodable.contains(name), "the oracle covers {name} and the encoder does not");
     }
     assert_eq!(
         encodable.len(),
-        captured.len() + NEWLY_ENCODABLE.len(),
-        "pinned: every encodable layout is accounted for, old or new"
+        pinned.len() + NEWLY_ENCODABLE.len(),
+        "pinned: every encodable layout is accounted for"
     );
 }

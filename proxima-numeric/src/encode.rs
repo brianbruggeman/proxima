@@ -6,8 +6,11 @@
 //! - `Scalar(layout)` — one value per element, through [`crate::float_layout_codec::encode`],
 //!   whose rounding and special-value policy are the format's own.
 //! - `Block(layout)` with integer codes — a run of codes under a shared absolute-maximum scale,
-//!   fitted per run and written back through the layout's own planes. Ported from
-//!   `proxima-gguf`'s `block_layout_encode`, which is now a thin adapter over this.
+//!   fitted per run and written back through the layout's own planes. A layout that
+//!   [`FormatCodec::for_format`] resolves with [`FormatCodec::can_encode`] is encoded by that codec
+//!   ([`crate::block_codec`], whose bytes match llama.cpp's `quantize_row_*_ref` for Q4_0, Q5_0,
+//!   Q8_0, Q8_1 and TQ2_0); only the layouts the table cannot encode run the walker in this module.
+//!   `proxima-gguf`'s `block_layout_encode` is a thin adapter over [`encode_blocks`].
 //! - `Block(layout)` with float codes — the OCP MX and NV `E2M1` fields and the FP6 `E3M2` field:
 //!   the code is a small float, so the nearest code is the nearest representable value, chosen
 //!   through [`crate::float_layout_codec::encode`] rather than by rounding a ratio.
@@ -24,6 +27,11 @@
 //! missing: the K-quants (a sub-block scale and a stored min per sub-block, chosen by a
 //! quantization-aware search) and the trained codebooks (`IQ1_*`..`IQ4_XS`, whose tables the
 //! walker does not carry).
+//!
+//! The walker divides each value by the scale already rounded to its stored width; llama.cpp
+//! multiplies by the inverse of the unrounded scale (and Q4_0 and Q5_0 fit the signed maximum, not
+//! the peak). The two differ by a code on some elements, which is why a layout with a codec never
+//! takes the walker: the walker is the encoder of last resort, not a second encoder.
 
 use crate::block_layout::{BlockLayout, Plane, PlaneCursor};
 use crate::convert::{Overflow, Rounding};
@@ -31,6 +39,7 @@ use crate::error::NumericError;
 use crate::float_layout::FloatLayout;
 use crate::float_layout_codec;
 use crate::format::{LevelTable, NumericFormat};
+use crate::format_codec::FormatCodec;
 
 const MAX_CODE_BITS: u8 = 12;
 const SUM_BYTES: usize = 2;
@@ -555,6 +564,24 @@ fn encode_scalar_blocks(
     Ok(values.len())
 }
 
+// the codec writes into the front of a window and takes any value; this entry keeps its contract of an
+// exact-size output and a typed refusal of a nan or infinity
+fn encode_with_codec(
+    format: &NumericFormat,
+    codec: &FormatCodec,
+    values: &[f32],
+    out: &mut [u8],
+) -> Result<usize, NumericError> {
+    let (_elements, _block_bytes, block_count) = packed_geometry(format, values, out)?;
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(NumericError::NonFinite {
+            format: format.block_layout().as_ref().map_or("block", format_of),
+        });
+    }
+    codec.encode(values, out)?;
+    Ok(block_count)
+}
+
 /// Encode `values` into `format`, writing `bytes_per_block` bytes per `elements_per_block` values,
 /// and returns the block count.
 ///
@@ -571,6 +598,11 @@ pub fn encode_blocks(
     values: &[f32],
     out: &mut [u8],
 ) -> Result<usize, NumericError> {
+    if !matches!(format, NumericFormat::Scalar(_))
+        && let Some(codec) = FormatCodec::for_format(format).filter(FormatCodec::can_encode)
+    {
+        return encode_with_codec(format, &codec, values, out);
+    }
     match format {
         NumericFormat::Scalar(layout) => encode_scalar_blocks(format, layout, values, out),
         NumericFormat::Block(layout) => {
@@ -1043,5 +1075,93 @@ mod tests {
                 expected: 34,
             }
         );
+    }
+
+    /// A 128-value activation row: gaussian-ish with two outlier channels per 64, the shape of a
+    /// real key row, from splitmix64 seeded 0x6b76_5f72_6f77_0001 and a sum of twelve uniforms.
+    fn activation_row() -> std::vec::Vec<f32> {
+        let mut state = 0x6b76_5f72_6f77_0001u64;
+        let mut unit = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut mixed = state;
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            ((mixed ^ (mixed >> 31)) >> 40) as f32 / (1u64 << 24) as f32
+        };
+        (0..128)
+            .map(|index| {
+                let gaussian = (0..12).map(|_| unit()).sum::<f32>() - 6.0;
+                if matches!(index % 64, 5 | 37) { gaussian * 24.0 } else { gaussian }
+            })
+            .collect()
+    }
+
+    // quantize_row_{q4_0,q5_0,q8_0,q8_1}_ref of activation_row(), as llama.cpp itself writes them:
+    // libggml-base.dylib (built 2026-09-06 14:34 local, llama.cpp checkout
+    // f1ea206218210afb913ae2f5d2c51faed35915da) called through dlopen by the xcheck-enc harness
+    const LLAMA_Q4_0: [u8; 72] = [
+        0xc1, 0x3c, 0x98, 0xa7, 0x88, 0x78, 0x77, 0x80, 0x88, 0x89, 0xb8, 0x87, 0xa6, 0x89, 0x98, 0x78, 0x98, 0x78,
+        0x6a, 0x43, 0x88, 0x88, 0x98, 0x98, 0x88, 0x80, 0x87, 0x88, 0x98, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88, 0x88,
+        0x91, 0x3e, 0x89, 0x89, 0x87, 0x88, 0x98, 0x90, 0x88, 0x68, 0x98, 0x87, 0x77, 0x88, 0x98, 0x79, 0x87, 0x99,
+        0x4e, 0x41, 0x78, 0x87, 0x87, 0x98, 0x88, 0x80, 0x78, 0x98, 0x88, 0x88, 0x88, 0x98, 0x88, 0x88, 0x88, 0x78,
+    ];
+    const LLAMA_Q5_0: [u8; 88] = [
+        0xc1, 0x38, 0x8c, 0xd9, 0xe7, 0x5f, 0x2f, 0x3e, 0x01, 0xe1, 0xfe, 0x00, 0x0f, 0x02, 0x50, 0x1e, 0x3c, 0x12,
+        0x10, 0xef, 0x21, 0xf1, 0x6a, 0x3f, 0x9f, 0xfe, 0xdd, 0x3d, 0x01, 0xf0, 0x10, 0x11, 0x00, 0xf0, 0x0e, 0x00,
+        0x1f, 0xf0, 0x00, 0x00, 0x00, 0x00, 0xf1, 0xf1, 0x91, 0x3a, 0x9b, 0xb9, 0x7f, 0xd9, 0x11, 0x03, 0x0e, 0x00,
+        0x30, 0x10, 0x1f, 0xd0, 0x10, 0xff, 0xfe, 0x01, 0x10, 0xe2, 0x0e, 0x22, 0x4e, 0x3d, 0xd9, 0xf7, 0xbe, 0x3a,
+        0xf0, 0x1f, 0x0f, 0x11, 0x01, 0x00, 0xf0, 0x10, 0xf0, 0x00, 0xf0, 0x1f, 0x10, 0x00, 0xf0, 0xe0,
+    ];
+    const LLAMA_Q8_0: [u8; 136] = [
+        0xcb, 0x2c, 0xf8, 0xee, 0x07, 0x08, 0xef, 0x81, 0xfb, 0x0f, 0x03, 0xec, 0xe1, 0x10, 0xff, 0xfb, 0x08, 0x06,
+        0x0f, 0x1b, 0x02, 0xf3, 0xf6, 0x03, 0xfe, 0xff, 0x29, 0x06, 0x18, 0x07, 0x08, 0xf3, 0x0f, 0xf6, 0x79, 0x33,
+        0x06, 0x01, 0xfd, 0x04, 0xff, 0x81, 0xf3, 0x03, 0xf9, 0xfc, 0x03, 0x03, 0x00, 0x01, 0x04, 0x06, 0x02, 0xfa,
+        0x08, 0x08, 0x02, 0xfa, 0x00, 0x00, 0x0a, 0xfc, 0xfc, 0x00, 0x01, 0x00, 0xfb, 0xf9, 0x9e, 0x2e, 0x0b, 0x15,
+        0xf3, 0xff, 0xfe, 0x81, 0xfb, 0xff, 0x04, 0xf5, 0xf0, 0x06, 0xfe, 0x0d, 0xef, 0x0c, 0x06, 0xfe, 0x00, 0x01,
+        0x17, 0x09, 0x06, 0xe5, 0x09, 0xfc, 0xf7, 0x03, 0x09, 0xf3, 0x01, 0x12, 0x58, 0x31, 0x01, 0xf8, 0xf5, 0x06,
+        0x07, 0x81, 0xff, 0x03, 0x01, 0xfe, 0x03, 0xf8, 0x00, 0x00, 0xfd, 0xff, 0xf4, 0x06, 0x00, 0x0c, 0x04, 0xff,
+        0xf5, 0x08, 0xf9, 0xfc, 0xfb, 0x0b, 0x05, 0xfe, 0xfb, 0xf4,
+    ];
+    const LLAMA_Q8_1: [u8; 144] = [
+        0xcb, 0x2c, 0x3e, 0xc5, 0xf8, 0xee, 0x07, 0x08, 0xef, 0x81, 0xfb, 0x0f, 0x03, 0xec, 0xe1, 0x10, 0xff, 0xfb,
+        0x08, 0x06, 0x0f, 0x1b, 0x02, 0xf3, 0xf6, 0x03, 0xfe, 0xff, 0x29, 0x06, 0x18, 0x07, 0x08, 0xf3, 0x0f, 0xf6,
+        0x79, 0x33, 0x4c, 0xcf, 0x06, 0x01, 0xfd, 0x04, 0xff, 0x81, 0xf3, 0x03, 0xf9, 0xfc, 0x03, 0x03, 0x00, 0x01,
+        0x04, 0x06, 0x02, 0xfa, 0x08, 0x08, 0x02, 0xfa, 0x00, 0x00, 0x0a, 0xfc, 0xfc, 0x00, 0x01, 0x00, 0xfb, 0xf9,
+        0x9e, 0x2e, 0x11, 0xc9, 0x0b, 0x15, 0xf3, 0xff, 0xfe, 0x81, 0xfb, 0xff, 0x04, 0xf5, 0xf0, 0x06, 0xfe, 0x0d,
+        0xef, 0x0c, 0x06, 0xfe, 0x00, 0x01, 0x17, 0x09, 0x06, 0xe5, 0x09, 0xfc, 0xf7, 0x03, 0x09, 0xf3, 0x01, 0x12,
+        0x58, 0x31, 0x64, 0xce, 0x01, 0xf8, 0xf5, 0x06, 0x07, 0x81, 0xff, 0x03, 0x01, 0xfe, 0x03, 0xf8, 0x00, 0x00,
+        0xfd, 0xff, 0xf4, 0x06, 0x00, 0x0c, 0x04, 0xff, 0xf5, 0x08, 0xf9, 0xfc, 0xfb, 0x0b, 0x05, 0xfe, 0xfb, 0xf4,
+    ];
+
+    #[test]
+    fn activation_row_bytes_equal_llama_cpp_quantize_row_ref_for_q4_0_q5_0_q8_0_and_q8_1() {
+        let row = activation_row();
+        let cases: [(NumericFormat, &[u8]); 4] = [
+            (NumericFormat::Q4_0, &LLAMA_Q4_0),
+            (NumericFormat::Q5_0, &LLAMA_Q5_0),
+            (NumericFormat::Q8_0, &LLAMA_Q8_0),
+            (NumericFormat::Q8_1, &LLAMA_Q8_1),
+        ];
+        for (format, expected) in cases {
+            assert_eq!(packed(&format, &row), expected, "{:?}", format.name());
+        }
+    }
+
+    #[test]
+    fn encode_blocks_writes_the_codec_bytes_for_every_layout_the_codec_encodes() {
+        let input = values(256 * 4, 21);
+        let mut routed = 0usize;
+        for format in NumericFormat::ALL.iter().filter(|format| !matches!(format, NumericFormat::Scalar(_))) {
+            let Some(codec) = FormatCodec::for_format(format).filter(FormatCodec::can_encode) else {
+                continue;
+            };
+            let blocks = input.len() / codec.elements();
+            let mut expected = std::vec![0u8; blocks * codec.block_bytes()];
+            codec.encode(&input, &mut expected).expect("the codec sizes match");
+
+            assert_eq!(packed(format, &input), expected, "{:?}", format.name());
+            routed += 1;
+        }
+        assert!(routed >= 8, "only {routed} formats resolved an encoder");
     }
 }

@@ -7,20 +7,22 @@
 //! constant, so the element count, byte count, every plane address, the scale and min offsets, the
 //! multiplier and the bias are folded from the layout's fields. A layout that is not in the table
 //! (the K-quant, grouped and codebook families, or a layout with no name) has no instantiation and
-//! keeps [`crate::encode::encode_blocks`] and [`crate::decode::decode_blocks`].
+//! keeps [`crate::decode::decode_blocks`] for decode and the walker in [`crate::encode::encode_blocks`]
+//! for encode.
 //!
 //! How a block's scale is fitted is read from the layout too ([`fit_of`]): an offset-binary code
 //! centred on its bias is fitted to the signed value of largest magnitude (`Q4_0`, `Q5_0`), a
-//! signed or off-centre integer code to the peak magnitude (`Q8_0`, `Q2_0`), a one-bit code with a
-//! multiplier of two to the mean magnitude (`Q1_0`). These are the rules of the incumbents in
-//! `proxima-gguf`, reproduced operation for operation so the bytes are identical; a layout whose
-//! fit is not one of them (a stored min, free bytes beside the scale, a float code) has a decode
-//! instantiation and no encode instantiation.
+//! signed or off-centre integer code to the peak magnitude (`Q8_0`, `Q2_0`), the same with llama's
+//! stored `s = d * sum(q)` in the two bytes after the scale (`Q8_1`), a one-bit code with a
+//! multiplier of two to the mean magnitude (`Q1_0`). These are the rules of llama.cpp's
+//! `quantize_row_*_ref` and of the incumbents in `proxima-gguf`, reproduced operation for operation
+//! so the bytes are identical; a layout whose fit is not one of them (a stored min, other free
+//! bytes beside the scale, a float code) has a decode instantiation and no encode instantiation.
 
 use core::mem::MaybeUninit;
 
 use crate::block_layout::{BlockLayout, Field, MAX_DIGITS, Plane, named_block_table};
-use crate::float_layout::SignEncoding;
+use crate::float_layout::{FloatLayout, SignEncoding};
 use crate::float_layout_codec::{decode, encode};
 use crate::format::{LevelTable, NumericFormat};
 use crate::format_codec::FormatCodec;
@@ -49,6 +51,9 @@ enum Fit {
     SignedMax,
     /// `scale = peak / reach`, `code = clamp(round(value / scale)) + bias`.
     PeakRound,
+    /// [`Self::PeakRound`] and the two bytes after the scale hold `f16(scale * sum(codes))`, llama's
+    /// `Q8_1` `s`, from the unrounded scale and the integer code sum.
+    PeakRoundSum,
     /// `scale = mean(|value|)`, `code = value >= 0`.
     MeanSign,
     /// No instantiation: the runtime encoder keeps this layout.
@@ -83,12 +88,35 @@ const fn is_sign_code(layout: &BlockLayout) -> bool {
         && is_unsigned_integer(layout)
 }
 
-/// Bytes the scale, the min and the codes account for; a layout with bytes beyond that (`Q8_1`'s
-/// stored sum) carries data the fits here do not write.
+/// Bytes the scale and the codes account for; a layout with bytes beyond that carries data the fits
+/// here do not write, unless it is the stored sum [`has_sum_slot`] names.
 const fn accounted_bytes(layout: &BlockLayout) -> usize {
     let scale = layout.scale.layout.width().div_ceil(8) as usize;
     let codes = (layout.elements as usize * code_bits(layout) as usize).div_ceil(8);
     scale + codes
+}
+
+/// Bytes of llama's `Q8_1` stored sum `s`, a binary16.
+const SUM_BYTES: usize = 2;
+
+/// Where the stored sum lies: the bytes right after the scale.
+const fn sum_offset(layout: &BlockLayout) -> usize {
+    layout.scale.byte_offset as usize + layout.scale.layout.width().div_ceil(8) as usize
+}
+
+/// Whether the block's only bytes beyond scale and codes are a stored sum in the two bytes after the
+/// scale, with no code in them: `Q8_1`'s `s = d * sum(q)`.
+const fn has_sum_slot(layout: &BlockLayout) -> bool {
+    let first = sum_offset(layout) * 8;
+    let end = first + SUM_BYTES * 8;
+    let high_touches = match &layout.element.high {
+        Some(plane) => plane_touches(plane, layout.elements as usize, first, end),
+        None => false,
+    };
+    accounted_bytes(layout) + SUM_BYTES == layout.block_bytes as usize
+        && end <= layout.block_bytes as usize * 8
+        && !plane_touches(&layout.element.low, layout.elements as usize, first, end)
+        && !high_touches
 }
 
 /// The range of `value` codes (before the bias) an integer layout stores.
@@ -115,14 +143,14 @@ const fn fit_of(layout: &BlockLayout) -> Fit {
         || layout.scale.layout.exponent_bits == 0
         || layout.scale.byte_offset as usize + layout.scale.layout.width().div_ceil(8) as usize
             > layout.block_bytes as usize
-        || accounted_bytes(layout) != layout.block_bytes as usize
+        || (accounted_bytes(layout) != layout.block_bytes as usize && !has_sum_slot(layout))
         || code_bits(layout) > 8
     {
         return Fit::Runtime;
     }
     let bits = code_bits(layout);
     let bias = layout.element.bias as i32;
-    if is_sign_code(layout) {
+    let fit = if is_sign_code(layout) {
         Fit::MeanSign
     } else if layout.multiplier != 1 {
         Fit::Runtime
@@ -132,6 +160,11 @@ const fn fit_of(layout: &BlockLayout) -> Fit {
         Fit::PeakRound
     } else {
         Fit::Runtime
+    };
+    match (fit, has_sum_slot(layout)) {
+        (Fit::PeakRound, true) => Fit::PeakRoundSum,
+        (_, true) => Fit::Runtime,
+        (other, false) => other,
     }
 }
 
@@ -613,6 +646,17 @@ fn raw_of_value(layout: &BlockLayout, value: i32) -> u32 {
     }
 }
 
+/// The integer a raw code stands for: [`raw_of_value`] inverted.
+#[inline(always)]
+fn value_of_raw(layout: &BlockLayout, raw: u8) -> i32 {
+    if is_twos_complement_integer(layout) {
+        let spare = 32 - code_bits(layout);
+        ((u32::from(raw) << spare) as i32) >> spare
+    } else {
+        i32::from(raw) - layout.element.bias as i32
+    }
+}
+
 /// Packs the block-local `codes` into `block` with the same nested digit walk the decode reads by.
 #[inline(always)]
 fn scatter_codes<
@@ -736,7 +780,7 @@ fn fit_scale<const ELEMENTS: usize>(layout: &BlockLayout, fit: Fit, input: &[f32
             let scale = signed_max(input) / -(layout.element.bias as f32);
             (scale, inverse_of(scale))
         }
-        Fit::PeakRound | Fit::Runtime => {
+        Fit::PeakRound | Fit::PeakRoundSum | Fit::Runtime => {
             let scale = peak(input) / reach_of(layout) as f32;
             (scale, inverse_of(scale))
         }
@@ -758,7 +802,7 @@ fn code_of(layout: &BlockLayout, fit: Fit, inverse: f32, value: f32) -> u8 {
             let top = (1i32 << code_bits(layout)) - 1;
             top.min((value * inverse + (layout.element.bias as f32 + 0.5)) as i32) as u8
         }
-        Fit::PeakRound | Fit::Runtime => {
+        Fit::PeakRound | Fit::PeakRoundSum | Fit::Runtime => {
             let (lowest, highest) = integer_bounds(layout);
             let rounded = (libm::roundf(value * inverse) as i32).clamp(lowest, highest);
             raw_of_value(layout, rounded) as u8
@@ -811,6 +855,13 @@ fn encode_chunk<
     scatter_codes::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED>(layout, &codes, high_word, &mut block);
     let width = layout.scale.layout.width() as u32;
     put_field::<BYTES, SCALE_OWNED>(&mut block, layout.scale.byte_offset as usize, width, encode(scale, layout.scale.layout));
+    if matches!(fit, Fit::PeakRoundSum) {
+        // llama: s = f16(sum * d) with d the scale before it is rounded to the stored width
+        let total: i32 = codes.iter().map(|&raw| value_of_raw(layout, raw)).sum();
+        let at = sum_offset(layout);
+        let stored = encode(total as f32 * scale, FloatLayout::F16) as u16;
+        block[at..at + SUM_BYTES].copy_from_slice(&stored.to_le_bytes());
+    }
     *out = block;
 }
 

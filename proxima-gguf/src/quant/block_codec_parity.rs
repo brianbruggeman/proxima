@@ -8,7 +8,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::mem::MaybeUninit;
 
-use proxima_numeric::{BlockLayout, FormatCodec};
+use proxima_numeric::{BlockLayout, FormatCodec, Numeric, NumericFormat};
 
 use crate::quant::QuantError;
 use crate::quant::llama_reference::{dequantize_row_mxfp4, dequantize_row_tq2_0, quantize_row_tq2_0_ref};
@@ -499,4 +499,20 @@ fn layouts_outside_the_simple_family_do_not_resolve() {
     for layout in [BlockLayout::Q4_K, BlockLayout::Q6_K, BlockLayout::NVFP4, BlockLayout::Q8_1_GROUPED, BlockLayout::TQ1_0] {
         assert!(FormatCodec::block(&layout).is_none());
     }
+}
+
+#[test]
+fn numeric_encode_of_q4_0_kv_like_values_equals_the_gguf_port_bytes() {
+    let values = kv_like(32 * 2048);
+    let mut expected = vec![0u8; 2048 * 18];
+    q4_0::quantize(&values, &mut expected).expect("the port encodes finite values");
+    let mut packed = vec![0u8; expected.len()];
+
+    let blocks = Numeric::new(&NumericFormat::Q4_0, &values)
+        .expect("whole blocks")
+        .encode(&mut packed)
+        .expect("q4_0 encodes finite values");
+
+    assert_eq!(blocks, 2048);
+    assert_eq!(packed, expected);
 }

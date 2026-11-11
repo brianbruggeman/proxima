@@ -38,6 +38,7 @@ mod tests {
     use proxima_gguf::quant::QuantError;
     use proxima_gguf::quant::block_layout::dequantize;
     use proxima_numeric::codec::Codec;
+    use proxima_numeric::SignEncoding;
     use proxima_numeric::block_layout::BlockLayout;
 
     const ROWS: u32 = 3;
@@ -102,6 +103,16 @@ mod tests {
         layout.element.code.exponent_bits == 0
     }
 
+    /// An unsigned code centred on its bias (`Q4_0`, `Q5_0`): the layouts llama.cpp fits to the
+    /// signed maximum rather than the peak magnitude.
+    fn centred_offset_code(layout: &BlockLayout) -> bool {
+        let bits = u32::from(layout.element.low.bits)
+            + layout.element.high.map_or(0, |plane| u32::from(plane.bits));
+        integer_code(layout)
+            && matches!(layout.element.code.sign, SignEncoding::Absent)
+            && i32::from(layout.element.bias) == 1i32 << (bits - 1)
+    }
+
     /// The scale the encoder will store for this block peak, read back through the scale layout.
     fn scale_of(layout: &BlockLayout, peak: f32) -> f32 {
         let reach = block_layout_encode::reach(layout).expect("an encodable layout has a reach");
@@ -110,7 +121,11 @@ mod tests {
     }
 
     fn stated_error(layout: &BlockLayout, peak: f32) -> f32 {
-        if integer_code(layout) {
+        if centred_offset_code(layout) {
+            // llama's q4_0 and q5_0 scale by the signed maximum over the bias, so the opposite
+            // end of the range saturates one step short: the error is a whole step, not half
+            peak / f32::from(layout.element.bias) + 2.0 * peak * F16_EPSILON
+        } else if integer_code(layout) {
             let reach = block_layout_encode::reach(layout).expect("an encodable layout has a reach");
             f32::from(layout.multiplier) * (peak / reach) / 2.0 + 2.0 * peak * F16_EPSILON
         } else {
@@ -145,6 +160,52 @@ mod tests {
         );
     }
 
+    /// A 128-value activation row: gaussian-ish with two outlier channels per 64, the shape of a
+    /// real key row, from splitmix64 seeded 0x6b76_5f72_6f77_0001 and a sum of twelve uniforms.
+    fn activation_row() -> Vec<f32> {
+        let mut state = 0x6b76_5f72_6f77_0001u64;
+        let mut unit = || {
+            state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut mixed = state;
+            mixed = (mixed ^ (mixed >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            mixed = (mixed ^ (mixed >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            ((mixed ^ (mixed >> 31)) >> 40) as f32 / (1u64 << 24) as f32
+        };
+        (0..128)
+            .map(|index| {
+                let gaussian = (0..12).map(|_| unit()).sum::<f32>() - 6.0;
+                if matches!(index % 64, 5 | 37) { gaussian * 24.0 } else { gaussian }
+            })
+            .collect()
+    }
+
+    /// `quantize_row_q8_1_ref` of `activation_row()`, 4 blocks of 36 bytes: the bytes llama.cpp
+    /// itself writes. Captured from libggml-base.dylib (built 2026-09-06 14:34 local, from the
+    /// llama.cpp checkout at f1ea206218210afb913ae2f5d2c51faed35915da) called through dlopen by the
+    /// xcheck-enc harness, never from a proxima port.
+    const LLAMA_Q8_1_ROW: [u8; 144] = [
+        0xcb, 0x2c, 0x3e, 0xc5, 0xf8, 0xee, 0x07, 0x08, 0xef, 0x81, 0xfb, 0x0f, 0x03, 0xec, 0xe1, 0x10,
+        0xff, 0xfb, 0x08, 0x06, 0x0f, 0x1b, 0x02, 0xf3, 0xf6, 0x03, 0xfe, 0xff, 0x29, 0x06, 0x18, 0x07,
+        0x08, 0xf3, 0x0f, 0xf6, 0x79, 0x33, 0x4c, 0xcf, 0x06, 0x01, 0xfd, 0x04, 0xff, 0x81, 0xf3, 0x03,
+        0xf9, 0xfc, 0x03, 0x03, 0x00, 0x01, 0x04, 0x06, 0x02, 0xfa, 0x08, 0x08, 0x02, 0xfa, 0x00, 0x00,
+        0x0a, 0xfc, 0xfc, 0x00, 0x01, 0x00, 0xfb, 0xf9, 0x9e, 0x2e, 0x11, 0xc9, 0x0b, 0x15, 0xf3, 0xff,
+        0xfe, 0x81, 0xfb, 0xff, 0x04, 0xf5, 0xf0, 0x06, 0xfe, 0x0d, 0xef, 0x0c, 0x06, 0xfe, 0x00, 0x01,
+        0x17, 0x09, 0x06, 0xe5, 0x09, 0xfc, 0xf7, 0x03, 0x09, 0xf3, 0x01, 0x12, 0x58, 0x31, 0x64, 0xce,
+        0x01, 0xf8, 0xf5, 0x06, 0x07, 0x81, 0xff, 0x03, 0x01, 0xfe, 0x03, 0xf8, 0x00, 0x00, 0xfd, 0xff,
+        0xf4, 0x06, 0x00, 0x0c, 0x04, 0xff, 0xf5, 0x08, 0xf9, 0xfc, 0xfb, 0x0b, 0x05, 0xfe, 0xfb, 0xf4,
+    ];
+
+    #[test]
+    fn q8_1_activation_row_bytes_equal_llama_cpp_quantize_row_q8_1_ref() {
+        let row = activation_row();
+        let values: Vec<f32> = (0..ROWS).flat_map(|_| row.iter().copied()).collect();
+
+        let packed = encode(&BlockLayout::Q8_1, &values).expect("q8_1 encodes a finite row");
+
+        let expected: Vec<u8> = (0..ROWS).flat_map(|_| LLAMA_Q8_1_ROW).collect();
+        assert_eq!(packed, expected);
+    }
+
     #[test]
     fn grouped_q8_1_holds_four_independent_q8_1_runs_behind_one_aligned_header() {
         let grouped = BlockLayout::Q8_1_GROUPED;
@@ -155,8 +216,14 @@ mod tests {
         for (group, block) in packed.chunks(144).enumerate() {
             for run in 0..4 {
                 let single = &runs[(group * 4 + run) * 36..][..36];
-                assert_eq!(&block[run * 4..][..4], &single[..4], "group {group} run {run} header");
-                assert_eq!(&block[16 + run * 32..][..32], &single[4..], "group {group} run {run} codes");
+                // the grouped layout is encoded by the shared walker, which divides by the rounded
+                // scale; the single layout by llama's rule, which multiplies by the inverse of the
+                // unrounded one: same scale, codes within one step, and a stored sum that follows them
+                assert_eq!(&block[run * 4..][..2], &single[..2], "group {group} run {run} scale");
+                for (grouped_code, single_code) in block[16 + run * 32..][..32].iter().zip(&single[4..]) {
+                    let step = i16::from(*grouped_code as i8) - i16::from(*single_code as i8);
+                    assert!(step.abs() <= 1, "group {group} run {run} codes differ by {step}");
+                }
             }
         }
     }
@@ -210,6 +277,19 @@ mod tests {
         }
     }
 
+    /// Q8_1's `s` is `f16(d * sum(q))` from the scale before it is rounded to f16, as llama.cpp
+    /// computes it; a re-encode from the decoded grid only has the rounded scale, so that field
+    /// may move by one ulp while every other byte is fixed.
+    fn without_stored_sums(codec: Codec, packed: &[u8]) -> Vec<u8> {
+        let mut bytes = packed.to_vec();
+        if codec == Codec::Q8_1 {
+            for block in bytes.chunks_mut(36) {
+                block[2..4].fill(0);
+            }
+        }
+        bytes
+    }
+
     #[test]
     fn encoding_a_decoded_integer_run_reproduces_the_same_bytes() {
         for (codec, layout) in encodable_layouts() {
@@ -220,7 +300,11 @@ mod tests {
             let first = encode(&layout, &values).expect("an encodable layout encodes");
             let second =
                 encode(&layout, &decoded(&layout, &first)).expect("the decoded run encodes");
-            assert_eq!(first, second, "{codec:?} is not idempotent on its own grid");
+            assert_eq!(
+                without_stored_sums(codec, &first),
+                without_stored_sums(codec, &second),
+                "{codec:?} is not idempotent on its own grid"
+            );
         }
     }
 
