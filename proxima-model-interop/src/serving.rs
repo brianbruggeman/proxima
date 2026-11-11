@@ -1726,23 +1726,48 @@ mod tests {
         assert!(quant_error.to_string().contains("kv_cache_key_quant"));
     }
 
-    /// llama-server's `-ctk f16 -ctv f16` (its default) is admitted as a pair;
-    /// a mixed pair is refused because the decode kernel reads K and V
-    /// through one codec.
+    /// llama-server's `-ctk f16 -ctv f16` (its default) is admitted as a pair
+    /// when the build has a kernel that reads a narrow cache.
+    #[cfg(feature = "gpu")]
     #[test]
-    fn serving_admits_an_f16_cache_for_both_keys_and_values_and_refuses_a_mixed_pair() {
+    fn serving_admits_an_f16_cache_for_both_keys_and_values() {
         let f16_pair = ServingConfig {
             kv_cache_key_quant: GgmlType::F16,
             kv_cache_value_quant: GgmlType::F16,
             ..ServingConfig::default()
         };
+
+        apply_serving_config(&f16_pair, 1).expect("an f16 key and value cache is admitted");
+    }
+
+    /// A build with no kernel that reads a narrow cache refuses it at config
+    /// time rather than failing mid-decode.
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn serving_refuses_an_f16_cache_when_no_kernel_reads_it() {
+        let f16_pair = ServingConfig {
+            kv_cache_key_quant: GgmlType::F16,
+            kv_cache_value_quant: GgmlType::F16,
+            ..ServingConfig::default()
+        };
+
+        let error = apply_serving_config(&f16_pair, 1).expect_err("no kernel reads an f16 cache");
+
+        let message = error.to_string();
+        assert!(message.contains("kv_cache_key_quant"), "{message}");
+        assert!(message.contains("no cached-attention kernel that reads a narrow cache"), "{message}");
+    }
+
+    /// A mixed pair is refused because the decode kernel reads K and V
+    /// through one codec.
+    #[test]
+    fn serving_refuses_a_mixed_f16_f32_pair() {
         let mixed_pair = ServingConfig {
             kv_cache_key_quant: GgmlType::F16,
             kv_cache_value_quant: GgmlType::F32,
             ..ServingConfig::default()
         };
 
-        apply_serving_config(&f16_pair, 1).expect("an f16 key and value cache is admitted");
         let mixed_error = apply_serving_config(&mixed_pair, 1)
             .expect_err("an f16 key with an f32 value cache must be refused");
 
