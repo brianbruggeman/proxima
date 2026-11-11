@@ -360,13 +360,17 @@ fn decode_chunk<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool>(
     block: &[u8; BYTES],
     out: &mut [MaybeUninit<f32>; ELEMENTS],
 ) {
-    let scale = read_field(block, layout.scale);
     let multiplier = f32::from(layout.multiplier);
     let bias = f32::from(layout.element.bias);
     let min_term = match layout.min {
         Some(field) => f32::from(layout.min_multiplier) * read_field(block, field),
         None => 0.0,
     };
+    // a nan min must reach every slot with its own payload, and ieee 754 does not say which payload
+    // survives an add of two nans: a zero scale makes every product a finite zero (an integer code
+    // is finite), so the add has one nan operand and returns it, on any isa, with no branch
+    let stored_scale = read_field(block, layout.scale);
+    let scale = if layout.min.is_some() && min_term.is_nan() { 0.0 } else { stored_scale };
     let value_of = |raw: u32| {
         let factor = if is_integer_code(layout) {
             integer_factor(layout, raw) as f32
@@ -380,14 +384,6 @@ fn decode_chunk<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool>(
         };
         if layout.min.is_some() { value + min_term } else { value }
     };
-    // ieee 754 does not say which nan payload survives an add of two nans, so the min's is chosen
-    // here and the result does not depend on which operand an isa's add returns
-    if layout.min.is_some() && min_term.is_nan() {
-        out.iter_mut().for_each(|slot| {
-            slot.write(min_term);
-        });
-        return;
-    }
     if BY_WORD {
         unpack_runs(&layout.element.low, block, out, value_of);
         return;
@@ -680,6 +676,7 @@ macro_rules! resolve_named_block {
                 const _: () = assert!(BlockLayout::$name.is_simple());
                 const _: () = assert!(planes_cover(&BlockLayout::$name));
                 const _: () = assert!(code_bits(&BlockLayout::$name) <= 8);
+                const _: () = assert!(BlockLayout::$name.min.is_none() || is_integer_code(&BlockLayout::$name));
                 const ELEMENTS: usize = BlockLayout::$name.elements as usize;
                 const BYTES: usize = BlockLayout::$name.block_bytes as usize;
                 const FIT: Fit = fit_of(&BlockLayout::$name);
