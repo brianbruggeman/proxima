@@ -693,7 +693,7 @@ const fn straight_line_finite_bits(code: u32, layout: &FloatLayout) -> u32 {
 }
 
 // the f32 the graph computes in; every slice converts from or to it
-const SOURCE_LAYOUT: FloatLayout = FloatLayout::BF32;
+pub(crate) const SOURCE_LAYOUT: FloatLayout = FloatLayout::BF32;
 
 // plain data, so the hot path builds no error text; the caller makes a NumericError on the cold path
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
