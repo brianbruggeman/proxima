@@ -106,12 +106,33 @@ fn encode_mismatches(case: &Case, values: &[f32]) -> usize {
         .count()
 }
 
-fn decode_mismatches(case: &Case, data: &[u8]) -> usize {
+fn is_f16_nan(low: u8, high: u8) -> bool {
+    u16::from_le_bytes([low, high]) & 0x7fff > 0x7c00
+}
+
+/// Per block: whether a layout with a min stores a NaN scale beside a NaN min (scale at bytes 0..2,
+/// min at 2..4 for every layout here that has one).
+fn both_nan_blocks(layout: &BlockLayout, data: &[u8], block_bytes: usize) -> Vec<bool> {
+    data.chunks(block_bytes)
+        .map(|block| layout.min.is_some() && is_f16_nan(block[0], block[1]) && is_f16_nan(block[2], block[3]))
+        .collect()
+}
+
+/// IEEE 754 leaves open which operand's payload a two-NaN add returns, so a both-NaN block's
+/// elements compare by NaN-ness; every other element compares by bits.
+fn decode_mismatches(case: &Case, data: &[u8], both_nan: &[bool]) -> usize {
     let codec = BlockCodec::resolve(&case.layout).expect("a simple layout resolves");
     let mut expected = vec![0.0f32; data.len() / codec.block_bytes() * codec.elements()];
     (case.decode)(data, &mut expected).expect("incumbent decodes");
     let got = new_decode(&codec, data);
-    let mut differing = expected.iter().zip(&got).filter(|(left, right)| left.to_bits() != right.to_bits());
+    let elements = codec.elements();
+    let mut differing = expected.iter().zip(&got).enumerate().filter(|(index, (left, right))| {
+        if both_nan.get(index / elements).copied().unwrap_or(false) {
+            !(left.is_nan() && right.is_nan())
+        } else {
+            left.to_bits() != right.to_bits()
+        }
+    }).map(|(_, pair)| pair);
     let first = differing.next().map(|(left, right)| (left.to_bits(), right.to_bits()));
     let count = usize::from(first.is_some()) + differing.count();
     if let Some((incumbent, new)) = first {
@@ -144,18 +165,14 @@ fn decode_bits_equal_the_incumbent_dequantize_on_arbitrary_block_bytes() {
     let mut state = 0xdead_beef_cafe_f00du64;
     for case in cases() {
         let codec = BlockCodec::resolve(&case.layout).expect("resolves");
-        let mut data = bytes_of(&mut state, 4096 * codec.block_bytes());
-        if case.layout.min.is_some() {
-            // a NaN scale added to a NaN min returns one operand's payload, which Rust leaves unspecified
-            for block in data.chunks_mut(codec.block_bytes()) {
-                let nan = |low: u8, high: u8| u16::from_le_bytes([low, high]) & 0x7fff > 0x7c00;
-                if nan(block[0], block[1]) && nan(block[2], block[3]) {
-                    block[3] &= 0xbf;
-                }
-            }
+        let data = bytes_of(&mut state, 4096 * codec.block_bytes());
+        let both_nan = both_nan_blocks(&case.layout, &data, codec.block_bytes());
+        if case.layout.min.is_some() && matches!(case.name, "q4_1" | "q5_1") {
+            std::eprintln!("{} both-nan scale+min blocks: {}", case.name, both_nan.iter().filter(|&&flag| flag).count());
+            assert!(both_nan.contains(&true), "{} seed yields no both-nan block", case.name);
         }
 
-        assert_eq!(decode_mismatches(&case, &data), 0, "{}", case.name);
+        assert_eq!(decode_mismatches(&case, &data, &both_nan), 0, "{}", case.name);
     }
 }
 
@@ -168,7 +185,7 @@ fn decode_bits_equal_the_incumbent_dequantize_on_encoded_kv_values() {
         let mut packed = vec![0u8; values.len() / codec.elements() * codec.block_bytes()];
         encode(&values, &mut packed).expect("incumbent encodes");
 
-        assert_eq!(decode_mismatches(&case, &packed), 0, "{}", case.name);
+        assert_eq!(decode_mismatches(&case, &packed, &[]), 0, "{}", case.name);
     }
 }
 
