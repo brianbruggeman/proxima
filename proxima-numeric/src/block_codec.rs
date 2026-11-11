@@ -32,6 +32,16 @@ pub type EncodeFn = fn(&[f32], &mut [u8]);
 /// A decode instantiation: whole blocks of bytes into one slot per element.
 pub type DecodeFn = fn(&[u8], &mut [MaybeUninit<f32>]);
 
+/// A block encode instantiation that sizes and checks its own window, where the element count and the
+/// block bytes are literals: the packed byte count, or `None` with `out` unwritten when `values` is not
+/// whole blocks or `out` is shorter than the packed range.
+pub type BlockEncodeFn = fn(&[f32], &mut [u8]) -> Option<usize>;
+
+/// A block decode instantiation that sizes and checks its own window, where the element count and the
+/// block bytes are literals: the byte count read, or `None` with `out` unwritten when `out` is not
+/// whole blocks or `data` is shorter than the packed range.
+pub type BlockDecodeFn = fn(&[u8], &mut [MaybeUninit<f32>]) -> Option<usize>;
+
 /// How a layout's block scale is fitted to its values, decided from the layout alone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fit {
@@ -581,12 +591,17 @@ fn decode_run<
     layout: BlockLayout,
     data: &[u8],
     out: &mut [MaybeUninit<f32>],
-) {
-    let blocks = data.as_chunks::<BYTES>().0;
-    let slots = out.as_chunks_mut::<ELEMENTS>().0;
+) -> Option<usize> {
+    let (slots, partial) = out.as_chunks_mut::<ELEMENTS>();
+    if !partial.is_empty() {
+        return None;
+    }
+    let bytes = slots.len() * BYTES;
+    let blocks = data.get(..bytes)?.as_chunks::<BYTES>().0;
     for (block, slot) in blocks.iter().zip(slots) {
         decode_chunk::<ELEMENTS, BYTES, BY_WORD, IN_PLACE, PAIRED>(&layout, block, slot);
     }
+    Some(bytes)
 }
 
 #[inline(always)]
@@ -812,12 +827,17 @@ fn encode_run<
     fit: Fit,
     values: &[f32],
     out: &mut [u8],
-) {
-    let inputs = values.as_chunks::<ELEMENTS>().0;
-    let blocks = out.as_chunks_mut::<BYTES>().0;
+) -> Option<usize> {
+    let (inputs, partial) = values.as_chunks::<ELEMENTS>();
+    if !partial.is_empty() {
+        return None;
+    }
+    let bytes = inputs.len() * BYTES;
+    let blocks = out.get_mut(..bytes)?.as_chunks_mut::<BYTES>().0;
     for (input, block) in inputs.iter().zip(blocks) {
         encode_chunk::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, SCALE_OWNED>(&layout, fit, input, block);
     }
+    Some(bytes)
 }
 
 macro_rules! resolve_named_block {
@@ -838,7 +858,7 @@ macro_rules! resolve_named_block {
                 const UNPACK_BY_WORD: bool = unpacks_by_word(&BlockLayout::$name);
                 const IN_PLACE: bool = reads_codes_in_place(&BlockLayout::$name);
                 const PAIRED: bool = pairs_halves_with_high_word(&BlockLayout::$name);
-                let encode: Option<EncodeFn> = match FIT {
+                let encode: Option<BlockEncodeFn> = match FIT {
                     Fit::Runtime => None,
                     _ => Some(|values, out| {
                         encode_run::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, SCALE_OWNED>(
@@ -846,13 +866,13 @@ macro_rules! resolve_named_block {
                             FIT,
                             values,
                             out,
-                        );
+                        )
                     }),
                 };
-                let decode: DecodeFn = |data, out| {
-                    decode_run::<ELEMENTS, BYTES, UNPACK_BY_WORD, IN_PLACE, PAIRED>(BlockLayout::$name, data, out);
+                let decode: BlockDecodeFn = |data, out| {
+                    decode_run::<ELEMENTS, BYTES, UNPACK_BY_WORD, IN_PLACE, PAIRED>(BlockLayout::$name, data, out)
                 };
-                return Some(FormatCodec::table(encode, decode, ELEMENTS, BYTES));
+                return Some(FormatCodec::block_table(encode, decode, ELEMENTS, BYTES));
             }
         )*
         None
