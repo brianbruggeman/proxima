@@ -21,6 +21,7 @@
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::hint::black_box;
+use std::ops::Range;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
@@ -31,9 +32,10 @@ use criterion::{BenchmarkId, Criterion, Throughput};
 use half::{bf16, f16};
 use proxima_gguf::quant::QuantError;
 use proxima_gguf::quant::{pq2_0, q1_0, q2_0, q4_0, q4_1, q5_0, q5_1, q8_0, q8_1, q8_k};
-use proxima_numeric::{BlockLayout, FormatCodec, NumericFormat};
+use proxima_numeric::{BlockLayout, Field, FormatCodec, NumericFormat};
 use proxima_numeric::decode::decode_blocks;
 use proxima_numeric::encode::encode_blocks;
+use proxima_numeric::float_layout_codec::encode as encode_field;
 
 struct CountingAllocator;
 
@@ -560,28 +562,38 @@ enum Decoder {
     Legacy,
 }
 
+/// Where a block format's timing incumbent for encode comes from: a `proxima-gguf` routine, or the runtime
+/// walker `encode_blocks` that NEW replaces (`proxima-gguf` has no `tq2_0` quantize outside its test-only
+/// llama.cpp transcription). The label is printed with every cell.
+#[derive(Clone, Copy)]
+enum Encoder {
+    Gguf(IncumbentEncode),
+    Walker,
+}
+
 #[derive(Clone, Copy)]
 struct BlockCase {
     name: &'static str,
     layout: BlockLayout,
-    gguf_encode: Option<IncumbentEncode>,
+    encoder: Option<Encoder>,
     decoder: Decoder,
 }
 
 fn block_cases() -> Vec<BlockCase> {
-    let case = |name, layout, gguf_encode, decoder| BlockCase { name, layout, gguf_encode, decoder };
+    let case = |name, layout, encoder, decoder| BlockCase { name, layout, encoder, decoder };
+    let gguf = |routine: IncumbentEncode| Some(Encoder::Gguf(routine));
     vec![
-        case("q4_0", BlockLayout::Q4_0, Some(q4_0::quantize as IncumbentEncode), Decoder::Gguf(q4_0::dequantize)),
+        case("q4_0", BlockLayout::Q4_0, gguf(q4_0::quantize), Decoder::Gguf(q4_0::dequantize)),
         case("q4_1", BlockLayout::Q4_1, None, Decoder::Gguf(q4_1::dequantize)),
-        case("q5_0", BlockLayout::Q5_0, Some(q5_0::quantize as IncumbentEncode), Decoder::Gguf(q5_0::dequantize)),
+        case("q5_0", BlockLayout::Q5_0, gguf(q5_0::quantize), Decoder::Gguf(q5_0::dequantize)),
         case("q5_1", BlockLayout::Q5_1, None, Decoder::Gguf(q5_1::dequantize)),
-        case("q8_0", BlockLayout::Q8_0, Some(q8_0::quantize as IncumbentEncode), Decoder::Gguf(q8_0::dequantize)),
+        case("q8_0", BlockLayout::Q8_0, gguf(q8_0::quantize), Decoder::Gguf(q8_0::dequantize)),
         case("q8_1", BlockLayout::Q8_1, None, Decoder::Gguf(q8_1::dequantize)),
         case("q8_k", BlockLayout::Q8_K, None, Decoder::Gguf(q8_k::dequantize)),
-        case("q1_0", BlockLayout::Q1_0, Some(q1_0::quantize as IncumbentEncode), Decoder::Gguf(q1_0::dequantize)),
-        case("q2_0", BlockLayout::Q2_0, Some(q2_0::quantize as IncumbentEncode), Decoder::Gguf(q2_0::dequantize)),
-        case("pq2_0", BlockLayout::PQ2_0, Some(pq2_0::quantize as IncumbentEncode), Decoder::Gguf(pq2_0::dequantize)),
-        case("tq2_0", BlockLayout::TQ2_0, None, Decoder::Legacy),
+        case("q1_0", BlockLayout::Q1_0, gguf(q1_0::quantize), Decoder::Gguf(q1_0::dequantize)),
+        case("q2_0", BlockLayout::Q2_0, gguf(q2_0::quantize), Decoder::Gguf(q2_0::dequantize)),
+        case("pq2_0", BlockLayout::PQ2_0, gguf(pq2_0::quantize), Decoder::Gguf(pq2_0::dequantize)),
+        case("tq2_0", BlockLayout::TQ2_0, Some(Encoder::Walker), Decoder::Legacy),
         case("mxfp4", BlockLayout::MXFP4, None, Decoder::Legacy),
         case("fp6_e3m2", BlockLayout::FP6_E3M2, None, Decoder::Legacy),
     ]
@@ -604,6 +616,14 @@ impl BlockCase {
         count / self.elements() * self.block_bytes()
     }
 
+    fn encoder_label(&self) -> &'static str {
+        match self.encoder {
+            Some(Encoder::Gguf(_)) => "gguf",
+            Some(Encoder::Walker) => "walker",
+            None => "none",
+        }
+    }
+
     fn decoder_label(&self) -> &'static str {
         match self.decoder {
             Decoder::Gguf(_) => "gguf",
@@ -612,16 +632,25 @@ impl BlockCase {
     }
 }
 
+fn run_incumbent_encode(case: &BlockCase, values: &[f32], out: &mut [u8]) {
+    match case.encoder.expect("a case with an incumbent encode") {
+        Encoder::Gguf(routine) => routine(values, out).unwrap(),
+        Encoder::Walker => {
+            encode_blocks(&NumericFormat::Block(case.layout), values, out).unwrap();
+        }
+    }
+}
+
 #[inline(never)]
 fn incumbent_block_encode(case: &BlockCase, values: &[f32], out: &mut [u8]) {
-    (case.gguf_encode.expect("a case with an incumbent encode"))(values, out).unwrap();
+    run_incumbent_encode(case, values, out);
 }
 
 /// [`incumbent_block_encode`] compiled a second time, the A/A control.
 #[inline(never)]
 fn incumbent_block_encode_copy(case: &BlockCase, values: &[f32], out: &mut [u8]) {
     black_box(());
-    (case.gguf_encode.expect("a case with an incumbent encode"))(values, out).unwrap();
+    run_incumbent_encode(case, values, out);
 }
 
 #[inline(never)]
@@ -705,14 +734,7 @@ fn is_f16_nan(low: u8, high: u8) -> bool {
 /// is the operand order's); both counts are returned and printed.
 fn random_blocks(case: &BlockCase, count: usize, seed: u64) -> (Vec<u8>, NanBlocks) {
     let bytes = random_bytes(case.packed_len(count), seed);
-    let mut nan = NanBlocks::default();
-    for block in bytes.chunks(case.block_bytes()) {
-        let scale_nan = is_f16_nan(block[0], block[1]);
-        let min_nan = case.layout.min.is_some() && is_f16_nan(block[2], block[3]);
-        nan.scale += usize::from(scale_nan);
-        nan.min += usize::from(min_nan);
-        nan.both += usize::from(scale_nan && min_nan);
-    }
+    let nan = nan_census(case, &bytes);
     (bytes, nan)
 }
 
@@ -721,6 +743,79 @@ struct NanBlocks {
     scale: usize,
     min: usize,
     both: usize,
+}
+
+fn field_bytes(field: Field) -> Range<usize> {
+    let start = usize::from(field.byte_offset);
+    start..start + usize::from(field.layout.width()).div_ceil(8)
+}
+
+/// Whether a scale or min field holds a NaN: an E8M0 byte of 0xff, an f16 or an f32 NaN.
+fn field_is_nan(block: &[u8], field: Field) -> bool {
+    match block[field_bytes(field)] {
+        [exponent] => exponent == 0xff,
+        [low, high] => is_f16_nan(low, high),
+        [first, second, third, fourth] => f32::from_le_bytes([first, second, third, fourth]).is_nan(),
+        _ => false,
+    }
+}
+
+fn nan_census(case: &BlockCase, bytes: &[u8]) -> NanBlocks {
+    let mut nan = NanBlocks::default();
+    for block in bytes.chunks(case.block_bytes()) {
+        let scale_nan = field_is_nan(block, case.layout.scale);
+        let min_nan = case.layout.min.is_some_and(|field| field_is_nan(block, field));
+        nan.scale += usize::from(scale_nan);
+        nan.min += usize::from(min_nan);
+        nan.both += usize::from(scale_nan && min_nan);
+    }
+    nan
+}
+
+/// For a format the walker refuses (a stored min is not an absolute-maximum scale, or bytes beyond the
+/// scale and codes): each block's scale field is its peak over 8 and its min field its smallest value, both
+/// from the kv values and encoded in the field's own layout.
+fn write_derived_fields(case: &BlockCase, inputs: &[f32], blocks: &mut [u8]) {
+    let fields = [(Some(case.layout.scale), 0), (case.layout.min, 1)];
+    for (block, values) in blocks.chunks_mut(case.block_bytes()).zip(inputs.chunks(case.elements())) {
+        let peak = values.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+        let lowest = values.iter().copied().fold(f32::MAX, f32::min);
+        for (field, role) in fields {
+            let Some(field) = field else { continue };
+            let value = if role == 0 { peak / 8.0 } else { lowest };
+            let range = field_bytes(field);
+            let width = range.len();
+            block[range].copy_from_slice(&encode_field(value, field.layout).to_le_bytes()[..width]);
+        }
+    }
+}
+
+/// The blocks a decode is timed on, and their NaN census. The template returns early on a block whose
+/// scale or min is NaN, so raw random bytes would time a mix of early returns and full decodes. A format
+/// with an incumbent encode is timed on the blocks it encodes from the kv values; a decode-only format
+/// takes random code bytes with the scale and min fields of the blocks the walker encodes from the same
+/// values, so every scale and min is finite and the codes are still arbitrary. Parity keeps raw bytes.
+fn timing_blocks(case: &BlockCase, values: &[f32], count: usize) -> (Vec<u8>, NanBlocks) {
+    let inputs = &values[..count];
+    let mut encoded = vec![0u8; case.packed_len(count)];
+    let bytes = if case.encoder.is_some() {
+        run_incumbent_encode(case, inputs, &mut encoded);
+        encoded
+    } else {
+        if encode_blocks(&NumericFormat::Block(case.layout), inputs, &mut encoded).is_err() {
+            write_derived_fields(case, inputs, &mut encoded);
+        }
+        let mut bytes = random_bytes(encoded.len(), 0xb10c);
+        let fields = [Some(case.layout.scale), case.layout.min];
+        for (block, source) in bytes.chunks_mut(case.block_bytes()).zip(encoded.chunks(case.block_bytes())) {
+            for field in fields.into_iter().flatten() {
+                block[field_bytes(field)].copy_from_slice(&source[field_bytes(field)]);
+            }
+        }
+        bytes
+    };
+    let census = nan_census(case, &bytes);
+    (bytes, census)
 }
 
 fn mismatched_blocks(left: &[u8], right: &[u8], block_bytes: usize) -> (usize, usize) {
@@ -740,11 +835,13 @@ fn block_bit_exactness(values: &[f32]) -> Vec<String> {
         let special = special_block_values(case.elements(), values);
         failures.extend(input_census(&format!("{} special", case.name), &special, true));
         let (mut encode_blocks_bad, mut encode_bytes_bad, mut encode_compared) = (0, 0, 0);
-        if let Some(incumbent) = case.gguf_encode {
-            for input in [kv, &special[..]] {
+        if case.encoder.is_some() {
+            // the walker refuses non-finite input (NonFinite), so only a gguf incumbent sees the special blocks
+            let walker = matches!(case.encoder, Some(Encoder::Walker));
+            for input in [kv, if walker { &[] } else { &special[..] }] {
                 let mut expected = vec![0u8; case.packed_len(input.len())];
                 let mut got = vec![0u8; expected.len()];
-                incumbent(input, &mut expected).unwrap();
+                run_incumbent_encode(&case, input, &mut expected);
                 codec.encode(input, &mut got).unwrap();
                 let (blocks, bytes) = mismatched_blocks(&expected, &got, case.block_bytes());
                 encode_blocks_bad += blocks;
@@ -752,7 +849,7 @@ fn block_bit_exactness(values: &[f32]) -> Vec<String> {
                 encode_compared += input.len() / case.elements();
             }
         }
-        if let Some(incumbent) = case.gguf_encode {
+        if let Some(Encoder::Gguf(incumbent)) = case.encoder {
             let mut expected = vec![0u8; case.packed_len(count)];
             let mut legacy = vec![0u8; expected.len()];
             incumbent(kv, &mut expected).unwrap();
@@ -779,9 +876,9 @@ fn block_bit_exactness(values: &[f32]) -> Vec<String> {
             nan_blocks.both,
         );
         let mut packed_sets = vec![random_packed];
-        if let Some(incumbent) = case.gguf_encode {
+        if case.encoder.is_some() {
             let mut packed = vec![0u8; case.packed_len(count)];
-            incumbent(kv, &mut packed).unwrap();
+            run_incumbent_encode(&case, kv, &mut packed);
             packed_sets.push(packed);
         }
         let (mut decode_bad, mut decode_compared) = (0usize, 0usize);
@@ -805,17 +902,21 @@ fn block_bit_exactness(values: &[f32]) -> Vec<String> {
             decode_bad += expected.iter().zip(&got).filter(|(a, b)| a.to_bits() != b.to_bits()).count();
             decode_compared += elements;
         }
-        let encode_oracle = match (case.gguf_encode.is_some(), codec.can_encode()) {
-            (true, _) => "gguf",
-            (false, true) => "none(no incumbent quantize; new encode instantiated, unchecked)",
-            (false, false) => "none(no incumbent quantize; new encode absent)",
+        let encode_oracle = match (case.encoder, codec.can_encode()) {
+            (Some(_), _) => case.encoder_label(),
+            (None, true) => "none(no incumbent quantize; new encode instantiated, unchecked)",
+            (None, false) => "none(no incumbent quantize; new encode absent)",
         };
         println!(
             "blockexact {}: encode oracle={encode_oracle} compared_blocks={encode_compared} mismatched_blocks={encode_blocks_bad} mismatched_bytes={encode_bytes_bad} | decode oracle={} compared_values={decode_compared} mismatched_values={decode_bad}",
             case.name,
             case.decoder_label(),
         );
-        if encode_blocks_bad + decode_bad != 0 {
+        // the walker is a timing incumbent, not an oracle: proxima-gguf's block_codec_parity checks tq2_0
+        // encode against the llama.cpp transcription on these same 2,097,152 values, so a walker
+        // disagreement is printed above and does not gate
+        let gating_encode_bad = if matches!(case.encoder, Some(Encoder::Walker)) { 0 } else { encode_blocks_bad };
+        if gating_encode_bad + decode_bad != 0 {
             failures.push(format!(
                 "block {} disagrees with its incumbent: {encode_blocks_bad} encode blocks, {decode_bad} decode values",
                 case.name
@@ -832,8 +933,8 @@ fn bench_blocks(criterion: &mut Criterion, values: &[f32]) {
         for &count in &SIZES {
             let inputs = &values[..count];
             group.throughput(Throughput::Elements(count as u64));
-            let mut packed = vec![0u8; case.packed_len(count)];
-            if case.gguf_encode.is_some() {
+            let packed = timing_blocks(&case, values, count).0;
+            if case.encoder.is_some() {
                 let mut buffer = vec![0u8; packed.len()];
                 group.bench_function(BenchmarkId::new("encode/incumbent", count), |bencher| {
                     bencher.iter(|| incumbent_block_encode(&case, black_box(inputs), black_box(&mut buffer)));
@@ -841,9 +942,6 @@ fn bench_blocks(criterion: &mut Criterion, values: &[f32]) {
                 group.bench_function(BenchmarkId::new("encode/new", count), |bencher| {
                     bencher.iter(|| new_block_encode(&codec, black_box(inputs), black_box(&mut buffer)));
                 });
-                incumbent_block_encode(&case, inputs, &mut packed);
-            } else {
-                packed = random_blocks(&case, count, 0xb10c).0;
             }
             let mut out = vec![0.0f32; count];
             group.bench_function(BenchmarkId::new("decode/incumbent", count), |bencher| {
@@ -866,6 +964,8 @@ struct BlockCell {
     incumbent_versus_copy: Comparison,
     degenerate: Comparison,
     degenerate_versus_new: Comparison,
+    timing_blocks: usize,
+    timing_nan: NanBlocks,
 }
 
 fn run_block_encode_cell(case: &BlockCase, values: &[f32], count: usize) -> BlockCell {
@@ -890,16 +990,23 @@ fn run_block_encode_cell(case: &BlockCase, values: &[f32], count: usize) -> Bloc
         || new_block_encode(&codec, black_box(inputs), black_box(&mut new_buffer)),
         || degenerate_block_encode(&codec, black_box(inputs), black_box(&mut degenerate_buffer)),
     );
-    BlockCell { direction: "encode", name: case.name, label: "gguf", count, versus_incumbent, incumbent_versus_copy, degenerate, degenerate_versus_new }
+    BlockCell {
+        direction: "encode",
+        name: case.name,
+        label: case.encoder_label(),
+        count,
+        versus_incumbent,
+        incumbent_versus_copy,
+        degenerate,
+        degenerate_versus_new,
+        timing_blocks: 0,
+        timing_nan: NanBlocks::default(),
+    }
 }
 
 fn run_block_decode_cell(case: &BlockCase, values: &[f32], count: usize) -> BlockCell {
     let codec = case.codec();
-    let mut packed = vec![0u8; case.packed_len(count)];
-    match case.gguf_encode {
-        Some(incumbent) => incumbent(&values[..count], &mut packed).unwrap(),
-        None => packed = random_blocks(case, count, 0xb10c).0,
-    }
+    let (packed, timing_nan) = timing_blocks(case, values, count);
     let (mut incumbent_out, mut copy_out, mut new_out, mut degenerate_out) =
         (vec![0.0f32; count], vec![0.0f32; count], vec![0.0f32; count], vec![0.0f32; count]);
     let versus_incumbent = compare(
@@ -918,14 +1025,25 @@ fn run_block_decode_cell(case: &BlockCase, values: &[f32], count: usize) -> Bloc
         || new_block_decode(&codec, black_box(&packed), black_box(&mut new_out)),
         || degenerate_block_decode(&codec, black_box(&packed), black_box(&mut degenerate_out)),
     );
-    BlockCell { direction: "decode", name: case.name, label: case.decoder_label(), count, versus_incumbent, incumbent_versus_copy, degenerate, degenerate_versus_new }
+    BlockCell {
+        direction: "decode",
+        name: case.name,
+        label: case.decoder_label(),
+        count,
+        versus_incumbent,
+        incumbent_versus_copy,
+        degenerate,
+        degenerate_versus_new,
+        timing_blocks: packed.len() / case.block_bytes(),
+        timing_nan,
+    }
 }
 
 fn block_cells(values: &[f32]) -> Vec<BlockCell> {
     let mut cells = Vec::new();
     for case in block_cases() {
         for &count in &SIZES {
-            if case.gguf_encode.is_some() {
+            if case.encoder.is_some() {
                 cells.push(run_block_encode_cell(&case, values, count));
             }
             cells.push(run_block_decode_cell(&case, values, count));
@@ -1388,6 +1506,20 @@ fn print_scalar_cells(cells: &[Cell], quiet: bool) -> Tally {
 /// 4 scalars x encode and decode x the 4 sizes.
 const SCALAR_CELLS: usize = 32;
 
+/// (7 instantiated encodes with a timing incumbent: q4_0, q5_0, q8_0, q1_0, q2_0 and pq2_0 against
+/// `proxima-gguf`, tq2_0 against the walker; plus 13 table decodes) x the 4 sizes.
+const BLOCK_CELLS: usize = (7 + 13) * 4;
+
+/// Sums the NaN census of every decode cell's timing input; the returned line is a failure when any
+/// timed block has a NaN scale or min, since the template returns early on those.
+fn timing_census(cells: &[BlockCell]) -> Option<String> {
+    let (blocks, scale, min) = cells.iter().fold((0, 0, 0), |(blocks, scale, min), cell| {
+        (blocks + cell.timing_blocks, scale + cell.timing_nan.scale, min + cell.timing_nan.min)
+    });
+    println!("census timing_inputs: blocks={blocks} nan_scale_blocks={scale} nan_min_blocks={min}");
+    (blocks == 0 || scale + min != 0).then(|| format!("timing inputs: {blocks} blocks, {scale} nan scale, {min} nan min (want blocks > 0 and 0 nan)"))
+}
+
 /// Runs every cell, then returns the failures: one line per cell not PASS and one for a cell count
 /// that is not the expected one. A run is a pass only when this is empty.
 fn interleaved(values: &[f32]) -> Vec<String> {
@@ -1413,6 +1545,11 @@ fn interleaved(values: &[f32]) -> Vec<String> {
     if cells.len() != expected_scalar_cells {
         failures.push(format!("scalar cells {} != expected {expected_scalar_cells}", cells.len()));
     }
+    println!("blockcells={} expected={BLOCK_CELLS}", block_cells.len());
+    if block_cells.len() != BLOCK_CELLS {
+        failures.push(format!("block cells {} != expected {BLOCK_CELLS}", block_cells.len()));
+    }
+    failures.extend(timing_census(&block_cells));
     if blocks_only {
         println!("AC6 UNCHECKED: KV_BENCH_BLOCKS_ONLY skipped the {SCALAR_CELLS} scalar cells");
     }
