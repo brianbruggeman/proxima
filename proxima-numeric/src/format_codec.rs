@@ -11,6 +11,15 @@
 //! scalar layout without a name resolves to the same loop with the layout as data, so every
 //! supported scalar layout has a codec; a block layout outside the table has none and keeps
 //! [`crate::encode::encode_blocks`] and [`crate::decode::decode_blocks`].
+//!
+//! One window contract serves every caller. [`FormatCodec::encode`] writes the packed form of
+//! `values` into the front of `out`, [`FormatCodec::decode`] reads the packed range for `out.len()`
+//! elements from the front of `data`, and each returns the byte count. The codec derives the range
+//! from the element count, so a caller holding a byte window over a whole allocation passes it
+//! as is and sizes nothing itself; an exact-size buffer is the window that ends at the range. A
+//! window shorter than the range, or an element count that is not whole blocks, is an error and
+//! nothing is written; bytes past the range are untouched by encode and unread by decode. A caller
+//! that needs the buffer to be exactly the range asserts the returned count.
 
 use core::mem::MaybeUninit;
 
@@ -47,8 +56,10 @@ enum Route {
 /// with the layout as a literal (a named scalar layout or a table block layout), or the scalar
 /// layout as data for any other storable layout. No allocation, no trait object.
 ///
-/// A scalar is a block of one element, so one type and one size check serve both: a call checks
-/// whole blocks and exact sizes, then makes one indirect call.
+/// A scalar is a block of one element, so one type and one window check serve both: a call sizes
+/// the packed range from the element count, checks the window holds it, then makes one indirect
+/// call. The scalar and identity routes size the range inline by `len * width`; the rest take the
+/// out-of-line path.
 ///
 /// Example: a 16-bit layout storing 512 values takes 1 KiB of output; `Q4_0` storing 64 values
 /// takes 36 bytes.
@@ -183,72 +194,116 @@ impl FormatCodec {
         Some(elements / self.elements * self.block_bytes)
     }
 
-    /// Encodes whole blocks of `values` into `out`, little-endian.
+    /// Encodes `values` into the front of `out`, little-endian, and returns the packed byte count.
+    /// The packed range comes from `values`, so a caller holding a byte window over a whole
+    /// allocation sizes nothing itself and the codec sizes and checks once; bytes past the range
+    /// are untouched. An exact-size `out` is the window that ends at the range.
     ///
     /// # Errors
     /// [`NumericError::UnsupportedEncode`] for a layout with no encode instantiation,
     /// [`NumericError::InputNotElementMultiple`] when `values` is not whole blocks,
-    /// [`NumericError::OutputSizeMismatch`] when `out` is not exactly the packed byte count; the
-    /// output is unwritten in each case.
+    /// [`NumericError::OutputSizeMismatch`] when `out` is shorter than the packed byte count; `out`
+    /// is unwritten in each case.
     #[must_use = "an error leaves the output unwritten"]
     #[inline(always)]
-    pub fn encode(&self, values: &[f32], out: &mut [u8]) -> Result<(), NumericError> {
+    pub fn encode(&self, values: &[f32], out: &mut [u8]) -> Result<usize, NumericError> {
+        // a scalar route's width is at most four bytes, so the product of a slice length and the
+        // width cannot wrap
         match &self.route {
             Route::Scalar { encode: Some(run), .. } => {
-                self.check_scalar_encode(values.len(), out.len(), self.block_bytes)?;
-                run(values, out);
-                Ok(())
-            }
-            Route::Block { encode: Some(run), .. } => {
-                self.check_block_encode(values.len(), out.len())?;
-                run(values, out);
-                Ok(())
+                let bytes = values.len() * self.block_bytes;
+                let Some(window) = out.get_mut(..bytes) else {
+                    return Err(self.encode_fault(values.len(), out.len()));
+                };
+                run(values, window);
+                Ok(bytes)
             }
             Route::Identity => {
-                self.check_scalar_encode(values.len(), out.len(), element_bytes(&SOURCE_LAYOUT))?;
-                encode_body(SOURCE_LAYOUT, values, out);
-                Ok(())
+                let bytes = values.len() * element_bytes(&SOURCE_LAYOUT);
+                let Some(window) = out.get_mut(..bytes) else {
+                    return Err(self.encode_fault(values.len(), out.len()));
+                };
+                encode_body(SOURCE_LAYOUT, values, window);
+                Ok(bytes)
             }
-            Route::Scalar { encode: None, .. } | Route::Block { encode: None, .. } => {
-                Err(self.unsupported_encode())
-            }
-            Route::Layout(layout) => self.encode_layout(layout, values, out),
+            _ => self.encode_general(values, out),
         }
     }
 
-    /// Decodes whole blocks of `data` into the caller-owned, possibly uninitialised `out`,
-    /// initialising every slot.
-    ///
-    /// # Errors
-    /// [`NumericError::InputNotBlockMultiple`] when `data` is not whole blocks,
-    /// [`NumericError::OutputSizeMismatch`] when `out` is not one slot per element; nothing is
-    /// written in either case.
-    #[must_use = "an error leaves the output uninitialised"]
-    #[inline(always)]
-    pub fn decode(&self, data: &[u8], out: &mut [MaybeUninit<f32>]) -> Result<(), NumericError> {
+    #[inline(never)]
+    fn encode_general(&self, values: &[f32], out: &mut [u8]) -> Result<usize, NumericError> {
+        if !self.can_encode() {
+            return Err(self.unsupported_encode());
+        }
+        let Some(bytes) = self.packed_len(values.len()) else {
+            return Err(self.encode_fault(values.len(), out.len()));
+        };
+        let Some(window) = out.get_mut(..bytes) else {
+            return Err(self.encode_fault(values.len(), out.len()));
+        };
         match &self.route {
-            Route::Scalar { decode, .. } => {
-                self.check_scalar_decode(data.len(), out.len(), self.block_bytes)?;
-                decode(data, out);
-            }
-            Route::Block { decode, .. } => {
-                self.check_block_decode(data.len(), out.len())?;
-                decode(data, out);
-            }
-            Route::Identity => {
-                self.check_scalar_decode(data.len(), out.len(), element_bytes(&SOURCE_LAYOUT))?;
-                if out.len() <= IDENTITY_INLINE_ELEMENTS {
-                    Self::decode_identity_copy(data, out);
-                } else {
-                    Self::decode_identity(data, out);
-                }
-            }
-            Route::Layout(layout) => {
-                self.check_scalar_decode(data.len(), out.len(), self.block_bytes)?;
-                Self::decode_layout(layout, data, out);
+            Route::Scalar { encode: Some(run), .. } | Route::Block { encode: Some(run), .. } => run(values, window),
+            Route::Layout(layout) => encode_body(*layout, values, window),
+            Route::Identity => encode_body(SOURCE_LAYOUT, values, window),
+            Route::Scalar { encode: None, .. } | Route::Block { encode: None, .. } => {
+                return Err(self.unsupported_encode());
             }
         }
-        Ok(())
+        Ok(bytes)
+    }
+
+    /// Decodes the packed range for `out.len()` elements from the front of `data` into the
+    /// caller-owned, possibly uninitialised `out`, initialising every slot, and returns the byte
+    /// count read. The range comes from `out`, so a caller holding a byte window over a whole
+    /// allocation sizes nothing itself and the codec sizes and checks once; bytes past the range
+    /// are unread. An exact-size `data` is the window that ends at the range.
+    ///
+    /// # Errors
+    /// [`NumericError::InputNotElementMultiple`] when `out` is not whole blocks,
+    /// [`NumericError::InputNotBlockMultiple`] or [`NumericError::OutputSizeMismatch`] when `data`
+    /// is shorter than the packed byte count; nothing is written in either case.
+    #[must_use = "an error leaves the output uninitialised"]
+    #[inline(always)]
+    pub fn decode(&self, data: &[u8], out: &mut [MaybeUninit<f32>]) -> Result<usize, NumericError> {
+        match &self.route {
+            Route::Scalar { decode, .. } => {
+                let bytes = out.len() * self.block_bytes;
+                let Some(window) = data.get(..bytes) else {
+                    return Err(self.decode_fault(data.len(), out.len()));
+                };
+                decode(window, out);
+                Ok(bytes)
+            }
+            Route::Identity => {
+                let bytes = out.len() * element_bytes(&SOURCE_LAYOUT);
+                let Some(window) = data.get(..bytes) else {
+                    return Err(self.decode_fault(data.len(), out.len()));
+                };
+                if out.len() <= IDENTITY_INLINE_ELEMENTS {
+                    Self::decode_identity_copy(window, out);
+                } else {
+                    Self::decode_identity(window, out);
+                }
+                Ok(bytes)
+            }
+            _ => self.decode_general(data, out),
+        }
+    }
+
+    #[inline(never)]
+    fn decode_general(&self, data: &[u8], out: &mut [MaybeUninit<f32>]) -> Result<usize, NumericError> {
+        let Some(bytes) = self.packed_len(out.len()) else {
+            return Err(self.decode_fault(data.len(), out.len()));
+        };
+        let Some(window) = data.get(..bytes) else {
+            return Err(self.decode_fault(data.len(), out.len()));
+        };
+        match &self.route {
+            Route::Scalar { decode, .. } | Route::Block { decode, .. } => decode(window, out),
+            Route::Layout(layout) => Self::decode_layout(layout, window, out),
+            Route::Identity => Self::decode_identity(window, out),
+        }
+        Ok(bytes)
     }
 
     #[inline(always)]
@@ -267,47 +322,10 @@ impl FormatCodec {
 
     // out of line so the layout-as-data loop's register pressure stays out of the inlined named path
     #[inline(never)]
-    fn encode_layout(&self, layout: &FloatLayout, values: &[f32], out: &mut [u8]) -> Result<(), NumericError> {
-        self.check_scalar_encode(values.len(), out.len(), self.block_bytes)?;
-        encode_body(*layout, values, out);
-        Ok(())
-    }
-
-    #[inline(never)]
     fn decode_layout(layout: &FloatLayout, data: &[u8], out: &mut [MaybeUninit<f32>]) {
         decode_body(*layout, data, out, |slot, value| {
             slot.write(value);
         });
-    }
-
-    // a scalar route is a block of one element, so the size tie is one multiply, and the width is a
-    // literal where the route fixes it
-    #[inline(always)]
-    fn check_scalar_encode(&self, values: usize, out: usize, width: usize) -> Result<(), NumericError> {
-        if out == values * width { Ok(()) } else { Err(self.encode_fault(values, out)) }
-    }
-
-    #[inline(always)]
-    fn check_scalar_decode(&self, data: usize, out: usize, width: usize) -> Result<(), NumericError> {
-        if data == out * width { Ok(()) } else { Err(self.decode_fault(data, out)) }
-    }
-
-    #[inline(always)]
-    fn check_block_encode(&self, values: usize, out: usize) -> Result<(), NumericError> {
-        match self.packed_len(values) {
-            Some(expected) if expected == out => Ok(()),
-            _ => Err(self.encode_fault(values, out)),
-        }
-    }
-
-    #[inline(always)]
-    fn check_block_decode(&self, data: usize, out: usize) -> Result<(), NumericError> {
-        let whole = data.is_multiple_of(self.block_bytes);
-        if whole && out == data / self.block_bytes * self.elements {
-            Ok(())
-        } else {
-            Err(self.decode_fault(data, out))
-        }
     }
 
     #[cold]
@@ -335,6 +353,13 @@ impl FormatCodec {
     #[cold]
     #[inline(never)]
     fn decode_fault(&self, data: usize, slots: usize) -> NumericError {
+        if self.packed_len(slots).is_none() {
+            return NumericError::InputNotElementMultiple {
+                format: self.format,
+                found: slots,
+                elements: self.elements,
+            };
+        }
         if self.elements != 1 && !data.is_multiple_of(self.block_bytes) {
             return NumericError::InputNotBlockMultiple {
                 format: self.format,
@@ -390,16 +415,19 @@ mod tests {
     }
 
     #[test]
-    fn resolved_decode_refuses_a_slot_count_that_is_not_the_element_count() {
+    fn resolved_decode_reads_only_the_range_its_slots_name_and_refuses_more_slots_than_data() {
         let values = kv_values(1000);
         let codec = FormatCodec::scalar(&FloatLayout::F16).expect("f16 resolves");
         let mut packed = vec![0u8; values.len() * 2];
         codec.encode(&values, &mut packed).expect("sizes match");
-        let mut slots = vec![MaybeUninit::<f32>::uninit(); 999];
+        let mut fewer = vec![MaybeUninit::<f32>::uninit(); 999];
+        let mut more = vec![MaybeUninit::<f32>::uninit(); 1001];
 
-        let refused = codec.decode(&packed, &mut slots);
+        let read = codec.decode(&packed, &mut fewer);
+        let refused = codec.decode(&packed, &mut more);
 
-        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 999, expected: 1000 }));
+        assert_eq!(read, Ok(1998));
+        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 1001, expected: 1000 }));
     }
 
     #[test]
@@ -449,6 +477,77 @@ mod tests {
         assert!(matches!(codec.route, Route::Identity));
         assert_eq!(packed[..4], 1.5_f32.to_le_bytes());
         assert_eq!(packed[4..], 0x7fa0_1234_u32.to_le_bytes());
+    }
+
+    fn route_codecs() -> Vec<(&'static str, FormatCodec)> {
+        let respelled = FloatLayout {
+            bias_override: Some(FloatLayout::F16.bias()),
+            ..FloatLayout::F16
+        };
+        vec![
+            ("identity", FormatCodec::scalar(&SOURCE_LAYOUT).expect("the source layout resolves")),
+            ("named scalar", FormatCodec::scalar(&FloatLayout::BF16).expect("bf16 resolves")),
+            ("layout as data", FormatCodec::scalar(&respelled).expect("a respelled f16 resolves")),
+            ("block", FormatCodec::block(&BlockLayout::Q4_0).expect("q4_0 resolves")),
+        ]
+    }
+
+    #[test]
+    fn a_longer_window_gets_the_packed_range_and_the_count_and_keeps_its_tail() {
+        let values = kv_values(256);
+        for (route, codec) in route_codecs() {
+            let packed_len = codec.packed_len(values.len()).expect("whole blocks");
+            let mut exact = vec![0u8; packed_len];
+            let mut window = vec![0xAB_u8; packed_len + 17];
+            let exact_written = codec.encode(&values, &mut exact).expect("the buffer is the packed range");
+
+            let window_written = codec.encode(&values, &mut window).expect("the window holds the packed range");
+
+            assert_eq!((exact_written, window_written), (packed_len, packed_len), "{route} encode count");
+            assert_eq!(window[..packed_len], exact, "{route} encode bytes");
+            assert!(window[packed_len..].iter().all(|byte| *byte == 0xAB), "{route} encode tail");
+            let mut from_exact = vec![MaybeUninit::<f32>::uninit(); values.len()];
+            let mut from_window = vec![MaybeUninit::<f32>::uninit(); values.len()];
+
+            let exact_read = codec.decode(&exact, &mut from_exact).expect("the buffer is the packed range");
+            let window_read = codec.decode(&window, &mut from_window).expect("the window holds the packed range");
+
+            assert_eq!((exact_read, window_read), (packed_len, packed_len), "{route} decode count");
+        }
+    }
+
+    #[test]
+    fn a_window_shorter_than_the_packed_range_is_refused_and_written_nowhere() {
+        let values = kv_values(256);
+        for (route, codec) in route_codecs() {
+            let packed_len = codec.packed_len(values.len()).expect("whole blocks");
+            let mut window = vec![0xAB_u8; packed_len - 1];
+
+            let encode_refused = codec.encode(&values, &mut window);
+            let mut slots = vec![MaybeUninit::<f32>::uninit(); values.len()];
+            let decode_refused = codec.decode(&window, &mut slots);
+
+            assert!(
+                matches!(encode_refused, Err(NumericError::OutputSizeMismatch { found, expected }) if found == packed_len - 1 && expected == packed_len),
+                "{route} encode: {encode_refused:?}"
+            );
+            assert!(window.iter().all(|byte| *byte == 0xAB), "{route} wrote into a refused window");
+            assert!(decode_refused.is_err(), "{route} decode: {decode_refused:?}");
+        }
+    }
+
+    #[test]
+    fn a_count_that_is_not_whole_blocks_is_refused_over_any_window() {
+        let codec = FormatCodec::block(&BlockLayout::Q4_0).expect("q4_0 resolves");
+        let values = kv_values(33);
+        let mut window = vec![0u8; 1024];
+        let mut slots = vec![MaybeUninit::<f32>::uninit(); 33];
+
+        let encode_refused = codec.encode(&values, &mut window);
+        let decode_refused = codec.decode(&window, &mut slots);
+
+        assert!(matches!(encode_refused, Err(NumericError::InputNotElementMultiple { found: 33, elements: 32, .. })));
+        assert!(matches!(decode_refused, Err(NumericError::InputNotElementMultiple { found: 33, elements: 32, .. })));
     }
 
     #[test]

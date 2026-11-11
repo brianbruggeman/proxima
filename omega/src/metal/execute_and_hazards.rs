@@ -1349,7 +1349,8 @@ pub fn write_placed_buffer_f32(buffer: &PlacedBuffer, byte_offset: usize, values
 ///
 /// # Errors
 /// [`NumericError::InputNotElementMultiple`] when `values.len()` is not whole blocks of the codec's
-/// format, and the codec's own refusal for a format with no encode.
+/// format, [`NumericError::OutputSizeMismatch`] when the allocation past `byte_offset` is shorter than
+/// the packed range, and the codec's own refusal for a format with no encode.
 #[cfg(feature = "metal-output-placement")]
 pub fn write_placed_buffer(
     buffer: &PlacedBuffer,
@@ -1357,27 +1358,14 @@ pub fn write_placed_buffer(
     codec: &FormatCodec,
     values: &[f32],
 ) -> Result<(), NumericError> {
-    let packed_bytes = placed_byte_len(codec, values.len())?;
-    // SAFETY: shared memory with no command buffer in flight; the caller keeps the packed range inside the allocation.
-    let destination = unsafe {
+    // SAFETY: shared memory with no command buffer in flight; the window is the rest of the allocation, which the codec bounds-checks against the packed range.
+    let window = unsafe {
         core::slice::from_raw_parts_mut(
             buffer.contents().as_ptr().cast::<u8>().add(byte_offset),
-            packed_bytes,
+            buffer.length().saturating_sub(byte_offset),
         )
     };
-    codec.encode(values, destination)
-}
-
-/// The byte length of `element_count` elements of `codec`'s format, from whole-block geometry.
-#[cfg(feature = "metal-output-placement")]
-fn placed_byte_len(codec: &FormatCodec, element_count: usize) -> Result<usize, NumericError> {
-    codec
-        .packed_len(element_count)
-        .ok_or(NumericError::InputNotElementMultiple {
-            format: codec.format_name(),
-            found: element_count,
-            elements: codec.elements(),
-        })
+    codec.encode(values, window).map(drop)
 }
 
 /// Decodes `element_count` elements at `byte_offset` to `f32`, the inverse of
@@ -1394,16 +1382,15 @@ pub fn read_placed_buffer(
     codec: &FormatCodec,
     element_count: usize,
 ) -> Result<Vec<f32>, NumericError> {
-    let packed_bytes = placed_byte_len(codec, element_count)?;
-    // SAFETY: same contract as `write_placed_buffer`; the source is the packed range inside the allocation.
-    let source = unsafe {
+    // SAFETY: same contract as `write_placed_buffer`; the window is the rest of the allocation.
+    let window = unsafe {
         core::slice::from_raw_parts(
             buffer.contents().as_ptr().cast::<u8>().add(byte_offset),
-            packed_bytes,
+            buffer.length().saturating_sub(byte_offset),
         )
     };
     let mut decoded: Vec<f32> = Vec::with_capacity(element_count);
-    codec.decode(source, &mut decoded.spare_capacity_mut()[..element_count])?;
+    codec.decode(window,&mut decoded.spare_capacity_mut()[..element_count])?;
     // SAFETY: `decode` returned Ok, so it initialised all `element_count` slots of the spare prefix.
     unsafe { decoded.set_len(element_count) };
     Ok(decoded)
@@ -1426,8 +1413,7 @@ pub fn narrow_placed_buffer(
     codec: &FormatCodec,
     element_count: usize,
 ) -> Result<(), NumericError> {
-    let packed_bytes = placed_byte_len(codec, element_count)?;
-    // SAFETY: idle shared buffers (every placed execute waits), in-bounds ranges, distinct allocations.
+    // SAFETY: idle shared buffers (every placed execute waits), in-bounds offsets, distinct allocations; the destination window is the rest of its allocation, which the codec bounds-checks.
     let (rows, packed) = unsafe {
         (
             core::slice::from_raw_parts(
@@ -1445,11 +1431,11 @@ pub fn narrow_placed_buffer(
                     .as_ptr()
                     .cast::<u8>()
                     .add(destination_byte_offset),
-                packed_bytes,
+                destination.length().saturating_sub(destination_byte_offset),
             ),
         )
     };
-    codec.encode(rows, packed)
+    codec.encode(rows, packed).map(drop)
 }
 
 /// Moves `byte_len` bytes from `from_byte` to `to_byte` inside one
