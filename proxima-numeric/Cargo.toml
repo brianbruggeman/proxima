@@ -30,6 +30,12 @@ config = ["std", "dep:conflaguration"]
 workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 half = { version = "2.7.1", default-features = false }
+proxima-gguf.workspace = true
 serde_json.workspace = true
 toml.workspace = true
+
+[[bench]]
+name = "bench_kv_cache_codec"
+harness = false
