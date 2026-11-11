@@ -5303,6 +5303,42 @@ pub(super) mod arena_tests {
     }
 
     #[test]
+    fn a_released_plan_drops_the_completed_command_buffers_it_kept_for_status() {
+        let (program, [stage_zero, stage_one, stage_two]) = three_stage_chain(4, 4);
+        let a = [1.0f32, 2.0, 3.0, 4.0];
+        let b = [10.0f32, 20.0, 30.0, 40.0];
+        let outputs = [stage_zero, stage_one, stage_two];
+        let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
+        let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
+            .expect("plans the three-stage chain");
+        let placed = allocate_placed_buffer(4 * core::mem::size_of::<f32>())
+            .expect("allocates the caller-owned output buffer");
+        execute_plan_with_placements(
+            &resolved_plan,
+            &blocks,
+            &[],
+            &[(stage_two, &placed, 0)],
+            &mut Vec::new(),
+        )
+        .expect("runs the chain with the last stage placed in the caller's buffer");
+        assert!(
+            !resolved_plan.chunk_status_buffers.borrow().is_empty(),
+            "a finished call keeps its committed command buffers for the status sweep"
+        );
+
+        resolved_plan.release_caller_buffers();
+
+        assert!(
+            resolved_plan.chunk_status_buffers.borrow().is_empty(),
+            "a completed command buffer retains the caller's bound buffers, so release must drop it"
+        );
+        assert!(
+            resolved_plan.chunk_status_diagnostics.borrow().is_empty(),
+            "the diagnostics are parallel to the command buffers and go with them"
+        );
+    }
+
+    #[test]
     fn pooled_output_equals_the_cpu_oracle_on_a_real_forward() {
         let (program, [stage_zero, stage_one, stage_two]) = three_stage_chain(4, 4);
         let a = [1.0f32, 2.0, 3.0, 4.0];

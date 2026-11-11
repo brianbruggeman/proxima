@@ -1977,10 +1977,24 @@ impl Plan {
     /// as the plan is kept resident. Every call writes a fresh entry for each
     /// non-resident node before reading it (`execute_plan_with_placements`), so
     /// nothing reads what this removes.
+    ///
+    /// Also drops [`Self::chunk_status_buffers`] and its parallel
+    /// diagnostics: a finished call's command buffers are already
+    /// `Completed` (`check_all_command_buffers` read their status before the
+    /// call returned) and each call clears both before encoding, but a
+    /// completed command buffer keeps its bound buffers retained until Metal
+    /// finishes tearing it down, which under GPU contention is after the call
+    /// returns. Observed on a failing run: status `Completed`, the placed
+    /// buffer's retain count one above the probe's own, and clearing this
+    /// vector alone freed the allocation. Releasing the buffers therefore
+    /// frees the caller's allocation before this returns, with nothing to wait
+    /// on, since no command buffer in this vector is still in flight.
     pub fn release_caller_buffers(&self) {
         self.device_buffers
             .borrow_mut()
             .retain(|node, _| self.resident_nodes.contains(node));
+        self.chunk_status_buffers.borrow_mut().clear();
+        self.chunk_status_diagnostics.borrow_mut().clear();
     }
 }
 
