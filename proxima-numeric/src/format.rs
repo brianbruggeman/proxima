@@ -39,18 +39,21 @@ pub enum LevelTable {
     },
     /// `value = table[code]`; IQ4_NL's 16-entry non-linear ladder.
     Explicit(&'static [i8]),
-    /// IQ2_XS: a 9-bit grid index and a 7-bit sign index packed in one `u16` per eight elements.
-    Iq2XsGrid,
-    /// IQ3_XXS: two 8-bit grid indices per eight elements, one 32-bit aux word per 32.
-    Iq3XxsGrid,
-    /// `value = sign * magnitude`: the code indexes `grid`, one entry per `lanes` elements, each
-    /// entry packing `lanes` unsigned byte magnitudes (lane 0 in the low byte); element `i` takes
-    /// lane `i % lanes`. `sign` is a one-bit-per-element plane; a set bit negates. IQ3_S's
-    /// `IQ3S_GRID` with its `signs[QK_K/8]` bytes.
+    /// `value = sign * magnitude * 2^-unit_shift`: the code indexes `grid`, one entry per `lanes`
+    /// elements, each entry packing `lanes` unsigned byte magnitudes (lane 0 in the low byte);
+    /// element `i` takes lane `i % lanes`. With `sign_table` `None`, `sign` is a
+    /// one-bit-per-element plane and a set bit negates (IQ3_S's `signs[QK_K/8]`). With
+    /// `Some(table)` it is a plane of indices into `table` shared by eight elements, and element
+    /// `i` is negated when bit `i % 8` of `table[index]` is set (IQ3_XXS's seven-bit index into
+    /// `ksigns_iq2xs`; eight elements span two grid entries, so the sign cannot be per entry).
+    /// `unit_shift` is the constant the dequantizer folds into the sub-block scale: 0 for IQ3_S,
+    /// 2 for IQ3_XXS (`0.5 * 0.5`).
     SignedGrid {
         grid: &'static [u32],
         lanes: u8,
         sign: Plane,
+        sign_table: Option<&'static [u8]>,
+        unit_shift: u8,
     },
     /// `value = sign * magnitude * 2^-unit_shift`: the code indexes `grid`, one `u64` entry per
     /// eight elements, each packing eight unsigned magnitude bytes (lane 0 in the low byte);
@@ -100,9 +103,7 @@ impl LevelTable {
                     None
                 }
             }
-            Self::Iq2XsGrid
-            | Self::Iq3XxsGrid
-            | Self::SignedGrid { .. }
+            Self::SignedGrid { .. }
             | Self::SignedGrid64 { .. }
             | Self::DeltaGrid { .. } => None,
         }
@@ -111,10 +112,9 @@ impl LevelTable {
 
 /// Where a level-set format's codes live.
 ///
-/// The split is a finding about the representation, not a convenience: `Packed` formats (ternary,
-/// IQ4_NL) have an affine code address, so their exact packing is a [`BlockLayout`] and one walker
-/// reads them. The trained codebooks (IQ2_XS, IQ3_XXS) address codes through a group record that
-/// is not an affine map of the element index, so they carry only their block shape.
+/// Every named format is `Packed`: each carries its exact packing as a [`BlockLayout`]. `Codebook`
+/// is the shape-only arm for a format whose code address is not an affine map of the element
+/// index; no named format uses it today.
 #[expect(
     clippy::large_enum_variant,
     reason = "the packed arm is a const block layout description, never heap-allocated and \
@@ -215,12 +215,6 @@ impl LevelFormat {
         Self::from_layout(layout, Self::ladder(layout))
     }
 }
-
-const F16_SCALE: Field = Field {
-    layout: FloatLayout::F16,
-    byte_offset: 0,
-    pieces: None,
-};
 
 /// One numeric storage format.
 ///
@@ -757,25 +751,30 @@ impl NumericFormat {
         LevelTable::Explicit(&crate::tables::KVALUES_IQ4_NL),
     ));
 
-    /// iq2_xs: 256 elements per super-block, a 9-bit grid index plus a sign index per group.
-    pub const Iq2Xs: Self = Self::Levels(LevelFormat {
-        geometry: LevelGeometry::Codebook {
-            elements: 256,
-            bytes: 74,
-            scale: F16_SCALE,
+    /// iq2_xs: 256 elements in 74 bytes, a 9-bit grid index and a 7-bit sign index per eight
+    /// elements under 4-bit sub-block scales ([`BlockLayout::IQ2_XS`]).
+    pub const Iq2Xs: Self = Self::Levels(LevelFormat::from_layout(
+        &BlockLayout::IQ2_XS,
+        LevelTable::SignedGrid64 {
+            grid: &crate::tables::IQ2XS_GRID,
+            sign: BlockLayout::IQ2_XS_SIGN_INDEX,
+            sign_table: Some(&crate::tables::KSIGNS_IQ2XS),
+            unit_shift: 3,
         },
-        levels: LevelTable::Iq2XsGrid,
-    });
+    ));
 
-    /// iq3_xxs: 256 elements per super-block, two 8-bit grid indices per eight elements.
-    pub const Iq3Xxs: Self = Self::Levels(LevelFormat {
-        geometry: LevelGeometry::Codebook {
-            elements: 256,
-            bytes: 98,
-            scale: F16_SCALE,
+    /// iq3_xxs: 256 elements in 98 bytes, an 8-bit grid index per four elements and a 7-bit sign
+    /// index per eight under 4-bit sub-block scales ([`BlockLayout::IQ3_XXS`]).
+    pub const Iq3Xxs: Self = Self::Levels(LevelFormat::from_layout(
+        &BlockLayout::IQ3_XXS,
+        LevelTable::SignedGrid {
+            grid: &crate::tables::IQ3XXS_GRID,
+            lanes: 4,
+            sign: BlockLayout::IQ3_XXS_SIGN_INDEX,
+            sign_table: Some(&crate::tables::KSIGNS_IQ2XS),
+            unit_shift: 2,
         },
-        levels: LevelTable::Iq3XxsGrid,
-    });
+    ));
 
     /// iq3_s: 256 elements in 110 bytes, a 9-bit grid index per four elements plus a sign bit per
     /// element under 4-bit sub-block scales ([`BlockLayout::IQ3_S`]).
@@ -785,6 +784,8 @@ impl NumericFormat {
             grid: &crate::tables::IQ3S_GRID,
             lanes: 4,
             sign: BlockLayout::IQ3_S_SIGNS,
+            sign_table: None,
+            unit_shift: 0,
         },
     ));
 

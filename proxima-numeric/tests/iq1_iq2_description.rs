@@ -471,8 +471,6 @@ fn describes_its_codes(table: &LevelTable) -> bool {
     match table {
         LevelTable::Linear { .. }
         | LevelTable::Explicit(_)
-        | LevelTable::Iq2XsGrid
-        | LevelTable::Iq3XxsGrid
         | LevelTable::SignedGrid { .. }
         | LevelTable::SignedGrid64 { .. }
         | LevelTable::DeltaGrid { .. } => true,
@@ -493,8 +491,7 @@ fn no_format_in_all_is_external() {
         }
     }
     assert!(level_formats > 0, "no level format in ALL");
-    // IQ2_XS and IQ3_XXS are the only codebook-geometry formats left, and each has its decoder
-    assert_eq!(codebook_only, 2);
+    assert_eq!(codebook_only, 0);
     for format in FOUR {
         assert!(
             levels_of(format).packing().is_some(),

@@ -17,10 +17,8 @@
 
 use crate::block_layout::{BlockLayout, Coded, Field, Plane};
 use crate::error::NumericError;
-use crate::float_layout::FloatLayout;
 use crate::float_layout_codec;
 use crate::format::{LevelFormat, LevelGeometry, LevelTable, NumericFormat};
-use crate::tables::{IQ2XS_GRID, IQ3XXS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
 
 /// Decode one scalar of `format` from the first `bytes_per_block` bytes of `bytes`.
 ///
@@ -379,92 +377,9 @@ fn decode_levels_block(
             }
             Ok(())
         }
-        LevelTable::Iq2XsGrid => {
-            decode_iq2_xs(block, out);
-            Ok(())
-        }
-        LevelTable::Iq3XxsGrid => {
-            decode_iq3_xxs(block, out);
-            Ok(())
-        }
         LevelTable::SignedGrid { .. }
         | LevelTable::SignedGrid64 { .. }
         | LevelTable::DeltaGrid { .. } => Err(NumericError::NoDecoder { format: name }),
-    }
-}
-
-fn u16_at(block: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([block[offset], block[offset + 1]])
-}
-
-fn f16_at(block: &[u8], offset: usize) -> f32 {
-    float_layout_codec::decode(u32::from(u16_at(block, offset)), FloatLayout::F16)
-}
-
-fn u32_at(block: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        block[offset],
-        block[offset + 1],
-        block[offset + 2],
-        block[offset + 3],
-    ])
-}
-
-const IQ2_XS_QS_OFFSET: usize = 2;
-const IQ2_XS_SCALES_OFFSET: usize = IQ2_XS_QS_OFFSET + 256 / 8 * 2;
-const IQ3_XXS_QS_OFFSET: usize = 2;
-const IQ3_XXS_SCALES_OFFSET: usize = IQ3_XXS_QS_OFFSET + 256 / 4;
-
-fn decode_iq2_xs(block: &[u8], out: &mut [f32]) {
-    let delta = f16_at(block, 0);
-    for sub_block in 0..256 / 32 {
-        let scale_byte = block[IQ2_XS_SCALES_OFFSET + sub_block];
-        let db_low = delta * (0.5 + f32::from(scale_byte & 0x0F)) * 0.25;
-        let db_high = delta * (0.5 + f32::from(scale_byte >> 4)) * 0.25;
-        for group in 0..4 {
-            let qs_value = u16_at(block, IQ2_XS_QS_OFFSET + (sub_block * 4 + group) * 2);
-            let grid_bytes = IQ2XS_GRID[usize::from(qs_value & 511)].to_le_bytes();
-            let signs = KSIGNS_IQ2XS[usize::from(qs_value >> 9)];
-            let db = if group < 2 { db_low } else { db_high };
-            let base = sub_block * 32 + group * 8;
-            for lane in 0..8 {
-                let sign = if signs & KMASK_IQ2XS[lane] != 0 {
-                    -1.0
-                } else {
-                    1.0
-                };
-                out[base + lane] = db * f32::from(grid_bytes[lane]) * sign;
-            }
-        }
-    }
-}
-
-fn decode_iq3_xxs(block: &[u8], out: &mut [f32]) {
-    let delta = f16_at(block, 0);
-    for sub_block in 0..256 / 32 {
-        let aux = u32_at(block, IQ3_XXS_SCALES_OFFSET + sub_block * 4);
-        let db = delta * (0.5 + f32::from((aux >> 28) as u8)) * 0.5;
-        let grid_base = IQ3_XXS_QS_OFFSET + sub_block * 8;
-        for group in 0..4 {
-            let signs = KSIGNS_IQ2XS[((aux >> (7 * group)) & 127) as usize];
-            let grid1 = IQ3XXS_GRID[usize::from(block[grid_base + group * 2])].to_le_bytes();
-            let grid2 = IQ3XXS_GRID[usize::from(block[grid_base + group * 2 + 1])].to_le_bytes();
-            let base = sub_block * 32 + group * 8;
-            for lane in 0..4 {
-                let sign1 = if signs & KMASK_IQ2XS[lane] != 0 {
-                    -1.0
-                } else {
-                    1.0
-                };
-                let sign2 = if signs & KMASK_IQ2XS[lane + 4] != 0 {
-                    -1.0
-                } else {
-                    1.0
-                };
-                out[base + lane] = db * f32::from(grid1[lane]) * sign1;
-                out[base + 4 + lane] = db * f32::from(grid2[lane]) * sign2;
-            }
-        }
     }
 }
 

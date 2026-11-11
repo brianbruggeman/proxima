@@ -24,7 +24,7 @@ struct Case {
 
 /// Every format with a decoder on both sides. Pinned by count: a new codec must be added here or
 /// the parity claim silently stops covering it.
-const CASES: [Case; 23] = [
+const CASES: [Case; 21] = [
     Case { format: NumericFormat::Float16, wire: GgmlType::F16 },
     Case { format: NumericFormat::BFloat16, wire: GgmlType::Bf16 },
     Case { format: NumericFormat::Q2K, wire: GgmlType::Q2_K },
@@ -45,8 +45,6 @@ const CASES: [Case; 23] = [
     Case { format: NumericFormat::Ptq1_0, wire: GgmlType::Ptq1_0 },
     Case { format: NumericFormat::Tq10, wire: GgmlType::Tq10 },
     Case { format: NumericFormat::Tq20, wire: GgmlType::Tq20 },
-    Case { format: NumericFormat::Iq2Xs, wire: GgmlType::Iq2Xs },
-    Case { format: NumericFormat::Iq3Xxs, wire: GgmlType::Iq3Xxs },
     Case { format: NumericFormat::Iq4Nl, wire: GgmlType::Iq4Nl },
 ];
 
@@ -66,7 +64,7 @@ fn bytes(seed: u64, len: usize) -> Vec<u8> {
 
 #[test]
 fn every_format_with_a_gguf_decoder_decodes_identically_through_the_shared_walker() {
-    assert_eq!(CASES.len(), 23, "pinned: formats with a decoder on both sides");
+    assert_eq!(CASES.len(), 21, "pinned: formats with a decoder on both sides");
     let mut checked = 0;
     for case in &CASES {
         let block_bytes = usize::from(case.format.bytes_per_block());
@@ -91,7 +89,7 @@ fn every_format_with_a_gguf_decoder_decodes_identically_through_the_shared_walke
             checked += 1;
         }
     }
-    assert_eq!(checked, 92, "pinned: 23 formats x 4 seeds");
+    assert_eq!(checked, 84, "pinned: 21 formats x 4 seeds");
 }
 
 #[test]
@@ -102,8 +100,23 @@ fn the_four_undecoded_codebooks_are_named_rather_than_guessed() {
         .count();
     assert_eq!(
         undecoded,
-        13,
-        "pinned: formats with no gguf decoder (5 scalar/float codecs, 6 non-walker block \
-         formats, and the codebooks the frontend owns)"
+        15,
+        "pinned: formats with no walker decoder (5 scalar/float codecs, 6 non-walker block \
+         formats, and the codebooks the frontend owns, iq2_xs and iq3_xxs included)"
     );
+}
+
+#[test]
+fn iq2_xs_and_iq3_xxs_are_described_not_walked_so_gguf_alone_decodes_them() {
+    for format in [NumericFormat::Iq2Xs, NumericFormat::Iq3Xxs] {
+        let payload = bytes(1, usize::from(format.bytes_per_block()));
+        let mut shared = vec![0.0_f32; usize::from(format.elements_per_block())];
+        assert!(
+            matches!(
+                decode_blocks(&format, &payload, &mut shared),
+                Err(proxima_numeric::NumericError::NoDecoder { .. })
+            ),
+            "{format:?}"
+        );
+    }
 }
