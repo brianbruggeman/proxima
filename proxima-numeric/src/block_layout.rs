@@ -795,6 +795,80 @@ impl BlockLayout {
     };
     /// The sign plane of [`Self::IQ2_S`]: one bit per element, bit `i % 8` of byte `34 + i / 8`.
     pub const IQ2_S_SIGNS: Plane = run(1, 272, 256);
+    /// iq2_xs: `block_iq2_xs` (`ggml-common.h:387-392`, sizeof 74 by the `static_assert` at :393).
+    /// `d` f16 at byte 0; `qs[QK_K/8]` (`uint16_t`, byte 2) is one word per eight elements whose
+    /// bits 0..8 are the grid index (`qs & 511`) and bits 9..15 the sign index
+    /// ([`Self::IQ2_XS_SIGN_INDEX`], `qs >> 9`); `scales[QK_K/32]` (byte 66) holds sixteen 4-bit
+    /// sub-block scales, low nibble first, each `d * (0.5 + nibble) * 0.25` over 16 elements
+    /// (`ggml-quants.c:2544-2545`): `scale_multiplier = 2`, `bias = -1`, `unit_shift = 3`.
+    pub const IQ2_XS: Self = Self {
+        elements: 256,
+        block_bytes: 74,
+        element: coded(
+            FloatLayout::UINT9,
+            plane(8, 16, [digit(8, 0), digit(32, 16), NO_DIGIT, NO_DIGIT]),
+            Some(plane(1, 24, [digit(8, 0), digit(32, 16), NO_DIGIT, NO_DIGIT])),
+            0,
+        ),
+        multiplier: 1,
+        scale: F16_SCALE,
+        min: None,
+        min_multiplier: 1,
+        scale_runs: None,
+        sub: Some(SubBlocks {
+            count: 16,
+            scale_multiplier: 2,
+            scale: coded(
+                FloatLayout::UINT4,
+                plane(4, 528, [digit(16, 4), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
+                None,
+                -1,
+            ),
+            min: None,
+        }),
+    };
+    /// The sign-index plane of [`Self::IQ2_XS`]: seven bits per eight elements, bits 9..15 of the
+    /// group's `qs` word (`ggml-quants.c:2548`, `qs >> 9`), indexing `ksigns_iq2xs`.
+    pub const IQ2_XS_SIGN_INDEX: Plane =
+        plane(7, 25, [digit(8, 0), digit(32, 16), NO_DIGIT, NO_DIGIT]);
+    /// iq3_xxs: `block_iq3_xxs` (`ggml-common.h:405-410`, sizeof 98 by the `static_assert` at
+    /// :411). `d` f16 at byte 0; `qs[3*QK_K/8]` (byte 2) is 64 grid-index bytes, one per four
+    /// elements (`qs[2*l]` and `qs[2*l+1]` feed the two halves of an eight-element group,
+    /// `ggml-quants.c:2606-2607`), then eight 32-bit words (byte 66), one per 32 elements: bits
+    /// `7 * l` are four 7-bit sign indices ([`Self::IQ3_XXS_SIGN_INDEX`]) and bits 28..31 the
+    /// 4-bit sub-block scale, worth `d * (0.5 + nibble) * 0.5` (`ggml-quants.c:2603`):
+    /// `scale_multiplier = 2`, `bias = -1`, `unit_shift = 2`.
+    pub const IQ3_XXS: Self = Self {
+        elements: 256,
+        block_bytes: 98,
+        element: coded(
+            FloatLayout::UINT8,
+            plane(8, 16, [digit(4, 0), digit(64, 8), NO_DIGIT, NO_DIGIT]),
+            None,
+            0,
+        ),
+        multiplier: 1,
+        scale: F16_SCALE,
+        min: None,
+        min_multiplier: 1,
+        scale_runs: None,
+        sub: Some(SubBlocks {
+            count: 8,
+            scale_multiplier: 2,
+            scale: coded(
+                FloatLayout::UINT4,
+                plane(4, 556, [digit(8, 32), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
+                None,
+                -1,
+            ),
+            min: None,
+        }),
+    };
+    /// The sign-index plane of [`Self::IQ3_XXS`]: seven bits per eight elements, at bit `7 * l`
+    /// of the sub-block's 32-bit word (`ggml-quants.c:2605`, `(aux32 >> 7*l) & 127`), indexing
+    /// `ksigns_iq2xs`.
+    pub const IQ3_XXS_SIGN_INDEX: Plane =
+        plane(7, 528, [digit(8, 0), digit(4, 7), digit(8, 32), NO_DIGIT]);
     /// iq1_s: `block_iq1_s` (`ggml-common.h:425-429`, sizeof 50 by the `static_assert` at :430).
     /// `d` f16 at byte 0; `qs[QK_K/8]` (byte 2) is the low byte of one grid index per eight
     /// elements; `qh[QK_K/32]` (`uint16_t`, byte 34) is one word per 32 elements: bits `3 * l`

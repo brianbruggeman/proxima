@@ -653,9 +653,7 @@ pub fn encode_blocks(
                     }
                     Ok(block_count)
                 }
-                LevelTable::Iq2XsGrid
-                | LevelTable::Iq3XxsGrid
-                | LevelTable::SignedGrid { .. }
+                LevelTable::SignedGrid { .. }
                 | LevelTable::SignedGrid64 { .. }
                 | LevelTable::DeltaGrid { .. } => {
                     Err(NumericError::UnsupportedEncode {
