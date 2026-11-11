@@ -54,14 +54,35 @@ matrix=(
     "proxima-gguf:"
 )
 
+# the package name of a top-level directory: the `name` in its manifest's
+# [package] section, or the directory name when it has no manifest. A crate's
+# directory need not match its name (omega/ holds proxima-omega).
+package_name() {
+    local dir="$1" name=""
+    if [ -f "$dir/Cargo.toml" ]; then
+        name="$(awk '
+            /^\[package\]/ { in_package = 1; next }
+            /^\[/ { in_package = 0 }
+            in_package && /^name[ \t]*=/ {
+                sub(/^name[ \t]*=[ \t]*"/, "")
+                sub(/".*$/, "")
+                print
+                exit
+            }' "$dir/Cargo.toml")"
+    fi
+    printf '%s\n' "${name:-$dir}"
+}
+
 changed_crates() {
     if [ "$all" = 1 ]; then
         printf '%s\n' proxima-tensor proxima-model-interop proxima-omega proxima-numeric proxima-gguf
         return
     fi
+    local dir
     git diff --name-only "$base"...HEAD 2>/dev/null \
         | cut -d/ -f1 \
         | sort -u \
+        | while IFS= read -r dir; do package_name "$dir"; done \
         | grep -Ex 'proxima-tensor|proxima-model-interop|proxima-omega|proxima-numeric|proxima-gguf' || true
 }
 
