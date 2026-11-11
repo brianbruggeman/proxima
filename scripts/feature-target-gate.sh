@@ -73,6 +73,30 @@ package_name() {
     printf '%s\n' "${name:-$dir}"
 }
 
+# a crate the matrix names but no top-level directory's package_name yields is never selected by
+# changed_crates, so its row would silently never run: fail naming it
+unmapped_matrix_crates() {
+    local crate dir found
+    while IFS= read -r crate; do
+        found=0
+        for dir in */; do
+            if [ "$(package_name "${dir%/}")" = "$crate" ]; then
+                found=1
+                break
+            fi
+        done
+        if [ "$found" = 0 ]; then
+            printf '%s\n' "$crate"
+        fi
+    done < <(printf '%s\n' "${matrix[@]%%:*}" | sort -u)
+}
+
+unmapped="$(unmapped_matrix_crates)"
+if [ -n "$unmapped" ]; then
+    printf 'feature-target-gate: matrix crate maps to no top-level directory: %s\n' "$unmapped" >&2
+    exit 3
+fi
+
 changed_crates() {
     if [ "$all" = 1 ]; then
         printf '%s\n' proxima-tensor proxima-model-interop proxima-omega proxima-numeric proxima-gguf
