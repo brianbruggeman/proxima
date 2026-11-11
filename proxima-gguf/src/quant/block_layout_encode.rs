@@ -1,10 +1,12 @@
-//! The encoder that inverts [`super::block_layout`]'s walker, kept as an adapter over the shared
-//! one in [`proxima_numeric::encode`].
+//! The encoder for [`super::block_layout`]'s layouts, kept as an adapter over
+//! [`proxima_numeric::encode::encode_blocks`].
 //!
-//! The quantizer lives in `proxima-numeric` because it is numeric data, not file parsing: it fits
-//! a shared absolute-maximum scale per run and writes codes back through the layout's own planes,
-//! which is the same walker's inverse wherever it is called from. This module keeps the
-//! [`QuantError`] surface every existing call site matches on, and maps the shared error onto it.
+//! The quantizer lives in `proxima-numeric` because it is numeric data, not file parsing. A layout
+//! with a monomorphic [`proxima_numeric::FormatCodec`] encoder (Q4_0, Q5_0, Q8_0, Q8_1, Q1_0, Q2_0,
+//! PQ2_0, TQ2_0) is encoded by that codec, whose bytes match llama.cpp's `quantize_row_*_ref`;
+//! every other layout runs the shared per-run walker, which fits a shared absolute-maximum scale and
+//! writes codes back through the layout's own planes. This module keeps the [`QuantError`] surface
+//! every existing call site matches on, and maps the shared error onto it.
 //!
 //! Teaching pointer: [`proxima_numeric::encode::reach`] is the test of whether a layout is one a
 //! shared scale can express, [`proxima_numeric::encode::encode_blocks`] is the encoder, and
