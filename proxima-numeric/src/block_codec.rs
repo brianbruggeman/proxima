@@ -1206,6 +1206,29 @@ mod tests {
         }
     }
 
+    fn q8_0_with_plane(base_bits: u32, stride_bits: u16) -> BlockLayout {
+        let plane = Plane {
+            base_bits,
+            digits: [Digit { radix: 32, stride_bits }, ONE_RUN_DIGIT, ONE_RUN_DIGIT, ONE_RUN_DIGIT],
+            ..BlockLayout::Q8_0.element.low
+        };
+        BlockLayout { element: Coded { low: plane, ..BlockLayout::Q8_0.element }, ..BlockLayout::Q8_0 }
+    }
+
+    #[test]
+    fn only_a_high_plane_free_byte_run_in_index_order_reads_its_codes_in_place() {
+        for layout in [BlockLayout::Q8_0, BlockLayout::Q8_1, BlockLayout::Q8_K, BlockLayout::Q8_1_GROUPED] {
+            assert!(reads_codes_in_place(&layout), "{layout:?} keeps one byte per code in index order");
+        }
+        assert!(!reads_codes_in_place(&BlockLayout::Q4_0), "q4_0's plane is four bits wide, not a byte");
+        assert!(!reads_codes_in_place(&BlockLayout::Q5_1), "q5_1 has a high plane above its nibbles");
+        assert!(!reads_codes_in_place(&BlockLayout::Q6_K), "q6_k has a high plane above its nibbles");
+        assert!(!reads_codes_in_place(&BlockLayout::FP6_E3M2), "fp6 codes are six bits, not a byte");
+        assert!(!reads_codes_in_place(&q8_0_with_plane(20, 8)), "the first code starts mid-byte");
+        assert!(!reads_codes_in_place(&q8_0_with_plane(16, 16)), "codes skip a byte between neighbours");
+        assert!(reads_codes_in_place(&q8_0_with_plane(16, 8)), "the control must be a qualifying layout");
+    }
+
     #[test]
     fn each_clause_of_is_simple_has_a_layout_that_does_not_resolve() {
         assert!(!BlockLayout::Q4_K.is_simple() && BlockLayout::Q4_K.sub.is_some());
