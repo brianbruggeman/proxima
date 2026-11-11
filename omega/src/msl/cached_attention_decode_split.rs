@@ -216,7 +216,7 @@ const BLOCK_KEY_POINTERS: &str =
                 device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
                 device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);";
 
-const BLOCK_KEY_LOAD: &str = "if (cached) { uint element = (uint)index * 4u; device const uchar* kr_block = kr_cached + (element / @KEY_BLOCK_ELEMENTS@u) * @KEY_BLOCK_BYTES@u; device const uchar* ki_block = ki_cached + (element / @KEY_BLOCK_ELEMENTS@u) * @KEY_BLOCK_BYTES@u; uint within = element % @KEY_BLOCK_ELEMENTS@u; key_real[step][slot] = float4(@KEY_BLOCK_LOAD@(kr_block, within), @KEY_BLOCK_LOAD@(kr_block, within + 1u), @KEY_BLOCK_LOAD@(kr_block, within + 2u), @KEY_BLOCK_LOAD@(kr_block, within + 3u)); key_imag[step][slot] = float4(@KEY_BLOCK_LOAD@(ki_block, within), @KEY_BLOCK_LOAD@(ki_block, within + 1u), @KEY_BLOCK_LOAD@(ki_block, within + 2u), @KEY_BLOCK_LOAD@(ki_block, within + 3u)); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
+const BLOCK_KEY_LOAD: &str = "if (cached) { uint element = (uint)index * 4u; device const uchar* kr_block = kr_cached + (element / @KEY_BLOCK_ELEMENTS@u) * @KEY_BLOCK_BYTES@u; device const uchar* ki_block = ki_cached + (element / @KEY_BLOCK_ELEMENTS@u) * @KEY_BLOCK_BYTES@u; uint within = element % @KEY_BLOCK_ELEMENTS@u; key_real[step][slot] = @KEY_BLOCK_LOAD@_run(kr_block, within); key_imag[step][slot] = @KEY_BLOCK_LOAD@_run(ki_block, within); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
 
 /// The helper's name comes from the layout's own geometry, so a kernel that reads two layouts would hold two helpers.
 fn key_block_helper_name(layout: &BlockLayout) -> String {

@@ -545,7 +545,73 @@ pub fn block_unpack_msl(layout: &BlockLayout, name: &str) -> String {
             layout.min_multiplier
         ));
     }
+    let run = block_run_msl(layout, name);
     format!(
-        "{helpers}\nstatic inline float {name}(device const uchar *block, uint index) {{\n{body}    return value;\n}}\n"
+        "{helpers}\nstatic inline float {name}(device const uchar *block, uint index) {{\n{body}    return value;\n}}\n{run}"
     )
+}
+
+/// Renders `static inline float4 name_run(device const uchar *block, uint index)`: elements
+/// `index..index + 4` of one block, with the block scale (and min) decoded once for the run
+/// instead of once per element. `index` is a multiple of four, which `block_k_refusal` guarantees
+/// stays inside one block. Reuses the `name_*` load helpers [`block_unpack_msl`] renders, and
+/// keeps the scalar helper's arithmetic order so the two agree bit for bit.
+fn block_run_msl(layout: &BlockLayout, name: &str) -> String {
+    let mut body = field_expression(&layout.scale, "scale", &format!("{name}_scale"));
+    if let Some(min) = &layout.min {
+        body.push_str(&field_expression(min, "minimum", &format!("{name}_min")));
+    }
+    for lane in 0..4 {
+        body.push_str(&run_element_msl(layout, name, lane));
+    }
+    format!(
+        "static inline float4 {name}_run(device const uchar *block, uint index) {{\n{body}    return float4(value0, value1, value2, value3);\n}}\n"
+    )
+}
+
+fn run_element_msl(layout: &BlockLayout, name: &str, lane: usize) -> String {
+    let at = format!("(index + {lane}u)");
+    let raw = format!("raw{lane}");
+    let mut text = coded_expression(&layout.element, &at, &raw, &format!("{name}_code"));
+    let mut scale = "scale".to_string();
+    let mut minimum = "minimum".to_string();
+    if let Some(sub) = &layout.sub {
+        let span = layout.elements / sub.count;
+        text.push_str(&format!("    uint sub_block{lane} = {at} / {span}u;\n"));
+        text.push_str(&coded_expression(
+            &sub.scale,
+            &format!("sub_block{lane}"),
+            &format!("sub_scale_raw{lane}"),
+            &format!("{name}_sub_scale_code"),
+        ));
+        text.push_str(&format!(
+            "    float effective_scale{lane} = scale * (sub_scale_raw{lane} - {}.0f);\n",
+            sub.scale.bias
+        ));
+        scale = format!("effective_scale{lane}");
+    }
+    text.push_str(&format!(
+        "    float value{lane} = (({}.0f * {raw}) - {}.0f) * {scale};\n",
+        layout.multiplier, layout.element.bias
+    ));
+    if layout.min.is_some() {
+        if let Some(sub_min) = layout.sub.and_then(|sub| sub.min) {
+            text.push_str(&coded_expression(
+                &sub_min,
+                &format!("sub_block{lane}"),
+                &format!("sub_min_raw{lane}"),
+                &format!("{name}_sub_min_code"),
+            ));
+            text.push_str(&format!(
+                "    float effective_min{lane} = minimum * (sub_min_raw{lane} - {}.0f);\n",
+                sub_min.bias
+            ));
+            minimum = format!("effective_min{lane}");
+        }
+        text.push_str(&format!(
+            "    value{lane} = value{lane} + ({}.0f * {minimum});\n",
+            layout.min_multiplier
+        ));
+    }
+    text
 }

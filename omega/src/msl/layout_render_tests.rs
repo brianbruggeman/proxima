@@ -525,6 +525,51 @@ fn a_block_format_with_no_host_encode_is_refused_naming_the_missing_encode() {
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
+fn run_block_run_kernel(layout: &BlockLayout, blocks: &[u8], elements: usize) -> alloc::vec::Vec<f32> {
+    let name = "probe_block";
+    let source = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\n{}\nkernel void probe(device const uchar *blocks [[buffer(0)]], device float *values [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n    uint block = gid / {}u;\n    uint within = gid % {}u;\n    values[gid] = {name}_run(blocks + block * {}u, within & ~3u)[within & 3u];\n}}\n",
+        block_unpack_msl(layout, name),
+        layout.elements,
+        layout.elements,
+        layout.block_bytes,
+    );
+    run_probe_source(&source, blocks, elements)
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn a_rendered_four_element_run_equals_the_host_decode_bit_for_bit_for_every_admitted_block_k_format() {
+    let admitted = admitted_block_k_formats();
+    assert_admitted_block_k_set(&admitted);
+
+    for format in &admitted {
+        let NumericFormat::Block(layout) = format else {
+            panic!("{format:?} is a block format");
+        };
+        let codec = FormatCodec::for_format(format).expect("an admitted block K resolves a host codec");
+        let elements = 4096usize * usize::from(layout.elements);
+        let values = random_values(0x5eed_0008, elements);
+        let mut packed = alloc::vec![0u8; codec.packed_len(elements).expect("whole blocks")];
+        codec.encode(&values, &mut packed).expect("host encodes an admitted block K");
+        let mut slots = alloc::vec![core::mem::MaybeUninit::<f32>::uninit(); elements];
+        codec.decode(&packed, &mut slots).expect("host decodes an admitted block K");
+        // decode returned Ok, which initialises every slot of its output
+        let expected: alloc::vec::Vec<u32> =
+            slots.iter().map(|slot| unsafe { slot.assume_init() }.to_bits()).collect();
+
+        let observed: alloc::vec::Vec<u32> = run_block_run_kernel(layout, &packed, elements)
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+
+        assert_eq!(observed.len(), elements, "{format:?}: every element of 4096 blocks was compared");
+        let mismatches = expected.iter().zip(&observed).filter(|(want, got)| want != got).count();
+        assert_eq!(mismatches, 0, "{format:?}: the rendered run helper must equal the host decode");
+    }
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]
 fn a_rendered_unpack_equals_the_host_decode_bit_for_bit_for_every_admitted_block_k_format() {
     let admitted = admitted_block_k_formats();
