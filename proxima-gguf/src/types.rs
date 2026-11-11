@@ -495,50 +495,24 @@ impl GgmlType {
     /// same arithmetic as `ggml_nbytes` (`ggml.c`, via `type_traits`
     /// `blck_size`/`type_size`, `ggml.c:1174,1178`). Dequantizing the
     /// packed values themselves stays out of scope; this only sizes them.
+    /// Derived from [`Self::numeric_format`] (`NumericFormat::elements_per_block` and
+    /// `bytes_per_block`); only the integer types and `F64`, which have no format, are spelled here.
     #[must_use]
     pub const fn wire_shape(self) -> WireBlockShape {
-        const fn layout(block_elements: u64, block_bytes: u64) -> WireBlockShape {
-            WireBlockShape {
-                block_elements,
-                block_bytes,
-            }
-        }
-        match self {
-            Self::F32 => layout(1, 4),
-            Self::F16 | Self::Bf16 => layout(1, 2),
-            Self::I8 => layout(1, 1),
-            Self::I16 => layout(1, 2),
-            Self::I32 => layout(1, 4),
-            Self::I64 | Self::F64 => layout(1, 8),
-            Self::Q4_0 | Self::Iq4Nl => layout(32, 18),
-            Self::Q4_1 => layout(32, 20),
-            Self::Q5_0 => layout(32, 22),
-            Self::Q5_1 => layout(32, 24),
-            Self::Q8_0 => layout(32, 34),
-            Self::Q8_1 => layout(32, 36),
-            Self::Q2_K => layout(256, 84),
-            Self::Q3_K => layout(256, 110),
-            Self::Q4_K => layout(256, 144),
-            Self::Q5_K => layout(256, 176),
-            Self::Q6_K => layout(256, 210),
-            Self::Q8_K => layout(256, 292),
-            Self::Iq2Xxs => layout(256, 66),
-            Self::Iq2Xs => layout(256, 74),
-            Self::Iq3Xxs => layout(256, 98),
-            Self::Iq1S => layout(256, 50),
-            Self::Iq3S => layout(256, 110),
-            Self::Iq2S => layout(256, 82),
-            Self::Iq4Xs => layout(256, 136),
-            Self::Iq1M => layout(256, 56),
-            Self::Tq10 => layout(256, 54),
-            Self::Tq20 => layout(256, 66),
-            Self::Mxfp4 => layout(32, 17),
-            Self::Nvfp4 => layout(64, 36),
-            Self::Q1_0 => layout(128, 18),
-            Self::Q2_0 => layout(64, 18),
-            Self::Pq2_0 => layout(128, 34),
-            Self::Ptq1_0 => layout(128, 28),
-            Self::Fp6E3M2 => layout(32, 26),
+        let (block_elements, block_bytes) = match self.numeric_format() {
+            Some(format) => (format.elements_per_block() as u64, format.bytes_per_block() as u64),
+            None => match self {
+                Self::I8 => (1, 1),
+                Self::I16 => (1, 2),
+                Self::I32 => (1, 4),
+                Self::I64 | Self::F64 => (1, 8),
+                // unreachable for a type with a format; the recorded-table test fails if a new variant lands here
+                _ => (1, 1),
+            },
+        };
+        WireBlockShape {
+            block_elements,
+            block_bytes,
         }
     }
 }
@@ -546,31 +520,6 @@ impl GgmlType {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_current_type_names_a_format_with_the_same_block_shape_as_its_wire_shape() {
-        let mut named = 0;
-        for ggml_type in GgmlType::CURRENT {
-            let Some(format) = ggml_type.numeric_format() else {
-                continue;
-            };
-            let shape = ggml_type.wire_shape();
-            assert_eq!(
-                u64::from(format.elements_per_block()),
-                shape.block_elements,
-                "{ggml_type:?} elements"
-            );
-            assert_eq!(
-                u64::from(format.bytes_per_block()),
-                shape.block_bytes,
-                "{ggml_type:?} bytes"
-            );
-            named += 1;
-        }
-        assert_eq!(named, 30, "CURRENT holds 35 types, 5 of them integer or f64 with no format");
-        assert_eq!(GgmlType::F32.numeric_format(), Some(NumericFormat::Float32));
-        assert_eq!(GgmlType::I8.numeric_format(), None);
-    }
 
     /// The arms of proxima-model-interop's `codec_from_ggml_type` at base commit 994a3d9b
     /// (bind.rs:1241), `Codec::` read as `NumericFormat::`, plus `F32`, the one row the single
@@ -701,6 +650,63 @@ mod tests {
                 block_bytes: 210
             }
         );
+    }
+
+    /// (elements, bytes) per block for every `GgmlType::ALL` variant, recorded from the hand-written
+    /// `wire_shape` table before it was derived from `numeric_format`.
+    static RECORDED_WIRE_SHAPES: [(GgmlType, u64, u64); 38] = [
+        (GgmlType::F32, 1, 4),
+        (GgmlType::F16, 1, 2),
+        (GgmlType::Q4_0, 32, 18),
+        (GgmlType::Q4_1, 32, 20),
+        (GgmlType::Q5_0, 32, 22),
+        (GgmlType::Q5_1, 32, 24),
+        (GgmlType::Q8_0, 32, 34),
+        (GgmlType::Q8_1, 32, 36),
+        (GgmlType::Q2_K, 256, 84),
+        (GgmlType::Q3_K, 256, 110),
+        (GgmlType::Q4_K, 256, 144),
+        (GgmlType::Q5_K, 256, 176),
+        (GgmlType::Q6_K, 256, 210),
+        (GgmlType::Q8_K, 256, 292),
+        (GgmlType::Iq2Xxs, 256, 66),
+        (GgmlType::Iq2Xs, 256, 74),
+        (GgmlType::Iq3Xxs, 256, 98),
+        (GgmlType::Iq1S, 256, 50),
+        (GgmlType::Iq4Nl, 32, 18),
+        (GgmlType::Iq3S, 256, 110),
+        (GgmlType::Iq2S, 256, 82),
+        (GgmlType::Iq4Xs, 256, 136),
+        (GgmlType::I8, 1, 1),
+        (GgmlType::I16, 1, 2),
+        (GgmlType::I32, 1, 4),
+        (GgmlType::I64, 1, 8),
+        (GgmlType::F64, 1, 8),
+        (GgmlType::Iq1M, 256, 56),
+        (GgmlType::Bf16, 1, 2),
+        (GgmlType::Tq10, 256, 54),
+        (GgmlType::Tq20, 256, 66),
+        (GgmlType::Mxfp4, 32, 17),
+        (GgmlType::Nvfp4, 64, 36),
+        (GgmlType::Q1_0, 128, 18),
+        (GgmlType::Q2_0, 64, 18),
+        (GgmlType::Pq2_0, 128, 34),
+        (GgmlType::Ptq1_0, 128, 28),
+        (GgmlType::Fp6E3M2, 32, 26),
+    ];
+
+    #[test]
+    fn wire_shape_of_every_variant_matches_the_recorded_table() {
+        assert_eq!(GgmlType::ALL.len(), 38);
+        assert_eq!(RECORDED_WIRE_SHAPES.len(), GgmlType::ALL.len());
+        for (ggml_type, block_elements, block_bytes) in RECORDED_WIRE_SHAPES {
+            assert!(GgmlType::ALL.contains(&ggml_type), "{ggml_type:?} missing from ALL");
+            assert_eq!(
+                ggml_type.wire_shape(),
+                WireBlockShape { block_elements, block_bytes },
+                "{ggml_type:?}"
+            );
+        }
     }
 
     /// no wildcard: adding a variant fails to compile here until `ALL` is revisited.
