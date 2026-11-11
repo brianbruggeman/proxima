@@ -223,6 +223,27 @@ fn cached_attention_kv_codec_for_a_respelled_binary32_is_the_plain_buffer_and_a_
 }
 
 #[test]
+fn the_row_tiled_kernel_reads_binary32_bf16_and_bf8_and_refuses_f16_and_quantized_caches() {
+    let respelled_f32 = NumericFormat::Scalar(FloatLayout {
+        bias_override: Some(127),
+        ..FloatLayout::BF32
+    });
+
+    assert_eq!(super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::Float32), Ok(None));
+    assert_eq!(super::cached_attention_row_tiled_kv_codec_for(&respelled_f32), Ok(None));
+    assert_eq!(
+        super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::BFloat16),
+        Ok(Some(NumericFormat::BFloat16))
+    );
+    assert_eq!(
+        super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::BFloat8),
+        Ok(Some(NumericFormat::BFloat8))
+    );
+    assert!(super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::Float16).is_err());
+    assert!(super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::Q8_0).is_err());
+}
+
+#[test]
 fn float_layout_msl_control_changed_bias_changes_the_constants() {
     let shifted = FloatLayout {
         bias_override: Some(4),

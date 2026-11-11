@@ -954,6 +954,38 @@ fn merge_grid(node: NodeId, total_elements: u64) -> Result<GridSpec, EmitError> 
     })
 }
 
+pub(super) const ROW_TILED_KV_REASON: &str =
+    "row-tiled attention reads cached K/V as F32, BFloat16, or BFloat8";
+
+/// The storage element type the row-tiled kernel (`cached_attention_row_tiled`) reads a cache of
+/// `codec` through, `None` when it has no read path for it. The row-tiled renderer and
+/// [`cached_attention_row_tiled_kv_codec_for`] both ask this one classifier; it lives here, with
+/// the other codec classifier, so the query exists in builds that do not compile the kernel.
+pub(super) fn row_tiled_cached_type(codec: Option<Codec>) -> Option<&'static str> {
+    match codec {
+        None => Some("float"),
+        Some(Codec::BFloat16) => Some("ushort"),
+        Some(Codec::BFloat8) => Some("uchar"),
+        Some(_) => None,
+    }
+}
+
+/// The row-tiled counterpart of [`cached_attention_kv_codec_for`]: the codec a cache stored as
+/// `format` is read with, or the emitter's error when the cached-attention kernels read `format`
+/// but the row-tiled (speculative verify) kernel does not, as for Float16.
+///
+/// # Errors
+/// [`EmitError::CachedAttentionKvCodecNotSupported`] for a format the row-tiled kernel cannot read.
+pub fn cached_attention_row_tiled_kv_codec_for(format: &Codec) -> Result<Option<Codec>, EmitError> {
+    let codec = cached_attention_kv_codec_for(format)?;
+    row_tiled_cached_type(codec)
+        .map(|_| codec)
+        .ok_or(EmitError::CachedAttentionKvCodecNotSupported {
+            node: NodeId(0),
+            reason: ROW_TILED_KV_REASON,
+        })
+}
+
 /// The codec the cached-attention emitter reads a K/V cache stored as `format` with: `Ok(None)`
 /// when `format` is the plain buffer every kernel form reads (the graph's own f32 output lands in
 /// it directly), `Ok(Some(codec))` for a narrow cache the step must be narrowed into, and the
