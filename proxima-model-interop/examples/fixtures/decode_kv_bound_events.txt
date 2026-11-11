@@ -1,0 +1,11 @@
+== fix2-short-f16.out
+2026-11-11T17:07:52.453682958Z INFO decode_gbps_baseline: de
+prompt_token_count=26 max_tokens=128
+== fix2-long-f16.out
+2026-11-11T17:07:42.992411708Z INFO decode_gbps_baseline: de
+prompt_token_count=2564 max_tokens=128
+step=0 cached_len=0 new_count=2565 positions_needed=2693 draft_limit=0 kv_capacity=2720 kv_bound_extent=2720
+step=1 cached_len=2565 new_count=1 positions_needed=2693 draft_limit=0 kv_capacity=2720 kv_bound_extent=2720
+== fix2-short-f32.out
+2026-11-11T17:07:39.279708917Z INFO decode_gbps_baseline: de
+prompt_token_count=26 max_tokens=128
