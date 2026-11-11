@@ -2153,6 +2153,15 @@ pub(super) fn reduce_is_cooperative_dispatch(
     output_axes: &[u16],
     expert_source_mode: bool,
 ) -> bool {
+    // the dense tile launch (`tiled_gemm_grid2d_spec`, `grid_threads`,
+    // `tiled_gemm_threadgroup_width`) is chosen by `classify_dense_batched_gemm`
+    // alone, which never reads the generic fold's length rules; asking
+    // `reduce_is_cooperative` here would render the serial body into a tile
+    // launch and leave every output past the first `gid` row unwritten
+    if dense_batched_gemm_block(resolved, quantized, policy, reduce_op, init, output_axes).is_some()
+    {
+        return true;
+    }
     // `emit_with_expert_sources_mode`'s string substitution hunts for the
     // cooperative walk's own `walk{index}`/`off{index}`/`fetched{index}`
     // spellings (`render_reduce`'s doc on this parameter) -- the serial
@@ -2164,8 +2173,6 @@ pub(super) fn reduce_is_cooperative_dispatch(
     if expert_source_mode
         || reduce_has_broadcast_epilogue(resolved)
         || tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
-        || dense_batched_gemm_block(resolved, quantized, policy, reduce_op, init, output_axes)
-            .is_some()
         || packed_row_block_admitted(resolved, quantized)
     {
         reduce_is_cooperative(resolved)
