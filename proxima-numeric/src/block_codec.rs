@@ -228,6 +228,83 @@ fn walk_plane(plane: &Plane, mut visit: impl FnMut(usize, usize)) {
     }
 }
 
+/// Codes a register word carries for a plane whose innermost digit is a contiguous run: as many as
+/// fit in 64 bits and in the run, trimmed until the word is a whole number of bytes; zero when no
+/// count does.
+const fn word_codes(plane: &Plane) -> usize {
+    let bits = plane.bits as usize;
+    if bits == 0 {
+        return 0;
+    }
+    let radix = plane.digits[0].radix as usize;
+    let mut count = if 64 / bits < radix { 64 / bits } else { radix };
+    while count > 0 && !(count * bits).is_multiple_of(8) {
+        count -= 1;
+    }
+    count
+}
+
+/// Whether a plane's innermost digit is a contiguous run (`stride_bits == bits`) that starts on a
+/// byte, whose every outer step moves by whole bytes and whose length is a whole number of register
+/// words: the property that lets the run be packed and unpacked a word at a time instead of a code
+/// at a time.
+const fn is_run_plane(plane: &Plane) -> bool {
+    let lowest = plane.digits[0];
+    if plane.bits == 0 || lowest.stride_bits != plane.bits as u16 || !plane.base_bits.is_multiple_of(8) {
+        return false;
+    }
+    let mut position = 1;
+    while position < MAX_DIGITS {
+        let digit = plane.digits[position];
+        if digit.radix > 1 && !digit.stride_bits.is_multiple_of(8) {
+            return false;
+        }
+        position += 1;
+    }
+    let count = word_codes(plane);
+    count > 0 && (lowest.radix as usize).is_multiple_of(count)
+}
+
+/// Whether a plane is moved a register word at a time: a run plane whose codes are narrower than a
+/// byte. A byte-wide code is already one byte per element, which the staged path reads and writes as
+/// a plain vector of bytes, so a word shuffle there only adds work.
+const fn is_word_packed(plane: &Plane) -> bool {
+    plane.bits < 8 && is_run_plane(plane)
+}
+
+/// [`is_word_packed`] for the plane that holds the bits above the low plane, if there is one.
+const fn is_high_word_packed(layout: &BlockLayout) -> bool {
+    match &layout.element.high {
+        Some(plane) => is_word_packed(plane),
+        None => false,
+    }
+}
+
+/// Whether decode reads every code straight out of register words: one word-packed plane and no
+/// other, so there is no code to stage.
+const fn unpacks_by_word(layout: &BlockLayout) -> bool {
+    layout.element.high.is_none() && is_word_packed(&layout.element.low)
+}
+
+/// [`walk_plane`] one run at a time: visits `(first_index, byte_address)` for each run of the
+/// innermost digit's radix elements, in index order.
+#[inline(always)]
+fn walk_runs(plane: &Plane, mut visit: impl FnMut(usize, usize)) {
+    let [lowest, second, third, highest] = plane.digits;
+    let mut index = 0;
+    for outer in 0..highest.radix as usize {
+        let outer_address = plane.base_bits as usize + outer * highest.stride_bits as usize;
+        for middle in 0..third.radix as usize {
+            let middle_address = outer_address + middle * third.stride_bits as usize;
+            for inner in 0..second.radix as usize {
+                let row_address = middle_address + inner * second.stride_bits as usize;
+                visit(index, row_address / 8);
+                index += lowest.radix as usize;
+            }
+        }
+    }
+}
+
 /// The raw code of every element: the low plane, then the high plane shifted above it.
 #[inline(always)]
 fn gather_codes<const ELEMENTS: usize, const BYTES: usize>(
@@ -265,7 +342,7 @@ fn integer_factor(layout: &BlockLayout, raw: u32) -> i32 {
 }
 
 #[inline(always)]
-fn decode_chunk<const ELEMENTS: usize, const BYTES: usize>(
+fn decode_chunk<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool>(
     layout: &BlockLayout,
     block: &[u8; BYTES],
     out: &mut [MaybeUninit<f32>; ELEMENTS],
@@ -298,14 +375,51 @@ fn decode_chunk<const ELEMENTS: usize, const BYTES: usize>(
         });
         return;
     }
+    if BY_WORD {
+        unpack_runs(&layout.element.low, block, out, value_of);
+        return;
+    }
     let codes = gather_codes::<ELEMENTS, BYTES>(layout, block);
     for (slot, &byte) in out.iter_mut().zip(&codes) {
         slot.write(value_of(u32::from(byte)));
     }
 }
 
+/// Reads a run-plane code a register word at a time and converts each straight into its slot: the
+/// shift that isolates a code is the constant `lane * bits`, so no code is staged in a byte array.
 #[inline(always)]
-fn decode_run<const ELEMENTS: usize, const BYTES: usize>(
+fn unpack_runs<const ELEMENTS: usize, const BYTES: usize>(
+    plane: &Plane,
+    block: &[u8; BYTES],
+    out: &mut [MaybeUninit<f32>; ELEMENTS],
+    value_of: impl Fn(u32) -> f32,
+) {
+    let bits = plane.bits as u32;
+    let count = word_codes(plane);
+    let word_bytes = count * bits as usize / 8;
+    let mask = u32::MAX >> (32 - bits);
+    let words = plane.digits[0].radix as usize / count;
+    walk_runs(plane, |index, first| {
+        for word in 0..words {
+            let mut bytes = [0u8; 8];
+            bytes[..word_bytes].copy_from_slice(&block[first + word * word_bytes..][..word_bytes]);
+            let packed = u64::from_le_bytes(bytes);
+            for lane in 0..count {
+                let offset = lane as u32 * bits;
+                let raw = if offset % 32 + bits <= 32 {
+                    // a 32-bit half of the word, so a vector lane stays 32 bits wide
+                    ((packed >> (offset & !31)) as u32 >> (offset % 32)) & mask
+                } else {
+                    (packed >> offset) as u32 & mask
+                };
+                out[index + word * count + lane].write(value_of(raw));
+            }
+        }
+    });
+}
+
+#[inline(always)]
+fn decode_run<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool>(
     layout: BlockLayout,
     data: &[u8],
     out: &mut [MaybeUninit<f32>],
@@ -313,7 +427,7 @@ fn decode_run<const ELEMENTS: usize, const BYTES: usize>(
     let blocks = data.as_chunks::<BYTES>().0;
     let slots = out.as_chunks_mut::<ELEMENTS>().0;
     for (block, slot) in blocks.iter().zip(slots) {
-        decode_chunk(&layout, block, slot);
+        decode_chunk::<ELEMENTS, BYTES, BY_WORD>(&layout, block, slot);
     }
 }
 
@@ -328,20 +442,65 @@ fn raw_of_value(layout: &BlockLayout, value: i32) -> u32 {
 
 /// Packs the block-local `codes` into `block` with the same nested digit walk the decode reads by.
 #[inline(always)]
-fn scatter_codes<const ELEMENTS: usize, const BYTES: usize>(
+fn scatter_codes<
+    const ELEMENTS: usize,
+    const BYTES: usize,
+    const LOW_BY_WORD: bool,
+    const HIGH_BY_WORD: bool,
+>(
     layout: &BlockLayout,
     codes: &[u8; ELEMENTS],
     block: &mut [u8; BYTES],
 ) {
     let element = &layout.element;
-    walk_plane(&element.low, |index, address| {
-        put_code_bits(block, address, element.low.bits as u32, u32::from(codes[index]));
-    });
+    scatter_plane::<BYTES, LOW_BY_WORD>(&element.low, 0, block, |index| codes[index]);
     if let Some(plane) = &element.high {
-        walk_plane(plane, |index, address| {
-            put_code_bits(block, address, plane.bits as u32, u32::from(codes[index] >> element.low.bits));
-        });
+        scatter_plane::<BYTES, HIGH_BY_WORD>(plane, element.low.bits as u32, block, |index| codes[index]);
     }
+}
+
+/// Packs one plane of the codes `code_of` yields (the plane's bits sit `lift` bits up in the code).
+/// A word-packed plane writes each register word's bytes once; any other plane ors a code at a time.
+#[inline(always)]
+fn scatter_plane<const BYTES: usize, const BY_WORD: bool>(
+    plane: &Plane,
+    lift: u32,
+    block: &mut [u8; BYTES],
+    code_of: impl Fn(usize) -> u8,
+) {
+    let bits = plane.bits as u32;
+    let mask = u32::MAX >> (32 - bits);
+    if !BY_WORD {
+        walk_plane(plane, |index, address| {
+            put_code_bits(block, address, bits, u32::from(code_of(index)) >> lift);
+        });
+        return;
+    }
+    let count = word_codes(plane);
+    let word_bytes = count * bits as usize / 8;
+    let words = plane.digits[0].radix as usize / count;
+    walk_runs(plane, |index, first| {
+        for word in 0..words {
+            let mut low = 0u32;
+            let mut high = 0u32;
+            let mut straddle = 0u64;
+            for lane in 0..count {
+                let offset = lane as u32 * bits;
+                let code = (u32::from(code_of(index + word * count + lane)) >> lift) & mask;
+                // codes occupy disjoint bits, so a sum is the or, and a sum is what a vector unit reduces
+                if offset + bits <= 32 {
+                    low = low.wrapping_add(code << offset);
+                } else if offset >= 32 {
+                    high = high.wrapping_add(code << (offset - 32));
+                } else {
+                    straddle = straddle.wrapping_add(u64::from(code) << offset);
+                }
+            }
+            let packed = u64::from(low) | (u64::from(high) << 32) | straddle;
+            let start = first + word * word_bytes;
+            block[start..start + word_bytes].copy_from_slice(&packed.to_le_bytes()[..word_bytes]);
+        }
+    });
 }
 
 /// The signed value of largest magnitude, the first one on a tie, as `quantize_row_q4_0_ref` picks.
@@ -372,6 +531,45 @@ fn inverse_of(scale: f32) -> f32 {
     if scale == 0.0 { 0.0 } else { 1.0 / scale }
 }
 
+/// The block's scale and the inverse the codes are fitted with (unused by a sign code).
+#[inline(always)]
+fn fit_scale<const ELEMENTS: usize>(layout: &BlockLayout, fit: Fit, input: &[f32; ELEMENTS]) -> (f32, f32) {
+    match fit {
+        Fit::SignedMax => {
+            let scale = signed_max(input) / -(layout.element.bias as f32);
+            (scale, inverse_of(scale))
+        }
+        Fit::PeakRound | Fit::Runtime => {
+            let scale = peak(input) / reach_of(layout) as f32;
+            (scale, inverse_of(scale))
+        }
+        Fit::MeanSign => {
+            let mut sum = 0.0f32;
+            for &value in input {
+                sum += value.abs();
+            }
+            (sum / ELEMENTS as f32, 0.0)
+        }
+    }
+}
+
+/// The raw code of one value under the fit's `inverse`.
+#[inline(always)]
+fn code_of(layout: &BlockLayout, fit: Fit, inverse: f32, value: f32) -> u8 {
+    match fit {
+        Fit::SignedMax => {
+            let top = (1i32 << code_bits(layout)) - 1;
+            top.min((value * inverse + (layout.element.bias as f32 + 0.5)) as i32) as u8
+        }
+        Fit::PeakRound | Fit::Runtime => {
+            let (lowest, highest) = integer_bounds(layout);
+            let rounded = (libm::roundf(value * inverse) as i32).clamp(lowest, highest);
+            raw_of_value(layout, rounded) as u8
+        }
+        Fit::MeanSign => u8::from(value >= 0.0),
+    }
+}
+
 /// Fits the block's scale and writes the raw codes; returns the scale the block stores.
 #[inline(always)]
 fn fit_codes<const ELEMENTS: usize>(
@@ -380,59 +578,41 @@ fn fit_codes<const ELEMENTS: usize>(
     input: &[f32; ELEMENTS],
     codes: &mut [u8; ELEMENTS],
 ) -> f32 {
-    match fit {
-        Fit::SignedMax => {
-            let bias = layout.element.bias as i32;
-            let scale = signed_max(input) / -(bias as f32);
-            let inverse = inverse_of(scale);
-            let top = (1i32 << code_bits(layout)) - 1;
-            let offset = bias as f32 + 0.5;
-            for (code, &value) in codes.iter_mut().zip(input) {
-                *code = top.min((value * inverse + offset) as i32) as u8;
-            }
-            scale
-        }
-        Fit::PeakRound | Fit::Runtime => {
-            let scale = peak(input) / reach_of(layout) as f32;
-            let inverse = inverse_of(scale);
-            let (lowest, highest) = integer_bounds(layout);
-            for (code, &value) in codes.iter_mut().zip(input) {
-                let rounded = (libm::roundf(value * inverse) as i32).clamp(lowest, highest);
-                *code = raw_of_value(layout, rounded) as u8;
-            }
-            scale
-        }
-        Fit::MeanSign => {
-            let mut sum = 0.0f32;
-            for &value in input {
-                sum += value.abs();
-            }
-            for (code, &value) in codes.iter_mut().zip(input) {
-                *code = u8::from(value >= 0.0);
-            }
-            sum / ELEMENTS as f32
-        }
+    let (scale, inverse) = fit_scale(layout, fit, input);
+    for (code, &value) in codes.iter_mut().zip(input) {
+        *code = code_of(layout, fit, inverse, value);
     }
+    scale
 }
 
 #[inline(always)]
-fn encode_chunk<const ELEMENTS: usize, const BYTES: usize>(
+fn encode_chunk<
+    const ELEMENTS: usize,
+    const BYTES: usize,
+    const LOW_BY_WORD: bool,
+    const HIGH_BY_WORD: bool,
+>(
     layout: &BlockLayout,
     fit: Fit,
     input: &[f32; ELEMENTS],
     out: &mut [u8; BYTES],
 ) {
+    let mut block = [0u8; BYTES];
     let mut codes = [0u8; ELEMENTS];
     let scale = fit_codes(layout, fit, input, &mut codes);
-    let mut block = [0u8; BYTES];
+    scatter_codes::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD>(layout, &codes, &mut block);
     let width = layout.scale.layout.width() as u32;
     put_bits(&mut block, layout.scale.byte_offset as usize * 8, width, encode(scale, layout.scale.layout));
-    scatter_codes(layout, &codes, &mut block);
     *out = block;
 }
 
 #[inline(always)]
-fn encode_run<const ELEMENTS: usize, const BYTES: usize>(
+fn encode_run<
+    const ELEMENTS: usize,
+    const BYTES: usize,
+    const LOW_BY_WORD: bool,
+    const HIGH_BY_WORD: bool,
+>(
     layout: BlockLayout,
     fit: Fit,
     values: &[f32],
@@ -441,7 +621,7 @@ fn encode_run<const ELEMENTS: usize, const BYTES: usize>(
     let inputs = values.as_chunks::<ELEMENTS>().0;
     let blocks = out.as_chunks_mut::<BYTES>().0;
     for (input, block) in inputs.iter().zip(blocks) {
-        encode_chunk(&layout, fit, input, block);
+        encode_chunk::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD>(&layout, fit, input, block);
     }
 }
 
@@ -455,14 +635,23 @@ macro_rules! resolve_named_block {
                 const ELEMENTS: usize = BlockLayout::$name.elements as usize;
                 const BYTES: usize = BlockLayout::$name.block_bytes as usize;
                 const FIT: Fit = fit_of(&BlockLayout::$name);
+                const LOW_BY_WORD: bool = is_word_packed(&BlockLayout::$name.element.low);
+                const HIGH_BY_WORD: bool = is_high_word_packed(&BlockLayout::$name);
+                const UNPACK_BY_WORD: bool = unpacks_by_word(&BlockLayout::$name);
                 let encode: Option<EncodeFn> = match FIT {
                     Fit::Runtime => None,
                     _ => Some(|values, out| {
-                        encode_run::<ELEMENTS, BYTES>(BlockLayout::$name, FIT, values, out);
+                        encode_run::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD>(
+                            BlockLayout::$name,
+                            FIT,
+                            values,
+                            out,
+                        );
                     }),
                 };
-                let decode: DecodeFn =
-                    |data, out| decode_run::<ELEMENTS, BYTES>(BlockLayout::$name, data, out);
+                let decode: DecodeFn = |data, out| {
+                    decode_run::<ELEMENTS, BYTES, UNPACK_BY_WORD>(BlockLayout::$name, data, out);
+                };
                 return Some(FormatCodec::table(encode, decode, ELEMENTS, BYTES));
             }
         )*
@@ -519,6 +708,35 @@ mod tests {
         assert_eq!(scale, 0.015_625);
         assert_eq!(&codes[..4], &[192, 0, 255, 128]);
         assert!(codes[3..].iter().all(|&code| code == 128));
+    }
+
+    #[test]
+    fn run_planes_are_the_contiguous_byte_aligned_ones_whatever_the_format_is_called() {
+        let runs = [
+            BlockLayout::Q8_0.element.low,
+            BlockLayout::Q2_0.element.low,
+            BlockLayout::PQ2_0.element.low,
+            BlockLayout::Q1_0.element.low,
+            BlockLayout::Q5_0.element.high.expect("q5_0 has a high plane"),
+        ];
+        let not_runs = [BlockLayout::Q4_0.element.low, BlockLayout::Q5_0.element.low];
+
+        assert!(runs.iter().all(is_run_plane));
+        assert!(not_runs.iter().all(|plane| !is_run_plane(plane)));
+        assert!(!is_word_packed(&BlockLayout::Q8_0.element.low), "a byte-wide code is not unpacked");
+        assert!(unpacks_by_word(&BlockLayout::PQ2_0) && !unpacks_by_word(&BlockLayout::Q5_0));
+        assert!(is_high_word_packed(&BlockLayout::Q5_0) && !is_high_word_packed(&BlockLayout::Q4_0));
+        assert_eq!(word_codes(&BlockLayout::PQ2_0.element.low), 32);
+        assert_eq!(word_codes(&BlockLayout::Q8_0.element.low), 8);
+        assert_eq!(word_codes(&BlockLayout::Q5_0.element.high.expect("high plane")), 32);
+    }
+
+    #[test]
+    fn a_run_that_is_not_a_whole_number_of_bytes_is_not_a_run_plane() {
+        let mut plane = BlockLayout::Q2_0.element.low;
+        plane.digits[0].radix = 3;
+
+        assert!(!is_run_plane(&plane));
     }
 
     fn layout_is_table_shaped(layout: &BlockLayout) -> bool {
