@@ -381,10 +381,10 @@ fn fit_codes<const ELEMENTS: usize>(
             let bias = layout.element.bias as i32;
             let scale = signed_max(input) / -(bias as f32);
             let inverse = inverse_of(scale);
-            let top = ((1i32 << code_bits(layout)) - 1) as i8;
+            let top = (1i32 << code_bits(layout)) - 1;
             let offset = bias as f32 + 0.5;
             for (code, &value) in codes.iter_mut().zip(input) {
-                *code = top.min((value * inverse + offset) as i8) as u8;
+                *code = top.min((value * inverse + offset) as i32) as u8;
             }
             scale
         }
@@ -594,5 +594,34 @@ impl BlockCodec {
     #[must_use]
     pub const fn decode_fn(&self) -> DecodeFn {
         self.decode
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::float_layout::FloatLayout;
+
+    fn offset_binary_u8_layout() -> BlockLayout {
+        let mut layout = BlockLayout::Q8_0;
+        layout.element.code = FloatLayout::UINT8;
+        layout.element.bias = 128;
+        layout
+    }
+
+    #[test]
+    fn signed_max_fit_keeps_eight_bit_offset_binary_codes_unsaturated() {
+        let layout = offset_binary_u8_layout();
+        let mut input = [0.0f32; 32];
+        input[0] = 1.0;
+        input[1] = -2.0;
+        input[2] = 1.984_375;
+        let mut codes = [0u8; 32];
+
+        let scale = fit_codes(&layout, Fit::SignedMax, &input, &mut codes);
+
+        assert_eq!(scale, 0.015_625);
+        assert_eq!(&codes[..4], &[192, 0, 255, 128]);
+        assert!(codes[3..].iter().all(|&code| code == 128));
     }
 }
