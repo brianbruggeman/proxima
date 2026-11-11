@@ -43,6 +43,24 @@ fn dense_layout_accepts_contiguous_and_rejects_broadcast() {
 }
 
 #[test]
+fn plain_and_saturating_e5m2_decode_every_code_alike_so_one_accessor_reads_both() {
+    use proxima_numeric::float_layout_codec::decode;
+
+    let differing: Vec<u32> = (0u32..256)
+        .filter(|&code| {
+            decode(code, FloatLayout::E5M2).to_bits()
+                != decode(code, FloatLayout::E5M2_SATURATING).to_bits()
+        })
+        .collect();
+    assert_eq!(differing, Vec::<u32>::new(), "the layouts differ only in how overflow encodes");
+
+    let plain = signature_tokens_prelude::operand_read(0, "index", Some(Codec::BFloat8));
+    let saturating = signature_tokens_prelude::operand_read(0, "index", Some(Codec::Bf8E5M2));
+    assert_eq!(plain, saturating);
+    assert_eq!(plain, "bf8_e5m2_element(in0 + index, 0u)");
+}
+
+#[test]
 fn brain_float_scalar_codecs_read_packed_bytes_directly() {
     let bf8_read =
         signature_tokens_prelude::operand_read(0, "native_packed_index", Some(Codec::Bf8E5M2));

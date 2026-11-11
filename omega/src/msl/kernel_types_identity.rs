@@ -1701,6 +1701,7 @@ pub(crate) const fn metal_operand_read_decodes(codec: Codec) -> bool {
             | Codec::Q5_0
             | Codec::Float16
             | Codec::BFloat16
+            | Codec::BFloat8
             | Codec::Bf8E5M2
             | Codec::Bf4E2M1
             | Codec::Fp6E3M2

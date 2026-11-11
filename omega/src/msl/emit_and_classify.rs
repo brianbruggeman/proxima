@@ -244,17 +244,6 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
         entry.push_str(&row_schedule.cache_token());
     }
     let quantized = operand_codecs(resolved, packed_operands);
-    if !matches!(resolved.kind, BoundOpKind::CachedAttention { .. })
-        && let Some(codec) = quantized
-            .iter()
-            .flatten()
-            .find(|codec| **codec == Codec::BFloat8)
-    {
-        return Err(EmitError::PackedCodecNotSupported {
-            node: resolved.node,
-            codec: codec.name().unwrap_or("unnamed"),
-        });
-    }
     let grid = grid_spec_with_tile_height(
         resolved,
         &quantized,
