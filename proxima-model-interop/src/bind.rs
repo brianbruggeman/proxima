@@ -1197,8 +1197,9 @@ pub(crate) fn codec_from_ggml_type(ggml_type: GgmlType) -> Option<Codec> {
 /// change is a rebind to a different name, never a silent swap under
 /// the name a compiled program already resolved.
 #[cfg(feature = "std")]
-fn codec_name_suffix(codec: Codec) -> &'static str {
+pub(crate) fn codec_name_suffix(codec: Codec) -> &'static str {
     match codec {
+        Codec::Float32 => "f32",
         Codec::Q4K => "q4_k",
         Codec::Q5K => "q5_k",
         Codec::Q6K => "q6_k",
@@ -1242,54 +1243,14 @@ fn codec_name_suffix(codec: Codec) -> &'static str {
 /// The on-disk [`GgmlType`] `codec` packs bytes as -- the reverse of
 /// [`codec_from_ggml_type`], needed by [`codec_byte_len_for`] to look up a
 /// codec's block layout without re-typing [`GgmlType::wire_shape`]'s
-/// numbers a second time here. The proxima brain-float encodings (`BFloat8`,
-/// `Bf8E5M2`, `Bf4E2M1`) have no GGML wire type and return
-/// [`InteropError::UnsupportedCodec`]; `Fp6E3M2` maps to its proxima-own id.
+/// numbers a second time here. Derived from [`GgmlType::from_numeric_format`],
+/// the reverse of the one forward table [`GgmlType::numeric_format`]. A format
+/// no ggml type stores (`BFloat8`, `Bf8E5M2`, `Bf4E2M1`, `Q8_1Grouped`) returns
+/// [`InteropError::UnsupportedCodec`]; `Float32` maps to `F32`.
 #[cfg(feature = "std")]
 pub(crate) fn codec_to_ggml_type(codec: Codec) -> Result<GgmlType, InteropError> {
-    Ok(match codec {
-        Codec::Q4K => GgmlType::Q4_K,
-        Codec::Q5K => GgmlType::Q5_K,
-        Codec::Q6K => GgmlType::Q6_K,
-        Codec::Q8_0 => GgmlType::Q8_0,
-        Codec::Q3K => GgmlType::Q3_K,
-        Codec::Q4_0 => GgmlType::Q4_0,
-        Codec::Float16 => GgmlType::F16,
-        Codec::BFloat16 => GgmlType::Bf16,
-        Codec::Q2K => GgmlType::Q2_K,
-        Codec::Q5_1 => GgmlType::Q5_1,
-        Codec::Q5_0 => GgmlType::Q5_0,
-        Codec::Q4_1 => GgmlType::Q4_1,
-        Codec::Q8_1 => GgmlType::Q8_1,
-        Codec::Q8K => GgmlType::Q8_K,
-        Codec::Iq1S => GgmlType::Iq1S,
-        Codec::Iq1M => GgmlType::Iq1M,
-        Codec::Iq2Xxs => GgmlType::Iq2Xxs,
-        Codec::Iq2Xs => GgmlType::Iq2Xs,
-        Codec::Iq2S => GgmlType::Iq2S,
-        Codec::Iq3Xxs => GgmlType::Iq3Xxs,
-        Codec::Iq3S => GgmlType::Iq3S,
-        Codec::Iq4Nl => GgmlType::Iq4Nl,
-        Codec::Iq4Xs => GgmlType::Iq4Xs,
-        Codec::Tq10 => GgmlType::Tq10,
-        Codec::Tq20 => GgmlType::Tq20,
-        Codec::Mxfp4 => GgmlType::Mxfp4,
-        Codec::Nvfp4 => GgmlType::Nvfp4,
-        Codec::Q1_0 => GgmlType::Q1_0,
-        Codec::Q2_0 => GgmlType::Q2_0,
-        Codec::Pq2_0 => GgmlType::Pq2_0,
-        Codec::Ptq1_0 => GgmlType::Ptq1_0,
-        Codec::Fp6E3M2 => GgmlType::Fp6E3M2,
-        Codec::BFloat8 | Codec::Bf8E5M2 | Codec::Bf4E2M1 | Codec::Q8_1Grouped => {
-            return Err(InteropError::UnsupportedCodec {
-                codec: crate::error::codec_name(codec),
-            });
-        }
-        _ => {
-            return Err(InteropError::UnsupportedCodec {
-                codec: crate::error::codec_name(codec),
-            });
-        }
+    GgmlType::from_numeric_format(&codec).ok_or(InteropError::UnsupportedCodec {
+        codec: crate::error::codec_name(codec),
     })
 }
 
@@ -1798,6 +1759,7 @@ pub(crate) fn quantize_to_kind(
     output: &mut [u8],
 ) -> Result<(), QuantError> {
     match kind {
+        Codec::Float32 => write_f32_le(decoded, output),
         Codec::Q8_0 => q8_0::quantize(decoded, output),
         Codec::Q4K => q4_k::quantize(decoded, output),
         Codec::Q5K => q5_k::quantize(decoded, output),
@@ -1847,8 +1809,24 @@ pub(crate) fn quantize_to_kind(
         Codec::Bf8E5M2 => Err(QuantError::UnsupportedCodec { codec: "bf8_e5m2" }),
         Codec::Bf4E2M1 => Err(QuantError::UnsupportedCodec { codec: "bf4_e2m1" }),
         Codec::Fp6E3M2 => Err(QuantError::UnsupportedCodec { codec: "fp6_e3m2" }),
-        _ => Err(QuantError::UnsupportedCodec { codec: "fp6_e3m2" }),
+        _ => Err(QuantError::UnsupportedCodec {
+            codec: codec_name_suffix(kind),
+        }),
     }
+}
+
+fn write_f32_le(decoded: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
+    if output.len() != decoded.len() * 4 {
+        return Err(QuantError::OutputSizeMismatch {
+            found: output.len(),
+            expected: decoded.len() * 4,
+        });
+    }
+    let (chunks, _) = output.as_chunks_mut::<4>();
+    for (chunk, value) in chunks.iter_mut().zip(decoded) {
+        *chunk = value.to_le_bytes();
+    }
+    Ok(())
 }
 
 /// Binds `gate_name`/`up_name` (`blk.{layer}.ffn_gate.weight`/

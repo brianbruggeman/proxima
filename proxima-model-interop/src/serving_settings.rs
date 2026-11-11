@@ -8,7 +8,6 @@ use conflaguration::{Settings, Validate};
 use omega::{AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
-use proxima_gguf::types::GgmlType;
 use proxima_numeric::{NumericFormat, NumericPolicy};
 use serde::{Deserialize, Serialize};
 
@@ -373,15 +372,6 @@ impl Default for ServingSettings {
     }
 }
 
-/// float32 is the identity format with no packed codec, so `codec_to_ggml_type` (the
-/// packed-codec reverse table) refuses it; a weight-precision rule may still target it.
-fn weight_target_ggml_type(format: &NumericFormat) -> Result<GgmlType, InteropError> {
-    if format.is_identity_of(&NumericFormat::Float32) {
-        return Ok(GgmlType::F32);
-    }
-    codec_to_ggml_type(*format)
-}
-
 impl ServingSettings {
     /// lowers each rule's target to the on-disk `GgmlType` the recode path binds at;
     /// a target format with no ggml wire type is refused here rather than at bind time.
@@ -404,7 +394,7 @@ impl ServingSettings {
                 };
                 Ok(WeightPrecisionRule {
                     pattern,
-                    target: weight_target_ggml_type(&target)?,
+                    target: codec_to_ggml_type(target)?,
                 })
             })
             .collect()
@@ -566,6 +556,7 @@ mod round_trip {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
+    use proxima_gguf::types::GgmlType;
     use crate::speculative_settings::{SpeculativeTypeName, SpeculativeTypeNameSet};
 
     #[test]
@@ -731,7 +722,7 @@ mod tests {
                 "{word} serializes to its canonical name"
             );
             assert_eq!(
-                weight_target_ggml_type(&variant).expect("a cache format has a ggml wire type"),
+                codec_to_ggml_type(variant).expect("a cache format has a ggml wire type"),
                 ggml,
                 "{word} lowers to its ggml type"
             );

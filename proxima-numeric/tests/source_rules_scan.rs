@@ -382,6 +382,14 @@ fn the_ggml_type_to_format_mapping_lives_only_in_gguf_numeric_format() {
         body_of_fn(&example, "fn codec_of("),
     ];
     let entry = body_of_fn(&bind, "fn gguf_tensor_as_packed_block<");
+    let reverse = body_of_fn(&bind, "fn codec_to_ggml_type(");
+
+    assert!(reverse.contains("from_numeric_format("), "the format to type direction asks GgmlType::from_numeric_format:\n{reverse}");
+    let reverse_named: Vec<&str> = reverse
+        .lines()
+        .filter(|line| names_a_ggml_type_variant(&line.replace("GgmlType::from_numeric_format", "")))
+        .collect();
+    assert_eq!(reverse_named, Vec::<&str>::new(), "the reverse derivation names no GgmlType variant at all");
 
     for body in &derivations {
         assert!(body.contains(".numeric_format()"), "a derivation site asks GgmlType::numeric_format:\n{body}");

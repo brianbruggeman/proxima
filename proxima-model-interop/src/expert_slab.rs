@@ -35,7 +35,7 @@ use proxima_tensor::NodeId;
 use proxima_tensor::cpu::ExpertPayloadSpan;
 use proxima_tensor::cpu::{ExpertEntry, ExpertSource};
 
-use crate::bind::{Codec, quantize_to_kind};
+use crate::bind::{Codec, codec_name_suffix, quantize_to_kind};
 use crate::error::InteropError;
 use crate::residency::ExpertAddress;
 
@@ -158,7 +158,7 @@ pub fn recode_expert_into(
     if !source_bytes.len().is_multiple_of(block_bytes) {
         return Err(InteropError::Quant(
             proxima_gguf::quant::QuantError::InputNotBlockMultiple {
-                codec: source_codec_name(source_codec),
+                codec: codec_name_suffix(source_codec),
                 found: source_bytes.len(),
                 block_bytes,
             },
@@ -187,50 +187,9 @@ pub fn recode_expert_into(
     Ok(target_bytes)
 }
 
-fn source_codec_name(codec: Codec) -> &'static str {
-    match codec {
-        Codec::Q2K => "q2_k",
-        Codec::Q3K => "q3_k",
-        Codec::Q4K => "q4_k",
-        Codec::Q5K => "q5_k",
-        Codec::Q6K => "q6_k",
-        Codec::Q8_0 => "q8_0",
-        Codec::Q4_0 => "q4_0",
-        Codec::Float16 => "f16",
-        Codec::BFloat16 => "bf16",
-        Codec::BFloat8 => "bf8",
-        Codec::Bf8E5M2 => "bf8_e5m2",
-        Codec::Bf4E2M1 => "bf4_e2m1",
-        Codec::Fp6E3M2 => "fp6_e3m2",
-        Codec::Q5_1 => "q5_1",
-        Codec::Q5_0 => "q5_0",
-        Codec::Q4_1 => "q4_1",
-        Codec::Q8_1 => "q8_1",
-        Codec::Q8_1Grouped => "q8_1_grouped",
-        Codec::Q8K => "q8_k",
-        Codec::Iq1S => "iq1_s",
-        Codec::Iq1M => "iq1_m",
-        Codec::Iq2Xxs => "iq2_xxs",
-        Codec::Iq2Xs => "iq2_xs",
-        Codec::Iq2S => "iq2_s",
-        Codec::Iq3Xxs => "iq3_xxs",
-        Codec::Iq3S => "iq3_s",
-        Codec::Iq4Nl => "iq4_nl",
-        Codec::Iq4Xs => "iq4_xs",
-        Codec::Tq10 => "tq1_0",
-        Codec::Tq20 => "tq2_0",
-        Codec::Mxfp4 => "mxfp4",
-        Codec::Nvfp4 => "nvfp4",
-        Codec::Q1_0 => "q1_0",
-        Codec::Q2_0 => "q2_0",
-        Codec::Pq2_0 => "pq2_0",
-        Codec::Ptq1_0 => "ptq1_0",
-        _ => "unnamed",
-    }
-}
-
 fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<(), InteropError> {
     match codec {
+        Codec::Float32 => read_f32_le(source, output),
         Codec::Q2K => q2_k::dequantize(source, output),
         Codec::Q3K => q3_k::dequantize(source, output),
         Codec::Q4K => q4_k::dequantize(source, output),
@@ -285,9 +244,25 @@ fn dequantize_expert(codec: Codec, source: &[u8], output: &mut [f32]) -> Result<
         Codec::Pq2_0 => {
             Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "pq2_0" })
         }
-        _ => Err(proxima_gguf::quant::QuantError::UnsupportedCodec { codec: "unnamed" }),
+        _ => Err(proxima_gguf::quant::QuantError::UnsupportedCodec {
+            codec: codec_name_suffix(codec),
+        }),
     }
     .map_err(InteropError::from)
+}
+
+fn read_f32_le(source: &[u8], output: &mut [f32]) -> Result<(), proxima_gguf::quant::QuantError> {
+    if source.len() != output.len() * 4 {
+        return Err(proxima_gguf::quant::QuantError::OutputSizeMismatch {
+            found: output.len(),
+            expected: source.len() / 4,
+        });
+    }
+    let (chunks, _) = source.as_chunks::<4>();
+    for (value, chunk) in output.iter_mut().zip(chunks) {
+        *value = f32::from_le_bytes(*chunk);
+    }
+    Ok(())
 }
 
 /// A dense weight's output and input feature extents, grouped so the paging
@@ -1590,6 +1565,67 @@ mod tests {
         assert_eq!(
             sources.get(&NodeId(7)).map(|source| source.entries().len()),
             Some(1)
+        );
+    }
+
+    fn expert_f32_bytes(element_count: usize) -> (Vec<f32>, Vec<u8>) {
+        // smooth, signed, weight-like values in roughly [-0.5, 0.5]
+        let values: Vec<f32> = (0..element_count)
+            .map(|index| ((index as f32) * 0.37).sin() * 0.5)
+            .collect();
+        let bytes = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        (values, bytes)
+    }
+
+    #[test]
+    fn recode_expert_f32_to_q8_0_and_back_stays_within_one_quant_step() {
+        let element_count = 128;
+        let (values, source) = expert_f32_bytes(element_count);
+        let mut scratch = vec![0.0_f32; element_count];
+        let mut packed = vec![0_u8; element_count / 32 * 34];
+
+        let written = recode_expert_into(Codec::Float32, &source, Codec::Q8_0, &mut scratch, &mut packed)
+            .expect("f32 recodes to q8_0");
+        assert_eq!(written, packed.len());
+
+        let mut back = vec![0_u8; element_count * 4];
+        recode_expert_into(Codec::Q8_0, &packed, Codec::Float32, &mut scratch, &mut back)
+            .expect("q8_0 recodes to f32");
+        let (chunks, _) = back.as_chunks::<4>();
+        for (original, chunk) in values.iter().zip(chunks) {
+            let decoded = f32::from_le_bytes(*chunk);
+            assert!(
+                (original - decoded).abs() < 0.005,
+                "q8_0 round trip drifted: {original} vs {decoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn recode_expert_f32_to_f32_is_a_byte_identity() {
+        let element_count = 128;
+        let (_, source) = expert_f32_bytes(element_count);
+        let mut scratch = vec![0.0_f32; element_count];
+        let mut output = vec![0_u8; element_count * 4];
+
+        let written = recode_expert_into(Codec::Float32, &source, Codec::Float32, &mut scratch, &mut output)
+            .expect("f32 recodes to f32");
+
+        assert_eq!(written, source.len());
+        assert_eq!(output, source);
+    }
+
+    #[test]
+    fn unsupported_target_error_names_the_requested_codec() {
+        let decoded = vec![0.0_f32; 32];
+        let mut output = vec![0_u8; 20];
+
+        let error = quantize_to_kind(Codec::Q4_1, &decoded, &mut output)
+            .expect_err("q4_1 has no encoder");
+
+        assert_eq!(
+            error.to_string(),
+            "no dequantizer is registered for GGML codec q4_1"
         );
     }
 }

@@ -387,6 +387,62 @@ impl GgmlType {
         })
     }
 
+    /// Every variant, including the fork and proxima-own ones [`Self::CURRENT`] leaves out. It is
+    /// an inventory, not a mapping: [`Self::from_numeric_format`] searches it through
+    /// [`Self::numeric_format`], so the format table stays the only `GgmlType` to format map.
+    pub const ALL: &'static [Self] = &[
+        Self::F32,
+        Self::F16,
+        Self::Q4_0,
+        Self::Q4_1,
+        Self::Q5_0,
+        Self::Q5_1,
+        Self::Q8_0,
+        Self::Q8_1,
+        Self::Q2_K,
+        Self::Q3_K,
+        Self::Q4_K,
+        Self::Q5_K,
+        Self::Q6_K,
+        Self::Q8_K,
+        Self::Iq2Xxs,
+        Self::Iq2Xs,
+        Self::Iq3Xxs,
+        Self::Iq1S,
+        Self::Iq4Nl,
+        Self::Iq3S,
+        Self::Iq2S,
+        Self::Iq4Xs,
+        Self::I8,
+        Self::I16,
+        Self::I32,
+        Self::I64,
+        Self::F64,
+        Self::Iq1M,
+        Self::Bf16,
+        Self::Tq10,
+        Self::Tq20,
+        Self::Mxfp4,
+        Self::Nvfp4,
+        Self::Q1_0,
+        Self::Q2_0,
+        Self::Pq2_0,
+        Self::Ptq1_0,
+        Self::Fp6E3M2,
+    ];
+
+    /// The wire type that stores `format`: the reverse of [`Self::numeric_format`], found by
+    /// searching [`Self::ALL`] for the variant whose format equals `format`, so no second table
+    /// can drift from the forward one. `None` for a format no ggml type stores (`BFloat8`,
+    /// `Bf8E5M2`, `Bf4E2M1`, `Q8_1Grouped`). Cold path: it builds one format per probe.
+    #[must_use]
+    pub fn from_numeric_format(format: &NumericFormat) -> Option<Self> {
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|candidate| candidate.numeric_format().as_ref() == Some(format))
+    }
+
     /// Encode back to the raw `ggml_type` wire tag — the writer's half of
     /// [`Self::from_wire`]. Kept as an explicit match (not a discriminant
     /// cast) because the wire values have gaps (4, 5, 31-33, 36-38) that
@@ -645,5 +701,101 @@ mod tests {
                 block_bytes: 210
             }
         );
+    }
+
+    /// no wildcard: adding a variant fails to compile here until `ALL` is revisited.
+    fn position_in_all(ggml_type: GgmlType) -> usize {
+        match ggml_type {
+            GgmlType::F32 => 0,
+            GgmlType::F16 => 1,
+            GgmlType::Q4_0 => 2,
+            GgmlType::Q4_1 => 3,
+            GgmlType::Q5_0 => 4,
+            GgmlType::Q5_1 => 5,
+            GgmlType::Q8_0 => 6,
+            GgmlType::Q8_1 => 7,
+            GgmlType::Q2_K => 8,
+            GgmlType::Q3_K => 9,
+            GgmlType::Q4_K => 10,
+            GgmlType::Q5_K => 11,
+            GgmlType::Q6_K => 12,
+            GgmlType::Q8_K => 13,
+            GgmlType::Iq2Xxs => 14,
+            GgmlType::Iq2Xs => 15,
+            GgmlType::Iq3Xxs => 16,
+            GgmlType::Iq1S => 17,
+            GgmlType::Iq4Nl => 18,
+            GgmlType::Iq3S => 19,
+            GgmlType::Iq2S => 20,
+            GgmlType::Iq4Xs => 21,
+            GgmlType::I8 => 22,
+            GgmlType::I16 => 23,
+            GgmlType::I32 => 24,
+            GgmlType::I64 => 25,
+            GgmlType::F64 => 26,
+            GgmlType::Iq1M => 27,
+            GgmlType::Bf16 => 28,
+            GgmlType::Tq10 => 29,
+            GgmlType::Tq20 => 30,
+            GgmlType::Mxfp4 => 31,
+            GgmlType::Nvfp4 => 32,
+            GgmlType::Q1_0 => 33,
+            GgmlType::Q2_0 => 34,
+            GgmlType::Pq2_0 => 35,
+            GgmlType::Ptq1_0 => 36,
+            GgmlType::Fp6E3M2 => 37,
+        }
+    }
+
+    #[test]
+    fn all_lists_every_variant_exactly_once_in_declaration_order() {
+        assert_eq!(GgmlType::ALL.len(), 38);
+        for (index, ggml_type) in GgmlType::ALL.iter().enumerate() {
+            assert_eq!(position_in_all(*ggml_type), index, "{ggml_type:?} position");
+        }
+    }
+
+    #[test]
+    fn numeric_format_is_injective_over_every_variant() {
+        let formats: Vec<NumericFormat> = GgmlType::ALL
+            .iter()
+            .filter_map(|ggml_type| ggml_type.numeric_format())
+            .collect();
+        for (index, format) in formats.iter().enumerate() {
+            assert!(
+                !formats[index + 1..].contains(format),
+                "two ggml types share the format at position {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn from_numeric_format_inverts_numeric_format_for_every_variant_with_a_format() {
+        let mut inverted = 0;
+        for ggml_type in GgmlType::ALL {
+            let Some(format) = ggml_type.numeric_format() else {
+                continue;
+            };
+            assert_eq!(GgmlType::from_numeric_format(&format), Some(*ggml_type), "{ggml_type:?}");
+            inverted += 1;
+        }
+        assert_eq!(inverted, 33, "38 variants, 5 integer or f64 types with no format");
+    }
+
+    #[test]
+    fn from_numeric_format_maps_float32_to_f32() {
+        assert_eq!(GgmlType::from_numeric_format(&NumericFormat::Float32), Some(GgmlType::F32));
+    }
+
+    #[test]
+    fn from_numeric_format_is_none_for_formats_no_ggml_type_stores() {
+        for format in [
+            NumericFormat::BFloat8,
+            NumericFormat::Bf8E5M2,
+            NumericFormat::Bf4E2M1,
+            NumericFormat::Q8_1Grouped,
+        ] {
+            assert_eq!(GgmlType::from_numeric_format(&format), None, "{format:?}");
+        }
     }
 }
