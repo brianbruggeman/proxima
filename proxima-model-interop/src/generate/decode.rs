@@ -3599,6 +3599,30 @@ impl<'file> LoadedModel<'file> {
         // path always fall through to the two-range `layer_roots` path
         // below, byte-for-byte unchanged.
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        {
+            let key_binary32 = kv_cache_format::is_binary32(serving_config.kv_cache_key_quant);
+            let reason = if force_two_range {
+                "force_two_range"
+            } else if !runtime.is_metal() {
+                "backend_not_metal"
+            } else if !key_binary32 {
+                "key_cache_not_binary32"
+            } else if self.single_range.is_none() {
+                "no_single_range_program"
+            } else {
+                "all_gates_passed"
+            };
+            debug!(
+                key_format = ?serving_config.kv_cache_key_quant,
+                value_format = ?serving_config.kv_cache_value_quant,
+                key_binary32,
+                has_single_range_program = self.single_range.is_some(),
+                chosen = reason == "all_gates_passed",
+                reason,
+                "single_range_decision: the placed-kv single-range path runs only when every gate passes"
+            );
+        }
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if !force_two_range
             && runtime.is_metal()
             && kv_cache_format::is_binary32(serving_config.kv_cache_key_quant)
@@ -4136,6 +4160,17 @@ format; only the single-row decode kernel reads it from the device cache",
                 )
             });
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        debug!(
+            key_format = ?serving_config.kv_cache_key_quant,
+            value_format = ?serving_config.kv_cache_value_quant,
+            device_kv_eligible,
+            backend_metal = runtime.is_metal(),
+            ring_write_offset = self.ring_write_offset as u64,
+            ffn_routed = self.ffn_routing == FfnRouting::Routed,
+            greedy_on_device_candidate = device_kv_eligible && max_tokens > 1,
+            "device_kv_eligibility: attention layers keep kv on device only for a metal, ring-free, non-moe, attention-or-shared layer set"
+        );
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let device_kv_decode_rows = draft_limit + 1;
         // the widest evaluation of the call, a prefill batch included: the first evaluation
         // places its K and V rows straight into the device buffers instead of reading them back
@@ -4195,9 +4230,23 @@ format; only the single-row decode kernel reads it from the device cache",
                 LayerCacheState::Attention(cache) => cache.ring.is_none(),
                 _ => true,
             });
+        debug!(
+            key_format = ?serving_config.kv_cache_key_quant,
+            value_format = ?serving_config.kv_cache_value_quant,
+            key_binary32 = kv_cache_format::is_binary32(serving_config.kv_cache_key_quant),
+            no_ring_attention = layer_caches.iter().all(|state| match state {
+                LayerCacheState::Attention(cache) => cache.ring.is_none(),
+                _ => true,
+            }),
+            kv_carry_eligible,
+            runtime_carries_state_on_device = runtime.carries_state_on_device(),
+            ffn_routed = self.ffn_routing == FfnRouting::Routed,
+            "kv_carry_decision: kv carry needs a binary32 cache, no ring, a device-carrying runtime and a non-routed ffn"
+        );
         let mut kv_carried: Vec<KvCarryLeaf> = Vec::new();
         let mut kv_carried_layers: Vec<bool> = vec![false; layer_caches.len()];
         let mut kv_carry_program = 0usize;
+        let mut kv_carry_step_reported: Option<bool> = None;
         let mut kv_live = false;
         'decode: while step < max_tokens {
             settled_tokens.clear();
@@ -4549,6 +4598,17 @@ format; only the single-row decode kernel reads it from the device cache",
                     let carry_kv_this_step = kv_carry_eligible
                         && runtime.carries_state_on_device()
                         && self.ffn_routing != FfnRouting::Routed;
+                    if kv_carry_step_reported != Some(carry_kv_this_step) {
+                        kv_carry_step_reported = Some(carry_kv_this_step);
+                        debug!(
+                            step = step as u64,
+                            carry_kv_this_step,
+                            kv_carry_eligible,
+                            runtime_carries_state_on_device = runtime.carries_state_on_device(),
+                            ffn_routed = self.ffn_routing == FfnRouting::Routed,
+                            "kv_carry_step_decision: logged when the per-step answer changes, not every token"
+                        );
+                    }
                     let program_address = active_program.as_ptr() as usize;
                     let verify_address = self
                         .speculative_verify_program
@@ -4771,6 +4831,8 @@ format; only the single-row decode kernel reads it from the device cache",
                             debug!(
                                 step = step as u64,
                                 cached_len = cached_len as u64,
+                                key_format = ?serving_config.kv_cache_key_quant,
+                                value_format = ?serving_config.kv_cache_value_quant,
                                 resident_layers =
                                     device_resident_flags.iter().filter(|flag| **flag).count()
                                         as u64,
@@ -4780,6 +4842,8 @@ format; only the single-row decode kernel reads it from the device cache",
                             debug!(
                                 step = step as u64,
                                 cached_len = cached_len as u64,
+                                key_format = ?serving_config.kv_cache_key_quant,
+                                value_format = ?serving_config.kv_cache_value_quant,
                                 "device_kv_declined: a host cache did not hold exactly the cached positions"
                             );
                         }

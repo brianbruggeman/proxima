@@ -2821,6 +2821,12 @@ impl<'file> LoadedModel<'file> {
             );
             build_single_range_program(&bound.architecture, qk_norm)?
         };
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        debug!(
+            kv_cache_shape = ?profile.kv_cache_shape,
+            built = single_range.is_some(),
+            "single_range_program: built only for a uniform kv cache shape the single-range builder admits"
+        );
         // Armed by the descriptor ([`ModelDescriptor::verify`]), never by a
         // name: a config decides directly, and without one the family's
         // header descriptor does.
