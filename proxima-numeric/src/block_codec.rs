@@ -137,14 +137,50 @@ fn read_bits<const BYTES: usize>(block: &[u8; BYTES], address: usize, width: u32
     ((word >> shift) as u32) & (u32::MAX >> (32 - width))
 }
 
-/// Stores the `width` low bits of `bits` at byte `offset` as one little-endian integer store, so the
-/// scale is a store of its own width and not a run of byte stores a vectoriser would join to the
-/// code bytes beside it.
+/// Stores the `width` low bits of `bits` at byte `offset`. When `OWNED` (see [`scale_owns_its_bytes`])
+/// it is one little-endian integer store, so the scale is a store of its own width and not a run of
+/// byte stores a vectoriser would join to the code bytes beside it; otherwise the bytes are shared
+/// with code bits already in `block`, so the field is ored in.
 #[inline(always)]
-fn put_field<const BYTES: usize>(block: &mut [u8; BYTES], offset: usize, width: u32, bits: u32) {
+fn put_field<const BYTES: usize, const OWNED: bool>(block: &mut [u8; BYTES], offset: usize, width: u32, bits: u32) {
     let bytes = width.div_ceil(8) as usize;
     let masked = bits & (u32::MAX >> (32 - width));
-    block[offset..offset + bytes].copy_from_slice(&masked.to_le_bytes()[..bytes]);
+    if OWNED {
+        block[offset..offset + bytes].copy_from_slice(&masked.to_le_bytes()[..bytes]);
+        return;
+    }
+    for (step, byte) in masked.to_le_bytes()[..bytes].iter().enumerate() {
+        block[offset + step] |= byte;
+    }
+}
+
+/// Whether the scale is a whole number of bytes that no code bit lies in: the property that lets
+/// [`put_field`] overwrite those bytes instead of oring into them.
+const fn scale_owns_its_bytes(layout: &BlockLayout) -> bool {
+    let width = layout.scale.layout.width() as usize;
+    if !width.is_multiple_of(8) {
+        return false;
+    }
+    let first = layout.scale.byte_offset as usize * 8;
+    let end = first + width;
+    let high_touches = match &layout.element.high {
+        Some(plane) => plane_touches(plane, layout.elements as usize, first, end),
+        None => false,
+    };
+    !plane_touches(&layout.element.low, layout.elements as usize, first, end) && !high_touches
+}
+
+/// Whether any code of the plane lies in the bit range `[first, end)`.
+const fn plane_touches(plane: &Plane, elements: usize, first: usize, end: usize) -> bool {
+    let mut index = 0;
+    while index < elements {
+        let address = plane.address(index);
+        if address < end && address + plane.bits as usize > first {
+            return true;
+        }
+        index += 1;
+    }
+    false
 }
 
 /// [`read_bits`] for a plane of at most eight bits, which spans at most two bytes, so the word is
@@ -287,6 +323,7 @@ const fn is_high_single_word(layout: &BlockLayout) -> bool {
         Some(plane) => {
             is_word_packed(plane)
                 && word_codes(plane) * plane.bits as usize == 32
+                && plane_span(plane) * plane.bits as usize == 32
                 && plane_span(plane) == layout.elements as usize
         }
         None => false,
@@ -368,7 +405,7 @@ fn decode_chunk<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool>(
     };
     // a nan min must reach every slot with its own payload, and ieee 754 does not say which payload
     // survives an add of two nans: a zero scale makes every product a finite zero (an integer code
-    // is finite), so the add has one nan operand and returns it, on any isa, with no branch
+    // is finite), so the add has one nan operand, which isas that propagate an operand's nan payload (aarch64, x86-64) return; a canonicalising isa returns its canonical nan, which the parity tests accept by nan-ness
     let stored_scale = read_field(block, layout.scale);
     let scale = if layout.min.is_some() && min_term.is_nan() { 0.0 } else { stored_scale };
     let value_of = |raw: u32| {
@@ -634,6 +671,7 @@ fn encode_chunk<
     const LOW_BY_WORD: bool,
     const HIGH_BY_WORD: bool,
     const HIGH_FUSED: bool,
+    const SCALE_OWNED: bool,
 >(
     layout: &BlockLayout,
     fit: Fit,
@@ -645,7 +683,7 @@ fn encode_chunk<
     let (scale, high_word) = fit_codes::<ELEMENTS, HIGH_FUSED>(layout, fit, input, &mut codes);
     scatter_codes::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED>(layout, &codes, high_word, &mut block);
     let width = layout.scale.layout.width() as u32;
-    put_field(&mut block, layout.scale.byte_offset as usize, width, encode(scale, layout.scale.layout));
+    put_field::<BYTES, SCALE_OWNED>(&mut block, layout.scale.byte_offset as usize, width, encode(scale, layout.scale.layout));
     *out = block;
 }
 
@@ -656,6 +694,7 @@ fn encode_run<
     const LOW_BY_WORD: bool,
     const HIGH_BY_WORD: bool,
     const HIGH_FUSED: bool,
+    const SCALE_OWNED: bool,
 >(
     layout: BlockLayout,
     fit: Fit,
@@ -665,7 +704,7 @@ fn encode_run<
     let inputs = values.as_chunks::<ELEMENTS>().0;
     let blocks = out.as_chunks_mut::<BYTES>().0;
     for (input, block) in inputs.iter().zip(blocks) {
-        encode_chunk::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED>(&layout, fit, input, block);
+        encode_chunk::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, SCALE_OWNED>(&layout, fit, input, block);
     }
 }
 
@@ -683,11 +722,12 @@ macro_rules! resolve_named_block {
                 const LOW_BY_WORD: bool = is_word_packed(&BlockLayout::$name.element.low);
                 const HIGH_BY_WORD: bool = is_high_word_packed(&BlockLayout::$name);
                 const HIGH_FUSED: bool = is_high_single_word(&BlockLayout::$name);
+                const SCALE_OWNED: bool = scale_owns_its_bytes(&BlockLayout::$name);
                 const UNPACK_BY_WORD: bool = unpacks_by_word(&BlockLayout::$name);
                 let encode: Option<EncodeFn> = match FIT {
                     Fit::Runtime => None,
                     _ => Some(|values, out| {
-                        encode_run::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED>(
+                        encode_run::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, SCALE_OWNED>(
                             BlockLayout::$name,
                             FIT,
                             values,
@@ -729,7 +769,8 @@ pub(crate) fn block_for_format(format: &NumericFormat) -> Option<FormatCodec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::float_layout::FloatLayout;
+    use crate::block_layout::{Coded, Digit};
+    use crate::float_layout::{FloatLayout, NanPolicy, Specials};
 
     const RESOLVING_NAMED_FORMATS: usize = 13;
 
@@ -926,6 +967,101 @@ mod tests {
         }
 
         assert_eq!(resolving, RESOLVING_NAMED_FORMATS);
+    }
+
+    const ONE_RUN_DIGIT: Digit = Digit { radix: 1, stride_bits: 0 };
+
+    /// q5_0-like, 64 elements: a 4-bit nibble-split low plane and a 1-bit high plane that is two
+    /// 32-bit runs, so the high plane is two register words and not the one a fused fit can fill.
+    const TWO_WORD_HIGH_PLANE: BlockLayout = BlockLayout {
+        elements: 64,
+        block_bytes: 42,
+        element: Coded {
+            low: Plane {
+                bits: 4,
+                base_bits: 80,
+                digits: [Digit { radix: 32, stride_bits: 8 }, Digit { radix: 2, stride_bits: 4 }, ONE_RUN_DIGIT, ONE_RUN_DIGIT],
+            },
+            high: Some(Plane {
+                bits: 1,
+                base_bits: 16,
+                digits: [Digit { radix: 32, stride_bits: 1 }, Digit { radix: 2, stride_bits: 32 }, ONE_RUN_DIGIT, ONE_RUN_DIGIT],
+            }),
+            ..BlockLayout::Q5_0.element
+        },
+        ..BlockLayout::Q5_0
+    };
+
+    /// q4_0 with a 12-bit scale, so the first code shares the scale's last byte.
+    const SCALE_SHARES_A_BYTE: BlockLayout = BlockLayout {
+        element: Coded {
+            low: Plane {
+                bits: 4,
+                base_bits: 12,
+                digits: [Digit { radix: 32, stride_bits: 4 }, ONE_RUN_DIGIT, ONE_RUN_DIGIT, ONE_RUN_DIGIT],
+            },
+            ..BlockLayout::Q4_0.element
+        },
+        scale: Field {
+            layout: FloatLayout {
+                exponent_bits: 5,
+                mantissa_bits: 6,
+                specials: Specials::InfinityOnOverflow,
+                bias_override: None,
+                sign: SignEncoding::Magnitude,
+                nan: NanPolicy::IEEE,
+            },
+            byte_offset: 0,
+        },
+        ..BlockLayout::Q4_0
+    };
+
+    fn kv_like_block_of_64(seed: u32) -> [f32; 64] {
+        let mut block = [0.0f32; 64];
+        block[..32].copy_from_slice(&kv_like_block(seed));
+        block[32..].copy_from_slice(&kv_like_block(seed + 1));
+        block
+    }
+
+    #[test]
+    fn a_high_plane_of_two_words_is_not_fused_and_encodes_as_the_generic_path_does() {
+        const FIT: Fit = fit_of(&TWO_WORD_HIGH_PLANE);
+        const LOW_BY_WORD: bool = is_word_packed(&TWO_WORD_HIGH_PLANE.element.low);
+        const HIGH_BY_WORD: bool = is_high_word_packed(&TWO_WORD_HIGH_PLANE);
+        const HIGH_FUSED: bool = is_high_single_word(&TWO_WORD_HIGH_PLANE);
+        let input = kv_like_block_of_64(11);
+        let mut chosen = [0u8; 42];
+        let mut generic = [0u8; 42];
+        let mut forced = [0u8; 42];
+
+        encode_chunk::<64, 42, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, true>(&TWO_WORD_HIGH_PLANE, FIT, &input, &mut chosen);
+        encode_chunk::<64, 42, false, false, false, true>(&TWO_WORD_HIGH_PLANE, FIT, &input, &mut generic);
+        encode_chunk::<64, 42, LOW_BY_WORD, HIGH_BY_WORD, true, true>(&TWO_WORD_HIGH_PLANE, FIT, &input, &mut forced);
+
+        assert_ne!(FIT, Fit::Runtime, "the layout must reach the encode instantiation");
+        const { assert!(!HIGH_FUSED && HIGH_BY_WORD, "two words of high bits are word-packed but not fused") };
+        assert!(is_high_single_word(&BlockLayout::Q5_0), "q5_0's 32 high bits are the one word");
+        assert_eq!(chosen, generic, "the instantiation the layout selects matches the per-element path");
+        assert_ne!(forced, generic, "forcing the fuse on this layout is the bug the clause prevents");
+    }
+
+    #[test]
+    fn a_scale_that_is_not_whole_bytes_keeps_the_code_bits_in_its_last_byte() {
+        const SCALE_OWNED: bool = scale_owns_its_bytes(&SCALE_SHARES_A_BYTE);
+        let layout = SCALE_SHARES_A_BYTE;
+        let input = kv_like_block(5);
+        let mut codes = [0u8; 32];
+        let mut block = [0u8; 18];
+
+        let (scale, _) = fit_codes::<32, false>(&layout, fit_of(&layout), &input, &mut codes);
+        encode_chunk::<32, 18, false, false, false, SCALE_OWNED>(&layout, fit_of(&layout), &input, &mut block);
+
+        const { assert!(!SCALE_OWNED, "the first code lies in the scale's last byte") };
+        assert!(scale_owns_its_bytes(&BlockLayout::Q4_0) && scale_owns_its_bytes(&BlockLayout::Q5_0));
+        assert_ne!(fit_of(&layout), Fit::Runtime, "the layout must reach the encode instantiation");
+        assert_ne!(codes[0], 0, "the first code must be nonzero to be lost");
+        assert_eq!(read_bits(&block, 0, 12), encode(scale, layout.scale.layout) & 0xfff, "the 12 scale bits");
+        assert_eq!(gather_codes::<32, 18>(&layout, &block), codes, "every code, the first one beside the scale");
     }
 
     #[test]
