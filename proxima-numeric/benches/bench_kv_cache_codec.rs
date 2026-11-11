@@ -31,7 +31,7 @@ use criterion::{BenchmarkId, Criterion, Throughput};
 use half::{bf16, f16};
 use proxima_gguf::quant::QuantError;
 use proxima_gguf::quant::{pq2_0, q1_0, q2_0, q4_0, q4_1, q5_0, q5_1, q8_0, q8_1, q8_k};
-use proxima_numeric::{BlockCodec, BlockLayout, NumericFormat, ScalarCodec};
+use proxima_numeric::{BlockLayout, FormatCodec, NumericFormat};
 use proxima_numeric::decode::decode_blocks;
 use proxima_numeric::encode::encode_blocks;
 
@@ -164,12 +164,12 @@ fn old_decode(scalar: Scalar, source_bytes: &[u8], element_count: usize) -> Vec<
 /// A scalar format resolved once, as `DeviceKvLayer` holds its cache format and codec.
 struct NewPath {
     format: NumericFormat,
-    codec: ScalarCodec,
+    codec: FormatCodec,
 }
 
 impl NewPath {
     fn new(format: NumericFormat) -> Self {
-        let codec = ScalarCodec::for_format(&format).expect("a scalar format resolves");
+        let codec = FormatCodec::for_format(&format).expect("a scalar format resolves");
         Self { format, codec }
     }
 }
@@ -183,22 +183,22 @@ impl core::ops::Deref for NewPath {
 }
 
 /// `#[inline(never)]`, like `old_encode`: both arms cross one call boundary, as production does across
-/// crates. The destination is sized `values.len() * element_bytes`, the way omega's
-/// `write_placed_buffer` sizes it from its `ScalarCodec`.
+/// crates. The destination is sized by `packed_len`, the way omega's `write_placed_buffer` sizes it
+/// from its `FormatCodec`.
 #[inline(never)]
 fn new_encode(values: &[f32], buffer: &mut [u8], path: &NewPath) {
     let codec = &path.codec;
     // SAFETY: every caller here sizes `buffer` to the packed range, the contract `write_placed_buffer` states.
-    let destination = unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), values.len() * codec.element_bytes()) };
+    let destination = unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), codec.packed_len(values.len()).unwrap()) };
     codec.encode(values, destination).unwrap();
 }
 
-/// See [`new_encode`]; the source is sized `element_count * element_bytes`, as `read_placed_buffer` does.
+/// See [`new_encode`]; the source is sized by `packed_len`, as `read_placed_buffer` does.
 #[inline(never)]
 fn new_decode(buffer: &[u8], element_count: usize, path: &NewPath) -> Vec<f32> {
     let codec = &path.codec;
     // SAFETY: every caller packs `element_count` elements into `buffer`, the contract `read_placed_buffer` states.
-    let source = unsafe { core::slice::from_raw_parts(buffer.as_ptr(), element_count * codec.element_bytes()) };
+    let source = unsafe { core::slice::from_raw_parts(buffer.as_ptr(), codec.packed_len(element_count).unwrap()) };
     let mut decoded: Vec<f32> = Vec::with_capacity(element_count);
     codec.decode(source, &mut decoded.spare_capacity_mut()[..element_count]).unwrap();
     // SAFETY: `decode` initialised exactly `element_count` slots, the whole `spare_capacity_mut` prefix.
@@ -546,25 +546,7 @@ fn bench_decode(criterion: &mut Criterion, values: &[f32]) {
     group.finish();
 }
 
-/// Prints each block codec function's offset from `main`, so `nm` on the bench binary names the
-/// instantiation whose loop `objdump` should read; `KV_BENCH_ASM=1`. The scalar instantiations are
-/// found by symbol (`ScalarCodec::resolve` closures), as a scalar codec exposes no raw pointer.
-fn print_codec_offsets() {
-    let base = main as *const () as usize;
-    for case in block_cases() {
-        let codec = case.codec();
-        let offset = |address: usize| address.wrapping_sub(base) as isize;
-        println!(
-            "blockcodec {} new_encode_offset={:?} new_decode_offset={} inc_encode_offset={:?}",
-            case.name,
-            codec.encode_fn().map(|run| offset(run as usize)),
-            offset(codec.decode_fn() as usize),
-            case.gguf_encode.map(|run| offset(run as usize)),
-        );
-    }
-}
-
-// ---- block formats: BlockCodec (NEW) against proxima-gguf's per-format routines (incumbent) ------
+// ---- block formats: FormatCodec (NEW) against proxima-gguf's per-format routines (incumbent) ------
 
 type IncumbentEncode = fn(&[f32], &mut [u8]) -> Result<(), QuantError>;
 type IncumbentDecode = fn(&[u8], &mut [f32]) -> Result<(), QuantError>;
@@ -606,8 +588,8 @@ fn block_cases() -> Vec<BlockCase> {
 }
 
 impl BlockCase {
-    fn codec(&self) -> BlockCodec {
-        BlockCodec::resolve(&self.layout).expect("a simple-family layout resolves")
+    fn codec(&self) -> FormatCodec {
+        FormatCodec::block(&self.layout).expect("a simple-family layout resolves")
     }
 
     fn elements(&self) -> usize {
@@ -665,25 +647,25 @@ fn incumbent_block_decode_copy(case: &BlockCase, data: &[u8], out: &mut [f32]) {
 
 /// NEW across the same call boundary as the incumbent; the codec was resolved once, before timing.
 #[inline(never)]
-fn new_block_encode(codec: &BlockCodec, values: &[f32], out: &mut [u8]) {
+fn new_block_encode(codec: &FormatCodec, values: &[f32], out: &mut [u8]) {
     codec.encode(values, out).unwrap();
 }
 
 #[inline(never)]
-fn new_block_decode(codec: &BlockCodec, data: &[u8], out: &mut [f32]) {
+fn new_block_decode(codec: &FormatCodec, data: &[u8], out: &mut [f32]) {
     // SAFETY: `MaybeUninit<f32>` has the layout of `f32` and every slot of `out` is initialised already.
     let slots = unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<MaybeUninit<f32>>(), out.len()) };
     codec.decode(data, slots).unwrap();
 }
 
-fn degenerate_block_encode(codec: &BlockCodec, values: &[f32], out: &mut [u8]) {
+fn degenerate_block_encode(codec: &FormatCodec, values: &[f32], out: &mut [u8]) {
     new_block_encode(codec, values, out);
     for byte in out.iter_mut() {
         *byte = black_box(*byte).wrapping_add(1);
     }
 }
 
-fn degenerate_block_decode(codec: &BlockCodec, data: &[u8], out: &mut [f32]) {
+fn degenerate_block_decode(codec: &FormatCodec, data: &[u8], out: &mut [f32]) {
     new_block_decode(codec, data, out);
     for value in out.iter_mut() {
         *value = black_box(*value);
@@ -1476,10 +1458,6 @@ fn exit_with(failures: &[String]) {
 }
 
 fn main() {
-    if std::env::var_os("KV_BENCH_ASM").is_some() {
-        print_codec_offsets();
-        return;
-    }
     let values = kv_like_values(*SIZES.last().unwrap());
     let parity_failures = parity_checks(&values);
     if std::env::var_os("KV_BENCH_INTERLEAVED").is_some() {

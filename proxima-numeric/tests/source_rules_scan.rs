@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 const FOREIGN_SOURCE_DIRS: [&str; 3] = ["omega/src", "proxima-model-interop/src", "proxima-gguf/src"];
 
 const CARD_FILES: [&str; 9] = [
-    "proxima-numeric/src/scalar_codec.rs",
+    "proxima-numeric/src/format_codec.rs",
     "proxima-numeric/src/float_layout_codec.rs",
     "proxima-numeric/src/float_layout.rs",
     "proxima-numeric/src/format.rs",

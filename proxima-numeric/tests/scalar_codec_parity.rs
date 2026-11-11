@@ -1,4 +1,4 @@
-//! `ScalarCodec` against independent oracles, under nextest.
+//! `FormatCodec` (scalar layouts) against independent oracles, under nextest.
 //!
 //! The oracles are `half` (f16, bf16), a transcription of onnxruntime's `Float8E5M2::ToFloat`
 //! (bf8 decode) and a copy of the encode in `proxima-tensor/src/bfloat8.rs` (bf8 encode, the code this
@@ -17,7 +17,7 @@ use half::{bf16, f16};
 
 use proxima_numeric::float_layout::NAMED_LAYOUTS;
 use proxima_numeric::float_layout_codec::{decode as decode_one, encode as encode_one};
-use proxima_numeric::{FloatLayout, NumericFormat, ScalarCodec, decode_blocks};
+use proxima_numeric::{FloatLayout, FormatCodec, NumericFormat, decode_blocks};
 
 const RANDOM_PATTERNS: usize = 1 << 20;
 const KV_LIKE_VALUES: usize = 1 << 18;
@@ -207,8 +207,8 @@ fn is_signaling_nan(value: f32) -> bool {
     value.is_nan() && value.to_bits() & F32_QUIET_BIT == 0
 }
 
-fn codec_of(scalar: Scalar) -> ScalarCodec {
-    ScalarCodec::resolve(&scalar.layout()).expect("a named scalar layout resolves")
+fn codec_of(scalar: Scalar) -> FormatCodec {
+    FormatCodec::scalar(&scalar.layout()).expect("a named scalar layout resolves")
 }
 
 fn encode_all(scalar: Scalar, values: &[f32]) -> Vec<u8> {
@@ -436,14 +436,14 @@ fn layout_bytes(layout: &FloatLayout) -> usize {
 }
 
 fn slice_encode(layout: &FloatLayout, values: &[f32]) -> Vec<u8> {
-    let codec = ScalarCodec::resolve(layout).expect("a supported layout resolves");
+    let codec = FormatCodec::scalar(layout).expect("a supported layout resolves");
     let mut out = vec![0u8; values.len() * layout_bytes(layout)];
     codec.encode(values, &mut out).expect("output sized to the element count");
     out
 }
 
 fn slice_decode(layout: &FloatLayout, packed: &[u8]) -> Vec<u32> {
-    let codec = ScalarCodec::resolve(layout).expect("a supported layout resolves");
+    let codec = FormatCodec::scalar(layout).expect("a supported layout resolves");
     let mut slots = vec![MaybeUninit::<f32>::uninit(); packed.len() / layout_bytes(layout)];
     codec.decode(packed, &mut slots).expect("slots sized to the element count");
     // SAFETY: decode initialises every slot when it returns Ok.
@@ -480,7 +480,7 @@ fn a_negative_infinity_and_a_negative_nan_into_a_sign_less_layout_store_their_ma
 fn every_named_layout_resolves_except_the_five_wider_than_32_bits() {
     let unresolved: Vec<&str> = NAMED_LAYOUTS
         .iter()
-        .filter(|(layout, _)| ScalarCodec::resolve(layout).is_none())
+        .filter(|(layout, _)| FormatCodec::scalar(layout).is_none())
         .map(|(_, name)| *name)
         .collect();
 

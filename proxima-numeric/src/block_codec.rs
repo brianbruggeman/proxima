@@ -1,8 +1,8 @@
 //! A simple block format resolved once into the two slice conversions that carry it.
 //!
-//! Teaching pointer: [`crate::scalar_codec::ScalarCodec`] does this for one stored number per
-//! element; this does it for a block of them. `encode_run` and `decode_run` are the two loops,
-//! written once over a [`BlockLayout`]. [`BlockCodec::resolve`] instantiates them once per row of
+//! Teaching pointer: [`crate::float_layout_codec`] does this for one stored number per element;
+//! this does it for a block of them. `encode_run` and `decode_run` are the two loops, written once
+//! over a [`BlockLayout`]. [`FormatCodec::block`] instantiates them once per row of
 //! the block table ([`crate::block_layout::named_block_table`]) with the layout as a literal
 //! constant, so the element count, byte count, every plane address, the scale and min offsets, the
 //! multiplier and the bias are folded from the layout's fields. A layout that is not in the table
@@ -20,10 +20,10 @@
 use core::mem::MaybeUninit;
 
 use crate::block_layout::{BlockLayout, Field, MAX_DIGITS, Plane, named_block_table};
-use crate::error::NumericError;
 use crate::float_layout::SignEncoding;
 use crate::float_layout_codec::{decode, encode};
 use crate::format::{LevelTable, NumericFormat};
+use crate::format_codec::FormatCodec;
 
 /// An encode instantiation: whole blocks of values into whole blocks of bytes.
 pub type EncodeFn = fn(&[f32], &mut [u8]);
@@ -441,18 +441,6 @@ fn encode_run<const ELEMENTS: usize, const BYTES: usize>(
     }
 }
 
-/// The encode and decode of one named simple block layout, as plain function pointers to
-/// instantiations with the layout as a literal. No allocation, no trait object.
-///
-/// Example: resolving [`BlockLayout::Q4_0`] and storing 64 values takes 36 bytes of output.
-#[derive(Clone, Copy)]
-pub struct BlockCodec {
-    encode: Option<EncodeFn>,
-    decode: DecodeFn,
-    elements: usize,
-    block_bytes: usize,
-}
-
 macro_rules! resolve_named_block {
     ($layout:expr, [ $(($name:ident, $text:literal, $encodes:literal)),* $(,)? ]) => {{
         $(
@@ -462,138 +450,44 @@ macro_rules! resolve_named_block {
                 const _: () = assert!(code_bits(&BlockLayout::$name) <= 8);
                 const ELEMENTS: usize = BlockLayout::$name.elements as usize;
                 const BYTES: usize = BlockLayout::$name.block_bytes as usize;
-                return Some(BlockCodec {
-                    encode: match (fit_of(&BlockLayout::$name), $encodes) {
-                        (Fit::Runtime, _) | (_, false) => None,
-                        _ => Some(|values, out| {
-                            encode_run::<ELEMENTS, BYTES>(
-                                BlockLayout::$name,
-                                fit_of(&BlockLayout::$name),
-                                values,
-                                out,
-                            );
-                        }),
-                    },
-                    decode: |data, out| decode_run::<ELEMENTS, BYTES>(BlockLayout::$name, data, out),
-                    elements: ELEMENTS,
-                    block_bytes: BYTES,
-                });
+                let encode: Option<EncodeFn> = match (fit_of(&BlockLayout::$name), $encodes) {
+                    (Fit::Runtime, _) | (_, false) => None,
+                    _ => Some(|values, out| {
+                        encode_run::<ELEMENTS, BYTES>(
+                            BlockLayout::$name,
+                            fit_of(&BlockLayout::$name),
+                            values,
+                            out,
+                        );
+                    }),
+                };
+                let decode: DecodeFn =
+                    |data, out| decode_run::<ELEMENTS, BYTES>(BlockLayout::$name, data, out);
+                return Some(FormatCodec::table(encode, decode, ELEMENTS, BYTES));
             }
         )*
         None
     }};
 }
 
-impl BlockCodec {
-    /// The instantiation for a layout in the block table, `None` for any other.
-    #[must_use]
-    pub fn resolve(layout: &BlockLayout) -> Option<Self> {
-        named_block_table!(resolve_named_block!(layout,))
-    }
+/// The table instantiation for a layout in the block table, `None` for any other; the name in its
+/// errors is set by [`FormatCodec::block`].
+pub(crate) fn resolve_block(layout: &BlockLayout) -> Option<FormatCodec> {
+    named_block_table!(resolve_named_block!(layout,))
+}
 
-    /// The instantiation for a [`NumericFormat`] whose packing is a table layout: a block format,
-    /// or a linear-ladder level format over one. `None` for scalars, codebooks and explicit tables.
-    #[must_use]
-    pub fn for_format(format: &NumericFormat) -> Option<Self> {
-        match format {
-            NumericFormat::Block(layout) => Self::resolve(layout),
-            NumericFormat::Levels(levels) => match (levels.packing(), levels.levels) {
-                (Some(layout), LevelTable::Linear { .. }) if levels.levels == layout.levels() => {
-                    Self::resolve(&layout)
-                }
-                _ => None,
-            },
-            NumericFormat::Scalar(_) => None,
-        }
-    }
-
-    /// Elements per block.
-    #[must_use]
-    pub const fn elements(&self) -> usize {
-        self.elements
-    }
-
-    /// Stored bytes per block.
-    #[must_use]
-    pub const fn block_bytes(&self) -> usize {
-        self.block_bytes
-    }
-
-    /// Whether this layout has an encode instantiation.
-    #[must_use]
-    pub const fn can_encode(&self) -> bool {
-        self.encode.is_some()
-    }
-
-    /// Encodes whole blocks of `values` into `out`.
-    ///
-    /// # Errors
-    /// [`NumericError::UnsupportedEncode`] for a layout with no encode instantiation,
-    /// [`NumericError::InputNotElementMultiple`] when `values` is not whole blocks,
-    /// [`NumericError::OutputSizeMismatch`] when `out` is not exactly the packed byte count.
-    #[must_use = "an error leaves the output unwritten"]
-    pub fn encode(&self, values: &[f32], out: &mut [u8]) -> Result<(), NumericError> {
-        let Some(run) = self.encode else {
-            return Err(NumericError::UnsupportedEncode {
-                format: "block",
-                reason: "no compile-time encode for this layout's fit",
-            });
-        };
-        if !values.len().is_multiple_of(self.elements) {
-            return Err(NumericError::InputNotElementMultiple {
-                format: "block",
-                found: values.len(),
-                elements: self.elements,
-            });
-        }
-        let expected = values.len() / self.elements * self.block_bytes;
-        if out.len() != expected {
-            return Err(NumericError::OutputSizeMismatch {
-                found: out.len(),
-                expected,
-            });
-        }
-        run(values, out);
-        Ok(())
-    }
-
-    /// Decodes whole blocks of `data` into the caller-owned, possibly uninitialised `out`,
-    /// initialising every slot.
-    ///
-    /// # Errors
-    /// [`NumericError::InputNotBlockMultiple`] when `data` is not whole blocks,
-    /// [`NumericError::OutputSizeMismatch`] when `out` is not one slot per element; nothing is
-    /// written in either case.
-    #[must_use = "an error leaves the output uninitialised"]
-    pub fn decode(&self, data: &[u8], out: &mut [MaybeUninit<f32>]) -> Result<(), NumericError> {
-        if !data.len().is_multiple_of(self.block_bytes) {
-            return Err(NumericError::InputNotBlockMultiple {
-                format: "block",
-                found: data.len(),
-                block_bytes: self.block_bytes,
-            });
-        }
-        let expected = data.len() / self.block_bytes * self.elements;
-        if out.len() != expected {
-            return Err(NumericError::OutputSizeMismatch {
-                found: out.len(),
-                expected,
-            });
-        }
-        (self.decode)(data, out);
-        Ok(())
-    }
-
-    /// The raw encode instantiation, if any; the caller guarantees whole blocks and exact sizes.
-    #[must_use]
-    pub const fn encode_fn(&self) -> Option<EncodeFn> {
-        self.encode
-    }
-
-    /// The raw decode instantiation; the caller guarantees whole blocks and exact sizes.
-    #[must_use]
-    pub const fn decode_fn(&self) -> DecodeFn {
-        self.decode
+/// The table instantiation for a [`NumericFormat`] whose packing is a table layout: a block format,
+/// or a linear-ladder level format over one. `None` for scalars, codebooks and explicit tables.
+pub(crate) fn block_for_format(format: &NumericFormat) -> Option<FormatCodec> {
+    match format {
+        NumericFormat::Block(layout) => resolve_block(layout),
+        NumericFormat::Levels(levels) => match (levels.packing(), levels.levels) {
+            (Some(layout), LevelTable::Linear { .. }) if levels.levels == layout.levels() => {
+                resolve_block(&layout)
+            }
+            _ => None,
+        },
+        NumericFormat::Scalar(_) => None,
     }
 }
 
@@ -648,7 +542,7 @@ mod tests {
     fn every_named_format_resolves_exactly_when_the_rule_says_it_does() {
         let mut resolving = 0usize;
         for (format, name) in NumericFormat::ALL.iter().zip(NumericFormat::NAMES) {
-            let resolves = BlockCodec::for_format(format).is_some();
+            let resolves = block_for_format(format).is_some();
 
             assert_eq!(resolves, format_should_resolve(format), "{name}");
             resolving += usize::from(resolves);
@@ -663,7 +557,7 @@ mod tests {
         assert!(!BlockLayout::NVFP4.is_simple() && BlockLayout::NVFP4.scale_runs.is_some());
         assert!(!BlockLayout::TQ1_0.is_simple() && BlockLayout::TQ1_0.element.packed_radix > 1);
         for layout in [BlockLayout::Q4_K, BlockLayout::NVFP4, BlockLayout::TQ1_0] {
-            assert!(BlockCodec::resolve(&layout).is_none());
+            assert!(FormatCodec::block(&layout).is_none());
         }
     }
 }
