@@ -1,5 +1,7 @@
 //! Affine scalar `Q4_1` decoder (32 values / 20 bytes).
 
+use proxima_numeric::fused;
+
 use crate::quant::QuantError;
 use crate::types::GgmlType;
 
@@ -36,8 +38,8 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
         let min = half::f16::from_le_bytes(m).to_f32();
         for i in 0..16 {
             let byte = block[4 + i];
-            out[i] = f32::from(byte & 0x0f) * scale + min;
-            out[16 + i] = f32::from(byte >> 4) * scale + min;
+            out[i] = fused::mul_add(f32::from(byte & 0x0f), scale, min);
+            out[16 + i] = fused::mul_add(f32::from(byte >> 4), scale, min);
         }
     }
     Ok(())

@@ -34,6 +34,8 @@
 //! shift arithmetic, not the simplified textbook description: `((qh >>
 //! (j+12)) & 0x10)` isolates bit `j+16`, not a re-based bit `j+12`).
 
+use proxima_numeric::fused;
+
 use crate::quant::QuantError;
 use crate::types::GgmlType;
 
@@ -120,8 +122,8 @@ pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
         let high_bit_high = (qh >> (index + 12)) & 0x10;
         let low = u32::from(byte & 0x0F) | high_bit_low;
         let high = u32::from(byte >> 4) | high_bit_high;
-        output[index] = low as f32 * delta + min;
-        output[HALF_BLOCK + index] = high as f32 * delta + min;
+        output[index] = fused::mul_add(low as f32, delta, min);
+        output[HALF_BLOCK + index] = fused::mul_add(high as f32, delta, min);
     }
 }
 

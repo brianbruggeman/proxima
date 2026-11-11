@@ -25,6 +25,8 @@
 //! bytes — `Q2_K` can afford the simpler packing because its 16
 //! sub-blocks each need only a 4-bit code, not 6.
 
+use proxima_numeric::fused;
+
 use crate::quant::QuantError;
 use crate::types::GgmlType;
 
@@ -138,7 +140,8 @@ pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
 
     // Per sub-block decode plan (dl, ml, shift, its own 16-byte window into
     // `qs`), built once in output order so the write pass below is a plain
-    // zipped iteration with no fallible indexing.
+    // zipped iteration with no fallible indexing. `ml` is the min's product
+    // in the form `fused::scaled_sub` consumes.
     let mut sub_block = 0usize;
     let mut plan: [(f32, f32, u32, &[u8]); SUB_BLOCKS] = [(0.0, 0.0, 0, &[]); SUB_BLOCKS];
     for chunk in 0..(QK_K / 128) {
@@ -149,7 +152,7 @@ pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
             let (scale_lo, min_lo) = unpack_scale_min(sub_block, &scales);
             plan[sub_block] = (
                 d * f32::from(scale_lo),
-                dmin * f32::from(min_lo),
+                fused::min_term(dmin, f32::from(min_lo)),
                 shift,
                 low_half,
             );
@@ -158,7 +161,7 @@ pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
             let (scale_hi, min_hi) = unpack_scale_min(sub_block, &scales);
             plan[sub_block] = (
                 d * f32::from(scale_hi),
-                dmin * f32::from(min_hi),
+                fused::min_term(dmin, f32::from(min_hi)),
                 shift,
                 high_half,
             );
@@ -176,7 +179,7 @@ pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
     {
         for (out_value, &packed) in out_chunk.iter_mut().zip(window) {
             let level = (packed >> shift) & 0x03;
-            *out_value = dl * f32::from(level) - ml;
+            *out_value = fused::scaled_sub(dl, f32::from(level), ml);
         }
     }
 }
