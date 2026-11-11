@@ -24,6 +24,7 @@ use crate::float_layout::SignEncoding;
 use crate::float_layout_codec::{decode, encode};
 use crate::format::{LevelTable, NumericFormat};
 use crate::format_codec::FormatCodec;
+use crate::fused;
 
 /// An encode instantiation: whole blocks of values into whole blocks of bytes.
 pub type EncodeFn = fn(&[f32], &mut [u8]);
@@ -463,27 +464,27 @@ fn decode_chunk<
 ) {
     let multiplier = f32::from(layout.multiplier);
     let bias = f32::from(layout.element.bias);
+    let has_min = layout.min.is_some();
     let min_term = match layout.min {
         Some(field) => f32::from(layout.min_multiplier) * read_field(block, field),
         None => 0.0,
     };
-    // a nan min must reach every slot with its own payload, and ieee 754 does not say which payload
-    // survives an add of two nans: a zero scale makes every product a finite zero (an integer code
-    // is finite), so the add has one nan operand, which isas that propagate an operand's nan payload (aarch64, x86-64) return; a canonicalising isa returns its canonical nan, which the parity tests accept by nan-ness
-    let stored_scale = read_field(block, layout.scale);
-    let scale = if layout.min.is_some() && min_term.is_nan() { 0.0 } else { stored_scale };
+    let scale = read_field(block, layout.scale);
     let value_of = |raw: u32| {
         let factor = if is_integer_code(layout) {
             integer_factor(layout, raw) as f32
         } else {
             decode(raw, layout.element.code) * multiplier - bias
         };
-        let value = if is_sign_code(layout) {
-            if factor > 0.0 { scale } else { -scale }
+        if is_sign_code(layout) {
+            let value = if factor > 0.0 { scale } else { -scale };
+            return if has_min { value + min_term } else { value };
+        }
+        if has_min {
+            fused::mul_add(factor, scale, min_term)
         } else {
             factor * scale
-        };
-        if layout.min.is_some() { value + min_term } else { value }
+        }
     };
     if BY_WORD {
         unpack_runs(&layout.element.low, block, out, value_of);

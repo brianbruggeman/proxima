@@ -12,6 +12,8 @@
 //! [`crate::types::GgmlType::Q4_K`]'s already-landed
 //! [`crate::types::GgmlType::wire_shape`] rather than re-typed by hand.
 
+use proxima_numeric::fused;
+
 use crate::quant::QuantError;
 use crate::types::GgmlType;
 
@@ -152,15 +154,15 @@ pub fn dequantize_block(block: &[u8], output: &mut [f32]) {
         let (scale_lo, min_lo) = get_scale_min_k4(sub_block, &scales);
         let (scale_hi, min_hi) = get_scale_min_k4(sub_block + 1, &scales);
         let scale_lo = d * f32::from(scale_lo);
-        let min_lo = dmin * f32::from(min_lo);
+        let min_lo = fused::min_term(dmin, f32::from(min_lo));
         let scale_hi = d * f32::from(scale_hi);
-        let min_hi = dmin * f32::from(min_hi);
+        let min_hi = fused::min_term(dmin, f32::from(min_hi));
 
         for offset in 0..SUB_BLOCK_ELEMENTS {
             output[out_offset + offset] =
-                scale_lo * f32::from(qs[qs_offset + offset] & 0x0F) - min_lo;
+                fused::scaled_sub(scale_lo, f32::from(qs[qs_offset + offset] & 0x0F), min_lo);
             output[out_offset + SUB_BLOCK_ELEMENTS + offset] =
-                scale_hi * f32::from(qs[qs_offset + offset] >> 4) - min_hi;
+                fused::scaled_sub(scale_hi, f32::from(qs[qs_offset + offset] >> 4), min_hi);
         }
 
         qs_offset += SUB_BLOCK_ELEMENTS;

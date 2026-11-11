@@ -53,6 +53,7 @@ pub mod float_layout_codec;
 pub mod format;
 pub mod format_codec;
 pub mod format_id;
+pub mod fused;
 pub mod numeric;
 pub mod numerics;
 pub mod tables;
