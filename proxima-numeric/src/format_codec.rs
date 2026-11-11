@@ -231,7 +231,8 @@ impl FormatCodec {
                 encode_body(SOURCE_LAYOUT, values, window);
                 Ok(bytes)
             }
-            _ => self.encode_general(values, out),
+            Route::Layout(layout) => self.encode_layout(layout, values, out),
+            Route::Scalar { encode: None, .. } | Route::Block { encode: None, .. } => Err(self.unsupported_encode()),
         }
     }
 
@@ -249,25 +250,13 @@ impl FormatCodec {
     }
 
     #[inline(never)]
-    fn encode_general(&self, values: &[f32], out: &mut [u8]) -> Result<usize, NumericError> {
-        if !self.can_encode() {
-            return Err(self.unsupported_encode());
-        }
-        let Some(bytes) = self.packed_len(values.len()) else {
-            return Err(self.encode_fault(values.len(), out.len()));
-        };
+    fn encode_layout(&self, layout: &FloatLayout, values: &[f32], out: &mut [u8]) -> Result<usize, NumericError> {
+        // a layout is a scalar of at most four bytes, so the product cannot wrap
+        let bytes = values.len() * self.block_bytes;
         let Some(window) = out.get_mut(..bytes) else {
             return Err(self.encode_fault(values.len(), out.len()));
         };
-        match &self.route {
-            Route::Block { encode: Some(run), .. } => return self.encode_block(*run, values, out),
-            Route::Scalar { encode: Some(run), .. } => run(values, window),
-            Route::Layout(layout) => encode_body(*layout, values, window),
-            Route::Identity => encode_body(SOURCE_LAYOUT, values, window),
-            Route::Scalar { encode: None, .. } | Route::Block { encode: None, .. } => {
-                return Err(self.unsupported_encode());
-            }
-        }
+        encode_body(*layout, values, window);
         Ok(bytes)
     }
 
@@ -306,24 +295,18 @@ impl FormatCodec {
                 }
                 Ok(bytes)
             }
-            _ => self.decode_general(data, out),
+            Route::Layout(layout) => self.decode_layout_general(layout, data, out),
         }
     }
 
     #[inline(never)]
-    fn decode_general(&self, data: &[u8], out: &mut [MaybeUninit<f32>]) -> Result<usize, NumericError> {
-        let Some(bytes) = self.packed_len(out.len()) else {
-            return Err(self.decode_fault(data.len(), out.len()));
-        };
+    fn decode_layout_general(&self, layout: &FloatLayout, data: &[u8], out: &mut [MaybeUninit<f32>]) -> Result<usize, NumericError> {
+        // a layout is a scalar of at most four bytes, so the product cannot wrap
+        let bytes = out.len() * self.block_bytes;
         let Some(window) = data.get(..bytes) else {
             return Err(self.decode_fault(data.len(), out.len()));
         };
-        match &self.route {
-            Route::Block { decode, .. } => return self.decode_block(*decode, data, out),
-            Route::Scalar { decode, .. } => decode(window, out),
-            Route::Layout(layout) => Self::decode_layout(layout, window, out),
-            Route::Identity => Self::decode_identity(window, out),
-        }
+        Self::decode_layout(layout, window, out);
         Ok(bytes)
     }
 
