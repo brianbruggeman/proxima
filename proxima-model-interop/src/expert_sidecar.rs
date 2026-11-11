@@ -1853,23 +1853,14 @@ pub fn write_expert_sidecar<W: Write + Seek>(
 }
 
 fn packed_kind(ggml_type: GgmlType, tensor: &str) -> Result<Codec, InteropError> {
-    match ggml_type {
-        GgmlType::Q2_K => Ok(Codec::Q2K),
-        GgmlType::Q3_K => Ok(Codec::Q3K),
-        GgmlType::Q4_K => Ok(Codec::Q4K),
-        GgmlType::Q5_K => Ok(Codec::Q5K),
-        GgmlType::Q6_K => Ok(Codec::Q6K),
-        GgmlType::Q8_0 => Ok(Codec::Q8_0),
-        GgmlType::Q4_0 => Ok(Codec::Q4_0),
-        GgmlType::F16 => Ok(Codec::Float16),
-        GgmlType::Bf16 => Ok(Codec::BFloat16),
-        GgmlType::Q5_1 => Ok(Codec::Q5_1),
-        GgmlType::Q5_0 => Ok(Codec::Q5_0),
-        other => Err(InteropError::UnrepresentableGgmlType {
+    // the sidecar packs exactly the formats whose wire tag `codec_from_tag` accepts
+    ggml_type
+        .numeric_format()
+        .filter(|format| format.tag().is_some_and(|tag| codec_from_tag(tag).is_ok()))
+        .ok_or_else(|| InteropError::UnrepresentableGgmlType {
             tensor: tensor.to_owned(),
-            ggml_type: other,
-        }),
-    }
+            ggml_type,
+        })
 }
 
 /// The sidecar wire tag for `codec` -- delegates to [`Codec::tag`] (this
@@ -1948,6 +1939,45 @@ mod tests {
 
     use crate::mapped_residency::{EXPERT_SIDECAR_REGION, MappedResidency, WEIGHTS_REGION};
     use crate::memory_reclaim::ReclaimSettings;
+
+    /// `packed_kind`'s 11 arms at d54ec106, as data.
+    const PACKED_KIND_AT_D54EC106: [(GgmlType, Codec); 11] = [
+        (GgmlType::Q2_K, Codec::Q2K),
+        (GgmlType::Q3_K, Codec::Q3K),
+        (GgmlType::Q4_K, Codec::Q4K),
+        (GgmlType::Q5_K, Codec::Q5K),
+        (GgmlType::Q6_K, Codec::Q6K),
+        (GgmlType::Q8_0, Codec::Q8_0),
+        (GgmlType::Q4_0, Codec::Q4_0),
+        (GgmlType::F16, Codec::Float16),
+        (GgmlType::Bf16, Codec::BFloat16),
+        (GgmlType::Q5_1, Codec::Q5_1),
+        (GgmlType::Q5_0, Codec::Q5_0),
+    ];
+
+    #[test]
+    fn packed_kind_returns_for_every_ggml_type_what_the_hand_table_returned() {
+        let mut accepted = 0;
+        for &ggml_type in GgmlType::ALL {
+            let expected = PACKED_KIND_AT_D54EC106
+                .iter()
+                .find(|(listed, _)| *listed == ggml_type)
+                .map(|(_, codec)| *codec);
+            match (packed_kind(ggml_type, "blk.0.ffn_down_exps.weight"), expected) {
+                (Ok(codec), Some(want)) => {
+                    assert_eq!(codec, want, "{ggml_type:?}");
+                    accepted += 1;
+                }
+                (Err(InteropError::UnrepresentableGgmlType { tensor, ggml_type: got }), None) => {
+                    assert_eq!(tensor, "blk.0.ffn_down_exps.weight");
+                    assert_eq!(got, ggml_type);
+                }
+                (other, want) => panic!("{ggml_type:?}: got {other:?}, wanted {want:?}"),
+            }
+        }
+        assert_eq!(GgmlType::ALL.len(), 38);
+        assert_eq!(accepted, 11);
+    }
 
     #[test]
     fn file_backed_reads_do_not_touch_the_sidecar_mapping() {

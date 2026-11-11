@@ -231,6 +231,26 @@ fn packed_block_codec(ggml_type: GgmlType) -> Option<Codec> {
     ggml_type.numeric_format()
 }
 
+// the codecs the zero-copy contiguous gate/up and q/k/v operand is proven for; the format still
+// comes from `packed_block_codec`, only this reach is stated here
+#[cfg(feature = "std")]
+const FUSED_OPERAND_CODECS: [Codec; 9] = [
+    Codec::Q4K,
+    Codec::Q5K,
+    Codec::Q3K,
+    Codec::Q6K,
+    Codec::Q8_0,
+    Codec::Q1_0,
+    Codec::Q2_0,
+    Codec::Pq2_0,
+    Codec::Ptq1_0,
+];
+
+#[cfg(feature = "std")]
+fn fused_operand_codec(ggml_type: GgmlType) -> Option<Codec> {
+    packed_block_codec(ggml_type).filter(|codec| FUSED_OPERAND_CODECS.contains(codec))
+}
+
 /// Reinterprets `bytes` as `&[f32]` with no copy, or returns `None` if
 /// `bytes.as_ptr()` is not 4-byte aligned or `bytes.len()` is not a whole
 /// number of `f32`s. The alignment check reads the pointer's own address
@@ -1815,6 +1835,7 @@ pub(crate) fn quantize_to_kind(
     }
 }
 
+#[cfg(feature = "std")]
 fn write_f32_le(decoded: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
     if output.len() != decoded.len() * 4 {
         return Err(QuantError::OutputSizeMismatch {
@@ -1877,49 +1898,15 @@ pub(crate) fn bind_matmul_weight_paired<'file>(
 
     if up_range.start == gate_range.end {
         let bytes = &file_bytes[gate_range.start as usize..up_range.end as usize];
-        let block = match codec {
-            GgmlType::Q4_K => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q4K,
-                bytes,
-            },
-            GgmlType::Q5_K => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q5K,
-                bytes,
-            },
-            GgmlType::Q3_K => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q3K,
-                bytes,
-            },
-            GgmlType::Q6_K => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q6K,
-                bytes,
-            },
-            GgmlType::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q8_0,
-                bytes,
-            },
-            GgmlType::Q1_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q1_0,
-                bytes,
-            },
-            GgmlType::Q2_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q2_0,
-                bytes,
-            },
-            GgmlType::Pq2_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Pq2_0,
-                bytes,
-            },
-            GgmlType::Ptq1_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Ptq1_0,
-                bytes,
-            },
-            other => {
-                return Err(InteropError::UnrepresentableGgmlType {
-                    tensor: gate_name.into(),
-                    ggml_type: other,
-                });
-            }
+        let Some(packed_codec) = fused_operand_codec(codec) else {
+            return Err(InteropError::UnrepresentableGgmlType {
+                tensor: gate_name.into(),
+                ggml_type: codec,
+            });
+        };
+        let block = proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: packed_codec,
+            bytes,
         };
         state.packed.push((target_name, block));
     } else {
@@ -1988,49 +1975,15 @@ pub(crate) fn bind_matmul_weight_triple<'file>(
 
     if k_range.start == q_range.end && v_range.start == k_range.end {
         let bytes = &file_bytes[q_range.start as usize..v_range.end as usize];
-        let block = match codec {
-            GgmlType::Q4_K => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q4K,
-                bytes,
-            },
-            GgmlType::Q5_K => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q5K,
-                bytes,
-            },
-            GgmlType::Q3_K => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q3K,
-                bytes,
-            },
-            GgmlType::Q6_K => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q6K,
-                bytes,
-            },
-            GgmlType::Q8_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q8_0,
-                bytes,
-            },
-            GgmlType::Q1_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q1_0,
-                bytes,
-            },
-            GgmlType::Q2_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Q2_0,
-                bytes,
-            },
-            GgmlType::Pq2_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Pq2_0,
-                bytes,
-            },
-            GgmlType::Ptq1_0 => proxima_tensor::cpu::QuantizedBlock::Packed {
-                codec: Codec::Ptq1_0,
-                bytes,
-            },
-            other => {
-                return Err(InteropError::UnrepresentableGgmlType {
-                    tensor: q_name.into(),
-                    ggml_type: other,
-                });
-            }
+        let Some(packed_codec) = fused_operand_codec(codec) else {
+            return Err(InteropError::UnrepresentableGgmlType {
+                tensor: q_name.into(),
+                ggml_type: codec,
+            });
+        };
+        let block = proxima_tensor::cpu::QuantizedBlock::Packed {
+            codec: packed_codec,
+            bytes,
         };
         state.packed.push((target_name, block));
     } else {

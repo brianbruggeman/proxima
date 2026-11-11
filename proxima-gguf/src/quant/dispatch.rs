@@ -6,7 +6,7 @@
 //! missing arm is an explicit capability result, never an accidental byte
 //! reinterpretation.
 
-use proxima_numeric::block_layout::BlockLayout;
+use proxima_numeric::NumericFormat;
 
 use super::{
     QuantError, bf16, block_layout, f16, iq2_xs, iq3_s, iq3_xxs, iq4_nl, iq4_xs, q2_k, q3_k, q4_k,
@@ -16,35 +16,40 @@ use crate::types::GgmlType;
 
 /// Decode a complete GGML tensor payload into logical `f32` values.
 pub fn dequantize(kind: GgmlType, data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
-    match kind {
-        GgmlType::F16 => f16::dequantize(data, output),
-        GgmlType::Bf16 => bf16::dequantize(data, output),
-        GgmlType::Q2_K => q2_k::dequantize(data, output),
-        GgmlType::Q1_0 => block_layout::dequantize(&BlockLayout::Q1_0, data, output),
-        GgmlType::Q2_0 => block_layout::dequantize(&BlockLayout::Q2_0, data, output),
-        GgmlType::Pq2_0 => block_layout::dequantize(&BlockLayout::PQ2_0, data, output),
-        GgmlType::Ptq1_0 => block_layout::dequantize(&BlockLayout::PTQ1_0, data, output),
-        GgmlType::Tq10 => block_layout::dequantize(&BlockLayout::TQ1_0, data, output),
-        GgmlType::Tq20 => block_layout::dequantize(&BlockLayout::TQ2_0, data, output),
-        GgmlType::Q3_K => q3_k::dequantize(data, output),
-        GgmlType::Q4_0 => block_layout::dequantize(&BlockLayout::Q4_0, data, output),
-        GgmlType::Q4_1 => block_layout::dequantize(&BlockLayout::Q4_1, data, output),
-        GgmlType::Q4_K => q4_k::dequantize(data, output),
-        GgmlType::Q5_0 => block_layout::dequantize(&BlockLayout::Q5_0, data, output),
-        GgmlType::Q5_1 => block_layout::dequantize(&BlockLayout::Q5_1, data, output),
-        GgmlType::Q5_K => q5_k::dequantize(data, output),
-        GgmlType::Q6_K => q6_k::dequantize(data, output),
-        GgmlType::Q8_0 => block_layout::dequantize(&BlockLayout::Q8_0, data, output),
-        GgmlType::Q8_1 => block_layout::dequantize(&BlockLayout::Q8_1, data, output),
-        GgmlType::Q8_K => q8_k::dequantize(data, output),
-        GgmlType::Iq2Xs => iq2_xs::dequantize(data, output),
-        GgmlType::Iq3S => iq3_s::dequantize(data, output),
-        GgmlType::Iq3Xxs => iq3_xxs::dequantize(data, output),
-        GgmlType::Iq4Nl => iq4_nl::dequantize(data, output),
-        GgmlType::Iq4Xs => iq4_xs::dequantize(data, output),
-        other => Err(QuantError::UnsupportedCodec {
-            codec: other.name(),
-        }),
+    let unsupported = QuantError::UnsupportedCodec { codec: kind.name() };
+    let Some(format) = kind.numeric_format() else {
+        return Err(unsupported);
+    };
+    match format {
+        NumericFormat::Float16 => f16::dequantize(data, output),
+        NumericFormat::BFloat16 => bf16::dequantize(data, output),
+        NumericFormat::Q2K => q2_k::dequantize(data, output),
+        NumericFormat::Q3K => q3_k::dequantize(data, output),
+        NumericFormat::Q4K => q4_k::dequantize(data, output),
+        NumericFormat::Q5K => q5_k::dequantize(data, output),
+        NumericFormat::Q6K => q6_k::dequantize(data, output),
+        NumericFormat::Q8K => q8_k::dequantize(data, output),
+        NumericFormat::Iq2Xs => iq2_xs::dequantize(data, output),
+        NumericFormat::Iq3S => iq3_s::dequantize(data, output),
+        NumericFormat::Iq3Xxs => iq3_xxs::dequantize(data, output),
+        NumericFormat::Iq4Nl => iq4_nl::dequantize(data, output),
+        NumericFormat::Iq4Xs => iq4_xs::dequantize(data, output),
+        NumericFormat::Q1_0
+        | NumericFormat::Q2_0
+        | NumericFormat::Pq2_0
+        | NumericFormat::Ptq1_0
+        | NumericFormat::Tq10
+        | NumericFormat::Tq20
+        | NumericFormat::Q4_0
+        | NumericFormat::Q4_1
+        | NumericFormat::Q5_0
+        | NumericFormat::Q5_1
+        | NumericFormat::Q8_0
+        | NumericFormat::Q8_1 => match format.block_layout() {
+            Some(layout) => block_layout::dequantize(&layout, data, output),
+            None => Err(unsupported),
+        },
+        _ => Err(unsupported),
     }
 }
 
@@ -52,7 +57,92 @@ pub fn dequantize(kind: GgmlType, data: &[u8], output: &mut [f32]) -> Result<(),
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use proxima_numeric::block_layout::BlockLayout;
     use crate::quant::{q1_0, q2_0, q4_0, q4_1, q8_1};
+
+    /// `dequantize` at d54ec106: one arm per decodable `GgmlType`, anything else unsupported.
+    fn dequantize_before_the_format_keyed_dispatch(
+        kind: GgmlType,
+        data: &[u8],
+        output: &mut [f32],
+    ) -> Result<(), QuantError> {
+        match kind {
+            GgmlType::F16 => f16::dequantize(data, output),
+            GgmlType::Bf16 => bf16::dequantize(data, output),
+            GgmlType::Q2_K => q2_k::dequantize(data, output),
+            GgmlType::Q1_0 => block_layout::dequantize(&BlockLayout::Q1_0, data, output),
+            GgmlType::Q2_0 => block_layout::dequantize(&BlockLayout::Q2_0, data, output),
+            GgmlType::Pq2_0 => block_layout::dequantize(&BlockLayout::PQ2_0, data, output),
+            GgmlType::Ptq1_0 => block_layout::dequantize(&BlockLayout::PTQ1_0, data, output),
+            GgmlType::Tq10 => block_layout::dequantize(&BlockLayout::TQ1_0, data, output),
+            GgmlType::Tq20 => block_layout::dequantize(&BlockLayout::TQ2_0, data, output),
+            GgmlType::Q3_K => q3_k::dequantize(data, output),
+            GgmlType::Q4_0 => block_layout::dequantize(&BlockLayout::Q4_0, data, output),
+            GgmlType::Q4_1 => block_layout::dequantize(&BlockLayout::Q4_1, data, output),
+            GgmlType::Q4_K => q4_k::dequantize(data, output),
+            GgmlType::Q5_0 => block_layout::dequantize(&BlockLayout::Q5_0, data, output),
+            GgmlType::Q5_1 => block_layout::dequantize(&BlockLayout::Q5_1, data, output),
+            GgmlType::Q5_K => q5_k::dequantize(data, output),
+            GgmlType::Q6_K => q6_k::dequantize(data, output),
+            GgmlType::Q8_0 => block_layout::dequantize(&BlockLayout::Q8_0, data, output),
+            GgmlType::Q8_1 => block_layout::dequantize(&BlockLayout::Q8_1, data, output),
+            GgmlType::Q8_K => q8_k::dequantize(data, output),
+            GgmlType::Iq2Xs => iq2_xs::dequantize(data, output),
+            GgmlType::Iq3S => iq3_s::dequantize(data, output),
+            GgmlType::Iq3Xxs => iq3_xxs::dequantize(data, output),
+            GgmlType::Iq4Nl => iq4_nl::dequantize(data, output),
+            GgmlType::Iq4Xs => iq4_xs::dequantize(data, output),
+            other => Err(QuantError::UnsupportedCodec {
+                codec: other.name(),
+            }),
+        }
+    }
+
+    fn run_dequantize(
+        dequantizer: impl Fn(GgmlType, &[u8], &mut [f32]) -> Result<(), QuantError>,
+        kind: GgmlType,
+        data: &[u8],
+        elements: usize,
+    ) -> Result<Vec<u32>, QuantError> {
+        let mut output = vec![0.0_f32; elements];
+        dequantizer(kind, data, &mut output)?;
+        Ok(output.iter().map(|value| value.to_bits()).collect())
+    }
+
+    #[test]
+    fn dequantize_returns_for_every_ggml_type_what_the_per_type_table_returned() {
+        let mut compared = 0;
+        let mut decoded = 0;
+        for &kind in GgmlType::ALL {
+            let shape = kind.wire_shape();
+            let blocks = 2_usize;
+            let elements = shape.block_elements as usize * blocks;
+            let mut state = 0x9e37_79b9_u32 ^ kind.to_wire() as u32;
+            let payload: Vec<u8> = (0..shape.block_bytes as usize * blocks)
+                .map(|_| {
+                    state ^= state << 13;
+                    state ^= state >> 17;
+                    state ^= state << 5;
+                    (state >> 8) as u8
+                })
+                .collect();
+            let inputs: [(&[u8], usize); 3] = [
+                (&payload, elements),
+                (&payload[..payload.len() - 1], elements),
+                (&payload, elements.saturating_sub(1)),
+            ];
+            for (data, wanted) in inputs {
+                let old = run_dequantize(dequantize_before_the_format_keyed_dispatch, kind, data, wanted);
+                let new = run_dequantize(dequantize, kind, data, wanted);
+                assert_eq!(new, old, "{kind:?} with {} bytes into {wanted} values", data.len());
+                decoded += usize::from(old.is_ok());
+                compared += 1;
+            }
+        }
+        assert_eq!(GgmlType::ALL.len(), 38);
+        assert_eq!(compared, 38 * 3);
+        assert!(decoded >= 25, "the 25 decodable types each decode their full input; {decoded} did");
+    }
 
     #[test]
     fn dispatches_a_registered_decoder_without_format_specific_caller_logic() {
