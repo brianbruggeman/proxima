@@ -40,10 +40,10 @@
 //! between turns. There is no separate `tokenizer.ggml.eot_token_id` (or
 //! similar) key on this fixture; the GGUF writer already folded the
 //! turn-boundary marker into the one `eos_token_id` slot
-//! [`proxima_tokenizer::Vocab::eos_token_id`] reads. So checking a single
-//! id against [`Vocab::eos_token_id`] is this fixture's whole stopping
-//! condition -- a `bool` carries it exactly; an enum would be modeling a
-//! multi-token-family case this checkpoint does not have.
+//! [`proxima_tokenizer::Vocab::eos_token_id`] reads. The stop test is
+//! [`Vocab::is_eog`] (llama.cpp's end-of-generation set: the eos id plus
+//! its eot/eom ids and curated token texts, e.g. gemma4's `<turn|>`); either
+//! way the outcome is one yes/no -- a `bool` carries it exactly.
 //!
 //! The stop token itself is excluded from both the returned ids and the
 //! returned text (never pushed onto `generated_ids` before the loop

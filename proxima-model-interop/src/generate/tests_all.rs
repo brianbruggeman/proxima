@@ -2064,7 +2064,7 @@ pub(super) mod tests {
     /// `false`), this test's scripted eos-first source would run the full
     /// budget instead of stopping on step 1 -- confirming the two tests
     /// above are not passing by coincidence of never actually comparing
-    /// against `vocab.eos_token_id()`.
+    /// against the vocab's EOG set (`vocab.is_eog`).
     #[test]
     fn stops_on_the_very_first_token_when_it_is_eos() {
         let vocab = vocab_with_eos(32_000);

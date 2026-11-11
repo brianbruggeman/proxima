@@ -34,6 +34,8 @@ use alloc::vec::Vec;
 
 use proxima_gguf::{MetadataArray, MetadataValue, ParsedGguf};
 
+use crate::config::TokenizerConfig;
+use crate::eog::EogEvidence;
 use crate::error::TokenizerError;
 use crate::gguf_names::{MODEL_BYTE_LEVEL_BPE, MODEL_UNIGRAM};
 use crate::pretokenize::PreType;
@@ -48,6 +50,9 @@ const SCORES_KEY: &str = "tokenizer.ggml.scores";
 const TOKEN_TYPE_KEY: &str = "tokenizer.ggml.token_type";
 const BOS_KEY: &str = "tokenizer.ggml.bos_token_id";
 const EOS_KEY: &str = "tokenizer.ggml.eos_token_id";
+const CHAT_TEMPLATE_KEY: &str = "tokenizer.chat_template";
+const EOT_KEY: &str = "tokenizer.ggml.eot_token_id";
+const EOM_KEY: &str = "tokenizer.ggml.eom_token_id";
 const UNKNOWN_KEY: &str = "tokenizer.ggml.unknown_token_id";
 const ADD_BOS_KEY: &str = "tokenizer.ggml.add_bos_token";
 const ADD_EOS_KEY: &str = "tokenizer.ggml.add_eos_token";
@@ -74,6 +79,20 @@ const ADD_EOS_KEY: &str = "tokenizer.ggml.add_eos_token";
 /// [`Vocab::new_unigram`] can fail with otherwise (a malformed merge rule,
 /// a missing base byte token, a scores/tokens length mismatch).
 pub fn vocab_from_metadata(metadata: &ParsedGguf) -> Result<Vocab, TokenizerError> {
+    vocab_from_metadata_with(metadata, &TokenizerConfig::default())
+}
+
+/// [`vocab_from_metadata`] with an explicit [`TokenizerConfig`]: its
+/// `eog_add`/`eog_remove` token texts override the end-of-generation set
+/// inferred from the checkpoint ([`crate::eog`]).
+///
+/// # Errors
+///
+/// As [`vocab_from_metadata`].
+pub fn vocab_from_metadata_with(
+    metadata: &ParsedGguf,
+    config: &TokenizerConfig,
+) -> Result<Vocab, TokenizerError> {
     let tokens = string_array(metadata, TOKENS_KEY)?
         .ok_or(TokenizerError::MissingMetadataKey { key: TOKENS_KEY })?;
     let bos_token_id = u32_scalar(metadata, BOS_KEY)?;
@@ -120,7 +139,37 @@ pub fn vocab_from_metadata(metadata: &ParsedGguf) -> Result<Vocab, TokenizerErro
         Some(token_types) => vocab.with_token_types(token_types)?,
         None => vocab,
     };
-    Ok(vocab.with_bos_eos_policy(add_bos_token, add_eos_token))
+    let eot = u32_scalar(metadata, EOT_KEY)?;
+    let eom = u32_scalar(metadata, EOM_KEY)?;
+    let chat_template = string_scalar(metadata, CHAT_TEMPLATE_KEY)?;
+    let (vocab, evidence) = vocab.with_bos_eos_policy(add_bos_token, add_eos_token).with_eog_inference(
+        eot,
+        eom,
+        chat_template.as_deref(),
+        &config.eog_add,
+        &config.eog_remove,
+    );
+    flag_eog_gaps(&vocab, &evidence, chat_template.is_some(), config);
+    Ok(vocab)
+}
+
+/// Raises the "a guess needs a config" flag: inference reached nothing past
+/// the checkpoint's key ids, so a model whose turn marker is not its eos
+/// would run on. Never filled from a built-in list; the config key is named.
+fn flag_eog_gaps(vocab: &Vocab, evidence: &EogEvidence, has_template: bool, config: &TokenizerConfig) {
+    if evidence.template_ids.is_empty() && config.eog_add.is_empty() {
+        proxima_telemetry::warn!(
+            eog_ids = ?vocab.eog_token_ids(),
+            chat_template_present = has_template,
+            "end-of-generation set is only the checkpoint's eos/eot/eom keys; the chat template named no turn-closing token, set TokenizerConfig `eog_add` to the token texts that must also stop generation"
+        );
+    }
+    if !evidence.unresolved_overrides.is_empty() {
+        proxima_telemetry::warn!(
+            unresolved = ?evidence.unresolved_overrides,
+            "eog_add/eog_remove names texts that are not tokens of this vocab and were ignored"
+        );
+    }
 }
 
 /// Selects the byte-level pre-split from `tokenizer.ggml.pre`, mapped as

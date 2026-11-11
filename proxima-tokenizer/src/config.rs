@@ -26,6 +26,23 @@ pub struct TokenizerConfig {
     #[serde(default = "default_max_input_bytes")]
     #[builder(default = default_max_input_bytes())]
     pub max_input_bytes: usize,
+
+    /// Token texts to add to the end-of-generation set on top of what the
+    /// checkpoint's keys and chat template yield, e.g. `["<turn|>"]`. Wins
+    /// over inference. Loaded from a config file only (a list has no env
+    /// form here).
+    #[setting(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub eog_add: alloc::vec::Vec<alloc::string::String>,
+
+    /// Token texts to remove from the inferred end-of-generation set, e.g.
+    /// `["<|tool_response>"]` to let a tool-response marker through. Applied
+    /// after `eog_add`. Loaded from a config file only.
+    #[setting(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub eog_remove: alloc::vec::Vec<alloc::string::String>,
 }
 
 fn default_max_input_bytes() -> usize {
@@ -96,6 +113,33 @@ mod tests {
             crate::sized::MAX_INPUT_BYTES,
             "env override leaked past its scope"
         );
+    }
+
+    #[test]
+    fn eog_overrides_loaded_from_a_file_equal_the_fluent_builder() {
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("tokenizer.toml");
+        std::fs::write(
+            &path,
+            "max_input_bytes = 4096\neog_add = [\"<turn|>\"]\neog_remove = [\"<|tool_response>\"]\n",
+        )
+        .expect("write tokenizer config");
+
+        let loaded: TokenizerConfig = conflaguration::from_file(&path).expect("loads from file");
+        let fluent = TokenizerConfig::builder()
+            .max_input_bytes(4096)
+            .eog_add(vec![String::from("<turn|>")])
+            .eog_remove(vec![String::from("<|tool_response>")])
+            .build();
+
+        assert_eq!(loaded, fluent);
+        assert!(loaded.validate().is_ok());
+    }
+
+    #[test]
+    fn eog_overrides_default_to_empty() {
+        let config = TokenizerConfig::default();
+        assert!(config.eog_add.is_empty() && config.eog_remove.is_empty());
     }
 
     #[test]

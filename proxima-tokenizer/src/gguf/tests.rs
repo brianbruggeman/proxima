@@ -918,3 +918,71 @@ fn control_flint_tokenizer_rejects_a_perturbed_id_run() {
         "but a possessive stays on its word, where llama3 splits it off"
     );
 }
+
+/// The real gemma4-E2B checkpoint, from `REAL_GEMMA4_E2B_GGUF_PATH`. Fails
+/// loudly when the variable is unset or the file is missing: this fixture
+/// is host-local and a silent skip would read as a pass.
+fn real_gemma4_parsed() -> ParsedGguf {
+    let path = std::env::var("REAL_GEMMA4_E2B_GGUF_PATH")
+        .expect("REAL_GEMMA4_E2B_GGUF_PATH must name the host-local gemma4-E2B gguf");
+    let mut file = File::open(&path).expect("REAL_GEMMA4_E2B_GGUF_PATH must exist");
+    let mut header_buf = Vec::new();
+    for cap in [4usize << 20, 16 << 20, 64 << 20] {
+        header_buf.resize(cap, 0);
+        file.seek(SeekFrom::Start(0)).expect("seek to file start");
+        let read = file.read(&mut header_buf).expect("read gguf header region");
+        header_buf.truncate(read);
+        if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header_buf) {
+            return parsed;
+        }
+    }
+    panic!("gguf metadata region did not fit in 64 MiB");
+}
+
+/// llama.cpp ba3c05f71 loads this file with EOG = {1 `<eos>`, 50
+/// `<|tool_response>`, 106 `<turn|>`} (verbose log, "printing all EOG
+/// tokens"). Here 1 comes from `tokenizer.ggml.eos_token_id` and 50/106 from
+/// the tail of the file's own chat template; no built-in list is consulted.
+#[test]
+fn real_gemma4_eog_set_is_inferred_from_keys_and_chat_template() {
+    let parsed = real_gemma4_parsed();
+    let vocab = vocab_from_metadata(&parsed).expect("builds vocab from real gemma4 metadata");
+
+    assert_eq!(vocab.eog_token_ids(), &[1, 50, 106]);
+    assert!(!vocab.is_eog(212), "</s> is not in the template tail");
+    assert_eq!(
+        [1, 50, 106].map(|token_id| vocab.token_str(token_id)),
+        [Some("<eos>"), Some("<|tool_response>"), Some("<turn|>")]
+    );
+    assert_eq!(
+        [1, 50, 106].map(|token_id| vocab.token_type(token_id)),
+        [
+            Some(TokenType::Control),
+            Some(TokenType::UserDefined),
+            Some(TokenType::Control)
+        ],
+        "token type is not the signal: 50 is user-defined and 105 `<|turn>` is control yet not an eog id"
+    );
+}
+
+#[test]
+fn real_gemma4_config_remove_overrides_the_inferred_tool_response_marker() {
+    let parsed = real_gemma4_parsed();
+    let config = TokenizerConfig::builder()
+        .eog_remove(vec![String::from("<|tool_response>")])
+        .build();
+    let vocab = vocab_from_metadata_with(&parsed, &config).expect("builds vocab with override");
+
+    assert_eq!(vocab.eog_token_ids(), &[1, 106]);
+}
+
+#[test]
+fn real_gemma4_config_add_extends_the_set_beyond_inference() {
+    let parsed = real_gemma4_parsed();
+    let config = TokenizerConfig::builder()
+        .eog_add(vec![String::from("<|turn>")])
+        .build();
+    let vocab = vocab_from_metadata_with(&parsed, &config).expect("builds vocab with override");
+
+    assert_eq!(vocab.eog_token_ids(), &[1, 50, 105, 106]);
+}
