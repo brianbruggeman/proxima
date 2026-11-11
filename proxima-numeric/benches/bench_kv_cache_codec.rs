@@ -1074,6 +1074,66 @@ fn cell_filter() -> Option<Vec<String>> {
     Some(text.split(',').map(str::trim).filter(|entry| !entry.is_empty()).map(str::to_string).collect())
 }
 
+/// every `(direction, name)` the harness can run: both directions of each scalar, the decode of each
+/// block case, and the encode of each block case that has an encoder.
+fn known_cells() -> Vec<(&'static str, &'static str)> {
+    let scalars = Scalar::ALL.iter().flat_map(|scalar| [("encode", scalar.name()), ("decode", scalar.name())]);
+    let blocks = block_cases()
+        .into_iter()
+        .flat_map(|case| [case.encoder.is_some().then_some(("encode", case.name)), Some(("decode", case.name))])
+        .flatten();
+    scalars.chain(blocks).collect()
+}
+
+/// the entries of a `KV_BENCH_CELLS` value, or an error naming the first entry that matches no known
+/// cell (or that the value holds no entry at all): a mistyped name must not select zero cells quietly.
+fn parse_cell_filter(text: &str, known: &[(&str, &str)], sizes: &[usize]) -> Result<Vec<String>, String> {
+    let entries: Vec<String> = text.split(',').map(str::trim).filter(|entry| !entry.is_empty()).map(str::to_string).collect();
+    if entries.is_empty() {
+        return Err(format!("KV_BENCH_CELLS={text:?} names no cell"));
+    }
+    let matches_a_cell = |entry: &str| {
+        let mut parts = entry.splitn(3, ':');
+        let (direction, name, count) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next());
+        let size_ok = count.is_none_or(|text| text.parse::<usize>().is_ok_and(|size| sizes.contains(&size)));
+        size_ok && known.contains(&(direction, name))
+    };
+    match entries.iter().find(|entry| !matches_a_cell(entry)) {
+        Some(entry) => Err(format!("KV_BENCH_CELLS entry `{entry}` matches no cell")),
+        None => Ok(entries),
+    }
+}
+
+/// the failure, if any, of the `KV_BENCH_CELLS` environment value; none when it is unset.
+fn cell_filter_failures() -> Vec<String> {
+    let Ok(text) = std::env::var("KV_BENCH_CELLS") else { return Vec::new() };
+    parse_cell_filter(&text, &known_cells(), &SIZES).err().into_iter().collect()
+}
+
+/// the filter parser against real cell names: it must accept each selection shape and reject a
+/// mistyped name, a size outside `SIZES`, a bare direction and an empty value.
+fn cell_filter_selftest() -> Vec<String> {
+    let known = known_cells();
+    let accepted = ["decode:q4_1", "encode:q4_0,decode:bf16:256", "decode:f32,encode:f16:2097152", " decode:q8_0 , "];
+    let rejected = ["decode:q4_11", "encode:q4_1", "decode:bf16:300", "decode", "", " , ", "decode:q4_1,decode:q4_x"];
+    let mut failures: Vec<String> = accepted
+        .iter()
+        .filter(|text| parse_cell_filter(text, &known, &SIZES).is_err())
+        .map(|text| format!("cell filter rejected {text:?}"))
+        .collect();
+    failures.extend(
+        rejected
+            .iter()
+            .filter(|text| parse_cell_filter(text, &known, &SIZES).is_ok())
+            .map(|text| format!("cell filter accepted {text:?}")),
+    );
+    let named = parse_cell_filter("decode:q4_1,decode:q4_x", &known, &SIZES).err().unwrap_or_default();
+    if !named.contains("decode:q4_x") {
+        failures.push(format!("unknown entry not named in {named:?}"));
+    }
+    failures
+}
+
 fn cell_selected(filter: &Option<Vec<String>>, direction: &str, name: &str, count: usize) -> bool {
     filter.as_ref().is_none_or(|entries| {
         entries.iter().any(|entry| *entry == format!("{direction}:{name}") || *entry == format!("{direction}:{name}:{count}"))
@@ -1565,13 +1625,37 @@ const SCALAR_CELLS: usize = 32;
 const BLOCK_CELLS: usize = (7 + 13) * 4;
 
 /// Sums the NaN census of every decode cell's timing input; the returned line is a failure when any
-/// timed block has a NaN scale or min, since the template returns early on those.
+/// timed block has a NaN scale or min, since the template returns early on those. No timed block is a
+/// failure only when a decode cell ran: a selection with no decode block cell has nothing to time.
 fn timing_census(cells: &[BlockCell]) -> Option<String> {
+    let decode_cells = cells.iter().filter(|cell| cell.direction == "decode").count();
     let (blocks, scale, min) = cells.iter().fold((0, 0, 0), |(blocks, scale, min), cell| {
         (blocks + cell.timing_blocks, scale + cell.timing_nan.scale, min + cell.timing_nan.min)
     });
-    println!("census timing_inputs: blocks={blocks} nan_scale_blocks={scale} nan_min_blocks={min}");
-    (blocks == 0 || scale + min != 0).then(|| format!("timing inputs: {blocks} blocks, {scale} nan scale, {min} nan min (want blocks > 0 and 0 nan)"))
+    println!("census timing_inputs: decode_cells={decode_cells} blocks={blocks} nan_scale_blocks={scale} nan_min_blocks={min}");
+    census_failure(decode_cells, blocks, scale, min)
+}
+
+fn census_failure(decode_cells: usize, blocks: usize, scale: usize, min: usize) -> Option<String> {
+    let empty = decode_cells > 0 && blocks == 0;
+    (empty || scale + min != 0).then(|| format!("timing inputs: {blocks} blocks, {scale} nan scale, {min} nan min (want blocks > 0 and 0 nan)"))
+}
+
+/// a scalar-only selection (no block cell) passes the census; a decode cell with no timed block, or a
+/// NaN scale or min, fails it.
+fn census_selftest() -> Vec<String> {
+    let cases = [
+        ("scalar-only selection", census_failure(0, 0, 0, 0), false),
+        ("decode cells with timed blocks", census_failure(2, 64, 0, 0), false),
+        ("decode cells with no timed block", census_failure(1, 0, 0, 0), true),
+        ("nan scale", census_failure(1, 64, 1, 0), true),
+        ("nan min", census_failure(1, 64, 0, 1), true),
+    ];
+    cases
+        .iter()
+        .filter(|(_, failure, should_fail)| failure.is_some() != *should_fail)
+        .map(|(name, failure, should_fail)| format!("census {name}: failure={failure:?}, want failure={should_fail}"))
+        .collect()
 }
 
 /// Runs every cell, then returns the failures: one line per cell not PASS and one for a cell count
@@ -1601,6 +1685,9 @@ fn interleaved(values: &[f32]) -> Vec<String> {
     let block_tally = print_block_cells(&block_cells, quiet);
     let scalar_tally = print_scalar_cells(&cells, quiet);
     let mut failures = Vec::new();
+    if filtered && cells.is_empty() && block_cells.is_empty() {
+        failures.push("KV_BENCH_CELLS selected no cell to run (KV_BENCH_BLOCKS_ONLY excludes the scalar cells)".to_string());
+    }
     let expected_scalar_cells = if blocks_only { 0 } else { SCALAR_CELLS };
     if !filtered && cells.len() != expected_scalar_cells {
         failures.push(format!("scalar cells {} != expected {expected_scalar_cells}", cells.len()));
@@ -1642,6 +1729,9 @@ fn parity_checks(values: &[f32]) -> Vec<String> {
         println!("paritycheck {name}: failures={}", found.len());
         failures.extend(found);
     };
+    report("cell_filter_selftest", cell_filter_selftest());
+    report("census_selftest", census_selftest());
+    report("cell_filter_env", cell_filter_failures());
     report("exhaustive_decode", exhaustive_decode_parity());
     report("block_bit_exactness", block_bit_exactness(values));
     report("kv_inputs_2097152", bit_exactness("kv_inputs_2097152", values, false));
