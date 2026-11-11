@@ -2,6 +2,8 @@ use half::bf16;
 use proxima_gguf::quant::float_layout::{decode, encode, encode_counting};
 use proxima_gguf::quant::{bf4_e2m1, bf8_e5m2};
 use proxima_numeric::float_layout::FloatLayout;
+use proxima_numeric::{BlockLayout, FormatCodec};
+use std::mem::MaybeUninit;
 
 fn positive_finite_codes(layout: FloatLayout) -> Vec<u32> {
     (0..1u32 << (layout.width() - 1))
@@ -424,4 +426,44 @@ fn float_layout_e3m2_golden_fixture_carries_table4() {
     assert_eq!(newline_count, 592);
     assert!(OCP_MX_TEXT.contains("S 111 112 = ± 24 × 1.75 = ± 28.0"));
     assert!(OCP_MX_TEXT.contains("S 000 012 = ± 2-2 × 0.25 = ± 0.0625"));
+}
+
+/// An FP6_E3M2 block as the layout stores it: the f16 scale at byte 0, then 32 six-bit fields from
+/// bit 16, each field's low bit first.
+fn pack_fp6_e3m2_block(scale_bits: u16, codes: &[u32]) -> Vec<u8> {
+    let mut block = vec![0u8; BlockLayout::FP6_E3M2.block_bytes as usize];
+    block[..2].copy_from_slice(&scale_bits.to_le_bytes());
+    for (slot, &code) in codes.iter().enumerate() {
+        for bit in 0..6 {
+            let address = 16 + slot * 6 + bit;
+            block[address / 8] |= (((code >> bit) & 1) as u8) << (address % 8);
+        }
+    }
+    block
+}
+
+#[test]
+fn fp6_e3m2_block_decode_equals_ocp_table_4_golden_times_scale_for_all_64_codes() {
+    let codec = FormatCodec::block(&BlockLayout::FP6_E3M2).expect("fp6 e3m2 resolves");
+    let power_of_two_scales = [(0x3c00u16, 1.0f32), (0x3400, 0.25), (0x4800, 8.0), (0x0400, 2f32.powi(-14))];
+    let mut checked = 0usize;
+
+    for (scale_bits, scale) in power_of_two_scales {
+        let codes: Vec<u32> = (0..64).collect();
+        let data: Vec<u8> = codes.chunks(32).flat_map(|half| pack_fp6_e3m2_block(scale_bits, half)).collect();
+        let mut slots = vec![MaybeUninit::<f32>::uninit(); 64];
+
+        codec.decode(&data, &mut slots).expect("two whole blocks decode");
+
+        for (&code, slot) in codes.iter().zip(&slots) {
+            // decode returned ok, which initialises every slot
+            let decoded = unsafe { slot.assume_init() };
+            let sign = if code & E3M2_SIGN_BIT == 0 { 1.0 } else { -1.0 };
+            let expected = sign * E3M2_POSITIVE_GOLDEN[(code & 0x1f) as usize] * scale;
+            assert_eq!(decoded.to_bits(), expected.to_bits(), "code {code:#04x} scale {scale}");
+            checked += 1;
+        }
+    }
+
+    assert_eq!(checked, 4 * 64);
 }
