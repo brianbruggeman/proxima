@@ -1,10 +1,16 @@
 use alloc::string::String;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use core::ffi::c_void;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use core::ptr::NonNull;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use objc2_foundation::NSString;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use objc2_metal::{
-    MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice, MTLLanguageVersion, MTLLibrary,
+    MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLCompileOptions,
+    MTLComputeCommandEncoder, MTLCreateSystemDefaultDevice, MTLDevice, MTLLanguageVersion, MTLLibrary,
+    MTLResourceOptions, MTLSize,
 };
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_numeric::decode_scalar;
@@ -303,14 +309,6 @@ fn run_block_unpack_kernel(layout: &BlockLayout, blocks: &[u8], elements: usize)
 /// f32 output returned.
 #[cfg(all(feature = "metal", target_os = "macos"))]
 fn run_probe_source(source: &str, blocks: &[u8], elements: usize) -> alloc::vec::Vec<f32> {
-    use core::ffi::c_void;
-    use core::ptr::NonNull;
-
-    use objc2_metal::{
-        MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
-        MTLResourceOptions, MTLSize,
-    };
-
     let device = MTLCreateSystemDefaultDevice().expect("this box has a Metal device");
     let options = MTLCompileOptions::new();
     options.setLanguageVersion(MTLLanguageVersion::Version3_1);
@@ -480,7 +478,16 @@ async fn a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boun
     assert_eq!(source.contains("(long)"), wide_arm, "only a signed layout past 30 mantissa bits takes the long arm");
 }
 
-const ADMITTED_BLOCK_K_COUNT: usize = 3;
+/// the block formats `block_k_refusal` admits: no scale runs, whole four-wide loads, and a host codec
+/// that encodes (llama's q4_0, q5_0 and q8_0 k-cache types).
+const ADMITTED_BLOCK_K: [BlockLayout; 3] = [BlockLayout::Q4_0, BlockLayout::Q5_0, BlockLayout::Q8_0];
+
+fn assert_admitted_block_k_set(admitted: &[NumericFormat]) {
+    for layout in ADMITTED_BLOCK_K {
+        assert!(admitted.contains(&NumericFormat::Block(layout)), "{layout:?} is missing from the admitted set {admitted:?}");
+    }
+    assert_eq!(admitted.len(), ADMITTED_BLOCK_K.len(), "an unexpected format is admitted: {admitted:?}");
+}
 
 fn admitted_block_k_formats() -> alloc::vec::Vec<NumericFormat> {
     NumericFormat::ALL
@@ -490,14 +497,14 @@ fn admitted_block_k_formats() -> alloc::vec::Vec<NumericFormat> {
 }
 
 #[test]
-fn every_admitted_block_k_resolves_and_encodes_on_the_host_and_the_admitted_count_is_pinned() {
+fn every_admitted_block_k_resolves_and_encodes_on_the_host_and_the_admitted_set_is_pinned() {
     let admitted = admitted_block_k_formats();
 
     for format in &admitted {
         let codec = FormatCodec::for_format(format).expect("an admitted block K resolves a host codec");
         assert!(codec.can_encode(), "{format:?} is admitted so the cache fill can encode it");
     }
-    assert_eq!(admitted.len(), ADMITTED_BLOCK_K_COUNT, "admitted: {admitted:?}");
+    assert_admitted_block_k_set(&admitted);
 }
 
 #[test]
@@ -520,7 +527,7 @@ fn a_block_format_with_no_host_encode_is_refused_naming_the_missing_encode() {
 #[test]
 fn a_rendered_unpack_equals_the_host_decode_bit_for_bit_for_every_admitted_block_k_format() {
     let admitted = admitted_block_k_formats();
-    assert_eq!(admitted.len(), ADMITTED_BLOCK_K_COUNT, "the enumerated admitted set: {admitted:?}");
+    assert_admitted_block_k_set(&admitted);
 
     for format in &admitted {
         let NumericFormat::Block(layout) = format else {

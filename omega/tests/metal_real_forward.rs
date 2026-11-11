@@ -107,6 +107,7 @@ fn metal_agrees_with_cpu_on_a_nonempty_kv_cache() {
         .expect("metal runs the real forward with a non-empty cache on a real device");
 
     let mut first_divergence: Option<(NodeId, f32, f32, f32)> = None;
+    let mut compared_nodes = 0usize;
     for &node in &all_nodes {
         let Some((cpu_data, _cpu_shape)) = cpu.get(node) else {
             continue;
@@ -114,6 +115,7 @@ fn metal_agrees_with_cpu_on_a_nonempty_kv_cache() {
         let Some((metal_data, _metal_shape)) = metal.get(node) else {
             continue;
         };
+        compared_nodes += 1;
         assert_eq!(
             cpu_data.len(),
             metal_data.len(),
@@ -140,6 +142,12 @@ fn metal_agrees_with_cpu_on_a_nonempty_kv_cache() {
             "metal first diverges from cpu at node {node:?} op={op:?}: metal={got} cpu={want} relative={relative}"
         );
     }
+    assert!(compared_nodes > 0, "no node was compared");
+    assert_eq!(
+        compared_nodes,
+        all_nodes.len(),
+        "a requested FLOAT32 node came back from only one backend"
+    );
 }
 
 #[test]
