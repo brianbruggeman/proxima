@@ -1,5 +1,7 @@
 use super::cached_attention_render::{BF8_VECTOR_HELPER, decode_index_tokens};
+use super::layout_render::{block_unpack_msl, readable_block_layout};
 use super::*;
+use proxima_numeric::block_layout::BlockLayout;
 
 /// The split-KV partial for [`CachedAttentionForm::TwoRangeDecodeSplit`]: one
 /// threadgroup per `(query_row, query_head, split)` with `chunks` simdgroups,
@@ -33,7 +35,7 @@ use super::*;
 pub(super) fn render_cached_attention_decode_split(
     resolved: &BoundOp,
     entry: &str,
-    cached_kv_codec: Option<Codec>,
+    (cached_key_codec, cached_kv_codec): (Option<Codec>, Option<Codec>),
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedAttention {
         kv_heads,
@@ -57,27 +59,86 @@ pub(super) fn render_cached_attention_decode_split(
     let (index_type, literal_suffix) = decode_index_tokens(&resolved.kind);
     let cached_lower = index_literal(*cached_lower_inclusive, index_type, literal_suffix);
     let new_upper = index_literal(*new_upper_inclusive, index_type, literal_suffix);
-    let (cached_kv_type, kv_pointers, key_load, value_load) = match cached_kv_codec {
-        None => (
-            element_type,
-            PLAIN_KV_POINTERS,
-            PLAIN_KEY_LOAD,
-            PLAIN_VALUE_LOAD,
-        ),
-        Some(Codec::Float16) => ("half", HALF_KV_POINTERS, HALF_KEY_LOAD, HALF_VALUE_LOAD),
-        Some(Codec::BFloat16) => ("ushort", BF16_KV_POINTERS, BF16_KEY_LOAD, BF16_VALUE_LOAD),
-        Some(Codec::BFloat8) => ("uchar", BF8_KV_POINTERS, BF8_KEY_LOAD, BF8_VALUE_LOAD),
-        Some(_) => {
-            return Err(EmitError::CachedAttentionKvCodecNotSupported {
-                node: resolved.node,
-                reason: "the decode split reads cached K/V that is plain, Float16, BFloat16, or BFloat8",
-            });
+    let key_block = cached_key_codec.as_ref().and_then(readable_block_layout);
+    if key_block.is_none() && cached_key_codec != cached_kv_codec {
+        return Err(EmitError::CachedAttentionKvCodecNotSupported {
+            node: resolved.node,
+            reason: "the decode split reads a K cache that is a block layout or the same codec as V",
+        });
+    }
+    let (cached_kv_type, mut key_pointers, value_pointers, mut key_load, value_load) =
+        match cached_kv_codec {
+            None => (
+                element_type,
+                PLAIN_KV_POINTERS,
+                "",
+                PLAIN_KEY_LOAD,
+                PLAIN_VALUE_LOAD,
+            ),
+            Some(Codec::Float16) => (
+                "half",
+                HALF_KEY_POINTERS,
+                HALF_VALUE_POINTERS,
+                HALF_KEY_LOAD,
+                HALF_VALUE_LOAD,
+            ),
+            Some(Codec::BFloat16) => (
+                "ushort",
+                BF16_KEY_POINTERS,
+                BF16_VALUE_POINTERS,
+                BF16_KEY_LOAD,
+                BF16_VALUE_LOAD,
+            ),
+            Some(Codec::BFloat8) => (
+                "uchar",
+                BF8_KEY_POINTERS,
+                BF8_VALUE_POINTERS,
+                BF8_KEY_LOAD,
+                BF8_VALUE_LOAD,
+            ),
+            Some(_) => {
+                return Err(EmitError::CachedAttentionKvCodecNotSupported {
+                    node: resolved.node,
+                    reason: "the decode split reads cached V that is plain, Float16, BFloat16, or BFloat8",
+                });
+            }
+        };
+    let (key_store, key_helper, key_blocks_per_head, key_block_bytes) = match key_block {
+        Some(layout) => {
+            let elements = u64::from(layout.elements);
+            if (*head_dim / 2) % elements != 0 {
+                return Err(EmitError::CachedAttentionKvCodecNotSupported {
+                    node: resolved.node,
+                    reason: "a block K cache needs a plane row of head_dim / 2 elements to be whole blocks",
+                });
+            }
+            key_pointers = BLOCK_KEY_POINTERS;
+            key_load = BLOCK_KEY_LOAD;
+            (
+                "uchar",
+                block_unpack_msl(layout, &key_block_helper_name(layout)),
+                ((*head_dim / 2) / elements).to_string(),
+                layout.block_bytes.to_string(),
+            )
         }
+        None => (cached_kv_type, String::new(), String::new(), String::new()),
     };
+    let key_helper_name = key_block
+        .map(key_block_helper_name)
+        .unwrap_or_default();
+    let all_pointers = format!("{key_pointers}\n                {value_pointers}");
     let substitutions = [
-        ("@KV_POINTERS@", kv_pointers.to_string()),
+        ("@KV_POINTERS@", all_pointers),
         ("@KEY_LOAD@", key_load.to_string()),
         ("@VALUE_LOAD@", value_load.to_string()),
+        ("@KEY_BLOCK_LOAD@", key_helper_name),
+        (
+            "@KEY_BLOCK_ELEMENTS@",
+            key_block.map_or_else(String::new, |layout| layout.elements.to_string()),
+        ),
+        ("@KEY_BLOCKS_PER_HEAD@", key_blocks_per_head),
+        ("@KEY_BLOCK_BYTES@", key_block_bytes),
+        ("@KEY_STORE@", key_store.to_string()),
         ("@KV@", cached_kv_type.to_string()),
         ("@ENTRY@", entry.to_string()),
         ("@T@", element_type.to_string()),
@@ -99,6 +160,7 @@ pub(super) fn render_cached_attention_decode_split(
     ];
     let mut source = String::new();
     preamble(&mut source);
+    source.push_str(&key_helper);
     if cached_kv_codec == Some(Codec::BFloat16) {
         source.push_str(BF16_VECTOR_HELPER);
     }
@@ -136,24 +198,43 @@ const PLAIN_VALUE_LOAD: &str = "value_row[step][slot] = float4(v4[index]);";
 
 // the cached range is half-width and the new range is the op's own element
 // type, so one pointer cannot select between them as the plain form does
-const HALF_KV_POINTERS: &str =
+const HALF_KEY_POINTERS: &str =
     "device const @KV@4* kr4_cached = (device const @KV@4*)(in2 + kbase);
                 device const @KV@4* ki4_cached = (device const @KV@4*)(in3 + kbase);
-                device const @KV@4* v4_cached = (device const @KV@4*)(in6 + kbase * 2);
                 device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
-                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);
+                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);";
+
+const HALF_VALUE_POINTERS: &str =
+    "device const @KV@4* v4_cached = (device const @KV@4*)(in6 + kbase * 2);
                 device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);";
+
+// a block cache is addressed in whole blocks: row `key` of head `kv_head` starts at block
+// (key * kv_heads + kv_head) * blocks_per_head, then the element's block and index come from its place in the head row
+const BLOCK_KEY_POINTERS: &str =
+    "device const uchar* kr_cached = in2 + (((long)key * (long)kv_heads + (long)kv_head) * @KEY_BLOCKS_PER_HEAD@L) * @KEY_BLOCK_BYTES@L;
+                device const uchar* ki_cached = in3 + (((long)key * (long)kv_heads + (long)kv_head) * @KEY_BLOCKS_PER_HEAD@L) * @KEY_BLOCK_BYTES@L;
+                device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
+                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);";
+
+const BLOCK_KEY_LOAD: &str = "if (cached) { uint element = (uint)index * 4u; device const uchar* kr_block = kr_cached + (element / @KEY_BLOCK_ELEMENTS@u) * @KEY_BLOCK_BYTES@u; device const uchar* ki_block = ki_cached + (element / @KEY_BLOCK_ELEMENTS@u) * @KEY_BLOCK_BYTES@u; uint within = element % @KEY_BLOCK_ELEMENTS@u; key_real[step][slot] = float4(@KEY_BLOCK_LOAD@(kr_block, within), @KEY_BLOCK_LOAD@(kr_block, within + 1u), @KEY_BLOCK_LOAD@(kr_block, within + 2u), @KEY_BLOCK_LOAD@(kr_block, within + 3u)); key_imag[step][slot] = float4(@KEY_BLOCK_LOAD@(ki_block, within), @KEY_BLOCK_LOAD@(ki_block, within + 1u), @KEY_BLOCK_LOAD@(ki_block, within + 2u), @KEY_BLOCK_LOAD@(ki_block, within + 3u)); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
+
+/// The helper's name comes from the layout's own geometry, so a kernel that reads two layouts would hold two helpers.
+fn key_block_helper_name(layout: &BlockLayout) -> String {
+    format!("omega_key_block_{}x{}", layout.elements, layout.block_bytes)
+}
 
 const HALF_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = float4(kr4_cached[index]); key_imag[step][slot] = float4(ki4_cached[index]); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
 
 const HALF_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
 
-const BF16_KV_POINTERS: &str =
+const BF16_KEY_POINTERS: &str =
     "device const ushort4* kr4_cached = (device const ushort4*)(in2 + kbase);
                 device const ushort4* ki4_cached = (device const ushort4*)(in3 + kbase);
-                device const ushort4* v4_cached = (device const ushort4*)(in6 + kbase * 2);
                 device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
-                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);
+                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);";
+
+const BF16_VALUE_POINTERS: &str =
+    "device const ushort4* v4_cached = (device const ushort4*)(in6 + kbase * 2);
                 device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);";
 
 const BF16_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = omega_bf16x4_to_float4(kr4_cached[index]); key_imag[step][slot] = omega_bf16x4_to_float4(ki4_cached[index]); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
@@ -162,12 +243,14 @@ const BF16_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = omega_bf16x
 
 const BF16_VECTOR_HELPER: &str = "static inline float4 omega_bf16x4_to_float4(ushort4 value) { return float4(as_type<float>((uint)value.x << 16u), as_type<float>((uint)value.y << 16u), as_type<float>((uint)value.z << 16u), as_type<float>((uint)value.w << 16u)); }\n";
 
-const BF8_KV_POINTERS: &str =
+const BF8_KEY_POINTERS: &str =
     "device const uchar4* kr4_cached = (device const uchar4*)(in2 + kbase);
                 device const uchar4* ki4_cached = (device const uchar4*)(in3 + kbase);
-                device const uchar4* v4_cached = (device const uchar4*)(in6 + kbase * 2);
                 device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
-                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);
+                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);";
+
+const BF8_VALUE_POINTERS: &str =
+    "device const uchar4* v4_cached = (device const uchar4*)(in6 + kbase * 2);
                 device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);";
 
 const BF8_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = omega_bf8x4_to_float4(kr4_cached[index]); key_imag[step][slot] = omega_bf8x4_to_float4(ki4_cached[index]); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
@@ -178,7 +261,7 @@ const DECODE_SPLIT_KERNEL: &str = r#"struct Uniforms { long total_elements; long
 
 #define OMEGA_UNROLL _Pragma("clang loop unroll(full)")
 
-kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [[buffer(1)]], device const @KV@* in2 [[buffer(2)]], device const @KV@* in3 [[buffer(3)]], device const @T@* in4 [[buffer(4)]], device const @T@* in5 [[buffer(5)]], device const @KV@* in6 [[buffer(6)]], device const @T@* in7 [[buffer(7)]], device const @T@* in8 [[buffer(8)]], device @T@* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [[buffer(1)]], device const @KEY_STORE@* in2 [[buffer(2)]], device const @KEY_STORE@* in3 [[buffer(3)]], device const @T@* in4 [[buffer(4)]], device const @T@* in5 [[buffer(5)]], device const @KV@* in6 [[buffer(6)]], device const @T@* in7 [[buffer(7)]], device const @T@* in8 [[buffer(8)]], device @T@* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
     @INDEX@ splits = (@INDEX@)u.splits;
     if ((@INDEX@)tgid >= (@INDEX@)u.total_elements * splits) { return; }
     constexpr @INDEX@ kv_heads = @KV_HEADS@; constexpr @INDEX@ query_groups = @QUERY_GROUPS@; constexpr @INDEX@ head_dim = @HEAD_DIM@; constexpr float scale = @SCALE@; constexpr @INDEX@ cached_lower = @CACHED_LOWER@; constexpr @INDEX@ new_upper = @NEW_UPPER@; constexpr @INDEX@ new_key_rows = @NEW_KEY_ROWS@; constexpr @INDEX@ cap = @CAP@;

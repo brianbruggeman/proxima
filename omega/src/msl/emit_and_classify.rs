@@ -270,13 +270,13 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
         dense_mma_input_layout,
     );
     let source = match &resolved.kind {
-        BoundOpKind::CachedAttention { .. } => cached_attention_kv_codec(resolved.node, &quantized)
-            .and_then(|cached_kv_codec| {
+        BoundOpKind::CachedAttention { .. } => cached_attention_kv_codecs(resolved.node, &quantized)
+            .and_then(|cached_kv_codecs| {
                 render_cached_attention_with_mma_selection(
                     resolved,
                     &entry,
                     numeric_policy,
-                    cached_kv_codec,
+                    cached_kv_codecs,
                     mma_selection,
                     row_schedule,
                 )
