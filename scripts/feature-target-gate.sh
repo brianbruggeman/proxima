@@ -55,7 +55,7 @@ matrix=(
 )
 
 # the package name of a top-level directory: the `name` in its manifest's
-# [package] section, or the directory name when it has no manifest. A crate's
+# [package] section, or the directory name when it has no manifest; a crate's
 # directory need not match its name (omega/ holds proxima-omega).
 package_name() {
     local dir="$1" name=""
