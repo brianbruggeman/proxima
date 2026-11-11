@@ -346,9 +346,9 @@ mod tests {
 // -- Real-data proof: apply the policy to every tensor of the real Mixtral
 // checkpoint's directory (metadata only, never tensor payload bytes) and
 // report per-role coverage plus where the coarse per-role default disagrees
-// with llama.cpp's real (layer-conditional) choice. Opportunistic, same as
-// `crate::tests::real_file`: skips cleanly when the host-local model cache
-// is absent.
+// with llama.cpp's real (layer-conditional) choice. Runs in the default
+// gate, same as `crate::tests::real_file`: a missing host-local model cache
+// fails the test loudly; see `checkpoint_resolver::require_checkpoint`.
 #[cfg(all(test, feature = "std"))]
 mod real_file {
     #![allow(clippy::unwrap_used, clippy::expect_used)]

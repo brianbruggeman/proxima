@@ -3,8 +3,9 @@
 //! run end to end through the crate's public `Pipe` surface -- the first
 //! time this crate's safetensors/HF path (`ceeb75b`/`ae74f42`/`c30b8a5`) has
 //! ever been driven against a real HuggingFace checkpoint rather than a
-//! synthetic fixture. `#[ignore]`d and skips cleanly when the host-local
-//! download is absent, same convention as `bind.rs::real_openchat_file`.
+//! synthetic fixture. `#[ignore]`d, and returns success with a "skipping" line
+//! when the host-local download is absent (unlike `bind.rs::real_openchat_file`,
+//! which fails loudly via `require_fixture`).
 //!
 //! This checkpoint ships `tie_word_embeddings: true` (its real
 //! `config.json`) -- no `lm_head.weight` tensor at all, confirmed against
