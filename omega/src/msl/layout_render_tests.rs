@@ -6,6 +6,8 @@ use objc2_foundation::NSString;
 use objc2_metal::{
     MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice, MTLLanguageVersion, MTLLibrary,
 };
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use proxima_numeric::decode_scalar;
 use proxima_numeric::FormatCodec;
 use proxima_numeric::NumericFormat;
 use proxima_numeric::block_layout::BlockLayout;
@@ -433,6 +435,49 @@ fn a_cache_layout_equal_to_the_graph_output_is_the_plain_buffer_whatever_its_spe
         super::cached_attention_kv_codec_for(&NumericFormat::Float16),
         Ok(Some(NumericFormat::Float16))
     );
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[proxima::test]
+#[case::int16_two_complement(FloatLayout::INT16)]
+#[case::int32_two_complement_takes_the_long_arm(FloatLayout::INT32)]
+#[case::uint32_unsigned(FloatLayout::UINT32)]
+async fn a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boundary_codes(
+    #[case] layout: FloatLayout,
+) {
+    let width = u32::from(layout.width());
+    let top = if width == 32 { u32::MAX } else { (1u32 << width) - 1 };
+    let sign_bit = 1u32 << (width - 1);
+    let mut codes: alloc::vec::Vec<u32> = [
+        0, 1, 2, top, top - 1, sign_bit, sign_bit - 1, sign_bit + 1, 1 << 15, (1 << 15) - 1, (1 << 15) + 1,
+        1 << 30, (1 << 30) - 1, (1 << 30) + 1, 0x7fff_ffff, 0x8000_0000, 0x8000_0001, 0xffff_fffe, 0x1234_5678,
+        0xdead_beef,
+    ]
+    .into_iter()
+    .map(|code| code & top)
+    .collect();
+    codes.sort_unstable();
+    codes.dedup();
+    let format = NumericFormat::Scalar(layout);
+    let expected: alloc::vec::Vec<u32> = codes
+        .iter()
+        .map(|code| {
+            decode_scalar(&format, &code.to_le_bytes()).expect("the host decodes the integer code").to_bits()
+        })
+        .collect();
+    let source = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\n{}\nkernel void probe(device const uint *codes [[buffer(0)]], device float *values [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n    values[gid] = probe_load(codes[gid]);\n}}\n",
+        layout_load_msl(layout, "probe_load")
+    );
+    let input: alloc::vec::Vec<u8> = codes.iter().flat_map(|code| code.to_le_bytes()).collect();
+
+    let observed: alloc::vec::Vec<u32> =
+        run_probe_source(&source, &input, codes.len()).iter().map(|value| value.to_bits()).collect();
+
+    assert!(codes.len() >= 10, "boundary codes survive the mask and dedup: {codes:?}");
+    assert_eq!(observed, expected, "{layout:?} codes {codes:x?}");
+    let wide_arm = layout.sign == SignEncoding::TwosComplement && layout.mantissa_bits > 30;
+    assert_eq!(source.contains("(long)"), wide_arm, "only a signed layout past 30 mantissa bits takes the long arm");
 }
 
 const ADMITTED_BLOCK_K_COUNT: usize = 3;
