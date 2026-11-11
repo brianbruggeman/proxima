@@ -280,6 +280,20 @@ const fn is_high_word_packed(layout: &BlockLayout) -> bool {
     }
 }
 
+/// Whether the high plane is exactly one register word of codes, which the fit can fill as it
+/// produces each code: a vector unit then shifts and sums every code into the word, where reading
+/// them back out of the staged array one lane at a time costs an instruction a lane.
+const fn is_high_single_word(layout: &BlockLayout) -> bool {
+    match &layout.element.high {
+        Some(plane) => {
+            is_word_packed(plane)
+                && word_codes(plane) * plane.bits as usize == 32
+                && plane_span(plane) == layout.elements as usize
+        }
+        None => false,
+    }
+}
+
 /// Whether decode reads every code straight out of register words: one word-packed plane and no
 /// other, so there is no code to stage.
 const fn unpacks_by_word(layout: &BlockLayout) -> bool {
@@ -447,15 +461,22 @@ fn scatter_codes<
     const BYTES: usize,
     const LOW_BY_WORD: bool,
     const HIGH_BY_WORD: bool,
+    const HIGH_FUSED: bool,
 >(
     layout: &BlockLayout,
     codes: &[u8; ELEMENTS],
+    high_word: u32,
     block: &mut [u8; BYTES],
 ) {
     let element = &layout.element;
     scatter_plane::<BYTES, LOW_BY_WORD>(&element.low, 0, block, |index| codes[index]);
     if let Some(plane) = &element.high {
-        scatter_plane::<BYTES, HIGH_BY_WORD>(plane, element.low.bits as u32, block, |index| codes[index]);
+        if HIGH_FUSED {
+            let start = plane.base_bits as usize / 8;
+            block[start..start + 4].copy_from_slice(&high_word.to_le_bytes());
+        } else {
+            scatter_plane::<BYTES, HIGH_BY_WORD>(plane, element.low.bits as u32, block, |index| codes[index]);
+        }
     }
 }
 
@@ -517,13 +538,30 @@ fn signed_max<const ELEMENTS: usize>(input: &[f32; ELEMENTS]) -> f32 {
     max
 }
 
+/// The magnitude bits of an `f32`: the sign cleared.
+const MAGNITUDE_MASK: u32 = 0x7fff_ffff;
+
+/// The magnitude bits of positive infinity: any magnitude above it is a nan.
+const INFINITY_BITS: u32 = 0x7f80_0000;
+
+/// `fold` of the magnitudes with the C `MAX` macro, in element order, whatever the elements are.
 #[inline(always)]
-fn peak<const ELEMENTS: usize>(input: &[f32; ELEMENTS]) -> f32 {
+fn peak_ordered<const ELEMENTS: usize>(input: &[f32; ELEMENTS]) -> f32 {
     // ggml-impl.h:40 MAX(a, b) is (a) > (b) ? (a) : (b), so a nan in the last element stays nan
     input.iter().fold(0.0f32, |peak, value| {
         let magnitude = value.abs();
         if peak > magnitude { peak } else { magnitude }
     })
+}
+
+/// [`peak_ordered`], with a reduction a vector unit runs when the block holds no nan. The bits of a
+/// non-negative float order as the floats do and every nan's magnitude bits exceed infinity's, so
+/// the unsigned max of the magnitude bits is the plain max of the magnitudes when it is at most
+/// infinity's bits, and is the sign that a nan is somewhere in the block when it is not.
+#[inline(always)]
+fn peak<const ELEMENTS: usize>(input: &[f32; ELEMENTS]) -> f32 {
+    let top = input.iter().fold(0u32, |top, value| top.max(value.to_bits() & MAGNITUDE_MASK));
+    if top <= INFINITY_BITS { f32::from_bits(top) } else { peak_ordered(input) }
 }
 
 #[inline(always)]
@@ -570,19 +608,28 @@ fn code_of(layout: &BlockLayout, fit: Fit, inverse: f32, value: f32) -> u8 {
     }
 }
 
-/// Fits the block's scale and writes the raw codes; returns the scale the block stores.
+/// Fits the block's scale and writes the raw codes; returns the scale the block stores and, when
+/// `HIGH_FUSED`, the word of the high plane's bits (code `lane`'s bits at `lane * bits`), summed in
+/// the loop that produces the codes so a vector unit shifts each lane into place.
 #[inline(always)]
-fn fit_codes<const ELEMENTS: usize>(
+fn fit_codes<const ELEMENTS: usize, const HIGH_FUSED: bool>(
     layout: &BlockLayout,
     fit: Fit,
     input: &[f32; ELEMENTS],
     codes: &mut [u8; ELEMENTS],
-) -> f32 {
+) -> (f32, u32) {
     let (scale, inverse) = fit_scale(layout, fit, input);
-    for (code, &value) in codes.iter_mut().zip(input) {
+    let lift = u32::from(layout.element.low.bits);
+    let bits = layout.element.high.map_or(0, |plane| u32::from(plane.bits));
+    let mask = u32::MAX.checked_shr(32 - bits).unwrap_or(0);
+    let mut word = 0u32;
+    for (lane, (code, &value)) in codes.iter_mut().zip(input).enumerate() {
         *code = code_of(layout, fit, inverse, value);
+        if HIGH_FUSED {
+            word = word.wrapping_add(((u32::from(*code) >> lift) & mask).wrapping_shl(lane as u32 * bits));
+        }
     }
-    scale
+    (scale, word)
 }
 
 #[inline(always)]
@@ -591,6 +638,7 @@ fn encode_chunk<
     const BYTES: usize,
     const LOW_BY_WORD: bool,
     const HIGH_BY_WORD: bool,
+    const HIGH_FUSED: bool,
 >(
     layout: &BlockLayout,
     fit: Fit,
@@ -599,8 +647,8 @@ fn encode_chunk<
 ) {
     let mut block = [0u8; BYTES];
     let mut codes = [0u8; ELEMENTS];
-    let scale = fit_codes(layout, fit, input, &mut codes);
-    scatter_codes::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD>(layout, &codes, &mut block);
+    let (scale, high_word) = fit_codes::<ELEMENTS, HIGH_FUSED>(layout, fit, input, &mut codes);
+    scatter_codes::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED>(layout, &codes, high_word, &mut block);
     let width = layout.scale.layout.width() as u32;
     put_bits(&mut block, layout.scale.byte_offset as usize * 8, width, encode(scale, layout.scale.layout));
     *out = block;
@@ -612,6 +660,7 @@ fn encode_run<
     const BYTES: usize,
     const LOW_BY_WORD: bool,
     const HIGH_BY_WORD: bool,
+    const HIGH_FUSED: bool,
 >(
     layout: BlockLayout,
     fit: Fit,
@@ -621,7 +670,7 @@ fn encode_run<
     let inputs = values.as_chunks::<ELEMENTS>().0;
     let blocks = out.as_chunks_mut::<BYTES>().0;
     for (input, block) in inputs.iter().zip(blocks) {
-        encode_chunk::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD>(&layout, fit, input, block);
+        encode_chunk::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED>(&layout, fit, input, block);
     }
 }
 
@@ -637,11 +686,12 @@ macro_rules! resolve_named_block {
                 const FIT: Fit = fit_of(&BlockLayout::$name);
                 const LOW_BY_WORD: bool = is_word_packed(&BlockLayout::$name.element.low);
                 const HIGH_BY_WORD: bool = is_high_word_packed(&BlockLayout::$name);
+                const HIGH_FUSED: bool = is_high_single_word(&BlockLayout::$name);
                 const UNPACK_BY_WORD: bool = unpacks_by_word(&BlockLayout::$name);
                 let encode: Option<EncodeFn> = match FIT {
                     Fit::Runtime => None,
                     _ => Some(|values, out| {
-                        encode_run::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD>(
+                        encode_run::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED>(
                             BlockLayout::$name,
                             FIT,
                             values,
@@ -703,11 +753,124 @@ mod tests {
         input[2] = 1.984_375;
         let mut codes = [0u8; 32];
 
-        let scale = fit_codes(&layout, Fit::SignedMax, &input, &mut codes);
+        let (scale, _) = fit_codes::<32, false>(&layout, Fit::SignedMax, &input, &mut codes);
 
         assert_eq!(scale, 0.015_625);
         assert_eq!(&codes[..4], &[192, 0, 255, 128]);
         assert!(codes[3..].iter().all(|&code| code == 128));
+    }
+
+    fn block_of(first: f32, fill: f32) -> [f32; 32] {
+        let mut block = [fill; 32];
+        block[0] = first;
+        block
+    }
+
+    fn kv_like_block(seed: u32) -> [f32; 32] {
+        let mut state = seed;
+        let mut block = [0.0f32; 32];
+        for (index, slot) in block.iter_mut().enumerate() {
+            let mut gaussian = -6.0f32;
+            for _ in 0..12 {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                gaussian += (state >> 8) as f32 / (1u32 << 24) as f32;
+            }
+            *slot = if matches!(index % 64, 5 | 37) { gaussian * 24.0 } else { gaussian };
+        }
+        block
+    }
+
+    fn random_bit_block(seed: u32) -> [f32; 32] {
+        let mut state = seed;
+        let mut block = [0.0f32; 32];
+        for slot in &mut block {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            *slot = f32::from_bits(state ^ (state << 13));
+        }
+        block
+    }
+
+    fn assert_peak_is_the_ordered_fold(block: &[f32; 32], what: &str) {
+        assert_eq!(peak(block).to_bits(), peak_ordered(block).to_bits(), "{what}");
+    }
+
+    #[test]
+    fn signed_max_is_the_first_largest_magnitude_ignoring_nans_and_keeping_zero_for_zeros() {
+        let mut tie = block_of(-3.0, 1.0);
+        tie[9] = 3.0;
+        assert_eq!(signed_max(&tie).to_bits(), (-3.0f32).to_bits(), "the first of a tie wins");
+        assert_eq!(signed_max(&[-0.0; 32]).to_bits(), 0.0f32.to_bits(), "all zeros keep the initial zero");
+        let mut with_nan = block_of(f32::NAN, 2.0);
+        with_nan[31] = -f32::NAN;
+        assert_eq!(signed_max(&with_nan).to_bits(), 2.0f32.to_bits(), "a nan never wins");
+        assert!(signed_max(&[f32::NAN; 32]) == 0.0, "only nans keep the initial zero");
+        let mut infinite = kv_like_block(3);
+        infinite[17] = f32::NEG_INFINITY;
+        assert_eq!(signed_max(&infinite), f32::NEG_INFINITY);
+    }
+
+    #[test]
+    fn peak_without_a_nan_is_the_largest_magnitude_whatever_its_sign_or_place() {
+        let mut block = kv_like_block(7);
+        block[11] = -97.25;
+        block[30] = f32::NEG_INFINITY;
+        assert_eq!(peak(&block), f32::INFINITY);
+        block[30] = -0.0;
+        assert_eq!(peak(&block).to_bits(), 97.25f32.to_bits());
+        assert_eq!(peak(&[-0.0; 32]).to_bits(), 0.0f32.to_bits());
+        assert_peak_is_the_ordered_fold(&block, "no nan");
+    }
+
+    #[test]
+    fn peak_is_nan_when_the_last_element_is_nan() {
+        let mut block = block_of(5.0, 1.0);
+        block[31] = f32::NAN;
+
+        assert!(peak(&block).is_nan());
+        assert_peak_is_the_ordered_fold(&block, "nan last");
+    }
+
+    #[test]
+    fn peak_restarts_after_the_last_nan_so_a_leading_nan_is_forgotten() {
+        let block = block_of(f32::NAN, 1.0);
+        assert_eq!(peak(&block), 1.0, "nan first, then ones");
+        assert_peak_is_the_ordered_fold(&block, "nan first");
+
+        let mut middle = block_of(100.0, 2.0);
+        middle[15] = -f32::NAN;
+        middle[16] = 3.0;
+        assert_eq!(peak(&middle), 3.0, "the 100 before the nan and the 2s before it are forgotten");
+        assert_peak_is_the_ordered_fold(&middle, "nan in the middle");
+    }
+
+    #[test]
+    fn peak_with_two_nans_keeps_what_follows_the_second() {
+        let mut block = block_of(9.0, 1.0);
+        block[3] = f32::NAN;
+        block[20] = f32::from_bits(0x7fa0_0001);
+        block[25] = 4.0;
+        block[26] = -6.5;
+
+        assert_eq!(peak(&block), 6.5);
+        assert_peak_is_the_ordered_fold(&block, "two nans");
+
+        block[31] = f32::from_bits(0xffc0_1234);
+        assert!(peak(&block).is_nan());
+        assert_eq!(peak(&block).to_bits(), peak_ordered(&block).to_bits(), "the nan payload is the last one's");
+    }
+
+    #[test]
+    fn peak_matches_the_ordered_fold_on_kv_like_and_random_bit_blocks() {
+        let mut nan_blocks = 0usize;
+        for seed in 1..=2000u32 {
+            let kv = kv_like_block(seed);
+            let random = random_bit_block(seed);
+            assert_peak_is_the_ordered_fold(&kv, "kv like");
+            assert_peak_is_the_ordered_fold(&random, "random bit patterns");
+            nan_blocks += usize::from(random.iter().any(|value| value.is_nan()));
+        }
+
+        assert!(nan_blocks > 0, "the random bit patterns must reach the nan path");
     }
 
     #[test]
