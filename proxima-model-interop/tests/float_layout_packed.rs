@@ -2,7 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 //! The packed matvec arms (`omega/src/msl/packed_row_blocked_ggml.rs`) against an f64 dot-product
-//! loop on real granite attention rows, and `Codec::layout()` against the layout constants.
+//! loop on real granite attention rows, and `Codec::element_layout()` against the layout constants.
 //!
 //! The weights are the granite 1024x512 attn_q rows (Q8_0 dequantized) re-encoded into each
 //! float codec by `proxima_gguf::quant`. The reference decodes the packed bytes through the CPU
@@ -251,19 +251,25 @@ fn float_layout_packed_codec_layout_table_matches_constants() {
         (Codec::Bf8E5M2, FloatLayout::E5M2_SATURATING),
         (Codec::Bf4E2M1, FloatLayout::E2M1),
         (Codec::Fp6E3M2, FloatLayout::E3M2),
+        (Codec::Mxfp4, FloatLayout::E2M1),
+        (Codec::Nvfp4, FloatLayout::E2M1),
     ];
 
     for (codec, layout) in expected {
         assert_eq!(codec.element_layout(), Some(layout), "{codec:?}");
     }
-    let with_layout = (0..=u8::MAX)
+    let floating = (0..=u8::MAX)
         .filter_map(Codec::from_tag)
-        .filter(|codec| codec.element_layout().is_some())
+        .filter(|codec| {
+            codec
+                .element_layout()
+                .is_some_and(|layout| !layout.is_integer())
+        })
         .count();
     assert_eq!(
-        with_layout,
+        floating,
         expected.len(),
-        "no other codec names a float layout"
+        "no other codec's element is a floating layout; every other element code is an integer ladder"
     );
 }
 
