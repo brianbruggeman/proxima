@@ -21,13 +21,14 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::instrument::{path_totals, reset_path};
 use proxima_tensor::{BoundOpKind, bind, infer};
 use proxima_numeric::{NumericPolicy};
 
 mod support;
-use support::{as_named_blocks, production_numeric_policy, qwen3_gqa_qk_norm_forward_fixture};
+use support::{
+    as_named_blocks, evaluate_gpu_oracle, production_numeric_policy, qwen3_gqa_qk_norm_forward_fixture,
+};
 
 /// One `(cached_len, new_count, policy)` cell: binds the qwen3 GQA+QK-norm
 /// fixture, asserts it actually fuses into `BoundOpKind::CachedAttention` (a
@@ -52,17 +53,7 @@ fn parity_cell(cached_len: u64, new_count: u64, policy: NumericPolicy) -> f32 {
          BoundOpKind::CachedAttention or this parity check exercises the wrong kernel"
     );
 
-    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
-    let mut validated = None;
-    let cpu = evaluate_quantized_named_with_scratch(
-        &program,
-        &symbols,
-        &named,
-        &output_roots,
-        &mut free_buffers,
-        &mut validated,
-    )
-    .expect("cpu runs the qwen3 gqa+qk_norm fixture");
+    let cpu = evaluate_gpu_oracle(&program, &symbols, &named, &output_roots, policy);
 
     reset_path();
     let plan = omega::plan_named(&program, &symbols, &named, &output_roots, policy)
