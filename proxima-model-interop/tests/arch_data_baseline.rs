@@ -1627,6 +1627,7 @@ fn serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps() {
 
 #[test]
 fn repeated_identical_requests_reproduce_the_first_requests_ids() {
+    const DECODE_STEPS: usize = 12;
     let checkpoint = proxima_model_interop::gemma4_fixture::gemma4_checkpoint_with(256, Some(4096));
     let file_bytes: &[u8] = &checkpoint;
     let parsed = parse_complete(file_bytes).expect("parses the generated checkpoint's GGUF header");
@@ -1648,7 +1649,7 @@ fn repeated_identical_requests_reproduce_the_first_requests_ids() {
         let (generated, _text, _stopped) = model
             .generate_streaming_with_speculative_stats(
                 &prompt,
-                12,
+                DECODE_STEPS,
                 config,
                 &mut |_event| ControlFlow::Continue(()),
                 &mut stats,
@@ -1659,6 +1660,14 @@ fn repeated_identical_requests_reproduce_the_first_requests_ids() {
     };
 
     let requests = [run(), run(), run()];
+    for (request, ids) in requests.iter().enumerate() {
+        assert_eq!(
+            ids.len(),
+            DECODE_STEPS,
+            "request {} must produce one id per decode step, three empty vectors would otherwise agree",
+            request + 1
+        );
+    }
     for (request, ids) in requests.iter().enumerate().skip(1) {
         assert_eq!(
             ids,
