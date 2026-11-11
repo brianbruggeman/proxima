@@ -17,12 +17,10 @@
 
 #[cfg(feature = "metal-buffer-pool")]
 use proxima_tensor::Reduce;
-use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::{BoundOpKind, NodeId, bind, infer};
 use proxima_numeric::{NumericPolicy};
 #[cfg(feature = "metal-buffer-pool")]
 use proxima_tensor::{Extent, IndexMap, Keep, Op, QuantizedBlock, ReduceInit, ScalarOp, append, projection};
-#[cfg(feature = "metal-buffer-pool")]
 use proxima_numeric::DType;
 
 mod support;
@@ -37,17 +35,7 @@ fn metal_runs_the_real_forward_graph_and_agrees_with_the_cpu() {
     let (program, symbols, roots, owned) = real_forward_fixture();
     let named = as_named_blocks(&owned);
 
-    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
-    let mut validated = None;
-    let cpu = evaluate_quantized_named_with_scratch(
-        &program,
-        &symbols,
-        &named,
-        &roots,
-        &mut free_buffers,
-        &mut validated,
-    )
-    .expect("cpu runs the real forward");
+    let cpu = evaluate_gpu_oracle(&program, &symbols, &named, &roots);
 
     let plan = omega::plan_named(&program, &symbols, &named, &roots, NumericPolicy::default())
         .expect("metal plans the real forward");
@@ -99,19 +87,13 @@ fn metal_agrees_with_cpu_on_a_nonempty_kv_cache() {
 
     let (program, symbols, _roots, owned) = real_forward_fixture_with_cached_len(CACHED_LEN);
     let named = as_named_blocks(&owned);
-    let all_nodes: Vec<NodeId> = (0..program.len() as u32).map(NodeId).collect();
+    // an f64 accumulation island is not a returnable f32 output on the cpu
+    let all_nodes: Vec<NodeId> = (0..program.len() as u32)
+        .map(NodeId)
+        .filter(|node| program[node.0 as usize].dtype() == DType::FLOAT32)
+        .collect();
 
-    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
-    let mut validated = None;
-    let cpu = evaluate_quantized_named_with_scratch(
-        &program,
-        &symbols,
-        &named,
-        &all_nodes,
-        &mut free_buffers,
-        &mut validated,
-    )
-    .expect("cpu runs the real forward with a non-empty cache");
+    let cpu = evaluate_gpu_oracle(&program, &symbols, &named, &all_nodes);
 
     let plan = omega::plan_named(
         &program,
@@ -174,13 +156,7 @@ fn fused_cached_attention_root_agrees_between_cpu_and_metal() {
             .any(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
     );
 
-    let cpu = evaluate_gpu_oracle(
-        &program,
-        &symbols,
-        &named,
-        &output_roots,
-        NumericPolicy::default(),
-    );
+    let cpu = evaluate_gpu_oracle(&program, &symbols, &named, &output_roots);
     let plan = omega::plan_named(
         &program,
         &symbols,

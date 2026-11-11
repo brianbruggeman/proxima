@@ -310,20 +310,23 @@ pub fn as_named_blocks(owned: &[(String, Vec<f32>)]) -> Vec<(&str, QuantizedBloc
         .collect()
 }
 
-/// The CPU oracle for a GPU parity gate: `policy` with flash narrowing granted.
+/// The CPU oracle for a GPU parity gate: the strict `NumericPolicy::bit_exact()`
+/// reference with flash narrowing granted and nothing else.
 /// Without the grant the CPU binds `CachedAttentionArithmetic::LlamaFlash`
 /// (llama.cpp's f16 query, key, value and accumulator); the GPU kernels run
 /// `OnlineF32`, so the two would differ by f16 rounding in the fused attention
-/// op and the gate would measure that, not the kernel.
+/// op and the gate would measure that, not the kernel. The oracle takes no
+/// caller policy: contraction and reassociation are permissions the GPU plan
+/// exercises, so granting them to the reference would hide the very
+/// difference the gate exists to bound.
 pub fn evaluate_gpu_oracle(
     program: &[Op],
     symbols: &[u64],
     named: &[(&str, QuantizedBlock<'_>)],
     outputs: &[NodeId],
-    policy: NumericPolicy,
 ) -> Evaluated {
     let config = TensorExecutionConfig::builder()
-        .numeric(policy.with_flash_narrowing(true))
+        .numeric(NumericPolicy::bit_exact().with_flash_narrowing(true))
         .build();
     let mut free_buffers = BufferPools::default();
     let mut validated = None;
