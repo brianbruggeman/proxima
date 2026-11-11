@@ -290,6 +290,16 @@ fn main() {
         Ok("f32") | Err(_) => GgmlType::F32,
         Ok(other) => panic!("PROXIMA_KV_CACHE_TYPE={other}: expected `f32` or `f16`"),
     };
+    let kv_cache_key_type = match std::env::var("PROXIMA_KV_CACHE_KEY_TYPE").as_deref() {
+        Ok("q4_0") => GgmlType::Q4_0,
+        Ok("q8_0") => GgmlType::Q8_0,
+        Ok("f16") => GgmlType::F16,
+        Ok("f32") => GgmlType::F32,
+        Err(_) => kv_cache_type,
+        Ok(other) => panic!(
+            "PROXIMA_KV_CACHE_KEY_TYPE={other}: expected `f32`, `f16`, `q8_0` or `q4_0`"
+        ),
+    };
     let speculative_settings = SpeculativeSettings::from_env()
         .expect("PROXIMA_SPECULATIVE_* env parses as the serving speculative settings");
     let speculative = speculative_settings.as_speculative_config();
@@ -307,7 +317,7 @@ fn main() {
         speculative,
         gpu_layers: GPU_LAYERS_ALL,
         numeric_policy,
-        kv_cache_key_quant: kv_cache_type,
+        kv_cache_key_quant: kv_cache_key_type,
         kv_cache_value_quant: kv_cache_type,
         flash_attention: false,
         batch_size: 0,
@@ -400,6 +410,8 @@ fn main() {
         // behind `instrument` -- see `TokenEvent`'s own field doc on why.
         let mut prefill_elapsed_ms: u64 = 0;
         let mut previous_elapsed_ms: u64 = 0;
+        // step 0's ns delta includes the call's tokenize setup before the first event
+        let mut previous_tick = Instant::now();
         let mut token_events: usize = 0;
         let mut steady_rss: Vec<u64> = Vec::new();
         let mut steady_footprint: Vec<u64> = Vec::new();
@@ -424,17 +436,21 @@ fn main() {
                     "decode"
                 };
                 let step_ms = event.elapsed_ms.saturating_sub(previous_elapsed_ms);
+                let now_tick = Instant::now();
+                let step_ns = now_tick.duration_since(previous_tick).as_nanos() as u64;
+                previous_tick = now_tick;
                 #[cfg(feature = "instrument")]
                 proxima_telemetry::info!(
                     run_index = run_index as u64,
                     step = event.step as u64,
                     step_ms,
+                    step_ns,
                     phase,
                     "step_time"
                 );
                 #[cfg(not(feature = "instrument"))]
                 eprintln!(
-                    "step_time run_index={run_index} step={} step_ms={step_ms} phase={phase}",
+                    "step_time run_index={run_index} step={} step_ms={step_ms} step_ns={step_ns} phase={phase}",
                     event.step,
                 );
                 previous_elapsed_ms = event.elapsed_ms;
