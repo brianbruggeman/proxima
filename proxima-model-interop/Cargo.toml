@@ -589,6 +589,12 @@ required-features = ["std", "metal"]
 name = "decode_arms"
 required-features = ["std"]
 
+# Interleaved KV scoreboard: proxima builds against llama-completion cold/warm,
+# per-process footprint, TSV plus mean/CoV markdown.
+[[example]]
+name = "kv_scoreboard"
+required-features = ["std"]
+
 # Ranks proxima census time against llama.cpp per-op timing, and tabulates the
 # decode loop telemetry timeline (slice 0 of the decode-prefill-parity spec).
 [[example]]
