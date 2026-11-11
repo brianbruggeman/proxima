@@ -101,13 +101,15 @@ fn integer_load_msl(layout: &FloatLayout, name: &str) -> String {
     let mantissa_bits = layout.mantissa_bits;
     let mantissa_mask = (1u64 << mantissa_bits) - 1;
     let scale = integer_scale(layout);
+    // the device has no native 64-bit integer, so the wide type is used only when 32 bits cannot hold the signed difference
+    let signed = if mantissa_bits <= 30 { "int" } else { "long" };
     let value = match layout.sign {
-        SignEncoding::Absent => "(float)(long)mantissa".to_string(),
+        SignEncoding::Absent => "(float)mantissa".to_string(),
         SignEncoding::Magnitude => format!(
-            "((code >> {mantissa_bits}u) & 1u) == 0u ? (float)(long)mantissa : -(float)(long)mantissa"
+            "((code >> {mantissa_bits}u) & 1u) == 0u ? (float)mantissa : -(float)mantissa"
         ),
         SignEncoding::TwosComplement => format!(
-            "(float)((long)mantissa - (long)(((code >> {mantissa_bits}u) & 1u) << {mantissa_bits}u))"
+            "(float)(({signed})mantissa - ({signed})(((code >> {mantissa_bits}u) & 1u) << {mantissa_bits}u))"
         ),
     };
     format!(

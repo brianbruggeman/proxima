@@ -344,22 +344,26 @@ fn run_block_unpack_kernel(layout: &BlockLayout, blocks: &[u8], elements: usize)
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-#[test]
-fn a_rendered_q4_0_block_unpack_equals_the_host_codec_decode_bit_for_bit_over_4096_blocks() {
+#[proxima::test]
+#[case::q4_0_nibble_pairs(NumericFormat::Q4_0)]
+#[case::q8_0_whole_bytes(NumericFormat::Q8_0)]
+#[case::q5_0_with_a_high_plane(NumericFormat::Q5_0)]
+async fn a_rendered_block_unpack_equals_the_host_codec_decode_bit_for_bit_over_4096_blocks(
+    #[case] format: NumericFormat,
+) {
     use proxima_numeric::FormatCodec;
 
-    let format = NumericFormat::Q4_0;
     let NumericFormat::Block(layout) = format else {
-        panic!("Q4_0 is a block format");
+        panic!("{format:?} is a block format");
     };
-    let codec = FormatCodec::for_format(&format).expect("Q4_0 resolves a host codec");
+    let codec = FormatCodec::for_format(&format).expect("the block format resolves a host codec");
     let blocks = 4096usize;
     let elements = blocks * usize::from(layout.elements);
     let values = random_values(0x5eed_0004, elements);
     let mut packed = alloc::vec![0u8; codec.packed_len(elements).expect("whole blocks")];
-    codec.encode(&values, &mut packed).expect("host encodes Q4_0");
+    codec.encode(&values, &mut packed).expect("host encodes the block format");
     let mut slots = alloc::vec![core::mem::MaybeUninit::<f32>::uninit(); elements];
-    codec.decode(&packed, &mut slots).expect("host decodes Q4_0");
+    codec.decode(&packed, &mut slots).expect("host decodes the block format");
     // decode returned Ok, which initialises every slot of its output
     let expected: alloc::vec::Vec<u32> = slots.iter().map(|slot| unsafe { slot.assume_init() }.to_bits()).collect();
 
@@ -368,7 +372,7 @@ fn a_rendered_q4_0_block_unpack_equals_the_host_codec_decode_bit_for_bit_over_40
         .map(|value| value.to_bits())
         .collect();
 
-    assert_eq!(observed.len(), 131_072, "4096 blocks of 32 elements were compared");
+    assert_eq!(observed.len(), elements, "every element of 4096 blocks was compared");
     let mismatches = expected.iter().zip(&observed).filter(|(want, got)| want != got).count();
     assert_eq!(mismatches, 0, "rendered MSL decode must equal the host codec decode on every element");
 }
