@@ -66,43 +66,42 @@ pub(super) fn render_cached_attention_decode_split(
             reason: "the decode split reads a K cache that is a block layout or the same codec as V",
         });
     }
-    let (cached_kv_type, mut key_pointers, value_pointers, mut key_load, value_load) =
-        match cached_kv_codec {
-            None => (
-                element_type,
-                PLAIN_KV_POINTERS,
-                "",
-                PLAIN_KEY_LOAD,
-                PLAIN_VALUE_LOAD,
-            ),
-            Some(Codec::Float16) => (
-                "half",
+    let (cached_kv_type, mut split) = match cached_kv_codec {
+        None => (element_type, None),
+        Some(Codec::Float16) => (
+            "half",
+            Some((
                 HALF_KEY_POINTERS,
                 HALF_VALUE_POINTERS,
                 HALF_KEY_LOAD,
                 HALF_VALUE_LOAD,
-            ),
-            Some(Codec::BFloat16) => (
-                "ushort",
+            )),
+        ),
+        Some(Codec::BFloat16) => (
+            "ushort",
+            Some((
                 BF16_KEY_POINTERS,
                 BF16_VALUE_POINTERS,
                 BF16_KEY_LOAD,
                 BF16_VALUE_LOAD,
-            ),
-            Some(Codec::BFloat8) => (
-                "uchar",
+            )),
+        ),
+        Some(Codec::BFloat8) => (
+            "uchar",
+            Some((
                 BF8_KEY_POINTERS,
                 BF8_VALUE_POINTERS,
                 BF8_KEY_LOAD,
                 BF8_VALUE_LOAD,
-            ),
-            Some(_) => {
-                return Err(EmitError::CachedAttentionKvCodecNotSupported {
-                    node: resolved.node,
-                    reason: "the decode split reads cached V that is plain, Float16, BFloat16, or BFloat8",
-                });
-            }
-        };
+            )),
+        ),
+        Some(_) => {
+            return Err(EmitError::CachedAttentionKvCodecNotSupported {
+                node: resolved.node,
+                reason: "the decode split reads cached V that is plain, Float16, BFloat16, or BFloat8",
+            });
+        }
+    };
     let (key_store, key_helper, key_blocks_per_head, key_block_bytes) = match key_block {
         Some(layout) => {
             let elements = u64::from(layout.elements);
@@ -112,8 +111,14 @@ pub(super) fn render_cached_attention_decode_split(
                     reason: "a block K cache needs a plane row of head_dim / 2 elements to be whole blocks",
                 });
             }
-            key_pointers = BLOCK_KEY_POINTERS;
-            key_load = BLOCK_KEY_LOAD;
+            let Some((key_pointers, _, key_load, _)) = split.as_mut() else {
+                return Err(EmitError::CachedAttentionKvCodecNotSupported {
+                    node: resolved.node,
+                    reason: "a block K cache needs a cached V that is Float16, BFloat16, or BFloat8",
+                });
+            };
+            *key_pointers = BLOCK_KEY_POINTERS;
+            *key_load = BLOCK_KEY_LOAD;
             (
                 "uchar",
                 block_unpack_msl(layout, &key_block_helper_name(layout)),
@@ -126,11 +131,40 @@ pub(super) fn render_cached_attention_decode_split(
     let key_helper_name = key_block
         .map(key_block_helper_name)
         .unwrap_or_default();
-    let all_pointers = format!("{key_pointers}\n                {value_pointers}");
+    let batch_loops = match split {
+        None => batch_loop(
+            "batch_start < num_local_keys",
+            GENERIC_STEP_SETUP,
+            &format!("{PLAIN_KV_POINTERS}{POINTER_SEPARATOR}"),
+            PLAIN_KEY_LOAD,
+            PLAIN_VALUE_LOAD,
+        ),
+        Some((key_pointers, value_pointers, key_load, value_load)) => {
+            let generic_pointers = [
+                key_pointers.0,
+                key_pointers.1,
+                value_pointers.0,
+                value_pointers.1,
+            ]
+            .join(POINTER_SEPARATOR);
+            let generic_loop = batch_loop(
+                "batch_start < num_local_keys",
+                GENERIC_STEP_SETUP,
+                &generic_pointers,
+                &branchy_load(key_load),
+                &branchy_load(value_load),
+            );
+            let cached_loop = batch_loop(
+                CACHED_ONLY_BATCH_CONDITION,
+                CACHED_ONLY_STEP_SETUP,
+                &[key_pointers.0, value_pointers.0].join(POINTER_SEPARATOR),
+                key_load.0,
+                value_load.0,
+            );
+            format!("{cached_loop}{generic_loop}")
+        }
+    };
     let substitutions = [
-        ("@KV_POINTERS@", all_pointers),
-        ("@KEY_LOAD@", key_load.to_string()),
-        ("@VALUE_LOAD@", value_load.to_string()),
         ("@KEY_BLOCK_LOAD@", key_helper_name),
         (
             "@KEY_BLOCK_ELEMENTS@",
@@ -167,7 +201,8 @@ pub(super) fn render_cached_attention_decode_split(
     if cached_kv_codec == Some(Codec::BFloat8) {
         source.push_str(BF8_VECTOR_HELPER);
     }
-    let mut body = DECODE_SPLIT_KERNEL.to_string();
+    let mut body = DECODE_SPLIT_KERNEL.replace("@BATCH_LOOPS@", &batch_loops);
+    body.push_str(DECODE_SPLIT_TAIL);
     for (token, value) in &substitutions {
         body = body.replace(token, value);
     }
@@ -186,6 +221,58 @@ pub(super) fn index_literal(value: i64, index_type: &str, literal_suffix: &str) 
     format!("{}{literal_suffix}", value.clamp(lowest, highest))
 }
 
+// cached keys have the lowest indices, so a batch whose last key is cached has only cached keys; the
+// batches are the same ones the generic loop would run, so the accumulation order is unchanged
+const CACHED_ONLY_BATCH_CONDITION: &str = "batch_start < num_local_keys && slice_start + (batch_start + (@INDEX@)batch * (@INDEX@)keys_in_flight - 1@L@) * chunks < cached_key_rows";
+
+const CACHED_ONLY_STEP_SETUP: &str = "@INDEX@ local_index = batch_start + (@INDEX@)step * (@INDEX@)keys_in_flight + (@INDEX@)ty;
+                @INDEX@ key = slice_start + local_index * chunks;
+                bool live = local_index < num_local_keys;
+                if (live && key - cached_key_rows - query_row < cached_lower) { live = false; }
+                valid[step] = live;
+                @INDEX@ kbase = key * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
+                @KV_POINTERS@";
+
+const GENERIC_STEP_SETUP: &str = "@INDEX@ local_index = batch_start + (@INDEX@)step * (@INDEX@)keys_in_flight + (@INDEX@)ty;
+                @INDEX@ key = slice_start + local_index * chunks;
+                bool cached = key < cached_key_rows; @INDEX@ new_index = key - cached_key_rows;
+                bool live = local_index < num_local_keys;
+                if (live) {
+                    @INDEX@ relative = (cached ? key - cached_key_rows : new_index) - query_row;
+                    if (cached && relative < cached_lower) { live = false; }
+                    if (!cached && relative > new_upper) { live = false; }
+                }
+                valid[step] = live;
+                @INDEX@ kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
+                @KV_POINTERS@";
+
+/// A cache format's declaration or load as `(cached format, float new)`: the branchy loop joins both,
+/// the cached-only loop takes the first alone.
+type Parts = (&'static str, &'static str);
+
+const POINTER_SEPARATOR: &str = "\n                ";
+
+fn batch_loop(
+    condition: &str,
+    step_setup: &str,
+    pointers: &str,
+    key_load: &str,
+    value_load: &str,
+) -> String {
+    BATCH_LOOP
+        .replace("@BATCH_CONDITION@", condition)
+        .replace(
+            "@STEP_SETUP@",
+            &step_setup.replace("@KV_POINTERS@", pointers),
+        )
+        .replace("@KEY_LOAD@", key_load)
+        .replace("@VALUE_LOAD@", value_load)
+}
+
+fn branchy_load((cached, new): Parts) -> String {
+    format!("if (cached) {{ {cached} }} else {{ {new} }}")
+}
+
 const PLAIN_KV_POINTERS: &str =
     "device const @T@4* kr4 = (device const @T@4*)((cached ? in2 : in4) + kbase);
                 device const @T@4* ki4 = (device const @T@4*)((cached ? in3 : in5) + kbase);
@@ -198,64 +285,88 @@ const PLAIN_VALUE_LOAD: &str = "value_row[step][slot] = float4(v4[index]);";
 
 // the cached range is half-width and the new range is the op's own element
 // type, so one pointer cannot select between them as the plain form does
-const HALF_KEY_POINTERS: &str =
+const HALF_KEY_POINTERS: Parts = (
     "device const @KV@4* kr4_cached = (device const @KV@4*)(in2 + kbase);
-                device const @KV@4* ki4_cached = (device const @KV@4*)(in3 + kbase);
-                device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
-                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);";
+                device const @KV@4* ki4_cached = (device const @KV@4*)(in3 + kbase);",
+    "device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
+                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);",
+);
 
-const HALF_VALUE_POINTERS: &str =
-    "device const @KV@4* v4_cached = (device const @KV@4*)(in6 + kbase * 2);
-                device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);";
+const HALF_VALUE_POINTERS: Parts = (
+    "device const @KV@4* v4_cached = (device const @KV@4*)(in6 + kbase * 2);",
+    "device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);",
+);
 
 // a block cache is addressed in whole blocks: row `key` of head `kv_head` starts at block
 // (key * kv_heads + kv_head) * blocks_per_head, then the element's block and index come from its place in the head row
-const BLOCK_KEY_POINTERS: &str =
+const BLOCK_KEY_POINTERS: Parts = (
     "device const uchar* kr_cached = in2 + (((long)key * (long)kv_heads + (long)kv_head) * @KEY_BLOCKS_PER_HEAD@L) * @KEY_BLOCK_BYTES@L;
-                device const uchar* ki_cached = in3 + (((long)key * (long)kv_heads + (long)kv_head) * @KEY_BLOCKS_PER_HEAD@L) * @KEY_BLOCK_BYTES@L;
-                device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
-                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);";
+                device const uchar* ki_cached = in3 + (((long)key * (long)kv_heads + (long)kv_head) * @KEY_BLOCKS_PER_HEAD@L) * @KEY_BLOCK_BYTES@L;",
+    "device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
+                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);",
+);
 
-const BLOCK_KEY_LOAD: &str = "if (cached) { uint element = (uint)index * 4u; device const uchar* kr_block = kr_cached + (element / @KEY_BLOCK_ELEMENTS@u) * @KEY_BLOCK_BYTES@u; device const uchar* ki_block = ki_cached + (element / @KEY_BLOCK_ELEMENTS@u) * @KEY_BLOCK_BYTES@u; uint within = element % @KEY_BLOCK_ELEMENTS@u; key_real[step][slot] = @KEY_BLOCK_LOAD@_run(kr_block, within); key_imag[step][slot] = @KEY_BLOCK_LOAD@_run(ki_block, within); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
+const BLOCK_KEY_LOAD: Parts = (
+    "uint element = (uint)index * 4u; device const uchar* kr_block = kr_cached + (element / @KEY_BLOCK_ELEMENTS@u) * @KEY_BLOCK_BYTES@u; device const uchar* ki_block = ki_cached + (element / @KEY_BLOCK_ELEMENTS@u) * @KEY_BLOCK_BYTES@u; uint within = element % @KEY_BLOCK_ELEMENTS@u; key_real[step][slot] = @KEY_BLOCK_LOAD@_run(kr_block, within); key_imag[step][slot] = @KEY_BLOCK_LOAD@_run(ki_block, within);",
+    NEW_KEY_LOAD,
+);
 
 /// The helper's name comes from the layout's own geometry, so a kernel that reads two layouts would hold two helpers.
 fn key_block_helper_name(layout: &BlockLayout) -> String {
     format!("omega_key_block_{}x{}", layout.elements, layout.block_bytes)
 }
 
-const HALF_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = float4(kr4_cached[index]); key_imag[step][slot] = float4(ki4_cached[index]); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
+// the float new range loads the same way beside every cached format
+const NEW_KEY_LOAD: &str = "key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]);";
 
-const HALF_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
+const NEW_VALUE_LOAD: &str = "value_row[step][slot] = float4(v4_new[index]);";
 
-const BF16_KEY_POINTERS: &str =
+const HALF_KEY_LOAD: Parts = (
+    "key_real[step][slot] = float4(kr4_cached[index]); key_imag[step][slot] = float4(ki4_cached[index]);",
+    NEW_KEY_LOAD,
+);
+
+const HALF_VALUE_LOAD: Parts = ("value_row[step][slot] = float4(v4_cached[index]);", NEW_VALUE_LOAD);
+
+const BF16_KEY_POINTERS: Parts = (
     "device const ushort4* kr4_cached = (device const ushort4*)(in2 + kbase);
-                device const ushort4* ki4_cached = (device const ushort4*)(in3 + kbase);
-                device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
-                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);";
+                device const ushort4* ki4_cached = (device const ushort4*)(in3 + kbase);",
+    "device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
+                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);",
+);
 
-const BF16_VALUE_POINTERS: &str =
-    "device const ushort4* v4_cached = (device const ushort4*)(in6 + kbase * 2);
-                device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);";
+const BF16_VALUE_POINTERS: Parts = (
+    "device const ushort4* v4_cached = (device const ushort4*)(in6 + kbase * 2);",
+    "device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);",
+);
 
-const BF16_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = omega_bf16x4_to_float4(kr4_cached[index]); key_imag[step][slot] = omega_bf16x4_to_float4(ki4_cached[index]); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
+const BF16_KEY_LOAD: Parts = (
+    "key_real[step][slot] = omega_bf16x4_to_float4(kr4_cached[index]); key_imag[step][slot] = omega_bf16x4_to_float4(ki4_cached[index]);",
+    NEW_KEY_LOAD,
+);
 
-const BF16_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = omega_bf16x4_to_float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
+const BF16_VALUE_LOAD: Parts = ("value_row[step][slot] = omega_bf16x4_to_float4(v4_cached[index]);", NEW_VALUE_LOAD);
 
 const BF16_VECTOR_HELPER: &str = "static inline float4 omega_bf16x4_to_float4(ushort4 value) { return float4(as_type<float>((uint)value.x << 16u), as_type<float>((uint)value.y << 16u), as_type<float>((uint)value.z << 16u), as_type<float>((uint)value.w << 16u)); }\n";
 
-const BF8_KEY_POINTERS: &str =
+const BF8_KEY_POINTERS: Parts = (
     "device const uchar4* kr4_cached = (device const uchar4*)(in2 + kbase);
-                device const uchar4* ki4_cached = (device const uchar4*)(in3 + kbase);
-                device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
-                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);";
+                device const uchar4* ki4_cached = (device const uchar4*)(in3 + kbase);",
+    "device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
+                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);",
+);
 
-const BF8_VALUE_POINTERS: &str =
-    "device const uchar4* v4_cached = (device const uchar4*)(in6 + kbase * 2);
-                device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);";
+const BF8_VALUE_POINTERS: Parts = (
+    "device const uchar4* v4_cached = (device const uchar4*)(in6 + kbase * 2);",
+    "device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);",
+);
 
-const BF8_KEY_LOAD: &str = "if (cached) { key_real[step][slot] = omega_bf8x4_to_float4(kr4_cached[index]); key_imag[step][slot] = omega_bf8x4_to_float4(ki4_cached[index]); } else { key_real[step][slot] = float4(kr4_new[index]); key_imag[step][slot] = float4(ki4_new[index]); }";
+const BF8_KEY_LOAD: Parts = (
+    "key_real[step][slot] = omega_bf8x4_to_float4(kr4_cached[index]); key_imag[step][slot] = omega_bf8x4_to_float4(ki4_cached[index]);",
+    NEW_KEY_LOAD,
+);
 
-const BF8_VALUE_LOAD: &str = "if (cached) { value_row[step][slot] = omega_bf8x4_to_float4(v4_cached[index]); } else { value_row[step][slot] = float4(v4_new[index]); }";
+const BF8_VALUE_LOAD: Parts = ("value_row[step][slot] = omega_bf8x4_to_float4(v4_cached[index]);", NEW_VALUE_LOAD);
 
 const DECODE_SPLIT_KERNEL: &str = r#"struct Uniforms { long total_elements; long context_chunks; long splits; };
 
@@ -299,22 +410,15 @@ kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [
         }
         @INDEX@ slice_start = lo + chunk;
         @INDEX@ num_local_keys = (slice_start < hi) ? ((hi - 1@L@ - slice_start) / chunks) + 1@L@ : 0@L@;
-        for (@INDEX@ batch_start = 0@L@; batch_start < num_local_keys; batch_start += (@INDEX@)batch * (@INDEX@)keys_in_flight) {
+        @INDEX@ batch_start = 0@L@;
+        @BATCH_LOOPS@
+"#;
+
+const BATCH_LOOP: &str = r#"        for (; @BATCH_CONDITION@; batch_start += (@INDEX@)batch * (@INDEX@)keys_in_flight) {
             float4 key_real[batch][plane_slots]; float4 key_imag[batch][plane_slots]; float4 value_row[batch][row_slots];
             bool valid[batch];
             OMEGA_UNROLL for (short step = 0; step < batch; step++) {
-                @INDEX@ local_index = batch_start + (@INDEX@)step * (@INDEX@)keys_in_flight + (@INDEX@)ty;
-                @INDEX@ key = slice_start + local_index * chunks;
-                bool cached = key < cached_key_rows; @INDEX@ new_index = key - cached_key_rows;
-                bool live = local_index < num_local_keys;
-                if (live) {
-                    @INDEX@ relative = (cached ? key - cached_key_rows : new_index) - query_row;
-                    if (cached && relative < cached_lower) { live = false; }
-                    if (!cached && relative > new_upper) { live = false; }
-                }
-                valid[step] = live;
-                @INDEX@ kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);
-                @KV_POINTERS@
+                @STEP_SETUP@
                 OMEGA_UNROLL for (short slot = 0; slot < plane_slots; slot++) {
                     short index = tx + slot * lanes_per_key;
                     key_real[step][slot] = float4(0.0f); key_imag[step][slot] = float4(0.0f);
@@ -354,7 +458,9 @@ kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [
             }
             maximum = next_max;
         }
-        if (lanes_per_key <= 8) {
+"#;
+
+const DECODE_SPLIT_TAIL: &str = r#"        if (lanes_per_key <= 8) {
             sum += simd_shuffle_xor(sum, (ushort)8);
             OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) { weighted[slot] += simd_shuffle_xor(weighted[slot], (ushort)8); }
         }
