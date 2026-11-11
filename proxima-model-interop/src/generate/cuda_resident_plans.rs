@@ -35,6 +35,7 @@ pub(super) struct CudaPlanIdentity {
     numeric_policy: NumericPolicy,
     exact_activations: bool,
     kv_cache_element: GgmlType,
+    kv_value_cache_element: GgmlType,
     cached_attention_fusion: bool,
     gated_delta_net_fusion: bool,
     moe_topk_fusion: bool,
@@ -55,6 +56,7 @@ impl CudaPlanIdentity {
             numeric_policy: config.numeric_policy,
             exact_activations: config.exact_activations,
             kv_cache_element: config.kv_cache_key_quant,
+            kv_value_cache_element: config.kv_cache_value_quant,
             cached_attention_fusion: config.cached_attention_fusion,
             gated_delta_net_fusion: config.gated_delta_net_fusion,
             moe_topk_fusion: config.moe_topk_fusion,
@@ -143,6 +145,21 @@ mod tests {
 
     fn key(new_count: usize, kv_bound_extent: usize, outputs: &[u32]) -> CudaPlanKey {
         (new_count, kv_bound_extent, outputs.iter().copied().map(NodeId).collect(), false, 0)
+    }
+
+    #[test]
+    fn identity_separates_plans_whose_value_cache_format_alone_differs() {
+        let f16_values = ServingConfig {
+            kv_cache_key_quant: GgmlType::Q4_0,
+            kv_cache_value_quant: GgmlType::F16,
+            ..ServingConfig::default()
+        };
+        let bf16_values = ServingConfig {
+            kv_cache_value_quant: GgmlType::Bf16,
+            ..f16_values
+        };
+
+        assert_ne!(CudaPlanIdentity::of(&f16_values), CudaPlanIdentity::of(&bf16_values));
     }
 
     #[proxima::test]

@@ -1769,6 +1769,7 @@ mod tests {
     use super::*;
     use crate::generate::chunk_shift::ChunkRun;
     use crate::serving::{ContextLength, GdnPrefillBackend};
+    use proxima_gguf::types::GgmlType;
 
     const ANY_OVERLAP: u32 = 0;
 
@@ -3529,6 +3530,11 @@ mod tests {
     #[case::moe_monolithic_high_mmap(|config| ServingConfig { moe_monolithic_high_mmap: !config.moe_monolithic_high_mmap, ..config })]
     #[case::moe_layer_window(|config| ServingConfig { moe_layer_window: config.moe_layer_window + 1, ..config })]
     #[case::qwen35moe_residency_budget(|config| ServingConfig { moe_residency_budget_bytes: config.moe_residency_budget_bytes + (1 << 30), ..config })]
+    #[case::kv_cache_f16_pair(|config| ServingConfig { kv_cache_key_quant: GgmlType::F16, kv_cache_value_quant: GgmlType::F16, ..config })]
+    #[case::kv_cache_bf16_pair(|config| ServingConfig { kv_cache_key_quant: GgmlType::Bf16, kv_cache_value_quant: GgmlType::Bf16, ..config })]
+    #[case::kv_cache_q8_0_pair(|config| ServingConfig { kv_cache_key_quant: GgmlType::Q8_0, kv_cache_value_quant: GgmlType::Q8_0, ..config })]
+    #[case::kv_cache_q4_0_key_beside_f16_value(|config| ServingConfig { kv_cache_key_quant: GgmlType::Q4_0, kv_cache_value_quant: GgmlType::F16, ..config })]
+    #[case::kv_cache_value_format_alone(|config| ServingConfig { kv_cache_value_quant: GgmlType::F16, ..config })]
     async fn a_request_differing_in_a_row_affecting_config_field_misses(
         #[case] change: fn(ServingConfig<'static>) -> ServingConfig<'static>,
     ) {
