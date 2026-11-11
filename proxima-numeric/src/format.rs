@@ -225,8 +225,8 @@ pub enum NumericFormat {
 /// rename would silently re-label evidence that is already on disk.
 impl core::fmt::Debug for NumericFormat {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        if let Some(position) = NumericFormat::ALL.iter().position(|named| named == self) {
-            return formatter.write_str(NumericFormat::DEBUG_NAMES[position]);
+        if let Some(name) = self.debug_name() {
+            return formatter.write_str(name);
         }
         match self {
             NumericFormat::Scalar(layout) => formatter.debug_tuple("Scalar").field(layout).finish(),
@@ -254,6 +254,31 @@ impl NumericFormat {
             Self::Scalar(layout) => layout.width().div_ceil(8) as u16,
             Self::Block(layout) => layout.block_bytes,
             Self::Levels(levels) => levels.bytes(),
+        }
+    }
+
+    /// Bytes `elements` values occupy packed in this format, `None` unless `elements` is a whole
+    /// number of blocks: 64 values of Q4_0 are 2 blocks, 36 bytes; 17 are not whole.
+    #[must_use]
+    pub const fn packed_len(&self, elements: usize) -> Option<usize> {
+        let block_elements = match self.elements_per_block() {
+            0 => 1,
+            count => count as usize,
+        };
+        if !elements.is_multiple_of(block_elements) {
+            return None;
+        }
+        Some(elements / block_elements * self.bytes_per_block() as usize)
+    }
+
+    /// Whether two formats are scalar layouts that convert into each other changing no bit
+    /// ([`FloatLayout::is_identity_of`]); a block or level format is the identity of nothing but
+    /// itself and answers `false` here, as the question is a property of the layouts, not a name.
+    #[must_use]
+    pub const fn is_identity_of(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Scalar(layout), Self::Scalar(wider)) => layout.is_identity_of(wider),
+            _ => false,
         }
     }
 
@@ -331,7 +356,8 @@ impl NumericFormat {
     /// Bytes per fp6 E3M2 block: the 6-bit E3M2 fields packed, then the f16 scale.
     pub const FP6_E3M2_BLOCK_BYTES: usize = BlockLayout::FP6_E3M2.block_bytes as usize;
 
-    /// Every format, in wire-tag order: index i carries tag i.
+    /// Every wire-tagged format, in wire-tag order: index i carries tag i. A named format with no
+    /// wire tag is in [`Self::UNTAGGED`] instead, so adding one never shifts a tag.
     pub const ALL: [Self; 36] = [
         Self::Q2K,
         Self::Q3K,
@@ -410,6 +436,26 @@ impl NumericFormat {
         "Ptq1_0",
         "Q8_1Grouped",
     ];
+
+    /// Named formats that carry no wire tag, with their `Debug` spelling. Lives beside
+    /// [`Self::ALL`] and [`Self::DEBUG_NAMES`] so [`Self::debug_name`] resolves every named
+    /// constant, tagged or not, in one place.
+    pub const UNTAGGED: [(Self, &'static str); 1] = [(Self::Float32, "Float32")];
+
+    /// The `Debug` spelling of a named format, wire-tagged or untagged; `None` for a layout this
+    /// crate has no constant for.
+    #[must_use]
+    pub fn debug_name(&self) -> Option<&'static str> {
+        Self::ALL
+            .iter()
+            .position(|named| named == self)
+            .map(|position| Self::DEBUG_NAMES[position])
+            .or_else(|| {
+                Self::UNTAGGED
+                    .iter()
+                    .find_map(|(named, name)| (named == self).then_some(*name))
+            })
+    }
 
     /// Every canonical name, same order as [`Self::ALL`]. One table serves
     /// [`Self::name`] and [`Self::from_name`]; with [`Self::DEBUG_NAMES`] it is one of three
@@ -508,6 +554,9 @@ impl NumericFormat {
     pub const Q8K: Self = Self::Block(BlockLayout::Q8_K);
     pub const Q8_1Grouped: Self = Self::Block(BlockLayout::Q8_1_GROUPED);
 
+    /// f32: one IEEE binary32 element per value, the layout `DType::FLOAT32` uses. It has no wire
+    /// tag, so it is in [`Self::UNTAGGED`], not [`Self::ALL`].
+    pub const Float32: Self = Self::Scalar(FloatLayout::BF32);
     /// f16: one IEEE binary16 element per value.
     pub const Float16: Self = Self::Scalar(FloatLayout::F16);
     /// bf16: one bfloat16 element per value.
@@ -612,6 +661,26 @@ mod tests {
     ];
 
     #[test]
+    fn packed_len_is_whole_blocks_of_bytes_or_none() {
+        assert_eq!(NumericFormat::Float16.packed_len(512), Some(1024));
+        assert_eq!(NumericFormat::Q4_0.packed_len(64), Some(36));
+        assert_eq!(NumericFormat::Q4_0.packed_len(17), None);
+    }
+
+    #[test]
+    fn an_untagged_format_names_itself_in_debug_and_holds_no_wire_tag() {
+        for (format, name) in NumericFormat::UNTAGGED {
+            assert_eq!(std::format!("{format:?}"), name);
+            assert!(
+                !NumericFormat::ALL.contains(&format),
+                "{name} would shift the wire tags"
+            );
+        }
+        assert_eq!(std::format!("{:?}", NumericFormat::Float32), "Float32");
+        assert_eq!(NumericFormat::Float32, crate::DType::FLOAT32.format().expect("f32 is numeric"));
+    }
+
+    #[test]
     fn the_debug_table_stays_aligned_with_the_format_table() {
         assert_eq!(NumericFormat::DEBUG_NAMES.len(), NumericFormat::ALL.len());
         let mut seen = std::vec::Vec::new();
@@ -638,6 +707,7 @@ mod tests {
             specials: Specs::None,
             bias_override: None,
             sign: Sign::Absent,
+            nan: Default::default(),
         };
         assert_eq!(NumericFormat::Scalar(empty).packed_elements(), 0);
         assert_eq!(NumericFormat::Scalar(empty).packed_bytes(), 0);

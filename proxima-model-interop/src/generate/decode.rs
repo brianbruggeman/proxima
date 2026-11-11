@@ -4722,8 +4722,10 @@ only the single-row decode kernel reads the half-width device cache",
                             &mut layer_caches,
                             &layer_row_widths,
                             cached_len,
-                            positions_needed + device_kv_decode_rows,
-                            serving_config.kv_bucket_tokens,
+                            (
+                                positions_needed + device_kv_decode_rows,
+                                serving_config.kv_bucket_tokens,
+                            ),
                             device_kv_step_rows,
                             |bytes| {
                                 let kept = self
@@ -4744,7 +4746,7 @@ only the single-row decode kernel reads the half-width device cache",
                                     Ok,
                                 )
                             },
-                            serving_config.kv_cache_key_quant.into(),
+                            device_kv::cache_format(serving_config.kv_cache_key_quant)?,
                         )?;
                         #[cfg(feature = "instrument")]
                         debug!(
@@ -4758,7 +4760,7 @@ only the single-row decode kernel reads the half-width device cache",
                         );
                         if let Some(device) = &device_kv {
                             device_resident_flags = device.resident_layers();
-                            if device.cache_codec().is_some() {
+                            if device.cache_codec()?.is_some() {
                                 runtime.drop_decode_plans();
                             }
                             debug!(
@@ -4806,7 +4808,11 @@ did not hold every cached position)",
                     let device_resident_view: &[bool] =
                         if kv_live { &kv_carried_layers } else { &[] };
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    let device_cache_codec = device_kv.as_ref().and_then(DeviceKv::cache_codec);
+                    let device_cache_codec = device_kv
+                        .as_ref()
+                        .map(DeviceKv::cache_codec)
+                        .transpose()?
+                        .flatten();
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let device_cache_codec: Option<Codec> = None;
                     let sliding_len_scalar = sliding_cached_len_scalar(&layer_caches, cached_len);
@@ -5926,7 +5932,7 @@ did not hold every cached position)",
                     if let Some(device) = device_kv.as_ref() {
                         #[cfg(feature = "instrument")]
                         let narrow_started = read_ticks();
-                        device.commit_step(cached_len, new_count);
+                        device.commit_step(cached_len, new_count)?;
                         #[cfg(feature = "instrument")]
                         debug!(
                             step = step as u64,
@@ -7200,7 +7206,7 @@ did not hold every cached position)",
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if let Some(device) = device_kv.as_ref() {
-            device.flush(&mut layer_caches, cached_len, positions_needed);
+            device.flush(&mut layer_caches, cached_len, positions_needed)?;
             seal_attention_layers(
                 &mut layer_caches,
                 &layer_row_widths,

@@ -1,3 +1,5 @@
+use proxima_numeric::float_layout::FloatLayout;
+
 use super::*;
 
 /// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
@@ -950,4 +952,24 @@ fn merge_grid(node: NodeId, total_elements: u64) -> Result<GridSpec, EmitError> 
         depth: 1,
         grid2d,
     })
+}
+
+/// The codec the cached-attention emitter reads a K/V cache stored as `format` with: `Ok(None)`
+/// when `format` is the plain buffer every kernel form reads (the graph's own f32 output lands in
+/// it directly), `Ok(Some(codec))` for a narrow cache the step must be narrowed into, and the
+/// emitter's own error for a format no kernel form reads. This asks [`cached_attention_kv_codec`],
+/// the classifier the emit path runs, so a caller never keeps a second list of readable formats.
+///
+/// # Errors
+/// [`EmitError::CachedAttentionKvCodecNotSupported`] for a format the kernel cannot read.
+pub fn cached_attention_kv_codec_for(format: &Codec) -> Result<Option<Codec>, EmitError> {
+    // binary32 is the graph's own output layout, the one source every narrow cache is narrowed from
+    if format.is_identity_of(&Codec::Scalar(FloatLayout::BF32)) {
+        return Ok(None);
+    }
+    let mut quantized = [None; 7];
+    for operand in CACHED_KV_OPERANDS {
+        quantized[operand] = Some(*format);
+    }
+    cached_attention_kv_codec(NodeId(0), &quantized)
 }

@@ -177,10 +177,9 @@ pub fn gguf_tensor_as_f32(
 /// `file_bytes`; [`InteropError::MisalignedFloat32Tensor`] if `name`'s
 /// tensor is `F32` but `file_bytes`'s base pointer leaves its byte range
 /// unaligned for `&[f32]`; [`InteropError::UnrepresentableGgmlType`] if
-/// `name`'s tensor is none of `F32`/`Q4_K`/`Q5_K`/`Q3_K`/`Q6_K`/`Q8_0`/`F16`/`Bf16`/`Fp6E3M2`
-/// -- a block-quantized type this crate has no dequantizer for at all, since
-/// `F16`/`Bf16` are the only codecs this function decodes packed that
-/// [`gguf_tensor_as_f32`] does not independently cover.
+/// `name`'s tensor is `F32` or a type with a [`proxima_gguf::GgmlType::numeric_format`] that the
+/// packed cpu kernels can read: any other type (the integer types, `F64`, and the block types
+/// listed in `NOT_PACKED_READABLE`) has no packed reader here.
 #[cfg(feature = "std")]
 pub fn gguf_tensor_as_packed_block<'a>(
     parsed: &ParsedGguf,
@@ -196,95 +195,40 @@ pub fn gguf_tensor_as_packed_block<'a>(
             .ok_or_else(|| InteropError::MisalignedFloat32Tensor {
                 tensor: tensor.name.clone(),
             }),
-        GgmlType::Q4_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Q4K,
-            bytes,
-        }),
-        GgmlType::Q2_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Q2K,
-            bytes,
-        }),
-        GgmlType::Q4_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Q4_0,
-            bytes,
-        }),
-        GgmlType::Q5_1 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Q5_1,
-            bytes,
-        }),
-        GgmlType::Q5_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Q5_0,
-            bytes,
-        }),
-        GgmlType::Q5_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Q5K,
-            bytes,
-        }),
-        GgmlType::Q3_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Q3K,
-            bytes,
-        }),
-        GgmlType::Q6_K => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Q6K,
-            bytes,
-        }),
-        GgmlType::Q8_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Q8_0,
-            bytes,
-        }),
-        GgmlType::Iq2Xs => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Iq2Xs,
-            bytes,
-        }),
-        GgmlType::Iq3Xxs => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Iq3Xxs,
-            bytes,
-        }),
-        GgmlType::Iq3S => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Iq3S,
-            bytes,
-        }),
-        GgmlType::Iq4Xs => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Iq4Xs,
-            bytes,
-        }),
-        GgmlType::Iq4Nl => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Iq4Nl,
-            bytes,
-        }),
-        GgmlType::F16 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Float16,
-            bytes,
-        }),
-        GgmlType::Bf16 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::BFloat16,
-            bytes,
-        }),
-        GgmlType::Q1_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Q1_0,
-            bytes,
-        }),
-        GgmlType::Q2_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Q2_0,
-            bytes,
-        }),
-        GgmlType::Pq2_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Pq2_0,
-            bytes,
-        }),
-        GgmlType::Ptq1_0 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Ptq1_0,
-            bytes,
-        }),
-        GgmlType::Fp6E3M2 => Ok(proxima_tensor::cpu::QuantizedBlock::Packed {
-            codec: Codec::Fp6E3M2,
-            bytes,
-        }),
-        other => Err(InteropError::UnrepresentableGgmlType {
-            tensor: tensor.name.clone(),
-            ggml_type: other,
-        }),
+        other => packed_block_codec(other)
+            .map(|codec| proxima_tensor::cpu::QuantizedBlock::Packed { codec, bytes })
+            .ok_or_else(|| InteropError::UnrepresentableGgmlType {
+                tensor: tensor.name.clone(),
+                ggml_type: other,
+            }),
     }
+}
+
+// types that have a numeric format but that the packed cpu kernels cannot read: either this crate has no
+// dequantizer for them, or (F32) the aligned-view arm above owns them
+#[cfg(feature = "std")]
+const NOT_PACKED_READABLE: [GgmlType; 12] = [
+    GgmlType::F32,
+    GgmlType::Q4_1,
+    GgmlType::Q8_1,
+    GgmlType::Q8_K,
+    GgmlType::Iq2Xxs,
+    GgmlType::Iq2S,
+    GgmlType::Iq1S,
+    GgmlType::Iq1M,
+    GgmlType::Tq10,
+    GgmlType::Tq20,
+    GgmlType::Mxfp4,
+    GgmlType::Nvfp4,
+];
+
+// the format comes from the one GgmlType table; only the kernels' reach is stated here
+#[cfg(feature = "std")]
+fn packed_block_codec(ggml_type: GgmlType) -> Option<Codec> {
+    if NOT_PACKED_READABLE.contains(&ggml_type) {
+        return None;
+    }
+    ggml_type.numeric_format()
 }
 
 /// Reinterprets `bytes` as `&[f32]` with no copy, or returns `None` if
@@ -1239,45 +1183,9 @@ pub(crate) fn as_block(
 /// function used to reject it.
 #[cfg(feature = "std")]
 pub(crate) fn codec_from_ggml_type(ggml_type: GgmlType) -> Option<Codec> {
-    match ggml_type {
-        GgmlType::Q4_K => Some(Codec::Q4K),
-        GgmlType::Q5_K => Some(Codec::Q5K),
-        GgmlType::Q6_K => Some(Codec::Q6K),
-        GgmlType::Q8_0 => Some(Codec::Q8_0),
-        GgmlType::Q3_K => Some(Codec::Q3K),
-        GgmlType::Q4_0 => Some(Codec::Q4_0),
-        GgmlType::F16 => Some(Codec::Float16),
-        GgmlType::Bf16 => Some(Codec::BFloat16),
-        GgmlType::Q2_K => Some(Codec::Q2K),
-        GgmlType::Q5_1 => Some(Codec::Q5_1),
-        GgmlType::Q5_0 => Some(Codec::Q5_0),
-        GgmlType::Q4_1 => Some(Codec::Q4_1),
-        GgmlType::Q8_1 => Some(Codec::Q8_1),
-        GgmlType::Q8_K => Some(Codec::Q8K),
-        GgmlType::Iq1S => Some(Codec::Iq1S),
-        GgmlType::Iq1M => Some(Codec::Iq1M),
-        GgmlType::Iq2Xxs => Some(Codec::Iq2Xxs),
-        GgmlType::Iq2Xs => Some(Codec::Iq2Xs),
-        GgmlType::Iq2S => Some(Codec::Iq2S),
-        GgmlType::Iq3Xxs => Some(Codec::Iq3Xxs),
-        GgmlType::Iq3S => Some(Codec::Iq3S),
-        GgmlType::Iq4Nl => Some(Codec::Iq4Nl),
-        GgmlType::Iq4Xs => Some(Codec::Iq4Xs),
-        GgmlType::Tq10 => Some(Codec::Tq10),
-        GgmlType::Tq20 => Some(Codec::Tq20),
-        GgmlType::Mxfp4 => Some(Codec::Mxfp4),
-        GgmlType::Nvfp4 => Some(Codec::Nvfp4),
-        GgmlType::Q1_0 => Some(Codec::Q1_0),
-        GgmlType::Q2_0 => Some(Codec::Q2_0),
-        GgmlType::Pq2_0 => Some(Codec::Pq2_0),
-        GgmlType::Ptq1_0 => Some(Codec::Ptq1_0),
-        GgmlType::Fp6E3M2 => Some(Codec::Fp6E3M2),
-        // `F32`/the integer types/`F64` have no `Codec` counterpart.
-        // `GgmlType` is `#[non_exhaustive]` (a foreign, still-growing wire
-        // enum), so this wildcard also covers a future wire value neither
-        // crate has named yet.
-        _ => None,
-    }
+    ggml_type
+        .numeric_format()
+        .filter(|format| !format.is_identity_of(&Codec::Float32))
 }
 
 /// The GGUF/llama.cpp lowercase codec name [`recode_tensor`] appends to

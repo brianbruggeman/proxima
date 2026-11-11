@@ -1,7 +1,7 @@
 use std::io::Write;
 
 use moe_test_json as serde_json;
-use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 use proxima_numeric::NumericPolicy;
 use tempfile::NamedTempFile;
 
@@ -200,6 +200,7 @@ fn dense_mma_layout_accepts_structured_settings_and_legacy_aliases() {
             specials: Specials::InfinityOnOverflow,
             bias_override: Some(127),
             sign: SignEncoding::Magnitude,
+            nan: NanPolicy::IEEE,
         })
     );
     assert_eq!(
@@ -687,6 +688,7 @@ fn unified_runtime_config_serde_builder_round_trip_preserves_full_policy() {
             specials: Specials::InfinityOnOverflow,
             bias_override: Some(127),
             sign: SignEncoding::Magnitude,
+            nan: NanPolicy::IEEE,
         }))
         .build()
         .expect("fluent policy validates");

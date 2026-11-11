@@ -31,18 +31,9 @@ fn failed(error: impl std::fmt::Display) -> DiffError {
 }
 
 fn codec_of(ggml_type: GgmlType) -> Option<Codec> {
-    match ggml_type {
-        GgmlType::Q8_0 => Some(Codec::Q8_0),
-        GgmlType::Q4_0 => Some(Codec::Q4_0),
-        GgmlType::Q5_0 => Some(Codec::Q5_0),
-        GgmlType::Q4_K => Some(Codec::Q4K),
-        GgmlType::Q5_K => Some(Codec::Q5K),
-        GgmlType::Q6_K => Some(Codec::Q6K),
-        GgmlType::Q1_0 => Some(Codec::Q1_0),
-        GgmlType::Q2_0 => Some(Codec::Q2_0),
-        GgmlType::Pq2_0 => Some(Codec::Pq2_0),
-        _ => None,
-    }
+    ggml_type
+        .numeric_format()
+        .filter(|format| !matches!(format, Codec::Scalar(_)))
 }
 
 fn packed_operands(program: &[Op], tensors: &BTreeMap<String, GgmlType>) -> BTreeMap<NodeId, Codec> {

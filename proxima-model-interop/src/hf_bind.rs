@@ -1502,7 +1502,7 @@ mod rope_rows;
 mod tests {
     use alloc::vec;
 
-    use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+    use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
     use proxima_safetensors::{SafetensorsModel, TensorPayload, write_complete};
 
     use super::*;
@@ -1515,6 +1515,7 @@ mod tests {
             specials: Specials::InfinityOnOverflow,
             bias_override: Some(15),
             sign: SignEncoding::Magnitude,
+            nan: NanPolicy::IEEE,
         };
         let brain16_by_fields = FloatLayout {
             exponent_bits: 8,
@@ -1522,6 +1523,7 @@ mod tests {
             specials: Specials::InfinityOnOverflow,
             bias_override: None,
             sign: SignEncoding::Magnitude,
+            nan: NanPolicy::IEEE,
         };
         let unnamed = FloatLayout {
             exponent_bits: 4,
@@ -1529,6 +1531,7 @@ mod tests {
             specials: Specials::NanOnly,
             bias_override: None,
             sign: SignEncoding::Magnitude,
+            nan: NanPolicy::IEEE,
         };
 
         assert_eq!(

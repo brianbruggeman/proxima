@@ -5,6 +5,8 @@
 //! `ggml/include/gguf.h:53-68` (`enum gguf_type`) and
 //! `ggml/include/ggml.h:352-391` (`enum ggml_type`).
 
+use proxima_numeric::NumericFormat;
+
 /// The type tag stored alongside every metadata KV pair (and, for arrays,
 /// alongside every element). Wire values match `enum gguf_type` exactly —
 /// `gguf.h:53-68`.
@@ -341,6 +343,50 @@ impl GgmlType {
         Some(value)
     }
 
+    /// The [`proxima_numeric::NumericFormat`] this wire type stores its elements as: the one
+    /// `GgmlType` to format table. `F32` maps to `NumericFormat::Float32`, which has no wire tag of
+    /// its own; a caller that wants only packed codecs filters it out. The integer types and `F64`
+    /// have no named format constant, so they return `None`, as does a type this table has not met.
+    #[must_use]
+    pub const fn numeric_format(self) -> Option<NumericFormat> {
+        Some(match self {
+            Self::F32 => NumericFormat::Float32,
+            Self::F16 => NumericFormat::Float16,
+            Self::Bf16 => NumericFormat::BFloat16,
+            Self::Q4_0 => NumericFormat::Q4_0,
+            Self::Q4_1 => NumericFormat::Q4_1,
+            Self::Q5_0 => NumericFormat::Q5_0,
+            Self::Q5_1 => NumericFormat::Q5_1,
+            Self::Q8_0 => NumericFormat::Q8_0,
+            Self::Q8_1 => NumericFormat::Q8_1,
+            Self::Q2_K => NumericFormat::Q2K,
+            Self::Q3_K => NumericFormat::Q3K,
+            Self::Q4_K => NumericFormat::Q4K,
+            Self::Q5_K => NumericFormat::Q5K,
+            Self::Q6_K => NumericFormat::Q6K,
+            Self::Q8_K => NumericFormat::Q8K,
+            Self::Iq2Xxs => NumericFormat::Iq2Xxs,
+            Self::Iq2Xs => NumericFormat::Iq2Xs,
+            Self::Iq3Xxs => NumericFormat::Iq3Xxs,
+            Self::Iq1S => NumericFormat::Iq1S,
+            Self::Iq4Nl => NumericFormat::Iq4Nl,
+            Self::Iq3S => NumericFormat::Iq3S,
+            Self::Iq2S => NumericFormat::Iq2S,
+            Self::Iq4Xs => NumericFormat::Iq4Xs,
+            Self::Iq1M => NumericFormat::Iq1M,
+            Self::Tq10 => NumericFormat::Tq10,
+            Self::Tq20 => NumericFormat::Tq20,
+            Self::Mxfp4 => NumericFormat::Mxfp4,
+            Self::Nvfp4 => NumericFormat::Nvfp4,
+            Self::Q1_0 => NumericFormat::Q1_0,
+            Self::Q2_0 => NumericFormat::Q2_0,
+            Self::Pq2_0 => NumericFormat::Pq2_0,
+            Self::Ptq1_0 => NumericFormat::Ptq1_0,
+            Self::Fp6E3M2 => NumericFormat::Fp6E3M2,
+            Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::F64 => return None,
+        })
+    }
+
     /// Encode back to the raw `ggml_type` wire tag — the writer's half of
     /// [`Self::from_wire`]. Kept as an explicit match (not a discriminant
     /// cast) because the wire values have gaps (4, 5, 31-33, 36-38) that
@@ -444,6 +490,93 @@ impl GgmlType {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_current_type_names_a_format_with_the_same_block_shape_as_its_wire_shape() {
+        let mut named = 0;
+        for ggml_type in GgmlType::CURRENT {
+            let Some(format) = ggml_type.numeric_format() else {
+                continue;
+            };
+            let shape = ggml_type.wire_shape();
+            assert_eq!(
+                u64::from(format.elements_per_block()),
+                shape.block_elements,
+                "{ggml_type:?} elements"
+            );
+            assert_eq!(
+                u64::from(format.bytes_per_block()),
+                shape.block_bytes,
+                "{ggml_type:?} bytes"
+            );
+            named += 1;
+        }
+        assert_eq!(named, 30, "CURRENT holds 35 types, 5 of them integer or f64 with no format");
+        assert_eq!(GgmlType::F32.numeric_format(), Some(NumericFormat::Float32));
+        assert_eq!(GgmlType::I8.numeric_format(), None);
+    }
+
+    /// The arms of proxima-model-interop's `codec_from_ggml_type` at base commit 994a3d9b
+    /// (bind.rs:1241), `Codec::` read as `NumericFormat::`, plus `F32`, the one row the single
+    /// table added.
+    static BASE_COMMIT_TABLE: [(GgmlType, NumericFormat); 33] = [
+        (GgmlType::Q4_K, NumericFormat::Q4K),
+        (GgmlType::Q5_K, NumericFormat::Q5K),
+        (GgmlType::Q6_K, NumericFormat::Q6K),
+        (GgmlType::Q8_0, NumericFormat::Q8_0),
+        (GgmlType::Q3_K, NumericFormat::Q3K),
+        (GgmlType::Q4_0, NumericFormat::Q4_0),
+        (GgmlType::F16, NumericFormat::Float16),
+        (GgmlType::Bf16, NumericFormat::BFloat16),
+        (GgmlType::Q2_K, NumericFormat::Q2K),
+        (GgmlType::Q5_1, NumericFormat::Q5_1),
+        (GgmlType::Q5_0, NumericFormat::Q5_0),
+        (GgmlType::Q4_1, NumericFormat::Q4_1),
+        (GgmlType::Q8_1, NumericFormat::Q8_1),
+        (GgmlType::Q8_K, NumericFormat::Q8K),
+        (GgmlType::Iq1S, NumericFormat::Iq1S),
+        (GgmlType::Iq1M, NumericFormat::Iq1M),
+        (GgmlType::Iq2Xxs, NumericFormat::Iq2Xxs),
+        (GgmlType::Iq2Xs, NumericFormat::Iq2Xs),
+        (GgmlType::Iq2S, NumericFormat::Iq2S),
+        (GgmlType::Iq3Xxs, NumericFormat::Iq3Xxs),
+        (GgmlType::Iq3S, NumericFormat::Iq3S),
+        (GgmlType::Iq4Nl, NumericFormat::Iq4Nl),
+        (GgmlType::Iq4Xs, NumericFormat::Iq4Xs),
+        (GgmlType::Tq10, NumericFormat::Tq10),
+        (GgmlType::Tq20, NumericFormat::Tq20),
+        (GgmlType::Mxfp4, NumericFormat::Mxfp4),
+        (GgmlType::Nvfp4, NumericFormat::Nvfp4),
+        (GgmlType::Q1_0, NumericFormat::Q1_0),
+        (GgmlType::Q2_0, NumericFormat::Q2_0),
+        (GgmlType::Pq2_0, NumericFormat::Pq2_0),
+        (GgmlType::Ptq1_0, NumericFormat::Ptq1_0),
+        (GgmlType::Fp6E3M2, NumericFormat::Fp6E3M2),
+        (GgmlType::F32, NumericFormat::Float32),
+    ];
+
+    #[test]
+    fn numeric_format_maps_every_type_exactly_as_the_table_it_replaced() {
+        for (ggml_type, expected) in BASE_COMMIT_TABLE {
+            assert_eq!(ggml_type.numeric_format(), Some(expected), "{ggml_type:?}");
+        }
+        for unmapped in [GgmlType::I8, GgmlType::I16, GgmlType::I32, GgmlType::I64, GgmlType::F64] {
+            assert_eq!(unmapped.numeric_format(), None, "{unmapped:?}");
+        }
+    }
+
+    #[test]
+    fn the_mapped_types_are_exactly_33() {
+        let every_type: Vec<GgmlType> = (0..=160)
+            .chain(PROXIMA_OWN_WIRE_BASE..PROXIMA_OWN_WIRE_BASE + 64)
+            .filter_map(GgmlType::from_wire)
+            .collect();
+
+        let mapped = every_type.iter().filter(|ggml_type| ggml_type.numeric_format().is_some()).count();
+
+        assert_eq!(every_type.len(), 38);
+        assert_eq!(mapped, 33);
+    }
 
     #[test]
     fn metadata_type_round_trips_every_named_wire_value() {

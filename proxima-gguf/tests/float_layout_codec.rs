@@ -1,6 +1,6 @@
 use half::{bf16, f16};
 use proxima_gguf::quant::float_layout::{decode, encode};
-use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 
 const SAMPLE_LEN: u32 = 1 << 20;
 const SAMPLE_STRIDE: u32 = 4093;
@@ -11,6 +11,7 @@ const LAYOUT_F16: FloatLayout = FloatLayout {
     specials: Specials::InfinityOnOverflow,
     bias_override: None,
     sign: SignEncoding::Magnitude,
+    nan: NanPolicy::IEEE,
 };
 const LAYOUT_E4M3: FloatLayout = FloatLayout::E4M3FN;
 

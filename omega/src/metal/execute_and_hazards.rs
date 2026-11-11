@@ -1,5 +1,6 @@
 use super::*;
-use proxima_tensor::BFloat8;
+#[cfg(feature = "metal-output-placement")]
+use proxima_numeric::{NumericError, ScalarCodec};
 
 /// Resolves a program into a reusable [`Plan`]. `blocks` is read for its
 /// CODECS and shapes only — the data is not captured, so the same plan runs
@@ -748,10 +749,8 @@ pub(super) fn reuse_or_upload_packed_bytes(
         && buffer.length() >= bytes.len()
         && buffer.contents().as_ptr() as usize != previous_alias_address
     {
-        // The previous buffer came from a copying upload, so its storage is
-        // independent of the host vector and can be overwritten after the
-        // prior command buffer has completed.
         let destination = buffer.contents().as_ptr().cast::<u8>();
+        // SAFETY: a copying upload owns its storage, at least `bytes.len()` long, idle once the prior command buffer completed.
         unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), destination, bytes.len()) };
         #[cfg(feature = "instrument")]
         counter!(EXPERT_SOURCE_BUFFER_REUSES, 1);
@@ -1186,11 +1185,7 @@ pub fn zero_placed_buffer(buffer: &PlacedBuffer, byte_len: usize) {
 #[cfg(feature = "metal-output-placement")]
 pub fn zero_placed_buffer_range(buffer: &PlacedBuffer, byte_offset: usize, byte_len: usize) {
     let pointer = buffer.contents();
-    // SAFETY: `buffer` is `storageModeShared` (`allocate_placed_buffer`'s
-    // own contract) and `byte_offset + byte_len` lies inside the caller's
-    // own allocation for it (mirrors `read_placed_buffer_f32`'s own SAFETY
-    // comment), so this is a valid, CPU-visible, mutable byte slice for the
-    // duration of this call.
+    // SAFETY: the buffer is shared storage and the caller keeps `byte_offset + byte_len` inside its allocation.
     let slots = unsafe {
         core::slice::from_raw_parts_mut(pointer.as_ptr().cast::<u8>().add(byte_offset), byte_len)
     };
@@ -1213,15 +1208,11 @@ pub fn try_write_placed_buffer_f32(
 ) -> Result<(), MetalError> {
     let byte_length = f32_byte_length(buffer, byte_offset, source.len())?;
     validate_placed_buffer_range(buffer, byte_offset, byte_length)?;
-    // SAFETY: `source` exposes `byte_length` initialized bytes for the
-    // duration of this call, and viewing f32 storage as bytes is valid.
-    let source_bytes =
-        unsafe { core::slice::from_raw_parts(source.as_ptr().cast::<u8>(), byte_length) };
-    // SAFETY: validation proves `byte_offset` is at most the buffer length,
-    // so this byte pointer is within or one past its allocation.
+    // SAFETY: `source` exposes `byte_length` initialized bytes, and f32 storage is valid as bytes.
+    let source_bytes = unsafe { core::slice::from_raw_parts(source.as_ptr().cast::<u8>(), byte_length) };
+    // SAFETY: validation proves `byte_offset` is within or one past the buffer's allocation.
     let destination = unsafe { buffer.contents().as_ptr().cast::<u8>().add(byte_offset) };
-    // SAFETY: range validation proves the destination span lies in the
-    // caller-owned shared buffer; the source span is `source`'s f32 bytes.
+    // SAFETY: validation proves the destination span lies in the shared buffer; the source span is `source`'s f32 bytes.
     unsafe { core::ptr::copy_nonoverlapping(source_bytes.as_ptr(), destination, byte_length) };
     Ok(())
 }
@@ -1242,12 +1233,10 @@ pub fn read_placed_buffer_f32_into(
 ) -> Result<(), MetalError> {
     let byte_length = f32_byte_length(buffer, byte_offset, dest.len())?;
     validate_placed_buffer_range(buffer, byte_offset, byte_length)?;
-    // SAFETY: validation proves `byte_offset` is at most the buffer length,
-    // so this byte pointer is within or one past its allocation.
+    // SAFETY: validation proves `byte_offset` is within or one past the buffer's allocation.
     let source = unsafe { buffer.contents().as_ptr().cast::<u8>().add(byte_offset) };
     let destination = dest.as_mut_ptr().cast::<u8>();
-    // SAFETY: range validation proves the source span lies in the
-    // caller-owned shared buffer; the destination span is `dest`'s f32 bytes.
+    // SAFETY: validation proves the source span lies in the shared buffer; the destination span is `dest`'s f32 bytes.
     unsafe { core::ptr::copy_nonoverlapping(source, destination, byte_length) };
     Ok(())
 }
@@ -1321,12 +1310,7 @@ pub fn read_placed_buffer_f32(
     element_count: usize,
 ) -> Vec<f32> {
     let pointer = buffer.contents();
-    // SAFETY: `storageModeShared` is CPU-visible once the command buffer
-    // that wrote it has completed, and `execute_plan_with_placements` always
-    // `waitUntilCompleted`s before returning. `byte_offset`/`element_count`
-    // staying inside `buffer`'s allocated length is the caller's contract —
-    // this function has no independent way to learn that length's meaning
-    // (a caller-owned buffer may hold several placed nodes at once).
+    // SAFETY: shared storage is CPU-visible once the writing command buffer completed; the caller keeps the range in bounds.
     unsafe {
         let base = pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f32>();
         core::slice::from_raw_parts(base, element_count)
@@ -1347,152 +1331,86 @@ pub fn read_placed_buffer_f32(
 #[cfg(feature = "metal-output-placement")]
 pub fn write_placed_buffer_f32(buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
     let pointer = buffer.contents();
-    // SAFETY: `storageModeShared` memory is CPU-writable while no command
-    // buffer is in flight, and the caller keeps `byte_offset + values` inside
-    // the allocation (this function's contract), so the destination is a
-    // valid, non-overlapping region for `values.len()` floats.
+    // SAFETY: shared memory with no command buffer in flight; the caller keeps the written range inside the allocation.
     unsafe {
         let destination = pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f32>();
         core::ptr::copy_nonoverlapping(values.as_ptr(), destination, values.len());
     }
 }
 
-/// [`write_placed_buffer_f32`] for a half-width buffer: each value is rounded
-/// to IEEE binary16 (round to nearest even) on the way in, so `byte_offset`
-/// addresses 2-byte elements. Seeds a `Codec::Float16` cache from f32 host
-/// rows; the kernel side reads the same bytes as `half`
-/// (`crate::msl::render_cached_attention_decode_split`).
+/// Encodes `values` into the cache format `codec` was resolved for, at `byte_offset`: the one
+/// store for every cache format.
+///
+/// Composes [`proxima_numeric::ScalarCodec`], resolved once at allocation with
+/// [`proxima_numeric::ScalarCodec::for_format`]: the call is one indirect jump to the instantiation
+/// with the layout as a literal, where [`proxima_numeric::encode::encode_blocks`] re-matches the
+/// format on every call. Same in-flight and bounds contract as [`write_placed_buffer_f32`].
+///
+/// # Errors
+/// [`NumericError::OutputSizeMismatch`] never for a well-formed call; the destination is sized from
+/// `values.len()` and the codec's element width.
 #[cfg(feature = "metal-output-placement")]
-pub fn write_placed_buffer_f32_as_f16(buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
-    let pointer = buffer.contents();
-    // SAFETY: same shared-memory, no-command-buffer-in-flight, in-bounds
-    // contract as `write_placed_buffer_f32`; `byte_offset` is a multiple of
-    // two by the caller's row-width arithmetic, so the `f16` destination is
-    // aligned.
-    let destination = unsafe {
-        core::slice::from_raw_parts_mut(
-            pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f16>(),
-            values.len(),
-        )
-    };
-    for (slot, value) in destination.iter_mut().zip(values) {
-        *slot = f16::from_f32(*value);
-    }
-}
-
-/// [`read_placed_buffer_f32`] for a half-width buffer: `element_count`
-/// binary16 elements starting at `byte_offset`, widened to `f32` exactly.
-#[cfg(feature = "metal-output-placement")]
-#[must_use]
-pub fn read_placed_buffer_f16_as_f32(
+pub fn write_placed_buffer(
     buffer: &PlacedBuffer,
     byte_offset: usize,
-    element_count: usize,
-) -> Vec<f32> {
-    let pointer = buffer.contents();
-    // SAFETY: same contract as `read_placed_buffer_f32`; the source is
-    // `element_count` aligned `f16`s inside the caller's allocation.
-    let source = unsafe {
-        core::slice::from_raw_parts(
-            pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f16>(),
-            element_count,
-        )
-    };
-    source.iter().map(|value| value.to_f32()).collect()
-}
-
-/// Stores `f32` values as two-byte `half::bf16` elements at `byte_offset`.
-#[cfg(feature = "metal-output-placement")]
-pub fn write_placed_buffer_f32_as_bf16(buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
-    let pointer = buffer.contents();
-    // SAFETY: shared storage is CPU-writable with no command buffer in flight;
-    // the caller keeps this aligned range inside the allocation.
-    let destination = unsafe {
-        core::slice::from_raw_parts_mut(
-            pointer
-                .as_ptr()
-                .cast::<u8>()
-                .add(byte_offset)
-                .cast::<half::bf16>(),
-            values.len(),
-        )
-    };
-    for (slot, value) in destination.iter_mut().zip(values) {
-        *slot = half::bf16::from_f32(*value);
-    }
-}
-
-/// Reads two-byte `half::bf16` elements at `byte_offset` and widens them to `f32`.
-#[cfg(feature = "metal-output-placement")]
-#[must_use]
-pub fn read_placed_buffer_bf16_as_f32(
-    buffer: &PlacedBuffer,
-    byte_offset: usize,
-    element_count: usize,
-) -> Vec<f32> {
-    let pointer = buffer.contents();
-    // SAFETY: the caller keeps the aligned source range inside shared storage.
-    let source = unsafe {
-        core::slice::from_raw_parts(
-            pointer
-                .as_ptr()
-                .cast::<u8>()
-                .add(byte_offset)
-                .cast::<half::bf16>(),
-            element_count,
-        )
-    };
-    source.iter().map(|value| value.to_f32()).collect()
-}
-
-/// Stores `f32` values as one-byte Proxima BF8 elements at `byte_offset`.
-#[cfg(feature = "metal-output-placement")]
-pub fn write_placed_buffer_f32_as_bf8(buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
-    // SAFETY: the caller provides an in-bounds byte range in idle shared storage.
+    codec: &ScalarCodec,
+    values: &[f32],
+) -> Result<(), NumericError> {
+    // SAFETY: shared memory with no command buffer in flight; the caller keeps the packed range inside the allocation.
     let destination = unsafe {
         core::slice::from_raw_parts_mut(
             buffer.contents().as_ptr().cast::<u8>().add(byte_offset),
-            values.len(),
+            values.len() * codec.element_bytes(),
         )
     };
-    for (slot, value) in destination.iter_mut().zip(values) {
-        *slot = BFloat8::from_f32(*value).to_bits();
-    }
+    codec.encode(values, destination)
 }
 
-/// Reads one-byte Proxima BF8 elements and widens them to `f32`.
+/// Decodes `element_count` elements at `byte_offset` to `f32`, the inverse of
+/// [`write_placed_buffer`]: straight into the returned `Vec`'s spare capacity, so no zero fill
+/// precedes the write.
+///
+/// # Errors
+/// [`NumericError::OutputSizeMismatch`] never for a well-formed call.
 #[cfg(feature = "metal-output-placement")]
-#[must_use]
-pub fn read_placed_buffer_bf8_as_f32(
+pub fn read_placed_buffer(
     buffer: &PlacedBuffer,
     byte_offset: usize,
+    codec: &ScalarCodec,
     element_count: usize,
-) -> Vec<f32> {
-    // SAFETY: the caller provides an in-bounds byte range in shared storage.
+) -> Result<Vec<f32>, NumericError> {
+    // SAFETY: same contract as `write_placed_buffer`; the source is the packed range inside the allocation.
     let source = unsafe {
         core::slice::from_raw_parts(
             buffer.contents().as_ptr().cast::<u8>().add(byte_offset),
-            element_count,
+            element_count * codec.element_bytes(),
         )
     };
-    source
-        .iter()
-        .map(|value| BFloat8::from_bits(*value).to_f32())
-        .collect()
+    let mut decoded: Vec<f32> = Vec::with_capacity(element_count);
+    codec.decode(source, &mut decoded.spare_capacity_mut()[..element_count])?;
+    // SAFETY: `decode` returned Ok, so it initialised all `element_count` slots of the spare prefix.
+    unsafe { decoded.set_len(element_count) };
+    Ok(decoded)
 }
 
-/// Narrows an f32 placed staging range into a one-byte BF8 cache range.
+/// Encodes `element_count` f32s of `source` (at `source_byte_offset`) into the codec's format in
+/// `destination` at `destination_byte_offset`, with no host allocation: the step-end narrowing of a
+/// cache whose format is not the graph's f32 output. The buffers must be distinct allocations; both
+/// ranges stay inside them and no command buffer may be in flight (caller contract).
+///
+/// # Errors
+/// [`NumericError::OutputSizeMismatch`] never for a well-formed call.
 #[cfg(feature = "metal-output-placement")]
-pub fn narrow_placed_buffer_f32_to_bf8(
+pub fn narrow_placed_buffer(
     source: &PlacedBuffer,
     source_byte_offset: usize,
     destination: &PlacedBuffer,
     destination_byte_offset: usize,
+    codec: &ScalarCodec,
     element_count: usize,
-) {
-    // SAFETY: the caller provides in-bounds f32 and byte ranges in distinct,
-    // idle shared buffers.
-    let (rows, narrowed) = unsafe {
+) -> Result<(), NumericError> {
+    // SAFETY: idle shared buffers (every placed execute waits), in-bounds ranges, distinct allocations.
+    let (rows, packed) = unsafe {
         (
             core::slice::from_raw_parts(
                 source
@@ -1509,97 +1427,11 @@ pub fn narrow_placed_buffer_f32_to_bf8(
                     .as_ptr()
                     .cast::<u8>()
                     .add(destination_byte_offset),
-                element_count,
+                element_count * codec.element_bytes(),
             ),
         )
     };
-    for (destination_value, source_value) in narrowed.iter_mut().zip(rows) {
-        *destination_value = BFloat8::from_f32(*source_value).to_bits();
-    }
-}
-
-/// Narrows an f32 placed staging range into a two-byte BF16 cache range.
-#[cfg(feature = "metal-output-placement")]
-pub fn narrow_placed_buffer_f32_to_bf16(
-    source: &PlacedBuffer,
-    source_byte_offset: usize,
-    destination: &PlacedBuffer,
-    destination_byte_offset: usize,
-    element_count: usize,
-) {
-    // SAFETY: both buffers are shared and idle, ranges are in bounds, and the
-    // staging and cache allocations are distinct.
-    let (rows, narrowed) = unsafe {
-        (
-            core::slice::from_raw_parts(
-                source
-                    .contents()
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(source_byte_offset)
-                    .cast::<f32>(),
-                element_count,
-            ),
-            core::slice::from_raw_parts_mut(
-                destination
-                    .contents()
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(destination_byte_offset)
-                    .cast::<half::bf16>(),
-                element_count,
-            ),
-        )
-    };
-    for (destination_value, source_value) in narrowed.iter_mut().zip(rows) {
-        *destination_value = half::bf16::from_f32(*source_value);
-    }
-}
-
-/// Rounds `element_count` f32s of `source` (read at `source_byte_offset`) to
-/// binary16 and stores them in `destination` at `destination_byte_offset`,
-/// with no host allocation: the step-end narrowing of a half-width KV cache,
-/// where the graph wrote this step's rows as f32 into a staging buffer
-/// ([`write_placed_buffer_f32_as_f16`] is the seeding counterpart). The two
-/// buffers must be distinct allocations; both ranges stay inside their
-/// buffers (caller contract) and no command buffer may be in flight.
-#[cfg(feature = "metal-output-placement")]
-pub fn narrow_placed_buffer_f32_to_f16(
-    source: &PlacedBuffer,
-    source_byte_offset: usize,
-    destination: &PlacedBuffer,
-    destination_byte_offset: usize,
-    element_count: usize,
-) {
-    // SAFETY: both buffers are `storageModeShared` and idle (every
-    // `execute_plan_with_placements` call `waitUntilCompleted`s before it
-    // returns); the ranges are in bounds and in different allocations, so the
-    // shared and mutable slices cannot alias.
-    let (rows, narrowed) = unsafe {
-        (
-            core::slice::from_raw_parts(
-                source
-                    .contents()
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(source_byte_offset)
-                    .cast::<f32>(),
-                element_count,
-            ),
-            core::slice::from_raw_parts_mut(
-                destination
-                    .contents()
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(destination_byte_offset)
-                    .cast::<f16>(),
-                element_count,
-            ),
-        )
-    };
-    for (slot, value) in narrowed.iter_mut().zip(rows) {
-        *slot = f16::from_f32(*value);
-    }
+    codec.encode(rows, packed)
 }
 
 /// Moves `byte_len` bytes from `from_byte` to `to_byte` inside one
@@ -1615,9 +1447,7 @@ pub fn move_placed_buffer_bytes(
     byte_len: usize,
 ) {
     let pointer = buffer.contents();
-    // SAFETY: both ranges lie inside the allocation (caller contract) and
-    // `ptr::copy` is the overlap-safe move, so a forward compaction whose
-    // source and destination ranges intersect is well-defined.
+    // SAFETY: the caller keeps both ranges inside the allocation and `ptr::copy` is the overlap-safe move.
     unsafe {
         let base = pointer.as_ptr().cast::<u8>();
         core::ptr::copy(base.add(from_byte), base.add(to_byte), byte_len);
@@ -2253,22 +2083,26 @@ pub(super) fn register_skipped_output(
 
 #[cfg(all(test, feature = "metal-output-placement"))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod card_04_tests {
+mod placed_format_tests {
     use super::*;
+    use proxima_numeric::{FloatLayout, NumericFormat};
+    use proxima_tensor::BFloat8;
+
+    fn stored_bytes(buffer: &PlacedBuffer, len: usize) -> Vec<u8> {
+        unsafe { core::slice::from_raw_parts(buffer.contents().as_ptr().cast::<u8>(), len) }.to_vec()
+    }
+
+    fn codec(format: &NumericFormat) -> ScalarCodec {
+        ScalarCodec::for_format(format).expect("a scalar format resolves")
+    }
 
     #[test]
-    fn card_04_bf16_placed_roundtrips_special_values() {
+    fn bf16_placed_roundtrips_special_values() {
         let buffer = allocate_placed_buffer(16).expect("allocates BF16 fixture bytes");
-        let values = [
-            0.0f32,
-            -0.0,
-            1.5,
-            f32::INFINITY,
-            f32::NEG_INFINITY,
-            f32::NAN,
-        ];
-        write_placed_buffer_f32_as_bf16(&buffer, 0, &values);
-        let actual = read_placed_buffer_bf16_as_f32(&buffer, 0, values.len());
+        let values = [0.0f32, -0.0, 1.5, f32::INFINITY, f32::NEG_INFINITY, f32::NAN];
+        let bf16 = codec(&NumericFormat::BFloat16);
+        write_placed_buffer(&buffer, 0, &bf16, &values).expect("bf16 encodes");
+        let actual = read_placed_buffer(&buffer, 0, &bf16, values.len()).expect("bf16 decodes");
 
         assert_eq!(actual[0].to_bits(), 0x0000_0000);
         assert_eq!(actual[1].to_bits(), 0x8000_0000);
@@ -2279,28 +2113,67 @@ mod card_04_tests {
     }
 
     #[test]
-    fn card_04_bf16_placed_preserves_adjacent_bytes_at_nonzero_offset() {
+    fn bf16_and_f16_bytes_match_the_half_crate_on_k_like_rows() {
+        let values = k_like_rows(256);
+        let buffer = allocate_placed_buffer(512).expect("allocates fixture bytes");
+        write_placed_buffer(&buffer, 0, &codec(&NumericFormat::BFloat16), &values).expect("bf16 encodes");
+        let expected: Vec<u8> = values
+            .iter()
+            .flat_map(|value| half::bf16::from_f32(*value).to_bits().to_le_bytes())
+            .collect();
+        assert_eq!(stored_bytes(&buffer, 512), expected);
+
+        write_placed_buffer(&buffer, 0, &codec(&NumericFormat::Float16), &values).expect("f16 encodes");
+        let expected: Vec<u8> = values
+            .iter()
+            .flat_map(|value| half::f16::from_f32(*value).to_bits().to_le_bytes())
+            .collect();
+        assert_eq!(stored_bytes(&buffer, 512), expected);
+    }
+
+    #[test]
+    fn a_respelled_layout_stores_and_loads_the_same_bytes_and_bits_as_its_named_spelling() {
+        let values = k_like_rows(256);
+        for named in [FloatLayout::BF32, FloatLayout::F16, FloatLayout::BF16, FloatLayout::E5M2_SATURATING] {
+            let respelled = FloatLayout { bias_override: Some(named.bias()), ..named };
+            let by_name = allocate_placed_buffer(1024).expect("allocates named-layout bytes");
+            let by_data = allocate_placed_buffer(1024).expect("allocates respelled-layout bytes");
+            let named_codec = codec(&NumericFormat::Scalar(named));
+            let data_codec = codec(&NumericFormat::Scalar(respelled));
+
+            write_placed_buffer(&by_name, 0, &named_codec, &values).expect("named layout encodes");
+            write_placed_buffer(&by_data, 0, &data_codec, &values).expect("respelled layout encodes");
+
+            assert_eq!(stored_bytes(&by_data, 1024), stored_bytes(&by_name, 1024), "{named:?}");
+            let expected = read_placed_buffer(&by_name, 0, &named_codec, values.len()).expect("decodes");
+            let actual = read_placed_buffer(&by_data, 0, &data_codec, values.len()).expect("decodes");
+            assert_eq!(
+                actual.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                expected.iter().map(|value| value.to_bits()).collect::<Vec<_>>(),
+                "{named:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bf16_placed_preserves_adjacent_bytes_at_nonzero_offset() {
         let staging = allocate_placed_buffer(16).expect("allocates f32 staging bytes");
         let cache = allocate_placed_buffer(16).expect("allocates BF16 cache bytes");
         write_placed_buffer_f32(&staging, 0, &[9.0, 1.5, 2.5, -7.0]);
-        write_placed_buffer_f32_as_bf16(&cache, 0, &[9.0]);
-        write_placed_buffer_f32_as_bf16(&cache, 12, &[-7.0]);
+        let bf16 = codec(&NumericFormat::BFloat16);
+        write_placed_buffer(&cache, 0, &bf16, &[9.0]).expect("encodes");
+        write_placed_buffer(&cache, 12, &bf16, &[-7.0]).expect("encodes");
 
-        narrow_placed_buffer_f32_to_bf16(&staging, 4, &cache, 8, 2);
+        narrow_placed_buffer(&staging, 4, &cache, 8, &bf16, 2).expect("narrows");
 
-        assert_eq!(read_placed_buffer_bf16_as_f32(&cache, 0, 1), vec![9.0]);
-        assert_eq!(read_placed_buffer_bf16_as_f32(&cache, 8, 2), vec![1.5, 2.5]);
-        assert_eq!(read_placed_buffer_bf16_as_f32(&cache, 12, 1), vec![-7.0]);
+        let read = |offset, count| read_placed_buffer(&cache, offset, &bf16, count).expect("decodes");
+        assert_eq!(read(0, 1), vec![9.0]);
+        assert_eq!(read(8, 2), vec![1.5, 2.5]);
+        assert_eq!(read(12, 1), vec![-7.0]);
     }
-}
-
-#[cfg(all(test, feature = "metal-output-placement"))]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
-mod card_07_tests {
-    use super::*;
 
     #[test]
-    fn card_07_bf8_placed_matches_golden_vectors() {
+    fn bf8_placed_matches_golden_vectors() {
         let buffer = allocate_placed_buffer(16).expect("allocates BF8 fixture bytes");
         let values = [
             0x0000_0000,
@@ -2326,14 +2199,13 @@ mod card_07_tests {
             0x7e, 0xfe,
         ];
 
-        write_placed_buffer_f32_as_bf8(&buffer, 0, &values);
+        let bf8 = codec(&NumericFormat::BFloat8);
+        write_placed_buffer(&buffer, 0, &bf8, &values).expect("bf8 encodes");
 
-        let stored = unsafe {
-            core::slice::from_raw_parts(buffer.contents().as_ptr().cast::<u8>(), expected.len())
-        };
-        assert_eq!(stored, expected);
+        assert_eq!(stored_bytes(&buffer, expected.len()), expected);
+        let decoded = read_placed_buffer(&buffer, 0, &bf8, expected.len()).expect("bf8 decodes");
         assert_eq!(
-            read_placed_buffer_bf8_as_f32(&buffer, 0, expected.len())
+            decoded
                 .iter()
                 .map(|value| BFloat8::from_f32(*value).to_bits())
                 .collect::<Vec<_>>(),
@@ -2342,18 +2214,78 @@ mod card_07_tests {
     }
 
     #[test]
-    fn card_07_bf8_placed_narrows_at_nonzero_offsets_without_touching_sentinels() {
+    fn bf8_placed_narrows_at_nonzero_offsets_without_touching_sentinels() {
         let staging = allocate_placed_buffer(16).expect("allocates f32 staging bytes");
         let cache = allocate_placed_buffer(8).expect("allocates BF8 cache bytes");
+        let bf8 = codec(&NumericFormat::BFloat8);
         write_placed_buffer_f32(&staging, 0, &[9.0, 1.5, 2.5, -7.0]);
-        write_placed_buffer_f32_as_bf8(&cache, 0, &[9.0]);
-        write_placed_buffer_f32_as_bf8(&cache, 7, &[-7.0]);
+        write_placed_buffer(&cache, 0, &bf8, &[9.0]).expect("encodes");
+        write_placed_buffer(&cache, 7, &bf8, &[-7.0]).expect("encodes");
 
-        narrow_placed_buffer_f32_to_bf8(&staging, 4, &cache, 2, 2);
+        narrow_placed_buffer(&staging, 4, &cache, 2, &bf8, 2).expect("narrows");
 
-        let stored =
-            unsafe { core::slice::from_raw_parts(cache.contents().as_ptr().cast::<u8>(), 8) };
-        assert_eq!(stored, &[0x48, 0, 0x3e, 0x41, 0, 0, 0, 0xc7]);
-        assert_eq!(read_placed_buffer_bf8_as_f32(&cache, 2, 2), [1.5, 2.5]);
+        assert_eq!(stored_bytes(&cache, 8), &[0x48, 0, 0x3e, 0x41, 0, 0, 0, 0xc7]);
+        assert_eq!(read_placed_buffer(&cache, 2, &bf8, 2).expect("decodes"), [1.5, 2.5]);
+    }
+
+    #[test]
+    fn bf8_placed_narrow_rounds_exact_halfway_values_to_even_like_the_incumbent() {
+        let staging = allocate_placed_buffer(12).expect("allocates f32 staging bytes");
+        let cache = allocate_placed_buffer(4).expect("allocates BF8 cache bytes");
+        let bf8 = codec(&NumericFormat::BFloat8);
+        write_placed_buffer_f32(&staging, 0, &[1.125, 1.375, 61440.0]);
+
+        narrow_placed_buffer(&staging, 0, &cache, 0, &bf8, 3).expect("narrows");
+
+        assert_eq!(&stored_bytes(&cache, 3), &[0x3c, 0x3e, 0x7c]);
+    }
+
+    /// onnxruntime `float8.h:454-462` (`Float8E5M2::ToFloat`): every NaN code widens to the canonical
+    /// quiet NaN with its sign. The earlier KV bf8 path kept payloads but was test-only
+    /// (`#[cfg(test)] Bf8`), so no production behaviour changed.
+    #[test]
+    fn bf8_placed_decode_widens_every_nan_code_to_the_canonical_quiet_nan() {
+        let buffer = allocate_placed_buffer(4).expect("allocates BF8 fixture bytes");
+        let bf8 = codec(&NumericFormat::BFloat8);
+        // SAFETY: the buffer holds 4 bytes and nothing else reads it here.
+        unsafe { core::ptr::copy_nonoverlapping([0x7du8, 0x7e, 0x7f, 0xfd].as_ptr(), buffer.contents().as_ptr().cast::<u8>(), 4) };
+
+        let decoded = read_placed_buffer(&buffer, 0, &bf8, 4).expect("bf8 decodes");
+
+        let bits: Vec<u32> = decoded.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(bits, [0x7fc0_0000, 0x7fc0_0000, 0x7fc0_0000, 0xffc0_0000]);
+    }
+
+    #[test]
+    fn a_signalling_nan_survives_a_store_and_load_in_the_graph_output_layout() {
+        let buffer = allocate_placed_buffer(8).expect("allocates f32 fixture bytes");
+        let f32_codec = codec(&NumericFormat::Float32);
+        let signalling = [f32::from_bits(0x7f80_0001), f32::from_bits(0xff80_0001)];
+
+        write_placed_buffer(&buffer, 0, &f32_codec, &signalling).expect("f32 encodes");
+        let loaded = read_placed_buffer(&buffer, 0, &f32_codec, signalling.len()).expect("f32 decodes");
+
+        let loaded_bits: Vec<u32> = loaded.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(loaded_bits, [0x7f80_0001, 0xff80_0001]);
+    }
+
+    #[test]
+    fn a_block_format_has_no_scalar_codec_to_place_through() {
+        assert!(ScalarCodec::for_format(&NumericFormat::Q4_0).is_none());
+    }
+
+    /// Deterministic roughly-gaussian rows with a few outlier channels, the shape a K projection has.
+    fn k_like_rows(count: usize) -> Vec<f32> {
+        let mut state = 0x9e37_79b9_u32;
+        let mut uniform = || {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (state >> 8) as f32 / (1u32 << 24) as f32
+        };
+        (0..count)
+            .map(|index| {
+                let gaussian: f32 = (0..6).map(|_| uniform()).sum::<f32>() - 3.0;
+                if index % 37 == 0 { gaussian * 8.0 } else { gaussian }
+            })
+            .collect()
     }
 }
