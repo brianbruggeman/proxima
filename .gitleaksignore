@@ -1,0 +1,21 @@
+# reviewed 2026-11-11: none of these is a credential.
+# rfc 9001 a.5 / 5.8 test vectors, rfc 6455 4.2.2 sample key, model and arm
+# names, token-id hashes, prose about tokens, a ci cache key, a prompt cache id.
+281aca79ca2570cde4a629b480399b88f6dcb8ae:proxima-tensor/specs/small-model-architecture-matrix/fixtures/request-records.json:generic-api-key:114
+281aca79ca2570cde4a629b480399b88f6dcb8ae:proxima-tensor/specs/small-model-architecture-matrix/fixtures/request-records.json:generic-api-key:20
+402ce1f7601d7a961af0dfe22b701b89825e6e82:proxima-tensor/specs/decode-prefill-parity/SPEC.md:generic-api-key:4848
+56701cbc7f32a47c5b83c35247db3be1418c8b73:docs/proxima-quic/c19-retry-tokens-design.md:generic-api-key:50
+56701cbc7f32a47c5b83c35247db3be1418c8b73:proxima-protocols/src/quic/crypto/aead.rs:generic-api-key:221
+56701cbc7f32a47c5b83c35247db3be1418c8b73:proxima-protocols/src/quic/crypto/aead.rs:generic-api-key:223
+56701cbc7f32a47c5b83c35247db3be1418c8b73:proxima-protocols/src/quic/crypto/aead.rs:generic-api-key:392
+56701cbc7f32a47c5b83c35247db3be1418c8b73:proxima-protocols/src/websocket_handshake.rs:generic-api-key:56
+56701cbc7f32a47c5b83c35247db3be1418c8b73:spec/examples/codex-response-create-observe.jsonl:generic-api-key:2
+65f5c00b6ce0efd01224bd1b903a391bdfe974a3:proxima-tensor/specs/ouro-mainline/unified-programmable/models.json:generic-api-key:42
+65f5c00b6ce0efd01224bd1b903a391bdfe974a3:proxima-tensor/specs/ouro-mainline/unified-programmable/models.json:generic-api-key:56
+708389ffa453b167dcbcc7b6aeecfe1397014e8d:proxima-tensor/docs/discipline.md:generic-api-key:33181
+87545196de5ce695f273bebedfe4ab1681f19f0f:proxima-tensor/specs/decode-performance-lab/manifest.json:generic-api-key:7
+ba1c7e37fa8ec29c84a3a1eab6608586d1be20fe:proxima-tensor/docs/discipline.md:generic-api-key:6766
+d1de9483c626994db8a0d293f68e8f0d4514a196:proxima-tensor/specs/decode-performance-lab/labvalidation/decode-lab-ngram3-inventory-controls-final.log:generic-api-key:16
+d64605af529963325a755694f86f706cdece4a45:proxima-tensor/docs/discipline.md:generic-api-key:19123
+eded833a9029d8159dc62fae9630f040a3a36d9f:proxima-tensor/docs/discipline.md:generic-api-key:33126
+fdafcd78f987030f5bd0fc30a600e4d61dcd9b3f:.github/workflows/wire-to-weights.yml:generic-api-key:39

@@ -1,0 +1,35 @@
+title = "gitleaks config"
+
+# read by the secrets workflow and the local secret-guard hook. each allowlist
+# exists because a full-history scan showed it as a recurring false positive;
+# widen nothing without a scan to back it.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "rfc 6455 section 1.3 sample websocket nonce, a public test vector"
+regexTarget = "secret"
+regexes = ['''^dGhlIHNhbXBsZSBub25jZQ==$''']
+
+[[allowlists]]
+description = "deployment templates carry REPLACE placeholders, not values"
+regexTarget = "secret"
+regexes = ['''^REPLACE''']
+
+[[allowlists]]
+description = "cargo feature lists like key-linux-keyring = [...] trip the generic key rule"
+targetRules = ["generic-api-key"]
+paths = ['''(^|/)Cargo\.toml$''']
+
+[[allowlists]]
+description = "bench evidence names the arm after ms_per_token, e.g. arm=gemma4_e2b.tip"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = ['''ms_per_token arm=''']
+
+[[allowlists]]
+description = "model_key fields hold model names, e.g. granite-1b-a400m"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = ['''model_key"?\s*[:=]\s*"?''']
