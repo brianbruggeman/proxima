@@ -6096,6 +6096,11 @@ pub struct TokenEvent<'piece> {
     /// every build that reaches [`LoadedModel::generate_streaming`] at all,
     /// not only one compiled for op-level profiling.
     pub elapsed_ms: u64,
+    /// The same instant as [`TokenEvent::elapsed_ms`] in nanoseconds
+    /// (`elapsed_ms == elapsed_ns / 1_000_000`), so a caller that needs a
+    /// sub-millisecond time to first token reads it from the loop's own clock
+    /// instead of the millisecond truncation.
+    pub elapsed_ns: u64,
 }
 
 /// Per-call speculative-decode counters, read directly from the decode loop's
@@ -6419,13 +6424,13 @@ pub(super) fn decode_until_stop_or_budget(
     let loop_started = std::time::Instant::now();
     for step in 0..max_tokens {
         let token_id = produce_next_token(step)?;
-        let elapsed_ms = u64::try_from(loop_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let elapsed_ns = u64::try_from(loop_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
         let delivery = deliver_token(
             vocab,
             token_id,
             step,
             prompt_token_count,
-            elapsed_ms,
+            elapsed_ns,
             &mut pending_bytes,
             &mut unigram_leading_space_trimmed,
             &mut generated_ids,
@@ -6457,12 +6462,13 @@ pub(super) fn deliver_token(
     token_id: u32,
     step: usize,
     prompt_token_count: usize,
-    elapsed_ms: u64,
+    elapsed_ns: u64,
     pending_bytes: &mut Vec<u8>,
     unigram_leading_space_trimmed: &mut bool,
     generated_ids: &mut Vec<u32>,
     on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
 ) -> Result<ControlFlow<bool, ()>, InteropError> {
+    let elapsed_ms = elapsed_ns / 1_000_000;
     let is_eos = vocab.eos_token_id() == Some(token_id);
     // Control tokens (the sliding-pattern family's `<turn|>`-shaped turn markers) are
     // structural, not content -- they must never appear in decoded
@@ -6494,6 +6500,7 @@ pub(super) fn deliver_token(
             },
             step,
             elapsed_ms,
+            elapsed_ns,
         });
         if control == ControlFlow::Break(()) {
             return Ok(ControlFlow::Break(false));
@@ -6509,6 +6516,7 @@ pub(super) fn deliver_token(
         phase: Phase::Token,
         step,
         elapsed_ms,
+        elapsed_ns,
     });
     Ok(match control {
         ControlFlow::Break(()) => ControlFlow::Break(false),
@@ -6533,12 +6541,13 @@ pub(super) async fn deliver_token_async<Producer: AsyncTokenProducer>(
     token_id: u32,
     step: usize,
     prompt_token_count: usize,
-    elapsed_ms: u64,
+    elapsed_ns: u64,
     pending_bytes: &mut Vec<u8>,
     unigram_leading_space_trimmed: &mut bool,
     generated_ids: &mut Vec<u32>,
     producer: &mut Producer,
 ) -> Result<ControlFlow<bool, ()>, InteropError> {
+    let elapsed_ms = elapsed_ns / 1_000_000;
     let is_eos = vocab.eos_token_id() == Some(token_id);
     let is_control = vocab.token_type(token_id) == Some(TokenType::Control);
     let mut text_piece = if is_eos || is_control {
@@ -6562,6 +6571,7 @@ pub(super) async fn deliver_token_async<Producer: AsyncTokenProducer>(
                 },
                 step,
                 elapsed_ms,
+                elapsed_ns,
             })
             .await;
         if control == ControlFlow::Break(()) {
@@ -6579,6 +6589,7 @@ pub(super) async fn deliver_token_async<Producer: AsyncTokenProducer>(
             phase: Phase::Token,
             step,
             elapsed_ms,
+            elapsed_ns,
         })
         .await;
     Ok(match control {
