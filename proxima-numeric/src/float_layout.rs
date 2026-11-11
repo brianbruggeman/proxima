@@ -485,20 +485,6 @@ mod tests {
         ),
     ];
 
-    const NAMED_LAYOUTS: [FloatLayout; 11] = [
-        FloatLayout::F16,
-        FloatLayout::BF16,
-        FloatLayout::BF32,
-        FloatLayout::E5M2,
-        FloatLayout::E5M2_SATURATING,
-        FloatLayout::E4M3FN,
-        FloatLayout::E3M2,
-        FloatLayout::E2M3,
-        FloatLayout::E2M2,
-        FloatLayout::E2M1,
-        FloatLayout::F8_E8M0,
-    ];
-
     fn unnamed_e8m3() -> FloatLayout {
         let mut layout = FloatLayout::BF16;
         layout.mantissa_bits = 3;
@@ -518,7 +504,7 @@ mod tests {
 
         let named = NAMED_LAYOUTS
             .iter()
-            .any(|layout| layout.fingerprint() == unnamed.fingerprint());
+            .any(|(layout, _)| layout.fingerprint() == unnamed.fingerprint());
 
         assert!(!named, "the blind-spot layout must have no name");
     }

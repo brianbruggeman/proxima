@@ -421,6 +421,12 @@ const fn magic_add_selected(layout: &FloatLayout) -> bool {
     !layout.is_mantissa_prefix_of(&SOURCE_LAYOUT) && magic_add_applies(layout)
 }
 
+// the one decision of which layouts decode by placing their bits at the top of a binary32; the per-element and the slice route both ask it
+#[inline(always)]
+const fn widens_by_embedding(layout: &FloatLayout) -> bool {
+    layout.is_mantissa_prefix_of(&SOURCE_LAYOUT)
+}
+
 // a round-up carry never reaches bit 31, so rounding the whole pattern converts sign and magnitude at once;
 // with no bits dropped and every nan bit kept the pattern is returned as it came, so a signalling nan survives
 #[inline(always)]
@@ -600,7 +606,7 @@ pub const fn decode(code: u32, layout: FloatLayout) -> f32 {
     if layout.is_identity_of(&SOURCE_LAYOUT) {
         return f32::from_bits(code);
     }
-    if layout.is_mantissa_prefix_of(&SOURCE_LAYOUT) {
+    if widens_by_embedding(&layout) {
         return embedded_f32(code, &layout);
     }
     let mantissa = code & mantissa_mask(&layout);
@@ -818,7 +824,7 @@ pub(crate) fn decode_body<Slot>(
         }
         return;
     }
-    if bytes == 2 && layout.is_mantissa_prefix_of(&SOURCE_LAYOUT) {
+    if bytes == 2 && widens_by_embedding(&layout) {
         let widen = F32_FRACTION_BITS - layout.mantissa_bits as u32;
         let Some(pairs) = exact_chunks::<2>(data, out.len()) else {
             return;
@@ -1304,6 +1310,61 @@ mod tests {
 
         assert!(magic_add_selected(&respelled_f16));
         assert!(!truncates_f32(&respelled_f16, Rounding::NearestTiesEven, Overflow::Format));
+    }
+
+    #[test]
+    fn an_unnamed_mantissa_prefix_layout_widens_by_embedding() {
+        assert!(widens_by_embedding(&unnamed_e8m3()));
+    }
+
+    #[test]
+    fn a_respelled_f16_does_not_widen_by_embedding() {
+        let respelled_f16 = FloatLayout { bias_override: Some(FloatLayout::F16.bias()), ..FloatLayout::F16 };
+
+        assert!(!widens_by_embedding(&respelled_f16));
+    }
+
+    fn e8m3_oracle(code: u32) -> f32 {
+        f32::from_bits(code << 20)
+    }
+
+    fn e8m3_exponent_is_all_ones(code: u32) -> bool {
+        (code >> 3) & 0xFF == 0xFF
+    }
+
+    fn assert_matches_oracle(code: u32, got: f32, route: &str) {
+        let want = e8m3_oracle(code);
+        if e8m3_exponent_is_all_ones(code) {
+            assert_eq!(got.is_nan(), want.is_nan(), "{route}: nan class of code {code:#05x}");
+            assert_eq!(got.is_infinite(), want.is_infinite(), "{route}: inf class of code {code:#05x}");
+            if want.is_infinite() {
+                assert_eq!(got.is_sign_negative(), want.is_sign_negative(), "{route}: inf sign of code {code:#05x}");
+            }
+        } else {
+            assert_eq!(got.to_bits(), want.to_bits(), "{route}: bits of code {code:#05x}");
+        }
+    }
+
+    #[test]
+    fn every_e8m3_code_decodes_to_its_bits_placed_at_the_top_of_an_f32() {
+        let e8m3 = unnamed_e8m3();
+
+        for code in 0u32..4096 {
+            assert_matches_oracle(code, decode(code, e8m3), "decode");
+        }
+    }
+
+    #[test]
+    fn every_e8m3_code_slice_decodes_to_its_bits_placed_at_the_top_of_an_f32() {
+        let e8m3 = unnamed_e8m3();
+        let bytes: Vec<u8> = (0u16..4096).flat_map(u16::to_le_bytes).collect();
+        let mut out = vec![0.0f32; 4096];
+
+        decode_body(e8m3, &bytes, &mut out, |slot, value| *slot = value);
+
+        for (code, got) in out.iter().enumerate() {
+            assert_matches_oracle(code as u32, *got, "decode_body");
+        }
     }
 
     #[test]
