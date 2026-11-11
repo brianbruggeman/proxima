@@ -21,7 +21,7 @@
 
 use half::{bf16, f16};
 use proxima_numeric::{FormatCodec, NumericFormat};
-use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
+use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::spec::qk_norm_cached_forward_program;
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{BFloat8, BoundOpKind, NodeId, Op, bind, infer};
@@ -656,6 +656,11 @@ fn max_relative(expected: &[f32], actual: &[f32]) -> f32 {
     worst / peak.max(f32::MIN_POSITIVE)
 }
 
+/// The CPU side attends over the host-decoded K and half-rounded V, so Metal's block read and the
+/// oracle see identical numbers; the bound is the 1e-4 the binary16-read test holds for the same
+/// situation (identical values in, only the kernel's f32 accumulation order differs).
+const BLOCK_K_CPU_BOUND: f32 = 1e-4;
+
 struct BlockKeyCell {
     metal_vs_cpu: f32,
     metal_vs_host_decode: f32,
@@ -709,17 +714,7 @@ fn block_key_cell(format: NumericFormat, cached_len: u64, head_dim: u32) -> Bloc
     }
 
     let host_blocks = as_named_blocks(&host_named);
-    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
-    let mut validated = None;
-    let cpu = evaluate_quantized_named_with_scratch(
-        &fixture.program,
-        &fixture.symbols,
-        &host_blocks,
-        &output_roots,
-        &mut free_buffers,
-        &mut validated,
-    )
-    .expect("cpu runs the decode program over the decoded cache");
+    let cpu = evaluate_gpu_oracle(&fixture.program, &fixture.symbols, &host_blocks, &output_roots, policy);
 
     let block_blocks: Vec<(&str, QuantizedBlock<'_>)> = fixture
         .named
@@ -776,8 +771,13 @@ fn cached_attention_decode_split_reads_a_q4_0_k_cache_as_the_host_codec_decodes_
             let cell = block_key_cell(NumericFormat::Q4_0, cached_len, head_dim);
             assert!(
                 cell.metal_vs_host_decode < 1e-4,
-                "head_dim {head_dim} cached_len {cached_len}: the block read disagrees with the cpu over the same decoded values: {}",
+                "head_dim {head_dim} cached_len {cached_len}: metal over the block K disagrees with metal over the same host-decoded values as plain f32: {}",
                 cell.metal_vs_host_decode
+            );
+            assert!(
+                cell.metal_vs_cpu < BLOCK_K_CPU_BOUND,
+                "head_dim {head_dim} cached_len {cached_len}: metal over the block K disagrees with the f32 cpu oracle over the host-decoded K and half-rounded V: {}",
+                cell.metal_vs_cpu
             );
             cells += 1;
         }
@@ -819,6 +819,7 @@ fn cached_attention_decode_split_reads_a_q8_0_k_cache_through_the_same_rendered_
     let cell = block_key_cell(NumericFormat::Q8_0, 199, 256);
 
     assert!(cell.metal_vs_host_decode < 1e-4, "{}", cell.metal_vs_host_decode);
+    assert!(cell.metal_vs_cpu < BLOCK_K_CPU_BOUND, "{}", cell.metal_vs_cpu);
 }
 
 #[cfg(all(feature = "instrument", feature = "metal-output-placement"))]
