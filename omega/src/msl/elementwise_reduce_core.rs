@@ -2007,7 +2007,7 @@ fn push_q4_0_pair_lane_step(source: &mut String, rows: usize, cap: usize, block_
 /// uses. Each lane's own nibble extraction stays per-lane -- that byte and
 /// bit position differ by lane, nothing to hoist there -- so every
 /// `scratch[weight]` value this renders is `(float)(nibble - 8) * d`,
-/// byte-identical to what [`Q4_0_UNPACK_MSL`]'s `q4_0_element` computes at
+/// byte-identical to what `q4_0_unpack_msl`'s `q4_0_element` computes at
 /// the same `(weight_base[q]+k)` offset: same operations on the same bytes,
 /// no reassociation, just computed once per block instead of once per lane.
 // the argument list mirrors the current generic arm's fixed signature so

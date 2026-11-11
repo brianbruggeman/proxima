@@ -834,7 +834,7 @@ static inline float uniform_expert_element_from_offset_q6k(
 
 static inline float q8_0_field(uint code) {
     uint mantissa = code & 0x7fu;
-    return ((float)((long)mantissa - (long)(((code >> 7u) & 1u) << 7u))) * 1e0f;
+    return ((float)((int)mantissa - (int)(((code >> 7u) & 1u) << 7u))) * 1e0f;
 }
 
 static inline uint q8_0_group(device const uchar *group) {
@@ -867,14 +867,27 @@ static inline float q8_0_pair_dot(device const uchar *superblock, uint slot, thr
 }
 
 
-// element `index` (0..32) of one Q4_0 block, byte-for-byte the value
-// proxima_gguf::quant::q4_0::dequantize_block writes at the same index.
+static inline float q4_0_element_code(uint code) {
+    uint mantissa = code & 0xfu;
+    return ((float)mantissa) * 1e0f;
+}
+
+static inline float q4_0_element_scale(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
 static inline float q4_0_element(device const uchar *block, uint index) {
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    float d = (float)as_type<half>(d_bits);
-    uchar byte = block[2u + (index % 16u)];
-    int nibble = (index < 16u) ? (int)(byte & 0x0Fu) : (int)(byte >> 4u);
-    return (float)(nibble - 8) * d;
+    uint raw_low_rest = index;
+    uint raw_low_address = 16u;
+    raw_low_address += (raw_low_rest % 16u) * 8u;
+    raw_low_rest /= 16u;
+    raw_low_address += (raw_low_rest % 2u) * 4u;
+    raw_low_rest /= 2u;
+    uint raw_low = ((uint)block[raw_low_address / 8u] >> (raw_low_address % 8u)) & 0xfu;
+    float raw = q4_0_element_code(raw_low);
+    float scale = q4_0_element_scale(((uint)block[0u] << 0u) | ((uint)block[1u] << 8u));
+    float value = ((1.0f * raw) - 8.0f) * scale;
+    return value;
 }
 
 
@@ -916,47 +929,67 @@ static inline void q4_0_run8(device const uchar *block, uint index, thread float
 }
 
 
-// element `index` (0..32) of one Q5_1 block, byte-for-byte the value
-// proxima_gguf::quant::q5_1::dequantize_block writes at the same index.
+static inline float q5_1_element_code(uint code) {
+    uint mantissa = code & 0x1fu;
+    return ((float)mantissa) * 1e0f;
+}
+
+static inline float q5_1_element_scale(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline float q5_1_element_min(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
 static inline float q5_1_element(device const uchar *block, uint index) {
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    ushort m_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
-    float delta = (float)as_type<half>(d_bits);
-    float minimum = (float)as_type<half>(m_bits);
-    uint qh = (uint)block[4] | ((uint)block[5] << 8) | ((uint)block[6] << 16) | ((uint)block[7] << 24);
-    bool high_half = index >= 16u;
-    uint local = high_half ? (index - 16u) : index;
-    uchar byte = block[8u + local];
-    uint level;
-    if (high_half) {
-        uint high_bit = (qh >> (local + 12u)) & 0x10u;
-        level = (uint)(byte >> 4u) | high_bit;
-    } else {
-        uint high_bit = ((qh >> local) << 4u) & 0x10u;
-        level = (uint)(byte & 0x0Fu) | high_bit;
-    }
-    return (float)level * delta + minimum;
+    uint raw_low_rest = index;
+    uint raw_low_address = 64u;
+    raw_low_address += (raw_low_rest % 16u) * 8u;
+    raw_low_rest /= 16u;
+    raw_low_address += (raw_low_rest % 2u) * 4u;
+    raw_low_rest /= 2u;
+    uint raw_low = ((uint)block[raw_low_address / 8u] >> (raw_low_address % 8u)) & 0xfu;
+    uint raw_high_rest = index;
+    uint raw_high_address = 32u;
+    raw_high_address += (raw_high_rest % 32u) * 1u;
+    raw_high_rest /= 32u;
+    uint raw_high = ((uint)block[raw_high_address / 8u] >> (raw_high_address % 8u)) & 0x1u;
+    float raw = q5_1_element_code((raw_low | (raw_high << 4u)));
+    float scale = q5_1_element_scale(((uint)block[0u] << 0u) | ((uint)block[1u] << 8u));
+    float value = ((1.0f * raw) - 0.0f) * scale;
+    float minimum = q5_1_element_min(((uint)block[2u] << 0u) | ((uint)block[3u] << 8u));
+    value = value + (1.0f * minimum);
+    return value;
 }
 
 
-// element `index` (0..32) of one Q5_0 block, byte-for-byte the value
-// proxima_gguf::quant::q5_0::dequantize_block writes at the same index.
+static inline float q5_0_element_code(uint code) {
+    uint mantissa = code & 0x1fu;
+    return ((float)mantissa) * 1e0f;
+}
+
+static inline float q5_0_element_scale(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
 static inline float q5_0_element(device const uchar *block, uint index) {
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    float delta = (float)as_type<half>(d_bits);
-    uint qh = (uint)block[2] | ((uint)block[3] << 8) | ((uint)block[4] << 16) | ((uint)block[5] << 24);
-    bool high_half = index >= 16u;
-    uint local = high_half ? (index - 16u) : index;
-    uchar byte = block[6u + local];
-    uint level;
-    if (high_half) {
-        uint high_bit = (qh >> (local + 12u)) & 0x10u;
-        level = (uint)(byte >> 4u) | high_bit;
-    } else {
-        uint high_bit = ((qh >> local) << 4u) & 0x10u;
-        level = (uint)(byte & 0x0Fu) | high_bit;
-    }
-    return ((float)level - 16.0f) * delta;
+    uint raw_low_rest = index;
+    uint raw_low_address = 48u;
+    raw_low_address += (raw_low_rest % 16u) * 8u;
+    raw_low_rest /= 16u;
+    raw_low_address += (raw_low_rest % 2u) * 4u;
+    raw_low_rest /= 2u;
+    uint raw_low = ((uint)block[raw_low_address / 8u] >> (raw_low_address % 8u)) & 0xfu;
+    uint raw_high_rest = index;
+    uint raw_high_address = 16u;
+    raw_high_address += (raw_high_rest % 32u) * 1u;
+    raw_high_rest /= 32u;
+    uint raw_high = ((uint)block[raw_high_address / 8u] >> (raw_high_address % 8u)) & 0x1u;
+    float raw = q5_0_element_code((raw_low | (raw_high << 4u)));
+    float scale = q5_0_element_scale(((uint)block[0u] << 0u) | ((uint)block[1u] << 8u));
+    float value = ((1.0f * raw) - 16.0f) * scale;
+    return value;
 }
 
 

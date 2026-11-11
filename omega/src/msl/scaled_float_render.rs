@@ -1,6 +1,8 @@
 use const_format::formatcp;
+use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::float_layout::FloatLayout;
 
+use super::layout_render::block_element_msl;
 use super::*;
 
 pub(super) const FP6_E3M2_ELEMENTS: usize = Codec::FP6_E3M2_BLOCK_ELEMENTS;
@@ -125,6 +127,32 @@ pub fn q8_0_unpack_msl() -> String {
         scaled_block_super_element_msl(&Q8_0_BLOCK),
     ]
     .concat()
+}
+
+/// The `q4_0_element(block, index)` accessor of a `Q4_0` block (18 bytes per 32 elements: an f16
+/// scale at 0, 16 packed nibble bytes at 2, element `j` in the low nibble and `16 + j` in the
+/// high one, `value = (nibble - 8) * d`), rendered from `BlockLayout::Q4_0` by
+/// `layout_render::block_element_msl`. It composes the same `BlockLayout` walk the cached-attention
+/// block K reads through; call sites (`codec_element_fn_name`, `q4_0_super_element`) are unchanged.
+#[must_use]
+pub fn q4_0_unpack_msl() -> String {
+    block_element_msl(&BlockLayout::Q4_0, "q4_0_element")
+}
+
+/// The `q5_0_element(block, index)` accessor of a `Q5_0` block (22 bytes per 32 elements: an f16
+/// scale at 0, 32 fifth bits at 2, 16 packed nibble bytes at 6, `value = d * (level - 16)`),
+/// rendered from `BlockLayout::Q5_0`.
+#[must_use]
+pub fn q5_0_unpack_msl() -> String {
+    block_element_msl(&BlockLayout::Q5_0, "q5_0_element")
+}
+
+/// The `q5_1_element(block, index)` accessor of a `Q5_1` block (24 bytes per 32 elements: f16
+/// scale at 0, f16 min at 2, 32 fifth bits at 4, 16 packed nibble bytes at 8,
+/// `value = level * d + m`), rendered from `BlockLayout::Q5_1`.
+#[must_use]
+pub fn q5_1_unpack_msl() -> String {
+    block_element_msl(&BlockLayout::Q5_1, "q5_1_element")
 }
 
 fn scaled_e3m2_quad_dot_msl(layout: FloatLayout) -> String {

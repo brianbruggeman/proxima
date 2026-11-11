@@ -1314,47 +1314,13 @@ pub const Q8_0_BLOCK_BYTES: usize = proxima_gguf::quant::q8_0::BLOCK_BYTES;
 /// family's element count. Read from `proxima_gguf::quant::q8_0::QK8_0`.
 pub const Q8_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q8_0::QK8_0;
 
-/// `Q4_0`: llama.cpp's simplest and most widely distributed 4-bit legacy
-/// format -- a flat 32-element block, one `f16` scale, no sub-block
-/// scale/min pair (unlike `Q4_K`) and no second `min` field (unlike
-/// `Q4_1`). Same KIND-difference from the K-quant family that `Q8_0`'s
-/// own doc draws: no super-block. The tiled-GEMM (`classify_tiled_gemm`) fast
-/// path reads it through its `tiled_decode` description
-/// ([`Q4_0_DEQUANT_HALF16_MSL`]); every other path renders it through the
-/// per-element accessor below.
-///
-/// It DOES take the row-blocked (`classify_packed_row_block`) fast path,
-/// the same way `Q8_0` does: eight real `Q4_0` blocks (32 elements, 18 bytes
-/// each) sit contiguously in exactly the byte span one K-quant super-block
-/// ([`Q4K_BLOCK_ELEMENTS`] = 256 elements) occupies, so
-/// `crate::msl::codec_row_block_step_bytes` treats every 8-block run as one
-/// super-block for that path's addressing, and [`Q4_0_SUPER_ELEMENT_MSL`] is
-/// the matching per-element read inside it.
-///
-/// Ports `proxima_gguf::quant::q4_0::dequantize_block` exactly: each packed
-/// byte carries two 4-bit levels, `value = (nibble - 8) * d`.
-///
-/// Layout, 18 bytes per 32 elements: `d` f16 at 0, 16 packed-nibble bytes
-/// at 2 (element `j`'s low nibble, element `16 + j`'s high nibble).
-pub const Q4_0_UNPACK_MSL: &str = r#"
-// element `index` (0..32) of one Q4_0 block, byte-for-byte the value
-// proxima_gguf::quant::q4_0::dequantize_block writes at the same index.
-static inline float q4_0_element(device const uchar *block, uint index) {
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    float d = (float)as_type<half>(d_bits);
-    uchar byte = block[2u + (index % 16u)];
-    int nibble = (index < 16u) ? (int)(byte & 0x0Fu) : (int)(byte >> 4u);
-    return (float)(nibble - 8) * d;
-}
-"#;
-
 /// The row-blocked packed path's per-superblock-relative `Q4_0` accessor --
 /// mirrors `q8_0_super_element` exactly, same posture: `Q4_0` has no
 /// super-block of its own, but eight real 32-element `Q4_0` blocks (18 bytes
 /// each) sit contiguously in exactly the byte span one K-quant super-block
 /// ([`Q4K_BLOCK_ELEMENTS`] = 256 elements) occupies, so `index / 32` selects
 /// which of the eight real blocks packed into that span, and the remainder
-/// feeds [`Q4_0_UNPACK_MSL`]'s own per-block decode (`q4_0_element`)
+/// feeds `q4_0_unpack_msl`'s own per-block decode (`q4_0_element`)
 /// unchanged. `18` is [`Q4_0_BLOCK_BYTES`] and `32` is [`Q4_0_BLOCK_ELEMENTS`],
 /// both inlined as literals here the same way `q8_0_super_element`
 /// inlines its own fixed layout constants.
@@ -1381,7 +1347,7 @@ static inline float q4_0_super_element(device const uchar *superblock, uint inde
 /// block's 16 packed-nibble bytes directly against the already-gathered
 /// `acts[32]` run: byte `j`'s low nibble is element `j` (`acts[j]`), its
 /// high nibble is element `16 + j` (`acts[j + 16]`) -- the exact index
-/// convention [`Q4_0_UNPACK_MSL`]'s `q4_0_element` already uses (`index %
+/// convention `q4_0_unpack_msl`'s `q4_0_element` already uses (`index %
 /// 16u` selects the byte, `index < 16u` selects which nibble).
 pub const Q4_0_PAIR_DOT_MSL: &str = r#"
 static inline float q4_0_pair_dot(device const uchar *superblock, uint slot, thread const float *acts) {
@@ -1407,7 +1373,7 @@ static inline float q4_0_pair_dot(device const uchar *superblock, uint slot, thr
 /// `d` ONCE per 32-element block via `q4_0_block_scale`, then this decodes 8
 /// RAW levels at a time so the block's `d` is not re-derived (two `device`
 /// byte reads plus an `as_type<half>` reinterpret) on every one of the 32
-/// elements, which is what [`Q4_0_UNPACK_MSL`]'s `q4_0_element` still does
+/// elements, which is what `q4_0_unpack_msl`'s `q4_0_element` still does
 /// per-call on the row-blocked path this arm does not touch.
 ///
 /// Deliberately plain byte reads, NOT `q4k_run8`'s two-word-load trick:
@@ -1469,48 +1435,6 @@ pub const Q4_0_BLOCK_BYTES: usize = proxima_gguf::quant::q4_0::BLOCK_BYTES;
 /// `proxima_gguf::quant::q4_0::QK4_0`.
 pub const Q4_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q4_0::QK4_0;
 
-/// `Q5_1`: a flat 32-element block, one `f16` scale AND one `f16` min
-/// (unlike `Q4_0`'s single scale) plus a 5th bit per element split out into
-/// a separate `qh` plane -- same KIND-difference from the K-quant family
-/// `q8_0_element`/[`Q4_0_UNPACK_MSL`] draw: no super-block, so this
-/// codec does not take the row-blocked (`classify_packed_row_block`) fast
-/// path; the tiled-GEMM (`classify_tiled_gemm`) fast path reads it through its
-/// `tiled_decode` description ([`Q5_1_DEQUANT_HALF16_MSL`]), and every other
-/// path renders it through the per-element accessor below.
-///
-/// Ports `proxima_gguf::quant::q5_1::dequantize_block` exactly (see that
-/// function's own doc for the exact `ggml-quants.c` bit-shift derivation):
-/// each packed nibble byte carries two 4-bit levels (low nibble at element
-/// `j`, high nibble at element `16 + j`), each widened to 5 bits by a
-/// per-element bit from `qh`, then `x = level * d + m` -- unlike `Q4_0`, no
-/// fixed-midpoint recenter, since the format carries its own `m` term.
-///
-/// Layout, 24 bytes per 32 elements: `d` f16 at 0, `m` f16 at 2, 4 bytes of
-/// packed 5th bits (`qh`) at 4, 16 packed-nibble bytes (`qs`) at 8.
-pub const Q5_1_UNPACK_MSL: &str = r#"
-// element `index` (0..32) of one Q5_1 block, byte-for-byte the value
-// proxima_gguf::quant::q5_1::dequantize_block writes at the same index.
-static inline float q5_1_element(device const uchar *block, uint index) {
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    ushort m_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
-    float delta = (float)as_type<half>(d_bits);
-    float minimum = (float)as_type<half>(m_bits);
-    uint qh = (uint)block[4] | ((uint)block[5] << 8) | ((uint)block[6] << 16) | ((uint)block[7] << 24);
-    bool high_half = index >= 16u;
-    uint local = high_half ? (index - 16u) : index;
-    uchar byte = block[8u + local];
-    uint level;
-    if (high_half) {
-        uint high_bit = (qh >> (local + 12u)) & 0x10u;
-        level = (uint)(byte >> 4u) | high_bit;
-    } else {
-        uint high_bit = ((qh >> local) << 4u) & 0x10u;
-        level = (uint)(byte & 0x0Fu) | high_bit;
-    }
-    return (float)level * delta + minimum;
-}
-"#;
-
 /// Bytes one `Q5_1` block occupies -- read from
 /// `proxima_gguf::quant::q5_1::BLOCK_BYTES`; pinned in
 /// `omega/tests/q5_1_unpack.rs`, same posture as [`Q4_0_BLOCK_BYTES`].
@@ -1520,50 +1444,6 @@ pub const Q5_1_BLOCK_BYTES: usize = proxima_gguf::quant::q5_1::BLOCK_BYTES;
 /// [`Q4_0_BLOCK_ELEMENTS`], NOT [`Q4K_BLOCK_ELEMENTS`]'s 256. Read from
 /// `proxima_gguf::quant::q5_1::QK5_1`.
 pub const Q5_1_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q5_1::QK5_1;
-
-/// `Q5_0`: [`Q5_1_UNPACK_MSL`] with the `m` (min) term dropped -- a flat
-/// 32-element block, one `f16` scale and a 5th bit per element split out
-/// into a separate `qh` plane, same as `Q5_1`, but no per-block min:
-/// `x = d * (level - 16)`, a fixed midpoint recenter exactly like [`Q4_0_UNPACK_MSL`]
-/// except `level` is 5 bits wide instead of 4. Same KIND-difference from the
-/// K-quant family `q8_0_element`/[`Q4_0_UNPACK_MSL`] draw: no
-/// super-block, so this codec does not take the row-blocked
-/// (`classify_packed_row_block`) fast path; the tiled-GEMM
-/// (`classify_tiled_gemm`) fast path reads it through its `tiled_decode`
-/// description ([`Q5_0_DEQUANT_HALF16_MSL`]), and every other path renders it
-/// through the per-element accessor below.
-///
-/// Ports `proxima_gguf::quant::q5_0::dequantize_block` exactly (see that
-/// function's own doc for the exact `ggml-quants.c` bit-shift derivation):
-/// each packed nibble byte carries two 4-bit levels (low nibble at element
-/// `j`, high nibble at element `16 + j`), each widened to 5 bits by a
-/// per-element bit from `qh`.
-///
-/// Layout, 22 bytes per 32 elements: `d` f16 at 0, 4 bytes of packed 5th
-/// bits (`qh`) at 2, 16 packed-nibble bytes (`qs`) at 6 -- [`Q5_1_UNPACK_MSL`]'s
-/// layout with the `m` field at offset 2 removed and every later field
-/// shifted back by 2 bytes.
-pub const Q5_0_UNPACK_MSL: &str = r#"
-// element `index` (0..32) of one Q5_0 block, byte-for-byte the value
-// proxima_gguf::quant::q5_0::dequantize_block writes at the same index.
-static inline float q5_0_element(device const uchar *block, uint index) {
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    float delta = (float)as_type<half>(d_bits);
-    uint qh = (uint)block[2] | ((uint)block[3] << 8) | ((uint)block[4] << 16) | ((uint)block[5] << 24);
-    bool high_half = index >= 16u;
-    uint local = high_half ? (index - 16u) : index;
-    uchar byte = block[6u + local];
-    uint level;
-    if (high_half) {
-        uint high_bit = (qh >> (local + 12u)) & 0x10u;
-        level = (uint)(byte >> 4u) | high_bit;
-    } else {
-        uint high_bit = ((qh >> local) << 4u) & 0x10u;
-        level = (uint)(byte & 0x0Fu) | high_bit;
-    }
-    return ((float)level - 16.0f) * delta;
-}
-"#;
 
 /// Bytes one `Q5_0` block occupies -- read from
 /// `proxima_gguf::quant::q5_0::BLOCK_BYTES`; pinned in

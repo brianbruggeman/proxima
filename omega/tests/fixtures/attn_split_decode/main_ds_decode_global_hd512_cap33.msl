@@ -40,7 +40,8 @@ kernel void omega_cached_attention_q1_h1_g8_d512_s3f800000_ln9223372036854775808
         }
         int slice_start = lo + chunk;
         int num_local_keys = (slice_start < hi) ? ((hi - 1 - slice_start) / chunks) + 1 : 0;
-        for (int batch_start = 0; batch_start < num_local_keys; batch_start += (int)batch * (int)keys_in_flight) {
+        int batch_start = 0;
+                for (; batch_start < num_local_keys; batch_start += (int)batch * (int)keys_in_flight) {
             float4 key_real[batch][plane_slots]; float4 key_imag[batch][plane_slots]; float4 value_row[batch][row_slots];
             bool valid[batch];
             OMEGA_UNROLL for (short step = 0; step < batch; step++) {
@@ -58,6 +59,7 @@ kernel void omega_cached_attention_q1_h1_g8_d512_s3f800000_ln9223372036854775808
                 device const float4* kr4 = (device const float4*)((cached ? in2 : in4) + kbase);
                 device const float4* ki4 = (device const float4*)((cached ? in3 : in5) + kbase);
                 device const float4* v4 = (device const float4*)((cached ? in6 : in7) + kbase * 2);
+                
                 OMEGA_UNROLL for (short slot = 0; slot < plane_slots; slot++) {
                     short index = tx + slot * lanes_per_key;
                     key_real[step][slot] = float4(0.0f); key_imag[step][slot] = float4(0.0f);
@@ -97,6 +99,7 @@ kernel void omega_cached_attention_q1_h1_g8_d512_s3f800000_ln9223372036854775808
             }
             maximum = next_max;
         }
+
         if (lanes_per_key <= 8) {
             sum += simd_shuffle_xor(sum, (ushort)8);
             OMEGA_UNROLL for (short slot = 0; slot < row_slots; slot++) { weighted[slot] += simd_shuffle_xor(weighted[slot], (ushort)8); }

@@ -4723,7 +4723,7 @@ fn q4_0_takes_the_tiled_gemm_path_when_unset() {
 /// `PROXIMA_TILED_GEMM_Q4_0=1`: the same `Q4_0` weight now takes the
 /// `simdgroup_matrix`-tiled path, decoding through the per-element
 /// `q4_0_element` accessor (already unconditional in the prelude via
-/// [`crate::identity`]'s own `Q4_0_UNPACK_MSL`) rather than `Q4_K`'s
+/// [`crate::identity`]'s own `q4_0_unpack_msl`) rather than `Q4_K`'s
 /// batched `q4k_header_for`/`q4k_run8` pair -- scheduling, packing and
 /// tiling stay the SAME emitted lines either codec takes; only this decode
 /// differs, matching the owner's standing rule that only the decoder may be

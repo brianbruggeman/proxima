@@ -1006,7 +1006,7 @@ pub(super) fn preamble(source: &mut String) {
     // feature -- an unused `static inline` costs nothing in the compiled AIR.
     source.push_str(Q8_0_PAIR_DOT_MSL);
     source.push('\n');
-    source.push_str(Q4_0_UNPACK_MSL);
+    source.push_str(&scaled_float_render::q4_0_unpack_msl());
     source.push('\n');
     source.push_str(Q4_0_SUPER_ELEMENT_MSL);
     source.push('\n');
@@ -1014,9 +1014,9 @@ pub(super) fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(Q4_0_RUN8_MSL);
     source.push('\n');
-    source.push_str(Q5_1_UNPACK_MSL);
+    source.push_str(&scaled_float_render::q5_1_unpack_msl());
     source.push('\n');
-    source.push_str(Q5_0_UNPACK_MSL);
+    source.push_str(&scaled_float_render::q5_0_unpack_msl());
     source.push('\n');
     push_flat_float_accessors(source);
 }
