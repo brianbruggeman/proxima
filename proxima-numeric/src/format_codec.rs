@@ -324,6 +324,32 @@ mod tests {
     }
 
     #[test]
+    fn every_named_scalar_layout_that_resolves_gets_the_compile_time_instantiation() {
+        let mut resolved = Vec::new();
+        for (layout, name) in crate::float_layout::NAMED_LAYOUTS {
+            if let Some(codec) = FormatCodec::scalar(&layout) {
+                assert!(matches!(codec.route, Route::Named { .. }), "{name} must take the named route");
+                resolved.push(name);
+            }
+        }
+
+        assert!(resolved.len() >= 8, "the scan reached only {resolved:?}");
+        assert!(resolved.contains(&"bfloat16") && resolved.contains(&"float8_e4m3fn"));
+    }
+
+    #[test]
+    fn a_respelled_layout_takes_the_layout_as_data_route() {
+        let respelled = FloatLayout {
+            bias_override: Some(FloatLayout::F16.bias()),
+            ..FloatLayout::F16
+        };
+
+        let codec = FormatCodec::scalar(&respelled).expect("a respelled f16 resolves");
+
+        assert!(matches!(codec.route, Route::Layout(_)));
+    }
+
+    #[test]
     fn a_layout_the_slice_codec_cannot_execute_does_not_resolve() {
         assert!(FormatCodec::scalar(&FloatLayout::INT64).is_none());
     }
@@ -356,15 +382,15 @@ mod tests {
 
     const FORMAT_NAMES: [&str; 4] = ["Float32", "Float16", "BFloat16", "BFloat8"];
 
-    fn production_text(source: &str) -> &str {
-        source.split("#[cfg(test)]").next().unwrap_or(source)
-    }
+    include!("../tests/support/production_text.rs");
 
     fn identifiers_after<'text>(text: &'text str, prefix: &str) -> Vec<&'text str> {
         text.match_indices(prefix)
-            .map(|(at, _)| {
-                let tail = &text[at + prefix.len()..];
-                let end = tail.find(|c: char| !c.is_alphanumeric() && c != '_').unwrap_or(tail.len());
+            .map(|(offset, _)| {
+                let tail = &text[offset + prefix.len()..];
+                let end = tail
+                    .find(|character: char| !character.is_alphanumeric() && character != '_')
+                    .unwrap_or(tail.len());
                 &tail[..end]
             })
             .collect()
@@ -385,19 +411,19 @@ mod tests {
     fn layout_constants(text: &str) -> Vec<&str> {
         identifiers_after(text, "FloatLayout::")
             .into_iter()
-            .filter(|name| name.starts_with(|c: char| c.is_ascii_uppercase()))
+            .filter(|name| name.starts_with(|first: char| first.is_ascii_uppercase()))
             .collect()
     }
 
     #[test]
     fn the_format_codec_and_the_layout_codec_name_no_format_and_one_source_layout() {
-        let codec = production_text(include_str!("float_layout_codec.rs"));
-        let bridge = production_text(include_str!("format_codec.rs"));
+        let codec = production_of(include_str!("float_layout_codec.rs"));
+        let bridge = production_of(include_str!("format_codec.rs"));
 
-        assert_eq!(format_name_tokens(codec), Vec::<String>::new());
-        assert_eq!(format_name_tokens(bridge), Vec::<String>::new());
-        assert_eq!(layout_constants(codec), ["BF32"], "the documented source layout, SOURCE_LAYOUT");
-        assert_eq!(layout_constants(bridge), Vec::<&str>::new());
+        assert_eq!(format_name_tokens(&codec), Vec::<String>::new());
+        assert_eq!(format_name_tokens(&bridge), Vec::<String>::new());
+        assert_eq!(layout_constants(&codec), ["BF32"], "the documented source layout, SOURCE_LAYOUT");
+        assert_eq!(layout_constants(&bridge), Vec::<&str>::new());
     }
 
     #[test]
