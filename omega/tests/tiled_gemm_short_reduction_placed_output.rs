@@ -141,6 +141,8 @@ fn tiled_gemm_short_reduction_output_is_independent_of_the_slots_prior_bytes() {
         first_difference(&zero_filled, &poisoned)
     );
 
+    let non_finite = zero_filled.iter().filter(|value| !value.is_finite()).count();
+    assert_eq!(non_finite, 0, "{non_finite}/{OUTPUT_COUNT} outputs are NaN or infinite, which an f32::max fold would score as zero error");
     let worst = zero_filled
         .iter()
         .zip(&reference)

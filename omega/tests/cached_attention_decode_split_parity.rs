@@ -249,6 +249,8 @@ fn parity_cell(cached_len: u64, head_dim: u32, half_kv: bool) -> f32 {
         !expected.is_empty(),
         "head_dim {head_dim} cached_len {cached_len}: an empty root compares nothing"
     );
+    assert_all_finite(expected, &format!("head_dim {head_dim} cached_len {cached_len} cpu root"));
+    assert_all_finite(actual, &format!("head_dim {head_dim} cached_len {cached_len} metal root"));
     let max_magnitude = expected
         .iter()
         .map(|value| value.abs())
@@ -637,9 +639,18 @@ fn worst_error_over_block_max(original: &[f32], decoded: &[f32]) -> f32 {
         .fold(0.0f32, f32::max)
 }
 
+/// f32::max drops a NaN operand, so a kernel that writes NaN everywhere would score zero error:
+/// every comparison first requires finite values on both sides.
+fn assert_all_finite(values: &[f32], what: &str) {
+    let non_finite = values.iter().filter(|value| !value.is_finite()).count();
+    assert_eq!(non_finite, 0, "{non_finite}/{} {what} values are not finite", values.len());
+}
+
 fn max_relative(expected: &[f32], actual: &[f32]) -> f32 {
     assert_eq!(expected.len(), actual.len());
     assert!(!expected.is_empty(), "an empty root compares nothing");
+    assert_all_finite(expected, "expected");
+    assert_all_finite(actual, "actual");
     let peak = expected.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
     let worst = expected.iter().zip(actual).fold(0.0f32, |worst, (want, got)| worst.max((want - got).abs()));
     worst / peak.max(f32::MIN_POSITIVE)
@@ -667,6 +678,7 @@ fn block_key_cell(format: NumericFormat, cached_len: u64, head_dim: u32) -> Bloc
     for (name, data) in host_named.iter_mut().filter(|(name, _)| is_kv_cache(name)) {
         if is_key_leaf(name) {
             let (packed, decoded) = block_round_trip(&format, data);
+            assert_all_finite(&decoded, "host-decoded K");
             step_fraction = step_fraction.max(worst_error_over_block_max(data, &decoded));
             *data = decoded;
             block_named.push((name.clone(), format, packed));
