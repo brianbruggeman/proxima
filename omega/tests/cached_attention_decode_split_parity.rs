@@ -917,6 +917,59 @@ fn cached_attention_decode_split_times_a_binary16_k_cache_against_a_q4_0_k_cache
     );
 }
 
+#[cfg(all(feature = "instrument", feature = "metal-output-placement"))]
+fn median_of(sample: &mut [u64]) -> u64 {
+    sample.sort_unstable();
+    sample[sample.len() / 2]
+}
+
+/// Per-step GPU time of the decode-split attention ops with K and V both f32 against K and V both binary16,
+/// the production pairings, at the two gemma4-E2B heads over three cached lengths, interleaved per sample.
+#[cfg(all(feature = "instrument", feature = "metal-output-placement"))]
+#[test]
+fn cached_attention_decode_split_times_an_f32_kv_cache_against_a_binary16_kv_cache() {
+    const SAMPLES: usize = 25;
+    let policy = production_numeric_policy();
+    for head_dim in [256_u32, 512] {
+        for cached_len in [32_u64, 1099, 4096] {
+            let fixture = gqa_decode_fixture(cached_len, head_dim);
+            let output_roots = [fixture.roots[0]];
+            let arms = ["k=f32 v=f32", "k=binary16 v=binary16"];
+            let leaves = [Vec::new(), timed_cache_leaves(&fixture, None)];
+            let blocks: Vec<_> = leaves.iter().map(|arm_leaves| timed_blocks(&fixture, arm_leaves)).collect();
+            let plans: Vec<_> = blocks
+                .iter()
+                .zip(&arms)
+                .map(|(arm_blocks, label)| {
+                    omega::plan_named(&fixture.program, &fixture.symbols, arm_blocks, &output_roots, policy)
+                        .unwrap_or_else(|error| panic!("metal plans the {label} decode program: {error:?}"))
+                })
+                .collect();
+
+            let mut samples: Vec<Vec<u64>> = arms.iter().map(|_| Vec::new()).collect();
+            for _ in 0..SAMPLES {
+                for (arm, plan) in plans.iter().enumerate() {
+                    let (_, timings) = omega::execute_plan_named_with_placements_op_timed(plan, &blocks[arm], &[], &[])
+                        .expect("the plan times");
+                    let (nanos, ops) = attention_gpu_ns(&timings);
+                    assert_eq!(ops, LAYERS as usize, "one decode-split attention op per layer");
+                    samples[arm].push(nanos);
+                }
+            }
+            for (label, sample) in arms.iter().zip(&samples) {
+                assert!(sample.iter().all(|nanos| *nanos > 0), "the {label} arm must report attention time");
+            }
+            let medians: Vec<u64> = samples.iter_mut().map(|sample| median_of(sample)).collect();
+            eprintln!(
+                "kv_dtype attention gpu_ns head_dim={head_dim} cached_len={cached_len} layers={LAYERS}: f32_median={} binary16_median={} ratio_f16_over_f32={:.4} samples={SAMPLES}",
+                medians[0],
+                medians[1],
+                medians[1] as f64 / medians[0] as f64,
+            );
+        }
+    }
+}
+
 #[test]
 fn cached_attention_declines_a_block_v_cache_instead_of_reading_it_as_f32() {
     let policy = production_numeric_policy();
