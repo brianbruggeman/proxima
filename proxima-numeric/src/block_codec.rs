@@ -336,6 +336,25 @@ const fn unpacks_by_word(layout: &BlockLayout) -> bool {
     layout.element.high.is_none() && is_word_packed(&layout.element.low)
 }
 
+/// Whether every code is already a byte in index order: no high plane, an eight-bit low plane, and
+/// element `index` at byte `base + index`. Decode then reads each code from the block where it lies;
+/// staging them in an array first is a copy of the whole run, which the optimiser cannot forward
+/// because the block and the output are not proven disjoint.
+const fn reads_codes_in_place(layout: &BlockLayout) -> bool {
+    let plane = &layout.element.low;
+    if layout.element.high.is_some() || plane.bits != 8 || !(plane.base_bits as usize).is_multiple_of(8) {
+        return false;
+    }
+    let mut index = 0;
+    while index < layout.elements as usize {
+        if plane.address(index) != plane.base_bits as usize + 8 * index {
+            return false;
+        }
+        index += 1;
+    }
+    true
+}
+
 /// [`walk_plane`] one run at a time: visits `(first_index, byte_address)` for each run of the
 /// innermost digit's radix elements, in index order.
 #[inline(always)]
@@ -392,7 +411,7 @@ fn integer_factor(layout: &BlockLayout, raw: u32) -> i32 {
 }
 
 #[inline(always)]
-fn decode_chunk<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool>(
+fn decode_chunk<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool, const IN_PLACE: bool>(
     layout: &BlockLayout,
     block: &[u8; BYTES],
     out: &mut [MaybeUninit<f32>; ELEMENTS],
@@ -423,6 +442,13 @@ fn decode_chunk<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool>(
     };
     if BY_WORD {
         unpack_runs(&layout.element.low, block, out, value_of);
+        return;
+    }
+    if IN_PLACE {
+        let first = layout.element.low.base_bits as usize / 8;
+        for (slot, &byte) in out.iter_mut().zip(&block[first..first + ELEMENTS]) {
+            slot.write(value_of(u32::from(byte)));
+        }
         return;
     }
     let codes = gather_codes::<ELEMENTS, BYTES>(layout, block);
@@ -465,7 +491,7 @@ fn unpack_runs<const ELEMENTS: usize, const BYTES: usize>(
 }
 
 #[inline(always)]
-fn decode_run<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool>(
+fn decode_run<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool, const IN_PLACE: bool>(
     layout: BlockLayout,
     data: &[u8],
     out: &mut [MaybeUninit<f32>],
@@ -473,7 +499,7 @@ fn decode_run<const ELEMENTS: usize, const BYTES: usize, const BY_WORD: bool>(
     let blocks = data.as_chunks::<BYTES>().0;
     let slots = out.as_chunks_mut::<ELEMENTS>().0;
     for (block, slot) in blocks.iter().zip(slots) {
-        decode_chunk::<ELEMENTS, BYTES, BY_WORD>(&layout, block, slot);
+        decode_chunk::<ELEMENTS, BYTES, BY_WORD, IN_PLACE>(&layout, block, slot);
     }
 }
 
@@ -724,6 +750,7 @@ macro_rules! resolve_named_block {
                 const HIGH_FUSED: bool = is_high_single_word(&BlockLayout::$name);
                 const SCALE_OWNED: bool = scale_owns_its_bytes(&BlockLayout::$name);
                 const UNPACK_BY_WORD: bool = unpacks_by_word(&BlockLayout::$name);
+                const IN_PLACE: bool = reads_codes_in_place(&BlockLayout::$name);
                 let encode: Option<EncodeFn> = match FIT {
                     Fit::Runtime => None,
                     _ => Some(|values, out| {
@@ -736,7 +763,7 @@ macro_rules! resolve_named_block {
                     }),
                 };
                 let decode: DecodeFn = |data, out| {
-                    decode_run::<ELEMENTS, BYTES, UNPACK_BY_WORD>(BlockLayout::$name, data, out);
+                    decode_run::<ELEMENTS, BYTES, UNPACK_BY_WORD, IN_PLACE>(BlockLayout::$name, data, out);
                 };
                 return Some(FormatCodec::table(encode, decode, ELEMENTS, BYTES));
             }
