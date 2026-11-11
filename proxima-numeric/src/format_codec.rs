@@ -380,6 +380,36 @@ mod tests {
         assert_eq!(codec.format_name(), "q4_0");
     }
 
+    #[test]
+    fn a_block_format_with_no_encode_names_itself_in_the_unsupported_encode_error() {
+        let codec = FormatCodec::for_format(&NumericFormat::Mxfp4).expect("mxfp4 resolves");
+        let mut out = [0u8; 17];
+
+        let refused = codec.encode(&kv_values(32), &mut out);
+
+        assert!(!codec.can_encode(), "mxfp4 resolves for decode only");
+        assert_eq!(
+            refused,
+            Err(NumericError::UnsupportedEncode {
+                format: "mxfp4",
+                reason: "no compile-time encode for this layout's fit",
+            })
+        );
+    }
+
+    #[test]
+    fn decoding_a_partial_block_names_the_format_that_raised_it() {
+        let codec = FormatCodec::for_format(&NumericFormat::Q4_0).expect("q4_0 resolves");
+        let mut slots = [MaybeUninit::<f32>::uninit(); 32];
+
+        let refused = codec.decode(&[0u8; 17], &mut slots);
+
+        assert_eq!(
+            refused,
+            Err(NumericError::InputNotBlockMultiple { format: "q4_0", found: 17, block_bytes: 18 })
+        );
+    }
+
     const FORMAT_NAMES: [&str; 4] = ["Float32", "Float16", "BFloat16", "BFloat8"];
 
     include!("../tests/support/production_text.rs");
