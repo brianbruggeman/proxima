@@ -16,6 +16,8 @@
 pub mod bf16;
 #[cfg(test)]
 mod block_codec_parity;
+#[cfg(test)]
+pub(crate) mod llama_reference;
 pub mod bf4_e2m1;
 pub mod bf8_e5m2;
 pub mod block_layout;
