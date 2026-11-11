@@ -107,8 +107,9 @@ pub(crate) fn quantize_row_tq2_0_ref(values: &[f32], out: &mut [u8]) {
             for lane in 0..32 {
                 let mut packed: u8 = 0;
                 for slot in 0..4 {
-                    // lroundf of NaN is unspecified in C, the saturating cast gives 0 here
-                    let code = (libm::roundf(source[lane + slot * 32] * inverse) as i64 + 1) as i32;
+                    // lroundf of NaN or of an infinity (a subnormal block maximum makes the inverse infinite) is
+                    // unspecified in C; the saturating cast and add keep it total and platform-independent here
+                    let code = (libm::roundf(source[lane + slot * 32] * inverse) as i64).saturating_add(1) as i32;
                     packed = packed.wrapping_add(((code & 3) << (2 * slot)) as u8);
                 }
                 block[byte_base + lane] = packed;
@@ -195,6 +196,20 @@ mod tests {
         let mut decoded = vec![0f32; 256];
         dequantize_row_tq2_0(&block, &mut decoded);
         assert_eq!(decoded, input);
+    }
+
+    #[test]
+    fn tq2_0_a_block_of_the_smallest_subnormal_has_an_infinite_inverse_and_still_quantizes() {
+        // amax = f32 bits 1, so id = 1 / 1.4e-45 overflows to +inf and every element is inf; the
+        // saturated rounding is i64::MAX, whose low 32 bits are all ones, so every code is 3 and every
+        // byte 0xFF; the scale 1.4e-45 underflows to f16 zero
+        let input = vec![f32::from_bits(1); 256];
+        let mut block = vec![0u8; 66];
+
+        quantize_row_tq2_0_ref(&input, &mut block);
+
+        assert_eq!(&block[64..66], &[0x00, 0x00], "f16 of the subnormal scale is zero");
+        assert!(block[..64].iter().all(|byte| *byte == 0xFF), "every element saturates to code 3");
     }
 
     #[test]
