@@ -360,7 +360,11 @@ fn signed_max<const ELEMENTS: usize>(input: &[f32; ELEMENTS]) -> f32 {
 
 #[inline(always)]
 fn peak<const ELEMENTS: usize>(input: &[f32; ELEMENTS]) -> f32 {
-    input.iter().fold(0.0f32, |peak, value| peak.max(value.abs()))
+    // ggml-impl.h:40 MAX(a, b) is (a) > (b) ? (a) : (b), so a nan in the last element stays nan
+    input.iter().fold(0.0f32, |peak, value| {
+        let magnitude = value.abs();
+        if peak > magnitude { peak } else { magnitude }
+    })
 }
 
 #[inline(always)]
