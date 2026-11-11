@@ -1758,8 +1758,9 @@ mod tests {
         assert!(message.contains("no cached-attention kernel that reads a narrow cache"), "{message}");
     }
 
-    /// A mixed pair is refused because the decode kernel reads K and V
-    /// through one codec.
+    /// A narrow K beside a plain f32 V is refused: the only mixed pair the
+    /// decode kernel reads is a block K beside a narrow (f16, bf16, bf8) V
+    /// (`kv_cache_format::admit_pair`).
     #[test]
     fn serving_refuses_a_mixed_f16_f32_pair() {
         let mixed_pair = ServingConfig {
