@@ -15,6 +15,9 @@
     unsafe_op_in_unsafe_fn
 )]
 pub mod bindings;
+mod decode;
+
+pub use decode::{GPU_LAYERS, GreedyRun, greedy_decode, masked_top2, tokenize};
 
 use std::env;
 use std::fs;
@@ -51,6 +54,18 @@ pub enum LoadError {
     BuildSymbol { path: PathBuf, source: libloading::Error },
     #[error("cannot resolve llama api from {path}: {source}")]
     Resolve { path: PathBuf, source: libloading::Error },
+    #[error("path {0} contains a NUL byte")]
+    BadPath(PathBuf),
+    #[error("llama_model_load_from_file returned null for {0}")]
+    ModelLoad(PathBuf),
+    #[error("llama_init_from_model returned null")]
+    ContextInit,
+    #[error("llama_tokenize returned {0}")]
+    Tokenize(i32),
+    #[error("llama_decode returned {code} at step {step}")]
+    Decode { step: usize, code: i32 },
+    #[error("no non-eog logits at step {step}")]
+    NoLogits { step: usize },
 }
 
 /// what the gate observed; goes in the scoreboard's `binary_sha256` and `llama_build` columns.
