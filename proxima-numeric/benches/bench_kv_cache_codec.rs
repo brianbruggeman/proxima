@@ -1039,14 +1039,28 @@ fn run_block_decode_cell(case: &BlockCase, values: &[f32], count: usize) -> Bloc
     }
 }
 
+/// `KV_BENCH_CELLS=decode:q4_1,encode:q4_0` limits the block cells to those `direction:name` pairs;
+/// unset runs every cell.
+fn cell_filter() -> Option<Vec<String>> {
+    let text = std::env::var("KV_BENCH_CELLS").ok()?;
+    Some(text.split(',').map(str::trim).filter(|entry| !entry.is_empty()).map(str::to_string).collect())
+}
+
+fn cell_selected(filter: &Option<Vec<String>>, direction: &str, name: &str) -> bool {
+    filter.as_ref().is_none_or(|entries| entries.iter().any(|entry| *entry == format!("{direction}:{name}")))
+}
+
 fn block_cells(values: &[f32]) -> Vec<BlockCell> {
+    let filter = cell_filter();
     let mut cells = Vec::new();
     for case in block_cases() {
         for &count in &SIZES {
-            if case.encoder.is_some() {
+            if case.encoder.is_some() && cell_selected(&filter, "encode", case.name) {
                 cells.push(run_block_encode_cell(&case, values, count));
             }
-            cells.push(run_block_decode_cell(&case, values, count));
+            if cell_selected(&filter, "decode", case.name) {
+                cells.push(run_block_decode_cell(&case, values, count));
+            }
         }
     }
     cells
@@ -1525,7 +1539,8 @@ fn timing_census(cells: &[BlockCell]) -> Option<String> {
 fn interleaved(values: &[f32]) -> Vec<String> {
     let before = box_gate();
     print_box_gate("before", &before);
-    let blocks_only = std::env::var_os("KV_BENCH_BLOCKS_ONLY").is_some();
+    let filtered = cell_filter().is_some();
+    let blocks_only = filtered || std::env::var_os("KV_BENCH_BLOCKS_ONLY").is_some();
     let mut cells = Vec::new();
     let scalars: &[Scalar] = if blocks_only { &[] } else { &Scalar::ALL };
     for &scalar in scalars {
@@ -1546,7 +1561,9 @@ fn interleaved(values: &[f32]) -> Vec<String> {
         failures.push(format!("scalar cells {} != expected {expected_scalar_cells}", cells.len()));
     }
     println!("blockcells={} expected={BLOCK_CELLS}", block_cells.len());
-    if block_cells.len() != BLOCK_CELLS {
+    if filtered {
+        println!("AC6 UNCHECKED: KV_BENCH_CELLS selected {} of {BLOCK_CELLS} block cells", block_cells.len());
+    } else if block_cells.len() != BLOCK_CELLS {
         failures.push(format!("block cells {} != expected {BLOCK_CELLS}", block_cells.len()));
     }
     failures.extend(timing_census(&block_cells));
