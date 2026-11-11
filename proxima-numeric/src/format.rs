@@ -536,7 +536,19 @@ impl NumericFormat {
     /// The canonical spelling of [`Self::Bool`], the one `DType::Bool` serializes as.
     pub const BOOL_NAME: &'static str = "bool";
 
-    /// The format a canonical name denotes; the inverse of [`Self::name`] over [`Self::ALL`].
+    /// Spellings [`Self::from_name`] also accepts, beside [`Self::NAMES`]: the ggml / llama.cpp
+    /// `--cache-type-k` short names for the three scalar types they spell differently. The
+    /// block types (`q8_0`, `q4_0`, `iq4_nl`, ...) already share their ggml spelling in
+    /// [`Self::NAMES`]. [`Self::name`] never returns these.
+    pub const ALIASES: [(&'static str, Self); 3] = [
+        ("f32", Self::Float32),
+        ("f16", Self::Float16),
+        ("bf16", Self::BFloat16),
+    ];
+
+    /// The format a name denotes: a canonical name from [`Self::NAMES`], `bool`, a name in
+    /// [`Self::ALIASES`], or a scalar layout's own name (`float32`). The inverse of
+    /// [`Self::name`] over every format that has one.
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         if name == Self::BOOL_NAME {
@@ -546,6 +558,12 @@ impl NumericFormat {
             .iter()
             .position(|named| *named == name)
             .map(|position| Self::ALL[position])
+            .or_else(|| {
+                Self::ALIASES
+                    .iter()
+                    .find_map(|(alias, format)| (*alias == name).then_some(*format))
+            })
+            .or_else(|| FloatLayout::from_name(name).map(Self::Scalar))
     }
 
     /// Bytes one element occupies stored alone, rounded up to a whole byte; a block format reports
@@ -729,6 +747,39 @@ impl NumericFormat {
     pub const Iq4Xs: Self = Self::Levels(LevelFormat::external(256, 136));
 }
 
+#[cfg(feature = "config")]
+impl serde::Serialize for NumericFormat {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.name() {
+            Some(name) => serializer.serialize_str(name),
+            None => Err(serde::ser::Error::custom("numeric format has no name")),
+        }
+    }
+}
+
+#[cfg(feature = "config")]
+impl<'de> serde::Deserialize<'de> for NumericFormat {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct NumericFormatVisitor;
+
+        impl serde::de::Visitor<'_> for NumericFormatVisitor {
+            type Value = NumericFormat;
+
+            fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+                formatter.write_str("a numeric format name such as \"q8_0\", \"f16\" or \"bfloat16\"")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<NumericFormat, E> {
+                NumericFormat::from_name(name).ok_or_else(|| {
+                    E::custom(format_args!("unknown numeric format name `{name}`"))
+                })
+            }
+        }
+
+        deserializer.deserialize_str(NumericFormatVisitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -859,6 +910,66 @@ mod tests {
         }
         assert_eq!(NumericFormat::from_tag(36), None);
         assert_eq!(NumericFormat::from_tag(u8::MAX), None);
+    }
+
+    #[test]
+    fn llama_cache_type_spellings_resolve_to_the_format_ggml_type_maps_them_to() {
+        let cases = [
+            ("f32", NumericFormat::Float32),
+            ("f16", NumericFormat::Float16),
+            ("bf16", NumericFormat::BFloat16),
+            ("q8_0", NumericFormat::Q8_0),
+            ("q4_0", NumericFormat::Q4_0),
+            ("q4_1", NumericFormat::Q4_1),
+            ("q5_0", NumericFormat::Q5_0),
+            ("q5_1", NumericFormat::Q5_1),
+            ("iq4_nl", NumericFormat::Iq4Nl),
+        ];
+        for (spelling, expected) in cases {
+            assert_eq!(NumericFormat::from_name(spelling), Some(expected), "{spelling}");
+        }
+    }
+
+    #[test]
+    fn aliases_never_come_back_from_name_and_every_pre_existing_name_still_resolves() {
+        for (alias, format) in NumericFormat::ALIASES {
+            assert_ne!(format.name(), Some(alias), "{alias} must stay an alias");
+            assert!(!NumericFormat::NAMES.contains(&alias), "{alias} duplicates a canonical name");
+        }
+        for (index, name) in NumericFormat::NAMES.iter().enumerate() {
+            assert_eq!(NumericFormat::from_name(name), Some(NumericFormat::ALL[index]), "{name}");
+        }
+        assert_eq!(NumericFormat::from_name("bool"), Some(NumericFormat::Bool));
+        assert_eq!(NumericFormat::from_name("float32"), Some(NumericFormat::Float32));
+        assert_eq!(NumericFormat::from_name("q9_9"), None);
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn every_named_format_round_trips_through_serde_to_itself() {
+        let named = NumericFormat::ALL
+            .iter()
+            .chain([NumericFormat::Float32, NumericFormat::Bool].iter());
+        for format in named {
+            let encoded = serde_json::to_string(format).expect("a named format serializes");
+            let decoded: NumericFormat =
+                serde_json::from_str(&encoded).expect("its own spelling deserializes");
+            assert_eq!(decoded, *format, "{encoded}");
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn deserializing_a_cache_type_spelling_yields_its_format() {
+        let decoded: NumericFormat = serde_json::from_str("\"bf16\"").expect("bf16 is an alias");
+        assert_eq!(decoded, NumericFormat::BFloat16);
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn deserializing_an_unknown_name_fails_naming_the_input() {
+        let error = serde_json::from_str::<NumericFormat>("\"q9_9\"").expect_err("q9_9 is not a format");
+        assert!(error.to_string().contains("q9_9"), "{error}");
     }
 
     #[test]
