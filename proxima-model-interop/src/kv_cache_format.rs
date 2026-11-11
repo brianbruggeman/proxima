@@ -27,12 +27,12 @@ fn is_binary32_format(format: &NumericFormat) -> bool {
 }
 
 /// The codec the kernel reads a K cache stored as `format` with, whatever the V cache is.
-#[cfg(feature = "gpu")]
+#[cfg(all(feature = "std", feature = "gpu"))]
 fn kernel_codec(format: &NumericFormat) -> Result<Option<NumericFormat>, String> {
     omega::cached_attention_key_codec_for(format).map_err(|error| error.to_string())
 }
 
-#[cfg(not(feature = "gpu"))]
+#[cfg(all(feature = "std", not(feature = "gpu")))]
 fn kernel_codec(format: &NumericFormat) -> Result<Option<NumericFormat>, String> {
     if is_binary32_format(format) {
         Ok(None)
@@ -126,14 +126,32 @@ pub(crate) fn row_tiled_reads(element: GgmlType) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use alloc::string::ToString;
+
     use super::*;
 
     #[test]
-    fn the_binary32_and_narrow_pairs_the_kernel_reads_are_admitted() {
-        let admitted = [GgmlType::F32, GgmlType::F16, GgmlType::Bf16];
+    fn a_binary32_cache_is_admitted() {
+        assert!(admit_pair(GgmlType::F32, GgmlType::F32).is_ok());
+    }
 
-        for element in admitted {
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn the_narrow_pairs_the_kernel_reads_are_admitted() {
+        for element in [GgmlType::F16, GgmlType::Bf16] {
             assert!(admit_pair(element, element).is_ok(), "{element:?}");
+        }
+    }
+
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn a_narrow_cache_is_refused_at_config_time_when_no_kernel_reads_it() {
+        for element in [GgmlType::F16, GgmlType::Bf16] {
+            let error = admit_pair(element, element).expect_err("no kernel reads a narrow cache");
+
+            let message = error.to_string();
+            assert!(message.contains(&format!("{element:?}")), "{message}");
+            assert!(message.contains("no cached-attention kernel that reads a narrow cache"), "{message}");
         }
     }
 
@@ -183,6 +201,7 @@ mod tests {
         assert!(error.to_string().contains("I8"), "{error}");
     }
 
+    #[cfg(feature = "std")]
     #[test]
     fn only_f32_is_binary32() {
         assert!(is_binary32(GgmlType::F32));
