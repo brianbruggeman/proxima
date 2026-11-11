@@ -48,9 +48,9 @@ Generated from `src/capability.rs`'s own tables by `examples/generate_compatibil
 | IQ2_XS | supported |
 | IQ2_S | unsupported |
 | IQ3_XXS | supported |
-| IQ3_S | unsupported |
+| IQ3_S | supported |
 | IQ4_NL | supported |
-| IQ4_XS | unsupported |
+| IQ4_XS | supported |
 | TQ1_0 | unsupported |
 | TQ2_0 | unsupported |
 | MXFP4 | unsupported |
