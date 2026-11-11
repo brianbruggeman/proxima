@@ -3078,6 +3078,23 @@ impl BackendRuntime {
         resident_plans::keep_kv_buffers(&mut self.kv_buffers, returned, self.resident_kv_bytes);
     }
 
+    /// Lets go of the device buffers the kept plans still hold from their last
+    /// call: a plan clones every caller-placed buffer it was given (the f32
+    /// staging of a narrow KV cache, the KV buffers themselves), so without
+    /// this a buffer the generation freed stays allocated until the plan's next
+    /// call.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn release_placed_buffers(&self) {
+        for plan in self
+            .placed_plans
+            .values()
+            .chain(self.decode_plans.values())
+            .chain(self.placed_segment_plans.values())
+        {
+            plan.release_caller_buffers();
+        }
+    }
+
     /// Whether this call's [`ServingConfig`] selected the Gpu engine --
     /// [`Self::engine`] is private (this struct's whole job is hiding which
     /// arm was picked), so [`Self::run_decode_loop`]'s own choice of the
