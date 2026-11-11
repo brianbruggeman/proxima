@@ -4793,6 +4793,16 @@ format; only the single-row decode kernel reads it from the device cache",
                         let mut buffers_bound = 0u64;
                         #[cfg(feature = "instrument")]
                         let mut buffers_allocated = 0u64;
+                        #[cfg(all(feature = "instrument", feature = "metal"))]
+                        emit_gpu_phase("before_adopt", step);
+                        // a narrow cache adopts after the prefill batches are done, so its f32 staging
+                        // only needs the rows of this step and the decode steps after it
+                        let adopted_step_rows =
+                            if kv_cache_format::is_narrow(&serving_config.kv_cache_key_quant) {
+                                device_kv_decode_rows.max(new_count)
+                            } else {
+                                device_kv_step_rows
+                            };
                         device_kv = DeviceKv::adopt_pair(
                             &mut layer_caches,
                             &layer_row_widths,
@@ -4801,7 +4811,7 @@ format; only the single-row decode kernel reads it from the device cache",
                                 positions_needed + device_kv_decode_rows,
                                 serving_config.kv_bucket_tokens,
                             ),
-                            device_kv_step_rows,
+                            (device_kv_step_rows, adopted_step_rows),
                             |bytes| {
                                 let kept = self
                                     .kv_buffer_source
@@ -4826,6 +4836,8 @@ format; only the single-row decode kernel reads it from the device cache",
                                 serving_config.kv_cache_value_quant,
                             ),
                         )?;
+                        #[cfg(all(feature = "instrument", feature = "metal"))]
+                        emit_gpu_phase("after_adopt", step);
                         #[cfg(feature = "instrument")]
                         debug!(
                             step = step as u64,
@@ -4874,12 +4886,13 @@ did not hold every cached position)",
                         )));
                     }
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    if device_kv
+                    if let Some(sized_rows) = device_kv
                         .as_ref()
-                        .is_some_and(|device| new_count > device.max_step_rows())
+                        .map(DeviceKv::max_step_rows)
+                        .filter(|sized_rows| new_count > *sized_rows)
                     {
                         return Err(InteropError::UnsupportedServingConfig(alloc::format!(
-                            "device-resident KV step of {new_count} rows exceeds the {device_kv_step_rows} rows it was sized for"
+                            "device-resident KV step of {new_count} rows exceeds the {sized_rows} rows it was sized for"
                         )));
                     }
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -7351,8 +7364,15 @@ did not hold every cached position)",
             );
         }
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        if let Some(device) = device_kv.take().filter(|_| self.kv_buffer_source.is_none()) {
-            runtime.keep_kv_buffers(device.into_buffers());
+        if let Some(device) = device_kv.take() {
+            #[cfg(all(feature = "instrument", feature = "metal"))]
+            emit_gpu_phase("before_release", step);
+            runtime.release_placed_buffers();
+            if self.kv_buffer_source.is_none() {
+                runtime.keep_kv_buffers(device.into_buffers());
+            }
+            #[cfg(all(feature = "instrument", feature = "metal"))]
+            emit_gpu_phase("after_release", step);
         }
 
         #[cfg(feature = "moe-expert-prefetch")]

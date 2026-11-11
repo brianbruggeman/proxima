@@ -704,6 +704,18 @@ pub(super) fn emit_device_memory_by_class(
     );
 }
 
+/// Metal's own allocated-byte count at one named point of a generation, so a
+/// growth between two phases is attributable to the phase that caused it.
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+pub(super) fn emit_gpu_phase(phase: &'static str, step: usize) {
+    debug!(
+        phase,
+        step = step as u64,
+        device_allocated_bytes = omega::metal::current_allocated_size().unwrap_or(0),
+        "kv_gpu_phase: metal allocation at this point of the generation"
+    );
+}
+
 /// `PROXIMA_METAL_KIND_FILTER` -- `omega::metal::execute_plan_with_placements`'s
 /// own in-buffer ablation knob (that function's own `KindFilter` doc has the
 /// full contract). Read here, at [`emit_token_breakdown_metal`]'s own emit

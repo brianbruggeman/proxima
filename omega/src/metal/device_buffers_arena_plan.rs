@@ -1969,6 +1969,19 @@ impl Plan {
                 .map(|bound| bound.node),
         );
     }
+
+    /// Drops the [`Self::device_buffers`] entries a finished call left behind
+    /// for every node that is not [`Self::resident_nodes`]: a caller-placed
+    /// buffer's clone keeps the caller's allocation alive until the plan's next
+    /// call overwrites it, which pins a freed KV or staging buffer for as long
+    /// as the plan is kept resident. Every call writes a fresh entry for each
+    /// non-resident node before reading it (`execute_plan_with_placements`), so
+    /// nothing reads what this removes.
+    pub fn release_caller_buffers(&self) {
+        self.device_buffers
+            .borrow_mut()
+            .retain(|node, _| self.resident_nodes.contains(node));
+    }
 }
 
 /// [`arena_placement`]'s own `retires` argument, filtered so a

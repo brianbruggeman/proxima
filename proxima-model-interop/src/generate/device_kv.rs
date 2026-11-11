@@ -146,7 +146,7 @@ impl DeviceKvLayer {
         cache: &LayerCache,
         (even_odd_row, v_row): (usize, usize),
         full_capacity_rows: usize,
-        max_step_rows: usize,
+        (window_step_rows, staging_rows): (usize, usize),
         source: &mut impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
         (key_format, value_format): (&NumericFormat, &NumericFormat),
     ) -> Result<Self, InteropError> {
@@ -170,7 +170,7 @@ impl DeviceKvLayer {
         let window = cache.ring_geometry().map(|ring| ring.window);
         let retain = cache.ring_geometry().map_or(0, |ring| ring.capacity);
         let capacity_rows = if window.is_some() {
-            (2 * retain + max_step_rows).min(full_capacity_rows)
+            (2 * retain + window_step_rows).min(full_capacity_rows)
         } else {
             full_capacity_rows
         };
@@ -183,10 +183,21 @@ impl DeviceKvLayer {
             None
         } else {
             let f32_bytes = core::mem::size_of::<f32>();
+            let even_odd_bytes = staging_rows * even_odd_row * f32_bytes;
+            let value_bytes = staging_rows * v_row * f32_bytes;
+            #[cfg(feature = "instrument")]
+            debug!(
+                layer = layer as u64,
+                staging_rows = staging_rows as u64,
+                k_even_bytes = even_odd_bytes as u64,
+                k_odd_bytes = even_odd_bytes as u64,
+                v_bytes = value_bytes as u64,
+                "kv_adopt_staging: f32 staging for rows a narrow cache rounds in after each step"
+            );
             Some([
-                allocate_placed_buffer(max_step_rows * even_odd_row * f32_bytes)?,
-                allocate_placed_buffer(max_step_rows * even_odd_row * f32_bytes)?,
-                allocate_placed_buffer(max_step_rows * v_row * f32_bytes)?,
+                allocate_placed_buffer(even_odd_bytes)?,
+                allocate_placed_buffer(even_odd_bytes)?,
+                allocate_placed_buffer(value_bytes)?,
             ])
         };
         Ok(Self {
@@ -474,10 +485,12 @@ impl DeviceKv {
     /// and rebuilt by [`Self::flush`], so a long context is held once.
     ///
     /// `capacity_positions` is the most positions any step can reach: the call's
-    /// `positions_needed` plus the rows of a speculative draft. `max_step_rows` is
-    /// the widest step of any kind, a prefill batch included, and bounds every
-    /// step and sizes a sliding layer's linear buffer. A prefill batch ends inside
-    /// `positions_needed`, so it adds no full-layer rows.
+    /// `positions_needed` plus the rows of a speculative draft. `window_step_rows`
+    /// is the widest step of any kind, a prefill batch included, and sizes a sliding
+    /// layer's linear buffer. `step_rows` is the widest step still to run after this
+    /// adoption: it bounds every later step and sizes the f32 staging of a narrow
+    /// cache, which a cache adopted after its prefill does not need prefill-wide. A
+    /// prefill batch ends inside `positions_needed`, so it adds no full-layer rows.
     ///
     /// `key_format` stores the K planes and `value_format` the V rows; a block key layout beside
     /// a scalar value is the one pair that differs, see [`kernel_codecs`].
@@ -486,7 +499,7 @@ impl DeviceKv {
         layer_row_widths: &[LayerPadRowWidths],
         cached_len: usize,
         (capacity_positions, bucket_tokens): (usize, usize),
-        max_step_rows: usize,
+        (window_step_rows, step_rows): (usize, usize),
         mut source: impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
         (key_format, value_format): (NumericFormat, NumericFormat),
     ) -> Result<Option<Self>, InteropError> {
@@ -513,7 +526,7 @@ impl DeviceKv {
                         cache,
                         (*even_odd_row, *v_row),
                         full_capacity_rows,
-                        max_step_rows,
+                        (window_step_rows, step_rows),
                         &mut source,
                         (&key_format, &value_format),
                     )?;
@@ -535,7 +548,7 @@ impl DeviceKv {
         }
         Ok(Some(Self {
             layers,
-            max_step_rows,
+            max_step_rows: step_rows,
             key_format,
             value_format,
         }))
@@ -557,7 +570,7 @@ impl DeviceKv {
             layer_row_widths,
             cached_len,
             capacity,
-            max_step_rows,
+            (max_step_rows, max_step_rows),
             source,
             (format, format),
         )
@@ -989,7 +1002,7 @@ mod tests {
             &cache,
             (EVEN_ODD_ROW, V_ROW),
             capacity_rows,
-            3,
+            (3, 3),
             &mut allocate_placed_buffer,
             (
                 &NumericFormat::Float32,
@@ -1605,7 +1618,7 @@ mod tests {
             &widths,
             positions,
             (40, 4),
-            3,
+            (3, 3),
             allocate_placed_buffer,
             (q4_0, NumericFormat::Float16),
         )
@@ -1789,6 +1802,68 @@ mod tests {
             "the new row lands at the end of the cached rows"
         );
         assert_eq!(device.cache_codec().expect("f32 is readable"), None);
+    }
+
+    fn adopted_half_with_step_rows(
+        positions: usize,
+        step_rows: usize,
+    ) -> (DeviceKv, Vec<usize>) {
+        let mut caches = alloc::vec![LayerCacheState::Attention(half_exact_cache(positions))];
+        let widths = [LayerPadRowWidths::Attention {
+            even_odd_row: EVEN_ODD_ROW,
+            v_row: V_ROW,
+        }];
+        let mut acquired_bytes = Vec::new();
+        let device = DeviceKv::adopt_pair(
+            &mut caches,
+            &widths,
+            positions,
+            (positions + 1, 4),
+            (3, step_rows),
+            |bytes| {
+                acquired_bytes.push(bytes);
+                allocate_placed_buffer(bytes)
+            },
+            (NumericFormat::Float16, NumericFormat::Float16),
+        )
+        .expect("device kv allocates on the real Metal device")
+        .expect("a plain attention cache is adoptable");
+        (device, acquired_bytes)
+    }
+
+    #[test]
+    fn a_narrow_cache_stages_only_the_rows_still_to_run_not_the_prefill_width() {
+        let (device, acquired_bytes) = adopted_half_with_step_rows(37, 1);
+
+        let layer = device.layers[0].as_ref().expect("layer 0 is device resident");
+        let [staging_even, staging_odd, staging_value] = layer
+            .staging
+            .as_ref()
+            .expect("a half-width cache rounds its rows in from f32 staging");
+        let f32_bytes = core::mem::size_of::<f32>();
+        assert_eq!(
+            [
+                omega::placed_buffer_len(staging_even),
+                omega::placed_buffer_len(staging_odd),
+                omega::placed_buffer_len(staging_value),
+            ],
+            [
+                EVEN_ODD_ROW * f32_bytes,
+                EVEN_ODD_ROW * f32_bytes,
+                V_ROW * f32_bytes
+            ],
+            "one decode row of f32 staging per plane, not the 3-row prefill-wide window step"
+        );
+        assert_eq!(
+            device.max_step_rows(),
+            1,
+            "a later step wider than the staging is refused by the step bound"
+        );
+        assert_eq!(
+            acquired_bytes.len(),
+            3,
+            "the cache planes come from the source; staging is the layer's own"
+        );
     }
 
     #[test]

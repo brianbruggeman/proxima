@@ -5019,12 +5019,13 @@ pub(super) mod uniform_cache_tests {
 pub(super) mod arena_tests {
     use alloc::vec;
 
+    use objc2::rc::Weak;
     use objc2_metal::MTLDevice;
     use proxima_tensor::{Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, cpu, projection};
     use proxima_numeric::{DType, NumericPolicy};
 
     use super::{
-        DispatchType, arena_placement, device_and_queue, execute_plan,
+        DispatchType, allocate_placed_buffer, arena_placement, device_and_queue, execute_plan,
         execute_plan_with_placements, plan, plan_uniform_buffer,
     };
 
@@ -5265,6 +5266,40 @@ pub(super) mod arena_tests {
                 "{node:?} (fed by {shared:?}) differs between layouts"
             );
         }
+    }
+
+    #[test]
+    fn a_released_plan_stops_pinning_the_caller_placed_output_buffer() {
+        let (program, [stage_zero, stage_one, stage_two]) = three_stage_chain(4, 4);
+        let a = [1.0f32, 2.0, 3.0, 4.0];
+        let b = [10.0f32, 20.0, 30.0, 40.0];
+        let outputs = [stage_zero, stage_one, stage_two];
+        let blocks = [QuantizedBlock::Float32(&a), QuantizedBlock::Float32(&b)];
+        let resolved_plan = plan(&program, &[], &blocks, &outputs, NumericPolicy::default())
+            .expect("plans the three-stage chain");
+        let placed = allocate_placed_buffer(4 * core::mem::size_of::<f32>())
+            .expect("allocates the caller-owned output buffer");
+        execute_plan_with_placements(
+            &resolved_plan,
+            &blocks,
+            &[],
+            &[(stage_two, &placed, 0)],
+            &mut Vec::new(),
+        )
+        .expect("runs the chain with the last stage placed in the caller's buffer");
+        let witness = Weak::from_retained(&placed);
+
+        drop(placed);
+        assert!(
+            witness.load().is_some(),
+            "the plan's per-node buffer map must still hold the caller's buffer after the call"
+        );
+        resolved_plan.release_caller_buffers();
+
+        assert!(
+            witness.load().is_none(),
+            "releasing the plan's caller buffers must free the allocation once the caller dropped it"
+        );
     }
 
     #[test]
