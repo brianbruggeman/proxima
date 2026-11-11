@@ -1,0 +1,1 @@
+headers from github.com/ggml-org/llama.cpp at commit ba3c05f71da85cd0439e84ba42b0478b24d5db16 (llama.h from include/, the rest from ggml/include/); LICENSE is that repo MIT license
