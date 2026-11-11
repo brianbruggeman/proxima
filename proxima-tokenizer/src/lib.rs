@@ -50,6 +50,8 @@ extern crate std;
 
 pub mod bpe;
 pub mod byte_level;
+#[cfg(feature = "chat-template")]
+pub mod chat_template;
 #[cfg(feature = "std")]
 pub mod config;
 pub mod draft;
