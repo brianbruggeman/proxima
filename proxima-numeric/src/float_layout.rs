@@ -180,6 +180,8 @@ impl FloatLayout {
     pub const UINT4: Self = Self::integer(4, SignEncoding::Absent);
     pub const UINT5: Self = Self::integer(5, SignEncoding::Absent);
     pub const UINT6: Self = Self::integer(6, SignEncoding::Absent);
+    /// Nine bits: the grid index IQ3_S assembles from a `qs` byte and one `qh` bit.
+    pub const UINT9: Self = Self::integer(9, SignEncoding::Absent);
     /// Sign-magnitude eight bits: range -127..=127 with a negative zero.
     pub const SIGN_MAGNITUDE_INT8: Self = Self::integer(8, SignEncoding::Magnitude);
     /// OCP MX v1.0 E8M0 block scale: eight exponent bits, no mantissa and no sign bit; the all-ones

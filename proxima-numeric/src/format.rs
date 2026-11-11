@@ -23,7 +23,7 @@
 //! Teaching pointer: [`NumericFormat::tag`] is the stable wire identity, [`NumericFormat::name`]
 //! the config spelling, and [`crate::decode`] the one place a format becomes numbers.
 
-use crate::block_layout::{BlockLayout, Field};
+use crate::block_layout::{BlockLayout, Field, Plane};
 use crate::dtype::DType;
 use crate::float_layout::FloatLayout;
 
@@ -43,6 +43,15 @@ pub enum LevelTable {
     Iq2XsGrid,
     /// IQ3_XXS: two 8-bit grid indices per eight elements, one 32-bit aux word per 32.
     Iq3XxsGrid,
+    /// `value = sign * magnitude`: the code indexes `grid`, one entry per `lanes` elements, each
+    /// entry packing `lanes` unsigned byte magnitudes (lane 0 in the low byte); element `i` takes
+    /// lane `i % lanes`. `sign` is a one-bit-per-element plane; a set bit negates. IQ3_S's
+    /// `IQ3S_GRID` with its `signs[QK_K/8]` bytes.
+    SignedGrid {
+        grid: &'static [u32],
+        lanes: u8,
+        sign: Plane,
+    },
     /// A trained codebook whose table and packing land with its format frontend. [`NumericFormat`]
     /// describes the format; this crate refuses to decode it rather than guess the codebook.
     External,
@@ -71,7 +80,7 @@ impl LevelTable {
                     None
                 }
             }
-            Self::Iq2XsGrid | Self::Iq3XxsGrid | Self::External => None,
+            Self::Iq2XsGrid | Self::Iq3XxsGrid | Self::SignedGrid { .. } | Self::External => None,
         }
     }
 }
@@ -738,13 +747,29 @@ impl NumericFormat {
         levels: LevelTable::Iq3XxsGrid,
     });
 
-    /// iq1_s, iq1_m, iq2_xxs, iq2_s, iq3_s, iq4_xs: codebooks that land with their gguf decoder.
+    /// iq3_s: 256 elements in 110 bytes, a 9-bit grid index per four elements plus a sign bit per
+    /// element under 4-bit sub-block scales ([`BlockLayout::IQ3_S`]).
+    pub const Iq3S: Self = Self::Levels(LevelFormat::from_layout(
+        &BlockLayout::IQ3_S,
+        LevelTable::SignedGrid {
+            grid: &crate::tables::IQ3S_GRID,
+            lanes: 4,
+            sign: BlockLayout::IQ3_S_SIGNS,
+        },
+    ));
+
+    /// iq4_xs: 256 elements in 136 bytes, IQ4_NL's ladder under 6-bit sub-block scales
+    /// ([`BlockLayout::IQ4_XS`]).
+    pub const Iq4Xs: Self = Self::Levels(LevelFormat::from_layout(
+        &BlockLayout::IQ4_XS,
+        LevelTable::Explicit(&crate::tables::KVALUES_IQ4_NL),
+    ));
+
+    /// iq1_s, iq1_m, iq2_xxs, iq2_s: codebooks that land with their gguf decoder.
     pub const Iq1S: Self = Self::Levels(LevelFormat::external(256, 50));
     pub const Iq1M: Self = Self::Levels(LevelFormat::external(256, 56));
     pub const Iq2Xxs: Self = Self::Levels(LevelFormat::external(256, 66));
     pub const Iq2S: Self = Self::Levels(LevelFormat::external(256, 82));
-    pub const Iq3S: Self = Self::Levels(LevelFormat::external(256, 110));
-    pub const Iq4Xs: Self = Self::Levels(LevelFormat::external(256, 136));
 }
 
 #[cfg(feature = "config")]
