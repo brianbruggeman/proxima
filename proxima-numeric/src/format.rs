@@ -272,8 +272,8 @@ impl NumericFormat {
     }
 
     /// Whether two formats are scalar layouts that convert into each other changing no bit
-    /// ([`FloatLayout::is_identity_of`]); a block or level format is the identity of nothing but
-    /// itself and answers `false` here, as the question is a property of the layouts, not a name.
+    /// ([`FloatLayout::is_identity_of`]). identity is a property of scalar layouts; any block or
+    /// level format answers `false`, even against itself.
     #[must_use]
     pub const fn is_identity_of(&self, other: &Self) -> bool {
         match (self, other) {
