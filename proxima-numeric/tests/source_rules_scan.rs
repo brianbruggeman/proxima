@@ -213,11 +213,66 @@ fn a_cfg_all_test_module_ends_the_production_region_like_a_cfg_test_module() {
 }
 
 #[test]
+fn a_cfg_that_does_not_require_test_leaves_the_item_in_production() {
+    let source = "\
+#[cfg(any(test, feature = \"test-support\", all(feature = \"metal\", target_os = \"macos\")))]
+fn merge_grid() -> u32 {
+    Some(1).unwrap()
+}
+
+#[cfg(any(
+    test,
+    feature = \"test-support\"
+))]
+fn merge_rows() {}
+
+#[cfg(not(test))]
+fn only_in_production() {}
+
+#[cfg(all(feature = \"metal\", test))]
+fn only_in_tests() {}
+";
+
+    let production = production_of(source);
+
+    assert!(production.contains("Some(1).unwrap()"), "an any(test, ..) item builds in production");
+    assert!(production.contains("fn merge_rows()"), "a multi-line any(test, ..) item builds in production");
+    assert!(production.contains("fn only_in_production()"), "not(test) builds in production");
+    assert!(!production.contains("only_in_tests"), "all(.., test) requires test");
+}
+
+#[test]
+fn an_out_of_line_cfg_test_module_does_not_end_the_production_region() {
+    let source = "\
+const WEIGHT_SUFFIX: &str = \".weight\";
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod tests;
+
+const SHADOW: FloatLayout = FloatLayout::BF16;
+
+#[cfg(test)]
+mod inline_tests {
+    fn dropped() {}
+}
+";
+
+    let production = production_of(source);
+
+    assert!(production.contains("const SHADOW: FloatLayout"), "code after `mod tests;` is still production");
+    assert!(!production.contains("mod tests;"));
+    assert!(!production.contains("dropped"), "the inline gated module ends the region");
+    assert_eq!(production.lines().nth(6), Some("const SHADOW: FloatLayout = FloatLayout::BF16;"));
+}
+
+#[test]
 fn the_omega_cached_attention_renderer_is_scanned_past_its_cfg_test_helper() {
     let root = workspace_root();
     let text = production_text(&root.join("omega/src/msl/cached_attention_render.rs"));
 
     assert!(text.contains("fn cached_attention_kv_codec_for"), "the scan must reach code after the gated helper");
+    assert!(text.contains("fn merge_grid("), "the scan must reach fns gated by cfg(any(test, ..))");
 }
 
 fn workspace_members(root: &Path) -> Vec<String> {
@@ -230,6 +285,8 @@ fn workspace_members(root: &Path) -> Vec<String> {
     list.split('"').skip(1).step_by(2).map(str::to_string).collect()
 }
 
+const CONSTANT_FORMAT_TYPES: [&str; 4] = ["NumericFormat", "Codec", "FloatLayout", "BlockLayout"];
+
 fn defines_a_format_constant(line: &str) -> bool {
     let trimmed = line.trim_start();
     let is_item = ["const ", "pub const ", "pub(crate) const ", "pub(super) const ", "static ", "pub static "]
@@ -238,8 +295,9 @@ fn defines_a_format_constant(line: &str) -> bool {
     let declared_type = trimmed.split_once(':').and_then(|(_, after)| after.split_once('=')).map(|(declared, _)| declared);
     is_item
         && declared_type.is_some_and(|declared| {
-            let bare = declared.trim().trim_start_matches('&').trim_start_matches("'static ");
-            bare == "NumericFormat" || bare == "Codec"
+            let bare = declared.trim().trim_start_matches('&').trim_start_matches("'static ").trim_start_matches("mut ").trim();
+            let type_name = bare.rsplit("::").next().unwrap_or(bare);
+            CONSTANT_FORMAT_TYPES.contains(&type_name)
         })
 }
 
@@ -256,6 +314,17 @@ fn the_format_constant_detector_flags_every_spelling_of_a_typed_definition() {
 }
 
 #[test]
+fn the_format_constant_detector_flags_path_qualified_and_layout_types() {
+    assert!(defines_a_format_constant("pub const KV: proxima_numeric::NumericFormat = proxima_numeric::NumericFormat::Q8_0;"));
+    assert!(defines_a_format_constant("const CACHE: crate::Codec = crate::Codec::Q8_0;"));
+    assert!(defines_a_format_constant("const BORROWED: &proxima_numeric::Codec = &Codec::Q8_0;"));
+    assert!(defines_a_format_constant("const LAYOUT: FloatLayout = FloatLayout::BF16;"));
+    assert!(defines_a_format_constant("pub(super) const BLOCKS: &'static BlockLayout = &BLOCKS_Q4_0;"));
+    assert!(!defines_a_format_constant("const LAYOUT_NAME: &str = \"FloatLayout\";"));
+    assert!(!defines_a_format_constant("const NOT_A_CODEC: crate::CodecShape = SHAPE;"));
+}
+
+#[test]
 fn no_numeric_format_or_codec_constant_is_defined_in_any_workspace_member_outside_proxima_numeric() {
     let root = workspace_root();
     let members = workspace_members(&root);
@@ -266,10 +335,11 @@ fn no_numeric_format_or_codec_constant_is_defined_in_any_workspace_member_outsid
             rust_files_under(&source_directory, &mut files);
         }
     }
+    files.retain(|path| !is_test_file(path));
     let mut hits = Vec::new();
 
     for file in &files {
-        let text = fs::read_to_string(file).expect("a scanned source file is readable");
+        let text = production_text(file);
         for (number, line) in code_lines(&text).filter(|(_, line)| defines_a_format_constant(line)) {
             hits.push(format!("{}:{number}: {}", file.display(), line.trim()));
         }
@@ -289,13 +359,18 @@ fn body_of_fn(text: &str, signature: &str) -> String {
     lines[start..end_of_item(&lines, start)].join("\n")
 }
 
-fn maps_a_ggml_type_to_something(line: &str) -> bool {
+fn names_a_ggml_type_variant(line: &str) -> bool {
     let trimmed = line.trim_start();
-    !trimmed.starts_with("//")
-        && trimmed.contains("GgmlType::")
-        && (trimmed.contains("=>") || trimmed.starts_with("GgmlType::") || trimmed.starts_with("| GgmlType::"))
+    !trimmed.starts_with("//") && trimmed.contains("GgmlType::")
 }
 
+fn names_a_ggml_type_variant_besides_f32(line: &str) -> bool {
+    names_a_ggml_type_variant(&line.replace("GgmlType::F32", ""))
+}
+
+// the scan reads the three derivation fns only. a mapping table kept in some other fn is invisible
+// to it; that the table lives solely in `GgmlType::numeric_format` is proven by reading
+// proxima-gguf, and this scan guards the three sites that must ask it instead of keeping their own.
 #[test]
 fn the_ggml_type_to_format_mapping_lives_only_in_gguf_numeric_format() {
     let root = workspace_root();
@@ -310,13 +385,10 @@ fn the_ggml_type_to_format_mapping_lives_only_in_gguf_numeric_format() {
 
     for body in &derivations {
         assert!(body.contains(".numeric_format()"), "a derivation site asks GgmlType::numeric_format:\n{body}");
-        let arms: Vec<&str> = body.lines().filter(|line| maps_a_ggml_type_to_something(line)).collect();
-        assert_eq!(arms, Vec::<&str>::new(), "a derivation site holds no GgmlType arm of its own");
+        let named: Vec<&str> = body.lines().filter(|line| names_a_ggml_type_variant(line)).collect();
+        assert_eq!(named, Vec::<&str>::new(), "a derivation site names no GgmlType variant at all");
     }
-    let entry_arms: Vec<&str> = entry
-        .lines()
-        .filter(|line| maps_a_ggml_type_to_something(line) && !line.contains("GgmlType::F32 =>"))
-        .collect();
+    let entry_arms: Vec<&str> = entry.lines().filter(|line| names_a_ggml_type_variant_besides_f32(line)).collect();
     assert!(entry.contains("packed_block_codec("), "the packed-block entry derives its codec through packed_block_codec");
     assert_eq!(entry_arms, Vec::<&str>::new(), "only the aligned f32 view is matched by type");
 }
@@ -328,5 +400,17 @@ fn the_gguf_mapping_scan_flags_a_hand_written_match() {
     let body = body_of_fn(planted, "fn codec_from_ggml_type(");
 
     assert!(!body.contains(".numeric_format()"));
-    assert!(body.lines().any(maps_a_ggml_type_to_something));
+    assert!(body.lines().any(names_a_ggml_type_variant));
+}
+
+#[test]
+fn the_gguf_mapping_scan_flags_an_early_return_that_is_not_a_match_arm() {
+    let planted = "fn codec_from_ggml_type(ggml_type: GgmlType) -> Option<Codec> {\n    if ggml_type == GgmlType::Q4_0 { return Some(Codec::Q8_0); }\n    ggml_type.numeric_format()\n}\n";
+
+    let body = body_of_fn(planted, "fn codec_from_ggml_type(");
+
+    assert!(body.contains(".numeric_format()"));
+    assert!(body.lines().any(names_a_ggml_type_variant));
+    assert!(!names_a_ggml_type_variant_besides_f32("        GgmlType::F32 => aligned_f32_view(bytes)"));
+    assert!(names_a_ggml_type_variant_besides_f32("        GgmlType::F32 | GgmlType::Q4_0 => None,"));
 }
