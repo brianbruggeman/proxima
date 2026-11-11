@@ -6,11 +6,14 @@ use objc2_foundation::NSString;
 use objc2_metal::{
     MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice, MTLLanguageVersion, MTLLibrary,
 };
+use proxima_numeric::FormatCodec;
 use proxima_numeric::NumericFormat;
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 
-use super::layout_render::{block_unpack_msl, hardware_type, layout_load_msl, layout_store_msl};
+use super::layout_render::{
+    block_k_refusal, block_unpack_msl, hardware_type, layout_load_msl, layout_store_msl, readable_block_layout,
+};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use super::layout_render::layout_unpack_msl;
 
@@ -283,14 +286,6 @@ fn random_values(seed: u64, count: usize) -> alloc::vec::Vec<f32> {
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 fn run_block_unpack_kernel(layout: &BlockLayout, blocks: &[u8], elements: usize) -> alloc::vec::Vec<f32> {
-    use core::ffi::c_void;
-    use core::ptr::NonNull;
-
-    use objc2_metal::{
-        MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
-        MTLResourceOptions, MTLSize,
-    };
-
     let name = "probe_block";
     let source = format!(
         "#include <metal_stdlib>\nusing namespace metal;\n{}\nkernel void probe(device const uchar *blocks [[buffer(0)]], device float *values [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n    uint block = gid / {}u;\n    values[gid] = {name}(blocks + block * {}u, gid % {}u);\n}}\n",
@@ -299,11 +294,26 @@ fn run_block_unpack_kernel(layout: &BlockLayout, blocks: &[u8], elements: usize)
         layout.block_bytes,
         layout.elements,
     );
+    run_probe_source(&source, blocks, elements)
+}
+
+/// Runs the `probe` kernel of `source` over `elements` threads: buffer 0 is `input`, buffer 1 the
+/// f32 output returned.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn run_probe_source(source: &str, blocks: &[u8], elements: usize) -> alloc::vec::Vec<f32> {
+    use core::ffi::c_void;
+    use core::ptr::NonNull;
+
+    use objc2_metal::{
+        MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
+        MTLResourceOptions, MTLSize,
+    };
+
     let device = MTLCreateSystemDefaultDevice().expect("this box has a Metal device");
     let options = MTLCompileOptions::new();
     options.setLanguageVersion(MTLLanguageVersion::Version3_1);
     let library = device
-        .newLibraryWithSource_options_error(&NSString::from_str(&source), Some(&options))
+        .newLibraryWithSource_options_error(&NSString::from_str(source), Some(&options))
         .unwrap_or_else(|error| panic!("metal rejected the source: {error:?}\n{source}"));
     let function = library
         .newFunctionWithName(&NSString::from_str("probe"))
@@ -351,8 +361,6 @@ fn run_block_unpack_kernel(layout: &BlockLayout, blocks: &[u8], elements: usize)
 async fn a_rendered_block_unpack_equals_the_host_codec_decode_bit_for_bit_over_4096_blocks(
     #[case] format: NumericFormat,
 ) {
-    use proxima_numeric::FormatCodec;
-
     let NumericFormat::Block(layout) = format else {
         panic!("{format:?} is a block format");
     };
@@ -380,8 +388,6 @@ async fn a_rendered_block_unpack_equals_the_host_codec_decode_bit_for_bit_over_4
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[test]
 fn control_a_corrupted_q4_0_scale_byte_changes_the_rendered_decode() {
-    use proxima_numeric::FormatCodec;
-
     let format = NumericFormat::Q4_0;
     let NumericFormat::Block(layout) = format else {
         panic!("Q4_0 is a block format");
@@ -427,4 +433,73 @@ fn a_cache_layout_equal_to_the_graph_output_is_the_plain_buffer_whatever_its_spe
         super::cached_attention_kv_codec_for(&NumericFormat::Float16),
         Ok(Some(NumericFormat::Float16))
     );
+}
+
+const ADMITTED_BLOCK_K_COUNT: usize = 3;
+
+fn admitted_block_k_formats() -> alloc::vec::Vec<NumericFormat> {
+    NumericFormat::ALL
+        .into_iter()
+        .filter(|format| readable_block_layout(format).is_some())
+        .collect()
+}
+
+#[test]
+fn every_admitted_block_k_resolves_and_encodes_on_the_host_and_the_admitted_count_is_pinned() {
+    let admitted = admitted_block_k_formats();
+
+    for format in &admitted {
+        let codec = FormatCodec::for_format(format).expect("an admitted block K resolves a host codec");
+        assert!(codec.can_encode(), "{format:?} is admitted so the cache fill can encode it");
+    }
+    assert_eq!(admitted.len(), ADMITTED_BLOCK_K_COUNT, "admitted: {admitted:?}");
+}
+
+#[test]
+fn a_block_format_with_no_host_encode_is_refused_naming_the_missing_encode() {
+    let decode_only: alloc::vec::Vec<NumericFormat> = NumericFormat::ALL
+        .into_iter()
+        .filter(|format| matches!(format, NumericFormat::Block(_)))
+        .filter(|format| FormatCodec::for_format(format).is_some_and(|codec| !codec.can_encode()))
+        .collect();
+
+    assert!(!decode_only.is_empty(), "the block table holds formats that decode but cannot encode");
+    for format in &decode_only {
+        let reason = block_k_refusal(format).expect_err("a decode-only block format is not a block K");
+        assert!(reason.contains("no encode"), "{format:?} refused with: {reason}");
+        assert!(readable_block_layout(format).is_none(), "{format:?} must not be admitted");
+    }
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn a_rendered_unpack_equals_the_host_decode_bit_for_bit_for_every_admitted_block_k_format() {
+    let admitted = admitted_block_k_formats();
+    assert_eq!(admitted.len(), ADMITTED_BLOCK_K_COUNT, "the enumerated admitted set: {admitted:?}");
+
+    for format in &admitted {
+        let NumericFormat::Block(layout) = format else {
+            panic!("{format:?} is a block format");
+        };
+        let codec = FormatCodec::for_format(format).expect("an admitted block K resolves a host codec");
+        let blocks = 4096usize;
+        let elements = blocks * usize::from(layout.elements);
+        let values = random_values(0x5eed_0007, elements);
+        let mut packed = alloc::vec![0u8; codec.packed_len(elements).expect("whole blocks")];
+        codec.encode(&values, &mut packed).expect("host encodes an admitted block K");
+        let mut slots = alloc::vec![core::mem::MaybeUninit::<f32>::uninit(); elements];
+        codec.decode(&packed, &mut slots).expect("host decodes an admitted block K");
+        // decode returned Ok, which initialises every slot of its output
+        let expected: alloc::vec::Vec<u32> =
+            slots.iter().map(|slot| unsafe { slot.assume_init() }.to_bits()).collect();
+
+        let observed: alloc::vec::Vec<u32> = run_block_unpack_kernel(layout, &packed, elements)
+            .iter()
+            .map(|value| value.to_bits())
+            .collect();
+
+        assert_eq!(observed.len(), elements, "{format:?}: every element of 4096 blocks was compared");
+        let mismatches = expected.iter().zip(&observed).filter(|(want, got)| want != got).count();
+        assert_eq!(mismatches, 0, "{format:?}: rendered MSL decode must equal the host decode");
+    }
 }

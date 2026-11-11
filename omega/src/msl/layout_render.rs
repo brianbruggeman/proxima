@@ -443,18 +443,38 @@ fn field_expression(field: &Field, binding: &str, helper: &str) -> String {
 
 /// The block layout a cached-attention kernel reads a cache stored as `format` through, `None`
 /// when the format is not one. [`block_unpack_msl`] must render the layout whole (it has no
-/// per-run scale fields), the host codec must resolve it so the cache can be filled, and four
-/// consecutive elements must stay inside one block so a four-wide load never straddles two.
-/// Decided from the layout's own properties, never from a format name.
+/// per-run scale fields), the host codec must resolve it and have an encode instantiation (the
+/// device cache is filled by narrowing f32 rows with `FormatCodec::encode`, so a decode-only codec
+/// would be admitted and fail at the first commit), and four consecutive elements must stay inside
+/// one block so a four-wide load never straddles two. Decided from the layout's own properties,
+/// never from a format name; [`block_k_refusal`] names the property that failed.
 #[must_use]
 pub fn readable_block_layout(format: &NumericFormat) -> Option<&BlockLayout> {
+    block_k_refusal(format).ok()
+}
+
+/// [`readable_block_layout`] with the reason: `Err` names the property the format lacks.
+///
+/// # Errors
+/// The property of the format that makes it unreadable as a block K.
+#[must_use = "the refusal names why a format cannot be a block K"]
+pub fn block_k_refusal(format: &NumericFormat) -> Result<&BlockLayout, &'static str> {
     let NumericFormat::Block(layout) = format else {
-        return None;
+        return Err("not a block layout");
     };
-    let renders_whole = layout.scale_runs.is_none();
-    let four_wide_stays_in_block = layout.elements % 4 == 0;
-    (renders_whole && four_wide_stays_in_block && FormatCodec::for_format(format).is_some())
-        .then_some(layout)
+    if layout.scale_runs.is_some() {
+        return Err("the layout packs independent scale runs, which block_unpack_msl does not render");
+    }
+    if layout.elements % 4 != 0 {
+        return Err("the layout's block is not a whole number of four-wide loads");
+    }
+    let Some(codec) = FormatCodec::for_format(format) else {
+        return Err("no host codec resolves the layout");
+    };
+    if !codec.can_encode() {
+        return Err("the host codec has no encode, so the device cache cannot be filled");
+    }
+    Ok(layout)
 }
 
 /// Renders `static inline float name(device const uchar *block, uint index)`: element `index` of
