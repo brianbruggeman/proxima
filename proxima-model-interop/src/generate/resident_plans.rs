@@ -43,9 +43,48 @@ use proxima_tensor::op::NodeId;
 
 use crate::serving::{GdnPrefillBackend, ServingConfig};
 
-/// `(new_count, kv_bound_extent, outputs, epilogue_sources)` -- the key
-/// [`BackendRuntime::resolve_cached_plan`] already uses for placed plans.
-pub(super) type DecodePlanKey = (usize, usize, Vec<NodeId>, bool);
+/// The wire tags ([`crate::bind::Codec::tag`]) of the codecs a plan reads its
+/// cached K and V leaves through; `None` is the f32 host or device cache. A
+/// tag is `Ord`, which the 520-byte [`crate::bind::Codec`] is not.
+pub(super) type KvBinding = (Option<u8>, Option<u8>);
+
+/// `(new_count, kv_bound_extent, outputs, epilogue_sources, kv_binding)` -- the
+/// key [`BackendRuntime::resolve_cached_plan`] uses for placed plans. The
+/// binding is part of the key because a plan built against f32 cached K/V and
+/// one built against binary16 bytes are different programs over the same
+/// shape: found by each other's key, the first would read binary16 as f32.
+pub(super) type DecodePlanKey = (usize, usize, Vec<NodeId>, bool, KvBinding);
+
+/// The key of the plan that `symbols`, `outputs`, the epilogue switch and the
+/// cached K/V `codecs` select.
+///
+/// # Errors
+/// A codec outside the wire set has no tag, so no key can name its plan.
+pub(super) fn decode_plan_key(
+    symbols: &[u64],
+    outputs: &[NodeId],
+    epilogue_sources: bool,
+    codecs: (Option<crate::bind::Codec>, Option<crate::bind::Codec>),
+) -> Result<DecodePlanKey, crate::error::InteropError> {
+    let tag = |codec: Option<crate::bind::Codec>| {
+        codec
+            .map(|codec| {
+                codec.tag().ok_or_else(|| {
+                    crate::error::InteropError::UnsupportedServingConfig(alloc::format!(
+                        "cached kv codec {codec:?} has no wire tag to key a decode plan by"
+                    ))
+                })
+            })
+            .transpose()
+    };
+    Ok((
+        symbols[0] as usize,
+        symbols[1] as usize,
+        outputs.to_vec(),
+        epilogue_sources,
+        (tag(codecs.0)?, tag(codecs.1)?),
+    ))
+}
 
 /// The plans one runtime holds for a set of shapes, keyed by [`DecodePlanKey`].
 pub(super) type DecodePlans = BTreeMap<DecodePlanKey, Plan>;
@@ -451,11 +490,57 @@ mod tests {
     use super::*;
 
     fn key(new_count: usize, kv_bound: usize) -> DecodePlanKey {
-        (new_count, kv_bound, Vec::new(), false)
+        (new_count, kv_bound, Vec::new(), false, (None, None))
     }
 
     fn bytes(entry: &usize) -> usize {
         *entry
+    }
+
+    fn key_with_codecs(
+        codecs: (Option<crate::bind::Codec>, Option<crate::bind::Codec>),
+    ) -> DecodePlanKey {
+        decode_plan_key(&[1, 512], &[NodeId(125), NodeId(128)], false, codecs)
+            .expect("float16 and q4_0 are wire codecs, so both have a tag")
+    }
+
+    #[test]
+    fn plan_keys_for_one_shape_differ_when_only_the_cached_kv_format_differs() {
+        use crate::bind::Codec;
+
+        let host_f32 = key_with_codecs((None, None));
+        let device_f16 = key_with_codecs((Some(Codec::Float16), Some(Codec::Float16)));
+        let device_q4_0_keys = key_with_codecs((Some(Codec::Q4_0), Some(Codec::Float16)));
+
+        assert_ne!(host_f32, device_f16);
+        assert_ne!(device_f16, device_q4_0_keys);
+        assert_eq!(
+            device_f16,
+            key_with_codecs((Some(Codec::Float16), Some(Codec::Float16)))
+        );
+
+        let mut cache = BTreeMap::new();
+        let (mut hits, mut misses) = (0, 0);
+        let host_plan = crate::generate::BackendRuntime::resolve_cached_plan(
+            &mut cache,
+            &mut hits,
+            &mut misses,
+            host_f32,
+            || Ok::<_, crate::error::InteropError>(11_u32),
+        )
+        .expect("the host-cache plan resolves");
+        assert_eq!(*host_plan, 11);
+
+        let device_plan = crate::generate::BackendRuntime::resolve_cached_plan(
+            &mut cache,
+            &mut hits,
+            &mut misses,
+            device_f16,
+            || Ok::<_, crate::error::InteropError>(22_u32),
+        )
+        .expect("the device-bound plan resolves apart from the host-bound one");
+        assert_eq!(*device_plan, 22);
+        assert_eq!((hits, misses), (0, 2));
     }
 
     fn plans_of(entries: &[(DecodePlanKey, usize)]) -> BTreeMap<DecodePlanKey, usize> {

@@ -4825,9 +4825,6 @@ format; only the single-row decode kernel reads it from the device cache",
                         );
                         if let Some(device) = &device_kv {
                             device_resident_flags = device.resident_layers();
-                            if device.cache_codec()?.is_some() {
-                                runtime.drop_decode_plans();
-                            }
                             debug!(
                                 step = step as u64,
                                 cached_len = cached_len as u64,
@@ -5712,6 +5709,7 @@ did not hold every cached position)",
                                             &resident_names,
                                             &ssm_input_placements,
                                             &ssm_output_placements,
+                                            device_cache_codec,
                                         )?;
                                     info!(
                                         step = step as u64,
@@ -5785,6 +5783,7 @@ did not hold every cached position)",
                                 &ssm_input_placements,
                                 &ssm_output_placements,
                                 expert_source_substitutions,
+                                device_cache_codec,
                             )?)
                         } else if dispatch_profile_target {
                             #[cfg(feature = "instrument")]
@@ -5809,6 +5808,7 @@ did not hold every cached position)",
                                         &resident_names,
                                         &[],
                                         &[],
+                                        (None, None),
                                     )?;
                                 info!(
                                     step = step as u64,
@@ -7676,6 +7676,7 @@ did not hold every cached position)",
                             &resident_names,
                             &input_placements,
                             &output_placements,
+                            (None, None),
                         )?;
                         report_op_timings(_step, &timings, &single_range.program);
                         evaluated
@@ -7701,6 +7702,7 @@ did not hold every cached position)",
                                 &resident_names,
                                 &input_placements,
                                 &output_placements,
+                                (None, None),
                             )?;
                         info!(
                             step = _step as u64,
@@ -7720,6 +7722,7 @@ did not hold every cached position)",
                         &input_placements,
                         &output_placements,
                         None,
+                        (None, None),
                     )?,
                 };
                 #[cfg(not(all(feature = "instrument", feature = "metal", target_os = "macos")))]
@@ -7732,6 +7735,7 @@ did not hold every cached position)",
                     &input_placements,
                     &output_placements,
                     None,
+                    (None, None),
                 )?;
                 #[cfg(feature = "instrument")]
                 let evaluate_ticks = elapsed_ticks(evaluate_started);

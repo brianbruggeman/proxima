@@ -2846,8 +2846,7 @@ pub struct BackendRuntime {
     /// `(new_count, merged_len)` shape space -- sharing one map would let a
     /// single-range plan satisfy a two-range lookup by coincidence of key.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    pub(super) placed_plans:
-        alloc::collections::BTreeMap<(usize, usize, Vec<NodeId>, bool), omega::metal::Plan>,
+    pub(super) placed_plans: resident_plans::DecodePlans,
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) placed_segment_plans:
         alloc::collections::BTreeMap<(usize, usize, usize, Vec<NodeId>, bool), omega::metal::Plan>,
@@ -3076,30 +3075,6 @@ impl BackendRuntime {
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) fn keep_kv_buffers(&mut self, returned: Vec<PlacedBuffer>) {
         resident_plans::keep_kv_buffers(&mut self.kv_buffers, returned, self.resident_kv_bytes);
-    }
-
-    /// Drops every decode-shaped plan. The host-cache steps before a device-KV
-    /// adoption bind f32 cached K/V; a plan built then and found again by key
-    /// after a half-width adoption would read binary16 bytes as f32.
-    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    pub(super) fn drop_decode_plans(&mut self) {
-        #[cfg(feature = "instrument")]
-        let drop_started = proxima_tensor::instrument::read_ticks();
-        let plans_dropped = self.decode_plans.len() as u64;
-        self.decode_plans.clear();
-        #[cfg(feature = "instrument")]
-        debug!(
-            plans_dropped,
-            drop_ns = proxima_tensor::instrument::ticks_to_nanos(
-                proxima_tensor::instrument::elapsed_ticks(drop_started)
-            ),
-            "decode_plans_dropped: a narrow device-kv adoption invalidates the f32-bound decode plans, so the next evaluate rebuilds one"
-        );
-        #[cfg(not(feature = "instrument"))]
-        debug!(
-            plans_dropped,
-            "decode_plans_dropped: a narrow device-kv adoption invalidates the f32-bound decode plans, so the next evaluate rebuilds one"
-        );
     }
 
     /// Whether this call's [`ServingConfig`] selected the Gpu engine --
@@ -4118,18 +4093,19 @@ impl BackendRuntime {
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
         expert_sources: Option<&BTreeMap<NodeId, proxima_tensor::cpu::ExpertSource<'_>>>,
+        kv_codecs: (Option<Codec>, Option<Codec>),
     ) -> Result<Evaluated, InteropError> {
         reject_bounded_placed_execution(
             self.omega_runtime.as_ref(),
             input_placements,
             output_placements,
         )?;
-        let shape = (
-            symbols[0] as usize,
-            symbols[1] as usize,
-            outputs.to_vec(),
+        let shape = resident_plans::decode_plan_key(
+            symbols,
+            outputs,
             self.numeric_policy.epilogue_sources,
-        );
+            kv_codecs,
+        )?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -4176,7 +4152,7 @@ impl BackendRuntime {
         };
         let near_plan = if self.plan_refit {
             Self::take_near_plan(cache, &shape, |key, wanted, _| {
-                key.0 == wanted.0 && key.2 == wanted.2 && key.3 == wanted.3
+                key.0 == wanted.0 && key.2 == wanted.2 && key.3 == wanted.3 && key.4 == wanted.4
             })
         } else {
             None
@@ -4418,18 +4394,19 @@ impl BackendRuntime {
         resident_names: &BTreeSet<&str>,
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
+        kv_codecs: (Option<Codec>, Option<Codec>),
     ) -> Result<(Evaluated, Vec<OpGpuTiming>), InteropError> {
         reject_bounded_placed_execution(
             self.omega_runtime.as_ref(),
             input_placements,
             output_placements,
         )?;
-        let shape = (
-            symbols[0] as usize,
-            symbols[1] as usize,
-            outputs.to_vec(),
+        let shape = resident_plans::decode_plan_key(
+            symbols,
+            outputs,
             self.numeric_policy.epilogue_sources,
-        );
+            kv_codecs,
+        )?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
@@ -4507,18 +4484,19 @@ impl BackendRuntime {
         resident_names: &BTreeSet<&str>,
         input_placements: &[(NodeId, &PlacedBuffer, usize)],
         output_placements: &[(NodeId, &PlacedBuffer, usize)],
+        kv_codecs: (Option<Codec>, Option<Codec>),
     ) -> Result<omega::metal::DispatchTimedOutcome, InteropError> {
         reject_bounded_placed_execution(
             self.omega_runtime.as_ref(),
             input_placements,
             output_placements,
         )?;
-        let shape = (
-            symbols[0] as usize,
-            symbols[1] as usize,
-            outputs.to_vec(),
+        let shape = resident_plans::decode_plan_key(
+            symbols,
+            outputs,
             self.numeric_policy.epilogue_sources,
-        );
+            kv_codecs,
+        )?;
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
