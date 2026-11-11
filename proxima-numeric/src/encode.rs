@@ -637,6 +637,12 @@ pub fn encode_blocks(
                     }
                     Ok(block_count)
                 }
+                LevelTable::Explicit(_) if layout.sub.is_some() => {
+                    Err(NumericError::UnsupportedEncode {
+                        format: name,
+                        reason: "this ladder sits under sub-block scales the encoder does not fit",
+                    })
+                }
                 LevelTable::Explicit(table) => {
                     let reach = ladder_reach(table);
                     for (group, block) in values.chunks(elements).zip(out.chunks_mut(block_bytes))
@@ -647,7 +653,10 @@ pub fn encode_blocks(
                     }
                     Ok(block_count)
                 }
-                LevelTable::Iq2XsGrid | LevelTable::Iq3XxsGrid | LevelTable::External => {
+                LevelTable::Iq2XsGrid
+                | LevelTable::Iq3XxsGrid
+                | LevelTable::SignedGrid { .. }
+                | LevelTable::External => {
                     Err(NumericError::UnsupportedEncode {
                         format: name,
                         reason: "this codebook has no inverse in this crate",

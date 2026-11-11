@@ -266,8 +266,8 @@ fn field_value(field: &Field, block: &[u8]) -> f32 {
     float_layout_codec::decode(le_code(&block[offset..offset + bytes]), field.layout)
 }
 
-fn sub_value(coded: &Coded, sub_block: usize, block: &[u8]) -> f32 {
-    float_layout_codec::decode(code_at(coded, sub_block, block), coded.code)
+fn sub_value(coded: &Coded, multiplier: i16, sub_block: usize, block: &[u8]) -> f32 {
+    float_layout_codec::decode(code_at(coded, sub_block, block), coded.code) * f32::from(multiplier)
         - f32::from(coded.bias)
 }
 
@@ -294,9 +294,9 @@ fn terms(layout: &BlockLayout, block: &[u8]) -> Terms {
     }
     if let Some(sub) = &layout.sub {
         for sub_block in 0..usize::from(sub.count).min(MAX_SUB_BLOCKS) {
-            terms.scales[sub_block] = scale * sub_value(&sub.scale, sub_block, block);
+            terms.scales[sub_block] = scale * sub_value(&sub.scale, sub.scale_multiplier, sub_block, block);
             if let (Some(offset), Some(coded)) = (min, &sub.min) {
-                terms.mins[sub_block] = offset * sub_value(coded, sub_block, block);
+                terms.mins[sub_block] = offset * sub_value(coded, 1, sub_block, block);
             }
         }
     }
@@ -350,6 +350,11 @@ fn decode_levels_block(
             let Some(packing) = levels.packing() else {
                 return Err(NumericError::NoDecoder { format: name });
             };
+            // this walker scales by the block scale alone; a ladder under sub-block scales
+            // (IQ4_XS) is described, not decoded, here
+            if packing.sub.is_some() {
+                return Err(NumericError::NoDecoder { format: name });
+            }
             let codes = &packing.element;
             let scale = field_value(&packing.scale, block);
             let mut low = codes.low.cursor();
@@ -382,7 +387,9 @@ fn decode_levels_block(
             decode_iq3_xxs(block, out);
             Ok(())
         }
-        LevelTable::External => Err(NumericError::NoDecoder { format: name }),
+        LevelTable::SignedGrid { .. } | LevelTable::External => {
+            Err(NumericError::NoDecoder { format: name })
+        }
     }
 }
 
@@ -516,6 +523,11 @@ pub(crate) fn geometry_fits(format: &NumericFormat) -> Result<(), NumericError> 
                     }
                     LevelTable::Explicit(values) if values.len() != code_space => {
                         Err(unsound("an explicit ladder whose length is not its code space"))
+                    }
+                    LevelTable::SignedGrid { grid, lanes, .. }
+                        if grid.len() != code_space || lanes == 0 =>
+                    {
+                        Err(unsound("a signed grid whose length is not its code space"))
                     }
                     _ => Ok(()),
                 }

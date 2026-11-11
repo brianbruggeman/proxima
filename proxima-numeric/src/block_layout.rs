@@ -112,6 +112,9 @@ impl Field {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SubBlocks {
     pub count: u16,
+    /// Multiplies the sub-block scale code before its bias: 2 for IQ3_S, whose sub-block scale is
+    /// `2 * code + 1` (`bias = -1`); 1 for every format whose scale is the code less its bias.
+    pub scale_multiplier: i16,
     pub scale: Coded,
     pub min: Option<Coded>,
 }
@@ -289,6 +292,7 @@ const fn k4_sub_blocks() -> SubBlocks {
     );
     SubBlocks {
         count: 8,
+        scale_multiplier: 1,
         scale,
         min: Some(min),
     }
@@ -484,6 +488,7 @@ impl BlockLayout {
         scale_runs: None,
         sub: Some(SubBlocks {
             count: 16,
+            scale_multiplier: 1,
             scale: coded(
                 FloatLayout::UINT4,
                 plane(4, 0, [digit(16, 8), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
@@ -522,6 +527,7 @@ impl BlockLayout {
         scale_runs: None,
         sub: Some(SubBlocks {
             count: 16,
+            scale_multiplier: 1,
             scale: coded(
                 FloatLayout::UINT6,
                 plane(4, 768, [digit(4, 8), digit(2, 32), digit(2, 4), NO_DIGIT]),
@@ -590,6 +596,7 @@ impl BlockLayout {
         scale_runs: None,
         sub: Some(SubBlocks {
             count: 16,
+            scale_multiplier: 1,
             scale: coded(
                 FloatLayout::INT8,
                 plane(8, 1536, [digit(16, 8), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
@@ -640,6 +647,73 @@ impl BlockLayout {
         1,
         None,
     );
+    /// iq4_xs: `block_iq4_xs` (`ggml-common.h:454-459`, sizeof 136 by the `static_assert` at :460).
+    /// `d` f16 at byte 0; `scales_h` (`uint16_t`, byte 2) holds the high two bits of each of eight
+    /// sub-block scales, `scales_l[QK_K/64]` (byte 4) the low nibbles, two per byte; `qs[QK_K/2]`
+    /// (byte 8) holds the codes, a 32-element sub-block's first 16 in the low nibbles of its 16
+    /// bytes and its last 16 in the high nibbles. The sub-block scale is `ls - 32` with
+    /// `ls = low | high << 4` (`ggml-quants.c:2753-2755`); a nibble's level is
+    /// `KVALUES_IQ4_NL[nibble]`, so the code bias is 0.
+    pub const IQ4_XS: Self = Self {
+        elements: 256,
+        block_bytes: 136,
+        element: coded(
+            FloatLayout::UINT4,
+            plane(4, 64, [digit(16, 8), digit(2, 4), digit(8, 128), NO_DIGIT]),
+            None,
+            0,
+        ),
+        multiplier: 1,
+        scale: F16_SCALE,
+        min: None,
+        min_multiplier: 1,
+        scale_runs: None,
+        sub: Some(SubBlocks {
+            count: 8,
+            scale_multiplier: 1,
+            scale: coded(
+                FloatLayout::UINT6,
+                plane(4, 32, [digit(2, 4), digit(4, 8), NO_DIGIT, NO_DIGIT]),
+                Some(plane(2, 16, [digit(8, 2), NO_DIGIT, NO_DIGIT, NO_DIGIT])),
+                32,
+            ),
+            min: None,
+        }),
+    };
+    /// iq3_s: `block_iq3_s` (`ggml-common.h:415-421`, sizeof 110 by the `static_assert` at :422).
+    /// `d` f16 at byte 0; `qs[QK_K/4]` (byte 2) is the low byte of one grid index per four
+    /// elements; `qh[QK_K/32]` (byte 66) is the ninth index bit, bit `i % 8` of byte `i / 8` for
+    /// index `i`; `signs[QK_K/8]` (byte 74) is one sign bit per element, described by
+    /// [`crate::LevelTable::SignedGrid`]; `scales[QK_K/64]` (byte 106) holds eight 4-bit sub-block
+    /// scales, two per byte, worth `2 * nibble + 1` (`ggml-quants.c:2619-2620`).
+    pub const IQ3_S: Self = Self {
+        elements: 256,
+        block_bytes: 110,
+        element: coded(
+            FloatLayout::UINT9,
+            plane(8, 16, [digit(4, 0), digit(64, 8), NO_DIGIT, NO_DIGIT]),
+            Some(plane(1, 528, [digit(4, 0), digit(64, 1), NO_DIGIT, NO_DIGIT])),
+            0,
+        ),
+        multiplier: 1,
+        scale: F16_SCALE,
+        min: None,
+        min_multiplier: 1,
+        scale_runs: None,
+        sub: Some(SubBlocks {
+            count: 8,
+            scale_multiplier: 2,
+            scale: coded(
+                FloatLayout::UINT4,
+                plane(4, 848, [digit(2, 4), digit(4, 8), NO_DIGIT, NO_DIGIT]),
+                None,
+                -1,
+            ),
+            min: None,
+        }),
+    };
+    /// The sign plane of [`Self::IQ3_S`]: one bit per element at byte 74.
+    pub const IQ3_S_SIGNS: Plane = run(1, 592, 256);
     /// fp6 e3m2: 32 six-bit E3M2 fields under one f16 scale at byte 0, 26 bytes per block. A
     /// six-bit field straddles byte boundaries, so a plane read spans the bytes it covers.
     pub const FP6_E3M2: Self = linear(
