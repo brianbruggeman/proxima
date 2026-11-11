@@ -422,3 +422,29 @@ fn the_gguf_mapping_scan_flags_an_early_return_that_is_not_a_match_arm() {
     assert!(!names_a_ggml_type_variant_besides_f32("        GgmlType::F32 => aligned_f32_view(bytes)"));
     assert!(names_a_ggml_type_variant_besides_f32("        GgmlType::F32 | GgmlType::Q4_0 => None,"));
 }
+
+// the sites below kept their own GgmlType -> codec arms until PROXNUM-8b; each now asks the
+// format table (directly or through packed_block_codec) and names no GgmlType variant.
+// group128_type in proxima-gguf parser.rs is not scanned: Q2_0 -> Pq2_0 is a pairing of two
+// formats the table maps separately, not a derivation from either one.
+#[test]
+fn the_collapsed_ggml_lookups_ask_the_format_table_and_name_no_variant() {
+    let root = workspace_root();
+    let bind = production_text(&root.join("proxima-model-interop/src/bind.rs"));
+    let sidecar = production_text(&root.join("proxima-model-interop/src/expert_sidecar.rs"));
+    let dispatch = production_text(&root.join("proxima-gguf/src/quant/dispatch.rs"));
+    let sites = [
+        ("packed_kind", body_of_fn(&sidecar, "fn packed_kind("), ".numeric_format()"),
+        ("fused_operand_codec", body_of_fn(&bind, "fn fused_operand_codec("), "packed_block_codec("),
+        ("bind_matmul_weight_paired", body_of_fn(&bind, "fn bind_matmul_weight_paired<"), "fused_operand_codec("),
+        ("bind_matmul_weight_triple", body_of_fn(&bind, "fn bind_matmul_weight_triple<"), "fused_operand_codec("),
+        ("dequantize", body_of_fn(&dispatch, "pub fn dequantize("), ".numeric_format()"),
+    ];
+
+    for (site, body, asks) in &sites {
+        assert!(body.contains(asks), "{site} must ask {asks}:\n{body}");
+        let named: Vec<&str> = body.lines().filter(|line| names_a_ggml_type_variant(line)).collect();
+        assert_eq!(named, Vec::<&str>::new(), "{site} names no GgmlType variant");
+    }
+    assert_eq!(sites.len(), 5);
+}

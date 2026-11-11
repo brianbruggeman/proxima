@@ -1784,3 +1784,79 @@ fn packed_block_codec_matches_the_hand_written_arms_for_every_current_ggml_type(
 
     assert_eq!(checked, 36);
 }
+
+/// The `codec` each type took in the contiguous arms of `bind_matmul_weight_paired` and
+/// `bind_matmul_weight_triple` at d54ec106; every other type was refused there.
+#[cfg(feature = "std")]
+const FUSED_CONTIGUOUS_AT_D54EC106: [(WireType, Codec); 9] = [
+    (WireType::Q4_K, Codec::Q4K),
+    (WireType::Q5_K, Codec::Q5K),
+    (WireType::Q3_K, Codec::Q3K),
+    (WireType::Q6_K, Codec::Q6K),
+    (WireType::Q8_0, Codec::Q8_0),
+    (WireType::Q1_0, Codec::Q1_0),
+    (WireType::Q2_0, Codec::Q2_0),
+    (WireType::Pq2_0, Codec::Pq2_0),
+    (WireType::Ptq1_0, Codec::Ptq1_0),
+];
+
+/// `count` tensors of `ggml_type`, each 32 blocks so every tensor's byte length is a multiple of
+/// the 32-byte data alignment and the tensors sit end to end.
+#[cfg(feature = "std")]
+fn contiguous_tensors_gguf(ggml_type: WireType, count: usize) -> (Vec<u8>, Vec<alloc::string::String>) {
+    let shape = ggml_type.wire_shape();
+    let payload: Vec<u8> = (0..shape.block_bytes * 32).map(|index| (index * 7 + 3) as u8).collect();
+    let names: Vec<alloc::string::String> = (0..count).map(|index| format!("blk.0.fused_{index}.weight")).collect();
+    let model = GgufModel {
+        version: 3,
+        metadata: Vec::new(),
+        tensors: names
+            .iter()
+            .map(|name| TensorPayload {
+                name: name.clone(),
+                dims: dims(&[shape.block_elements * 32]),
+                ggml_type,
+                data: &payload,
+            })
+            .collect(),
+    };
+    (write_complete(&model).expect("writes the contiguous tensors fixture"), names)
+}
+
+#[cfg(feature = "std")]
+#[test]
+fn fused_gate_up_and_qkv_operands_take_for_every_ggml_type_the_codec_the_hand_table_gave() {
+    let mut accepted = 0;
+    for &ggml_type in WireType::ALL {
+        let expected = FUSED_CONTIGUOUS_AT_D54EC106
+            .iter()
+            .find(|(listed, _)| *listed == ggml_type)
+            .map(|(_, codec)| *codec);
+        for count in [2usize, 3] {
+            let (file_bytes, names) = contiguous_tensors_gguf(ggml_type, count);
+            let parsed = proxima_gguf::pipe::parse_complete(&file_bytes).expect("parses the fixture");
+            let mut state = BoundWeights::new(&[]);
+            let outcome = if count == 2 {
+                bind_matmul_weight_paired(&parsed, &file_bytes, &names[0], &names[1], "fused".to_string(), &mut state)
+            } else {
+                bind_matmul_weight_triple(&parsed, &file_bytes, &names[0], &names[1], &names[2], "fused".to_string(), &mut state)
+            };
+            match (outcome, expected) {
+                (Ok(()), Some(want)) => {
+                    assert_eq!(state.packed.len(), 1, "{ggml_type:?} x{count}");
+                    assert!(state.packed_owned.is_empty(), "{ggml_type:?} x{count} stays zero-copy");
+                    assert!(matches!(&state.packed[0].1, proxima_tensor::cpu::QuantizedBlock::Packed { codec, .. } if *codec == want), "{ggml_type:?} x{count}");
+                    accepted += 1;
+                }
+                (Err(InteropError::UnrepresentableGgmlType { tensor, ggml_type: got }), None) => {
+                    assert_eq!(tensor, names[0]);
+                    assert_eq!(got, ggml_type);
+                    assert!(state.packed.is_empty() && state.packed_owned.is_empty());
+                }
+                (other, want) => panic!("{ggml_type:?} x{count}: got {other:?}, wanted {want:?}"),
+            }
+        }
+    }
+    assert_eq!(WireType::ALL.len(), 38);
+    assert_eq!(accepted, 18);
+}
