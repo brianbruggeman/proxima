@@ -677,28 +677,28 @@ impl BlockLayout {
 /// spellings: `named_block_table!(callback!(prefix...))` expands to
 /// `callback! { prefix... [ (NAME, "spelling"), ... ] }`, as `named_layout_table!` does for scalars.
 /// A row is admitted by [`BlockLayout::is_simple`] (checked at compile time where the codec expands
-/// it); the K-quant, grouped and codebook families keep the runtime walker. The third column is
-/// whether the row's encode is instantiated: `false` marks a layout whose rounding rule the
-/// description does not carry and no incumbent in this workspace checks (`tq2_0` ties to even in
-/// llama.cpp's `nearest_int`, where the fit here rounds ties away), so it decodes only.
+/// it); the K-quant, grouped and codebook families keep the runtime walker. Whether a row also
+/// instantiates an encode is decided by its layout alone (`fit_of` in the block codec): a layout
+/// whose fit is not one of the known rules decodes only. `tq2_0` rounds with `lroundf`, half away
+/// from zero, as the fit does (ggml-quants.c:2382-2411), so it encodes like every other row.
 macro_rules! named_block_table {
     ($callback:ident ! ( $($prefix:tt)* )) => {
         $callback! {
             $($prefix)*
             [
-                (Q4_0, "q4_0", true),
-                (Q4_1, "q4_1", true),
-                (Q5_0, "q5_0", true),
-                (Q5_1, "q5_1", true),
-                (Q8_0, "q8_0", true),
-                (Q8_1, "q8_1", true),
-                (Q8_K, "q8_k", true),
-                (Q1_0, "q1_0", true),
-                (Q2_0, "q2_0", true),
-                (PQ2_0, "pq2_0", true),
-                (TQ2_0, "tq2_0", false),
-                (MXFP4, "mxfp4", true),
-                (FP6_E3M2, "fp6_e3m2", true),
+                (Q4_0, "q4_0"),
+                (Q4_1, "q4_1"),
+                (Q5_0, "q5_0"),
+                (Q5_1, "q5_1"),
+                (Q8_0, "q8_0"),
+                (Q8_1, "q8_1"),
+                (Q8_K, "q8_k"),
+                (Q1_0, "q1_0"),
+                (Q2_0, "q2_0"),
+                (PQ2_0, "pq2_0"),
+                (TQ2_0, "tq2_0"),
+                (MXFP4, "mxfp4"),
+                (FP6_E3M2, "fp6_e3m2"),
             ]
         }
     };
