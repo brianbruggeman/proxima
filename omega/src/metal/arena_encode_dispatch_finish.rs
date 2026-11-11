@@ -564,6 +564,26 @@ pub(super) fn arena_placement(
         .get()
         .and_then(|arena| arena.placement_for(position)))
 }
+/// Seeds the caller's buffer for a twin op's second node (a K rotation half
+/// is a cache root, and `bound.node` is only the first) and then the
+/// arena's extra outputs, before `encode_op` runs. Every executor that
+/// dispatches `bound` (production and both timed twins) calls this one
+/// function, so a profiled step writes the same placed outputs as an
+/// unprofiled one.
+pub(super) fn bind_position_outputs(
+    plan: &Plan,
+    position: usize,
+    bound: &BoundOp,
+    output_placed: &BTreeMap<NodeId, (&PlacedBuffer, usize)>,
+    device_buffers: &mut BTreeMap<NodeId, DeviceBuffer>,
+) {
+    if let Some(twin_node) = bound.twin_node()
+        && let Some((buffer, offset)) = output_placed.get(&twin_node).copied()
+    {
+        device_buffers.insert(twin_node, (buffer.clone(), offset));
+    }
+    bind_arena_extras(plan, position, device_buffers);
+}
 /// Registers a position's extra output buffers in `device_buffers` before
 /// `encode_op` runs, so a multi-output op binds plan-owned storage instead
 /// of allocating one `MTLBuffer` per extra output per step. A node already

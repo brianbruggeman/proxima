@@ -302,3 +302,55 @@ async fn only_the_second_half_placed_still_writes_the_first_into_the_arena() {
     assert_eq!(bits(&first), bits(&expected_first));
     assert_eq!(bits(&placed_second), bits(&expected_second));
 }
+
+#[cfg(feature = "instrument")]
+#[proxima::test]
+#[case::split_half(8, RopePairing::SplitHalf { pairs: PAIRS })]
+#[case::adjacent_pairs(8, RopePairing::Interleaved)]
+async fn the_dispatch_timed_executor_places_both_rotated_halves_like_the_production_executor(
+    #[case] head_dim: u32,
+    #[case] pairing: RopePairing,
+) {
+    let case = RopeCase::new(head_dim, pairing);
+    let (expected_first, expected_second) = case.run_two_dispatch();
+    let half_bytes = case.half_len() * size_of::<f32>();
+    let buffer_bytes = PLACEMENT_ALIGNMENT * 4 + half_bytes;
+    let first_cache = omega::allocate_placed_buffer(buffer_bytes).expect("first cache buffer");
+    let second_cache = omega::allocate_placed_buffer(buffer_bytes).expect("second cache buffer");
+    omega::zero_placed_buffer(&first_cache, buffer_bytes).expect("zeroes the whole first cache");
+    omega::zero_placed_buffer(&second_cache, buffer_bytes).expect("zeroes the whole second cache");
+    let plan = case.plan();
+
+    let (_evaluated, timings, _sampling_mode, _split_ns) =
+        omega::execute_plan_with_placements_dispatch_timed(
+            &plan,
+            &case.blocks(),
+            &[],
+            &[
+                (case.first, &first_cache, PLACEMENT_ALIGNMENT),
+                (case.second, &second_cache, PLACEMENT_ALIGNMENT * 2),
+            ],
+        )
+        .expect("dispatch-timed execution runs with both rotated halves placed");
+
+    let placed_first =
+        omega::try_read_placed_buffer_f32(&first_cache, PLACEMENT_ALIGNMENT, case.half_len())
+            .expect("the first half lies inside its cache");
+    let placed_second =
+        omega::try_read_placed_buffer_f32(&second_cache, PLACEMENT_ALIGNMENT * 2, case.half_len())
+            .expect("the second half lies inside its cache");
+    assert_eq!(
+        bits(&placed_first),
+        bits(&expected_first),
+        "first half in its cache"
+    );
+    assert_eq!(
+        bits(&placed_second),
+        bits(&expected_second),
+        "second half in its cache: the twin's second node must reach the caller's buffer"
+    );
+    assert!(
+        !timings.is_empty(),
+        "a profiled step must still report one timing row per dispatched position"
+    );
+}
