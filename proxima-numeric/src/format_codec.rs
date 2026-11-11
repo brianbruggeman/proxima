@@ -384,6 +384,10 @@ impl FormatCodec {
 
 #[cfg(test)]
 mod tests {
+    use std::string::String;
+    use std::vec::Vec;
+    use std::{format, vec};
+
     use super::*;
     use crate::encode::encode_blocks;
 

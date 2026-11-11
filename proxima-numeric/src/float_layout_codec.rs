@@ -954,6 +954,9 @@ pub(crate) fn decode_slice(
 
 #[cfg(test)]
 mod tests {
+    use std::vec;
+    use std::vec::Vec;
+
     use super::*;
     use crate::float_layout::{NanNarrow, NanPolicy, NanWiden};
 
