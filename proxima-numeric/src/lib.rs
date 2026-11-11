@@ -36,6 +36,7 @@
 #[cfg(test)]
 extern crate std;
 
+pub mod block_codec;
 pub mod block_layout;
 /// The historical name for [`crate::NumericFormat`], kept so an existing call site reads
 /// `Codec::Q4_0` while there is still exactly one type and one constant table.
@@ -56,6 +57,7 @@ pub mod scalar_codec;
 pub mod tables;
 pub mod value;
 
+pub use block_codec::BlockCodec;
 pub use block_layout::{BlockLayout, Coded, Field, Plane};
 pub use convert::{Overflow, Rounding, narrow_to_format, narrow_to_layout};
 pub use decode::{decode_block, decode_blocks, decode_scalar, encode_scalar};
