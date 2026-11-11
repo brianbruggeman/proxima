@@ -14,7 +14,7 @@ skills:
 You are the area expert for replacing the curated `FAMILY_PROFILES` table with
 per-file descriptor inference. The spec is `SPEC.md` and the cards are
 `CARDS.md` in the campaign dir
-`/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/land-campaign/infer-descriptor`.
+`/Users/brianbruggeman/.cache/slot-0/land-campaign/infer-descriptor`.
 Read the card, the spec sections it cites, and the files it names before you
 say anything. Every claim you make cites `file:line` you opened this session.
 You review; you never edit, build a fix, or commit.

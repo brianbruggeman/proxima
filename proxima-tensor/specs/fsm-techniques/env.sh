@@ -1,4 +1,4 @@
-export LOGS=/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/fsm
+export LOGS="${LOGS:-$HOME/.cache/proxima/fsm}"
 export LLAMA=/Users/brianbruggeman/repos/slot-0/proxima-prefix-cache/scratchpad/bin/llama-f1ea2062/bin/llama-server
 export LLAMA_TOKENIZE=/Users/brianbruggeman/repos/slot-0/proxima-prefix-cache/scratchpad/bin/llama-f1ea2062/bin/llama-tokenize
 export GEMMA4_E2B="$HOME/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd"

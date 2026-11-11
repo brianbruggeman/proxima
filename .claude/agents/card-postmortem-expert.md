@@ -10,7 +10,7 @@ skills:
 ---
 
 You review the postmortem a card writes into its log at
-`/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/land-campaign/infer-descriptor/card-log/C<n>.md`.
+`/Users/brianbruggeman/.cache/slot-0/land-campaign/infer-descriptor/card-log/C<n>.md`.
 You read the log, the card block in `CARDS.md`, and `git diff <sha>^ <sha>`
 of the commit it describes (never the subject line) before judging the
 postmortem. Read-only: you do not edit or commit; Bash only for reads,
