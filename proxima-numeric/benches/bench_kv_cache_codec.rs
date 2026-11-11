@@ -9,8 +9,9 @@
 //! 1387/1428/1466, `read_placed_buffer_f32` 1318, `narrow_placed_buffer_f32_to_*` 1486/1523/1567); the BF8
 //! conversion is `proxima-tensor/src/bfloat8.rs` (`encode_f32_bits` / `decode_f32_bits`), copied verbatim
 //! because `proxima-tensor` depends on this crate. `store` and `narrow` are the same encode loop, so one
-//! `encode` arm covers both; `decode` is the load and allocates its returned `Vec` in both paths, as the
-//! real functions do.
+//! `encode` arm covers both; `decode` is the load. The interleaved arms write into one pre-sized buffer
+//! each, allocated outside the timed region, the same way for OLD and NEW; the owned `Vec` entry points
+//! (parity, allocation counts, criterion arms) share one `decode_owned` allocation.
 //!
 //! Before any timing the bench asserts OLD bytes == NEW bytes (encode) and OLD bits == NEW bits (decode)
 //! on the bench inputs plus 2^20 random f32 bit patterns, and prints allocations per call per arm.
@@ -140,25 +141,56 @@ fn old_encode(scalar: Scalar, values: &[f32], destination_bytes: &mut [u8]) {
     }
 }
 
-/// `read_placed_buffer_f32` / `read_placed_buffer_{f16,bf16,bf8}_as_f32` bodies at HEAD.
+/// `read_placed_buffer_f32` / `read_placed_buffer_{f16,bf16,bf8}_as_f32` conversions at HEAD, writing
+/// into the caller's slots (`out.len()` elements) the way [`new_decode_into`] does, so neither arm
+/// allocates its output.
 #[inline(never)]
-fn old_decode(scalar: Scalar, source_bytes: &[u8], element_count: usize) -> Vec<f32> {
+fn old_decode_into(scalar: Scalar, source_bytes: &[u8], out: &mut [MaybeUninit<f32>]) {
     let pointer = source_bytes.as_ptr();
+    let element_count = out.len();
     match scalar {
-        Scalar::Float32 => unsafe { core::slice::from_raw_parts(pointer.cast::<f32>(), element_count) }.to_vec(),
-        Scalar::Float16 => unsafe { core::slice::from_raw_parts(pointer.cast::<f16>(), element_count) }
-            .iter()
-            .map(|value| value.to_f32())
-            .collect(),
-        Scalar::BFloat16 => unsafe { core::slice::from_raw_parts(pointer.cast::<bf16>(), element_count) }
-            .iter()
-            .map(|value| value.to_f32())
-            .collect(),
-        Scalar::BFloat8 => unsafe { core::slice::from_raw_parts(pointer, element_count) }
-            .iter()
-            .map(|value| BFloat8::from_bits(*value).to_f32())
-            .collect(),
+        Scalar::Float32 => unsafe {
+            core::ptr::copy_nonoverlapping(pointer.cast::<f32>(), out.as_mut_ptr().cast::<f32>(), element_count);
+        },
+        Scalar::Float16 => {
+            let source = unsafe { core::slice::from_raw_parts(pointer.cast::<f16>(), element_count) };
+            for (slot, value) in out.iter_mut().zip(source) {
+                slot.write(value.to_f32());
+            }
+        }
+        Scalar::BFloat16 => {
+            let source = unsafe { core::slice::from_raw_parts(pointer.cast::<bf16>(), element_count) };
+            for (slot, value) in out.iter_mut().zip(source) {
+                slot.write(value.to_f32());
+            }
+        }
+        Scalar::BFloat8 => {
+            let source = unsafe { core::slice::from_raw_parts(pointer, element_count) };
+            for (slot, value) in out.iter_mut().zip(source) {
+                slot.write(BFloat8::from_bits(*value).to_f32());
+            }
+        }
     }
+}
+
+/// The one output allocation both owned decode arms share: `element_count` uninitialised slots in a
+/// fresh `Vec`, filled by the arm's `into` function.
+fn decode_owned(element_count: usize, fill: impl FnOnce(&mut [MaybeUninit<f32>])) -> Vec<f32> {
+    let mut decoded: Vec<f32> = Vec::with_capacity(element_count);
+    fill(&mut decoded.spare_capacity_mut()[..element_count]);
+    // SAFETY: `fill` initialised every one of the `element_count` slots it was handed.
+    unsafe { decoded.set_len(element_count) };
+    decoded
+}
+
+fn old_decode(scalar: Scalar, source_bytes: &[u8], element_count: usize) -> Vec<f32> {
+    decode_owned(element_count, |out| old_decode_into(scalar, source_bytes, out))
+}
+
+/// An already-initialised output buffer viewed as slots, the pre-sized buffer both timed arms write into.
+fn as_slots(out: &mut [f32]) -> &mut [MaybeUninit<f32>] {
+    // SAFETY: `MaybeUninit<f32>` has the layout of `f32`, and every slot of `out` is initialised already.
+    unsafe { core::slice::from_raw_parts_mut(out.as_mut_ptr().cast::<MaybeUninit<f32>>(), out.len()) }
 }
 
 // ---- NEW path, as omega's write/read/narrow_placed_buffer call it ------------------------------
@@ -192,15 +224,15 @@ fn new_encode(values: &[f32], buffer: &mut [u8], path: &NewPath) {
     path.codec.encode(values, buffer).unwrap();
 }
 
-/// See [`new_encode`]; the window is the whole buffer, as `read_placed_buffer` passes it.
+/// See [`new_encode`]; the window is the whole buffer, as `read_placed_buffer` passes it, and the
+/// output slots are the caller's, as [`old_decode_into`] has them.
 #[inline(never)]
+fn new_decode_into(buffer: &[u8], out: &mut [MaybeUninit<f32>], path: &NewPath) {
+    path.codec.decode(buffer, out).unwrap();
+}
+
 fn new_decode(buffer: &[u8], element_count: usize, path: &NewPath) -> Vec<f32> {
-    let codec = &path.codec;
-    let mut decoded: Vec<f32> = Vec::with_capacity(element_count);
-    codec.decode(buffer,&mut decoded.spare_capacity_mut()[..element_count]).unwrap();
-    // SAFETY: `decode` initialised exactly `element_count` slots, the whole `spare_capacity_mut` prefix.
-    unsafe { decoded.set_len(element_count) };
-    decoded
+    decode_owned(element_count, |out| new_decode_into(buffer, out, path))
 }
 
 // ---- BFloat8, verbatim from proxima-tensor/src/bfloat8.rs --------------------------------------
@@ -1112,25 +1144,34 @@ fn old_encode_copy(scalar: Scalar, values: &[f32], destination_bytes: &mut [u8])
     }
 }
 
-/// `old_decode` compiled a second time; see [`old_encode_copy`].
+/// `old_decode_into` compiled a second time; see [`old_encode_copy`].
 #[inline(never)]
-fn old_decode_copy(scalar: Scalar, source_bytes: &[u8], element_count: usize) -> Vec<f32> {
+fn old_decode_into_copy(scalar: Scalar, source_bytes: &[u8], out: &mut [MaybeUninit<f32>]) {
     black_box(());
     let pointer = source_bytes.as_ptr();
+    let element_count = out.len();
     match scalar {
-        Scalar::Float32 => unsafe { core::slice::from_raw_parts(pointer.cast::<f32>(), element_count) }.to_vec(),
-        Scalar::Float16 => unsafe { core::slice::from_raw_parts(pointer.cast::<f16>(), element_count) }
-            .iter()
-            .map(|value| value.to_f32())
-            .collect(),
-        Scalar::BFloat16 => unsafe { core::slice::from_raw_parts(pointer.cast::<bf16>(), element_count) }
-            .iter()
-            .map(|value| value.to_f32())
-            .collect(),
-        Scalar::BFloat8 => unsafe { core::slice::from_raw_parts(pointer, element_count) }
-            .iter()
-            .map(|value| BFloat8::from_bits(*value).to_f32())
-            .collect(),
+        Scalar::Float32 => unsafe {
+            core::ptr::copy_nonoverlapping(pointer.cast::<f32>(), out.as_mut_ptr().cast::<f32>(), element_count);
+        },
+        Scalar::Float16 => {
+            let source = unsafe { core::slice::from_raw_parts(pointer.cast::<f16>(), element_count) };
+            for (slot, value) in out.iter_mut().zip(source) {
+                slot.write(value.to_f32());
+            }
+        }
+        Scalar::BFloat16 => {
+            let source = unsafe { core::slice::from_raw_parts(pointer.cast::<bf16>(), element_count) };
+            for (slot, value) in out.iter_mut().zip(source) {
+                slot.write(value.to_f32());
+            }
+        }
+        Scalar::BFloat8 => {
+            let source = unsafe { core::slice::from_raw_parts(pointer, element_count) };
+            for (slot, value) in out.iter_mut().zip(source) {
+                slot.write(BFloat8::from_bits(*value).to_f32());
+            }
+        }
     }
 }
 
@@ -1143,12 +1184,11 @@ fn degenerate_encode(values: &[f32], buffer: &mut [u8], path: &NewPath) {
 }
 
 /// NEW decode plus one deliberate read-modify-write pass over the decoded values.
-fn degenerate_decode(buffer: &[u8], element_count: usize, path: &NewPath) -> Vec<f32> {
-    let mut decoded = new_decode(buffer, element_count, path);
-    for value in decoded.iter_mut() {
+fn degenerate_decode_into(buffer: &[u8], out: &mut [f32], path: &NewPath) {
+    new_decode_into(buffer, as_slots(out), path);
+    for value in out.iter_mut() {
         *value = black_box(*value);
     }
-    decoded
 }
 
 struct Comparison {
@@ -1389,21 +1429,23 @@ fn run_decode_cell(scalar: Scalar, values: &[f32], count: usize) -> Cell {
     let path = scalar.format();
     let mut packed = aligned_bytes(count * scalar.width());
     old_encode(scalar, &values[..count], &mut packed);
+    let (mut old_out, mut copy_out, mut new_out, mut degenerate_out) =
+        (vec![0.0f32; count], vec![0.0f32; count], vec![0.0f32; count], vec![0.0f32; count]);
     let versus_old = compare(
-        || drop(black_box(old_decode(scalar, black_box(&packed), count))),
-        || drop(black_box(new_decode(black_box(&packed), count, &path))),
+        || old_decode_into(scalar, black_box(&packed), black_box(as_slots(&mut old_out))),
+        || new_decode_into(black_box(&packed), black_box(as_slots(&mut new_out)), &path),
     );
     let old_versus_copy = compare(
-        || drop(black_box(old_decode(scalar, black_box(&packed), count))),
-        || drop(black_box(old_decode_copy(scalar, black_box(&packed), count))),
+        || old_decode_into(scalar, black_box(&packed), black_box(as_slots(&mut old_out))),
+        || old_decode_into_copy(scalar, black_box(&packed), black_box(as_slots(&mut copy_out))),
     );
     let degenerate = compare(
-        || drop(black_box(old_decode(scalar, black_box(&packed), count))),
-        || drop(black_box(degenerate_decode(black_box(&packed), count, &path))),
+        || old_decode_into(scalar, black_box(&packed), black_box(as_slots(&mut old_out))),
+        || degenerate_decode_into(black_box(&packed), black_box(&mut degenerate_out), &path),
     );
     let degenerate_versus_new = compare(
-        || drop(black_box(new_decode(black_box(&packed), count, &path))),
-        || drop(black_box(degenerate_decode(black_box(&packed), count, &path))),
+        || new_decode_into(black_box(&packed), black_box(as_slots(&mut new_out)), &path),
+        || degenerate_decode_into(black_box(&packed), black_box(&mut degenerate_out), &path),
     );
     Cell { direction: "decode", scalar, count, versus_old, old_versus_copy, degenerate, degenerate_versus_new }
 }
