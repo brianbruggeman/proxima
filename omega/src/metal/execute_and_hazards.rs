@@ -1310,12 +1310,14 @@ pub fn read_placed_buffer_f32(
     element_count: usize,
 ) -> Vec<f32> {
     let pointer = buffer.contents();
-    // SAFETY: shared storage is CPU-visible once the writing command buffer completed; the caller keeps the range in bounds.
+    let mut values: Vec<f32> = Vec::with_capacity(element_count);
+    // SAFETY: shared storage is CPU-visible once the writing command buffer completed; the caller keeps the range in bounds. The copy is bytewise, so an unaligned `byte_offset` forms no misaligned reference; every bit pattern is a valid f32.
     unsafe {
-        let base = pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f32>();
-        core::slice::from_raw_parts(base, element_count)
+        let base = pointer.as_ptr().cast::<u8>().add(byte_offset);
+        core::ptr::copy_nonoverlapping(base, values.as_mut_ptr().cast::<u8>(), element_count * size_of::<f32>());
+        values.set_len(element_count);
     }
-    .to_vec()
+    values
 }
 
 /// Writes `values` into `buffer` at `byte_offset` -- the host-side store a
@@ -1331,10 +1333,10 @@ pub fn read_placed_buffer_f32(
 #[cfg(feature = "metal-output-placement")]
 pub fn write_placed_buffer_f32(buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
     let pointer = buffer.contents();
-    // SAFETY: shared memory with no command buffer in flight; the caller keeps the written range inside the allocation.
+    // SAFETY: shared memory with no command buffer in flight; the caller keeps the written range inside the allocation. The copy is bytewise, so an unaligned `byte_offset` forms no misaligned pointer.
     unsafe {
-        let destination = pointer.as_ptr().cast::<u8>().add(byte_offset).cast::<f32>();
-        core::ptr::copy_nonoverlapping(values.as_ptr(), destination, values.len());
+        let destination = pointer.as_ptr().cast::<u8>().add(byte_offset);
+        core::ptr::copy_nonoverlapping(values.as_ptr().cast::<u8>(), destination, size_of_val(values));
     }
 }
 
@@ -1347,10 +1349,14 @@ pub fn write_placed_buffer_f32(buffer: &PlacedBuffer, byte_offset: usize, values
 /// format on every call. Scalar and block formats place alike; the byte range is the codec's whole-block
 /// geometry. Same in-flight and bounds contract as [`write_placed_buffer_f32`].
 ///
+/// An offset at or past the end of the allocation leaves an empty window, which the codec refuses like
+/// any window shorter than the packed range; the buffer is unwritten in every error case.
+///
 /// # Errors
 /// [`NumericError::InputNotElementMultiple`] when `values.len()` is not whole blocks of the codec's
-/// format, [`NumericError::OutputSizeMismatch`] when the allocation past `byte_offset` is shorter than
-/// the packed range, and the codec's own refusal for a format with no encode.
+/// format, [`NumericError::OutputSizeMismatch`] when the allocation past `byte_offset` (empty if the
+/// offset is past the end) is shorter than the packed range, and [`NumericError::UnsupportedEncode`]
+/// for a format with no encode. No variant names an offset: the window is the quantity the codec sizes.
 #[cfg(feature = "metal-output-placement")]
 pub fn write_placed_buffer(
     buffer: &PlacedBuffer,
@@ -1358,14 +1364,22 @@ pub fn write_placed_buffer(
     codec: &FormatCodec,
     values: &[f32],
 ) -> Result<(), NumericError> {
-    // SAFETY: shared memory with no command buffer in flight; the window is the rest of the allocation, which the codec bounds-checks against the packed range.
-    let window = unsafe {
-        core::slice::from_raw_parts_mut(
-            buffer.contents().as_ptr().cast::<u8>().add(byte_offset),
-            buffer.length().saturating_sub(byte_offset),
-        )
-    };
+    let (start, window_len) = placed_tail(buffer, byte_offset);
+    // SAFETY: `start` is inside the allocation and `window_len` bytes follow it (`placed_tail` clamps the offset to the allocation length, so the add above never leaves it); the memory is shared with no command buffer in flight (caller contract, every placed execute waits); the codec checks the packed range against `window_len`.
+    let window = unsafe { core::slice::from_raw_parts_mut(start, window_len) };
     codec.encode(values, window).map(drop)
+}
+
+/// The bytes of `buffer` from `byte_offset` to its end as a base pointer and length. An offset past the
+/// end is clamped to the end, so the pointer arithmetic stays within or one past the allocation and the
+/// window is empty; the rest of the allocation, never more, is what a caller may form a slice over.
+#[cfg(feature = "metal-output-placement")]
+fn placed_tail(buffer: &PlacedBuffer, byte_offset: usize) -> (*mut u8, usize) {
+    let length = buffer.length();
+    let start = byte_offset.min(length);
+    // SAFETY: `start <= length`, so the result is within or one past the allocation `contents()` points at.
+    let base = unsafe { buffer.contents().as_ptr().cast::<u8>().add(start) };
+    (base, length - start)
 }
 
 /// Decodes `element_count` elements at `byte_offset` to `f32`, the inverse of
@@ -1374,7 +1388,9 @@ pub fn write_placed_buffer(
 ///
 /// # Errors
 /// [`NumericError::InputNotElementMultiple`] when `element_count` is not whole blocks of the
-/// codec's format.
+/// codec's format, [`NumericError::InputNotBlockMultiple`] or [`NumericError::OutputSizeMismatch`]
+/// when the allocation past `byte_offset` (empty if the offset is past the end) is shorter than the
+/// packed range. No variant names an offset: the window is the quantity the codec sizes.
 #[cfg(feature = "metal-output-placement")]
 pub fn read_placed_buffer(
     buffer: &PlacedBuffer,
@@ -1382,15 +1398,11 @@ pub fn read_placed_buffer(
     codec: &FormatCodec,
     element_count: usize,
 ) -> Result<Vec<f32>, NumericError> {
-    // SAFETY: same contract as `write_placed_buffer`; the window is the rest of the allocation.
-    let window = unsafe {
-        core::slice::from_raw_parts(
-            buffer.contents().as_ptr().cast::<u8>().add(byte_offset),
-            buffer.length().saturating_sub(byte_offset),
-        )
-    };
+    let (start, window_len) = placed_tail(buffer, byte_offset);
+    // SAFETY: same as `write_placed_buffer`: `start` is inside the allocation with `window_len` bytes after it, and no command buffer is in flight; the codec checks the packed range against `window_len`.
+    let window = unsafe { core::slice::from_raw_parts(start, window_len) };
     let mut decoded: Vec<f32> = Vec::with_capacity(element_count);
-    codec.decode(window,&mut decoded.spare_capacity_mut()[..element_count])?;
+    codec.decode(window, &mut decoded.spare_capacity_mut()[..element_count])?;
     // SAFETY: `decode` returned Ok, so it initialised all `element_count` slots of the spare prefix.
     unsafe { decoded.set_len(element_count) };
     Ok(decoded)
@@ -1398,12 +1410,20 @@ pub fn read_placed_buffer(
 
 /// Encodes `element_count` f32s of `source` (at `source_byte_offset`) into the codec's format in
 /// `destination` at `destination_byte_offset`, with no host allocation: the step-end narrowing of a
-/// cache whose format is not the graph's f32 output. The buffers must be distinct allocations; both
-/// ranges stay inside them and no command buffer may be in flight (caller contract).
+/// cache whose format is not the graph's f32 output.
+///
+/// # Contract
+/// The buffers are distinct allocations and no command buffer is in flight. Neither offset nor the
+/// source range is trusted otherwise: alignment and both ranges are checked before any slice is formed.
 ///
 /// # Errors
+/// [`NumericError::InputNotBlockMultiple`] (`format: "binary32"`, `found: source_byte_offset`) when the
+/// source address is not `f32`-aligned, i.e. the offset is not a whole element,
 /// [`NumericError::InputNotElementMultiple`] when `element_count` is not whole blocks of the
-/// codec's format.
+/// codec's format, [`NumericError::OutputSizeMismatch`] when the source past `source_byte_offset` holds
+/// fewer than `element_count` `f32`s (`found` is how many it holds, `expected` is `element_count`) or
+/// the destination past `destination_byte_offset` is shorter than the packed range (an offset past
+/// either end is an empty window). No variant names an offset: the window is the quantity checked.
 #[cfg(feature = "metal-output-placement")]
 pub fn narrow_placed_buffer(
     source: &PlacedBuffer,
@@ -1413,26 +1433,24 @@ pub fn narrow_placed_buffer(
     codec: &FormatCodec,
     element_count: usize,
 ) -> Result<(), NumericError> {
-    // SAFETY: idle shared buffers (every placed execute waits), in-bounds offsets, distinct allocations; the destination window is the rest of its allocation, which the codec bounds-checks.
+    let (source_start, source_window) = placed_tail(source, source_byte_offset);
+    if !source_start.cast::<f32>().is_aligned() {
+        return Err(NumericError::InputNotBlockMultiple {
+            format: "binary32",
+            found: source_byte_offset,
+            block_bytes: size_of::<f32>(),
+        });
+    }
+    let source_held = source_window / size_of::<f32>();
+    if element_count > source_held {
+        return Err(NumericError::OutputSizeMismatch { found: source_held, expected: element_count });
+    }
+    let (destination_start, destination_window) = placed_tail(destination, destination_byte_offset);
+    // SAFETY: idle shared buffers (every placed execute waits) and distinct allocations (caller contract); `element_count <= source_window / 4` was just checked, so the source slice lies inside the source allocation, and the destination slice is the `destination_window` bytes after a start `placed_tail` kept inside its allocation, which the codec checks against the packed range. The source pointer was just checked `f32`-aligned.
     let (rows, packed) = unsafe {
         (
-            core::slice::from_raw_parts(
-                source
-                    .contents()
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(source_byte_offset)
-                    .cast::<f32>(),
-                element_count,
-            ),
-            core::slice::from_raw_parts_mut(
-                destination
-                    .contents()
-                    .as_ptr()
-                    .cast::<u8>()
-                    .add(destination_byte_offset),
-                destination.length().saturating_sub(destination_byte_offset),
-            ),
+            core::slice::from_raw_parts(source_start.cast::<f32>(), element_count),
+            core::slice::from_raw_parts_mut(destination_start, destination_window),
         )
     };
     codec.encode(rows, packed).map(drop)
@@ -2354,6 +2372,144 @@ mod placed_format_tests {
             refused,
             Err(NumericError::InputNotElementMultiple { format: "q4_0", found: 33, elements: 32 })
         );
+    }
+
+    const SENTINEL: u8 = 0xa5;
+
+    fn sentinel_buffer(len: usize) -> PlacedBuffer {
+        let buffer = allocate_placed_buffer(len).expect("allocates sentinel fixture bytes");
+        let length = placed_buffer_len(&buffer);
+        // SAFETY: the buffer holds `length` bytes of cpu-visible placed memory with no gpu work in flight.
+        unsafe { core::ptr::write_bytes(buffer.contents().as_ptr().cast::<u8>(), SENTINEL, length) };
+        buffer
+    }
+
+    fn assert_all_sentinel(buffer: &PlacedBuffer) {
+        let bytes = stored_bytes(buffer, placed_buffer_len(buffer));
+        assert!(bytes.iter().all(|byte| *byte == SENTINEL), "a refused placed call wrote: {bytes:02x?}");
+    }
+
+    #[test]
+    fn writing_at_an_offset_past_the_end_is_refused_and_leaves_the_buffer_untouched() {
+        let bf16 = codec(&NumericFormat::BFloat16);
+        let buffer = sentinel_buffer(16);
+        let past_end = placed_buffer_len(&buffer) + 8;
+
+        let refused = write_placed_buffer(&buffer, past_end, &bf16, &[1.5, 2.5, -3.0, 4.0]);
+
+        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 0, expected: 8 }));
+        assert_all_sentinel(&buffer);
+    }
+
+    #[test]
+    fn writing_at_an_offset_that_leaves_a_window_shorter_than_the_packed_range_is_refused() {
+        let bf16 = codec(&NumericFormat::BFloat16);
+        let buffer = sentinel_buffer(16);
+        let offset = placed_buffer_len(&buffer) - 4;
+
+        let refused = write_placed_buffer(&buffer, offset, &bf16, &[1.5, 2.5, -3.0, 4.0]);
+
+        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 4, expected: 8 }));
+        assert_all_sentinel(&buffer);
+    }
+
+    #[test]
+    fn reading_at_an_offset_past_the_end_is_refused_and_leaves_the_buffer_untouched() {
+        let bf16 = codec(&NumericFormat::BFloat16);
+        let buffer = sentinel_buffer(16);
+        let past_end = placed_buffer_len(&buffer) + 8;
+
+        let refused = read_placed_buffer(&buffer, past_end, &bf16, 4);
+
+        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 4, expected: 0 }));
+        assert_all_sentinel(&buffer);
+    }
+
+    #[test]
+    fn reading_at_an_offset_that_leaves_a_window_shorter_than_the_packed_range_is_refused() {
+        let bf16 = codec(&NumericFormat::BFloat16);
+        let buffer = sentinel_buffer(16);
+        let offset = placed_buffer_len(&buffer) - 4;
+
+        let refused = read_placed_buffer(&buffer, offset, &bf16, 4);
+
+        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 4, expected: 2 }));
+        assert_all_sentinel(&buffer);
+    }
+
+    #[test]
+    fn narrowing_to_a_destination_offset_past_the_end_is_refused_and_leaves_both_buffers_untouched() {
+        let bf16 = codec(&NumericFormat::BFloat16);
+        let staging = sentinel_buffer(16);
+        let cache = sentinel_buffer(16);
+        let past_end = placed_buffer_len(&cache) + 8;
+
+        let refused = narrow_placed_buffer(&staging, 0, &cache, past_end, &bf16, 4);
+
+        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 0, expected: 8 }));
+        assert_all_sentinel(&cache);
+        assert_all_sentinel(&staging);
+    }
+
+    #[test]
+    fn narrowing_to_a_destination_offset_with_a_window_shorter_than_the_packed_range_is_refused() {
+        let bf16 = codec(&NumericFormat::BFloat16);
+        let staging = sentinel_buffer(16);
+        let cache = sentinel_buffer(16);
+        let offset = placed_buffer_len(&cache) - 4;
+
+        let refused = narrow_placed_buffer(&staging, 0, &cache, offset, &bf16, 4);
+
+        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 4, expected: 8 }));
+        assert_all_sentinel(&cache);
+        assert_all_sentinel(&staging);
+    }
+
+    #[test]
+    fn narrowing_from_a_source_offset_past_the_end_is_refused_and_leaves_both_buffers_untouched() {
+        let bf16 = codec(&NumericFormat::BFloat16);
+        let staging = sentinel_buffer(16);
+        let cache = sentinel_buffer(16);
+        let past_end = placed_buffer_len(&staging) + 8;
+
+        let refused = narrow_placed_buffer(&staging, past_end, &cache, 0, &bf16, 4);
+
+        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 0, expected: 4 }));
+        assert_all_sentinel(&cache);
+        assert_all_sentinel(&staging);
+    }
+
+    #[test]
+    fn narrowing_from_a_source_offset_with_fewer_rows_than_requested_is_refused() {
+        let bf16 = codec(&NumericFormat::BFloat16);
+        let staging = sentinel_buffer(16);
+        let cache = sentinel_buffer(16);
+        let offset = placed_buffer_len(&staging) - 8;
+
+        let refused = narrow_placed_buffer(&staging, offset, &cache, 0, &bf16, 4);
+
+        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 2, expected: 4 }));
+        assert_all_sentinel(&cache);
+        assert_all_sentinel(&staging);
+    }
+
+    #[test]
+    fn narrowing_from_a_source_offset_that_is_not_a_whole_f32_is_refused_and_leaves_both_buffers_untouched() {
+        let bf16 = codec(&NumericFormat::BFloat16);
+        for misaligned in [1usize, 2, 3] {
+            let staging = sentinel_buffer(32);
+            let cache = sentinel_buffer(16);
+
+            let refused = narrow_placed_buffer(&staging, misaligned, &cache, 0, &bf16, 4);
+
+            assert_eq!(
+                refused,
+                Err(NumericError::InputNotBlockMultiple { format: "binary32", found: misaligned, block_bytes: 4 }),
+                "source offset {misaligned}"
+            );
+            assert_all_sentinel(&cache);
+            assert_all_sentinel(&staging);
+        }
     }
 
     /// Deterministic roughly-gaussian rows with a few outlier channels, the shape a K projection has.
