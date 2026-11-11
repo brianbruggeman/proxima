@@ -574,7 +574,9 @@ const fn f32_bits_from_scaled(significand: u32, scale: i32) -> u32 {
 #[inline(always)]
 const fn finite_magnitude_bits(exponent: u32, mantissa: u32, layout: &FloatLayout) -> u32 {
     let mantissa_bits = layout.mantissa_bits as i32;
-    if exponent == 0 {
+    if exponent == 0 && mantissa_bits == 0 {
+        f32_bits_from_scaled(1, layout.lowest_exponent())
+    } else if exponent == 0 {
         f32_bits_from_scaled(mantissa, 1 - layout.bias() as i32 - mantissa_bits)
     } else {
         let significand = (1u32 << layout.mantissa_bits) | mantissa;
@@ -612,7 +614,7 @@ pub const fn decode(code: u32, layout: FloatLayout) -> f32 {
             exponent == exponent_ones(&layout)
         }
     };
-    let reserved_bits = if mantissa == 0 {
+    let reserved_bits = if mantissa == 0 && !matches!(layout.specials, Specials::NanOnly) {
         F32_INFINITY_BITS
     } else if drops_nan_payload(&layout) {
         F32_INFINITY_BITS | F32_QUIET_BIT
@@ -678,7 +680,10 @@ const fn straight_line_finite_bits(code: u32, layout: &FloatLayout) -> u32 {
     let field_bits = layout.exponent_bits as u32 + layout.mantissa_bits as u32;
     let fields = code & ((1u32 << field_bits) - 1);
     let rebias = f32::from_bits(((2 * F32_BIAS - bias) as u32) << F32_FRACTION_BITS);
-    (f32::from_bits(fields << shift) * rebias).to_bits()
+    let scaled = (f32::from_bits(fields << shift) * rebias).to_bits();
+    // a layout with no mantissa has no subnormal range, so its zero field is the lowest power, not zero
+    let lowest_power = (layout.mantissa_bits == 0 && fields == 0) as u32;
+    scaled | (lowest_power * f32_bits_from_scaled(1, layout.lowest_exponent()))
 }
 
 // the f32 the graph computes in; every slice converts from or to it
