@@ -183,7 +183,7 @@ impl FloatLayout {
     /// Sign-magnitude eight bits: range -127..=127 with a negative zero.
     pub const SIGN_MAGNITUDE_INT8: Self = Self::integer(8, SignEncoding::Magnitude);
     /// OCP MX v1.0 E8M0 block scale: eight exponent bits, no mantissa and no sign bit; the all-ones
-    /// code is NaN and every other code is `2^(code - 127)`.
+    /// code is NaN and every other code is `2^(code - 127)`, code 0 included: there is no zero.
     pub const F8_E8M0: Self = Self {
         exponent_bits: 8,
         mantissa_bits: 0,
@@ -338,13 +338,27 @@ impl FloatLayout {
     /// Binary32 projection of the minimum normal float; wider formats can underflow to zero.
     #[must_use]
     pub const fn min_normal(&self) -> f32 {
-        pow2(1 - self.bias() as i32)
+        pow2(self.lowest_exponent())
     }
 
     /// Binary32 projection of the minimum subnormal float; wider formats can underflow to zero.
+    /// A layout with no mantissa has no subnormal range, so this is its smallest value.
     #[must_use]
     pub const fn min_subnormal(&self) -> f32 {
-        pow2(1 - self.bias() as i32 - self.mantissa_bits as i32)
+        pow2(self.lowest_exponent() - self.mantissa_bits as i32)
+    }
+
+    /// The power of two of the smallest normal value. With mantissa bits the all-zero exponent
+    /// field is the subnormal range, so the smallest normal sits at field 1; with none there is
+    /// no subnormal range, so field 0 is itself the lowest power (E8M0 code 0 is `2^-127`, OCP MX
+    /// v1.0 Table 7, which has no zero).
+    #[must_use]
+    pub const fn lowest_exponent(&self) -> i32 {
+        if self.exponent_bits != 0 && self.mantissa_bits == 0 {
+            -(self.bias() as i32)
+        } else {
+            1 - self.bias() as i32
+        }
     }
 
     /// The canonical lowercase name of exactly this layout. `None` for a layout nobody named.
@@ -616,6 +630,37 @@ mod tests {
     fn float_layout_derived_min_subnormal_per_layout() {
         let minima = CASES.map(|case| case.0.min_subnormal());
         assert_eq!(minima, CASES.map(|case| case.5));
+    }
+
+    // ocp_mx_v1_0.txt:500-505 (Table 7): E8M0 has no zero, code 0 is 2^-127, 0xff is NaN
+    #[test]
+    fn e8m0_has_no_zero_code_zero_is_two_to_the_minus_127_per_element_and_per_slice() {
+        let layout = FloatLayout::F8_E8M0;
+        let expected_bits = [(0x00_u8, 0x0040_0000_u32), (0x01, 0x0080_0000), (0x7f, 1.0f32.to_bits()), (0xfe, 0x7f00_0000)];
+        let codes: std::vec::Vec<u8> = (0..=u8::MAX).collect();
+        let mut slice = std::vec![0.0f32; codes.len()];
+
+        crate::float_layout_codec::decode_slice(&layout, &codes, &mut slice).expect("e8m0 is a supported layout");
+
+        for (code, bits) in expected_bits {
+            let element = crate::float_layout_codec::decode(u32::from(code), layout);
+            assert_eq!(element.to_bits(), bits, "per-element code {code:#04x}");
+            assert_eq!(slice[usize::from(code)].to_bits(), bits, "slice code {code:#04x}");
+        }
+        assert!(crate::float_layout_codec::decode(0xff, layout).is_nan());
+        assert!(slice[0xff].is_nan());
+        assert_eq!(layout.min_subnormal().to_bits(), 0x0040_0000);
+        assert_eq!(layout.min_normal().to_bits(), 0x0040_0000);
+    }
+
+    #[test]
+    fn e8m0_encodes_zero_and_values_below_the_smallest_code_to_code_zero() {
+        let layout = FloatLayout::F8_E8M0;
+
+        let codes = [0.0f32, f32::from_bits(1), 2.0f32.powi(-127), 2.0f32.powi(-126)]
+            .map(|value| crate::float_layout_codec::encode(value, layout));
+
+        assert_eq!(codes, [0, 0, 0, 1]);
     }
 
     #[test]
