@@ -101,7 +101,7 @@ fn integer_load_msl(layout: &FloatLayout, name: &str) -> String {
     let mantissa_bits = layout.mantissa_bits;
     let mantissa_mask = (1u64 << mantissa_bits) - 1;
     let scale = integer_scale(layout);
-    // 64-bit integer arithmetic here doubled the q8_0 k-cache load on metal (370 vs 191 us), so the wide type is used only when 32 bits cannot hold the signed difference
+    // 64-bit integer arithmetic here slowed the q8_0 k-cache load on metal, so the wide type is used only when 32 bits cannot hold the signed difference; the q8_0 arm of cached_attention_decode_split_times_a_binary16_k_cache_against_a_q4_0_k_cache (omega/tests/cached_attention_decode_split_parity.rs, feature instrument) prints that load's per-step gpu time, and a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boundary_codes (layout_render_tests.rs) pins the long arm
     let signed = if mantissa_bits <= 30 { "int" } else { "long" };
     let value = match layout.sign {
         SignEncoding::Absent => "(float)mantissa".to_string(),

@@ -34,8 +34,9 @@ use crate::format::NumericFormat;
 
 const UNNAMED: &str = "unnamed";
 
-// the element count up to which an identity decode copies inline: a vector loop beats the libc memcpy call by 5-11% at
-// 256 and 512 elements and ties at 2048 and 8192, then loses 3-9% from 32768 up, where the out-of-line memcpy wins
+// the element count up to which an identity decode copies inline: a vector loop avoids the libc memcpy call, which wins from
+// some larger size; the decode f32 cells of benches/bench_kv_cache_codec.rs (KV_BENCH_INTERLEAVED=1 KV_BENCH_CELLS=decode:f32)
+// time 256 and 512 against 262144 and 2097152 elements, and no cell sits between, so the bound itself is not located there
 const IDENTITY_INLINE_ELEMENTS: usize = 8192;
 
 #[derive(Clone, Copy)]
