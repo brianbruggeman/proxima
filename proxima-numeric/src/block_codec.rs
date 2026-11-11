@@ -290,8 +290,8 @@ fn decode_chunk<const ELEMENTS: usize, const BYTES: usize>(
         };
         if layout.min.is_some() { value + min_term } else { value }
     };
-    // a NaN min wins over a NaN scale, as the incumbent's add (min first) returns it; stated here
-    // so the payload does not depend on which operand an ISA's add returns when both are NaN
+    // ieee 754 does not say which nan payload survives an add of two nans, so the min's is chosen
+    // here and the result does not depend on which operand an isa's add returns
     if layout.min.is_some() && min_term.is_nan() {
         out.iter_mut().for_each(|slot| {
             slot.write(min_term);
@@ -602,6 +602,8 @@ mod tests {
     use super::*;
     use crate::float_layout::FloatLayout;
 
+    const RESOLVING_NAMED_FORMATS: usize = 13;
+
     fn offset_binary_u8_layout() -> BlockLayout {
         let mut layout = BlockLayout::Q8_0;
         layout.element.code = FloatLayout::UINT8;
@@ -623,5 +625,45 @@ mod tests {
         assert_eq!(scale, 0.015_625);
         assert_eq!(&codes[..4], &[192, 0, 255, 128]);
         assert!(codes[3..].iter().all(|&code| code == 128));
+    }
+
+    fn layout_is_table_shaped(layout: &BlockLayout) -> bool {
+        layout.is_simple() && planes_cover(layout) && code_bits(layout) <= 8
+    }
+
+    fn format_should_resolve(format: &NumericFormat) -> bool {
+        match format {
+            NumericFormat::Block(layout) => layout_is_table_shaped(layout),
+            NumericFormat::Levels(levels) => match (levels.packing(), levels.levels) {
+                (Some(layout), LevelTable::Linear { .. }) => {
+                    levels.levels == layout.levels() && layout_is_table_shaped(&layout)
+                }
+                _ => false,
+            },
+            NumericFormat::Scalar(_) => false,
+        }
+    }
+
+    #[test]
+    fn every_named_format_resolves_exactly_when_the_rule_says_it_does() {
+        let mut resolving = 0usize;
+        for (format, name) in NumericFormat::ALL.iter().zip(NumericFormat::NAMES) {
+            let resolves = BlockCodec::for_format(format).is_some();
+
+            assert_eq!(resolves, format_should_resolve(format), "{name}");
+            resolving += usize::from(resolves);
+        }
+
+        assert_eq!(resolving, RESOLVING_NAMED_FORMATS);
+    }
+
+    #[test]
+    fn each_clause_of_is_simple_has_a_layout_that_does_not_resolve() {
+        assert!(!BlockLayout::Q4_K.is_simple() && BlockLayout::Q4_K.sub.is_some());
+        assert!(!BlockLayout::NVFP4.is_simple() && BlockLayout::NVFP4.scale_runs.is_some());
+        assert!(!BlockLayout::TQ1_0.is_simple() && BlockLayout::TQ1_0.element.packed_radix > 1);
+        for layout in [BlockLayout::Q4_K, BlockLayout::NVFP4, BlockLayout::TQ1_0] {
+            assert!(BlockCodec::resolve(&layout).is_none());
+        }
     }
 }
