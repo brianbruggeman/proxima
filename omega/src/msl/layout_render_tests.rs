@@ -172,8 +172,8 @@ const CACHED_ATTENTION_SOURCE: &str = include_str!("cached_attention_render.rs")
 
 fn identifiers_after<'text>(text: &'text str, prefix: &str) -> alloc::vec::Vec<&'text str> {
     text.match_indices(prefix)
-        .map(|(at, _)| {
-            let tail = &text[at + prefix.len()..];
+        .map(|(match_start, _)| {
+            let tail = &text[match_start + prefix.len()..];
             let end = tail
                 .find(|current: char| !current.is_alphanumeric() && current != '_')
                 .unwrap_or(tail.len());
