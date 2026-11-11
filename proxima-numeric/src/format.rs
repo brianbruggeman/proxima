@@ -24,6 +24,7 @@
 //! the config spelling, and [`crate::decode`] the one place a format becomes numbers.
 
 use crate::block_layout::{BlockLayout, Field};
+use crate::dtype::DType;
 use crate::float_layout::FloatLayout;
 
 /// The level set a code selects, when it is not the code's own [`FloatLayout`] value.
@@ -613,28 +614,19 @@ impl NumericFormat {
     /// The `DType` that describes the same elements: a scalar layout, or [`Self::Bool`]. `None`
     /// for a block or level format, which `DType` cannot express.
     #[must_use]
-    pub const fn to_dtype(&self) -> Option<crate::DType> {
+    pub fn to_dtype(&self) -> Option<DType> {
         match self {
-            Self::Scalar(layout) => Some(crate::DType::Layout(*layout)),
-            Self::Levels(_) if self.is_bool() => Some(crate::DType::Bool),
+            Self::Scalar(layout) => Some(DType::Layout(*layout)),
+            Self::Levels(_) if self.is_bool() => Some(DType::Bool),
             Self::Block(_) | Self::Levels(_) => None,
         }
     }
 
-    /// Whether this is [`Self::Bool`]; `const` so `to_dtype` can use it, since `PartialEq` cannot.
+    /// Whether this is [`Self::Bool`]: the same equality [`Self::name`] spells `"bool"` by, so a
+    /// ladder that only resembles it (the code at another bit) is neither.
     #[must_use]
-    pub const fn is_bool(&self) -> bool {
-        matches!(
-            self,
-            Self::Levels(LevelFormat {
-                geometry: LevelGeometry::Packed(layout),
-                levels: LevelTable::Linear {
-                    count: 2,
-                    zero_point: 0,
-                    step: 1,
-                },
-            }) if layout.elements == 1 && layout.block_bytes == 1 && layout.scale.layout.width() == 0
-        )
+    pub fn is_bool(&self) -> bool {
+        *self == Self::Bool
     }
 
     /// q2_k: 256 four-bit codes, 16 sub-blocks each with a 4-bit scale and min.
@@ -794,7 +786,7 @@ mod tests {
             );
         }
         assert_eq!(std::format!("{:?}", NumericFormat::Float32), "Float32");
-        assert_eq!(NumericFormat::Float32, crate::DType::FLOAT32.format().expect("f32 is numeric"));
+        assert_eq!(NumericFormat::Float32, DType::FLOAT32.format().expect("f32 is numeric"));
     }
 
     #[test]
@@ -938,8 +930,6 @@ mod tests {
 
     #[test]
     fn every_dtype_constant_has_a_numeric_format_twin_with_identical_methods() {
-        use crate::DType;
-
         let twins = [
             (DType::Bool, NumericFormat::Bool),
             (DType::INT8, NumericFormat::Int8),
@@ -982,6 +972,24 @@ mod tests {
             );
         }
         assert_eq!(NumericFormat::Q4_0.to_dtype(), None);
+    }
+
+    #[test]
+    fn a_bool_ladder_with_its_code_at_another_bit_is_not_bool() {
+        let NumericFormat::Levels(mut levels) = NumericFormat::Bool else {
+            panic!("bool is a level format");
+        };
+        let LevelGeometry::Packed(mut layout) = levels.geometry else {
+            panic!("bool is a packed ladder");
+        };
+        layout.element.low.base_bits = 7;
+        levels.geometry = LevelGeometry::Packed(layout);
+        let shifted = NumericFormat::Levels(levels);
+
+        assert!(NumericFormat::Bool.is_bool() && !shifted.is_bool());
+        assert_eq!(shifted.to_dtype(), None);
+        assert_eq!(shifted.name(), None);
+        assert_eq!(NumericFormat::Bool.to_dtype(), Some(DType::Bool));
     }
 
     #[test]
