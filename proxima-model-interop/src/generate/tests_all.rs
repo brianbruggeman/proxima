@@ -1233,16 +1233,19 @@ pub(super) mod tests {
     /// own doc, so `gpu_layers: GPU_LAYERS_ALL` here reaches
     /// [`BackendRuntime::evaluate`] through [`LoadedModel::run_decode_loop`],
     /// never `run_decode_loop_placed_kv`) drives the SAME 8-step greedy
-    /// decode twice, once with `kv_bucket_tokens: 1` (today's pre-fix
-    /// behavior: `kv_extent`'s own doc, `div_ceil(1)` is the identity) and
-    /// once with `kv_bucket_tokens: 32` (`ServingConfig::default`'s own
-    /// value). Two claims, both comparative rather than a single hard-coded
-    /// constant, so neither depends on `omega`'s own internal per-node
-    /// allocation count: bucketing must produce STRICTLY fewer plan misses
-    /// and STRICTLY fewer [`omega::metal::OUTPUT_BUFFER_ALLOCATIONS`] than
-    /// the unbucketed run (ROW 392's own finding: one miss, and one fresh
-    /// `Plan` with its own device output buffers, per token before this
-    /// fix), and the two runs must land on the IDENTICAL generated token
+    /// decode twice, once with `kv_bucket_tokens: 1` (`kv_extent`'s own doc,
+    /// `div_ceil(1)` is the identity) and once with `kv_bucket_tokens: 32`
+    /// (`ServingConfig::default`'s own value). Since 2889cf1c a padded plan
+    /// binds the call's whole kv capacity (`kv_extent` over `positions_needed
+    /// + draft_limit`, `decode.rs`'s `decode_kv_bound` event), so the symbol
+    /// is constant inside a call for every bucket size: each arm builds ONE
+    /// plan and hits it on the other 7 steps. The bucket size shows between
+    /// calls on the same runtime: a 9-token call moves the unbucketed
+    /// capacity by a row (refit) and stays in the 32-row bucket (hit), and a
+    /// 32-token call needs the 64-row bucket (refit). The arms must never
+    /// allocate more [`omega::metal::OUTPUT_BUFFER_ALLOCATIONS`] than the
+    /// unbucketed run, and every pair of runs must land on the IDENTICAL
+    /// generated token
     /// ids -- `proxima_tensor::bind::cached_attention_candidates`'s own doc
     /// on the fused op's runtime bound is the numerics claim this equality
     /// is standing in for: a bucket's padding is invisible to softmax, so
@@ -1296,23 +1299,23 @@ pub(super) mod tests {
             "no eos id was declared, so both runs must exhaust the full token budget"
         );
         assert_eq!(
-            unbucketed_runtime.plan_misses, max_tokens,
-            "kv_bucket_tokens=1 reproduces the pre-fix shape: cached_len is strictly \
-             increasing, so every step is a fresh miss"
+            (
+                unbucketed_runtime.plan_misses,
+                unbucketed_runtime.plan_refits,
+                unbucketed_runtime.plan_hits
+            ),
+            (1, 0, max_tokens - 1),
+            "a padded plan binds the call's whole kv capacity, so even kv_bucket_tokens=1 \
+             builds one plan for the call and every later step hits it"
         );
         assert_eq!(
-            unbucketed_runtime.plan_hits, 0,
-            "an unbucketed extent never repeats within one decode call"
-        );
-
-        assert!(
-            bucketed_runtime.plan_hits > 0,
-            "a bucketed extent that never hits is the null result, not a pass"
-        );
-        assert!(
-            bucketed_runtime.plan_misses < unbucketed_runtime.plan_misses,
-            "kv_bucket_tokens=32 must reduce plan_misses below the unbucketed baseline, \
-             or bucketing bought nothing on this fixture"
+            (
+                bucketed_runtime.plan_misses,
+                bucketed_runtime.plan_refits,
+                bucketed_runtime.plan_hits
+            ),
+            (1, 0, max_tokens - 1),
+            "kv_bucket_tokens=32 binds one 32-row capacity for the call: one miss, the rest hits"
         );
         // Non-strict: measured `0` on both arms in this sandbox (no real
         // Metal device attached, `omega`'s own Gpu-arm buffer allocation
@@ -1332,17 +1335,67 @@ pub(super) mod tests {
              zero-padding invisible to softmax -- rounding cached_len up must never \
              change which token is emitted"
         );
+
+        // a second call on the same runtime is where the bucket size shows: one more
+        // token moves the unbucketed capacity by a row (a refit) and leaves the 32-row
+        // bucket where it was (a hit); 32 tokens need the 64-row bucket (a refit)
+        let next_tokens = max_tokens + 1;
+        let unbucketed_next = loaded
+            .run_decode_loop("A", next_tokens, &unbucketed_config, &mut unbucketed_runtime)
+            .expect("runs the second unbucketed two-range MoE decode loop on the same runtime");
+        let bucketed_next = loaded
+            .run_decode_loop("A", next_tokens, &bucketed_config, &mut bucketed_runtime)
+            .expect("runs the second bucketed two-range MoE decode loop on the same runtime");
+        assert_eq!(
+            (unbucketed_runtime.plan_misses, unbucketed_runtime.plan_refits),
+            (2, 1),
+            "the unbucketed capacity moved by one row, so the resident plan is refit"
+        );
+        assert_eq!(
+            (bucketed_runtime.plan_misses, bucketed_runtime.plan_refits),
+            (1, 0),
+            "one more token stays inside the 32-row bucket, so the resident plan is reused"
+        );
+        assert_eq!(
+            bucketed_next.0, unbucketed_next.0,
+            "a refit plan and a reused plan must emit the same ids"
+        );
+
+        let crossing_tokens = 32usize;
+        let unbucketed_crossing = loaded
+            .run_decode_loop("A", crossing_tokens, &unbucketed_config, &mut unbucketed_runtime)
+            .expect("runs the unbucketed two-range MoE decode loop across a bucket edge");
+        let bucketed_crossing = loaded
+            .run_decode_loop("A", crossing_tokens, &bucketed_config, &mut bucketed_runtime)
+            .expect("runs the bucketed two-range MoE decode loop across a bucket edge");
+        assert_eq!(
+            (unbucketed_runtime.plan_misses, unbucketed_runtime.plan_refits),
+            (3, 2),
+            "every call with a new capacity refits the resident plan once"
+        );
+        assert_eq!(
+            (bucketed_runtime.plan_misses, bucketed_runtime.plan_refits),
+            (2, 1),
+            "33 positions need the 64-row bucket, so the 32-row plan is refit once"
+        );
+        assert_eq!(
+            bucketed_crossing.0, unbucketed_crossing.0,
+            "a refit across a bucket edge must emit the ids an exact-capacity plan emits"
+        );
     }
 
-    /// A decode that crosses `kv_bucket_tokens` boundaries must serve every
-    /// crossing by refitting the cached plan in place, not by building a new
-    /// one: the only thing a crossing changes in a decode plan is the key
+    /// A decode binds the call's whole kv capacity (2889cf1c), so the 32 and 64
+    /// row boundaries a 70-token generation passes cost nothing inside the
+    /// call: one plan, hit on every later step, whether or not plans refit.
+    /// The call that needs a larger capacity bucket than the resident plan
+    /// (a 100-token call after the 70-token one: 96 rows to 128) must serve
+    /// the crossing by refitting the cached plan in place, not by building a
+    /// new one: the only thing a crossing changes in a decode plan is the key
     /// range of its fused attention ops (`proxima_tensor::
     /// refit_cached_attention_rows`'s own doc), so `plan_misses - plan_refits`
     /// -- the number of plans actually built -- stays at the one plan the
-    /// first step needed. 70 tokens past a 2-token prompt cross the 32 and 64
-    /// row boundaries; the unbucketed run (a fresh plan per step, 70 builds)
-    /// is the oracle for the emitted ids.
+    /// first step needed. The `plan_refit: false` arm builds that plan again
+    /// and is the oracle for the emitted ids.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     #[test]
     fn a_bucket_crossing_refits_the_cached_plan_instead_of_building_another() {
@@ -1370,7 +1423,7 @@ pub(super) mod tests {
         let mut refitting_runtime = BackendRuntime::new(&refitting_config);
         let refitted = loaded
             .run_decode_loop("A", max_tokens, &refitting_config, &mut refitting_runtime)
-            .expect("runs the refitting decode loop across two bucket crossings");
+            .expect("runs the refitting decode loop across two bucket boundaries");
         let rebuilding_config = ServingConfig {
             plan_refit: false,
             ..refitting_config
@@ -1378,31 +1431,52 @@ pub(super) mod tests {
         let mut rebuilding_runtime = BackendRuntime::new(&rebuilding_config);
         let rebuilt = loaded
             .run_decode_loop("A", max_tokens, &rebuilding_config, &mut rebuilding_runtime)
-            .expect("runs the rebuilding decode loop, a fresh plan at every crossing");
+            .expect("runs the rebuilding decode loop across two bucket boundaries");
 
-        assert_eq!(
-            refitting_runtime.plan_misses, 3,
-            "one miss for the first plan and one per crossing of the 32 and 64 row boundaries"
-        );
-        assert_eq!(
-            refitting_runtime.plan_refits, 2,
-            "both crossings must be served by refitting, leaving exactly one plan built"
-        );
-        assert_eq!(
-            refitting_runtime.plan_hits,
-            max_tokens - 3,
-            "every other step reuses the cached plan"
-        );
-        assert_eq!(
-            rebuilding_runtime.plan_misses, 3,
-            "the rebuilding arm misses at the same steps"
-        );
-        assert_eq!(
-            rebuilding_runtime.plan_refits, 0,
-            "plan_refit: false never refits"
-        );
+        for (arm, runtime) in [
+            ("refitting", &refitting_runtime),
+            ("rebuilding", &rebuilding_runtime),
+        ] {
+            assert_eq!(
+                (runtime.plan_misses, runtime.plan_refits, runtime.plan_hits),
+                (1, 0, max_tokens - 1),
+                "{arm}: the 32 and 64 row boundaries inside one call bind one 96-row capacity, \
+                 so the call builds one plan and hits it on every other step"
+            );
+        }
         assert_eq!(
             refitted.0, rebuilt.0,
+            "the two arms run the same plan within a call, so they emit the same ids"
+        );
+
+        let crossing_tokens = 100usize;
+        let refitted_crossing = loaded
+            .run_decode_loop("A", crossing_tokens, &refitting_config, &mut refitting_runtime)
+            .expect("runs the refitting decode loop into the 128-row bucket");
+        let rebuilt_crossing = loaded
+            .run_decode_loop("A", crossing_tokens, &rebuilding_config, &mut rebuilding_runtime)
+            .expect("runs the rebuilding decode loop into the 128-row bucket");
+
+        assert_eq!(
+            (
+                refitting_runtime.plan_misses,
+                refitting_runtime.plan_refits,
+                refitting_runtime.plan_hits
+            ),
+            (2, 1, (max_tokens - 1) + (crossing_tokens - 1)),
+            "the call that outgrows the 96-row plan is served by refitting it, leaving exactly one plan built"
+        );
+        assert_eq!(
+            (
+                rebuilding_runtime.plan_misses,
+                rebuilding_runtime.plan_refits,
+                rebuilding_runtime.plan_hits
+            ),
+            (2, 0, (max_tokens - 1) + (crossing_tokens - 1)),
+            "plan_refit: false builds a second plan for the larger capacity and never refits"
+        );
+        assert_eq!(
+            refitted_crossing.0, rebuilt_crossing.0,
             "refitting across a crossing must emit the ids a freshly built plan emits"
         );
     }
@@ -1649,29 +1723,51 @@ pub(super) mod tests {
             "no eos id was declared, so both runs must exhaust the full token budget"
         );
         assert_eq!(
-            unbucketed_runtime.plan_misses, max_tokens,
-            "kv_bucket_tokens=1 reproduces the pre-fix shape on the DenseAttention arm: \
-             cached_len is strictly increasing, so every step is a fresh miss"
+            (
+                unbucketed_runtime.plan_misses,
+                unbucketed_runtime.plan_refits,
+                unbucketed_runtime.plan_hits
+            ),
+            (1, 0, max_tokens - 1),
+            "a padded plan binds the call's whole kv capacity on the DenseAttention arm, so \
+             even kv_bucket_tokens=1 builds one plan for the call and hits it on every later step"
         );
         assert_eq!(
-            unbucketed_runtime.plan_hits, 0,
-            "an unbucketed extent never repeats within one decode call"
-        );
-        assert!(
-            bucketed_runtime.plan_hits > 0,
-            "a bucketed extent that never hits on the DenseAttention arm is the null \
-             result, not a pass"
-        );
-        assert!(
-            bucketed_runtime.plan_misses < unbucketed_runtime.plan_misses,
-            "kv_bucket_tokens=32 must reduce plan_misses below the unbucketed baseline \
-             on the DenseAttention arm, or bucketing bought nothing on this fixture"
+            (
+                bucketed_runtime.plan_misses,
+                bucketed_runtime.plan_refits,
+                bucketed_runtime.plan_hits
+            ),
+            (1, 0, max_tokens - 1),
+            "kv_bucket_tokens=32 binds one 32-row capacity for the call on the DenseAttention arm"
         );
         assert_eq!(
             bucketed.0, unbucketed.0,
             "the DenseAttention arm's padded cache must make a bucket's own \
              zero-padding invisible to softmax -- rounding cached_len up must never \
              change which token is emitted"
+        );
+
+        let next_tokens = max_tokens + 1;
+        let unbucketed_next = loaded
+            .run_decode_loop("A", next_tokens, &unbucketed_config, &mut unbucketed_runtime)
+            .expect("runs the second unbucketed qwen35 dense-attention decode loop");
+        let bucketed_next = loaded
+            .run_decode_loop("A", next_tokens, &bucketed_config, &mut bucketed_runtime)
+            .expect("runs the second bucketed qwen35 dense-attention decode loop");
+        assert_eq!(
+            (unbucketed_runtime.plan_misses, unbucketed_runtime.plan_refits),
+            (2, 1),
+            "the unbucketed capacity moved by one row, so the resident plan is refit"
+        );
+        assert_eq!(
+            (bucketed_runtime.plan_misses, bucketed_runtime.plan_refits),
+            (1, 0),
+            "one more token stays inside the 32-row bucket, so the resident plan is reused"
+        );
+        assert_eq!(
+            bucketed_next.0, unbucketed_next.0,
+            "a refit plan and a reused plan must emit the same ids"
         );
     }
 
