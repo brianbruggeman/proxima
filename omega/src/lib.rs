@@ -129,12 +129,10 @@ pub use metal::{
     PlacedBuffer, allocate_placed_buffer, allocate_placed_buffer_over,
     execute_plan_named_with_placements, execute_plan_named_with_placements_and_expert_sources,
     execute_plan_named_with_placements_overlapping, execute_plan_with_placements,
-    move_placed_buffer_bytes, narrow_placed_buffer_f32_to_bf8, narrow_placed_buffer_f32_to_bf16,
-    narrow_placed_buffer_f32_to_f16, placed_buffer_len, plan_named_with_placed_inputs,
-    read_placed_buffer_bf8_as_f32, read_placed_buffer_bf16_as_f32, read_placed_buffer_f16_as_f32,
-    read_placed_buffer_f32, read_placed_buffer_f32_into, try_write_placed_buffer_f32,
-    write_placed_buffer_f32, write_placed_buffer_f32_as_bf8, write_placed_buffer_f32_as_bf16,
-    write_placed_buffer_f32_as_f16, zero_placed_buffer, zero_placed_buffer_range,
+    move_placed_buffer_bytes, narrow_placed_buffer, placed_buffer_len,
+    plan_named_with_placed_inputs, read_placed_buffer, read_placed_buffer_f32,
+    read_placed_buffer_f32_into, try_write_placed_buffer_f32, write_placed_buffer,
+    write_placed_buffer_f32, zero_placed_buffer, zero_placed_buffer_range,
 };
 #[cfg(all(
     feature = "metal-output-placement",
@@ -161,7 +159,7 @@ pub use msl::{
     Q4K_BLOCK_ELEMENTS, Q4K_UNPACK_MSL, Q5_0_BLOCK_BYTES, Q5_0_BLOCK_ELEMENTS, Q5_0_UNPACK_MSL,
     Q5_1_BLOCK_BYTES, Q5_1_BLOCK_ELEMENTS, Q5_1_UNPACK_MSL, Q5K_BLOCK_BYTES, Q5K_UNPACK_MSL,
     Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, q8_0_unpack_msl,
-    context_chunks_for, emit,
+    cached_attention_kv_codec_for, context_chunks_for, emit,
 };
 #[cfg(feature = "wgpu-backend")]
 pub use wgpu_driver::{

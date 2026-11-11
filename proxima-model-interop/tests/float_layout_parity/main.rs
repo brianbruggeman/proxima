@@ -15,7 +15,7 @@ mod upload;
 use std::sync::OnceLock;
 
 use proxima_gguf::quant::float_layout::{decode, encode};
-use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 
 use compare::{compare_bits, compare_codes};
 use gpu::{Gpu, read_words};
@@ -28,6 +28,7 @@ const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     specials: Specials::NanOnly,
     bias_override: None,
     sign: SignEncoding::Magnitude,
+    nan: NanPolicy::IEEE,
 };
 
 const MATMUL_ROWS: usize = 64;

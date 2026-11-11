@@ -34,6 +34,57 @@ pub enum SignEncoding {
     TwosComplement,
 }
 
+/// What a NaN becomes when `f32` is narrowed into a layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum NanNarrow {
+    /// Sign, top payload bits and a set quiet bit survive (IEEE 754-2019 6.2.3, "preserve the
+    /// payload to the extent possible"; `half` `f32_to_bf16` convert.rs:13, `f32_to_f16_fallback`
+    /// binary16/arch.rs:569).
+    #[default]
+    Preserve,
+    /// The canonical quiet NaN with an empty payload (ml_dtypes `float8.h:1010` `quiet_NaN()` for
+    /// E5M2, `0b0_11111_10`, IEEE 754-2019 6.2.1: the first trailing-significand bit is the quiet bit).
+    Canonical,
+}
+
+/// What a reserved NaN code becomes when a layout is widened to `f32`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum NanWiden {
+    /// The payload is kept and the quiet bit is set (`half` `bf16_to_f32` convert.rs:96-98,
+    /// `f16_to_f32_fallback` binary16/arch.rs:702-704).
+    #[default]
+    Quiet,
+    /// The canonical quiet NaN `0x7fc0_0000` with the sign kept and the payload dropped (onnxruntime
+    /// `include/onnxruntime/core/common/float8.h:454-462`, `Float8E5M2::ToFloat`: codes 125..=127 give
+    /// `0x7fc0_0000`, codes from 253 give `0xffc0_0000`).
+    Canonical,
+}
+
+/// The NaN payload policy of one layout: the data the codec reads instead of a threshold on width.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub struct NanPolicy {
+    /// What narrowing `f32` into the layout does to a NaN.
+    pub narrow: NanNarrow,
+    /// What widening the layout's NaN code to `f32` does to its payload.
+    pub widen: NanWiden,
+}
+
+impl NanPolicy {
+    /// IEEE 754-2019 6.2.3 on both directions: binary16, bfloat16 and the layouts without a reference.
+    pub const IEEE: Self = Self {
+        narrow: NanNarrow::Preserve,
+        widen: NanWiden::Quiet,
+    };
+    /// The float8 reference: canonical quiet NaN out, canonical quiet NaN in. Widening follows
+    /// onnxruntime `float8.h:454-462` (`Float8E5M2::ToFloat`, sign kept, payload dropped); narrowing
+    /// stays at ml_dtypes' `0b0_11111_10` because onnxruntime `float8.h:398-399` narrows to `sign | 0x7f`
+    /// and the two external sources disagree there.
+    pub const FLOAT8: Self = Self {
+        narrow: NanNarrow::Canonical,
+        widen: NanWiden::Canonical,
+    };
+}
+
 /// A sign encoding, `exponent_bits`, `mantissa_bits`; numeric layout metadata can describe up to
 /// 128-bit scalars, while the current generic scalar codecs execute widths up to 32 bits. An integer is the
 /// layout with `exponent_bits` 0 and a `bias_override` of `1 - mantissa_bits`, which makes its
@@ -52,6 +103,35 @@ pub struct FloatLayout {
     pub bias_override: Option<i16>,
     /// How the sign is encoded; `Magnitude` for IEEE floats, `TwosComplement` for `int8`.
     pub sign: SignEncoding,
+    /// NaN payload policy for narrowing into and widening out of the layout; `NanPolicy::FLOAT8`
+    /// for E5M2, `NanPolicy::IEEE` for binary16.
+    #[serde(default)]
+    pub nan: NanPolicy,
+}
+
+const fn specials_index(specials: Specials) -> u8 {
+    match specials {
+        Specials::None => 0,
+        Specials::SaturateOnOverflow => 1,
+        Specials::InfinityOnOverflow => 2,
+        Specials::NanOnly => 3,
+    }
+}
+
+const fn sign_index(sign: SignEncoding) -> u8 {
+    match sign {
+        SignEncoding::Absent => 0,
+        SignEncoding::Magnitude => 1,
+        SignEncoding::TwosComplement => 2,
+    }
+}
+
+const fn specials_equal(left: Specials, right: Specials) -> bool {
+    specials_index(left) == specials_index(right)
+}
+
+const fn sign_equal(left: SignEncoding, right: SignEncoding) -> bool {
+    sign_index(left) == sign_index(right)
 }
 
 const fn pow2(exponent: i32) -> f32 {
@@ -64,11 +144,13 @@ const fn pow2(exponent: i32) -> f32 {
 }
 
 impl FloatLayout {
-    pub const E5M2: Self = Self::ieee_like(5, 2, Specials::InfinityOnOverflow);
+    pub const E5M2: Self =
+        Self::ieee_like(5, 2, Specials::InfinityOnOverflow).with_nan(NanPolicy::FLOAT8);
     /// OCP E4M3FN: bias 7, one NaN code per sign, no infinities, max finite 448.
     pub const E4M3FN: Self = Self::ieee_like(4, 3, Specials::NanOnly);
     /// E5M2 widths with saturation: the GGUF bf8 storage policy, which keeps infinities out of stored weights.
-    pub const E5M2_SATURATING: Self = Self::ieee_like(5, 2, Specials::SaturateOnOverflow);
+    pub const E5M2_SATURATING: Self =
+        Self::ieee_like(5, 2, Specials::SaturateOnOverflow).with_nan(NanPolicy::FLOAT8);
     /// IEEE 754 binary16: bias 15, inf and nan reserved, max normal 65504.0.
     pub const F16: Self = Self::ieee_like(5, 10, Specials::InfinityOnOverflow);
     pub const E2M1: Self = Self::ieee_like(2, 1, Specials::None);
@@ -108,6 +190,7 @@ impl FloatLayout {
         specials: Specials::NanOnly,
         bias_override: None,
         sign: SignEncoding::Absent,
+        nan: NanPolicy::IEEE,
     };
 
     const fn ieee_like(exponent_bits: u8, mantissa_bits: u8, specials: Specials) -> Self {
@@ -117,7 +200,13 @@ impl FloatLayout {
             specials,
             bias_override: None,
             sign: SignEncoding::Magnitude,
+            nan: NanPolicy::IEEE,
         }
+    }
+
+    const fn with_nan(mut self, nan: NanPolicy) -> Self {
+        self.nan = nan;
+        self
     }
 
     const fn integer(width: u8, sign: SignEncoding) -> Self {
@@ -131,6 +220,7 @@ impl FloatLayout {
             specials: Specials::None,
             bias_override: Some(1 - mantissa_bits as i16),
             sign,
+            nan: NanPolicy::IEEE,
         }
     }
 
@@ -155,12 +245,58 @@ impl FloatLayout {
     /// specials, and equal effective bias. `==` also compares the raw `bias_override`, so a
     /// layout spelled with `Some(15)` and one with `None` differ under `==` and agree here.
     #[must_use]
-    pub fn same_format(&self, other: &Self) -> bool {
+    pub const fn same_format(&self, other: &Self) -> bool {
+        self.shares_exponent_with(other) && self.mantissa_bits == other.mantissa_bits
+    }
+
+    /// Whether converting between the two layouts changes no bit of a code: the same format and the
+    /// same NaN policy in both directions, so a signalling NaN keeps its payload and its quiet bit.
+    #[must_use]
+    pub const fn is_identity_of(&self, other: &Self) -> bool {
+        self.same_format(other)
+            && self.nan.narrow as u8 == other.nan.narrow as u8
+            && self.nan.widen as u8 == other.nan.widen as u8
+    }
+
+    /// Whether two layouts agree on everything but the mantissa width: the same exponent width,
+    /// effective bias, special-value policy and sign encoding, so every exponent field and every
+    /// special value means the same number in both. Only layouts with an exponent field can share one.
+    #[must_use]
+    pub const fn shares_exponent_with(&self, other: &Self) -> bool {
         self.exponent_bits == other.exponent_bits
-            && self.mantissa_bits == other.mantissa_bits
-            && self.specials == other.specials
             && self.bias() == other.bias()
-            && self.sign == other.sign
+            && specials_equal(self.specials, other.specials)
+            && sign_equal(self.sign, other.sign)
+    }
+
+    /// Whether this layout is `wider` with trailing mantissa bits dropped: they share an exponent
+    /// ([`Self::shares_exponent_with`]) and this one has no more mantissa bits. Widening to `wider`
+    /// is then an exact bit embedding (a shift) and narrowing from it is one rounding of the dropped
+    /// bits, with a carry into the exponent field already yielding the overflow value.
+    #[must_use]
+    pub const fn is_mantissa_prefix_of(&self, wider: &Self) -> bool {
+        self.exponent_bits != 0
+            && self.shares_exponent_with(wider)
+            && self.mantissa_bits <= wider.mantissa_bits
+    }
+
+    /// A value that is equal for two layouts exactly when every field of the description is equal,
+    /// `bias_override` and the NaN policy included. A `u64` so a dispatch over named layouts is one
+    /// integer compare per row, which the compiler turns into a switch.
+    #[must_use]
+    pub const fn fingerprint(&self) -> u64 {
+        let (bias_present, bias) = match self.bias_override {
+            Some(bias) => (1u64, bias as u16 as u64),
+            None => (0, 0),
+        };
+        (self.exponent_bits as u64)
+            | (self.mantissa_bits as u64) << 8
+            | (specials_index(self.specials) as u64) << 16
+            | (sign_index(self.sign) as u64) << 18
+            | (self.nan.narrow as u64) << 20
+            | (self.nan.widen as u64) << 21
+            | bias_present << 23
+            | bias << 24
     }
 
     /// Bytes `elements` values occupy packed densely at `width()` bits each, plus one `scale` code
@@ -242,39 +378,63 @@ impl FloatLayout {
     }
 }
 
-/// Every layout with a spelling. One table serves serde for both [`FloatLayout`] and
-/// [`crate::DType`], so a new named format is one row here and nothing else.
-pub const NAMED_LAYOUTS: [(FloatLayout, &str); 29] = [
-    (FloatLayout::INT8, "int8"),
-    (FloatLayout::UINT8, "uint8"),
-    (FloatLayout::INT16, "int16"),
-    (FloatLayout::UINT16, "uint16"),
-    (FloatLayout::INT32, "int32"),
-    (FloatLayout::UINT32, "uint32"),
-    (FloatLayout::INT64, "int64"),
-    (FloatLayout::UINT64, "uint64"),
-    (FloatLayout::INT128, "int128"),
-    (FloatLayout::UINT128, "uint128"),
-    (FloatLayout::SIGN_MAGNITUDE_INT8, "sign_magnitude_int8"),
-    (FloatLayout::BF32, "float32"),
-    (FloatLayout::F64, "float64"),
-    (FloatLayout::F16, "float16"),
-    (FloatLayout::BF16, "bfloat16"),
-    (FloatLayout::E5M2_SATURATING, "bfloat8"),
-    (FloatLayout::E5M2, "float8_e5m2"),
-    (FloatLayout::E4M3FN, "float8_e4m3fn"),
-    (FloatLayout::E3M2, "fp6_e3m2"),
-    (FloatLayout::E2M3, "e2m3"),
-    (FloatLayout::E2M2, "e2m2"),
-    (FloatLayout::E2M1, "e2m1"),
-    (FloatLayout::UINT1, "uint1"),
-    (FloatLayout::UINT2, "uint2"),
-    (FloatLayout::UINT3, "uint3"),
-    (FloatLayout::UINT4, "uint4"),
-    (FloatLayout::UINT5, "uint5"),
-    (FloatLayout::UINT6, "uint6"),
-    (FloatLayout::F8_E8M0, "float8_e8m0"),
-];
+/// The one list of named layouts, as constant names and spellings. A macro rather than a `const`
+/// because the scalar codec instantiates itself once per row at compile time
+/// ([`crate::float_layout_codec`]): `named_layout_table!(callback!(prefix...))` expands to
+/// `callback! { prefix... [ (NAME, "spelling"), ... ] }`, so a new named format is one row here and
+/// both [`NAMED_LAYOUTS`] and the codec's instantiations follow.
+macro_rules! named_layout_table {
+    ($callback:ident ! ( $($prefix:tt)* )) => {
+        $callback! {
+            $($prefix)*
+            [
+                (INT8, "int8"),
+                (UINT8, "uint8"),
+                (INT16, "int16"),
+                (UINT16, "uint16"),
+                (INT32, "int32"),
+                (UINT32, "uint32"),
+                (INT64, "int64"),
+                (UINT64, "uint64"),
+                (INT128, "int128"),
+                (UINT128, "uint128"),
+                (SIGN_MAGNITUDE_INT8, "sign_magnitude_int8"),
+                (BF32, "float32"),
+                (F64, "float64"),
+                (F16, "float16"),
+                (BF16, "bfloat16"),
+                (E5M2_SATURATING, "bfloat8"),
+                (E5M2, "float8_e5m2"),
+                (E4M3FN, "float8_e4m3fn"),
+                (E3M2, "fp6_e3m2"),
+                (E2M3, "e2m3"),
+                (E2M2, "e2m2"),
+                (E2M1, "e2m1"),
+                (UINT1, "uint1"),
+                (UINT2, "uint2"),
+                (UINT3, "uint3"),
+                (UINT4, "uint4"),
+                (UINT5, "uint5"),
+                (UINT6, "uint6"),
+                (F8_E8M0, "float8_e8m0"),
+            ]
+        }
+    };
+}
+
+pub(crate) use named_layout_table;
+
+macro_rules! named_layouts_array {
+    ([$(($name:ident, $text:literal)),* $(,)?]) => {
+        /// Every layout with a spelling. One table serves serde for both [`FloatLayout`] and
+        /// [`crate::DType`], so a new named format is one row in `named_layout_table!` and nothing
+        /// else.
+        pub const NAMED_LAYOUTS: [(FloatLayout, &str); [$($text),*].len()] =
+            [$((FloatLayout::$name, $text)),*];
+    };
+}
+
+named_layout_table!(named_layouts_array!());
 
 #[cfg(test)]
 mod tests {

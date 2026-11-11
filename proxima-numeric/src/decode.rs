@@ -139,6 +139,11 @@ pub fn decode_blocks(
     data: &[u8],
     out: &mut [f32],
 ) -> Result<usize, NumericError> {
+    if let NumericFormat::Scalar(layout) = format {
+        float_layout_codec::decode_slice(layout, data, out)
+            .map_err(|fault| fault.into_error(layout, format_name(format)))?;
+        return Ok(out.len());
+    }
     geometry_fits(format)?;
     let block_bytes = usize::from(format.bytes_per_block());
     if block_bytes == 0 || !data.len().is_multiple_of(block_bytes) {
@@ -971,6 +976,7 @@ mod tests {
             specials: Specials::InfinityOnOverflow,
             bias_override: None,
             sign: SignEncoding::Magnitude,
+            nan: Default::default(),
         };
         let format = NumericFormat::Scalar(wide);
 

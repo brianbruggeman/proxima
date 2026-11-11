@@ -6,8 +6,9 @@ use objc2_foundation::NSString;
 use objc2_metal::{
     MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice, MTLLanguageVersion, MTLLibrary,
 };
+use proxima_numeric::NumericFormat;
 use proxima_numeric::block_layout::BlockLayout;
-use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 
 use super::layout_render::{block_unpack_msl, hardware_type, layout_load_msl, layout_store_msl};
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -24,6 +25,7 @@ const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     specials: Specials::NanOnly,
     bias_override: None,
     sign: SignEncoding::Magnitude,
+    nan: NanPolicy::IEEE,
 };
 
 fn blank_numeric_literals(source: &str) -> String {
@@ -64,6 +66,7 @@ fn float_layout_msl_hardware_type_chosen_by_fields_not_names() {
         specials: Specials::InfinityOnOverflow,
         bias_override: Some(127),
         sign: SignEncoding::Magnitude,
+    nan: NanPolicy::IEEE,
     };
     let bfloat_without_infinity = FloatLayout {
         specials: Specials::None,
@@ -165,6 +168,60 @@ fn float_layout_msl_emitter_source_names_no_layout() {
     assert_eq!(hits, alloc::vec::Vec::<&str>::new());
 }
 
+const CACHED_ATTENTION_SOURCE: &str = include_str!("cached_attention_render.rs");
+
+fn identifiers_after<'text>(text: &'text str, prefix: &str) -> alloc::vec::Vec<&'text str> {
+    text.match_indices(prefix)
+        .map(|(at, _)| {
+            let tail = &text[at + prefix.len()..];
+            let end = tail
+                .find(|current: char| !current.is_alphanumeric() && current != '_')
+                .unwrap_or(tail.len());
+            &tail[..end]
+        })
+        .collect()
+}
+
+fn function_body<'text>(source: &'text str, signature: &str) -> &'text str {
+    let start = source.find(signature).expect("the function is in the source");
+    let rest = &source[start..];
+    &rest[..rest.find("\n}\n").expect("the function body closes at column 0")]
+}
+
+#[test]
+fn cached_attention_kv_codec_for_names_no_scalar_format_and_only_the_source_layout() {
+    let body = function_body(CACHED_ATTENTION_SOURCE, "pub fn cached_attention_kv_codec_for");
+    let format_names = ["Float32", "Float16", "BFloat16", "BFloat8"];
+
+    let named: alloc::vec::Vec<&str> = ["NumericFormat::", "Codec::"]
+        .into_iter()
+        .flat_map(|prefix| identifiers_after(body, prefix))
+        .filter(|name| format_names.contains(name))
+        .collect();
+    let layouts: alloc::vec::Vec<&str> = identifiers_after(body, "FloatLayout::")
+        .into_iter()
+        .filter(|name| name.starts_with(|current: char| current.is_ascii_uppercase()))
+        .collect();
+
+    assert_eq!(named, alloc::vec::Vec::<&str>::new());
+    assert_eq!(layouts, ["BF32"], "the one documented source layout");
+}
+
+#[test]
+fn cached_attention_kv_codec_for_a_respelled_binary32_is_the_plain_buffer_and_a_narrow_layout_is_not() {
+    let respelled_f32 = NumericFormat::Scalar(FloatLayout {
+        bias_override: Some(FloatLayout::BF32.bias()),
+        ..FloatLayout::BF32
+    });
+
+    assert_eq!(super::cached_attention_kv_codec_for(&respelled_f32), Ok(None));
+    assert_eq!(super::cached_attention_kv_codec_for(&NumericFormat::Float32), Ok(None));
+    assert_eq!(
+        super::cached_attention_kv_codec_for(&NumericFormat::BFloat16),
+        Ok(Some(NumericFormat::BFloat16))
+    );
+}
+
 #[test]
 fn float_layout_msl_control_changed_bias_changes_the_constants() {
     let shifted = FloatLayout {
@@ -187,5 +244,20 @@ fn float_layout_msl_control_changed_bias_changes_the_constants() {
     assert_eq!(
         blank_numeric_literals(&original),
         blank_numeric_literals(&rebiased)
+    );
+}
+
+#[test]
+fn a_cache_layout_equal_to_the_graph_output_is_the_plain_buffer_whatever_its_spelling() {
+    let respelled = NumericFormat::Scalar(FloatLayout {
+        bias_override: Some(127),
+        ..FloatLayout::BF32
+    });
+
+    assert_eq!(super::cached_attention_kv_codec_for(&NumericFormat::Float32), Ok(None));
+    assert_eq!(super::cached_attention_kv_codec_for(&respelled), Ok(None));
+    assert_eq!(
+        super::cached_attention_kv_codec_for(&NumericFormat::Float16),
+        Ok(Some(NumericFormat::Float16))
     );
 }

@@ -52,6 +52,7 @@ pub mod float_layout_codec;
 pub mod format;
 pub mod numeric;
 pub mod numerics;
+pub mod scalar_codec;
 pub mod tables;
 pub mod value;
 
@@ -65,4 +66,5 @@ pub use float_layout::{FloatLayout, SignEncoding, Specials};
 pub use format::{LevelFormat, LevelGeometry, LevelTable, NumericFormat};
 pub use numeric::{NumericPolicy, NumericRewrite, admit};
 pub use numerics::Numerics;
+pub use scalar_codec::ScalarCodec;
 pub use value::Numeric;

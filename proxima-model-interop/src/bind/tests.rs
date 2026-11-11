@@ -1740,3 +1740,47 @@ fn f16_dense_leaf_outside_the_gather_still_widens_to_owned_f32() {
     );
     assert_eq!(state.resident_bytes, rows * k * core::mem::size_of::<f32>());
 }
+
+// the arms of `gguf_tensor_as_packed_block` before they were derived from `GgmlType::numeric_format`
+#[cfg(feature = "std")]
+const PACKED_ARMS_BEFORE_DERIVATION: [(GgmlType, Codec); 21] = [
+    (GgmlType::Q4_K, Codec::Q4K),
+    (GgmlType::Q2_K, Codec::Q2K),
+    (GgmlType::Q4_0, Codec::Q4_0),
+    (GgmlType::Q5_1, Codec::Q5_1),
+    (GgmlType::Q5_0, Codec::Q5_0),
+    (GgmlType::Q5_K, Codec::Q5K),
+    (GgmlType::Q3_K, Codec::Q3K),
+    (GgmlType::Q6_K, Codec::Q6K),
+    (GgmlType::Q8_0, Codec::Q8_0),
+    (GgmlType::Iq2Xs, Codec::Iq2Xs),
+    (GgmlType::Iq3Xxs, Codec::Iq3Xxs),
+    (GgmlType::Iq3S, Codec::Iq3S),
+    (GgmlType::Iq4Xs, Codec::Iq4Xs),
+    (GgmlType::Iq4Nl, Codec::Iq4Nl),
+    (GgmlType::F16, Codec::Float16),
+    (GgmlType::Bf16, Codec::BFloat16),
+    (GgmlType::Q1_0, Codec::Q1_0),
+    (GgmlType::Q2_0, Codec::Q2_0),
+    (GgmlType::Pq2_0, Codec::Pq2_0),
+    (GgmlType::Ptq1_0, Codec::Ptq1_0),
+    (GgmlType::Fp6E3M2, Codec::Fp6E3M2),
+];
+
+#[cfg(feature = "std")]
+#[test]
+fn packed_block_codec_matches_the_hand_written_arms_for_every_current_ggml_type() {
+    let every_type = GgmlType::CURRENT.iter().copied().chain([GgmlType::Fp6E3M2]);
+    let mut checked = 0;
+
+    for ggml_type in every_type {
+        let expected = PACKED_ARMS_BEFORE_DERIVATION
+            .iter()
+            .find(|(arm, _)| *arm == ggml_type)
+            .map(|(_, codec)| *codec);
+        assert_eq!(packed_block_codec(ggml_type), expected, "{ggml_type:?}");
+        checked += 1;
+    }
+
+    assert_eq!(checked, 36);
+}

@@ -510,22 +510,11 @@ pub fn reach(layout: &BlockLayout) -> Result<f32, NumericError> {
         })
 }
 
-/// Encode `values` into `format`, writing `bytes_per_block` bytes per `elements_per_block` values,
-/// and returns the block count.
-///
-/// One value per block for a scalar format; a whole block of `f32` for every block and level-set
-/// format whose geometry a shared absolute-maximum scale can express.
-///
-/// # Errors
-/// [`NumericError::InputNotElementMultiple`] when `values` is not a whole number of blocks,
-/// [`NumericError::OutputSizeMismatch`] when `out` is not exactly the packed byte count,
-/// [`NumericError::UnsupportedEncode`] for a format this module cannot quantize, and
-/// [`NumericError::NonFinite`] for a NaN or infinite block element.
-pub fn encode_blocks(
+fn packed_geometry(
     format: &NumericFormat,
     values: &[f32],
-    out: &mut [u8],
-) -> Result<usize, NumericError> {
+    out: &[u8],
+) -> Result<(usize, usize, usize), NumericError> {
     let elements = usize::from(format.elements_per_block());
     let block_bytes = usize::from(format.bytes_per_block());
     if elements == 0 || block_bytes == 0 {
@@ -550,19 +539,42 @@ pub fn encode_blocks(
         });
     }
     crate::decode::geometry_fits(format)?;
+    Ok((elements, block_bytes, block_count))
+}
+
+// a scalar's geometry is its layout, so a named layout needs no geometry check beyond encode_slice's own
+#[inline]
+fn encode_scalar_blocks(
+    format: &NumericFormat,
+    layout: &FloatLayout,
+    values: &[f32],
+    out: &mut [u8],
+) -> Result<usize, NumericError> {
+    float_layout_codec::encode_slice(layout, values, out)
+        .map_err(|fault| fault.into_error(layout, format.name().unwrap_or("unnamed")))?;
+    Ok(values.len())
+}
+
+/// Encode `values` into `format`, writing `bytes_per_block` bytes per `elements_per_block` values,
+/// and returns the block count.
+///
+/// One value per block for a scalar format; a whole block of `f32` for every block and level-set
+/// format whose geometry a shared absolute-maximum scale can express.
+///
+/// # Errors
+/// [`NumericError::InputNotElementMultiple`] when `values` is not a whole number of blocks,
+/// [`NumericError::OutputSizeMismatch`] when `out` is not exactly the packed byte count,
+/// [`NumericError::UnsupportedEncode`] for a format this module cannot quantize, and
+/// [`NumericError::NonFinite`] for a NaN or infinite block element.
+pub fn encode_blocks(
+    format: &NumericFormat,
+    values: &[f32],
+    out: &mut [u8],
+) -> Result<usize, NumericError> {
     match format {
-        NumericFormat::Scalar(layout) => {
-            float_layout_codec::layout_supported(layout)?;
-            let bytes = usize::from(layout.width().div_ceil(8));
-            for (value, chunk) in values.iter().zip(out.chunks_exact_mut(block_bytes)) {
-                let code = float_layout_codec::encode(*value, *layout);
-                for (byte, slot) in chunk.iter_mut().take(bytes).enumerate() {
-                    *slot = (code >> (8 * byte)) as u8;
-                }
-            }
-            Ok(block_count)
-        }
+        NumericFormat::Scalar(layout) => encode_scalar_blocks(format, layout, values, out),
         NumericFormat::Block(layout) => {
+            let (elements, block_bytes, block_count) = packed_geometry(format, values, out)?;
             let shape = linear(layout).map_err(|reason| NumericError::UnsupportedEncode {
                 format: format.name().unwrap_or("block"),
                 reason,
@@ -573,6 +585,7 @@ pub fn encode_blocks(
             Ok(block_count)
         }
         NumericFormat::Levels(levels) => {
+            let (elements, block_bytes, block_count) = packed_geometry(format, values, out)?;
             let name = format.name().unwrap_or("levels");
             let Some(layout) = levels.packing() else {
                 return Err(NumericError::UnsupportedEncode {

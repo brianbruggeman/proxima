@@ -227,6 +227,7 @@ mod tests {
             specials: Specials::NanOnly,
             bias_override: Some(7),
             sign: SignEncoding::Magnitude,
+            nan: Default::default(),
         });
 
         for dtype in [

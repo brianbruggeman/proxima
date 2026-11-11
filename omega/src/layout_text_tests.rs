@@ -1,6 +1,6 @@
 use alloc::collections::BTreeMap;
 
-use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 use proxima_tensor::{BoundOp, Extent, IndexMap, NodeId, Op, ScalarOp, append, bind, infer, map};
 use proxima_numeric::{DType, NumericPolicy};
 
@@ -15,6 +15,7 @@ const E4M3_FROM_FIELDS: FloatLayout = FloatLayout {
     specials: Specials::NanOnly,
     bias_override: None,
     sign: SignEncoding::Magnitude,
+    nan: NanPolicy::IEEE,
 };
 
 const BINARY16_BY_FIELDS: FloatLayout = FloatLayout {
@@ -23,6 +24,7 @@ const BINARY16_BY_FIELDS: FloatLayout = FloatLayout {
     specials: Specials::InfinityOnOverflow,
     bias_override: Some(15),
     sign: SignEncoding::Magnitude,
+    nan: NanPolicy::IEEE,
 };
 
 const BRAIN16_BY_FIELDS: FloatLayout = FloatLayout {
@@ -31,6 +33,7 @@ const BRAIN16_BY_FIELDS: FloatLayout = FloatLayout {
     specials: Specials::InfinityOnOverflow,
     bias_override: Some(127),
     sign: SignEncoding::Magnitude,
+    nan: NanPolicy::IEEE,
 };
 
 fn negate_bound(layout: FloatLayout) -> BoundOp {
