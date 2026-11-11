@@ -363,3 +363,39 @@ fn the_crate_describes_these_formats_without_decoding_or_encoding_them() {
         ));
     }
 }
+
+#[test]
+fn block_layout_is_some_only_when_the_layout_alone_determines_the_values() {
+    let mut reporting = 0;
+    for format in NumericFormat::ALL {
+        let Some(layout) = format.block_layout() else {
+            continue;
+        };
+        reporting += 1;
+        if let NumericFormat::Levels(levels) = format {
+            assert_eq!(
+                levels.levels,
+                LevelFormat::ladder(&layout),
+                "{format:?} reports a layout whose own ladder is not its level table"
+            );
+        }
+    }
+    assert!(reporting > 0, "no format reported a block layout");
+}
+
+#[test]
+fn control_formats_with_a_trained_level_table_report_no_block_layout() {
+    for format in [
+        NumericFormat::Iq4Nl,
+        NumericFormat::Iq4Xs,
+        NumericFormat::Iq3S,
+    ] {
+        assert_eq!(format.block_layout(), None, "{format:?}");
+        assert!(
+            levels_of(format).packing().is_some(),
+            "{format:?} keeps its packing"
+        );
+    }
+    assert_eq!(NumericFormat::Q4_0.block_layout(), Some(BlockLayout::Q4_0));
+    assert_eq!(NumericFormat::Tq20.block_layout(), Some(BlockLayout::TQ2_0));
+}
