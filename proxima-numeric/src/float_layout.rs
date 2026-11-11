@@ -241,6 +241,36 @@ impl FloatLayout {
         sign_bits + self.exponent_bits + self.mantissa_bits
     }
 
+    /// Whether the layout has an exponent field.
+    #[must_use]
+    pub const fn is_float(&self) -> bool {
+        self.exponent_bits > 0
+    }
+
+    /// Whether a fold can accumulate in the same encoding without widening.
+    #[must_use]
+    pub const fn accumulates_in_place(&self) -> bool {
+        if self.exponent_bits == 0 {
+            self.width() >= 32
+        } else {
+            self.width() >= 16
+        }
+    }
+
+    /// Whether the layout is a whole-number type: no exponent, no specials, unit step.
+    #[must_use]
+    pub const fn is_integer(&self) -> bool {
+        self.exponent_bits == 0
+            && matches!(self.specials, Specials::None)
+            && self.bias() == 1 - self.mantissa_bits as i16
+    }
+
+    /// Whether an integer layout has a signed representation.
+    #[must_use]
+    pub const fn is_signed_integer(&self) -> bool {
+        self.is_integer() && !matches!(self.sign, SignEncoding::Absent)
+    }
+
     /// Whether two layouts are the same format: equal exponent and mantissa widths, equal
     /// specials, and equal effective bias. `==` also compares the raw `bias_override`, so a
     /// layout spelled with `Some(15)` and one with `None` differ under `==` and agree here.

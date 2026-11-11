@@ -258,6 +258,9 @@ fn packed_radix_code(coded: &Coded, index: usize, block: &[u8]) -> u32 {
 }
 
 fn field_value(field: &Field, block: &[u8]) -> f32 {
+    if field.layout.width() == 0 {
+        return 1.0;
+    }
     let offset = usize::from(field.byte_offset);
     let bytes = usize::from(field.layout.width()).div_ceil(8);
     float_layout_codec::decode(le_code(&block[offset..offset + bytes]), field.layout)

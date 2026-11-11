@@ -11,7 +11,7 @@
 //! stride, which expresses contiguous runs, nibble-split pairs, and the interleaved lanes of the
 //! K formats with one rule.
 
-use crate::float_layout::FloatLayout;
+use crate::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 use crate::format::{LevelFormat, LevelTable};
 
 /// One digit of an element index: `radix` values, each moving the bit address by `stride_bits`.
@@ -88,6 +88,23 @@ pub struct CodeRegion {
 pub struct Field {
     pub layout: FloatLayout,
     pub byte_offset: u16,
+}
+
+impl Field {
+    /// A scale that occupies no byte and multiplies by one: the field a block carries when its
+    /// codes are already its values (bool). [`crate::decode`] reads a zero-width field as 1.0, so
+    /// every reader of `scale.layout.width()` sees zero bytes and none needs a special case.
+    pub const UNIT: Self = Self {
+        layout: FloatLayout {
+            exponent_bits: 0,
+            mantissa_bits: 0,
+            specials: Specials::None,
+            bias_override: None,
+            sign: SignEncoding::Absent,
+            nan: NanPolicy::IEEE,
+        },
+        byte_offset: 0,
+    };
 }
 
 /// Sub-blocks of the block, each with its own scale code and optionally a min code, indexed by
@@ -325,6 +342,17 @@ impl BlockLayout {
         1,
         None,
     );
+    /// One byte per element holding the code 0 or 1, no scale: bool as a two-level ladder.
+    pub const BOOL: Self = Self {
+        scale: Field::UNIT,
+        ..linear(
+            1,
+            1,
+            coded(FloatLayout::UINT1, run(1, 0, 1), None, 0),
+            1,
+            None,
+        )
+    };
     pub const Q1_0: Self = linear(
         128,
         18,

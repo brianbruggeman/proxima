@@ -1,4 +1,4 @@
-use crate::float_layout::{FloatLayout, SignEncoding, Specials};
+use crate::float_layout::FloatLayout;
 
 /// Element encoding carried by a tensor operation.
 ///
@@ -96,7 +96,7 @@ impl DType {
     #[must_use]
     pub const fn is_float(self) -> bool {
         match self {
-            Self::Layout(layout) => layout.exponent_bits > 0,
+            Self::Layout(layout) => layout.is_float(),
             Self::Bool => false,
         }
     }
@@ -105,13 +105,7 @@ impl DType {
     #[must_use]
     pub const fn accumulates_in_place(self) -> bool {
         match self {
-            Self::Layout(layout) => {
-                if layout.exponent_bits == 0 {
-                    layout.width() >= 32
-                } else {
-                    layout.width() >= 16
-                }
-            }
+            Self::Layout(layout) => layout.accumulates_in_place(),
             Self::Bool => false,
         }
     }
@@ -120,11 +114,7 @@ impl DType {
     #[must_use]
     pub const fn is_integer(self) -> bool {
         match self {
-            Self::Layout(layout) => {
-                layout.exponent_bits == 0
-                    && matches!(layout.specials, Specials::None)
-                    && layout.bias() == 1 - layout.mantissa_bits as i16
-            }
+            Self::Layout(layout) => layout.is_integer(),
             Self::Bool => false,
         }
     }
@@ -133,13 +123,19 @@ impl DType {
     #[must_use]
     pub const fn is_signed_integer(self) -> bool {
         match self {
-            Self::Layout(layout) => {
-                layout.exponent_bits == 0
-                    && !matches!(layout.sign, SignEncoding::Absent)
-                    && matches!(layout.specials, Specials::None)
-                    && layout.bias() == 1 - layout.mantissa_bits as i16
-            }
+            Self::Layout(layout) => layout.is_signed_integer(),
             Self::Bool => false,
+        }
+    }
+
+    /// The `NumericFormat` that describes the same elements: a layout is its `Scalar`, `Bool` is
+    /// the two-level ladder [`crate::NumericFormat::Bool`]. Total, so a caller migrates by calling
+    /// this once at the boundary.
+    #[must_use]
+    pub const fn numeric_format(self) -> crate::NumericFormat {
+        match self {
+            Self::Layout(layout) => crate::NumericFormat::Scalar(layout),
+            Self::Bool => crate::NumericFormat::Bool,
         }
     }
 }
