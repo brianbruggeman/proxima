@@ -471,6 +471,123 @@ mod tests {
         ),
     ];
 
+    const NAMED_LAYOUTS: [FloatLayout; 11] = [
+        FloatLayout::F16,
+        FloatLayout::BF16,
+        FloatLayout::BF32,
+        FloatLayout::E5M2,
+        FloatLayout::E5M2_SATURATING,
+        FloatLayout::E4M3FN,
+        FloatLayout::E3M2,
+        FloatLayout::E2M3,
+        FloatLayout::E2M2,
+        FloatLayout::E2M1,
+        FloatLayout::F8_E8M0,
+    ];
+
+    fn unnamed_e8m3() -> FloatLayout {
+        let mut layout = FloatLayout::BF16;
+        layout.mantissa_bits = 3;
+        layout
+    }
+
+    fn xorshift(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn e8m3_is_not_in_the_named_layout_list() {
+        let unnamed = unnamed_e8m3();
+
+        let named = NAMED_LAYOUTS
+            .iter()
+            .any(|layout| layout.fingerprint() == unnamed.fingerprint());
+
+        assert!(!named, "the blind-spot layout must have no name");
+    }
+
+    #[test]
+    fn unnamed_e8m3_is_a_mantissa_prefix_of_binary32_but_f16_is_not() {
+        let unnamed = unnamed_e8m3();
+
+        assert!(unnamed.is_mantissa_prefix_of(&FloatLayout::BF32));
+        assert!(!FloatLayout::F16.is_mantissa_prefix_of(&FloatLayout::BF32));
+    }
+
+    fn e8m3_oracle(value: f32) -> Option<u32> {
+        let bits = value.to_bits();
+        let rounded = (bits + 0x7ffff + ((bits >> 20) & 1)) >> 20;
+        let exponent = (rounded >> 3) & 0xff;
+        (exponent != 0xff).then_some(rounded)
+    }
+
+    #[test]
+    fn unnamed_e8m3_encode_equals_integer_rne_of_the_top_twelve_f32_bits() {
+        let unnamed = unnamed_e8m3();
+        let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+        let mut checked = 0_u32;
+
+        while checked < 4096 {
+            let value = f32::from_bits(xorshift(&mut state) as u32);
+            let Some(expected) = value.is_finite().then(|| e8m3_oracle(value)).flatten() else {
+                continue;
+            };
+
+            let code = crate::float_layout_codec::encode(value, unnamed);
+
+            assert_eq!(code, expected, "bits {:#010x}", value.to_bits());
+            checked += 1;
+        }
+    }
+
+    #[test]
+    fn unnamed_e8m3_slice_route_matches_the_per_element_codec() {
+        let unnamed = unnamed_e8m3();
+        let mut state = 0x2545_f491_4f6c_dd1d_u64;
+        let values: std::vec::Vec<f32> = core::iter::from_fn(|| {
+            Some(f32::from_bits(xorshift(&mut state) as u32))
+        })
+        .filter(|value| value.is_finite() && e8m3_oracle(*value).is_some())
+        .take(1024)
+        .collect();
+        let mut packed = std::vec![0_u8; values.len() * 2];
+
+        crate::float_layout_codec::encode_slice(&unnamed, &values, &mut packed)
+            .expect("e8m3 is a supported layout");
+
+        let decoded: std::vec::Vec<u32> = packed
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|pair| u32::from(u16::from_le_bytes(*pair)))
+            .collect();
+        let expected: std::vec::Vec<u32> = values
+            .iter()
+            .map(|value| crate::float_layout_codec::encode(*value, unnamed))
+            .collect();
+        assert_eq!(decoded, expected);
+    }
+
+    #[test]
+    fn unnamed_e8m3_ties_round_to_even_mantissa() {
+        let unnamed = unnamed_e8m3();
+        let step = 1.0_f32 / (1 << unnamed.mantissa_bits) as f32;
+        let one = 1.0_f32;
+        let tie_up_to_even_zero = one + step / 2.0;
+        let tie_up_to_even_two = one + step + step / 2.0;
+
+        let low = crate::float_layout_codec::encode(tie_up_to_even_zero, unnamed);
+        let high = crate::float_layout_codec::encode(tie_up_to_even_two, unnamed);
+
+        assert_eq!(tie_up_to_even_zero, 1.0625);
+        assert_eq!(tie_up_to_even_two, 1.1875);
+        assert_eq!(low, 127 << 3, "1.0625 ties to 1.0 (mantissa 0)");
+        assert_eq!(high, (127 << 3) | 2, "1.1875 ties to 1.25 (mantissa 2)");
+    }
+
     #[test]
     fn float_layout_derived_bias_per_layout() {
         let biases = CASES.map(|case| case.0.bias());
