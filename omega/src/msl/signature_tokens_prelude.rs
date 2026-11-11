@@ -1101,7 +1101,12 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
         Some(Codec::BFloat16) => format!(
             "bf16_element(in{index} + ({offset} / {BFLOAT16_BLOCK_ELEMENTS}) * {BFLOAT16_BLOCK_BYTES}, (uint)({offset} % {BFLOAT16_BLOCK_ELEMENTS}))"
         ),
-        Some(Codec::Bf8E5M2) => format!("bf8_e5m2_element(in{index} + {offset}, 0u)"),
+        // `BFloat8` (plain E5M2) and `Bf8E5M2` (saturating E5M2) differ only in
+        // how overflow ENCODES; the two decode all 256 codes to identical f32
+        // bits, so one flat accessor reads both
+        Some(Codec::Bf8E5M2 | Codec::BFloat8) => {
+            format!("bf8_e5m2_element(in{index} + {offset}, 0u)")
+        }
         Some(Codec::Bf4E2M1) => {
             format!("bf4_e2m1_element(in{index} + ({offset} / 2), (uint)({offset} % 2))")
         }
@@ -1116,16 +1121,15 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
         Some(Codec::Iq3S) => format!(
             "iq3_s_element(in{index} + ({offset} / {IQ3_S_BLOCK_ELEMENTS}) * {IQ3_S_BLOCK_BYTES}, (uint)({offset} % {IQ3_S_BLOCK_ELEMENTS}))"
         ),
-        // No Metal unpack kernel exists for these 21 names (the 20 below plus
+        // No Metal unpack kernel exists for these names (the 19 below plus
         // `Float16`, whose buffer binds as `half` and never takes a per-element
         // decode). `PackedOperands` reaches this emitter only through
-        // `metal_operand_read_decodes`, which admits exactly the 16 codecs with
+        // `metal_operand_read_decodes`, which admits exactly the codecs with
         // an arm above, so this arm is unreachable by construction; kept
         // exhaustive so a future codec forces a decision here rather than
-        // slipping through (that is how `Q1_0`/`Q2_0`/`Pq2_0`/`Ptq1_0`/
-        // `BFloat8` were found: the old driver-neutral admission list claimed
-        // them, this match did not, and the fall-through read packed bytes as
-        // `f32`).
+        // slipping through (that is how `Q1_0`/`Q2_0`/`Pq2_0`/`Ptq1_0` were
+        // found: the old driver-neutral admission list claimed them, this
+        // match did not, and the fall-through read packed bytes as `f32`).
         Some(
             Codec::Q4_1
             | Codec::Q8_1
@@ -1145,8 +1149,7 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
             | Codec::Q1_0
             | Codec::Q2_0
             | Codec::Pq2_0
-            | Codec::Ptq1_0
-            | Codec::BFloat8,
+            | Codec::Ptq1_0,
         ) => format!("in{index}[{offset}]"),
         _ => format!("in{index}[{offset}]"),
     }
@@ -1201,7 +1204,7 @@ fn codec_element_fn_name(codec: Codec) -> &'static str {
         Codec::Q5_1 => "q5_1_element",
         Codec::Q5_0 => "q5_0_element",
         Codec::BFloat16 => "bf16_element",
-        Codec::Bf8E5M2 => "bf8_e5m2_element",
+        Codec::Bf8E5M2 | Codec::BFloat8 => "bf8_e5m2_element",
         Codec::Bf4E2M1 => "bf4_e2m1_element",
         Codec::Fp6E3M2 => "scaled_e3m2_element",
         Codec::Iq4Xs => "iq4_xs_element",
@@ -1225,8 +1228,7 @@ fn codec_element_fn_name(codec: Codec) -> &'static str {
         | Codec::Q1_0
         | Codec::Q2_0
         | Codec::Pq2_0
-        | Codec::Ptq1_0
-        | Codec::BFloat8 => "unreachable_element_fn",
+        | Codec::Ptq1_0 => "unreachable_element_fn",
         _ => "unreachable_element_fn",
     }
 }
