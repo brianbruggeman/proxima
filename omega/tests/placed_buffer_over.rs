@@ -6,8 +6,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use omega::{
-    MetalError, allocate_placed_buffer_over, page_size, read_placed_buffer_f32,
-    write_placed_buffer_f32,
+    MetalError, allocate_placed_buffer_over, page_size, try_read_placed_buffer_f32,
+    try_write_placed_buffer_f32,
 };
 
 #[test]
@@ -33,13 +33,16 @@ fn placed_buffer_over_mmap_range_round_trips() {
     let buffer = unsafe { allocate_placed_buffer_over(base, 2 * page) }
         .expect("a page-aligned mmap range must be accepted");
 
-    write_placed_buffer_f32(&buffer, 0, &[1.0, 2.0, 3.0]);
+    try_write_placed_buffer_f32(&buffer, 0, &[1.0, 2.0, 3.0]).expect("three f32s fit the mmap range");
     let through_pointer = unsafe { std::slice::from_raw_parts(base.cast::<f32>(), 3) };
     assert_eq!(through_pointer, &[1.0, 2.0, 3.0]);
 
     unsafe { std::slice::from_raw_parts_mut(base.cast::<f32>(), 3) }
         .copy_from_slice(&[4.0, 5.0, 6.0]);
-    assert_eq!(read_placed_buffer_f32(&buffer, 0, 3), vec![4.0, 5.0, 6.0]);
+    assert_eq!(
+        try_read_placed_buffer_f32(&buffer, 0, 3).expect("three f32s fit the mmap range"),
+        vec![4.0, 5.0, 6.0]
+    );
 
     let refusals = [
         unsafe { allocate_placed_buffer_over(base.add(1), page) },

@@ -234,8 +234,8 @@ async fn both_halves_land_in_caller_placed_cache_buffers_at_nonzero_offsets(
     let buffer_bytes = PLACEMENT_ALIGNMENT * 4 + half_bytes;
     let first_cache = omega::allocate_placed_buffer(buffer_bytes).expect("first cache buffer");
     let second_cache = omega::allocate_placed_buffer(buffer_bytes).expect("second cache buffer");
-    omega::zero_placed_buffer(&first_cache, buffer_bytes);
-    omega::zero_placed_buffer(&second_cache, buffer_bytes);
+    omega::zero_placed_buffer(&first_cache, buffer_bytes).expect("zeroes the whole first cache");
+    omega::zero_placed_buffer(&second_cache, buffer_bytes).expect("zeroes the whole second cache");
     let plan = case.plan();
 
     omega::execute_plan_with_placements(
@@ -251,9 +251,11 @@ async fn both_halves_land_in_caller_placed_cache_buffers_at_nonzero_offsets(
     .expect("executes with both rotated halves placed");
 
     let placed_first =
-        omega::read_placed_buffer_f32(&first_cache, PLACEMENT_ALIGNMENT, case.half_len());
+        omega::try_read_placed_buffer_f32(&first_cache, PLACEMENT_ALIGNMENT, case.half_len())
+            .expect("the first half lies inside its cache");
     let placed_second =
-        omega::read_placed_buffer_f32(&second_cache, PLACEMENT_ALIGNMENT * 2, case.half_len());
+        omega::try_read_placed_buffer_f32(&second_cache, PLACEMENT_ALIGNMENT * 2, case.half_len())
+            .expect("the second half lies inside its cache");
     assert_eq!(
         bits(&placed_first),
         bits(&expected_first),
@@ -264,7 +266,8 @@ async fn both_halves_land_in_caller_placed_cache_buffers_at_nonzero_offsets(
         bits(&expected_second),
         "second half in its cache"
     );
-    let head = omega::read_placed_buffer_f32(&second_cache, 0, PLACEMENT_ALIGNMENT / 4);
+    let head = omega::try_read_placed_buffer_f32(&second_cache, 0, PLACEMENT_ALIGNMENT / 4)
+        .expect("the head precedes the placed offset");
     assert!(
         head.iter().all(|value| *value == 0.0),
         "bytes before the placed offset must stay untouched"
@@ -293,7 +296,9 @@ async fn only_the_second_half_placed_still_writes_the_first_into_the_arena() {
         .expect("first half read back")
         .0
         .to_vec();
-    let placed_second = omega::read_placed_buffer_f32(&cache, PLACEMENT_ALIGNMENT, case.half_len());
+    let placed_second =
+        omega::try_read_placed_buffer_f32(&cache, PLACEMENT_ALIGNMENT, case.half_len())
+            .expect("the second half lies inside the cache");
     assert_eq!(bits(&first), bits(&expected_first));
     assert_eq!(bits(&placed_second), bits(&expected_second));
 }

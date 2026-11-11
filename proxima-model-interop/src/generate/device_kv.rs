@@ -247,7 +247,7 @@ impl DeviceKvLayer {
         let write_ns = ticks_to_nanos(elapsed_ticks(write_started));
         #[cfg(feature = "instrument")]
         let zero_started = read_ticks();
-        self.zero_tail(kept);
+        self.zero_tail(kept)?;
         #[cfg(feature = "instrument")]
         let zero_ns = ticks_to_nanos(elapsed_ticks(zero_started));
         #[cfg(feature = "instrument")]
@@ -278,7 +278,7 @@ impl DeviceKvLayer {
         Ok(kept)
     }
 
-    fn zero_tail(&self, kept: usize) {
+    fn zero_tail(&self, kept: usize) -> Result<(), InteropError> {
         for (buffer, row_bytes) in [
             (&self.k_even, self.even_odd_row_bytes),
             (&self.k_odd, self.even_odd_row_bytes),
@@ -288,8 +288,9 @@ impl DeviceKvLayer {
                 buffer,
                 kept * row_bytes,
                 (self.capacity_rows - kept) * row_bytes,
-            );
+            )?;
         }
+        Ok(())
     }
 
     fn write_rows(
@@ -316,15 +317,20 @@ impl DeviceKvLayer {
         self.store_value_f32(&self.v, target_row * self.v_row_bytes, &cache.v[value])
     }
 
-    fn make_room(&mut self, cached_len: usize, new_count: usize, bound_extent: usize) {
+    fn make_room(
+        &mut self,
+        cached_len: usize,
+        new_count: usize,
+        bound_extent: usize,
+    ) -> Result<(), InteropError> {
         let Some(window) = self.window else {
-            return;
+            return Ok(());
         };
         let live_first_row = cached_len - cached_len.min(window) - self.base_position;
         let reach =
             (live_first_row + bound_extent).max(cached_len + new_count - self.base_position);
         if reach <= self.capacity_rows {
-            return;
+            return Ok(());
         }
         let kept_first = self.first_kept(cached_len);
         let kept_rows = cached_len - kept_first;
@@ -339,9 +345,10 @@ impl DeviceKvLayer {
                 kept_first_row * row_bytes,
                 0,
                 kept_rows * row_bytes,
-            );
+            )?;
         }
         self.base_position = kept_first;
+        Ok(())
     }
 
     /// A rewind to `to_rows` positions needs no copy: the valid rows are the host `cached_len`. It
@@ -643,10 +650,16 @@ impl DeviceKv {
     /// (`KvRing::bound_extent`). Separate from [`Self::placements`] so the
     /// placements borrow the cache shared, and [`Self::commit_step`] can run
     /// while the step's placement lists are still alive.
-    pub(super) fn ready_step(&mut self, cached_len: usize, new_count: usize, sliding_bound: usize) {
+    pub(super) fn ready_step(
+        &mut self,
+        cached_len: usize,
+        new_count: usize,
+        sliding_bound: usize,
+    ) -> Result<(), InteropError> {
         for layer in self.layers.iter_mut().flatten() {
-            layer.make_room(cached_len, new_count, sliding_bound);
+            layer.make_room(cached_len, new_count, sliding_bound)?;
         }
+        Ok(())
     }
 
     /// Names the placements a step runs under, after [`Self::ready_step`].
@@ -859,21 +872,24 @@ mod tests {
     fn write_step_rows(device: &DeviceKv, cached_len: usize) {
         let layer = device.layers[0].as_ref().expect("layer 0 is resident");
         let row = layer.output_row(cached_len);
-        omega::write_placed_buffer_f32(
+        omega::try_write_placed_buffer_f32(
             &layer.k_even,
             row * layer.even_odd_row_bytes,
             &row_values(cached_len, EVEN_ODD_ROW, 0),
-        );
-        omega::write_placed_buffer_f32(
+        )
+        .expect("the output row lies inside k_even");
+        omega::try_write_placed_buffer_f32(
             &layer.k_odd,
             row * layer.even_odd_row_bytes,
             &row_values(cached_len, EVEN_ODD_ROW, 1),
-        );
-        omega::write_placed_buffer_f32(
+        )
+        .expect("the output row lies inside k_odd");
+        omega::try_write_placed_buffer_f32(
             &layer.v,
             row * layer.v_row_bytes,
             &row_values(cached_len, V_ROW, 2),
-        );
+        )
+        .expect("the output row lies inside v");
     }
 
     #[test]
@@ -911,7 +927,8 @@ mod tests {
             device.layers[0]
                 .as_mut()
                 .expect("layer 0 is resident")
-                .make_room(cached_len, 1, window);
+                .make_room(cached_len, 1, window)
+                .expect("the kept rows lie inside the layer buffers");
             let layer = device.layers[0].as_ref().expect("layer 0 is resident");
             compactions += usize::from(Some(layer.base_position) != before);
             assert_eq!(
@@ -994,15 +1011,19 @@ mod tests {
         )
         .expect("device kv allocates on the real Metal device");
         let dirty = alloc::vec![f32::NAN; capacity_rows * EVEN_ODD_ROW.max(V_ROW)];
-        omega::write_placed_buffer_f32(&layer.k_even, 0, &dirty[..capacity_rows * EVEN_ODD_ROW]);
-        omega::write_placed_buffer_f32(&layer.k_odd, 0, &dirty[..capacity_rows * EVEN_ODD_ROW]);
-        omega::write_placed_buffer_f32(&layer.v, 0, &dirty[..capacity_rows * V_ROW]);
+        omega::try_write_placed_buffer_f32(&layer.k_even, 0, &dirty[..capacity_rows * EVEN_ODD_ROW])
+            .expect("capacity_rows rows fill k_even");
+        omega::try_write_placed_buffer_f32(&layer.k_odd, 0, &dirty[..capacity_rows * EVEN_ODD_ROW])
+            .expect("capacity_rows rows fill k_odd");
+        omega::try_write_placed_buffer_f32(&layer.v, 0, &dirty[..capacity_rows * V_ROW])
+            .expect("capacity_rows rows fill v");
 
         layer.seed(&cache, positions).expect("layer seeds");
 
         let tail_rows = capacity_rows - positions;
         let tail = |buffer: &PlacedBuffer, row_bytes: usize, row: usize| {
-            omega::read_placed_buffer_f32(buffer, positions * row_bytes, tail_rows * row)
+            omega::try_read_placed_buffer_f32(buffer, positions * row_bytes, tail_rows * row)
+                .expect("the rows past the kept ones lie inside the buffer")
         };
         assert!(
             tail(&layer.k_even, layer.even_odd_row_bytes, EVEN_ODD_ROW)
@@ -1013,7 +1034,8 @@ mod tests {
             "rows the call never wrote read as +0.0, not the buffer's previous bytes"
         );
         assert_eq!(
-            omega::read_placed_buffer_f32(&layer.k_even, 0, positions * EVEN_ODD_ROW),
+            omega::try_read_placed_buffer_f32(&layer.k_even, 0, positions * EVEN_ODD_ROW)
+                .expect("the kept rows lie inside k_even"),
             rows(0, positions, EVEN_ODD_ROW, 0),
             "the kept rows are the host rows, in order"
         );
@@ -1046,21 +1068,24 @@ mod tests {
     fn write_prefill_rows(device: &DeviceKv, rows_written: usize) {
         let layer = device.layers[0].as_ref().expect("layer 0 is resident");
         let row = layer.output_row(0);
-        omega::write_placed_buffer_f32(
+        omega::try_write_placed_buffer_f32(
             &layer.k_even,
             row * layer.even_odd_row_bytes,
             &rows(0, rows_written, EVEN_ODD_ROW, 0),
-        );
-        omega::write_placed_buffer_f32(
+        )
+        .expect("the prefill rows lie inside k_even");
+        omega::try_write_placed_buffer_f32(
             &layer.k_odd,
             row * layer.even_odd_row_bytes,
             &rows(0, rows_written, EVEN_ODD_ROW, 1),
-        );
-        omega::write_placed_buffer_f32(
+        )
+        .expect("the prefill rows lie inside k_odd");
+        omega::try_write_placed_buffer_f32(
             &layer.v,
             row * layer.v_row_bytes,
             &rows(0, rows_written, V_ROW, 2),
-        );
+        )
+        .expect("the prefill rows lie inside v");
     }
 
     #[test]
@@ -1100,7 +1125,7 @@ mod tests {
             "the linear buffer must hold the whole prefill batch, saw {} rows",
             layer.capacity_rows
         );
-        layer.make_room(0, prefill_rows, 8);
+        layer.make_room(0, prefill_rows, 8).expect("a linear layer never moves rows");
         assert_eq!(
             layer.base_position, 0,
             "a prefill from an empty cache never compacts"
@@ -1210,7 +1235,8 @@ mod tests {
         );
         for buffer in &kept {
             let floats = resident_plans::kv_bytes(core::slice::from_ref(buffer)) / size_of::<f32>();
-            omega::write_placed_buffer_f32(buffer, 0, &alloc::vec![f32::NAN; floats]);
+            omega::try_write_placed_buffer_f32(buffer, 0, &alloc::vec![f32::NAN; floats])
+                .expect("the buffer holds the floats its own byte length names");
         }
 
         let mut allocations = 0;
@@ -1245,16 +1271,18 @@ mod tests {
         );
         let layer = second.layers[0].as_ref().expect("layer 0 is resident");
         let tail_rows = layer.capacity_rows - 37;
-        let tail = omega::read_placed_buffer_f32(
+        let tail = omega::try_read_placed_buffer_f32(
             &layer.k_even,
             37 * layer.even_odd_row_bytes,
             tail_rows * EVEN_ODD_ROW,
-        );
+        )
+        .expect("the rows past the seeded ones lie inside k_even");
         assert!(
             tail.iter().all(|value| *value == 0.0),
             "stale NaN rows from the first generation are zeroed past the seeded rows"
         );
-        let head = omega::read_placed_buffer_f32(&layer.v, 0, 37 * V_ROW);
+        let head = omega::try_read_placed_buffer_f32(&layer.v, 0, 37 * V_ROW)
+            .expect("the seeded rows lie inside v");
         assert_eq!(
             head,
             rows(0, 37, V_ROW, 2),
@@ -1392,9 +1420,9 @@ mod tests {
         let even = [0.1f32, 0.2, 0.3, 0.4];
         let odd = [-0.1f32, -0.2, -0.3, -0.4];
         let value = [1.1f32, 1.2, 1.3, 1.4, 1.5, 1.6];
-        omega::write_placed_buffer_f32(staging_even, 0, &even);
-        omega::write_placed_buffer_f32(staging_odd, 0, &odd);
-        omega::write_placed_buffer_f32(staging_value, 0, &value);
+        omega::try_write_placed_buffer_f32(staging_even, 0, &even).expect("the even rows fit their staging buffer");
+        omega::try_write_placed_buffer_f32(staging_odd, 0, &odd).expect("the odd rows fit their staging buffer");
+        omega::try_write_placed_buffer_f32(staging_value, 0, &value).expect("the value rows fit their staging buffer");
         device.commit_step(cached_len, 1).expect("step narrows into the cache");
         device.flush(&mut caches, cached_len + 1, 80).expect("device kv flushes to host");
 
@@ -1560,9 +1588,9 @@ mod tests {
         let even = [0.5f32, -0.5, 1.0, -1.0];
         let odd = [-1.0f32, 1.0, -2.0, 2.0];
         let value = [2.0f32, -2.0, 0.25, -0.25, 0.5, -0.5];
-        omega::write_placed_buffer_f32(staging_even, 0, &even);
-        omega::write_placed_buffer_f32(staging_odd, 0, &odd);
-        omega::write_placed_buffer_f32(staging_value, 0, &value);
+        omega::try_write_placed_buffer_f32(staging_even, 0, &even).expect("the even rows fit their staging buffer");
+        omega::try_write_placed_buffer_f32(staging_odd, 0, &odd).expect("the odd rows fit their staging buffer");
+        omega::try_write_placed_buffer_f32(staging_value, 0, &value).expect("the value rows fit their staging buffer");
         device.commit_step(cached_len, 1).expect("step narrows into the cache");
         device.flush(&mut caches, cached_len + 1, 80).expect("device kv flushes to host");
 
@@ -1686,9 +1714,9 @@ mod tests {
         let value: Vec<f32> = (0..V_ROW)
             .map(|column| 1.0 / (column as f32 + 3.0))
             .collect();
-        omega::write_placed_buffer_f32(staging_even, 0, &even);
-        omega::write_placed_buffer_f32(staging_odd, 0, &odd);
-        omega::write_placed_buffer_f32(staging_value, 0, &value);
+        omega::try_write_placed_buffer_f32(staging_even, 0, &even).expect("the even rows fit their staging buffer");
+        omega::try_write_placed_buffer_f32(staging_odd, 0, &odd).expect("the odd rows fit their staging buffer");
+        omega::try_write_placed_buffer_f32(staging_value, 0, &value).expect("the value rows fit their staging buffer");
 
         device.commit_step(cached_len, 1).expect("step narrows into the cache");
 
@@ -1741,7 +1769,7 @@ mod tests {
             NodeId(12),
         ))];
 
-        device.ready_step(cached_len, 1, 0);
+        device.ready_step(cached_len, 1, 0).expect("a linear layer never moves rows");
         let placements = device.placements(cached_len, &leaves, &roots);
 
         let layer = device.layers[0].as_ref().expect("layer 0 is resident");
@@ -1770,7 +1798,7 @@ mod tests {
             NodeId(12),
         ))];
 
-        device.ready_step(cached_len, 1, 0);
+        device.ready_step(cached_len, 1, 0).expect("a linear layer never moves rows");
         let placements = device.placements(cached_len, &leaves, &roots);
 
         let layer = device.layers[0].as_ref().expect("layer 0 is resident");

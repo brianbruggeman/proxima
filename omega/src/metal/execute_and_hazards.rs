@@ -1097,7 +1097,7 @@ pub fn execute_plan_named_with_expert_sources(
 /// buffers (`MetalBuffer`, private) never had to be public for, since
 /// `execute_plan`/`execute_plan_op_timed` allocate and own every buffer
 /// themselves. Get one from [`allocate_placed_buffer`]; read one back with
-/// [`read_placed_buffer_f32`].
+/// [`try_read_placed_buffer_f32`].
 #[cfg(feature = "metal-output-placement")]
 pub type PlacedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 
@@ -1172,24 +1172,35 @@ pub unsafe fn allocate_placed_buffer_over(
 /// allocation (not per token): every row a later step ever reads was
 /// either zeroed here or overwritten by a REAL rotated key/value this same
 /// call wrote first, since `cached_len` only grows.
+///
+/// # Errors
+/// [`MetalError::PlacedBufferRange`] when `byte_len` bytes do not fit in the allocation; nothing is written.
 #[cfg(feature = "metal-output-placement")]
-pub fn zero_placed_buffer(buffer: &PlacedBuffer, byte_len: usize) {
-    zero_placed_buffer_range(buffer, 0, byte_len);
+pub fn zero_placed_buffer(buffer: &PlacedBuffer, byte_len: usize) -> Result<(), MetalError> {
+    zero_placed_buffer_range(buffer, 0, byte_len)
 }
 
 /// [`zero_placed_buffer`] for `byte_len` bytes starting at `byte_offset`: a
 /// caller that overwrites the head of a buffer with real rows right after
-/// allocating it zeroes only the tail it will not write. Same in-flight and
-/// bounds contract as [`write_placed_buffer_f32`]: `byte_offset + byte_len`
-/// stays inside the allocation.
+/// allocating it zeroes only the tail it will not write. No command buffer may be in flight.
+///
+/// # Errors
+/// [`MetalError::PlacedBufferRange`] when `byte_offset + byte_len` overflows or extends past the
+/// allocation; nothing is written.
 #[cfg(feature = "metal-output-placement")]
-pub fn zero_placed_buffer_range(buffer: &PlacedBuffer, byte_offset: usize, byte_len: usize) {
+pub fn zero_placed_buffer_range(
+    buffer: &PlacedBuffer,
+    byte_offset: usize,
+    byte_len: usize,
+) -> Result<(), MetalError> {
+    validate_placed_buffer_range(buffer, byte_offset, byte_len)?;
     let pointer = buffer.contents();
-    // SAFETY: the buffer is shared storage and the caller keeps `byte_offset + byte_len` inside its allocation.
+    // SAFETY: validation proved `byte_offset + byte_len` lies inside the shared allocation; no command buffer is in flight (every placed execute waits).
     let slots = unsafe {
         core::slice::from_raw_parts_mut(pointer.as_ptr().cast::<u8>().add(byte_offset), byte_len)
     };
     slots.fill(0);
+    Ok(())
 }
 
 /// Copies `source` into a caller-owned placed buffer at `byte_offset`.
@@ -1297,47 +1308,29 @@ pub fn placed_buffer_identity(buffer: &PlacedBuffer) -> usize {
 /// through [`Evaluated`]'s own output set (a placed node need not be a named
 /// output at all).
 ///
-/// # Panics
-/// Never panics; an out-of-bounds `byte_offset`/`element_count` pair is the
-/// caller's own contract to keep (documented on [`execute_plan_with_placements`]),
-/// the same trust boundary `bind_buffers`' SAFETY comment already states for
-/// every kernel-side binding.
+/// The owned form of [`read_placed_buffer_f32_into`], with the same bounds check: the copy
+/// goes straight into the returned `Vec`'s spare capacity, so no zero fill precedes it. Prefer
+/// [`read_placed_buffer_f32_into`] when the caller already holds a slice to fill.
+///
+/// # Errors
+/// [`MetalError::PlacedBufferRange`] when the requested byte range overflows or extends past the
+/// buffer's allocated length.
 #[cfg(feature = "metal-output-placement")]
-#[must_use]
-pub fn read_placed_buffer_f32(
+pub fn try_read_placed_buffer_f32(
     buffer: &PlacedBuffer,
     byte_offset: usize,
     element_count: usize,
-) -> Vec<f32> {
-    let pointer = buffer.contents();
+) -> Result<Vec<f32>, MetalError> {
+    let byte_length = f32_byte_length(buffer, byte_offset, element_count)?;
+    validate_placed_buffer_range(buffer, byte_offset, byte_length)?;
     let mut values: Vec<f32> = Vec::with_capacity(element_count);
-    // SAFETY: shared storage is CPU-visible once the writing command buffer completed; the caller keeps the range in bounds. The copy is bytewise, so an unaligned `byte_offset` forms no misaligned reference; every bit pattern is a valid f32.
+    // SAFETY: validation proves `byte_offset` and the `byte_length` bytes after it lie inside the shared allocation, which is CPU-visible once the writing command buffer completed; the destination is the Vec's `element_count`-f32 capacity. The copy is bytewise, so an unaligned `byte_offset` forms no misaligned reference, and every bit pattern is a valid f32.
     unsafe {
-        let base = pointer.as_ptr().cast::<u8>().add(byte_offset);
-        core::ptr::copy_nonoverlapping(base, values.as_mut_ptr().cast::<u8>(), element_count * size_of::<f32>());
+        let source = buffer.contents().as_ptr().cast::<u8>().add(byte_offset);
+        core::ptr::copy_nonoverlapping(source, values.as_mut_ptr().cast::<u8>(), byte_length);
         values.set_len(element_count);
     }
-    values
-}
-
-/// Writes `values` into `buffer` at `byte_offset` -- the host-side store a
-/// caller uses to seed a [`PlacedBuffer`] (a KV cache restored from a host
-/// copy, say) before the device ever writes it. The counterpart of
-/// [`read_placed_buffer_f32`]; both rely on `storageModeShared` and on no
-/// command buffer being in flight, which every `execute_plan_with_placements`
-/// call guarantees by `waitUntilCompleted`-ing before it returns.
-///
-/// # Contract
-/// `byte_offset + size_of_val(values)` must stay inside the buffer's
-/// allocated length, the same trust boundary [`read_placed_buffer_f32`] states.
-#[cfg(feature = "metal-output-placement")]
-pub fn write_placed_buffer_f32(buffer: &PlacedBuffer, byte_offset: usize, values: &[f32]) {
-    let pointer = buffer.contents();
-    // SAFETY: shared memory with no command buffer in flight; the caller keeps the written range inside the allocation. The copy is bytewise, so an unaligned `byte_offset` forms no misaligned pointer.
-    unsafe {
-        let destination = pointer.as_ptr().cast::<u8>().add(byte_offset);
-        core::ptr::copy_nonoverlapping(values.as_ptr().cast::<u8>(), destination, size_of_val(values));
-    }
+    Ok(values)
 }
 
 /// Encodes `values` into the cache format `codec` was resolved for, at `byte_offset`: the one
@@ -1347,7 +1340,7 @@ pub fn write_placed_buffer_f32(buffer: &PlacedBuffer, byte_offset: usize, values
 /// [`proxima_numeric::FormatCodec::for_format`]: the call is one indirect jump to the instantiation
 /// with the layout as a literal, where [`proxima_numeric::encode::encode_blocks`] re-matches the
 /// format on every call. Scalar and block formats place alike; the byte range is the codec's whole-block
-/// geometry. Same in-flight and bounds contract as [`write_placed_buffer_f32`].
+/// geometry. Same in-flight contract as [`try_write_placed_buffer_f32`]; the offset and window are checked, never trusted.
 ///
 /// An offset at or past the end of the allocation leaves an empty window, which the codec refuses like
 /// any window shorter than the packed range; the buffer is unwritten in every error case.
@@ -1459,21 +1452,27 @@ pub fn narrow_placed_buffer(
 /// Moves `byte_len` bytes from `from_byte` to `to_byte` inside one
 /// [`PlacedBuffer`], overlap allowed -- how a sliding-window KV buffer
 /// compacts its live rows back to the front without leaving the device's
-/// shared allocation. Same in-flight and bounds contract as
-/// [`write_placed_buffer_f32`].
+/// shared allocation. No command buffer may be in flight.
+///
+/// # Errors
+/// [`MetalError::PlacedBufferRange`] when either range overflows or extends past the allocation;
+/// nothing is moved.
 #[cfg(feature = "metal-output-placement")]
 pub fn move_placed_buffer_bytes(
     buffer: &PlacedBuffer,
     from_byte: usize,
     to_byte: usize,
     byte_len: usize,
-) {
+) -> Result<(), MetalError> {
+    validate_placed_buffer_range(buffer, from_byte, byte_len)?;
+    validate_placed_buffer_range(buffer, to_byte, byte_len)?;
     let pointer = buffer.contents();
-    // SAFETY: the caller keeps both ranges inside the allocation and `ptr::copy` is the overlap-safe move.
+    // SAFETY: validation proved both ranges lie inside the allocation, and `ptr::copy` is the overlap-safe move.
     unsafe {
         let base = pointer.as_ptr().cast::<u8>();
         core::ptr::copy(base.add(from_byte), base.add(to_byte), byte_len);
     }
+    Ok(())
 }
 
 /// [`DispatchType::Concurrent`]'s dataflow-hazard set, generic over the
@@ -2182,7 +2181,7 @@ mod placed_format_tests {
     fn bf16_placed_preserves_adjacent_bytes_at_nonzero_offset() {
         let staging = allocate_placed_buffer(16).expect("allocates f32 staging bytes");
         let cache = allocate_placed_buffer(16).expect("allocates BF16 cache bytes");
-        write_placed_buffer_f32(&staging, 0, &[9.0, 1.5, 2.5, -7.0]);
+        try_write_placed_buffer_f32(&staging, 0, &[9.0, 1.5, 2.5, -7.0]).expect("four f32s fit the 16-byte staging buffer");
         let bf16 = codec(&NumericFormat::BFloat16);
         write_placed_buffer(&cache, 0, &bf16, &[9.0]).expect("encodes");
         write_placed_buffer(&cache, 12, &bf16, &[-7.0]).expect("encodes");
@@ -2241,7 +2240,7 @@ mod placed_format_tests {
         let staging = allocate_placed_buffer(16).expect("allocates f32 staging bytes");
         let cache = allocate_placed_buffer(8).expect("allocates BF8 cache bytes");
         let bf8 = codec(&NumericFormat::BFloat8);
-        write_placed_buffer_f32(&staging, 0, &[9.0, 1.5, 2.5, -7.0]);
+        try_write_placed_buffer_f32(&staging, 0, &[9.0, 1.5, 2.5, -7.0]).expect("four f32s fit the 16-byte staging buffer");
         write_placed_buffer(&cache, 0, &bf8, &[9.0]).expect("encodes");
         write_placed_buffer(&cache, 7, &bf8, &[-7.0]).expect("encodes");
 
@@ -2256,7 +2255,7 @@ mod placed_format_tests {
         let staging = allocate_placed_buffer(12).expect("allocates f32 staging bytes");
         let cache = allocate_placed_buffer(4).expect("allocates BF8 cache bytes");
         let bf8 = codec(&NumericFormat::BFloat8);
-        write_placed_buffer_f32(&staging, 0, &[1.125, 1.375, 61440.0]);
+        try_write_placed_buffer_f32(&staging, 0, &[1.125, 1.375, 61440.0]).expect("three f32s fit the 12-byte staging buffer");
 
         narrow_placed_buffer(&staging, 0, &cache, 0, &bf8, 3).expect("narrows");
 
@@ -2339,7 +2338,7 @@ mod placed_format_tests {
         q4_0.encode(&values, &mut host_packed).expect("host encodes q4_0");
         let staging = allocate_placed_buffer(values.len() * 4).expect("allocates the f32 staging rows");
         let cache = allocate_placed_buffer(packed_len).expect("allocates the q4_0 cache bytes");
-        write_placed_buffer_f32(&staging, 0, &values);
+        try_write_placed_buffer_f32(&staging, 0, &values).expect("the staging buffer holds every row");
 
         narrow_placed_buffer(&staging, 0, &cache, 0, &q4_0, values.len()).expect("q4_0 narrows");
 
