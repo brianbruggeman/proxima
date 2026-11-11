@@ -580,9 +580,10 @@ mod tests {
         assert_eq!(gather_expert(&stacked, &plan, 2), None);
     }
 
-    // -- Real Mixtral-8x7B experts, not a synthetic fixture. Opportunistic
-    // like `crate::tests::real_file`: this 25 GB model cache is specific to
-    // this host, so `#[ignore]`d rather than made a hard failure elsewhere.
+    // -- Real Mixtral-8x7B experts, not a synthetic fixture. `#[ignore]`d:
+    // this 25 GB model cache is specific to this host. unlike
+    // `crate::tests::real_file`, an absent fixture returns success with a
+    // "skipping" line, so a host without the cache passes having checked nothing.
     // Only the metadata/tensor-directory prefix and each of the 8 experts'
     // own `Q4_K` byte range for one layer's `ffn_gate` projection are read
     // via direct `seek`+`read` -- never the whole file.

@@ -3384,10 +3384,10 @@ mod real_qwen3moe_file {
 // checkpoint by name, feed it through `proxima_tensor::cpu::evaluate_named`
 // against a known activation, and check the interpreter's result against a
 // dequantize-then-multiply computed independently of both `bind` and
-// `cpu`. Opportunistic like `proxima_gguf::restack::tests::real_mixtral_file`:
-// `#[ignore]`d, and fails loudly naming the missing checkpoint when the
-// host-local model cache is absent -- see
-// `crate::test_support::require_fixture`.
+// `cpu`. `#[ignore]`d, so it runs only when asked for; once asked, it fails
+// loudly naming the missing checkpoint when the host-local model cache is
+// absent (unlike `proxima_gguf::restack::tests::real_mixtral_file`, which
+// returns success) -- see `crate::test_support::require_fixture`.
 #[cfg(all(test, feature = "std", unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod real_openchat_file {

@@ -481,9 +481,9 @@ fn non_power_of_two_alignment_is_rejected() {
 }
 
 // -- Real Q4_K tensor from a host-local GGUF, not a synthetic fixture.
-// Opportunistic: this model cache is specific to this machine (found via
-// `find` over `~/.lmstudio`), so the test skips cleanly (not a failure)
-// wherever that path is absent. Only a small prefix (metadata + tensor
+// Runs in the default gate: this model cache is specific to this machine
+// (found via `find` over `~/.lmstudio`), so a missing fixture fails the test
+// loudly; see `checkpoint_resolver::require_checkpoint`. Only a small prefix (metadata + tensor
 // directory) and one sample slice of one tensor's packed bytes are read
 // via direct `seek`+`read` — never the whole multi-GB file.
 #[cfg(feature = "std")]
@@ -1431,8 +1431,8 @@ mod real_file {
 // ever read -- never the multi-GB tensor payload. `#[ignore]`d: this is a
 // point-in-time report meant to be driven by hand
 // (`cargo test -p proxima-gguf --features std reports_real_models -- --ignored --nocapture`),
-// not part of the standard gate, and (like `real_file` above) opportunistic
-// on a host-local model cache.
+// not part of the standard gate. unlike `real_file` above, an absent model
+// prints SKIP and moves on, so a host with no cache passes having checked nothing.
 #[cfg(feature = "std")]
 mod real_models {
     use alloc::collections::BTreeMap;

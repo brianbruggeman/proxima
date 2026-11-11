@@ -77,8 +77,9 @@ fn parse_real_blob(path: &str) -> (memmap2::Mmap, proxima_gguf::pipe::ParsedGguf
 }
 
 /// The MoE 26B-A4B checkpoint (`batiai/gemma4-26b:latest`) -- the variant
-/// this test was originally written for. Skips when that specific manifest's
-/// blob is absent; never silently routes to a different `gemma4` variant.
+/// this test was originally written for. Fails loudly (`require_fixture`) when
+/// that specific manifest's blob is absent; never silently routes to a
+/// different `gemma4` variant.
 #[proxima::test]
 #[ignore = "requires the real, local gemma4 26B-A4B MoE GGUF blob (batiai/gemma4-26b:latest); set PROXIMA_GEMMA4_GGUF"]
 async fn family_profile_routes_real_gemma4_header_with_its_tensor_count() {

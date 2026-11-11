@@ -724,8 +724,8 @@ mod tests {
     /// module's own `quantize`/`dequantize` round-trips, reporting max-abs
     /// and RMS error -- never asserting a make-believe bound, only the
     /// bound this module's own derivation above already committed to.
-    /// `#[ignore]`d like the other real-checkpoint tests in this crate:
-    /// host-local file, opportunistic, never part of the standard gate.
+    /// Not `#[ignore]`d: runs in the default gate, and a missing host-local
+    /// file fails the test loudly; see `checkpoint_resolver::require_checkpoint`.
     #[cfg(feature = "std")]
     mod q2_k_real_tensor {
         use std::io::{Read, Seek, SeekFrom};
