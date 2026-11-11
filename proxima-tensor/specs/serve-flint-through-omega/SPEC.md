@@ -102,7 +102,7 @@ The work is data and generic-engine capability, not a family module.
 | AC19 | R6 | `cargo nextest run -p proxima-tensor --lib -E 'test(control_attention_sink_cpu_)'` | 1 passed, 0 failed |
 | AC20 | R6 | `cargo nextest run -p proxima-omega --lib -E 'test(control_attention_sink_metal_parity_)'` | 1 passed, 0 failed |
 | AC21 | R1 | `cargo nextest run -p proxima-model-interop --lib --features std -E 'test(flint_fixture_control_)'` | 1 passed, 0 failed |
-| AC22 | R12 | `cargo nextest run --manifest-path /Users/brianbruggeman/repos/slot-0/ragd-wt-final/Cargo.toml -p ragd_llm -E 'test(providers::proxima::tests)'` | 9 passed, 1 skipped, 0 failed |
+| AC22 | R12 | `cargo nextest run --manifest-path /Users/brianbruggeman/repos/slot-0/ragd-wt-final/Cargo.toml -p ragd_llm -E 'test(providers::proxima::tests)'` | 9 passed, 0 failed (the skip count is not asserted: nextest counts the module's one `#[ignore]`d test and every filter-excluded `ragd_llm` test as skipped, 160 at ragd `b963b9fd`) |
 | AC23 | R2 | `cargo nextest run -p proxima-model-interop --lib --features std -E 'test(control_rejects_mutated_sliding_pattern_header)'` | 1 passed, 0 failed |
 | AC24 | R3 | `cargo nextest run -p proxima-model-interop --lib --features std -E 'test(control_flint_reader_leading_dense_)'` | 1 passed, 0 failed |
 | AC25 | R4 | `cargo nextest run -p proxima-model-interop --lib --features std -E 'test(control_rejects_mutated_rope_pattern)'` | 1 passed, 0 failed |
