@@ -6469,10 +6469,10 @@ pub(super) fn deliver_token(
     on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
 ) -> Result<ControlFlow<bool, ()>, InteropError> {
     let elapsed_ms = elapsed_ns / 1_000_000;
-    let is_eos = vocab.eos_token_id() == Some(token_id);
-    // Control tokens (the sliding-pattern family's `<turn|>`-shaped turn markers) are
-    // structural, not content -- they must never appear in decoded
-    // TEXT, but unlike eos they do not stop generation: the id still
+    let is_eos = vocab.is_eog(token_id);
+    // `is_eos` is any end-of-generation id (the checkpoint's `Vocab::is_eog`),
+    // not only the EOS id. Other control tokens are structural, not content --
+    // never in decoded TEXT, but they do not stop generation: the id still
     // enters `generated_ids` below, only its visible piece is empty.
     let is_control = vocab.token_type(token_id) == Some(TokenType::Control);
     let mut text_piece = if is_eos || is_control {
@@ -6548,7 +6548,7 @@ pub(super) async fn deliver_token_async<Producer: AsyncTokenProducer>(
     producer: &mut Producer,
 ) -> Result<ControlFlow<bool, ()>, InteropError> {
     let elapsed_ms = elapsed_ns / 1_000_000;
-    let is_eos = vocab.eos_token_id() == Some(token_id);
+    let is_eos = vocab.is_eog(token_id);
     let is_control = vocab.token_type(token_id) == Some(TokenType::Control);
     let mut text_piece = if is_eos || is_control {
         String::new()

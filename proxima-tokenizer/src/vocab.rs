@@ -107,6 +107,7 @@ pub struct Vocab {
     base_byte_token_id: [Option<u32>; 256],
     bos_token_id: Option<u32>,
     eos_token_id: Option<u32>,
+    eog_token_ids: Vec<u32>,
     unknown_token_id: Option<u32>,
     token_types: Vec<TokenType>,
     added_token_trie: AddedTokenNode,
@@ -343,6 +344,7 @@ impl Vocab {
             base_byte_token_id,
             bos_token_id,
             eos_token_id,
+            eog_token_ids: eos_token_id.into_iter().collect(),
             unknown_token_id,
             token_types: Vec::new(),
             added_token_trie: AddedTokenNode::default(),
@@ -593,6 +595,39 @@ impl Vocab {
         self.eos_token_id
     }
 
+    /// Re-derives the end-of-generation set from the checkpoint alone
+    /// ([`crate::eog`]): eos/eot/eom ids, then the tokens the chat template
+    /// emits at the tail of its message loop, then the `add`/`remove` token
+    /// texts (config wins). Without this call the set is just the EOS id.
+    /// Returns what the derivation saw so the caller can flag a gap.
+    #[must_use]
+    pub fn with_eog_inference(
+        mut self,
+        eot: Option<u32>,
+        eom: Option<u32>,
+        chat_template: Option<&str>,
+        add: &[String],
+        remove: &[String],
+    ) -> (Self, crate::eog::EogEvidence) {
+        let (ids, evidence) =
+            crate::eog::derive_eog_ids(&self, eot, eom, chat_template, add, remove);
+        self.eog_token_ids = ids;
+        (self, evidence)
+    }
+
+    /// Sorted ids that end generation (see [`Vocab::with_eog_inference`]).
+    #[must_use]
+    pub fn eog_token_ids(&self) -> &[u32] {
+        &self.eog_token_ids
+    }
+
+    /// Whether `token_id` ends generation; a stop test should use this, not
+    /// a comparison against [`Vocab::eos_token_id`].
+    #[must_use]
+    pub fn is_eog(&self, token_id: u32) -> bool {
+        self.eog_token_ids.binary_search(&token_id).is_ok()
+    }
+
     #[must_use]
     pub fn unknown_token_id(&self) -> Option<u32> {
         self.unknown_token_id
@@ -720,6 +755,15 @@ pub(crate) mod tests {
 
         let merges = vec![String::from("\u{2581} hi")];
         Vocab::new(tokens, &merges, None, None, None).expect("tiny char-level vocab builds")
+    }
+
+    #[test]
+    fn a_vocab_with_only_eos_has_just_eos_in_its_eog_set() {
+        let (vocab, evidence) = tiny_vocab().with_eog_inference(None, None, None, &[], &[]);
+        assert_eq!(vocab.eog_token_ids(), &[2]);
+        assert!(vocab.is_eog(2));
+        assert!(!vocab.is_eog(1));
+        assert!(evidence.template_ids.is_empty());
     }
 
     #[test]

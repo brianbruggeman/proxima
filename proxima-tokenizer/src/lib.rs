@@ -53,6 +53,7 @@ pub mod byte_level;
 #[cfg(feature = "std")]
 pub mod config;
 pub mod draft;
+pub mod eog;
 pub mod error;
 #[cfg(feature = "gguf")]
 pub mod gguf;
