@@ -7181,14 +7181,14 @@ did not hold every cached position)",
                     omega::set_capture_step(step as u64);
                     debug!(step = step as u64, "speculative_settled_token");
                 }
-                let elapsed_ms =
-                    u64::try_from(loop_started.elapsed().as_millis()).unwrap_or(u64::MAX);
+                let elapsed_ns =
+                    u64::try_from(loop_started.elapsed().as_nanos()).unwrap_or(u64::MAX);
                 let delivery = deliver_token_async(
                     &self.vocab,
                     token_id,
                     step,
                     prompt_token_count,
-                    elapsed_ms,
+                    elapsed_ns,
                     &mut pending_bytes,
                     &mut unigram_leading_space_trimmed,
                     &mut generated_ids,

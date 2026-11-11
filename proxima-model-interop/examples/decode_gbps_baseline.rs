@@ -81,6 +81,20 @@ fn process_memory_bytes() -> (u64, u64) {
 /// tokens still carry the prefill transient.
 const STEADY_FROM_TOKEN: usize = 10;
 
+/// Whether a step's `step_ns` belongs to llama-server's `predicted_ms` span:
+/// one `llama_decode` per generated token after the first, so the prefill
+/// event and decode step 0 (the prompt's own evaluation) are excluded.
+fn counts_toward_decode_span(is_prefill: bool, step: usize) -> bool {
+    !is_prefill && step >= 1
+}
+
+/// llama-server's `predicted_ms / predicted_n` in float ms: the summed
+/// `step_ns` of the steps `counts_toward_decode_span` admits, over the
+/// `tokens_generated - 1` tokens they produced.
+fn decode_step_ms_per_token(decode_step_ns: u64, tokens_generated: usize) -> f64 {
+    decode_step_ns as f64 / 1_000_000.0 / tokens_generated.saturating_sub(1).max(1) as f64
+}
+
 fn median_bytes(samples: &[u64]) -> u64 {
     let mut sorted = samples.to_vec();
     sorted.sort_unstable();
@@ -355,11 +369,9 @@ fn main() {
         .ok()
         .and_then(|value| value.parse().ok())
         .unwrap_or(DEFAULT_MAX_TOKENS);
-    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
-        .expect("builds vocab via the current gemma4 dispatch");
-    let prompt_token_count = proxima_tokenizer::encode(prompt, &vocab)
-        .expect("tokenize prompt for cached_len accounting")
-        .len();
+    // the prompt count is not known until the generate path has encoded with
+    // its own BOS policy; `Phase::Prefill::prompt_tokens` carries it, so the
+    // run=done lines report that value rather than a second encode.
     // `proxima_telemetry` is only a dependency under `instrument`
     // (`proxima-model-interop/Cargo.toml`'s own `metal` feature list does not
     // pull `dep:proxima-telemetry`) -- this example's `required-features =
@@ -371,13 +383,12 @@ fn main() {
     proxima_telemetry::info!(
         run = "start",
         prompt = ?prompt,
-        prompt_token_count = prompt_token_count as u64,
         max_tokens = max_tokens as u64,
         "decode_gbps_baseline"
     );
     #[cfg(not(feature = "instrument"))]
     eprintln!(
-        "decode_gbps_baseline run=start prompt={prompt:?} prompt_token_count={prompt_token_count} max_tokens={max_tokens}"
+        "decode_gbps_baseline run=start prompt={prompt:?} max_tokens={max_tokens}"
     );
 
     // owner rollout check (2026-09-22, intervention6): K=1 vs K=8 chunked
@@ -399,6 +410,9 @@ fn main() {
     // is a token, not an evaluation: tokens a verify evaluation committed
     // arrive back to back, so those later steps read ~0 ms.
     let step_times = std::env::var_os("PROXIMA_STEP_TIMES").is_some();
+    // `PROXIMA_MEASURE_QUIET=1` keeps memory polling out of the timed callback
+    // (llama-server's span has none); peak memory is read once after the run.
+    let measure_quiet = std::env::var("PROXIMA_MEASURE_QUIET").is_ok_and(|value| value == "1");
 
     let mut gpu_peak_bytes: u64 = 0;
     for run_index in 0..runs {
@@ -413,29 +427,36 @@ fn main() {
         let mut steady_rss: Vec<u64> = Vec::new();
         let mut steady_footprint: Vec<u64> = Vec::new();
         let mut steady_gpu: Vec<u64> = Vec::new();
+        let mut prefilled_prompt_tokens: usize = 0;
+        let mut ttft_ms_precise: f64 = 0.0;
+        let mut decode_step_ns_total: u64 = 0;
         let mut on_token = |event: TokenEvent<'_>| {
-            if matches!(event.phase, Phase::Prefill { .. }) {
+            let is_prefill = matches!(event.phase, Phase::Prefill { .. });
+            if let Phase::Prefill { prompt_tokens } = event.phase {
                 prefill_elapsed_ms = event.elapsed_ms;
+                prefilled_prompt_tokens = prompt_tokens;
+                ttft_ms_precise = event.elapsed_ns as f64 / 1_000_000.0;
             }
             token_events += 1;
-            let gpu_now = gpu_allocated_bytes();
-            gpu_peak_bytes = gpu_peak_bytes.max(gpu_now);
-            if token_events > STEADY_FROM_TOKEN {
-                let (rss_now, footprint_now) = process_memory_bytes();
-                steady_rss.push(rss_now);
-                steady_footprint.push(footprint_now);
-                steady_gpu.push(gpu_now);
+            let now_tick = Instant::now();
+            let step_ns = now_tick.duration_since(previous_tick).as_nanos() as u64;
+            previous_tick = now_tick;
+            if counts_toward_decode_span(is_prefill, event.step) {
+                decode_step_ns_total += step_ns;
+            }
+            if !measure_quiet {
+                let gpu_now = gpu_allocated_bytes();
+                gpu_peak_bytes = gpu_peak_bytes.max(gpu_now);
+                if token_events > STEADY_FROM_TOKEN {
+                    let (rss_now, footprint_now) = process_memory_bytes();
+                    steady_rss.push(rss_now);
+                    steady_footprint.push(footprint_now);
+                    steady_gpu.push(gpu_now);
+                }
             }
             if step_times {
-                let phase = if matches!(event.phase, Phase::Prefill { .. }) {
-                    "prefill"
-                } else {
-                    "decode"
-                };
+                let phase = if is_prefill { "prefill" } else { "decode" };
                 let step_ms = event.elapsed_ms.saturating_sub(previous_elapsed_ms);
-                let now_tick = Instant::now();
-                let step_ns = now_tick.duration_since(previous_tick).as_nanos() as u64;
-                previous_tick = now_tick;
                 #[cfg(feature = "instrument")]
                 proxima_telemetry::info!(
                     run_index = run_index as u64,
@@ -465,7 +486,15 @@ fn main() {
         let cpu_sys_ms = cpu_after.1 - cpu_before.1;
         let cpu_ms = cpu_user_ms + cpu_sys_ms;
         let cpu_pct = cpu_ms / wall_ms * 100.0;
-        gpu_peak_bytes = gpu_peak_bytes.max(gpu_allocated_bytes());
+        let gpu_end = gpu_allocated_bytes();
+        gpu_peak_bytes = gpu_peak_bytes.max(gpu_end);
+        if measure_quiet {
+            let (rss_end, footprint_end) = process_memory_bytes();
+            steady_rss.push(rss_end);
+            steady_footprint.push(footprint_end);
+            steady_gpu.push(gpu_end);
+        }
+        let prompt_token_count = prefilled_prompt_tokens;
         let steady_rss_bytes = median_bytes(&steady_rss);
         let steady_footprint_bytes = median_bytes(&steady_footprint);
         let steady_gpu_bytes = median_bytes(&steady_gpu);
@@ -479,6 +508,9 @@ fn main() {
         // arms, so subtracting its own measured `elapsed_ms` isolates the
         // per-committed-token decode cost the K sweep is actually meant to
         // move; with speculation it is wall per token, not per evaluation.
+        // on every run=done line; a one-token run has no decode steps, so 0.0
+        let decode_step_ms_per_token =
+            decode_step_ms_per_token(decode_step_ns_total, tokens_generated);
         if tokens_generated > 1 {
             let decode_ms_per_token =
                 (wall_ms - prefill_elapsed_ms as f64) / (tokens_generated - 1) as f64;
@@ -496,7 +528,9 @@ fn main() {
                 text_hash = %format!("{text_hash:016x}"),
                 stopped_by_eos,
                 decode_ms_per_token,
+                decode_step_ms_per_token,
                 ttft_ms = prefill_elapsed_ms,
+                ttft_ms_precise,
                 gpu_peak_bytes,
                 steady_rss_bytes,
                 steady_footprint_bytes,
@@ -511,7 +545,9 @@ fn main() {
                  cpu_user_ms={cpu_user_ms:.3} cpu_sys_ms={cpu_sys_ms:.3} cpu_ms={cpu_ms:.3} cpu_pct={cpu_pct:.2} \
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \
                  text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} \
-                 decode_ms_per_token={decode_ms_per_token:.3} ttft_ms={prefill_elapsed_ms} \
+                 decode_ms_per_token={decode_ms_per_token:.3} \
+                 decode_step_ms_per_token={decode_step_ms_per_token:.6} \
+                 ttft_ms={prefill_elapsed_ms} ttft_ms_precise={ttft_ms_precise:.6} \
                  gpu_peak_bytes={gpu_peak_bytes} steady_rss_bytes={steady_rss_bytes} \
                  steady_footprint_bytes={steady_footprint_bytes} steady_gpu_bytes={steady_gpu_bytes} \
                  steady_samples={steady_samples} text={text:?}"
@@ -530,7 +566,9 @@ fn main() {
                 prompt_token_count = prompt_token_count as u64,
                 text_hash = %format!("{text_hash:016x}"),
                 stopped_by_eos,
+                decode_step_ms_per_token,
                 ttft_ms = prefill_elapsed_ms,
+                ttft_ms_precise,
                 gpu_peak_bytes,
                 steady_rss_bytes,
                 steady_footprint_bytes,
@@ -544,7 +582,9 @@ fn main() {
                 "decode_gbps_baseline run=done run_index={run_index} wall_ms={wall_ms:.3} \
                  cpu_user_ms={cpu_user_ms:.3} cpu_sys_ms={cpu_sys_ms:.3} cpu_ms={cpu_ms:.3} cpu_pct={cpu_pct:.2} \
                  tokens_generated={tokens_generated} prompt_token_count={prompt_token_count} \
-                 text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} ttft_ms={prefill_elapsed_ms} \
+                 text_hash={text_hash:016x} stopped_by_eos={stopped_by_eos} \
+                 decode_step_ms_per_token={decode_step_ms_per_token:.6} \
+                 ttft_ms={prefill_elapsed_ms} ttft_ms_precise={ttft_ms_precise:.6} \
                  gpu_peak_bytes={gpu_peak_bytes} steady_rss_bytes={steady_rss_bytes} \
                  steady_footprint_bytes={steady_footprint_bytes} steady_gpu_bytes={steady_gpu_bytes} \
                  steady_samples={steady_samples} text={text:?}"
@@ -571,5 +611,60 @@ fn main() {
         if let Some((_, recorder)) = _telemetry.as_ref() {
             while recorder.drain() > 0 {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{counts_toward_decode_span, decode_step_ms_per_token};
+
+    /// run_index=0 step_time lines and the run=done line from a real 128-token
+    /// F32 run of the 26-token chat prompt (sb1 `prox-short-F32-r1.log`).
+    const RUN_LOG: &str = include_str!("../tests/fixtures/decode_gbps_baseline_step_times.log");
+
+    fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+        line.split_whitespace()
+            .find_map(|token| token.strip_prefix(key))
+    }
+
+    fn decode_span_ns(log: &str) -> u64 {
+        log.lines()
+            .filter(|line| line.contains("step_time"))
+            .filter_map(|line| {
+                let step: usize = field(line, "step=")?.parse().ok()?;
+                let step_ns: u64 = field(line, "step_ns=")?.parse().ok()?;
+                let is_prefill = field(line, "phase=")? == "prefill";
+                counts_toward_decode_span(is_prefill, step).then_some(step_ns)
+            })
+            .sum()
+    }
+
+    #[test]
+    fn fixture_decode_span_sums_the_127_decode_steps_after_the_first() {
+        let sum_ns = decode_span_ns(RUN_LOG);
+        let done = RUN_LOG
+            .lines()
+            .find(|line| line.contains("run=done"))
+            .expect("fixture carries the run=done line");
+        let tokens_generated: usize = field(done, "tokens_generated=")
+            .and_then(|value| value.parse().ok())
+            .expect("run=done carries tokens_generated");
+
+        assert_eq!(tokens_generated, 128);
+        assert_eq!(sum_ns, 1_251_123_583);
+        let per_token = decode_step_ms_per_token(sum_ns, tokens_generated);
+        assert!((per_token - 9.851_366_795).abs() < 1e-9, "got {per_token}");
+    }
+
+    #[test]
+    fn prefill_event_and_decode_step_zero_are_outside_the_span() {
+        assert!(!counts_toward_decode_span(true, 0));
+        assert!(!counts_toward_decode_span(false, 0));
+        assert!(counts_toward_decode_span(false, 1));
+    }
+
+    #[test]
+    fn single_token_run_does_not_divide_by_zero() {
+        assert_eq!(decode_step_ms_per_token(0, 1), 0.0);
     }
 }

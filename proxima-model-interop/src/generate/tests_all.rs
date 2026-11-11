@@ -736,6 +736,7 @@ pub(super) mod tests {
                 phase: Phase::Prefill { prompt_tokens: 7 },
                 step: 0,
                 elapsed_ms: 400,
+                elapsed_ns: 400_000_000,
             },
             TokenEvent {
                 token_id: 1,
@@ -743,6 +744,7 @@ pub(super) mod tests {
                 phase: Phase::Token,
                 step: 0,
                 elapsed_ms: 400,
+                elapsed_ns: 400_000_000,
             },
             TokenEvent {
                 token_id: 2,
@@ -750,6 +752,7 @@ pub(super) mod tests {
                 phase: Phase::Token,
                 step: 1,
                 elapsed_ms: 900,
+                elapsed_ns: 900_000_000,
             },
         ];
         let metrics = DecodeMetrics::from_events(&events, 3_500, 42.5, 1, 0.125);
