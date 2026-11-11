@@ -440,7 +440,8 @@ impl NumericFormat {
     /// Named formats that carry no wire tag, with their `Debug` spelling. Lives beside
     /// [`Self::ALL`] and [`Self::DEBUG_NAMES`] so [`Self::debug_name`] resolves every named
     /// constant, tagged or not, in one place.
-    pub const UNTAGGED: [(Self, &'static str); 1] = [(Self::Float32, "Float32")];
+    pub const UNTAGGED: [(Self, &'static str); 2] =
+        [(Self::Float32, "Float32"), (Self::Bool, "Bool")];
 
     /// The `Debug` spelling of a named format, wire-tagged or untagged; `None` for a layout this
     /// crate has no constant for.
@@ -526,17 +527,114 @@ impl NumericFormat {
             .map(|position| Self::NAMES[position])
             .or_else(|| match self {
                 Self::Scalar(layout) => layout.name(),
+                Self::Levels(_) if *self == Self::Bool => Some(Self::BOOL_NAME),
                 Self::Block(_) | Self::Levels(_) => None,
             })
     }
 
+    /// The canonical spelling of [`Self::Bool`], the one `DType::Bool` serializes as.
+    pub const BOOL_NAME: &'static str = "bool";
+
     /// The format a canonical name denotes; the inverse of [`Self::name`] over [`Self::ALL`].
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
+        if name == Self::BOOL_NAME {
+            return Some(Self::Bool);
+        }
         Self::NAMES
             .iter()
             .position(|named| *named == name)
             .map(|position| Self::ALL[position])
+    }
+
+    /// Bytes one element occupies stored alone, rounded up to a whole byte; a block format reports
+    /// its block's bytes spread over its elements, rounded up. Equals `DType::size_bytes` for every
+    /// `DType` twin.
+    #[must_use]
+    pub const fn size_bytes(&self) -> usize {
+        match self {
+            Self::Scalar(layout) => (layout.width() as usize).div_ceil(8),
+            Self::Block(_) | Self::Levels(_) => {
+                (self.bytes_per_block() as usize).div_ceil(self.elements_per_block() as usize)
+            }
+        }
+    }
+
+    /// Storage bits one element occupies: the layout's own width for a scalar, the block's bits
+    /// spread over its elements (rounded down) otherwise. Equals `DType::bits` for every `DType`
+    /// twin.
+    #[must_use]
+    pub const fn bits(&self) -> usize {
+        match self {
+            Self::Scalar(layout) => layout.width() as usize,
+            Self::Block(_) | Self::Levels(_) => {
+                self.bytes_per_block() as usize * 8 / self.elements_per_block() as usize
+            }
+        }
+    }
+
+    /// Whether the element is a scalar with an exponent field; a block or level format is a
+    /// quantized code, not a float element.
+    #[must_use]
+    pub const fn is_float(&self) -> bool {
+        match self {
+            Self::Scalar(layout) => layout.is_float(),
+            Self::Block(_) | Self::Levels(_) => false,
+        }
+    }
+
+    /// Whether a fold can accumulate in this encoding without widening.
+    #[must_use]
+    pub const fn accumulates_in_place(&self) -> bool {
+        match self {
+            Self::Scalar(layout) => layout.accumulates_in_place(),
+            Self::Block(_) | Self::Levels(_) => false,
+        }
+    }
+
+    /// Whether the element is a whole-number scalar suitable for gather indices.
+    #[must_use]
+    pub const fn is_integer(&self) -> bool {
+        match self {
+            Self::Scalar(layout) => layout.is_integer(),
+            Self::Block(_) | Self::Levels(_) => false,
+        }
+    }
+
+    /// Whether the element is a signed whole-number scalar.
+    #[must_use]
+    pub const fn is_signed_integer(&self) -> bool {
+        match self {
+            Self::Scalar(layout) => layout.is_signed_integer(),
+            Self::Block(_) | Self::Levels(_) => false,
+        }
+    }
+
+    /// The `DType` that describes the same elements: a scalar layout, or [`Self::Bool`]. `None`
+    /// for a block or level format, which `DType` cannot express.
+    #[must_use]
+    pub const fn to_dtype(&self) -> Option<crate::DType> {
+        match self {
+            Self::Scalar(layout) => Some(crate::DType::Layout(*layout)),
+            Self::Levels(_) if self.is_bool() => Some(crate::DType::Bool),
+            Self::Block(_) | Self::Levels(_) => None,
+        }
+    }
+
+    /// Whether this is [`Self::Bool`]; `const` so `to_dtype` can use it, since `PartialEq` cannot.
+    #[must_use]
+    pub const fn is_bool(&self) -> bool {
+        matches!(
+            self,
+            Self::Levels(LevelFormat {
+                geometry: LevelGeometry::Packed(layout),
+                levels: LevelTable::Linear {
+                    count: 2,
+                    zero_point: 0,
+                    step: 1,
+                },
+            }) if layout.elements == 1 && layout.block_bytes == 1 && layout.scale.layout.width() == 0
+        )
     }
 
     /// q2_k: 256 four-bit codes, 16 sub-blocks each with a 4-bit scale and min.
@@ -557,6 +655,25 @@ impl NumericFormat {
     /// f32: one IEEE binary32 element per value, the layout `DType::FLOAT32` uses. It has no wire
     /// tag, so it is in [`Self::UNTAGGED`], not [`Self::ALL`].
     pub const Float32: Self = Self::Scalar(FloatLayout::BF32);
+    /// bool: a two-level ladder `{0, 1}`, one byte per element, no scale bytes. Not in
+    /// [`Self::ALL`]: it has no wire tag, and `DType::Bool` is its only prior spelling.
+    pub const Bool: Self = Self::Levels(LevelFormat::ladder_of(&BlockLayout::BOOL));
+
+    pub const Int8: Self = Self::Scalar(FloatLayout::INT8);
+    pub const UInt8: Self = Self::Scalar(FloatLayout::UINT8);
+    pub const Int16: Self = Self::Scalar(FloatLayout::INT16);
+    pub const UInt16: Self = Self::Scalar(FloatLayout::UINT16);
+    pub const Int32: Self = Self::Scalar(FloatLayout::INT32);
+    pub const UInt32: Self = Self::Scalar(FloatLayout::UINT32);
+    pub const Int64: Self = Self::Scalar(FloatLayout::INT64);
+    pub const UInt64: Self = Self::Scalar(FloatLayout::UINT64);
+    pub const Int128: Self = Self::Scalar(FloatLayout::INT128);
+    pub const UInt128: Self = Self::Scalar(FloatLayout::UINT128);
+    pub const Float64: Self = Self::Scalar(FloatLayout::F64);
+    pub const Float8E4M3Fn: Self = Self::Scalar(FloatLayout::E4M3FN);
+    /// fp6 E3M2 as one scalar element per value, the layout `DType::FP6_E3_M2` uses; distinct from
+    /// [`Self::Fp6E3M2`], the 32-element block under an f16 scale.
+    pub const Fp6E3M2Scalar: Self = Self::Scalar(FloatLayout::E3M2);
     /// f16: one IEEE binary16 element per value.
     pub const Float16: Self = Self::Scalar(FloatLayout::F16);
     /// bf16: one bfloat16 element per value.
@@ -817,6 +934,108 @@ mod tests {
         assert_eq!(iq4.levels.level(0), Some(-127.0));
         assert_eq!(iq4.levels.level(15), Some(113.0));
         assert_ne!(iq4.levels.level(8), Some(0.0), "the ladder is non-linear");
+    }
+
+    #[test]
+    fn every_dtype_constant_has_a_numeric_format_twin_with_identical_methods() {
+        use crate::DType;
+
+        let twins = [
+            (DType::Bool, NumericFormat::Bool),
+            (DType::INT8, NumericFormat::Int8),
+            (DType::UINT8, NumericFormat::UInt8),
+            (DType::INT16, NumericFormat::Int16),
+            (DType::UINT16, NumericFormat::UInt16),
+            (DType::INT32, NumericFormat::Int32),
+            (DType::UINT32, NumericFormat::UInt32),
+            (DType::INT64, NumericFormat::Int64),
+            (DType::UINT64, NumericFormat::UInt64),
+            (DType::INT128, NumericFormat::Int128),
+            (DType::UINT128, NumericFormat::UInt128),
+            (DType::BFLOAT16, NumericFormat::BFloat16),
+            (DType::BFLOAT8, NumericFormat::Bf8E5M2),
+            (DType::FLOAT8_E4M3FN, NumericFormat::Float8E4M3Fn),
+            (DType::FLOAT8_E5M2, NumericFormat::BFloat8),
+            (DType::FP6_E3_M2, NumericFormat::Fp6E3M2Scalar),
+            (DType::FLOAT16, NumericFormat::Float16),
+            (DType::FLOAT32, NumericFormat::Float32),
+            (DType::FLOAT64, NumericFormat::Float64),
+        ];
+        assert_eq!(twins.len(), 19, "pinned: every DType constant plus Bool");
+
+        for (dtype, format) in twins {
+            assert_eq!(dtype.numeric_format(), format, "{dtype:?}");
+            assert_eq!(format.to_dtype(), Some(dtype), "{dtype:?}");
+            assert_eq!(format.size_bytes(), dtype.size_bytes(), "{dtype:?} size_bytes");
+            assert_eq!(format.bits(), dtype.bits(), "{dtype:?} bits");
+            assert_eq!(format.is_float(), dtype.is_float(), "{dtype:?} is_float");
+            assert_eq!(
+                format.accumulates_in_place(),
+                dtype.accumulates_in_place(),
+                "{dtype:?} accumulates_in_place"
+            );
+            assert_eq!(format.is_integer(), dtype.is_integer(), "{dtype:?} is_integer");
+            assert_eq!(
+                format.is_signed_integer(),
+                dtype.is_signed_integer(),
+                "{dtype:?} is_signed_integer"
+            );
+        }
+        assert_eq!(NumericFormat::Q4_0.to_dtype(), None);
+    }
+
+    #[test]
+    fn bool_is_a_two_level_unscaled_ladder_that_decodes_through_the_shared_walker() {
+        let NumericFormat::Levels(levels) = NumericFormat::Bool else {
+            panic!("bool is a level format");
+        };
+        assert_eq!(
+            levels.levels,
+            LevelTable::Linear {
+                count: 2,
+                zero_point: 0,
+                step: 1
+            }
+        );
+        assert_eq!(NumericFormat::Bool.bytes_per_block(), 1);
+        assert_eq!(NumericFormat::Bool.elements_per_block(), 1);
+        assert_eq!(NumericFormat::Bool.scale(), Some(Field::UNIT));
+        assert_eq!(NumericFormat::Bool.packed_len(5), Some(5));
+        assert_eq!(NumericFormat::from_name("bool"), Some(NumericFormat::Bool));
+        assert_eq!(NumericFormat::Bool.name(), Some("bool"));
+        assert_eq!(std::format!("{:?}", NumericFormat::Bool), "Bool");
+
+        let mut decoded = [9.0_f32; 4];
+        for (index, byte) in [0_u8, 1, 1, 0].iter().enumerate() {
+            crate::decode_blocks(
+                &NumericFormat::Bool,
+                core::slice::from_ref(byte),
+                &mut decoded[index..=index],
+            )
+            .expect("a bool byte decodes as one block");
+        }
+        assert_eq!(decoded, [0.0, 1.0, 1.0, 0.0]);
+        let mut padded = [9.0_f32; 1];
+        crate::decode_blocks(&NumericFormat::Bool, &[0b11_u8], &mut padded)
+            .expect("a bool byte decodes as one block");
+        assert_eq!(padded, [1.0], "the code is bit 0; the seven padding bits are not read");
+    }
+
+    #[test]
+    fn scalar_twins_keep_their_structural_debug_spelling() {
+        for format in [
+            NumericFormat::Int8,
+            NumericFormat::UInt128,
+            NumericFormat::Float64,
+            NumericFormat::Float8E4M3Fn,
+            NumericFormat::Fp6E3M2Scalar,
+        ] {
+            assert!(
+                std::format!("{format:?}").starts_with("Scalar("),
+                "{format:?} must print as it did before it had a constant"
+            );
+            assert_eq!(format.debug_name(), None);
+        }
     }
 
     #[test]
