@@ -137,16 +137,14 @@ fn read_bits<const BYTES: usize>(block: &[u8; BYTES], address: usize, width: u32
     ((word >> shift) as u32) & (u32::MAX >> (32 - width))
 }
 
-/// Ors `bits` into `block` at `[address, address + width)`; the block starts zeroed.
+/// Stores the `width` low bits of `bits` at byte `offset` as one little-endian integer store, so the
+/// scale is a store of its own width and not a run of byte stores a vectoriser would join to the
+/// code bytes beside it.
 #[inline(always)]
-fn put_bits<const BYTES: usize>(block: &mut [u8; BYTES], address: usize, width: u32, bits: u32) {
-    let first = address / 8;
-    let shift = (address % 8) as u32;
-    let span = (shift + width).div_ceil(8) as usize;
-    let word = u64::from(bits & (u32::MAX >> (32 - width))) << shift;
-    for step in 0..span {
-        block[first + step] |= (word >> (8 * step)) as u8;
-    }
+fn put_field<const BYTES: usize>(block: &mut [u8; BYTES], offset: usize, width: u32, bits: u32) {
+    let bytes = width.div_ceil(8) as usize;
+    let masked = bits & (u32::MAX >> (32 - width));
+    block[offset..offset + bytes].copy_from_slice(&masked.to_le_bytes()[..bytes]);
 }
 
 /// [`read_bits`] for a plane of at most eight bits, which spans at most two bytes, so the word is
@@ -163,7 +161,8 @@ fn read_code_bits<const BYTES: usize>(block: &[u8; BYTES], address: usize, width
     (word >> shift) & (u32::MAX >> (32 - width))
 }
 
-/// [`put_bits`] for a plane of at most eight bits.
+/// Ors `bits` into `block` at `[address, address + width)` for a plane of at most eight bits; the
+/// block starts zeroed.
 #[inline(always)]
 fn put_code_bits<const BYTES: usize>(block: &mut [u8; BYTES], address: usize, width: u32, bits: u32) {
     let first = address / 8;
@@ -650,7 +649,7 @@ fn encode_chunk<
     let (scale, high_word) = fit_codes::<ELEMENTS, HIGH_FUSED>(layout, fit, input, &mut codes);
     scatter_codes::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED>(layout, &codes, high_word, &mut block);
     let width = layout.scale.layout.width() as u32;
-    put_bits(&mut block, layout.scale.byte_offset as usize * 8, width, encode(scale, layout.scale.layout));
+    put_field(&mut block, layout.scale.byte_offset as usize, width, encode(scale, layout.scale.layout));
     *out = block;
 }
 
