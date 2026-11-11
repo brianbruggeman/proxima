@@ -479,8 +479,9 @@ async fn a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boun
 }
 
 /// the block formats `block_k_refusal` admits: no scale runs, whole four-wide loads, and a host codec
-/// that encodes (llama's q4_0, q5_0 and q8_0 k-cache types).
-const ADMITTED_BLOCK_K: [BlockLayout; 3] = [BlockLayout::Q4_0, BlockLayout::Q5_0, BlockLayout::Q8_0];
+/// that encodes (llama's q4_0, q5_0 and q8_0 k-cache types, and q8_1, which carries a min field).
+const ADMITTED_BLOCK_K: [BlockLayout; 4] =
+    [BlockLayout::Q4_0, BlockLayout::Q5_0, BlockLayout::Q8_0, BlockLayout::Q8_1];
 
 fn assert_admitted_block_k_set(admitted: &[NumericFormat]) {
     for layout in ADMITTED_BLOCK_K {
