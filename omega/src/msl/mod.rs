@@ -175,8 +175,10 @@ use cached_attention_decode_split::index_literal;
 use cached_attention_decode_split::render_cached_attention_decode_split;
 #[cfg(test)]
 use cached_attention_render::render_cached_attention;
+#[cfg(feature = "metal-attn-variants")]
+use cached_attention_render::cached_attention_kv_codec;
 use cached_attention_render::{
-    cached_attention_kv_codec, render_cached_attention_with_mma_selection,
+    cached_attention_kv_codecs, render_cached_attention_with_mma_selection,
 };
 #[cfg(feature = "metal-attn-split-rows")]
 use cached_attention_row_tiled::render_cached_attention_row_tiled;
@@ -211,7 +213,9 @@ use expert_grouped_gemm::*;
 pub(crate) use expert_grouped_gemm::{route_prepass, route_prepass_active};
 use index_narrowing::*;
 use packed_row_blocked_ggml::*;
-pub use cached_attention_render::cached_attention_kv_codec_for;
+pub use cached_attention_render::{
+    cached_attention_key_codec_for, cached_attention_kv_codec_for, cached_attention_kv_codecs_for,
+};
 pub use cached_attention_render::cached_attention_row_tiled_kv_codec_for;
 #[cfg(feature = "metal-attn-split-rows")]
 use cached_attention_render::{ROW_TILED_KV_REASON, row_tiled_cached_type};

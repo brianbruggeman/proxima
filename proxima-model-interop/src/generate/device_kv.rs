@@ -38,15 +38,18 @@ fn unsupported_cache(kind: &impl core::fmt::Debug) -> InteropError {
 }
 
 // the emitter alone knows which formats a kernel reads, so its answer and its refusal are passed through rather than re-derived here
-fn kernel_codec(format: &NumericFormat) -> Result<Option<NumericFormat>, InteropError> {
-    omega::cached_attention_kv_codec_for(format).map_err(|error| match error {
+fn kernel_codecs(
+    key: &NumericFormat,
+    value: &NumericFormat,
+) -> Result<(Option<NumericFormat>, Option<NumericFormat>), InteropError> {
+    omega::cached_attention_kv_codecs_for(key, value).map_err(|error| match error {
         omega::EmitError::CachedAttentionKvCodecNotSupported { reason, .. } => {
             InteropError::UnsupportedServingConfig(alloc::format!(
-                "device kv cache type {format:?}: {reason}"
+                "device kv cache types key {key:?} value {value:?}: {reason}"
             ))
         }
         other => InteropError::UnsupportedServingConfig(alloc::format!(
-            "device kv cache type {format:?}: {other}"
+            "device kv cache types key {key:?} value {value:?}: {other}"
         )),
     })
 }
@@ -93,9 +96,12 @@ struct DeviceKvLayer {
     /// buffer, and [`DeviceKvLayer::commit`] narrows them into the cache once the step's command
     /// buffers have completed.
     staging: Option<[PlacedBuffer; 3]>,
-    format: NumericFormat,
-    /// The format's codec, resolved once at allocation.
-    codec: FormatCodec,
+    key_format: NumericFormat,
+    /// The key planes' codec, resolved once at allocation.
+    key_codec: FormatCodec,
+    value_format: NumericFormat,
+    /// The value rows' codec, resolved once at allocation.
+    value_codec: FormatCodec,
     even_odd_row: usize,
     v_row: usize,
     even_odd_row_bytes: usize,
@@ -114,7 +120,8 @@ struct DeviceKvLayer {
 pub(super) struct DeviceKv {
     layers: Vec<Option<DeviceKvLayer>>,
     max_step_rows: usize,
-    format: NumericFormat,
+    key_format: NumericFormat,
+    value_format: NumericFormat,
 }
 
 #[cfg(feature = "instrument")]
@@ -154,15 +161,19 @@ impl DeviceKvLayer {
         full_capacity_rows: usize,
         max_step_rows: usize,
         source: &mut impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
-        format: &NumericFormat,
+        (key_format, value_format): (&NumericFormat, &NumericFormat),
     ) -> Result<Self, InteropError> {
-        let narrow_codec = kernel_codec(format)?;
-        let codec = FormatCodec::for_format(format).ok_or_else(|| {
-            InteropError::UnsupportedServingConfig(alloc::format!(
-                "device kv cache format {format:?} has no slice codec"
-            ))
-        })?;
-        let row_bytes = |row: usize| {
+        let narrow_codecs = kernel_codecs(key_format, value_format)?;
+        let slice_codec = |format: &NumericFormat| {
+            FormatCodec::for_format(format).ok_or_else(|| {
+                InteropError::UnsupportedServingConfig(alloc::format!(
+                    "device kv cache format {format:?} has no slice codec"
+                ))
+            })
+        };
+        let key_codec = slice_codec(key_format)?;
+        let value_codec = slice_codec(value_format)?;
+        let row_bytes = |format: &NumericFormat, row: usize| {
             format.packed_len(row).ok_or_else(|| {
                 InteropError::UnsupportedServingConfig(alloc::format!(
                     "device kv cache format {format:?}: a row of {row} elements is not whole blocks"
@@ -176,12 +187,12 @@ impl DeviceKvLayer {
         } else {
             full_capacity_rows
         };
-        let even_odd_row_bytes = row_bytes(even_odd_row)?;
-        let v_row_bytes = row_bytes(v_row)?;
+        let even_odd_row_bytes = row_bytes(key_format, even_odd_row)?;
+        let v_row_bytes = row_bytes(value_format, v_row)?;
         let k_even = acquire(source, layer, "k_even", capacity_rows * even_odd_row_bytes)?;
         let k_odd = acquire(source, layer, "k_odd", capacity_rows * even_odd_row_bytes)?;
         let v = acquire(source, layer, "v", capacity_rows * v_row_bytes)?;
-        let staging = if narrow_codec.is_none() {
+        let staging = if narrow_codecs == (None, None) {
             None
         } else {
             let f32_bytes = core::mem::size_of::<f32>();
@@ -198,8 +209,10 @@ impl DeviceKvLayer {
             k_odd,
             v,
             staging,
-            format: *format,
-            codec,
+            key_format: *key_format,
+            key_codec,
+            value_format: *value_format,
+            value_codec,
             even_odd_row,
             v_row,
             even_odd_row_bytes,
@@ -300,7 +313,7 @@ impl DeviceKvLayer {
             target_row * self.even_odd_row_bytes,
             &cache.k_odd[even_odd],
         )?;
-        self.store_f32(&self.v, target_row * self.v_row_bytes, &cache.v[value])
+        self.store_value_f32(&self.v, target_row * self.v_row_bytes, &cache.v[value])
     }
 
     fn make_room(&mut self, cached_len: usize, new_count: usize, bound_extent: usize) {
@@ -364,24 +377,48 @@ impl DeviceKvLayer {
         cached_len - self.base_position
     }
 
+    /// Writes f32 rows into a key plane through the key format's codec.
     fn store_f32(
         &self,
         buffer: &PlacedBuffer,
         byte_offset: usize,
         values: &[f32],
     ) -> Result<(), InteropError> {
-        omega::write_placed_buffer(buffer, byte_offset, &self.codec, values)
-            .map_err(|error| numeric_failure(&self.format, error))
+        omega::write_placed_buffer(buffer, byte_offset, &self.key_codec, values)
+            .map_err(|error| numeric_failure(&self.key_format, error))
     }
 
+    /// Reads f32 rows out of a key plane through the key format's codec.
     fn load_f32(
         &self,
         buffer: &PlacedBuffer,
         byte_offset: usize,
         count: usize,
     ) -> Result<Vec<f32>, InteropError> {
-        omega::read_placed_buffer(buffer, byte_offset, &self.codec, count)
-            .map_err(|error| numeric_failure(&self.format, error))
+        omega::read_placed_buffer(buffer, byte_offset, &self.key_codec, count)
+            .map_err(|error| numeric_failure(&self.key_format, error))
+    }
+
+    /// Writes f32 rows into the value buffer through the value format's codec.
+    fn store_value_f32(
+        &self,
+        buffer: &PlacedBuffer,
+        byte_offset: usize,
+        values: &[f32],
+    ) -> Result<(), InteropError> {
+        omega::write_placed_buffer(buffer, byte_offset, &self.value_codec, values)
+            .map_err(|error| numeric_failure(&self.value_format, error))
+    }
+
+    /// Reads f32 rows out of the value buffer through the value format's codec.
+    fn load_value_f32(
+        &self,
+        buffer: &PlacedBuffer,
+        byte_offset: usize,
+        count: usize,
+    ) -> Result<Vec<f32>, InteropError> {
+        omega::read_placed_buffer(buffer, byte_offset, &self.value_codec, count)
+            .map_err(|error| numeric_failure(&self.value_format, error))
     }
 
     /// Rounds the `new_count` rows a finished step left in the f32 staging
@@ -395,30 +432,41 @@ impl DeviceKvLayer {
             return Ok(());
         };
         let output_row = self.output_row(cached_len);
-        for (staging, cache, row_bytes, row) in [
+        for (staging, cache, row_bytes, row, codec, format) in [
             (
                 staging_even,
                 &self.k_even,
                 self.even_odd_row_bytes,
                 self.even_odd_row,
+                &self.key_codec,
+                &self.key_format,
             ),
             (
                 staging_odd,
                 &self.k_odd,
                 self.even_odd_row_bytes,
                 self.even_odd_row,
+                &self.key_codec,
+                &self.key_format,
             ),
-            (staging_value, &self.v, self.v_row_bytes, self.v_row),
+            (
+                staging_value,
+                &self.v,
+                self.v_row_bytes,
+                self.v_row,
+                &self.value_codec,
+                &self.value_format,
+            ),
         ] {
             omega::narrow_placed_buffer(
                 staging,
                 0,
                 cache,
                 output_row * row_bytes,
-                &self.codec,
+                codec,
                 new_count * row,
             )
-            .map_err(|error| numeric_failure(&self.format, error))?;
+            .map_err(|error| numeric_failure(format, error))?;
         }
         Ok(())
     }
@@ -436,14 +484,17 @@ impl DeviceKv {
     /// the widest step of any kind, a prefill batch included, and bounds every
     /// step and sizes a sliding layer's linear buffer. A prefill batch ends inside
     /// `positions_needed`, so it adds no full-layer rows.
-    pub(super) fn adopt(
+    ///
+    /// `key_format` stores the K planes and `value_format` the V rows; a block key layout beside
+    /// a scalar value is the one pair that differs, see [`kernel_codecs`].
+    pub(super) fn adopt_pair(
         layer_caches: &mut [LayerCacheState],
         layer_row_widths: &[LayerPadRowWidths],
         cached_len: usize,
         (capacity_positions, bucket_tokens): (usize, usize),
         max_step_rows: usize,
         mut source: impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
-        format: NumericFormat,
+        (key_format, value_format): (NumericFormat, NumericFormat),
     ) -> Result<Option<Self>, InteropError> {
         let full_capacity_rows =
             kv_extent(capacity_positions, usize::MAX, bucket_tokens) + bucket_tokens;
@@ -470,7 +521,7 @@ impl DeviceKv {
                         full_capacity_rows,
                         max_step_rows,
                         &mut source,
-                        &format,
+                        (&key_format, &value_format),
                     )?;
                     device_layer.seed(cache, cached_len)?;
                     layers.push(Some(device_layer));
@@ -491,8 +542,31 @@ impl DeviceKv {
         Ok(Some(Self {
             layers,
             max_step_rows,
-            format,
+            key_format,
+            value_format,
         }))
+    }
+
+    /// [`Self::adopt_pair`] with K and V stored in one `format`, the shape every uniform cache takes.
+    #[cfg(test)]
+    pub(super) fn adopt(
+        layer_caches: &mut [LayerCacheState],
+        layer_row_widths: &[LayerPadRowWidths],
+        cached_len: usize,
+        capacity: (usize, usize),
+        max_step_rows: usize,
+        source: impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
+        format: NumericFormat,
+    ) -> Result<Option<Self>, InteropError> {
+        Self::adopt_pair(
+            layer_caches,
+            layer_row_widths,
+            cached_len,
+            capacity,
+            max_step_rows,
+            source,
+            (format, format),
+        )
     }
 
     /// Gives up the cache buffers of every resident layer so the next [`Self::adopt`] can bind them
@@ -515,7 +589,15 @@ impl DeviceKv {
     /// # Errors
     /// The classifier's refusal, as at allocation: a format the cached-attention kernel cannot read.
     pub(super) fn cache_codec(&self) -> Result<Option<NumericFormat>, InteropError> {
-        kernel_codec(&self.format)
+        kernel_codecs(&self.key_format, &self.value_format).map(|(key, _)| key)
+    }
+
+    /// The packed codec the V leaf placements read, beside [`Self::cache_codec`] for the K planes.
+    ///
+    /// # Errors
+    /// The classifier's refusal, as at allocation.
+    pub(super) fn value_cache_codec(&self) -> Result<Option<NumericFormat>, InteropError> {
+        kernel_codecs(&self.key_format, &self.value_format).map(|(_, value)| value)
     }
 
     /// Moves what a finished step wrote into the cache, for every layer whose
@@ -641,7 +723,8 @@ impl DeviceKv {
                 first_row * layer.even_odd_row_bytes,
                 live * even_odd_row,
             )?;
-            let value = layer.load_f32(&layer.v, first_row * layer.v_row_bytes, live * v_row)?;
+            let value =
+                layer.load_value_f32(&layer.v, first_row * layer.v_row_bytes, live * v_row)?;
             cache.k_even.clear();
             cache.k_odd.clear();
             cache.v.clear();
@@ -904,7 +987,10 @@ mod tests {
             capacity_rows,
             3,
             &mut allocate_placed_buffer,
-            &cache_format(GgmlType::F32).expect("f32 is a device cache format"),
+            (
+                &cache_format(GgmlType::F32).expect("f32 is a device cache format"),
+                &cache_format(GgmlType::F32).expect("f32 is a device cache format"),
+            ),
         )
         .expect("device kv allocates on the real Metal device");
         let dirty = alloc::vec![f32::NAN; capacity_rows * EVEN_ODD_ROW.max(V_ROW)];
@@ -1495,6 +1581,55 @@ mod tests {
     }
 
     #[test]
+    fn a_q4_0_key_beside_a_float16_value_sizes_blocks_for_k_and_halves_for_v_and_flushes_what_the_codecs_decode() {
+        const WIDE_ROW: usize = 64;
+        let positions = 9;
+        let mut cache = attention_cache(None, 2, WIDE_ROW, V_ROW, 0, positions);
+        let even = rows(0, positions, WIDE_ROW, 0);
+        let odd = rows(0, positions, WIDE_ROW, 1);
+        let value = rows(0, positions, V_ROW, 2);
+        cache.append_at(0, &even, &odd, &value);
+        let mut caches = alloc::vec![LayerCacheState::Attention(cache)];
+        let widths = [LayerPadRowWidths::Attention { even_odd_row: WIDE_ROW, v_row: V_ROW }];
+        let q4_0 = cache_format(GgmlType::Q4_0).expect("q4_0 maps to a format");
+
+        let device = DeviceKv::adopt_pair(
+            &mut caches,
+            &widths,
+            positions,
+            (40, 4),
+            3,
+            allocate_placed_buffer,
+            (q4_0, cache_format(GgmlType::F16).expect("f16 maps to a format")),
+        )
+        .expect("a Q4_0 key beside a Float16 value is a readable pair")
+        .expect("a plain attention cache is adoptable");
+
+        let layer = device.layers[0].as_ref().expect("layer 0 is resident");
+        assert_eq!(layer.even_odd_row_bytes, WIDE_ROW / 32 * 18, "two 18-byte Q4_0 blocks per 64-element row");
+        assert_eq!(layer.v_row_bytes, V_ROW * 2, "binary16 value rows");
+        assert!(layer.staging.is_some(), "neither plane is the graph's f32 output, so the step stages in f32");
+        assert_eq!(device.cache_codec().expect("q4_0 is a readable key"), Some(q4_0));
+        assert_eq!(device.value_cache_codec().expect("f16 is a readable value"), Some(Codec::Float16));
+
+        device.flush(&mut caches, positions, 40).expect("device kv flushes to host");
+        let LayerCacheState::Attention(restored) = &caches[0] else {
+            panic!("layer 0 is an attention layer");
+        };
+        let (_, decoded_even) = {
+            let codec = FormatCodec::for_format(&q4_0).expect("q4_0 resolves a codec");
+            let mut packed = alloc::vec![0u8; codec.packed_len(even.len()).expect("whole blocks")];
+            codec.encode(&even, &mut packed).expect("host encodes q4_0");
+            let mut slots = alloc::vec![core::mem::MaybeUninit::<f32>::uninit(); even.len()];
+            codec.decode(&packed, &mut slots).expect("host decodes q4_0");
+            // decode returned Ok, which initialises every slot of its output
+            (packed, slots.iter().map(|slot| unsafe { slot.assume_init() }).collect::<Vec<f32>>())
+        };
+        assert_eq!(restored.k_even, decoded_even, "the key rows read back as the Q4_0 codec decodes them");
+        assert_eq!(restored.v, value, "the value rows are exact binary16 values");
+    }
+
+    #[test]
     fn a_q4_0_device_cache_is_refused_at_adoption_with_the_cache_type_named() {
         let mut caches = alloc::vec![LayerCacheState::Attention(host_cache(None, 10))];
         let widths = [LayerPadRowWidths::Attention {
@@ -1684,7 +1819,7 @@ mod tests {
             }
             resolved += 1;
 
-            let refusal = kernel_codec(format);
+            let refusal = kernel_codecs(format, format);
 
             assert!(matches!(refusal, Err(InteropError::UnsupportedServingConfig(_))), "{format:?}");
         }

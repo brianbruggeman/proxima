@@ -1,5 +1,6 @@
 use proxima_numeric::float_layout::FloatLayout;
 
+use super::layout_render::readable_block_layout;
 use super::*;
 
 /// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
@@ -84,6 +85,28 @@ pub(super) fn cached_attention_kv_codec(
     node: NodeId,
     quantized: &[Option<Codec>],
 ) -> Result<Option<Codec>, EmitError> {
+    let (key, value) = cached_attention_kv_codecs(node, quantized)?;
+    if key == value {
+        return Ok(key);
+    }
+    Err(EmitError::CachedAttentionKvCodecNotSupported {
+        node,
+        reason: "this form reads one codec for the cached K and V; a block K cache is read by the decode split only",
+    })
+}
+
+/// The scalar codecs the decode split reads a cached V row through.
+fn is_scalar_value_codec(codec: &Codec) -> bool {
+    matches!(*codec, Codec::Float16 | Codec::BFloat16 | Codec::BFloat8)
+}
+
+/// [`cached_attention_kv_codec`] with K and V answered separately, `(key, value)`: the uniform
+/// triples it accepts answer `(codec, codec)`, and a K cache stored as a block layout the
+/// renderer can unpack ([`readable_block_layout`]) answers its own format beside a scalar V.
+pub(super) fn cached_attention_kv_codecs(
+    node: NodeId,
+    quantized: &[Option<Codec>],
+) -> Result<(Option<Codec>, Option<Codec>), EmitError> {
     let packed_elsewhere = quantized
         .iter()
         .enumerate()
@@ -97,19 +120,24 @@ pub(super) fn cached_attention_kv_codec(
     let [first, second, third] =
         CACHED_KV_OPERANDS.map(|index| quantized.get(index).copied().flatten());
     match (first, second, third) {
-        (None, None, None) => Ok(None),
+        (None, None, None) => Ok((None, None)),
         (Some(Codec::Float16), Some(Codec::Float16), Some(Codec::Float16)) => {
-            Ok(Some(Codec::Float16))
+            Ok((Some(Codec::Float16), Some(Codec::Float16)))
         }
         (Some(Codec::BFloat16), Some(Codec::BFloat16), Some(Codec::BFloat16)) => {
-            Ok(Some(Codec::BFloat16))
+            Ok((Some(Codec::BFloat16), Some(Codec::BFloat16)))
         }
         (Some(Codec::BFloat8), Some(Codec::BFloat8), Some(Codec::BFloat8)) => {
-            Ok(Some(Codec::BFloat8))
+            Ok((Some(Codec::BFloat8), Some(Codec::BFloat8)))
+        }
+        (Some(even), Some(odd), Some(value))
+            if even == odd && readable_block_layout(&even).is_some() && is_scalar_value_codec(&value) =>
+        {
+            Ok((Some(even), Some(value)))
         }
         _ => Err(EmitError::CachedAttentionKvCodecNotSupported {
             node,
-            reason: "the cached K and V operands must be all plain, all Float16, all BFloat16, or all BFloat8",
+            reason: "the cached K and V operands must be all plain, all Float16, all BFloat16, all BFloat8, or a block K beside a Float16, BFloat16 or BFloat8 V",
         }),
     }
 }
@@ -139,6 +167,18 @@ fn form_reads_narrow_kv(form: CachedAttentionForm) -> bool {
     decode || rows
 }
 
+fn form_reads_block_key(form: CachedAttentionForm) -> bool {
+    #[cfg(feature = "metal-attn-split-decode")]
+    {
+        matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. })
+    }
+    #[cfg(not(feature = "metal-attn-split-decode"))]
+    {
+        let _ = form;
+        false
+    }
+}
+
 #[cfg(test)]
 pub(super) fn render_cached_attention(
     resolved: &BoundOp,
@@ -150,7 +190,7 @@ pub(super) fn render_cached_attention(
         resolved,
         entry,
         numeric_policy,
-        cached_kv_codec,
+        (cached_kv_codec, cached_kv_codec),
         AttentionMmaSelection::Legacy,
         AttentionRowSchedule::legacy(),
     )
@@ -160,7 +200,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
     resolved: &BoundOp,
     entry: &str,
     numeric_policy: NumericPolicy,
-    cached_kv_codec: Option<Codec>,
+    (cached_key_codec, cached_kv_codec): (Option<Codec>, Option<Codec>),
     mma_selection: AttentionMmaSelection,
     row_schedule: AttentionRowSchedule,
 ) -> Result<String, EmitError> {
@@ -281,13 +321,23 @@ pub(super) fn render_cached_attention_with_mma_selection(
             reason: "decode split reads Float16, BFloat16 or BFloat8; row-tiled reads BFloat16 or BFloat8",
         });
     }
+    if cached_key_codec != cached_kv_codec && !form_reads_block_key(form) {
+        return Err(EmitError::CachedAttentionKvCodecNotSupported {
+            node: resolved.node,
+            reason: "a block K cache is read by the decode split only; row-tiled and the other forms read one codec for K and V",
+        });
+    }
     let (single_range_dynamic, two_range_cached_bound) = match form {
         CachedAttentionForm::Static => (false, false),
         CachedAttentionForm::SingleRangeDynamic { .. } => (true, false),
         CachedAttentionForm::TwoRangeCachedBound => (false, true),
         #[cfg(feature = "metal-attn-split-decode")]
         CachedAttentionForm::TwoRangeDecodeSplit { .. } => {
-            return render_cached_attention_decode_split(resolved, entry, cached_kv_codec);
+            return render_cached_attention_decode_split(
+                resolved,
+                entry,
+                (cached_key_codec, cached_kv_codec),
+            );
         }
         #[cfg(feature = "metal-attn-split-rows")]
         CachedAttentionForm::TwoRangeRowTiled {
@@ -1004,4 +1054,38 @@ pub fn cached_attention_kv_codec_for(format: &Codec) -> Result<Option<Codec>, Em
         quantized[operand] = Some(*format);
     }
     cached_attention_kv_codec(NodeId(0), &quantized)
+}
+
+/// The codec the cached-attention emitter reads a K cache stored as `format` with, whatever the V
+/// cache is: [`cached_attention_kv_codec_for`]'s answer for a plain or scalar format, and `format`
+/// itself for a block layout [`readable_block_layout`] accepts. Admission asks this for the K side
+/// and [`cached_attention_kv_codecs_for`] for the pair.
+///
+/// # Errors
+/// [`EmitError::CachedAttentionKvCodecNotSupported`] for a format no kernel form reads as K.
+pub fn cached_attention_key_codec_for(format: &Codec) -> Result<Option<Codec>, EmitError> {
+    if readable_block_layout(format).is_some() {
+        return Ok(Some(*format));
+    }
+    cached_attention_kv_codec_for(format)
+}
+
+/// The `(key, value)` codecs the cached-attention emitter reads a cache stored as `key` and
+/// `value` with; the pair counterpart of [`cached_attention_kv_codec_for`] and the same classifier
+/// the emit path runs. A pair the kernels cannot read is the emitter's own refusal.
+///
+/// # Errors
+/// [`EmitError::CachedAttentionKvCodecNotSupported`] for a pair no kernel form reads.
+pub fn cached_attention_kv_codecs_for(
+    key: &Codec,
+    value: &Codec,
+) -> Result<(Option<Codec>, Option<Codec>), EmitError> {
+    let as_operand = |format: &Codec| {
+        (!format.is_identity_of(&Codec::Scalar(FloatLayout::BF32))).then_some(*format)
+    };
+    let mut quantized = [None; 7];
+    quantized[2] = as_operand(key);
+    quantized[3] = as_operand(key);
+    quantized[6] = as_operand(value);
+    cached_attention_kv_codecs(NodeId(0), &quantized)
 }

@@ -14,6 +14,7 @@ use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::{BlockLayout, CodeRegion, Coded, Field, Plane};
 use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
+use proxima_numeric::{FormatCodec, NumericFormat};
 
 pub(crate) const F32_FRACTION_BITS: u32 = 23;
 pub(crate) const F32_INFINITY_BITS: u32 = 0x7f80_0000;
@@ -436,6 +437,22 @@ fn field_expression(field: &Field, binding: &str, helper: &str) -> String {
         .collect::<Vec<_>>()
         .join(" | ");
     format!("    float {binding} = {helper}({gathered});\n")
+}
+
+/// The block layout a cached-attention kernel reads a cache stored as `format` through, `None`
+/// when the format is not one. [`block_unpack_msl`] must render the layout whole (it has no
+/// per-run scale fields), the host codec must resolve it so the cache can be filled, and four
+/// consecutive elements must stay inside one block so a four-wide load never straddles two.
+/// Decided from the layout's own properties, never from a format name.
+#[must_use]
+pub fn readable_block_layout(format: &NumericFormat) -> Option<&BlockLayout> {
+    let NumericFormat::Block(layout) = format else {
+        return None;
+    };
+    let renders_whole = layout.scale_runs.is_none();
+    let four_wide_stays_in_block = layout.elements % 4 == 0;
+    (renders_whole && four_wide_stays_in_block && FormatCodec::for_format(format).is_some())
+        .then_some(layout)
 }
 
 /// Renders `static inline float name(device const uchar *block, uint index)`: element `index` of

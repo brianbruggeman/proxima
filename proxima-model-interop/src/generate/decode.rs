@@ -1955,7 +1955,7 @@ impl<'file> LoadedModel<'file> {
         dense_attention_pad_scratch: &'call mut [DenseAttentionPadScratch],
         step_input_scratch: &'call mut Vec<StepInput>,
         device_resident: &[bool],
-        device_codec: Option<Codec>,
+        device_codec: (Option<Codec>, Option<Codec>),
         named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
         single_position_step: bool,
     ) -> Result<Vec<u64>, InteropError> {
@@ -4720,7 +4720,7 @@ format; only the single-row decode kernel reads it from the device cache",
                         let mut buffers_bound = 0u64;
                         #[cfg(feature = "instrument")]
                         let mut buffers_allocated = 0u64;
-                        device_kv = DeviceKv::adopt(
+                        device_kv = DeviceKv::adopt_pair(
                             &mut layer_caches,
                             &layer_row_widths,
                             cached_len,
@@ -4748,7 +4748,10 @@ format; only the single-row decode kernel reads it from the device cache",
                                     Ok,
                                 )
                             },
-                            device_kv::cache_format(serving_config.kv_cache_key_quant)?,
+                            (
+                                device_kv::cache_format(serving_config.kv_cache_key_quant)?,
+                                device_kv::cache_format(serving_config.kv_cache_value_quant)?,
+                            ),
                         )?;
                         #[cfg(feature = "instrument")]
                         debug!(
@@ -4811,13 +4814,12 @@ did not hold every cached position)",
                     let device_resident_view: &[bool] =
                         if kv_live { &kv_carried_layers } else { &[] };
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    let device_cache_codec = device_kv
-                        .as_ref()
-                        .map(DeviceKv::cache_codec)
-                        .transpose()?
-                        .flatten();
+                    let device_cache_codec = match device_kv.as_ref() {
+                        Some(device) => (device.cache_codec()?, device.value_cache_codec()?),
+                        None => (None, None),
+                    };
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
-                    let device_cache_codec: Option<Codec> = None;
+                    let device_cache_codec: (Option<Codec>, Option<Codec>) = (None, None);
                     let sliding_len_scalar = sliding_cached_len_scalar(&layer_caches, cached_len);
                     #[cfg(feature = "instrument")]
                     let push_named_blocks_started = read_ticks();
@@ -8101,7 +8103,7 @@ did not hold every cached position)",
             &mut dense_attention_pad_scratch,
             &mut step_input_scratch,
             &[],
-            None,
+            (None, None),
             &mut named_blocks,
             self.single_position_step,
         )?;

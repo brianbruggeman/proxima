@@ -20,6 +20,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use half::{bf16, f16};
+use proxima_numeric::{FormatCodec, NumericFormat};
 use proxima_tensor::cpu::{QuantizedBlock, evaluate_quantized_named_with_scratch};
 use proxima_tensor::spec::qk_norm_cached_forward_program;
 use proxima_tensor::test_support::Lcg;
@@ -604,4 +605,333 @@ fn card_09_bf8_decode_matches_f32_cache_output_bits() {
         bf8_output, f32_output,
         "BF8 cache values widen into the same f32 decode"
     );
+}
+
+fn is_key_leaf(name: &str) -> bool {
+    name.ends_with(".k_even") || name.ends_with(".k_odd")
+}
+
+/// `values` packed by the host codec and decoded back by it: the bytes the device reads and the
+/// f32 values the CPU evaluator attends over.
+fn block_round_trip(format: &NumericFormat, values: &[f32]) -> (Vec<u8>, Vec<f32>) {
+    let codec = FormatCodec::for_format(format).expect("the format resolves a host codec");
+    let mut packed = vec![0u8; codec.packed_len(values.len()).expect("a whole number of blocks")];
+    codec.encode(values, &mut packed).expect("the host encodes the cache rows");
+    let mut slots = vec![std::mem::MaybeUninit::<f32>::uninit(); values.len()];
+    codec.decode(&packed, &mut slots).expect("the host decodes the cache rows");
+    // decode returned Ok, which initialises every slot of its output
+    let decoded = slots.iter().map(|slot| unsafe { slot.assume_init() }).collect();
+    (packed, decoded)
+}
+
+/// The largest `|decoded - original|` as a fraction of its 32-element block's largest magnitude:
+/// a Q4_0 element is rounded to a step of `max / 8` and the extreme opposite the block maximum
+/// clamps a full step short, so no element is off by more than `1/8` of the block maximum.
+fn worst_error_over_block_max(original: &[f32], decoded: &[f32]) -> f32 {
+    original
+        .chunks(32)
+        .zip(decoded.chunks(32))
+        .flat_map(|(block, rebuilt)| {
+            let block_max = block.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+            block
+                .iter()
+                .zip(rebuilt)
+                .map(move |(want, got)| (want - got).abs() / block_max.max(f32::MIN_POSITIVE))
+        })
+        .fold(0.0f32, f32::max)
+}
+
+fn max_relative(expected: &[f32], actual: &[f32]) -> f32 {
+    assert_eq!(expected.len(), actual.len());
+    assert!(!expected.is_empty(), "an empty root compares nothing");
+    let peak = expected.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+    let worst = expected.iter().zip(actual).fold(0.0f32, |worst, (want, got)| worst.max((want - got).abs()));
+    worst / peak.max(f32::MIN_POSITIVE)
+}
+
+struct BlockKeyCell {
+    metal_vs_cpu: f32,
+    metal_vs_host_decode: f32,
+    metal_vs_f16_cache: f32,
+    step_fraction: f32,
+}
+
+/// Runs the decode program with K cached as `format` blocks and V as binary16 on Metal, against
+/// (a) the CPU evaluator over the host-decoded K and half-rounded V, which isolates the kernel's
+/// block read, and (b) Metal over the same un-quantized inputs cached as binary16, which measures
+/// what the K quantization costs the output.
+fn block_key_cell(format: NumericFormat, cached_len: u64, head_dim: u32) -> BlockKeyCell {
+    let policy = production_numeric_policy();
+    let fixture = gqa_decode_fixture(cached_len, head_dim);
+    let output_roots = [fixture.roots[0]];
+
+    let mut host_named = fixture.named.clone();
+    let mut block_named: Vec<(String, omega::Codec, Vec<u8>)> = Vec::new();
+    let mut step_fraction = 0.0f32;
+    for (name, data) in host_named.iter_mut().filter(|(name, _)| is_kv_cache(name)) {
+        if is_key_leaf(name) {
+            let (packed, decoded) = block_round_trip(&format, data);
+            step_fraction = step_fraction.max(worst_error_over_block_max(data, &decoded));
+            *data = decoded;
+            block_named.push((name.clone(), format, packed));
+        } else {
+            *data = round_to_half(data);
+            block_named.push((name.clone(), omega::Codec::Float16, half_bytes(data)));
+        }
+    }
+    assert_eq!(block_named.len(), 3 * LAYERS as usize, "a K even, K odd and V leaf per layer");
+
+    let shapes = infer(&fixture.program, &fixture.symbols).expect("the decode program infers");
+    let resolved = bind(&fixture.program, &shapes, &output_roots, policy).expect("the decode program binds");
+    let attention: Vec<_> = resolved
+        .iter()
+        .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .collect();
+    assert!(!attention.is_empty(), "zero CachedAttention ops would compare nothing");
+    for bound in &attention {
+        let mut packed = omega::PackedOperands::new();
+        for index in [2, 3] {
+            packed.insert(bound.operands()[index].0, format);
+        }
+        packed.insert(bound.operands()[6].0, omega::Codec::Float16);
+        let kernel = omega::emit(bound, &packed, policy).expect("a block K beside a binary16 V emits");
+        assert!(kernel.entry.ends_with("_ds"), "the op must take the decode split form, got {}", kernel.entry);
+        assert!(kernel.source.contains("device const uchar* in2"), "the cached K plane binds as raw blocks");
+        assert!(kernel.source.contains("omega_key_block_"), "the K read goes through the rendered layout helper");
+    }
+
+    let host_blocks = as_named_blocks(&host_named);
+    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
+    let mut validated = None;
+    let cpu = evaluate_quantized_named_with_scratch(
+        &fixture.program,
+        &fixture.symbols,
+        &host_blocks,
+        &output_roots,
+        &mut free_buffers,
+        &mut validated,
+    )
+    .expect("cpu runs the decode program over the decoded cache");
+
+    let block_blocks: Vec<(&str, QuantizedBlock<'_>)> = fixture
+        .named
+        .iter()
+        .map(|(name, data)| match block_named.iter().find(|(leaf, _, _)| leaf == name) {
+            Some((_, codec, bytes)) => (name.as_str(), QuantizedBlock::Packed { codec: *codec, bytes }),
+            None => (name.as_str(), QuantizedBlock::Float32(data)),
+        })
+        .collect();
+    let block_plan = omega::plan_named(&fixture.program, &fixture.symbols, &block_blocks, &output_roots, policy)
+        .expect("metal plans the block K decode program");
+    let block_run = omega::execute_plan_named(&block_plan, &block_blocks).expect("metal runs the block K decode program");
+
+    let half_leaves: Vec<(String, Vec<u8>)> = fixture
+        .named
+        .iter()
+        .filter(|(name, _)| is_kv_cache(name))
+        .map(|(name, data)| (name.clone(), half_bytes(data)))
+        .collect();
+    let half_blocks: Vec<(&str, QuantizedBlock<'_>)> = fixture
+        .named
+        .iter()
+        .map(|(name, data)| match half_leaves.iter().find(|(leaf, _)| leaf == name) {
+            Some((_, bytes)) => (name.as_str(), QuantizedBlock::Packed { codec: omega::Codec::Float16, bytes }),
+            None => (name.as_str(), QuantizedBlock::Float32(data)),
+        })
+        .collect();
+    let half_plan = omega::plan_named(&fixture.program, &fixture.symbols, &half_blocks, &output_roots, policy)
+        .expect("metal plans the binary16 decode program");
+    let half_run = omega::execute_plan_named(&half_plan, &half_blocks).expect("metal runs the binary16 decode program");
+
+    let plain_plan = omega::plan_named(&fixture.program, &fixture.symbols, &host_blocks, &output_roots, policy)
+        .expect("metal plans the decoded plain f32 program");
+    let plain_run = omega::execute_plan_named(&plain_plan, &host_blocks).expect("metal runs the decoded plain f32 program");
+
+    let cell = BlockKeyCell {
+        metal_vs_cpu: max_relative(cpu.root(), block_run.root()),
+        metal_vs_host_decode: max_relative(plain_run.root(), block_run.root()),
+        metal_vs_f16_cache: max_relative(half_run.root(), block_run.root()),
+        step_fraction,
+    };
+    eprintln!(
+        "block_key parity: head_dim={head_dim} cached_len={cached_len} metal_vs_cpu={} metal_vs_host_decode={} metal_vs_f16_cache={} worst_key_error_over_block_max={}",
+        cell.metal_vs_cpu, cell.metal_vs_host_decode, cell.metal_vs_f16_cache, cell.step_fraction
+    );
+    cell
+}
+
+#[test]
+fn cached_attention_decode_split_reads_a_q4_0_k_cache_as_the_host_codec_decodes_it() {
+    let mut cells = 0_usize;
+    for head_dim in HEAD_DIMS {
+        for cached_len in CACHED_LENGTHS {
+            let cell = block_key_cell(NumericFormat::Q4_0, cached_len, head_dim);
+            assert!(
+                cell.metal_vs_host_decode < 1e-4,
+                "head_dim {head_dim} cached_len {cached_len}: the block read disagrees with the cpu over the same decoded values: {}",
+                cell.metal_vs_host_decode
+            );
+            cells += 1;
+        }
+    }
+    assert_eq!(cells, 12, "3 head dims x 4 cached lengths");
+}
+
+/// Q4_0 rounds each element to a step of `block max / 8`, so no K element moves by more than
+/// one step of its block maximum: the block's largest value maps to code 0 exactly and the
+/// opposite extreme clamps to code 15, a full step short (asserted on the data below). The output
+/// is compared at that same `1/8` relative bound: attention is smooth in K, and the fixture's K
+/// is uniform in [-1, 1).
+#[test]
+fn cached_attention_q4_0_k_cache_moves_the_output_by_no_more_than_the_q4_0_step_of_the_inputs() {
+    let half_step = 1.0f32 / 8.0; // one full Q4_0 step as a fraction of the block maximum
+    let mut cells = 0_usize;
+    for head_dim in HEAD_DIMS {
+        for cached_len in CACHED_LENGTHS {
+            let cell = block_key_cell(NumericFormat::Q4_0, cached_len, head_dim);
+            assert!(
+                // the stored scale is binary16, so the step carries up to 8 * 2^-11 of relative slack
+                cell.step_fraction <= half_step * (1.0 + 1.0 / 256.0),
+                "head_dim {head_dim}: a K element moved by {} of its block max, past one Q4_0 step",
+                cell.step_fraction
+            );
+            assert!(
+                cell.metal_vs_f16_cache <= half_step,
+                "head_dim {head_dim} cached_len {cached_len}: Q4_0 K moved the output by {} against the binary16 cache, past {half_step}",
+                cell.metal_vs_f16_cache
+            );
+            cells += 1;
+        }
+    }
+    assert_eq!(cells, 12, "3 head dims x 4 cached lengths");
+}
+
+#[test]
+fn cached_attention_decode_split_reads_a_q8_0_k_cache_through_the_same_rendered_layout_load() {
+    let cell = block_key_cell(NumericFormat::Q8_0, 199, 256);
+
+    assert!(cell.metal_vs_host_decode < 1e-4, "{}", cell.metal_vs_host_decode);
+}
+
+#[cfg(all(feature = "instrument", feature = "metal-output-placement"))]
+fn attention_gpu_ns(timings: &[omega::metal::OpGpuTiming]) -> (u64, usize) {
+    timings
+        .iter()
+        .filter(|timing| timing.kind.contains("attention"))
+        .fold((0, 0), |(total, ops), timing| (total + timing.gpu_ns, ops + 1))
+}
+
+/// Per-step GPU time of the decode-split attention ops with the K cache as binary16 and as Q4_0,
+/// interleaved so box load lands on both arms alike. Reports min / median / max of the sample.
+#[cfg(all(feature = "instrument", feature = "metal-output-placement"))]
+#[test]
+fn cached_attention_decode_split_times_a_binary16_k_cache_against_a_q4_0_k_cache() {
+    const SAMPLES: usize = 25;
+    let policy = production_numeric_policy();
+    let (head_dim, cached_len) = (256, 1099);
+    let fixture = gqa_decode_fixture(cached_len, head_dim);
+    let output_roots = [fixture.roots[0]];
+    let q4_0 = NumericFormat::Q4_0;
+
+    let half_leaves: Vec<(String, omega::Codec, Vec<u8>)> = fixture
+        .named
+        .iter()
+        .filter(|(name, _)| is_kv_cache(name))
+        .map(|(name, data)| (name.clone(), omega::Codec::Float16, half_bytes(data)))
+        .collect();
+    let block_leaves: Vec<(String, omega::Codec, Vec<u8>)> = fixture
+        .named
+        .iter()
+        .filter(|(name, _)| is_kv_cache(name))
+        .map(|(name, data)| {
+            if is_key_leaf(name) {
+                (name.clone(), q4_0, block_round_trip(&q4_0, data).0)
+            } else {
+                (name.clone(), omega::Codec::Float16, half_bytes(data))
+            }
+        })
+        .collect();
+    let named_with = |leaves: &'_ [(String, omega::Codec, Vec<u8>)]| -> Vec<(String, Vec<f32>, Option<usize>)> {
+        fixture
+            .named
+            .iter()
+            .map(|(name, data)| (name.clone(), data.clone(), leaves.iter().position(|(leaf, _, _)| leaf == name)))
+            .collect()
+    };
+    let half_owned = named_with(&half_leaves);
+    let block_owned = named_with(&block_leaves);
+    let half_blocks: Vec<(&str, QuantizedBlock<'_>)> = half_owned
+        .iter()
+        .map(|(name, data, leaf)| match leaf {
+            Some(index) => (name.as_str(), QuantizedBlock::Packed { codec: half_leaves[*index].1, bytes: &half_leaves[*index].2 }),
+            None => (name.as_str(), QuantizedBlock::Float32(data)),
+        })
+        .collect();
+    let block_blocks: Vec<(&str, QuantizedBlock<'_>)> = block_owned
+        .iter()
+        .map(|(name, data, leaf)| match leaf {
+            Some(index) => (name.as_str(), QuantizedBlock::Packed { codec: block_leaves[*index].1, bytes: &block_leaves[*index].2 }),
+            None => (name.as_str(), QuantizedBlock::Float32(data)),
+        })
+        .collect();
+    let half_plan = omega::plan_named(&fixture.program, &fixture.symbols, &half_blocks, &output_roots, policy)
+        .expect("metal plans the binary16 decode program");
+    let block_plan = omega::plan_named(&fixture.program, &fixture.symbols, &block_blocks, &output_roots, policy)
+        .expect("metal plans the Q4_0 K decode program");
+
+    let mut half_ns = Vec::new();
+    let mut block_ns = Vec::new();
+    for _ in 0..SAMPLES {
+        let (_, timings) = omega::execute_plan_named_with_placements_op_timed(&half_plan, &half_blocks, &[], &[])
+            .expect("the binary16 plan times");
+        let (nanos, ops) = attention_gpu_ns(&timings);
+        assert_eq!(ops, LAYERS as usize, "one decode-split attention op per layer");
+        half_ns.push(nanos);
+        let (_, timings) = omega::execute_plan_named_with_placements_op_timed(&block_plan, &block_blocks, &[], &[])
+            .expect("the Q4_0 K plan times");
+        block_ns.push(attention_gpu_ns(&timings).0);
+    }
+    half_ns.sort_unstable();
+    block_ns.sort_unstable();
+    let summary = |label: &str, sorted: &[u64]| {
+        eprintln!(
+            "decode_split attention gpu_ns head_dim={head_dim} cached_len={cached_len} layers={LAYERS} {label}: min={} median={} max={} samples={}",
+            sorted[0],
+            sorted[sorted.len() / 2],
+            sorted[sorted.len() - 1],
+            sorted.len()
+        );
+    };
+    summary("k=binary16 v=binary16", &half_ns);
+    summary("k=q4_0 v=binary16", &block_ns);
+    eprintln!(
+        "k bytes per row per kv head: binary16={} q4_0={} (even + odd planes: {} vs {})",
+        (head_dim as usize / 2) * 2,
+        NumericFormat::Q4_0.packed_len(head_dim as usize / 2).expect("whole blocks"),
+        2 * (head_dim as usize / 2) * 2,
+        2 * NumericFormat::Q4_0.packed_len(head_dim as usize / 2).expect("whole blocks"),
+    );
+    assert!(half_ns[0] > 0 && block_ns[0] > 0, "both arms must report attention time");
+}
+
+#[test]
+fn cached_attention_declines_a_block_v_cache_instead_of_reading_it_as_f32() {
+    let policy = production_numeric_policy();
+    let fixture = gqa_decode_fixture(199, 64);
+    let output_roots = [fixture.roots[0]];
+    let shapes = infer(&fixture.program, &fixture.symbols).expect("the decode program infers");
+    let resolved = bind(&fixture.program, &shapes, &output_roots, policy).expect("the decode program binds");
+    let attention = resolved
+        .iter()
+        .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .expect("the fixture contains a cached attention operation");
+    let mut mixed_with_block_value = omega::PackedOperands::new();
+    for index in [2, 3, 6] {
+        mixed_with_block_value.insert(attention.operands()[index].0, NumericFormat::Q4_0);
+    }
+
+    let error = omega::emit(attention, &mixed_with_block_value, policy)
+        .expect_err("a block V cache has no read path");
+
+    assert!(matches!(error, omega::EmitError::CachedAttentionKvCodecNotSupported { .. }), "{error:?}");
 }

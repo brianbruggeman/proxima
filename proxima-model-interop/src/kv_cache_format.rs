@@ -26,15 +26,33 @@ fn is_binary32_format(format: &NumericFormat) -> bool {
     format.is_identity_of(&NumericFormat::Float32)
 }
 
+/// The codec the kernel reads a K cache stored as `format` with, whatever the V cache is.
 #[cfg(feature = "gpu")]
 fn kernel_codec(format: &NumericFormat) -> Result<Option<NumericFormat>, String> {
-    omega::cached_attention_kv_codec_for(format).map_err(|error| error.to_string())
+    omega::cached_attention_key_codec_for(format).map_err(|error| error.to_string())
 }
 
 #[cfg(not(feature = "gpu"))]
 fn kernel_codec(format: &NumericFormat) -> Result<Option<NumericFormat>, String> {
     if is_binary32_format(format) {
         Ok(None)
+    } else {
+        Err(String::from("this build has no cached-attention kernel that reads a narrow cache"))
+    }
+}
+
+/// The kernel's answer for a K and V stored as different formats.
+#[cfg(feature = "gpu")]
+fn kernel_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
+    omega::cached_attention_kv_codecs_for(key, value)
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(not(feature = "gpu"))]
+fn kernel_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
+    if is_binary32_format(key) && is_binary32_format(value) {
+        Ok(())
     } else {
         Err(String::from("this build has no cached-attention kernel that reads a narrow cache"))
     }
@@ -51,8 +69,8 @@ fn row_tiled_reads_format(format: &NumericFormat) -> bool {
 }
 
 /// Admits a `-ctk`/`-ctv` pair: key and value in one type that is binary32 or that the
-/// cached-attention kernel reads. A mixed pair, or a type no kernel reads (Q8_0, Q4_0, ...), is
-/// refused with the format named.
+/// cached-attention kernel reads, or the one mixed pair the decode kernel reads: a block key
+/// layout beside a scalar narrow value. Any other pair is refused with the formats named.
 ///
 /// # Errors
 /// [`InteropError::UnsupportedServingConfig`] naming the refused pair and the reason.
@@ -62,20 +80,23 @@ pub(crate) fn admit_pair(key: GgmlType, value: GgmlType) -> Result<(), InteropEr
             "kv_cache_key_quant={key:?} kv_cache_value_quant={value:?} (-ctk/-ctv): {reason}"
         ))
     };
-    if key != value {
-        return Err(refuse(String::from(
-            "key and value must be stored in the same type; the cached attention kernels read one cache codec for both",
-        )));
-    }
     let Ok(format) = cache_format(key) else {
         return Err(refuse(format!("{key:?} names no numeric format")));
     };
-    kernel_codec(&format).map(|_| ()).map_err(|reason| {
+    if key != value {
+        let Ok(value_format) = cache_format(value) else {
+            return Err(refuse(format!("{value:?} names no numeric format")));
+        };
+        return kernel_pair(&format, &value_format).map_err(|reason| {
+            refuse(format!(
+                "key and value must be stored in the same type unless the decode kernel reads the pair: {reason}"
+            ))
+        });
+    }
+    kernel_pair(&format, &format).map_err(|reason| {
         refuse(format!(
-            "cache format {format:?} has no read path: {reason}; a quantized cache (Q8_0, Q4_0, ...) \
-             is not readable because the quantized matmul dispatch only handles a flat \
-             `weight[rows, k] x activation[batch, k]` matmul, while the cached-attention reduces \
-             are batched reduces over a shared kv-head axis"
+            "cache format {format:?} has no read path: {reason}; a block layout is read as the key \
+             cache only (-ctk), beside a Float16, BFloat16 or BFloat8 value cache (-ctv)"
         ))
     })
 }
@@ -136,6 +157,25 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn a_block_key_beside_a_float16_value_is_admitted_and_every_other_block_pairing_is_refused() {
+        assert!(admit_pair(GgmlType::Q4_0, GgmlType::F16).is_ok(), "Q4_0 key, F16 value");
+        assert!(admit_pair(GgmlType::Q8_0, GgmlType::F16).is_ok(), "Q8_0 key, F16 value");
+        for (key, value) in [
+            (GgmlType::Q4_0, GgmlType::Q4_0),
+            (GgmlType::Q8_0, GgmlType::Q8_0),
+            (GgmlType::F16, GgmlType::Q4_0),
+            (GgmlType::Q4_0, GgmlType::F32),
+            (GgmlType::F32, GgmlType::F16),
+        ] {
+            let error = admit_pair(key, value).expect_err("the kernel reads no such pair");
+
+            let message = error.to_string();
+            assert!(message.contains(&format!("{key:?}")) && message.contains(&format!("{value:?}")), "{message}");
+        }
+    }
+
     #[test]
     fn a_type_with_no_numeric_format_is_refused() {
         let error = admit_pair(GgmlType::I8, GgmlType::I8).expect_err("integer cache");
@@ -157,7 +197,7 @@ mod tests {
         assert!(!is_narrow(GgmlType::F32));
         assert!(is_narrow(GgmlType::F16));
         assert!(is_narrow(GgmlType::Bf16));
-        assert!(!is_narrow(GgmlType::Q8_0));
+        assert!(is_narrow(GgmlType::Q4_0), "a block key layout is a narrow cache");
     }
 
     #[cfg(feature = "gpu")]

@@ -2116,7 +2116,7 @@ pub(super) struct KvStep<'resident> {
     pub(super) cached_len: usize,
     pub(super) bound_extent: usize,
     pub(super) device_resident: &'resident [bool],
-    pub(super) device_codec: Option<Codec>,
+    pub(super) device_codec: (Option<Codec>, Option<Codec>),
 }
 
 /// One step's KV-cache `Op::Input` leaves, named and padded off whatever
@@ -2206,14 +2206,17 @@ pub(super) fn push_kv_named_blocks<'call>(
             ) => {
                 let shape = KvPadShape::for_cache(cache, kv_bound_extent, *even_odd_row, *v_row);
                 if device_resident.get(layer).copied().unwrap_or(false) {
-                    let resident_leaf = device_codec
-                        .map_or(QuantizedBlock::Float32(&[]), |codec| {
-                            QuantizedBlock::Packed { codec, bytes: &[] }
-                        });
+                    let resident_leaf = |codec: Option<Codec>| {
+                        codec.map_or(QuantizedBlock::Float32(&[]), |codec| QuantizedBlock::Packed {
+                            codec,
+                            bytes: &[],
+                        })
+                    };
+                    let (key_codec, value_codec) = device_codec;
                     named_blocks.extend([
-                        (k_even.as_str(), resident_leaf),
-                        (k_odd.as_str(), resident_leaf),
-                        (v.as_str(), resident_leaf),
+                        (k_even.as_str(), resident_leaf(key_codec)),
+                        (k_odd.as_str(), resident_leaf(key_codec)),
+                        (v.as_str(), resident_leaf(value_codec)),
                     ]);
                     continue;
                 }

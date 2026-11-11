@@ -268,6 +268,148 @@ fn float_layout_msl_control_changed_bias_changes_the_constants() {
     );
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn random_values(seed: u64, count: usize) -> alloc::vec::Vec<f32> {
+    let mut state = seed;
+    (0..count)
+        .map(|_| {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            let unit = ((state >> 32) as u32 as f32 / u32::MAX as f32) * 2.0 - 1.0;
+            let magnitude = [0.02f32, 0.3, 1.0, 7.5][(state >> 20) as usize % 4];
+            unit * magnitude
+        })
+        .collect()
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn run_block_unpack_kernel(layout: &BlockLayout, blocks: &[u8], elements: usize) -> alloc::vec::Vec<f32> {
+    use core::ffi::c_void;
+    use core::ptr::NonNull;
+
+    use objc2_metal::{
+        MTLBuffer, MTLCommandBuffer, MTLCommandEncoder, MTLCommandQueue, MTLComputeCommandEncoder,
+        MTLResourceOptions, MTLSize,
+    };
+
+    let name = "probe_block";
+    let source = format!(
+        "#include <metal_stdlib>\nusing namespace metal;\n{}\nkernel void probe(device const uchar *blocks [[buffer(0)]], device float *values [[buffer(1)]], uint gid [[thread_position_in_grid]]) {{\n    uint block = gid / {}u;\n    values[gid] = {name}(blocks + block * {}u, gid % {}u);\n}}\n",
+        block_unpack_msl(layout, name),
+        layout.elements,
+        layout.block_bytes,
+        layout.elements,
+    );
+    let device = MTLCreateSystemDefaultDevice().expect("this box has a Metal device");
+    let options = MTLCompileOptions::new();
+    options.setLanguageVersion(MTLLanguageVersion::Version3_1);
+    let library = device
+        .newLibraryWithSource_options_error(&NSString::from_str(&source), Some(&options))
+        .unwrap_or_else(|error| panic!("metal rejected the source: {error:?}\n{source}"));
+    let function = library
+        .newFunctionWithName(&NSString::from_str("probe"))
+        .expect("the probe kernel is in the compiled library");
+    let pipeline = device
+        .newComputePipelineStateWithFunction_error(&function)
+        .unwrap_or_else(|error| panic!("metal could not build a pipeline: {error:?}"));
+    // SAFETY: `blocks` outlives the call and the length passed is its own byte length.
+    let input = unsafe {
+        device.newBufferWithBytes_length_options(
+            NonNull::new(blocks.as_ptr().cast_mut().cast::<c_void>()).expect("a slice pointer is never null"),
+            blocks.len(),
+            MTLResourceOptions::StorageModeShared,
+        )
+    }
+    .expect("the device allocates the block buffer");
+    let output = device
+        .newBufferWithLength_options(elements * 4, MTLResourceOptions::StorageModeShared)
+        .expect("the device allocates the value buffer");
+    let queue = device.newCommandQueue().expect("the device makes a command queue");
+    let command_buffer = queue.commandBuffer().expect("the queue makes a command buffer");
+    let encoder = command_buffer.computeCommandEncoder().expect("the command buffer makes an encoder");
+    encoder.setComputePipelineState(&pipeline);
+    // SAFETY: both buffers are live for the whole encode and index 0 and 1 are the kernel's two buffer slots.
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(&input), 0, 0);
+        encoder.setBuffer_offset_atIndex(Some(&output), 0, 1);
+    }
+    encoder.dispatchThreads_threadsPerThreadgroup(
+        MTLSize { width: elements, height: 1, depth: 1 },
+        MTLSize { width: 32, height: 1, depth: 1 },
+    );
+    encoder.endEncoding();
+    command_buffer.commit();
+    command_buffer.waitUntilCompleted();
+    // SAFETY: the command buffer completed, so the kernel's writes are visible, and the buffer holds `elements` f32s.
+    unsafe { core::slice::from_raw_parts(output.contents().as_ptr().cast::<f32>(), elements) }.to_vec()
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn a_rendered_q4_0_block_unpack_equals_the_host_codec_decode_bit_for_bit_over_4096_blocks() {
+    use proxima_numeric::FormatCodec;
+
+    let format = NumericFormat::Q4_0;
+    let NumericFormat::Block(layout) = format else {
+        panic!("Q4_0 is a block format");
+    };
+    let codec = FormatCodec::for_format(&format).expect("Q4_0 resolves a host codec");
+    let blocks = 4096usize;
+    let elements = blocks * usize::from(layout.elements);
+    let values = random_values(0x5eed_0004, elements);
+    let mut packed = alloc::vec![0u8; codec.packed_len(elements).expect("whole blocks")];
+    codec.encode(&values, &mut packed).expect("host encodes Q4_0");
+    let mut slots = alloc::vec![core::mem::MaybeUninit::<f32>::uninit(); elements];
+    codec.decode(&packed, &mut slots).expect("host decodes Q4_0");
+    // decode returned Ok, which initialises every slot of its output
+    let expected: alloc::vec::Vec<u32> = slots.iter().map(|slot| unsafe { slot.assume_init() }.to_bits()).collect();
+
+    let observed: alloc::vec::Vec<u32> = run_block_unpack_kernel(&layout, &packed, elements)
+        .iter()
+        .map(|value| value.to_bits())
+        .collect();
+
+    assert_eq!(observed.len(), 131_072, "4096 blocks of 32 elements were compared");
+    let mismatches = expected.iter().zip(&observed).filter(|(want, got)| want != got).count();
+    assert_eq!(mismatches, 0, "rendered MSL decode must equal the host codec decode on every element");
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn control_a_corrupted_q4_0_scale_byte_changes_the_rendered_decode() {
+    use proxima_numeric::FormatCodec;
+
+    let format = NumericFormat::Q4_0;
+    let NumericFormat::Block(layout) = format else {
+        panic!("Q4_0 is a block format");
+    };
+    let codec = FormatCodec::for_format(&format).expect("Q4_0 resolves a host codec");
+    let values = random_values(7, 32 * 8);
+    let mut packed = alloc::vec![0u8; codec.packed_len(values.len()).expect("whole blocks")];
+    codec.encode(&values, &mut packed).expect("host encodes Q4_0");
+    let clean = run_block_unpack_kernel(&layout, &packed, values.len());
+    packed[1] ^= 0x20;
+
+    let corrupted = run_block_unpack_kernel(&layout, &packed, values.len());
+
+    assert_ne!(clean[..32], corrupted[..32], "the first block's scale feeds its 32 elements");
+    assert_eq!(clean[32..], corrupted[32..], "the other blocks are untouched");
+}
+
+#[test]
+fn a_block_k_beside_a_scalar_v_is_read_and_every_other_pairing_is_refused_naming_the_kernel_capability() {
+    let q4_0 = NumericFormat::Q4_0;
+    let f16 = NumericFormat::Float16;
+
+    assert_eq!(super::cached_attention_kv_codecs_for(&q4_0, &f16), Ok((Some(q4_0), Some(f16))));
+    assert_eq!(super::cached_attention_key_codec_for(&q4_0), Ok(Some(q4_0)));
+    assert!(super::cached_attention_kv_codecs_for(&q4_0, &q4_0).is_err(), "a block V has no read path");
+    assert!(super::cached_attention_kv_codecs_for(&NumericFormat::Q8_0, &f16).is_ok(), "Q8_0 is a readable block layout too");
+    assert!(super::cached_attention_kv_codecs_for(&NumericFormat::Float32, &f16).is_err(), "a plain K beside a narrow V is a mixed pair");
+    assert!(super::cached_attention_kv_codecs_for(&q4_0, &NumericFormat::Float32).is_err(), "a block K beside a plain V is a mixed pair");
+    assert!(super::cached_attention_kv_codec_for(&q4_0).is_err(), "one block format for both K and V is refused");
+    assert!(super::cached_attention_row_tiled_kv_codec_for(&q4_0).is_err(), "row-tiled keeps refusing a block cache");
+}
+
 #[test]
 fn a_cache_layout_equal_to_the_graph_output_is_the_plain_buffer_whatever_its_spelling() {
     let respelled = NumericFormat::Scalar(FloatLayout {
