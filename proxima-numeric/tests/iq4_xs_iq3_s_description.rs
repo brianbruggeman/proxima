@@ -318,20 +318,6 @@ fn derived_block_geometry_is_unchanged() {
 }
 
 #[test]
-fn only_four_formats_remain_external() {
-    let external = |format: &NumericFormat| matches!(format, NumericFormat::Levels(levels) if levels.levels == LevelTable::External);
-
-    assert_eq!(
-        NumericFormat::ALL
-            .iter()
-            .filter(|format| external(format))
-            .count(),
-        4
-    );
-    assert!(!external(&NumericFormat::Iq3S) && !external(&NumericFormat::Iq4Xs));
-}
-
-#[test]
 fn control_one_changed_offset_fails_the_member_comparison() {
     let mut layout = layout_of(NumericFormat::Iq4Xs);
     let sub = layout.sub.as_mut().expect("iq4_xs has sub-block scales");

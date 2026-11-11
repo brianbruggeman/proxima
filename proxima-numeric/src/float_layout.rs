@@ -182,6 +182,10 @@ impl FloatLayout {
     pub const UINT6: Self = Self::integer(6, SignEncoding::Absent);
     /// Nine bits: the grid index IQ3_S assembles from a `qs` byte and one `qh` bit.
     pub const UINT9: Self = Self::integer(9, SignEncoding::Absent);
+    /// Ten bits: the grid index IQ2_S assembles from a `qs` byte and two `qh` bits.
+    pub const UINT10: Self = Self::integer(10, SignEncoding::Absent);
+    /// Eleven bits: the grid index IQ1_S and IQ1_M assemble from a `qs` byte and three `qh` bits.
+    pub const UINT11: Self = Self::integer(11, SignEncoding::Absent);
     /// Sign-magnitude eight bits: range -127..=127 with a negative zero.
     pub const SIGN_MAGNITUDE_INT8: Self = Self::integer(8, SignEncoding::Magnitude);
     /// OCP MX v1.0 E8M0 block scale: eight exponent bits, no mantissa and no sign bit; the all-ones

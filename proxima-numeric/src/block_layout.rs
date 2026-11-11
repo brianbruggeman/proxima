@@ -88,6 +88,12 @@ pub struct CodeRegion {
 pub struct Field {
     pub layout: FloatLayout,
     pub byte_offset: u16,
+    /// A field whose bits are not contiguous: the stored number is `layout.width() / pieces.bits`
+    /// pieces, piece `j` (low bits first) read at `pieces.address(j)`, and `byte_offset` is 0 and
+    /// unused. IQ1_M's f16 super-scale is four nibbles, each the top nibble of one of four
+    /// 16-bit sub-block scale words (`ggml-quants.c:2703`). `None` for every field that
+    /// sits whole at `byte_offset`.
+    pub pieces: Option<Plane>,
 }
 
 impl Field {
@@ -104,6 +110,7 @@ impl Field {
             nan: NanPolicy::IEEE,
         },
         byte_offset: 0,
+        pieces: None,
     };
 }
 
@@ -154,6 +161,7 @@ const fn field_at(layout: FloatLayout, byte_offset: u16) -> Field {
     Field {
         layout,
         byte_offset,
+        pieces: None,
     }
 }
 
@@ -714,6 +722,155 @@ impl BlockLayout {
     };
     /// The sign plane of [`Self::IQ3_S`]: one bit per element at byte 74.
     pub const IQ3_S_SIGNS: Plane = run(1, 592, 256);
+    /// iq2_xxs: `block_iq2_xxs` (`ggml-common.h:381-384`, sizeof 66 by the `static_assert` at
+    /// :385). `d` f16 at byte 0; `qs[QK_K/8]` (`uint16_t`, byte 2) is eight 8-byte records, one per
+    /// 32 elements: four grid-index bytes, then a 32-bit word whose bits 0..27 are four 7-bit sign
+    /// indices (7 bits per eight elements, see [`Self::IQ2_XXS_SIGN_INDEX`]) and whose bits 28..31
+    /// are the record's 4-bit scale. The sub-block scale is `d * (0.5 + nibble) * 0.25`
+    /// (`ggml-quants.c:2517`), i.e. `(2 * nibble + 1)` times `2^-3`: `scale_multiplier = 2`,
+    /// `bias = -1`, and the `2^-3` is the level table's `unit_shift`.
+    pub const IQ2_XXS: Self = Self {
+        elements: 256,
+        block_bytes: 66,
+        element: coded(
+            FloatLayout::UINT8,
+            plane(8, 16, [digit(8, 0), digit(4, 8), digit(8, 64), NO_DIGIT]),
+            None,
+            0,
+        ),
+        multiplier: 1,
+        scale: F16_SCALE,
+        min: None,
+        min_multiplier: 1,
+        scale_runs: None,
+        sub: Some(SubBlocks {
+            count: 8,
+            scale_multiplier: 2,
+            scale: coded(
+                FloatLayout::UINT4,
+                plane(4, 76, [digit(8, 64), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
+                None,
+                -1,
+            ),
+            min: None,
+        }),
+    };
+    /// The sign-index plane of [`Self::IQ2_XXS`]: seven bits per eight elements, at bit `7 * l` of
+    /// the record's second 32-bit word (`ggml-quants.c:2520`,
+    /// `(aux32[1] >> 7*l) & 127`), indexing `ksigns_iq2xs`.
+    pub const IQ2_XXS_SIGN_INDEX: Plane =
+        plane(7, 48, [digit(8, 0), digit(4, 7), digit(8, 64), NO_DIGIT]);
+    /// iq2_s: `block_iq2_s` (`ggml-common.h:396-401`, sizeof 82 by the `static_assert` at :402).
+    /// `d` f16 at byte 0; `qs[QK_K/4]` (byte 2) is 32 grid-index low bytes followed by 32 sign
+    /// bytes (`signs = qs + QK_K/8`, `ggml-quants.c:2570`, see [`Self::IQ2_S_SIGNS`]);
+    /// `qh[QK_K/32]` (byte 66) carries two more index bits per eight elements, bits `2 * l` of
+    /// `qh[ib32]` (`ggml-quants.c:2577`); `scales[QK_K/32]` (byte 74) holds sixteen 4-bit
+    /// sub-block scales, low nibble first, each `d * (0.5 + nibble) * 0.25` over 16 elements
+    /// (`ggml-quants.c:2573-2574`): `scale_multiplier = 2`, `bias = -1`, `unit_shift = 3`.
+    pub const IQ2_S: Self = Self {
+        elements: 256,
+        block_bytes: 82,
+        element: coded(
+            FloatLayout::UINT10,
+            plane(8, 16, [digit(8, 0), digit(32, 8), NO_DIGIT, NO_DIGIT]),
+            Some(plane(2, 528, [digit(8, 0), digit(4, 2), digit(8, 8), NO_DIGIT])),
+            0,
+        ),
+        multiplier: 1,
+        scale: F16_SCALE,
+        min: None,
+        min_multiplier: 1,
+        scale_runs: None,
+        sub: Some(SubBlocks {
+            count: 16,
+            scale_multiplier: 2,
+            scale: coded(
+                FloatLayout::UINT4,
+                plane(4, 592, [digit(16, 4), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
+                None,
+                -1,
+            ),
+            min: None,
+        }),
+    };
+    /// The sign plane of [`Self::IQ2_S`]: one bit per element, bit `i % 8` of byte `34 + i / 8`.
+    pub const IQ2_S_SIGNS: Plane = run(1, 272, 256);
+    /// iq1_s: `block_iq1_s` (`ggml-common.h:425-429`, sizeof 50 by the `static_assert` at :430).
+    /// `d` f16 at byte 0; `qs[QK_K/8]` (byte 2) is the low byte of one grid index per eight
+    /// elements; `qh[QK_K/32]` (`uint16_t`, byte 34) is one word per 32 elements: bits `3 * l`
+    /// (three each, `l` in 0..4) are the index's high bits, bits 12..14 the 3-bit sub-block scale
+    /// (`d * (2 * s + 1)`, `ggml-quants.c:2677`), bit 15 the sign of the sub-block delta
+    /// ([`Self::IQ1_S_DELTA`]).
+    pub const IQ1_S: Self = Self {
+        elements: 256,
+        block_bytes: 50,
+        element: coded(
+            FloatLayout::UINT11,
+            plane(8, 16, [digit(8, 0), digit(32, 8), NO_DIGIT, NO_DIGIT]),
+            Some(plane(3, 272, [digit(8, 0), digit(4, 3), digit(8, 16), NO_DIGIT])),
+            0,
+        ),
+        multiplier: 1,
+        scale: F16_SCALE,
+        min: None,
+        min_multiplier: 1,
+        scale_runs: None,
+        sub: Some(SubBlocks {
+            count: 8,
+            scale_multiplier: 2,
+            scale: coded(
+                FloatLayout::UINT3,
+                plane(3, 284, [digit(8, 16), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
+                None,
+                -1,
+            ),
+            min: None,
+        }),
+    };
+    /// The delta-sign plane of [`Self::IQ1_S`]: bit 15 of the sub-block's `qh` word, shared by its
+    /// 32 elements; a set bit is `-IQ1S_DELTA` (`ggml-quants.c:2678`).
+    pub const IQ1_S_DELTA: Plane = plane(1, 287, [digit(32, 0), digit(8, 16), NO_DIGIT, NO_DIGIT]);
+    /// iq1_m: `block_iq1_m` (`ggml-common.h:433-437`, sizeof 56 by the `static_assert` at :438).
+    /// There is no `d` field. `qs[QK_K/8]` (byte 0) is the low byte of one grid index per eight
+    /// elements; `qh[QK_K/16]` (byte 32) is one nibble per eight elements: bits 0..2 the index's
+    /// high three bits, bit 3 the delta sign ([`Self::IQ1_M_DELTA`]) (`ggml-quants.c:2713-2720`);
+    /// `scales[QK_K/32]` (byte 48) is four `uint16_t` words of 3-bit sub-block scales, sixteen of
+    /// them (one per 16 elements), `d * (2 * s + 1)` (`ggml-quants.c:2710-2711`), `s` at bit
+    /// `6 * (ib % 2) + 3 * h` of word `ib / 2`. The f16 super-scale is scattered over the top
+    /// nibbles of those four words (`ggml-quants.c:2703`), so `scale` is a
+    /// [`Field::pieces`] field.
+    pub const IQ1_M: Self = Self {
+        elements: 256,
+        block_bytes: 56,
+        element: coded(
+            FloatLayout::UINT11,
+            plane(8, 0, [digit(8, 0), digit(32, 8), NO_DIGIT, NO_DIGIT]),
+            Some(plane(3, 256, [digit(8, 0), digit(32, 4), NO_DIGIT, NO_DIGIT])),
+            0,
+        ),
+        multiplier: 1,
+        scale: Field {
+            layout: FloatLayout::F16,
+            byte_offset: 0,
+            pieces: Some(plane(4, 396, [digit(4, 16), NO_DIGIT, NO_DIGIT, NO_DIGIT])),
+        },
+        min: None,
+        min_multiplier: 1,
+        scale_runs: None,
+        sub: Some(SubBlocks {
+            count: 16,
+            scale_multiplier: 2,
+            scale: coded(
+                FloatLayout::UINT3,
+                plane(3, 384, [digit(2, 3), digit(2, 6), digit(4, 16), NO_DIGIT]),
+                None,
+                -1,
+            ),
+            min: None,
+        }),
+    };
+    /// The delta-sign plane of [`Self::IQ1_M`]: bit 3 of each `qh` nibble, one per eight elements.
+    pub const IQ1_M_DELTA: Plane = plane(1, 259, [digit(8, 0), digit(32, 4), NO_DIGIT, NO_DIGIT]);
     /// fp6 e3m2: 32 six-bit E3M2 fields under one f16 scale at byte 0, 26 bytes per block. A
     /// six-bit field straddles byte boundaries, so a plane read spans the bytes it covers.
     pub const FP6_E3M2: Self = linear(
