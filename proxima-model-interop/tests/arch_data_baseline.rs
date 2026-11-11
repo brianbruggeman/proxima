@@ -1626,6 +1626,50 @@ fn serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps() {
 }
 
 #[test]
+fn repeated_identical_requests_reproduce_the_first_requests_ids() {
+    let checkpoint = proxima_model_interop::gemma4_fixture::gemma4_checkpoint_with(256, Some(4096));
+    let file_bytes: &[u8] = &checkpoint;
+    let parsed = parse_complete(file_bytes).expect("parses the generated checkpoint's GGUF header");
+    let model = armed_e2b_model(&parsed, file_bytes);
+    let config = ServingConfig {
+        prompt_cache: PromptCacheConfig::off(),
+        temperature: 0.0,
+        repeat_penalty: 1.0,
+        frequency_penalty: 0.0,
+        presence_penalty: 0.0,
+        ..ServingConfig::default()
+    }
+    .with_speculative(SpeculativeConfig::none());
+    let paragraph = "The quick brown fox jumps over the lazy dog while a curious cat watches quietly from the garden \
+                     wall. Pack my box with five dozen liquor jugs before the delivery truck arrives at noon. ";
+    let prompt = paragraph.repeat(4);
+    let run = || {
+        let mut stats = SpeculativeDecodeStats::default();
+        let (generated, _text, _stopped) = model
+            .generate_streaming_with_speculative_stats(
+                &prompt,
+                12,
+                config,
+                &mut |_event| ControlFlow::Continue(()),
+                &mut stats,
+                None,
+            )
+            .expect("decode runs on the generated checkpoint");
+        generated
+    };
+
+    let requests = [run(), run(), run()];
+    for (request, ids) in requests.iter().enumerate().skip(1) {
+        assert_eq!(
+            ids,
+            &requests[0],
+            "request {} of the same prompt must reproduce request 1's greedy ids",
+            request + 1
+        );
+    }
+}
+
+#[test]
 fn serving_fsm_drives_speculative_verify_through_accept_and_rollback() {
     let checkpoint = proxima_model_interop::gemma4_fixture::gemma4_checkpoint_with(256, Some(4096));
     let file_bytes: &[u8] = &checkpoint;
