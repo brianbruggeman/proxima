@@ -624,6 +624,7 @@ pub fn execute_plan_with_placements_op_timed(
             _ => None,
         };
         let uniform_buffer = plan_uniform_buffer(plan, position)?;
+        bind_position_outputs(plan, position, bound, &output_placed, &mut device_buffers);
         let timing = execute_op_timed(
             &device,
             &queue,
@@ -1013,6 +1014,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             _ => None,
         };
         let uniform_buffer = plan_uniform_buffer(plan, position)?;
+        bind_position_outputs(plan, position, bound, &output_placed, &mut device_buffers);
         let operand_bytes: u64 = bound
             .operands()
             .iter()

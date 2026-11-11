@@ -5697,6 +5697,23 @@ did not hold every cached position)",
                         #[cfg(not(feature = "instrument"))]
                         let dispatch_profile_target = false;
                         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                        #[cfg(feature = "instrument")]
+                        debug!(
+                            step = step as u64,
+                            greedy_step,
+                            monolithic_profile_target,
+                            dispatch_profile_target,
+                            pre_gather,
+                            use_placements = use_metal_output_placements(
+                                !ssm_input_placements.is_empty()
+                                    || !ssm_output_placements.is_empty(),
+                                monolithic_all_low,
+                            ),
+                            ssm_input_placements = ssm_input_placements.len() as u64,
+                            ssm_output_placements = ssm_output_placements.len() as u64,
+                            "evaluate_arm_inputs: which executor arm this step selects"
+                        );
+                        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                         let evaluated_in_step: Option<Evaluated> = if monolithic_profile_target {
                             #[cfg(feature = "instrument")]
                             {
@@ -5787,17 +5804,50 @@ did not hold every cached position)",
                             !ssm_input_placements.is_empty() || !ssm_output_placements.is_empty(),
                             monolithic_all_low,
                         ) {
-                            Some(runtime.evaluate_with_placements(
-                                active_program,
-                                &symbols,
-                                &named_blocks,
-                                &roots,
-                                &resident_names,
-                                &ssm_input_placements,
-                                &ssm_output_placements,
-                                expert_source_substitutions,
-                                device_cache_codec,
-                            )?)
+                            // the greedy step places its logits buffer, so it lands here before
+                            // the unplaced profile arm below; the timed executor takes the same
+                            // placements and returns the same `Evaluated`. routed-expert
+                            // sources have no timed twin here (the monolithic arm owns that).
+                            #[cfg(feature = "instrument")]
+                            let timed_evaluated =
+                                if dispatch_profile_target && expert_source_substitutions.is_none() {
+                                    let (evaluated, timings, sampling_mode, split_ns) = runtime
+                                        .evaluate_dispatch_timed_with_placements(
+                                            active_program,
+                                            &symbols,
+                                            &named_blocks,
+                                            &roots,
+                                            &resident_names,
+                                            &ssm_input_placements,
+                                            &ssm_output_placements,
+                                            device_cache_codec,
+                                        )?;
+                                    info!(
+                                        step = step as u64,
+                                        sampling_mode, "dispatch_profile: placed full graph"
+                                    );
+                                    report_op_timings(step, &timings, active_program);
+                                    encoder_split_ns = split_ns;
+                                    Some(evaluated)
+                                } else {
+                                    None
+                                };
+                            #[cfg(not(feature = "instrument"))]
+                            let timed_evaluated: Option<Evaluated> = None;
+                            match timed_evaluated {
+                                Some(evaluated) => Some(evaluated),
+                                None => Some(runtime.evaluate_with_placements(
+                                    active_program,
+                                    &symbols,
+                                    &named_blocks,
+                                    &roots,
+                                    &resident_names,
+                                    &ssm_input_placements,
+                                    &ssm_output_placements,
+                                    expert_source_substitutions,
+                                    device_cache_codec,
+                                )?),
+                            }
                         } else if dispatch_profile_target {
                             #[cfg(feature = "instrument")]
                             {

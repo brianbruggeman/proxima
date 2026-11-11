@@ -96,6 +96,19 @@ pub(super) fn report_op_timings(step: usize, timings: &[OpGpuTiming], program: &
         "op_profile: gpu op-timing summary for one decode step"
     );
 
+    for (position, timing) in timings.iter().enumerate() {
+        debug!(
+            step = step as u64,
+            position = position as u64,
+            node = timing.node.0,
+            kind = timing.kind,
+            extents = ?timing.extents,
+            gpu_ns = timing.gpu_ns,
+            operand_bytes = timing.operand_bytes,
+            "op_profile_op: one position's gpu time in the profiled step"
+        );
+    }
+
     let mut by_kind: alloc::collections::BTreeMap<&'static str, (u64, u64, u64)> =
         alloc::collections::BTreeMap::new();
     for timing in timings {
