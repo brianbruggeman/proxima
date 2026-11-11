@@ -88,7 +88,7 @@ fn bytes_of(state: &mut u64, count: usize) -> Vec<u8> {
 
 fn new_decode(codec: &FormatCodec, data: &[u8]) -> Vec<f32> {
     let mut slots = vec![MaybeUninit::<f32>::uninit(); data.len() / codec.block_bytes() * codec.elements()];
-    codec.decode(data, &mut slots).expect("whole blocks decode");
+    assert_eq!(codec.decode(data, &mut slots).expect("whole blocks decode"), data.len());
     // decode returned ok, which initialises every slot
     slots.iter().map(|slot| unsafe { slot.assume_init() }).collect()
 }
@@ -100,7 +100,7 @@ fn differing_blocks(layout: &BlockLayout, reference: impl Fn(&[f32], &mut [u8]),
     let mut expected = vec![0u8; blocks * codec.block_bytes()];
     let mut got = vec![0u8; expected.len()];
     reference(values, &mut expected);
-    codec.encode(values, &mut got).expect("new encodes");
+    assert_eq!(codec.encode(values, &mut got).expect("new encodes"), got.len());
     expected
         .chunks(codec.block_bytes())
         .zip(got.chunks(codec.block_bytes()))
@@ -155,6 +155,26 @@ fn decode_differences(
         std::eprintln!("{name} first decode mismatch incumbent={incumbent:#010x} new={new:#010x} of {count}");
     }
     count
+}
+
+#[test]
+fn decode_over_a_longer_window_equals_decode_of_the_exact_range_bit_for_bit_for_every_block_format() {
+    let mut state = 0x1234_5678_9abc_def0u64;
+    for case in cases() {
+        let codec = FormatCodec::block(&case.layout).expect("resolves");
+        let data = bytes_of(&mut state, 64 * codec.block_bytes());
+        let mut window = data.clone();
+        window.extend_from_slice(&bytes_of(&mut state, 29));
+        let mut slots = vec![MaybeUninit::<f32>::uninit(); 64 * codec.elements()];
+
+        let read = codec.decode(&window, &mut slots).expect("the window holds the packed range");
+
+        assert_eq!(read, data.len(), "{}", case.name);
+        // decode returned ok, which initialises every slot
+        let found: Vec<u32> = slots.iter().map(|slot| unsafe { slot.assume_init() }.to_bits()).collect();
+        let wanted: Vec<u32> = new_decode(&codec, &data).iter().map(|value| value.to_bits()).collect();
+        assert_eq!(found, wanted, "{}", case.name);
+    }
 }
 
 #[test]

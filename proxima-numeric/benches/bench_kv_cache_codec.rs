@@ -185,24 +185,19 @@ impl core::ops::Deref for NewPath {
 }
 
 /// `#[inline(never)]`, like `old_encode`: both arms cross one call boundary, as production does across
-/// crates. The destination is sized by `packed_len`, the way omega's `write_placed_buffer` sizes it
-/// from its `FormatCodec`.
+/// crates. The window is the whole buffer, the way omega's `write_placed_buffer` passes the rest of
+/// the allocation; the codec sizes the packed range from `values` and checks it once.
 #[inline(never)]
 fn new_encode(values: &[f32], buffer: &mut [u8], path: &NewPath) {
-    let codec = &path.codec;
-    // SAFETY: every caller here sizes `buffer` to the packed range, the contract `write_placed_buffer` states.
-    let destination = unsafe { core::slice::from_raw_parts_mut(buffer.as_mut_ptr(), codec.packed_len(values.len()).unwrap()) };
-    codec.encode(values, destination).unwrap();
+    path.codec.encode(values, buffer).unwrap();
 }
 
-/// See [`new_encode`]; the source is sized by `packed_len`, as `read_placed_buffer` does.
+/// See [`new_encode`]; the window is the whole buffer, as `read_placed_buffer` passes it.
 #[inline(never)]
 fn new_decode(buffer: &[u8], element_count: usize, path: &NewPath) -> Vec<f32> {
     let codec = &path.codec;
-    // SAFETY: every caller packs `element_count` elements into `buffer`, the contract `read_placed_buffer` states.
-    let source = unsafe { core::slice::from_raw_parts(buffer.as_ptr(), codec.packed_len(element_count).unwrap()) };
     let mut decoded: Vec<f32> = Vec::with_capacity(element_count);
-    codec.decode(source, &mut decoded.spare_capacity_mut()[..element_count]).unwrap();
+    codec.decode(buffer,&mut decoded.spare_capacity_mut()[..element_count]).unwrap();
     // SAFETY: `decode` initialised exactly `element_count` slots, the whole `spare_capacity_mut` prefix.
     unsafe { decoded.set_len(element_count) };
     decoded
