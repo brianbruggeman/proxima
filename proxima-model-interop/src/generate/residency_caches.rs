@@ -4158,6 +4158,17 @@ impl BackendRuntime {
         } else {
             None
         };
+        #[cfg(feature = "instrument")]
+        debug!(
+            new_count = shape.0 as u64,
+            kv_bound_extent = shape.1 as u64,
+            decode_shaped,
+            resident = cache.contains_key(&shape),
+            epilogue_sources = shape.3,
+            kv_binding = ?shape.4,
+            near_plan = near_plan.is_some(),
+            "decode_plan_lookup: a resident key hits, a near plan refits, anything else builds"
+        );
         let build = || {
             if let Some(mut near) = near_plan
                 && near.refit_symbols(symbols)?
