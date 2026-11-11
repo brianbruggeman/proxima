@@ -22,6 +22,7 @@ use proxima_model_interop::LoadedModel;
 use proxima_model_interop::Phase;
 use proxima_model_interop::ServingConfig;
 use proxima_model_interop::TokenEvent;
+use proxima_numeric::NumericFormat;
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -85,8 +86,8 @@ fn main() {
 
     let serving_config = ServingConfig {
         model_path: &gguf_path,
-        kv_cache_key_quant: proxima_gguf::types::GgmlType::F32,
-        kv_cache_value_quant: proxima_gguf::types::GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

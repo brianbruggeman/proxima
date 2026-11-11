@@ -2,6 +2,7 @@ use core::mem::size_of;
 use std::io::Write;
 
 use proxima_gguf::GgmlType;
+use proxima_numeric::NumericFormat;
 
 use crate::ContextLength;
 use crate::lowering::{KvLayout, header_descriptor};
@@ -36,8 +37,8 @@ pub(super) fn write_draft_checkpoint(checkpoint: &[u8]) -> tempfile::NamedTempFi
 pub(super) fn serving_config(speculative: SpeculativeConfig<'_>) -> ServingConfig<'_> {
     ServingConfig {
         gpu_layers: 0,
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         temperature: 0.0,
         repeat_penalty: 1.0,
         frequency_penalty: 0.0,

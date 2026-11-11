@@ -22,7 +22,7 @@ use std::fs::File;
 
 use memmap2::Mmap;
 use proxima_gguf::parse_complete;
-use proxima_gguf::types::GgmlType;
+use proxima_numeric::NumericFormat;
 use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig};
 
 const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
@@ -41,8 +41,8 @@ fn run_one_prompt_and_read_audit_counts(reduction_literal_env: Option<&str>) -> 
 
     let serving_config = ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

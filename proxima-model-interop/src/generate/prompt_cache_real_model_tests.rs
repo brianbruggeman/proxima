@@ -5,7 +5,7 @@ use std::fs::File;
 
 use memmap2::Mmap;
 use proxima_gguf::parse_complete;
-use proxima_gguf::types::GgmlType;
+use proxima_numeric::NumericFormat;
 
 use super::prefix_resume_long_prompt_tests::{chat_prompt, corpus_document, greedy_config};
 use super::prompt_cache::longest_common_prefix;
@@ -631,8 +631,8 @@ fn a_request_rejected_by_the_serving_config_leaves_the_stored_entry_for_the_next
             ..cached_config(SpeculativeConfig::none())
         };
         let rejected = ServingConfig {
-            kv_cache_key_quant: GgmlType::Q8_0,
-            kv_cache_value_quant: GgmlType::Q8_0,
+            kv_cache_key_quant: NumericFormat::Q8_0,
+            kv_cache_value_quant: NumericFormat::Q8_0,
             ..valid
         };
         let mut prompt_ids = encode_opening(model, "The quick brown fox jumps over the lazy dog. ");

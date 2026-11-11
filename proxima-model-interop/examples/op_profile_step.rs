@@ -19,6 +19,7 @@ mod real_model_probe;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 mod profile {
         use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, PromptCacheConfig, ServingConfig};
+    use proxima_numeric::NumericFormat;
 
     use super::real_model_probe;
 
@@ -28,8 +29,8 @@ mod profile {
 
     fn openchat_config() -> ServingConfig<'static> {
         ServingConfig {
-            kv_cache_key_quant: proxima_gguf::GgmlType::F32,
-            kv_cache_value_quant: proxima_gguf::GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -52,8 +53,8 @@ mod profile {
 
     fn qwen3_config() -> Result<ServingConfig<'static>, String> {
         Ok(ServingConfig {
-            kv_cache_key_quant: proxima_gguf::GgmlType::F32,
-            kv_cache_value_quant: proxima_gguf::GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,

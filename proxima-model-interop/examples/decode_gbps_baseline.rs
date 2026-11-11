@@ -44,11 +44,11 @@ use std::time::Instant;
 use conflaguration::Settings as _;
 use memmap2::{Mmap, MmapOptions};
 use proxima_gguf::parse_complete;
-use proxima_gguf::types::GgmlType;
 use proxima_model_interop::{
     GPU_LAYERS_ALL, LoadedModel, Phase, PromptCacheConfig, ServingConfig, SpeculativeSettings,
     TokenEvent,
 };
+use proxima_numeric::NumericFormat;
 #[cfg(feature = "instrument")]
 use proxima_telemetry::export::Exporter;
 #[cfg(feature = "instrument")]
@@ -286,19 +286,16 @@ fn main() {
         Err(_) => ServingConfig::default().resident_kv_bytes,
     };
     let kv_cache_type = match std::env::var("PROXIMA_KV_CACHE_TYPE").as_deref() {
-        Ok("f16") => GgmlType::F16,
-        Ok("f32") | Err(_) => GgmlType::F32,
-        Ok(other) => panic!("PROXIMA_KV_CACHE_TYPE={other}: expected `f32` or `f16`"),
+        Ok(name) => NumericFormat::from_name(name).unwrap_or_else(|| {
+            panic!("PROXIMA_KV_CACHE_TYPE={name}: not a NumericFormat name")
+        }),
+        Err(_) => NumericFormat::Float32,
     };
     let kv_cache_key_type = match std::env::var("PROXIMA_KV_CACHE_KEY_TYPE").as_deref() {
-        Ok("q4_0") => GgmlType::Q4_0,
-        Ok("q8_0") => GgmlType::Q8_0,
-        Ok("f16") => GgmlType::F16,
-        Ok("f32") => GgmlType::F32,
+        Ok(name) => NumericFormat::from_name(name).unwrap_or_else(|| {
+            panic!("PROXIMA_KV_CACHE_KEY_TYPE={name}: not a NumericFormat name")
+        }),
         Err(_) => kv_cache_type,
-        Ok(other) => panic!(
-            "PROXIMA_KV_CACHE_KEY_TYPE={other}: expected `f32`, `f16`, `q8_0` or `q4_0`"
-        ),
     };
     let speculative_settings = SpeculativeSettings::from_env()
         .expect("PROXIMA_SPECULATIVE_* env parses as the serving speculative settings");

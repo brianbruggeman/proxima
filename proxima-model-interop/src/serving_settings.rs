@@ -9,10 +9,12 @@ use omega::{AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
 use proxima_gguf::types::GgmlType;
-use proxima_numeric::NumericPolicy;
+use proxima_numeric::{NumericFormat, NumericPolicy};
 use serde::{Deserialize, Serialize};
 
 use crate::RopeScaling;
+use crate::bind::codec_to_ggml_type;
+use crate::error::InteropError;
 use crate::codec_policy_settings::CodecPolicySettings;
 use crate::memory_reclaim::ReclaimSettings;
 use crate::prompt_cache_settings::PromptCacheSettings;
@@ -37,32 +39,6 @@ fn from_json<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json:
 
 fn from_name<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, serde_json::Error> {
     serde_json::from_value(serde_json::Value::String(raw.to_owned()))
-}
-
-/// the values llama.cpp accepts for `--cache-type-k` and `--cache-type-v`, spelled
-/// as llama.cpp spells them; `as_ggml` is the lowering to the type the serving
-/// config holds. mirrored rather than derived on `GgmlType` because that enum
-/// is foreign and `#[non_exhaustive]`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CacheType {
-    #[serde(rename = "f32")]
-    F32,
-    #[serde(rename = "f16")]
-    F16,
-    #[serde(rename = "bf16")]
-    Bf16,
-    #[serde(rename = "q8_0")]
-    Q80,
-    #[serde(rename = "q4_0")]
-    Q40,
-    #[serde(rename = "q4_1")]
-    Q41,
-    #[serde(rename = "q5_0")]
-    Q50,
-    #[serde(rename = "q5_1")]
-    Q51,
-    #[serde(rename = "iq4_nl")]
-    Iq4Nl,
 }
 
 #[cfg(all(
@@ -90,22 +66,6 @@ impl AttentionTileHeightSetting {
             Self::Legacy => AttentionTileHeight::Legacy,
             Self::Rows8 => AttentionTileHeight::Rows8,
             Self::Rows16 => AttentionTileHeight::Rows16,
-        }
-    }
-}
-
-impl CacheType {
-    pub const fn as_ggml(self) -> GgmlType {
-        match self {
-            Self::F32 => GgmlType::F32,
-            Self::F16 => GgmlType::F16,
-            Self::Bf16 => GgmlType::Bf16,
-            Self::Q80 => GgmlType::Q8_0,
-            Self::Q40 => GgmlType::Q4_0,
-            Self::Q41 => GgmlType::Q4_1,
-            Self::Q50 => GgmlType::Q5_0,
-            Self::Q51 => GgmlType::Q5_1,
-            Self::Iq4Nl => GgmlType::Iq4Nl,
         }
     }
 }
@@ -160,9 +120,9 @@ impl DispatchTypeName {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "pattern_kind", rename_all = "snake_case")]
 pub enum WeightPrecisionRuleSettings {
-    Exact { pattern: String, target: CacheType },
-    Prefix { pattern: String, target: CacheType },
-    Suffix { pattern: String, target: CacheType },
+    Exact { pattern: String, target: NumericFormat },
+    Prefix { pattern: String, target: NumericFormat },
+    Suffix { pattern: String, target: NumericFormat },
 }
 
 /// the llama-flag surface of [`ServingConfig`], loadable from toml and env
@@ -196,12 +156,12 @@ pub struct ServingSettings {
     pub parallel_sequences: u32,
     /// `ServingConfig::kv_cache_key_quant`: `--cache-type-k`.
     #[setting(resolve_with = "from_name", default_str = "f32")]
-    #[builder(default = CacheType::F32)]
-    pub kv_cache_key_quant: CacheType,
+    #[builder(default = NumericFormat::Float32)]
+    pub kv_cache_key_quant: NumericFormat,
     /// `ServingConfig::kv_cache_value_quant`: `--cache-type-v`.
     #[setting(resolve_with = "from_name", default_str = "f32")]
-    #[builder(default = CacheType::F32)]
-    pub kv_cache_value_quant: CacheType,
+    #[builder(default = NumericFormat::Float32)]
+    pub kv_cache_value_quant: NumericFormat,
     /// `ServingConfig::flash_attention`: `-fa`.
     #[setting(default = false)]
     #[builder(default = false)]
@@ -413,24 +373,39 @@ impl Default for ServingSettings {
     }
 }
 
+/// float32 is the identity format with no packed codec, so `codec_to_ggml_type` (the
+/// packed-codec reverse table) refuses it; a weight-precision rule may still target it.
+fn weight_target_ggml_type(format: &NumericFormat) -> Result<GgmlType, InteropError> {
+    if format.is_identity_of(&NumericFormat::Float32) {
+        return Ok(GgmlType::F32);
+    }
+    codec_to_ggml_type(*format)
+}
+
 impl ServingSettings {
-    #[must_use]
-    pub fn weight_precision_rules(&self) -> Vec<WeightPrecisionRule<'_>> {
+    /// lowers each rule's target to the on-disk `GgmlType` the recode path binds at;
+    /// a target format with no ggml wire type is refused here rather than at bind time.
+    pub fn weight_precision_rules(
+        &self,
+    ) -> Result<Vec<WeightPrecisionRule<'_>>, InteropError> {
         self.weight_precision
             .iter()
-            .map(|rule| match rule {
-                WeightPrecisionRuleSettings::Exact { pattern, target } => WeightPrecisionRule {
-                    pattern: NamePattern::Exact(pattern),
-                    target: target.as_ggml(),
-                },
-                WeightPrecisionRuleSettings::Prefix { pattern, target } => WeightPrecisionRule {
-                    pattern: NamePattern::Prefix(pattern),
-                    target: target.as_ggml(),
-                },
-                WeightPrecisionRuleSettings::Suffix { pattern, target } => WeightPrecisionRule {
-                    pattern: NamePattern::Suffix(pattern),
-                    target: target.as_ggml(),
-                },
+            .map(|rule| {
+                let (pattern, target) = match rule {
+                    WeightPrecisionRuleSettings::Exact { pattern, target } => {
+                        (NamePattern::Exact(pattern), *target)
+                    }
+                    WeightPrecisionRuleSettings::Prefix { pattern, target } => {
+                        (NamePattern::Prefix(pattern), *target)
+                    }
+                    WeightPrecisionRuleSettings::Suffix { pattern, target } => {
+                        (NamePattern::Suffix(pattern), *target)
+                    }
+                };
+                Ok(WeightPrecisionRule {
+                    pattern,
+                    target: weight_target_ggml_type(&target)?,
+                })
             })
             .collect()
     }
@@ -445,8 +420,8 @@ impl ServingSettings {
             context_length: self.lowered_context_length(),
             rope_scaling: self.rope_scaling,
             parallel_sequences: self.parallel_sequences,
-            kv_cache_key_quant: self.kv_cache_key_quant.as_ggml(),
-            kv_cache_value_quant: self.kv_cache_value_quant.as_ggml(),
+            kv_cache_key_quant: self.kv_cache_key_quant,
+            kv_cache_value_quant: self.kv_cache_value_quant,
             flash_attention: self.flash_attention,
             batch_size: self.batch_size,
             ubatch_size: self.ubatch_size,
@@ -731,32 +706,40 @@ mod tests {
     #[test]
     fn serving_section_cache_type_round_trips_json() {
         let table = [
-            ("f32", CacheType::F32, GgmlType::F32),
-            ("f16", CacheType::F16, GgmlType::F16),
-            ("bf16", CacheType::Bf16, GgmlType::Bf16),
-            ("q8_0", CacheType::Q80, GgmlType::Q8_0),
-            ("q4_0", CacheType::Q40, GgmlType::Q4_0),
-            ("q4_1", CacheType::Q41, GgmlType::Q4_1),
-            ("q5_0", CacheType::Q50, GgmlType::Q5_0),
-            ("q5_1", CacheType::Q51, GgmlType::Q5_1),
-            ("iq4_nl", CacheType::Iq4Nl, GgmlType::Iq4Nl),
+            ("f32", NumericFormat::Float32, "float32", GgmlType::F32),
+            ("f16", NumericFormat::Float16, "float16", GgmlType::F16),
+            ("bf16", NumericFormat::BFloat16, "bfloat16", GgmlType::Bf16),
+            ("q8_0", NumericFormat::Q8_0, "q8_0", GgmlType::Q8_0),
+            ("q4_0", NumericFormat::Q4_0, "q4_0", GgmlType::Q4_0),
+            ("q4_1", NumericFormat::Q4_1, "q4_1", GgmlType::Q4_1),
+            ("q5_0", NumericFormat::Q5_0, "q5_0", GgmlType::Q5_0),
+            ("q5_1", NumericFormat::Q5_1, "q5_1", GgmlType::Q5_1),
+            ("iq4_nl", NumericFormat::Iq4Nl, "iq4_nl", GgmlType::Iq4Nl),
         ];
         assert_eq!(table.len(), 9, "the table must list every cache type");
 
-        for (word, variant, ggml) in table {
+        for (word, variant, canonical, ggml) in table {
             let quoted = format!("\"{word}\"");
-            let parsed: CacheType = serde_json::from_str(&quoted)
+            let parsed: NumericFormat = serde_json::from_str(&quoted)
                 .unwrap_or_else(|error| panic!("{quoted} must parse: {error}"));
             assert_eq!(parsed, variant, "{quoted} parses to its variant");
             let written = serde_json::to_string(&variant)
                 .unwrap_or_else(|error| panic!("{word} must serialize: {error}"));
-            assert_eq!(written, quoted, "{word} serializes back to the same word");
-            assert_eq!(variant.as_ggml(), ggml, "{word} lowers to its ggml type");
+            assert_eq!(
+                written,
+                format!("\"{canonical}\""),
+                "{word} serializes to its canonical name"
+            );
+            assert_eq!(
+                weight_target_ggml_type(&variant).expect("a cache format has a ggml wire type"),
+                ggml,
+                "{word} lowers to its ggml type"
+            );
         }
 
         for rejected in ["\"q9_9\"", "\"Q8_0\"", "\"q8\""] {
             assert!(
-                serde_json::from_str::<CacheType>(rejected).is_err(),
+                serde_json::from_str::<NumericFormat>(rejected).is_err(),
                 "{rejected} must be refused"
             );
         }
@@ -812,8 +795,8 @@ beta_slow = 1.0
             .context_extrapolate(true)
             .rope_scaling(yarn())
             .parallel_sequences(2)
-            .kv_cache_key_quant(CacheType::Q80)
-            .kv_cache_value_quant(CacheType::Q40)
+            .kv_cache_key_quant(NumericFormat::Q8_0)
+            .kv_cache_value_quant(NumericFormat::Q4_0)
             .flash_attention(true)
             .batch_size(512)
             .ubatch_size(128)
@@ -857,8 +840,8 @@ beta_slow = 1.0
 
         let lowered = built.as_serving_config(&[]);
         assert_eq!(lowered.context_length, ContextLength::Extrapolate(32768));
-        assert_eq!(lowered.kv_cache_key_quant, GgmlType::Q8_0);
-        assert_eq!(lowered.kv_cache_value_quant, GgmlType::Q4_0);
+        assert_eq!(lowered.kv_cache_key_quant, NumericFormat::Q8_0);
+        assert_eq!(lowered.kv_cache_value_quant, NumericFormat::Q4_0);
         assert_eq!(lowered.gpu_layers, 99);
         assert_eq!(lowered.gpu_memory_limit_bytes, Some(17_179_869_184));
         assert_eq!(lowered.rope_scaling, Some(yarn()));
@@ -1151,11 +1134,11 @@ target = "q8_0"
             .weight_precision(vec![
                 WeightPrecisionRuleSettings::Suffix {
                     pattern: "ffn_down_exps.weight".to_owned(),
-                    target: CacheType::Q40,
+                    target: NumericFormat::Q4_0,
                 },
                 WeightPrecisionRuleSettings::Exact {
                     pattern: "token_embd.weight".to_owned(),
-                    target: CacheType::Q80,
+                    target: NumericFormat::Q8_0,
                 },
             ])
             .gdn_prefill_backend(GdnPrefillBackend::Mlx)
@@ -1176,7 +1159,9 @@ target = "q8_0"
         assert_eq!(from_toml, built, "toml and builder agree");
         assert_eq!(from_env, built, "env and builder agree");
 
-        let rules = built.weight_precision_rules();
+        let rules = built
+            .weight_precision_rules()
+            .expect("q4_0 and q8_0 have ggml wire types");
         let config = built.as_serving_config(&rules);
         assert_eq!(
             config.weight_precision,

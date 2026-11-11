@@ -120,7 +120,7 @@ use omega::metal::metal_stage_totals;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_gguf::parse_complete;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use proxima_gguf::types::GgmlType;
+use proxima_numeric::NumericFormat;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_model_interop::sliding_pattern::program::sliding_rope_table;
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -222,8 +222,8 @@ fn loaded_model() -> &'static LoadedModel<'static> {
 fn serving_config() -> ServingConfig<'static> {
     ServingConfig {
         context_length: ContextLength::Within(64),
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

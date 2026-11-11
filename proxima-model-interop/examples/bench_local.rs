@@ -28,7 +28,7 @@ use std::ops::ControlFlow;
 use std::time::Instant;
 
 use memmap2::{Mmap, MmapOptions};
-use proxima_gguf::GgmlType;
+use proxima_numeric::NumericFormat;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
     GPU_LAYERS_ALL, LoadedModel, Phase, PromptCacheConfig, ServingConfig, classify_task,
@@ -238,8 +238,8 @@ fn main() {
     };
     let serving_config = ServingConfig {
         model_path: &model_path,
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         reasoning_budget: 0,
         batch_size: batch_size.unwrap_or_else(|| ServingConfig::default().batch_size),

@@ -17,9 +17,8 @@ use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use omega::backend::{Plan, carry_cuda_rows, carry_cuda_state, drain_cuda_appended_rows, drain_cuda_carried};
-use proxima_gguf::GgmlType;
 use proxima_primitives::sync::blocking::Mutex;
-use proxima_numeric::NumericPolicy;
+use proxima_numeric::{NumericFormat, NumericPolicy};
 use proxima_tensor::op::NodeId;
 
 use crate::serving::{GdnPrefillBackend, ServingConfig};
@@ -34,8 +33,8 @@ pub(super) type CudaPlans = BTreeMap<CudaPlanKey, Plan>;
 pub(super) struct CudaPlanIdentity {
     numeric_policy: NumericPolicy,
     exact_activations: bool,
-    kv_cache_element: GgmlType,
-    kv_value_cache_element: GgmlType,
+    kv_cache_element: NumericFormat,
+    kv_value_cache_element: NumericFormat,
     cached_attention_fusion: bool,
     gated_delta_net_fusion: bool,
     moe_topk_fusion: bool,
@@ -150,12 +149,12 @@ mod tests {
     #[test]
     fn identity_separates_plans_whose_value_cache_format_alone_differs() {
         let f16_values = ServingConfig {
-            kv_cache_key_quant: GgmlType::Q4_0,
-            kv_cache_value_quant: GgmlType::F16,
+            kv_cache_key_quant: NumericFormat::Q4_0,
+            kv_cache_value_quant: NumericFormat::Float16,
             ..ServingConfig::default()
         };
         let bf16_values = ServingConfig {
-            kv_cache_value_quant: GgmlType::Bf16,
+            kv_cache_value_quant: NumericFormat::BFloat16,
             ..f16_values
         };
 

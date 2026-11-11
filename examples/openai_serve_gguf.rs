@@ -68,6 +68,7 @@ use proxima_gguf::value::MetadataValue;
 use proxima_model_interop::{
     CheckpointMapping, LoadedModel, MappedExpertSidecar, ServingConfig, ServingSettings,
 };
+use proxima_numeric::NumericFormat;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -124,8 +125,8 @@ fn render_prompt(messages: &[ChatMessage]) -> String {
 fn supported_serving_config(model_path: &str, moe_pre_gather: bool) -> ServingConfig<'_> {
     ServingConfig {
         model_path,
-        kv_cache_key_quant: proxima_gguf::types::GgmlType::F32,
-        kv_cache_value_quant: proxima_gguf::types::GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

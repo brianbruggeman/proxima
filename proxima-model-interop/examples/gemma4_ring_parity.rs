@@ -35,7 +35,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use memmap2::Mmap;
-use proxima_gguf::GgmlType;
+use proxima_numeric::NumericFormat;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{GPU_LAYERS_ALL, InteropError, KvLayout, LoadedModel, ServingConfig};
 use proxima_tokenizer::gguf::vocab_from_metadata;
@@ -250,8 +250,8 @@ fn build_long_prompt(vocab: &Vocab) -> Result<String, ExampleError> {
 fn serving_config() -> ServingConfig<'static> {
     ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

@@ -304,6 +304,7 @@ async fn moe_architecture_cpu_forward_prefill_and_decode(#[case] max_tokens: usi
 mod metal_backend {
     use proxima_gguf::GgmlType;
     use proxima_model_interop::{GPU_LAYERS_ALL, LoadedModel, ServingConfig};
+    use proxima_numeric::NumericFormat;
 
     use super::{PROMPT, assert_respects_budget_and_range};
 
@@ -318,8 +319,8 @@ mod metal_backend {
     /// between the two.
     fn serving_config(gpu_layers: i32) -> ServingConfig<'static> {
         ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,

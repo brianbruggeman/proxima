@@ -3424,6 +3424,8 @@ mod real_openchat_file {
     use proxima_gguf::GgmlType;
     use proxima_gguf::quant::q4_k;
     use proxima_numeric::DType;
+    #[cfg(feature = "metal")]
+    use proxima_numeric::NumericFormat;
     use proxima_numeric::codec::Codec;
     use proxima_primitives::pipe::Pipe;
     use proxima_tensor::cpu::{
@@ -3983,8 +3985,8 @@ mod real_openchat_file {
         #[cfg(target_os = "macos")]
         let dispatch_type = dispatch_type_from_env();
         let serving_config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -4210,8 +4212,8 @@ mod real_openchat_file {
         #[cfg(target_os = "macos")]
         let dispatch_type = dispatch_type_from_env();
         let serving_config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -4946,8 +4948,8 @@ mod real_openchat_file {
         #[cfg(target_os = "macos")]
         let dispatch_type = dispatch_type_from_env();
         let serving_config = ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,

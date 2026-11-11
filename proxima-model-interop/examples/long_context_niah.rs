@@ -37,11 +37,12 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use memmap2::Mmap;
-use proxima_gguf::{GgmlType, parse_complete};
+use proxima_gguf::parse_complete;
 use proxima_model_interop::{
     ContextLength, GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig, RopeScaling,
     ServingConfig, kv_layers,
 };
+use proxima_numeric::NumericFormat;
 use proxima_tokenizer::gguf::vocab_from_metadata;
 use proxima_tokenizer::{TokenizerError, encode_with_bos_eos};
 
@@ -87,7 +88,8 @@ enum NiahError {
         context: usize,
     },
     #[error("kv type {0:?} has no element size in this harness")]
-    UnsupportedKv(GgmlType),
+    // boxed: NumericFormat is 560 bytes against 96 for the next variant (clippy result_large_err)
+    UnsupportedKv(Box<NumericFormat>),
     #[error("no ollama manifest names blob {0}")]
     OllamaModelUnknown(String),
     #[error("{0}")]
@@ -107,7 +109,7 @@ struct Options {
     model: PathBuf,
     context: u32,
     needles: usize,
-    kv_types: Vec<GgmlType>,
+    kv_types: Vec<NumericFormat>,
     rope_scalings: Vec<Option<RopeScaling>>,
     extrapolate: bool,
     control: bool,
@@ -135,20 +137,20 @@ fn parse_number<T: std::str::FromStr>(flag: &str, value: &str) -> Result<T, Niah
         .map_err(|_| usage(format!("{flag} takes a number, got {value:?}")))
 }
 
-fn parse_kv_type(name: &str) -> Result<GgmlType, NiahError> {
+fn parse_kv_type(name: &str) -> Result<NumericFormat, NiahError> {
     match name {
-        "f32" => Ok(GgmlType::F32),
-        "f16" => Ok(GgmlType::F16),
-        "q8_0" => Ok(GgmlType::Q8_0),
+        "f32" => Ok(NumericFormat::Float32),
+        "f16" => Ok(NumericFormat::Float16),
+        "q8_0" => Ok(NumericFormat::Q8_0),
         other => Err(usage(format!("--kv knows f32, f16, q8_0; got {other:?}"))),
     }
 }
 
-fn kv_label(kv: GgmlType) -> &'static str {
+fn kv_label(kv: NumericFormat) -> &'static str {
     match kv {
-        GgmlType::F32 => "f32",
-        GgmlType::F16 => "f16",
-        GgmlType::Q8_0 => "q8_0",
+        NumericFormat::Float32 => "f32",
+        NumericFormat::Float16 => "f16",
+        NumericFormat::Q8_0 => "q8_0",
         _ => "unsupported",
     }
 }
@@ -192,7 +194,7 @@ fn parse_options(mut args: impl Iterator<Item = String>) -> Result<Options, Niah
     let mut model = None;
     let mut context = None;
     let mut needles = None;
-    let mut kv_types = vec![GgmlType::F32];
+    let mut kv_types = vec![NumericFormat::Float32];
     let mut rope_scalings = vec![None];
     let mut extrapolate = false;
     let mut control = false;
@@ -241,19 +243,19 @@ fn fresh_seed() -> u64 {
     u64::try_from(nanos).unwrap_or(u64::MAX)
 }
 
-fn element_bytes(elements: u64, kv: GgmlType) -> Result<u64, NiahError> {
+fn element_bytes(elements: u64, kv: NumericFormat) -> Result<u64, NiahError> {
     match kv {
-        GgmlType::F32 => Ok(elements * 4),
-        GgmlType::F16 => Ok(elements * 2),
-        GgmlType::Q8_0 => Ok(elements.div_ceil(Q8_0_BLOCK_ELEMENTS) * Q8_0_BLOCK_BYTES),
-        other => Err(NiahError::UnsupportedKv(other)),
+        NumericFormat::Float32 => Ok(elements * 4),
+        NumericFormat::Float16 => Ok(elements * 2),
+        NumericFormat::Q8_0 => Ok(elements.div_ceil(Q8_0_BLOCK_ELEMENTS) * Q8_0_BLOCK_BYTES),
+        other => Err(NiahError::UnsupportedKv(Box::new(other))),
     }
 }
 
 /// K and V bytes for `context` positions over `layers`, the layout the
 /// checkpoint's own architecture reports (own-KV layers only, sliding layers
 /// capped at their window), stored as `kv`.
-fn kv_cache_bytes(layers: &[KvLayer], context: u32, kv: GgmlType) -> Result<u64, NiahError> {
+fn kv_cache_bytes(layers: &[KvLayer], context: u32, kv: NumericFormat) -> Result<u64, NiahError> {
     layers
         .iter()
         .map(|&(kv_heads, head_dim, window)| {
@@ -277,7 +279,7 @@ fn metal_allocated_bytes() -> Option<u64> {
 fn serving_config<'model>(
     options: &Options,
     model_path: &'model str,
-    kv: GgmlType,
+    kv: NumericFormat,
     rope_scaling: Option<RopeScaling>,
 ) -> ServingConfig<'model> {
     ServingConfig {
@@ -671,10 +673,14 @@ mod tests {
             [vec![(1, 256, Some(512)); 12], vec![(1, 512, None); 3]].concat();
         let qwen36: Vec<KvLayer> = vec![(2, 256, None); 10];
 
-        let gemma4_f32 = kv_cache_bytes(&gemma4, 131_072, GgmlType::F32).expect("f32 has a size");
-        let gemma4_f16 = kv_cache_bytes(&gemma4, 131_072, GgmlType::F16).expect("f16 has a size");
-        let gemma4_q8 = kv_cache_bytes(&gemma4, 131_072, GgmlType::Q8_0).expect("q8_0 has a size");
-        let qwen36_f16 = kv_cache_bytes(&qwen36, 262_144, GgmlType::F16).expect("f16 has a size");
+        let gemma4_f32 =
+            kv_cache_bytes(&gemma4, 131_072, NumericFormat::Float32).expect("f32 has a size");
+        let gemma4_f16 =
+            kv_cache_bytes(&gemma4, 131_072, NumericFormat::Float16).expect("f16 has a size");
+        let gemma4_q8 =
+            kv_cache_bytes(&gemma4, 131_072, NumericFormat::Q8_0).expect("q8_0 has a size");
+        let qwen36_f16 =
+            kv_cache_bytes(&qwen36, 262_144, NumericFormat::Float16).expect("f16 has a size");
 
         assert_eq!(gemma4_f32, 1_623_195_648);
         assert_eq!(gemma4_f16, 811_597_824);

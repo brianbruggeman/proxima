@@ -16,6 +16,7 @@ use crate::cuda_async::{
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use proxima_core::ProximaError;
 use proxima_core::ServingState;
+use proxima_numeric::NumericFormat;
 #[cfg(all(feature = "instrument", any(test, all(feature = "metal", target_os = "macos"))))]
 use proxima_telemetry::metric::Counter;
 
@@ -2612,8 +2613,8 @@ pub(crate) fn supported_serving_config(
     #[cfg(all(feature = "metal", target_os = "macos"))] math_mode: omega::MathMode,
 ) -> ServingConfig<'static> {
     ServingConfig {
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

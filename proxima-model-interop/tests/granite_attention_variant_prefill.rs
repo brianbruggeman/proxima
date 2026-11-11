@@ -21,7 +21,7 @@ use omega::{
 };
 use proxima_gguf::parse_complete;
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_gguf::types::GgmlType;
+use proxima_numeric::NumericFormat;
 use proxima_model_interop::{
     AttentionTileHeightSetting, GPU_LAYERS_ALL, InteropError, LoadedModel, PromptCacheConfig,
     ServingConfig, ServingSettings, SpeculativeConfig,
@@ -128,8 +128,8 @@ fn serving_config(attention_variant: Option<AttentionVariant>) -> ServingConfig<
     ServingConfig {
         attention_variant,
         gpu_layers: GPU_LAYERS_ALL,
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         reasoning_budget: 0,
         prompt_cache: PromptCacheConfig::off(),

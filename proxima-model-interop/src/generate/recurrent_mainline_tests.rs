@@ -611,7 +611,7 @@ mod resident_cuda_plans {
 
     use proxima_gguf::parse_complete;
 
-    use proxima_gguf::types::GgmlType;
+    use proxima_numeric::NumericFormat;
     use proxima_tensor::spec::ModelDescriptor;
 
     use super::super::ouro_fixture::grouped_llama_gguf;
@@ -814,8 +814,8 @@ mod resident_cuda_plans {
             ..defaults
         });
         ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             temperature: 0.8,
             top_k: 8,
@@ -878,8 +878,8 @@ mod resident_cuda_plans {
 
     fn greedy_config() -> ServingConfig<'static> {
         ServingConfig {
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             temperature: 0.0,
             speculative: SpeculativeConfig::none(),
@@ -929,7 +929,7 @@ mod resident_cuda_plans {
 
 mod second_request_real_model {
     use proxima_gguf::parse_complete;
-    use proxima_gguf::types::GgmlType;
+    use proxima_numeric::NumericFormat;
     use proxima_tensor::spec::ModelDescriptor;
 
     use super::{LoadedModel, ServingConfig};
@@ -944,8 +944,8 @@ mod second_request_real_model {
     fn probe_config() -> ServingConfig<'static> {
         ServingConfig {
             gpu_layers: GPU_LAYERS_ALL,
-            kv_cache_key_quant: GgmlType::F32,
-            kv_cache_value_quant: GgmlType::F32,
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,

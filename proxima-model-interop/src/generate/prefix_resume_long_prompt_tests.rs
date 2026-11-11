@@ -5,7 +5,7 @@ use std::fs::File;
 
 use memmap2::Mmap;
 use proxima_gguf::parse_complete;
-use proxima_gguf::types::GgmlType;
+use proxima_numeric::NumericFormat;
 
 use crate::LoadedModel;
 use crate::serving::{GPU_LAYERS_ALL, ServingConfig, SpeculativeConfig};
@@ -23,8 +23,8 @@ const LAST_ROW_COUNT_AT_FULL_LANE_WIDTH: usize = 1872;
 pub(super) fn greedy_config() -> ServingConfig<'static> {
     ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,

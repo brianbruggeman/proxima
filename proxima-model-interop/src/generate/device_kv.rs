@@ -31,12 +31,6 @@ use proxima_numeric::{FormatCodec, NumericError, NumericFormat};
 
 use super::*;
 
-fn unsupported_cache(kind: &impl core::fmt::Debug) -> InteropError {
-    InteropError::UnsupportedServingConfig(alloc::format!(
-        "device kv cache type {kind:?}: no numeric format names it"
-    ))
-}
-
 // the emitter alone knows which formats a kernel reads, so its answer and its refusal are passed through rather than re-derived here
 fn kernel_codecs(
     key: &NumericFormat,
@@ -58,13 +52,6 @@ fn numeric_failure(format: &NumericFormat, error: NumericError) -> InteropError 
     InteropError::UnsupportedServingConfig(alloc::format!(
         "device kv cache format {format:?}: {error}"
     ))
-}
-
-/// The cache format a serving config's `GgmlType` names, from the one table `GgmlType::numeric_format`. A type with no format has no device path and fails here, before any buffer is allocated; a format the kernel cannot read fails at allocation.
-pub(super) fn cache_format(element: GgmlType) -> Result<NumericFormat, InteropError> {
-    element
-        .numeric_format()
-        .ok_or_else(|| unsupported_cache(&element))
 }
 
 /// The placement hook of the device kv: the allocator the three buffers of each layer come from; the default is [`omega::allocate_placed_buffer`]; [`omega::allocate_placed_buffer_over`] wraps memory a caller owns.
@@ -862,7 +849,7 @@ mod tests {
             (total_positions, 4),
             3,
             allocate_placed_buffer,
-            cache_format(GgmlType::F32).expect("f32 is a device cache format"),
+            NumericFormat::Float32,
         )
         .expect("device kv allocates on the real Metal device")
         .expect("a plain attention cache is adoptable");
@@ -1005,8 +992,8 @@ mod tests {
             3,
             &mut allocate_placed_buffer,
             (
-                &cache_format(GgmlType::F32).expect("f32 is a device cache format"),
-                &cache_format(GgmlType::F32).expect("f32 is a device cache format"),
+                &NumericFormat::Float32,
+                &NumericFormat::Float32,
             ),
         )
         .expect("device kv allocates on the real Metal device");
@@ -1058,7 +1045,7 @@ mod tests {
             (total_positions + 3, 4),
             prefill_rows,
             allocate_placed_buffer,
-            cache_format(GgmlType::F32).expect("f32 is a device cache format"),
+            NumericFormat::Float32,
         )
         .expect("device kv allocates on the real Metal device")
         .expect("an empty attention cache is adoptable");
@@ -1189,7 +1176,7 @@ mod tests {
             (80, 4),
             3,
             recording_source,
-            cache_format(GgmlType::F32).expect("f32 is a device cache format"),
+            NumericFormat::Float32,
         )
         .expect("device kv allocates on the real Metal device");
 
@@ -1223,7 +1210,7 @@ mod tests {
             (80, 4),
             3,
             allocate_placed_buffer,
-            cache_format(GgmlType::F32).expect("f32 is a device cache format"),
+            NumericFormat::Float32,
         )
         .expect("device kv allocates on the real Metal device")
         .expect("a plain attention layer is adoptable");
@@ -1256,7 +1243,7 @@ mod tests {
                     Ok,
                 )
             },
-            cache_format(GgmlType::F32).expect("f32 is a device cache format"),
+            NumericFormat::Float32,
         )
         .expect("device kv binds the kept buffers")
         .expect("a plain attention layer is adoptable");
@@ -1304,7 +1291,7 @@ mod tests {
             (40, 4),
             3,
             allocate_placed_buffer,
-            cache_format(GgmlType::F32).expect("f32 is a device cache format"),
+            NumericFormat::Float32,
         )
         .expect("the allocation path itself succeeds");
         assert!(
@@ -1357,7 +1344,7 @@ mod tests {
             (total_positions, 4),
             3,
             allocate_placed_buffer,
-            cache_format(GgmlType::F16).expect("f16 is a device cache format"),
+            NumericFormat::Float16,
         )
         .expect("device kv allocates on the real Metal device")
         .expect("a plain attention cache is adoptable");
@@ -1396,7 +1383,7 @@ mod tests {
             (total_positions, 4),
             3,
             allocate_placed_buffer,
-            cache_format(GgmlType::Bf16).expect("bf16 is a device cache format"),
+            NumericFormat::BFloat16,
         )
         .expect("device kv allocates on the real Metal device")
         .expect("a plain attention cache is adoptable");
@@ -1480,24 +1467,16 @@ mod tests {
     }
 
     #[test]
-    fn device_kv_production_text_has_no_kv_element_type_and_names_ggml_type_only_in_cache_format() {
+    fn device_kv_production_text_has_no_kv_element_type_and_never_names_ggml_type() {
         let production = production_of(include_str!("device_kv.rs"));
-        let lines: Vec<&str> = production.lines().collect();
-        let start = lines
-            .iter()
-            .position(|line| line.contains("fn cache_format("))
-            .expect("cache_format is the one place a GgmlType becomes a format");
-        let end = end_of_item(&lines, start);
 
-        let outside_cache_format: Vec<&str> = lines[..start]
-            .iter()
-            .chain(&lines[end..])
+        let ggml_lines: Vec<&str> = production
+            .lines()
             .filter(|line| !line.trim_start().starts_with("//") && line.contains("GgmlType"))
-            .copied()
             .collect();
 
         assert!(!production.contains("KvElement"), "the cache element is a NumericFormat, not a parallel enum");
-        assert_eq!(outside_cache_format, Vec::<&str>::new());
+        assert_eq!(ggml_lines, Vec::<&str>::new());
     }
 
     #[test]
@@ -1619,7 +1598,7 @@ mod tests {
         cache.append_at(0, &even, &odd, &value);
         let mut caches = alloc::vec![LayerCacheState::Attention(cache)];
         let widths = [LayerPadRowWidths::Attention { even_odd_row: WIDE_ROW, v_row: V_ROW }];
-        let q4_0 = cache_format(GgmlType::Q4_0).expect("q4_0 maps to a format");
+        let q4_0 = NumericFormat::Q4_0;
 
         let device = DeviceKv::adopt_pair(
             &mut caches,
@@ -1628,7 +1607,7 @@ mod tests {
             (40, 4),
             3,
             allocate_placed_buffer,
-            (q4_0, cache_format(GgmlType::F16).expect("f16 maps to a format")),
+            (q4_0, NumericFormat::Float16),
         )
         .expect("a Q4_0 key beside a Float16 value is a readable pair")
         .expect("a plain attention cache is adoptable");
@@ -1671,7 +1650,7 @@ mod tests {
             (40, 4),
             3,
             allocate_placed_buffer,
-            cache_format(GgmlType::Q4_0).expect("q4_0 maps to a format"),
+            NumericFormat::Q4_0,
         )
         .err()
         .expect("a Q4_0 device cache has no read path");
@@ -1827,7 +1806,7 @@ mod tests {
             (40, 4),
             3,
             allocate_placed_buffer,
-            cache_format(GgmlType::Q8_0).expect("q8_0 maps to a codec"),
+            NumericFormat::Q8_0,
         )
         .err()
         .expect("a Q8_0 device cache has no read path");

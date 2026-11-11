@@ -3600,7 +3600,7 @@ impl<'file> LoadedModel<'file> {
         // below, byte-for-byte unchanged.
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         {
-            let key_binary32 = kv_cache_format::is_binary32(serving_config.kv_cache_key_quant);
+            let key_binary32 = kv_cache_format::is_binary32(&serving_config.kv_cache_key_quant);
             let reason = if force_two_range {
                 "force_two_range"
             } else if !runtime.is_metal() {
@@ -3625,7 +3625,7 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if !force_two_range
             && runtime.is_metal()
-            && kv_cache_format::is_binary32(serving_config.kv_cache_key_quant)
+            && kv_cache_format::is_binary32(&serving_config.kv_cache_key_quant)
             && let Some(single_range) = &self.single_range
         {
             let mut placed_token_error: Option<InteropError> = None;
@@ -4117,7 +4117,7 @@ impl<'file> LoadedModel<'file> {
             (!drafter_set.is_empty() || model_proposer.is_some() || forced_draft_width.is_some())
                 && rings_cover_speculation(&layer_caches, draft_limit)
                 && !(self.recurrent_speculative_verify.is_some() && recurrent_state_is_placed);
-        if speculative_enabled && !kv_cache_format::row_tiled_reads(serving_config.kv_cache_key_quant) {
+        if speculative_enabled && !kv_cache_format::row_tiled_reads(&serving_config.kv_cache_key_quant) {
             return Err(InteropError::UnsupportedServingConfig(alloc::format!(
                 "kv_cache_key_quant={:?} with speculative decoding: a verify step attends several \
 query rows against the cached range through the row-tiled kernel, which does not read this cache \
@@ -4225,7 +4225,7 @@ format; only the single-row decode kernel reads it from the device cache",
         let mut step = 0usize;
         let mut carried_layers: Vec<(usize, NodeId)> = Vec::new();
         let mut carried_program = 0usize;
-        let kv_carry_eligible = kv_cache_format::is_binary32(serving_config.kv_cache_key_quant)
+        let kv_carry_eligible = kv_cache_format::is_binary32(&serving_config.kv_cache_key_quant)
             && layer_caches.iter().all(|state| match state {
                 LayerCacheState::Attention(cache) => cache.ring.is_none(),
                 _ => true,
@@ -4233,7 +4233,7 @@ format; only the single-row decode kernel reads it from the device cache",
         debug!(
             key_format = ?serving_config.kv_cache_key_quant,
             value_format = ?serving_config.kv_cache_value_quant,
-            key_binary32 = kv_cache_format::is_binary32(serving_config.kv_cache_key_quant),
+            key_binary32 = kv_cache_format::is_binary32(&serving_config.kv_cache_key_quant),
             no_ring_attention = layer_caches.iter().all(|state| match state {
                 LayerCacheState::Attention(cache) => cache.ring.is_none(),
                 _ => true,
@@ -4769,7 +4769,7 @@ format; only the single-row decode kernel reads it from the device cache",
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if !device_kv_attempted
                         && device_kv_eligible
-                        && (!kv_cache_format::is_narrow(serving_config.kv_cache_key_quant)
+                        && (!kv_cache_format::is_narrow(&serving_config.kv_cache_key_quant)
                             || (cached_len > 0 && is_last_step_batch))
                         && new_count <= device_kv_step_rows
                     {
@@ -4809,8 +4809,8 @@ format; only the single-row decode kernel reads it from the device cache",
                                 )
                             },
                             (
-                                device_kv::cache_format(serving_config.kv_cache_key_quant)?,
-                                device_kv::cache_format(serving_config.kv_cache_value_quant)?,
+                                serving_config.kv_cache_key_quant,
+                                serving_config.kv_cache_value_quant,
                             ),
                         )?;
                         #[cfg(feature = "instrument")]
@@ -4850,7 +4850,7 @@ format; only the single-row decode kernel reads it from the device cache",
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let device_kv_resident = false;
                     if cached_len > 0
-                        && kv_cache_format::is_narrow(serving_config.kv_cache_key_quant)
+                        && kv_cache_format::is_narrow(&serving_config.kv_cache_key_quant)
                         && !device_kv_resident
                     {
                         return Err(InteropError::UnsupportedServingConfig(alloc::format!(

@@ -21,6 +21,7 @@
 mod fixture;
 
 use proxima_gguf::types::GgmlType;
+use proxima_numeric::NumericFormat;
 use proxima_gguf::writer::{GgufModel, write_complete};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_model_interop::GPU_LAYERS_ALL;
@@ -69,8 +70,8 @@ fn supported_config(gpu_layers: i32) -> ServingConfig<'static> {
     ServingConfig {
         model_path: "synthetic-qwen35-fixture",
         context_length: ContextLength::Within(256),
-        kv_cache_key_quant: GgmlType::F32,
-        kv_cache_value_quant: GgmlType::F32,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,
