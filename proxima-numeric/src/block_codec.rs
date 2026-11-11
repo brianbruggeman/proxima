@@ -1197,6 +1197,7 @@ mod tests {
                 nan: NanPolicy::IEEE,
             },
             byte_offset: 0,
+            pieces: None,
         },
         ..BlockLayout::Q4_0
     };

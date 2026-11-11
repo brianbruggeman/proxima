@@ -4,11 +4,17 @@
 //! Every table here is copied verbatim from llama.cpp's `ggml-common.h`; the per-module doc names
 //! the exact source line range (guiding-principles principle 10, attribution).
 
+pub mod iq1s_grid;
+pub mod iq2s_grid;
 pub mod iq2xs_grid;
+pub mod iq2xxs_grid;
 pub mod iq3s_grid;
 pub mod iq3xxs_grid;
 
+pub use iq1s_grid::IQ1S_GRID;
+pub use iq2s_grid::IQ2S_GRID;
 pub use iq2xs_grid::{IQ2XS_GRID, KMASK_IQ2XS, KSIGNS_IQ2XS};
+pub use iq2xxs_grid::IQ2XXS_GRID;
 pub use iq3s_grid::IQ3S_GRID;
 pub use iq3xxs_grid::IQ3XXS_GRID;
 

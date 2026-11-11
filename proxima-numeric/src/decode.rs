@@ -352,7 +352,7 @@ fn decode_levels_block(
             };
             // this walker scales by the block scale alone; a ladder under sub-block scales
             // (IQ4_XS) is described, not decoded, here
-            if packing.sub.is_some() {
+            if packing.sub.is_some() || packing.scale.pieces.is_some() {
                 return Err(NumericError::NoDecoder { format: name });
             }
             let codes = &packing.element;
@@ -387,9 +387,9 @@ fn decode_levels_block(
             decode_iq3_xxs(block, out);
             Ok(())
         }
-        LevelTable::SignedGrid { .. } | LevelTable::External => {
-            Err(NumericError::NoDecoder { format: name })
-        }
+        LevelTable::SignedGrid { .. }
+        | LevelTable::SignedGrid64 { .. }
+        | LevelTable::DeltaGrid { .. } => Err(NumericError::NoDecoder { format: name }),
     }
 }
 
@@ -529,6 +529,11 @@ pub(crate) fn geometry_fits(format: &NumericFormat) -> Result<(), NumericError> 
                     {
                         Err(unsound("a signed grid whose length is not its code space"))
                     }
+                    LevelTable::SignedGrid64 { grid, .. } | LevelTable::DeltaGrid { grid, .. }
+                        if grid.len() != code_space =>
+                    {
+                        Err(unsound("a byte grid whose length is not its code space"))
+                    }
                     _ => Ok(()),
                 }
             }
@@ -585,6 +590,15 @@ fn block_geometry_fits(layout: &BlockLayout) -> Result<(), &'static str> {
     for field in [Some(layout.scale), layout.min].into_iter().flatten() {
         if usize::from(field.byte_offset) * 8 + usize::from(field.layout.width()) > bits {
             return Err("a scale or min field outside the block");
+        }
+        if let Some(pieces) = &field.pieces {
+            let count = usize::from(field.layout.width().div_ceil(pieces.bits));
+            if usize::from(pieces.bits) * count != usize::from(field.layout.width()) {
+                return Err("scattered pieces that do not tile the field");
+            }
+            if plane_span(pieces, count) > bits {
+                return Err("a scattered field outside the block");
+            }
         }
     }
     if let Some(runs) = layout.scale_runs {

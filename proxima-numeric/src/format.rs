@@ -52,9 +52,29 @@ pub enum LevelTable {
         lanes: u8,
         sign: Plane,
     },
-    /// A trained codebook whose table and packing land with its format frontend. [`NumericFormat`]
-    /// describes the format; this crate refuses to decode it rather than guess the codebook.
-    External,
+    /// `value = sign * magnitude * 2^-unit_shift`: the code indexes `grid`, one `u64` entry per
+    /// eight elements, each packing eight unsigned magnitude bytes (lane 0 in the low byte);
+    /// element `i` takes lane `i % 8`. The sign is `sign`: with `sign_table` `None` it is a
+    /// one-bit-per-element plane (a set bit negates; IQ2_S); with `Some(table)` it is a plane of
+    /// indices into `table`, and element `i` is negated when bit `i % 8` of `table[index]` is set
+    /// (IQ2_XXS's seven-bit index into `ksigns_iq2xs` and its `kmask_iq2xs`). `unit_shift` is the
+    /// constant `0.25 * 0.5` the IQ2 dequantizers fold into the sub-block scale: 3.
+    SignedGrid64 {
+        grid: &'static [u64],
+        sign: Plane,
+        sign_table: Option<&'static [u8]>,
+        unit_shift: u8,
+    },
+    /// `value = grid_lane + delta`, `delta = +-2^-delta_shift`: the code indexes `grid`, one `u64`
+    /// entry per eight elements, each packing eight *signed* byte levels (lane 0 in the low byte);
+    /// element `i` takes lane `i % 8`. `delta` is a one-bit-per-element plane addressed like the
+    /// code; a set bit makes the delta negative. IQ1_S and IQ1_M's `iq1s_grid` with their
+    /// `IQ1S_DELTA = 0.125 = 2^-3`; the delta is added *before* the sub-block scale multiplies.
+    DeltaGrid {
+        grid: &'static [u64],
+        delta: Plane,
+        delta_shift: u8,
+    },
 }
 
 impl LevelTable {
@@ -80,7 +100,11 @@ impl LevelTable {
                     None
                 }
             }
-            Self::Iq2XsGrid | Self::Iq3XxsGrid | Self::SignedGrid { .. } | Self::External => None,
+            Self::Iq2XsGrid
+            | Self::Iq3XxsGrid
+            | Self::SignedGrid { .. }
+            | Self::SignedGrid64 { .. }
+            | Self::DeltaGrid { .. } => None,
         }
     }
 }
@@ -190,25 +214,12 @@ impl LevelFormat {
     pub const fn ladder_of(layout: &BlockLayout) -> Self {
         Self::from_layout(layout, Self::ladder(layout))
     }
-
-    /// A codebook format whose table lands with its gguf decoder: geometry only, and a decode
-    /// that reports [`crate::NumericError::NoDecoder`] rather than a guessed number.
-    #[must_use]
-    pub const fn external(elements: u16, bytes: u16) -> Self {
-        Self {
-            geometry: LevelGeometry::Codebook {
-                elements,
-                bytes,
-                scale: F16_SCALE,
-            },
-            levels: LevelTable::External,
-        }
-    }
 }
 
 const F16_SCALE: Field = Field {
     layout: FloatLayout::F16,
     byte_offset: 0,
+    pieces: None,
 };
 
 /// One numeric storage format.
@@ -784,11 +795,51 @@ impl NumericFormat {
         LevelTable::Explicit(&crate::tables::KVALUES_IQ4_NL),
     ));
 
-    /// iq1_s, iq1_m, iq2_xxs, iq2_s: codebooks that land with their gguf decoder.
-    pub const Iq1S: Self = Self::Levels(LevelFormat::external(256, 50));
-    pub const Iq1M: Self = Self::Levels(LevelFormat::external(256, 56));
-    pub const Iq2Xxs: Self = Self::Levels(LevelFormat::external(256, 66));
-    pub const Iq2S: Self = Self::Levels(LevelFormat::external(256, 82));
+    /// iq1_s: 256 elements in 50 bytes, an 11-bit ternary-grid index per eight elements under
+    /// 3-bit sub-block scales and a per-sub-block delta ([`BlockLayout::IQ1_S`]).
+    pub const Iq1S: Self = Self::Levels(LevelFormat::from_layout(
+        &BlockLayout::IQ1_S,
+        LevelTable::DeltaGrid {
+            grid: &crate::tables::IQ1S_GRID,
+            delta: BlockLayout::IQ1_S_DELTA,
+            delta_shift: 3,
+        },
+    ));
+
+    /// iq1_m: 256 elements in 56 bytes, IQ1_S's grid with a delta per eight elements and a
+    /// super-scale scattered over the sub-block scale words ([`BlockLayout::IQ1_M`]).
+    pub const Iq1M: Self = Self::Levels(LevelFormat::from_layout(
+        &BlockLayout::IQ1_M,
+        LevelTable::DeltaGrid {
+            grid: &crate::tables::IQ1S_GRID,
+            delta: BlockLayout::IQ1_M_DELTA,
+            delta_shift: 3,
+        },
+    ));
+
+    /// iq2_xxs: 256 elements in 66 bytes, an 8-bit grid index and a 7-bit sign index per eight
+    /// elements under 4-bit sub-block scales ([`BlockLayout::IQ2_XXS`]).
+    pub const Iq2Xxs: Self = Self::Levels(LevelFormat::from_layout(
+        &BlockLayout::IQ2_XXS,
+        LevelTable::SignedGrid64 {
+            grid: &crate::tables::IQ2XXS_GRID,
+            sign: BlockLayout::IQ2_XXS_SIGN_INDEX,
+            sign_table: Some(&crate::tables::KSIGNS_IQ2XS),
+            unit_shift: 3,
+        },
+    ));
+
+    /// iq2_s: 256 elements in 82 bytes, a 10-bit grid index per eight elements plus a sign bit per
+    /// element under 4-bit sub-block scales ([`BlockLayout::IQ2_S`]).
+    pub const Iq2S: Self = Self::Levels(LevelFormat::from_layout(
+        &BlockLayout::IQ2_S,
+        LevelTable::SignedGrid64 {
+            grid: &crate::tables::IQ2S_GRID,
+            sign: BlockLayout::IQ2_S_SIGNS,
+            sign_table: None,
+            unit_shift: 3,
+        },
+    ));
 }
 
 #[cfg(feature = "config")]
@@ -1216,7 +1267,8 @@ mod tests {
             NumericFormat::Mxfp4.scale(),
             Some(Field {
                 layout: FloatLayout::F8_E8M0,
-                byte_offset: 0
+                byte_offset: 0,
+                pieces: None
             })
         );
         assert_eq!(BlockLayout::Q5_0.high_bits(), Some(1));

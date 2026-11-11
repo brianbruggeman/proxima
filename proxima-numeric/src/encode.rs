@@ -656,7 +656,8 @@ pub fn encode_blocks(
                 LevelTable::Iq2XsGrid
                 | LevelTable::Iq3XxsGrid
                 | LevelTable::SignedGrid { .. }
-                | LevelTable::External => {
+                | LevelTable::SignedGrid64 { .. }
+                | LevelTable::DeltaGrid { .. } => {
                     Err(NumericError::UnsupportedEncode {
                         format: name,
                         reason: "this codebook has no inverse in this crate",
