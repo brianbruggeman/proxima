@@ -355,18 +355,18 @@ fn card_06_bf16_decode_matches_f32_decode_output_bits() {
     )
     .expect("BF16 cache dispatch plans");
 
-    let f32_output = omega::execute_plan_named(&f32_plan, &f32_named)
-        .expect("F32 cache decode executes")
-        .root()
-        .iter()
-        .map(|value| value.to_bits())
-        .collect::<Vec<_>>();
-    let bf16_output = omega::execute_plan_named(&bf16_plan, &bf16_named)
-        .expect("BF16 cache decode executes")
-        .root()
-        .iter()
-        .map(|value| value.to_bits())
-        .collect::<Vec<_>>();
+    let f32_output = finite_root_bits(
+        omega::execute_plan_named(&f32_plan, &f32_named)
+            .expect("F32 cache decode executes")
+            .root(),
+        "F32 cache",
+    );
+    let bf16_output = finite_root_bits(
+        omega::execute_plan_named(&bf16_plan, &bf16_named)
+            .expect("BF16 cache decode executes")
+            .root(),
+        "BF16 cache",
+    );
     assert_eq!(
         bf16_output, f32_output,
         "the cache decode has the same f32 inputs and operations"
@@ -571,28 +571,28 @@ fn card_09_bf8_decode_matches_f32_cache_output_bits() {
         "the BF8 cache reader has a distinct pipeline identity"
     );
 
-    let bf8_output = omega::execute_plan_named(&bf8_plan, &bf8_named)
-        .expect("BF8 cache decode executes")
-        .root()
-        .iter()
-        .map(|value| value.to_bits())
-        .collect::<Vec<_>>();
-    let bf8_output_repeat = omega::execute_plan_named(&bf8_plan, &bf8_named)
-        .expect("repeated BF8 cache decode executes")
-        .root()
-        .iter()
-        .map(|value| value.to_bits())
-        .collect::<Vec<_>>();
+    let bf8_output = finite_root_bits(
+        omega::execute_plan_named(&bf8_plan, &bf8_named)
+            .expect("BF8 cache decode executes")
+            .root(),
+        "BF8 cache",
+    );
+    let bf8_output_repeat = finite_root_bits(
+        omega::execute_plan_named(&bf8_plan, &bf8_named)
+            .expect("repeated BF8 cache decode executes")
+            .root(),
+        "repeated BF8 cache",
+    );
     assert_eq!(
         bf8_output_repeat, bf8_output,
         "BF8 dispatch repeats its output bytes"
     );
-    let f32_output = omega::execute_plan_named(&f32_plan, &f32_named)
-        .expect("F32 cache decode executes")
-        .root()
-        .iter()
-        .map(|value| value.to_bits())
-        .collect::<Vec<_>>();
+    let f32_output = finite_root_bits(
+        omega::execute_plan_named(&f32_plan, &f32_named)
+            .expect("F32 cache decode executes")
+            .root(),
+        "F32 cache",
+    );
     assert_eq!(
         bf8_output, f32_output,
         "BF8 cache values widen into the same f32 decode"
@@ -638,6 +638,14 @@ fn worst_error_over_block_max(original: &[f32], decoded: &[f32]) -> f32 {
 fn assert_all_finite(values: &[f32], what: &str) {
     let non_finite = values.iter().filter(|value| !value.is_finite()).count();
     assert_eq!(non_finite, 0, "{non_finite}/{} {what} values are not finite", values.len());
+}
+
+/// The bit patterns of a root for an equality check: bit equality passes when both sides are the
+/// same NaN, so a root must be non-empty and finite before its bits are compared.
+fn finite_root_bits(root: &[f32], what: &str) -> Vec<u32> {
+    assert!(!root.is_empty(), "an empty {what} root compares nothing");
+    assert_all_finite(root, what);
+    root.iter().map(|value| value.to_bits()).collect()
 }
 
 fn max_relative(expected: &[f32], actual: &[f32]) -> f32 {
