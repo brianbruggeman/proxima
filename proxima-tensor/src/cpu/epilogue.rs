@@ -1023,21 +1023,39 @@ pub(super) fn apply_layer_norm_cluster_fused<B: Deref<Target = [f32]>>(
 
     let x = buffers[x_node.0 as usize].as_deref().unwrap_or(&[]);
     let inner_axis = rank.saturating_sub(1);
-    let read_inner = |slot: usize, inner: u64| -> f32 {
-        let (node, layout, _gather) = &operands[slot];
+    let source_of = |slot: usize| -> &[f32] {
+        buffers[operands[slot].0.0 as usize]
+            .as_deref()
+            .unwrap_or(&[])
+    };
+    let offset_at = |slot: usize, inner: u64| -> i64 {
         let mut coordinate = [0u64; bind::MAX_INLINE_RANK];
         if inner_axis < rank && inner_axis < bind::MAX_INLINE_RANK {
             coordinate[inner_axis] = inner;
         }
-        let offset = layout.offset_of(&coordinate[..rank.min(bind::MAX_INLINE_RANK)]);
-        let source: &[f32] = buffers[node.0 as usize].as_deref().unwrap_or(&[]);
-        usize::try_from(offset)
+        operands[slot]
+            .1
+            .offset_of(&coordinate[..rank.min(bind::MAX_INLINE_RANK)])
+    };
+    let read_inner = |slot: usize, inner: u64| -> f32 {
+        usize::try_from(offset_at(slot, inner))
             .ok()
-            .and_then(|index| source.get(index))
+            .and_then(|index| source_of(slot).get(index))
             .copied()
             .unwrap_or(0.0)
     };
     let read_scalar = |slot: usize| -> f32 { read_inner(slot, 0) };
+    // `offset_of` is linear in the coordinate, so a unit step between inner 0 and inner 1 means
+    // the whole row is one contiguous slice; reading it per element through `read_inner` rebuilt
+    // the coordinate and re-walked the layout for every column of every row.
+    let contiguous_row = |slot: usize| -> Option<&[f32]> {
+        let start = usize::try_from(offset_at(slot, 0)).ok()?;
+        let unit_step = hidden < 2 || offset_at(slot, 1) == offset_at(slot, 0) + 1;
+        let end = start.checked_add(hidden as usize)?;
+        source_of(slot).get(start..end).filter(|_| unit_step)
+    };
+    let gamma_row = contiguous_row(tail_slots.gamma);
+    let beta_row = contiguous_row(tail_slots.beta);
 
     let reciprocal_n = read_scalar(tail_slots.reciprocal_n);
     let epsilon = read_scalar(tail_slots.epsilon);
@@ -1051,13 +1069,26 @@ pub(super) fn apply_layer_norm_cluster_fused<B: Deref<Target = [f32]>>(
             let mut fsm = LayerNormRowFsm::new();
             while !fsm.advance(row, reciprocal_n, epsilon) {}
             let (mean, denominator) = fsm.finish();
-            for inner in 0..hidden {
-                let value = row.get(inner as usize).copied().unwrap_or(0.0);
-                let gamma = read_inner(tail_slots.gamma, inner);
-                let beta = read_inner(tail_slots.beta, inner);
-                let normalized = (value - mean) / denominator;
-                output[out_index] = normalized * gamma + beta;
-                out_index += 1;
+            match (gamma_row, beta_row) {
+                (Some(gamma_row), Some(beta_row)) if row.len() == hidden_usize => {
+                    let out_row = &mut output[out_index..out_index + hidden_usize];
+                    for (((slot, &value), &gamma), &beta) in
+                        out_row.iter_mut().zip(row).zip(gamma_row).zip(beta_row)
+                    {
+                        *slot = ((value - mean) / denominator) * gamma + beta;
+                    }
+                    out_index += hidden_usize;
+                }
+                _ => {
+                    for inner in 0..hidden {
+                        let value = row.get(inner as usize).copied().unwrap_or(0.0);
+                        let gamma = read_inner(tail_slots.gamma, inner);
+                        let beta = read_inner(tail_slots.beta, inner);
+                        let normalized = (value - mean) / denominator;
+                        output[out_index] = normalized * gamma + beta;
+                        out_index += 1;
+                    }
+                }
             }
             row_index += 1;
         }
