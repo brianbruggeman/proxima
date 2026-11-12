@@ -1500,9 +1500,13 @@ pub(super) fn cached_attention_candidates(
             // `decode_split_form` shape: one decode row, a bound cached range, a full-rotary head of
             // whole float4 lanes, the split-merge policy); every other shape stays unfused rather
             // than bind an op no kernel can render. The CPU executors take any shape.
+            #[cfg(feature = "metal-attn-split-rows")]
+            let row_tiled_admits_rows = query_shape[0] >= 2 && cached_key_shape[0].is_multiple_of(8);
+            #[cfg(not(feature = "metal-attn-split-rows"))]
+            let row_tiled_admits_rows = false;
             if attention_sink_term.is_some()
                 && !(split_decode_admitted
-                    && query_shape[0] == 1
+                    && (query_shape[0] == 1 || row_tiled_admits_rows)
                     && decode_split_shape_fits(
                         query_shape[0],
                         new_key_shape[0],
@@ -1516,8 +1520,8 @@ pub(super) fn cached_attention_candidates(
                 #[cfg(feature = "instrument")]
                 debug!(
                     node = output.0,
-                    stage = "sink_needs_decode_split_form",
-                    "cached_attention decline -- a sink fuses only where a kernel renders it: the decode split form"
+                    stage = "sink_needs_kernel_form",
+                    "cached_attention decline -- a sink fuses only where a kernel renders it: the decode split form (one row) or the row-tiled form (a query-row tile)"
                 );
                 continue;
             }

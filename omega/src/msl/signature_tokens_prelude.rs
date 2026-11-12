@@ -2482,6 +2482,7 @@ fn row_tiled_entry_name(
         head_dim,
         scale,
         cached_lower_inclusive,
+        attention_sink,
         ..
     } = kind
     else {
@@ -2496,10 +2497,11 @@ fn row_tiled_entry_name(
         return None;
     };
     Some(format!(
-        "omega_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}_n{simdgroups}_b{}_rt",
+        "omega_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}_n{simdgroups}_b{}_rt{}",
         scale.to_bits(),
         signed_name_part(*cached_lower_inclusive),
         row_tiled_block(*head_dim),
+        if *attention_sink { "_sk" } else { "" },
     ))
 }
 
