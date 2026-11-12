@@ -111,7 +111,7 @@ fn scaled_e3m2_render_tiled_decode_elements_32_bytes_26() {
         source.contains(&format!("{}(wws_blk", decode.function)),
         "the tiled body stages through the description:\n{source}"
     );
-    assert!(source.contains(decode.msl));
+    assert!(source.contains(&*decode.msl()));
 }
 
 #[cfg(feature = "metal-tiled-gemm")]
@@ -121,7 +121,7 @@ fn scaled_e3m2_render_grouped_gemm_source_uses_the_tiled_decode() {
     let source = grouped_source();
 
     assert!(source.contains("scaled_e3m2_decode"));
-    assert!(source.contains(decode.msl));
+    assert!(source.contains(&*decode.msl()));
     assert_eq!(
         source
             .matches("static inline float scaled_e3m2_field")

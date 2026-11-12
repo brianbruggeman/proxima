@@ -2,7 +2,7 @@ use const_format::formatcp;
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::float_layout::FloatLayout;
 
-use super::layout_render::block_element_msl;
+use super::layout_render::{block_element_msl, level_block_element_msl};
 use super::*;
 
 pub(super) const FP6_E3M2_ELEMENTS: usize = Codec::FP6_E3M2_BLOCK_ELEMENTS;
@@ -153,6 +153,48 @@ pub fn q5_0_unpack_msl() -> String {
 #[must_use]
 pub fn q5_1_unpack_msl() -> String {
     block_element_msl(&BlockLayout::Q5_1, "q5_1_element")
+}
+
+/// The `iq4_xs_element(block, index)` accessor of an `IQ4_XS` block (136 bytes per 256 elements: f16
+/// scale, 6-bit sub-block scales over a high and a low plane, 4-bit codes into IQ4_NL's explicit
+/// ladder), rendered from `BlockLayout::IQ4_XS` and `LevelTable::Explicit` by
+/// `layout_render::level_block_element_msl`.
+#[must_use]
+pub fn iq4_xs_unpack_msl() -> String {
+    level_unpack_msl(&Codec::Iq4Xs, "iq4_xs_element")
+}
+
+/// The `iq3_s_element(block, index)` accessor of an `IQ3_S` block (110 bytes per 256 elements: f16
+/// scale, 4-bit sub-block scales worth `2 * nibble + 1`, a 9-bit grid index per four elements, one
+/// sign bit per element), rendered from `BlockLayout::IQ3_S` and `LevelTable::SignedGrid`.
+#[must_use]
+pub fn iq3_s_unpack_msl() -> String {
+    level_unpack_msl(&Codec::Iq3S, "iq3_s_element")
+}
+
+fn level_unpack_msl(format: &Codec, name: &str) -> String {
+    let Codec::Levels(levels) = format else {
+        return format!("#error {name}: not a level format\n");
+    };
+    // an unrenderable format stops the kernel's compile with the refusal as the message
+    level_block_element_msl(levels, name)
+        .unwrap_or_else(|refusal| format!("#error {name}: {refusal}\n"))
+}
+
+/// `function(block, slot, out)`: the tiled decode contract (`TiledDecode`), writing the
+/// [`DECODE_RUN_ELEMENTS`] elements at `slot` of the block as `half` through the rendered scalar
+/// accessor `element`, which the preamble defines.
+#[must_use]
+pub fn level_half16_decode_msl(function: &str, element: &str) -> String {
+    format!(
+        "
+static inline void {function}(device const uchar *block, uint slot, thread half *out) {{
+    for (uint run = 0u; run < {DECODE_RUN_ELEMENTS}u; ++run) {{
+        out[run] = (half){element}(block, slot + run);
+    }}
+}}
+"
+    )
 }
 
 fn scaled_e3m2_quad_dot_msl(layout: FloatLayout) -> String {

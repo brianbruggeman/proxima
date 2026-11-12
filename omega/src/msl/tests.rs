@@ -9790,11 +9790,11 @@ mod tiled_decode_description {
                 decode.function
             );
             assert!(
-                decode.msl.contains(&signature),
+                decode.msl().contains(&signature),
                 "{codec:?}: `{signature}` missing from its msl"
             );
             assert_eq!(
-                decode.msl.matches("static inline void").count(),
+                decode.msl().matches("static inline void").count(),
                 1,
                 "{codec:?}: a description's msl defines only its own function"
             );
@@ -9889,12 +9889,12 @@ mod tiled_decode_description {
             "{codec:?} must decode at the per-thread cursor:\n{source}"
         );
         assert!(
-            source.contains(decode.msl),
+            source.contains(&*decode.msl()),
             "{codec:?}: its description's msl is spliced:\n{source}"
         );
         for other in DESCRIBED_CODECS.into_iter().filter(|other| *other != codec) {
             assert!(
-                !source.contains(described(other).msl),
+                !source.contains(&*described(other).msl()),
                 "{codec:?}: {other:?}'s description must not be spliced into this kernel"
             );
         }
@@ -9939,7 +9939,7 @@ mod tiled_decode_description {
             "{codec:?}: the per-row schedule has no per-thread cursor"
         );
         assert!(
-            per_row.contains(decode.msl),
+            per_row.contains(&*decode.msl()),
             "{codec:?}: its description's msl is spliced"
         );
     }
@@ -10240,7 +10240,7 @@ mod expert_grouped_decode_description {
             "{codec:?}:\n{source}"
         );
         assert!(
-            source.contains(decode.msl),
+            source.contains(&*decode.msl()),
             "{codec:?}: its description's msl is spliced"
         );
         assert!(
