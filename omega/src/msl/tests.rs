@@ -11328,3 +11328,64 @@ fn a_dense_product_whose_tile_grid_cannot_occupy_the_device_stays_on_the_coopera
         "{rejection:?}"
     );
 }
+
+#[cfg(all(feature = "metal-tiled-gemm", feature = "metal-grouped-gemm"))]
+#[test]
+fn activation_staging_layout_renders_the_tile_type_in_every_gemm_schedule() {
+    for (name, element, matrix) in [
+        ("float16", "half", "simdgroup_half8x8"),
+        ("bfloat16", "bfloat", "simdgroup_bfloat8x8"),
+    ] {
+        for (label, mml) in [("mm_layout", "1"), ("row_major", "0")] {
+            let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+            let packed = BTreeMap::from([(weight_node, Codec::Q4K)]);
+            let source = temp_env::with_vars(
+                [
+                    ("PROXIMA_TILED_GEMM_STAGING", Some(name)),
+                    ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some(mml)),
+                ],
+                || {
+                    emit(&bound, &packed, NumericPolicy::default())
+                        .expect("emits")
+                        .source
+                },
+            );
+            assert!(
+                source.contains(&format!("threadgroup {element} *act_tile"))
+                    || source.contains(&format!("threadgroup {element} act_tile[")),
+                "{label} {name}: activation tile is {element}"
+            );
+            assert!(source.contains(matrix), "{label} {name}: matrix is {matrix}");
+            assert!(!source.contains("simdgroup_float8x8 mb"), "{label} {name}");
+        }
+        let bound = gathered_matmul_op(300, 8, 192, 512);
+        let weight_node = bound.operands()[0].0;
+        let packed = BTreeMap::from([(weight_node, Codec::Q8_0)]);
+        let source = temp_env::with_var("PROXIMA_TILED_GEMM_STAGING", Some(name), || {
+            emit(&bound, &packed, NumericPolicy::default())
+                .expect("emits")
+                .source
+        });
+        assert!(
+            source.contains(&format!("threadgroup {element} *act_tile")),
+            "grouped {name}: activation tile is {element}"
+        );
+        assert!(source.contains(&format!("{matrix} mb[2]")), "grouped {name}");
+    }
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn activation_staging_layout_changes_the_kernel_identity_only_off_binary32() {
+    let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+    let packed = BTreeMap::from([(weight_node, Codec::Q4K)]);
+    let key = |staging: Option<&str>| {
+        temp_env::with_var("PROXIMA_TILED_GEMM_STAGING", staging, || {
+            kernel_cache_key(&bound, &packed, NumericPolicy::default()).expect("cache key derives")
+        })
+    };
+    let unset = key(None);
+    assert_eq!(key(Some("float32")), unset, "binary32 keeps today's identity");
+    assert_ne!(key(Some("float16")), unset);
+    assert_ne!(key(Some("float16")), key(Some("bfloat16")));
+}

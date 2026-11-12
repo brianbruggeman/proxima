@@ -1,5 +1,7 @@
 use alloc::borrow::Cow;
 
+use proxima_numeric::float_layout::FloatLayout;
+
 use super::*;
 
 /// MSL source for one `Q2_K` element. The byte layout and index arithmetic
@@ -2385,6 +2387,24 @@ fn log_slim_tgmem_once(_active: bool) {}
 #[cfg(all(not(feature = "std"), feature = "metal-tiled-gemm"))]
 pub(super) const fn slim_tgmem_override() -> bool {
     true
+}
+
+/// `PROXIMA_TILED_GEMM_STAGING`: the `proxima_numeric` layout name (`float32`,
+/// `float16`, `bfloat16`; see `FloatLayout::from_name`) the tiled and
+/// expert-grouped GEMMs stage their activation tile in. Unset or `float32`
+/// keeps binary32 (`None`, an unchanged identity); a name that is not a
+/// Metal hardware type is ignored with a warning rather than rendered.
+#[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
+pub(super) fn tiled_gemm_staging_layout_override() -> Option<FloatLayout> {
+    let name = std::env::var("PROXIMA_TILED_GEMM_STAGING").ok()?;
+    let layout = FloatLayout::from_name(name.trim())?;
+    layout_render::hardware_type(&layout)?;
+    (!layout.same_format(&FloatLayout::BF32)).then_some(layout)
+}
+
+#[cfg(not(all(feature = "std", feature = "metal-tiled-gemm")))]
+pub(super) const fn tiled_gemm_staging_layout_override() -> Option<FloatLayout> {
+    None
 }
 
 /// `PROXIMA_TILED_GEMM_DIRECT_STORE` (see `docs/model-interop/

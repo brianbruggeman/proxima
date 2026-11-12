@@ -1,4 +1,9 @@
+use proxima_numeric::float_layout::FloatLayout;
+
 use super::*;
+
+/// A fused epilogue: the composed body and the operands it reads.
+pub(super) type GroupedEpilogue<'a> = (&'a ComposedBody, &'a [(NodeId, Layout, Option<Lookup>)]);
 
 /// Token axes the expert-grouped kernel decomposes a flat token index into:
 /// `[sequence]` for one top-k slot per dispatch, `[sequence, selected]` for the
@@ -77,10 +82,11 @@ pub(super) fn push_expert_grouped_gemm_body(
     output_axes: &[u16],
     block: &TiledGemmBlock,
     element_type: &str,
-    epilogue_body: &ComposedBody,
-    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    epilogue: GroupedEpilogue<'_>,
+    staging_layout: &FloatLayout,
 ) -> Result<(), EmitError> {
     let node = resolved.node;
+    let staging = ActivationStaging::new(node, staging_layout)?;
     let Some(expert) = block.gathered else {
         return Err(EmitError::RenderKindMismatch {
             node,
@@ -96,7 +102,7 @@ pub(super) fn push_expert_grouped_gemm_body(
     let geometry = GroupedGeometry::new(block, output_axes, resolved)?;
     let compaction_buffer = grouped_route_compacted(block).then(|| bindings(resolved).len());
     push_grouped_entry(source, node, &geometry, compaction_buffer)?;
-    push_grouped_threadgroup_memory(source, &geometry);
+    push_grouped_threadgroup_memory(source, &geometry, &staging);
     source.push_str(&format!(
         "    device const uchar *weight_bytes = (device const uchar *)in{};\n",
         block.weight
@@ -114,8 +120,8 @@ pub(super) fn push_expert_grouped_gemm_body(
             &geometry,
             &decode,
             element_type,
-            epilogue_body,
-            epilogue_operands,
+            epilogue,
+            &staging,
         );
         source.push_str("    }\n");
         return Ok(());
@@ -143,8 +149,8 @@ pub(super) fn push_expert_grouped_gemm_body(
         &geometry,
         &decode,
         element_type,
-        epilogue_body,
-        epilogue_operands,
+        epilogue,
+        &staging,
     );
     source.push_str("        }\n");
     push_grouped_consume(source, &geometry);
@@ -423,17 +429,22 @@ fn push_route_segment_bounds(source: &mut String, geometry: &GroupedGeometry) {
 /// ids: one tile plus the largest number of matches a scan step can append,
 /// which is every route entry the step covers.
 #[cfg(feature = "metal-grouped-gemm")]
-fn push_grouped_threadgroup_memory(source: &mut String, geometry: &GroupedGeometry) {
+fn push_grouped_threadgroup_memory(
+    source: &mut String,
+    geometry: &GroupedGeometry,
+    staging: &ActivationStaging,
+) {
     let weight_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_DEPTH * 2;
-    let act_tile_bytes = GROUPED_TILE_TOKENS * GROUPED_TILE_DEPTH * 4;
+    let act_tile_bytes = GROUPED_TILE_TOKENS * GROUPED_TILE_DEPTH * staging.element_bytes();
     let out_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_TOKENS * 4;
     let shared_bytes = (weight_tile_bytes + act_tile_bytes).max(out_tile_bytes);
     source.push_str(&format!(
         "    threadgroup uchar tg_shared[{shared_bytes}];\n"
     ));
     source.push_str("    threadgroup half *weight_tile = (threadgroup half *)tg_shared;\n");
+    let element = staging.element();
     source.push_str(&format!(
-        "    threadgroup float *act_tile = (threadgroup float *)(tg_shared + {weight_tile_bytes});\n"
+        "    threadgroup {element} *act_tile = (threadgroup {element} *)(tg_shared + {weight_tile_bytes});\n"
     ));
     source.push_str("    threadgroup float *out_tile = (threadgroup float *)tg_shared;\n");
     source.push_str(&format!(
@@ -604,23 +615,24 @@ fn push_grouped_tile(
     geometry: &GroupedGeometry,
     decode: &TiledDecode,
     element_type: &str,
-    epilogue_body: &ComposedBody,
-    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    epilogue: GroupedEpilogue<'_>,
+    staging:&ActivationStaging,
 ) {
+    let (epilogue_body, epilogue_operands) = epilogue;
     source.push_str("            simdgroup_float8x8 acc[8];\n");
     source.push_str(
         "            for (int i = 0; i < 8; ++i) { acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }\n",
     );
-    push_grouped_stage_pointers(source, block, geometry, decode);
+    push_grouped_stage_pointers(source, block, geometry, decode, staging);
     source.push_str(&format!(
         "            for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH}) {{\n"
     ));
     source.push_str("                float4 a_regs[2];\n");
     push_grouped_load(source, decode, "                ");
     source.push_str("                threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    push_grouped_store(source);
+    push_grouped_store(source, staging);
     source.push_str("                threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    push_grouped_multiply_accumulate(source);
+    push_grouped_multiply_accumulate(source, staging);
     push_block_cursor_advance(
         source,
         "                ",
@@ -661,6 +673,7 @@ fn push_grouped_stage_pointers(
     block: &TiledGemmBlock,
     geometry: &GroupedGeometry,
     decode: &TiledDecode,
+    staging: &ActivationStaging,
 ) {
     let weight = block.weight;
     let other = block.other;
@@ -687,9 +700,10 @@ fn push_grouped_stage_pointers(
     source.push_str(
         "            long a_tok = (a_row < (long)tile_count) ? (long)tile_token[a_row] : -1;\n",
     );
-    source.push_str(
-        "            threadgroup float4 *a_slot = (threadgroup float4 *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));\n",
-    );
+    let vector = staging.vector();
+    source.push_str(&format!(
+        "            threadgroup {vector} *a_slot = (threadgroup {vector} *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));\n"
+    ));
     push_token_coordinates(
         source,
         geometry,
@@ -759,16 +773,18 @@ fn push_grouped_load(source: &mut String, decode: &TiledDecode, indent: &str) {
 /// into their 8x8-block slots (element `i` of the 16 sits at `512 * (i / 8) +
 /// 8 * (i % 8)` from `w_slot`), the activation row as two 16-byte stores.
 #[cfg(feature = "metal-grouped-gemm")]
-fn push_grouped_store(source: &mut String) {
+fn push_grouped_store(source: &mut String, staging: &ActivationStaging) {
     for element in 0..DECODE_RUN_ELEMENTS {
         let slot = 512 * (element / 8) + 8 * (element % 8);
         source.push_str(&format!(
             "                w_slot[{slot}] = w_regs[{element}];\n"
         ));
     }
-    source.push_str(
-        "                if (a_staged) { a_slot[0] = a_regs[0]; a_slot[1] = a_regs[1]; }\n",
-    );
+    source.push_str(&format!(
+        "                if (a_staged) {{ a_slot[0] = {}; a_slot[1] = {}; }}\n",
+        staging.convert_vector("a_regs[0]"),
+        staging.convert_vector("a_regs[1]")
+    ));
 }
 
 /// The `simdgroup_matrix` step over the staged tiles, one 8-deep K block at a
@@ -779,20 +795,24 @@ fn push_grouped_store(source: &mut String) {
 /// half skip the step when the tile has no token there; their accumulators
 /// stay zero.
 #[cfg(feature = "metal-grouped-gemm")]
-fn push_grouped_multiply_accumulate(source: &mut String) {
+fn push_grouped_multiply_accumulate(source: &mut String, staging: &ActivationStaging) {
     source.push_str("                if ((sgitg >> 1) == 0 || has_hi) {\n");
     source.push_str(
         "                    threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);\n",
     );
-    source.push_str(
-        "                    threadgroup const float *lsmb = act_tile + 2 * 64 * (sgitg / 2);\n",
-    );
+    source.push_str(&format!(
+        "                    threadgroup const {} *lsmb = act_tile + 2 * 64 * (sgitg / 2);\n",
+        staging.element()
+    ));
     source.push_str(&format!(
         "                    for (short ik = 0; ik < {}; ++ik) {{\n",
         GROUPED_TILE_DEPTH / 8
     ));
     source.push_str("                        simdgroup_half8x8 ma[4];\n");
-    source.push_str("                        simdgroup_float8x8 mb[2];\n");
+    source.push_str(&format!(
+        "                        {} mb[2];\n",
+        staging.matrix()
+    ));
     source.push_str(
         "                        for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, ulong2(0), false); }\n",
     );
@@ -927,8 +947,8 @@ pub(super) fn push_expert_grouped_gemm_body(
     _output_axes: &[u16],
     _block: &TiledGemmBlock,
     _element_type: &str,
-    _epilogue_body: &ComposedBody,
-    _epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    _epilogue: GroupedEpilogue<'_>,
+    _staging_layout: &FloatLayout,
 ) -> Result<(), EmitError> {
     Err(EmitError::RenderKindMismatch {
         node: resolved.node,

@@ -1843,6 +1843,7 @@ pub(super) fn metal_specialization(
             ),
             _ => false,
         },
+        tiled_gemm_staging_layout: tiled_gemm_staging_layout_override(),
         wide_grid: matches!(
             grid.grid2d,
             Some(Grid2DSpec {

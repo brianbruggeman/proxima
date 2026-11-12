@@ -2,6 +2,72 @@ use super::*;
 #[cfg(feature = "metal-tiled-gemm")]
 use proxima_numeric::float_layout::FloatLayout;
 
+/// The Metal spelling of the activation staging format of a tiled or
+/// expert-grouped GEMM, derived from a `proxima_numeric` [`FloatLayout`] by
+/// [`layout_render::hardware_type`] (field comparison, never a name): the
+/// threadgroup tile element, its 4-wide vector, the `simdgroup` matrix the
+/// tile loads into, and the conversion from the `float` the device holds.
+/// Binary32 spells every one exactly as the renderers did before the format
+/// was a parameter, so it renders byte-identical source. The weight tile is a
+/// separate operand and stays `half`; accumulation stays `float`.
+#[cfg(any(feature = "metal-tiled-gemm", feature = "metal-grouped-gemm"))]
+pub(super) struct ActivationStaging {
+    element: &'static str,
+}
+
+#[cfg(any(feature = "metal-tiled-gemm", feature = "metal-grouped-gemm"))]
+impl ActivationStaging {
+    /// Fails with `RenderKindMismatch` when `layout` has no Metal hardware type.
+    pub(super) fn new(node: NodeId, layout: &FloatLayout) -> Result<Self, EmitError> {
+        layout_render::hardware_type(layout)
+            .map(|element| Self { element })
+            .ok_or(EmitError::RenderKindMismatch {
+                node,
+                expected: "activation staging layout with a metal hardware type",
+                found: "other float layout",
+            })
+    }
+
+    pub(super) fn element(&self) -> &'static str {
+        self.element
+    }
+
+    pub(super) fn vector(&self) -> String {
+        format!("{}4", self.element)
+    }
+
+    pub(super) fn matrix(&self) -> String {
+        format!("simdgroup_{}8x8", self.element)
+    }
+
+    /// Bytes one staged element occupies in the threadgroup tile.
+    pub(super) fn element_bytes(&self) -> u64 {
+        if self.is_binary32() { 4 } else { 2 }
+    }
+
+    pub(super) fn is_binary32(&self) -> bool {
+        self.element == "float"
+    }
+
+    /// `expression` (a `float`) as the staging element.
+    pub(super) fn convert(&self, expression: &str) -> String {
+        if self.is_binary32() {
+            expression.to_string()
+        } else {
+            format!("{}({expression})", self.element)
+        }
+    }
+
+    /// `expression` (a `float4`) as the staging vector.
+    pub(super) fn convert_vector(&self, expression: &str) -> String {
+        if self.is_binary32() {
+            expression.to_string()
+        } else {
+            format!("{}({expression})", self.vector())
+        }
+    }
+}
+
 /// `simdgroup_matrix`-tiled Q4_K x F32 GEMM (`docs/discipline.md` ROW 109,
 /// superseding ROW 107's single-simdgroup design) -- ports
 /// `ggml-metal.metal:6500-6600`'s `kernel_mul_mm` GEOMETRY, not just its
@@ -231,9 +297,9 @@ pub(super) fn push_tiled_gemm_body(
     // write), so a shared backing array sized to the larger of the two
     // phases' needs replaces three separately-sized ones -- mirrors ggml's
     // own `kernel_mul_mm` `shmem` reuse (`ggml-metal.metal:160-161,330`).
-    let act_element_type = "float";
-    let act_value_cast = "";
-    let act_simdgroup_type = "simdgroup_float8x8";
+    let staging = ActivationStaging::new(node, &metal.activation_staging())?;
+    let act_element_type = staging.element();
+    let act_simdgroup_type = staging.matrix();
     let slim_tgmem_active = metal.tiled_gemm_slim_tgmem;
     let weight_tile_bytes = weight_tile_elems * 2;
     if slim_tgmem_active {
@@ -312,10 +378,10 @@ pub(super) fn push_tiled_gemm_body(
             source,
             block,
             &decode,
-            token_axis,
-            feature_axis,
+            [token_axis, feature_axis],
             metal,
             grid2d_active,
+            &staging,
         );
     } else {
         if wide_weight_stage_eligible {
@@ -437,7 +503,8 @@ pub(super) fn push_tiled_gemm_body(
                 };
                 let index = format!("a_col * {block_k} + a_k{suffix}");
                 source.push_str(&format!(
-                    "                act_tile[{index}] = wide.{component};\n"
+                    "                act_tile[{index}] = {};\n",
+                    staging.convert(&format!("wide.{component}"))
                 ));
             }
             source.push_str("            }\n");
@@ -464,7 +531,8 @@ pub(super) fn push_tiled_gemm_body(
         source.push_str("            }\n");
         let act_scalar_index = format!("a_col * {block_k} + a_k");
         source.push_str(&format!(
-            "            act_tile[{act_scalar_index}] = {act_value_cast}a_value;\n"
+            "            act_tile[{act_scalar_index}] = {};\n",
+            staging.convert("a_value")
         ));
         source.push_str("        }\n");
         if wide_act_load_active {
@@ -624,11 +692,12 @@ fn push_mm_layout_k_loop(
     source: &mut String,
     block: &TiledGemmBlock,
     decode: &TiledDecode,
-    token_axis: u16,
-    feature_axis: u16,
+    axes: [u16; 2],
     metal: &crate::identity::MetalOnlyExtras,
     grid2d_active: bool,
+    staging: &ActivationStaging,
 ) {
+    let [token_axis, feature_axis] = axes;
     let weight = block.weight;
     let other = block.other;
     let reduce_dim = block.reduce_dim;
@@ -657,7 +726,7 @@ fn push_mm_layout_k_loop(
         ));
     }
     source.push_str("    simdgroup_half8x8 ma[4];\n");
-    source.push_str("    simdgroup_float8x8 mb[2];\n");
+    source.push_str(&format!("    {} mb[2];\n", staging.matrix()));
     source.push_str(&format!(
         "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
     ));
@@ -678,9 +747,9 @@ fn push_mm_layout_k_loop(
             run * 8
         ));
     }
-    push_mm_layout_activation_stage(source, block, unit_stride);
+    push_mm_layout_activation_stage(source, block, unit_stride, staging);
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    push_mm_layout_multiply(source);
+    push_mm_layout_multiply(source, staging);
     source.push_str("    }\n");
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
 }
@@ -802,7 +871,12 @@ pub(super) fn push_block_cursor_advance(
 /// floats per step; any other layout reads each element through the operand
 /// accessor at the runtime stride.
 #[cfg(feature = "metal-tiled-gemm")]
-fn push_mm_layout_activation_stage(source: &mut String, block: &TiledGemmBlock, unit_stride: bool) {
+fn push_mm_layout_activation_stage(
+    source: &mut String,
+    block: &TiledGemmBlock,
+    unit_stride: bool,
+    staging: &ActivationStaging,
+) {
     let other = block.other;
     let reduce_dim = block.reduce_dim;
     if unit_stride {
@@ -828,8 +902,15 @@ fn push_mm_layout_activation_stage(source: &mut String, block: &TiledGemmBlock, 
             "        float4 act_high = float4(act_scalar[4], act_scalar[5], act_scalar[6], act_scalar[7]);\n",
         );
     }
-    source.push_str("        *(threadgroup float4 *)&act_tile[mm_act_store] = act_low;\n");
-    source.push_str("        *(threadgroup float4 *)&act_tile[mm_act_store + 4] = act_high;\n");
+    let vector = staging.vector();
+    source.push_str(&format!(
+        "        *(threadgroup {vector} *)&act_tile[mm_act_store] = {};\n",
+        staging.convert_vector("act_low")
+    ));
+    source.push_str(&format!(
+        "        *(threadgroup {vector} *)&act_tile[mm_act_store + 4] = {};\n",
+        staging.convert_vector("act_high")
+    ));
 }
 
 /// The four 8-deep multiply steps of one K-step, in `kernel_mul_mm`'s own
@@ -838,10 +919,13 @@ fn push_mm_layout_activation_stage(source: &mut String, block: &TiledGemmBlock, 
 /// fully unrolled. `acc[(i % 4) * 2 + i / 4]` is ggml's flat `mc[i]` renamed to
 /// the `[feature][token]` index the write-back reads.
 #[cfg(feature = "metal-tiled-gemm")]
-fn push_mm_layout_multiply(source: &mut String) {
+fn push_mm_layout_multiply(source: &mut String, staging: &ActivationStaging) {
     let unroll = "_Pragma(\"clang loop unroll(full)\")";
     source.push_str("        threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);\n");
-    source.push_str("        threadgroup const float *lsmb = act_tile + 2 * 64 * (sgitg / 2);\n");
+    source.push_str(&format!(
+        "        threadgroup const {} *lsmb = act_tile + 2 * 64 * (sgitg / 2);\n",
+        staging.element()
+    ));
     source.push_str(&format!(
         "        {unroll} for (short ik = 0; ik < 4; ik++) {{\n"
     ));
@@ -2161,8 +2245,8 @@ pub(super) fn push_cooperative_reduce_body(
                 output_axes,
                 &block,
                 element_type,
-                epilogue_body,
-                epilogue_operands,
+                (epilogue_body, epilogue_operands),
+                &metal.activation_staging(),
             )?;
             return Ok(());
         }
