@@ -358,6 +358,26 @@ pub(crate) struct MetalOnlyExtras {
     /// so it must never share a compiled pipeline with the 1D form of an op
     /// that agrees on every other axis. Feeds the `_wg` suffix.
     pub wide_grid: bool,
+    /// The numeric format the tiled and expert-grouped GEMMs stage their
+    /// activation tile and activation simdgroup matrix in, as a
+    /// `proxima_numeric` description ([`FloatLayout::F16`] for a `half` tile).
+    /// `None` is binary32, the format every GEMM staged in before this field
+    /// existed, and renders byte-identical source and an unchanged identity.
+    /// A `Some` layout other than binary32 appends a `_stg` suffix naming it.
+    pub tiled_gemm_staging_layout: Option<FloatLayout>,
+}
+
+impl MetalOnlyExtras {
+    /// The layout the GEMM renderers stage activations in: the configured one,
+    /// else binary32.
+    #[must_use]
+    #[allow(
+        dead_code,
+        reason = "read by the metal-tiled-gemm renderers, absent in other builds"
+    )]
+    pub(crate) fn activation_staging(&self) -> FloatLayout {
+        self.tiled_gemm_staging_layout.unwrap_or(FloatLayout::BF32)
+    }
 }
 
 /// `numeric_policy`'s two-hex-digit identity token — one bit per
@@ -982,6 +1002,12 @@ mod gated {
         }
         if metal.wide_grid {
             identity.push_str("_wg");
+        }
+        if let Some(layout) = metal.tiled_gemm_staging_layout
+            && !layout.same_format(&FloatLayout::BF32)
+        {
+            identity.push_str("_stg");
+            identity.push_str(layout.format_name().unwrap_or("custom"));
         }
 
         identity
