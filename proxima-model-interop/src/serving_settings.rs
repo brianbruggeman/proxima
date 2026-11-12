@@ -18,7 +18,7 @@ use crate::codec_policy_settings::CodecPolicySettings;
 use crate::memory_reclaim::ReclaimSettings;
 use crate::prompt_cache_settings::PromptCacheSettings;
 use crate::serving::{
-    ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_MODEL_PATH,
+    ContextLength, DEFAULT_BATCH_SIZE, DEFAULT_GPU_LAYERS, DEFAULT_KV_CACHE_FORMAT, DEFAULT_MODEL_PATH,
     DEFAULT_RESIDENT_KV_BYTES, DEFAULT_RESIDENT_PREFILL_PLAN_BYTES, DEFAULT_UBATCH_SIZE,
     GdnPrefillBackend, NamePattern, PrefillConfig, PromptCacheConfig, ServingConfig,
     WeightPrecisionRule,
@@ -154,12 +154,14 @@ pub struct ServingSettings {
     #[builder(default = 1)]
     pub parallel_sequences: u32,
     /// `ServingConfig::kv_cache_key_quant`: `--cache-type-k`.
-    #[setting(resolve_with = "from_name", default_str = "f32")]
-    #[builder(default = NumericFormat::Float32)]
+    #[cfg_attr(feature = "gpu", setting(resolve_with = "from_name", default_str = "f16"))]
+    #[cfg_attr(not(feature = "gpu"), setting(resolve_with = "from_name", default_str = "f32"))]
+    #[builder(default = DEFAULT_KV_CACHE_FORMAT)]
     pub kv_cache_key_quant: NumericFormat,
     /// `ServingConfig::kv_cache_value_quant`: `--cache-type-v`.
-    #[setting(resolve_with = "from_name", default_str = "f32")]
-    #[builder(default = NumericFormat::Float32)]
+    #[cfg_attr(feature = "gpu", setting(resolve_with = "from_name", default_str = "f16"))]
+    #[cfg_attr(not(feature = "gpu"), setting(resolve_with = "from_name", default_str = "f32"))]
+    #[builder(default = DEFAULT_KV_CACHE_FORMAT)]
     pub kv_cache_value_quant: NumericFormat,
     /// `ServingConfig::flash_attention`: `-fa`.
     #[setting(default = false)]
