@@ -2,7 +2,7 @@ use const_format::formatcp;
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::float_layout::FloatLayout;
 
-use super::layout_render::{block_element_msl, level_block_element_msl};
+use super::layout_render::{block_element_msl, level_block_element_msl, level_run_decode_msl};
 use super::*;
 
 pub(super) const FP6_E3M2_ELEMENTS: usize = Codec::FP6_E3M2_BLOCK_ELEMENTS;
@@ -182,10 +182,20 @@ fn level_unpack_msl(format: &Codec, name: &str) -> String {
 }
 
 /// `function(block, slot, out)`: the tiled decode contract (`TiledDecode`), writing the
-/// [`DECODE_RUN_ELEMENTS`] elements at `slot` of the block as `half` through the rendered scalar
-/// accessor `element`, which the preamble defines.
+/// [`DECODE_RUN_ELEMENTS`] elements at `slot` of the block as `half`. The run form decodes the
+/// block and sub-block scales once per run (`layout_render::level_run_decode_msl`); a format whose
+/// sub-blocks are narrower than a run falls back to calling the rendered scalar accessor `element`,
+/// which the preamble defines, once per element.
 #[must_use]
-pub fn level_half16_decode_msl(function: &str, element: &str) -> String {
+pub fn level_half16_decode_msl(function: &str, element: &str, format: &Codec) -> String {
+    let Codec::Levels(levels) = format else {
+        return level_half16_scalar_decode_msl(function, element);
+    };
+    level_run_decode_msl(levels, function, element, DECODE_RUN_ELEMENTS)
+        .unwrap_or_else(|_| level_half16_scalar_decode_msl(function, element))
+}
+
+fn level_half16_scalar_decode_msl(function: &str, element: &str) -> String {
     format!(
         "
 static inline void {function}(device const uchar *block, uint slot, thread half *out) {{

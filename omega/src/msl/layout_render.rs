@@ -525,6 +525,65 @@ pub fn level_block_element_msl(
     format: &LevelFormat,
     name: &str,
 ) -> Result<String, LevelRenderRefusal> {
+    let layout = renderable_level_layout(format)?;
+    Ok(element_msl(layout, Codes::Levels(&format.levels), name))
+}
+
+/// Renders the tiled decode contract `function(device const uchar *block, uint slot, thread half
+/// *out)` for a level-set format: the `run` consecutive elements at `slot`, each the same value
+/// [`level_block_element_msl`]'s accessor `name` returns for it, with the block scale and the
+/// sub-block scale decoded once for the run instead of once per element. Teaching pointer: the
+/// accessor stays the scalar reference (the cooperative kernel reads it per element); this is the
+/// run form the tiled and expert-grouped GEMM stage weights through, so the scale arithmetic
+/// leaves the per-element loop.
+///
+/// # Errors
+/// What [`level_block_element_msl`] refuses, and a layout whose sub-blocks are narrower than
+/// `run` (a run would then straddle two sub-block scales).
+#[must_use = "the refusal names why the format has no rendered run decode"]
+pub fn level_run_decode_msl(
+    format: &LevelFormat,
+    function: &str,
+    name: &str,
+    run: u64,
+) -> Result<String, LevelRenderRefusal> {
+    let layout = renderable_level_layout(format)?;
+    let mut head = field_expression(&layout.scale, "scale", &format!("{name}_scale"));
+    let mut scale = "scale";
+    if let Some(sub) = &layout.sub {
+        let span = u64::from(layout.elements / sub.count);
+        if span % run != 0 {
+            return Err(LevelRenderRefusal("a decode run that straddles two sub-block scales"));
+        }
+        head.push_str(&format!("    uint sub_block = slot / {span}u;\n"));
+        head.push_str(&coded_expression(
+            &sub.scale,
+            "sub_block",
+            "sub_scale_raw",
+            &format!("{name}_sub_scale_code"),
+        ));
+        head.push_str(&format!(
+            "    float sub_scale = {} - {}.0f;\n    float effective_scale = scale * sub_scale;\n",
+            sub_scale_product(sub.scale_multiplier),
+            sub.scale.bias
+        ));
+        scale = "effective_scale";
+    }
+    let raw = raw_level_msl(layout, Codes::Levels(&format.levels), name);
+    Ok(format!(
+        "\nstatic inline void {function}(device const uchar *block, uint slot, thread half *out) {{\n{head}    for (uint run = 0u; run < {run}u; ++run) {{\n        uint index = slot + run;\n{raw}        out[run] = (half)(raw * {scale});\n    }}\n}}\n"
+    ))
+}
+
+fn sub_scale_product(scale_multiplier: i16) -> String {
+    if scale_multiplier == 1 {
+        "sub_scale_raw".to_string()
+    } else {
+        format!("({scale_multiplier}.0f * sub_scale_raw)")
+    }
+}
+
+fn renderable_level_layout(format: &LevelFormat) -> Result<&BlockLayout, LevelRenderRefusal> {
     let LevelGeometry::Packed(layout) = &format.geometry else {
         return Err(LevelRenderRefusal("codebook geometry has no plane walk"));
     };
@@ -544,7 +603,7 @@ pub fn level_block_element_msl(
             return Err(LevelRenderRefusal("64-bit and delta grids"));
         }
     }
-    Ok(element_msl(layout, Codes::Levels(&format.levels), name))
+    Ok(layout)
 }
 
 #[derive(Clone, Copy)]
@@ -638,13 +697,9 @@ fn element_msl(layout: &BlockLayout, codes: Codes<'_>, name: &str) -> String {
             "sub_scale_raw",
             &format!("{name}_sub_scale_code"),
         ));
-        let multiplied = if sub.scale_multiplier == 1 {
-            "sub_scale_raw".to_string()
-        } else {
-            format!("({}.0f * sub_scale_raw)", sub.scale_multiplier)
-        };
         body.push_str(&format!(
-            "    float sub_scale = {multiplied} - {}.0f;\n    float effective_scale = scale * sub_scale;\n",
+            "    float sub_scale = {} - {}.0f;\n    float effective_scale = scale * sub_scale;\n",
+            sub_scale_product(sub.scale_multiplier),
             sub.scale.bias
         ));
         scale = "effective_scale".to_string();
