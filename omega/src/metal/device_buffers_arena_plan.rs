@@ -2527,6 +2527,31 @@ impl Plan {
             .collect()
     }
 
+    /// One [`crate::msl::GridSpec`] per resolved position, the launch each
+    /// position's kernel gets at this plan's bound extents -- the grid half of
+    /// what [`Self::kernel_keys`] names, so a per-dispatch profile can say how
+    /// many threads a kernel launched, not only which kernel.
+    ///
+    /// # Errors
+    /// Propagates the rejection [`Self::kernel_keys`] raises for the same op.
+    #[cfg(feature = "instrument")]
+    pub fn kernel_grids(&self) -> Result<Vec<crate::msl::GridSpec>, MetalError> {
+        self.prepared
+            .resolved
+            .iter()
+            .map(|bound| {
+                crate::msl::kernel_dispatch_shape_with_schedule(
+                    bound,
+                    &self.packed_operands,
+                    self.numeric_policy,
+                    self.attention_row_schedule,
+                )
+                .map(|(_, grid)| grid)
+                .map_err(MetalError::from)
+            })
+            .collect()
+    }
+
     /// prefill599 retarget: one row per resolved position -- the minimal
     /// signature a bucket-crossing diagnostic diffs against the PRIOR
     /// miss's plan to answer "how much of the plan actually changed", not
