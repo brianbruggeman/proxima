@@ -244,8 +244,7 @@ fn codes_msl(layout: &BlockLayout, rule: &EncodeRule, name: &str) -> Option<Stri
                 CodeClamp::Neither => String::from("raw"),
             };
             format!(
-                "            int raw = {name}(input[index] * inverse + {offset});\n            code = (uint){clamped} & 0xffu;\n",
-                name = format!("{name}_to_int"),
+                "            int raw = {name}_to_int(input[index] * inverse + {offset});\n            code = (uint){clamped} & 0xffu;\n",
                 offset = float_literal(bias as f32 + 0.5)
             )
         }
@@ -261,8 +260,7 @@ fn codes_msl(layout: &BlockLayout, rule: &EncodeRule, name: &str) -> Option<Stri
                 format!("(uint)({clamped} + {bias})")
             };
             format!(
-                "            int rounded = {name}(round(input[index] * inverse));\n            code = ({raw}) & 0xffu;\n",
-                name = format!("{name}_to_int")
+                "            int rounded = {name}_to_int(round(input[index] * inverse));\n            code = ({raw}) & 0xffu;\n"
             )
         }
         CodeRounding::NonNegativeBit => String::from(

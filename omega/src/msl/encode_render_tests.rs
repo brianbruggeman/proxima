@@ -53,7 +53,7 @@ fn edge_rows(width: usize) -> Vec<f32> {
         &|index| if index == 5 { 3.0e38 } else { -1.0 },
         &|index| (index as f32 - 16.0) * 0.5,
     ];
-    patterns.iter().flat_map(|pattern| (0..width).map(|index| pattern(index))).collect()
+    patterns.iter().flat_map(|pattern| (0..width).map(pattern)).collect()
 }
 
 fn host_encode(format: &NumericFormat, values: &[f32]) -> Vec<u8> {
