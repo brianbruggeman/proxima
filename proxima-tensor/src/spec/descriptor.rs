@@ -317,9 +317,38 @@ pub struct ModelDescriptor {
     #[cfg_attr(feature = "config", setting(skip))]
     #[serde(default)]
     pub network: Option<blocks::Network>,
+    /// The numeric format activation and intermediate values are produced at,
+    /// a proxima-numeric [`NumericFormat`] spelled in a family profile or model
+    /// config as `activation = "float32"`. Weights stay in the format they are
+    /// bound as; norm accumulators, index math and counts keep their own
+    /// contract formats. Absent means binary32. Read today by the stem of
+    /// `CacheMask::Bounded`'s builder (`embedding_lookup_as`, the embedding
+    /// scale); the remaining activation sites still build at binary32.
+    /// [`Self::activation_dtype`] is the bridge to the `DType` ops carry.
+    #[cfg_attr(feature = "config", setting(skip))]
+    #[cfg_attr(feature = "config", builder(default = default_activation()))]
+    #[serde(default = "default_activation")]
+    pub activation: NumericFormat,
+}
+
+const fn default_activation() -> NumericFormat {
+    DType::FLOAT32.numeric_format()
 }
 
 impl ModelDescriptor {
+    /// The `DType` an op produced at [`Self::activation`] carries. A `Block` or
+    /// `Levels` activation has no op dtype today, so it is refused here rather
+    /// than silently widened.
+    pub fn activation_dtype(&self) -> Result<DType, TensorError> {
+        match self.activation {
+            NumericFormat::Scalar(layout) => Ok(DType::Layout(layout)),
+            _ => Err(TensorError::UnsupportedInBuilder {
+                builder: "build_forward",
+                feature: "a block or level activation format (Op carries a scalar dtype)",
+            }),
+        }
+    }
+
     /// The descriptor of the verify program for a symbolic row count: this one
     /// with every new row's logits kept. `None` unless
     /// [`Self::verify_at_width`] arms it and no layer is recurrent -- a
@@ -485,6 +514,10 @@ pub struct FamilyProfile {
     /// V heads the way llama.cpp's does. An explicit header value always wins.
     #[serde(default)]
     pub ssm_v_head_reordered: bool,
+    /// The format this family's activations are produced at
+    /// ([`ModelDescriptor::activation`]); absent means binary32.
+    #[serde(default = "default_activation")]
+    pub activation: NumericFormat,
 }
 
 const fn default_command_buffer_chunks() -> u32 {
@@ -740,6 +773,7 @@ pub fn gqa_descriptor_from_shape(
         recurrence: None,
         loopcd: LoopCdConfig::default(),
         network: None,
+        activation: profile.activation,
     }
 }
 
@@ -1180,6 +1214,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                     descriptor.residual_scale,
                     &layer_windows,
                     descriptor.sliding_kv_ring,
+                    descriptor.activation_dtype()?,
                 )?;
             Ok(ForwardProgram {
                 program,

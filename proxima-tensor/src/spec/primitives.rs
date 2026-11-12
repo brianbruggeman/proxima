@@ -454,10 +454,19 @@ pub fn input_leaf(program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name:
 /// [`Op::Constant`]'s own doc records what each cost.
 #[must_use]
 pub fn scalar_constant(program: &mut Vec<Op>, value: f32) -> NodeId {
+    scalar_constant_as(program, value, DType::FLOAT32)
+}
+
+/// [`scalar_constant`] at an explicit `dtype`: the form an activation-side
+/// scalar takes when the builder carries a non-f32 activation format
+/// ([`super::ModelDescriptor::activation`]). [`scalar_constant`] is this at
+/// f32, for constants that must stay f32 by contract.
+#[must_use]
+pub fn scalar_constant_as(program: &mut Vec<Op>, value: f32, dtype: DType) -> NodeId {
     op::append(
         program,
         Op::Constant {
-            dtype: DType::FLOAT32,
+            dtype,
             shape: Vec::new(),
             value,
         },
@@ -553,6 +562,18 @@ pub fn mean_of_squares(
 /// worked example.
 #[must_use]
 pub fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> NodeId {
+    embedding_lookup_as(program, table, ids, DType::FLOAT32)
+}
+
+/// [`embedding_lookup`] whose gathered rows are produced at `activation`: the
+/// table stays whatever format it is bound as, the gather's output is the
+/// activation format the rest of the layer stack consumes.
+pub fn embedding_lookup_as(
+    program: &mut Vec<Op>,
+    table: NodeId,
+    ids: NodeId,
+    activation: DType,
+) -> NodeId {
     let gathered_map = IndexMap::Computed {
         indices: ids,
         index_map: map::projection(2, &[0]),
@@ -572,7 +593,7 @@ pub fn embedding_lookup(program: &mut Vec<Op>, table: NodeId, ids: NodeId) -> No
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::FLOAT32,
+            dtype: activation,
             body: ScalarOp::Identity,
             operands: alloc::vec![(table, gathered_map)],
             name: None,

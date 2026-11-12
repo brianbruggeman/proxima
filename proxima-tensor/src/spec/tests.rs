@@ -948,6 +948,7 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
             None,
             &[],
             false,
+            DType::FLOAT32,
         )
         .expect("qwen2-shaped split-half program lowers");
     let (generic_program, _, _, _, _) = gqa_cached_forward_program_with_experts_and_layer_taps(
@@ -958,6 +959,93 @@ fn qwen2_cached_program_uses_split_half_rope_without_qk_norm() {
         qwen2_program != generic_program,
         "Qwen2's explicit split-half graph must differ from the generic interleaved graph"
     );
+}
+
+fn qwen2_dims_program_at(activation: DType) -> Vec<Op> {
+    let (program, _, _, _, _) =
+        gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing(
+            32_000,
+            256,
+            128,
+            4,
+            2,
+            64,
+            1,
+            0,
+            0,
+            false,
+            false,
+            false,
+            false,
+            false,
+            RopePairing::SplitHalf { pairs: 32 },
+            Some(EmbeddingScale::Sqrt),
+            None,
+            AttentionScoreScale::InverseSqrtQueryPreAttnScalar(64),
+            None,
+            &[],
+            false,
+            activation,
+        )
+        .expect("qwen2-dims program lowers at the requested activation format");
+    program
+}
+
+fn embedding_stem_dtypes(program: &[Op]) -> Vec<DType> {
+    program
+        .iter()
+        .filter(|op| matches!(op, Op::Elementwise { body: ScalarOp::Identity, .. }))
+        .take(1)
+        .chain(
+            program
+                .iter()
+                .filter(|op| matches!(op, Op::Elementwise { body: ScalarOp::Multiply, .. }))
+                .take(1),
+        )
+        .map(Op::dtype)
+        .collect()
+}
+
+/// The activation format reaches the embedding stem (gather and scale) and
+/// nothing else changes at the default: a binary32 build is the program the
+/// literal produced.
+#[test]
+fn activation_format_sets_the_embedding_stem_dtype_and_binary32_is_the_default_program() {
+    let default_program = qwen2_dims_program_at(DType::FLOAT32);
+    let half_program = qwen2_dims_program_at(DType::FLOAT16);
+
+    assert_eq!(
+        embedding_stem_dtypes(&default_program),
+        alloc::vec![DType::FLOAT32, DType::FLOAT32]
+    );
+    assert_eq!(
+        embedding_stem_dtypes(&half_program),
+        alloc::vec![DType::FLOAT16, DType::FLOAT16]
+    );
+    assert_eq!(default_program.len(), half_program.len());
+}
+
+/// A family profile spells the activation as a numeric format; a block format
+/// has no op dtype and is refused at the bridge rather than widened.
+#[test]
+fn descriptor_activation_defaults_to_binary32_and_refuses_a_block_format() {
+    let mut descriptor =
+        head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Bounded, 1);
+    assert_eq!(descriptor.activation, DType::FLOAT32.numeric_format());
+    assert_eq!(descriptor.activation_dtype(), Ok(DType::FLOAT32));
+
+    descriptor.activation = DType::BFLOAT16.numeric_format();
+    assert_eq!(descriptor.activation_dtype(), Ok(DType::BFLOAT16));
+
+    let block = NumericFormat::ALL
+        .into_iter()
+        .find(|format| !matches!(format, NumericFormat::Scalar(_)))
+        .expect("the format catalogue holds a block or level format");
+    descriptor.activation = block;
+    assert!(matches!(
+        descriptor.activation_dtype(),
+        Err(TensorError::UnsupportedInBuilder { .. })
+    ));
 }
 
 /// [`gqa_cached_forward_program_with_experts_and_layer_taps`] must
@@ -16872,6 +16960,7 @@ mod gemma4_synthetic_parity {
             recurrence: None,
             loopcd: LoopCdConfig::default(),
             network: None,
+            activation: DType::FLOAT32.numeric_format(),
         };
 
         let ForwardProgram {
@@ -17071,6 +17160,7 @@ mod gemma4_synthetic_parity {
                 None,
                 &[],
                 false,
+                DType::FLOAT32,
             )
             .expect("direct real qwen2-dims build");
 
@@ -19627,6 +19717,7 @@ mod head_repeats {
             recurrence: None,
             loopcd: LoopCdConfig::default(),
             network: None,
+            activation: DType::FLOAT32.numeric_format(),
         }
     }
 
@@ -19716,6 +19807,7 @@ mod directory_less_parse {
             ffn_routing: FfnRouting::Dense,
             command_buffer_chunks: 1,
             ssm_v_head_reordered: false,
+            activation: DType::FLOAT32.numeric_format(),
         }
     }
 
@@ -21272,6 +21364,7 @@ mod hybrid_dense_descriptor {
             recurrence: None,
             loopcd: LoopCdConfig::default(),
             network: None,
+            activation: DType::FLOAT32.numeric_format(),
         }
     }
 
@@ -21571,6 +21664,7 @@ mod hybrid_routed_descriptor {
             recurrence: None,
             loopcd: LoopCdConfig::default(),
             network: None,
+            activation: DType::FLOAT32.numeric_format(),
         }
     }
 
