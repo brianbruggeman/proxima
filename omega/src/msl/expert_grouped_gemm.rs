@@ -340,11 +340,10 @@ fn push_grouped_entry(
 
 /// The compacted route's replacement for the scan: finds this threadgroup's
 /// `(expert, tile)` in the prepass tables and stages that tile's token ids.
-/// The launch covers [`grouped_tile_upper_bound`] token tiles per row tile, so
-/// a threadgroup walks the per-expert tile counts until its `tile_index` falls
-/// inside one expert's tiles; a `tile_index` past the realized total finds no
-/// expert and leaves, before any barrier, together with the rest of its
-/// threadgroup (every thread read the same words). The prepass total is
+/// The launch is indirect and covers exactly the realized token tiles per row
+/// tile, so every threadgroup works: its `tile_index` indexes the prepass's
+/// tile-to-expert table and per-expert first-tile table, two loads, no walk.
+/// The prepass total is
 /// checked against the route length first: a buffer the prepass did not write
 /// (its header word is zeroed on the host) records
 /// [`ROUTE_COMPACTION_MISMATCH_FAULT`], which the host reports as a
@@ -370,27 +369,19 @@ fn push_grouped_locate(
     source.push_str("        }\n");
     source.push_str("        return;\n");
     source.push_str("    }\n");
-    source.push_str("    long grouped_expert = -1;\n");
-    source.push_str("    long expert_tile = 0;\n");
-    source.push_str("    uint expert_tokens = 0u;\n");
-    source.push_str("    long tile_base = 0;\n");
-    source.push_str("    for (uint scan_expert = 0u; scan_expert < experts; ++scan_expert) {\n");
+    let tokens = grouped_token_total(resolved, block);
     source.push_str(&format!(
-        "        uint expert_count = route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + scan_expert];\n"
+        "    constexpr uint tile_start_base = {GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts + {tokens}u;\n"
     ));
+    source.push_str(
+        "    long grouped_expert = (long)route_compaction[tile_start_base + experts + (uint)tile_index];\n",
+    );
+    source.push_str(
+        "    long expert_tile = tile_index - (long)route_compaction[tile_start_base + (uint)grouped_expert];\n",
+    );
     source.push_str(&format!(
-        "        long expert_tiles = (long)((expert_count + {}u) / {tile_tokens}u);\n",
-        tile_tokens - 1
+        "    uint expert_tokens = route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + (uint)grouped_expert];\n"
     ));
-    source.push_str("        if (tile_index < tile_base + expert_tiles) {\n");
-    source.push_str("            grouped_expert = (long)scan_expert;\n");
-    source.push_str("            expert_tile = tile_index - tile_base;\n");
-    source.push_str("            expert_tokens = expert_count;\n");
-    source.push_str("            break;\n");
-    source.push_str("        }\n");
-    source.push_str("        tile_base += expert_tiles;\n");
-    source.push_str("    }\n");
-    source.push_str("    if (grouped_expert < 0) { return; }\n");
     source.push_str(&format!(
         "    uint tile_count = min({tile_tokens}u, expert_tokens - (uint)expert_tile * {tile_tokens}u);\n"
     ));
@@ -896,8 +887,9 @@ fn push_grouped_writeback(
 /// expert-grouped block, which is not the token count: the segment scan
 /// launches `GROUPED_GEMM_ROUTE_SEGMENTS` threadgroups per row tile, each
 /// walking its slice of the route; the compacted route launches the upper
-/// bound of token tiles ([`grouped_tile_upper_bound`]) per row tile, one
-/// threadgroup each, and the tiles past the realized total exit at once.
+/// bound of token tiles ([`grouped_tile_upper_bound`]) per row tile as the
+/// static grid (the pipeline's identity and width); the host then dispatches
+/// indirectly, exactly the realized tiles the prepass wrote.
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) fn expert_grouped_launch_tokens(
     resolved: &BoundOp,
@@ -958,9 +950,50 @@ pub(crate) const ROUTE_COMPACTION_MISMATCH_FAULT: u32 = u32::MAX;
 
 /// Words of the route-compaction buffer ahead of the per-expert tables: word 0
 /// is the total entry count the prepass wrote, the check the GEMM makes before
-/// it trusts the tables.
+/// it trusts the tables; then one `MTLDispatchThreadgroupsIndirectArguments`
+/// (three words) per row-tile count `1..=GROUPED_GEMM_COMPACTED_MAX_ROW_TILES`,
+/// each `(row_tiles * realized token tiles, 1, 1)`, so every GEMM that shares
+/// the compaction dispatches exactly its working threadgroups through the
+/// indirect slot of its own row-tile count.
 #[cfg(feature = "metal-grouped-gemm")]
-pub(super) const GROUPED_ROUTE_HEADER_WORDS: u64 = 1;
+pub(super) const GROUPED_ROUTE_HEADER_WORDS: u64 =
+    1 + 3 * crate::sized::GROUPED_GEMM_COMPACTED_MAX_ROW_TILES;
+
+/// Row tiles of output features `resolved` launches, the index of its indirect
+/// slot in the compaction header.
+#[cfg(feature = "metal-grouped-gemm")]
+fn grouped_row_tiles(resolved: &BoundOp, block: &TiledGemmBlock) -> u64 {
+    block
+        .feature_axes
+        .iter()
+        .map(|&axis| resolved.extents[axis as usize])
+        .product::<u64>()
+        .div_ceil(GROUPED_TILE_ROWS)
+}
+
+/// Byte offset into the compaction buffer of the indirect dispatch arguments a
+/// compacted grouped op launches through; `None` for every other op.
+#[cfg(all(
+    feature = "metal-grouped-gemm",
+    any(test, all(feature = "metal", target_os = "macos"))
+))]
+pub(crate) fn route_compaction_indirect_offset(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+) -> Option<usize> {
+    let quantized = operand_codecs(resolved, packed_operands);
+    let block = grouped_block(resolved, &quantized)?;
+    let slot = grouped_row_tiles(resolved, &block).checked_sub(1)?;
+    Some(4 * (1 + 3 * slot as usize))
+}
+
+/// Words of the per-expert first-tile table and of the tile-to-expert table the
+/// prepass writes after the list: the GEMM's O(1) replacement for walking the
+/// per-expert tile counts.
+#[cfg(feature = "metal-grouped-gemm")]
+fn grouped_tile_table_words(tokens: u64, experts: u64) -> u64 {
+    experts + grouped_tile_upper_bound(tokens, experts)
+}
 
 /// Threads of each prepass threadgroup: a simdgroup per expert,
 /// `GROUPED_PREPASS_THREADS / SIMD_WIDTH` experts at a time.
@@ -1049,6 +1082,7 @@ pub(super) fn grouped_compaction_words(tokens: u64, experts: u64) -> u64 {
     GROUPED_ROUTE_HEADER_WORDS
         + 2 * experts
         + tokens
+        + grouped_tile_table_words(tokens, experts)
         + grouped_prepass_threadgroups(tokens) * experts
 }
 
@@ -1119,8 +1153,9 @@ pub(super) fn push_grouped_route_prepass(
         )
     };
     let chunk = crate::sized::GROUPED_GEMM_PREPASS_ENTRIES;
+    let tile_table = grouped_tile_table_words(tokens, experts);
     let constants = format!(
-        "    constexpr uint experts = {experts}u;\n    constexpr uint list_base = {GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts;\n    constexpr uint scratch_base = list_base + {tokens}u;\n    long chunk_begin = (long)tgid * {chunk}l;\n    long chunk_end = min({token_extent}, chunk_begin + {chunk}l);\n",
+        "    constexpr uint experts = {experts}u;\n    constexpr uint list_base = {GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts;\n    constexpr uint tile_start_base = list_base + {tokens}u;\n    constexpr uint tile_expert_base = tile_start_base + experts;\n    constexpr uint scratch_base = tile_start_base + {tile_table}u;\n    long chunk_begin = (long)tgid * {chunk}l;\n    long chunk_end = min({token_extent}, chunk_begin + {chunk}l);\n",
         token_extent = geometry.token_extent_expr
     );
     let fetch = |with_fault: bool| {
@@ -1242,9 +1277,19 @@ fn push_prepass_offsets(source: &mut String) {
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str("    if (tid == 0u) {\n");
     source.push_str("        uint running = 0u;\n");
+    source.push_str("        uint tile_running = 0u;\n");
     source.push_str("        for (uint expert = 0u; expert < experts; ++expert) {\n");
     source.push_str("            expert_base_tg[expert] = running + expert_before_tg[expert];\n");
     source.push_str("            if (tgid == 0u) {\n");
+    source.push_str(&format!(
+        "                uint expert_tiles = (expert_count_tg[expert] + {}u) / {GROUPED_TILE_TOKENS}u;\n",
+        GROUPED_TILE_TOKENS - 1
+    ));
+    source.push_str("                route_compaction[tile_start_base + expert] = tile_running;\n");
+    source.push_str(
+        "                for (uint tile = 0u; tile < expert_tiles; ++tile) { route_compaction[tile_expert_base + tile_running + tile] = expert; }\n",
+    );
+    source.push_str("                tile_running += expert_tiles;\n");
     source.push_str(&format!(
         "                route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + expert] = expert_count_tg[expert];\n"
     ));
@@ -1256,6 +1301,17 @@ fn push_prepass_offsets(source: &mut String) {
     source.push_str("        }\n");
     source.push_str("        if (tgid == 0u) {\n");
     source.push_str("            route_compaction[0] = running;\n");
+    source.push_str(&format!(
+        "            for (uint row_tiles_slot = 1u; row_tiles_slot <= {}u; ++row_tiles_slot) {{\n",
+        crate::sized::GROUPED_GEMM_COMPACTED_MAX_ROW_TILES
+    ));
+    source.push_str("                uint slot_word = 1u + 3u * (row_tiles_slot - 1u);\n");
+    source.push_str(
+        "                route_compaction[slot_word] = tile_running * row_tiles_slot;\n",
+    );
+    source.push_str("                route_compaction[slot_word + 1u] = 1u;\n");
+    source.push_str("                route_compaction[slot_word + 2u] = 1u;\n");
+    source.push_str("            }\n");
     source.push_str("        }\n");
     source.push_str("    }\n");
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
@@ -1333,6 +1389,18 @@ fn grouped_block(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<Tile
 pub(crate) fn route_prepass_active(resolved: &BoundOp, packed_operands: &PackedOperands) -> bool {
     let quantized = operand_codecs(resolved, packed_operands);
     grouped_block(resolved, &quantized).is_some()
+}
+
+#[cfg(all(
+    not(feature = "metal-grouped-gemm"),
+    feature = "metal",
+    target_os = "macos"
+))]
+pub(crate) fn route_compaction_indirect_offset(
+    _resolved: &BoundOp,
+    _packed_operands: &PackedOperands,
+) -> Option<usize> {
+    None
 }
 
 #[cfg(all(

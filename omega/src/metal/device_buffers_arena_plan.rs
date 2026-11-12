@@ -1821,6 +1821,10 @@ pub(super) struct ResolvedPrepass {
     pub(super) place: Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     pub(super) grid: GridSpec,
     pub(super) words: usize,
+    /// byte offset into the compaction buffer of the indirect dispatch
+    /// arguments the GEMM launches through, classified once at plan time so
+    /// the per-dispatch path only reads it
+    pub(super) indirect_offset: Option<usize>,
 }
 
 /// [`ResolvedStep::merge`]'s payload -- the SAME triple `ResolvedStep`

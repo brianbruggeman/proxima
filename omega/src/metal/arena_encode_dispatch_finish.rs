@@ -902,6 +902,7 @@ fn resolve_route_prepass(
         place: place_pipeline,
         grid: count.grid,
         words,
+        indirect_offset: crate::msl::route_compaction_indirect_offset(bound, packed_operands),
     }))
 }
 
@@ -4133,9 +4134,16 @@ pub(super) fn encode_op(
             .zip(compaction.as_ref())
             .map(|(prepass, (buffer, shared_from))| (prepass, buffer, *shared_from)),
     );
-    #[cfg(not(feature = "instrument"))]
-    drop(compaction);
-    dispatch(encoder, &pipeline, grid);
+    // a compacted grouped op launches exactly the tiles the prepass realized, read from the compaction
+    match (
+        compaction.as_ref(),
+        prepass.and_then(|resolved_prepass| resolved_prepass.indirect_offset),
+    ) {
+        (Some((buffer, _)), Some(offset)) => {
+            dispatch_indirect(encoder, &pipeline, grid, buffer, offset);
+        }
+        _ => dispatch(encoder, &pipeline, grid),
+    }
     // Redesign §4c: the split kernel above wrote its partial into `scratch`
     // (its own `Binding::Scratch` slot, never `output`); this second
     // dispatch reads it back and writes the position's REAL output --

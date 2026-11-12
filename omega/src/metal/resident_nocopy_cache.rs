@@ -1431,6 +1431,40 @@ pub(super) fn bind_buffers(
     Ok(())
 }
 
+/// [`dispatch`] with the threadgroup count read by the GPU from three words at
+/// `argument_offset` bytes of `arguments`, which an earlier dispatch of the
+/// same encoder wrote (the compacted grouped GEMM's route prepass). The
+/// threadgroup width is the grid's pinned width, as [`dispatch`] honors it.
+pub(super) fn dispatch_indirect(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
+    grid: GridSpec,
+    arguments: &ProtocolObject<dyn MTLBuffer>,
+    argument_offset: usize,
+) {
+    let max_threadgroup = pipeline.maxTotalThreadsPerThreadgroup();
+    let width = grid
+        .threadgroup_width
+        .map_or(max_threadgroup, |pinned| pinned as usize)
+        .min(max_threadgroup)
+        .max(1);
+    let threadgroup = MTLSize {
+        width,
+        height: 1,
+        depth: 1,
+    };
+    // SAFETY: `arguments` holds three u32 words (x, y, z) at `argument_offset`, written by the prepass dispatch ahead of this one.
+    unsafe {
+        encoder.dispatchThreadgroupsWithIndirectBuffer_indirectBufferOffset_threadsPerThreadgroup(
+            arguments,
+            argument_offset,
+            threadgroup,
+        );
+    }
+    #[cfg(feature = "instrument")]
+    counter!(PHYSICAL_DISPATCH_CALLS, 1);
+}
+
 /// `grid.threadgroup_width`, when present, is not an occupancy hint — it is
 /// a correctness requirement a cooperative-reduce kernel's own coordinate
 /// math depends on (`gid / SIMD_WIDTH` as an output index; see
