@@ -166,3 +166,72 @@ fn encoder_split_reports_two_nonzero_encoder_spans_and_zeroes_per_op_gpu_ns() {
         "split mode's three encoder-level samples must never be misread as per-position ones"
     );
 }
+
+/// One Metal timestamp sample buffer holds `MAX_TIMESTAMP_SAMPLES / 2` = 1024
+/// positions; a flint prefill plan has 1662. Every stage is a plan output so
+/// none fuses away, and every position past the first buffer must still carry
+/// a real GPU time rather than the old zero fill.
+#[test]
+fn a_plan_over_one_sample_buffer_times_every_position() {
+    const EXTENT: u32 = 8;
+    const STAGES: usize = 1500;
+    let mut program = Vec::new();
+    let mut current = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: vec![Extent::Static(EXTENT)],
+            name: None,
+        },
+    );
+    let mut outputs = Vec::with_capacity(STAGES);
+    for stage in 0..STAGES {
+        let body = if stage % 2 == 0 {
+            ScalarOp::Negate
+        } else {
+            ScalarOp::Identity
+        };
+        current = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body,
+                operands: vec![(current, IndexMap::Affine(projection(1, &[0])))],
+                name: None,
+            },
+        );
+        outputs.push(current);
+    }
+    let plan = omega::plan(
+        &program,
+        &[],
+        &[QuantizedBlock::Float32(&[0.0; EXTENT as usize])],
+        &outputs,
+        NumericPolicy::default(),
+    )
+    .expect("plans the many-dispatch program");
+
+    let input = vec![1.0f32; EXTENT as usize];
+    let (_evaluated, timings, sampling_mode, _split) =
+        omega::execute_plan_with_placements_dispatch_timed(
+            &plan,
+            &[QuantizedBlock::Float32(&input)],
+            &[],
+            &[],
+        )
+        .expect("dispatch-timed execution runs on a real Metal device");
+
+    assert_ne!(sampling_mode, "unsupported", "this device samples counters");
+    assert!(
+        timings.len() > 1024,
+        "the program must exceed one sample buffer, got {} positions",
+        timings.len()
+    );
+    let timed = timings.iter().filter(|timing| timing.gpu_ns > 0).count();
+    assert_eq!(
+        timed,
+        timings.len(),
+        "every position must carry nonzero gpu_ns; first untimed position: {:?}",
+        timings.iter().position(|timing| timing.gpu_ns == 0)
+    );
+}

@@ -903,29 +903,33 @@ pub fn execute_plan_with_placements_dispatch_timed(
     // prefill can contain more dispatches than fit in one counter buffer; the
     // unprofiled tail still executes in the same command buffer, but reports
     // zero GPU time rather than causing a CPU fallback or a fabricated value.
-    let profiled_position_count = if split_at.is_some() {
-        position_count
+    let profiled_position_count = position_count;
+    // one sample buffer per `positions_per_buffer` positions, each within the
+    // device's 32 KiB cap; split mode samples three points in a single buffer.
+    let positions_per_buffer = MAX_TIMESTAMP_SAMPLES / 2;
+    let buffer_count = if split_at.is_some() {
+        1
     } else {
-        position_count.min(MAX_TIMESTAMP_SAMPLES / 2)
+        position_count.div_ceil(positions_per_buffer).max(1)
     };
-    let sample_descriptor = objc2_metal::MTLCounterSampleBufferDescriptor::new();
-    sample_descriptor.setCounterSet(Some(&counter_set));
-    // Three samples (buffer start, encoder-1 end, encoder-2 end) when
-    // split, else the original one-pair-per-position sizing. SAFETY: both
-    // counts are plain arithmetic, well under any device's
-    // `maxBufferLength`-scale sample-buffer limits for the per-token
-    // dispatch counts this workspace's own decode programs emit.
-    let sample_count: usize = if split_at.is_some() {
-        3
-    } else {
-        2 * profiled_position_count
-    };
-    unsafe { sample_descriptor.setSampleCount(sample_count as NSUInteger) };
-    let sample_buffer = device
-        .newCounterSampleBufferWithDescriptor_error(&sample_descriptor)
-        .map_err(|error| MetalError::CompileFailed {
-            log: format!("failed to allocate a counter sample buffer: {error}"),
-        })?;
+    let mut sample_buffers = Vec::with_capacity(buffer_count);
+    for buffer_index in 0..buffer_count {
+        let sample_descriptor = objc2_metal::MTLCounterSampleBufferDescriptor::new();
+        sample_descriptor.setCounterSet(Some(&counter_set));
+        let samples: usize = if split_at.is_some() {
+            3
+        } else {
+            let remaining = position_count - buffer_index * positions_per_buffer;
+            2 * remaining.min(positions_per_buffer).max(1)
+        };
+        unsafe { sample_descriptor.setSampleCount(samples as NSUInteger) };
+        let buffer = device
+            .newCounterSampleBufferWithDescriptor_error(&sample_descriptor)
+            .map_err(|error| MetalError::CompileFailed {
+                log: format!("failed to allocate a counter sample buffer: {error}"),
+            })?;
+        sample_buffers.push(buffer);
+    }
 
     let command_buffer = new_labeled_command_buffer(
         &queue,
@@ -1004,6 +1008,11 @@ pub fn execute_plan_with_placements_dispatch_timed(
     }
     let cpu_gpu_start = sample_timestamps(&device);
     for (position, bound) in prepared.resolved.iter().enumerate() {
+        let (position_chunk, position_local) = if split_at.is_some() {
+            (0, position)
+        } else {
+            (position / positions_per_buffer, position % positions_per_buffer)
+        };
         let placement = match output_placed.get(&bound.node).copied() {
             Some(placement) => Some(placement),
             None => arena_placement(plan, position, |node| output_placed.contains_key(&node))?,
@@ -1096,10 +1105,10 @@ pub fn execute_plan_with_placements_dispatch_timed(
                                 .sampleBufferAttachments()
                                 .objectAtIndexedSubscript(0)
                         };
-                        attachment.setSampleBuffer(Some(&sample_buffer));
+                        attachment.setSampleBuffer(Some(&sample_buffers[position_chunk]));
                     }
                     let (start_index, end_index) = match split_at {
-                        None => (2 * position, 2 * position + 1),
+                        None => (2 * position_local, 2 * position_local + 1),
                         Some(split) if position == split => (objc2_metal::MTLCounterDontSample, 2),
                         Some(_) => (0, 1),
                     };
@@ -1137,8 +1146,8 @@ pub fn execute_plan_with_placements_dispatch_timed(
         if dispatch_boundary && position < profiled_position_count {
             unsafe {
                 encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
-                    &sample_buffer,
-                    (2 * position) as NSUInteger,
+                    &sample_buffers[position_chunk],
+                    (2 * position_local) as NSUInteger,
                     true,
                 );
             }
@@ -1167,8 +1176,8 @@ pub fn execute_plan_with_placements_dispatch_timed(
         if dispatch_boundary && position < profiled_position_count {
             unsafe {
                 encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
-                    &sample_buffer,
-                    (2 * position + 1) as NSUInteger,
+                    &sample_buffers[position_chunk],
+                    (2 * position_local + 1) as NSUInteger,
                     true,
                 );
             }
@@ -1246,20 +1255,30 @@ pub fn execute_plan_with_placements_dispatch_timed(
     let gpu_tick_delta = cpu_gpu_end.1.saturating_sub(cpu_gpu_start.1).max(1);
     let ns_per_gpu_tick = cpu_ns_delta as f64 / gpu_tick_delta as f64;
 
-    let range = objc2_foundation::NSRange {
-        location: 0,
-        length: sample_count as NSUInteger,
-    };
-    // SAFETY: `range` is bounds-checked by construction above (it spans
-    // exactly the `sample_count` samples this call itself wrote);
-    // `resolveCounterRange`'s own unsafety is the driver's undocumented
-    // out-of-range behavior, which this range cannot trigger.
-    let resolved = unsafe { sample_buffer.resolveCounterRange(range) }.ok_or_else(|| {
-        MetalError::CompileFailed {
-            log: "counter sample buffer resolved no data".to_string(),
-        }
-    })?;
-    let raw = resolved.to_vec();
+    let mut raw_chunks: Vec<Vec<u8>> = Vec::with_capacity(buffer_count);
+    for (buffer_index, buffer) in sample_buffers.iter().enumerate() {
+        let samples = if split_at.is_some() {
+            3
+        } else {
+            2 * (position_count - buffer_index * positions_per_buffer)
+                .min(positions_per_buffer)
+                .max(1)
+        };
+        let range = objc2_foundation::NSRange {
+            location: 0,
+            length: samples as NSUInteger,
+        };
+        // SAFETY: `range` spans exactly the `samples` this buffer was sized
+        // for; `resolveCounterRange`'s unsafety is the driver's undocumented
+        // out-of-range behavior, which this range cannot trigger.
+        let resolved = unsafe { buffer.resolveCounterRange(range) }.ok_or_else(|| {
+            MetalError::CompileFailed {
+                log: "counter sample buffer resolved no data".to_string(),
+            }
+        })?;
+        raw_chunks.push(resolved.to_vec());
+    }
+    let raw = &raw_chunks[0];
     // ROW 329: split mode's three samples describe two ENCODER-level spans,
     // not `position_count` per-position ones -- reading them as
     // `2 * position` pairs (the non-split layout) would read past index 2
@@ -1269,9 +1288,9 @@ pub fn execute_plan_with_placements_dispatch_timed(
     // carries the real, encoder-granularity numbers this call actually
     // sampled.
     let encoder_split_ns = split_at.map(|_| {
-        let buffer_start = read_timestamp(&raw, 0);
-        let encoder_one_end = read_timestamp(&raw, 1);
-        let encoder_two_end = read_timestamp(&raw, 2);
+        let buffer_start = read_timestamp(raw, 0);
+        let encoder_one_end = read_timestamp(raw, 1);
+        let encoder_two_end = read_timestamp(raw, 2);
         let encoder_one_ns = if buffer_start == u64::MAX || encoder_one_end == u64::MAX {
             0
         } else {
@@ -1292,8 +1311,10 @@ pub fn execute_plan_with_placements_dispatch_timed(
             if position >= profiled_position_count {
                 0
             } else {
-                let start = read_timestamp(&raw, 2 * position);
-                let end = read_timestamp(&raw, 2 * position + 1);
+                let chunk = &raw_chunks[position / positions_per_buffer];
+                let local = position % positions_per_buffer;
+                let start = read_timestamp(chunk, 2 * local);
+                let end = read_timestamp(chunk, 2 * local + 1);
                 if start == u64::MAX || end == u64::MAX {
                     0
                 } else {
