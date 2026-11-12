@@ -1523,6 +1523,87 @@ fn logits_bits_hash(logits: &[f32]) -> u64 {
         })
 }
 
+/// One-pass top-two scan: `(argmax_index, argmax_logit, second_index,
+/// second_logit)`. The argmax follows `proxima_tokenizer::greedy_pick`'s exact
+/// rule (ties keep the lowest index; a NaN is displaced by the next value),
+/// so the reported argmax is the token greedy sampling picks. An exact tie
+/// reports the later equal index as second. Empty input yields index 0 and
+/// `NEG_INFINITY` for both logits, as the old `unwrap_or` scan did.
+#[cfg(feature = "instrument")]
+fn top_two(logits: &[f32]) -> (usize, f32, usize, f32) {
+    let mut best: Option<(usize, f32)> = None;
+    let mut second: Option<(usize, f32)> = None;
+    for (index, &value) in logits.iter().enumerate() {
+        match (best, second) {
+            (Some((_, best_value)), _) if value <= best_value => {
+                if !matches!(second, Some((_, second_value)) if value <= second_value) {
+                    second = Some((index, value));
+                }
+            }
+            _ => {
+                second = best;
+                best = Some((index, value));
+            }
+        }
+    }
+    let (best_index, best_logit) = best.unwrap_or((0, f32::NEG_INFINITY));
+    let (second_index, second_logit) = second.unwrap_or((0, f32::NEG_INFINITY));
+    (best_index, best_logit, second_index, second_logit)
+}
+
+#[cfg(all(test, feature = "instrument"))]
+mod top_two_tests {
+    use super::top_two;
+
+    const VOCAB: usize = 201_088;
+
+    #[test]
+    fn top_two_strict_winner_reports_runner_up() {
+        let logits = [0.5_f32, 11.25, -3.0, 10.75, 2.0];
+        assert_eq!(top_two(&logits), (1, 11.25, 3, 10.75));
+    }
+
+    #[test]
+    fn top_two_exact_tie_keeps_lowest_index_as_argmax() {
+        let logits = [1.0_f32, 14.5, 3.0, 14.5, 14.5];
+        let (best, best_logit, second, second_logit) = top_two(&logits);
+        assert_eq!(best, 1);
+        assert_eq!(best_logit, 14.5);
+        assert_eq!(second, 3);
+        assert_eq!(second_logit - best_logit, 0.0);
+    }
+
+    #[test]
+    fn top_two_agrees_with_greedy_pick_on_nan_inputs() {
+        let cases: [&[f32]; 4] = [
+            &[f32::NAN, 2.0, 1.0],
+            &[1.0, f32::NAN, 2.0],
+            &[3.0, 2.0, f32::NAN],
+            &[f32::NAN, f32::NAN],
+        ];
+        for logits in cases {
+            let expected = proxima_tokenizer::greedy_pick(logits).map(|index| index as usize);
+            assert_eq!(Some(top_two(logits).0), expected, "logits {logits:?}");
+        }
+    }
+
+    #[test]
+    fn top_two_empty_and_single_slices_use_neg_infinity() {
+        assert_eq!(top_two(&[]), (0, f32::NEG_INFINITY, 0, f32::NEG_INFINITY));
+        assert_eq!(top_two(&[4.5]), (0, 4.5, 0, f32::NEG_INFINITY));
+    }
+
+    #[test]
+    fn top_two_finds_planted_pair_in_vocab_sized_slice() {
+        let mut logits: Vec<f32> = (0..VOCAB)
+            .map(|index| ((index % 977) as f32) * 0.01 - 6.0)
+            .collect();
+        logits[150_001] = 21.5;
+        logits[7] = 21.25;
+        assert_eq!(top_two(&logits), (150_001, 21.5, 7, 21.25));
+    }
+}
+
 /// Resolves the `PROXIMA_PREFILL_ONE_EVALUATION`/`PROXIMA_PREFILL_SEQUENTIAL`
 /// escape hatches (`ServingConfig::prefill_one_evaluation`'s own doc) into
 /// the one presence-based override
@@ -6985,12 +7066,9 @@ did not hold every cached position)",
                         // fold, so a disabled debug level pays neither cost.
                         #[cfg(feature = "instrument")]
                         let (scan_ticks, debug_ticks) = if logits_diag_enabled {
-                            let argmax_token =
-                                proxima_tokenizer::greedy_pick(last_position).unwrap_or(0) as usize;
-                            let argmax_logit = last_position
-                                .get(argmax_token)
-                                .copied()
-                                .unwrap_or(f32::NEG_INFINITY);
+                            let (argmax_token, argmax_logit, second_token, second_logit) =
+                                top_two(last_position);
+                            let margin = argmax_logit - second_logit;
                             let scan_ticks = elapsed_ticks(argmax_started);
                             let debug_started = read_ticks();
                             debug!(
@@ -6999,6 +7077,9 @@ did not hold every cached position)",
                                 cached_len = cached_len as u64,
                                 argmax_token = argmax_token as u64,
                                 argmax_logit,
+                                second_token = second_token as u64,
+                                second_logit,
+                                margin,
                                 "decode_loop_step_trace: logits before sampling"
                             );
                             let debug_ticks = elapsed_ticks(debug_started);
