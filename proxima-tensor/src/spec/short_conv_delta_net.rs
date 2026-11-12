@@ -1539,22 +1539,17 @@ pub fn sigmoid(
 ) -> Result<NodeId, TensorError> {
     let target = map.rsplit("->").next().unwrap_or(map);
     let one_map = alloc::format!("->{target}");
-    let neg_x = elementwise(program, DType::FLOAT32, ScalarOp::Negate, &[(x, map)])?;
-    let exp_neg_x = elementwise(
+    let neg_x = elementwise_like(program, x, ScalarOp::Negate, &[(x, map)])?;
+    let exp_neg_x = elementwise_like(program, neg_x, ScalarOp::Exponential, &[(neg_x, map)])?;
+    let one_plus_exp = elementwise_like(
         program,
-        DType::FLOAT32,
-        ScalarOp::Exponential,
-        &[(neg_x, map)],
-    )?;
-    let one_plus_exp = elementwise(
-        program,
-        DType::FLOAT32,
+        exp_neg_x,
         ScalarOp::Add,
         &[(exp_neg_x, map), (one, one_map.as_str())],
     )?;
-    elementwise(
+    elementwise_like(
         program,
-        DType::FLOAT32,
+        one_plus_exp,
         ScalarOp::Reciprocal,
         &[(one_plus_exp, map)],
     )

@@ -184,33 +184,28 @@ pub(super) fn append_activation(
     let broadcast_axes = alloc::format!("->{axes}");
     match activation {
         Activation::Silu => {
-            let neg_x = elementwise(
+            let neg_x = elementwise_like(program, x, ScalarOp::Negate, &[(x, &same_axes)])?;
+            let exp_neg_x = elementwise_like(
                 program,
-                DType::FLOAT32,
-                ScalarOp::Negate,
-                &[(x, &same_axes)],
-            )?;
-            let exp_neg_x = elementwise(
-                program,
-                DType::FLOAT32,
+                neg_x,
                 ScalarOp::Exponential,
                 &[(neg_x, &same_axes)],
             )?;
-            let one_plus_exp = elementwise(
+            let one_plus_exp = elementwise_like(
                 program,
-                DType::FLOAT32,
+                exp_neg_x,
                 ScalarOp::Add,
                 &[(exp_neg_x, &same_axes), (ones, &broadcast_axes)],
             )?;
-            let sigmoid_x = elementwise(
+            let sigmoid_x = elementwise_like(
                 program,
-                DType::FLOAT32,
+                one_plus_exp,
                 ScalarOp::Reciprocal,
                 &[(one_plus_exp, &same_axes)],
             )?;
-            elementwise(
+            elementwise_like(
                 program,
-                DType::FLOAT32,
+                x,
                 ScalarOp::Multiply,
                 &[(x, &same_axes), (sigmoid_x, &same_axes)],
             )
@@ -220,57 +215,57 @@ pub(super) fn append_activation(
             let cubic_coeff = scalar_constant(program, 0.044_715);
             let sqrt_two_over_pi = scalar_constant(program, 0.797_884_6);
 
-            let x_squared = elementwise(
+            let x_squared = elementwise_like(
                 program,
-                DType::FLOAT32,
+                x,
                 ScalarOp::Multiply,
                 &[(x, &same_axes), (x, &same_axes)],
             )?;
-            let x_cubed = elementwise(
+            let x_cubed = elementwise_like(
                 program,
-                DType::FLOAT32,
+                x_squared,
                 ScalarOp::Multiply,
                 &[(x_squared, &same_axes), (x, &same_axes)],
             )?;
-            let cubic_term = elementwise(
+            let cubic_term = elementwise_like(
                 program,
-                DType::FLOAT32,
+                x_cubed,
                 ScalarOp::Multiply,
                 &[(x_cubed, &same_axes), (cubic_coeff, &broadcast_axes)],
             )?;
-            let inner = elementwise(
+            let inner = elementwise_like(
                 program,
-                DType::FLOAT32,
+                x,
                 ScalarOp::Add,
                 &[(x, &same_axes), (cubic_term, &same_axes)],
             )?;
-            let scaled_inner = elementwise(
+            let scaled_inner = elementwise_like(
                 program,
-                DType::FLOAT32,
+                inner,
                 ScalarOp::Multiply,
                 &[(inner, &same_axes), (sqrt_two_over_pi, &broadcast_axes)],
             )?;
-            let tanh_term = elementwise(
+            let tanh_term = elementwise_like(
                 program,
-                DType::FLOAT32,
+                scaled_inner,
                 ScalarOp::Tanh,
                 &[(scaled_inner, &same_axes)],
             )?;
-            let one_plus_tanh = elementwise(
+            let one_plus_tanh = elementwise_like(
                 program,
-                DType::FLOAT32,
+                tanh_term,
                 ScalarOp::Add,
                 &[(tanh_term, &same_axes), (ones, &broadcast_axes)],
             )?;
-            let half_x = elementwise(
+            let half_x = elementwise_like(
                 program,
-                DType::FLOAT32,
+                x,
                 ScalarOp::Multiply,
                 &[(x, &same_axes), (half, &broadcast_axes)],
             )?;
-            elementwise(
+            elementwise_like(
                 program,
-                DType::FLOAT32,
+                half_x,
                 ScalarOp::Multiply,
                 &[(half_x, &same_axes), (one_plus_tanh, &same_axes)],
             )
@@ -1181,30 +1176,28 @@ pub(crate) fn append_swiglu_ffn(
     ones: NodeId,
     activation: Activation,
 ) -> Result<NodeId, TensorError> {
-    let gate_product = elementwise(
+    let gate_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        normed,
         ScalarOp::Multiply,
         &[(normed, "sd->sdg"), (w_gate, "dg->sdg")],
     )?;
-    let gate = reduce(
+    let gate = reduce_like(
         program,
-        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         gate_product,
         "sdg->sdg",
         "sg->sdg",
     )?;
-    let up_product = elementwise(
+    let up_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        normed,
         ScalarOp::Multiply,
         &[(normed, "sd->sdg"), (w_up, "dg->sdg")],
     )?;
-    let up = reduce(
+    let up = reduce_like(
         program,
-        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         up_product,
@@ -1213,22 +1206,21 @@ pub(crate) fn append_swiglu_ffn(
     )?;
 
     let activated_gate = append_activation(program, gate, ones, activation, "sg")?;
-    let ffn_hidden = elementwise(
+    let ffn_hidden = elementwise_like(
         program,
-        DType::FLOAT32,
+        up,
         ScalarOp::Multiply,
         &[(activated_gate, "sg->sg"), (up, "sg->sg")],
     )?;
 
-    let down_product = elementwise(
+    let down_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        ffn_hidden,
         ScalarOp::Multiply,
         &[(ffn_hidden, "sg->sgd"), (w_down, "gd->sgd")],
     )?;
-    reduce(
+    reduce_like(
         program,
-        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         down_product,
@@ -1304,15 +1296,14 @@ pub(crate) fn append_shared_expert_ffn(
         alloc::vec![Extent::Static(embedding)],
         &alloc::format!("blk.{layer}.ffn_gate_inp_shexp.weight"),
     );
-    let gate_product = elementwise(
+    let gate_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        normed,
         ScalarOp::Multiply,
         &[(normed, "sd->sd"), (w_gate_inp, "d->sd")],
     )?;
-    let gate_logit = reduce(
+    let gate_logit = reduce_like(
         program,
-        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         gate_product,
@@ -1320,9 +1311,9 @@ pub(crate) fn append_shared_expert_ffn(
         "s->sd",
     )?;
     let shared_gate = sigmoid(program, gate_logit, ones, "s->s")?;
-    elementwise(
+    elementwise_like(
         program,
-        DType::FLOAT32,
+        shared_out,
         ScalarOp::Multiply,
         &[(shared_out, "sd->sd"), (shared_gate, "s->sd")],
     )
@@ -1597,9 +1588,9 @@ pub(crate) fn append_layer_ffn(
                         ffn_config.activation,
                         ffn_config.shared_expert_gate,
                     )?;
-                    elementwise(
+                    elementwise_like(
                         program,
-                        DType::FLOAT32,
+                        routed_out,
                         ScalarOp::Add,
                         &[(routed_out, "sd->sd"), (shared_out, "sd->sd")],
                     )?
@@ -1682,9 +1673,9 @@ pub(crate) fn append_layer_ffn(
                 routed_out
             };
 
-            let combined = elementwise(
+            let combined = elementwise_like(
                 program,
-                DType::FLOAT32,
+                dense_out,
                 ScalarOp::Add,
                 &[(dense_out, "sd->sd"), (routed_out, "sd->sd")],
             )?;
@@ -1702,9 +1693,9 @@ pub(crate) fn append_layer_ffn(
         }
     };
 
-    let mut x = elementwise(
+    let mut x = elementwise_like(
         program,
-        DType::FLOAT32,
+        post_mixer,
         ScalarOp::Add,
         &[(ffn_out, "sd->sd"), (post_mixer, "sd->sd")],
     )?;
@@ -1716,15 +1707,14 @@ pub(crate) fn append_layer_ffn(
             alloc::vec![Extent::Static(embedding), Extent::Static(ple_dim)],
             &alloc::format!("blk.{layer}.inp_gate.weight"),
         );
-        let gate_product = elementwise(
+        let gate_product = elementwise_like(
             program,
-            DType::FLOAT32,
+            x,
             ScalarOp::Multiply,
             &[(x, "sd->sdo"), (inp_gate, "do->sdo")],
         )?;
-        let gate_raw = reduce(
+        let gate_raw = reduce_like(
             program,
-            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             gate_product,
@@ -1732,9 +1722,9 @@ pub(crate) fn append_layer_ffn(
             "so->sdo",
         )?;
         let gate_act = append_activation(program, gate_raw, ones, Activation::GeluTanh, "sg")?;
-        let gated = elementwise(
+        let gated = elementwise_like(
             program,
-            DType::FLOAT32,
+            gate_act,
             ScalarOp::Multiply,
             &[(gate_act, "so->so"), (ple_input, "so->so")],
         )?;
@@ -1745,15 +1735,14 @@ pub(crate) fn append_layer_ffn(
             alloc::vec![Extent::Static(ple_dim), Extent::Static(embedding)],
             &alloc::format!("blk.{layer}.proj.weight"),
         );
-        let projected_product = elementwise(
+        let projected_product = elementwise_like(
             program,
-            DType::FLOAT32,
+            gated,
             ScalarOp::Multiply,
             &[(gated, "so->sod"), (proj, "od->sod")],
         )?;
-        let projected_raw = reduce(
+        let projected_raw = reduce_like(
             program,
-            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             projected_product,
@@ -1767,9 +1756,9 @@ pub(crate) fn append_layer_ffn(
             &alloc::format!("blk.{layer}.post_norm.weight"),
         );
         let projected_normed = rmsnorm(program, projected_raw, post_norm_weight, inv_dim, eps)?;
-        x = elementwise(
+        x = elementwise_like(
             program,
-            DType::FLOAT32,
+            x,
             ScalarOp::Add,
             &[(x, "sd->sd"), (projected_normed, "sd->sd")],
         )?;
@@ -1782,9 +1771,9 @@ pub(crate) fn append_layer_ffn(
             Vec::new(),
             &alloc::format!("blk.{layer}.layer_output_scale.weight"),
         );
-        x = elementwise(
+        x = elementwise_like(
             program,
-            DType::FLOAT32,
+            x,
             ScalarOp::Multiply,
             &[(x, "sd->sd"), (output_scale, "->sd")],
         )?;

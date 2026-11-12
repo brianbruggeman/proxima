@@ -1032,6 +1032,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                     descriptor.recurrence,
                     descriptor.loopcd,
                     SharedExpertWidth(descriptor.expert_shared_feed_forward),
+                    descriptor.activation_dtype()?,
                 )?;
             Ok(ForwardProgram {
                 program,
