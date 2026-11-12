@@ -471,10 +471,51 @@ pub(super) fn run_elementwise_range<B: Deref<Target = [f32]>>(
 
     let mut row_running: Vec<i64> = Vec::new();
     let mut row_strides: Vec<i64> = Vec::new();
+    // gather rows that collapse to an affine span (a head-split transpose
+    // reads one such row per output row) step the block dim by one
+    // coordinate each: `running` and every cursor's index offset are exactly
+    // linear in that coordinate, so the next row is the last row plus a
+    // per-slot delta instead of a fresh odometer unflatten, offset
+    // recompute and cursor fill. Left off under `instrument`, whose
+    // per-row gather witness records inside `fill_gather_cursors`.
+    let gather_block_strides: Vec<i64> =
+        if !fast_path && block_extent > 1 && !cfg!(feature = "instrument") {
+            resolved
+                .operands()
+                .iter()
+                .map(|(_, _, gather)| match (gather, block_dim) {
+                    (Some(access), Some(dim)) => access.index_layout.stride(dim),
+                    _ => 0,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+    let mut sweeping = false;
     let mut outer_position = outer_start;
     while outer_position < outer_end {
-        unflatten_into(outer_position as u64, outer_extents, &mut outer_coordinate);
-        fill_running_offsets(resolved, &outer_coordinate, &mut running);
+        let continues_sweep = sweeping
+            && outer_coordinate
+                .last()
+                .is_some_and(|coordinate| coordinate + 1 < block_extent);
+        sweeping = false;
+        if continues_sweep {
+            if let Some(coordinate) = outer_coordinate.last_mut() {
+                *coordinate += 1;
+            }
+            for (slot, block_stride) in running.iter_mut().zip(&block_strides) {
+                *slot += block_stride;
+            }
+            for (cursor, delta) in gather_cursors.iter_mut().zip(&gather_block_strides) {
+                if let Some(cursor) = cursor.as_mut() {
+                    cursor.offset += delta;
+                    cursor.progression_checked = *delta == 0;
+                }
+            }
+        } else {
+            unflatten_into(outer_position as u64, outer_extents, &mut outer_coordinate);
+            fill_running_offsets(resolved, &outer_coordinate, &mut running);
+        }
 
         // The whole `[outer_start, outer_end)` range collapsed to one flat
         // span (`full_range_flat`, computed once above): a SINGLE
@@ -603,13 +644,15 @@ pub(super) fn run_elementwise_range<B: Deref<Target = [f32]>>(
             continue;
         }
 
-        fill_gather_cursors(
-            resolved,
-            buffers,
-            &outer_coordinate,
-            Some(innermost_dim),
-            &mut gather_cursors,
-        )?;
+        if !continues_sweep {
+            fill_gather_cursors(
+                resolved,
+                buffers,
+                &outer_coordinate,
+                Some(innermost_dim),
+                &mut gather_cursors,
+            )?;
+        }
 
         if !matches!(shape, BodyShape::FusedAdamUpdate(..)) {
             row_running.resize(raw.len(), 0);
@@ -643,6 +686,7 @@ pub(super) fn run_elementwise_range<B: Deref<Target = [f32]>>(
                     counters.output_writes += inner_len as u64;
                     counters.operand_loads += (raw.len() * inner_len) as u64;
                 }
+                sweeping = !gather_block_strides.is_empty();
                 outer_position += 1;
                 continue;
             }
@@ -1703,6 +1747,7 @@ pub(super) fn run_reduce_scatter<B: Deref<Target = [f32]>>(
             stride: 0,
             element_stride: target.element_stride,
             extent: target.extent,
+            progression_checked: false,
         };
         let dest_offset =
             out_layout.offset_of(&coordinate) + destination.fetch_and_advance(resolved.node)?;
