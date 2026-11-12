@@ -227,7 +227,9 @@ use packed_row_blocked_ggml::*;
 pub use cached_attention_render::{
     cached_attention_key_codec_for, cached_attention_kv_codec_for, cached_attention_kv_codecs_for,
 };
-pub use cached_attention_render::cached_attention_row_tiled_kv_codec_for;
+pub use cached_attention_render::{
+    cached_attention_row_tiled_kv_codec_for, cached_attention_row_tiled_reads,
+};
 #[cfg(feature = "metal-attn-split-rows")]
 use cached_attention_render::{
     ROW_TILED_KV_REASON, fragment_scalar_type, fragment_type, row_tiled_cached_type,

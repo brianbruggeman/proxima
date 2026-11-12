@@ -1050,6 +1050,32 @@ pub(super) fn row_tiled_cached_type(codec: Option<Codec>) -> Option<&'static str
         .or_else(|| readable_block_layout(&format).map(|_| "uchar"))
 }
 
+/// Whether the row-tiled kernel reads one side (K or V) of a cache stored as `format` for a head of
+/// `head_dim` elements: binary32, a scalar layout of whole bytes ([`readable_scalar_cache`]), or a
+/// readable block layout ([`readable_block_layout`]) whose blocks tile both `head_dim / 2` (the K
+/// plane rows) and `head_dim` (the V rows). The row-tiled emitter and admission both ask this, so
+/// neither keeps a list of formats.
+///
+/// # Errors
+/// The property of the layout the kernel cannot read.
+pub fn cached_attention_row_tiled_reads(format: &Codec, head_dim: u64) -> Result<(), &'static str> {
+    if format.is_identity_of(&Codec::Scalar(FloatLayout::BF32)) {
+        return Ok(());
+    }
+    if row_tiled_cached_type(Some(*format)).is_none() {
+        return Err(ROW_TILED_KV_REASON);
+    }
+    if let Some(layout) = readable_block_layout(format) {
+        let elements = u64::from(layout.elements);
+        if !(head_dim / 2).is_multiple_of(elements) || !head_dim.is_multiple_of(elements) {
+            return Err(
+                "a block cache needs K plane rows of head_dim / 2 and V rows of head_dim to be whole blocks",
+            );
+        }
+    }
+    Ok(())
+}
+
 /// The row-tiled counterpart of [`cached_attention_kv_codec_for`]: the codec a cache stored as
 /// `format` is read with, or the emitter's error when the cached-attention kernels read `format`
 /// but the row-tiled (speculative verify) kernel does not, as for Float16.

@@ -299,14 +299,13 @@ pub(super) fn render_cached_attention_row_tiled_with(
             node: resolved.node,
             reason: ROW_TILED_KV_REASON,
         })?;
-    if let Some(layout) = cached_kv_codec.as_ref().and_then(readable_block_layout) {
-        let elements = u64::from(layout.elements);
-        if (*head_dim / 2) % elements != 0 || *head_dim % elements != 0 {
-            return Err(EmitError::CachedAttentionKvCodecNotSupported {
+    if let Some(format) = cached_kv_codec.as_ref() {
+        cached_attention_row_tiled_reads(format, *head_dim).map_err(|reason| {
+            EmitError::CachedAttentionKvCodecNotSupported {
                 node: resolved.node,
-                reason: "a block cache needs K plane rows of head_dim / 2 and V rows of head_dim to be whole blocks",
-            });
-        }
+                reason,
+            }
+        })?;
     }
     let native_half_cache = cached_kv_codec
         .as_ref()
