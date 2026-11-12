@@ -152,9 +152,14 @@ route_mode = "compacted"
 # (PROXNUM-82), compacted / segments: Q5_K ffn_down_exps (2048 features, 32
 # row tiles) 2305 / 1748; Iq4_XS ffn_down_exps 580 / 497; Q5_K ffn_gate/up_exps
 # (512 features, 8 row tiles) 1237 / 1390; Iq4_XS ffn_gate/up_exps 461 / 567.
-# 16 sits between the two measured shapes; no op of a width between them was
-# measured.
-compacted_max_row_tiles = 16
+# Since the compacted route dispatches indirectly with an O(1) tile table (no
+# per-threadgroup walk), the PROXNUM-82 down figures no longer apply: PROXNUM-88,
+# same model and prompt, op profile run 2 of 2, summed gpu ms over the 47
+# ffn_down_exps ops, 16 / 32: 180.4 / 110.6 (Q5_K 3811 / 2295 us per op, Iq4_XS
+# 3934 / 2460); gate/up sums unchanged (103.5 / 103.5, 103.0 / 103.1). Warm
+# prefill ttft 522-541 ms at 16, 446-461 ms at 32. 32 admits the 2048-feature
+# down (32 row tiles); a wider op takes the segment scan.
+compacted_max_row_tiles = 32
 # Adjacent route entries each thread of a threadgroup owns in one scan step.
 # A step covers `block_threads * scan_ahead` entries for one barrier pair: the
 # loads are independent, so one memory round trip serves them all, and the
