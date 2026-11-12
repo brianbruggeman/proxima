@@ -894,17 +894,20 @@ mod tests {
 
     /// NVFP4: four E4M3 sub-block scales (one per 16 elements) then 32 nibble bytes, 64 E2M1
     /// values per block. E4M3 `0x38` is 1.0, so a `0x20` nibble byte places code 0 (0.0) at
-    /// element 0 and code 2 (1.0) at element 32 (the nibble split the 32-byte run uses).
+    /// element 0 and code 2 (1.0) at element 8: ggml's `dequantize_row_nvfp4` writes
+    /// `yb[j]` from the low nibble and `yb[j + 8]` from the high nibble of each run's byte `j`.
     #[test]
     fn an_nvfp4_block_decodes_the_worked_example() {
         let mut block = [0u8; 36];
         block[..4].fill(0x38);
         block[4] = 0x20;
+        block[12] = 0x02;
         let mut out = [0.0_f32; 64];
         decode_block(&NumericFormat::Nvfp4, &block, &mut out).expect("one nvfp4 block decodes");
         assert_eq!(out[0], 0.0);
-        assert_eq!(out[32], 1.0, "high nibble of byte 0 is element 32");
-        assert_eq!(out[16], 0.0, "sub-block 1 starts at element 16");
+        assert_eq!(out[8], 1.0, "high nibble of byte 0 is element 8 of the first run");
+        assert_eq!(out[16], 1.0, "byte 8 starts the second run, so its low nibble is element 16");
+        assert_eq!(out[24], 0.0);
     }
 
     #[test]

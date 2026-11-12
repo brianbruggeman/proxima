@@ -879,6 +879,39 @@ fn cached_attention_decode_split_reads_a_block_v_cache_as_the_host_codec_decodes
     assert_eq!(cells, 48, "4 pairings x 3 head dims x 4 cached lengths");
 }
 
+/// The float-coded scaled blocks as the K cache, the V cache, and both: a shared exponent over 32
+/// four-bit codes, and four 16-element runs under an E4M3 scale (the block is 64 elements, so a head
+/// row of `head_dim / 2` plane elements needs `head_dim >= 128`). Metal over the packed caches equals
+/// Metal over the host-decoded values as plain f32 and the CPU oracle over the same values.
+#[test]
+fn cached_attention_decode_split_reads_fp4_k_and_v_caches_as_the_host_codec_decodes_them() {
+    let mut cells = 0_usize;
+    for (key_format, value_format, head_dims) in [
+        (NumericFormat::Mxfp4, NumericFormat::Mxfp4, &[64_u32, 256, 512][..]),
+        (NumericFormat::Nvfp4, NumericFormat::Nvfp4, &[256, 512][..]),
+        (NumericFormat::Mxfp4, NumericFormat::Nvfp4, &[256, 512][..]),
+        (NumericFormat::Nvfp4, NumericFormat::Mxfp4, &[256, 512][..]),
+    ] {
+        for head_dim in head_dims {
+            for cached_len in [33_u64, 199] {
+                let cell = block_cell(key_format, value_format, cached_len, *head_dim);
+                assert!(
+                    cell.metal_vs_cpu < BLOCK_K_CPU_BOUND,
+                    "K {key_format:?} V {value_format:?} head_dim {head_dim} cached_len {cached_len}: metal over the fp4 caches disagrees with the f32 cpu oracle over the host-decoded K and V: {}",
+                    cell.metal_vs_cpu
+                );
+                assert!(
+                    cell.metal_vs_host_decode < 1e-4,
+                    "K {key_format:?} V {value_format:?} head_dim {head_dim} cached_len {cached_len}: {}",
+                    cell.metal_vs_host_decode
+                );
+                cells += 1;
+            }
+        }
+    }
+    assert_eq!(cells, 18, "(3 + 2 + 2 + 2) head dims x 2 cached lengths");
+}
+
 /// Any scalar layout whose code fills whole bytes is read through `layout_load_msl`: the kernel's
 /// output over the packed cache equals, bit for bit, its output over the host-decoded values as
 /// plain f32, because both feed the same floats through the same accumulation. E4M3FN is a layout

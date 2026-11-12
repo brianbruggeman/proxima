@@ -1,9 +1,20 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use proxima_numeric::encode_rule::{CodeRounding, EncodeRule, ScaleRounding};
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use proxima_numeric::BlockLayout;
 use proxima_numeric::{FormatCodec, NumericFormat};
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use super::encode_render::{RenderedEncode, block_encode_kernel_by_rule};
 use super::encode_render::{encode_kernel_refusal, format_encode_kernel_msl};
+
+#[expect(dead_code, reason = "the numeric layout tests use the dequantizers this crate's tests do not")]
+mod llama {
+    include!("../../../proxima-numeric/tests/support/llama_fp4_reference.rs");
+}
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use core::ffi::c_void;
@@ -67,6 +78,11 @@ fn host_encode(format: &NumericFormat, values: &[f32]) -> Vec<u8> {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 fn device_encode(format: &NumericFormat, values: &[f32]) -> Vec<u8> {
     let rendered = format_encode_kernel_msl(format, "probe_encode").expect("the format renders");
+    device_run(&rendered, values)
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn device_run(rendered: &RenderedEncode, values: &[f32]) -> Vec<u8> {
     let device = MTLCreateSystemDefaultDevice().expect("this box has a Metal device");
     let options = MTLCompileOptions::new();
     options.setLanguageVersion(MTLLanguageVersion::Version3_1);
@@ -182,4 +198,144 @@ fn a_rendered_block_encode_is_the_rule_with_its_constants_substituted() {
     assert_eq!(rendered.elements_per_thread, 32);
     assert_eq!(rendered.bytes_per_thread, 18);
     assert!(rendered.source.contains("-8.0f"), "the signed-peak divisor is the rule's");
+}
+
+fn fp4_formats() -> [(&'static str, NumericFormat); 2] {
+    [("block of 32 under a shared exponent", NumericFormat::Mxfp4), ("runs of 16 under an E4M3 scale", NumericFormat::Nvfp4)]
+}
+
+fn kv_shaped_values() -> Vec<f32> {
+    let mut values = attention_rows(0x5eed, 512, 256);
+    values.extend(attention_rows(0xface, 64, 128));
+    values.extend(edge_rows(256));
+    values
+}
+
+#[test]
+fn a_float_coded_block_format_has_a_rendered_encode_whether_it_packs_scale_runs_or_not() {
+    for (label, format) in fp4_formats() {
+        assert!(encode_kernel_refusal(&format).is_ok(), "{label}");
+    }
+}
+
+/// The smallest peak whose fitted scale is a normal `f32`: below it (an all-zero block included,
+/// whose exponent-only scale stores as the lowest power of two) the scale is a subnormal, which the
+/// device flushes to zero where the host keeps it, so those blocks (a peak under 1e-37, zero for
+/// attention) encode as all-zero codes on the device, and only the sign of a negative zero differs.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+const DEVICE_SUBNORMAL_SCALE_PEAK: f32 = 8.0 * f32::MIN_POSITIVE;
+
+/// Bytes that differ between a host and a device encode, split into those in blocks whose peak the
+/// device flushes and the rest: `(differing in flushed blocks, differing elsewhere, flushed blocks)`.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+fn differing_bytes(host: &[u8], device: &[u8], values: &[f32], format: &NumericFormat) -> (usize, usize, usize) {
+    let elements = usize::from(format.elements_per_block());
+    let bytes = usize::from(format.bytes_per_block());
+    let run_elements = format.block_layout().map_or(elements, |layout| usize::from(layout.run_elements()));
+    let (mut flushed_differing, mut other_differing, mut flushed_blocks) = (0usize, 0usize, 0usize);
+    for ((block_values, left), right) in values.chunks(elements).zip(host.chunks(bytes)).zip(device.chunks(bytes)) {
+        let differing = left.iter().zip(right).filter(|(a, b)| a != b).count();
+        let flushed = block_values.chunks(run_elements).any(|run| {
+            let peak = run.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+            peak < DEVICE_SUBNORMAL_SCALE_PEAK
+        });
+        flushed_blocks += usize::from(flushed && differing > 0);
+        if flushed {
+            flushed_differing += differing;
+        } else {
+            other_differing += differing;
+        }
+    }
+    (flushed_differing, other_differing, flushed_blocks)
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn a_rendered_fp4_encode_equals_the_host_codec_byte_for_byte_on_kv_rows_and_edge_rows() {
+    let values = kv_shaped_values();
+    let mut report = String::new();
+    let mut other_total = 0usize;
+    for (label, format) in fp4_formats() {
+        let host = host_encode(&format, &values);
+        let device = device_encode(&format, &values);
+        assert_eq!(host.len(), device.len(), "{label}: packed length");
+        let (flushed, other, flushed_blocks) = differing_bytes(&host, &device, &values, &format);
+        report.push_str(&format!(
+            "{label}: {} values, {} bytes, byte-differing {other} outside subnormal-scale blocks, {flushed} inside {flushed_blocks} of them\n",
+            values.len(),
+            host.len()
+        ));
+        other_total += other;
+    }
+    eprintln!("{report}");
+    assert_eq!(other_total, 0, "{report}");
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn a_rendered_mxfp4_encode_equals_llama_quantize_row_mxfp4_ref_on_kv_rows() {
+    let mut values = attention_rows(0x5eed, 512, 256);
+    values.extend(attention_rows(0xface, 64, 128));
+    let reference: Vec<u8> = values.chunks(32).flat_map(llama::llama_quantize_block_mxfp4).collect();
+
+    let device = device_encode(&NumericFormat::Mxfp4, &values);
+
+    let differing = device.iter().zip(&reference).filter(|(left, right)| left != right).count();
+    eprintln!("mxfp4 device vs llama: {} values, {} bytes, {differing} differing", values.len(), device.len());
+    assert_eq!((device.len(), differing), (reference.len(), 0));
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn a_rendered_away_from_zero_mxfp4_encode_equals_the_host_codec_with_the_same_rule() {
+    let rule = EncodeRule {
+        scale_rounding: ScaleRounding::PowerOfTwoCeil,
+        rounding: CodeRounding::NearestEvenQuotient,
+        ..BlockLayout::MXFP4.encode_rule().expect("mxfp4 has a rule")
+    };
+    let values = kv_shaped_values();
+    let host = {
+        let codec = FormatCodec::coded(&BlockLayout::MXFP4, rule).expect("the rule fits the layout");
+        let mut out = alloc::vec![0u8; codec.packed_len(values.len()).expect("whole blocks")];
+        codec.encode(&values, &mut out).expect("the host encodes the rows");
+        out
+    };
+    let rendered = block_encode_kernel_by_rule(&BlockLayout::MXFP4, &rule, "probe_encode").expect("the rule renders");
+
+    let device = device_run(&rendered, &values);
+
+    let (flushed, other, flushed_blocks) = differing_bytes(&host, &device, &values, &NumericFormat::Mxfp4);
+    eprintln!(
+        "mxfp4 away-from-zero device vs host: {} values, {} bytes, {other} differing outside subnormal-scale blocks, {flushed} inside {flushed_blocks} of them",
+        values.len(),
+        host.len()
+    );
+    assert_eq!((device.len(), other), (host.len(), 0));
+}
+
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn control_the_ocp_and_the_away_from_zero_rules_render_different_bytes() {
+    let values = attention_rows(0x5eed, 16, 256);
+    let ocp = device_encode(&NumericFormat::Mxfp4, &values);
+    let rule = EncodeRule {
+        scale_rounding: ScaleRounding::PowerOfTwoCeil,
+        rounding: CodeRounding::NearestEvenQuotient,
+        ..BlockLayout::MXFP4.encode_rule().expect("mxfp4 has a rule")
+    };
+    let rendered = block_encode_kernel_by_rule(&BlockLayout::MXFP4, &rule, "probe_encode").expect("the rule renders");
+
+    let away = device_run(&rendered, &values);
+
+    assert_ne!(ocp, away, "the scale rounding is read from the rule");
+}
+
+#[test]
+fn a_rendered_float_encode_is_the_rule_with_its_constants_substituted() {
+    let rendered = format_encode_kernel_msl(&NumericFormat::Mxfp4, "probe_encode").expect("mxfp4 renders");
+    assert_eq!((rendered.elements_per_thread, rendered.bytes_per_thread), (32, 17));
+    assert!(rendered.source.contains("probe_encode_grid[16]"), "the code grid is the layout's decoded values");
+    let runs = format_encode_kernel_msl(&NumericFormat::Nvfp4, "probe_encode").expect("nvfp4 renders");
+    assert_eq!((runs.elements_per_thread, runs.bytes_per_thread), (64, 36));
+    assert!(runs.source.contains("run < 4u"), "the four scale runs are the layout's");
 }

@@ -10,10 +10,13 @@
 //! indirect jump, where [`crate::encode::encode_blocks`] re-resolves the format on every call and
 //! routes a block or level format here when [`FormatCodec::can_encode`] (adding a typed refusal of
 //! non-finite input and an exact-size output). A scalar layout without a name resolves to the same
-//! loop with the layout as data, so every supported scalar layout has a codec; a block layout
-//! outside the table has none and keeps [`crate::decode::decode_blocks`] for decode, and a block
-//! layout whose fit has no instantiation (a stored min, K-quants, mixed-radix, float codes) has a
-//! decode instantiation only and keeps the walker in [`crate::encode::encode_blocks`] for encode.
+//! loop with the layout as data, so every supported scalar layout has a codec; a float-coded block
+//! layout (the OCP MX and NV `E2M1` fields, `E3M2`) resolves to [`FormatCodec::coded`], its
+//! [`crate::encode_rule::EncodeRule`] run with the layout as data, in the table or not. A block
+//! layout outside the table with no rule has none and keeps [`crate::decode::decode_blocks`] for
+//! decode, and a block layout whose fit has no instantiation (a stored min, K-quants, mixed-radix)
+//! has a decode instantiation only and keeps the walker in [`crate::encode::encode_blocks`] for
+//! encode.
 //!
 //! One window contract serves every caller. [`FormatCodec::encode`] writes the packed form of
 //! `values` into the front of `out`, [`FormatCodec::decode`] reads the packed range for `out.len()`
@@ -26,8 +29,11 @@
 
 use core::mem::MaybeUninit;
 
-use crate::block_codec::{BlockDecodeFn, BlockEncodeFn, DecodeFn, EncodeFn};
+use crate::block_codec::{BlockDecodeFn, BlockEncodeFn, DecodeFn, EncodeFn, is_float_rule};
 use crate::block_layout::BlockLayout;
+use crate::decode::decode_block;
+use crate::encode::{encode_rule_blocks, reach as code_reach};
+use crate::encode_rule::{EncodeRule, ScaleRounding, ScaleStatistic};
 use crate::error::NumericError;
 use crate::float_layout::{FloatLayout, named_layout_table};
 use crate::float_layout_codec::{
@@ -37,12 +43,19 @@ use crate::format::NumericFormat;
 
 const UNNAMED: &str = "unnamed";
 
+/// The most elements a data-route block holds: its decode stages one block in a stack buffer.
+const MAX_CODED_ELEMENTS: u16 = 256;
+
 // the element count up to which an identity decode copies inline: a vector loop avoids the libc memcpy call, which wins from
 // some larger size; the decode f32 cells of benches/bench_kv_cache_codec.rs (KV_BENCH_INTERLEAVED=1 KV_BENCH_CELLS=decode:f32)
 // time 256 and 512 against 262144 and 2097152 elements, and no cell sits between, so the bound itself is not located there
 const IDENTITY_INLINE_ELEMENTS: usize = 8192;
 
 #[derive(Clone, Copy)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the data route holds the whole layout so the codec stays Copy; a codec is resolved once per cache and called by reference, so the size is paid at resolution only"
+)]
 enum Route {
     Scalar {
         encode: Option<EncodeFn>,
@@ -54,6 +67,14 @@ enum Route {
     },
     Identity,
     Layout(FloatLayout),
+    /// A float-coded block encoded by its [`EncodeRule`] with the layout as data; decode is the
+    /// table instantiation when the layout is in the table, else the walker.
+    Coded {
+        layout: BlockLayout,
+        rule: EncodeRule,
+        reach: f32,
+        decode: Option<BlockDecodeFn>,
+    },
 }
 
 /// The encode and decode of one numeric format: plain function pointers to table instantiations
@@ -150,6 +171,45 @@ impl FormatCodec {
             .map(|resolved| resolved.named_as(&NumericFormat::Block(*layout)))
     }
 
+    /// The codec for a float-coded block layout encoded by `rule`, `None` unless `rule` is a float
+    /// rule this layout can run: its element code a small float of at most eight bits, its scale a
+    /// float field (with no mantissa when the rule rounds the scale to a power of two), the peak
+    /// magnitude of each scale run as the statistic, and at most 256 elements.
+    ///
+    /// [`Self::for_format`] resolves a float-coded layout with the rule [`BlockLayout::encode_rule`]
+    /// fills in; this is the same codec with another rule, for instance the default MXFP4 rule with
+    /// [`ScaleRounding::PowerOfTwoCeil`] to keep the block peak inside the code range. Decode is the
+    /// table instantiation when the layout is in the table, the walker otherwise. Teaching pointer:
+    /// [`crate::encode::encode_blocks`] reaches the same arithmetic for a format.
+    #[must_use]
+    pub fn coded(layout: &BlockLayout, rule: EncodeRule) -> Option<Self> {
+        let exponent_only_scale = layout.scale.layout.mantissa_bits == 0;
+        let valid = layout.encode_rule().is_some_and(|fill| is_float_rule(&fill))
+            && is_float_rule(&rule)
+            && matches!(rule.statistic, ScaleStatistic::PeakMagnitude)
+            && (matches!(rule.scale_rounding, ScaleRounding::Stored) || exponent_only_scale)
+            && layout.elements <= MAX_CODED_ELEMENTS
+            && crate::decode::geometry_fits(&NumericFormat::Block(*layout)).is_ok();
+        if !valid {
+            return None;
+        }
+        let table_decode = match crate::block_codec::resolve_block(layout).map(|table| table.route) {
+            Some(Route::Block { decode, .. }) => Some(decode),
+            _ => None,
+        };
+        Some(Self {
+            route: Route::Coded {
+                layout: *layout,
+                rule,
+                reach: code_reach(layout).ok()?,
+                decode: table_decode,
+            },
+            elements: usize::from(layout.elements),
+            block_bytes: usize::from(layout.block_bytes),
+            format: UNNAMED,
+        })
+    }
+
     /// The codec for a [`NumericFormat`]: a scalar layout, a block format, or a linear-ladder level
     /// format over a table layout. `None` for codebooks, explicit tables and any layout the table
     /// does not hold. Resolving a format says nothing about which consumers can read it.
@@ -236,8 +296,48 @@ impl FormatCodec {
                 Ok(bytes)
             }
             Route::Layout(layout) => self.encode_layout(layout, values, out),
+            Route::Coded { layout, rule, reach, .. } => self.encode_coded(layout, rule, *reach, values, out),
             Route::Scalar { encode: None, .. } | Route::Block { encode: None, .. } => Err(self.unsupported_encode()),
         }
+    }
+
+    #[inline(never)]
+    fn encode_coded(
+        &self,
+        layout: &BlockLayout,
+        rule: &EncodeRule,
+        reach: f32,
+        values: &[f32],
+        out: &mut [u8],
+    ) -> Result<usize, NumericError> {
+        let Some(bytes) = self.packed_len(values.len()) else {
+            return Err(self.encode_fault(values.len(), out.len()));
+        };
+        let Some(window) = out.get_mut(..bytes) else {
+            return Err(self.encode_fault(values.len(), out.len()));
+        };
+        encode_rule_blocks(layout, rule, reach, values, window);
+        Ok(bytes)
+    }
+
+    #[inline(never)]
+    fn decode_coded(&self, layout: &BlockLayout, data: &[u8], out: &mut [MaybeUninit<f32>]) -> Result<usize, NumericError> {
+        let Some(bytes) = self.packed_len(out.len()) else {
+            return Err(self.decode_fault(data.len(), out.len()));
+        };
+        let Some(window) = data.get(..bytes) else {
+            return Err(self.decode_fault(data.len(), out.len()));
+        };
+        let format = NumericFormat::Block(*layout);
+        let mut staged = [0.0f32; MAX_CODED_ELEMENTS as usize];
+        let elements = self.elements;
+        for (block, slots) in window.chunks_exact(self.block_bytes).zip(out.chunks_exact_mut(elements)) {
+            decode_block(&format, block, &mut staged[..elements])?;
+            for (slot, value) in slots.iter_mut().zip(&staged) {
+                slot.write(*value);
+            }
+        }
+        Ok(bytes)
     }
 
     // the instantiation sizes and checks the window against literals, so no divide runs here; the fault
@@ -300,6 +400,8 @@ impl FormatCodec {
                 Ok(bytes)
             }
             Route::Layout(layout) => self.decode_layout_general(layout, data, out),
+            Route::Coded { decode: Some(run), .. } => self.decode_block(*run, data, out),
+            Route::Coded { layout, decode: None, .. } => self.decode_coded(layout, data, out),
         }
     }
 
@@ -607,16 +709,16 @@ mod tests {
 
     #[test]
     fn a_block_format_with_no_encode_names_itself_in_the_unsupported_encode_error() {
-        let codec = FormatCodec::for_format(&NumericFormat::Mxfp4).expect("mxfp4 resolves");
-        let mut out = [0u8; 17];
+        let codec = FormatCodec::for_format(&NumericFormat::Block(BlockLayout::Q8_K)).expect("q8_k resolves");
+        let mut out = [0u8; 292];
 
-        let refused = codec.encode(&kv_values(32), &mut out);
+        let refused = codec.encode(&kv_values(256), &mut out);
 
-        assert!(!codec.can_encode(), "mxfp4 resolves for decode only");
+        assert!(!codec.can_encode(), "q8_k fits by its own sum, so it resolves for decode only");
         assert_eq!(
             refused,
             Err(NumericError::UnsupportedEncode {
-                format: "mxfp4",
+                format: "q8_k",
                 reason: "no compile-time encode for this layout's fit",
             })
         );

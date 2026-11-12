@@ -36,8 +36,10 @@
 //! `Q8_1` runs behind one header): it is `Q8_1` by definition, so each run takes llama's
 //! unrounded-scale inverse and the sum is taken against the unrounded scale, as in the flat codec.
 
+use crate::block_codec::is_float_rule;
 use crate::block_layout::{BlockLayout, Plane, PlaneCursor};
 use crate::convert::{Overflow, Rounding};
+use crate::encode_rule::{CodeRounding, EncodeRule, ScaleRounding};
 use crate::error::NumericError;
 use crate::float_layout::FloatLayout;
 use crate::float_layout_codec;
@@ -286,6 +288,140 @@ fn stored_scale(peak: f32, reach: f32, layout: FloatLayout) -> (u32, f32) {
     (code, float_layout_codec::decode(code, layout))
 }
 
+/// The finite value of each code of a float-coded layout, in code order; a code that is not a
+/// finite number (a NaN or infinity of the layout's specials) is infinite here, so the nearest-code
+/// search never picks it.
+struct CodeGrid {
+    levels: [f32; MAX_GRID],
+    count: usize,
+}
+
+/// The most codes a rule-fitted float code can have: eight bits.
+const MAX_GRID: usize = 256;
+
+impl CodeGrid {
+    fn of(layout: &BlockLayout) -> Self {
+        let count = code_space(layout).min(MAX_GRID as u32) as usize;
+        let mut levels = [f32::INFINITY; MAX_GRID];
+        for (raw, level) in levels.iter_mut().enumerate().take(count) {
+            let value = float_layout_codec::decode(raw as u32, layout.element.code);
+            if value.is_finite() {
+                *level = value;
+            }
+        }
+        Self { levels, count }
+    }
+
+    /// The first code, in code order, whose value times `scale` is nearest `value` in `f32`.
+    fn nearest(&self, scale: f32, value: f32) -> u32 {
+        let mut best = 0usize;
+        let mut best_error = (self.levels[0] * scale - value).abs();
+        for (code, level) in self.levels.iter().enumerate().take(self.count).skip(1) {
+            let error = (level * scale - value).abs();
+            if error < best_error {
+                best = code;
+                best_error = error;
+            }
+        }
+        best as u32
+    }
+}
+
+/// `floor(log2(value))` of a positive `f32`, read from its exponent field (and, below the normal
+/// range, its leading mantissa bit), so it never rounds a value just under a power of two up to it.
+fn floor_log2(value: f32) -> i32 {
+    let bits = value.to_bits();
+    let exponent = ((bits >> 23) & 0xff) as i32;
+    if exponent == 0 {
+        let mantissa = bits & 0x7f_ffff;
+        return 31 - mantissa.leading_zeros() as i32 - 149;
+    }
+    exponent - 127
+}
+
+/// The value a block's scale field is asked to store for `peak`, under `rule`.
+fn scale_target(rule: &EncodeRule, peak: f32, reach: f32) -> (f32, Rounding) {
+    match rule.scale_rounding {
+        ScaleRounding::Stored => (peak / reach, Rounding::NearestTiesEven),
+        ScaleRounding::PowerOfTwoCeil if peak > 0.0 => (peak / reach, Rounding::AwayFromZero),
+        ScaleRounding::PowerOfTwoCeil => (0.0, Rounding::NearestTiesEven),
+        ScaleRounding::PowerOfTwoFloor => {
+            if peak > 0.0 {
+                let exponent = (floor_log2(peak) - floor_log2(reach)).clamp(-149, 127);
+                (libm::ldexpf(1.0, exponent), Rounding::NearestTiesEven)
+            } else {
+                (0.0, Rounding::NearestTiesEven)
+            }
+        }
+    }
+}
+
+/// The scale code a block run stores for its `peak` and the value that code decodes to.
+fn rule_scale(rule: &EncodeRule, peak: f32, reach: f32, layout: FloatLayout) -> (u32, f32) {
+    let (target, rounding) = scale_target(rule, peak, reach);
+    let mut nan_count = 0;
+    let code = float_layout_codec::encode_with(target, layout, rounding, Overflow::Format, &mut nan_count);
+    (code, float_layout_codec::decode(code, layout))
+}
+
+/// The magnitude peak of a run in element order; a NaN never raises it, as in llama.cpp's
+/// `if (amax < fabsf(v))`.
+fn run_peak(run: &[f32]) -> f32 {
+    run.iter().fold(0.0f32, |peak, value| {
+        let magnitude = value.abs();
+        if peak < magnitude { magnitude } else { peak }
+    })
+}
+
+/// One block of a float-coded layout written by `rule`: each scale run fitted to its own peak,
+/// every element then coded under the stored scale. The one host arithmetic of a float rule; the
+/// device encode is rendered from the same fields.
+fn quantize_rule_block(
+    layout: &BlockLayout,
+    rule: &EncodeRule,
+    reach: f32,
+    grid: &CodeGrid,
+    input: &[f32],
+    block: &mut [u8],
+) {
+    block.fill(0);
+    let mut cursors = cursors_of(layout);
+    for (run, group) in input.chunks(usize::from(layout.run_elements())).enumerate() {
+        let (scale_code, scale) = rule_scale(rule, run_peak(group), reach, layout.scale.layout);
+        #[expect(clippy::cast_possible_truncation, reason = "a block holds at most 32 runs")]
+        put_scale(layout, layout.run_scale_byte(run as u16), scale_code, block);
+        for value in group {
+            let raw = match rule.rounding {
+                CodeRounding::NearestCodeValue => grid.nearest(scale, *value),
+                _ => {
+                    let target = if scale == 0.0 { 0.0 } else { value / scale };
+                    float_layout_codec::encode(target, layout.element.code)
+                }
+            };
+            put_code(layout, &mut cursors, raw, block);
+        }
+    }
+}
+
+/// Encodes whole blocks of `values` into the front of `out` by a float `rule`; `reach` is
+/// [`reach`] of the layout. The caller has checked the element count and the window.
+pub(crate) fn encode_rule_blocks(
+    layout: &BlockLayout,
+    rule: &EncodeRule,
+    reach: f32,
+    values: &[f32],
+    out: &mut [u8],
+) {
+    let grid = CodeGrid::of(layout);
+    let block_bytes = usize::from(layout.block_bytes);
+    for (group, block) in values
+        .chunks(usize::from(layout.elements))
+        .zip(out.chunks_mut(block_bytes))
+    {
+        quantize_rule_block(layout, rule, reach, &grid, group, block);
+    }
+}
+
 fn quantize_run(
     layout: &BlockLayout,
     shape: &Linear,
@@ -334,6 +470,13 @@ fn quantize_block(
         return quantize_radix_block(layout, shape, input, block);
     }
     if matches!(shape.codes, Codes::Float) {
+        if let Some(rule) = layout.encode_rule().filter(is_float_rule) {
+            if input.iter().any(|value| !value.is_finite()) {
+                return Err(NumericError::NonFinite { format: format_of(layout) });
+            }
+            encode_rule_blocks(layout, &rule, shape.reach, input, block);
+            return Ok(());
+        }
         let code_layout = shape.code_layout;
         return quantize_coded_block(layout, shape.reach, input, block, |target| {
             float_layout_codec::encode(target, code_layout)
@@ -881,8 +1024,10 @@ mod tests {
         }
         let mut block = std::vec![0u8; 17];
         encode_blocks(&NumericFormat::Mxfp4, &input, &mut block).expect("mxfp4 encodes");
-        let mut expected = std::vec![127u8];
-        expected.extend(0u8..16);
+        // -0.0 takes code 0, not the sign-bit zero: the nearest-code search keeps the first of two
+        // equally near codes, as llama.cpp's best_index_mxfp4 does
+        let mut expected = std::vec![127u8, 0, 1, 2, 3, 4, 5, 6, 7, 0];
+        expected.extend(9u8..16);
         assert_eq!(block, expected, "OCP MX E2M1 grid at scale 2^0");
     }
 
@@ -897,8 +1042,8 @@ mod tests {
         encode_blocks(&NumericFormat::Nvfp4, &input, &mut block).expect("nvfp4 encodes");
         // E4M3FN(1.0) is code 56, and the three runs above zero keep a zero scale
         let mut expected = std::vec![56u8, 0, 0, 0];
-        expected.extend(0u8..16);
-        expected.extend(std::iter::repeat_n(0u8, 16));
+        expected.extend((0u8..8).map(|byte| byte | ((8 + byte) << 4)));
+        expected.extend(std::iter::repeat_n(0u8, 24));
         assert_eq!(block, expected, "one E4M3 scale per 16 elements");
     }
 
@@ -1330,5 +1475,255 @@ mod tests {
             let stored = float_layout_codec::encode(delta, FloatLayout::F16) as u16;
             assert_eq!(&grouped[run * 4..run * 4 + 2], &stored.to_le_bytes(), "run {run} scale");
         }
+    }
+}
+
+#[cfg(test)]
+mod float_rule_tests {
+    use std::vec::Vec;
+    use std::{eprintln, format, vec};
+
+    use super::*;
+    use crate::decode::decode_blocks;
+
+    include!("../tests/support/llama_fp4_reference.rs");
+
+    /// K/V-shaped rows: per-head magnitudes that differ by orders of magnitude, a few outlier
+    /// channels, sign-symmetric spread, the shape of a projected and rotated attention row.
+    fn attention_rows(seed: u64, rows: usize, width: usize) -> Vec<f32> {
+        let mut state = seed;
+        let mut next = move || {
+            state = state.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1_442_695_040_888_963_407);
+            ((state >> 33) as f32 / (1u64 << 31) as f32) * 2.0 - 1.0
+        };
+        let mut values = Vec::with_capacity(rows * width);
+        for row in 0..rows {
+            let head_scale = [0.04f32, 0.5, 3.0, 24.0][row % 4];
+            for column in 0..width {
+                let outlier = if column % 61 == 7 { 12.0 } else { 1.0 };
+                values.push(next() * head_scale * outlier);
+            }
+        }
+        values
+    }
+
+    /// The rule the previous MXFP4 encoder ran: the scale rounded away from zero so the peak never
+    /// clamps, each element the nearest-even code of its quotient.
+    fn away_from_zero_rule() -> EncodeRule {
+        EncodeRule {
+            scale_rounding: ScaleRounding::PowerOfTwoCeil,
+            rounding: CodeRounding::NearestEvenQuotient,
+            ..BlockLayout::MXFP4.encode_rule().expect("mxfp4 has a rule")
+        }
+    }
+
+    fn encode_with_rule(layout: &BlockLayout, rule: EncodeRule, values: &[f32]) -> Vec<u8> {
+        let codec = FormatCodec::coded(layout, rule).expect("the rule fits the layout");
+        let mut out = vec![0u8; codec.packed_len(values.len()).expect("whole blocks")];
+        codec.encode(values, &mut out).expect("the host encodes the rows");
+        out
+    }
+
+    fn decoded(format: &NumericFormat, bytes: &[u8], count: usize) -> Vec<f32> {
+        let mut out = vec![0.0f32; count];
+        decode_blocks(format, bytes, &mut out).expect("whole blocks decode");
+        out
+    }
+
+    fn error_of(original: &[f32], restored: &[f32]) -> (f64, f64) {
+        let mut square_error = 0.0f64;
+        let mut square_signal = 0.0f64;
+        let mut peak_error = 0.0f64;
+        for (left, right) in original.iter().zip(restored) {
+            let difference = f64::from(*left) - f64::from(*right);
+            square_error += difference * difference;
+            square_signal += f64::from(*left) * f64::from(*left);
+            peak_error = peak_error.max(difference.abs());
+        }
+        ((square_error / square_signal).sqrt(), peak_error)
+    }
+
+    #[test]
+    fn the_mxfp4_rule_is_the_ocp_shared_exponent_with_the_nearest_code() {
+        let rule = BlockLayout::MXFP4.encode_rule().expect("mxfp4 has a rule");
+
+        assert_eq!(rule.statistic, crate::encode_rule::ScaleStatistic::PeakMagnitude);
+        assert_eq!(rule.scale_rounding, ScaleRounding::PowerOfTwoFloor);
+        assert_eq!(rule.rounding, CodeRounding::NearestCodeValue);
+        assert_eq!(reach(&BlockLayout::MXFP4), Ok(6.0), "the reach is E2M1's largest magnitude");
+    }
+
+    #[test]
+    fn the_nvfp4_rule_stores_the_peak_over_the_reach_and_rounds_the_quotient() {
+        let rule = BlockLayout::NVFP4.encode_rule().expect("nvfp4 has a rule");
+
+        assert_eq!(rule.scale_rounding, ScaleRounding::Stored);
+        assert_eq!(rule.rounding, CodeRounding::NearestEvenQuotient);
+        assert_eq!(BlockLayout::NVFP4.runs(), 4);
+    }
+
+    #[test]
+    fn mxfp4_host_encode_equals_llama_quantize_row_mxfp4_ref_on_kv_rows() {
+        let mut values = attention_rows(0x5eed, 512, 256);
+        values.extend(attention_rows(0xface, 64, 128));
+        let codec = FormatCodec::for_format(&NumericFormat::Mxfp4).expect("mxfp4 resolves");
+        let mut ours = vec![0u8; codec.packed_len(values.len()).expect("whole blocks")];
+        codec.encode(&values, &mut ours).expect("mxfp4 encodes");
+
+        let reference: Vec<u8> = values.chunks(32).flat_map(llama_quantize_block_mxfp4).collect();
+
+        let differing = ours.iter().zip(&reference).filter(|(left, right)| left != right).count();
+        eprintln!("mxfp4 host vs llama: {} values, {} bytes, {differing} differing", values.len(), ours.len());
+        assert_eq!(ours.len(), reference.len());
+        assert_eq!(differing, 0, "mxfp4 bytes against quantize_row_mxfp4_ref");
+    }
+
+    #[test]
+    fn the_llama_mxfp4_control_differs_from_the_away_from_zero_variant() {
+        let values = attention_rows(0x5eed, 64, 256);
+        let ours = encode_with_rule(&BlockLayout::MXFP4, away_from_zero_rule(), &values);
+        let reference: Vec<u8> = values.chunks(32).flat_map(llama_quantize_block_mxfp4).collect();
+
+        assert_ne!(ours, reference, "a control that should fail: the other scale rounding writes other bytes");
+    }
+
+    #[test]
+    fn the_away_from_zero_variant_writes_the_bytes_the_previous_mxfp4_encoder_wrote() {
+        let values = attention_rows(0xface, 64, 128);
+        let ceil_rule = away_from_zero_rule();
+        let layout = BlockLayout::MXFP4;
+        let shape = linear(&layout).expect("mxfp4 is walkable");
+        let mut previous = vec![0u8; values.len() / 32 * 17];
+        for (group, block) in values.chunks(32).zip(previous.chunks_mut(17)) {
+            quantize_coded_block(&layout, shape.reach, group, block, |target| {
+                float_layout_codec::encode(target, shape.code_layout)
+            })
+            .expect("finite rows");
+        }
+
+        let ours = encode_with_rule(&layout, ceil_rule, &values);
+
+        assert_eq!(ours, previous);
+    }
+
+    #[test]
+    fn mxfp4_error_of_the_ocp_rule_and_the_away_from_zero_rule_on_kv_rows() {
+        let mut values = attention_rows(0x5eed, 512, 256);
+        values.extend(attention_rows(0xface, 64, 128));
+        let floor_rule = BlockLayout::MXFP4.encode_rule().expect("rule");
+        let ceil_rule = away_from_zero_rule();
+        let mut report = std::string::String::new();
+        for (label, rule) in [("ocp floor + nearest code", floor_rule), ("away from zero + nearest even", ceil_rule)] {
+            let restored = decoded(&NumericFormat::Mxfp4, &encode_with_rule(&BlockLayout::MXFP4, rule, &values), values.len());
+            let (relative_rms, peak_error) = error_of(&values, &restored);
+            report.push_str(&format!("{label}: relative rms {relative_rms:.5}, peak abs error {peak_error:.5}\n"));
+            assert!(relative_rms < 0.5, "{label}: {relative_rms}");
+        }
+        eprintln!("mxfp4 error on {} kv-shaped values:\n{report}", values.len());
+    }
+
+    #[test]
+    fn the_exponent_form_of_floor_log2_differs_from_log2f_only_just_below_a_power_of_two() {
+        let mut differing = Vec::new();
+        for exponent in -126i32..=127 {
+            let power = f32::from_bits(((exponent + 127) as u32) << 23);
+            let below = f32::from_bits(power.to_bits() - 1);
+            for value in [power, below, power * 1.5, power * 1.999_999_9] {
+                let exact = floor_log2(value);
+                let rounded = value.log2().floor() as i32;
+                if exact != rounded {
+                    differing.push((value.to_bits(), exact, rounded));
+                }
+            }
+        }
+        eprintln!("floor_log2 vs floorf(log2f): {} of 1016 probes differ", differing.len());
+        let mut widest = 0u32;
+        let mut band_values = 0u64;
+        for exponent in -126i32..=127 {
+            let power = f32::from_bits(((exponent + 127) as u32) << 23);
+            for ulps_below in 1..=4096u32 {
+                let value = f32::from_bits(power.to_bits() - ulps_below);
+                if floor_log2(value) != value.log2().floor() as i32 {
+                    widest = widest.max(ulps_below);
+                    band_values += 1;
+                }
+            }
+        }
+        eprintln!("floor_log2 vs floorf(log2f): widest disagreement {widest} ulps below a power of two, {band_values} values over 254 exponents");
+        assert!(
+            differing.iter().all(|(bits, exact, _)| f32::from_bits(*bits) < f32::from_bits(((exact + 128) as u32) << 23)),
+            "{differing:?}"
+        );
+    }
+
+    #[test]
+    fn nvfp4_decodes_what_llama_quantize_row_nvfp4_ref_wrote() {
+        let values = attention_rows(0xbeef, 16, 64);
+        for group in values.chunks(64) {
+            let block = llama_quantize_block_nvfp4(group);
+            let mut ours = [0.0f32; 64];
+            crate::decode::decode_block(&NumericFormat::Nvfp4, &block, &mut ours).expect("one block decodes");
+            let reference = llama_dequantize_block_nvfp4(&block);
+            assert_eq!(ours.to_vec(), reference.to_vec(), "dequantize_row_nvfp4 against the nvfp4 layout's decode");
+        }
+    }
+
+    #[test]
+    fn mxfp4_decodes_what_llama_quantize_row_mxfp4_ref_wrote() {
+        for group in attention_rows(0xbeef, 16, 32).chunks(32) {
+            let block = llama_quantize_block_mxfp4(group);
+            let mut ours = [0.0f32; 32];
+            crate::decode::decode_block(&NumericFormat::Mxfp4, &block, &mut ours).expect("one block decodes");
+            assert_eq!(ours.to_vec(), llama_dequantize_block_mxfp4(&block).to_vec());
+        }
+    }
+
+    /// The reference of NVIDIA's NVFP4 definition (a 16-element E4M3 scale of `amax / 6` rounded to
+    /// nearest even, each element the nearest-even E2M1 value of `x / scale`), searched by brute
+    /// force over the decoded grids so that it shares no code with the codec's bit arithmetic.
+    fn nearest_even_in(grid: &[(u32, f32)], target: f32) -> u32 {
+        let mut best = grid[0];
+        for entry in &grid[1..] {
+            let (best_distance, distance) = ((best.1 - target).abs(), (entry.1 - target).abs());
+            if distance < best_distance || (distance == best_distance && entry.0.is_multiple_of(2) && !best.0.is_multiple_of(2)) {
+                best = *entry;
+            }
+        }
+        best.0
+    }
+
+    fn nvfp4_by_definition(group: &[f32]) -> [u8; 36] {
+        let scales: Vec<(u32, f32)> = (0u32..0x7f).map(|code| (code, float_layout_codec::decode(code, FloatLayout::E4M3FN))).collect();
+        let magnitudes: Vec<(u32, f32)> = (0u32..8).map(|code| (code, float_layout_codec::decode(code, FloatLayout::E2M1))).collect();
+        let element = |target: f32| nearest_even_in(&magnitudes, target.abs()) | if target.is_sign_negative() { 8 } else { 0 };
+        let mut block = [0u8; 36];
+        for (run, values) in group.chunks(16).enumerate() {
+            let peak = values.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+            let (scale_code, scale) = {
+                let code = nearest_even_in(&scales, peak / 6.0);
+                (code, float_layout_codec::decode(code, FloatLayout::E4M3FN))
+            };
+            block[run] = scale_code as u8;
+            for index in 0..8 {
+                let low = element(if scale == 0.0 { 0.0 } else { values[index] / scale });
+                let high = element(if scale == 0.0 { 0.0 } else { values[index + 8] / scale });
+                block[4 + run * 8 + index] = (low | (high << 4)) as u8;
+            }
+        }
+        block
+    }
+
+    #[test]
+    fn nvfp4_host_encode_equals_the_published_definition_on_kv_rows() {
+        let values = attention_rows(0x5eed, 256, 256);
+        let codec = FormatCodec::for_format(&NumericFormat::Nvfp4).expect("nvfp4 resolves");
+        let mut ours = vec![0u8; codec.packed_len(values.len()).expect("whole blocks")];
+        codec.encode(&values, &mut ours).expect("nvfp4 encodes");
+
+        let reference: Vec<u8> = values.chunks(64).flat_map(nvfp4_by_definition).collect();
+
+        let differing = ours.iter().zip(&reference).filter(|(left, right)| left != right).count();
+        eprintln!("nvfp4 host vs definition: {} values, {} bytes, {differing} differing", values.len(), ours.len());
+        assert_eq!(differing, 0);
     }
 }

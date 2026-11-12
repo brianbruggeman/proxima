@@ -1044,11 +1044,18 @@ impl BlockLayout {
     };
     /// NVFP4: 64 E2M1 fields in 32 nibble bytes after four E4M3 sub-block scales, one per 16
     /// elements, 36 bytes per block (the per-tensor global scale is a tensor property, not a
-    /// block one).
+    /// block one). Inside each 16-element run, byte `j` holds element `j` in its low nibble and
+    /// element `j + 8` in its high nibble, as ggml's `block_nvfp4` does
+    /// (`dequantize_row_nvfp4`, ggml-quants.c).
     pub const NVFP4: Self = Self {
         elements: 64,
         block_bytes: 36,
-        element: coded(FloatLayout::E2M1, nibbles(32, 32), None, 0),
+        element: coded(
+            FloatLayout::E2M1,
+            plane(4, 32, [digit(8, 8), digit(2, 4), digit(4, 64), NO_DIGIT]),
+            None,
+            0,
+        ),
         multiplier: 1,
         scale: field_at(FloatLayout::E4M3FN, 0),
         min: None,

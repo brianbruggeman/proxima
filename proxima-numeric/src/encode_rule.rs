@@ -114,6 +114,27 @@ pub enum CodeRounding {
     HalfUpThenTruncate,
     /// One bit: `1` when `value >= 0`, else `0`; the scale carries all of the magnitude.
     NonNegativeBit,
+    /// A float code: the stored scale times each finite code's value is compared with the input in
+    /// `f32` (`|code_value * scale - value|`), and the first code in code order with the smallest
+    /// error wins, so a tie takes the lowest code. This is llama.cpp's `best_index_mxfp4`.
+    NearestCodeValue,
+    /// A float code: `value / scale` (zero for a zero scale) is encoded by the code layout itself,
+    /// nearest representable value with ties to even, saturating under the layout's specials.
+    NearestEvenQuotient,
+}
+
+/// How the fitted scale is turned into the value the scale field stores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum ScaleRounding {
+    /// The scale field's own encode of `statistic / divisor`: nearest, ties to even.
+    Stored,
+    /// `2^(floor(log2 peak) - floor(log2 reach))`, the OCP MX v1.0 shared exponent: a block peak
+    /// above the largest code clamps to it. Needs a scale field with no mantissa.
+    PowerOfTwoFloor,
+    /// `2^ceil(log2(peak / reach))`: rounded away from zero, so the block peak always lands inside
+    /// the code range and never clamps, at the price of a coarser grid for the rest of the block.
+    /// Needs a scale field with no mantissa.
+    PowerOfTwoCeil,
 }
 
 /// Which ends of the code range clamp a code.
@@ -132,13 +153,17 @@ pub enum CodeClamp {
 pub struct EncodeRule {
     pub statistic: ScaleStatistic,
     /// What the statistic is divided by; negative where the signed peak maps to the most negative
-    /// code (`-8` for a four-bit offset-binary code), `1` for a mean.
+    /// code (`-8` for a four-bit offset-binary code), `1` for a mean. Zero for a float code, whose
+    /// divisor is the layout's reach (the largest finite magnitude its codes stand for on both
+    /// sides of zero, [`crate::encode::reach`]), which is not always an integer.
     pub divisor: i32,
     pub rounding: CodeRounding,
+    /// How the fitted scale becomes the stored one; [`ScaleRounding::Stored`] for every integer code.
+    pub scale_rounding: ScaleRounding,
     pub clamp: CodeClamp,
-    /// The lowest value a code stands for, before the bias.
+    /// The lowest value a code stands for, before the bias; the lowest raw code for a float code.
     pub lowest: i32,
-    /// The highest value a code stands for, before the bias.
+    /// The highest value a code stands for, before the bias; the highest raw code for a float code.
     pub highest: i32,
     /// The two bytes after the scale hold `f16(scale * sum(values of codes))`.
     pub stored_sum: bool,
@@ -170,10 +195,21 @@ pub struct SubRule {
     pub fit: RangeFit,
 }
 
+impl EncodeRule {
+    /// Whether the code is a small float chosen by [`CodeRounding::NearestCodeValue`] or
+    /// [`CodeRounding::NearestEvenQuotient`], with one scale per run of elements.
+    #[must_use]
+    pub const fn is_float_code(&self) -> bool {
+        matches!(self.rounding, CodeRounding::NearestCodeValue | CodeRounding::NearestEvenQuotient)
+    }
+}
+
 impl BlockLayout {
     /// This layout's encode as data, or `None` when one statistic over one divisor does not say how
-    /// the layout is fitted (it stores a min, carries sub-block scales, has a float or wide code,
-    /// or keeps free bytes the rule does not write).
+    /// the layout is fitted (it stores a min, carries sub-block scales, has a code wider than a
+    /// byte, or keeps free bytes the rule does not write). A float code fills the rule in from its
+    /// scale field: a scale with no mantissa is a shared exponent (the OCP MX rule), a scale with a
+    /// mantissa stores the peak over the reach.
     #[must_use]
     pub const fn encode_rule(&self) -> Option<EncodeRule> {
         encode_rule_of(self)
@@ -193,6 +229,7 @@ mod tests {
                 statistic: ScaleStatistic::SignedPeak,
                 divisor: -8,
                 rounding: CodeRounding::HalfUpThenTruncate,
+                scale_rounding: ScaleRounding::Stored,
                 clamp: CodeClamp::Upper,
                 lowest: -8,
                 highest: 7,

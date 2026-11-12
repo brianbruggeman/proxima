@@ -17,13 +17,17 @@
 //! stored `s = d * sum(q)` in the two bytes after the scale (`Q8_1`), a one-bit code with a
 //! multiplier of two to the mean magnitude (`Q1_0`). These are the rules of llama.cpp's
 //! `quantize_row_*_ref` and of the incumbents in `proxima-gguf`, reproduced operation for operation
-//! so the bytes are identical; a layout whose fit is not one of them (other free
-//! bytes beside the scale, a float code) has a decode instantiation and no encode instantiation.
+//! so the bytes are identical. A float code (the OCP MX and NV `E2M1` fields, the `E3M2` field) has
+//! a rule too (`float_encode_rule_of`) and is encoded by [`FormatCodec::coded`], the same
+//! arithmetic with the layout as data (`crate::encode::encode_rule_blocks`), because its fit is a
+//! search over the code grid and not a ratio the table's integer loops fold. A layout whose fit is
+//! none of these (other free bytes beside the scale) has a decode instantiation and no encode
+//! instantiation.
 
 use core::mem::MaybeUninit;
 
 use crate::block_layout::{BlockLayout, Coded, Field, MAX_DIGITS, Plane, named_block_table};
-use crate::encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleStatistic, StoredMin};
+use crate::encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleRounding, ScaleStatistic, StoredMin};
 use crate::encode_rule::{RangeFit, SubRule};
 use crate::range_fit::{fit_range, nearest_even};
 use crate::float_layout::{FloatLayout, SignEncoding};
@@ -118,6 +122,7 @@ const fn stored_min_rule(layout: &BlockLayout, stored_sum: bool) -> Option<Encod
         statistic: ScaleStatistic::MinMax(RangeFit::PLAIN),
         divisor: highest - lowest,
         rounding: CodeRounding::HalfUpThenTruncate,
+        scale_rounding: ScaleRounding::Stored,
         clamp: CodeClamp::Upper,
         lowest,
         highest,
@@ -234,6 +239,7 @@ const fn two_level_rule(layout: &BlockLayout) -> Option<EncodeRule> {
         statistic: ScaleStatistic::MinMax(search.range_fit()),
         divisor: highest - lowest,
         rounding: CodeRounding::NearestEven,
+        scale_rounding: ScaleRounding::Stored,
         clamp: CodeClamp::Both,
         lowest,
         highest,
@@ -244,10 +250,65 @@ const fn two_level_rule(layout: &BlockLayout) -> Option<EncodeRule> {
     })
 }
 
+/// The rule of a layout whose element code is a small float: the peak magnitude of each scale run
+/// over the code layout's reach. A scale with no mantissa is a shared exponent, fitted by the OCP MX
+/// rule (floor of the peak's exponent, less the code's largest exponent) and a code is the nearest
+/// code value, as llama.cpp's `quantize_row_mxfp4_ref` does; a scale with a mantissa stores the
+/// peak over the reach and rounds the quotient to the code layout, as an NVFP4 or FP6 encoder does.
+const fn float_encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
+    let scale_bytes = layout.scale.layout.width().div_ceil(8) as usize;
+    let accounted = layout.runs() as usize * scale_bytes
+        + (layout.elements as usize * code_bits(layout) as usize).div_ceil(8);
+    if layout.sub.is_some()
+        || layout.min.is_some()
+        || layout.element.packed_radix > 1
+        || layout.multiplier != 1
+        || layout.element.bias != 0
+        || layout.scale.layout.exponent_bits == 0
+        || layout.scale.layout.width() > 32
+        || code_bits(layout) > 8
+        || accounted != layout.block_bytes as usize
+        || !layout.elements.is_multiple_of(layout.runs())
+    {
+        return None;
+    }
+    let exponent_only_scale = layout.scale.layout.mantissa_bits == 0;
+    Some(EncodeRule {
+        statistic: ScaleStatistic::PeakMagnitude,
+        divisor: 0,
+        rounding: if exponent_only_scale {
+            CodeRounding::NearestCodeValue
+        } else {
+            CodeRounding::NearestEvenQuotient
+        },
+        scale_rounding: if exponent_only_scale {
+            ScaleRounding::PowerOfTwoFloor
+        } else {
+            ScaleRounding::Stored
+        },
+        clamp: CodeClamp::Both,
+        lowest: 0,
+        highest: (1i32 << code_bits(layout)) - 1,
+        stored_sum: false,
+        stored_min: StoredMin::Absent,
+        zero_code: 0,
+        sub: None,
+    })
+}
+
+/// Whether a rule fits a float code, which the table's integer loops do not run: it encodes through
+/// [`FormatCodec::coded`], the same arithmetic with the layout as data.
+pub(crate) const fn is_float_rule(rule: &EncodeRule) -> bool {
+    rule.is_float_code()
+}
+
 /// The layout's [`EncodeRule`], decided from its fields alone: an offset-binary code centred on its
 /// bias fits the signed peak, a signed or off-centre integer code the peak magnitude, a one-bit
 /// code with a multiplier of two the mean magnitude, an unbiased code with a stored min the range ([`stored_min_rule`]); `None` for any other layout.
 pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
+    if layout.element.code.exponent_bits > 0 {
+        return float_encode_rule_of(layout);
+    }
     let integer = is_unsigned_integer(layout) || is_twos_complement_integer(layout);
     if layout.sub.is_some() {
         return two_level_rule(layout);
@@ -277,6 +338,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             statistic: ScaleStatistic::MeanMagnitude,
             divisor: 1,
             rounding: CodeRounding::NonNegativeBit,
+            scale_rounding: ScaleRounding::Stored,
             clamp: CodeClamp::Neither,
             lowest,
             highest,
@@ -297,6 +359,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             statistic: ScaleStatistic::SignedPeak,
             divisor: -bias,
             rounding: CodeRounding::HalfUpThenTruncate,
+            scale_rounding: ScaleRounding::Stored,
             clamp: CodeClamp::Upper,
             lowest,
             highest,
@@ -311,6 +374,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             statistic: ScaleStatistic::PeakMagnitude,
             divisor: reach_of(layout),
             rounding: CodeRounding::NearestAwayFromZero,
+            scale_rounding: ScaleRounding::Stored,
             clamp: CodeClamp::Both,
             lowest,
             highest,
@@ -1000,6 +1064,8 @@ fn code_of(layout: &BlockLayout, rule: &EncodeRule, inverse: f32, value: f32) ->
             raw_of_value(layout, rounded) as u8
         }
         CodeRounding::NonNegativeBit => u8::from(value >= 0.0),
+        // float rules run through `FormatCodec::coded`, never this integer loop
+        CodeRounding::NearestCodeValue | CodeRounding::NearestEvenQuotient => rule.zero_code,
     }
 }
 
@@ -1140,6 +1206,7 @@ macro_rules! resolve_named_block {
                 const PAIRED: bool = pairs_halves_with_high_word(&BlockLayout::$name);
                 let encode: Option<BlockEncodeFn> = match RULE {
                     None => None,
+                    Some(rule) if is_float_rule(&rule) => None,
                     Some(_) => Some(|values, out| {
                         // the arm above proved the rule exists; the const folds this match away
                         let rule = RULE?;
@@ -1171,7 +1238,10 @@ pub(crate) fn resolve_block(layout: &BlockLayout) -> Option<FormatCodec> {
 /// or a linear-ladder level format over one. `None` for scalars, codebooks and explicit tables.
 pub(crate) fn block_for_format(format: &NumericFormat) -> Option<FormatCodec> {
     match format {
-        NumericFormat::Block(layout) => resolve_block(layout),
+        NumericFormat::Block(layout) => match layout.encode_rule() {
+            Some(rule) if is_float_rule(&rule) => FormatCodec::coded(layout, rule),
+            _ => resolve_block(layout),
+        },
         NumericFormat::Levels(levels) => match (levels.packing(), levels.levels) {
             (Some(layout), LevelTable::Linear { .. }) if levels.levels == layout.levels() => {
                 resolve_block(&layout)
@@ -1188,7 +1258,7 @@ mod tests {
     use crate::block_layout::{Coded, Digit};
     use crate::float_layout::{FloatLayout, NanPolicy, Specials};
 
-    const RESOLVING_NAMED_FORMATS: usize = 13;
+    const RESOLVING_NAMED_FORMATS: usize = 14;
 
     fn offset_binary_u8_layout() -> BlockLayout {
         let mut layout = BlockLayout::Q8_0;
@@ -1361,7 +1431,10 @@ mod tests {
 
     fn format_should_resolve(format: &NumericFormat) -> bool {
         match format {
-            NumericFormat::Block(layout) => layout_is_table_shaped(layout),
+            // a float-coded layout resolves through its rule with the layout as data, table-shaped or not
+            NumericFormat::Block(layout) => {
+                layout_is_table_shaped(layout) || layout.encode_rule().is_some_and(|rule| is_float_rule(&rule))
+            }
             NumericFormat::Levels(levels) => match (levels.packing(), levels.levels) {
                 (Some(layout), LevelTable::Linear { .. }) => {
                     levels.levels == layout.levels() && layout_is_table_shaped(&layout)

@@ -504,16 +504,20 @@ async fn a_rendered_wide_integer_load_equals_the_host_decode_bit_for_bit_on_boun
     assert_eq!(source.contains("(long)"), wide_arm, "only a signed layout past 30 mantissa bits takes the long arm");
 }
 
-/// the block formats `block_k_refusal` admits: no scale runs, whole four-wide loads, and a host codec
-/// that encodes; admission is description-derived, so the stored-min layouts (q4_1, q5_1, q8_1) join
-/// llama's q4_0, q5_0 and q8_0 once proxima-numeric encodes them.
-const ADMITTED_BLOCK_K: [BlockLayout; 6] = [
+/// the block formats `block_k_refusal` admits: whole four-wide loads in every scale run, and a host
+/// codec that encodes. Admission is description-derived: llama's q4_0, q5_0 and q8_0, the stored-min
+/// layouts (q4_1, q5_1, q8_1), and the float-coded scaled blocks (a shared exponent over 32 four-bit
+/// codes, four 16-element runs under an E4M3 scale, a binary16 scale over 32 six-bit codes).
+const ADMITTED_BLOCK_K: [BlockLayout; 9] = [
     BlockLayout::Q4_0,
     BlockLayout::Q5_0,
     BlockLayout::Q8_0,
     BlockLayout::Q4_1,
     BlockLayout::Q5_1,
     BlockLayout::Q8_1,
+    BlockLayout::MXFP4,
+    BlockLayout::NVFP4,
+    BlockLayout::FP6_E3M2,
 ];
 
 fn assert_admitted_block_k_set(admitted: &[NumericFormat]) {

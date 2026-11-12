@@ -112,17 +112,18 @@ pub(crate) const fn infinity_code(layout: &FloatLayout) -> u32 {
 }
 
 pub(crate) const fn max_normal_code(layout: &FloatLayout) -> u32 {
+    if matches!(layout.specials, Specials::NanOnly) {
+        // the NaN is the all-ones code, so the largest finite one is the code below it, whatever the
+        // mantissa width (a layout with no mantissa has the exponent byte alone)
+        return (infinity_code(layout) | mantissa_mask(layout)) - 1;
+    }
     let top = match layout.specials {
         Specials::None | Specials::NanOnly => infinity_code(layout),
         Specials::SaturateOnOverflow | Specials::InfinityOnOverflow => {
             infinity_code(layout) - (1u32 << layout.mantissa_bits)
         }
     };
-    let mantissa = match layout.specials {
-        Specials::NanOnly => mantissa_mask(layout) - 1,
-        _ => mantissa_mask(layout),
-    };
-    top | mantissa
+    top | mantissa_mask(layout)
 }
 
 pub(crate) const fn overflow_code(layout: &FloatLayout) -> u32 {
@@ -694,6 +695,23 @@ fn field_expression(field: &Field, binding: &str, helper: &str) -> String {
     format!("    float {binding} = {helper}({gathered});\n")
 }
 
+/// [`field_expression`] for the block scale: the scale field of the run that holds `index`, which
+/// is the layout's one scale when it declares no scale runs. Every element of a four-wide load is
+/// in one run, because a run is a whole number of four-wide loads.
+fn scale_expression(layout: &BlockLayout, binding: &str, helper: &str) -> String {
+    let Some(runs) = layout.scale_runs else {
+        return field_expression(&layout.scale, binding, helper);
+    };
+    let first = layout.scale.byte_offset;
+    let span = layout.run_elements();
+    let stride = runs.stride_bytes;
+    let gathered = (0..usize::from(layout.scale.layout.width()) / 8)
+        .map(|byte| format!("((uint)block[{first}u + (index / {span}u) * {stride}u + {byte}u] << {}u)", byte * 8))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!("    float {binding} = {helper}({gathered});\n")
+}
+
 /// The block layout a cached-attention kernel reads a cache stored as `format` through, `None`
 /// when the format is not one. [`block_unpack_msl`] must render the layout whole (it has no
 /// per-run scale fields), the host codec must resolve it and have an encode instantiation (the
@@ -772,6 +790,15 @@ pub(super) fn scalar_cache_read(format: &NumericFormat) -> Option<ScalarCacheRea
     Some(ScalarCacheRead { storage, load, helper })
 }
 
+/// Whether a cached-attention kernel reads a cache stored as `format` through a rendered layout
+/// helper: [`readable_block_layout`] or [`readable_scalar_cache`]. Operand admission asks this
+/// beside its list of weight codecs, so a K or V cache in a described layout reaches the kernel that
+/// reads it by that description and not by a name on a list.
+#[must_use]
+pub fn cache_read_renders(format: &NumericFormat) -> bool {
+    readable_block_layout(format).is_some() || readable_scalar_cache(format).is_some()
+}
+
 /// [`readable_block_layout`] with the reason: `Err` names the property the format lacks.
 ///
 /// # Errors
@@ -781,11 +808,11 @@ pub fn block_k_refusal(format: &NumericFormat) -> Result<&BlockLayout, &'static 
     let NumericFormat::Block(layout) = format else {
         return Err("not a block layout");
     };
-    if layout.scale_runs.is_some() {
-        return Err("the layout packs independent scale runs, which block_unpack_msl does not render");
+    if layout.elements % 4 != 0 || layout.run_elements() % 4 != 0 {
+        return Err("the layout's block or scale run is not a whole number of four-wide loads");
     }
-    if layout.elements % 4 != 0 {
-        return Err("the layout's block is not a whole number of four-wide loads");
+    if layout.scale_runs.is_some() && layout.scale.layout.width() % 8 != 0 {
+        return Err("a scale run field that does not fill whole bytes has no flat address");
     }
     let Some(codec) = FormatCodec::for_format(format) else {
         return Err("no host codec resolves the layout");
@@ -1202,11 +1229,7 @@ fn element_msl(layout: &BlockLayout, codes: Codes<'_>, name: &str) -> String {
         helpers.push_str(&layout_load_msl(min.layout, &format!("{name}_min")));
     }
     let mut body = raw_level_msl(layout, codes, name);
-    body.push_str(&field_expression(
-        &layout.scale,
-        "scale",
-        &format!("{name}_scale"),
-    ));
+    body.push_str(&scale_expression(layout, "scale", &format!("{name}_scale")));
     let mut scale = "scale".to_string();
     if let Some(sub) = &layout.sub {
         let span = layout.elements / sub.count;
@@ -1271,7 +1294,7 @@ fn element_msl(layout: &BlockLayout, codes: Codes<'_>, name: &str) -> String {
 /// stays inside one block. Reuses the `name_*` load helpers [`block_unpack_msl`] renders, and
 /// keeps the scalar helper's arithmetic order so the two agree bit for bit.
 fn block_run_msl(layout: &BlockLayout, name: &str) -> String {
-    let mut body = field_expression(&layout.scale, "scale", &format!("{name}_scale"));
+    let mut body = scale_expression(layout, "scale", &format!("{name}_scale"));
     if let Some(min) = &layout.min {
         body.push_str(&field_expression(min, "minimum", &format!("{name}_min")));
     }

@@ -1986,8 +1986,8 @@ pub(in crate::generate) mod tests {
             readable += usize::from(admitted);
         }
 
-        assert_eq!(resolved, 13);
-        assert!(readable >= 2, "Q4_0 and Q8_0 are readable block layouts, got {readable}");
+        assert_eq!(resolved, 14);
+        assert!(readable >= 4, "Q4_0, Q8_0, MXFP4 and NVFP4 are readable block layouts, got {readable}");
     }
 
     #[test]

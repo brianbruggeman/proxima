@@ -2807,8 +2807,12 @@ pub(super) fn packed_operands_of(
         // elements to every read and to `reject_unsupported_gpu_dtype`'s own
         // exemption, which is the silent wrong-bits upload this check exists
         // for.
-        let readable = crate::msl::codec_from_quantized_block(block).is_some()
-            && crate::msl::metal_operand_read_decodes(*codec);
+        // A cache in a layout a cached-attention kernel renders a read of is the third way an
+        // operand is readable: that kernel reads it by its description, whatever it is called, and
+        // an operand of any other consumer in such a layout is refused by that consumer's emit.
+        let readable = (crate::msl::codec_from_quantized_block(block).is_some()
+            && crate::msl::metal_operand_read_decodes(*codec))
+            || crate::msl::layout_render::cache_read_renders(codec);
         if !readable {
             return Err(MetalError::UnsupportedPackedCodec {
                 node: *node,
