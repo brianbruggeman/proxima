@@ -137,6 +137,7 @@ mod q4_0_planes;
 mod tiled_gemm_cooperative_scan;
 mod expert_grouped_gemm;
 mod index_narrowing;
+pub mod encode_render;
 pub mod layout_render;
 mod matmul_form;
 mod scaled_float_render;
@@ -278,6 +279,9 @@ mod index_narrowing_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_int_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod encode_render_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_render_tests;
