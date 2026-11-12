@@ -187,27 +187,33 @@ pub(super) fn prepare_with_options(
 
     #[cfg(feature = "instrument")]
     let bind_started = read_ticks();
+    // the packed weights are named to the binder so a composed activation feeding a
+    // reduction over one materializes as its own op: the row-blocked packed kernel
+    // admits only a bare weight-times-activation product, and a fused 3-operand body
+    // (attn_output's softmax normalization) falls to the per-element generic reduce
     #[cfg(not(feature = "top-fraction-fusion"))]
     let mut resolved = if allow_fusion {
-        bind_with_fusion(
+        bind_with_fusion_and_packed_leaves(
             program,
             &shapes,
             &effective_outputs,
             fuse_cached_attention,
             numeric_policy,
+            &packed_operand_nodes,
         )?
     } else {
         bind_unfused(program, &shapes, &effective_outputs, numeric_policy)?
     };
     #[cfg(feature = "top-fraction-fusion")]
     let mut resolved = if allow_fusion {
-        bind_with_top_fraction(
+        bind_with_top_fraction_and_packed_leaves(
             program,
             &shapes,
             &effective_outputs,
             fuse_cached_attention,
             numeric_policy,
             crate::sized::SELECTION_TOP_FRACTION_MIN_ROWS,
+            &packed_operand_nodes,
         )?
     } else {
         bind_unfused(program, &shapes, &effective_outputs, numeric_policy)?

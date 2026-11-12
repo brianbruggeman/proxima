@@ -127,7 +127,9 @@ pub use rows_template::{
 #[cfg(feature = "instrument")]
 pub use repeat_nodes::{RepeatNodeRefusal, apply_repeat_nodes};
 #[cfg(feature = "top-fraction-fusion")]
-pub use top_fraction_fusion::{bind_with_top_fraction, top_fraction_candidates};
+pub use top_fraction_fusion::{
+    bind_with_top_fraction, bind_with_top_fraction_and_packed_leaves, top_fraction_candidates,
+};
 pub use twin_elementwise::fuse_twin_elementwise;
 pub use types_layout_boundop::*;
 

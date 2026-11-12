@@ -221,9 +221,9 @@ use proxima_tensor::apply_repeat_nodes;
 use proxima_tensor::bind::narrow_accumulations;
 use proxima_tensor::bind_unfused;
 #[cfg(not(feature = "top-fraction-fusion"))]
-use proxima_tensor::bind_with_fusion;
+use proxima_tensor::bind::bind_with_fusion_and_packed_leaves;
 #[cfg(feature = "top-fraction-fusion")]
-use proxima_tensor::bind_with_top_fraction;
+use proxima_tensor::bind::bind_with_top_fraction_and_packed_leaves;
 #[cfg(feature = "twin-elementwise-fusion")]
 use proxima_tensor::fuse_twin_elementwise;
 #[cfg(feature = "instrument")]
@@ -528,6 +528,9 @@ mod layout_admission_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layout_bytes_tests;
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod packed_normalized_projection_tests;
 #[cfg(test)]
 mod command_buffer_failed_label_tests {
     use super::label_or_unlabeled;
