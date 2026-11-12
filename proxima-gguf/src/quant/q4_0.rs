@@ -21,7 +21,10 @@
 //! sub-block scale/min hierarchy the way `Q4_K`/`Q5_K`/`Q6_K` have, and no
 //! second `min` field the way `Q4_1` (`ggml-common.h:174-182`) has.
 
+use proxima_numeric::BlockLayout;
+
 use crate::quant::QuantError;
+use crate::quant::block_layout_encode::quantize_by_rule;
 use crate::types::GgmlType;
 
 /// This codec's name as it appears in a rendered [`QuantError`] message.
@@ -132,75 +135,18 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
     Ok(())
 }
 
-/// Quantizes one 32-element chunk into a `Q4_0` block.
-///
-/// Ports `quantize_row_q4_0_ref` (`ggml-quants.c:25-59`) exactly: `max` is
-/// the SIGNED value achieving the block's largest magnitude (not `amax`
-/// itself), `d = max / -8` so that element scales to exactly the nibble
-/// `0` (`0 - 8 == -8`, and `-8 * (max/-8) == max`), each other level is
-/// `(int8_t)(x*id + 8.5)` clamped above at `15` (no explicit lower clamp --
-/// llama.cpp's own reference does not add one, trusting `max`'s own
-/// derivation to keep every `x*id + 8.5` inside `[0, 16.5]`), and the two
-/// nibbles for position `j` and `HALF_BLOCK + j` pack into one byte with
-/// the first in the low bits.
-fn quantize_block(x: &[f32], output: &mut [u8]) {
-    let mut amax = 0.0f32;
-    let mut max = 0.0f32;
-    for &value in x {
-        if amax < value.abs() {
-            amax = value.abs();
-            max = value;
-        }
-    }
-    let d = max / -8.0;
-    let inv_d = if d == 0.0 { 0.0 } else { 1.0 / d };
-
-    let block_scale = half::f16::from_f32(d);
-    output[D_OFFSET..D_OFFSET + 2].copy_from_slice(&block_scale.to_le_bytes());
-
-    let qs = &mut output[QS_OFFSET..QS_OFFSET + HALF_BLOCK];
-    for (index, out) in qs.iter_mut().enumerate() {
-        let x0 = x[index] * inv_d;
-        let x1 = x[HALF_BLOCK + index] * inv_d;
-        let level0 = 15i8.min((x0 + 8.5) as i8);
-        let level1 = 15i8.min((x1 + 8.5) as i8);
-        *out = (level0 as u8) | ((level1 as u8) << 4);
-    }
-}
-
-/// Quantizes a run of `f32` weights into `Q4_0` blocks. `input` is
-/// borrowed, `output` is caller-provided -- no allocation on this path.
+/// Quantizes a run of `f32` weights into `Q4_0` blocks by `BlockLayout::Q4_0`'s encode rule: the
+/// signed value of largest magnitude over `-8` is the scale, each level is `trunc(x / scale + 8.5)`
+/// clamped above at `15` (`quantize_row_q4_0_ref`, `ggml-quants.c:25-59`). The hand-written loop
+/// this replaced is frozen in `reference_encoders` as the byte oracle. `input` is borrowed,
+/// `output` is caller-provided -- no allocation on this path.
 ///
 /// # Errors
 /// [`QuantError::InputNotElementMultiple`] if `input.len()` is not a
 /// multiple of [`QK4_0`]; [`QuantError::OutputSizeMismatch`] if
 /// `output.len()` does not exactly match the packed byte count.
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
-    if !input.len().is_multiple_of(QK4_0) {
-        return Err(QuantError::InputNotElementMultiple {
-            codec: CODEC,
-            unit: "block",
-            found: input.len(),
-            block_elements: QK4_0,
-        });
-    }
-    let block_count = input.len() / QK4_0;
-    let expected = bytes_for_blocks(block_count);
-    if output.len() != expected {
-        return Err(QuantError::OutputSizeMismatch {
-            found: output.len(),
-            expected,
-        });
-    }
-    for (chunk, out_block) in input
-        .as_chunks::<QK4_0>()
-        .0
-        .iter()
-        .zip(output.as_chunks_mut::<BLOCK_BYTES>().0)
-    {
-        quantize_block(chunk, out_block);
-    }
-    Ok(())
+    quantize_by_rule(&BlockLayout::Q4_0, CODEC, input, output)
 }
 
 #[cfg(test)]

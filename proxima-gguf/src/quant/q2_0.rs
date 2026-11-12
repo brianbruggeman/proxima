@@ -1,6 +1,9 @@
 //! Scalar legacy `Q2_0` decoder (64 values / 18 bytes).
 
+use proxima_numeric::BlockLayout;
+
 use crate::quant::QuantError;
+use crate::quant::block_layout_encode::quantize_by_rule;
 use crate::types::GgmlType;
 
 const CODEC: &str = "q2_0";
@@ -43,49 +46,10 @@ const _: () = {
     assert!(GgmlType::Q2_0.wire_shape().block_bytes as usize == BLOCK_BYTES);
 };
 
-/// PrismML's `quantize_row_q2_0_ref` / `quantize_row_pq2_0_ref` body, shared by the two group
-/// sizes: scale is the absolute maximum, code is `round(w / scale) + 1` clamped to `0..=3`.
-pub(super) fn quantize_groups<const GROUP: usize, const BYTES: usize>(
-    codec: &'static str,
-    input: &[f32],
-    output: &mut [u8],
-) -> Result<(), QuantError> {
-    if !input.len().is_multiple_of(GROUP) {
-        return Err(QuantError::InputNotElementMultiple {
-            codec,
-            unit: "block",
-            found: input.len(),
-            block_elements: GROUP,
-        });
-    }
-    let expected = input.len() / GROUP * BYTES;
-    if output.len() != expected {
-        return Err(QuantError::OutputSizeMismatch {
-            found: output.len(),
-            expected,
-        });
-    }
-    for (chunk, block) in input
-        .as_chunks::<GROUP>()
-        .0
-        .iter()
-        .zip(output.as_chunks_mut::<BYTES>().0)
-    {
-        let scale = chunk
-            .iter()
-            .fold(0.0f32, |peak, value| peak.max(value.abs()));
-        let inverse = if scale > 0.0 { 1.0 / scale } else { 0.0 };
-        block[..2].copy_from_slice(&half::f16::from_f32(scale).to_le_bytes());
-        block[2..].fill(0);
-        for (index, value) in chunk.iter().enumerate() {
-            let code = (libm::roundf(value * inverse) as i32 + 1).clamp(0, 3) as u8;
-            block[2 + index / 4] |= code << (2 * (index % 4));
-        }
-    }
-    Ok(())
-}
-
-/// Quantizes whole 64-element runs of `f32` into `Q2_0` blocks.
+/// Quantizes whole 64-element runs of `f32` into `Q2_0` blocks by `BlockLayout::Q2_0`'s encode rule
+/// (PrismML's `quantize_row_q2_0_ref`): scale is the absolute maximum over the code reach, code is
+/// `round(w / scale) + 1` clamped to `0..=3`. The loop this replaced is frozen in
+/// `reference_encoders` as the byte oracle.
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
-    quantize_groups::<QK_Q2_0, BLOCK_BYTES>(CODEC, input, output)
+    quantize_by_rule(&BlockLayout::Q2_0, CODEC, input, output)
 }

@@ -18,6 +18,10 @@ pub mod bf16;
 mod block_codec_parity;
 #[cfg(test)]
 pub(crate) mod llama_reference;
+#[cfg(test)]
+pub(crate) mod reference_encoders;
+#[cfg(all(test, feature = "std"))]
+mod flint_encode_parity;
 pub mod bf4_e2m1;
 pub mod bf8_e5m2;
 pub mod block_layout;

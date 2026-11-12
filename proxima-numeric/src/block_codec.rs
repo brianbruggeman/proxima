@@ -942,7 +942,7 @@ macro_rules! resolve_named_block {
                     None => None,
                     Some(_) => Some(|values, out| {
                         // the arm above proved the rule exists; the const folds this match away
-                        let Some(rule) = RULE else { return None };
+                        let rule = RULE?;
                         encode_run::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, SCALE_OWNED>(
                             BlockLayout::$name,
                             rule,

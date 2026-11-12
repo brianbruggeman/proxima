@@ -1,7 +1,10 @@
 //! Scalar PrismML `PQ2_0` decoder (128 values / 34 bytes): `dequantize_row_pq2_0`
 //! in PrismML-Eng/llama.cpp (`ggml-quants.c`, branch `prism`).
 
+use proxima_numeric::BlockLayout;
+
 use crate::quant::QuantError;
+use crate::quant::block_layout_encode::quantize_by_rule;
 use crate::types::GgmlType;
 
 const CODEC: &str = "pq2_0";
@@ -46,5 +49,5 @@ const _: () = {
 
 /// Quantizes whole 128-element runs of `f32` into `PQ2_0` blocks.
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
-    crate::quant::q2_0::quantize_groups::<QK_PQ2_0, BLOCK_BYTES>(CODEC, input, output)
+    quantize_by_rule(&BlockLayout::PQ2_0, CODEC, input, output)
 }
