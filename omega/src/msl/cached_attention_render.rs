@@ -72,9 +72,6 @@ pub(super) fn cached_attention_scalar_score_body(
 /// one `Codec::Float16`, `Codec::BFloat16` or `Codec::BFloat8` triple read by a narrow-K/V kernel form.
 const CACHED_KV_OPERANDS: [usize; 3] = [2, 3, 6];
 
-#[cfg(feature = "metal-attn-split-decode")]
-pub(super) const BF8_VECTOR_HELPER: &str = "static inline float omega_bf8_to_float(uchar value) { uint sign = ((uint)value & 0x80u) << 24u; uint exponent = ((uint)value >> 2u) & 0x1fu; uint mantissa = (uint)value & 0x3u; if (exponent == 0u) { float magnitude = ldexp((float)mantissa, -16); return sign == 0u ? magnitude : -magnitude; } if (exponent == 31u) { uint bits = 0x7f800000u | (mantissa << 21u); return as_type<float>(sign | bits); } uint bits = ((exponent + 112u) << 23u) | (mantissa << 21u); return as_type<float>(sign | bits); }\nstatic inline float4 omega_bf8x4_to_float4(uchar4 value) { return float4(omega_bf8_to_float(value.x), omega_bf8_to_float(value.y), omega_bf8_to_float(value.z), omega_bf8_to_float(value.w)); }\n";
-
 /// Classifies a cached attention bind's operand codecs: `None` when every
 /// operand is a plain buffer (every kernel form reads this), or a uniform
 /// Float16/BFloat16/BFloat8 cache triple (decode split reads all three; row-tiled reads BF16 and BF8), an
@@ -318,10 +315,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
             #[cfg(feature = "metal-attn-split-rows")]
             {
                 matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. })
-                    && matches!(
-                        cached_kv_codec,
-                        Some(Codec::Float16 | Codec::BFloat16 | Codec::BFloat8)
-                    )
+                    && row_tiled_cached_type(cached_kv_codec).is_some()
             }
             #[cfg(not(feature = "metal-attn-split-rows"))]
             {
@@ -1022,7 +1016,7 @@ fn merge_grid(node: NodeId, total_elements: u64) -> Result<GridSpec, EmitError> 
 }
 
 pub(super) const ROW_TILED_KV_REASON: &str =
-    "row-tiled attention reads cached K/V as F32, Float16, BFloat16, or BFloat8";
+    "row-tiled attention reads cached K/V as binary32, one scalar layout of whole bytes, or one readable block layout";
 
 /// The MSL scalar a matrix-multiply fragment of `format` holds: the one place the row-tiled
 /// kernel's operand, probability and accumulator widths are spelled, each read off a proxima-numeric
@@ -1048,13 +1042,12 @@ pub(super) fn fragment_type(format: Codec) -> &'static str {
 /// [`cached_attention_row_tiled_kv_codec_for`] both ask this one classifier; it lives here, with
 /// the other codec classifier, so the query exists in builds that do not compile the kernel.
 pub(super) fn row_tiled_cached_type(codec: Option<Codec>) -> Option<&'static str> {
-    match codec {
-        None => Some("float"),
-        Some(Codec::Float16) => Some("half"),
-        Some(Codec::BFloat16) => Some("ushort"),
-        Some(Codec::BFloat8) => Some("uchar"),
-        Some(_) => None,
-    }
+    let Some(format) = codec else {
+        return Some("float");
+    };
+    readable_scalar_cache(&format)
+        .map(|(_, storage)| storage)
+        .or_else(|| readable_block_layout(&format).map(|_| "uchar"))
 }
 
 /// The row-tiled counterpart of [`cached_attention_kv_codec_for`]: the codec a cache stored as

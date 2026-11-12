@@ -271,7 +271,11 @@ fn the_row_tiled_kernel_reads_binary32_bf16_and_bf8_and_refuses_f16_and_quantize
         super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::Float16),
         Ok(Some(NumericFormat::Float16))
     );
-    assert!(super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::Q8_0).is_err());
+    assert_eq!(
+        super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::Q8_0),
+        Ok(Some(NumericFormat::Q8_0)),
+        "row-tiled reads a described block layout"
+    );
 }
 
 #[test]
@@ -439,7 +443,7 @@ fn a_block_k_beside_a_scalar_or_block_v_is_read_and_every_other_pairing_is_refus
     assert!(super::cached_attention_kv_codecs_for(&NumericFormat::Float32, &f16).is_err(), "a plain K beside a narrow V is a mixed pair");
     assert!(super::cached_attention_kv_codecs_for(&q4_0, &NumericFormat::Float32).is_err(), "a block K beside a plain V is a mixed pair");
     assert!(super::cached_attention_kv_codecs_for(&f16, &q4_0).is_err(), "a scalar K beside a block V is not read");
-    assert!(super::cached_attention_row_tiled_kv_codec_for(&q4_0).is_err(), "row-tiled keeps refusing a block cache");
+    assert_eq!(super::cached_attention_row_tiled_kv_codec_for(&q4_0), Ok(Some(q4_0)), "row-tiled reads a block cache through its layout");
 }
 
 #[test]
