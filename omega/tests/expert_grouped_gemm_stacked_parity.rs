@@ -255,6 +255,11 @@ fn activation_len(case: &Case) -> usize {
 }
 
 fn run(case: &Case) -> Outputs {
+    let activation = unit_values(2000, activation_len(case), -1.0, 1.0);
+    run_with_activation(case, activation)
+}
+
+fn run_with_activation(case: &Case, activation: Vec<f32>) -> Outputs {
     let Shape {
         sequence,
         selected,
@@ -263,7 +268,6 @@ fn run(case: &Case) -> Outputs {
     } = case.shape;
     let stack = quantized_expert_stack(&case.shape);
     let reference_stack = dequantized(&case.shape, &stack);
-    let activation = unit_values(2000, activation_len(case), -1.0, 1.0);
     let gate = unit_values(3000, sequence * selected * rows, 0.5, 1.5);
     let (reference_program, reference_output) = program(case, DType::FLOAT32);
     let reference_named = named_blocks(
@@ -333,7 +337,10 @@ fn worst_relative_row_error(oracle: &[f32], metal: &[f32], row_width: usize) -> 
 }
 
 fn assert_stacked_matches_oracle(case: &Case) {
-    let outputs = run(case);
+    assert_outputs_match_oracle(case, run(case));
+}
+
+fn assert_outputs_match_oracle(case: &Case, outputs: Outputs) {
     let Shape {
         sequence,
         selected,
@@ -455,6 +462,74 @@ fn a_fused_epilogue_reads_its_operands_at_the_sequence_and_selected_coordinates(
         activation_per_selected: false,
         fuse_gate: true,
     });
+}
+
+const FLINT_GATED_ACTIVATION_ROWS: &str =
+    include_str!("fixtures/flint_blk46_expert_gated_activation_rows.txt");
+const HALF_MAX: f32 = 65504.0;
+
+/// The two 512-wide rows the flint checkpoint's block-46 gated expert product
+/// handed its down projection for prompt token 2 (selected slots 0 and 1),
+/// captured from a Metal prefill of "The history of the printing press ... oil".
+fn flint_gated_activation_rows() -> Vec<Vec<f32>> {
+    FLINT_GATED_ACTIVATION_ROWS
+        .lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .split(',')
+                .map(|value| value.trim().parse::<f32>().expect("a captured f32"))
+                .collect()
+        })
+        .collect()
+}
+
+/// Real gated activations reach 8e4, past the largest finite `half`; a
+/// `half`-staged activation tile turns every output of such a token into
+/// infinity (observed: all 2048 features of the row, +inf and -inf mixed),
+/// and the following sum over the selected experts into NaN.
+#[test]
+fn a_down_projection_activation_past_the_half_range_stays_finite_and_matches_the_f32_oracle() {
+    let shape = Shape {
+        sequence: 60,
+        selected: 4,
+        rows: 128,
+        k: 512,
+        experts: 8,
+    };
+    let captured = flint_gated_activation_rows();
+    assert_eq!(captured.len(), 2, "the fixture holds slot 0 and slot 1");
+    assert!(
+        captured
+            .iter()
+            .all(|row| row.len() == shape.k && row.iter().any(|value| value.abs() > HALF_MAX)),
+        "degenerate: the fixture rows must overflow half"
+    );
+    let activation: Vec<f32> = (0..shape.sequence * shape.selected)
+        .flat_map(|index| {
+            let scale = if index % 3 == 0 { 1.0 } else { 1.0 / 64.0 };
+            captured[index % 2].iter().map(move |value| value * scale)
+        })
+        .collect();
+    let route = top_k_route(shape.sequence, shape.selected, shape.experts, 57);
+    let case = Case {
+        shape,
+        route,
+        activation_per_selected: true,
+        fuse_gate: false,
+    };
+    let outputs = run_with_activation(&case, activation);
+    let non_finite = outputs
+        .metal
+        .iter()
+        .filter(|value| !value.is_finite())
+        .count();
+    assert_eq!(
+        non_finite, 0,
+        "metal produced non-finite outputs from finite activations"
+    );
+    assert_outputs_match_oracle(&case, outputs);
 }
 
 #[test]

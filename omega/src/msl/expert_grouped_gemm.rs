@@ -54,12 +54,16 @@ pub(super) const GROUPED_TILE_DEPTH: u64 = STAGED_K_STEP_ELEMENTS;
 /// bad index raises the same `GatherIndexOutOfRange`.
 ///
 /// Tile layout and thread mapping are `ggml-metal`'s `kernel_mul_mm_id`
-/// (`kernels/mul_mm.metal`): both staged tiles are `half`, stored as 8x8
+/// (`kernels/mul_mm.metal`) except the activation tile: the weight tile is
+/// `half` and the activation tile is `float`, as in the dense tiled GEMM
+/// (`push_mm_layout_multiply`'s `ma`/`mb`), because a `half` activation
+/// turns any value past 65504 into infinity and a gated expert intermediate
+/// reaches 8e4 on real checkpoints. Both are stored as 8x8
 /// blocks of 64 contiguous elements so each `simdgroup_load` reads one
-/// contiguous 128 bytes; two threads per weight row each decode one
+/// contiguous block; two threads per weight row each decode one
 /// [`DECODE_RUN_ELEMENTS`] run of the codec through the stager the dense tiled
 /// GEMM shares ([`push_weight_cursor`], [`push_weight_decode`],
-/// [`push_block_cursor_advance`]); four threads per token row convert eight
+/// [`push_block_cursor_advance`]); four threads per token row copy eight
 /// activations each; each
 /// simdgroup accumulates a 4 by 2 grid of 8x8 blocks in float. A tile of at
 /// most half [`GROUPED_TILE_TOKENS`] tokens leaves the two simdgroups that own
@@ -430,7 +434,7 @@ fn push_route_segment_bounds(source: &mut String, geometry: &GroupedGeometry) {
 #[cfg(feature = "metal-grouped-gemm")]
 fn push_grouped_threadgroup_memory(source: &mut String, geometry: &GroupedGeometry) {
     let weight_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_DEPTH * 2;
-    let act_tile_bytes = GROUPED_TILE_TOKENS * GROUPED_TILE_DEPTH * 2;
+    let act_tile_bytes = GROUPED_TILE_TOKENS * GROUPED_TILE_DEPTH * 4;
     let out_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_TOKENS * 4;
     let shared_bytes = (weight_tile_bytes + act_tile_bytes).max(out_tile_bytes);
     source.push_str(&format!(
@@ -438,7 +442,7 @@ fn push_grouped_threadgroup_memory(source: &mut String, geometry: &GroupedGeomet
     ));
     source.push_str("    threadgroup half *weight_tile = (threadgroup half *)tg_shared;\n");
     source.push_str(&format!(
-        "    threadgroup half *act_tile = (threadgroup half *)(tg_shared + {weight_tile_bytes});\n"
+        "    threadgroup float *act_tile = (threadgroup float *)(tg_shared + {weight_tile_bytes});\n"
     ));
     source.push_str("    threadgroup float *out_tile = (threadgroup float *)tg_shared;\n");
     source.push_str(&format!(
@@ -620,7 +624,7 @@ fn push_grouped_tile(
     source.push_str(&format!(
         "            for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH}) {{\n"
     ));
-    source.push_str("                half4 a_regs[2];\n");
+    source.push_str("                float4 a_regs[2];\n");
     push_grouped_load(source, decode, "                ");
     source.push_str("                threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     push_grouped_store(source);
@@ -693,7 +697,7 @@ fn push_grouped_stage_pointers(
         "            long a_tok = (a_row < (long)tile_count) ? (long)tile_token[a_row] : -1;\n",
     );
     source.push_str(
-        "            threadgroup half4 *a_slot = (threadgroup half4 *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));\n",
+        "            threadgroup float4 *a_slot = (threadgroup float4 *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));\n",
     );
     push_token_coordinates(
         source,
@@ -721,7 +725,7 @@ fn push_grouped_stage_pointers(
 /// Issues one step's global loads and decodes into `w_regs`/`a_regs`: the row's
 /// [`DECODE_RUN_ELEMENTS`] weights decode through the codec's [`tiled_decode`]
 /// function (a row past `feature_extent` stages zeros), the activation row's
-/// eight floats are two `float4` loads converted to `half`.
+/// eight floats are two `float4` loads kept as `float`.
 #[cfg(feature = "metal-grouped-gemm")]
 fn push_grouped_load(source: &mut String, decode: &TiledDecode, indent: &str) {
     let weight_load = [
@@ -742,13 +746,13 @@ fn push_grouped_load(source: &mut String, decode: &TiledDecode, indent: &str) {
     let lines = [
         "if (a_staged) {",
         "    if (a_tok < 0) {",
-        "        a_regs[0] = half4(0.0h); a_regs[1] = half4(0.0h);",
+        "        a_regs[0] = float4(0.0f); a_regs[1] = float4(0.0f);",
         "    } else if (a_vector) {",
         "        device const float4 *a_src = (device const float4 *)a_ptr;",
-        "        a_regs[0] = half4(a_src[0]); a_regs[1] = half4(a_src[1]);",
+        "        a_regs[0] = a_src[0]; a_regs[1] = a_src[1];",
         "    } else {",
         "        for (int lane = 0; lane < 4; ++lane) {",
-        "            a_regs[0][lane] = (half)a_ptr[lane]; a_regs[1][lane] = (half)a_ptr[4 + lane];",
+        "            a_regs[0][lane] = a_ptr[lane]; a_regs[1][lane] = a_ptr[4 + lane];",
         "        }",
         "    }",
         "}",
@@ -790,14 +794,14 @@ fn push_grouped_multiply_accumulate(source: &mut String) {
         "                    threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);\n",
     );
     source.push_str(
-        "                    threadgroup const half *lsmb = act_tile + 2 * 64 * (sgitg / 2);\n",
+        "                    threadgroup const float *lsmb = act_tile + 2 * 64 * (sgitg / 2);\n",
     );
     source.push_str(&format!(
         "                    for (short ik = 0; ik < {}; ++ik) {{\n",
         GROUPED_TILE_DEPTH / 8
     ));
     source.push_str("                        simdgroup_half8x8 ma[4];\n");
-    source.push_str("                        simdgroup_half8x8 mb[2];\n");
+    source.push_str("                        simdgroup_float8x8 mb[2];\n");
     source.push_str(
         "                        for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, ulong2(0), false); }\n",
     );
