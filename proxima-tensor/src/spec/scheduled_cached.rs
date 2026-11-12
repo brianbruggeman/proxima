@@ -64,15 +64,14 @@ pub fn append_single_range_cached_attention(
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
-    let q_product = elementwise(
+    let q_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        normed,
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
-    let q_raw = reduce(
+    let q_raw = reduce_like(
         program,
-        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         q_product,
@@ -106,15 +105,14 @@ pub fn append_single_range_cached_attention(
 
     let v_new_raw = match value_source {
         ValueSource::Projected(wv) => {
-            let v_product = elementwise(
+            let v_product = elementwise_like(
                 program,
-                DType::FLOAT32,
+                normed,
                 ScalarOp::Multiply,
                 &[(normed, "si->sudi"), (wv, "iud->sudi")],
             )?;
-            reduce(
+            reduce_like(
                 program,
-                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 v_product,
@@ -292,15 +290,14 @@ pub fn append_single_range_cached_attention(
         "sugd->stugd",
     )?;
 
-    let wo_product = elementwise(
+    let wo_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        attended,
         ScalarOp::Multiply,
         &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
     )?;
-    let attn_out = reduce(
+    let attn_out = reduce_like(
         program,
-        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         wo_product,
@@ -313,9 +310,9 @@ pub fn append_single_range_cached_attention(
         None => attn_out,
     };
 
-    let post_mixer = elementwise(
+    let post_mixer = elementwise_like(
         program,
-        DType::FLOAT32,
+        x,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
@@ -480,15 +477,14 @@ pub fn append_two_range_cached_attention(
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
-    let q_product = elementwise(
+    let q_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        normed,
         ScalarOp::Multiply,
         &[(normed, "si->shdi"), (wq, "ihd->shdi")],
     )?;
-    let q_raw = reduce(
+    let q_raw = reduce_like(
         program,
-        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         q_product,
@@ -511,15 +507,14 @@ pub fn append_two_range_cached_attention(
     // in this arm.
     let (k_new_raw_for_shared_with_key, rotated_k_new_even, rotated_k_new_odd) = match key_source {
         KeySource::Projected { wk, k_norm_weight } => {
-            let k_new_product = elementwise(
+            let k_new_product = elementwise_like(
                 program,
-                DType::FLOAT32,
+                normed,
                 ScalarOp::Multiply,
                 &[(normed, "si->sudi"), (wk, "iud->sudi")],
             )?;
-            let k_new_raw = reduce(
+            let k_new_raw = reduce_like(
                 program,
-                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 k_new_product,
@@ -544,15 +539,14 @@ pub fn append_two_range_cached_attention(
 
     let v_new_raw = match value_source {
         ValueSource::Projected(wv) => {
-            let v_product = elementwise(
+            let v_product = elementwise_like(
                 program,
-                DType::FLOAT32,
+                normed,
                 ScalarOp::Multiply,
                 &[(normed, "si->sudi"), (wv, "iud->sudi")],
             )?;
-            reduce(
+            reduce_like(
                 program,
-                DType::FLOAT32,
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 v_product,
@@ -603,15 +597,14 @@ pub fn append_two_range_cached_attention(
         group,
     )?;
 
-    let wo_product = elementwise(
+    let wo_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        attended,
         ScalarOp::Multiply,
         &[(attended, "sugd->sugdo"), (wo, "ugdo->sugdo")],
     )?;
-    let attn_out = reduce(
+    let attn_out = reduce_like(
         program,
-        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         wo_product,
@@ -624,9 +617,9 @@ pub fn append_two_range_cached_attention(
         None => attn_out,
     };
 
-    let post_mixer = elementwise(
+    let post_mixer = elementwise_like(
         program,
-        DType::FLOAT32,
+        x,
         ScalarOp::Add,
         &[(attn_out, "sd->sd"), (x, "sd->sd")],
     )?;
@@ -1138,6 +1131,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
             None,
             LoopCdConfig::default(),
             expert_shared_feed_forward,
+            DType::FLOAT32,
         )?;
     let mut cache_roots = Vec::with_capacity(layer_roots.len());
     for roots in layer_roots {
@@ -1185,6 +1179,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     recurrence: Option<RecurrenceConfig>,
     loopcd: LoopCdConfig,
     expert_shared_feed_forward: SharedExpertWidth,
+    activation: DType,
 ) -> Result<TwoRangeLayerRootForwardProgram, TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -1243,9 +1238,9 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
         alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
         "token_embd.weight",
     );
-    let mut x = embedding_lookup(&mut program, table, ids);
+    let mut x = embedding_lookup_as(&mut program, table, ids, activation);
     if let Some(scale) = embedding_scale {
-        x = append_embedding_scale(&mut program, x, embedding, scale, DType::FLOAT32)?;
+        x = append_embedding_scale(&mut program, x, embedding, scale, activation)?;
     }
 
     let inv_dim = count_constant(&mut program, embedding);

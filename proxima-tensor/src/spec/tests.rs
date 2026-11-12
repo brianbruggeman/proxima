@@ -1025,6 +1025,31 @@ fn activation_format_sets_the_embedding_stem_dtype_and_binary32_is_the_default_p
     assert_eq!(default_program.len(), half_program.len());
 }
 
+/// The padded cached engine (the one the sliding-pattern families run) carries
+/// the activation format through attention, norms and the FFN from the embedding
+/// stem; at binary32 no op is half precision, at binary16 the activation chain
+/// is, while the logits root stays binary32.
+#[test]
+fn padded_cached_engine_propagates_the_activation_format_and_keeps_logits_binary32() {
+    let mut descriptor = head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Padded, 1);
+    let default_forward = build_forward(&descriptor).expect("binary32 padded program lowers");
+    descriptor.activation = DType::FLOAT16.numeric_format();
+    let half_forward = build_forward(&descriptor).expect("binary16 padded program lowers");
+
+    let half_ops = |program: &[Op]| program.iter().filter(|op| op.dtype() == DType::FLOAT16).count();
+    assert_eq!(half_ops(&default_forward.program), 0);
+    assert!(
+        half_ops(&half_forward.program) > 20,
+        "the activation chain must be half precision, found {}",
+        half_ops(&half_forward.program)
+    );
+    assert_eq!(default_forward.program.len(), half_forward.program.len());
+    assert_eq!(
+        half_forward.program[half_forward.logits.0 as usize].dtype(),
+        DType::FLOAT32
+    );
+}
+
 /// A family profile spells the activation as a numeric format; a block format
 /// has no op dtype and is refused at the bridge rather than widened.
 #[test]
@@ -6825,6 +6850,7 @@ fn architecture_matrix_mixed_cached_conv_roots() {
             None,
             LoopCdConfig::default(),
             SharedExpertWidth::NONE,
+            DType::FLOAT32,
         )
         .expect("mixed attention and short-convolution schedule lowers");
 

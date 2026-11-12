@@ -191,6 +191,62 @@ pub fn elementwise(
     ))
 }
 
+/// The dtype the node `node` already produces; the one place an activation-side
+/// op reads the model's activation format, which entered the graph at
+/// [`embedding_lookup_as`].
+fn produced_dtype(program: &[Op], node: NodeId) -> Result<DType, TensorError> {
+    program
+        .get(node.0 as usize)
+        .map(Op::dtype)
+        .ok_or_else(|| TensorError::UnknownNode(alloc::format!("{node}")))
+}
+
+/// [`produced_dtype`] for the builders that return a bare [`NodeId`]: a node id
+/// the caller did not get from this program falls back to binary32, the
+/// contract format, and the graph's own validation rejects the dangling id.
+pub(crate) fn produced_dtype_or_binary32(program: &[Op], node: NodeId) -> DType {
+    produced_dtype(program, node).unwrap_or(DType::FLOAT32)
+}
+
+/// [`elementwise`] whose output dtype is the dtype `like` already carries: an
+/// activation-side op takes the activation format from the data it consumes,
+/// so the format is read from the graph rather than passed down every builder
+/// signature. A site that must stay binary32 by contract (statistics, index
+/// math) calls [`elementwise`] with an explicit `DType::FLOAT32` instead.
+pub fn elementwise_like(
+    program: &mut Vec<Op>,
+    like: NodeId,
+    body: ScalarOp,
+    inputs: &[(NodeId, &str)],
+) -> Result<NodeId, TensorError> {
+    let dtype = produced_dtype(program, like)?;
+    elementwise(program, dtype, body, inputs)
+}
+
+/// [`reduce`] whose output dtype is the dtype `operand` already carries; the
+/// reduce counterpart of [`elementwise_like`].
+pub fn reduce_like(
+    program: &mut Vec<Op>,
+    body: ScalarOp,
+    init: ReduceInit,
+    operand: NodeId,
+    in_map: &str,
+    out_map: &str,
+) -> Result<NodeId, TensorError> {
+    let dtype = produced_dtype(program, operand)?;
+    reduce(program, dtype, body, init, operand, in_map, out_map)
+}
+
+/// [`scalar_constant_as`] at the dtype `like` already carries.
+pub fn scalar_constant_like(
+    program: &mut Vec<Op>,
+    value: f32,
+    like: NodeId,
+) -> Result<NodeId, TensorError> {
+    let dtype = produced_dtype(program, like)?;
+    Ok(scalar_constant_as(program, value, dtype))
+}
+
 /// Appends one [`Op::Reduce`], same notation-parsing rationale as
 /// [`elementwise`].
 pub fn reduce(
@@ -321,27 +377,27 @@ pub fn fused_rope_pair(
     let partner_pattern = alloc::format!("s,{head_letter},{partner_offset}->{out_axes}");
     let trig_pattern = alloc::format!("s,i->{out_axes}");
 
-    let same_cos = elementwise(
+    let same_cos = elementwise_like(
         program,
-        DType::FLOAT32,
+        source,
         ScalarOp::Multiply,
         &[
             (source, same_pattern.as_str()),
             (cos_new, trig_pattern.as_str()),
         ],
     )?;
-    let partner_sin = elementwise(
+    let partner_sin = elementwise_like(
         program,
-        DType::FLOAT32,
+        source,
         ScalarOp::Multiply,
         &[
             (source, partner_pattern.as_str()),
             (sin_new, trig_pattern.as_str()),
         ],
     )?;
-    let rotated_same = elementwise(
+    let rotated_same = elementwise_like(
         program,
-        DType::FLOAT32,
+        same_cos,
         ScalarOp::Subtract,
         &[
             (same_cos, out_identity.as_str()),
@@ -349,27 +405,27 @@ pub fn fused_rope_pair(
         ],
     )?;
 
-    let partner_cos = elementwise(
+    let partner_cos = elementwise_like(
         program,
-        DType::FLOAT32,
+        source,
         ScalarOp::Multiply,
         &[
             (source, partner_pattern.as_str()),
             (cos_new, trig_pattern.as_str()),
         ],
     )?;
-    let same_sin = elementwise(
+    let same_sin = elementwise_like(
         program,
-        DType::FLOAT32,
+        source,
         ScalarOp::Multiply,
         &[
             (source, same_pattern.as_str()),
             (sin_new, trig_pattern.as_str()),
         ],
     )?;
-    let rotated_partner = elementwise(
+    let rotated_partner = elementwise_like(
         program,
-        DType::FLOAT32,
+        partner_cos,
         ScalarOp::Add,
         &[
             (partner_cos, out_identity.as_str()),
@@ -403,15 +459,15 @@ pub fn unrotated_head_pair(
     let same_pattern = alloc::format!("s,{head_letter},{same_offset}->{out_axes}");
     let partner_pattern = alloc::format!("s,{head_letter},{partner_offset}->{out_axes}");
 
-    let same = elementwise(
+    let same = elementwise_like(
         program,
-        DType::FLOAT32,
+        source,
         ScalarOp::Identity,
         &[(source, same_pattern.as_str())],
     )?;
-    let partner = elementwise(
+    let partner = elementwise_like(
         program,
-        DType::FLOAT32,
+        source,
         ScalarOp::Identity,
         &[(source, partner_pattern.as_str())],
     )?;
@@ -497,9 +553,9 @@ pub fn sum_of_squares(
     full: &str,
     reduce_out: &str,
 ) -> Result<NodeId, TensorError> {
-    let squared = elementwise(
+    let squared = elementwise_like(
         program,
-        DType::FLOAT32,
+        x,
         ScalarOp::Multiply,
         &[(x, full), (x, full)],
     )?;
@@ -706,15 +762,15 @@ pub fn rmsnorm(
         ScalarOp::Reciprocal,
         &[(rms, "s->s")],
     )?;
-    let normed = elementwise(
+    let normed = elementwise_like(
         program,
-        DType::FLOAT32,
+        x,
         ScalarOp::Multiply,
         &[(x, "sd->sd"), (inv_rms, "s->sd")],
     )?;
-    elementwise(
+    elementwise_like(
         program,
-        DType::FLOAT32,
+        normed,
         ScalarOp::Multiply,
         &[(normed, "sd->sd"), (gamma, "d->sd")],
     )
@@ -950,15 +1006,15 @@ pub fn rmsnorm_per_head(
         ScalarOp::Reciprocal,
         &[(rms, identity.as_str())],
     )?;
-    let normed = elementwise(
+    let normed = elementwise_like(
         program,
-        DType::FLOAT32,
+        x,
         ScalarOp::Multiply,
         &[(x, full.as_str()), (inv_rms, broadcast_over_d.as_str())],
     )?;
-    elementwise(
+    elementwise_like(
         program,
-        DType::FLOAT32,
+        normed,
         ScalarOp::Multiply,
         &[(normed, full.as_str()), (gamma, gamma_map.as_str())],
     )

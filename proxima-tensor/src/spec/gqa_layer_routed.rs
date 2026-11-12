@@ -382,10 +382,11 @@ pub fn gathered_expert_product(
         gathered_dim: 0,
     };
     let x_map = IndexMap::Affine(map::projection(3, &[0, 1]));
+    let dtype = produced_dtype_or_binary32(program, x);
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::FLOAT32,
+            dtype,
             body: ScalarOp::Multiply,
             operands: alloc::vec![(stack, gathered_map), (x, x_map)],
             name: None,
@@ -428,10 +429,11 @@ pub fn grouped_gathered_expert_product(
         gathered_dim: 0,
     };
     let x_map = IndexMap::Affine(map::projection(4, &[0, 2]));
+    let dtype = produced_dtype_or_binary32(program, x);
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::FLOAT32,
+            dtype,
             body: ScalarOp::Multiply,
             operands: alloc::vec![(stack, gathered_map), (x, x_map)],
             name: None,
@@ -475,10 +477,11 @@ pub fn slotwise_gathered_expert_product(
         gathered_dim: 0,
     };
     let x_map = IndexMap::Affine(map::projection(4, &[0, 1, 2]));
+    let dtype = produced_dtype_or_binary32(program, x);
     op::append(
         program,
         Op::Elementwise {
-            dtype: DType::FLOAT32,
+            dtype,
             body: ScalarOp::Multiply,
             operands: alloc::vec![(stack, gathered_map), (x, x_map)],
             name: None,
@@ -899,25 +902,24 @@ pub(super) fn append_moe_round_output(
     activation: Activation,
 ) -> Result<NodeId, TensorError> {
     let activated_gate = append_activation(program, gate, ones, activation, "sg")?;
-    let hidden = elementwise(
+    let hidden = elementwise_like(
         program,
-        DType::FLOAT32,
+        up,
         ScalarOp::Multiply,
         &[(activated_gate, "sg->sg"), (up, "sg->sg")],
     )?;
     let down_product = gathered_expert_product(program, expert_w_down, route, hidden);
-    let round_output = reduce(
+    let round_output = reduce_like(
         program,
-        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         down_product,
         "sio->sio",
         "so->sio",
     )?;
-    elementwise(
+    elementwise_like(
         program,
-        DType::FLOAT32,
+        round_output,
         ScalarOp::Multiply,
         &[(round_output, "sd->sd"), (weight, "s->sd")],
     )
@@ -1241,9 +1243,8 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         let routes = stack_selected_routes(program, &selected_routes)?;
         let stacked_weights = stack_selected_routes(program, &round_weights)?;
         let gate_product = grouped_gathered_expert_product(program, expert_w_gate, routes, x);
-        let gate = reduce(
+        let gate = reduce_like(
             program,
-            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             gate_product,
@@ -1251,9 +1252,8 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             "sko->skio",
         )?;
         let up_product = grouped_gathered_expert_product(program, expert_w_up, routes, x);
-        let up = reduce(
+        let up = reduce_like(
             program,
-            DType::FLOAT32,
             ScalarOp::Add,
             ReduceInit::Zero,
             up_product,
@@ -1261,9 +1261,9 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             "sko->skio",
         )?;
         let activated_gate = append_activation(program, gate, ones, activation, "sko")?;
-        let hidden = elementwise(
+        let hidden = elementwise_like(
             program,
-            DType::FLOAT32,
+            up,
             ScalarOp::Multiply,
             &[(activated_gate, "sko->sko"), (up, "sko->sko")],
         )?;
@@ -1271,9 +1271,9 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             if projection_strategy == MoeProjectionStrategy::StackedCombined {
                 let slot_weights =
                     stacked_slot_weights(program, expert_scale, routes, stacked_weights)?;
-                let weighted_hidden = elementwise(
+                let weighted_hidden = elementwise_like(
                     program,
-                    DType::FLOAT32,
+                    hidden,
                     ScalarOp::Multiply,
                     &[(hidden, "sko->sko"), (slot_weights, "sk->sko")],
                 )?;
@@ -1283,9 +1283,8 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
                     routes,
                     weighted_hidden,
                 );
-                reduce(
+                reduce_like(
                     program,
-                    DType::FLOAT32,
                     ScalarOp::Add,
                     ReduceInit::Zero,
                     down_product,
@@ -1295,9 +1294,8 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
             } else {
                 let down_product =
                     slotwise_gathered_expert_product(program, expert_w_down, routes, hidden);
-                let down = reduce(
+                let down = reduce_like(
                     program,
-                    DType::FLOAT32,
                     ScalarOp::Add,
                     ReduceInit::Zero,
                     down_product,
@@ -1306,15 +1304,14 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
                 )?;
                 let slot_weights =
                     stacked_slot_weights(program, expert_scale, routes, stacked_weights)?;
-                let weighted = elementwise(
+                let weighted = elementwise_like(
                     program,
-                    DType::FLOAT32,
+                    down,
                     ScalarOp::Multiply,
                     &[(down, "sko->sko"), (slot_weights, "sk->sko")],
                 )?;
-                reduce(
+                reduce_like(
                     program,
-                    DType::FLOAT32,
                     ScalarOp::Add,
                     ReduceInit::Zero,
                     weighted,
@@ -1350,9 +1347,9 @@ fn append_moe_ffn_with_projection_strategy_from_logits(
         ScalarOp::Reciprocal,
         &[(weight_total, "s->s")],
     )?;
-    let output = elementwise(
+    let output = elementwise_like(
         program,
-        DType::FLOAT32,
+        weighted_sum,
         ScalarOp::Multiply,
         &[(weighted_sum, "sd->sd"), (inv_weight_total, "s->sd")],
     )?;

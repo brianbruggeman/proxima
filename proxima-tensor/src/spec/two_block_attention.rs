@@ -25,18 +25,18 @@ pub(super) fn group_queries(
     group_ones: NodeId,
 ) -> Result<(NodeId, NodeId), TensorError> {
     let group_map = alloc::format!("s,{group}*u+g,i->sugi");
-    let q_even_grouped = elementwise(
+    let q_even_grouped = elementwise_like(
         program,
-        DType::FLOAT32,
+        rotated_q_even,
         ScalarOp::Multiply,
         &[
             (rotated_q_even, group_map.as_str()),
             (group_ones, "ug->sugi"),
         ],
     )?;
-    let q_odd_grouped = elementwise(
+    let q_odd_grouped = elementwise_like(
         program,
-        DType::FLOAT32,
+        rotated_q_odd,
         ScalarOp::Multiply,
         &[
             (rotated_q_odd, group_map.as_str()),
@@ -58,9 +58,9 @@ pub(super) fn append_cached_block_scores(
     inv_sqrt_head_dim: NodeId,
     cache_mask: Option<(NodeId, NodeId)>,
 ) -> Result<NodeId, TensorError> {
-    let score_cached_even_product = elementwise(
+    let score_cached_even_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        q_even_grouped,
         ScalarOp::Multiply,
         &[
             (q_even_grouped, "sugi->stugi"),
@@ -76,9 +76,9 @@ pub(super) fn append_cached_block_scores(
         "stugi->stugi",
         "stug->stugi",
     )?;
-    let score_cached_odd_product = elementwise(
+    let score_cached_odd_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        q_odd_grouped,
         ScalarOp::Multiply,
         &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")],
     )?;
@@ -153,9 +153,9 @@ pub(super) fn append_local_block_and_combine(
     attention_sink: Option<NodeId>,
     group: u32,
 ) -> Result<(NodeId, NodeId), TensorError> {
-    let score_new_even_product = elementwise(
+    let score_new_even_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        q_even_grouped,
         ScalarOp::Multiply,
         &[
             (q_even_grouped, "sugi->swugi"),
@@ -171,9 +171,9 @@ pub(super) fn append_local_block_and_combine(
         "swugi->swugi",
         "swug->swugi",
     )?;
-    let score_new_odd_product = elementwise(
+    let score_new_odd_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        q_odd_grouped,
         ScalarOp::Multiply,
         &[
             (q_odd_grouped, "sugi->swugi"),
@@ -351,9 +351,9 @@ pub(super) fn append_local_block_and_combine(
             (attended_new, "sugd->sugd"),
         ],
     )?;
-    let attended = elementwise(
+    let attended = elementwise_like(
         program,
-        DType::FLOAT32,
+        q_even_grouped,
         ScalarOp::Multiply,
         &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")],
     )?;
