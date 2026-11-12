@@ -1800,6 +1800,10 @@ pub(super) struct GatherCursor<'a, E = f32> {
     pub(super) stride: i64,
     pub(super) element_stride: i64,
     pub(super) extent: u64,
+    /// the index run `collapse_gather_row` reads at `offset` was already
+    /// checked to be an arithmetic progression for the previous row of a
+    /// block sweep, which this row's cursor re-reads unchanged
+    pub(super) progression_checked: bool,
 }
 
 impl<E: GatherIndexElement> GatherCursor<'_, E> {
@@ -1846,6 +1850,10 @@ impl<E: GatherIndexElement> GatherCursor<'_, E> {
 /// resulting base or stride is negative (the width kernels index with `usize`), so the caller
 /// keeps its per-element cursor walk. An index out
 /// of range is an error exactly as the cursor walk reports it.
+///
+/// A cursor with [`GatherCursor::progression_checked`] set reads the very index run the previous
+/// row of a block sweep already had checked, so the width-long scan is skipped and only the first
+/// two indices are re-read for the step.
 pub(super) fn collapse_gather_row(
     node: NodeId,
     cursors: &[Option<GatherCursor<'_>>],
@@ -1870,7 +1878,7 @@ pub(super) fn collapse_gather_row(
         } else {
             cursor.peek(1, node)? - first
         };
-        if cursor.stride != 0 {
+        if cursor.stride != 0 && !cursor.progression_checked {
             let mut previous = first + step;
             for position in 2..width as i64 {
                 let current = cursor.peek(position, node)?;
@@ -1935,6 +1943,7 @@ pub(super) fn fill_gather_cursors<'a, B: Deref<Target = [f32]>>(
                     stride: stride_dim.map_or(0, |dim| gather_access.index_layout.stride(dim)),
                     element_stride: gather_access.element_stride,
                     extent: gather_access.extent,
+                    progression_checked: false,
                 })
             })
             .transpose()?;
@@ -1982,6 +1991,7 @@ pub(super) fn fill_gather_cursors_typed<'a>(
                     stride: stride_dim.map_or(0, |dim| gather_access.index_layout.stride(dim)),
                     element_stride: gather_access.element_stride,
                     extent: gather_access.extent,
+                    progression_checked: false,
                 })
             })
             .transpose()?;
@@ -2606,6 +2616,7 @@ mod collapse_gather_row_tests {
             stride,
             element_stride,
             extent,
+            progression_checked: false,
         }
     }
 

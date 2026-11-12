@@ -4482,6 +4482,112 @@ fn embedding_lookup_program(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId)
     (program, gathered)
 }
 
+/// `source[s, ids[h, d]]` over `(heads, head_dim, seq)` (`key_transposed`) or
+/// `(heads, seq, head_dim)`: the head-split transpose BERT-shaped graphs
+/// lower to, a gather whose index run is read along one dim and constant
+/// along the block dim `run_elementwise_range` sweeps. `ids` is the flat
+/// `[heads, head_dim]` index table.
+fn head_split_gather_program(
+    heads: u32,
+    head_dim: u32,
+    seq: u32,
+    key_transposed: bool,
+) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let source = f32_block(
+        &mut program,
+        &[Extent::Static(seq), Extent::Static(heads * head_dim)],
+    );
+    let ids = block(
+        &mut program,
+        DType::INT32,
+        &[Extent::Static(heads), Extent::Static(head_dim)],
+    );
+    let (seq_axis, index_axes): (u16, [u16; 2]) = if key_transposed {
+        (2, [0, 1])
+    } else {
+        (1, [0, 2])
+    };
+    let gathered_map = IndexMap::Computed {
+        indices: ids,
+        index_map: map::projection(3, &index_axes),
+        base: map::IndexPattern {
+            iter_rank: 3,
+            axes: alloc::vec![
+                map::AxisIndex {
+                    terms: core::iter::once(AxisTerm::projection(seq_axis)).collect(),
+                    offset: 0,
+                    len: None,
+                },
+                map::AxisIndex::default(),
+            ],
+        },
+        gathered_dim: 1,
+    };
+    let gathered = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Identity,
+            operands: alloc::vec![(source, gathered_map)],
+            name: None,
+        },
+    );
+    (program, gathered)
+}
+
+/// A gather row that collapses to an affine span steps the block dim with
+/// the previous row's collapse reused; every index order below must still
+/// read exactly `source[s, ids[h, d]]`: unit-step runs (the BERT head
+/// split), a descending run (negative step, falls back to the cursor walk),
+/// and a scrambled run (not a progression at all).
+#[test]
+fn head_split_gather_matches_a_hand_written_reference_for_every_index_order() {
+    let (heads, head_dim, seq) = (3usize, 4usize, 5usize);
+    let hidden = heads * head_dim;
+    let orders: [(&str, [usize; 4]); 3] = [
+        ("unit_step", [0, 1, 2, 3]),
+        ("descending", [3, 2, 1, 0]),
+        ("scrambled", [2, 0, 3, 1]),
+    ];
+    for key_transposed in [true, false] {
+        for (name, order) in orders {
+            let (program, _gathered) =
+                head_split_gather_program(heads as u32, head_dim as u32, seq as u32, key_transposed);
+            let source_data: Vec<f32> = (0..seq * hidden).map(|value| value as f32 + 0.5).collect();
+            let ids_data: Vec<f32> = (0..heads)
+                .flat_map(|head| order.iter().map(move |&lane| (head * head_dim + lane) as f32))
+                .collect();
+            let evaluated = evaluate(&program, &[], &[&source_data, &ids_data], &[])
+                .expect("head split gather evaluates");
+
+            let mut reference = Vec::new();
+            for head in 0..heads {
+                if key_transposed {
+                    for dim in 0..head_dim {
+                        for position in 0..seq {
+                            let column = ids_data[head * head_dim + dim] as usize;
+                            reference.push(source_data[position * hidden + column]);
+                        }
+                    }
+                } else {
+                    for position in 0..seq {
+                        for dim in 0..head_dim {
+                            let column = ids_data[head * head_dim + dim] as usize;
+                            reference.push(source_data[position * hidden + column]);
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                evaluated.root(),
+                reference.as_slice(),
+                "{name} index order, key_transposed={key_transposed}"
+            );
+        }
+    }
+}
+
 /// `sum_k table[ids[i], k] * weight[k, j]` — an embedding lookup fused
 /// straight into a contraction, mirroring [`matmul_program`] with `lhs`
 /// replaced by a gather.
