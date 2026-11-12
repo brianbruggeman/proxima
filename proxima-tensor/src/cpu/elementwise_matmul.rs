@@ -469,6 +469,8 @@ pub(super) fn run_elementwise_range<B: Deref<Target = [f32]>>(
         Path::Generic
     };
 
+    let mut row_running: Vec<i64> = Vec::new();
+    let mut row_strides: Vec<i64> = Vec::new();
     let mut outer_position = outer_start;
     while outer_position < outer_end {
         unflatten_into(outer_position as u64, outer_extents, &mut outer_coordinate);
@@ -608,6 +610,43 @@ pub(super) fn run_elementwise_range<B: Deref<Target = [f32]>>(
             Some(innermost_dim),
             &mut gather_cursors,
         )?;
+
+        if !matches!(shape, BodyShape::FusedAdamUpdate(..)) {
+            row_running.resize(raw.len(), 0);
+            row_strides.resize(raw.len(), 0);
+            if collapse_gather_row(
+                resolved.node,
+                &gather_cursors,
+                &running,
+                &strides,
+                inner_len,
+                &mut row_running,
+                &mut row_strides,
+            )? {
+                if let BodyShape::Generic(generic_body) = shape {
+                    let needed = generic_body.steps.len() * inner_len.min(GENERIC_WIDTH_TILE);
+                    if step_values.len() < needed {
+                        step_values.resize(needed, 0.0);
+                    }
+                }
+                elementwise_width_fast(
+                    &shape,
+                    &raw,
+                    &row_running,
+                    &row_strides,
+                    &mut output[out_base..out_base + inner_len],
+                    &mut step_values,
+                );
+                #[cfg(feature = "instrument")]
+                {
+                    counters.kernel_calls += 1;
+                    counters.output_writes += inner_len as u64;
+                    counters.operand_loads += (raw.len() * inner_len) as u64;
+                }
+                outer_position += 1;
+                continue;
+            }
+        }
 
         for step in 0..inner_len {
             for (index, data) in raw.iter().enumerate() {

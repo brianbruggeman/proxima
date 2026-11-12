@@ -1804,6 +1804,73 @@ impl<E: GatherIndexElement> GatherCursor<'_, E> {
         }
         Ok(index * self.element_stride)
     }
+
+    /// The offset contribution the index `steps` positions past this cursor's start adds,
+    /// read without advancing; the same range check as [`Self::fetch_and_advance`].
+    fn peek(&self, steps: i64, node: NodeId) -> Result<i64, TensorError> {
+        let index = self.buffer[(self.offset + steps * self.stride) as usize].as_gather_index();
+        if index < 0 || index as u64 >= self.extent {
+            return Err(TensorError::GatherIndexOutOfRange {
+                node,
+                index,
+                extent: self.extent,
+            });
+        }
+        Ok(index * self.element_stride)
+    }
+}
+
+/// Rewrites one output row's gather operands as plain affine spans when every gather operand's
+/// fetched offsets across the `width` positions advance by one constant step: the operand then
+/// reads `row_running + position * row_strides`, which the width kernels take, instead of one
+/// cursor fetch per element. An index that is constant along the row (an embedding row, a
+/// broadcast) is the zero-step case; a unit-step index run (a split of a trailing axis read back
+/// through its own flat index) is the step-one case. Returns `false`, leaving the outputs
+/// unspecified, when some operand's offsets are not an arithmetic progression, or any operand's
+/// resulting base or stride is negative (the width kernels index with `usize`), so the caller
+/// keeps its per-element cursor walk. An index out
+/// of range is an error exactly as the cursor walk reports it.
+pub(super) fn collapse_gather_row(
+    node: NodeId,
+    cursors: &[Option<GatherCursor<'_>>],
+    running: &[i64],
+    strides: &[i64],
+    width: usize,
+    row_running: &mut [i64],
+    row_strides: &mut [i64],
+) -> Result<bool, TensorError> {
+    for (slot, cursor) in cursors.iter().enumerate() {
+        let Some(cursor) = cursor else {
+            if strides[slot] < 0 || running[slot] < 0 {
+                return Ok(false);
+            }
+            row_running[slot] = running[slot];
+            row_strides[slot] = strides[slot];
+            continue;
+        };
+        let first = cursor.peek(0, node)?;
+        let step = if cursor.stride == 0 || width < 2 {
+            0
+        } else {
+            cursor.peek(1, node)? - first
+        };
+        if cursor.stride != 0 {
+            let mut previous = first + step;
+            for position in 2..width as i64 {
+                let current = cursor.peek(position, node)?;
+                if current - previous != step {
+                    return Ok(false);
+                }
+                previous = current;
+            }
+        }
+        if strides[slot] + step < 0 || running[slot] + first < 0 {
+            return Ok(false);
+        }
+        row_running[slot] = running[slot] + first;
+        row_strides[slot] = strides[slot] + step;
+    }
+    Ok(true)
 }
 
 /// Fills one [`GatherCursor`] per operand that gathers (`None` for the
@@ -2504,5 +2571,121 @@ mod rank_select_tests {
         assert_eq!(mask.len(), 12, "a vacuous mask proves nothing");
         let chosen: Vec<usize> = (0..12).filter(|row| mask[*row] == 1.0).collect();
         assert_eq!(chosen, vec![1, 7, 11]);
+    }
+}
+
+#[cfg(test)]
+mod collapse_gather_row_tests {
+    use super::*;
+
+    const NODE: NodeId = NodeId(7);
+    const HEAD_DIM: usize = 32;
+
+    type CollapsedRow = (Vec<i64>, Vec<i64>);
+
+    fn cursor(indices: &[f32], stride: i64, element_stride: i64, extent: u64) -> GatherCursor<'_> {
+        GatherCursor {
+            buffer: indices,
+            offset: 0,
+            stride,
+            element_stride,
+            extent,
+        }
+    }
+
+    fn collapse(
+        cursors: &[Option<GatherCursor<'_>>],
+        running: &[i64],
+        strides: &[i64],
+        width: usize,
+    ) -> Result<Option<CollapsedRow>, TensorError> {
+        let mut row_running = vec![0; running.len()];
+        let mut row_strides = vec![0; running.len()];
+        let collapsed = collapse_gather_row(
+            NODE,
+            cursors,
+            running,
+            strides,
+            width,
+            &mut row_running,
+            &mut row_strides,
+        )?;
+        Ok(collapsed.then_some((row_running, row_strides)))
+    }
+
+    #[test]
+    fn head_split_flat_index_becomes_a_unit_stride_span() {
+        let flat_index: Vec<f32> = (0..384).map(|position| position as f32).collect();
+        let head_five = &flat_index[5 * HEAD_DIM..];
+        let cursors = [Some(cursor(head_five, 1, 1, 384))];
+
+        let collapsed = collapse(&cursors, &[3072], &[0], HEAD_DIM).expect("indices are in range");
+
+        assert_eq!(collapsed, Some((vec![3072 + 160], vec![1])));
+    }
+
+    #[test]
+    fn embedding_row_index_constant_along_the_row_keeps_the_layout_stride() {
+        let token_ids = [101.0_f32, 1996.0, 4937.0];
+        let mut row = cursor(&token_ids, 0, 384, 30522);
+        row.offset = 1;
+
+        let collapsed = collapse(&[Some(row)], &[0], &[1], 384).expect("token id is in range");
+
+        assert_eq!(collapsed, Some((vec![1996 * 384], vec![1])));
+    }
+
+    #[test]
+    fn transposed_key_read_adds_the_layout_stride_to_a_constant_index() {
+        let flat_index: Vec<f32> = (0..384).map(|position| position as f32).collect();
+        let head_two_dim_nine = &flat_index[2 * HEAD_DIM + 9..];
+        let cursors = [Some(cursor(head_two_dim_nine, 0, 1, 384))];
+
+        let collapsed = collapse(&cursors, &[0], &[384], 8).expect("index is in range");
+
+        assert_eq!(collapsed, Some((vec![73], vec![384])));
+    }
+
+    #[test]
+    fn operand_without_a_gather_passes_through_unchanged() {
+        let flat_index: Vec<f32> = (0..HEAD_DIM).map(|position| position as f32).collect();
+        let cursors = [None, Some(cursor(&flat_index, 1, 1, 384))];
+
+        let collapsed = collapse(&cursors, &[11, 0], &[1, 0], HEAD_DIM).expect("in range");
+
+        assert_eq!(collapsed, Some((vec![11, 0], vec![1, 1])));
+    }
+
+    #[test]
+    fn irregular_index_run_keeps_the_per_element_walk() {
+        let shuffled = [0.0_f32, 1.0, 3.0, 4.0];
+        let cursors = [Some(cursor(&shuffled, 1, 1, 8))];
+
+        assert_eq!(collapse(&cursors, &[0], &[0], 4).expect("in range"), None);
+    }
+
+    #[test]
+    fn descending_index_run_would_wrap_the_stride_so_it_is_not_collapsed() {
+        let descending = [3.0_f32, 2.0, 1.0, 0.0];
+        let cursors = [Some(cursor(&descending, 1, 1, 8))];
+
+        assert_eq!(collapse(&cursors, &[0], &[0], 4).expect("in range"), None);
+    }
+
+    #[test]
+    fn index_past_the_extent_is_reported_not_clamped() {
+        let past_the_end = [382.0_f32, 383.0, 384.0];
+        let cursors = [Some(cursor(&past_the_end, 1, 1, 384))];
+
+        let error = collapse(&cursors, &[0], &[0], 3).expect_err("index 384 is out of range");
+
+        assert!(matches!(
+            error,
+            TensorError::GatherIndexOutOfRange {
+                node: NODE,
+                index: 384,
+                extent: 384
+            }
+        ));
     }
 }
