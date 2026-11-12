@@ -107,7 +107,7 @@ fn ternary_block_layouts_render_from_structural_value_and_scale_fields() {
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
-fn compile_on_the_metal_compiler(source: &str, entry: &str) {
+pub(super) fn compile_on_the_metal_compiler(source: &str, entry: &str) {
     let device = MTLCreateSystemDefaultDevice().expect("this box has a Metal device");
     let options = MTLCompileOptions::new();
     options.setLanguageVersion(MTLLanguageVersion::Version3_1);

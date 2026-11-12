@@ -11374,6 +11374,36 @@ fn activation_staging_layout_renders_the_tile_type_in_every_gemm_schedule() {
     }
 }
 
+#[cfg(all(
+    feature = "metal",
+    feature = "metal-tiled-gemm",
+    feature = "metal-grouped-gemm",
+    target_os = "macos"
+))]
+#[test]
+fn staging_pipeline_compiles() {
+    for name in ["float16", "bfloat16"] {
+        let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
+        let packed = BTreeMap::from([(weight_node, Codec::Q4K)]);
+        let dense = temp_env::with_vars(
+            [
+                ("PROXIMA_TILED_GEMM_STAGING", Some(name)),
+                ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("1")),
+            ],
+            || emit(&bound, &packed, NumericPolicy::default()).expect("dense emits"),
+        );
+        super::layout_render_tests::compile_on_the_metal_compiler(&dense.source, &dense.entry);
+
+        let bound = gathered_matmul_op(300, 8, 192, 512);
+        let weight_node = bound.operands()[0].0;
+        let packed = BTreeMap::from([(weight_node, Codec::Q8_0)]);
+        let grouped = temp_env::with_var("PROXIMA_TILED_GEMM_STAGING", Some(name), || {
+            emit(&bound, &packed, NumericPolicy::default()).expect("grouped emits")
+        });
+        super::layout_render_tests::compile_on_the_metal_compiler(&grouped.source, &grouped.entry);
+    }
+}
+
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn activation_staging_layout_changes_the_kernel_identity_only_off_binary32() {
