@@ -5942,6 +5942,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         let leaves = leaves
                             .get_or_insert_with(|| kv_leaf_nodes(active_program, &cache_names));
                         let placements = device.placements(cached_len, leaves, active_layer_roots);
+                        runtime.set_encoded_outputs(&placements.encoded);
                         ssm_input_placements.extend(placements.inputs);
                         ssm_output_placements.extend(placements.outputs);
                     }
@@ -6626,21 +6627,9 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         target_os = "macos"
                     ))]
                     let mut device_kv_step_write_bytes = 0u64;
-                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    #[cfg(all(feature = "instrument", feature = "metal-output-placement", target_os = "macos"))]
                     if let Some(device) = device_kv.as_ref() {
-                        #[cfg(feature = "instrument")]
-                        let narrow_started = read_ticks();
-                        device.commit_step(cached_len, new_count)?;
-                        #[cfg(feature = "instrument")]
-                        {
-                            device_kv_step_write_bytes = device.step_write_bytes(new_count);
-                        }
-                        #[cfg(feature = "instrument")]
-                        debug!(
-                            step = step as u64,
-                            narrow_ms = ticks_to_nanos(elapsed_ticks(narrow_started)) as f64 / 1e6,
-                            "device_kv_narrow"
-                        );
+                        device_kv_step_write_bytes = device.step_write_bytes(new_count);
                     }
                     // attribution slice (2026-09-22, OWNER_BRIEF_dominant_cost):
                     // brackets everything between evaluate() returning and the

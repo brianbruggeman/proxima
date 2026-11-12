@@ -73,6 +73,10 @@ pub(super) struct KvLeafNodes {
 pub(super) struct KvPlacements<'buffers> {
     pub(super) inputs: Vec<(NodeId, &'buffers PlacedBuffer, usize)>,
     pub(super) outputs: Vec<(NodeId, &'buffers PlacedBuffer, usize)>,
+    /// The output nodes whose cache layout is not binary32: the plan encodes them into `outputs`'
+    /// buffer in this format ([`BackendRuntime::set_encoded_outputs`]), on the device, in the step's
+    /// own command buffer.
+    pub(super) encoded: Vec<(NodeId, NumericFormat)>,
 }
 
 struct DeviceKvLayer {
@@ -81,13 +85,11 @@ struct DeviceKvLayer {
     k_even: PlacedBuffer,
     k_odd: PlacedBuffer,
     v: PlacedBuffer,
-    /// Per plane (K even, K odd, V), `Some` for a plane whose cache layout the graph cannot write
-    /// itself (see [`omega::device_row_store_dtype`]): the graph writes this step's rows as f32
-    /// here, because the program cannot place its f32 outputs in a narrower buffer, and [`DeviceKvLayer::commit`] narrows them into the cache once the step's command
-    /// buffers have completed.
-    staging: [Option<PlacedBuffer>; 3],
-    /// Bytes asked of the allocator for the `Some` planes of `staging`, summed.
-    staging_bytes: usize,
+    /// Whether the K planes are stored in a layout the graph can neither write itself (see
+    /// [`omega::device_row_store_dtype`]) nor leave as binary32; the plan then encodes this step's rows into the cache itself ([`KvPlacements::encoded`]).
+    key_encoded: bool,
+    /// [`Self::key_encoded`] for the V rows.
+    value_encoded: bool,
     key_format: NumericFormat,
     /// The key planes' codec, resolved once at allocation.
     key_codec: FormatCodec,
@@ -194,11 +196,12 @@ impl DeviceKvLayer {
         cache: &LayerCache,
         (even_odd_row, v_row): (usize, usize),
         full_capacity_rows: usize,
-        (window_step_rows, staging_rows, compaction_granule_rows): (usize, usize, usize),
+        (window_step_rows, compaction_granule_rows): (usize, usize),
         source: &mut impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
         (key_format, value_format): (&NumericFormat, &NumericFormat),
     ) -> Result<Self, InteropError> {
         let narrow_codecs = kernel_codecs(key_format, value_format)?;
+        let encoded = |narrow: bool, format: &NumericFormat| narrow && omega::device_row_store_dtype(format).is_none();
         let slice_codec = |format: &NumericFormat| {
             FormatCodec::for_format(format).ok_or_else(|| {
                 InteropError::UnsupportedServingConfig(alloc::format!(
@@ -232,32 +235,14 @@ impl DeviceKvLayer {
         let k_even = acquire(source, layer, "k_even", capacity_rows * even_odd_row_bytes)?;
         let k_odd = acquire(source, layer, "k_odd", capacity_rows * even_odd_row_bytes)?;
         let v = acquire(source, layer, "v", capacity_rows * v_row_bytes)?;
-        let f32_bytes = core::mem::size_of::<f32>();
-        let even_odd_bytes = staging_rows * even_odd_row * f32_bytes;
-        let value_bytes = staging_rows * v_row * f32_bytes;
-        let staged = |narrow: bool, format: &NumericFormat, bytes: usize| {
-            (narrow && omega::device_row_store_dtype(format).is_none())
-                .then(|| allocate_placed_buffer(bytes))
-                .transpose()
-        };
-        let staging = [
-            staged(narrow_codecs.0.is_some(), key_format, even_odd_bytes)?,
-            staged(narrow_codecs.0.is_some(), key_format, even_odd_bytes)?,
-            staged(narrow_codecs.1.is_some(), value_format, value_bytes)?,
-        ];
-        let staging_bytes = staging
-            .iter()
-            .zip([even_odd_bytes, even_odd_bytes, value_bytes])
-            .filter_map(|(buffer, bytes)| buffer.as_ref().map(|_| bytes))
-            .sum();
         Ok(Self {
             #[cfg(feature = "instrument")]
             layer,
             k_even,
             k_odd,
             v,
-            staging,
-            staging_bytes,
+            key_encoded: encoded(narrow_codecs.0.is_some(), key_format),
+            value_encoded: encoded(narrow_codecs.1.is_some(), value_format),
             key_format: *key_format,
             key_codec,
             value_format: *value_format,
@@ -479,56 +464,6 @@ impl DeviceKvLayer {
         omega::read_placed_buffer(buffer, byte_offset, &self.value_codec, count)
             .map_err(|error| numeric_failure(&self.value_format, error))
     }
-
-    /// Rounds the `new_count` rows a finished step left in the f32 staging
-    /// buffers into the cache at the rows [`Self::output_row`] names. A layer
-    /// whose cache is f32 has its outputs placed in the cache itself, so there
-    /// is nothing to do. Must run after the step's command buffers completed
-    /// (`evaluate_with_placements` waits) and before the next step reads the
-    /// cache.
-    fn commit(&self, cached_len: usize, new_count: usize) -> Result<(), InteropError> {
-        let output_row = self.output_row(cached_len);
-        for (staging, cache, row_bytes, row, codec, format) in [
-            (
-                &self.staging[0],
-                &self.k_even,
-                self.even_odd_row_bytes,
-                self.even_odd_row,
-                &self.key_codec,
-                &self.key_format,
-            ),
-            (
-                &self.staging[1],
-                &self.k_odd,
-                self.even_odd_row_bytes,
-                self.even_odd_row,
-                &self.key_codec,
-                &self.key_format,
-            ),
-            (
-                &self.staging[2],
-                &self.v,
-                self.v_row_bytes,
-                self.v_row,
-                &self.value_codec,
-                &self.value_format,
-            ),
-        ] {
-            let Some(staging) = staging else {
-                continue;
-            };
-            omega::narrow_placed_buffer(
-                staging,
-                0,
-                cache,
-                output_row * row_bytes,
-                codec,
-                new_count * row,
-            )
-            .map_err(|error| numeric_failure(format, error))?;
-        }
-        Ok(())
-    }
 }
 
 /// A granule of one rows is `retain + step` exactly, the tightest buffer: the tests that count compactions use it.
@@ -590,9 +525,8 @@ impl DeviceKv {
     /// `positions_needed` plus the rows of a speculative draft. `window_step_rows`
     /// is the widest step of any kind, a prefill batch included, and sizes a sliding
     /// layer's linear buffer. `step_rows` is the widest step still to run after this
-    /// adoption: it bounds every later step and sizes the f32 staging of a narrow
-    /// cache, which a cache adopted after its prefill does not need prefill-wide. A
-    /// prefill batch ends inside `positions_needed`, so it adds no full-layer rows.
+    /// adoption: it bounds every later step. A prefill batch ends inside
+    /// `positions_needed`, so it adds no full-layer rows.
     ///
     /// `compaction_granule_rows` rounds a sliding layer's `retain + window_step_rows` buffer up to a
     /// multiple: the slack is how many tokens pass between compactions. A serving call passes
@@ -632,7 +566,7 @@ impl DeviceKv {
                         cache,
                         (*even_odd_row, *v_row),
                         full_capacity_rows,
-                        (window_step_rows, step_rows, compaction_granule_rows),
+                        (window_step_rows, compaction_granule_rows),
                         &mut source,
                         (&key_format, &value_format),
                     )?;
@@ -683,7 +617,7 @@ impl DeviceKv {
     }
 
     /// Gives up the cache buffers of every resident layer so the next [`Self::adopt`] can bind them
-    /// instead of allocating; the f32 staging buffers of a layer whose cache is not f32 are freed here.
+    /// instead of allocating.
     pub(super) fn into_buffers(self) -> Vec<PlacedBuffer> {
         self.layers
             .into_iter()
@@ -749,12 +683,11 @@ impl DeviceKv {
 
     /// Bytes of device KV this cache holds: the three planes of every resident layer, each sized as
     /// [`DeviceKvLayer::allocate`] asked the allocator for it (`capacity_rows` times the row bytes).
-    /// Plus each layer's f32 staging buffers, as recorded in `staging_bytes` at allocation.
     pub(super) fn resident_bytes(&self) -> usize {
         self.layers
             .iter()
             .flatten()
-            .map(|layer| layer.capacity_rows * (2 * layer.even_odd_row_bytes + layer.v_row_bytes) + layer.staging_bytes)
+            .map(|layer| layer.capacity_rows * (2 * layer.even_odd_row_bytes + layer.v_row_bytes))
             .sum()
     }
 
@@ -790,20 +723,6 @@ impl DeviceKv {
     /// The classifier's refusal, as at allocation.
     pub(super) fn value_cache_codec(&self) -> Result<Option<NumericFormat>, InteropError> {
         kernel_codecs(&self.key_format, &self.value_format).map(|(_, value)| value)
-    }
-
-    /// Moves what a finished step wrote into the cache, for every layer whose
-    /// outputs landed in f32 staging ([`DeviceKvLayer::commit`]). `cached_len`
-    /// and `new_count` are the values [`Self::placements`] ran with.
-    pub(super) fn commit_step(
-        &self,
-        cached_len: usize,
-        new_count: usize,
-    ) -> Result<(), InteropError> {
-        self.layers
-            .iter()
-            .flatten()
-            .try_for_each(|layer| layer.commit(cached_len, new_count))
     }
 
     /// Bytes `new_rows` rows of this step wrote into the device cache: every resident layer's K planes
@@ -847,8 +766,7 @@ impl DeviceKv {
     /// Readies every sliding layer for a step at `cached_len` positions.
     /// `sliding_bound` is the program's sliding extent this step
     /// (`KvRing::bound_extent`). Separate from [`Self::placements`] so the
-    /// placements borrow the cache shared, and [`Self::commit_step`] can run
-    /// while the step's placement lists are still alive.
+    /// placements borrow the cache shared while the step's placement lists are alive.
     pub(super) fn ready_step(
         &mut self,
         cached_len: usize,
@@ -870,6 +788,7 @@ impl DeviceKv {
     ) -> KvPlacements<'buffers> {
         let mut inputs = Vec::with_capacity(self.layers.len() * 3);
         let mut outputs = Vec::with_capacity(self.layers.len() * 3);
+        let mut encoded = Vec::new();
         for (index, slot) in self.layers.iter().enumerate() {
             let (
                 Some(layer),
@@ -892,18 +811,18 @@ impl DeviceKv {
                 input_row * layer.even_odd_row_bytes,
             ));
             inputs.push((leaf.v, &layer.v, input_row * layer.v_row_bytes));
-            for (root, staging, cache, row_bytes) in [
-                (even, &layer.staging[0], &layer.k_even, layer.even_odd_row_bytes),
-                (odd, &layer.staging[1], &layer.k_odd, layer.even_odd_row_bytes),
-                (value, &layer.staging[2], &layer.v, layer.v_row_bytes),
-            ] {
-                outputs.push(match staging {
-                    Some(staged) => (*root, staged, 0),
-                    None => (*root, cache, output_row * row_bytes),
-                });
+            outputs.push((*even, &layer.k_even, output_row * layer.even_odd_row_bytes));
+            outputs.push((*odd, &layer.k_odd, output_row * layer.even_odd_row_bytes));
+            outputs.push((*value, &layer.v, output_row * layer.v_row_bytes));
+            if layer.key_encoded {
+                encoded.push((*even, layer.key_format));
+                encoded.push((*odd, layer.key_format));
+            }
+            if layer.value_encoded {
+                encoded.push((*value, layer.value_format));
             }
         }
-        KvPlacements { inputs, outputs }
+        KvPlacements { inputs, outputs, encoded }
     }
 
     /// Hands the rows back to the host caches so [`PrefixState`] and the
@@ -1224,7 +1143,7 @@ pub(in crate::generate) mod tests {
             &cache,
             (EVEN_ODD_ROW, V_ROW),
             capacity_rows,
-            (3, 3, BARE_MINIMUM_GRANULE_ROWS),
+            (3, BARE_MINIMUM_GRANULE_ROWS),
             &mut allocate_placed_buffer,
             (
                 &NumericFormat::Float32,
@@ -1566,13 +1485,6 @@ pub(in crate::generate) mod tests {
         cache
     }
 
-    fn staged_planes<'layer>(layer: &'layer DeviceKvLayer, reason: &str) -> [&'layer PlacedBuffer; 3] {
-        let [Some(even), Some(odd), Some(value)] = &layer.staging else {
-            unreachable!("{reason}")
-        };
-        [even, odd, value]
-    }
-
     fn adopted_half(positions: usize, total_positions: usize) -> (DeviceKv, Vec<LayerCacheState>) {
         let mut caches = alloc::vec![LayerCacheState::Attention(half_exact_cache(positions))];
         let widths = [LayerPadRowWidths::Attention {
@@ -1599,6 +1511,21 @@ pub(in crate::generate) mod tests {
                 (0..width).map(move |column| (position * 2 + column) as f32 + leaf as f32 * 0.5)
             })
             .collect()
+    }
+
+    /// Stores one step's rows at the output row through the host codec: what the plan's rendered encode does on the device.
+    fn store_step_rows(device: &DeviceKv, cached_len: usize, rows: [&[f32]; 3]) {
+        let layer = device.layers[0].as_ref().expect("layer 0 is resident");
+        let output_row = layer.output_row(cached_len);
+        layer
+            .store_f32(&layer.k_even, output_row * layer.even_odd_row_bytes, rows[0])
+            .expect("the even rows fit the cache");
+        layer
+            .store_f32(&layer.k_odd, output_row * layer.even_odd_row_bytes, rows[1])
+            .expect("the odd rows fit the cache");
+        layer
+            .store_value_f32(&layer.v, output_row * layer.v_row_bytes, rows[2])
+            .expect("the value rows fit the cache");
     }
 
     fn bf16_exact_cache(positions: usize) -> LayerCache {
@@ -1640,16 +1567,12 @@ pub(in crate::generate) mod tests {
         assert_eq!(layer.even_odd_row_bytes, EVEN_ODD_ROW * 2);
         assert_eq!(layer.v_row_bytes, V_ROW * 2);
         assert_eq!(device.cache_codec().expect("bf16 is readable"), Some(Codec::BFloat16));
-        assert!(layer.staging.iter().all(Option::is_some), "BF16 cache rows stage f32 outputs");
+        assert!(layer.key_encoded && layer.value_encoded, "BF16 cache rows are encoded into the cache");
 
-        let [staging_even, staging_odd, staging_value] = staged_planes(layer, "BF16 cache has three f32 staging buffers");
         let even = [0.1f32, 0.2, 0.3, 0.4];
         let odd = [-0.1f32, -0.2, -0.3, -0.4];
         let value = [1.1f32, 1.2, 1.3, 1.4, 1.5, 1.6];
-        omega::try_write_placed_buffer_f32(staging_even, 0, &even).expect("the even rows fit their staging buffer");
-        omega::try_write_placed_buffer_f32(staging_odd, 0, &odd).expect("the odd rows fit their staging buffer");
-        omega::try_write_placed_buffer_f32(staging_value, 0, &value).expect("the value rows fit their staging buffer");
-        device.commit_step(cached_len, 1).expect("step narrows into the cache");
+        store_step_rows(&device, cached_len, [&even, &odd, &value]);
         device.flush(&mut caches, cached_len + 1, 80).expect("device kv flushes to host");
 
         let LayerCacheState::Attention(restored) = &caches[0] else {
@@ -1797,16 +1720,12 @@ pub(in crate::generate) mod tests {
         assert_eq!(layer.even_odd_row_bytes, EVEN_ODD_ROW);
         assert_eq!(layer.v_row_bytes, V_ROW);
         assert_eq!(device.cache_codec().expect("bf8 is readable"), Some(Codec::BFloat8));
-        assert!(layer.staging.iter().all(Option::is_some), "BF8 cache rows stage f32 outputs");
+        assert!(layer.key_encoded && layer.value_encoded, "BF8 cache rows are encoded into the cache");
 
-        let [staging_even, staging_odd, staging_value] = staged_planes(layer, "BF8 cache has three f32 staging buffers");
         let even = [0.5f32, -0.5, 1.0, -1.0];
         let odd = [-1.0f32, 1.0, -2.0, 2.0];
         let value = [2.0f32, -2.0, 0.25, -0.25, 0.5, -0.5];
-        omega::try_write_placed_buffer_f32(staging_even, 0, &even).expect("the even rows fit their staging buffer");
-        omega::try_write_placed_buffer_f32(staging_odd, 0, &odd).expect("the odd rows fit their staging buffer");
-        omega::try_write_placed_buffer_f32(staging_value, 0, &value).expect("the value rows fit their staging buffer");
-        device.commit_step(cached_len, 1).expect("step narrows into the cache");
+        store_step_rows(&device, cached_len, [&even, &odd, &value]);
         device.flush(&mut caches, cached_len + 1, 80).expect("device kv flushes to host");
 
         let LayerCacheState::Attention(restored) = &caches[0] else {
@@ -1852,8 +1771,8 @@ pub(in crate::generate) mod tests {
         assert_eq!(layer.even_odd_row_bytes, WIDE_ROW / 32 * 18, "two 18-byte Q4_0 blocks per 64-element row");
         assert_eq!(layer.v_row_bytes, V_ROW * 2, "binary16 value rows");
         assert!(
-            layer.staging[0].is_some() && layer.staging[1].is_some() && layer.staging[2].is_none(),
-            "the Q4_0 key stages in f32; the binary16 value is a scalar layout the graph writes itself"
+            layer.key_encoded && !layer.value_encoded,
+            "the Q4_0 key is encoded by the plan; the binary16 value is a scalar layout the graph writes itself"
         );
         assert_eq!(device.cache_codec().expect("q4_0 is a readable key"), Some(q4_0));
         assert_eq!(device.value_cache_codec().expect("f16 is a readable value"), Some(Codec::Float16));
@@ -1915,16 +1834,15 @@ pub(in crate::generate) mod tests {
     }
 
     #[test]
-    fn a_half_cache_stages_nothing_and_commits_nothing() {
+    fn a_half_cache_is_written_by_the_graph_and_encodes_nothing() {
         let cached_len = 5;
         let (device, _caches) = adopted_half(cached_len, 80);
         let layer = device.layers[0].as_ref().expect("layer 0 is resident");
 
         assert!(
-            layer.staging.iter().all(Option::is_none),
-            "binary16 is a layout the graph writes at the cache width, so no plane is staged"
+            !layer.key_encoded && !layer.value_encoded,
+            "binary16 is a layout the graph writes at the cache width, so the plan encodes no plane"
         );
-        device.commit_step(cached_len, 1).expect("a step with nothing staged commits nothing");
     }
 
     #[test]
@@ -1950,6 +1868,7 @@ pub(in crate::generate) mod tests {
             cached_len * layer.even_odd_row_bytes,
             "the new half row lands at the end of the cached rows"
         );
+        assert!(placements.encoded.is_empty(), "the graph writes binary16 itself, so nothing is encoded");
     }
 
     #[test]
@@ -1971,7 +1890,8 @@ pub(in crate::generate) mod tests {
         let placements = device.placements(cached_len, &leaves, &roots);
 
         let layer = device.layers[0].as_ref().expect("layer 0 is resident");
-        assert!(layer.staging.iter().all(Option::is_none), "an f32 cache needs no staging");
+        assert!(!layer.key_encoded && !layer.value_encoded, "an f32 cache needs no encode");
+        assert!(placements.encoded.is_empty());
         assert!(core::ptr::eq(placements.outputs[0].1, &layer.k_even));
         assert_eq!(
             placements.outputs[0].2,
@@ -2009,34 +1929,14 @@ pub(in crate::generate) mod tests {
     }
 
     #[test]
-    fn a_narrow_cache_stages_only_the_rows_still_to_run_not_the_prefill_width() {
+    fn a_narrow_cache_allocates_only_its_three_cache_planes_and_no_binary32_staging() {
         let (device, acquired_bytes) = adopted_bf16_with_step_rows(37, 1);
 
-        let layer = device.layers[0].as_ref().expect("layer 0 is device resident");
-        let [staging_even, staging_odd, staging_value] = staged_planes(layer, "a half-width cache rounds its rows in from f32 staging");
-        let f32_bytes = core::mem::size_of::<f32>();
-        assert_eq!(
-            [
-                omega::placed_buffer_len(staging_even),
-                omega::placed_buffer_len(staging_odd),
-                omega::placed_buffer_len(staging_value),
-            ],
-            [
-                EVEN_ODD_ROW * f32_bytes,
-                EVEN_ODD_ROW * f32_bytes,
-                V_ROW * f32_bytes
-            ],
-            "one decode row of f32 staging per plane, not the 3-row prefill-wide window step"
-        );
-        assert_eq!(
-            device.max_step_rows(),
-            1,
-            "a later step wider than the staging is refused by the step bound"
-        );
+        assert_eq!(device.max_step_rows(), 1, "a later step wider than the bound is refused");
         assert_eq!(
             acquired_bytes.len(),
             3,
-            "the cache planes come from the source; staging is the layer's own"
+            "the three cache planes come from the source and nothing else is allocated for the layer"
         );
     }
 

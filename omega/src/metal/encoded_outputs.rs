@@ -40,6 +40,16 @@ impl Plan {
         Ok(())
     }
 
+    /// Refuses a plan with encoded outputs: the profiling executors dispatch per op and would
+    /// write binary32 rows into a narrower buffer instead of encoding them.
+    #[cfg(feature = "instrument")]
+    pub(super) fn reject_encoded_outputs(&self) -> Result<(), MetalError> {
+        match self.encoded_outputs.keys().next() {
+            Some(node) => Err(refuse(*node, "the per-op timed executors do not encode outputs")),
+            None => Ok(()),
+        }
+    }
+
     /// Whether `node` is registered as an encoded output.
     #[must_use]
     pub fn is_encoded_output(&self, node: NodeId) -> bool {

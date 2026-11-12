@@ -2585,6 +2585,7 @@ pub(super) mod placed_plan_mode_tests {
             super::PlacedIo {
                 input: &[],
                 output: &[],
+                encoded: &[],
             },
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
@@ -2647,6 +2648,7 @@ pub(super) mod placed_plan_mode_tests {
             super::PlacedIo {
                 input: &[],
                 output: &[],
+                encoded: &[],
             },
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
@@ -2692,6 +2694,7 @@ pub(super) mod placed_plan_mode_tests {
             super::PlacedIo {
                 input: &[],
                 output: &[],
+                encoded: &[],
             },
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Fast,

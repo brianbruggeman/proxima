@@ -364,6 +364,7 @@ pub(super) fn execute_plan_op_timed_inner(
     cpu_reference: Option<&BTreeMap<NodeId, alloc::vec::Vec<f32>>>,
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
     plan.reject_bounded_extension()?;
+    plan.reject_encoded_outputs()?;
     plan.validate_configured_inputs(blocks)?;
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
@@ -537,6 +538,7 @@ pub fn execute_plan_with_placements_op_timed(
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
 ) -> Result<(Evaluated, Vec<OpGpuTiming>), MetalError> {
     plan.reject_bounded_extension()?;
+    plan.reject_encoded_outputs()?;
     plan.validate_configured_inputs(blocks)?;
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;
@@ -786,6 +788,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
     output_placements: &[(NodeId, &PlacedBuffer, usize)],
 ) -> Result<DispatchTimedOutcome, MetalError> {
     plan.reject_bounded_extension()?;
+    plan.reject_encoded_outputs()?;
     plan.validate_configured_inputs(blocks)?;
     let prepared = &plan.prepared;
     let packed_operands = &plan.packed_operands;

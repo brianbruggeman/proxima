@@ -3053,6 +3053,9 @@ pub(super) struct PlanNumerics<'config> {
 pub(super) struct PlacedIo<'buffers> {
     pub(super) input: &'buffers [(NodeId, &'buffers PlacedBuffer, usize)],
     pub(super) output: &'buffers [(NodeId, &'buffers PlacedBuffer, usize)],
+    /// Output nodes (a subset of `output`'s) the plan stores in a numeric format of their own: the
+    /// cache write of a narrow device kv, rendered by `omega::metal::Plan::set_encoded_outputs`.
+    pub(super) encoded: &'buffers [(NodeId, NumericFormat)],
 }
 
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3237,6 +3240,11 @@ pub struct BackendRuntime {
     resident_home: Option<resident_plans::PlanIdentity>,
     pub(crate) plan_hits: usize,
     pub(crate) plan_misses: usize,
+    /// The output nodes a placed plan stores in a numeric format of their own (a narrow device kv's
+    /// cache write), set by [`Self::set_encoded_outputs`] before the step's evaluation and applied to
+    /// every placed plan built after.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) encoded_outputs: Vec<(NodeId, NumericFormat)>,
     /// `(state input, state output)` pairs the next CUDA evaluation keeps on the device; empty
     /// when no recurrent state is carried.
     carry_pairs: Vec<(NodeId, NodeId)>,
@@ -3415,6 +3423,8 @@ impl BackendRuntime {
             resident_home: None,
             plan_hits: 0,
             plan_misses: 0,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            encoded_outputs: Vec::new(),
             carry_pairs: Vec::new(),
             kv_carry_pairs: Vec::new(),
             kv_carry_cached_rows: 0,
@@ -4395,6 +4405,7 @@ impl BackendRuntime {
                     PlacedIo {
                         input: bindings.input_placements,
                         output: bindings.output_placements,
+                        encoded: &[],
                     },
                     &numerics,
                 )
@@ -4467,6 +4478,7 @@ impl BackendRuntime {
                     PlacedIo {
                         input: input_placements,
                         output: output_placements,
+                        encoded: &self.encoded_outputs,
                     },
                     &numerics,
                 )
@@ -4494,6 +4506,18 @@ impl BackendRuntime {
     /// identical superseded-`Plan` leak that clearing fixed there applies
     /// here unchanged: ordinary decode's `merged_len` strictly increases,
     /// so a miss means the previous entry can never be looked up again.
+    /// Names the output nodes the placed plans built from now on store in their own numeric format:
+    /// the narrow cache writes of a device kv ([`super::device_kv::KvPlacements::encoded`]). A plan
+    /// already cached keeps the set it was built with; the set is a function of the program and the
+    /// cache formats, which a runtime holds fixed across a generation.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn set_encoded_outputs(&mut self, encoded: &[(NodeId, NumericFormat)]) {
+        if self.encoded_outputs != encoded {
+            self.encoded_outputs.clear();
+            self.encoded_outputs.extend_from_slice(encoded);
+        }
+    }
+
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     #[allow(clippy::too_many_arguments)]
     pub(super) fn evaluate_with_placements(
@@ -4605,6 +4629,7 @@ impl BackendRuntime {
                 PlacedIo {
                     input: input_placements,
                     output: output_placements,
+                    encoded: &self.encoded_outputs,
                 },
                 &numerics,
             )?;
@@ -4782,6 +4807,7 @@ impl BackendRuntime {
             )?
         };
         plan.mark_resident(resident_names);
+        plan.set_encoded_outputs(placed.encoded.iter().copied())?;
         if numerics.plan_time_constants {
             plan.mark_plan_time_constants_resident();
         }
@@ -4872,6 +4898,7 @@ impl BackendRuntime {
                     PlacedIo {
                         input: input_placements,
                         output: output_placements,
+                        encoded: &self.encoded_outputs,
                     },
                     &numerics,
                 )
@@ -4964,6 +4991,7 @@ impl BackendRuntime {
                     PlacedIo {
                         input: input_placements,
                         output: output_placements,
+                        encoded: &self.encoded_outputs,
                     },
                     &numerics,
                 )
