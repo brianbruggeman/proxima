@@ -76,6 +76,11 @@ pub struct EncodeRule {
     pub highest: i32,
     /// The two bytes after the scale hold `f16(scale * sum(values of codes))`.
     pub stored_sum: bool,
+    /// The raw code whose value is zero (the bias of an offset-binary code, `0` of a two's
+    /// complement one). A block whose finite scale stores as zero, or stores with a non-finite
+    /// inverse, has every code set to this, so it decodes to exactly zero; a NaN or infinite scale
+    /// is not that case and keeps the arithmetic.
+    pub zero_code: u8,
 }
 
 impl BlockLayout {
@@ -105,6 +110,7 @@ mod tests {
                 lowest: -8,
                 highest: 7,
                 stored_sum: false,
+                zero_code: 8,
             }
         );
     }

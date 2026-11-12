@@ -121,6 +121,11 @@ const fn reach_of(layout: &BlockLayout) -> i32 {
     if highest < -lowest { highest } else { -lowest }
 }
 
+/// The raw code that stands for the value zero.
+const fn zero_code_of(layout: &BlockLayout) -> u8 {
+    if is_twos_complement_integer(layout) { 0 } else { layout.element.bias as u8 }
+}
+
 /// The layout's [`EncodeRule`], decided from its fields alone: an offset-binary code centred on its
 /// bias fits the signed peak, a signed or off-centre integer code the peak magnitude, a one-bit
 /// code with a multiplier of two the mean magnitude; `None` for any other layout.
@@ -153,6 +158,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             lowest,
             highest,
             stored_sum,
+            zero_code: 1,
         });
     }
     if layout.multiplier != 1 {
@@ -170,6 +176,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             lowest,
             highest,
             stored_sum,
+            zero_code: zero_code_of(layout),
         });
     }
     if reach_of(layout) > 0 && (is_twos_complement_integer(layout) || bias > 0) {
@@ -181,6 +188,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             lowest,
             highest,
             stored_sum,
+            zero_code: zero_code_of(layout),
         });
     }
     None
@@ -840,6 +848,18 @@ fn code_of(layout: &BlockLayout, rule: &EncodeRule, inverse: f32, value: f32) ->
     }
 }
 
+/// Whether the scale the block will store is zero, or has a non-finite inverse, so no code can
+/// carry a value: [`EncodeRule::zero_code`] then fills the block. A NaN or infinite fitted scale
+/// is not this case (the arithmetic is the incumbent's), and a sign code never divides by it.
+#[inline(always)]
+fn has_degenerate_scale(layout: &BlockLayout, rule: &EncodeRule, scale: f32) -> bool {
+    if matches!(rule.rounding, CodeRounding::NonNegativeBit) || !scale.is_finite() {
+        return false;
+    }
+    let stored = decode(encode(scale, layout.scale.layout), layout.scale.layout);
+    stored == 0.0 || !(1.0 / stored).is_finite()
+}
+
 /// Fits the block's scale and writes the raw codes; returns the scale the block stores and, when
 /// `HIGH_FUSED`, the word of the high plane's bits (code `lane`'s bits at `lane * bits`), summed in
 /// the loop that produces the codes so a vector unit shifts each lane into place.
@@ -851,12 +871,13 @@ fn fit_codes<const ELEMENTS: usize, const HIGH_FUSED: bool>(
     codes: &mut [u8; ELEMENTS],
 ) -> (f32, u32) {
     let (scale, inverse) = fit_scale(rule, input);
+    let degenerate = has_degenerate_scale(layout, rule, scale);
     let lift = u32::from(layout.element.low.bits);
     let bits = layout.element.high.map_or(0, |plane| u32::from(plane.bits));
     let mask = u32::MAX.checked_shr(32 - bits).unwrap_or(0);
     let mut word = 0u32;
     for (lane, (code, &value)) in codes.iter_mut().zip(input).enumerate() {
-        *code = code_of(layout, rule, inverse, value);
+        *code = if degenerate { rule.zero_code } else { code_of(layout, rule, inverse, value) };
         if HIGH_FUSED {
             word = word.wrapping_add(((u32::from(*code) >> lift) & mask).wrapping_shl(lane as u32 * bits));
         }

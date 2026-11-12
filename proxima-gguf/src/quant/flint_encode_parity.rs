@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use proxima_numeric::BlockLayout;
+use proxima_numeric::{BlockLayout, CodeRounding, EncodeRule};
 
 use crate::quant::real_weights::{open_gguf, read_tensor_prefix};
 use crate::quant::{QuantError, dispatch, pq2_0, q1_0, q2_0, q4_0, q5_0, q8_0, reference_encoders};
@@ -89,37 +89,60 @@ fn adversarial(elements: usize) -> Vec<f32> {
     blocks
 }
 
-fn mismatched_blocks(format: &Format, values: &[f32]) -> (usize, usize) {
+fn mismatched_blocks(format: &Format, values: &[f32]) -> (usize, usize, usize) {
     let blocks = values.len() / format.elements;
     let mut expected = vec![0u8; blocks * format.block_bytes];
     let mut derived = vec![0u8; expected.len()];
     (format.reference)(values, &mut expected).expect("reference encodes whole blocks");
     (format.derived)(values, &mut derived).expect("derived encodes whole blocks");
+    let rule = format.layout.encode_rule().expect("the six formats have a rule");
+    let mut zero_block = vec![0u8; format.block_bytes];
+    (format.derived)(&vec![0.0f32; format.elements], &mut zero_block).expect("an all-zero block encodes");
     let mut differing = 0;
+    let mut degenerate = 0;
     for (index, (left, right)) in expected
         .chunks(format.block_bytes)
         .zip(derived.chunks(format.block_bytes))
         .enumerate()
     {
-        if left == right {
-            continue;
-        }
         let input = &values[index * format.elements..(index + 1) * format.elements];
-        let peak = input.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
-        // x * (1 / scale) overflows to infinity here, so the f32 -> integer cast is outside its
-        // defined range and the two hand-written routines disagree (see the module report)
-        let divisor = format.layout.encode_rule().map_or(1.0, |rule| rule.divisor.abs() as f32);
-        let scale = peak / divisor;
-        let overflowing_inverse = scale != 0.0 && (1.0 / scale).is_infinite();
-        std::eprintln!(
-            "{} block {index} differs (overflowing inverse: {overflowing_inverse})\n  reference {left:02x?}\n  derived   {right:02x?}",
-            format.name
-        );
-        if !overflowing_inverse {
+        if is_degenerate(&rule, input) {
+            // the frozen routines cast x * (1 / scale) outside its defined range here and disagree
+            // with each other (q4_0 saturates through i8, q2_0 overflows its i32 add); the rule
+            // defines the block instead: every code is the zero code and the block decodes to zero
+            degenerate += 1;
+            assert_eq!(&right[2..], &zero_block[2..], "{} block {index}: not the zero code", format.name);
+            let mut decoded = vec![1.0f32; format.elements];
+            dequantize(format.name, right, &mut decoded).expect("the block decodes");
+            assert!(decoded.iter().all(|value| *value == 0.0), "{} block {index}: not all zeros", format.name);
+        } else if left != right {
+            std::eprintln!("{} block {index} differs\n  reference {left:02x?}\n  derived   {right:02x?}", format.name);
             differing += 1;
         }
     }
-    (blocks, differing)
+    (blocks, differing, degenerate)
+}
+
+/// The rule's own test: a finite fitted scale that stores as zero or with an infinite inverse.
+fn is_degenerate(rule: &EncodeRule, input: &[f32]) -> bool {
+    if matches!(rule.rounding, CodeRounding::NonNegativeBit) {
+        return false;
+    }
+    let peak = input.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+    let scale = peak / rule.divisor.abs() as f32;
+    let stored = half::f16::from_f32(scale).to_f32();
+    scale.is_finite() && (stored == 0.0 || !(1.0 / stored).is_finite())
+}
+
+fn dequantize(name: &str, data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
+    match name {
+        "q4_0" => q4_0::dequantize(data, output),
+        "q5_0" => q5_0::dequantize(data, output),
+        "q8_0" => q8_0::dequantize(data, output),
+        "q1_0" => q1_0::dequantize(data, output),
+        "q2_0" => q2_0::dequantize(data, output),
+        _ => pq2_0::dequantize(data, output),
+    }
 }
 
 #[test]
@@ -128,17 +151,20 @@ fn rule_derived_encoders_equal_the_frozen_encoders_byte_for_byte_on_flint_rows_a
     assert!(tensors > 0 && !rows.is_empty(), "no flint tensor decoded");
     std::eprintln!("flint rows: {} f32 from {tensors} tensors of types {types:?}", rows.len());
     let mut compared = 0usize;
+    let mut degenerate_total = 0usize;
     for format in formats() {
         let usable = rows.len() / format.elements * format.elements;
-        let (real_blocks, real_diff) = mismatched_blocks(&format, &rows[..usable]);
-        let (edge_blocks, edge_diff) = mismatched_blocks(&format, &adversarial(format.elements));
+        let (real_blocks, real_diff, real_zero) = mismatched_blocks(&format, &rows[..usable]);
+        let (edge_blocks, edge_diff, edge_zero) = mismatched_blocks(&format, &adversarial(format.elements));
         std::eprintln!(
-            "{}: real {real_blocks} blocks, {real_diff} differ; adversarial {edge_blocks} blocks, {edge_diff} differ",
+            "{}: real {real_blocks} blocks, {real_diff} differ, {real_zero} zero-code; adversarial {edge_blocks} blocks, {edge_diff} differ, {edge_zero} zero-code",
             format.name
         );
         assert_eq!(real_diff + edge_diff, 0, "{}", format.name);
+        degenerate_total += real_zero + edge_zero;
         compared += real_blocks + edge_blocks;
     }
     assert!(compared > 0);
-    std::eprintln!("total blocks compared: {compared}");
+    assert!(degenerate_total > 0, "the subnormal adversarial blocks must reach the zero-code path");
+    std::eprintln!("total blocks compared: {compared}, zero-code blocks: {degenerate_total}");
 }
