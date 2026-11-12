@@ -4408,6 +4408,9 @@ pub enum DenseBatchedGemmRejection {
     /// The token group's flattened extent is below
     /// `crate::sized::TILED_GEMM_MIN_TOKENS`.
     TokenExtentBelowMinimum { token_extent: u64, min_tokens: u64 },
+    /// The tile grid (row tiles x column tiles x batch depth) holds fewer threadgroups than
+    /// `crate::sized::DENSE_TILED_MIN_THREADGROUPS`: too few to occupy the device.
+    GridBelowMinimum { threadgroups: u64, min_threadgroups: u64 },
 }
 
 /// The dense (unquantized) counterpart to [`TiledGemmBlock`]: two DENSE
@@ -4620,6 +4623,20 @@ pub(super) fn classify_dense_batched_gemm(
             return Err(DenseBatchedGemmRejection::TokenExtentBelowMinimum {
                 token_extent,
                 min_tokens: crate::sized::TILED_GEMM_MIN_TOKENS,
+            });
+        }
+        let feature_extent = resolved.extents[feature_axis as usize];
+        let depth: u64 = batch_axes
+            .iter()
+            .map(|&axis| resolved.extents[axis as usize])
+            .product();
+        let threadgroups = feature_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_M)
+            * token_extent.div_ceil(crate::sized::TILED_GEMM_BLOCK_N)
+            * depth;
+        if threadgroups < crate::sized::DENSE_TILED_MIN_THREADGROUPS {
+            return Err(DenseBatchedGemmRejection::GridBelowMinimum {
+                threadgroups,
+                min_threadgroups: crate::sized::DENSE_TILED_MIN_THREADGROUPS,
             });
         }
         Ok(DenseBatchedGemmBlock {

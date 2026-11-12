@@ -347,6 +347,14 @@ fn emit_sizing_consts() {
             "pub const TILED_GEMM_MIN_TOKENS: u64 = {min_tokens};\n"
         ));
 
+        let dense_min_threadgroups = require_nonzero(
+            "tiled_gemm.dense_min_threadgroups",
+            resolve_int(&root, "tiled_gemm", "dense_min_threadgroups"),
+        );
+        out.push_str(&format!(
+            "pub const DENSE_TILED_MIN_THREADGROUPS: u64 = {dense_min_threadgroups};\n"
+        ));
+
         let block_m = require_multiple_of_sixteen(
             "tiled_gemm.block_m",
             require_nonzero(

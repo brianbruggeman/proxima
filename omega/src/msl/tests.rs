@@ -2120,6 +2120,12 @@ fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path_single_fetch() {
 #[cfg(feature = "metal-tiled-gemm")]
 pub(super) const TILED_ADMITTED_TOKENS: u32 = crate::sized::TILED_GEMM_MIN_TOKENS as u32;
 
+/// Batch depth that fills the dense tile grid to the build's own minimum, so a one-tile fixture is
+/// admitted by the grid gate (`DenseBatchedGemmRejection::GridBelowMinimum`) the way a real batched
+/// product is.
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) const TILED_ADMITTED_BATCH: u32 = crate::sized::DENSE_TILED_MIN_THREADGROUPS as u32;
+
 /// Same shape as [`matmul_op`] (`lhs=[features,k]` weight,
 /// `rhs=[k,tokens]` activation), but with the out_map listing the TOKEN
 /// axis before the feature axis -- `output_axes = [1, 0]` instead of
@@ -2463,8 +2469,8 @@ fn dense_batched_gemm_admission_is_switch_gated() {
 
     let shapes: &[(u32, u32, u32, u32)] = &[
         (510, 512, 8, 128),
-        (TILED_ADMITTED_TOKENS, 32, 8, 128),
-        (TILED_ADMITTED_TOKENS + 32, 96, 4, 256),
+        (TILED_ADMITTED_TOKENS, 32, TILED_ADMITTED_BATCH, 128),
+        (TILED_ADMITTED_TOKENS + 32, 96, TILED_ADMITTED_BATCH, 256),
     ];
 
     let count_admitted = |var_value: Option<&str>| -> usize {
@@ -2623,7 +2629,7 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_float_storage_codec_pairs_admit_with_both_rewrites() {
-    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
+    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, TILED_ADMITTED_BATCH, 16);
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -2686,7 +2692,7 @@ fn programmable_tiled_float_storage_codec_pairs_admit_with_both_rewrites() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_f16_renderer_uses_existing_float_tiles() {
-    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
+    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, TILED_ADMITTED_BATCH, 16);
     let operands = bound.operands();
     let packed = BTreeMap::from([
         (operands[0].0, Codec::Float16),
@@ -2712,7 +2718,7 @@ fn programmable_tiled_f16_renderer_uses_existing_float_tiles() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_unsupported_codec_is_rejected_by_dense_classifier() {
-    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
+    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, TILED_ADMITTED_BATCH, 16);
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -2753,7 +2759,7 @@ fn programmable_tiled_ragged_k_and_feature_tail_keep_bounds_masks() {
     let bound = dense_batched_score_shaped_op(
         TILED_ADMITTED_TOKENS,
         5,
-        1,
+        TILED_ADMITTED_BATCH,
         (crate::sized::TILED_GEMM_BLOCK_K + 3) as u32,
     );
     let operands = bound.operands();
@@ -2784,7 +2790,7 @@ fn programmable_tiled_ragged_k_and_feature_tail_keep_bounds_masks() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_numeric_policy_requires_both_rewrites() {
-    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
+    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, TILED_ADMITTED_BATCH, 16);
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -2881,7 +2887,7 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
-    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 2, 16);
+    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, TILED_ADMITTED_BATCH, 16);
     let packed = BTreeMap::from([
         (bound.operands()[0].0, Codec::BFloat16),
         (bound.operands()[1].0, Codec::Float16),
@@ -2892,7 +2898,7 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
     assert!(admitted.source.contains("simdgroup_bfloat8x8"));
     assert!(admitted.source.contains("as_type<bfloat>"));
     assert!(!admitted.source.contains("bf16_element(in"));
-    assert_eq!(admitted.grid.depth, 2);
+    assert_eq!(admitted.grid.depth, u64::from(TILED_ADMITTED_BATCH));
     let admitted_extras = metal_specialization(
         &bound,
         &packed,
@@ -2944,7 +2950,7 @@ fn programmable_tiled_classifier_follows_ownership_for_reversed_operand_order() 
         let bound = dense_batched_score_shaped_op_with_operand_order(
             TILED_ADMITTED_TOKENS,
             5,
-            1,
+            TILED_ADMITTED_BATCH,
             16,
             reversed,
         );
@@ -2989,9 +2995,9 @@ fn programmable_tiled_classifier_follows_ownership_for_reversed_operand_order() 
 #[test]
 fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
     for same_codecs in [true, false] {
-        let original = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 2, 16);
+        let original = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, TILED_ADMITTED_BATCH, 16);
         let reversed =
-            dense_batched_score_shaped_op_with_operand_order(TILED_ADMITTED_TOKENS, 5, 2, 16, true);
+            dense_batched_score_shaped_op_with_operand_order(TILED_ADMITTED_TOKENS, 5, TILED_ADMITTED_BATCH, 16, true);
         let packed_for = |bound: &BoundOp| {
             if same_codecs {
                 BTreeMap::from([
@@ -3053,7 +3059,7 @@ fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn programmable_tiled_float_storage_does_not_depend_on_build_gate() {
-    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
+    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, TILED_ADMITTED_BATCH, 16);
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -11177,7 +11183,7 @@ mod expert_grouped_route_segments {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn dense_bf16_weight_read_parenthesizes_the_compound_offset() {
-    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, 1, 16);
+    let bound = dense_batched_score_shaped_op(TILED_ADMITTED_TOKENS, 5, TILED_ADMITTED_BATCH, 16);
     let operands = bound.operands();
     let packed = BTreeMap::from([(operands[0].0, Codec::BFloat16)]);
 
@@ -11254,4 +11260,40 @@ fn moe_topk_selected_score_kernel_reads_unbiased_scores_and_shifts_every_later_s
     assert!(shifted.source.contains("exp(max_value - max0)"));
     assert!(!shifted.source.contains("weight_scores"));
     assert_ne!(selected.entry, shifted.entry, "the pipeline cache must key the two kernels apart");
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn a_dense_product_whose_tile_grid_cannot_occupy_the_device_stays_on_the_cooperative_kernel() {
+    let decode_scores = dense_batched_score_shaped_op(96, 8, 4, 64);
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        ref output_axes,
+        ..
+    } = decode_scores.kind
+    else {
+        panic!("dense fixture reduces")
+    };
+
+    let rejection = classify_dense_batched_gemm(
+        &decode_scores,
+        &[None, None],
+        NumericPolicy::llama_relaxed(),
+        reduce_op,
+        init,
+        output_axes,
+    )
+    .err()
+    .expect("96 positions pass the token minimum but 4 batches of one tile do not fill the grid");
+
+    assert!(
+        matches!(
+            rejection,
+            DenseBatchedGemmRejection::GridBelowMinimum { threadgroups, min_threadgroups }
+                if threadgroups < min_threadgroups
+                    && min_threadgroups == crate::sized::DENSE_TILED_MIN_THREADGROUPS
+        ),
+        "{rejection:?}"
+    );
 }
