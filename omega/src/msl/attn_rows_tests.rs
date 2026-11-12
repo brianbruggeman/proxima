@@ -1481,8 +1481,8 @@ fn card_15_v_reuse_stages_v_for_distinct_query_owners() {
         AttentionRowSchedule::shared_kv(),
     )
     .expect("BF8 cached V decodes before shared staging");
-    assert!(bf16.contains("omega_bf16_load_matrix(value_float"));
-    assert!(bf8.contains("omega_bf8_load_matrix(value_float"));
+    assert!(bf16.contains("omega_cache_load_matrix(value_float"));
+    assert!(bf8.contains("omega_cache_load_matrix(value_float"));
     assert!(bf16.contains("omega_zero_padded_value_rows(value_float"));
     assert!(bf8.contains("omega_zero_padded_value_rows(value_float"));
 }

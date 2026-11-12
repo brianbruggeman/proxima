@@ -1,33 +1,59 @@
+use super::layout_render::{
+    block_element_msl, hardware_type, layout_load_msl, readable_block_layout, readable_scalar_cache,
+};
 use super::signature_tokens_prelude::{QUERY_STAGE_PAD, query_tile_staged};
 use super::*;
 
-const BF16_CACHE_HELPER: &str = r#"
-inline float omega_bf16_to_float(ushort value) { return as_type<float>((uint)value << 16); }
-inline void omega_bf16_load_matrix(thread simdgroup_float8x8& destination, device const ushort* source, ulong stride, ushort lane, bool transposed) {
-    short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
-    if (transposed) {
-        destination.thread_elements()[0] = omega_bf16_to_float(source[(long)(column) * stride + row]);
-        destination.thread_elements()[1] = omega_bf16_to_float(source[(long)(column + 1) * stride + row]);
-    } else {
-        destination.thread_elements()[0] = omega_bf16_to_float(source[(long)row * stride + column]);
-        destination.thread_elements()[1] = omega_bf16_to_float(source[(long)row * stride + column + 1]);
+/// `omega_cache_element(base, element)`: element `element` of the cache at `base`, as binary32,
+/// defined from the cache's own description: the layout load of a scalar of whole bytes, the block
+/// accessor of a readable block layout, or a plain read when the cache is binary32 (the branches that
+/// call it are dead there). One definition serves every format the row-tiled kernel reads.
+fn cache_element_helper(cached_kv_codec: Option<Codec>) -> String {
+    let Some(format) = cached_kv_codec else {
+        return String::from(
+            "inline float omega_cache_element(device const uchar* base, long element) { return ((device const float*)base)[element]; }\n",
+        );
+    };
+    if let Some((layout, storage)) = readable_scalar_cache(&format) {
+        return format!(
+            "{}inline float omega_cache_element(device const uchar* base, long element) {{ return omega_cache_code((uint)((device const {storage}*)base)[element]); }}\n",
+            layout_load_msl(layout, "omega_cache_code")
+        );
+    }
+    match readable_block_layout(&format) {
+        Some(layout) => format!(
+            "{}inline float omega_cache_element(device const uchar* base, long element) {{ return omega_cache_block(base + (element / {elements}L) * {bytes}L, (uint)(element % {elements}L)); }}\n",
+            block_element_msl(layout, "omega_cache_block"),
+            elements = layout.elements,
+            bytes = layout.block_bytes,
+        ),
+        None => String::new(),
     }
 }
-inline void omega_bf8_load_matrix(thread simdgroup_float8x8& destination, device const uchar* source, ulong stride, ushort lane, bool transposed) {
+
+/// The fragment load every described cache layout shares: element `offset + r * stride + c` of the
+/// cache at `base`, decoded by `omega_cache_element`, which [`cache_element_helper`] defines from the
+/// cache's own description.
+const CACHE_MATRIX_HELPER: &str = r#"
+inline void omega_cache_load_matrix(thread simdgroup_float8x8& destination, device const uchar* base, long offset, ulong stride, ushort lane, bool transposed) {
     short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
     if (transposed) {
-        destination.thread_elements()[0] = omega_bf8_to_float(source[(long)(column) * stride + row]);
-        destination.thread_elements()[1] = omega_bf8_to_float(source[(long)(column + 1) * stride + row]);
+        destination.thread_elements()[0] = omega_cache_element(base, offset + (long)(column) * stride + row);
+        destination.thread_elements()[1] = omega_cache_element(base, offset + (long)(column + 1) * stride + row);
     } else {
-        destination.thread_elements()[0] = omega_bf8_to_float(source[(long)row * stride + column]);
-        destination.thread_elements()[1] = omega_bf8_to_float(source[(long)row * stride + column + 1]);
+        destination.thread_elements()[0] = omega_cache_element(base, offset + (long)row * stride + column);
+        destination.thread_elements()[1] = omega_cache_element(base, offset + (long)row * stride + column + 1);
     }
 }
 inline simdgroup_float8x8 omega_widen_fragment(simdgroup_half8x8 narrow) { simdgroup_float8x8 wide; wide.thread_elements()[0] = float(narrow.thread_elements()[0]); wide.thread_elements()[1] = float(narrow.thread_elements()[1]); return wide; }
 inline float omega_key_scalar(device const float* source) { return *source; }
 inline float omega_key_scalar(device const half* source) { return float(*source); }
-inline float omega_key_scalar(device const ushort* source) { return omega_bf16_to_float(*source); }
-inline float omega_key_scalar(device const uchar* source) { return omega_bf8_to_float(*source); }
+inline void omega_cache_load_key_matrix(thread simdgroup_float8x8& destination, device const uchar* base, long offset, ulong stride, ushort lane, long rows_left) {
+    short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
+    long last_key = max(rows_left - 1L, 0L);
+    destination.thread_elements()[0] = omega_cache_element(base, offset + min((long)column, last_key) * (long)stride + row);
+    destination.thread_elements()[1] = omega_cache_element(base, offset + min((long)column + 1L, last_key) * (long)stride + row);
+}
 template <typename Matrix, typename Source>
 inline void omega_load_key_matrix(thread Matrix& destination, device const Source* source, ulong stride, ushort lane, long rows_left) {
     short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
@@ -273,12 +299,20 @@ pub(super) fn render_cached_attention_row_tiled_with(
             node: resolved.node,
             reason: ROW_TILED_KV_REASON,
         })?;
-    if prefetch_next_block && cached_kv_codec == Some(Codec::Float16) {
-        return Err(EmitError::CachedAttentionKvCodecNotSupported {
-            node: resolved.node,
-            reason: "next-block prefetch stages cached K/V as F32, BFloat16 or BFloat8, not Float16",
-        });
+    if let Some(layout) = cached_kv_codec.as_ref().and_then(readable_block_layout) {
+        let elements = u64::from(layout.elements);
+        if (*head_dim / 2) % elements != 0 || *head_dim % elements != 0 {
+            return Err(EmitError::CachedAttentionKvCodecNotSupported {
+                node: resolved.node,
+                reason: "a block cache needs K plane rows of head_dim / 2 and V rows of head_dim to be whole blocks",
+            });
+        }
     }
+    let native_half_cache = cached_kv_codec
+        .as_ref()
+        .and_then(readable_scalar_cache)
+        .is_some_and(|(layout, _)| hardware_type(&layout) == Some("half"));
+    let narrow_cache = cached_kv_codec.is_some();
     let operand_format = if half_operands {
         Codec::Float16
     } else {
@@ -322,13 +356,10 @@ pub(super) fn render_cached_attention_row_tiled_with(
             }
             .to_string(),
         ),
+        ("@NARROW_CACHE@", narrow_cache.to_string()),
         (
-            "@BF16_CACHE@",
-            (cached_kv_codec == Some(Codec::BFloat16)).to_string(),
-        ),
-        (
-            "@BF8_CACHE@",
-            (cached_kv_codec == Some(Codec::BFloat8)).to_string(),
+            "@GENERIC_CACHE@",
+            (narrow_cache && !native_half_cache).to_string(),
         ),
         (
             "@MMA_HELPERS@",
@@ -346,7 +377,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
         ),
         (
             "@F16_CACHE@",
-            (cached_kv_codec == Some(Codec::Float16)).to_string(),
+            native_half_cache.to_string(),
         ),
         ("@KV_REUSE_SHARED_K@", shared_k.to_string()),
         ("@KV_REUSE_SHARED_V@", shared_v.to_string()),
@@ -432,8 +463,8 @@ pub(super) fn render_cached_attention_row_tiled_with(
     ];
     let mut source = String::new();
     preamble(&mut source);
-    source.push_str(super::cached_attention_render::BF8_VECTOR_HELPER);
-    source.push_str(BF16_CACHE_HELPER);
+    source.push_str(&cache_element_helper(cached_kv_codec));
+    source.push_str(CACHE_MATRIX_HELPER);
     if !half_operands {
         source.push_str(SHARED_K_FLOAT_HELPER);
     }
@@ -591,16 +622,15 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                                 long fragment_offset = ((long)key_tile * (half_dim / 8L) + (depth / 8L) + step_index) * 64L;
                                 @SHARED_K_LOAD@(key_even_tile[group][step_index], prefetched_key_even + fragment_offset, 8, lane);
                                 @SHARED_K_LOAD@(key_odd_tile[group][step_index], prefetched_key_odd + fragment_offset, 8, lane);
-                            } else if (@BF16_CACHE@ && mode == 0L) {
-                                device const ushort* cached_even = (device const ushort*)in2 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
-                                device const ushort* cached_odd = (device const ushort*)in3 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
+                            } else if (@GENERIC_CACHE@ && mode == 0L) {
+                                long cached_offset = (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
                                 simdgroup_float8x8 even_float; simdgroup_float8x8 odd_float;
                                 if (key_rows_left >= 8L) {
-                                    omega_bf16_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
-                                    omega_bf16_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                                    omega_cache_load_matrix(even_float, (device const uchar*)in2, cached_offset, (ulong)(kv_heads * half_dim), lane, true);
+                                    omega_cache_load_matrix(odd_float, (device const uchar*)in3, cached_offset, (ulong)(kv_heads * half_dim), lane, true);
                                 } else {
-                                    omega_load_key_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, key_rows_left);
-                                    omega_load_key_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, key_rows_left);
+                                    omega_cache_load_key_matrix(even_float, (device const uchar*)in2, cached_offset, (ulong)(kv_heads * half_dim), lane, key_rows_left);
+                                    omega_cache_load_key_matrix(odd_float, (device const uchar*)in3, cached_offset, (ulong)(kv_heads * half_dim), lane, key_rows_left);
                                 }
                                 key_even_tile[group][step_index] = @NARROW_TO_OPERAND_EVEN@;
                                 key_odd_tile[group][step_index] = @NARROW_TO_OPERAND_ODD@;
@@ -613,19 +643,6 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                                     simdgroup_load(even_half, cached_even, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
                                     simdgroup_load(odd_half, cached_odd, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
                                     even_float = omega_widen_fragment(even_half); odd_float = omega_widen_fragment(odd_half);
-                                } else {
-                                    omega_load_key_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, key_rows_left);
-                                    omega_load_key_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, key_rows_left);
-                                }
-                                key_even_tile[group][step_index] = @NARROW_TO_OPERAND_EVEN@;
-                                key_odd_tile[group][step_index] = @NARROW_TO_OPERAND_ODD@;
-                            } else if (@BF8_CACHE@ && mode == 0L) {
-                                device const uchar* cached_even = (device const uchar*)in2 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
-                                device const uchar* cached_odd = (device const uchar*)in3 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
-                                simdgroup_float8x8 even_float; simdgroup_float8x8 odd_float;
-                                if (key_rows_left >= 8L) {
-                                    omega_bf8_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
-                                    omega_bf8_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
                                 } else {
                                     omega_load_key_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, key_rows_left);
                                     omega_load_key_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, key_rows_left);
@@ -840,16 +857,13 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                                 if (prefetch_next_block && mode == 0L && step > 0L) {
                                     long fragment_offset = ((long)key_tile * (head_dim / 8L) + dimension_block) * 64L;
                                     @PREFETCH_LOAD@(value_float, prefetched_value + fragment_offset, 8, lane);
-                                } else if (@BF16_CACHE@ && mode == 0L) {
-                                    device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
-                                    omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                                } else if (@GENERIC_CACHE@ && mode == 0L) {
+                                    long cached_offset = key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                                    omega_cache_load_matrix(value_float, (device const uchar*)in6, cached_offset, (ulong)(kv_heads * head_dim), lane, false);
                                 } else if (@F16_CACHE@ && mode == 0L) {
                                     device const half* cached_value = (device const half*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
                                     simdgroup_half8x8 value_half; simdgroup_load(value_half, cached_value, (ulong)(kv_heads * head_dim));
                                     value_float = omega_widen_fragment(value_half);
-                                } else if (@BF8_CACHE@ && mode == 0L) {
-                                    device const uchar* cached_value = (device const uchar*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
-                                    omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
                                 } else {
                                     simdgroup_load(value_float, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
                                 }
@@ -883,16 +897,13 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                         if (prefetch_next_block && mode == 0L && step > 0L) {
                             long fragment_offset = ((long)key_tile * (head_dim / 8L) + dimension_block) * 64L;
                             @PREFETCH_LOAD@(value_float, prefetched_value + fragment_offset, 8, lane);
-                        } else if (@BF16_CACHE@ && mode == 0L) {
-                            device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
-                            omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                        } else if (@GENERIC_CACHE@ && mode == 0L) {
+                            long cached_offset = key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                            omega_cache_load_matrix(value_float, (device const uchar*)in6, cached_offset, (ulong)(kv_heads * head_dim), lane, false);
                         } else if (@F16_CACHE@ && mode == 0L) {
                             device const half* cached_value = (device const half*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
                             simdgroup_half8x8 value_half; simdgroup_load(value_half, cached_value, (ulong)(kv_heads * head_dim));
                             value_float = omega_widen_fragment(value_half);
-                        } else if (@BF8_CACHE@ && mode == 0L) {
-                            device const uchar* cached_value = (device const uchar*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
-                            omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
                         } else {
                             simdgroup_load(value_float, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
                         }
@@ -914,12 +925,9 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                         if (prefetch_next_block && mode == 0L && step > 0L) {
                             long fragment_offset = ((long)key_tile * (head_dim / 8L) + dimension_block) * 64L;
                             @PREFETCH_LOAD@(value_float, prefetched_value + fragment_offset, 8, lane);
-                        } else if (@BF16_CACHE@ && mode == 0L) {
-                            device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
-                            omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
-                        } else if (@BF8_CACHE@ && mode == 0L) {
-                            device const uchar* cached_value = (device const uchar*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
-                            omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                        } else if (@NARROW_CACHE@ && mode == 0L) {
+                            long cached_offset = key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                            omega_cache_load_matrix(value_float, (device const uchar*)in6, cached_offset, (ulong)(kv_heads * head_dim), lane, false);
                         } else {
                             simdgroup_load(value_float, value_ptr + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8, (ulong)(kv_heads * head_dim));
                         }
@@ -976,25 +984,14 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                 device const float* key_odd_ptr = (device const float*)in3 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
                 simdgroup_float8x8 even_float;
                 simdgroup_float8x8 odd_float;
-                if (@BF16_CACHE@) {
-                    device const ushort* cached_even = (device const ushort*)in2 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
-                    device const ushort* cached_odd = (device const ushort*)in3 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
+                if (@NARROW_CACHE@) {
+                    long cached_offset = (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
                     if (next_rows_left >= 8L) {
-                        omega_bf16_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
-                        omega_bf16_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                        omega_cache_load_matrix(even_float, (device const uchar*)in2, cached_offset, (ulong)(kv_heads * half_dim), lane, true);
+                        omega_cache_load_matrix(odd_float, (device const uchar*)in3, cached_offset, (ulong)(kv_heads * half_dim), lane, true);
                     } else {
-                        omega_load_key_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, next_rows_left);
-                        omega_load_key_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, next_rows_left);
-                    }
-                } else if (@BF8_CACHE@) {
-                    device const uchar* cached_even = (device const uchar*)in2 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
-                    device const uchar* cached_odd = (device const uchar*)in3 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
-                    if (next_rows_left >= 8L) {
-                        omega_bf8_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
-                        omega_bf8_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
-                    } else {
-                        omega_load_key_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, next_rows_left);
-                        omega_load_key_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, next_rows_left);
+                        omega_cache_load_key_matrix(even_float, (device const uchar*)in2, cached_offset, (ulong)(kv_heads * half_dim), lane, next_rows_left);
+                        omega_cache_load_key_matrix(odd_float, (device const uchar*)in3, cached_offset, (ulong)(kv_heads * half_dim), lane, next_rows_left);
                     }
                 } else if (next_rows_left >= 8L) {
                     simdgroup_load(even_float, key_even_ptr, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
@@ -1014,12 +1011,9 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                 long fragment_offset = (long)fragment_index * 64L;
                 device const float* value_ptr = (device const float*)in6 + next_key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8L;
                 simdgroup_float8x8 value_float;
-                if (@BF16_CACHE@) {
-                    device const ushort* cached_value = (device const ushort*)in6 + next_key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8L;
-                    omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
-                } else if (@BF8_CACHE@) {
-                    device const uchar* cached_value = (device const uchar*)in6 + next_key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8L;
-                    omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                if (@NARROW_CACHE@) {
+                    long cached_offset = next_key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8L;
+                    omega_cache_load_matrix(value_float, (device const uchar*)in6, cached_offset, (ulong)(kv_heads * head_dim), lane, false);
                 } else {
                     simdgroup_load(value_float, value_ptr, (ulong)(kv_heads * head_dim));
                 }
