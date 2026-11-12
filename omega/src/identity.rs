@@ -46,6 +46,18 @@ use proxima_numeric::{NumericPolicy};
 
 use crate::lowering::PackedOperands;
 
+/// A proved name for a format or layout: FNV-1a over its `Debug` text, which prints every field of
+/// the description, as 16 hex digits. Two descriptions that differ in any field get different
+/// names, so a cache key or helper name built from it cannot let two formats share a kernel.
+// only the kernel-rendering backends name kernels; a build with none of them has no caller
+#[cfg_attr(not(any(test, feature = "metal-core", feature = "wgpu-backend", feature = "cuda")), allow(dead_code))]
+pub(crate) fn description_fingerprint(description: &impl core::fmt::Debug) -> String {
+    let hash = format!("{description:?}")
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |state, byte| (state ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
+    format!("{hash:016x}")
+}
+
 /// Which renderer is asking [`kernel_identity`] for a fingerprint — selects
 /// only the name prefix. Every other axis is computed the same way for
 /// every language; see this module's doc for why a language tag, not three
@@ -566,8 +578,21 @@ mod gated {
     /// tiled bodies, `crate::wgsl`'s `packed_element_fn`, `crate::cuda`'s
     /// `packed_element_expr`) needs this in its cache identity, or two
     /// operands differing only in codec can share one compiled kernel.
-    fn codec_token(codec: Option<Codec>) -> char {
-        match codec {
+    fn push_codec_token(identity: &mut String, codec: Option<Codec>) {
+        match codec_letter(codec) {
+            Some(letter) => identity.push(letter),
+            None => {
+                let described = codec.map_or_else(String::new, |format| description_fingerprint(&format));
+                identity.push_str(&format!("~{described}~"));
+            }
+        }
+    }
+
+    /// The frozen single-letter token of a codec that has one, `None` for a codec whose name is its
+    /// whole field description ([`description_fingerprint`]): a letter shared by two formats, or a
+    /// `?` fallback, would let two formats compile to one cached kernel.
+    fn codec_letter(codec: Option<Codec>) -> Option<char> {
+        Some(match codec {
             // these letters are a frozen kernel-identity contract: every rendered entry
             // name carries one, and `omega/tests/*` assert on markers like `cFfB1`.
             Some(Codec::Q2K) => '2',
@@ -605,10 +630,11 @@ mod gated {
             Some(Codec::Q1_0) => 'u',
             Some(Codec::Q2_0) => 'v',
             Some(Codec::Pq2_0) => 'W',
-            Some(Codec::Ptq1_0) => 'X',
+            // 'X' above is Bf4E2M1's frozen letter; sharing it would make the two collide
+            Some(Codec::Ptq1_0) => return None,
             None => 'f',
-            Some(_) => '?',
-        }
+            Some(_) => return None,
+        })
     }
 
     /// The one fingerprint every renderer's pipeline/name cache derives from —
@@ -888,7 +914,7 @@ mod gated {
         if quantized.iter().any(Option::is_some) {
             identity.push_str("_c");
             for codec in &quantized {
-                identity.push(codec_token(*codec));
+                push_codec_token(&mut identity, *codec);
             }
         }
 
@@ -1011,6 +1037,46 @@ mod gated {
         }
 
         identity
+    }
+
+    #[cfg(test)]
+    mod codec_token_tests {
+        use proxima_numeric::codec::Codec;
+
+        use super::*;
+
+        fn token(codec: Codec) -> String {
+            let mut identity = String::new();
+            push_codec_token(&mut identity, Some(codec));
+            identity
+        }
+
+        #[test]
+        fn every_codec_gets_a_name_no_other_codec_shares() {
+            let tokens: Vec<(Codec, String)> =
+                Codec::ALL.iter().map(|codec| (*codec, token(*codec))).collect();
+
+            let collisions: Vec<(Codec, Codec)> = tokens
+                .iter()
+                .enumerate()
+                .flat_map(|(position, (first, first_token))| {
+                    tokens[position + 1..]
+                        .iter()
+                        .filter(move |(_, second_token)| second_token == first_token)
+                        .map(move |(second, _)| (*first, *second))
+                })
+                .collect();
+
+            assert!(!tokens.is_empty(), "an empty codec list compares nothing");
+            assert_eq!(collisions, Vec::new(), "two codecs share a kernel identity token");
+        }
+
+        #[test]
+        fn a_frozen_letter_is_unchanged_and_a_letterless_codec_is_named_by_its_description() {
+            assert_eq!(token(Codec::Q8_0), "8");
+            assert_eq!(token(Codec::Bf4E2M1), "X");
+            assert!(token(Codec::Ptq1_0).starts_with('~'), "{}", token(Codec::Ptq1_0));
+        }
     }
 }
 
