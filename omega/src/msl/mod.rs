@@ -104,6 +104,7 @@ use crate::identity::{
 ))]
 use crate::sized::PACKED_ROW_NSG;
 use crate::sized::SIMD_WIDTH;
+use sub_block_assembled_matvec::{LevelCodes, level_matvec_msl};
 use sub_block_matvec::{SubBlockMatvecGeometry, sub_block_matvec_msl};
 
 #[macro_use]

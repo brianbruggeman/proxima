@@ -1194,7 +1194,7 @@ pub(super) fn operand_read_from_block_origin(
 /// `multi_row_index32_active`'s admission only ever calls this for a codec
 /// `classify_packed_row_block` already whitelisted (`Q3_K`/`Q4_K`/`Q5_K`/
 /// `Q6_K`/`Q8_0`/`Q4_0`), so the fallback name is dead code, never rendered.
-fn codec_element_fn_name(codec: Codec) -> &'static str {
+pub(super) fn codec_element_fn_name(codec: Codec) -> &'static str {
     match codec {
         Codec::Q2K => "q2k_element",
         Codec::Q3K => "q3k_element",

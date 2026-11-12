@@ -224,11 +224,25 @@ fn run_with(case: &Case, slab: &Slab, activation: &[f32]) -> Run {
 }
 
 fn cooperative(case: &Case, slab: &Slab) -> Run {
-    temp_env::with_var("PROXIMA_TILED_GEMM_DISABLE", Some(case.disable_token), || run(case, slab))
+    cooperative_with(case, slab, &activation(slab.reduction, case.per_selected_activation))
+}
+
+fn cooperative_with(case: &Case, slab: &Slab, activation: &[f32]) -> Run {
+    temp_env::with_vars(
+        [("PROXIMA_TILED_GEMM_DISABLE", Some(case.disable_token)), ("PROXIMA_PACKED_ROW_DISABLE", Some(case.disable_token))],
+        || run_with(case, slab, activation),
+    )
 }
 
 fn tiled(case: &Case, slab: &Slab) -> Run {
     temp_env::with_var("PROXIMA_TILED_GEMM_DISABLE", None::<&str>, || run(case, slab))
+}
+
+fn row_blocked(case: &Case, slab: &Slab) -> Run {
+    temp_env::with_vars(
+        [("PROXIMA_TILED_GEMM_DISABLE", Some(case.disable_token)), ("PROXIMA_PACKED_ROW_DISABLE", None::<&str>)],
+        || run(case, slab),
+    )
 }
 
 fn grouped_tiled_kernel_ran(keys: &[String]) -> bool {
@@ -281,9 +295,30 @@ fn assert_rendered_cooperative_equals_hand(case: &Case) {
     let expected = fixture_bits(case);
     let actual = cooperative(case, &slab);
     assert!(!grouped_tiled_kernel_ran(&actual.kernel_keys),"{}: the cooperative control must not run the tiled kernel: {:?}", case.tensor, actual.kernel_keys);
+    assert!(actual.kernel_keys.iter().all(|key| !key.contains("_cpfB")), "{}: the cooperative control must not run the row-blocked kernel: {:?}", case.tensor, actual.kernel_keys);
     assert_eq!(expected.len(), TOKENS * SELECTED * ROWS, "the fixture holds one f32 per token, selected expert and row");
     let mismatches = bits(&actual.output).iter().zip(&expected).filter(|(got, want)| got != want).count();
     assert_eq!(mismatches, 0, "{}: {mismatches} of {} cooperative f32 outputs differ from the hand-written kernel's bits", case.tensor, expected.len());
+}
+
+const F32_RELATIVE_TOLERANCE: f32 = 1.0e-5;
+
+/// With the tiled GEMM off, a level codec's gate and up rows (one activation row per token) take the rendered
+/// row-blocked matvec; it folds each row in a different f32 order than the cooperative kernel, so it agrees to
+/// f32 rounding, not bit for bit. `iq4xs_row_blocked_matvec_parity` measures both kernels against an f64 reduction
+/// (cooperative 2.1e-7 of the summed absolute terms, the rendered matvec 1.5e-8).
+fn assert_row_blocked_agrees_with_cooperative(case: &Case) {
+    let slab = read_slab(case);
+    if std::env::var_os("PROXNUM77_CAPTURE_DIR").is_some() {
+        return;
+    }
+    let expected = fixture_bits(case);
+    let actual = row_blocked(case, &slab);
+    assert!(actual.kernel_keys.iter().any(|key| key.contains("_cpfB")), "{}: the row-blocked kernel was never selected: {:?}", case.tensor, actual.kernel_keys);
+    let identical = bits(&actual.output).iter().zip(&expected).filter(|(got, want)| got == want).count();
+    let worst = worst_relative_row_error(&expected, &actual.output);
+    eprintln!("{}: elements={} bit_identical={identical} worst_relative_row_error={worst:e}", case.tensor, expected.len());
+    assert!(worst <= F32_RELATIVE_TOLERANCE, "{}: row-blocked result drifted from the cooperative bits by {worst:e} of a row's norm", case.tensor);
 }
 
 fn assert_tiled_agrees_with_cooperative(case: &Case) {
@@ -374,7 +409,7 @@ fn iq4_xs_down_projection_activation_past_the_half_range_stays_finite_and_matche
         })
         .collect();
     let tiled_run = temp_env::with_var("PROXIMA_TILED_GEMM_DISABLE", None::<&str>, || run_with(case, &slab, &activation));
-    let cooperative_run = temp_env::with_var("PROXIMA_TILED_GEMM_DISABLE", Some(case.disable_token), || run_with(case, &slab, &activation));
+    let cooperative_run = cooperative_with(case, &slab, &activation);
     assert!(grouped_tiled_kernel_ran(&tiled_run.kernel_keys), "the tiled kernel must run: {:?}", tiled_run.kernel_keys);
     let non_finite = tiled_run.output.iter().filter(|value| !value.is_finite()).count();
     assert_eq!(non_finite, 0, "the tiled kernel produced non-finite outputs from finite activations");
@@ -400,4 +435,14 @@ fn control_one_flipped_scale_byte_changes_only_its_row_of_the_tiled_result() {
         .collect();
     assert!(!differing_rows.is_empty(), "flipping a scale byte must change the result: the control saw no effect");
     assert!(differing_rows.iter().all(|&row| row == 0), "only the flipped row may change, saw rows {differing_rows:?}");
+}
+
+#[test]
+fn iq4xs_gate_row_blocked_matvec_agrees_with_the_cooperative_bits() {
+    assert_row_blocked_agrees_with_cooperative(&CASES[0]);
+}
+
+#[test]
+fn iq4xs_up_row_blocked_matvec_agrees_with_the_cooperative_bits() {
+    assert_row_blocked_agrees_with_cooperative(&CASES[1]);
 }
