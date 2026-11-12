@@ -2,7 +2,8 @@
 //! (commit 36745c59, `scripts/onnx_reference/bench.py`) and `proxima-onnx/examples/bge_eval.rs`:
 //! 3 sentences, 1 warmup embed of sentence 0, 5 runs, per-run mean, `CoV` across run means.
 //!
-//! env: `BGE_MODEL_PATH` (required), `ORT_LIB_DIR`, `BGE_ORT_RUNS` (default 5), `BGE_ORT_EMB_DIR`.
+//! env: `BGE_MODEL_PATH` (required), `ORT_LIB_DIR`, `BGE_ORT_RUNS` (default 5), `BGE_ORT_EMB_DIR`,
+//! `BGE_ORT_PROFILE_PREFIX` (turns on onnxruntime's per-node profiler; the json lands at `<prefix>_<timestamp>.json`).
 
 use std::env;
 use std::fs;
@@ -15,6 +16,7 @@ use ort_arm::{EmbedSession, OrtRuntime, coefficient_of_variation, cosine, lib_di
 const MODEL_PATH_ENV: &str = "BGE_MODEL_PATH";
 const RUNS_ENV: &str = "BGE_ORT_RUNS";
 const EMB_DIR_ENV: &str = "BGE_ORT_EMB_DIR";
+const PROFILE_PREFIX_ENV: &str = "BGE_ORT_PROFILE_PREFIX";
 const DEFAULT_EMB_DIR: &str = "/Users/brianbruggeman/.cache/kvgate/proxnum71";
 const WARMUP_PASSES: usize = 1;
 
@@ -48,7 +50,8 @@ fn main() -> Result<()> {
     println!("config: CPU EP intra_op=1 inter_op=1 sequential batch=1 warmup={WARMUP_PASSES} runs={runs}");
     println!("loadavg start: {}", load_average());
 
-    let session = EmbedSession::new(&runtime, &model_path)?;
+    let profile_prefix = env::var_os(PROFILE_PREFIX_ENV).map(PathBuf::from);
+    let session = EmbedSession::with_profile_prefix(&runtime, &model_path, profile_prefix.as_deref())?;
     for _ in 0..WARMUP_PASSES {
         session.embed(SENTENCES[0].1)?;
     }
@@ -73,6 +76,9 @@ fn main() -> Result<()> {
         last_embeddings = embeddings;
     }
     println!("loadavg end: {}", load_average());
+    if profile_prefix.is_some() {
+        println!("onnxruntime profile json (timings above include profiler overhead): {}", session.end_profiling()?.display());
+    }
 
     for ((text, tokens), samples) in SENTENCES.iter().zip(&per_sentence_ms) {
         let sentence_mean = mean(samples);
