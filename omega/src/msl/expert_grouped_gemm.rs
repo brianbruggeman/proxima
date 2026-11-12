@@ -977,8 +977,21 @@ const GROUPED_PREPASS_THREADS: u64 = 1024;
 /// decomposition stays on the segment scan.
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) fn grouped_route_compacted(block: &TiledGemmBlock) -> bool {
+    block.gathered.is_some_and(|expert| expert.compacted)
+}
+
+/// Whether an op whose weight has `feature_extent` output features takes the
+/// compacted route. The locate walk of the compacted route runs once per
+/// threadgroup, and an op with more row tiles launches proportionally more
+/// threadgroups for the same weight bytes; past
+/// `GROUPED_GEMM_COMPACTED_MAX_ROW_TILES` row tiles the segment scan is
+/// cheaper (`[grouped_gemm]` in `omega-runtime.toml` carries the measurement).
+#[cfg(feature = "metal-grouped-gemm")]
+pub(super) fn grouped_route_is_compacted(route_flat: bool, feature_extent: u64) -> bool {
     crate::sized::GROUPED_GEMM_ROUTE_COMPACTED
-        && block.gathered.is_some_and(|expert| expert.route_flat)
+        && route_flat
+        && feature_extent.div_ceil(GROUPED_TILE_ROWS)
+            <= crate::sized::GROUPED_GEMM_COMPACTED_MAX_ROW_TILES
 }
 
 #[cfg(all(feature = "metal-tiled-gemm", not(feature = "metal-grouped-gemm")))]

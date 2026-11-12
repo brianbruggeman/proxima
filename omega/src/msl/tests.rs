@@ -9003,7 +9003,8 @@ mod expert_grouped_gemm {
             block.gathered,
             Some(ExpertGather {
                 slot: 0,
-                route_flat: true
+                route_flat: true,
+                compacted: crate::sized::GROUPED_GEMM_ROUTE_COMPACTED
             })
         );
         assert_eq!(block.token_axes, vec![0]);
@@ -9215,7 +9216,8 @@ mod expert_grouped_gemm {
             block.gathered,
             Some(ExpertGather {
                 slot: 0,
-                route_flat: true
+                route_flat: true,
+                compacted: crate::sized::GROUPED_GEMM_ROUTE_COMPACTED
             })
         );
         assert_eq!(block.token_axes, vec![0, 1]);
@@ -10237,7 +10239,8 @@ mod expert_grouped_decode_description {
             block.gathered,
             Some(ExpertGather {
                 slot: 0,
-                route_flat: true
+                route_flat: true,
+                compacted: crate::sized::GROUPED_GEMM_ROUTE_COMPACTED
             })
         );
         assert_eq!(block.codec, codec);
