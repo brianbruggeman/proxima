@@ -1091,54 +1091,35 @@ pub fn execute_plan_with_placements_dispatch_timed(
                     if let Some(previous) = stage_encoder.take() {
                         previous.finish();
                     }
-                    let profile_position = position < position_count;
-                    let descriptor = profile_position
-                        .then(objc2_metal::MTLComputePassDescriptor::computePassDescriptor);
-                    if let Some(descriptor) = &descriptor {
-                        let attachment = unsafe {
-                            descriptor
-                                .sampleBufferAttachments()
-                                .objectAtIndexedSubscript(0)
-                        };
-                        attachment.setSampleBuffer(Some(&sample_buffers[position_chunk]));
-                    }
+                    let descriptor = objc2_metal::MTLComputePassDescriptor::computePassDescriptor();
+                    let attachment = unsafe {
+                        descriptor
+                            .sampleBufferAttachments()
+                            .objectAtIndexedSubscript(0)
+                    };
+                    attachment.setSampleBuffer(Some(&sample_buffers[position_chunk]));
                     let (start_index, end_index) = match split_at {
                         None => (2 * position_local, 2 * position_local + 1),
                         Some(split) if position == split => (objc2_metal::MTLCounterDontSample, 2),
                         Some(_) => (0, 1),
                     };
-                    if let Some(descriptor) = &descriptor {
-                        let attachment = unsafe {
-                            descriptor
-                                .sampleBufferAttachments()
-                                .objectAtIndexedSubscript(0)
-                        };
-                        unsafe {
-                            attachment.setStartOfEncoderSampleIndex(start_index as NSUInteger);
-                            attachment.setEndOfEncoderSampleIndex(end_index as NSUInteger);
-                        }
+                    unsafe {
+                        attachment.setStartOfEncoderSampleIndex(start_index as NSUInteger);
+                        attachment.setEndOfEncoderSampleIndex(end_index as NSUInteger);
                     }
-                    let opened = match descriptor {
-                        Some(descriptor) => command_buffer
-                            .computeCommandEncoderWithDescriptor(&descriptor)
-                            .ok_or_else(|| MetalError::CompileFailed {
-                                log: "command buffer refused to hand out a stage-sampled compute encoder"
-                                    .to_string(),
-                            })?,
-                        None => command_buffer
-                            .computeCommandEncoder()
-                            .ok_or_else(|| MetalError::CompileFailed {
-                                log: "command buffer refused to hand out a compute encoder"
-                                    .to_string(),
-                            })?,
-                    };
+                    let opened = command_buffer
+                        .computeCommandEncoderWithDescriptor(&descriptor)
+                        .ok_or_else(|| MetalError::CompileFailed {
+                            log: "command buffer refused to hand out a stage-sampled compute encoder"
+                                .to_string(),
+                        })?;
                     stage_encoder = Some(EncoderGuard::new(opened.clone()));
                     opened
                 }
             }
         };
 
-        if dispatch_boundary && position < position_count {
+        if dispatch_boundary {
             unsafe {
                 encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
                     &sample_buffers[position_chunk],
@@ -1168,7 +1149,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             None,
             None,
         )?;
-        if dispatch_boundary && position < position_count {
+        if dispatch_boundary {
             unsafe {
                 encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
                     &sample_buffers[position_chunk],
@@ -1303,18 +1284,14 @@ pub fn execute_plan_with_placements_dispatch_timed(
         let gpu_ns = if split_at.is_some() {
             0
         } else {
-            if position >= position_count {
+            let chunk = &raw_chunks[position / positions_per_buffer];
+            let local = position % positions_per_buffer;
+            let start = read_timestamp(chunk, 2 * local);
+            let end = read_timestamp(chunk, 2 * local + 1);
+            if start == u64::MAX || end == u64::MAX {
                 0
             } else {
-                let chunk = &raw_chunks[position / positions_per_buffer];
-                let local = position % positions_per_buffer;
-                let start = read_timestamp(chunk, 2 * local);
-                let end = read_timestamp(chunk, 2 * local + 1);
-                if start == u64::MAX || end == u64::MAX {
-                    0
-                } else {
-                    (end.wrapping_sub(start) as f64 * ns_per_gpu_tick).max(0.0) as u64
-                }
+                (end.wrapping_sub(start) as f64 * ns_per_gpu_tick).max(0.0) as u64
             }
         };
         let (
