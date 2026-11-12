@@ -105,6 +105,10 @@ pub(super) fn report_op_timings(step: usize, timings: &[OpGpuTiming], program: &
             extents = ?timing.extents,
             gpu_ns = timing.gpu_ns,
             operand_bytes = timing.operand_bytes,
+            output_axes = ?timing.output_axes,
+            weight_name = ?timing.weight_name,
+            packed_codec = ?timing.packed_codec,
+            packed_kernel_variant = timing.packed_kernel_variant,
             "op_profile_op: one position's gpu time in the profiled step"
         );
     }
