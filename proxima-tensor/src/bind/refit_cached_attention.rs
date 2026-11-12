@@ -161,6 +161,7 @@ fn refit_attention(bound: &BoundOp, next: &Shapes, query_may_move: bool) -> Opti
         new_key_rows,
         head_dim,
         rotary_dim,
+        attention_sink,
         ..
     } = &bound.kind
     else {
@@ -185,7 +186,9 @@ fn refit_attention(bound: &BoundOp, next: &Shapes, query_may_move: bool) -> Opti
         let in_range = new.checked_sub(1)?.checked_add(cached)? < F32_EXACT_INTEGER_BOUND;
         (consistent && cached > 0 && in_range).then_some((cached, new))?
     };
-    if has_pass_plane && !pass_planes_agree(operands, next_query_rows, refit_cached, refit_new, next) {
+    // the sink, when bound, is the one operand after the pass triple
+    let before_sink = &operands[..operands.len() - usize::from(*attention_sink && !operands.is_empty())];
+    if has_pass_plane && !pass_planes_agree(before_sink, next_query_rows, refit_cached, refit_new, next) {
         return None;
     }
     let mut patched = bound.clone();
@@ -216,7 +219,7 @@ fn new_rows_follow(new: u64, next_query_rows: u64, query_rows: u64, new_key_rows
 /// (`cached_attention_candidates` re-appends it after the optional
 /// `cached_len`): query pass, cached key pass, new key pass.
 fn pass_planes_agree(
-    operands: &BoundOperands,
+    operands: &[(NodeId, Layout, Option<Lookup>)],
     query_rows: u64,
     cached_rows: u64,
     new_rows: u64,

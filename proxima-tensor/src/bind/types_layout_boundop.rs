@@ -223,6 +223,17 @@ pub enum BoundOpKind {
     /// window that is at least `new_key_rows` makes the lower bound vacuous
     /// on the new range; a prefill past the window is where it cuts.
     ///
+    /// `attention_sink` appends ONE more operand after every slot above (the
+    /// optional ninth `cached_len` and the optional pass triple): a rank-1
+    /// `[kv_heads * query_groups]` per-query-head scalar `s[h]`, indexed
+    /// `h = kv_head * query_groups + group`. It joins the softmax as one extra
+    /// key whose value is zero: the running maximum is `max(running_max,
+    /// s[h])` and `exp(s[h] - max)` is added to the denominator, so a head
+    /// may attend to nothing (llama.cpp `ggml_compute_forward_soft_max_f32`'s
+    /// `sk` branch; `spec::append_attention_sink_addend` is the graph it
+    /// replaces). When `false` the op has no such operand and every executor
+    /// and kernel is byte-identical to the sink-less form.
+    ///
     /// `rotary_dim` is the RoPE-rotated width per head (`head_dim` when
     /// every column rotates — every dense decoder today); when
     /// `rotary_dim < head_dim`, `operands` carries THREE more trailing
@@ -257,6 +268,7 @@ pub enum BoundOpKind {
         cached_lower_inclusive: i64,
         new_upper_inclusive: i64,
         arithmetic: CachedAttentionArithmetic,
+        attention_sink: bool,
     },
     /// One backend-neutral gated-delta-net recurrence step
     /// ([`crate::spec::append_delta_net_step`]'s own ~12-op chain,
@@ -940,6 +952,7 @@ impl BoundOp {
                 cached_lower_inclusive,
                 new_upper_inclusive,
                 arithmetic,
+                attention_sink,
             } => BoundOpKind::CachedAttention {
                 operands: rebase_operands(operands, split_axis, chunk_start),
                 query_rows: *query_rows,
@@ -953,6 +966,7 @@ impl BoundOp {
                 cached_lower_inclusive: *cached_lower_inclusive,
                 new_upper_inclusive: *new_upper_inclusive,
                 arithmetic: *arithmetic,
+                attention_sink: *attention_sink,
             },
             BoundOpKind::Elementwise { body, operands } => BoundOpKind::Elementwise {
                 body: body.clone(),

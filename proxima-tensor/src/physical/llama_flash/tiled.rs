@@ -292,6 +292,17 @@ impl Shared<'_> {
                     let values = &data.values[(kv_head * data.padded_rows + first) * head_dim..][..TILE_KV * head_dim];
                     value_row(kernels, &scores, values, accumulator);
                 }
+                if let Some(sink) = self.score.sink_of(query_head) {
+                    if sink > running_max {
+                        let rescale = expf(running_max - sink);
+                        for value in accumulator.iter_mut() {
+                            *value *= rescale;
+                        }
+                        running_sum = running_sum * rescale + 1.0;
+                    } else {
+                        running_sum += expf(sink - running_max);
+                    }
+                }
                 let inverse = if running_sum == 0.0 { 0.0 } else { 1.0 / running_sum };
                 let output_start = query_head * head_dim;
                 for (slot, value) in out[output_start..output_start + head_dim].iter_mut().zip(accumulator.iter()) {

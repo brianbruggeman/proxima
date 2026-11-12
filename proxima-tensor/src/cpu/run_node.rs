@@ -561,6 +561,7 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         cached_lower_inclusive,
         new_upper_inclusive,
         arithmetic,
+        attention_sink,
     } = &resolved.kind
     else {
         return Err(TensorError::NotLowerable {
@@ -571,22 +572,30 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
     // `rotary_dim < head_dim` (`BoundOpKind::CachedAttention`'s own doc) is
     // the discriminator for the trailing three-operand pass plane -- never
     // the operand count alone, since the optional ninth `cached_len` slot
-    // already varies independently of it.
+    // already varies independently of it. The sink, when present, is the one
+    // operand after all of those.
     let pass_present = rotary_dim < head_dim;
+    let (sink_operand, operands_before_sink) = match (*attention_sink, operands.split_last()) {
+        (true, Some((sink, rest))) => (Some(sink), rest),
+        (true, None) => (None, operands.as_slice()),
+        (false, _) => (None, operands.as_slice()),
+    };
     let expected_lengths: &[usize] = if pass_present { &[11, 12] } else { &[8, 9] };
-    if !expected_lengths.contains(&operands.len())
+    if !expected_lengths.contains(&operands_before_sink.len())
+        || (*attention_sink && sink_operand.is_none())
         || operands.iter().any(|(_, _, lookup)| lookup.is_some())
     {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
             reason: "cached attention requires eight or nine base operands, plus three more \
-                     when a partial-rotary pass plane is present",
+                     when a partial-rotary pass plane is present, plus one when an attention \
+                     sink is bound",
         });
     }
     let cached_len_index = if pass_present {
-        (operands.len() == 12).then_some(8)
+        (operands_before_sink.len() == 12).then_some(8)
     } else {
-        (operands.len() == 9).then_some(8)
+        (operands_before_sink.len() == 9).then_some(8)
     };
     // The optional ninth operand shares its slot between two DIFFERENT
     // runtime scalars, discriminated by `cached_key_rows`
@@ -782,7 +791,20 @@ pub(super) fn run_cached_attention<B: Deref<Target = [f32]> + Sync>(
         rotary_dim: *rotary_dim,
         pass,
     };
+    let sinks = match sink_operand {
+        Some((node, layout, _)) => {
+            if layout.base != 0 || layout.strides.as_slice() != [1] {
+                return Err(TensorError::NotLowerable {
+                    node: resolved.node,
+                    reason: "cached attention's sink operand must be a contiguous per-head vector",
+                });
+            }
+            Some(buffer_of(buffers, *node)?)
+        }
+        None => None,
+    };
     let score = crate::physical::CachedAttentionScore {
+        sinks,
         scale: *scale,
         bands: [
             crate::physical::CausalBand {

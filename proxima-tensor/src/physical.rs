@@ -308,9 +308,29 @@ pub struct CachedAttentionRotary<'buffer> {
 
 /// The scalar attention domain [`stream_cached_attention_split_gqa`] scores
 /// with — bundled with [`CachedAttentionRotary`] for the same arity reason.
-pub struct CachedAttentionScore {
+pub struct CachedAttentionScore<'buffer> {
     pub scale: f32,
     pub bands: [CausalBand; 2],
+    /// one attention-sink scalar per query head, `h = kv_head * query_groups + group`
+    /// (`BoundOpKind::CachedAttention::attention_sink`): the sink joins the row
+    /// maximum and `exp(sink - maximum)` joins the denominator with a zero value.
+    pub sinks: Option<&'buffer [f32]>,
+}
+
+impl CachedAttentionScore<'_> {
+    pub(crate) fn sinks_fit(&self, extents: &AttentionExtents) -> bool {
+        self.sinks.is_none_or(|sinks| {
+            extents
+                .kv_heads
+                .checked_mul(extents.query_groups)
+                .is_some_and(|heads| heads == sinks.len() as u64)
+        })
+    }
+
+    /// the sink of one query head, `None` when this call carries no sinks.
+    pub(crate) fn sink_of(&self, query_head: usize) -> Option<f32> {
+        self.sinks.and_then(|sinks| sinks.get(query_head).copied())
+    }
 }
 
 /// GQA form of `stream_cached_attention_split`. Each query row contains
@@ -332,10 +352,14 @@ pub fn stream_cached_attention_split_gqa(
     output: &mut [f32],
     extents: AttentionExtents,
     rotary: CachedAttentionRotary<'_>,
-    score: CachedAttentionScore,
+    score: CachedAttentionScore<'_>,
 ) -> bool {
     let CachedAttentionRotary { rotary_dim, pass } = rotary;
-    let CachedAttentionScore { scale, bands } = score;
+    if !score.sinks_fit(&extents) {
+        return false;
+    }
+    let sinks = score.sinks;
+    let CachedAttentionScore { scale, bands, .. } = score;
     if extents.head_dim == 0
         || rotary_dim == 0
         || rotary_dim > extents.head_dim
@@ -509,6 +533,17 @@ pub fn stream_cached_attention_split_gqa(
                             }
                             running_sum += weight;
                         }
+                    }
+                }
+                if let Some(sink) = sinks.map(|sinks| sinks[query_head]) {
+                    if sink > running_max {
+                        let old_scale = libm::expf(running_max - sink);
+                        for value in output_row.iter_mut() {
+                            *value *= old_scale;
+                        }
+                        running_sum = running_sum * old_scale + 1.0;
+                    } else {
+                        running_sum += libm::expf(sink - running_max);
                     }
                 }
                 if running_sum != 0.0 {
@@ -691,6 +726,7 @@ mod tests {
             },
             CachedAttentionScore {
                 scale: 1.0,
+                sinks: None,
                 bands: [
                     CausalBand {
                         lower_inclusive: -1,
@@ -755,6 +791,7 @@ mod tests {
             },
             CachedAttentionScore {
                 scale: 1.0,
+                sinks: None,
                 bands: [
                     CausalBand {
                         lower_inclusive: i64::MIN,
@@ -837,6 +874,7 @@ mod tests {
             },
             CachedAttentionScore {
                 scale: 1.0,
+                sinks: None,
                 bands: [
                     CausalBand {
                         lower_inclusive: i64::MIN,
@@ -924,6 +962,7 @@ mod tests {
             },
             CachedAttentionScore {
                 scale: 1.0,
+                sinks: None,
                 bands: [
                     CausalBand {
                         lower_inclusive: i64::MIN,
@@ -1024,6 +1063,7 @@ mod tests {
             },
             CachedAttentionScore {
                 scale: 1.0,
+                sinks: None,
                 bands: bands_old,
             },
         ));
@@ -1039,6 +1079,7 @@ mod tests {
             },
             CachedAttentionScore {
                 scale: 1.0,
+                sinks: None,
                 bands: bands_new,
             },
         ));

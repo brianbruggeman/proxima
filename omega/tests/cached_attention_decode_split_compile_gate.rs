@@ -42,6 +42,7 @@ fn decode_attention(head_dim: u64, cached_key_rows: u64, lower: i64) -> BoundOp 
             cached_lower_inclusive: lower,
             new_upper_inclusive: 0,
         arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
+        attention_sink: false,
         },
     }
 }

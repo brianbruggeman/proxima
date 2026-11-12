@@ -1852,6 +1852,7 @@ fn cached_attention_bound_step_runs_online_softmax() {
             cached_lower_inclusive: -1,
             new_upper_inclusive: 0,
             arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32,
+            attention_sink: false,
         },
     };
     let mut output = vec![0.0; 2];
@@ -1909,6 +1910,7 @@ fn cached_attention_window_bounds_the_new_range_too() {
             cached_lower_inclusive,
             new_upper_inclusive: 0,
             arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32,
+            attention_sink: false,
         },
     };
 
@@ -2322,6 +2324,7 @@ fn cached_attention_bound_step_scores_the_partial_rotary_pass_plane() {
             cached_lower_inclusive: -1,
             new_upper_inclusive: 0,
             arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32,
+            attention_sink: false,
         },
     };
     let mut output = vec![0.0; 4];

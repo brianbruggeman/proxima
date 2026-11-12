@@ -474,6 +474,7 @@ fn cached_attention_kernel() -> omega::Kernel {
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
                 arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
+                attention_sink: false,
         },
     };
     omega::emit(
