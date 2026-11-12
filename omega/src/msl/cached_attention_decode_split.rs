@@ -1,7 +1,8 @@
-use super::cached_attention_render::{BF8_VECTOR_HELPER, decode_index_tokens};
-use super::layout_render::{block_unpack_msl, readable_block_layout};
+use super::cached_attention_render::decode_index_tokens;
+use super::layout_render::{block_unpack_msl, layout_load_msl, readable_block_layout, readable_scalar_cache};
 use super::*;
 use proxima_numeric::block_layout::BlockLayout;
+use proxima_numeric::float_layout::FloatLayout;
 
 /// The split-KV partial for [`CachedAttentionForm::TwoRangeDecodeSplit`]: one
 /// threadgroup per `(query_row, query_head, split)` with `chunks` simdgroups,
@@ -62,6 +63,13 @@ pub(super) fn render_cached_attention_decode_split(
     let new_upper = index_literal(*new_upper_inclusive, index_type, literal_suffix);
     let key_block = cached_key_codec.as_ref().and_then(readable_block_layout);
     let value_block = cached_kv_codec.as_ref().and_then(readable_block_layout);
+    let scalar_cache = cached_kv_codec.as_ref().and_then(readable_scalar_cache);
+    let scalar_helper_name = scalar_cache
+        .map(|(layout, _)| format!("omega_kv_scalar_{}", crate::identity::description_fingerprint(&layout)))
+        .unwrap_or_default();
+    let scalar_helper = scalar_cache
+        .map(|(layout, storage)| scalar_vector_helper(layout, storage, &scalar_helper_name))
+        .unwrap_or_default();
     if key_block.is_none() && cached_key_codec != cached_kv_codec {
         return Err(EmitError::CachedAttentionKvCodecNotSupported {
             node: resolved.node,
@@ -70,32 +78,9 @@ pub(super) fn render_cached_attention_decode_split(
     }
     let (cached_kv_type, mut split) = match cached_kv_codec {
         None => (element_type, None),
-        Some(Codec::Float16) => (
-            "half",
-            Some((
-                HALF_KEY_POINTERS,
-                HALF_VALUE_POINTERS,
-                HALF_KEY_LOAD,
-                HALF_VALUE_LOAD,
-            )),
-        ),
-        Some(Codec::BFloat16) => (
-            "ushort",
-            Some((
-                BF16_KEY_POINTERS,
-                BF16_VALUE_POINTERS,
-                BF16_KEY_LOAD,
-                BF16_VALUE_LOAD,
-            )),
-        ),
-        Some(Codec::BFloat8) => (
-            "uchar",
-            Some((
-                BF8_KEY_POINTERS,
-                BF8_VALUE_POINTERS,
-                BF8_KEY_LOAD,
-                BF8_VALUE_LOAD,
-            )),
+        Some(_) if scalar_cache.is_some() => (
+            scalar_cache.map_or("", |(_, storage)| storage),
+            Some((SCALAR_KEY_POINTERS, SCALAR_VALUE_POINTERS, SCALAR_KEY_LOAD, SCALAR_VALUE_LOAD)),
         ),
         Some(_) if value_block.is_some() => {
             if *head_dim % u64::from(value_block.map_or(1, |layout| layout.elements)) != 0 {
@@ -213,6 +198,7 @@ pub(super) fn render_cached_attention_decode_split(
             "@KEY_BLOCK_ELEMENTS@",
             key_block.map_or_else(String::new, |layout| layout.elements.to_string()),
         ),
+        ("@SCALAR_LOAD@", format!("{scalar_helper_name}_x4")),
         ("@VALUE_BLOCK_LOAD@", value_helper_name),
         (
             "@VALUE_BLOCK_ELEMENTS@",
@@ -246,12 +232,7 @@ pub(super) fn render_cached_attention_decode_split(
     preamble(&mut source);
     source.push_str(&key_helper);
     source.push_str(&value_helper);
-    if cached_kv_codec == Some(Codec::BFloat16) {
-        source.push_str(BF16_VECTOR_HELPER);
-    }
-    if cached_kv_codec == Some(Codec::BFloat8) {
-        source.push_str(BF8_VECTOR_HELPER);
-    }
+    source.push_str(&scalar_helper);
     let mut body = DECODE_SPLIT_KERNEL.replace("@BATCH_LOOPS@", &batch_loops);
     body.push_str(DECODE_SPLIT_TAIL);
     for (token, value) in &substitutions {
@@ -346,16 +327,17 @@ const PLAIN_KEY_LOAD: &str =
 
 const PLAIN_VALUE_LOAD: &str = "value_row[step][slot] = float4(v4[index]);";
 
-// the cached range is half-width and the new range is the op's own element
-// type, so one pointer cannot select between them as the plain form does
-const HALF_KEY_POINTERS: Parts = (
+// the cached range is stored as `@KV@` codes (`uchar`/`ushort`/`uint`, the width of the cache layout)
+// and the new range is the op's own element type, so one pointer cannot select between them as the
+// plain form does
+const SCALAR_KEY_POINTERS: Parts = (
     "device const @KV@4* kr4_cached = (device const @KV@4*)(in2 + kbase);
                 device const @KV@4* ki4_cached = (device const @KV@4*)(in3 + kbase);",
     "device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
                 device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);",
 );
 
-const HALF_VALUE_POINTERS: Parts = (
+const SCALAR_VALUE_POINTERS: Parts = (
     "device const @KV@4* v4_cached = (device const @KV@4*)(in6 + kbase * 2);",
     "device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);",
 );
@@ -397,52 +379,21 @@ const NEW_KEY_LOAD: &str = "key_real[step][slot] = float4(kr4_new[index]); key_i
 
 const NEW_VALUE_LOAD: &str = "value_row[step][slot] = float4(v4_new[index]);";
 
-const HALF_KEY_LOAD: Parts = (
-    "key_real[step][slot] = float4(kr4_cached[index]); key_imag[step][slot] = float4(ki4_cached[index]);",
+const SCALAR_KEY_LOAD: Parts = (
+    "key_real[step][slot] = @SCALAR_LOAD@(kr4_cached[index]); key_imag[step][slot] = @SCALAR_LOAD@(ki4_cached[index]);",
     NEW_KEY_LOAD,
 );
 
-const HALF_VALUE_LOAD: Parts = ("value_row[step][slot] = float4(v4_cached[index]);", NEW_VALUE_LOAD);
+const SCALAR_VALUE_LOAD: Parts = ("value_row[step][slot] = @SCALAR_LOAD@(v4_cached[index]);", NEW_VALUE_LOAD);
 
-const BF16_KEY_POINTERS: Parts = (
-    "device const ushort4* kr4_cached = (device const ushort4*)(in2 + kbase);
-                device const ushort4* ki4_cached = (device const ushort4*)(in3 + kbase);",
-    "device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
-                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);",
-);
-
-const BF16_VALUE_POINTERS: Parts = (
-    "device const ushort4* v4_cached = (device const ushort4*)(in6 + kbase * 2);",
-    "device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);",
-);
-
-const BF16_KEY_LOAD: Parts = (
-    "key_real[step][slot] = omega_bf16x4_to_float4(kr4_cached[index]); key_imag[step][slot] = omega_bf16x4_to_float4(ki4_cached[index]);",
-    NEW_KEY_LOAD,
-);
-
-const BF16_VALUE_LOAD: Parts = ("value_row[step][slot] = omega_bf16x4_to_float4(v4_cached[index]);", NEW_VALUE_LOAD);
-
-const BF16_VECTOR_HELPER: &str = "static inline float4 omega_bf16x4_to_float4(ushort4 value) { return float4(as_type<float>((uint)value.x << 16u), as_type<float>((uint)value.y << 16u), as_type<float>((uint)value.z << 16u), as_type<float>((uint)value.w << 16u)); }\n";
-
-const BF8_KEY_POINTERS: Parts = (
-    "device const uchar4* kr4_cached = (device const uchar4*)(in2 + kbase);
-                device const uchar4* ki4_cached = (device const uchar4*)(in3 + kbase);",
-    "device const @T@4* kr4_new = (device const @T@4*)(in4 + kbase);
-                device const @T@4* ki4_new = (device const @T@4*)(in5 + kbase);",
-);
-
-const BF8_VALUE_POINTERS: Parts = (
-    "device const uchar4* v4_cached = (device const uchar4*)(in6 + kbase * 2);",
-    "device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);",
-);
-
-const BF8_KEY_LOAD: Parts = (
-    "key_real[step][slot] = omega_bf8x4_to_float4(kr4_cached[index]); key_imag[step][slot] = omega_bf8x4_to_float4(ki4_cached[index]);",
-    NEW_KEY_LOAD,
-);
-
-const BF8_VALUE_LOAD: Parts = ("value_row[step][slot] = omega_bf8x4_to_float4(v4_cached[index]);", NEW_VALUE_LOAD);
+/// The four-wide load of a scalar cache: `layout_load_msl`'s per-code decode applied to the four
+/// codes of one `storage` vector, so the cache layout alone decides the arithmetic.
+fn scalar_vector_helper(layout: FloatLayout, storage: &str, name: &str) -> String {
+    let element = layout_load_msl(layout, name);
+    format!(
+        "{element}static inline float4 {name}_x4({storage}4 value) {{ return float4({name}((uint)value.x), {name}((uint)value.y), {name}((uint)value.z), {name}((uint)value.w)); }}\n"
+    )
+}
 
 const SINK_PARAM: &str = "device const @T@* in9 [[buffer(9)]], ";
 

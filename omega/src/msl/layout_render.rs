@@ -458,6 +458,28 @@ pub fn readable_block_layout(format: &NumericFormat) -> Option<&BlockLayout> {
     block_k_refusal(format).ok()
 }
 
+/// The layout and the Metal storage type (`uchar`, `ushort` or `uint`) a cache of `format` is
+/// addressed through when it is a scalar whose code fills whole bytes, so a four-wide load is
+/// four contiguous codes and [`layout_load_msl`] decodes each. `None` for a block or level
+/// format, and for a width with no flat address (a 6-bit code straddles bytes). The host codec
+/// must also resolve and encode it, because the device cache is filled by encoding rows.
+/// Decided from the layout's width, never from a format name.
+#[must_use]
+pub fn readable_scalar_cache(format: &NumericFormat) -> Option<(FloatLayout, &'static str)> {
+    let NumericFormat::Scalar(layout) = format else {
+        return None;
+    };
+    let storage = match layout.width() {
+        8 => "uchar",
+        16 => "ushort",
+        32 => "uint",
+        _ => return None,
+    };
+    FormatCodec::for_format(format)
+        .is_some_and(|codec| codec.can_encode())
+        .then_some((*layout, storage))
+}
+
 /// [`readable_block_layout`] with the reason: `Err` names the property the format lacks.
 ///
 /// # Errors

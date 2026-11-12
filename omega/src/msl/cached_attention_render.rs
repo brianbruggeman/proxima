@@ -1,6 +1,6 @@
 use proxima_numeric::float_layout::FloatLayout;
 
-use super::layout_render::readable_block_layout;
+use super::layout_render::{readable_block_layout, readable_scalar_cache};
 use super::*;
 
 /// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
@@ -95,9 +95,10 @@ pub(super) fn cached_attention_kv_codec(
     })
 }
 
-/// The scalar codecs the decode split reads a cached V row through.
+/// The scalar codecs the decode split reads a cached V row through: every layout of whole bytes
+/// ([`readable_scalar_cache`]).
 fn is_scalar_value_codec(codec: &Codec) -> bool {
-    matches!(*codec, Codec::Float16 | Codec::BFloat16 | Codec::BFloat8)
+    readable_scalar_cache(codec).is_some()
 }
 
 /// [`cached_attention_kv_codec`] with K and V answered separately, `(key, value)`: the uniform
@@ -121,14 +122,10 @@ pub(super) fn cached_attention_kv_codecs(
         CACHED_KV_OPERANDS.map(|index| quantized.get(index).copied().flatten());
     match (first, second, third) {
         (None, None, None) => Ok((None, None)),
-        (Some(Codec::Float16), Some(Codec::Float16), Some(Codec::Float16)) => {
-            Ok((Some(Codec::Float16), Some(Codec::Float16)))
-        }
-        (Some(Codec::BFloat16), Some(Codec::BFloat16), Some(Codec::BFloat16)) => {
-            Ok((Some(Codec::BFloat16), Some(Codec::BFloat16)))
-        }
-        (Some(Codec::BFloat8), Some(Codec::BFloat8), Some(Codec::BFloat8)) => {
-            Ok((Some(Codec::BFloat8), Some(Codec::BFloat8)))
+        (Some(even), Some(odd), Some(value))
+            if even == odd && even == value && readable_scalar_cache(&even).is_some() =>
+        {
+            Ok((Some(even), Some(even)))
         }
         (Some(even), Some(odd), Some(value))
             if even == odd
@@ -139,7 +136,7 @@ pub(super) fn cached_attention_kv_codecs(
         }
         _ => Err(EmitError::CachedAttentionKvCodecNotSupported {
             node,
-            reason: "the cached K and V operands must be all plain, all Float16, all BFloat16, all BFloat8, or a block K beside a Float16, BFloat16, BFloat8 or readable block V",
+            reason: "the cached K and V operands must be all plain, all one scalar layout of whole bytes, or a readable block K beside a scalar or readable block V",
         }),
     }
 }
