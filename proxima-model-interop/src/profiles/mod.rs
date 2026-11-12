@@ -195,7 +195,7 @@ mod tests {
         assert!(!profile.ffn.exclusive_dense_post_norm);
         assert!(profile.recurrence.is_none());
         assert!(!profile.speculative_verify);
-        assert_eq!(profile.command_buffer_chunks, 1);
+        assert_eq!(profile.command_buffer_chunks, 8);
     }
 
     #[test]
@@ -266,7 +266,7 @@ mod tests {
                 ScheduleSource::SlidingPattern,
                 KvCacheShape::Custom,
                 FfnRouting::Routed,
-                1,
+                8,
             ),
             (
                 "qwen35",
