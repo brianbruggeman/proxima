@@ -276,6 +276,7 @@ fn name_reports_the_variant_backends_render_error_messages_with() {
         cached_lower_inclusive: 0,
         new_upper_inclusive: 0,
         arithmetic: CachedAttentionArithmetic::OnlineF32,
+        attention_sink: false,
     };
     let elementwise = BoundOpKind::Elementwise {
         body: ComposedBody::leaf(ScalarOp::Identity),

@@ -6663,6 +6663,7 @@ pub(super) mod attention_scratch_len_tests {
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
                 arithmetic: CachedAttentionArithmetic::OnlineF32,
+                attention_sink: false,
             },
         }
     }
@@ -6799,6 +6800,7 @@ pub(super) mod attention_scratch_len_tests {
                 cached_lower_inclusive: if head_dim == 256 { -511 } else { i64::MIN },
                 new_upper_inclusive: 0,
                 arithmetic: CachedAttentionArithmetic::OnlineF32,
+                attention_sink: false,
             },
         }
     }

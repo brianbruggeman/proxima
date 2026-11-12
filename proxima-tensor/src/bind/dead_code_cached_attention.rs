@@ -787,6 +787,71 @@ pub(super) fn find_named_input(program: &[Op], name: &str) -> Option<NodeId> {
     })
 }
 
+/// The attention-sink addend of a softmax denominator, peeled off:
+/// `Add(Add(sum_cached, sum_new), Exp(Subtract(sink, Maximum(row_max, sink))))`
+/// is what `spec::append_attention_sink_addend` +
+/// `spec::add_attention_sink_weight` emit, and the scores subtract that same
+/// widened `Maximum`.
+#[cfg(feature = "cached-attention-streaming")]
+pub(super) struct AttentionSinkTerm {
+    /// the `[query_heads]` input leaf, the fused op's trailing operand
+    pub(super) leaf: NodeId,
+    /// the `Maximum(row_max, sink)` node every score subtracts
+    pub(super) widened_max: NodeId,
+    /// the cached/new weight sums, `Add`'s operands once the sink addend is removed
+    pub(super) sum_parts: [NodeId; 2],
+    head_map: IndexMap,
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+impl AttentionSinkTerm {
+    /// whether the leaf is read as `leaf[groups * kv_head + group]` over the
+    /// `[row, kv_head, group]` iteration space `append_attention_sink_addend` spells.
+    pub(super) fn addresses_query_heads(&self, query_groups: u64) -> bool {
+        let pattern = self.head_map.affine();
+        let [axis] = pattern.axes.as_slice() else {
+            return false;
+        };
+        let Ok(groups) = i32::try_from(query_groups) else {
+            return false;
+        };
+        pattern.iter_rank == 3
+            && axis.offset == 0
+            && axis.len.is_none()
+            && axis.terms.len() == 2
+            && axis.terms.contains(&AxisTerm::scaled(1, groups))
+            && axis.terms.contains(&AxisTerm::projection(2))
+    }
+}
+
+#[cfg(feature = "cached-attention-streaming")]
+pub(super) fn peel_attention_sink(
+    program: &[Op],
+    denominator_parts: [NodeId; 2],
+) -> Option<AttentionSinkTerm> {
+    let sum_parts = binary_elementwise(program, denominator_parts[0], ScalarOp::Add)?;
+    let shifted = unary_elementwise(program, denominator_parts[1], ScalarOp::Exponential)?;
+    let [(leaf, leaf_map), (widened_max, _)] =
+        elementwise_operands(program, shifted, ScalarOp::Subtract)?
+    else {
+        return None;
+    };
+    let [_, (maximum_leaf, maximum_leaf_map)] =
+        elementwise_operands(program, *widened_max, ScalarOp::Maximum)?
+    else {
+        return None;
+    };
+    (matches!(program.get(leaf.0 as usize)?, Op::Input { .. })
+        && maximum_leaf == leaf
+        && maximum_leaf_map == leaf_map)
+        .then(|| AttentionSinkTerm {
+            leaf: *leaf,
+            widened_max: *widened_max,
+            sum_parts,
+            head_map: leaf_map.clone(),
+        })
+}
+
 #[cfg(feature = "cached-attention-streaming")]
 pub(super) fn cached_attention_candidates(
     program: &[Op],
@@ -841,7 +906,8 @@ pub(super) fn cached_attention_candidates(
             );
             continue;
         };
-        let Some(sum_parts) = binary_elementwise(program, inverse_sum, ScalarOp::Add) else {
+        let Some(denominator_parts) = binary_elementwise(program, inverse_sum, ScalarOp::Add)
+        else {
             #[cfg(feature = "instrument")]
             debug!(
                 node = output.0,
@@ -850,6 +916,10 @@ pub(super) fn cached_attention_candidates(
             );
             continue;
         };
+        let attention_sink_term = peel_attention_sink(program, denominator_parts);
+        let sum_parts = attention_sink_term
+            .as_ref()
+            .map_or(denominator_parts, |term| term.sum_parts);
         let Some(cached_weights) =
             reduced_source(program, sum_parts[0], ScalarOp::Add, ReduceInit::Zero)
         else {
@@ -918,6 +988,18 @@ pub(super) fn cached_attention_candidates(
                 node = output.0,
                 stage = "score_denominator_mismatch",
                 "cached_attention decline -- cached/new score denominators diverge"
+            );
+            continue;
+        }
+        if attention_sink_term
+            .as_ref()
+            .is_some_and(|term| term.widened_max != cached_score_parts[1])
+        {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "sink_max_mismatch",
+                "cached_attention decline -- the sink-widened maximum is not the maximum the scores subtract"
             );
             continue;
         }
@@ -1412,6 +1494,26 @@ pub(super) fn cached_attention_candidates(
                 );
                 continue;
             }
+            // the Metal renderers draw a sink in the decode split form alone (omega's
+            // `decode_split_form` shape: one decode row, a bound cached range, a full-rotary head of
+            // whole float4 lanes, the split-merge policy); every other shape stays unfused rather
+            // than bind an op no kernel can render. The CPU executors take any shape.
+            if attention_sink_term.is_some()
+                && !(split_decode_admitted
+                    && query_shape[0] == 1
+                    && new_key_shape[0] == 1
+                    && cached_key_shape[0] > 0
+                    && pass.is_none()
+                    && ninth_operand_available)
+            {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "sink_needs_decode_split_form",
+                    "cached_attention decline -- a sink fuses only where a kernel renders it: the decode split form"
+                );
+                continue;
+            }
             softmax_weights_eligible = via_gemma_template && !split_decode_admitted;
         }
         let Some(rotary_width) = query_shape[3].checked_mul(2) else {
@@ -1470,6 +1572,23 @@ pub(super) fn cached_attention_candidates(
             );
             continue;
         }
+        let attention_sink = match &attention_sink_term {
+            Some(term) if term.addresses_query_heads(query_shape[2])
+                && shapes.of(term.leaf) == [query_shape[1] * query_shape[2]] =>
+            {
+                Some(term.leaf)
+            }
+            Some(_) => {
+                #[cfg(feature = "instrument")]
+                debug!(
+                    node = output.0,
+                    stage = "sink_head_addressing",
+                    "cached_attention decline -- the sink leaf is not one scalar per query head indexed kv_head * groups + group"
+                );
+                continue;
+            }
+            None => None,
+        };
         let pair_dim = query_shape[3];
         let query_strides = [
             (query_shape[1] * query_shape[2] * pair_dim) as i64,
@@ -1823,9 +1942,10 @@ pub(super) fn cached_attention_candidates(
         } else {
             None
         };
-        let dependencies = attention_dependencies(program, output, &source_nodes);
+        let stop_nodes: Vec<NodeId> = source_nodes.into_iter().chain(attention_sink).collect();
+        let dependencies = attention_dependencies(program, output, &stop_nodes);
         let dependencies = dependencies
-            .difference(&source_nodes.into_iter().collect())
+            .difference(&stop_nodes.into_iter().collect())
             .copied()
             .collect::<BTreeSet<_>>();
         if dependencies
@@ -1900,6 +2020,16 @@ pub(super) fn cached_attention_candidates(
         if let Some(pass_operands) = pass_operands {
             operands.extend(pass_operands);
         }
+        if let Some(sink_leaf) = attention_sink {
+            operands.push((
+                sink_leaf,
+                Layout {
+                    base: 0,
+                    strides: SmallVec::from_slice(&[1]),
+                },
+                None,
+            ));
+        }
         // Reached only when `softmax_weights_eligible` is `false` (every
         // branch above that sets it `true` also `continue`s, accepted or
         // declined, before falling through here) -- this is the plain
@@ -1927,6 +2057,7 @@ pub(super) fn cached_attention_candidates(
                 cached_lower_inclusive,
                 new_upper_inclusive: 0,
                 arithmetic: cached_attention_arithmetic(numeric_policy, program, query_even),
+                attention_sink: attention_sink.is_some(),
             },
         };
         #[cfg(feature = "instrument")]
@@ -2240,6 +2371,7 @@ pub(super) fn cached_attention_single_range_candidates(
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
                 arithmetic: cached_attention_arithmetic(numeric_policy, program, query_even),
+                attention_sink: false,
             },
         };
         candidates.push((fused, absorbed));
@@ -2527,6 +2659,7 @@ mod kv_padding_tests {
                 cached_lower_inclusive: i64::MIN,
                 new_upper_inclusive: 0,
                 arithmetic: CachedAttentionArithmetic::OnlineF32,
+                attention_sink: false,
             },
             node,
         )

@@ -463,7 +463,7 @@ pub fn stream_cached_attention_llama_flash(
     output: &mut [f32],
     extents: &AttentionExtents,
     rotary: &CachedAttentionRotary<'_>,
-    score: &CachedAttentionScore,
+    score: &CachedAttentionScore<'_>,
     interleaved: bool,
 ) -> bool {
     #[cfg(feature = "std")]
@@ -489,7 +489,7 @@ fn run(
     output: &mut [f32],
     extents: &AttentionExtents,
     rotary: &CachedAttentionRotary<'_>,
-    score: &CachedAttentionScore,
+    score: &CachedAttentionScore<'_>,
 ) -> bool {
     let pair_dim = (rotary.rotary_dim / 2) as usize;
     let pass_dim = (extents.head_dim - rotary.rotary_dim) as usize;
@@ -499,7 +499,13 @@ fn run(
     let query_rows = extents.query_rows as usize;
     let cached_rows = extents.cached_key_rows as usize;
     let new_rows = extents.new_key_rows as usize;
-    if head_dim == 0 || pair_dim == 0 || kv_heads == 0 || groups == 0 || rotary.rotary_dim > extents.head_dim {
+    if head_dim == 0
+        || pair_dim == 0
+        || kv_heads == 0
+        || groups == 0
+        || rotary.rotary_dim > extents.head_dim
+        || !score.sinks_fit(extents)
+    {
         return false;
     }
     let query_width = query_rows * kv_heads * groups * pair_dim;
@@ -646,7 +652,7 @@ struct Shared<'call> {
     pass_query: Option<&'call [f32]>,
     keys: &'call [u16],
     values: &'call [u16],
-    score: &'call CachedAttentionScore,
+    score: &'call CachedAttentionScore<'call>,
     cached_rows: usize,
     new_rows: usize,
     kv_heads: usize,
@@ -721,6 +727,14 @@ impl Shared<'_> {
                         }
                         kernels.mad(&mut local.accumulator[..head_dim], &values[target..target + head_dim], weight);
                         running_sum = running_sum * rescale + weight;
+                    }
+                }
+                if let Some(sink) = score.sink_of(query_head) {
+                    if sink > running_max {
+                        kernels.scale(&mut local.accumulator[..head_dim], expf(running_max - sink));
+                        running_sum = running_sum * expf(running_max - sink) + 1.0;
+                    } else {
+                        running_sum += expf(sink - running_max);
                     }
                 }
                 let inverse = if running_sum == 0.0 { 0.0 } else { 1.0 / running_sum };
@@ -828,6 +842,7 @@ mod threading_tests {
         let rotary = CachedAttentionRotary { rotary_dim: head_dim as u64, pass: None };
         let score = CachedAttentionScore {
             scale: 0.125,
+            sinks: None,
             bands: [
                 CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },
                 CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
@@ -1028,6 +1043,7 @@ mod pairing_order_tests {
         let rotary = CachedAttentionRotary { rotary_dim: head_dim as u64, pass: None };
         let score = CachedAttentionScore {
             scale: 0.125,
+            sinks: None,
             bands: [
                 CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },
                 CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },

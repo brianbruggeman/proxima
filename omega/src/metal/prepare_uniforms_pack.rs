@@ -1374,6 +1374,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
                 cached_lower_inclusive: -511,
                 new_upper_inclusive: 0,
                 arithmetic: CachedAttentionArithmetic::OnlineF32,
+                attention_sink: false,
             },
         };
         let policy = NumericPolicy::llama_relaxed();
@@ -1427,6 +1428,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
                 cached_lower_inclusive: -511,
                 new_upper_inclusive: 0,
                 arithmetic: CachedAttentionArithmetic::OnlineF32,
+                attention_sink: false,
             },
         };
         let policy = NumericPolicy::llama_relaxed();

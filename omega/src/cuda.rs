@@ -4481,6 +4481,7 @@ mod tests {
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
                 arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
+            attention_sink: false,
         }
     }
 
@@ -6561,6 +6562,7 @@ mod rocm_tests {
             cached_lower_inclusive: 0,
             new_upper_inclusive: 0,
             arithmetic: Default::default(),
+            attention_sink: false,
         };
 
         let error = emit_hip(&attention, &no_packed()).expect_err("attention is refused");

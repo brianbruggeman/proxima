@@ -125,6 +125,7 @@ mod imp {
                     cached_lower_inclusive: self.lower,
                     new_upper_inclusive: self.upper,
                     arithmetic: CachedAttentionArithmetic::OnlineF32,
+                    attention_sink: false,
                 },
             }
         }

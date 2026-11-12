@@ -4109,6 +4109,7 @@ fn causal_attention_kind(rows: u64, heads: u64, groups: u64, head_dim: u64) -> p
         cached_lower_inclusive: i64::MIN,
         new_upper_inclusive: 0,
         arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
+        attention_sink: false,
     }
 }
 
@@ -4206,6 +4207,7 @@ fn decode_attention_kind(
         cached_lower_inclusive,
         new_upper_inclusive,
         arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
+        attention_sink: false,
     }
 }
 
@@ -4366,6 +4368,7 @@ fn prefill_attention_kind(shape: &PrefillAttentionShape) -> proxima_tensor::Boun
         cached_lower_inclusive,
         new_upper_inclusive,
         arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
+        attention_sink: false,
     }
 }
 

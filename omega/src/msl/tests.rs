@@ -1033,6 +1033,7 @@ fn cached_attention_op() -> BoundOp {
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
                 arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
+                attention_sink: false,
         },
     }
 }
@@ -1082,6 +1083,7 @@ fn cached_attention_op_dynamic(cached_key_rows: u64, new_key_rows: u64) -> Bound
             cached_lower_inclusive: i64::MIN,
             new_upper_inclusive: 0,
                 arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
+                attention_sink: false,
         },
     }
 }

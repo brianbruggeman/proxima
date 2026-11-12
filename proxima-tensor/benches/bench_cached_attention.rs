@@ -141,6 +141,7 @@ fn bench_cached_attention(c: &mut Criterion) {
             },
             CachedAttentionScore {
                 scale: SCALE,
+                sinks: None,
                 bands: [
                     CausalBand {
                         lower_inclusive: i64::MIN,
@@ -197,6 +198,7 @@ fn bench_cached_attention(c: &mut Criterion) {
                         },
                         CachedAttentionScore {
                             scale: SCALE,
+                            sinks: None,
                             bands: [
                                 CausalBand {
                                     lower_inclusive: i64::MIN,

@@ -15731,7 +15731,7 @@ mod gemma4_synthetic_parity {
 
         const KEY_ROWS_TOTAL: usize = 8;
 
-        fn two_layer_schedule() -> Vec<LayerSchedule> {
+        fn two_layer_schedule(attention_sinks: bool) -> Vec<LayerSchedule> {
             let ffn_config = LayerFfnConfig {
                 post_attention_norm: true,
                 combination: FfnCombination::ParallelDenseMoe(ParallelDenseMoeConfig {
@@ -15775,7 +15775,7 @@ mod gemma4_synthetic_parity {
                     score_scale: AttentionScoreScale::Unscaled,
                     value_norm: true,
                     qk_norm: true,
-                    attention_sinks: false,
+                    attention_sinks,
                     rope: true,
                 };
             alloc::vec![
@@ -15803,7 +15803,19 @@ mod gemma4_synthetic_parity {
         }
 
         fn fixture() -> Fixture {
-            let schedule = two_layer_schedule();
+            fixture_with_sinks(false)
+        }
+
+        /// Per-query-head sink logits shaped like a trained checkpoint's: spread across the
+        /// score range so some heads sit above their row maximum and some far below it.
+        fn sink_values(layer: usize) -> Vec<f32> {
+            (0..QUERY_HEADS)
+                .map(|head| ((head * 5 + layer * 3) % 11) as f32 * 0.7 - 3.5)
+                .collect()
+        }
+
+        fn fixture_with_sinks(attention_sinks: bool) -> Fixture {
+            let schedule = two_layer_schedule(attention_sinks);
             let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
                 scheduled_two_range_cached_forward_program_with_experts(
                     VOCAB as u32,
@@ -15844,6 +15856,12 @@ mod gemma4_synthetic_parity {
                 let sliding = layer == 0;
                 let layer_weights = layer_weights(layer, sliding);
                 weights.extend(ring_layer_weight_blocks(layer, &layer_weights, true));
+                if attention_sinks {
+                    weights.push((
+                        alloc::format!("blk.{layer}.attn_sinks.weight"),
+                        sink_values(layer),
+                    ));
+                }
             }
             Fixture {
                 program,
@@ -15968,7 +15986,17 @@ mod gemma4_synthetic_parity {
             policy: NumericPolicy,
             is_kind: fn(&BoundOpKind) -> bool,
         ) -> (usize, f32) {
-            let fixture = fixture();
+            fused_against_unfused_on(fixture(), count, cached_len, padding, policy, is_kind)
+        }
+
+        fn fused_against_unfused_on(
+            fixture: Fixture,
+            count: usize,
+            cached_len: usize,
+            padding: usize,
+            policy: NumericPolicy,
+            is_kind: fn(&BoundOpKind) -> bool,
+        ) -> (usize, f32) {
             let mut owned = fixture.weights.clone();
             owned.extend(step_inputs(count, cached_len, padding));
             let fused = bind_at(&fixture, count, cached_len, padding, true, policy);
@@ -16140,6 +16168,133 @@ mod gemma4_synthetic_parity {
                 assert!(
                     difference < TOLERANCE,
                     "K={count} cached={cached_len} padding={padding}: logits differ by {difference}"
+                );
+                cells += 1;
+            }
+            assert_eq!(cells, 5, "every cell must have run");
+        }
+
+        /// A sink-bearing layer binds the same fused op as a sink-less one plus
+        /// one trailing operand: the sink leaf, which no unfused node reads any more.
+        #[test]
+        fn a_sink_layer_fuses_with_the_sink_leaf_as_its_last_operand() {
+            let policy = NumericPolicy::llama_relaxed().with_flash_narrowing(true);
+            for (sinks, expected_operands) in [(true, 10usize), (false, 9usize)] {
+                let fixture = fixture_with_sinks(sinks);
+                let resolved = bind_at(&fixture, 1, 3, 2, true, policy);
+                let fused: Vec<&BoundOp> = resolved
+                    .iter()
+                    .filter(|bound| is_cached_attention(&bound.kind))
+                    .collect();
+                assert_eq!(fused.len(), 2, "sinks={sinks}: both layers fuse");
+                for (layer, bound) in fused.iter().enumerate() {
+                    let BoundOpKind::CachedAttention {
+                        operands,
+                        attention_sink,
+                        ..
+                    } = &bound.kind
+                    else {
+                        unreachable!("filtered to cached attention");
+                    };
+                    assert_eq!(*attention_sink, sinks, "sinks={sinks} layer {layer}");
+                    assert_eq!(operands.len(), expected_operands, "sinks={sinks} layer {layer}");
+                    let last = operands.last().expect("a fused op has operands");
+                    let name = match &fixture.program[last.0.0 as usize] {
+                        Op::Input { name, .. } => name.clone(),
+                        _ => None,
+                    };
+                    if sinks {
+                        assert_eq!(
+                            name.as_deref(),
+                            Some(alloc::format!("blk.{layer}.attn_sinks.weight").as_str())
+                        );
+                        assert_eq!(last.1.strides.to_vec(), alloc::vec![1]);
+                    } else {
+                        assert_ne!(name.as_deref(), Some("blk.0.attn_sinks.weight"));
+                    }
+                }
+            }
+        }
+
+        /// Control that must fail: the fused op reads its sink from the bound
+        /// leaf, so feeding it zeroed sinks departs from the unfused answer by
+        /// far more than the tolerance the parity test accepts.
+        #[test]
+        fn a_fused_op_fed_zeroed_sinks_departs_from_the_unfused_chain() {
+            let policy = NumericPolicy::llama_relaxed().with_flash_narrowing(true);
+            let fixture = fixture_with_sinks(true);
+            let mut owned = fixture.weights.clone();
+            owned.extend(step_inputs(1, 3, 2));
+            let unfused = bind_at(&fixture, 1, 3, 2, false, policy);
+            let fused = bind_at(&fixture, 1, 3, 2, true, policy);
+            let logits = |resolved: &[BoundOp], owned: &[(String, Vec<f32>)]| {
+                run_resolved(&fixture.program, resolved, owned)[fixture.logits.0 as usize]
+                    .clone()
+                    .expect("logits present")
+            };
+            let mut zeroed = owned.clone();
+            for (name, values) in &mut zeroed {
+                if name.ends_with(".attn_sinks.weight") {
+                    values.fill(0.0);
+                }
+            }
+            let expected = logits(&unfused, &owned);
+            assert!(max_abs_diff(&expected, &logits(&fused, &owned)) < TOLERANCE);
+            assert!(max_abs_diff(&expected, &logits(&fused, &zeroed)) > 10.0 * TOLERANCE);
+        }
+
+        /// The fused sink form reproduces the unfused chain at several cached
+        /// lengths (padded and exact, decode and verify), and the sink genuinely
+        /// moves the logits, so agreement is not two copies of the sink-less answer.
+        #[test]
+        fn the_fused_sink_oracle_holds_the_unfused_chain_within_tolerance() {
+            let policy = NumericPolicy::llama_relaxed().with_flash_narrowing(true);
+            let mut cells = 0usize;
+            for (count, cached_len, padding) in [
+                (1usize, 3usize, 2usize),
+                (1, 5, 0),
+                (1, 7, 1),
+                (2, 3, 2),
+                (3, 3, 2),
+            ] {
+                let (fused_ops, difference) = fused_against_unfused_on(
+                    fixture_with_sinks(true),
+                    count,
+                    cached_len,
+                    padding,
+                    policy,
+                    is_cached_attention,
+                );
+                let expected_fused = if count == 1 { 2 } else { 0 };
+                assert_eq!(
+                    fused_ops, expected_fused,
+                    "K={count} cached={cached_len} padding={padding}: only the decode row has a kernel that renders a sink"
+                );
+                assert!(
+                    difference < TOLERANCE,
+                    "K={count} cached={cached_len} padding={padding}: sink logits differ by {difference}"
+                );
+                let sinkless = {
+                    let fixture = fixture();
+                    let mut owned = fixture.weights.clone();
+                    owned.extend(step_inputs(count, cached_len, padding));
+                    let unfused = bind_at(&fixture, count, cached_len, padding, false, policy);
+                    run_resolved(&fixture.program, &unfused, &owned)[fixture.logits.0 as usize]
+                        .clone()
+                        .expect("sink-less logits present")
+                };
+                let with_sinks = {
+                    let fixture = fixture_with_sinks(true);
+                    let mut owned = fixture.weights.clone();
+                    owned.extend(step_inputs(count, cached_len, padding));
+                    let unfused = bind_at(&fixture, count, cached_len, padding, false, policy);
+                    run_resolved(&fixture.program, &unfused, &owned)[fixture.logits.0 as usize]
+                        .clone()
+                        .expect("sink logits present")
+                };
+                assert!(
+                    max_abs_diff(&sinkless, &with_sinks) > 10.0 * TOLERANCE,
+                    "K={count} cached={cached_len} padding={padding}: the sink must change the unfused logits"
                 );
                 cells += 1;
             }

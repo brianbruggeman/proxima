@@ -50,6 +50,7 @@ fn row_tiled_attention(
             cached_lower_inclusive: lower,
             new_upper_inclusive: 0,
                 arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
+                attention_sink: false,
         },
     }
 }
