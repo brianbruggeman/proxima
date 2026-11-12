@@ -3668,6 +3668,82 @@ fn build_static_arena_runs_a_live_constant_once_and_never_again() {
     );
 }
 
+/// `static_resolved_nodes` closes over `Elementwise`: a node reading only
+/// static nodes (here `negated = -constant`, the shape of the lowered
+/// `Reshape` split's `Iota * stride` index table) is computed once at build
+/// time, while a node that also reads an `Input` is not. Proven the same
+/// way as the constant above: a corrupted resident buffer survives the next
+/// step only if the node never re-executes.
+#[test]
+fn build_static_arena_runs_an_elementwise_over_static_nodes_once() {
+    let mut program = Vec::new();
+    let input = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: vec![Extent::Static(4)],
+            name: Some(String::from("a")),
+        },
+    );
+    let constant = append(
+        &mut program,
+        Op::Constant {
+            dtype: DType::FLOAT32,
+            shape: vec![Extent::Static(4)],
+            value: 5.0,
+        },
+    );
+    let negated = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Negate,
+            operands: vec![(constant, IndexMap::Affine(map::projection(1, &[0])))],
+            name: None,
+        },
+    );
+    let live = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            operands: vec![
+                (input, IndexMap::Affine(map::projection(1, &[0]))),
+                (negated, IndexMap::Affine(map::projection(1, &[0]))),
+            ],
+            name: None,
+        },
+    );
+    let mut arena = build_static_arena(&program, &[], &[negated, live])
+        .expect("static-elementwise program builds a static arena");
+    assert!(
+        arena.static_nodes.contains(&negated),
+        "an Elementwise reading only static nodes must be static"
+    );
+    assert!(
+        !arena.static_nodes.contains(&live),
+        "an Elementwise reading an Input must stay per-call"
+    );
+
+    let step_one = [1.0f32, 2.0, 3.0, 4.0];
+    let evaluated =
+        evaluate_named_with_arena(&mut arena, &[("a", &step_one)]).expect("step one evaluates");
+    assert_eq!(
+        evaluated.get(live).map(|(data, _)| data.to_vec()),
+        Some(vec![-4.0, -3.0, -2.0, -1.0]),
+        "a + (-5.0), the negation computed at build time"
+    );
+
+    arena.buffers[negated.0 as usize] = Some(alloc::vec![100.0f32; 4]);
+    let evaluated =
+        evaluate_named_with_arena(&mut arena, &[("a", &step_one)]).expect("step two evaluates");
+    assert_eq!(
+        evaluated.get(live).map(|(data, _)| data.to_vec()),
+        Some(vec![101.0, 102.0, 103.0, 104.0]),
+        "step two folds the corrupted buffer, proving the static Elementwise never re-ran"
+    );
+}
+
 /// The other half of ROW 174's same contract, mirroring
 /// [`build_static_arena_does_not_elide_a_dead_node_that_is_also_a_requested_output`]:
 /// a `Constant` with zero consumers is never bound at all --

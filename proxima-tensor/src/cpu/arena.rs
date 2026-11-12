@@ -666,22 +666,35 @@ pub struct StaticArena {
 /// `dead` (no reason to run a dead constant even once) since callers pass
 /// `dead` alongside this set to build the union `run_resolved_nodes_in_arena`
 /// skips. See `docs/discipline.md` ROW 174.
+///
+/// Also closes over [`BoundOpKind::Elementwise`]: a node every one of whose
+/// read sources (operands, gather index nodes, per [`read_nodes`]) is already
+/// static computes the same values on every call, so it is static too. This is
+/// what the lowered `Reshape` split is: `Iota * stride + Iota` building a flat
+/// index table that only `Lookup` reads ever consume. `resolved` is in
+/// execution order, so one forward pass sees every producer before its reader.
 pub(super) fn static_resolved_nodes(
     resolved: &[BoundOp],
     dead: &BTreeSet<NodeId>,
 ) -> BTreeSet<NodeId> {
-    resolved
-        .iter()
-        .filter(|computed| computed.dtype != DType::FLOAT64)
-        .filter(|computed| {
-            matches!(
-                computed.kind,
-                BoundOpKind::Constant { .. } | BoundOpKind::Iota
-            )
-        })
-        .map(|computed| computed.node)
-        .filter(|node| !dead.contains(node))
-        .collect()
+    let mut static_nodes = BTreeSet::new();
+    for computed in resolved {
+        if computed.dtype == DType::FLOAT64 || dead.contains(&computed.node) {
+            continue;
+        }
+        let leaf = matches!(
+            computed.kind,
+            BoundOpKind::Constant { .. } | BoundOpKind::Iota
+        );
+        let folds = matches!(computed.kind, BoundOpKind::Elementwise { .. })
+            && read_nodes(computed)
+                .iter()
+                .all(|read| static_nodes.contains(read));
+        if leaf || folds {
+            static_nodes.insert(computed.node);
+        }
+    }
+    static_nodes
 }
 
 /// Builds a [`StaticArena`] for `program`: runs shape inference and
