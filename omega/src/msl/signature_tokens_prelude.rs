@@ -1002,12 +1002,12 @@ pub(super) fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(&scaled_float_render::q8_0_unpack_msl());
     source.push('\n');
-    // unconditional, same posture as `Q5K_PAIR_DOT_MSL` above: the selector
-    // is `is_plain_product_reduce`, decided at EMIT time by
-    // `push_packed_row_blocked_body`'s `Codec::Q8_0` arm, not a cargo
-    // feature -- an unused `static inline` costs nothing in the compiled AIR.
-    source.push_str(Q8_0_PAIR_DOT_MSL);
-    source.push('\n');
+    // only `metal-q4k-split-k` builds still render `q8_0_pair_dot`: every other build selects the
+    // layout-rendered flat-block matvec for a plain-product Q8_0 reduce (`PackedBodySelect::FlatRendered`).
+    if cfg!(feature = "metal-q4k-split-k") {
+        source.push_str(Q8_0_PAIR_DOT_MSL);
+        source.push('\n');
+    }
     source.push_str(&scaled_float_render::q4_0_unpack_msl());
     source.push('\n');
     source.push_str(Q4_0_SUPER_ELEMENT_MSL);

@@ -902,19 +902,6 @@ static inline float q8_0_super_element(device const uchar *superblock, uint inde
 }
 
 
-static inline float q8_0_pair_dot(device const uchar *superblock, uint slot, thread const float *acts) {
-    device const uchar *block = superblock + (slot / 32u) * 34u;
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    float d = (float)as_type<half>(d_bits);
-    device const uchar *levels = block + 2;
-    float result = 0.0f;
-    for (uint j = 0u; j < 32u; ++j) {
-        result += d * (float)((char)levels[j]) * acts[j];
-    }
-    return result;
-}
-
-
 static inline float q4_0_element_code(uint code) {
     uint mantissa = code & 0xfu;
     return ((float)mantissa) * 1e0f;
