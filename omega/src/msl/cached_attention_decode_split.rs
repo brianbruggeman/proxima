@@ -61,6 +61,7 @@ pub(super) fn render_cached_attention_decode_split(
     let cached_lower = index_literal(*cached_lower_inclusive, index_type, literal_suffix);
     let new_upper = index_literal(*new_upper_inclusive, index_type, literal_suffix);
     let key_block = cached_key_codec.as_ref().and_then(readable_block_layout);
+    let value_block = cached_kv_codec.as_ref().and_then(readable_block_layout);
     if key_block.is_none() && cached_key_codec != cached_kv_codec {
         return Err(EmitError::CachedAttentionKvCodecNotSupported {
             node: resolved.node,
@@ -96,10 +97,22 @@ pub(super) fn render_cached_attention_decode_split(
                 BF8_VALUE_LOAD,
             )),
         ),
+        Some(_) if value_block.is_some() => {
+            if *head_dim % u64::from(value_block.map_or(1, |layout| layout.elements)) != 0 {
+                return Err(EmitError::CachedAttentionKvCodecNotSupported {
+                    node: resolved.node,
+                    reason: "a block V cache needs a head row of head_dim elements to be whole blocks",
+                });
+            }
+            (
+                "uchar",
+                Some((BLOCK_KEY_POINTERS, BLOCK_VALUE_POINTERS, BLOCK_KEY_LOAD, BLOCK_VALUE_LOAD)),
+            )
+        }
         Some(_) => {
             return Err(EmitError::CachedAttentionKvCodecNotSupported {
                 node: resolved.node,
-                reason: "the decode split reads cached V that is plain, Float16, BFloat16, or BFloat8",
+                reason: "the decode split reads cached V that is plain, a scalar the kernel decodes, or a readable block layout",
             });
         }
     };
@@ -122,7 +135,7 @@ pub(super) fn render_cached_attention_decode_split(
             *key_load = BLOCK_KEY_LOAD;
             (
                 "uchar",
-                block_unpack_msl(layout, &key_block_helper_name(layout)),
+                block_unpack_msl(layout, &block_helper_name("key", layout)),
                 ((*head_dim / 2) / elements).to_string(),
                 layout.block_bytes.to_string(),
             )
@@ -130,8 +143,18 @@ pub(super) fn render_cached_attention_decode_split(
         None => (cached_kv_type, String::new(), String::new(), String::new()),
     };
     let key_helper_name = key_block
-        .map(key_block_helper_name)
+        .map(|layout| block_helper_name("key", layout))
         .unwrap_or_default();
+    let value_helper_name = value_block
+        .map(|layout| block_helper_name("value", layout))
+        .unwrap_or_default();
+    let value_helper = value_block
+        .map(|layout| block_unpack_msl(layout, &value_helper_name))
+        .unwrap_or_default();
+    let (value_blocks_per_head, value_block_bytes) = value_block.map_or_else(
+        || (String::new(), String::new()),
+        |layout| ((*head_dim / u64::from(layout.elements)).to_string(), layout.block_bytes.to_string()),
+    );
     let batch_loops = match split {
         None => batch_loop(
             "batch_start < num_local_keys",
@@ -190,6 +213,13 @@ pub(super) fn render_cached_attention_decode_split(
             "@KEY_BLOCK_ELEMENTS@",
             key_block.map_or_else(String::new, |layout| layout.elements.to_string()),
         ),
+        ("@VALUE_BLOCK_LOAD@", value_helper_name),
+        (
+            "@VALUE_BLOCK_ELEMENTS@",
+            value_block.map_or_else(String::new, |layout| layout.elements.to_string()),
+        ),
+        ("@VALUE_BLOCKS_PER_HEAD@", value_blocks_per_head),
+        ("@VALUE_BLOCK_BYTES@", value_block_bytes),
         ("@KEY_BLOCKS_PER_HEAD@", key_blocks_per_head),
         ("@KEY_BLOCK_BYTES@", key_block_bytes),
         ("@KEY_STORE@", key_store.to_string()),
@@ -215,6 +245,7 @@ pub(super) fn render_cached_attention_decode_split(
     let mut source = String::new();
     preamble(&mut source);
     source.push_str(&key_helper);
+    source.push_str(&value_helper);
     if cached_kv_codec == Some(Codec::BFloat16) {
         source.push_str(BF16_VECTOR_HELPER);
     }
@@ -343,9 +374,22 @@ const BLOCK_KEY_LOAD: Parts = (
     NEW_KEY_LOAD,
 );
 
-/// The helper's name comes from the layout's own geometry, so a kernel that reads two layouts would hold two helpers.
-fn key_block_helper_name(layout: &BlockLayout) -> String {
-    format!("omega_key_block_{}x{}", layout.elements, layout.block_bytes)
+const BLOCK_VALUE_POINTERS: Parts = (
+    "device const uchar* v_cached = in6 + (((long)key * (long)kv_heads + (long)kv_head) * @VALUE_BLOCKS_PER_HEAD@L) * @VALUE_BLOCK_BYTES@L;",
+    "device const @T@4* v4_new = (device const @T@4*)(in7 + kbase * 2);",
+);
+
+const BLOCK_VALUE_LOAD: Parts = (
+    "uint value_element = (uint)index * 4u; device const uchar* v_block = v_cached + (value_element / @VALUE_BLOCK_ELEMENTS@u) * @VALUE_BLOCK_BYTES@u; value_row[step][slot] = @VALUE_BLOCK_LOAD@_run(v_block, value_element % @VALUE_BLOCK_ELEMENTS@u);",
+    NEW_VALUE_LOAD,
+);
+
+/// The helper's name is a proved name of the layout: its geometry for the reader of the kernel, and
+/// an FNV-1a hash of the whole field description, so two layouts that share a geometry and differ
+/// in packing, scale or code map never share a helper (`Debug` prints every field of the layout).
+fn block_helper_name(role: &str, layout: &BlockLayout) -> String {
+    let fingerprint = crate::identity::description_fingerprint(layout);
+    format!("omega_{role}_block_{}x{}_{fingerprint}", layout.elements, layout.block_bytes)
 }
 
 // the float new range loads the same way beside every cached format

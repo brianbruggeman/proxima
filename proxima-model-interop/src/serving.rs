@@ -1789,12 +1789,18 @@ mod tests {
             kv_cache_value_quant: NumericFormat::Q8_0,
             ..ServingConfig::default()
         };
+        let scalar_key_block_value = ServingConfig {
+            kv_cache_key_quant: NumericFormat::Float16,
+            kv_cache_value_quant: NumericFormat::Q8_0,
+            ..ServingConfig::default()
+        };
 
         apply_serving_config(&bf16_pair, 1).expect("a bf16 key and value cache is admitted");
-        let q8_0_error = apply_serving_config(&q8_0_pair, 1)
-            .expect_err("a q8_0 cache has no kernel read path");
+        apply_serving_config(&q8_0_pair, 1).expect("a q8_0 key and value cache is read through its layout");
+        let refused = apply_serving_config(&scalar_key_block_value, 1)
+            .expect_err("a scalar key beside a block value has no kernel read path");
 
-        assert!(q8_0_error.to_string().contains("Q8_0"), "{q8_0_error}");
+        assert!(refused.to_string().contains("Q8_0"), "{refused}");
     }
 
     /// A config with every unimplemented knob switched to its

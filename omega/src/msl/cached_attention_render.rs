@@ -131,13 +131,15 @@ pub(super) fn cached_attention_kv_codecs(
             Ok((Some(Codec::BFloat8), Some(Codec::BFloat8)))
         }
         (Some(even), Some(odd), Some(value))
-            if even == odd && readable_block_layout(&even).is_some() && is_scalar_value_codec(&value) =>
+            if even == odd
+                && readable_block_layout(&even).is_some()
+                && (is_scalar_value_codec(&value) || readable_block_layout(&value).is_some()) =>
         {
             Ok((Some(even), Some(value)))
         }
         _ => Err(EmitError::CachedAttentionKvCodecNotSupported {
             node,
-            reason: "the cached K and V operands must be all plain, all Float16, all BFloat16, all BFloat8, or a block K beside a Float16, BFloat16 or BFloat8 V",
+            reason: "the cached K and V operands must be all plain, all Float16, all BFloat16, all BFloat8, or a block K beside a Float16, BFloat16, BFloat8 or readable block V",
         }),
     }
 }

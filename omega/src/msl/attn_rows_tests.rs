@@ -976,7 +976,7 @@ fn a_partly_packed_or_misplaced_codec_is_declined_on_the_decode_split() {
         ("only the K even plane", vec![2], Codec::Float16),
         ("the query plane", vec![0], Codec::Float16),
         ("the new V rows", vec![7], Codec::Float16),
-        ("a quantized cached triple", vec![2, 3, 6], Codec::Q8_0),
+        ("a cached triple in a layout with no readable block", vec![2, 3, 6], Codec::Q4K),
     ] {
         let packed = packed_operands_at(&op, &indices, codec);
         let error = emit(&op, &packed, policy).expect_err(label);
