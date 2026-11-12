@@ -590,7 +590,7 @@ threadgroup_memory_bytes = 32768
 [packed_row_nsg]
 # `tiled_gemm_threadgroup_width`'s nsg multiplier for the packed
 # row-blocked path, shared by `metal-packed-row-nsg2` and
-# `metal-q4k-ggml-port` (either feature emits this; both want the
+# `metal-q4_0-native` (either feature emits this; both want the
 # identical value) -- see sized::PACKED_ROW_NSG and `msl.rs`'s
 # `packed_row_nsg_factor`. ggml's own `N_SG_Q4_K` is 2; must be a power of
 # two and `<= 32` for the same reason `packed_row_block.simdgroups` is.

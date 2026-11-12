@@ -1581,8 +1581,8 @@ fn fast_q4_0_admitted(
 }
 
 /// [`push_packed_row_multi_row_body`]'s `fast_q6k` gate: the multi-row twin
-/// of the single-row [`push_q6k_ggml_port_body`] admission in
-/// `push_packed_row_blocked_body` (`use_ggml_port && Q6K`), so a token group
+/// of the single-row rendered `Q6_K` admission in
+/// `push_packed_row_blocked_body` (`PackedBodySelect::SubBlockRendered` for `Q6K`), so a token group
 /// takes the ggml `Q6_K` lane map exactly when a lone token would. The two
 /// bodies share the per-lane accumulation order, which is what lets a
 /// multi-row dispatch reproduce the single-row result bit for bit.
@@ -1593,7 +1593,7 @@ pub(super) fn fast_q6k_active(
     reduce_op: ScalarOp,
     expert_source_mode: bool,
 ) -> bool {
-    cfg!(feature = "metal-q4k-ggml-port")
+    cfg!(feature = "metal")
         && !cfg!(feature = "metal-q4k-split-k")
         && !expert_source_mode
         && gather_slots(resolved)[block.weight].is_none()

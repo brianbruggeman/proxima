@@ -20,6 +20,7 @@ use alloc::vec::Vec;
 use proxima_numeric::block_layout::{BlockLayout, Coded, Digit, Field};
 
 use super::layout_render::hardware_type;
+use super::sub_block_assembled_matvec::assembled_matvec_msl;
 
 const WORD_BITS: u32 = 16;
 const BYTE_BITS: u32 = 8;
@@ -41,6 +42,45 @@ pub(super) struct SubBlockMatvecGeometry {
     /// Lanes that share one block: ggml's `ix = tiisg/8`, `it = tiisg%8` (ggml-metal.metal:5100-5103).
     /// The block count in flight per simdgroup is `lanes / threads_per_block`.
     pub threads_per_block: usize,
+    /// Which half of the lane number picks the block and which picks the thread within it. It sets
+    /// which lane holds which partial sum, so it fixes the order the simdgroup reduction adds them.
+    pub lane_order: LaneOrder,
+    /// How wide one read of the element codes is: ggml's Q4_K reads `ushort` pairs
+    /// (ggml-metal.metal:5152), its Q5_K reads `uchar` (ggml-metal.metal:5289).
+    pub code_read: CodeRead,
+}
+
+/// How a lane number splits into the block it works on and the thread slot within that block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LaneOrder {
+    /// `ix = lane / threads_per_block`, `it = lane % threads_per_block` (ggml-metal.metal:5100-5103).
+    BlocksHigh,
+    /// `ix = lane % blocks_in_flight`, `it = lane / blocks_in_flight` (ggml-metal.metal:5244-5250
+    /// for Q5_K, :5376-5385 for Q6_K).
+    BlocksLow,
+}
+
+/// The width of one read of the element codes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CodeRead {
+    Bytes,
+    Words,
+}
+
+impl CodeRead {
+    const fn lanes(self) -> usize {
+        match self {
+            Self::Bytes => 1,
+            Self::Words => 2,
+        }
+    }
+
+    const fn type_name(self) -> &'static str {
+        match self {
+            Self::Bytes => "uchar",
+            Self::Words => "ushort",
+        }
+    }
 }
 
 impl SubBlockMatvecGeometry {
@@ -55,6 +95,31 @@ impl SubBlockMatvecGeometry {
             lanes,
             run_elements: Self::RUN_ELEMENTS,
             threads_per_block: Self::THREADS_PER_BLOCK,
+            lane_order: LaneOrder::BlocksHigh,
+            code_read: CodeRead::Words,
+        }
+    }
+
+    /// ggml's `kernel_mul_mv_q5_K_f32_impl<2,2,32>` launch shape (ggml-metal.metal:5209-5250).
+    /// Renders bit-identically to ggml's Q5_K port but measured slower, so only the unit tests select it.
+    #[cfg(test)]
+    pub(super) const fn decode_high_plane(rows_per_simdgroup: usize, simdgroups: usize, lanes: usize) -> Self {
+        Self {
+            lane_order: LaneOrder::BlocksLow,
+            code_read: CodeRead::Bytes,
+            ..Self::decode(rows_per_simdgroup, simdgroups, lanes)
+        }
+    }
+
+    /// ggml's `kernel_mul_mv_q6_K_f32_impl<1,2,32>` launch shape (ggml-metal.metal:5340-5385):
+    /// four elements per lane run, sixteen threads per block.
+    pub(super) const fn decode_signed_scales(rows_per_simdgroup: usize, simdgroups: usize, lanes: usize) -> Self {
+        Self {
+            run_elements: 4,
+            threads_per_block: 16,
+            lane_order: LaneOrder::BlocksLow,
+            code_read: CodeRead::Bytes,
+            ..Self::decode(rows_per_simdgroup, simdgroups, lanes)
         }
     }
 }
@@ -64,7 +129,7 @@ impl SubBlockMatvecGeometry {
 #[error("sub-block matvec cannot render this layout: {0}")]
 pub(super) struct SubBlockMatvecRefusal(pub &'static str);
 
-fn require(condition: bool, reason: &'static str) -> Result<(), SubBlockMatvecRefusal> {
+pub(super) fn require(condition: bool, reason: &'static str) -> Result<(), SubBlockMatvecRefusal> {
     if condition { Ok(()) } else { Err(SubBlockMatvecRefusal(reason)) }
 }
 
@@ -80,8 +145,27 @@ struct Walk {
     lane_runs: usize,
     owned_groups: usize,
     covered_groups: usize,
-    word_lanes: usize,
+    read_lanes: usize,
     span: usize,
+    high: Option<HighPlane>,
+}
+
+/// The one-bit plane above the low code bits: `weight` is what a set bit adds to the code, the byte
+/// of the plane a thread reads is `base_byte + ir * ir_step_bytes`, and `shifts` holds the bit it
+/// tests for every `(owned, covered, nibble)`.
+struct HighPlane {
+    weight: u32,
+    base_byte: u32,
+    ir_step_bytes: u32,
+    shifts: Vec<u32>,
+}
+
+impl HighPlane {
+    fn shifts_by_owned(&self, walk: &Walk, covered: usize, nibble: usize) -> Vec<u32> {
+        (0..walk.owned_groups)
+            .map(|owned| self.shifts[(owned * walk.covered_groups + covered) * walk.nibbles() + nibble])
+            .collect()
+    }
 }
 
 impl Walk {
@@ -89,7 +173,7 @@ impl Walk {
         let sub = layout.sub.as_ref().ok_or(SubBlockMatvecRefusal("no sub-blocks"))?;
         require(layout.scale_runs.is_none(), "scale runs")?;
         require(layout.multiplier == 1 && layout.element.bias == 0, "affine element code")?;
-        require(layout.element.high.is_none() && layout.element.packed_radix == 0, "single plane code")?;
+        require(layout.element.packed_radix == 0, "plane coded element")?;
         require(sub.scale_multiplier == 1, "sub-block scale multiplier")?;
         require(layout.min.is_some() && sub.min.is_some(), "min and sub-block min")?;
         require(layout.min_multiplier.abs() == 1, "unit min multiplier")?;
@@ -118,7 +202,7 @@ impl Walk {
         let span = elements / usize::from(sub.count);
         require(span.is_multiple_of(usize::from(lane.radix)), "sub-blocks do not split a lane run")?;
         require(u32::from(nibble.radix) * BYTE_BITS == WORD_BITS, "a sub-block pair is one word")?;
-        Ok(Self {
+        let mut walk = Self {
             elements,
             bits,
             element_base_bytes: plane.base_bits / BYTE_BITS,
@@ -128,9 +212,46 @@ impl Walk {
             lane_runs,
             owned_groups,
             covered_groups,
-            word_lanes,
+            read_lanes: geometry.code_read.lanes(),
             span,
-        })
+            high: None,
+        };
+        walk.high = walk.high_plane(layout, geometry)?;
+        Ok(walk)
+    }
+
+    /// The element index of the code the thread slot `(owned, covered, nibble)` reads at run
+    /// position `lane_index`.
+    fn element(&self, owned: usize, covered: usize, nibble: usize, lane_index: usize) -> usize {
+        lane_index + usize::from(self.lane.radix) * (nibble + self.nibbles() * (owned + self.owned_groups * covered))
+    }
+
+    /// The bit plane above the low one, when the element code has it: where its bit of each tile
+    /// element sits, found by evaluating the plane's address walk for every thread slot.
+    fn high_plane(&self, layout: &BlockLayout, geometry: &SubBlockMatvecGeometry) -> Result<Option<HighPlane>, SubBlockMatvecRefusal> {
+        let Some(plane) = layout.element.high else {
+            return Ok(None);
+        };
+        require(plane.bits == 1, "one-bit high plane")?;
+        let lane_digit = plane.digits[0];
+        require(lane_digit.radix == self.lane.radix && u32::from(lane_digit.stride_bits) == BYTE_BITS, "high plane lane digit steps one byte")?;
+        let base_byte = plane.address(self.element(0, 0, 0, 0)) as u32 / BYTE_BITS;
+        let mut shifts = Vec::new();
+        for owned in 0..self.owned_groups {
+            for covered in 0..self.covered_groups {
+                for nibble in 0..self.nibbles() {
+                    let at = plane.address(self.element(owned, covered, nibble, 0)) as u32;
+                    require(at / BYTE_BITS == base_byte, "high plane bits of a thread share a byte")?;
+                    shifts.push(at % BYTE_BITS);
+                }
+            }
+        }
+        Ok(Some(HighPlane {
+            weight: 1u32 << layout.element.low.bits,
+            base_byte,
+            ir_step_bytes: geometry.run_elements as u32 * u32::from(lane_digit.stride_bits) / BYTE_BITS,
+            shifts,
+        }))
     }
 
     fn nibbles(&self) -> usize {
@@ -274,12 +395,23 @@ fn code_value(pair: &str, nibble: usize, last: usize, coded: &Coded) -> String {
     if coded.bias == 0 { code } else { format!("({code} - {}.0f)", coded.bias) }
 }
 
-fn typed_field_read(field: &Field) -> Result<String, SubBlockMatvecRefusal> {
+pub(super) fn typed_field_read(field: &Field) -> Result<String, SubBlockMatvecRefusal> {
     require(field.pieces.is_none(), "whole stored field")?;
     let native = hardware_type(&field.layout).ok_or(SubBlockMatvecRefusal("field is a hardware type"))?;
     let bytes = u16::from(field.layout.width()) / 8;
     require(field.byte_offset.is_multiple_of(bytes), "field is naturally aligned")?;
     Ok(format!("(float)(*(device const {native} *)(blk + {}u))", field.byte_offset))
+}
+
+pub(super) fn lane_split(geometry: &SubBlockMatvecGeometry) -> String {
+    let blocks_in_flight = geometry.lanes / geometry.threads_per_block;
+    match geometry.lane_order {
+        LaneOrder::BlocksHigh => format!(
+            "    uint ix = (uint)lane / {}u;\n    uint it = (uint)lane % {}u;\n",
+            geometry.threads_per_block, geometry.threads_per_block
+        ),
+        LaneOrder::BlocksLow => format!("    uint ix = (uint)lane % {blocks_in_flight}u;\n    uint it = (uint)lane / {blocks_in_flight}u;\n"),
+    }
 }
 
 fn reciprocal(shift: u32) -> String {
@@ -301,6 +433,9 @@ pub(super) fn sub_block_matvec_msl(
     other_stride_is_one: bool,
     reduction_bound: &str,
 ) -> Result<String, SubBlockMatvecRefusal> {
+    if layout.min.is_none() {
+        return assembled_matvec_msl(layout, geometry, weight, other, other_stride_is_one, reduction_bound);
+    }
     let walk = Walk::of(layout, geometry)?;
     let sub = layout.sub.as_ref().ok_or(SubBlockMatvecRefusal("no sub-blocks"))?;
     let sub_min = sub.min.as_ref().ok_or(SubBlockMatvecRefusal("no sub-block min"))?;
@@ -329,8 +464,7 @@ pub(super) fn sub_block_matvec_msl(
         }
     }
     let mut source = String::new();
-    source.push_str(&format!("    uint ix = (uint)lane / {}u;\n", geometry.threads_per_block));
-    source.push_str(&format!("    uint it = (uint)lane % {}u;\n", geometry.threads_per_block));
+    source.push_str(&lane_split(geometry));
     source.push_str(&format!("    uint ir = it % {}u;\n    uint iq = it / {}u;\n", walk.lane_runs, walk.lane_runs));
     source.push_str(&format!("    int super_blocks = (int){reduction_bound} / {elements};\n"));
     for group in 0..covered {
@@ -350,6 +484,15 @@ pub(super) fn sub_block_matvec_msl(
         "    uint code_offset = {}u + ir * {run_bytes}u + iq * {group_bytes}u;\n",
         walk.element_base_bytes
     ));
+    if let Some(high) = &walk.high {
+        source.push_str(&format!("    uint high_offset = {}u + ir * {}u;\n", high.base_byte, high.ir_step_bytes));
+        for group in 0..covered {
+            for nibble in 0..nibbles {
+                let shift = select_by_owned(&high.shifts_by_owned(&walk, group, nibble));
+                source.push_str(&format!("    uchar hm{group}_{nibble} = (uchar)(1u << {shift});\n"));
+            }
+        }
+    }
     let body = format!("            device const uchar *blk = blk_ptr[q];\n{}{codes}", words.loads());
     source.push_str(&words.preamble());
     if other_stride_is_one {
@@ -381,31 +524,51 @@ pub(super) fn sub_block_matvec_msl(
     source.push_str("        }\n");
     source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str(&body);
-    let accumulator = |group: usize, nibble: usize, lane: usize| format!("acc{}_{}", group + 1, nibble * walk.word_lanes + lane);
-    source.push_str("            device const ushort *codes = (device const ushort *)(blk + code_offset);\n");
+    let read_lanes = walk.read_lanes;
+    let read_type = geometry.code_read.type_name();
+    let accumulator = |group: usize, nibble: usize, lane: usize| format!("acc{}_{}", group + 1, nibble * read_lanes + lane);
+    source.push_str(&format!("            device const {read_type} *codes = (device const {read_type} *)(blk + code_offset);\n"));
+    if walk.high.is_some() {
+        source.push_str("            device const uchar *high_codes = blk + high_offset;\n");
+        for group in 0..covered {
+            for nibble in 0..nibbles {
+                source.push_str(&format!("            float high_acc{group}_{nibble} = 0.0f;\n"));
+            }
+        }
+    }
     for group in 0..covered {
         for nibble in 0..nibbles {
-            for lane in 0..walk.word_lanes {
+            for lane in 0..read_lanes {
                 source.push_str(&format!("            float {} = 0.0f;\n", accumulator(group, nibble, lane)));
             }
         }
     }
-    source.push_str(&format!("            for (uint i = 0u; i < {}u; ++i) {{\n", run / walk.word_lanes));
+    source.push_str(&format!("            for (uint i = 0u; i < {}u; ++i) {{\n", run / read_lanes));
+    if walk.high.is_some() {
+        source.push_str("                uchar high_byte = high_codes[i];\n");
+    }
     for group in 0..covered {
-        let shifted_words = walk.owned_groups as u32 * group as u32 * group_bytes / (WORD_BITS / BYTE_BITS);
-        source.push_str(&format!("                ushort code_word{group} = codes[i + {shifted_words}u];\n"));
+        let shifted_words = walk.owned_groups as u32 * group as u32 * group_bytes / read_lanes as u32;
+        source.push_str(&format!("                {read_type} code_word{group} = codes[i + {shifted_words}u];\n"));
     }
     let nibble_shift = |nibble: usize| nibble as u32 * u32::from(walk.nibble.stride_bits);
     let lane_shift = |lane: usize| lane as u32 * u32::from(walk.lane.stride_bits);
     for group in 0..covered {
         for nibble in 0..nibbles {
-            for lane in 0..walk.word_lanes {
+            for lane in 0..read_lanes {
                 let mask = ((1u32 << walk.bits) - 1) << (lane_shift(lane) + nibble_shift(nibble));
+                let mask = if read_lanes == 1 { format!("{mask:#04x}") } else { format!("{mask:#06x}") };
                 source.push_str(&format!(
-                    "                {} += y{group}[{}u * i + {}u] * (float)(code_word{group} & (ushort){mask:#06x}u);\n",
+                    "                {} += y{group}[{}u * i + {}u] * (float)(code_word{group} & ({read_type}){mask}u);\n",
                     accumulator(group, nibble, lane),
-                    walk.word_lanes,
+                    read_lanes,
                     nibble * run + lane
+                ));
+            }
+            if walk.high.is_some() {
+                let slot = nibble * run;
+                source.push_str(&format!(
+                    "                high_acc{group}_{nibble} += (high_byte & hm{group}_{nibble}) != 0u ? y{group}[i + {slot}u] : 0.0f;\n"
                 ));
             }
         }
@@ -416,11 +579,17 @@ pub(super) fn sub_block_matvec_msl(
     let mut scaled = Vec::new();
     for group in 0..covered {
         for nibble in 0..nibbles {
-            let folded = (1..walk.word_lanes).fold(accumulator(group, nibble, 0), |sum, lane| {
+            let folded = (1..read_lanes).fold(accumulator(group, nibble, 0), |sum, lane| {
                 format!("{sum} + {} * {}", reciprocal(lane_shift(lane)), accumulator(group, nibble, lane))
             });
             let residual = if nibble_shift(nibble) == 0 { String::new() } else { format!(" * {}", reciprocal(nibble_shift(nibble))) };
-            scaled.push(format!("({folded}) * scale_{group}_{nibble}{residual}"));
+            match &walk.high {
+                None => scaled.push(format!("({folded}) * scale_{group}_{nibble}{residual}")),
+                Some(high) => {
+                    let low_term = format!("{folded}{residual}");
+                    scaled.push(format!("scale_{group}_{nibble} * ({low_term} + {}.0f * high_acc{group}_{nibble})", high.weight));
+                }
+            }
         }
     }
     let offsets = (0..covered).flat_map(|group| (0..nibbles).map(move |nibble| format!("sumy{group}_{nibble} * min_{group}_{nibble}")));
@@ -464,8 +633,31 @@ mod tests {
 
     #[test]
     fn layouts_without_paired_sub_block_codes_are_refused() {
-        for layout in [BlockLayout::Q4_0, BlockLayout::Q4_1, BlockLayout::Q5_K, BlockLayout::Q6_K, BlockLayout::Q8_K] {
+        for layout in [BlockLayout::Q4_0, BlockLayout::Q4_1, BlockLayout::Q8_K] {
             assert!(render(&layout).is_err(), "{layout:?} has no rendered matvec");
         }
+    }
+
+    #[test]
+    fn q5_k_renders_its_high_plane_gate_from_its_layout() {
+        let geometry = SubBlockMatvecGeometry::decode_high_plane(2, 2, 32);
+        let source = sub_block_matvec_msl(&BlockLayout::Q5_K, &geometry, 0, 1, true, "u.reduction_total").expect("q5_k renders");
+        assert!(source.contains("high_acc0_0") && source.contains("16.0f * high_acc1_1") && source.contains("(1.0f/16.0f)"), "{source}");
+    }
+
+    #[test]
+    fn q6_k_renders_its_assembled_codes_from_its_layout() {
+        let geometry = SubBlockMatvecGeometry::decode_signed_scales(1, 2, 32);
+        let source = sub_block_matvec_msl(&BlockLayout::Q6_K, &geometry, 0, 1, true, "u.reduction_total").expect("q6_k renders");
+        assert!(source.contains("- 32)") && source.contains("(float)(char)scales[6u]") && source.contains("high_codes"), "{source}");
+    }
+
+    #[test]
+    fn one_field_of_the_q6_k_layout_changes_the_rendered_kernel() {
+        let geometry = SubBlockMatvecGeometry::decode_signed_scales(1, 2, 32);
+        let mut moved = BlockLayout::Q6_K;
+        moved.element.bias = 31;
+        let render_with = |layout: &BlockLayout| sub_block_matvec_msl(layout, &geometry, 0, 1, true, "u.reduction_total").expect("q6_k renders");
+        assert_ne!(render_with(&BlockLayout::Q6_K), render_with(&moved));
     }
 }

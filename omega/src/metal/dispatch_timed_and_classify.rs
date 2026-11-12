@@ -1479,7 +1479,7 @@ pub(super) fn classify_packed_kernel_variant(
     } else if kernel.source.contains("q6k_value(blk") {
         "q6k-scalar"
     } else if kernel.source.contains("acc1_0") {
-        // `metal-q4k-ggml-port`'s own body -- same marker and same reason
+        // the rendered Q4_K/Q5_K body -- same marker and same reason
         // as `classify_kind`'s own arm above, so this variant name does not
         // fall into "other" alongside genuinely unclassified kernels.
         "q4k-ggml-port"

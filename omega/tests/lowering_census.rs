@@ -101,8 +101,7 @@ const WEIGHT_FAMILIES: &[WeightFamily] = &[
     },
 ];
 
-/// `metal`'s own feature list turns `metal-q4k-ggml-port` ON by default
-/// (`Cargo.toml`'s `metal = [.., "metal-q4k-ggml-port"]`, found empirically
+/// `metal` selects the rendered K-quant matvec by default (found empirically
 /// via this same census -- see `PACKED_ROW_BODY_MARKERS`'s own doc), and
 /// `use_ggml_port` takes PRIORITY over the named pair-dot arm for every
 /// codec it covers (`Q4_K`/`Q5_K`/`Q6_K`) whenever `plain_product` holds --

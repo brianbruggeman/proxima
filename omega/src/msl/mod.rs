@@ -99,7 +99,7 @@ use crate::identity::{
     reduce_epilogue_is_identity, signed_name_part,
 };
 #[cfg(all(
-    any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port"),
+    feature = "metal-packed-row-nsg2",
     not(feature = "metal-q4k-split-k")
 ))]
 use crate::sized::PACKED_ROW_NSG;
@@ -134,6 +134,7 @@ mod expert_grouped_gemm;
 mod index_narrowing;
 pub mod layout_render;
 mod scaled_float_render;
+mod sub_block_assembled_matvec;
 mod sub_block_matvec;
 mod wide_grid;
 #[cfg(all(feature = "metal", target_os = "macos"))]

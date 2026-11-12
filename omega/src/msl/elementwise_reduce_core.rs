@@ -1752,8 +1752,8 @@ pub(super) fn push_packed_row_multi_row_q4k_body(
 }
 
 /// Renders [`push_packed_row_multi_row_body`]'s `Q6_K` fast-path reduction
-/// loop: [`push_q6k_ggml_port_body`]'s lane map (`tid = lane / 2`, `ix = lane
-/// % 2`, super-block stride 2) and its exact per-lane accumulation order,
+/// loop: the single-row `Q6_K` body's ([`sub_block_matvec_msl`] on `BlockLayout::Q6_K`) lane map
+/// (`tid = lane / 2`, `ix = lane % 2`, super-block stride 2) and its exact per-lane accumulation order,
 /// generalized to a `cap`-token activation group. Each lane decodes its 16
 /// weight levels of a super-block ONCE into registers and folds them against
 /// every token's 16 activations, instead of the generic arm re-deriving `d`,
@@ -1761,8 +1761,7 @@ pub(super) fn push_packed_row_multi_row_q4k_body(
 /// the per-token `sums0..sums3` partials, the `dall * (..)` fold and the
 /// super-block order match the single-row body operation for operation, each
 /// token's result is bit-identical to a single-row dispatch of that token.
-// the argument list mirrors `push_q6k_ggml_port_body`'s plus the token cap, so the two
-// bodies stay diffable line-for-line against each other.
+// the argument list mirrors the single-row rendered `Q6_K` body's plus the token cap.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_packed_row_multi_row_q6k_body(
     source: &mut String,
@@ -2228,7 +2227,7 @@ pub(super) fn packed_row_direct_grouped_axes(
 /// Renders `weight_base[q]`/`other_base[q]`/`coord_q_cache[q]` for one
 /// row-blocked group -- the ONE place every [`push_packed_row_blocked_body`]
 /// body variant (the default/mask-fma arm, [`sub_block_matvec_msl`],
-/// [`push_q6k_ggml_port_body`]) gets its row addressing from, since all
+/// the rendered `Q5_K`/`Q6_K` bodies) gets its row addressing from, since all
 /// three run this preamble before branching on which reduce body to emit.
 /// ROW 350 named the generic `%`/`/` decomposition against
 /// `u.output_extents`/`u.operand_strides` as 16 division-class instructions
@@ -2421,13 +2420,12 @@ pub(super) fn push_packed_row_group_bases(
 /// (the `Q6K if plain_product` arm) -- every Q3_K row-blocked dispatch and
 /// every plain-product Q6_K dispatch (the shape the openchat output head
 /// actually takes) undercounted into `"reduce-cooperative"`. A fourth gap
-/// found by the lowering census test this same landing adds: `metal`'s own
-/// feature list turns `metal-q4k-ggml-port` ON by default (`Cargo.toml`'s
-/// `metal = [.., "metal-q4k-ggml-port"]`), and [`push_q6k_ggml_port_body`]
+/// found by the lowering census test this same landing adds: `metal` selects the
+/// rendered K-quant matvec by default, and the rendered `Q6_K` body
 /// -- unlike its `Q4_K`/`Q5_K` siblings, which share `acc1_0` -- calls none
 /// of the named helpers and has no `acc1_0` accumulator either, so it fell
 /// through this same list even after the first three additions. `"sums0"`
-/// closes it (unique to that function's own per-thread partial sums).
+/// closes it (unique to that body's own per-thread partial sums).
 // sole caller is `crate::metal::classify_kind`, gated on `metal` (macOS-only
 // driver) AND `instrument` (diagnostic-only) -- this crate's `msl` module
 // itself only needs `alloc`, so a build with neither compiles this table
@@ -2452,13 +2450,12 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     "q5k_value(blk",
     "q6k_pair_dot(blk",
     "q6k_value(blk",
-    // unique to `sub_block_matvec_msl`/`push_q5k_ggml_port_body`'s
-    // per-thread accumulator naming -- those bodies call none of the
-    // helpers above by name, that is the whole point of the ggml port.
+    // unique to `sub_block_matvec_msl`'s Q4_K/Q5_K per-thread accumulator
+    // naming -- those bodies call none of the helpers above by name.
     "acc1_0",
-    // unique to `push_q6k_ggml_port_body`'s own per-thread partial sums --
+    // unique to the rendered Q6_K body's own per-thread partial sums --
     // that body shares neither `acc1_0` nor any named helper call with its
-    // Q4_K/Q5_K ggml-port siblings.
+    // Q4_K/Q5_K siblings.
     "sums0",
     // `Q4_0`/`Q8_0` are flat (non-K-quant) codecs but still route through
     // `emit_and_classify`'s packed-row whitelist (`Codec::Q4_0 | Codec::Q8_0`

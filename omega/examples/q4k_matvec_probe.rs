@@ -331,7 +331,7 @@ fn run() {
     println!("  bar: llama.cpp Metal on 7B Q4_K_S = 214.7 GB/s (3.784 GB in 17.62 ms/token)");
 
     // named production shapes, single-size wall time (no marginal
-    // cancellation): what a `metal-q4k-ggml-port` bake-off needs to compare
+    // cancellation): what a K-quant matvec bake-off needs to compare
     // arm-vs-arm at the two real projections the openchat checkpoint's
     // default decode graph actually dispatches -- `attn_q.weight`
     // (embedding x embedding) and `ffn_up.weight` (embedding x

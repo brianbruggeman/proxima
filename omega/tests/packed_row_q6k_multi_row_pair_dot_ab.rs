@@ -1,7 +1,7 @@
 //! `push_packed_row_multi_row_q6k_body` (`omega/src/msl/elementwise_reduce_core.rs`)
 //! folds a token group against ONE decode of each `Q6_K` super-block, on the
-//! same lane map and per-lane accumulation order as the single-row ggml port
-//! (`push_q6k_ggml_port_body`). This gate proves that equivalence on bytes:
+//! same lane map and per-lane accumulation order as the single-row rendered
+//! `Q6_K` matvec (`sub_block_matvec_msl`). This gate proves that equivalence on bytes:
 //! every row of a `tokens`-wide matmul must equal, bit for bit (`to_bits()`),
 //! the same matmul dispatched with a single token -- the single-row body --
 //! on that token's activation row, over the same real-quantized `Q6_K` weights.
@@ -10,7 +10,6 @@
 
 #![cfg(all(
     feature = "metal",
-    feature = "metal-q4k-ggml-port",
     not(feature = "metal-q4k-split-k"),
     target_os = "macos"
 ))]

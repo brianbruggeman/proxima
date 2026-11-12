@@ -6492,13 +6492,11 @@ fn packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul
 }
 
 /// [`packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul`]'s
-/// own twin for the OTHER feature that shares [`packed_row_nsg_factor`]:
-/// `metal-q4k-ggml-port` dispatches ggml's own body at ggml's own
-/// nsg=2, so it must double the threadgroup width the identical way
-/// `metal-packed-row-nsg2` does -- same assertion, different feature,
-/// proving the two features compose through one factor rather than two
-/// competing nsg constants.
-#[cfg(all(feature = "metal-q4k-ggml-port", not(feature = "metal-q4k-split-k")))]
+/// own twin for the rendered K-quant matvec: it is launched at ggml's own
+/// nsg=2 through the same [`packed_row_nsg_factor`], so it must double the
+/// threadgroup width the identical way `metal-packed-row-nsg2` does -- one
+/// factor, not two competing nsg constants.
+#[cfg(all(feature = "metal", not(feature = "metal-q4k-split-k")))]
 #[test]
 fn ggml_port_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul() {
     let bound = matmul_op(4, 256, 5);
@@ -6517,7 +6515,7 @@ fn ggml_port_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul() {
     assert_eq!(
         width,
         SIMD_WIDTH * 2,
-        "metal-q4k-ggml-port must double the one-simdgroup default width to 2 \
+        "the rendered K-quant matvec must double the one-simdgroup default width to 2 \
          simdgroups (PACKED_ROW_NSG); got {width}"
     );
 }
@@ -6534,7 +6532,7 @@ fn ggml_port_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul() {
 /// [`packed_row_dispatch`]/[`packed_row_nsg_factor`] production reads
 /// rather than a literal -- a hardcoded `SIMD_WIDTH` here is feature-blind
 /// to split-K's own widening and fails every cell it does not predict.
-#[cfg(not(any(feature = "metal-packed-row-nsg2", feature = "metal-q4k-ggml-port")))]
+#[cfg(not(feature = "metal-packed-row-nsg2"))]
 #[test]
 fn packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged() {
     let bound = matmul_op(4, 256, 5);
@@ -8749,7 +8747,7 @@ fn packed_row_activation_cap_is_the_smallest_power_of_two_holding_the_tokens_up_
 /// gemma4-E2B head 8.58 ms at width 2 against 1.17 ms at width 1. The fast arm
 /// decodes a lane's 16 levels once per super-block (`level0..level3`) and
 /// reads no per-element helper.
-#[cfg(all(feature = "metal-q4k-ggml-port", not(feature = "metal-q4k-split-k")))]
+#[cfg(all(feature = "metal", not(feature = "metal-q4k-split-k")))]
 #[test]
 fn q6k_multi_row_kernel_decodes_each_super_block_once_for_the_token_group() {
     let rows = crate::sized::PACKED_ROWS_PER_GROUP_Q6K;
@@ -10279,7 +10277,7 @@ mod expert_grouped_decode_description {
     }
 }
 
-#[cfg(all(feature = "metal-q4k-ggml-port", feature = "metal-q4_0-native"))]
+#[cfg(all(feature = "metal", feature = "metal-q4_0-native"))]
 fn trimmed_line_above(source: &str, needle: &str, lines_up: usize) -> String {
     let lines: Vec<&str> = source.lines().collect();
     let index = lines
@@ -10334,7 +10332,7 @@ fn q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup() {
 /// route to prove is that neither ported body renders, that the `ib` walk is
 /// strided by the simdgroup index and `split`, and that the row loop and the
 /// block pointer setup and advance are still the blk_ptr form the combine reads.
-#[cfg(all(feature = "metal-q4k-ggml-port", feature = "metal-q4_0-native"))]
+#[cfg(all(feature = "metal", feature = "metal-q4_0-native"))]
 #[test]
 fn ported_matvec_bodies_unroll_their_row_and_lane_loops_fully() {
     for codec in [Codec::Q4_0, Codec::Q6K] {

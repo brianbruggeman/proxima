@@ -1,0 +1,26 @@
+q5k_matvec_*.f32le, q6k_matvec_*.f32le: raw little-endian f32 bits of a Q5_K / Q6_K decode matvec, one value per weight row.
+
+old side:    proxima main 873ebbc3, kernels = push_q5k_ggml_port_body / push_q6k_ggml_port_body
+             (hand ports of ggml kernel_mul_mv_q5_K_f32_impl<2,2,32> / kernel_mul_mv_q6_K_f32_impl<1,2,32>),
+             metal feature, debug build.
+capture:     PROXNUM67_CAPTURE_DIR=<dir> cargo nextest run -p proxima-omega --features metal
+             --test q56k_rendered_matvec_parity; omega::execute over [Input u8 (rows, k), Input f32 (k, 1)]
+             -> Multiply -> Reduce Add, QuantizedBlock::Packed { codec } weights,
+             QuantizedBlock::Float32 activation = Lcg(2026).next_unit() * 4 - 2 for k values.
+
+q5k_matvec_ollama_blk0_attn_v_rows512.f32le
+  tensor  blk.0.attn_v.weight (Q5_K) of ollama blob sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129,
+          dims [2816, 2048]; first 512 rows
+  sha256  a4fa4a1992597a72000bf83743ae15a8799b150f7fa089f71140ab5da5c19906
+
+q5k_matvec_flint_blk10_ffn_gate_exps_rows512.f32le
+  tensor  blk.10.ffn_gate_exps.weight (Q5_K) of flint-UD-Q4_K_XL.gguf, dims [2048, 512, 256]; first 512 rows (expert 0)
+  sha256  3640cb3c561ae7473781d699f686851721150db3e1ac07350cd6f45fc197743e
+
+q6k_matvec_ollama_token_embd_rows2048.f32le
+  tensor  token_embd.weight (Q6_K) of the same ollama blob, dims [2816, 262144]; first 2048 rows
+  sha256  e1e76d173b43f76e56201ea8f7178d18828c28153002965cc34da2701e13c206
+
+q6k_matvec_flint_blk8_ffn_down_exps_rows2048.f32le
+  tensor  blk.8.ffn_down_exps.weight (Q6_K) of flint-UD-Q4_K_XL.gguf, dims [512, 2048, 256]; first 2048 rows (expert 0)
+  sha256  523eb4af94efa1ccf13a157d99d31c128b00e16df0a4ba6d60bd8d7e8d1e5110
