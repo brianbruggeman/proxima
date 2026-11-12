@@ -1,4 +1,4 @@
-//! `push_q4k_ggml_port_body`'s activation address now shares
+//! `sub_block_matvec_msl`'s activation address now shares
 //! `push_q4k_plain_product_y4_address` with `push_packed_row_blocked_body`'s
 //! own `plain_product` arm, so it takes the SAME `other_stride_is_one`
 //! stride-free specialization -- see that function's own doc. Before this
@@ -166,7 +166,7 @@ fn assert_ggml_port_matches_reference_at_stride(label: &str, stride: i32) {
         assert!(
             metal_value.is_finite(),
             "{label} row {index}: metal={metal_value} is not finite -- a wrong-stride read landed \
-             on a poisoned NaN activation slot in `push_q4k_ggml_port_body`'s stride-{stride} arm"
+             on a poisoned NaN activation slot in `sub_block_matvec_msl`'s stride-{stride} arm"
         );
         let scale = reference.abs().max(f32::MIN_POSITIVE);
         let relative = (metal_value - reference).abs() / scale;
@@ -174,7 +174,7 @@ fn assert_ggml_port_matches_reference_at_stride(label: &str, stride: i32) {
             relative < 1e-2,
             "{label} row {index}: metal={metal_value} disagrees with the independent \
              dequantize+dot reference={reference} (relative={relative}) -- \
-             `push_q4k_ggml_port_body`'s stride-{stride} activation addressing defect if it fires"
+             `sub_block_matvec_msl`'s stride-{stride} activation addressing defect if it fires"
         );
     }
 }

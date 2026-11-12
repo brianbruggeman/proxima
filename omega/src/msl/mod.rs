@@ -104,6 +104,7 @@ use crate::identity::{
 ))]
 use crate::sized::PACKED_ROW_NSG;
 use crate::sized::SIMD_WIDTH;
+use sub_block_matvec::{SubBlockMatvecGeometry, sub_block_matvec_msl};
 
 #[macro_use]
 mod kernel_types_identity;
@@ -133,6 +134,7 @@ mod expert_grouped_gemm;
 mod index_narrowing;
 pub mod layout_render;
 mod scaled_float_render;
+mod sub_block_matvec;
 mod wide_grid;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) use emit_and_classify::emit_inner_with_mma_selection_and_layout;

@@ -1691,7 +1691,7 @@ fn push_multi_row_lane_epilogue(source: &mut String, epilogue: &MultiRowEpilogue
 
 /// Renders [`push_packed_row_multi_row_body`]'s `Q4_K` fast-path reduction
 /// loop: the SAME lane split (`ix`/`it`/`iq`/`ir`, `lanes_per_block = 8`) and
-/// row-pointer hoist `push_q4k_ggml_port_body`/the M=1 `plain_product` arm
+/// row-pointer hoist `sub_block_matvec_msl`/the M=1 `plain_product` arm
 /// already use, generalized to a `cap`-token activation group. Each weight
 /// block's header/nibble words are read ONCE per `(ib, q)` inside
 /// `q4k_pair_dot_mr` and folded against every one of the `cap` activation
@@ -2227,7 +2227,7 @@ pub(super) fn packed_row_direct_grouped_axes(
 
 /// Renders `weight_base[q]`/`other_base[q]`/`coord_q_cache[q]` for one
 /// row-blocked group -- the ONE place every [`push_packed_row_blocked_body`]
-/// body variant (the default/mask-fma arm, [`push_q4k_ggml_port_body`],
+/// body variant (the default/mask-fma arm, [`sub_block_matvec_msl`],
 /// [`push_q6k_ggml_port_body`]) gets its row addressing from, since all
 /// three run this preamble before branching on which reduce body to emit.
 /// ROW 350 named the generic `%`/`/` decomposition against
@@ -2452,7 +2452,7 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     "q5k_value(blk",
     "q6k_pair_dot(blk",
     "q6k_value(blk",
-    // unique to `push_q4k_ggml_port_body`/`push_q5k_ggml_port_body`'s
+    // unique to `sub_block_matvec_msl`/`push_q5k_ggml_port_body`'s
     // per-thread accumulator naming -- those bodies call none of the
     // helpers above by name, that is the whole point of the ggml port.
     "acc1_0",

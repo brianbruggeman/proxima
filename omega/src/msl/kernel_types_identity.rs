@@ -2116,7 +2116,7 @@ pub(crate) const fn codec_supports_pair_dot(codec: Codec) -> bool {
 /// Output rows one SIMD group folds at once in the row-blocked packed path
 /// (`push_packed_row_blocked_body`'s generic `else` arm and
 /// `push_packed_row_multi_row_body`; NOT `push_q4k_single_fetch_body`/
-/// `push_q4k_ggml_port_body`, which are `Q4_K`-only and keep `4` baked into
+/// `sub_block_matvec_msl`, which are `Q4_K`-only and keep `4` baked into
 /// their own `lane % 8u` arithmetic regardless of this value —
 /// [`PACKED_ROWS_PER_GROUP`]'s doc). `Q6_K` decodes three raw-byte fields
 /// per element (`ql`, `qh`, `scale`) versus `Q4_K`'s effectively two, so

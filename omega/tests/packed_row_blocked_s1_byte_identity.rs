@@ -114,7 +114,7 @@ fn matmul_program(tokens: u32, in_dim: u32, out_dim: u32) -> (Vec<Op>, NodeId) {
 /// `metal`'s own default feature list, so a build that silently drops either
 /// out of that default list would still pass byte-identity against a STALE
 /// fixture forever (the fixture would simply have been captured from the old
-/// default too) -- checking for `push_q4k_ggml_port_body`'s own `sc16_0`/
+/// default too) -- checking for `sub_block_matvec_msl`'s own `scale_pair0`/
 /// `acc1_0` identifiers in the source text, plus the dispatched nsg=2 width
 /// on `kernel.grid` (`tiled_gemm_threadgroup_width`'s own
 /// `SIMD_WIDTH * packed_row_nsg_factor()`, both from `omega::sized` so this
@@ -167,9 +167,9 @@ fn single_activation_row_q4k_matvec_emits_byte_identical_msl_to_the_pre_fold_bod
     );
 
     assert!(
-        kernel.source.contains("sc16_0") && kernel.source.contains("acc1_0"),
-        "the fixture no longer carries `push_q4k_ggml_port_body`'s own \
-         `sc16_0`/`acc1_0` identifiers -- `metal-q4k-ggml-port` sits in \
+        kernel.source.contains("scale_pair0") && kernel.source.contains("acc1_0"),
+        "the fixture no longer carries `sub_block_matvec_msl`'s own \
+         `scale_pair0`/`acc1_0` identifiers -- `metal-q4k-ggml-port` sits in \
          `metal`'s own default feature list, so its body must be what this \
          fixture captures; a build that silently dropped it from the \
          default would still byte-match a stale fixture without this check"
