@@ -929,6 +929,20 @@ pub(super) fn is_plain_product_reduce(
     )
 }
 
+/// Whether the row-blocked kernel has a rendered body for a level-set codec: the reduce is a plain
+/// product, the activations are real f32, and the build selects the ggml-geometry bodies. The one
+/// predicate both `classify_packed_row_block` (admission) and `PackedBodySelect::select`
+/// (emission) evaluate, so a level codec is admitted exactly where emission renders it; every
+/// other level-codec op runs on the cooperative kernel. `expert_source_mode` is not an input here:
+/// that mode removes the packed operand before classification (`emit_with_expert_sources_mode`)
+/// and the env knob is refused in `packed_row_block_admitted`.
+pub(super) const fn level_codec_row_body_rendered(plain_product_reduce: bool, real_float: bool) -> bool {
+    plain_product_reduce
+        && real_float
+        && cfg!(feature = "metal")
+        && !cfg!(feature = "metal-q4k-split-k")
+}
+
 /// The row-blocked Q4_K header decode, one call site feature-gated between
 /// `q4k_header_for` (the shift-then-branch original) and `q4k_header_for_bf`
 /// (`metal-q4k-mask-fma`'s branch-free port, see [`Q4K_MASK_FMA_MSL`]).

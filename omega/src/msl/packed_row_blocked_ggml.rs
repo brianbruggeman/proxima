@@ -227,16 +227,13 @@ pub(super) fn push_packed_row_blocked_body(
             fn select(
                 codec: Codec,
                 plain_product: bool,
-                epilogue_is_identity: bool,
+                plain_product_reduce: bool,
                 real_float: bool,
                 expert_source_mode: bool,
             ) -> Self {
                 let levels_rendered = matches!(codec, Codec::Levels(_))
-                    && epilogue_is_identity
-                    && real_float
                     && !expert_source_mode
-                    && cfg!(feature = "metal")
-                    && !cfg!(feature = "metal-q4k-split-k");
+                    && level_codec_row_body_rendered(plain_product_reduce, real_float);
                 let ggml_port = plain_product
                     && matches!(codec, Codec::Q4K | Codec::Q5K | Codec::Q6K)
                     && cfg!(feature = "metal")
@@ -246,7 +243,7 @@ pub(super) fn push_packed_row_blocked_body(
                 // selection: its admission is a feature check here, never a
                 // parameter a caller could set for a different codec.
                 let q4_0_reference = matches!(codec, Codec::Q4_0)
-                    && epilogue_is_identity
+                    && plain_product_reduce
                     && real_float
                     && cfg!(feature = "metal-q4_0-native")
                     && !cfg!(feature = "metal-q4k-split-k");
