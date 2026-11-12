@@ -122,6 +122,16 @@ impl SubBlockMatvecGeometry {
             ..Self::decode(rows_per_simdgroup, simdgroups, lanes)
         }
     }
+
+    /// ggml's `kernel_mul_mv_iq4_xs_f32_impl` launch shape (ggml-metal.metal `ix = tiisg/16`,
+    /// `it = tiisg%16`): sixteen threads share a block, each reads a run of eight code bytes.
+    pub(super) const fn decode_levels(rows_per_simdgroup: usize, simdgroups: usize, lanes: usize) -> Self {
+        Self {
+            threads_per_block: 16,
+            code_read: CodeRead::Bytes,
+            ..Self::decode(rows_per_simdgroup, simdgroups, lanes)
+        }
+    }
 }
 
 /// The property of the layout or geometry that keeps this renderer from rendering it.
@@ -358,7 +368,7 @@ impl Words {
     }
 }
 
-fn select_by_owned(values: &[u32]) -> String {
+pub(super) fn select_by_owned(values: &[u32]) -> String {
     let Some((last, earlier)) = values.split_last() else {
         return String::from("0u");
     };

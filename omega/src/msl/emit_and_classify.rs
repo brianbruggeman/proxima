@@ -1,5 +1,6 @@
 use alloc::borrow::ToOwned;
 use proxima_numeric::float_layout::FloatLayout;
+use proxima_numeric::{LevelFormat, LevelTable};
 
 use super::*;
 
@@ -2841,6 +2842,12 @@ pub enum PackedRowBlockRejection {
     /// contiguous-fold check this fails) — cannot be treated as one
     /// flattened reduction, so the generic per-element path runs instead.
     ReduceDimsNotContiguous { reduce_dims: Vec<u16> },
+    /// A level-set codec has a rendered single-row matvec only; an op that folds more than one
+    /// token row takes the generic cooperative or tiled path.
+    MultiRowBodyMissing,
+    /// `PROXIMA_PACKED_ROW_DISABLE` names the codec: the same-binary A/B control that keeps it on
+    /// the generic cooperative kernel.
+    RowBlockSwitchedOff,
     /// The packed operand's stride at the innermost reduce dim is not 1.
     NonUnitWeightStride { stride: i64 },
     /// The flattened extent across every reduce dim is not a whole
@@ -2881,7 +2888,14 @@ pub(super) fn classify_packed_row_block(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
 ) -> Result<PackedRowBlock, PackedRowBlockRejection> {
-    classify_packed_row_block_with(resolved, quantized, false, row_block_extent_multiple)
+    let block = classify_packed_row_block_with(resolved, quantized, false, row_block_extent_multiple)?;
+    if matches!(block.codec, Codec::Levels(_)) && packed_row_block_token_total(&block, &resolved.extents) > 1 {
+        return Err(PackedRowBlockRejection::MultiRowBodyMissing);
+    }
+    if packed_row_codec_disabled(block.codec) {
+        return Err(PackedRowBlockRejection::RowBlockSwitchedOff);
+    }
+    Ok(block)
 }
 
 /// The codec table of the row-blocked packed kernel: `Some(n)` when its lane
@@ -2892,6 +2906,9 @@ pub(super) fn classify_packed_row_block(
 /// codec forces a decision here instead of slipping through.
 const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
     match codec {
+        Codec::Levels(format) if level_row_block_elements(&format).is_some() => {
+            level_row_block_elements(&format)
+        }
         Codec::Q3K
         | Codec::Q4K
         | Codec::Q5K
@@ -2929,6 +2946,22 @@ const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
         | Codec::Bf8E5M2
         | Codec::Bf4E2M1 => None,
         _ => None,
+    }
+}
+
+/// The reduce-extent multiple of a level-set format the row-blocked kernel renders: one block of
+/// its packed layout. Decided by the properties `level_matvec_msl` covers (an explicit ladder, sub-block
+/// scales, no block min) and never by a format name, so a refusal there is a refusal here.
+const fn level_row_block_elements(format: &LevelFormat) -> Option<usize> {
+    let Some(layout) = format.packing() else {
+        return None;
+    };
+    let ladder = matches!(format.levels, LevelTable::Explicit(_));
+    let scaled_sub_blocks = matches!(layout.sub, Some(sub) if sub.min.is_none());
+    if ladder && scaled_sub_blocks && layout.min.is_none() && layout.scale_runs.is_none() {
+        Some(layout.elements as usize)
+    } else {
+        None
     }
 }
 

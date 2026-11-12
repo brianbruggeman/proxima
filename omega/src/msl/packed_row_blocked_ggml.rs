@@ -212,6 +212,8 @@ pub(super) fn push_packed_row_blocked_body(
             Q5KGgmlPort,
             /// the sub-block matvec rendered from the codec's own block layout (Q4_K, Q6_K)
             SubBlockRendered,
+            /// the level-set matvec rendered from the format's block layout and level table (IQ4_XS)
+            LevelsRendered,
             /// ggml's own Q4_0 lane geometry, kept as a REFERENCE/Oracle body.
             Q4_0Reference,
             /// the generic lane-spread preamble plus its per-codec decode arms
@@ -227,7 +229,14 @@ pub(super) fn push_packed_row_blocked_body(
                 plain_product: bool,
                 epilogue_is_identity: bool,
                 real_float: bool,
+                expert_source_mode: bool,
             ) -> Self {
+                let levels_rendered = matches!(codec, Codec::Levels(_))
+                    && epilogue_is_identity
+                    && real_float
+                    && !expert_source_mode
+                    && cfg!(feature = "metal")
+                    && !cfg!(feature = "metal-q4k-split-k");
                 let ggml_port = plain_product
                     && matches!(codec, Codec::Q4K | Codec::Q5K | Codec::Q6K)
                     && cfg!(feature = "metal")
@@ -245,6 +254,7 @@ pub(super) fn push_packed_row_blocked_body(
                     (true, Codec::Q5K, _) => Self::Q5KGgmlPort,
                     (true, _, _) => Self::SubBlockRendered,
                     (false, _, true) => Self::Q4_0Reference,
+                    (false, _, false) if levels_rendered => Self::LevelsRendered,
                     (false, _, false) => Self::Generic,
                 }
             }
@@ -257,6 +267,7 @@ pub(super) fn push_packed_row_blocked_body(
             // epilogue and real f32 activations. Neither names a codec.
             is_plain_product_reduce(resolved, reduce_op, weight, other),
             resolved.dtype == DType::FLOAT32,
+            expert_source_mode,
         );
         if packed_body == PackedBodySelect::Q5KGgmlPort {
             push_q5k_ggml_port_body(
@@ -285,6 +296,38 @@ pub(super) fn push_packed_row_blocked_body(
             let reduction_bound = packed_row_reduction_bound_token(metal);
             let body = sub_block_matvec_msl(
                 &layout,
+                &geometry,
+                weight,
+                other,
+                other_stride_is_one,
+                &reduction_bound,
+            )
+            .map_err(|refusal| EmitError::PackedCodecNotSupported {
+                node: resolved.node,
+                codec: refusal.0,
+            })?;
+            source.push_str(&body);
+        } else if packed_body == PackedBodySelect::LevelsRendered {
+            let Codec::Levels(format) = codec else {
+                return Err(EmitError::PackedCodecNotSupported {
+                    node: resolved.node,
+                    codec: "not a level format",
+                });
+            };
+            let layout = format.packing().ok_or(EmitError::PackedCodecNotSupported {
+                node: resolved.node,
+                codec: "no block layout",
+            })?;
+            let codes = LevelCodes {
+                table: &format.levels,
+                element_fn: codec_element_fn_name(codec),
+            };
+            let (simdgroups, lanes) = (packed_row_nsg_factor() as usize, SIMD_WIDTH as usize);
+            let geometry = SubBlockMatvecGeometry::decode_levels(rows, simdgroups, lanes);
+            let reduction_bound = packed_row_reduction_bound_token(metal);
+            let body = level_matvec_msl(
+                &layout,
+                &codes,
                 &geometry,
                 weight,
                 other,

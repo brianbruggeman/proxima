@@ -2170,6 +2170,25 @@ pub(super) const fn q4_0_multi_row_pair_lane_override() -> bool {
     true
 }
 
+/// `PROXIMA_PACKED_ROW_DISABLE`: a comma-separated list of codec names
+/// ([`codec_cache_token`] spellings, as [`tiled_gemm_codec_disabled`]'s) kept off the row-blocked
+/// matvec, so their ops render on the generic cooperative kernel instead
+/// (`PackedRowBlockRejection::RowBlockSwitchedOff`). The same-binary A/B control for a codec's
+/// rendered matvec, the way `PROXIMA_TILED_GEMM_DISABLE` is for its tiled GEMM. Unset or empty
+/// disables nothing (the default).
+#[cfg(feature = "std")]
+pub(super) fn packed_row_codec_disabled(codec: Codec) -> bool {
+    std::env::var("PROXIMA_PACKED_ROW_DISABLE").is_ok_and(|list| {
+        list.split(',')
+            .any(|name| name.trim() == codec_cache_token(codec))
+    })
+}
+
+#[cfg(not(feature = "std"))]
+pub(super) const fn packed_row_codec_disabled(_codec: Codec) -> bool {
+    false
+}
+
 /// `PROXIMA_TILED_GEMM_DISABLE`: a comma-separated list of codec names
 /// ([`codec_cache_token`] spellings: `q8_0`, `q5_0`, `q5_1`, `f16`, `q3k`,
 /// `q4k`, `q5k`, `q6k`, ...) kept off the tiled and expert-grouped GEMM, so
