@@ -8777,8 +8777,10 @@ fn q6k_multi_row_kernel_decodes_each_super_block_once_for_the_token_group() {
         });
 
         assert!(
-            source.contains("level0[l] = (float)((int)q_lo0 - 32);"),
-            "{tokens} tokens must decode the lane's levels once per super-block"
+            source.contains("level0[i] = (float)((int)((((uint)low_codes[i + 0u] >> 0u) & 0xfu) | ((((uint)high_codes[i + 0u] >> 0u) & 0x3u) << 4u)) - 32);")
+                && source.contains(&format!("for (int s = 0; s < {accumulator_cap}; ++s)"))
+                && source.contains("sumf[s][q] = sumf[s][q] + dall * (sums0 * (float)(char)scales[0u]"),
+            "{tokens} tokens must decode the lane's levels once per super-block from the layout and fold the {accumulator_cap}-token group against them"
         );
         assert!(
             !source.contains("q6k_element(in") && !source.contains("q6k_element(wblk0"),
