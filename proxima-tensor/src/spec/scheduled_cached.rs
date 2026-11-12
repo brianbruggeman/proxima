@@ -701,7 +701,7 @@ pub fn scheduled_single_range_cached_forward_program_with_experts(
     );
     let mut x = embedding_lookup(&mut program, table, ids);
     if let Some(scale) = embedding_scale {
-        x = append_embedding_scale(&mut program, x, embedding, scale)?;
+        x = append_embedding_scale(&mut program, x, embedding, scale, DType::FLOAT32)?;
     }
 
     let inv_dim = count_constant(&mut program, embedding);
@@ -1245,7 +1245,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     );
     let mut x = embedding_lookup(&mut program, table, ids);
     if let Some(scale) = embedding_scale {
-        x = append_embedding_scale(&mut program, x, embedding, scale)?;
+        x = append_embedding_scale(&mut program, x, embedding, scale, DType::FLOAT32)?;
     }
 
     let inv_dim = count_constant(&mut program, embedding);

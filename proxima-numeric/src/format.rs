@@ -251,6 +251,14 @@ impl core::fmt::Debug for NumericFormat {
     }
 }
 
+/// Binary32, the format every activation is produced at until a config names another; a
+/// settings derive that skips a field of this type needs a `Default`.
+impl Default for NumericFormat {
+    fn default() -> Self {
+        Self::Scalar(FloatLayout::BF32)
+    }
+}
+
 impl NumericFormat {
     /// Elements one block covers; 1 for a scalar.
     #[must_use]

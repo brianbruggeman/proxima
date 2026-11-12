@@ -138,11 +138,12 @@ pub(crate) fn append_embedding_scale(
     x: NodeId,
     embedding: u32,
     scale: EmbeddingScale,
+    activation: DType,
 ) -> Result<NodeId, TensorError> {
-    let multiplier = scalar_constant(program, scale.multiplier(embedding));
+    let multiplier = scalar_constant_as(program, scale.multiplier(embedding), activation);
     elementwise(
         program,
-        DType::FLOAT32,
+        activation,
         ScalarOp::Multiply,
         &[(x, "sd->sd"), (multiplier, "->sd")],
     )
@@ -2236,7 +2237,7 @@ pub fn scheduled_forward_program_with_experts_and_head_repeats(
     );
     let mut x = embedding_lookup(&mut program, table, ids);
     if let Some(scale) = embedding_scale {
-        x = append_embedding_scale(&mut program, x, embedding, scale)?;
+        x = append_embedding_scale(&mut program, x, embedding, scale, DType::FLOAT32)?;
     }
 
     let inv_dim = count_constant(&mut program, embedding);
@@ -2822,6 +2823,7 @@ pub fn gqa_cached_forward_program_with_experts_and_layer_taps(
         None,
         &[],
         false,
+        DType::FLOAT32,
     )
 }
 
@@ -2855,6 +2857,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
     residual_scale: Option<f32>,
     layer_windows: &[Option<u32>],
     sliding_kv_ring: bool,
+    activation: DType,
 ) -> Result<GqaRoutedForwardProgramWithLayerTaps, TensorError> {
     if residual_scale.is_some() && expert_count == 0 {
         return Err(TensorError::UnsupportedInBuilder {
@@ -2897,9 +2900,9 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
         alloc::vec![Extent::Static(vocab), Extent::Static(embedding)],
         "token_embd.weight",
     );
-    let mut x = embedding_lookup(&mut program, table, ids);
+    let mut x = embedding_lookup_as(&mut program, table, ids, activation);
     if let Some(scale) = embedding_scale {
-        x = append_embedding_scale(&mut program, x, embedding, scale)?;
+        x = append_embedding_scale(&mut program, x, embedding, scale, activation)?;
     }
 
     let inv_dim = count_constant(&mut program, embedding);
@@ -3606,6 +3609,7 @@ pub fn recurrent_interval_forward_program_with_last_row(
         recurrence: None,
         loopcd: LoopCdConfig::default(),
         network: None,
+        activation: DType::FLOAT32.numeric_format(),
     };
     let ForwardProgram {
         program,

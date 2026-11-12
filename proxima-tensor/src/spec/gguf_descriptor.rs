@@ -318,6 +318,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         recurrence: None,
         loopcd: LoopCdConfig::default(),
         network: None,
+        activation: profile.activation,
     })
 }
 
