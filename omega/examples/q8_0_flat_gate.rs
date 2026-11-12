@@ -25,6 +25,7 @@ use proxima_gguf::types::GgmlType;
 use proxima_numeric::codec::Codec;
 use proxima_numeric::{DType, NumericPolicy};
 use proxima_tensor::test_support::Lcg;
+use proxima_tensor::map::{AxisIndex, AxisTerm};
 use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, map};
 
 const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
@@ -71,6 +72,66 @@ fn parse_header(file: &mut File) -> Result<(ParsedGguf, u64), String> {
         }
         prefix_len *= 2;
     }
+}
+
+fn load_tensor(file: &mut File, parsed: &ParsedGguf, file_len: u64, name: &str) -> Result<(Vec<u8>, usize, usize), String> {
+    let tensor = parsed.tensors.iter().find(|tensor| tensor.name == name).ok_or("tensor not found")?;
+    if tensor.ggml_type != GgmlType::Q8_0 {
+        return Err(format!("{name} is {:?}, not Q8_0", tensor.ggml_type));
+    }
+    let range = parsed.tensor_data_range(tensor, file_len).map_err(|error| format!("{error:?}"))?;
+    let mut bytes = vec![0u8; (range.end - range.start) as usize];
+    file.seek(SeekFrom::Start(range.start)).map_err(|error| error.to_string())?;
+    file.read_exact(&mut bytes).map_err(|error| error.to_string())?;
+    Ok((bytes, tensor.dims[0] as usize, tensor.dims[1] as usize))
+}
+
+/// `sum_k weight[route[s], o, k] * activation[s, k]`: the weight is gathered per token off a stacked
+/// `[expert, out, in]` slab, the shape `proxima_tensor::spec::gathered_expert_product` builds.
+fn gathered_expert_program(experts: u32, rows: u32, k: u32) -> (Vec<Op>, NodeId) {
+    let mut program = Vec::new();
+    let named = |program: &mut Vec<Op>, dtype: DType, shape: Vec<Extent>, name: &str| {
+        append(program, Op::Input { dtype, shape, name: Some(name.into()) })
+    };
+    let weight = named(&mut program, DType::UINT8, vec![Extent::Static(experts), Extent::Static(rows), Extent::Static(k)], "weight");
+    let route = named(&mut program, DType::INT32, vec![Extent::Static(1)], "route");
+    let activation = named(&mut program, DType::FLOAT32, vec![Extent::Static(1), Extent::Static(k)], "activation");
+    let gather_map = IndexMap::Computed {
+        indices: route,
+        index_map: map::projection(3, &[0]),
+        base: map::IndexPattern {
+            iter_rank: 3,
+            axes: vec![
+                AxisIndex::default(),
+                AxisIndex { terms: core::iter::once(AxisTerm::projection(1)).collect(), offset: 0, len: None },
+                AxisIndex { terms: core::iter::once(AxisTerm::projection(2)).collect(), offset: 0, len: None },
+            ],
+        },
+        gathered_dim: 0,
+    };
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Multiply,
+            operands: vec![(weight, gather_map), (activation, IndexMap::Affine(map::projection(3, &[0, 2])))],
+            name: None,
+        },
+    );
+    let sum = append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+            keep: Keep::Reduce,
+            name: Some("q8_0_flat_gate_expert".into()),
+        }),
+    );
+    (program, sum)
 }
 
 fn matmul_program(rows: u32, k: u32) -> (Vec<Op>, NodeId) {
@@ -155,37 +216,63 @@ fn main() -> Result<(), String> {
         return Ok(());
     }
     let name = env_or("Q8_TENSOR", "blk.3.attn_q.weight");
-    let tensor = parsed.tensors.iter().find(|tensor| tensor.name == name).ok_or("tensor not found")?;
-    if tensor.ggml_type != GgmlType::Q8_0 {
-        return Err(format!("{name} is {:?}, not Q8_0", tensor.ggml_type));
-    }
-    let (k, rows) = (tensor.dims[0] as usize, tensor.dims[1] as usize);
-    let range = parsed.tensor_data_range(tensor, file_len).map_err(|error| format!("{error:?}"))?;
-    let mut weight = vec![0u8; (range.end - range.start) as usize];
-    file.seek(SeekFrom::Start(range.start)).map_err(|error| error.to_string())?;
-    file.read_exact(&mut weight).map_err(|error| error.to_string())?;
+    let (first, k, rows) = load_tensor(&mut file, &parsed, file_len, &name)?;
+    let second = match std::env::var("Q8_TENSOR2") {
+        Ok(other) => Some(load_tensor(&mut file, &parsed, file_len, &other)?),
+        Err(_) => None,
+    };
 
     let mut lcg = Lcg(2026);
     let activation: Vec<f32> = (0..k).map(|_| lcg.next_unit() * 4.0 - 2.0).collect();
-    let (program, output) = matmul_program(rows as u32, k as u32);
-    let blocks = [QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &weight }, QuantizedBlock::Float32(&activation)];
-    let plan = omega::plan(&program, &[], &blocks, &[output], if std::env::var("Q8_POLICY").as_deref() == Ok("bit_exact") { NumericPolicy::bit_exact() } else { NumericPolicy::llama_relaxed() }).map_err(|error| format!("{error:?}"))?;
+    // expert mode: the two tensors are stacked as experts 0 and 1 and the route picks expert 1, so
+    // the weight is read through the gathered-expert preamble; the host reference reads expert 1.
+    let (program, output, weight, route) = match &second {
+        Some((other, other_k, other_rows)) if (*other_k, *other_rows) == (k, rows) => {
+            let (program, output) = gathered_expert_program(2, rows as u32, k as u32);
+            let stacked: Vec<u8> = first.iter().chain(other.iter()).copied().collect();
+            (program, output, stacked, Some([1.0f32]))
+        }
+        Some(_) => return Err("Q8_TENSOR2 must have the same shape as Q8_TENSOR".to_owned()),
+        None => {
+            let (program, output) = matmul_program(rows as u32, k as u32);
+            (program, output, first.clone(), None)
+        }
+    };
+    let reference_weight: &[u8] = second.as_ref().map_or(&first, |(other, _, _)| other);
+    let blocks_dense = [QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &weight }, QuantizedBlock::Float32(&activation)];
+    let blocks_expert;
+    let blocks: &[QuantizedBlock<'_>] = match &route {
+        Some(route) => {
+            blocks_expert = [
+                QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: &weight },
+                QuantizedBlock::Float32(route),
+                QuantizedBlock::Float32(&activation),
+            ];
+            &blocks_expert
+        }
+        None => &blocks_dense,
+    };
+    let plan = omega::plan(&program, &[], blocks, &[output], if std::env::var("Q8_POLICY").as_deref() == Ok("bit_exact") { NumericPolicy::bit_exact() } else { NumericPolicy::llama_relaxed() }).map_err(|error| format!("{error:?}"))?;
 
     let (iters, warm, idle_ms): (usize, usize, u64) = (
         env_or("Q8_ITERS", "50").parse().map_err(|_| "Q8_ITERS")?,
         env_or("Q8_WARM", "3").parse().map_err(|_| "Q8_WARM")?,
         env_or("Q8_IDLE_MS", "0").parse().map_err(|_| "Q8_IDLE_MS")?,
     );
+    let run = || -> Result<(Vec<f32>, u64), String> {
+        let (evaluated, ns) = omega::execute_plan_timed(&plan, blocks).map_err(|error| format!("{error:?}"))?;
+        Ok((evaluated.root().to_vec(), ns))
+    };
     for _ in 0..warm {
-        omega::execute_plan_timed(&plan, &blocks).map_err(|error| format!("{error:?}"))?;
+        run()?;
     }
     std::thread::sleep(Duration::from_millis(idle_ms));
     let mut gpu_ns = Vec::with_capacity(iters);
     let mut last = Vec::new();
     for _ in 0..iters {
-        let (evaluated, ns) = omega::execute_plan_timed(&plan, &blocks).map_err(|error| format!("{error:?}"))?;
+        let (values, ns) = run()?;
         gpu_ns.push(ns);
-        last = evaluated.root().to_vec();
+        last = values;
     }
 
     let checksum = last.iter().fold(FNV_OFFSET, |hash, value| {
@@ -195,7 +282,7 @@ fn main() -> Result<(), String> {
         let bytes: Vec<u8> = last.iter().flat_map(|value| value.to_bits().to_le_bytes()).collect();
         File::create(out).and_then(|mut dump| dump.write_all(&bytes)).map_err(|error| error.to_string())?;
     }
-    let reference = host_reference(&weight, &activation, k, 0, 2);
+    let reference = host_reference(reference_weight, &activation, k, 0, 2);
     let true_error = relative_error(&last, &reference);
     let (mean_error, magnitude) = error_summary(&last, &reference);
     let versus_other = std::env::var("Q8_CMP").ok().map(|other| {
@@ -209,7 +296,7 @@ fn main() -> Result<(), String> {
         let (differing, relative) = compare?;
         println!("{{\"vs_other_differing_words\":{differing},\"vs_other_max_rel_diff\":{relative:e},\"words\":{}}}", last.len());
     }
-    let control_error = relative_error(&last, &host_reference(&weight, &activation, k, 2, 2));
+    let control_error = relative_error(&last, &host_reference(reference_weight, &activation, k, 2, 2));
     println!(
         "{{\"tensor\":\"{name}\",\"rows\":{rows},\"k\":{k},\"fnv\":\"{checksum:016x}\",\"rel_err_f64\":{true_error:e},\"mean_rel_err_f64\":{mean_error:e},\"control_rel_err\":{control_error:e},\"gpu_ns\":{gpu_ns:?}}}"
     );
