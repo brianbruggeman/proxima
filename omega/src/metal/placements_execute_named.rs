@@ -653,11 +653,22 @@ pub(super) fn execute_plan_with_placements_inner(
         blocks = ?prepared.block_nodes,
         "metal placement keys for this execution"
     );
+    // an encoded output's producer writes its binary32 rows where an unplaced node's go, so only
+    // the plain placements steer the producing ops; the encoded ones are the encode dispatch's targets
     let output_placed: BTreeMap<NodeId, (&PlacedBuffer, usize)> = output_placements
         .iter()
+        .filter(|(node, _, _)| !plan.is_encoded_output(*node))
+        .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
+        .collect();
+    let encode_targets: BTreeMap<NodeId, (&PlacedBuffer, usize)> = output_placements
+        .iter()
+        .filter(|(node, _, _)| plan.is_encoded_output(*node))
         .map(|(node, buffer, offset)| (*node, (*buffer, *offset)))
         .collect();
     let (device, queue) = device_and_queue()?;
+    super::encoded_outputs::resolve_encode_pipelines(&device, plan)?;
+    let encode_pipelines = plan.encode_pipelines.borrow();
+    let mut encoded_dispatches = 0usize;
     // On a plan-cache HIT this is a no-op (`resolve_steps` checks staleness
     // and returns immediately): the per-position loop below indexes
     // `plan.resolved_steps` instead of every step re-deriving
@@ -1721,6 +1732,25 @@ pub(super) fn execute_plan_with_placements_inner(
             if let Some((fault_buffer, gathers)) = fault {
                 pending_faults.push((bound, fault_buffer, gathers));
             }
+            for produced in core::iter::once(bound.node).chain(bound.twin_node()) {
+                let Some((destination, destination_offset)) = encode_targets.get(&produced).copied() else {
+                    continue;
+                };
+                let (Some(compiled), Some(source)) =
+                    (encode_pipelines.get(&produced), device_buffers.get(&produced))
+                else {
+                    return Err(MetalError::UnresolvedHazardOperand { node: produced });
+                };
+                super::encoded_outputs::encode_rows(
+                    &encoder,
+                    compiled,
+                    source,
+                    (destination, destination_offset),
+                    plan.prepared.shapes.of(produced).iter().product::<u64>() as usize,
+                    (dispatch_type == DispatchType::Concurrent).then_some(&mut hazard_state.tracker),
+                );
+                encoded_dispatches += 1;
+            }
             chunk_op_count += 1;
             // blit-after-kernel: the real kernel already ran above; this
             // blits the identical captured bytes on top of what it wrote,
@@ -2094,7 +2124,17 @@ pub(super) fn execute_plan_with_placements_inner(
 
     check_pending_faults(pending_faults)?;
 
-    let placed_output_nodes: BTreeSet<NodeId> = output_placed.keys().copied().collect();
+    if encoded_dispatches != encode_targets.len() {
+        return Err(MetalError::InputContractChanged {
+            node: encode_targets.keys().next().copied().unwrap_or(NodeId(0)),
+            reason: "an encoded output's producing op did not run, so its rows were not stored",
+        });
+    }
+    let placed_output_nodes: BTreeSet<NodeId> = output_placed
+        .keys()
+        .chain(encode_targets.keys())
+        .copied()
+        .collect();
     #[cfg(feature = "instrument")]
     let finish_started = read_ticks();
     let evaluated = finish(plan, &device_buffers, &placed_output_nodes, recycle.pop())?;
@@ -2233,14 +2273,18 @@ fn validate_output_placements(
             &plan.prepared.resolved,
             *node,
         );
-        let required_bytes = usize::try_from(element_count)
-            .ok()
-            .and_then(|count| {
-                count.checked_mul(super::prepare_uniforms_pack::device_element_bytes(dtype))
-            })
-            .ok_or(MetalError::ResourceOverflow {
-                field: "placed_output_bytes",
-            })?;
+        let required_bytes = if plan.is_encoded_output(*node) {
+            super::encoded_outputs::encoded_bytes(plan, *node, element_count)?
+        } else {
+            usize::try_from(element_count)
+                .ok()
+                .and_then(|count| {
+                    count.checked_mul(super::prepare_uniforms_pack::device_element_bytes(dtype))
+                })
+                .ok_or(MetalError::ResourceOverflow {
+                    field: "placed_output_bytes",
+                })?
+        };
         let buffer_length = buffer.length();
         if offset
             .checked_add(required_bytes)

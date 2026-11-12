@@ -147,6 +147,8 @@ pub(super) fn plan_from_prepared(
         hazard_state: RefCell::new(HazardState::new()),
         device_buffers: RefCell::new(BTreeMap::new()),
         block_identity: RefCell::new(Vec::new()),
+        encoded_outputs: BTreeMap::new(),
+        encode_pipelines: RefCell::new(BTreeMap::new()),
         chunk_status_buffers: RefCell::new(Vec::new()),
         chunk_status_diagnostics: RefCell::new(Vec::new()),
     }

@@ -1012,6 +1012,10 @@ pub struct Plan {
     /// moves and never changes content, the same promise
     /// [`Plan::mark_resident`]'s no-copy upload path already trusts).
     pub(super) block_identity: RefCell<Vec<Option<(usize, usize)>>>,
+    /// Output nodes stored into a caller's buffer in their own numeric format ([`Plan::set_encoded_outputs`]).
+    pub(super) encoded_outputs: BTreeMap<NodeId, proxima_numeric::NumericFormat>,
+    /// The compiled encode of each node in `encoded_outputs`, resolved on first execute.
+    pub(super) encode_pipelines: RefCell<BTreeMap<NodeId, super::encoded_outputs::EncodePipeline>>,
     /// Every command buffer [`execute_plan_with_placements`] committed for
     /// its most recent call, in commit order -- reused call-to-call
     /// (`clear` keeps capacity) so a warm call's status sweep costs no heap

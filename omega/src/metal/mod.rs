@@ -262,6 +262,7 @@ pub use configured::{
 };
 #[macro_use]
 mod execute_and_hazards;
+mod encoded_outputs;
 #[macro_use]
 mod placements_execute_named;
 #[macro_use]
