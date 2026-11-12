@@ -498,6 +498,18 @@ fn main() {
     println!(
         "accelerate max_abs_diff vs evaluate_named oracle per sentence (last run) = {accel_max_diffs:?}"
     );
+    // sgemm reassociates the f32 sums, so bit equality is not the bar; on
+    // unit-norm embeddings that reordering measures ~1e-7, while dropping the
+    // batched-heads outer loop (PROXNUM-72) measured 0.39-0.49. 1e-5 is two
+    // orders over the reordering noise and four under that bug.
+    const ACCELERATE_ORACLE_TOLERANCE: f32 = 1e-5;
+    assert!(
+        accel_max_diffs.len() == oracle_embeddings.len()
+            && accel_max_diffs
+                .iter()
+                .all(|&diff| diff <= ACCELERATE_ORACLE_TOLERANCE),
+        "Accelerate route drifted from the evaluate_named oracle past {ACCELERATE_ORACLE_TOLERANCE}: {accel_max_diffs:?}"
+    );
 
     println!("\n=== ENGAGEMENT PROOF ===");
     println!(
