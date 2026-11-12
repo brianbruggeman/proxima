@@ -88,6 +88,9 @@ fn width_tile_counters() -> (u64, u64, u64) {
 /// `BGE_MODEL_PATH` so this example stays runnable (and skips cleanly
 /// when absent) without embedding that path in source.
 const MODEL_PATH_ENV: &str = "BGE_MODEL_PATH";
+/// directory that receives each arm's last-run CLS embeddings as raw little-endian f32
+/// (`prox_neon_emb_<n>.f32`, `prox_accel_emb_<n>.f32`), the layout `tools/ort-arm`'s `emb_diff` reads
+const EMB_DIR_ENV: &str = "BGE_EVAL_EMB_DIR";
 
 /// `[CLS]`, three sentences, `[SEP]` -- ids read directly off the real
 /// `vocab.txt` shipped next to the model (`grep -n` for each whole word,
@@ -510,6 +513,23 @@ fn main() {
                 .all(|&diff| diff <= ACCELERATE_ORACLE_TOLERANCE),
         "Accelerate route drifted from the evaluate_named oracle past {ACCELERATE_ORACLE_TOLERANCE}: {accel_max_diffs:?}"
     );
+
+    if let Ok(emb_dir) = env::var(EMB_DIR_ENV) {
+        for (prefix, embeddings) in [
+            ("prox_neon_emb", &last_neon_embeddings),
+            ("prox_accel_emb", &last_accel_embeddings),
+        ] {
+            for (index, embedding) in embeddings.iter().enumerate() {
+                let path = Path::new(&emb_dir).join(format!("{prefix}_{index}.f32"));
+                let little_endian: Vec<u8> = embedding
+                    .iter()
+                    .flat_map(|value| value.to_le_bytes())
+                    .collect();
+                fs::write(&path, little_endian).expect("write embedding for emb_diff");
+                println!("wrote {}", path.display());
+            }
+        }
+    }
 
     println!("\n=== ENGAGEMENT PROOF ===");
     println!(
