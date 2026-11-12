@@ -1,3 +1,5 @@
+use alloc::borrow::Cow;
+
 use super::*;
 
 /// MSL source for one `Q2_K` element. The byte layout and index arithmetic
@@ -30,150 +32,10 @@ static inline float q2k_element(device const uchar *block, uint index) {
 pub const Q2K_BLOCK_BYTES: usize = proxima_gguf::quant::q2_k::BLOCK_BYTES;
 pub const Q2K_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q2_k::QK_K;
 
-/// `IQ4_XS`'s own unpack kernel: 4-bit non-linear levels in 256-element
-/// super-blocks, one `f16` super-block scale, eight 6-bit sub-block scales
-/// split across a high-bit plane and four low-nibble bytes, and the same
-/// 16-entry codebook `IQ4_NL` uses.
-///
-/// Ports `dequantize_row_iq4_xs` (`ggml-quants.c:2743-2765`, llama.cpp
-/// `f1ea20621`) and mirrors
-/// `proxima_gguf::quant::iq4_xs::dequantize_block` term for term: the
-/// codebook is copied verbatim (`ggml-common.h:1120-1122`, `f1ea20621`),
-/// the sub-block scale is biased by 32, and the low nibble
-/// of a packed byte addresses the sub-block's first half while the high
-/// nibble addresses the second.
-pub const IQ4_XS_UNPACK_MSL: &str = r#"
-constant int kvalues_iq4nl_msl[16] = {
-    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
-};
-static inline float iq4_xs_element(device const uchar *block, uint index) {
-    float d = (float)as_type<half>((ushort)((uint)block[0] | ((uint)block[1] << 8)));
-    ushort scales_h = (ushort)((uint)block[2] | ((uint)block[3] << 8));
-    uint sub_block = index / 32u;
-    uint within = index % 32u;
-    uchar scales_l = block[4u + sub_block / 2u];
-    uint low_nibble = (uint)((scales_l >> (4u * (sub_block % 2u))) & 0x0Fu);
-    uint high_bits = ((uint)scales_h >> (2u * sub_block)) & 3u;
-    float sub_scale = d * ((float)(low_nibble | (high_bits << 4u)) - 32.0f);
-    uchar packed = block[8u + sub_block * 16u + (within % 16u)];
-    uint code = within < 16u ? (uint)(packed & 0x0Fu) : (uint)(packed >> 4u);
-    return sub_scale * (float)kvalues_iq4nl_msl[code];
-}
-"#;
-
 /// Bytes and elements in one `IQ4_XS` super-block, sourced from the GGUF
 /// codec rather than restated numeric constants.
 pub const IQ4_XS_BLOCK_BYTES: usize = proxima_gguf::quant::iq4_xs::BLOCK_BYTES;
 pub const IQ4_XS_BLOCK_ELEMENTS: usize = proxima_gguf::quant::iq4_xs::QK_K;
-
-/// `IQ3_S`'s own unpack kernel: 3.4375-bit grid-indexed magnitudes in
-/// 256-element super-blocks, one `f16` super-block scale, eight positively
-/// biased 4-bit sub-block scales, a 9-bit grid address split across `qs` and
-/// `qh`, and one explicit sign byte per 8-element group.
-///
-/// Ports `dequantize_row_iq3_s` (`ggml-quants.c:2607-2646`, llama.cpp
-/// `f1ea20621`) and mirrors
-/// `proxima_gguf::quant::iq3_s::dequantize_block` term for term: the
-/// 512-entry grid is copied verbatim (`ggml-common.h:1052-1117`, `f1ea20621`,
-/// `iq3s_grid`), each group's two grid points carry their own ninth index bit
-/// (`8-2*l` and `7-2*l`), and lane `j` of a group takes magnitude byte `j % 4`
-/// of the grid entry its half names.
-pub const IQ3_S_UNPACK_MSL: &str = r#"
-constant uint iq3s_grid_msl[512] = {
-    0x01010101u, 0x01010103u, 0x01010105u, 0x0101010bu, 0x0101010fu, 0x01010301u, 0x01010303u, 0x01010305u,
-    0x01010309u, 0x0101030du, 0x01010501u, 0x01010503u, 0x0101050bu, 0x01010707u, 0x01010901u, 0x01010905u,
-    0x0101090bu, 0x0101090fu, 0x01010b03u, 0x01010b07u, 0x01010d01u, 0x01010d05u, 0x01010f03u, 0x01010f09u,
-    0x01010f0fu, 0x01030101u, 0x01030103u, 0x01030105u, 0x01030109u, 0x01030301u, 0x01030303u, 0x0103030bu,
-    0x01030501u, 0x01030507u, 0x0103050fu, 0x01030703u, 0x0103070bu, 0x01030909u, 0x01030d03u, 0x01030d0bu,
-    0x01030f05u, 0x01050101u, 0x01050103u, 0x0105010bu, 0x0105010fu, 0x01050301u, 0x01050307u, 0x0105030du,
-    0x01050503u, 0x0105050bu, 0x01050701u, 0x01050709u, 0x01050905u, 0x0105090bu, 0x0105090fu, 0x01050b03u,
-    0x01050b07u, 0x01050f01u, 0x01050f07u, 0x01070107u, 0x01070303u, 0x0107030bu, 0x01070501u, 0x01070505u,
-    0x01070703u, 0x01070707u, 0x0107070du, 0x01070909u, 0x01070b01u, 0x01070b05u, 0x01070d0fu, 0x01070f03u,
-    0x01070f0bu, 0x01090101u, 0x01090307u, 0x0109030fu, 0x01090503u, 0x01090509u, 0x01090705u, 0x01090901u,
-    0x01090907u, 0x01090b03u, 0x01090f01u, 0x010b0105u, 0x010b0109u, 0x010b0501u, 0x010b0505u, 0x010b050du,
-    0x010b0707u, 0x010b0903u, 0x010b090bu, 0x010b090fu, 0x010b0d0du, 0x010b0f07u, 0x010d010du, 0x010d0303u,
-    0x010d0307u, 0x010d0703u, 0x010d0b05u, 0x010d0f03u, 0x010f0101u, 0x010f0105u, 0x010f0109u, 0x010f0501u,
-    0x010f0505u, 0x010f050du, 0x010f0707u, 0x010f0b01u, 0x010f0b09u, 0x03010101u, 0x03010103u, 0x03010105u,
-    0x03010109u, 0x03010301u, 0x03010303u, 0x03010307u, 0x0301030bu, 0x0301030fu, 0x03010501u, 0x03010505u,
-    0x03010703u, 0x03010709u, 0x0301070du, 0x03010b09u, 0x03010b0du, 0x03010d03u, 0x03010f05u, 0x03030101u,
-    0x03030103u, 0x03030107u, 0x0303010du, 0x03030301u, 0x03030309u, 0x03030503u, 0x03030701u, 0x03030707u,
-    0x03030903u, 0x03030b01u, 0x03030b05u, 0x03030f01u, 0x03030f0du, 0x03050101u, 0x03050305u, 0x0305030bu,
-    0x0305030fu, 0x03050501u, 0x03050509u, 0x03050705u, 0x03050901u, 0x03050907u, 0x03050b0bu, 0x03050d01u,
-    0x03050f05u, 0x03070103u, 0x03070109u, 0x0307010fu, 0x03070301u, 0x03070307u, 0x03070503u, 0x0307050fu,
-    0x03070701u, 0x03070709u, 0x03070903u, 0x03070d05u, 0x03070f01u, 0x03090107u, 0x0309010bu, 0x03090305u,
-    0x03090309u, 0x03090703u, 0x03090707u, 0x03090905u, 0x0309090du, 0x03090b01u, 0x03090b09u, 0x030b0103u,
-    0x030b0301u, 0x030b0307u, 0x030b0503u, 0x030b0701u, 0x030b0705u, 0x030b0b03u, 0x030d0501u, 0x030d0509u,
-    0x030d050fu, 0x030d0909u, 0x030d090du, 0x030f0103u, 0x030f0107u, 0x030f0301u, 0x030f0305u, 0x030f0503u,
-    0x030f070bu, 0x030f0903u, 0x030f0d05u, 0x030f0f01u, 0x05010101u, 0x05010103u, 0x05010107u, 0x0501010bu,
-    0x0501010fu, 0x05010301u, 0x05010305u, 0x05010309u, 0x0501030du, 0x05010503u, 0x05010507u, 0x0501050fu,
-    0x05010701u, 0x05010705u, 0x05010903u, 0x05010907u, 0x0501090bu, 0x05010b01u, 0x05010b05u, 0x05010d0fu,
-    0x05010f01u, 0x05010f07u, 0x05010f0bu, 0x05030101u, 0x05030105u, 0x05030301u, 0x05030307u, 0x0503030fu,
-    0x05030505u, 0x0503050bu, 0x05030703u, 0x05030709u, 0x05030905u, 0x05030b03u, 0x05050103u, 0x05050109u,
-    0x0505010fu, 0x05050503u, 0x05050507u, 0x05050701u, 0x0505070fu, 0x05050903u, 0x05050b07u, 0x05050b0fu,
-    0x05050f03u, 0x05050f09u, 0x05070101u, 0x05070105u, 0x0507010bu, 0x05070303u, 0x05070505u, 0x05070509u,
-    0x05070703u, 0x05070707u, 0x05070905u, 0x05070b01u, 0x05070d0du, 0x05090103u, 0x0509010fu, 0x05090501u,
-    0x05090507u, 0x05090705u, 0x0509070bu, 0x05090903u, 0x05090f05u, 0x05090f0bu, 0x050b0109u, 0x050b0303u,
-    0x050b0505u, 0x050b070fu, 0x050b0901u, 0x050b0b07u, 0x050b0f01u, 0x050d0101u, 0x050d0105u, 0x050d010fu,
-    0x050d0503u, 0x050d0b0bu, 0x050d0d03u, 0x050f010bu, 0x050f0303u, 0x050f050du, 0x050f0701u, 0x050f0907u,
-    0x050f0b01u, 0x07010105u, 0x07010303u, 0x07010307u, 0x0701030bu, 0x0701030fu, 0x07010505u, 0x07010703u,
-    0x07010707u, 0x0701070bu, 0x07010905u, 0x07010909u, 0x0701090fu, 0x07010b03u, 0x07010d07u, 0x07010f03u,
-    0x07030103u, 0x07030107u, 0x0703010bu, 0x07030309u, 0x07030503u, 0x07030507u, 0x07030901u, 0x07030d01u,
-    0x07030f05u, 0x07030f0du, 0x07050101u, 0x07050305u, 0x07050501u, 0x07050705u, 0x07050709u, 0x07050b01u,
-    0x07070103u, 0x07070301u, 0x07070309u, 0x07070503u, 0x07070507u, 0x0707050fu, 0x07070701u, 0x07070903u,
-    0x07070907u, 0x0707090fu, 0x07070b0bu, 0x07070f07u, 0x07090107u, 0x07090303u, 0x0709030du, 0x07090505u,
-    0x07090703u, 0x07090b05u, 0x07090d01u, 0x07090d09u, 0x070b0103u, 0x070b0301u, 0x070b0305u, 0x070b050bu,
-    0x070b0705u, 0x070b0909u, 0x070b0b0du, 0x070b0f07u, 0x070d030du, 0x070d0903u, 0x070f0103u, 0x070f0107u,
-    0x070f0501u, 0x070f0505u, 0x070f070bu, 0x09010101u, 0x09010109u, 0x09010305u, 0x09010501u, 0x09010509u,
-    0x0901050fu, 0x09010705u, 0x09010903u, 0x09010b01u, 0x09010f01u, 0x09030105u, 0x0903010fu, 0x09030303u,
-    0x09030307u, 0x09030505u, 0x09030701u, 0x0903070bu, 0x09030907u, 0x09030b03u, 0x09030b0bu, 0x09050103u,
-    0x09050107u, 0x09050301u, 0x0905030bu, 0x09050503u, 0x09050707u, 0x09050901u, 0x09050b0fu, 0x09050d05u,
-    0x09050f01u, 0x09070109u, 0x09070303u, 0x09070307u, 0x09070501u, 0x09070505u, 0x09070703u, 0x0907070bu,
-    0x09090101u, 0x09090105u, 0x09090509u, 0x0909070fu, 0x09090901u, 0x09090f03u, 0x090b010bu, 0x090b010fu,
-    0x090b0503u, 0x090b0d05u, 0x090d0307u, 0x090d0709u, 0x090d0d01u, 0x090f0301u, 0x090f030bu, 0x090f0701u,
-    0x090f0907u, 0x090f0b03u, 0x0b010105u, 0x0b010301u, 0x0b010309u, 0x0b010505u, 0x0b010901u, 0x0b010909u,
-    0x0b01090fu, 0x0b010b05u, 0x0b010d0du, 0x0b010f09u, 0x0b030103u, 0x0b030107u, 0x0b03010bu, 0x0b030305u,
-    0x0b030503u, 0x0b030705u, 0x0b030f05u, 0x0b050101u, 0x0b050303u, 0x0b050507u, 0x0b050701u, 0x0b05070du,
-    0x0b050b07u, 0x0b070105u, 0x0b07010fu, 0x0b070301u, 0x0b07050fu, 0x0b070909u, 0x0b070b03u, 0x0b070d0bu,
-    0x0b070f07u, 0x0b090103u, 0x0b090109u, 0x0b090501u, 0x0b090705u, 0x0b09090du, 0x0b0b0305u, 0x0b0b050du,
-    0x0b0b0b03u, 0x0b0b0b07u, 0x0b0d0905u, 0x0b0f0105u, 0x0b0f0109u, 0x0b0f0505u, 0x0d010303u, 0x0d010307u,
-    0x0d01030bu, 0x0d010703u, 0x0d010707u, 0x0d010d01u, 0x0d030101u, 0x0d030501u, 0x0d03050fu, 0x0d030d09u,
-    0x0d050305u, 0x0d050709u, 0x0d050905u, 0x0d050b0bu, 0x0d050d05u, 0x0d050f01u, 0x0d070101u, 0x0d070309u,
-    0x0d070503u, 0x0d070901u, 0x0d09050bu, 0x0d090907u, 0x0d090d05u, 0x0d0b0101u, 0x0d0b0107u, 0x0d0b0709u,
-    0x0d0b0d01u, 0x0d0d010bu, 0x0d0d0901u, 0x0d0f0303u, 0x0d0f0307u, 0x0f010101u, 0x0f010109u, 0x0f01010fu,
-    0x0f010501u, 0x0f010505u, 0x0f01070du, 0x0f010901u, 0x0f010b09u, 0x0f010d05u, 0x0f030105u, 0x0f030303u,
-    0x0f030509u, 0x0f030907u, 0x0f03090bu, 0x0f050103u, 0x0f050109u, 0x0f050301u, 0x0f05030du, 0x0f050503u,
-    0x0f050701u, 0x0f050b03u, 0x0f070105u, 0x0f070705u, 0x0f07070bu, 0x0f070b07u, 0x0f090103u, 0x0f09010bu,
-    0x0f090307u, 0x0f090501u, 0x0f090b01u, 0x0f0b0505u, 0x0f0b0905u, 0x0f0d0105u, 0x0f0d0703u, 0x0f0f0101u,
-};
-static inline float iq3_s_element(device const uchar *block, uint index) {
-    float d = (float)as_type<half>((ushort)((uint)block[0] | ((uint)block[1] << 8)));
-    device const uchar *qs = block + 2u;
-    device const uchar *qh = block + 66u;
-    device const uchar *signs = block + 74u;
-    device const uchar *scales = block + 106u;
-    uint sub_block = index / 32u;
-    uint within = index % 32u;
-    uint pair = sub_block / 2u;
-    uint half_index = sub_block % 2u;
-    uchar packed_scale = scales[pair];
-    uint scale_nibble = half_index == 0u
-        ? (uint)(packed_scale & 0x0Fu)
-        : (uint)((packed_scale >> 4u) & 0x0Fu);
-    float db = d * (1.0f + 2.0f * (float)scale_nibble);
-    uint group = within / 8u;
-    uint lane = within % 8u;
-    uchar qh_byte = qh[pair * 2u + half_index];
-    uint ninth_bit = lane < 4u
-        ? (((uint)qh_byte << (8u - 2u * group)) & 256u)
-        : (((uint)qh_byte << (7u - 2u * group)) & 256u);
-    uint low = (uint)qs[pair * 16u + half_index * 8u + group * 2u + (lane < 4u ? 0u : 1u)];
-    uint grid = iq3s_grid_msl[low | ninth_bit];
-    uint magnitude = (grid >> (8u * (lane % 4u))) & 0xFFu;
-    uchar sign_byte = signs[pair * 8u + half_index * 4u + group];
-    float sign = (sign_byte & (1u << lane)) != 0u ? -1.0f : 1.0f;
-    return db * (float)magnitude * sign;
-}
-"#;
 
 /// Bytes and elements in one `IQ3_S` super-block, sourced from the GGUF
 /// codec rather than restated numeric constants.
@@ -1929,7 +1791,18 @@ pub(crate) struct TiledDecode {
     pub(crate) function: &'static str,
     /// MSL source defining [`Self::function`], spliced into the preamble of a
     /// kernel that stages this codec and nowhere else.
-    pub(crate) msl: &'static str,
+    pub(crate) source: DecodeSource,
+}
+
+/// Where a [`TiledDecode`]'s MSL comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DecodeSource {
+    /// A fixed string defining the decode function.
+    Static(&'static str),
+    /// The decode function is rendered over a scalar `float name(block, index)` accessor the
+    /// preamble already defines for the codec (rendered there from the codec's `BlockLayout` and
+    /// `LevelTable`), so the description carries only that accessor's name.
+    Element(&'static str),
 }
 
 impl TiledDecode {
@@ -1939,11 +1812,30 @@ impl TiledDecode {
         function: &'static str,
         msl: &'static str,
     ) -> Self {
+        Self::with_source(block_elements, block_bytes, function, DecodeSource::Static(msl))
+    }
+
+    const fn with_source(
+        block_elements: usize,
+        block_bytes: usize,
+        function: &'static str,
+        source: DecodeSource,
+    ) -> Self {
         Self {
             block_elements: block_elements as u64,
             block_bytes: block_bytes as u64,
             function,
-            msl,
+            source,
+        }
+    }
+
+    /// The MSL defining [`Self::function`].
+    pub(crate) fn msl(&self) -> Cow<'static, str> {
+        match self.source {
+            DecodeSource::Static(source) => Cow::Borrowed(source),
+            DecodeSource::Element(element) => {
+                Cow::Owned(scaled_float_render::level_half16_decode_msl(self.function, element))
+            }
         }
     }
 
@@ -2014,6 +1906,18 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
             "f16_dequant_half16",
             F16_DEQUANT_HALF16_MSL,
         )),
+        Codec::Iq4Xs => Some(TiledDecode::with_source(
+            IQ4_XS_BLOCK_ELEMENTS,
+            IQ4_XS_BLOCK_BYTES,
+            "iq4_xs_dequant_half16",
+            DecodeSource::Element("iq4_xs_element"),
+        )),
+        Codec::Iq3S => Some(TiledDecode::with_source(
+            IQ3_S_BLOCK_ELEMENTS,
+            IQ3_S_BLOCK_BYTES,
+            "iq3_s_dequant_half16",
+            DecodeSource::Element("iq3_s_element"),
+        )),
         Codec::Q2K
         | Codec::BFloat16
         | Codec::Q4_1
@@ -2026,9 +1930,7 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
         | Codec::Iq2Xs
         | Codec::Iq2S
         | Codec::Iq3Xxs
-        | Codec::Iq3S
         | Codec::Iq4Nl
-        | Codec::Iq4Xs
         | Codec::Tq10
         | Codec::Tq20
         | Codec::Mxfp4

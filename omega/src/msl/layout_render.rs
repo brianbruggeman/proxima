@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::{BlockLayout, CodeRegion, Coded, Field, Plane};
 use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
-use proxima_numeric::{FormatCodec, NumericFormat};
+use proxima_numeric::{FormatCodec, LevelFormat, LevelGeometry, LevelTable, NumericFormat};
 
 pub(crate) const F32_FRACTION_BITS: u32 = 23;
 pub(crate) const F32_INFINITY_BITS: u32 = 0x7f80_0000;
@@ -365,6 +365,13 @@ fn plane_expression(plane: &Plane, index: &str, binding: &str) -> String {
 }
 
 fn coded_expression(coded: &Coded, index: &str, binding: &str, helper: &str) -> String {
+    let (mut text, code) = coded_assembly(coded, index, binding);
+    text.push_str(&format!("    float {binding} = {helper}({code});\n"));
+    text
+}
+
+/// The statements that assemble `coded`'s integer code for element `index`, and the expression that names it.
+fn coded_assembly(coded: &Coded, index: &str, binding: &str) -> (String, String) {
     if coded.packed_radix > 1 && coded.region_count > 0 {
         let code_name = format!("{binding}_code");
         let mut text = format!("    uint {code_name} = 0u;\n");
@@ -383,8 +390,7 @@ fn coded_expression(coded: &Coded, index: &str, binding: &str, helper: &str) -> 
                 if region_index == 0 { "if" } else { "else if" },
             ));
         }
-        text.push_str(&format!("    float {binding} = {helper}({code_name});\n"));
-        return text;
+        return (text, code_name);
     }
 
     let mut text = plane_expression(&coded.low, index, &format!("{binding}_low"));
@@ -393,8 +399,7 @@ fn coded_expression(coded: &Coded, index: &str, binding: &str, helper: &str) -> 
         text.push_str(&plane_expression(high, index, &format!("{binding}_high")));
         code = format!("({binding}_low | ({binding}_high << {}u))", coded.low.bits);
     }
-    text.push_str(&format!("    float {binding} = {helper}({code});\n"));
-    text
+    (text, code)
 }
 
 fn radix_region_expression(
@@ -493,7 +498,119 @@ pub fn block_unpack_msl(layout: &BlockLayout, name: &str) -> String {
 /// four-wide body enters the translation unit.
 #[must_use]
 pub fn block_element_msl(layout: &BlockLayout, name: &str) -> String {
-    let mut helpers = layout_load_msl(layout.element.code, &format!("{name}_code"));
+    element_msl(layout, Codes::Affine, name)
+}
+
+/// The property of a level format that keeps [`level_block_element_msl`] from rendering it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("level element renderer cannot render this format: {0}")]
+pub struct LevelRenderRefusal(pub &'static str);
+
+/// Renders `static inline float name(device const uchar *block, uint index)` for a level-set
+/// format: [`block_element_msl`]'s walk of the block's planes and sub-block codes, with the code
+/// resolved to a value through the format's [`LevelTable`] instead of the layout's affine map.
+///
+/// An explicit ladder (IQ4_NL, IQ4_XS) becomes a constant table indexed by the code; a linear
+/// ladder is its `zero_point + step * code`; a signed grid (IQ3_S) becomes a constant table of
+/// packed magnitudes indexed by the code, a lane picked by `index % lanes`, and a sign read from the
+/// sign plane. The sub-block scale is `scale_multiplier * code - bias`, as `proxima_numeric::decode`
+/// computes it. Teaching pointer: this is the renderer the tiled GEMM's `tiled_decode` description
+/// and the cooperative kernel's `iq4_xs_element` / `iq3_s_element` accessors both call.
+///
+/// # Errors
+/// The level table or layout property the renderer does not cover (grids with a sign table, 64-bit
+/// grids, delta grids, scale runs, a block min).
+#[must_use = "the refusal names why the format has no rendered element accessor"]
+pub fn level_block_element_msl(
+    format: &LevelFormat,
+    name: &str,
+) -> Result<String, LevelRenderRefusal> {
+    let LevelGeometry::Packed(layout) = &format.geometry else {
+        return Err(LevelRenderRefusal("codebook geometry has no plane walk"));
+    };
+    if layout.scale_runs.is_some() || layout.min.is_some() {
+        return Err(LevelRenderRefusal("scale runs or a block min"));
+    }
+    if layout.element.packed_radix > 1 {
+        return Err(LevelRenderRefusal("packed-radix codes"));
+    }
+    match &format.levels {
+        LevelTable::Linear { .. } | LevelTable::Explicit(_) => {}
+        LevelTable::SignedGrid { sign_table: None, lanes, .. } if *lanes > 0 => {}
+        LevelTable::SignedGrid { .. } => {
+            return Err(LevelRenderRefusal("a signed grid whose sign is a table index"));
+        }
+        LevelTable::SignedGrid64 { .. } | LevelTable::DeltaGrid { .. } => {
+            return Err(LevelRenderRefusal("64-bit and delta grids"));
+        }
+    }
+    Ok(element_msl(layout, Codes::Levels(&format.levels), name))
+}
+
+#[derive(Clone, Copy)]
+enum Codes<'a> {
+    Affine,
+    Levels(&'a LevelTable),
+}
+
+fn level_table_msl(levels: &LevelTable, name: &str) -> String {
+    match levels {
+        LevelTable::Linear { zero_point, step, .. } => format!(
+            "\nstatic inline float {name}_code(uint code) {{\n    return (float)(({zero_point}) + ({step}) * (int)code);\n}}\n"
+        ),
+        LevelTable::Explicit(values) => {
+            let entries = values.iter().map(i8::to_string).collect::<Vec<_>>().join(", ");
+            format!(
+                "\nconstant char {name}_levels[{}] = {{ {entries} }};\nstatic inline float {name}_code(uint code) {{\n    return (float){name}_levels[code];\n}}\n",
+                values.len()
+            )
+        }
+        LevelTable::SignedGrid { grid, .. } => {
+            let rows = grid
+                .chunks(8)
+                .map(|row| row.iter().map(|entry| format!("{entry:#010x}u")).collect::<Vec<_>>().join(", "))
+                .collect::<Vec<_>>()
+                .join(",\n    ");
+            format!("\nconstant uint {name}_grid[{}] = {{\n    {rows}\n}};\n", grid.len())
+        }
+        LevelTable::SignedGrid64 { .. } | LevelTable::DeltaGrid { .. } => String::new(),
+    }
+}
+
+/// The statements that bind `float raw` (the element's level) for `codes`.
+fn raw_level_msl(layout: &BlockLayout, codes: Codes<'_>, name: &str) -> String {
+    match codes {
+        Codes::Levels(LevelTable::SignedGrid { lanes, sign, unit_shift, .. }) => {
+            signed_grid_raw_msl(&layout.element, name, *lanes, sign, *unit_shift)
+        }
+        Codes::Affine | Codes::Levels(_) => {
+            coded_expression(&layout.element, "index", "raw", &format!("{name}_code"))
+        }
+    }
+}
+
+fn signed_grid_raw_msl(coded: &Coded, name: &str, lanes: u8, sign: &Plane, unit_shift: u8) -> String {
+    let (mut text, code) = coded_assembly(coded, "index", "raw_code");
+    text.push_str(&format!(
+        "    uint magnitude = ({name}_grid[{code}] >> (8u * (index % {lanes}u))) & 0xFFu;\n"
+    ));
+    text.push_str(&plane_expression(sign, "index", "negative"));
+    let unit = if unit_shift == 0 {
+        String::new()
+    } else {
+        format!(" * {:e}f", 0.5f32.powi(i32::from(unit_shift)))
+    };
+    text.push_str(&format!(
+        "    float raw = negative != 0u ? -(float)magnitude{unit} : (float)magnitude{unit};\n"
+    ));
+    text
+}
+
+fn element_msl(layout: &BlockLayout, codes: Codes<'_>, name: &str) -> String {
+    let mut helpers = match codes {
+        Codes::Affine => layout_load_msl(layout.element.code, &format!("{name}_code")),
+        Codes::Levels(levels) => level_table_msl(levels, name),
+    };
     helpers.push_str(&layout_load_msl(
         layout.scale.layout,
         &format!("{name}_scale"),
@@ -501,7 +618,7 @@ pub fn block_element_msl(layout: &BlockLayout, name: &str) -> String {
     if let Some(min) = &layout.min {
         helpers.push_str(&layout_load_msl(min.layout, &format!("{name}_min")));
     }
-    let mut body = coded_expression(&layout.element, "index", "raw", &format!("{name}_code"));
+    let mut body = raw_level_msl(layout, codes, name);
     body.push_str(&field_expression(
         &layout.scale,
         "scale",
@@ -521,16 +638,24 @@ pub fn block_element_msl(layout: &BlockLayout, name: &str) -> String {
             "sub_scale_raw",
             &format!("{name}_sub_scale_code"),
         ));
+        let multiplied = if sub.scale_multiplier == 1 {
+            "sub_scale_raw".to_string()
+        } else {
+            format!("({}.0f * sub_scale_raw)", sub.scale_multiplier)
+        };
         body.push_str(&format!(
-            "    float sub_scale = sub_scale_raw - {}.0f;\n    float effective_scale = scale * sub_scale;\n",
+            "    float sub_scale = {multiplied} - {}.0f;\n    float effective_scale = scale * sub_scale;\n",
             sub.scale.bias
         ));
         scale = "effective_scale".to_string();
     }
-    body.push_str(&format!(
-        "    float value = (({}.0f * raw) - {}.0f) * {scale};\n",
-        layout.multiplier, layout.element.bias
-    ));
+    match codes {
+        Codes::Affine => body.push_str(&format!(
+            "    float value = (({}.0f * raw) - {}.0f) * {scale};\n",
+            layout.multiplier, layout.element.bias
+        )),
+        Codes::Levels(_) => body.push_str(&format!("    float value = raw * {scale};\n")),
+    }
     if let Some(min) = &layout.min {
         body.push_str(&field_expression(min, "minimum", &format!("{name}_min")));
         let mut minimum = "minimum".to_string();

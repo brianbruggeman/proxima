@@ -601,3 +601,60 @@ fn a_rendered_unpack_equals_the_host_decode_bit_for_bit_for_every_admitted_block
         assert_eq!(mismatches, 0, "{format:?}: rendered MSL decode must equal the host decode");
     }
 }
+
+fn level_format_of(format: NumericFormat) -> proxima_numeric::LevelFormat {
+    match format {
+        NumericFormat::Levels(levels) => levels,
+        other => panic!("{other:?} is not a level format"),
+    }
+}
+
+#[test]
+fn iq4_xs_element_renders_the_explicit_ladder_under_six_bit_sub_scales() {
+    let format = level_format_of(NumericFormat::Iq4Xs);
+
+    let source = super::layout_render::level_block_element_msl(&format, "iq4_xs_element").expect("iq4_xs renders");
+
+    assert!(source.contains("constant char iq4_xs_element_levels[16] = { -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113 };"), "the ladder is IQ4_NL's:\n{source}");
+    assert!(source.contains("float sub_scale = sub_scale_raw - 32.0f;"), "the sub-block scale is biased by 32:\n{source}");
+    assert!(source.contains("float value = raw * effective_scale;"), "the level is scaled, not re-biased:\n{source}");
+}
+
+#[test]
+fn iq3_s_element_renders_the_signed_grid_with_its_sign_plane_and_doubled_sub_scale() {
+    let format = level_format_of(NumericFormat::Iq3S);
+
+    let source = super::layout_render::level_block_element_msl(&format, "iq3_s_element").expect("iq3_s renders");
+
+    assert!(source.contains("constant uint iq3_s_element_grid[512]"), "the 512-entry grid is a constant table:\n{source}");
+    let table = source.split("};").next().expect("the table ends with a brace");
+    assert_eq!(table.matches("0x").count(), 512, "every grid entry is rendered once");
+    assert!(source.contains("float sub_scale = (2.0f * sub_scale_raw) - -1.0f;"), "the sub-block scale is 2 * nibble + 1:\n{source}");
+    assert!(source.contains("negative != 0u ? -(float)magnitude"), "a set sign bit negates the magnitude:\n{source}");
+}
+
+#[test]
+fn level_element_refuses_a_signed_grid_whose_sign_is_a_table_index() {
+    let format = level_format_of(NumericFormat::Iq3Xxs);
+
+    let refusal = super::layout_render::level_block_element_msl(&format, "iq3_xxs_element").expect_err("a sign table is not rendered");
+
+    assert!(refusal.to_string().contains("sign is a table index"), "{refusal}");
+}
+
+#[test]
+fn control_one_changed_sub_scale_bias_changes_the_rendered_iq4_xs_element() {
+    let format = level_format_of(NumericFormat::Iq4Xs);
+    let mut changed = format;
+    let proxima_numeric::LevelGeometry::Packed(layout) = &mut changed.geometry else {
+        panic!("iq4_xs is a packed level format");
+    };
+    let sub = layout.sub.as_mut().expect("iq4_xs has sub-blocks");
+    sub.scale.bias = 31;
+
+    let original = super::layout_render::level_block_element_msl(&format, "iq4_xs_element").expect("renders");
+    let altered = super::layout_render::level_block_element_msl(&changed, "iq4_xs_element").expect("renders");
+
+    assert_ne!(original, altered, "the bias is the only field changed and the text must follow it");
+    assert!(altered.contains("sub_scale_raw - 31.0f"));
+}
