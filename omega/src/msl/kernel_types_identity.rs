@@ -1802,7 +1802,7 @@ pub(crate) enum DecodeSource {
     /// The decode function is rendered over a scalar `float name(block, index)` accessor the
     /// preamble already defines for the codec (rendered there from the codec's `BlockLayout` and
     /// `LevelTable`), so the description carries only that accessor's name.
-    Element(&'static str),
+    Element(&'static str, &'static Codec),
 }
 
 impl TiledDecode {
@@ -1833,9 +1833,9 @@ impl TiledDecode {
     pub(crate) fn msl(&self) -> Cow<'static, str> {
         match self.source {
             DecodeSource::Static(source) => Cow::Borrowed(source),
-            DecodeSource::Element(element) => {
-                Cow::Owned(scaled_float_render::level_half16_decode_msl(self.function, element))
-            }
+            DecodeSource::Element(element, codec) => Cow::Owned(
+                scaled_float_render::level_half16_decode_msl(self.function, element, codec),
+            ),
         }
     }
 
@@ -1910,13 +1910,13 @@ pub(crate) const fn tiled_decode(codec: Codec) -> Option<TiledDecode> {
             IQ4_XS_BLOCK_ELEMENTS,
             IQ4_XS_BLOCK_BYTES,
             "iq4_xs_dequant_half16",
-            DecodeSource::Element("iq4_xs_element"),
+            DecodeSource::Element("iq4_xs_element", &Codec::Iq4Xs),
         )),
         Codec::Iq3S => Some(TiledDecode::with_source(
             IQ3_S_BLOCK_ELEMENTS,
             IQ3_S_BLOCK_BYTES,
             "iq3_s_dequant_half16",
-            DecodeSource::Element("iq3_s_element"),
+            DecodeSource::Element("iq3_s_element", &Codec::Iq3S),
         )),
         Codec::Q2K
         | Codec::BFloat16
