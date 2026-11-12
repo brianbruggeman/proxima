@@ -956,17 +956,14 @@ fn a_float16_cached_kv_makes_the_decode_split_read_half_pointers_for_the_cached_
 }
 
 #[test]
-fn the_row_tiled_form_declines_a_float16_cached_kv_instead_of_reading_it_as_f32() {
+fn the_row_tiled_form_reads_a_float16_cached_kv_through_half_pointers() {
     let op = sliding_op(512, 5);
     let packed = packed_operands_at(&op, &[2, 3, 6], Codec::Float16);
 
-    let error = emit(&op, &packed, NumericPolicy::llama_relaxed())
-        .expect_err("the MMA row-tiled kernel reads f32 K/V");
+    let kernel = emit(&op, &packed, NumericPolicy::llama_relaxed())
+        .expect("the MMA row-tiled kernel reads a Float16 K/V cache");
 
-    assert!(matches!(
-        error,
-        EmitError::CachedAttentionKvCodecNotSupported { node, .. } if node == op.node
-    ));
+    assert!(kernel.source.contains("device const half*"));
 }
 
 #[test]
@@ -1531,7 +1528,10 @@ fn the_float_setting_multiplies_float_fragments_and_names_no_half_type() {
                 "head_dim {head_dim}: the float setting does not declare `{declaration}`"
             );
         }
-        assert!(!source.contains("simdgroup_half8x8"), "head_dim {head_dim}");
+        assert!(
+            !names_half_fragment_outside_prelude(&source),
+            "head_dim {head_dim}"
+        );
     }
 }
 
@@ -1618,6 +1618,18 @@ fn the_two_settings_differ_only_by_the_operand_type_and_the_narrowing_overloads(
             .replace(
                 "simdgroup_half8x8 value_operand = narrow_fragment(value_float);",
                 "simdgroup_float8x8 value_operand = value_float;",
+            )
+            .replace(
+                "simdgroup_float8x8 even_half; simdgroup_float8x8 odd_half;",
+                "simdgroup_half8x8 even_half; simdgroup_half8x8 odd_half;",
+            )
+            .replace(
+                "simdgroup_float8x8 value_half;",
+                "simdgroup_half8x8 value_half;",
+            )
+            .replace(
+                "omega_widen_fragment(simdgroup_float8x8 narrow)",
+                "omega_widen_fragment(simdgroup_half8x8 narrow)",
             );
         if restored != float_source {
             let mismatch = restored
@@ -1640,7 +1652,15 @@ fn the_default_sizing_renders_the_float_setting() {
             .source
             .contains("simdgroup_float8x8 weights[tile_blocks];")
     );
-    assert!(!kernel.source.contains("simdgroup_half8x8"));
+    assert!(!names_half_fragment_outside_prelude(&kernel.source));
+}
+
+fn names_half_fragment_outside_prelude(source: &str) -> bool {
+    source
+        .lines()
+        .filter(|line| !line.starts_with("inline "))
+        .filter(|line| !line.contains("even_half") && !line.contains("value_half"))
+        .any(|line| line.contains("simdgroup_half8x8"))
 }
 
 #[cfg(feature = "metal-attn-variants")]

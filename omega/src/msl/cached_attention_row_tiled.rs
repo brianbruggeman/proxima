@@ -23,6 +23,7 @@ inline void omega_bf8_load_matrix(thread simdgroup_float8x8& destination, device
         destination.thread_elements()[1] = omega_bf8_to_float(source[(long)row * stride + column + 1]);
     }
 }
+inline simdgroup_float8x8 omega_widen_fragment(simdgroup_half8x8 narrow) { simdgroup_float8x8 wide; wide.thread_elements()[0] = float(narrow.thread_elements()[0]); wide.thread_elements()[1] = float(narrow.thread_elements()[1]); return wide; }
 inline void omega_zero_padded_value_rows(thread simdgroup_float8x8& value, long key_start, long valid_end, ushort lane) {
     short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4));
     if (key_start + row >= valid_end) {
@@ -261,6 +262,17 @@ pub(super) fn render_cached_attention_row_tiled_with(
             node: resolved.node,
             reason: ROW_TILED_KV_REASON,
         })?;
+    if prefetch_next_block && cached_kv_codec == Some(Codec::Float16) {
+        return Err(EmitError::CachedAttentionKvCodecNotSupported {
+            node: resolved.node,
+            reason: "next-block prefetch stages cached K/V as F32, BFloat16 or BFloat8, not Float16",
+        });
+    }
+    let operand_format = if half_operands {
+        Codec::Float16
+    } else {
+        Codec::Float32
+    };
     let (sink_param, sink_init, out_buffer, uniforms_buffer) = if *attention_sink {
         (SINK_PARAM, SINK_INIT, "10", "11")
     } else {
@@ -316,18 +328,14 @@ pub(super) fn render_cached_attention_row_tiled_with(
             }
             .to_string(),
         ),
-        (
-            "@OPERAND@",
-            if half_operands {
-                "simdgroup_half8x8"
-            } else {
-                "simdgroup_float8x8"
-            }
-            .to_string(),
-        ),
+        ("@OPERAND@", fragment_type(operand_format).to_string()),
         (
             "@OPERAND_SCALAR@",
-            if half_operands { "half" } else { "float" }.to_string(),
+            fragment_scalar_type(operand_format).to_string(),
+        ),
+        (
+            "@F16_CACHE@",
+            (cached_kv_codec == Some(Codec::Float16)).to_string(),
         ),
         ("@KV_REUSE_SHARED_K@", shared_k.to_string()),
         ("@KV_REUSE_SHARED_V@", shared_v.to_string()),
@@ -579,6 +587,15 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                                 omega_bf16_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
                                 key_even_tile[group][step_index] = @NARROW_TO_OPERAND_EVEN@;
                                 key_odd_tile[group][step_index] = @NARROW_TO_OPERAND_ODD@;
+                            } else if (@F16_CACHE@ && mode == 0L) {
+                                device const half* cached_even = (device const half*)in2 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
+                                device const half* cached_odd = (device const half*)in3 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
+                                simdgroup_half8x8 even_half; simdgroup_half8x8 odd_half;
+                                simdgroup_load(even_half, cached_even, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                                simdgroup_load(odd_half, cached_odd, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                                simdgroup_float8x8 even_float = omega_widen_fragment(even_half); simdgroup_float8x8 odd_float = omega_widen_fragment(odd_half);
+                                key_even_tile[group][step_index] = @NARROW_TO_OPERAND_EVEN@;
+                                key_odd_tile[group][step_index] = @NARROW_TO_OPERAND_ODD@;
                             } else if (@BF8_CACHE@ && mode == 0L) {
                                 device const uchar* cached_even = (device const uchar*)in2 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
                                 device const uchar* cached_odd = (device const uchar*)in3 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
@@ -793,6 +810,10 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                                 } else if (@BF16_CACHE@ && mode == 0L) {
                                     device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
                                     omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                                } else if (@F16_CACHE@ && mode == 0L) {
+                                    device const half* cached_value = (device const half*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                                    simdgroup_half8x8 value_half; simdgroup_load(value_half, cached_value, (ulong)(kv_heads * head_dim));
+                                    value_float = omega_widen_fragment(value_half);
                                 } else if (@BF8_CACHE@ && mode == 0L) {
                                     device const uchar* cached_value = (device const uchar*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
                                     omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
@@ -832,6 +853,10 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                         } else if (@BF16_CACHE@ && mode == 0L) {
                             device const ushort* cached_value = (device const ushort*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
                             omega_bf16_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
+                        } else if (@F16_CACHE@ && mode == 0L) {
+                            device const half* cached_value = (device const half*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
+                            simdgroup_half8x8 value_half; simdgroup_load(value_half, cached_value, (ulong)(kv_heads * head_dim));
+                            value_float = omega_widen_fragment(value_half);
                         } else if (@BF8_CACHE@ && mode == 0L) {
                             device const uchar* cached_value = (device const uchar*)in6 + key0 * (kv_heads * head_dim) + kv_head * head_dim + (long)key_tile * 8L * (kv_heads * head_dim) + dimension_block * 8;
                             omega_bf8_load_matrix(value_float, cached_value, (ulong)(kv_heads * head_dim), lane, false);
