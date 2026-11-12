@@ -4568,6 +4568,8 @@ impl BackendRuntime {
         // to set unconditionally: unlike `set_math_mode`, this field never
         // invalidates `resolved_steps` (this same function's own doc).
         plan.set_encoder_split_at(encoder_split_at_from_env());
+        #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+        Self::emit_dispatch_profile_kernels(plan);
         Ok(execute_plan_named_with_placements_dispatch_timed(
             plan,
             named,
@@ -4686,6 +4688,30 @@ impl BackendRuntime {
             kernel_cache_keys_identical,
             "plan_footprint_diff: bucket-crossing miss against the immediately prior plan"
         );
+    }
+
+    /// One `debug!` per resolved position of the plan a dispatch profile times:
+    /// the kernel cache key and launch grid next to the extents, so a
+    /// per-dispatch timing diff between two runs can name the kernel and the
+    /// thread count whose time moved, not only its op kind.
+    #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+    fn emit_dispatch_profile_kernels(plan: &omega::metal::Plan) {
+        let footprint = plan.shape_footprint();
+        let kernel_keys = plan.kernel_keys().unwrap_or_default();
+        let grids = plan.kernel_grids().unwrap_or_default();
+        for (position, (node, kind, extents, _)) in footprint.iter().enumerate() {
+            let grid = grids.get(position);
+            debug!(
+                position = position as u64,
+                node = u64::from(*node),
+                kind = *kind,
+                extents = ?extents,
+                kernel_cache_key = ?kernel_keys.get(position),
+                grid_threads = grid.map_or(0, |spec| spec.threads),
+                threadgroup_width = ?grid.and_then(|spec| spec.threadgroup_width),
+                "dispatch_profile_kernel: the kernel key and launch grid this position runs"
+            );
+        }
     }
 
     /// The cached plan a miss at `shape` can be refitted from: removed from
