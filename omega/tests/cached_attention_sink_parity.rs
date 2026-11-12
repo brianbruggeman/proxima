@@ -62,7 +62,13 @@ fn schedule(attention_sinks: bool) -> Vec<LayerSchedule> {
             sin_name: "rope_sin".into(),
         },
         rope_pairing: RopePairing::Interleaved,
-        score_scale: AttentionScoreScale::Unscaled,
+        // a sink checkpoint scales its scores; the sink-less control stays unscaled, the one scale the
+        // template-masked sink-less shape fuses at
+        score_scale: if attention_sinks {
+            AttentionScoreScale::InverseSqrtQueryPreAttnScalar(HEAD_DIM)
+        } else {
+            AttentionScoreScale::Unscaled
+        },
         value_norm: false,
         qk_norm: true,
         attention_sinks,

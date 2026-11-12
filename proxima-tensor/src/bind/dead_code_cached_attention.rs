@@ -1484,7 +1484,9 @@ pub(super) fn cached_attention_candidates(
                 );
                 continue;
             }
-            if via_gemma_template && scale_value != 1.0 {
+            // a sink candidate never takes the softmax-weights arm (it needs the decode split form,
+            // checked below), so the unity-scale proof of that arm does not bind it
+            if via_gemma_template && scale_value != 1.0 && attention_sink_term.is_none() {
                 #[cfg(feature = "instrument")]
                 debug!(
                     node = output.0,

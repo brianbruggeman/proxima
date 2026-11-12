@@ -15772,7 +15772,13 @@ mod gemma4_synthetic_parity {
                     rope_pairing: RopePairing::SplitHalf {
                         pairs: PAIRS as u32,
                     },
-                    score_scale: AttentionScoreScale::Unscaled,
+                    // a sink checkpoint scales its scores (1/sqrt(head_dim)) under the same
+                    // template mask the unscaled sink-less fixture uses
+                    score_scale: if attention_sinks {
+                        AttentionScoreScale::InverseSqrtQueryPreAttnScalar(HEAD_DIM as u32)
+                    } else {
+                        AttentionScoreScale::Unscaled
+                    },
                     value_norm: true,
                     qk_norm: true,
                     attention_sinks,
