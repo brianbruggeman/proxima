@@ -1454,6 +1454,21 @@ pub(crate) const fn metal_operand_read_decodes(codec: Codec) -> bool {
     )
 }
 
+/// What [`codec_cache_token`] returns for a format it has no frozen spelling for.
+const UNRECOGNISED_TOKEN: &str = "unrecognised";
+
+/// The cache and helper-name spelling of `codec`: its frozen [`codec_cache_token`] where it has one,
+/// else its whole field description ([`crate::identity::description_fingerprint`], the scheme
+/// `kernel_identity` uses for a letterless codec). One shared spelling for every unnamed format let
+/// the second of two splits reuse the first's compiled pipeline, so a format with no frozen token
+/// keys on what it IS, never on a label it lacks.
+pub(crate) fn codec_cache_key(codec: Codec) -> String {
+    match codec_cache_token(codec) {
+        UNRECOGNISED_TOKEN => format!("d{}", crate::identity::description_fingerprint(&codec)),
+        token => String::from(token),
+    }
+}
+
 pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
     match codec {
         Codec::Q2K => "q2k",
@@ -1498,7 +1513,7 @@ pub(crate) const fn codec_cache_token(codec: Codec) -> &'static str {
         Codec::Q2_0 => "q2_0",
         Codec::Pq2_0 => "pq2_0",
         Codec::Ptq1_0 => "ptq1_0",
-        _ => "unrecognised",
+        _ => UNRECOGNISED_TOKEN,
     }
 }
 
@@ -2182,7 +2197,7 @@ pub(super) const fn q4_0_multi_row_pair_lane_override() -> bool {
 pub(super) fn packed_row_codec_disabled(codec: Codec) -> bool {
     std::env::var("PROXIMA_PACKED_ROW_DISABLE").is_ok_and(|list| {
         list.split(',')
-            .any(|name| name.trim() == codec_cache_token(codec))
+            .any(|name| name.trim() == codec_cache_key(codec))
     })
 }
 
@@ -2204,7 +2219,7 @@ pub(super) const fn packed_row_codec_disabled(_codec: Codec) -> bool {
 pub(super) fn tiled_gemm_codec_disabled(codec: Codec) -> bool {
     std::env::var("PROXIMA_TILED_GEMM_DISABLE").is_ok_and(|list| {
         list.split(',')
-            .any(|name| name.trim() == codec_cache_token(codec))
+            .any(|name| name.trim() == codec_cache_key(codec))
     })
 }
 
@@ -2890,4 +2905,46 @@ pub(crate) fn operand_alias_cache_token(resolved: &BoundOp) -> Option<String> {
             format!("{token}_{alias}")
         })
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod codec_cache_key_tests {
+    use proxima_numeric::float_layout::FloatLayout;
+    use proxima_numeric::NumericFormat;
+
+    use super::{codec_cache_key, codec_cache_token};
+
+    fn unnamed_scalar(exponent_bits: u8, mantissa_bits: u8) -> NumericFormat {
+        NumericFormat::Scalar(FloatLayout {
+            exponent_bits,
+            mantissa_bits,
+            ..FloatLayout::E2M1
+        })
+    }
+
+    #[test]
+    fn codec_cache_key_differs_for_two_unnamed_scalar_layouts() {
+        let e3m0 = unnamed_scalar(3, 0);
+        let e1m2 = unnamed_scalar(1, 2);
+
+        assert_eq!(codec_cache_token(e3m0), "unrecognised");
+        assert_eq!(codec_cache_token(e1m2), "unrecognised");
+        assert_ne!(codec_cache_key(e3m0), codec_cache_key(e1m2));
+    }
+
+    #[test]
+    fn codec_cache_key_equals_codec_cache_token_for_every_named_codec() {
+        let named: Vec<NumericFormat> = NumericFormat::ALL
+            .iter()
+            .copied()
+            .chain(NumericFormat::UNTAGGED.iter().map(|(format, _)| *format))
+            .filter(|codec| codec_cache_token(*codec) != "unrecognised")
+            .collect();
+
+        assert!(!named.is_empty(), "no named codec was checked");
+        for codec in named {
+            assert_eq!(codec_cache_key(codec), codec_cache_token(codec), "{codec:?}");
+        }
+    }
 }

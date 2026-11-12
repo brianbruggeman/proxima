@@ -3678,7 +3678,7 @@ pub(super) fn encode_op(
             });
             if let Some(codec) = uniform_codec {
                 cache_key.push_str("_uniform_expert_");
-                cache_key.push_str(crate::msl::codec_cache_token(codec));
+                cache_key.push_str(&crate::msl::codec_cache_key(codec));
                 trace!(codec = ?codec, node = ?source_node, "expert lowering mode uniform");
             } else {
                 cache_key.push_str("_mixed_expert");
