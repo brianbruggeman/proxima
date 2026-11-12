@@ -1,0 +1,20 @@
+q6k_multi_row_*.f32le: raw little-endian f32 bits of a Q6_K token-group matmul, token-major: tokens * 2048 values, output[token * 2048 + row].
+
+old side:    proxima main 97eef4d7, kernel = push_packed_row_multi_row_q6k_body (hand copy of ggml's Q6_K lane map
+             generalized to a cap-token group), metal feature, debug build.
+capture:     PROXNUM69_CAPTURE_DIR=<dir> cargo nextest run -p proxima-omega --features metal
+             --test q6k_multi_row_rendered_parity; omega::plan + omega::execute_plan over
+             [Input u8 (2048, k), Input f32 (tokens, k)] -> Multiply -> Reduce Add, QuantizedBlock::Packed { codec: Q6K } weights,
+             QuantizedBlock::Float32 activation = Lcg(2026).next_unit() * 4 - 2 for tokens * k values.
+             tokens = 2 (cap 2) and 8 (the cap, sized::PACKED_ROW_ACTIVATION_GROUP).
+
+q6k_multi_row_ollama_token_embd_rows2048_tokens{2,8}.f32le
+  tensor  token_embd.weight (Q6_K) of ollama blob sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129,
+          dims [2816, 262144]; first 2048 rows
+  sha256  tokens2 ebfbf58af7169abddbb51e3e97cdc489af396188018f5913cadccb34d9ed0d60
+          tokens8 13984a0446d6e37507e117dc804c538578b78a5290b1d9ce7c5fd640989e0cec
+
+q6k_multi_row_flint_blk8_ffn_down_exps_rows2048_tokens{2,8}.f32le
+  tensor  blk.8.ffn_down_exps.weight (Q6_K) of flint-UD-Q4_K_XL.gguf, dims [512, 2048, 256]; first 2048 rows (expert 0)
+  sha256  tokens2 6ff4fed1606956fc9338a4cd93fa4458349409ae12d9247b409b1c171c0e2059
+          tokens8 21d312a15ccbbae4bd2a7c6cc1c3c01450cbc059202f20c7453ad1472fd4f685

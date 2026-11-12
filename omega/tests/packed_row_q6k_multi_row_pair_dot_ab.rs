@@ -1,4 +1,4 @@
-//! `push_packed_row_multi_row_q6k_body` (`omega/src/msl/elementwise_reduce_core.rs`)
+//! `assembled_multi_row_matvec_msl` (`omega/src/msl/sub_block_assembled_matvec.rs`)
 //! folds a token group against ONE decode of each `Q6_K` super-block, on the
 //! same lane map and per-lane accumulation order as the single-row rendered
 //! `Q6_K` matvec (`sub_block_matvec_msl`). This gate proves that equivalence on bytes:

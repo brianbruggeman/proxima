@@ -622,6 +622,7 @@ mod tests {
     use proxima_numeric::block_layout::BlockLayout;
 
     use super::{SubBlockMatvecGeometry, sub_block_matvec_msl};
+    use crate::msl::sub_block_assembled_matvec::assembled_multi_row_matvec_msl;
 
     fn render(layout: &BlockLayout) -> Result<alloc::string::String, super::SubBlockMatvecRefusal> {
         sub_block_matvec_msl(layout, &SubBlockMatvecGeometry::decode(4, 2, 32), 0, 1, true, "u.reduction_total")
@@ -660,6 +661,30 @@ mod tests {
         let geometry = SubBlockMatvecGeometry::decode_signed_scales(1, 2, 32);
         let source = sub_block_matvec_msl(&BlockLayout::Q6_K, &geometry, 0, 1, true, "u.reduction_total").expect("q6_k renders");
         assert!(source.contains("- 32)") && source.contains("(float)(char)scales[6u]") && source.contains("high_codes"), "{source}");
+    }
+
+    fn render_multi_row(layout: &BlockLayout, token_cap: usize) -> alloc::string::String {
+        let geometry = SubBlockMatvecGeometry::decode_signed_scales(2, 2, 32);
+        assembled_multi_row_matvec_msl(layout, &geometry, 0, 1, true, "u.reduction_total", token_cap).expect("q6_k renders")
+    }
+
+    #[test]
+    fn q6_k_multi_row_decodes_once_and_folds_every_token_of_the_group() {
+        let source = render_multi_row(&BlockLayout::Q6_K, 8);
+        assert!(source.contains("float level3[4];") && source.contains("for (int s = 0; s < 8; ++s)") && source.contains("sumf[s][q] = sumf[s][q] + dall"), "{source}");
+        assert!(source.contains("sums3 += y4[i + 96u] * level3[i];") && !source.contains("yl["), "{source}");
+    }
+
+    #[test]
+    fn q6_k_multi_row_carries_the_token_cap_it_is_given() {
+        assert_ne!(render_multi_row(&BlockLayout::Q6_K, 2), render_multi_row(&BlockLayout::Q6_K, 8));
+    }
+
+    #[test]
+    fn one_field_of_the_q6_k_layout_changes_the_rendered_multi_row_kernel() {
+        let mut moved = BlockLayout::Q6_K;
+        moved.element.bias = 31;
+        assert_ne!(render_multi_row(&BlockLayout::Q6_K, 8), render_multi_row(&moved, 8));
     }
 
     #[test]
