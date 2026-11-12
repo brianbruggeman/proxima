@@ -116,6 +116,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
         scale,
         cached_lower_inclusive,
         new_upper_inclusive,
+        attention_sink,
         ..
     } = &resolved.kind
     else {
@@ -260,7 +261,16 @@ pub(super) fn render_cached_attention_row_tiled_with(
             node: resolved.node,
             reason: ROW_TILED_KV_REASON,
         })?;
+    let (sink_param, sink_init, out_buffer, uniforms_buffer) = if *attention_sink {
+        (SINK_PARAM, SINK_INIT, "10", "11")
+    } else {
+        ("", "", "9", "10")
+    };
     let substitutions = [
+        ("@SINK_PARAM@", sink_param.to_string()),
+        ("@SINK_INIT@", sink_init.to_string()),
+        ("@OUT_BUFFER@", out_buffer.to_string()),
+        ("@UNIFORMS_BUFFER@", uniforms_buffer.to_string()),
         ("@KV_TYPE@", cached_type.to_string()),
         (
             "@NARROW_TO_OPERAND_EVEN@",
@@ -429,11 +439,21 @@ pub(super) const SHARED_K_FLOAT_HELPER: &str = r#"
 inline void omega_load_shared_float(thread simdgroup_float8x8& destination, threadgroup const float* source, ulong stride, ushort lane) { (void)lane; simdgroup_load(destination, source, stride); }
 "#;
 
+const SINK_PARAM: &str = "device const float* in9 [[buffer(9)]], ";
+
+// the sink is the softmax reduction's initial state: one key of zero value, so the running maximum starts at the sink and the
+// running sum at 1 (exp(sink - sink)); split 0 alone carries it so the cross-split merge counts it once per query head.
+const SINK_INIT: &str = "if (split == 0L) {
+            float sink = in9[kv_head * query_groups + head];
+            row_maximum[index] = sink;
+            row_sum[index] = (sink == -INFINITY) ? 0.0f : 1.0f;
+        }";
+
 const ROW_TILED_KERNEL: &str = r#"struct Uniforms { long total_elements; long splits; };@MMA_HELPERS@
 
 #define FOR_UNROLL _Pragma("clang loop unroll(full)")
 
-kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const @KV_TYPE@* in2 [[buffer(2)]], device const @KV_TYPE@* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const @KV_TYPE@* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], device float* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* in1 [[buffer(1)]], device const @KV_TYPE@* in2 [[buffer(2)]], device const @KV_TYPE@* in3 [[buffer(3)]], device const float* in4 [[buffer(4)]], device const float* in5 [[buffer(5)]], device const @KV_TYPE@* in6 [[buffer(6)]], device const float* in7 [[buffer(7)]], device const float* in8 [[buffer(8)]], @SINK_PARAM@device float* out [[buffer(@OUT_BUFFER@)]], constant Uniforms& u [[buffer(@UNIFORMS_BUFFER@)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
     constexpr long kv_heads = @KV_HEADS@; constexpr long query_groups = @QUERY_GROUPS@; constexpr long head_dim = @HEAD_DIM@; constexpr long half_dim = head_dim / 2; constexpr float scale = @SCALE@; constexpr long cached_lower = @CACHED_LOWER@; constexpr long new_upper = @NEW_UPPER@;
     constexpr long tile_rows = @TILE_ROWS@; constexpr long simdgroups = @SIMDGROUPS@; constexpr long block = @BLOCK@; constexpr long split_keys = @SPLIT_KEYS@;
     constexpr bool rows_in_fragment = (query_groups % 8) != 0;
@@ -487,6 +507,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
         }
         vector_row[index] = (int)row; vector_head[index] = (int)head; vector_live[index] = (int)owned;
         row_maximum[index] = -INFINITY; row_sum[index] = 0.0f; rescale_tile[index] = 0.0f;
+        @SINK_INIT@
     }
     long block_row[tile_blocks]; long block_head[tile_blocks];
     FOR_UNROLL for (long vector_block = 0L; vector_block < tile_blocks; vector_block++) {

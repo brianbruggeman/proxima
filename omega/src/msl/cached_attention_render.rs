@@ -266,13 +266,17 @@ pub(super) fn render_cached_attention_with_mma_selection(
         });
     };
     #[cfg(feature = "metal-attn-split-decode")]
-    let form_draws_sink = matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. });
+    let decode_draws_sink = matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. });
     #[cfg(not(feature = "metal-attn-split-decode"))]
-    let form_draws_sink = false;
-    if *attention_sink && !form_draws_sink {
+    let decode_draws_sink = false;
+    #[cfg(feature = "metal-attn-split-rows")]
+    let rows_draw_sink = matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. });
+    #[cfg(not(feature = "metal-attn-split-rows"))]
+    let rows_draw_sink = false;
+    if *attention_sink && !(decode_draws_sink || rows_draw_sink) {
         return Err(EmitError::CachedAttentionSinkNotSupported {
             node: resolved.node,
-            reason: "only the decode split form (one decode row, bound cached range, whole float4 lanes, split-merge policy) draws a sink",
+            reason: "only the decode split form (one decode row, whole float4 lanes) and the row-tiled form (a query-row tile, bound cached range) draw a sink, under the split-merge policy",
         });
     }
     #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
