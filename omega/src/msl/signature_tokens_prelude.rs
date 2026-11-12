@@ -2564,7 +2564,7 @@ pub(crate) fn cached_attention_form_with_schedule(
     let _ = schedule;
     let base_operand_len = if rotary_dim < head_dim { 11 } else { 8 };
     // the sink, when bound, is the one operand after the ninth and the pass triple
-    if operands.len() - usize::from(*attention_sink) != base_operand_len + 1 {
+    if operands.len().saturating_sub(usize::from(*attention_sink)) != base_operand_len + 1 {
         return Some(CachedAttentionForm::Static);
     }
     if *cached_key_rows == 0 {
@@ -2786,10 +2786,12 @@ fn decode_split_form(kind: &BoundOpKind, policy: NumericPolicy) -> Option<Cached
     };
     let admitted = admit(policy, NumericRewrite::ContextSplitMerge).is_ok()
         && admit(policy, NumericRewrite::TreeReduce).is_ok();
-    let shape_fits = *query_rows == *new_key_rows
-        && decode_split_serves_rows(*query_rows)
-        && rotary_dim == head_dim
-        && head_dim.is_multiple_of(32);
+    let shape_fits = proxima_tensor::decode_split_shape_fits(
+        *query_rows,
+        *new_key_rows,
+        *rotary_dim,
+        *head_dim,
+    ) && decode_split_serves_rows(*query_rows);
     if !admitted || !shape_fits {
         return None;
     }

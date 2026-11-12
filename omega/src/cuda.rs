@@ -311,6 +311,17 @@ pub(crate) fn emit_on_target(
         } => render_scan(target, resolved, &entry, &quantized)?,
         BoundOpKind::Iota => render_leaf(target, resolved, &entry, None)?,
         BoundOpKind::Constant { value } => render_leaf(target, resolved, &entry, Some(*value))?,
+        // no CUDA or HIP kernel draws the sink term; rendering the op without it would normalize
+        // every head by the wrong denominator
+        BoundOpKind::CachedAttention {
+            attention_sink: true,
+            ..
+        } => {
+            return Err(EmitError::CudaUnsupportedOpKind {
+                node: resolved.node,
+                kind: "cached_attention_sink",
+            });
+        }
         BoundOpKind::CachedAttention { .. } if quantized.iter().any(Option::is_some) => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
@@ -4414,11 +4425,15 @@ pub(crate) fn cuda_cached_attention_class(kind: &BoundOpKind) -> Option<CudaAtte
         cached_key_rows,
         head_dim,
         rotary_dim,
+        attention_sink,
         ..
     } = kind
     else {
         return None;
     };
+    if *attention_sink {
+        return None;
+    }
     let (static_operands, bound_operands) = if rotary_dim < head_dim {
         (11, 12)
     } else {
@@ -6570,6 +6585,32 @@ mod rocm_tests {
             EmitError::CudaUnsupportedOpKind { kind, .. } => {
                 assert_eq!(kind, "cached_attention_on_this_target");
             }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_cached_attention_sink_is_refused_on_cuda_and_never_rendered_without_it() {
+        let mut attention = elementwise_tanh();
+        attention.kind = proxima_tensor::BoundOpKind::CachedAttention {
+            operands: Vec::new(),
+            query_rows: 1,
+            cached_key_rows: 8,
+            new_key_rows: 1,
+            kv_heads: 1,
+            query_groups: 1,
+            head_dim: 128,
+            rotary_dim: 128,
+            scale: 0.088,
+            cached_lower_inclusive: i64::MIN,
+            new_upper_inclusive: 0,
+            arithmetic: Default::default(),
+            attention_sink: true,
+        };
+        let kind = attention.kind.clone();
+        assert!(cuda_cached_attention_class(&kind).is_none());
+        match emit_hip(&attention, &no_packed()).expect_err("a sink is refused") {
+            EmitError::CudaUnsupportedOpKind { kind, .. } => assert_eq!(kind, "cached_attention_sink"),
             other => panic!("unexpected error: {other:?}"),
         }
     }
