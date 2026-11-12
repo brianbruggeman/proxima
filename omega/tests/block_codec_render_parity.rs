@@ -111,11 +111,11 @@ fn control_q5_1_with_subtracted_min_fails_parity() {
 }
 
 #[test]
-fn hand_written_unpack_strings_number_seven() {
+fn hand_written_unpack_strings_number_five() {
     let source = include_str!("../src/msl/kernel_types_identity.rs");
     let count = source
         .lines()
         .filter(|line| line.starts_with("pub const ") && line.contains("_UNPACK_MSL: &str"))
         .count();
-    assert_eq!(count, 7, "hand _UNPACK_MSL strings: 10 before PROXNUM-58, 7 after");
+    assert_eq!(count, 5, "hand _UNPACK_MSL strings: 10 before PROXNUM-58, 7 after, 5 after the iq render");
 }
