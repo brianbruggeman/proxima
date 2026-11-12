@@ -45,6 +45,7 @@ pub(super) fn render_cached_attention_decode_split(
         cached_lower_inclusive,
         new_upper_inclusive,
         new_key_rows,
+        attention_sink,
         ..
     } = &resolved.kind
     else {
@@ -171,7 +172,19 @@ pub(super) fn render_cached_attention_decode_split(
             format!("{cached_loop}{mixed_loop}{new_loop}")
         }
     };
+    // a sink operand follows the ninth in operand order, so it takes buffer 9 and pushes `out` and
+    // the uniforms up one; without one every token below renders the pre-sink text byte for byte
+    let (sink_param, sink_merge, sink_scale, out_buffer, uniforms_buffer) = if *attention_sink {
+        (SINK_PARAM, SINK_MERGE, SINK_SCALE, "10", "11")
+    } else {
+        ("", "", "", "9", "10")
+    };
     let substitutions = [
+        ("@SINK_PARAM@", sink_param.to_string()),
+        ("@SINK_MERGE@", sink_merge.to_string()),
+        ("@SINK_SCALE@", sink_scale.to_string()),
+        ("@OUT_BUFFER@", out_buffer.to_string()),
+        ("@UNIFORMS_BUFFER@", uniforms_buffer.to_string()),
         ("@KEY_BLOCK_LOAD@", key_helper_name),
         (
             "@KEY_BLOCK_ELEMENTS@",
@@ -387,11 +400,29 @@ const BF8_KEY_LOAD: Parts = (
 
 const BF8_VALUE_LOAD: Parts = ("value_row[step][slot] = omega_bf8x4_to_float4(v4_cached[index]);", NEW_VALUE_LOAD);
 
+const SINK_PARAM: &str = "device const @T@* in9 [[buffer(9)]], ";
+
+// the sink is one more key of zero value: it joins this split's maximum and its exp(sink - maximum) joins the sum, once per
+// query head (split 0), so the cross-split merge sees it as part of that split's partial. llama.cpp's flash_attn_ext_vec
+// reduce does the same with `sinks` on its first workgroup.
+const SINK_MERGE: &str = "float sink_rescale = 1.0f;
+        if (split == 0@L@) {
+            float sink = (float)in9[query_head];
+            float sink_max = max(merged_max, sink);
+            sink_rescale = (merged_max == -INFINITY) ? 0.0f : exp(merged_max - sink_max);
+            merged_sum = merged_sum * sink_rescale + ((sink == -INFINITY) ? 0.0f : exp(sink - sink_max));
+            merged_max = sink_max;
+        }
+        ";
+
+const SINK_SCALE: &str = "merged *= sink_rescale;
+                    ";
+
 const DECODE_SPLIT_KERNEL: &str = r#"struct Uniforms { long total_elements; long context_chunks; long splits; };
 
 #define OMEGA_UNROLL _Pragma("clang loop unroll(full)")
 
-kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [[buffer(1)]], device const @KEY_STORE@* in2 [[buffer(2)]], device const @KEY_STORE@* in3 [[buffer(3)]], device const @T@* in4 [[buffer(4)]], device const @T@* in5 [[buffer(5)]], device const @KV@* in6 [[buffer(6)]], device const @T@* in7 [[buffer(7)]], device const @T@* in8 [[buffer(8)]], device @T@* out [[buffer(9)]], constant Uniforms& u [[buffer(10)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
+kernel void @ENTRY@(device const @T@* in0 [[buffer(0)]], device const @T@* in1 [[buffer(1)]], device const @KEY_STORE@* in2 [[buffer(2)]], device const @KEY_STORE@* in3 [[buffer(3)]], device const @T@* in4 [[buffer(4)]], device const @T@* in5 [[buffer(5)]], device const @KV@* in6 [[buffer(6)]], device const @T@* in7 [[buffer(7)]], device const @T@* in8 [[buffer(8)]], @SINK_PARAM@device @T@* out [[buffer(@OUT_BUFFER@)]], constant Uniforms& u [[buffer(@UNIFORMS_BUFFER@)]], uint tgid [[threadgroup_position_in_grid]], ushort lane [[thread_index_in_simdgroup]], ushort simdgroup_slot [[simdgroup_index_in_threadgroup]]) {
     @INDEX@ splits = (@INDEX@)u.splits;
     if ((@INDEX@)tgid >= (@INDEX@)u.total_elements * splits) { return; }
     constexpr @INDEX@ kv_heads = @KV_HEADS@; constexpr @INDEX@ query_groups = @QUERY_GROUPS@; constexpr @INDEX@ head_dim = @HEAD_DIM@; constexpr float scale = @SCALE@; constexpr @INDEX@ cached_lower = @CACHED_LOWER@; constexpr @INDEX@ new_upper = @NEW_UPPER@; constexpr @INDEX@ new_key_rows = @NEW_KEY_ROWS@; constexpr @INDEX@ cap = @CAP@;
@@ -506,7 +537,7 @@ const DECODE_SPLIT_TAIL: &str = r#"        if (lanes_per_key <= 8) {
             chunk_scale[c] = live_chunk ? exp(shared_m[c] - merged_max) : 0.0f;
             merged_sum += live_chunk ? shared_l[c] * chunk_scale[c] : 0.0f;
         }
-        device float* attn_scratch = (device float*)out;
+        @SINK_MERGE@device float* attn_scratch = (device float*)out;
         @INDEX@ value_base = query_index * row_vectors;
         @INDEX@ stats_index = (@INDEX@)u.total_elements * head_dim * splits + (query_index * splits + split) * 2@L@;
         if (splits != 1@L@ && lane == 0) { attn_scratch[stats_index] = merged_max; attn_scratch[stats_index + 1@L@] = merged_sum; }
@@ -516,7 +547,7 @@ const DECODE_SPLIT_TAIL: &str = r#"        if (lanes_per_key <= 8) {
                 if (index < row_vectors) {
                     float4 merged = float4(0.0f);
                     OMEGA_UNROLL for (@INDEX@ c = 0; c < cap; c++) { merged += (c < chunks) ? shared_o[c * row_vectors + index] * chunk_scale[c] : float4(0.0f); }
-                    if (splits == 1@L@) {
+                    @SINK_SCALE@if (splits == 1@L@) {
                         ((device @T@4*)(out + query_index * head_dim))[index] = @T@4(merged_sum == 0.0f ? float4(0.0f) : merged / merged_sum);
                     } else {
                         ((device float4*)attn_scratch)[(value_base + index) * splits + split] = merged;

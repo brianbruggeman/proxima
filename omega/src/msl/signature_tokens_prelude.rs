@@ -2446,6 +2446,7 @@ fn decode_split_entry_name(
         head_dim,
         scale,
         cached_lower_inclusive,
+        attention_sink,
         ..
     } = kind
     else {
@@ -2455,12 +2456,13 @@ fn decode_split_entry_name(
         return None;
     };
     Some(format!(
-        "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_e{}_k{}_ds",
+        "omega_cached_attention_q{query_rows}_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_x{}_e{}_k{}_ds{}",
         scale.to_bits(),
         signed_name_part(*cached_lower_inclusive),
         decode_simdgroup_cap(*head_dim),
         crate::sized::ATTENTION_DECODE_KEYS_IN_FLIGHT,
         crate::sized::ATTENTION_DECODE_KEYS_PER_BATCH,
+        if *attention_sink { "_sk" } else { "" },
     ))
 }
 
@@ -2552,6 +2554,7 @@ pub(crate) fn cached_attention_form_with_schedule(
         new_key_rows,
         head_dim,
         rotary_dim,
+        attention_sink,
         ..
     } = kind
     else {
@@ -2560,7 +2563,8 @@ pub(crate) fn cached_attention_form_with_schedule(
     #[cfg(not(feature = "metal-attn-split-rows"))]
     let _ = schedule;
     let base_operand_len = if rotary_dim < head_dim { 11 } else { 8 };
-    if operands.len() != base_operand_len + 1 {
+    // the sink, when bound, is the one operand after the ninth and the pass triple
+    if operands.len() - usize::from(*attention_sink) != base_operand_len + 1 {
         return Some(CachedAttentionForm::Static);
     }
     if *cached_key_rows == 0 {

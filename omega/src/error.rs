@@ -154,6 +154,14 @@ pub enum EmitError {
     )]
     CachedAttentionKvCodecNotSupported { node: NodeId, reason: &'static str },
 
+    /// A cached-attention bind carrying an attention-sink operand
+    /// (`BoundOpKind::CachedAttention::attention_sink`) whose selected form has
+    /// no sink term: only the decode split draws one. Rejected rather than
+    /// rendered without the sink, which would normalize every head by the
+    /// wrong denominator.
+    #[error("node {node} is a cached attention bind with an attention sink the selected kernel form cannot draw: {reason}")]
+    CachedAttentionSinkNotSupported { node: NodeId, reason: &'static str },
+
     #[error("node {node} cannot select cached-attention MMA precision {precision}: {reason}")]
     CachedAttentionMmaPrecisionNotSupported {
         node: NodeId,
