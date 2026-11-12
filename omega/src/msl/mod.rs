@@ -105,6 +105,7 @@ use crate::identity::{
 use crate::sized::PACKED_ROW_NSG;
 use crate::sized::SIMD_WIDTH;
 use sub_block_assembled_matvec::{LevelCodes, assembled_multi_row_matvec_msl, level_matvec_msl};
+use matmul_form::{FlatBlockForm, FlatLaunch, Fold};
 use sub_block_matvec::{SubBlockMatvecGeometry, sub_block_matvec_msl};
 
 #[macro_use]
@@ -134,6 +135,7 @@ mod tiled_gemm_cooperative_scan;
 mod expert_grouped_gemm;
 mod index_narrowing;
 pub mod layout_render;
+mod matmul_form;
 mod scaled_float_render;
 mod sub_block_assembled_matvec;
 mod sub_block_matvec;

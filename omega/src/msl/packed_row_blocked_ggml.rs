@@ -214,6 +214,8 @@ pub(super) fn push_packed_row_blocked_body(
             SubBlockRendered,
             /// the level-set matvec rendered from the format's block layout and level table (IQ4_XS)
             LevelsRendered,
+            /// the flat-block matvec rendered from a whole-byte-code layout (Q8_0), one block per lane
+            FlatRendered,
             /// ggml's own Q4_0 lane geometry, kept as a REFERENCE/Oracle body.
             Q4_0Reference,
             /// the generic lane-spread preamble plus its per-codec decode arms
@@ -247,9 +249,15 @@ pub(super) fn push_packed_row_blocked_body(
                     && real_float
                     && cfg!(feature = "metal-q4_0-native")
                     && !cfg!(feature = "metal-q4k-split-k");
+                let flat_rendered = matches!(codec, Codec::Q8_0)
+                    && plain_product_reduce
+                    && real_float
+                    && !expert_source_mode
+                    && !cfg!(feature = "metal-q4k-split-k");
                 match (ggml_port, codec, q4_0_reference) {
                     (true, Codec::Q5K, _) => Self::Q5KGgmlPort,
                     (true, _, _) => Self::SubBlockRendered,
+                    (false, _, false) if flat_rendered => Self::FlatRendered,
                     (false, _, true) => Self::Q4_0Reference,
                     (false, _, false) if levels_rendered => Self::LevelsRendered,
                     (false, _, false) => Self::Generic,
@@ -304,6 +312,31 @@ pub(super) fn push_packed_row_blocked_body(
                 codec: refusal.0,
             })?;
             source.push_str(&body);
+        } else if packed_body == PackedBodySelect::FlatRendered {
+            let layout = codec
+                .block_layout()
+                .ok_or(EmitError::PackedCodecNotSupported {
+                    node: resolved.node,
+                    codec: "no block layout",
+                })?;
+            let form = FlatBlockForm::plan(&layout).map_err(|refusal| EmitError::PackedCodecNotSupported {
+                node: resolved.node,
+                codec: refusal.0,
+            })?;
+            let reduction_bound = packed_row_reduction_bound_token(metal);
+            let launch = FlatLaunch {
+                rows,
+                lanes: SIMD_WIDTH as usize,
+                weight,
+                other,
+                other_stride_is_one,
+            };
+            source.push_str(&form.matvec_msl(
+                &launch,
+                &reduction_bound,
+                element_type,
+                Fold::ScaleEachTerm,
+            ));
         } else if packed_body == PackedBodySelect::LevelsRendered {
             let Codec::Levels(format) = codec else {
                 return Err(EmitError::PackedCodecNotSupported {

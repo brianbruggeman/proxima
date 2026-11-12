@@ -6342,9 +6342,14 @@ fn push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel() {
         &MetalOnlyExtras::default(),
     )
     .expect("Q8_0 now reaches the row-blocked path and renders a kernel body");
+    let expected = if cfg!(feature = "metal-q4k-split-k") {
+        "q8_0_pair_dot(blk"
+    } else {
+        "flat_block_levels[j]"
+    };
     assert!(
-        source.contains("q8_0_pair_dot(blk"),
-        "row-blocked Q8_0 body for a plain-product reduce must call the batched pair-dot accessor: {source}"
+        source.contains(expected),
+        "row-blocked Q8_0 body for a plain-product reduce must contain {expected}: {source}"
     );
 }
 
