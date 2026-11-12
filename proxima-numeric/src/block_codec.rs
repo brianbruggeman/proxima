@@ -10,7 +10,8 @@
 //! keeps [`crate::decode::decode_blocks`] for decode and the walker in [`crate::encode::encode_blocks`]
 //! for encode.
 //!
-//! How a block's scale is fitted is read from the layout too ([`fit_of`]): an offset-binary code
+//! How a block's scale is fitted is read from the layout too ([`crate::encode_rule::EncodeRule`], from
+//! [`BlockLayout::encode_rule`]): an offset-binary code
 //! centred on its bias is fitted to the signed value of largest magnitude (`Q4_0`, `Q5_0`), a
 //! signed or off-centre integer code to the peak magnitude (`Q8_0`, `Q2_0`), the same with llama's
 //! stored `s = d * sum(q)` in the two bytes after the scale (`Q8_1`), a one-bit code with a
@@ -22,6 +23,7 @@
 use core::mem::MaybeUninit;
 
 use crate::block_layout::{BlockLayout, Field, MAX_DIGITS, Plane, named_block_table};
+use crate::encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleStatistic};
 use crate::float_layout::{FloatLayout, SignEncoding};
 use crate::float_layout_codec::{decode, encode};
 use crate::format::{LevelTable, NumericFormat};
@@ -43,22 +45,6 @@ pub type BlockEncodeFn = fn(&[f32], &mut [u8]) -> Option<usize>;
 /// block bytes are literals: the byte count read, or `None` with `out` unwritten when `out` is not
 /// whole blocks or `data` is shorter than the packed range.
 pub type BlockDecodeFn = fn(&[u8], &mut [MaybeUninit<f32>]) -> Option<usize>;
-
-/// How a layout's block scale is fitted to its values, decided from the layout alone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Fit {
-    /// `scale = signed_max / -bias`, `code = min(top, trunc(value / scale + bias + 0.5))`.
-    SignedMax,
-    /// `scale = peak / reach`, `code = clamp(round(value / scale)) + bias`.
-    PeakRound,
-    /// [`Self::PeakRound`] and the two bytes after the scale hold `f16(scale * sum(codes))`, llama's
-    /// `Q8_1` `s`, from the unrounded scale and the integer code sum.
-    PeakRoundSum,
-    /// `scale = mean(|value|)`, `code = value >= 0`.
-    MeanSign,
-    /// No instantiation: the runtime encoder keeps this layout.
-    Runtime,
-}
 
 const fn code_bits(layout: &BlockLayout) -> u32 {
     layout.element.low.bits as u32
@@ -135,7 +121,10 @@ const fn reach_of(layout: &BlockLayout) -> i32 {
     if highest < -lowest { highest } else { -lowest }
 }
 
-const fn fit_of(layout: &BlockLayout) -> Fit {
+/// The layout's [`EncodeRule`], decided from its fields alone: an offset-binary code centred on its
+/// bias fits the signed peak, a signed or off-centre integer code the peak magnitude, a one-bit
+/// code with a multiplier of two the mean magnitude; `None` for any other layout.
+pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
     let integer = is_unsigned_integer(layout) || is_twos_complement_integer(layout);
     if !layout.is_simple()
         || layout.min.is_some()
@@ -146,26 +135,55 @@ const fn fit_of(layout: &BlockLayout) -> Fit {
         || (accounted_bytes(layout) != layout.block_bytes as usize && !has_sum_slot(layout))
         || code_bits(layout) > 8
     {
-        return Fit::Runtime;
+        return None;
     }
     let bits = code_bits(layout);
     let bias = layout.element.bias as i32;
-    let fit = if is_sign_code(layout) {
-        Fit::MeanSign
-    } else if layout.multiplier != 1 {
-        Fit::Runtime
-    } else if is_unsigned_integer(layout) && bias == 1i32 << (bits - 1) {
-        Fit::SignedMax
-    } else if reach_of(layout) > 0 && (is_twos_complement_integer(layout) || bias > 0) {
-        Fit::PeakRound
-    } else {
-        Fit::Runtime
-    };
-    match (fit, has_sum_slot(layout)) {
-        (Fit::PeakRound, true) => Fit::PeakRoundSum,
-        (_, true) => Fit::Runtime,
-        (other, false) => other,
+    let (lowest, highest) = integer_bounds(layout);
+    let stored_sum = has_sum_slot(layout);
+    if is_sign_code(layout) {
+        if stored_sum {
+            return None;
+        }
+        return Some(EncodeRule {
+            statistic: ScaleStatistic::MeanMagnitude,
+            divisor: 1,
+            rounding: CodeRounding::NonNegativeBit,
+            clamp: CodeClamp::Neither,
+            lowest,
+            highest,
+            stored_sum,
+        });
     }
+    if layout.multiplier != 1 {
+        return None;
+    }
+    if is_unsigned_integer(layout) && bias == 1i32 << (bits - 1) {
+        if stored_sum {
+            return None;
+        }
+        return Some(EncodeRule {
+            statistic: ScaleStatistic::SignedPeak,
+            divisor: -bias,
+            rounding: CodeRounding::HalfUpThenTruncate,
+            clamp: CodeClamp::Upper,
+            lowest,
+            highest,
+            stored_sum,
+        });
+    }
+    if reach_of(layout) > 0 && (is_twos_complement_integer(layout) || bias > 0) {
+        return Some(EncodeRule {
+            statistic: ScaleStatistic::PeakMagnitude,
+            divisor: reach_of(layout),
+            rounding: CodeRounding::NearestAwayFromZero,
+            clamp: CodeClamp::Both,
+            lowest,
+            highest,
+            stored_sum,
+        });
+    }
+    None
 }
 
 /// The bits `[address, address + width)` of `block`, low bit first.
@@ -774,40 +792,51 @@ fn inverse_of(scale: f32) -> f32 {
 
 /// The block's scale and the inverse the codes are fitted with (unused by a sign code).
 #[inline(always)]
-fn fit_scale<const ELEMENTS: usize>(layout: &BlockLayout, fit: Fit, input: &[f32; ELEMENTS]) -> (f32, f32) {
-    match fit {
-        Fit::SignedMax => {
-            let scale = signed_max(input) / -(layout.element.bias as f32);
+fn fit_scale<const ELEMENTS: usize>(rule: &EncodeRule, input: &[f32; ELEMENTS]) -> (f32, f32) {
+    let divisor = rule.divisor as f32;
+    match rule.statistic {
+        ScaleStatistic::SignedPeak => {
+            let scale = signed_max(input) / divisor;
             (scale, inverse_of(scale))
         }
-        Fit::PeakRound | Fit::PeakRoundSum | Fit::Runtime => {
-            let scale = peak(input) / reach_of(layout) as f32;
+        ScaleStatistic::PeakMagnitude => {
+            let scale = peak(input) / divisor;
             (scale, inverse_of(scale))
         }
-        Fit::MeanSign => {
+        ScaleStatistic::MeanMagnitude => {
             let mut sum = 0.0f32;
             for &value in input {
                 sum += value.abs();
             }
-            (sum / ELEMENTS as f32, 0.0)
+            (sum / ELEMENTS as f32 / divisor, 0.0)
         }
     }
 }
 
-/// The raw code of one value under the fit's `inverse`.
+/// The raw code of one value under the rule's `inverse`.
 #[inline(always)]
-fn code_of(layout: &BlockLayout, fit: Fit, inverse: f32, value: f32) -> u8 {
-    match fit {
-        Fit::SignedMax => {
-            let top = (1i32 << code_bits(layout)) - 1;
-            top.min((value * inverse + (layout.element.bias as f32 + 0.5)) as i32) as u8
+fn code_of(layout: &BlockLayout, rule: &EncodeRule, inverse: f32, value: f32) -> u8 {
+    let bias = layout.element.bias as i32;
+    match rule.rounding {
+        CodeRounding::HalfUpThenTruncate => {
+            let raw = (value * inverse + (bias as f32 + 0.5)) as i32;
+            let raw = match rule.clamp {
+                CodeClamp::Both => raw.clamp(rule.lowest + bias, rule.highest + bias),
+                CodeClamp::Upper => raw.min(rule.highest + bias),
+                CodeClamp::Neither => raw,
+            };
+            raw as u8
         }
-        Fit::PeakRound | Fit::PeakRoundSum | Fit::Runtime => {
-            let (lowest, highest) = integer_bounds(layout);
-            let rounded = (libm::roundf(value * inverse) as i32).clamp(lowest, highest);
+        CodeRounding::NearestAwayFromZero => {
+            let rounded = libm::roundf(value * inverse) as i32;
+            let rounded = match rule.clamp {
+                CodeClamp::Both => rounded.clamp(rule.lowest, rule.highest),
+                CodeClamp::Upper => rounded.min(rule.highest),
+                CodeClamp::Neither => rounded,
+            };
             raw_of_value(layout, rounded) as u8
         }
-        Fit::MeanSign => u8::from(value >= 0.0),
+        CodeRounding::NonNegativeBit => u8::from(value >= 0.0),
     }
 }
 
@@ -817,17 +846,17 @@ fn code_of(layout: &BlockLayout, fit: Fit, inverse: f32, value: f32) -> u8 {
 #[inline(always)]
 fn fit_codes<const ELEMENTS: usize, const HIGH_FUSED: bool>(
     layout: &BlockLayout,
-    fit: Fit,
+    rule: &EncodeRule,
     input: &[f32; ELEMENTS],
     codes: &mut [u8; ELEMENTS],
 ) -> (f32, u32) {
-    let (scale, inverse) = fit_scale(layout, fit, input);
+    let (scale, inverse) = fit_scale(rule, input);
     let lift = u32::from(layout.element.low.bits);
     let bits = layout.element.high.map_or(0, |plane| u32::from(plane.bits));
     let mask = u32::MAX.checked_shr(32 - bits).unwrap_or(0);
     let mut word = 0u32;
     for (lane, (code, &value)) in codes.iter_mut().zip(input).enumerate() {
-        *code = code_of(layout, fit, inverse, value);
+        *code = code_of(layout, rule, inverse, value);
         if HIGH_FUSED {
             word = word.wrapping_add(((u32::from(*code) >> lift) & mask).wrapping_shl(lane as u32 * bits));
         }
@@ -845,17 +874,17 @@ fn encode_chunk<
     const SCALE_OWNED: bool,
 >(
     layout: &BlockLayout,
-    fit: Fit,
+    rule: &EncodeRule,
     input: &[f32; ELEMENTS],
     out: &mut [u8; BYTES],
 ) {
     let mut block = [0u8; BYTES];
     let mut codes = [0u8; ELEMENTS];
-    let (scale, high_word) = fit_codes::<ELEMENTS, HIGH_FUSED>(layout, fit, input, &mut codes);
+    let (scale, high_word) = fit_codes::<ELEMENTS, HIGH_FUSED>(layout, rule, input, &mut codes);
     scatter_codes::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED>(layout, &codes, high_word, &mut block);
     let width = layout.scale.layout.width() as u32;
     put_field::<BYTES, SCALE_OWNED>(&mut block, layout.scale.byte_offset as usize, width, encode(scale, layout.scale.layout));
-    if matches!(fit, Fit::PeakRoundSum) {
+    if rule.stored_sum {
         // llama: s = f16(sum * d) with d the scale before it is rounded to the stored width
         let total: i32 = codes.iter().map(|&raw| value_of_raw(layout, raw)).sum();
         let at = sum_offset(layout);
@@ -875,7 +904,7 @@ fn encode_run<
     const SCALE_OWNED: bool,
 >(
     layout: BlockLayout,
-    fit: Fit,
+    rule: EncodeRule,
     values: &[f32],
     out: &mut [u8],
 ) -> Option<usize> {
@@ -886,7 +915,7 @@ fn encode_run<
     let bytes = inputs.len() * BYTES;
     let blocks = out.get_mut(..bytes)?.as_chunks_mut::<BYTES>().0;
     for (input, block) in inputs.iter().zip(blocks) {
-        encode_chunk::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, SCALE_OWNED>(&layout, fit, input, block);
+        encode_chunk::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, SCALE_OWNED>(&layout, &rule, input, block);
     }
     Some(bytes)
 }
@@ -901,7 +930,7 @@ macro_rules! resolve_named_block {
                 const _: () = assert!(BlockLayout::$name.min.is_none() || is_integer_code(&BlockLayout::$name));
                 const ELEMENTS: usize = BlockLayout::$name.elements as usize;
                 const BYTES: usize = BlockLayout::$name.block_bytes as usize;
-                const FIT: Fit = fit_of(&BlockLayout::$name);
+                const RULE: Option<EncodeRule> = BlockLayout::$name.encode_rule();
                 const LOW_BY_WORD: bool = is_word_packed(&BlockLayout::$name.element.low);
                 const HIGH_BY_WORD: bool = is_high_word_packed(&BlockLayout::$name);
                 const HIGH_FUSED: bool = is_high_single_word(&BlockLayout::$name);
@@ -909,12 +938,14 @@ macro_rules! resolve_named_block {
                 const UNPACK_BY_WORD: bool = unpacks_by_word(&BlockLayout::$name);
                 const IN_PLACE: bool = reads_codes_in_place(&BlockLayout::$name);
                 const PAIRED: bool = pairs_halves_with_high_word(&BlockLayout::$name);
-                let encode: Option<BlockEncodeFn> = match FIT {
-                    Fit::Runtime => None,
-                    _ => Some(|values, out| {
+                let encode: Option<BlockEncodeFn> = match RULE {
+                    None => None,
+                    Some(_) => Some(|values, out| {
+                        // the arm above proved the rule exists; the const folds this match away
+                        let Some(rule) = RULE else { return None };
                         encode_run::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, SCALE_OWNED>(
                             BlockLayout::$name,
-                            FIT,
+                            rule,
                             values,
                             out,
                         )
@@ -975,7 +1006,7 @@ mod tests {
         input[2] = 1.984_375;
         let mut codes = [0u8; 32];
 
-        let (scale, _) = fit_codes::<32, false>(&layout, Fit::SignedMax, &input, &mut codes);
+        let (scale, _) = fit_codes::<32, false>(&layout, &layout.encode_rule().expect("a signed-peak layout"), &input, &mut codes);
 
         assert_eq!(scale, 0.015_625);
         assert_eq!(&codes[..4], &[192, 0, 255, 128]);
@@ -1211,7 +1242,8 @@ mod tests {
 
     #[test]
     fn a_high_plane_of_two_words_is_not_fused_and_encodes_as_the_generic_path_does() {
-        const FIT: Fit = fit_of(&TWO_WORD_HIGH_PLANE);
+        const RULE: Option<EncodeRule> = TWO_WORD_HIGH_PLANE.encode_rule();
+        let rule = RULE.expect("the layout must reach the encode instantiation");
         const LOW_BY_WORD: bool = is_word_packed(&TWO_WORD_HIGH_PLANE.element.low);
         const HIGH_BY_WORD: bool = is_high_word_packed(&TWO_WORD_HIGH_PLANE);
         const HIGH_FUSED: bool = is_high_single_word(&TWO_WORD_HIGH_PLANE);
@@ -1220,11 +1252,10 @@ mod tests {
         let mut generic = [0u8; 42];
         let mut forced = [0u8; 42];
 
-        encode_chunk::<64, 42, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, true>(&TWO_WORD_HIGH_PLANE, FIT, &input, &mut chosen);
-        encode_chunk::<64, 42, false, false, false, true>(&TWO_WORD_HIGH_PLANE, FIT, &input, &mut generic);
-        encode_chunk::<64, 42, LOW_BY_WORD, HIGH_BY_WORD, true, true>(&TWO_WORD_HIGH_PLANE, FIT, &input, &mut forced);
+        encode_chunk::<64, 42, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED, true>(&TWO_WORD_HIGH_PLANE, &rule, &input, &mut chosen);
+        encode_chunk::<64, 42, false, false, false, true>(&TWO_WORD_HIGH_PLANE, &rule, &input, &mut generic);
+        encode_chunk::<64, 42, LOW_BY_WORD, HIGH_BY_WORD, true, true>(&TWO_WORD_HIGH_PLANE, &rule, &input, &mut forced);
 
-        assert_ne!(FIT, Fit::Runtime, "the layout must reach the encode instantiation");
         const { assert!(!HIGH_FUSED && HIGH_BY_WORD, "two words of high bits are word-packed but not fused") };
         assert!(is_high_single_word(&BlockLayout::Q5_0), "q5_0's 32 high bits are the one word");
         assert_eq!(chosen, generic, "the instantiation the layout selects matches the per-element path");
@@ -1235,16 +1266,16 @@ mod tests {
     fn a_scale_that_is_not_whole_bytes_keeps_the_code_bits_in_its_last_byte() {
         const SCALE_OWNED: bool = scale_owns_its_bytes(&SCALE_SHARES_A_BYTE);
         let layout = SCALE_SHARES_A_BYTE;
+        let rule = layout.encode_rule().expect("the layout must reach the encode instantiation");
         let input = kv_like_block(5);
         let mut codes = [0u8; 32];
         let mut block = [0u8; 18];
 
-        let (scale, _) = fit_codes::<32, false>(&layout, fit_of(&layout), &input, &mut codes);
-        encode_chunk::<32, 18, false, false, false, SCALE_OWNED>(&layout, fit_of(&layout), &input, &mut block);
+        let (scale, _) = fit_codes::<32, false>(&layout, &rule, &input, &mut codes);
+        encode_chunk::<32, 18, false, false, false, SCALE_OWNED>(&layout, &rule, &input, &mut block);
 
         const { assert!(!SCALE_OWNED, "the first code lies in the scale's last byte") };
         assert!(scale_owns_its_bytes(&BlockLayout::Q4_0) && scale_owns_its_bytes(&BlockLayout::Q5_0));
-        assert_ne!(fit_of(&layout), Fit::Runtime, "the layout must reach the encode instantiation");
         assert_ne!(codes[0], 0, "the first code must be nonzero to be lost");
         assert_eq!(read_bits(&block, 0, 12), encode(scale, layout.scale.layout) & 0xfff, "the 12 scale bits");
         assert_eq!(gather_codes::<32, 18>(&layout, &block), codes, "every code, the first one beside the scale");
