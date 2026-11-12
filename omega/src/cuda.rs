@@ -1218,7 +1218,8 @@ fn moe_block_width(target: Target, expert_count: u64) -> u64 {
 /// value per warp crosses through shared memory, and two `__syncthreads` per
 /// round publish the warp maxima and the warp winners.
 ///
-/// Ties resolve to the HIGHER index (`max` over `masked == max_value ? tid : -1`),
+/// Ties resolve to the HIGHER index (`max` over `masked == max_value ? tid : 0`; a NaN row with no
+/// matching lane routes to expert 0, as the unfused `ReduceInit::Zero` reduce does),
 /// and exclusion removes EVERY expert tied with the round's maximum -- both
 /// exactly as the Metal arm and `proxima_tensor::cpu::run_moe_topk` do. The
 /// candidate guard `tid < expert_count` keeps a padding lane (held at `-inf`)
@@ -1231,6 +1232,7 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
         expert_count,
         top_k,
         stacked,
+        weighting,
         ..
     } = &resolved.kind
     else {
@@ -1240,6 +1242,7 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
             found: resolved.kind.name(),
         });
     };
+    let selected_score = weighting.reads_weight_scores();
     let block_width = moe_block_width(target, *expert_count);
     if block_width > MAX_BLOCK_WIDTH {
         return Err(EmitError::WideGridUnsupported {
@@ -1258,8 +1261,13 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
     let mut source = String::new();
     preamble(target, &mut source, "float");
     source.push_str("struct Uniforms { long unused; };\n\n");
+    let weight_scores_parameter = if selected_score {
+        "    const float* __restrict__ weight_scores,\n"
+    } else {
+        ""
+    };
     source.push_str(&format!(
-        "extern \"C\" __global__ void {entry}(\n    const float* __restrict__ scores,\n    float* __restrict__ route0,\n    const Uniforms* __restrict__ u_ptr"
+        "extern \"C\" __global__ void {entry}(\n    const float* __restrict__ scores,\n{weight_scores_parameter}    float* __restrict__ route0,\n    const Uniforms* __restrict__ u_ptr"
     ));
     for index in 0..extra_count {
         source.push_str(&format!(",\n    float* __restrict__ extra{index}"));
@@ -1279,6 +1287,22 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
     } else {
         ""
     };
+    // the sigmoid weight is the unbiased score summed over the lanes tied at the round's maximum,
+    // so it rides the winner-index exchange: one extra warp sum, published before the same barrier
+    let (weight_declarations, weight_load, weight_publish, weight_expression) = if selected_score {
+        (
+            "    __shared__ float warp_weight[num_warps];\n",
+            "    const float weight_score = (tid < expert_count) ? weight_scores[(long)token * expert_count + tid] : 0.0f;\n",
+            format!(
+                "        float lane_weight = (masked == max_value && tid < expert_count) ? weight_score : 0.0f;\n\
+                 \x20       for (int offset = {shuffle_start}; offset > 0; offset >>= 1) {{ lane_weight += __shfl_xor_sync({mask}, lane_weight, offset); }}\n\
+                 \x20       if (lane == 0) {{ warp_weight[warp_id] = lane_weight; }}\n"
+            ),
+            "float weight = 0.0f; for (unsigned int warp = 0; warp < num_warps; warp++) { weight += warp_weight[warp]; }",
+        )
+    } else {
+        ("", "", String::new(), "const float weight = expf(max_value - max0);")
+    };
     source.push_str(&format!(
         "    constexpr unsigned int expert_count = {expert_count}u;\n\
          \x20   constexpr unsigned int top_k = {top_k}u;\n\
@@ -1287,11 +1311,13 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
          \x20   const float negative_infinity = -__int_as_float(0x7f800000);\n\
          \x20   __shared__ float warp_max[num_warps];\n\
          \x20   __shared__ int warp_index[num_warps];\n\
+         {weight_declarations}\
          \x20   const unsigned int token = blockIdx.x;\n\
          \x20   const unsigned int tid = threadIdx.x;\n\
          \x20   const unsigned int warp_id = tid >> {warp_shift};\n\
          \x20   const unsigned int lane = tid & {lane_bits}u;\n\
          \x20   float masked = (tid < expert_count) ? scores[(long)token * expert_count + tid] : negative_infinity;\n\
+         {weight_load}\
          \x20   float max0 = 0.0f;\n\
          \x20   float weight_total = 0.0f;\n\
          \x20   for (unsigned int round = 0; round < top_k; round++) {{\n\
@@ -1301,15 +1327,16 @@ fn render_moe_topk(target: Target, resolved: &BoundOp, entry: &str) -> Result<St
          \x20       __syncthreads();\n\
          \x20       float max_value = warp_max[0];\n\
          \x20       for (unsigned int warp = 1; warp < num_warps; warp++) {{ max_value = fmaxf(max_value, warp_max[warp]); }}\n\
-         \x20       int candidate = (masked == max_value && tid < expert_count) ? (int)tid : -1;\n\
+         \x20       int candidate = (masked == max_value && tid < expert_count) ? (int)tid : 0;\n\
          \x20       for (int offset = {shuffle_start}; offset > 0; offset >>= 1) {{ candidate = max(candidate, __shfl_xor_sync({mask}, candidate, offset)); }}\n\
          \x20       if (lane == 0) {{ warp_index[warp_id] = candidate; }}\n\
+         {weight_publish}\
          \x20       __syncthreads();\n\
          \x20       int winner_index = warp_index[0];\n\
          \x20       for (unsigned int warp = 1; warp < num_warps; warp++) {{ winner_index = max(winner_index, warp_index[warp]); }}\n\
          \x20       if (round == 0) {{ max0 = max_value; }}\n\
          \x20       if (tid == 0) {{\n\
-         \x20           const float weight = expf(max_value - max0);\n\
+         \x20           {weight_expression}\n\
          \x20           weight_total += weight;\n\
          \x20           if (round == 0) {{ route0[token] = (float)winner_index; }} else {{ extras[round - 1][token] = (float)winner_index; }}\n\
          \x20           extras[(top_k - 1) + round][token] = weight;\n\
@@ -4778,6 +4805,7 @@ mod tests {
                     },
                     None,
                 )],
+                weighting: proxima_tensor::MoeWeighting::ShiftedExponential,
                 expert_count,
                 top_k,
                 routes: nodes(100),
@@ -4828,6 +4856,48 @@ mod tests {
         assert_eq!(kernel.extra_outputs.len(), 12 + 2);
         assert_eq!(kernel.extra_outputs[12], (NodeId(400), 30));
         assert!(kernel.source.contains("stacked_weights"));
+    }
+
+    fn selected_score_top_k_op(expert_count: u64, top_k: u64) -> BoundOp {
+        let mut bound = moe_top_k_op(expert_count, top_k, false);
+        if let BoundOpKind::MoeTopK {
+            operands, weighting, ..
+        } = &mut bound.kind
+        {
+            operands.push((
+                NodeId(2),
+                Layout {
+                    base: 0,
+                    strides: vec![expert_count as i64, 1].into(),
+                },
+                None,
+            ));
+            *weighting = proxima_tensor::MoeWeighting::SelectedScore;
+        }
+        bound
+    }
+
+    #[test]
+    fn moe_topk_selected_score_weighting_reads_the_unbiased_scores_and_sums_them_over_the_tied_lanes() {
+        let kernel = emit_cuda(&selected_score_top_k_op(256, 6), &no_packed())
+            .expect("a 256 expert sigmoid router emits");
+
+        assert_eq!(
+            kernel.bindings,
+            vec![
+                Binding::Input(NodeId(1)),
+                Binding::Input(NodeId(2)),
+                Binding::Output(NodeId(100)),
+                Binding::Uniforms
+            ]
+        );
+        assert!(kernel.source.contains("const float* __restrict__ weight_scores"));
+        assert!(kernel.source.contains("warp_weight[warp_id] = lane_weight"));
+        assert!(!kernel.source.contains("expf(max_value - max0)"));
+        let softmax = emit_cuda(&moe_top_k_op(256, 6, false), &no_packed())
+            .expect("a 256 expert softmax router emits");
+        assert!(softmax.source.contains("expf(max_value - max0)"));
+        assert!(!softmax.source.contains("weight_scores"));
     }
 
     #[test]

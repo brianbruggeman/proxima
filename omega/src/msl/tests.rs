@@ -11195,3 +11195,63 @@ fn dense_bf16_weight_read_parenthesizes_the_compound_offset() {
     );
     assert!(!kernel.source.contains("bf16_element(in0"));
 }
+
+fn moe_top_k_op_with_weighting(
+    expert_count: u64,
+    top_k: u64,
+    weighting: proxima_tensor::MoeWeighting,
+) -> BoundOp {
+    let layout = Layout {
+        base: 0,
+        strides: vec![expert_count as i64, 1].into(),
+    };
+    let nodes = |start: u32| (0..top_k as u32).map(|index| NodeId(start + index)).collect();
+    let mut operands = vec![(NodeId(1), layout.clone(), None)];
+    if weighting.reads_weight_scores() {
+        operands.push((NodeId(2), layout, None));
+    }
+    BoundOp {
+        node: NodeId(100),
+        dtype: DType::FLOAT32,
+        extents: vec![1],
+        kind: BoundOpKind::MoeTopK {
+            operands,
+            weighting,
+            expert_count,
+            top_k,
+            routes: nodes(100),
+            weights: nodes(200),
+            weight_total: NodeId(300),
+            stacked: None,
+        },
+    }
+}
+
+#[test]
+fn moe_topk_selected_score_kernel_reads_unbiased_scores_and_shifts_every_later_slot() {
+    use proxima_tensor::MoeWeighting;
+
+    let selected = emit(
+        &moe_top_k_op_with_weighting(256, 6, MoeWeighting::SelectedScore),
+        &BTreeMap::new(),
+        NumericPolicy::default(),
+    )
+    .expect("a 256 expert sigmoid router emits");
+    let shifted = emit(
+        &moe_top_k_op_with_weighting(256, 6, MoeWeighting::ShiftedExponential),
+        &BTreeMap::new(),
+        NumericPolicy::default(),
+    )
+    .expect("a 256 expert softmax router emits");
+
+    assert!(selected.source.contains("device const float* weight_scores [[buffer(1)]]"));
+    assert!(selected.source.contains("device float* route0 [[buffer(2)]]"));
+    assert!(selected.source.contains("device float* extra0 [[buffer(4)]]"));
+    assert!(selected.source.contains("simd_sum((masked == max_value) ? weight_score : 0.0)"));
+    assert!(!selected.source.contains("exp(max_value - max0)"));
+    assert!(shifted.source.contains("device float* route0 [[buffer(1)]]"));
+    assert!(shifted.source.contains("device float* extra0 [[buffer(3)]]"));
+    assert!(shifted.source.contains("exp(max_value - max0)"));
+    assert!(!shifted.source.contains("weight_scores"));
+    assert_ne!(selected.entry, shifted.entry, "the pipeline cache must key the two kernels apart");
+}

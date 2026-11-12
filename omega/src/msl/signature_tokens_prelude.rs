@@ -570,10 +570,12 @@ pub(super) fn entry_name_with_schedule(
             expert_count,
             top_k,
             stacked,
+            weighting,
             ..
         } => format!(
-            "omega_moe_topk_e{expert_count}_k{top_k}{}",
-            if stacked.is_some() { "_stacked" } else { "" }
+            "omega_moe_topk_e{expert_count}_k{top_k}{}{}",
+            if stacked.is_some() { "_stacked" } else { "" },
+            if weighting.reads_weight_scores() { "_selected" } else { "" }
         ),
         BoundOpKind::TopFractionSelect {
             rows,
@@ -1419,9 +1421,11 @@ pub(super) fn render_gated_delta_net(resolved: &BoundOp, entry: &str) -> Result<
 /// the (at most 8) `sg_max` entries into `max_value` redundantly -- cheap,
 /// and avoids a second reduction pass for something this small. The same
 /// two-level shape finds the winner index: `simd_max` over
-/// `masked == max_value ? tid : -1` (a `max` over a candidate/`-1` pair
-/// can only ever prefer the larger valid index, so ties resolve to the
-/// HIGHEST index within a simdgroup for free); lane 0 writes the
+/// `masked == max_value ? tid : 0` (a `max` over a candidate/`0` pair
+/// can only ever prefer the larger index, so ties resolve to the
+/// HIGHEST index within a simdgroup for free; a row with no lane equal to
+/// its maximum, a NaN row, routes to expert 0 exactly as the unfused
+/// `reduce(Maximum, ReduceInit::Zero)` over `mask * expert_index` does); lane 0 writes the
 /// simdgroup's own candidate to `sg_idx[sg_id]`; a SECOND barrier, then
 /// every thread folds `sg_idx` the same way -- the exact bit-exact match
 /// for `proxima_tensor::spec::append_moe_ffn`'s own `mask * expert_index ->
@@ -1453,6 +1457,7 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
         expert_count,
         top_k,
         stacked,
+        weighting,
         ..
     } = &resolved.kind
     else {
@@ -1465,6 +1470,9 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
     let expert_count = *expert_count;
     let top_k = *top_k;
     let stacked = stacked.is_some();
+    let selected_score = weighting.reads_weight_scores();
+    // `weight_scores` takes the slot after `scores`, which shifts every later slot by one
+    let slot_shift = usize::from(selected_score);
     // `crate::metal::encode_op`'s own `MoeTopK` arm binds exactly
     // `2 * top_k` extra buffers -- `routes[1..top_k]` (`top_k - 1` entries),
     // every `weights` entry (`top_k` entries), then `weight_total` (1) --
@@ -1476,17 +1484,24 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
     let mut source = String::new();
     preamble(&mut source);
     source.push_str("struct Uniforms { long unused; };\n\n");
+    let weight_scores_parameter = if selected_score {
+        "device const float* weight_scores [[buffer(1)]], "
+    } else {
+        ""
+    };
     source.push_str(&format!(
-        "kernel void {entry}(device const float* scores [[buffer(0)]], device float* route0 [[buffer(1)]], constant Uniforms& u [[buffer(2)]],\n"
+        "kernel void {entry}(device const float* scores [[buffer(0)]], {weight_scores_parameter}device float* route0 [[buffer({})]], constant Uniforms& u [[buffer({})]],\n",
+        1 + slot_shift,
+        2 + slot_shift,
     ));
     for index in 0..extra_count {
-        let buffer_index = 3 + index;
+        let buffer_index = 3 + slot_shift + index as usize;
         source.push_str(&format!(
             "    device float* extra{index} [[buffer({buffer_index})]],\n"
         ));
     }
     if stacked {
-        let first = 3 + extra_count;
+        let first = 3 + slot_shift + extra_count as usize;
         source.push_str(&format!(
             "    device float* stacked_routes [[buffer({first})]],\n    device float* stacked_weights [[buffer({})]],\n",
             first + 1
@@ -1511,12 +1526,26 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
     } else {
         ""
     };
+    // the sigmoid weight is the unbiased score summed over the lanes tied at the round's maximum,
+    // so it rides the winner-index exchange: one extra simd_sum, published before the same barrier
+    let (weight_declarations, weight_publish, weight_expression) = if selected_score {
+        (
+            "\tthreadgroup float sg_weight[num_simdgroups];\n\
+             \tconst float weight_score = (tid < expert_count) ? weight_scores[token * expert_count + tid] : 0.0;\n",
+            "\t\tconst float sg_weight_sum = simd_sum((masked == max_value) ? weight_score : 0.0);\n\
+             \t\tif (sg_lane == 0) { sg_weight[sg_id] = sg_weight_sum; }\n",
+            "float weight = 0.0; for (uint i = 0; i < num_simdgroups; i++) { weight += sg_weight[i]; }",
+        )
+    } else {
+        ("", "", "const float weight = exp(max_value - max0);")
+    };
     source.push_str(&format!(
         "    constexpr uint expert_count = {expert_count}u; constexpr uint top_k = {top_k}u; \
          constexpr uint num_simdgroups = {num_simdgroups}u;\n\
          \t(void)u;\n\
          \tthreadgroup float sg_max[num_simdgroups];\n\
          \tthreadgroup int sg_idx[num_simdgroups];\n\
+         {weight_declarations}\
          \tfloat masked = (tid < expert_count) ? scores[token * expert_count + tid] : -INFINITY;\n\
          \tfloat max0 = 0.0;\n\
          \tfloat weight_total = 0.0;\n\
@@ -1526,15 +1555,16 @@ pub(super) fn render_moe_topk(resolved: &BoundOp, entry: &str) -> Result<String,
          \t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
          \t\tfloat max_value = sg_max[0];\n\
          \t\tfor (uint i = 1; i < num_simdgroups; i++) {{ max_value = max(max_value, sg_max[i]); }}\n\
-         \t\tconst int candidate = (masked == max_value) ? int(tid) : -1;\n\
+         \t\tconst int candidate = (masked == max_value) ? int(tid) : 0;\n\
          \t\tconst int sg_candidate = simd_max(candidate);\n\
          \t\tif (sg_lane == 0) {{ sg_idx[sg_id] = sg_candidate; }}\n\
+         {weight_publish}\
          \t\tthreadgroup_barrier(mem_flags::mem_threadgroup);\n\
          \t\tint winner_index = sg_idx[0];\n\
          \t\tfor (uint i = 1; i < num_simdgroups; i++) {{ winner_index = max(winner_index, sg_idx[i]); }}\n\
          \t\tif (round == 0) {{ max0 = max_value; }}\n\
          \t\tif (tid == 0) {{\n\
-         \t\t\tconst float weight = exp(max_value - max0);\n\
+         \t\t\t{weight_expression}\n\
          \t\t\tweight_total += weight;\n\
          \t\t\tif (round == 0) {{\n\
          \t\t\t\troute0[token] = float(winner_index);\n\

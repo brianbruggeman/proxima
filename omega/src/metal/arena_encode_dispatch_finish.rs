@@ -7753,6 +7753,7 @@ mod extra_output_slot_tests {
                     },
                     None,
                 )],
+                weighting: proxima_tensor::MoeWeighting::ShiftedExponential,
                 expert_count: EXPERT_COUNT,
                 top_k: TOP_K,
                 routes: nodes(100, TOP_K),

@@ -870,9 +870,67 @@ pub(super) struct MoeRound {
     pub(super) mask: NodeId,
     pub(super) candidate: NodeId,
     pub(super) max_selection: NodeId,
+    /// The weight chain's inner node: the `max_r - max_0` shift for
+    /// [`MoeWeighting::ShiftedExponential`], the `mask * scores` product for
+    /// [`MoeWeighting::SelectedScore`].
     pub(super) shifted: NodeId,
     pub(super) route: NodeId,
     pub(super) weight: NodeId,
+    pub(super) weighting: MoeWeighting,
+    /// The unbiased gating scores [`MoeWeighting::SelectedScore`] sums at the selected positions.
+    pub(super) weight_scores: Option<NodeId>,
+}
+
+#[cfg(feature = "moe-topk-fusion")]
+fn moe_match_shifted_weight(
+    program: &[Op],
+    consumers: &BTreeMap<NodeId, Vec<NodeId>>,
+    max_selection: NodeId,
+    anchor: NodeId,
+) -> Option<(NodeId, NodeId)> {
+    let shifted = consumers
+        .get(&max_selection)?
+        .iter()
+        .copied()
+        .find(|candidate| {
+            moe_binary_elementwise(program, *candidate, ScalarOp::Subtract)
+                == Some([max_selection, anchor])
+        })?;
+    let weight = consumers.get(&shifted)?.iter().copied().find(|candidate| {
+        matches!(
+            program.get(candidate.0 as usize),
+            Some(Op::Elementwise { body: ScalarOp::Exponential, operands, .. })
+                if operands.len() == 1 && operands[0].0 == shifted
+        )
+    })?;
+    Some((shifted, weight))
+}
+
+/// `append_moe_ffn`'s sigmoid weight: `reduce(Add, mask * scores)`, returning the product, the reduce
+/// and the `scores` node (the mask's other multiplicand, never the expert index).
+#[cfg(feature = "moe-topk-fusion")]
+fn moe_match_selected_weight(
+    program: &[Op],
+    consumers: &BTreeMap<NodeId, Vec<NodeId>>,
+    mask: NodeId,
+    expert_index: NodeId,
+) -> Option<(NodeId, NodeId, NodeId)> {
+    consumers.get(&mask)?.iter().copied().find_map(|product| {
+        let [first, scores] = moe_binary_elementwise(program, product, ScalarOp::Multiply)?;
+        if first != mask || scores == expert_index {
+            return None;
+        }
+        let weight = consumers.get(&product)?.iter().copied().find(|candidate| {
+            moe_reduce_operand(
+                program,
+                *candidate,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                ReduceInit::Zero,
+            ) == Some(product)
+        })?;
+        Some((product, weight, scores))
+    })
 }
 
 /// Matches one round of [`crate::spec::append_moe_ffn`]'s own
@@ -896,6 +954,7 @@ pub(super) fn moe_match_round(
     max_selection_0: Option<NodeId>,
     expert_index: NodeId,
     route_dtype: DType,
+    weighting: Option<MoeWeighting>,
     consumers: &BTreeMap<NodeId, Vec<NodeId>>,
 ) -> Option<MoeRound> {
     let max_selection = consumers
@@ -933,21 +992,22 @@ pub(super) fn moe_match_round(
         ) == Some(candidate)
     })?;
     let anchor = max_selection_0.unwrap_or(max_selection);
-    let shifted = consumers
-        .get(&max_selection)?
-        .iter()
-        .copied()
-        .find(|candidate| {
-            moe_binary_elementwise(program, *candidate, ScalarOp::Subtract)
-                == Some([max_selection, anchor])
-        })?;
-    let weight = consumers.get(&shifted)?.iter().copied().find(|candidate| {
-        matches!(
-            program.get(candidate.0 as usize),
-            Some(Op::Elementwise { body: ScalarOp::Exponential, operands, .. })
-                if operands.len() == 1 && operands[0].0 == shifted
+    let shifted_weight = || {
+        moe_match_shifted_weight(program, consumers, max_selection, anchor)
+            .map(|(shifted, weight)| (shifted, weight, MoeWeighting::ShiftedExponential, None))
+    };
+    let selected_weight = || {
+        moe_match_selected_weight(program, consumers, mask, expert_index).map(
+            |(product, weight, scores)| {
+                (product, weight, MoeWeighting::SelectedScore, Some(scores))
+            },
         )
-    })?;
+    };
+    let (shifted, weight, weighting, weight_scores) = match weighting {
+        Some(MoeWeighting::ShiftedExponential) => shifted_weight()?,
+        Some(MoeWeighting::SelectedScore) => selected_weight()?,
+        None => shifted_weight().or_else(selected_weight)?,
+    };
     Some(MoeRound {
         mask,
         candidate,
@@ -955,6 +1015,8 @@ pub(super) fn moe_match_round(
         shifted,
         route,
         weight,
+        weighting,
+        weight_scores,
     })
 }
 
@@ -971,6 +1033,8 @@ pub(super) struct MoeTopKMatch {
     pub(super) weights: Vec<NodeId>,
     pub(super) weight_total: NodeId,
     pub(super) stacked: Option<(NodeId, NodeId)>,
+    pub(super) weighting: MoeWeighting,
+    pub(super) weight_scores: Option<NodeId>,
     pub(super) absorbed: BTreeSet<NodeId>,
 }
 
@@ -1112,6 +1176,8 @@ pub(super) fn match_moe_topk(
     let mut selection_scores = scores;
     let mut max_selection_0_node: Option<NodeId> = None;
     let mut weight_total_running: Option<NodeId> = None;
+    let mut weighting: Option<MoeWeighting> = None;
+    let mut weight_scores: Option<NodeId> = None;
     let mut round: usize = 0;
     const ROUND_SANITY_CAP: usize = 64;
     loop {
@@ -1121,6 +1187,7 @@ pub(super) fn match_moe_topk(
             max_selection_0_node,
             expert_index,
             route_dtype,
+            weighting,
             consumers,
         )?;
         if round == 0 {
@@ -1128,6 +1195,10 @@ pub(super) fn match_moe_topk(
                 return None;
             }
             max_selection_0_node = Some(matched.max_selection);
+            weighting = Some(matched.weighting);
+            weight_scores = matched.weight_scores;
+        } else if matched.weight_scores != weight_scores {
+            return None;
         }
         absorbed.insert(matched.mask);
         absorbed.insert(matched.candidate);
@@ -1210,6 +1281,8 @@ pub(super) fn match_moe_topk(
         weights,
         weight_total,
         stacked,
+        weighting: weighting?,
+        weight_scores,
         absorbed,
     })
 }
@@ -1259,14 +1332,25 @@ pub(super) fn moe_topk_candidates(
         {
             continue;
         }
-        let Some((_, layout, lookup)) = resolved
-            .iter()
-            .flat_map(|bound| bound.operands().iter())
-            .find(|(node, _, _)| *node == found.scores)
-        else {
+        if shapes.of(found.scores) != shapes.of(found.weight_scores.unwrap_or(found.scores)) {
             continue;
-        };
-        if lookup.is_some() || layout.strides.iter().any(|stride| *stride < 0) {
+        }
+        let sources = core::iter::once(found.scores).chain(found.weight_scores);
+        let mut operands = Vec::with_capacity(2);
+        for source in sources {
+            let Some((_, layout, lookup)) = resolved
+                .iter()
+                .flat_map(|bound| bound.operands().iter())
+                .find(|(node, _, _)| *node == source)
+            else {
+                break;
+            };
+            if lookup.is_some() || layout.strides.iter().any(|stride| *stride < 0) {
+                break;
+            }
+            operands.push((source, layout.clone(), None));
+        }
+        if operands.len() != 1 + usize::from(found.weight_scores.is_some()) {
             continue;
         }
         let top_k = found.routes.len() as u64;
@@ -1275,7 +1359,8 @@ pub(super) fn moe_topk_candidates(
             dtype: found.route_dtype,
             extents: shapes.of(route0).to_vec(),
             kind: BoundOpKind::MoeTopK {
-                operands: vec![(found.scores, layout.clone(), None)],
+                operands,
+                weighting: found.weighting,
                 expert_count: found.expert_count,
                 top_k,
                 routes: found.routes.clone(),
