@@ -817,3 +817,7 @@ required-features = ["cuda-driver", "cpu"]
 name = "q4_0_matvec"
 harness = false
 required-features = ["metal"]
+
+[[example]]
+name = "q8_0_flat_gate"
+required-features = ["metal", "instrument"]
