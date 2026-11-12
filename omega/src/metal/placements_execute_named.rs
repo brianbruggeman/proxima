@@ -782,6 +782,8 @@ pub(super) fn execute_plan_with_placements_inner(
             counter!(BLOCK_UPLOAD_CALLS, 1);
             counter!(BLOCK_OFFERED_BYTES, block_byte_len(block) as u64);
         }
+        #[cfg(feature = "instrument")]
+        let block_upload_started = read_ticks();
         let buffer = match block {
             QuantizedBlock::Float32(data) => upload_block(
                 &device,
@@ -804,6 +806,8 @@ pub(super) fn execute_plan_with_placements_inner(
                 (upload_strided_runs(&device, block, resident_name)?, 0)
             }
         };
+        #[cfg(feature = "instrument")]
+        counter!(BLOCK_UPLOAD_TICKS, elapsed_ticks(block_upload_started));
         device_buffers.insert(*node, buffer);
     }
 
