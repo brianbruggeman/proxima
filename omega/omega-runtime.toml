@@ -137,6 +137,17 @@ route_segments = 2
 # 46.988 ms for "segments" on a 25 token prompt and 246.016 against 246.943 ms
 # on a 1000 token prompt.
 route_mode = "compacted"
+# Most 64-row tiles of output features an op may have and still take the
+# compacted route; an op with more takes the segment scan. The compacted
+# route's locate walk runs once per threadgroup and an op with more row tiles
+# launches more threadgroups for the same weight bytes. flint-UD-Q4_K_XL,
+# M1 Max, 84-token prefill, mean gpu us per op from the dispatch profile
+# (PROXNUM-82), compacted / segments: Q5_K ffn_down_exps (2048 features, 32
+# row tiles) 2305 / 1748; Iq4_XS ffn_down_exps 580 / 497; Q5_K ffn_gate/up_exps
+# (512 features, 8 row tiles) 1237 / 1390; Iq4_XS ffn_gate/up_exps 461 / 567.
+# 16 sits between the two measured shapes; no op of a width between them was
+# measured.
+compacted_max_row_tiles = 16
 # Adjacent route entries each thread of a threadgroup owns in one scan step.
 # A step covers `block_threads * scan_ahead` entries for one barrier pair: the
 # loads are independent, so one memory round trip serves them all, and the

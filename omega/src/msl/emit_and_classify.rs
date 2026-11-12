@@ -3283,6 +3283,10 @@ pub(super) struct ExpertGather {
     /// The route index folds over the token axes into one flat stride, so the
     /// scan reads a route entry by flat token index with no decomposition.
     pub(super) route_flat: bool,
+    /// The op takes the compacted route (a prepass ranks the route, the GEMM
+    /// locates its tile) rather than the per-threadgroup segment scan; see
+    /// `grouped_route_is_compacted`.
+    pub(super) compacted: bool,
 }
 
 /// The additional narrowing [`push_tiled_gemm_body`]'s `simdgroup_matrix`
@@ -3471,6 +3475,14 @@ pub(super) fn classify_tiled_gemm(
                 .is_some_and(|lookup| {
                     axes_fold_contiguously(&token_axes, &resolved.extents, &lookup.index_layout)
                 });
+            #[cfg(feature = "metal-grouped-gemm")]
+            {
+                let feature_extent: u64 = feature_axes
+                    .iter()
+                    .map(|&axis| resolved.extents[axis as usize])
+                    .product();
+                gather.compacted = grouped_route_is_compacted(gather.route_flat, feature_extent);
+            }
             if other_layout.stride(reduce_dim as u16) != 1 {
                 return Err(TiledGemmRejection::GatheredActivationNotUnitStride);
             }
@@ -3538,6 +3550,7 @@ fn classify_expert_gather(
     Ok(Some(ExpertGather {
         slot,
         route_flat: true,
+        compacted: false,
     }))
 }
 

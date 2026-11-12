@@ -400,6 +400,13 @@ fn emit_sizing_consts() {
                 resolve_int(&root, "grouped_gemm", "prepass_entries"),
             ),
         );
+        let compacted_max_row_tiles = require_nonzero(
+            "grouped_gemm.compacted_max_row_tiles",
+            resolve_int(&root, "grouped_gemm", "compacted_max_row_tiles"),
+        );
+        out.push_str(&format!(
+            "pub const GROUPED_GEMM_COMPACTED_MAX_ROW_TILES: u64 = {compacted_max_row_tiles};\n"
+        ));
         let route_mode = resolve_str(&root, "grouped_gemm", "route_mode");
         let route_compacted = match route_mode.as_str() {
             "segments" => false,
