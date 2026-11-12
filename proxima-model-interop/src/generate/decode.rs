@@ -1,6 +1,8 @@
 use core::future::Future;
 use core::ops::ControlFlow;
 use core::task::{Context, Poll, Waker};
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+use std::thread;
 
 use proxima_core::kv_carry::{Appended, Extent, KvCarry, KvCarryError, KvCommand, KvEvent, RowPair};
 use proxima_core::{ServingFsmError, ServingState};
@@ -6119,7 +6121,7 @@ did not hold every cached position)",
                         #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
                         debug!(
                             batch_index = batch_index as u64,
-                            thread = ?std::thread::current().id(),
+                            thread = ?thread::current().id(),
                             prepare_ms = ticks_to_nanos(metal_stage.prepare_ticks) as f64 / 1e6,
                             emit_ms = ticks_to_nanos(metal_stage.emit_ticks) as f64 / 1e6,
                             pipeline_lookup_ms =
@@ -6150,7 +6152,7 @@ did not hold every cached position)",
                         debug!(
                             step = step as u64,
                             cached_len = cached_len as u64,
-                            thread = ?std::thread::current().id(),
+                            thread = ?thread::current().id(),
                             evaluate_ms = ticks_to_nanos(evaluate_ticks) as f64 / 1e6,
                             evaluate_start_raw_s =
                                 ticks_to_nanos(evaluate_started.as_raw()) as f64 / 1e9,
