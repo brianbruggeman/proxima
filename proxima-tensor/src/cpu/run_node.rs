@@ -1282,6 +1282,7 @@ pub(super) fn run_moe_topk<B: Deref<Target = [f32]> + Sync>(
 ) -> Result<(), TensorError> {
     let BoundOpKind::MoeTopK {
         operands,
+        weighting,
         expert_count,
         top_k,
         stacked,
@@ -1293,23 +1294,31 @@ pub(super) fn run_moe_topk<B: Deref<Target = [f32]> + Sync>(
             reason: "moe top-k runner received another bound operation",
         });
     };
-    let [(scores_node, _, lookup)] = operands.as_slice() else {
-        return Err(TensorError::NotLowerable {
-            node: resolved.node,
-            reason: "moe top-k requires exactly one operand",
-        });
+    let (scores_node, weight_scores_node) = match (weighting, operands.as_slice()) {
+        (MoeWeighting::ShiftedExponential, [(scores, _, None)]) => (*scores, None),
+        (MoeWeighting::SelectedScore, [(scores, _, None), (weight_scores, _, None)]) => {
+            (*scores, Some(*weight_scores))
+        }
+        _ => {
+            return Err(TensorError::NotLowerable {
+                node: resolved.node,
+                reason: "moe top-k requires one gather-free scores operand, plus the weight scores operand for selected-score weighting",
+            });
+        }
     };
-    if lookup.is_some() {
-        return Err(TensorError::NotLowerable {
-            node: resolved.node,
-            reason: "moe top-k requires a gather-free scores operand",
-        });
-    }
-    let scores = buffer_of(buffers, *scores_node)?;
+    let scores = buffer_of(buffers, scores_node)?;
+    let weight_scores = weight_scores_node
+        .map(|node| buffer_of(buffers, node))
+        .transpose()?;
     let expert_count = *expert_count as usize;
     let top_k = *top_k as usize;
     let token_count = output.len();
-    if token_count == 0 || scores.len() != token_count * expert_count {
+    if token_count == 0
+        || scores.len() != token_count * expert_count
+        || weight_scores
+            .as_ref()
+            .is_some_and(|weight_scores| weight_scores.len() != scores.len())
+    {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
             reason: "moe top-k scores are not one row of expert_count values per output token",
@@ -1342,7 +1351,14 @@ pub(super) fn run_moe_topk<B: Deref<Target = [f32]> + Sync>(
             } else {
                 extra[route_block(round) + token] = best_index as f32;
             }
-            let weight = (best_value - max_selection_0).exp();
+            let weight = match weight_scores.as_ref() {
+                None => (best_value - max_selection_0).exp(),
+                Some(weight_scores) => live
+                    .iter()
+                    .zip(&weight_scores[token * expert_count..][..expert_count])
+                    .map(|(value, score)| if *value == best_value { *score } else { 0.0 })
+                    .sum(),
+            };
             extra[weight_block(round) + token] = weight;
             weight_total += weight;
             if stacked.is_some() {

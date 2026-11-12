@@ -134,6 +134,28 @@ pub enum CachedAttentionArithmetic {
     },
 }
 
+/// What a [`BoundOpKind::MoeTopK`] writes as each round's weight. Part of the bound op, so the
+/// kernel that runs it is keyed on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MoeWeighting {
+    /// `exp(max_r - max_0)` over the one scores operand: the softmax restricted to the selected
+    /// experts ([`crate::spec::ExpertGatingFunc::Softmax`]).
+    #[default]
+    ShiftedExponential,
+    /// The sum of the second operand over the positions the round's selection tied at its maximum:
+    /// the gating score of the chosen expert, unbiased by the selection score the first operand
+    /// carries ([`crate::spec::ExpertGatingFunc::Sigmoid`]).
+    SelectedScore,
+}
+
+impl MoeWeighting {
+    /// Whether the op reads a second `[tokens, expert_count]` operand, the scores it sums.
+    #[must_use]
+    pub const fn reads_weight_scores(self) -> bool {
+        matches!(self, Self::SelectedScore)
+    }
+}
+
 /// One tensor op with its addressing resolved: which buffers to read, at
 /// what layout, combined by which scalar op — and, for a reduce, how the
 /// reduction is shaped. Carries only what an executor needs, nothing about
@@ -331,7 +353,10 @@ pub enum BoundOpKind {
     /// these 17 values is consumed entirely within the SAME forward
     /// evaluation that produced it.
     MoeTopK {
+        /// `[selection_scores]` for [`MoeWeighting::ShiftedExponential`]; `[selection_scores,
+        /// weight_scores]` for [`MoeWeighting::SelectedScore`], both `[tokens, expert_count]`.
         operands: BoundOperands,
+        weighting: MoeWeighting,
         expert_count: u64,
         top_k: u64,
         routes: Vec<NodeId>,

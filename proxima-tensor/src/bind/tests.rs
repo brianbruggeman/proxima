@@ -6635,6 +6635,7 @@ mod moe_routing_census {
         expert_w_gate: NodeId,
         expert_w_up: NodeId,
         expert_w_down: NodeId,
+        expert_bias: Option<NodeId>,
         output: NodeId,
         selected: Vec<NodeId>,
         weights: Vec<NodeId>,
@@ -6647,6 +6648,15 @@ mod moe_routing_census {
 
     #[cfg(feature = "moe-topk-fusion")]
     fn build_routing_program_with(strategy: MoeProjectionStrategy) -> RoutingProgram {
+        build_routing_program_gated(strategy, ExpertGatingFunc::Softmax, false)
+    }
+
+    #[cfg(feature = "moe-topk-fusion")]
+    fn build_routing_program_gated(
+        strategy: MoeProjectionStrategy,
+        gating: ExpertGatingFunc,
+        with_bias: bool,
+    ) -> RoutingProgram {
         let mut program = Vec::new();
         let x = input_leaf(
             &mut program,
@@ -6691,6 +6701,14 @@ mod moe_routing_census {
             "expert_w_down",
         );
         let ones = scalar_constant(&mut program, 1.0);
+        let expert_bias = with_bias.then(|| {
+            input_leaf(
+                &mut program,
+                DType::FLOAT32,
+                alloc::vec![Extent::Static(EXPERT_COUNT)],
+                "expert_bias",
+            )
+        });
         let moe_spec = MoeFfnSpec {
             router: MoeRouter::Logits(logits),
             expert_w_gate,
@@ -6699,8 +6717,8 @@ mod moe_routing_census {
             expert_count: EXPERT_COUNT,
             expert_used_count: EXPERT_USED_COUNT,
             ones,
-            gating: ExpertGatingFunc::Softmax,
-            expert_bias: None,
+            gating,
+            expert_bias,
             expert_scale: None,
             activation: Activation::Silu,
             strategy,
@@ -6714,6 +6732,7 @@ mod moe_routing_census {
             expert_w_gate,
             expert_w_up,
             expert_w_down,
+            expert_bias,
             output,
             selected: site.selected,
             weights: site.weights,
@@ -6944,6 +6963,106 @@ mod moe_routing_census {
                 "case {case}: unfused weight_total must match the independent reference \
                  within 1e-6"
             );
+        }
+    }
+
+    /// A sigmoid-gated router with the selection bias (the flint shape: `expert_gating_func = 2`
+    /// plus `exp_probs_b`) selects on `sigmoid(logit) + bias` but weighs each chosen expert by the
+    /// UNBIASED `sigmoid(logit)`. The fusion must fire on it as `MoeWeighting::SelectedScore` and
+    /// write the exact routes, weights, weight total and layer output the unfused chain computes,
+    /// over random logits with a nonzero bias and over exact selection-score ties.
+    #[cfg(feature = "moe-topk-fusion")]
+    #[test]
+    fn fused_sigmoid_biased_routing_matches_unfused_over_random_scores_and_exact_ties() {
+        for strategy in [MoeProjectionStrategy::PerRoute, MoeProjectionStrategy::Stacked] {
+            let built = build_routing_program_gated(strategy, ExpertGatingFunc::Sigmoid, true);
+            let bias_node = built.expert_bias.expect("the biased program declares its bias leaf");
+            let shapes = shape::infer(&built.program, &[1]).expect("routing program infers");
+            let mut outputs = alloc::vec![built.output];
+            outputs.extend(built.selected.iter().copied());
+            outputs.extend(built.weights.iter().copied());
+
+            let unfused = bind_plain(&built.program, &shapes, &outputs, NumericPolicy::bit_exact())
+                .expect("unfused sigmoid routing program binds");
+            let fused = bind_with_fusion(
+                &built.program,
+                &shapes,
+                &outputs,
+                true,
+                NumericPolicy::bit_exact(),
+            )
+            .expect("fused sigmoid routing program binds");
+
+            let fused_weightings: Vec<MoeWeighting> = fused
+                .iter()
+                .filter_map(|bound| match &bound.kind {
+                    BoundOpKind::MoeTopK { weighting, .. } => Some(*weighting),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                fused_weightings,
+                alloc::vec![MoeWeighting::SelectedScore],
+                "{strategy:?}: the sigmoid+bias routing chain must fuse into one selected-score MoeTopK, got kinds {:?}",
+                fused.iter().map(|bound| bound.kind.name()).collect::<Vec<_>>()
+            );
+            assert!(
+                unfused.len() - fused.len() >= 30,
+                "{strategy:?}: fusing the {EXPERT_USED_COUNT}-round sigmoid chain must remove most of its bound ops, unfused {} fused {}",
+                unfused.len(),
+                fused.len()
+            );
+
+            let weight_data = alloc::vec![0.0_f32; EXPERT_COUNT as usize * EMBEDDING as usize * FEED_FORWARD as usize];
+            let x_data = alloc::vec![0.1_f32; EMBEDDING as usize];
+            let mut lcg = crate::test_support::Lcg(31);
+            let mut cases: Vec<(Vec<f32>, Vec<f32>)> = (0..100)
+                .map(|_| {
+                    let logits = (0..EXPERT_COUNT as usize)
+                        .map(|_| lcg.next_unit() * 8.0 - 4.0)
+                        .collect();
+                    let bias = (0..EXPERT_COUNT as usize)
+                        .map(|_| lcg.next_unit() * 0.5)
+                        .collect();
+                    (logits, bias)
+                })
+                .collect();
+            let ramp_logits = (0..EXPERT_COUNT as usize)
+                .map(|index| index as f32 * 0.01 - 1.0)
+                .collect::<Vec<f32>>();
+            let mut top_tie_logits = ramp_logits.clone();
+            top_tie_logits[200] = top_tie_logits[12];
+            let mut top_tie_bias = alloc::vec![0.0_f32; EXPERT_COUNT as usize];
+            top_tie_bias[12] = 1.0;
+            top_tie_bias[200] = 1.0;
+            cases.push((top_tie_logits, top_tie_bias));
+            let mut later_tie_logits = ramp_logits;
+            later_tie_logits[220] = later_tie_logits[40];
+            let mut later_tie_bias = alloc::vec![0.0_f32; EXPERT_COUNT as usize];
+            later_tie_bias[5] = 2.0;
+            later_tie_bias[40] = 1.0;
+            later_tie_bias[220] = 1.0;
+            cases.push((later_tie_logits, later_tie_bias));
+
+            for (case, (logits, bias)) in cases.into_iter().enumerate() {
+                let inputs = alloc::vec![
+                    (built.x, x_data.clone()),
+                    (built.logits, logits),
+                    (bias_node, bias),
+                    (built.expert_w_gate, weight_data.clone()),
+                    (built.expert_w_up, weight_data.clone()),
+                    (built.expert_w_down, weight_data.clone()),
+                ];
+                let unfused_buffers = run_resolved(built.program.len(), &unfused, inputs.clone());
+                let fused_buffers = run_resolved(built.program.len(), &fused, inputs);
+                for node in outputs.iter() {
+                    assert_eq!(
+                        unfused_buffers[node.0 as usize], fused_buffers[node.0 as usize],
+                        "{strategy:?} case {case}: node {} must hold the same values fused and unfused",
+                        node.0
+                    );
+                }
+            }
         }
     }
 

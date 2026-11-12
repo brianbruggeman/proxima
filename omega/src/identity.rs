@@ -795,10 +795,12 @@ mod gated {
                 expert_count,
                 top_k,
                 stacked,
+                weighting,
                 ..
             } => format!(
-                "{prefix}_moe_topk_e{expert_count}_k{top_k}{}",
-                if stacked.is_some() { "_stacked" } else { "" }
+                "{prefix}_moe_topk_e{expert_count}_k{top_k}{}{}",
+                if stacked.is_some() { "_stacked" } else { "" },
+                if weighting.reads_weight_scores() { "_selected" } else { "" }
             ),
             BoundOpKind::TopFractionSelect {
                 rows,

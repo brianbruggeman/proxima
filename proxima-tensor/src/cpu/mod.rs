@@ -186,7 +186,7 @@ use proxima_gguf::quant::{
 };
 
 use crate::bind::{
-    self, BoundOp, BoundOpKind, ComposedBody, ReadyBatch, StepArg, block_node_ids,
+    self, BoundOp, BoundOpKind, ComposedBody, MoeWeighting, ReadyBatch, StepArg, block_node_ids,
     dead_resolved_nodes, index_node_ids, node_retirement, push_indices_node,
 };
 #[cfg(feature = "config")]
