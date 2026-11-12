@@ -2845,6 +2845,9 @@ pub enum PackedRowBlockRejection {
     /// A level-set codec has a rendered single-row matvec only; an op that folds more than one
     /// token row takes the generic cooperative or tiled path.
     MultiRowBodyMissing,
+    /// A level-set codec has a rendered row-blocked body only for a plain-product f32 reduce
+    /// (`level_codec_row_body_rendered`); any other op runs on the cooperative kernel.
+    LevelBodyNotRendered,
     /// `PROXIMA_PACKED_ROW_DISABLE` names the codec: the same-binary A/B control that keeps it on
     /// the generic cooperative kernel.
     RowBlockSwitchedOff,
@@ -2892,10 +2895,23 @@ pub(super) fn classify_packed_row_block(
     if matches!(block.codec, Codec::Levels(_)) && packed_row_block_token_total(&block, &resolved.extents) > 1 {
         return Err(PackedRowBlockRejection::MultiRowBodyMissing);
     }
+    if matches!(block.codec, Codec::Levels(_)) && !level_row_body_rendered(resolved, &block) {
+        return Err(PackedRowBlockRejection::LevelBodyNotRendered);
+    }
     if packed_row_codec_disabled(block.codec) {
         return Err(PackedRowBlockRejection::RowBlockSwitchedOff);
     }
     Ok(block)
+}
+
+fn level_row_body_rendered(resolved: &BoundOp, block: &PackedRowBlock) -> bool {
+    let BoundOpKind::Reduce { reduce_op, .. } = &resolved.kind else {
+        return false;
+    };
+    level_codec_row_body_rendered(
+        is_plain_product_reduce(resolved, *reduce_op, block.weight, block.other),
+        resolved.dtype == DType::FLOAT32,
+    )
 }
 
 /// The codec table of the row-blocked packed kernel: `Some(n)` when its lane

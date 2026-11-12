@@ -26,17 +26,45 @@ const EXPERTS: usize = 16;
 const ROWS: usize = 96;
 const RELATIVE_TOLERANCE: f64 = 1.0e-6;
 
+/// What the reduce folds. Only `PlainProduct` at f32 has a rendered row-blocked body; the others must decline it.
+#[derive(Clone, Copy, PartialEq)]
+enum Variant {
+    PlainProduct,
+    /// the same product reduced at half precision
+    Float16,
+    /// the product negated before the reduce, so the fused element body is not a plain product
+    NegatedProduct,
+}
+
+impl Variant {
+    fn dtype(self) -> DType {
+        if self == Self::Float16 { DType::FLOAT16 } else { DType::FLOAT32 }
+    }
+
+    fn sign(self) -> f64 {
+        if self == Self::NegatedProduct { -1.0 } else { 1.0 }
+    }
+
+    /// half carries ten mantissa bits through the whole fold, f32 rounds only at the end.
+    fn relative_tolerance(self) -> f64 {
+        if self == Self::Float16 { 2.0e-3 } else { RELATIVE_TOLERANCE }
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Case {
     tensor: &'static str,
     per_selected_activation: bool,
     tokens: usize,
+    variant: Variant,
 }
 
-const GATE: Case = Case { tensor: "blk.19.ffn_gate_exps.weight", per_selected_activation: false, tokens: 1 };
-const DOWN: Case = Case { tensor: "blk.19.ffn_down_exps.weight", per_selected_activation: true, tokens: 1 };
-const GATE_BATCH: Case = Case { tensor: "blk.19.ffn_gate_exps.weight", per_selected_activation: false, tokens: 5 };
-const DOWN_BATCH: Case = Case { tensor: "blk.19.ffn_down_exps.weight", per_selected_activation: true, tokens: 5 };
+const GATE: Case = Case { tensor: "blk.19.ffn_gate_exps.weight", per_selected_activation: false, tokens: 1, variant: Variant::PlainProduct };
+const DOWN: Case = Case { tensor: "blk.19.ffn_down_exps.weight", per_selected_activation: true, tokens: 1, variant: Variant::PlainProduct };
+const GATE_BATCH: Case = Case { tensor: "blk.19.ffn_gate_exps.weight", per_selected_activation: false, tokens: 5, variant: Variant::PlainProduct };
+const DOWN_BATCH: Case = Case { tensor: "blk.19.ffn_down_exps.weight", per_selected_activation: true, tokens: 5, variant: Variant::PlainProduct };
+const GATE_HALF: Case = Case { variant: Variant::Float16, ..GATE };
+const GATE_NEGATED: Case = Case { variant: Variant::NegatedProduct, ..GATE };
 
 /// Each token names `SELECTED` distinct consecutive experts starting at a token-dependent offset, the way the
 /// flint level-codec parity fixture routes.
@@ -123,26 +151,39 @@ fn program(reduction: usize, case: &Case) -> (Vec<Op>, NodeId) {
     let weight = input(&mut program, DType::UINT8, &[EXPERTS, ROWS, reduction]);
     let route = input(&mut program, DType::FLOAT32, &[tokens, SELECTED]);
     let (activation, activation_map) = if case.per_selected_activation {
-        (input(&mut program, DType::FLOAT32, &[tokens, SELECTED, reduction]), map::projection(4, &[0, 1, 3]))
+        (input(&mut program, case.variant.dtype(), &[tokens, SELECTED, reduction]), map::projection(4, &[0, 1, 3]))
     } else {
-        (input(&mut program, DType::FLOAT32, &[tokens, reduction]), map::projection(4, &[0, 3]))
+        (input(&mut program, case.variant.dtype(), &[tokens, reduction]), map::projection(4, &[0, 3]))
     };
     let product = append(
         &mut program,
         Op::Elementwise {
-            dtype: DType::FLOAT32,
+            dtype: case.variant.dtype(),
             body: ScalarOp::Multiply,
             operands: vec![(weight, expert_gather_map(route)), (activation, IndexMap::Affine(activation_map))],
             name: None,
         },
     );
+    let reduced_operand = if case.variant == Variant::NegatedProduct {
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: case.variant.dtype(),
+                body: ScalarOp::Negate,
+                operands: vec![(product, IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])))],
+                name: None,
+            },
+        )
+    } else {
+        product
+    };
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
-            dtype: DType::FLOAT32,
+            dtype: case.variant.dtype(),
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
-            operand: product,
+            operand: reduced_operand,
             in_map: IndexMap::Affine(map::projection(4, &[0, 1, 2, 3])),
             out_map: IndexMap::Affine(map::projection(4, &[0, 1, 2])),
             keep: Keep::Reduce,
@@ -182,19 +223,19 @@ fn reference(case: &Case, slab: &Slab, activation: &[f32]) -> Vec<(f64, f64)> {
                 proxima_gguf::quant::iq4_xs::dequantize(&slab.bytes[start..start + slab.row_bytes], &mut values).expect("the gguf dequantizer reads the row");
                 let terms = values.iter().zip(row_activation).map(|(weight, act)| f64::from(*weight) * f64::from(*act));
                 let (sum, magnitude) = terms.fold((0.0f64, 0.0f64), |(sum, magnitude), term| (sum + term, magnitude + term.abs()));
-                reduced.push((sum, magnitude));
+                reduced.push((sum * case.variant.sign(), magnitude));
             }
         }
     }
     reduced
 }
 
-fn out_of_tolerance(got: &[f32], want: &[(f64, f64)], shift: usize) -> usize {
+fn out_of_tolerance(got: &[f32], want: &[(f64, f64)], shift: usize, relative_tolerance: f64) -> usize {
     got.iter()
         .enumerate()
         .filter(|(at, value)| {
             let (reduced, magnitude) = want[(at + shift) % want.len()];
-            (f64::from(**value) - reduced).abs() > RELATIVE_TOLERANCE * magnitude + 1.0e-6
+            (f64::from(**value) - reduced).abs() > relative_tolerance * magnitude + 1.0e-6
         })
         .count()
 }
@@ -204,16 +245,20 @@ fn assert_row_blocked_matches_host_decode(case: &Case) {
     let activation = activation(slab.reduction, case);
     let actual = run(case, &slab, &activation);
     let want = reference(case, &slab, &activation);
-    assert!(
-        actual.kernel_keys.iter().any(|key| key.contains("_cpfB")),
-        "{}: the row-blocked kernel was never selected: {:?}",
+    let row_blocked = actual.kernel_keys.iter().any(|key| key.contains("_cpfB"));
+    assert_eq!(
+        row_blocked,
+        case.variant == Variant::PlainProduct,
+        "{}: row-blocked kernel selection must follow whether the body is rendered: {:?}",
         case.tensor,
         actual.kernel_keys
     );
     assert_eq!(actual.output.len(), want.len(), "{}: one f32 per selected expert and row", case.tensor);
-    let wrong = out_of_tolerance(&actual.output, &want, 0);
+    assert!(actual.output.iter().all(|value| value.is_finite()), "{}: a non-finite output would pass the tolerance comparison vacuously", case.tensor);
+    let tolerance = case.variant.relative_tolerance();
+    let wrong = out_of_tolerance(&actual.output, &want, 0, tolerance);
     assert_eq!(wrong, 0, "{}: {wrong} of {} outputs differ from the host-decoded f64 reduction", case.tensor, want.len());
-    let neighbour = out_of_tolerance(&actual.output, &want, 1);
+    let neighbour = out_of_tolerance(&actual.output, &want, 1, tolerance);
     assert!(neighbour > want.len() * 9 / 10, "{}: control: only {neighbour} outputs left tolerance against the neighbouring row, the check does not discriminate", case.tensor);
 }
 
@@ -235,6 +280,16 @@ fn iq4xs_gate_row_blocked_matvec_matches_the_host_decode_across_tokens() {
 #[test]
 fn iq4xs_down_row_blocked_matvec_matches_the_host_decode_across_tokens() {
     assert_row_blocked_matches_host_decode(&DOWN_BATCH);
+}
+
+#[test]
+fn iq4xs_half_precision_reduce_declines_the_row_blocked_kernel_and_matches_the_host_decode() {
+    assert_row_blocked_matches_host_decode(&GATE_HALF);
+}
+
+#[test]
+fn iq4xs_negated_product_reduce_declines_the_row_blocked_kernel_and_matches_the_host_decode() {
+    assert_row_blocked_matches_host_decode(&GATE_NEGATED);
 }
 
 fn worst_distance(output: &[f32], want: &[(f64, f64)]) -> f64 {
