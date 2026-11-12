@@ -156,6 +156,20 @@ impl MoeWeighting {
     }
 }
 
+/// Whether a two-range cached-attention op has the shape the Metal decode split form serves, apart
+/// from the policy and the row-count knob: one new key per query row, a full-rotary head whose
+/// width is whole float4 lanes. `omega`'s `decode_split_form` and the recognizer's sink acceptance
+/// both ask this one question, so a sink op is never bound where no kernel draws it.
+#[must_use]
+pub const fn decode_split_shape_fits(
+    query_rows: u64,
+    new_key_rows: u64,
+    rotary_dim: u64,
+    head_dim: u64,
+) -> bool {
+    query_rows == new_key_rows && rotary_dim == head_dim && head_dim.is_multiple_of(32)
+}
+
 /// One tensor op with its addressing resolved: which buffers to read, at
 /// what layout, combined by which scalar op — and, for a reduce, how the
 /// reduction is shaped. Carries only what an executor needs, nothing about

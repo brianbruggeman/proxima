@@ -1503,7 +1503,12 @@ pub(super) fn cached_attention_candidates(
             if attention_sink_term.is_some()
                 && !(split_decode_admitted
                     && query_shape[0] == 1
-                    && new_key_shape[0] == 1
+                    && decode_split_shape_fits(
+                        query_shape[0],
+                        new_key_shape[0],
+                        query_shape[3] * 2,
+                        query_shape[3] * 2,
+                    )
                     && cached_key_shape[0] > 0
                     && pass.is_none()
                     && ninth_operand_available)

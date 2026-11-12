@@ -13605,7 +13605,7 @@ mod gemma4_synthetic_parity {
 
     const EMBEDDING: usize = 8;
     const VOCAB: usize = 6;
-    const HEAD_DIM: usize = 4;
+    const HEAD_DIM: usize = 32;
     const PAIRS: usize = HEAD_DIM / 2;
     /// HF gemma4 full/global layers: `rope_type="proportional"`,
     /// `partial_rotary_factor=0.25` -- only the first
@@ -18560,6 +18560,9 @@ mod gemma4_synthetic_parity {
     /// itself.
     #[test]
     fn score_softmax_attend_chain_alone_isolates_the_group_broadcast() {
+        // the hand-written vectors below are four wide, whatever the module's fixture head is
+        const HEAD_DIM: usize = 4;
+        const PAIRS: usize = HEAD_DIM / 2;
         let q_even = alloc::vec![0.05f32, -0.12, 0.08, 0.20];
         let q_odd = alloc::vec![0.03f32, -0.07, 0.11, -0.02];
         let k_even = alloc::vec![-0.04f32, 0.09];
@@ -23797,6 +23800,49 @@ mod attention_sinks {
         )
         .expect("the sink descriptor parses back");
         assert_eq!(restored, sinks, "sinks survive the descriptor round trip");
+    }
+
+    /// A sink fuses only where the decode split kernel can draw it: a head of whole float4
+    /// lanes. The same graph at a four-wide head stays unfused, so no op reaches a renderer
+    /// that would refuse it.
+    #[test]
+    #[cfg(feature = "metal-attn-split-decode")]
+    fn a_sink_layer_fuses_at_a_whole_lane_head_and_declines_a_small_one() {
+        let policy = proxima_numeric::NumericPolicy::llama_relaxed().with_flash_narrowing(true);
+        let mut sink_ops_by_head_dim = Vec::new();
+        for head_dim in [4u32, 32] {
+            let mut model = scheduled(
+                CacheStrategy::Cached,
+                CacheMask::Padded,
+                true,
+                FLINT_QUERY_HEADS,
+                FLINT_KV_HEADS,
+            );
+            for layer in &mut model.layers {
+                layer.attention.head_dim = head_dim;
+                layer.attention.score_scale = AttentionScoreScale::Unscaled;
+            }
+            let program = lowered(&model);
+            let shapes = infer(&program.program, &[1, 5]).expect("the sink program infers");
+            let bound = bind_with_fusion(&program.program, &shapes, &[program.logits], true, policy)
+                .expect("the sink program binds");
+            let sink_ops = bound
+                .iter()
+                .filter(|op| matches!(op.kind, BoundOpKind::CachedAttention { attention_sink: true, .. }))
+                .count();
+            sink_ops_by_head_dim.push((head_dim, sink_ops));
+        }
+        assert_eq!(sink_ops_by_head_dim[0], (4, 0), "a four-wide head has no kernel that draws a sink");
+        assert_eq!(sink_ops_by_head_dim[1], (32, 2), "both layers of a whole-lane head fuse");
+    }
+
+    #[test]
+    fn the_decode_split_shape_predicate_is_the_one_the_recognizer_and_omega_share() {
+        use crate::decode_split_shape_fits;
+        assert!(decode_split_shape_fits(1, 1, 64, 64));
+        assert!(!decode_split_shape_fits(1, 1, 4, 4), "head_dim 4 is not whole float4 lanes of 32");
+        assert!(!decode_split_shape_fits(2, 1, 64, 64), "one new key per query row");
+        assert!(!decode_split_shape_fits(1, 1, 32, 64), "a partial-rotary head has a pass plane");
     }
 
     #[test]
