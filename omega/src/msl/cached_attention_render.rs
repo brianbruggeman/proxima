@@ -215,6 +215,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
         scale,
         cached_lower_inclusive,
         new_upper_inclusive,
+        attention_sink,
         ..
     } = &resolved.kind
     else {
@@ -264,6 +265,16 @@ pub(super) fn render_cached_attention_with_mma_selection(
             found: resolved.kind.name(),
         });
     };
+    #[cfg(feature = "metal-attn-split-decode")]
+    let form_draws_sink = matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. });
+    #[cfg(not(feature = "metal-attn-split-decode"))]
+    let form_draws_sink = false;
+    if *attention_sink && !form_draws_sink {
+        return Err(EmitError::CachedAttentionSinkNotSupported {
+            node: resolved.node,
+            reason: "only the decode split form (one decode row, bound cached range, whole float4 lanes, split-merge policy) draws a sink",
+        });
+    }
     #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
     let has_row_tiled_mma = matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. });
     #[cfg(all(

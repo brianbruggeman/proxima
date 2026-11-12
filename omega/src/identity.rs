@@ -617,6 +617,7 @@ mod gated {
                 scale,
                 cached_lower_inclusive,
                 new_upper_inclusive,
+                attention_sink,
                 ..
             } => {
                 // `operand_count == 9` names a runtime ninth operand, but two
@@ -683,8 +684,9 @@ mod gated {
                 } else {
                     format!("_r{rotary_dim}")
                 };
+                let sink_token = if *attention_sink { "_sk" } else { "" };
                 format!(
-                    "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_x{context_chunks}{cached_bound_token}",
+                    "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_x{context_chunks}{cached_bound_token}{sink_token}",
                     scale.to_bits(),
                     signed_name_part(*cached_lower_inclusive),
                 )
