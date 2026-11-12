@@ -179,12 +179,35 @@ pub fn bind_with_top_fraction(
     numeric_policy: NumericPolicy,
     min_rows: u64,
 ) -> Result<Vec<BoundOp>, TensorError> {
-    let built = bind_with_fusion(
+    bind_with_top_fraction_and_packed_leaves(
         program,
         shapes,
         outputs,
         fuse_cached_attention,
         numeric_policy,
+        min_rows,
+        &BTreeSet::new(),
+    )
+}
+
+/// [`bind_with_top_fraction`] carrying the caller's packed-leaf set, as
+/// [`bind_with_fusion_and_packed_leaves`] does for [`bind_with_fusion`].
+pub fn bind_with_top_fraction_and_packed_leaves(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    fuse_cached_attention: bool,
+    numeric_policy: NumericPolicy,
+    min_rows: u64,
+    packed_leaves: &BTreeSet<NodeId>,
+) -> Result<Vec<BoundOp>, TensorError> {
+    let built = bind_with_fusion_and_packed_leaves(
+        program,
+        shapes,
+        outputs,
+        fuse_cached_attention,
+        numeric_policy,
+        packed_leaves,
     )?;
     apply_top_fraction_fusion(built, program, shapes, outputs, min_rows)
 }
