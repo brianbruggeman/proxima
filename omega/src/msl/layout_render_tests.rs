@@ -219,6 +219,23 @@ fn cached_attention_kv_codec_for_names_no_scalar_format_and_only_the_source_layo
 }
 
 #[test]
+fn cached_attention_kv_codecs_classifier_names_no_format() {
+    let body = function_body(CACHED_ATTENTION_SOURCE, "pub(super) fn cached_attention_kv_codecs(");
+    let format_names = [
+        "Float32", "Float16", "BFloat16", "BFloat8", "Q4_0", "Q8_0", "Bf8E5M2", "Q4K",
+    ];
+
+    let named: alloc::vec::Vec<&str> = ["NumericFormat::", "Codec::"]
+        .into_iter()
+        .flat_map(|prefix| identifiers_after(body, prefix))
+        .filter(|name| format_names.contains(name))
+        .collect();
+
+    assert!(!body.is_empty(), "an empty body scans nothing");
+    assert_eq!(named, alloc::vec::Vec::<&str>::new(), "admission is decided by the layout's description");
+}
+
+#[test]
 fn cached_attention_kv_codec_for_a_respelled_binary32_is_the_plain_buffer_and_a_narrow_layout_is_not() {
     let respelled_f32 = NumericFormat::Scalar(FloatLayout {
         bias_override: Some(FloatLayout::BF32.bias()),

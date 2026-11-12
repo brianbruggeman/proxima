@@ -194,9 +194,9 @@ fn parity_cell(cached_len: u64, head_dim: u32, half_kv: bool) -> f32 {
         }
         let kernel = omega::emit(bound, &packed, policy).expect("the bound attention op emits");
         assert_eq!(
-            kernel.source.contains("device const half* in2"),
+            kernel.source.contains("device const ushort* in2"),
             half_kv,
-            "head_dim {head_dim} cached_len {cached_len}: the cached K plane binds as half exactly when the cache is half"
+            "head_dim {head_dim} cached_len {cached_len}: the cached K plane binds as 16-bit codes exactly when the cache is half"
         );
         assert!(
             kernel.entry.ends_with("_ds"),
@@ -395,7 +395,8 @@ fn card_06_bf16_decode_selects_source_and_declines_mixed_cache_codecs() {
         "selected source is decode split"
     );
     assert!(emitted.source.contains("device const ushort* in2"));
-    assert!(emitted.source.contains("omega_bf16x4_to_float4"));
+    assert!(emitted.source.contains("omega_kv_scalar_"), "the load is rendered from the layout");
+    assert!(!emitted.source.contains("omega_bf16x4_to_float4"), "no format-named helper remains");
     assert!(emitted.source.contains("float4(kr4_new[index])"));
 
     let mixed = [
@@ -486,8 +487,8 @@ fn card_09_bf8_decode_matches_golden_vectors_and_declines_mixed_cache_codecs() {
     );
     assert!(emitted.source.contains("device const uchar* in2"));
     assert!(emitted.source.contains("device const uchar4* kr4_cached"));
-    assert!(emitted.source.contains("omega_bf8x4_to_float4"));
-    assert!(emitted.source.contains("ldexp((float)mantissa, -16)"));
+    assert!(emitted.source.contains("omega_kv_scalar_"), "the load is rendered from the layout");
+    assert!(!emitted.source.contains("omega_bf8x4_to_float4"), "no format-named helper remains");
 
     let mixed = [
         (attention.operands()[2].0, omega::Codec::BFloat8),
@@ -682,6 +683,7 @@ fn block_key_cell(format: NumericFormat, cached_len: u64, head_dim: u32) -> Bloc
 /// block layout read through the same rendered layout helper as K.
 fn block_cell(format: NumericFormat, value_format: NumericFormat, cached_len: u64, head_dim: u32) -> BlockKeyCell {
     let value_is_block = omega::msl::layout_render::readable_block_layout(&value_format).is_some();
+    let key_is_block = omega::msl::layout_render::readable_block_layout(&format).is_some();
     let policy = production_numeric_policy();
     let fixture = gqa_decode_fixture(cached_len, head_dim);
     let output_roots = [fixture.roots[0]];
@@ -696,7 +698,7 @@ fn block_cell(format: NumericFormat, value_format: NumericFormat, cached_len: u6
             step_fraction = step_fraction.max(worst_error_over_block_max(data, &decoded));
             *data = decoded;
             block_named.push((name.clone(), format, packed));
-        } else if value_is_block {
+        } else if value_format != NumericFormat::Float16 {
             let (packed, decoded) = block_round_trip(&value_format, data);
             assert_all_finite(&decoded, "host-decoded V");
             *data = decoded;
@@ -720,16 +722,20 @@ fn block_cell(format: NumericFormat, value_format: NumericFormat, cached_len: u6
         for index in [2, 3] {
             packed.insert(bound.operands()[index].0, format);
         }
-        packed.insert(bound.operands()[6].0, if value_is_block { value_format } else { omega::Codec::Float16 });
-        let kernel = omega::emit(bound, &packed, policy).expect("a block K beside a binary16 or block V emits");
+        packed.insert(bound.operands()[6].0, value_format);
+        let kernel = omega::emit(bound, &packed, policy).expect("a cached K and V in these layouts emit");
         assert_eq!(
             kernel.source.contains("omega_value_block_"),
             value_is_block,
             "the V read goes through the rendered layout helper exactly when V is a block layout"
         );
         assert!(kernel.entry.ends_with("_ds"), "the op must take the decode split form, got {}", kernel.entry);
-        assert!(kernel.source.contains("device const uchar* in2"), "the cached K plane binds as raw blocks");
-        assert!(kernel.source.contains("omega_key_block_"), "the K read goes through the rendered layout helper");
+        if key_is_block {
+            assert!(kernel.source.contains("device const uchar* in2"), "the cached K plane binds as raw blocks");
+            assert!(kernel.source.contains("omega_key_block_"), "the K read goes through the rendered layout helper");
+        } else {
+            assert!(kernel.source.contains("omega_kv_scalar_"), "a scalar cache is read through the rendered layout load");
+        }
     }
 
     let host_blocks = as_named_blocks(&host_named);
@@ -871,6 +877,70 @@ fn cached_attention_decode_split_reads_a_block_v_cache_as_the_host_codec_decodes
         }
     }
     assert_eq!(cells, 48, "4 pairings x 3 head dims x 4 cached lengths");
+}
+
+/// Any scalar layout whose code fills whole bytes is read through `layout_load_msl`: the kernel's
+/// output over the packed cache equals, bit for bit, its output over the host-decoded values as
+/// plain f32, because both feed the same floats through the same accumulation. E4M3FN is a layout
+/// no cache read ever named.
+#[test]
+fn cached_attention_decode_split_reads_any_whole_byte_scalar_layout_bit_exactly() {
+    let formats = [
+        NumericFormat::Float16,
+        NumericFormat::BFloat16,
+        NumericFormat::BFloat8,
+    ];
+    let mut cells = 0_usize;
+    for format in formats {
+        for head_dim in HEAD_DIMS {
+            for cached_len in [33_u64, 199] {
+                let cell = block_cell(format, format, cached_len, head_dim);
+                assert_eq!(
+                    cell.metal_vs_host_decode, 0.0,
+                    "{format:?} head_dim {head_dim} cached_len {cached_len}: the packed read differs in bits from the host-decoded plain read"
+                );
+                assert!(cell.metal_vs_cpu < BLOCK_K_CPU_BOUND, "{format:?}: {}", cell.metal_vs_cpu);
+                cells += 1;
+            }
+        }
+    }
+    assert_eq!(cells, 18, "3 layouts x 3 head dims x 2 cached lengths");
+}
+
+/// E4M3FN is a layout no cache read ever named: the classifier admits it and the kernel renders its
+/// load from the layout. Running it needs the plan layer's by-name packed-block tables
+/// (`proxima-tensor/src/cpu/epilogue.rs`, `omega/src/msl/kernel_types_identity.rs`) widened too, so
+/// this asserts the emitted kernel only.
+#[test]
+fn cached_attention_emits_a_scalar_layout_no_cache_read_ever_named() {
+    let policy = production_numeric_policy();
+    let fixture = gqa_decode_fixture(199, 64);
+    let output_roots = [fixture.roots[0]];
+    let shapes = infer(&fixture.program, &fixture.symbols).expect("the decode program infers");
+    let resolved = bind(&fixture.program, &shapes, &output_roots, policy).expect("the decode program binds");
+    let attention = resolved
+        .iter()
+        .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .expect("the fixture contains a cached attention operation");
+    let e4m3 = NumericFormat::Scalar(proxima_numeric::float_layout::FloatLayout::E4M3FN);
+    let mut packed = omega::PackedOperands::new();
+    for index in [2, 3, 6] {
+        packed.insert(attention.operands()[index].0, e4m3);
+    }
+
+    let kernel = omega::emit(attention, &packed, policy).expect("an 8-bit scalar layout emits");
+
+    assert!(kernel.entry.ends_with("_ds"), "{}", kernel.entry);
+    assert!(kernel.source.contains("device const uchar* in2"), "the cache binds as 8-bit codes");
+    assert!(kernel.source.contains("omega_kv_scalar_"), "the load is rendered from the layout");
+}
+
+#[test]
+fn cached_attention_declines_a_scalar_layout_with_no_flat_byte_address() {
+    let six_bit = NumericFormat::Scalar(proxima_numeric::float_layout::FloatLayout::E3M2);
+
+    assert!(omega::msl::layout_render::readable_scalar_cache(&six_bit).is_none(), "a 6-bit code straddles bytes");
+    assert!(omega::cached_attention_kv_codecs_for(&six_bit, &six_bit).is_err());
 }
 
 #[cfg(all(feature = "instrument", feature = "metal-output-placement"))]

@@ -935,23 +935,23 @@ fn a_float16_cached_kv_makes_the_decode_split_read_half_pointers_for_the_cached_
     for index in [2, 3, 6] {
         assert!(
             half.source
-                .contains(&format!("device const half* in{index} [[buffer({index})]]")),
-            "cached operand {index} must bind as half"
+                .contains(&format!("device const ushort* in{index} [[buffer({index})]]")),
+            "cached operand {index} must bind as 16-bit codes"
         );
     }
     for index in [0, 1, 4, 5, 7, 8] {
         assert!(
             !half
                 .source
-                .contains(&format!("device const half* in{index} [[buffer({index})]]")),
+                .contains(&format!("device const ushort* in{index} [[buffer({index})]]")),
             "operand {index} keeps the op's own element type"
         );
     }
     assert!(half.source.contains("kr4_cached"));
     assert!(half.source.contains("if (cached) { value_row[step][slot]"));
     assert!(
-        !plain.source.contains("device const half*"),
-        "the plain decode split must bind no half pointer"
+        !plain.source.contains("device const ushort*"),
+        "the plain decode split must bind no 16-bit code pointer"
     );
     assert!(plain.source.contains("(cached ? in2 : in4) + kbase"));
 }
