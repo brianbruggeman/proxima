@@ -303,7 +303,7 @@ fn main() {
         Ok(name) => NumericFormat::from_name(name).unwrap_or_else(|| {
             panic!("PROXIMA_KV_CACHE_TYPE={name}: not a NumericFormat name")
         }),
-        Err(_) => NumericFormat::Float32,
+        Err(_) => ServingConfig::default().kv_cache_value_quant,
     };
     let kv_cache_key_type = match std::env::var("PROXIMA_KV_CACHE_KEY_TYPE").as_deref() {
         Ok(name) => NumericFormat::from_name(name).unwrap_or_else(|| {
