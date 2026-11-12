@@ -462,14 +462,16 @@ fn card_10_bf16_row_selects_the_bf16_source_and_declines_mixed_cache_codecs() {
             emitted.entry
         );
         assert!(emitted.source.contains("device const ushort* in2"));
-        assert!(emitted.source.contains("omega_bf16_load_matrix(even_float"));
+        assert!(emitted.source.contains("omega_cache_load_matrix(even_float"));
         assert!(
             emitted
                 .source
                 .contains("key_even_tile[group][step_index] = even_float;")
         );
         assert!(emitted.source.contains("simdgroup_float8x8"));
-        assert!(!emitted.source.contains("simdgroup_half8x8"));
+        assert!(emitted.source.contains("else if (true && mode == 0L)"));
+        assert!(emitted.source.contains("else if (false && mode == 0L)"));
+        assert!(!emitted.source.contains("simdgroup_half8x8 weights["));
 
         let mixed = [
             (bound.operands()[2].0, omega::Codec::BFloat16),
@@ -690,15 +692,21 @@ fn card_11_bf8_row_selects_the_bf8_source_and_declines_mixed_cache_codecs() {
             emitted.entry
         );
         assert!(emitted.source.contains("device const uchar* in2"));
-        assert!(emitted.source.contains("omega_bf8_load_matrix(even_float"));
-        assert!(emitted.source.contains("omega_bf8_to_float"));
+        assert!(emitted.source.contains("omega_cache_load_matrix(even_float"));
+        assert!(
+            emitted
+                .source
+                .contains("omega_cache_code((uint)((device const uchar*)base)[element])")
+        );
         assert!(
             emitted
                 .source
                 .contains("omega_zero_padded_value_rows(value_float")
         );
         assert!(emitted.source.contains("simdgroup_float8x8"));
-        assert!(!emitted.source.contains("simdgroup_half8x8"));
+        assert!(emitted.source.contains("else if (true && mode == 0L)"));
+        assert!(emitted.source.contains("else if (false && mode == 0L)"));
+        assert!(!emitted.source.contains("simdgroup_half8x8 weights["));
 
         let mixed = [
             (bound.operands()[2].0, omega::Codec::BFloat8),
@@ -733,13 +741,13 @@ fn card_13_mma_precision_selects_f32_and_f16_for_each_cache_storage() {
             omega::AttentionKvStorage::Bf16,
             Some(omega::Codec::BFloat16),
             "ushort* in2",
-            Some("omega_bf16_load_matrix"),
+            Some("omega_cache_load_matrix"),
         ),
         (
             omega::AttentionKvStorage::Bf8,
             Some(omega::Codec::BFloat8),
             "uchar* in2",
-            Some("omega_bf8_load_matrix"),
+            Some("omega_cache_load_matrix"),
         ),
     ] {
         let packed = codec.map_or_else(omega::PackedOperands::new, |codec| {
