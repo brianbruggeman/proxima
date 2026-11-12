@@ -15,8 +15,10 @@
 //! [`crate::types::GgmlType::Q8_0`]'s already-landed
 //! [`crate::types::GgmlType::wire_shape`] rather than re-typed by hand.
 
+use proxima_numeric::BlockLayout;
 use proxima_numeric::float_layout::FloatLayout;
 
+use crate::quant::block_layout_encode::quantize_by_rule;
 use crate::quant::{QuantError, float_layout};
 use crate::types::GgmlType;
 
@@ -118,64 +120,17 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
     Ok(())
 }
 
-/// Quantizes one 32-element chunk into a `Q8_0` block.
-///
-/// Ports `quantize_row_q8_0_ref` (`ggml-quants.c:187-208`) exactly: the
-/// block's `d` is `amax / 127` (`amax` the block's absolute max, `127`
-/// the signed-int8 positive range), each level is `round(x * (1/d))`
-/// clamped by construction to `[-127, 127]` (amax itself maps to exactly
-/// ±127, nothing rounds past it), and `d` is zero (levels all zero) only
-/// when every input in the block is zero.
-fn quantize_block(x: &[f32], output: &mut [u8]) {
-    let mut amax = 0.0f32;
-    for &value in x {
-        amax = amax.max(value.abs());
-    }
-    let d = amax / 127.0;
-    let inv_d = if d == 0.0 { 0.0 } else { 1.0 / d };
-
-    let block_scale = half::f16::from_f32(d);
-    output[D_OFFSET..D_OFFSET + 2].copy_from_slice(&block_scale.to_le_bytes());
-
-    let qs = &mut output[QS_OFFSET..QS_OFFSET + QK8_0];
-    for (out, &value) in qs.iter_mut().zip(x.iter()) {
-        *out = float_layout::encode(libm::roundf(value * inv_d), FloatLayout::INT8) as u8;
-    }
-}
-
-/// Quantizes a run of `f32` weights into `Q8_0` blocks. `input` is
-/// borrowed, `output` is caller-provided — no allocation on this path.
+/// Quantizes a run of `f32` weights into `Q8_0` blocks by `BlockLayout::Q8_0`'s encode rule:
+/// `quantize_row_q8_0_ref` (`ggml-quants.c:187-208`), scale `amax / 127`, each level
+/// `round(x * (1/scale))` clamped to `[-127, 127]`. The loop this replaced is frozen in
+/// `reference_encoders` as the byte oracle. `input` is borrowed, `output` is caller-provided.
 ///
 /// # Errors
 /// [`QuantError::InputNotElementMultiple`] if `input.len()` is not a
 /// multiple of [`QK8_0`]; [`QuantError::OutputSizeMismatch`] if
 /// `output.len()` does not exactly match the packed byte count.
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
-    if !input.len().is_multiple_of(QK8_0) {
-        return Err(QuantError::InputNotElementMultiple {
-            codec: CODEC,
-            unit: "block",
-            found: input.len(),
-            block_elements: QK8_0,
-        });
-    }
-    let block_count = input.len() / QK8_0;
-    let expected = bytes_for_blocks(block_count);
-    if output.len() != expected {
-        return Err(QuantError::OutputSizeMismatch {
-            found: output.len(),
-            expected,
-        });
-    }
-    for (chunk, out_block) in input
-        .as_chunks::<QK8_0>()
-        .0
-        .iter()
-        .zip(output.as_chunks_mut::<BLOCK_BYTES>().0)
-    {
-        quantize_block(chunk, out_block);
-    }
-    Ok(())
+    quantize_by_rule(&BlockLayout::Q8_0, CODEC, input, output)
 }
 
 #[cfg(test)]

@@ -11,6 +11,7 @@ use core::mem::MaybeUninit;
 use proxima_numeric::{BlockLayout, FormatCodec, Numeric, NumericFormat};
 
 use crate::quant::QuantError;
+use crate::quant::reference_encoders;
 use crate::quant::llama_reference::{dequantize_row_mxfp4, dequantize_row_tq2_0, quantize_row_tq2_0_ref};
 use crate::quant::{q1_0, q2_0, pq2_0, q4_0, q4_1, q5_0, q5_1, q8_0, q8_1, q8_k};
 
@@ -26,16 +27,16 @@ struct Case {
 
 fn cases() -> Vec<Case> {
     vec![
-        Case { name: "q4_0", layout: BlockLayout::Q4_0, encode: Some(q4_0::quantize), decode: q4_0::dequantize },
+        Case { name: "q4_0", layout: BlockLayout::Q4_0, encode: Some(reference_encoders::q4_0), decode: q4_0::dequantize },
         Case { name: "q4_1", layout: BlockLayout::Q4_1, encode: None, decode: q4_1::dequantize },
-        Case { name: "q5_0", layout: BlockLayout::Q5_0, encode: Some(q5_0::quantize), decode: q5_0::dequantize },
+        Case { name: "q5_0", layout: BlockLayout::Q5_0, encode: Some(reference_encoders::q5_0), decode: q5_0::dequantize },
         Case { name: "q5_1", layout: BlockLayout::Q5_1, encode: None, decode: q5_1::dequantize },
-        Case { name: "q8_0", layout: BlockLayout::Q8_0, encode: Some(q8_0::quantize), decode: q8_0::dequantize },
+        Case { name: "q8_0", layout: BlockLayout::Q8_0, encode: Some(reference_encoders::q8_0), decode: q8_0::dequantize },
         Case { name: "q8_1", layout: BlockLayout::Q8_1, encode: None, decode: q8_1::dequantize },
         Case { name: "q8_k", layout: BlockLayout::Q8_K, encode: None, decode: q8_k::dequantize },
-        Case { name: "q1_0", layout: BlockLayout::Q1_0, encode: Some(q1_0::quantize), decode: q1_0::dequantize },
-        Case { name: "q2_0", layout: BlockLayout::Q2_0, encode: Some(q2_0::quantize), decode: q2_0::dequantize },
-        Case { name: "pq2_0", layout: BlockLayout::PQ2_0, encode: Some(pq2_0::quantize), decode: pq2_0::dequantize },
+        Case { name: "q1_0", layout: BlockLayout::Q1_0, encode: Some(reference_encoders::q1_0), decode: q1_0::dequantize },
+        Case { name: "q2_0", layout: BlockLayout::Q2_0, encode: Some(reference_encoders::q2_0), decode: q2_0::dequantize },
+        Case { name: "pq2_0", layout: BlockLayout::PQ2_0, encode: Some(reference_encoders::pq2_0), decode: pq2_0::dequantize },
     ]
 }
 
@@ -458,11 +459,11 @@ fn zero_padded(elements: usize, leading: &[f32]) -> Vec<f32> {
 
 fn incumbent_encode(name: &str, values: &[f32], out: &mut [u8]) {
     match name {
-        "q4_0" => q4_0::quantize(values, out).expect("incumbent encodes"),
-        "q5_0" => q5_0::quantize(values, out).expect("incumbent encodes"),
-        "q8_0" => q8_0::quantize(values, out).expect("incumbent encodes"),
-        "q2_0" => q2_0::quantize(values, out).expect("incumbent encodes"),
-        "pq2_0" => pq2_0::quantize(values, out).expect("incumbent encodes"),
+        "q4_0" => reference_encoders::q4_0(values, out).expect("incumbent encodes"),
+        "q5_0" => reference_encoders::q5_0(values, out).expect("incumbent encodes"),
+        "q8_0" => reference_encoders::q8_0(values, out).expect("incumbent encodes"),
+        "q2_0" => reference_encoders::q2_0(values, out).expect("incumbent encodes"),
+        "pq2_0" => reference_encoders::pq2_0(values, out).expect("incumbent encodes"),
         "tq2_0" => quantize_row_tq2_0_ref(values, out),
         other => unreachable!("{other} has no incumbent encode in this test"),
     }
@@ -505,7 +506,7 @@ fn layouts_outside_the_simple_family_do_not_resolve() {
 fn numeric_encode_of_q4_0_kv_like_values_equals_the_gguf_port_bytes() {
     let values = kv_like(32 * 2048);
     let mut expected = vec![0u8; 2048 * 18];
-    q4_0::quantize(&values, &mut expected).expect("the port encodes finite values");
+    reference_encoders::q4_0(&values, &mut expected).expect("the port encodes finite values");
     let mut packed = vec![0u8; expected.len()];
 
     let blocks = Numeric::new(&NumericFormat::Q4_0, &values)

@@ -1,6 +1,9 @@
 //! Scalar legacy `Q1_0` decoder (128 values / 18 bytes).
 
+use proxima_numeric::BlockLayout;
+
 use crate::quant::QuantError;
+use crate::quant::block_layout_encode::quantize_by_rule;
 use crate::types::GgmlType;
 
 const CODEC: &str = "q1_0";
@@ -43,42 +46,8 @@ const _: () = {
     assert!(GgmlType::Q1_0.wire_shape().block_bytes as usize == BLOCK_BYTES);
 };
 
-fn quantize_block(input: &[f32; QK_Q1_0], block: &mut [u8; BLOCK_BYTES]) {
-    let scale = input.iter().map(|value| value.abs()).sum::<f32>() / QK_Q1_0 as f32;
-    block[..2].copy_from_slice(&half::f16::from_f32(scale).to_le_bytes());
-    block[2..].fill(0);
-    for (index, value) in input.iter().enumerate() {
-        if *value >= 0.0 {
-            block[2 + index / 8] |= 1 << (index % 8);
-        }
-    }
-}
-
-/// Quantizes whole 128-element runs of `f32` into `Q1_0` blocks, following
-/// PrismML's `quantize_row_q1_0_ref`: scale is the mean absolute value, each bit the sign.
+/// Quantizes whole 128-element runs of `f32` into `Q1_0` blocks by `BlockLayout::Q1_0`'s encode
+/// rule (PrismML's `quantize_row_q1_0_ref`): scale is the mean absolute value, each bit the sign.
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
-    if !input.len().is_multiple_of(QK_Q1_0) {
-        return Err(QuantError::InputNotElementMultiple {
-            codec: CODEC,
-            unit: "block",
-            found: input.len(),
-            block_elements: QK_Q1_0,
-        });
-    }
-    let expected = input.len() / QK_Q1_0 * BLOCK_BYTES;
-    if output.len() != expected {
-        return Err(QuantError::OutputSizeMismatch {
-            found: output.len(),
-            expected,
-        });
-    }
-    for (chunk, block) in input
-        .as_chunks::<QK_Q1_0>()
-        .0
-        .iter()
-        .zip(output.as_chunks_mut::<BLOCK_BYTES>().0)
-    {
-        quantize_block(chunk, block);
-    }
-    Ok(())
+    quantize_by_rule(&BlockLayout::Q1_0, CODEC, input, output)
 }

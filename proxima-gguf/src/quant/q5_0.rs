@@ -2,7 +2,10 @@
 //! four packed high-bit flags. This is the legacy format used by several
 //! token-embedding tensors in otherwise `Q4_K_M` checkpoints.
 
+use proxima_numeric::BlockLayout;
+
 use crate::quant::QuantError;
+use crate::quant::block_layout_encode::quantize_by_rule;
 use crate::types::GgmlType;
 
 pub const QK5_0: usize = 32;
@@ -84,57 +87,11 @@ pub fn dequantize(data: &[u8], output: &mut [f32]) -> Result<(), QuantError> {
     Ok(())
 }
 
-fn quantize_block(input: &[f32], output: &mut [u8]) {
-    let mut amax = 0.0f32;
-    let mut max = 0.0f32;
-    for &value in input {
-        if amax < value.abs() {
-            amax = value.abs();
-            max = value;
-        }
-    }
-    let scale = max / -16.0;
-    let inverse = if scale == 0.0 { 0.0 } else { 1.0 / scale };
-    output[D_OFFSET..D_OFFSET + 2].copy_from_slice(&half::f16::from_f32(scale).to_le_bytes());
-
-    let mut high_bits = 0u32;
-    for index in 0..HALF_BLOCK {
-        let low = 31i8.min((input[index] * inverse + 16.5) as i8) as u8;
-        let high = 31i8.min((input[HALF_BLOCK + index] * inverse + 16.5) as i8) as u8;
-        output[QS_OFFSET + index] = (low & 0x0f) | ((high & 0x0f) << 4);
-        high_bits |= u32::from((low & 0x10) >> 4) << index;
-        high_bits |= u32::from((high & 0x10) >> 4) << (index + HALF_BLOCK);
-    }
-    output[QH_OFFSET..QH_OFFSET + 4].copy_from_slice(&high_bits.to_le_bytes());
-}
-
-/// Quantizes whole 32-element runs of `f32` into `Q5_0` blocks, following
-/// llama.cpp's `quantize_row_q5_0_ref`.
+/// Quantizes whole 32-element runs of `f32` into `Q5_0` blocks by `BlockLayout::Q5_0`'s encode
+/// rule (signed peak over `-16`), the result of llama.cpp's `quantize_row_q5_0_ref`; the loop this
+/// replaced is frozen in `reference_encoders` as the byte oracle.
 pub fn quantize(input: &[f32], output: &mut [u8]) -> Result<(), QuantError> {
-    if !input.len().is_multiple_of(QK5_0) {
-        return Err(QuantError::InputNotElementMultiple {
-            codec: "q5_0",
-            unit: "block",
-            found: input.len(),
-            block_elements: QK5_0,
-        });
-    }
-    let expected = input.len() / QK5_0 * BLOCK_BYTES;
-    if output.len() != expected {
-        return Err(QuantError::OutputSizeMismatch {
-            found: output.len(),
-            expected,
-        });
-    }
-    for (chunk, block) in input
-        .as_chunks::<QK5_0>()
-        .0
-        .iter()
-        .zip(output.as_chunks_mut::<BLOCK_BYTES>().0)
-    {
-        quantize_block(chunk, block);
-    }
-    Ok(())
+    quantize_by_rule(&BlockLayout::Q5_0, "q5_0", input, output)
 }
 
 #[cfg(test)]

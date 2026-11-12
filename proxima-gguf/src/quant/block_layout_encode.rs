@@ -12,7 +12,7 @@
 //! shared scale can express, [`proxima_numeric::encode::encode_blocks`] is the encoder, and
 //! [`proxima_numeric::Numeric`] is the value-plus-format surface for converting between formats.
 
-use proxima_numeric::NumericFormat;
+use proxima_numeric::{FormatCodec, NumericFormat};
 use proxima_numeric::encode::{encode_blocks, reach as shared_reach};
 use proxima_numeric::error::NumericError;
 
@@ -45,6 +45,42 @@ pub fn quantize(
     encode_blocks(&NumericFormat::Block(*layout), input, output)
         .map(|_blocks| ())
         .map_err(map_error)
+}
+
+/// Encodes whole blocks of `f32` into `layout` by the layout's own
+/// [`proxima_numeric::EncodeRule`], run by [`proxima_numeric::FormatCodec`]; what the per-format
+/// `quantize` of `q4_0`, `q5_0`, `q8_0`, `q1_0`, `q2_0` and `pq2_0` call, keeping their size checks
+/// and error values. `codec` names the format in [`QuantError::InputNotElementMultiple`].
+///
+/// # Errors
+/// [`QuantError::UnsupportedBlockLayout`] for a layout with no rule,
+/// [`QuantError::InputNotElementMultiple`] if `input` is not whole blocks,
+/// [`QuantError::OutputSizeMismatch`] if `output` is not exactly the packed byte count.
+pub fn quantize_by_rule(
+    layout: &proxima_numeric::BlockLayout,
+    codec: &'static str,
+    input: &[f32],
+    output: &mut [u8],
+) -> Result<(), QuantError> {
+    let block_codec = FormatCodec::block(layout).ok_or(QuantError::UnsupportedBlockLayout {
+        reason: "the layout has no encode instantiation",
+    })?;
+    if !input.len().is_multiple_of(block_codec.elements()) {
+        return Err(QuantError::InputNotElementMultiple {
+            codec,
+            unit: "block",
+            found: input.len(),
+            block_elements: block_codec.elements(),
+        });
+    }
+    let expected = input.len() / block_codec.elements() * block_codec.block_bytes();
+    if output.len() != expected {
+        return Err(QuantError::OutputSizeMismatch {
+            found: output.len(),
+            expected,
+        });
+    }
+    block_codec.encode(input, output).map(drop).map_err(map_error)
 }
 
 fn map_error(error: NumericError) -> QuantError {
