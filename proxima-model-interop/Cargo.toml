@@ -121,9 +121,8 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # `metal-packed-row-nsg2` joins per ROW 311: halves the packed-row matvec
 # threadgroup count (`omega/Cargo.toml`'s own comment carries the mechanism),
 # output identical, ships default-on per the less-work rule.
-# `metal-q4k-ggml-port` joins per ROW 315 (`omega/Cargo.toml`'s own comment
-# carries the mechanism and the interleaved-bake-off numbers) -- the fixed
-# body is less work with identical output, default-on per the same rule.
+# The ggml-geometry K-quant matvecs (Q4_K, Q5_K, Q6_K) are rendered from their block layouts
+# (`omega/src/msl/sub_block_matvec.rs`) and are unconditional in `metal`.
 # `metal-q4_0-native` joins per ROW C4.22 (`omega/Cargo.toml`'s own comment
 # carries the numbers) -- ggml's lane geometry for the Q4_0 matvecs, same
 # launch grid, identical token ids, default-on per the same rule.
@@ -149,7 +148,6 @@ metal = [
     "cached-attention-streaming",
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
-    "metal-q4k-ggml-port",
     "metal-q4_0-native",
     "gated-delta-net-fusion",
     "moe-topk-fusion",
@@ -328,8 +326,6 @@ kv-capacity-bucket = [
     "proxima-tensor/kv-capacity-bucket",
     "omega?/kv-capacity-bucket",
 ]
-# passthrough to `omega/metal-q4k-ggml-port` so the decode harness can measure that arm.
-metal-q4k-ggml-port = ["omega?/metal-q4k-ggml-port"]
 # passthrough to `omega/metal-q4_0-native` so the decode harness can measure that arm.
 metal-q4_0-native = ["omega?/metal-q4_0-native"]
 # passthrough to `omega/metal-reduction-literal` so the gate can measure that arm.

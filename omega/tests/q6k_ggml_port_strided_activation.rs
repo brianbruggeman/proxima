@@ -1,5 +1,5 @@
-//! `push_q6k_ggml_port_body`'s activation address shares
-//! `push_packed_row_plain_product_y4_address` with `sub_block_matvec_msl`,
+//! the rendered `Q6_K` matvec's activation address (`assembled_matvec_msl`) shares
+//! the `other_stride_is_one` specialization with `sub_block_matvec_msl`,
 //! so it takes the SAME `other_stride_is_one` stride-free specialization --
 //! see that function's own doc. One codec over from
 //! `q4k_ggml_port_strided_activation.rs`: a unit-stride activation (the
@@ -8,7 +8,7 @@
 //! wrong-stride read on either branch lands on a poisoned slot or disagrees
 //! with the independent dequantize+dot reference.
 
-#![cfg(all(feature = "metal-q4k-ggml-port", target_os = "macos"))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
@@ -161,7 +161,7 @@ fn assert_ggml_port_matches_reference_at_stride(label: &str, stride: i32) {
         assert!(
             metal_value.is_finite(),
             "{label} row {index}: metal={metal_value} is not finite -- a wrong-stride read landed \
-             on a poisoned NaN activation slot in `push_q6k_ggml_port_body`'s stride-{stride} arm"
+             on a poisoned NaN activation slot in the rendered Q6_K body's stride-{stride} arm"
         );
         let scale = reference.abs().max(f32::MIN_POSITIVE);
         let relative = (metal_value - reference).abs() / scale;
@@ -169,7 +169,7 @@ fn assert_ggml_port_matches_reference_at_stride(label: &str, stride: i32) {
             relative < 1e-2,
             "{label} row {index}: metal={metal_value} disagrees with the independent \
              dequantize+dot reference={reference} (relative={relative}) -- \
-             `push_q6k_ggml_port_body`'s stride-{stride} activation addressing defect if it fires"
+             the rendered Q6_K body's stride-{stride} activation addressing defect if it fires"
         );
     }
 }

@@ -165,17 +165,9 @@ metal-core = ["alloc"]
 # simdgroup count -- less work, same output (`generated_text` identical
 # across 15 runs), `gpu_exec_ms` mean 26.784 -> 26.554 ms (within both arms'
 # CoV, 1.04%/0.79%, so not a wall win but not a regression either).
-# `metal-q4k-ggml-port` joins per ROW 315's quiet bake-off, run against the
-# fixed body (main 2969311 took the stride-1 activation path, removing the
-# old port's 32 stray 64-bit multiplies -- ROW 311's +15% finding was against
-# that unfixed body and is void here). One branchless scale decode per
-# iteration replaces the default body's four branchy calls -- less work, same
-# `generated_text` across the interleaved rounds where GPU contention did not
-# corrupt the run; paired same-round `gpu_exec_ms` mean beat the default body
-# in 3/3 interleaved rounds (25.0/364.6/376.1 vs 464.3/424.8/448.8 ms) despite
-# heavy external-contention noise inflating both arms' round-to-round CoV
-# (pooled CoV 53-68%, dominated by two other GPU benches sharing the device,
-# not by this change).
+# The ggml-geometry K-quant matvecs (Q4_K, Q5_K, Q6_K) that the former `metal-q4k-ggml-port` feature
+# selected are rendered from their `BlockLayout`s (`msl/sub_block_matvec.rs`) and are unconditional
+# in `metal`; the feature is gone.
 # `metal-attn-split-decode` and `metal-attn-split-rows` join per `docs/model-interop/discipline.md` ROW C4.21 (split-KV decode attention and
 # row-tiled K > 1 verify attention; evidence on the feature definitions below).
 # `metal-q4_0-native` (not in this crate's `metal`; `proxima-model-interop`'s
@@ -222,7 +214,6 @@ metal = [
     "cached-attention-streaming",
     "reduce-epilogue-fusion",
     "metal-packed-row-nsg2",
-    "metal-q4k-ggml-port",
     "metal-tiled-gemm",
     "metal-grouped-gemm",
     "metal-attn-split-decode",
@@ -464,27 +455,6 @@ metal-output-placement = ["metal"]
 # `zero_placed_buffer` helper below through one dependency edge, mirroring
 # every other `proxima-tensor/*` passthrough in this file.
 kv-capacity-bucket = ["proxima-tensor/kv-capacity-bucket"]
-# Line-for-line port of ggml's `kernel_mul_mv_q4_K_f32_impl<4,2,32>`
-# (`ggml-metal.metal:5086-5193`, MIT-licensed, upstream:
-# https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-metal/ggml-metal.metal)
-# for the row-blocked packed `Q4_K` matvec (`msl/sub_block_matvec.rs`'s `sub_block_matvec_msl`, rendered from `BlockLayout::Q4_K`
-# since PROXNUM-66; this feature still gates the `Q5_K` and `Q6_K` ports in
-# `msl/packed_row_blocked_ggml.rs`).
-# Every prior landing on this path (`q4k_pair_dot`'s `plain_product` arm,
-# `metal-q4k-mask-fma`, `metal-q4k-single-fetch`) is a RE-DERIVATION of pieces
-# of ggml's technique through this crate's own header-decode/`q4k_run8`
-# abstractions -- this feature instead transcribes ggml's `sc16`/`kmask1..3`
-# scale extraction and `acc1`/`acc2` masked-word accumulation verbatim, so the
-# only difference left from the incumbent is address computation (this
-# crate's per-axis `operand_base`/`operand_strides` reads instead of ggml's
-# raw `nb01` pointer walk). Also sets the dispatch geometry to ggml's own
-# `nsg=2`/`nr0=4` (64-thread threadgroups, `tiled_gemm_threadgroup_width`)
-# under this feature specifically, since ggml's nsg=2 threadgroup was
-# measured a FOUR-time negative every time it was tried on OUR body
-# (`metal-packed-row-nsg2`, ledger ROWs 249,251-254,259-260,265-267) --
-# untested until now is nsg=2 paired with ggml's OWN math rather than ours.
-# Part of `metal` (listed above, ROW 315's bake-off).
-metal-q4k-ggml-port = ["metal"]
 # Line-for-line port of ggml's `mul_vec_q_n_f32_impl<block_q4_0, N_R0_Q4_0=4>`
 # + `block_q_n_dot_y<block_q4_0>`
 # (`ggml/src/ggml-metal/kernels/mul_mv.metal`, MIT-licensed, upstream:
@@ -499,8 +469,7 @@ metal-q4k-ggml-port = ["metal"]
 # contiguous blocks (288B) per outer-loop iteration. Also sets the dispatch
 # geometry to ggml's own `nsg=2`/`nr0=4` (`N_SG_Q4_0`/`N_R0_Q4_0`,
 # `tiled_gemm_threadgroup_width`), reusing the SAME `packed_row_nsg_factor`
-# mechanism `metal-q4k-ggml-port` already proved correctness-neutral
-# (`docs/discipline.md`'s q4k-ggml-port row). Part of `metal` (ROW C4.22 in
+# mechanism `metal-packed-row-nsg2` carries. Part of `metal` (ROW C4.22 in
 # `docs/model-interop/discipline.md` carries the quiet-box decode-step seal
 # that earned the default).
 metal-q4_0-native = ["metal"]

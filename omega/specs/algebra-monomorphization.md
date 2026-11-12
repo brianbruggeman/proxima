@@ -78,7 +78,7 @@ Rules:
 
 - **no catch-all.** The dispatch is `match (layout, epilogue, split)` over the product of the
   impls. A new codec or epilogue shape fails to compile at every site that must handle it.
-- **no provenance in the type.** `metal-q4k-ggml-port` / `metal-q4_0-native` become alternative
+- **no provenance in the type.** the former `metal-q4k-ggml-port` (now rendered) / `metal-q4_0-native` become alternative
   impls of the same cell; the feature picks which one the arm instantiates.
 - **no codec-meaningful parameters.** A parameter whose meaning depends on another parameter's
   value is a special case: it moves inside the arm (applied to `select` already).

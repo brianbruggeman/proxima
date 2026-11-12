@@ -4,7 +4,7 @@
 //! stride-free specialization -- see that function's own doc. Before this
 //! landing the port always multiplied by `other_stride` at read time, which
 //! happens to be correct at every stride (multiplying by 1 is a no-op), so
-//! no existing `metal-q4k-ggml-port` test (`q4k_ggml_port_parity.rs`, always
+//! no existing rendered-matvec test (`q4k_ggml_port_parity.rs`, always
 //! a contiguous `[k, 1]` activation) could tell the two code paths apart.
 //! This file drives BOTH branches of `other_stride_is_one` through the port
 //! body directly: a unit-stride activation (the specialization's new path)
@@ -13,7 +13,7 @@
 //! either branch lands on a poisoned slot or disagrees with the independent
 //! dequantize+dot reference.
 
-#![cfg(all(feature = "metal-q4k-ggml-port", target_os = "macos"))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};

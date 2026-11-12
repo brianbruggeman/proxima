@@ -47,7 +47,7 @@
 //!   `[arena]`.
 //! - [`WORKGROUP_SIZE`] (always compiled) — threads per workgroup every
 //!   v1 WGSL kernel dispatches with; see `omega-runtime.toml`'s `[wgsl]`.
-//! - `PACKED_ROW_NSG` (`metal-packed-row-nsg2`/`metal-q4k-ggml-port`-only)
+//! - `PACKED_ROW_NSG` (`metal-packed-row-nsg2`-only)
 //!   — simdgroups per threadgroup for the row-blocked packed path; see
 //!   `omega-runtime.toml`'s `[packed_row_nsg]`.
 //! - [`ATTENTION_CONTEXT_KEYS_PER_CHUNK`]/[`ATTENTION_CONTEXT_CHUNK_CAP`]

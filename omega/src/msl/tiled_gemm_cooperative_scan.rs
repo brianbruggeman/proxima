@@ -1904,9 +1904,9 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
             // is unreachable dead code for `Keep::Reduce` ops (every
             // `packed_row_block` match IS a `Keep::Reduce` op by
             // construction -- see `PackedRowBlock`'s own classification).
-            // `metal-q4k-ggml-port` needs the identical nsg=2 width (its own
-            // kernel body is ggml's, dispatched at ggml's own `N_SG_Q4_K`) --
-            // [`packed_row_nsg_factor`] is the one place both features widen
+            // the rendered K-quant matvec needs the identical nsg=2 width (it
+            // is launched at ggml's own `N_SG_Q4_K`) --
+            // [`packed_row_nsg_factor`] is the one place every nsg feature widens
             // from, so they cannot drift into two competing nsg constants.
             // `!metal-q4k-split-k` too: split-K's own combine (`push_packed_
             // row_combine_and_write`'s split-K arm) already picks a
@@ -2096,7 +2096,6 @@ pub(super) fn cooperative_reduce_width(
 #[cfg(all(
     any(
         feature = "metal-packed-row-nsg2",
-        feature = "metal-q4k-ggml-port",
         feature = "metal-q4_0-native"
     ),
     not(feature = "metal-q4k-split-k")
@@ -2111,7 +2110,6 @@ pub(super) fn packed_row_nsg_factor() -> u64 {
 #[cfg(not(all(
     any(
         feature = "metal-packed-row-nsg2",
-        feature = "metal-q4k-ggml-port",
         feature = "metal-q4_0-native"
     ),
     not(feature = "metal-q4k-split-k")

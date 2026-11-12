@@ -4273,7 +4273,7 @@ kernel void q6k_matvec_l3_shape(
         // ([`production_reduce_kernel`]) instead of this ladder's hand-written
         // `q4k_pair_dot`/`q6k_pair_dot` body -- the question ROW 339-343 never
         // answered: is the emitted body itself as fast as `pair_dot` bare, or is
-        // production's ggml-port default (`metal-q4k-ggml-port`, in the default
+        // production's rendered ggml-geometry default (in the default
         // `metal` feature list) the loss this whole-token gap has been carrying?
         // Fixed at `MTLMathMode::Relaxed`, matching arm C -- production has no
         // `nsg`/math knob a caller selects per dispatch the way arms A-D's

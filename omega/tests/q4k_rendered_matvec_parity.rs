@@ -4,6 +4,7 @@
 //! ab8575ec. The fixtures hold that port's raw f32 bits; `fixtures/q4k_matvec_PROVENANCE.txt`
 //! records how they were captured.
 #![cfg(all(feature = "metal", target_os = "macos"))]
+// workspace lints deny unwrap/expect (Cargo.toml:93-94) and an integration test binary is not cfg(test), so a failed fixture read must be an allowed panic.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::fs::File;

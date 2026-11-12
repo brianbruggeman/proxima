@@ -1,6 +1,6 @@
-//! Correctness gate for `metal-q4k-ggml-port`, the verbatim transcription of
-//! ggml's `kernel_mul_mv_q4_K_f32_impl<4,2,32>`
-//! (`ggml-metal.metal:5086-5193`) onto `omega::msl`'s row-blocked packed
+//! Correctness gate for the Q4_K matvec at ggml's
+//! `kernel_mul_mv_q4_K_f32_impl<4,2,32>` geometry
+//! (`ggml-metal.metal:5086-5193`), rendered from `BlockLayout::Q4_K` onto `omega::msl`'s row-blocked packed
 //! path (`sub_block_matvec_msl`). Same posture as
 //! `q4k_real_checkpoint_parity.rs`: real GGUF bytes wherever the host has
 //! them (guiding-principles §9), skip rather than fail when the file is
@@ -15,7 +15,7 @@
 //! identity seed) -- the boundary shapes a large real tensor never happens
 //! to hit deterministically.
 
-#![cfg(all(feature = "metal-q4k-ggml-port", target_os = "macos"))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::io::{Read, Seek, SeekFrom};
