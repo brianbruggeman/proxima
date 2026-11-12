@@ -319,7 +319,10 @@ pub(super) fn render_cached_attention_with_mma_selection(
             #[cfg(feature = "metal-attn-split-rows")]
             {
                 matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. })
-                    && matches!(cached_kv_codec, Some(Codec::BFloat16 | Codec::BFloat8))
+                    && matches!(
+                        cached_kv_codec,
+                        Some(Codec::Float16 | Codec::BFloat16 | Codec::BFloat8)
+                    )
             }
             #[cfg(not(feature = "metal-attn-split-rows"))]
             {
@@ -333,7 +336,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
     if cached_kv_codec.is_some() && !codec_supported_by_form {
         return Err(EmitError::CachedAttentionKvCodecNotSupported {
             node: resolved.node,
-            reason: "decode split reads Float16, BFloat16 or BFloat8; row-tiled reads BFloat16 or BFloat8",
+            reason: "decode split and row-tiled read Float16, BFloat16 or BFloat8",
         });
     }
     if cached_key_codec != cached_kv_codec && !form_reads_block_key(form) {
@@ -1020,7 +1023,26 @@ fn merge_grid(node: NodeId, total_elements: u64) -> Result<GridSpec, EmitError> 
 }
 
 pub(super) const ROW_TILED_KV_REASON: &str =
-    "row-tiled attention reads cached K/V as F32, BFloat16, or BFloat8";
+    "row-tiled attention reads cached K/V as F32, Float16, BFloat16, or BFloat8";
+
+/// The MSL scalar a matrix-multiply fragment of `format` holds: the one place the row-tiled
+/// kernel's operand, probability and accumulator widths are spelled, each read off a proxima-numeric
+/// [`Codec`] so llama.cpp's binary16 operands over binary32 accumulators (`fa_f16.metal` `FA_TYPES`)
+/// is a choice of formats, not a literal in the kernel text.
+pub(super) fn fragment_scalar_type(format: Codec) -> &'static str {
+    match format {
+        Codec::Float16 => "half",
+        _ => "float",
+    }
+}
+
+/// The `simdgroup_matrix` type of an 8x8 fragment of `format`.
+pub(super) fn fragment_type(format: Codec) -> &'static str {
+    match format {
+        Codec::Float16 => "simdgroup_half8x8",
+        _ => "simdgroup_float8x8",
+    }
+}
 
 /// The storage element type the row-tiled kernel (`cached_attention_row_tiled`) reads a cache of
 /// `codec` through, `None` when it has no read path for it. The row-tiled renderer and
@@ -1029,6 +1051,7 @@ pub(super) const ROW_TILED_KV_REASON: &str =
 pub(super) fn row_tiled_cached_type(codec: Option<Codec>) -> Option<&'static str> {
     match codec {
         None => Some("float"),
+        Some(Codec::Float16) => Some("half"),
         Some(Codec::BFloat16) => Some("ushort"),
         Some(Codec::BFloat8) => Some("uchar"),
         Some(_) => None,

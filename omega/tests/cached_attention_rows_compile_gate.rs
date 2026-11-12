@@ -133,6 +133,49 @@ fn the_row_tiled_partial_compiles_with_the_metal_toolchain() {
     );
 }
 
+fn sink_row_tiled_attention(rows: u64, cached_key_rows: u64, lower: i64) -> BoundOp {
+    let mut op = row_tiled_attention(4, 8, 64, cached_key_rows, rows, lower);
+    if let BoundOpKind::CachedAttention {
+        operands,
+        attention_sink,
+        ..
+    } = &mut op.kind
+    {
+        operands.push((NodeId(9), layout(&[1]), None));
+        *attention_sink = true;
+    }
+    op
+}
+
+#[test]
+fn the_sink_row_tiled_partial_compiles_with_the_metal_toolchain_for_each_cache_storage() {
+    let policy = NumericPolicy::llama_relaxed();
+    let mut compiled = 0_usize;
+    for (storage, codec) in [
+        ("f32", None),
+        ("f16", Some(omega::Codec::Float16)),
+        ("bf16", Some(omega::Codec::BFloat16)),
+    ] {
+        for (shape, rows, cached_key_rows, lower) in [
+            ("full_prefill", 2024_u64, 1024_u64, i64::MIN),
+            ("sliding_prefill", 84, 1024, -127_i64),
+            ("two_row_verify", 2, 1024, i64::MIN),
+        ] {
+            let op = sink_row_tiled_attention(rows, cached_key_rows, lower);
+            let packed: PackedOperands = codec.map_or_else(PackedOperands::new, |codec| {
+                [2, 3, 6].into_iter().map(|index| (NodeId(index), codec)).collect()
+            });
+            let label = format!("{shape} cache {storage}");
+            let partial = omega::emit(&op, &packed, policy).expect("the sink partial emits");
+            assert!(partial.entry.ends_with("_rt_sk"), "{label}: {}", partial.entry);
+            assert!(partial.source.contains("in9 [[buffer(9)]]"), "{label}: sink at buffer 9");
+            compile(&label, &partial);
+            compiled += 1;
+        }
+    }
+    assert_eq!(compiled, 9, "3 cache storages x 3 shapes");
+}
+
 #[test]
 fn the_k_row_softmax_weights_kernels_compile_with_the_metal_toolchain() {
     let mut compiled = 0_usize;

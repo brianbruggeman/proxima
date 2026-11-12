@@ -250,7 +250,10 @@ fn the_row_tiled_kernel_reads_binary32_bf16_and_bf8_and_refuses_f16_and_quantize
         super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::BFloat8),
         Ok(Some(NumericFormat::BFloat8))
     );
-    assert!(super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::Float16).is_err());
+    assert_eq!(
+        super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::Float16),
+        Ok(Some(NumericFormat::Float16))
+    );
     assert!(super::cached_attention_row_tiled_kv_codec_for(&NumericFormat::Q8_0).is_err());
 }
 
