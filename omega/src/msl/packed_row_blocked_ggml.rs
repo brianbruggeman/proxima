@@ -692,7 +692,8 @@ pub(super) fn push_packed_row_blocked_body(
                     source.push_str("            }\n");
                 }
                 Codec::Q8_0
-                    if is_plain_product_reduce(resolved, reduce_op, weight, other)
+                    if cfg!(feature = "metal-q4k-split-k")
+                        && is_plain_product_reduce(resolved, reduce_op, weight, other)
                         && resolved.dtype == DType::FLOAT32 =>
                 {
                     // BATCHED ARM, mirroring the K-quant codecs' own
