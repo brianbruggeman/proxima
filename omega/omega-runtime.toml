@@ -80,6 +80,17 @@ min_tokens = 64
 # ms. The 160 above was measured on gemma4-E2B Q4_0 where 64..144 rows lost 3-8%
 # to the tiled fixed cost; that model is re-measured in the same card.
 
+# a DENSE (unquantized) batched product runs on the `simdgroup_matrix` tile only when its grid holds at
+# least this many threadgroups (row tiles x column tiles x batch depth); `min_tokens` alone admitted a
+# decode step's attention scores, whose 96 cached positions pass the token minimum while the grid is
+# 8 threadgroups on a 32-core device. flint-UD-Q4_K_XL, one decode step, 49 attention layers, per-op
+# gpu us from the dispatch profile at 96 cached positions, scores [1,96,4,8,64]: 39-47 tiled
+# (8 threadgroups), cooperative ~19 (`PROXIMA_TILED_GEMM_DENSE=0` same binary: 23.2 -> 21.6 ms/token,
+# text identical). The 84-token prefill scores [84,84,4,8,64] hold 672 threadgroups (205 us tiled,
+# 689 cooperative). 32: at least one threadgroup per core of the smallest Apple GPU this crate
+# targets that fills a tile at all. `feature = "metal-tiled-gemm"`-only, like `min_tokens`.
+dense_min_threadgroups = 32
+
 # per-threadgroup output tile shape (ROW 109 redesign) — ports
 # `ggml-metal.metal:6487` (`BLOCK_SIZE_M`). Must be a multiple of 16 (2
 # simdgroup row-halves x TILE_DIM(8) x THREAD_MAT_M) — see
