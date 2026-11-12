@@ -83,7 +83,7 @@ pub(crate) fn admit_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(
     kernel_pair(key, key).map_err(|reason| {
         refuse(format!(
             "cache format {key:?} has no read path: {reason}; a block layout is read as the key \
-             cache only (-ctk), beside a Float16, BFloat16 or BFloat8 value cache (-ctv)"
+             cache (-ctk) beside a scalar or block value cache (-ctv)"
         ))
     })
 }
@@ -148,6 +148,7 @@ mod tests {
         assert!(message.contains("same type"), "{message}");
     }
 
+    #[cfg(not(feature = "gpu"))]
     #[test]
     fn a_quantized_cache_is_refused_naming_its_format() {
         for element in [NumericFormat::Q8_0, NumericFormat::Q4_0] {
@@ -161,12 +162,17 @@ mod tests {
 
     #[cfg(feature = "gpu")]
     #[test]
-    fn a_block_key_beside_a_float16_value_is_admitted_and_every_other_block_pairing_is_refused() {
-        assert!(admit_pair(&NumericFormat::Q4_0, &NumericFormat::Float16).is_ok(), "Q4_0 key, F16 value");
-        assert!(admit_pair(&NumericFormat::Q8_0, &NumericFormat::Float16).is_ok(), "Q8_0 key, F16 value");
+    fn a_block_key_beside_a_scalar_or_block_value_is_admitted_and_every_other_block_pairing_is_refused() {
         for (key, value) in [
+            (NumericFormat::Q4_0, NumericFormat::Float16),
+            (NumericFormat::Q8_0, NumericFormat::Float16),
             (NumericFormat::Q4_0, NumericFormat::Q4_0),
             (NumericFormat::Q8_0, NumericFormat::Q8_0),
+            (NumericFormat::Q8_0, NumericFormat::Q4_0),
+        ] {
+            assert!(admit_pair(&key, &value).is_ok(), "{key:?} key, {value:?} value");
+        }
+        for (key, value) in [
             (NumericFormat::Float16, NumericFormat::Q4_0),
             (NumericFormat::Q4_0, NumericFormat::Float32),
             (NumericFormat::Float32, NumericFormat::Float16),

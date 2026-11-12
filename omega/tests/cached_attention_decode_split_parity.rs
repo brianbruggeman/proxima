@@ -675,6 +675,13 @@ struct BlockKeyCell {
 /// block read, and (b) Metal over the same un-quantized inputs cached as binary16, which measures
 /// what the K quantization costs the output.
 fn block_key_cell(format: NumericFormat, cached_len: u64, head_dim: u32) -> BlockKeyCell {
+    block_cell(format, NumericFormat::Float16, cached_len, head_dim)
+}
+
+/// [`block_key_cell`] with the V cache stored as `value_format`: a scalar the kernel decodes or a
+/// block layout read through the same rendered layout helper as K.
+fn block_cell(format: NumericFormat, value_format: NumericFormat, cached_len: u64, head_dim: u32) -> BlockKeyCell {
+    let value_is_block = omega::msl::layout_render::readable_block_layout(&value_format).is_some();
     let policy = production_numeric_policy();
     let fixture = gqa_decode_fixture(cached_len, head_dim);
     let output_roots = [fixture.roots[0]];
@@ -689,6 +696,11 @@ fn block_key_cell(format: NumericFormat, cached_len: u64, head_dim: u32) -> Bloc
             step_fraction = step_fraction.max(worst_error_over_block_max(data, &decoded));
             *data = decoded;
             block_named.push((name.clone(), format, packed));
+        } else if value_is_block {
+            let (packed, decoded) = block_round_trip(&value_format, data);
+            assert_all_finite(&decoded, "host-decoded V");
+            *data = decoded;
+            block_named.push((name.clone(), value_format, packed));
         } else {
             *data = round_to_half(data);
             block_named.push((name.clone(), omega::Codec::Float16, half_bytes(data)));
@@ -708,8 +720,13 @@ fn block_key_cell(format: NumericFormat, cached_len: u64, head_dim: u32) -> Bloc
         for index in [2, 3] {
             packed.insert(bound.operands()[index].0, format);
         }
-        packed.insert(bound.operands()[6].0, omega::Codec::Float16);
-        let kernel = omega::emit(bound, &packed, policy).expect("a block K beside a binary16 V emits");
+        packed.insert(bound.operands()[6].0, if value_is_block { value_format } else { omega::Codec::Float16 });
+        let kernel = omega::emit(bound, &packed, policy).expect("a block K beside a binary16 or block V emits");
+        assert_eq!(
+            kernel.source.contains("omega_value_block_"),
+            value_is_block,
+            "the V read goes through the rendered layout helper exactly when V is a block layout"
+        );
         assert!(kernel.entry.ends_with("_ds"), "the op must take the decode split form, got {}", kernel.entry);
         assert!(kernel.source.contains("device const uchar* in2"), "the cached K plane binds as raw blocks");
         assert!(kernel.source.contains("omega_key_block_"), "the K read goes through the rendered layout helper");
@@ -822,6 +839,38 @@ fn cached_attention_decode_split_reads_a_q8_0_k_cache_through_the_same_rendered_
 
     assert!(cell.metal_vs_host_decode < 1e-4, "{}", cell.metal_vs_host_decode);
     assert!(cell.metal_vs_cpu < BLOCK_K_CPU_BOUND, "{}", cell.metal_vs_cpu);
+}
+
+/// Block layouts for the V cache: each pairing reads K and V through their own rendered layout
+/// helpers, and the kernel matches the CPU oracle over the host-decoded K and V to the same bound the
+/// block K cell holds.
+#[test]
+fn cached_attention_decode_split_reads_a_block_v_cache_as_the_host_codec_decodes_it() {
+    let mut cells = 0_usize;
+    for (key_format, value_format) in [
+        (NumericFormat::Q8_0, NumericFormat::Q8_0),
+        (NumericFormat::Q4_0, NumericFormat::Q4_0),
+        (NumericFormat::Q8_0, NumericFormat::Q4_0),
+        (NumericFormat::Q4_0, NumericFormat::Q8_0),
+    ] {
+        for head_dim in HEAD_DIMS {
+            for cached_len in CACHED_LENGTHS {
+                let cell = block_cell(key_format, value_format, cached_len, head_dim);
+                assert!(
+                    cell.metal_vs_cpu < BLOCK_K_CPU_BOUND,
+                    "K {key_format:?} V {value_format:?} head_dim {head_dim} cached_len {cached_len}: metal over the block cache disagrees with the f32 cpu oracle over the host-decoded K and V: {}",
+                    cell.metal_vs_cpu
+                );
+                assert!(
+                    cell.metal_vs_host_decode < 1e-4,
+                    "K {key_format:?} V {value_format:?} head_dim {head_dim} cached_len {cached_len}: {}",
+                    cell.metal_vs_host_decode
+                );
+                cells += 1;
+            }
+        }
+    }
+    assert_eq!(cells, 48, "4 pairings x 3 head dims x 4 cached lengths");
 }
 
 #[cfg(all(feature = "instrument", feature = "metal-output-placement"))]
@@ -971,7 +1020,7 @@ fn cached_attention_decode_split_times_an_f32_kv_cache_against_a_binary16_kv_cac
 }
 
 #[test]
-fn cached_attention_declines_a_block_v_cache_instead_of_reading_it_as_f32() {
+fn cached_attention_declines_a_scalar_k_beside_a_block_v_instead_of_reading_it_as_f32() {
     let policy = production_numeric_policy();
     let fixture = gqa_decode_fixture(199, 64);
     let output_roots = [fixture.roots[0]];
@@ -982,12 +1031,13 @@ fn cached_attention_declines_a_block_v_cache_instead_of_reading_it_as_f32() {
         .find(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
         .expect("the fixture contains a cached attention operation");
     let mut mixed_with_block_value = omega::PackedOperands::new();
-    for index in [2, 3, 6] {
-        mixed_with_block_value.insert(attention.operands()[index].0, NumericFormat::Q4_0);
+    for index in [2, 3] {
+        mixed_with_block_value.insert(attention.operands()[index].0, NumericFormat::Float16);
     }
+    mixed_with_block_value.insert(attention.operands()[6].0, NumericFormat::Q4_0);
 
     let error = omega::emit(attention, &mixed_with_block_value, policy)
-        .expect_err("a block V cache has no read path");
+        .expect_err("a scalar K beside a block V has no read path");
 
     assert!(matches!(error, omega::EmitError::CachedAttentionKvCodecNotSupported { .. }), "{error:?}");
 }

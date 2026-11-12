@@ -409,17 +409,19 @@ fn control_a_corrupted_q4_0_scale_byte_changes_the_rendered_decode() {
 }
 
 #[test]
-fn a_block_k_beside_a_scalar_v_is_read_and_every_other_pairing_is_refused_naming_the_kernel_capability() {
+fn a_block_k_beside_a_scalar_or_block_v_is_read_and_every_other_pairing_is_refused_naming_the_kernel_capability() {
     let q4_0 = NumericFormat::Q4_0;
+    let q8_0 = NumericFormat::Q8_0;
     let f16 = NumericFormat::Float16;
 
     assert_eq!(super::cached_attention_kv_codecs_for(&q4_0, &f16), Ok((Some(q4_0), Some(f16))));
     assert_eq!(super::cached_attention_key_codec_for(&q4_0), Ok(Some(q4_0)));
-    assert!(super::cached_attention_kv_codecs_for(&q4_0, &q4_0).is_err(), "a block V has no read path");
-    assert!(super::cached_attention_kv_codecs_for(&NumericFormat::Q8_0, &f16).is_ok(), "Q8_0 is a readable block layout too");
+    assert_eq!(super::cached_attention_kv_codecs_for(&q4_0, &q4_0), Ok((Some(q4_0), Some(q4_0))), "a block V reads through its layout");
+    assert_eq!(super::cached_attention_kv_codecs_for(&q8_0, &q4_0), Ok((Some(q8_0), Some(q4_0))), "K and V may be different block layouts");
+    assert!(super::cached_attention_kv_codecs_for(&q8_0, &f16).is_ok(), "Q8_0 is a readable block layout too");
     assert!(super::cached_attention_kv_codecs_for(&NumericFormat::Float32, &f16).is_err(), "a plain K beside a narrow V is a mixed pair");
     assert!(super::cached_attention_kv_codecs_for(&q4_0, &NumericFormat::Float32).is_err(), "a block K beside a plain V is a mixed pair");
-    assert!(super::cached_attention_kv_codec_for(&q4_0).is_err(), "one block format for both K and V is refused");
+    assert!(super::cached_attention_kv_codecs_for(&f16, &q4_0).is_err(), "a scalar K beside a block V is not read");
     assert!(super::cached_attention_row_tiled_kv_codec_for(&q4_0).is_err(), "row-tiled keeps refusing a block cache");
 }
 

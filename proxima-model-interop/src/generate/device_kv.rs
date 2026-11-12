@@ -1650,24 +1650,24 @@ mod tests {
     }
 
     #[test]
-    fn a_q4_0_device_cache_is_refused_at_adoption_with_the_cache_type_named() {
+    fn a_scalar_key_beside_a_q4_0_value_is_refused_at_adoption_with_the_cache_types_named() {
         let mut caches = alloc::vec![LayerCacheState::Attention(host_cache(None, 10))];
         let widths = [LayerPadRowWidths::Attention {
             even_odd_row: EVEN_ODD_ROW,
             v_row: V_ROW,
         }];
-        let error = DeviceKv::adopt(
+        let error = DeviceKv::adopt_pair(
             &mut caches,
             &widths,
             10,
             (40, 4),
-            3,
+            (3, 3),
             allocate_placed_buffer,
-            NumericFormat::Q4_0,
+            (NumericFormat::Float16, NumericFormat::Q4_0),
         )
         .err()
-        .expect("a Q4_0 device cache has no read path");
-        assert!(error.to_string().contains("device kv cache type"));
+        .expect("a scalar key beside a block value has no read path");
+        assert!(error.to_string().contains("device kv cache types"));
     }
 
     #[test]
@@ -1867,31 +1867,32 @@ mod tests {
     }
 
     #[test]
-    fn a_quantized_device_cache_is_refused_at_adoption() {
+    fn a_q8_0_key_beside_a_binary32_value_is_refused_at_adoption() {
         let mut caches = alloc::vec![LayerCacheState::Attention(host_cache(None, 10))];
         let widths = [LayerPadRowWidths::Attention {
             even_odd_row: EVEN_ODD_ROW,
             v_row: V_ROW,
         }];
 
-        let error = DeviceKv::adopt(
+        let error = DeviceKv::adopt_pair(
             &mut caches,
             &widths,
             10,
             (40, 4),
-            3,
+            (3, 3),
             allocate_placed_buffer,
-            NumericFormat::Q8_0,
+            (NumericFormat::Q8_0, NumericFormat::Float32),
         )
         .err()
-        .expect("a Q8_0 device cache has no read path");
+        .expect("a block key beside a plain value is a mixed pair");
 
-        assert!(error.to_string().contains("device kv cache type"));
+        assert!(error.to_string().contains("device kv cache types"));
     }
 
     #[test]
-    fn every_block_format_a_codec_resolves_is_still_refused_by_the_kernel_classifier() {
+    fn a_block_format_is_a_readable_cache_exactly_when_its_description_is_a_readable_block() {
         let mut resolved = 0usize;
+        let mut readable = 0usize;
         for format in NumericFormat::ALL
             .iter()
             .filter(|format| !matches!(format, NumericFormat::Scalar(_)))
@@ -1901,12 +1902,18 @@ mod tests {
             }
             resolved += 1;
 
-            let refusal = kernel_codecs(format, format);
+            let admitted = kernel_codecs(format, format).is_ok();
 
-            assert!(matches!(refusal, Err(InteropError::UnsupportedServingConfig(_))), "{format:?}");
+            assert_eq!(
+                admitted,
+                omega::msl::layout_render::readable_block_layout(format).is_some(),
+                "{format:?}: admission must follow the description, not a list"
+            );
+            readable += usize::from(admitted);
         }
 
         assert_eq!(resolved, 13);
+        assert!(readable >= 2, "Q4_0 and Q8_0 are readable block layouts, got {readable}");
     }
 
     #[test]
