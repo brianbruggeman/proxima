@@ -4,8 +4,9 @@
 //! composes the raw `OrtApi` function table from [`crate::OrtRuntime`]; every resource is released in `Drop`.
 
 use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::ptr;
 
 use crate::bindings::{
@@ -69,7 +70,24 @@ impl<'rt> EmbedSession<'rt> {
     /// # Errors
     /// any onnxruntime failure or a model whose signature is not the BGE one.
     pub fn new(runtime: &'rt OrtRuntime, model_path: &Path) -> Result<Self, LoadError> {
+        Self::with_profile_prefix(runtime, model_path, None)
+    }
+
+    /// [`new`](Self::new) plus onnxruntime's built-in profiler: with `Some(prefix)` the session
+    /// records one json event per node per `Run`, written by [`end_profiling`](Self::end_profiling).
+    /// profiling adds per-node bookkeeping, so a profiled run is for attribution, never for timing.
+    ///
+    /// # Errors
+    /// any onnxruntime failure, a prefix containing NUL, or a model whose signature is not the BGE one.
+    pub fn with_profile_prefix(
+        runtime: &'rt OrtRuntime,
+        model_path: &Path,
+        profile_prefix: Option<&Path>,
+    ) -> Result<Self, LoadError> {
         let api = runtime.api();
+        let prefix = profile_prefix
+            .map(|prefix| CString::new(prefix.as_os_str().as_bytes()).map_err(|_| LoadError::BadPath(prefix.to_path_buf())))
+            .transpose()?;
         let mut this = Self {
             runtime,
             env: ptr::null_mut(),
@@ -94,6 +112,10 @@ impl<'rt> EmbedSession<'rt> {
             check(api, "SetIntraOpNumThreads", set_intra(this.options, 1))?;
             check(api, "SetInterOpNumThreads", set_inter(this.options, 1))?;
             check(api, "SetSessionExecutionMode", set_mode(this.options, ExecutionMode_ORT_SEQUENTIAL))?;
+            if let Some(prefix) = &prefix {
+                let enable = api.EnableProfiling.ok_or(missing("EnableProfiling"))?;
+                check(api, "EnableProfiling", enable(this.options, prefix.as_ptr()))?;
+            }
             check(api, "CreateSession", create_session(this.env, path.as_ptr(), this.options, &raw mut this.session))?;
             check(
                 api,
@@ -103,6 +125,28 @@ impl<'rt> EmbedSession<'rt> {
         }
         this.verify_signature()?;
         Ok(this)
+    }
+
+    /// stops the profiler and returns the path of the json file onnxruntime wrote.
+    ///
+    /// # Errors
+    /// any onnxruntime failure, including a session built without a profile prefix.
+    pub fn end_profiling(&self) -> Result<PathBuf, LoadError> {
+        let api = self.runtime.api();
+        let get_allocator = api.GetAllocatorWithDefaultOptions.ok_or(LoadError::MissingFunction("GetAllocatorWithDefaultOptions"))?;
+        let end = api.SessionEndProfiling.ok_or(LoadError::MissingFunction("SessionEndProfiling"))?;
+        let mut allocator = ptr::null_mut();
+        let mut raw: *mut c_char = ptr::null_mut();
+        // safety: allocator is the process-wide default; raw is allocated by it and freed after the copy
+        unsafe {
+            check(api, "GetAllocatorWithDefaultOptions", get_allocator(&raw mut allocator))?;
+            check(api, "SessionEndProfiling", end(self.session, allocator, &raw mut raw))?;
+            let owned = CStr::from_ptr(raw).to_owned();
+            if let Some(free) = (*allocator).Free {
+                free(allocator, raw.cast::<c_void>());
+            }
+            Ok(PathBuf::from(OsStr::from_bytes(owned.to_bytes())))
+        }
     }
 
     fn verify_signature(&self) -> Result<(), LoadError> {
