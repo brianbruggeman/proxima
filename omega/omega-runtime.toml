@@ -70,7 +70,15 @@ split_k_max_rows = 4096
 # rows 2663 / 2411. 128 rows is a lone tiled win (666 / 636): the tiled cost
 # steps up at every 32-row tile edge, so 129..144 lose again. Ubatch-32
 # prefill: 495 tok/s row-blocked, 364 tiled.
-min_tokens = 160
+min_tokens = 64
+# 64, down from 160. flint-UD-Q4_K_XL, 84-token prefill, per-dispatch gpu us
+# per op, row-blocked/cooperative at 160 -> tiled at 64 (PROXNUM-78, dispatch
+# profile of the 1662-op program): attn_q [84,32,128,2048] 1984 -> 278,
+# attn_output [84,4,8,128,2048] 1557 -> 315, shared-expert gate/up
+# [84,2048,1024] 508 -> 126, dense attention value reduce [84,160,4,8,128]
+# 4049 -> 190, scores [84,84,4,8,64] 689 -> 205; whole program 1061 ms -> 522
+# ms. The 160 above was measured on gemma4-E2B Q4_0 where 64..144 rows lost 3-8%
+# to the tiled fixed cost; that model is re-measured in the same card.
 
 # per-threadgroup output tile shape (ROW 109 redesign) — ports
 # `ggml-metal.metal:6487` (`BLOCK_SIZE_M`). Must be a multiple of 16 (2
