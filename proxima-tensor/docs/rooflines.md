@@ -637,6 +637,59 @@ ms/sentence, CoV 1.76%, `intra_op=1 inter_op=1`, `scripts/onnx_reference/`)
 is itself **2.1x-2.9x off the AMX ceiling** — the incumbent is a rung, not
 the target.
 
+### Head-to-head vs onnxruntime 1.20.1, 2026-11-11 (PROXNUM-74)
+
+Method: `tools/ort-arm` `bge_ort` (CPU EP, intra/inter-op 1, sequential, batch 1, 1 warmup, 5 runs) and
+`proxima-onnx/examples/bge_eval.rs` alternated per round, one process each, 12 rounds, 1-minute load
+8.9-9.7 at the final rounds and 88.8-90.9 at the baseline rounds (both LOADED, ms are not quiet-box
+numbers). Each cell is the per-round mean over the 3 sentences; the ratio is paired within a round.
+Logs: `/Users/brianbruggeman/.cache/kvgate/proxnum74/{base,fin}_table.txt`.
+
+| arm | baseline 318cd15c median ms (CoV) | final 45308d72 median ms (CoV) | paired ratio vs ORT, baseline -> final (median, min-max) |
+|---|---|---|---|
+| onnxruntime | 5.794 (2.28%) | 5.684 (5.46%) | 1.000 |
+| proxima Accelerate-on | 6.363 (6.88%) | 4.897 (9.51%) | 1.096 (1.032-1.364) -> 0.869 (0.723-1.143) |
+| proxima NEON | 7.470 (1.56%) | 6.107 (2.90%) | 1.272 (1.198-1.308) -> 1.080 (0.904-1.097) |
+
+The Accelerate CoV is carried by 3 contended final rounds (6.50, 5.57, 5.52 ms against 4.74-4.92 for the
+other 9). Correctness at 45308d72 against the ORT embeddings: cosine 1.000000000 and max abs diff
+1.4e-7..1.9e-7 on all 3 sentences for both arms (`emb_diff`); `bge_eval` assertions pass (NEON
+bit-identical to `evaluate_named`, Accelerate max abs diff 0.0 / 1.04e-7 / 9.5e-8).
+
+Per-op, us per sentence (mean of the 3 sentences, process loaded 19-30, so shares carry, absolutes do not).
+ORT is its own profiler json (`BGE_ORT_PROFILE_PREFIX`, 61 runs; profiled session ran 6.76 ms/sentence
+against 5.82 unprofiled, so ORT cells include profiler cost). proxima is `Instant` per node
+(`epilogue-profile-probe` plus a throwaway per-node table, not committed), with each lowered node
+attributed to the ONNX node whose lowering produced it.
+
+| op family | ORT | proxima Accel baseline | proxima Accel final | proxima NEON final |
+|---|---|---|---|---|
+| MatMul (96, ORT adds 12 FusedMatMul) | 5114 | 4873 (arena built accel-on, not comparable) | 4441 | 4984 |
+| GELU (ORT BiasGelu; proxima Mul) | 236 | 420 | 405 | 391 |
+| LayerNorm (25 sites) | 169 | 460 | 73 | 62 |
+| Transpose (48) | 92 | 1132 | 279 | 252 |
+| Add (ORT 98 nodes, proxima 85) | 199 | 226 | 169 | 153 |
+| Softmax (12) | 21 | 107 | 108 | 106 |
+| Reshape | 71 | 30 | 30 | 27 |
+| Gather/Slice/Cast/other | 30 | 1 | 1 | 1 |
+| probe wall | 6760 (profiled) | 7357 | 5615 | 6083 |
+
+Mechanisms, each from the node dump: the 48 head-split Transposes read their input through an
+`IndexMap::Computed` gather over a call-invariant flat-index table (the lowered `Reshape` split fused
+into the transpose); `BoundOp` for node 274 shows `Lookup { index_layout: strides [0,32,0,1],
+element_stride: 1, extent: 384 }`, which fails the affine fast-path gate and ran the per-element cursor
+interpreter at 9.4 ns/element (28.8 us for 3072 elements). `collapse_gather_row` rewrites an
+arithmetic-progression index row as a base plus a stride for the width kernels (28.8 -> 6.3 us), and the
+two-`Identity` fused body now takes the bare-copy kernel (-> 5.2 us; the strided K^T read 31.8 -> 10.8 us).
+The LayerNorm tail re-derived gamma/beta addresses through `Layout::offset_of` for every element
+(18.4 us/site for 3072 elements); contiguous-row reads take it to 3.0 us/site.
+
+Residual, not closed: GELU (`erf_f32` calls `f32::exp` per element, 33.6 us per 12288-element node vs
+ORT BiasGelu about 20), Softmax (768-element nodes at 1.5-3.9 us each, per-row and per-call setup),
+Transpose (about 55 ns per 32-wide row), and the Accelerate FFN-up GEMM at M=8 (layer 6: 122 us vs
+ORT 114 us; the NEON tile route measured 105 us on the same node, FFN-down 89 us Accelerate / 104 us NEON
+vs ORT 109 us).
+
 ### Per-node-class profile (closes the "no BGE-side profiler breakdown" DEBT)
 
 `proxima-onnx/examples/bge_epilogue_profile.rs`, `epilogue-profile-diag`
