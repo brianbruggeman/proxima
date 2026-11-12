@@ -127,10 +127,17 @@ route_segments = 2
 # route (`route_segments` above), one dispatch per op.
 # "compacted": a prepass dispatch before the GEMM counts the tokens per
 # expert, prefix-sums the counts and writes the assignment list expert-major
-# into one buffer; the GEMM launches `ceil(tokens / 32) + experts` token tiles
-# per row tile and each threadgroup locates its (expert, tile) from the counts,
-# so an expert with many tokens gets proportionally many threadgroups and tiles
-# past the realized total exit at once. Two dispatches per op; ops with a
+# into one buffer, with a tile-to-expert table and one indirect dispatch
+# argument slot per row-tile count; the GEMM is dispatched indirectly with
+# exactly the realized token tiles per row tile and each threadgroup reads its
+# (expert, tile) from the table in two loads, so an expert with many tokens gets
+# proportionally many threadgroups and no threadgroup walks the counts.
+# flint-UD-Q4_K_XL, M1 Max, 84-token prefill, dispatch profile run 2 of 2
+# (PROXNUM-86): before, ffn_gate/up_exps Iq4_XS 836/840 us regression intercept
+# at 9.9 us per touched expert; after, 11/91 us at 12.0/11.6 us per touched
+# expert. Walking the counts was the intercept: with the walk replaced by an
+# immediate return the same 2176-threadgroup launch cost 180 us, the prepass
+# alone. Two dispatches per op; ops with a
 # prepass are kept out of horizontal merging and their live capture is marked
 # unreplayable. "compacted" is the default: granite prefill (3 processes x 7
 # runs, interleaved, text hash equal to the other mode) read 39.994 ms against

@@ -10861,7 +10861,15 @@ mod expert_grouped_route_segments {
             return;
         };
         let threadgroups = grouped_prepass_threadgroups(300);
-        assert_eq!(words as u64, 1 + 2 * 8 + 300 + threadgroups * 8);
+        assert_eq!(
+            words as u64,
+            GROUPED_ROUTE_HEADER_WORDS
+                + 2 * 8
+                + 300
+                + 8
+                + grouped_tile_upper_bound(300, 8)
+                + threadgroups * 8
+        );
         assert!(count.entry.ends_with("_route_prepass"), "{}", count.entry);
         assert!(
             place.entry.ends_with("_route_prepass_place"),
@@ -10927,8 +10935,12 @@ mod expert_grouped_route_segments {
             "{source}"
         );
         assert!(
-            source.contains("if (grouped_expert < 0) { return; }"),
+            source.contains("route_compaction[tile_start_base + experts + (uint)tile_index]"),
             "{source}"
+        );
+        assert!(
+            !source.contains("scan_expert < experts; ++scan_expert) {\n        uint expert_count"),
+            "the locate step must index the tile table, not walk the per-expert counts: {source}"
         );
         let k_loop =
             format!("for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH})");
@@ -10941,6 +10953,7 @@ mod expert_grouped_route_segments {
         let counts = expert_counts(route);
         let offsets = exclusive_offsets(&counts);
         let mut words = vec![route.len() as u32];
+        words.resize(GROUPED_ROUTE_HEADER_WORDS as usize, 0);
         words.extend(&counts);
         words.extend(&offsets);
         words.extend(expert_major_list(route, &offsets));
@@ -10965,15 +10978,16 @@ mod expert_grouped_route_segments {
     }
 
     fn place_pass(route: &[usize], entries: usize, scratch: &[[u32; EXPERTS]]) -> Vec<u32> {
-        let list_base = 1 + 2 * EXPERTS;
+        let header = GROUPED_ROUTE_HEADER_WORDS as usize;
+        let list_base = header + 2 * EXPERTS;
         let mut words = vec![0u32; list_base + route.len()];
         let totals: Vec<u32> = (0..EXPERTS)
             .map(|expert| scratch.iter().map(|row| row[expert]).sum())
             .collect();
         let offsets = exclusive_offsets(&totals);
         words[0] = route.len() as u32;
-        words[1..1 + EXPERTS].copy_from_slice(&totals);
-        words[1 + EXPERTS..list_base].copy_from_slice(&offsets);
+        words[header..header + EXPERTS].copy_from_slice(&totals);
+        words[header + EXPERTS..list_base].copy_from_slice(&offsets);
         for threadgroup in 0..scratch.len() {
             let chunk = chunk_of(route.len(), entries, threadgroup);
             for expert in 0..EXPERTS {
@@ -11051,7 +11065,7 @@ mod expert_grouped_route_segments {
 
         let compaction = two_pass_compaction(&route, entries);
 
-        let mut seen = compaction[1 + 2 * EXPERTS..].to_vec();
+        let mut seen = compaction[GROUPED_ROUTE_HEADER_WORDS as usize + 2 * EXPERTS..].to_vec();
         seen.sort_unstable();
         assert!(seen.iter().copied().eq(0..route.len() as u32));
     }
@@ -11087,7 +11101,12 @@ mod expert_grouped_route_segments {
         assert_eq!(grouped_prepass_threadgroups(entries + 1), 2);
         assert_eq!(
             grouped_compaction_words(8000, 32),
-            1 + 2 * 32 + 8000 + threadgroups * 32
+            GROUPED_ROUTE_HEADER_WORDS
+                + 2 * 32
+                + 8000
+                + 32
+                + grouped_tile_upper_bound(8000, 32)
+                + threadgroups * 32
         );
     }
 
