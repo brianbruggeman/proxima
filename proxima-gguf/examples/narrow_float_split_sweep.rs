@@ -11,13 +11,17 @@
 //! `cargo run --release -p proxima-gguf --example narrow_float_split_sweep -- <gguf> accuracy`
 //! `cargo run --release -p proxima-gguf --example narrow_float_split_sweep -- <gguf> support`
 //!
+//! `narrow_float_split_sweep raw <file.f32> <role> [<tensor-label>]` runs the same sweep over a
+//! little-endian f32 file (captured K/V or activations); `gen-normal <out.f32> [<count>]` writes a
+//! deterministic N(0,1) file to check it against.
+//!
 //! `accuracy` prints one TSV row per (tensor, split); `support` prints one row per split saying whether
 //! a [`BlockLayout`] describes it, whether the layout decodes real bytes the way the host quantizer
 //! meant, and which host encode routes accept it.
 
 use std::env;
 use std::error::Error;
-use std::fs::File;
+use std::fs::{self, File};
 
 use memmap2::Mmap;
 use proxima_gguf::pipe::{ParsedGguf, parse_complete};
@@ -480,9 +484,70 @@ fn support(mapped: &Mmap, parsed: &ParsedGguf) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+fn read_f32_le(path: &str) -> Result<Vec<f32>, Box<dyn Error>> {
+    let bytes = fs::read(path)?;
+    if bytes.len() % 4 != 0 {
+        return Err(format!("{path}: {} bytes is not a multiple of 4", bytes.len()).into());
+    }
+    Ok(bytes.chunks_exact(4).map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]])).collect())
+}
+
+fn raw(path: &str, role: &str, label: &str) -> Result<(), Box<dyn Error>> {
+    let values = read_f32_le(path)?;
+    println!("role\ttensor\tgguf_type\telements\tsplit\tbits_per_element\tsqnr_db\trel_rms\tmax_rel\tmax_abs_over_peak\tsaturated_frac\tflushed_frac");
+    let prefix = format!("{role}\t{label}\traw\t{}", values.len());
+    for split in &all_splits() {
+        let errors = measure(split, &values)?;
+        println!("{}", errors.row(&prefix, &split.label(), split.bits_per_element()));
+    }
+    Ok(())
+}
+
+fn xorshift64(state: &mut u64) -> u64 {
+    *state ^= *state << 13;
+    *state ^= *state >> 7;
+    *state ^= *state << 17;
+    *state
+}
+
+fn unit_open(state: &mut u64) -> f64 {
+    ((xorshift64(state) >> 11) as f64 + 0.5) / (1u64 << 53) as f64
+}
+
+/// Box-Muller over a fixed-seed xorshift: the same N(0,1) file on every run.
+fn normal_values(count: usize) -> Vec<f32> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+    let mut values = Vec::with_capacity(count + 1);
+    while values.len() < count {
+        let radius = (-2.0 * unit_open(&mut state).ln()).sqrt();
+        let angle = std::f64::consts::TAU * unit_open(&mut state);
+        values.push((radius * angle.cos()) as f32);
+        values.push((radius * angle.sin()) as f32);
+    }
+    values.truncate(count);
+    values
+}
+
+fn gen_normal(path: &str, count: usize) -> Result<(), Box<dyn Error>> {
+    let bytes: Vec<u8> = normal_values(count).iter().flat_map(|value| value.to_le_bytes()).collect();
+    fs::write(path, bytes)?;
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn Error>> {
     let mut args = env::args().skip(1);
-    let path = args.next().ok_or("usage: narrow_float_split_sweep <gguf> accuracy|support")?;
+    let path = args.next().ok_or("usage: narrow_float_split_sweep <gguf> accuracy|support | raw <file.f32> <role> [<tensor-label>] | gen-normal <out.f32> [<count>]")?;
+    if path == "raw" {
+        let file_path = args.next().ok_or("usage: narrow_float_split_sweep raw <file.f32> <role> [<tensor-label>]")?;
+        let role = args.next().ok_or("usage: narrow_float_split_sweep raw <file.f32> <role> [<tensor-label>]")?;
+        let label = args.next().unwrap_or_else(|| file_path.clone());
+        return raw(&file_path, &role, &label);
+    }
+    if path == "gen-normal" {
+        let out = args.next().ok_or("usage: narrow_float_split_sweep gen-normal <out.f32> [<count>]")?;
+        let count = args.next().map_or(Ok(1_000_000), |text| text.parse())?;
+        return gen_normal(&out, count);
+    }
     let mode = args.next().ok_or("usage: narrow_float_split_sweep <gguf> accuracy|support")?;
     let file = File::open(&path)?;
     // the mapping is read-only and the file is not modified while this process runs
