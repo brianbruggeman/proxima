@@ -2718,7 +2718,7 @@ impl CapturedDispatch {
     /// narrowed to `codec`, so a variant kernel that reads `half*`, `ushort4` or
     /// `uchar4` there runs on the data the f32 kernel ran on. The narrowing is
     /// [`proxima_numeric::FormatCodec::for_format`] plus its `encode`, the same
-    /// codec [`narrow_placed_buffer`] applies, for any format that encodes.
+    /// codec the cache planes of a device KV are written with, for any format that encodes.
     ///
     /// # Errors
     ///
@@ -8647,10 +8647,9 @@ mod shared_route_compaction_tests {
 pub(super) mod narrowed_buffer_parity_tests {
     use super::{CapturedDispatch, device_and_queue, shared_buffer_from};
     use crate::GridSpec;
-    use crate::metal::{allocate_placed_buffer, narrow_placed_buffer, try_write_placed_buffer_f32};
-    use half::{bf16, f16};
+        use half::{bf16, f16};
     use objc2_foundation::NSString;
-    use objc2_metal::{MTLBuffer, MTLCompileOptions, MTLDevice, MTLLibrary};
+    use objc2_metal::{MTLCompileOptions, MTLDevice, MTLLibrary};
     use proxima_numeric::{FormatCodec, NumericFormat};
     use proxima_tensor::BFloat8;
 
@@ -8719,19 +8718,15 @@ pub(super) mod narrowed_buffer_parity_tests {
         }
     }
 
-    fn placed_bytes(values: &[f32], format: &NumericFormat) -> Vec<u8> {
+    fn encoded_bytes(values: &[f32], format: &NumericFormat) -> Vec<u8> {
         let codec = FormatCodec::for_format(format).expect("a scalar format resolves");
-        let staging = allocate_placed_buffer(values.len() * 4).expect("allocates f32 staging");
-        let packed_len = codec.packed_len(values.len()).expect("whole elements");
-        let cache = allocate_placed_buffer(packed_len).expect("allocates cache");
-        try_write_placed_buffer_f32(&staging, 0, values).expect("row fits staging");
-        narrow_placed_buffer(&staging, 0, &cache, 0, &codec, values.len()).expect("row narrows");
-        // idle shared buffer, `packed_len` bytes were just written
-        unsafe { core::slice::from_raw_parts(cache.contents().as_ptr().cast::<u8>(), packed_len) }.to_vec()
+        let mut packed = alloc::vec![0u8; codec.packed_len(values.len()).expect("whole elements")];
+        codec.encode(values, &mut packed).expect("the row encodes");
+        packed
     }
 
     #[test]
-    fn narrowed_buffers_match_per_value_encoding_and_narrow_placed_buffer_for_every_cache_format() {
+    fn narrowed_buffers_match_per_value_encoding_and_the_format_codec_for_every_cache_format() {
         let row = cache_row();
         assert_eq!(CACHE_FORMATS.len(), 3, "the parity loop must visit every cache format");
         for format in &CACHE_FORMATS {
@@ -8741,7 +8736,7 @@ pub(super) mod narrowed_buffer_parity_tests {
             let actual = narrowed.bound_buffer_bytes_at(0).expect("binding 0 is bound");
             let expected: Vec<u8> = row.iter().flat_map(|value| removed_arm_bytes(format, *value)).collect();
             assert_eq!(actual, expected, "{format:?} against the removed per-value closures");
-            assert_eq!(actual, placed_bytes(&row, format), "{format:?} against narrow_placed_buffer");
+            assert_eq!(actual, encoded_bytes(&row, format), "{format:?} against the format codec");
         }
     }
 

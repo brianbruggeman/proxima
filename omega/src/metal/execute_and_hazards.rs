@@ -1444,54 +1444,6 @@ pub fn read_placed_buffer(
     Ok(decoded)
 }
 
-/// Encodes `element_count` f32s of `source` (at `source_byte_offset`) into the codec's format in
-/// `destination` at `destination_byte_offset`, with no host allocation: the step-end narrowing of a
-/// cache whose format is not the graph's f32 output.
-///
-/// # Contract
-/// The buffers are distinct allocations and no command buffer is in flight. Neither offset nor the
-/// source range is trusted otherwise: alignment and both ranges are checked before any slice is formed.
-///
-/// # Errors
-/// [`NumericError::InputNotBlockMultiple`] (`format: "binary32"`, `found: source_byte_offset`) when the
-/// source address is not `f32`-aligned, i.e. the offset is not a whole element,
-/// [`NumericError::InputNotElementMultiple`] when `element_count` is not whole blocks of the
-/// codec's format, [`NumericError::OutputSizeMismatch`] when the source past `source_byte_offset` holds
-/// fewer than `element_count` `f32`s (`found` is how many it holds, `expected` is `element_count`) or
-/// the destination past `destination_byte_offset` is shorter than the packed range (an offset past
-/// either end is an empty window). No variant names an offset: the window is the quantity checked.
-#[cfg(feature = "metal-output-placement")]
-pub fn narrow_placed_buffer(
-    source: &PlacedBuffer,
-    source_byte_offset: usize,
-    destination: &PlacedBuffer,
-    destination_byte_offset: usize,
-    codec: &FormatCodec,
-    element_count: usize,
-) -> Result<(), NumericError> {
-    let (source_start, source_window) = placed_tail(source, source_byte_offset);
-    if !source_start.cast::<f32>().is_aligned() {
-        return Err(NumericError::InputNotBlockMultiple {
-            format: "binary32",
-            found: source_byte_offset,
-            block_bytes: size_of::<f32>(),
-        });
-    }
-    let source_held = source_window / size_of::<f32>();
-    if element_count > source_held {
-        return Err(NumericError::OutputSizeMismatch { found: source_held, expected: element_count });
-    }
-    let (destination_start, destination_window) = placed_tail(destination, destination_byte_offset);
-    // SAFETY: idle shared buffers (every placed execute waits) and distinct allocations (caller contract); `element_count <= source_window / 4` was just checked, so the source slice lies inside the source allocation, and the destination slice is the `destination_window` bytes after a start `placed_tail` kept inside its allocation, which the codec checks against the packed range. The source pointer was just checked `f32`-aligned.
-    let (rows, packed) = unsafe {
-        (
-            core::slice::from_raw_parts(source_start.cast::<f32>(), element_count),
-            core::slice::from_raw_parts_mut(destination_start, destination_window),
-        )
-    };
-    codec.encode(rows, packed).map(drop)
-}
-
 /// Moves `byte_len` bytes from `from_byte` to `to_byte` inside one
 /// [`PlacedBuffer`], overlap allowed -- how a sliding-window KV buffer
 /// compacts its live rows back to the front without leaving the device's
@@ -2462,23 +2414,6 @@ mod placed_format_tests {
     }
 
     #[test]
-    fn bf16_placed_preserves_adjacent_bytes_at_nonzero_offset() {
-        let staging = allocate_placed_buffer(16).expect("allocates f32 staging bytes");
-        let cache = allocate_placed_buffer(16).expect("allocates BF16 cache bytes");
-        try_write_placed_buffer_f32(&staging, 0, &[9.0, 1.5, 2.5, -7.0]).expect("four f32s fit the 16-byte staging buffer");
-        let bf16 = codec(&NumericFormat::BFloat16);
-        write_placed_buffer(&cache, 0, &bf16, &[9.0]).expect("encodes");
-        write_placed_buffer(&cache, 12, &bf16, &[-7.0]).expect("encodes");
-
-        narrow_placed_buffer(&staging, 4, &cache, 8, &bf16, 2).expect("narrows");
-
-        let read = |offset, count| read_placed_buffer(&cache, offset, &bf16, count).expect("decodes");
-        assert_eq!(read(0, 1), vec![9.0]);
-        assert_eq!(read(8, 2), vec![1.5, 2.5]);
-        assert_eq!(read(12, 1), vec![-7.0]);
-    }
-
-    #[test]
     fn bf8_placed_matches_golden_vectors() {
         let buffer = allocate_placed_buffer(16).expect("allocates BF8 fixture bytes");
         let values = [
@@ -2517,33 +2452,6 @@ mod placed_format_tests {
                 .collect::<Vec<_>>(),
             expected
         );
-    }
-
-    #[test]
-    fn bf8_placed_narrows_at_nonzero_offsets_without_touching_sentinels() {
-        let staging = allocate_placed_buffer(16).expect("allocates f32 staging bytes");
-        let cache = allocate_placed_buffer(8).expect("allocates BF8 cache bytes");
-        let bf8 = codec(&NumericFormat::BFloat8);
-        try_write_placed_buffer_f32(&staging, 0, &[9.0, 1.5, 2.5, -7.0]).expect("four f32s fit the 16-byte staging buffer");
-        write_placed_buffer(&cache, 0, &bf8, &[9.0]).expect("encodes");
-        write_placed_buffer(&cache, 7, &bf8, &[-7.0]).expect("encodes");
-
-        narrow_placed_buffer(&staging, 4, &cache, 2, &bf8, 2).expect("narrows");
-
-        assert_eq!(stored_bytes(&cache, 8), &[0x48, 0, 0x3e, 0x41, 0, 0, 0, 0xc7]);
-        assert_eq!(read_placed_buffer(&cache, 2, &bf8, 2).expect("decodes"), [1.5, 2.5]);
-    }
-
-    #[test]
-    fn bf8_placed_narrow_rounds_exact_halfway_values_to_even_like_the_incumbent() {
-        let staging = allocate_placed_buffer(12).expect("allocates f32 staging bytes");
-        let cache = allocate_placed_buffer(4).expect("allocates BF8 cache bytes");
-        let bf8 = codec(&NumericFormat::BFloat8);
-        try_write_placed_buffer_f32(&staging, 0, &[1.125, 1.375, 61440.0]).expect("three f32s fit the 12-byte staging buffer");
-
-        narrow_placed_buffer(&staging, 0, &cache, 0, &bf8, 3).expect("narrows");
-
-        assert_eq!(&stored_bytes(&cache, 3), &[0x3c, 0x3e, 0x7c]);
     }
 
     /// onnxruntime `float8.h:454-462` (`Float8E5M2::ToFloat`): every NaN code widens to the canonical
@@ -2606,37 +2514,6 @@ mod placed_format_tests {
         let buffer = allocate_placed_buffer(64).expect("allocates fixture bytes");
 
         let refused = read_placed_buffer(&buffer, 0, &q4_0, 33);
-
-        assert_eq!(
-            refused,
-            Err(NumericError::InputNotElementMultiple { format: "q4_0", found: 33, elements: 32 })
-        );
-    }
-
-    #[test]
-    fn narrowing_kv_like_rows_to_q4_0_stores_the_host_encode_bytes() {
-        let values = k_like_rows(96);
-        let q4_0 = codec(&NumericFormat::Q4_0);
-        let packed_len = q4_0.packed_len(values.len()).expect("96 values are three whole blocks");
-        let mut host_packed = vec![0u8; packed_len];
-        q4_0.encode(&values, &mut host_packed).expect("host encodes q4_0");
-        let staging = allocate_placed_buffer(values.len() * 4).expect("allocates the f32 staging rows");
-        let cache = allocate_placed_buffer(packed_len).expect("allocates the q4_0 cache bytes");
-        try_write_placed_buffer_f32(&staging, 0, &values).expect("the staging buffer holds every row");
-
-        narrow_placed_buffer(&staging, 0, &cache, 0, &q4_0, values.len()).expect("q4_0 narrows");
-
-        assert_eq!(packed_len, 54);
-        assert_eq!(stored_bytes(&cache, packed_len), host_packed);
-    }
-
-    #[test]
-    fn narrowing_a_placed_element_count_that_is_not_whole_blocks_is_an_error_naming_the_format() {
-        let q4_0 = codec(&NumericFormat::Q4_0);
-        let staging = allocate_placed_buffer(33 * 4).expect("allocates the f32 staging rows");
-        let cache = allocate_placed_buffer(64).expect("allocates fixture bytes");
-
-        let refused = narrow_placed_buffer(&staging, 0, &cache, 0, &q4_0, 33);
 
         assert_eq!(
             refused,
@@ -2718,81 +2595,6 @@ mod placed_format_tests {
 
         assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 4, expected: 2 }));
         assert_all_sentinel(&buffer);
-    }
-
-    #[test]
-    fn narrowing_to_a_destination_offset_past_the_end_is_refused_and_leaves_both_buffers_untouched() {
-        let bf16 = codec(&NumericFormat::BFloat16);
-        let staging = sentinel_buffer(16);
-        let cache = sentinel_buffer(16);
-        let past_end = placed_buffer_len(&cache) + 8;
-
-        let refused = narrow_placed_buffer(&staging, 0, &cache, past_end, &bf16, 4);
-
-        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 0, expected: 8 }));
-        assert_all_sentinel(&cache);
-        assert_all_sentinel(&staging);
-    }
-
-    #[test]
-    fn narrowing_to_a_destination_offset_with_a_window_shorter_than_the_packed_range_is_refused() {
-        let bf16 = codec(&NumericFormat::BFloat16);
-        let staging = sentinel_buffer(16);
-        let cache = sentinel_buffer(16);
-        let offset = placed_buffer_len(&cache) - 4;
-
-        let refused = narrow_placed_buffer(&staging, 0, &cache, offset, &bf16, 4);
-
-        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 4, expected: 8 }));
-        assert_all_sentinel(&cache);
-        assert_all_sentinel(&staging);
-    }
-
-    #[test]
-    fn narrowing_from_a_source_offset_past_the_end_is_refused_and_leaves_both_buffers_untouched() {
-        let bf16 = codec(&NumericFormat::BFloat16);
-        let staging = sentinel_buffer(16);
-        let cache = sentinel_buffer(16);
-        let past_end = placed_buffer_len(&staging) + 8;
-
-        let refused = narrow_placed_buffer(&staging, past_end, &cache, 0, &bf16, 4);
-
-        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 0, expected: 4 }));
-        assert_all_sentinel(&cache);
-        assert_all_sentinel(&staging);
-    }
-
-    #[test]
-    fn narrowing_from_a_source_offset_with_fewer_rows_than_requested_is_refused() {
-        let bf16 = codec(&NumericFormat::BFloat16);
-        let staging = sentinel_buffer(16);
-        let cache = sentinel_buffer(16);
-        let offset = placed_buffer_len(&staging) - 8;
-
-        let refused = narrow_placed_buffer(&staging, offset, &cache, 0, &bf16, 4);
-
-        assert_eq!(refused, Err(NumericError::OutputSizeMismatch { found: 2, expected: 4 }));
-        assert_all_sentinel(&cache);
-        assert_all_sentinel(&staging);
-    }
-
-    #[test]
-    fn narrowing_from_a_source_offset_that_is_not_a_whole_f32_is_refused_and_leaves_both_buffers_untouched() {
-        let bf16 = codec(&NumericFormat::BFloat16);
-        for misaligned in [1usize, 2, 3] {
-            let staging = sentinel_buffer(32);
-            let cache = sentinel_buffer(16);
-
-            let refused = narrow_placed_buffer(&staging, misaligned, &cache, 0, &bf16, 4);
-
-            assert_eq!(
-                refused,
-                Err(NumericError::InputNotBlockMultiple { format: "binary32", found: misaligned, block_bytes: 4 }),
-                "source offset {misaligned}"
-            );
-            assert_all_sentinel(&cache);
-            assert_all_sentinel(&staging);
-        }
     }
 
     /// Deterministic roughly-gaussian rows with a few outlier channels, the shape a K projection has.
