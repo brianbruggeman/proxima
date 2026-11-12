@@ -2583,10 +2583,30 @@ pub(super) fn body_shape(body: &ComposedBody) -> BodyShape<'_> {
             _ => {}
         }
     }
+    if let Some(operand) = identity_chain_operand(body) {
+        return BodyShape::Unary(ScalarOp::Identity, operand);
+    }
     if let Some(roles) = detect_adam_update_roles(body) {
         return BodyShape::FusedAdamUpdate(roles, body);
     }
     BodyShape::Generic(body)
+}
+
+/// The one operand a body copies when every step is an `Identity` fed by the step before it
+/// (a reshape read fused into a transpose leaves two such steps), so a multi-step chain that
+/// computes nothing takes the bare-copy kernel instead of the generic interpreter.
+fn identity_chain_operand(body: &ComposedBody) -> Option<u16> {
+    let (first, rest) = body.steps.split_first()?;
+    let StepArg::Operand(operand) = *first.args.first()? else {
+        return None;
+    };
+    let chained = first.op == ScalarOp::Identity
+        && first.args.len() == 1
+        && rest.iter().enumerate().all(|(position, step)| {
+            step.op == ScalarOp::Identity
+                && matches!(step.args.as_slice(), [StepArg::Step(source)] if usize::from(*source) == position)
+        });
+    chained.then_some(operand)
 }
 
 /// Evaluates one iteration step against a pre-classified [`BodyShape`].
