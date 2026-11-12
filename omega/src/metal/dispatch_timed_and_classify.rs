@@ -899,11 +899,6 @@ pub fn execute_plan_with_placements_dispatch_timed(
         plan.encoder_split_at
     };
 
-    // Keep the diagnostic path inside Metal's sample-buffer limit. A decode
-    // prefill can contain more dispatches than fit in one counter buffer; the
-    // unprofiled tail still executes in the same command buffer, but reports
-    // zero GPU time rather than causing a CPU fallback or a fabricated value.
-    let profiled_position_count = position_count;
     // one sample buffer per `positions_per_buffer` positions, each within the
     // device's 32 KiB cap; split mode samples three points in a single buffer.
     let positions_per_buffer = MAX_TIMESTAMP_SAMPLES / 2;
@@ -1096,7 +1091,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
                     if let Some(previous) = stage_encoder.take() {
                         previous.finish();
                     }
-                    let profile_position = position < profiled_position_count;
+                    let profile_position = position < position_count;
                     let descriptor = profile_position
                         .then(objc2_metal::MTLComputePassDescriptor::computePassDescriptor);
                     if let Some(descriptor) = &descriptor {
@@ -1143,7 +1138,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             }
         };
 
-        if dispatch_boundary && position < profiled_position_count {
+        if dispatch_boundary && position < position_count {
             unsafe {
                 encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
                     &sample_buffers[position_chunk],
@@ -1173,7 +1168,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
             None,
             None,
         )?;
-        if dispatch_boundary && position < profiled_position_count {
+        if dispatch_boundary && position < position_count {
             unsafe {
                 encoder.sampleCountersInBuffer_atSampleIndex_withBarrier(
                     &sample_buffers[position_chunk],
@@ -1308,7 +1303,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
         let gpu_ns = if split_at.is_some() {
             0
         } else {
-            if position >= profiled_position_count {
+            if position >= position_count {
                 0
             } else {
                 let chunk = &raw_chunks[position / positions_per_buffer];
