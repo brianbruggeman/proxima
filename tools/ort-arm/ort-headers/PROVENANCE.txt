@@ -1,0 +1,1 @@
+onnxruntime_c_api.h from include/ of onnxruntime-osx-arm64-1.20.1.tgz (github.com/microsoft/onnxruntime/releases/tag/v1.20.1, git commit 5c1b7ccbff7e5141c1da7a9d963d660e5741c319, tgz sha256 b678fc3c2354c771fea4fba420edeccfba205140088334df801e7fc40e83a57a); LICENSE is that repo MIT license
