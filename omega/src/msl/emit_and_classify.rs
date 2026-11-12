@@ -698,7 +698,7 @@ pub(super) fn emit_with_expert_sources_mode(
                 let replacement = if let Some(codec) = uniform_codec {
                     format!(
                         "uniform_expert_element_from_offset_{}(expert_payloads, expert_descriptors, (uint)fetched{}, {offset_name}, {})",
-                        codec_cache_token(codec),
+                        codec_cache_key(codec),
                         weight_index,
                         expert_stride,
                     )
