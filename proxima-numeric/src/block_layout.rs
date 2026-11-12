@@ -1122,6 +1122,29 @@ macro_rules! named_block_table {
 pub(crate) use named_block_table;
 
 impl BlockLayout {
+    /// One row as one block: `elements` codes of `element` after a single E8M0 scale at byte 0, so
+    /// the block length is the row length (the reduction dimension) and not a format constant. A
+    /// row of binary16 under this layout is llama's row-scaled activation staging once an
+    /// [`crate::EncodeRule`] with a divisor and a scale floor fits it. Build it per row length;
+    /// the result is plain data, so a config map names the same layout.
+    #[must_use]
+    pub const fn row_scaled(element: FloatLayout, elements: u16) -> Self {
+        let bits = element.width();
+        Self {
+            elements,
+            block_bytes: 1 + (elements as u32 * bits as u32).div_ceil(8) as u16,
+            element: coded(element, run(bits, 8, elements), None, 0),
+            multiplier: 1,
+            scale: field_at(FloatLayout::F8_E8M0, 0),
+            min: None,
+            min_multiplier: 1,
+            scale_runs: None,
+            sub: None,
+        }
+    }
+}
+
+impl BlockLayout {
     /// A layout with one scale (and at most one min) for the whole block and codes read straight
     /// from bit planes: no sub-blocks, no per-run scales, no mixed-radix words. The family the
     /// compile-time block codec instantiates.

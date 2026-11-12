@@ -123,6 +123,7 @@ const fn stored_min_rule(layout: &BlockLayout, stored_sum: bool) -> Option<Encod
         divisor: highest - lowest,
         rounding: CodeRounding::HalfUpThenTruncate,
         scale_rounding: ScaleRounding::Stored,
+        min_scale_exponent: None,
         clamp: CodeClamp::Upper,
         lowest,
         highest,
@@ -240,6 +241,7 @@ const fn two_level_rule(layout: &BlockLayout) -> Option<EncodeRule> {
         divisor: highest - lowest,
         rounding: CodeRounding::NearestEven,
         scale_rounding: ScaleRounding::Stored,
+        min_scale_exponent: None,
         clamp: CodeClamp::Both,
         lowest,
         highest,
@@ -266,17 +268,19 @@ const fn float_encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
         || layout.element.bias != 0
         || layout.scale.layout.exponent_bits == 0
         || layout.scale.layout.width() > 32
-        || code_bits(layout) > 8
+        || code_bits(layout) > 16
         || accounted != layout.block_bytes as usize
         || !layout.elements.is_multiple_of(layout.runs())
     {
         return None;
     }
     let exponent_only_scale = layout.scale.layout.mantissa_bits == 0;
+    // a code wider than a byte has no nearest-code grid, so it takes the quotient rounding
     Some(EncodeRule {
         statistic: ScaleStatistic::PeakMagnitude,
         divisor: 0,
-        rounding: if exponent_only_scale {
+        min_scale_exponent: None,
+        rounding: if exponent_only_scale && code_bits(layout) <= 8 {
             CodeRounding::NearestCodeValue
         } else {
             CodeRounding::NearestEvenQuotient
@@ -337,6 +341,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
         return Some(EncodeRule {
             statistic: ScaleStatistic::MeanMagnitude,
             divisor: 1,
+            min_scale_exponent: None,
             rounding: CodeRounding::NonNegativeBit,
             scale_rounding: ScaleRounding::Stored,
             clamp: CodeClamp::Neither,
@@ -358,6 +363,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
         return Some(EncodeRule {
             statistic: ScaleStatistic::SignedPeak,
             divisor: -bias,
+            min_scale_exponent: None,
             rounding: CodeRounding::HalfUpThenTruncate,
             scale_rounding: ScaleRounding::Stored,
             clamp: CodeClamp::Upper,
@@ -373,6 +379,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
         return Some(EncodeRule {
             statistic: ScaleStatistic::PeakMagnitude,
             divisor: reach_of(layout),
+            min_scale_exponent: None,
             rounding: CodeRounding::NearestAwayFromZero,
             scale_rounding: ScaleRounding::Stored,
             clamp: CodeClamp::Both,

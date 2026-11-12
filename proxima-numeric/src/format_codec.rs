@@ -44,7 +44,7 @@ use crate::format::NumericFormat;
 const UNNAMED: &str = "unnamed";
 
 /// The most elements a data-route block holds: its decode stages one block in a stack buffer.
-const MAX_CODED_ELEMENTS: u16 = 256;
+const MAX_CODED_ELEMENTS: u16 = 4096;
 
 // the element count up to which an identity decode copies inline: a vector loop avoids the libc memcpy call, which wins from
 // some larger size; the decode f32 cells of benches/bench_kv_cache_codec.rs (KV_BENCH_INTERLEAVED=1 KV_BENCH_CELLS=decode:f32)
@@ -201,7 +201,8 @@ impl FormatCodec {
             route: Route::Coded {
                 layout: *layout,
                 rule,
-                reach: code_reach(layout).ok()?,
+                // a stated divisor replaces the reach, so a wide code is never walked for one
+                reach: if rule.divisor == 0 { code_reach(layout).ok()? } else { rule.divisor as f32 },
                 decode: table_decode,
             },
             elements: usize::from(layout.elements),

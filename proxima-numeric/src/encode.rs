@@ -341,6 +341,14 @@ fn floor_log2(value: f32) -> i32 {
 
 /// The value a block's scale field is asked to store for `peak`, under `rule`.
 fn scale_target(rule: &EncodeRule, peak: f32, reach: f32) -> (f32, Rounding) {
+    let (target, rounding) = unfloored_scale_target(rule, peak, reach);
+    match rule.min_scale_exponent {
+        Some(floor) => (target.max(libm::ldexpf(1.0, i32::from(floor))), rounding),
+        None => (target, rounding),
+    }
+}
+
+fn unfloored_scale_target(rule: &EncodeRule, peak: f32, reach: f32) -> (f32, Rounding) {
     match rule.scale_rounding {
         ScaleRounding::Stored => (peak / reach, Rounding::NearestTiesEven),
         ScaleRounding::PowerOfTwoCeil if peak > 0.0 => (peak / reach, Rounding::AwayFromZero),
@@ -1475,6 +1483,99 @@ mod tests {
             let stored = float_layout_codec::encode(delta, FloatLayout::F16) as u16;
             assert_eq!(&grouped[run * 4..run * 4 + 2], &stored.to_le_bytes(), "run {run} scale");
         }
+    }
+
+    const FLINT_EXPERT_ROWS: &str =
+        include_str!("../tests/fixtures/flint_blk46_expert_gated_activation_rows.txt");
+
+    /// llama.cpp `llama-graph.cpp` 1716-1751: `2^clamp(ceil(log2(amax / 1024)), 0, 127)`.
+    fn llama_row_exponent(row: &[f32]) -> i32 {
+        let amax = row.iter().fold(0.0f64, |peak, value| peak.max(f64::from(value.abs())));
+        if amax == 0.0 {
+            return 0;
+        }
+        ((amax / 1024.0).log2().ceil() as i32).clamp(0, 127)
+    }
+
+    fn flint_rows() -> Vec<Vec<f32>> {
+        FLINT_EXPERT_ROWS
+            .lines()
+            .map(|line| {
+                line.split(|ch: char| !(ch.is_ascii_digit() || matches!(ch, '-' | '.' | 'e' | 'E' | '+')))
+                    .filter(|word| !word.is_empty())
+                    .map(|word| word.parse::<f32>().expect("fixture words are f32"))
+                    .collect()
+            })
+            .collect()
+    }
+
+    fn staging_rule() -> EncodeRule {
+        EncodeRule {
+            divisor: 1024,
+            min_scale_exponent: Some(0),
+            scale_rounding: ScaleRounding::PowerOfTwoCeil,
+            ..BlockLayout::row_scaled(FloatLayout::F16, 512).encode_rule().expect("a row layout has a rule")
+        }
+    }
+
+    fn plain_binary16(row: &[f32]) -> Vec<f32> {
+        row.iter()
+            .map(|value| {
+                let mut nan_count = 0;
+                let code = float_layout_codec::encode_with(
+                    *value,
+                    FloatLayout::F16,
+                    Rounding::NearestTiesEven,
+                    Overflow::Format,
+                    &mut nan_count,
+                );
+                float_layout_codec::decode(code, FloatLayout::F16)
+            })
+            .collect()
+    }
+
+    fn staged(row: &[f32]) -> (i32, Vec<f32>) {
+        let layout = BlockLayout::row_scaled(FloatLayout::F16, row.len() as u16);        let codec = FormatCodec::coded(&layout, staging_rule()).expect("the row rule fits the row layout");
+        let mut bytes = vec![0u8; codec.block_bytes()];
+        codec.encode(row, &mut bytes).expect("one whole row encodes");
+        let mut restored = vec![0.0f32; row.len()];
+        decode_blocks(&NumericFormat::Block(layout), &bytes, &mut restored).expect("the row decodes");
+        (i32::from(bytes[0]) - 127, restored)
+    }
+
+    fn relative_error(original: &[f32], restored: &[f32]) -> f64 {
+        let (square_error, square_signal) = original.iter().zip(restored).fold((0.0f64, 0.0f64), |(error, signal), (left, right)| {
+            let difference = f64::from(*left) - f64::from(*right);
+            (error + difference * difference, signal + f64::from(*left) * f64::from(*left))
+        });
+        (square_error / square_signal).sqrt()
+    }
+
+    #[test]
+    fn row_scaled_binary16_chooses_llamas_scale_and_stays_finite_on_flint_expert_rows() {
+        let mut rows = flint_rows();
+        let fitting = rows[0].iter().map(|value| value / 256.0).collect::<Vec<f32>>();
+        rows.push(fitting);
+        assert_eq!(rows.len(), 3, "two fixture rows and one derived row that fits binary16");
+        let mut plain_inf = 0usize;
+        let mut fitting_rows = 0usize;
+        for row in &rows {
+            let (exponent, restored) = staged(row);
+            assert_eq!(exponent, llama_row_exponent(row), "scale exponent, row peak {}", row.iter().fold(0.0f32, |peak, value| peak.max(value.abs())));
+            assert_eq!(restored.iter().filter(|value| !value.is_finite()).count(), 0);
+            let plain = plain_binary16(row);
+            let plain_nonfinite = plain.iter().filter(|value| !value.is_finite()).count();
+            plain_inf += plain_nonfinite;
+            if plain_nonfinite == 0 {
+                fitting_rows += 1;
+                assert!(relative_error(row, &restored) <= relative_error(row, &plain) * 1.001);
+            } else {
+                assert!(relative_error(row, &restored).is_finite());
+            }
+            eprintln!("row peak {:?} exponent {exponent} plain non-finite {plain_nonfinite}", row.iter().fold(0.0f32, |peak, value| peak.max(value.abs())));
+        }
+        assert!(plain_inf > 0, "control: plain binary16 must overflow on the large rows");
+        assert!(fitting_rows >= 1, "the error comparison needs a row binary16 holds");
     }
 }
 

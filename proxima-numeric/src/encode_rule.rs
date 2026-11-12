@@ -155,8 +155,13 @@ pub struct EncodeRule {
     /// What the statistic is divided by; negative where the signed peak maps to the most negative
     /// code (`-8` for a four-bit offset-binary code), `1` for a mean. Zero for a float code, whose
     /// divisor is the layout's reach (the largest finite magnitude its codes stand for on both
-    /// sides of zero, [`crate::encode::reach`]), which is not always an integer.
+    /// sides of zero, [`crate::encode::reach`]), which is not always an integer; a nonzero divisor
+    /// on a float code replaces the reach (1024 for binary16 staging, which leaves headroom for
+    /// sums of 32 staged values below the binary16 maximum).
     pub divisor: i32,
+    /// The lowest exponent a power-of-two scale may take: `Some(0)` never scales a row up, so a
+    /// small row is staged as it is. `None` leaves the scale field's own range.
+    pub min_scale_exponent: Option<i16>,
     pub rounding: CodeRounding,
     /// How the fitted scale becomes the stored one; [`ScaleRounding::Stored`] for every integer code.
     pub scale_rounding: ScaleRounding,
@@ -228,6 +233,7 @@ mod tests {
             EncodeRule {
                 statistic: ScaleStatistic::SignedPeak,
                 divisor: -8,
+                min_scale_exponent: None,
                 rounding: CodeRounding::HalfUpThenTruncate,
                 scale_rounding: ScaleRounding::Stored,
                 clamp: CodeClamp::Upper,
