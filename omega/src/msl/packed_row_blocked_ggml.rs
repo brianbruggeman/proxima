@@ -249,7 +249,9 @@ pub(super) fn push_packed_row_blocked_body(
                     && real_float
                     && cfg!(feature = "metal-q4_0-native")
                     && !cfg!(feature = "metal-q4k-split-k");
-                let flat_rendered = matches!(codec, Codec::Q8_0)
+                let flat_rendered = codec
+                    .block_layout()
+                    .is_some_and(|layout| FlatBlockForm::plan(&layout).is_ok())
                     && plain_product_reduce
                     && real_float
                     && !expert_source_mode
