@@ -565,37 +565,79 @@ pub(super) fn try_run_accelerate_width_gemm(
     else {
         return false;
     };
-    // SAFETY: `width_tile_plan`'s own gate already proves `a`/`b`
-    // gather-free, `b`'s width-dim stride 0 or 1 (this route reads the
-    // unpacked buffer, the same one the width-dim-1 branch of
-    // `run_width_tile_neon`'s own column-tail loop reads), and `a`'s
-    // contraction-dim stride 1 is checked above -- so `a`'s own
-    // `leading_total x reduction_total` block is contiguous per row from
-    // `base_a`, and `b`'s own `reduction_total x width` block is contiguous
-    // per row from `base_b`. `output` is this function's own `&mut [f32]`
-    // parameter, sized by the caller to `out_layout`'s extents, so
-    // `out_base + (leading_total-1)*out_row_stride + (width-1)` stays
-    // in-bounds given `plan.out_col_stride == 1` (checked inside
-    // `try_run_accelerate_sgemm` itself).
-    unsafe {
-        try_run_accelerate_sgemm(
-            raw[plan.a_operand],
-            base_a,
-            row_stride_a,
-            raw[plan.b_operand],
-            base_b,
-            k_stride_b,
-            output,
-            out_base,
-            out_row_stride,
-            plan.leading_total,
-            plan.width,
-            plan.reduction_total,
-            plan.out_col_stride,
-            0.0,
-            false,
-        )
+    // `plan.outer_extent` (`heads`, for BGE's `Q@K^T` / `softmax@V`) is a
+    // second leading axis both operands and the output step through
+    // together, exactly as `run_width_tile_neon`'s own outer loop walks
+    // it: one independent `[leading_total, reduction_total] x
+    // [reduction_total, width]` product per step, re-based by
+    // `step * outer_stride_*`. Each step writes a disjoint output block
+    // (`beta = 0`), so no step accumulates into another.
+    for outer_step in 0..plan.outer_extent {
+        let Some((step_base_a, step_base_b, step_out_base)) =
+            width_outer_step_bases(plan, outer_step, (base_a, base_b, out_base))
+        else {
+            return false;
+        };
+        // SAFETY: `width_tile_plan`'s own gate already proves `a`/`b`
+        // gather-free, `b`'s width-dim stride 0 or 1 (this route reads the
+        // unpacked buffer, the same one the width-dim-1 branch of
+        // `run_width_tile_neon`'s own column-tail loop reads), and `a`'s
+        // contraction-dim stride 1 is checked above -- so `a`'s own
+        // `leading_total x reduction_total` block is contiguous per row from
+        // each step's re-based `base_a`, and `b`'s own `reduction_total x
+        // width` block is contiguous per row from each step's `base_b`: the
+        // same extents `run_width_tile_neon` reads for the SAME `plan` and
+        // step. `output` is this function's own `&mut [f32]` parameter,
+        // sized by the caller to `out_layout`'s extents, so
+        // `out_base + (leading_total-1)*out_row_stride + (width-1)` stays
+        // in-bounds given `plan.out_col_stride == 1` (checked inside
+        // `try_run_accelerate_sgemm` itself).
+        let accelerated = unsafe {
+            try_run_accelerate_sgemm(
+                raw[plan.a_operand],
+                step_base_a,
+                row_stride_a,
+                raw[plan.b_operand],
+                step_base_b,
+                k_stride_b,
+                output,
+                step_out_base,
+                out_row_stride,
+                plan.leading_total,
+                plan.width,
+                plan.reduction_total,
+                plan.out_col_stride,
+                0.0,
+                false,
+            )
+        };
+        if !accelerated {
+            return false;
+        }
     }
+    true
+}
+
+/// `(base_a, base_b, out_base)` for `outer_step` of a [`WidthTilePlan`]:
+/// each base advanced by `outer_step * outer_stride_*`. `None` when the
+/// multiply/add overflows or lands negative -- `width_tile_plan`'s offsets
+/// can run negative, so every rebased offset is validated, not cast.
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+fn width_outer_step_bases(
+    plan: &WidthTilePlan,
+    outer_step: usize,
+    bases: (usize, usize, usize),
+) -> Option<(usize, usize, usize)> {
+    let step = i64::try_from(outer_step).ok()?;
+    let rebase = |base: usize, outer_stride: i64| -> Option<usize> {
+        let offset = outer_stride.checked_mul(step)?;
+        usize::try_from(i64::try_from(base).ok()?.checked_add(offset)?).ok()
+    };
+    Some((
+        rebase(bases.0, plan.outer_stride_a)?,
+        rebase(bases.1, plan.outer_stride_b)?,
+        rebase(bases.2, plan.outer_stride_out)?,
+    ))
 }
 
 /// Routes [`ConvGemmTilePlan`] through `cblas_sgemm` instead of

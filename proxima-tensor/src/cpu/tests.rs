@@ -4314,7 +4314,10 @@ fn three_leading_axes_matmul_program(
 /// `heads`. `three_leading_axes_matmul_program`'s all-invariant `rhs`
 /// cannot stand in for this -- a genuinely different stride shape, and
 /// the one the three-axis-merge task (2026-09-02) closes.
-#[cfg(all(target_arch = "aarch64", feature = "instrument"))]
+#[cfg(all(
+    target_arch = "aarch64",
+    any(feature = "instrument", target_os = "macos")
+))]
 fn three_leading_axes_batched_matmul_program(
     outer: u32,
     batch: u32,
@@ -5044,6 +5047,71 @@ fn a_three_leading_axis_batched_reduce_engages_width_tile_and_matches_naive_matm
         declines.iter().all(|&(node, ..)| node != sum.0),
         "the batched three-leading-axis node declined instead of engaging: {declines:?}"
     );
+}
+
+/// PROXNUM-72: BGE-small's `attn_qk` (`Q@K^T`, `[12 heads, 8 seq, 32 head_dim]
+/// x [12, 32, 8]`) and `attn_v` (`softmax@V`, `[12, 8, 8] x [12, 8, 32]`)
+/// reach `width_tile_plan` as `outer_extent = 12` with per-head
+/// `outer_stride_{a,b,out}`. The Accelerate route used to issue ONE
+/// `cblas_sgemm` for head 0 and leave heads 1..11 holding stale arena
+/// bytes (bge_eval: cosine 0.50-0.63 vs ONNX Runtime). Every head must match
+/// the scalar per-head reference, and the route must actually have fired.
+#[proxima::test]
+#[case::attn_qk_8_seq_32_head_dim_8_wide(12, 8, 32, 8)]
+#[case::attn_v_8_seq_8_contraction_32_wide(12, 8, 8, 32)]
+#[case::attn_qk_9_seq_odd_narrow_tile(12, 9, 32, 9)]
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+async fn accelerate_width_gemm_computes_every_head_of_a_batched_attention_matmul(
+    #[case] heads: u32,
+    #[case] seq: u32,
+    #[case] contraction: u32,
+    #[case] width: u32,
+) {
+    let batch = 1u32;
+    let (program, _) =
+        three_leading_axes_batched_matmul_program(heads, batch, seq, contraction, width);
+    let mut lcg = Lcg(0xb9e5_0072 + u64::from(seq) * 131 + u64::from(width));
+    let lhs: Vec<f32> = (0..heads * batch * seq * contraction)
+        .map(|_| lcg.next_unit())
+        .collect();
+    let rhs: Vec<f32> = (0..heads * batch * contraction * width)
+        .map(|_| lcg.next_unit())
+        .collect();
+    let (seq, contraction, width) = (seq as usize, contraction as usize, width as usize);
+    let mut reference = vec![0.0f32; heads as usize * seq * width];
+    for head in 0..heads as usize {
+        let head_out = naive_matmul(
+            &lhs[head * seq * contraction..(head + 1) * seq * contraction],
+            &rhs[head * contraction * width..(head + 1) * contraction * width],
+            seq,
+            contraction,
+            width,
+        );
+        reference[head * seq * width..(head + 1) * seq * width].copy_from_slice(&head_out);
+    }
+
+    let (hits_before, _) = accelerate_gemm_totals();
+    set_accelerate_gemm_enabled(true);
+    let evaluated = evaluate(&program, &[], &[&lhs, &rhs], &[]);
+    set_accelerate_gemm_enabled(false);
+    let evaluated = evaluated.expect("the batched attention matmul evaluates");
+    let (hits_after, _) = accelerate_gemm_totals();
+
+    assert!(
+        hits_after > hits_before,
+        "the Accelerate width route never fired (hits {hits_before} -> {hits_after}); the \
+         assertions below would only be checking the NEON tile"
+    );
+    assert_eq!(
+        evaluated.shape(),
+        &[
+            u64::from(heads),
+            u64::from(batch),
+            seq as u64,
+            width as u64
+        ]
+    );
+    assert_all_close(evaluated.root(), &reference, 1e-5);
 }
 
 #[test]
