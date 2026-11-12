@@ -52,12 +52,12 @@ fn kernel_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String>
 }
 
 #[cfg(all(feature = "std", feature = "gpu"))]
-fn row_tiled_reads_format(format: &NumericFormat) -> bool {
-    omega::cached_attention_row_tiled_kv_codec_for(format).is_ok()
+fn row_tiled_reads_format(format: &NumericFormat, head_dim: u64) -> bool {
+    omega::cached_attention_row_tiled_reads(format, head_dim).is_ok()
 }
 
 #[cfg(all(feature = "std", not(feature = "gpu")))]
-fn row_tiled_reads_format(format: &NumericFormat) -> bool {
+fn row_tiled_reads_format(format: &NumericFormat, _head_dim: u64) -> bool {
     is_binary32_format(format)
 }
 
@@ -102,10 +102,10 @@ pub(crate) fn is_narrow(format: &NumericFormat) -> bool {
 }
 
 /// Whether the row-tiled kernel (speculative verify, several query rows against the cached range)
-/// reads this cache.
+/// reads this cache: the K side and the V side each, for a head of `head_dim` elements.
 #[cfg(feature = "std")]
-pub(crate) fn row_tiled_reads(format: &NumericFormat) -> bool {
-    row_tiled_reads_format(format)
+pub(crate) fn row_tiled_reads(key: &NumericFormat, value: &NumericFormat, head_dim: u64) -> bool {
+    row_tiled_reads_format(key, head_dim) && row_tiled_reads_format(value, head_dim)
 }
 
 #[cfg(test)]
@@ -204,9 +204,35 @@ mod tests {
 
     #[cfg(feature = "gpu")]
     #[test]
-    fn the_row_tiled_verify_kernel_reads_bf16_and_not_f16() {
-        assert!(row_tiled_reads(&NumericFormat::Float32));
-        assert!(row_tiled_reads(&NumericFormat::BFloat16));
-        assert!(!row_tiled_reads(&NumericFormat::Float16));
+    fn the_row_tiled_verify_kernel_reads_what_omega_describes_for_k_and_v() {
+        const HEAD_DIM: u64 = 128;
+        let formats = [
+            NumericFormat::Float32,
+            NumericFormat::Float16,
+            NumericFormat::BFloat16,
+            NumericFormat::BFloat8,
+            NumericFormat::Q8_0,
+            NumericFormat::Q4_0,
+        ];
+        for format in &formats {
+            let expected = format.is_identity_of(&NumericFormat::Float32)
+                || omega::msl::layout_render::readable_scalar_cache(format).is_some()
+                || omega::msl::layout_render::readable_block_layout(format).is_some();
+            assert_eq!(row_tiled_reads(format, &NumericFormat::Float32, HEAD_DIM), expected, "K {format:?}");
+            assert_eq!(row_tiled_reads(&NumericFormat::Float32, format, HEAD_DIM), expected, "V {format:?}");
+        }
+        assert!(row_tiled_reads(&NumericFormat::Float16, &NumericFormat::Float16, HEAD_DIM), "binary16 is the flint default");
+    }
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn a_block_layout_whose_blocks_do_not_tile_the_head_is_refused_for_k_and_v() {
+        let head_dim = 48;
+        let q4_elements = omega::msl::layout_render::readable_block_layout(&NumericFormat::Q4_0)
+            .map(|layout| u64::from(layout.elements))
+            .expect("q4_0 is a readable block layout");
+        assert_ne!((head_dim / 2) % q4_elements, 0, "fixture head must not tile the block");
+        assert!(!row_tiled_reads(&NumericFormat::Q4_0, &NumericFormat::Float32, head_dim));
+        assert!(!row_tiled_reads(&NumericFormat::Float32, &NumericFormat::Q4_0, head_dim));
     }
 }

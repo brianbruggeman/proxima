@@ -4203,12 +4203,19 @@ impl<'file> LoadedModel<'file> {
             (!drafter_set.is_empty() || model_proposer.is_some() || forced_draft_width.is_some())
                 && rings_cover_speculation(&layer_caches, draft_limit)
                 && !(self.recurrent_speculative_verify.is_some() && recurrent_state_is_placed);
-        if speculative_enabled && !kv_cache_format::row_tiled_reads(&serving_config.kv_cache_key_quant) {
+        if speculative_enabled
+            && !kv_cache_format::row_tiled_reads(
+                &serving_config.kv_cache_key_quant,
+                &serving_config.kv_cache_value_quant,
+                u64::from(self.architecture.head_dim),
+            )
+        {
             return Err(InteropError::UnsupportedServingConfig(alloc::format!(
-                "kv_cache_key_quant={:?} with speculative decoding: a verify step attends several \
-query rows against the cached range through the row-tiled kernel, which does not read this cache \
-format; only the single-row decode kernel reads it from the device cache",
-                serving_config.kv_cache_key_quant
+                "kv_cache_key_quant={:?} kv_cache_value_quant={:?} with speculative decoding: a verify \
+step attends several query rows against the cached range through the row-tiled kernel, which does \
+not read this cache format; only the single-row decode kernel reads it from the device cache",
+                serving_config.kv_cache_key_quant,
+                serving_config.kv_cache_value_quant
             )));
         }
         // One draft buffer, reused every step -- every drafter's own
