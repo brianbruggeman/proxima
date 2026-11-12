@@ -1,0 +1,27 @@
+[package]
+name = "ort-arm"
+version = "0.1.0"
+edition = "2024"
+publish = false
+description = "bench-only arm that loads the incumbent's prebuilt libonnxruntime 1.20.1 behind a sha256 gate; never a dependency of proxima"
+
+# own workspace and lockfile: onnxruntime must not reach the root Cargo.lock
+[workspace]
+
+[dependencies]
+anyhow = "1.0.104"
+bindgen = { version = "0.73.2", optional = true }
+libloading = "0.9.0"
+sha2 = "0.11.1"
+thiserror = "2.0.21"
+
+[dev-dependencies]
+tempfile = "3.27.0"
+
+[features]
+bindgen = ["dep:bindgen"]
+
+[[bin]]
+name = "regen_bindings"
+path = "src/bin/regen_bindings.rs"
+required-features = ["bindgen"]
