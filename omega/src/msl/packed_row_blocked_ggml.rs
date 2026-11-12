@@ -1259,8 +1259,8 @@ pub(super) fn push_q4_0_native_body(
 ///
 /// This is the one K-quant matvec NOT rendered from its `BlockLayout` by default: the rendered
 /// `Q5_K` (`SubBlockMatvecGeometry::decode_high_plane`, bit-identical to this body on four real
-/// tensors, commit e436879f) measured `new/old` of 1.0110 (flint ffn_gate_exps, fast clock mode)
-/// and 1.0051/1.0072 (ollama attn_v / flint ffn_gate_exps, slow mode) against this body, so the
+/// tensors, commit e436879f) measured `new/old` of 1.0110 (an MoE checkpoint's ffn_gate_exps, fast clock mode)
+/// and 1.0051/1.0072 (ollama attn_v / that ffn_gate_exps, slow mode) against this body, so the
 /// card's "at least as fast" rule keeps this port. The gaps sit inside 12-16% CoV.
 ///
 /// Lane assignment (`ggml-metal.metal:5244-5250`): `tid = tiisg/4`, `ix = tiisg%4`, `iq = tid/4`,
