@@ -1,0 +1,28 @@
+level_gemm_*.f32le: raw little-endian f32 bits of a stacked expert-gathered projection, [84 tokens, 6 selected, 96 rows] row-major
+(48384 values). This is the flint prefill shape: extents [84, 6, K, rows] of PROXNUM-73's warm profile
+(~/.cache/kvgate/proxnum73/pw_0.txt, position 110 and 681).
+
+old side:    proxima main 3a220af2, kernel = the cooperative per-element reduce with the hand-written
+             IQ4_XS_UNPACK_MSL / IQ3_S_UNPACK_MSL (neither codec had a tiled_decode description), metal feature, debug build.
+capture:     PROXNUM77_CAPTURE_DIR=<dir> cargo test -p proxima-omega --features metal
+             --test level_codec_tiled_gemm_parity -- --test-threads=1
+             run in a detached worktree of 3a220af2 holding only this test file.
+weights:     the first 96 rows of each of the first 16 experts of the named tensor of flint-UD-Q4_K_XL.gguf
+             (/Users/brianbruggeman/models/llm/flint-gguf/, model sha256 63c2ecc461ca545134b670c660e76fa20f47240f8d39b6510bfd21c4dd6e072f),
+             read from the file's own tensor directory offsets.
+activation:  Lcg(2026).next_unit() * 4 - 2, a synthetic stand-in for the hidden states (no forward pass was run):
+             [84, K] shared by a token's selected experts for gate and up, [84, 6, K] per selected expert for down.
+route:       token t selects experts (t * 5 % 7) + s for s in 0..6.
+
+level_gemm_iq4xs_blk19_ffn_gate_exps.f32le
+  tensor  blk.19.ffn_gate_exps.weight (IQ4_XS), dims [2048, 512, 256]
+  sha256  4f6d0047df3fe58fc19a7e532fc247a1097cca15418886e915b095c063db0dae
+level_gemm_iq4xs_blk19_ffn_up_exps.f32le
+  tensor  blk.19.ffn_up_exps.weight (IQ4_XS), dims [2048, 512, 256]
+  sha256  bc444c768d3388dbc00ec08d92f39aa8dfd560fd237a6dcdf7f0f9b63aa277bc
+level_gemm_iq4xs_blk19_ffn_down_exps.f32le
+  tensor  blk.19.ffn_down_exps.weight (IQ4_XS), dims [512, 2048, 256]
+  sha256  be5572840b5be527e0e499d16bc44b5f3b60296b908458326db29a10b29726a6
+level_gemm_iq3s_blk2_ffn_gate_exps.f32le
+  tensor  blk.2.ffn_gate_exps.weight (IQ3_S), dims [2048, 512, 256]
+  sha256  6d246f82d2d2d06e4a4fe0d6cabf6e603a9d4669363e14fe9dbfe585b29f5f67
