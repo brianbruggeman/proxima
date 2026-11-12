@@ -861,12 +861,37 @@ impl NumericFormat {
     ));
 }
 
+/// The config spellings of a format: its name, or its description. A scalar description is the
+/// [`FloatLayout`] map itself (`{ exponent_bits = 3, mantissa_bits = 0, specials = "None", ... }`);
+/// a block description is `{ block = { ... } }` holding a [`BlockLayout`]. A name is a label for a
+/// description, so a format with no name is still selectable from config by what it is.
+#[cfg(feature = "config")]
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum Spelling {
+    Name(std::string::String),
+    // boxed because the 592-byte block variant would size every spelling; config load is cold
+    Block { block: std::boxed::Box<BlockLayout> },
+    Scalar(FloatLayout),
+}
+
+#[cfg(feature = "config")]
+#[derive(serde::Serialize)]
+struct BlockSpelling<'a> {
+    block: &'a BlockLayout,
+}
+
 #[cfg(feature = "config")]
 impl serde::Serialize for NumericFormat {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self.name() {
-            Some(name) => serializer.serialize_str(name),
-            None => Err(serde::ser::Error::custom("numeric format has no name")),
+        // a name that resolves to a different format (a scalar layout's own name can equal a block
+        // format's) is not this format's spelling, so the description is written instead
+        let spelled = self.name().filter(|name| NumericFormat::from_name(name) == Some(*self));
+        match (spelled, self) {
+            (Some(name), _) => serializer.serialize_str(name),
+            (None, Self::Scalar(layout)) => serde::Serialize::serialize(layout, serializer),
+            (None, Self::Block(layout)) => serde::Serialize::serialize(&BlockSpelling { block: layout }, serializer),
+            (None, Self::Levels(_)) => Err(serde::ser::Error::custom("an unnamed level format has no description spelling")),
         }
     }
 }
@@ -874,23 +899,13 @@ impl serde::Serialize for NumericFormat {
 #[cfg(feature = "config")]
 impl<'de> serde::Deserialize<'de> for NumericFormat {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct NumericFormatVisitor;
-
-        impl serde::de::Visitor<'_> for NumericFormatVisitor {
-            type Value = NumericFormat;
-
-            fn expecting(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-                formatter.write_str("a numeric format name such as \"q8_0\", \"f16\" or \"bfloat16\"")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, name: &str) -> Result<NumericFormat, E> {
-                NumericFormat::from_name(name).ok_or_else(|| {
-                    E::custom(format_args!("unknown numeric format name `{name}`"))
-                })
-            }
+        match Spelling::deserialize(deserializer)? {
+            Spelling::Name(name) => NumericFormat::from_name(&name).ok_or_else(|| {
+                serde::de::Error::custom(format_args!("unknown numeric format name `{name}`"))
+            }),
+            Spelling::Block { block } => Ok(NumericFormat::Block(*block)),
+            Spelling::Scalar(layout) => Ok(NumericFormat::Scalar(layout)),
         }
-
-        deserializer.deserialize_str(NumericFormatVisitor)
     }
 }
 
@@ -1079,6 +1094,59 @@ mod tests {
                 serde_json::from_str(&encoded).expect("its own spelling deserializes");
             assert_eq!(decoded, *format, "{encoded}");
         }
+    }
+
+    /// The element widths of the PROXNUM-109 sweep as (exponent bits, mantissa bits): none has a name.
+    #[cfg(feature = "config")]
+    const SWEEP_ELEMENT_SPLITS: [(u8, u8); 8] = [(2, 1), (3, 0), (1, 2), (3, 2), (2, 3), (4, 1), (4, 3), (5, 2)];
+
+    #[cfg(feature = "config")]
+    fn sweep_element(exponent_bits: u8, mantissa_bits: u8) -> NumericFormat {
+        NumericFormat::Scalar(FloatLayout {
+            exponent_bits,
+            mantissa_bits,
+            specials: Specs::None,
+            bias_override: None,
+            sign: Sign::Magnitude,
+            nan: crate::float_layout::NanPolicy::IEEE,
+        })
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn every_sweep_split_round_trips_through_json_by_its_description() {
+        for (exponent_bits, mantissa_bits) in SWEEP_ELEMENT_SPLITS {
+            let format = sweep_element(exponent_bits, mantissa_bits);
+            let encoded = serde_json::to_string(&format).expect("a scalar description serializes");
+            let decoded: NumericFormat = serde_json::from_str(&encoded).expect("its description deserializes");
+            assert_eq!(decoded, format, "{encoded}");
+        }
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn a_scalar_description_in_toml_selects_a_format_that_has_no_name() {
+        let decoded: NumericFormat = toml::from_str::<std::collections::BTreeMap<String, NumericFormat>>(
+            "element = { exponent_bits = 3, mantissa_bits = 0, specials = \"None\", sign = \"Magnitude\" }",
+        )
+        .expect("a described element parses")
+        .remove("element")
+        .expect("the key is present");
+        assert_eq!(decoded, sweep_element(3, 0));
+        assert_eq!(decoded.name(), None);
+    }
+
+    #[cfg(feature = "config")]
+    #[test]
+    fn an_unnamed_block_description_round_trips_through_json() {
+        let mut layout = BlockLayout::Q8_0;
+        layout.elements = 16;
+        layout.block_bytes = 18;
+        let format = NumericFormat::Block(layout);
+        assert_eq!(format.name(), None);
+        let encoded = serde_json::to_string(&format).expect("a block description serializes");
+        let decoded: NumericFormat = serde_json::from_str(&encoded).expect("its description deserializes");
+        assert_eq!(decoded, format);
     }
 
     #[cfg(feature = "config")]
