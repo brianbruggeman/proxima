@@ -393,11 +393,11 @@ fn scaled_e3m2_parity_1024x512_1_token() {
 }
 
 #[test]
-fn scaled_e3m2_parity_1024x512_128_tokens() {
+fn scaled_e3m2_parity_1024x512_tokens_below_the_tiled_minimum() {
     assert_within_bound(Case {
         rows: 1024,
         depth: 512,
-        tokens: 128,
+        tokens: omega::sized::TILED_GEMM_MIN_TOKENS as usize - 1,
         path: Path::RowBlockedMulti,
     });
 }
@@ -413,11 +413,11 @@ fn scaled_e3m2_parity_1536x6144_1_token() {
 }
 
 #[test]
-fn scaled_e3m2_parity_1536x6144_128_tokens() {
+fn scaled_e3m2_parity_1536x6144_tokens_below_the_tiled_minimum() {
     assert_within_bound(Case {
         rows: 1536,
         depth: 6144,
-        tokens: 128,
+        tokens: omega::sized::TILED_GEMM_MIN_TOKENS as usize - 1,
         path: Path::RowBlockedMulti,
     });
 }

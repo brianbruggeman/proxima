@@ -24,7 +24,7 @@ use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, TensorError, append};
 use proxima_numeric::{DType, NumericPolicy};
 
-const MIN_TOKENS_FOR_TILES: usize = 160;
+const MIN_TOKENS_FOR_TILES: usize = omega::sized::TILED_GEMM_MIN_TOKENS as usize;
 const RELATIVE_TOLERANCE: f32 = 2.0e-3;
 
 struct Shape {

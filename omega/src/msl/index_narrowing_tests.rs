@@ -274,7 +274,13 @@ fn a_routed_expert_projection_one_row_group_inside_u32_still_narrows() {
 #[cfg(feature = "metal-grouped-gemm")]
 #[test]
 fn a_routed_expert_projection_with_outputs_past_u32_keeps_the_64_bit_divides() {
-    let bound = gathered_matmul_op(64, 2, 67_108_864, 1024);
+    let tokens = 63;
+    assert!(
+        u64::from(tokens) < crate::sized::TILED_GEMM_MIN_TOKENS,
+        "this test pins the row-blocked body, so its token count must sit under the tiled minimum"
+    );
+    let rows = (u32::MAX / tokens + 1).next_multiple_of(8);
+    let bound = gathered_matmul_op(tokens, 2, rows, 1024);
     let packed = packed_table(&bound, Codec::Q8_0);
 
     let source = emitted(&bound, &packed, None);
