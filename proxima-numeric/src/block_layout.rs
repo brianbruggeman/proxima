@@ -1128,3 +1128,68 @@ impl PlaneCursor {
         }
     }
 }
+
+/// Codes that are whole bytes laid end to end: the first code's byte offset in the block and the
+/// bytes each code takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteCodes {
+    pub base_byte: usize,
+    pub code_bytes: usize,
+}
+
+impl BlockLayout {
+    /// The byte address arithmetic of a layout whose single code plane is whole bytes laid end to
+    /// end (Q8_0, Q8_1): code `index` sits at `base_byte + index * code_bytes`. `None` for a
+    /// plane narrower than a byte, split across planes, mixed-radix or interleaved, which are the
+    /// layouts the plane walk in [`Plane::address`] has to answer element by element.
+    #[must_use]
+    pub const fn contiguous_byte_codes(&self) -> Option<ByteCodes> {
+        let plane = self.element.low;
+        let bits = plane.bits as usize;
+        if self.element.high.is_some() || self.element.packed_radix != 0 || bits == 0 || !bits.is_multiple_of(8) {
+            return None;
+        }
+        let base = plane.address(0);
+        if !base.is_multiple_of(8) {
+            return None;
+        }
+        let mut index = 1;
+        while index < self.elements as usize {
+            if plane.address(index) != base + index * bits {
+                return None;
+            }
+            index += 1;
+        }
+        Some(ByteCodes {
+            base_byte: base / 8,
+            code_bytes: bits / 8,
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BlockLayout, ByteCodes};
+
+    #[test]
+    fn q8_0_codes_are_whole_bytes_after_the_two_byte_scale() {
+        assert_eq!(
+            BlockLayout::Q8_0.contiguous_byte_codes(),
+            Some(ByteCodes { base_byte: 2, code_bytes: 1 })
+        );
+    }
+
+    #[test]
+    fn nibble_and_split_plane_layouts_have_no_byte_code_run() {
+        for layout in [BlockLayout::Q4_0, BlockLayout::Q5_0, BlockLayout::Q5_1, BlockLayout::Q4_K, BlockLayout::Q6_K] {
+            assert_eq!(layout.contiguous_byte_codes(), None, "{layout:?}");
+        }
+    }
+
+    #[test]
+    fn moving_the_first_code_one_byte_moves_the_base_byte() {
+        let mut moved = BlockLayout::Q8_0;
+        moved.element.low.base_bits += 8;
+        assert_eq!(moved.contiguous_byte_codes().map(|codes| codes.base_byte), Some(3));
+    }
+}
