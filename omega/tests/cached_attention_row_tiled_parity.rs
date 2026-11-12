@@ -75,6 +75,15 @@ fn bound_attention(fixture: &Fixture, policy: NumericPolicy) -> Vec<BoundOp> {
         .expect("the program binds")
 }
 
+/// The f32 CPU oracle for a GPU parity gate: the unfused bind, so attention runs as
+/// f32 softmax ops rather than the fused `LlamaFlash` f16 path the GPU kernels do not run.
+fn f32_oracle(fixture: &Fixture, policy: NumericPolicy) -> Vec<f32> {
+    let shapes = infer(&fixture.program, &fixture.symbols).expect("the program infers");
+    let unfused = bind_with_fusion(&fixture.program, &shapes, &[fixture.logits], false, policy)
+        .expect("the unfused program binds");
+    run_resolved_on_cpu(fixture, &unfused)
+}
+
 /// `resolved` run on the CPU interpreter over the fixture's named inputs.
 fn run_resolved_on_cpu(fixture: &Fixture, resolved: &[BoundOp]) -> Vec<f32> {
     run_resolved_root_on_cpu(fixture, resolved, fixture.logits)
@@ -1105,8 +1114,7 @@ fn card_15_v_reuse_device_keeps_query_rows_independent() {
 fn card_16_tile_height_plan_dispatches_rows16_and_matches_cpu_payload() {
     let policy = production_numeric_policy();
     let fixture = fixture_with(16, 31, Geometry::TWO_QUERY_GROUPS);
-    let resolved = bound_attention(&fixture, policy);
-    let expected = run_resolved_on_cpu(&fixture, &resolved);
+    let expected = f32_oracle(&fixture, policy);
     let named = as_named_blocks(&fixture.named);
     let roots = [fixture.logits];
     let legacy_plan = omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
@@ -1131,9 +1139,11 @@ fn card_16_tile_height_plan_dispatches_rows16_and_matches_cpu_payload() {
 
     let output =
         omega::execute_plan_named(&rows16_plan, &named).expect("the selected rows16 plan executes");
+    let relative = relative_difference(&expected, output.root());
+    eprintln!("card_16 rows16 relative={relative}");
     assert!(
-        relative_difference(&expected, output.root()) <= TOLERANCE,
-        "rows16 plan output matches the CPU payload"
+        relative <= TOLERANCE,
+        "rows16 plan output matches the f32 CPU payload: relative={relative} tolerance={TOLERANCE}"
     );
 }
 
@@ -1141,8 +1151,7 @@ fn card_16_tile_height_plan_dispatches_rows16_and_matches_cpu_payload() {
 fn card_17_query_parallelism_plan_preserves_shared_kv_and_matches_cpu_payload() {
     let policy = production_numeric_policy();
     let fixture = fixture_with(8, 31, Geometry::TWO_QUERY_GROUPS);
-    let resolved = bound_attention(&fixture, policy);
-    let expected = run_resolved_on_cpu(&fixture, &resolved);
+    let expected = f32_oracle(&fixture, policy);
     let named = as_named_blocks(&fixture.named);
     let roots = [fixture.logits];
     let mut query_parallel_plan =
@@ -1165,9 +1174,11 @@ fn card_17_query_parallelism_plan_preserves_shared_kv_and_matches_cpu_payload() 
 
     let output = omega::execute_plan_named(&query_parallel_plan, &named)
         .expect("the selected query-parallel plan executes");
+    let relative = relative_difference(&expected, output.root());
+    eprintln!("card_17 query-parallel relative={relative}");
     assert!(
-        relative_difference(&expected, output.root()) <= TOLERANCE,
-        "query-parallel SharedKv output matches the CPU payload"
+        relative <= TOLERANCE,
+        "query-parallel SharedKv output matches the f32 CPU payload: relative={relative} tolerance={TOLERANCE}"
     );
 }
 
@@ -1227,8 +1238,7 @@ fn card_18_prefetch_plan_executes_with_a_partial_live_cache_block() {
 fn card_19_simd_topology_plans_match_cpu_and_keep_axes_fixed() {
     let policy = production_numeric_policy();
     let fixture = fixture_with(16, 31, Geometry::TWO_QUERY_GROUPS);
-    let resolved = bound_attention(&fixture, policy);
-    let expected = run_resolved_on_cpu(&fixture, &resolved);
+    let expected = f32_oracle(&fixture, policy);
     let named = as_named_blocks(&fixture.named);
     let roots = [fixture.logits];
     let mut per_head_plan =
@@ -1279,12 +1289,15 @@ fn card_19_simd_topology_plans_match_cpu_and_keep_axes_fixed() {
         .expect("the per-head topology plan executes");
     let grouped_output = omega::execute_plan_named(&grouped_plan, &named)
         .expect("the grouped-query topology plan executes");
+    let per_head_relative = relative_difference(&expected, per_head_output.root());
+    let grouped_relative = relative_difference(&expected, grouped_output.root());
+    eprintln!("card_19 per_head relative={per_head_relative} grouped relative={grouped_relative}");
     assert!(
-        relative_difference(&expected, per_head_output.root()) <= TOLERANCE,
-        "per-head topology output matches the CPU payload"
+        per_head_relative <= TOLERANCE,
+        "per-head topology output matches the f32 CPU payload: relative={per_head_relative} tolerance={TOLERANCE}"
     );
     assert!(
-        relative_difference(&expected, grouped_output.root()) <= TOLERANCE,
-        "grouped-query topology output matches the CPU payload"
+        grouped_relative <= TOLERANCE,
+        "grouped-query topology output matches the f32 CPU payload: relative={grouped_relative} tolerance={TOLERANCE}"
     );
 }

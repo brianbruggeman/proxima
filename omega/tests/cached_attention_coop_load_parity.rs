@@ -21,13 +21,13 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::{BoundOpKind, bind};
 use proxima_numeric::{NumericPolicy};
 
 mod support;
 use support::{
-    as_named_blocks, production_numeric_policy, real_single_range_forward_fixture_with_padding,
+    as_named_blocks, evaluate_gpu_oracle, production_numeric_policy,
+    real_single_range_forward_fixture_with_padding,
 };
 
 /// One padding value's worth of the parity check, shared by every case in
@@ -72,17 +72,7 @@ fn assert_parity_at_shape(cached_len: u64, new_count: u64, padding: u64, policy:
          eight-operand two-range shape"
     );
 
-    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
-    let mut validated = None;
-    let cpu = evaluate_quantized_named_with_scratch(
-        &program,
-        &symbols,
-        &named,
-        &output_roots,
-        &mut free_buffers,
-        &mut validated,
-    )
-    .expect("cpu runs the padded single-range program");
+    let cpu = evaluate_gpu_oracle(&program, &symbols, &named, &output_roots);
 
     let plan = omega::plan_named(&program, &symbols, &named, &output_roots, policy)
         .expect("metal plans the padded single-range program");
