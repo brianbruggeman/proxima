@@ -71,6 +71,10 @@ const REAL_GEMMA4_E2B_GGUF_PATH: &str = "/Users/brianbruggeman/.ollama/models/bl
 
 const MAX_TOKENS: usize = 48;
 
+/// `<turn|>`: llama-server returns it as the last id when it stops; the engine stops on it without
+/// returning it, so the locked ids are compared up to, not including, that stop.
+const END_OF_TURN_ID: u32 = 106;
+
 struct CorrectnessCheck {
     name: &'static str,
     prompt: String,
@@ -164,7 +168,11 @@ async fn gemma4_e2b_answers_all_four_correctness_checks_greedy() {
             ));
         }
 
-        if token_ids.get(..check.locked_token_ids.len()) != Some(check.locked_token_ids) {
+        let content_ids = check
+            .locked_token_ids
+            .strip_suffix(&[END_OF_TURN_ID])
+            .unwrap_or(check.locked_token_ids);
+        if token_ids.get(..content_ids.len()) != Some(content_ids) {
             failures.push(format!(
                 "{}: greedy token ids differ from llama-server's up to its stop\n  llama  = {:?}\n  proxima = {token_ids:?}",
                 check.name, check.locked_token_ids
