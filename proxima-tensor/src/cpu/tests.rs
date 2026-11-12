@@ -7999,6 +7999,73 @@ fn erf_f32_matches_reference_values_within_f32_epsilon() {
     );
 }
 
+/// The branch-free `exp` that lets `erf_f32` auto-vectorize, swept over the
+/// whole non-positive range `erf` feeds it (`-m*m` for `m` up to the
+/// clamp) against `f64::exp`: relative error stays inside 1.5 `f32` ulp.
+#[test]
+fn exp_nonpositive_f32_tracks_f64_exp_across_its_range() {
+    let mut max_ulps = 0.0f64;
+    let mut worst = 0.0f32;
+    for step in 0..=870_000u32 {
+        let x = -(step as f32) * 1.0e-4;
+        let reference = f64::from(x).exp();
+        let observed = f64::from(exp_nonpositive_f32(x));
+        let ulp = f64::from(f32::from_bits((reference as f32).to_bits() & 0x7f80_0000))
+            * f64::from(f32::EPSILON);
+        let error_ulps = (observed - reference).abs() / ulp.max(f64::MIN_POSITIVE);
+        if error_ulps > max_ulps {
+            max_ulps = error_ulps;
+            worst = x;
+        }
+    }
+    assert!(
+        max_ulps <= 1.5,
+        "worst exp_nonpositive_f32 error {max_ulps} ulp at x={worst}"
+    );
+}
+
+/// `erf_f32` before the vectorizable `exp`: the identical A&S 7.1.26 `f32`
+/// arithmetic with `libm`'s `expf`, kept as the baseline the swap is held to.
+fn erf_f32_with_libm_exp(x: f32) -> f32 {
+    let sign = if x < 0.0 { -1.0 } else { 1.0 };
+    let magnitude = x.abs();
+    let t = 1.0 / 0.327_591_1f32.mul_add(magnitude, 1.0);
+    let poly = t * 1.061_405_4f32
+        .mul_add(t, -1.453_152_1)
+        .mul_add(t, 1.421_413_8)
+        .mul_add(t, -0.284_496_72)
+        .mul_add(t, 0.254_829_6);
+    sign * poly.mul_add(-(-magnitude * magnitude).exp(), 1.0)
+}
+
+/// Only the `exp` differs from the `libm` baseline, so over a dense sweep of
+/// both signs the two stay inside one `f32::EPSILON` of each other.
+#[test]
+fn erf_f32_stays_within_epsilon_of_its_libm_exp_baseline_on_a_dense_sweep() {
+    let mut max_error = 0.0f64;
+    let mut worst = 0.0f32;
+    for step in -60_000i32..=60_000 {
+        let x = step as f32 * 1.0e-4;
+        let error = (f64::from(erf_f32(x)) - f64::from(erf_f32_with_libm_exp(x))).abs();
+        if error > max_error {
+            max_error = error;
+            worst = x;
+        }
+    }
+    assert!(
+        max_error <= f64::from(f32::EPSILON),
+        "worst erf_f32 deviation {max_error} at x={worst}"
+    );
+}
+
+#[test]
+fn erf_f32_propagates_nan_and_saturates_at_infinity() {
+    assert!(erf_f32(f32::NAN).is_nan(), "NaN must not be swallowed by the exp clamp");
+    assert_eq!(erf_f32(f32::INFINITY), 1.0);
+    assert_eq!(erf_f32(f32::NEG_INFINITY), -1.0);
+    assert_eq!(erf_f32(0.0), 0.0);
+}
+
 /// Same formula, same reference table, `f64` throughout: isolates how
 /// much of `erf_f32`'s error is the formula itself versus f32 rounding
 /// compounding on top of it.

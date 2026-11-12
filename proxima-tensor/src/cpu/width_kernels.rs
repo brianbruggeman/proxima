@@ -1579,7 +1579,39 @@ pub(super) fn erf_f32(x: f32) -> f32 {
         .mul_add(t, A3)
         .mul_add(t, A2)
         .mul_add(t, A1);
-    sign * poly.mul_add(-(-magnitude * magnitude).exp(), 1.0)
+    sign * poly.mul_add(-exp_nonpositive_f32(-magnitude * magnitude), 1.0)
+}
+
+/// `exp(x)` for `x <= 0`, branch-free and libm-free so a loop over it
+/// auto-vectorizes (`f32::exp` is an opaque `expf` call the vectorizer cannot
+/// widen). Cody-Waite reduction `x = n*ln2 + b` with `|b| <= ln2/2`, a degree-7
+/// Taylor polynomial for `e^b - 1` (truncation `b^8/8! < 5.3e-9`, under a
+/// tenth of an `f32` ulp), and `2^n` assembled in the exponent field. The
+/// argument is clamped at `-87` so `n >= -126` and `2^n` stays a normal float;
+/// `e^-87 = 1.6e-38`, which `erf` multiplies into a result of order one, so
+/// the clamp is invisible there. A NaN argument fails the `<` and propagates.
+#[inline(always)]
+pub(super) fn exp_nonpositive_f32(x: f32) -> f32 {
+    const LOG2_E: f32 = core::f32::consts::LOG2_E;
+    // 0x1.62e4p-1: few enough mantissa bits that n*LN2_HIGH is exact for |n| <= 126
+    const LN2_HIGH: f32 = f32::from_bits(0x3f31_7200);
+    const LN2_LOW: f32 = 1.428_606_8e-6;
+    const ROUND: f32 = 12_582_912.0;
+    const FLOOR: f32 = -87.0;
+
+    let x = if x < FLOOR { FLOOR } else { x };
+    let rounded = x.mul_add(LOG2_E, ROUND);
+    let n = rounded - ROUND;
+    let b = (-n).mul_add(LN2_LOW, (-n).mul_add(LN2_HIGH, x));
+    let scale = f32::from_bits((rounded.to_bits() << 23).wrapping_add(1.0f32.to_bits()));
+    let poly = b
+        .mul_add(1.0 / 5040.0, 1.0 / 720.0)
+        .mul_add(b, 1.0 / 120.0)
+        .mul_add(b, 1.0 / 24.0)
+        .mul_add(b, 1.0 / 6.0)
+        .mul_add(b, 0.5)
+        .mul_add(b, 1.0);
+    (b * poly).mul_add(scale, scale)
 }
 
 /// Same formula as [`erf_f32`], carried in `f64` for [`Element::apply`]'s
