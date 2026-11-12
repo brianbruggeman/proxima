@@ -770,7 +770,8 @@ pub(super) fn gather_last_row(
             alloc::vec![Extent::Static(1)],
             "lm_head_row",
         );
-        embedding_lookup(program, normed_final, lm_head_row)
+        let row_dtype = produced_dtype_or_binary32(program, normed_final);
+        embedding_lookup_as(program, normed_final, lm_head_row, row_dtype)
     } else {
         normed_final
     }
@@ -1973,11 +1974,16 @@ pub(crate) fn append_ple_flat_projections(
         alloc::vec![Extent::Static(vocab), Extent::Static(ple_total)],
         "per_layer_token_embd.weight",
     );
-    let emb_gathered = embedding_lookup(program, emb_table, ids);
-    let emb_scale = scalar_constant(program, libm::sqrtf(ple_dim as f32));
-    let emb_flat = elementwise(
+    let emb_gathered = embedding_lookup_as(
         program,
-        DType::FLOAT32,
+        emb_table,
+        ids,
+        produced_dtype_or_binary32(program, h0),
+    );
+    let emb_scale = scalar_constant(program, libm::sqrtf(ple_dim as f32));
+    let emb_flat = elementwise_like(
+        program,
+        emb_gathered,
         ScalarOp::Multiply,
         &[(emb_gathered, "sd->sd"), (emb_scale, "->sd")],
     )?;
@@ -1988,15 +1994,14 @@ pub(crate) fn append_ple_flat_projections(
         alloc::vec![Extent::Static(embedding), Extent::Static(ple_total)],
         "per_layer_model_proj.weight",
     );
-    let proj_product = elementwise(
+    let proj_product = elementwise_like(
         program,
-        DType::FLOAT32,
+        h0,
         ScalarOp::Multiply,
         &[(h0, "sd->sdo"), (proj_table, "do->sdo")],
     )?;
-    let proj_raw = reduce(
+    let proj_raw = reduce_like(
         program,
-        DType::FLOAT32,
         ScalarOp::Add,
         ReduceInit::Zero,
         proj_product,
@@ -2004,9 +2009,9 @@ pub(crate) fn append_ple_flat_projections(
         "so->sdo",
     )?;
     let proj_scale = scalar_constant(program, 1.0 / libm::sqrtf(embedding as f32));
-    let proj_flat = elementwise(
+    let proj_flat = elementwise_like(
         program,
-        DType::FLOAT32,
+        proj_raw,
         ScalarOp::Multiply,
         &[(proj_raw, "so->so"), (proj_scale, "->so")],
     )?;
@@ -2036,15 +2041,15 @@ pub(crate) fn append_ple_combined(
     ple_dim: u32,
 ) -> Result<PleSharedProjections, TensorError> {
     let split_view = alloc::format!("s,{ple_dim}*l+d@{ple_dim}->sld");
-    let proj_view = elementwise(
+    let proj_view = elementwise_like(
         program,
-        DType::FLOAT32,
+        flat.proj_flat,
         ScalarOp::Identity,
         &[(flat.proj_flat, split_view.as_str())],
     )?;
-    let emb_view = elementwise(
+    let emb_view = elementwise_like(
         program,
-        DType::FLOAT32,
+        flat.emb_flat,
         ScalarOp::Identity,
         &[(flat.emb_flat, split_view.as_str())],
     )?;
@@ -2056,16 +2061,16 @@ pub(crate) fn append_ple_combined(
         eps,
         "l",
     )?;
-    let summed = elementwise(
+    let summed = elementwise_like(
         program,
-        DType::FLOAT32,
+        proj_normed,
         ScalarOp::Add,
         &[(proj_normed, "sld->sld"), (emb_view, "sld->sld")],
     )?;
     let combine_scale = scalar_constant(program, core::f32::consts::FRAC_1_SQRT_2);
-    let combined = elementwise(
+    let combined = elementwise_like(
         program,
-        DType::FLOAT32,
+        summed,
         ScalarOp::Multiply,
         &[(summed, "sld->sld"), (combine_scale, "->sld")],
     )?;
@@ -2083,9 +2088,9 @@ pub(crate) fn ple_layer_input(
     layer: u32,
 ) -> Result<NodeId, TensorError> {
     let slice = alloc::format!("s,{layer},d->sd");
-    elementwise(
+    elementwise_like(
         program,
-        DType::FLOAT32,
+        shared.combined,
         ScalarOp::Identity,
         &[(shared.combined, slice.as_str())],
     )
