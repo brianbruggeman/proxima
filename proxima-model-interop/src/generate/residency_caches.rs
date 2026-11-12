@@ -353,6 +353,85 @@ mod configured_runtime_tests {
     }
 }
 
+/// A narrow KV cache is read only by the fused `CachedAttention` kernel, which decodes it through
+/// the cache's format. A plan whose attention stayed unfused reads the cache leaves as binary32,
+/// so a narrow cache there yields wrong ids (flint, binary16: divergence at token 1). Teaching
+/// pointer: the question is `omega::metal::Plan::pads_kv_safely`, the same predicate that decides
+/// whether a bucketed cached range may be padded.
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+fn refuse_narrow_cache_without_fused_reader(
+    plan: &omega::metal::Plan,
+    (key_codec, value_codec): (Option<Codec>, Option<Codec>),
+) -> Result<(), InteropError> {
+    if key_codec.is_none() && value_codec.is_none() {
+        return Ok(());
+    }
+    if plan.pads_kv_safely(|name| name.starts_with("kv_cache.")) {
+        return Ok(());
+    }
+    Err(InteropError::UnsupportedServingConfig(alloc::format!(
+        "kv cache key codec {key_codec:?} value codec {value_codec:?}: this plan has attention \
+that did not fuse into cached attention, and only the fused kernel reads a narrow cache; \
+use a binary32 cache for this model"
+    )))
+}
+
+// a test names its failure with expect, as the crate's other test modules do
+#[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod narrow_cache_refusal_tests {
+    use super::*;
+    use proxima_numeric::DType;
+    use proxima_tensor::ScalarOp;
+    use proxima_tensor::map::{self, IndexMap};
+
+    fn unfused_reader_plan() -> omega::metal::Plan {
+        let program = vec![
+            Op::Input {
+                dtype: DType::FLOAT32,
+                shape: vec![Extent::Static(8)],
+                name: Some(String::from("kv_cache.3.k_even")),
+            },
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Negate,
+                operands: vec![(NodeId(0), IndexMap::Affine(map::projection(1, &[0])))],
+                name: Some(String::from("read_as_binary32")),
+            },
+        ];
+        plan_named_with_placed_inputs(
+            &program,
+            &[],
+            &[],
+            &[NodeId(1)],
+            proxima_numeric::NumericPolicy::bit_exact(),
+            &[NodeId(0)],
+            true,
+        )
+        .expect("a two-op program plans")
+    }
+
+    #[test]
+    fn a_binary32_cache_needs_no_fused_reader() {
+        let plan = unfused_reader_plan();
+
+        refuse_narrow_cache_without_fused_reader(&plan, (None, None)).expect("binary32 reads anywhere");
+    }
+
+    #[test]
+    fn a_narrow_cache_read_by_an_unfused_op_is_refused_naming_both_codecs() {
+        let plan = unfused_reader_plan();
+        let half = Some(NumericFormat::Float16);
+
+        let refusal = refuse_narrow_cache_without_fused_reader(&plan, (half, half))
+            .expect_err("an unfused reader would read the half bytes as binary32");
+
+        let message = refusal.to_string();
+        assert!(message.contains("did not fuse"), "{message}");
+        assert!(message.contains("Float16"), "{message}");
+    }
+}
+
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 fn reject_bounded_placed_execution(
     config: Option<&RuntimeConfig>,
@@ -4193,7 +4272,7 @@ impl BackendRuntime {
                 self.plan_refits += 1;
                 return Ok(near);
             }
-            Self::build_placed_plan(
+            let plan = Self::build_placed_plan(
                 program,
                 symbols,
                 named,
@@ -4204,7 +4283,9 @@ impl BackendRuntime {
                     output: output_placements,
                 },
                 &numerics,
-            )
+            )?;
+            refuse_narrow_cache_without_fused_reader(&plan, kv_codecs)?;
+            Ok(plan)
         };
         let plan = if decode_shaped {
             Self::resolve_cached_plan(
