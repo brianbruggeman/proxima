@@ -1,7 +1,7 @@
 //! Correctness gate for `metal-q4k-ggml-port`, the verbatim transcription of
 //! ggml's `kernel_mul_mv_q4_K_f32_impl<4,2,32>`
 //! (`ggml-metal.metal:5086-5193`) onto `omega::msl`'s row-blocked packed
-//! path (`push_q4k_ggml_port_body`). Same posture as
+//! path (`sub_block_matvec_msl`). Same posture as
 //! `q4k_real_checkpoint_parity.rs`: real GGUF bytes wherever the host has
 //! them (guiding-principles §9), skip rather than fail when the file is
 //! absent. Two real tensors, `blk.0.attn_q.weight` AND `blk.0.ffn_up.weight`

@@ -1,5 +1,5 @@
 //! `push_q6k_ggml_port_body`'s activation address shares
-//! `push_packed_row_plain_product_y4_address` with `push_q4k_ggml_port_body`,
+//! `push_packed_row_plain_product_y4_address` with `sub_block_matvec_msl`,
 //! so it takes the SAME `other_stride_is_one` stride-free specialization --
 //! see that function's own doc. One codec over from
 //! `q4k_ggml_port_strided_activation.rs`: a unit-stride activation (the

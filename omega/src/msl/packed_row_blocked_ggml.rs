@@ -172,9 +172,11 @@ pub(super) fn push_packed_row_blocked_body(
         // in, same "not invented to compose" posture as its other arms.
         // (`metal-q4k-single-fetch`'s body is compiled only when that feature is
         // on; it is not part of `metal`, so no supported build can reach it.)
-        // `metal-q4k-ggml-port` (default-off): the verbatim ggml transcription,
-        // see [`push_q4k_ggml_port_body`]/[`push_q6k_ggml_port_body`]'s own
-        // docs. Requires `plain_product` (float-only scale-deferred shape,
+        // `metal-q4k-ggml-port` (part of `metal`): the ggml-geometry bodies. `Q4_K`
+        // is RENDERED from its `BlockLayout` ([`sub_block_matvec_msl`]); `Q5_K` and
+        // `Q6_K` are still verbatim ports ([`push_q5k_ggml_port_body`]/
+        // [`push_q6k_ggml_port_body`], see their own docs) and are what keep the
+        // feature. Requires `plain_product` (float-only scale-deferred shape,
         // the same gate `q4k_pair_dot`'s own arm below needs) and takes
         // priority over it -- both target the exact same design point, and
         // when this feature is on it is the one under test. Not
@@ -182,7 +184,7 @@ pub(super) fn push_packed_row_blocked_body(
         // above and for the identical reason: its `ib` loop has no
         // `sgitg`/`split` stride of its own. ALSO requires the codec be one
         // this file has a verbatim ggml body for (`Q4K`, `Q5K`, `Q6K`): each
-        // of `push_q4k_ggml_port_body`/`push_q5k_ggml_port_body`/
+        // of `sub_block_matvec_msl`/`push_q5k_ggml_port_body`/
         // `push_q6k_ggml_port_body` transcribes a SPECIFIC ggml kernel's own
         // fixed byte offsets and decode shape. `plain_product` alone is not
         // codec-specific (every codec with `supports_pair_dot` reaches this
@@ -194,7 +196,8 @@ pub(super) fn push_packed_row_blocked_body(
         // simply never read). `Q5_K` now has its own body
         // ([`push_q5k_ggml_port_body`]) instead of falling through to `Q4_K`'s.
         // (the gate itself now lives in `PackedBodySelect::select` below)
-        // `metal-q4_0-native` (part of `metal`): ggml's OWN `Q4_0` lane geometry
+        // `metal-q4_0-native` (NOT in omega's `metal`; `proxima-model-interop`'s
+        // `metal` enables it, proxima-model-interop/Cargo.toml:153): ggml's OWN `Q4_0` lane geometry
         // (`push_q4_0_native_body`'s own doc) rather than this preamble's
         // K-quant-shaped `ix = lane/8` split -- `Q4_0` has no `codec_
         // supports_pair_dot` entry (its own doc: only the four K-quants have
@@ -216,7 +219,8 @@ pub(super) fn push_packed_row_blocked_body(
         enum PackedBodySelect {
             Q6KGgmlPort,
             Q5KGgmlPort,
-            Q4KGgmlPort,
+            /// the sub-block matvec rendered from the codec's own block layout
+            Q4KRendered,
             /// ggml's own Q4_0 lane geometry, kept as a REFERENCE/Oracle body.
             Q4_0Reference,
             /// the generic lane-spread preamble plus its per-codec decode arms
@@ -249,7 +253,7 @@ pub(super) fn push_packed_row_blocked_body(
                 match (ggml_port, codec, q4_0_reference) {
                     (true, Codec::Q6K, _) => Self::Q6KGgmlPort,
                     (true, Codec::Q5K, _) => Self::Q5KGgmlPort,
-                    (true, _, _) => Self::Q4KGgmlPort,
+                    (true, _, _) => Self::Q4KRendered,
                     (false, _, true) => Self::Q4_0Reference,
                     (false, _, false) => Self::Generic,
                 }
@@ -284,16 +288,32 @@ pub(super) fn push_packed_row_blocked_body(
                 other_stride_is_one,
                 metal,
             );
-        } else if packed_body == PackedBodySelect::Q4KGgmlPort {
-            push_q4k_ggml_port_body(
-                source,
+        } else if packed_body == PackedBodySelect::Q4KRendered {
+            let layout = codec
+                .block_layout()
+                .ok_or(EmitError::PackedCodecNotSupported {
+                    node: resolved.node,
+                    codec: "no block layout",
+                })?;
+            let geometry = SubBlockMatvecGeometry::decode(
+                rows,
+                packed_row_nsg_factor() as usize,
+                SIMD_WIDTH as usize,
+            );
+            let reduction_bound = packed_row_reduction_bound_token(metal);
+            let body = sub_block_matvec_msl(
+                &layout,
+                &geometry,
                 weight,
                 other,
-                rows,
-                block_bytes,
                 other_stride_is_one,
-                metal,
-            );
+                &reduction_bound,
+            )
+            .map_err(|refusal| EmitError::PackedCodecNotSupported {
+                node: resolved.node,
+                codec: refusal.0,
+            })?;
+            source.push_str(&body);
         } else if packed_body == PackedBodySelect::Q4_0Reference {
             push_q4_0_native_body(source, weight, other, rows, other_stride_is_one, metal);
         } else {
@@ -375,7 +395,7 @@ pub(super) fn push_packed_row_blocked_body(
                 // element offsets regardless of `other_stride` before this
                 // landing -- correct only by accident, for every caller that
                 // happened to hand this path a contiguous activation. Ported
-                // from `push_q4k_ggml_port_body`'s own already-stride-aware
+                // from `sub_block_matvec_msl`'s own already-stride-aware
                 // form (`y4_base + (long)i * other_stride`, below in this
                 // file), the one sibling body that already got this right.
                 source.push_str("        for (uint i = 0u; i < 8u; ++i) { yl[i] = y4[(long)i * other_stride]; yl[i + 8u] = y4[(long)(i + 32u) * other_stride]; yh[i] = y4[(long)(i + 128u) * other_stride]; yh[i + 8u] = y4[(long)(i + 160u) * other_stride]; }\n");
@@ -1013,7 +1033,7 @@ pub(super) fn push_q4k_single_fetch_body(
 
 /// The plain-product row-blocked bodies' shared activation address: the
 /// `y4` pointer's base and per-iteration byte step. `push_packed_row_blocked_
-/// body`'s own `plain_product` arm and `push_q4k_ggml_port_body` both read
+/// body`'s own `plain_product` arm and `sub_block_matvec_msl` both read
 /// `weight_base`/`other_base`/`other_stride`/`iq`/`ir` from the same
 /// preamble and must have already declared `ib_first`/`ib_step` in scope --
 /// this is the ONE place either renders the pointer, so the stride-free
@@ -1058,227 +1078,6 @@ pub(super) fn push_packed_row_plain_product_y4_address(
 }
 
 // ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
-// master/LICENSE) `kernel_mul_mv_q4_K_f32_impl<4,2,32>`
-// (ggml-metal.metal:5086-5193), transcribed line-for-line onto this crate's
-// operand-base/stride addressing. See `push_q4k_ggml_port_body`'s own doc for
-// what is and is not identical to the upstream source.
-//
-// Copyright (c) 2023-2024 The ggml authors. MIT-licensed; see THIRD_PARTY.md.
-//
-/// `metal-q4k-ggml-port` (default-off): a VERBATIM port of ggml's
-/// `kernel_mul_mv_q4_K_f32_impl<nr0=4, nsg=2, nw=32>`
-/// (`ggml-metal.metal:5086-5193`) -- every prior landing on this path
-/// (`q4k_pair_dot`'s `plain_product` arm above, `metal-q4k-mask-fma`,
-/// `metal-q4k-single-fetch`) is this crate's own RE-DERIVATION of pieces of
-/// ggml's technique through its `q4k_header`/`q4k_run8` abstractions; this
-/// function instead transcribes ggml's actual per-thread math with no
-/// intermediate abstraction, so the only remaining difference from upstream
-/// is address computation (`weight_base[q]`/`other_base[0]`/`other_stride`,
-/// this crate's per-axis strided reads, instead of ggml's raw `nb01` pointer
-/// walk -- ggml's own `q1 += args.nb01/2` row-advance is behaviorally
-/// identical to this function's per-row `blk` recompute for the contiguous
-/// packed-row layout this crate always uses). The activation address itself
-/// shares `push_q4k_plain_product_y4_address` with
-/// `push_packed_row_blocked_body`'s own `plain_product` arm, so when the
-/// layout proves the reduce-axis stride is 1 this body drops the runtime
-/// multiply the same way ggml's raw pointer walk always did.
-///
-/// Per-thread split (ggml-metal.metal:5100-5103), unchanged from the
-/// existing row-blocked preamble's own lane assignment: `ix = lane/8`
-/// (0..3, which of 4 super-blocks in today's `ib` stride this lane owns),
-/// `it = lane%8` (0..7), `iq = it/4` (0 or 1, selects `q1` vs `q2`'s 64-byte
-/// `qs` half), `ir = it%4` (0..3, a 4-uint16 stride within that half).
-///
-/// Super-block iteration (ggml-metal.metal:5132,5182): `for (ib = ix; ib <
-/// nb; ib += 4)`, `nb = reduction_total / 256`; `y4` (the activation gather
-/// base) advances by `4 * QK_K` (1024) elements per iteration, matching
-/// ggml's `y4 += 4 * QK_K`.
-///
-/// Scale/min extraction (ggml-metal.metal:5096-5098,5142-5150): three fixed
-/// masks, `kmask1 = 0x3f3f` (two 6-bit scale/min fields), `kmask2 = 0x0f0f`
-/// (two 4-bit high-scale/high-min fields), `kmask3 = 0xc0c0` (the two
-/// leftover high bits of the LOW fields, shifted into place with `>> 2`) --
-/// no shift-then-branch the way this file's own `q4k_scale_min` reads it.
-/// `sc16[0..3]` (aliased as 8 bytes `sc8[0..7]`) hold, in order: low-group
-/// low-half scale, low-group low-half min, low-group high-half scale,
-/// low-group high-half min, high-group low-half scale, high-group low-half
-/// min, high-group high-half scale, high-group high-half min.
-///
-/// Nibble extraction (ggml-metal.metal:5157-5166): FOUR fixed bit-position
-/// masks off each raw `uint16_t` word -- `& 0x000F`, `& 0x0F00`, `& 0x00F0`,
-/// `& 0xF000` -- no runtime shift at all. The `0x0F00`/`0xF000` masks leave
-/// their nibble sitting at bit 8/12, so the corresponding accumulator lane
-/// (`acc1[1]`/`acc1[3]`/`acc2[1]`/`acc2[3]`) is 256x too large; `0x00F0`
-/// leaves its nibble at bit 4, 16x too large. Both residuals are folded into
-/// the FINAL per-sub-block combine below (ggml-metal.metal:5171-5175)
-/// rather than corrected per element -- `1.0f/256.0f` on the odd
-/// accumulator lanes, `1.0f/16.0f` on the whole second scale/min term --
-/// this is the "mask-without-shift" technique `metal-q4k-mask-fma`'s own doc
-/// names but only ports for the header decode, not this accumulate.
-///
-/// SIMD reduction (ggml-metal.metal:5187-5192): unchanged from every other
-/// row-blocked arm -- `simd_sum(sumf[row])` combines the 32 lanes of one
-/// simdgroup, lane 0 alone writes -- handled by the shared
-/// `push_packed_row_combine_and_write` tail this function's caller still
-/// invokes after it returns.
-///
-/// Dispatch geometry: `nr0 = 4` is already this crate's own
-/// `PACKED_ROWS_PER_GROUP`; `nsg = 2` is wired separately, in
-/// `tiled_gemm_threadgroup_width`'s own `metal-q4k-ggml-port` arm.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn push_q4k_ggml_port_body(
-    source: &mut String,
-    weight: usize,
-    other: usize,
-    rows: usize,
-    block_bytes: usize,
-    other_stride_is_one: bool,
-    metal: &MetalOnlyExtras,
-) {
-    source.push_str("    uint ix = (uint)lane / 8u;\n");
-    source.push_str("    uint it = (uint)lane % 8u;\n");
-    source.push_str("    uint iq = it / 4u;\n");
-    source.push_str("    uint ir = it % 4u;\n");
-    let reduction_bound = packed_row_reduction_bound_token(metal);
-    source.push_str(&format!(
-        "    int super_blocks = (int){reduction_bound} / {Q4K_BLOCK_ELEMENTS};\n"
-    ));
-    source.push_str("    float yl[16];\n");
-    source.push_str("    float yh[16];\n");
-    // HOIST + POINTER INCREMENT, same as `push_packed_row_blocked_body`'s
-    // own arm above and for the identical reason: `weight_base[q]/
-    // Q4K_BLOCK_ELEMENTS` and the y4 lane offset are invariant across every
-    // `ib` this thread visits (`ix` alone selects the starting super-block,
-    // the loop always steps by the fixed `4`), so both this row's byte
-    // pointer and the activation base are computed ONCE and advanced by a
-    // constant per iteration instead of rebuilt from `ib` every time.
-    // `ib_first`/`ib_step` (rather than `ix`/the literal `4`) are the same
-    // names `push_packed_row_blocked_body`'s own arm declares, so
-    // `push_q4k_plain_product_y4_address` renders identical text in both
-    // callers.
-    source.push_str("    int ib_first = (int)ix;\n    int ib_step = 4;\n");
-    source.push_str(&format!(
-        "    long blk_step = (long)ib_step * {block_bytes};\n"
-    ));
-    source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
-    source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
-    source.push_str(&format!(
-        "        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS}) + (long)ib_first) * {block_bytes};\n"
-    ));
-    source.push_str("    }\n");
-    push_q4k_plain_product_y4_address(source, other, other_stride_is_one);
-    source.push_str("    for (int ib = ib_first; ib < super_blocks; ib += ib_step) {\n");
-    source.push_str(
-        "        float sumy0 = 0.0f; float sumy1 = 0.0f; float sumy2 = 0.0f; float sumy3 = 0.0f;\n",
-    );
-    if other_stride_is_one {
-        source.push_str(
-            "        for (uint i = 0u; i < 8u; ++i) {\n            yl[i] = y4[i]; sumy0 += yl[i];\n",
-        );
-        source.push_str("            yl[i + 8u] = y4[i + 32u]; sumy1 += yl[i + 8u];\n");
-        source.push_str("            yh[i] = y4[i + 128u]; sumy2 += yh[i];\n");
-        source.push_str("            yh[i + 8u] = y4[i + 160u]; sumy3 += yh[i + 8u];\n");
-    } else {
-        source.push_str(
-            "        for (uint i = 0u; i < 8u; ++i) {\n            yl[i] = y4[(long)i * other_stride]; sumy0 += yl[i];\n",
-        );
-        source.push_str(
-            "            yl[i + 8u] = y4[(long)(i + 32u) * other_stride]; sumy1 += yl[i + 8u];\n",
-        );
-        source
-            .push_str("            yh[i] = y4[(long)(i + 128u) * other_stride]; sumy2 += yh[i];\n");
-        source.push_str(
-            "            yh[i + 8u] = y4[(long)(i + 160u) * other_stride]; sumy3 += yh[i + 8u];\n",
-        );
-    }
-    source.push_str("        }\n");
-    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
-    source.push_str("            device const uchar *blk = blk_ptr[q];\n");
-    source
-        .push_str("            device const ushort *sc = (device const ushort *)(blk + 4) + iq;\n");
-    source.push_str("            device const ushort *q1 = (device const ushort *)(blk + 16) + 16u * iq + 4u * ir;\n");
-    source.push_str("            device const ushort *q2 = q1 + 32;\n");
-    source.push_str("            device const half *dh = (device const half *)blk;\n");
-    source.push_str("            ushort sc16_0 = sc[0] & (ushort)0x3f3fu;\n");
-    source.push_str("            ushort sc16_1 = sc[2] & (ushort)0x3f3fu;\n");
-    source.push_str(
-        "            ushort sc16_2 = (ushort)(((sc[4] >> 0) & (ushort)0x0f0fu) | ((sc[0] & (ushort)0xc0c0u) >> 2));\n",
-    );
-    source.push_str(
-        "            ushort sc16_3 = (ushort)(((sc[4] >> 4) & (ushort)0x0f0fu) | ((sc[2] & (ushort)0xc0c0u) >> 2));\n",
-    );
-    source.push_str(
-        "            uchar sc8_0 = (uchar)(sc16_0 & 0xffu); uchar sc8_1 = (uchar)(sc16_0 >> 8);\n",
-    );
-    source.push_str(
-        "            uchar sc8_2 = (uchar)(sc16_1 & 0xffu); uchar sc8_3 = (uchar)(sc16_1 >> 8);\n",
-    );
-    source.push_str(
-        "            uchar sc8_4 = (uchar)(sc16_2 & 0xffu); uchar sc8_5 = (uchar)(sc16_2 >> 8);\n",
-    );
-    source.push_str(
-        "            uchar sc8_6 = (uchar)(sc16_3 & 0xffu); uchar sc8_7 = (uchar)(sc16_3 >> 8);\n",
-    );
-    source.push_str(
-        "            float acc1_0 = 0.0f; float acc1_1 = 0.0f; float acc1_2 = 0.0f; float acc1_3 = 0.0f;\n",
-    );
-    source.push_str(
-        "            float acc2_0 = 0.0f; float acc2_1 = 0.0f; float acc2_2 = 0.0f; float acc2_3 = 0.0f;\n",
-    );
-    source.push_str("            for (uint i = 0u; i < 4u; ++i) {\n");
-    source.push_str("                ushort word1 = q1[i];\n");
-    source.push_str("                ushort word2 = q2[i];\n");
-    source.push_str(
-        "                acc1_0 += yl[2u * i + 0u] * (float)(word1 & (ushort)0x000Fu);\n",
-    );
-    source.push_str(
-        "                acc1_1 += yl[2u * i + 1u] * (float)(word1 & (ushort)0x0F00u);\n",
-    );
-    source.push_str(
-        "                acc1_2 += yl[2u * i + 8u] * (float)(word1 & (ushort)0x00F0u);\n",
-    );
-    source.push_str(
-        "                acc1_3 += yl[2u * i + 9u] * (float)(word1 & (ushort)0xF000u);\n",
-    );
-    source.push_str(
-        "                acc2_0 += yh[2u * i + 0u] * (float)(word2 & (ushort)0x000Fu);\n",
-    );
-    source.push_str(
-        "                acc2_1 += yh[2u * i + 1u] * (float)(word2 & (ushort)0x0F00u);\n",
-    );
-    source.push_str(
-        "                acc2_2 += yh[2u * i + 8u] * (float)(word2 & (ushort)0x00F0u);\n",
-    );
-    source.push_str(
-        "                acc2_3 += yh[2u * i + 9u] * (float)(word2 & (ushort)0xF000u);\n",
-    );
-    source.push_str("            }\n");
-    source.push_str("            float dall = (float)dh[0];\n");
-    source.push_str("            float dmin = (float)dh[1];\n");
-    source.push_str(
-        "            sumf[q] = sumf[q] + dall * ((acc1_0 + (1.0f/256.0f) * acc1_1) * (float)sc8_0 +\n",
-    );
-    source.push_str(
-        "                                       (acc1_2 + (1.0f/256.0f) * acc1_3) * (float)sc8_1 * (1.0f/16.0f) +\n",
-    );
-    source.push_str(
-        "                                       (acc2_0 + (1.0f/256.0f) * acc2_1) * (float)sc8_4 +\n",
-    );
-    source.push_str(
-        "                                       (acc2_2 + (1.0f/256.0f) * acc2_3) * (float)sc8_5 * (1.0f/16.0f)) -\n",
-    );
-    source.push_str(
-        "                      dmin * (sumy0 * (float)sc8_2 + sumy1 * (float)sc8_3 + sumy2 * (float)sc8_6 + sumy3 * (float)sc8_7);\n",
-    );
-    source.push_str("        }\n");
-    source.push_str(&format!(
-        "        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"
-    ));
-    source.push_str("        y4 += y4_step;\n");
-    source.push_str("    }\n");
-}
-
-// ggml (llama.cpp, MIT license: https://github.com/ggml-org/llama.cpp/blob/
 // master/LICENSE) `mul_vec_q_n_f32_impl<block_q4_0, N_R0_Q4_0=4>` +
 // `block_q_n_dot_y(device const block_q4_0 *, ...)`
 // (ggml/src/ggml-metal/kernels/mul_mv.metal), transcribed line-for-line onto
@@ -1286,7 +1085,8 @@ pub(super) fn push_q4k_ggml_port_body(
 //
 // Copyright (c) 2023-2024 The ggml authors. MIT-licensed; see THIRD_PARTY.md.
 //
-/// `metal-q4_0-native` (part of `metal`): a VERBATIM port of ggml's own `Q4_0`
+/// `metal-q4_0-native` (NOT in omega's `metal`; `proxima-model-interop`'s `metal`
+/// enables it, proxima-model-interop/Cargo.toml:153): a VERBATIM port of ggml's own `Q4_0`
 /// matvec lane geometry -- TWO threads per REAL 32-element block (`ix =
 /// tiisg/2`, 16 distinct block-owning lane-PAIRS per simdgroup; `il =
 /// (tiisg%2)*8`, the two lanes of a pair split one block's 16 packed-nibble
@@ -1426,21 +1226,21 @@ pub(super) fn push_q4_0_native_body(
 // master/LICENSE) `kernel_mul_mv_q5_K_f32_impl<2,2,32>`
 // (ggml-metal.metal:5209-5324), transcribed line-for-line onto this crate's
 // operand-base/stride addressing, the same posture as
-// [`push_q4k_ggml_port_body`].
+// [`sub_block_matvec_msl`].
 //
 // Copyright (c) 2023-2024 The ggml authors. MIT-licensed; see THIRD_PARTY.md.
 //
-/// `metal-q4k-ggml-port` (default-off, same feature `push_q4k_ggml_port_body`
+/// `metal-q4k-ggml-port` (default-off, same feature `sub_block_matvec_msl`
 /// answers to): a VERBATIM port of ggml's `kernel_mul_mv_q5_K_f32_impl<nr0=2,
 /// nsg=2, nw=32>` (`ggml-metal.metal:5209-5324`) -- the fix for this crate's
 /// own `q5k_pair_dot`, whose non-deferred `(scale*value - minimum)*activation`
 /// per lane (`docs/discipline.md` ROW 361/384) does the scale/min multiply-
 /// subtract EIGHT times per sub-block; this body applies `dall`/`dmin` ONCE
 /// per sub-block over pre-summed `acc1`/`acc2`/`sumy`, the same deferral
-/// `push_q4k_ggml_port_body` already ports for `Q4_K`.
+/// `sub_block_matvec_msl` already ports for `Q4_K`.
 ///
 /// Lane assignment (`ggml-metal.metal:5244-5250`), same shape as
-/// [`push_q4k_ggml_port_body`]'s own `tid`/`ix`/`iq`/`ir` (`Q5_K`'s `tid =
+/// [`sub_block_matvec_msl`]'s own `tid`/`ix`/`iq`/`ir` (`Q5_K`'s `tid =
 /// tiisg/4` divides by 4 where `Q4_K`'s divides by 8, because `Q5_K` has no
 /// second `it/4` split -- `iq = tid/4`, `ir = tid%4` read directly off `tid`):
 /// `l0 = 8*ir`; `q_offset = 32*iq + l0` (byte offset into `qs`, unused here --
@@ -1457,7 +1257,7 @@ pub(super) fn push_q4_0_native_body(
 /// Activation gather (`ggml-metal.metal:5269-5276`): `y2 = y1 + 128`, so
 /// `y2[l] == y1[128+l]` and `y2[l+32] == y1[160+l]` -- textually the SAME
 /// `yl[i]/yl[i+8]/yh[i]/yh[i+8]` gather from `y4[i]/y4[i+32]/y4[i+128]/
-/// y4[i+160]` [`push_q4k_ggml_port_body`] already renders, so this body
+/// y4[i+160]` [`sub_block_matvec_msl`] already renders, so this body
 /// reuses that exact source text rather than a second copy.
 ///
 /// Scale/min extraction (`ggml-metal.metal:5281-5284`): `Q5_K`'s
@@ -1625,11 +1425,11 @@ pub(super) fn push_q5k_ggml_port_body(
 // master/LICENSE) `kernel_mul_mv_q6_K_f32_impl<1,2,32>`
 // (ggml-metal.metal:5340-5433), transcribed line-for-line onto this crate's
 // operand-base/stride addressing, the same posture as
-// [`push_q4k_ggml_port_body`].
+// [`sub_block_matvec_msl`].
 //
 // Copyright (c) 2023-2024 The ggml authors. MIT-licensed; see THIRD_PARTY.md.
 //
-/// `metal-q4k-ggml-port` (default-off, same feature `push_q4k_ggml_port_body`
+/// `metal-q4k-ggml-port` (default-off, same feature `sub_block_matvec_msl`
 /// answers to -- ROW 316 named the feature after the first codec it ported,
 /// not the mechanism): a VERBATIM port of ggml's
 /// `kernel_mul_mv_q6_K_f32_impl<nr0=1, nsg=2, nw=32>`
@@ -1645,7 +1445,7 @@ pub(super) fn push_q5k_ggml_port_body(
 /// (`ggml-metal-impl.h:38`) collapses ggml's own `row`/`nr0` loop to a
 /// single iteration, still written as `for q in 0..rows` so this stays in
 /// step with [`Codec::rows_per_simdgroup`] rather than baking `1` in
-/// the way `push_q4k_ggml_port_body` bakes `4`.
+/// the way `sub_block_matvec_msl` bakes `4`.
 ///
 /// Super-block iteration (`ggml-metal.metal:5387`): `for (i = ix; i < nb; i
 /// += 2)` -- stride `2` (`N_SIMDWIDTH/2` lanes-per-super-block-half), not

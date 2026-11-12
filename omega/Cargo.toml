@@ -178,7 +178,8 @@ metal-core = ["alloc"]
 # not by this change).
 # `metal-attn-split-decode` and `metal-attn-split-rows` join per `docs/model-interop/discipline.md` ROW C4.21 (split-KV decode attention and
 # row-tiled K > 1 verify attention; evidence on the feature definitions below).
-# `metal-q4_0-native` joins per `docs/model-interop/discipline.md` ROW C4.22
+# `metal-q4_0-native` (not in this crate's `metal`; `proxima-model-interop`'s
+# `metal` enables it) joins per `docs/model-interop/discipline.md` ROW C4.22
 # (ggml's lane geometry for the 275 Q4_0 matvecs of a gemma4-E2B decode token,
 # same launch grid, 640 instead of 512 `maxTotalThreadsPerThreadgroup`: the
 # Q4_0 family replayed in plan order 7.33-7.54 -> 5.26-5.50 ms, decode 16.61-
@@ -466,7 +467,9 @@ kv-capacity-bucket = ["proxima-tensor/kv-capacity-bucket"]
 # Line-for-line port of ggml's `kernel_mul_mv_q4_K_f32_impl<4,2,32>`
 # (`ggml-metal.metal:5086-5193`, MIT-licensed, upstream:
 # https://github.com/ggml-org/llama.cpp/blob/master/ggml/src/ggml-metal/ggml-metal.metal)
-# for the row-blocked packed `Q4_K` matvec (`msl.rs`'s `push_q4k_ggml_port_body`).
+# for the row-blocked packed `Q4_K` matvec (`msl/sub_block_matvec.rs`'s `sub_block_matvec_msl`, rendered from `BlockLayout::Q4_K`
+# since PROXNUM-66; this feature still gates the `Q5_K` and `Q6_K` ports in
+# `msl/packed_row_blocked_ggml.rs`).
 # Every prior landing on this path (`q4k_pair_dot`'s `plain_product` arm,
 # `metal-q4k-mask-fma`, `metal-q4k-single-fetch`) is a RE-DERIVATION of pieces
 # of ggml's technique through this crate's own header-decode/`q4k_run8`
@@ -480,9 +483,7 @@ kv-capacity-bucket = ["proxima-tensor/kv-capacity-bucket"]
 # measured a FOUR-time negative every time it was tried on OUR body
 # (`metal-packed-row-nsg2`, ledger ROWs 249,251-254,259-260,265-267) --
 # untested until now is nsg=2 paired with ggml's OWN math rather than ours.
-# Default-off per the same discipline as `metal-tiled-gemm` above: a kernel
-# body rewrite earns the production default only after a quiet-box
-# decode-step seal, not on the "verbatim port" argument alone.
+# Part of `metal` (listed above, ROW 315's bake-off).
 metal-q4k-ggml-port = ["metal"]
 # Line-for-line port of ggml's `mul_vec_q_n_f32_impl<block_q4_0, N_R0_Q4_0=4>`
 # + `block_q_n_dot_y<block_q4_0>`

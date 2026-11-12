@@ -31,6 +31,120 @@ static inline float q2k_element(device const uchar *block, uint index) {
 }
 
 
+constant int kvalues_iq4nl_msl[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113
+};
+static inline float iq4_xs_element(device const uchar *block, uint index) {
+    float d = (float)as_type<half>((ushort)((uint)block[0] | ((uint)block[1] << 8)));
+    ushort scales_h = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    uint sub_block = index / 32u;
+    uint within = index % 32u;
+    uchar scales_l = block[4u + sub_block / 2u];
+    uint low_nibble = (uint)((scales_l >> (4u * (sub_block % 2u))) & 0x0Fu);
+    uint high_bits = ((uint)scales_h >> (2u * sub_block)) & 3u;
+    float sub_scale = d * ((float)(low_nibble | (high_bits << 4u)) - 32.0f);
+    uchar packed = block[8u + sub_block * 16u + (within % 16u)];
+    uint code = within < 16u ? (uint)(packed & 0x0Fu) : (uint)(packed >> 4u);
+    return sub_scale * (float)kvalues_iq4nl_msl[code];
+}
+
+
+constant uint iq3s_grid_msl[512] = {
+    0x01010101u, 0x01010103u, 0x01010105u, 0x0101010bu, 0x0101010fu, 0x01010301u, 0x01010303u, 0x01010305u,
+    0x01010309u, 0x0101030du, 0x01010501u, 0x01010503u, 0x0101050bu, 0x01010707u, 0x01010901u, 0x01010905u,
+    0x0101090bu, 0x0101090fu, 0x01010b03u, 0x01010b07u, 0x01010d01u, 0x01010d05u, 0x01010f03u, 0x01010f09u,
+    0x01010f0fu, 0x01030101u, 0x01030103u, 0x01030105u, 0x01030109u, 0x01030301u, 0x01030303u, 0x0103030bu,
+    0x01030501u, 0x01030507u, 0x0103050fu, 0x01030703u, 0x0103070bu, 0x01030909u, 0x01030d03u, 0x01030d0bu,
+    0x01030f05u, 0x01050101u, 0x01050103u, 0x0105010bu, 0x0105010fu, 0x01050301u, 0x01050307u, 0x0105030du,
+    0x01050503u, 0x0105050bu, 0x01050701u, 0x01050709u, 0x01050905u, 0x0105090bu, 0x0105090fu, 0x01050b03u,
+    0x01050b07u, 0x01050f01u, 0x01050f07u, 0x01070107u, 0x01070303u, 0x0107030bu, 0x01070501u, 0x01070505u,
+    0x01070703u, 0x01070707u, 0x0107070du, 0x01070909u, 0x01070b01u, 0x01070b05u, 0x01070d0fu, 0x01070f03u,
+    0x01070f0bu, 0x01090101u, 0x01090307u, 0x0109030fu, 0x01090503u, 0x01090509u, 0x01090705u, 0x01090901u,
+    0x01090907u, 0x01090b03u, 0x01090f01u, 0x010b0105u, 0x010b0109u, 0x010b0501u, 0x010b0505u, 0x010b050du,
+    0x010b0707u, 0x010b0903u, 0x010b090bu, 0x010b090fu, 0x010b0d0du, 0x010b0f07u, 0x010d010du, 0x010d0303u,
+    0x010d0307u, 0x010d0703u, 0x010d0b05u, 0x010d0f03u, 0x010f0101u, 0x010f0105u, 0x010f0109u, 0x010f0501u,
+    0x010f0505u, 0x010f050du, 0x010f0707u, 0x010f0b01u, 0x010f0b09u, 0x03010101u, 0x03010103u, 0x03010105u,
+    0x03010109u, 0x03010301u, 0x03010303u, 0x03010307u, 0x0301030bu, 0x0301030fu, 0x03010501u, 0x03010505u,
+    0x03010703u, 0x03010709u, 0x0301070du, 0x03010b09u, 0x03010b0du, 0x03010d03u, 0x03010f05u, 0x03030101u,
+    0x03030103u, 0x03030107u, 0x0303010du, 0x03030301u, 0x03030309u, 0x03030503u, 0x03030701u, 0x03030707u,
+    0x03030903u, 0x03030b01u, 0x03030b05u, 0x03030f01u, 0x03030f0du, 0x03050101u, 0x03050305u, 0x0305030bu,
+    0x0305030fu, 0x03050501u, 0x03050509u, 0x03050705u, 0x03050901u, 0x03050907u, 0x03050b0bu, 0x03050d01u,
+    0x03050f05u, 0x03070103u, 0x03070109u, 0x0307010fu, 0x03070301u, 0x03070307u, 0x03070503u, 0x0307050fu,
+    0x03070701u, 0x03070709u, 0x03070903u, 0x03070d05u, 0x03070f01u, 0x03090107u, 0x0309010bu, 0x03090305u,
+    0x03090309u, 0x03090703u, 0x03090707u, 0x03090905u, 0x0309090du, 0x03090b01u, 0x03090b09u, 0x030b0103u,
+    0x030b0301u, 0x030b0307u, 0x030b0503u, 0x030b0701u, 0x030b0705u, 0x030b0b03u, 0x030d0501u, 0x030d0509u,
+    0x030d050fu, 0x030d0909u, 0x030d090du, 0x030f0103u, 0x030f0107u, 0x030f0301u, 0x030f0305u, 0x030f0503u,
+    0x030f070bu, 0x030f0903u, 0x030f0d05u, 0x030f0f01u, 0x05010101u, 0x05010103u, 0x05010107u, 0x0501010bu,
+    0x0501010fu, 0x05010301u, 0x05010305u, 0x05010309u, 0x0501030du, 0x05010503u, 0x05010507u, 0x0501050fu,
+    0x05010701u, 0x05010705u, 0x05010903u, 0x05010907u, 0x0501090bu, 0x05010b01u, 0x05010b05u, 0x05010d0fu,
+    0x05010f01u, 0x05010f07u, 0x05010f0bu, 0x05030101u, 0x05030105u, 0x05030301u, 0x05030307u, 0x0503030fu,
+    0x05030505u, 0x0503050bu, 0x05030703u, 0x05030709u, 0x05030905u, 0x05030b03u, 0x05050103u, 0x05050109u,
+    0x0505010fu, 0x05050503u, 0x05050507u, 0x05050701u, 0x0505070fu, 0x05050903u, 0x05050b07u, 0x05050b0fu,
+    0x05050f03u, 0x05050f09u, 0x05070101u, 0x05070105u, 0x0507010bu, 0x05070303u, 0x05070505u, 0x05070509u,
+    0x05070703u, 0x05070707u, 0x05070905u, 0x05070b01u, 0x05070d0du, 0x05090103u, 0x0509010fu, 0x05090501u,
+    0x05090507u, 0x05090705u, 0x0509070bu, 0x05090903u, 0x05090f05u, 0x05090f0bu, 0x050b0109u, 0x050b0303u,
+    0x050b0505u, 0x050b070fu, 0x050b0901u, 0x050b0b07u, 0x050b0f01u, 0x050d0101u, 0x050d0105u, 0x050d010fu,
+    0x050d0503u, 0x050d0b0bu, 0x050d0d03u, 0x050f010bu, 0x050f0303u, 0x050f050du, 0x050f0701u, 0x050f0907u,
+    0x050f0b01u, 0x07010105u, 0x07010303u, 0x07010307u, 0x0701030bu, 0x0701030fu, 0x07010505u, 0x07010703u,
+    0x07010707u, 0x0701070bu, 0x07010905u, 0x07010909u, 0x0701090fu, 0x07010b03u, 0x07010d07u, 0x07010f03u,
+    0x07030103u, 0x07030107u, 0x0703010bu, 0x07030309u, 0x07030503u, 0x07030507u, 0x07030901u, 0x07030d01u,
+    0x07030f05u, 0x07030f0du, 0x07050101u, 0x07050305u, 0x07050501u, 0x07050705u, 0x07050709u, 0x07050b01u,
+    0x07070103u, 0x07070301u, 0x07070309u, 0x07070503u, 0x07070507u, 0x0707050fu, 0x07070701u, 0x07070903u,
+    0x07070907u, 0x0707090fu, 0x07070b0bu, 0x07070f07u, 0x07090107u, 0x07090303u, 0x0709030du, 0x07090505u,
+    0x07090703u, 0x07090b05u, 0x07090d01u, 0x07090d09u, 0x070b0103u, 0x070b0301u, 0x070b0305u, 0x070b050bu,
+    0x070b0705u, 0x070b0909u, 0x070b0b0du, 0x070b0f07u, 0x070d030du, 0x070d0903u, 0x070f0103u, 0x070f0107u,
+    0x070f0501u, 0x070f0505u, 0x070f070bu, 0x09010101u, 0x09010109u, 0x09010305u, 0x09010501u, 0x09010509u,
+    0x0901050fu, 0x09010705u, 0x09010903u, 0x09010b01u, 0x09010f01u, 0x09030105u, 0x0903010fu, 0x09030303u,
+    0x09030307u, 0x09030505u, 0x09030701u, 0x0903070bu, 0x09030907u, 0x09030b03u, 0x09030b0bu, 0x09050103u,
+    0x09050107u, 0x09050301u, 0x0905030bu, 0x09050503u, 0x09050707u, 0x09050901u, 0x09050b0fu, 0x09050d05u,
+    0x09050f01u, 0x09070109u, 0x09070303u, 0x09070307u, 0x09070501u, 0x09070505u, 0x09070703u, 0x0907070bu,
+    0x09090101u, 0x09090105u, 0x09090509u, 0x0909070fu, 0x09090901u, 0x09090f03u, 0x090b010bu, 0x090b010fu,
+    0x090b0503u, 0x090b0d05u, 0x090d0307u, 0x090d0709u, 0x090d0d01u, 0x090f0301u, 0x090f030bu, 0x090f0701u,
+    0x090f0907u, 0x090f0b03u, 0x0b010105u, 0x0b010301u, 0x0b010309u, 0x0b010505u, 0x0b010901u, 0x0b010909u,
+    0x0b01090fu, 0x0b010b05u, 0x0b010d0du, 0x0b010f09u, 0x0b030103u, 0x0b030107u, 0x0b03010bu, 0x0b030305u,
+    0x0b030503u, 0x0b030705u, 0x0b030f05u, 0x0b050101u, 0x0b050303u, 0x0b050507u, 0x0b050701u, 0x0b05070du,
+    0x0b050b07u, 0x0b070105u, 0x0b07010fu, 0x0b070301u, 0x0b07050fu, 0x0b070909u, 0x0b070b03u, 0x0b070d0bu,
+    0x0b070f07u, 0x0b090103u, 0x0b090109u, 0x0b090501u, 0x0b090705u, 0x0b09090du, 0x0b0b0305u, 0x0b0b050du,
+    0x0b0b0b03u, 0x0b0b0b07u, 0x0b0d0905u, 0x0b0f0105u, 0x0b0f0109u, 0x0b0f0505u, 0x0d010303u, 0x0d010307u,
+    0x0d01030bu, 0x0d010703u, 0x0d010707u, 0x0d010d01u, 0x0d030101u, 0x0d030501u, 0x0d03050fu, 0x0d030d09u,
+    0x0d050305u, 0x0d050709u, 0x0d050905u, 0x0d050b0bu, 0x0d050d05u, 0x0d050f01u, 0x0d070101u, 0x0d070309u,
+    0x0d070503u, 0x0d070901u, 0x0d09050bu, 0x0d090907u, 0x0d090d05u, 0x0d0b0101u, 0x0d0b0107u, 0x0d0b0709u,
+    0x0d0b0d01u, 0x0d0d010bu, 0x0d0d0901u, 0x0d0f0303u, 0x0d0f0307u, 0x0f010101u, 0x0f010109u, 0x0f01010fu,
+    0x0f010501u, 0x0f010505u, 0x0f01070du, 0x0f010901u, 0x0f010b09u, 0x0f010d05u, 0x0f030105u, 0x0f030303u,
+    0x0f030509u, 0x0f030907u, 0x0f03090bu, 0x0f050103u, 0x0f050109u, 0x0f050301u, 0x0f05030du, 0x0f050503u,
+    0x0f050701u, 0x0f050b03u, 0x0f070105u, 0x0f070705u, 0x0f07070bu, 0x0f070b07u, 0x0f090103u, 0x0f09010bu,
+    0x0f090307u, 0x0f090501u, 0x0f090b01u, 0x0f0b0505u, 0x0f0b0905u, 0x0f0d0105u, 0x0f0d0703u, 0x0f0f0101u,
+};
+static inline float iq3_s_element(device const uchar *block, uint index) {
+    float d = (float)as_type<half>((ushort)((uint)block[0] | ((uint)block[1] << 8)));
+    device const uchar *qs = block + 2u;
+    device const uchar *qh = block + 66u;
+    device const uchar *signs = block + 74u;
+    device const uchar *scales = block + 106u;
+    uint sub_block = index / 32u;
+    uint within = index % 32u;
+    uint pair = sub_block / 2u;
+    uint half_index = sub_block % 2u;
+    uchar packed_scale = scales[pair];
+    uint scale_nibble = half_index == 0u
+        ? (uint)(packed_scale & 0x0Fu)
+        : (uint)((packed_scale >> 4u) & 0x0Fu);
+    float db = d * (1.0f + 2.0f * (float)scale_nibble);
+    uint group = within / 8u;
+    uint lane = within % 8u;
+    uchar qh_byte = qh[pair * 2u + half_index];
+    uint ninth_bit = lane < 4u
+        ? (((uint)qh_byte << (8u - 2u * group)) & 256u)
+        : (((uint)qh_byte << (7u - 2u * group)) & 256u);
+    uint low = (uint)qs[pair * 16u + half_index * 8u + group * 2u + (lane < 4u ? 0u : 1u)];
+    uint grid = iq3s_grid_msl[low | ninth_bit];
+    uint magnitude = (grid >> (8u * (lane % 4u))) & 0xFFu;
+    uchar sign_byte = signs[pair * 8u + half_index * 4u + group];
+    float sign = (sign_byte & (1u << lane)) != 0u ? -1.0f : 1.0f;
+    return db * (float)magnitude * sign;
+}
+
+
 // ports proxima_gguf::quant::q3_k::unpack_scale -- the same bit-interleaved
 // 6-bit unpack q4k_scale_min/q5k_scale_min use for a (scale, min) pair,
 // restated here for a scale-only code (no min), same posture as
@@ -720,7 +834,7 @@ static inline float uniform_expert_element_from_offset_q6k(
 
 static inline float q8_0_field(uint code) {
     uint mantissa = code & 0x7fu;
-    return ((float)((long)mantissa - (long)(((code >> 7u) & 1u) << 7u))) * 1e0f;
+    return ((float)((int)mantissa - (int)(((code >> 7u) & 1u) << 7u))) * 1e0f;
 }
 
 static inline uint q8_0_group(device const uchar *group) {
@@ -753,14 +867,27 @@ static inline float q8_0_pair_dot(device const uchar *superblock, uint slot, thr
 }
 
 
-// element `index` (0..32) of one Q4_0 block, byte-for-byte the value
-// proxima_gguf::quant::q4_0::dequantize_block writes at the same index.
+static inline float q4_0_element_code(uint code) {
+    uint mantissa = code & 0xfu;
+    return ((float)mantissa) * 1e0f;
+}
+
+static inline float q4_0_element_scale(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
 static inline float q4_0_element(device const uchar *block, uint index) {
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    float d = (float)as_type<half>(d_bits);
-    uchar byte = block[2u + (index % 16u)];
-    int nibble = (index < 16u) ? (int)(byte & 0x0Fu) : (int)(byte >> 4u);
-    return (float)(nibble - 8) * d;
+    uint raw_low_rest = index;
+    uint raw_low_address = 16u;
+    raw_low_address += (raw_low_rest % 16u) * 8u;
+    raw_low_rest /= 16u;
+    raw_low_address += (raw_low_rest % 2u) * 4u;
+    raw_low_rest /= 2u;
+    uint raw_low = ((uint)block[raw_low_address / 8u] >> (raw_low_address % 8u)) & 0xfu;
+    float raw = q4_0_element_code(raw_low);
+    float scale = q4_0_element_scale(((uint)block[0u] << 0u) | ((uint)block[1u] << 8u));
+    float value = ((1.0f * raw) - 8.0f) * scale;
+    return value;
 }
 
 
@@ -802,47 +929,67 @@ static inline void q4_0_run8(device const uchar *block, uint index, thread float
 }
 
 
-// element `index` (0..32) of one Q5_1 block, byte-for-byte the value
-// proxima_gguf::quant::q5_1::dequantize_block writes at the same index.
+static inline float q5_1_element_code(uint code) {
+    uint mantissa = code & 0x1fu;
+    return ((float)mantissa) * 1e0f;
+}
+
+static inline float q5_1_element_scale(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline float q5_1_element_min(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
 static inline float q5_1_element(device const uchar *block, uint index) {
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    ushort m_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
-    float delta = (float)as_type<half>(d_bits);
-    float minimum = (float)as_type<half>(m_bits);
-    uint qh = (uint)block[4] | ((uint)block[5] << 8) | ((uint)block[6] << 16) | ((uint)block[7] << 24);
-    bool high_half = index >= 16u;
-    uint local = high_half ? (index - 16u) : index;
-    uchar byte = block[8u + local];
-    uint level;
-    if (high_half) {
-        uint high_bit = (qh >> (local + 12u)) & 0x10u;
-        level = (uint)(byte >> 4u) | high_bit;
-    } else {
-        uint high_bit = ((qh >> local) << 4u) & 0x10u;
-        level = (uint)(byte & 0x0Fu) | high_bit;
-    }
-    return (float)level * delta + minimum;
+    uint raw_low_rest = index;
+    uint raw_low_address = 64u;
+    raw_low_address += (raw_low_rest % 16u) * 8u;
+    raw_low_rest /= 16u;
+    raw_low_address += (raw_low_rest % 2u) * 4u;
+    raw_low_rest /= 2u;
+    uint raw_low = ((uint)block[raw_low_address / 8u] >> (raw_low_address % 8u)) & 0xfu;
+    uint raw_high_rest = index;
+    uint raw_high_address = 32u;
+    raw_high_address += (raw_high_rest % 32u) * 1u;
+    raw_high_rest /= 32u;
+    uint raw_high = ((uint)block[raw_high_address / 8u] >> (raw_high_address % 8u)) & 0x1u;
+    float raw = q5_1_element_code((raw_low | (raw_high << 4u)));
+    float scale = q5_1_element_scale(((uint)block[0u] << 0u) | ((uint)block[1u] << 8u));
+    float value = ((1.0f * raw) - 0.0f) * scale;
+    float minimum = q5_1_element_min(((uint)block[2u] << 0u) | ((uint)block[3u] << 8u));
+    value = value + (1.0f * minimum);
+    return value;
 }
 
 
-// element `index` (0..32) of one Q5_0 block, byte-for-byte the value
-// proxima_gguf::quant::q5_0::dequantize_block writes at the same index.
+static inline float q5_0_element_code(uint code) {
+    uint mantissa = code & 0x1fu;
+    return ((float)mantissa) * 1e0f;
+}
+
+static inline float q5_0_element_scale(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
 static inline float q5_0_element(device const uchar *block, uint index) {
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    float delta = (float)as_type<half>(d_bits);
-    uint qh = (uint)block[2] | ((uint)block[3] << 8) | ((uint)block[4] << 16) | ((uint)block[5] << 24);
-    bool high_half = index >= 16u;
-    uint local = high_half ? (index - 16u) : index;
-    uchar byte = block[6u + local];
-    uint level;
-    if (high_half) {
-        uint high_bit = (qh >> (local + 12u)) & 0x10u;
-        level = (uint)(byte >> 4u) | high_bit;
-    } else {
-        uint high_bit = ((qh >> local) << 4u) & 0x10u;
-        level = (uint)(byte & 0x0Fu) | high_bit;
-    }
-    return ((float)level - 16.0f) * delta;
+    uint raw_low_rest = index;
+    uint raw_low_address = 48u;
+    raw_low_address += (raw_low_rest % 16u) * 8u;
+    raw_low_rest /= 16u;
+    raw_low_address += (raw_low_rest % 2u) * 4u;
+    raw_low_rest /= 2u;
+    uint raw_low = ((uint)block[raw_low_address / 8u] >> (raw_low_address % 8u)) & 0xfu;
+    uint raw_high_rest = index;
+    uint raw_high_address = 16u;
+    raw_high_address += (raw_high_rest % 32u) * 1u;
+    raw_high_rest /= 32u;
+    uint raw_high = ((uint)block[raw_high_address / 8u] >> (raw_high_address % 8u)) & 0x1u;
+    float raw = q5_0_element_code((raw_low | (raw_high << 4u)));
+    float scale = q5_0_element_scale(((uint)block[0u] << 0u) | ((uint)block[1u] << 8u));
+    float value = ((1.0f * raw) - 16.0f) * scale;
+    return value;
 }
 
 
@@ -967,11 +1114,11 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     long other_stride = u.operand_strides[1][2];
     uint ix = (uint)lane / 8u;
     uint it = (uint)lane % 8u;
-    uint iq = it / 4u;
     uint ir = it % 4u;
+    uint iq = it / 4u;
     int super_blocks = (int)u.reduction_total / 256;
-    float yl[16];
-    float yh[16];
+    float y0[16];
+    float y1[16];
     int ib_first = (int)ix;
     int ib_step = 4;
     long blk_step = (long)ib_step * 144;
@@ -979,51 +1126,66 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     for (int q = 0; q < 4; ++q) {
         blk_ptr[q] = in0 + ((long)((int)weight_base[q] / 256) + (long)ib_first) * 144;
     }
+    uint code_offset = 16u + ir * 8u + iq * 32u;
+    uint word_offset0 = (iq == 0u ? 4u : 6u);
     long y4_step = (long)ib_step * 256;
-    device const float *y4 = in1 + other_base[0] + (long)ib_first * 256 + (long)(64u * iq + 8u * ir);
+    device const float *y4 = in1 + other_base[0] + (long)ib_first * 256 + (long)(8u * ir + 64u * iq);
     for (int ib = ib_first; ib < super_blocks; ib += ib_step) {
-        float sumy0 = 0.0f; float sumy1 = 0.0f; float sumy2 = 0.0f; float sumy3 = 0.0f;
+        float sumy0_0 = 0.0f;
+        float sumy0_1 = 0.0f;
+        float sumy1_0 = 0.0f;
+        float sumy1_1 = 0.0f;
         for (uint i = 0u; i < 8u; ++i) {
-            yl[i] = y4[i]; sumy0 += yl[i];
-            yl[i + 8u] = y4[i + 32u]; sumy1 += yl[i + 8u];
-            yh[i] = y4[i + 128u]; sumy2 += yh[i];
-            yh[i + 8u] = y4[i + 160u]; sumy3 += yh[i + 8u];
+            y0[i + 0u] = y4[i + 0u]; sumy0_0 += y0[i + 0u];
+            y0[i + 8u] = y4[i + 32u]; sumy0_1 += y0[i + 8u];
+            y1[i + 0u] = y4[i + 128u]; sumy1_0 += y1[i + 0u];
+            y1[i + 8u] = y4[i + 160u]; sumy1_1 += y1[i + 8u];
         }
         for (int q = 0; q < 4; ++q) {
             device const uchar *blk = blk_ptr[q];
-            device const ushort *sc = (device const ushort *)(blk + 4) + iq;
-            device const ushort *q1 = (device const ushort *)(blk + 16) + 16u * iq + 4u * ir;
-            device const ushort *q2 = q1 + 32;
-            device const half *dh = (device const half *)blk;
-            ushort sc16_0 = sc[0] & (ushort)0x3f3fu;
-            ushort sc16_1 = sc[2] & (ushort)0x3f3fu;
-            ushort sc16_2 = (ushort)(((sc[4] >> 0) & (ushort)0x0f0fu) | ((sc[0] & (ushort)0xc0c0u) >> 2));
-            ushort sc16_3 = (ushort)(((sc[4] >> 4) & (ushort)0x0f0fu) | ((sc[2] & (ushort)0xc0c0u) >> 2));
-            uchar sc8_0 = (uchar)(sc16_0 & 0xffu); uchar sc8_1 = (uchar)(sc16_0 >> 8);
-            uchar sc8_2 = (uchar)(sc16_1 & 0xffu); uchar sc8_3 = (uchar)(sc16_1 >> 8);
-            uchar sc8_4 = (uchar)(sc16_2 & 0xffu); uchar sc8_5 = (uchar)(sc16_2 >> 8);
-            uchar sc8_6 = (uchar)(sc16_3 & 0xffu); uchar sc8_7 = (uchar)(sc16_3 >> 8);
-            float acc1_0 = 0.0f; float acc1_1 = 0.0f; float acc1_2 = 0.0f; float acc1_3 = 0.0f;
-            float acc2_0 = 0.0f; float acc2_1 = 0.0f; float acc2_2 = 0.0f; float acc2_3 = 0.0f;
+            device const uchar *word_base = blk + word_offset0;
+            ushort word0 = *(device const ushort *)word_base;
+            ushort word1 = *(device const ushort *)(word_base + 8);
+            ushort word2 = *(device const ushort *)(word_base + 4);
+            ushort scale_pair0 = (ushort)((word0 & (ushort)0x3f3fu));
+            float scale_0_0 = (float)(uchar)(scale_pair0 & 0xffu);
+            float scale_0_1 = (float)(uchar)(scale_pair0 >> 8u);
+            ushort scale_pair1 = (ushort)((word1 & (ushort)0x0f0fu) | ((word0 >> 2u) & (ushort)0x3030u));
+            float scale_1_0 = (float)(uchar)(scale_pair1 & 0xffu);
+            float scale_1_1 = (float)(uchar)(scale_pair1 >> 8u);
+            ushort min_pair0 = (ushort)((word2 & (ushort)0x3f3fu));
+            float min_0_0 = (float)(uchar)(min_pair0 & 0xffu);
+            float min_0_1 = (float)(uchar)(min_pair0 >> 8u);
+            ushort min_pair1 = (ushort)(((word1 >> 4u) & (ushort)0x0f0fu) | ((word2 >> 2u) & (ushort)0x3030u));
+            float min_1_0 = (float)(uchar)(min_pair1 & 0xffu);
+            float min_1_1 = (float)(uchar)(min_pair1 >> 8u);
+            device const ushort *codes = (device const ushort *)(blk + code_offset);
+            float acc1_0 = 0.0f;
+            float acc1_1 = 0.0f;
+            float acc1_2 = 0.0f;
+            float acc1_3 = 0.0f;
+            float acc2_0 = 0.0f;
+            float acc2_1 = 0.0f;
+            float acc2_2 = 0.0f;
+            float acc2_3 = 0.0f;
             for (uint i = 0u; i < 4u; ++i) {
-                ushort word1 = q1[i];
-                ushort word2 = q2[i];
-                acc1_0 += yl[2u * i + 0u] * (float)(word1 & (ushort)0x000Fu);
-                acc1_1 += yl[2u * i + 1u] * (float)(word1 & (ushort)0x0F00u);
-                acc1_2 += yl[2u * i + 8u] * (float)(word1 & (ushort)0x00F0u);
-                acc1_3 += yl[2u * i + 9u] * (float)(word1 & (ushort)0xF000u);
-                acc2_0 += yh[2u * i + 0u] * (float)(word2 & (ushort)0x000Fu);
-                acc2_1 += yh[2u * i + 1u] * (float)(word2 & (ushort)0x0F00u);
-                acc2_2 += yh[2u * i + 8u] * (float)(word2 & (ushort)0x00F0u);
-                acc2_3 += yh[2u * i + 9u] * (float)(word2 & (ushort)0xF000u);
+                ushort code_word0 = codes[i + 0u];
+                ushort code_word1 = codes[i + 32u];
+                acc1_0 += y0[2u * i + 0u] * (float)(code_word0 & (ushort)0x000fu);
+                acc1_1 += y0[2u * i + 1u] * (float)(code_word0 & (ushort)0x0f00u);
+                acc1_2 += y0[2u * i + 8u] * (float)(code_word0 & (ushort)0x00f0u);
+                acc1_3 += y0[2u * i + 9u] * (float)(code_word0 & (ushort)0xf000u);
+                acc2_0 += y1[2u * i + 0u] * (float)(code_word1 & (ushort)0x000fu);
+                acc2_1 += y1[2u * i + 1u] * (float)(code_word1 & (ushort)0x0f00u);
+                acc2_2 += y1[2u * i + 8u] * (float)(code_word1 & (ushort)0x00f0u);
+                acc2_3 += y1[2u * i + 9u] * (float)(code_word1 & (ushort)0xf000u);
             }
-            float dall = (float)dh[0];
-            float dmin = (float)dh[1];
-            sumf[q] = sumf[q] + dall * ((acc1_0 + (1.0f/256.0f) * acc1_1) * (float)sc8_0 +
-                                       (acc1_2 + (1.0f/256.0f) * acc1_3) * (float)sc8_1 * (1.0f/16.0f) +
-                                       (acc2_0 + (1.0f/256.0f) * acc2_1) * (float)sc8_4 +
-                                       (acc2_2 + (1.0f/256.0f) * acc2_3) * (float)sc8_5 * (1.0f/16.0f)) -
-                      dmin * (sumy0 * (float)sc8_2 + sumy1 * (float)sc8_3 + sumy2 * (float)sc8_6 + sumy3 * (float)sc8_7);
+            float dall = (float)(*(device const half *)(blk + 0u));
+            float dmin = (float)(*(device const half *)(blk + 2u));
+            sumf[q] = sumf[q] + dall * ((acc1_0 + (1.0f/256.0f) * acc1_1) * scale_0_0 +
+                (acc1_2 + (1.0f/256.0f) * acc1_3) * scale_0_1 * (1.0f/16.0f) +
+                (acc2_0 + (1.0f/256.0f) * acc2_1) * scale_1_0 +
+                (acc2_2 + (1.0f/256.0f) * acc2_3) * scale_1_1 * (1.0f/16.0f)) - dmin * (sumy0_0 * min_0_0 + sumy0_1 * min_0_1 + sumy1_0 * min_1_0 + sumy1_1 * min_1_1);
         }
         for (int q = 0; q < 4; ++q) { blk_ptr[q] += blk_step; }
         y4 += y4_step;

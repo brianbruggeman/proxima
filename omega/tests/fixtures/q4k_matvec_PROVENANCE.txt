@@ -1,0 +1,16 @@
+q4k_matvec_*.f32le: raw little-endian f32 bits of a Q4_K decode matvec, one value per weight row.
+
+old side:    proxima main ab8575ecd206a534b08769de86a738d52c169a8c, kernel = push_q4k_ggml_port_body
+             (hand port of ggml kernel_mul_mv_q4_K_f32_impl<4,2,32>), metal feature, release build.
+capture:     omega::execute over [Input u8 (rows, k), Input f32 (k, 1)] -> Multiply -> Reduce Add,
+             QuantizedBlock::Packed { codec: Q4K } weights, QuantizedBlock::Float32 activation,
+             activation = Lcg(2026).next_unit() * 4 - 2 for k values.
+
+q4k_matvec_flint_blk21_ffn_gate_exps_rows512.f32le
+  tensor  blk.21.ffn_gate_exps.weight of flint-UD-Q4_K_XL.gguf, dims [2048, 512, 256]; first 512 rows (expert 0)
+  sha256  f43b77bb3292b893ad699b022ee0f6639771444debba361849be03acbaba82ae
+
+q4k_matvec_ollama_blk0_attn_output_rows2816.f32le
+  tensor  blk.0.attn_output.weight of ollama blob sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129,
+          dims [4096, 2816]; all 2816 rows
+  sha256  aa16d4db4c902e4cb3529635f8527c02058f64c4a54cfe9e3e46242e1508a26b
