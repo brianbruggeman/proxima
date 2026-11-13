@@ -1,0 +1,5 @@
+general.architecture=String("flint")
+flint.attention.head_count_kv=U32(4)
+flint.expert_count=U32(256)
+flint.expert_gating_func=U32(2)
+flint.attention.sliding_window_pattern=Array(Bool([false, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, true, false, true, true, false]))

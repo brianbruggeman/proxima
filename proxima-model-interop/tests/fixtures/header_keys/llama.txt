@@ -1,0 +1,2 @@
+general.architecture=String("llama")
+llama.attention.head_count_kv=U32(8)

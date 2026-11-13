@@ -1,0 +1,2 @@
+general.architecture=String("qwen2")
+qwen2.attention.head_count_kv=U32(2)

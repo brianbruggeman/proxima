@@ -32,6 +32,7 @@ use crate::bind::{
 };
 use crate::error::InteropError;
 use crate::ffn_inference::with_inferred_ffn;
+use crate::key_inference::{InferredScoreScale, infer_score_scale, with_inferred_keys};
 use crate::profiles::family_profile;
 use crate::task::{ModelTask, classify_task};
 
@@ -68,6 +69,7 @@ pub fn descriptor_from_gguf(
         parsed,
         architecture.expert_count,
     );
+    let profile = with_inferred_keys(profile, parsed, &architecture.family)?;
     require_full_rotary(parsed, architecture)?;
     // This builder has one KV cache shape for every attention layer. Preserve a
     // checkpoint's per-layer configuration in `ModelHparams`, but
@@ -251,8 +253,8 @@ fn with_header_scales(
     parsed: &ParsedGguf,
     family: &str,
 ) -> ModelDescriptor {
-    let layers = match header_scale(parsed, family, "attention.scale") {
-        Some(scale) => descriptor
+    let layers = match infer_score_scale(parsed, family) {
+        InferredScoreScale::Factor(scale) => descriptor
             .layers
             .iter()
             .map(|layer| LayerSchedule {
@@ -263,7 +265,7 @@ fn with_header_scales(
                 ..layer.clone()
             })
             .collect(),
-        None => descriptor.layers.clone(),
+        InferredScoreScale::InverseSqrtHeadDim => descriptor.layers.clone(),
     };
     ModelDescriptor {
         embedding_scale: header_scale(parsed, family, "embedding_scale")

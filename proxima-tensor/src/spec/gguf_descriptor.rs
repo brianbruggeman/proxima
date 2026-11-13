@@ -374,7 +374,11 @@ fn metadata_u32_option(parsed: &ParsedGguf, key: &str) -> Option<u32> {
 /// (`1` softmax, `2` sigmoid; `0` none, absent). `3` (`SOFTMAX_WEIGHT`) and `4`
 /// (`SQRT_SOFTPLUS`) are real values this engine has no function for, so they
 /// are refused by name rather than served with the profile's default.
-fn expert_gating_func(value: u32) -> Result<Option<ExpertGatingFunc>, TensorError> {
+///
+/// # Errors
+///
+/// [`TensorError::GgufUnsupportedExpertGating`] for `3` and `4`.
+pub fn expert_gating_func(value: u32) -> Result<Option<ExpertGatingFunc>, TensorError> {
     match value {
         0 => Ok(None),
         1 => Ok(Some(ExpertGatingFunc::Softmax)),

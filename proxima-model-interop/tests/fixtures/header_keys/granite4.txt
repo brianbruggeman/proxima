@@ -1,0 +1,4 @@
+general.architecture=String("granite")
+granite.attention.head_count_kv=Array(I32([4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4]))
+granite.expert_count=U32(0)
+granite.attention.scale=F32(0.015625)

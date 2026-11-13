@@ -29,6 +29,7 @@ use crate::bind::{BoundWeights, ModelHparams, bind_native_f32, metadata_str};
 use crate::bind_leaves::{bind_census, bind_missing_leaves, bind_program_leaves};
 use crate::error::InteropError;
 use crate::hf_bind::{HfShard, bind_safetensors_shards};
+use crate::key_inference::with_inferred_keys;
 use crate::profiles::{BindingProfile, binding_profile, family_profile};
 use crate::recurrent_config::RecurrentConfig;
 use crate::recurrent_routed_interval::MoeLayerDiagnostics;
@@ -273,9 +274,20 @@ fn family(parsed: &ParsedGguf) -> Result<&str, InteropError> {
     metadata_str(parsed, "general.architecture")
 }
 
-/// The header reader the family profile names, run over `parsed`.
+/// The header reader `parsed`'s own key shape selects
+/// ([`crate::key_inference::infer_schedule_source`]), decided before any reader
+/// runs. The family's profile is still resolved first, so a family with neither
+/// a row nor an arch config is refused by name before any reader touches the
+/// header.
+fn schedule_source(parsed: &ParsedGguf) -> Result<ScheduleSource, InteropError> {
+    let family = family(parsed)?;
+    let profile = with_inferred_keys(family_profile(family)?, parsed, family)?;
+    Ok(profile.schedule_source)
+}
+
+/// The header reader the key shape selects, run over `parsed`.
 fn header(parsed: &ParsedGguf, layout: KvLayout) -> Result<Header, InteropError> {
-    match family_profile(family(parsed)?)?.schedule_source {
+    match schedule_source(parsed)? {
         ScheduleSource::Uniform => crate::dense::header(parsed),
         ScheduleSource::SlidingPattern => crate::sliding_pattern::header(parsed, layout),
         ScheduleSource::RecurrentInterval => crate::recurrent_interval::header(parsed),
@@ -632,7 +644,7 @@ pub fn recurrent_speculative_verify(
 ///
 /// Whatever the family's header reader can fail with.
 pub fn step_state(parsed: &ParsedGguf) -> Result<Option<StepState>, InteropError> {
-    match family_profile(family(parsed)?)?.schedule_source {
+    match schedule_source(parsed)? {
         ScheduleSource::RecurrentInterval => {
             crate::recurrent_interval::step_state(parsed).map(Some)
         }
@@ -648,7 +660,7 @@ pub fn step_state(parsed: &ParsedGguf) -> Result<Option<StepState>, InteropError
 ///
 /// Whatever the family's metadata reads can fail with.
 pub fn kv_layers(parsed: &ParsedGguf) -> Result<Vec<(u32, u32, Option<u32>)>, InteropError> {
-    match family_profile(family(parsed)?)?.schedule_source {
+    match schedule_source(parsed)? {
         ScheduleSource::SlidingPattern => {
             crate::sliding_pattern::hparams::kv_layers_from_metadata(parsed)
         }
