@@ -1,6 +1,7 @@
 use alloc::borrow::Cow;
 
 use proxima_numeric::float_layout::FloatLayout;
+use proxima_numeric::{RowBlockShape, row_block_shape};
 
 use super::*;
 
@@ -1549,15 +1550,25 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
 /// `block_super_element_msl`'s own docs for why eight contiguous blocks
 /// span exactly the same 256 elements. No other codec reaches this function
 /// (`classify_packed_row_block` whitelists only
-/// `Q3_K`/`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q4_0`/`Fp6E3M2`), so the fallback arm is exactly
-/// [`codec_block_bytes`], never invented for a codec this path never sees.
-pub(crate) const fn codec_row_block_step_bytes(codec: Codec) -> usize {
-    match codec {
-        Codec::Q8_0 => Q8_0_BLOCK_BYTES * (Q4K_BLOCK_ELEMENTS / Q8_0_BLOCK_ELEMENTS),
-        Codec::Q4_0 => Q4_0_BLOCK_BYTES * (Q4K_BLOCK_ELEMENTS / Q4_0_BLOCK_ELEMENTS),
-        Codec::Fp6E3M2 => {
+/// `Q3_K`/`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q4_0`/`Fp6E3M2` and the sub-block level formats), so
+/// the fallback arm is exactly [`codec_block_bytes`], never invented for a codec this path
+/// never sees.
+///
+/// A format `proxima_numeric::row_block_shape` admits as a `RowBlockShape::Block` takes its
+/// `span_step_bytes` from that decision (`block_bytes * (256 / elements)`), not from a name.
+pub(crate) fn codec_row_block_step_bytes(codec: Codec) -> usize {
+    if matches!(codec, Codec::Levels(_)) {
+        // level bodies step their own blocks; a ladder level format is not a super-block span
+        return codec_block_bytes(codec);
+    }
+    match row_block_shape(&codec) {
+        Some(RowBlockShape::Block { span_step_bytes, .. }) => span_step_bytes as usize,
+        // legacy arm until the plane body can read straddling codes: row_block_shape refuses
+        // fp6 (its 6-bit codes straddle bytes) but the generic arm steps it eight blocks
+        _ if matches!(codec, Codec::Fp6E3M2) => {
             Codec::FP6_E3M2_BLOCK_BYTES * (Q4K_BLOCK_ELEMENTS / Codec::FP6_E3M2_BLOCK_ELEMENTS)
         }
+        // refused (sub-blocks, tables) or scalar: the codec's own block is its step
         _ => codec_block_bytes(codec),
     }
 }
@@ -2954,5 +2965,67 @@ mod codec_cache_key_tests {
         for codec in named {
             assert_eq!(codec_cache_key(codec), codec_cache_token(codec), "{codec:?}");
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod row_block_step_bytes_tests {
+    use proxima_numeric::NumericFormat;
+
+    use super::super::emit_and_classify::row_block_extent_multiple;
+    use super::{
+        Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, Q4K_BLOCK_ELEMENTS, Q8_0_BLOCK_BYTES,
+        Q8_0_BLOCK_ELEMENTS, codec_block_bytes, codec_row_block_step_bytes,
+    };
+
+    /// `codec_row_block_step_bytes` exactly as it read at e21dfb81, the per-codec match.
+    fn step_bytes_at_e21dfb81(codec: NumericFormat) -> usize {
+        match codec {
+            NumericFormat::Q8_0 => Q8_0_BLOCK_BYTES * (Q4K_BLOCK_ELEMENTS / Q8_0_BLOCK_ELEMENTS),
+            NumericFormat::Q4_0 => Q4_0_BLOCK_BYTES * (Q4K_BLOCK_ELEMENTS / Q4_0_BLOCK_ELEMENTS),
+            NumericFormat::Fp6E3M2 => {
+                NumericFormat::FP6_E3M2_BLOCK_BYTES
+                    * (Q4K_BLOCK_ELEMENTS / NumericFormat::FP6_E3M2_BLOCK_ELEMENTS)
+            }
+            _ => codec_block_bytes(codec),
+        }
+    }
+
+    #[test]
+    fn step_bytes_equal_e21dfb81_for_every_codec_the_row_blocked_kernel_admits() {
+        let admitted: Vec<NumericFormat> = NumericFormat::ALL
+            .iter()
+            .copied()
+            .chain(NumericFormat::UNTAGGED.iter().map(|(format, _)| *format))
+            .filter(|codec| row_block_extent_multiple(*codec).is_some())
+            .collect();
+
+        for required in [
+            NumericFormat::Q3K,
+            NumericFormat::Q4K,
+            NumericFormat::Q5K,
+            NumericFormat::Q6K,
+            NumericFormat::Q8_0,
+            NumericFormat::Q4_0,
+            NumericFormat::Fp6E3M2,
+        ] {
+            assert!(admitted.contains(&required), "{required:?} not admitted");
+        }
+        assert!(admitted.len() > 7, "no level format was checked: {}", admitted.len());
+        for codec in admitted {
+            assert_eq!(
+                codec_row_block_step_bytes(codec),
+                step_bytes_at_e21dfb81(codec),
+                "{codec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn step_bytes_of_flat_blocks_are_eight_blocks() {
+        assert_eq!(codec_row_block_step_bytes(NumericFormat::Q8_0), 272);
+        assert_eq!(codec_row_block_step_bytes(NumericFormat::Q4_0), 144);
+        assert_eq!(codec_row_block_step_bytes(NumericFormat::Q5_0), 176);
     }
 }
