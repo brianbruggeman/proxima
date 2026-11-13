@@ -31,6 +31,7 @@ use crate::bind::{
     metadata_f32_optional, metadata_u32, metadata_u32_optional, metadata_u32_optional_or,
 };
 use crate::error::InteropError;
+use crate::ffn_inference::with_inferred_ffn;
 use crate::profiles::family_profile;
 use crate::task::{ModelTask, classify_task};
 
@@ -62,7 +63,11 @@ pub fn descriptor_from_gguf(
     parsed: &ParsedGguf,
     architecture: &ModelHparams,
 ) -> Result<ModelDescriptor, InteropError> {
-    let profile = family_profile(&architecture.family)?;
+    let profile = with_inferred_ffn(
+        family_profile(&architecture.family)?,
+        parsed,
+        architecture.expert_count,
+    );
     require_full_rotary(parsed, architecture)?;
     // This builder has one KV cache shape for every attention layer. Preserve a
     // checkpoint's per-layer configuration in `ModelHparams`, but

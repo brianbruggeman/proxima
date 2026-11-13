@@ -42,6 +42,8 @@ pub mod disk_cold_tier;
 mod dense;
 #[cfg(feature = "std")]
 mod draft_model_compatibility;
+#[cfg(feature = "std")]
+mod ffn_inference;
 mod dtype;
 mod error;
 #[cfg(feature = "std")]
