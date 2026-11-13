@@ -801,6 +801,7 @@ pub(super) fn build_static_arena_with_packed(
         NumericPolicy::bit_exact(),
     )?;
     let dead = dead_resolved_nodes(&resolved, &effective_outputs);
+    super::run_int8_activation_dot::refuse_live_quantized_activation_readers(&resolved, &dead)?;
     let static_nodes = static_resolved_nodes(&resolved, &dead);
     let recyclable = recyclable_nodes(&resolved, &dead, &static_nodes, &effective_outputs);
     for computed in &resolved {

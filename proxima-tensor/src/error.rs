@@ -282,6 +282,21 @@ pub enum TensorError {
         cause: proxima_gguf::quant::QuantError,
     },
 
+    /// A packed-weight product reads a `BlockQuantize` activation but the weight codec has no
+    /// byte-code int8 dot, so the CPU refuses instead of dequantizing it.
+    #[error("node {node} reads a quantized activation against a {codec} weight, which has no int8 dot")]
+    ActivationQuantizedWeightCodec {
+        node: NodeId,
+        /// canonical format name, e.g. `q4_0`; the format itself is 676 bytes and would grow every `TensorError`
+        codec: &'static str,
+    },
+
+    /// A node reads a `BlockQuantize` int8 activation through a path that cannot decode its bytes
+    /// (gathered or expert-sourced weight, a dense f32 weight, a non-matching axis order, the
+    /// arena or parallel interpreters), so it refuses rather than reading the bytes as f32.
+    #[error("node {node} reads quantized activation {activation} through a path with no int8 dot")]
+    QuantizedActivationUnserved { node: NodeId, activation: NodeId },
+
     /// [`crate::spec::stack_selected_routes`] casts its `routes` slice length
     /// to a `u32` `Op::Iota` extent; a caller that hands it more than
     /// `u32::MAX` selected routes has no valid axis to stack them onto.

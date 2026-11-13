@@ -1,3 +1,5 @@
+use proxima_numeric::block_layout::BlockLayout;
+
 use super::*;
 
 #[cfg(test)]
@@ -1545,6 +1547,10 @@ pub struct Interpreter<'buffers, B: Deref<Target = [f32]> + Sync> {
     /// The f64 values of a norm's widened accumulation, beside the f32
     /// table, so an f64 island evaluates in f64 here as in every other loop.
     wide: RefCell<Vec<Option<Cow<'static, [f64]>>>>,
+    /// Every int8 `BlockQuantize` node this interpreter has folded so far, keyed by the node whose
+    /// buffer holds its packed bytes: a later batch's reader is refused against it, since the
+    /// interpreter has no int8 dot and would read those bytes as f32.
+    activation_layouts: RefCell<BTreeMap<NodeId, BlockLayout>>,
 }
 
 impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'buffers, B> {
@@ -1559,6 +1565,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
         Self {
             buffers: RefCell::new(buffers),
             wide: RefCell::new(Vec::new()),
+            activation_layouts: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -1585,6 +1592,15 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
     /// per-node path both bottom out in this one written-once loop.
     fn fold(&self, ready: &[BoundOp]) -> Result<(), TensorError> {
         for resolved in ready {
+            super::run_int8_activation_dot::refuse_quantized_activation_reader(
+                resolved,
+                &self.activation_layouts.borrow(),
+            )?;
+            self.activation_layouts
+                .borrow_mut()
+                .extend(super::run_int8_activation_dot::quantized_activation_layouts(
+                    core::slice::from_ref(resolved),
+                ));
             if self.fold_island(resolved)? {
                 continue;
             }

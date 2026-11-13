@@ -214,6 +214,7 @@ mod step_plan;
 #[macro_use]
 mod run_node;
 mod run_block_quantize;
+mod run_int8_activation_dot;
 #[macro_use]
 mod elementwise_matmul;
 #[macro_use]
