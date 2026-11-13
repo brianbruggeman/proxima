@@ -925,6 +925,7 @@ pub(super) fn run_prepared_step(
     // writes, rather than `live_count(&buffers)`'s O(program.len()) full
     // rescan called once per node (the actual quadratic cost this landing
     // removes: `O(program.len())` work times `program.len()` nodes).
+    let activation_layouts = super::run_int8_activation_dot::quantized_activation_layouts(resolved);
     let mut peak_live_buffers = live_count(&buffers);
     let mut live_now = peak_live_buffers;
     #[cfg(feature = "instrument")]
@@ -976,7 +977,10 @@ pub(super) fn run_prepared_step(
     let mut position = 0usize;
     while position < resolved.len() {
         #[cfg(feature = "cohort-staged-graph")]
-        if !exact_activations && let Some(session_ref) = session.as_ref() {
+        if !exact_activations
+            && activation_layouts.is_empty()
+            && let Some(session_ref) = session.as_ref()
+        {
             let run_end = staged_batch_run_end(resolved, position, &quantized_weights);
             if run_end - position >= STAGED_BATCH_MIN_LEN {
                 #[cfg(feature = "instrument")]
@@ -1015,6 +1019,9 @@ pub(super) fn run_prepared_step(
         let island_live = if epilogue_fused_away {
             0
         } else {
+            if computed.dtype == DType::FLOAT64 {
+                super::run_int8_activation_dot::refuse_quantized_activation_reader(computed, &activation_layouts)?;
+            }
             let island = float64_island::step(
                 computed,
                 &buffers,
@@ -1050,18 +1057,32 @@ pub(super) fn run_prepared_step(
             let mut gdn_state = Vec::new();
             let mut moe_topk_extra = Vec::new();
             let mut round_extra: Vec<Vec<f32>> = Vec::new();
-            run_node_into_with_round_sink(
+            let int8_activation_handled = super::run_int8_activation_dot::run_if_int8_activation(
                 computed,
                 &buffers,
-                Some(&quantized_weights),
+                &quantized_weights,
                 expert_sources,
-                session.as_ref(),
-                exact_activations,
+                &activation_layouts,
                 &mut output,
-                Some(&mut gdn_state),
-                Some(&mut moe_topk_extra),
-                Some(&mut round_extra),
             )?;
+            if !int8_activation_handled {
+                super::run_int8_activation_dot::refuse_quantized_activation_reader(
+                    computed,
+                    &activation_layouts,
+                )?;
+                run_node_into_with_round_sink(
+                    computed,
+                    &buffers,
+                    Some(&quantized_weights),
+                    expert_sources,
+                    session.as_ref(),
+                    exact_activations,
+                    &mut output,
+                    Some(&mut gdn_state),
+                    Some(&mut moe_topk_extra),
+                    Some(&mut round_extra),
+                )?;
+            }
             #[cfg(feature = "epilogue-profile-probe")]
             epilogue_profile_record(
                 computed,
@@ -1170,6 +1191,7 @@ pub(super) fn run_prepared_step(
                     continue;
                 };
                 let consumer = &resolved[consumer_index];
+                super::run_int8_activation_dot::refuse_quantized_activation_reader(consumer, &activation_layouts)?;
                 let reduce_values = buffers[reduce_node.0 as usize].as_deref().unwrap_or(&[]);
                 let mut fused_output = take_or_allocate(free_buffers, node_output_len(consumer));
                 let fuse_started = std::time::Instant::now();
@@ -1207,6 +1229,7 @@ pub(super) fn run_prepared_step(
                     continue;
                 };
                 let tail = &resolved[cluster.tail_index];
+                super::run_int8_activation_dot::refuse_quantized_activation_reader(tail, &activation_layouts)?;
                 let mut fused_output = take_or_allocate(free_buffers, node_output_len(tail));
                 let fuse_started = std::time::Instant::now();
                 apply_layer_norm_cluster_fused(
@@ -1914,10 +1937,12 @@ pub(super) fn evaluate_pooled(
     // `evaluate_quantized`'s identical `live_now` doc for why this replaces
     // `live_count(&buffers)`'s O(program.len()) full rescan per node (the
     // quadratic cost this landing removes).
+    let activation_layouts = super::run_int8_activation_dot::quantized_activation_layouts(&resolved);
     let mut peak_live_buffers = live_count(&buffers);
     let mut live_now = peak_live_buffers;
     let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
     for (position, computed) in resolved.iter().enumerate() {
+        super::run_int8_activation_dot::refuse_quantized_activation_reader(computed, &activation_layouts)?;
         let island = float64_island::step(
             computed,
             &buffers,
@@ -2166,7 +2191,9 @@ pub fn evaluate_parallel(
     let mut wide: Vec<Option<Cow<'static, [f64]>>> = Vec::new();
     let mut wide_pool: Vec<Vec<f64>> = Vec::new();
     let mut narrow_pool: Vec<Vec<f32>> = Vec::new();
+    let activation_layouts = super::run_int8_activation_dot::quantized_activation_layouts(&resolved);
     for (position, computed) in resolved.iter().enumerate() {
+        super::run_int8_activation_dot::refuse_quantized_activation_reader(computed, &activation_layouts)?;
         let island = float64_island::step(
             computed,
             &buffers,
