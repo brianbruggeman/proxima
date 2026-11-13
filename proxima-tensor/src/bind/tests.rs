@@ -8160,3 +8160,294 @@ mod end_aligned_mask_tests {
         assert_eq!(end_aligned_offset(true, 0), None);
     }
 }
+
+#[cfg(feature = "cached-attention-streaming")]
+mod bound_graph_golden {
+    use super::*;
+
+    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    /// FNV-1a 64 over the `Debug` text of every bound op followed by the
+    /// requested outputs. `BoundOp` and every type it holds derive `Debug`
+    /// over `Vec`/`SmallVec`/`BTreeMap` and plain numbers, so the text has
+    /// no addresses and no hash-map order; FNV-1a is a fixed function, unlike
+    /// `DefaultHasher`, whose algorithm std does not pin.
+    fn fingerprint(bound: &[BoundOp], outputs: &[NodeId]) -> u64 {
+        let text = alloc::format!("{bound:?}|{outputs:?}");
+        text.bytes().fold(FNV_OFFSET, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(FNV_PRIME)
+        })
+    }
+
+    /// The `Executes` `omega::metal::executes()` grants
+    /// (omega/src/metal/executes.rs:15-30), rebuilt here because this crate
+    /// cannot depend on omega.
+    fn metal_executes() -> Executes {
+        let granted = Executes::BASE
+            .with(Form::ElementwiseTwin)
+            .with(Form::ReduceEpilogue)
+            .with(Form::ReduceBroadcastEpilogue)
+            .with(Form::CachedAttention)
+            .with(Form::CachedSoftmaxWeights)
+            .with(Form::GatedDeltaNet)
+            .with(Form::MoeTopK)
+            .with(Form::TopFractionSelect);
+        if cfg!(feature = "metal-moe-mul-mat-id") {
+            granted.with(Form::RoundBatchedReduce)
+        } else {
+            granted
+        }
+    }
+
+    fn bind_production(
+        program: &[Op],
+        shapes: &Shapes,
+        outputs: &[NodeId],
+        policy: NumericPolicy,
+    ) -> Vec<BoundOp> {
+        bind_with_fusion_and_packed_leaves(
+            program,
+            shapes,
+            outputs,
+            true,
+            policy,
+            &BTreeSet::new(),
+            &metal_executes(),
+        )
+        .expect("fixture binds under the production fusion path with the Metal Executes")
+    }
+
+    fn count_named(bound: &[BoundOp], name: &str) -> usize {
+        bound.iter().filter(|op| op.kind.name() == name).count()
+    }
+
+    struct Golden {
+        op_count: usize,
+        cached_attention: usize,
+        moe_topk: usize,
+        fingerprint: u64,
+    }
+
+    fn assert_golden(label: &str, bound: &[BoundOp], outputs: &[NodeId], golden: &Golden) {
+        let actual = Golden {
+            op_count: bound.len(),
+            cached_attention: count_named(bound, "cached_attention"),
+            moe_topk: count_named(bound, "moe_topk"),
+            fingerprint: fingerprint(bound, outputs),
+        };
+        let matches = actual.op_count == golden.op_count
+            && actual.cached_attention == golden.cached_attention
+            && actual.moe_topk == golden.moe_topk
+            && actual.fingerprint == golden.fingerprint;
+        assert!(
+            matches,
+            "{label}: bound graph changed. actual (op_count={}, cached_attention={}, moe_topk={}, \
+             fingerprint={:#018x}) vs golden (op_count={}, cached_attention={}, moe_topk={}, \
+             fingerprint={:#018x})",
+            actual.op_count,
+            actual.cached_attention,
+            actual.moe_topk,
+            actual.fingerprint,
+            golden.op_count,
+            golden.cached_attention,
+            golden.moe_topk,
+            golden.fingerprint,
+        );
+    }
+
+    fn moe_decoder(
+        embedding: u32,
+        feed_forward: u32,
+        expert_count: u32,
+        expert_used_count: u32,
+        qk_norm: bool,
+        layers: u32,
+    ) -> (Vec<Op>, Shapes, Vec<NodeId>) {
+        let (program, roots, cache_roots, _moe_sites) =
+            crate::spec::gqa_cached_forward_program_with_experts(
+                128,
+                embedding,
+                feed_forward,
+                8,
+                2,
+                16,
+                layers,
+                expert_count,
+                expert_used_count,
+                qk_norm,
+                false,
+                false,
+                false,
+            )
+            .expect("moe gqa decoder fixture builds");
+        let mut outputs = alloc::vec![roots.logits];
+        for (even, odd, value) in cache_roots {
+            outputs.extend_from_slice(&[even, odd, value]);
+        }
+        let shapes =
+            crate::shape::infer(&program, &[1, 5]).expect("moe gqa decoder fixture infers");
+        (program, shapes, outputs)
+    }
+
+    /// Fixture: the granite-shaped moe decoder of
+    /// `moe_topk_fusion_keeps_the_cached_attention_ops_of_a_moe_decoder`
+    /// (3 layers, 8 experts routed 2). Bind entry:
+    /// `bind_with_fusion_and_packed_leaves`, Metal `Executes`, bit-exact.
+    /// Constants recorded from main bd4a675e.
+    #[test]
+    fn bound_graph_golden_moe_decoder_is_unchanged() {
+        let (program, roots, cache_roots, _moe_sites) =
+            crate::spec::gqa_cached_forward_program_with_experts(
+                64, 64, 128, 4, 2, 16, 3, 8, 2, false, false, false, false,
+            )
+            .expect("moe gqa decoder fixture builds");
+        let mut outputs = alloc::vec![roots.logits];
+        for (even, odd, value) in cache_roots {
+            outputs.extend_from_slice(&[even, odd, value]);
+        }
+        let shapes =
+            crate::shape::infer(&program, &[1, 5]).expect("moe gqa decoder fixture infers");
+        let bound = bind_production(&program, &shapes, &outputs, NumericPolicy::bit_exact());
+
+        assert_golden(
+            "moe decoder",
+            &bound,
+            &outputs,
+            &Golden {
+                op_count: 106,
+                cached_attention: 3,
+                moe_topk: 3,
+                fingerprint: 0xa1a1_72d2_a385_7e8a,
+            },
+        );
+    }
+
+    /// Fixture: a wider moe decoder with qk-norm and 16 experts routed 4
+    /// (4 layers), closer to a flint layout than the granite fixture. Bind
+    /// entry: `bind_with_fusion_and_packed_leaves`, Metal `Executes`,
+    /// bit-exact. Constants recorded from main bd4a675e.
+    #[test]
+    fn bound_graph_golden_moe_decoder_with_qk_norm_and_sixteen_experts_is_unchanged() {
+        let (program, shapes, outputs) = moe_decoder(128, 64, 16, 4, true, 4);
+        let bound = bind_production(&program, &shapes, &outputs, NumericPolicy::bit_exact());
+
+        assert_golden(
+            "moe decoder, qk-norm, 16 experts",
+            &bound,
+            &outputs,
+            &Golden {
+                op_count: 202,
+                cached_attention: 4,
+                moe_topk: 4,
+                fingerprint: 0x8ee6_2da5_1227_d5cb,
+            },
+        );
+    }
+
+    /// Fixture: the real openchat-3.5/Mistral-7B single-range program of
+    /// `single_range_cached_attention_fuses_one_step_per_layer_on_the_real_openchat_shape`
+    /// (32 layers, 71-position merged range). Bind entry:
+    /// `bind_with_fusion_and_packed_leaves`, Metal `Executes`, bit-exact.
+    /// Constants recorded from main bd4a675e.
+    #[test]
+    fn bound_graph_golden_openchat_single_range_is_unchanged() {
+        let (program, logits, cache_roots, _) =
+            crate::spec::gqa_single_range_cached_forward_program(
+                32_002,
+                4096,
+                14336,
+                32,
+                8,
+                128,
+                32,
+                false,
+                crate::spec::DuplicateHeadPosition::None,
+                false,
+            )
+            .expect("openchat-shaped single-range forward pass lowers to a program");
+        let mut outputs = alloc::vec![logits];
+        for (even, odd, value) in &cache_roots {
+            outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let shapes = crate::shape::infer(&program, &[1, 71])
+            .expect("one new position against a 71-position merged range infers");
+        let bound = bind_production(&program, &shapes, &outputs, NumericPolicy::bit_exact());
+
+        assert_golden(
+            "openchat single range",
+            &bound,
+            &outputs,
+            &Golden {
+                op_count: 749,
+                cached_attention: 32,
+                moe_topk: 0,
+                fingerprint: 0x5851_41d9_4d15_69a4,
+            },
+        );
+    }
+
+    /// Fixture: qwen3.5's real per-head dense attention layer
+    /// (`qwen35_partial_rotary_attention_fixture`: kv_heads 2, group 8,
+    /// head_dim 256, rotary_dim 64, 40 cached keys) with the output pins of
+    /// `qwen35_partial_rotary_cached_attention_fuses_and_matches_the_unfused_layer`.
+    /// Bind entry: `bind_with_fusion_and_packed_leaves`, Metal `Executes`,
+    /// bit-exact with flash narrowing. Constants recorded from main bd4a675e.
+    #[test]
+    fn bound_graph_golden_qwen35_dense_cached_attention_layer_is_unchanged() {
+        let (program, residual1, taps, _inputs, shapes) =
+            qwen35_partial_rotary_attention_fixture();
+        let outputs = alloc::vec![
+            residual1,
+            taps.attended,
+            taps.rotated_k_new_first,
+            taps.rotated_k_new_second,
+            taps.k_pass,
+            taps.v_new,
+        ];
+        let bound = bind_production(
+            &program,
+            &shapes,
+            &outputs,
+            NumericPolicy::bit_exact().with_flash_narrowing(true),
+        );
+
+        assert_golden(
+            "qwen35 dense layer",
+            &bound,
+            &outputs,
+            &Golden {
+                op_count: 46,
+                cached_attention: 1,
+                moe_topk: 0,
+                fingerprint: 0x51cf_c22e_065a_5332,
+            },
+        );
+    }
+
+    #[test]
+    fn bound_graph_golden_fingerprint_is_deterministic_across_binds() {
+        let (program, shapes, outputs) = moe_decoder(64, 128, 8, 2, false, 2);
+        let first = bind_production(&program, &shapes, &outputs, NumericPolicy::bit_exact());
+        let second = bind_production(&program, &shapes, &outputs, NumericPolicy::bit_exact());
+
+        assert_eq!(fingerprint(&first, &outputs), fingerprint(&second, &outputs));
+    }
+
+    #[test]
+    fn bound_graph_golden_fingerprint_changes_when_the_pin_set_changes() {
+        let (program, shapes, outputs) = moe_decoder(64, 128, 8, 2, false, 2);
+        let pinned = bind_production(&program, &shapes, &outputs, NumericPolicy::bit_exact());
+        let logits_only = bind_production(
+            &program,
+            &shapes,
+            &outputs[..1],
+            NumericPolicy::bit_exact(),
+        );
+
+        assert_ne!(
+            fingerprint(&pinned, &outputs),
+            fingerprint(&logits_only, &outputs[..1])
+        );
+    }
+}
