@@ -184,13 +184,12 @@ fn deepseek_coder_without_a_pre_key_uses_the_default_split_like_llama() {
 fn host_local_vector_vocab(name: &str) -> PathBuf {
     proxima_gguf::checkpoint_resolver::require_checkpoint(
         &format!("PROXIMA_VOCAB_{}_GGUF", name.to_uppercase()),
-        &format!("ggml-vocab-{name}.gguf"),
+        &format!("/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-{name}.gguf"),
         0,
     )
 }
 
 #[test]
-#[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-starcoder.gguf is not vendored"]
 fn digit_isolated_gpt2_splits_every_digit_like_llama_starcoder() {
     let vocab = load_vocab(&host_local_vector_vocab("starcoder"));
     assert_family_matches_llama(
@@ -201,7 +200,6 @@ fn digit_isolated_gpt2_splits_every_digit_like_llama_starcoder() {
 }
 
 #[test]
-#[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-refact.gguf is not vendored"]
 fn digit_isolated_gpt2_splits_every_digit_like_llama_refact() {
     let vocab = load_vocab(&host_local_vector_vocab("refact"));
     assert_family_matches_llama(&vocab, PreType::DigitIsolatedGpt2, &family_cases!("refact"));
@@ -255,14 +253,12 @@ fn assert_non_ascii_digit_runs_match_llama(vocab: &Vocab, cases: &[(&str, &str, 
 }
 
 #[test]
-#[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-starcoder.gguf is not vendored"]
 fn digit_isolated_gpt2_splits_non_ascii_digit_runs_like_llama_starcoder() {
     let vocab = load_vocab(&host_local_vector_vocab("starcoder"));
     assert_non_ascii_digit_runs_match_llama(&vocab, &non_ascii_digit_cases!("starcoder"));
 }
 
 #[test]
-#[ignore = "needs LLAMA_CPP_MODELS_DIR: ggml-vocab-refact.gguf is not vendored"]
 fn digit_isolated_gpt2_splits_non_ascii_digit_runs_like_llama_refact() {
     let vocab = load_vocab(&host_local_vector_vocab("refact"));
     assert_non_ascii_digit_runs_match_llama(&vocab, &non_ascii_digit_cases!("refact"));

@@ -100,7 +100,21 @@ test-group = 'real-checkpoint'
 # every lfm2 test. the digests and descriptor round trips of every checkpoint stay in. the excluded
 # tests run once at the end of the run with the default profile. built with `--cargo-profile gate`.
 [profile.slice-gate]
-default-filter = 'not test(/lfm2/) and not test(/^(generic_binder|generic_verify_llama_parity|llama_parity|kv_in_caller_memory)_(gemma4_26b|openchat|qwen2|qwen3|qwen35|qwen35moe)$/)'
+default-filter = 'not test(/lfm2/) and not test(/^(generic_binder|generic_verify_llama_parity|llama_parity|kv_in_caller_memory)_(gemma4_26b|openchat|qwen2|qwen3|qwen35|qwen35moe)$/) and not (test(/(^|::)versailles_/) or binary(/^versailles_/))'
+
+# tests that read multi-GB checkpoint files are named `versailles_*` (or live in a `versailles_*`
+# test binary). they run only on versailles, where the files are; the default profile never selects them.
+[profile.default]
+default-filter = 'not (test(/(^|::)versailles_/) or binary(/^versailles_/))'
+
+# run on versailles as `cargo nextest run --profile versailles --no-tests=fail`: zero selected tests is red,
+# and a test whose file is absent panics naming the path.
+[profile.versailles]
+default-filter = 'test(/(^|::)versailles_/) or binary(/^versailles_/)'
+
+[[profile.versailles.overrides]]
+filter = 'test(/(^|::)versailles_/) or binary(/^versailles_/)'
+test-group = 'real-checkpoint'
 
 # vm_upstream_latency_table times fresh-VM-per-call p50/p99; any test running
 # beside it lands in its samples. Claim every test thread so it runs alone.

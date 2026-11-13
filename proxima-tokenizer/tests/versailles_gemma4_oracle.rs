@@ -2,8 +2,8 @@
 //! vendored under `tests/fixtures/llama-gemma4-tokenize/` (see its README for
 //! the exact `llama-tokenize` command). llama.cpp is the oracle for the
 //! fixtures only; it is never a runtime dependency. Each test loads the real
-//! gemma4 GGUF blob from the Ollama store and prints `SKIP` loudly if the
-//! blob is absent on the host.
+//! gemma4 GGUF blob from the Ollama store and panics naming the path if the
+//! blob is absent; run in the nextest `versailles` profile.
 
 #![cfg(feature = "gguf")]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -20,15 +20,16 @@ const BOS_ID: u32 = 2;
 
 fn blob_path() -> PathBuf {
     let home = std::env::var("HOME").expect("HOME is set");
-    PathBuf::from(home).join(format!(".ollama/models/blobs/sha256-{BLOB_SHA256}"))
+    proxima_gguf::checkpoint_resolver::require_checkpoint(
+        "PROXIMA_GEMMA4_ORACLE_GGUF",
+        &format!("{home}/.ollama/models/blobs/sha256-{BLOB_SHA256}"),
+        0,
+    )
 }
 
-fn load_vocab() -> Option<Vocab> {
+fn load_vocab() -> Vocab {
     let path = blob_path();
-    let Ok(mut file) = File::open(&path) else {
-        eprintln!("SKIP gemma4 tokenizer oracle tests: blob absent at {path:?}");
-        return None;
-    };
+    let mut file = File::open(&path).expect("open gemma4 oracle blob");
     let mut header = Vec::new();
     for capacity in [4usize << 20, 16 << 20, 64 << 20] {
         header.resize(capacity, 0);
@@ -36,15 +37,15 @@ fn load_vocab() -> Option<Vocab> {
         let read = file.read(&mut header).expect("read gguf header region");
         header.truncate(read);
         if let Ok(parsed) = proxima_gguf::pipe::parse_complete(&header) {
-            return Some(vocab_from_metadata(&parsed).expect("vocab from real gemma4 metadata"));
+            return vocab_from_metadata(&parsed).expect("vocab from real gemma4 metadata");
         }
     }
     panic!("gguf metadata region did not fit in 64 MiB of {path:?}");
 }
 
-fn vocab() -> Option<&'static Vocab> {
-    static VOCAB: OnceLock<Option<Vocab>> = OnceLock::new();
-    VOCAB.get_or_init(load_vocab).as_ref()
+fn vocab() -> &'static Vocab {
+    static VOCAB: OnceLock<Vocab> = OnceLock::new();
+    VOCAB.get_or_init(load_vocab)
 }
 
 fn parse_ids(text: &str) -> Vec<u32> {
@@ -76,7 +77,7 @@ macro_rules! oracle_case {
     ($test:ident, $name:literal) => {
         #[test]
         fn $test() {
-            let Some(vocab) = vocab() else { return };
+            let vocab = vocab();
             assert_matches_llama(
                 vocab,
                 include_str!(concat!("fixtures/llama-gemma4-tokenize/", $name, ".txt")),
@@ -140,7 +141,7 @@ oracle_case!(
 
 #[test]
 fn gemma4_tokenizer_vocab_lookups_by_string() {
-    let Some(vocab) = vocab() else { return };
+    let vocab = vocab();
     assert_eq!(vocab.token_id("\u{2581}\u{201c}"), Some(999));
     assert_eq!(vocab.token_id("\n"), Some(107));
     assert_eq!(vocab.token_id("\n\n"), Some(108));
@@ -150,7 +151,7 @@ fn gemma4_tokenizer_vocab_lookups_by_string() {
 
 #[test]
 fn gemma4_tokenizer_round_trips_real_text_shapes() {
-    let Some(vocab) = vocab() else { return };
+    let vocab = vocab();
     let texts = [
         "a\nb\n\nc\n\n\nd",
         "She said \u{201c}hello\u{201d} and left.",
@@ -171,7 +172,7 @@ fn gemma4_tokenizer_round_trips_real_text_shapes() {
 
 #[test]
 fn gemma4_tokenizer_decodes_byte_fallback_tokens_to_utf8() {
-    let Some(vocab) = vocab() else { return };
+    let vocab = vocab();
     let ids: Vec<u32> = ["<0xC3>", "<0xA9>"]
         .iter()
         .map(|token| vocab.token_id(token).expect("byte fallback token exists"))
@@ -181,7 +182,7 @@ fn gemma4_tokenizer_decodes_byte_fallback_tokens_to_utf8() {
 
 #[test]
 fn gemma4_tokenizer_ascii_single_space_ids_equal_the_pre_fix_gpt2_path() {
-    let Some(vocab) = vocab() else { return };
+    let vocab = vocab();
     let pre_fix_gpt2_ids = [
         2, 818, 3823, 8864, 37423, 38167, 1024, 506, 31770, 4799, 236761,
     ];
@@ -197,7 +198,7 @@ fn gemma4_tokenizer_ascii_single_space_ids_equal_the_pre_fix_gpt2_path() {
 
 #[test]
 fn gemma4_tokenizer_legacy_byte_level_path_still_splits_newlines_into_gpt2_remap_tokens() {
-    let Some(vocab) = vocab() else { return };
+    let vocab = vocab();
     let tokens: Vec<String> = (0..vocab.len() as u32)
         .map(|id| vocab.token_str(id).expect("in range").to_string())
         .collect();
