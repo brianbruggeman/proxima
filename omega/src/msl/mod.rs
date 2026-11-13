@@ -231,9 +231,7 @@ pub use cached_attention_render::{
     cached_attention_row_tiled_kv_codec_for, cached_attention_row_tiled_reads,
 };
 #[cfg(feature = "metal-attn-split-rows")]
-use cached_attention_render::{
-    ROW_TILED_KV_REASON, fragment_scalar_type, fragment_type, row_tiled_cached_type,
-};
+use cached_attention_render::{ROW_TILED_KV_REASON, row_tiled_cached_type};
 pub use scaled_float_render::{q4_0_unpack_msl, q5_0_unpack_msl, q5_1_unpack_msl, q8_0_unpack_msl};
 use scaled_float_render::*;
 use selection_render::render_top_fraction_select;

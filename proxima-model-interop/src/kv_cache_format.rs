@@ -20,7 +20,12 @@ fn is_binary32_format(format: &NumericFormat) -> bool {
 }
 
 /// The codec the kernel reads a K cache stored as `format` with, whatever the V cache is.
-#[cfg(all(feature = "std", feature = "gpu"))]
+#[cfg(all(
+    feature = "std",
+    feature = "gpu",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
 fn kernel_codec(format: &NumericFormat) -> Result<Option<NumericFormat>, String> {
     omega::cached_attention_key_codec_for(format).map_err(|error| error.to_string())
 }
@@ -92,7 +97,12 @@ pub(crate) fn is_binary32(format: &NumericFormat) -> bool {
 
 /// Whether the cache is narrower than the graph's binary32 output: the kernel reads it through a
 /// codec, so the step's rows are narrowed into a device-resident cache.
-#[cfg(all(feature = "std", feature = "gpu"))]
+#[cfg(all(
+    feature = "std",
+    feature = "gpu",
+    feature = "metal-output-placement",
+    target_os = "macos"
+))]
 pub(crate) fn is_narrow(format: &NumericFormat) -> bool {
     kernel_codec(format).is_ok_and(|codec| codec.is_some())
 }
@@ -207,7 +217,12 @@ mod tests {
         }
     }
 
-    #[cfg(feature = "gpu")]
+    #[cfg(all(
+        feature = "std",
+        feature = "gpu",
+        feature = "metal-output-placement",
+        target_os = "macos"
+    ))]
     #[test]
     fn f16_and_bf16_are_narrow_and_f32_is_not() {
         assert!(!is_narrow(&NumericFormat::Float32));

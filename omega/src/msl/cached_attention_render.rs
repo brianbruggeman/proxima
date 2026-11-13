@@ -1034,25 +1034,6 @@ fn merge_grid(node: NodeId, total_elements: u64) -> Result<GridSpec, EmitError> 
 pub(super) const ROW_TILED_KV_REASON: &str =
     "row-tiled attention reads cached K/V as binary32, one scalar layout of whole bytes, or one readable block layout";
 
-/// The MSL scalar a matrix-multiply fragment of `format` holds: the one place the row-tiled
-/// kernel's operand, probability and accumulator widths are spelled, each read off a proxima-numeric
-/// [`Codec`] so llama.cpp's binary16 operands over binary32 accumulators (`fa_f16.metal` `FA_TYPES`)
-/// is a choice of formats, not a literal in the kernel text.
-pub(super) fn fragment_scalar_type(format: Codec) -> &'static str {
-    match format {
-        Codec::Float16 => "half",
-        _ => "float",
-    }
-}
-
-/// The `simdgroup_matrix` type of an 8x8 fragment of `format`.
-pub(super) fn fragment_type(format: Codec) -> &'static str {
-    match format {
-        Codec::Float16 => "simdgroup_half8x8",
-        _ => "simdgroup_float8x8",
-    }
-}
-
 /// The storage element type the row-tiled kernel (`cached_attention_row_tiled`) reads a cache of
 /// `codec` through, `None` when it has no read path for it. The row-tiled renderer and
 /// [`cached_attention_row_tiled_kv_codec_for`] both ask this one classifier; it lives here, with
