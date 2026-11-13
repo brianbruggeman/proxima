@@ -243,9 +243,12 @@ fn main() {
     // SAFETY: `file` is dropped at the end of this scope, but the mapping
     // stays valid past that -- POSIX `mmap`/`munmap` semantics, same
     // pattern every real-checkpoint example in this crate already uses.
-    let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }.expect("map gemma4-E2B blob");
-    let parsed = parse_complete(&bytes).expect("parse gemma4-E2B header");
-    let model = LoadedModel::load(&parsed, &bytes).expect("bind gemma4-E2B");
+    let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }
+        .unwrap_or_else(|error| panic!("map {model_file}: {error}"));
+    let parsed = parse_complete(&bytes)
+        .unwrap_or_else(|error| panic!("parse gguf header of {model_file}: {error:?}"));
+    let model = LoadedModel::load(&parsed, &bytes)
+        .unwrap_or_else(|error| panic!("bind {model_file}: {error:?}"));
 
     // attribution3 followon, intervention 3 (2026-09-22, owner redirect):
     // `ServingConfig::default()` carries `dispatch_type: DispatchType::Serial`
