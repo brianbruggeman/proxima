@@ -11364,3 +11364,111 @@ fn a_block_key_cache_is_refused_by_the_generic_cached_attention_forms() {
     .expect_err("a block K beside a scalar V is not a generic-form cache");
     assert!(matches!(error, EmitError::CachedAttentionKvCodecNotSupported { .. }), "{error:?}");
 }
+
+const QWEN25_KV_GROUPS: u32 = 2;
+const QWEN25_QUERY_HEADS_PER_GROUP: u32 = 7;
+const QWEN25_HEAD_DIM: u32 = 64;
+const QWEN25_EMBED: u32 = 896;
+
+fn q5_0_admitting_table(codec: Codec) -> Option<usize> {
+    match codec {
+        Codec::Q5_0 => Some(32),
+        _ => None,
+    }
+}
+
+/// qwen2.5's decode attention-output projection: iteration axes
+/// `(token, kv group, query head, head dim, out row)` = `[1, 2, 7, 64, 896]`,
+/// weight `[896, 2, 7, 64]` read through `(4, 1, 2, 3)`, activation
+/// `[1, 2, 7, 64]` read through `(0, 1, 2, 3)`, output axes `[0, 4]`.
+fn qwen25_attention_output_op() -> BoundOp {
+    let mut program = Vec::new();
+    let weight = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: vec![
+                Extent::Static(QWEN25_EMBED),
+                Extent::Static(QWEN25_KV_GROUPS),
+                Extent::Static(QWEN25_QUERY_HEADS_PER_GROUP),
+                Extent::Static(QWEN25_HEAD_DIM),
+            ],
+            name: None,
+        },
+    );
+    let activation = append(
+        &mut program,
+        Op::Input {
+            dtype: DType::FLOAT32,
+            shape: vec![
+                Extent::Static(1),
+                Extent::Static(QWEN25_KV_GROUPS),
+                Extent::Static(QWEN25_QUERY_HEADS_PER_GROUP),
+                Extent::Static(QWEN25_HEAD_DIM),
+            ],
+            name: None,
+        },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (weight, IndexMap::Affine(map::projection(5, &[4, 1, 2, 3]))),
+                (activation, IndexMap::Affine(map::projection(5, &[0, 1, 2, 3]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(5, &[0, 1, 2, 3, 4])),
+            out_map: IndexMap::Affine(map::projection(5, &[0, 4])),
+            keep: Keep::Reduce,
+            name: Some("qwen25_attn_output".into()),
+        }),
+    );
+    let shapes = infer(&program, &[]).expect("qwen2.5 attention output infers");
+    bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+        .expect("qwen2.5 attention output lowers")
+        .into_iter()
+        .next()
+        .expect("one fused bound emitted")
+}
+
+#[test]
+fn qwen25_q5_0_attention_output_row_block_outcome_is_pinned() {
+    let bound = qwen25_attention_output_op();
+    let weight_node = bound.operands()[0].0;
+    let mut q5_0 = BTreeMap::new();
+    q5_0.insert(weight_node, Codec::Q5_0);
+    let codecs = operand_codecs(&bound, &q5_0);
+
+    for (index, operand) in bound.operands().iter().enumerate() {
+        std::println!("operand {index} base={} strides={:?}", operand.1.base, operand.1.strides);
+    }
+    std::println!("extents={:?}", bound.extents);
+    let outcome = classify_packed_row_block_with(&bound, &codecs, false, q5_0_admitting_table);
+    match &outcome {
+        Ok(block) => std::println!(
+            "outcome=Ok weight={} other={} reduce_dim={} codec={:?} token_axes={:?} feature_axes={:?}",
+            block.weight, block.other, block.reduce_dim, block.codec, block.token_axes, block.feature_axes
+        ),
+        Err(rejection) => std::println!("outcome=Err({rejection:?})"),
+    }
+    assert_eq!(bound.extents.as_slice(), &[1, 2, 7, 64, 896]);
+    assert_eq!(bound.operands()[0].1.strides.as_slice(), &[0, 448, 64, 1, 896]);
+    assert_eq!(bound.operands()[1].1.strides.as_slice(), &[896, 448, 64, 1, 0]);
+    let block = outcome.expect("both operands fold dims [1, 2, 3] contiguously into one 896 reduce");
+    assert_eq!(
+        (block.weight, block.other, block.reduce_dim, block.codec),
+        (0, 1, 3, Codec::Q5_0)
+    );
+    assert_eq!((block.token_axes.as_slice(), block.feature_axes.as_slice()), (&[0u16][..], &[4u16][..]));
+}
