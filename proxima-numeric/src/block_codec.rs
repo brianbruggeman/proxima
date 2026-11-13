@@ -24,6 +24,8 @@ use core::mem::MaybeUninit;
 
 use crate::block_layout::{BlockLayout, Field, MAX_DIGITS, Plane, named_block_table};
 use crate::encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleStatistic, StoredMin};
+use crate::encode_rule::RangeFit;
+use crate::range_fit::{fit_range, nearest_even};
 use crate::float_layout::{FloatLayout, SignEncoding};
 use crate::float_layout_codec::{decode, encode};
 use crate::format::{LevelTable, NumericFormat};
@@ -113,7 +115,7 @@ const fn stored_min_rule(layout: &BlockLayout, stored_sum: bool) -> Option<Encod
     }
     let (lowest, highest) = integer_bounds(layout);
     Some(EncodeRule {
-        statistic: ScaleStatistic::MinMax,
+        statistic: ScaleStatistic::MinMax(RangeFit::PLAIN),
         divisor: highest - lowest,
         rounding: CodeRounding::HalfUpThenTruncate,
         clamp: CodeClamp::Upper,
@@ -882,7 +884,8 @@ fn fit_scale<const ELEMENTS: usize>(rule: &EncodeRule, input: &[f32; ELEMENTS]) 
             }
             (sum / ELEMENTS as f32 / divisor, 0.0, 0.0)
         }
-        ScaleStatistic::MinMax => {
+        ScaleStatistic::MinMax(_) => {
+            // a searched fit never reaches here: `fit_codes` runs it, as it also yields the codes
             let (low, high) = range_ordered(input);
             let scale = (high - low) / divisor;
             (scale, inverse_of(scale), low)
@@ -904,8 +907,12 @@ fn code_of(layout: &BlockLayout, rule: &EncodeRule, inverse: f32, value: f32) ->
             };
             raw as u8
         }
-        CodeRounding::NearestAwayFromZero => {
-            let rounded = libm::roundf(value * inverse) as i32;
+        CodeRounding::NearestAwayFromZero | CodeRounding::NearestEven => {
+            let rounded = if matches!(rule.rounding, CodeRounding::NearestEven) {
+                nearest_even(value * inverse)
+            } else {
+                libm::roundf(value * inverse) as i32
+            };
             let rounded = match rule.clamp {
                 CodeClamp::Both => rounded.clamp(rule.lowest, rule.highest),
                 CodeClamp::Upper => rounded.min(rule.highest),
@@ -939,7 +946,17 @@ fn fit_codes<const ELEMENTS: usize, const HIGH_FUSED: bool>(
     input: &[f32; ELEMENTS],
     codes: &mut [u8; ELEMENTS],
 ) -> (f32, u32, f32) {
-    let (scale, inverse, low) = fit_scale(rule, input);
+    let searched = match rule.statistic {
+        ScaleStatistic::MinMax(fit) if fit.searches() => Some(fit),
+        _ => None,
+    };
+    let (scale, inverse, low) = match searched {
+        Some(fit) => {
+            let (scale, offset) = fit_range(&fit, rule.divisor, input, codes);
+            (scale, 0.0, offset)
+        }
+        None => fit_scale(rule, input),
+    };
     let shifted = matches!(rule.stored_min, StoredMin::LowEnd { .. });
     let degenerate = !shifted && has_degenerate_scale(layout, rule, scale);
     let lift = u32::from(layout.element.low.bits);
@@ -947,7 +964,13 @@ fn fit_codes<const ELEMENTS: usize, const HIGH_FUSED: bool>(
     let mask = u32::MAX.checked_shr(32 - bits).unwrap_or(0);
     let mut word = 0u32;
     for (lane, (code, &value)) in codes.iter_mut().zip(input).enumerate() {
-        *code = if degenerate { rule.zero_code } else { code_of(layout, rule, inverse, if shifted { value - low } else { value }) };
+        *code = if searched.is_some() {
+            *code
+        } else if degenerate {
+            rule.zero_code
+        } else {
+            code_of(layout, rule, inverse, if shifted { value - low } else { value })
+        };
         if HIGH_FUSED {
             word = word.wrapping_add(((u32::from(*code) >> lift) & mask).wrapping_shl(lane as u32 * bits));
         }

@@ -57,6 +57,7 @@ pub mod format_id;
 pub mod fused;
 pub mod numeric;
 pub mod numerics;
+pub mod range_fit;
 pub mod tables;
 pub mod value;
 
@@ -65,7 +66,7 @@ pub use convert::{Overflow, Rounding, narrow_to_format, narrow_to_layout};
 pub use decode::{decode_block, decode_blocks, decode_scalar, encode_scalar};
 pub use dtype::DType;
 pub use encode::{encode_blocks, reach};
-pub use encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleStatistic, StoredMin};
+pub use encode_rule::{CodeClamp, CodeRounding, EncodeRule, FitError, FitWeighting, RangeFit, ScaleStatistic, StoredMin};
 pub use error::NumericError;
 pub use float_layout::{FloatLayout, SignEncoding, Specials};
 pub use format::{LevelFormat, LevelGeometry, LevelTable, NumericFormat};
