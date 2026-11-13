@@ -168,19 +168,6 @@ pub const DEFAULT_RESIDENT_PREFILL_PLAN_BYTES: usize = 512 * 1024 * 1024;
 /// [`ServingConfig::default`]'s `resident_kv_bytes`: 512 MiB keeps the 107 MB of device KV buffers a 1000-token granite moe generation adopts, with room for a longer context.
 pub const DEFAULT_RESIDENT_KV_BYTES: usize = 512 * 1024 * 1024;
 
-/// [`ServingConfig::default`]'s `kv_cache_key_quant` and `kv_cache_value_quant`: llama.cpp's own
-/// `-ctk`/`-ctv` default, binary16. Measured on flint (`proxnum100/grid`, 128 tokens at 84, 510,
-/// 2024 and 4069 prompt tokens): generated ids identical to a binary32 cache in all four cells. A
-/// build with no cached-attention kernel keeps binary32 because its cache is the graph's own
-/// output; `kv_cache_format::admit_pair` there admits any format that encodes, and the host
-/// rounds each row through the format's codec at the write.
-#[cfg(feature = "gpu")]
-pub const DEFAULT_KV_CACHE_FORMAT: NumericFormat = NumericFormat::Float16;
-
-/// See the `gpu` form: without a cached-attention kernel the cache is the graph's binary32 output.
-#[cfg(not(feature = "gpu"))]
-pub const DEFAULT_KV_CACHE_FORMAT: NumericFormat = NumericFormat::Float32;
-
 /// [`ServingConfig::default`]'s `batch_size`: llama.cpp's own `-b` default
 /// (`common/common.h` `n_batch`), the logical batch an `-ub` micro-batch is
 /// clamped to.
@@ -1292,8 +1279,13 @@ impl Default for ServingConfig<'static> {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            // llama.cpp's own -ctk/-ctv default, binary16. Measured on flint (proxnum100/grid, 128
+            // tokens at 84, 510, 2024 and 4069 prompt tokens): generated ids identical to a binary32
+            // cache in all four cells. A build with no cached-attention kernel keeps binary32 because
+            // its cache is the graph's own output; kv_cache_format::admit_pair there admits any format
+            // that encodes, and the host rounds each row through the format's codec at the write.
+            kv_cache_key_quant: if cfg!(feature = "gpu") { NumericFormat::Float16 } else { NumericFormat::Float32 },
+            kv_cache_value_quant: if cfg!(feature = "gpu") { NumericFormat::Float16 } else { NumericFormat::Float32 },
             flash_attention: false,
             batch_size: DEFAULT_BATCH_SIZE,
             ubatch_size: DEFAULT_UBATCH_SIZE,
@@ -1651,8 +1643,9 @@ mod tests {
             "-c unset resolves to the limit"
         );
         assert_eq!(config.parallel_sequences, 1, "-np 1");
-        assert_eq!(config.kv_cache_key_quant, DEFAULT_KV_CACHE_FORMAT, "-ctk is llama.cpp's default");
-        assert_eq!(config.kv_cache_value_quant, DEFAULT_KV_CACHE_FORMAT, "-ctv is llama.cpp's default");
+        let expected = if cfg!(feature = "gpu") { NumericFormat::Float16 } else { NumericFormat::Float32 };
+        assert_eq!(config.kv_cache_key_quant, expected, "-ctk is llama.cpp's default");
+        assert_eq!(config.kv_cache_value_quant, expected, "-ctv is llama.cpp's default");
         assert!(!config.flash_attention, "-fa off");
         assert_eq!(config.batch_size, 2048, "-b 2048");
         assert_eq!(config.ubatch_size, 512, "-ub 512");
@@ -1889,8 +1882,8 @@ mod tests {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            kv_cache_key_quant: ServingConfig::default().kv_cache_key_quant,
+            kv_cache_value_quant: ServingConfig::default().kv_cache_value_quant,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -1969,8 +1962,8 @@ mod tests {
     #[test]
     fn multiple_parallel_sequences_reaches_its_error() {
         let config = ServingConfig {
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            kv_cache_key_quant: ServingConfig::default().kv_cache_key_quant,
+            kv_cache_value_quant: ServingConfig::default().kv_cache_value_quant,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -2007,8 +2000,8 @@ mod tests {
     #[test]
     fn nonzero_min_p_in_range_applies_without_error() {
         let config = ServingConfig {
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            kv_cache_key_quant: ServingConfig::default().kv_cache_key_quant,
+            kv_cache_value_quant: ServingConfig::default().kv_cache_value_quant,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -2023,8 +2016,8 @@ mod tests {
     #[test]
     fn min_p_outside_the_valid_range_reaches_its_error() {
         let config = ServingConfig {
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            kv_cache_key_quant: ServingConfig::default().kv_cache_key_quant,
+            kv_cache_value_quant: ServingConfig::default().kv_cache_value_quant,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -2040,8 +2033,8 @@ mod tests {
     #[test]
     fn negative_repeat_last_n_reaches_its_error() {
         let config = ServingConfig {
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            kv_cache_key_quant: ServingConfig::default().kv_cache_key_quant,
+            kv_cache_value_quant: ServingConfig::default().kv_cache_value_quant,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -2077,8 +2070,8 @@ mod tests {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            kv_cache_key_quant: ServingConfig::default().kv_cache_key_quant,
+            kv_cache_value_quant: ServingConfig::default().kv_cache_value_quant,
             flash_attention: false,
             batch_size: DEFAULT_BATCH_SIZE,
             ubatch_size: DEFAULT_UBATCH_SIZE,
@@ -2210,8 +2203,8 @@ mod tests {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            kv_cache_key_quant: ServingConfig::default().kv_cache_key_quant,
+            kv_cache_value_quant: ServingConfig::default().kv_cache_value_quant,
             flash_attention: false,
             batch_size: DEFAULT_BATCH_SIZE,
             ubatch_size: DEFAULT_UBATCH_SIZE,
@@ -2316,8 +2309,8 @@ mod tests {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            kv_cache_key_quant: ServingConfig::default().kv_cache_key_quant,
+            kv_cache_value_quant: ServingConfig::default().kv_cache_value_quant,
             flash_attention: false,
             batch_size: DEFAULT_BATCH_SIZE,
             ubatch_size: DEFAULT_UBATCH_SIZE,
@@ -2412,8 +2405,8 @@ mod tests {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            kv_cache_key_quant: ServingConfig::default().kv_cache_key_quant,
+            kv_cache_value_quant: ServingConfig::default().kv_cache_value_quant,
             flash_attention: false,
             batch_size: DEFAULT_BATCH_SIZE,
             ubatch_size: DEFAULT_UBATCH_SIZE,
@@ -2493,8 +2486,8 @@ mod tests {
     #[test]
     fn zero_kv_bucket_tokens_reaches_its_error() {
         let config = ServingConfig {
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            kv_cache_key_quant: ServingConfig::default().kv_cache_key_quant,
+            kv_cache_value_quant: ServingConfig::default().kv_cache_value_quant,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
@@ -2510,8 +2503,8 @@ mod tests {
 
     fn supported_default() -> ServingConfig<'static> {
         ServingConfig {
-            kv_cache_key_quant: DEFAULT_KV_CACHE_FORMAT,
-            kv_cache_value_quant: DEFAULT_KV_CACHE_FORMAT,
+            kv_cache_key_quant: ServingConfig::default().kv_cache_key_quant,
+            kv_cache_value_quant: ServingConfig::default().kv_cache_value_quant,
             flash_attention: false,
             batch_size: 0,
             ubatch_size: 0,
