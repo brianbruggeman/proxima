@@ -370,6 +370,13 @@ fn count_as_f64(count: usize) -> f64 {
     f64::from(u32::try_from(count).unwrap_or(u32::MAX))
 }
 
+/// Exact below 2^53: the high and low u32 halves recombined, so byte counts above 4 GiB keep their value.
+fn bytes_as_f64(bytes: u64) -> f64 {
+    let high = u32::try_from(bytes >> 32).unwrap_or(u32::MAX);
+    let low = u32::try_from(bytes & u64::from(u32::MAX)).unwrap_or(u32::MAX);
+    f64::from(high) * 4_294_967_296.0 + f64::from(low)
+}
+
 /// Reads `/usr/bin/time -l`'s `peak memory footprint` line (bytes).
 fn parse_footprint_bytes(text: &str) -> Result<u64, HarnessError> {
     let line = text
@@ -2170,7 +2177,7 @@ struct LlamaStage {
 }
 
 fn bytes_value(bytes: Option<u64>) -> Option<f64> {
-    bytes.map(|count| count_as_f64(usize::try_from(count).unwrap_or(usize::MAX)))
+    bytes.map(bytes_as_f64)
 }
 
 fn llama_rows(sink: &mut RowSink, input: &LlamaStage) {
@@ -2776,7 +2783,7 @@ fn llama_text_edge_rows(sink: &mut RowSink, input: &LlamaTextEdges) {
     sink.measured(&TOKENIZE_INPROC_MS, input.tokenize_ms, "vocab_only model, no transport");
     sink.measured(&TOKENIZE_INPROC_TOKENS, count_as_f64(input.tokenize_tokens), "");
     sink.measured(&DETOKENIZE_PROMPT_INPROC_MS, input.detokenize_ms, "vocab_only model, prompt ids");
-    sink.measured(&VOCAB_ONLY_RSS_BYTES,count_as_f64(usize::try_from(input.rss_bytes).unwrap_or(usize::MAX)), "ps rss of the harness after the vocab-only load");
+    sink.measured(&VOCAB_ONLY_RSS_BYTES, bytes_as_f64(input.rss_bytes), "ps rss of the harness after the vocab-only load");
 }
 
 fn rss_error(stage: &str, bytes: u64) -> HarnessError {
@@ -3929,5 +3936,13 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         let cell = proxima.cell.clone();
         let table = scoreboard_markdown(&[proxima], &[cell]);
         assert!(table.contains("| proxima | new | 1 | 0 | 1 | - | - | - | - | - | - |"), "{table}");
+    }
+
+    #[test]
+    fn bytes_above_four_gib_convert_exactly() {
+        assert_eq!(bytes_as_f64(25_666_650_112).to_bits(), 25_666_650_112.0_f64.to_bits());
+        assert_eq!(bytes_as_f64(4_294_967_296).to_bits(), 4_294_967_296.0_f64.to_bits());
+        assert_eq!(bytes_as_f64(u64::from(u32::MAX)).to_bits(), 4_294_967_295.0_f64.to_bits());
+        assert_eq!(bytes_value(Some(25_666_650_112)).map(f64::to_bits), Some(25_666_650_112.0_f64.to_bits()));
     }
 }
