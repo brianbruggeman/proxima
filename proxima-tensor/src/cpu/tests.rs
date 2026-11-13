@@ -15344,3 +15344,148 @@ fn the_decode_loop_reuses_its_f64_island_buffers_across_calls() {
         "a warm call must reuse the pooled f64 storage instead of allocating"
     );
 }
+
+/// The gemma4 E2B head shape: one kv head, eight query groups.
+const END_ALIGNED_KV_HEADS: u32 = 1;
+const END_ALIGNED_QUERY_GROUPS: u32 = 8;
+
+/// A cached-attention step over `new_rows` new keys, no cached range, and
+/// `query_rows` queries whose bounds are `(lower, upper)`.
+fn end_aligned_attention_output(
+    (query_rows, new_rows, head_dim): (u32, u32, u32),
+    (lower, upper): (i64, i64),
+    query_planes: [&[f32]; 2],
+    key_value_planes: [&[f32]; 3],
+) -> Vec<f32> {
+    let [query_even, query_odd] = query_planes;
+    let [new_key_even, new_key_odd, new_value] = key_value_planes;
+    let empty: &[f32] = &[];
+    let inputs: [&[f32]; 8] = [
+        query_even,
+        query_odd,
+        empty,
+        empty,
+        new_key_even,
+        new_key_odd,
+        empty,
+        new_value,
+    ];
+    let buffers: Vec<Option<&[f32]>> = inputs.iter().map(|input| Some(*input)).collect();
+    let operands: Vec<_> = (0..inputs.len())
+        .map(|index| {
+            (
+                NodeId(index as u32),
+                bind::Layout {
+                    base: 0,
+                    strides: smallvec::smallvec![1],
+                },
+                None,
+            )
+        })
+        .collect();
+    let groups = END_ALIGNED_KV_HEADS * END_ALIGNED_QUERY_GROUPS;
+    let attention = BoundOp {
+        node: NodeId(8),
+        dtype: DType::FLOAT32,
+        extents: vec![
+            u64::from(query_rows),
+            u64::from(END_ALIGNED_KV_HEADS),
+            u64::from(END_ALIGNED_QUERY_GROUPS),
+            u64::from(head_dim),
+        ],
+        kind: BoundOpKind::CachedAttention {
+            operands,
+            query_rows: u64::from(query_rows),
+            cached_key_rows: 0,
+            new_key_rows: u64::from(new_rows),
+            kv_heads: u64::from(END_ALIGNED_KV_HEADS),
+            query_groups: u64::from(END_ALIGNED_QUERY_GROUPS),
+            head_dim: u64::from(head_dim),
+            rotary_dim: u64::from(head_dim),
+            scale: 1.0 / (head_dim as f32).sqrt(),
+            cached_lower_inclusive: lower,
+            new_upper_inclusive: upper,
+            arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32,
+            attention_sink: false,
+        },
+    };
+    let mut output = vec![0.0; (query_rows * groups * head_dim) as usize];
+    run_node_into(&attention, &buffers, None, None, None, false, &mut output)
+        .expect("a one-range cached attention with query_rows < new_key_rows runs");
+    output
+}
+
+fn end_aligned_stream(seed: u64, count: usize) -> Vec<f32> {
+    let mut lcg = Lcg(seed);
+    (0..count).map(|_| lcg.next_unit()).collect()
+}
+
+/// Paper proof: `kv-epic/PROXNUM-262-row-liveness.md`, worked examples 1
+/// (N = 4) and 2 (N = 600, window 512). One query at absolute row N-1, both
+/// bounds shifted by N-1, equals the last row of the N-query attention.
+#[proxima::test]
+#[case::n4_sliding_window_512_head_dim_256(4, -511, 256)]
+#[case::n4_global_head_dim_512(4, i64::MIN, 512)]
+#[case::n600_sliding_window_512_head_dim_256(600, -511, 256)]
+#[case::n600_global_head_dim_512(600, i64::MIN, 512)]
+async fn one_end_aligned_query_equals_the_last_row_of_the_full_prefill_attention(
+    #[case] rows: u32,
+    #[case] lower: i64,
+    #[case] head_dim: u32,
+) {
+    let pair = (head_dim / 2) as usize;
+    let groups = (END_ALIGNED_KV_HEADS * END_ALIGNED_QUERY_GROUPS) as usize;
+    let query_width = groups * pair;
+    let key_width = END_ALIGNED_KV_HEADS as usize * pair;
+    let value_width = END_ALIGNED_KV_HEADS as usize * head_dim as usize;
+    let count = rows as usize;
+    let query_even = end_aligned_stream(11, count * query_width);
+    let query_odd = end_aligned_stream(12, count * query_width);
+    let key_even = end_aligned_stream(13, count * key_width);
+    let key_odd = end_aligned_stream(14, count * key_width);
+    let value = end_aligned_stream(15, count * value_width);
+    let keys_values = [key_even.as_slice(), key_odd.as_slice(), value.as_slice()];
+
+    let full = end_aligned_attention_output(
+        (rows, rows, head_dim),
+        (lower, 0),
+        [&query_even, &query_odd],
+        keys_values,
+    );
+
+    let last = count - 1;
+    let shift = i64::from(rows) - 1;
+    let last_query = [
+        &query_even[last * query_width..],
+        &query_odd[last * query_width..],
+    ];
+    let one = end_aligned_attention_output(
+        (1, rows, head_dim),
+        (lower.saturating_add(shift), shift),
+        last_query,
+        keys_values,
+    );
+    let output_width = groups * head_dim as usize;
+    assert_eq!(one.len(), output_width);
+    assert!(
+        one.iter().any(|value| *value != 0.0),
+        "the single query attended to nothing, so equality would prove nothing"
+    );
+    assert_eq!(
+        one.as_slice(),
+        &full[last * output_width..],
+        "rows {rows} lower {lower}: the shifted single query must equal the last full row"
+    );
+
+    let unshifted = end_aligned_attention_output(
+        (1, rows, head_dim),
+        (lower, 0),
+        last_query,
+        keys_values,
+    );
+    assert_ne!(
+        unshifted.as_slice(),
+        one.as_slice(),
+        "control: bounds left at query index 0 see key 0 only and must differ"
+    );
+}
