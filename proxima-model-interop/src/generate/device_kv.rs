@@ -30,6 +30,8 @@ use proxima_core::kv_carry::KvCommand;
 use proxima_numeric::{FormatCodec, NumericError, NumericFormat};
 
 use super::*;
+#[cfg(feature = "instrument")]
+use crate::kv_cache_format;
 
 // the emitter alone knows which formats a kernel reads, so its answer and its refusal are passed through rather than re-derived here
 fn kernel_codecs(
@@ -619,6 +621,20 @@ impl DeviceKv {
             .iter()
             .flatten()
             .try_for_each(|layer| layer.commit(cached_len, new_count))
+    }
+
+    /// Bytes `new_rows` rows of this step wrote into the device cache: every resident layer's K planes
+    /// and V row, counted in the formats the cache was adopted with.
+    #[cfg(feature = "instrument")]
+    pub(super) fn step_write_bytes(&self, new_rows: usize) -> u64 {
+        kv_cache_format::step_write_bytes(
+            (&self.key_format, &self.value_format),
+            new_rows as u64,
+            self.layers
+                .iter()
+                .flatten()
+                .map(|layer| (layer.even_odd_row as u64, layer.v_row as u64)),
+        )
     }
 
     /// Runs one [`KvCommand`] the kv carry state machine decided for layer `input`: a `Truncate` moves

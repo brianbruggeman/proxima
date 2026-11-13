@@ -601,13 +601,16 @@ impl LogitsSink<'_> {
     }
 }
 
-/// This call's growable per-layer key/value cache -- `F32` only:
-/// [`apply_serving_config`]'s own gate rejects any other
-/// `kv_cache_key_quant`/`kv_cache_value_quant` before [`LoadedModel::call`]
-/// ever reaches this loop, so there is no second precision for this type
-/// to carry (contrast `bind.rs`'s own `real_openchat_file::LayerCache`,
-/// which still probes the rejected `Q8_0` path directly against the
-/// tensor seam that gate exists to keep unreachable here).
+/// Bytes a host slice occupies, read off the container itself: the host layer caches are `Vec<f32>`
+/// whatever `-ctk`/`-ctv` is (it rounds on write, host_kv_rounding.rs), so the count names no format.
+#[cfg(feature = "instrument")]
+pub(super) fn host_slice_bytes<T>(slice: &[T]) -> u64 {
+    core::mem::size_of_val(slice) as u64
+}
+
+/// This call's growable per-layer key/value cache, stored as binary32 whatever the serving
+/// `kv_cache_key_quant`/`kv_cache_value_quant` is: admission accepts any format that encodes, and the host
+/// rounds each appended row to that format on write (host_kv_rounding.rs).
 #[derive(Clone)]
 pub(super) struct LayerCache {
     pub(super) k_even: Vec<f32>,
@@ -7078,5 +7081,30 @@ impl Drop for BackendRuntime {
         if let Some((home, identity)) = self.cuda_home.take() {
             home.put(identity, core::mem::take(&mut self.plans));
         }
+    }
+}
+
+#[cfg(all(test, feature = "instrument"))]
+mod host_cache_format_tests {
+    use super::host_slice_bytes;
+    use crate::gemma4_fixture::SLIDING_HEAD_DIM;
+    use crate::kv_cache_format;
+    use proxima_numeric::NumericFormat;
+
+    /// A sliding gemma4 layer under the binary16 serving default: the host rows are `f32` slices counted
+    /// off the container, 4 bytes an element, while the device cache for the same rows is 2 bytes an element.
+    #[test]
+    fn binary16_serving_quant_leaves_host_bytes_at_four_and_device_bytes_at_two() {
+        let row_elements = SLIDING_HEAD_DIM as usize;
+        let even_plane = vec![0.5f32; row_elements / 2];
+        let odd_plane = vec![-0.25f32; row_elements / 2];
+        let value_row = vec![1.0f32; row_elements];
+        let half = NumericFormat::Float16;
+
+        let host = host_slice_bytes(&even_plane) + host_slice_bytes(&odd_plane) + host_slice_bytes(&value_row);
+        let device = kv_cache_format::step_write_bytes((&half, &half), 1, [(SLIDING_HEAD_DIM / 2, SLIDING_HEAD_DIM)]);
+
+        assert_eq!(host, 4 * 2 * SLIDING_HEAD_DIM);
+        assert_eq!(device, 2 * 2 * SLIDING_HEAD_DIM);
     }
 }
