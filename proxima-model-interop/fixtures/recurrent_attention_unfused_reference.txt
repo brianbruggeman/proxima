@@ -1,0 +1,11 @@
+# tiny_ouro_gguf(2,false), prompt [0], 8 decode steps, binary32 kv, gpu_layers all (metal)
+# recorded at 92b0cf1f: cached_attention declined (cached_attention_count=0 resolved_len=76), logits are f32 bit patterns
+ids=[1, 1, 1, 1, 1, 1, 1, 1]
+logits step=0 n=2: 3f169e01 3f48d2ac
+logits step=1 n=2: 00000000 3f7b0757
+logits step=2 n=2: 00000000 3f7b0757
+logits step=3 n=2: 00000000 3f7b0757
+logits step=4 n=2: 00000000 3f7b0757
+logits step=5 n=2: 00000000 3f7b0757
+logits step=6 n=2: 00000000 3f7b0757
+logits step=7 n=2: 00000000 3f7b0757
