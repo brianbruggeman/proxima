@@ -2558,7 +2558,7 @@ fn require_prompt_count(engine: &'static str, reported: usize, sent: usize) -> R
     }
 }
 
-fn capture_proxima(config: &Config, binary: &Path, text: &str, profile: Option<&str>, log_path: &Path) -> Result<String, HarnessError> {
+fn proxima_command(config: &Config, binary: &Path, text: &str, profile: Option<&str>) -> Command {
     let (runs, tokens) = match profile {
         Some(PROFILE_PREFILL_STEP) => ("1", 1),
         Some(_) => ("1", PROFILE_DECODE_TOKENS),
@@ -2568,6 +2568,7 @@ fn capture_proxima(config: &Config, binary: &Path, text: &str, profile: Option<&
     command.arg("-l").arg(binary);
     command.env("PROXIMA_SPECULATIVE_TYPES", "none");
     command.env("PROXIMA_STEP_TIMES", "1");
+    command.env("PROXIMA_IGNORE_EOS", "1");
     command.env("PROXIMA_RUNS", runs);
     command.env("PROXIMA_MAX_TOKENS", tokens.to_string());
     command.env("PROXIMA_PROMPT", text);
@@ -2578,6 +2579,11 @@ fn capture_proxima(config: &Config, binary: &Path, text: &str, profile: Option<&
     if let Some(step) = profile {
         command.env("PROXIMA_METAL_OP_PROFILE_STEP", step);
     }
+    command
+}
+
+fn capture_proxima(config: &Config, binary: &Path, text: &str, profile: Option<&str>, log_path: &Path) -> Result<String, HarnessError> {
+    let mut command = proxima_command(config, binary, text, profile);
     let output = command.output().map_err(|source| HarnessError::Server(format!("spawn failed: {source}")))?;
     let combined = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     fs::write(log_path, &combined).map_err(io_error(log_path))?;
@@ -4007,6 +4013,22 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         assert!((cov.expect("n=3") - 20.0).abs() < 1e-9);
         assert_eq!(sample_mean_cov(&[5.0]), Some((5.0, None)));
         assert_eq!(sample_mean_cov(&[]), None);
+    }
+
+    #[test]
+    fn proxima_command_sets_ignore_eos_for_main_and_profile_runs() {
+        let arguments = ["--out", "o", "--model", "m", "--llama", "l", "--long-prompt-file", "p", "--llama-commit", "ba3c05f71", "--prox", "new=/bin/a"]
+            .map(str::to_owned)
+            .to_vec();
+        let config = parse_config(arguments).expect("valid arguments");
+        for profile in [None, Some(PROFILE_PREFILL_STEP), Some("3")] {
+            let command = proxima_command(&config, Path::new("/bin/a"), "hello", profile);
+            let ignore_eos = command
+                .get_envs()
+                .find(|(key, _)| *key == "PROXIMA_IGNORE_EOS")
+                .and_then(|(_, value)| value);
+            assert_eq!(ignore_eos, Some(std::ffi::OsStr::new("1")), "profile {profile:?} must mirror llama ignore_eos");
+        }
     }
 
     #[test]
