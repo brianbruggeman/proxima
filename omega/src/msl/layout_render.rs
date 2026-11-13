@@ -574,6 +574,23 @@ pub fn block_element_msl(layout: &BlockLayout, name: &str) -> String {
     element_msl(layout, Codes::Affine, name)
 }
 
+/// Renders `static inline float {prefix}_super_element(superblock, index)`: the row-blocked matvec's
+/// per-format reader, which selects the `index / elements`-th block of `block_bytes` bytes in the
+/// superblock span and reads element `index % elements` through `{prefix}_element`. Both counts
+/// come from `layout`, so a format whose `{prefix}_element` is rendered (`block_element_msl`,
+/// `scaled_block_element_msl`) gets its reader with no per-format code.
+#[must_use]
+pub fn block_super_element_msl(layout: &BlockLayout, prefix: &str) -> String {
+    let (elements, bytes) = (layout.elements, layout.block_bytes);
+    format!(
+        "
+static inline float {prefix}_super_element(device const uchar *superblock, uint index) {{
+    return {prefix}_element(superblock + (index / {elements}u) * {bytes}u, index % {elements}u);
+}}
+"
+    )
+}
+
 /// The property of a level format that keeps [`level_block_element_msl`] from rendering it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error("level element renderer cannot render this format: {0}")]

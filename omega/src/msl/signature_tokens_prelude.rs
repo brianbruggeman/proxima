@@ -1,4 +1,5 @@
 use super::*;
+use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::float_layout::FloatLayout;
 
 pub(super) const SELECTION_THREADGROUP_WIDTH: u64 = 1024;
@@ -1010,7 +1011,7 @@ pub(super) fn preamble(source: &mut String) {
     }
     source.push_str(&scaled_float_render::q4_0_unpack_msl());
     source.push('\n');
-    source.push_str(Q4_0_SUPER_ELEMENT_MSL);
+    source.push_str(&layout_render::block_super_element_msl(&BlockLayout::Q4_0, "q4_0"));
     source.push('\n');
     source.push_str(Q4_0_PAIR_DOT_MSL);
     source.push('\n');

@@ -1817,7 +1817,7 @@ fn gathered_packed_row_reads_each_selected_experts_slab_exactly_once() {
 /// admits [`Codec::Q8_0`] (`emit_and_classify.rs`'s whitelist match):
 /// `Q4_0`'s own block is 32 elements, and eight contiguous real blocks span
 /// exactly the same 256-element byte span one K-quant super-block occupies,
-/// so [`Q4_0_SUPER_ELEMENT_MSL`] emulates the super-block-relative read this
+/// so `block_super_element_msl` emulates the super-block-relative read this
 /// path needs instead of falling back to the fully generic per-element
 /// accessor. `matmul_op`'s reduce is a plain product (`Add` of `Multiply`),
 /// so [`push_packed_row_blocked_body`]'s `Codec::Q4_0 if is_plain_product_
@@ -1835,7 +1835,7 @@ fn q4_0_codec_takes_the_row_blocked_path_at_a_256_extent() {
 
     assert!(
         classify_packed_row_block(&bound, &operand_codecs(&bound, &q4_0)).is_ok(),
-        "Q4_0 must be admitted by codec now that Q4_0_SUPER_ELEMENT_MSL emulates its super-block read"
+        "Q4_0 must be admitted by codec now that block_super_element_msl emulates its super-block read"
     );
     assert!(
         packed_row_block(&bound, &operand_codecs(&bound, &q4_0)).is_some(),
@@ -6133,8 +6133,7 @@ fn cooperative_identity_token_rejects_a_non_cooperative_reduce_op() {
 /// gate never builds one of these in practice, so this drives the emitter's
 /// internal contract directly rather than through [`emit`]. `Q5_1` is the
 /// still-rejected exemplar: `Q8_0` and `Q4_0` each gained a row-blocked arm
-/// (see `codec_row_block_step_bytes`/`Q8_0_SUPER_ELEMENT_MSL`/
-/// `Q4_0_SUPER_ELEMENT_MSL`'s own docs) and are proved to SUCCEED through
+/// (see `codec_row_block_step_bytes`/`block_super_element_msl`'s own docs) and are proved to SUCCEED through
 /// this same function by
 /// [`push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel`]/
 /// [`push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel`] below,
