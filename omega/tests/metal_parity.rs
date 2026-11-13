@@ -1665,13 +1665,10 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
     );
 }
 
-/// `metal-q4k-single-fetch` correctness gate: exactly ONE `Q4_K`
+/// Packed-`Q4_K` correctness gate: exactly ONE `Q4_K`
 /// super-block (`k = QK_K = 256`), the minimum shape that exercises every
 /// one of the 8 sub-blocks and BOTH nibble halves of every `qs` byte on
-/// every output row — the exact granularity `push_q4k_single_fetch_body`'s
-/// lane remap touches (`sf_region` selects one of the super-block's 4
-/// 64-element groups = 2 sub-blocks each, `sf_half` selects which 16-byte
-/// half of that group's `qs` range a lane owns). The oracle is a
+/// every output row. The oracle is a
 /// hand-rolled dequantize-then-dot in this test, NOT
 /// `proxima_tensor::evaluate` — a real second implementation of the sum,
 /// independent of both the GPU kernel AND the CPU tensor-graph evaluator
@@ -1684,7 +1681,6 @@ fn metal_matmul_on_packed_q4k_weights_matches_the_dequantized_f32_cpu_path() {
 /// row: a per-row relative error explodes near a row's own zero crossing
 /// and reads as a false multi-hundred-percent "bug" that is actually a
 /// metric artifact (`docs/discipline.md`'s own note on this exact trap).
-#[cfg(all(feature = "metal-q4k-single-fetch", not(feature = "metal-q4k-split-k")))]
 #[test]
 fn metal_matmul_on_one_q4k_super_block_matches_a_hand_rolled_dequantize_then_dot_oracle() {
     use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
