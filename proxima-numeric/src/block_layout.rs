@@ -11,6 +11,7 @@
 //! stride, which expresses contiguous runs, nibble-split pairs, and the interleaved lanes of the
 //! K formats with one rule.
 
+use crate::encode_rule::{FitError, FitWeighting, RangeFit};
 use crate::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 use crate::format::{LevelFormat, LevelTable};
 
@@ -122,8 +123,50 @@ pub struct SubBlocks {
     /// Multiplies the sub-block scale code before its bias: 2 for IQ3_S, whose sub-block scale is
     /// `2 * code + 1` (`bias = -1`); 1 for every format whose scale is the code less its bias.
     pub scale_multiplier: i16,
+    /// How the encoder fits each sub-block's scale and min: the quantizer's definition, which no
+    /// layout field implies. `None` for a layout whose sub-block fit is not described.
+    #[serde(default)]
+    pub search: Option<SubSearch>,
     pub scale: Coded,
     pub min: Option<Coded>,
+}
+
+/// The search a sub-block is fitted with, as integer data so a layout stays `Eq + Hash`: ggml's
+/// `make_qkx2_quants` parameters (ggml-quants.c:808-887) in tenths. [`SubSearch::range_fit`] is the
+/// [`RangeFit`] that [`crate::range_fit::fit_range`] runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SubSearch {
+    /// `rmin` in tenths: `-10` is `-1.0`.
+    pub rmin_tenths: i16,
+    /// `rdelta` in tenths: `1` is `0.1`.
+    pub rdelta_tenths: i16,
+    pub nstep: u32,
+    pub error: FitError,
+    pub weighting: FitWeighting,
+}
+
+impl SubSearch {
+    /// `quantize_row_q4_K_ref` (ggml-quants.c:1486): `rmin -1`, `rdelta 0.1`, `nstep 20`, squared
+    /// error, `av_x + |x|` weights.
+    pub const Q4_K: Self = Self {
+        rmin_tenths: -10,
+        rdelta_tenths: 1,
+        nstep: 20,
+        error: FitError::Squared,
+        weighting: FitWeighting::MeanPlusAbs,
+    };
+
+    /// The search as the fit that runs it; a tenth is the correctly rounded `f32` of the decimal.
+    #[must_use]
+    pub const fn range_fit(&self) -> RangeFit {
+        RangeFit {
+            rmin: self.rmin_tenths as f32 / 10.0,
+            rdelta: self.rdelta_tenths as f32 / 10.0,
+            nstep: self.nstep,
+            error: self.error,
+            weighting: self.weighting,
+        }
+    }
 }
 
 /// A block that holds `count` runs of codes, each with its own copy of the scale field (and of
@@ -269,7 +312,7 @@ const QK_QS_PAIR_LANES: [Digit; MAX_DIGITS] = [digit(32, 8), digit(2, 4), digit(
 
 const K4_SCALE_BASE: u32 = 32;
 
-const fn k4_sub_blocks() -> SubBlocks {
+const fn k4_sub_blocks(search: Option<SubSearch>) -> SubBlocks {
     let scale = coded(
         FloatLayout::UINT6,
         plane(
@@ -301,6 +344,7 @@ const fn k4_sub_blocks() -> SubBlocks {
     SubBlocks {
         count: 8,
         scale_multiplier: 1,
+        search,
         scale,
         min: Some(min),
     }
@@ -497,6 +541,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 16,
             scale_multiplier: 1,
+            search: None,
             scale: coded(
                 FloatLayout::UINT4,
                 plane(4, 0, [digit(16, 8), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
@@ -536,6 +581,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 16,
             scale_multiplier: 1,
+            search: None,
             scale: coded(
                 FloatLayout::UINT6,
                 plane(4, 768, [digit(4, 8), digit(2, 32), digit(2, 4), NO_DIGIT]),
@@ -558,7 +604,7 @@ impl BlockLayout {
         min: Some(field_at(FloatLayout::F16, 2)),
         min_multiplier: -1,
         scale_runs: None,
-        sub: Some(k4_sub_blocks()),
+        sub: Some(k4_sub_blocks(Some(SubSearch::Q4_K))),
     };
     pub const Q5_K: Self = Self {
         elements: 256,
@@ -578,7 +624,7 @@ impl BlockLayout {
         min: Some(field_at(FloatLayout::F16, 2)),
         min_multiplier: -1,
         scale_runs: None,
-        sub: Some(k4_sub_blocks()),
+        sub: Some(k4_sub_blocks(None)),
     };
     pub const Q6_K: Self = Self {
         elements: 256,
@@ -605,6 +651,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 16,
             scale_multiplier: 1,
+            search: None,
             scale: coded(
                 FloatLayout::INT8,
                 plane(8, 1536, [digit(16, 8), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
@@ -679,6 +726,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 8,
             scale_multiplier: 1,
+            search: None,
             scale: coded(
                 FloatLayout::UINT6,
                 plane(4, 32, [digit(2, 4), digit(4, 8), NO_DIGIT, NO_DIGIT]),
@@ -711,6 +759,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 8,
             scale_multiplier: 2,
+            search: None,
             scale: coded(
                 FloatLayout::UINT4,
                 plane(4, 848, [digit(2, 4), digit(4, 8), NO_DIGIT, NO_DIGIT]),
@@ -746,6 +795,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 8,
             scale_multiplier: 2,
+            search: None,
             scale: coded(
                 FloatLayout::UINT4,
                 plane(4, 76, [digit(8, 64), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
@@ -784,6 +834,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 16,
             scale_multiplier: 2,
+            search: None,
             scale: coded(
                 FloatLayout::UINT4,
                 plane(4, 592, [digit(16, 4), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
@@ -818,6 +869,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 16,
             scale_multiplier: 2,
+            search: None,
             scale: coded(
                 FloatLayout::UINT4,
                 plane(4, 528, [digit(16, 4), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
@@ -855,6 +907,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 8,
             scale_multiplier: 2,
+            search: None,
             scale: coded(
                 FloatLayout::UINT4,
                 plane(4, 556, [digit(8, 32), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
@@ -892,6 +945,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 8,
             scale_multiplier: 2,
+            search: None,
             scale: coded(
                 FloatLayout::UINT3,
                 plane(3, 284, [digit(8, 16), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
@@ -934,6 +988,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 16,
             scale_multiplier: 2,
+            search: None,
             scale: coded(
                 FloatLayout::UINT3,
                 plane(3, 384, [digit(2, 3), digit(2, 6), digit(4, 16), NO_DIGIT]),

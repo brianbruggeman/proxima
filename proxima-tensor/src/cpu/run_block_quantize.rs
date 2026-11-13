@@ -333,7 +333,7 @@ mod tests {
     fn sub_block_layouts_are_a_typed_error() {
         // TQ1_0 is not here: it has neither a sub-block nor a stored min, and its base-3 packing
         // encodes through the shared writer now (proxima-numeric pins that split per format)
-        let refused = [BlockLayout::Q4_K, BlockLayout::Q6_K];
+        let refused = [BlockLayout::Q5_K, BlockLayout::Q6_K];
         for layout in refused {
             let error =
                 encode(&layout, &inputs(&layout, 7)).expect_err("sub-block scales are not fitted");

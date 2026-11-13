@@ -40,6 +40,7 @@ use crate::float_layout::FloatLayout;
 use crate::float_layout_codec;
 use crate::format::{LevelTable, NumericFormat};
 use crate::format_codec::FormatCodec;
+use crate::two_level::encode_two_level;
 
 const MAX_CODE_BITS: u8 = 12;
 const SUM_BYTES: usize = 2;
@@ -199,7 +200,7 @@ fn put_bits(plane: &Plane, cursor: &mut PlaneCursor, bits: u32, block: &mut [u8]
     cursor.advance();
 }
 
-fn put_bits_at(width: u8, at: usize, bits: u32, block: &mut [u8]) {
+pub(crate) fn put_bits_at(width: u8, at: usize, bits: u32, block: &mut [u8]) {
     let mask = (1u32 << width) - 1;
     let mut value = bits & mask;
     let mut address = at;
@@ -219,7 +220,7 @@ fn put_bits_at(width: u8, at: usize, bits: u32, block: &mut [u8]) {
     }
 }
 
-fn cursors_of(layout: &BlockLayout) -> [PlaneCursor; 2] {
+pub(crate) fn cursors_of(layout: &BlockLayout) -> [PlaneCursor; 2] {
     let mut cursors = [layout.element.low.cursor(), layout.element.low.cursor()];
     if let Some(high) = &layout.element.high {
         cursors[1] = high.cursor();
@@ -227,7 +228,7 @@ fn cursors_of(layout: &BlockLayout) -> [PlaneCursor; 2] {
     cursors
 }
 
-fn put_code(layout: &BlockLayout, cursors: &mut [PlaneCursor; 2], raw: u32, block: &mut [u8]) {
+pub(crate) fn put_code(layout: &BlockLayout, cursors: &mut [PlaneCursor; 2], raw: u32, block: &mut [u8]) {
     let element = &layout.element;
     put_bits(&element.low, &mut cursors[0], raw, block);
     if let Some(high) = &element.high {
@@ -496,7 +497,7 @@ fn quantize_coded_block(
     Ok(())
 }
 
-fn format_of(layout: &BlockLayout) -> &'static str {
+pub(crate) fn format_of(layout: &BlockLayout) -> &'static str {
     NumericFormat::ALL
         .iter()
         .find(|format| format.block_layout().as_ref() == Some(layout))
@@ -607,6 +608,12 @@ pub fn encode_blocks(
         NumericFormat::Scalar(layout) => encode_scalar_blocks(format, layout, values, out),
         NumericFormat::Block(layout) => {
             let (elements, block_bytes, block_count) = packed_geometry(format, values, out)?;
+            if let Some(rule) = layout.encode_rule().filter(|rule| rule.sub.is_some()) {
+                for (group, block) in values.chunks(elements).zip(out.chunks_mut(block_bytes)) {
+                    encode_two_level(layout, &rule, group, block)?;
+                }
+                return Ok(block_count);
+            }
             let shape = linear(layout).map_err(|reason| NumericError::UnsupportedEncode {
                 format: format.name().unwrap_or("block"),
                 reason,
@@ -937,7 +944,7 @@ mod tests {
         assert_eq!(
             refused,
             [
-                "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "iq1_s", "iq1_m",
+                "q2_k", "q3_k", "q5_k", "q6_k", "iq1_s", "iq1_m",
                 "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "iq3_s", "iq4_xs",
             ],
             "pinned: the formats a shared scale cannot express"
@@ -947,7 +954,7 @@ mod tests {
             NumericFormat::ALL.len(),
             "pinned: every format is classified"
         );
-        assert_eq!(encodable.len(), 23, "pinned: formats with an encoder");
+        assert_eq!(encodable.len(), 24, "pinned: formats with an encoder");
     }
 
     fn oracle_block() -> std::vec::Vec<f32> {
