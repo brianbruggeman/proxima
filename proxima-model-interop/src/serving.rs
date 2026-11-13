@@ -171,8 +171,9 @@ pub const DEFAULT_RESIDENT_KV_BYTES: usize = 512 * 1024 * 1024;
 /// [`ServingConfig::default`]'s `kv_cache_key_quant` and `kv_cache_value_quant`: llama.cpp's own
 /// `-ctk`/`-ctv` default, binary16. Measured on flint (`proxnum100/grid`, 128 tokens at 84, 510,
 /// 2024 and 4069 prompt tokens): generated ids identical to a binary32 cache in all four cells. A
-/// build with no cached-attention kernel keeps binary32, because
-/// `kv_cache_format::admit_pair` refuses a narrow cache there.
+/// build with no cached-attention kernel keeps binary32 because its cache is the graph's own
+/// output; `kv_cache_format::admit_pair` there admits any format that encodes, and the host
+/// rounds each row through the format's codec at the write.
 #[cfg(feature = "gpu")]
 pub const DEFAULT_KV_CACHE_FORMAT: NumericFormat = NumericFormat::Float16;
 
@@ -1716,28 +1717,62 @@ mod tests {
             .expect("ServingConfig::default() must pass apply_serving_config");
     }
 
-    /// The paired control: admission still refuses what it must, so the
-    /// default cannot pass by loosening the check. `Q4_0` KV and a second
-    /// parallel sequence are both unimplemented and must stay refused.
+    /// A second parallel sequence is unimplemented and is refused in every build.
     #[test]
-    fn serving_default_admission_rejects_the_controls() {
+    fn serving_refuses_two_parallel_sequences() {
         let two_sequences = ServingConfig {
             parallel_sequences: 2,
             ..ServingConfig::default()
         };
+
+        let sequences_error = apply_serving_config(&two_sequences, 1)
+            .expect_err("parallel_sequences=2 must be rejected");
+
+        assert!(sequences_error.to_string().contains("parallel_sequences"));
+    }
+
+    /// With the cached-attention kernel, a Q4_0 key beside an f32 value is a pair the kernel does not read.
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn serving_refuses_a_q4_0_key_beside_an_f32_value_when_the_kernel_reads_no_such_pair() {
         let q4_0_keys = ServingConfig {
             kv_cache_key_quant: NumericFormat::Q4_0,
             kv_cache_value_quant: NumericFormat::Float32,
             ..ServingConfig::default()
         };
 
-        let sequences_error = apply_serving_config(&two_sequences, 1)
-            .expect_err("parallel_sequences=2 must be rejected");
         let quant_error =
             apply_serving_config(&q4_0_keys, 1).expect_err("Q4_0 key cache must be rejected");
 
-        assert!(sequences_error.to_string().contains("parallel_sequences"));
         assert!(quant_error.to_string().contains("kv_cache_key_quant"));
+    }
+
+    /// The host reader rounds each row through the format's codec, so a Q4_0 key beside an f32 value is admitted.
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn serving_admits_a_q4_0_key_beside_an_f32_value_on_the_host_reader() {
+        let q4_0_keys = ServingConfig {
+            kv_cache_key_quant: NumericFormat::Q4_0,
+            kv_cache_value_quant: NumericFormat::Float32,
+            ..ServingConfig::default()
+        };
+
+        apply_serving_config(&q4_0_keys, 1).expect("the host reader admits any format that encodes");
+    }
+
+    /// A format with no codec (Q2_K) cannot be rounded on write, so the host reader refuses it naming the key.
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn serving_refuses_a_format_with_no_encoding_codec_on_the_host_reader() {
+        let q2_k_keys = ServingConfig {
+            kv_cache_key_quant: NumericFormat::Q2K,
+            kv_cache_value_quant: NumericFormat::Q2K,
+            ..ServingConfig::default()
+        };
+
+        let error = apply_serving_config(&q2_k_keys, 1).expect_err("Q2_K has no codec that encodes");
+
+        assert!(error.to_string().contains("kv_cache_key_quant"), "{error}");
     }
 
     /// llama-server's `-ctk f16 -ctv f16` (its default) is admitted as a pair
@@ -1754,29 +1789,26 @@ mod tests {
         apply_serving_config(&f16_pair, 1).expect("an f16 key and value cache is admitted");
     }
 
-    /// A build with no kernel that reads a narrow cache refuses it at config
-    /// time rather than failing mid-decode.
+    /// A build with no cached-attention kernel reads the cache on the host,
+    /// rounding each row through the format's codec at the write.
     #[cfg(not(feature = "gpu"))]
     #[test]
-    fn serving_refuses_an_f16_cache_when_no_kernel_reads_it() {
+    fn serving_admits_a_narrow_cache_on_the_host_reader() {
         let f16_pair = ServingConfig {
             kv_cache_key_quant: NumericFormat::Float16,
             kv_cache_value_quant: NumericFormat::Float16,
             ..ServingConfig::default()
         };
 
-        let error = apply_serving_config(&f16_pair, 1).expect_err("no kernel reads an f16 cache");
-
-        let message = error.to_string();
-        assert!(message.contains("kv_cache_key_quant"), "{message}");
-        assert!(message.contains("no cached-attention kernel that reads a narrow cache"), "{message}");
+        apply_serving_config(&f16_pair, 1).expect("the host reader admits an f16 cache");
     }
 
-    /// A narrow K beside a plain f32 V is refused: the only mixed pair the
+    /// A narrow K beside a plain f32 V is refused with the kernel: the only mixed pair the
     /// decode kernel reads is a block K beside a narrow (f16, bf16, bf8) V
     /// (`kv_cache_format::admit_pair`).
+    #[cfg(feature = "gpu")]
     #[test]
-    fn serving_refuses_a_mixed_f16_f32_pair() {
+    fn serving_refuses_a_mixed_f16_f32_pair_when_the_kernel_reads_no_such_pair() {
         let mixed_pair = ServingConfig {
             kv_cache_key_quant: NumericFormat::Float16,
             kv_cache_value_quant: NumericFormat::Float32,
@@ -1787,6 +1819,19 @@ mod tests {
             .expect_err("an f16 key with an f32 value cache must be refused");
 
         assert!(mixed_error.to_string().contains("kv_cache_value_quant"));
+    }
+
+    /// The host reader rounds each side independently, so a mixed f16 key and f32 value is admitted.
+    #[cfg(not(feature = "gpu"))]
+    #[test]
+    fn serving_admits_a_mixed_f16_f32_pair_on_the_host_reader() {
+        let mixed_pair = ServingConfig {
+            kv_cache_key_quant: NumericFormat::Float16,
+            kv_cache_value_quant: NumericFormat::Float32,
+            ..ServingConfig::default()
+        };
+
+        apply_serving_config(&mixed_pair, 1).expect("the host reader admits an f16 key beside an f32 value");
     }
 
     #[cfg(feature = "gpu")]
