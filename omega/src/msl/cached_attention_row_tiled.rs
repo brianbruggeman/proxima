@@ -24,6 +24,17 @@ inline void omega_bf8_load_matrix(thread simdgroup_float8x8& destination, device
     }
 }
 inline simdgroup_float8x8 omega_widen_fragment(simdgroup_half8x8 narrow) { simdgroup_float8x8 wide; wide.thread_elements()[0] = float(narrow.thread_elements()[0]); wide.thread_elements()[1] = float(narrow.thread_elements()[1]); return wide; }
+inline float omega_key_scalar(device const float* source) { return *source; }
+inline float omega_key_scalar(device const half* source) { return float(*source); }
+inline float omega_key_scalar(device const ushort* source) { return omega_bf16_to_float(*source); }
+inline float omega_key_scalar(device const uchar* source) { return omega_bf8_to_float(*source); }
+template <typename Matrix, typename Source>
+inline void omega_load_key_matrix(thread Matrix& destination, device const Source* source, ulong stride, ushort lane, long rows_left) {
+    short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
+    long last_key = max(rows_left - 1L, 0L);
+    destination.thread_elements()[0] = omega_key_scalar(source + min((long)column, last_key) * (long)stride + row);
+    destination.thread_elements()[1] = omega_key_scalar(source + min((long)column + 1L, last_key) * (long)stride + row);
+}
 inline void omega_zero_padded_value_rows(thread simdgroup_float8x8& value, long key_start, long valid_end, ushort lane) {
     short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4));
     if (key_start + row >= valid_end) {
@@ -574,6 +585,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                     if (key_tile < fragments) {
                         device const float* key_even_ptr = key_even + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
                         device const float* key_odd_ptr = key_odd + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim;
+                        long key_rows_left = (mode == 0L ? slice_end : mma_end) - (key0 + (long)key_tile * 8L);
                         FOR_UNROLL for (int step_index = 0; step_index < (int)depth_unroll; step_index++) {
                             if (prefetch_next_block && mode == 0L && step > 0L) {
                                 long fragment_offset = ((long)key_tile * (half_dim / 8L) + (depth / 8L) + step_index) * 64L;
@@ -583,30 +595,51 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                                 device const ushort* cached_even = (device const ushort*)in2 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
                                 device const ushort* cached_odd = (device const ushort*)in3 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
                                 simdgroup_float8x8 even_float; simdgroup_float8x8 odd_float;
-                                omega_bf16_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
-                                omega_bf16_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                                if (key_rows_left >= 8L) {
+                                    omega_bf16_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
+                                    omega_bf16_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                                } else {
+                                    omega_load_key_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, key_rows_left);
+                                    omega_load_key_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, key_rows_left);
+                                }
                                 key_even_tile[group][step_index] = @NARROW_TO_OPERAND_EVEN@;
                                 key_odd_tile[group][step_index] = @NARROW_TO_OPERAND_ODD@;
                             } else if (@F16_CACHE@ && mode == 0L) {
                                 device const half* cached_even = (device const half*)in2 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
                                 device const half* cached_odd = (device const half*)in3 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
-                                simdgroup_half8x8 even_half; simdgroup_half8x8 odd_half;
-                                simdgroup_load(even_half, cached_even, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
-                                simdgroup_load(odd_half, cached_odd, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
-                                simdgroup_float8x8 even_float = omega_widen_fragment(even_half); simdgroup_float8x8 odd_float = omega_widen_fragment(odd_half);
+                                simdgroup_float8x8 even_float; simdgroup_float8x8 odd_float;
+                                if (key_rows_left >= 8L) {
+                                    simdgroup_half8x8 even_half; simdgroup_half8x8 odd_half;
+                                    simdgroup_load(even_half, cached_even, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                                    simdgroup_load(odd_half, cached_odd, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                                    even_float = omega_widen_fragment(even_half); odd_float = omega_widen_fragment(odd_half);
+                                } else {
+                                    omega_load_key_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, key_rows_left);
+                                    omega_load_key_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, key_rows_left);
+                                }
                                 key_even_tile[group][step_index] = @NARROW_TO_OPERAND_EVEN@;
                                 key_odd_tile[group][step_index] = @NARROW_TO_OPERAND_ODD@;
                             } else if (@BF8_CACHE@ && mode == 0L) {
                                 device const uchar* cached_even = (device const uchar*)in2 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
                                 device const uchar* cached_odd = (device const uchar*)in3 + (key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth + 8 * step_index;
                                 simdgroup_float8x8 even_float; simdgroup_float8x8 odd_float;
-                                omega_bf8_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
-                                omega_bf8_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                                if (key_rows_left >= 8L) {
+                                    omega_bf8_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
+                                    omega_bf8_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                                } else {
+                                    omega_load_key_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, key_rows_left);
+                                    omega_load_key_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, key_rows_left);
+                                }
                                 key_even_tile[group][step_index] = @NARROW_TO_OPERAND_EVEN@;
                                 key_odd_tile[group][step_index] = @NARROW_TO_OPERAND_ODD@;
                             } else {
-                                simdgroup_load(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
-                                simdgroup_load(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                                if (key_rows_left >= 8L) {
+                                    simdgroup_load(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                                    simdgroup_load(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                                } else {
+                                    omega_load_key_matrix(key_even_tile[group][step_index], key_even_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), lane, key_rows_left);
+                                    omega_load_key_matrix(key_odd_tile[group][step_index], key_odd_ptr + depth + 8 * step_index, (ulong)(kv_heads * half_dim), lane, key_rows_left);
+                                }
                             }
                         }
                     }
@@ -938,6 +971,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                 int key_tile = fragment_index / depth_fragments;
                 int depth_tile = fragment_index % depth_fragments;
                 long fragment_offset = (long)fragment_index * 64L;
+                long next_rows_left = slice_end - (next_key0 + (long)key_tile * 8L);
                 device const float* key_even_ptr = (device const float*)in2 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
                 device const float* key_odd_ptr = (device const float*)in3 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
                 simdgroup_float8x8 even_float;
@@ -945,16 +979,29 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
                 if (@BF16_CACHE@) {
                     device const ushort* cached_even = (device const ushort*)in2 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
                     device const ushort* cached_odd = (device const ushort*)in3 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
-                    omega_bf16_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
-                    omega_bf16_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                    if (next_rows_left >= 8L) {
+                        omega_bf16_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
+                        omega_bf16_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                    } else {
+                        omega_load_key_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, next_rows_left);
+                        omega_load_key_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, next_rows_left);
+                    }
                 } else if (@BF8_CACHE@) {
                     device const uchar* cached_even = (device const uchar*)in2 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
                     device const uchar* cached_odd = (device const uchar*)in3 + (next_key0 + (long)key_tile * 8L) * (kv_heads * half_dim) + kv_head * half_dim + depth_tile * 8L;
-                    omega_bf8_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
-                    omega_bf8_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
-                } else {
+                    if (next_rows_left >= 8L) {
+                        omega_bf8_load_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, true);
+                        omega_bf8_load_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, true);
+                    } else {
+                        omega_load_key_matrix(even_float, cached_even, (ulong)(kv_heads * half_dim), lane, next_rows_left);
+                        omega_load_key_matrix(odd_float, cached_odd, (ulong)(kv_heads * half_dim), lane, next_rows_left);
+                    }
+                } else if (next_rows_left >= 8L) {
                     simdgroup_load(even_float, key_even_ptr, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
                     simdgroup_load(odd_float, key_odd_ptr, (ulong)(kv_heads * half_dim), ulong2(0, 0), true);
+                } else {
+                    omega_load_key_matrix(even_float, key_even_ptr, (ulong)(kv_heads * half_dim), lane, next_rows_left);
+                    omega_load_key_matrix(odd_float, key_odd_ptr, (ulong)(kv_heads * half_dim), lane, next_rows_left);
                 }
                 @OPERAND@ even_operand = @NARROW_TO_OPERAND_EVEN@;
                 @OPERAND@ odd_operand = @NARROW_TO_OPERAND_ODD@;
