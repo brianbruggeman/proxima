@@ -85,6 +85,10 @@ fn schedule(attention_sinks: bool, window: Option<u32>) -> Vec<LayerSchedule> {
 }
 
 fn fixture(rows: u64, window: Option<u32>, attention_sinks: bool) -> Fixture {
+    fixture_with_cache(rows, CACHED_LEN, window, attention_sinks)
+}
+
+fn fixture_with_cache(rows: u64, cached_len: u64, window: Option<u32>, attention_sinks: bool) -> Fixture {
     let (program, logits, cache_roots, _moe_sites, _head_repeats) =
         scheduled_two_range_cached_forward_program_with_experts(
             VOCAB,
@@ -109,7 +113,7 @@ fn fixture(rows: u64, window: Option<u32>, attention_sinks: bool) -> Fixture {
     for (even, odd, value) in &cache_roots {
         roots.extend([*even, *odd, *value]);
     }
-    let symbols = vec![rows, CACHED_LEN];
+    let symbols = vec![rows, cached_len];
     let shapes = infer(&program, &symbols).expect("the prefill program infers");
     let mut named = Vec::new();
     for (position, op) in program.iter().enumerate() {
@@ -123,7 +127,7 @@ fn fixture(rows: u64, window: Option<u32>, attention_sinks: bool) -> Fixture {
         let data = match name.as_str() {
             "ids" => (0..count).map(|index| (index % VOCAB as usize) as f32).collect(),
             "eps" => vec![1e-5f32; count],
-            "cached_len" => vec![CACHED_LEN as f32],
+            "cached_len" => vec![cached_len as f32],
             _ if name.ends_with(".attn_sinks.weight") => random_vec(position as u64 + 1, count)
                 .into_iter()
                 .map(|value| value * 4.0)
@@ -211,6 +215,29 @@ fn the_sink_row_tiled_form_holds_parity_with_the_cpu_evaluator_across_prompt_wid
         }
     }
     assert_eq!(cells, 6, "3 prompt widths x 2 window schedules");
+}
+
+#[test]
+fn the_sink_row_tiled_form_masks_a_partial_last_key_tile_when_the_cache_is_not_a_multiple_of_eight() {
+    let cells: [(u64, u64, Option<u32>); 5] = [
+        (84, 513, None),
+        (84, 9, None),
+        (84, 7, None),
+        (84, 1, None),
+        (84, 513, Some(128)),
+    ];
+    for (rows, cached_len, window) in cells {
+        let cell = format!("rows {rows} cached_len {cached_len} window {window:?}");
+        let fixture = fixture_with_cache(rows, cached_len, window, true);
+        assert_sink_kernels(&fixture, &cell);
+        let (expected, actual) = metal_and_cpu(&fixture, &fixture.named);
+        assert_finite(&expected, "cpu root");
+        assert_finite(&actual, "metal root");
+        assert_eq!(actual.len(), expected.len());
+        let relative = max_relative(&expected, &actual);
+        eprintln!("sink row_tiled partial tile parity: {cell} relative={relative}");
+        assert!(relative < 1e-4, "{cell}: metal disagrees with cpu: relative={relative}");
+    }
 }
 
 #[test]

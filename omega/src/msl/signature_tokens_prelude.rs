@@ -2929,7 +2929,6 @@ fn row_tiled_form(
         && rotary_dim == head_dim
         && head_dim.is_multiple_of(16)
         && head_dim.is_multiple_of(8 * simdgroups)
-        && cached_key_rows.is_multiple_of(8)
         && (row_tiled_block(*head_dim) / 8).is_multiple_of(simdgroups)
         && tile_unit_fragments_for(*query_groups, *head_dim, simdgroups)
             <= crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS

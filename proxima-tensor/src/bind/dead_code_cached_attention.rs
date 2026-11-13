@@ -1501,7 +1501,7 @@ pub(super) fn cached_attention_candidates(
             // whole float4 lanes, the split-merge policy); every other shape stays unfused rather
             // than bind an op no kernel can render. The CPU executors take any shape.
             #[cfg(feature = "metal-attn-split-rows")]
-            let row_tiled_admits_rows = query_shape[0] >= 2 && cached_key_shape[0].is_multiple_of(8);
+            let row_tiled_admits_rows = query_shape[0] >= 2;
             #[cfg(not(feature = "metal-attn-split-rows"))]
             let row_tiled_admits_rows = false;
             if attention_sink_term.is_some()
