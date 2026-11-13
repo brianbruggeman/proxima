@@ -1,6 +1,8 @@
 use super::*;
 #[cfg(feature = "instrument")]
 use objc2_metal::MTLBlitCommandEncoder;
+#[cfg(feature = "instrument")]
+use objc2_metal::MTLResource;
 use proxima_numeric::float_layout::FloatLayout;
 #[cfg(feature = "instrument")]
 use std::borrow::Borrow;
@@ -1340,10 +1342,8 @@ fn capture_dispatch(
     chunk_index: usize,
     uniforms: &MetalBuffer,
     prepass: Option<(&ResolvedPrepass, &MetalBuffer, Option<NodeId>)>,
-) {
-    let Some(wanted) = std::env::var("PROXIMA_CAPTURE_NODES").ok() else {
-        return;
-    };
+) -> Option<CaptureCopy> {
+    let wanted = std::env::var("PROXIMA_CAPTURE_NODES").ok()?;
     let output_only = wanted.trim() == "packed-multi-token";
     let route_prepass_only = wanted.trim() == "route-prepass";
     let matched = wanted.trim() == "all"
@@ -1354,7 +1354,7 @@ fn capture_dispatch(
             .filter_map(|token| token.trim().parse::<u32>().ok())
             .any(|node| node == bound.node.0);
     if !matched {
-        return;
+        return None;
     }
     let step = CAPTURE_STEP.load(core::sync::atomic::Ordering::Relaxed);
     // `PROXIMA_CAPTURE_STEPS=<comma list>`, default (unset) every step --
@@ -1366,7 +1366,7 @@ fn capture_dispatch(
             .filter_map(|token| token.trim().parse::<u64>().ok())
             .any(|wanted_step| wanted_step == step);
         if !step_matched {
-            return;
+            return None;
         }
     }
     let operand_records: Vec<String> = bound
@@ -1446,6 +1446,9 @@ fn capture_dispatch(
     };
     let mut buffers = Vec::new();
     let mut dump_buffers = Vec::new();
+    let mut output_source = None;
+    let mut capture_copy = None;
+    let dump_requested = std::env::var_os("PROXIMA_CAPTURE_DUMP_DIR").is_some();
     for (index, binding) in bindings.iter().enumerate() {
         let resolved: Option<(MetalBuffer, usize)> = match binding {
             Binding::Input(node) | Binding::Indices(node) => device_buffers.get(node).cloned(),
@@ -1461,13 +1464,23 @@ fn capture_dispatch(
             // keeps the dump small: only the output, never the resident
             // weight/activation inputs a substitution pass never re-reads.
             if !output_only || matches!(binding, Binding::Output(_)) {
-                dump_buffers.push((index, buffer, offset));
+                let snapshot = (dump_requested && matches!(binding, Binding::Output(_)))
+                    .then(|| output_snapshot(bound, index, &buffer, offset))
+                    .flatten();
+                match snapshot {
+                    Some((copy, source)) => {
+                        dump_buffers.push((index, copy.destination.clone(), 0));
+                        output_source = Some(source);
+                        capture_copy = Some(copy);
+                    }
+                    None => dump_buffers.push((index, buffer, offset)),
+                }
             }
         } else {
             buffers.push(format!("({index}, unresolved, 0, 0)"));
         }
     }
-    if std::env::var_os("PROXIMA_CAPTURE_DUMP_DIR").is_some() {
+    if dump_requested {
         CAPTURE_DUMP_PENDING.with(|pending| {
             pending.borrow_mut().push(CaptureDumpEntry {
                 step,
@@ -1488,6 +1501,7 @@ fn capture_dispatch(
                 dtype: format!("{:?}", bound.dtype),
                 extents: format!("{:?}", bound.extents),
                 buffers: dump_buffers,
+                output_source,
                 uniforms: (uniforms.clone(), uniforms.length()),
                 manifest: output_only,
             });
@@ -1601,6 +1615,127 @@ fn capture_dispatch(
         buffers = %buffers.join(", "),
         "dispatch_capture"
     );
+    capture_copy
+}
+
+/// An output binding copied at dispatch time: the arena slot `source` is
+/// reused by later ops before the command buffer completes, so the dump reads
+/// `destination`, filled right after this node's dispatch.
+#[cfg(feature = "instrument")]
+pub(super) struct CaptureCopy {
+    source: MetalBuffer,
+    source_offset: usize,
+    destination: MetalBuffer,
+    bytes: usize,
+}
+
+/// Where a snapshotted output binding lived, for the dump's name and meta.
+#[cfg(feature = "instrument")]
+pub(super) struct OutputSource {
+    binding: usize,
+    offset: usize,
+    elements: usize,
+}
+
+#[cfg(feature = "instrument")]
+fn output_snapshot(
+    bound: &BoundOp,
+    binding: usize,
+    buffer: &MetalBuffer,
+    offset: usize,
+) -> Option<(CaptureCopy, OutputSource)> {
+    let elements = bound_output_len(bound).max(1);
+    let bytes = (elements * device_element_bytes(bound.dtype)).min(buffer.length().saturating_sub(offset));
+    let destination = buffer
+        .device()
+        .newBufferWithLength_options(bytes.max(4), MTLResourceOptions::StorageModeShared)?;
+    Some((
+        CaptureCopy {
+            source: buffer.clone(),
+            source_offset: offset,
+            destination,
+            bytes,
+        },
+        OutputSource {
+            binding,
+            offset,
+            elements,
+        },
+    ))
+}
+
+#[cfg(feature = "instrument")]
+const CAPTURE_COPY_SOURCE: &str = "#include <metal_stdlib>\nusing namespace metal;\nkernel void capture_copy(device const uchar* source [[buffer(0)]], device uchar* destination [[buffer(1)]], uint gid [[thread_position_in_grid]]) { destination[gid] = source[gid]; }\n";
+
+#[cfg(feature = "instrument")]
+thread_local! {
+    static CAPTURE_COPY_PIPELINE: RefCell<Option<Retained<ProtocolObject<dyn MTLComputePipelineState>>>> = const { RefCell::new(None) };
+}
+
+#[cfg(feature = "instrument")]
+fn capture_copy_pipeline(
+    device: &ProtocolObject<dyn MTLDevice>,
+) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
+    if let Some(pipeline) = CAPTURE_COPY_PIPELINE.with(|slot| slot.borrow().clone()) {
+        return Ok(pipeline);
+    }
+    let compile_error = |log: String| MetalError::CompileFailed { log };
+    let library = device
+        .newLibraryWithSource_options_error(
+            &NSString::from_str(CAPTURE_COPY_SOURCE),
+            Some(&MTLCompileOptions::new()),
+        )
+        .map_err(|error| compile_error(error.localizedDescription().to_string()))?;
+    let function = library
+        .newFunctionWithName(&NSString::from_str("capture_copy"))
+        .ok_or_else(|| compile_error("capture_copy entry missing".to_string()))?;
+    let pipeline = device
+        .newComputePipelineStateWithFunction_error(&function)
+        .map_err(|error| compile_error(error.localizedDescription().to_string()))?;
+    CAPTURE_COPY_PIPELINE.with(|slot| *slot.borrow_mut() = Some(pipeline.clone()));
+    Ok(pipeline)
+}
+
+/// Encodes `copy` into the dispatch's own encoder, right after the node's
+/// dispatch: command order makes the copy read the value at dispatch time.
+/// Buffer barriers on both sides keep it ordered under concurrent dispatch
+/// too (before: sees the node's write; after: no later op overwrites the slot
+/// until the copy read it), so the hazard tracker is reset behind them.
+#[cfg(feature = "instrument")]
+fn encode_capture_copy(
+    encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
+    copy: &CaptureCopy,
+    hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
+) -> Result<(), MetalError> {
+    if copy.bytes == 0 {
+        return Ok(());
+    }
+    let pipeline = capture_copy_pipeline(&copy.source.device())?;
+    encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+    encoder.setComputePipelineState(&pipeline);
+    // SAFETY: both buffers are live shared buffers; `bytes` fits the source past its offset and the destination.
+    unsafe {
+        encoder.setBuffer_offset_atIndex(Some(&copy.source), copy.source_offset, 0);
+        encoder.setBuffer_offset_atIndex(Some(&copy.destination), 0, 1);
+    }
+    let width = pipeline.maxTotalThreadsPerThreadgroup().min(copy.bytes).max(1);
+    encoder.dispatchThreads_threadsPerThreadgroup(
+        MTLSize {
+            width: copy.bytes,
+            height: 1,
+            depth: 1,
+        },
+        MTLSize {
+            width,
+            height: 1,
+            depth: 1,
+        },
+    );
+    encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+    if let Some(tracker) = hazard {
+        tracker.reset();
+    }
+    Ok(())
 }
 
 /// One [`capture_dispatch`] match under `PROXIMA_CAPTURE_DUMP_DIR`, held
@@ -1628,6 +1763,9 @@ pub(super) struct CaptureDumpEntry {
     /// length)`, just holding the live buffer handle instead of formatting
     /// it away.
     buffers: Vec<(usize, MetalBuffer, usize)>,
+    /// set when the output binding in `buffers` is the dispatch-time snapshot
+    /// rather than the live (reusable) slot.
+    output_source: Option<OutputSource>,
     uniforms: (MetalBuffer, usize),
     /// `true` under `PROXIMA_CAPTURE_NODES=packed-multi-token`: also append
     /// this node to `manifest.txt` at flush time.
@@ -1684,17 +1822,23 @@ pub(super) fn flush_pending_capture_dumps() {
         const CAPTURE_DUMP_MAX_BYTES: usize = 64 * 1024 * 1024;
         let mut buffer_records = Vec::with_capacity(entry.buffers.len());
         let mut manifest_row: Option<(usize, String)> = None;
-        for (index, buffer, offset) in &entry.buffers {
+        for (index, buffer, read_offset) in &entry.buffers {
+            let snapshot = entry
+                .output_source
+                .as_ref()
+                .filter(|source| source.binding == *index);
             let length = buffer
                 .length()
-                .saturating_sub(*offset)
+                .saturating_sub(*read_offset)
                 .min(CAPTURE_DUMP_MAX_BYTES);
             let pointer = buffer.contents().as_ptr().cast::<u8>();
-            let bytes = unsafe { core::slice::from_raw_parts(pointer.add(*offset), length) };
+            let bytes = unsafe { core::slice::from_raw_parts(pointer.add(*read_offset), length) };
+            let offset = &snapshot.map_or(*read_offset, |source| source.offset);
             // step in the name: without it, a later step silently overwrites
             // an earlier step's dump of the same node.
+            let elements_note = snapshot.map_or(String::new(), |source| format!("_n{}", source.elements));
             let path = dir.join(format!(
-                "node{node}_step{step}_buf{index}_off{offset}_len{length}.bin"
+                "node{node}_step{step}_buf{index}_off{offset}_len{length}{elements_note}.bin"
             ));
             if let Err(err) = std::fs::write(&path, bytes) {
                 debug!(?err, path = ?path, "capture dump: failed to write buffer bytes");
@@ -1737,8 +1881,14 @@ pub(super) fn flush_pending_capture_dumps() {
             }
             uniforms_note = format!("node{node}_step{step}_uniforms_len{uniforms_len}.bin");
         }
+        let output_note = entry.output_source.as_ref().map_or(String::new(), |source| {
+            format!(
+                "output_binding={}\noutput_elements={}\n",
+                source.binding, source.elements
+            )
+        });
         let meta = format!(
-            "{}\nstep={}\nentry={}\nmsl_sha256={}\ndispatch={}\ngrid={:?}\nthreadgroup={:?}\ndtype={}\nextents={}\nbuffers=[{}]\nuniforms={uniforms_note}\n",
+            "{}\nstep={}\nentry={}\nmsl_sha256={}\ndispatch={}\ngrid={:?}\nthreadgroup={:?}\ndtype={}\nextents={}\nbuffers=[{}]\nuniforms={uniforms_note}\n{output_note}",
             entry.bound_op_line,
             entry.step,
             entry.entry,
@@ -4119,7 +4269,7 @@ pub(super) fn encode_op(
         None => None,
     };
     #[cfg(feature = "instrument")]
-    capture_dispatch(
+    let capture_copy = capture_dispatch(
         bound,
         packed_operands,
         &pipeline,
@@ -4143,6 +4293,10 @@ pub(super) fn encode_op(
             dispatch_indirect(encoder, &pipeline, grid, buffer, offset);
         }
         _ => dispatch(encoder, &pipeline, grid),
+    }
+    #[cfg(feature = "instrument")]
+    if let Some(copy) = &capture_copy {
+        encode_capture_copy(encoder, copy, hazard.as_deref_mut())?;
     }
     // Redesign §4c: the split kernel above wrote its partial into `scratch`
     // (its own `Binding::Scratch` slot, never `output`); this second
@@ -4206,7 +4360,7 @@ pub(super) fn encode_op(
             None,
         )?;
         #[cfg(feature = "instrument")]
-        capture_dispatch(
+        let merge_capture_copy = capture_dispatch(
             bound,
             packed_operands,
             &merge.pipeline,
@@ -4220,6 +4374,10 @@ pub(super) fn encode_op(
             None,
         );
         dispatch(encoder, &merge.pipeline, merge.grid);
+        #[cfg(feature = "instrument")]
+        if let Some(copy) = &merge_capture_copy {
+            encode_capture_copy(encoder, copy, hazard)?;
+        }
     }
     #[cfg(feature = "instrument")]
     {
