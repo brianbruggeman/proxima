@@ -1,0 +1,11 @@
+# llama: the three facts no checkpoint carries, keyed on general.architecture = "llama".
+# source: PROXNUM-424 design section 3 rows 21-23; llama.cpp rev f1ea20621.
+
+# NORM (adjacent pairs): src/llama-model.cpp:3018-3022 lists LLM_ARCH_LLAMA under LLAMA_ROPE_TYPE_NORM
+rope_layout = "adjacent"
+
+# LLM_FFN_SILU hardcoded in the graph: src/models/llama.cpp:194
+ffn_activation = "Silu"
+
+# no ggml_rms_norm(Vcur) anywhere in src/models/llama.cpp (only gemma4.cpp:256 has one)
+value_norm = false

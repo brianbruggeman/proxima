@@ -198,6 +198,13 @@ pub enum InteropError {
     #[error("family profile for {family:?} does not parse: {message}")]
     InvalidFamilyProfile { family: String, message: String },
 
+    /// `crate::arch_config::ArchConfig::load`: the architecture's runtime
+    /// config file is absent or lacks required fields. `field` names every
+    /// missing field, comma separated (`"rope_layout, ffn_activation"`). Never
+    /// defaulted: no checkpoint states these, so a guess changes every logit.
+    #[error("architecture {architecture:?} config is missing required field(s): {field}")]
+    MissingArchField { architecture: String, field: String },
+
     /// `crate::profiles::binding_profile`: an embedded binding file did not
     /// parse into `crate::profiles::BindingProfile`.
     #[error("binding profile for {family:?} does not parse: {message}")]
