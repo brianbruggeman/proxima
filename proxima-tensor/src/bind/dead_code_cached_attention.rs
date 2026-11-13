@@ -1486,15 +1486,17 @@ pub(super) fn cached_attention_candidates(
             }
             // a sink candidate never takes the softmax-weights arm (it needs the decode split form,
             // checked below), so the unity-scale proof of that arm does not bind it
-            if via_gemma_template && scale_value != 1.0 && attention_sink_term.is_none() {
-                #[cfg(feature = "instrument")]
+            // a non-unity scale only keeps the candidate off the softmax-weights arm (proven at
+            // unity only); it still fuses into the plain CachedAttention, which carries the scale
+            let softmax_weights_scale_unity = scale_value == 1.0;
+            #[cfg(feature = "instrument")]
+            if via_gemma_template && !softmax_weights_scale_unity {
                 debug!(
                     node = output.0,
                     stage = "softmax_weights_scale_not_unity",
                     scale_value,
-                    "cached_attention decline -- softmax-weights arm is proven at unity scale only"
+                    "cached_attention plain fusion -- softmax-weights arm is proven at unity scale only"
                 );
-                continue;
             }
             // the Metal renderers draw a sink in the decode split form alone (omega's
             // `decode_split_form` shape: one decode row, a bound cached range, a full-rotary head of
@@ -1525,7 +1527,8 @@ pub(super) fn cached_attention_candidates(
                 );
                 continue;
             }
-            softmax_weights_eligible = via_gemma_template && !split_decode_admitted;
+            softmax_weights_eligible =
+                via_gemma_template && !split_decode_admitted && softmax_weights_scale_unity;
         }
         let Some(rotary_width) = query_shape[3].checked_mul(2) else {
             continue;

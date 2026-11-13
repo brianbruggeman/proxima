@@ -314,6 +314,8 @@ mod recurrent_hf_tests;
 mod recurrent_mainline_tests;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod recurrent_metal_tests;
+#[cfg(all(test, feature = "metal", feature = "instrument", target_os = "macos"))]
+mod fused_recurrent_attention_tests;
 #[cfg(test)]
 mod recurrent_verify_tests;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
