@@ -1,0 +1,20 @@
+op_profile step=0 op_count=1003 total_gpu_ms=2678.585 operand_bytes=1122546611076
+op_profile_kind step=0 kind=cached_attention op_count=49 gpu_ms=354.384 operand_bytes=2222115140
+op_profile_kind step=0 kind=constant op_count=3 gpu_ms=0.033 operand_bytes=0
+op_profile_kind step=0 kind=elementwise op_count=58 gpu_ms=3.687 operand_bytes=1048990720
+op_profile_kind step=0 kind=elementwise_twin op_count=70 gpu_ms=8.137 operand_bytes=2683985920
+op_profile_kind step=0 kind=moe_topk op_count=47 gpu_ms=3.662 operand_bytes=194822144
+op_profile_kind step=0 kind=reduce-cooperative op_count=244 gpu_ms=378.856 operand_bytes=7767556096
+op_profile_kind step=0 kind=reduce-generic-scalar op_count=47 gpu_ms=21.351 operand_bytes=4678014528
+op_profile_kind step=0 kind=reduce-packed-row-blocked op_count=1 gpu_ms=1.047 operand_bytes=326721536
+op_profile_kind step=0 kind=reduce-tiled-gemm op_count=484 gpu_ms=1907.426 operand_bytes=1103624404992
+op_profile step=0 op_count=1003 total_gpu_ms=2676.361 operand_bytes=1122546611076
+op_profile_kind step=0 kind=cached_attention op_count=49 gpu_ms=353.033 operand_bytes=2222115140
+op_profile_kind step=0 kind=constant op_count=3 gpu_ms=0.031 operand_bytes=0
+op_profile_kind step=0 kind=elementwise op_count=58 gpu_ms=3.641 operand_bytes=1048990720
+op_profile_kind step=0 kind=elementwise_twin op_count=70 gpu_ms=8.149 operand_bytes=2683985920
+op_profile_kind step=0 kind=moe_topk op_count=47 gpu_ms=3.493 operand_bytes=194822144
+op_profile_kind step=0 kind=reduce-cooperative op_count=244 gpu_ms=378.892 operand_bytes=7767556096
+op_profile_kind step=0 kind=reduce-generic-scalar op_count=47 gpu_ms=21.349 operand_bytes=4678014528
+op_profile_kind step=0 kind=reduce-packed-row-blocked op_count=1 gpu_ms=1.076 operand_bytes=326721536
+op_profile_kind step=0 kind=reduce-tiled-gemm op_count=484 gpu_ms=1906.698 operand_bytes=1103624404992
