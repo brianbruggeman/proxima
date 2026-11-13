@@ -110,6 +110,12 @@ mod repeat_nodes;
 mod top_fraction_fusion;
 mod twin_elementwise;
 mod executes;
+mod activation_layout;
+mod activation_quantize;
+pub use activation_layout::{ACTIVATION_GROUP_ELEMENTS, Missing, is_int8_run_layout, quantize_rule_is_served};
+pub use activation_quantize::{
+    activation_is_flat, collapsed_extent, is_derived, quantize_op, repoint, underive_block_quantize,
+};
 pub use builder_compose_window::*;
 pub use executes::{ActivationLimits, DeviceLimits, DeviceMemory, Executes, Form, FormSet, Refusal};
 pub use cached_attention_epilogue_liveness::*;

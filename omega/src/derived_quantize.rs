@@ -4,20 +4,22 @@
 //! readers at it; every other reader keeps the f32 activation. The node's id is
 //! `program.len() + k`, so it never collides with a program node and never leaves the plan.
 
-use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::{DType, NumericFormat, NumericPolicy, NumericRewrite, admit};
-use proxima_tensor::{BoundOp, BoundOpKind, Keep, Layout, NodeId, Op, ScalarOp, Shapes};
+use proxima_tensor::{
+    ACTIVATION_GROUP_ELEMENTS, BoundOp, BoundOpKind, Keep, Missing, NodeId, Op, ScalarOp, Shapes, activation_is_flat,
+    collapsed_extent, quantize_op, repoint,
+};
 
 use crate::backend::GpuDriver;
-use crate::cuda::{Missing, consumer_missing, int8_gemm_serves, producer_missing, staged_matvec_serves};
+use crate::cuda::{consumer_missing, int8_gemm_serves, producer_missing, staged_matvec_serves};
 use crate::identity::operand_codecs;
 use crate::lowering::{Codec, PackedOperands};
 
 /// Elements per scale the default activation (the Q8_1 pair) needs the depth to fill.
-const DEFAULT_GROUP: u64 = 32;
+const DEFAULT_GROUP: u64 = ACTIVATION_GROUP_ELEMENTS;
 
 /// A configured activation storage format the plan cannot honour, and the render pieces it lacks.
 /// The plan refuses instead of quietly keeping the activation in binary32.
@@ -34,38 +36,6 @@ pub struct ActivationRefusal {
 struct Consumer {
     position: usize,
     slot: usize,
-}
-
-fn is_derived(bound: &BoundOp, program_len: usize) -> bool {
-    bound.node.0 as usize >= program_len && matches!(bound.kind, BoundOpKind::BlockQuantize { .. })
-}
-
-fn activation_is_flat(bound: &BoundOp, layout: &Layout, tokens: u64, depth: u64) -> bool {
-    let BoundOpKind::Reduce { output_axes, .. } = &bound.kind else {
-        return false;
-    };
-    let mut live: Vec<(i64, u16)> = (0..bound.extents.len() as u16)
-        .filter(|axis| layout.stride(*axis) != 0)
-        .map(|axis| (layout.stride(axis), axis))
-        .collect();
-    live.sort_by_key(|(stride, _)| Reverse(*stride));
-    let Some((&(token_stride, token_axis), depth_axes)) = live.split_first() else {
-        return false;
-    };
-    let dense_run = depth_axes.iter().rev().try_fold(1i64, |expected, (stride, axis)| {
-        (*stride == expected).then(|| expected * bound.extents[usize::from(*axis)] as i64)
-    });
-    layout.base == 0
-        && dense_run == Some(depth as i64)
-        && token_stride == depth as i64
-        && bound.extents[usize::from(token_axis)] == tokens
-        && output_axes.contains(&token_axis)
-        && depth_axes.iter().all(|(_, axis)| !output_axes.contains(axis))
-}
-
-fn collapsed_extent(shape: &[u64]) -> Option<[u64; 2]> {
-    let (tokens, trailing) = shape.split_first()?;
-    (!trailing.is_empty()).then(|| [*tokens, trailing.iter().product()])
 }
 
 fn gemm_activation(
@@ -144,38 +114,6 @@ fn storage_refusal(format: NumericFormat) -> Option<ActivationRefusal> {
     (producer.is_some() || consumer.is_some()).then_some(ActivationRefusal { format, producer, consumer })
 }
 
-fn quantize_op(
-    derived: NodeId,
-    activation: NodeId,
-    extent: [u64; 2],
-    template: &Layout,
-    held: &BlockLayout,
-) -> BoundOp {
-    let [tokens, depth] = extent;
-    let mut layout = template.clone();
-    layout.base = 0;
-    layout.strides.clear();
-    layout.strides.extend([depth as i64, 1]);
-    let bytes = depth / u64::from(held.elements) * u64::from(held.block_bytes);
-    BoundOp {
-        node: derived,
-        dtype: DType::UINT8,
-        extents: vec![tokens, bytes],
-        kind: BoundOpKind::BlockQuantize {
-            operands: vec![(activation, layout, None)],
-            layout: Box::new(*held),
-        },
-    }
-}
-
-fn repoint(bound: &mut BoundOp, slot: usize, derived: NodeId) {
-    if let BoundOpKind::Reduce { operands, .. } = &mut bound.kind
-        && let Some(operand) = operands.get_mut(slot)
-    {
-        operand.0 = derived;
-    }
-}
-
 /// Whether the plan can store activations in the configured block `format` (a descriptor's
 /// `activation_storage`); `None` format is the default Q8_1 pair, always servable.
 ///
@@ -243,34 +181,12 @@ pub(crate) fn derive_with_storage(
     out
 }
 
-/// The bound ops without the plan-local quantize nodes, each gemm reading its original f32
-/// activation again: the form every program-keyed refresh understands.
-pub(crate) fn underive_block_quantize(resolved: &[BoundOp], program_len: usize) -> Vec<BoundOp> {
-    let sources: BTreeMap<NodeId, NodeId> = resolved
-        .iter()
-        .filter(|bound| is_derived(bound, program_len))
-        .filter_map(|bound| Some((bound.node, bound.operands().first()?.0)))
-        .collect();
-    resolved
-        .iter()
-        .filter(|bound| !is_derived(bound, program_len))
-        .cloned()
-        .map(|mut bound| {
-            if let BoundOpKind::Reduce { operands, .. } = &mut bound.kind {
-                operands.iter_mut().for_each(|operand| {
-                    operand.0 = sources.get(&operand.0).copied().unwrap_or(operand.0);
-                });
-            }
-            bound
-        })
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use proxima_tensor::{
-        Extent, IndexMap, Reduce, ReduceInit, append, bind_with_fusion, correct_packed_matmul_layouts, infer, projection,
+        Extent, IndexMap, Reduce, ReduceInit, append, bind_with_fusion, correct_packed_matmul_layouts, infer, is_derived,
+        projection, underive_block_quantize,
     };
 
     const DEPTH: u32 = 128;
