@@ -60,8 +60,13 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
                 packed_leaves,
             );
         }
-        // the split-kv arms read resolved layouts to decide, so discovery needs the two-pass form
-        let (built, discovery) = (
+        // only the softmax-weights arm builds its fused ops from resolved reduce operands and
+        // layouts; a backend that never executes that form is discovered from the program alone,
+        // and the second lowering's `require_output_resolved` check re-validates every candidate
+        let discovery = !executes.forms.contains(Form::CachedSoftmaxWeights);
+        let built = if discovery {
+            None
+        } else {
             Some(bind_plain_with_fusion_packed(
                 program,
                 shapes,
@@ -69,9 +74,8 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
                 numeric_policy,
                 true,
                 packed_leaves,
-            )?),
-            false,
-        );
+            )?)
+        };
         let discovery_resolved: &[BoundOp] = built.as_deref().unwrap_or(&[]);
         // `false`: this discovery pass finds anchors `bind_plain` has already
         // folded into their single consumer (the recurrent-interval family's own `attended` tap,
