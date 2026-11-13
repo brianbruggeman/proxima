@@ -4,15 +4,13 @@ use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::{BlockLayout, Coded, Field, Plane};
 use proxima_numeric::float_layout::SignEncoding;
+use proxima_numeric::int8_dot::chunk_byte_run;
 
-use super::block_dot::{
-    BlockDot, ChunkTerms, DOT_ELEMENTS, affine, layout_name, rows_per_warp, scale_helpers, scale_read, values_fit_int8,
-};
+use super::block_dot::{BlockDot, ChunkTerms, DOT_ELEMENTS, affine, layout_name, rows_per_warp, scale_helpers, scale_read};
 use crate::cuda_layout::layout_load_cuda;
 
 const NIBBLE_BITS: u8 = 4;
 const BYTE_BITS: usize = 8;
-const MAX_PARTS: usize = 2;
 const TABLE_ENTRIES_PER_WORD: usize = 4;
 const TABLE_ENTRY_BITS: usize = 16;
 
@@ -27,31 +25,18 @@ struct ChunkPlane {
 /// The int8 lowering of a block whose sub-blocks carry their own scale (and optionally min) codes
 /// and whose element code is a 4-bit plane plus an optional 1 or 2 bit plane, each chunk's bytes
 /// strided one per element at a per-chunk offset and shift. Derived from the planes' address maps
-/// alone; no format is named.
-pub(super) fn sub_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
+/// alone; no format is named. `parts` is `Int8DotShape::SubBlocks`'s.
+pub(super) fn sub_block_dot(layout: &BlockLayout, parts: usize) -> Option<BlockDot> {
     let sub = layout.sub.as_ref()?;
     let elements = usize::from(layout.elements);
-    let parts = parts_per_chunk(elements, usize::from(sub.count))?;
     let min = layout.min.as_ref().zip(sub.min.as_ref());
-    let eligible = layout.scale_runs.is_none()
-        && layout.element.packed_radix == 0
-        && elements.is_multiple_of(DOT_ELEMENTS)
-        && layout.block_bytes.is_multiple_of(2)
-        && layout.min.is_some() == sub.min.is_some()
-        && (min.is_none() || parts == 1);
-    if !eligible {
-        return None;
-    }
     let chunks = elements / DOT_ELEMENTS;
-    let low = chunk_plane(&layout.element.low, chunks).filter(|plane| plane.bits == NIBBLE_BITS)?;
+    let low = chunk_plane(&layout.element.low, chunks)?;
     let high = match &layout.element.high {
         Some(plane) => Some(chunk_plane(plane, chunks)?),
         None => None,
     };
     let code_bits = usize::from(NIBBLE_BITS) + high.as_ref().map_or(0, |plane| usize::from(plane.bits));
-    if !values_fit_int8(&layout.element, layout.multiplier, code_bits) {
-        return None;
-    }
     let name = format!("{}_sb{}{}h{}", layout_name(layout), parts, if min.is_some() { "m" } else { "n" }, code_bits - 4);
     let mut helpers = scale_helpers(layout, &name)?;
     helpers.push_str(&words_helper(&name, layout, &low, high.as_ref(), code_bits)?);
@@ -70,25 +55,8 @@ pub(super) fn sub_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
     })
 }
 
-fn parts_per_chunk(elements: usize, sub_count: usize) -> Option<usize> {
-    let size = elements.checked_div(sub_count).filter(|size| *size > 0 && elements.is_multiple_of(sub_count))?;
-    let parts = DOT_ELEMENTS / size;
-    (DOT_ELEMENTS.is_multiple_of(size) && (1..=MAX_PARTS).contains(&parts)).then_some(parts)
-}
-
-fn chunk_run(plane: &Plane, chunk: usize) -> Option<(u32, u32)> {
-    let first = plane.address(chunk * DOT_ELEMENTS);
-    let strided = (0..DOT_ELEMENTS).all(|lane| plane.address(chunk * DOT_ELEMENTS + lane) == first + lane * BYTE_BITS);
-    let shift = first % BYTE_BITS;
-    let fits = shift + usize::from(plane.bits) <= BYTE_BITS && (first / BYTE_BITS).is_multiple_of(2);
-    if !(strided && fits) {
-        return None;
-    }
-    Some((u32::try_from(first / BYTE_BITS).ok()?, u32::try_from(shift).ok()?))
-}
-
 fn chunk_plane(plane: &Plane, chunks: usize) -> Option<ChunkPlane> {
-    let runs = (0..chunks).map(|chunk| chunk_run(plane, chunk)).collect::<Option<Vec<_>>>()?;
+    let runs = (0..chunks).map(|chunk| chunk_byte_run(plane, chunk)).collect::<Option<Vec<_>>>()?;
     Some(ChunkPlane {
         bits: plane.bits,
         bytes: runs.iter().map(|run| run.0).collect(),
@@ -201,15 +169,15 @@ fn min_chunk_helpers(name: &str, layout: &BlockLayout, field: Field, coded: Code
 #[cfg(test)]
 mod tests {
     use proxima_numeric::block_layout::BlockLayout;
+    use proxima_numeric::int8_dot::{Int8DotShape, int8_dot_shape};
 
-    use super::sub_block_dot;
-    use crate::cuda::block_dot::ChunkTerms;
+    use crate::cuda::block_dot::{ChunkTerms, block_dot_i8};
 
     #[test]
     fn k_quants_lower_with_the_chunk_terms_their_sub_blocks_describe() {
-        let q4 = sub_block_dot(&BlockLayout::Q4_K).expect("q4_k lowers");
-        let q5 = sub_block_dot(&BlockLayout::Q5_K).expect("q5_k lowers");
-        let q6 = sub_block_dot(&BlockLayout::Q6_K).expect("q6_k lowers");
+        let q4 = block_dot_i8(&BlockLayout::Q4_K).expect("q4_k lowers");
+        let q5 = block_dot_i8(&BlockLayout::Q5_K).expect("q5_k lowers");
+        let q6 = block_dot_i8(&BlockLayout::Q6_K).expect("q6_k lowers");
         assert_eq!(q4.chunk_terms, Some(ChunkTerms { parts: 1, min: true }));
         assert_eq!(q5.chunk_terms, Some(ChunkTerms { parts: 1, min: true }));
         assert_eq!(q6.chunk_terms, Some(ChunkTerms { parts: 2, min: false }));
@@ -218,9 +186,10 @@ mod tests {
     }
 
     #[test]
-    fn layouts_without_a_four_bit_low_plane_or_sub_blocks_do_not_lower() {
+    fn layouts_without_a_four_bit_low_plane_or_sub_blocks_are_not_sub_block_codes() {
         for layout in [BlockLayout::Q2_K, BlockLayout::Q3_K, BlockLayout::Q4_0, BlockLayout::Q4_1, BlockLayout::Q8_K] {
-            assert!(sub_block_dot(&layout).is_none(), "{layout:?} is not a four-bit sub-block code");
+            let shape = int8_dot_shape(&layout);
+            assert!(!matches!(shape, Some(Int8DotShape::SubBlocks { .. })), "{layout:?} is not a four-bit sub-block code: {shape:?}");
         }
     }
 }
@@ -230,7 +199,7 @@ mod device_scale_dump {
     use proxima_numeric::block_layout::BlockLayout;
     use proxima_tensor::NodeId;
 
-    use super::sub_block_dot;
+    use crate::cuda::block_dot::block_dot_i8;
     use crate::cuda::{Binding, CudaGridSpec, CudaKernel};
     use crate::cuda_driver::CudaDriver;
 
@@ -256,7 +225,7 @@ mod device_scale_dump {
     }
 
     fn device_probes(layout: &BlockLayout, block: &[u8], body: &str) -> Vec<f32> {
-        let dot = sub_block_dot(layout).unwrap_or_else(|| panic!("the layout lowers"));
+        let dot = block_dot_i8(layout).unwrap_or_else(|| panic!("the layout lowers"));
         let words: Vec<f32> = block.chunks(4).map(|word| f32::from_bits(u32::from_le_bytes([word[0], word[1], *word.get(2).unwrap_or(&0), *word.get(3).unwrap_or(&0)]))).collect();
         let source = format!(
             "#include <cuda_fp16.h>\n{}\nextern \"C\" __global__ void probe(const float *in, float *out, const int *u) {{\n    const int i = blockIdx.x * blockDim.x + threadIdx.x;\n    if (i >= {PROBES}) return;\n    const unsigned char *block = (const unsigned char *)in;\n    {body}\n}}\n",

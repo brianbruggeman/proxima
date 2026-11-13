@@ -3,6 +3,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::{BlockLayout, Coded};
+use proxima_numeric::int8_dot::radix_digit_source;
 
 use super::block_dot::{BlockDot, DOT_ELEMENTS, layout_name, rows_per_warp, scale_helpers};
 
@@ -13,21 +14,10 @@ const WORD_ELEMENTS: usize = 4;
 /// stored byte, recovered as `((byte * radix^lane) mod 256) * radix >> 8`. Four codes that are
 /// the same digit of four consecutive bytes form one word, recovered two 16-bit lanes per
 /// multiply; any other word is assembled code by code. Derived from the layout's regions and
-/// digits alone; no format is named.
-pub(super) fn radix_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
+/// digits alone; no format is named. `radix` is `Int8DotShape::Radix`'s.
+pub(super) fn radix_block_dot(layout: &BlockLayout, radix: u32) -> Option<BlockDot> {
     let element = &layout.element;
-    let radix = u32::from(element.packed_radix);
     let elements = usize::from(layout.elements);
-    let usable = layout.sub.is_none()
-        && layout.min.is_none()
-        && elements.is_multiple_of(DOT_ELEMENTS)
-        && radix > 1
-        && radix < 128
-        && radix * 255 < 1 << 16
-        && codes_fit_int8(element, layout.multiplier, radix);
-    if !usable {
-        return None;
-    }
     let sources = digit_sources(element, radix, elements)?;
     let name = layout_name(layout);
     let mut helpers = scale_helpers(layout, &name)?;
@@ -48,33 +38,9 @@ pub(super) fn radix_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
     })
 }
 
-fn codes_fit_int8(element: &Coded, multiplier: i16, radix: u32) -> bool {
-    multiplier > 0
-        && (0..radix).all(|code| {
-            let value = i32::from(multiplier) * i32::try_from(code).unwrap_or(i32::MAX) - i32::from(element.bias);
-            (-128..=127).contains(&value)
-        })
-}
-
 /// For every element, the byte holding its digit and `radix^lane mod 256`.
 fn digit_sources(element: &Coded, radix: u32, elements: usize) -> Option<Vec<(usize, u32)>> {
-    let regions = element.regions.get(..usize::from(element.region_count))?;
-    (0..elements)
-        .map(|index| {
-            let region = regions.iter().find(|region| {
-                let start = usize::from(region.start);
-                (start..start + usize::from(region.elements)).contains(&index)
-            })?;
-            let local = index - usize::from(region.start);
-            let address = region.source.address(local);
-            let axis = usize::from(region.digit_axis);
-            let divisor: usize = region.source.digits.iter().take(axis).map(|digit| usize::from(digit.radix)).product();
-            let lane_radix = usize::from(region.source.digits.get(axis)?.radix);
-            let lane = (local / divisor) % lane_radix;
-            let factor = (0..lane).fold(1u32, |product, _| (product * radix) % 256);
-            (region.source.bits == 8 && address.is_multiple_of(8)).then_some((address / 8, factor))
-        })
-        .collect()
+    (0..elements).map(|index| radix_digit_source(element, radix, index)).collect()
 }
 
 /// `Some((byte, factor))` when the word's four codes are one digit of four consecutive bytes.
