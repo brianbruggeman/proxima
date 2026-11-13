@@ -1106,3 +1106,187 @@ mod pairing_order_tests {
         assert!(differing_keys > 0, "summing the same products in the two memory orders must round differently for some key");
     }
 }
+
+#[cfg(test)]
+mod amplification_tests {
+    use super::super::{CachedAttentionScore, CausalBand, stream_cached_attention_split_gqa};
+    use super::*;
+
+    const ROWS: usize = 1;
+    const CACHED: usize = 40;
+    const HEAD_DIM: usize = 64;
+    const PAIR: usize = HEAD_DIM / 2;
+    const PERTURBED_ROW: usize = 7;
+    const PERTURBED_PAIR: usize = 5;
+
+    struct Fixture {
+        query_even: alloc::vec::Vec<f32>,
+        query_odd: alloc::vec::Vec<f32>,
+        cached_even: alloc::vec::Vec<f32>,
+        cached_odd: alloc::vec::Vec<f32>,
+        new_even: alloc::vec::Vec<f32>,
+        new_odd: alloc::vec::Vec<f32>,
+        cached_value: alloc::vec::Vec<f32>,
+        new_value: alloc::vec::Vec<f32>,
+    }
+
+    impl Fixture {
+        fn random() -> Self {
+            let mut state = 0x0bad_5eed_1234_5678u64;
+            let mut plane = |length: usize| -> alloc::vec::Vec<f32> {
+                (0..length)
+                    .map(|_| {
+                        state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                        ((state >> 33) as f32 / (1u64 << 31) as f32) * 6.0 - 3.0
+                    })
+                    .collect()
+            };
+            Self {
+                query_even: plane(ROWS * PAIR),
+                query_odd: plane(ROWS * PAIR),
+                cached_even: plane(CACHED * PAIR),
+                cached_odd: plane(CACHED * PAIR),
+                new_even: plane(ROWS * PAIR),
+                new_odd: plane(ROWS * PAIR),
+                cached_value: plane(CACHED * HEAD_DIM),
+                new_value: plane(ROWS * HEAD_DIM),
+            }
+        }
+
+        fn run(&self, llama: bool) -> alloc::vec::Vec<f32> {
+            let extents = AttentionExtents {
+                query_rows: ROWS as u64,
+                cached_key_rows: CACHED as u64,
+                new_key_rows: ROWS as u64,
+                kv_heads: 1,
+                query_groups: 1,
+                head_dim: HEAD_DIM as u64,
+            };
+            let rotary = CachedAttentionRotary { rotary_dim: HEAD_DIM as u64, pass: None };
+            let score = CachedAttentionScore {
+                scale: 0.125,
+                sinks: None,
+                bands: [
+                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: i64::MAX },
+                    CausalBand { lower_inclusive: i64::MIN, upper_inclusive: 0 },
+                ],
+            };
+            let queries = [&self.query_even[..], &self.query_odd[..]];
+            let keys = [[&self.cached_even[..], &self.cached_odd[..]], [&self.new_even[..], &self.new_odd[..]]];
+            let values = [&self.cached_value[..], &self.new_value[..]];
+            let mut output = alloc::vec![0f32; ROWS * HEAD_DIM];
+            let ran = if llama {
+                stream_cached_attention_llama_flash(queries, keys, values, &mut output, &extents, &rotary, &score, false)
+            } else {
+                stream_cached_attention_split_gqa(queries, keys, values, &mut output, extents, rotary, score)
+            };
+            assert!(ran, "the fixture's layout must fit the kernel");
+            output
+        }
+    }
+
+    fn max_diff(left: &[f32], right: &[f32]) -> (usize, f32) {
+        left.iter()
+            .zip(right)
+            .enumerate()
+            .map(|(index, (a, b))| (index, (a - b).abs()))
+            .fold((0, 0.0f32), |best, next| if next.1 > best.1 { next } else { best })
+    }
+
+    fn half_ulp_at(value: f32) -> f32 {
+        let bits = f16::from_f32(value.abs()).to_bits();
+        (f16::from_bits(bits + 1).to_f32() - f16::from_bits(bits).to_f32()).abs()
+    }
+
+    /// The f32 value halfway between two neighbouring binary16 values, and its neighbour one binary32
+    /// ulp away on the side that rounds to the other binary16 value.
+    fn tie_and_flip(near: f32) -> (f32, f32) {
+        let low = f16::from_f32(near);
+        let high = f16::from_bits(low.to_bits() + 1);
+        let tie = (low.to_f32() + high.to_f32()) / 2.0;
+        let (down, up) = (tie.next_down(), tie.next_up());
+        let tie_half = f16::from_f32(tie);
+        let flipped = if f16::from_f32(up) != tie_half { up } else { down };
+        assert_ne!(f16::from_f32(flipped), tie_half, "one binary32 ulp off a tie must cross the binary16 rounding boundary");
+        (tie, flipped)
+    }
+
+    #[test]
+    fn a_binary32_ulp_below_binary16_resolution_leaves_llama_flash_unchanged() {
+        let base = Fixture::random();
+        let mut nudged = Fixture::random();
+        let slot = PERTURBED_ROW * PAIR + PERTURBED_PAIR;
+        let before = nudged.cached_even[slot];
+        nudged.cached_even[slot] = before.next_up();
+        assert_ne!(base.cached_even[slot], nudged.cached_even[slot]);
+        assert_eq!(f16::from_f32(before), f16::from_f32(nudged.cached_even[slot]), "the nudge must stay inside one binary16 rounding interval");
+        assert_eq!(base.run(true), nudged.run(true));
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum Operand {
+        Key,
+        Value,
+    }
+
+    fn slot_of(fixture: &mut Fixture, operand: Operand, slot: usize) -> &mut f32 {
+        match operand {
+            Operand::Key => &mut fixture.cached_even[slot],
+            Operand::Value => &mut fixture.cached_value[slot],
+        }
+    }
+
+    #[derive(Debug)]
+    struct Sweep {
+        trials: usize,
+        llama_moved: usize,
+        llama_largest_move_in_output_ulps: f32,
+        llama_largest_move: f32,
+        online_largest_move: f32,
+    }
+
+    /// Moves each cached operand element in turn from a binary16 rounding tie to the binary32 neighbour
+    /// that rounds the other way, one trial per element.
+    fn sweep(operand: Operand, slots: usize) -> Sweep {
+        let mut result = Sweep { trials: 0, llama_moved: 0, llama_largest_move_in_output_ulps: 0.0, llama_largest_move: 0.0, online_largest_move: 0.0 };
+        for slot in 0..slots {
+            let mut base = Fixture::random();
+            let mut nudged = Fixture::random();
+            let (tie, flipped) = tie_and_flip(*slot_of(&mut base, operand, slot));
+            *slot_of(&mut base, operand, slot) = tie;
+            *slot_of(&mut nudged, operand, slot) = flipped;
+            let llama_base = base.run(true);
+            let (index, llama_diff) = max_diff(&llama_base, &nudged.run(true));
+            let (_, online_diff) = max_diff(&base.run(false), &nudged.run(false));
+            result.trials += 1;
+            if llama_diff > 0.0 {
+                result.llama_moved += 1;
+                result.llama_largest_move_in_output_ulps = result.llama_largest_move_in_output_ulps.max(llama_diff / half_ulp_at(llama_base[index]));
+            }
+            result.llama_largest_move = result.llama_largest_move.max(llama_diff);
+            result.online_largest_move = result.online_largest_move.max(online_diff);
+        }
+        result
+    }
+
+    #[test]
+    fn a_binary32_ulp_across_a_binary16_rounding_tie_moves_llama_flash_by_binary16_ulps_not_binary32_roundoff() {
+        let output = Fixture::random().run(true);
+        let peak = output.iter().fold(0.0f32, |best, value| best.max(value.abs()));
+        let binary16_ulp = half_ulp_at(peak);
+        for (operand, slots) in [(Operand::Key, CACHED * PAIR), (Operand::Value, CACHED * HEAD_DIM)] {
+            let swept = sweep(operand, slots);
+            assert!(swept.llama_moved > 0, "{operand:?}: some tie flips must reach the llama flash output");
+            assert!(
+                swept.llama_largest_move >= binary16_ulp,
+                "{operand:?}: llama flash largest move {} must reach one binary16 ulp {binary16_ulp} at the peak output {peak}",
+                swept.llama_largest_move
+            );
+            assert!(
+                swept.online_largest_move < binary16_ulp / 100.0,
+                "{operand:?}: the f32 online kernel moved {} on the same perturbations, binary16 ulp is {binary16_ulp}",
+                swept.online_largest_move
+            );
+        }
+    }
+}
