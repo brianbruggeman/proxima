@@ -8,6 +8,7 @@ use proxima_core::kv_carry::{Appended, Extent, KvCarry, KvCarryError, KvCommand,
 use proxima_core::{ServingFsmError, ServingState};
 
 use super::drafter::{DrafterSet, draft_limit_for_step};
+use super::host_kv_rounding::HostCacheRounding;
 use super::*;
 use crate::kv_cache_format;
 use crate::memory_reclaim::monotonic_now;
@@ -4318,6 +4319,10 @@ not read this cache format; only the single-row decode kernel reads it from the 
         let mut step = 0usize;
         let mut carried_layers: Vec<(usize, NodeId)> = Vec::new();
         let mut carried_program = 0usize;
+        let mut host_cache_rounding = HostCacheRounding::new(
+            &serving_config.kv_cache_key_quant,
+            &serving_config.kv_cache_value_quant,
+        )?;
         let kv_carry_eligible = kv_cache_format::is_binary32(&serving_config.kv_cache_key_quant)
             && layer_caches.iter().all(|state| match state {
                 LayerCacheState::Attention(cache) => cache.ring.is_none(),
@@ -4959,21 +4964,6 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                 "device_kv_declined: a host cache did not hold exactly the cached positions"
                             );
                         }
-                    }
-                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    let device_kv_resident = device_kv.is_some();
-                    #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
-                    let device_kv_resident = false;
-                    if cached_len > 0
-                        && kv_cache_format::is_narrow(&serving_config.kv_cache_key_quant)
-                        && !device_kv_resident
-                    {
-                        return Err(InteropError::UnsupportedServingConfig(alloc::format!(
-                            "kv_cache_key_quant={:?}: the narrow cache lives in the device-resident KV, \
-which this decode did not adopt (a non-Metal backend, a recurrent layer, or a host cache that \
-did not hold every cached position)",
-                            serving_config.kv_cache_key_quant
-                        )));
                     }
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if let Some(sized_rows) = device_kv
@@ -6431,7 +6421,11 @@ did not hold every cached position)",
                                         (even_data.len() + odd_data.len() + value_data.len())
                                             as u64;
                                 }
-                                cache.append_at(cached_len, even_data, odd_data, value_data);
+                                host_cache_rounding.append_attention(
+                                    cache,
+                                    cached_len,
+                                    (even_data, odd_data, value_data),
+                                )?;
                             }
                             (
                                 LayerCacheRoots::DenseAttention((first, second, pass, value)),
@@ -6471,7 +6465,10 @@ did not hold every cached position)",
                                         + value_data.len())
                                         as u64;
                                 }
-                                cache.append(first_data, second_data, pass_data, value_data);
+                                host_cache_rounding.append_dense(
+                                    cache,
+                                    (first_data, second_data, pass_data, value_data),
+                                )?;
                             }
                             (
                                 LayerCacheRoots::Ssm {

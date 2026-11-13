@@ -245,6 +245,7 @@ mod pregather;
 #[cfg(feature = "cuda")]
 mod cuda_resident_plans;
 mod residency_caches;
+mod host_kv_rounding;
 #[macro_use]
 mod decode;
 #[cfg(test)]
