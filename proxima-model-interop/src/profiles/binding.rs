@@ -84,6 +84,13 @@ pub struct BindingProfile {
     #[setting(skip)]
     #[builder(default)]
     pub extra: Vec<String>,
+    /// Format-level tensors (GGUF `rope_freqs.weight`, the per-pair RoPE
+    /// frequency factors) bound by name when the directory carries them and
+    /// skipped when it does not, for every family: their meaning is fixed by
+    /// the file format, not by an architecture.
+    #[setting(skip)]
+    #[builder(default)]
+    pub optional: Vec<String>,
 }
 
 impl Validate for BindingProfile {
@@ -141,11 +148,22 @@ impl BindingProfile {
             .any(|suffix| name_prefix_before(name, suffix).is_some())
     }
 
+    /// `true` when `name` is a tensor no program leaf reads that the binder
+    /// still claims: one of [`Self::extra`] or [`Self::optional`].
+    #[must_use]
+    pub fn claims_extra(&self, name: &str) -> bool {
+        self.extra
+            .iter()
+            .chain(&self.optional)
+            .any(|extra| extra == name)
+    }
+
     fn inherits(self, defaults: Self) -> Self {
         Self {
             aliases: self.aliases.into_iter().chain(defaults.aliases).collect(),
             decode_f32: self.decode_f32,
             extra: self.extra,
+            optional: self.optional.into_iter().chain(defaults.optional).collect(),
         }
     }
 }
@@ -300,6 +318,7 @@ mod tests {
                     ],
                 },
             ])
+            .optional(vec!["rope_freqs.weight".into()])
             .build();
 
         let loaded = parse("default", DEFAULT_BINDING).expect("default.toml loads");

@@ -1,3 +1,5 @@
+optional = ["rope_freqs.weight"]
+
 [[alias]]
 kind = "rename"
 leaf = "output.weight"

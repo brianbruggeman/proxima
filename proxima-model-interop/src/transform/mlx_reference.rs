@@ -180,7 +180,7 @@ mod tests {
         let leaves: Vec<&str> = directory
             .iter()
             .copied()
-            .filter(|name| !binding.extra.iter().any(|extra| extra == name))
+            .filter(|name| !binding.claims_extra(name))
             .collect();
         conventions.apply(dense_names(
             &leaves,

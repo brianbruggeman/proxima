@@ -173,6 +173,12 @@ pub(crate) fn bind_missing_leaves<'file>(
             bind_native_f32(parsed, file_bytes, name, name.clone(), state)?;
         }
     }
+    for name in &binding.optional {
+        let carried = directory.contains_key(name.as_str());
+        if carried && bound.insert(name.clone()) {
+            bind_native_f32(parsed, file_bytes, name, name.clone(), state)?;
+        }
+    }
     Ok(())
 }
 
@@ -285,7 +291,7 @@ pub(crate) fn bind_census<'parsed>(
             }
         }
     }
-    for name in &binding.extra {
+    for name in binding.extra.iter().chain(&binding.optional) {
         if let Some((stored, _)) = directory.get_key_value(name.as_str()) {
             claimed.insert(stored);
         }
@@ -1307,6 +1313,49 @@ mod tests {
         };
         assert_eq!(name, "rope_freqs.weight");
         assert_eq!(values, &[1.0, 1.0, 1.0e30, 1.0e30]);
+    }
+
+    /// Llama-3.2-1B-Instruct's `rope_freqs.weight`: `head_dim 64 / 2` pairs, the
+    /// llama3 scaling law's `1.0` for the high-frequency pairs ramping to `32.0`
+    /// (`rope.scaling.factor`) for the low-frequency ones.
+    fn llama32_rope_freqs() -> Vec<f32> {
+        let mut factors = alloc::vec![1.0_f32; 8];
+        factors.extend([1.0, 1.5, 2.5, 4.0, 6.0, 8.5, 12.0, 17.0, 23.0, 28.0]);
+        factors.resize(32, 32.0);
+        factors
+    }
+
+    #[test]
+    fn a_llama_checkpoint_binds_the_rope_freqs_tensor_its_directory_carries() {
+        let factors = llama32_rope_freqs();
+        let bytes = gguf(&[("rope_freqs.weight", &[32], GgmlType::F32, &f32_bytes(&factors))]);
+        let parsed = parse_complete(&bytes).expect("parses");
+        let profile = binding_profile("llama").expect("llama binds with the defaults");
+
+        let weights = bind(&bytes, &[], &profile).expect("binds");
+        let census = bind_census(&parsed, &[], &profile, &[]);
+
+        let [(name, values)] = weights.owned() else {
+            panic!("one owned table, got {}", weights.owned().len());
+        };
+        assert_eq!(name, "rope_freqs.weight");
+        assert_eq!(values, &factors);
+        assert_eq!(census, BindCensus::default(), "the tensor is claimed");
+    }
+
+    #[test]
+    fn a_checkpoint_without_rope_freqs_binds_without_one() {
+        let bytes = gguf(&[("token_embd.weight", &[4], GgmlType::F32, &f32_bytes(&[0.0; 4]))]);
+        let profile = binding_profile("llama").expect("llama binds with the defaults");
+        let mut program = Vec::new();
+        input(&mut program, "token_embd.weight", &[4]);
+
+        let weights = bind(&bytes, &program, &profile).expect("binds");
+
+        assert!(
+            weights.owned().iter().all(|(name, _)| name != "rope_freqs.weight"),
+            "an absent optional tensor is not bound, and not an error"
+        );
     }
 
     #[test]
