@@ -16,7 +16,7 @@ use alloc::format;
 use alloc::string::String;
 
 use proxima_numeric::block_layout::{BlockLayout, ByteCodes, Coded};
-use proxima_numeric::float_layout::SignEncoding;
+use proxima_numeric::float_layout::{FloatLayout, SignEncoding};
 
 use super::layout_render::coded_assembly;
 use super::sub_block_matvec::{SubBlockMatvecRefusal, require, typed_field_read};
@@ -35,6 +35,9 @@ pub(super) const FLAT_BLOCK_COUNT_MARKER: &str = "int blocks = (int)";
 pub(super) enum Fold {
     /// `d * code * act` per term, the block's terms summed in element order.
     ScaleEachTerm,
+    /// `value * act` per term, a run's terms summed in element order: a scalar float has no scale
+    /// to hoist.
+    Plain,
 }
 
 /// The launch the matvec is rendered for: rows per simdgroup, lanes per simdgroup, and which
@@ -58,6 +61,10 @@ pub(super) enum CodeRead {
     /// the value is `((multiplier * code) - bias) * d`, plus `min_multiplier * min` when the layout
     /// has a min, the arithmetic `element_msl` renders with `d` and `min` read once per block.
     Planes { element: Coded, multiplier: i16, min_multiplier: i8 },
+    /// A scalar float weight read in lane-owned runs: `accessor` is `None` when the buffer binds
+    /// as native `half` (`kernel_signature` binds `Float16` that way), else the flat accessor
+    /// `layout_unpack_msl` renders in the preamble, called on a `uchar` payload.
+    Scalar { width_bits: u8, accessor: Option<&'static str> },
 }
 
 /// A layout the flat-block matvec covers, with every fact the renderer reads.
@@ -109,9 +116,72 @@ impl FlatBlockForm {
         })
     }
 
+    /// The `Scalar` form: one lane owns `run_elements` consecutive weights of one float format, no
+    /// scale. `accessor` is the preamble's flat accessor, `None` for a buffer bound as native `half`.
+    ///
+    /// # Errors
+    /// A run that is not whole bytes.
+    pub(super) fn plan_scalar(layout: FloatLayout, run_elements: usize, accessor: Option<&'static str>) -> Result<Self, SubBlockMatvecRefusal> {
+        let width = usize::from(layout.width());
+        require(run_elements > 0 && (run_elements * width).is_multiple_of(8), "a scalar run is whole bytes")?;
+        Ok(Self {
+            elements: run_elements,
+            block_bytes: run_elements * width / 8,
+            read: CodeRead::Scalar { width_bits: layout.width(), accessor },
+            scale_read: String::new(),
+            min_read: None,
+        })
+    }
+
     /// Renders the body between the preamble that declares `lane`, `weight_base`, `other_base`,
     /// `other_stride` and `sumf` and the shared combine and write tail.
-    pub(super) fn matvec_msl(&self, launch: &FlatLaunch, reduction_bound: &str, element_type: &str, fold: Fold) -> String {
+    ///
+    /// # Errors
+    /// A fold the form's read has no meaning under: a scalar read has no scale to apply, and a
+    /// scaled read has no plain product.
+    pub(super) fn matvec_msl(&self, launch: &FlatLaunch, reduction_bound: &str, element_type: &str, fold: Fold) -> Result<String, SubBlockMatvecRefusal> {
+        match (fold, self.read) {
+            (Fold::Plain, CodeRead::Scalar { width_bits, accessor }) => Ok(self.scalar_run_msl(launch, reduction_bound, element_type, width_bits, accessor)),
+            (Fold::Plain, _) => Err(SubBlockMatvecRefusal("a plain fold needs an unscaled scalar read")),
+            (Fold::ScaleEachTerm, _) => self.block_msl(launch, reduction_bound, element_type, fold),
+        }
+    }
+
+    fn scalar_run_msl(&self, launch: &FlatLaunch, reduction_bound: &str, element_type: &str, width_bits: u8, accessor: Option<&'static str>) -> String {
+        let FlatLaunch { rows, lanes, weight, other, other_stride_is_one } = *launch;
+        let (run, run_bytes) = (self.elements, self.block_bytes);
+        let mut source = String::new();
+        source.push_str(&format!("    int blocks = (int){reduction_bound} / {run};\n"));
+        source.push_str(&format!("    int ib_first = (int)lane;\n    int ib_step = {lanes};\n"));
+        let (pointer_type, origin, step) = match accessor {
+            None => ("half", format!("(long)weight_base[q] + (long)ib_first * {run}"), format!("(long)ib_step * {run}")),
+            Some(_) => ("uchar", format!("(((long)weight_base[q] + (long)ib_first * {run}) * {width_bits}) / 8"), format!("(long)ib_step * {run_bytes}")),
+        };
+        source.push_str(&format!("    long blk_step = {step};\n"));
+        source.push_str(&format!("    device const {pointer_type} *blk_ptr[{rows}];\n"));
+        source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n        blk_ptr[q] = in{weight} + {origin};\n    }}\n"));
+        source.push_str(&format!("    {element_type} acts[{run}];\n"));
+        let acts_stride = if other_stride_is_one { String::new() } else { " * other_stride".to_string() };
+        source.push_str(&format!("    long acts_step = (long)ib_step * {run}{acts_stride};\n"));
+        source.push_str(&format!("    device const {element_type} *acts_row = in{other} + other_base[0] + (long)ib_first * {run}{acts_stride};\n"));
+        source.push_str("    for (int ib = ib_first; ib < blocks; ib += ib_step) {\n");
+        source.push_str(&format!("        for (int j = 0; j < {run}; ++j) {{\n"));
+        source.push_str(if other_stride_is_one { "            acts[j] = acts_row[j];\n" } else { "            acts[j] = acts_row[(long)j * other_stride];\n" });
+        source.push_str("        }\n");
+        let value = match accessor {
+            None => "(float)blk[j]".to_string(),
+            Some(name) => format!("{name}(blk, j)"),
+        };
+        source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n            device const {pointer_type} *blk = blk_ptr[q];\n"));
+        source.push_str(&format!(
+            "            float result = 0.0f;\n            for (uint j = 0u; j < {run}u; ++j) {{\n                result += {value} * acts[j];\n            }}\n            sumf[q] = sumf[q] + result;\n        }}\n"
+        ));
+        source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"));
+        source.push_str("        acts_row += acts_step;\n    }\n");
+        source
+    }
+
+    fn block_msl(&self, launch: &FlatLaunch, reduction_bound: &str, element_type: &str, fold: Fold) -> Result<String, SubBlockMatvecRefusal> {
         let FlatLaunch { rows, lanes, weight, other, other_stride_is_one } = *launch;
         let (elements, block_bytes) = (self.elements, self.block_bytes);
         let mut source = String::new();
@@ -147,18 +217,20 @@ impl FlatBlockForm {
         source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
         source.push_str("            device const uchar *blk = blk_ptr[q];\n");
         match fold {
-            Fold::ScaleEachTerm => source.push_str(&self.scale_each_term()),
+            Fold::ScaleEachTerm => source.push_str(&self.scale_each_term()?),
+            Fold::Plain => return Err(SubBlockMatvecRefusal("a plain fold has no scaled block body")),
         }
         source.push_str("        }\n");
         source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"));
         source.push_str("        acts_row += acts_step;\n    }\n");
-        source
+        Ok(source)
     }
 
-    fn scale_each_term(&self) -> String {
+    fn scale_each_term(&self) -> Result<String, SubBlockMatvecRefusal> {
         match self.read {
-            CodeRead::ByteRun { codes, signed } => self.byte_run_terms(codes, signed),
-            CodeRead::Planes { element, multiplier, min_multiplier } => self.plane_terms(&element, multiplier, min_multiplier),
+            CodeRead::ByteRun { codes, signed } => Ok(self.byte_run_terms(codes, signed)),
+            CodeRead::Planes { element, multiplier, min_multiplier } => Ok(self.plane_terms(&element, multiplier, min_multiplier)),
+            CodeRead::Scalar { .. } => Err(SubBlockMatvecRefusal("a scalar read has no scale to apply")),
         }
     }
 
@@ -201,6 +273,7 @@ impl FlatBlockForm {
 mod tests {
     use proxima_numeric::block_layout::BlockLayout;
     use proxima_numeric::decode::decode_block;
+    use proxima_numeric::float_layout::FloatLayout;
     use proxima_numeric::format::NumericFormat;
 
     use super::{FlatBlockForm, FlatLaunch, Fold};
@@ -214,6 +287,7 @@ mod tests {
                 "float",
                 Fold::ScaleEachTerm,
             )
+            .expect("a scaled byte-run form renders under the scale fold")
     }
 
     #[test]
@@ -268,6 +342,7 @@ mod tests {
                 "float",
                 Fold::ScaleEachTerm,
             )
+            .expect("a plane-read form renders under the scale fold")
     }
 
     fn position(source: &str, needle: &str) -> usize {
@@ -380,6 +455,76 @@ mod tests {
         let mut moved = BlockLayout::Q8_0;
         moved.element.low.base_bits += 8;
         assert_ne!(render(&BlockLayout::Q8_0), render(&moved));
+    }
+
+    fn render_scalar(layout: FloatLayout, accessor: Option<&'static str>) -> String {
+        FlatBlockForm::plan_scalar(layout, 8, accessor)
+            .expect("an eight-element run of a 16-bit float is whole bytes")
+            .matvec_msl(
+                &FlatLaunch { rows: 4, lanes: 32, weight: 0, other: 1, other_stride_is_one: true },
+                "u.reduction_total",
+                "float",
+                Fold::Plain,
+            )
+            .expect("an unscaled scalar form renders under the plain fold")
+    }
+
+    #[test]
+    fn f16_run_body_reads_eight_native_halves_per_lane_with_no_scale() {
+        let source = render_scalar(FloatLayout::F16, None);
+        assert!(source.contains("int blocks = (int)u.reduction_total / 8;"), "{source}");
+        assert!(source.contains("device const half *blk_ptr[4];"), "{source}");
+        assert!(source.contains("blk_ptr[q] = in0 + (long)weight_base[q] + (long)ib_first * 8;"), "{source}");
+        assert!(source.contains("result += (float)blk[j] * acts[j];"), "{source}");
+        assert!(source.contains("long blk_step = (long)ib_step * 8;"), "{source}");
+        assert!(!source.contains("float d = "), "{source}");
+    }
+
+    #[test]
+    fn bf16_run_body_reads_the_flat_accessor_over_a_byte_payload() {
+        let source = render_scalar(FloatLayout::BF16, Some("bf16_element"));
+        assert!(source.contains("device const uchar *blk_ptr[4];"), "{source}");
+        assert!(source.contains("(((long)weight_base[q] + (long)ib_first * 8) * 16) / 8;"), "{source}");
+        assert!(source.contains("long blk_step = (long)ib_step * 16;"), "{source}");
+        assert!(source.contains("result += bf16_element(blk, j) * acts[j];"), "{source}");
+    }
+
+    #[test]
+    fn a_fold_the_read_has_no_meaning_under_is_refused() {
+        let launch = FlatLaunch { rows: 4, lanes: 32, weight: 0, other: 1, other_stride_is_one: true };
+        let scalar = FlatBlockForm::plan_scalar(FloatLayout::F16, 8, None).expect("f16 run");
+        assert!(scalar.matvec_msl(&launch, "u.reduction_total", "float", Fold::ScaleEachTerm).is_err());
+        let scaled = FlatBlockForm::plan(&BlockLayout::Q8_0).expect("q8_0 form");
+        assert!(scaled.matvec_msl(&launch, "u.reduction_total", "float", Fold::Plain).is_err());
+    }
+
+    #[test]
+    fn a_run_that_is_not_whole_bytes_is_refused() {
+        assert!(FlatBlockForm::plan_scalar(FloatLayout::E2M1, 3, None).is_err());
+        assert!(FlatBlockForm::plan_scalar(FloatLayout::F16, 0, None).is_err());
+    }
+
+    /// design 9.4: eight consecutive weights, little-endian, decoded by the host and compared to the
+    /// hand-derived values bitwise; the body reads the same two bytes as `half`, so the host decode
+    /// is the oracle for what a lane loads.
+    #[test]
+    fn f16_design_worked_example_run_decodes_to_the_eight_hand_derived_values() {
+        let bytes: [u8; 16] = [0x00, 0x3C, 0x00, 0xBC, 0x00, 0x38, 0x01, 0x00, 0xFF, 0x7B, 0x00, 0xC4, 0x55, 0x35, 0x00, 0x04];
+        let mut values = [0.0f32; 8];
+        proxima_gguf::quant::f16::dequantize(&bytes, &mut values).expect("eight whole f16 elements");
+        let expected = [1.0f32, -1.0, 0.5, 1.0 / 16_777_216.0, 65504.0, -4.0, (1.0 + 341.0 / 1024.0) * 0.25, 1.0 / 16_384.0];
+        let bits = |row: &[f32]| row.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&values), bits(&expected));
+    }
+
+    #[test]
+    fn bf16_design_worked_example_row_decodes_to_the_three_hand_derived_values() {
+        let bytes: [u8; 6] = [0x80, 0x3F, 0x00, 0xC0, 0xAB, 0x3E];
+        let mut values = [0.0f32; 3];
+        proxima_gguf::quant::bf16::dequantize(&bytes, &mut values).expect("three whole bf16 elements");
+        let expected = [1.0f32, -2.0, (1.0 + 43.0 / 128.0) * 0.25];
+        let bits = |row: &[f32]| row.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&values), bits(&expected));
     }
 
     #[test]

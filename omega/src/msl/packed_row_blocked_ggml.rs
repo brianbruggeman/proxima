@@ -312,23 +312,34 @@ pub(super) fn push_packed_row_blocked_body(
                 other,
                 other_stride_is_one,
             };
-            source.push_str(&form.matvec_msl(
-                &launch,
-                &reduction_bound,
-                element_type,
-                Fold::ScaleEachTerm,
-            ));
+            source.push_str(
+                &form
+                    .matvec_msl(&launch, &reduction_bound, element_type, Fold::ScaleEachTerm)
+                    .map_err(|refusal| EmitError::PackedCodecNotSupported {
+                        node: resolved.node,
+                        codec: refusal.0,
+                    })?,
+            );
         } else if packed_body == PackedBodySelect::BlockRendered {
-            let layout = codec
-                .block_layout()
-                .ok_or(EmitError::PackedCodecNotSupported {
-                    node: resolved.node,
-                    codec: "no block layout",
-                })?;
-            let form = FlatBlockForm::plan_planes(&layout).map_err(|refusal| EmitError::PackedCodecNotSupported {
+            let refused = |refusal: sub_block_matvec::SubBlockMatvecRefusal| EmitError::PackedCodecNotSupported {
                 node: resolved.node,
                 codec: refusal.0,
-            })?;
+            };
+            let (form, fold) = match scalar_run_read(codec) {
+                Some((scalar, accessor)) => (
+                    FlatBlockForm::plan_scalar(scalar, crate::sized::PACKED_ROW_SCALAR_RUN, accessor).map_err(refused)?,
+                    Fold::Plain,
+                ),
+                None => {
+                    let layout = codec
+                        .block_layout()
+                        .ok_or(EmitError::PackedCodecNotSupported {
+                            node: resolved.node,
+                            codec: "no block layout",
+                        })?;
+                    (FlatBlockForm::plan_planes(&layout).map_err(refused)?, Fold::ScaleEachTerm)
+                }
+            };
             let reduction_bound = packed_row_reduction_bound_token(metal);
             let launch = FlatLaunch {
                 rows,
@@ -337,12 +348,7 @@ pub(super) fn push_packed_row_blocked_body(
                 other,
                 other_stride_is_one,
             };
-            source.push_str(&form.matvec_msl(
-                &launch,
-                &reduction_bound,
-                element_type,
-                Fold::ScaleEachTerm,
-            ));
+            source.push_str(&form.matvec_msl(&launch, &reduction_bound, element_type, fold).map_err(refused)?);
         } else if packed_body == PackedBodySelect::LevelsRendered {
             let Codec::Levels(format) = codec else {
                 return Err(EmitError::PackedCodecNotSupported {

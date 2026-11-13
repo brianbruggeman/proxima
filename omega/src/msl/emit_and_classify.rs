@@ -2985,6 +2985,10 @@ pub(super) const fn legacy_super_block_arm(codec: Codec) -> bool {
 /// extent need only be a multiple of this, not of 256. Admission here and the emitted body both
 /// derive from this one decision.
 pub(super) fn block_rendered_elements(codec: Codec) -> Option<usize> {
+    if let Some((layout, accessor)) = scalar_run_read(codec) {
+        FlatBlockForm::plan_scalar(layout, crate::sized::PACKED_ROW_SCALAR_RUN, accessor).ok()?;
+        return Some(crate::sized::PACKED_ROW_SCALAR_RUN);
+    }
     if legacy_super_block_arm(codec) || matches!(codec, Codec::Levels(_)) {
         return None;
     }
@@ -2994,6 +2998,21 @@ pub(super) fn block_rendered_elements(codec: Codec) -> Option<usize> {
     let layout = codec.block_layout()?;
     FlatBlockForm::plan_planes(&layout).ok()?;
     Some(usize::from(elements))
+}
+
+/// The scalar float formats the run body reads, with how each binds: `RowBlockShape::Scalar` from
+/// `row_block_shape` and an accessor the preamble renders. `Float16` binds as native `half`
+/// (`kernel_signature`), so it needs none; `BFloat16` binds as `uchar` and reads through
+/// `bf16_element`. A scalar this does not name stays on the cooperative kernel.
+pub(super) fn scalar_run_read(codec: Codec) -> Option<(FloatLayout, Option<&'static str>)> {
+    let (Some(RowBlockShape::Scalar), Codec::Scalar(layout)) = (row_block_shape(&codec), codec) else {
+        return None;
+    };
+    match codec {
+        Codec::Float16 => Some((layout, None)),
+        Codec::BFloat16 => Some((layout, Some("bf16_element"))),
+        _ => None,
+    }
 }
 
 /// Whether the block body renders the op: a plain-product reduce over real f32 activations, with
