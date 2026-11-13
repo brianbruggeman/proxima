@@ -280,6 +280,7 @@ fn architecture_matrix_safetensors_program_leaves() {
             } else {
                 Vec::new()
             },
+            optional: Vec::new(),
         };
         let weights = bind_safetensors_program_leaves(
             &manifest,

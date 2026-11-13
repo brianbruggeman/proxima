@@ -314,7 +314,7 @@ mod tests {
         directory
             .iter()
             .map(String::as_str)
-            .filter(|name| !binding.extra.iter().any(|extra| extra == name))
+            .filter(|name| !binding.claims_extra(name))
             .collect()
     }
 

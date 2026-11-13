@@ -53,7 +53,7 @@ pub(super) fn leaf_names(
     let leaves: Vec<&str> = directory
         .iter()
         .copied()
-        .filter(|name| !binding.extra.iter().any(|extra| extra == name))
+        .filter(|name| !binding.claims_extra(name))
         .collect();
     let names = dense_names(&leaves, &directory, binding, layout, hf_prefix);
     match names.unmapped.is_empty() {

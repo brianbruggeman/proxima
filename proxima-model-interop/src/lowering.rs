@@ -524,14 +524,22 @@ pub fn bind_hf_checkpoint<'file>(
     let forward = build_forward(&descriptor)?;
     let binding = binding_profile(&architecture.family)?;
     let mut weights = bind_safetensors_shards(shards, &forward.program, &binding)?;
-    for name in &binding.extra {
-        bind_native_f32(
-            header_source,
-            header_bytes,
-            name,
-            name.clone(),
-            &mut weights,
-        )?;
+    let carried_optional = binding.optional.iter().filter(|name| {
+        header_source
+            .tensors
+            .iter()
+            .any(|tensor| &tensor.name == *name)
+    });
+    for name in binding.extra.iter().chain(carried_optional) {
+        if weights.owned().iter().all(|(bound, _)| bound != name) {
+            bind_native_f32(
+                header_source,
+                header_bytes,
+                name,
+                name.clone(),
+                &mut weights,
+            )?;
+        }
     }
     Ok(bound_program(weights, architecture, forward, &descriptor))
 }
