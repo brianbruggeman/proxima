@@ -394,7 +394,7 @@ fn coded_expression(coded: &Coded, index: &str, binding: &str, helper: &str) -> 
 }
 
 /// The statements that assemble `coded`'s integer code for element `index`, and the expression that names it.
-fn coded_assembly(coded: &Coded, index: &str, binding: &str) -> (String, String) {
+pub(super) fn coded_assembly(coded: &Coded, index: &str, binding: &str) -> (String, String) {
     if coded.packed_radix > 1 && coded.region_count > 0 {
         let code_name = format!("{binding}_code");
         let mut text = format!("    uint {code_name} = 0u;\n");

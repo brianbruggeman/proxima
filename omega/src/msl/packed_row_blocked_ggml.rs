@@ -293,7 +293,7 @@ pub(super) fn push_packed_row_blocked_body(
                     node: resolved.node,
                     codec: "no block layout",
                 })?;
-            let form = FlatBlockForm::plan(&layout).map_err(|refusal| EmitError::PackedCodecNotSupported {
+            let form = FlatBlockForm::plan(&layout).or_else(|_| FlatBlockForm::plan_planes(&layout)).map_err(|refusal| EmitError::PackedCodecNotSupported {
                 node: resolved.node,
                 codec: refusal.0,
             })?;
