@@ -2931,7 +2931,7 @@ fn level_row_body_rendered(resolved: &BoundOp, block: &PackedRowBlock) -> bool {
 /// span (`Q8_0` and `Q4_0` as eight real blocks), so `n` is
 /// [`Q4K_BLOCK_ELEMENTS`] for all of them. Exhaustive over [`Codec`], so a new
 /// codec forces a decision here instead of slipping through.
-const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
+pub(super) const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
     match codec {
         Codec::Levels(format) if level_row_block_elements(&format).is_some() => {
             level_row_block_elements(&format)
