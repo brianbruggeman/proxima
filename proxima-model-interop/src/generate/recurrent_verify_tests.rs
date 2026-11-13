@@ -51,6 +51,8 @@ fn config() -> ServingConfig<'static> {
     ServingConfig {
         kv_cache_key_quant: NumericFormat::Float32,
         kv_cache_value_quant: NumericFormat::Float32,
+        // llama flash accumulates in binary16, so verify vs decode differ by f16 ulps; rollback is about state, not attention arithmetic
+        numeric_policy: ServingConfig::default().numeric_policy.with_flash_narrowing(true),
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,
