@@ -583,10 +583,19 @@ mod gated {
             Some(letter) => identity.push(letter),
             None => {
                 let described = codec.map_or_else(String::new, |format| description_fingerprint(&format));
-                identity.push_str(&format!("~{described}~"));
+                identity.push(LETTERLESS_MARKER);
+                identity.push_str(&described);
             }
         }
     }
+
+    /// Opens a letterless codec's token: this marker then the 16-hex-digit
+    /// [`description_fingerprint`], 17 characters, identifier-safe (the identity is the kernel
+    /// entry name on every renderer). 'Y' is in no frozen letter of [`codec_letter`] and no
+    /// character `kernel_identity` appends after the codec tokens ('G'/'M'/'B'/'S'/'E'/'F'/'f'/
+    /// 'H'/'h', '1'/'N', `_`-led suffixes), and the fixed length makes concatenated tokens parse
+    /// left to right without a delimiter.
+    const LETTERLESS_MARKER: char = 'Y';
 
     /// The frozen single-letter token of a codec that has one, `None` for a codec whose name is its
     /// whole field description ([`description_fingerprint`]): a letter shared by two formats, or a
@@ -1071,11 +1080,72 @@ mod gated {
             assert_eq!(collisions, Vec::new(), "two codecs share a kernel identity token");
         }
 
+        fn is_c_identifier(text: &str) -> bool {
+            let mut characters = text.chars();
+            let starts_well = characters
+                .next()
+                .is_some_and(|first| first.is_ascii_alphabetic() || first == '_');
+            starts_well && text.chars().all(|character| character.is_ascii_alphanumeric() || character == '_')
+        }
+
         #[test]
         fn a_frozen_letter_is_unchanged_and_a_letterless_codec_is_named_by_its_description() {
+            let expected = format!("Y{}", description_fingerprint(&Codec::Ptq1_0));
             assert_eq!(token(Codec::Q8_0), "8");
             assert_eq!(token(Codec::Bf4E2M1), "X");
-            assert!(token(Codec::Ptq1_0).starts_with('~'), "{}", token(Codec::Ptq1_0));
+            assert_eq!(token(Codec::Ptq1_0), expected);
+            assert_eq!(expected.len(), 17);
+        }
+
+        #[test]
+        fn the_letterless_marker_is_no_frozen_letter() {
+            let frozen: Vec<char> = Codec::ALL
+                .iter()
+                .filter_map(|codec| codec_letter(Some(*codec)))
+                .chain(codec_letter(None))
+                .collect();
+
+            assert!(!frozen.is_empty(), "an empty letter table proves nothing");
+            assert!(!frozen.contains(&LETTERLESS_MARKER));
+        }
+
+        #[test]
+        fn every_codec_token_is_a_c_identifier_fragment_without_a_double_underscore() {
+            let mut tokens: Vec<String> = Codec::ALL.iter().map(|codec| token(*codec)).collect();
+            tokens.extend(Codec::UNTAGGED.iter().map(|(codec, _)| token(*codec)));
+            let mut none_token = String::new();
+            push_codec_token(&mut none_token, None);
+            tokens.push(none_token);
+
+            let offenders: Vec<&String> = tokens
+                .iter()
+                .filter(|text| !is_c_identifier(&format!("c{text}")) || text.contains("__"))
+                .collect();
+
+            assert_eq!(tokens.len(), Codec::ALL.len() + Codec::UNTAGGED.len() + 1);
+            assert_eq!(offenders, Vec::<&String>::new(), "a codec token is not identifier-safe");
+        }
+
+        #[test]
+        fn a_full_kernel_identity_for_a_letterless_codec_is_a_c_identifier() {
+            let bound = crate::msl::golden_support::matmul_op(4, 256, 5);
+            let weight_node = bound.operands()[0].0;
+            let mut packed = PackedOperands::new();
+            packed.insert(weight_node, Codec::Ptq1_0);
+
+            for language in [KernelLanguage::Metal, KernelLanguage::Wgsl, KernelLanguage::Cuda, KernelLanguage::Hip] {
+                let identity = kernel_identity(
+                    language,
+                    &bound,
+                    &packed,
+                    MetalOnlyExtras::default(),
+                    NumericPolicy::default(),
+                );
+
+                assert!(identity.contains(&token(Codec::Ptq1_0)), "{identity}");
+                assert!(is_c_identifier(&identity), "{identity}");
+                assert!(!identity.contains("__"), "{identity}");
+            }
         }
     }
 }
