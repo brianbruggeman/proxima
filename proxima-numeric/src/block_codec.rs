@@ -22,9 +22,9 @@
 
 use core::mem::MaybeUninit;
 
-use crate::block_layout::{BlockLayout, Field, MAX_DIGITS, Plane, named_block_table};
+use crate::block_layout::{BlockLayout, Coded, Field, MAX_DIGITS, Plane, named_block_table};
 use crate::encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleStatistic, StoredMin};
-use crate::encode_rule::RangeFit;
+use crate::encode_rule::{RangeFit, SubRule};
 use crate::range_fit::{fit_range, nearest_even};
 use crate::float_layout::{FloatLayout, SignEncoding};
 use crate::float_layout_codec::{decode, encode};
@@ -124,6 +124,7 @@ const fn stored_min_rule(layout: &BlockLayout, stored_sum: bool) -> Option<Encod
         stored_sum,
         stored_min: StoredMin::LowEnd { sign: layout.min_multiplier },
         zero_code: 0,
+        sub: None,
     })
 }
 
@@ -171,11 +172,86 @@ const fn zero_code_of(layout: &BlockLayout) -> u8 {
     if is_twos_complement_integer(layout) { 0 } else { layout.element.bias as u8 }
 }
 
+/// The widest sub-block the two-level fit holds on the stack, and the most sub-blocks it counts.
+pub(crate) const MAX_SUB_ELEMENTS: usize = 32;
+pub(crate) const MAX_SUB_COUNT: usize = 16;
+
+/// The bits of a sub-block code: its low plane and its high plane.
+const fn coded_bits(coded: &Coded) -> u32 {
+    coded.low.bits as u32
+        + match &coded.high {
+            Some(plane) => plane.bits as u32,
+            None => 0,
+        }
+}
+
+/// Whether `coded` is an unbiased unsigned integer the sub-block writer can store directly.
+const fn is_plain_unsigned(coded: &Coded) -> bool {
+    coded.code.exponent_bits == 0
+        && matches!(coded.code.sign, SignEncoding::Absent)
+        && coded.bias == 0
+        && coded.packed_radix <= 1
+        && coded_bits(coded) >= 1
+        && coded_bits(coded) <= 8
+}
+
+/// The rule of a layout whose block scale and min each scale a sub-block scale and min:
+/// an unbiased unsigned element code, a `min_multiplier` of negative one, whole-byte float fields
+/// for the block scale and min, plain unsigned sub-block codes, and a search attached to `sub`.
+/// The sub-block count and the level count are read from the description, not from a name.
+const fn two_level_rule(layout: &BlockLayout) -> Option<EncodeRule> {
+    let (Some(sub), Some(min)) = (&layout.sub, &layout.min) else { return None };
+    let (Some(search), Some(sub_min)) = (&sub.search, &sub.min) else { return None };
+    let size = if sub.count == 0 { 0 } else { layout.elements as usize / sub.count as usize };
+    let bits = code_bits(layout);
+    if !is_unsigned_integer(layout)
+        || layout.element.bias != 0
+        || layout.element.packed_radix > 1
+        || bits == 0
+        || bits > 8
+        || layout.multiplier != 1
+        || layout.min_multiplier != -1
+        || layout.scale_runs.is_some()
+        || sub.scale_multiplier != 1
+        || !is_plain_unsigned(&sub.scale)
+        || !is_plain_unsigned(sub_min)
+        || coded_bits(&sub.scale) != coded_bits(sub_min)
+        || sub.count as usize > MAX_SUB_COUNT
+        || size * sub.count as usize != layout.elements as usize
+        || size == 0
+        || size > MAX_SUB_ELEMENTS
+        || layout.scale.layout.exponent_bits == 0
+        || min.layout.exponent_bits == 0
+        || !layout.scale.layout.width().is_multiple_of(8)
+        || !min.layout.width().is_multiple_of(8)
+        || layout.scale.byte_offset as usize + layout.scale.layout.width() as usize / 8 > layout.block_bytes as usize
+        || min.byte_offset as usize + min.layout.width() as usize / 8 > layout.block_bytes as usize
+    {
+        return None;
+    }
+    let (lowest, highest) = integer_bounds(layout);
+    Some(EncodeRule {
+        statistic: ScaleStatistic::MinMax(search.range_fit()),
+        divisor: highest - lowest,
+        rounding: CodeRounding::NearestEven,
+        clamp: CodeClamp::Both,
+        lowest,
+        highest,
+        stored_sum: false,
+        stored_min: StoredMin::LowEnd { sign: -1 },
+        zero_code: 0,
+        sub: Some(SubRule { count: sub.count, levels: (1u32 << coded_bits(&sub.scale)) - 1, fit: search.range_fit() }),
+    })
+}
+
 /// The layout's [`EncodeRule`], decided from its fields alone: an offset-binary code centred on its
 /// bias fits the signed peak, a signed or off-centre integer code the peak magnitude, a one-bit
 /// code with a multiplier of two the mean magnitude, an unbiased code with a stored min the range ([`stored_min_rule`]); `None` for any other layout.
 pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
     let integer = is_unsigned_integer(layout) || is_twos_complement_integer(layout);
+    if layout.sub.is_some() {
+        return two_level_rule(layout);
+    }
     if !layout.is_simple()
         || !integer
         || layout.scale.layout.exponent_bits == 0
@@ -207,6 +283,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             stored_sum,
             stored_min: StoredMin::Absent,
             zero_code: 1,
+            sub: None,
         });
     }
     if layout.multiplier != 1 {
@@ -226,6 +303,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             stored_sum,
             stored_min: StoredMin::Absent,
             zero_code: zero_code_of(layout),
+            sub: None,
         });
     }
     if reach_of(layout) > 0 && (is_twos_complement_integer(layout) || bias > 0) {
@@ -239,6 +317,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             stored_sum,
             stored_min: StoredMin::Absent,
             zero_code: zero_code_of(layout),
+            sub: None,
         });
     }
     None

@@ -149,6 +149,25 @@ pub struct EncodeRule {
     /// inverse, has every code set to this, so it decodes to exactly zero; a NaN or infinite scale
     /// is not that case and keeps the arithmetic.
     pub zero_code: u8,
+    /// The second level of a layout with sub-blocks: see [`SubRule`].
+    pub sub: Option<SubRule>,
+}
+
+/// The second level of a two-level layout, derived from its `sub` field
+/// ([`crate::block_layout::SubBlocks`]) and the search attached to it. Each sub-block is fitted with
+/// `fit`; its scale and min are then quantized as `nearest_even(levels * s / max_s)` clamped to
+/// `levels` (`levels` is the top of the sub-block code, 63 for a six-bit one), the block scale is
+/// `f16(max_s / levels)` and the block min likewise, and every element code is refitted against the
+/// rounded scales. The sub-block codes are written through the description's own planes
+/// ([`crate::block_layout::Plane::address`]), the inverse of [`crate::decode::decode_blocks`]' read.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SubRule {
+    /// Sub-blocks per block.
+    pub count: u16,
+    /// The largest sub-block scale or min code.
+    pub levels: u32,
+    /// The per-sub-block search.
+    pub fit: RangeFit,
 }
 
 impl BlockLayout {
@@ -180,6 +199,7 @@ mod tests {
                 stored_sum: false,
                 stored_min: StoredMin::Absent,
                 zero_code: 8,
+                sub: None,
             }
         );
     }
@@ -206,8 +226,8 @@ mod tests {
     }
 
     #[test]
-    fn a_layout_with_sub_blocks_has_no_rule() {
-        assert_eq!(BlockLayout::Q4_K.encode_rule(), None);
+    fn a_layout_with_sub_blocks_and_no_stored_min_has_no_rule() {
+        assert_eq!(BlockLayout::Q6_K.encode_rule(), None);
     }
 
     #[test]
