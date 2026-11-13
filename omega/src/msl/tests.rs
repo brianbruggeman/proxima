@@ -1982,6 +1982,10 @@ fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path() {
         source.contains("hdr.scale * levels[j] - hdr.minimum"),
         "a Maximum reduce must keep dequantizing per element:\n{source}"
     );
+    assert!(
+        source.contains("q4k_header hdr = "),
+        "the per-element dequant reads hdr, so the kernel must declare it or the Metal compile fails:\n{source}"
+    );
 }
 
 /// The smallest activation-row count the tiled path admits: every fixture that asserts the tiled
