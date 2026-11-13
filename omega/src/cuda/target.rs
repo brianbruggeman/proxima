@@ -117,8 +117,11 @@ impl Target {
         if self.wave == 64 { "0xffffffffffffffffull" } else { "0xffffffffu" }
     }
 
-    pub(crate) fn shfl_broadcast(&self, value: &str, lane: &str) -> String {
-        alloc::format!("__shfl_sync({}, {value}, {lane})", self.lane_mask())
+    /// A complete statement that broadcasts `value` from `lane` into `dest`.
+    /// The shuffle is only ever rendered with its destination, so a caller
+    /// cannot emit the call as a discarded bare expression.
+    pub(crate) fn shfl_broadcast_into(&self, dest: &str, value: &str, lane: &str) -> String {
+        alloc::format!("{dest} = __shfl_sync({}, {value}, {lane});", self.lane_mask())
     }
 
     /// The `warp_partials[N]` extent a block-wide merge needs: one slot per

@@ -3607,8 +3607,8 @@ fn push_cooperative_reduce_body(
             // without this broadcast, the other lanes reuse their partial sums
             // as if they were the norm, corrupting every other output
             // coordinate.
-            let broadcast = target.shfl_broadcast("accumulator", "0");
-            source.push_str(&format!("    {broadcast};\n"));
+            let broadcast = target.shfl_broadcast_into("accumulator", "accumulator", "0");
+            source.push_str(&format!("    {broadcast}\n"));
         }
         // Recreate the non-reduction coordinate after the fold, whose loop
         // leaves `full_coord` holding its last reduction coordinate. Each
@@ -5840,7 +5840,16 @@ mod tests {
             .expect("broadcast emits");
         assert!(source.contains("broadcast_out_strides[2]"));
         assert!(source.contains("broadcast_full_coord[1]"));
-        assert!(source.contains("__shfl_sync(0xffffffffu, accumulator, 0)"));
+        assert!(source.contains("    accumulator = __shfl_sync(0xffffffffu, accumulator, 0);\n"));
+        assert!(
+            !source.contains("    __shfl_sync(0xffffffffu, accumulator, 0);\n"),
+            "the broadcast must assign its result; a bare shuffle leaves lanes 1..31 holding partial sums"
+        );
+
+        let hip_source = render_reduce(Target::HIP, &bound, "entry", &[None], NumericPolicy::llama_relaxed(), EmitDevice::default())
+            .expect("hip broadcast emits");
+        assert!(hip_source.contains("    accumulator = __shfl_sync(0xffffffffffffffffull, accumulator, 0);\n"));
+        assert!(!hip_source.contains("    __shfl_sync(0xffffffffffffffffull, accumulator, 0);\n"));
 
         let kernel = emit_cuda_with_policy(&bound, &no_packed(), NumericPolicy::llama_relaxed())
             .expect("broadcast kernel emits");
