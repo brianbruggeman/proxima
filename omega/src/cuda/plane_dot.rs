@@ -1,40 +1,21 @@
 use alloc::format;
 use alloc::string::String;
 
-use proxima_numeric::block_layout::{BlockLayout, Plane};
+use proxima_numeric::block_layout::BlockLayout;
 
-use super::block_dot::{BlockDot, DOT_ELEMENTS, affine, layout_name, rows_per_warp, scale_helpers, values_fit_int8};
+use super::block_dot::{BlockDot, affine, layout_name, rows_per_warp, scale_helpers};
 
 const NIBBLE_BITS: usize = 4;
-const CHUNK_NIBBLE_BITS: usize = DOT_ELEMENTS * NIBBLE_BITS;
-const HALF_CHUNK: usize = DOT_ELEMENTS / 2;
-const ADDRESS_ALIGNMENT_BITS: usize = 16;
 
 /// The int8 lowering of a linear code whose low 4-bit plane is nibble-split (the first half of a
 /// 32-element chunk in the low nibbles of 16 bytes, the second half in the high nibbles) and whose
 /// optional high plane is one bit per element in a contiguous run. The assembled code is
-/// `low | high << 4`; `multiplier * code - bias` must fit int8. Derived from the planes' address
-/// maps alone; no format is named.
-pub(super) fn split_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
-    let element = &layout.element;
+/// `low | high << 4`. The plane addresses come from `Int8DotShape::NibbleSplit`; no format is named.
+pub(super) fn split_block_dot(layout: &BlockLayout, low_base_byte: usize, high_base_byte: Option<usize>) -> Option<BlockDot> {
     let elements = usize::from(layout.elements);
-    let linear = layout.sub.is_none()
-        && layout.min.is_none()
-        && layout.scale_runs.is_none()
-        && element.packed_radix == 0
-        && elements.is_multiple_of(DOT_ELEMENTS);
-    let low_base = nibble_split_base(&element.low, elements).filter(|_| linear)?;
-    let high_base = match &element.high {
-        Some(plane) => Some(bit_run_base(plane, elements)?),
-        None => None,
-    };
-    let code_bits = NIBBLE_BITS + usize::from(high_base.is_some());
-    if !values_fit_int8(element, layout.multiplier, code_bits) {
-        return None;
-    }
-    let name = format!("{}_ns{}", layout_name(layout), high_base.map_or_else(String::new, |base| format!("h{base}")));
+    let name = format!("{}_ns{}", layout_name(layout), high_base_byte.map_or_else(String::new, |byte| format!("h{}", byte * 8)));
     let mut helpers = scale_helpers(layout, &name)?;
-    helpers.push_str(&words_helper(&name, layout, low_base / 8, high_base.map(|base| base / 8))?);
+    helpers.push_str(&words_helper(&name, layout, low_base_byte, high_base_byte)?);
     Some(BlockDot {
         name,
         helpers,
@@ -44,25 +25,6 @@ pub(super) fn split_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
         centering: None,
         chunk_terms: None,
     })
-}
-
-fn nibble_split_offset(position: usize) -> usize {
-    (position % HALF_CHUNK) * 8 + (position / HALF_CHUNK) * NIBBLE_BITS
-}
-
-fn nibble_split_base(plane: &Plane, elements: usize) -> Option<usize> {
-    let base = plane.address(0);
-    let split = usize::from(plane.bits) == NIBBLE_BITS
-        && (0..elements).all(|index| {
-            plane.address(index) == base + index / DOT_ELEMENTS * CHUNK_NIBBLE_BITS + nibble_split_offset(index % DOT_ELEMENTS)
-        });
-    (split && base.is_multiple_of(ADDRESS_ALIGNMENT_BITS)).then_some(base)
-}
-
-fn bit_run_base(plane: &Plane, elements: usize) -> Option<usize> {
-    let base = plane.address(0);
-    let run = plane.bits == 1 && (0..elements).all(|index| plane.address(index) == base + index);
-    (run && base.is_multiple_of(ADDRESS_ALIGNMENT_BITS)).then_some(base)
 }
 
 const HIGH_LOAD: &str = "    const unsigned int high_bits = (unsigned int)high_halves[0] | ((unsigned int)high_halves[1] << 16);\n";
@@ -85,13 +47,14 @@ fn words_helper(name: &str, layout: &BlockLayout, low_bytes: usize, high_bytes: 
 #[cfg(test)]
 mod tests {
     use proxima_numeric::block_layout::BlockLayout;
+    use proxima_numeric::int8_dot::{Int8DotShape, int8_dot_shape};
 
-    use super::split_block_dot;
+    use crate::cuda::block_dot::block_dot_i8;
 
     #[test]
     fn nibble_split_planes_lower_with_and_without_a_high_bit_plane() {
-        let q5 = split_block_dot(&BlockLayout::Q5_0).expect("q5_0 is a nibble-split plane plus a bit run");
-        let q4 = split_block_dot(&BlockLayout::Q4_0).expect("q4_0 is a nibble-split plane");
+        let q5 = block_dot_i8(&BlockLayout::Q5_0).expect("q5_0 is a nibble-split plane plus a bit run");
+        let q4 = block_dot_i8(&BlockLayout::Q4_0).expect("q4_0 is a nibble-split plane");
         assert_eq!((q5.elements, q5.block_bytes), (32, 22));
         assert_eq!((q4.elements, q4.block_bytes), (32, 18));
         assert_ne!(q5.name, q4.name);
@@ -99,9 +62,10 @@ mod tests {
     }
 
     #[test]
-    fn min_bearing_and_sub_block_layouts_do_not_lower() {
+    fn min_bearing_and_sub_block_layouts_are_not_nibble_split_codes() {
         for layout in [BlockLayout::Q4_1, BlockLayout::Q5_1, BlockLayout::Q4_K, BlockLayout::Q8_0] {
-            assert!(split_block_dot(&layout).is_none(), "{layout:?} is not a min-free nibble-split code");
+            let shape = int8_dot_shape(&layout);
+            assert!(!matches!(shape, Some(Int8DotShape::NibbleSplit { .. })), "{layout:?} is not a min-free nibble-split code: {shape:?}");
         }
     }
 }

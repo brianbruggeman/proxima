@@ -1,8 +1,9 @@
 use alloc::format;
 use alloc::string::String;
 
-use proxima_numeric::block_layout::{BlockLayout, Coded, Field};
+use proxima_numeric::block_layout::{BlockLayout, Field};
 use proxima_numeric::float_layout::{FloatLayout, SignEncoding};
+use proxima_numeric::int8_dot::{INT8_DOT_ELEMENTS, Int8DotShape, int8_dot_shape};
 
 use super::plane_dot::split_block_dot;
 use super::sub_block_dot::sub_block_dot;
@@ -10,7 +11,7 @@ use super::radix_dot::radix_block_dot;
 use crate::cuda_layout::layout_load_cuda;
 
 /// Elements one int8 dot step covers: eight `dp4a` words.
-pub(super) const DOT_ELEMENTS: usize = 32;
+pub(super) const DOT_ELEMENTS: usize = INT8_DOT_ELEMENTS;
 
 /// What a block with per-chunk sub-block scales adds to the dot: `<name>_chunk_scale(block, chunk,
 /// part)` is the scale of the `part`-th run of `32 / parts` elements of the chunk (block scale times
@@ -37,35 +38,25 @@ pub(super) struct BlockDot {
     pub chunk_terms: Option<ChunkTerms>,
 }
 
-/// `None` when the layout is neither a radix-packed code, a single-plane linear code whose
-/// 32-element chunks are contiguous bit runs of 1, 2, 4 or 8 bits, nor a nibble-split code with an
-/// optional bit-run high plane, or its affine value does not fit int8.
+/// Renders the decomposition [`int8_dot_shape`] names for `layout`; `None` exactly when that
+/// function is `None`. The structural decision lives in `proxima_numeric::int8_dot`; the builders
+/// below only emit CUDA source, and an `Option` inside one is string-assembly plumbing the shape
+/// has already proven total.
 pub(super) fn block_dot_i8(layout: &BlockLayout) -> Option<BlockDot> {
-    if layout.element.packed_radix > 1 {
-        return radix_block_dot(layout);
+    let shape = int8_dot_shape(layout)?;
+    match shape {
+        Int8DotShape::Radix { radix } => radix_block_dot(layout, u32::from(radix)),
+        Int8DotShape::BitRuns { bits, base_byte } => contiguous_block_dot(layout, usize::from(bits), base_byte),
+        Int8DotShape::NibbleSplit { low_base_byte, high_base_byte } => split_block_dot(layout, low_base_byte, high_base_byte),
+        Int8DotShape::SubBlocks { parts, .. } => sub_block_dot(layout, usize::from(parts)),
     }
-    contiguous_block_dot(layout)
-        .or_else(|| split_block_dot(layout))
-        .or_else(|| sub_block_dot(layout))
 }
 
-fn contiguous_block_dot(layout: &BlockLayout) -> Option<BlockDot> {
-    let element = &layout.element;
-    let bits = usize::from(element.low.bits);
+fn contiguous_block_dot(layout: &BlockLayout, bits: usize, base_byte: usize) -> Option<BlockDot> {
     let elements = usize::from(layout.elements);
-    let linear = layout.sub.is_none()
-        && layout.min.is_none()
-        && element.high.is_none()
-        && element.packed_radix == 0
-        && elements.is_multiple_of(DOT_ELEMENTS)
-        && matches!(bits, 1 | 2 | 4 | 8);
-    if !linear || !values_fit_int8(element, layout.multiplier, bits) {
-        return None;
-    }
-    let chunk_base_bits = contiguous_chunk_base(element, elements, bits)?;
     let name = layout_name(layout);
     let mut helpers = scale_helpers(layout, &name)?;
-    helpers.push_str(&words_helper(&name, layout, bits, chunk_base_bits / 8)?);
+    helpers.push_str(&words_helper(&name, layout, bits, base_byte)?);
     Some(BlockDot {
         name,
         helpers,
@@ -122,30 +113,6 @@ fn sign_token(code: FloatLayout) -> &'static str {
         SignEncoding::Magnitude => "m",
         SignEncoding::Absent => "u",
     }
-}
-
-fn signed_code(code: FloatLayout, raw: i32, bits: usize) -> Option<i32> {
-    match code.sign {
-        SignEncoding::Absent => Some(raw),
-        SignEncoding::TwosComplement => Some(if raw >= 1 << (bits - 1) { raw - (1 << bits) } else { raw }),
-        SignEncoding::Magnitude => None,
-    }
-}
-
-pub(super) fn values_fit_int8(element: &Coded, multiplier: i16, bits: usize) -> bool {
-    (0..1i32 << bits).all(|raw| {
-        signed_code(element.code, raw, bits)
-            .map(|code| i32::from(multiplier) * code - i32::from(element.bias))
-            .is_some_and(|value| (-128..=127).contains(&value))
-    })
-}
-
-/// The bit address of chunk 0, when every chunk is a contiguous run starting
-/// `DOT_ELEMENTS * bits` after the previous one on a 16-bit boundary.
-fn contiguous_chunk_base(element: &Coded, elements: usize, bits: usize) -> Option<usize> {
-    let base = element.low.address(0);
-    let contiguous = (0..elements).all(|index| element.low.address(index) == base + index * bits);
-    (contiguous && base.is_multiple_of(16)).then_some(base)
 }
 
 pub(super) fn scale_read(field: &Field) -> Option<String> {
@@ -251,5 +218,48 @@ mod tests {
         let linear = block_dot_i8(&BlockLayout::PQ2_0).expect("pq2_0 lowers");
         assert_eq!(radix.rows_per_warp, 2);
         assert_eq!(linear.rows_per_warp, 4);
+    }
+}
+
+#[cfg(all(test, feature = "cuda-driver"))]
+mod shape_agreement {
+    use proxima_numeric::NumericFormat;
+    use proxima_numeric::block_layout::BlockLayout;
+    use proxima_numeric::int8_dot::{Int8DotShape, int8_dot_shape};
+
+    use super::{ChunkTerms, block_dot_i8};
+
+    #[test]
+    fn the_shape_decides_the_lowering_for_every_block_layout_the_crate_names() {
+        let named = [
+            BlockLayout::Q4_0, BlockLayout::Q4_1, BlockLayout::Q5_0, BlockLayout::Q5_1, BlockLayout::Q8_0, BlockLayout::Q8_1,
+            BlockLayout::BOOL, BlockLayout::Q1_0, BlockLayout::Q2_0, BlockLayout::PQ2_0, BlockLayout::TQ2_0, BlockLayout::TQ1_0,
+            BlockLayout::PTQ1_0, BlockLayout::Q2_K, BlockLayout::Q3_K, BlockLayout::Q4_K, BlockLayout::Q5_K, BlockLayout::Q6_K,
+            BlockLayout::Q8_1_GROUPED, BlockLayout::Q8_K, BlockLayout::IQ4_NL, BlockLayout::IQ4_XS, BlockLayout::IQ3_S,
+            BlockLayout::IQ2_XXS, BlockLayout::IQ2_S, BlockLayout::IQ2_XS, BlockLayout::IQ3_XXS, BlockLayout::IQ1_S,
+            BlockLayout::IQ1_M, BlockLayout::FP6_E3M2, BlockLayout::MXFP4, BlockLayout::NVFP4,
+        ];
+        assert_eq!(named.len(), 32, "the named layout list");
+        let formats = NumericFormat::ALL.into_iter().chain(NumericFormat::UNTAGGED.into_iter().map(|(format, _)| format));
+        for layout in formats.filter_map(|format| format.block_layout()) {
+            assert!(named.contains(&layout), "{layout:?} is a format's layout the named list misses");
+        }
+        let mut lowered = 0;
+        for layout in named {
+            let shape = int8_dot_shape(&layout);
+            let dot = block_dot_i8(&layout);
+            assert_eq!(shape.is_some(), dot.is_some(), "{layout:?}: shape {shape:?} against lowering");
+            let (Some(shape), Some(dot)) = (shape, dot) else { continue };
+            lowered += 1;
+            match shape {
+                Int8DotShape::Radix { .. } => assert!(dot.centering.is_some() && dot.chunk_terms.is_none(), "{layout:?}"),
+                Int8DotShape::BitRuns { .. } => assert!(dot.centering.is_none() && dot.chunk_terms.is_none() && !dot.name.contains("_ns") && !dot.name.contains("_sb"), "{layout:?}"),
+                Int8DotShape::NibbleSplit { .. } => assert!(dot.name.contains("_ns") && dot.chunk_terms.is_none(), "{layout:?}"),
+                Int8DotShape::SubBlocks { parts, min } => {
+                    assert_eq!(dot.chunk_terms, Some(ChunkTerms { parts: usize::from(parts), min }), "{layout:?}");
+                }
+            }
+        }
+        assert!(lowered > 0, "no layout lowered");
     }
 }
