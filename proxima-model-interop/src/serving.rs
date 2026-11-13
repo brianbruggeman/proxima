@@ -1279,7 +1279,7 @@ impl Default for ServingConfig<'static> {
             #[cfg(feature = "gpu")]
             omega_runtime: None,
             parallel_sequences: 1,
-            // llama.cpp's own -ctk/-ctv default, binary16. Measured on flint (proxnum100/grid, 128
+            // llama.cpp's own -ctk/-ctv default, binary16. Measured on the 26B MoE checkpoint (proxnum100/grid, 128
             // tokens at 84, 510, 2024 and 4069 prompt tokens): generated ids identical to a binary32
             // cache in all four cells. A build with no cached-attention kernel keeps binary32 because
             // its cache is the graph's own output; kv_cache_format::admit_pair there admits any format

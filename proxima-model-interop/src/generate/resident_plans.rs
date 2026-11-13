@@ -774,7 +774,11 @@ mod tests {
 
     #[test]
     fn identity_separates_plans_bound_to_an_f32_cache_from_those_bound_to_an_f16_one() {
-        let f32_cache = ServingConfig::default();
+        let f32_cache = ServingConfig {
+            kv_cache_key_quant: NumericFormat::Float32,
+            kv_cache_value_quant: NumericFormat::Float32,
+            ..ServingConfig::default()
+        };
         let f16_cache = ServingConfig {
             kv_cache_key_quant: NumericFormat::Float16,
             kv_cache_value_quant: NumericFormat::Float16,
