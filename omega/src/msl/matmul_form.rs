@@ -20,6 +20,10 @@ use proxima_numeric::float_layout::SignEncoding;
 
 use super::sub_block_matvec::{SubBlockMatvecRefusal, require, typed_field_read};
 
+/// The local this body names its code bytes by, unique to the flat-block matvec's emitted source;
+/// `PACKED_ROW_BODY_MARKERS` holds it so the profiler classifies this body as packed-row-blocked.
+pub(super) const FLAT_BLOCK_LEVELS_MARKER: &str = "flat_block_levels";
+
 /// Where the scale enters the sum, and what the per-row statement is when it is not the plain
 /// product.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,13 +123,14 @@ impl FlatBlockForm {
         let (elements, base) = (self.elements, self.codes.base_byte);
         format!(
             "            float d = {};\n\
-             \x20           device const uchar *flat_block_levels = blk + {base};\n\
+             \x20           device const uchar *{levels} = blk + {base};\n\
              \x20           float result = 0.0f;\n\
              \x20           for (uint j = 0u; j < {elements}u; ++j) {{\n\
-             \x20               result += d * (float)(({cast})flat_block_levels[j]) * acts[j];\n\
+             \x20               result += d * (float)(({cast}){levels}[j]) * acts[j];\n\
              \x20           }}\n\
              \x20           sumf[q] = sumf[q] + result;\n",
-            self.scale_read
+            self.scale_read,
+            levels = FLAT_BLOCK_LEVELS_MARKER,
         )
     }
 }

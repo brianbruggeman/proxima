@@ -2394,6 +2394,9 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // index32 multi-row reads the weight from the block-origin pointer, which
     // renders `<codec>_element(wblk0` for every codec instead of `(in`/`(blk`
     "_element(wblk0",
+    // `PackedBodySelect::FlatRendered` (Q8_0 plain-product reduce) renders the matvec from the
+    // block layout and calls none of the named helpers above.
+    super::matmul_form::FLAT_BLOCK_LEVELS_MARKER,
 ];
 
 /// `cond ? a : (cond ? b : ...)` over `values`, picked by `lane`: the
