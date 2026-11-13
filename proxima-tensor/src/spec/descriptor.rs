@@ -527,11 +527,6 @@ pub struct FamilyProfile {
     /// keeps the family off the placed single-range cached program.
     #[serde(default)]
     pub kv_cache_shape: KvCacheShape,
-    /// Whether the feed-forward routes through experts with a pre-gather
-    /// execution protocol ([`FfnRouting::Routed`]) or evaluates the same FFN
-    /// every layer.
-    #[serde(default)]
-    pub ffn_routing: FfnRouting,
     /// Measured default for the number of command-buffer chunks one decode
     /// step is submitted in. `1` unless this family's decode was measured to
     /// gain from chunked submission; an explicit caller value always wins.
@@ -591,16 +586,6 @@ pub enum KvCacheShape {
     Monolithic,
 }
 
-/// Whether a family's feed-forward is evaluated unconditionally every layer or
-/// routed through experts under the pre-gather protocol, as data on
-/// [`FamilyProfile::ffn_routing`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FfnRouting {
-    #[default]
-    Dense,
-    Routed,
-}
 
 /// Which channels RoPE rotates together: `(i, i + rotary_dim / 2)` or
 /// `(2i, 2i + 1)`. The count of rotating dims is not here; it is the

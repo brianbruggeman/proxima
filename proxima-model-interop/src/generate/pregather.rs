@@ -27,6 +27,13 @@ fn canonical_safetensors_descriptor(
     ))
 }
 
+/// `{arch}.expert_count` (or a descriptor's `expert_count`) above zero is the
+/// whole of what "this checkpoint has experts" means; the expert protocol
+/// (sidecars, residency, pre-gather, segment evaluation) keys off it.
+pub(super) const fn checkpoint_has_experts(expert_count: u32) -> bool {
+    expert_count > 0
+}
+
 impl<'file> LoadedModel<'file> {
     #[must_use]
     pub fn vocab(&self) -> &Vocab {
@@ -149,7 +156,7 @@ impl<'file> LoadedModel<'file> {
         prompt: &str,
         gpu_layers: i32,
     ) -> Result<Vec<Vec<f32>>, InteropError> {
-        if self.router_roots.is_empty() || self.ffn_routing != FfnRouting::Routed {
+        if self.router_roots.is_empty() || !self.has_experts {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(self.family()),
                 reason: String::from("the bound model does not expose routed-expert router roots"),
@@ -167,7 +174,7 @@ impl<'file> LoadedModel<'file> {
         symbols: &[u64],
     ) -> Result<Vec<crate::recurrent_routed_interval::execution::LayerProgramBoundary>, InteropError>
     {
-        if self.moe_layer_diagnostics.is_empty() || self.ffn_routing != FfnRouting::Routed {
+        if self.moe_layer_diagnostics.is_empty() || !self.has_experts {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(self.family()),
                 reason: String::from("the bound model has no routed-expert layer diagnostics"),
@@ -201,7 +208,7 @@ impl<'file> LoadedModel<'file> {
         )>,
         InteropError,
     > {
-        if self.moe_layer_diagnostics.is_empty() || self.ffn_routing != FfnRouting::Routed {
+        if self.moe_layer_diagnostics.is_empty() || !self.has_experts {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(self.family()),
                 reason: String::from("the bound model has no routed-expert layer diagnostics"),
@@ -2781,13 +2788,16 @@ impl<'file> LoadedModel<'file> {
         // chunk default; `crate::lowering` binds and lowers from that one
         // config, so no per-family branch exists here.
         let profile = family_profile(metadata_str(parsed, "general.architecture")?)?;
+        let bound = source.bind(parsed, file_bytes, kv_layout, descriptor)?;
+        let expert_count =
+            descriptor.map_or(bound.architecture.expert_count, |config| config.expert_count);
+        let has_experts = checkpoint_has_experts(expert_count);
         debug!(
             family = ?profile.schedule_source,
             kv_cache_shape = ?profile.kv_cache_shape,
-            ffn_routing = ?profile.ffn_routing,
+            experts = expert_count,
             "family_route"
         );
-        let bound = source.bind(parsed, file_bytes, kv_layout, descriptor)?;
         #[cfg(all(feature = "metal", target_os = "macos"))]
         let step_state = crate::lowering::step_state(parsed)?;
         // The single-range program is dense-uniform-only
@@ -2833,10 +2843,10 @@ impl<'file> LoadedModel<'file> {
         let speculative_verify_program = source
             .speculative_verify(parsed, file_bytes, kv_layout, descriptor)?
             .map(|verify| (verify.program, verify.logits_root, verify.layer_roots));
-        // routed prefill slices its pre-gather plan from `program`'s own node
-        // ids, which a second graph does not share, so a routed model keeps one
-        // prefill program
-        let prefill_row_cut_program = if profile.ffn_routing == FfnRouting::Routed {
+        // expert prefill slices its pre-gather plan from `program`'s own node
+        // ids, which a second graph does not share, so a model with experts
+        // keeps one prefill program
+        let prefill_row_cut_program = if has_experts {
             None
         } else {
             source
@@ -2880,7 +2890,7 @@ impl<'file> LoadedModel<'file> {
             architecture: bound.architecture,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_cache_shape: profile.kv_cache_shape,
-            ffn_routing: profile.ffn_routing,
+            has_experts,
             command_buffer_chunks: profile.command_buffer_chunks,
             trained_context_length: crate::lowering::trained_context_length(parsed),
             rope_scaling,
@@ -2910,7 +2920,7 @@ impl<'file> LoadedModel<'file> {
             single_position_step: bound.single_position_step,
             recurrent: bound.recurrent,
             recurrent_readouts: bound.readouts,
-            recurrent_routed_interval_hparams: (profile.ffn_routing == FfnRouting::Routed)
+            recurrent_routed_interval_hparams: has_experts
                 .then(|| crate::recurrent_routed_interval::hparams::from_metadata(parsed).ok())
                 .flatten(),
             model_name: crate::bind::metadata_str_opt(parsed, "general.name").map(String::from),
@@ -3110,7 +3120,7 @@ impl<'file> LoadedModel<'file> {
             architecture,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_cache_shape: KvCacheShape::Uniform,
-            ffn_routing: FfnRouting::Dense,
+            has_experts: false,
             command_buffer_chunks: 1,
             // safetensors carries no context_length or rope.scaling key this
             // crate reads (`crate::hf_config::architecture_from_hf_config`

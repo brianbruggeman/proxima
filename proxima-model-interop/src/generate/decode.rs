@@ -44,6 +44,12 @@ trait DecodeStepEvaluator {
     fn carries_recurrent_state(&self) -> bool {
         false
     }
+
+    /// Whether this backend can run the expert pre-gather protocol. A model
+    /// with experts on a backend that cannot evaluates them through the graph.
+    fn runs_expert_protocol(&self) -> bool {
+        true
+    }
 }
 
 struct SyncDecodeTokenProducer<'callback> {
@@ -111,6 +117,10 @@ impl<Owner> DecodeStepEvaluator for AsyncCudaDecodeStepEvaluator<'_, Owner>
 where
     Owner: Future<Output = Result<(), ProximaError>> + Send,
 {
+    fn runs_expert_protocol(&self) -> bool {
+        false
+    }
+
     async fn evaluate_step(
         &mut self,
         runtime: &mut BackendRuntime,
@@ -2253,7 +2263,7 @@ impl<'file> LoadedModel<'file> {
         &mut self,
         sidecar: crate::expert_sidecar::MappedExpertSidecar,
     ) -> Result<(), InteropError> {
-        if self.ffn_routing != FfnRouting::Routed {
+        if !self.has_experts {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: self.architecture.family.clone(),
                 reason: String::from("expert sidecars require a routed-expert graph"),
@@ -2413,7 +2423,7 @@ impl<'file> LoadedModel<'file> {
         ) -> Result<Output, InteropError>,
     {
         let architecture = self.architecture.family.as_str();
-        if self.ffn_routing != FfnRouting::Routed {
+        if !self.has_experts {
             return Err(InteropError::PreGatherExecutionUnsupported {
                 architecture: String::from(architecture),
                 reason: String::from("the bound model is not a routed-expert graph"),
@@ -2570,7 +2580,7 @@ impl<'file> LoadedModel<'file> {
                 mode: "speculative decoding",
             });
         }
-        if serving_config.moe_pre_gather || self.ffn_routing != FfnRouting::Dense {
+        if serving_config.moe_pre_gather {
             return Err(InteropError::AsyncCudaGenerationUnsupported {
                 mode: "routed expert evaluation",
             });
@@ -3626,7 +3636,7 @@ impl<'file> LoadedModel<'file> {
         moe_monolithic_all_low_enabled(
             moe_pre_gather_enabled(
                 serving_config.moe_pre_gather,
-                self.ffn_routing == FfnRouting::Routed,
+                self.has_experts,
             ),
             runtime.uses_gpu(),
             serving_config.moe_monolithic_all_low,
@@ -3655,6 +3665,7 @@ impl<'file> LoadedModel<'file> {
         mut model_proposer: Option<&mut ModelProposer<'_>>,
         evaluator: &mut Evaluator,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
+        let expert_protocol = self.has_experts && evaluator.runs_expert_protocol();
         let mut local_speculative_stats = SpeculativeDecodeStats::default();
         let speculative_stats = speculative_stats.unwrap_or(&mut local_speculative_stats);
         let initial_speculative_stats = *speculative_stats;
@@ -3815,10 +3826,8 @@ impl<'file> LoadedModel<'file> {
         // cache leaf names are never hard-coded twice.
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
         #[cfg(feature = "gpu")]
-        let moe_pre_gather_requested = moe_pre_gather_enabled(
-            serving_config.moe_pre_gather,
-            self.ffn_routing == FfnRouting::Routed,
-        );
+        let moe_pre_gather_requested =
+            moe_pre_gather_enabled(serving_config.moe_pre_gather, expert_protocol);
         #[cfg(feature = "gpu")]
         let monolithic_high_mmap_requested = moe_pre_gather_requested
             && runtime.uses_gpu()
@@ -3999,7 +4008,7 @@ impl<'file> LoadedModel<'file> {
         // when the model owns a low-codec sidecar and the caller supplies a
         // high-precision residency budget.
         let residency_budget = serving_config.moe_residency_budget_bytes;
-        let mut moe_residency = if self.ffn_routing == FfnRouting::Routed
+        let mut moe_residency = if expert_protocol
             && self.expert_sidecar.is_some()
             && residency_budget > 0
         {
@@ -4273,10 +4282,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let device_kv_eligible = runtime.is_metal()
             && self.ring_write_offset == 0
-            && !moe_pre_gather_enabled(
-                serving_config.moe_pre_gather,
-                self.ffn_routing == FfnRouting::Routed,
-            )
+            && !moe_pre_gather_enabled(serving_config.moe_pre_gather, expert_protocol)
             && layer_caches
                 .iter()
                 .any(|state| matches!(state, LayerCacheState::Attention(_)))
@@ -4293,7 +4299,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
             device_kv_eligible,
             backend_metal = runtime.is_metal(),
             ring_write_offset = self.ring_write_offset as u64,
-            ffn_routed = self.ffn_routing == FfnRouting::Routed,
+            experts = expert_protocol,
             greedy_on_device_candidate = device_kv_eligible && max_tokens > 1,
             "device_kv_eligibility: attention layers keep kv on device only for a metal, ring-free, non-moe, attention-or-shared layer set"
         );
@@ -4375,7 +4381,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
             }),
             kv_carry_eligible,
             runtime_carries_state_on_device = runtime.carries_state_on_device(),
-            ffn_routed = self.ffn_routing == FfnRouting::Routed,
+            experts = expert_protocol,
             "kv_carry_decision: kv carry needs a binary32 cache, no ring, a device-carrying runtime and a non-routed ffn"
         );
         let mut kv_carried: Vec<KvCarryLeaf> = Vec::new();
@@ -4735,7 +4741,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         && runtime.carries_state_on_device()
                         && new_count == 1
                         && !speculative_step
-                        && self.ffn_routing != FfnRouting::Routed;
+                        && !expert_protocol;
                     if !carry_state_this_step && !carried_layers.is_empty() {
                         flush_carried_state(runtime, &mut layer_caches, &carried_layers)?;
                         carried_layers.clear();
@@ -4752,7 +4758,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     }
                     let carry_kv_this_step = kv_carry_eligible
                         && runtime.carries_state_on_device()
-                        && self.ffn_routing != FfnRouting::Routed;
+                        && !expert_protocol;
                     if kv_carry_step_reported != Some(carry_kv_this_step) {
                         kv_carry_step_reported = Some(carry_kv_this_step);
                         debug!(
@@ -4760,7 +4766,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             carry_kv_this_step,
                             kv_carry_eligible,
                             runtime_carries_state_on_device = runtime.carries_state_on_device(),
-                            ffn_routed = self.ffn_routing == FfnRouting::Routed,
+                            experts = expert_protocol,
                             "kv_carry_step_decision: logged when the per-step answer changes, not every token"
                         );
                     }
@@ -5211,7 +5217,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         Vec::with_capacity(1 + active_layer_roots.len() * 3);
                     let monolithic_prefill_requested = moe_pre_gather_enabled(
                         serving_config.moe_pre_gather,
-                        self.ffn_routing == FfnRouting::Routed,
+                        expert_protocol,
                     ) && runtime.uses_gpu()
                         && step == 0
                         && serving_config.moe_monolithic_all_low;
@@ -5461,7 +5467,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             .filter(|name| {
                                 !(moe_pre_gather_enabled(
                                     serving_config.moe_pre_gather,
-                                    self.ffn_routing == FfnRouting::Routed,
+                                    expert_protocol,
                                 ) && (name.contains("_exps.weight")
                                     || name.starts_with("gdn_prefill.")))
                             })
@@ -5575,7 +5581,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     // reachable only in `active_program`'s own numbering).
                     let pre_gather = moe_pre_gather_enabled(
                         serving_config.moe_pre_gather,
-                        self.ffn_routing == FfnRouting::Routed,
+                        expert_protocol,
                     ) && !monolithic_high_mmap_requested
                         && !one_evaluation_prefill
                         && recurrent_verify.is_none();
@@ -7382,7 +7388,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                 let residency_boundary_requested = moe_residency.is_some()
                     && moe_pre_gather_enabled(
                         serving_config.moe_pre_gather,
-                        self.ffn_routing == FfnRouting::Routed,
+                        expert_protocol,
                     )
                     && runtime.uses_gpu()
                     && !monolithic_high_mmap_requested;
@@ -8469,7 +8475,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
         // The recurrent-routed diagnostic can request an interior routed node, so
         // keep it on the partition-isolated seam. Other one-shot forwards
         // retain the ordinary evaluator and its normal cache bookkeeping.
-        let evaluated = if self.ffn_routing == FfnRouting::Routed {
+        let evaluated = if self.has_experts {
             runtime.evaluate_segment(
                 &self.program,
                 &symbols,

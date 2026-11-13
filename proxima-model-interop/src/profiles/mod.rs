@@ -71,7 +71,7 @@ mod tests {
     use std::path::Path;
     use proxima_tensor::spec::{
         Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-        FfnRouting, KvCacheShape, RopePairing, ScheduleSource,
+        KvCacheShape, RopePairing, ScheduleSource,
     };
 
     #[test]
@@ -173,7 +173,6 @@ mod tests {
         );
         assert_eq!(profile.schedule_source, ScheduleSource::SlidingPattern);
         assert_eq!(profile.kv_cache_shape, KvCacheShape::Custom);
-        assert_eq!(profile.ffn_routing, FfnRouting::Routed);
         assert_eq!(
             profile.layer_ffn(256).combination,
             FfnCombination::RoutedWithSharedExpert
@@ -210,85 +209,29 @@ mod tests {
     }
 
     #[test]
-    fn each_profile_names_its_header_reader_cache_shape_routing_and_chunk_default() {
+    fn each_profile_names_its_header_reader_cache_shape_and_chunk_default() {
         let table = [
-            (
-                "llama",
-                ScheduleSource::Uniform,
-                KvCacheShape::Uniform,
-                FfnRouting::Dense,
-                1,
-            ),
-            (
-                "mixtral",
-                ScheduleSource::Uniform,
-                KvCacheShape::Uniform,
-                FfnRouting::Dense,
-                1,
-            ),
-            (
-                "granitemoe",
-                ScheduleSource::Uniform,
-                KvCacheShape::Uniform,
-                FfnRouting::Dense,
-                8,
-            ),
-            (
-                "qwen2",
-                ScheduleSource::Uniform,
-                KvCacheShape::Uniform,
-                FfnRouting::Dense,
-                1,
-            ),
-            (
-                "qwen3",
-                ScheduleSource::Uniform,
-                KvCacheShape::Uniform,
-                FfnRouting::Dense,
-                1,
-            ),
-            (
-                "lfm2moe",
-                ScheduleSource::Uniform,
-                KvCacheShape::Uniform,
-                FfnRouting::Dense,
-                1,
-            ),
-            (
-                "gemma4",
-                ScheduleSource::SlidingPattern,
-                KvCacheShape::Custom,
-                FfnRouting::Dense,
-                8,
-            ),
-            (
-                "flint",
-                ScheduleSource::SlidingPattern,
-                KvCacheShape::Custom,
-                FfnRouting::Routed,
-                8,
-            ),
-            (
-                "qwen35",
-                ScheduleSource::RecurrentInterval,
-                KvCacheShape::Custom,
-                FfnRouting::Dense,
-                1,
-            ),
+            ("llama", ScheduleSource::Uniform, KvCacheShape::Uniform, 1),
+            ("mixtral", ScheduleSource::Uniform, KvCacheShape::Uniform, 1),
+            ("granitemoe", ScheduleSource::Uniform, KvCacheShape::Uniform, 8),
+            ("qwen2", ScheduleSource::Uniform, KvCacheShape::Uniform, 1),
+            ("qwen3", ScheduleSource::Uniform, KvCacheShape::Uniform, 1),
+            ("lfm2moe", ScheduleSource::Uniform, KvCacheShape::Uniform, 1),
+            ("gemma4", ScheduleSource::SlidingPattern, KvCacheShape::Custom, 8),
+            ("flint", ScheduleSource::SlidingPattern, KvCacheShape::Custom, 8),
+            ("qwen35", ScheduleSource::RecurrentInterval, KvCacheShape::Custom, 1),
             (
                 "qwen35moe",
                 ScheduleSource::RecurrentRoutedInterval,
                 KvCacheShape::Monolithic,
-                FfnRouting::Routed,
                 1,
             ),
         ];
-        for (family, source, shape, routing, chunks) in table {
+        for (family, source, shape, chunks) in table {
             let profile = family_profile(family).expect("profile embedded");
 
             assert_eq!(profile.schedule_source, source, "{family} schedule source");
             assert_eq!(profile.kv_cache_shape, shape, "{family} cache shape");
-            assert_eq!(profile.ffn_routing, routing, "{family} routing");
             assert_eq!(
                 profile.command_buffer_chunks, chunks,
                 "{family} chunk default"
