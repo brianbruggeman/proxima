@@ -5,7 +5,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::bpe::{decode_ids, encode_char_pretoken, encode_pretoken};
+use crate::bpe::{encode_char_pretoken, encode_pretoken};
 use crate::error::TokenizerError;
 use crate::pretokenize::{pretokenize, pretokenize_newline_runs};
 use crate::unigram;
@@ -196,24 +196,100 @@ pub fn drain_lossy_utf8(pending: &mut Vec<u8>, output: &mut String) {
 /// like any other id (an out-of-range Control id still errors, since
 /// `Vocab::token_type` returns `None` for it, not `Some(Control)`).
 pub fn decode(ids: &[u32], vocab: &Vocab) -> Result<String, TokenizerError> {
-    let text_ids: Vec<u32> = ids
-        .iter()
-        .copied()
-        .filter(|&id| vocab.token_type(id) != Some(TokenType::Control))
-        .collect();
-    let mut pending = decode_ids(&text_ids, vocab)?;
     let mut text = String::new();
-    drain_lossy_utf8(&mut pending, &mut text);
-    if !pending.is_empty() {
-        text.push('\u{FFFD}');
-    }
-    if vocab.is_char_level_bpe() {
-        return Ok(unigram::replace_space_markers(&text));
-    }
-    if vocab.space_marker() == crate::vocab::SpaceMarker::SentencePiece {
-        return Ok(unigram::unescape(&text));
-    }
+    decode_into(ids, vocab, &mut text)?;
     Ok(text)
+}
+
+/// [`decode`] into a caller-owned `out`: clears it, then writes the decoded
+/// text, reusing its capacity.
+///
+/// Composes [`Vocab::token_type`] (Control ids are skipped inline, no
+/// filtered id vec), [`Vocab::token_bytes`] (the byte length is summed
+/// first so `out` is reserved once), and the same lossy-UTF-8 and
+/// space-marker rules [`decode`] documents, applied in place on the byte
+/// buffer. Once `out` has grown to the decoded length, a call allocates
+/// nothing in the valid-UTF-8 case (invalid byte runs take a cold
+/// repair path). [`decode`] is this function into a fresh `String`; prefer
+/// `decode_into` for a caller that decodes repeatedly (a streaming loop, a
+/// benchmark), `decode` for a one-shot.
+///
+/// # Errors
+///
+/// [`TokenizerError::TokenIdOutOfRange`] for an id absent from `vocab`;
+/// `out` is left empty.
+pub fn decode_into(ids: &[u32], vocab: &Vocab, out: &mut String) -> Result<(), TokenizerError> {
+    let mut bytes = core::mem::take(out).into_bytes();
+    bytes.clear();
+    let mut total = 0usize;
+    for &id in ids {
+        let piece = vocab
+            .token_bytes(id)
+            .ok_or(TokenizerError::TokenIdOutOfRange {
+                token_id: id,
+                vocab_len: vocab.len(),
+            });
+        match piece {
+            Ok(piece) if vocab.token_type(id) != Some(TokenType::Control) => total += piece.len(),
+            Ok(_) => {}
+            Err(error) => {
+                *out = String::from_utf8(bytes).unwrap_or_default();
+                return Err(error);
+            }
+        }
+    }
+    bytes.reserve(total);
+    for &id in ids {
+        if vocab.token_type(id) == Some(TokenType::Control) {
+            continue;
+        }
+        if let Some(piece) = vocab.token_bytes(id) {
+            bytes.extend_from_slice(piece);
+        }
+    }
+    let char_level = vocab.is_char_level_bpe();
+    let sentence_piece = !char_level && vocab.space_marker() == crate::vocab::SpaceMarker::SentencePiece;
+    if char_level || sentence_piece {
+        replace_space_marker_bytes(&mut bytes);
+    }
+    if sentence_piece && bytes.first() == Some(&b' ') {
+        bytes.remove(0);
+    }
+    match String::from_utf8(bytes) {
+        Ok(text) => *out = text,
+        Err(error) => {
+            let mut pending = error.into_bytes();
+            let mut text = String::new();
+            drain_lossy_utf8(&mut pending, &mut text);
+            if !pending.is_empty() {
+                text.push('\u{FFFD}');
+            }
+            *out = text;
+        }
+    }
+    Ok(())
+}
+
+/// U+2581 in UTF-8, the SentencePiece space marker.
+const SPACE_MARKER_UTF8: [u8; 3] = [0xE2, 0x96, 0x81];
+
+/// Byte-level [`unigram::replace_space_markers`]: each marker becomes one
+/// space, compacting in place. U+2581 starts with a lead byte, so it can
+/// never be swallowed as the continuation of a preceding invalid run.
+fn replace_space_marker_bytes(bytes: &mut Vec<u8>) {
+    let mut read = 0;
+    let mut write = 0;
+    while read < bytes.len() {
+        if bytes[read..].starts_with(&SPACE_MARKER_UTF8) {
+            bytes[write] = b' ';
+            read += SPACE_MARKER_UTF8.len();
+        } else {
+            bytes[write] = bytes[read];
+            read += 1;
+        }
+        write += 1;
+    }
+    bytes.truncate(write);
 }
 
 #[cfg(test)]
@@ -323,5 +399,40 @@ mod tests {
             "hi"
         );
         assert_eq!(decode(&bpe_ids, &bpe_vocab).expect("bpe decodes"), "hi");
+    }
+
+    #[test]
+    fn decode_into_matches_decode_for_every_vocab_branch() {
+        let base = tiny_vocab();
+        let h_id = base.token_id("h").expect("h token exists");
+        let i_id = base.token_id("i").expect("i token exists");
+        let hi_id = base.token_id("hi").expect("hi token exists");
+        let mut token_types = alloc::vec![TokenType::Normal; base.len()];
+        token_types[hi_id as usize] = TokenType::Control;
+        let control_vocab = base.clone().with_token_types(token_types).expect("types fit");
+        let gemma = tiny_gemma4_vocab();
+        let gemma_hi = gemma.token_id("hi").expect("hi");
+        let gemma_space = gemma.token_id("\u{2581}").expect("marker");
+        let cases: [(&Vocab, Vec<u32>); 5] = [
+            (&base, encode(" hi hi \u{1F600}", &base).expect("encodes")),
+            (&control_vocab, alloc::vec![h_id, hi_id, i_id]),
+            (&gemma, alloc::vec![gemma_space, gemma_hi, gemma_space, gemma_hi]),
+            (&tiny_unigram_vocab(), encode(" hi hi", &tiny_unigram_vocab()).expect("encodes")),
+            (&base, alloc::vec![]),
+        ];
+        let mut out = String::from("stale contents that must be cleared");
+        for (vocab, ids) in &cases {
+            decode_into(ids, vocab, &mut out).expect("decode_into");
+            assert_eq!(out, decode(ids, vocab).expect("decode"), "ids {ids:?}");
+        }
+    }
+
+    #[test]
+    fn decode_into_out_of_range_id_errors_and_leaves_out_empty() {
+        let vocab = tiny_vocab();
+        let mut out = String::from("x");
+        let error = decode_into(&[u32::MAX], &vocab, &mut out).expect_err("out of range");
+        assert!(matches!(error, TokenizerError::TokenIdOutOfRange { .. }));
+        assert!(out.is_empty());
     }
 }
