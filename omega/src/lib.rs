@@ -61,6 +61,8 @@ pub mod cuda_driver;
 #[cfg(feature = "cuda-driver")]
 mod derived_quantize;
 #[cfg(feature = "cuda-driver")]
+pub use derived_quantize::ActivationRefusal;
+#[cfg(feature = "cuda-driver")]
 pub mod kernel_cache_config;
 #[cfg(feature = "cuda-driver")]
 pub mod cuda_kernel_cache;

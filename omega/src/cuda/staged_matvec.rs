@@ -9,6 +9,7 @@ use proxima_tensor::{BoundOp, BoundOpKind, Keep, Layout, NodeId, ReduceInit, Sca
 use proxima_numeric::{DType, NumericPolicy};
 
 use super::block_dot::{BlockDot, ChunkTerms, DOT_ELEMENTS, block_dot_i8};
+use super::block_quantize::consumer_missing;
 use super::int8_gemm::{activation_block_offset, activation_code_offset, activation_code_words, activation_scale_offset};
 use super::{
     EmitDevice,
@@ -98,6 +99,12 @@ fn is_contiguous_run(layout: &Layout, reduce_dims: &[u16], reduce_extents: &[u64
     layout.base.rem_euclid(4) == 0
 }
 
+fn readable_activation_layout(activation: &Codec) -> Option<BlockLayout> {
+    let layout = activation.block_layout()?;
+    consumer_missing(&layout).ok()?;
+    Some(layout)
+}
+
 pub(super) fn staged_matvec_plan(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
@@ -128,10 +135,10 @@ pub(super) fn staged_matvec_plan(
         [Some(codec), None] => (0, 1, *codec, None),
         [None, Some(codec)] => (1, 0, *codec, None),
         [Some(codec), Some(activation)] if activation.is_quantized_activation() && !codec.is_quantized_activation() => {
-            (0, 1, *codec, Some(activation.block_layout()?))
+            (0, 1, *codec, Some(readable_activation_layout(activation)?))
         }
         [Some(activation), Some(codec)] if activation.is_quantized_activation() && !codec.is_quantized_activation() => {
-            (1, 0, *codec, Some(activation.block_layout()?))
+            (1, 0, *codec, Some(readable_activation_layout(activation)?))
         }
         _ => return None,
     };

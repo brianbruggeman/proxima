@@ -8,15 +8,28 @@ use std::cmp::Reverse;
 use std::collections::BTreeMap;
 
 use proxima_numeric::block_layout::BlockLayout;
+use proxima_numeric::{DType, NumericFormat, NumericPolicy, NumericRewrite, admit};
 use proxima_tensor::{BoundOp, BoundOpKind, Keep, Layout, NodeId, Op, ScalarOp, Shapes};
-use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 use crate::backend::GpuDriver;
-use crate::cuda::{int8_gemm_serves, staged_matvec_serves};
+use crate::cuda::{Missing, consumer_missing, int8_gemm_serves, producer_missing, staged_matvec_serves};
 use crate::identity::operand_codecs;
 use crate::lowering::{Codec, PackedOperands};
 
-const QUANTIZE_GROUP: u64 = 32;
+/// Elements per scale the default activation (the Q8_1 pair) needs the depth to fill.
+const DEFAULT_GROUP: u64 = 32;
+
+/// A configured activation storage format the plan cannot honour, and the render pieces it lacks.
+/// The plan refuses instead of quietly keeping the activation in binary32.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("activation storage {format:?} is not servable: producer {producer:?}, consumer {consumer:?}")]
+pub struct ActivationRefusal {
+    pub format: NumericFormat,
+    /// The CUDA quantize render's missing piece, with the file and line that found it missing.
+    pub producer: Option<Missing>,
+    /// The activation readers' missing piece (int8 gemm, staged matvec), likewise.
+    pub consumer: Option<Missing>,
+}
 
 struct Consumer {
     position: usize,
@@ -61,6 +74,7 @@ fn gemm_activation(
     shapes: &Shapes,
     packed: &PackedOperands,
     policy: NumericPolicy,
+    storage: Option<Codec>,
 ) -> Option<(NodeId, usize)> {
     let BoundOpKind::Reduce { keep: Keep::Reduce, reduce_op: ScalarOp::Add, operands, .. } = &bound.kind else {
         return None;
@@ -74,7 +88,7 @@ fn gemm_activation(
     let (activation, layout, _) = operands.get(slot)?;
     let [tokens, depth] = collapsed_extent(shapes.of(*activation))?;
     let float_node = matches!(program.get(activation.0 as usize)?.dtype(), DType::FLOAT32);
-    let held = activation_codec(depth);
+    let held = activation_codec(depth, storage);
     let served = if tokens == 1 {
         staged_matvec_serves(bound, packed, slot, held, policy)
     } else {
@@ -82,7 +96,7 @@ fn gemm_activation(
             && activation_is_flat(bound, layout, tokens, depth)
             && int8_gemm_serves(bound, packed, slot, held, policy)
     };
-    let eligible = float_node && depth.is_multiple_of(QUANTIZE_GROUP) && served;
+    let eligible = float_node && depth.is_multiple_of(group_elements(storage)) && served;
     eligible.then_some((*activation, slot))
 }
 
@@ -92,37 +106,64 @@ fn consumers_by_activation(
     shapes: &Shapes,
     packed: &PackedOperands,
     policy: NumericPolicy,
+    storage: Option<Codec>,
 ) -> BTreeMap<NodeId, Vec<Consumer>> {
     let mut by_activation: BTreeMap<NodeId, Vec<Consumer>> = BTreeMap::new();
     for (position, bound) in resolved.iter().enumerate() {
-        if let Some((activation, slot)) = gemm_activation(bound, program, shapes, packed, policy) {
+        if let Some((activation, slot)) = gemm_activation(bound, program, shapes, packed, policy, storage) {
             by_activation.entry(activation).or_default().push(Consumer { position, slot });
         }
     }
     by_activation
 }
 
-/// The aligned grouped layout where the depth fills whole groups, else the plain 32-element one.
-fn activation_codec(depth: u64) -> Codec {
+/// Elements one scale covers in the activation a plan stores: the configured format's block, or the
+/// default's group.
+fn group_elements(storage: Option<Codec>) -> u64 {
+    storage.map_or(DEFAULT_GROUP, |format| u64::from(format.packed_elements()))
+}
+
+/// The format an activation of this depth is stored in: the configured one, else the default pair
+/// (the aligned grouped Q8_1 layout where the depth fills whole groups, else the plain one).
+fn activation_codec(depth: u64, storage: Option<Codec>) -> Codec {
+    if let Some(format) = storage {
+        return format;
+    }
     let grouped = BlockLayout::Q8_1_GROUPED;
     if depth.is_multiple_of(u64::from(grouped.elements)) { Codec::Q8_1Grouped } else { Codec::Q8_1 }
 }
 
-fn quantize_op(derived: NodeId, activation: NodeId, extent: [u64; 2], template: &Layout) -> BoundOp {
+/// Why a configured format cannot be the plan's activation storage, `None` when the producer and
+/// the readers can serve it. A non-block format (a scalar) is not a BlockQuantize concern.
+fn storage_refusal(format: NumericFormat) -> Option<ActivationRefusal> {
+    let Some(layout) = format.block_layout() else {
+        return Some(ActivationRefusal { format, producer: None, consumer: None });
+    };
+    let producer = producer_missing(&layout).err();
+    let consumer = consumer_missing(&layout).err();
+    (producer.is_some() || consumer.is_some()).then_some(ActivationRefusal { format, producer, consumer })
+}
+
+fn quantize_op(
+    derived: NodeId,
+    activation: NodeId,
+    extent: [u64; 2],
+    template: &Layout,
+    held: &BlockLayout,
+) -> BoundOp {
     let [tokens, depth] = extent;
     let mut layout = template.clone();
     layout.base = 0;
     layout.strides.clear();
     layout.strides.extend([depth as i64, 1]);
-    let layout_q8 = activation_codec(depth).block_layout().unwrap_or(BlockLayout::Q8_1);
-    let bytes = depth / u64::from(layout_q8.elements) * u64::from(layout_q8.block_bytes);
+    let bytes = depth / u64::from(held.elements) * u64::from(held.block_bytes);
     BoundOp {
         node: derived,
         dtype: DType::UINT8,
         extents: vec![tokens, bytes],
         kind: BoundOpKind::BlockQuantize {
             operands: vec![(activation, layout, None)],
-            layout: Box::new(layout_q8),
+            layout: Box::new(*held),
         },
     }
 }
@@ -135,22 +176,38 @@ fn repoint(bound: &mut BoundOp, slot: usize, derived: NodeId) {
     }
 }
 
-/// Adds one q8_1 quantize node per activation that has an int8 gemm reader this backend serves,
+/// Whether the plan can store activations in the configured block `format` (a descriptor's
+/// `activation_storage`); `None` format is the default Q8_1 pair, always servable.
+///
+/// # Errors
+/// [`ActivationRefusal`] naming the producer and reader pieces the format lacks, so a configured
+/// format is never silently left in binary32. Boxed: the refusal carries a 700-byte format and is
+/// built once per plan, never on a hot path.
+pub(crate) fn validate_storage(format: Option<NumericFormat>) -> Result<(), Box<ActivationRefusal>> {
+    match format.and_then(storage_refusal) {
+        Some(refusal) => Err(Box::new(refusal)),
+        None => Ok(()),
+    }
+}
+
+/// Adds one quantize node per activation that has an int8 gemm reader this backend serves,
 /// positioned just before the first such gemm, repoints only those readers, and records the node
-/// in `packed` as a `Q8_1` operand. The same inputs always yield the same ids and positions.
-pub(crate) fn derive_block_quantize(
+/// in `packed`. `storage` `None` is the default q8_1 pair; otherwise the caller has passed it
+/// through [`validate_storage`]. The same inputs always yield the same ids and positions.
+pub(crate) fn derive_with_storage(
     resolved: Vec<BoundOp>,
     program: &[Op],
     shapes: &Shapes,
     packed: &mut PackedOperands,
     policy: NumericPolicy,
     driver: GpuDriver,
+    storage: Option<Codec>,
 ) -> Vec<BoundOp> {
     packed.retain(|node, _| (node.0 as usize) < program.len());
     if !driver.lowers_block_quantize() || admit(policy, NumericRewrite::ActivationQuantization).is_err() {
         return resolved;
     }
-    let activations = consumers_by_activation(&resolved, program, shapes, packed, policy);
+    let activations = consumers_by_activation(&resolved, program, shapes, packed, policy, storage);
     let ids: BTreeMap<NodeId, NodeId> = activations
         .keys()
         .enumerate()
@@ -163,13 +220,17 @@ pub(crate) fn derive_block_quantize(
         let Some([tokens, depth]) = collapsed_extent(shapes.of(*activation)) else {
             continue;
         };
+        let held_codec = activation_codec(depth, storage);
+        let Some(held) = held_codec.block_layout() else {
+            continue;
+        };
         let first = consumers.iter().map(|consumer| consumer.position).min().unwrap_or(0);
         let template = &resolved[first].operands()[consumers[0].slot].1;
-        inserts.entry(first).or_default().push(quantize_op(derived, *activation, [tokens, depth], template));
+        inserts.entry(first).or_default().push(quantize_op(derived, *activation, [tokens, depth], template, &held));
         for consumer in consumers {
             repoints.entry(consumer.position).or_default().push((consumer.slot, derived));
         }
-        packed.insert(derived, activation_codec(depth));
+        packed.insert(derived, held_codec);
     }
     let mut out = Vec::with_capacity(resolved.len() + ids.len());
     for (position, mut bound) in resolved.into_iter().enumerate() {
@@ -298,7 +359,7 @@ mod tests {
     fn derive(fixture: &Fixture, policy: NumericPolicy, driver: GpuDriver) -> (Vec<BoundOp>, PackedOperands) {
         let mut packed = fixture.packed.clone();
         let derived =
-            derive_block_quantize(fixture.resolved.clone(), &fixture.program, &fixture.shapes, &mut packed, policy, driver);
+            derive_with_storage(fixture.resolved.clone(), &fixture.program, &fixture.shapes, &mut packed, policy, driver, None);
         (derived, packed)
     }
 
@@ -400,6 +461,47 @@ mod tests {
         assert_eq!(derive(&fixture, granted(), GpuDriver::Cuda).0, derived, "derivation is deterministic");
     }
 
+    fn derive_stored(fixture: &Fixture, format: NumericFormat) -> Result<(Vec<BoundOp>, PackedOperands), ActivationRefusal> {
+        validate_storage(Some(format)).map_err(|refusal| *refusal)?;
+        let mut packed = fixture.packed.clone();
+        let derived = derive_with_storage(
+            fixture.resolved.clone(),
+            &fixture.program,
+            &fixture.shapes,
+            &mut packed,
+            granted(),
+            GpuDriver::Cuda,
+            Some(format),
+        );
+        Ok((derived, packed))
+    }
+
+    #[test]
+    fn naming_the_default_format_derives_the_same_plan_as_naming_none() {
+        for tokens in [1, 3] {
+            let fixture = fixture(tokens, false);
+            let default = derive(&fixture, granted(), GpuDriver::Cuda);
+            let named = derive_stored(&fixture, NumericFormat::Q8_1Grouped).expect("the default format is servable");
+            assert_eq!(named, default, "{tokens} tokens");
+        }
+    }
+
+    #[test]
+    fn a_float_coded_block_format_is_refused_naming_producer_and_reader_pieces_with_lines() {
+        let fixture = fixture(3, false);
+        let refusal = derive_stored(&fixture, NumericFormat::Mxfp4).expect_err("mxfp4 has no cuda render yet");
+        let producer = refusal.producer.expect("the quantize render lacks a piece");
+        let consumer = refusal.consumer.expect("the int8 readers lack a piece");
+        assert!(producer.file.ends_with("cuda/block_quantize.rs") && producer.line > 0, "{producer:?}");
+        assert!(consumer.file.ends_with("cuda/block_quantize.rs") && consumer.line > 0, "{consumer:?}");
+    }
+
+    #[test]
+    fn a_weight_only_int8_layout_without_the_stored_sum_is_refused_not_misrendered() {
+        let fixture = fixture(3, false);
+        assert!(derive_stored(&fixture, NumericFormat::Q8_0).is_err());
+    }
+
     #[test]
     fn a_single_token_plan_gets_a_derived_node_for_the_staged_matvec() {
         let fixture = fixture(1, false);
@@ -427,10 +529,10 @@ mod tests {
 
     #[test]
     fn depth_picks_the_aligned_grouped_layout_only_when_it_fills_whole_groups() {
-        assert_eq!(activation_codec(4096), Codec::Q8_1Grouped);
-        assert_eq!(activation_codec(128), Codec::Q8_1Grouped);
-        assert_eq!(activation_codec(96), Codec::Q8_1);
-        assert_eq!(activation_codec(32), Codec::Q8_1);
+        assert_eq!(activation_codec(4096, None), Codec::Q8_1Grouped);
+        assert_eq!(activation_codec(128, None), Codec::Q8_1Grouped);
+        assert_eq!(activation_codec(96, None), Codec::Q8_1);
+        assert_eq!(activation_codec(32, None), Codec::Q8_1);
     }
 
     #[test]
