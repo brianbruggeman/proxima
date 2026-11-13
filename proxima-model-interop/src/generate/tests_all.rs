@@ -5220,6 +5220,49 @@ mod greedy_tie_break {
         .expect("non-empty logits select a token")
     }
 
+    fn select_suppressing(logits: &[f32], suppressed_ids: &[u32]) -> u32 {
+        select_decoded_token(
+            0,
+            &super::super::decode::logits_without_suppressed(logits, suppressed_ids),
+            &[],
+            0,
+            None,
+            greedy_config(),
+            &mut fastrand::Rng::with_seed(1),
+        )
+        .expect("non-empty logits select a token")
+    }
+
+    fn eog_vocab() -> proxima_tokenizer::Vocab {
+        let tokens = ["<eos>", "<end_of_turn>", "hello", "world"]
+            .map(String::from)
+            .to_vec();
+        proxima_tokenizer::Vocab::new(tokens, &[], None, Some(0), None)
+            .expect("small vocabulary with an eos id builds")
+    }
+
+    /// llama.cpp `ignore_eos` biases every eog id to -inf (`common/common.cpp:1306-1318`).
+    #[test]
+    fn ignore_eos_selects_the_best_non_eog_id_when_an_eog_id_has_the_top_logit() {
+        let vocab = eog_vocab();
+        let suppressed_ids = super::super::decode::suppressed_eog_ids(&vocab, true);
+        assert!(suppressed_ids.contains(&0), "the eos id is in the vocab's eog set");
+        assert_eq!(select_suppressing(&[9.0, 1.0, 4.0, 3.0], suppressed_ids), 2);
+    }
+
+    #[test]
+    fn ignore_eos_off_selects_the_eog_id_with_the_top_logit() {
+        let vocab = eog_vocab();
+        let suppressed_ids = super::super::decode::suppressed_eog_ids(&vocab, false);
+        assert!(suppressed_ids.is_empty());
+        assert_eq!(select_suppressing(&[9.0, 1.0, 4.0, 3.0], suppressed_ids), 0);
+    }
+
+    #[test]
+    fn ignore_eos_skips_every_eog_id_not_only_the_first() {
+        assert_eq!(select_suppressing(&[9.0, 8.0, 4.0, 3.0], &[0, 1]), 2);
+    }
+
     /// llama.cpp's greedy sampler (`llama_sampler_greedy_apply`, src/llama-sampler.cpp:1053-1060
     /// at f1ea20621) replaces the pick only on a strict `>`, so the first of tied maxima wins.
     #[test]

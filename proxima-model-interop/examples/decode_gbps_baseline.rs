@@ -25,6 +25,8 @@
 //! settings' own key (`SpeculativeSettings`, `speculative_settings.rs`), read
 //! through `SpeculativeSettings::from_env` with every other `PROXIMA_SPECULATIVE_*`
 //! field; unset keeps the serving default, ngram-simple.
+//! `PROXIMA_IGNORE_EOS=1` sets `ServingConfig::ignore_eos`: generate exactly the
+//! requested max tokens instead of stopping at the end-of-generation id.
 //! A half-width KV cache (`PROXIMA_KV_CACHE_TYPE=f16`) requires it, because a
 //! verify step reads the cache through a kernel that only reads f32.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -323,7 +325,13 @@ fn main() {
             ),
             Err(_) => ServingConfig::default().warm_model_buffers_at_load,
         };
+    let ignore_eos = match std::env::var("PROXIMA_IGNORE_EOS").as_deref() {
+        Ok("1") => true,
+        Ok("0") | Err(_) => false,
+        Ok(other) => panic!("PROXIMA_IGNORE_EOS={other}: expected `0` or `1`"),
+    };
     let serving_config = ServingConfig {
+        ignore_eos,
         warm_model_buffers_at_load,
         speculative,
         gpu_layers: GPU_LAYERS_ALL,
