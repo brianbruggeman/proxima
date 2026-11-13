@@ -8,54 +8,20 @@ use alloc::format;
 use alloc::string::String;
 
 use proxima_numeric::block_layout::BlockLayout;
-use proxima_numeric::float_layout::FloatLayout;
-use proxima_tensor::{BoundOp, BoundOpKind};
+pub use proxima_tensor::Missing;
+use proxima_tensor::{ACTIVATION_GROUP_ELEMENTS, BoundOp, BoundOpKind, is_int8_run_layout, quantize_rule_is_served};
 
 use super::{CudaGridSpec, EmitError, MAX_GRID_BLOCKS};
 use crate::grid::checked_product;
 
 const QUANTIZE_THREADS: u64 = 256;
-const GROUP_ELEMENTS: u64 = 32;
+const GROUP_ELEMENTS: u64 = ACTIVATION_GROUP_ELEMENTS;
 
 fn unsupported(resolved: &BoundOp, kind: &'static str) -> EmitError {
     EmitError::CudaUnsupportedOpKind {
         node: resolved.node,
         kind,
     }
-}
-
-fn codes_are_byte_runs(layout: &BlockLayout) -> bool {
-    let element = &layout.element;
-    let run = usize::from(layout.run_elements());
-    element.code == FloatLayout::INT8
-        && element.high.is_none()
-        && element.low.bits == 8
-        && (0..usize::from(layout.elements))
-            .all(|index| element.low.address(index) == layout.run_code_byte((index / run) as u16) * 8 + index % run * 8)
-}
-
-/// A piece the CUDA render lacks for a block activation layout, with the line that found it
-/// missing, so a refusal points at the code that would have to change and never at a format name.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Missing {
-    pub piece: &'static str,
-    pub file: &'static str,
-    pub line: u32,
-}
-
-/// Int8 codes in 32-element byte runs under an f16 scale, each run's scale followed by the two-byte
-/// stored sum the int8 readers fold in: what `quantize_device` writes and `activation_code_words`
-/// reads.
-fn is_int8_run_layout(layout: &BlockLayout) -> bool {
-    layout.run_elements() == GROUP_ELEMENTS as u16
-        && layout.scale.layout == FloatLayout::F16
-        && layout.min.is_none()
-        && layout.sub.is_none()
-        && layout.multiplier == 1
-        && layout.element.bias == 0
-        && codes_are_byte_runs(layout)
-        && (0..layout.runs()).all(|run| layout.run_code_byte(run) >= layout.run_scale_byte(run) + 4)
-        && (0..layout.runs()).all(|run| layout.run_scale_byte(run) + 4 <= usize::from(layout.block_bytes))
 }
 
 /// Why no int8 reader (gemm, staged matvec, mma gemm) can read an activation held in `layout`.
@@ -79,16 +45,14 @@ pub(crate) fn producer_missing(layout: &BlockLayout) -> Result<(), Missing> {
             line: line!(),
         });
     }
-    // a layout with independent scale runs (the grouped pair) has no single rule; its geometry is
-    // the run layout checked above
-    match layout.encode_rule() {
-        Some(rule) if rule.divisor != 127 || !rule.stored_sum => Err(Missing {
-            piece: "a quantize device function for this layout's scale rule: quantize_device divides the peak by 127 and stores the sum",
-            file: file!(),
-            line: line!(),
-        }),
-        _ => Ok(()),
+    if quantize_rule_is_served(layout) {
+        return Ok(());
     }
+    Err(Missing {
+        piece: "a quantize device function for this layout's scale rule: quantize_device divides the peak by 127 and stores the sum",
+        file: file!(),
+        line: line!(),
+    })
 }
 
 fn servable_layout(resolved: &BoundOp) -> Result<&BlockLayout, EmitError> {

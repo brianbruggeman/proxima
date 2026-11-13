@@ -41,7 +41,7 @@ use crate::cuda_kernel_cache::{
 use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
 use crate::backend::GpuDriver;
-use crate::derived_quantize::{ActivationRefusal, derive_with_storage, underive_block_quantize, validate_storage};
+use crate::derived_quantize::{ActivationRefusal, derive_with_storage, validate_storage};
 use proxima_numeric::NumericFormat;
 use crate::lowering::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{
@@ -50,7 +50,7 @@ use proxima_tensor::bind::{
     refresh_cached_attention, row_template, rows_enumerable, symbols_shapes_template,
     touched_positions, touches_changed,
 };
-use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, Keep, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, bind_with_fusion_for, block_node_ids, correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks};
+use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, Keep, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, bind_with_fusion_for, block_node_ids, correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks, underive_block_quantize};
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 /// Errors from CUDA initialization, NVRTC compilation, or execution.

@@ -278,6 +278,11 @@ pub use bind::{
 };
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{changed_nodes, refit_cached_attention_at, touched_positions};
+#[cfg(any(feature = "std", feature = "alloc"))]
+pub use bind::{
+    ACTIVATION_GROUP_ELEMENTS, Missing, activation_is_flat, collapsed_extent, is_derived, is_int8_run_layout,
+    quantize_op, quantize_rule_is_served, repoint, underive_block_quantize,
+};
 #[cfg(feature = "instrument")]
 #[cfg(any(feature = "std", feature = "alloc"))]
 pub use bind::{RepeatNodeRefusal, apply_repeat_nodes};
