@@ -111,7 +111,7 @@ mod top_fraction_fusion;
 mod twin_elementwise;
 mod executes;
 pub use builder_compose_window::*;
-pub use executes::{Executes, Form, FormSet, Refusal};
+pub use executes::{DeviceLimits, DeviceMemory, Executes, Form, FormSet, Refusal};
 pub use cached_attention_epilogue_liveness::*;
 pub use dead_code_cached_attention::*;
 pub use gdn_moe_fusion_apply::*;

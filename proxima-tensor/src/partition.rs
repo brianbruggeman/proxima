@@ -19,7 +19,7 @@ use alloc::vec::Vec;
 
 use crate::error::TensorError;
 use crate::map::IndexMap;
-use crate::op::{Extent, NodeId, Op, Reduce};
+use crate::op::{Extent, NodeId, Op, Reduce, ScalarOp};
 use crate::shape;
 
 /// Every `NodeId` an op at or after `boundary` reaches backwards across it,
@@ -500,6 +500,202 @@ fn op_references(op: &Op) -> Vec<NodeId> {
     }
 }
 
+/// Whether `node` appears, anywhere in `program`, ONLY as the SOLE operand of
+/// an `Identity` [`Op::Elementwise`] addressed through an
+/// [`IndexMap::Computed`] pattern -- the exact "embedding table" gather shape
+/// [`embedding_lookup`](crate::spec::embedding_lookup) builds. The CPU's
+/// quantized evaluator reads such a table one packed row at a time
+/// (`run_embedding_gather_quantized`), so its f32-only validation exempts it;
+/// [`row_gathers`] reads the same shape to find tables a separate-memory
+/// device never needs whole. One definition for both.
+pub(crate) fn is_gather_only_operand(program: &[Op], node: NodeId) -> bool {
+    let mut used_as_gather_operand = false;
+    for expr in program {
+        let Op::Elementwise { body, operands, .. } = expr else {
+            continue;
+        };
+        if !operands.iter().any(|(source, _)| *source == node) {
+            continue;
+        }
+        let [(source, index_map)] = operands.as_slice() else {
+            return false;
+        };
+        if *source != node || *body != ScalarOp::Identity {
+            return false;
+        }
+        if !matches!(index_map, IndexMap::Computed { .. }) {
+            return false;
+        }
+        used_as_gather_operand = true;
+    }
+    used_as_gather_operand
+}
+
+/// One table leaf read by exactly one row gather: the three nodes
+/// [`hoist_row_gather`] rewrites. Plain data, not a pipe: it names nodes of a
+/// program, it transforms nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RowGather {
+    /// The `Op::Input` table leaf (`[vocab, row...]`).
+    pub table: NodeId,
+    /// The node supplying the row indices.
+    pub indices: NodeId,
+    /// The `Identity` elementwise that reads `table` through `indices`.
+    pub gather: NodeId,
+}
+
+/// Every `Op::Input` leaf whose only reader in `program` is one `Identity`
+/// row gather with an [`IndexMap::Computed`] operand map -- the shape
+/// [`crate::spec::embedding_lookup_as`] builds. Such a table never has to be
+/// resident on a [`crate::bind::DeviceMemory::Separate`] device: the rows a
+/// step reads can be gathered on the host (see [`hoist_row_gather`]). A leaf
+/// that any other op also reads (a tied output head's matmul) is not returned.
+///
+/// Composes [`is_gather_only_operand`], the predicate the CPU evaluator also
+/// uses, plus a whole-program reference count so a `Reduce` reading the leaf
+/// directly refuses it too.
+#[must_use]
+pub fn row_gathers(program: &[Op]) -> Vec<RowGather> {
+    let mut reads = vec![0u32; program.len()];
+    for op in program {
+        for node in op_references(op) {
+            if let Some(count) = reads.get_mut(node.0 as usize) {
+                *count += 1;
+            }
+        }
+    }
+    program
+        .iter()
+        .enumerate()
+        .filter_map(|(position, op)| {
+            let Op::Elementwise {
+                body: ScalarOp::Identity,
+                operands,
+                ..
+            } = op
+            else {
+                return None;
+            };
+            let [(table, IndexMap::Computed { indices, .. })] = operands.as_slice() else {
+                return None;
+            };
+            let is_leaf = matches!(program.get(table.0 as usize), Some(Op::Input { .. }));
+            let sole_reader = reads.get(table.0 as usize) == Some(&1);
+            (is_leaf && sole_reader && is_gather_only_operand(program, *table)).then_some(RowGather {
+                table: *table,
+                indices: *indices,
+                gather: NodeId(position as u32),
+            })
+        })
+        .collect()
+}
+
+/// What [`hoist_row_gather`] leaves behind for the host to run.
+/// Plain data: `producer` is an ordinary program any evaluator runs.
+#[derive(Debug, Clone)]
+pub struct Hoisted {
+    /// A self-contained program (`[ids input, table input, gather]`).
+    pub producer: Vec<Op>,
+    /// The node of `producer` that evaluates to the gathered rows.
+    pub output: NodeId,
+    /// The name of the new input leaf (`"{table}@rows"`) the device program
+    /// now reads the rows from.
+    pub leaf: String,
+}
+
+/// Rewrites `program` in place so `gather.table` is no longer a table but the
+/// already-gathered rows: the leaf becomes
+/// `Input { name: "{table}@rows", shape: indices_shape ++ table_shape[1..] }`
+/// at the gather's dtype, and the gather reads it through the identity affine
+/// map over its own rank. NodeIds do not move, so roots held by the caller
+/// stay valid. The returned [`Hoisted::producer`] evaluates to exactly the
+/// rows the unrewritten gather produced.
+///
+/// # Errors
+/// [`TensorError::NotLowerable`] when `gather` does not name a named table
+/// `Input`, a shaped indices `Input`, and a gather on axis 0 whose rank is
+/// `indices` rank + `table` rank - 1.
+pub fn hoist_row_gather(program: &mut [Op], gather: &RowGather) -> Result<Hoisted, TensorError> {
+    let refuse = |reason: &'static str| TensorError::NotLowerable {
+        node: gather.gather,
+        reason,
+    };
+    let table_op = program.get(gather.table.0 as usize).cloned();
+    let indices_op = program.get(gather.indices.0 as usize).cloned();
+    let gather_op = program.get(gather.gather.0 as usize).cloned();
+    let (
+        Some(table_op @ Op::Input { .. }),
+        Some(indices_op @ Op::Input { .. }),
+        Some(mut gather_op @ Op::Elementwise { .. }),
+    ) = (table_op, indices_op, gather_op)
+    else {
+        return Err(refuse("row gather nodes are not input, input, elementwise"));
+    };
+    let Op::Input {
+        shape: table_shape,
+        name: Some(table_name),
+        ..
+    } = &table_op
+    else {
+        return Err(refuse("hoisted table input has no name"));
+    };
+    let Op::Input {
+        shape: indices_shape,
+        ..
+    } = &indices_op
+    else {
+        return Err(refuse("row gather indices are not an input"));
+    };
+    let Op::Elementwise {
+        dtype: rows_dtype,
+        operands,
+        ..
+    } = &gather_op
+    else {
+        return Err(refuse("row gather node is not elementwise"));
+    };
+    let [(_, IndexMap::Computed { base, gathered_dim: 0, .. })] = operands.as_slice() else {
+        return Err(refuse("row gather is not a single axis-0 computed read"));
+    };
+    let rows_shape: Vec<Extent> = indices_shape
+        .iter()
+        .chain(table_shape.iter().skip(1))
+        .cloned()
+        .collect();
+    if rows_shape.len() != usize::from(base.iter_rank) {
+        return Err(refuse("row gather rank is not indices rank plus row rank"));
+    }
+    let leaf = format!("{table_name}@rows");
+    let rows_dtype = *rows_dtype;
+    let rank = base.iter_rank;
+    if let Op::Elementwise { operands, .. } = &mut gather_op {
+        for (node, index_map) in operands.iter_mut() {
+            *node = NodeId(1);
+            if let IndexMap::Computed { indices, .. } = index_map {
+                *indices = NodeId(0);
+            }
+        }
+    }
+    let producer = vec![indices_op, table_op, gather_op];
+
+    if let Some(Op::Input { dtype, shape, name }) = program.get_mut(gather.table.0 as usize) {
+        *dtype = rows_dtype;
+        *shape = rows_shape;
+        *name = Some(leaf.clone());
+    }
+    if let Some(Op::Elementwise { operands, .. }) = program.get_mut(gather.gather.0 as usize)
+        && let Some((_, index_map)) = operands.first_mut()
+    {
+        let axes: Vec<u16> = (0..rank).collect();
+        *index_map = IndexMap::Affine(crate::map::projection(rank, &axes));
+    }
+    Ok(Hoisted {
+        producer,
+        output: NodeId(2),
+        leaf,
+    })
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
@@ -662,5 +858,149 @@ mod tests {
             whole.root(),
             "partitioned run must be bit-identical to the whole program"
         );
+    }
+
+    fn xorshift_floats(seed: u64, len: usize) -> Vec<f32> {
+        let mut state = seed;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                ((state >> 11) as f64 / (1u64 << 53) as f64) as f32 - 0.5
+            })
+            .collect()
+    }
+
+    const TABLE_NAME: &str = "per_layer_token_embd.weight";
+
+    /// ids -> gather from a packed table -> `Negate`, the gemma4
+    /// `per_layer_token_embd` shape at test size.
+    fn gather_then_negate(vocab: u32, dim: u32, seq: u32) -> (Vec<Op>, NodeId) {
+        use crate::spec::{embedding_lookup, input_leaf};
+
+        let mut program = Vec::new();
+        let ids = input_leaf(&mut program, DType::INT32, vec![Extent::Static(seq)], "ids");
+        let table = input_leaf(
+            &mut program,
+            DType::UINT8,
+            vec![Extent::Static(vocab), Extent::Static(dim)],
+            TABLE_NAME,
+        );
+        let rows = embedding_lookup(&mut program, table, ids);
+        let negated = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Negate,
+                operands: alloc::vec![(rows, IndexMap::Affine(map::projection(2, &[0, 1])))],
+                name: None,
+            },
+        );
+        (program, negated)
+    }
+
+    #[test]
+    fn hoisted_rows_equal_device_gather_on_a_q6k_table() {
+        use crate::cpu::{QuantizedBlock, evaluate_quantized_named};
+        use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, quantize};
+        use proxima_numeric::codec::Codec;
+
+        let (vocab, dim, seq) = (6u32, 256u32, 3u32);
+        let (program, negated) = gather_then_negate(vocab, dim, seq);
+        let table_f32 = xorshift_floats(0x2026_1113_0303_beef, (vocab * dim) as usize);
+        let mut table_bytes = vec![0u8; table_f32.len() / QK_K * BLOCK_BYTES];
+        quantize(&table_f32, &mut table_bytes).expect("six whole q6_k rows quantize");
+        let ids_data = [4.0f32, 0.0, 5.0];
+        let ids_block = QuantizedBlock::Float32(ids_data.as_slice());
+        let table_block = QuantizedBlock::Packed {
+            codec: Codec::Q6K,
+            bytes: &table_bytes,
+        };
+
+        let unhoisted = evaluate_quantized_named(
+            &program,
+            &[],
+            &[("ids", ids_block), (TABLE_NAME, table_block)],
+            &[negated],
+        )
+        .expect("the packed gather evaluates on device-shaped input");
+        let (expected, expected_shape) = unhoisted.get(negated).expect("negated output");
+
+        let mut device_program = program.clone();
+        let gathers = row_gathers(&device_program);
+        assert_eq!(gathers.len(), 1);
+        let hoisted = hoist_row_gather(&mut device_program, &gathers[0]).expect("table hoists");
+        assert_eq!(hoisted.leaf, "per_layer_token_embd.weight@rows");
+        let produced = evaluate_quantized_named(
+            &hoisted.producer,
+            &[],
+            &[("ids", ids_block), (TABLE_NAME, table_block)],
+            &[hoisted.output],
+        )
+        .expect("the producer evaluates on the host");
+        let (rows, rows_shape) = produced.get(hoisted.output).expect("rows output");
+        assert_eq!(rows_shape, [u64::from(seq), u64::from(dim)]);
+        let rows = rows.to_vec();
+
+        let hoisted_run = evaluate_quantized_named(
+            &device_program,
+            &[],
+            &[("ids", ids_block), (hoisted.leaf.as_str(), QuantizedBlock::Float32(&rows))],
+            &[negated],
+        )
+        .expect("the device program evaluates with rows fed in");
+        let (actual, actual_shape) = hoisted_run.get(negated).expect("negated output");
+
+        assert_eq!(actual_shape, expected_shape);
+        let actual_bits: Vec<u32> = actual.iter().map(|value| value.to_bits()).collect();
+        let expected_bits: Vec<u32> = expected.iter().map(|value| value.to_bits()).collect();
+        assert_eq!(actual_bits, expected_bits);
+    }
+
+    #[test]
+    fn a_leaf_also_read_by_a_matmul_is_not_a_row_gather() {
+        use crate::op::{Keep, ReduceInit};
+        use crate::spec::{embedding_lookup, input_leaf};
+
+        let mut program = Vec::new();
+        let ids = input_leaf(&mut program, DType::INT32, vec![Extent::Static(2)], "ids");
+        let shape = vec![Extent::Static(4), Extent::Static(8)];
+        let gather_only = input_leaf(&mut program, DType::FLOAT32, shape.clone(), "per_layer.weight");
+        let tied = input_leaf(&mut program, DType::FLOAT32, shape.clone(), "token_embd.weight");
+        let activation = input_leaf(&mut program, DType::FLOAT32, shape, "activation");
+        let _per_layer_rows = embedding_lookup(&mut program, gather_only, ids);
+        let _head_rows = embedding_lookup(&mut program, tied, ids);
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Multiply,
+                operands: alloc::vec![
+                    (tied, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                    (activation, IndexMap::Affine(map::projection(2, &[0, 1]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+
+        let found = row_gathers(&program);
+
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].table, gather_only);
+        assert_eq!(found[0].indices, ids);
     }
 }
