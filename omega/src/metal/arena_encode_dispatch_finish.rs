@@ -5186,7 +5186,8 @@ pub(super) mod arena_tests {
     use alloc::vec;
 
     use objc2::rc::Weak;
-    use objc2_metal::MTLDevice;
+    use objc2::runtime::{NSObjectProtocol, ProtocolObject};
+    use objc2_metal::{MTLBuffer, MTLCommandBuffer, MTLCommandBufferStatus, MTLDevice};
     use proxima_tensor::{Extent, IndexMap, NodeId, Op, QuantizedBlock, ScalarOp, append, cpu, projection};
     use proxima_numeric::{DType, NumericPolicy};
 
@@ -5434,8 +5435,41 @@ pub(super) mod arena_tests {
         }
     }
 
+    const WITNESS_LOAD_BOUND: u64 = 1_000_000;
+
+    fn diagnose_surviving_placed_buffer(
+        witness: &Weak<ProtocolObject<dyn MTLBuffer>>,
+        command_buffer_witnesses: &[Weak<ProtocolObject<dyn MTLCommandBuffer>>],
+        statuses_before_release: &[MTLCommandBufferStatus],
+        retain_count_before_drop: usize,
+    ) -> String {
+        let command_buffers_still_alive: Vec<bool> = command_buffer_witnesses
+            .iter()
+            .map(|command_buffer| command_buffer.load().is_some())
+            .collect();
+        let statuses_after_release: Vec<Option<MTLCommandBufferStatus>> = command_buffer_witnesses
+            .iter()
+            .map(|command_buffer| command_buffer.load().map(|live| live.status()))
+            .collect();
+        let retain_count_now = witness.load().map(|live| live.retainCount());
+        let mut loads_until_free = WITNESS_LOAD_BOUND;
+        for attempt in 1..=WITNESS_LOAD_BOUND {
+            if witness.load().is_none() {
+                loads_until_free = attempt;
+                break;
+            }
+        }
+        format!(
+            "placed buffer still held after release: command_buffers_still_alive={command_buffers_still_alive:?} \
+             statuses_before_release={statuses_before_release:?} statuses_after_release={statuses_after_release:?} \
+             retain_count_before_drop={retain_count_before_drop} retain_count_now={retain_count_now:?} \
+             loads_until_free={loads_until_free} (bound {WITNESS_LOAD_BOUND} means never freed)"
+        )
+    }
+
     #[test]
-    fn a_released_plan_stops_pinning_the_caller_placed_output_buffer() {
+    fn a_released_plan_holds_no_caller_buffer_and_the_buffer_frees_when_metal_drops_its_command_buffers(
+    ) {
         let (program, [stage_zero, stage_one, stage_two]) = three_stage_chain(4, 4);
         let a = [1.0f32, 2.0, 3.0, 4.0];
         let b = [10.0f32, 20.0, 30.0, 40.0];
@@ -5454,6 +5488,20 @@ pub(super) mod arena_tests {
         )
         .expect("runs the chain with the last stage placed in the caller's buffer");
         let witness = Weak::from_retained(&placed);
+        let retain_count_before_drop = placed.retainCount();
+        let command_buffer_witnesses: Vec<Weak<ProtocolObject<dyn MTLCommandBuffer>>> =
+            resolved_plan
+                .chunk_status_buffers
+                .borrow()
+                .iter()
+                .map(Weak::from_retained)
+                .collect();
+        let statuses_before_release: Vec<MTLCommandBufferStatus> = resolved_plan
+            .chunk_status_buffers
+            .borrow()
+            .iter()
+            .map(|command_buffer| command_buffer.status())
+            .collect();
 
         drop(placed);
         assert!(
@@ -5463,8 +5511,34 @@ pub(super) mod arena_tests {
         resolved_plan.release_caller_buffers();
 
         assert!(
+            !resolved_plan.device_buffers.borrow().contains_key(&stage_two),
+            "the released plan must hold no entry for the caller-placed node"
+        );
+        assert!(
+            resolved_plan.chunk_status_buffers.borrow().is_empty(),
+            "the released plan must hold no command buffers"
+        );
+
+        // metal tears completed command buffers down on its own thread, so they outlive the release briefly
+        for _ in 0..WITNESS_LOAD_BOUND {
+            if command_buffer_witnesses
+                .iter()
+                .all(|command_buffer| command_buffer.load().is_none())
+            {
+                break;
+            }
+            std::thread::yield_now();
+        }
+
+        assert!(
             witness.load().is_none(),
-            "releasing the plan's caller buffers must free the allocation once the caller dropped it"
+            "the placed buffer must free once every command buffer the plan submitted is gone: {}",
+            diagnose_surviving_placed_buffer(
+                &witness,
+                &command_buffer_witnesses,
+                &statuses_before_release,
+                retain_count_before_drop,
+            )
         );
     }
 
