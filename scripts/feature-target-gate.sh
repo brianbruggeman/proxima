@@ -48,7 +48,6 @@ esac
 # features --all-targets build can never notice that break.
 matrix=(
     "proxima-tensor:std"
-    "proxima-tensor:std,metal-attn-split-rows"
     "proxima-model-interop:std"
     "proxima-model-interop:std,metal,instrument"
     "proxima-model-interop:std,cuda"

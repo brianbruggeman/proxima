@@ -160,11 +160,11 @@ fn extra_output_slots(
 ///
 /// Reading the caller's own row count, rather than scanning `resolved` for
 /// the largest leading `extents` axis, is what keeps this correct
-/// regardless of a bind's op shapes: the E2B checkpoint's own bound graph on a
-/// build without `metal-fuse-attn-decode` decomposes attention into plain
-/// `Elementwise`/`Reduce` ops with no `CachedAttention` node to read a row
-/// count off at all, while a vocab- or expert-count-leading op elsewhere in
-/// the SAME graph (a router logits `Reduce`, a stacked per-expert weight
+/// regardless of a bind's op shapes: the E2B checkpoint's own bound graph, when
+/// the backend's `Executes` does not admit the cached-attention recognizer,
+/// decomposes attention into plain `Elementwise`/`Reduce` ops with no
+/// `CachedAttention` node to read a row count off at all, while a vocab- or
+/// expert-count-leading op elsewhere in the SAME graph (a router logits `Reduce`, a stacked per-expert weight
 /// `Constant`) carries a leading axis with no relation to the token count --
 /// scanning `extents[0]` across every op cannot tell "the token axis" apart
 /// from either. `symbols[0]` has no such ambiguity: it is the exact
@@ -7230,8 +7230,8 @@ pub(super) mod plan_query_rows_tests {
     /// `speculative_decode_parity --gpu-layers all` against the E2B checkpoint on
     /// the 1618-token `rag001` prompt (`proxima-model-interop/examples/
     /// data/speculative_corpus.jsonl`). The E2B checkpoint's attention lowers to a
-    /// plain elementwise/reduce decomposition on a build without
-    /// `metal-fuse-attn-decode` -- ZERO `CachedAttention` nodes in the bound
+    /// plain elementwise/reduce decomposition when the backend's `Executes`
+    /// does not admit the recognizer -- ZERO `CachedAttention` nodes in the bound
     /// graph -- so a scan over `resolved` for a `CachedAttention`-shaped row
     /// count could never see this plan's true row count and fell back to
     /// `1`, reproducing exactly the panic above. `symbols[0] == 1618` is the

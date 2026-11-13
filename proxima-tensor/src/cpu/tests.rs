@@ -13666,7 +13666,6 @@ fn round_batched_reduce_matches_k_sequential_reduces() {
 /// is gone from the resolved list -- proving the ADMISSION half of this
 /// landing independently of the executor half the sibling test already
 /// covers.
-#[cfg(feature = "metal-moe-mul-mat-id")]
 #[test]
 fn bind_collapses_structurally_uniform_round_group_into_round_batched_reduce() {
     let n_experts: u32 = 3;
@@ -13769,7 +13768,6 @@ fn bind_collapses_structurally_uniform_round_group_into_round_batched_reduce() {
 /// shared `table`/`x`, every route an `Int32` leaf declared before the first
 /// reduce -- the shape `moe_round_group_is_contiguous` admits -- returning the
 /// program and each round's output node in round order.
-#[cfg(feature = "metal-moe-mul-mat-id")]
 fn round_group_program(rounds: u32) -> (Vec<Op>, Vec<NodeId>) {
     let mut program = Vec::new();
     let table = f32_block(&mut program, &[Extent::Static(3), Extent::Static(4)]);
@@ -14423,7 +14421,6 @@ fn arena_materializes_a_transposed_packed_operand_by_row_shape() {
 /// buffer per round after the first (`k - 1`): `6 + k` against Metal's 31
 /// argument slots. k = 25 is exactly 31 and collapses; k = 26 would be 32, so
 /// the group keeps its 26 plain reduces instead of reaching a Metal error.
-#[cfg(feature = "metal-moe-mul-mat-id")]
 #[test]
 fn round_group_collapses_to_the_metal_argument_table_limit_and_no_further() {
     for (rounds, collapses) in [(25u32, true), (26u32, false)] {

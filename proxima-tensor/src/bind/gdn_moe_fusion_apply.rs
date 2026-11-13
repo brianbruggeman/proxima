@@ -176,6 +176,7 @@ pub fn bind_with_fusion_and_packed_leaves(
         fuse_cached_attention,
         numeric_policy,
         packed_leaves,
+        executes,
     )?;
     #[cfg(feature = "instrument")]
     debug!(
@@ -203,7 +204,7 @@ pub fn bind_with_fusion_and_packed_leaves(
             shapes,
             outputs,
             fuse_cached_attention,
-            numeric_policy,
+            (numeric_policy, executes),
             packed_leaves,
         )?
     };
@@ -221,18 +222,16 @@ pub fn bind_with_fusion_and_packed_leaves(
             shapes,
             outputs,
             fuse_cached_attention,
-            numeric_policy,
+            (numeric_policy, executes),
             packed_leaves,
         )?
     };
-    #[cfg(feature = "metal-moe-mul-mat-id")]
     #[cfg(feature = "std")]
-    let moe_round_group_fusion_disabled =
-        env::var_os("PROXIMA_DISABLE_MOE_ROUND_GROUP_FUSION").is_some();
-    #[cfg(feature = "metal-moe-mul-mat-id")]
+    let round_group_env_disabled = env::var_os("PROXIMA_DISABLE_MOE_ROUND_GROUP_FUSION").is_some();
     #[cfg(not(feature = "std"))]
-    let moe_round_group_fusion_disabled = false;
-    #[cfg(feature = "metal-moe-mul-mat-id")]
+    let round_group_env_disabled = false;
+    let moe_round_group_fusion_disabled =
+        round_group_env_disabled || !executes.forms.contains(Form::RoundBatchedReduce);
     let built = if moe_round_group_fusion_disabled {
         built
     } else {
@@ -1404,9 +1403,10 @@ pub(super) fn apply_moe_topk_fusion(
     shapes: &Shapes,
     outputs: &[NodeId],
     fuse_cached_attention: bool,
-    numeric_policy: NumericPolicy,
+    target: (NumericPolicy, &Executes),
     packed_leaves: &BTreeSet<NodeId>,
 ) -> Result<Vec<BoundOp>, TensorError> {
+    let (numeric_policy, executes) = target;
     let initial_candidates = moe_topk_candidates(program, shapes, &built, outputs);
     if initial_candidates.is_empty() {
         return Ok(built);
@@ -1450,6 +1450,7 @@ pub(super) fn apply_moe_topk_fusion(
         fuse_cached_attention,
         numeric_policy,
         packed_leaves,
+        executes,
     )?;
     let candidates = moe_topk_candidates(program, shapes, &rebuilt, outputs);
     if candidates.is_empty() {
@@ -1487,9 +1488,10 @@ pub(super) fn apply_gated_delta_net_fusion(
     shapes: &Shapes,
     outputs: &[NodeId],
     fuse_cached_attention: bool,
-    numeric_policy: NumericPolicy,
+    target: (NumericPolicy, &Executes),
     packed_leaves: &BTreeSet<NodeId>,
 ) -> Result<Vec<BoundOp>, TensorError> {
+    let (numeric_policy, executes) = target;
     let initial_candidates = gated_delta_net_candidates(program, shapes, &built, outputs);
     if initial_candidates.is_empty() {
         return Ok(built);
@@ -1529,6 +1531,7 @@ pub(super) fn apply_gated_delta_net_fusion(
         fuse_cached_attention,
         numeric_policy,
         packed_leaves,
+        executes,
     )?;
     let candidates = gated_delta_net_candidates(program, shapes, &rebuilt, outputs);
     if candidates.is_empty() {
@@ -1563,7 +1566,6 @@ pub(super) fn apply_gated_delta_net_fusion(
 /// shares this exact shape too, so this matcher serves all three
 /// projections a `MoeSite` builds, keyed apart from each other by their own
 /// distinct `stack` node.
-#[cfg(feature = "metal-moe-mul-mat-id")]
 pub(super) fn moe_round_reduce_operand(
     program: &[Op],
     node: NodeId,
@@ -1606,7 +1608,6 @@ pub(super) fn moe_round_reduce_operand(
 /// `Reduce` [`moe_round_reduce_operand`] matched against the SAME `stack`
 /// (and therefore the same `x`), in program order -- `PerRoute`'s own round
 /// order, matching [`crate::spec::MoeSite::selected`]'s own convention.
-#[cfg(feature = "metal-moe-mul-mat-id")]
 pub(super) struct MoeRoundGroup {
     pub(super) x: NodeId,
     pub(super) routes: Vec<NodeId>,
@@ -1622,7 +1623,6 @@ pub(super) struct MoeRoundGroup {
 /// `program` position, which is `PerRoute`'s own emission order (round 0
 /// first) by construction -- `append_moe_ffn` never reorders a round's own
 /// three reduces relative to an earlier round's.
-#[cfg(feature = "metal-moe-mul-mat-id")]
 pub(super) fn moe_round_groups(program: &[Op]) -> Vec<MoeRoundGroup> {
     let mut by_stack: BTreeMap<NodeId, MoeRoundGroup> = BTreeMap::new();
     let mut order: Vec<NodeId> = Vec::new();
@@ -1673,7 +1673,6 @@ pub(super) fn moe_round_groups(program: &[Op]) -> Vec<MoeRoundGroup> {
 /// own split -- admit structurally here, defer the buffer-table placement
 /// decision to encode time ([`ensure_round_group_resolved`], the arena-side
 /// half this landing wires next).
-#[cfg(feature = "metal-moe-mul-mat-id")]
 fn moe_round_group_is_contiguous(
     group: &MoeRoundGroup,
     program: &[Op],
@@ -1733,7 +1732,6 @@ fn moe_round_group_is_contiguous(
 /// `count + k`. A group over the limit keeps its k plain `Reduce`s, the same
 /// two-legal-kernels fallback the epilogue fusion takes, so an oversized
 /// plan never reaches a Metal pipeline error.
-#[cfg(feature = "metal-moe-mul-mat-id")]
 fn round_batched_fits_metal_argument_table(
     group: &MoeRoundGroup,
     resolved: &BTreeMap<NodeId, &BoundOp>,
@@ -1761,7 +1759,6 @@ fn round_batched_fits_metal_argument_table(
 /// counterpart because a leaf never computes anything to resolve"), so
 /// `built` alone cannot answer this for the route side of a group the way
 /// [`round_batched_output_layout`] answers it for the reduce (output) side.
-#[cfg(feature = "metal-moe-mul-mat-id")]
 fn route_signature<'shapes>(
     program: &[Op],
     shapes: &'shapes Shapes,
@@ -1776,7 +1773,6 @@ fn route_signature<'shapes>(
 /// [`moe_round_group_is_contiguous`]'s own structural check for a group's
 /// reduce (output) siblings, which -- unlike a `route` -- always has a
 /// [`BoundOp`] to read this from.
-#[cfg(feature = "metal-moe-mul-mat-id")]
 fn round_member_signature_matches(member: &BoundOp, leader: &BoundOp) -> bool {
     member.dtype == leader.dtype && member.extents == leader.extents
 }
@@ -1787,7 +1783,6 @@ fn round_member_signature_matches(member: &BoundOp, leader: &BoundOp) -> bool {
 /// leader into [`BoundOpKind::RoundBatchedReduce`]); `None` for any other
 /// kind, which this predicate treats as a structural mismatch rather than a
 /// panic.
-#[cfg(feature = "metal-moe-mul-mat-id")]
 fn round_batched_output_layout(bound: &BoundOp) -> Option<&Layout> {
     match &bound.kind {
         BoundOpKind::Reduce { out_layout, .. } => Some(out_layout),
@@ -1820,7 +1815,6 @@ fn round_batched_output_layout(bound: &BoundOp) -> Option<&Layout> {
 /// allocation, which is the arena-side placement work
 /// `omega::metal::device_buffers_arena_plan::ensure_round_group_resolved`
 /// (this landing's other half) is responsible for instead.
-#[cfg(feature = "metal-moe-mul-mat-id")]
 pub(super) fn apply_moe_round_group_fusion(
     built: Vec<BoundOp>,
     program: &[Op],

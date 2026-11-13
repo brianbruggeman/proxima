@@ -29,7 +29,7 @@ fn cpu_config() -> ServingConfig<'static> {
 /// The CPU interpreter lowers the same program the GPU planner fuses, so a
 /// feature that rewrites the program for a GPU-only op must not reach a
 /// `gpu_layers = 0` forward. Built under the production feature set
-/// (`std,metal,metal-fuse-attn-decode,identity-copy-alias,metal-tiled-gemm`)
+/// (`std,metal,identity-copy-alias,metal-tiled-gemm`)
 /// this generated `NotLowerable` at the first fused node.
 #[test]
 #[ignore = "depends on a host-local gemma4-E2B gguf blob outside this repo"]

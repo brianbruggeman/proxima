@@ -380,7 +380,7 @@ async fn gemma4_attention_chain_census() {
     // `bind_cached_attention_fusion`'s own early return
     // (`cached_attention_epilogue_liveness.rs:19-20`) means this is the
     // unfused `bind_plain` chain verbatim, matching every gemma4 layer's
-    // real production plan (feature `metal-fuse-attn-decode` off).
+    // plan only where the backend's `Executes` does not admit the recognizer.
     let (unfused_bound_ops, unfused_per_layer) = run_one_bind(
         "unfused_production",
         &bound_program.program,

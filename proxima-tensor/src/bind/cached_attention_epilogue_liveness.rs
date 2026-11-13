@@ -19,6 +19,7 @@ pub(super) fn bind_cached_attention_fusion(
         fuse_cached_attention,
         numeric_policy,
         &BTreeSet::new(),
+        &Executes::CPU,
     )
 }
 
@@ -32,10 +33,11 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
     fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
     packed_leaves: &BTreeSet<NodeId>,
+    executes: &Executes,
 ) -> Result<Vec<BoundOp>, TensorError> {
     #[cfg(not(feature = "cached-attention-streaming"))]
     {
-        let _ = fuse_cached_attention;
+        let _ = (fuse_cached_attention, executes);
         bind_plain_with_fusion_packed(
             program,
             shapes,
@@ -58,10 +60,7 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
                 packed_leaves,
             );
         }
-        // without the metal split-kv arms every pin a candidate needs is a node of `program`, so
-        // discovery reads the program alone and the graph binds once with those nodes pinned; the
-        // metal arms read resolved layouts to decide, so they keep the two-pass form
-        #[cfg(feature = "metal-fuse-attn-decode")]
+        // the split-kv arms read resolved layouts to decide, so discovery needs the two-pass form
         let (built, discovery) = (
             Some(bind_plain_with_fusion_packed(
                 program,
@@ -73,8 +72,6 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
             )?),
             false,
         );
-        #[cfg(not(feature = "metal-fuse-attn-decode"))]
-        let (built, discovery): (Option<Vec<BoundOp>>, bool) = (None, true);
         let discovery_resolved: &[BoundOp] = built.as_deref().unwrap_or(&[]);
         // `false`: this discovery pass finds anchors `bind_plain` has already
         // folded into their single consumer (the recurrent-interval family's own `attended` tap,
@@ -88,7 +85,7 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
             discovery_resolved,
             outputs,
             false,
-            numeric_policy,
+            (numeric_policy, executes),
             discovery,
         );
         initial_candidates.extend(cached_attention_single_range_candidates(
@@ -151,7 +148,6 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
                 // `CachedAttention`'s own arm just pinned, so `bind_plain`
                 // cannot fold either the anchor or its sources away before
                 // the second pass' `resolved.iter().find(..)` lookups run.
-                #[cfg(feature = "metal-fuse-attn-decode")]
                 BoundOpKind::CachedSoftmaxWeights { operands, .. } => {
                     if !planning_outputs.contains(&fused.node) {
                         planning_outputs.push(fused.node);
@@ -166,7 +162,6 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
                 // own node): pin the combine's own node, its epilogue
                 // operands (157/158/164), and its base fold operands (82,
                 // 154) -- the coordinator's own explicit pin list.
-                #[cfg(feature = "metal-fuse-attn-decode")]
                 BoundOpKind::Reduce {
                     operands,
                     epilogue_operands,
@@ -198,7 +193,7 @@ pub(super) fn bind_cached_attention_fusion_with_packed_leaves(
             &rebuilt,
             outputs,
             true,
-            numeric_policy,
+            (numeric_policy, executes),
             false,
         );
         candidates.extend(cached_attention_single_range_candidates(

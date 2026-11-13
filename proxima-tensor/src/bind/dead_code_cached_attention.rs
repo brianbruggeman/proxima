@@ -1,5 +1,5 @@
 use super::*;
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 use crate::op::Extent;
 
 /// Rewrites a packed matmul weight operand's [`Layout`] from `layout_of`'s
@@ -376,7 +376,7 @@ pub(super) fn constant_value(program: &[Op], node: NodeId) -> Option<f32> {
 /// (the mistake this same module's own CPU evaluator caught last slice: a
 /// naive row-major guess for `cached_scores` had the key/row axes swapped
 /// relative to the real R9 dump).
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 pub(super) fn find_operand_layout(reader: &BoundOp, source: NodeId) -> Option<Layout> {
     reader
         .operands()
@@ -408,7 +408,7 @@ pub(super) fn find_operand_layout(reader: &BoundOp, source: NodeId) -> Option<La
 /// of `reader`'s own operands, or if a wanted axis does not exist at
 /// `reader`'s own rank (a shape this fusion was never meant to admit —
 /// declined by the caller, not guessed).
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 pub(super) fn collapsed_operand_layout(
     reader: &BoundOp,
     source: NodeId,
@@ -441,7 +441,7 @@ pub(super) fn collapsed_operand_layout(
 /// dim]`. Axis 2 (the kv head) is not collapsed in, as at K=1: the row is
 /// addressed by the group stride alone, which is exact for the one-kv-head
 /// shape the E2B checkpoint binds.
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 pub(super) const fn softmax_weights_axes(
     query_rows: u64,
 ) -> (&'static [u16], &'static [u16], &'static [u16]) {
@@ -567,7 +567,7 @@ pub(super) fn unwrap_cached_padding_select(
 /// [`local_causal_mask_new_row_bound`]'s windowed arm can confirm its own
 /// `too_old` term subtracts the SAME two `Iota`s `is_future` compares,
 /// rather than merely matching the same shape twice over unrelated nodes.
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 fn causal_greater_iota_pair(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId)> {
     let operands = elementwise_operands(program, node, ScalarOp::Greater)?;
     let [(key, key_map), (query, query_map)] = operands else {
@@ -597,7 +597,7 @@ fn causal_greater_iota_pair(program: &[Op], node: NodeId) -> Option<(NodeId, Nod
 /// finite non-negative integral constant and `W` fits `1..=2^24`
 /// (`cached_len_precision`'s own f32-exactness bound, restated for the
 /// window itself).
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 pub(super) fn local_causal_mask_new_row_bound(program: &[Op], node: NodeId) -> Option<u64> {
     if is_exact_causal_mask(program, node) {
         return Some(u64::MAX);
@@ -620,7 +620,7 @@ pub(super) fn local_causal_mask_new_row_bound(program: &[Op], node: NodeId) -> O
 /// `W` of an end-aligned `too_old` ceiling constant `W - 1`; the same
 /// finite, non-negative, integral, `1..=2^24` admission
 /// [`local_causal_mask_new_row_bound`] applies to a block-local window.
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 fn window_from_ceiling(program: &[Op], ceiling: NodeId) -> Option<u64> {
     let window_ceiling = constant_value(program, ceiling)?;
     if !window_ceiling.is_finite() || window_ceiling < 0.0 || window_ceiling.fract() != 0.0 {
@@ -634,7 +634,7 @@ fn window_from_ceiling(program: &[Op], ceiling: NodeId) -> Option<u64> {
 /// query anchor [`crate::spec::causal_mask_end_aligned`] builds:
 /// `Add(Iota[Static(1)], Reduce(Maximum, -inf, key_iota))`, a one-row query
 /// standing for the last new row `N - 1`.
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 fn end_aligned_query_anchor(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId)> {
     let [query_index, last_row] = binary_elementwise(program, node, ScalarOp::Add)?;
     let single_row = matches!(
@@ -655,7 +655,7 @@ fn end_aligned_query_anchor(program: &[Op], node: NodeId) -> Option<(NodeId, Nod
 
 /// `(key_iota, query_absolute)` when `node` is `Greater(key, query_absolute)`
 /// over an end-aligned query anchor whose max-reduce reads that same key iota.
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 fn end_aligned_greater(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId)> {
     let operands = elementwise_operands(program, node, ScalarOp::Greater)?;
     let [(key, key_map), (query_absolute, query_map)] = operands else {
@@ -676,7 +676,7 @@ fn end_aligned_greater(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId)>
 /// `too_old` subtracts the SAME query-absolute and key nodes. Today's masks
 /// never match (their query side is a bare `Iota`), so recognition of them is
 /// untouched.
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 pub(super) fn end_aligned_new_row_bound(program: &[Op], node: NodeId) -> Option<u64> {
     if end_aligned_greater(program, node).is_some() {
         return Some(u64::MAX);
@@ -725,7 +725,7 @@ pub(super) fn shift_lower_bound(lower: i64, offset: i64) -> i64 {
 /// caller needs `query_absolute`'s own [`NodeId`] to confirm a windowed
 /// `too_old` term subtracts the SAME query-absolute and key-index nodes
 /// this predicate already walked, not an unrelated pair.
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 fn cached_len_padding_template(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId, NodeId)> {
     let padding = elementwise_operands(program, node, ScalarOp::Greater)?;
     let [(key_index, key_map), (ceiling_source, ceiling_map)] = padding else {
@@ -766,7 +766,7 @@ fn cached_len_padding_template(program: &[Op], node: NodeId) -> Option<(NodeId, 
 /// SAME `query_absolute`/key-index [`NodeId`]s `is_padding` walked.
 /// [`unwrap_cached_padding_select`] is tried FIRST and unconditionally, so
 /// the recurrent-interval family's own bare shape is untouched by this function's existence.
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 pub(super) fn cached_padding_mask_lower_bound(
     program: &[Op],
     node: NodeId,
@@ -817,7 +817,7 @@ pub(super) fn cached_padding_mask_lower_bound(
 /// `(inner, 1 - W)`; the caller adds `N - 1` from the bound new-key extent.
 /// [`cached_padding_mask_lower_bound`] returns `None` on this shape
 /// (`distance[0] != query_absolute`), so today's masks never reach here.
-#[cfg(feature = "metal-fuse-attn-decode")]
+#[cfg(feature = "cached-attention-streaming")]
 pub(super) fn cached_padding_mask_end_aligned_lower_bound(
     program: &[Op],
     node: NodeId,
@@ -1003,9 +1003,10 @@ pub(super) fn cached_attention_candidates(
     resolved: &[BoundOp],
     effective_outputs: &[NodeId],
     require_output_resolved: bool,
-    numeric_policy: NumericPolicy,
+    target: (NumericPolicy, &Executes),
     discovery: bool,
 ) -> Vec<(BoundOp, BTreeSet<NodeId>)> {
+    let (numeric_policy, executes) = target;
     let mut candidates = Vec::new();
     let consumers = core::cell::OnceCell::new();
     let first_readers = core::cell::OnceCell::new();
@@ -1168,26 +1169,16 @@ pub(super) fn cached_attention_candidates(
         };
         let negative_infinity_ok =
             constant_value(program, *negative_infinity) == Some(f32::NEG_INFINITY);
-        #[cfg(feature = "metal-fuse-attn-decode")]
         let plain_row_bound = negative_infinity_ok
             .then(|| local_causal_mask_new_row_bound(program, *mask))
             .flatten();
-        #[cfg(feature = "metal-fuse-attn-decode")]
         let end_aligned_row_bound = plain_row_bound
             .is_none()
             .then(|| negative_infinity_ok.then(|| end_aligned_new_row_bound(program, *mask)))
             .flatten()
             .flatten();
-        #[cfg(feature = "metal-fuse-attn-decode")]
         let local_end_aligned = end_aligned_row_bound.is_some();
-        #[cfg(not(feature = "metal-fuse-attn-decode"))]
-        let local_end_aligned = false;
-        #[cfg(feature = "metal-fuse-attn-decode")]
         let local_row_bound = plain_row_bound.or(end_aligned_row_bound);
-        #[cfg(not(feature = "metal-fuse-attn-decode"))]
-        let local_row_bound = negative_infinity_ok
-            .then(|| is_exact_causal_mask(program, *mask).then_some(u64::MAX))
-            .flatten();
         let Some(local_row_bound) = local_row_bound else {
             #[cfg(feature = "instrument")]
             debug!(
@@ -1198,8 +1189,6 @@ pub(super) fn cached_attention_candidates(
             );
             continue;
         };
-        #[cfg(not(feature = "metal-fuse-attn-decode"))]
-        let _ = local_row_bound;
         // the recurrent-interval family's own chain masks cached-range padding with a `Select`
         // right here (`spec.rs:4979-4997`, `is_cached_padding`) before the
         // online-softmax subtract this matcher already walked past above --
@@ -1207,7 +1196,6 @@ pub(super) fn cached_attention_candidates(
         // (`cpu.rs:6944-6974`) excludes exactly those rows, so dropping the
         // mask node is sound whenever its bound is the SAME `cached_len`
         // leaf the ninth operand below reads.
-        #[cfg(feature = "metal-fuse-attn-decode")]
         let (
             cached_scaled_source,
             cached_lower_inclusive,
@@ -1234,7 +1222,6 @@ pub(super) fn cached_attention_candidates(
             }
             None => (cached_score_parts[0], i64::MIN, false, false, None, false),
         };
-        #[cfg(feature = "metal-fuse-attn-decode")]
         if cached_end_aligned != local_end_aligned && cached_lower_inclusive != i64::MIN {
             #[cfg(feature = "instrument")]
             debug!(
@@ -1246,19 +1233,6 @@ pub(super) fn cached_attention_candidates(
             );
             continue;
         }
-        #[cfg(not(feature = "metal-fuse-attn-decode"))]
-        let (
-            cached_scaled_source,
-            cached_lower_inclusive,
-            _cached_padding_matched,
-            matched_cached_len,
-        ) = match named_cached_lens.iter().find_map(|&candidate| {
-            unwrap_cached_padding_select(program, cached_score_parts[0], Some(candidate))
-                .map(|found| (found, candidate))
-        }) {
-            Some((inner, matched)) => (inner, i64::MIN, true, Some(matched)),
-            None => (cached_score_parts[0], i64::MIN, false, None),
-        };
         let bound_cached_len = matched_cached_len.or(named_cached_len);
         let Some(cached_scaled_parts) =
             binary_elementwise(program, cached_scaled_source, ScalarOp::Multiply)
@@ -1551,31 +1525,14 @@ pub(super) fn cached_attention_candidates(
         };
         // Eligibility guards for the sliding-pattern-shaped windowed/padded masks
         // `local_row_bound`/`cached_lower_inclusive` above may have matched.
-        // Every guard here is a no-op off this feature: `local_row_bound` is
-        // always `u64::MAX` and `cached_padding_matched` always came from
-        // [`unwrap_cached_padding_select`]'s unwindowed bare shape, so none
-        // of the recurrent-interval family's existing accepted candidates can be reached by them.
-        #[cfg(feature = "metal-fuse-attn-decode")]
         let softmax_weights_eligible;
-        // unread off this feature: the sole reader below is itself
-        // `#[cfg(feature = "metal-fuse-attn-decode")]` -- a plain
-        // `-p proxima-tensor` check never reaches this (its own default
-        // features exclude `cached-attention-streaming`), but a workspace
-        // build that unifies `cached-attention-streaming` in transitively
-        // (`cargo check --workspace --features metal`) does.
-        #[cfg(not(feature = "metal-fuse-attn-decode"))]
-        let _softmax_weights_eligible = false;
-        #[cfg(feature = "metal-fuse-attn-decode")]
         {
             // the split-KV forms need both reassociations: the cross-threadgroup
             // merge and the in-block tree reduce; `bit_exact` keeps the
             // byte-exact `CachedSoftmaxWeights` lowering.
-            #[cfg(feature = "metal-attn-split-decode")]
             let split_decode_admitted = admit(numeric_policy, NumericRewrite::ContextSplitMerge)
                 .is_ok()
                 && admit(numeric_policy, NumericRewrite::TreeReduce).is_ok();
-            #[cfg(not(feature = "metal-attn-split-decode"))]
-            let split_decode_admitted = false;
             // a window that cuts the new range is carried by `cached_lower_inclusive`
             // on the two-range `CachedAttention` op alone; the softmax-weights
             // lowering and the single-range form do not read it for new keys.
@@ -1659,20 +1616,8 @@ pub(super) fn cached_attention_candidates(
             // mask/window shape. `via_gemma_template` being `false` (a dense or hybrid
             // builder, or no match at all) skips both declines entirely --
             // those candidates are untouched by this feature, exactly as
-            // before. With `metal-attn-split-rows` the one-row restriction is
-            // lifted: a K-row candidate binds `CachedSoftmaxWeights` (byte-exact
+            // before. A K-row candidate binds `CachedSoftmaxWeights` (byte-exact
             // policy) or the row-tiled `CachedAttention` (relaxed policy).
-            #[cfg(not(feature = "metal-attn-split-rows"))]
-            if via_gemma_template && new_key_shape[0] != 1 {
-                #[cfg(feature = "instrument")]
-                debug!(
-                    node = output.0,
-                    stage = "softmax_weights_decode_only",
-                    new_key_rows = new_key_shape[0],
-                    "cached_attention decline -- softmax-weights arm is decode-only (new_key_rows must be 1)"
-                );
-                continue;
-            }
             // a sink candidate never takes the softmax-weights arm (it needs the decode split form,
             // checked below), so the unity-scale proof of that arm does not bind it
             // a non-unity scale only keeps the candidate off the softmax-weights arm (proven at
@@ -1691,12 +1636,10 @@ pub(super) fn cached_attention_candidates(
             // `decode_split_form` shape: one decode row, a bound cached range, a full-rotary head of
             // whole float4 lanes, the split-merge policy); every other shape stays unfused rather
             // than bind an op no kernel can render. The CPU executors take any shape.
-            #[cfg(feature = "metal-attn-split-rows")]
             let row_tiled_admits_rows = query_shape[0] >= 2;
-            #[cfg(not(feature = "metal-attn-split-rows"))]
-            let row_tiled_admits_rows = false;
             if attention_sink_term.is_some()
-                && !(split_decode_admitted
+                && !(executes.forms.contains(Form::AttentionSink)
+                    && split_decode_admitted
                     && (query_shape[0] == 1 || row_tiled_admits_rows)
                     && decode_split_shape_fits(
                         query_shape[0],
@@ -1716,8 +1659,10 @@ pub(super) fn cached_attention_candidates(
                 );
                 continue;
             }
-            softmax_weights_eligible =
-                via_gemma_template && !split_decode_admitted && softmax_weights_scale_unity;
+            softmax_weights_eligible = via_gemma_template
+                && !split_decode_admitted
+                && softmax_weights_scale_unity
+                && executes.forms.contains(Form::CachedSoftmaxWeights);
         }
         let Some(rotary_width) = query_shape[3].checked_mul(2) else {
             continue;
@@ -1859,7 +1804,6 @@ pub(super) fn cached_attention_candidates(
         // `topological_order_by_read_sources` before returning it — the
         // ordering violation this arm was the first fusion in this file to
         // trigger.
-        #[cfg(feature = "metal-fuse-attn-decode")]
         if softmax_weights_eligible {
             if pass.is_some() {
                 #[cfg(feature = "instrument")]
@@ -2765,7 +2709,7 @@ pub fn kv_read_only_by_fused_attention_in_program(
             _ => None,
         })
         .collect();
-    let mut candidates = cached_attention_candidates(program, shapes, &[], outputs, false, numeric_policy, true);
+    let mut candidates = cached_attention_candidates(program, shapes, &[], outputs, false, (numeric_policy, &Executes::CPU), true);
     candidates.extend(cached_attention_single_range_candidates(program, shapes, &[], outputs, numeric_policy, true));
     let covered: BTreeSet<NodeId> = candidates
         .iter()

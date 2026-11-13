@@ -197,31 +197,17 @@ cached-attention-streaming = [
     "proxima-tensor/cached-attention-streaming",
     "omega?/cached-attention-streaming",
 ]
-# Default-off passthrough to `proxima-tensor/metal-fuse-attn-decode` and
-# `omega/metal-fuse-attn-decode` -- the gemma4-shaped windowed/padded
-# cached-attention recognizer extension. Not named in `metal`'s list above,
-# but `metal-attn-split-decode` (which is) implies it; a build that names
-# `--no-default-features` plus the `metal` members individually gets the
-# feature-off oracle.
-metal-fuse-attn-decode = [
-    "dep:omega",
-    "cached-attention-streaming",
-    "proxima-tensor/metal-fuse-attn-decode",
-    "omega?/metal-fuse-attn-decode",
-]
-# Passthrough, in `metal`'s list above (ROW C4.21), to `proxima-tensor/metal-attn-split-decode` and
-# `omega/metal-attn-split-decode` -- gemma4 decode attention as a split-KV
-# partial plus a llama.cpp-shaped merge (2 dispatches per layer).
+# Passthrough, in `metal`'s list above (ROW C4.21), to `omega/metal-attn-split-decode` -- gemma4
+# decode attention as a split-KV partial plus a llama.cpp-shaped merge (2 dispatches per layer).
+# The recognizer side is decided by the backend's `Executes` at bind time, not by a feature.
 metal-attn-split-decode = [
-    "metal-fuse-attn-decode",
-    "proxima-tensor/metal-attn-split-decode",
+    "dep:omega",
     "omega?/metal-attn-split-decode",
 ]
-# Passthrough to `proxima-tensor/metal-attn-split-rows` and `omega/metal-attn-split-rows` -- gemma4
+# Passthrough to `omega/metal-attn-split-rows` -- gemma4
 # attention at K > 1 new query rows (speculative verify) as one row-tiled split partial plus the merge.
 metal-attn-split-rows = [
     "metal-attn-split-decode",
-    "proxima-tensor/metal-attn-split-rows",
     "omega?/metal-attn-split-rows",
 ]
 # Default-off typed selector surface for the captured attention A/B example.
@@ -581,7 +567,7 @@ required-features = ["std"]
 name = "attribution_rank"
 required-features = ["std"]
 
-# `metal-fuse-attn-decode` byte-equivalence harness: fused vs. unfused
+# fused-attention byte-equivalence harness: fused vs. unfused
 # `BoundOpKind::CachedAttention` parity on the real gemma4-E2B checkpoint,
 # read via `PROXIMA_METAL_FUSE_ATTN_PARITY_STEPS` in `decode.rs`.
 [[example]]
