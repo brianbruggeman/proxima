@@ -461,8 +461,8 @@ mod tests {
         assert_eq!(derive(&fixture, granted(), GpuDriver::Cuda).0, derived, "derivation is deterministic");
     }
 
-    fn derive_stored(fixture: &Fixture, format: NumericFormat) -> Result<(Vec<BoundOp>, PackedOperands), ActivationRefusal> {
-        validate_storage(Some(format)).map_err(|refusal| *refusal)?;
+    fn derive_stored(fixture: &Fixture, format: NumericFormat) -> Result<(Vec<BoundOp>, PackedOperands), Box<ActivationRefusal>> {
+        validate_storage(Some(format))?;
         let mut packed = fixture.packed.clone();
         let derived = derive_with_storage(
             fixture.resolved.clone(),
