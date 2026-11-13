@@ -190,6 +190,9 @@ pub(super) fn push_packed_row_blocked_body(
             FlatRendered,
             /// ggml's own Q4_0 lane geometry, kept as a REFERENCE/Oracle body.
             Q4_0Reference,
+            /// the flat-block matvec reading the layout's coded planes (Q5_0, Q5_1, Q4_1), one
+            /// block per lane, extent a multiple of the block and not of 256
+            BlockRendered,
             /// the generic lane-spread preamble plus its per-codec decode arms
             Generic,
         }
@@ -228,11 +231,15 @@ pub(super) fn push_packed_row_blocked_body(
                     && real_float
                     && !expert_source_mode
                     && !cfg!(feature = "metal-q4k-split-k");
+                let block_rendered = block_rendered_elements(codec).is_some()
+                    && block_codec_row_body_rendered(plain_product_reduce, real_float)
+                    && !expert_source_mode;
                 match (ggml_port, codec, q4_0_reference) {
                     (true, Codec::Q5K, _) => Self::Q5KGgmlPort,
                     (true, _, _) => Self::SubBlockRendered,
                     (false, _, false) if flat_rendered => Self::FlatRendered,
                     (false, _, true) => Self::Q4_0Reference,
+                    (false, _, false) if block_rendered => Self::BlockRendered,
                     (false, _, false) if levels_rendered => Self::LevelsRendered,
                     (false, _, false) => Self::Generic,
                 }
@@ -293,7 +300,32 @@ pub(super) fn push_packed_row_blocked_body(
                     node: resolved.node,
                     codec: "no block layout",
                 })?;
-            let form = FlatBlockForm::plan(&layout).or_else(|_| FlatBlockForm::plan_planes(&layout)).map_err(|refusal| EmitError::PackedCodecNotSupported {
+            let form = FlatBlockForm::plan(&layout).map_err(|refusal| EmitError::PackedCodecNotSupported {
+                node: resolved.node,
+                codec: refusal.0,
+            })?;
+            let reduction_bound = packed_row_reduction_bound_token(metal);
+            let launch = FlatLaunch {
+                rows,
+                lanes: SIMD_WIDTH as usize,
+                weight,
+                other,
+                other_stride_is_one,
+            };
+            source.push_str(&form.matvec_msl(
+                &launch,
+                &reduction_bound,
+                element_type,
+                Fold::ScaleEachTerm,
+            ));
+        } else if packed_body == PackedBodySelect::BlockRendered {
+            let layout = codec
+                .block_layout()
+                .ok_or(EmitError::PackedCodecNotSupported {
+                    node: resolved.node,
+                    codec: "no block layout",
+                })?;
+            let form = FlatBlockForm::plan_planes(&layout).map_err(|refusal| EmitError::PackedCodecNotSupported {
                 node: resolved.node,
                 codec: refusal.0,
             })?;

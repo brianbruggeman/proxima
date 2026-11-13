@@ -1,6 +1,6 @@
 use alloc::borrow::ToOwned;
 use proxima_numeric::float_layout::FloatLayout;
-use proxima_numeric::{LevelFormat, LevelTable};
+use proxima_numeric::{LevelFormat, LevelTable, RowBlockShape, row_block_shape};
 
 use super::*;
 
@@ -2859,6 +2859,9 @@ pub enum PackedRowBlockRejection {
     /// A level-set codec has a rendered row-blocked body only for a plain-product f32 reduce
     /// (`level_codec_row_body_rendered`); any other op runs on the cooperative kernel.
     LevelBodyNotRendered,
+    /// A unit-scale block codec has a rendered row-blocked body only for a plain-product f32
+    /// reduce (`block_codec_row_body_rendered`); any other op runs on the cooperative kernel.
+    BlockBodyNotRendered,
     /// `PROXIMA_PACKED_ROW_DISABLE` names the codec: the same-binary A/B control that keeps it on
     /// the generic cooperative kernel.
     RowBlockSwitchedOff,
@@ -2909,10 +2912,28 @@ pub(super) fn classify_packed_row_block(
     if matches!(block.codec, Codec::Levels(_)) && !level_row_body_rendered(resolved, &block) {
         return Err(PackedRowBlockRejection::LevelBodyNotRendered);
     }
+    if block_rendered_elements(block.codec).is_some() {
+        if packed_row_block_token_total(&block, &resolved.extents) > 1 {
+            return Err(PackedRowBlockRejection::MultiRowBodyMissing);
+        }
+        if !block_row_body_rendered(resolved, &block) {
+            return Err(PackedRowBlockRejection::BlockBodyNotRendered);
+        }
+    }
     if packed_row_codec_disabled(block.codec) {
         return Err(PackedRowBlockRejection::RowBlockSwitchedOff);
     }
     Ok(block)
+}
+
+fn block_row_body_rendered(resolved: &BoundOp, block: &PackedRowBlock) -> bool {
+    let BoundOpKind::Reduce { reduce_op, .. } = &resolved.kind else {
+        return false;
+    };
+    block_codec_row_body_rendered(
+        is_plain_product_reduce(resolved, *reduce_op, block.weight, block.other),
+        resolved.dtype == DType::FLOAT32,
+    )
 }
 
 fn level_row_body_rendered(resolved: &BoundOp, block: &PackedRowBlock) -> bool {
@@ -2931,49 +2952,55 @@ fn level_row_body_rendered(resolved: &BoundOp, block: &PackedRowBlock) -> bool {
 /// span (`Q8_0` and `Q4_0` as eight real blocks), so `n` is
 /// [`Q4K_BLOCK_ELEMENTS`] for all of them. Exhaustive over [`Codec`], so a new
 /// codec forces a decision here instead of slipping through.
-pub(super) const fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
+pub(super) fn row_block_extent_multiple(codec: Codec) -> Option<usize> {
     match codec {
         Codec::Levels(format) if level_row_block_elements(&format).is_some() => {
             level_row_block_elements(&format)
         }
-        Codec::Q3K
-        | Codec::Q4K
-        | Codec::Q5K
-        | Codec::Q6K
-        | Codec::Q8_0
-        | Codec::Q4_0
-        | Codec::Fp6E3M2 => Some(Q4K_BLOCK_ELEMENTS),
-        Codec::Q2K
-        | Codec::Q5_1
-        | Codec::Q5_0
-        | Codec::Float16
-        | Codec::BFloat16
-        | Codec::Q4_1
-        | Codec::Q8_1
-        | Codec::Q8_1Grouped
-        | Codec::Q8K
-        | Codec::Iq1S
-        | Codec::Iq1M
-        | Codec::Iq2Xxs
-        | Codec::Iq2Xs
-        | Codec::Iq2S
-        | Codec::Iq3Xxs
-        | Codec::Iq3S
-        | Codec::Iq4Nl
-        | Codec::Iq4Xs
-        | Codec::Tq10
-        | Codec::Tq20
-        | Codec::Mxfp4
-        | Codec::Nvfp4
-        | Codec::Q1_0
-        | Codec::Q2_0
-        | Codec::Pq2_0
-        | Codec::Ptq1_0
-        | Codec::BFloat8
-        | Codec::Bf8E5M2
-        | Codec::Bf4E2M1 => None,
-        _ => None,
+        _ if legacy_super_block_arm(codec) => Some(Q4K_BLOCK_ELEMENTS),
+        _ => block_rendered_elements(codec),
     }
+}
+
+/// The codecs whose row-blocked body still addresses one 256-element super-block span per step
+/// (the K-quant bodies, and `Q8_0`, `Q4_0` and fp6 through their super-element readers), so their
+/// reduce extent must be a multiple of 256. This list only shrinks: a format the layout-rendered
+/// block body serves is decided by [`block_rendered_elements`], never added here.
+pub(super) const fn legacy_super_block_arm(codec: Codec) -> bool {
+    matches!(
+        codec,
+        Codec::Q3K
+            | Codec::Q4K
+            | Codec::Q5K
+            | Codec::Q6K
+            | Codec::Q8_0
+            | Codec::Q4_0
+            | Codec::Fp6E3M2
+    )
+}
+
+/// The block elements of a codec the layout-rendered `CodeRead::Planes` body serves: a unit-scale
+/// `RowBlockShape::Block` whose plane read `FlatBlockForm::plan_planes` accepts, outside the legacy
+/// arms and the level formats (which read through their level table, not the planes). The reduce
+/// extent need only be a multiple of this, not of 256. Admission here and the emitted body both
+/// derive from this one decision.
+pub(super) fn block_rendered_elements(codec: Codec) -> Option<usize> {
+    if legacy_super_block_arm(codec) || matches!(codec, Codec::Levels(_)) {
+        return None;
+    }
+    let Some(RowBlockShape::Block { elements, .. }) = row_block_shape(&codec) else {
+        return None;
+    };
+    let layout = codec.block_layout()?;
+    FlatBlockForm::plan_planes(&layout).ok()?;
+    Some(usize::from(elements))
+}
+
+/// Whether the block body renders the op: a plain-product reduce over real f32 activations, with
+/// the split-k build off. Evaluated by `classify_packed_row_block` (admission) and
+/// `PackedBodySelect::select` (emission), so a codec is admitted exactly where emission renders it.
+pub(super) const fn block_codec_row_body_rendered(plain_product_reduce: bool, real_float: bool) -> bool {
+    plain_product_reduce && real_float && !cfg!(feature = "metal-q4k-split-k")
 }
 
 /// The reduce-extent multiple of a level-set format the row-blocked kernel renders: one block of

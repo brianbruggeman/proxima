@@ -25,6 +25,10 @@ use super::sub_block_matvec::{SubBlockMatvecRefusal, require, typed_field_read};
 /// `PACKED_ROW_BODY_MARKERS` holds it so the profiler classifies this body as packed-row-blocked.
 pub(super) const FLAT_BLOCK_LEVELS_MARKER: &str = "flat_block_levels";
 
+/// The block-count line every flat-block matvec opens with, whichever `CodeRead` it renders; the
+/// plane read names no levels local, so this is its profiler marker.
+pub(super) const FLAT_BLOCK_COUNT_MARKER: &str = "int blocks = (int)";
+
 /// Where the scale enters the sum, and what the per-row statement is when it is not the plain
 /// product.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
