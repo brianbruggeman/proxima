@@ -1,0 +1,22 @@
+op_profile step=0 op_count=1471 total_gpu_ms=12981.844 operand_bytes=1216905123472
+op_profile_kind step=0 kind=cached_attention op_count=14 gpu_ms=159.467 operand_bytes=699598648
+op_profile_kind step=0 kind=constant op_count=9 gpu_ms=0.086 operand_bytes=0
+op_profile_kind step=0 kind=elementwise op_count=201 gpu_ms=289.004 operand_bytes=25232135448
+op_profile_kind step=0 kind=elementwise_twin op_count=70 gpu_ms=8.163 operand_bytes=2683985920
+op_profile_kind step=0 kind=iota op_count=4 gpu_ms=0.042 operand_bytes=0
+op_profile_kind step=0 kind=moe_topk op_count=47 gpu_ms=3.602 operand_bytes=194822144
+op_profile_kind step=0 kind=reduce-cooperative op_count=384 gpu_ms=977.025 operand_bytes=53776152576
+op_profile_kind step=0 kind=reduce-generic-scalar op_count=47 gpu_ms=21.874 operand_bytes=4678014528
+op_profile_kind step=0 kind=reduce-packed-row-blocked op_count=1 gpu_ms=1.036 operand_bytes=326721536
+op_profile_kind step=0 kind=reduce-tiled-gemm op_count=694 gpu_ms=11521.544 operand_bytes=1129313692672
+op_profile step=0 op_count=1471 total_gpu_ms=12925.762 operand_bytes=1216905123472
+op_profile_kind step=0 kind=cached_attention op_count=14 gpu_ms=158.538 operand_bytes=699598648
+op_profile_kind step=0 kind=constant op_count=9 gpu_ms=0.114 operand_bytes=0
+op_profile_kind step=0 kind=elementwise op_count=201 gpu_ms=288.786 operand_bytes=25232135448
+op_profile_kind step=0 kind=elementwise_twin op_count=70 gpu_ms=8.131 operand_bytes=2683985920
+op_profile_kind step=0 kind=iota op_count=4 gpu_ms=0.041 operand_bytes=0
+op_profile_kind step=0 kind=moe_topk op_count=47 gpu_ms=3.493 operand_bytes=194822144
+op_profile_kind step=0 kind=reduce-cooperative op_count=384 gpu_ms=976.344 operand_bytes=53776152576
+op_profile_kind step=0 kind=reduce-generic-scalar op_count=47 gpu_ms=20.949 operand_bytes=4678014528
+op_profile_kind step=0 kind=reduce-packed-row-blocked op_count=1 gpu_ms=1.673 operand_bytes=326721536
+op_profile_kind step=0 kind=reduce-tiled-gemm op_count=694 gpu_ms=11467.692 operand_bytes=1129313692672

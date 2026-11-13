@@ -37,6 +37,21 @@
 //! difference between the two is the server's overhead. `--prompts` / `--kvs` select a subset of
 //! cells; `--quiet-gate off` runs without waiting and marks every row INVALID on I10.
 //!
+//! Stage-matrix mode (`--stages DIR`, PROXNUM-184): every pipeline stage of both engines on
+//! `DIR/wp_{84,510,2024,4069}.txt`, one TSV row per (round, engine, prompt, metric) in
+//! `stages.tsv` and an owner-ordered markdown table in `stages.md` (tokenization, prefill,
+//! decode, attention, kv, detokenization, ete, then model load / first-request compile / RSS /
+//! GPU peak). The `Metric` consts carry each number's definition into the TSV and the markdown.
+//! Cells a side cannot produce are `unavailable` with the reason, never filled: llama has no
+//! per-op timer, so its attention cells are unavailable and `--fa-off-arm on` adds the
+//! `llama-fa-delta` rows (flash attention off minus on) as the only proxy. Uses the first
+//! `--prox`, `--stage-kv` (default F16) and `--rounds`.
+//!
+//! ```sh
+//! kv_scoreboard --stages ~/.cache/kvgate/proxnum97 --out DIR --model BLOB --llama PATH/llama-server \
+//!   --llama-commit ba3c05f71 --prox new=PATH_A --rounds 3 --fa-off-arm on
+//! ```
+//!
 //! Output directory gets `raw.tsv` (one row per process with the parity columns), `logs/` (each
 //! child's stderr) and `scoreboard.md`.
 //!
@@ -1358,9 +1373,18 @@ struct Config {
     kvs: Vec<Kv>,
     /// false runs every process without waiting; every such row is INVALID on I10
     quiet_gate: bool,
+    /// directory holding `wp_{84,510,2024,4069}.txt`; its presence selects the stage-matrix mode
+    stages: Option<PathBuf>,
+    /// KV configuration of the stage-matrix run, one of the llama-comparable kinds
+    stage_kv: Kv,
+    /// adds the optional `llama-fa-off` arm and the `llama-fa-delta` attention proxy rows
+    fa_off_arm: bool,
 }
 
-const VALUE_FLAGS: [&str; 16] = [
+const VALUE_FLAGS: [&str; 19] = [
+    "--stages",
+    "--stage-kv",
+    "--fa-off-arm",
     "--quiet-gate",
     "--llama-inproc",
     "--prompts",
@@ -1420,6 +1444,27 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
             .ok_or(HarnessError::MissingFlag(flag))
     };
     let llama_inproc = values.get("--llama-inproc").map(PathBuf::from);
+    let stages = values.get("--stages").map(PathBuf::from);
+    let long_prompt_file = match (&stages, values.get("--long-prompt-file")) {
+        (_, Some(path)) => PathBuf::from(path),
+        (Some(_), None) => PathBuf::new(),
+        (None, None) => return Err(HarnessError::MissingFlag("--long-prompt-file")),
+    };
+    let stage_kv = match values.get("--stage-kv") {
+        None => Kv::F16,
+        Some(text) => Kv::parse(text).filter(|kv| kv.llama_types().is_some()).ok_or_else(|| HarnessError::BadValue {
+            flag: "--stage-kv",
+            expected: "F32|F16|BF16",
+            got: text.clone(),
+        })?,
+    };
+    let fa_off_arm = match values.get("--fa-off-arm").map(String::as_str) {
+        None | Some("off") => false,
+        Some("on") => true,
+        Some(other) => {
+            return Err(HarnessError::BadValue { flag: "--fa-off-arm", expected: "on|off", got: other.to_owned() });
+        }
+    };
     if proxima.is_empty() && llama_inproc.is_none() {
         return Err(HarnessError::MissingFlag("--prox"));
     }
@@ -1437,7 +1482,10 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
         out: required("--out")?,
         model: required("--model")?,
         llama: required("--llama")?,
-        long_prompt_file: required("--long-prompt-file")?,
+        long_prompt_file,
+        stages,
+        stage_kv,
+        fa_off_arm,
         proxima,
         rounds,
         time_bin: values
@@ -1628,7 +1676,14 @@ struct TimedServer {
 }
 
 impl TimedServer {
-    fn spawn(config: &Config, capacity: usize, kv: Kv, port: u16, stderr_path: &Path) -> Result<Self, HarnessError> {
+    fn spawn(
+        config: &Config,
+        capacity: usize,
+        kv: Kv,
+        port: u16,
+        stderr_path: &Path,
+        flash: &str,
+    ) -> Result<Self, HarnessError> {
         let (key, value) = kv.llama_types().ok_or_else(|| HarnessError::Server("no llama arm for this KV".to_owned()))?;
         let stderr_file = File::create(stderr_path).map_err(io_error(stderr_path))?;
         let timer = Command::new(&config.time_bin)
@@ -1636,7 +1691,7 @@ impl TimedServer {
             .arg(&config.llama)
             .arg("-m")
             .arg(&config.model)
-            .args(["-ngl", "99", "-fa", "on", "-np", "1", "--no-warmup", "--seed", "1"])
+            .args(["-ngl", "99", "-fa", flash, "-np", "1", "--no-warmup", "--seed", "1"])
             .args(["-c", &capacity.to_string(), "-ctk", key, "-ctv", value])
             .args(["--host", "127.0.0.1", "--port", &port.to_string(), "-lv", "4"])
             .stdout(Stdio::null())
@@ -1693,7 +1748,7 @@ struct RunContext<'a> {
 }
 
 fn run_llama(context: &RunContext, cell: &Cell, row: &mut Row) -> Result<(), HarnessError> {
-    let server = TimedServer::spawn(context.config, context.prompt.capacity, cell.kv, context.port, &context.log_path)?;
+    let server = TimedServer::spawn(context.config, context.prompt.capacity, cell.kv, context.port, &context.log_path, "on")?;
     let outcome = (|| {
         if !TimedServer::wait_ready(context.port, 180) {
             return Err(HarnessError::Server("never became healthy".to_owned()));
@@ -1910,8 +1965,678 @@ fn write_outputs(config: &Config, cells: &[Cell], rows: &[Row], facts: &Facts) -
     Ok(())
 }
 
+// ---- stage matrix: every pipeline stage of both engines on the same prompt files ----
+
+const STAGE_PROMPT_LABELS: [&str; 4] = ["84", "510", "2024", "4069"];
+const TEXT_EDGE_REPS: usize = 20;
+const MEBIBYTE: f64 = 1_048_576.0;
+const STAGE_BASE_PORT: u16 = BASE_PORT + 500;
+const PROFILE_PREFILL_STEP: &str = "0";
+const PROFILE_DECODE_STEP: &str = "3";
+const PROFILE_DECODE_TOKENS: usize = 5;
+const STAGE_HEADER: &str = "round\tengine\tprompt\tstage\tmetric\tvalue\tunit\tstatus\tload1\tdefinition\tnote";
+const NO_LLAMA_OP_TIMER: &str = "llama-server exposes no per-op timer and none is invented here; the closest real proxy is the llama-fa-delta rows (--fa-off-arm on)";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Stage {
+    Tokenization,
+    Prefill,
+    Decode,
+    Attention,
+    Kv,
+    Detokenization,
+    EndToEnd,
+    Extra,
+}
+
+impl Stage {
+    fn name(self) -> &'static str {
+        match self {
+            Stage::Tokenization => "tokenization",
+            Stage::Prefill => "prefill",
+            Stage::Decode => "decode",
+            Stage::Attention => "attention",
+            Stage::Kv => "kv",
+            Stage::Detokenization => "detokenization",
+            Stage::EndToEnd => "ete",
+            Stage::Extra => "extra",
+        }
+    }
+}
+
+/// One measured quantity with the definition that both engines' values share.
+struct Metric {
+    stage: Stage,
+    name: &'static str,
+    unit: &'static str,
+    definition: &'static str,
+}
+
+const fn metric(stage: Stage, name: &'static str, unit: &'static str, definition: &'static str) -> Metric {
+    Metric { stage, name, unit, definition }
+}
+
+const TOKENIZE_MS: Metric = metric(Stage::Tokenization, "tokenize_ms", "ms", "text to ids for the prompt file. proxima: mean of 20 in-process encode_with_bos_eos calls on the GGUF vocab after 1 discarded call, no transport. llama: client wall of POST /tokenize {content, add_special:true} minus tokenize_http_floor_ms");
+const TOKENIZE_WALL_MS: Metric = metric(Stage::Tokenization, "tokenize_wall_ms", "ms", "llama: client wall of POST /tokenize on the prompt text, HTTP included. proxima: the in-process call, equal to tokenize_ms");
+const TOKENIZE_FLOOR_MS: Metric = metric(Stage::Tokenization, "tokenize_http_floor_ms", "ms", "llama only: client wall of POST /tokenize on an empty string against the local server, the HTTP round trip with no tokenizer work, subtracted from tokenize_wall_ms");
+const TOKENIZE_TOKENS: Metric = metric(Stage::Tokenization, "tokenize_tokens", "count", "ids the tokenizer returned for the prompt text (proxima: encode_with_bos_eos count; llama: /tokenize tokens length)");
+const PREFILL_MS: Metric = metric(Stage::Prefill, "prefill_ms_per_prompt_token", "ms/token", "warm prefill ms / prompt tokens. proxima: mean over runs 1 and 2 of the prefill step_time step_ns / prompt tokens. llama: timings.prompt_ms of request 2 / timings.prompt_n");
+const PREFILL_COLD_MS: Metric = metric(Stage::Prefill, "prefill_cold_ms_per_prompt_token", "ms/token", "first-request prefill ms / prompt tokens. proxima: run 0 prefill step_ns. llama: timings.prompt_ms of request 1");
+const DECODE_MS: Metric = metric(Stage::Decode, "decode_ms_per_token", "ms/token", "proxima: mean over runs 1 and 2 of decode_span_ms_per_token over step_time records (decode index>=1). llama: timings.predicted_per_token_ms of request 2 (server timing, includes server overhead)");
+const ATTN_PREFILL_MS: Metric = metric(Stage::Attention, "attention_prefill_gpu_ms", "ms", "proxima: sum of gpu_ms over op_profile_kind kinds containing 'attention' in a separate process with PROXIMA_METAL_OP_PROFILE_STEP=0 (one command buffer per op, so slower than the unprofiled step; kinds not named attention are not counted)");
+const ATTN_PREFILL_SHARE: Metric = metric(Stage::Attention, "attention_prefill_share", "fraction", "attention_prefill_gpu_ms / sum of gpu_ms over every op_profile_kind of the same profiled step");
+const ATTN_DECODE_MS: Metric = metric(Stage::Attention, "attention_decode_gpu_ms", "ms", "as attention_prefill_gpu_ms with PROXIMA_METAL_OP_PROFILE_STEP=3 and 5 tokens");
+const ATTN_DECODE_SHARE: Metric = metric(Stage::Attention, "attention_decode_share", "fraction", "attention_decode_gpu_ms / sum of gpu_ms over every op_profile_kind of the same profiled step");
+const FA_PREFILL_PROXY: Metric = metric(Stage::Attention, "fa_off_minus_on_prefill_ms_per_token", "ms/token", "llama proxy, not attention time: warm prefill ms/token with -fa off minus -fa on; the graph also changes KV layout and softmax materialisation, so this bounds attention cost only loosely");
+const FA_DECODE_PROXY: Metric = metric(Stage::Attention, "fa_off_minus_on_decode_ms_per_token", "ms/token", "llama proxy, not attention time: timings.predicted_per_token_ms with -fa off minus -fa on");
+const KV_BYTES_PER_TOKEN: Metric = metric(Stage::Kv, "kv_bytes_per_token", "bytes", "KV bytes per token position across all layers. proxima: mean layer_cache_append_bytes over token_breakdown decode steps. llama: load-log 'KV buffer size' bytes / n_ctx_seq");
+const KV_PEAK_BYTES: Metric = metric(Stage::Kv, "kv_peak_bytes", "bytes", "llama: sum of the load-log 'KV buffer size' lines, allocated up front for the padded -c so it is also the peak. proxima: no KV-only peak is logged");
+const KV_WRITE_MS: Metric = metric(Stage::Kv, "kv_write_ms_per_step", "ms", "proxima: mean over token_breakdown decode steps (step>=1) of named_blocks_kv_ms + layer_cache_append_ms + that step's device_kv_narrow narrow_ms when logged, the encode-side KV timing. llama: no per-step KV timer");
+const DETOKENIZE_MS: Metric = metric(Stage::Detokenization, "detokenize_ms", "ms", "the 128 generated ids to text. proxima: mean of 20 in-process proxima_tokenizer::decode calls after 1 discarded call. llama: client wall of POST /detokenize minus detokenize_http_floor_ms");
+const DETOKENIZE_WALL_MS: Metric = metric(Stage::Detokenization, "detokenize_wall_ms", "ms", "llama: client wall of POST /detokenize on the generated ids, HTTP included. proxima: the in-process call, equal to detokenize_ms");
+const DETOKENIZE_FLOOR_MS: Metric = metric(Stage::Detokenization, "detokenize_http_floor_ms", "ms", "llama only: client wall of POST /detokenize with an empty token array, subtracted from detokenize_wall_ms");
+const E2E_WALL_MS: Metric = metric(Stage::EndToEnd, "e2e_wall_ms", "ms", "full request, 128 tokens out. proxima: mean over runs 1 and 2 of run=done wall_ms from the decode_gbps_baseline loop (text edges not proven inside it, see e2e_with_text_edges_ms). llama: client wall of warm POST /completion with the prompt as text, n_predict 128, ignore_eos, text returned");
+const E2E_EDGES_MS: Metric = metric(Stage::EndToEnd, "e2e_with_text_edges_ms", "ms", "proxima DERIVED: e2e_wall_ms + tokenize_ms + detokenize_ms, the composed text-in text-out path; llama's /completion already includes both edges");
+const LOAD_MS: Metric = metric(Stage::Extra, "model_load_ms", "ms", "proxima DERIVED: /usr/bin/time real minus the sum of run wall_ms (process start, GGUF parse, weight load, teardown). llama: spawn to /health ok, 500 ms poll granularity");
+const FIRST_REQUEST_MS: Metric = metric(Stage::Extra, "first_request_compile_ms", "ms", "DERIVED: first-request prefill ms minus warm prefill ms, the pipeline-compile and first-use cost (llama runs --no-warmup)");
+const FOOTPRINT_BYTES: Metric = metric(Stage::Extra, "peak_footprint_bytes", "bytes", "/usr/bin/time -l 'peak memory footprint' of the engine process (proxima binary, or llama-server)");
+const RSS_BYTES: Metric = metric(Stage::Extra, "max_rss_bytes", "bytes", "/usr/bin/time -l 'maximum resident set size' of the engine process");
+const GPU_PEAK_BYTES: Metric = metric(Stage::Extra, "gpu_peak_bytes", "bytes", "proxima: max gpu_peak_bytes over run=done lines. llama: not reported by llama-server");
+const ARM_ERROR: Metric = metric(Stage::Extra, "arm_error", "none", "an arm that failed to run; the reason is in the note");
+
+/// (column title, metric name) in the owner's order: tokenization, prefill, decode, attention, kv, detokenization, ete, extras.
+const HEADLINES: [(&str, &str); 17] = [
+    ("tokenize ms", "tokenize_ms"),
+    ("prefill ms/tok", "prefill_ms_per_prompt_token"),
+    ("decode ms/tok", "decode_ms_per_token"),
+    ("attn prefill gpu ms", "attention_prefill_gpu_ms"),
+    ("attn prefill share", "attention_prefill_share"),
+    ("attn decode gpu ms", "attention_decode_gpu_ms"),
+    ("attn decode share", "attention_decode_share"),
+    ("kv bytes/tok", "kv_bytes_per_token"),
+    ("kv peak bytes", "kv_peak_bytes"),
+    ("kv write ms/step", "kv_write_ms_per_step"),
+    ("detokenize ms", "detokenize_ms"),
+    ("ete wall ms", "e2e_wall_ms"),
+    ("load ms", "model_load_ms"),
+    ("first-req compile ms", "first_request_compile_ms"),
+    ("footprint bytes", "peak_footprint_bytes"),
+    ("rss bytes", "max_rss_bytes"),
+    ("gpu peak bytes", "gpu_peak_bytes"),
+];
+
+#[derive(Clone, Debug, PartialEq)]
+struct StageRow {
+    round: usize,
+    engine: String,
+    prompt: String,
+    stage: Stage,
+    metric: &'static str,
+    value: Option<f64>,
+    unit: &'static str,
+    definition: &'static str,
+    load1: f64,
+    note: String,
+}
+
+struct RowSink {
+    round: usize,
+    engine: String,
+    prompt: String,
+    load1: f64,
+    rows: Vec<StageRow>,
+}
+
+impl RowSink {
+    fn new(round: usize, engine: &str, prompt: &str, load1: f64) -> Self {
+        Self { round, engine: engine.to_owned(), prompt: prompt.to_owned(), load1, rows: Vec::new() }
+    }
+
+    fn push(&mut self, spec: &Metric, value: Option<f64>, note: &str) {
+        self.rows.push(StageRow {
+            round: self.round,
+            engine: self.engine.clone(),
+            prompt: self.prompt.clone(),
+            stage: spec.stage,
+            metric: spec.name,
+            value,
+            unit: spec.unit,
+            definition: spec.definition,
+            load1: self.load1,
+            note: note.to_owned(),
+        });
+    }
+
+    fn measured(&mut self, spec: &Metric, value: f64, note: &str) {
+        self.push(spec, Some(value), note);
+    }
+
+    fn unavailable(&mut self, spec: &Metric, reason: &str) {
+        self.push(spec, None, reason);
+    }
+
+    /// A value when the source line existed, else an unavailable cell naming what was missing.
+    fn optional(&mut self, spec: &Metric, value: Option<f64>, missing: &str) {
+        self.push(spec, value, if value.is_some() { "" } else { missing });
+    }
+}
+
+/// Everything one llama-server arm observed for one prompt.
+#[derive(Debug, Clone, PartialEq)]
+struct LlamaStage {
+    cold: LlamaResponse,
+    warm: LlamaResponse,
+    tokenize_wall_ms: f64,
+    tokenize_floor_ms: f64,
+    tokenize_tokens: usize,
+    detokenize_wall_ms: f64,
+    detokenize_floor_ms: f64,
+    e2e_wall_ms: f64,
+    ready_ms: f64,
+    log: LlamaLog,
+    footprint_bytes: Option<u64>,
+    rss_bytes: Option<u64>,
+}
+
+fn bytes_value(bytes: Option<u64>) -> Option<f64> {
+    bytes.map(|count| count_as_f64(usize::try_from(count).unwrap_or(usize::MAX)))
+}
+
+fn llama_rows(sink: &mut RowSink, input: &LlamaStage) {
+    sink.measured(&TOKENIZE_WALL_MS, input.tokenize_wall_ms, "");
+    sink.measured(&TOKENIZE_FLOOR_MS, input.tokenize_floor_ms, "");
+    sink.measured(&TOKENIZE_MS, input.tokenize_wall_ms - input.tokenize_floor_ms, "wall minus http floor");
+    sink.measured(&TOKENIZE_TOKENS, count_as_f64(input.tokenize_tokens), "");
+    sink.measured(&PREFILL_MS, input.warm.prompt_ms / count_as_f64(input.warm.prompt_n), "request 2");
+    sink.measured(&PREFILL_COLD_MS, input.cold.prompt_ms / count_as_f64(input.cold.prompt_n), "request 1");
+    sink.measured(&DECODE_MS, input.warm.predicted_per_token_ms, "request 2");
+    for spec in [&ATTN_PREFILL_MS, &ATTN_PREFILL_SHARE, &ATTN_DECODE_MS, &ATTN_DECODE_SHARE] {
+        sink.unavailable(spec, NO_LLAMA_OP_TIMER);
+    }
+    let kv_bytes = input.log.kv_buffer_mib * MEBIBYTE;
+    sink.optional(
+        &KV_BYTES_PER_TOKEN,
+        input.log.n_ctx_seq.filter(|&context| context > 0).map(|context| kv_bytes / count_as_f64(context)),
+        "load log has no n_ctx_seq line",
+    );
+    sink.optional(&KV_PEAK_BYTES, Some(kv_bytes).filter(|&bytes| bytes > 0.0), "load log has no KV buffer size line");
+    sink.unavailable(&KV_WRITE_MS, "llama-server has no per-step KV timer");
+    sink.measured(&DETOKENIZE_WALL_MS, input.detokenize_wall_ms, "");
+    sink.measured(&DETOKENIZE_FLOOR_MS, input.detokenize_floor_ms, "");
+    sink.measured(&DETOKENIZE_MS, input.detokenize_wall_ms - input.detokenize_floor_ms, "wall minus http floor");
+    sink.measured(&E2E_WALL_MS, input.e2e_wall_ms, "warm, text prompt");
+    sink.unavailable(&E2E_EDGES_MS, "/completion already includes server-side tokenize and detokenize");
+    sink.measured(&LOAD_MS, input.ready_ms, "");
+    sink.measured(&FIRST_REQUEST_MS, input.cold.prompt_ms - input.warm.prompt_ms, "request 1 minus request 2 prompt_ms");
+    sink.optional(&FOOTPRINT_BYTES, bytes_value(input.footprint_bytes), "no peak memory footprint line");
+    sink.optional(&RSS_BYTES, bytes_value(input.rss_bytes), "no maximum resident set size line");
+    sink.unavailable(&GPU_PEAK_BYTES, "llama-server does not report GPU memory");
+}
+
+/// Attention gpu time and the whole profiled step's gpu time from `op_profile_kind` lines.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct OpProfile {
+    attention_ms: f64,
+    total_ms: f64,
+}
+
+fn parse_op_profile(text: &str) -> Option<OpProfile> {
+    let mut profile = OpProfile { attention_ms: 0.0, total_ms: 0.0 };
+    let mut lines = 0_usize;
+    // the engine prints the profile once per profiled evaluation (a real log carries two blocks); the first block is one step
+    for line in text.lines().filter(|line| line.starts_with("op_profile step=") || line.contains("op_profile_kind step=")) {
+        if line.starts_with("op_profile step=") {
+            if lines > 0 {
+                break;
+            }
+            continue;
+        }
+        let (Some(kind), Some(gpu_ms)) =
+            (field_value(line, "kind="), field_value(line, "gpu_ms=").and_then(|token| token.parse::<f64>().ok()))
+        else {
+            continue;
+        };
+        profile.total_ms += gpu_ms;
+        if kind.contains("attention") {
+            profile.attention_ms += gpu_ms;
+        }
+        lines += 1;
+    }
+    (lines > 0).then_some(profile)
+}
+
+/// Per-decode-step means of the `token_breakdown` event.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct KvBreakdown {
+    write_ms: f64,
+    append_bytes: f64,
+}
+
+fn parse_kv_breakdown(text: &str) -> Option<KvBreakdown> {
+    let (mut write_ms, mut append_bytes, mut steps) = (0.0, 0.0, 0_usize);
+    // the device KV path logs `device_kv_narrow step= narrow_ms=` just before that step's token_breakdown line
+    let mut pending_narrow: Option<(usize, f64)> = None;
+    for line in text.lines().filter(|line| line.contains("token_breakdown") || line.contains("device_kv_narrow step=")) {
+        if line.contains("device_kv_narrow step=") {
+            pending_narrow = (|| Some((field_value(line, "step=")?.parse().ok()?, field_value(line, "narrow_ms=")?.parse().ok()?)))();
+            continue;
+        }
+        let parsed = (|| {
+            let step: usize = field_value(line, "step=")?.parse().ok()?;
+            let encode: f64 = field_value(line, "named_blocks_kv_ms=")?.parse().ok()?;
+            let append: f64 = field_value(line, "layer_cache_append_ms=")?.parse().ok()?;
+            let bytes: f64 = field_value(line, "layer_cache_append_bytes=")?.parse().ok()?;
+            let narrow = pending_narrow.filter(|(narrow_step, _)| *narrow_step == step).map_or(0.0, |(_, millis)| millis);
+            (step >= 1).then_some((encode + append + narrow, bytes))
+        })();
+        if let Some((millis, bytes)) = parsed {
+            write_ms += millis;
+            append_bytes += bytes;
+            steps += 1;
+        }
+    }
+    (steps > 0).then(|| KvBreakdown {
+        write_ms: write_ms / count_as_f64(steps),
+        append_bytes: append_bytes / count_as_f64(steps),
+    })
+}
+
+fn parse_run_walls(text: &str) -> BTreeMap<usize, f64> {
+    text.lines()
+        .filter(|line| line.contains("run=done"))
+        .filter_map(|line| Some((run_index_of(line)?, field_value(line, "wall_ms=")?.parse().ok()?)))
+        .collect()
+}
+
+/// `/usr/bin/time -l` first line: `7.53 real 2.90 user 1.85 sys`, in milliseconds.
+fn parse_real_ms(text: &str) -> Option<f64> {
+    let line = text.lines().find(|line| line.contains(" real "))?;
+    Some(line.split_whitespace().next()?.parse::<f64>().ok()? * 1e3)
+}
+
+fn parse_rss_bytes(text: &str) -> Option<u64> {
+    let line = text.lines().find(|line| line.trim_end().ends_with("maximum resident set size"))?;
+    line.split_whitespace().next()?.parse().ok()
+}
+
+/// Everything one proxima run set observed for one prompt.
+#[derive(Debug, Clone, PartialEq)]
+struct ProximaStage {
+    prompt_tokens: usize,
+    tokenize_ms: f64,
+    detokenize_ms: f64,
+    ttft_cold_ms: f64,
+    ttft_warm_ms: Vec<f64>,
+    decode_ms: Vec<f64>,
+    run_walls_ms: BTreeMap<usize, f64>,
+    process_real_ms: Option<f64>,
+    gpu_peak_bytes: Option<u64>,
+    footprint_bytes: Option<u64>,
+    rss_bytes: Option<u64>,
+    kv: Option<KvBreakdown>,
+    attention_prefill: Option<OpProfile>,
+    attention_decode: Option<OpProfile>,
+}
+
+fn warm_runs_mean(values: &[f64]) -> Option<f64> {
+    (!values.is_empty()).then(|| mean(values))
+}
+
+fn attention_rows(sink: &mut RowSink, profile: Option<OpProfile>, millis: &Metric, share: &Metric, missing: &str) {
+    sink.optional(millis, profile.map(|found| found.attention_ms), missing);
+    sink.optional(
+        share,
+        profile.filter(|found| found.total_ms > 0.0).map(|found| found.attention_ms / found.total_ms),
+        missing,
+    );
+}
+
+fn proxima_rows(sink: &mut RowSink, input: &ProximaStage) {
+    sink.measured(&TOKENIZE_WALL_MS, input.tokenize_ms, "in-process, no transport");
+    sink.unavailable(&TOKENIZE_FLOOR_MS, "in-process call, no transport to subtract");
+    sink.measured(&TOKENIZE_MS, input.tokenize_ms, "");
+    sink.measured(&TOKENIZE_TOKENS, count_as_f64(input.prompt_tokens), "");
+    let tokens = count_as_f64(input.prompt_tokens.max(1));
+    let warm = warm_runs_mean(&input.ttft_warm_ms);
+    sink.optional(&PREFILL_MS, warm.map(|millis| millis / tokens), "no warm prefill step_time lines");
+    sink.measured(&PREFILL_COLD_MS, input.ttft_cold_ms / tokens, "run 0");
+    sink.optional(&DECODE_MS, warm_runs_mean(&input.decode_ms), "no decode span records");
+    attention_rows(sink, input.attention_prefill, &ATTN_PREFILL_MS, &ATTN_PREFILL_SHARE, "no op_profile_kind lines from the step 0 profile run");
+    attention_rows(sink, input.attention_decode, &ATTN_DECODE_MS, &ATTN_DECODE_SHARE, "no op_profile_kind lines from the step 3 profile run");
+    let no_breakdown = "no token_breakdown lines in the run's output (event not emitted at this log level)";
+    sink.optional(&KV_BYTES_PER_TOKEN, input.kv.map(|found| found.append_bytes), no_breakdown);
+    sink.unavailable(&KV_PEAK_BYTES, "decode_gbps_baseline logs no KV-only peak; gpu_peak_bytes is whole-process");
+    sink.optional(&KV_WRITE_MS, input.kv.map(|found| found.write_ms), no_breakdown);
+    sink.measured(&DETOKENIZE_WALL_MS, input.detokenize_ms, "in-process, no transport");
+    sink.unavailable(&DETOKENIZE_FLOOR_MS, "in-process call, no transport to subtract");
+    sink.measured(&DETOKENIZE_MS, input.detokenize_ms, "");
+    let walls: Vec<f64> = [1, 2].iter().filter_map(|run| input.run_walls_ms.get(run).copied()).collect();
+    let wall = warm_runs_mean(&walls);
+    sink.optional(&E2E_WALL_MS, wall, "no run=done wall_ms for runs 1 and 2");
+    sink.optional(&E2E_EDGES_MS, wall.map(|millis| millis + input.tokenize_ms + input.detokenize_ms), "needs e2e_wall_ms");
+    let loop_ms: f64 = input.run_walls_ms.values().sum();
+    sink.optional(&LOAD_MS, input.process_real_ms.map(|real| real - loop_ms), "no /usr/bin/time real line");
+    sink.optional(&FIRST_REQUEST_MS, warm.map(|millis| input.ttft_cold_ms - millis), "needs warm prefill");
+    sink.optional(&FOOTPRINT_BYTES, bytes_value(input.footprint_bytes), "no peak memory footprint line");
+    sink.optional(&RSS_BYTES, bytes_value(input.rss_bytes), "no maximum resident set size line");
+    sink.optional(&GPU_PEAK_BYTES, bytes_value(input.gpu_peak_bytes), "no gpu_peak_bytes in run=done");
+}
+
+/// The llama flash-attention on/off delta as the only available attention proxy.
+fn fa_delta_rows(sink: &mut RowSink, on: &LlamaStage, off: &LlamaStage) {
+    let prefill = |stage: &LlamaStage| stage.warm.prompt_ms / count_as_f64(stage.warm.prompt_n);
+    sink.measured(&FA_PREFILL_PROXY, prefill(off) - prefill(on), "request 2 of each arm");
+    sink.measured(&FA_DECODE_PROXY, off.warm.predicted_per_token_ms - on.warm.predicted_per_token_ms, "request 2 of each arm");
+}
+
+fn sanitize(text: &str) -> String {
+    text.replace(['\t', '\n'], " ")
+}
+
+fn stage_tsv(rows: &[StageRow]) -> String {
+    let mut tsv = format!("{STAGE_HEADER}\n");
+    for row in rows {
+        let (value, status) = row.value.map_or((String::new(), "unavailable"), |found| (format!("{found:.6}"), "measured"));
+        let _ = writeln!(
+            tsv,
+            "{}\t{}\t{}\t{}\t{}\t{value}\t{}\t{status}\t{:.2}\t{}\t{}",
+            row.round, row.engine, row.prompt, row.stage.name(), row.metric, row.unit, row.load1, row.definition, sanitize(&row.note)
+        );
+    }
+    tsv
+}
+
+fn unique_in_order<T: PartialEq>(items: impl Iterator<Item = T>) -> Vec<T> {
+    let mut seen: Vec<T> = Vec::new();
+    for item in items {
+        if !seen.contains(&item) {
+            seen.push(item);
+        }
+    }
+    seen
+}
+
+fn stage_markdown(rows: &[StageRow]) -> String {
+    let mut table = String::from("# stage matrix\n\nCells are `mean (CoV%) n=rounds`; `-` means no measured value (see Unavailable).\n\n| engine | prompt |");
+    for (title, _) in HEADLINES {
+        let _ = write!(table, " {title} |");
+    }
+    let _ = write!(table, "\n|{}\n", "---|".repeat(HEADLINES.len() + 2));
+    for (engine, prompt) in unique_in_order(rows.iter().map(|row| (row.engine.as_str(), row.prompt.as_str()))) {
+        let _ = write!(table, "| {engine} | {prompt} |");
+        for (_, name) in HEADLINES {
+            let values: Vec<f64> = rows
+                .iter()
+                .filter(|row| row.engine == engine && row.prompt == prompt && row.metric == name)
+                .filter_map(|row| row.value)
+                .collect();
+            let _ = write!(table, " {} |", stat_cell(&values));
+        }
+        table.push('\n');
+    }
+    table.push_str("\n## Definitions\n\n");
+    for (stage, name, unit, definition) in unique_in_order(rows.iter().map(|row| (row.stage, row.metric, row.unit, row.definition))) {
+        let _ = writeln!(table, "- `{name}` ({}, {unit}): {definition}", stage.name());
+    }
+    table.push_str("\n## Unavailable\n\n");
+    for (engine, name, reason) in unique_in_order(rows.iter().filter(|row| row.value.is_none()).map(|row| (row.engine.as_str(), row.metric, row.note.as_str()))) {
+        let _ = writeln!(table, "- {engine} `{name}`: {}", sanitize(reason));
+    }
+    table
+}
+
+struct StagePrompt {
+    label: String,
+    text: String,
+    ids: Vec<u32>,
+    capacity: usize,
+}
+
+fn load_stage_prompts(config: &Config, directory: &Path) -> Result<(Vocab, Vec<StagePrompt>), HarnessError> {
+    let file = File::open(&config.model).map_err(io_error(&config.model))?;
+    // SAFETY: the mapping is read-only and the blob is not modified while the harness runs.
+    let bytes = unsafe { MmapOptions::new().map(&file) }.map_err(io_error(&config.model))?;
+    let parsed = parse_complete(&bytes).map_err(|source| HarnessError::Tokenize(format!("{source:?}")))?;
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .map_err(|source| HarnessError::Tokenize(format!("{source:?}")))?;
+    let mut prompts = Vec::new();
+    for label in STAGE_PROMPT_LABELS {
+        let path = directory.join(format!("wp_{label}.txt"));
+        let text = fs::read_to_string(&path).map_err(io_error(&path))?.trim_end_matches('\n').to_owned();
+        let ids = tokenize_like_proxima(&text, &vocab)?;
+        let capacity = kv_capacity(ids.len(), MAX_TOKENS, config.kv_bucket, config.context_length);
+        prompts.push(StagePrompt { label: label.to_owned(), text, ids, capacity });
+    }
+    Ok((vocab, prompts))
+}
+
+fn mean_call_ms<T>(mut action: impl FnMut() -> T) -> f64 {
+    action();
+    let started = Instant::now();
+    for _ in 0..TEXT_EDGE_REPS {
+        std::hint::black_box(action());
+    }
+    started.elapsed().as_secs_f64() * 1e3 / count_as_f64(TEXT_EDGE_REPS)
+}
+
+fn timed_exchange(port: u16, path: &str, body: &str) -> Result<(String, f64), HarnessError> {
+    let started = Instant::now();
+    let answer = http_exchange(port, "POST", path, body, Duration::from_secs(300))?;
+    Ok((answer, started.elapsed().as_secs_f64() * 1e3))
+}
+
+fn json_array_len(body: &str, key: &str) -> Result<usize, HarnessError> {
+    let value: Value = serde_json::from_str(body).map_err(|source| HarnessError::BadResponse(source.to_string()))?;
+    value
+        .get(key)
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .ok_or_else(|| HarnessError::BadResponse(format!("missing {key}")))
+}
+
+fn text_completion_body(text: &str) -> String {
+    json!({
+        "prompt": text,
+        "n_predict": MAX_TOKENS,
+        "temperature": 0,
+        "top_k": 1,
+        "seed": 1,
+        "cache_prompt": false,
+        "ignore_eos": true,
+    })
+    .to_string()
+}
+
+fn llama_stage_requests(port: u16, prompt: &StagePrompt, ready_ms: f64) -> Result<LlamaStage, HarnessError> {
+    let (answer, tokenize_wall_ms) = timed_exchange(port, "/tokenize", &json!({"content": prompt.text, "add_special": true}).to_string())?;
+    let tokenize_tokens = json_array_len(&answer, "tokens")?;
+    let (_, tokenize_floor_ms) = timed_exchange(port, "/tokenize", &json!({"content": ""}).to_string())?;
+    let body = completion_body(&prompt.ids);
+    let ask = || timed_exchange(port, "/completion", &body).and_then(|(text, _)| parse_llama_response(&text));
+    let (cold, warm) = (ask()?, ask()?);
+    let (_, detokenize_wall_ms) = timed_exchange(port, "/detokenize", &json!({"tokens": warm.ids}).to_string())?;
+    let (_, detokenize_floor_ms) = timed_exchange(port, "/detokenize", &json!({"tokens": []}).to_string())?;
+    let (answer, e2e_wall_ms) = timed_exchange(port, "/completion", &text_completion_body(&prompt.text))?;
+    parse_llama_response(&answer)?;
+    Ok(LlamaStage {
+        cold,
+        warm,
+        tokenize_wall_ms,
+        tokenize_floor_ms,
+        tokenize_tokens,
+        detokenize_wall_ms,
+        detokenize_floor_ms,
+        e2e_wall_ms,
+        ready_ms,
+        log: LlamaLog::default(),
+        footprint_bytes: None,
+        rss_bytes: None,
+    })
+}
+
+fn run_llama_stage(config: &Config, prompt: &StagePrompt, port: u16, flash: &str, log_path: &Path) -> Result<LlamaStage, HarnessError> {
+    let started = Instant::now();
+    let server = TimedServer::spawn(config, prompt.capacity, config.stage_kv, port, log_path, flash)?;
+    let outcome = if TimedServer::wait_ready(port, 180) {
+        llama_stage_requests(port, prompt, started.elapsed().as_secs_f64() * 1e3)
+    } else {
+        Err(HarnessError::Server("never became healthy".to_owned()))
+    };
+    server.stop();
+    let log_text = fs::read_to_string(log_path).map_err(io_error(log_path))?;
+    Ok(LlamaStage {
+        log: parse_llama_log(&log_text),
+        footprint_bytes: parse_footprint_bytes(&log_text).ok(),
+        rss_bytes: parse_rss_bytes(&log_text),
+        ..outcome?
+    })
+}
+
+fn capture_proxima(config: &Config, binary: &Path, text: &str, profile: Option<&str>, log_path: &Path) -> Result<String, HarnessError> {
+    let (runs, tokens) = match profile {
+        Some(PROFILE_PREFILL_STEP) => ("1", 1),
+        Some(_) => ("1", PROFILE_DECODE_TOKENS),
+        None => ("3", MAX_TOKENS),
+    };
+    let mut command = Command::new(&config.time_bin);
+    command.arg("-l").arg(binary);
+    command.env("PROXIMA_SPECULATIVE_TYPES", "none");
+    command.env("PROXIMA_STEP_TIMES", "1");
+    command.env("PROXIMA_RUNS", runs);
+    command.env("PROXIMA_MAX_TOKENS", tokens.to_string());
+    command.env("PROXIMA_PROMPT", text);
+    for (key, value) in config.stage_kv.proxima_env() {
+        command.env(key, value);
+    }
+    if let Some(step) = profile {
+        command.env("PROXIMA_METAL_OP_PROFILE_STEP", step);
+    }
+    let output = command.output().map_err(|source| HarnessError::Server(format!("spawn failed: {source}")))?;
+    let combined = format!("{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    fs::write(log_path, &combined).map_err(io_error(log_path))?;
+    if output.status.success() {
+        Ok(combined)
+    } else {
+        Err(HarnessError::Server(format!("{} exited {:?}", binary.display(), output.status.code())))
+    }
+}
+
+fn run_proxima_stage(config: &Config, binary: &Path, vocab: &Vocab, prompt: &StagePrompt, logs: &Path, round: usize) -> Result<ProximaStage, HarnessError> {
+    let log_for = |kind: &str| logs.join(format!("stage-r{round}-proxima-{}-{kind}.err", prompt.label));
+    let main_log = capture_proxima(config, binary, &prompt.text, None, &log_for("main"))?;
+    let profile = |step: &str, kind: &str| {
+        capture_proxima(config, binary, &prompt.text, Some(step), &log_for(kind)).ok().and_then(|text| parse_op_profile(&text))
+    };
+    let attention_prefill = profile(PROFILE_PREFILL_STEP, "profile-prefill");
+    let attention_decode = profile(PROFILE_DECODE_STEP, "profile-decode");
+    let legacy = parse_proxima(&main_log)?;
+    let span = parse_proxima_span(&main_log, &legacy).unwrap_or(legacy);
+    let detail = parse_proxima_detail(&main_log)?;
+    let generated: Vec<u32> = detail.ids.iter().filter_map(|&id| u32::try_from(id).ok()).collect();
+    let tokenize_ms = mean_call_ms(|| tokenize_like_proxima(&prompt.text, vocab));
+    let detokenize_ms = mean_call_ms(|| proxima_tokenizer::decode(&generated, vocab));
+    Ok(ProximaStage {
+        prompt_tokens: prompt.ids.len(),
+        tokenize_ms,
+        detokenize_ms,
+        ttft_cold_ms: span.ttft_cold_ms.ok_or(HarnessError::MissingLine("cold prefill"))?,
+        ttft_warm_ms: span.ttft_warm_ms.clone(),
+        decode_ms: span.tok_s.iter().map(|rate| 1000.0 / rate).collect(),
+        run_walls_ms: parse_run_walls(&main_log),
+        process_real_ms: parse_real_ms(&main_log),
+        gpu_peak_bytes: span.gpu_peak_bytes,
+        footprint_bytes: parse_footprint_bytes(&main_log).ok(),
+        rss_bytes: parse_rss_bytes(&main_log),
+        kv: parse_kv_breakdown(&main_log),
+        attention_prefill,
+        attention_decode,
+    })
+}
+
+fn error_rows(round: usize, engine: &str, prompt: &str, load: f64, error: &HarnessError) -> Vec<StageRow> {
+    let mut sink = RowSink::new(round, engine, prompt, load);
+    sink.unavailable(&ARM_ERROR, &error.to_string());
+    sink.rows
+}
+
+fn quiet_enough(config: &Config) -> bool {
+    !config.quiet_gate || wait_for_quiet(&config.gate).may_run()
+}
+
+fn stage_round(config: &Config, binary: &(String, PathBuf), vocab: &Vocab, prompt: &StagePrompt, logs: &Path, round: usize) -> Vec<StageRow> {
+    let mut rows = Vec::new();
+    let load = load1();
+    let slot = STAGE_PROMPT_LABELS.iter().position(|label| *label == prompt.label).unwrap_or(0);
+    let port = STAGE_BASE_PORT + u16::try_from(round * 8 + slot).unwrap_or(0);
+    let flashes: &[(&str, &str)] = if config.fa_off_arm { &[("llama", "on"), ("llama-fa-off", "off")] } else { &[("llama", "on")] };
+    let mut arms: Vec<(&str, Result<LlamaStage, HarnessError>)> = Vec::new();
+    for &(engine, flash) in flashes {
+        let log_path = logs.join(format!("stage-r{round}-{engine}-{}.err", prompt.label));
+        let outcome = if quiet_enough(config) {
+            run_llama_stage(config, prompt, port, flash, &log_path)
+        } else {
+            Err(HarnessError::Server("quiet gate refused".to_owned()))
+        };
+        arms.push((engine, outcome));
+    }
+    for (engine, outcome) in &arms {
+        match outcome {
+            Ok(stage) => {
+                let mut sink = RowSink::new(round, engine, &prompt.label, load);
+                llama_rows(&mut sink, stage);
+                rows.extend(sink.rows);
+            }
+            Err(error) => rows.extend(error_rows(round, engine, &prompt.label, load, error)),
+        }
+    }
+    if let [(_, Ok(on)), (_, Ok(off))] = arms.as_slice() {
+        let mut sink = RowSink::new(round, "llama-fa-delta", &prompt.label, load);
+        fa_delta_rows(&mut sink, on, off);
+        rows.extend(sink.rows);
+    }
+    let engine = format!("proxima-{}", binary.0);
+    let outcome = if quiet_enough(config) {
+        run_proxima_stage(config, &binary.1, vocab, prompt, logs, round)
+    } else {
+        Err(HarnessError::Server("quiet gate refused".to_owned()))
+    };
+    match outcome {
+        Ok(stage) => {
+            let mut sink = RowSink::new(round, &engine, &prompt.label, load);
+            proxima_rows(&mut sink, &stage);
+            rows.extend(sink.rows);
+        }
+        Err(error) => rows.extend(error_rows(round, &engine, &prompt.label, load, &error)),
+    }
+    rows
+}
+
+fn run_stages(config: &Config, directory: &Path) -> Result<(), HarnessError> {
+    let logs = config.out.join("logs");
+    fs::create_dir_all(&logs).map_err(io_error(&logs))?;
+    let (vocab, prompts) = load_stage_prompts(config, directory)?;
+    let binary = config.proxima.first().ok_or(HarnessError::MissingFlag("--prox"))?;
+    let mut rows = Vec::new();
+    for round in 0..config.rounds {
+        for prompt in &prompts {
+            rows.extend(stage_round(config, binary, &vocab, prompt, &logs, round));
+            println!("stage round {round} prompt {} rows {}", prompt.label, rows.len());
+        }
+    }
+    let tsv_path = config.out.join("stages.tsv");
+    fs::write(&tsv_path, stage_tsv(&rows)).map_err(io_error(&tsv_path))?;
+    let table_path = config.out.join("stages.md");
+    let table = stage_markdown(&rows);
+    fs::write(&table_path, &table).map_err(io_error(&table_path))?;
+    println!("{table}");
+    Ok(())
+}
+
 fn main() {
-    let outcome = parse_config(std::env::args().skip(1)).and_then(|config| run(&config));
+    let outcome = parse_config(std::env::args().skip(1)).and_then(|config| match &config.stages {
+        Some(directory) => run_stages(&config, directory),
+        None => run(&config),
+    });
     if let Err(error) = outcome {
         eprintln!("kv_scoreboard: {error}");
         std::process::exit(2);
@@ -1943,6 +2668,198 @@ mod tests {
 
     fn close(left: Option<f64>, right: f64) -> bool {
         left.is_some_and(|value| (value - right).abs() < 1e-6)
+    }
+
+    const LLAMA_F32_84_RESPONSE: &str = include_str!("fixtures/llama_server_completion_f32_84.json");
+    const OP_PROFILE_LINES: &str = "\
+op_profile_kind step=3 kind=cached_attention op_count=35 gpu_ms=1.500 operand_bytes=1024
+op_profile_kind step=3 kind=matmul op_count=210 gpu_ms=6.000 operand_bytes=4096
+op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 operand_bytes=64
+";
+
+    fn llama_stage_from_real_response() -> LlamaStage {
+        let response = parse_llama_response(LLAMA_F32_84_RESPONSE).expect("real llama completion parses");
+        LlamaStage {
+            cold: response.clone(),
+            warm: response,
+            tokenize_wall_ms: 2.5,
+            tokenize_floor_ms: 0.5,
+            tokenize_tokens: 84,
+            detokenize_wall_ms: 3.0,
+            detokenize_floor_ms: 0.75,
+            e2e_wall_ms: 3300.0,
+            ready_ms: 4000.0,
+            log: parse_llama_log(LLAMA_START_LOG),
+            footprint_bytes: Some(952_119_104),
+            rss_bytes: None,
+        }
+    }
+
+    fn rows_of(sink: &RowSink, metric: &str) -> Vec<StageRow> {
+        sink.rows.iter().filter(|row| row.metric == metric).cloned().collect()
+    }
+
+    #[test]
+    fn llama_stage_rows_use_the_server_timings_definitions_and_subtract_the_http_floor() {
+        let mut sink = RowSink::new(0, "llama", "84", 1.5);
+        llama_rows(&mut sink, &llama_stage_from_real_response());
+        let prefill = rows_of(&sink, "prefill_ms_per_prompt_token");
+        assert!(close(prefill[0].value, 374.526 / 84.0));
+        let decode = rows_of(&sink, "decode_ms_per_token");
+        assert!(close(decode[0].value, 25.15844094488189));
+        assert!(close(rows_of(&sink, "tokenize_ms")[0].value, 2.0));
+        assert!(close(rows_of(&sink, "detokenize_ms")[0].value, 2.25));
+        assert!(close(rows_of(&sink, "first_request_compile_ms")[0].value, 0.0));
+    }
+
+    #[test]
+    fn llama_attention_cells_are_unavailable_and_say_why() {
+        let mut sink = RowSink::new(0, "llama", "84", 1.5);
+        llama_rows(&mut sink, &llama_stage_from_real_response());
+        let attention: Vec<&StageRow> = sink.rows.iter().filter(|row| row.stage == Stage::Attention).collect();
+        assert_eq!(attention.len(), 4);
+        assert!(attention.iter().all(|row| row.value.is_none() && row.note.contains("no per-op timer")));
+    }
+
+    #[test]
+    fn stage_tsv_has_one_row_per_metric_with_header_status_and_definition() {
+        let mut sink = RowSink::new(2, "llama", "84", 1.5);
+        llama_rows(&mut sink, &llama_stage_from_real_response());
+        let tsv = stage_tsv(&sink.rows);
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines[0], STAGE_HEADER);
+        assert_eq!(lines.len(), sink.rows.len() + 1);
+        let columns = STAGE_HEADER.split('\t').count();
+        assert!(lines.iter().all(|line| line.split('\t').count() == columns));
+        let unavailable = lines.iter().filter(|line| line.contains("\tunavailable\t")).count();
+        assert!(unavailable >= 6, "attention x4, kv write and gpu peak must be unavailable, got {unavailable}");
+        assert!(lines.iter().skip(1).all(|line| line.split('\t').nth(9).is_some_and(|definition| !definition.is_empty())));
+    }
+
+    #[test]
+    fn stage_markdown_orders_columns_like_the_owner_and_lists_definitions() {
+        let mut sink = RowSink::new(0, "llama", "84", 1.5);
+        llama_rows(&mut sink, &llama_stage_from_real_response());
+        let table = stage_markdown(&sink.rows);
+        let header = table.lines().find(|line| line.starts_with("| engine")).expect("table header");
+        let position = |title: &str| header.find(title).expect("column present");
+        assert!(position("tokenize ms") < position("prefill ms/tok"));
+        assert!(position("prefill ms/tok") < position("decode ms/tok"));
+        assert!(position("decode ms/tok") < position("attn prefill gpu ms"));
+        assert!(position("attn decode share") < position("kv bytes/tok"));
+        assert!(position("kv write ms/step") < position("detokenize ms"));
+        assert!(position("detokenize ms") < position("ete wall ms"));
+        assert!(position("ete wall ms") < position("load ms"));
+        assert!(table.contains("## Definitions"));
+        assert!(table.contains("`tokenize_ms` (tokenization, ms)"));
+        assert!(table.contains("llama `attention_prefill_gpu_ms`"));
+    }
+
+    const FUSED_2024: &str = include_str!("fixtures/op_profile_flint_fused_2024.err");
+    const UNFUSED_2024: &str = include_str!("fixtures/op_profile_flint_unfused_2024.err");
+    const KV_EVENTS: &str = include_str!("fixtures/kv_write_events_flint_device_kv.log");
+
+    fn kind_line(text: &str, kind: &str) -> (usize, f64) {
+        let line = text
+            .lines()
+            .find(|line| line.contains(&format!("kind={kind} ")))
+            .expect("kind present in the first profile block");
+        (
+            field_value(line, "op_count=").and_then(|token| token.parse().ok()).expect("op_count"),
+            field_value(line, "gpu_ms=").and_then(|token| token.parse().ok()).expect("gpu_ms"),
+        )
+    }
+
+    #[test]
+    fn real_fused_2024_prefill_profile_reads_the_first_block_only() {
+        let profile = parse_op_profile(FUSED_2024).expect("real flint profile parses");
+        assert!((profile.total_ms - 2678.585).abs() < 0.1, "total {}", profile.total_ms);
+        let (op_count, attention_ms) = kind_line(FUSED_2024, "cached_attention");
+        assert_eq!(op_count, 49);
+        assert!((profile.attention_ms - attention_ms).abs() < 1e-9);
+        assert!((353.0..355.0).contains(&profile.attention_ms), "attention {}", profile.attention_ms);
+        let share = profile.attention_ms / profile.total_ms;
+        assert!((share - 0.13).abs() < 0.01, "share {share}");
+    }
+
+    #[test]
+    fn real_unfused_2024_prefill_profile_reads_the_first_block_only() {
+        let profile = parse_op_profile(UNFUSED_2024).expect("real unfused profile parses");
+        assert!((profile.total_ms - 12981.844).abs() < 1.0, "total {}", profile.total_ms);
+        assert!(profile.attention_ms > 0.0 && profile.attention_ms < profile.total_ms);
+    }
+
+    #[test]
+    fn kv_write_adds_device_kv_narrow_to_the_step_it_precedes() {
+        let breakdown = parse_kv_breakdown(KV_EVENTS).expect("real events parse");
+        let expected = [
+            5.17525 + 0.001 + 0.226875,
+            0.10975 + 0.001208 + 0.050458,
+            0.107875 + 0.001541 + 0.530291,
+            3.307916 + 0.000833 + 0.062291,
+            0.104208 + 0.034416 + 0.1425,
+            0.326375 + 0.001125 + 0.048125,
+        ];
+        let mean = expected.iter().sum::<f64>() / 6.0;
+        assert!((breakdown.write_ms - mean).abs() < 1e-6, "write {}", breakdown.write_ms);
+    }
+
+    #[test]
+    fn llama_b12110_tokenize_and_detokenize_bodies_match_server_field_names() {
+        let tokenize = json!({"tokens": [2, 651, 6037]}).to_string();
+        assert_eq!(json_array_len(&tokenize, "tokens").expect("tokens array"), 3);
+        let empty = json!({"tokens": []}).to_string();
+        assert_eq!(json_array_len(&empty, "tokens").expect("empty tokens array"), 0);
+        assert!(json_array_len(&json!({"content": "hello"}).to_string(), "tokens").is_err());
+    }
+
+    #[test]
+    fn op_profile_counts_every_attention_kind_and_shares_over_the_whole_step() {
+        let profile = parse_op_profile(OP_PROFILE_LINES).expect("op profile lines parse");
+        assert!((profile.attention_ms - 2.0).abs() < 1e-9);
+        assert!((profile.total_ms - 8.0).abs() < 1e-9);
+        assert!(parse_op_profile("no profile lines here").is_none());
+    }
+
+    #[test]
+    fn proxima_rows_derive_load_and_first_request_from_the_real_run_log() {
+        let legacy = parse_proxima(PROX_LOG).expect("real proxima log parses");
+        let span = parse_proxima_span(PROX_LOG, &legacy).unwrap_or(legacy);
+        let input = ProximaStage {
+            prompt_tokens: 26,
+            tokenize_ms: 0.1,
+            detokenize_ms: 0.05,
+            ttft_cold_ms: span.ttft_cold_ms.expect("cold prefill"),
+            ttft_warm_ms: span.ttft_warm_ms.clone(),
+            decode_ms: span.tok_s.iter().map(|rate| 1000.0 / rate).collect(),
+            run_walls_ms: parse_run_walls(PROX_LOG),
+            process_real_ms: parse_real_ms(PROX_LOG),
+            gpu_peak_bytes: span.gpu_peak_bytes,
+            footprint_bytes: parse_footprint_bytes(PROX_LOG).ok(),
+            rss_bytes: parse_rss_bytes(PROX_LOG),
+            kv: None,
+            attention_prefill: None,
+            attention_decode: parse_op_profile(OP_PROFILE_LINES),
+        };
+        let mut sink = RowSink::new(0, "proxima-new", "84", 1.5);
+        proxima_rows(&mut sink, &input);
+        let load = rows_of(&sink, "model_load_ms")[0].value.expect("load derived");
+        let walls: f64 = input.run_walls_ms.values().sum();
+        assert!((load - (7530.0 - walls)).abs() < 1e-6);
+        assert!(rows_of(&sink, "attention_prefill_share")[0].value.is_none());
+        assert!(close(rows_of(&sink, "attention_decode_share")[0].value, 0.25));
+        assert!(rows_of(&sink, "kv_write_ms_per_step")[0].note.contains("token_breakdown"));
+        assert_eq!(input.run_walls_ms.len(), 3);
+    }
+
+    #[test]
+    fn flash_attention_delta_is_off_minus_on() {
+        let on = llama_stage_from_real_response();
+        let mut off = on.clone();
+        off.warm.predicted_per_token_ms += 4.0;
+        let mut sink = RowSink::new(0, "llama-fa-delta", "84", 1.5);
+        fa_delta_rows(&mut sink, &on, &off);
+        assert!(close(rows_of(&sink, "fa_off_minus_on_decode_ms_per_token")[0].value, 4.0));
     }
 
     #[test]
