@@ -30,7 +30,7 @@
 //! ```sh
 //! cd /Users/brianbruggeman/repos/slot-0/proxima && \
 //! CARGO_TARGET_DIR=/private/tmp/cargo_target_lc_m0 cargo run --release -p proxima-model-interop \
-//!   --features std,metal,instrument,metal-fuse-attn-decode --example gemma4_decode_kernel_census
+//!   --features std,metal,instrument --example gemma4_decode_kernel_census
 //! ```
 //! Knobs: `M0_MAX_TOKENS` (24), `M0_ITERS` (50), `M0_BATCH` (16),
 //! `M0_FLUSH_MIB` (256), `M0_OUT_DIR`, `M0_CAPTURE_STEPS` (comma list; default every

@@ -1783,7 +1783,7 @@ fn a_perturbed_pass_plane_map_declines_the_qwen35_fusion() {
         &resolved,
         &outputs,
         true,
-        NumericPolicy::bit_exact(),
+        (NumericPolicy::bit_exact(), &Executes::CPU),
         false,
     );
     assert!(
@@ -8054,7 +8054,6 @@ fn a_packed_leaf_named_by_the_caller_materializes_its_composed_activation() {
     );
 }
 
-#[cfg(feature = "metal-fuse-attn-decode")]
 mod end_aligned_mask_tests {
     use super::*;
     use crate::op::Extent;
@@ -8184,20 +8183,17 @@ mod bound_graph_golden {
     /// (omega/src/metal/executes.rs:15-30), rebuilt here because this crate
     /// cannot depend on omega.
     fn metal_executes() -> Executes {
-        let granted = Executes::BASE
+        Executes::BASE
             .with(Form::ElementwiseTwin)
             .with(Form::ReduceEpilogue)
             .with(Form::ReduceBroadcastEpilogue)
             .with(Form::CachedAttention)
             .with(Form::CachedSoftmaxWeights)
+            .with(Form::AttentionSink)
             .with(Form::GatedDeltaNet)
             .with(Form::MoeTopK)
-            .with(Form::TopFractionSelect);
-        if cfg!(feature = "metal-moe-mul-mat-id") {
-            granted.with(Form::RoundBatchedReduce)
-        } else {
-            granted
-        }
+            .with(Form::TopFractionSelect)
+            .with(Form::RoundBatchedReduce)
     }
 
     fn bind_production(

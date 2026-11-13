@@ -4500,6 +4500,7 @@ fn refusal_kind(refusal: Refusal) -> &'static str {
         Refusal::Form(Form::TopFractionSelect) => "top_fraction_select",
         Refusal::Form(Form::RoundBatchedReduce) => "round_batched_reduce",
         Refusal::Form(Form::CachedSoftmaxWeights) => "cached_softmax_weights",
+        Refusal::Form(Form::AttentionSink) => "cached_attention_sink",
         Refusal::Form(Form::ElementwiseTwin) => "elementwise_twin",
         // both enums are non_exhaustive across the crate boundary
         _ => UNGRANTED_FORM_KIND,

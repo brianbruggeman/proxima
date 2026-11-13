@@ -956,13 +956,6 @@ pub(super) fn run_cached_softmax_weights<B: Deref<Target = [f32]> + Sync>(
             reason: "cached softmax weights requires gather-free operands",
         });
     }
-    #[cfg(not(feature = "metal-attn-split-rows"))]
-    if *new_key_rows != 1 {
-        return Err(TensorError::NotLowerable {
-            node: resolved.node,
-            reason: "cached softmax weights is decode-only (new_key_rows must be 1)",
-        });
-    }
     let single_row = *query_rows == 1;
     let expected_ranks = if single_row { (2, 1, 2) } else { (3, 3, 3) };
     if (

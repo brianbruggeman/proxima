@@ -15589,7 +15589,7 @@ mod gemma4_synthetic_parity {
         );
     }
 
-    /// `metal-fuse-attn-decode` recognizer-extension acceptance gate: the
+    /// cached-attention recognizer-extension acceptance gate: the
     /// SAME sliding+global two-layer schedule the prior test builds, bound
     /// (never evaluated -- shape inference and [`crate::bind::bind`] need
     /// no real weight data) at a decode-shaped `[new_count=1,
@@ -15727,6 +15727,28 @@ mod gemma4_synthetic_parity {
             (softmax_weights_count, cached_attention_count)
         };
 
+        let without_softmax_weights = {
+            let shapes = crate::shape::infer(&program, &[1, SWA_WINDOW as u64 / 2])
+                .expect("the gemma4-shaped recognizer fixture shape-infers");
+            let executes = crate::bind::Executes::CPU.without(crate::bind::Form::CachedSoftmaxWeights);
+            crate::bind::bind_with_fusion_for(
+                &program,
+                &shapes,
+                &[logits],
+                true,
+                proxima_numeric::NumericPolicy::bit_exact(),
+                &executes,
+            )
+            .expect("the fixture binds without the softmax-weights form")
+        };
+        assert!(
+            !without_softmax_weights.iter().any(|bound| matches!(
+                bound.kind,
+                crate::bind::BoundOpKind::CachedSoftmaxWeights { .. }
+            )),
+            "a backend without the softmax-weights form is never handed CachedSoftmaxWeights under bit_exact"
+        );
+
         let accepted = |new_count: u64, kv_extent: u64| -> (usize, usize) {
             accepted_under(
                 new_count,
@@ -15742,7 +15764,6 @@ mod gemma4_synthetic_parity {
             "prefill (new_key_rows > 1) declines the softmax-weights arm regardless of feature"
         );
 
-        #[cfg(feature = "metal-attn-split-decode")]
         {
             assert_eq!(
                 decode_softmax_weights, 0,
@@ -15754,13 +15775,6 @@ mod gemma4_synthetic_parity {
                 "split-decode on: both the sliding and the global decode layer bind as \
                  CachedAttention"
             );
-            #[cfg(not(feature = "metal-attn-split-rows"))]
-            assert_eq!(
-                prefill_accepted, 0,
-                "split-decode on: prefill still declines both layers (the decode-only guard runs \
-                 before the routing decision)"
-            );
-            #[cfg(feature = "metal-attn-split-rows")]
             {
                 assert_eq!(
                     prefill_accepted, 1,
@@ -15787,49 +15801,11 @@ mod gemma4_synthetic_parity {
                  byte-exact CachedSoftmaxWeights lowering"
             );
         }
-        #[cfg(all(
-            feature = "metal-fuse-attn-decode",
-            not(feature = "metal-attn-split-decode")
-        ))]
-        {
-            assert_eq!(
-                decode_softmax_weights, 2,
-                "feature on: the recognizer is live -- decode fuses both the sliding and global \
-                 layers into CachedSoftmaxWeights"
-            );
-            assert_eq!(
-                decode_accepted, 0,
-                "feature on: the softmax-weights arm now serves this arm's decode step, so the \
-                 original monolithic online-softmax CachedAttention fusion no longer fires there"
-            );
-            assert_eq!(
-                prefill_accepted, 0,
-                "feature on: prefill past the sliding window now declines BOTH layers -- \
-                 softmax_weights_decode_only declines the global layer too (new_key_rows > 1), \
-                 rather than falling back to the online kernel for an unverified shape"
-            );
-        }
-        #[cfg(not(feature = "metal-fuse-attn-decode"))]
-        {
-            assert_eq!(
-                decode_softmax_weights, 0,
-                "feature off: the softmax-weights arm is compiled out entirely"
-            );
-            assert_eq!(
-                decode_accepted, 0,
-                "feature off: the gemma4-shaped masks stay declined at decode"
-            );
-            assert_eq!(
-                prefill_accepted, 0,
-                "feature off: the gemma4-shaped masks stay declined at prefill"
-            );
-        }
     }
 
     /// The K-row recognizer and CPU oracle (`metal-attn-split-rows`): the
     /// gemma4-shaped sliding + global two-layer program, bound at K new query
     /// rows over a cached history, fused against the literal unfused chain.
-    #[cfg(feature = "metal-attn-split-rows")]
     mod k_rows {
         use core::pin::pin;
         use core::task::{Context, Poll, Waker};
@@ -23925,7 +23901,6 @@ mod attention_sinks {
     /// lanes. The same graph at a four-wide head stays unfused, so no op reaches a renderer
     /// that would refuse it.
     #[test]
-    #[cfg(feature = "metal-attn-split-decode")]
     fn a_sink_layer_fuses_at_a_whole_lane_head_and_declines_a_small_one() {
         let policy = proxima_numeric::NumericPolicy::llama_relaxed().with_flash_narrowing(true);
         let mut sink_ops_by_head_dim = Vec::new();
@@ -23953,6 +23928,39 @@ mod attention_sinks {
         }
         assert_eq!(sink_ops_by_head_dim[0], (4, 0), "a four-wide head has no kernel that draws a sink");
         assert_eq!(sink_ops_by_head_dim[1], (32, 2), "both layers of a whole-lane head fuse");
+    }
+
+    #[test]
+    fn a_sink_layer_stays_unfused_on_a_backend_that_does_not_grant_the_sink_form() {
+        use crate::bind::{Executes, Form, bind_with_fusion_for};
+        let policy = proxima_numeric::NumericPolicy::llama_relaxed().with_flash_narrowing(true);
+        let mut model = scheduled(
+            CacheStrategy::Cached,
+            CacheMask::Padded,
+            true,
+            FLINT_QUERY_HEADS,
+            FLINT_KV_HEADS,
+        );
+        for layer in &mut model.layers {
+            layer.attention.head_dim = 32;
+            layer.attention.score_scale = AttentionScoreScale::Unscaled;
+        }
+        let program = lowered(&model);
+        let shapes = infer(&program.program, &[1, 5]).expect("the sink program infers");
+        let sink_ops = |executes: &Executes| {
+            bind_with_fusion_for(&program.program, &shapes, &[program.logits], true, policy, executes)
+                .expect("the sink program binds")
+                .iter()
+                .filter(|op| matches!(op.kind, BoundOpKind::CachedAttention { attention_sink: true, .. }))
+                .count()
+        };
+
+        assert_eq!(sink_ops(&Executes::CPU), 2, "control: a backend granting the sink form fuses both layers");
+        assert_eq!(
+            sink_ops(&Executes::CPU.without(Form::AttentionSink)),
+            0,
+            "a backend without the sink form is never handed a sink CachedAttention"
+        );
     }
 
     #[test]
@@ -24268,8 +24276,8 @@ mod attention_sinks {
     /// the proof that the flag reached the graph at all. This is the only place
     /// TASKS.md row 8's "fusion consequence unmeasured" claim can be re-proved
     /// from the tree, so it asserts the ABSOLUTE pair `(0, 0)` rather than the
-    /// two counts being equal (`(0, 0)` by default, `(2, 0)` under
-    /// `metal-fuse-attn-decode`):
+    /// two counts being equal (`(0, 0)` where the backend's `Executes` does not
+    /// admit the recognizer, `(2, 0)` where it does):
     ///
     /// - equal-with-both-fused is the interesting regression (a sink riding a
     ///   kernel that has no place for its addend) and equality alone passes it;
@@ -24315,16 +24323,12 @@ mod attention_sinks {
             2,
             "the sink-on arm must declare one leaf per layer, found {sinks_on_leaves:?}"
         );
-        let expected = if cfg!(feature = "metal-fuse-attn-decode") {
-            (2, 0)
-        } else {
-            (0, 0)
-        };
+        let expected = (2, 0);
         assert_eq!(
             (sinks_off, sinks_on),
             expected,
             "fused cached-attention steps: sink off {sinks_off}, sink on {sinks_on} -- expected \
-             {expected:?}; `metal-fuse-attn-decode` is what fuses the sink-off program (2 of 2 \
+             {expected:?}; the backend's `Executes` admitting the recognizer is what fuses the sink-off program (2 of 2 \
              layers) and the sink-on program stays unfused (0 of 2), without it neither fuses. \
              This pair is what row 8's open item records; if it moved, the sink now chooses a \
              kernel and that item must be rewritten with these numbers"

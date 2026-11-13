@@ -2795,7 +2795,7 @@ pub(super) struct PlanNumerics<'config> {
     /// Forwarded to `proxima_tensor::bind::bind_with_fusion`'s
     /// `fuse_cached_attention` argument -- see that function's own doc for
     /// what the bool controls. `true` at every construction site below
-    /// except the `metal-fuse-attn-decode` parity probe, which builds one
+    /// except the fused-vs-unfused parity probe, which builds one
     /// [`PlanNumerics`] with `false` to render the unfused chain for the
     /// same program/outputs.
     pub(super) fuse_cached_attention: bool,

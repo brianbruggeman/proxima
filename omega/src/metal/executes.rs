@@ -19,6 +19,7 @@ pub fn executes() -> Executes {
         .with(Form::ReduceBroadcastEpilogue)
         .with(Form::CachedAttention)
         .with(Form::CachedSoftmaxWeights)
+        .with(Form::AttentionSink)
         .with(Form::GatedDeltaNet)
         .with(Form::MoeTopK)
         .with(Form::TopFractionSelect);

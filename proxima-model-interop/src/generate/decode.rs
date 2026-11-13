@@ -239,9 +239,7 @@ fn set_fusion_disable_env_var(name: &str, disable: bool) {
 /// step indices [`run_decode_loop_placed_kv`]'s parity probe runs on, same
 /// one-env-var-per-diagnostic convention as `PROXIMA_METAL_OP_PROFILE_STEP`.
 #[cfg(all(
-    feature = "metal",
-    feature = "metal-fuse-attn-decode",
-    feature = "metal-output-placement",
+    feature = "metal",    feature = "metal-output-placement",
     target_os = "macos"
 ))]
 fn attn_fuse_parity_target_steps() -> Vec<usize> {
@@ -261,9 +259,7 @@ fn attn_fuse_parity_target_steps() -> Vec<usize> {
 /// decoder layer) the failure report / read-source-vector dump targets.
 /// Default `0` preserves round-9's layer-0-only behaviour exactly.
 #[cfg(all(
-    feature = "metal",
-    feature = "metal-fuse-attn-decode",
-    feature = "metal-output-placement",
+    feature = "metal",    feature = "metal-output-placement",
     target_os = "macos"
 ))]
 fn attn_fuse_parity_target_layer() -> usize {
@@ -280,9 +276,7 @@ fn attn_fuse_parity_target_layer() -> usize {
 /// capacity as if it were live length -- this reads the actual named
 /// "cached_len" block the step supplied.
 #[cfg(all(
-    feature = "metal",
-    feature = "metal-fuse-attn-decode",
-    feature = "metal-output-placement",
+    feature = "metal",    feature = "metal-output-placement",
     target_os = "macos"
 ))]
 fn live_cached_len(named_blocks: &[(&str, QuantizedBlock<'_>)]) -> Option<f32> {
@@ -298,9 +292,7 @@ fn live_cached_len(named_blocks: &[(&str, QuantizedBlock<'_>)]) -> Option<f32> {
 }
 
 #[cfg(all(
-    feature = "metal",
-    feature = "metal-fuse-attn-decode",
-    feature = "metal-output-placement",
+    feature = "metal",    feature = "metal-output-placement",
     target_os = "macos"
 ))]
 fn bits_at_slice(values: &[u32], index: usize) -> String {
@@ -313,9 +305,7 @@ fn bits_at_slice(values: &[u32], index: usize) -> String {
 /// level, carrying both bit patterns -- `==` on the floats themselves would
 /// treat two differently-rounded NaNs as equal.
 #[cfg(all(
-    feature = "metal",
-    feature = "metal-fuse-attn-decode",
-    feature = "metal-output-placement",
+    feature = "metal",    feature = "metal-output-placement",
     target_os = "macos"
 ))]
 fn first_diff_f32(unfused: &[f32], fused: &[f32]) -> Option<(usize, u32, u32)> {
@@ -335,9 +325,7 @@ fn first_diff_f32(unfused: &[f32], fused: &[f32]) -> Option<(usize, u32, u32)> {
 /// `CachedAttention` node IS the attended output and there is no separate
 /// softmax op to report.
 #[cfg(all(
-    feature = "metal",
-    feature = "metal-fuse-attn-decode",
-    feature = "metal-output-placement",
+    feature = "metal",    feature = "metal-output-placement",
     target_os = "macos"
 ))]
 type AttnFuseProbeLayer = (NodeId, Option<(NodeId, NodeId, NodeId, NodeId)>);
@@ -357,9 +345,7 @@ type AttnFuseProbeLayer = (NodeId, Option<(NodeId, NodeId, NodeId, NodeId)>);
 /// None)` for the first shape, `(attended_node, Some((softmax_node,
 /// cached_weight_sum, new_weight_sum, new_attended)))` for the second.
 #[cfg(all(
-    feature = "metal",
-    feature = "metal-fuse-attn-decode",
-    feature = "metal-output-placement",
+    feature = "metal",    feature = "metal-output-placement",
     target_os = "macos"
 ))]
 fn attn_fuse_probe_layers(
@@ -436,9 +422,7 @@ fn attn_fuse_probe_layers(
 /// Never touches [`BackendRuntime::placed_plans`] -- both plans are built
 /// and dropped locally, not inserted into the cache.
 #[cfg(all(
-    feature = "metal",
-    feature = "metal-fuse-attn-decode",
-    feature = "metal-output-placement",
+    feature = "metal",    feature = "metal-output-placement",
     target_os = "macos"
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -724,9 +708,7 @@ fn run_attn_fuse_parity_probe(
 /// to the process's own cwd -- run from the scratch `attn_parity/`
 /// directory so the default lands there).
 #[cfg(all(
-    feature = "metal",
-    feature = "metal-fuse-attn-decode",
-    feature = "metal-output-placement",
+    feature = "metal",    feature = "metal-output-placement",
     target_os = "macos"
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -1363,9 +1345,7 @@ fn write_attn_layer0_failure_report(
 /// closure generalizes to any layer from its own attended node alone,
 /// without re-deriving a base per layer.
 #[cfg(all(
-    feature = "metal",
-    feature = "metal-fuse-attn-decode",
-    feature = "metal-output-placement",
+    feature = "metal",    feature = "metal-output-placement",
     target_os = "macos"
 ))]
 const ATTN_ABSORBED_NODE_OFFSETS: [i32; 14] = [
@@ -1373,9 +1353,7 @@ const ATTN_ABSORBED_NODE_OFFSETS: [i32; 14] = [
 ];
 
 #[cfg(all(
-    feature = "metal",
-    feature = "metal-fuse-attn-decode",
-    feature = "metal-output-placement",
+    feature = "metal",    feature = "metal-output-placement",
     target_os = "macos"
 ))]
 #[allow(clippy::too_many_arguments)]
@@ -1534,9 +1512,9 @@ fn write_attn_read_source_vectors(
     Ok(())
 }
 
-/// `fnv1a64` of `logits`' raw bit patterns -- lets a `metal-fuse-attn-decode`
-/// build and a feature-off build be compared step-for-step on the same
-/// prompt without diffing the full f32 buffer by hand.
+/// `fnv1a64` of `logits`' raw bit patterns -- lets a fused plan and an unfused
+/// plan be compared step-for-step on the same prompt without diffing the
+/// full f32 buffer by hand.
 #[cfg(feature = "gpu")]
 fn logits_bits_hash(logits: &[f32]) -> u64 {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
@@ -5592,9 +5570,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     // input/output placements since this arm's KV cache
                     // lives in `named_blocks`, not a device `PlacedBuffer`.
                     #[cfg(all(
-                        feature = "metal",
-                        feature = "metal-fuse-attn-decode",
-                        feature = "metal-output-placement",
+                        feature = "metal",                        feature = "metal-output-placement",
                         target_os = "macos"
                     ))]
                     if attn_fuse_parity_target_steps().contains(&step) {
@@ -8052,9 +8028,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     roots.push(*value);
                 }
                 #[cfg(all(
-                    feature = "metal",
-                    feature = "metal-fuse-attn-decode",
-                    feature = "metal-output-placement",
+                    feature = "metal",                    feature = "metal-output-placement",
                     target_os = "macos"
                 ))]
                 if attn_fuse_parity_target_steps().contains(&_step) {

@@ -208,7 +208,6 @@ fn print_capture_binary() {
         md5 = %md5_hex,
         metal = cfg!(feature = "metal"),
         instrument = cfg!(feature = "instrument"),
-        metal_fuse_attn_decode = cfg!(feature = "metal-fuse-attn-decode"),
         identity_copy_alias = cfg!(feature = "identity-copy-alias"),
         metal_output_placement = cfg!(feature = "metal-output-placement"),
         reduce_epilogue_fusion = cfg!(feature = "reduce-epilogue-fusion"),

@@ -2,7 +2,7 @@
 //! `BoundOpKind::CachedAttention` op's emitted MSL text (the SAME fixture
 //! `cached_attention_partial_rotary_parity.rs` proves CPU/Metal parity
 //! against) to a fixed path, so a caller can build this binary once with
-//! `metal-fuse-attn-decode` OFF and once ON and diff the two dumps --
+//! `metal-attn-split-decode` OFF and once ON and diff the two dumps --
 //! `two_pass` is never set on a qwen op (Part A's `via_gemma_template`
 //! scoping), so the two dumps must be byte-identical.
 

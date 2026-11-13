@@ -176,26 +176,18 @@ async fn attn_launch_shape_census() {
     write_launch_shapes(&out_dir, ON_CSV_NAME, "on_fused", &(fused_bound_ops,));
 }
 
-#[cfg(feature = "metal-fuse-attn-decode")]
 const OFF_CSV_DECODE_NAME: &str = "launch_shapes_off_decode.csv";
-#[cfg(feature = "metal-fuse-attn-decode")]
 const ON_CSV_DECODE_NAME: &str = "launch_shapes_on_decode.csv";
 
 /// Decode-shaped counterpart to [`attn_launch_shape_census`]: that test's
 /// fixed input binds `single_position_step=false` (`bind_program.single_position_step`
 /// off `dense.rs:156`, gemma4's own `DenseArch`), so the recognizer's
-/// `#[cfg(feature = "metal-fuse-attn-decode")]`-gated gemma4 arms in
+/// gemma4 arms in
 /// `proxima-tensor/src/bind/dead_code_cached_attention.rs` (e.g. the
-/// `via_gemma_template` guard) never see a decode-shaped candidate and this
-/// crate's own `metal` feature list does not pull in `metal-fuse-attn-decode`
-/// (`proxima-model-interop/Cargo.toml:117-131` omits it), so a plain
-/// `--features metal` build never even compiles those arms in. This case
+/// `via_gemma_template` guard) never see a decode-shaped candidate. This case
 /// binds `bind_symbols` with `single_position_step=true` and the same
 /// `NEW_COUNT=1`/`KV_BUCKET_EXTENT=32` bucket-32 geometry the probe uses
-/// (`attn_parity_probe.rs`'s own decode step), gated
-/// `#[cfg(feature = "metal-fuse-attn-decode")]` so it only runs when that
-/// feature is actually enabled.
-#[cfg(feature = "metal-fuse-attn-decode")]
+/// (`attn_parity_probe.rs`'s own decode step).
 #[proxima::test]
 async fn attn_launch_shape_census_decode_shaped() {
     let Ok(file) = File::open(REAL_GEMMA4_E2B_GGUF_PATH) else {

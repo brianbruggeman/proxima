@@ -455,9 +455,7 @@ pub enum InteropError {
     /// pack_uniforms_for` failed for one of the 15 target nodes' own
     /// `BoundOp` from the real per-step bound plan.
     #[cfg(all(
-        feature = "metal",
-        feature = "metal-fuse-attn-decode",
-        feature = "metal-output-placement",
+        feature = "metal",        feature = "metal-output-placement",
         target_os = "macos"
     ))]
     #[error("attn node dump: node {node} emit failed: {reason}")]

@@ -32,25 +32,6 @@ alloc = ["proxima-numeric/alloc"]
 # that the real checkpoint work and CPU/Metal differential records are
 # accepted -- this feature stays selectable standalone for CPU-only callers.
 cached-attention-streaming = ["std"]
-# Recognizer extension only (dead_code_cached_attention.rs's own matcher
-# functions) -- admits the gemma4-shaped windowed/padded mask forms the
-# base cached-attention-streaming matcher declines (`is_exact_causal_mask`,
-# `unwrap_cached_padding_select`). No new kernel, no new BoundOpKind field
-# beyond what the fused op already carries; implies cached-attention-streaming
-# since every new matcher arm lives inside that feature's own gated function.
-# Default-off: the byte-equivalence acceptance bar is not yet met (attn_decode_
-# fusion_review.md 4b/4c).
-metal-fuse-attn-decode = ["cached-attention-streaming"]
-# Default-on one level up (`omega/metal`, `proxima-model-interop/metal`); off in this crate's own default so CPU-only builds keep the
-# unfused chain. Routes gemma4-shaped decode attention to `BoundOpKind::CachedAttention`
-# (the split-KV form `omega` renders) instead of `CachedSoftmaxWeights`, when the
-# bind policy admits `ContextSplitMerge` and `TreeReduce`.
-metal-attn-split-decode = ["metal-fuse-attn-decode"]
-# Default-on one level up with `metal-attn-split-decode`; routes gemma4-shaped attention at K > 1 new query rows (speculative verify,
-# small prefill chunks) to the row-tiled `BoundOpKind::CachedAttention` form under a policy that
-# admits `ContextSplitMerge` and `TreeReduce`, and generalizes the `bit_exact`
-# `CachedSoftmaxWeights` lowering from one query row to K.
-metal-attn-split-rows = ["metal-attn-split-decode"]
 # Std composition boundary for graph specs (guiding-principle 4): bon builder +
 # conflaguration Settings/Validate + serde. The alloc-tier core (Graph/Node/
 # AffineMap/validate) never sees this feature.
@@ -134,17 +115,6 @@ gated-delta-net-fusion = []
 # The matcher rebuilds the expression through `spec::top_fraction_mask`, which lives behind
 # `config`. Default-off until the selection kernel has a measured A/B against the plain expression.
 top-fraction-fusion = ["config"]
-# Bind-time MoE round-sibling projection fusion (decode/n_tokens=1 only):
-# collapses the k round-sibling gate/up/down `Reduce` nodes
-# `append_moe_ffn`'s own `PerRoute` loop emits (one `BoundOp` per round) into
-# ONE `BoundOp` per (site, projection) carrying `round_count: Some(k)` --
-# `omega`'s Metal renderer then walks `thread_position_in_grid.z` as one more
-# stride-addressed iteration axis through the SAME generic gather loop every
-# other axis already uses. Declines (falls back to k separate `BoundOp`s)
-# whenever the k route/output positions the arena resolved are not already
-# contiguous -- see `bind/gdn_moe_fusion_apply.rs`'s
-# `moe_round_group_candidates`. Default-off until a real-model A/B lands.
-metal-moe-mul-mat-id = []
 # The model builders lower a routed feed-forward block with `MoeProjectionStrategy::Stacked`
 # (one gate, one up and one down operation over a `[sequence, selected]` route stack) instead of
 # one operation per selected expert, at every token count from a decode step up. A backend whose

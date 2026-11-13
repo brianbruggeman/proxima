@@ -2606,9 +2606,8 @@ impl LeverVar {
 #[cfg(all(unix, any(target_os = "macos", target_os = "linux")))]
 fn compiled_perf_features_summary() -> String {
     format!(
-        "metal_feature={} metal_fuse_attn_decode_feature={} identity_copy_alias_feature={} metal_tiled_gemm_feature={} cached_attention_streaming_feature={} metal_attn_split_decode_feature={} metal_attn_split_rows_feature={} instrument_feature={} metal_output_placement_feature={}",
+        "metal_feature={} identity_copy_alias_feature={} metal_tiled_gemm_feature={} cached_attention_streaming_feature={} metal_attn_split_decode_feature={} metal_attn_split_rows_feature={} instrument_feature={} metal_output_placement_feature={}",
         cfg!(feature = "metal"),
-        cfg!(feature = "metal-fuse-attn-decode"),
         cfg!(feature = "identity-copy-alias"),
         cfg!(feature = "metal-tiled-gemm"),
         cfg!(feature = "cached-attention-streaming"),
@@ -3342,7 +3341,6 @@ mod tests {
 
         for key in [
             "metal_feature=",
-            "metal_fuse_attn_decode_feature=",
             "identity_copy_alias_feature=",
             "metal_tiled_gemm_feature=",
             "cached_attention_streaming_feature=",

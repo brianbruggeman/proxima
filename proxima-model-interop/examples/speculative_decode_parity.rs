@@ -453,9 +453,8 @@ fn parse_drafter_flag(value: &str) -> SpeculativeTypeSet {
 /// attributable to the same binary configuration.
 fn compiled_perf_features_summary() -> String {
     format!(
-        "metal_feature={} metal_fuse_attn_decode_feature={} identity_copy_alias_feature={} metal_tiled_gemm_feature={}",
+        "metal_feature={} identity_copy_alias_feature={} metal_tiled_gemm_feature={}",
         cfg!(feature = "metal"),
-        cfg!(feature = "metal-fuse-attn-decode"),
         cfg!(feature = "identity-copy-alias"),
         cfg!(feature = "metal-tiled-gemm"),
     )
@@ -860,7 +859,6 @@ mod tests {
 
         for key in [
             "metal_feature=",
-            "metal_fuse_attn_decode_feature=",
             "identity_copy_alias_feature=",
             "metal_tiled_gemm_feature=",
         ] {

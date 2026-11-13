@@ -20,6 +20,7 @@ pub enum Form {
     BlockQuantize,
     CachedAttention,
     CachedSoftmaxWeights,
+    AttentionSink,
     GatedDeltaNet,
     MoeTopK,
     TopFractionSelect,
@@ -159,6 +160,7 @@ impl Executes {
             .with(Form::BlockQuantize)
             .with(Form::CachedAttention)
             .with(Form::CachedSoftmaxWeights)
+            .with(Form::AttentionSink)
             .with(Form::GatedDeltaNet)
             .with(Form::MoeTopK)
             .with(Form::TopFractionSelect),
@@ -224,6 +226,10 @@ impl Executes {
 
 fn form_of(kind: &BoundOpKind) -> Form {
     match kind {
+        BoundOpKind::CachedAttention {
+            attention_sink: true,
+            ..
+        } => Form::AttentionSink,
         BoundOpKind::CachedAttention { .. } => Form::CachedAttention,
         BoundOpKind::CachedSoftmaxWeights { .. } => Form::CachedSoftmaxWeights,
         BoundOpKind::GatedDeltaNet { .. } => Form::GatedDeltaNet,
@@ -380,6 +386,7 @@ mod tests {
             Form::RoundBatchedReduce,
             Form::BlockQuantize,
             Form::CachedSoftmaxWeights,
+            Form::AttentionSink,
             Form::GatedDeltaNet,
             Form::MoeTopK,
             Form::TopFractionSelect,

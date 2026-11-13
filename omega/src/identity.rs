@@ -871,9 +871,9 @@ mod gated {
             // sections) -- mechanical addition to keep this match total; not in
             // this task's isolation grant (`identity.rs` is outside the listed
             // writable set), landed anyway because Rust's own exhaustiveness
-            // check gives no way to keep `omega` compiling under
-            // `metal-fuse-attn-decode` without it once the new `BoundOpKind`
-            // variant exists -- reported as a deviation, not silently done.
+            // check gives no way to keep `omega` compiling without it once
+            // the new `BoundOpKind` variant exists -- reported as a deviation,
+            // not silently done.
             BoundOpKind::CachedSoftmaxWeights {
                 cached_key_rows,
                 query_rows,

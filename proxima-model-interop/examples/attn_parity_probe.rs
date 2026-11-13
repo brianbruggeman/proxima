@@ -1,5 +1,5 @@
 //! Byte-equivalence harness for the gemma4 cached-attention recognizer
-//! extension (`metal-fuse-attn-decode`): runs real greedy decode on the
+//! extension (admitted by the backend's `Executes`): runs real greedy decode on the
 //! real gemma4-E2B checkpoint and, on the decode steps named by
 //! `PROXIMA_METAL_FUSE_ATTN_PARITY_STEPS`, `decode.rs::run_attn_fuse_parity_probe`
 //! builds a fused and an unfused plan for the SAME step's program/outputs

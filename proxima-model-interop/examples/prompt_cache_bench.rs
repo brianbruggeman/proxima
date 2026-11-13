@@ -308,10 +308,6 @@ fn build_summary() -> Value {
     let features: Vec<&str> = [
         ("std", cfg!(feature = "std")),
         ("metal", cfg!(feature = "metal")),
-        (
-            "metal-fuse-attn-decode",
-            cfg!(feature = "metal-fuse-attn-decode"),
-        ),
         ("identity-copy-alias", cfg!(feature = "identity-copy-alias")),
         ("metal-tiled-gemm", cfg!(feature = "metal-tiled-gemm")),
     ]
