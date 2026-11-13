@@ -1773,7 +1773,8 @@ fn text_plan_token(
             (false, false) => "",
         };
         let gathered = if plan.gather.is_some() { STAGED_GATHER_TOKEN } else { "" };
-        format!("_smv{}x{}{source}{gathered}_gid64c9", staged_matvec::STAGED_WARPS, plan.rows)
+        let per_slot = if plan.activation_per_slot { STAGED_SLOT_ACTIVATION_TOKEN } else { "" };
+        format!("_smv{}x{}{source}{gathered}{per_slot}_gid64c9", staged_matvec::STAGED_WARPS, plan.rows)
     } else if let Some(plan) = target
         .card_asm
         .then(|| mma_gemm_plan(resolved, quantized, numeric_policy))
@@ -1822,6 +1823,10 @@ const LEAN_GATHER_TOKEN: &str = "_lg1";
 /// Entry-name token for the staged matvec whose row address carries the selected expert's
 /// gather base, so a module compiled from the ungathered staged text is never served for it.
 const STAGED_GATHER_TOKEN: &str = "_sg1";
+
+/// Entry-name token for the staged matvec whose rows each read their own slot's quantized
+/// activation, so a module compiled from the shared-activation text is never served for it.
+const STAGED_SLOT_ACTIVATION_TOKEN: &str = "_ss1";
 
 /// The `(weight, activation)` operand slots of a Q4_0-weight matvec that the
 /// int8-activation `dp4a` body can serve: one `Multiply` over exactly two
@@ -5686,6 +5691,12 @@ mod tests {
     /// `Σ_k experts[ids[s], r, k] * activation[k]` over `(s, r, k)`: a stacked MoE product
     /// whose one activation row is shared by every routed expert.
     fn stacked_expert_op(experts: u32, rows: u32, width: u32, slots: u32) -> BoundOp {
+        stacked_expert_op_with_activation(experts, rows, width, slots, false)
+    }
+
+    /// With `per_slot` the activation is `[slots, width]`, as a stacked down product reads one
+    /// SwiGLU row per routed expert.
+    fn stacked_expert_op_with_activation(experts: u32, rows: u32, width: u32, slots: u32, per_slot: bool) -> BoundOp {
         let mut program = Vec::new();
         let weight = append(
             &mut program,
@@ -5707,10 +5718,15 @@ mod tests {
             &mut program,
             Op::Input {
                 dtype: DType::FLOAT32,
-                shape: vec![Extent::Static(width)],
+                shape: if per_slot {
+                    vec![Extent::Static(slots), Extent::Static(width)]
+                } else {
+                    vec![Extent::Static(width)]
+                },
                 name: None,
             },
         );
+        let activation_axes: &[u16] = if per_slot { &[0, 2] } else { &[2] };
         let axis = |dim: u16| map::AxisIndex {
             terms: vec![AxisTerm::projection(dim)].into(),
             offset: 0,
@@ -5732,7 +5748,7 @@ mod tests {
                 body: ScalarOp::Multiply,
                 operands: vec![
                     (weight, gathered_map),
-                    (activation, IndexMap::Affine(map::projection(3, &[2]))),
+                    (activation, IndexMap::Affine(map::projection(3, activation_axes))),
                 ],
                 name: None,
             },
@@ -5796,6 +5812,49 @@ mod tests {
         assert!(!kernel.entry.contains("_smv"), "{}", kernel.entry);
         assert!(!kernel.entry.contains("_sg1"), "{}", kernel.entry);
         assert!(!kernel.source.contains("__dp4a"));
+    }
+
+    fn emit_stacked_down(per_slot: bool, activation: Option<Codec>) -> CudaKernel {
+        let bound = stacked_expert_op_with_activation(32, 1024, 512, 8, per_slot);
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        if let Some(codec) = activation {
+            packed.insert(bound.operands()[1].0, codec);
+        }
+        emit_cuda_with_policy(&bound, &packed, NumericPolicy::default().with_activation_quantization(true))
+            .expect("emit succeeds")
+    }
+
+    #[test]
+    fn a_stacked_q8_0_down_product_with_a_per_slot_activation_adds_the_slot_offset_and_a_distinct_name() {
+        let kernel = emit_stacked_down(true, Some(Codec::Q8_1Grouped));
+        let source = &kernel.source;
+        assert!(kernel.entry.contains("_smv"), "{}", kernel.entry);
+        assert!(kernel.entry.contains("_sg1"), "{}", kernel.entry);
+        assert!(kernel.entry.contains("_ss1"), "{}", kernel.entry);
+        assert!(source.contains("act_row_element += coord0 * u.operand_strides[1][0];"));
+        assert!(source.contains("act_row_byte[row] = (act_row_element / 128) * 144L;"));
+        assert!(source.contains("staged_blocks + act_row_byte[row] + ((chunk) / 4) * 144"));
+        let row_loop = source.find("if (row_start[row] == 0) { continue; }").expect("row loop");
+        let load = source.find("staged_blocks + act_row_byte[row]").expect("per-row activation load");
+        assert!(row_loop < load, "the activation is loaded per row, inside the row loop");
+    }
+
+    #[test]
+    fn a_stacked_down_product_whose_activation_is_not_pre_quantized_declines_the_staged_plan() {
+        let kernel = emit_stacked_down(true, None);
+        assert!(!kernel.entry.contains("_ss1"), "{}", kernel.entry);
+        assert!(!kernel.entry.contains("_smv"), "{}", kernel.entry);
+        assert!(!kernel.source.contains("act_row_byte"));
+    }
+
+    #[test]
+    fn a_stacked_product_with_a_shared_pre_quantized_activation_keeps_the_shared_text_and_name() {
+        let kernel = emit_stacked_down(false, Some(Codec::Q8_1Grouped));
+        assert!(kernel.entry.contains("_smv"), "{}", kernel.entry);
+        assert!(!kernel.entry.contains("_ss1"), "{}", kernel.entry);
+        assert!(!kernel.source.contains("act_row_byte"));
+        assert!(kernel.source.contains("staged_blocks + ((chunk) / 4) * 144"));
     }
 
     #[test]

@@ -93,8 +93,8 @@ fn gemm_activation(
         staged_matvec_serves(bound, packed, slot, held, policy)
     } else {
         tokens > 1
-            && activation_is_flat(bound, layout, tokens, depth)
-            && int8_gemm_serves(bound, packed, slot, held, policy)
+            && ((activation_is_flat(bound, layout, tokens, depth) && int8_gemm_serves(bound, packed, slot, held, policy))
+                || staged_matvec_serves(bound, packed, slot, held, policy))
     };
     let eligible = float_node && depth.is_multiple_of(group_elements(storage)) && served;
     eligible.then_some((*activation, slot))
