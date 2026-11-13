@@ -69,7 +69,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use memmap2::MmapOptions;
 use proxima_gguf::parse_complete;
@@ -1393,9 +1393,14 @@ struct Config {
     fa_off_arm: bool,
     /// runs only tokenize and detokenize of the stage prompts; llama stays on the cpu with a tiny context so the weights are mapped, never faulted in
     text_edges: bool,
+    /// directory of cached llama-server incumbent samples, one tsv per (model, commit, ids, flash, engine, round); absent means every arm runs
+    incumbent_cache: Option<PathBuf>,
+    /// ignores cache hits and overwrites the cached samples with fresh runs
+    refresh_incumbent: bool,
 }
 
-const VALUE_FLAGS: [&str; 19] = [
+const VALUE_FLAGS: [&str; 20] = [
+    "--incumbent-cache",
     "--stages",
     "--stage-kv",
     "--fa-off-arm",
@@ -1437,9 +1442,14 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
     let mut proxima = Vec::new();
     let mut tokens = arguments.into_iter();
     let mut text_edges = false;
+    let mut refresh_incumbent = false;
     while let Some(flag) = tokens.next() {
         if flag == "--text-edges" {
             text_edges = true;
+            continue;
+        }
+        if flag == "--refresh-incumbent" {
+            refresh_incumbent = true;
             continue;
         }
         let value = tokens
@@ -1509,6 +1519,8 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
         stage_kv,
         fa_off_arm,
         text_edges,
+        incumbent_cache: values.get("--incumbent-cache").map(PathBuf::from),
+        refresh_incumbent,
         proxima,
         rounds,
         time_bin: values
@@ -2841,7 +2853,137 @@ fn quiet_enough(config: &Config) -> bool {
     !config.quiet_gate || wait_for_quiet(&config.gate).may_run()
 }
 
-fn stage_round(config: &Config, binary: &(String, PathBuf), vocab: &Vocab, prompt: &StagePrompt, logs: &Path, round: usize) -> Vec<StageRow> {
+type ArmKeys = Vec<(&'static str, String)>;
+
+const CACHED_NOTE: &str = "cached";
+
+const KNOWN_METRICS: &[&Metric] = &[
+    &TOKENIZE_MS, &TOKENIZE_WALL_MS, &TOKENIZE_FLOOR_MS, &TOKENIZE_TOKENS, &PREFILL_MS, &PREFILL_COLD_MS, &DECODE_MS,
+    &ATTN_PREFILL_MS, &ATTN_PREFILL_SHARE, &ATTN_DECODE_MS, &ATTN_DECODE_SHARE, &FA_PREFILL_PROXY, &FA_DECODE_PROXY,
+    &KV_BYTES_PER_TOKEN, &KV_PEAK_BYTES, &KV_WRITE_MS, &DETOKENIZE_MS, &DETOKENIZE_WALL_MS, &DETOKENIZE_FLOOR_MS,
+    &TOKENIZE_INPROC_MS, &TOKENIZE_INPROC_TOKENS, &DETOKENIZE_PROMPT_INPROC_MS, &VOCAB_ONLY_RSS_BYTES, &E2E_WALL_MS,
+    &E2E_EDGES_MS, &LOAD_MS, &FIRST_REQUEST_MS, &FOOTPRINT_BYTES, &RSS_BYTES, &GPU_PEAK_BYTES, &ARM_ERROR,
+];
+
+fn metric_by_name(name: &str) -> Option<&'static Metric> {
+    KNOWN_METRICS.iter().copied().find(|known| known.name == name)
+}
+
+/// Model identity without hashing 25 GB: canonical path, length and mtime in nanoseconds, plus the stage KV kind.
+fn model_stamp(model: &Path, kv: Kv) -> Result<String, HarnessError> {
+    let canonical = fs::canonicalize(model).map_err(io_error(model))?;
+    let metadata = fs::metadata(&canonical).map_err(io_error(&canonical))?;
+    let modified = metadata.modified().map_err(io_error(&canonical))?;
+    let nanos = modified.duration_since(UNIX_EPOCH).map_or(0, |elapsed| elapsed.as_nanos());
+    Ok(format!("{}|{}|{nanos}|{}", canonical.display(), metadata.len(), kv.name()))
+}
+
+fn cache_key(stamp: &str, commit: &str, ids: &[u32], flash: &str, engine: &str, round: usize) -> String {
+    let id_text = ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",");
+    sha256_hex(format!("{stamp}\n{commit}\n{id_text}\n{flash}\n{engine}\n{MAX_TOKENS}\n{round}").as_bytes())
+}
+
+fn incumbent_arms(config: &Config) -> Vec<(&'static str, &'static str)> {
+    if config.fa_off_arm {
+        vec![("llama", "on"), ("llama-fa-off", "off"), ("llama-fa-delta", "on+off")]
+    } else {
+        vec![("llama", "on")]
+    }
+}
+
+fn incumbent_keys(config: &Config, prompt: &StagePrompt, round: usize) -> ArmKeys {
+    if config.incumbent_cache.is_none() {
+        return Vec::new();
+    }
+    match model_stamp(&config.model, config.stage_kv) {
+        Ok(stamp) => incumbent_arms(config)
+            .into_iter()
+            .map(|(engine, flash)| (engine, cache_key(&stamp, &config.llama_commit, &prompt.ids, flash, engine, round)))
+            .collect(),
+        Err(error) => {
+            eprintln!("kv_scoreboard: incumbent cache disabled: {error}");
+            Vec::new()
+        }
+    }
+}
+
+fn cache_tsv(rows: &[StageRow]) -> String {
+    let mut tsv = format!("{STAGE_HEADER}\n");
+    for row in rows {
+        let (value, status) = row.value.map_or((String::new(), "unavailable"), |found| (found.to_string(), "measured"));
+        let _ = writeln!(
+            tsv,
+            "{}\t{}\t{}\t{}\t{}\t{value}\t{}\t{status}\t{}\t{}\t{}",
+            row.round, row.engine, row.prompt, row.stage.name(), row.metric, row.unit, row.load1, row.definition, sanitize(&row.note)
+        );
+    }
+    tsv
+}
+
+fn cached_row(line: &str, round: usize, prompt: &str, file: &str) -> Option<StageRow> {
+    let columns: Vec<&str> = line.splitn(11, '\t').collect();
+    let [_, engine, _, _, name, value, _, _, load1, _, note] = columns.as_slice() else {
+        return None;
+    };
+    let spec = metric_by_name(name)?;
+    let value = if value.is_empty() { None } else { Some(value.parse().ok()?) };
+    let note = if note.is_empty() { format!("{CACHED_NOTE} {file}") } else { format!("{CACHED_NOTE} {file}: {note}") };
+    Some(StageRow {
+        round,
+        engine: (*engine).to_owned(),
+        prompt: prompt.to_owned(),
+        stage: spec.stage,
+        metric: spec.name,
+        value,
+        unit: spec.unit,
+        definition: spec.definition,
+        load1: load1.parse().ok()?,
+        note,
+    })
+}
+
+fn rows_from_cache_tsv(text: &str, round: usize, prompt: &str, file: &str) -> Option<Vec<StageRow>> {
+    let mut lines = text.lines();
+    if lines.next()? != STAGE_HEADER {
+        return None;
+    }
+    let rows: Option<Vec<StageRow>> = lines.map(|line| cached_row(line, round, prompt, file)).collect();
+    rows.filter(|found| !found.is_empty())
+}
+
+fn lookup_cached(directory: &Path, key: &str, round: usize, prompt: &str) -> Option<Vec<StageRow>> {
+    let file = format!("{key}.tsv");
+    let text = fs::read_to_string(directory.join(&file)).ok()?;
+    rows_from_cache_tsv(&text, round, prompt, &file)
+}
+
+fn store_cached(directory: &Path, key: &str, rows: &[StageRow]) -> Result<(), HarnessError> {
+    fs::create_dir_all(directory).map_err(io_error(directory))?;
+    let path = directory.join(format!("{key}.tsv"));
+    fs::write(&path, cache_tsv(rows)).map_err(io_error(&path))
+}
+
+fn cached_incumbent(config: &Config, prompt: &StagePrompt, round: usize, keys: &ArmKeys) -> Option<Vec<StageRow>> {
+    let directory = config.incumbent_cache.as_deref().filter(|_| !config.refresh_incumbent && !keys.is_empty())?;
+    let mut rows = Vec::new();
+    for (_, key) in keys {
+        rows.extend(lookup_cached(directory, key, round, &prompt.label)?);
+    }
+    Some(rows)
+}
+
+fn remember_incumbent(config: &Config, keys: &ArmKeys, engine: &str, rows: &[StageRow]) {
+    let Some(directory) = config.incumbent_cache.as_deref() else {
+        return;
+    };
+    for (_, key) in keys.iter().filter(|(name, _)| *name == engine) {
+        if let Err(error) = store_cached(directory, key, rows) {
+            eprintln!("kv_scoreboard: incumbent cache write failed: {error}");
+        }
+    }
+}
+
+fn fresh_incumbent(config: &Config, prompt: &StagePrompt, logs: &Path, round: usize, keys: &ArmKeys) -> Vec<StageRow> {
     let mut rows = Vec::new();
     let load = load1();
     let slot = STAGE_PROMPT_LABELS.iter().position(|label| *label == prompt.label).unwrap_or(0);
@@ -2862,6 +3004,7 @@ fn stage_round(config: &Config, binary: &(String, PathBuf), vocab: &Vocab, promp
             Ok(stage) => {
                 let mut sink = RowSink::new(round, engine, &prompt.label, load);
                 llama_rows(&mut sink, stage);
+                remember_incumbent(config, keys, engine, &sink.rows);
                 rows.extend(sink.rows);
             }
             Err(error) => rows.extend(error_rows(round, engine, &prompt.label, load, error)),
@@ -2870,8 +3013,16 @@ fn stage_round(config: &Config, binary: &(String, PathBuf), vocab: &Vocab, promp
     if let [(_, Ok(on)), (_, Ok(off))] = arms.as_slice() {
         let mut sink = RowSink::new(round, "llama-fa-delta", &prompt.label, load);
         fa_delta_rows(&mut sink, on, off);
+        remember_incumbent(config, keys, "llama-fa-delta", &sink.rows);
         rows.extend(sink.rows);
     }
+    rows
+}
+
+fn stage_round(config: &Config, binary: &(String, PathBuf), vocab: &Vocab, prompt: &StagePrompt, logs: &Path, round: usize) -> Vec<StageRow> {
+    let load = load1();
+    let keys = incumbent_keys(config, prompt, round);
+    let mut rows = cached_incumbent(config, prompt, round, &keys).unwrap_or_else(|| fresh_incumbent(config, prompt, logs, round, &keys));
     let engine = format!("proxima-{}", binary.0);
     let outcome = if quiet_enough(config) {
         run_proxima_stage(config, &binary.1, vocab, prompt, logs, round)
@@ -3944,11 +4095,73 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         assert!(table.contains("| proxima | new | 1 | 0 | 1 | - | - | - | - | - | - |"), "{table}");
     }
 
+    const REAL_IDS: [u32; 5] = [2, 236776, 5213, 20619, 1];
+    const REAL_STAMP: &str = "/models/gemma.gguf|25666650112|1762900000000000000|F16";
+
+    fn llama_arm_rows() -> Vec<StageRow> {
+        let mut sink = RowSink::new(0, "llama", "84", 1.37);
+        llama_rows(&mut sink, &llama_stage_from_real_response());
+        sink.rows
+    }
+
     #[test]
     fn bytes_above_four_gib_convert_exactly() {
         assert_eq!(bytes_as_f64(25_666_650_112).to_bits(), 25_666_650_112.0_f64.to_bits());
         assert_eq!(bytes_as_f64(4_294_967_296).to_bits(), 4_294_967_296.0_f64.to_bits());
         assert_eq!(bytes_as_f64(u64::from(u32::MAX)).to_bits(), 4_294_967_295.0_f64.to_bits());
         assert_eq!(bytes_value(Some(25_666_650_112)).map(f64::to_bits), Some(25_666_650_112.0_f64.to_bits()));
+    }
+
+    #[test]
+    fn cache_key_changes_with_commit_ids_flash_and_round_and_is_otherwise_stable() {
+        let base = cache_key(REAL_STAMP, "ba3c05f71", &REAL_IDS, "on", "llama", 0);
+        assert_eq!(base, cache_key(REAL_STAMP, "ba3c05f71", &REAL_IDS, "on", "llama", 0));
+        assert_eq!(base.len(), 64);
+        assert_ne!(base, cache_key(REAL_STAMP, "b12110", &REAL_IDS, "on", "llama", 0));
+        assert_ne!(base, cache_key(REAL_STAMP, "ba3c05f71", &REAL_IDS[..4], "on", "llama", 0));
+        assert_ne!(base, cache_key(REAL_STAMP, "ba3c05f71", &REAL_IDS, "off", "llama", 0));
+        assert_ne!(base, cache_key(REAL_STAMP, "ba3c05f71", &REAL_IDS, "on", "llama", 1));
+        assert_ne!(base, cache_key("/models/gemma.gguf|25666650112|1762900000000000001|F16", "ba3c05f71", &REAL_IDS, "on", "llama", 0));
+    }
+
+    #[test]
+    fn cached_rows_read_back_with_value_unit_load_and_a_cached_note() {
+        let directory = tempfile::tempdir().expect("tempdir for the incumbent cache");
+        let rows = llama_arm_rows();
+        store_cached(directory.path(), "abc", &rows).expect("cache file written");
+        let back = lookup_cached(directory.path(), "abc", 2, "510").expect("cache file hits");
+        assert_eq!(back.len(), rows.len());
+        for (stored, found) in rows.iter().zip(&back) {
+            assert_eq!((found.metric, found.value, found.unit, found.definition), (stored.metric, stored.value, stored.unit, stored.definition));
+            assert_eq!(found.load1, stored.load1);
+            assert_eq!((found.round, found.prompt.as_str()), (2, "510"));
+            assert!(found.note.starts_with("cached abc.tsv"), "{}", found.note);
+        }
+    }
+
+    #[test]
+    fn a_directory_without_the_file_is_a_miss() {
+        let directory = tempfile::tempdir().expect("tempdir for the incumbent cache");
+        assert!(lookup_cached(directory.path(), "absent", 0, "84").is_none());
+    }
+
+    #[test]
+    fn a_file_with_an_unknown_metric_name_is_a_miss() {
+        let directory = tempfile::tempdir().expect("tempdir for the incumbent cache");
+        let text = cache_tsv(&llama_arm_rows()).replace("decode_ms_per_token", "decode_ms_renamed");
+        fs::write(directory.path().join("stale.tsv"), text).expect("stale cache file written");
+        assert!(lookup_cached(directory.path(), "stale", 0, "84").is_none());
+    }
+
+    #[test]
+    fn incumbent_cache_flags_parse_and_default_to_off() {
+        let base = ["--out", "o", "--model", "m", "--llama", "l", "--long-prompt-file", "p", "--llama-commit", "ba3c05f71", "--prox", "new=/bin/a"];
+        let mut arguments: Vec<String> = base.iter().map(|text| (*text).to_owned()).collect();
+        let plain = parse_config(arguments.clone()).expect("valid arguments");
+        assert!(plain.incumbent_cache.is_none() && !plain.refresh_incumbent);
+        arguments.extend(["--incumbent-cache", "/cache", "--refresh-incumbent"].map(str::to_owned));
+        let cached = parse_config(arguments).expect("cache flags");
+        assert_eq!(cached.incumbent_cache, Some(PathBuf::from("/cache")));
+        assert!(cached.refresh_incumbent);
     }
 }
