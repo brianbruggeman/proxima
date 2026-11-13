@@ -15,10 +15,10 @@ use core::ops::ControlFlow;
 #[cfg(test)]
 use super::{
     DecodeMetrics, Phase, RouterExpertCounts, RouterLogits, SsmLayerCache, TokenEvent,
-    build_position_inputs, collect_future_gather_cuts, decode_until_stop_or_budget,
-    first_nonfinite_node_value, kv_extent, moe_admit_low_copy, moe_monolithic_all_low_enabled,
-    moe_pre_gather_enabled, should_release_monolithic_sources, step_batch_needs_logits,
-    visit_moe_router_boundary, visit_moe_router_selections,
+    build_position_inputs, carries_on_device_this_step, collect_future_gather_cuts,
+    decode_until_stop_or_budget, first_nonfinite_node_value, kv_extent, moe_admit_low_copy,
+    moe_monolithic_all_low_enabled, moe_pre_gather_enabled, should_release_monolithic_sources,
+    step_batch_needs_logits, visit_moe_router_boundary, visit_moe_router_selections,
 };
 #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 use super::{
@@ -49,10 +49,10 @@ pub(super) mod tests {
     #[cfg(feature = "moe-expert-prefetch")]
     use super::super::moe_expert_prefetch_requested;
     use super::{
-        RouterExpertCounts, RouterLogits, SsmLayerCache, collect_future_gather_cuts,
-        first_nonfinite_node_value, kv_extent, moe_admit_low_copy, moe_monolithic_all_low_enabled,
-        moe_pre_gather_enabled, should_release_monolithic_sources, step_batch_needs_logits,
-        visit_moe_router_boundary, visit_moe_router_selections,
+        RouterExpertCounts, RouterLogits, SsmLayerCache, carries_on_device_this_step,
+        collect_future_gather_cuts, first_nonfinite_node_value, kv_extent, moe_admit_low_copy,
+        moe_monolithic_all_low_enabled, moe_pre_gather_enabled, should_release_monolithic_sources,
+        step_batch_needs_logits, visit_moe_router_boundary, visit_moe_router_selections,
     };
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     use super::{
@@ -139,6 +139,28 @@ pub(super) mod tests {
         assert!(moe_pre_gather_enabled(true, true));
         assert!(!moe_pre_gather_enabled(false, true));
         assert!(!moe_pre_gather_enabled(true, false));
+    }
+
+    #[test]
+    fn expert_model_carries_on_device_when_step_is_not_pre_gather() {
+        let expert_protocol = true;
+        let pre_gather = moe_pre_gather_enabled(false, expert_protocol);
+        assert!(carries_on_device_this_step(true, true, pre_gather));
+    }
+
+    #[test]
+    fn expert_model_does_not_carry_on_device_when_step_is_pre_gather() {
+        let expert_protocol = true;
+        let pre_gather = moe_pre_gather_enabled(true, expert_protocol);
+        assert!(!carries_on_device_this_step(true, true, pre_gather));
+    }
+
+    #[test]
+    fn dense_model_carries_on_device_and_ineligible_or_hostside_runtime_does_not() {
+        let pre_gather = moe_pre_gather_enabled(true, false);
+        assert!(carries_on_device_this_step(true, true, pre_gather));
+        assert!(!carries_on_device_this_step(false, true, pre_gather));
+        assert!(!carries_on_device_this_step(true, false, pre_gather));
     }
 
     #[test]
