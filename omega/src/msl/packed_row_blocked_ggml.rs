@@ -569,6 +569,9 @@ pub(super) fn push_packed_row_blocked_body(
                         push_q4k_header_decode(source);
                         push_q4k_product_reduce_body(source, sub, run, element_type);
                     } else {
+                        // the per-element dequant below reads `hdr`, which only
+                        // the scale-deferred arm above declared
+                        push_q4k_header_decode(source);
                         source.push_str(&format!(
                             "            for (int c = 0; c < {}; ++c) {{\n",
                             sub / run
