@@ -71,7 +71,7 @@ pub(crate) fn description_fingerprint(description: &impl core::fmt::Debug) -> St
     reason = "each variant is constructed by its own renderer, gated on that renderer's own feature"
 )]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KernelLanguage {
+pub enum KernelLanguage {
     Metal,
     Wgsl,
     Cuda,

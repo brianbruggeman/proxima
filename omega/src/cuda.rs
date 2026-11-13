@@ -84,7 +84,7 @@ use crate::lowering::{
     gather_slots, is_cooperative_reduce_op, reduction_dims,
 };
 
-pub(crate) mod target;
+pub mod target;
 mod block_dot;
 mod block_quantize;
 mod int8_gemm;
@@ -4480,7 +4480,7 @@ const UNGRANTED_FORM_KIND: &str = "unsupported_form";
 /// emitter's refusal arms both read this one value so admission cannot drift
 /// between them.
 #[must_use]
-pub(crate) fn executes(target: &Target) -> Executes {
+pub fn executes(target: &Target) -> Executes {
     let base = Executes::BASE
         .with(Form::BlockQuantize)
         .with(Form::MoeTopK)
