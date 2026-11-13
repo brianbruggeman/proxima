@@ -8196,7 +8196,23 @@ mod bound_graph_golden {
             .with(Form::RoundBatchedReduce)
     }
 
-    fn bind_production(
+    /// The `Executes` `omega::cuda::executes(&Target)` grants a card_asm
+    /// target (omega/src/cuda.rs:4483-4494), rebuilt here because this crate
+    /// cannot depend on omega. It lacks `Form::CachedSoftmaxWeights`,
+    /// `ElementwiseTwin`, `ReduceBroadcastEpilogue`, `AttentionSink`,
+    /// `GatedDeltaNet`, `TopFractionSelect` and `RoundBatchedReduce`, which
+    /// Metal grants.
+    fn cuda_executes() -> Executes {
+        Executes::BASE
+            .with(Form::BlockQuantize)
+            .with(Form::MoeTopK)
+            .with(Form::ReduceEpilogue)
+            .with(Form::CachedAttention)
+            .with_memory(DeviceMemory::Separate)
+    }
+
+    fn bind_under(
+        executes: &Executes,
         program: &[Op],
         shapes: &Shapes,
         outputs: &[NodeId],
@@ -8209,9 +8225,141 @@ mod bound_graph_golden {
             true,
             policy,
             &BTreeSet::new(),
-            &metal_executes(),
+            executes,
         )
-        .expect("fixture binds under the production fusion path with the Metal Executes")
+        .expect("fixture binds under the production fusion path with the given Executes")
+    }
+
+    fn bind_production(
+        program: &[Op],
+        shapes: &Shapes,
+        outputs: &[NodeId],
+        policy: NumericPolicy,
+    ) -> Vec<BoundOp> {
+        bind_under(&metal_executes(), program, shapes, outputs, policy)
+    }
+
+    fn bind_cuda(
+        program: &[Op],
+        shapes: &Shapes,
+        outputs: &[NodeId],
+        policy: NumericPolicy,
+    ) -> Vec<BoundOp> {
+        bind_under(&cuda_executes(), program, shapes, outputs, policy)
+    }
+
+    fn granite_moe_decoder() -> (Vec<Op>, Shapes, Vec<NodeId>) {
+        let (program, roots, cache_roots, _moe_sites) =
+            crate::spec::gqa_cached_forward_program_with_experts(
+                64, 64, 128, 4, 2, 16, 3, 8, 2, false, false, false, false,
+            )
+            .expect("moe gqa decoder fixture builds");
+        let mut outputs = alloc::vec![roots.logits];
+        for (even, odd, value) in cache_roots {
+            outputs.extend_from_slice(&[even, odd, value]);
+        }
+        let shapes =
+            crate::shape::infer(&program, &[1, 5]).expect("moe gqa decoder fixture infers");
+        (program, shapes, outputs)
+    }
+
+    fn openchat_single_range() -> (Vec<Op>, Shapes, Vec<NodeId>) {
+        let (program, logits, cache_roots, _) =
+            crate::spec::gqa_single_range_cached_forward_program(
+                32_002,
+                4096,
+                14336,
+                32,
+                8,
+                128,
+                32,
+                false,
+                crate::spec::DuplicateHeadPosition::None,
+                false,
+            )
+            .expect("openchat-shaped single-range forward pass lowers to a program");
+        let mut outputs = alloc::vec![logits];
+        for (even, odd, value) in &cache_roots {
+            outputs.extend_from_slice(&[*even, *odd, *value]);
+        }
+        let shapes = crate::shape::infer(&program, &[1, 71])
+            .expect("one new position against a 71-position merged range infers");
+        (program, shapes, outputs)
+    }
+
+    fn qwen35_dense_layer() -> (Vec<Op>, Shapes, Vec<NodeId>) {
+        let (program, residual1, taps, _inputs, shapes) =
+            qwen35_partial_rotary_attention_fixture();
+        let outputs = alloc::vec![
+            residual1,
+            taps.attended,
+            taps.rotated_k_new_first,
+            taps.rotated_k_new_second,
+            taps.k_pass,
+            taps.v_new,
+        ];
+        (program, shapes, outputs)
+    }
+
+    /// Fixture: the gemma4-shaped two-range program of
+    /// `gemma4_shaped_two_range_recognizer_accept_decline_counts`
+    /// (spec/tests.rs `gemma4_synthetic_parity`): one sliding layer (window 2,
+    /// ProjectedV) and one global layer (SharedWithKey), 4-expert top-2 MoE,
+    /// embedding 8, head_dim 32, 2 q heads, 1 kv head, softcap 30. Bound at the
+    /// decode-shaped symbols `[new_count=1, kv_extent=1]` (SWA_WINDOW/2).
+    fn gemma4_two_range_decode() -> (Vec<Op>, Shapes, Vec<NodeId>) {
+        use crate::spec::{
+            AttentionScoreScale, EmbeddingScale, KeySourceKind, LayerAttentionConfig, LayerFfnConfig,
+            LayerKind, LayerSchedule, RopePairing, RopeTableSel, SharedExpertWidth, ValueSourceKind,
+        };
+        let attention = |mask_window, value_source_kind, cos: &str, sin: &str| LayerSchedule {
+            kind: LayerKind::Attention,
+            attention: LayerAttentionConfig {
+                head_dim: 32,
+                kv_heads: 1,
+                mask_window,
+                value_source_kind,
+                key_source_kind: KeySourceKind::ProjectedK,
+                rope_table: RopeTableSel {
+                    cos_name: cos.into(),
+                    sin_name: sin.into(),
+                },
+                rope_pairing: RopePairing::SplitHalf { pairs: 16 },
+                score_scale: AttentionScoreScale::Unscaled,
+                value_norm: true,
+                qk_norm: true,
+                attention_sinks: false,
+                rope: true,
+            },
+            ffn: LayerFfnConfig::exclusive(),
+        };
+        let schedule = alloc::vec![
+            attention(Some(2), ValueSourceKind::ProjectedV, "rope_cos_swa", "rope_sin_swa"),
+            attention(None, ValueSourceKind::SharedWithKey, "rope_cos", "rope_sin"),
+        ];
+        let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
+            crate::spec::scheduled_two_range_cached_forward_program_with_experts(
+                6,
+                8,
+                4,
+                4,
+                2,
+                2,
+                4,
+                2,
+                0,
+                &schedule,
+                Some(EmbeddingScale::Sqrt),
+                Some(30.0),
+                true,
+                None,
+                false,
+                SharedExpertWidth::NONE,
+            )
+            .expect("the gemma4-shaped two-range fixture lowers");
+        let shapes = crate::shape::infer(&program, &[1, 1])
+            .expect("the gemma4-shaped two-range fixture shape-infers at decode");
+        (program, shapes, alloc::vec![logits])
     }
 
     fn count_named(bound: &[BoundOp], name: &str) -> usize {
@@ -8417,6 +8565,136 @@ mod bound_graph_golden {
                 cached_attention: 1,
                 moe_topk: 0,
                 fingerprint: 0x51cf_c22e_065a_5332,
+            },
+        );
+    }
+
+    /// Twin of `bound_graph_golden_moe_decoder_is_unchanged` under the
+    /// CUDA-shaped `Executes` (no `CachedSoftmaxWeights`). Constants recorded
+    /// from main 01f1d317.
+    #[test]
+    fn bound_graph_golden_moe_decoder_under_cuda_executes_is_unchanged() {
+        let (program, shapes, outputs) = granite_moe_decoder();
+        let bound = bind_cuda(&program, &shapes, &outputs, NumericPolicy::bit_exact());
+
+        assert_golden(
+            "moe decoder, cuda executes",
+            &bound,
+            &outputs,
+            &Golden {
+                op_count: 106,
+                cached_attention: 3,
+                moe_topk: 3,
+                fingerprint: 0xa1a1_72d2_a385_7e8a,
+            },
+        );
+    }
+
+    /// Twin of the 16-expert qk-norm moe decoder golden under the CUDA-shaped
+    /// `Executes`. Constants recorded from main 01f1d317.
+    #[test]
+    fn bound_graph_golden_moe_decoder_with_qk_norm_and_sixteen_experts_under_cuda_executes_is_unchanged()
+     {
+        let (program, shapes, outputs) = moe_decoder(128, 64, 16, 4, true, 4);
+        let bound = bind_cuda(&program, &shapes, &outputs, NumericPolicy::bit_exact());
+
+        assert_golden(
+            "moe decoder, qk-norm, 16 experts, cuda executes",
+            &bound,
+            &outputs,
+            &Golden {
+                op_count: 202,
+                cached_attention: 4,
+                moe_topk: 4,
+                fingerprint: 0x8ee6_2da5_1227_d5cb,
+            },
+        );
+    }
+
+    /// Twin of the openchat single-range golden under the CUDA-shaped
+    /// `Executes`. Constants recorded from main 01f1d317.
+    #[test]
+    fn bound_graph_golden_openchat_single_range_under_cuda_executes_is_unchanged() {
+        let (program, shapes, outputs) = openchat_single_range();
+        let bound = bind_cuda(&program, &shapes, &outputs, NumericPolicy::bit_exact());
+
+        assert_golden(
+            "openchat single range, cuda executes",
+            &bound,
+            &outputs,
+            &Golden {
+                op_count: 749,
+                cached_attention: 32,
+                moe_topk: 0,
+                fingerprint: 0x5851_41d9_4d15_69a4,
+            },
+        );
+    }
+
+    /// Twin of the qwen35 dense layer golden under the CUDA-shaped
+    /// `Executes`, bit-exact with flash narrowing. Constants recorded from
+    /// main 01f1d317.
+    #[test]
+    fn bound_graph_golden_qwen35_dense_cached_attention_layer_under_cuda_executes_is_unchanged() {
+        let (program, shapes, outputs) = qwen35_dense_layer();
+        let bound = bind_cuda(
+            &program,
+            &shapes,
+            &outputs,
+            NumericPolicy::bit_exact().with_flash_narrowing(true),
+        );
+
+        assert_golden(
+            "qwen35 dense layer, cuda executes",
+            &bound,
+            &outputs,
+            &Golden {
+                op_count: 46,
+                cached_attention: 1,
+                moe_topk: 0,
+                fingerprint: 0x51cf_c22e_065a_5332,
+            },
+        );
+    }
+
+    /// Gemma4-shaped two-range decode (sliding + global layer) under Metal's
+    /// `Executes` with `llama_relaxed`. Constants recorded from main 01f1d317.
+    #[test]
+    fn bound_graph_golden_gemma4_two_range_decode_is_unchanged() {
+        let (program, shapes, outputs) = gemma4_two_range_decode();
+        let bound = bind_production(&program, &shapes, &outputs, NumericPolicy::llama_relaxed());
+
+        assert_golden(
+            "gemma4 two-range decode",
+            &bound,
+            &outputs,
+            &Golden {
+                op_count: 104,
+                cached_attention: 2,
+                moe_topk: 2,
+                fingerprint: 0xe1e3_6a6c_30bb_f72b,
+            },
+        );
+    }
+
+    /// Gemma4-shaped two-range decode under the CUDA-shaped `Executes` with
+    /// `llama_relaxed`: no `CachedSoftmaxWeights`, so cached-attention
+    /// discovery takes the online-softmax path. Constants recorded from main
+    /// 01f1d317.
+    #[test]
+    fn bound_graph_golden_gemma4_two_range_decode_under_cuda_executes_is_unchanged() {
+        let (program, shapes, outputs) = gemma4_two_range_decode();
+        let bound = bind_cuda(&program, &shapes, &outputs, NumericPolicy::llama_relaxed());
+
+        assert_golden(
+            "gemma4 two-range decode, cuda executes",
+            &bound,
+            &outputs,
+            &Golden {
+                op_count: 104,
+                cached_attention: 2,
+                moe_topk: 2,
+                fingerprint: 0xe1e3_6a6c_30bb_f72b,
             },
         );
     }
