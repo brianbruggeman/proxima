@@ -1804,8 +1804,19 @@ fn text_plan_token(
     } else {
         String::from("_gid64c8")
     };
-    format!("{activation_token}{revision}")
+    let lean_gather_token = if reduce_is_cooperative(resolved, quantized, numeric_policy)
+        && lean_gathered_reduce(resolved, quantized)
+    {
+        LEAN_GATHER_TOKEN
+    } else {
+        ""
+    };
+    format!("{activation_token}{revision}{lean_gather_token}")
 }
+
+/// Entry-name token for the cooperative reduce whose lean loop folds the hoisted
+/// gather base into the row base (PROXNUM-311).
+const LEAN_GATHER_TOKEN: &str = "_lg1";
 
 /// The `(weight, activation)` operand slots of a Q4_0-weight matvec that the
 /// int8-activation `dp4a` body can serve: one `Multiply` over exactly two
@@ -2974,9 +2985,51 @@ fn push_packed_row_base(
             ));
         }
     }
+    let gather_term = if resolved.operands()[index].2.is_some() {
+        format!(" + gather_base{index}")
+    } else {
+        String::new()
+    };
     source.push_str(&format!(
-        "    const long row{index} = u.operand_base[{index}] + packed_row{index} * u.reduction_total;\n"
+        "    const long row{index} = u.operand_base[{index}] + packed_row{index} * u.reduction_total{gather_term};\n"
     ));
+}
+
+/// Whether the lean chunk loop can serve this reduce's gathered operands: none, or
+/// exactly one that is packed, chunk-decodable and constant along the reduction, so
+/// the hoisted `gather_base` folds into the hoisted row base (one expert slab per
+/// output row, as a stacked MoE product reads it).
+fn lean_gather_admissible(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
+    let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
+        return false;
+    };
+    let gathered: Vec<usize> = gather_slots(resolved)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, slot)| slot.map(|_| index))
+        .collect();
+    match gathered.as_slice() {
+        [] => true,
+        [index] => {
+            chunk_slots(quantized).iter().any(|(slot, _)| slot == index)
+                && gather_is_reduction_invariant(resolved, output_axes)
+        }
+        _ => false,
+    }
+}
+
+/// Whether the cooperative body emits the lean loop over a gathered operand; the
+/// entry name carries a token for it so a module compiled from the per-chunk
+/// `gather_base` form is never served for this text.
+fn lean_gathered_reduce(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
+    let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
+        return false;
+    };
+    gather_count(resolved) == 1
+        && quantized.iter().any(Option::is_some)
+        && !reduction_dims(resolved, output_axes).is_empty()
+        && flat_packed_rows(resolved, quantized)
+        && lean_gather_admissible(resolved, quantized)
 }
 
 fn push_plain_row_base(source: &mut String, index: usize, rank: usize, reduce_dim: u16) {
@@ -3420,7 +3473,7 @@ fn push_cooperative_reduce_body(
     let lean = packed_chunked
         && reduce_rank >= 1
         && flat_rows
-        && gather_count(resolved) == 0;
+        && lean_gather_admissible(resolved, quantized);
     let guarded = lean && reduce_rank > 1;
 
     if lean {
@@ -5651,62 +5704,64 @@ mod tests {
     }
 
     #[test]
-    fn q8_0_gathered_reduce_adds_hoisted_gather_base_to_packed_offset() {
+    fn q8_0_gathered_reduce_folds_hoisted_gather_base_into_the_lean_row_base() {
         let bound = gathered_reduce_op(16, 64, 4, false);
         let mut packed = BTreeMap::new();
         packed.insert(bound.operands()[0].0, Codec::Q8_0);
         let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
             .expect("emit succeeds");
+        let source = &kernel.source;
         assert_eq!(kernel.grid.block_width, Some(WARP_SIZE));
-        assert!(kernel.source.contains("off0 += gather_base0;"));
+        let fetch = source.find("long gather_base0 =").expect("hoisted gather base");
+        let row = source
+            .find("const long row0 = u.operand_base[0] + packed_row0 * u.reduction_total + gather_base0;")
+            .expect("row base carries the gather base");
+        let unrolled = source
+            .find("q8_0_chunk8(in0 + (off0_3 /")
+            .expect("unrolled lean chunk decode");
+        assert!(fetch < row && row < unrolled);
+        assert!(!source.contains("off0 += gather_base0;"), "no per-chunk gather add");
+        assert!(source.contains("__ldg((const float4 *)(in1"), "activation read as float4");
+        assert!(kernel.entry.ends_with("_gid64c8_lg1"), "{}", kernel.entry);
+        assert!(source.contains(&kernel.entry));
     }
 
     #[test]
-    fn q8_0_cooperative_reduce_emits_chunk8_decode_after_gather_base() {
-        let bound = gathered_reduce_op(16, 64, 4, false);
-        let mut packed = BTreeMap::new();
-        packed.insert(bound.operands()[0].0, Codec::Q8_0);
-        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
-            .expect("emit succeeds");
-        let gather_add = kernel
-            .source
-            .find("off0 += gather_base0;")
-            .expect("hoisted gather base is added to the packed offset");
-        let chunk_call = kernel
-            .source
-            .find("q8_0_chunk8(in0")
-            .expect("aligned chunk decode is emitted");
-        let lane_loop = kernel
-            .source
-            .find("for (long chunk = (long)lane * 8;")
-            .expect("chunked lane loop is emitted");
-        assert!(lane_loop < gather_add && gather_add < chunk_call);
-        assert!(kernel.source.contains("q8_0_element(in0"));
-        assert!(kernel.source.contains("scratch[0] = q8_0_chunk0[inner];"));
-    }
-
-    #[test]
-    fn q6k_cooperative_reduce_emits_chunk8_decode_after_gather_base() {
+    fn q6k_gathered_reduce_uses_the_lean_loop_with_the_gather_base_in_the_row() {
         let bound = gathered_reduce_op(16, 64, 4, false);
         let mut packed = BTreeMap::new();
         packed.insert(bound.operands()[0].0, Codec::Q6K);
         let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
             .expect("emit succeeds");
-        let gather_add = kernel
-            .source
-            .find("off0 += gather_base0;")
-            .expect("hoisted gather base is added to the packed offset");
-        let chunk_call = kernel
-            .source
-            .find("q6k_chunk8(in0")
-            .expect("aligned chunk decode is emitted");
-        let lane_loop = kernel
-            .source
-            .find("for (long chunk = (long)lane * 8;")
-            .expect("chunked lane loop is emitted");
-        assert!(lane_loop < gather_add && gather_add < chunk_call);
-        assert!(kernel.source.contains("q6k_element(in0"));
-        assert!(kernel.source.contains("scratch[0] = q6k_chunk0[inner];"));
+        assert!(kernel.source.contains("packed_row0 * u.reduction_total + gather_base0;"));
+        assert!(kernel.source.contains("q6k_chunk8(in0 + (off0_3 /"));
+        assert!(!kernel.source.contains("off0 += gather_base0;"));
+    }
+
+    #[test]
+    fn a_gathered_reduce_over_an_undecodable_codec_keeps_the_per_chunk_gather_add() {
+        let bound = gathered_reduce_op(16, 64, 4, false);
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q5K);
+        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
+        assert!(kernel.source.contains("off0 += gather_base0;"));
+        assert!(!kernel.source.contains("const long row0 ="));
+        assert!(kernel.entry.ends_with("_gid64c8"), "{}", kernel.entry);
+    }
+
+    #[test]
+    fn an_ungathered_q8_0_reduce_keeps_its_lean_row_base_and_entry_name() {
+        let bound = matmul_reduce_op(4, 256, ScalarOp::Add);
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::llama_relaxed())
+            .expect("emit succeeds");
+        assert!(kernel.source.contains(
+            "    const long row0 = u.operand_base[0] + packed_row0 * u.reduction_total;\n"
+        ));
+        assert!(!kernel.source.contains("gather_base"));
+        assert!(kernel.entry.ends_with("_gid64c8"), "{}", kernel.entry);
     }
 
     #[test]
