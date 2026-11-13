@@ -16271,10 +16271,9 @@ mod gemma4_synthetic_parity {
                     policy,
                     is_cached_attention,
                 );
-                let expected_fused = if count == 1 { 2 } else { 0 };
                 assert_eq!(
-                    fused_ops, expected_fused,
-                    "K={count} cached={cached_len} padding={padding}: only the decode row has a kernel that renders a sink"
+                    fused_ops, 2,
+                    "K={count} cached={cached_len} padding={padding}: the decode and row-tiled forms render a sink at any cached length"
                 );
                 assert!(
                     difference < TOLERANCE,

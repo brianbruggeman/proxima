@@ -157,10 +157,6 @@ fn shapes_the_tile_cannot_serve_stay_on_the_one_dispatch_form() {
     misfits.push(("a partial-rotary head", partial_rotary));
 
     misfits.push((
-        "a bucket that is not whole 8-key fragments",
-        sliding_op(515, 5),
-    ));
-    misfits.push((
         "a head_dim whose half is not a whole MMA depth",
         attention_rows_op(9, 8, 24, 512, 5, SLIDING_LOWER),
     ));
@@ -189,7 +185,12 @@ fn shapes_the_tile_cannot_serve_stay_on_the_one_dispatch_form() {
     for (label, op) in misfits {
         assert_eq!(chosen(relaxed_form(&op)), Chosen::OneDispatch, "{label}");
     }
-    assert_eq!(cells, 9, "every misfit must have been classified");
+    assert_eq!(cells, 8, "every misfit must have been classified");
+    assert_eq!(
+        chosen(relaxed_form(&sliding_op(515, 5))),
+        Chosen::RowTiled,
+        "a bucket that is not whole 8-key fragments is served row-tiled"
+    );
 }
 
 fn set_new_key_rows(op: &mut BoundOp, rows: u64) {
