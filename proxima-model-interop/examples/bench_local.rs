@@ -241,13 +241,6 @@ fn main() {
         );
         std::process::exit(3);
     }
-    let loaded_model = LoadedModel::load(&parsed, &file_bytes).expect("bind GGUF checkpoint");
-    let rss_after_load_kib = rss_kib();
-    let gpu_memory_before = if backend == "cuda" {
-        cuda_memory_kib()
-    } else {
-        None
-    };
     let serving_config = ServingConfig {
         model_path: &model_path,
         kv_cache_key_quant: NumericFormat::Float32,
@@ -264,6 +257,14 @@ fn main() {
             .numeric_policy
             .with_activation_quantization(activation_quantization),
         ..ServingConfig::default()
+    };
+    let loaded_model = LoadedModel::load_with_serving(&parsed, &file_bytes, &serving_config)
+        .expect("bind GGUF checkpoint");
+    let rss_after_load_kib = rss_kib();
+    let gpu_memory_before = if backend == "cuda" {
+        cuda_memory_kib()
+    } else {
+        None
     };
     let execution_backend = if serving_config.gpu_correctness_fallback && backend == "vulkan" {
         "cpu-fallback"

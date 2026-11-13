@@ -346,7 +346,7 @@ fn run_child(args: &RunArgs<'_>) -> Result<(), BenchError> {
         path: path.to_owned(),
         message: error.to_string(),
     })?;
-    let model = LoadedModel::load(&parsed, &mapping)?;
+    let model = LoadedModel::load_with_serving(&parsed, &mapping, &config(args.context))?;
     let vocab = model.vocab();
     let load_ms = millis(load_started);
     emit("load", &format!("ms={load_ms:.3}"));

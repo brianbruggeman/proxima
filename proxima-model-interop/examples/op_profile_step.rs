@@ -94,7 +94,7 @@ mod profile {
         let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
             .map_err(|error| format!("parse the openchat gguf: {error}"))?;
         real_model_probe::prefault_if_requested(file_bytes)?;
-        let model = LoadedModel::load(&parsed, file_bytes)
+        let model = LoadedModel::load_with_serving(&parsed, file_bytes, &openchat_config())
             .map_err(|error| format!("load the openchat checkpoint: {error}"))?;
         let prompt = real_model_probe::env_prompt(OPENCHAT_PROMPT);
 
@@ -123,9 +123,9 @@ mod profile {
         let file_bytes: &[u8] = &mapped;
         let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
             .map_err(|error| format!("parse the qwen3 gguf: {error}"))?;
-        let model = LoadedModel::load(&parsed, file_bytes)
-            .map_err(|error| format!("load the qwen3 checkpoint: {error}"))?;
         let serving_config = qwen3_config()?;
+        let model = LoadedModel::load_with_serving(&parsed, file_bytes, &serving_config)
+            .map_err(|error| format!("load the qwen3 checkpoint: {error}"))?;
         let prompt = PREFIX.repeat(5);
         let telemetry = real_model_probe::telemetry::install_stdout_telemetry()?;
 

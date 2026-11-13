@@ -277,7 +277,7 @@ fn run(path: &str, prompt: &str, tokens: usize, backends: Backends) -> Result<()
     if env::var("PROXIMA_PREFAULT").is_ok_and(|value| value == "1") {
         proxima_model_interop::prefault(&mapping)?;
     }
-    let model = LoadedModel::load(&parsed, &mapping)?;
+    let model = LoadedModel::load_with_serving(&parsed, &mapping, &config(GPU_LAYERS_ALL))?;
     println!("prompt_ids {:?}", prompt_ids(&vocab, prompt)?);
     if let Ok(forced_text) = env::var("DECODE_COMPARE_FORCED_IDS") {
         let gpu_layers = if matches!(backends, Backends::Cpu) {

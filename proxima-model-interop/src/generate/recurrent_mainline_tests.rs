@@ -554,6 +554,31 @@ mod served_weights {
         );
     }
 
+    #[test]
+    fn a_served_model_takes_the_kv_cache_shape_override_from_its_settings() {
+        let directory = tempfile::tempdir().expect("checkpoint directory");
+        let source = tracked_model(directory.path());
+        let overridden = ServingSettings::builder()
+            .kv_cache_shape(proxima_tensor::spec::KvCacheShape::Uniform)
+            .build();
+
+        let measured = source
+            .load_serving(&ServingSettings::builder().build())
+            .expect("serve with no override");
+        let served = source
+            .load_serving(&overridden)
+            .expect("serve with a uniform cache shape override");
+
+        assert_eq!(
+            measured.kv_cache_shape,
+            proxima_tensor::spec::KvCacheShape::Custom
+        );
+        assert_eq!(
+            served.kv_cache_shape,
+            proxima_tensor::spec::KvCacheShape::Uniform
+        );
+    }
+
     fn tracked_model(directory: &std::path::Path) -> CheckpointMapping {
         let path = directory.join("tiny-ouro.gguf");
         std::fs::write(&path, tiny_ouro_gguf(2, false)).expect("write the tiny checkpoint");

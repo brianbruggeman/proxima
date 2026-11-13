@@ -185,6 +185,7 @@ impl LoadedModel<'_> {
     ) -> Result<LoadedModel<'draft>, InteropError> {
         let target_metadata = proxima_gguf::parse_complete(self.checkpoint_mapping)?;
         let draft_metadata = proxima_gguf::parse_complete(draft_mapping)?;
+        // the serving overrides name the served model, not its draft, so the draft keeps its measured defaults
         let draft = LoadedModel::load(&draft_metadata, draft_mapping)?;
         ensure_compatible(&target_metadata, &self.vocab, &draft_metadata, &draft.vocab)?;
         Ok(draft)
