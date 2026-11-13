@@ -36,6 +36,9 @@
 #[cfg(test)]
 extern crate std;
 
+#[cfg(feature = "alloc")]
+extern crate alloc;
+
 pub mod block_codec;
 pub mod block_layout;
 /// The historical name for [`crate::NumericFormat`], kept so an existing call site reads

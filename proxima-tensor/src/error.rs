@@ -128,10 +128,9 @@ pub enum TensorError {
         letter: char,
     },
 
-    // these three carry free-form text from the TOML graph spec, which is
-    // `config`-only; the two above are raised by the notation parsers every
-    // forward builder shares.
-    #[cfg(feature = "config")]
+    // `UnknownNode` is raised by `spec::primitives::produced_dtype`, which every
+    // forward builder shares, so it exists at the alloc tier; the three below carry
+    // free-form text from the TOML graph spec, which is `config`-only.
     #[error("spec references node `{0}` before it is defined")]
     UnknownNode(alloc::string::String),
 
