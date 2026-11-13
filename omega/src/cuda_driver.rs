@@ -1821,6 +1821,27 @@ pub fn probe_pads_kv(
     numeric_policy: NumericPolicy,
     is_kv_input: impl Fn(&str) -> bool,
 ) -> Result<bool, CudaDriverError> {
+    let (resolved, _) = probe_bound_graph(program, symbols, outputs, named, numeric_policy, None)?;
+    Ok(kv_read_only_by_fused_attention(program, &resolved, outputs, is_kv_input))
+}
+
+/// The bound ops and packed-operand map a CUDA plan for `program` at `symbols` would
+/// bind, by binding alone: no kernel is emitted and no device is touched. The packed map
+/// is built from the weight blocks in `named` (a missing input binds unpacked), then
+/// `bind_resolved` runs its steps: bind, prune dead ops, correct packed matmul layouts,
+/// and derive the activation quantize nodes (`activation_storage` `None` is the default
+/// q8_1 pair), so the returned map also holds each derived node's codec.
+///
+/// # Errors
+/// Shape inference or binding fails at `symbols`, or the bound graph is not servable.
+pub fn probe_bound_graph(
+    program: &[Op],
+    symbols: &[u64],
+    outputs: &[NodeId],
+    named: &[(&str, QuantizedBlock<'_>)],
+    numeric_policy: NumericPolicy,
+    activation_storage: Option<NumericFormat>,
+) -> Result<(Vec<BoundOp>, PackedOperands), CudaDriverError> {
     let packed_operands: PackedOperands = program
         .iter()
         .enumerate()
@@ -1834,8 +1855,9 @@ pub fn probe_pads_kv(
         node: NodeId(0),
         reason: "shape inference failed",
     })?;
-    let (resolved, _, _) = bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, false, None)?;
-    Ok(kv_read_only_by_fused_attention(program, &resolved, outputs, is_kv_input))
+    let (resolved, packed, _) =
+        bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, false, activation_storage)?;
+    Ok((resolved, packed))
 }
 
 fn bind_resolved(
