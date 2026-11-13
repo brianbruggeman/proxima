@@ -11419,3 +11419,83 @@ fn activation_staging_layout_changes_the_kernel_identity_only_off_binary32() {
     assert_ne!(key(Some("float16")), unset);
     assert_ne!(key(Some("float16")), key(Some("bfloat16")));
 }
+
+fn narrow_cache_form_op(form: &str, head_dim: u64) -> (BoundOp, NumericPolicy) {
+    let (mut bound, policy) = match form {
+        "static" => (cached_attention_op(), NumericPolicy::bit_exact()),
+        "two_range_cached_bound" => {
+            let mut bound = cached_attention_op_dynamic(0, 0);
+            let BoundOpKind::CachedAttention { cached_key_rows, new_key_rows, .. } = &mut bound.kind else {
+                unreachable!("cached_attention_op_dynamic always returns a CachedAttention kind");
+            };
+            *cached_key_rows = 48;
+            *new_key_rows = 16;
+            (bound, NumericPolicy::bit_exact())
+        }
+        "single_range_scalar_body" => (cached_attention_op_dynamic(32, 7), NumericPolicy::bit_exact()),
+        "single_range_block_staged" => (cached_attention_op_dynamic(32, 7), NumericPolicy::llama_relaxed()),
+        other => unreachable!("unknown form {other}"),
+    };
+    let BoundOpKind::CachedAttention { head_dim: bound_head_dim, rotary_dim, .. } = &mut bound.kind else {
+        unreachable!("every fixture returns a CachedAttention kind");
+    };
+    *bound_head_dim = head_dim;
+    *rotary_dim = head_dim;
+    (bound, policy)
+}
+
+/// A scalar K/V cache is declared in its storage type on in2/in3/in6 and decoded by one helper
+/// text per kernel in every non-split form, while the new-row operands in4/in5/in7 keep the
+/// element type; the no-codec text carries no helper at all.
+#[test]
+fn every_generic_cached_attention_form_declares_a_narrow_cache_and_emits_the_helper_once() {
+    let cases = [
+        ("static", 4, Codec::Float16, "ushort"),
+        ("two_range_cached_bound", 4, Codec::BFloat16, "ushort"),
+        ("single_range_scalar_body", 4, Codec::Float16, "ushort"),
+        ("single_range_block_staged", 8, Codec::BFloat16, "ushort"),
+        ("single_range_block_staged", 32, Codec::Float16, "ushort"),
+        ("static", 4, Codec::BFloat8, "uchar"),
+    ];
+    let mut checked = 0_usize;
+    for (form, head_dim, codec, storage) in cases {
+        let (bound, policy) = narrow_cache_form_op(form, head_dim);
+        let source = render_cached_attention(&bound, "entry", policy, Some(codec))
+            .unwrap_or_else(|error| panic!("{form} head_dim {head_dim} {codec:?} renders: {error:?}"));
+        for operand in [2, 3, 6] {
+            assert!(
+                source.contains(&format!("device const {storage}* in{operand} [[buffer({operand})]]")),
+                "{form} {codec:?}: in{operand} must be declared in the storage type"
+            );
+        }
+        for operand in [4, 5, 7] {
+            assert!(
+                source.contains(&format!("device const float* in{operand} [[buffer({operand})]]")),
+                "{form} {codec:?}: new-row in{operand} stays the element type"
+            );
+        }
+        assert_eq!(source.matches("static inline float omega_kv_scalar_").count(), 1, "{form} {codec:?}: one scalar decode helper");
+        assert_eq!(source.matches("static inline float4 omega_kv_scalar_").count(), 1, "{form} {codec:?}: one x4 helper");
+        let (plain, plain_policy) = narrow_cache_form_op(form, head_dim);
+        let plain_source = render_cached_attention(&plain, "entry", plain_policy, None).expect("the plain cache renders");
+        assert!(!plain_source.contains("omega_kv_scalar_"), "{form}: no codec means no helper");
+        checked += 1;
+    }
+    assert_eq!(checked, 6, "every form case ran");
+}
+
+/// A block K beside a scalar V is read by the decode split alone; the generic forms refuse it.
+#[test]
+fn a_block_key_cache_is_refused_by_the_generic_cached_attention_forms() {
+    let (bound, policy) = narrow_cache_form_op("static", 4);
+    let error = render_cached_attention_with_mma_selection(
+        &bound,
+        "entry",
+        policy,
+        (Some(Codec::Q4_0), Some(Codec::Float16)),
+        AttentionMmaSelection::Legacy,
+        AttentionRowSchedule::legacy(),
+    )
+    .expect_err("a block K beside a scalar V is not a generic-form cache");
+    assert!(matches!(error, EmitError::CachedAttentionKvCodecNotSupported { .. }), "{error:?}");
+}
