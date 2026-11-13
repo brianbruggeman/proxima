@@ -61,6 +61,7 @@
 //! ```
 
 use std::collections::BTreeMap;
+use std::ffi::{CString, c_char, c_void};
 use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{Read, Write as _};
@@ -1380,6 +1381,8 @@ struct Config {
     stage_kv: Kv,
     /// adds the optional `llama-fa-off` arm and the `llama-fa-delta` attention proxy rows
     fa_off_arm: bool,
+    /// runs only tokenize and detokenize of the stage prompts; llama stays on the cpu with a tiny context so the weights are mapped, never faulted in
+    text_edges: bool,
 }
 
 const VALUE_FLAGS: [&str; 19] = [
@@ -1423,7 +1426,12 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
     let mut values: BTreeMap<String, String> = BTreeMap::new();
     let mut proxima = Vec::new();
     let mut tokens = arguments.into_iter();
+    let mut text_edges = false;
     while let Some(flag) = tokens.next() {
+        if flag == "--text-edges" {
+            text_edges = true;
+            continue;
+        }
         let value = tokens
             .next()
             .ok_or_else(|| HarnessError::MissingValue(flag.clone()))?;
@@ -1466,6 +1474,9 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
             return Err(HarnessError::BadValue { flag: "--fa-off-arm", expected: "on|off", got: other.to_owned() });
         }
     };
+    if text_edges && stages.is_none() {
+        return Err(HarnessError::MissingFlag("--stages"));
+    }
     if proxima.is_empty() && llama_inproc.is_none() {
         return Err(HarnessError::MissingFlag("--prox"));
     }
@@ -1487,6 +1498,7 @@ fn parse_config(arguments: impl IntoIterator<Item = String>) -> Result<Config, H
         stages,
         stage_kv,
         fa_off_arm,
+        text_edges,
         proxima,
         rounds,
         time_bin: values
@@ -2045,6 +2057,10 @@ const KV_WRITE_MS: Metric = metric(Stage::Kv, "kv_write_ms_per_step", "ms", "pro
 const DETOKENIZE_MS: Metric = metric(Stage::Detokenization, "detokenize_ms", "ms", "the 128 generated ids to text. proxima: mean of 20 in-process proxima_tokenizer::decode calls after 1 discarded call. llama: client wall of POST /detokenize minus detokenize_http_floor_ms");
 const DETOKENIZE_WALL_MS: Metric = metric(Stage::Detokenization, "detokenize_wall_ms", "ms", "llama: client wall of POST /detokenize on the generated ids, HTTP included. proxima: the in-process call, equal to detokenize_ms");
 const DETOKENIZE_FLOOR_MS: Metric = metric(Stage::Detokenization, "detokenize_http_floor_ms", "ms", "llama only: client wall of POST /detokenize with an empty token array, subtracted from detokenize_wall_ms");
+const TOKENIZE_INPROC_MS: Metric = metric(Stage::Tokenization, "tokenize_inproc_ms", "ms", "text to ids for the prompt file, no transport. mean of 20 in-process calls after 1 discarded: proxima_tokenizer on the GGUF vocab / llama b12110 llama_tokenize on a vocab_only model");
+const TOKENIZE_INPROC_TOKENS: Metric = metric(Stage::Tokenization, "tokenize_inproc_tokens", "count", "ids returned by the in-process tokenize call on the prompt text: proxima_tokenizer encode_with_bos_eos on the GGUF vocab / llama b12110 llama_tokenize on a vocab_only model");
+const DETOKENIZE_PROMPT_INPROC_MS: Metric = metric(Stage::Detokenization, "detokenize_prompt_inproc_ms", "ms", "the prompt's own ids to text, never merged into detokenize_ms (the 128 generated ids). mean of 20 in-process calls after 1 discarded: proxima_tokenizer on the GGUF vocab / llama b12110 llama_detokenize on a vocab_only model");
+const VOCAB_ONLY_RSS_BYTES: Metric = metric(Stage::Extra, "vocab_only_process_rss_bytes", "bytes", "resident set (ps -o rss=) of this harness process after the llama b12110 vocab_only model load and its in-process calls; no tensors are loaded, so it must stay under the text-edge limit");
 const E2E_WALL_MS: Metric = metric(Stage::EndToEnd, "e2e_wall_ms", "ms", "full request, 128 tokens out. proxima: mean over runs 1 and 2 of run=done wall_ms from the decode_gbps_baseline loop (text edges not proven inside it, see e2e_with_text_edges_ms). llama: client wall of warm POST /completion with the prompt as text, n_predict 128, ignore_eos, text returned");
 const E2E_EDGES_MS: Metric = metric(Stage::EndToEnd, "e2e_with_text_edges_ms", "ms", "proxima DERIVED: e2e_wall_ms + tokenize_ms + detokenize_ms, the composed text-in text-out path; llama's /completion already includes both edges");
 const LOAD_MS: Metric = metric(Stage::Extra, "model_load_ms", "ms", "proxima DERIVED: /usr/bin/time real minus the sum of run wall_ms (process start, GGUF parse, weight load, teardown). llama: spawn to /health ok, 500 ms poll granularity");
@@ -2055,7 +2071,7 @@ const GPU_PEAK_BYTES: Metric = metric(Stage::Extra, "gpu_peak_bytes", "bytes", "
 const ARM_ERROR: Metric = metric(Stage::Extra, "arm_error", "none", "an arm that failed to run; the reason is in the note");
 
 /// (column title, metric name) in the owner's order: tokenization, prefill, decode, attention, kv, detokenization, ete, extras.
-const HEADLINES: [(&str, &str); 17] = [
+const HEADLINES: [(&str, &str); 20] = [
     ("tokenize ms", "tokenize_ms"),
     ("prefill ms/tok", "prefill_ms_per_prompt_token"),
     ("decode ms/tok", "decode_ms_per_token"),
@@ -2067,12 +2083,15 @@ const HEADLINES: [(&str, &str); 17] = [
     ("kv peak bytes", "kv_peak_bytes"),
     ("kv write ms/step", "kv_write_ms_per_step"),
     ("detokenize ms", "detokenize_ms"),
+    ("detokenize prompt inproc ms", "detokenize_prompt_inproc_ms"),
     ("ete wall ms", "e2e_wall_ms"),
     ("load ms", "model_load_ms"),
     ("first-req compile ms", "first_request_compile_ms"),
     ("footprint bytes", "peak_footprint_bytes"),
     ("rss bytes", "max_rss_bytes"),
     ("gpu peak bytes", "gpu_peak_bytes"),
+    ("vocab-only process rss bytes", "vocab_only_process_rss_bytes"),
+    ("tokenize inproc ms", "tokenize_inproc_ms"),
 ];
 
 #[derive(Clone, Debug, PartialEq)]
@@ -2563,6 +2582,222 @@ fn run_proxima_stage(config: &Config, binary: &Path, vocab: &Vocab, prompt: &Sta
     })
 }
 
+const LLAMA_LIBRARY: &str = "/opt/homebrew/lib/libllama.dylib";
+const TEXT_EDGE_RSS_LIMIT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// What the in-process vocab-only llama observed for the text edges of one prompt.
+#[derive(Debug, Clone, PartialEq)]
+struct LlamaTextEdges {
+    tokenize_ms: f64,
+    tokenize_tokens: usize,
+    detokenize_ms: f64,
+    rss_bytes: u64,
+}
+
+/// `struct llama_model_params` of llama b12110 (`llama.h:321-358`); C enums are `int` sized.
+#[repr(C)]
+struct LlamaModelParams {
+    devices: *const c_void,
+    tensor_buft_overrides: *const c_void,
+    n_gpu_layers: i32,
+    split_mode: i32,
+    load_mode: i32,
+    lazy_mode: i32,
+    main_gpu: i32,
+    tensor_split: *const f32,
+    progress_callback: *const c_void,
+    progress_callback_user_data: *mut c_void,
+    kv_overrides: *const c_void,
+    vocab_only: bool,
+    check_tensors: bool,
+    use_extra_bufts: bool,
+    no_host: bool,
+    no_alloc: bool,
+    load_mtp: bool,
+}
+
+type LlamaBackendInit = unsafe extern "C" fn();
+type LlamaDefaultParams = unsafe extern "C" fn() -> LlamaModelParams;
+type LlamaLoad = unsafe extern "C" fn(*const c_char, LlamaModelParams) -> *mut c_void;
+type LlamaFree = unsafe extern "C" fn(*mut c_void);
+type LlamaGetVocab = unsafe extern "C" fn(*const c_void) -> *const c_void;
+type LlamaTokenize = unsafe extern "C" fn(*const c_void, *const c_char, i32, *mut i32, i32, bool, bool) -> i32;
+type LlamaDetokenize = unsafe extern "C" fn(*const c_void, *const i32, i32, *mut c_char, i32, bool, bool) -> i32;
+
+/// libllama taken with `dlopen` at run time: bench-only, no build or link dependency.
+struct LlamaApi {
+    backend_init: LlamaBackendInit,
+    default_params: LlamaDefaultParams,
+    load: LlamaLoad,
+    free: LlamaFree,
+    get_vocab: LlamaGetVocab,
+    tokenize: LlamaTokenize,
+    detokenize: LlamaDetokenize,
+}
+
+fn llama_symbol<T: Copy>(handle: *mut c_void, name: &str) -> Result<T, HarnessError> {
+    let c_name = CString::new(name).map_err(|source| HarnessError::Server(source.to_string()))?;
+    // SAFETY: handle came from a successful dlopen and c_name is NUL terminated.
+    let address = unsafe { libc::dlsym(handle, c_name.as_ptr()) };
+    if address.is_null() {
+        return Err(HarnessError::Server(format!("libllama has no symbol {name}")));
+    }
+    // SAFETY: T is one of the extern "C" fn pointer aliases above, pointer sized, matching llama.h for this build.
+    Ok(unsafe { std::mem::transmute_copy::<*mut c_void, T>(&address) })
+}
+
+impl LlamaApi {
+    fn open(library: &str) -> Result<Self, HarnessError> {
+        let c_path = CString::new(library).map_err(|source| HarnessError::Server(source.to_string()))?;
+        // SAFETY: c_path is NUL terminated; RTLD_NOW resolves every symbol before returning.
+        let handle = unsafe { libc::dlopen(c_path.as_ptr(), libc::RTLD_NOW) };
+        if handle.is_null() {
+            return Err(HarnessError::Server(format!("dlopen {library} failed")));
+        }
+        Ok(Self {
+            backend_init: llama_symbol(handle, "llama_backend_init")?,
+            default_params: llama_symbol(handle, "llama_model_default_params")?,
+            load: llama_symbol(handle, "llama_model_load_from_file")?,
+            free: llama_symbol(handle, "llama_model_free")?,
+            get_vocab: llama_symbol(handle, "llama_model_get_vocab")?,
+            tokenize: llama_symbol(handle, "llama_tokenize")?,
+            detokenize: llama_symbol(handle, "llama_detokenize")?,
+        })
+    }
+
+    fn load_vocab_only(&self, model: &Path) -> Result<LlamaVocabModel<'_>, HarnessError> {
+        let c_path = CString::new(model.as_os_str().as_encoded_bytes()).map_err(|source| HarnessError::Server(source.to_string()))?;
+        // SAFETY: symbols were resolved from this build's llama.h; the params struct mirrors it.
+        let handle = unsafe {
+            (self.backend_init)();
+            let mut params = (self.default_params)();
+            params.vocab_only = true;
+            params.n_gpu_layers = 0;
+            (self.load)(c_path.as_ptr(), params)
+        };
+        if handle.is_null() {
+            return Err(HarnessError::Server(format!("llama_model_load_from_file failed for {}", model.display())));
+        }
+        // SAFETY: handle is the live model just loaded.
+        let vocab = unsafe { (self.get_vocab)(handle) };
+        Ok(LlamaVocabModel { api: self, handle, vocab })
+    }
+}
+
+struct LlamaVocabModel<'api> {
+    api: &'api LlamaApi,
+    handle: *mut c_void,
+    vocab: *const c_void,
+}
+
+impl Drop for LlamaVocabModel<'_> {
+    fn drop(&mut self) {
+        // SAFETY: handle was returned by llama_model_load_from_file and is freed exactly once.
+        unsafe { (self.api.free)(self.handle) };
+    }
+}
+
+impl LlamaVocabModel<'_> {
+    /// a negative return is the needed size: grow once, then call again
+    fn tokenize(&self, text: &str, tokens: &mut Vec<i32>) -> Result<usize, HarnessError> {
+        let length = i32::try_from(text.len()).map_err(|source| HarnessError::Tokenize(source.to_string()))?;
+        for _ in 0..2 {
+            let capacity = i32::try_from(tokens.len()).unwrap_or(i32::MAX);
+            // SAFETY: text and tokens are live for the call, lengths passed are their real lengths.
+            let count = unsafe { (self.api.tokenize)(self.vocab, text.as_ptr().cast(), length, tokens.as_mut_ptr(), capacity, true, false) };
+            if count >= 0 {
+                return Ok(count as usize);
+            }
+            if count == i32::MIN {
+                return Err(HarnessError::Tokenize("llama_tokenize overflow".to_owned()));
+            }
+            tokens.resize(count.unsigned_abs() as usize, 0);
+        }
+        Err(HarnessError::Tokenize("llama_tokenize size query did not converge".to_owned()))
+    }
+
+    fn detokenize(&self, ids: &[i32], text: &mut Vec<u8>) -> Result<usize, HarnessError> {
+        let count = i32::try_from(ids.len()).map_err(|source| HarnessError::Tokenize(source.to_string()))?;
+        for _ in 0..2 {
+            let capacity = i32::try_from(text.len()).unwrap_or(i32::MAX);
+            // SAFETY: ids and text are live for the call, lengths passed are their real lengths.
+            let written = unsafe { (self.api.detokenize)(self.vocab, ids.as_ptr(), count, text.as_mut_ptr().cast(), capacity, false, false) };
+            if written >= 0 {
+                return Ok(written as usize);
+            }
+            text.resize(written.unsigned_abs() as usize, 0);
+        }
+        Err(HarnessError::Tokenize("llama_detokenize size query did not converge".to_owned()))
+    }
+}
+
+fn own_rss_bytes() -> Option<u64> {
+    let output = Command::new("ps").args(["-o", "rss=", "-p", &std::process::id().to_string()]).output().ok()?;
+    let kib: u64 = String::from_utf8_lossy(&output.stdout).trim().parse().ok()?;
+    Some(kib * 1024)
+}
+
+fn run_llama_text_edges(config: &Config, prompt: &StagePrompt) -> Result<LlamaTextEdges, HarnessError> {
+    let api = LlamaApi::open(LLAMA_LIBRARY)?;
+    let model = api.load_vocab_only(&config.model)?;
+    let rss_bytes = own_rss_bytes().ok_or_else(|| HarnessError::Server("could not read the harness rss".to_owned()))?;
+    if rss_bytes > TEXT_EDGE_RSS_LIMIT_BYTES {
+        return Err(rss_error("after the vocab-only load", rss_bytes));
+    }
+    let ids: Vec<i32> = prompt.ids.iter().map(|&id| id as i32).collect();
+    let mut tokens = Vec::new();
+    let tokenize_tokens = model.tokenize(&prompt.text, &mut tokens)?;
+    let mut text = Vec::new();
+    model.detokenize(&ids, &mut text)?;
+    let mut failure = None;
+    let tokenize_ms = mean_call_ms(|| model.tokenize(&prompt.text, &mut tokens).map_err(|error| failure = Some(error)));
+    let detokenize_ms = mean_call_ms(|| model.detokenize(&ids, &mut text).map_err(|error| failure = Some(error)));
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    Ok(LlamaTextEdges { tokenize_ms, tokenize_tokens, detokenize_ms, rss_bytes })
+}
+
+fn llama_text_edge_rows(sink: &mut RowSink, input: &LlamaTextEdges) {
+    sink.measured(&TOKENIZE_INPROC_MS, input.tokenize_ms, "vocab_only model, no transport");
+    sink.measured(&TOKENIZE_INPROC_TOKENS, count_as_f64(input.tokenize_tokens), "");
+    sink.measured(&DETOKENIZE_PROMPT_INPROC_MS, input.detokenize_ms, "vocab_only model, prompt ids");
+    sink.measured(&VOCAB_ONLY_RSS_BYTES,count_as_f64(usize::try_from(input.rss_bytes).unwrap_or(usize::MAX)), "ps rss of the harness after the vocab-only load");
+}
+
+fn rss_error(stage: &str, bytes: u64) -> HarnessError {
+    HarnessError::Server(format!("text-edge server rss {bytes} bytes exceeds {TEXT_EDGE_RSS_LIMIT_BYTES} {stage}; weights were faulted in"))
+}
+
+fn proxima_text_edge_rows(sink: &mut RowSink, tokenize_ms: f64, detokenize_prompt_ms: f64, prompt_tokens: usize) {
+    sink.measured(&TOKENIZE_INPROC_MS, tokenize_ms, "GGUF vocab, no transport");
+    sink.measured(&TOKENIZE_INPROC_TOKENS, count_as_f64(prompt_tokens), "");
+    sink.measured(&DETOKENIZE_PROMPT_INPROC_MS, detokenize_prompt_ms, "GGUF vocab, prompt ids");
+}
+
+fn text_edge_round(config: &Config, binary: &(String, PathBuf), vocab: &Vocab, prompt: &StagePrompt, round: usize) -> Vec<StageRow> {
+    let load = load1();
+    let outcome = if quiet_enough(config) {
+        run_llama_text_edges(config, prompt)
+    } else {
+        Err(HarnessError::Server("quiet gate refused".to_owned()))
+    };
+    let mut rows = match outcome {
+        Ok(edges) => {
+            let mut sink = RowSink::new(round, "llama", &prompt.label, load);
+            llama_text_edge_rows(&mut sink, &edges);
+            sink.rows
+        }
+        Err(error) => error_rows(round, "llama", &prompt.label, load, &error),
+    };
+    let mut sink = RowSink::new(round, &format!("proxima-{}", binary.0), &prompt.label, load);
+    let tokenize_ms = mean_call_ms(|| tokenize_like_proxima(&prompt.text, vocab));
+    let detokenize_prompt_ms = mean_call_ms(|| proxima_tokenizer::decode(&prompt.ids, vocab));
+    proxima_text_edge_rows(&mut sink, tokenize_ms, detokenize_prompt_ms, prompt.ids.len());
+    rows.extend(sink.rows);
+    rows
+}
+
 fn error_rows(round: usize, engine: &str, prompt: &str, load: f64, error: &HarnessError) -> Vec<StageRow> {
     let mut sink = RowSink::new(round, engine, prompt, load);
     sink.unavailable(&ARM_ERROR, &error.to_string());
@@ -2629,7 +2864,11 @@ fn run_stages(config: &Config, directory: &Path) -> Result<(), HarnessError> {
     let mut rows = Vec::new();
     for round in 0..config.rounds {
         for prompt in &prompts {
-            rows.extend(stage_round(config, binary, &vocab, prompt, &logs, round));
+            rows.extend(if config.text_edges {
+                text_edge_round(config, binary, &vocab, prompt, round)
+            } else {
+                stage_round(config, binary, &vocab, prompt, &logs, round)
+            });
             println!("stage round {round} prompt {} rows {}", prompt.label, rows.len());
         }
     }
@@ -3592,6 +3831,54 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         assert_eq!((tuned.gate.load_limit, tuned.gate.hold_secs), (2.5, 60));
         arguments.extend(["--bogus", "1"].map(str::to_owned));
         assert!(parse_config(arguments).is_err());
+    }
+
+    #[test]
+    fn text_edge_arms_report_prompt_detokenize_apart_from_generated_and_carry_rss() {
+        let response = parse_llama_response(LLAMA_F32_84_RESPONSE).expect("real llama completion parses");
+        let edges = LlamaTextEdges { tokenize_ms: 2.0, tokenize_tokens: response.ids.len(), detokenize_ms: 2.25, rss_bytes: 600 * 1024 * 1024 };
+        let mut llama = RowSink::new(0, "llama", "84", 1.5);
+        llama_text_edge_rows(&mut llama, &edges);
+        assert!(close(rows_of(&llama, "tokenize_inproc_ms")[0].value, 2.0));
+        assert!(close(rows_of(&llama, "detokenize_prompt_inproc_ms")[0].value, 2.25));
+        assert!(rows_of(&llama, "detokenize_ms").is_empty() && rows_of(&llama, "tokenize_ms").is_empty());
+        assert!(close(rows_of(&llama, "vocab_only_process_rss_bytes")[0].value, 629_145_600.0));
+        let mut proxima = RowSink::new(0, "proxima-new", "84", 1.5);
+        proxima_text_edge_rows(&mut proxima, 0.1, 0.05, response.ids.len());
+        assert!(close(rows_of(&proxima, "detokenize_prompt_inproc_ms")[0].value, 0.05));
+        assert!(rows_of(&proxima, "detokenize_ms").is_empty() && rows_of(&proxima, "prefill_ms_per_prompt_token").is_empty());
+        assert!(close(rows_of(&proxima, "tokenize_inproc_tokens")[0].value, count_as_f64(response.ids.len())));
+        assert!(rows_of(&proxima, "tokenize_ms").is_empty());
+    }
+
+    #[test]
+    fn llama_model_params_matches_the_b12110_header_layout() {
+        // llama.h:321-358 on 64-bit: devices 0, tensor_buft_overrides 8, five i32 at 16,20,24,28,32 (end 36),
+        // tensor_split pads to 40, progress_callback 48, user_data 56, kv_overrides 64, vocab_only 72,
+        // six bools 72..78, struct align 8 so size rounds 78 up to 80
+        assert_eq!(std::mem::offset_of!(LlamaModelParams, n_gpu_layers), 16);
+        assert_eq!(std::mem::offset_of!(LlamaModelParams, tensor_split), 40);
+        assert_eq!(std::mem::offset_of!(LlamaModelParams, kv_overrides), 64);
+        assert_eq!(std::mem::offset_of!(LlamaModelParams, vocab_only), 72);
+        assert_eq!(std::mem::size_of::<LlamaModelParams>(), 80);
+    }
+
+    #[test]
+    fn rss_over_the_limit_becomes_an_error_row_naming_the_rss() {
+        let error = rss_error("after the exchanges", 25_000_000_000);
+        let rows = error_rows(0, "llama", "84", 1.5, &error);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].value.is_none() && rows[0].note.contains("25000000000"));
+    }
+
+    #[test]
+    fn text_edges_flag_needs_stages_and_takes_no_value() {
+        let base = ["--out", "o", "--model", "m", "--llama", "l", "--llama-commit", "x", "--prox", "new=/bin/true"];
+        let mut arguments: Vec<String> = base.iter().map(|text| (*text).to_owned()).collect();
+        arguments.push("--text-edges".to_owned());
+        assert!(parse_config(arguments.clone()).is_err());
+        arguments.extend(["--stages", "d"].map(str::to_owned));
+        assert!(parse_config(arguments).expect("stages with text edges").text_edges);
     }
 
     #[test]
