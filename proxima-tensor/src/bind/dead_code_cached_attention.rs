@@ -1,4 +1,6 @@
 use super::*;
+#[cfg(feature = "metal-fuse-attn-decode")]
+use crate::op::Extent;
 
 /// Rewrites a packed matmul weight operand's [`Layout`] from `layout_of`'s
 /// default -- row-major over the operand's own DECLARED axis order -- to the
@@ -615,6 +617,104 @@ pub(super) fn local_causal_mask_new_row_bound(program: &[Op], node: NodeId) -> O
     (1..=(1u64 << 24)).contains(&window).then_some(window)
 }
 
+/// `W` of an end-aligned `too_old` ceiling constant `W - 1`; the same
+/// finite, non-negative, integral, `1..=2^24` admission
+/// [`local_causal_mask_new_row_bound`] applies to a block-local window.
+#[cfg(feature = "metal-fuse-attn-decode")]
+fn window_from_ceiling(program: &[Op], ceiling: NodeId) -> Option<u64> {
+    let window_ceiling = constant_value(program, ceiling)?;
+    if !window_ceiling.is_finite() || window_ceiling < 0.0 || window_ceiling.fract() != 0.0 {
+        return None;
+    }
+    let window = window_ceiling as u64 + 1;
+    (1..=(1u64 << 24)).contains(&window).then_some(window)
+}
+
+/// `(query_absolute, key_iota)` when `node` is exactly the end-aligned
+/// query anchor [`crate::spec::causal_mask_end_aligned`] builds:
+/// `Add(Iota[Static(1)], Reduce(Maximum, -inf, key_iota))`, a one-row query
+/// standing for the last new row `N - 1`.
+#[cfg(feature = "metal-fuse-attn-decode")]
+fn end_aligned_query_anchor(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId)> {
+    let [query_index, last_row] = binary_elementwise(program, node, ScalarOp::Add)?;
+    let single_row = matches!(
+        program.get(query_index.0 as usize),
+        Some(Op::Iota {
+            extent: Extent::Static(1),
+            ..
+        })
+    );
+    let key_index = reduced_source(
+        program,
+        last_row,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+    )?;
+    (single_row && is_iota(program, key_index)).then_some((node, key_index))
+}
+
+/// `(key_iota, query_absolute)` when `node` is `Greater(key, query_absolute)`
+/// over an end-aligned query anchor whose max-reduce reads that same key iota.
+#[cfg(feature = "metal-fuse-attn-decode")]
+fn end_aligned_greater(program: &[Op], node: NodeId) -> Option<(NodeId, NodeId)> {
+    let operands = elementwise_operands(program, node, ScalarOp::Greater)?;
+    let [(key, key_map), (query_absolute, query_map)] = operands else {
+        return None;
+    };
+    if *key_map != IndexMap::Affine(map::projection(2, &[1]))
+        || *query_map != IndexMap::Affine(map::projection(2, &[0]))
+    {
+        return None;
+    }
+    let (anchor, anchor_key) = end_aligned_query_anchor(program, *query_absolute)?;
+    (anchor_key == *key).then_some((*key, anchor))
+}
+
+/// [`local_causal_mask_new_row_bound`]'s counterpart for
+/// [`crate::spec::causal_mask_end_aligned`]: `u64::MAX` for the bare
+/// `is_future` form, `Some(W)` for `Maximum(is_future, too_old)` whose
+/// `too_old` subtracts the SAME query-absolute and key nodes. Today's masks
+/// never match (their query side is a bare `Iota`), so recognition of them is
+/// untouched.
+#[cfg(feature = "metal-fuse-attn-decode")]
+pub(super) fn end_aligned_new_row_bound(program: &[Op], node: NodeId) -> Option<u64> {
+    if end_aligned_greater(program, node).is_some() {
+        return Some(u64::MAX);
+    }
+    let masked = binary_elementwise(program, node, ScalarOp::Maximum)?;
+    let (key, query_absolute) = end_aligned_greater(program, masked[0])?;
+    let too_old = binary_elementwise(program, masked[1], ScalarOp::Greater)?;
+    let distance = binary_elementwise(program, too_old[0], ScalarOp::Subtract)?;
+    if distance[0] != query_absolute || distance[1] != key {
+        return None;
+    }
+    window_from_ceiling(program, too_old[1])
+}
+
+/// The row offset an end-aligned query adds to every bound: its absolute row
+/// `N - 1` for `N` bound new-key rows, `0` for an ordinary mask. `None` when
+/// `N` is `0` or does not fit an `i64`.
+#[cfg(feature = "cached-attention-streaming")]
+pub(super) fn end_aligned_offset(end_aligned: bool, new_key_rows: u64) -> Option<i64> {
+    if !end_aligned {
+        return Some(0);
+    }
+    new_key_rows
+        .checked_sub(1)
+        .and_then(|last_row| i64::try_from(last_row).ok())
+}
+
+/// `cached_lower_inclusive.saturating_add(offset)`, except that the
+/// `i64::MIN` "unbounded" sentinel stays `i64::MIN`: other readers test
+/// `!= i64::MIN` to mean "windowed".
+#[cfg(feature = "cached-attention-streaming")]
+pub(super) fn shift_lower_bound(lower: i64, offset: i64) -> i64 {
+    if lower == i64::MIN {
+        return lower;
+    }
+    lower.saturating_add(offset)
+}
+
 /// [`scheduled_cached::causal_mask_cached_windowed`]'s own
 /// `is_padding` shape: `Greater(Iota_t, Subtract(Subtract(Add(Iota_s, C),
 /// Iota_s), 1.0))`, value-equal to [`cached_len_padding_bound`]'s bare
@@ -707,6 +807,50 @@ pub(super) fn cached_padding_mask_lower_bound(
         return None;
     }
     Some((*inner, 1 - window, true))
+}
+
+/// [`cached_padding_mask_lower_bound`]'s counterpart for
+/// [`crate::spec::causal_mask_cached_end_aligned`]: the windowed predicate
+/// `Maximum(is_padding, too_old)` whose `too_old` distance reads
+/// `Add(query_absolute, Reduce(Maximum, -inf, new_key_iota))` -- the query's
+/// absolute row `cached_len + N - 1` -- instead of `query_absolute`. Returns
+/// `(inner, 1 - W)`; the caller adds `N - 1` from the bound new-key extent.
+/// [`cached_padding_mask_lower_bound`] returns `None` on this shape
+/// (`distance[0] != query_absolute`), so today's masks never reach here.
+#[cfg(feature = "metal-fuse-attn-decode")]
+pub(super) fn cached_padding_mask_end_aligned_lower_bound(
+    program: &[Op],
+    node: NodeId,
+    cached_len: Option<NodeId>,
+) -> Option<(NodeId, i64)> {
+    let select_operands = elementwise_operands(program, node, ScalarOp::Select)?;
+    let [(predicate, _), (negative_infinity, _), (inner, _)] = select_operands else {
+        return None;
+    };
+    if constant_value(program, *negative_infinity) != Some(f32::NEG_INFINITY) {
+        return None;
+    }
+    let parts = binary_elementwise(program, *predicate, ScalarOp::Maximum)?;
+    let (cached_len_candidate, query_absolute, key_index) =
+        cached_len_padding_template(program, parts[0])?;
+    if Some(cached_len_candidate) != cached_len {
+        return None;
+    }
+    let too_old = binary_elementwise(program, parts[1], ScalarOp::Greater)?;
+    let distance = binary_elementwise(program, too_old[0], ScalarOp::Subtract)?;
+    let end_absolute = binary_elementwise(program, distance[0], ScalarOp::Add)?;
+    let new_key_index = reduced_source(
+        program,
+        end_absolute[1],
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+    )?;
+    if distance[1] != key_index || end_absolute[0] != query_absolute || !is_iota(program, new_key_index)
+    {
+        return None;
+    }
+    let window = window_from_ceiling(program, too_old[1])?;
+    Some((*inner, 1 - window as i64))
 }
 
 #[cfg(feature = "cached-attention-streaming")]
@@ -1025,9 +1169,21 @@ pub(super) fn cached_attention_candidates(
         let negative_infinity_ok =
             constant_value(program, *negative_infinity) == Some(f32::NEG_INFINITY);
         #[cfg(feature = "metal-fuse-attn-decode")]
-        let local_row_bound = negative_infinity_ok
+        let plain_row_bound = negative_infinity_ok
             .then(|| local_causal_mask_new_row_bound(program, *mask))
             .flatten();
+        #[cfg(feature = "metal-fuse-attn-decode")]
+        let end_aligned_row_bound = plain_row_bound
+            .is_none()
+            .then(|| negative_infinity_ok.then(|| end_aligned_new_row_bound(program, *mask)))
+            .flatten()
+            .flatten();
+        #[cfg(feature = "metal-fuse-attn-decode")]
+        let local_end_aligned = end_aligned_row_bound.is_some();
+        #[cfg(not(feature = "metal-fuse-attn-decode"))]
+        let local_end_aligned = false;
+        #[cfg(feature = "metal-fuse-attn-decode")]
+        let local_row_bound = plain_row_bound.or(end_aligned_row_bound);
         #[cfg(not(feature = "metal-fuse-attn-decode"))]
         let local_row_bound = negative_infinity_ok
             .then(|| is_exact_causal_mask(program, *mask).then_some(u64::MAX))
@@ -1058,15 +1214,38 @@ pub(super) fn cached_attention_candidates(
             cached_padding_matched,
             via_gemma_template,
             matched_cached_len,
+            cached_end_aligned,
         ) = match named_cached_lens.iter().find_map(|&candidate| {
-            cached_padding_mask_lower_bound(program, cached_score_parts[0], Some(candidate))
-                .map(|found| (found, candidate))
+            let plain =
+                cached_padding_mask_lower_bound(program, cached_score_parts[0], Some(candidate))
+                    .map(|(inner, bound, via_gemma)| (inner, bound, via_gemma, false));
+            let end_aligned = || {
+                cached_padding_mask_end_aligned_lower_bound(
+                    program,
+                    cached_score_parts[0],
+                    Some(candidate),
+                )
+                .map(|(inner, bound)| (inner, bound, false, true))
+            };
+            plain.or_else(end_aligned).map(|found| (found, candidate))
         }) {
-            Some(((inner, bound, via_gemma_template), matched)) => {
-                (inner, bound, true, via_gemma_template, Some(matched))
+            Some(((inner, bound, via_gemma_template, end_aligned), matched)) => {
+                (inner, bound, true, via_gemma_template, Some(matched), end_aligned)
             }
-            None => (cached_score_parts[0], i64::MIN, false, false, None),
+            None => (cached_score_parts[0], i64::MIN, false, false, None, false),
         };
+        #[cfg(feature = "metal-fuse-attn-decode")]
+        if cached_end_aligned != local_end_aligned && cached_lower_inclusive != i64::MIN {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "end_alignment_mismatch",
+                cached_end_aligned,
+                local_end_aligned,
+                "cached_attention decline -- cached and local masks disagree on the query's row alignment"
+            );
+            continue;
+        }
         #[cfg(not(feature = "metal-fuse-attn-decode"))]
         let (
             cached_scaled_source,
@@ -1361,6 +1540,15 @@ pub(super) fn cached_attention_candidates(
         let new_key_shape = shapes.of(new_key_even);
         let cached_value_shape = shapes.of(cached_value);
         let new_value_shape = shapes.of(new_value);
+        let Some(end_offset) = end_aligned_offset(local_end_aligned, new_key_shape[0]) else {
+            #[cfg(feature = "instrument")]
+            debug!(
+                node = output.0,
+                stage = "end_aligned_empty_new_range",
+                "cached_attention decline -- an end-aligned query needs at least one new key row"
+            );
+            continue;
+        };
         // Eligibility guards for the sliding-pattern-shaped windowed/padded masks
         // `local_row_bound`/`cached_lower_inclusive` above may have matched.
         // Every guard here is a no-op off this feature: `local_row_bound` is
@@ -1391,7 +1579,8 @@ pub(super) fn cached_attention_candidates(
             // a window that cuts the new range is carried by `cached_lower_inclusive`
             // on the two-range `CachedAttention` op alone; the softmax-weights
             // lowering and the single-range form do not read it for new keys.
-            let window_cut_carried = split_decode_admitted && cached_key_shape[0] > 0;
+            let window_cut_carried =
+                local_end_aligned || (split_decode_admitted && cached_key_shape[0] > 0);
             if local_row_bound != u64::MAX
                 && new_key_shape[0] > local_row_bound
                 && !window_cut_carried
@@ -2068,8 +2257,8 @@ pub(super) fn cached_attention_candidates(
                 // below `head_dim` (`attention_score_sources`'s own doc).
                 rotary_dim: rotary_width,
                 scale: scale_value,
-                cached_lower_inclusive,
-                new_upper_inclusive: 0,
+                cached_lower_inclusive: shift_lower_bound(cached_lower_inclusive, end_offset),
+                new_upper_inclusive: end_offset,
                 arithmetic: cached_attention_arithmetic(numeric_policy, program, query_even),
                 attention_sink: attention_sink.is_some(),
             },

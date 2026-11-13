@@ -1173,6 +1173,194 @@ pub fn causal_mask_windowed(
     Ok((is_masked, neg_infinity))
 }
 
+/// The absolute position of the last new row, derived in-graph: a rank-0
+/// max-reduce over the new range's own key [`Op::Iota`] (symbol 0), which is
+/// `N - 1` for whatever `N` the bound extent carries. Chosen over a host
+/// [`Op::Input`] (the `cached_len` precedent in [`causal_mask_merged`]) because
+/// it needs no per-call feed and the binder recovers `N` from the bound key
+/// extent either way; the reduce is one structural node the binder can match
+/// by shape (`Maximum` reduce, `NegativeInfinity` init, operand an `Iota`).
+pub(super) fn last_new_row_index(
+    program: &mut Vec<Op>,
+    key_index: NodeId,
+) -> Result<NodeId, TensorError> {
+    reduce(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        key_index,
+        "t->t",
+        "->t",
+    )
+}
+
+/// The single end-aligned query's absolute row: a one-element query
+/// [`Op::Iota`] (always 0) added to [`last_new_row_index`], so the query axis
+/// has extent `Static(1)` yet reads as row `N - 1`. Returns
+/// `(query_absolute, key_index)`.
+pub(super) fn end_aligned_query_absolute(
+    program: &mut Vec<Op>,
+) -> Result<(NodeId, NodeId), TensorError> {
+    let query_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::FLOAT32,
+            extent: Extent::Static(1),
+        },
+    );
+    let key_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::FLOAT32,
+            extent: Extent::Symbolic(0),
+        },
+    );
+    let last_row = last_new_row_index(program, key_index)?;
+    let query_absolute = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Add,
+        &[(query_index, "s->s"), (last_row, "->s")],
+    )?;
+    Ok((query_absolute, key_index))
+}
+
+/// [`causal_mask_windowed`] for one query that stands for the LAST new row
+/// `N - 1`: a prefill layer after the last cache-writing layer keeps only the
+/// output row (PROXNUM-262), yet still attends over the donor's `N` new keys.
+/// The query axis is `Static(1)`; the key axis stays `Symbolic(0)`. Masked iff
+/// `key > N - 1` (never) or `(N - 1) - key > window - 1`. Built from the same
+/// `Greater`/`Subtract`/`Maximum` set as [`causal_mask_windowed`], so the
+/// binder's `CachedAttention` fusion reads it with the bounds shifted by `N - 1`.
+/// `window` of `None` or `Some(0)` leaves only the `is_future` comparison.
+pub fn causal_mask_end_aligned(
+    program: &mut Vec<Op>,
+    window: Option<u32>,
+) -> Result<(NodeId, NodeId), TensorError> {
+    let (query_absolute, key_index) = end_aligned_query_absolute(program)?;
+    let is_future = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Greater,
+        &[(key_index, "t->st"), (query_absolute, "s->st")],
+    )?;
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+    let Some(window) = window.filter(|&window| window > 0) else {
+        return Ok((is_future, neg_infinity));
+    };
+    let distance = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Subtract,
+        &[(query_absolute, "s->st"), (key_index, "t->st")],
+    )?;
+    let window_ceiling = scalar_constant(program, window as f32 - 1.0);
+    let too_old = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Greater,
+        &[(distance, "st->st"), (window_ceiling, "->st")],
+    )?;
+    let is_masked = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Maximum,
+        &[(is_future, "st->st"), (too_old, "st->st")],
+    )?;
+    Ok((is_masked, neg_infinity))
+}
+
+/// [`causal_mask_cached_windowed`]'s counterpart for the end-aligned query of
+/// [`causal_mask_end_aligned`]: the cache range's padding mask is unchanged
+/// (`key >= cached_len`, query-independent), and the window distance is read
+/// from the query's absolute row `cached_len + N - 1`. With no window it is
+/// the bare padding predicate the binder already recognizes.
+pub fn causal_mask_cached_end_aligned(
+    program: &mut Vec<Op>,
+    cached_len: NodeId,
+    key_extent: Extent,
+    window: Option<u32>,
+) -> Result<(NodeId, NodeId), TensorError> {
+    let query_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::FLOAT32,
+            extent: Extent::Static(1),
+        },
+    );
+    let key_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::FLOAT32,
+            extent: key_extent,
+        },
+    );
+    let query_absolute = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Add,
+        &[(query_index, "s->s"), (cached_len, "->s")],
+    )?;
+    let cached_len_row = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Subtract,
+        &[(query_absolute, "s->s"), (query_index, "s->s")],
+    )?;
+    let one = scalar_constant(program, 1.0);
+    let ceiling_row = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Subtract,
+        &[(cached_len_row, "s->s"), (one, "->s")],
+    )?;
+    let is_padding = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Greater,
+        &[(key_index, "t->st"), (ceiling_row, "s->st")],
+    )?;
+    let neg_infinity = scalar_constant(program, f32::NEG_INFINITY);
+    let Some(window) = window.filter(|&window| window > 0) else {
+        return Ok((is_padding, neg_infinity));
+    };
+    let new_key_index = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::FLOAT32,
+            extent: Extent::Symbolic(0),
+        },
+    );
+    let last_row = last_new_row_index(program, new_key_index)?;
+    let end_absolute = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Add,
+        &[(query_absolute, "s->s"), (last_row, "->s")],
+    )?;
+    let distance = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Subtract,
+        &[(end_absolute, "s->st"), (key_index, "t->st")],
+    )?;
+    let window_ceiling = scalar_constant(program, window as f32 - 1.0);
+    let too_old = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Greater,
+        &[(distance, "st->st"), (window_ceiling, "->st")],
+    )?;
+    let is_invalid = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Maximum,
+        &[(is_padding, "st->st"), (too_old, "st->st")],
+    )?;
+    Ok((is_invalid, neg_infinity))
+}
+
 /// [`causal_mask`]'s single-range-attention counterpart:
 /// [`append_gqa_single_range_cached_layer`]'s key axis (`t`) is no
 /// longer this call's own new positions (symbol 0) but the *whole* merged
