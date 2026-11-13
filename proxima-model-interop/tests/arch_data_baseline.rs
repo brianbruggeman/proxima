@@ -2034,7 +2034,7 @@ fn lfm2_header_descriptor_describes_the_hybrid_stack_and_round_trips_through_tom
             descriptor.l_cache,
             descriptor.leading_dense_block_count
         ),
-        (CacheStrategy::Cacheless, 3, 2)
+        (CacheStrategy::Cached, 3, 2)
     );
     assert_eq!(
         (

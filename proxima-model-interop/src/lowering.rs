@@ -21,7 +21,7 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
-    ForwardProgram, LayerCacheRoots, LayerKind, LoopCdConfig, ModelDescriptor, RecurrenceConfig,
+    CacheStrategy, ForwardProgram, LayerCacheRoots, LayerKind, LoopCdConfig, ModelDescriptor, RecurrenceConfig,
     RecurrentReadoutRoots, ScheduleSource, build_forward, build_forward_with_row_cut,
 };
 
@@ -500,10 +500,13 @@ fn bound_program<'file>(
         moe_layer_diagnostics: forward.layer_diagnostics,
         moe_sites: forward.moe_sites,
         duplicate_head_roots: forward.duplicate_head_roots,
-        single_position_step: descriptor
-            .layers
-            .iter()
-            .any(|layer| layer.kind == LayerKind::Gdn),
+        single_position_step: descriptor.layers.iter().any(|layer| match layer.kind {
+            LayerKind::Gdn => true,
+            // the cached short-conv builder is a one-token step whose `s`-axis
+            // reduce sums positions; only the cacheless builder batches a prompt
+            LayerKind::ShortConv => descriptor.cache_strategy == CacheStrategy::Cached,
+            LayerKind::Attention => false,
+        }),
         readouts: forward.readouts,
         recurrent: resolved_recurrence(descriptor),
     }

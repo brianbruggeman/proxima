@@ -1544,6 +1544,10 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                 alloc::vec![Extent::Static(short_conv_cache_len)],
                 &alloc::format!("shortconv_cache.{layer}.roll_indices"),
             );
+            // the history starts zero-filled, so every token rolls and lands in the newest slot; the
+            // position-clamped slot is only right once `cached_len >= l_cache - 1` and writes the
+            // first `l_cache - 1` prompt tokens out of order
+            let newest_slot = scalar_constant(&mut program, (short_conv_cache_len - 1) as f32);
             let (post_mixer, state_out) = append_short_conv_cached_mixer_step(
                 &mut program,
                 x,
@@ -1556,7 +1560,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                 conv_weight,
                 out_proj,
                 state_in,
-                cached_len,
+                newest_slot,
                 roll_indices,
                 short_conv_cache_len,
             )?;

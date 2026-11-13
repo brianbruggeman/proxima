@@ -6964,6 +6964,323 @@ async fn architecture_matrix_lfm_conv_step() {
     std::println!("steps=2 reference_pairs=2 state_values=6");
 }
 
+#[test]
+fn cached_short_conv_mixer_step_binds_and_matches_f32_over_packed_q4k_projections() {
+    use proxima_gguf::quant::q4_k::QK_K;
+
+    const L_CACHE: u32 = 3;
+    let embedding = QK_K;
+    let fill = |seed: u64, count: usize, scale: f32| -> Vec<f32> {
+        let mut lcg = Lcg(seed);
+        (0..count).map(|_| lcg.next_unit() * scale).collect()
+    };
+    let in_proj_values = fill(7, 3 * embedding * embedding, 0.5);
+    let in_proj_packed = quantize_rows(&in_proj_values, 3 * embedding, embedding);
+    let in_proj_dequantized = dequantize_rows(&in_proj_packed, 3 * embedding, embedding);
+    let out_proj_values = fill(17, embedding * embedding, 0.5);
+    let out_proj_packed = quantize_rows(&out_proj_values, embedding, embedding);
+    let out_proj_rows = dequantize_rows(&out_proj_packed, embedding, embedding);
+    // a packed row holds one output channel's weights over the input axis, while the f32 leaf is
+    // declared input axis first, so the f32 reference reads the dequantized rows transposed
+    let out_proj_dequantized: Vec<f32> = (0..embedding * embedding)
+        .map(|index| out_proj_rows[(index % embedding) * embedding + index / embedding])
+        .collect();
+    let activation_values = fill(11, embedding, 1.0);
+    let norm_values = fill(13, embedding, 1.0);
+    let conv_values = fill(19, embedding * L_CACHE as usize, 1.0);
+    let history_values = fill(23, embedding * L_CACHE as usize, 1.0);
+
+    let mut program = Vec::new();
+    let x = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(1), Extent::Static(embedding as u32)],
+        "x",
+    );
+    let norm_weight = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(embedding as u32)],
+        "norm_weight",
+    );
+    let in_proj = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![
+            Extent::Static(3 * embedding as u32),
+            Extent::Static(embedding as u32)
+        ],
+        "in_proj",
+    );
+    let conv_weight = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(embedding as u32), Extent::Static(L_CACHE)],
+        "conv_weight",
+    );
+    let out_proj = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![
+            Extent::Static(embedding as u32),
+            Extent::Static(embedding as u32)
+        ],
+        "out_proj",
+    );
+    let state_in = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(embedding as u32), Extent::Static(L_CACHE)],
+        "state_in",
+    );
+    let newest_slot = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "newest_slot");
+    let roll_indices = input_leaf(
+        &mut program,
+        DType::INT32,
+        alloc::vec![Extent::Static(L_CACHE)],
+        "roll_indices",
+    );
+    let inv_dim = count_constant(&mut program, embedding as u32);
+    let eps = scalar_constant(&mut program, 1.0e-5);
+    let (b_proj, c_proj, x_proj) =
+        fused_short_conv_projections(&mut program, in_proj, embedding as u32)
+            .expect("B, C and x views slice from the fused projection");
+    let (post_mixer, state_out) = append_short_conv_cached_mixer_step(
+        &mut program,
+        x,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        state_in,
+        newest_slot,
+        roll_indices,
+        L_CACHE,
+    )
+    .expect("cached short-convolution mixer builds");
+
+    let slot = [(L_CACHE - 1) as f32];
+    let rolls = [1i32, 2, 0];
+    let evaluate = |in_proj_block: crate::cpu::QuantizedBlock<'_>,
+                    out_proj_block: crate::cpu::QuantizedBlock<'_>| {
+        crate::cpu::evaluate_quantized(
+            &program,
+            &[],
+            &[
+                crate::cpu::QuantizedBlock::Float32(&activation_values),
+                crate::cpu::QuantizedBlock::Float32(&norm_values),
+                in_proj_block,
+                crate::cpu::QuantizedBlock::Float32(&conv_values),
+                out_proj_block,
+                crate::cpu::QuantizedBlock::Float32(&history_values),
+                crate::cpu::QuantizedBlock::Float32(&slot),
+                crate::cpu::QuantizedBlock::Int32(&rolls),
+            ],
+            &[post_mixer, state_out],
+        )
+        .expect("cached short-convolution mixer evaluates over its weights")
+    };
+    let packed = evaluate(
+        crate::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &in_proj_packed,
+        },
+        crate::cpu::QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &out_proj_packed,
+        },
+    );
+    let reference = evaluate(
+        crate::cpu::QuantizedBlock::Float32(&in_proj_dequantized),
+        crate::cpu::QuantizedBlock::Float32(&out_proj_dequantized),
+    );
+
+    for (root, width) in [(post_mixer, embedding), (state_out, embedding * L_CACHE as usize)] {
+        let (actual, _) = packed.get(root).expect("packed run holds the root");
+        let (expected, _) = reference.get(root).expect("f32 run holds the root");
+        assert_eq!(actual.len(), width);
+        let scale = expected.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+        let worst = actual
+            .iter()
+            .zip(expected)
+            .map(|(left, right)| (left - right).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst <= 0.05 * scale.max(1.0),
+            "root {root:?}: worst abs diff {worst} against peak {scale}"
+        );
+    }
+}
+
+/// The first `l_cache` prompt tokens of a one-position-per-evaluation prompt feed: the history
+/// starts zero-filled, so position 0 and 1 are where a slot clamped to the position wrote the
+/// token out of order. `l_cache` 3 and the lfm2-350m hidden width, deterministic fill.
+#[test]
+fn feeding_three_prompt_tokens_one_at_a_time_through_the_cached_short_conv_step_matches_prefill() {
+    const L_CACHE: u32 = 3;
+    const PROMPT: usize = 3;
+    let embedding = 1024usize;
+    let width = embedding as u32;
+    let fill = |seed: u64, count: usize, scale: f32| -> Vec<f32> {
+        let mut lcg = Lcg(seed);
+        (0..count).map(|_| lcg.next_unit() * scale).collect()
+    };
+    let c_values = fill(31, embedding * embedding, 0.05);
+    let tokens = fill(37, PROMPT * embedding, 1.0);
+    let norm_values: Vec<f32> = fill(41, embedding, 0.5)
+        .iter()
+        .map(|value| value + 1.0)
+        .collect();
+    let conv_values = fill(43, embedding * L_CACHE as usize, 1.0);
+    let out_values = fill(47, embedding * embedding, 0.05);
+    let b_values = fill(53, embedding * embedding, 0.05);
+    let x_values = fill(59, embedding * embedding, 0.05);
+    let zero_history = alloc::vec![0.0f32; embedding * L_CACHE as usize];
+
+    let mut program = Vec::new();
+    let prefill_input = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Symbolic(0), Extent::Static(width)],
+        "prefill_input",
+    );
+    let step_inputs: Vec<NodeId> = (0..PROMPT)
+        .map(|position| {
+            input_leaf(
+                &mut program,
+                DType::FLOAT32,
+                alloc::vec![Extent::Static(1), Extent::Static(width)],
+                &alloc::format!("step_input_{position}"),
+            )
+        })
+        .collect();
+    let norm_weight = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(width)],
+        "norm_weight",
+    );
+    let square = || alloc::vec![Extent::Static(width), Extent::Static(width)];
+    let b_proj = input_leaf(&mut program, DType::FLOAT32, square(), "b_proj");
+    let c_proj = input_leaf(&mut program, DType::FLOAT32, square(), "c_proj");
+    let x_proj = input_leaf(&mut program, DType::FLOAT32, square(), "x_proj");
+    let conv_weight = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(width), Extent::Static(L_CACHE)],
+        "conv_weight",
+    );
+    let out_proj = input_leaf(&mut program, DType::FLOAT32, square(), "out_proj");
+    let history = input_leaf(
+        &mut program,
+        DType::FLOAT32,
+        alloc::vec![Extent::Static(width), Extent::Static(L_CACHE)],
+        "history",
+    );
+    let roll_indices = input_leaf(
+        &mut program,
+        DType::INT32,
+        alloc::vec![Extent::Static(L_CACHE)],
+        "roll_indices",
+    );
+    let inv_dim = count_constant(&mut program, width);
+    let eps = scalar_constant(&mut program, 1.0e-5);
+    let newest_slot = scalar_constant(&mut program, (L_CACHE - 1) as f32);
+    let prompt_len = core::num::NonZeroU32::new(PROMPT as u32).expect("the prompt is not empty");
+
+    let (prefill_output, prefill_state) = append_short_conv_prefill_mixer(
+        &mut program,
+        prefill_input,
+        inv_dim,
+        eps,
+        norm_weight,
+        b_proj,
+        c_proj,
+        x_proj,
+        conv_weight,
+        out_proj,
+        prompt_len,
+        L_CACHE,
+    )
+    .expect("the prefill mixer builds");
+    let mut carried = history;
+    let mut step_outputs = Vec::new();
+    for step_input in &step_inputs {
+        let (output, state) = append_short_conv_cached_mixer_step(
+            &mut program,
+            *step_input,
+            inv_dim,
+            eps,
+            norm_weight,
+            b_proj,
+            c_proj,
+            x_proj,
+            conv_weight,
+            out_proj,
+            carried,
+            newest_slot,
+            roll_indices,
+            L_CACHE,
+        )
+        .expect("the cached step builds");
+        step_outputs.push(output);
+        carried = state;
+    }
+
+    let token_rows: Vec<&[f32]> = tokens.chunks_exact(embedding).collect();
+    let rolls = [1i32, 2, 0];
+    let mut blocks = alloc::vec![crate::cpu::QuantizedBlock::Float32(&tokens)];
+    blocks.extend(token_rows.iter().map(|row| crate::cpu::QuantizedBlock::Float32(row)));
+    blocks.extend([
+        crate::cpu::QuantizedBlock::Float32(&norm_values),
+        crate::cpu::QuantizedBlock::Float32(&b_values),
+        crate::cpu::QuantizedBlock::Float32(&c_values),
+        crate::cpu::QuantizedBlock::Float32(&x_values),
+        crate::cpu::QuantizedBlock::Float32(&conv_values),
+        crate::cpu::QuantizedBlock::Float32(&out_values),
+        crate::cpu::QuantizedBlock::Float32(&zero_history),
+        crate::cpu::QuantizedBlock::Int32(&rolls),
+    ]);
+    let mut outputs = alloc::vec![prefill_output, prefill_state, carried];
+    outputs.extend(&step_outputs);
+    let evaluated =
+        crate::cpu::evaluate_quantized(&program, &[PROMPT as u64], &blocks, &outputs)
+            .expect("prefill and the three cached steps evaluate");
+
+    let (prefill_rows, _) = evaluated.get(prefill_output).expect("prefill output exists");
+    for (position, output) in step_outputs.iter().enumerate() {
+        let (step_row, step_shape) = evaluated.get(*output).expect("step output exists");
+        assert_eq!(step_shape, [1, embedding as u64], "position {position}");
+        let expected = &prefill_rows[position * embedding..(position + 1) * embedding];
+        let worst = step_row
+            .iter()
+            .zip(expected)
+            .map(|(left, right)| (left - right).abs() / right.abs().max(1.0))
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 1.0e-3,
+            "position {position}: worst relative diff {worst} between the cached step and prefill, step[..4]={:?} prefill[..4]={:?}",
+            &step_row[..4],
+            &expected[..4]
+        );
+    }
+    let (prefill_history, _) = evaluated.get(prefill_state).expect("prefill history exists");
+    let (carried_history, _) = evaluated.get(carried).expect("carried history exists");
+    let worst_history = carried_history
+        .iter()
+        .zip(prefill_history)
+        .map(|(left, right)| (left - right).abs() / right.abs().max(1.0))
+        .fold(0.0f32, f32::max);
+    assert!(
+        worst_history < 1.0e-3,
+        "history after three steps differs from the prefill history by {worst_history}"
+    );
+}
+
 #[proxima::test]
 async fn architecture_matrix_lfm_cached_mixer_step() {
     const L_CACHE: u32 = 3;
@@ -21433,6 +21750,23 @@ mod layer_roots {
 
 mod hybrid_dense_descriptor {
     use super::*;
+
+    #[test]
+    fn every_layer_kind_has_a_cache_builder_so_a_short_conv_hybrid_selects_the_cached_strategy() {
+        let hybrid = descriptor(&[LayerKind::ShortConv, LayerKind::ShortConv, LayerKind::Attention]);
+        let attention_only = descriptor(&[LayerKind::Attention, LayerKind::Attention]);
+
+        assert!(
+            [LayerKind::Attention, LayerKind::ShortConv, LayerKind::Gdn]
+                .iter()
+                .all(|kind| kind.has_cache_builder())
+        );
+        assert_eq!(CacheStrategy::for_layers(&hybrid.layers), CacheStrategy::Cached);
+        assert_eq!(
+            CacheStrategy::for_layers(&attention_only.layers),
+            CacheStrategy::Cached
+        );
+    }
 
     const VOCAB: u32 = 100;
     const EMBEDDING: u32 = 8;

@@ -295,7 +295,7 @@ fn hybrid_descriptor(
 }
 
 #[test]
-fn zero_kv_layers_with_a_conv_tensor_become_short_conv_layers_of_a_cacheless_program() {
+fn zero_kv_layers_with_a_conv_tensor_become_short_conv_layers_of_a_cached_program() {
     let descriptor = hybrid_descriptor(
         &[0, 2, 0],
         &[
@@ -318,7 +318,11 @@ fn zero_kv_layers_with_a_conv_tensor_become_short_conv_layers_of_a_cacheless_pro
             LayerKind::ShortConv
         ]
     );
-    assert_eq!(descriptor.cache_strategy, CacheStrategy::Cacheless);
+    assert_eq!(
+        (descriptor.cache_strategy, descriptor.cache_mask),
+        (CacheStrategy::Cached, CacheMask::Padded),
+        "the padded two-range builder is the one that keeps shortconv_cache state"
+    );
     assert_eq!(
         (descriptor.l_cache, descriptor.leading_dense_block_count),
         (3, 1)
@@ -397,7 +401,18 @@ fn a_hybrid_header_with_no_experts_takes_the_dense_ffn_on_every_layer() {
         (0, 16),
         "no expert_count means every one of the 16 blocks is a dense block"
     );
-    proxima_tensor::spec::build_forward(&descriptor).expect("a dense hybrid lowers without the routed builder");
+    let forward = proxima_tensor::spec::build_forward(&descriptor)
+        .expect("a dense hybrid lowers without the routed builder");
+    assert_eq!(
+        (descriptor.cache_strategy, descriptor.cache_mask),
+        (CacheStrategy::Cached, CacheMask::Padded),
+        "lfm2-350m's zero-kv layers are short-conv layers the cached builder supports"
+    );
+    assert_eq!(
+        forward.layer_roots.len(),
+        16,
+        "every one of the 16 layers owns cache roots: 10 short-conv histories and 6 kv caches"
+    );
 }
 
 #[test]

@@ -1378,6 +1378,8 @@ pub(super) fn build_matmul_stage_plan<'weights>(
     if k == 0 || rows == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
     }
+    let weights = packed_weight_window(weights, weight_layout, rows, k, (block_bytes, block_elements))
+        .ok_or_else(shape_error)?;
     let total_weight_elements = (weights.len() / block_bytes) * block_elements;
     if total_weight_elements != rows * k {
         return Err(shape_error());

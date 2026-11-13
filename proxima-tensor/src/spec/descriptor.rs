@@ -12,6 +12,21 @@ pub enum CacheStrategy {
     Cached,
 }
 
+impl CacheStrategy {
+    /// The strategy a schedule's layer kinds select: [`Self::Cached`] when
+    /// every kind has a cache builder ([`LayerKind::has_cache_builder`]),
+    /// [`Self::Cacheless`] when any lacks one. The decision reads kinds only,
+    /// never a family name or an expert count.
+    #[must_use]
+    pub fn for_layers(layers: &[LayerSchedule]) -> Self {
+        if layers.iter().all(|layer| layer.kind.has_cache_builder()) {
+            Self::Cached
+        } else {
+            Self::Cacheless
+        }
+    }
+}
+
 /// How a cached program excludes the cache bucket's zero padding from the
 /// cached block's softmax, as data on [`ModelDescriptor::cache_mask`]. Both arms
 /// score through `append_cached_block_scores` and
