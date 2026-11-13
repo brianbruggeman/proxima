@@ -4226,8 +4226,10 @@ mod tests {
             .collect()
     }
 
+    /// llama's CUDA quantizer divides by d and its CPU quantizer multiplies by 1/d, so the two encoders
+    /// differ exactly where those two f32 roundings disagree.
     #[test]
-    fn gpu_grouped_quantize_is_the_q8_1_runs_regrouped_and_tracks_the_cpu_encoder() {
+    fn gpu_and_cpu_grouped_quantize_each_match_their_llama_rounding_exactly() {
         let driver = CudaDriver::new(0).expect("a cuda device");
         let values = activation_values();
         let single = quantize_on_gpu(&driver, BlockLayout::Q8_1, &values);
@@ -4236,20 +4238,37 @@ mod tests {
 
         let cpu = cpu_quantize(&BlockLayout::Q8_1_GROUPED, &values);
         assert_eq!(grouped.len(), cpu.len());
-        let mut off_by_one = 0usize;
         for (block, (gpu_block, cpu_block)) in grouped.chunks(144).zip(cpu.chunks(144)).enumerate() {
             for run in 0..4 {
-                let header = run * 4..run * 4 + 2;
-                assert_eq!(gpu_block[header.clone()], cpu_block[header], "block {block} run {run}: f16 scale");
+                let start = (block * 4 + run) * 32;
+                let run_values = &values[start..start + 32];
+                let amax = run_values.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+                let scale = amax / 127.0f32;
+                let scale_bits = half::f16::from_f32(scale).to_bits().to_le_bytes();
                 let codes = 16 + run * 32..16 + run * 32 + 32;
-                for (gpu_code, cpu_code) in gpu_block[codes.clone()].iter().zip(&cpu_block[codes]) {
-                    let gap = (i32::from(*gpu_code as i8) - i32::from(*cpu_code as i8)).abs();
-                    assert!(gap <= 1, "block {block} run {run}: codes differ by {gap}");
-                    off_by_one += usize::from(gap == 1);
+                let mut gpu_sum = 0i32;
+                let mut cpu_sum = 0i32;
+                for (offset, value) in run_values.iter().enumerate() {
+                    let (gpu_expected, cpu_expected) = if amax == 0.0 {
+                        (0.0f32, 0.0f32)
+                    } else {
+                        ((value / scale).round(), (value * (1.0f32 / scale)).round())
+                    };
+                    let gpu_code = gpu_block[codes.start + offset] as i8;
+                    let cpu_code = cpu_block[codes.start + offset] as i8;
+                    assert_eq!(i32::from(gpu_code), gpu_expected as i32, "block {block} run {run} element {offset}: gpu code is roundf(x / d)");
+                    assert_eq!(i32::from(cpu_code), cpu_expected as i32, "block {block} run {run} element {offset}: cpu code is roundf(x * (1 / d))");
+                    gpu_sum += i32::from(gpu_code);
+                    cpu_sum += i32::from(cpu_code);
+                }
+                let header = run * 4..run * 4 + 4;
+                for (side, block_bytes, sum) in [("gpu", gpu_block, gpu_sum), ("cpu", cpu_block, cpu_sum)] {
+                    let stored_sum = half::f16::from_f32(scale * sum as f32).to_bits().to_le_bytes();
+                    assert_eq!(block_bytes[header.start..header.start + 2], scale_bits, "block {block} run {run}: {side} f16 scale");
+                    assert_eq!(block_bytes[header.start + 2..header.end], stored_sum, "block {block} run {run}: {side} stored sum is f16(d * sum of its codes)");
                 }
             }
         }
-        assert!(off_by_one * 20 < grouped.len(), "{off_by_one} codes round differently against the f16 scale");
     }
 
     #[test]
