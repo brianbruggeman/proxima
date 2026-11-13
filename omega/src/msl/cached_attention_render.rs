@@ -1,6 +1,6 @@
 use proxima_numeric::float_layout::FloatLayout;
 
-use super::layout_render::{readable_block_layout, readable_scalar_cache};
+use super::layout_render::{readable_block_layout, readable_scalar_cache, scalar_cache_read};
 use super::*;
 
 /// `BoundOpKind::CachedAttention`'s Metal kernel: online (running max/sum,
@@ -36,6 +36,7 @@ use super::*;
 pub(super) fn cached_attention_scalar_score_body(
     pass_present: bool,
     new_range_windowed: bool,
+    cached_load: Option<&str>,
 ) -> String {
     let lower_guard = if new_range_windowed {
         "if (relative < cached_lower) { continue; }"
@@ -62,8 +63,11 @@ pub(super) fn cached_attention_scalar_score_body(
     } else {
         String::new()
     };
+    let key_even = cached_read(cached_load, "in2", "kbase + pair");
+    let key_odd = cached_read(cached_load, "in3", "kbase + pair");
+    let value_read = cached_read(cached_load, "in6", &format!("{value_addr} + dimension"));
     format!(
-        "        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        {lower_guard}\n        if (!cached && relative > new_upper) {{ continue; }}\n        long kbase = (cached ? key : new_index) * (kv_heads * ({pair_expr})) + kv_head * ({pair_expr});\n        {value_base_decl}float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < {pair_expr}; pair += 32L) {{\n            partial_score += in0[qbase + pair] * (cached ? in2[kbase + pair] : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? in3[kbase + pair] : in5[kbase + pair]);\n        }}{pass_accum}\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? in6[{value_addr} + dimension] : in7[{value_addr} + dimension]);\n        }}\n        maximum = next_max;\n"
+        "        bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n        long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n        {lower_guard}\n        if (!cached && relative > new_upper) {{ continue; }}\n        long kbase = (cached ? key : new_index) * (kv_heads * ({pair_expr})) + kv_head * ({pair_expr});\n        {value_base_decl}float partial_score = 0.0f;\n        for (long pair = (long)lane; pair < {pair_expr}; pair += 32L) {{\n            partial_score += in0[qbase + pair] * (cached ? {key_even} : in4[kbase + pair]);\n            partial_score += in1[qbase + pair] * (cached ? {key_odd} : in5[kbase + pair]);\n        }}{pass_accum}\n        float score = simd_broadcast_first(simd_sum(partial_score)) * scale;\n        float next_max = max(maximum, score);\n        float weight = exp(score - next_max); float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n        sum = sum * rescale + weight;\n        for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n            long local_dimension = dimension / 32L;\n            weighted[local_dimension] = weighted[local_dimension] * rescale + weight * (cached ? {value_read} : in7[{value_addr} + dimension]);\n        }}\n        maximum = next_max;\n"
     )
 }
 
@@ -138,29 +142,21 @@ pub(super) fn cached_attention_kv_codecs(
     }
 }
 
-#[cfg(feature = "metal-attn-split-decode")]
-fn form_reads_narrow_kv(form: CachedAttentionForm) -> bool {
-    let decode = {
-        #[cfg(feature = "metal-attn-split-decode")]
-        {
-            matches!(form, CachedAttentionForm::TwoRangeDecodeSplit { .. })
-        }
-        #[cfg(not(feature = "metal-attn-split-decode"))]
-        {
-            false
-        }
-    };
-    let rows = {
-        #[cfg(feature = "metal-attn-split-rows")]
-        {
-            matches!(form, CachedAttentionForm::TwoRangeRowTiled { .. })
-        }
-        #[cfg(not(feature = "metal-attn-split-rows"))]
-        {
-            false
-        }
-    };
-    decode || rows
+fn form_reads_generic_scalar_kv(form: CachedAttentionForm) -> bool {
+    matches!(
+        form,
+        CachedAttentionForm::Static
+            | CachedAttentionForm::SingleRangeDynamic { .. }
+            | CachedAttentionForm::TwoRangeCachedBound
+    )
+}
+
+/// `load` is the scalar-cache decode name when the cached operands are narrow.
+fn cached_read(load: Option<&str>, buffer: &str, index: &str) -> String {
+    match load {
+        Some(name) => format!("{name}((uint){buffer}[{index}])"),
+        None => format!("{buffer}[{index}]"),
+    }
 }
 
 fn form_reads_block_key(form: CachedAttentionForm) -> bool {
@@ -299,8 +295,9 @@ pub(super) fn render_cached_attention_with_mma_selection(
     }
     #[cfg(not(feature = "metal-attn-split-rows"))]
     let _ = mma_selection;
-    #[cfg(feature = "metal-attn-split-decode")]
     let codec_supported_by_form = {
+        let generic = form_reads_generic_scalar_kv(form)
+            && cached_kv_codec.as_ref().is_some_and(|codec| readable_scalar_cache(codec).is_some());
         let decode = {
             #[cfg(feature = "metal-attn-split-decode")]
             {
@@ -322,14 +319,12 @@ pub(super) fn render_cached_attention_with_mma_selection(
                 false
             }
         };
-        (decode || rows) && form_reads_narrow_kv(form)
+        generic || decode || rows
     };
-    #[cfg(not(feature = "metal-attn-split-decode"))]
-    let codec_supported_by_form = false;
     if cached_kv_codec.is_some() && !codec_supported_by_form {
         return Err(EmitError::CachedAttentionKvCodecNotSupported {
             node: resolved.node,
-            reason: "decode split and row-tiled read Float16, BFloat16 or BFloat8",
+            reason: "every form reads a whole-byte scalar cache; a block cache is read by the decode split (and row-tiled) only",
         });
     }
     if cached_key_codec != cached_kv_codec && !form_reads_block_key(form) {
@@ -465,11 +460,17 @@ pub(super) fn render_cached_attention_with_mma_selection(
     let row_count_decl = row_count_decl
         .replace("{cached_key_rows}", &cached_key_rows.to_string())
         .replace("{new_key_rows}", &new_key_rows.to_string());
+    let scalar = cached_kv_codec.as_ref().and_then(scalar_cache_read);
+    let cached_load = scalar.as_ref().map(|read| read.load.as_str());
+    let kv_store = scalar.as_ref().map_or(element_type, |read| read.storage);
     let mut source = String::new();
     preamble(&mut source);
+    if let Some(read) = &scalar {
+        source.push_str(&read.helper);
+    }
     source.push_str(uniforms_struct);
     source.push_str(&format!(
-        "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {element_type}* in2 [[buffer(2)]], device const {element_type}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {element_type}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]]{cached_len_param}{pass_param}, device {element_type}* out [[buffer({out_buffer_index})]], constant Uniforms& u [[buffer({uniforms_buffer_index})]], uint gid [[thread_position_in_grid]]{tgid_param}) {{\n"
+        "kernel void {entry}(device const {element_type}* in0 [[buffer(0)]], device const {element_type}* in1 [[buffer(1)]], device const {kv_store}* in2 [[buffer(2)]], device const {kv_store}* in3 [[buffer(3)]], device const {element_type}* in4 [[buffer(4)]], device const {element_type}* in5 [[buffer(5)]], device const {kv_store}* in6 [[buffer(6)]], device const {element_type}* in7 [[buffer(7)]]{cached_len_param}{pass_param}, device {element_type}* out [[buffer({out_buffer_index})]], constant Uniforms& u [[buffer({uniforms_buffer_index})]], uint gid [[thread_position_in_grid]]{tgid_param}) {{\n"
     ));
     source.push_str("    if ((long)gid >= u.total_elements * 32L) { return; }\n");
     // `pair_dim`/`pass_dim` are only ever declared when a pass plane is
@@ -666,7 +667,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
         if block_width <= 1 {
             source.push_str(&format!(
                 "    if (chunk < chunks) {{\n    for (long key = lo + chunk; key < hi; key += chunks) {{\n{}    }}\n    }}\n",
-                cached_attention_scalar_score_body(pass_present, new_range_windowed),
+                cached_attention_scalar_score_body(pass_present, new_range_windowed, cached_load),
             ));
         } else {
             // The float4/ty-group V accumulate (llama.cpp's `kernel_flash_attn_
@@ -678,16 +679,31 @@ pub(super) fn render_cached_attention_with_mma_selection(
             // fixtures below) keep today's scalar per-key V loop, byte for
             // byte, rather than mis-sizing the vector loads or rejecting a
             // shape the Q·K side already renders correctly.
+            let value_scalar = cached_read(cached_load, "in6", "kbase * 2 + dimension");
+            let (v_pointers, v_read, k_pointers, k_dots) = match cached_load {
+                Some(load) => (
+                    format!("device const {kv_store}4* v4c = (device const {kv_store}4*)(in6 + kbase * 2);\n                    device const {element_type}4* v4n = (device const {element_type}4*)(in7 + kbase * 2);"),
+                    format!("(cached ? {load}_x4(v4c[(long)tx + 8L * register_index]) : float4(v4n[(long)tx + 8L * register_index]))"),
+                    format!("                device const {kv_store}4* kr4c = (device const {kv_store}4*)(in2 + kbase);\n                device const {kv_store}4* ki4c = (device const {kv_store}4*)(in3 + kbase);\n                device const {element_type}4* kr4n = (device const {element_type}4*)(in4 + kbase);\n                device const {element_type}4* ki4n = (device const {element_type}4*)(in5 + kbase);\n"),
+                    format!("partial_score += dot(cached ? {load}_x4(kr4c[index]) : float4(kr4n[index]), float4(qr4[index]));\n                    partial_score += dot(cached ? {load}_x4(ki4c[index]) : float4(ki4n[index]), float4(qi4[index]));"),
+                ),
+                None => (
+                    format!("device const {element_type}4* v4 = (device const {element_type}4*)((cached ? in6 : in7) + kbase * 2);"),
+                    "float4(v4[(long)tx + 8L * register_index])".to_string(),
+                    format!("                device const {element_type}4* kr4 = (device const {element_type}4*)((cached ? in2 : in4) + kbase);\n                device const {element_type}4* ki4 = (device const {element_type}4*)((cached ? in3 : in5) + kbase);\n"),
+                    "partial_score += dot(kr4[index], qr4[index]);\n                    partial_score += dot(ki4[index], qi4[index]);".to_string(),
+                ),
+            };
             let v_accumulate = if head_dim.is_multiple_of(32) {
                 let v_registers = head_dim / 8 / 4;
                 format!(
-                    "            {{\n                constexpr long v_registers = {v_registers};\n                float4 v_acc[v_registers];\n                for (long register_index = 0L; register_index < v_registers; register_index++) {{ v_acc[register_index] = float4(0.0f); }}\n                for (long cc4 = 0L; cc4 < 8L; cc4++) {{\n                    long local_index = block_start + sub + 4L * cc4 + (long)ty;\n                    bool valid = local_index < min(block_start + sub + 32L, num_local_keys);\n                    long key = slice_start + local_index * chunks;\n                    bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n                    long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n                    float key_weight = valid ? ss[local_group_index * block_width + (local_index - block_start)] : 0.0f;\n                    device const {element_type}4* v4 = (device const {element_type}4*)((cached ? in6 : in7) + kbase * 2);\n                    for (long register_index = 0L; register_index < v_registers; register_index++) {{\n                        v_acc[register_index] += valid ? float4(v4[(long)tx + 8L * register_index]) * key_weight : float4(0.0f);\n                    }}\n                }}\n                for (long register_index = 0L; register_index < v_registers; register_index++) {{\n                    v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 8);\n                    v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 16);\n                }}\n                if (ty == 0) {{\n                    threadgroup float4* shared_o4 = (threadgroup float4*)(shared_o + local_group_index * head_dim);\n                    for (long register_index = 0L; register_index < v_registers; register_index++) {{ shared_o4[(long)tx + 8L * register_index] = v_acc[register_index]; }}\n                }}\n                simdgroup_barrier(mem_flags::mem_threadgroup);\n                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n                    long local_dimension = dimension / 32L;\n                    weighted[local_dimension] += shared_o[local_group_index * head_dim + dimension];\n                }}\n                simdgroup_barrier(mem_flags::mem_threadgroup);\n            }}\n"
+                    "            {{\n                constexpr long v_registers = {v_registers};\n                float4 v_acc[v_registers];\n                for (long register_index = 0L; register_index < v_registers; register_index++) {{ v_acc[register_index] = float4(0.0f); }}\n                for (long cc4 = 0L; cc4 < 8L; cc4++) {{\n                    long local_index = block_start + sub + 4L * cc4 + (long)ty;\n                    bool valid = local_index < min(block_start + sub + 32L, num_local_keys);\n                    long key = slice_start + local_index * chunks;\n                    bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n                    long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n                    float key_weight = valid ? ss[local_group_index * block_width + (local_index - block_start)] : 0.0f;\n                    {v_pointers}\n                    for (long register_index = 0L; register_index < v_registers; register_index++) {{\n                        v_acc[register_index] += valid ? {v_read} * key_weight : float4(0.0f);\n                    }}\n                }}\n                for (long register_index = 0L; register_index < v_registers; register_index++) {{\n                    v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 8);\n                    v_acc[register_index] += simd_shuffle_xor(v_acc[register_index], 16);\n                }}\n                if (ty == 0) {{\n                    threadgroup float4* shared_o4 = (threadgroup float4*)(shared_o + local_group_index * head_dim);\n                    for (long register_index = 0L; register_index < v_registers; register_index++) {{ shared_o4[(long)tx + 8L * register_index] = v_acc[register_index]; }}\n                }}\n                simdgroup_barrier(mem_flags::mem_threadgroup);\n                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{\n                    long local_dimension = dimension / 32L;\n                    weighted[local_dimension] += shared_o[local_group_index * head_dim + dimension];\n                }}\n                simdgroup_barrier(mem_flags::mem_threadgroup);\n            }}\n"
                 )
             } else {
-                "            for (long local_index = block_start + sub; local_index < min(block_start + sub + 32L, num_local_keys); local_index++) {\n                long key = slice_start + local_index * chunks;\n                bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n                long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n                float key_weight = ss[local_group_index * block_width + (local_index - block_start)];\n                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n                    long local_dimension = dimension / 32L;\n                    weighted[local_dimension] += key_weight * (cached ? in6[kbase * 2 + dimension] : in7[kbase * 2 + dimension]);\n                }\n            }\n".to_string()
+                "            for (long local_index = block_start + sub; local_index < min(block_start + sub + 32L, num_local_keys); local_index++) {\n                long key = slice_start + local_index * chunks;\n                bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n                long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n                float key_weight = ss[local_group_index * block_width + (local_index - block_start)];\n                for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {\n                    long local_dimension = dimension / 32L;\n                    weighted[local_dimension] += key_weight * (cached ? @VALUE_SCALAR@ : in7[kbase * 2 + dimension]);\n                }\n            }\n".replace("@VALUE_SCALAR@", &value_scalar)
             };
             source.push_str(&format!(
-                "    constexpr long block_width = {block_width};\n    short ty = (short)(lane / 8u); short tx = (short)(lane % 8u);\n    threadgroup float ss[query_groups * cap * block_width];\n    if (chunk < chunks) {{\n    long slice_start = lo + chunk;\n    long num_local_keys = (slice_start < hi) ? ((hi - 1L - slice_start) / chunks) + 1L : 0L;\n    for (long block_start = 0L; block_start < num_local_keys; block_start += block_width) {{\n        for (long cc = 0L; cc < block_width / 4L; cc++) {{\n            long local_index = block_start + 4L * cc + (long)ty;\n            bool valid = local_index < num_local_keys;\n            long key = slice_start + local_index * chunks;\n            bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n            if (valid) {{\n                long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n                if (cached && relative < cached_lower) {{ valid = false; }}\n                if (!cached && relative > new_upper) {{ valid = false; }}\n            }}\n            long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n            float partial_score = 0.0f;\n            if (valid) {{\n                device const {element_type}4* qr4 = (device const {element_type}4*)(in0 + qbase);\n                device const {element_type}4* qi4 = (device const {element_type}4*)(in1 + qbase);\n                device const {element_type}4* kr4 = (device const {element_type}4*)((cached ? in2 : in4) + kbase);\n                device const {element_type}4* ki4 = (device const {element_type}4*)((cached ? in3 : in5) + kbase);\n                for (short index = tx; index < (short)((head_dim / 2) / 4L); index += 8) {{\n                    partial_score += dot(kr4[index], qr4[index]);\n                    partial_score += dot(ki4[index], qi4[index]);\n                }}\n            }}\n            partial_score += simd_shuffle_down(partial_score, 4);\n            partial_score += simd_shuffle_down(partial_score, 2);\n            partial_score += simd_shuffle_down(partial_score, 1);\n            if (tx == 0) {{ ss[local_group_index * block_width + 4L * cc + (long)ty] = valid ? partial_score * scale : -INFINITY; }}\n        }}\n        simdgroup_barrier(mem_flags::mem_threadgroup);\n        for (long sub = 0L; sub < block_width; sub += 32L) {{\n            long lane_index = sub + (long)lane;\n            float raw_score = ss[local_group_index * block_width + lane_index];\n            float next_max = simd_max(max(maximum, raw_score));\n            float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n            float weight = exp(raw_score - next_max);\n            sum = sum * rescale + simd_sum(weight);\n            ss[local_group_index * block_width + lane_index] = weight;\n            for (long dimension = 0L; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] *= rescale; }}\n            maximum = next_max;\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n{v_accumulate}            simdgroup_barrier(mem_flags::mem_threadgroup);\n        }}\n    }}\n    }}\n"
+                "    constexpr long block_width = {block_width};\n    short ty = (short)(lane / 8u); short tx = (short)(lane % 8u);\n    threadgroup float ss[query_groups * cap * block_width];\n    if (chunk < chunks) {{\n    long slice_start = lo + chunk;\n    long num_local_keys = (slice_start < hi) ? ((hi - 1L - slice_start) / chunks) + 1L : 0L;\n    for (long block_start = 0L; block_start < num_local_keys; block_start += block_width) {{\n        for (long cc = 0L; cc < block_width / 4L; cc++) {{\n            long local_index = block_start + 4L * cc + (long)ty;\n            bool valid = local_index < num_local_keys;\n            long key = slice_start + local_index * chunks;\n            bool cached = key < cached_key_rows; long new_index = key - cached_key_rows;\n            if (valid) {{\n                long relative = (cached ? key - cached_key_rows : new_index) - query_row;\n                if (cached && relative < cached_lower) {{ valid = false; }}\n                if (!cached && relative > new_upper) {{ valid = false; }}\n            }}\n            long kbase = (cached ? key : new_index) * (kv_heads * (head_dim / 2)) + kv_head * (head_dim / 2);\n            float partial_score = 0.0f;\n            if (valid) {{\n                device const {element_type}4* qr4 = (device const {element_type}4*)(in0 + qbase);\n                device const {element_type}4* qi4 = (device const {element_type}4*)(in1 + qbase);\n{k_pointers}                for (short index = tx; index < (short)((head_dim / 2) / 4L); index += 8) {{\n                    {k_dots}\n                }}\n            }}\n            partial_score += simd_shuffle_down(partial_score, 4);\n            partial_score += simd_shuffle_down(partial_score, 2);\n            partial_score += simd_shuffle_down(partial_score, 1);\n            if (tx == 0) {{ ss[local_group_index * block_width + 4L * cc + (long)ty] = valid ? partial_score * scale : -INFINITY; }}\n        }}\n        simdgroup_barrier(mem_flags::mem_threadgroup);\n        for (long sub = 0L; sub < block_width; sub += 32L) {{\n            long lane_index = sub + (long)lane;\n            float raw_score = ss[local_group_index * block_width + lane_index];\n            float next_max = simd_max(max(maximum, raw_score));\n            float rescale = (maximum == -INFINITY) ? 0.0f : exp(maximum - next_max);\n            float weight = exp(raw_score - next_max);\n            sum = sum * rescale + simd_sum(weight);\n            ss[local_group_index * block_width + lane_index] = weight;\n            for (long dimension = 0L; dimension < (head_dim + 31) / 32; dimension++) {{ weighted[dimension] *= rescale; }}\n            maximum = next_max;\n            simdgroup_barrier(mem_flags::mem_threadgroup);\n{v_accumulate}            simdgroup_barrier(mem_flags::mem_threadgroup);\n        }}\n    }}\n    }}\n"
             ));
         }
         // Redesign §4c ([`NumericRewrite::ContextSplitMerge`]): once the
@@ -741,7 +757,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
         // reduces the per-lane partial dot product within this simdgroup.
         source.push_str(&format!(
             "    for (long key = 0; key <= last_key; key++) {{\n{}    }}\n",
-            cached_attention_scalar_score_body(pass_present, new_range_windowed),
+            cached_attention_scalar_score_body(pass_present, new_range_windowed, cached_load),
         ));
         source.push_str(&format!("    for (long dimension = (long)lane; dimension < head_dim; dimension += 32L) {{ long local_dimension = dimension / 32L; out[query_index * head_dim + dimension] = ({element_type})(sum == 0.0f ? 0.0f : weighted[local_dimension] / sum); }}\n}}\n"));
     } else {
@@ -766,7 +782,7 @@ pub(super) fn render_cached_attention_with_mma_selection(
         source.push_str(&format!("    {last_key_decl}"));
         source.push_str(&format!(
             "    for (long key = chunk; key <= last_key; key += context_chunks) {{\n{}    }}\n",
-            cached_attention_scalar_score_body(pass_present, new_range_windowed),
+            cached_attention_scalar_score_body(pass_present, new_range_windowed, cached_load),
         ));
         // Single cross-simdgroup merge: each chunk's own (max, sum,
         // weighted) is the same online-softmax state the `chunks<=1` body
