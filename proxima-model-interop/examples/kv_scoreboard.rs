@@ -2769,6 +2769,12 @@ fn rss_error(stage: &str, bytes: u64) -> HarnessError {
     HarnessError::Server(format!("text-edge server rss {bytes} bytes exceeds {TEXT_EDGE_RSS_LIMIT_BYTES} {stage}; weights were faulted in"))
 }
 
+/// proxima's decode into a caller-owned `String` (`decode_into`), allocated before the timed closure, matching the llama arm's reused output buffer.
+fn detokenize_prompt_ms(ids: &[u32], vocab: &Vocab) -> f64 {
+    let mut text = String::with_capacity(ids.len() * 8);
+    mean_call_ms(|| proxima_tokenizer::decode_into(ids, vocab, &mut text))
+}
+
 fn proxima_text_edge_rows(sink: &mut RowSink, tokenize_ms: f64, detokenize_prompt_ms: f64, prompt_tokens: usize) {
     sink.measured(&TOKENIZE_INPROC_MS, tokenize_ms, "GGUF vocab, no transport");
     sink.measured(&TOKENIZE_INPROC_TOKENS, count_as_f64(prompt_tokens), "");
@@ -2792,8 +2798,8 @@ fn text_edge_round(config: &Config, binary: &(String, PathBuf), vocab: &Vocab, p
     };
     let mut sink = RowSink::new(round, &format!("proxima-{}", binary.0), &prompt.label, load);
     let tokenize_ms = mean_call_ms(|| tokenize_like_proxima(&prompt.text, vocab));
-    let detokenize_prompt_ms = mean_call_ms(|| proxima_tokenizer::decode(&prompt.ids, vocab));
-    proxima_text_edge_rows(&mut sink, tokenize_ms, detokenize_prompt_ms, prompt.ids.len());
+    let detokenize_ms = detokenize_prompt_ms(&prompt.ids, vocab);
+    proxima_text_edge_rows(&mut sink, tokenize_ms, detokenize_ms, prompt.ids.len());
     rows.extend(sink.rows);
     rows
 }
@@ -3831,6 +3837,16 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         assert_eq!((tuned.gate.load_limit, tuned.gate.hold_secs), (2.5, 60));
         arguments.extend(["--bogus", "1"].map(str::to_owned));
         assert!(parse_config(arguments).is_err());
+    }
+
+    #[test]
+    fn detokenize_prompt_ms_times_a_decode_that_succeeds_on_the_prompt_ids() {
+        let tokens = vec!["<unk>".to_owned(), "Hel".to_owned(), "lo".to_owned(), " world".to_owned()];
+        let vocab = Vocab::new(tokens, &[], None, None, None).expect("plain vocab");
+        let mut text = String::new();
+        proxima_tokenizer::decode_into(&[1, 2, 3], &vocab, &mut text).expect("decodes");
+        assert_eq!(text, "Hello world");
+        assert!(detokenize_prompt_ms(&[1, 2, 3], &vocab) >= 0.0);
     }
 
     #[test]
