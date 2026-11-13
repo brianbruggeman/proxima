@@ -40,18 +40,18 @@ fn run() -> Result<(), String> {
         .map_err(|error| format!("parse the openchat gguf: {error}"))?;
     real_model_probe::prefault_if_requested(file_bytes)?;
 
-    let model = LoadedModel::load(&parsed, file_bytes)
+    let serving_config = ServingConfig {
+        exact_activations: std::env::var("PROXIMA_EXACT_ACTIVATIONS")
+            .map_or(true, |value| value != "0"),
+        ..ServingConfig::default()
+    };
+    let model = LoadedModel::load_with_serving(&parsed, file_bytes, &serving_config)
         .map_err(|error| format!("load the openchat checkpoint: {error}"))?;
     let prompt = real_model_probe::env_prompt(DEFAULT_PROMPT);
     let max_tokens = real_model_probe::env_max_tokens(24);
 
     println!("prompt={prompt:?} max_tokens={max_tokens}");
     let decode_start = Instant::now();
-    let serving_config = ServingConfig {
-        exact_activations: std::env::var("PROXIMA_EXACT_ACTIVATIONS")
-            .map_or(true, |value| value != "0"),
-        ..ServingConfig::default()
-    };
     let generated = model
         .generate_with_serving_config(&prompt, max_tokens, serving_config)
         .map_err(|error| format!("generate with the serving config: {error}"))?;

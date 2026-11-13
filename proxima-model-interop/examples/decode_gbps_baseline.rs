@@ -247,8 +247,6 @@ fn main() {
         .unwrap_or_else(|error| panic!("map {model_file}: {error}"));
     let parsed = parse_complete(&bytes)
         .unwrap_or_else(|error| panic!("parse gguf header of {model_file}: {error:?}"));
-    let model = LoadedModel::load(&parsed, &bytes)
-        .unwrap_or_else(|error| panic!("bind {model_file}: {error:?}"));
 
     // attribution3 followon, intervention 3 (2026-09-22, owner redirect):
     // `ServingConfig::default()` carries `dispatch_type: DispatchType::Serial`
@@ -352,6 +350,8 @@ fn main() {
         dispatch_type,
         ..ServingConfig::default()
     };
+    let model = LoadedModel::load_with_serving(&parsed, &bytes, &serving_config)
+        .unwrap_or_else(|error| panic!("bind {model_file}: {error:?}"));
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
     {

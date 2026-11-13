@@ -84,13 +84,20 @@ impl CheckpointMapping {
         }
     }
 
-    /// Loads like [`Self::load`], then installs the cold tier when `settings.reclaim.cold_dir` is set.
+    /// Loads through [`LoadedModel::load_with_serving`] with `settings` lowered
+    /// by [`ServingSettings::as_serving_config`], so the operator's measured-setting
+    /// overrides reach the served model, then installs the cold tier when
+    /// `settings.reclaim.cold_dir` is set.
     pub fn load_serving(&self, settings: &ServingSettings) -> Result<LoadedModel<'_>, CheckpointSourceError> {
         let residency = Arc::new(MappedResidency::new(settings.reclaim.clone()));
         if let Some(mapping) = self.file_mapping() {
             residency.register_weights(mapping, monotonic_now());
         }
-        let model = self.load()?.with_residency(residency);
+        let parsed = proxima_gguf::parse_complete(self.bytes()).map_err(InteropError::from)?;
+        let weight_precision = settings.weight_precision_rules()?;
+        let serving_config = settings.as_serving_config(&weight_precision);
+        let model = LoadedModel::load_with_serving(&parsed, self.bytes(), &serving_config)?
+            .with_residency(residency);
         model.install_cold_tier(&settings.reclaim)?;
         Ok(model)
     }

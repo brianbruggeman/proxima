@@ -416,7 +416,9 @@ fn run() -> Result<usize, NiahError> {
     )?;
     print_case(&options, seed, &case);
     let layers = kv_layers(&parsed)?;
-    let model = LoadedModel::load(&parsed, &mapping)?;
+    let model_path = options.model.display().to_string();
+    let load_config = serving_config(&options, &model_path, NumericFormat::Float32, None);
+    let model = LoadedModel::load_with_serving(&parsed, &mapping, &load_config)?;
     let mut failures = run_arms(&options, &model, &case, &layers);
     if let Err(error) = run_ollama_arm(&options, &case) {
         failures += 1;

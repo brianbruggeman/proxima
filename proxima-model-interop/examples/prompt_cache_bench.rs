@@ -366,7 +366,7 @@ fn with_model<T>(model_path: &str, body: impl FnOnce(&LoadedModel<'_>, &Vocab) -
     let mapping = unsafe { Mmap::map(&file) }.expect("map the model");
     let bytes: &[u8] = &mapping;
     let parsed = parse_complete(bytes).expect("parse the model header");
-    let model = LoadedModel::load(&parsed, bytes).expect("bind the model");
+    let model = LoadedModel::load_with_serving(&parsed, bytes, &base_config()).expect("bind the model");
     let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed).expect("build the vocab");
     body(&model, &vocab)
 }

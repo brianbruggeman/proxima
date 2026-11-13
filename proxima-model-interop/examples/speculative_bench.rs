@@ -2742,8 +2742,9 @@ fn main() {
         .unwrap_or_else(|error| panic!("map model {}: {error}", args.model_path));
     let parsed = parse_complete(&bytes)
         .unwrap_or_else(|error| panic!("parse model {}: {error}", args.model_path));
-    let model = LoadedModel::load(&parsed, &bytes)
-        .unwrap_or_else(|error| panic!("load model {}: {error}", args.model_path));
+    let model =
+        LoadedModel::load_with_serving(&parsed, &bytes, &base_serving_config(args.gpu_layers))
+            .unwrap_or_else(|error| panic!("load model {}: {error}", args.model_path));
     // SAME tokenization `run_one_arm`'s decode call performs internally
     // (`generate/residency_caches.rs::wants_bos`, crate-private) -- this
     // example rebuilds the identical `Vocab` from the identical metadata to

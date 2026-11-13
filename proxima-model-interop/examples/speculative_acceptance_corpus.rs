@@ -152,7 +152,11 @@ fn run() -> Result<(), CorpusError> {
     // SAFETY: `model_file` remains alive while `model_bytes` is borrowed.
     let model_bytes: Mmap = unsafe { MmapOptions::new().map(&model_file)? };
     let parsed = parse_complete(&model_bytes)?;
-    let model = LoadedModel::load(&parsed, &model_bytes)?;
+    let load_config = ServingConfig {
+        gpu_layers,
+        ..ServingConfig::default()
+    };
+    let model = LoadedModel::load_with_serving(&parsed, &model_bytes, &load_config)?;
 
     println!("environment_os = {}", env::consts::OS);
     println!("environment_arch = {}", env::consts::ARCH);

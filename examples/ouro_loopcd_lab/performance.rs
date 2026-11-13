@@ -89,7 +89,6 @@ pub(super) fn cached(arguments: &Arguments) -> io::Result<()> {
     let mapping = unsafe { MmapOptions::new().map(&file)? };
     let setup_started = Instant::now();
     let parsed = proxima_gguf::pipe::parse_complete(&mapping).map_err(io::Error::other)?;
-    let loaded = LoadedModel::load(&parsed, &mapping).map_err(io::Error::other)?;
     let config = ServingConfig {
         model_path: path,
         context_length: ContextLength::Within(320),
@@ -109,6 +108,8 @@ pub(super) fn cached(arguments: &Arguments) -> io::Result<()> {
             }),
         ..ServingConfig::default()
     };
+    let loaded =
+        LoadedModel::load_with_serving(&parsed, &mapping, &config).map_err(io::Error::other)?;
     record(
         &mut records,
         &json!({"kind":"cached_setup","model_path":path,"checkpoint_source_sha256":DIGEST,

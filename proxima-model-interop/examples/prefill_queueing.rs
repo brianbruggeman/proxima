@@ -103,7 +103,8 @@ mod harness {
         let bytes: Mmap = unsafe { MmapOptions::new().map(&file) }.expect("map checkpoint");
         let parsed = parse_complete(&bytes).expect("parse header");
         let load_cell = Cell::begin();
-        let model = LoadedModel::load(&parsed, &bytes).expect("bind model");
+        let model =
+            LoadedModel::load_with_serving(&parsed, &bytes, &serving_config()).expect("bind model");
         println!("pq {}", load_cell.end("load"));
         let long_prompt = std::fs::read_to_string(
             std::env::var("PROXIMA_PROMPT_FILE").expect("PROXIMA_PROMPT_FILE"),

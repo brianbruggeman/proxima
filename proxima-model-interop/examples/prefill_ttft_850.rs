@@ -63,9 +63,9 @@ mod ttft {
         let file_bytes: &[u8] = &mapped;
         let parsed = proxima_gguf::pipe::parse_complete(file_bytes)
             .map_err(|error| format!("parse the qwen3 gguf: {error}"))?;
-        let model = LoadedModel::load(&parsed, file_bytes)
-            .map_err(|error| format!("load the qwen3 checkpoint: {error}"))?;
         let serving_config = greedy_config()?;
+        let model = LoadedModel::load_with_serving(&parsed, file_bytes, &serving_config)
+            .map_err(|error| format!("load the qwen3 checkpoint: {error}"))?;
         let prompt = PREFIX.repeat(5);
 
         let mut ttft_ms: Vec<f64> = Vec::with_capacity(TIMED_RUNS);

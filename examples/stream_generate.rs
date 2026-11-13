@@ -70,7 +70,19 @@ fn main() {
         }
     };
 
-    let model = match LoadedModel::load(&parsed, file_bytes) {
+    let serving_config = ServingConfig {
+        model_path: &gguf_path,
+        kv_cache_key_quant: NumericFormat::Float32,
+        kv_cache_value_quant: NumericFormat::Float32,
+        flash_attention: false,
+        batch_size: 0,
+        ubatch_size: 0,
+        gpu_layers: 0,
+        reasoning_budget: 0,
+        ..ServingConfig::default()
+    };
+
+    let model = match LoadedModel::load_with_serving(&parsed, file_bytes, &serving_config) {
         Ok(model) => model,
         Err(error) => {
             println!("WEIGHT LOAD FAILED: {error}");
@@ -83,18 +95,6 @@ fn main() {
         model.layer_count(),
         model.checkpoint_bytes()
     );
-
-    let serving_config = ServingConfig {
-        model_path: &gguf_path,
-        kv_cache_key_quant: NumericFormat::Float32,
-        kv_cache_value_quant: NumericFormat::Float32,
-        flash_attention: false,
-        batch_size: 0,
-        ubatch_size: 0,
-        gpu_layers: 0,
-        reasoning_budget: 0,
-        ..ServingConfig::default()
-    };
 
     let mut event_count = 0usize;
     let mut streamed_text = String::new();

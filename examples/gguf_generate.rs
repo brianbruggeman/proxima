@@ -618,7 +618,9 @@ fn main() {
     }
 
     let load_started = Instant::now();
-    let mut model = match LoadedModel::load(&parsed, file_bytes) {
+    let load_config =
+        supported_serving_config(gguf_path, requested_backend.gpu_layers(), &settings);
+    let mut model = match LoadedModel::load_with_serving(&parsed, file_bytes, &load_config) {
         Ok(model) => model,
         Err(error) => {
             println!("WEIGHT LOAD FAILED: {error}");
