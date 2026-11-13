@@ -51,16 +51,18 @@ fn bind_symbols_allows_new_count_above_one_when_single_position_step_is_unset() 
 }
 
 #[test]
-fn a_family_with_no_profile_is_refused_by_name_before_anything_binds() {
+fn a_family_with_no_arch_config_is_refused_by_name_before_anything_binds() {
     let parsed = crate::test_support::parsed_header(vec![(
         "general.architecture",
         Value::String("phi9".to_string()),
     )]);
 
     match bind_checkpoint(&parsed, &[]) {
-        Err(InteropError::MissingFamilyProfile { family }) => assert_eq!(family, "phi9"),
+        Err(InteropError::MissingArchField { architecture, .. }) => {
+            assert_eq!(architecture, "phi9");
+        }
         Ok(_) => panic!("a family with no profile must not bind"),
-        Err(other) => panic!("expected MissingFamilyProfile, got {other}"),
+        Err(other) => panic!("expected MissingArchField, got {other}"),
     }
 }
 

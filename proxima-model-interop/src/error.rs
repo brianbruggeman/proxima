@@ -187,12 +187,6 @@ pub enum InteropError {
     #[error("draft-model state cannot advance: {reason}")]
     DraftModelState { reason: &'static str },
 
-    /// `crate::profiles::family_profile`: no embedded profile file exists for
-    /// this family string. Never defaulted: a family whose profile is absent
-    /// would lower with another family's activation, scales and norm shifts.
-    #[error("no family profile for general.architecture or model_type = {family:?}")]
-    MissingFamilyProfile { family: String },
-
     /// `crate::profiles::family_profile`: the embedded profile file for this
     /// family did not parse into a [`proxima_tensor::spec::FamilyProfile`].
     #[error("family profile for {family:?} does not parse: {message}")]
