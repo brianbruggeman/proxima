@@ -873,23 +873,23 @@ impl NumericFormat {
 /// [`FloatLayout`] map itself (`{ exponent_bits = 3, mantissa_bits = 0, specials = "None", ... }`);
 /// a block description is `{ block = { ... } }` holding a [`BlockLayout`]. A name is a label for a
 /// description, so a format with no name is still selectable from config by what it is.
-#[cfg(feature = "config")]
+#[cfg(feature = "alloc")]
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum Spelling {
-    Name(std::string::String),
+    Name(alloc::string::String),
     // boxed because the 592-byte block variant would size every spelling; config load is cold
-    Block { block: std::boxed::Box<BlockLayout> },
+    Block { block: alloc::boxed::Box<BlockLayout> },
     Scalar(FloatLayout),
 }
 
-#[cfg(feature = "config")]
+#[cfg(feature = "alloc")]
 #[derive(serde::Serialize)]
 struct BlockSpelling<'a> {
     block: &'a BlockLayout,
 }
 
-#[cfg(feature = "config")]
+#[cfg(feature = "alloc")]
 impl serde::Serialize for NumericFormat {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         // a name that resolves to a different format (a scalar layout's own name can equal a block
@@ -904,7 +904,7 @@ impl serde::Serialize for NumericFormat {
     }
 }
 
-#[cfg(feature = "config")]
+#[cfg(feature = "alloc")]
 impl<'de> serde::Deserialize<'de> for NumericFormat {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         match Spelling::deserialize(deserializer)? {

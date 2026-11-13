@@ -21,7 +21,7 @@ half = { version = "2.7.1", default-features = false }
 default = ["std"]
 # tier 1: no_std + alloc. no path in this crate allocates, so the surface is
 # identical to bare no_std minus nothing.
-alloc = []
+alloc = ["serde/alloc"]
 # tier 2: std-only conveniences.
 std = ["alloc"]
 # config surface for `NumericPolicy` / `Numerics`: conflaguration `Settings`.

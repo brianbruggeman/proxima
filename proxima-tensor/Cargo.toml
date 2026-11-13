@@ -25,7 +25,7 @@ default = ["std", "config", "q4k-int8-dot", "q5k-int8-dot", "q6k-int8-dot", "cac
 # shape -- decode -5.21% (clears combined noise ~7x), prefill +1.93%
 # (~1.03x combined noise, i.e. a tie, not a regression).
 std = ["alloc", "thiserror/std", "tensor-bgpool", "tensor-cohort", "cohort-staged-graph", "dep:libc"]
-alloc = []
+alloc = ["proxima-numeric/alloc"]
 # Cached-attention graph rewrite. Default-off in this crate's own `default`
 # (no checkpoint/differential harness lives here), but ROW 282 folds it into
 # `metal`'s default shape one level up (`omega`, `proxima-model-interop`) now
