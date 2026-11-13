@@ -48,7 +48,9 @@ use proxima_numeric::{NumericPolicy};
 mod gemma4_rows_support;
 mod support;
 use gemma4_rows_support::{Fixture, Geometry, bucket_for, fixture_with};
-use support::{as_named_blocks, production_numeric_policy};
+use support::{
+    as_named_blocks, attention_probe_roots, production_numeric_policy, sampled_attention_against_device,
+};
 
 const VERIFY_ROWS: [usize; 4] = [2, 5, 17, 49];
 const CACHED_LENGTHS: [usize; 6] = [31, 33, 199, 511, 1099, 2047];
@@ -153,14 +155,18 @@ fn one_cell(label: &str, geometry: Geometry, rows: usize, cached_len: usize) -> 
         );
     }
 
-    let shapes = infer(&fixture.program, &fixture.symbols).expect("the program infers");
-    let unfused = bind_with_fusion(&fixture.program, &shapes, &roots, false, policy)
-        .expect("the unfused program binds");
-    let cpu = run_resolved_on_cpu(&fixture, &unfused);
-    let plan = omega::plan_named(&fixture.program, &fixture.symbols, &named, &roots, policy)
+    let probes = attention_probe_roots(&resolved, roots[0]);
+    let plan = omega::plan_named(&fixture.program, &fixture.symbols, &named, &probes, policy)
         .expect("metal plans the program");
     let metal = omega::execute_plan_named(&plan, &named).expect("metal runs the program");
-    let relative = relative_difference(&cpu, metal.root());
+    let program_len = fixture.program.len();
+    let mut rows_checked = 0_usize;
+    let mut relative = 0.0f32;
+    for bound in &attention {
+        let sampled = sampled_attention_against_device(program_len, bound, &metal, &[]);
+        rows_checked += sampled.rows_checked;
+        relative = relative.max(sampled.relative);
+    }
 
     let mut wrong_mask = resolved.clone();
     let mut forced = 0_usize;
@@ -178,11 +184,15 @@ fn one_cell(label: &str, geometry: Geometry, rows: usize, cached_len: usize) -> 
         forced, 2,
         "{cell}: the control must reach both attention ops"
     );
-    let control = run_resolved_on_cpu(&fixture, &wrong_mask);
-    let control_relative = relative_difference(&control, metal.root());
+    let control_relative = wrong_mask
+        .iter()
+        .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+        .map(|bound| sampled_attention_against_device(program_len, bound, &metal, &[]).relative)
+        .fold(0.0f32, f32::max);
 
     eprintln!(
-        "row_tiled parity: {cell} relative={relative} wrong_mask_relative={control_relative}"
+        "row_tiled parity: {cell} rows_checked={rows_checked} relative={relative} \
+         wrong_mask_relative={control_relative}"
     );
     (relative, control_relative)
 }

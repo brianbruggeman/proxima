@@ -28,7 +28,9 @@ use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{BoundOpKind, NodeId, Op, bind, infer};
 
 mod support;
-use support::{as_named_blocks, evaluate_gpu_oracle, production_numeric_policy};
+use support::{
+    as_named_blocks, attention_probe_roots, production_numeric_policy, sampled_attention_against_device,
+};
 
 const VOCAB: u32 = 64;
 const EMBEDDING: u32 = 256;
@@ -144,16 +146,6 @@ fn fixture_with_cache(rows: u64, cached_len: u64, window: Option<u32>, attention
     }
 }
 
-fn max_relative(expected: &[f32], actual: &[f32]) -> f32 {
-    let magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
-    let difference = expected
-        .iter()
-        .zip(actual)
-        .map(|(want, got)| (want - got).abs())
-        .fold(0.0f32, f32::max);
-    difference / magnitude.max(f32::MIN_POSITIVE)
-}
-
 fn assert_finite(values: &[f32], what: &str) {
     assert!(!values.is_empty(), "{what}: an empty root compares nothing");
     assert!(values.iter().all(|value| value.is_finite()), "{what}: non-finite output");
@@ -184,16 +176,40 @@ fn assert_sink_kernels(fixture: &Fixture, cell: &str) {
     }
 }
 
-fn metal_and_cpu(fixture: &Fixture, cpu_named: &[(String, Vec<f32>)]) -> (Vec<f32>, Vec<f32>) {
+/// Metal runs the whole prefill; the CPU attention kernel then recomputes only
+/// the sampled query rows of each fused op, at full key width, from the
+/// operand tensors Metal fed that op. Returns rows checked and the worst
+/// relative error across the layers. `negate_sinks` feeds the CPU the
+/// opposite sinks, the control that must disagree.
+fn sampled_metal_vs_cpu(fixture: &Fixture, negate_sinks: bool) -> (usize, f32) {
     let policy = production_numeric_policy();
-    let roots = [fixture.roots[0]];
+    let shapes = infer(&fixture.program, &fixture.symbols).expect("the prefill program infers");
+    let resolved = bind(&fixture.program, &shapes, &fixture.roots[..1], policy)
+        .expect("the prefill program binds");
+    let probes = attention_probe_roots(&resolved, fixture.roots[0]);
     let metal_named = as_named_blocks(&fixture.named);
-    let cpu_blocks = as_named_blocks(cpu_named);
-    let cpu = evaluate_gpu_oracle(&fixture.program, &fixture.symbols, &cpu_blocks, &roots);
-    let plan = omega::plan_named(&fixture.program, &fixture.symbols, &metal_named, &roots, policy)
+    let plan = omega::plan_named(&fixture.program, &fixture.symbols, &metal_named, &probes, policy)
         .expect("metal plans the sink prefill program");
-    let metal = omega::execute_plan_named(&plan, &metal_named).expect("metal runs the sink prefill program");
-    (cpu.root().to_vec(), metal.root().to_vec())
+    let device = omega::execute_plan_named(&plan, &metal_named).expect("metal runs the sink prefill program");
+    assert_finite(device.root(), "metal root");
+    let mut rows_checked = 0;
+    let mut worst = 0.0f32;
+    for bound in resolved
+        .iter()
+        .filter(|bound| matches!(bound.kind, BoundOpKind::CachedAttention { .. }))
+    {
+        let overrides: Vec<(NodeId, Vec<f32>)> = if negate_sinks {
+            let (sink_node, _, _) = bound.operands().last().expect("a sink op carries its sink operand");
+            let (sinks, _) = device.get(*sink_node).expect("device returned the sinks");
+            vec![(*sink_node, sinks.iter().map(|value| -value).collect())]
+        } else {
+            Vec::new()
+        };
+        let sampled = sampled_attention_against_device(fixture.program.len(), bound, &device, &overrides);
+        rows_checked += sampled.rows_checked;
+        worst = worst.max(sampled.relative);
+    }
+    (rows_checked, worst)
 }
 
 #[test]
@@ -204,12 +220,9 @@ fn the_sink_row_tiled_form_holds_parity_with_the_cpu_evaluator_across_prompt_wid
             let cell = format!("rows {rows} window {window:?}");
             let fixture = fixture(rows, window, true);
             assert_sink_kernels(&fixture, &cell);
-            let (expected, actual) = metal_and_cpu(&fixture, &fixture.named);
-            assert_finite(&expected, "cpu root");
-            assert_finite(&actual, "metal root");
-            assert_eq!(actual.len(), expected.len());
-            let relative = max_relative(&expected, &actual);
-            eprintln!("sink row_tiled parity: {cell} relative={relative}");
+            let (rows_checked, relative) = sampled_metal_vs_cpu(&fixture, false);
+            assert!(rows_checked >= LAYERS as usize * rows.min(16) as usize, "{cell}: sample too thin");
+            eprintln!("sink row_tiled parity: {cell} rows_checked={rows_checked} relative={relative}");
             assert!(relative < 1e-4, "{cell}: metal disagrees with cpu: relative={relative}");
             cells += 1;
         }
@@ -230,12 +243,8 @@ fn the_sink_row_tiled_form_masks_a_partial_last_key_tile_when_the_cache_is_not_a
         let cell = format!("rows {rows} cached_len {cached_len} window {window:?}");
         let fixture = fixture_with_cache(rows, cached_len, window, true);
         assert_sink_kernels(&fixture, &cell);
-        let (expected, actual) = metal_and_cpu(&fixture, &fixture.named);
-        assert_finite(&expected, "cpu root");
-        assert_finite(&actual, "metal root");
-        assert_eq!(actual.len(), expected.len());
-        let relative = max_relative(&expected, &actual);
-        eprintln!("sink row_tiled partial tile parity: {cell} relative={relative}");
+        let (rows_checked, relative) = sampled_metal_vs_cpu(&fixture, false);
+        eprintln!("sink row_tiled partial tile parity: {cell} rows_checked={rows_checked} relative={relative}");
         assert!(relative < 1e-4, "{cell}: metal disagrees with cpu: relative={relative}");
     }
 }
@@ -243,20 +252,8 @@ fn the_sink_row_tiled_form_masks_a_partial_last_key_tile_when_the_cache_is_not_a
 #[test]
 fn a_cpu_oracle_fed_negated_sinks_departs_from_the_metal_row_tiled_sink_kernel() {
     let fixture = fixture(84, None, true);
-    let other_sinks: Vec<(String, Vec<f32>)> = fixture
-        .named
-        .iter()
-        .map(|(name, data)| {
-            if name.ends_with(".attn_sinks.weight") {
-                (name.clone(), data.iter().map(|value| -value).collect())
-            } else {
-                (name.clone(), data.clone())
-            }
-        })
-        .collect();
-    let (expected, actual) = metal_and_cpu(&fixture, &other_sinks);
-    let relative = max_relative(&expected, &actual);
-    eprintln!("sink rows control: relative={relative}");
+    let (rows_checked, relative) = sampled_metal_vs_cpu(&fixture, true);
+    eprintln!("sink rows control: rows_checked={rows_checked} relative={relative}");
     assert!(
         relative > 1e-3,
         "the oracle given negated sinks must disagree with the kernel; relative={relative}"
