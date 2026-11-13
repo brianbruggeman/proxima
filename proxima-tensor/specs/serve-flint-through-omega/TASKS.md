@@ -295,8 +295,12 @@ asserts a `Float32` carrier stays legal and `Iq4Xs` stays packed on device.
   addend has no place in it; the danger was a program that fused anyway and
   dropped the term inside the kernel. Measured matrix (`scheduled(...)` with the
   flint head ratio, `NumericPolicy::default()`, fused steps sink-off ->
-  sink-on): `Cached/Padded` `0 -> 0` (this is the sliding-pattern family's
-  production path, `generate/decode.rs`), `Cached/Bounded` `2 -> refused by name`
+  sink-on): `Cached/Padded` `0 -> 0` without `metal-fuse-attn-decode` and
+  `2 -> 0` with it (re-measured at `5f1bf180` with `--features
+  std,metal-fuse-attn-decode`: cached attention without a sink fuses 2 of 2
+  steps on this 2-layer flint-head program, with a sink 0 of 2, so under that
+  feature a sink model loses the fused kernel; this is the sliding-pattern
+  family's production path, `generate/decode.rs`), `Cached/Bounded` `2 -> refused by name`
   (`UnsupportedInBuilder { feature: "attention sinks (this engine has no
   per-layer sink channel)" }`, `descriptor.rs:1072-1078`), `Cacheless/Padded`
   `2 -> 0`, `Cacheless/Bounded` `2 -> 0`. No configuration is non-zero on both
@@ -304,10 +308,11 @@ asserts a `Float32` carrier stays legal and `Iq4Xs` stays packed on device.
   the matrix does show is a real PERF consequence: where the same program fuses
   without a sink (the two cacheless arms, 2 steps), adding one moves it to the
   generic per-node path (0 steps). Flint's *serving* path is unaffected today
-  because its two-range decode program takes 0 fused steps with the sink off too
-  -- i.e. that path is not fused at all. The census
+  only without `metal-fuse-attn-decode`, where its two-range decode program takes
+  0 fused steps with the sink off too; with that feature the same program fuses
+  2 of 2 without a sink and 0 of 2 with one. The census
   (`attention_sink_fusion_census_reports_the_same_decision_with_and_without_the_sink`)
-  pins the production pair `(0, 0)` plus the declared-leaf assertions, so any
+  pins the pair `(0, 0)` (`(2, 0)` under `metal-fuse-attn-decode`) plus the declared-leaf assertions, so any
   move is loud. Reopening this needs either a fused kernel that learns to read a
   sink (then the census fails and this note gets the new pair) or a measurement
   of what the cacheless 2 -> 0 costs on a real prefill.

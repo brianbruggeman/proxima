@@ -24274,7 +24274,8 @@ mod attention_sinks {
     /// the proof that the flag reached the graph at all. This is the only place
     /// TASKS.md row 8's "fusion consequence unmeasured" claim can be re-proved
     /// from the tree, so it asserts the ABSOLUTE pair `(0, 0)` rather than the
-    /// two counts being equal:
+    /// two counts being equal (`(0, 0)` by default, `(2, 0)` under
+    /// `metal-fuse-attn-decode`):
     ///
     /// - equal-with-both-fused is the interesting regression (a sink riding a
     ///   kernel that has no place for its addend) and equality alone passes it;
@@ -24320,12 +24321,19 @@ mod attention_sinks {
             2,
             "the sink-on arm must declare one leaf per layer, found {sinks_on_leaves:?}"
         );
+        let expected = if cfg!(feature = "metal-fuse-attn-decode") {
+            (2, 0)
+        } else {
+            (0, 0)
+        };
         assert_eq!(
             (sinks_off, sinks_on),
-            (0, 0),
-            "fused cached-attention steps: sink off {sinks_off}, sink on {sinks_on} -- this \
-             pair is what row 8's open item records as the unmeasured case; if it moved, the \
-             sink now chooses a kernel and that item must be rewritten with these numbers"
+            expected,
+            "fused cached-attention steps: sink off {sinks_off}, sink on {sinks_on} -- expected \
+             {expected:?}; `metal-fuse-attn-decode` is what fuses the sink-off program (2 of 2 \
+             layers) and the sink-on program stays unfused (0 of 2), without it neither fuses. \
+             This pair is what row 8's open item records; if it moved, the sink now chooses a \
+             kernel and that item must be rewritten with these numbers"
         );
     }
 
