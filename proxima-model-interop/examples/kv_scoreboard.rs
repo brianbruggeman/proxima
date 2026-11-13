@@ -85,6 +85,7 @@ const DEFAULT_WAIT_LIMIT_SECS: u64 = 900;
 const DEFAULT_CONTEXT_LENGTH: usize = 131_072;
 const DEFAULT_KV_BUCKET: usize = 32;
 const GATE_POLL: Duration = Duration::from_secs(2);
+const STOP_GRACE: Duration = Duration::from_secs(2);
 const MAX_TOKENS: usize = 128;
 const LLAMA_KV_PAD: usize = 256;
 const BASE_PORT: u16 = 18_200;
@@ -1734,6 +1735,15 @@ impl TimedServer {
         if let Some(pid) = self.server_pid {
             // SAFETY: signalling a child pid this process just found with pgrep -P; SIGTERM only.
             unsafe { libc::kill(pid, libc::SIGTERM) };
+            let asked = Instant::now();
+            while asked.elapsed() < STOP_GRACE && matches!(self.timer.try_wait(), Ok(None)) {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            // llama-server ignores SIGTERM until the tensor load finishes, so a load in progress needs the kill.
+            if matches!(self.timer.try_wait(), Ok(None)) {
+                // SAFETY: same child pid as above; SIGKILL cannot be handled, so the load stops now.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
         }
         self.timer.wait().ok().and_then(|status| status.code()).unwrap_or(-1)
     }
