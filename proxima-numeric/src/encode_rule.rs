@@ -27,7 +27,7 @@ use crate::block_layout::BlockLayout;
 use crate::block_codec::encode_rule_of;
 
 /// The statistic of a block's values the scale is fitted to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ScaleStatistic {
     /// The largest magnitude, taken in element order with the C `MAX` macro, so a NaN in the last
     /// element stays NaN.
@@ -38,8 +38,56 @@ pub enum ScaleStatistic {
     MeanMagnitude,
     /// The range of the block: the scale is `(max - min) / divisor`, with `min` and `max` taken by
     /// strict comparison in element order. The low end is also the block's offset: see
-    /// [`StoredMin`].
-    MinMax,
+    /// [`StoredMin`]. The [`RangeFit`] says whether the scale and offset are then searched
+    /// ([`RangeFit::PLAIN`] is not).
+    MinMax(RangeFit),
+}
+
+/// The error a candidate scale is judged by in a [`RangeFit`] search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FitError {
+    /// `diff * diff`.
+    Squared,
+    /// `|diff|` (ggml's `use_mad`).
+    Absolute,
+}
+
+/// How each element's error is weighted in a [`RangeFit`] search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FitWeighting {
+    /// Every weight is one.
+    Uniform,
+    /// `sqrt(mean(x^2)) + |x|` (ggml's `av_x + fabsf(x)`, Q4_K and Q5_K).
+    MeanPlusAbs,
+    /// `|x|` (Q2_K).
+    Abs,
+}
+
+/// The search of ggml's `make_qkx2_quants` (ggml-quants.c:808-887) as data: `nstep + 1` candidate
+/// inverse scales `(rmin + rdelta * step + nmax) / (max - min)`, each refitted by weighted least
+/// squares, the least error kept. `nstep == 0` with [`FitWeighting::Uniform`] is no search: the
+/// plain range fit of `quantize_row_q4_1_ref`, which `Q4_1` and `Q5_1` resolve to.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RangeFit {
+    /// The offset added to the first candidate's level count, `-1.0` for Q4_K.
+    pub rmin: f32,
+    /// The step between candidates, `0.1` for the k-quants.
+    pub rdelta: f32,
+    /// Candidates beyond the first; zero is no search.
+    pub nstep: u32,
+    pub error: FitError,
+    pub weighting: FitWeighting,
+}
+
+impl RangeFit {
+    /// No search: the fit `Q4_1` and `Q5_1` use.
+    pub const PLAIN: Self = Self { rmin: 0.0, rdelta: 0.0, nstep: 0, error: FitError::Squared, weighting: FitWeighting::Uniform };
+
+    /// Whether the fit runs the candidate search.
+    #[must_use]
+    pub const fn searches(&self) -> bool {
+        self.nstep > 0
+    }
 }
 
 /// Whether the block stores the low end of its [`ScaleStatistic::MinMax`] range, and with which sign.
@@ -58,6 +106,9 @@ pub enum StoredMin {
 pub enum CodeRounding {
     /// `round(value * inverse)` with ties away from zero, then the bias added.
     NearestAwayFromZero,
+    /// ggml `nearest_int` (ggml-quants.c:630-635): ties to even through the float magic-number add,
+    /// see [`crate::range_fit::nearest_even`]; then the bias added.
+    NearestEven,
     /// `trunc(value * inverse + bias + 0.5)`: the bias and the half added before the cast truncates
     /// toward zero, so the code is `floor` for any in-range positive sum.
     HalfUpThenTruncate,
@@ -77,7 +128,7 @@ pub enum CodeClamp {
 }
 
 /// A block's encode, as data. See the module documentation for the arithmetic each field means.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EncodeRule {
     pub statistic: ScaleStatistic,
     /// What the statistic is divided by; negative where the signed peak maps to the most negative
@@ -163,7 +214,7 @@ mod tests {
     fn q4_1_and_q5_1_fit_the_range_over_their_code_span_and_store_the_low_end() {
         for (layout, span) in [(BlockLayout::Q4_1, 15), (BlockLayout::Q5_1, 31)] {
             let rule = layout.encode_rule().expect("a stored-min layout has a rule");
-            assert_eq!(rule.statistic, ScaleStatistic::MinMax);
+            assert_eq!(rule.statistic, ScaleStatistic::MinMax(RangeFit::PLAIN));
             assert_eq!(rule.divisor, span);
             assert_eq!(rule.stored_min, StoredMin::LowEnd { sign: 1 });
             assert_eq!(rule.rounding, CodeRounding::HalfUpThenTruncate);
