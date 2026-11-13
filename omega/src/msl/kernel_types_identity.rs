@@ -1413,10 +1413,7 @@ pub(crate) fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Option<C
         | Codec::Fp6E3M2
         | Codec::Iq4Xs
         | Codec::Iq3S => Some(*codec),
-        unnamed => match unnamed_scalar_layout(unnamed) {
-            Some(_) => Some(unnamed),
-            None => None,
-        },
+        unnamed => unnamed_scalar_layout(unnamed).map(|_| unnamed),
     }
 }
 
@@ -1430,7 +1427,7 @@ pub(crate) fn unnamed_scalar_layout(codec: Codec) -> Option<FloatLayout> {
         return None;
     };
     let width = layout.width();
-    let flat = width != 0 && width <= 32 && (width % 8 == 0 || 8 % width == 0);
+    let flat = width != 0 && width <= 32 && (width % 8 == 0 || width <= 16);
     if flat && codec_cache_token(codec) == UNRECOGNISED_TOKEN {
         Some(layout)
     } else {

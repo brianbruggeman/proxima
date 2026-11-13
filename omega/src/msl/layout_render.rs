@@ -343,6 +343,8 @@ pub fn layout_unpack_msl(layout: FloatLayout, name: &str) -> Option<String> {
         format!(
             "    uint bit = index * {width}u;\n    uint code = ((uint)payload[bit / 8u] >> (bit % 8u)) & {mask:#x}u;\n"
         )
+    } else if width <= 16 {
+        straddling_unpack_msl(width)
     } else {
         return None;
     };
@@ -350,6 +352,20 @@ pub fn layout_unpack_msl(layout: FloatLayout, name: &str) -> Option<String> {
     Some(format!(
         "{value}\nstatic inline float {name}(device const uchar *payload, uint index) {{\n{code}    return {value_name}(code);\n}}\n"
     ))
+}
+
+/// The statements that read a `width`-bit field at bit `index * width` of a dense low-bits-first
+/// stream, joining the two or three bytes that cover it. Each trailing byte is read only when the
+/// field reaches into it, so the last element never reads past the payload.
+fn straddling_unpack_msl(width: u32) -> String {
+    let mask = (1u32 << width) - 1;
+    let spans = (7 + width).div_ceil(8);
+    let joined = (1..spans)
+        .map(|byte| format!(" | (shift + {width}u > {}u ? (uint)payload[first + {byte}u] << {}u : 0u)", byte * 8, byte * 8))
+        .collect::<String>();
+    format!(
+        "    uint bit = index * {width}u;\n    uint first = bit / 8u;\n    uint shift = bit % 8u;\n    uint word = (uint)payload[first]{joined};\n    uint code = (word >> shift) & {mask:#x}u;\n"
+    )
 }
 
 fn plane_expression(plane: &Plane, index: &str, binding: &str) -> String {

@@ -259,6 +259,16 @@ impl Default for NumericFormat {
     }
 }
 
+/// Greatest common divisor of `width` and 8: `8 / g` elements fill `width / g` whole bytes of a dense
+/// low-bits-first stream, the smallest storage unit that starts and ends on a byte edge.
+const fn byte_gcd(width: u16) -> u16 {
+    let (mut larger, mut smaller) = (8_u16, width);
+    while smaller != 0 {
+        (larger, smaller) = (smaller, larger % smaller);
+    }
+    larger
+}
+
 impl NumericFormat {
     /// Elements one block covers; 1 for a scalar.
     #[must_use]
@@ -383,8 +393,7 @@ impl NumericFormat {
             // a zero-width layout (sign Absent, no mantissa, no exponent) stores no element and
             // no byte; `decode_blocks` rejects it, and 0 here keeps `8 / 0` out of the accessor
             Self::Scalar(layout) if layout.width() == 0 => 0,
-            Self::Scalar(layout) if layout.width() < 8 => 8 / layout.width() as u16,
-            Self::Scalar(_) => 1,
+            Self::Scalar(layout) => 8 / byte_gcd(layout.width() as u16),
             Self::Block(layout) => layout.elements,
             Self::Levels(levels) => levels.elements(),
         }
@@ -395,8 +404,7 @@ impl NumericFormat {
     pub const fn packed_bytes(&self) -> u16 {
         match self {
             Self::Scalar(layout) if layout.width() == 0 => 0,
-            Self::Scalar(layout) if layout.width() < 8 => 1,
-            Self::Scalar(layout) => layout.width().div_ceil(8) as u16,
+            Self::Scalar(layout) => layout.width() as u16 / byte_gcd(layout.width() as u16),
             Self::Block(layout) => layout.block_bytes,
             Self::Levels(levels) => levels.bytes(),
         }

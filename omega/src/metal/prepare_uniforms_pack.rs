@@ -138,7 +138,14 @@ pub(super) fn prepare_with_options(
                 })
         })?;
         let found = block.element_count()?;
-        if found != expected {
+        let partial_group = match block {
+            QuantizedBlock::Packed { codec: codec @ Codec::Scalar(_), .. } => {
+                usize::from(codec.packed_elements()).saturating_sub(1)
+            }
+            _ => 0,
+        };
+        // a scalar stream's last storage unit may hold fewer codes than it has room for
+        if found < expected || found - expected > partial_group {
             return Err(TensorError::InputSizeMismatch {
                 node: *node,
                 expected,

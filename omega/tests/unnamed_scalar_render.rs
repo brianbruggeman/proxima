@@ -1,6 +1,7 @@
 //! A Metal read of an unnamed scalar split (E3M0, E1M2) decodes its own bytes to what the host
 //! `FormatCodec::scalar` decode gives, in one process, with no per-name arm anywhere (PROXNUM-118).
-//! A split whose width neither divides nor fills a byte (E2M3, six bits) stays refused at plan time.
+//! A split whose width straddles bytes (E2M3 and E4M1 at six bits, E2M2 at five) reads the same
+//! way from a dense low-bits-first bit stream (PROXNUM-165).
 
 #![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -125,10 +126,58 @@ fn control_wrong_split_fails_the_host_comparison() {
     assert!(differing(&host, &metal) > 0, "E1M2 bytes matched E3M0 host decode; the comparison cannot discriminate");
 }
 
-#[test]
-fn e2m3_six_bit_split_is_refused_at_plan_time() {
-    let (_, format) = unnamed_scalar(2, 3);
-    let refused = metal_decode(format, &[0_u8; 6], 8);
+fn pack_bit_stream_low_bits_first(codes: &[u32], width: u32) -> Vec<u8> {
+    let mut bytes = vec![0_u8; (codes.len() * width as usize).div_ceil(8)];
+    for (index, code) in codes.iter().enumerate() {
+        for bit in 0..width as usize {
+            let position = index * width as usize + bit;
+            bytes[position / 8] |= (((code >> bit) & 1) as u8) << (position % 8);
+        }
+    }
+    bytes
+}
 
-    assert!(refused.is_err(), "a width that neither divides nor fills a byte has no flat address");
+#[test]
+fn byte_straddling_splits_decode_their_own_bit_stream_in_one_process() {
+    let mut distinct_per_split = Vec::new();
+    for (exponent_bits, mantissa_bits) in [(2, 3), (4, 1), (2, 2)] {
+        let (layout, format) = unnamed_scalar(exponent_bits, mantissa_bits);
+        let width = u32::from(layout.width());
+        let mut codes = every_code_repeated(width);
+        codes.truncate(codes.len() - 1);
+        assert_ne!(codes.len() % 4, 0, "degenerate gate: the last group must be partial");
+        let host = host_decode(&layout, &codes);
+        let metal = metal_decode(format, &pack_bit_stream_low_bits_first(&codes, width), codes.len())
+            .expect("Metal reads an unnamed scalar whose width straddles bytes");
+
+        let first_sixteen: Vec<(u32, u32, u32)> = (0..16)
+            .map(|code| (code as u32, host[code].to_bits(), metal[code].to_bits()))
+            .collect();
+        assert_eq!(
+            differing(&host, &metal),
+            0,
+            "E{exponent_bits}M{mantissa_bits}: Metal differs from host decode; (code, host bits, metal bits) = {first_sixteen:x?}"
+        );
+        let mut distinct: Vec<u32> = host.iter().map(|value| value.to_bits()).collect();
+        distinct.sort_unstable();
+        distinct.dedup();
+        distinct_per_split.push(distinct);
+    }
+    assert_ne!(distinct_per_split[0], distinct_per_split[1], "degenerate gate: E2M3 and E4M1 decode alike");
+}
+
+#[test]
+fn four_bit_scalars_with_an_odd_element_count_decode_their_partial_last_byte() {
+    for (exponent_bits, mantissa_bits) in [(3, 0), (2, 1)] {
+        let (layout, format) = unnamed_scalar(exponent_bits, mantissa_bits);
+        let width = u32::from(layout.width());
+        let mut codes = every_code_repeated(width);
+        codes.truncate(codes.len() - 1);
+        assert_eq!(codes.len() % 2, 1, "degenerate gate: the element count must be odd");
+        let host = host_decode(&layout, &codes);
+        let metal = metal_decode(format, &pack_low_bits_first(&codes, width), codes.len())
+            .expect("Metal reads a four-bit scalar whose last byte holds one element");
+
+        assert_eq!(differing(&host, &metal), 0, "E{exponent_bits}M{mantissa_bits}: odd-count Metal read differs from host decode");
+    }
 }
