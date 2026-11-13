@@ -49,6 +49,12 @@ fn flint_path() -> String {
 /// points at it. Never skipped: an arm that silently does not run cannot
 /// discharge the acceptance criterion it exists for.
 fn load_flint() -> LoadedModel<'static> {
+    load_flint_with(false)
+}
+
+/// `arm_verify` sets the descriptor's `speculative_verify`, which flint's family profile leaves
+/// off (only gemma4's verify step was measured to pay), so the verify program is lowered at all.
+fn load_flint_with(arm_verify: bool) -> LoadedModel<'static> {
     let path = flint_path();
     crate::test_support::require_fixture(&path, Some("PROXIMA_FLINT_GGUF"));
     let file = File::open(&path).expect("open the real flint checkpoint");
@@ -58,6 +64,16 @@ fn load_flint() -> LoadedModel<'static> {
     // borrow alive without a self-referential struct.
     let bytes: &'static [u8] = Box::leak(Box::new(mapping));
     let parsed = parse_complete(bytes).expect("parse the real flint header");
+    if arm_verify {
+        let decode = crate::header_descriptor(&parsed, crate::KvLayout::SlidingRing)
+            .expect("read the real flint header descriptor");
+        let armed = proxima_tensor::spec::ModelDescriptor {
+            speculative_verify: true,
+            ..decode
+        };
+        return LoadedModel::load_with_descriptor(&parsed, bytes, &armed)
+            .expect("bind the real flint checkpoint with verify armed");
+    }
     LoadedModel::load(&parsed, bytes).expect("bind the real flint checkpoint")
 }
 
@@ -102,5 +118,78 @@ fn flint_greedy_parity_metal_reproduces_llama_cpps_captured_ids() {
         "metal: first divergent id from llama.cpp {} (ours {token_ids:?}, theirs {:?}, text {text:?})",
         oracle.llama_build,
         oracle.generated_ids
+    );
+}
+
+/// Speculation must never change greedy output. Both arms pin a binary16 KV cache
+/// explicitly (flint's default), so the speculative arm's verify steps attend several
+/// query rows against that cache through the row-tiled kernel; `verify_steps > 0` is the
+/// counter proving the verify path ran rather than every step falling back to single-row
+/// decode. The ids must equal the speculation-off run and llama.cpp's captured ids.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+#[test]
+fn speculative_decoding_with_a_binary16_kv_cache_keeps_flint_greedy_ids() {
+    use core::ops::ControlFlow;
+
+    use proxima_numeric::NumericFormat;
+
+    use crate::SpeculativeDecodeStats;
+    use crate::serving::{SpeculativeConfig, SpeculativeTypeSet};
+
+    // the Gettysburg Address opening quoted twice, the second quote cut mid-sentence: the last
+    // 12 prompt tokens then recur earlier, so ngram-simple (size_n 12, size_m 48) drafts the
+    // rest of the sentence with no forced width.
+    const OPENING: &str = "Four score and seven years ago our fathers brought forth on this continent, a new nation, conceived in Liberty, and dedicated to the proposition that all men are created equal.";
+    let prompt = format!(
+        "{OPENING} Now we are engaged in a great civil war, testing whether that nation, or any nation so conceived and so dedicated, can long endure.\n\nQuoted again: Four score and seven years ago our fathers brought forth on this continent, a new nation, conceived in Liberty, and dedicated to the"
+    );
+    const MAX_TOKENS: usize = 24;
+    let model = load_flint_with(true);
+    assert!(
+        model.speculative_verify_program.is_some() || model.recurrent_speculative_verify.is_some(),
+        "flint armed no verify program, so no step can verify"
+    );
+    assert!(
+        crate::kv_cache_format::row_tiled_reads(
+            &NumericFormat::Float16,
+            &NumericFormat::Float16,
+            u64::from(model.architecture.head_dim),
+        ),
+        "the row-tiled verify kernel must read a binary16 cache"
+    );
+    let arm = |speculative: SpeculativeConfig<'static>| ServingConfig {
+        kv_cache_key_quant: NumericFormat::Float16,
+        kv_cache_value_quant: NumericFormat::Float16,
+        speculative,
+        ..config(crate::serving::GPU_LAYERS_ALL)
+    };
+
+    let off = arm(SpeculativeConfig::none());
+    assert_eq!(off.speculative.speculative_types, SpeculativeTypeSet::empty());
+    let (off_ids, off_text, _) = model
+        .generate_with_serving_config(&prompt, MAX_TOKENS, off)
+        .expect("speculation off with a binary16 cache must run on Metal");
+
+    let mut stats = SpeculativeDecodeStats::default();
+    let (on_ids, on_text, _) = model
+        .generate_streaming_with_speculative_stats(
+            &prompt,
+            MAX_TOKENS,
+            arm(SpeculativeConfig::ngram_simple()),
+            &mut |_| ControlFlow::Continue(()),
+            &mut stats,
+            None,
+        )
+        .expect("ngram-simple speculation with a binary16 cache must run on Metal");
+
+    eprintln!("speculative stats: {stats:?}");
+    assert!(
+        stats.verify_steps > 0 && stats.drafted_total > 0,
+        "the speculative arm never ran a verify step, so the row-tiled path was not exercised: {stats:?}"
+    );
+    assert_eq!(
+        first_id_divergence(&off_ids, &on_ids),
+        None,
+        "speculation changed greedy ids (off {off_ids:?}, on {on_ids:?}, off text {off_text:?}, on text {on_text:?})"
     );
 }
