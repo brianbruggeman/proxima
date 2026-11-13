@@ -1911,27 +1911,28 @@ fn q4_0_codec_falls_back_to_per_element_for_a_non_plain_product_reduce() {
 }
 
 /// Same landmine `q4_0_codec_never_takes_the_row_blocked_path_even_at_a_256_extent`
-/// closes, proven for BOTH half-precision codecs at once: neither is a
-/// K-quant, so both must reject via `NotKQuantCodec` and render through
+/// closes, proven for BOTH half-precision codecs at once: a half-precision
+/// weight is not a K-quant, so an op the scalar run body does not render (a
+/// `Maximum` reduce) must reject via `BlockBodyNotRendered` and render through
 /// the generic per-element accessor -- `Float16`'s direct `half` index,
 /// `BFloat16`'s `bf16_element` widen -- never the row-blocked path's
 /// `q4k_run8`/`q5k_value`/`q6k_value` calls.
 #[proxima::test]
 #[case::float16(Codec::Float16, "in0[")]
 #[case::bfloat16(Codec::BFloat16, "bf16_element(")]
-async fn half_precision_codec_never_takes_the_row_blocked_path_even_at_a_256_extent(
+async fn half_precision_codec_outside_the_run_body_never_takes_a_k_quant_row_blocked_path(
     #[case] codec: Codec,
     #[case] expected_read: &str,
 ) {
-    let bound = matmul_op(4, 256, 5);
+    let bound = matmul_op_with_reduce(4, 256, 5, ScalarOp::Maximum);
     let weight_node = bound.operands()[0].0;
     let mut operands = BTreeMap::new();
     operands.insert(weight_node, codec);
 
     assert_eq!(
         classify_packed_row_block(&bound, &operand_codecs(&bound, &operands)).err(),
-        Some(PackedRowBlockRejection::NotKQuantCodec),
-        "{codec:?} must be rejected by codec, not admitted just because 256 is a multiple of its own block size"
+        Some(PackedRowBlockRejection::BlockBodyNotRendered),
+        "{codec:?} at a non-plain-product reduce must be rejected by the run body's own gate"
     );
     assert!(
         packed_row_block(&bound, &operand_codecs(&bound, &operands)).is_none(),
@@ -6162,10 +6163,10 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         &block,
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
-        false,
+        true,
         &MetalOnlyExtras::default(),
     )
-    .expect_err("F16 never reaches the row-blocked path");
+    .expect_err("F16 from an expert source has no row-blocked body: the scalar run body excludes expert sources");
     assert!(matches!(
         error,
         EmitError::NonKQuantCodec { codec: "float16", .. }
@@ -11498,7 +11499,7 @@ async fn block_codec_outside_the_plane_body_names_the_property_it_lacks(#[case] 
 }
 
 #[test]
-fn legacy_super_block_codecs_keep_their_256_extent_and_scalars_stay_unadmitted() {
+fn legacy_super_block_codecs_keep_their_256_extent_and_scalars_take_the_run_extent() {
     for codec in [Codec::Q3K, Codec::Q4K, Codec::Q5K, Codec::Q6K, Codec::Q8_0, Codec::Q4_0, Codec::Fp6E3M2] {
         assert_eq!(row_block_extent_multiple(codec), Some(256), "{codec:?}");
         assert_eq!(block_rendered_elements(codec), None, "{codec:?}");
@@ -11507,6 +11508,34 @@ fn legacy_super_block_codecs_keep_their_256_extent_and_scalars_stay_unadmitted()
         assert_eq!(row_block_extent_multiple(codec), Some(32), "{codec:?}");
     }
     for codec in [Codec::Float16, Codec::BFloat16] {
-        assert_eq!(row_block_extent_multiple(codec), None, "{codec:?} is a scalar, design cards 13-14");
+        assert_eq!(row_block_extent_multiple(codec), Some(crate::sized::PACKED_ROW_SCALAR_RUN), "{codec:?} is a scalar read in runs");
     }
+    for codec in [Codec::Bf8E5M2, Codec::BFloat8, Codec::Bf4E2M1] {
+        assert_eq!(row_block_extent_multiple(codec), None, "{codec:?} has no run body yet");
+    }
+}
+
+#[proxima::test]
+#[case::f16(Codec::Float16, "device const half *blk_ptr", "(float)blk[j] * acts[j]")]
+#[case::bf16(Codec::BFloat16, "device const uchar *blk_ptr", "bf16_element(blk, j) * acts[j]")]
+async fn scalar_weight_at_reduce_896_is_admitted_and_emits_the_run_body(#[case] codec: Codec, #[case] pointer: &str, #[case] term: &str) {
+    let bound = matmul_op_with_reduce(4, 896, 1, ScalarOp::Add);
+    let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+
+    let block = classify_packed_row_block(&bound, &operand_codecs(&bound, &packed)).expect("a scalar at a run-multiple reduce is admitted");
+    let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("the scalar run body renders");
+
+    assert_eq!(block.codec, codec);
+    assert!(kernel.source.contains(pointer), "{codec:?} binds the run pointer as {pointer}");
+    assert!(kernel.source.contains(term), "{codec:?} folds value * act per term");
+    assert!(kernel.source.contains("reduced_row0"), "{codec:?} reduces through the row-blocked tail");
+}
+
+#[proxima::test]
+#[case::max_reduce(matmul_op_with_reduce(4, 896, 1, ScalarOp::Maximum), PackedRowBlockRejection::BlockBodyNotRendered)]
+#[case::ragged_run(matmul_op_with_reduce(4, 900, 1, ScalarOp::Add), PackedRowBlockRejection::ExtentNotBlockMultiple { extent: 900 })]
+async fn scalar_weight_outside_the_run_body_names_the_property_it_lacks(#[case] bound: BoundOp, #[case] expected: PackedRowBlockRejection) {
+    let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Float16)]);
+
+    assert_eq!(classify_packed_row_block(&bound, &operand_codecs(&bound, &packed)).err(), Some(expected));
 }

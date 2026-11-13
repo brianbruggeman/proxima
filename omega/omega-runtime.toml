@@ -36,6 +36,15 @@ simdgroups = 1
 # `OMEGA_PACKED_ROW_BLOCK_Q6K_ROWS`.
 q6k_rows = 2
 
+# consecutive weights one lane loads per run in the row-blocked scalar-float body
+# (`FlatBlockForm::scalar`, `Fold::Plain`; F16, BF16): lane `l` takes runs
+# `l + 32*i`. 8 halves are one 16-byte load per lane per run. Larger means fewer address
+# updates and activation gathers per weight, more registers (`acts[run]`). The reduce extent must
+# be a multiple of it or the op stays on the cooperative kernel -- see
+# sized::PACKED_ROW_SCALAR_RUN. Overridable per-build via
+# `OMEGA_PACKED_ROW_BLOCK_SCALAR_RUN`.
+scalar_run = 8
+
 # `metal-q4k-split-k`-only ceiling on the row-blocked packed matmul's OUTPUT
 # row count (`output_total` in `msl.rs`'s `packed_row_dispatch`) above which
 # split-K never engages, regardless of what `[packed_row_split_k]`'s
