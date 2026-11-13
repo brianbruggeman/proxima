@@ -60,6 +60,7 @@ use omega::config::RuntimeConfig;
 use omega::{DispatchType, MathMode};
 use proxima_gguf::types::GgmlType;
 use proxima_numeric::{NumericFormat, NumericPolicy};
+use proxima_tensor::spec::KvCacheShape;
 
 use crate::error::InteropError;
 use crate::kv_cache_format;
@@ -1125,12 +1126,23 @@ pub struct ServingConfig<'model> {
     /// `PROXIMA_COMMAND_BUFFER_CHUNKS=K` still overrides this per-process
     /// when set -- the same A/B escape hatch this field now supplies a
     /// config-sourced default for, not a replacement for it. A checkpoint
-    /// whose family profile declares its own
-    /// non-default split count (`FamilyProfile::command_buffer_chunks`'s own
-    /// doc -- the sliding-pattern family's is `8`, the Intervention 6 measured decode
-    /// configuration) uses that value instead of this field's own default,
+    /// whose architecture has a measured split count
+    /// (`serving_defaults::MeasuredServingDefaults::command_buffer_chunks`)
+    /// uses that value instead of this field's own default,
     /// but never overrides a caller who set this field explicitly.
     pub command_buffer_chunks: u32,
+    /// Replaces the architecture's measured speculative-verify arming
+    /// (`serving_defaults::MeasuredServingDefaults::speculative_verify`) when
+    /// `Some`; `None` keeps the measured value. Applies wherever a descriptor
+    /// is built from these defaults through
+    /// `MeasuredServingDefaults::with_overrides`.
+    pub speculative_verify_override: Option<bool>,
+    /// Replaces the architecture's measured decode-time KV cache shape when
+    /// `Some`; `None` keeps the measured value.
+    pub kv_cache_shape_override: Option<KvCacheShape>,
+    /// Replaces the architecture's measured activation format when `Some`;
+    /// `None` keeps the measured value.
+    pub activation_override: Option<NumericFormat>,
     /// Not an upstream llama-server flag -- a hard ceiling on
     /// `omega::metal::MetalStageTotals::gpu_exec_calls` (Metal command
     /// buffers committed) per decode step, checked in
@@ -1349,6 +1361,9 @@ impl Default for ServingConfig<'static> {
             plan_time_constants: true,
             plan_refit: true,
             command_buffer_chunks: 1,
+            speculative_verify_override: None,
+            kv_cache_shape_override: None,
+            activation_override: None,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,
@@ -1938,6 +1953,9 @@ mod tests {
             plan_time_constants: true,
             plan_refit: true,
             command_buffer_chunks: 1,
+            speculative_verify_override: None,
+            kv_cache_shape_override: None,
+            activation_override: None,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,
@@ -2127,6 +2145,9 @@ mod tests {
             plan_time_constants: true,
             plan_refit: true,
             command_buffer_chunks: 1,
+            speculative_verify_override: None,
+            kv_cache_shape_override: None,
+            activation_override: None,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,
@@ -2261,6 +2282,9 @@ mod tests {
             plan_time_constants: true,
             plan_refit: true,
             command_buffer_chunks: 1,
+            speculative_verify_override: None,
+            kv_cache_shape_override: None,
+            activation_override: None,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,
@@ -2368,6 +2392,9 @@ mod tests {
             plan_time_constants: true,
             plan_refit: true,
             command_buffer_chunks: 1,
+            speculative_verify_override: None,
+            kv_cache_shape_override: None,
+            activation_override: None,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,
@@ -2465,6 +2492,9 @@ mod tests {
             plan_time_constants: true,
             plan_refit: true,
             command_buffer_chunks: 1,
+            speculative_verify_override: None,
+            kv_cache_shape_override: None,
+            activation_override: None,
             max_command_buffers_per_token: 0,
             resident_prefill_plan_bytes: DEFAULT_RESIDENT_PREFILL_PLAN_BYTES,
             resident_kv_bytes: DEFAULT_RESIDENT_KV_BYTES,

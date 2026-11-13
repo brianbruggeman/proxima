@@ -72,7 +72,9 @@ fn recurrent_mainline_profile_is_data() {
     assert_eq!(profile.rope_pairing(2), RopePairing::Interleaved);
     assert!(profile.ffn.post_attention_norm && profile.ffn.exclusive_dense_post_norm);
     assert_eq!(
-        profile.kv_cache_shape,
+        crate::serving_defaults::measured_serving_defaults("ouro")
+            .expect("the ouro serving defaults are embedded")
+            .kv_cache_shape,
         proxima_tensor::spec::KvCacheShape::Custom
     );
 }
@@ -98,6 +100,55 @@ fn recurrent_mainline_header_descriptor_repeats_the_physical_schedule() {
     assert_eq!(
         descriptor.layers[0].attention.rope_pairing,
         RopePairing::Interleaved
+    );
+}
+
+#[test]
+fn a_load_with_a_cache_shape_override_changes_the_single_range_gate_input() {
+    let bytes = tiny_ouro_gguf(2, false);
+    let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+
+    let measured = LoadedModel::load_with_serving(&parsed, &bytes, &ServingConfig::default())
+        .expect("load with no override");
+    let overridden = LoadedModel::load_with_serving(
+        &parsed,
+        &bytes,
+        &ServingConfig {
+            kv_cache_shape_override: Some(proxima_tensor::spec::KvCacheShape::Uniform),
+            ..ServingConfig::default()
+        },
+    )
+    .expect("load with a uniform cache shape override");
+
+    assert_eq!(
+        measured.kv_cache_shape,
+        proxima_tensor::spec::KvCacheShape::Custom
+    );
+    assert_eq!(
+        overridden.kv_cache_shape,
+        proxima_tensor::spec::KvCacheShape::Uniform
+    );
+}
+
+#[test]
+fn a_load_whose_overrides_equal_the_measured_values_keeps_the_measured_shape() {
+    let bytes = tiny_ouro_gguf(2, false);
+    let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+
+    let overridden = LoadedModel::load_with_serving(
+        &parsed,
+        &bytes,
+        &ServingConfig {
+            activation_override: Some(proxima_numeric::NumericFormat::Float32),
+            speculative_verify_override: Some(false),
+            ..ServingConfig::default()
+        },
+    )
+    .expect("load with overrides equal to the measured values");
+
+    assert_eq!(
+        overridden.kv_cache_shape,
+        proxima_tensor::spec::KvCacheShape::Custom
     );
 }
 

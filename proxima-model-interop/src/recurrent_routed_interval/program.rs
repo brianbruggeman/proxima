@@ -32,6 +32,7 @@ pub use proxima_tensor::spec::MoeLayerDiagnostics;
 use super::hparams::{LayerKind as HeaderLayerKind, RecurrentRoutedIntervalHparams};
 use crate::error::InteropError;
 use crate::profiles::family_profile;
+use crate::serving_defaults::measured_serving_defaults;
 
 /// [`recurrent_routed_interval_forward_program`]'s own return shape: the built `Vec<Op>`,
 /// its logits/hidden roots, each layer's production cache-root tag, every
@@ -57,6 +58,7 @@ pub fn descriptor_from_architecture(
     width: Option<u32>,
 ) -> Result<ModelDescriptor, InteropError> {
     let profile = family_profile(&architecture.family)?;
+    let measured = measured_serving_defaults(&architecture.family)?;
     let attention = LayerAttentionConfig {
         head_dim: architecture.attn_head_dim,
         kv_heads: 0,
@@ -93,7 +95,7 @@ pub fn descriptor_from_architecture(
         .collect();
     Ok(ModelDescriptor {
         network: None,
-        activation: profile.activation,
+        activation: measured.activation,
         vocab: architecture.vocab,
         embedding: architecture.embedding,
         feed_forward: 0,
@@ -119,7 +121,7 @@ pub fn descriptor_from_architecture(
         fused_qkv_reduce: false,
         head_repeats: 1,
         last_row_only: true,
-        speculative_verify: profile.speculative_verify,
+        speculative_verify: measured.speculative_verify,
         ssm_conv_kernel: architecture.ssm_conv_kernel,
         ssm_state_size: architecture.ssm_state_size,
         ssm_group_count: architecture.ssm_group_count,

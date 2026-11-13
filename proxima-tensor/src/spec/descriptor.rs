@@ -318,8 +318,8 @@ pub struct ModelDescriptor {
     #[serde(default)]
     pub network: Option<blocks::Network>,
     /// The numeric format activation and intermediate values are produced at,
-    /// a proxima-numeric [`NumericFormat`] spelled in a family profile or model
-    /// config as `activation = "float32"`. Weights stay in the format they are
+    /// a proxima-numeric [`NumericFormat`] spelled in a model config as
+    /// `activation = "float32"` or set from the serving defaults a loader applies. Weights stay in the format they are
     /// bound as; norm accumulators, index math and counts keep their own
     /// contract formats. Absent means binary32. Read today by the stem of
     /// `CacheMask::Bounded`'s builder (`embedding_lookup_as`, the embedding
@@ -511,40 +511,17 @@ pub struct FamilyProfile {
     /// cached engine, the only one that gives every pass its own KV.
     #[serde(default)]
     pub recurrence: Option<RecurrenceProfile>,
-    /// Lower the verify program by default ([`ModelDescriptor::speculative_verify`]):
-    /// set only for a family whose measured verify step costs less than the
-    /// tokens its drafts save.
-    #[serde(default)]
-    pub speculative_verify: bool,
     /// Which header reader fills this family's [`ModelDescriptor`]: the layout
     /// the GGUF header uses to spell the layer schedule. Config selects a
     /// compiled reader; a family whose header already reads as one of these
     /// layouts is a profile file with no Rust.
     #[serde(default)]
     pub schedule_source: ScheduleSource,
-    /// The decode-time cache shape the lowered program needs from the runtime
-    /// loop, read once per load. A value other than [`KvCacheShape::Uniform`]
-    /// keeps the family off the placed single-range cached program.
-    #[serde(default)]
-    pub kv_cache_shape: KvCacheShape,
-    /// Measured default for the number of command-buffer chunks one decode
-    /// step is submitted in. `1` unless this family's decode was measured to
-    /// gain from chunked submission; an explicit caller value always wins.
-    #[serde(default = "default_command_buffer_chunks")]
-    pub command_buffer_chunks: u32,
     /// The V-head order a recurrent checkpoint uses when its header omits
     /// `{family}.ssm.v_head_reordered`: `true` for a family whose converter tiles
     /// V heads the way llama.cpp's does. An explicit header value always wins.
     #[serde(default)]
     pub ssm_v_head_reordered: bool,
-    /// The format this family's activations are produced at
-    /// ([`ModelDescriptor::activation`]); absent means binary32.
-    #[serde(default = "default_activation")]
-    pub activation: NumericFormat,
-}
-
-const fn default_command_buffer_chunks() -> u32 {
-    1
 }
 
 /// How a family's GGUF header spells its layer schedule, as data on
@@ -567,11 +544,11 @@ pub enum ScheduleSource {
     RecurrentRoutedInterval,
 }
 
-/// The decode-time shape of a lowered program's KV cache, as data on
-/// [`FamilyProfile::kv_cache_shape`]. Distinct from [`CacheStrategy`], which
+/// The decode-time shape of a lowered program's KV cache, as a measured
+/// serving setting. Distinct from [`CacheStrategy`], which
 /// picks the lowering engine: this describes what the already-built program's
 /// cache needs from the decode loop.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KvCacheShape {
     /// One uniform per-layer attention cache, which the single-range cached
@@ -768,7 +745,7 @@ pub fn gqa_descriptor_from_shape(
         fused_qkv_reduce,
         head_repeats: 1,
         last_row_only: true,
-        speculative_verify: profile.speculative_verify,
+        speculative_verify: false,
         ssm_conv_kernel: 0,
         ssm_state_size: 0,
         ssm_group_count: 0,
@@ -786,7 +763,7 @@ pub fn gqa_descriptor_from_shape(
         recurrence: None,
         loopcd: LoopCdConfig::default(),
         network: None,
-        activation: profile.activation,
+        activation: default_activation(),
     }
 }
 

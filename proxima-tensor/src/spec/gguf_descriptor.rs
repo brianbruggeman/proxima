@@ -300,7 +300,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         fused_qkv_reduce: false,
         head_repeats: 1,
         last_row_only: true,
-        speculative_verify: profile.speculative_verify,
+        speculative_verify: false,
         ssm_conv_kernel: 0,
         ssm_state_size: 0,
         ssm_group_count: 0,
@@ -318,7 +318,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         recurrence: None,
         loopcd: LoopCdConfig::default(),
         network: None,
-        activation: profile.activation,
+        activation: DType::FLOAT32.numeric_format(),
     })
 }
 

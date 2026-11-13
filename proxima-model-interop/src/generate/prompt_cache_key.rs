@@ -101,6 +101,7 @@ pub(super) struct CacheKey {
     /// `-ctv`: the same for the value rows; it can differ from the key's
     /// format (a block key layout beside a narrow scalar value).
     pub(super) kv_cache_value_quant: NumericFormat,
+    pub(super) activation_override: Option<NumericFormat>,
 }
 
 impl CacheKey {
@@ -208,6 +209,12 @@ impl CacheKey {
             plan_refit: _,
             // how one step's dispatches split across command buffers
             command_buffer_chunks: _,
+            // arming only decides whether a verify program exists: the rows are the same
+            speculative_verify_override: _,
+            // placement of the decode caches, same values
+            kv_cache_shape_override: _,
+            // a different activation format changes every row
+            activation_override,
             max_command_buffers_per_token: _,
             // device memory held for plans between calls: never changes rows
             resident_prefill_plan_bytes: _,
@@ -265,6 +272,7 @@ impl CacheKey {
             read,
             kv_cache_key_quant,
             kv_cache_value_quant,
+            activation_override,
         }
     }
 }

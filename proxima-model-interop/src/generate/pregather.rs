@@ -9,7 +9,8 @@ fn canonical_safetensors_descriptor(
     architecture: &ModelHparams,
 ) -> Result<ModelDescriptor, InteropError> {
     let profile = family_profile(&architecture.family)?;
-    Ok(gqa_descriptor_from_shape(
+    let measured = measured_serving_defaults(&architecture.family)?;
+    Ok(measured.apply_to_descriptor(gqa_descriptor_from_shape(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -24,7 +25,7 @@ fn canonical_safetensors_descriptor(
         false,
         false,
         &profile,
-    ))
+    )))
 }
 
 /// `{arch}.expert_count` (or a descriptor's `expert_count`) above zero is the
@@ -2731,6 +2732,74 @@ impl<'file> LoadedModel<'file> {
         source: WeightSource<'_, 'file>,
         vocab: Option<Vocab>,
     ) -> Result<Self, InteropError> {
+        Self::load_inner_serving(
+            parsed, file_bytes, kv_layout, descriptor, source, vocab, None,
+        )
+    }
+
+    /// [`Self::load`] with the operator's serving overrides in hand: the
+    /// measured defaults for this architecture
+    /// ([`crate::serving_defaults::MeasuredServingDefaults`]) with every `Some`
+    /// override on `serving_config` applied before the program is lowered.
+    ///
+    /// `speculative_verify_override` and `activation_override` shape the lowered
+    /// program, so a load that sets either builds from the header descriptor
+    /// with them applied; `kv_cache_shape_override` decides the single-range
+    /// gate. With every override `None` this is [`Self::load`] exactly.
+    /// Compose the primitives directly ([`Self::load_with_descriptor`]) when
+    /// the descriptor is hand-written.
+    ///
+    /// # Errors
+    ///
+    /// Whatever [`Self::load`] can fail with.
+    pub fn load_with_serving(
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        serving_config: &ServingConfig<'_>,
+    ) -> Result<Self, InteropError> {
+        let family = metadata_str(parsed, "general.architecture")?;
+        let measured = measured_serving_defaults(family)?;
+        let effective = measured.with_overrides(serving_config);
+        if effective.speculative_verify == measured.speculative_verify
+            && effective.activation == measured.activation
+        {
+            return Self::load_inner_serving(
+                parsed,
+                file_bytes,
+                KvLayout::SlidingRing,
+                None,
+                WeightSource::Gguf,
+                None,
+                Some(serving_config),
+            );
+        }
+        let header = crate::lowering::header_descriptor(parsed, KvLayout::SlidingRing)?;
+        let descriptor = effective.apply_to_descriptor(header);
+        let kv_layout = if descriptor.sliding_kv_ring {
+            KvLayout::SlidingRing
+        } else {
+            KvLayout::Full
+        };
+        Self::load_inner_serving(
+            parsed,
+            file_bytes,
+            kv_layout,
+            Some(&descriptor),
+            WeightSource::Gguf,
+            None,
+            Some(serving_config),
+        )
+    }
+
+    fn load_inner_serving(
+        parsed: &ParsedGguf,
+        file_bytes: &'file [u8],
+        kv_layout: KvLayout,
+        descriptor: Option<&ModelDescriptor>,
+        source: WeightSource<'_, 'file>,
+        vocab: Option<Vocab>,
+        serving_config: Option<&ServingConfig<'_>>,
+    ) -> Result<Self, InteropError> {
         // ROW 533's own mechanism (`proxima-tensor/docs/discipline.md`): a
         // non-resident page behind the no-copy `MTLBuffer`
         // `register_checkpoint_mapping` installs below reads as zero rather
@@ -2787,14 +2856,19 @@ impl<'file> LoadedModel<'file> {
         // which names the header reader, the cache shape, the routing and the
         // chunk default; `crate::lowering` binds and lowers from that one
         // config, so no per-family branch exists here.
-        let profile = family_profile(metadata_str(parsed, "general.architecture")?)?;
+        let architecture_name = metadata_str(parsed, "general.architecture")?;
+        let profile = family_profile(architecture_name)?;
+        let measured = serving_config.map_or_else(
+            || measured_serving_defaults(architecture_name),
+            |config| Ok(measured_serving_defaults(architecture_name)?.with_overrides(config)),
+        )?;
         let bound = source.bind(parsed, file_bytes, kv_layout, descriptor)?;
         let expert_count =
             descriptor.map_or(bound.architecture.expert_count, |config| config.expert_count);
         let has_experts = checkpoint_has_experts(expert_count);
         debug!(
             family = ?profile.schedule_source,
-            kv_cache_shape = ?profile.kv_cache_shape,
+            kv_cache_shape = ?measured.kv_cache_shape,
             experts = expert_count,
             "family_route"
         );
@@ -2822,7 +2896,7 @@ impl<'file> LoadedModel<'file> {
         // scheme (a materially different device-buffer design, not a
         // mechanical port).
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let single_range = if profile.kv_cache_shape != KvCacheShape::Uniform {
+        let single_range = if measured.kv_cache_shape != KvCacheShape::Uniform {
             None
         } else {
             let qk_norm = descriptor.map_or_else(
@@ -2833,7 +2907,7 @@ impl<'file> LoadedModel<'file> {
         };
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         debug!(
-            kv_cache_shape = ?profile.kv_cache_shape,
+            kv_cache_shape = ?measured.kv_cache_shape,
             built = single_range.is_some(),
             "single_range_program: built only for a uniform kv cache shape the single-range builder admits"
         );
@@ -2888,10 +2962,10 @@ impl<'file> LoadedModel<'file> {
             weights: Arc::new(SharedWeights::new(bound.weights, file_bytes)),
             safetensors_descriptor: None,
             architecture: bound.architecture,
-            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            kv_cache_shape: profile.kv_cache_shape,
+            #[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
+            kv_cache_shape: measured.kv_cache_shape,
             has_experts,
-            command_buffer_chunks: profile.command_buffer_chunks,
+            command_buffer_chunks: measured.command_buffer_chunks,
             trained_context_length: crate::lowering::trained_context_length(parsed),
             rope_scaling,
             kv_layers,
@@ -3118,7 +3192,7 @@ impl<'file> LoadedModel<'file> {
             weights,
             safetensors_descriptor: Some(descriptor.clone()),
             architecture,
-            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            #[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
             kv_cache_shape: KvCacheShape::Uniform,
             has_experts: false,
             command_buffer_chunks: 1,
@@ -3188,8 +3262,8 @@ impl<'file> LoadedModel<'file> {
 /// Regression coverage for the SECOND forward crash on the E2B checkpoint
 /// (`Metal(Tensor(UnboundInputName("blk.15.attn_k.weight")))`, measured
 /// against the real `e2b-it-qat` checkpoint on Metal): `Self::load`'s
-/// `profile.kv_cache_shape != KvCacheShape::Uniform` gate above
-/// (the sliding-pattern family profile's `kv_cache_shape` is
+/// `measured.kv_cache_shape != KvCacheShape::Uniform` gate above
+/// (the sliding-pattern architecture's measured `kv_cache_shape` is
 /// `KvCacheShape::Custom`) is what stops
 /// `build_single_range_program` from ever running for sliding-pattern, and this
 /// module proves both halves of why that gate is necessary, without

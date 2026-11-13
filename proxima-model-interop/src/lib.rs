@@ -117,6 +117,8 @@ mod kv_cache_format;
 mod serving;
 mod serving_grammar;
 #[cfg(feature = "std")]
+mod serving_defaults;
+#[cfg(feature = "std")]
 mod serving_settings;
 #[cfg(all(feature = "std", feature = "proxima-storage"))]
 mod source;
@@ -234,6 +236,8 @@ pub use serving_grammar::{AssembleStep, ReadSpec};
     target_os = "macos"
 ))]
 pub use serving_settings::AttentionTileHeightSetting;
+#[cfg(feature = "std")]
+pub use serving_defaults::{MeasuredServingDefaults, measured_serving_defaults};
 #[cfg(feature = "std")]
 pub use serving_settings::{
     AdmissionScheduleSettings, ExpertResidencyScheduleSettings, PhaseScheduleSettings,

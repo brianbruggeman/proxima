@@ -2,7 +2,6 @@ score_scale_inverse_sqrt_head_dim = true
 value_norm = false
 rope_layout = "split_half"
 schedule_source = "recurrent_interval"
-kv_cache_shape = "custom"
 ssm_v_head_reordered = true
 
 [ffn]

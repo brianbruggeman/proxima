@@ -34,6 +34,7 @@ use crate::error::InteropError;
 use crate::ffn_inference::with_inferred_ffn;
 use crate::key_inference::{InferredScoreScale, infer_score_scale, with_inferred_keys};
 use crate::profiles::family_profile;
+use crate::serving_defaults::measured_serving_defaults;
 use crate::task::{ModelTask, classify_task};
 
 /// This header's descriptor and hyperparameters, the two values
@@ -106,7 +107,7 @@ pub fn descriptor_from_gguf(
     );
     Ok(ModelDescriptor {
         last_row_only,
-        ..descriptor
+        ..measured_serving_defaults(&architecture.family)?.apply_to_descriptor(descriptor)
     })
 }
 

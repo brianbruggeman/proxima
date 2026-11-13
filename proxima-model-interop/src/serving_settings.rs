@@ -9,6 +9,7 @@ use omega::{AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
 use proxima_numeric::{NumericFormat, NumericPolicy};
+use proxima_tensor::spec::KvCacheShape;
 use serde::{Deserialize, Serialize};
 
 use crate::RopeScaling;
@@ -329,6 +330,15 @@ pub struct ServingSettings {
     #[setting(default = 1)]
     #[builder(default = 1)]
     pub command_buffer_chunks: u32,
+    /// `ServingConfig::speculative_verify_override`: arm or disarm the speculative verify program regardless of the architecture's measured arming; absent keeps the measured value.
+    #[setting(resolve_with = "from_json", default)]
+    pub speculative_verify: Option<bool>,
+    /// `ServingConfig::kv_cache_shape_override`: the decode-time KV cache shape (`uniform`, `custom` or `monolithic`) regardless of the architecture's measured shape; absent keeps the measured value.
+    #[setting(resolve_with = "from_json", default)]
+    pub kv_cache_shape: Option<KvCacheShape>,
+    /// `ServingConfig::activation_override`: the numeric format activations are produced at, spelled as a proxima-numeric format name; absent keeps the measured value.
+    #[setting(resolve_with = "from_json", default)]
+    pub activation: Option<NumericFormat>,
     /// `ServingConfig::max_command_buffers_per_token`: cap on command buffers per token; `0` is no cap.
     #[setting(default = 0)]
     #[builder(default = 0)]
@@ -477,6 +487,9 @@ impl ServingSettings {
             plan_time_constants: self.plan_time_constants,
             plan_refit: self.plan_refit,
             command_buffer_chunks: self.command_buffer_chunks,
+            speculative_verify_override: self.speculative_verify,
+            kv_cache_shape_override: self.kv_cache_shape,
+            activation_override: self.activation,
             max_command_buffers_per_token: self.max_command_buffers_per_token,
             resident_prefill_plan_bytes: self.resident_prefill_plan_bytes,
             resident_kv_bytes: self.resident_kv_bytes,
@@ -1192,6 +1205,35 @@ target = "q8_0"
             missing_pattern.is_err(),
             "an exact rule without a pattern is refused"
         );
+    }
+
+    #[test]
+    fn measured_serving_overrides_lower_and_default_to_absent() {
+        const OVERRIDES_TOML: &str = r#"
+speculative_verify = true
+kv_cache_shape = "monolithic"
+activation = "float16"
+"#;
+
+        let from_toml: ServingSettings =
+            conflaguration::from_toml_str(OVERRIDES_TOML).expect("the override toml parses");
+        let built = ServingSettings::builder()
+            .speculative_verify(true)
+            .kv_cache_shape(KvCacheShape::Monolithic)
+            .activation(NumericFormat::Float16)
+            .build();
+
+        assert_eq!(from_toml, built, "toml and builder agree");
+        let config = built.as_serving_config(&[]);
+        assert_eq!(config.speculative_verify_override, Some(true));
+        assert_eq!(config.kv_cache_shape_override, Some(KvCacheShape::Monolithic));
+        assert_eq!(config.activation_override, Some(NumericFormat::Float16));
+
+        let defaults = ServingSettings::default();
+        let absent = defaults.as_serving_config(&[]);
+        assert_eq!(absent.speculative_verify_override, None);
+        assert_eq!(absent.kv_cache_shape_override, None);
+        assert_eq!(absent.activation_override, None);
     }
 
     #[test]

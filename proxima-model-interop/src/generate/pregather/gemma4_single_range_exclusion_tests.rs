@@ -60,16 +60,16 @@ fn build_single_range_program_declares_blk15_attn_k_for_gemma4_shaped_architectu
     );
 }
 
-/// The actual production gate reads the family profile's
-/// [`proxima_tensor::spec::FamilyProfile::kv_cache_shape`] -- reproduced
-/// here directly so flipping the sliding-pattern profile back to the default breaks
+/// The actual production gate reads the architecture's measured
+/// [`crate::serving_defaults::MeasuredServingDefaults::kv_cache_shape`] -- reproduced
+/// here directly so flipping the sliding-pattern default back to uniform breaks
 /// this test rather than silently reopening the panic this fix closed.
 #[test]
 #[allow(clippy::expect_used)]
 fn load_single_range_exclusion_covers_gemma4() {
     assert_ne!(
-        family_profile("gemma4")
-            .expect("gemma4 profile embedded")
+        measured_serving_defaults("gemma4")
+            .expect("gemma4 serving defaults embedded")
             .kv_cache_shape,
         KvCacheShape::Uniform,
         "gemma4 must stay excluded from the placed-KV single-range program"

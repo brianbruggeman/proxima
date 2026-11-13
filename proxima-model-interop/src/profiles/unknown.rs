@@ -22,11 +22,10 @@ use std::path::PathBuf;
 
 use bon::Builder;
 use conflaguration::{Settings, Validate};
-use proxima_numeric::DType;
 use proxima_telemetry::debug;
 use proxima_tensor::spec::{
-    EmbeddingScale, ExpertGatingFunc, FamilyProfile, FfnCombination,
-    KvCacheShape, LayerFfnConfig, ScheduleSource,
+    EmbeddingScale, ExpertGatingFunc, FamilyProfile, FfnCombination, LayerFfnConfig,
+    ScheduleSource,
 };
 use serde::{Deserialize, Serialize};
 
@@ -118,10 +117,6 @@ pub(crate) fn profile_from_arch_config(family: &str, config: &ArchConfig) -> Fam
     });
     log_default(family, "ffn.combination", "exclusive");
     log_default(family, "schedule_source", "uniform");
-    log_default(family, "kv_cache_shape", "uniform");
-    log_default(family, "command_buffer_chunks", "1");
-    log_default(family, "speculative_verify", "false");
-    log_default(family, "activation_format", "float32");
     FamilyProfile {
         embedding_scale,
         ffn: LayerFfnConfig {
@@ -142,12 +137,8 @@ pub(crate) fn profile_from_arch_config(family: &str, config: &ArchConfig) -> Fam
         qk_norm: true,
         rope_layout: config.rope_layout,
         recurrence: None,
-        speculative_verify: false,
         schedule_source: ScheduleSource::Uniform,
-        kv_cache_shape: KvCacheShape::Uniform,
-        command_buffer_chunks: 1,
         ssm_v_head_reordered: false,
-        activation: DType::FLOAT32.numeric_format(),
     }
 }
 
