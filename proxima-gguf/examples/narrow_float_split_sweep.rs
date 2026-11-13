@@ -489,7 +489,8 @@ fn read_f32_le(path: &str) -> Result<Vec<f32>, Box<dyn Error>> {
     if bytes.len() % 4 != 0 {
         return Err(format!("{path}: {} bytes is not a multiple of 4", bytes.len()).into());
     }
-    Ok(bytes.chunks_exact(4).map(|word| f32::from_le_bytes([word[0], word[1], word[2], word[3]])).collect())
+    let (words, _) = bytes.as_chunks::<4>();
+    Ok(words.iter().map(|word| f32::from_le_bytes(*word)).collect())
 }
 
 fn raw(path: &str, role: &str, label: &str) -> Result<(), Box<dyn Error>> {

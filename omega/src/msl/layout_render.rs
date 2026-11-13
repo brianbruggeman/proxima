@@ -175,6 +175,13 @@ fn field_load_msl(layout: &FloatLayout, name: &str) -> String {
     let fraction_shift = F32_FRACTION_BITS - u32::from(mantissa_bits);
     let implicit = 1u64 << mantissa_bits;
     let reserved = field_load_reserved_msl(layout, exponent_ones, fraction_shift);
+    // no mantissa field means no subnormal range: field 0 is itself the lowest power of two
+    // (`FloatLayout::lowest_exponent`, OCP MX v1.0 Table 7), never zero
+    let (zero_exponent_significand, zero_exponent_scale) = if mantissa_bits == 0 {
+        (String::from("1u"), layout.lowest_exponent().to_string())
+    } else {
+        (String::from("mantissa"), format!("(1 - ({bias}) - {mantissa_bits})"))
+    };
     format!(
         "
 static inline uint {name}_scaled_bits(uint significand, int scale) {{
@@ -200,8 +207,8 @@ static inline float {name}(uint code) {{
     uint mantissa = code & {mantissa_mask:#x}u;
     uint exponent = (code >> {mantissa_bits}u) & {exponent_ones:#x}u;
     uint sign = ((code >> {sign_shift}u) & 1u) << 31u;
-{reserved}    uint significand = exponent == 0u ? mantissa : ({implicit:#x}u | mantissa);
-    int scale = exponent == 0u ? (1 - ({bias}) - {mantissa_bits}) : ((int)exponent - ({bias}) - {mantissa_bits});
+{reserved}    uint significand = exponent == 0u ? {zero_exponent_significand} : ({implicit:#x}u | mantissa);
+    int scale = exponent == 0u ? {zero_exponent_scale} : ((int)exponent - ({bias}) - {mantissa_bits});
     return as_type<float>(sign | {name}_scaled_bits(significand, scale));
 }}
 "

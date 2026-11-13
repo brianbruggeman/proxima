@@ -1377,7 +1377,7 @@ pub const BFLOAT16_BLOCK_ELEMENTS: usize = proxima_gguf::quant::bf16::QK_BF16;
         feature = "cuda-driver"
     )
 ))]
-pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Option<Codec> {
+pub(crate) fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Option<Codec> {
     let (QuantizedBlock::Packed { codec, .. } | QuantizedBlock::PackedStrided { codec, .. }) =
         block
     else {
@@ -1413,8 +1413,35 @@ pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Op
         | Codec::Fp6E3M2
         | Codec::Iq4Xs
         | Codec::Iq3S => Some(*codec),
-        _ => None,
+        unnamed => match unnamed_scalar_layout(unnamed) {
+            Some(_) => Some(unnamed),
+            None => None,
+        },
     }
+}
+
+/// The layout of a scalar format that has no frozen name and whose elements have a flat address
+/// (width fills whole bytes or divides a byte) -- exactly the layouts
+/// [`layout_render::layout_unpack_msl`] renders an accessor for. Admission follows renderability,
+/// not a name list: a new split needs no arm anywhere.
+#[must_use]
+pub(crate) fn unnamed_scalar_layout(codec: Codec) -> Option<FloatLayout> {
+    let Codec::Scalar(layout) = codec else {
+        return None;
+    };
+    let width = layout.width();
+    let flat = width != 0 && width <= 32 && (width % 8 == 0 || 8 % width == 0);
+    if flat && codec_cache_token(codec) == UNRECOGNISED_TOKEN {
+        Some(layout)
+    } else {
+        None
+    }
+}
+
+/// The helper name an unnamed scalar's flat accessor is rendered under, keyed by description so two
+/// splits never share one.
+pub(crate) fn unnamed_scalar_accessor_name(codec: Codec) -> String {
+    format!("{}_element", codec_cache_key(codec))
 }
 
 /// Whether Metal's `operand_read` decodes `codec` from packed bytes -- the one
@@ -1431,10 +1458,11 @@ pub(crate) const fn codec_from_quantized_block(block: &QuantizedBlock<'_>) -> Op
 // list is genuinely unreachable, and `-D warnings` is right to say so
 #[cfg(all(feature = "metal", target_os = "macos"))]
 #[must_use]
-pub(crate) const fn metal_operand_read_decodes(codec: Codec) -> bool {
-    matches!(
-        codec,
-        Codec::Q2K
+pub(crate) fn metal_operand_read_decodes(codec: Codec) -> bool {
+    unnamed_scalar_layout(codec).is_some()
+        || matches!(
+            codec,
+            Codec::Q2K
             | Codec::Q3K
             | Codec::Q4K
             | Codec::Q5K
