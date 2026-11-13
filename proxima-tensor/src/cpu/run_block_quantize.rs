@@ -216,14 +216,8 @@ mod tests {
         for (group, block) in packed.chunks(144).enumerate() {
             for run in 0..4 {
                 let single = &runs[(group * 4 + run) * 36..][..36];
-                // the grouped layout is encoded by the shared walker, which divides by the rounded
-                // scale; the single layout by llama's rule, which multiplies by the inverse of the
-                // unrounded one: same scale, codes within one step, and a stored sum that follows them
-                assert_eq!(&block[run * 4..][..2], &single[..2], "group {group} run {run} scale");
-                for (grouped_code, single_code) in block[16 + run * 32..][..32].iter().zip(&single[4..]) {
-                    let step = i16::from(*grouped_code as i8) - i16::from(*single_code as i8);
-                    assert!(step.abs() <= 1, "group {group} run {run} codes differ by {step}");
-                }
+                assert_eq!(&block[run * 4..][..4], &single[..4], "group {group} run {run} scale and sum");
+                assert_eq!(&block[16 + run * 32..][..32], &single[4..], "group {group} run {run} codes");
             }
         }
     }
@@ -277,15 +271,25 @@ mod tests {
         }
     }
 
-    /// Q8_1's `s` is `f16(d * sum(q))` from the scale before it is rounded to f16, as llama.cpp
-    /// computes it; a re-encode from the decoded grid only has the rounded scale, so that field
+    /// Q8_1's `s` (flat, and each run of the grouped layout) is `f16(d * sum(q))` from the scale
+    /// before it is rounded to f16, as llama.cpp computes it; a re-encode from the decoded grid only has the rounded scale, so that field
     /// may move by one ulp while every other byte is fixed.
     fn without_stored_sums(codec: Codec, packed: &[u8]) -> Vec<u8> {
         let mut bytes = packed.to_vec();
-        if codec == Codec::Q8_1 {
-            for block in bytes.chunks_mut(36) {
-                block[2..4].fill(0);
+        match codec {
+            Codec::Q8_1 => {
+                for block in bytes.chunks_mut(36) {
+                    block[2..4].fill(0);
+                }
             }
+            Codec::Q8_1Grouped => {
+                for block in bytes.chunks_mut(144) {
+                    for run in 0..4 {
+                        block[run * 4 + 2..run * 4 + 4].fill(0);
+                    }
+                }
+            }
+            _ => {}
         }
         bytes
     }
