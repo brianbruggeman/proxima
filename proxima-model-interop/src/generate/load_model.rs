@@ -1462,6 +1462,15 @@ pub(super) fn find_input_node(program: &[Op], name: &str) -> Result<NodeId, Inte
         .ok_or_else(|| InteropError::UnboundInputName(String::from(name)))
 }
 
+/// A layer that declares zero KV heads keeps no KV cache (a short-convolution
+/// layer), and [`ModelHparams::kv_heads`] is zero whenever the per-layer counts
+/// differ: the single-range program has an attention block and a cache in every
+/// layer, so such a stack cannot be expressed in it.
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+fn has_cacheless_layer(architecture: &ModelHparams) -> bool {
+    architecture.kv_heads == 0 || architecture.kv_heads_by_layer.contains(&0)
+}
+
 /// Builds [`SingleRangeProgram`] for a checkpoint whose
 /// `architecture.expert_count == 0` -- `None` for any mixture-of-experts
 /// checkpoint, since [`gqa_single_range_cached_forward_program`] is
@@ -1479,7 +1488,7 @@ pub(super) fn build_single_range_program(
     architecture: &ModelHparams,
     qk_norm: bool,
 ) -> Result<Option<SingleRangeProgram>, InteropError> {
-    if architecture.expert_count != 0 {
+    if architecture.expert_count != 0 || has_cacheless_layer(architecture) {
         return Ok(None);
     }
     // ROW 326/328 diagnostic: same env-knob convention as `PROXIMA_PREFAULT`/
