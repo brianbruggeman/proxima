@@ -1,4 +1,5 @@
 use super::*;
+use crate::bind::{BodyStep, Layout, Lookup};
 
 /// One `(node, expert)` key's selection history: `count` since the last
 /// [`snapshot_expert_selection_top_n`] drain, and `ema` -- updated toward
@@ -130,10 +131,97 @@ pub fn emit_expert_selection_event() {
     }
 }
 
+/// The physical operand `arg` reads once the `Identity` steps between them are
+/// followed, and whether any such step sat in between. `None` when a step on the
+/// way is anything but a one-argument `Identity`.
+fn operand_through_identities(steps: &[BodyStep], arg: &StepArg) -> Option<(usize, bool)> {
+    match arg {
+        StepArg::Operand(index) => Some((usize::from(*index), false)),
+        StepArg::Step(step) => {
+            let BodyStep {
+                op: ScalarOp::Identity,
+                args,
+            } = steps.get(usize::from(*step))?
+            else {
+                return None;
+            };
+            let [inner] = args.as_slice() else {
+                return None;
+            };
+            operand_through_identities(steps, inner).map(|(index, _)| (index, true))
+        }
+    }
+}
+
+/// Whether `steps` over `operands` is `weight * activation` and nothing more: one
+/// final `Multiply` of two distinct physical operands, preceded only by `Identity`
+/// views, with the views allowed on the weight side alone. A weight view is a
+/// slice or transpose of the packed leaf the operand's [`Layout`] already carries
+/// (the fused short-conv projection reads its `B`, `C` and `x` bands this way once
+/// a one-token step no longer broadcasts them over a sequence axis), so the
+/// kernel reads the same packed rows through it. The activation is read as a raw
+/// slice, so a view on it would be dropped and must reject.
+fn is_bare_weight_activation_product(
+    steps: &[BodyStep],
+    operands: &[(NodeId, Layout, Option<Lookup>)],
+    weight_node: NodeId,
+) -> bool {
+    let Some((product, views)) = steps.split_last() else {
+        return false;
+    };
+    let [left, right] = product.args.as_slice() else {
+        return false;
+    };
+    let (Some((left_index, left_viewed)), Some((right_index, right_viewed))) = (
+        operand_through_identities(steps, left),
+        operand_through_identities(steps, right),
+    ) else {
+        return false;
+    };
+    let node_at = |index: usize| operands.get(index).map(|(node, _, _)| *node);
+    let weight_is_left = node_at(left_index) == Some(weight_node);
+    let weight_is_right = node_at(right_index) == Some(weight_node);
+    let activation_viewed = if weight_is_left {
+        right_viewed
+    } else {
+        left_viewed
+    };
+    product.op == ScalarOp::Multiply
+        && views.iter().all(|step| step.op == ScalarOp::Identity)
+        && operands.len() == 2
+        && left_index != right_index
+        && (weight_is_left || weight_is_right)
+        && !activation_viewed
+}
+
+/// The `rows * k` elements of packed `weights` that the weight operand's `layout`
+/// selects, as bytes: `layout.base` elements in, whole blocks on both ends. A
+/// weight read through a slice view (the fused short-conv projection's `C` band
+/// starts one embedding's worth of rows into the fused `in_proj`) is a window of
+/// the leaf; a whole-leaf read has base `0` and `rows * k` elements, so the
+/// window is the leaf. `None` when the window is not block aligned or leaves the
+/// buffer, which a packed row cannot express.
+pub(super) fn packed_weight_window<'bytes>(
+    weights: &'bytes [u8],
+    layout: &Layout,
+    rows: usize,
+    k: usize,
+    block: (usize, usize),
+) -> Option<&'bytes [u8]> {
+    let (block_bytes, block_elements) = block;
+    let start = usize::try_from(layout.base).ok()?;
+    let end = start.checked_add(rows.checked_mul(k)?)?;
+    if !start.is_multiple_of(block_elements) || !end.is_multiple_of(block_elements) {
+        return None;
+    }
+    weights.get(start / block_elements * block_bytes..end / block_elements * block_bytes)
+}
+
 /// [`run_reduce_quantized`]'s admission contract, checked BEFORE it ever
 /// touches a buffer: the fused reduce's `element_body` must be exactly one
 /// step, `Multiply`, over exactly two physical operands (the packed weight
-/// and one already-materialized activation leaf) -- the ONE shape
+/// and one already-materialized activation leaf), the weight optionally seen
+/// through `Identity` views of its own packed leaf -- the ONE shape
 /// [`matmul_q4k_f32`] (and its sibling K-quant/legacy kernels) actually
 /// implements, `activation_row = &activation[...]`, a raw slice read with no
 /// re-application of any composed step. `resolved.operands()` alone cannot
@@ -161,14 +249,7 @@ pub(super) fn packed_reduce_activation_operand(
     else {
         unreachable!("run_reduce_quantized is only called for a Keep::Reduce fold")
     };
-    let is_bare_weight_activation_product = element_body.steps.len() == 1
-        && element_body.steps[0].op == ScalarOp::Multiply
-        && matches!(
-            element_body.steps[0].args.as_slice(),
-            [StepArg::Operand(_), StepArg::Operand(_)]
-        )
-        && operands.len() == 2;
-    if !is_bare_weight_activation_product {
+    if !is_bare_weight_activation_product(&element_body.steps, operands, weight_node) {
         return Err(TensorError::NotLowerable {
             node: resolved.node,
             reason: "packed reduce admits only W\u{b7}a with a materialized a",
@@ -426,6 +507,12 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     if k == 0 || rows == 0 || !weights.len().is_multiple_of(block_bytes) {
         return Err(shape_error());
     }
+    let weights = if weight_gather.is_some() {
+        weights
+    } else {
+        packed_weight_window(weights, weight_layout, rows, k, (block_bytes, block_elements))
+            .ok_or_else(shape_error)?
+    };
     // A gathered weight packs `n_experts` (`weight_gather.extent`) whole
     // `[rows, k]` slabs back to back -- `per_expert_bytes` below is the same
     // byte-concatenation arithmetic `proxima-gguf::restack::plan_stack`

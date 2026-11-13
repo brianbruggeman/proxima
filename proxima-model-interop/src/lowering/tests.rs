@@ -1,6 +1,7 @@
 use alloc::string::ToString;
 
 use proxima_gguf::value::MetadataValue as Value;
+use proxima_tensor::spec::{CacheMask, gqa_descriptor_from_shape};
 
 use super::*;
 use crate::bind::SlidingRope;
@@ -147,4 +148,33 @@ fn trained_context_absent_key_reads_none() {
         None,
         "a header without {{arch}}.context_length must read None, not a default"
     );
+}
+
+/// An lfm2-shaped schedule (one short-conv layer ahead of one attention layer,
+/// `l_cache` 3), lowered under each cache strategy.
+#[proxima::test]
+#[case::cached_short_conv_steps_one_position_per_evaluation(CacheStrategy::Cached, true)]
+#[case::cacheless_short_conv_batches_the_whole_prompt(CacheStrategy::Cacheless, false)]
+async fn a_short_conv_program_binds_a_single_position_step_exactly_when_it_is_cached(
+    #[case] cache_strategy: CacheStrategy,
+    #[case] expected: bool,
+) {
+    let profile =
+        crate::profiles::family_profile("lfm2").expect("lfm2 ships an embedded family profile");
+    let mut descriptor =
+        gqa_descriptor_from_shape(100, 16, 32, 2, 1, 8, 2, 0, 0, false, false, false, false, &profile);
+    descriptor.layers[0].kind = LayerKind::ShortConv;
+    descriptor.l_cache = 3;
+    descriptor.cache_mask = CacheMask::Padded;
+    descriptor.cache_strategy = cache_strategy;
+    let forward = build_forward(&descriptor).expect("a short-conv schedule lowers under either strategy");
+
+    let bound = bound_program(
+        BoundWeights::new(&[]),
+        gemma4_shaped_hparams(None),
+        forward,
+        &descriptor,
+    );
+
+    assert_eq!(bound.single_position_step, expected);
 }

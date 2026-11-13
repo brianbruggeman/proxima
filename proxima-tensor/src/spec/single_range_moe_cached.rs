@@ -1271,4 +1271,18 @@ impl LayerKind {
         }
         Err(TensorError::UndeterminedLayerKind { layer })
     }
+
+    /// Whether a cached lowering carries this kind's state across decode
+    /// steps: [`Self::Attention`] keeps `kv_cache.{layer}.*`
+    /// (`scheduled_two_range_cached_forward_program_with_layer_roots`),
+    /// [`Self::ShortConv`] keeps `shortconv_cache.{layer}.{history,roll_indices}`
+    /// (same builder), and [`Self::Gdn`] keeps `ssm_cache.{layer}.*` in the
+    /// recurrent-hybrid engine `build_forward` selects from the kind itself.
+    /// The match is exhaustive so a new kind must state its cache builder.
+    #[must_use]
+    pub const fn has_cache_builder(self) -> bool {
+        match self {
+            Self::Attention | Self::ShortConv | Self::Gdn => true,
+        }
+    }
 }

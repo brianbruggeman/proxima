@@ -263,14 +263,7 @@ pub fn sliding_pattern_descriptor_from_gguf(
         })
         .collect();
 
-    let cache_strategy = if layers
-        .iter()
-        .all(|entry| entry.kind == LayerKind::Attention)
-    {
-        CacheStrategy::Cached
-    } else {
-        CacheStrategy::Cacheless
-    };
+    let cache_strategy = CacheStrategy::for_layers(&layers);
 
     Ok(ModelDescriptor {
         vocab: vocab_from_token_embedding(parsed, embedding)?,

@@ -22,7 +22,7 @@
 use proxima_gguf::MetadataValue;
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::{
-    AttentionScoreScale, CacheStrategy, EmbeddingScale, FamilyProfile, LayerAttentionConfig,
+    AttentionScoreScale, CacheMask, CacheStrategy, EmbeddingScale, FamilyProfile, LayerAttentionConfig,
     LayerKind, LayerSchedule, ModelDescriptor, gqa_descriptor_from_shape,
 };
 
@@ -140,9 +140,10 @@ fn with_recurrence(
 /// A checkpoint whose header declares zero KV heads on some layers is a hybrid
 /// of attention and short-convolution layers: the tensor directory says which
 /// kind each zero-KV layer is, the dense and routed FFN widths and the leading
-/// dense block count come off the header, and the program is lowered without a
-/// cache because a convolution layer carries state a KV cache cannot hold
-/// ([`CacheStrategy::Cacheless`]). A checkpoint with an attention layer at
+/// dense block count come off the header, and the program is lowered with the
+/// padded two-range cache ([`CacheStrategy::for_layers`], [`CacheMask::Padded`]),
+/// which keeps a convolution layer's history beside the KV cache of the
+/// attention layers. A checkpoint with an attention layer at
 /// every index is returned unchanged.
 fn with_conv_layers(
     descriptor: ModelDescriptor,
@@ -162,7 +163,8 @@ fn with_conv_layers(
             kind,
             ..layer.clone()
         })
-        .collect();
+        .collect::<Vec<_>>();
+    let cache_strategy = CacheStrategy::for_layers(&layers);
     Ok(ModelDescriptor {
         layers,
         feed_forward: metadata_u32_optional(parsed, &format!("{family}.feed_forward_length")),
@@ -172,7 +174,10 @@ fn with_conv_layers(
             absent_leading_dense_block_count(architecture),
         ),
         l_cache: metadata_u32_optional(parsed, &format!("{family}.shortconv.l_cache")),
-        cache_strategy: CacheStrategy::Cacheless,
+        cache_strategy,
+        // the bounded engine refuses a non-attention layer; only the padded
+        // two-range engine builds shortconv_cache.{layer}.* state
+        cache_mask: CacheMask::Padded,
         ..descriptor
     })
 }
