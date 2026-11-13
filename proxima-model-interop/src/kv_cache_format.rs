@@ -25,15 +25,6 @@ fn kernel_codec(format: &NumericFormat) -> Result<Option<NumericFormat>, String>
     omega::cached_attention_key_codec_for(format).map_err(|error| error.to_string())
 }
 
-#[cfg(all(feature = "std", not(feature = "gpu")))]
-fn kernel_codec(format: &NumericFormat) -> Result<Option<NumericFormat>, String> {
-    if is_binary32_format(format) {
-        Ok(None)
-    } else {
-        Err(String::from("this build has no cached-attention kernel that reads a narrow cache"))
-    }
-}
-
 /// The kernel's answer for a K and V stored as different formats.
 #[cfg(feature = "gpu")]
 fn kernel_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
@@ -42,13 +33,18 @@ fn kernel_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String>
         .map_err(|error| error.to_string())
 }
 
+/// Without a cached-attention kernel the host reads the cache: each row is rounded through the
+/// format's own codec at the write (`generate::host_kv_rounding`), so any format that encodes is read.
 #[cfg(not(feature = "gpu"))]
 fn kernel_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
-    if is_binary32_format(key) && is_binary32_format(value) {
-        Ok(())
-    } else {
-        Err(String::from("this build has no cached-attention kernel that reads a narrow cache"))
+    for format in [key, value] {
+        let encodes = is_binary32_format(format)
+            || proxima_numeric::FormatCodec::for_format(format).is_some_and(|codec| codec.can_encode());
+        if !encodes {
+            return Err(String::from("the format has no codec that encodes"));
+        }
     }
+    Ok(())
 }
 
 #[cfg(all(feature = "std", feature = "gpu"))]
@@ -96,7 +92,7 @@ pub(crate) fn is_binary32(format: &NumericFormat) -> bool {
 
 /// Whether the cache is narrower than the graph's binary32 output: the kernel reads it through a
 /// codec, so the step's rows are narrowed into a device-resident cache.
-#[cfg(feature = "std")]
+#[cfg(all(feature = "std", feature = "gpu"))]
 pub(crate) fn is_narrow(format: &NumericFormat) -> bool {
     kernel_codec(format).is_ok_and(|codec| codec.is_some())
 }
@@ -110,6 +106,7 @@ pub(crate) fn row_tiled_reads(key: &NumericFormat, value: &NumericFormat, head_d
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "gpu")]
     use alloc::string::ToString;
 
     use super::*;
@@ -129,16 +126,14 @@ mod tests {
 
     #[cfg(not(feature = "gpu"))]
     #[test]
-    fn a_narrow_cache_is_refused_at_config_time_when_no_kernel_reads_it() {
-        for element in [NumericFormat::Float16, NumericFormat::BFloat16] {
-            let error = admit_pair(&element, &element).expect_err("no kernel reads a narrow cache");
-
-            let message = error.to_string();
-            assert!(message.contains(&format!("{element:?}")), "{message}");
-            assert!(message.contains("no cached-attention kernel that reads a narrow cache"), "{message}");
+    fn a_cpu_only_build_admits_every_format_that_encodes_including_mixed_pairs() {
+        for element in [NumericFormat::Float16, NumericFormat::BFloat16, NumericFormat::Q8_0, NumericFormat::Q4_0] {
+            assert!(admit_pair(&element, &element).is_ok(), "{element:?}");
         }
+        assert!(admit_pair(&NumericFormat::Float16, &NumericFormat::BFloat16).is_ok());
     }
 
+    #[cfg(feature = "gpu")]
     #[test]
     fn a_mixed_pair_is_refused_naming_both_types() {
         let error = admit_pair(&NumericFormat::Float16, &NumericFormat::BFloat16).expect_err("mixed pair");
@@ -146,18 +141,6 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("Float16") && message.contains("BFloat16"), "{message}");
         assert!(message.contains("same type"), "{message}");
-    }
-
-    #[cfg(not(feature = "gpu"))]
-    #[test]
-    fn a_quantized_cache_is_refused_naming_its_format() {
-        for element in [NumericFormat::Q8_0, NumericFormat::Q4_0] {
-            let error = admit_pair(&element, &element).expect_err("quantized cache");
-
-            let message = error.to_string();
-            assert!(message.contains(&format!("{element:?}")), "{message}");
-            assert!(message.contains("no read path"), "{message}");
-        }
     }
 
     #[cfg(feature = "gpu")]
