@@ -27,7 +27,12 @@ use proxima_tensor::spec::{
 use proxima_tensor::config::TensorExecutionConfig;
 use proxima_tensor::cpu::{BufferPools, Evaluated, evaluate_quantized_named_with_config};
 use proxima_tensor::test_support::Lcg;
-use proxima_tensor::{NodeId, Op, QuantizedBlock, block_node_ids, infer};
+use core::pin::pin;
+use core::task::{Context, Poll, Waker};
+
+use proxima_primitives::pipe::Pipe;
+use proxima_tensor::bind::ReadyBatch;
+use proxima_tensor::{BoundOp, BoundOpKind, CachedAttentionArithmetic, Interpreter, NodeId, Op, QuantizedBlock, block_node_ids, infer};
 use proxima_numeric::{NumericPolicy};
 
 /// The numeric policy production actually runs under --
@@ -326,7 +331,7 @@ pub fn evaluate_gpu_oracle(
     outputs: &[NodeId],
 ) -> Evaluated {
     let config = TensorExecutionConfig::builder()
-        .numeric(NumericPolicy::bit_exact().with_flash_narrowing(true))
+        .numeric(gpu_oracle_numeric_policy())
         .build();
     let mut free_buffers = BufferPools::default();
     let mut validated = None;
@@ -597,4 +602,205 @@ pub fn qwen3_gqa_qk_norm_padded_cache_fixture(
     let padded_run = (program.clone(), padded_symbols, roots.clone(), padded);
     let reference_run = (program, reference_symbols, roots, reference);
     (reference_run, padded_run)
+}
+
+/// The query rows a sampled attention parity check compares: the first and
+/// last eight, every 64th, and the rows either side of each point where the
+/// sliding window starts excluding a key (the oldest cached key, and the
+/// first new key). Each query row's attention reads only its own query and
+/// the shared K/V, so a row computed alone equals that row of the full run.
+pub fn sampled_attention_rows(
+    query_rows: u64,
+    cached_len: u64,
+    cached_lower_inclusive: i64,
+) -> Vec<u64> {
+    let total = query_rows as i64;
+    let mut rows: Vec<i64> = (0..8).chain(total - 8..total).chain((0..total).step_by(64)).collect();
+    if cached_lower_inclusive != i64::MIN {
+        for boundary in [-cached_lower_inclusive, -(cached_len as i64) - cached_lower_inclusive] {
+            rows.extend((boundary - 1)..=(boundary + 1));
+        }
+    }
+    rows.retain(|row| (0..total).contains(row));
+    rows.sort_unstable();
+    rows.dedup();
+    rows.into_iter().map(|row| row as u64).collect()
+}
+
+/// Every node the sampled check reads from the device run: each fused
+/// attention op's output and its operand tensors.
+pub fn attention_probe_roots(resolved: &[BoundOp], logits: NodeId) -> Vec<NodeId> {
+    let mut roots = vec![logits];
+    for bound in resolved {
+        if matches!(bound.kind, BoundOpKind::CachedAttention { .. }) {
+            roots.push(bound.node);
+            roots.extend(bound.operands().iter().map(|(node, _, _)| *node));
+        }
+    }
+    roots.sort_unstable();
+    roots.dedup();
+    roots
+}
+
+/// Rows checked and the largest `|cpu - device|` over the largest `|cpu|`,
+/// for one fused attention op whose operands and output came from `device`.
+pub struct SampledAttention {
+    pub rows_checked: usize,
+    pub relative: f32,
+}
+
+/// Runs the CPU attention kernel for the sampled query rows only, at full key
+/// width, over the operand tensors the device run produced, and compares those
+/// rows with the device output. A contiguous run of rows starting at `first`
+/// is a shorter query with every causal band shifted by `first`, which the
+/// kernel evaluates exactly.
+pub fn sampled_attention_against_device(
+    program_len: usize,
+    bound: &BoundOp,
+    device: &Evaluated,
+    cpu_operand_overrides: &[(NodeId, Vec<f32>)],
+) -> SampledAttention {
+    let BoundOpKind::CachedAttention {
+        operands,
+        query_rows,
+        cached_key_rows,
+        kv_heads,
+        query_groups,
+        head_dim,
+        rotary_dim,
+        cached_lower_inclusive,
+        ..
+    } = &bound.kind
+    else {
+        panic!("sampled attention parity needs a fused cached attention op");
+    };
+    assert!(*cached_key_rows != 0, "the shifted band needs the two-range form");
+    let query_operands: Vec<usize> = if rotary_dim < head_dim {
+        vec![0, 1, if has_cached_len(bound) { 9 } else { 8 }]
+    } else {
+        vec![0, 1]
+    };
+    let query_nodes: Vec<NodeId> = query_operands.iter().map(|index| operands[*index].0).collect();
+    let (device_out, _) = device.get(bound.node).expect("device returned the attention output");
+    let row_width = (*kv_heads * *query_groups * *head_dim) as usize;
+    let cached_len = live_cached_len(bound, device);
+    let sampled = sampled_attention_rows(*query_rows, cached_len, *cached_lower_inclusive);
+
+    let mut expected = Vec::new();
+    let mut actual = Vec::new();
+    let mut start = 0;
+    while start < sampled.len() {
+        let mut end = start + 1;
+        while end < sampled.len() && sampled[end] == sampled[end - 1] + 1 {
+            end += 1;
+        }
+        let (first, count) = (sampled[start], (end - start) as u64);
+        let run = cpu_attention_rows(
+            program_len,
+            bound,
+            (device, cpu_operand_overrides),
+            &query_nodes,
+            (first, count),
+        );
+        expected.extend_from_slice(&run);
+        actual.extend_from_slice(&device_out[first as usize * row_width..(first + count) as usize * row_width]);
+        start = end;
+    }
+    let magnitude = expected.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    let difference = expected
+        .iter()
+        .zip(&actual)
+        .map(|(want, got)| (want - got).abs())
+        .fold(0.0f32, f32::max);
+    SampledAttention {
+        rows_checked: sampled.len(),
+        relative: difference / magnitude.max(f32::MIN_POSITIVE),
+    }
+}
+
+fn has_cached_len(bound: &BoundOp) -> bool {
+    let BoundOpKind::CachedAttention {
+        operands,
+        rotary_dim,
+        head_dim,
+        attention_sink,
+        ..
+    } = &bound.kind
+    else {
+        unreachable!("checked by the caller");
+    };
+    let before_sink = operands.len() - usize::from(*attention_sink);
+    if rotary_dim < head_dim { before_sink == 12 } else { before_sink == 9 }
+}
+
+fn live_cached_len(bound: &BoundOp, device: &Evaluated) -> u64 {
+    let BoundOpKind::CachedAttention { operands, cached_key_rows, .. } = &bound.kind else {
+        unreachable!("checked by the caller");
+    };
+    if !has_cached_len(bound) {
+        return *cached_key_rows;
+    }
+    let (value, _) = device
+        .get(operands[8].0)
+        .expect("device returned the cached_len operand");
+    value[0] as u64
+}
+
+fn cpu_attention_rows(
+    program_len: usize,
+    bound: &BoundOp,
+    (device, overrides): (&Evaluated, &[(NodeId, Vec<f32>)]),
+    query_nodes: &[NodeId],
+    (first, count): (u64, u64),
+) -> Vec<f32> {
+    let mut shifted = bound.clone();
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        cached_lower_inclusive,
+        new_upper_inclusive,
+        arithmetic,
+        ..
+    } = &mut shifted.kind
+    else {
+        unreachable!("checked by the caller");
+    };
+    // the f32 online softmax is the oracle the device kernels are held to; the
+    // llama f16 flash mode the fused op may carry is a different arithmetic
+    *arithmetic = CachedAttentionArithmetic::OnlineF32;
+    let full_rows = *query_rows;
+    *query_rows = count;
+    *cached_lower_inclusive = cached_lower_inclusive.saturating_add(first as i64);
+    *new_upper_inclusive = new_upper_inclusive.saturating_add(first as i64);
+    let mut buffers: Vec<Option<Vec<f32>>> = vec![None; program_len];
+    for (node, _, _) in shifted.operands() {
+        let (device_data, _) = device.get(*node).expect("device returned the attention operand");
+        let data = overrides
+            .iter()
+            .find(|(candidate, _)| candidate == node)
+            .map_or(device_data, |(_, replacement)| replacement.as_slice());
+        let sliced = if query_nodes.contains(node) {
+            let per_row = data.len() / full_rows as usize;
+            data[first as usize * per_row..(first + count) as usize * per_row].to_vec()
+        } else {
+            data.to_vec()
+        };
+        buffers[node.0 as usize] = Some(sliced);
+    }
+    let interpreter = Interpreter::new(&mut buffers);
+    let batch: ReadyBatch = [shifted.clone()].into_iter().collect();
+    let mut context = Context::from_waker(Waker::noop());
+    match pin!(interpreter.call(batch)).as_mut().poll(&mut context) {
+        Poll::Ready(result) => result.expect("the sampled cpu attention computes"),
+        Poll::Pending => unreachable!("cpu pipes never yield"),
+    }
+    buffers[shifted.node.0 as usize]
+        .clone()
+        .expect("the sampled cpu attention wrote its output")
+}
+
+/// The math mode of [`evaluate_gpu_oracle`], for binding the ops a sampled CPU
+/// attention check runs.
+#[must_use]
+pub fn gpu_oracle_numeric_policy() -> NumericPolicy {
+    NumericPolicy::bit_exact().with_flash_narrowing(true)
 }
