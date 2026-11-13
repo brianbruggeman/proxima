@@ -187,6 +187,7 @@ pub fn bind_with_top_fraction(
         numeric_policy,
         min_rows,
         &BTreeSet::new(),
+        &Executes::CPU,
     )
 }
 
@@ -200,6 +201,7 @@ pub fn bind_with_top_fraction_and_packed_leaves(
     numeric_policy: NumericPolicy,
     min_rows: u64,
     packed_leaves: &BTreeSet<NodeId>,
+    executes: &Executes,
 ) -> Result<Vec<BoundOp>, TensorError> {
     let built = bind_with_fusion_and_packed_leaves(
         program,
@@ -208,6 +210,7 @@ pub fn bind_with_top_fraction_and_packed_leaves(
         fuse_cached_attention,
         numeric_policy,
         packed_leaves,
+        executes,
     )?;
     apply_top_fraction_fusion(built, program, shapes, outputs, min_rows)
 }

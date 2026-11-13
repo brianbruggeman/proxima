@@ -14,6 +14,9 @@ pub fn bind_unfused(
     bind_plain_with_fusion(&narrowed, shapes, outputs, numeric_policy, false)
 }
 
+/// Binds for the CPU reference executor: [`bind_with_fusion`] with cached-attention fusion on, which
+/// admits every fusion by [`Executes::CPU`]. A GPU backend must not call this; it calls
+/// [`bind_with_fusion_for`] with its own [`Executes`].
 pub fn bind(
     program: &[Op],
     shapes: &Shapes,
@@ -46,6 +49,7 @@ pub fn bind_with_packed_leaves(
         true,
         numeric_policy,
         packed_leaves,
+        &Executes::CPU,
     )
 }
 
@@ -74,13 +78,13 @@ pub fn bind_without_reduce_epilogue_fusion(
     Ok(built)
 }
 
-/// Same as [`bind`], but `fuse_cached_attention` states whether the caller's
-/// backend can render [`BoundOpKind::CachedAttention`] at all. `cpu.rs` and
-/// `omega/src/metal.rs` render the fused kind, so they (via [`bind`]) pass
-/// `true`; `omega`'s wgpu and cuda drivers have no renderer for it yet, so
-/// they call this directly with `false` — the fused rewrite never fires for
-/// them, and the plain elementwise/reduce chain `bind_plain` already
-/// produces is what they emit.
+/// Binds for the CPU reference executor ([`Executes::CPU`]): every form-gated
+/// fusion, MoeTopK included, is admitted. Production code for a GPU backend
+/// calls [`bind_with_fusion_for`] with that backend's [`Executes`] instead.
+///
+/// `fuse_cached_attention` states whether the caller's backend can render
+/// [`BoundOpKind::CachedAttention`] at all; passing `false` leaves the plain
+/// elementwise/reduce chain `bind_plain` already produces.
 ///
 /// `reduce-epilogue-fusion` (the `BoundOpKind::Reduce::epilogue_body`/
 /// `epilogue_operands` rewrite) runs unconditionally after this, gated only
@@ -106,6 +110,29 @@ pub fn bind_with_fusion(
     fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<BoundOp>, TensorError> {
+    bind_with_fusion_for(
+        program,
+        shapes,
+        outputs,
+        fuse_cached_attention,
+        numeric_policy,
+        &Executes::CPU,
+    )
+}
+
+/// [`bind_with_fusion`] for a backend that states what it renders: `executes`
+/// is the target's [`Executes`] (`Executes::CPU` for the reference executor,
+/// `omega::metal::executes()`, `omega::cuda::executes(&target)`), and each
+/// form-gated fusion runs only when the backend grants its [`Form`]. Reach for
+/// [`bind_with_fusion`] only when the caller is the CPU reference executor.
+pub fn bind_with_fusion_for(
+    program: &[Op],
+    shapes: &Shapes,
+    outputs: &[NodeId],
+    fuse_cached_attention: bool,
+    numeric_policy: NumericPolicy,
+    executes: &Executes,
+) -> Result<Vec<BoundOp>, TensorError> {
     bind_with_fusion_and_packed_leaves(
         program,
         shapes,
@@ -113,10 +140,11 @@ pub fn bind_with_fusion(
         fuse_cached_attention,
         numeric_policy,
         &BTreeSet::new(),
+        executes,
     )
 }
 
-/// [`bind_with_fusion`] carrying the caller's packed-leaf set -- see
+/// [`bind_with_fusion_for`] carrying the caller's packed-leaf set -- see
 /// [`bind_with_packed_leaves`].
 pub fn bind_with_fusion_and_packed_leaves(
     program: &[Op],
@@ -125,6 +153,7 @@ pub fn bind_with_fusion_and_packed_leaves(
     fuse_cached_attention: bool,
     numeric_policy: NumericPolicy,
     packed_leaves: &BTreeSet<NodeId>,
+    executes: &Executes,
 ) -> Result<Vec<BoundOp>, TensorError> {
     let narrowed = narrow_accumulations(program, numeric_policy);
     let program: &[Op] = &narrowed;
@@ -178,13 +207,11 @@ pub fn bind_with_fusion_and_packed_leaves(
             packed_leaves,
         )?
     };
-    #[cfg(feature = "moe-topk-fusion")]
     #[cfg(feature = "std")]
-    let moe_topk_fusion_disabled = env::var_os("PROXIMA_DISABLE_MOE_TOPK_FUSION").is_some();
-    #[cfg(feature = "moe-topk-fusion")]
+    let env_disabled = env::var_os("PROXIMA_DISABLE_MOE_TOPK_FUSION").is_some();
     #[cfg(not(feature = "std"))]
-    let moe_topk_fusion_disabled = false;
-    #[cfg(feature = "moe-topk-fusion")]
+    let env_disabled = false;
+    let moe_topk_fusion_disabled = env_disabled || !executes.forms.contains(Form::MoeTopK);
     let built = if moe_topk_fusion_disabled {
         built
     } else {
@@ -802,7 +829,6 @@ pub(super) fn gated_delta_net_candidates(
     candidates
 }
 
-#[cfg(feature = "moe-topk-fusion")]
 pub(super) fn moe_binary_elementwise(
     program: &[Op],
     node: NodeId,
@@ -821,7 +847,6 @@ pub(super) fn moe_binary_elementwise(
     }
 }
 
-#[cfg(feature = "moe-topk-fusion")]
 pub(super) fn moe_reduce_operand(
     program: &[Op],
     node: NodeId,
@@ -849,7 +874,6 @@ pub(super) fn moe_reduce_operand(
 /// `mask` (the exclusion `Select`), never the reverse, so finding round
 /// `r + 1` from round `r`'s own `mask` is a forward lookup, not a backward
 /// one the way every other fusion matcher in this module walks.
-#[cfg(feature = "moe-topk-fusion")]
 pub(super) fn moe_consumers(program: &[Op]) -> BTreeMap<NodeId, Vec<NodeId>> {
     let mut consumers: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
     for (position, op) in program.iter().enumerate() {
@@ -865,7 +889,6 @@ pub(super) fn moe_consumers(program: &[Op]) -> BTreeMap<NodeId, Vec<NodeId>> {
 /// own `mask`/`max_selection`/`route`/`weight` for whichever round produced
 /// `selection_scores`'s own `mask`/`max_selection` pair — see
 /// [`match_moe_topk`] for how successive rounds chain together.
-#[cfg(feature = "moe-topk-fusion")]
 pub(super) struct MoeRound {
     pub(super) mask: NodeId,
     pub(super) candidate: NodeId,
@@ -881,7 +904,6 @@ pub(super) struct MoeRound {
     pub(super) weight_scores: Option<NodeId>,
 }
 
-#[cfg(feature = "moe-topk-fusion")]
 fn moe_match_shifted_weight(
     program: &[Op],
     consumers: &BTreeMap<NodeId, Vec<NodeId>>,
@@ -908,7 +930,6 @@ fn moe_match_shifted_weight(
 
 /// `append_moe_ffn`'s sigmoid weight: `reduce(Add, mask * scores)`, returning the product, the reduce
 /// and the `scores` node (the mask's other multiplicand, never the expert index).
-#[cfg(feature = "moe-topk-fusion")]
 fn moe_match_selected_weight(
     program: &[Op],
     consumers: &BTreeMap<NodeId, Vec<NodeId>>,
@@ -947,7 +968,6 @@ fn moe_match_selected_weight(
 /// `max_selection` becomes the caller's own anchor for every later round's
 /// `weight = exp(max_selection_r - max_selection_0)` shift); every later
 /// round passes `Some` of round 0's already-matched `max_selection`.
-#[cfg(feature = "moe-topk-fusion")]
 pub(super) fn moe_match_round(
     program: &[Op],
     selection_scores: NodeId,
@@ -1024,7 +1044,6 @@ pub(super) fn moe_match_round(
 /// every round's own `route`/`weight` (in round order, [`crate::spec::MoeSite`]'s
 /// own ordering) and the final `weight_total`, plus every internal node the
 /// fusion consumes and must therefore drop from `resolved` once it fires.
-#[cfg(feature = "moe-topk-fusion")]
 pub(super) struct MoeTopKMatch {
     pub(super) route_dtype: DType,
     pub(super) scores: NodeId,
@@ -1045,7 +1064,6 @@ pub(super) struct MoeTopKMatch {
 /// into the `[sequence, selected]` stack. Returns the stack node and every node
 /// the chain consists of, the stack node included, or `None` when the chain is
 /// not exactly that or something outside it reads one of its inner nodes.
-#[cfg(feature = "moe-topk-fusion")]
 pub(super) fn match_moe_stack(
     program: &[Op],
     consumers: &BTreeMap<NodeId, Vec<NodeId>>,
@@ -1110,7 +1128,6 @@ pub(super) fn match_moe_stack(
 /// this slice does not support, `n_tokens != 1` -- rather than guess: ROW
 /// 569's own design note names this as the one safe default for a
 /// correctness-critical routing decision.
-#[cfg(feature = "moe-topk-fusion")]
 pub(super) fn match_moe_topk(
     program: &[Op],
     shapes: &Shapes,
@@ -1292,7 +1309,6 @@ pub(super) fn match_moe_topk(
 /// same technique [`gated_delta_net_candidates`] uses for its own six
 /// operand sources, scaled down to the one true operand this kind reads
 /// (`routes`/`weights`/`weight_total` are outputs, not operands).
-#[cfg(feature = "moe-topk-fusion")]
 pub(super) fn moe_topk_candidates(
     program: &[Op],
     shapes: &Shapes,
@@ -1382,7 +1398,6 @@ pub(super) fn moe_topk_candidates(
 /// matches again against the wider `resolved` set before rewriting. Runs
 /// inside [`bind_with_fusion`] only -- never [`bind_plain_with_fusion`], the same rule
 /// [`apply_gated_delta_net_fusion`] follows.
-#[cfg(feature = "moe-topk-fusion")]
 pub(super) fn apply_moe_topk_fusion(
     built: Vec<BoundOp>,
     program: &[Op],
@@ -1694,7 +1709,7 @@ fn moe_round_group_is_contiguous(
     // round 0's reduce for `r >= 1` -- declining that shape here is what
     // stops the collapsed dispatch from reading a route buffer that has not
     // been written yet (`TensorError::NotLowerable`, "operand buffer
-    // missing at evaluation time"). A batch router (`moe-topk-fusion`'s own
+    // missing at evaluation time"). A batch router (the MoE top-k fusion's own
     // `MoeTopK`) that resolves every round's route BEFORE any round's own
     // reduce satisfies this trivially.
     let routes_uniform = rest_routes.iter().all(|&node| {

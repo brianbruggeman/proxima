@@ -21,6 +21,6 @@ fn the_metal_feature_set_builds_routed_experts_as_stacked_projections() {
 }
 
 const _: () = assert!(
-    cfg!(feature = "moe-topk-fusion") && cfg!(feature = "moe-stacked-experts"),
-    "metal must bring the stacked experts and the top-k fusion that folds their route stacks"
+    cfg!(feature = "moe-stacked-experts"),
+    "metal must bring the stacked experts"
 );

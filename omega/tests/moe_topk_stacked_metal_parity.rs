@@ -7,7 +7,7 @@
 //! per-route lowering of the same layer, which shares no node with the stacked
 //! program past the inputs.
 
-#![cfg(all(feature = "metal", feature = "moe-topk-fusion", target_os = "macos"))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use proxima_tensor::spec::{

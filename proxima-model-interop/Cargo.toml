@@ -130,13 +130,8 @@ instrument = ["proxima-tensor/instrument", "omega?/instrument", "dep:proxima-tel
 # `state_out` write actually reaches the caller's placed buffer (`encode_op`'s
 # own `state_out_placement` doc, `omega/src/metal.rs`) -- qwen35moe real-model
 # decode reaches "Paris" with `ttnt_mean_ms=52.733` (baseline 56.9).
-# ROW 569: `moe-topk-fusion` joins default-on once the simd-group kernel
-# (`omega/src/msl.rs`'s own `render_moe_topk`) replaced the first threadgroup-
-# tree-reduction draft -- unprofiled qwen35moe real-model decode reaches
-# "Paris" at `ttnt_mean_ms` 50.727/50.727 (feature on) vs 51.933/51.333
-# (feature off, same binary), a real if modest win once the bare kernel
-# itself dropped from a 5404.5us to a 1046.9us median (`omega/tests/
-# moe_topk_bare_dispatch_timing.rs`).
+# ROW 569: the MoE top-k fusion is admitted by the backend's `Executes` at bind
+# time; Metal grants it (`omega/src/metal/executes.rs`).
 metal = [
     "gpu",
     "rustix",
@@ -150,7 +145,6 @@ metal = [
     "metal-packed-row-nsg2",
     "metal-q4_0-native",
     "gated-delta-net-fusion",
-    "moe-topk-fusion",
     "moe-stacked-experts",
     "metal-attn-split-decode",
     "metal-attn-split-rows",
@@ -184,15 +178,14 @@ gpu = ["dep:omega", "dep:libc", "std", "dep:proxima-telemetry", "proxima-telemet
 # the cuda lane on the 2026-11-01 bake-off (16 tokens, ids identical): 8B PQ2_0
 # 19.2 -> 11.9 ms/token, Bonsai-27B Q1_0 115.5 -> 55.6, Bonsai-2-27B PTQ1_0
 # 174.4 -> 106.9, with one refit per run instead of one per token.
-# moe-topk-fusion joins on the granite CUDA A/B (PROXNUM-300, PROXNUM-307, versailles RTX 2070),
-# so the cuda lane uses the MoeTopK kernel omega already renders.
+# moe-stacked-experts joins on the granite CUDA A/B (PROXNUM-307, versailles RTX 2070); the
+# MoeTopK fusion needs no lane feature because `omega::cuda::executes` admits it at runtime.
 cuda = [
     "gpu",
     "omega/cuda-driver",
     "kv-capacity-bucket",
     "cached-attention-streaming",
     "reduce-epilogue-fusion",
-    "moe-topk-fusion",
     "moe-stacked-experts",
 ]
 # cached-attention physical step for the real serving/decode harness; folded
@@ -242,23 +235,12 @@ gated-delta-net-fusion = [
     "proxima-tensor/gated-delta-net-fusion",
     "omega?/gated-delta-net-fusion",
 ]
-# Passthrough to `proxima-tensor/moe-topk-fusion` and `omega/moe-topk-fusion`
-# (ROW 569) -- enabled by the `metal` and `cuda` lanes above; off in any other
-# build, and individually selectable so this crate's own harness can exercise
-# the fused `BoundOpKind::MoeTopK` on CPU alone.
-moe-topk-fusion = [
-    "dep:omega",
-    "proxima-tensor/moe-topk-fusion",
-    "omega?/moe-topk-fusion",
-]
 # Passthrough to `proxima-tensor/moe-stacked-experts` and `omega/moe-stacked-experts`: the routed
 # feed-forward blocks the model builders emit run gate, up and down once over every selected expert
 # (`MoeProjectionStrategy::Stacked`) instead of once per selected expert, at prefill and at decode.
 # In `metal`'s list above, so serving builds lower one expert dispatch per (layer, projection).
-# Implies `moe-topk-fusion`, which fuses the route stacks.
 moe-stacked-experts = [
     "dep:omega",
-    "moe-topk-fusion",
     "proxima-tensor/moe-stacked-experts",
     "omega?/moe-stacked-experts",
 ]

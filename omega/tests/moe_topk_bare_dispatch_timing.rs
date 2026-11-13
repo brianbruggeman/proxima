@@ -12,7 +12,6 @@
 #![cfg(all(
     feature = "metal",
     feature = "instrument",
-    feature = "moe-topk-fusion",
     target_os = "macos"
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]

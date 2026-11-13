@@ -2616,7 +2616,6 @@ fn an_out_of_range_gathered_matvec_index_faults_on_cuda_cooperative_path() {
     }
 }
 
-#[cfg(feature = "moe-topk-fusion")]
 mod moe_topk {
     use super::*;
     use moe_test_json as serde_json;

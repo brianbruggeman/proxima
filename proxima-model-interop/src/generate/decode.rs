@@ -449,8 +449,14 @@ fn run_attn_fuse_parity_probe(
     runtime: &BackendRuntime,
 ) -> Result<(), InteropError> {
     let shapes = proxima_tensor::infer(program, symbols)?;
-    let resolved =
-        proxima_tensor::bind_with_fusion(program, &shapes, roots, true, runtime.numeric_policy)?;
+    let resolved = proxima_tensor::bind_with_fusion_for(
+        program,
+        &shapes,
+        roots,
+        true,
+        runtime.numeric_policy,
+        &omega::metal::executes(),
+    )?;
     let layers = attn_fuse_probe_layers(step, &resolved);
     let candidates: Vec<NodeId> = layers.iter().map(|(attended, _)| *attended).collect();
     debug!(
@@ -810,12 +816,13 @@ fn write_attn_layer0_failure_report(
     // layer 0's score/softmax/weighted-sum chain without assuming a node
     // numbering.
     let shapes = proxima_tensor::infer(program, symbols)?;
-    let unfused_resolved = proxima_tensor::bind_with_fusion(
+    let unfused_resolved = proxima_tensor::bind_with_fusion_for(
         program,
         &shapes,
         &[attended_node],
         false,
         numeric_policy,
+        &omega::metal::executes(),
     )?;
     let by_node: alloc::collections::BTreeMap<NodeId, &proxima_tensor::BoundOp> = unfused_resolved
         .iter()

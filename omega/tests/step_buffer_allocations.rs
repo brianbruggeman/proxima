@@ -132,7 +132,6 @@ mod lookup {
     }
 }
 
-#[cfg(feature = "moe-topk-fusion")]
 mod routed_moe {
     use super::metal_stage_totals;
     use omega::DispatchType;

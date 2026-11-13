@@ -1088,11 +1088,11 @@ pub struct ServingConfig<'model> {
     /// default set); has no effect when that feature is absent.
     pub gated_delta_net_fusion: bool,
     /// Not an upstream llama-server flag -- runtime toggle for
-    /// `bind_with_fusion`'s `moe-topk-fusion` rewrite, mirroring the new
+    /// `bind_with_fusion`'s MoE top-k rewrite, mirroring the new
     /// `PROXIMA_DISABLE_MOE_TOPK_FUSION` env var. `true` (this field's
-    /// default) matches today's shipped behavior on a build with the
-    /// `moe-topk-fusion` feature compiled in (`metal`'s own default set);
-    /// has no effect when that feature is absent.
+    /// default) matches today's shipped behavior on a backend whose
+    /// `Executes` grants `Form::MoeTopK` (Metal and CUDA); has no effect on
+    /// a backend that does not grant it.
     pub moe_topk_fusion: bool,
     /// Not an upstream llama-server flag -- marks every plan's own
     /// `Op::Constant` leaf (`omega::metal::Plan::

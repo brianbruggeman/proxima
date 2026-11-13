@@ -272,7 +272,7 @@ pub use bind::bind_with_top_fraction;
 pub use bind::{
     BodyStep, BoundOp, BoundOpBuilder, BoundOpKind, CachedAttentionArithmetic, ComposedBody, DeviceLimits, DeviceMemory, Executes, Form, FormSet, Layout, Lookup,
     MoeWeighting, Refusal, StepArg, bind,
-    bind_unfused, bind_with_fusion, bind_without_reduce_epilogue_fusion, block_node_ids,
+    bind_unfused, bind_with_fusion, bind_with_fusion_for, bind_without_reduce_epilogue_fusion, block_node_ids,
     correct_packed_matmul_layouts, dead_resolved_nodes, decode_split_shape_fits, fuse_twin_elementwise, index_node_ids,
     node_last_reader, node_retirement, prune_dead, refit_cached_attention_rows, touches_changed,
 };
