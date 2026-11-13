@@ -849,10 +849,10 @@ pub struct LoadedModel<'file> {
     /// fixtures).
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) kv_cache_shape: KvCacheShape,
-    /// Whether this checkpoint's family profile routes the FFN through
-    /// experts ([`proxima_tensor::spec::FamilyProfile::ffn_routing`]); `Dense`
-    /// for a load that resolves no family profile.
-    pub(super) ffn_routing: FfnRouting,
+    /// Whether the checkpoint carries experts: `{arch}.expert_count > 0`
+    /// (or the caller's descriptor `expert_count`); `false` for a load with
+    /// no expert count, such as safetensors or synthetic fixtures.
+    pub(super) has_experts: bool,
     /// The family profile's measured default for
     /// `ServingConfig::command_buffer_chunks`; `1` for a load that resolves no
     /// family profile. Consulted by [`Self::apply_command_buffer_chunks_default`]

@@ -211,7 +211,7 @@ pub struct StepState {
     pub ssm_state_bytes: u64,
 }
 
-pub use proxima_tensor::spec::{FfnRouting, KvCacheShape};
+pub use proxima_tensor::spec::KvCacheShape;
 
 /// How a bound program lays out the KV cache of its sliding-window layers.
 /// [`Self::Full`] stores every position and lets the window mask hide the

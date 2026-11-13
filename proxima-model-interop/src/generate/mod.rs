@@ -212,9 +212,7 @@ use crate::error::InteropError;
 use crate::hf_bind::{HfShard, bind_all_weights_from_safetensors};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use crate::lowering::KvCacheShape;
-use crate::lowering::{
-    FfnRouting, KvLayout, StepInput, bind_symbols, rope_freq_factors, sliding_rope_inputs,
-};
+use crate::lowering::{KvLayout, StepInput, bind_symbols, rope_freq_factors, sliding_rope_inputs};
 use crate::profiles::family_profile;
 use crate::recurrent_config::RecurrentConfig;
 use crate::rope_scaling::{RopeScaling, f32_from_u32};

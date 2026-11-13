@@ -39,7 +39,7 @@ impl LoadedModel<'_> {
         &self,
         serving_config: &ServingConfig<'_>,
     ) -> Result<usize, InteropError> {
-        if !should_warm(serving_config, self.ffn_routing == FfnRouting::Routed) {
+        if !should_warm(serving_config, self.has_experts) {
             return Ok(0);
         }
         omega::metal::warm_resident_buffers().map_err(InteropError::from)

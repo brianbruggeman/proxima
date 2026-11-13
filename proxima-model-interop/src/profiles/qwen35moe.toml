@@ -3,7 +3,6 @@ value_norm = false
 rope_layout = "split_half"
 schedule_source = "recurrent_routed_interval"
 kv_cache_shape = "monolithic"
-ffn_routing = "routed"
 
 [ffn]
 post_attention_norm = false

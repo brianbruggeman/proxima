@@ -95,6 +95,26 @@ pub(super) mod tests {
     use proxima_tokenizer::Vocab;
 
     #[test]
+    fn experts_are_inferred_from_the_checkpoints_expert_count() {
+        let shapes = [
+            ("granitemoe", 32, true),
+            ("mixtral", 8, true),
+            ("qwen3moe", 128, true),
+            ("flint", 256, true),
+            ("qwen35moe", 256, true),
+            ("gemma4_e2b", 0, false),
+            ("qwen3", 0, false),
+        ];
+        for (shape, expert_count, expected) in shapes {
+            assert_eq!(
+                crate::generate::pregather::checkpoint_has_experts(expert_count),
+                expected,
+                "{shape} has_experts"
+            );
+        }
+    }
+
+    #[test]
     fn first_nonfinite_node_value_reports_program_order_and_payload_location() {
         let evaluated = Evaluated::from_parts(
             NodeId(9),
@@ -2665,7 +2685,6 @@ pub(super) mod memory_fit_gate_tests {
     use omega::allocate_placed_buffer;
 
     use super::LoadedModel;
-    use crate::lowering::FfnRouting;
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     use crate::lowering::KvCacheShape;
 
@@ -2755,7 +2774,7 @@ pub(super) mod memory_fit_gate_tests {
             architecture: tiny_architecture(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_cache_shape: KvCacheShape::Uniform,
-            ffn_routing: FfnRouting::Dense,
+            has_experts: false,
             command_buffer_chunks: 1,
             trained_context_length: Some(TRAINED_CONTEXT_LENGTH),
             rope_scaling: RopeScaling::None,

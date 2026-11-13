@@ -21,7 +21,7 @@ use proxima_model_interop::profiles::family_profile;
 use proxima_model_interop::{
     LoadedModel, architecture_from_metadata, bind_checkpoint, metadata_str,
 };
-use proxima_tensor::spec::{FfnRouting, ScheduleSource};
+use proxima_tensor::spec::ScheduleSource;
 
 #[proxima::test]
 #[ignore = "requires a real, local qwen3.6:35b-a3b GGUF blob; set PROXIMA_QWEN35MOE_GGUF"]
@@ -53,7 +53,6 @@ async fn family_profile_routes_real_qwen35moe_header_with_per_layer_kv_configura
         profile.schedule_source,
         ScheduleSource::RecurrentRoutedInterval
     );
-    assert_eq!(profile.ffn_routing, FfnRouting::Routed);
 
     let architecture = architecture_from_metadata(&parsed)
         .expect("the real header's per-layer KV-head array is configuration, not a parse error");
