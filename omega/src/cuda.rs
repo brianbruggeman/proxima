@@ -63,7 +63,7 @@ use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, Executes, Form, Keep, Layout, Lookup, NodeId, ReduceInit, Refusal, ScalarOp, StepArg,
+    BoundOp, BoundOpKind, ComposedBody, DeviceMemory, Executes, Form, Keep, Layout, Lookup, NodeId, ReduceInit, Refusal, ScalarOp, StepArg,
 };
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
@@ -4468,11 +4468,12 @@ pub(crate) fn executes(target: &Target) -> Executes {
         .with(Form::BlockQuantize)
         .with(Form::MoeTopK)
         .with(Form::ReduceEpilogue);
-    if target.card_asm {
+    let forms = if target.card_asm {
         base.with(Form::CachedAttention)
     } else {
         base
-    }
+    };
+    forms.with_memory(DeviceMemory::Separate)
 }
 
 fn refusal_kind(refusal: Refusal) -> &'static str {
@@ -4620,6 +4621,12 @@ mod tests {
             executes(&Target::HIP).admit(&attention),
             Err(Refusal::Form(Form::CachedAttention))
         );
+    }
+
+    #[test]
+    fn executes_declares_separate_memory_on_both_card_asm_and_plain_targets() {
+        assert_eq!(executes(&Target::CUDA).memory(), DeviceMemory::Separate);
+        assert_eq!(executes(&Target::HIP).memory(), DeviceMemory::Separate);
     }
 
     #[test]
