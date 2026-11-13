@@ -31,7 +31,10 @@
 //! The walker divides each value by the scale already rounded to its stored width; llama.cpp
 //! multiplies by the inverse of the unrounded scale (and Q4_0 and Q5_0 fit the signed maximum, not
 //! the peak). The two differ by a code on some elements, which is why a layout with a codec never
-//! takes the walker: the walker is the encoder of last resort, not a second encoder.
+//! takes the walker: the walker is the encoder of last resort, not a second encoder. The one
+//! exception is a layout that holds `Q8_1`'s stored-sum slot without a codec (`Q8_1_GROUPED`, four
+//! `Q8_1` runs behind one header): it is `Q8_1` by definition, so each run takes llama's
+//! unrounded-scale inverse and the sum is taken against the unrounded scale, as in the flat codec.
 
 use crate::block_layout::{BlockLayout, Plane, PlaneCursor};
 use crate::convert::{Overflow, Rounding};
@@ -190,6 +193,21 @@ impl Linear {
         code.clamp(lowest, highest)
     }
 
+    /// llama's `Q8_1` rule (`quantize_row_q8_1_ref`, `quantize_mmq_q8_1`): the code is
+    /// `roundf(value * (1 / d))` with `d` the unrounded `peak / reach`, so the stored half-width
+    /// scale never enters the codes. A `d` that stores as zero or with a non-finite inverse codes
+    /// every value as zero, the same fill [`crate::block_codec`] gives a flat `Q8_1`.
+    fn code_by_inverse(&self, value: f32, stored: f32, scale: f32, (lowest, highest): (i32, i32)) -> i32 {
+        let degenerate = scale == 0.0 || stored == 0.0 || !(1.0 / stored).is_finite();
+        let inverse = if degenerate { 0.0 } else { 1.0 / scale };
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "the product is clamped into the code range immediately after"
+        )]
+        let code = libm::roundf((value * inverse + self.bias) / self.multiplier) as i32;
+        code.clamp(lowest, highest)
+    }
+
     fn value_of(&self, code: i32) -> f32 {
         self.multiplier * code as f32 - self.bias
     }
@@ -280,12 +298,17 @@ fn quantize_run(
     let peak = input
         .iter()
         .fold(0.0f32, |peak, value| peak.max(value.abs()));
-    let (scale_code, scale) = stored_scale(peak, shape.reach, layout.scale.layout);
+    let (scale_code, stored) = stored_scale(peak, shape.reach, layout.scale.layout);
     let scale_at = layout.run_scale_byte(run);
     put_scale(layout, scale_at, scale_code, block);
+    let scale = if shape.sum_gap.is_some() { peak / shape.reach } else { stored };
     let mut value_sum = 0.0f32;
     for value in input {
-        let code = shape.code_for(*value, scale, bounds);
+        let code = if shape.sum_gap.is_some() {
+            shape.code_by_inverse(*value, stored, scale, bounds)
+        } else {
+            shape.code_for(*value, scale, bounds)
+        };
         put_code(
             layout,
             cursors,
@@ -1231,5 +1254,81 @@ mod tests {
             routed += 1;
         }
         assert!(routed >= 8, "only {routed} formats resolved an encoder");
+    }
+
+    /// Four runs of llama's `block_q8_1_mmq` (`Q8_1_GROUPED`), each chosen so the f16 the scale
+    /// stores as sits on the other side of a rounding tie from the f32 `d = amax / 127`.
+    ///
+    /// Run 0, `d = 1 + 5/16384 = 1.000305176` (exact in f32, `amax = 127 d = 127.03875732`): f16
+    /// stores 1.0 (`0x3c00`), smaller than `d`. Element 0 is `5.500278`, ratio `x / d = 5.4986`, so
+    /// llama codes 5; dividing by the stored 1.0 gives 5.500278 and the old walker coded 6. Element
+    /// 1 is `amax`, code 127. `sum(q) = 132`, `s = f16(d * 132 = 132.0403) = 132.0 = 0x5820`.
+    ///
+    /// Run 1, `d = 1 + 3/4096 = 1.000732422` (`amax = 127.09301758`): f16 stores `1 + 4/4096`
+    /// (`0x3c01`), larger than `d`. Element 3 is `-73.500015 d`, ratio `-73.500015`, so llama codes
+    /// -74; dividing by the stored scale gives -73.48 and the old walker coded -73. Element 0 is
+    /// `amax`, code 127. `sum(q) = 53`, `s = f16(53.0388) = 53.03125 = 0x52a1`. The f32 error of
+    /// forming and dividing that element is at most about 1.2e-5, inside the 1.5e-5 the ratio
+    /// clears the tie by.
+    ///
+    /// Run 2 is zero: `d = 0`, every code 0, header `00 00 00 00`.
+    ///
+    /// Run 3, `d = 1`: elements 2.5 and -2.5 are exact ties and round half away from zero to 3 and
+    /// -3, element 2 is `amax = 127`. `sum(q) = 127`, `s = 127.0 = 0x57f0`, scale `0x3c00`.
+    ///
+    /// Header bytes (little endian, `d` then `s` per run, stride 4):
+    /// `00 3c 20 58 | 01 3c a1 52 | 00 00 00 00 | 00 3c f0 57`.
+    #[test]
+    fn q8_1_grouped_equals_four_flat_q8_1_runs_and_the_cuda_arithmetic_at_near_ties() {
+        let scale_zero = 1.0f32 + 5.0 / 16384.0;
+        let scale_one = 1.0f32 + 3.0 / 4096.0;
+        let mut input = [0.0f32; 128];
+        input[0] = 5.500_278;
+        input[1] = 127.0 * scale_zero;
+        input[32] = 127.0 * scale_one;
+        input[35] = -73.500_015 * scale_one;
+        input[96] = 2.5;
+        input[97] = -2.5;
+        input[98] = 127.0;
+        let mut expected_codes = [0i8; 128];
+        expected_codes[0] = 5;
+        expected_codes[1] = 127;
+        expected_codes[32] = 127;
+        expected_codes[35] = -74;
+        expected_codes[96] = 3;
+        expected_codes[97] = -3;
+        expected_codes[98] = 127;
+        let expected_header: [u8; 16] = [0x00, 0x3c, 0x20, 0x58, 0x01, 0x3c, 0xa1, 0x52, 0, 0, 0, 0, 0x00, 0x3c, 0xf0, 0x57];
+
+        let mut grouped = [0u8; 144];
+        let blocks = encode_blocks(&NumericFormat::Block(BlockLayout::Q8_1_GROUPED), &input, &mut grouped)
+            .expect("grouped q8_1 encodes finite values");
+        let mut flat = [0u8; 144];
+        FormatCodec::block(&BlockLayout::Q8_1)
+            .expect("q8_1 has a codec")
+            .encode(&input, &mut flat)
+            .expect("the codec sizes match");
+
+        assert_eq!(blocks, 1);
+        let mut repacked = [0u8; 144];
+        for (run, flat_run) in flat.chunks(36).enumerate() {
+            repacked[run * 4..run * 4 + 4].copy_from_slice(&flat_run[..4]);
+            repacked[16 + run * 32..16 + run * 32 + 32].copy_from_slice(&flat_run[4..]);
+        }
+        assert_eq!(grouped, repacked, "grouped must be four flat q8_1 runs behind one header");
+        assert_eq!(&grouped[..16], &expected_header);
+        let grouped_codes: std::vec::Vec<i8> = grouped[16..].iter().map(|&byte| byte as i8).collect();
+        assert_eq!(grouped_codes, expected_codes);
+
+        for (run, group) in input.chunks(32).enumerate() {
+            let amax = group.iter().fold(0.0f32, |peak, value| peak.max(value.abs()));
+            let delta = amax / 127.0;
+            for (index, &value) in group.iter().enumerate() {
+                let code = if amax == 0.0 { 0 } else { (value / delta).round() as i8 };
+                assert_eq!(grouped[16 + run * 32 + index] as i8, code, "run {run} element {index}");
+            }
+            let stored = float_layout_codec::encode(delta, FloatLayout::F16) as u16;
+            assert_eq!(&grouped[run * 4..run * 4 + 2], &stored.to_le_bytes(), "run {run} scale");
+        }
     }
 }

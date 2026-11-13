@@ -16,7 +16,7 @@
 use proxima_gguf::quant::QuantError;
 use proxima_gguf::quant::block_layout_encode::{quantize, reach};
 use proxima_gguf::quant::{pq2_0, q1_0, q2_0};
-use proxima_numeric::NumericFormat;
+use proxima_numeric::{BlockLayout, NumericFormat};
 
 type Port = fn(&[f32], &mut [u8]) -> Result<(), QuantError>;
 
@@ -50,8 +50,11 @@ const PORTS: [(&str, Port); 3] = [
     ("pq2_0", pq2_0::quantize),
 ];
 
+/// `Q8_1_GROUPED` is four `Q8_1` runs behind one header, so its oracle is the `q8_1` bytes repacked.
+const GROUPED: &str = "q8_1_grouped";
+
 /// Layouts with no other encoder, with the bytes the walker produced for [`values`].
-const WALKER: [(&str, &[&str]); 2] = [
+const WALKER: [(&str, &[&str]); 1] = [
     (
         "q8_k",
         &[
@@ -74,20 +77,6 @@ const WALKER: [(&str, &[&str]); 2] = [
             "93f7df14283761ef0015d8cb23c7d3fb1d08f71898f5f9f53439e8c7d80714fef2ccc0fe1109041fe34b0ef8e801d952",
             "2ed8fef72d06fff2e2030e2db52e5e450824cb291b95b7ef0ed445340000000000000000000000000000000000000000",
             "000000000000000000000000",
-        ],
-    ),
-    (
-        "q8_1_grouped",
-        &[
-            "b9315dcd193105cde7316e55fa329d4d04d608265545a200d73bdddba8901620e9eed77d811409da362810f7060e0de3",
-            "1dd50e0e2ac5f9a1b08d08f6da193a7faef5d231faec425d0cd3c92b0bd837ecdad039443670f5102801c4677f001a3d",
-            "046c6d93f0d6e8d41148b5f5e9edbb550f81ef1df522f004f2090a351caa52d4f0f8343e4d47bd052333f03aeb8c0ae9",
-            "e2301fd0813281ba0a322e4e16321ad405c8ba786b131ccda9cbe9fcf62effdbffcc0dfcdada1fc77f100228e3c3009e",
-            "10fc1f2bd95df8820604edb2e2fcbd07040b20dcc67ffd22ed37a13c7412ddd8eda63ad50f17dbf715f27fef0929def4",
-            "597313e5ee55f0db38f40b16c1c3d5f81007ffb84fa3ad15dc00f5548555f603d3f9011d81fb2738b6f10a19fdf3c1ed",
-            "d432d4b6bc3177cde931dbd24632e44f57aadaf1e6222a24e3950b0af3c212518106f6f641d652760fe4231ed6bd25f9",
-            "02da26b081c50be91f089adf0c0ed440004d44c2f8f5d7502a1c31fd070bcb1481c90d173bba15555afcdf3aed01b405",
-            "ffded4fde8950f1520efc365d89bf605042108343a04213437e6db1b13f30f08d85e81030dfb49c0a8dff80bcf4d36d6",
         ],
     ),
 ];
@@ -142,6 +131,19 @@ fn every_encodable_layout_equals_its_independent_encoder_bytes() {
             let mut incumbent = vec![0u8; packed.len()];
             port(&input, &mut incumbent).expect("the port encodes finite values");
             assert_eq!(hexed, hex_of(&incumbent), "{name} bytes against the gguf port");
+        } else if name == GROUPED {
+            let flat_layout = BlockLayout::Q8_1;
+            let flat_bytes = usize::from(flat_layout.block_bytes);
+            let mut flat = vec![0u8; input.len() / usize::from(flat_layout.elements) * flat_bytes];
+            quantize(&flat_layout, &input, &mut flat).expect("q8_1 encodes finite values");
+            let mut repacked = vec![0u8; packed.len()];
+            for (block, runs) in repacked.chunks_mut(144).zip(flat.chunks(4 * flat_bytes)) {
+                for (run, flat_run) in runs.chunks(flat_bytes).enumerate() {
+                    block[run * 4..run * 4 + 4].copy_from_slice(&flat_run[..4]);
+                    block[16 + run * 32..16 + run * 32 + 32].copy_from_slice(&flat_run[4..]);
+                }
+            }
+            assert_eq!(packed, repacked, "{name} bytes against four llama-pinned q8_1 runs per block");
         } else if let Some((_, frozen)) = WALKER.iter().find(|(pinned, _)| *pinned == name) {
             assert_eq!(hexed, frozen.concat(), "{name} bytes against the frozen walker capture");
         } else {
@@ -157,6 +159,7 @@ fn every_encodable_layout_equals_its_independent_encoder_bytes() {
         .map(|(name, _)| *name)
         .chain(PORTS.iter().map(|(name, _)| *name))
         .chain(WALKER.iter().map(|(name, _)| *name))
+        .chain([GROUPED])
         .collect();
     for name in &pinned {
         assert!(encodable.contains(name), "the oracle covers {name} and the encoder does not");
