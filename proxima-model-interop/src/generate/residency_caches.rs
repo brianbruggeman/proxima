@@ -355,7 +355,7 @@ mod configured_runtime_tests {
 
 /// A narrow KV cache is read only by the fused `CachedAttention` kernel, which decodes it through
 /// the cache's format. A plan whose attention stayed unfused reads the cache leaves as binary32,
-/// so a narrow cache there yields wrong ids (flint, binary16: divergence at token 1). Teaching
+/// so a narrow cache there yields wrong ids (measured on the 26B MoE checkpoint, binary16: divergence at token 1). Teaching
 /// pointer: the question is `omega::metal::Plan::pads_kv_safely`, the same predicate that decides
 /// whether a bucketed cached range may be padded.
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

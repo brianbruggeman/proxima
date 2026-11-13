@@ -3503,6 +3503,10 @@ mod tests {
         assert!(blocks.starts_with(&[1, 2, 3, 4]), "{blocks:?}");
     }
 
+    fn float_other_than(format: &NumericFormat) -> NumericFormat {
+        if *format == NumericFormat::Float16 { NumericFormat::Float32 } else { NumericFormat::Float16 }
+    }
+
     fn key_under(
         config: &ServingConfig,
         rope: RopeScaling,
@@ -3529,11 +3533,17 @@ mod tests {
     #[case::moe_monolithic_high_mmap(|config| ServingConfig { moe_monolithic_high_mmap: !config.moe_monolithic_high_mmap, ..config })]
     #[case::moe_layer_window(|config| ServingConfig { moe_layer_window: config.moe_layer_window + 1, ..config })]
     #[case::qwen35moe_residency_budget(|config| ServingConfig { moe_residency_budget_bytes: config.moe_residency_budget_bytes + (1 << 30), ..config })]
-    #[case::kv_cache_f16_pair(|config| ServingConfig { kv_cache_key_quant: NumericFormat::Float16, kv_cache_value_quant: NumericFormat::Float16, ..config })]
+    #[case::kv_cache_other_float_pair(|config| {
+        let other = float_other_than(&config.kv_cache_key_quant);
+        ServingConfig { kv_cache_key_quant: other, kv_cache_value_quant: other, ..config }
+    })]
     #[case::kv_cache_bf16_pair(|config| ServingConfig { kv_cache_key_quant: NumericFormat::BFloat16, kv_cache_value_quant: NumericFormat::BFloat16, ..config })]
     #[case::kv_cache_q8_0_pair(|config| ServingConfig { kv_cache_key_quant: NumericFormat::Q8_0, kv_cache_value_quant: NumericFormat::Q8_0, ..config })]
     #[case::kv_cache_q4_0_key_beside_f16_value(|config| ServingConfig { kv_cache_key_quant: NumericFormat::Q4_0, kv_cache_value_quant: NumericFormat::Float16, ..config })]
-    #[case::kv_cache_value_format_alone(|config| ServingConfig { kv_cache_value_quant: NumericFormat::Float16, ..config })]
+    #[case::kv_cache_value_format_alone(|config| {
+        let other = float_other_than(&config.kv_cache_value_quant);
+        ServingConfig { kv_cache_value_quant: other, ..config }
+    })]
     async fn a_request_differing_in_a_row_affecting_config_field_misses(
         #[case] change: fn(ServingConfig<'static>) -> ServingConfig<'static>,
     ) {
