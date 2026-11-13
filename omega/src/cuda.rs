@@ -378,42 +378,6 @@ pub(crate) fn emit_on_target(
     })
 }
 
-/// Whether the int8 gemm would serve `resolved` if its operand in `activation_slot` held
-/// activation blocks of the `activation` codec.
-#[cfg(feature = "cuda-driver")]
-pub(crate) fn int8_gemm_serves(
-    resolved: &BoundOp,
-    packed_operands: &PackedOperands,
-    activation_slot: usize,
-    activation: Codec,
-    numeric_policy: NumericPolicy,
-) -> bool {
-    let mut quantized = operand_codecs(resolved, packed_operands);
-    let Some(slot) = quantized.get_mut(activation_slot) else {
-        return false;
-    };
-    *slot = Some(activation);
-    mma_gemm_plan(resolved, &quantized, numeric_policy).is_some_and(|plan| plan.int8.is_some())
-}
-
-/// Whether the staged matvec would serve `resolved` reading its operand in `activation_slot` as
-/// activation blocks of the `activation` codec.
-#[cfg(feature = "cuda-driver")]
-pub(crate) fn staged_matvec_serves(
-    resolved: &BoundOp,
-    packed_operands: &PackedOperands,
-    activation_slot: usize,
-    activation: Codec,
-    numeric_policy: NumericPolicy,
-) -> bool {
-    let mut quantized = operand_codecs(resolved, packed_operands);
-    let Some(slot) = quantized.get_mut(activation_slot) else {
-        return false;
-    };
-    *slot = Some(activation);
-    staged_matvec_plan(resolved, &quantized, numeric_policy, EmitDevice::default()).is_some_and(|plan| plan.external.is_some())
-}
-
 /// A pre-quantized activation is readable only by the int8 gemm and the external-activation staged
 /// matvec; any other consumer would read its bytes as floats, so it fails here instead of emitting a wrong kernel.
 fn reject_unserved_prequantized(

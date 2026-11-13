@@ -16,15 +16,13 @@ use std::fs::File;
 use std::process::ExitCode;
 
 use memmap2::Mmap;
-use omega::cuda::executes;
-use omega::cuda::target::Target;
 use omega::cuda_driver::probe_bound_graph;
 use proxima_gguf::parse_complete;
 use proxima_model_interop::LoadedModel;
 use proxima_numeric::{DType, NumericFormat, NumericPolicy};
 use proxima_tensor::{
-    BoundOp, BoundOpKind, Keep, NodeId, Op, QuantizedBlock, ScalarOp, Shapes, activation_is_flat, collapsed_extent,
-    derive_activation_quantize, infer, is_derived, underive_block_quantize,
+    BoundOp, BoundOpKind, Keep, NodeId, Op, QuantizedBlock, ScalarOp, Shapes, activation_is_flat, collapsed_extent, infer,
+    is_derived,
 };
 
 const GROUP_ELEMENTS: u64 = 32;
@@ -127,58 +125,7 @@ fn census(
         }
     }
     print_summary(phase, &tally);
-    compare_with_tensor_pass(phase, program, &shapes, &bound, &packed, policy);
     Ok(())
-}
-
-fn kind_name(op: Option<&BoundOp>) -> String {
-    let Some(op) = op else {
-        return String::from("absent");
-    };
-    let text = format!("{:?}", op.kind);
-    let end = text.find(|character: char| !character.is_alphanumeric()).unwrap_or(text.len());
-    format!("{} node{}", &text[..end], op.node.0)
-}
-
-/// Runs `derive_activation_quantize` over the pre-derive ops omega's bind produced, with the
-/// policy `bind_resolved` uses, and prints whether it yields omega's bound graph node for node.
-fn compare_with_tensor_pass(
-    phase: &str,
-    program: &[Op],
-    shapes: &Shapes,
-    bound: &[BoundOp],
-    packed: &BTreeMap<NodeId, NumericFormat>,
-    policy: NumericPolicy,
-) {
-    let before = underive_block_quantize(bound, program.len());
-    let weights: BTreeMap<NodeId, NumericFormat> =
-        packed.iter().filter(|(node, _)| (node.0 as usize) < program.len()).map(|(node, format)| (*node, *format)).collect();
-    let tensor_policy = policy.with_accumulator_narrowing().with_flash_narrowing(true);
-    let (tensor_ops, held) =
-        derive_activation_quantize(before, program, shapes, &weights, tensor_policy, &executes(&Target::CUDA), None);
-    let omega_held = |op: Option<&BoundOp>| op.and_then(|op| packed.get(&op.node)).filter(|_| op.is_some_and(|op| is_derived(op, program.len())));
-    let tensor_held = |op: Option<&BoundOp>| op.and_then(|op| held.get(&op.node));
-    let positions = bound.len().max(tensor_ops.len());
-    let differs: Vec<usize> = (0..positions)
-        .filter(|position| {
-            let (omega_op, tensor_op) = (bound.get(*position), tensor_ops.get(*position));
-            omega_op != tensor_op || omega_held(omega_op) != tensor_held(tensor_op)
-        })
-        .collect();
-    let derived = bound.iter().filter(|op| is_derived(op, program.len())).count();
-    let Some(first) = differs.first().copied() else {
-        println!("{phase} tensor_derive_matches_omega=true derived={derived}");
-        return;
-    };
-    let (omega_op, tensor_op) = (bound.get(first), tensor_ops.get(first));
-    println!(
-        "{phase} tensor_derive_matches_omega=false differing_positions={} first={first} omega={} tensor={} omega_held={:?} tensor_held={:?}",
-        differs.len(),
-        kind_name(omega_op),
-        kind_name(tensor_op),
-        omega_held(omega_op),
-        tensor_held(tensor_op),
-    );
 }
 
 fn run() -> Result<(), CensusError> {

@@ -236,18 +236,6 @@ impl GpuDriver {
     pub const fn renders_fused_cached_attention(self) -> bool {
         matches!(self, GpuDriver::Metal)
     }
-
-    /// Capability only: whether this driver lowers `BoundOpKind::BlockQuantize`, so the
-    /// int8 activation rewrite may insert the op into a program bound for it. Metal and
-    /// wgpu never see the op.
-    #[must_use]
-    pub const fn lowers_block_quantize(self) -> bool {
-        match self {
-            GpuDriver::Metal | GpuDriver::Wgpu => false,
-            #[cfg(feature = "cuda-driver")]
-            GpuDriver::Cuda => true,
-        }
-    }
 }
 
 /// Emits the telemetry event for an unrecognized `OMEGA_BACKEND` value.
