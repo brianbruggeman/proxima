@@ -131,6 +131,8 @@ enum HarnessError {
     BadResponse(String),
     #[error("llama-server: {0}")]
     Server(String),
+    #[error("{engine} counted {reported} prompt tokens, the tokenizer sent {sent}: it ran another model or prompt, not a measurement")]
+    PromptCountMismatch { engine: &'static str, reported: usize, sent: usize },
     #[error("tokenizer: {0}")]
     Tokenize(String),
     #[error("io on {path}: {source}")]
@@ -2483,6 +2485,8 @@ fn llama_stage_requests(port: u16, prompt: &StagePrompt, ready_ms: f64) -> Resul
     let body = completion_body(&prompt.ids);
     let ask = || timed_exchange(port, "/completion", &body).and_then(|(text, _)| parse_llama_response(&text));
     let (cold, warm) = (ask()?, ask()?);
+    require_prompt_count("llama cold", cold.prompt_n + cold.cache_n, prompt.ids.len())?;
+    require_prompt_count("llama warm", warm.prompt_n + warm.cache_n, prompt.ids.len())?;
     let (_, detokenize_wall_ms) = timed_exchange(port, "/detokenize", &json!({"tokens": warm.ids}).to_string())?;
     let (_, detokenize_floor_ms) = timed_exchange(port, "/detokenize", &json!({"tokens": []}).to_string())?;
     let (answer, e2e_wall_ms) = timed_exchange(port, "/completion", &text_completion_body(&prompt.text))?;
@@ -2521,6 +2525,14 @@ fn run_llama_stage(config: &Config, prompt: &StagePrompt, port: u16, flash: &str
     })
 }
 
+fn require_prompt_count(engine: &'static str, reported: usize, sent: usize) -> Result<(), HarnessError> {
+    if reported == sent {
+        Ok(())
+    } else {
+        Err(HarnessError::PromptCountMismatch { engine, reported, sent })
+    }
+}
+
 fn capture_proxima(config: &Config, binary: &Path, text: &str, profile: Option<&str>, log_path: &Path) -> Result<String, HarnessError> {
     let (runs, tokens) = match profile {
         Some(PROFILE_PREFILL_STEP) => ("1", 1),
@@ -2534,6 +2546,7 @@ fn capture_proxima(config: &Config, binary: &Path, text: &str, profile: Option<&
     command.env("PROXIMA_RUNS", runs);
     command.env("PROXIMA_MAX_TOKENS", tokens.to_string());
     command.env("PROXIMA_PROMPT", text);
+    command.env("PROXIMA_DECODE_MODEL_GGUF", &config.model);
     for (key, value) in config.stage_kv.proxima_env() {
         command.env(key, value);
     }
@@ -2561,6 +2574,7 @@ fn run_proxima_stage(config: &Config, binary: &Path, vocab: &Vocab, prompt: &Sta
     let legacy = parse_proxima(&main_log)?;
     let span = parse_proxima_span(&main_log, &legacy).unwrap_or(legacy);
     let detail = parse_proxima_detail(&main_log)?;
+    require_prompt_count("proxima", detail.prompt_token_count, prompt.ids.len())?;
     let generated: Vec<u32> = detail.ids.iter().filter_map(|&id| u32::try_from(id).ok()).collect();
     let tokenize_ms = mean_call_ms(|| tokenize_like_proxima(&prompt.text, vocab));
     let detokenize_ms = mean_call_ms(|| proxima_tokenizer::decode(&generated, vocab));
@@ -3151,6 +3165,16 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
             .join("\n");
         assert!(parse_proxima(&truncated).is_err());
         assert!(parse_proxima("panicked at src/main.rs").is_err());
+    }
+
+    #[test]
+    fn proxnum250_run_done_line_reports_85_ids_for_an_84_token_prompt_and_is_refused() {
+        let log = include_str!("../tests/fixtures/proxnum250_proxima_84_run_done.log");
+        let detail = parse_proxima_detail(log).expect("proxnum250 log parses");
+        assert_eq!(detail.prompt_token_count, 85);
+        let refusal = require_prompt_count("proxima", detail.prompt_token_count, 84).expect_err("85 != 84 must be refused");
+        assert_eq!(refusal.to_string(), "proxima counted 85 prompt tokens, the tokenizer sent 84: it ran another model or prompt, not a measurement");
+        assert!(require_prompt_count("proxima", 84, 84).is_ok());
     }
 
     #[test]
