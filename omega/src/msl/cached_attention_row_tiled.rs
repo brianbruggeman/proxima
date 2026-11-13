@@ -31,6 +31,25 @@ fn cache_element_helper(cached_kv_codec: Option<Codec>) -> String {
     }
 }
 
+/// The MSL scalar a matrix-multiply fragment of `format` holds: the one place the row-tiled
+/// kernel's operand, probability and accumulator widths are spelled, each read off a proxima-numeric
+/// [`Codec`] so llama.cpp's binary16 operands over binary32 accumulators (`fa_f16.metal` `FA_TYPES`)
+/// is a choice of formats, not a literal in the kernel text.
+fn fragment_scalar_type(format: Codec) -> &'static str {
+    match format {
+        Codec::Float16 => "half",
+        _ => "float",
+    }
+}
+
+/// The `simdgroup_matrix` type of an 8x8 fragment of `format`.
+fn fragment_type(format: Codec) -> &'static str {
+    match format {
+        Codec::Float16 => "simdgroup_half8x8",
+        _ => "simdgroup_float8x8",
+    }
+}
+
 /// The fragment load every described cache layout shares: element `offset + r * stride + c` of the
 /// cache at `base`, decoded by `omega_cache_element`, which [`cache_element_helper`] defines from the
 /// cache's own description.
