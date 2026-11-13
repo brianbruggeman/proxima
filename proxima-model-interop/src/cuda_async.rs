@@ -299,11 +299,13 @@ enum OwnerCommand {
         reply: oneshot::Sender<Result<omega::CudaDeviceSnapshot, omega::CudaDriverError>>,
     },
     RegisterGraph {
-        graph: OwnedGraph,
+        // boxed: the owned graph is ~300 bytes and would size every command
+        graph: Box<OwnedGraph>,
         reply: oneshot::Sender<Result<CudaPlanLease, CudaPlanRegistrationError>>,
     },
     RegisterPlan {
-        plan: omega::CudaPlan,
+        // boxed: the plan is ~1.2 KB and would size every command; the owner boxes it into RegisteredPlan anyway
+        plan: Box<omega::CudaPlan>,
         reply: oneshot::Sender<Result<CudaPlanLease, CudaPlanRegistryError>>,
     },
     RetirePlan {
@@ -538,7 +540,7 @@ fn borrow_owned_block(block: &OwnedBlock) -> QuantizedBlock<'_> {
         OwnedBlock::Float32(values) => QuantizedBlock::Float32(values),
         OwnedBlock::Int32(values) => QuantizedBlock::Int32(values),
         OwnedBlock::Packed { codec, bytes } => QuantizedBlock::Packed {
-            codec: *codec,
+            codec: **codec,
             bytes,
         },
     }
@@ -659,11 +661,11 @@ fn own_block(block: QuantizedBlock<'_>) -> OwnedBlock {
         QuantizedBlock::Float32(values) => OwnedBlock::Float32(Arc::from(values)),
         QuantizedBlock::Int32(values) => OwnedBlock::Int32(Arc::from(values)),
         QuantizedBlock::Packed { codec, bytes } => OwnedBlock::Packed {
-            codec,
+            codec: Arc::new(codec),
             bytes: Arc::from(bytes),
         },
         QuantizedBlock::PackedStrided { codec, .. } => OwnedBlock::Packed {
-            codec,
+            codec: Arc::new(codec),
             bytes: block
                 .packed_runs()
                 .into_iter()
@@ -683,7 +685,11 @@ pub enum OwnedBlock {
     /// Owned integer values.
     Int32(Arc<[i32]>),
     /// Owned packed bytes and their codec identity.
-    Packed { codec: Codec, bytes: Arc<[u8]> },
+    Packed {
+        /// shared so the 688-byte codec value does not size every variant
+        codec: Arc<Codec>,
+        bytes: Arc<[u8]>,
+    },
 }
 
 /// An owned block name and its payload.
@@ -965,13 +971,13 @@ impl CudaGpuService<()> {
                             plans
                                 .register(RegisteredPlan::Cuda(Box::new(plan)))
                                 .map_err(CudaPlanRegistrationError::from)
-                        })(graph);
+                        })(*graph);
                         if let Err(Ok(lease)) = reply.send(result) {
                             let _ = plans.retire(&lease);
                         }
                     }
                     OwnerCommand::RegisterPlan { plan, reply } => {
-                        let result = plans.register(RegisteredPlan::Cuda(Box::new(plan)));
+                        let result = plans.register(RegisteredPlan::Cuda(plan));
                         if let Err(Ok(lease)) = reply.send(result) {
                             let _ = plans.retire(&lease);
                         }
@@ -1102,7 +1108,10 @@ where
         Box<omega::CudaPlan>,
     > {
         let (reply, response) = oneshot::channel();
-        let command = OwnerCommand::RegisterPlan { plan, reply };
+        let command = OwnerCommand::RegisterPlan {
+            plan: Box::new(plan),
+            reply,
+        };
         match self.commands.try_send(command) {
             Ok(()) => Ok(async move {
                 response
@@ -1110,7 +1119,7 @@ where
                     .unwrap_or(Err(CudaPlanRegistryError::OwnerStopped))
             }),
             Err(error) => match error.into_inner() {
-                OwnerCommand::RegisterPlan { plan, .. } => Err(Box::new(plan)),
+                OwnerCommand::RegisterPlan { plan, .. } => Err(plan),
                 OwnerCommand::DeviceSnapshot { .. }
                 | OwnerCommand::RegisterGraph { .. }
                 | OwnerCommand::RetirePlan { .. }
@@ -1148,7 +1157,10 @@ where
             inputs: inputs.clone(),
         };
         self.commands
-            .send(OwnerCommand::RegisterGraph { graph, reply })
+            .send(OwnerCommand::RegisterGraph {
+                graph: Box::new(graph),
+                reply,
+            })
             .await
             .map_err(|_| CudaPlanRegistryError::OwnerStopped)?;
         response
@@ -1364,7 +1376,7 @@ mod tests {
         let OwnedBlock::Packed { codec, bytes } = &owned.blocks[0].block else {
             panic!("expected an owned packed block");
         };
-        assert_eq!(*codec, Codec::Q4K);
+        assert_eq!(**codec, Codec::Q4K);
         assert_eq!(bytes.as_ref(), expected.as_slice());
         assert_eq!(owned.owned_bytes, "up_exps".len() + experts * run);
     }
@@ -1682,7 +1694,7 @@ mod tests {
         );
         assert!(matches!(
             &owned.blocks[2].block,
-            OwnedBlock::Packed { codec: Codec::Q4K, bytes } if bytes.as_ref() == packed_values
+            OwnedBlock::Packed { codec, bytes } if **codec == Codec::Q4K && bytes.as_ref() == packed_values
         ));
     }
 

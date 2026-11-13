@@ -495,7 +495,7 @@ fn resident_payload_matches(owned: &OwnedBlock, source: QuantizedBlock<'_>) -> b
                 bytes: cached,
             },
             QuantizedBlock::Packed { codec, bytes },
-        ) => *cached_codec == codec && cached.as_ref() == bytes,
+        ) => **cached_codec == codec && cached.as_ref() == bytes,
         _ => false,
     }
 }
