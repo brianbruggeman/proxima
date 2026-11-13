@@ -1,8 +1,7 @@
 use super::cached_attention_render::decode_index_tokens;
-use super::layout_render::{block_unpack_msl, layout_load_msl, readable_block_layout, readable_scalar_cache};
+use super::layout_render::{block_unpack_msl, readable_block_layout, scalar_cache_read};
 use super::*;
 use proxima_numeric::block_layout::BlockLayout;
-use proxima_numeric::float_layout::FloatLayout;
 
 /// The split-KV partial for [`CachedAttentionForm::TwoRangeDecodeSplit`]: one
 /// threadgroup per `(query_row, query_head, split)` with `chunks` simdgroups,
@@ -63,13 +62,9 @@ pub(super) fn render_cached_attention_decode_split(
     let new_upper = index_literal(*new_upper_inclusive, index_type, literal_suffix);
     let key_block = cached_key_codec.as_ref().and_then(readable_block_layout);
     let value_block = cached_kv_codec.as_ref().and_then(readable_block_layout);
-    let scalar_cache = cached_kv_codec.as_ref().and_then(readable_scalar_cache);
-    let scalar_helper_name = scalar_cache
-        .map(|(layout, _)| format!("omega_kv_scalar_{}", crate::identity::description_fingerprint(&layout)))
-        .unwrap_or_default();
-    let scalar_helper = scalar_cache
-        .map(|(layout, storage)| scalar_vector_helper(layout, storage, &scalar_helper_name))
-        .unwrap_or_default();
+    let scalar_cache = cached_kv_codec.as_ref().and_then(scalar_cache_read);
+    let scalar_helper_name = scalar_cache.as_ref().map(|read| read.load.clone()).unwrap_or_default();
+    let scalar_helper = scalar_cache.as_ref().map(|read| read.helper.clone()).unwrap_or_default();
     if key_block.is_none() && cached_key_codec != cached_kv_codec {
         return Err(EmitError::CachedAttentionKvCodecNotSupported {
             node: resolved.node,
@@ -79,7 +74,7 @@ pub(super) fn render_cached_attention_decode_split(
     let (cached_kv_type, mut split) = match cached_kv_codec {
         None => (element_type, None),
         Some(_) if scalar_cache.is_some() => (
-            scalar_cache.map_or("", |(_, storage)| storage),
+            scalar_cache.as_ref().map_or("", |read| read.storage),
             Some((SCALAR_KEY_POINTERS, SCALAR_VALUE_POINTERS, SCALAR_KEY_LOAD, SCALAR_VALUE_LOAD)),
         ),
         Some(_) if value_block.is_some() => {
@@ -385,15 +380,6 @@ const SCALAR_KEY_LOAD: Parts = (
 );
 
 const SCALAR_VALUE_LOAD: Parts = ("value_row[step][slot] = @SCALAR_LOAD@(v4_cached[index]);", NEW_VALUE_LOAD);
-
-/// The four-wide load of a scalar cache: `layout_load_msl`'s per-code decode applied to the four
-/// codes of one `storage` vector, so the cache layout alone decides the arithmetic.
-fn scalar_vector_helper(layout: FloatLayout, storage: &str, name: &str) -> String {
-    let element = layout_load_msl(layout, name);
-    format!(
-        "{element}static inline float4 {name}_x4({storage}4 value) {{ return float4({name}((uint)value.x), {name}((uint)value.y), {name}((uint)value.z), {name}((uint)value.w)); }}\n"
-    )
-}
 
 const SINK_PARAM: &str = "device const @T@* in9 [[buffer(9)]], ";
 

@@ -684,3 +684,26 @@ fn control_one_changed_sub_scale_bias_changes_the_rendered_iq4_xs_element() {
     assert_ne!(original, altered, "the bias is the only field changed and the text must follow it");
     assert!(altered.contains("sub_scale_raw - 31.0f"));
 }
+
+#[test]
+fn scalar_cache_read_is_the_text_the_decode_split_emits_for_each_scalar_width() {
+    use super::attn_golden_tests::attention_op;
+    use super::layout_render::scalar_cache_read;
+
+    let formats = [
+        (NumericFormat::Float16, "ushort"),
+        (NumericFormat::BFloat16, "ushort"),
+        (NumericFormat::BFloat8, "uchar"),
+    ];
+    for (format, storage) in formats {
+        let read = scalar_cache_read(&format).expect("a whole-byte scalar layout is readable");
+        let op = attention_op(9, 8, 256, 512, 1, -511);
+        let source = super::render_cached_attention_decode_split(&op, "entry", (Some(format), Some(format)))
+            .expect("the decode split renders a scalar cache");
+
+        assert_eq!(read.storage, storage);
+        assert!(read.load.starts_with("omega_kv_scalar_"), "{}", read.load);
+        assert_eq!(source.matches(read.helper.as_str()).count(), 1, "the decode split pushes the helper once");
+        assert!(source.contains(&format!("{}_x4(kr4_cached[index])", read.load)));
+    }
+}

@@ -503,6 +503,34 @@ pub fn readable_scalar_cache(format: &NumericFormat) -> Option<(FloatLayout, &'s
         .then_some((*layout, storage))
 }
 
+/// What a kernel needs to read a whole-byte scalar K/V cache: the buffer element type, the
+/// per-code decode name and the helper text that defines it.
+pub(super) struct ScalarCacheRead {
+    /// `uchar`, `ushort` or `uint`: the element type the cache buffer is declared with.
+    pub storage: &'static str,
+    /// `omega_kv_scalar_<fingerprint>`: `float name(uint code)` decodes one code; `{name}_x4` decodes
+    /// the four codes of one `storage` vector.
+    pub load: String,
+    /// The text defining `load` and `{load}_x4`, pushed once after the preamble.
+    pub helper: String,
+}
+
+/// The one rendered read of a scalar cache, for every attention form: the per-code decode is
+/// [`layout_load_msl`] on the cache layout, and the `_x4` line applies it to the four codes of
+/// a `storage` vector (the float4 read shape; the scalar shape calls `load` directly).
+/// The name carries the layout's description fingerprint, so layouts that share a geometry
+/// never share a helper. `None` when [`readable_scalar_cache`] is.
+#[must_use]
+pub(super) fn scalar_cache_read(format: &NumericFormat) -> Option<ScalarCacheRead> {
+    let (layout, storage) = readable_scalar_cache(format)?;
+    let load = format!("omega_kv_scalar_{}", crate::identity::description_fingerprint(&layout));
+    let element = layout_load_msl(layout, &load);
+    let helper = format!(
+        "{element}static inline float4 {load}_x4({storage}4 value) {{ return float4({load}((uint)value.x), {load}((uint)value.y), {load}((uint)value.z), {load}((uint)value.w)); }}\n"
+    );
+    Some(ScalarCacheRead { storage, load, helper })
+}
+
 /// [`readable_block_layout`] with the reason: `Err` names the property the format lacks.
 ///
 /// # Errors
