@@ -36,6 +36,21 @@ pub enum ScaleStatistic {
     SignedPeak,
     /// The mean magnitude: the sum of the magnitudes over the element count.
     MeanMagnitude,
+    /// The range of the block: the scale is `(max - min) / divisor`, with `min` and `max` taken by
+    /// strict comparison in element order. The low end is also the block's offset: see
+    /// [`StoredMin`].
+    MinMax,
+}
+
+/// Whether the block stores the low end of its [`ScaleStatistic::MinMax`] range, and with which sign.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum StoredMin {
+    /// No offset: a value is coded from zero.
+    Absent,
+    /// The layout's `min` field holds `sign * low`, with `sign` the layout's `min_multiplier`
+    /// (`1` or `-1`), so a decode that adds `min_multiplier * min` recovers the low end. A code is
+    /// then fitted from `value - low`.
+    LowEnd { sign: i8 },
 }
 
 /// How a value over the scale becomes a code.
@@ -76,6 +91,8 @@ pub struct EncodeRule {
     pub highest: i32,
     /// The two bytes after the scale hold `f16(scale * sum(values of codes))`.
     pub stored_sum: bool,
+    /// Whether the layout's min field holds the low end of the block's range.
+    pub stored_min: StoredMin,
     /// The raw code whose value is zero (the bias of an offset-binary code, `0` of a two's
     /// complement one). A block whose finite scale stores as zero, or stores with a non-finite
     /// inverse, has every code set to this, so it decodes to exactly zero; a NaN or infinite scale
@@ -110,6 +127,7 @@ mod tests {
                 lowest: -8,
                 highest: 7,
                 stored_sum: false,
+                stored_min: StoredMin::Absent,
                 zero_code: 8,
             }
         );
@@ -137,8 +155,19 @@ mod tests {
     }
 
     #[test]
-    fn a_layout_with_a_stored_min_or_sub_blocks_has_no_rule() {
-        assert_eq!(BlockLayout::Q4_1.encode_rule(), None);
+    fn a_layout_with_sub_blocks_has_no_rule() {
         assert_eq!(BlockLayout::Q4_K.encode_rule(), None);
+    }
+
+    #[test]
+    fn q4_1_and_q5_1_fit_the_range_over_their_code_span_and_store_the_low_end() {
+        for (layout, span) in [(BlockLayout::Q4_1, 15), (BlockLayout::Q5_1, 31)] {
+            let rule = layout.encode_rule().expect("a stored-min layout has a rule");
+            assert_eq!(rule.statistic, ScaleStatistic::MinMax);
+            assert_eq!(rule.divisor, span);
+            assert_eq!(rule.stored_min, StoredMin::LowEnd { sign: 1 });
+            assert_eq!(rule.rounding, CodeRounding::HalfUpThenTruncate);
+            assert_eq!(rule.clamp, CodeClamp::Upper);
+        }
     }
 }

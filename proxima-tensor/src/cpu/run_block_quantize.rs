@@ -330,13 +330,13 @@ mod tests {
     }
 
     #[test]
-    fn layouts_with_sub_blocks_or_a_min_are_a_typed_error() {
+    fn sub_block_layouts_are_a_typed_error() {
         // TQ1_0 is not here: it has neither a sub-block nor a stored min, and its base-3 packing
         // encodes through the shared writer now (proxima-numeric pins that split per format)
-        let refused = [BlockLayout::Q4_1, BlockLayout::Q4_K, BlockLayout::Q6_K];
+        let refused = [BlockLayout::Q4_K, BlockLayout::Q6_K];
         for layout in refused {
             let error =
-                encode(&layout, &inputs(&layout, 7)).expect_err("not a shared-scale linear layout");
+                encode(&layout, &inputs(&layout, 7)).expect_err("sub-block scales are not fitted");
             assert!(
                 matches!(
                     error,
@@ -347,6 +347,33 @@ mod tests {
                 ),
                 "{error:?}"
             );
+        }
+    }
+
+    /// proxima-numeric's PROXNUM-193 oracle input: x[j] = ((j * 37 mod 64) - 20) / 16.
+    fn oracle_input(count: usize) -> Vec<f32> {
+        (0..count).map(|index| ((index * 37 % 64) as f32 - 20.0) / 16.0).collect()
+    }
+
+    #[test]
+    fn stored_min_layouts_quantize_and_decode_within_half_a_step_per_element() {
+        for (layout, levels) in [(BlockLayout::Q4_1, 15.0f32), (BlockLayout::Q5_1, 31.0f32)] {
+            let width = usize::from(layout.elements);
+            let values = oracle_input(ROWS as usize * row_width(&layout) as usize);
+            let packed = encode(&layout, &values).expect("a stored-min layout encodes from its description");
+            let back = decoded(&layout, &packed);
+
+            assert_eq!(back.len(), values.len(), "{layout:?}: every element decodes");
+            for (block, (source, restored)) in values.chunks(width).zip(back.chunks(width)).enumerate() {
+                let low = source.iter().copied().fold(f32::INFINITY, f32::min);
+                let high = source.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let step = (high - low) / levels;
+                // d and min are stored as f16, so the half-step bound widens by their rounding
+                let bound = step / 2.0 + step * levels * F16_EPSILON / 2.0 + high.abs().max(low.abs()) * F16_EPSILON;
+                for (want, got) in source.iter().zip(restored) {
+                    assert!((want - got).abs() <= bound, "{layout:?} block {block}: {want} vs {got}, bound {bound}");
+                }
+            }
         }
     }
 
