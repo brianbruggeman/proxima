@@ -411,6 +411,7 @@ pub(crate) fn round_zero_reduce_bound(resolved: &BoundOp) -> BoundOp {
             epilogue_body: epilogue_body.clone(),
             epilogue_operands: epilogue_operands.clone(),
             epilogue_broadcast_axes: epilogue_broadcast_axes.clone(),
+            accumulator: resolved.dtype,
         },
     }
 }
@@ -922,7 +923,10 @@ pub(super) fn emit_with_expert_sources_mode(
 /// emitted TEXT is correct in isolation, which is what lets it be unit-tested
 /// without a device (see this module's own `horizontal_merge_base_table_
 /// splice_tests`).
-#[cfg(feature = "metal-horizontal-merge")]
+#[cfg(all(
+    feature = "metal-horizontal-merge",
+    any(test, all(feature = "metal", target_os = "macos"))
+))]
 pub(crate) fn splice_horizontal_merge_base_table(
     kernel: &mut Kernel,
     node: NodeId,
@@ -1016,7 +1020,13 @@ pub(crate) fn splice_horizontal_merge_base_table(
 /// `splice_horizontal_merge_base_table` and `metal-moe-mul-mat-id`'s
 /// `splice_round_batched_reduce_base_table` -- either feature alone must
 /// still compile this, since a build can enable one without the other.
-#[cfg(any(feature = "metal-horizontal-merge", feature = "metal-moe-mul-mat-id"))]
+#[cfg(any(
+    all(
+        feature = "metal-horizontal-merge",
+        any(test, all(feature = "metal", target_os = "macos"))
+    ),
+    feature = "metal-moe-mul-mat-id"
+))]
 pub(super) fn replace_whole_word(text: &str, identifier: &str, replacement: &str) -> String {
     let bytes = text.as_bytes();
     let pattern = identifier.as_bytes();

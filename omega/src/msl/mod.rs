@@ -146,7 +146,11 @@ pub(crate) use emit_and_classify::emit_inner_with_mma_selection_and_layout;
 pub(crate) use emit_and_classify::has_dense_bf16_mma_candidate;
 #[cfg(any(test, all(feature = "metal", target_os = "macos")))]
 pub(crate) use emit_and_classify::kernel_cache_key_for_grid_with_layout;
-#[cfg(feature = "metal-attn-variants")]
+#[cfg(all(
+    feature = "metal-attn-variants",
+    feature = "metal",
+    target_os = "macos"
+))]
 pub(crate) use emit_and_classify::validate_attention_variant_storage;
 pub use emit_and_classify::*;
 pub use kernel_types_identity::*;
