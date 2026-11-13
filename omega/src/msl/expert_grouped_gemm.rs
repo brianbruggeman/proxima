@@ -981,7 +981,10 @@ pub(super) const GROUPED_ROUTE_HEADER_WORDS: u64 =
 
 /// Row tiles of output features `resolved` launches, the index of its indirect
 /// slot in the compaction header.
-#[cfg(feature = "metal-grouped-gemm")]
+#[cfg(all(
+    feature = "metal-grouped-gemm",
+    any(test, all(feature = "metal", target_os = "macos"))
+))]
 fn grouped_row_tiles(resolved: &BoundOp, block: &TiledGemmBlock) -> u64 {
     block
         .feature_axes
