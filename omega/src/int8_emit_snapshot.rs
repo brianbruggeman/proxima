@@ -9,7 +9,7 @@ use proxima_numeric::{DType, NumericPolicy};
 
 use crate::backend::GpuDriver;
 use crate::cuda::emit_cuda_with_policy;
-use crate::derived_quantize::derive_block_quantize;
+use crate::derived_quantize::derive_with_storage;
 use crate::lowering::{Codec, PackedOperands};
 
 const ROWS: u32 = 8;
@@ -59,7 +59,7 @@ fn emitted_sources(codec: Codec, tokens: u32) -> String {
     let mut packed = PackedOperands::from([(weight, codec)]);
     let mut resolved = bind_with_fusion(&program, &shapes, &[sum], policy.reassociation, policy).expect("binds");
     correct_packed_matmul_layouts(&mut resolved, &packed.keys().copied().collect());
-    let derived = derive_block_quantize(resolved, &program, &shapes, &mut packed, policy, GpuDriver::Cuda);
+    let derived = derive_with_storage(resolved, &program, &shapes, &mut packed, policy, GpuDriver::Cuda, None);
     derived.iter().map(|bound| emitted(bound, &packed, policy)).collect()
 }
 

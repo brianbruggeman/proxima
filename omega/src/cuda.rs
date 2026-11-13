@@ -98,6 +98,9 @@ use split_attention::{
 };
 pub use int8_gemm::is_int8_weight;
 use block_quantize::{block_quantize_grid, quantize_device, render_block_quantize};
+pub use block_quantize::Missing;
+#[cfg(feature = "cuda-driver")]
+pub(crate) use block_quantize::{consumer_missing, producer_missing};
 #[cfg(any(test, feature = "cuda-driver"))]
 use block_quantize::block_quantize_groups;
 use int8_gemm::INT8_MMA_INSTRUCTION;

@@ -34,7 +34,19 @@ fn codes_are_byte_runs(layout: &BlockLayout) -> bool {
             .all(|index| element.low.address(index) == layout.run_code_byte((index / run) as u16) * 8 + index % run * 8)
 }
 
-fn is_q8_1_run_layout(layout: &BlockLayout) -> bool {
+/// A piece the CUDA render lacks for a block activation layout, with the line that found it
+/// missing, so a refusal points at the code that would have to change and never at a format name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Missing {
+    pub piece: &'static str,
+    pub file: &'static str,
+    pub line: u32,
+}
+
+/// Int8 codes in 32-element byte runs under an f16 scale, each run's scale followed by the two-byte
+/// stored sum the int8 readers fold in: what `quantize_device` writes and `activation_code_words`
+/// reads.
+fn is_int8_run_layout(layout: &BlockLayout) -> bool {
     layout.run_elements() == GROUP_ELEMENTS as u16
         && layout.scale.layout == FloatLayout::F16
         && layout.min.is_none()
@@ -42,7 +54,41 @@ fn is_q8_1_run_layout(layout: &BlockLayout) -> bool {
         && layout.multiplier == 1
         && layout.element.bias == 0
         && codes_are_byte_runs(layout)
+        && (0..layout.runs()).all(|run| layout.run_code_byte(run) >= layout.run_scale_byte(run) + 4)
         && (0..layout.runs()).all(|run| layout.run_scale_byte(run) + 4 <= usize::from(layout.block_bytes))
+}
+
+/// Why no int8 reader (gemm, staged matvec, mma gemm) can read an activation held in `layout`.
+pub(crate) fn consumer_missing(layout: &BlockLayout) -> Result<(), Missing> {
+    if is_int8_run_layout(layout) {
+        return Ok(());
+    }
+    Err(Missing {
+        piece: "an activation reader for this layout: the int8 gemm and staged matvec unpack int8 byte-run codes under an f16 scale with a stored sum (int8_gemm.rs activation_code_words)",
+        file: file!(),
+        line: line!(),
+    })
+}
+
+/// Why `render_block_quantize` cannot produce an activation in `layout`.
+pub(crate) fn producer_missing(layout: &BlockLayout) -> Result<(), Missing> {
+    if !is_int8_run_layout(layout) {
+        return Err(Missing {
+            piece: "a CUDA quantize device function rendered from this layout's EncodeRule: quantize_device writes the peak/127 rule for int8 byte runs as literals",
+            file: file!(),
+            line: line!(),
+        });
+    }
+    // a layout with independent scale runs (the grouped pair) has no single rule; its geometry is
+    // the run layout checked above
+    match layout.encode_rule() {
+        Some(rule) if rule.divisor != 127 || !rule.stored_sum => Err(Missing {
+            piece: "a quantize device function for this layout's scale rule: quantize_device divides the peak by 127 and stores the sum",
+            file: file!(),
+            line: line!(),
+        }),
+        _ => Ok(()),
+    }
 }
 
 fn servable_layout(resolved: &BoundOp) -> Result<&BlockLayout, EmitError> {
@@ -56,7 +102,7 @@ fn servable_layout(resolved: &BoundOp) -> Result<&BlockLayout, EmitError> {
     let dense_source = operands
         .first()
         .is_some_and(|(_, layout, _)| layout.base == 0 && layout.strides.last() == Some(&1));
-    match (is_q8_1_run_layout(layout), layout.block_bytes % 4 == 0, dense_source) {
+    match (producer_missing(layout).is_ok(), layout.block_bytes % 4 == 0, dense_source) {
         (true, true, true) => Ok(layout),
         (false, _, _) => Err(unsupported(resolved, "block_quantize_layout")),
         (_, false, _) => Err(unsupported(resolved, "block_quantize_block_bytes_not_word_sized")),

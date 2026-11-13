@@ -358,10 +358,20 @@ impl NumericFormat {
         }
     }
 
-    /// Whether the buffer holds an activation a `BlockQuantize` node already quantized.
+    /// Whether the buffer holds an activation a `BlockQuantize` node already quantized: int8
+    /// codes under an f16 scale with the two-byte stored sum right behind each run's scale, which
+    /// is what an integer dot product needs and a weight-only layout of the same codes lacks.
+    /// Decided from the layout's fields, so a layout of that shape is one whatever it is called.
     #[must_use]
     pub fn is_quantized_activation(&self) -> bool {
-        *self == Self::Q8_1 || *self == Self::Q8_1Grouped
+        let Self::Block(layout) = self else {
+            return false;
+        };
+        layout.element.code == FloatLayout::INT8
+            && layout.scale.layout == FloatLayout::F16
+            && layout.min.is_none()
+            && layout.sub.is_none()
+            && (0..layout.runs()).all(|run| layout.run_code_byte(run) >= layout.run_scale_byte(run) + 4)
     }
 
     /// Elements that share the smallest whole-byte storage unit: 2 for a four-bit scalar (two
@@ -923,6 +933,15 @@ mod tests {
         FloatLayout::UINT5,
         FloatLayout::UINT6,
     ];
+
+    #[test]
+    fn the_quantized_activation_shape_selects_exactly_the_two_q8_1_layouts_among_all_formats() {
+        let selected: Vec<NumericFormat> =
+            NumericFormat::ALL.into_iter().filter(NumericFormat::is_quantized_activation).collect();
+        assert_eq!(selected, vec![NumericFormat::Q8_1, NumericFormat::Q8_1Grouped]);
+        assert!(!NumericFormat::Mxfp4.is_quantized_activation());
+        assert!(!NumericFormat::Q8_0.is_quantized_activation());
+    }
 
     #[test]
     fn packed_len_is_whole_blocks_of_bytes_or_none() {

@@ -1050,27 +1050,33 @@ fn padded_cached_engine_propagates_the_activation_format_and_keeps_logits_binary
     );
 }
 
-/// A family profile spells the activation as a numeric format; a block format
-/// has no op dtype and is refused at the bridge rather than widened.
+/// A family profile spells the activation as a numeric format; a scalar format
+/// is the op dtype, a block or level format is the plan's storage format over
+/// binary32 values, and every format in the catalogue builds the same program.
 #[test]
-fn descriptor_activation_defaults_to_binary32_and_refuses_a_block_format() {
+fn descriptor_activation_accepts_every_numeric_format_scalar_or_block() {
     let mut descriptor =
         head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Bounded, 1);
     assert_eq!(descriptor.activation, DType::FLOAT32.numeric_format());
-    assert_eq!(descriptor.activation_dtype(), Ok(DType::FLOAT32));
+    assert_eq!(descriptor.activation_dtype(), DType::FLOAT32);
+    assert_eq!(descriptor.activation_storage(), None);
 
     descriptor.activation = DType::BFLOAT16.numeric_format();
-    assert_eq!(descriptor.activation_dtype(), Ok(DType::BFLOAT16));
+    assert_eq!(descriptor.activation_dtype(), DType::BFLOAT16);
+    assert_eq!(descriptor.activation_storage(), None);
 
-    let block = NumericFormat::ALL
-        .into_iter()
-        .find(|format| !matches!(format, NumericFormat::Scalar(_)))
-        .expect("the format catalogue holds a block or level format");
-    descriptor.activation = block;
-    assert!(matches!(
-        descriptor.activation_dtype(),
-        Err(TensorError::UnsupportedInBuilder { .. })
-    ));
+    let reference = build_forward(&head_repeats::descriptor(CacheStrategy::Cached, CacheMask::Bounded, 1))
+        .expect("binary32 program lowers");
+    let mut stored = 0;
+    for format in NumericFormat::ALL.into_iter().filter(|format| !matches!(format, NumericFormat::Scalar(_))) {
+        descriptor.activation = format;
+        assert_eq!(descriptor.activation_dtype(), DType::FLOAT32, "{format:?}");
+        assert_eq!(descriptor.activation_storage(), Some(format));
+        let forward = build_forward(&descriptor).expect("a block activation format builds");
+        assert_eq!(forward.program, reference.program, "{format:?}");
+        stored += 1;
+    }
+    assert!(stored > 0 && NumericFormat::Mxfp4.block_layout().is_some());
 }
 
 /// [`gqa_cached_forward_program_with_experts_and_layer_taps`] must

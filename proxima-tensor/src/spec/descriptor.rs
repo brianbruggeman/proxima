@@ -336,16 +336,28 @@ const fn default_activation() -> NumericFormat {
 }
 
 impl ModelDescriptor {
-    /// The `DType` an op produced at [`Self::activation`] carries. A `Block` or
-    /// `Levels` activation has no op dtype today, so it is refused here rather
-    /// than silently widened.
-    pub fn activation_dtype(&self) -> Result<DType, TensorError> {
+    /// The `DType` the program's ops compute and carry values at for
+    /// [`Self::activation`]. A scalar format is its own dtype. A block or level
+    /// format is a storage format of the plan, not of an op: the program's nodes
+    /// hold the decoded binary32 values and the plan stores the node in the
+    /// format (omega's `BlockQuantize`, whose codec is the configured format),
+    /// so the op dtype of such an activation is binary32.
+    #[must_use]
+    pub fn activation_dtype(&self) -> DType {
         match self.activation {
-            NumericFormat::Scalar(layout) => Ok(DType::Layout(layout)),
-            _ => Err(TensorError::UnsupportedInBuilder {
-                builder: "build_forward",
-                feature: "a block or level activation format (Op carries a scalar dtype)",
-            }),
+            NumericFormat::Scalar(layout) => DType::Layout(layout),
+            NumericFormat::Block(_) | NumericFormat::Levels(_) => DType::FLOAT32,
+        }
+    }
+
+    /// The format activations are stored in between ops, when it is a block or
+    /// level format the plan applies as a storage decision; `None` for a scalar
+    /// activation, which the ops carry as their own dtype.
+    #[must_use]
+    pub fn activation_storage(&self) -> Option<NumericFormat> {
+        match self.activation {
+            NumericFormat::Scalar(_) => None,
+            stored => Some(stored),
         }
     }
 
@@ -1032,7 +1044,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                     descriptor.recurrence,
                     descriptor.loopcd,
                     SharedExpertWidth(descriptor.expert_shared_feed_forward),
-                    descriptor.activation_dtype()?,
+                    descriptor.activation_dtype(),
                 )?;
             Ok(ForwardProgram {
                 program,
@@ -1215,7 +1227,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                     descriptor.residual_scale,
                     &layer_windows,
                     descriptor.sliding_kv_ring,
-                    descriptor.activation_dtype()?,
+                    descriptor.activation_dtype(),
                 )?;
             Ok(ForwardProgram {
                 program,

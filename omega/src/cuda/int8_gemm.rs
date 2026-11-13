@@ -14,6 +14,7 @@ use proxima_tensor::{BoundOp, Layout};
 use proxima_numeric::{NumericPolicy};
 
 use super::block_dot::{BlockDot, ChunkTerms, DOT_ELEMENTS, block_dot_i8};
+use super::block_quantize::consumer_missing;
 use super::mma_gemm::{MmaGemm, push_output_write, push_tile_origin};
 use super::{Codec, EmitError, reduction_dims};
 
@@ -59,6 +60,7 @@ pub(super) fn int8_gemm_plan(
         return None;
     }
     let activation = prequantized?.block_layout()?;
+    consumer_missing(&activation).ok()?;
     let dot = int8_dot(codec)?;
     let reduction: u64 = reduction_dims(resolved, output_axes)
         .iter()

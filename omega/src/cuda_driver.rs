@@ -40,7 +40,8 @@ use crate::cuda_kernel_cache::{
 use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
 use crate::backend::GpuDriver;
-use crate::derived_quantize::{derive_block_quantize, underive_block_quantize};
+use crate::derived_quantize::{ActivationRefusal, derive_with_storage, underive_block_quantize, validate_storage};
+use proxima_numeric::NumericFormat;
 use crate::lowering::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{
     RefreshRefusal, changed_nodes, kv_read_only_by_fused_attention, refit_cached_attention_at,
@@ -112,6 +113,8 @@ pub enum CudaDriverError {
     },
     #[error("CUDA kv carry state machine: {0}")]
     KvCarry(String),
+    #[error("CUDA cannot store activations in the configured format: {0}")]
+    ActivationStorage(#[from] Box<ActivationRefusal>),
 }
 
 impl From<StateCarryError<NodeId>> for CudaDriverError {
@@ -532,6 +535,7 @@ pub struct CudaPlan {
     // boxed: the arena is three maps (72 bytes) that only move when the plan is built, keeping CudaPlan inside clippy's large_enum_variant gap against the cpu plan
     arena: Box<CudaF32Arena>,
     numeric_policy: NumericPolicy,
+    activation_storage: Option<NumericFormat>,
     packed_operands: PackedOperands,
     exact_activations: bool,
     // resident_nodes is sorted; boxed slices keep CudaPlan under clippy's large_enum_variant gap against the cpu plan
@@ -572,6 +576,8 @@ struct StateCarry {
 /// plan with fusion enabled, which `RuntimeConfig::default()` (fusion off) would
 /// silently change.
 struct PlanPolicy<'config> {
+    /// A descriptor's block activation format (`activation_storage`); `None` keeps the default pair.
+    activation_storage: Option<NumericFormat>,
     numeric_policy: NumericPolicy,
     exact_activations: bool,
     config: Option<&'config RuntimeConfig>,
@@ -991,6 +997,31 @@ impl CudaDriver {
         named: &[(&str, QuantizedBlock<'_>)],
     ) -> Result<CudaPlan, CudaDriverError> {
         let policy = PlanPolicy {
+            activation_storage: None,
+            numeric_policy,
+            exact_activations: true,
+            config: None,
+        };
+        self.plan_with_options(program, symbols, outputs, named, policy)
+    }
+
+    /// [`Self::plan`] storing activations in the block format a descriptor names through
+    /// `ModelDescriptor::activation_storage`.
+    ///
+    /// # Errors
+    /// [`CudaDriverError::ActivationStorage`] when the producer or the readers lack a render piece
+    /// for the format; the refusal names each piece and the file:line that found it missing.
+    pub fn plan_with_activation_storage(
+        &self,
+        program: &[Op],
+        symbols: &[u64],
+        outputs: &[NodeId],
+        numeric_policy: NumericPolicy,
+        activation_storage: Option<NumericFormat>,
+        named: &[(&str, QuantizedBlock<'_>)],
+    ) -> Result<CudaPlan, CudaDriverError> {
+        let policy = PlanPolicy {
+            activation_storage,
             numeric_policy,
             exact_activations: true,
             config: None,
@@ -1009,6 +1040,7 @@ impl CudaDriver {
         named: &[(&str, QuantizedBlock<'_>)],
     ) -> Result<CudaPlan, CudaDriverError> {
         let policy = PlanPolicy {
+            activation_storage: None,
             numeric_policy,
             exact_activations,
             config: None,
@@ -1025,6 +1057,7 @@ impl CudaDriver {
         config: &RuntimeConfig,
     ) -> Result<CudaPlan, CudaDriverError> {
         let policy = PlanPolicy {
+            activation_storage: None,
             numeric_policy: config.numeric,
             exact_activations: config.exact_activations,
             config: Some(config),
@@ -1041,10 +1074,12 @@ impl CudaDriver {
         policy: PlanPolicy<'_>,
     ) -> Result<CudaPlan, CudaDriverError> {
         let PlanPolicy {
+            activation_storage,
             numeric_policy,
             exact_activations,
             config,
         } = policy;
+        validate_storage(activation_storage)?;
         let blocks = resolve_named_blocks(program, named).map_err(|_| {
             CudaDriverError::UnsupportedGraph {
                 node: NodeId(0),
@@ -1095,7 +1130,7 @@ impl CudaDriver {
         }
         let unfused = config.is_some_and(|value| !value.allow_fusion);
         let (resolved, packed_operands, mut micros) =
-            bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, unfused)?;
+            bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, unfused, activation_storage)?;
         let (kernels, uniforms) =
             emit_and_pack(&resolved, None, &packed_operands, numeric_policy, self.device, &mut micros)?;
         let pool = Box::new(PoolSchedule::build(&resolved, &kernels, outputs));
@@ -1117,6 +1152,7 @@ impl CudaDriver {
             outputs: outputs.into(),
             arena: Box::new(self.new_arena()),
             numeric_policy,
+            activation_storage,
             packed_operands,
             exact_activations,
             resident_nodes: Box::default(),
@@ -1797,7 +1833,7 @@ pub fn probe_pads_kv(
         node: NodeId(0),
         reason: "shape inference failed",
     })?;
-    let (resolved, _, _) = bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, false)?;
+    let (resolved, _, _) = bind_resolved(program, &shapes, outputs, &packed_operands, numeric_policy, false, None)?;
     Ok(kv_read_only_by_fused_attention(program, &resolved, outputs, is_kv_input))
 }
 
@@ -1808,6 +1844,7 @@ fn bind_resolved(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     unfused: bool,
+    activation_storage: Option<NumericFormat>,
 ) -> Result<(Vec<BoundOp>, PackedOperands, LowerMicros), CudaDriverError> {
     // llama.cpp's cuda norms sum in float (`ggml-cuda/norm.cu:130-140`)
     let numeric_policy = numeric_policy.with_accumulator_narrowing().with_flash_narrowing(true);
@@ -1830,7 +1867,8 @@ fn bind_resolved(
     let mut resolved = prune_dead(bound, outputs);
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
     let mut packed = packed_operands.clone();
-    let resolved = derive_block_quantize(resolved, program, shapes, &mut packed, numeric_policy, GpuDriver::Cuda);
+    let resolved =
+        derive_with_storage(resolved, program, shapes, &mut packed, numeric_policy, GpuDriver::Cuda, activation_storage);
     validate_resolved(&resolved, numeric_policy)?;
     let micros = LowerMicros {
         bind: bind_started.elapsed().as_micros() as u64,
@@ -1932,13 +1970,13 @@ fn refresh_refusal_name(refusal: RefreshRefusal) -> &'static str {
 /// Re-derives only the KV-touched ops from `program` at `shapes`, keeping every
 /// other retained op as-is. Returns the refreshed set and the touched count.
 fn refresh_bound_resolved(
-    previous: &[BoundOp],
-    previous_shapes: &Shapes,
+    (previous, previous_shapes): (&[BoundOp], &Shapes),
     program: &[Op],
     outputs: &[NodeId],
     shapes: &Shapes,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    activation_storage: Option<NumericFormat>,
 ) -> Result<(Vec<BoundOp>, PackedOperands, usize), RefreshRefusal> {
     let changed: BTreeSet<NodeId> = (0..program.len())
         .map(|position| NodeId(position as u32))
@@ -1962,7 +2000,8 @@ fn refresh_bound_resolved(
     )?;
     correct_packed_matmul_layouts(&mut refreshed, &packed_operands.keys().copied().collect());
     let mut packed = packed_operands.clone();
-    let refreshed = derive_block_quantize(refreshed, program, shapes, &mut packed, numeric_policy, GpuDriver::Cuda);
+    let refreshed =
+        derive_with_storage(refreshed, program, shapes, &mut packed, numeric_policy, GpuDriver::Cuda, activation_storage);
     Ok((refreshed, packed, touched))
 }
 
@@ -2271,13 +2310,13 @@ impl CudaPlan {
             Err("numeric policy changed")
         } else {
             refresh_bound_resolved(
-                &previous_bound,
-                &self.shapes,
+                (&previous_bound, &self.shapes),
                 &self.program,
                 &self.outputs,
                 &shapes,
                 &self.packed_operands,
                 numeric_policy,
+                self.activation_storage,
             )
             .map_err(refresh_refusal_name)
         };
@@ -2315,6 +2354,7 @@ impl CudaPlan {
                     &self.packed_operands,
                     numeric_policy,
                     false,
+                    self.activation_storage,
                 )?;
                 self.packed_operands = packed;
                 let (kernels, uniforms) = emit_and_pack(
@@ -2506,6 +2546,7 @@ impl CudaPlan {
             &self.packed_operands,
             numeric_policy,
             false,
+            self.activation_storage,
         )?;
         Ok((shapes, bound))
     }
