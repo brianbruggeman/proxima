@@ -79,7 +79,7 @@ pub struct ArchConfig {
     #[setting(resolve_with = "parse_score_scale", default)]
     pub score_scale: Option<ScoreScaleOverride>,
     /// The routed-expert gating when the header has no `expert_gating_func`:
-    /// `"Softmax"` for granitemoe, `"Sigmoid"` for flint.
+    /// `"Softmax"` or `"Sigmoid"`.
     #[serde(default)]
     #[setting(resolve_with = "parse_routed_gating", default)]
     pub routed_gating: Option<ExpertGatingFunc>,

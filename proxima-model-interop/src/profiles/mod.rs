@@ -19,6 +19,10 @@ use proxima_tensor::spec::FamilyProfile;
 use crate::error::InteropError;
 
 mod binding;
+mod unknown;
+
+pub use unknown::ArchConfigSettings;
+use unknown::unknown_family_profile;
 
 #[cfg(test)]
 mod scan;
@@ -46,18 +50,18 @@ pub(crate) const FAMILY_PROFILES: &[(&str, &str)] = &[
 /// The [`FamilyProfile`] for `family`: a checkpoint's `general.architecture`
 /// (GGUF) or `model_type` (HF `config.json`).
 ///
+/// A family with no embedded row is built from the dense defaults and the
+/// run-time arch config file it names ([`ArchConfigSettings`]).
+///
 /// # Errors
 ///
-/// [`InteropError::MissingFamilyProfile`] when no profile is embedded for
-/// `family`; [`InteropError::InvalidFamilyProfile`] when the embedded file does
-/// not parse.
+/// [`InteropError::MissingArchField`] when an unlisted family's arch config is
+/// absent or lacks required fields; [`InteropError::InvalidFamilyProfile`] when
+/// a file does not parse.
 pub fn family_profile(family: &str) -> Result<FamilyProfile, InteropError> {
-    let (_, text) = FAMILY_PROFILES
-        .iter()
-        .find(|(name, _)| *name == family)
-        .ok_or_else(|| InteropError::MissingFamilyProfile {
-            family: family.into(),
-        })?;
+    let Some((_, text)) = FAMILY_PROFILES.iter().find(|(name, _)| *name == family) else {
+        return unknown_family_profile(family);
+    };
     conflaguration::from_toml_str(text).map_err(|error| InteropError::InvalidFamilyProfile {
         family: family.into(),
         message: error.to_string(),
@@ -427,12 +431,12 @@ mod tests {
     }
 
     #[test]
-    fn a_family_with_no_profile_is_an_error_naming_it() {
-        let error = family_profile("phi9").expect_err("phi9 has no embedded profile");
+    fn a_family_with_no_profile_or_arch_config_is_an_error_naming_it() {
+        let error = family_profile("phi9").expect_err("phi9 has no profile or arch config");
 
         assert!(matches!(
             &error,
-            InteropError::MissingFamilyProfile { family } if family == "phi9"
+            InteropError::MissingArchField { architecture, .. } if architecture == "phi9"
         ));
         assert!(error.to_string().contains("phi9"));
     }
