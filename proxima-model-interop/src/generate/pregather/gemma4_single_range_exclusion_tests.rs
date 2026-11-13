@@ -75,3 +75,36 @@ fn load_single_range_exclusion_covers_gemma4() {
         "gemma4 must stay excluded from the placed-KV single-range program"
     );
 }
+
+/// `LFM2-350M-Q4_K_M.gguf`'s own shape: no `expert_count` key, and an
+/// `attention.head_count_kv` of `[0, 0, 8, 0, 0, 8, 0, 0, 8, 0, 8, 0, 8, 0, 8, 0]`,
+/// which `architecture_from_metadata` reads as `kv_heads = 0` because the
+/// per-layer counts differ. The zero entries are short-convolution layers
+/// with no attention block for the single-range program to place.
+#[test]
+#[allow(clippy::expect_used)]
+fn a_dense_hybrid_with_cacheless_layers_gets_no_single_range_program() {
+    let architecture = ModelHparams {
+        vocab: 65536,
+        embedding: 1024,
+        feed_forward: 4608,
+        expert_feed_forward: 0,
+        query_heads: 16,
+        kv_heads: 0,
+        kv_heads_by_layer: alloc::vec![0, 0, 8, 0, 0, 8, 0, 0, 8, 0, 8, 0, 8, 0, 8, 0],
+        head_dim: 64,
+        block_count: 16,
+        expert_count: 0,
+        expert_used_count: 0,
+        rope_freq_base: 1_000_000.0,
+        rms_epsilon: 1e-5,
+        tied_embeddings: true,
+        family: String::from("lfm2"),
+        sliding_rope: None,
+    };
+
+    let single_range = build_single_range_program(&architecture, true)
+        .expect("a hybrid is turned away, not built");
+
+    assert!(single_range.is_none());
+}
