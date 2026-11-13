@@ -4382,7 +4382,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
             kv_carry_eligible,
             runtime_carries_state_on_device = runtime.carries_state_on_device(),
             experts = expert_protocol,
-            "kv_carry_decision: kv carry needs a binary32 cache, no ring, a device-carrying runtime and a non-routed ffn"
+            "kv_carry_decision: kv carry needs a binary32 cache, no ring and a device-carrying runtime, and is skipped per step when that step runs the segmented pre-gather path"
         );
         let mut kv_carried: Vec<KvCarryLeaf> = Vec::new();
         let mut kv_carried_layers: Vec<bool> = vec![false; layer_caches.len()];
@@ -4737,28 +4737,45 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     #[cfg(feature = "instrument")]
                     let build_position_inputs_ticks = elapsed_ticks(build_position_inputs_started);
 
-                    let carry_state_this_step = evaluator.carries_recurrent_state()
-                        && runtime.carries_state_on_device()
-                        && new_count == 1
-                        && !speculative_step
-                        && !expert_protocol;
+                    // the one pre-gather decision per step: the carry decisions
+                    // below and the evaluation branch further down both read it.
+                    let pre_gather =
+                        moe_pre_gather_enabled(serving_config.moe_pre_gather, expert_protocol)
+                            && !monolithic_high_mmap_requested
+                            && !one_evaluation_prefill
+                            && recurrent_verify.is_none();
+                    let carry_state_this_step = carries_on_device_this_step(
+                        evaluator.carries_recurrent_state() && new_count == 1 && !speculative_step,
+                        runtime.carries_state_on_device(),
+                        pre_gather,
+                    );
                     if !carry_state_this_step && !carried_layers.is_empty() {
                         flush_carried_state(runtime, &mut layer_caches, &carried_layers)?;
                         carried_layers.clear();
                         carried_program = 0;
                     }
-                    if carry_state_this_step && carried_program != active_program.as_ptr() as usize {
+                    if carry_state_this_step && carried_program != active_program.as_ptr() as usize
+                    {
                         flush_carried_state(runtime, &mut layer_caches, &carried_layers)?;
-                        let layers = ssm_carry_layers(active_program, &cache_names, active_layer_roots);
+                        let layers =
+                            ssm_carry_layers(active_program, &cache_names, active_layer_roots);
                         runtime.set_state_carry(
-                            layers.iter().map(|(_, input, output)| (*input, *output)).collect(),
+                            layers
+                                .iter()
+                                .map(|(_, input, output)| (*input, *output))
+                                .collect(),
                         );
-                        carried_layers = layers.iter().map(|(layer, _, output)| (*layer, *output)).collect();
+                        carried_layers = layers
+                            .iter()
+                            .map(|(layer, _, output)| (*layer, *output))
+                            .collect();
                         carried_program = active_program.as_ptr() as usize;
                     }
-                    let carry_kv_this_step = kv_carry_eligible
-                        && runtime.carries_state_on_device()
-                        && !expert_protocol;
+                    let carry_kv_this_step = carries_on_device_this_step(
+                        kv_carry_eligible,
+                        runtime.carries_state_on_device(),
+                        pre_gather,
+                    );
                     if kv_carry_step_reported != Some(carry_kv_this_step) {
                         kv_carry_step_reported = Some(carry_kv_this_step);
                         debug!(
@@ -4767,6 +4784,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             kv_carry_eligible,
                             runtime_carries_state_on_device = runtime.carries_state_on_device(),
                             experts = expert_protocol,
+                            pre_gather,
                             "kv_carry_step_decision: logged when the per-step answer changes, not every token"
                         );
                     }
@@ -5579,12 +5597,6 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     // resolve against it -- ROW 591/592's `NodeId(6540)`
                     // "operand buffer missing" (a real weight input leaf
                     // reachable only in `active_program`'s own numbering).
-                    let pre_gather = moe_pre_gather_enabled(
-                        serving_config.moe_pre_gather,
-                        expert_protocol,
-                    ) && !monolithic_high_mmap_requested
-                        && !one_evaluation_prefill
-                        && recurrent_verify.is_none();
                     #[cfg(feature = "gpu")]
                     let monolithic_all_low = moe_monolithic_all_low_enabled(
                         pre_gather,
@@ -8630,6 +8642,17 @@ pub(super) fn use_metal_output_placements(
 
 pub(super) fn moe_pre_gather_enabled(configured: bool, routed_experts: bool) -> bool {
     configured && routed_experts
+}
+
+/// device kv/state carry exists only on the whole-graph `runtime.evaluate`;
+/// the segmented pre-gather path (`evaluate_segment`) never carries, so a step
+/// carries iff it is eligible, the runtime carries, and it is not pre-gather.
+pub(super) fn carries_on_device_this_step(
+    eligible: bool,
+    runtime_carries_state_on_device: bool,
+    pre_gather_this_step: bool,
+) -> bool {
+    eligible && runtime_carries_state_on_device && !pre_gather_this_step
 }
 
 pub(super) fn moe_admit_low_copy(source: Codec, target: Codec) -> bool {
