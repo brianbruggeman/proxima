@@ -330,6 +330,76 @@ fn zero_kv_layers_with_a_conv_tensor_become_short_conv_layers_of_a_cacheless_pro
     assert_eq!(descriptor.layers[1].attention.kv_heads, 2);
 }
 
+/// `LFM2-350M-Q4_K_M.gguf`'s own `lfm2.*` scalars (block_count 16, embedding_length 1024,
+/// feed_forward_length 4608, attention.head_count 16, shortconv.l_cache 3) and its
+/// `attention.head_count_kv` array; the header carries no `expert_count`,
+/// `expert_used_count` or `leading_dense_block_count` key.
+const LFM2_350M_KV_HEADS: [u32; 16] = [0, 0, 8, 0, 0, 8, 0, 0, 8, 0, 8, 0, 8, 0, 8, 0];
+
+fn lfm2_350m_header() -> Vec<u8> {
+    let family = "lfm2";
+    let metadata = vec![
+        (
+            "general.architecture".to_string(),
+            MetadataValue::String(family.into()),
+        ),
+        (format!("{family}.block_count"), MetadataValue::U32(16)),
+        (format!("{family}.embedding_length"), MetadataValue::U32(1024)),
+        (
+            format!("{family}.feed_forward_length"),
+            MetadataValue::U32(4608),
+        ),
+        (format!("{family}.attention.head_count"), MetadataValue::U32(16)),
+        (
+            format!("{family}.attention.head_count_kv"),
+            MetadataValue::Array(MetadataArray::I32(
+                LFM2_350M_KV_HEADS.iter().map(|&heads| heads as i32).collect(),
+            )),
+        ),
+        (format!("{family}.shortconv.l_cache"), MetadataValue::U32(3)),
+    ];
+    let table = vec![0u8; (1024 * HYBRID_VOCAB * 4) as usize];
+    let marker = [0u8; 4];
+    let mut tensors = vec![TensorPayload {
+        name: "token_embd.weight".to_string(),
+        dims: ArrayVec::from_iter([1024, HYBRID_VOCAB]),
+        ggml_type: GgmlType::F32,
+        data: &table,
+    }];
+    tensors.extend((0..16).map(|layer| TensorPayload {
+        name: if LFM2_350M_KV_HEADS[layer] == 0 {
+            format!("blk.{layer}.shortconv.conv.weight")
+        } else {
+            format!("blk.{layer}.attn_q.weight")
+        },
+        dims: ArrayVec::from_iter([1u64]),
+        ggml_type: GgmlType::F32,
+        data: &marker,
+    }));
+    write_complete(&GgufModel {
+        version: 3,
+        metadata,
+        tensors,
+    })
+    .expect("an lfm2-350m header with marker tensors encodes")
+}
+
+#[test]
+fn a_hybrid_header_with_no_experts_takes_the_dense_ffn_on_every_layer() {
+    let bytes = lfm2_350m_header();
+    let parsed = parse_complete(&bytes).expect("bytes the encoder just wrote parse");
+    let architecture = architecture_from_metadata(&parsed).expect("lfm2-350m header reads");
+
+    let descriptor = descriptor_from_gguf(&parsed, &architecture).expect("lfm2-350m describes itself");
+
+    assert_eq!(
+        (architecture.expert_count, descriptor.leading_dense_block_count),
+        (0, 16),
+        "no expert_count means every one of the 16 blocks is a dense block"
+    );
+    proxima_tensor::spec::build_forward(&descriptor).expect("a dense hybrid lowers without the routed builder");
+}
+
 #[test]
 fn a_zero_kv_layer_whose_tensors_say_attention_is_refused() {
     let outcome = hybrid_descriptor(&[0, 2], &["blk.0.attn_q.weight", "blk.1.attn_q.weight"]);

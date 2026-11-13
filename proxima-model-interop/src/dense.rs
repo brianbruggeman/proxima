@@ -28,7 +28,7 @@ use proxima_tensor::spec::{
 
 use crate::bind::{
     ModelHparams, architecture_from_metadata, checkpoint_has_qk_norm, checkpoint_qkv_biases,
-    metadata_f32_optional, metadata_u32, metadata_u32_optional,
+    metadata_f32_optional, metadata_u32, metadata_u32_optional, metadata_u32_optional_or,
 };
 use crate::error::InteropError;
 use crate::profiles::family_profile;
@@ -158,14 +158,26 @@ fn with_conv_layers(
     Ok(ModelDescriptor {
         layers,
         feed_forward: metadata_u32_optional(parsed, &format!("{family}.feed_forward_length")),
-        leading_dense_block_count: metadata_u32_optional(
+        leading_dense_block_count: metadata_u32_optional_or(
             parsed,
             &format!("{family}.leading_dense_block_count"),
+            absent_leading_dense_block_count(architecture),
         ),
         l_cache: metadata_u32_optional(parsed, &format!("{family}.shortconv.l_cache")),
         cache_strategy: CacheStrategy::Cacheless,
         ..descriptor
     })
+}
+
+/// What an absent `{family}.leading_dense_block_count` means: a checkpoint with
+/// no experts has only dense blocks, so every block is a leading dense block; one
+/// with experts leads with none, as llama.cpp's loader defaults it.
+const fn absent_leading_dense_block_count(architecture: &ModelHparams) -> u32 {
+    if architecture.expert_count == 0 {
+        architecture.block_count
+    } else {
+        0
+    }
 }
 
 fn layer_kinds(
