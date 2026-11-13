@@ -487,8 +487,7 @@ static inline void q4k_run8(device const uchar *block, uint index, thread float 
     out[7] = (float)((w1 >> (shift + 24u)) & 0xFu);
 }
 
-// `metal-q4k-single-fetch` (opt-in, see `push_q4k_single_fetch_body`): ONE
-// 8-byte (two-word) load, BOTH nibble halves of it -- eight low-nibble
+// ONE 8-byte (two-word) load, BOTH nibble halves of it -- eight low-nibble
 // levels (elements `low_index .. low_index+8`) AND the eight high-nibble
 // levels of the SAME bytes (elements `low_index+32 .. low_index+40`, ggml's
 // and `dequantize_row_q4_K`'s own "32 elements apart, same byte" pairing —

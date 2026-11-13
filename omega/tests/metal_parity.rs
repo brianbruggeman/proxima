@@ -1767,12 +1767,12 @@ fn metal_matmul_on_one_q4k_super_block_matches_a_hand_rolled_dequantize_then_dot
     }
     let relative_to_batch_peak = max_diff / peak_magnitude;
     eprintln!(
-        "single-fetch q4k metal vs hand-rolled dequantize-then-dot oracle: rows={rows} k={k} \
+        "q4k metal vs hand-rolled dequantize-then-dot oracle: rows={rows} k={k} \
          max_diff={max_diff} batch_peak_magnitude={peak_magnitude} relative_to_batch_peak={relative_to_batch_peak}"
     );
     assert!(
         relative_to_batch_peak < 1e-5,
-        "single-fetch unpack disagrees with the hand-rolled oracle: \
+        "q4k unpack disagrees with the hand-rolled oracle: \
          relative_to_batch_peak={relative_to_batch_peak} max_diff={max_diff}"
     );
 }
