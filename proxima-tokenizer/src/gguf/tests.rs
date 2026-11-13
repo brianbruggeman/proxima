@@ -262,7 +262,7 @@ fn empty_pre_value_is_treated_as_missing() {
 /// metadata keys/types documented in this module's doc comment are
 /// what actually round-trips through `proxima-gguf`.
 #[test]
-fn builds_a_vocab_from_the_real_llama_bpe_fixture() {
+fn versailles_builds_a_vocab_from_the_real_llama_bpe_fixture() {
     let candidate = proxima_gguf::checkpoint_resolver::require_checkpoint(
         "PROXIMA_LLAMA_BPE_VOCAB_GGUF",
         "/Users/brianbruggeman/repos/others/llama.cpp/models/ggml-vocab-llama-bpe.gguf",
@@ -288,20 +288,21 @@ fn builds_a_vocab_from_the_real_llama_bpe_fixture() {
 /// host-local model cache outside this repo.
 const OPENCHAT_GGUF_PATH: &str = "/Users/brianbruggeman/.lmstudio/models/TheBloke/openchat-3.5-1210-GGUF/openchat-3.5-1210.Q4_K_S.gguf";
 
+/// Length-agnostic `require_checkpoint`: panics with the missing path when the file is absent.
+fn host_checkpoint(env_name: &str, recorded: &str) -> std::path::PathBuf {
+    proxima_gguf::checkpoint_resolver::require_checkpoint(env_name, recorded, 0)
+}
+
 /// Reads only the metadata region of the real openchat-3.5-1210 GGUF
 /// (growing-buffer `parse_complete` loop, matching
 /// `proxima-gguf/src/restack.rs`'s `real_mixtral_file` module) and
 /// builds a [`Vocab`] from it -- the 3.9 GB tensor payload is never
-/// touched. `None` if the host-local model cache this crate's real-vocab
-/// tests depend on is absent.
-fn load_real_openchat_vocab() -> Option<Vocab> {
+/// touched. Panics naming the path when the host-local model cache this
+/// crate's real-vocab tests depend on is absent.
+fn load_real_openchat_vocab() -> Vocab {
     use std::io::{Read, Seek, SeekFrom};
 
-    let candidate = Path::new(OPENCHAT_GGUF_PATH);
-    if !candidate.exists() {
-        eprintln!("no real openchat .gguf found at {candidate:?}, skipping");
-        return None;
-    }
+    let candidate = host_checkpoint("PROXIMA_OPENCHAT_GGUF", OPENCHAT_GGUF_PATH);
 
     let mut file = std::fs::File::open(candidate).expect("open host-local openchat gguf fixture");
     let mut header_buf = Vec::new();
@@ -317,7 +318,7 @@ fn load_real_openchat_vocab() -> Option<Vocab> {
         }
         panic!("gguf metadata region did not fit in 64 MiB");
     };
-    Some(vocab_from_metadata(&parsed).expect("builds vocab from real openchat metadata"))
+    vocab_from_metadata(&parsed).expect("builds vocab from real openchat metadata")
 }
 
 /// Confirms the real value [`gguf.rs`]'s own module doc names for
@@ -325,11 +326,8 @@ fn load_real_openchat_vocab() -> Option<Vocab> {
 /// `tokenizer.ggml.add_eos_token = false`, both genuinely present on
 /// this checkpoint's own GGUF metadata (not this crate's default).
 #[test]
-#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
-fn real_openchat_vocab_carries_add_bos_true_add_eos_false() {
-    let Some(vocab) = load_real_openchat_vocab() else {
-        return;
-    };
+fn versailles_real_openchat_vocab_carries_add_bos_true_add_eos_false() {
+    let vocab = load_real_openchat_vocab();
     assert_eq!(
         vocab.add_bos_token(),
         Some(true),
@@ -349,17 +347,13 @@ fn real_openchat_vocab_carries_add_bos_true_add_eos_false() {
 /// openchat-3.5-1210 carries. `#[ignore]`d: depends on a host-local
 /// model cache outside this repo.
 #[test]
-#[ignore = "depends on a host-local deepseek-coder gguf checkout outside this repo"]
-fn real_deepseek_coder_vocab_has_no_add_bos_eos_metadata_at_all() {
+fn versailles_real_deepseek_coder_vocab_has_no_add_bos_eos_metadata_at_all() {
     use std::io::{Read, Seek, SeekFrom};
 
-    let candidate = Path::new(
+    let candidate = host_checkpoint(
+        "PROXIMA_DEEPSEEK_CODER_GGUF",
         "/Users/brianbruggeman/.lmstudio/models/TheBloke/deepseek-coder-33B-instruct-GGUF/deepseek-coder-33b-instruct.Q4_K_S.gguf",
     );
-    if !candidate.exists() {
-        eprintln!("no real deepseek-coder .gguf found at {candidate:?}, skipping");
-        return;
-    }
     let mut file =
         std::fs::File::open(candidate).expect("open host-local deepseek-coder gguf fixture");
     let mut header_buf = Vec::new();
@@ -393,13 +387,10 @@ fn real_deepseek_coder_vocab_has_no_add_bos_eos_metadata_at_all() {
 }
 
 #[test]
-#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
-fn greedy_decode_at_real_openchat_vocab_scale() {
+fn versailles_greedy_decode_at_real_openchat_vocab_scale() {
     use crate::sample::greedy_pick;
 
-    let Some(vocab) = load_real_openchat_vocab() else {
-        return;
-    };
+    let vocab = load_real_openchat_vocab();
     assert_eq!(
         vocab.len(),
         32_002,
@@ -463,11 +454,8 @@ fn decode_ids_for_test(vocab: &Vocab, ids: &[u32]) -> String {
 /// dumped directly from this fixture, not guessed or taken from a
 /// second tokenizer implementation.
 #[test]
-#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
-fn unigram_encode_the_capital_of_france_is_not_one_token_per_byte() {
-    let Some(vocab) = load_real_openchat_vocab() else {
-        return;
-    };
+fn versailles_unigram_encode_the_capital_of_france_is_not_one_token_per_byte() {
+    let vocab = load_real_openchat_vocab();
     assert!(
         vocab.is_unigram(),
         "openchat-3.5-1210 declares tokenizer.ggml.model = \"llama\""
@@ -522,11 +510,8 @@ fn unigram_encode_the_capital_of_france_is_not_one_token_per_byte() {
 /// raw byte with no multi-char vocab piece (only its `<0xXX>`
 /// byte-fallback token), both must survive encode-then-decode exactly.
 #[test]
-#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
-fn unigram_round_trips_multibyte_utf8_and_byte_fallback() {
-    let Some(vocab) = load_real_openchat_vocab() else {
-        return;
-    };
+fn versailles_unigram_round_trips_multibyte_utf8_and_byte_fallback() {
+    let vocab = load_real_openchat_vocab();
     for text in [
         "The capital of France is Paris",
         "нещо на Български",
@@ -551,11 +536,8 @@ fn unigram_round_trips_multibyte_utf8_and_byte_fallback() {
 /// the real fix path never does that for an ordinary ASCII sentence --
 /// this must be impossible to regress silently back to `sequence=25`.
 #[test]
-#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
-fn unigram_encode_never_degenerates_to_one_token_per_byte() {
-    let Some(vocab) = load_real_openchat_vocab() else {
-        return;
-    };
+fn versailles_unigram_encode_never_degenerates_to_one_token_per_byte() {
+    let vocab = load_real_openchat_vocab();
     let sentence = "The quick brown fox jumps over the lazy dog";
     let ids = crate::encode(sentence, &vocab).expect("encodes against real vocab");
     assert!(
@@ -587,11 +569,8 @@ include!("../../tests/fixtures/llama_cpp_oracle_openchat.rs");
 /// (this crate's own logits-driven decode vs. llama.cpp's), not
 /// exercised by this test.
 #[test]
-#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
-fn encode_with_bos_eos_matches_llama_cpp_oracle_prompt_ids() {
-    let Some(vocab) = load_real_openchat_vocab() else {
-        return;
-    };
+fn versailles_encode_with_bos_eos_matches_llama_cpp_oracle_prompt_ids() {
+    let vocab = load_real_openchat_vocab();
 
     for case in ORACLE_CASES {
         let ids = crate::encode_with_bos_eos(case.prompt, &vocab, true, false)
@@ -630,11 +609,8 @@ fn encode_with_bos_eos_matches_llama_cpp_oracle_prompt_ids() {
 /// resolving to the single id 32000 mid-sequence, not eight text
 /// pieces.
 #[test]
-#[ignore = "depends on a host-local openchat gguf checkout outside this repo"]
-fn encode_with_bos_eos_matches_llama_cpp_oracle_end_of_turn_marker() {
-    let Some(vocab) = load_real_openchat_vocab() else {
-        return;
-    };
+fn versailles_encode_with_bos_eos_matches_llama_cpp_oracle_end_of_turn_marker() {
+    let vocab = load_real_openchat_vocab();
 
     let prompt = "GPT4 Correct User: Write a Python function that returns the nth Fibonacci number.<|end_of_turn|>GPT4 Correct Assistant:";
     let expected_ids: [u32; 31] = [
@@ -668,17 +644,13 @@ fn encode_with_bos_eos_matches_llama_cpp_oracle_end_of_turn_marker() {
 /// 511]` -- 9 ids for 5 words -- instead of one id per space-prefixed
 /// word. `#[ignore]`d: depends on a host-local gemma4 gguf checkout.
 #[test]
-#[ignore = "depends on a host-local gemma4 gguf checkout outside this repo"]
-fn real_gemma4_vocab_merges_space_into_the_following_word() {
+fn versailles_real_gemma4_vocab_merges_space_into_the_following_word() {
     use std::io::{Read, Seek, SeekFrom};
 
-    let candidate = Path::new(
+    let candidate = host_checkpoint(
+        "PROXIMA_GEMMA4_GGUF",
         "/Users/brianbruggeman/.ollama/models/blobs/sha256-ea549b7688d4c95019754880c21e3f29c58c985a7a1c3b37b9eebd0a95224129",
     );
-    if !candidate.exists() {
-        eprintln!("no real gemma4 gguf found at {candidate:?}, skipping");
-        return;
-    }
     let mut file = std::fs::File::open(candidate).expect("open host-local gemma4 fixture");
     let mut header_buf = Vec::new();
     let parsed = 'grow: {
@@ -818,7 +790,7 @@ fn flint_contractions_ids() -> Vec<u32> {
 /// llama3 splits tokenize differently -- the sample sentence alone is
 /// reproduced by the llama3 split too, so it cannot show which rule ran.
 #[test]
-fn flint_pre_reads_the_gguf_and_reproduces_the_llama_cpp_ids() {
+fn versailles_flint_pre_reads_the_gguf_and_reproduces_the_llama_cpp_ids() {
     let path = proxima_gguf::checkpoint_resolver::require_checkpoint(
         "PROXIMA_FLINT_GGUF",
         FLINT_GGUF,
@@ -859,7 +831,7 @@ fn flint_pre_reads_the_gguf_and_reproduces_the_llama_cpp_ids() {
 /// truncated run, and the same comparison rejects the llama3 split on a text
 /// the two rules disagree about -- so a mapping onto that rule cannot pass.
 #[test]
-fn control_flint_tokenizer_rejects_a_perturbed_id_run() {
+fn versailles_control_flint_tokenizer_rejects_a_perturbed_id_run() {
     let (_, captured_ids) = flint_tokenizer_capture();
     assert!(
         captured_ids.len() > 7,
@@ -919,13 +891,23 @@ fn control_flint_tokenizer_rejects_a_perturbed_id_run() {
     );
 }
 
-/// The real gemma4-E2B checkpoint, from `REAL_GEMMA4_E2B_GGUF_PATH`. Fails
-/// loudly when the variable is unset or the file is missing: this fixture
-/// is host-local and a silent skip would read as a pass.
+/// The ollama `gemma4:e2b-it-qat` model blob (manifest
+/// `~/.ollama/models/manifests/registry.ollama.ai/library/gemma4/e2b-it-qat`),
+/// the same file and env var `tests/versailles_gemma4_oracle.rs` resolves.
+const GEMMA4_E2B_BLOB_SHA256: &str =
+    "3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd";
+
+/// The real gemma4-E2B checkpoint, resolved exactly as the gemma4 oracle test
+/// does (`PROXIMA_GEMMA4_ORACLE_GGUF`, else the ollama blob). Fails loudly
+/// when the file is missing: this fixture is host-local and a silent skip
+/// would read as a pass.
 fn real_gemma4_parsed() -> ParsedGguf {
-    let path = std::env::var("REAL_GEMMA4_E2B_GGUF_PATH")
-        .expect("REAL_GEMMA4_E2B_GGUF_PATH must name the host-local gemma4-E2B gguf");
-    let mut file = File::open(&path).expect("REAL_GEMMA4_E2B_GGUF_PATH must exist");
+    let home = std::env::var("HOME").expect("HOME is set");
+    let path = host_checkpoint(
+        "PROXIMA_GEMMA4_ORACLE_GGUF",
+        &format!("{home}/.ollama/models/blobs/sha256-{GEMMA4_E2B_BLOB_SHA256}"),
+    );
+    let mut file = File::open(&path).expect("gemma4 E2B blob must exist");
     let mut header_buf = Vec::new();
     for cap in [4usize << 20, 16 << 20, 64 << 20] {
         header_buf.resize(cap, 0);
@@ -939,12 +921,32 @@ fn real_gemma4_parsed() -> ParsedGguf {
     panic!("gguf metadata region did not fit in 64 MiB");
 }
 
+#[test]
+fn versailles_real_gemma4_blob_declares_itself_the_e2b_checkpoint() {
+    let parsed = real_gemma4_parsed();
+    let name = match parsed.metadata_value("general.name") {
+        Some(MetadataValue::String(name)) => name.clone(),
+        other => panic!("general.name is not a string: {other:?}"),
+    };
+    assert!(name.contains("2B"), "general.name is {name:?}, not a 2B model");
+    assert_eq!(
+        parsed.metadata_value("general.architecture"),
+        Some(&MetadataValue::String(String::from("gemma4"))),
+    );
+    let home = std::env::var("HOME").expect("HOME is set");
+    let manifest = std::fs::read_to_string(format!(
+        "{home}/.ollama/models/manifests/registry.ollama.ai/library/gemma4/e2b-it-qat"
+    ))
+    .expect("ollama gemma4:e2b-it-qat manifest names the blob");
+    assert!(manifest.contains(GEMMA4_E2B_BLOB_SHA256));
+}
+
 /// llama.cpp ba3c05f71 loads this file with EOG = {1 `<eos>`, 50
 /// `<|tool_response>`, 106 `<turn|>`} (verbose log, "printing all EOG
 /// tokens"). Here 1 comes from `tokenizer.ggml.eos_token_id` and 50/106 from
 /// the tail of the file's own chat template; no built-in list is consulted.
 #[test]
-fn real_gemma4_eog_set_is_inferred_from_keys_and_chat_template() {
+fn versailles_real_gemma4_eog_set_is_inferred_from_keys_and_chat_template() {
     let parsed = real_gemma4_parsed();
     let vocab = vocab_from_metadata(&parsed).expect("builds vocab from real gemma4 metadata");
 
@@ -966,7 +968,7 @@ fn real_gemma4_eog_set_is_inferred_from_keys_and_chat_template() {
 }
 
 #[test]
-fn real_gemma4_config_remove_overrides_the_inferred_tool_response_marker() {
+fn versailles_real_gemma4_config_remove_overrides_the_inferred_tool_response_marker() {
     let parsed = real_gemma4_parsed();
     let config = TokenizerConfig::builder()
         .eog_remove(vec![String::from("<|tool_response>")])
@@ -977,7 +979,7 @@ fn real_gemma4_config_remove_overrides_the_inferred_tool_response_marker() {
 }
 
 #[test]
-fn real_gemma4_config_add_extends_the_set_beyond_inference() {
+fn versailles_real_gemma4_config_add_extends_the_set_beyond_inference() {
     let parsed = real_gemma4_parsed();
     let config = TokenizerConfig::builder()
         .eog_add(vec![String::from("<|turn>")])
