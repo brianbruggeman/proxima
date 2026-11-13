@@ -6131,8 +6131,8 @@ fn cooperative_identity_token_rejects_a_non_cooperative_reduce_op() {
 /// hand-built [`PackedRowBlock`] naming a codec that is neither a K-quant
 /// nor `Q8_0`/`Q4_0` -- [`classify_packed_row_block`]'s own `NotKQuantCodec`
 /// gate never builds one of these in practice, so this drives the emitter's
-/// internal contract directly rather than through [`emit`]. `Q5_1` is the
-/// still-rejected exemplar: `Q8_0` and `Q4_0` each gained a row-blocked arm
+/// internal contract directly rather than through [`emit`]. `Float16` is the
+/// still-rejected exemplar (`Q5_0`/`Q5_1` now take `PackedBodySelect::BlockRendered`): `Q8_0` and `Q4_0` each gained a row-blocked arm
 /// (see `codec_row_block_step_bytes`/`block_super_element_msl`'s own docs) and are proved to SUCCEED through
 /// this same function by
 /// [`push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel`]/
@@ -6145,7 +6145,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         weight: 0,
         other: 1,
         reduce_dim: 1,
-        codec: Codec::Q5_1,
+        codec: Codec::Float16,
         token_axes: Vec::new(),
         feature_axes: vec![0, 1],
     };
@@ -6157,7 +6157,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         ReduceInit::Zero,
         &[0, 1],
         2,
-        &[Some(Codec::Q5_1), None],
+        &[Some(Codec::Float16), None],
         "float",
         &block,
         &ComposedBody::leaf(ScalarOp::Identity),
@@ -6165,11 +6165,11 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         false,
         &MetalOnlyExtras::default(),
     )
-    .expect_err("Q5_1 never reaches the row-blocked path");
+    .expect_err("F16 never reaches the row-blocked path");
     assert!(matches!(
         error,
-        EmitError::NonKQuantCodec { codec: "q5_1", .. }
-    ));
+        EmitError::NonKQuantCodec { codec: "float16", .. }
+    ), "{error:?}");
 }
 
 /// [`classify_packed_row_block`] now admits [`Codec::Q8_0`]
@@ -11370,18 +11370,15 @@ const QWEN25_QUERY_HEADS_PER_GROUP: u32 = 7;
 const QWEN25_HEAD_DIM: u32 = 64;
 const QWEN25_EMBED: u32 = 896;
 
-fn q5_0_admitting_table(codec: Codec) -> Option<usize> {
-    match codec {
-        Codec::Q5_0 => Some(32),
-        _ => None,
-    }
-}
-
 /// qwen2.5's decode attention-output projection: iteration axes
 /// `(token, kv group, query head, head dim, out row)` = `[1, 2, 7, 64, 896]`,
 /// weight `[896, 2, 7, 64]` read through `(4, 1, 2, 3)`, activation
 /// `[1, 2, 7, 64]` read through `(0, 1, 2, 3)`, output axes `[0, 4]`.
 fn qwen25_attention_output_op() -> BoundOp {
+    qwen25_attention_output_op_for_tokens(1)
+}
+
+fn qwen25_attention_output_op_for_tokens(tokens: u32) -> BoundOp {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -11401,7 +11398,7 @@ fn qwen25_attention_output_op() -> BoundOp {
         Op::Input {
             dtype: DType::FLOAT32,
             shape: vec![
-                Extent::Static(1),
+                Extent::Static(tokens),
                 Extent::Static(QWEN25_KV_GROUPS),
                 Extent::Static(QWEN25_QUERY_HEADS_PER_GROUP),
                 Extent::Static(QWEN25_HEAD_DIM),
@@ -11454,7 +11451,7 @@ fn qwen25_q5_0_attention_output_row_block_outcome_is_pinned() {
         std::println!("operand {index} base={} strides={:?}", operand.1.base, operand.1.strides);
     }
     std::println!("extents={:?}", bound.extents);
-    let outcome = classify_packed_row_block_with(&bound, &codecs, false, q5_0_admitting_table);
+    let outcome = classify_packed_row_block(&bound, &codecs);
     match &outcome {
         Ok(block) => std::println!(
             "outcome=Ok weight={} other={} reduce_dim={} codec={:?} token_axes={:?} feature_axes={:?}",
@@ -11471,4 +11468,45 @@ fn qwen25_q5_0_attention_output_row_block_outcome_is_pinned() {
         (0, 1, 3, Codec::Q5_0)
     );
     assert_eq!((block.token_axes.as_slice(), block.feature_axes.as_slice()), (&[0u16][..], &[4u16][..]));
+}
+
+#[proxima::test]
+#[case::q5_0(Codec::Q5_0)]
+#[case::q5_1(Codec::Q5_1)]
+async fn block_codec_at_a_reduce_that_is_not_a_multiple_of_256_is_admitted_and_emits_the_plane_body(#[case] codec: Codec) {
+    let bound = matmul_op_with_reduce(4, 896, 1, ScalarOp::Add);
+    let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+
+    let block = classify_packed_row_block(&bound, &operand_codecs(&bound, &packed))
+        .expect("a unit-scale plane codec at reduce 896 is a whole number of 32-element blocks");
+    let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("the plane body renders");
+
+    assert_eq!(block.codec, codec);
+    assert!(kernel.source.contains("int blocks = (int)"), "{codec:?} renders the flat-block matvec");
+    assert!(kernel.source.contains("/ 32;"), "{codec:?} counts 32-element blocks, not 256-element spans");
+    assert!(kernel.source.contains("float d = "), "{codec:?} reads its scale once per block");
+}
+
+#[proxima::test]
+#[case::max_reduce(matmul_op_with_reduce(4, 896, 1, ScalarOp::Maximum), PackedRowBlockRejection::BlockBodyNotRendered)]
+#[case::three_tokens(qwen25_attention_output_op_for_tokens(3), PackedRowBlockRejection::MultiRowBodyMissing)]
+#[case::ragged_extent(matmul_op_with_reduce(4, 880, 1, ScalarOp::Add), PackedRowBlockRejection::ExtentNotBlockMultiple { extent: 880 })]
+async fn block_codec_outside_the_plane_body_names_the_property_it_lacks(#[case] bound: BoundOp, #[case] expected: PackedRowBlockRejection) {
+    let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q5_0)]);
+
+    assert_eq!(classify_packed_row_block(&bound, &operand_codecs(&bound, &packed)).err(), Some(expected));
+}
+
+#[test]
+fn legacy_super_block_codecs_keep_their_256_extent_and_scalars_stay_unadmitted() {
+    for codec in [Codec::Q3K, Codec::Q4K, Codec::Q5K, Codec::Q6K, Codec::Q8_0, Codec::Q4_0, Codec::Fp6E3M2] {
+        assert_eq!(row_block_extent_multiple(codec), Some(256), "{codec:?}");
+        assert_eq!(block_rendered_elements(codec), None, "{codec:?}");
+    }
+    for codec in [Codec::Q5_0, Codec::Q5_1, Codec::Q4_1] {
+        assert_eq!(row_block_extent_multiple(codec), Some(32), "{codec:?}");
+    }
+    for codec in [Codec::Float16, Codec::BFloat16] {
+        assert_eq!(row_block_extent_multiple(codec), None, "{codec:?} is a scalar, design cards 13-14");
+    }
 }

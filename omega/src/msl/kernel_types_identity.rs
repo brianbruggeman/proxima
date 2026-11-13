@@ -2973,7 +2973,7 @@ mod codec_cache_key_tests {
 mod row_block_step_bytes_tests {
     use proxima_numeric::NumericFormat;
 
-    use super::super::emit_and_classify::row_block_extent_multiple;
+    use super::super::emit_and_classify::{block_rendered_elements, row_block_extent_multiple};
     use super::{
         Q4_0_BLOCK_BYTES, Q4_0_BLOCK_ELEMENTS, Q4K_BLOCK_ELEMENTS, Q8_0_BLOCK_BYTES,
         Q8_0_BLOCK_ELEMENTS, codec_block_bytes, codec_row_block_step_bytes,
@@ -2999,6 +2999,7 @@ mod row_block_step_bytes_tests {
             .copied()
             .chain(NumericFormat::UNTAGGED.iter().map(|(format, _)| *format))
             .filter(|codec| row_block_extent_multiple(*codec).is_some())
+            .filter(|codec| block_rendered_elements(*codec).is_none())
             .collect();
 
         for required in [

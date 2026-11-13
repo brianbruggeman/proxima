@@ -2397,6 +2397,8 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // `PackedBodySelect::FlatRendered` (Q8_0 plain-product reduce) renders the matvec from the
     // block layout and calls none of the named helpers above.
     super::matmul_form::FLAT_BLOCK_LEVELS_MARKER,
+    // `PackedBodySelect::BlockRendered` (Q5_0, Q5_1, Q4_1) reads the layout's planes instead.
+    super::matmul_form::FLAT_BLOCK_COUNT_MARKER,
 ];
 
 /// `cond ? a : (cond ? b : ...)` over `values`, picked by `lane`: the
