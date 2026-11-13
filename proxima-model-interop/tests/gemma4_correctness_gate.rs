@@ -128,6 +128,17 @@ fn correctness_checks() -> Vec<CorrectnessCheck> {
 
 #[proxima::test]
 async fn gemma4_e2b_answers_all_four_correctness_checks_greedy() {
+    run_gate(NumericFormat::Float32, NumericFormat::Float32);
+}
+
+#[proxima::test]
+async fn gemma4_e2b_answers_all_four_correctness_checks_greedy_at_serving_default_kv() {
+    let defaults = ServingConfig::default();
+    run_gate(defaults.kv_cache_key_quant, defaults.kv_cache_value_quant);
+}
+
+fn run_gate(key_quant: NumericFormat, value_quant: NumericFormat) {
+    println!("kv_cache_key_quant={key_quant:?} kv_cache_value_quant={value_quant:?}");
     let Ok(file) = File::open(REAL_GEMMA4_E2B_GGUF_PATH) else {
         eprintln!("skipping: real gemma4-E2B blob not found at {REAL_GEMMA4_E2B_GGUF_PATH}");
         return;
@@ -141,8 +152,8 @@ async fn gemma4_e2b_answers_all_four_correctness_checks_greedy() {
 
     let serving_config = ServingConfig {
         gpu_layers: GPU_LAYERS_ALL,
-        kv_cache_key_quant: NumericFormat::Float32,
-        kv_cache_value_quant: NumericFormat::Float32,
+        kv_cache_key_quant: key_quant,
+        kv_cache_value_quant: value_quant,
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,
