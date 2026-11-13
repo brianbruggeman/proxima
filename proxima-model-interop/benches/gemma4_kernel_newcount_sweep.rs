@@ -88,6 +88,7 @@ use proxima_tensor::instrument::ticks_to_nanos;
 use proxima_tensor::test_support::Lcg;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, map};
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_numeric::{DType, NumericPolicy};
 
 /// `gemma4:e2b-it-qat`'s real blob — same checkpoint the sibling

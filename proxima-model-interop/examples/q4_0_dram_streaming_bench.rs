@@ -97,6 +97,7 @@ use proxima_numeric::codec::Codec;
 use proxima_tensor::instrument::ticks_to_nanos;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_tensor::{BoundOpKind, Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, bind, infer, map};
+#[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 use proxima_numeric::{DType, NumericPolicy};
 
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]

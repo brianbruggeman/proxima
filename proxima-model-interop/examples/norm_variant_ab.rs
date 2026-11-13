@@ -60,6 +60,7 @@ use omega::{
 
 #[cfg(feature = "metal-attn-variants")]
 use proxima_tensor::{BoundOp, BoundOpKind, Layout, NodeId};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_numeric::{DType, NumericPolicy};
 
 #[cfg(feature = "metal-attn-variants")]
