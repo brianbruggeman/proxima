@@ -27,7 +27,7 @@ pub(super) const STAGED_THREADS: u64 = (STAGED_WARPS * 32) as u64;
 
 /// Largest reduction a block can stage: int8 values plus one f32 scale per
 /// 32 elements must fit the 48 KiB static shared-memory limit.
-const MAX_STAGED_REDUCTION: u64 = 32_768;
+pub(super) const MAX_STAGED_REDUCTION: u64 = 32_768;
 
 /// Blocks per multiprocessor a small output should still launch so the device stays fed.
 const TARGET_WAVES: u64 = 3;

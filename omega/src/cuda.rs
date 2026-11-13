@@ -63,7 +63,7 @@ use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_tensor::{
-    BoundOp, BoundOpKind, ComposedBody, DeviceMemory, Executes, Form, Keep, Layout, Lookup, NodeId, ReduceInit, Refusal, ScalarOp, StepArg,
+    ActivationLimits, BoundOp, BoundOpKind, ComposedBody, DeviceMemory, Executes, Form, Keep, Layout, Lookup, NodeId, ReduceInit, Refusal, ScalarOp, StepArg,
 };
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
@@ -4486,7 +4486,10 @@ pub(crate) fn executes(target: &Target) -> Executes {
         .with(Form::MoeTopK)
         .with(Form::ReduceEpilogue);
     let forms = if target.card_asm {
-        base.with(Form::CachedAttention)
+        base.with(Form::CachedAttention).with_int8_dot(ActivationLimits {
+            max_reduction: staged_matvec::MAX_STAGED_REDUCTION,
+            output_total_max: u64::from(u32::MAX),
+        })
     } else {
         base
     };
@@ -4502,6 +4505,7 @@ fn refusal_kind(refusal: Refusal) -> &'static str {
         Refusal::Form(Form::CachedSoftmaxWeights) => "cached_softmax_weights",
         Refusal::Form(Form::AttentionSink) => "cached_attention_sink",
         Refusal::Form(Form::ElementwiseTwin) => "elementwise_twin",
+        Refusal::Form(Form::Int8DotReduce) => "int8_dot_reduce",
         // both enums are non_exhaustive across the crate boundary
         _ => UNGRANTED_FORM_KIND,
     }
@@ -4639,6 +4643,22 @@ mod tests {
             executes(&Target::HIP).admit(&attention),
             Err(Refusal::Form(Form::CachedAttention))
         );
+    }
+
+    #[test]
+    fn executes_grants_int8_dot_reduce_only_to_a_card_asm_target_with_the_staged_matvec_limits() {
+        let granted = executes(&Target::CUDA);
+
+        assert!(granted.forms.contains(Form::Int8DotReduce));
+        assert_eq!(
+            granted.activation,
+            Some(ActivationLimits {
+                max_reduction: staged_matvec::MAX_STAGED_REDUCTION,
+                output_total_max: u64::from(u32::MAX),
+            })
+        );
+        assert!(!executes(&Target::HIP).forms.contains(Form::Int8DotReduce));
+        assert_eq!(executes(&Target::HIP).activation, None);
     }
 
     #[test]

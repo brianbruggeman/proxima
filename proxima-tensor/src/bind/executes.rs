@@ -24,6 +24,13 @@ pub enum Form {
     GatedDeltaNet,
     MoeTopK,
     TopFractionSelect,
+    /// A [`Reduce`](Self::Reduce) of `Add` over a `Multiply` of a packed weight
+    /// and a quantized activation, executed as an integer dot product over the
+    /// weight codes and the q8_1 activation codes. A backend grants it only when
+    /// its renderer executes that product as an integer dot; [`Self::BlockQuantize`]
+    /// alone says only that the renderer produces the quantized activation, not
+    /// that anything consumes it as an int8 dot.
+    Int8DotReduce,
 }
 
 impl Form {
@@ -133,6 +140,45 @@ impl DeviceLimits {
     }
 }
 
+/// Device bounds on an int8 dot over a q8_1 activation, carried beside the
+/// [`Form::Int8DotReduce`] grant in [`Executes`] so plan identity hashes them.
+///
+/// Composes the same `Copy` value shape as [`DeviceLimits`]. The activation
+/// block family is a predicate over the block layout, not data, so it is not here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ActivationLimits {
+    /// Largest reduction extent one dot may cover, e.g. 32768 on CUDA where the
+    /// staged int8 codes and scales must fit 48 KiB of shared memory.
+    pub max_reduction: u64,
+    /// Largest total output element count the dot may produce, e.g. `u32::MAX`
+    /// on CUDA where output indices are 32-bit.
+    pub output_total_max: u64,
+}
+
+impl ActivationLimits {
+    pub const UNLIMITED: Self = Self {
+        max_reduction: u64::MAX,
+        output_total_max: u64::MAX,
+    };
+
+    /// The tighter of two limits, field by field.
+    #[must_use]
+    pub const fn intersect(self, other: Self) -> Self {
+        Self {
+            max_reduction: if self.max_reduction < other.max_reduction {
+                self.max_reduction
+            } else {
+                other.max_reduction
+            },
+            output_total_max: if self.output_total_max < other.output_total_max {
+                self.output_total_max
+            } else {
+                other.output_total_max
+            },
+        }
+    }
+}
+
 /// What one backend renders, as a value.
 ///
 /// Composes the same subset shape as `proxima_numeric::NumericPolicy::grants`
@@ -147,6 +193,9 @@ impl DeviceLimits {
 pub struct Executes {
     pub forms: FormSet,
     pub limits: DeviceLimits,
+    /// Bounds on [`Form::Int8DotReduce`]; `None` when the backend has no int8
+    /// dot, so a neutral value never reads as "unlimited".
+    pub activation: Option<ActivationLimits>,
 }
 
 impl Executes {
@@ -165,12 +214,14 @@ impl Executes {
             .with(Form::MoeTopK)
             .with(Form::TopFractionSelect),
         limits: DeviceLimits::UNIFIED,
+        activation: None,
     };
 
     /// The unfused algebra only.
     pub const BASE: Self = Self {
         forms: FormSet::BASE,
         limits: DeviceLimits::UNIFIED,
+        activation: None,
     };
 
     #[must_use]
@@ -178,6 +229,7 @@ impl Executes {
         Self {
             forms: self.forms.with(form),
             limits: self.limits,
+            activation: self.activation,
         }
     }
 
@@ -186,6 +238,7 @@ impl Executes {
         Self {
             forms: self.forms.without(form),
             limits: self.limits,
+            activation: self.activation,
         }
     }
 
@@ -195,6 +248,17 @@ impl Executes {
         Self {
             forms: self.forms,
             limits: DeviceLimits { memory },
+            activation: self.activation,
+        }
+    }
+
+    /// Grants [`Form::Int8DotReduce`] with the given bounds.
+    #[must_use]
+    pub const fn with_int8_dot(self, limits: ActivationLimits) -> Self {
+        Self {
+            forms: self.forms.with(Form::Int8DotReduce),
+            limits: self.limits,
+            activation: Some(limits),
         }
     }
 
@@ -208,6 +272,10 @@ impl Executes {
         Self {
             forms: self.forms.intersect(other.forms),
             limits: self.limits.intersect(other.limits),
+            activation: match (self.activation, other.activation) {
+                (Some(left), Some(right)) => Some(left.intersect(right)),
+                _ => None,
+            },
         }
     }
 
