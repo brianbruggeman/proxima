@@ -1,4 +1,10 @@
 optional = ["rope_freqs.weight"]
+# tensors the text graph never reads: the mtmd vision tower and projector
+# (llama.cpp tools/mtmd/clip-impl.h: "v.patch_embd.weight" :107, "v.blk.%d.*" :383,
+# "mm.%d.%s" :137, "mm.merger.fc1.%s" :153) and the HF-style multi-token
+# prediction head (qwen35 "mtp.*", not executed in the main pass,
+# src/models/qwen35.cpp:154)
+unread_prefixes = ["v.", "mm.", "mtp."]
 
 [[alias]]
 kind = "rename"
