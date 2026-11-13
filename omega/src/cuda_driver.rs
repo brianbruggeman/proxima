@@ -40,8 +40,7 @@ use crate::cuda_kernel_cache::{
 };
 use crate::kernel_cache_config::KernelCacheConfig;
 use crate::cuda_ptx_store::PtxStore;
-use crate::backend::GpuDriver;
-use crate::derived_quantize::{ActivationRefusal, derive_with_storage, validate_storage};
+use crate::derived_quantize::{ActivationRefusal, derive_through_tensor_pass, validate_storage};
 use proxima_numeric::NumericFormat;
 use crate::lowering::{Binding, Codec, PackedOperands, gather_count};
 use proxima_tensor::bind::{
@@ -1891,8 +1890,7 @@ fn bind_resolved(
     let mut resolved = prune_dead(bound, outputs);
     correct_packed_matmul_layouts(&mut resolved, &packed_operands.keys().copied().collect());
     let mut packed = packed_operands.clone();
-    let resolved =
-        derive_with_storage(resolved, program, shapes, &mut packed, numeric_policy, GpuDriver::Cuda, activation_storage);
+    let resolved = derive_through_tensor_pass(resolved, program, shapes, &mut packed, numeric_policy, activation_storage);
     validate_resolved(&resolved, numeric_policy)?;
     let micros = LowerMicros {
         bind: bind_started.elapsed().as_micros() as u64,
@@ -2024,8 +2022,7 @@ fn refresh_bound_resolved(
     )?;
     correct_packed_matmul_layouts(&mut refreshed, &packed_operands.keys().copied().collect());
     let mut packed = packed_operands.clone();
-    let refreshed =
-        derive_with_storage(refreshed, program, shapes, &mut packed, numeric_policy, GpuDriver::Cuda, activation_storage);
+    let refreshed = derive_through_tensor_pass(refreshed, program, shapes, &mut packed, numeric_policy, activation_storage);
     Ok((refreshed, packed, touched))
 }
 
