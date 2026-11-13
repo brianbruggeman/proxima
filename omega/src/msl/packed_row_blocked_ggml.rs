@@ -45,9 +45,9 @@ pub(super) fn push_packed_row_blocked_body(
     // (`weight_base[q] / Q4K_BLOCK_ELEMENTS`) regardless of codec -- equal
     // to `codec_block_bytes` for every K-quant codec, but `Q8_0`'s own block
     // is 32 elements, so its step must be eight real blocks' worth of bytes.
-    // The two `use_ggml_port`/`use_single_fetch` bodies below that also take
-    // a `block_bytes` parameter never see `Q8_0` (gated to `Q4K`/`Q5K`/
-    // `Q6K`), so this substitution is a no-op for every codec but `Q8_0`.
+    // The ggml-port bodies below that also take a `block_bytes` parameter
+    // never see `Q8_0` (gated to `Q4K`/`Q5K`/`Q6K`), so this substitution is
+    // a no-op for every codec but `Q8_0`.
     let block_bytes = codec_row_block_step_bytes(codec);
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
@@ -147,41 +147,14 @@ pub(super) fn push_packed_row_blocked_body(
             && codec_supports_pair_dot(codec)
             && resolved.dtype == DType::FLOAT32
             && is_plain_product_reduce(resolved, reduce_op, weight, other);
-        // `metal-q4k-single-fetch` (default-off): eliminates the redundant
-        // paired-lane load the default `Q4_K` lane assignment below makes --
-        // see `push_q4k_single_fetch_body`'s own doc. Checked after
-        // `plain_product` (`q4k_pair_dot`'s float-only arm keeps priority --
-        // neither is a self-contained kernel body the way this one is, so
-        // `q4k_pair_dot` stays the fastest-known path where it applies) and
-        // takes priority over everything else below it (the scale-deferred/
-        // mask-fma arm, the per-element fallback): `push_q4k_single_fetch_body`
-        // is fully self-contained (its own dispatch loop, not routed through
-        // the lane-spread preamble this `else` arm builds), so it replaces
-        // that whole preamble+match rather than plugging into one arm of it.
-        // ALSO requires `metal-q4k-split-k` off: `emit`'s own dispatch-geometry
-        // setup (`kernel_dispatch_shape`) computes `sgitg`/`split` purely off
-        // that feature flag, unconditionally, for every row-blocked op --
-        // `push_q4k_single_fetch_body`'s `ib` loop has no `sgitg`/`split`
-        // awareness of its own (measured: under `--all-features` its sum came
-        // out ~7x too large, consistent with every one of `split` simdgroups
-        // redundantly summing the SAME full reduction instead of a disjoint
-        // 1/split slice). Correct fix, not a silent one: `plain_product`/the
-        // default/mask-fma `else` arm are already split-K-aware (they read
-        // `sgitg`/`split` when the feature is on), so gating single-fetch off
-        // here just means split-K wins whenever BOTH features are compiled
-        // in, same "not invented to compose" posture as its other arms.
-        // (`metal-q4k-single-fetch`'s body is compiled only when that feature is
-        // on; it is not part of `metal`, so no supported build can reach it.)
         // With `metal`: the ggml-geometry bodies. `Q4_K` and `Q6_K` are RENDERED from their
         // `BlockLayout`s ([`sub_block_matvec_msl`]) at the launch geometry their
         // `SubBlockMatvecGeometry` constructor names; `Q5_K` keeps
         // [`push_q5k_ggml_port_body`] (its rendering measured slower, see that doc). Requires
         // `plain_product` (float-only scale-deferred shape, the same gate
         // `q4k_pair_dot`'s own arm below needs) and takes priority over it --
-        // both target the exact same design point. Not `metal-q4k-split-k`-aware,
-        // same posture as `push_q4k_single_fetch_body` above and for the
-        // identical reason: its `ib` loop has no `sgitg`/`split` stride of its
-        // own. ALSO requires the codec be one of `Q4K`, `Q5K`, `Q6K`:
+        // both target the exact same design point. Not `metal-q4k-split-k`-aware:
+        // its `ib` loop has no `sgitg`/`split` stride of its own. ALSO requires the codec be one of `Q4K`, `Q5K`, `Q6K`:
         // `plain_product` alone is not codec-specific (every codec with
         // `supports_pair_dot` reaches this arm), and routing a `Q5_K` matmul
         // through a body that never reads its `qh` plane gave relative=0.977
@@ -195,9 +168,8 @@ pub(super) fn push_packed_row_blocked_body(
         // a paired-nibble body), so it never sets `plain_product` above and
         // needs its own gate mirroring `Codec::Q4_0 if is_plain_product_
         // reduce`'s existing per-element/pair-dot arms below. Not `metal-
-        // q4k-split-k`-aware, same posture as `use_ggml_port`/`use_single_
-        // fetch`: this body owns its own complete `ib` loop with no
-        // `sgitg`/`split` stride of its own.
+        // q4k-split-k`-aware, same posture as `use_ggml_port`: this body owns
+        // its own complete `ib` loop with no `sgitg`/`split` stride of its own.
         // (the gate itself now lives in `PackedBodySelect::select` below)
         // ONE exhaustive selection instead of four chained predicates. every axis
         // that used to be a boolean at the dispatch site (which codec family,
@@ -919,174 +891,6 @@ pub(super) fn push_packed_row_blocked_body(
         )?;
     }
     Ok(())
-}
-
-/// `metal-q4k-single-fetch` (default-off): the row-blocked packed-`Q4_K`
-/// path's `it`/`slot` lane assignment, above, gives lanes `2r` and `2r+1`
-/// (`r` = one of the super-block's 4 64-element groups) the SAME 32-byte
-/// `qs` range — `q4k_run8` loads it twice, once per lane, differing only in
-/// which nibble half each keeps (`shift` 0 vs 4). This function replaces
-/// that pairing: `sf_half` (still `it % 2`) now selects a DISTINCT 16-byte
-/// half of the group's 32 bytes, and `q4k_run8_dual`
-/// extracts BOTH nibble halves from each byte it loads, so the pair's two
-/// lanes together read the group's 32 bytes exactly once instead of twice.
-///
-/// Dispatch geometry is untouched: `ix = lane/8` and the `ib += 4` stride
-/// are identical to the duplicate-fetch path, so this is a change to which
-/// BYTES a lane owns and what it does with them, not to thread count,
-/// simdgroups-per-threadgroup, or `PACKED_ROWS_PER_GROUP`. Not `split-K`
-/// aware -- this function owns its own complete dispatch loop rather than
-/// plugging into the shared lane-spread preamble `metal-q4k-split-k`
-/// modifies, so the two features do not compose (see this feature's own
-/// Cargo.toml doc).
-///
-/// Correctness hazard this function exists to get right: a `qs` byte's low
-/// nibble and high nibble belong to DIFFERENT 32-element sub-blocks with
-/// DIFFERENT 6-bit `(scale, min)` pairs (`q4_k.rs::dequantize_block`'s own
-/// doc — elements land "32 output elements apart", not adjacent). A lane
-/// that decodes both nibbles of a byte therefore needs BOTH sub-blocks'
-/// headers (`hdr_low`/`hdr_high`), never one. `q4k_header_for(blk,
-/// sf_low_base)` and `q4k_header_for(blk, sf_high_base)` resolve to the
-/// same two sub-block indices for `sf_half == 0` and `sf_half == 1` alike
-/// (`sf_low_base % 64` is `0` or `16`, both `< 32`; `sf_high_base % 64` is
-/// `32` or `48`, both `>= 32`), so both this lane's low-half partial sum and
-/// its pair-partner's low-half partial sum are scaled by the IDENTICAL
-/// `hdr_low`, and summing them via `simd_sum` after the `ib` loop
-/// reconstructs the same per-sub-block total the duplicate-fetch path
-/// computes — see this function's own algebra note on the scale-deferred
-/// arm below.
-#[allow(clippy::too_many_arguments)]
-#[cfg(feature = "metal-q4k-single-fetch")]
-pub(super) fn push_q4k_single_fetch_body(
-    source: &mut String,
-    resolved: &BoundOp,
-    reduce_op: ScalarOp,
-    weight: usize,
-    other: usize,
-    element_type: &str,
-    operand_count: usize,
-    rows: usize,
-    block_bytes: usize,
-    metal: &MetalOnlyExtras,
-) {
-    source.push_str("    uint ix = (uint)lane / 8u;\n");
-    source.push_str("    uint it = (uint)lane % 8u;\n");
-    source.push_str("    uint sf_region = it / 2u;\n");
-    source.push_str("    uint sf_half = it % 2u;\n");
-    source.push_str("    uint sf_low_base = sf_region * 64u + sf_half * 16u;\n");
-    source.push_str("    uint sf_high_base = sf_low_base + 32u;\n");
-    let reduction_bound = packed_row_reduction_bound_token(metal);
-    source.push_str(&format!(
-        "    int super_blocks = (int){reduction_bound} / {Q4K_BLOCK_ELEMENTS};\n"
-    ));
-    source.push_str("    for (int ib = (int)ix; ib < super_blocks; ib += 4) {\n");
-    source.push_str("        int elem0_low = ib * 256 + (int)sf_low_base;\n");
-    source.push_str("        int elem0_high = ib * 256 + (int)sf_high_base;\n");
-    source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
-    source.push_str(&format!(
-        "            device const uchar *blk = in{weight} + ((int)weight_base[q] / {Q4K_BLOCK_ELEMENTS} + ib) * {block_bytes};\n"
-    ));
-    source.push_str("            q4k_header hdr_low = q4k_header_for(blk, sf_low_base);\n");
-    source.push_str("            q4k_header hdr_high = q4k_header_for(blk, sf_high_base);\n");
-    if is_plain_product_reduce(resolved, reduce_op, weight, other) {
-        // SCALE-DEFERRED, split across TWO sub-blocks instead of one: this
-        // lane covers 16 of sub-block-A's 32 elements (`raw_low`/`act_low`)
-        // and 16 of sub-block-B's 32 (`raw_high`/`act_high`) — its pair
-        // partner (`sf_half` flipped, same `sf_region`) covers the other 16
-        // of each. `sum_j (scale*nibble_j - min)*act_j == scale*sum(nibble_j
-        // *act_j) - min*sum(act_j)` (the same identity
-        // `is_plain_product_reduce`'s caller already proved licenses) holds
-        // per HALF exactly as it holds per whole sub-block, and addition
-        // distributes over the two halves, so `simd_sum` over both lanes in
-        // a pair reconstructs the identical two sub-block totals the
-        // duplicate-fetch path computes in one lane each.
-        source.push_str(&format!("            {element_type} raw_low = 0;\n"));
-        source.push_str(&format!("            {element_type} act_low = 0;\n"));
-        source.push_str(&format!("            {element_type} raw_high = 0;\n"));
-        source.push_str(&format!("            {element_type} act_high = 0;\n"));
-        source.push_str("            for (int c = 0; c < 2; ++c) {\n");
-        source.push_str("                float low_levels[8];\n");
-        source.push_str("                float high_levels[8];\n");
-        source.push_str(
-            "                q4k_run8_dual(blk, sf_low_base + (uint)(c * 8), low_levels, high_levels);\n",
-        );
-        source.push_str("                for (int j = 0; j < 8; ++j) {\n");
-        source.push_str(&format!(
-            "                    {element_type} act_l = in{other}[other_base[0] + (long)(elem0_low + c * 8 + j) * other_stride];\n"
-        ));
-        source.push_str(&format!(
-            "                    {element_type} act_h = in{other}[other_base[0] + (long)(elem0_high + c * 8 + j) * other_stride];\n"
-        ));
-        source.push_str("                    raw_low += low_levels[j] * act_l;\n");
-        source.push_str("                    act_low += act_l;\n");
-        source.push_str("                    raw_high += high_levels[j] * act_h;\n");
-        source.push_str("                    act_high += act_h;\n");
-        source.push_str("                }\n");
-        source.push_str("            }\n");
-        source.push_str(
-            "            sumf[q] = sumf[q] + hdr_low.scale * raw_low - hdr_low.minimum * act_low + hdr_high.scale * raw_high - hdr_high.minimum * act_high;\n",
-        );
-    } else {
-        source.push_str("            for (int c = 0; c < 2; ++c) {\n");
-        source.push_str("                float low_levels[8];\n");
-        source.push_str("                float high_levels[8];\n");
-        source.push_str(
-            "                q4k_run8_dual(blk, sf_low_base + (uint)(c * 8), low_levels, high_levels);\n",
-        );
-        source.push_str("                for (int j = 0; j < 8; ++j) {\n");
-        source.push_str(&format!(
-            "                    {element_type} scratch[{}];\n",
-            operand_count.max(1)
-        ));
-        source.push_str(&format!(
-            "                    scratch[{weight}] = hdr_low.scale * low_levels[j] - hdr_low.minimum;\n"
-        ));
-        source.push_str(&format!(
-            "                    scratch[{other}] = in{other}[other_base[0] + (long)(elem0_low + c * 8 + j) * other_stride];\n"
-        ));
-        let low_value_expr = push_body_steps(
-            source,
-            resolved.element_body(),
-            "                    ",
-            element_type,
-        );
-        source.push_str(&format!(
-            "                    {element_type} value = {low_value_expr};\n"
-        ));
-        let low_combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
-        source.push_str(&format!(
-            "                    sumf[q] = {low_combine_expr};\n"
-        ));
-        source.push_str("                }\n");
-        source.push_str("                for (int j = 0; j < 8; ++j) {\n");
-        source.push_str(&format!(
-            "                    {element_type} scratch[{}];\n",
-            operand_count.max(1)
-        ));
-        source.push_str(&format!(
-            "                    scratch[{weight}] = hdr_high.scale * high_levels[j] - hdr_high.minimum;\n"
-        ));
-        source.push_str(&format!(
-            "                    scratch[{other}] = in{other}[other_base[0] + (long)(elem0_high + c * 8 + j) * other_stride];\n"
-        ));
-        let high_value_expr = push_body_steps(
-            source,
-            resolved.element_body(),
-            "                    ",
-            element_type,
-        );
-        source.push_str(&format!(
-            "                    {element_type} value = {high_value_expr};\n"
-        ));
-        let high_combine_expr = scalar_op_expr(reduce_op, &["sumf[q]", "value"]);
-        source.push_str(&format!(
-            "                    sumf[q] = {high_combine_expr};\n"
-        ));
-        source.push_str("                }\n");
-        source.push_str("            }\n");
-    }
-    source.push_str("        }\n");
-    source.push_str("    }\n");
 }
 
 /// The plain-product row-blocked bodies' shared activation address: the

@@ -713,8 +713,7 @@ static inline void q4k_run8(device const uchar *block, uint index, thread float 
     out[7] = (float)((w1 >> (shift + 24u)) & 0xFu);
 }
 
-// `metal-q4k-single-fetch` (opt-in, see `push_q4k_single_fetch_body`): ONE
-// 8-byte (two-word) load, BOTH nibble halves of it -- eight low-nibble
+// ONE 8-byte (two-word) load, BOTH nibble halves of it -- eight low-nibble
 // levels (elements `low_index .. low_index+8`) AND the eight high-nibble
 // levels of the SAME bytes (elements `low_index+32 .. low_index+40`, ggml's
 // and `dequantize_row_q4_K`'s own "32 elements apart, same byte" pairing —
@@ -2059,8 +2058,8 @@ pub(crate) const fn codec_supports_pair_dot(codec: Codec) -> bool {
 
 /// Output rows one SIMD group folds at once in the row-blocked packed path
 /// (`push_packed_row_blocked_body`'s generic `else` arm and
-/// `push_packed_row_multi_row_body`; NOT `push_q4k_single_fetch_body`/
-/// `sub_block_matvec_msl`, which are `Q4_K`-only and keep `4` baked into
+/// `push_packed_row_multi_row_body`; NOT `sub_block_matvec_msl`, which is
+/// `Q4_K`-only and keeps `4` baked into
 /// their own `lane % 8u` arithmetic regardless of this value —
 /// [`PACKED_ROWS_PER_GROUP`]'s doc). `Q6_K` decodes three raw-byte fields
 /// per element (`ql`, `qh`, `scale`) versus `Q4_K`'s effectively two, so

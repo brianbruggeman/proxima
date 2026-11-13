@@ -180,7 +180,7 @@ commit.
   a pipeline-count + compile-ms AC per slice.
 - **One feature, not nine.** `metal-algebra-monomorph` for the whole programme, deleted at S9.
   Feature sprawl is how `metal-q4k-split-k` (inert) and `metal-q4k-single-fetch` (unreachable)
-  shipped dead.
+  shipped dead. (`metal-q4k-single-fetch` was removed entirely under PROXNUM-317.)
 - **The instrument moves with the bodies.** `classify_kind` buckets by emitted source markers, so
   unifying bodies silently re-buckets every measurement (twice today). Update it in the same commit.
 - **S5 re-decides the fusion default from data.** Fusion currently measures a 2.8% LOSS.
@@ -259,7 +259,7 @@ Five additions, all cheap:
 2. **Cross-split consistency AC.** For each cell, `split in {1,2,4,8}` must agree with each OTHER
    within the loose bound. This is the check that catches a split arm summing the same full
    reduction `split` times — a bug this repo has actually shipped once (recorded in
-   `push_q4k_single_fetch_body`'s doc: "~7x too large").
+   `push_q4k_single_fetch_body`'s doc: "~7x too large"; that body was removed under PROXNUM-317).
 3. **CI tiering.** AC1 over the full matrix is a device test in the hundreds of cases; requiring it
    per commit makes AC6 impractical. Split it: `AC1-fast` = one cell per layout per commit,
    `AC1-full` = the whole matrix nightly. Both name their counts.

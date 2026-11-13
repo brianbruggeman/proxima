@@ -1148,68 +1148,6 @@ fn matmul_op_with_reduce(m: u32, k: u32, n: u32, reduce_op: ScalarOp) -> BoundOp
     .expect("one fused bound emitted")
 }
 
-/// [`matmul_op`]'s `Float16` counterpart -- `q4k_pair_dot`'s own
-/// `plain_product` arm (`push_packed_row_blocked_body`'s own gate) is
-/// `DType::FLOAT32`-only, so a fixture that needs to reach a
-/// DIFFERENT row-blocked Q4_K arm (mask-fma's, single-fetch's) must NOT
-/// be plain-`Float32`-shaped, or `q4k_pair_dot` wins over it every time.
-#[cfg(all(feature = "metal-q4k-single-fetch", not(feature = "metal-q4k-split-k")))]
-fn matmul_op_f16(m: u32, k: u32, n: u32) -> BoundOp {
-    let mut program = Vec::new();
-    let lhs = append(
-        &mut program,
-        Op::Input {
-            dtype: DType::FLOAT16,
-            shape: vec![Extent::Static(m), Extent::Static(k)],
-            name: None,
-        },
-    );
-    let rhs = append(
-        &mut program,
-        Op::Input {
-            dtype: DType::FLOAT16,
-            shape: vec![Extent::Static(k), Extent::Static(n)],
-            name: None,
-        },
-    );
-    let product = append(
-        &mut program,
-        Op::Elementwise {
-            dtype: DType::FLOAT16,
-            body: ScalarOp::Multiply,
-            operands: vec![
-                (lhs, IndexMap::Affine(map::projection(3, &[0, 2]))),
-                (rhs, IndexMap::Affine(map::projection(3, &[2, 1]))),
-            ],
-            name: None,
-        },
-    );
-    append(
-        &mut program,
-        Op::Reduce(Reduce {
-            dtype: DType::FLOAT16,
-            body: ScalarOp::Add,
-            init: ReduceInit::Zero,
-            operand: product,
-            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
-            out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
-            keep: Keep::Reduce,
-            name: Some("matmul_f16".into()),
-        }),
-    );
-    let shapes = infer(&program, &[]).expect("f16 matmul infers");
-    bind(
-        &program,
-        &shapes,
-        &[terminal(&program)],
-        NumericPolicy::default(),
-    )
-    .expect("f16 matmul lowers")
-    .into_iter()
-    .next()
-    .expect("one fused bound emitted")
-}
-
 #[test]
 fn q4k_row_blocked_matmul_uses_paired_nibble_decode() {
     // 256 == Q4K_BLOCK_ELEMENTS exactly: one super-block, so
@@ -1875,44 +1813,6 @@ fn gathered_packed_row_reads_each_selected_experts_slab_exactly_once() {
     );
 }
 
-/// `metal-q4k-single-fetch` sibling of the test above: the lane remap
-/// renames the scale-deferred accumulators (`raw_low`/`raw_high` in
-/// place of `q4k_pair_dot`, one pair per sub-block half — see
-/// `push_q4k_single_fetch_body`'s own algebra note) but the SAME
-/// dichotomy holds — Add-reduce over a plain product still defers the
-/// scale, never falls back to per-element dequant. `matmul_op_f16`, not
-/// `matmul_op`: `q4k_pair_dot`'s own `plain_product` arm is
-/// `DType::FLOAT32`-only and takes priority over this feature
-/// (see `metal-q4k-single-fetch`'s own Cargo.toml doc), so a `Float32`
-/// fixture would silently exercise `q4k_pair_dot` instead and this
-/// test would assert nothing about single-fetch at all.
-#[cfg(all(feature = "metal-q4k-single-fetch", not(feature = "metal-q4k-split-k")))]
-#[test]
-fn q4k_row_blocked_matmul_defers_scale_to_once_per_sub_block_single_fetch() {
-    let bound = matmul_op_f16(4, 256, 5);
-    let weight_node = bound.operands()[0].0;
-    let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, Codec::Q4K);
-
-    assert!(
-        packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
-        "test fixture must actually take the row-blocked path for this assertion to mean anything"
-    );
-
-    let source = emit(&bound, &q4k, NumericPolicy::default())
-        .expect("emits")
-        .source;
-    assert!(
-        source.contains("raw_low") && source.contains("raw_high"),
-        "Add-reduce over a plain weight*activation body must take the scale-deferred path, split across both sub-block halves:\n{source}"
-    );
-    assert!(
-        !source.contains("hdr_low.scale * low_levels[j] - hdr_low.minimum")
-            && !source.contains("hdr_high.scale * high_levels[j] - hdr_high.minimum"),
-        "the per-element dequant expression must not remain once the scale-deferred path is taken:\n{source}"
-    );
-}
-
 /// `classify_packed_row_block` now admits [`Codec::Q4_0`] the same way it
 /// admits [`Codec::Q8_0`] (`emit_and_classify.rs`'s whitelist match):
 /// `Q4_0`'s own block is 32 elements, and eight contiguous real blocks span
@@ -2053,7 +1953,6 @@ async fn half_precision_codec_never_takes_the_row_blocked_path_even_at_a_256_ext
     );
 }
 
-#[cfg(not(all(feature = "metal-q4k-single-fetch", not(feature = "metal-q4k-split-k"))))]
 #[test]
 fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path() {
     // Same fused `weight * activation` body as the matmul shape above,
@@ -2081,39 +1980,6 @@ fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path() {
     assert!(
         source.contains("hdr.scale * levels[j] - hdr.minimum"),
         "a Maximum reduce must keep dequantizing per element:\n{source}"
-    );
-}
-
-/// `metal-q4k-single-fetch` sibling of the test above: the lane remap
-/// renames the per-element dequant expression (`hdr_low`/`hdr_high` in
-/// place of `hdr`, one pair per sub-block half — see
-/// `push_q4k_single_fetch_body`'s own doc) but the SAME dichotomy holds
-/// — a Maximum reduce still falls back to dequantizing per element,
-/// never the scale-deferred accumulators either arm uses for Add.
-#[cfg(all(feature = "metal-q4k-single-fetch", not(feature = "metal-q4k-split-k")))]
-#[test]
-fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path_single_fetch() {
-    let bound = matmul_op_with_reduce(4, 256, 5, ScalarOp::Maximum);
-    let weight_node = bound.operands()[0].0;
-    let mut q4k = BTreeMap::new();
-    q4k.insert(weight_node, Codec::Q4K);
-
-    assert!(
-        packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
-        "test fixture must actually take the row-blocked path for this assertion to mean anything"
-    );
-
-    let source = emit(&bound, &q4k, NumericPolicy::default())
-        .expect("emits")
-        .source;
-    assert!(
-        !source.contains("raw_low") && !source.contains("raw_high"),
-        "a Maximum reduce must never take the scale-deferred path, its identity does not hold under max:\n{source}"
-    );
-    assert!(
-        source.contains("hdr_low.scale * low_levels[j] - hdr_low.minimum")
-            && source.contains("hdr_high.scale * high_levels[j] - hdr_high.minimum"),
-        "a Maximum reduce must keep dequantizing per element, both sub-block halves:\n{source}"
     );
 }
 
