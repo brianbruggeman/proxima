@@ -58,6 +58,8 @@ pub use generate::CudaServingPipe;
 mod hf_bind;
 mod hf_config;
 #[cfg(feature = "std")]
+mod host_rows;
+#[cfg(feature = "std")]
 mod loader;
 #[cfg(feature = "std")]
 mod lowering;

@@ -13,8 +13,13 @@ use proxima_numeric::NumericFormat;
 use super::drafter::{DrafterSet, draft_limit_for_step};
 use super::host_kv_rounding::HostCacheRounding;
 use super::*;
+use crate::host_rows;
 use crate::kv_cache_format;
 use crate::memory_reclaim::monotonic_now;
+use proxima_tensor::partition::Hoisted;
+use proxima_tensor::{DeviceMemory, Executes};
+
+use crate::host_rows::HostRewrite;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use crate::cuda_async::CudaGpuService;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
@@ -1768,6 +1773,98 @@ impl<'file> LoadedModel<'file> {
     /// exactly the device buffers it caused and nothing another model's
     /// own names might collide with.
     pub(super) fn resident_names(&self) -> BTreeSet<&str> {
+        self.resident_names_except(&[])
+    }
+
+    /// [`Self::resident_names`] minus the tables `hoisted` keeps on the host
+    /// (`crate::host_rows`): a name never uploaded must not be marked resident.
+    pub(super) fn resident_names_except(&self, hoisted: &[Hoisted]) -> BTreeSet<&str> {
+        let mut names = self.all_weight_names();
+        names.retain(|name| !hoisted.iter().any(|rows| host_rows::table_name(rows) == *name));
+        names
+    }
+
+    /// Pushes every bound weight as a named block except the tables
+    /// `hoisted` keeps on the host. The one weight loop the decode paths
+    /// share, so a hoisted table is skipped in exactly one place.
+    pub(super) fn push_weight_blocks<'call>(
+        &'call self,
+        named_blocks: &mut Vec<(&'call str, QuantizedBlock<'call>)>,
+        hoisted: &[Hoisted],
+    ) -> Result<(), InteropError> {
+        let kept = |name: &str| !hoisted.iter().any(|rows| host_rows::table_name(rows) == name);
+        for (name, data) in self.weights.owned.iter().filter(|(name, _)| kept(name)) {
+            named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
+        }
+        for (name, block) in self.weights.packed.iter().filter(|(name, _)| kept(name)) {
+            named_blocks.push((name.as_str(), *block));
+        }
+        for (name, bytes, kind) in self.weights.packed_owned.iter().filter(|(name, _, _)| kept(name)) {
+            let block = crate::bind::as_block(*kind, bytes)
+                .ok_or(InteropError::UnsupportedCodec { codec: crate::error::codec_name(*kind) })?;
+            named_blocks.push((name.as_str(), block));
+        }
+        Ok(())
+    }
+
+    /// `program` rewritten for a separate-memory backend, with its recomputed
+    /// hash and the producers that gather the hoisted rows; `None` when no
+    /// table moves ([`host_rows::host_rows`]).
+    fn host_rewrite_for(
+        &self,
+        executes: &Executes,
+        program: &[Op],
+        max_new_count: u64,
+    ) -> Result<Option<HostRewrite>, InteropError> {
+        Ok(host_rows::host_rows(program, executes, &self.weights, max_new_count)?
+            .map(|rows| {
+                let hash = program_hash(&rows.device_program);
+                (rows.device_program, hash, rows.hoisted)
+            }))
+    }
+
+    fn host_rows_unsupported(&self, reason: &str) -> InteropError {
+        InteropError::PreGatherExecutionUnsupported {
+            architecture: String::from(self.family()),
+            reason: String::from(reason),
+        }
+    }
+
+    /// Runs one hoisted producer on the CPU runtime: gathers this step's rows
+    /// of the table from the host's own bytes, reading the producer's index
+    /// leaf out of the step's `named_blocks` (the `ids` the device also reads).
+    fn evaluate_host_rows(
+        &self,
+        host: &mut BackendRuntime,
+        hoisted: &Hoisted,
+        symbols: &[u64],
+        named_blocks: &[(&str, QuantizedBlock<'_>)],
+    ) -> Result<Evaluated, InteropError> {
+        let table = host_rows::table_name(hoisted);
+        let ids_name = hoisted
+            .producer
+            .first()
+            .and_then(Op::name)
+            .ok_or_else(|| self.host_rows_unsupported("the host producer has no named index leaf"))?;
+        let table_block = host_rows::weight_block(&self.weights, table)?
+            .ok_or_else(|| self.host_rows_unsupported("a hoisted table is not a bound weight"))?;
+        let ids_block = named_blocks
+            .iter()
+            .find(|(name, _)| *name == ids_name)
+            .map(|(_, block)| *block)
+            .ok_or_else(|| self.host_rows_unsupported("the step feeds no block for the producer's index leaf"))?;
+        host.evaluate_segment(
+            &hoisted.producer,
+            symbols,
+            &[(ids_name, ids_block), (table, table_block)],
+            &[hoisted.output],
+            &BTreeSet::new(),
+            None,
+        )
+    }
+
+    /// Every bound weight name, hoisted or not.
+    fn all_weight_names(&self) -> BTreeSet<&str> {
         self.weights
             .owned
             .iter()
@@ -4098,7 +4195,33 @@ impl<'file> LoadedModel<'file> {
         // "same name, same bytes" apart from "same name, new bytes" without
         // ever keying on name itself (`omega::metal::Plan::mark_resident`'s
         // own doc). Computed once, not per token: these names never change.
-        let resident_names: BTreeSet<&str> = self.resident_names();
+        // A separate-memory backend (CUDA, the only one today) keeps each
+        // gather-only table on the host: `host_rewrites` holds, per program
+        // the loop runs, the device program, its hash and the hoisted
+        // producers; `host_runtime` is the CPU runtime that runs them.
+        let host_rows_executes = cfg!(all(
+            feature = "cuda",
+            not(all(feature = "metal-output-placement", target_os = "macos"))
+        ))
+        .then(|| Executes::BASE.with_memory(DeviceMemory::Separate))
+        .filter(|_| runtime.uses_gpu());
+        let host_rows_max_new = ids.len() as u64;
+        // keyed by the source program's `program_hash` (load_model.rs:1675),
+        // its content: an address can be reused by a different program
+        let mut host_rewrites: BTreeMap<u64, Option<HostRewrite>> = BTreeMap::new();
+        let mut host_runtime = host_rows_executes
+            .as_ref()
+            .map(|_| BackendRuntime::new(&ServingConfig { gpu_layers: 0, ..*serving_config }));
+        if let Some(executes) = &host_rows_executes {
+            host_rows::rewrite_cached(&mut host_rewrites, self.program_hash, || {
+                self.host_rewrite_for(executes, &self.program, host_rows_max_new)
+            })?;
+        }
+        let main_hoisted: &[Hoisted] = host_rewrites
+            .get(&self.program_hash)
+            .and_then(Option::as_ref)
+            .map_or(&[], |(_, _, hoisted)| hoisted.as_slice());
+        let resident_names: BTreeSet<&str> = self.resident_names_except(main_hoisted);
 
         let prompt_token_count = ids.len();
         let mut serving: Option<ServingState<u32, usize>> =
@@ -4687,6 +4810,22 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             self.program_hash,
                         )
                     };
+                    // NodeIds are stable under the hoist, so the roots chosen
+                    // below and the kv carry keep addressing the device program.
+                    let source_hash = active_program_hash;
+                    let rewrite = match &host_rows_executes {
+                        Some(executes) => host_rows::rewrite_cached(&mut host_rewrites, source_hash, || {
+                            self.host_rewrite_for(executes, active_program, host_rows_max_new)
+                        })?,
+                        None => None,
+                    };
+                    let (active_program, active_program_hash, step_hoisted): (&[Op], u64, &[Hoisted]) =
+                        match rewrite {
+                            Some((device, hash, hoisted)) => {
+                                (device.as_slice(), *hash, hoisted.as_slice())
+                            }
+                            None => (active_program, active_program_hash, &[]),
+                        };
                     #[allow(clippy::expect_used)]
                     let active_logits_root = if let Some(forward) = recurrent_verify {
                         forward.logits
@@ -4842,6 +4981,8 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         runtime.set_kv_cached_rows(cached_len as u64);
                     }
                     let prep_carry_done = std::time::Instant::now();
+                    // declared before `named_blocks` so the rows it borrows outlive it
+                    let mut host_row_results: Vec<Evaluated> = Vec::new();
                     let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::with_capacity(
                         self.weights.owned.len()
                             + self.weights.packed.len()
@@ -4851,18 +4992,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     );
                     #[cfg(feature = "instrument")]
                     let named_blocks_weights_started = read_ticks();
-                    for (name, data) in &self.weights.owned {
-                        named_blocks
-                            .push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
-                    }
-                    for (name, block) in &self.weights.packed {
-                        named_blocks.push((name.as_str(), *block));
-                    }
-                    for (name, bytes, kind) in &self.weights.packed_owned {
-                        let block = crate::bind::as_block(*kind, bytes)
-                            .ok_or(InteropError::UnsupportedCodec { codec: crate::error::codec_name(*kind) })?;
-                        named_blocks.push((name.as_str(), block));
-                    }
+                    self.push_weight_blocks(&mut named_blocks, step_hoisted)?;
                     #[cfg(feature = "instrument")]
                     debug!(
                         step = step as u64,
@@ -5120,6 +5250,23 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         ms = ticks_to_nanos(elapsed_ticks(push_named_blocks_started)) as f64 / 1e6,
                         "named_blocks_phase"
                     );
+                    if let Some(host) = host_runtime.as_mut() {
+                        for hoisted in step_hoisted {
+                            host_row_results.push(self.evaluate_host_rows(
+                                host,
+                                hoisted,
+                                &symbols,
+                                &named_blocks,
+                            )?);
+                        }
+                        for (hoisted, evaluated) in step_hoisted.iter().zip(&host_row_results) {
+                            let (rows, _shape) = evaluated.get(hoisted.output).ok_or_else(|| {
+                                self.host_rows_unsupported("the host producer returned no rows")
+                            })?;
+                            named_blocks
+                                .push((hoisted.leaf.as_str(), QuantizedBlock::Float32(rows)));
+                        }
+                    }
                     #[cfg(feature = "instrument")]
                     let greedy_build_started = read_ticks();
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -7790,17 +7937,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                 named_blocks.push(("ids", QuantizedBlock::Int32(inputs.ids_i32.as_slice())));
                 #[cfg(feature = "instrument")]
                 let named_blocks_weights_started = read_ticks();
-                for (name, data) in &self.weights.owned {
-                    named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
-                }
-                for (name, block) in &self.weights.packed {
-                    named_blocks.push((name.as_str(), *block));
-                }
-                for (name, bytes, kind) in &self.weights.packed_owned {
-                    let block = crate::bind::as_block(*kind, bytes)
-                        .ok_or(InteropError::UnsupportedCodec { codec: crate::error::codec_name(*kind) })?;
-                    named_blocks.push((name.as_str(), block));
-                }
+                self.push_weight_blocks(&mut named_blocks, &[])?;
                 named_blocks.push(("eps", QuantizedBlock::Float32(inputs.epsilon.as_slice())));
                 named_blocks.push(("rope_cos", QuantizedBlock::Float32(inputs.cos.as_slice())));
                 named_blocks.push(("rope_sin", QuantizedBlock::Float32(inputs.sin.as_slice())));
@@ -8427,17 +8564,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                 + 6
                 + cache_names.len() * 4,
         );
-        for (name, data) in &self.weights.owned {
-            named_blocks.push((name.as_str(), QuantizedBlock::Float32(data.as_slice())));
-        }
-        for (name, block) in &self.weights.packed {
-            named_blocks.push((name.as_str(), *block));
-        }
-        for (name, bytes, kind) in &self.weights.packed_owned {
-            let block = crate::bind::as_block(*kind, bytes)
-                .ok_or(InteropError::UnsupportedCodec { codec: crate::error::codec_name(*kind) })?;
-            named_blocks.push((name.as_str(), block));
-        }
+        self.push_weight_blocks(&mut named_blocks, &[])?;
         // `gqa_cached_forward_program_with_experts`'s own `cached_len`
         // `Op::Input` (ROW 404/405's runtime bound the fused Metal
         // `CachedAttention` kernel reads) is present on every program this
