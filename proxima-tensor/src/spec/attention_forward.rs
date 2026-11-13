@@ -2882,12 +2882,6 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
     sliding_kv_ring: bool,
     activation: DType,
 ) -> Result<GqaRoutedForwardProgramWithLayerTaps, TensorError> {
-    if residual_scale.is_some() && expert_count == 0 {
-        return Err(TensorError::UnsupportedInBuilder {
-            builder: "gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
-            feature: "a residual scale on a dense layer",
-        });
-    }
     if !layer_windows.is_empty() && layer_windows.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
             expected: block_count,
@@ -3259,6 +3253,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
                 fused_qkv_reduce,
                 rope_pairing,
                 cached_window_mask,
+                residual_scale,
             )?
         } else {
             let gate_inp = input_leaf(

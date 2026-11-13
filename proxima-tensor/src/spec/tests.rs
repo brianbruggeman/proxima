@@ -20200,23 +20200,172 @@ mod forward_scales {
         assert_eq!(constants_equal(&base, 0.22_f32), 0);
     }
 
+    fn scale_multiplies(program: &[Op], scale: f32) -> Vec<(usize, NodeId)> {
+        let scale_node = program
+            .iter()
+            .position(|op| matches!(op, Op::Constant { value, .. } if *value == scale))
+            .expect("the scale constant is in the program");
+        program
+            .iter()
+            .enumerate()
+            .filter_map(|(index, op)| match op {
+                Op::Elementwise {
+                    body: ScalarOp::Multiply,
+                    operands,
+                    ..
+                } if operands.len() == 2 && operands[1].0 == NodeId(scale_node as u32) => {
+                    Some((index, operands[0].0))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn add_consuming(program: &[Op], branch: usize) -> usize {
+        program
+            .iter()
+            .position(|op| {
+                matches!(
+                    op,
+                    Op::Elementwise { body: ScalarOp::Add, operands, .. }
+                        if operands.first().is_some_and(|(node, _)| node.0 as usize == branch)
+                )
+            })
+            .expect("the scaled branch feeds a residual add")
+    }
+
+    const TOKENS: usize = 2;
+
+    fn evaluate(program: &[Op], outputs: &[NodeId]) -> crate::cpu::Evaluated {
+        let symbols = [TOKENS as u64, TOKENS as u64];
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        let bound: Vec<(String, Vec<f32>)> = program
+            .iter()
+            .filter_map(|op| match op {
+                Op::Input {
+                    shape,
+                    name: Some(name),
+                    ..
+                } => {
+                    let length: usize = shape
+                        .iter()
+                        .map(|extent| match extent {
+                            Extent::Static(count) => *count as usize,
+                            Extent::Symbolic(slot) => symbols[*slot as usize] as usize,
+                        })
+                        .product();
+                    let values = (0..length)
+                        .map(|_| {
+                            state ^= state << 13;
+                            state ^= state >> 7;
+                            state ^= state << 17;
+                            ((state >> 11) as f64 / (1u64 << 53) as f64) as f32 - 0.5
+                        })
+                        .collect();
+                    Some((name.clone(), values))
+                }
+                _ => None,
+            })
+            .map(|(name, values)| match name.as_str() {
+                "ids" => (name, (0..TOKENS).map(|token| token as f32).collect()),
+                "eps" => (name, alloc::vec![1e-6f32; TOKENS]),
+                "cached_len" => (name, alloc::vec![0.0f32]),
+                _ => (name, values),
+            })
+            .collect();
+        let named: Vec<(&str, &[f32])> = bound
+            .iter()
+            .map(|(name, values)| (name.as_str(), values.as_slice()))
+            .collect();
+        crate::cpu::evaluate_named(program, &symbols, &named, outputs)
+            .expect("the dense layer program evaluates on cpu")
+    }
+
     #[test]
-    fn dense_single_range_refuses_a_residual_scale() {
+    fn dense_residual_scale_multiplies_the_attention_and_ffn_branches_before_each_residual_add() {
+        let (base, _) = built(&descriptor(0, 0));
         let mut dense = descriptor(0, 0);
         dense.residual_scale = Some(0.22);
 
-        let outcome = build_forward(&dense);
+        let (scaled, _) = built(&dense);
+        let multiplies = scale_multiplies(&scaled, 0.22);
 
-        assert!(
-            matches!(
-                outcome,
-                Err(TensorError::UnsupportedInBuilder {
-                    builder: "gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_pairing",
-                    feature: "a residual scale on a dense layer",
-                })
-            ),
-            "a dense layer must refuse a residual scale"
+        assert_eq!(scaled.len(), base.len() + 5);
+        assert_eq!(constants_equal(&scaled, 0.22_f32), 1);
+        assert_eq!(constants_equal(&base, 0.22_f32), 0);
+        assert_eq!(multiplies.len(), 4, "two blocks, a multiply per residual branch: {multiplies:?}");
+        for (multiply, _) in multiplies {
+            let add = add_consuming(&scaled, multiply);
+            assert!(add > multiply, "the add consumes the scaled branch");
+        }
+    }
+
+    #[test]
+    fn dense_residual_stream_is_x_plus_scaled_attention_plus_scaled_ffn() {
+        let scale = 0.22_f32;
+        let mut dense = descriptor(0, 0);
+        dense.residual_scale = Some(scale);
+        let (program, _) = built(&dense);
+        let multiplies = scale_multiplies(&program, scale);
+        let [(attn_multiply, attn_branch), (ffn_multiply, ffn_branch), ..] = multiplies[..] else {
+            panic!("a two-block dense program carries four scale multiplies: {multiplies:?}");
+        };
+        let residual1 = add_consuming(&program, attn_multiply);
+        let x_next = add_consuming(&program, ffn_multiply);
+        let embedding = program
+            .iter()
+            .position(|op| matches!(op, Op::Input { name: Some(name), .. } if name == "token_embd.weight"))
+            .expect("the embedding table is an input");
+
+        let evaluated = evaluate(
+            &program,
+            &[
+                attn_branch,
+                ffn_branch,
+                NodeId(residual1 as u32),
+                NodeId(x_next as u32),
+                NodeId(embedding as u32),
+            ],
         );
+        let value = |node: NodeId| evaluated.get(node).expect("node evaluated").0.to_vec();
+        let attn = value(attn_branch);
+        let ffn = value(ffn_branch);
+        let table = value(NodeId(embedding as u32));
+        let residual = value(NodeId(residual1 as u32));
+        let next = value(NodeId(x_next as u32));
+
+        let width = attn.len() / TOKENS;
+        for token in 0..TOKENS {
+            for column in 0..width {
+                let at = token * width + column;
+                let x = table[token * width + column];
+                let expected_residual = x + scale * attn[at];
+                let expected_next = residual[at] + scale * ffn[at];
+                assert!(
+                    (residual[at] - expected_residual).abs() <= 1e-5,
+                    "residual1[{token},{column}] = {} but x + s*attn = {expected_residual}",
+                    residual[at]
+                );
+                assert!(
+                    (next[at] - expected_next).abs() <= 1e-5,
+                    "x_next[{token},{column}] = {} but residual1 + s*ffn = {expected_next}",
+                    next[at]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn dense_residual_scale_of_one_leaves_the_logits_of_an_unscaled_build_unchanged() {
+        let (base, base_logits) = built(&descriptor(0, 0));
+        let mut dense = descriptor(0, 0);
+        dense.residual_scale = Some(1.0);
+        let (scaled, scaled_logits) = built(&dense);
+
+        let base_values = evaluate(&base, &[base_logits]).get(base_logits).expect("base logits").0.to_vec();
+        let scaled_values = evaluate(&scaled, &[scaled_logits]).get(scaled_logits).expect("scaled logits").0.to_vec();
+
+        assert_eq!(base_values, scaled_values);
     }
 
     #[test]
