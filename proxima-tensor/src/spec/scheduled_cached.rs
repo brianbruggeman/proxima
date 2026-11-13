@@ -1124,6 +1124,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
             embedding_scale,
             logit_softcap,
             last_row_only,
+            false,
             ple_dim,
             sliding_kv_ring,
             0,
@@ -1157,6 +1158,106 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
     ))
 }
 
+type NodePair = (NodeId, NodeId);
+type NodePairs = (NodePair, NodePair);
+
+/// The last layer whose output feeds a cache write: an owning key source, a
+/// short-conv layer, or (via the caller) a recurrent pass. Rows after it are
+/// observed only by the logits (PROXNUM-262).
+fn last_cache_writing_layer(schedule: &[LayerSchedule]) -> Option<usize> {
+    schedule.iter().rposition(|entry| {
+        entry.kind == LayerKind::ShortConv
+            || !matches!(
+                entry.attention.key_source_kind,
+                KeySourceKind::SharedFromLayer(_)
+            )
+    })
+}
+
+/// The layer after which only the output row stays live, or `None` when the
+/// program must keep every row (not `last_row_only`, a recurrence, or the last
+/// layer itself writes cache state).
+pub(super) fn row_cut_after(
+    schedule: &[LayerSchedule],
+    last_row_only: bool,
+    has_recurrence: bool,
+) -> Option<usize> {
+    if !last_row_only || has_recurrence {
+        return None;
+    }
+    last_cache_writing_layer(schedule).filter(|last| last + 1 < schedule.len())
+}
+
+/// The `(new-range, cache-range)` end-aligned mask pair per layer of `tail`,
+/// built once per distinct window.
+fn end_aligned_layer_masks(
+    program: &mut Vec<Op>,
+    tail: &[LayerSchedule],
+    cached_len: NodeId,
+    sliding_cached_len: Option<NodeId>,
+) -> Result<Vec<NodePairs>, TensorError> {
+    let mut by_window: Vec<(Option<u32>, NodePairs)> = Vec::new();
+    let mut masks = Vec::with_capacity(tail.len());
+    for entry in tail {
+        let window = entry.attention.mask_window;
+        let found = by_window
+            .iter()
+            .find(|(candidate, _)| *candidate == window)
+            .map(|(_, pair)| *pair);
+        let pair = match found {
+            Some(pair) => pair,
+            None => {
+                let built =
+                    end_aligned_window_masks(program, window, cached_len, sliding_cached_len)?;
+                by_window.push((window, built));
+                built
+            }
+        };
+        masks.push(pair);
+    }
+    Ok(masks)
+}
+
+/// The rope tables' row `N - 1`, once per distinct table pair: the single
+/// surviving query sits at the last new position, and a shared-KV layer never
+/// rotates keys, so only the query reads these.
+fn last_row_rope(
+    program: &mut Vec<Op>,
+    tables: (NodeId, NodeId),
+    index: NodeId,
+    gathered: &mut Vec<NodePairs>,
+) -> (NodeId, NodeId) {
+    if let Some((_, rows)) = gathered.iter().find(|(source, _)| *source == tables) {
+        return *rows;
+    }
+    let rows = (
+        gather_row_at(program, tables.0, index),
+        gather_row_at(program, tables.1, index),
+    );
+    gathered.push((tables, rows));
+    rows
+}
+
+fn end_aligned_window_masks(
+    program: &mut Vec<Op>,
+    window: Option<u32>,
+    cached_len: NodeId,
+    sliding_cached_len: Option<NodeId>,
+) -> Result<NodePairs, TensorError> {
+    let new_range = causal_mask_end_aligned(program, window)?;
+    let ring_len = sliding_cached_len.filter(|_| window.is_some_and(|width| width > 0));
+    let cache_range = match ring_len {
+        Some(ring_len) => causal_mask_cached_end_aligned(
+            program,
+            ring_len,
+            Extent::Symbolic(SLIDING_KV_SYMBOL),
+            window,
+        )?,
+        None => causal_mask_cached_end_aligned(program, cached_len, Extent::Symbolic(1), window)?,
+    };
+    Ok((new_range, cache_range))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     vocab: u32,
@@ -1172,6 +1273,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     embedding_scale: Option<EmbeddingScale>,
     logit_softcap: Option<f32>,
     last_row_only: bool,
+    row_cut: bool,
     ple_dim: Option<u32>,
     sliding_kv_ring: bool,
     short_conv_cache_len: u32,
@@ -1343,10 +1445,32 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
         })
         .collect();
 
+    let cut_after = if row_cut {
+        row_cut_after(schedule, last_row_only, recurrence.is_some())
+    } else {
+        None
+    };
+    let mut row_index: Option<NodeId> = None;
+    let mut tail_masks: Vec<NodePairs> = Vec::new();
+    let mut tail_rope: Vec<NodePairs> = Vec::new();
+    let mut tail_eps = eps;
+
     for logical in 0..logical_count {
         let layer = logical % block_count;
         let iteration_base = logical - layer;
         let entry = &schedule[layer as usize];
+        if cut_after.is_some_and(|cut| layer as usize == cut + 1) {
+            let index = last_row_index_leaf(&mut program);
+            x = gather_row_at(&mut program, x, index);
+            row_index = Some(index);
+            tail_eps = gather_element_at(&mut program, eps, index);
+            tail_masks = end_aligned_layer_masks(
+                &mut program,
+                &schedule[layer as usize..],
+                cached_len,
+                sliding_cached_len,
+            )?;
+        }
         let config = &entry.attention;
         let ffn_config = &entry.ffn;
         let (is_future_cached, neg_infinity_cached) = cached_masks[layer as usize];
@@ -1374,7 +1498,11 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             None
         };
         if let Some(shared) = &ple_shared {
-            ple_layer_inputs[layer as usize] = Some(ple_layer_input(&mut program, shared, layer)?);
+            let slice = ple_layer_input(&mut program, shared, layer)?;
+            ple_layer_inputs[layer as usize] = Some(match row_index {
+                Some(index) => gather_row_at(&mut program, slice, index),
+                None => slice,
+            });
         }
 
         if entry.kind == LayerKind::ShortConv {
@@ -1461,6 +1589,20 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
         let kv_heads = config.kv_heads;
         let pairs = head_dim / 2;
         let group = resources.group;
+        let ((is_future_new, neg_infinity_new), (is_future_cached, neg_infinity_cached)) =
+            cut_after
+                .filter(|cut| layer as usize > *cut)
+                .and_then(|cut| tail_masks.get(layer as usize - cut - 1).copied())
+                .unwrap_or((
+                    (resources.is_future, resources.neg_infinity),
+                    (is_future_cached, neg_infinity_cached),
+                ));
+        let rope = match (row_index, resources.rope) {
+            (Some(index), Some(tables)) => {
+                Some(last_row_rope(&mut program, tables, index, &mut tail_rope))
+            }
+            (_, tables) => tables,
+        };
 
         let wq = input_leaf(
             &mut program,
@@ -1626,14 +1768,14 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             &mut program,
             x,
             inv_dim,
-            eps,
+            tail_eps,
             resources.inv_sqrt_head_dim,
             resources.inv_head_dim,
-            resources.rope,
+            rope,
             pairs,
             resources.group_ones,
-            resources.is_future,
-            resources.neg_infinity,
+            is_future_new,
+            neg_infinity_new,
             is_future_cached,
             neg_infinity_cached,
             group,
@@ -1761,7 +1903,11 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
         }
     }
 
-    let normed_last = gather_last_row(&mut program, normed_final, last_row_only);
+    let normed_last = if cut_after.is_some() {
+        normed_final
+    } else {
+        gather_last_row(&mut program, normed_final, last_row_only)
+    };
 
     let lm_head = input_leaf(
         &mut program,

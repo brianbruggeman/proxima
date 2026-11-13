@@ -22,7 +22,7 @@ use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
     ForwardProgram, LayerCacheRoots, LayerKind, LoopCdConfig, ModelDescriptor, RecurrenceConfig,
-    RecurrentReadoutRoots, ScheduleSource, build_forward,
+    RecurrentReadoutRoots, ScheduleSource, build_forward, build_forward_with_row_cut,
 };
 
 use crate::bind::{BoundWeights, ModelHparams, bind_native_f32, metadata_str};
@@ -368,20 +368,22 @@ pub fn bind_checkpoint_with_kv_layout<'file>(
     layout: KvLayout,
 ) -> Result<BoundProgram<'file>, InteropError> {
     let (descriptor, architecture) = header(parsed, layout)?;
-    bind_descriptor(parsed, file_bytes, architecture, &descriptor)
+    bind_descriptor(parsed, file_bytes, architecture, &descriptor, false)
 }
 
 /// Lowers `descriptor` and binds the weights its `Input` leaves name: the one
 /// pipeline every family takes after its header reader has run, and the one a
 /// verify program takes after [`ModelDescriptor::verify`] has edited the decode
-/// descriptor.
+/// descriptor. `row_cut` lowers the prefill form that computes one row after
+/// the last cache-writing layer ([`build_forward_with_row_cut`]).
 fn bind_descriptor<'file>(
     parsed: &ParsedGguf,
     file_bytes: &'file [u8],
     architecture: ModelHparams,
     descriptor: &ModelDescriptor,
+    row_cut: bool,
 ) -> Result<BoundProgram<'file>, InteropError> {
-    let forward = build_forward(descriptor)?;
+    let forward = build_forward_with_row_cut(descriptor, row_cut)?;
     let binding = binding_profile(&architecture.family)?;
     let weights = bind_program_leaves(parsed, file_bytes, &forward.program, &binding, &[])?;
     refuse_incomplete_bind(parsed, &forward.program, &binding, descriptor)?;
@@ -556,7 +558,33 @@ pub fn bind_speculative_verify<'file>(
     config
         .unwrap_or(&header_descriptor)
         .verify()
-        .map(|verify| bind_descriptor(parsed, file_bytes, architecture, &verify))
+        .map(|verify| bind_descriptor(parsed, file_bytes, architecture, &verify, false))
+        .transpose()
+}
+
+/// The prefill counterpart of [`bind_checkpoint_with_kv_layout`]: the decode
+/// descriptor in force (`config`, or the header's own when `None`) lowered with
+/// the row cut ([`ModelDescriptor::has_prefill_row_cut`]), so a multi-row call
+/// computes only the output row after the last layer that writes cache state.
+/// `None` when the descriptor has no such tail, so the decode program serves
+/// prefill unchanged. Decode itself never uses this program: one new row has
+/// nothing to cut.
+///
+/// # Errors
+///
+/// The header reader refuses the header, or the prefill descriptor does not
+/// lower or bind.
+pub fn bind_prefill_row_cut<'file>(
+    parsed: &ParsedGguf,
+    file_bytes: &'file [u8],
+    layout: KvLayout,
+    config: Option<&ModelDescriptor>,
+) -> Result<Option<BoundProgram<'file>>, InteropError> {
+    let (header_descriptor, architecture) = header(parsed, layout)?;
+    let descriptor = config.unwrap_or(&header_descriptor);
+    descriptor
+        .has_prefill_row_cut()
+        .then(|| bind_descriptor(parsed, file_bytes, architecture, descriptor, true))
         .transpose()
 }
 

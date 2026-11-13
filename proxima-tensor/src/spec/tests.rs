@@ -6849,6 +6849,7 @@ fn architecture_matrix_mixed_cached_conv_roots() {
             None,
             None,
             true,
+            false,
             None,
             false,
             L_CACHE,
