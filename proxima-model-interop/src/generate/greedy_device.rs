@@ -21,6 +21,9 @@
 //! only for the rows it uses.
 
 use super::*;
+use proxima_numeric::DType;
+use proxima_tensor::op::{ScalarOp, append};
+use proxima_tensor::spec::{elementwise, scalar_constant};
 
 /// `program` plus the greedy-pick ops over `logits_root`, with the `(token,
 /// finite)` nodes to request, or `None` when the program does not accept
@@ -32,12 +35,69 @@ pub(super) fn with_greedy_argmax(
     logits_root: NodeId,
     vocab: u32,
     symbols: &[u64],
+    suppressed_ids: &[u32],
 ) -> Option<(Vec<Op>, NodeId, NodeId)> {
     let mut augmented = program.to_vec();
+    let candidates = if suppressed_ids.is_empty() {
+        logits_root
+    } else {
+        suppress_ids(&mut augmented, logits_root, vocab, suppressed_ids)?
+    };
     let (token, finite) =
-        proxima_tensor::spec::greedy_argmax(&mut augmented, logits_root, vocab).ok()?;
+        proxima_tensor::spec::greedy_argmax(&mut augmented, candidates, vocab).ok()?;
     proxima_tensor::shape::infer(&augmented, symbols).ok()?;
     Some((augmented, token, finite))
+}
+
+/// `logits_root` with every `suppressed_ids` entry replaced by the smallest
+/// finite floor that still passes [`device_token`]'s guard (that guard
+/// requires `> f32::MIN`, and an infinity would hand every row to the host).
+/// llama.cpp's `ignore_eos` biases these ids to `-inf`; any non-eog entry
+/// above the floor wins on both. Ops: one `Iota` over the vocabulary, one
+/// `Equal` against each id's scalar constant, `Add` to merge the hits, and a
+/// `Select` of the floor over the logits.
+fn suppress_ids(
+    program: &mut Vec<Op>,
+    logits_root: NodeId,
+    vocab: u32,
+    suppressed_ids: &[u32],
+) -> Option<NodeId> {
+    let position = append(
+        program,
+        Op::Iota {
+            dtype: DType::FLOAT32,
+            extent: Extent::Static(vocab),
+        },
+    );
+    let mut hits: Option<NodeId> = None;
+    for &suppressed_id in suppressed_ids {
+        let id_constant = scalar_constant(program, suppressed_id as f32);
+        let hit = elementwise(
+            program,
+            DType::FLOAT32,
+            ScalarOp::Equal,
+            &[(position, "v->v"), (id_constant, "->v")],
+        )
+        .ok()?;
+        hits = Some(match hits {
+            None => hit,
+            Some(merged) => elementwise(
+                program,
+                DType::FLOAT32,
+                ScalarOp::Add,
+                &[(merged, "v->v"), (hit, "v->v")],
+            )
+            .ok()?,
+        });
+    }
+    let floor = scalar_constant(program, f32::MIN.next_up());
+    elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Select,
+        &[(hits?, "v->sv"), (floor, "->sv"), (logits_root, "sv->sv")],
+    )
+    .ok()
 }
 
 /// The device's pick, only when the row held `vocab` clean entries and the
@@ -91,6 +151,10 @@ mod tests {
     }
 
     fn pick_on_device(row: &[f32]) -> Option<u32> {
+        pick_on_device_suppressing(row, &[])
+    }
+
+    fn pick_on_device_suppressing(row: &[f32], suppressed_ids: &[u32]) -> Option<u32> {
         let mut program = Vec::new();
         let logits = input_leaf(
             &mut program,
@@ -101,8 +165,9 @@ mod tests {
             ],
             "logits",
         );
-        let (augmented, token, finite) = with_greedy_argmax(&program, logits, VOCAB as u32, &[1])
-            .expect("argmax fits [1, vocab]");
+        let (augmented, token, finite) =
+            with_greedy_argmax(&program, logits, VOCAB as u32, &[1], suppressed_ids)
+                .expect("argmax fits [1, vocab]");
         let named = [("logits", QuantizedBlock::Float32(row))];
         let plan = omega::plan_named(
             &augmented,
@@ -137,6 +202,60 @@ mod tests {
 
         assert_eq!(pick_on_device(&row), Some(5));
         assert_eq!(pick_on_device(&row), pick_on_host(&row));
+    }
+
+    fn masked_for_host(row: &[f32], suppressed_ids: &[u32]) -> Vec<f32> {
+        let mut masked = row.to_vec();
+        for &suppressed_id in suppressed_ids {
+            masked[suppressed_id as usize] = f32::NEG_INFINITY;
+        }
+        masked
+    }
+
+    #[test]
+    fn suppressed_top_entry_loses_on_the_device_exactly_as_on_the_masked_host_row() {
+        let mut row = softcapped_row();
+        row[1] = 31.0;
+        row[106] = 31.5;
+        let suppressed_ids = [1, 106];
+
+        let device = pick_on_device_suppressing(&row, &suppressed_ids);
+
+        assert_eq!(device, pick_on_host(&masked_for_host(&row, &suppressed_ids)));
+        assert!(device.is_some_and(|picked| !suppressed_ids.contains(&picked)));
+    }
+
+    #[test]
+    fn an_empty_suppressed_set_appends_the_same_ops_as_the_unmasked_call() {
+        let mut program = Vec::new();
+        let logits = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            alloc::vec![
+                proxima_tensor::Extent::Symbolic(0),
+                proxima_tensor::Extent::Static(VOCAB as u32)
+            ],
+            "logits",
+        );
+        let mut direct = program.clone();
+        proxima_tensor::spec::greedy_argmax(&mut direct, logits, VOCAB as u32)
+            .expect("argmax fits [1, vocab]");
+
+        let (augmented, _, _) = with_greedy_argmax(&program, logits, VOCAB as u32, &[1], &[])
+            .expect("argmax fits [1, vocab]");
+        let (masked, _, _) = with_greedy_argmax(&program, logits, VOCAB as u32, &[1], &[0])
+            .expect("masked argmax fits [1, vocab]");
+
+        assert_eq!(augmented.len(), direct.len());
+        assert!(masked.len() > direct.len());
+    }
+
+    #[test]
+    fn the_masked_device_path_still_returns_a_pick_instead_of_handing_the_row_to_the_host() {
+        let mut row = softcapped_row();
+        row[0] = 31.0;
+
+        assert!(pick_on_device_suppressing(&row, &[0]).is_some());
     }
 
     #[test]

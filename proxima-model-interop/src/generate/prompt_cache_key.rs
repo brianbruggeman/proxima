@@ -197,6 +197,8 @@ impl CacheKey {
             moe_monolithic_high_mmap,
             // only read under the wgpu driver, which this crate never links
             gpu_correctness_fallback: _,
+            // stop policy only: the cached prefix is the same either way
+            ignore_eos: _,
             cached_attention_fusion,
             gated_delta_net_fusion,
             moe_topk_fusion,

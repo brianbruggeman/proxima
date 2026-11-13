@@ -1,5 +1,6 @@
 use core::future::Future;
 use core::ops::ControlFlow;
+use std::borrow::Cow;
 use core::task::{Context, Poll, Waker};
 #[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
 use std::thread;
@@ -1651,6 +1652,35 @@ pub(super) fn select_decoded_token(
             sample_next_token(logits_row, recent_tokens, sample_config, rng)
                 .ok_or(InteropError::EmptyLogits)
         }
+    }
+}
+
+/// llama.cpp's `ignore_eos` as a logit bias of `-inf` on every id the vocab
+/// marks end-of-generation (`common/common.cpp:1306-1318`), applied before any
+/// selection so the pick is the best non-eog id. Borrows the row untouched
+/// when nothing is suppressed; copies it (one vocab-sized row) only when the
+/// serving config asked for `ignore_eos`.
+pub(super) fn logits_without_suppressed<'row>(
+    logits_row: &'row [f32],
+    suppressed_ids: &[u32],
+) -> Cow<'row, [f32]> {
+    if suppressed_ids.is_empty() {
+        return Cow::Borrowed(logits_row);
+    }
+    let mut masked = logits_row.to_vec();
+    for &suppressed_id in suppressed_ids {
+        if let Some(logit) = masked.get_mut(suppressed_id as usize) {
+            *logit = f32::NEG_INFINITY;
+        }
+    }
+    Cow::Owned(masked)
+}
+
+pub(super) fn suppressed_eog_ids(vocab: &Vocab, ignore_eos: bool) -> &[u32] {
+    if ignore_eos {
+        vocab.eog_token_ids()
+    } else {
+        &[]
     }
 }
 
@@ -3667,6 +3697,7 @@ impl<'file> LoadedModel<'file> {
             presence_penalty: serving_config.presence_penalty,
         };
         let mut rng = fastrand::Rng::with_seed(serving_config.seed);
+        let suppressed_ids = suppressed_eog_ids(&self.vocab, serving_config.ignore_eos);
 
         // Persistent device-resident KV: only reachable when this build was
         // compiled with `metal-output-placement`, this checkpoint built a
@@ -5042,6 +5073,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             active_logits_root,
                             vocab_size as u32,
                             &symbols,
+                            suppressed_ids,
                         ) {
                             Some((program, token, finite)) => {
                                 let logits_buffer = allocate_placed_buffer(
@@ -6726,9 +6758,10 @@ not read this cache format; only the single-row decode kernel reads it from the 
 
                         let mut emitted: Vec<u32> = Vec::with_capacity(rows.len());
                         for (row_index, &row) in rows.iter().enumerate() {
+                            let row = logits_without_suppressed(row, suppressed_ids);
                             let selected = select_decoded_token(
                                 step + row_index,
-                                row,
+                                &row,
                                 &token_history,
                                 repeat_window,
                                 token_override,
@@ -7180,7 +7213,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             Some(picked) => picked,
                             None => select_decoded_token(
                                 step,
-                                last_position,
+                                &logits_without_suppressed(last_position, suppressed_ids),
                                 &token_history,
                                 repeat_window,
                                 token_override,
@@ -8044,7 +8077,11 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     None => {
                         let recent_window_start = token_history.len().saturating_sub(repeat_window);
                         let recent_tokens = &token_history[recent_window_start..];
-                        sample_next_token(last_position, recent_tokens, sample_config, &mut rng)
+                        let logits = logits_without_suppressed(
+                            last_position,
+                            suppressed_eog_ids(&self.vocab, serving_config.ignore_eos),
+                        );
+                        sample_next_token(&logits, recent_tokens, sample_config, &mut rng)
                             .ok_or(InteropError::EmptyLogits)?
                     }
                 };

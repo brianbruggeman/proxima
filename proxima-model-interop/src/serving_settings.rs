@@ -289,6 +289,10 @@ pub struct ServingSettings {
     #[setting(default = false)]
     #[builder(default = false)]
     pub gpu_correctness_fallback: bool,
+    /// `ServingConfig::ignore_eos`: generate exactly the requested max tokens instead of stopping at the end-of-generation id.
+    #[setting(default = false)]
+    #[builder(default = false)]
+    pub ignore_eos: bool,
     /// `ServingConfig::prefill_one_evaluation`: evaluate the whole prefill chunk in one call.
     #[setting(default = false)]
     #[builder(default = false)]
@@ -461,6 +465,7 @@ impl ServingSettings {
             weight_precision,
             gdn_prefill_backend: self.gdn_prefill_backend,
             gpu_correctness_fallback: self.gpu_correctness_fallback,
+            ignore_eos: self.ignore_eos,
             prefill_one_evaluation: self.prefill_one_evaluation,
             prefill_chunk_positions: self.prefill_chunk_positions,
             prefill: PrefillConfig {
@@ -1108,6 +1113,7 @@ epilogue_sources = true
         const WEIGHT_PRECISION_TOML: &str = r#"
 gdn_prefill_backend = "mlx"
 gpu_correctness_fallback = true
+ignore_eos = true
 
 [[weight_precision]]
 pattern_kind = "suffix"
@@ -1136,6 +1142,7 @@ target = "q8_0"
             ])
             .gdn_prefill_backend(GdnPrefillBackend::Mlx)
             .gpu_correctness_fallback(true)
+            .ignore_eos(true)
             .build();
         let from_env = temp_env::with_vars(
             [
@@ -1145,6 +1152,7 @@ target = "q8_0"
                 ),
                 ("PROXIMA_SERVING_GDN_PREFILL_BACKEND", Some("mlx")),
                 ("PROXIMA_SERVING_GPU_CORRECTNESS_FALLBACK", Some("true")),
+                ("PROXIMA_SERVING_IGNORE_EOS", Some("true")),
             ],
             || ServingSettings::from_env().expect("the weight precision env parses"),
         );
@@ -1171,6 +1179,7 @@ target = "q8_0"
         );
         assert_eq!(config.gdn_prefill_backend, GdnPrefillBackend::Mlx);
         assert!(config.gpu_correctness_fallback);
+        assert!(config.ignore_eos);
 
         let unknown_kind = conflaguration::from_toml_str::<ServingSettings>(
             "[[weight_precision]]\npattern_kind = \"glob\"\npattern = \"blk.*\"\ntarget = \"q4_0\"",

@@ -1043,6 +1043,11 @@ pub struct ServingConfig<'model> {
     /// f32 trajectory is not token-equivalent; the default keeps the GPU
     /// path selected so its performance remains measurable.
     pub gpu_correctness_fallback: bool,
+    /// Not an upstream llama-server flag -- mirrors llama.cpp's per-request
+    /// `ignore_eos`: the decode loop does not stop on an end-of-generation
+    /// id and generates exactly the requested max tokens. `false` (this
+    /// field's default) stops at the model's own end-of-generation id.
+    pub ignore_eos: bool,
     /// Not an upstream llama-server flag -- runtime switch for the
     /// `single_position_step` prefill's alt one-evaluation program
     /// (`generate/decode.rs`'s `one_evaluation_prefill_requested`), in place
@@ -1332,6 +1337,7 @@ impl Default for ServingConfig<'static> {
             moe_monolithic_all_low: false,
             moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
+            ignore_eos: false,
             // default flipped false: main's default path regressed on the
             // France checkpoint (garbage tokens / EmptyLogits) somewhere in
             // 78a313d7..HEAD; see proxima-tensor/docs/discipline.md ROW 590.
@@ -1923,6 +1929,7 @@ mod tests {
             moe_monolithic_all_low: false,
             moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
+            ignore_eos: false,
             prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
@@ -2111,6 +2118,7 @@ mod tests {
             moe_monolithic_all_low: false,
             moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
+            ignore_eos: false,
             prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
@@ -2244,6 +2252,7 @@ mod tests {
             moe_monolithic_all_low: false,
             moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
+            ignore_eos: false,
             prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
@@ -2350,6 +2359,7 @@ mod tests {
             moe_monolithic_all_low: false,
             moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
+            ignore_eos: false,
             prefill_one_evaluation: false,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,
@@ -2446,6 +2456,7 @@ mod tests {
             moe_monolithic_all_low: false,
             moe_monolithic_high_mmap: false,
             gpu_correctness_fallback: false,
+            ignore_eos: false,
             prefill_one_evaluation: true,
             prefill_chunk_positions: 0,
             cached_attention_fusion: true,

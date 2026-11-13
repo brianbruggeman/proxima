@@ -217,6 +217,7 @@ impl PlanIdentity {
             moe_layer_window,
             moe_monolithic_high_mmap,
             gpu_correctness_fallback: _,
+            ignore_eos: _,
             cached_attention_fusion,
             gated_delta_net_fusion,
             moe_topk_fusion,
