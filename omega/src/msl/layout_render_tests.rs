@@ -20,7 +20,7 @@ use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
 
 use super::layout_render::{
-    block_k_refusal, block_unpack_msl, hardware_type, layout_load_msl, layout_store_msl, readable_block_layout,
+    block_k_refusal, block_super_element_msl, block_unpack_msl, hardware_type, layout_load_msl, layout_store_msl, readable_block_layout,
 };
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use super::layout_render::layout_unpack_msl;
@@ -713,4 +713,18 @@ fn scalar_cache_read_is_the_text_the_decode_split_emits_for_each_scalar_width() 
         assert_eq!(source.matches(read.helper.as_str()).count(), 1, "the decode split pushes the helper once");
         assert!(source.contains(&format!("{}_x4(kr4_cached[index])", read.load)));
     }
+}
+
+/// The retired `Q4_0_SUPER_ELEMENT_MSL` literal, byte for byte.
+const RETIRED_Q4_0_SUPER_ELEMENT_MSL: &str = r#"
+static inline float q4_0_super_element(device const uchar *superblock, uint index) {
+    return q4_0_element(superblock + (index / 32u) * 18u, index % 32u);
+}
+"#;
+
+#[test]
+fn q4_0_super_element_rendered_from_its_layout_equals_the_retired_literal() {
+    let rendered = block_super_element_msl(&BlockLayout::Q4_0, "q4_0");
+
+    assert_eq!(rendered, RETIRED_Q4_0_SUPER_ELEMENT_MSL);
 }

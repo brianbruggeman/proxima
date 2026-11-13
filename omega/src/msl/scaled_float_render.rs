@@ -2,7 +2,7 @@ use const_format::formatcp;
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::float_layout::FloatLayout;
 
-use super::layout_render::{block_element_msl, layout_unpack_msl, level_block_element_msl, level_run_decode_msl};
+use super::layout_render::{block_element_msl, block_super_element_msl, layout_unpack_msl, level_block_element_msl, level_run_decode_msl};
 use super::*;
 
 pub(super) const FP6_E3M2_ELEMENTS: usize = Codec::FP6_E3M2_BLOCK_ELEMENTS;
@@ -42,7 +42,7 @@ pub(super) fn scaled_e3m2_unpack_msl(layout: FloatLayout) -> String {
         scaled_e3m2_field_msl(layout),
         scaled_block_group_msl(&E3M2_BLOCK),
         scaled_block_element_msl(&E3M2_BLOCK, layout),
-        scaled_block_super_element_msl(&E3M2_BLOCK),
+        block_super_element_msl(&BlockLayout::FP6_E3M2, E3M2_BLOCK.prefix),
         scaled_e3m2_quad_dot_msl(layout),
     ]
     .concat()
@@ -119,18 +119,6 @@ static inline float {prefix}_element(device const uchar *block, uint index) {{
     )
 }
 
-pub(super) fn scaled_block_super_element_msl(block: &ScaledBlock) -> String {
-    let prefix = block.prefix;
-    let (elements, bytes) = (block.elements, block.block_bytes);
-    format!(
-        "
-static inline float {prefix}_super_element(device const uchar *superblock, uint index) {{
-    return {prefix}_element(superblock + (index / {elements}u) * {bytes}u, index % {elements}u);
-}}
-"
-    )
-}
-
 /// The `q8_0_field`, `q8_0_group`, `q8_0_element` and `q8_0_super_element` accessors of a Q8_0
 /// block, rendered by the same block emitters as the fp6 e3m2 ones.
 pub fn q8_0_unpack_msl() -> String {
@@ -138,7 +126,7 @@ pub fn q8_0_unpack_msl() -> String {
         super::layout_render::layout_load_msl(FloatLayout::INT8, "q8_0_field"),
         scaled_block_group_msl(&Q8_0_BLOCK),
         scaled_block_element_msl(&Q8_0_BLOCK, FloatLayout::INT8),
-        scaled_block_super_element_msl(&Q8_0_BLOCK),
+        block_super_element_msl(&BlockLayout::Q8_0, Q8_0_BLOCK.prefix),
     ]
     .concat()
 }

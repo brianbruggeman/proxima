@@ -1177,26 +1177,10 @@ pub const Q8_0_BLOCK_BYTES: usize = proxima_gguf::quant::q8_0::BLOCK_BYTES;
 /// family's element count. Read from `proxima_gguf::quant::q8_0::QK8_0`.
 pub const Q8_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q8_0::QK8_0;
 
-/// The row-blocked packed path's per-superblock-relative `Q4_0` accessor --
-/// mirrors `q8_0_super_element` exactly, same posture: `Q4_0` has no
-/// super-block of its own, but eight real 32-element `Q4_0` blocks (18 bytes
-/// each) sit contiguously in exactly the byte span one K-quant super-block
-/// ([`Q4K_BLOCK_ELEMENTS`] = 256 elements) occupies, so `index / 32` selects
-/// which of the eight real blocks packed into that span, and the remainder
-/// feeds `q4_0_unpack_msl`'s own per-block decode (`q4_0_element`)
-/// unchanged. `18` is [`Q4_0_BLOCK_BYTES`] and `32` is [`Q4_0_BLOCK_ELEMENTS`],
-/// both inlined as literals here the same way `q8_0_super_element`
-/// inlines its own fixed layout constants.
-pub const Q4_0_SUPER_ELEMENT_MSL: &str = r#"
-static inline float q4_0_super_element(device const uchar *superblock, uint index) {
-    return q4_0_element(superblock + (index / 32u) * 18u, index % 32u);
-}
-"#;
-
 /// Batched-unpack fast arm for `Q4_0`, the primitive this landing exists to
 /// add: `reduce-packed-row-blocked` is the #1 GPU-time bucket in the E2B checkpoint
 /// decode (39.6%, 275 dispatches/step) and every `Q4_0` weight matvec went
-/// through [`Q4_0_SUPER_ELEMENT_MSL`]'s `q4_0_super_element`, which re-reads
+/// through `block_super_element_msl`'s `q4_0_super_element`, which re-reads
 /// `d_bits` from `block[0..2]` and re-derives the nibble mask on EVERY
 /// element -- the same per-element posture the K-quant codecs' own
 /// `q4k_pair_dot`/[`Q5K_PAIR_DOT_MSL`]/[`Q6K_PAIR_DOT_MSL`] batched arms
@@ -1562,7 +1546,7 @@ pub(crate) const fn codec_block_bytes(codec: Codec) -> usize {
 /// whose own block already IS that 256-element super-block. [`Codec::Q8_0`],
 /// [`Codec::Q4_0`] and [`Codec::Fp6E3M2`] are flat 32-element blocks, so their
 /// step is eight real blocks' worth of bytes -- see `q8_0_super_element`/
-/// [`Q4_0_SUPER_ELEMENT_MSL`]'s own docs for why eight contiguous blocks
+/// `block_super_element_msl`'s own docs for why eight contiguous blocks
 /// span exactly the same 256 elements. No other codec reaches this function
 /// (`classify_packed_row_block` whitelists only
 /// `Q3_K`/`Q4_K`/`Q5_K`/`Q6_K`/`Q8_0`/`Q4_0`/`Fp6E3M2`), so the fallback arm is exactly
