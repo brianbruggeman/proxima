@@ -184,7 +184,7 @@ gpu = ["dep:omega", "dep:libc", "std", "dep:proxima-telemetry", "proxima-telemet
 # the cuda lane on the 2026-11-01 bake-off (16 tokens, ids identical): 8B PQ2_0
 # 19.2 -> 11.9 ms/token, Bonsai-27B Q1_0 115.5 -> 55.6, Bonsai-2-27B PTQ1_0
 # 174.4 -> 106.9, with one refit per run instead of one per token.
-# moe-topk-fusion joins on the granite CUDA A/B (PROXNUM-300, versailles RTX 2070),
+# moe-topk-fusion joins on the granite CUDA A/B (PROXNUM-300, PROXNUM-307, versailles RTX 2070),
 # so the cuda lane uses the MoeTopK kernel omega already renders.
 cuda = [
     "gpu",
@@ -193,6 +193,7 @@ cuda = [
     "cached-attention-streaming",
     "reduce-epilogue-fusion",
     "moe-topk-fusion",
+    "moe-stacked-experts",
 ]
 # cached-attention physical step for the real serving/decode harness; folded
 # into `metal`'s default shape per ROW 282 but kept individually selectable
