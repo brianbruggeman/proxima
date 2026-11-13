@@ -1,0 +1,1169 @@
+#include <metal_stdlib>
+using namespace metal;
+
+inline float proxima_erf(float x) {
+    float sign = x < 0.0f ? -1.0f : 1.0f;
+    float magnitude = fabs(x);
+    float t = 1.0f / fma(0.3275911f, magnitude, 1.0f);
+    float poly = t * fma(fma(fma(fma(1.061405429f, t, -1.453152027f), t, 1.421413741f), t, -0.284496736f), t, 0.254829592f);
+    return sign * fma(poly, -exp(-magnitude * magnitude), 1.0f);
+}
+
+
+static inline float q2k_element(device const uchar *block, uint index) {
+    device const uchar *scales = block;
+    device const uchar *qs = block + 16;
+    ushort d_bits = (ushort)((uint)block[80] | ((uint)block[81] << 8));
+    ushort dmin_bits = (ushort)((uint)block[82] | ((uint)block[83] << 8));
+    float d = (float)as_type<half>(d_bits);
+    float dmin = (float)as_type<half>(dmin_bits);
+
+    uint chunk = index / 128u;
+    uint within = index % 128u;
+    uint group = within / 32u;
+    uint local = within % 32u;
+    uint sub_block = chunk * 8u + group * 2u + (local >= 16u ? 1u : 0u);
+    uchar scale_min = scales[sub_block];
+    float scale = d * (float)(scale_min & 0x0Fu);
+    float minimum = dmin * (float)(scale_min >> 4u);
+    uchar level = (qs[chunk * 32u + local] >> (2u * group)) & 0x03u;
+    return scale * (float)level - minimum;
+}
+
+
+constant char iq4_xs_element_levels[16] = { -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113 };
+static inline float iq4_xs_element_code(uint code) {
+    return (float)iq4_xs_element_levels[code];
+}
+
+static inline float iq4_xs_element_scale(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline float iq4_xs_element_sub_scale_code(uint code) {
+    uint mantissa = code & 0x3fu;
+    return ((float)mantissa) * 1e0f;
+}
+
+static inline float iq4_xs_element(device const uchar *block, uint index) {
+    uint raw_low_rest = index;
+    uint raw_low_address = 64u;
+    raw_low_address += (raw_low_rest % 16u) * 8u;
+    raw_low_rest /= 16u;
+    raw_low_address += (raw_low_rest % 2u) * 4u;
+    raw_low_rest /= 2u;
+    raw_low_address += (raw_low_rest % 8u) * 128u;
+    raw_low_rest /= 8u;
+    uint raw_low = ((uint)block[raw_low_address / 8u] >> (raw_low_address % 8u)) & 0xfu;
+    float raw = iq4_xs_element_code(raw_low);
+    float scale = iq4_xs_element_scale(((uint)block[0u] << 0u) | ((uint)block[1u] << 8u));
+    uint sub_block = index / 32u;
+    uint sub_scale_raw_low_rest = sub_block;
+    uint sub_scale_raw_low_address = 32u;
+    sub_scale_raw_low_address += (sub_scale_raw_low_rest % 2u) * 4u;
+    sub_scale_raw_low_rest /= 2u;
+    sub_scale_raw_low_address += (sub_scale_raw_low_rest % 4u) * 8u;
+    sub_scale_raw_low_rest /= 4u;
+    uint sub_scale_raw_low = ((uint)block[sub_scale_raw_low_address / 8u] >> (sub_scale_raw_low_address % 8u)) & 0xfu;
+    uint sub_scale_raw_high_rest = sub_block;
+    uint sub_scale_raw_high_address = 16u;
+    sub_scale_raw_high_address += (sub_scale_raw_high_rest % 8u) * 2u;
+    sub_scale_raw_high_rest /= 8u;
+    uint sub_scale_raw_high = ((uint)block[sub_scale_raw_high_address / 8u] >> (sub_scale_raw_high_address % 8u)) & 0x3u;
+    float sub_scale_raw = iq4_xs_element_sub_scale_code((sub_scale_raw_low | (sub_scale_raw_high << 4u)));
+    float sub_scale = sub_scale_raw - 32.0f;
+    float effective_scale = scale * sub_scale;
+    float value = raw * effective_scale;
+    return value;
+}
+
+
+constant uint iq3_s_element_grid[512] = {
+    0x01010101u, 0x01010103u, 0x01010105u, 0x0101010bu, 0x0101010fu, 0x01010301u, 0x01010303u, 0x01010305u,
+    0x01010309u, 0x0101030du, 0x01010501u, 0x01010503u, 0x0101050bu, 0x01010707u, 0x01010901u, 0x01010905u,
+    0x0101090bu, 0x0101090fu, 0x01010b03u, 0x01010b07u, 0x01010d01u, 0x01010d05u, 0x01010f03u, 0x01010f09u,
+    0x01010f0fu, 0x01030101u, 0x01030103u, 0x01030105u, 0x01030109u, 0x01030301u, 0x01030303u, 0x0103030bu,
+    0x01030501u, 0x01030507u, 0x0103050fu, 0x01030703u, 0x0103070bu, 0x01030909u, 0x01030d03u, 0x01030d0bu,
+    0x01030f05u, 0x01050101u, 0x01050103u, 0x0105010bu, 0x0105010fu, 0x01050301u, 0x01050307u, 0x0105030du,
+    0x01050503u, 0x0105050bu, 0x01050701u, 0x01050709u, 0x01050905u, 0x0105090bu, 0x0105090fu, 0x01050b03u,
+    0x01050b07u, 0x01050f01u, 0x01050f07u, 0x01070107u, 0x01070303u, 0x0107030bu, 0x01070501u, 0x01070505u,
+    0x01070703u, 0x01070707u, 0x0107070du, 0x01070909u, 0x01070b01u, 0x01070b05u, 0x01070d0fu, 0x01070f03u,
+    0x01070f0bu, 0x01090101u, 0x01090307u, 0x0109030fu, 0x01090503u, 0x01090509u, 0x01090705u, 0x01090901u,
+    0x01090907u, 0x01090b03u, 0x01090f01u, 0x010b0105u, 0x010b0109u, 0x010b0501u, 0x010b0505u, 0x010b050du,
+    0x010b0707u, 0x010b0903u, 0x010b090bu, 0x010b090fu, 0x010b0d0du, 0x010b0f07u, 0x010d010du, 0x010d0303u,
+    0x010d0307u, 0x010d0703u, 0x010d0b05u, 0x010d0f03u, 0x010f0101u, 0x010f0105u, 0x010f0109u, 0x010f0501u,
+    0x010f0505u, 0x010f050du, 0x010f0707u, 0x010f0b01u, 0x010f0b09u, 0x03010101u, 0x03010103u, 0x03010105u,
+    0x03010109u, 0x03010301u, 0x03010303u, 0x03010307u, 0x0301030bu, 0x0301030fu, 0x03010501u, 0x03010505u,
+    0x03010703u, 0x03010709u, 0x0301070du, 0x03010b09u, 0x03010b0du, 0x03010d03u, 0x03010f05u, 0x03030101u,
+    0x03030103u, 0x03030107u, 0x0303010du, 0x03030301u, 0x03030309u, 0x03030503u, 0x03030701u, 0x03030707u,
+    0x03030903u, 0x03030b01u, 0x03030b05u, 0x03030f01u, 0x03030f0du, 0x03050101u, 0x03050305u, 0x0305030bu,
+    0x0305030fu, 0x03050501u, 0x03050509u, 0x03050705u, 0x03050901u, 0x03050907u, 0x03050b0bu, 0x03050d01u,
+    0x03050f05u, 0x03070103u, 0x03070109u, 0x0307010fu, 0x03070301u, 0x03070307u, 0x03070503u, 0x0307050fu,
+    0x03070701u, 0x03070709u, 0x03070903u, 0x03070d05u, 0x03070f01u, 0x03090107u, 0x0309010bu, 0x03090305u,
+    0x03090309u, 0x03090703u, 0x03090707u, 0x03090905u, 0x0309090du, 0x03090b01u, 0x03090b09u, 0x030b0103u,
+    0x030b0301u, 0x030b0307u, 0x030b0503u, 0x030b0701u, 0x030b0705u, 0x030b0b03u, 0x030d0501u, 0x030d0509u,
+    0x030d050fu, 0x030d0909u, 0x030d090du, 0x030f0103u, 0x030f0107u, 0x030f0301u, 0x030f0305u, 0x030f0503u,
+    0x030f070bu, 0x030f0903u, 0x030f0d05u, 0x030f0f01u, 0x05010101u, 0x05010103u, 0x05010107u, 0x0501010bu,
+    0x0501010fu, 0x05010301u, 0x05010305u, 0x05010309u, 0x0501030du, 0x05010503u, 0x05010507u, 0x0501050fu,
+    0x05010701u, 0x05010705u, 0x05010903u, 0x05010907u, 0x0501090bu, 0x05010b01u, 0x05010b05u, 0x05010d0fu,
+    0x05010f01u, 0x05010f07u, 0x05010f0bu, 0x05030101u, 0x05030105u, 0x05030301u, 0x05030307u, 0x0503030fu,
+    0x05030505u, 0x0503050bu, 0x05030703u, 0x05030709u, 0x05030905u, 0x05030b03u, 0x05050103u, 0x05050109u,
+    0x0505010fu, 0x05050503u, 0x05050507u, 0x05050701u, 0x0505070fu, 0x05050903u, 0x05050b07u, 0x05050b0fu,
+    0x05050f03u, 0x05050f09u, 0x05070101u, 0x05070105u, 0x0507010bu, 0x05070303u, 0x05070505u, 0x05070509u,
+    0x05070703u, 0x05070707u, 0x05070905u, 0x05070b01u, 0x05070d0du, 0x05090103u, 0x0509010fu, 0x05090501u,
+    0x05090507u, 0x05090705u, 0x0509070bu, 0x05090903u, 0x05090f05u, 0x05090f0bu, 0x050b0109u, 0x050b0303u,
+    0x050b0505u, 0x050b070fu, 0x050b0901u, 0x050b0b07u, 0x050b0f01u, 0x050d0101u, 0x050d0105u, 0x050d010fu,
+    0x050d0503u, 0x050d0b0bu, 0x050d0d03u, 0x050f010bu, 0x050f0303u, 0x050f050du, 0x050f0701u, 0x050f0907u,
+    0x050f0b01u, 0x07010105u, 0x07010303u, 0x07010307u, 0x0701030bu, 0x0701030fu, 0x07010505u, 0x07010703u,
+    0x07010707u, 0x0701070bu, 0x07010905u, 0x07010909u, 0x0701090fu, 0x07010b03u, 0x07010d07u, 0x07010f03u,
+    0x07030103u, 0x07030107u, 0x0703010bu, 0x07030309u, 0x07030503u, 0x07030507u, 0x07030901u, 0x07030d01u,
+    0x07030f05u, 0x07030f0du, 0x07050101u, 0x07050305u, 0x07050501u, 0x07050705u, 0x07050709u, 0x07050b01u,
+    0x07070103u, 0x07070301u, 0x07070309u, 0x07070503u, 0x07070507u, 0x0707050fu, 0x07070701u, 0x07070903u,
+    0x07070907u, 0x0707090fu, 0x07070b0bu, 0x07070f07u, 0x07090107u, 0x07090303u, 0x0709030du, 0x07090505u,
+    0x07090703u, 0x07090b05u, 0x07090d01u, 0x07090d09u, 0x070b0103u, 0x070b0301u, 0x070b0305u, 0x070b050bu,
+    0x070b0705u, 0x070b0909u, 0x070b0b0du, 0x070b0f07u, 0x070d030du, 0x070d0903u, 0x070f0103u, 0x070f0107u,
+    0x070f0501u, 0x070f0505u, 0x070f070bu, 0x09010101u, 0x09010109u, 0x09010305u, 0x09010501u, 0x09010509u,
+    0x0901050fu, 0x09010705u, 0x09010903u, 0x09010b01u, 0x09010f01u, 0x09030105u, 0x0903010fu, 0x09030303u,
+    0x09030307u, 0x09030505u, 0x09030701u, 0x0903070bu, 0x09030907u, 0x09030b03u, 0x09030b0bu, 0x09050103u,
+    0x09050107u, 0x09050301u, 0x0905030bu, 0x09050503u, 0x09050707u, 0x09050901u, 0x09050b0fu, 0x09050d05u,
+    0x09050f01u, 0x09070109u, 0x09070303u, 0x09070307u, 0x09070501u, 0x09070505u, 0x09070703u, 0x0907070bu,
+    0x09090101u, 0x09090105u, 0x09090509u, 0x0909070fu, 0x09090901u, 0x09090f03u, 0x090b010bu, 0x090b010fu,
+    0x090b0503u, 0x090b0d05u, 0x090d0307u, 0x090d0709u, 0x090d0d01u, 0x090f0301u, 0x090f030bu, 0x090f0701u,
+    0x090f0907u, 0x090f0b03u, 0x0b010105u, 0x0b010301u, 0x0b010309u, 0x0b010505u, 0x0b010901u, 0x0b010909u,
+    0x0b01090fu, 0x0b010b05u, 0x0b010d0du, 0x0b010f09u, 0x0b030103u, 0x0b030107u, 0x0b03010bu, 0x0b030305u,
+    0x0b030503u, 0x0b030705u, 0x0b030f05u, 0x0b050101u, 0x0b050303u, 0x0b050507u, 0x0b050701u, 0x0b05070du,
+    0x0b050b07u, 0x0b070105u, 0x0b07010fu, 0x0b070301u, 0x0b07050fu, 0x0b070909u, 0x0b070b03u, 0x0b070d0bu,
+    0x0b070f07u, 0x0b090103u, 0x0b090109u, 0x0b090501u, 0x0b090705u, 0x0b09090du, 0x0b0b0305u, 0x0b0b050du,
+    0x0b0b0b03u, 0x0b0b0b07u, 0x0b0d0905u, 0x0b0f0105u, 0x0b0f0109u, 0x0b0f0505u, 0x0d010303u, 0x0d010307u,
+    0x0d01030bu, 0x0d010703u, 0x0d010707u, 0x0d010d01u, 0x0d030101u, 0x0d030501u, 0x0d03050fu, 0x0d030d09u,
+    0x0d050305u, 0x0d050709u, 0x0d050905u, 0x0d050b0bu, 0x0d050d05u, 0x0d050f01u, 0x0d070101u, 0x0d070309u,
+    0x0d070503u, 0x0d070901u, 0x0d09050bu, 0x0d090907u, 0x0d090d05u, 0x0d0b0101u, 0x0d0b0107u, 0x0d0b0709u,
+    0x0d0b0d01u, 0x0d0d010bu, 0x0d0d0901u, 0x0d0f0303u, 0x0d0f0307u, 0x0f010101u, 0x0f010109u, 0x0f01010fu,
+    0x0f010501u, 0x0f010505u, 0x0f01070du, 0x0f010901u, 0x0f010b09u, 0x0f010d05u, 0x0f030105u, 0x0f030303u,
+    0x0f030509u, 0x0f030907u, 0x0f03090bu, 0x0f050103u, 0x0f050109u, 0x0f050301u, 0x0f05030du, 0x0f050503u,
+    0x0f050701u, 0x0f050b03u, 0x0f070105u, 0x0f070705u, 0x0f07070bu, 0x0f070b07u, 0x0f090103u, 0x0f09010bu,
+    0x0f090307u, 0x0f090501u, 0x0f090b01u, 0x0f0b0505u, 0x0f0b0905u, 0x0f0d0105u, 0x0f0d0703u, 0x0f0f0101u
+};
+
+static inline float iq3_s_element_scale(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline float iq3_s_element_sub_scale_code(uint code) {
+    uint mantissa = code & 0xfu;
+    return ((float)mantissa) * 1e0f;
+}
+
+static inline float iq3_s_element(device const uchar *block, uint index) {
+    uint raw_code_low_rest = index;
+    uint raw_code_low_address = 16u;
+    raw_code_low_address += (raw_code_low_rest % 4u) * 0u;
+    raw_code_low_rest /= 4u;
+    raw_code_low_address += (raw_code_low_rest % 64u) * 8u;
+    raw_code_low_rest /= 64u;
+    uint raw_code_low = ((uint)block[raw_code_low_address / 8u] >> (raw_code_low_address % 8u)) & 0xffu;
+    uint raw_code_high_rest = index;
+    uint raw_code_high_address = 528u;
+    raw_code_high_address += (raw_code_high_rest % 4u) * 0u;
+    raw_code_high_rest /= 4u;
+    raw_code_high_address += (raw_code_high_rest % 64u) * 1u;
+    raw_code_high_rest /= 64u;
+    uint raw_code_high = ((uint)block[raw_code_high_address / 8u] >> (raw_code_high_address % 8u)) & 0x1u;
+    uint magnitude = (iq3_s_element_grid[(raw_code_low | (raw_code_high << 8u))] >> (8u * (index % 4u))) & 0xFFu;
+    uint negative_rest = index;
+    uint negative_address = 592u;
+    negative_address += (negative_rest % 256u) * 1u;
+    negative_rest /= 256u;
+    uint negative = ((uint)block[negative_address / 8u] >> (negative_address % 8u)) & 0x1u;
+    float raw = negative != 0u ? -(float)magnitude : (float)magnitude;
+    float scale = iq3_s_element_scale(((uint)block[0u] << 0u) | ((uint)block[1u] << 8u));
+    uint sub_block = index / 32u;
+    uint sub_scale_raw_low_rest = sub_block;
+    uint sub_scale_raw_low_address = 848u;
+    sub_scale_raw_low_address += (sub_scale_raw_low_rest % 2u) * 4u;
+    sub_scale_raw_low_rest /= 2u;
+    sub_scale_raw_low_address += (sub_scale_raw_low_rest % 4u) * 8u;
+    sub_scale_raw_low_rest /= 4u;
+    uint sub_scale_raw_low = ((uint)block[sub_scale_raw_low_address / 8u] >> (sub_scale_raw_low_address % 8u)) & 0xfu;
+    float sub_scale_raw = iq3_s_element_sub_scale_code(sub_scale_raw_low);
+    float sub_scale = (2.0f * sub_scale_raw) - -1.0f;
+    float effective_scale = scale * sub_scale;
+    float value = raw * effective_scale;
+    return value;
+}
+
+
+// ports proxima_gguf::quant::q3_k::unpack_scale -- the same bit-interleaved
+// 6-bit unpack q4k_scale_min/q5k_scale_min use for a (scale, min) pair,
+// restated here for a scale-only code (no min), same posture as
+// q5k_scale_min restating q4k_scale_min.
+static inline int q3k_unpack_scale(device const uchar *scales, uint sub_block) {
+    uchar low = (sub_block < 8u) ? (scales[sub_block] & 0x0Fu) : (scales[sub_block - 8u] >> 4u);
+    uchar high = (scales[8u + sub_block % 4u] >> (2u * (sub_block / 4u))) & 0x03u;
+    int combined = (int)(low | (high << 4u));
+    return combined - 32;
+}
+
+// one Q3_K super-block's per-sub-block (16-element) scale and high-bit
+// MASK, decoded ONCE for a run of elements sharing both -- same
+// amortization q4k_header_for/q5k_header_for make, at Q3_K's own 16-element
+// sub-block granularity rather than their 32-element one.
+struct q3k_header { float scale; uchar mask; };
+
+static inline q3k_header q3k_header_for(device const uchar *block, uint index) {
+    device const uchar *scales = block + 96;
+    ushort d_bits = (ushort)((uint)block[108] | ((uint)block[109] << 8));
+    float d = (float)as_type<half>(d_bits);
+
+    uint chunk = index / 128u;
+    uint rem = index % 128u;
+    uint j = rem / 32u;
+    uint local32 = rem % 32u;
+    bool low = local32 < 16u;
+    uint sub_block = 8u * chunk + 2u * j + (low ? 0u : 1u);
+
+    q3k_header header;
+    header.scale = d * (float)q3k_unpack_scale(scales, sub_block);
+    header.mask = (uchar)(1u << (4u * chunk + j));
+    return header;
+}
+
+// one element, given its sub-block's already-decoded header.
+static inline float q3k_value(device const uchar *block, uint index, q3k_header header) {
+    device const uchar *hmask = block;
+    device const uchar *qs = block + 32;
+
+    uint chunk = index / 128u;
+    uint rem = index % 128u;
+    uint j = rem / 32u;
+    uint local32 = rem % 32u;
+
+    uchar level = (qs[chunk * 32u + local32] >> (2u * j)) & 0x03u;
+    float correction = (hmask[local32] & header.mask) != 0u ? 0.0f : 4.0f;
+    return header.scale * ((float)level - correction);
+}
+
+// element `index` of one Q3_K super-block, decoding its own header first --
+// the generic per-element path (`operand_read`'s non-row-blocked callers)
+// has no amortized header to reuse across elements, same posture as
+// q5k_element/q6k_element.
+static inline float q3k_element(device const uchar *block, uint index) {
+    return q3k_value(block, index, q3k_header_for(block, index));
+}
+
+
+static inline float q3k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
+    device const uchar *hmask = block;
+    device const uchar *qs = block + 32;
+    uint low_index = 64u * iq + 8u * ir;
+    q3k_header h0 = q3k_header_for(block, low_index);
+    q3k_header h1 = q3k_header_for(block, low_index + 32u);
+    q3k_header h2 = q3k_header_for(block, low_index + 128u);
+    q3k_header h3 = q3k_header_for(block, low_index + 160u);
+    uint shift0 = 4u * iq;
+    uint shift1 = shift0 + 2u;
+    uint byte_offset = 8u * ir;
+    float result = 0.0f;
+    for (uint l = 0u; l < 8u; ++l) {
+        uchar q1 = qs[byte_offset + l];
+        uchar q2 = qs[32u + byte_offset + l];
+        uchar hm = hmask[byte_offset + l];
+        float low0 = (float)((q1 >> shift0) & 0x03u) - ((hm & h0.mask) != 0u ? 0.0f : 4.0f);
+        float low1 = (float)((q1 >> shift1) & 0x03u) - ((hm & h1.mask) != 0u ? 0.0f : 4.0f);
+        float high0 = (float)((q2 >> shift0) & 0x03u) - ((hm & h2.mask) != 0u ? 0.0f : 4.0f);
+        float high1 = (float)((q2 >> shift1) & 0x03u) - ((hm & h3.mask) != 0u ? 0.0f : 4.0f);
+        result += h0.scale * low0 * yl[l];
+        result += h1.scale * low1 * yl[l + 8u];
+        result += h2.scale * high0 * yh[l];
+        result += h3.scale * high1 * yh[l + 8u];
+    }
+    return result;
+}
+
+
+// ports proxima_gguf::quant::q4_k::get_scale_min_k4
+static inline uchar2 q4k_scale_min(device const uchar *scales, uint sub_block) {
+    if (sub_block < 4u) {
+        return uchar2(scales[sub_block] & 63, scales[sub_block + 4u] & 63);
+    }
+    uchar scale = (scales[sub_block + 4u] & 0x0F) | ((scales[sub_block - 4u] >> 6) << 4);
+    uchar minimum = (scales[sub_block + 4u] >> 4) | ((scales[sub_block] >> 6) << 4);
+    return uchar2(scale, minimum);
+}
+
+// element `index` (0..256) of one Q4_K super-block, byte-for-byte the value
+// proxima_gguf::quant::q4_k::dequantize_block writes at the same index.
+static inline float q4k_element(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort dmin_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    float d = (float)as_type<half>(d_bits);
+    float dmin = (float)as_type<half>(dmin_bits);
+
+    device const uchar *scales = block + 4;
+    device const uchar *qs = block + 16;
+
+    uint group = index / 64u;
+    uint within = index % 64u;
+    bool low_nibble = within < 32u;
+    uint sub_block = 2u * group + (low_nibble ? 0u : 1u);
+    uint byte_index = group * 32u + (within % 32u);
+
+    uchar2 scale_min = q4k_scale_min(scales, sub_block);
+    float scale = d * (float)scale_min.x;
+    float minimum = dmin * (float)scale_min.y;
+    uchar nibble = low_nibble ? (qs[byte_index] & 0x0F) : (qs[byte_index] >> 4);
+    return scale * (float)nibble - minimum;
+}
+
+// A super-block's per-sub-block scale and min, decoded ONCE for a run of
+// elements inside that sub-block. `d`, `dmin` and the 6-bit scale/min pair
+// are constant across all 32 elements of a sub-block, so deriving them per
+// element (what `q4k_element` does) is 8-40x the arithmetic of the nibble
+// extract it feeds. ggml decodes once per super-block and spends ~1.6 ops
+// per weight; this is the same amortization.
+struct q4k_header { float scale; float minimum; };
+
+static inline q4k_header q4k_header_for(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort dmin_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    device const uchar *scales = block + 4;
+    uint group = index / 64u;
+    uint within = index % 64u;
+    uint sub_block = 2u * group + (within < 32u ? 0u : 1u);
+    uchar2 scale_min = q4k_scale_min(scales, sub_block);
+    q4k_header header;
+    header.scale = (float)as_type<half>(d_bits) * (float)scale_min.x;
+    header.minimum = (float)as_type<half>(dmin_bits) * (float)scale_min.y;
+    return header;
+}
+
+// one element, given its sub-block's already-decoded header. This is the
+// whole per-element cost in the tiled loop: one byte load, one mask or
+// shift, one fma.
+static inline float q4k_value(device const uchar *block, uint index, q4k_header header) {
+    device const uchar *qs = block + 16;
+    uint group = index / 64u;
+    uint within = index % 64u;
+    uint byte_index = group * 32u + (within % 32u);
+    uchar nibble = (within < 32u) ? (qs[byte_index] & 0x0F) : (qs[byte_index] >> 4);
+    return header.scale * (float)nibble - header.minimum;
+}
+
+static inline float q4k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
+    device const uchar *qs = block + 16;
+    // ggml's q1/q2 pointers are uint16_t, so its +32 offset advances 64 bytes.
+    uint byte_base = 32u * iq + 8u * ir;
+    // `qs` sits at offset 16 in a 144-byte block (both even), and `byte_base`
+    // is always a multiple of 8, so every `ushort` word below is 2-byte
+    // aligned -- matches ggml's `(device const uint16_t *)qs + 16*iq + 4*ir`.
+    device const ushort *word_low = (device const ushort *)(qs + byte_base);
+    device const ushort *word_high = (device const ushort *)(qs + byte_base + 64u);
+    uint low_index = 64u * iq + 8u * ir;
+    q4k_header h0 = q4k_header_for(block, low_index);
+    q4k_header h1 = q4k_header_for(block, low_index + 32u);
+    q4k_header h2 = q4k_header_for(block, low_index + 128u);
+    q4k_header h3 = q4k_header_for(block, low_index + 160u);
+    float result = 0.0f;
+    for (uint i = 0u; i < 4u; ++i) {
+        uint word1 = (uint)word_low[i];
+        uint word2 = (uint)word_high[i];
+        result += (h0.scale * (float)(word1 & 0x0Fu) - h0.minimum) * yl[2u * i + 0u];
+        result += (h0.scale * (float)((word1 >> 8) & 0x0Fu) - h0.minimum) * yl[2u * i + 1u];
+        result += (h1.scale * (float)((word1 >> 4) & 0x0Fu) - h1.minimum) * yl[2u * i + 8u];
+        result += (h1.scale * (float)((word1 >> 12) & 0x0Fu) - h1.minimum) * yl[2u * i + 9u];
+        result += (h2.scale * (float)(word2 & 0x0Fu) - h2.minimum) * yh[2u * i + 0u];
+        result += (h2.scale * (float)((word2 >> 8) & 0x0Fu) - h2.minimum) * yh[2u * i + 1u];
+        result += (h3.scale * (float)((word2 >> 4) & 0x0Fu) - h3.minimum) * yh[2u * i + 8u];
+        result += (h3.scale * (float)((word2 >> 12) & 0x0Fu) - h3.minimum) * yh[2u * i + 9u];
+    }
+    return result;
+}
+
+// `q4k_pair_dot` generalized across an activation GROUP: `push_packed_row_
+// multi_row_body`'s own per-element `operand_read` loop (`docs/discipline.md`
+// ROW 389) decoded this row's header/nibble words once PER TOKEN instead of
+// once per weight-block iteration, because it never shared this function's
+// `word_low`/`word_high`/`h0..h3` decode across the group. `q4k_pair_dot_mr`
+// pulls that decode out of the per-token loop: `word_low`/`word_high` and
+// `h0..h3` are read/derived exactly once, then the eight-fma accumulate
+// below runs once per token, gathering that ONE token's 16+16 `yl`/`yh`
+// floats from `other_ptr` (via `other_base[s]`/`other_stride`/
+// `other_ib_offset`) immediately before folding them.
+//
+// CORRECTION (perf/prefill-packed-row-decode): a first version of this
+// function took pre-gathered `yl_group[cap][16]`/`yh_group[cap][16]` thread
+// arrays instead -- 256 live private floats at `cap = 8` -- and measured
+// SLOWER on a 31-token prefill than the generic per-element body it
+// replaced (step-0 GPU 13.0s on main vs 15.1-21.8s on that version). Arrays
+// sized by `cap` force Metal to reserve that much thread/private storage
+// for the whole per-block-iteration accumulate regardless of how many of
+// those `cap` slots are actually live at once, collapsing occupancy. This
+// version stages one token's `yl`/`yh` at a time inside the `s` loop below,
+// so live private state is ~40 floats (`yl`, `yh`, `result_s`, `result[]`)
+// no matter how large `cap` gets -- at the cost of re-issuing `other_ptr`'s
+// device loads once per output row (`rows_per_simdgroup`, 4 for `Q4_K`)
+// instead of once shared across all four; each repeat reads the SAME
+// address as the other three (same lane, same token, same sub-block
+// offset), so it costs a cache hit, not additional HBM traffic.
+static inline void q4k_pair_dot_mr(device const uchar *block, uint iq, uint ir, device const float *other_ptr, thread const long *other_base, long other_stride, long other_ib_offset, uint cap, thread float *result) {
+    device const uchar *qs = block + 16;
+    uint byte_base = 32u * iq + 8u * ir;
+    device const ushort *word_low = (device const ushort *)(qs + byte_base);
+    device const ushort *word_high = (device const ushort *)(qs + byte_base + 64u);
+    uint low_index = 64u * iq + 8u * ir;
+    q4k_header h0 = q4k_header_for(block, low_index);
+    q4k_header h1 = q4k_header_for(block, low_index + 32u);
+    q4k_header h2 = q4k_header_for(block, low_index + 128u);
+    q4k_header h3 = q4k_header_for(block, low_index + 160u);
+    ushort w1[4]; ushort w2[4];
+    for (uint i = 0u; i < 4u; ++i) { w1[i] = word_low[i]; w2[i] = word_high[i]; }
+    long lane_offset = (long)(64u * iq + 8u * ir) * other_stride;
+    for (uint s = 0u; s < cap; ++s) {
+        device const float *y4 = other_ptr + other_base[s] + other_ib_offset + lane_offset;
+        float yl[16];
+        float yh[16];
+        for (uint i = 0u; i < 8u; ++i) {
+            yl[i] = y4[(long)i * other_stride];
+            yl[i + 8u] = y4[(long)(i + 32u) * other_stride];
+            yh[i] = y4[(long)(i + 128u) * other_stride];
+            yh[i + 8u] = y4[(long)(i + 160u) * other_stride];
+        }
+        float result_s = 0.0f;
+        for (uint i = 0u; i < 4u; ++i) {
+            uint word1 = (uint)w1[i];
+            uint word2 = (uint)w2[i];
+            result_s += (h0.scale * (float)(word1 & 0x0Fu) - h0.minimum) * yl[2u * i + 0u];
+            result_s += (h0.scale * (float)((word1 >> 8) & 0x0Fu) - h0.minimum) * yl[2u * i + 1u];
+            result_s += (h1.scale * (float)((word1 >> 4) & 0x0Fu) - h1.minimum) * yl[2u * i + 8u];
+            result_s += (h1.scale * (float)((word1 >> 12) & 0x0Fu) - h1.minimum) * yl[2u * i + 9u];
+            result_s += (h2.scale * (float)(word2 & 0x0Fu) - h2.minimum) * yh[2u * i + 0u];
+            result_s += (h2.scale * (float)((word2 >> 8) & 0x0Fu) - h2.minimum) * yh[2u * i + 1u];
+            result_s += (h3.scale * (float)((word2 >> 4) & 0x0Fu) - h3.minimum) * yh[2u * i + 8u];
+            result_s += (h3.scale * (float)((word2 >> 12) & 0x0Fu) - h3.minimum) * yh[2u * i + 9u];
+        }
+        result[s] = result_s;
+    }
+}
+
+// Eight consecutive levels from TWO 32-bit loads instead of eight byte
+// loads. A lane's run is `slot .. slot+7` and never crosses a 32-element
+// sub-block boundary, so all eight share a group and a nibble half, and
+// their bytes are eight CONSECUTIVE bytes of `qs`. `slot % 32` is one of
+// {0,8,16,24} and a super-block is 144 bytes (a multiple of 16), so the
+// address is 4-byte aligned and the `uint` cast is sound.
+//
+// CORRECTION (perf/metal-q4k-mask-fma): the claim this comment used to make
+// here -- "ggml does the same thing one width down ... the nibble extract is
+// cheap and the LOAD is what costs" -- is FALSE, verified against
+// `ggml-metal.metal:5157-5165` (`kernel_mul_mv_q4_K_f32_impl`). ggml does NOT
+// shift at all: it masks four FIXED bit positions (`q1[i] & 0x000F/0x0F00/
+// 0x00F0/0xF000`) straight off a `uint16_t` load and folds the resulting
+// 1x/16x/256x residual scale into the per-sub-block combine
+// (`ggml-metal.metal:5171-5175`). This function instead computes a RUNTIME
+// `shift` (0 or 4, not known at compile time) and adds it into every one of
+// the eight extractions below, which ggml's masked form has no equivalent
+// of. See `push_q4k_product_reduce_body`'s `metal-q4k-mask-fma` arm (Rust,
+// not MSL -- it generates the masked loop inline so it stays generic over
+// this kernel's `element_type`) for the mask-without-shift port of ggml's
+// actual technique, adapted to this function's one-nibble-per-byte layout
+// (ggml's is two-nibbles-per-byte interleaved across two sub-blocks per
+// load, a different packing this file's lane mapping does not share).
+static inline void q4k_run8(device const uchar *block, uint index, thread float *out) {
+    device const uchar *qs = block + 16;
+    uint group = index / 64u;
+    uint within = index % 64u;
+    uint byte_index = group * 32u + (within % 32u);
+    device const uint *words = (device const uint *)(qs + byte_index);
+    uint w0 = words[0];
+    uint w1 = words[1];
+    uint shift = (within < 32u) ? 0u : 4u;
+    out[0] = (float)((w0 >> (shift +  0u)) & 0xFu);
+    out[1] = (float)((w0 >> (shift +  8u)) & 0xFu);
+    out[2] = (float)((w0 >> (shift + 16u)) & 0xFu);
+    out[3] = (float)((w0 >> (shift + 24u)) & 0xFu);
+    out[4] = (float)((w1 >> (shift +  0u)) & 0xFu);
+    out[5] = (float)((w1 >> (shift +  8u)) & 0xFu);
+    out[6] = (float)((w1 >> (shift + 16u)) & 0xFu);
+    out[7] = (float)((w1 >> (shift + 24u)) & 0xFu);
+}
+
+// ONE 8-byte (two-word) load, BOTH nibble halves of it -- eight low-nibble
+// levels (elements `low_index .. low_index+8`) AND the eight high-nibble
+// levels of the SAME bytes (elements `low_index+32 .. low_index+40`, ggml's
+// and `dequantize_row_q4_K`'s own "32 elements apart, same byte" pairing —
+// see `q4_k.rs::dequantize_block`'s doc). `q4k_run8` above issues this exact
+// load TWICE for the pair of lanes that owns a byte range (once per nibble
+// half); this issues it ONCE and reads out both halves, which is the whole
+// point of the feature. `low_index` must be a "low" index (`index % 64 <
+// 32`) — callers only ever pass one of `sf_low_base + c*8`.
+static inline void q4k_run8_dual(
+    device const uchar *block,
+    uint low_index,
+    thread float *out_low,
+    thread float *out_high
+) {
+    device const uchar *qs = block + 16;
+    uint group = low_index / 64u;
+    uint within = low_index % 64u;
+    uint byte_index = group * 32u + within;
+    device const uint *words = (device const uint *)(qs + byte_index);
+    uint w0 = words[0];
+    uint w1 = words[1];
+    out_low[0] = (float)((w0 >>  0u) & 0xFu);
+    out_low[1] = (float)((w0 >>  8u) & 0xFu);
+    out_low[2] = (float)((w0 >> 16u) & 0xFu);
+    out_low[3] = (float)((w0 >> 24u) & 0xFu);
+    out_low[4] = (float)((w1 >>  0u) & 0xFu);
+    out_low[5] = (float)((w1 >>  8u) & 0xFu);
+    out_low[6] = (float)((w1 >> 16u) & 0xFu);
+    out_low[7] = (float)((w1 >> 24u) & 0xFu);
+    out_high[0] = (float)((w0 >>  4u) & 0xFu);
+    out_high[1] = (float)((w0 >> 12u) & 0xFu);
+    out_high[2] = (float)((w0 >> 20u) & 0xFu);
+    out_high[3] = (float)((w0 >> 28u) & 0xFu);
+    out_high[4] = (float)((w1 >>  4u) & 0xFu);
+    out_high[5] = (float)((w1 >> 12u) & 0xFu);
+    out_high[6] = (float)((w1 >> 20u) & 0xFu);
+    out_high[7] = (float)((w1 >> 28u) & 0xFu);
+}
+
+
+// ports proxima_gguf::quant::q5_k::get_scale_min_k4 -- byte-for-byte the
+// same function q4k_scale_min above computes, restated here rather than
+// shared (see this constant's own doc).
+static inline uchar2 q5k_scale_min(device const uchar *scales, uint sub_block) {
+    if (sub_block < 4u) {
+        return uchar2(scales[sub_block] & 63, scales[sub_block + 4u] & 63);
+    }
+    uchar scale = (scales[sub_block + 4u] & 0x0F) | ((scales[sub_block - 4u] >> 6) << 4);
+    uchar minimum = (scales[sub_block + 4u] >> 4) | ((scales[sub_block] >> 6) << 4);
+    return uchar2(scale, minimum);
+}
+
+// one Q5_K super-block's per-sub-block scale, min, and high-bit MASK,
+// decoded ONCE for a run of elements inside that sub-block -- the same
+// amortization q4k_header_for makes, widened to also carry which `qh` bit
+// this sub-block's elements read (constant across the whole 32-element
+// sub-block: `chunk` and "low or high half" are both fixed for it).
+struct q5k_header { float scale; float minimum; uchar mask; };
+
+static inline q5k_header q5k_header_for(device const uchar *block, uint index) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    ushort dmin_bits = (ushort)((uint)block[2] | ((uint)block[3] << 8));
+    device const uchar *scales = block + 4;
+
+    uint chunk = index / 64u;
+    uint within = index % 64u;
+    bool low = within < 32u;
+    uint sub_block = 2u * chunk + (low ? 0u : 1u);
+
+    uchar2 scale_min = q5k_scale_min(scales, sub_block);
+    q5k_header header;
+    header.scale = (float)as_type<half>(d_bits) * (float)scale_min.x;
+    header.minimum = (float)as_type<half>(dmin_bits) * (float)scale_min.y;
+    header.mask = low ? (uchar)(1u << (2u * chunk)) : (uchar)(2u << (2u * chunk));
+    return header;
+}
+
+// one element, given its sub-block's already-decoded header. `qh` is
+// indexed by `offset` (0..32) alone, never by `chunk` -- the same
+// within-sub-block-position indexing `dequantize_block`'s own doc calls
+// out as `Q5_K`'s "easiest to get silently wrong" trap: two elements in
+// DIFFERENT chunks but the SAME local offset read different BITS of the
+// SAME `qh` byte (the header's own `mask` is what picks the right bit).
+static inline float q5k_value(device const uchar *block, uint index, q5k_header header) {
+    device const uchar *qh = block + 16;
+    device const uchar *qs = block + 48;
+
+    uint chunk = index / 64u;
+    uint within = index % 64u;
+    bool low = within < 32u;
+    uint offset = within % 32u;
+
+    uchar qs_byte = qs[chunk * 32u + offset];
+    uchar nibble = low ? (qs_byte & 0x0Fu) : (qs_byte >> 4u);
+    float high = (qh[offset] & header.mask) != 0u ? 16.0f : 0.0f;
+    return header.scale * ((float)nibble + high) - header.minimum;
+}
+
+// element `index` of one Q5_K super-block, decoding its own header first --
+// the generic per-element path (`operand_read`'s non-row-blocked callers)
+// has no amortized header to reuse across elements, unlike the row-blocked
+// path's `q5k_header_for` decoded once per sub-block.
+static inline float q5k_element(device const uchar *block, uint index) {
+    return q5k_value(block, index, q5k_header_for(block, index));
+}
+
+
+static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
+    device const uchar *qh = block + 16;
+    device const uchar *qs = block + 48;
+    uint byte_base = 32u * iq + 8u * ir;
+    // `qs`/`qh` start at offsets 48/16 in a 176-byte block (all multiples of
+    // 8), and `byte_base`/`8*ir` are themselves multiples of 8, so each
+    // `ulong` below reads its 8-byte run of `l` in one 8-byte-aligned load
+    // instead of eight scalar `uchar` loads.
+    ulong q1_word = *(device const ulong *)(qs + byte_base);
+    ulong q2_word = *(device const ulong *)(qs + byte_base + 64u);
+    ulong h_word = *(device const ulong *)(qh + 8u * ir);
+    uint low_index = 64u * iq + 8u * ir;
+    q5k_header h0 = q5k_header_for(block, low_index);
+    q5k_header h1 = q5k_header_for(block, low_index + 32u);
+    q5k_header h2 = q5k_header_for(block, low_index + 128u);
+    q5k_header h3 = q5k_header_for(block, low_index + 160u);
+    uchar hm1 = (uchar)(1u << (2u * iq));
+    uchar hm2 = (uchar)(hm1 << 1u);
+    uchar hm3 = (uchar)(hm1 << 4u);
+    uchar hm4 = (uchar)(hm2 << 4u);
+    float result = 0.0f;
+    for (uint l = 0u; l < 8u; ++l) {
+        uchar q1 = (uchar)((q1_word >> (8u * l)) & 0xFFu);
+        uchar q2 = (uchar)((q2_word >> (8u * l)) & 0xFFu);
+        uchar h = (uchar)((h_word >> (8u * l)) & 0xFFu);
+        float low0 = (float)(q1 & 0x0Fu) + ((h & hm1) != 0u ? 16.0f : 0.0f);
+        float low1 = (float)(q1 >> 4u) + ((h & hm2) != 0u ? 16.0f : 0.0f);
+        float high0 = (float)(q2 & 0x0Fu) + ((h & hm3) != 0u ? 16.0f : 0.0f);
+        float high1 = (float)(q2 >> 4u) + ((h & hm4) != 0u ? 16.0f : 0.0f);
+        result += (h0.scale * low0 - h0.minimum) * yl[l];
+        result += (h1.scale * low1 - h1.minimum) * yl[l + 8u];
+        result += (h2.scale * high0 - h2.minimum) * yh[l];
+        result += (h3.scale * high1 - h3.minimum) * yh[l + 8u];
+    }
+    return result;
+}
+
+
+// one Q6_K super-block's scale `d` -- decoded ONCE per super-block by the
+// row-blocked path (see push_packed_row_blocked_body), since it is constant
+// across all 256 elements (unlike Q4_K's per-sub-block header).
+struct q6k_header { float d; };
+
+static inline q6k_header q6k_header_for(device const uchar *block) {
+    ushort d_bits = (ushort)((uint)block[208] | ((uint)block[209] << 8));
+    q6k_header header;
+    header.d = (float)as_type<half>(d_bits);
+    return header;
+}
+
+// element `index` (0..256) of one Q6_K super-block, given its super-block's
+// already-decoded `d` -- byte-for-byte the value
+// proxima_gguf::quant::q6_k::dequantize_block writes at the same index.
+static inline float q6k_value(device const uchar *block, uint index, q6k_header header) {
+    uint half_index = index / 128u;
+    uint local = index % 128u;
+    uint l = local % 32u;
+    uint lane = local / 32u;
+    uint sub_block_in_half = l / 16u;
+
+    device const uchar *ql = block + half_index * 64u;
+    device const uchar *qh = block + 128u + half_index * 32u;
+    device const uchar *scales = block + 192u;
+
+    uchar ql_byte = (lane % 2u == 0u) ? ql[l] : ql[l + 32u];
+    uchar nibble = (lane < 2u) ? (ql_byte & 0x0Fu) : (ql_byte >> 4u);
+    uchar high2 = (qh[l] >> (uchar)(lane * 2u)) & 0x03u;
+    uchar level = nibble | (high2 << 4u);
+
+    uchar scale_byte = scales[half_index * 8u + sub_block_in_half + lane * 2u];
+    float scale = (float)(char)scale_byte;
+    float quant = (float)level - 32.0f;
+    return header.d * scale * quant;
+}
+
+// element `index` of one Q6_K super-block, decoding its own header first --
+// the generic per-element path (`operand_read`'s non-row-blocked callers)
+// has no amortized header to reuse across elements, unlike the row-blocked
+// path's `q6k_header_for` decoded once per super-block.
+static inline float q6k_element(device const uchar *block, uint index) {
+    return q6k_value(block, index, q6k_header_for(block));
+}
+
+
+static inline float q6k_pair_dot(device const uchar *block, uint iq, uint ir, thread const float *yl, thread const float *yh) {
+    device const uchar *ql = block;
+    device const uchar *qh = block + 128u;
+    device const uchar *scales = block + 192u;
+    q6k_header hdr = q6k_header_for(block);
+
+    uint l_base = 8u * ir;
+    // `l_base` (0/8/16/24) and its +32/+64/+96 siblings are all even, and
+    // `block` itself always lands on an even byte (210-byte stride, always
+    // even) -- so every `ushort` load below is 2-byte aligned. A `uint`
+    // load would need `l_base` 4-byte aligned AND `block` 4-byte aligned;
+    // neither holds for every super-block index, so `ushort` is the
+    // widest load this layout can support unconditionally (see this
+    // constant's own doc).
+    device const ushort *ql_a = (device const ushort *)(ql + l_base);
+    device const ushort *ql_b = (device const ushort *)(ql + 32u + l_base);
+    device const ushort *ql_c = (device const ushort *)(ql + 64u + l_base);
+    device const ushort *ql_d = (device const ushort *)(ql + 96u + l_base);
+    device const ushort *qh_0 = (device const ushort *)(qh + l_base);
+    device const ushort *qh_1 = (device const ushort *)(qh + 32u + l_base);
+
+    uint sub = (l_base < 16u) ? 0u : 1u;
+    float scale_a = (float)(char)scales[sub + 4u * iq];
+    float scale_b = (float)(char)scales[sub + 4u * iq + 2u];
+    float scale_c = (float)(char)scales[8u + sub + 4u * iq];
+    float scale_d = (float)(char)scales[8u + sub + 4u * iq + 2u];
+
+    uint shift_lo = 4u * iq;
+    uint shift_hi = shift_lo + 2u;
+    uchar nibble_shift = (iq == 0u) ? 0u : 4u;
+
+    float result = 0.0f;
+    for (uint w = 0u; w < 4u; ++w) {
+        ushort ql_a_word = ql_a[w];
+        ushort ql_b_word = ql_b[w];
+        ushort ql_c_word = ql_c[w];
+        ushort ql_d_word = ql_d[w];
+        ushort qh_0_word = qh_0[w];
+        ushort qh_1_word = qh_1[w];
+        for (uint bshift = 0u; bshift < 16u; bshift += 8u) {
+            uint i = 2u * w + (bshift / 8u);
+            uchar ql_a_byte = (uchar)((ql_a_word >> bshift) & 0xFFu);
+            uchar ql_b_byte = (uchar)((ql_b_word >> bshift) & 0xFFu);
+            uchar ql_c_byte = (uchar)((ql_c_word >> bshift) & 0xFFu);
+            uchar ql_d_byte = (uchar)((ql_d_word >> bshift) & 0xFFu);
+            uchar qh_0_byte = (uchar)((qh_0_word >> bshift) & 0xFFu);
+            uchar qh_1_byte = (uchar)((qh_1_word >> bshift) & 0xFFu);
+
+            float level_a = (float)(((ql_a_byte >> nibble_shift) & 0x0Fu) | (((qh_0_byte >> shift_lo) & 0x03u) << 4u)) - 32.0f;
+            float level_b = (float)(((ql_b_byte >> nibble_shift) & 0x0Fu) | (((qh_0_byte >> shift_hi) & 0x03u) << 4u)) - 32.0f;
+            float level_c = (float)(((ql_c_byte >> nibble_shift) & 0x0Fu) | (((qh_1_byte >> shift_lo) & 0x03u) << 4u)) - 32.0f;
+            float level_d = (float)(((ql_d_byte >> nibble_shift) & 0x0Fu) | (((qh_1_byte >> shift_hi) & 0x03u) << 4u)) - 32.0f;
+
+            result += (hdr.d * scale_a * level_a) * yl[i];
+            result += (hdr.d * scale_b * level_b) * yl[i + 8u];
+            result += (hdr.d * scale_c * level_c) * yh[i];
+            result += (hdr.d * scale_d * level_d) * yh[i + 8u];
+        }
+    }
+    return result;
+}
+
+
+struct ExpertPayloadDescriptor {
+    uint expert_index;
+    uint codec;
+    uint byte_offset;
+    uint byte_length;
+    uint out_dim;
+    uint in_dim;
+    uint epoch;
+    uint reserved;
+};
+static inline float mixed_expert_element(device const uchar *payload,
+                                         device const ExpertPayloadDescriptor *descriptor,
+                                         uint expert,
+                                         uint element) {
+    ExpertPayloadDescriptor selected = descriptor[expert];
+    device const uchar *block = payload + selected.byte_offset;
+    if (selected.codec == 1u) {
+        return q2k_element(block + (element / 256u) * 84u, element % 256u);
+    }
+    if (selected.codec == 2u) {
+        return q4k_element(block + (element / 256u) * 144u, element % 256u);
+    }
+    if (selected.codec == 3u) {
+        return q6k_element(block + (element / 256u) * 210u, element % 256u);
+    }
+    if (selected.codec == 4u) {
+        return q3k_element(block + (element / 256u) * 110u, element % 256u);
+    }
+    return 0.0f;
+}
+static inline float mixed_expert_element_from_offset(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride,
+        uint codec) {
+    long local = full_offset - (long)expert * expert_stride;
+    if (codec == 1u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
+            (uint)(local / 256l) * 84u;
+        return q2k_element(block, (uint)(local % 256l));
+    }
+    if (codec == 2u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
+            (uint)(local / 256l) * 144u;
+        return q4k_element(block, (uint)(local % 256l));
+    }
+    if (codec == 3u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
+            (uint)(local / 256l) * 210u;
+        return q6k_element(block, (uint)(local % 256l));
+    }
+    if (codec == 4u) {
+        device const uchar *block = payload + descriptor[expert].byte_offset +
+            (uint)(local / 256l) * 110u;
+        return q3k_element(block, (uint)(local % 256l));
+    }
+    return 0.0f;
+}
+static inline float mixed_expert_element_from_local(
+        device const uchar *base,
+        uint codec,
+        long local) {
+    if (codec == 1u) {
+        return q2k_element(base + (uint)(local / 256l) * 84u, (uint)(local % 256l));
+    }
+    if (codec == 2u) {
+        return q4k_element(base + (uint)(local / 256l) * 144u, (uint)(local % 256l));
+    }
+    if (codec == 3u) {
+        return q6k_element(base + (uint)(local / 256l) * 210u, (uint)(local % 256l));
+    }
+    if (codec == 4u) {
+        return q3k_element(base + (uint)(local / 256l) * 110u, (uint)(local % 256l));
+    }
+    return 0.0f;
+}
+
+
+static inline float uniform_expert_element_from_offset_q2k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 84u;
+    return q2k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q3k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 110u;
+    return q3k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q4k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 144u;
+    return q4k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q5k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 176u;
+    return q5k_element(block, (uint)(local % 256l));
+}
+static inline float uniform_expert_element_from_offset_q6k(
+        device const uchar *payload,
+        device const ExpertPayloadDescriptor *descriptor,
+        uint expert,
+        long full_offset,
+        long expert_stride) {
+    long local = full_offset - (long)expert * expert_stride;
+    device const uchar *block = payload + descriptor[expert].byte_offset +
+        (uint)(local / 256l) * 210u;
+    return q6k_element(block, (uint)(local % 256l));
+}
+
+
+static inline float q8_0_field(uint code) {
+    uint mantissa = code & 0x7fu;
+    return ((float)((int)mantissa - (int)(((code >> 7u) & 1u) << 7u))) * 1e0f;
+}
+
+static inline uint q8_0_group(device const uchar *group) {
+    return ((uint)group[0] << 0u);
+}
+
+static inline float q8_0_element(device const uchar *block, uint index) {
+    ushort scale_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float scale = (float)as_type<half>(scale_bits);
+    uint word = q8_0_group(block + 2u + (index / 1u) * 1u);
+    uint field = (word >> ((index % 1u) * 8u)) & 0xffu;
+    return q8_0_field(field) * scale;
+}
+
+static inline float q8_0_super_element(device const uchar *superblock, uint index) {
+    return q8_0_element(superblock + (index / 32u) * 34u, index % 32u);
+}
+
+
+static inline float q4_0_element_code(uint code) {
+    uint mantissa = code & 0xfu;
+    return ((float)mantissa) * 1e0f;
+}
+
+static inline float q4_0_element_scale(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline float q4_0_element(device const uchar *block, uint index) {
+    uint raw_low_rest = index;
+    uint raw_low_address = 16u;
+    raw_low_address += (raw_low_rest % 16u) * 8u;
+    raw_low_rest /= 16u;
+    raw_low_address += (raw_low_rest % 2u) * 4u;
+    raw_low_rest /= 2u;
+    uint raw_low = ((uint)block[raw_low_address / 8u] >> (raw_low_address % 8u)) & 0xfu;
+    float raw = q4_0_element_code(raw_low);
+    float scale = q4_0_element_scale(((uint)block[0u] << 0u) | ((uint)block[1u] << 8u));
+    float value = ((1.0f * raw) - 8.0f) * scale;
+    return value;
+}
+
+
+static inline float q4_0_super_element(device const uchar *superblock, uint index) {
+    return q4_0_element(superblock + (index / 32u) * 18u, index % 32u);
+}
+
+
+static inline float q4_0_pair_dot(device const uchar *superblock, uint slot, thread const float *acts) {
+    device const uchar *block = superblock + (slot / 32u) * 18u;
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    float d = (float)as_type<half>(d_bits);
+    device const uchar *qs = block + 2;
+    float result = 0.0f;
+    for (uint j = 0u; j < 16u; ++j) {
+        uchar byte = qs[j];
+        float low = (float)((int)(byte & 0x0Fu) - 8);
+        float high = (float)((int)(byte >> 4u) - 8);
+        result += d * low * acts[j];
+        result += d * high * acts[j + 16u];
+    }
+    return result;
+}
+
+
+static inline float q4_0_block_scale(device const uchar *block) {
+    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
+    return (float)as_type<half>(d_bits);
+}
+
+static inline void q4_0_run8(device const uchar *block, uint index, thread float *out) {
+    device const uchar *qs = block + 2;
+    uint shift = (index < 16u) ? 0u : 4u;
+    uint base = index % 16u;
+    for (uint j = 0u; j < 8u; ++j) {
+        uchar byte = qs[base + j];
+        out[j] = (float)((byte >> shift) & 0x0Fu);
+    }
+}
+
+
+static inline float q5_1_element_code(uint code) {
+    uint mantissa = code & 0x1fu;
+    return ((float)mantissa) * 1e0f;
+}
+
+static inline float q5_1_element_scale(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline float q5_1_element_min(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline float q5_1_element(device const uchar *block, uint index) {
+    uint raw_low_rest = index;
+    uint raw_low_address = 64u;
+    raw_low_address += (raw_low_rest % 16u) * 8u;
+    raw_low_rest /= 16u;
+    raw_low_address += (raw_low_rest % 2u) * 4u;
+    raw_low_rest /= 2u;
+    uint raw_low = ((uint)block[raw_low_address / 8u] >> (raw_low_address % 8u)) & 0xfu;
+    uint raw_high_rest = index;
+    uint raw_high_address = 32u;
+    raw_high_address += (raw_high_rest % 32u) * 1u;
+    raw_high_rest /= 32u;
+    uint raw_high = ((uint)block[raw_high_address / 8u] >> (raw_high_address % 8u)) & 0x1u;
+    float raw = q5_1_element_code((raw_low | (raw_high << 4u)));
+    float scale = q5_1_element_scale(((uint)block[0u] << 0u) | ((uint)block[1u] << 8u));
+    float value = ((1.0f * raw) - 0.0f) * scale;
+    float minimum = q5_1_element_min(((uint)block[2u] << 0u) | ((uint)block[3u] << 8u));
+    value = value + (1.0f * minimum);
+    return value;
+}
+
+
+static inline float q5_0_element_code(uint code) {
+    uint mantissa = code & 0x1fu;
+    return ((float)mantissa) * 1e0f;
+}
+
+static inline float q5_0_element_scale(uint code) {
+    return (float)as_type<half>((ushort)code);
+}
+
+static inline float q5_0_element(device const uchar *block, uint index) {
+    uint raw_low_rest = index;
+    uint raw_low_address = 48u;
+    raw_low_address += (raw_low_rest % 16u) * 8u;
+    raw_low_rest /= 16u;
+    raw_low_address += (raw_low_rest % 2u) * 4u;
+    raw_low_rest /= 2u;
+    uint raw_low = ((uint)block[raw_low_address / 8u] >> (raw_low_address % 8u)) & 0xfu;
+    uint raw_high_rest = index;
+    uint raw_high_address = 16u;
+    raw_high_address += (raw_high_rest % 32u) * 1u;
+    raw_high_rest /= 32u;
+    uint raw_high = ((uint)block[raw_high_address / 8u] >> (raw_high_address % 8u)) & 0x1u;
+    float raw = q5_0_element_code((raw_low | (raw_high << 4u)));
+    float scale = q5_0_element_scale(((uint)block[0u] << 0u) | ((uint)block[1u] << 8u));
+    float value = ((1.0f * raw) - 16.0f) * scale;
+    return value;
+}
+
+
+static inline float bf16_element_value(uint code) {
+    return (float)as_type<bfloat>((ushort)code);
+}
+
+static inline float bf16_element(device const uchar *payload, uint index) {
+    uint offset = index * 2u;
+    uint code = ((uint)payload[offset + 0u] << 0u) | ((uint)payload[offset + 1u] << 8u);
+    return bf16_element_value(code);
+}
+
+
+static inline uint bf8_e5m2_element_value_scaled_bits(uint significand, int scale) {
+    if (significand == 0u) {
+        return 0u;
+    }
+    int lead = 31 - (int)clz(significand);
+    int biased = lead + scale + 127;
+    if (biased >= 255) {
+        return 0x7f800000u;
+    }
+    if (biased >= 1) {
+        return ((uint)biased << 23u) | ((significand << (uint)(23 - lead)) & 0x7fffffu);
+    }
+    int shift = scale + 149;
+    if (shift >= 0) {
+        return significand << (uint)shift;
+    }
+    return -shift >= 32 ? 0u : significand >> (uint)(-shift);
+}
+
+static inline float bf8_e5m2_element_value(uint code) {
+    uint mantissa = code & 0x3u;
+    uint exponent = (code >> 2u) & 0x1fu;
+    uint sign = ((code >> 7u) & 1u) << 31u;
+    if (exponent == 0x1fu) {
+        return as_type<float>(sign | 0x7f800000u | (mantissa == 0u ? 0u : (0x400000u | (mantissa << 21u))));
+    }
+    uint significand = exponent == 0u ? mantissa : (0x4u | mantissa);
+    int scale = exponent == 0u ? (1 - (15) - 2) : ((int)exponent - (15) - 2);
+    return as_type<float>(sign | bf8_e5m2_element_value_scaled_bits(significand, scale));
+}
+
+static inline float bf8_e5m2_element(device const uchar *payload, uint index) {
+    uint offset = index * 1u;
+    uint code = ((uint)payload[offset + 0u] << 0u);
+    return bf8_e5m2_element_value(code);
+}
+
+
+static inline uint bf4_e2m1_element_value_scaled_bits(uint significand, int scale) {
+    if (significand == 0u) {
+        return 0u;
+    }
+    int lead = 31 - (int)clz(significand);
+    int biased = lead + scale + 127;
+    if (biased >= 255) {
+        return 0x7f800000u;
+    }
+    if (biased >= 1) {
+        return ((uint)biased << 23u) | ((significand << (uint)(23 - lead)) & 0x7fffffu);
+    }
+    int shift = scale + 149;
+    if (shift >= 0) {
+        return significand << (uint)shift;
+    }
+    return -shift >= 32 ? 0u : significand >> (uint)(-shift);
+}
+
+static inline float bf4_e2m1_element_value(uint code) {
+    uint mantissa = code & 0x1u;
+    uint exponent = (code >> 1u) & 0x3u;
+    uint sign = ((code >> 3u) & 1u) << 31u;
+    uint significand = exponent == 0u ? mantissa : (0x2u | mantissa);
+    int scale = exponent == 0u ? (1 - (1) - 1) : ((int)exponent - (1) - 1);
+    return as_type<float>(sign | bf4_e2m1_element_value_scaled_bits(significand, scale));
+}
+
+static inline float bf4_e2m1_element(device const uchar *payload, uint index) {
+    uint bit = index * 4u;
+    uint code = ((uint)payload[bit / 8u] >> (bit % 8u)) & 0xfu;
+    return bf4_e2m1_element_value(code);
+}
+
+struct Uniforms {
+    long output_total;
+    long reduction_total;
+    long output_extents[2];
+    long reduction_extents[1];
+    long operand_base[2];
+    long operand_strides[2][3];
+    long out_base;
+    long out_strides[3];
+};
+
+kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
+    device const uchar* in0 [[buffer(0)]],
+    device const float* in1 [[buffer(1)]],
+    device float* out [[buffer(2)]],
+    constant Uniforms& u [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{
+    if ((long)gid >= u.output_total) { return; }
+    long full_coord[3];
+    full_coord[0] = 0;
+    full_coord[1] = 0;
+    full_coord[2] = 0;
+    long output_coord[2];
+    long remaining = (long)gid;
+    output_coord[1] = (long)((uint)remaining % (uint)u.output_extents[1]); remaining = (long)((uint)remaining / (uint)u.output_extents[1]);
+    output_coord[0] = (long)((uint)remaining % (uint)u.output_extents[0]); remaining = (long)((uint)remaining / (uint)u.output_extents[0]);
+    full_coord[0] = output_coord[0];
+    full_coord[1] = output_coord[1];
+    float accumulator = 0.0f;
+    bool seeded = true;
+    for (long r = 0; r < u.reduction_total; r++) {
+        long reduction_coord[1];
+        reduction_coord[0] = r;
+        full_coord[2] = reduction_coord[0];
+        long off0 = u.operand_base[0];
+        off0 += full_coord[0] * u.operand_strides[0][0];
+        off0 += full_coord[1] * u.operand_strides[0][1];
+        off0 += full_coord[2] * u.operand_strides[0][2];
+        long off1 = u.operand_base[1];
+        off1 += full_coord[0] * u.operand_strides[1][0];
+        off1 += full_coord[1] * u.operand_strides[1][1];
+        off1 += full_coord[2] * u.operand_strides[1][2];
+        float scratch[2];
+        scratch[0] = bf16_element(in0 + (off0 / 1) * 2, (uint)(off0 % 1));
+        scratch[1] = in1[off1];
+        float step0 = (scratch[0] * scratch[1]);
+        float value = step0;
+        accumulator = seeded ? (accumulator + value) : value;
+        seeded = true;
+    }
+    long out_offset = u.out_base;
+    out_offset += full_coord[0] * u.out_strides[0];
+    out_offset += full_coord[1] * u.out_strides[1];
+    out_offset += full_coord[2] * u.out_strides[2];
+    out[out_offset] = accumulator;
+}
