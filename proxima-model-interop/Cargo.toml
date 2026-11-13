@@ -396,6 +396,10 @@ name = "plan_rows_diff"
 required-features = ["std", "cuda"]
 
 [[example]]
+name = "cuda_activation_census"
+required-features = ["std", "cuda"]
+
+[[example]]
 name = "smollm2_logit_oracle_diff"
 required-features = ["std", "instrument"]
 
