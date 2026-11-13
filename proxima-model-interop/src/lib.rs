@@ -94,6 +94,8 @@ mod hf_descriptor;
 #[cfg(any(test, all(feature = "std", feature = "metal", target_os = "macos")))]
 mod memory_fit;
 #[cfg(feature = "std")]
+pub mod arch_config;
+#[cfg(feature = "std")]
 pub mod profiles;
 #[cfg(feature = "std")]
 mod prompt_cache_settings;

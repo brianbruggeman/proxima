@@ -1,0 +1,11 @@
+# granite: the three facts no checkpoint carries, keyed on general.architecture = "granite".
+# source: PROXNUM-424 design sections 3 and 5; llama.cpp rev f1ea20621.
+
+# NORM (adjacent pairs): src/llama-model.cpp:3018 lists LLM_ARCH_GRANITE under LLAMA_ROPE_TYPE_NORM
+rope_layout = "adjacent"
+
+# LLM_FFN_SILU hardcoded in the graph: src/models/granite.cpp:269
+ffn_activation = "Silu"
+
+# granite.cpp has no V norm (design section 5)
+value_norm = false

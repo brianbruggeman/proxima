@@ -590,7 +590,7 @@ pub enum KvCacheShape {
 /// Which channels RoPE rotates together: `(i, i + rotary_dim / 2)` or
 /// `(2i, 2i + 1)`. The count of rotating dims is not here; it is the
 /// checkpoint's own `<arch>.rope.dimension_count`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RopeLayout {
     SplitHalf,
