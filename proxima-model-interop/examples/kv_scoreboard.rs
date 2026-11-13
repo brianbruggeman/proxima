@@ -66,6 +66,7 @@ use std::fmt::Write as _;
 use std::fs::{self, File};
 use std::io::{Read, Write as _};
 use std::net::{SocketAddr, TcpStream};
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
@@ -1718,6 +1719,7 @@ impl TimedServer {
             .args(["--host", "127.0.0.1", "--port", &port.to_string(), "-lv", "4"])
             .stdout(Stdio::null())
             .stderr(stderr_file)
+            .process_group(0)
             .spawn()
             .map_err(|source| HarnessError::Server(format!("spawn: {source}")))?;
         let server_pid = Self::child_of(timer.id());
@@ -1752,19 +1754,23 @@ impl TimedServer {
         false
     }
 
+    /// the server pid when pgrep found it, else the timer's whole process group, so stop never depends on the lookup.
+    fn signal_target(&self) -> i32 {
+        self.server_pid.unwrap_or_else(|| -i32::try_from(self.timer.id()).unwrap_or(i32::MAX))
+    }
+
     fn stop(mut self) -> i32 {
-        if let Some(pid) = self.server_pid {
-            // SAFETY: signalling a child pid this process just found with pgrep -P; SIGTERM only.
-            unsafe { libc::kill(pid, libc::SIGTERM) };
-            let asked = Instant::now();
-            while asked.elapsed() < STOP_GRACE && matches!(self.timer.try_wait(), Ok(None)) {
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            // llama-server ignores SIGTERM until the tensor load finishes, so a load in progress needs the kill.
-            if matches!(self.timer.try_wait(), Ok(None)) {
-                // SAFETY: same child pid as above; SIGKILL cannot be handled, so the load stops now.
-                unsafe { libc::kill(pid, libc::SIGKILL) };
-            }
+        let target = self.signal_target();
+        // SAFETY: target is the pgrep-found server pid, or the negated pid of the process group this harness created for the timer; SIGTERM only.
+        unsafe { libc::kill(target, libc::SIGTERM) };
+        let asked = Instant::now();
+        while asked.elapsed() < STOP_GRACE && matches!(self.timer.try_wait(), Ok(None)) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // llama-server ignores SIGTERM until the tensor load finishes, so a load in progress needs the kill.
+        if matches!(self.timer.try_wait(), Ok(None)) {
+            // SAFETY: same target as above; SIGKILL cannot be handled, so the load stops now.
+            unsafe { libc::kill(target, libc::SIGKILL) };
         }
         self.timer.wait().ok().and_then(|status| status.code()).unwrap_or(-1)
     }
