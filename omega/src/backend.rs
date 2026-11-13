@@ -2219,6 +2219,7 @@ mod tests {
     use proxima_tensor::cpu::ExpertSource;
     #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_tensor::{Extent, IndexMap, Op, QuantizedBlock, ScalarOp, append, projection};
+    #[cfg(all(feature = "metal", target_os = "macos"))]
     use proxima_numeric::{DType, NumericPolicy};
 
     #[cfg(all(feature = "metal", target_os = "macos"))]

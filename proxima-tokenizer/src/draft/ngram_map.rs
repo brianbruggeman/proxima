@@ -478,10 +478,10 @@ fn draft_k4v(
 
         let idx_begin_value_key = position + size_key;
         let mut idx_value: Option<usize> = None;
-        for slot in 0..MAX_VALUES {
-            let value_idx_v = map.keys[key_offset].values[slot].value_idx;
+        for (slot, entry) in map.keys[key_offset].values.iter_mut().enumerate() {
+            let value_idx_v = entry.value_idx;
             if value_idx_v == 0 {
-                map.keys[key_offset].values[slot] = NgramMapValue {
+                *entry = NgramMapValue {
                     value_idx: idx_begin_value_key,
                     value_num: 0,
                     n_accepted: size_value as u16,

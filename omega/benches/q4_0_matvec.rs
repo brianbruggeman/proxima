@@ -20,19 +20,24 @@
 //! comparable to the ~152 GB/s a llama.cpp decode step averages across all of
 //! its own packed reads.
 
-#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use std::mem::size_of;
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_gguf::quant::q4_0;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::{Extent, IndexMap, Keep, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_numeric::{DType, NumericPolicy};
 
 /// `[rows, k] x [k, 1] -> [rows, 1]`, the shape [`crate::`]'s packed-weight gate
 /// uses: a packed weight operand, an f32 activation, a multiply, and a reduce
 /// over the contraction axis.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn q4_0_matvec_program(rows: u32, k: u32) -> (Vec<Op>, proxima_tensor::NodeId) {
     let mut program = Vec::new();
     let weight = append(
@@ -79,6 +84,7 @@ fn q4_0_matvec_program(rows: u32, k: u32) -> (Vec<Op>, proxima_tensor::NodeId) {
     (program, sum)
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn bench_q4_0_matvec(criterion: &mut Criterion) {
     // (rows, k, label): bytes = rows * k * Q4_0's 0.5625 bytes per element
     let shapes = [
@@ -141,5 +147,13 @@ fn bench_q4_0_matvec(criterion: &mut Criterion) {
     }
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 criterion_group!(benches, bench_q4_0_matvec);
+#[cfg(all(feature = "metal", target_os = "macos"))]
 criterion_main!(benches);
+
+#[cfg(not(all(feature = "metal", target_os = "macos")))]
+fn main() {
+    eprintln!("unsupported target for this benchmark or example");
+    std::process::exit(1);
+}

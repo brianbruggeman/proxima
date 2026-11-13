@@ -157,10 +157,10 @@ proptest! {
         for index in 0..QK {
             prop_assert_eq!(ours[4 + index] as i8, reference.qs[index], "qs[{}]", index);
         }
-        for group in 0..16 {
+        for (group, expected) in reference.bsums.iter().enumerate().take(16) {
             let offset = 4 + QK + group * 2;
             let bsum = i16::from_le_bytes([ours[offset], ours[offset + 1]]);
-            prop_assert_eq!(bsum, reference.bsums[group], "bsums[{}]", group);
+            prop_assert_eq!(bsum, *expected, "bsums[{}]", group);
         }
     }
 

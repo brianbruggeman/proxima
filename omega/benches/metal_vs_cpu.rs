@@ -56,6 +56,7 @@ use proxima_tensor::cpu::evaluate;
 use proxima_tensor::test_support::Lcg;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, map};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_numeric::{DType, NumericPolicy};
 
 #[cfg(all(feature = "metal", target_os = "macos"))]

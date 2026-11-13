@@ -983,7 +983,8 @@ pub(super) const GROUPED_ROUTE_HEADER_WORDS: u64 =
 /// slot in the compaction header.
 #[cfg(all(
     feature = "metal-grouped-gemm",
-    any(test, all(feature = "metal", target_os = "macos"))
+    feature = "metal",
+    target_os = "macos"
 ))]
 fn grouped_row_tiles(resolved: &BoundOp, block: &TiledGemmBlock) -> u64 {
     block
@@ -998,7 +999,8 @@ fn grouped_row_tiles(resolved: &BoundOp, block: &TiledGemmBlock) -> u64 {
 /// compacted grouped op launches through; `None` for every other op.
 #[cfg(all(
     feature = "metal-grouped-gemm",
-    any(test, all(feature = "metal", target_os = "macos"))
+    feature = "metal",
+    target_os = "macos"
 ))]
 pub(crate) fn route_compaction_indirect_offset(
     resolved: &BoundOp,
