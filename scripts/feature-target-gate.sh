@@ -42,6 +42,10 @@ case "${1:-}" in
 esac
 
 # crate:feature-set pairs. An empty feature set means "default features".
+# crate:@nostd:feature-set is a tier row: `cargo check --lib --no-default-features`
+# plus those features (empty = bare). --lib because tests and examples need std;
+# the tier claim is that the library itself builds without it, and a default-
+# features --all-targets build can never notice that break.
 matrix=(
     "proxima-tensor:std"
     "proxima-tensor:std,metal-attn-split-rows"
@@ -52,6 +56,13 @@ matrix=(
     "proxima-numeric:std"
     "proxima-numeric:config"
     "proxima-gguf:"
+    "proxima-tensor:@nostd:alloc"
+    "proxima-numeric:@nostd:alloc"
+    "proxima-numeric:@nostd:"
+    "proxima-gguf:@nostd:alloc"
+    "proxima-omega:@nostd:alloc"
+    "proxima-omega:@nostd:"
+    "proxima-model-interop:@nostd:"
 )
 
 # the package name of a top-level directory: the `name` in its manifest's
@@ -126,12 +137,20 @@ fi
 
 failed=0
 ran=0
-while IFS=: read -r crate features; do
+while IFS=: read -r crate features tier_features; do
     case " $crates " in
         *" $crate "*) ;;
         *) continue ;;
     esac
-    if [ -n "$features" ]; then
+    if [ "$features" = "@nostd" ]; then
+        if [ -n "$tier_features" ]; then
+            label="$crate --lib --no-default-features --features $tier_features"
+            args=(-p "$crate" --lib --no-default-features --features "$tier_features")
+        else
+            label="$crate --lib --no-default-features"
+            args=(-p "$crate" --lib --no-default-features)
+        fi
+    elif [ -n "$features" ]; then
         label="$crate --features $features"
         args=(-p "$crate" --all-targets --features "$features")
     else
