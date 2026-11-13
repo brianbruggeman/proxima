@@ -1,0 +1,3 @@
+general.architecture=String("gemma4")
+gemma4.attention.head_count_kv=U32(1)
+gemma4.attention.sliding_window_pattern=Array(Bool([true, true, true, true, false, true, true, true, true, false, true, true, true, true, false, true, true, true, true, false, true, true, true, true, false, true, true, true, true, false, true, true, true, true, false]))

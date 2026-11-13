@@ -1,0 +1,4 @@
+general.architecture=String("granitemoe")
+granitemoe.attention.head_count_kv=U32(8)
+granitemoe.expert_count=U32(32)
+granitemoe.attention.scale=F32(0.015625)

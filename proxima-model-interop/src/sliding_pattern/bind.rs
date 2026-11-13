@@ -16,6 +16,7 @@ use proxima_tensor::spec::{ModelDescriptor, sliding_pattern_descriptor_from_gguf
 use crate::bind::{ModelHparams, SlidingRope, find_tensor, metadata_str, metadata_u32_optional};
 use crate::error::InteropError;
 use crate::ffn_inference::with_inferred_ffn;
+use crate::key_inference::with_inferred_keys;
 use crate::lowering::KvLayout;
 use crate::profiles::family_profile;
 
@@ -31,6 +32,7 @@ pub fn descriptor_from_gguf(
     let family = metadata_str(parsed, "general.architecture")?;
     let expert_count = metadata_u32_optional(parsed, &format!("{family}.expert_count"));
     let profile = with_inferred_ffn(family_profile(family)?, parsed, expert_count);
+    let profile = with_inferred_keys(profile, parsed, family)?;
     Ok(sliding_pattern_descriptor_from_gguf(
         parsed,
         sliding_kv_ring,

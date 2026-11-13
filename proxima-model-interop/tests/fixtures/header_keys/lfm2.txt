@@ -1,0 +1,2 @@
+general.architecture=String("lfm2")
+lfm2.attention.head_count_kv=Array(I32([0, 0, 8, 0, 0, 8, 0, 0, 8, 0, 8, 0, 8, 0, 8, 0]))

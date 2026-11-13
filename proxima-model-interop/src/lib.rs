@@ -44,6 +44,8 @@ mod dense;
 mod draft_model_compatibility;
 #[cfg(feature = "std")]
 mod ffn_inference;
+#[cfg(feature = "std")]
+mod key_inference;
 mod dtype;
 mod error;
 #[cfg(feature = "std")]
