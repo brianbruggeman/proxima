@@ -185,9 +185,11 @@ pub(crate) fn derive_with_storage(
 mod tests {
     use super::*;
     use proxima_tensor::{
-        Extent, IndexMap, Reduce, ReduceInit, append, bind_with_fusion, correct_packed_matmul_layouts, infer, is_derived,
-        projection, underive_block_quantize,
+        Extent, IndexMap, Reduce, ReduceInit, append, bind_with_fusion, correct_packed_matmul_layouts,
+        derive_activation_quantize, infer, is_derived, projection, underive_block_quantize,
     };
+    use crate::cuda::executes;
+    use crate::cuda::target::Target;
 
     const DEPTH: u32 = 128;
     const FEATURES: u32 = 4;
@@ -449,6 +451,57 @@ mod tests {
         assert_eq!(activation_codec(128, None), Codec::Q8_1Grouped);
         assert_eq!(activation_codec(96, None), Codec::Q8_1);
         assert_eq!(activation_codec(32, None), Codec::Q8_1);
+    }
+
+    fn tensor_derive(
+        fixture: &Fixture,
+        policy: NumericPolicy,
+        storage: Option<NumericFormat>,
+    ) -> (Vec<BoundOp>, BTreeMap<NodeId, NumericFormat>) {
+        derive_activation_quantize(
+            fixture.resolved.clone(),
+            &fixture.program,
+            &fixture.shapes,
+            &fixture.packed,
+            policy,
+            &executes(&Target::CUDA),
+            storage,
+        )
+    }
+
+    #[test]
+    fn the_tensor_pass_binds_the_same_ops_and_held_formats_as_the_renderer_asking_pass() {
+        let storages = [None, Some(NumericFormat::Q8_1Grouped), Some(NumericFormat::Q8_1)]
+            .into_iter()
+            .filter(|storage| validate_storage(*storage).is_ok());
+        let mut derived_total = 0;
+        for storage in storages {
+            for (tokens, plain_reader, wide) in
+                [1, 3].into_iter().flat_map(|tokens| [false, true].into_iter().flat_map(move |plain| [false, true].map(move |wide| (tokens, plain, wide))))
+            {
+                let fixture = build_fixture(tokens, plain_reader, wide);
+                for (label, policy) in [("granted", granted()), ("off", NumericPolicy::llama_relaxed())] {
+                    let mut packed = fixture.packed.clone();
+                    let omega = derive_with_storage(
+                        fixture.resolved.clone(),
+                        &fixture.program,
+                        &fixture.shapes,
+                        &mut packed,
+                        policy,
+                        GpuDriver::Cuda,
+                        storage,
+                    );
+                    let (tensor, held) = tensor_derive(&fixture, policy, storage);
+                    let case = format!("{tokens} tokens plain_reader={plain_reader} wide={wide} policy={label} storage={storage:?}");
+                    assert_eq!(tensor, omega, "bound ops: {case}");
+                    let omega_held: BTreeMap<NodeId, NumericFormat> =
+                        packed.into_iter().filter(|(node, _)| node.0 as usize >= fixture.program.len()).collect();
+                    assert_eq!(held, omega_held, "held formats: {case}");
+                    derived_total += derived_ids(&omega, fixture.program.len()).len();
+                }
+            }
+        }
+        assert!(derived_total > 0, "no case derived a node, so equality compared nothing");
     }
 
     #[test]
