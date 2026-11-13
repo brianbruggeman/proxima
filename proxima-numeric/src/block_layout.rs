@@ -156,6 +156,26 @@ impl SubSearch {
         weighting: FitWeighting::MeanPlusAbs,
     };
 
+    /// `quantize_row_q5_K_ref` (ggml-quants.c:1654-1718, call at 1670): `rmin -0.5`, `rdelta 0.1`,
+    /// `nstep 15`, squared error, `av_x + |x|` weights.
+    pub const Q5_K: Self = Self {
+        rmin_tenths: -5,
+        rdelta_tenths: 1,
+        nstep: 15,
+        error: FitError::Squared,
+        weighting: FitWeighting::MeanPlusAbs,
+    };
+
+    /// `quantize_row_q2_K_ref` (ggml-quants.c:900-968, call at 914): `rmin -0.5`, `rdelta 0.1`,
+    /// `nstep 15`, absolute error (`use_mad`), `|x|` weights.
+    pub const Q2_K: Self = Self {
+        rmin_tenths: -5,
+        rdelta_tenths: 1,
+        nstep: 15,
+        error: FitError::Absolute,
+        weighting: FitWeighting::Abs,
+    };
+
     /// The search as the fit that runs it; a tenth is the correctly rounded `f32` of the decimal.
     #[must_use]
     pub const fn range_fit(&self) -> RangeFit {
@@ -541,7 +561,7 @@ impl BlockLayout {
         sub: Some(SubBlocks {
             count: 16,
             scale_multiplier: 1,
-            search: None,
+            search: Some(SubSearch::Q2_K),
             scale: coded(
                 FloatLayout::UINT4,
                 plane(4, 0, [digit(16, 8), NO_DIGIT, NO_DIGIT, NO_DIGIT]),
@@ -624,7 +644,7 @@ impl BlockLayout {
         min: Some(field_at(FloatLayout::F16, 2)),
         min_multiplier: -1,
         scale_runs: None,
-        sub: Some(k4_sub_blocks(None)),
+        sub: Some(k4_sub_blocks(Some(SubSearch::Q5_K))),
     };
     pub const Q6_K: Self = Self {
         elements: 256,

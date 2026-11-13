@@ -131,6 +131,9 @@ mod tests {
 
     const Q4_K_ORACLE: &str = "9c20cc29f4f4fff5bef4ffbae3cf6493a0c2f5072a5c7fa0c3f5083a5d8fa0d3f5083a5d8fa1d3f6183a6d8fb1d3f618e406285a7caec2e406385a7caec2f406385a8caec2f416385a8ca0d2f416386a274a6c8fa0c2e5274a6c8fa0c205284a6d8fa0c305284a6d8fa0c305284a6d8f4c7f90c2f5072a5c7fa0c3f5072a5c7fa0c3f5083a5d8fa0d3f5083a5d8fa1d3";
 
+    const Q2_K_ORACLE: &str = "ffefcfcfafbeefdfcfbfbeefdfcfbfafc8181d6162b687c8195d62a2b787d8192d6176b68bd81d6d62b6878bd81d6d626176868bd81d6d6276869bd81d6162b6868bd81d616276869bd81d6166b687db00310032";
+    const Q5_K_ORACLE: &str = "211cb629fafafffafff4febc09ef8ad94a5296b4a52d694a5296b4a52d494a5296b5ad6d4b5ad296b5ad694b5ad296b53085da0f54a9fe4095ea0f54a9fe4196eb1065ba0e4196eb1065ba0f52a7fb20d80c51a5fa4e94e80d51a6fa4f94e81d62b60b5fa4f91d62b60b50a5f92e72c74e84d91e60b5fa4f94d92e60b50a4f94e92e71b60b5095ea3f71c61b50a5ea3fa8fd4095ea0f54a9fe4095ea0f54a9fe4196eb1065ba0e51a6fb1065ba0f52a7";
+
     fn oracle_input() -> std::vec::Vec<f32> {
         (0..256).map(|index| (((index * 37) % 256) as f32 - 90.0) / 32.0).collect()
     }
@@ -160,6 +163,32 @@ mod tests {
 
         let worst = input.iter().zip(&back).map(|(a, b)| (a - b).abs()).fold(0.0f32, f32::max);
         assert_eq!(worst, 0.232_788_09);
+    }
+
+    fn encoded_and_worst(format: &NumericFormat, bytes: usize) -> (std::string::String, f32) {
+        let input = oracle_input();
+        let mut packed = std::vec![0u8; bytes];
+        encode_blocks(format, &input, &mut packed).expect("the format encodes from its description");
+        let mut back = std::vec![0.0f32; 256];
+        decode_blocks(format, &packed, &mut back).expect("the format decodes");
+        let worst = input.iter().zip(&back).map(|(a, b)| (f64::from(*a) - f64::from(*b)).abs()).fold(0.0f64, f64::max);
+        (hex_of(&packed), worst as f32)
+    }
+
+    #[test]
+    fn q5_k_matches_llama_cpp_b12110_quantize_row_q5_k_ref_on_the_permutation_block() {
+        let (hex, worst) = encoded_and_worst(&NumericFormat::Q5K, 176);
+
+        assert_eq!(hex, Q5_K_ORACLE);
+        assert_eq!(worst, 0.125_137_33);
+    }
+
+    #[test]
+    fn q2_k_matches_llama_cpp_b12110_quantize_row_q2_k_ref_on_the_permutation_block() {
+        let (hex, worst) = encoded_and_worst(&NumericFormat::Q2K, 84);
+
+        assert_eq!(hex, Q2_K_ORACLE);
+        assert_eq!(worst, 1.15625);
     }
 
     #[test]

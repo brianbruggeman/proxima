@@ -944,7 +944,7 @@ mod tests {
         assert_eq!(
             refused,
             [
-                "q2_k", "q3_k", "q5_k", "q6_k", "iq1_s", "iq1_m",
+                "q3_k", "q6_k", "iq1_s", "iq1_m",
                 "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "iq3_s", "iq4_xs",
             ],
             "pinned: the formats a shared scale cannot express"
@@ -954,7 +954,7 @@ mod tests {
             NumericFormat::ALL.len(),
             "pinned: every format is classified"
         );
-        assert_eq!(encodable.len(), 24, "pinned: formats with an encoder");
+        assert_eq!(encodable.len(), 26, "pinned: formats with an encoder");
     }
 
     fn oracle_block() -> std::vec::Vec<f32> {
