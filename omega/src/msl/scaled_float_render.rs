@@ -2,7 +2,7 @@ use const_format::formatcp;
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::float_layout::FloatLayout;
 
-use super::layout_render::{block_element_msl, level_block_element_msl, level_run_decode_msl};
+use super::layout_render::{block_element_msl, layout_unpack_msl, level_block_element_msl, level_run_decode_msl};
 use super::*;
 
 pub(super) const FP6_E3M2_ELEMENTS: usize = Codec::FP6_E3M2_BLOCK_ELEMENTS;
@@ -17,6 +17,20 @@ pub(super) fn push_scaled_float_decoders(source: &mut String, quantized: &[Optio
     if quantized.contains(&Some(Codec::Fp6E3M2)) {
         source.push_str(&scaled_e3m2_unpack_msl(FloatLayout::E3M2));
         source.push('\n');
+    }
+    let mut spliced: Vec<Codec> = Vec::new();
+    for codec in quantized.iter().flatten().copied() {
+        let Some(layout) = unnamed_scalar_layout(codec) else {
+            continue;
+        };
+        if spliced.contains(&codec) {
+            continue;
+        }
+        spliced.push(codec);
+        if let Some(accessor) = layout_unpack_msl(layout, &unnamed_scalar_accessor_name(codec)) {
+            source.push_str(&accessor);
+            source.push('\n');
+        }
     }
 }
 

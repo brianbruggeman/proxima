@@ -1153,6 +1153,15 @@ pub(super) fn operand_read(index: usize, offset: &str, codec: Option<Codec>) -> 
             | Codec::Pq2_0
             | Codec::Ptq1_0,
         ) => format!("in{index}[{offset}]"),
+        // an unnamed scalar reads through the accessor `push_scaled_float_decoders` renders
+        // from its own layout, split as the named flat accessors above split theirs
+        Some(unnamed) if unnamed_scalar_layout(unnamed).is_some() => format!(
+            "{}(in{index} + ({offset} / {}) * {}, (uint)({offset} % {}))",
+            unnamed_scalar_accessor_name(unnamed),
+            codec_block_elements(unnamed),
+            codec_block_bytes(unnamed),
+            codec_block_elements(unnamed),
+        ),
         _ => format!("in{index}[{offset}]"),
     }
 }

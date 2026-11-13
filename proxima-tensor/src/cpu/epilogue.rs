@@ -2274,6 +2274,18 @@ impl<'a> QuantizedBlock<'a> {
                 Codec::BFloat8 => ("bfloat8", bytes.len(), 1, Some(bytes.len())),
                 Codec::Bf8E5M2 => ("bf8_e5m2", bytes.len(), 1, Some(bytes.len())),
                 Codec::Bf4E2M1 => ("bf4_e2m1", bytes.len(), 1, Some(bytes.len() * 2)),
+                // an unnamed scalar split counts by its own description: `packed_elements`
+                // codes per `packed_bytes` storage unit, as the flat Metal accessor addresses it
+                other @ Codec::Scalar(_) if other.packed_bytes() != 0 => (
+                    codec_name_for_error(other),
+                    bytes.len(),
+                    usize::from(other.packed_bytes()),
+                    whole_blocks(
+                        bytes.len(),
+                        usize::from(other.packed_bytes()),
+                        usize::from(other.packed_elements()),
+                    ),
+                ),
                 // No packed-block construction site (`gguf_tensor_as_packed_block`/
                 // `as_block` in `proxima-model-interop`) ever produces a
                 // `Packed` carrying one of these 15 undecodable codecs -- see
