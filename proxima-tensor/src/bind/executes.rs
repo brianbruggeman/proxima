@@ -92,6 +92,46 @@ pub enum Refusal {
     Form(Form),
 }
 
+/// Whether a backend reads the host's memory in place or from its own.
+///
+/// Decides where a gather-only table may live: on [`Self::Separate`] memory a
+/// table read only by a row gather can stay on the host (see
+/// [`crate::partition::row_gathers`]), on [`Self::Unified`] it never needs to.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DeviceMemory {
+    Unified,
+    Separate,
+}
+
+/// Capacity facts about a backend's device, carried beside its [`FormSet`] in
+/// [`Executes`] so plan identity hashes both.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DeviceLimits {
+    pub memory: DeviceMemory,
+}
+
+impl DeviceLimits {
+    pub const UNIFIED: Self = Self {
+        memory: DeviceMemory::Unified,
+    };
+
+    /// The tighter of two limits: a pair is `Separate` if either side is.
+    #[must_use]
+    pub const fn intersect(self, other: Self) -> Self {
+        let separate = matches!(self.memory, DeviceMemory::Separate)
+            || matches!(other.memory, DeviceMemory::Separate);
+        Self {
+            memory: if separate {
+                DeviceMemory::Separate
+            } else {
+                DeviceMemory::Unified
+            },
+        }
+    }
+}
+
 /// What one backend renders, as a value.
 ///
 /// Composes the same subset shape as `proxima_numeric::NumericPolicy::grants`
@@ -105,6 +145,7 @@ pub enum Refusal {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Executes {
     pub forms: FormSet,
+    pub limits: DeviceLimits,
 }
 
 impl Executes {
@@ -121,15 +162,20 @@ impl Executes {
             .with(Form::GatedDeltaNet)
             .with(Form::MoeTopK)
             .with(Form::TopFractionSelect),
+        limits: DeviceLimits::UNIFIED,
     };
 
     /// The unfused algebra only.
-    pub const BASE: Self = Self { forms: FormSet::BASE };
+    pub const BASE: Self = Self {
+        forms: FormSet::BASE,
+        limits: DeviceLimits::UNIFIED,
+    };
 
     #[must_use]
     pub const fn with(self, form: Form) -> Self {
         Self {
             forms: self.forms.with(form),
+            limits: self.limits,
         }
     }
 
@@ -137,13 +183,29 @@ impl Executes {
     pub const fn without(self, form: Form) -> Self {
         Self {
             forms: self.forms.without(form),
+            limits: self.limits,
         }
+    }
+
+    /// The same forms on the named memory kind.
+    #[must_use]
+    pub const fn with_memory(self, memory: DeviceMemory) -> Self {
+        Self {
+            forms: self.forms,
+            limits: DeviceLimits { memory },
+        }
+    }
+
+    #[must_use]
+    pub const fn memory(&self) -> DeviceMemory {
+        self.limits.memory
     }
 
     #[must_use]
     pub const fn intersect(self, other: Self) -> Self {
         Self {
             forms: self.forms.intersect(other.forms),
+            limits: self.limits.intersect(other.limits),
         }
     }
 
@@ -341,5 +403,20 @@ mod tests {
 
         assert!(narrowed.forms.contains(Form::MoeTopK));
         assert!(!narrowed.forms.contains(Form::CachedAttention));
+    }
+
+    #[test]
+    fn unified_memory_executes_is_the_default() {
+        assert_eq!(Executes::CPU.memory(), DeviceMemory::Unified);
+        assert_eq!(Executes::BASE.memory(), DeviceMemory::Unified);
+
+        let discrete = Executes::BASE.with(Form::MoeTopK).with_memory(DeviceMemory::Separate);
+        assert_eq!(discrete.memory(), DeviceMemory::Separate);
+        assert!(discrete.forms.contains(Form::MoeTopK));
+        assert_ne!(discrete, Executes::BASE.with(Form::MoeTopK));
+        assert_eq!(
+            discrete.intersect(Executes::CPU).memory(),
+            DeviceMemory::Separate
+        );
     }
 }
