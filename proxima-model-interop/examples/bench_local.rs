@@ -17,6 +17,12 @@
 //! Set `PROXIMA_VERIFY_GPU=1` to run the same prompt through CPU after the
 //! measured GPU call and fail if greedy token IDs differ. This is an explicit
 //! correctness gate, not part of the reported GPU timing.
+//!
+//! Pass `--activation-quantization` to run the GPU call with activation
+//! quantization enabled in its numeric policy (the dp4a matvec path). The CPU
+//! verification run keeps the default policy, so it compares against the
+//! unquantized reference. The JSON record's `activation_quantization` field
+//! states which arithmetic the measured run used.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -48,7 +54,7 @@ impl fmt::Display for TtntJson {
 fn usage() -> ! {
     eprintln!(
         "usage: bench_local <model.gguf> <cpu|cuda|vulkan|metal> <prompt> [max_tokens] \
-         [batch_size] [ubatch_size] [--gpu-memory-bytes N]\n\
+         [batch_size] [ubatch_size] [--gpu-memory-bytes N] [--activation-quantization]\n\
          cuda requires --features std,cuda; vulkan requires --features std,vulkan; metal requires --features std,metal (macOS only)"
     );
     std::process::exit(2)
@@ -148,31 +154,37 @@ fn require_metal_device() {
 fn require_metal_device() {}
 
 fn main() {
-    let mut args = env::args().skip(1);
+    let mut args = env::args().skip(1).peekable();
     let model_path = args.next().unwrap_or_else(|| usage());
     let backend = args.next().unwrap_or_else(|| usage());
     let prompt = args.next().unwrap_or_else(|| usage());
     let max_tokens = args
-        .next()
+        .next_if(|value| !value.starts_with("--"))
         .map(|value| value.parse::<usize>().unwrap_or_else(|_| usage()))
         .unwrap_or(16);
     let batch_size = args
-        .next()
+        .next_if(|value| !value.starts_with("--"))
         .map(|value| value.parse::<u32>().unwrap_or_else(|_| usage()));
     let ubatch_size = args
-        .next()
+        .next_if(|value| !value.starts_with("--"))
         .map(|value| value.parse::<u32>().unwrap_or_else(|_| usage()));
-    let gpu_memory_limit_bytes = match args.next() {
-        None => None,
-        Some(flag) if flag == "--gpu-memory-bytes" => Some(
-            args.next()
-                .unwrap_or_else(|| usage())
-                .parse::<u64>()
-                .unwrap_or_else(|_| usage()),
-        ),
-        Some(_) => usage(),
-    };
-    if args.next().is_some() || !matches!(backend.as_str(), "cpu" | "cuda" | "vulkan" | "metal") {
+    let mut gpu_memory_limit_bytes = None;
+    let mut activation_quantization = false;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--gpu-memory-bytes" if gpu_memory_limit_bytes.is_none() => {
+                gpu_memory_limit_bytes = Some(
+                    args.next()
+                        .unwrap_or_else(|| usage())
+                        .parse::<u64>()
+                        .unwrap_or_else(|_| usage()),
+                );
+            }
+            "--activation-quantization" => activation_quantization = true,
+            _ => usage(),
+        }
+    }
+    if !matches!(backend.as_str(), "cpu" | "cuda" | "vulkan" | "metal") {
         usage();
     }
     if backend == "cuda" && !cfg!(feature = "cuda") {
@@ -248,6 +260,9 @@ fn main() {
         gpu_memory_limit_bytes,
         gpu_correctness_fallback: env::var_os("PROXIMA_GPU_CORRECTNESS_FALLBACK").is_some(),
         prompt_cache: PromptCacheConfig::off(),
+        numeric_policy: ServingConfig::default()
+            .numeric_policy
+            .with_activation_quantization(activation_quantization),
         ..ServingConfig::default()
     };
     let execution_backend = if serving_config.gpu_correctness_fallback && backend == "vulkan" {
@@ -277,6 +292,7 @@ fn main() {
     let verification = if backend != "cpu" && env::var_os("PROXIMA_VERIFY_GPU").is_some() {
         let cpu_config = ServingConfig {
             gpu_layers: 0,
+            numeric_policy: ServingConfig::default().numeric_policy,
             ..serving_config
         };
         let (cpu_ids, _cpu_text, _cpu_stopped_by_eos) = loaded_model
@@ -325,7 +341,8 @@ fn main() {
          \"execution_backend\":{execution_backend:?},\
          \"rss_before_load_kib\":{},\"rss_after_load_kib\":{},\"prompt_tokens\":{},\
          \"gpu_memory_before\":{},\"gpu_memory_after\":{},\
-         \"batch_size\":{},\"ubatch_size\":{},\"cpu_percent\":{},\
+         \"batch_size\":{},\"ubatch_size\":{},\"activation_quantization\":{},\
+         \"cpu_percent\":{},\
          \"generated_tokens\":{},\"ttft_ms\":{},\"ttnt_ms\":{ttnt_ms:.3},\
          \"total_ms\":{total_ms:.3},\"events\":{events},\"stopped_by_eos\":{},\
          \"ids\":{ids:?},\"text\":{text:?},\"verification\":{}}}",
@@ -337,6 +354,7 @@ fn main() {
         memory_json(gpu_memory_after),
         serving_config.batch_size,
         serving_config.ubatch_size,
+        serving_config.numeric_policy.activation_quantization,
         cpu_percent,
         ids.len(),
         ttft_ms.map_or(0.0, |(_, elapsed)| elapsed),
