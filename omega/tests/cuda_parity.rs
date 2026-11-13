@@ -5795,3 +5795,110 @@ fn a_strided_fused_gate_up_stack_uploads_and_routes_on_cuda_bit_identically_to_t
         );
     }
 }
+
+const STACKED_EXPERTS: usize = 32;
+const STACKED_ROWS: usize = 512;
+const STACKED_DEPTH: usize = 1024;
+
+fn q8_0_expert_stack(seed: u64) -> (Vec<u8>, Vec<f32>) {
+    use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
+
+    let values: Vec<f32> = random_vec(seed, STACKED_EXPERTS * STACKED_ROWS * STACKED_DEPTH)
+        .into_iter()
+        .map(|value| value * 2.0 - 1.0)
+        .collect();
+    let mut packed = vec![0u8; values.len() / QK8_0 * BLOCK_BYTES];
+    quantize(&values, &mut packed).expect("expert stack is a whole number of q8_0 blocks");
+    let mut stored = vec![0.0f32; values.len()];
+    dequantize(&packed, &mut stored).expect("stack decodes back to the stored values");
+    (packed, stored)
+}
+
+fn run_q8_0_expert_stack_relaxed(
+    packed: &[u8],
+    route: &[f32],
+    activation: &[f32],
+) -> Result<Vec<f32>, BackendError> {
+    let (program, sum) = gathered_expert_program(
+        STACKED_EXPERTS as u32,
+        STACKED_ROWS as u32,
+        STACKED_DEPTH as u32,
+        route.len() as u32,
+    );
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        (
+            "weight",
+            QuantizedBlock::Packed {
+                codec: Codec::Q8_0,
+                bytes: packed,
+            },
+        ),
+        ("route", QuantizedBlock::Float32(route)),
+        ("activation", QuantizedBlock::Float32(activation)),
+    ];
+    let mut plan = plan_named(
+        Engine::Gpu,
+        Some(GpuDriver::Cuda),
+        &program,
+        &[],
+        &named,
+        &[sum],
+        NumericPolicy::llama_relaxed(),
+    )
+    .expect("omega::backend plans the stacked q8_0 expert reduce on cuda");
+    execute_plan_named(&mut plan, &named).map(|run| run.root().to_vec())
+}
+
+#[test]
+fn a_stacked_q8_0_expert_product_on_the_lean_gathered_loop_matches_the_f64_oracle_on_cuda() {
+    let (packed, stored) = q8_0_expert_stack(711);
+    let route = [31.0f32, 0.0, 17.0, 5.0, 22.0, 9.0, 30.0, 12.0];
+    let activation: Vec<f32> = random_vec(712, route.len() * STACKED_DEPTH)
+        .into_iter()
+        .map(|value| value * 2.0 - 1.0)
+        .collect();
+
+    let output = run_q8_0_expert_stack_relaxed(&packed, &route, &activation)
+        .expect("a valid route runs on a real cuda device");
+
+    assert_eq!(output.len(), route.len() * STACKED_ROWS, "one output per (token, row)");
+    let peak = output.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    assert!(peak > 0.0, "an all-zero output would make parity vacuous");
+    let mut worst = 0.0f64;
+    for (token, &expert) in route.iter().enumerate() {
+        for row in 0..STACKED_ROWS {
+            let start = (expert as usize * STACKED_ROWS + row) * STACKED_DEPTH;
+            let exact: f64 = stored[start..start + STACKED_DEPTH]
+                .iter()
+                .zip(&activation[token * STACKED_DEPTH..][..STACKED_DEPTH])
+                .map(|(weight, input)| f64::from(*weight) * f64::from(*input))
+                .sum();
+            worst = worst.max((f64::from(output[token * STACKED_ROWS + row]) - exact).abs());
+        }
+    }
+    assert!(
+        worst / f64::from(peak) < 1e-5,
+        "lean gathered q8_0 expert product differs from the f64 oracle by {worst} of peak {peak}"
+    );
+    let first_token = &output[..STACKED_ROWS];
+    let second_token = &output[STACKED_ROWS..2 * STACKED_ROWS];
+    assert_ne!(
+        first_token, second_token,
+        "degenerate control: tokens routed to different experts produced identical rows"
+    );
+}
+
+#[test]
+fn an_out_of_range_stacked_q8_0_expert_route_faults_on_the_lean_gathered_loop() {
+    let (packed, _) = q8_0_expert_stack(713);
+    let route = [31.0f32, 0.0, 999.0, 5.0, 22.0, 9.0, 30.0, 12.0];
+    let activation: Vec<f32> = random_vec(714, route.len() * STACKED_DEPTH);
+
+    let error = run_q8_0_expert_stack_relaxed(&packed, &route, &activation)
+        .expect_err("an out-of-range expert route must fault on cuda, not clamp");
+
+    match error {
+        BackendError::Cuda(omega::CudaDriverError::GatherIndexOutOfRange { index: 999, .. }) => {}
+        other => panic!("expected a cuda GatherIndexOutOfRange at index 999, got {other:?}"),
+    }
+}
