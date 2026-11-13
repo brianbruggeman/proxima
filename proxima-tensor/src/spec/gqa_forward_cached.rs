@@ -505,6 +505,7 @@ pub fn append_gqa_cached_layer(
     fused_qkv_reduce: bool,
     rope_pairing: RopePairing,
     cached_window_mask: Option<(NodeId, NodeId)>,
+    residual_scale: Option<NodeId>,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
     let kv_heads = query_heads / group;
@@ -778,6 +779,7 @@ pub fn append_gqa_cached_layer(
         "so->sugdo",
     )?;
 
+    let attn_out = scale_residual(program, attn_out, residual_scale)?;
     let residual1 = elementwise(
         program,
         DType::FLOAT32,
@@ -910,6 +912,7 @@ pub fn append_gqa_cached_layer(
         "sd->sgd",
     )?;
 
+    let ffn_out = scale_residual(program, ffn_out, residual_scale)?;
     let x_next = elementwise(
         program,
         DType::FLOAT32,

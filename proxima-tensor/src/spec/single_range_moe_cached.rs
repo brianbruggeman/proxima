@@ -974,7 +974,7 @@ pub fn duplicate_head_reduce(
     )
 }
 
-fn scale_residual(
+pub(super) fn scale_residual(
     program: &mut Vec<Op>,
     branch: NodeId,
     scale: Option<NodeId>,
