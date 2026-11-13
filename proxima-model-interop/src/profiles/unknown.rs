@@ -8,7 +8,16 @@
 //! checkpoint does state (FFN tensors, `attention.scale`, `embedding_scale`,
 //! `residual_scale`). This module only fills the fields neither source reaches
 //! with the defaults a dense llama-shaped model has, and logs each one.
+//!
+//! The config files are found through an ordered search path
+//! ([`ArchConfigSettings::search_path`]): `PROXIMA_ARCH_CONFIG_DIR` alone when
+//! set; else `$XDG_CONFIG_HOME/proxima/arch` (or `$HOME/.config/proxima/arch`),
+//! `<executable dir>/arch`, then the build-time `src/arch`, so an installed
+//! binary does not depend on where its source tree was compiled. The first
+//! directory with `<architecture>.toml` wins (`llama.toml`, `granite.toml`
+//! ship in `src/arch`); none having it is a refusal listing every directory.
 
+use std::env;
 use std::path::PathBuf;
 
 use bon::Builder;
@@ -24,28 +33,47 @@ use serde::{Deserialize, Serialize};
 use crate::arch_config::{ArchConfig, EmbeddingScaleOverride, ScoreScaleOverride};
 use crate::error::InteropError;
 
-/// Where the run-time architecture config files live. `PROXIMA_ARCH_CONFIG_DIR`
-/// sets it; unset means the data directory this crate ships (`src/arch`, one
-/// `<general.architecture>.toml` per example), resolved by [`Self::directory`].
-/// An unreadable directory is refused naming the path, never replaced by an
-/// embedded copy.
+/// Where the run-time architecture config files live, as an ordered search
+/// path resolved by [`Self::search_path`]; the first directory containing
+/// `<architecture>.toml` wins (`llama.toml` and `granite.toml` ship in this
+/// crate's `src/arch`). An unreadable file is refused naming the path, never
+/// replaced by an embedded copy.
 #[derive(Debug, Clone, PartialEq, Eq, Builder, Deserialize, Serialize, Settings, Validate)]
 #[settings(prefix = "PROXIMA_ARCH_CONFIG")]
 #[builder(derive(Clone, Debug))]
 pub struct ArchConfigSettings {
     /// A directory of `<architecture>.toml` files, for example
-    /// `/etc/proxima/arch`. Absent selects the shipped data directory.
+    /// `/etc/proxima/arch`. When set it is the only directory searched; absent
+    /// selects, in order: `$XDG_CONFIG_HOME/proxima/arch` (else
+    /// `$HOME/.config/proxima/arch`), `<executable dir>/arch` for installed
+    /// bundles, then the build-time `CARGO_MANIFEST_DIR/src/arch` for
+    /// development, last because it names the build checkout, which an installed
+    /// binary may not have.
     pub dir: Option<String>,
 }
 
 impl ArchConfigSettings {
-    /// The configured directory, or the shipped data directory.
+    /// The directories to search, in order. Reads `XDG_CONFIG_HOME`, `HOME` and
+    /// the running executable's path; a source that is unset or unreadable
+    /// contributes no entry.
     #[must_use]
-    pub fn directory(&self) -> PathBuf {
-        match &self.dir {
-            Some(dir) => PathBuf::from(dir),
-            None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("arch"),
+    pub fn search_path(&self) -> Vec<PathBuf> {
+        if let Some(dir) = &self.dir {
+            return vec![PathBuf::from(dir)];
         }
+        let user_config = env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+            .map(|base| base.join("proxima").join("arch"));
+        let beside_executable = env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|parent| parent.join("arch")));
+        let build_time = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("arch");
+        user_config
+            .into_iter()
+            .chain(beside_executable)
+            .chain(Some(build_time))
+            .collect()
     }
 }
 
@@ -63,7 +91,7 @@ pub(crate) fn unknown_family_profile(family: &str) -> Result<FamilyProfile, Inte
             family: family.into(),
             message: error.to_string(),
         })?;
-    let config = ArchConfig::load(&settings.directory(), family)?;
+    let config = ArchConfig::load_from(&settings.search_path(), family)?;
     Ok(profile_from_arch_config(family, &config))
 }
 
@@ -177,9 +205,10 @@ mod tests {
         let dir = tempfile::tempdir().expect("empty config dir");
 
         match profile_in(&dir, "phi9") {
-            Err(InteropError::MissingArchField { architecture, field }) => {
+            Err(InteropError::MissingArchField { architecture, field, searched }) => {
                 assert_eq!(architecture, "phi9");
                 assert_eq!(field, "rope_layout, ffn_activation, value_norm");
+                assert_eq!(searched, dir.path().display().to_string());
             }
             other => panic!("expected MissingArchField, got {other:?}"),
         }
@@ -221,9 +250,16 @@ mod tests {
     fn the_real_granite_4_header_builds_a_uniform_adjacent_silu_descriptor_from_the_shipped_file() {
         let parsed = granite_4_header();
 
-        let descriptor = temp_env::with_var("PROXIMA_ARCH_CONFIG_DIR", None::<&str>, || {
-            crate::lowering::header_descriptor(&parsed, crate::lowering::KvLayout::default())
-        })
+        let empty_home = tempfile::tempdir().expect("empty home and xdg config home");
+        let empty_home_text = empty_home.path().to_str().expect("tempdir path is utf-8");
+        let descriptor = temp_env::with_vars(
+            [
+                ("PROXIMA_ARCH_CONFIG_DIR", None),
+                ("XDG_CONFIG_HOME", Some(empty_home_text)),
+                ("HOME", Some(empty_home_text)),
+            ],
+            || crate::lowering::header_descriptor(&parsed, crate::lowering::KvLayout::default()),
+        )
         .expect("granite header builds through the unlisted-family path");
 
         assert_eq!(descriptor.block_count, 28);
@@ -236,14 +272,114 @@ mod tests {
         assert_eq!(descriptor.embedding_scale, Some(EmbeddingScale::Factor(12.0)));
     }
 
-    #[test]
-    fn the_directory_defaults_to_the_shipped_data_and_the_env_overrides_it() {
-        let unset = temp_env::with_var("PROXIMA_ARCH_CONFIG_DIR", None::<&str>, || {
-            ArchConfigSettings::from_env().expect("settings load").directory()
-        });
-        assert!(unset.ends_with("src/arch"), "{unset:?}");
+    const PHI9_FILE: &str = "rope_layout = \"split_half\"\nffn_activation = \"GeluTanh\"\nvalue_norm = true\n";
+    const PHI9_OTHER_FILE: &str = "rope_layout = \"adjacent\"\nffn_activation = \"Silu\"\nvalue_norm = false\n";
 
+    fn build_time_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("arch")
+    }
+
+    fn profile_with_dirs(
+        env_dir: Option<&str>,
+        xdg: Option<&str>,
+        family: &str,
+    ) -> Result<FamilyProfile, InteropError> {
+        temp_env::with_vars(
+            [
+                ("PROXIMA_ARCH_CONFIG_DIR", env_dir),
+                ("XDG_CONFIG_HOME", xdg),
+                ("HOME", xdg),
+            ],
+            || unknown_family_profile(family),
+        )
+    }
+
+    fn xdg_dir_with(name: &str, text: &str) -> TempDir {
+        let xdg = tempfile::tempdir().expect("tempdir for xdg config home");
+        let arch = xdg.path().join("proxima").join("arch");
+        fs::create_dir_all(&arch).expect("create xdg arch dir");
+        fs::write(arch.join(format!("{name}.toml")), text).expect("write xdg arch file");
+        xdg
+    }
+
+    #[test]
+    fn the_env_directory_wins_even_when_the_user_config_dir_has_the_file() {
+        let env_dir = dir_with("phi9", PHI9_FILE);
+        let xdg = xdg_dir_with("phi9", PHI9_OTHER_FILE);
+
+        let profile = profile_with_dirs(
+            env_dir.path().to_str(),
+            xdg.path().to_str(),
+            "phi9",
+        )
+        .expect("env directory has the file");
+
+        assert_eq!(profile.rope_layout, RopeLayout::SplitHalf);
+        assert!(profile.value_norm);
+    }
+
+    #[test]
+    fn the_env_directory_is_the_only_one_searched_when_it_lacks_the_file() {
+        let env_dir = tempfile::tempdir().expect("empty env dir");
+        let xdg = xdg_dir_with("phi9", PHI9_FILE);
+
+        let result = profile_with_dirs(env_dir.path().to_str(), xdg.path().to_str(), "phi9");
+
+        assert!(matches!(result, Err(InteropError::MissingArchField { .. })), "{result:?}");
+    }
+
+    #[test]
+    fn the_xdg_config_home_directory_is_found_when_the_env_is_unset() {
+        let xdg = xdg_dir_with("phi9", PHI9_FILE);
+
+        let profile = profile_with_dirs(None, xdg.path().to_str(), "phi9")
+            .expect("xdg arch directory has the file");
+
+        assert_eq!(profile.rope_layout, RopeLayout::SplitHalf);
+    }
+
+    #[test]
+    fn with_nothing_anywhere_the_refusal_lists_every_searched_directory_in_order() {
+        let xdg = tempfile::tempdir().expect("empty xdg config home");
+        let xdg_text = xdg.path().to_str().expect("tempdir path is utf-8");
+
+        let error = profile_with_dirs(None, Some(xdg_text), "phi9").expect_err("no file anywhere");
+
+        let InteropError::MissingArchField { searched, .. } = &error else {
+            panic!("expected MissingArchField, got {error:?}");
+        };
+        let user = xdg.path().join("proxima").join("arch");
+        let exe = env::current_exe().expect("test exe path").parent().expect("exe dir").join("arch");
+        let expected = [user, exe, build_time_dir()]
+            .iter()
+            .map(|dir| dir.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        assert_eq!(searched, &expected);
+        assert!(error.to_string().contains(&expected), "{error}");
+    }
+
+    #[test]
+    fn the_build_time_directory_is_searched_last_and_still_supplies_the_shipped_files() {
+        let xdg = tempfile::tempdir().expect("empty xdg config home");
+        let settings = ArchConfigSettings::builder().build();
+
+        let path = temp_env::with_vars(
+            [("XDG_CONFIG_HOME", xdg.path().to_str()), ("HOME", xdg.path().to_str())],
+            || settings.search_path(),
+        );
+        let granite = profile_with_dirs(None, xdg.path().to_str(), "granite")
+            .expect("shipped granite is found in the build-time directory");
+
+        assert_eq!(path.last(), Some(&build_time_dir()));
+        assert_eq!(path.len(), 3);
+        assert_eq!(granite.rope_layout, RopeLayout::Adjacent);
+    }
+
+    #[test]
+    fn a_configured_dir_alone_is_the_search_path() {
         let built = ArchConfigSettings::builder().dir("/etc/proxima/arch".into()).build();
-        assert_eq!(built.directory(), PathBuf::from("/etc/proxima/arch"));
+
+        assert_eq!(built.search_path(), vec![PathBuf::from("/etc/proxima/arch")]);
     }
 }

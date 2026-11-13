@@ -57,7 +57,18 @@ fn a_family_with_no_arch_config_is_refused_by_name_before_anything_binds() {
         Value::String("phi9".to_string()),
     )]);
 
-    match bind_checkpoint(&parsed, &[]) {
+    let empty_home = tempfile::tempdir().expect("empty home and xdg config home");
+    let empty_home_text = empty_home.path().to_str().expect("tempdir path is utf-8");
+    let bound = temp_env::with_vars(
+        [
+            ("PROXIMA_ARCH_CONFIG_DIR", None),
+            ("XDG_CONFIG_HOME", Some(empty_home_text)),
+            ("HOME", Some(empty_home_text)),
+        ],
+        || bind_checkpoint(&parsed, &[]),
+    );
+
+    match bound {
         Err(InteropError::MissingArchField { architecture, .. }) => {
             assert_eq!(architecture, "phi9");
         }

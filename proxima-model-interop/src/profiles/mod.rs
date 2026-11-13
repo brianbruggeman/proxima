@@ -432,7 +432,17 @@ mod tests {
 
     #[test]
     fn a_family_with_no_profile_or_arch_config_is_an_error_naming_it() {
-        let error = family_profile("phi9").expect_err("phi9 has no profile or arch config");
+        let empty_home = tempfile::tempdir().expect("empty home and xdg config home");
+        let empty_home_text = empty_home.path().to_str().expect("tempdir path is utf-8");
+        let error = temp_env::with_vars(
+            [
+                ("PROXIMA_ARCH_CONFIG_DIR", None),
+                ("XDG_CONFIG_HOME", Some(empty_home_text)),
+                ("HOME", Some(empty_home_text)),
+            ],
+            || family_profile("phi9"),
+        )
+        .expect_err("phi9 has no profile or arch config");
 
         assert!(matches!(
             &error,
