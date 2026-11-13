@@ -565,7 +565,7 @@ impl<P: TlsProvider + Send + 'static> DatagramProtocol for Listener<P> {
             let Some(length) = core::num::NonZeroUsize::new(self.handle_order.len()) else {
                 break;
             };
-            let index = self.transmit_cursor % length.get();
+            let index = self.transmit_cursor % length;
             let handle = self.handle_order[index];
             match self.connections.get_mut(&handle) {
                 Some(entry) => match entry.connection.poll_transmit(now, buf) {

@@ -59,6 +59,7 @@ use omega::execute;
 use proxima_tensor::test_support::Lcg;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_numeric::{DType, NumericPolicy};
 
 #[cfg(all(feature = "metal", target_os = "macos"))]

@@ -2945,12 +2945,12 @@ fn lower_reduce_mean(
     let mut out_shape = Vec::with_capacity(rank);
     let mut view: Vec<Option<u16>> = Vec::with_capacity(rank);
     let mut kept_index = 0u16;
-    for axis in 0..rank {
+    for (axis, extent) in input.shape.iter().enumerate().take(rank) {
         if axes.contains(&axis) {
             out_shape.push(1u64);
             view.push(None);
         } else {
-            out_shape.push(input.shape[axis]);
+            out_shape.push(*extent);
             view.push(Some(kept_index));
             kept_index += 1;
         }

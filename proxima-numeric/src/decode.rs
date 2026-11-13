@@ -282,12 +282,12 @@ fn terms(layout: &BlockLayout, block: &[u8]) -> Terms {
         mins: [min.unwrap_or(0.0); MAX_SUB_BLOCKS],
     };
     if layout.scale_runs.is_some() {
-        for run in 0..usize::from(layout.runs()).min(MAX_SUB_BLOCKS) {
+        for (run, scale_slot) in terms.scales.iter_mut().enumerate().take(usize::from(layout.runs())) {
             let field = Field {
                 byte_offset: layout.run_scale_byte(run as u16) as u16,
                 ..layout.scale
             };
-            terms.scales[run] = field_value(&field, block);
+            *scale_slot = field_value(&field, block);
         }
     }
     if let Some(sub) = &layout.sub {
