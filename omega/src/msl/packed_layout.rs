@@ -10,9 +10,9 @@
 //!    throw that away and produce a generic body slower than the ones it
 //!    replaces. `fold_levels` decodes a whole block-slot at once and hands the
 //!    emitter `LEVELS` floats.
-//! 2. the table is TOTAL over [`Codec`] and exhaustive, with `Unsupported` as an
-//!    explicit per-codec answer rather than a wildcard. adding a codec therefore
-//!    fails to compile here, and the pinned count in the tests fails too.
+//! 2. the table is TOTAL over [`Codec`]: a format is a description, so
+//!    `layout` reads its geometry and answers `Unsupported` for any geometry no
+//!    body addresses. adding a format changes the pinned counts in the tests.
 
 #![expect(
     dead_code,
@@ -22,6 +22,7 @@
 )]
 
 use proxima_numeric::codec::Codec;
+use proxima_numeric::{FloatLayout, SignEncoding};
 
 /// the byte layout a packed-row matvec body is specialized for. one variant per
 /// layout the emitter can address -- distinct codecs share a variant only when
@@ -38,7 +39,7 @@ pub(crate) enum Layout {
     Q5_1,
     /// 34 B: binary16 scale, 32 signed bytes.
     Q8_0,
-    /// 210 B super-block: d, dmin, 16 x 4-bit scales, 256 nibbles.
+    /// 84 B super-block: d, dmin, 16 x 4-bit scales, 256 x 2-bit levels.
     Q2K,
     /// 110 B super-block: 16 x 6-bit scales mixed with 256 x 2-bit levels.
     Q3K,
@@ -58,47 +59,48 @@ pub(crate) enum Layout {
     Unsupported,
 }
 
-/// the one place a [`Codec`] becomes a [`Layout`]. exhaustive by construction --
-/// there is no wildcard arm, so a new codec is a compile error right here.
-pub(crate) const fn layout(codec: Codec) -> Layout {
-    match codec {
-        Codec::Q4_0 => Layout::Q4_0,
-        Codec::Q4_1 => Layout::Q4_1,
-        Codec::Q5_0 => Layout::Q5_0,
-        Codec::Q5_1 => Layout::Q5_1,
-        Codec::Q8_0 | Codec::Q8_1 => Layout::Q8_0,
-        Codec::Q2K => Layout::Q2K,
-        Codec::Q3K => Layout::Q3K,
-        Codec::Q4K => Layout::Q4K,
-        Codec::Q5K => Layout::Q5K,
-        Codec::Q6K => Layout::Q6K,
-        Codec::Iq4Nl => Layout::Iq4Nl,
-        Codec::Float16 => Layout::Float16,
-        Codec::BFloat16 => Layout::BFloat16,
-        // the remaining wire codecs have no packed-row body and no generic
-        // decode in this crate; each is named rather than swept into a wildcard
-        // so this list is the inventory a future layout addition edits.
-        Codec::Q8K
-        | Codec::Iq1S
-        | Codec::Iq1M
-        | Codec::Iq2Xxs
-        | Codec::Iq2Xs
-        | Codec::Iq2S
-        | Codec::Iq3Xxs
-        | Codec::Iq3S
-        | Codec::Iq4Xs
-        | Codec::Tq10
-        | Codec::Tq20
-        | Codec::Mxfp4
-        | Codec::Nvfp4
-        | Codec::Q1_0
-        | Codec::Q2_0
-        | Codec::Pq2_0
-        | Codec::Ptq1_0
-        | Codec::BFloat8
-        | Codec::Bf8E5M2
-        | Codec::Bf4E2M1
-        | Codec::Fp6E3M2 => Layout::Unsupported,
+/// the one place a numeric format becomes a [`Layout`]. a format is a description
+/// (`Scalar` / `Block` / `Levels`, not an enum of names), so the layout is read from
+/// the description's own geometry: the arm kind, elements per block and bytes per
+/// block. a geometry no body can address is `Unsupported` -- the typed refusal
+/// admission already keys on -- so every format the type can express is answered.
+pub(crate) const fn layout(format: &Codec) -> Layout {
+    let elements = format.elements_per_block();
+    let bytes = format.bytes_per_block();
+    match format {
+        Codec::Scalar(scalar) => scalar_layout(scalar),
+        Codec::Block(_) => block_layout(elements, bytes),
+        // the one level-set geometry with a body: 32 elements in 18 bytes under a
+        // non-linear table (a linear ladder of that geometry is a `Block`).
+        Codec::Levels(_) if elements == 32 && bytes == 18 => Layout::Iq4Nl,
+        Codec::Levels(_) => Layout::Unsupported,
+    }
+}
+
+const fn scalar_layout(scalar: &FloatLayout) -> Layout {
+    let ieee_shaped = matches!(scalar.sign, SignEncoding::Magnitude) && scalar.bias_override.is_none();
+    match (ieee_shaped, scalar.exponent_bits, scalar.mantissa_bits) {
+        (true, 5, 10) => Layout::Float16,
+        (true, 8, 7) => Layout::BFloat16,
+        _ => Layout::Unsupported,
+    }
+}
+
+/// block geometry (elements, bytes) -> layout. `Q8_1` carries the `Q8_0` codes with
+/// a stored sum behind the scale, so its 36-byte block shares the `Q8_0` body.
+const fn block_layout(elements: u16, bytes: u16) -> Layout {
+    match (elements, bytes) {
+        (32, 18) => Layout::Q4_0,
+        (32, 20) => Layout::Q4_1,
+        (32, 22) => Layout::Q5_0,
+        (32, 24) => Layout::Q5_1,
+        (32, 34 | 36) => Layout::Q8_0,
+        (256, 84) => Layout::Q2K,
+        (256, 110) => Layout::Q3K,
+        (256, 144) => Layout::Q4K,
+        (256, 176) => Layout::Q5K,
+        (256, 210) => Layout::Q6K,
+        _ => Layout::Unsupported,
     }
 }
 
@@ -181,55 +183,57 @@ mod tests {
     }
 
     #[test]
-    fn the_layout_table_is_total_and_pins_the_unsupported_count() {
-        // every codec is NAMED by `layout` (the match has no wildcard, so a new
-        // codec fails to compile). this test pins how many are Unsupported today,
-        // so adding one silently is a count failure as well.
-        let all = [
-            Codec::Q4K,
-            Codec::Q5K,
-            Codec::Q6K,
-            Codec::Q8_0,
-            Codec::Q3K,
-            Codec::Q4_0,
-            Codec::Float16,
-            Codec::BFloat16,
-            Codec::Q2K,
-            Codec::Q5_1,
-            Codec::Q5_0,
-            Codec::Q4_1,
-            Codec::Q8_1,
-            Codec::Q8K,
-            Codec::Iq1S,
-            Codec::Iq1M,
-            Codec::Iq2Xxs,
-            Codec::Iq2Xs,
-            Codec::Iq2S,
-            Codec::Iq3Xxs,
-            Codec::Iq3S,
-            Codec::Iq4Nl,
-            Codec::Iq4Xs,
-            Codec::Tq10,
-            Codec::Tq20,
-            Codec::Mxfp4,
-            Codec::Nvfp4,
-            Codec::Q1_0,
-            Codec::Q2_0,
-            Codec::Pq2_0,
-            Codec::Ptq1_0,
-            Codec::BFloat8,
-            Codec::Bf8E5M2,
-            Codec::Bf4E2M1,
-            Codec::Fp6E3M2,
-        ];
-        assert_eq!(all.len(), 35, "every Codec variant must be listed once");
-        let unsupported = all
+    fn the_layout_table_is_total_and_names_every_unsupported_format() {
+        // every format the type enumerates is answered by `layout`. the unsupported set is
+        // pinned by name so a regression names the format that lost (or gained) a body.
+        // beyond the 21 hand-listed in the old table: Q8_1Grouped (the one entry added to
+        // `Codec::ALL`, format.rs:457) and the two `Codec::UNTAGGED` formats Float32 and Bool.
+        let all: Vec<Codec> = Codec::ALL
             .iter()
-            .filter(|&&codec| layout(codec) == Layout::Unsupported)
-            .count();
-        assert_eq!(unsupported, 21, "pinned: codecs with no layout body");
-        let distinct = all.iter().map(|&c| layout(c)).collect::<BTreeSet<_>>();
-        assert_eq!(distinct.len(), 14, "pinned: distinct layouts reachable today");
+            .copied()
+            .chain(Codec::UNTAGGED.iter().map(|(format, _)| *format))
+            .collect();
+        let unsupported: BTreeSet<&str> = all
+            .iter()
+            .filter(|format| layout(format) == Layout::Unsupported)
+            .map(|format| format.debug_name().expect("every enumerated format has a debug name"))
+            .collect();
+        let expected: BTreeSet<&str> = [
+            "Q8K", "Iq1S", "Iq1M", "Iq2Xxs", "Iq2Xs", "Iq2S", "Iq3Xxs", "Iq3S", "Iq4Xs", "Tq10",
+            "Tq20", "Mxfp4", "Nvfp4", "Q1_0", "Q2_0", "Pq2_0", "Ptq1_0", "BFloat8", "Bf8E5M2",
+            "Bf4E2M1", "Fp6E3M2", "Q8_1Grouped", "Float32", "Bool",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(unsupported, expected, "formats with no layout body");
+        let distinct = all.iter().map(layout).collect::<BTreeSet<_>>();
+        assert_eq!((all.len(), distinct.len()), (38, 14), "formats, distinct layouts reachable today");
+    }
+
+    #[test]
+    fn each_addressable_layout_is_the_one_its_own_geometry_describes() {
+        let expected = [
+            (Codec::Q4_0, Layout::Q4_0),
+            (Codec::Q4_1, Layout::Q4_1),
+            (Codec::Q5_0, Layout::Q5_0),
+            (Codec::Q5_1, Layout::Q5_1),
+            (Codec::Q8_0, Layout::Q8_0),
+            (Codec::Q8_1, Layout::Q8_0),
+            (Codec::Q2K, Layout::Q2K),
+            (Codec::Q3K, Layout::Q3K),
+            (Codec::Q4K, Layout::Q4K),
+            (Codec::Q5K, Layout::Q5K),
+            (Codec::Q6K, Layout::Q6K),
+            (Codec::Iq4Nl, Layout::Iq4Nl),
+            (Codec::Float16, Layout::Float16),
+            (Codec::BFloat16, Layout::BFloat16),
+            (Codec::Q8K, Layout::Unsupported),
+            (Codec::Iq3S, Layout::Unsupported),
+            (Codec::Bf8E5M2, Layout::Unsupported),
+        ];
+        for (format, layout_expected) in expected {
+            assert_eq!(layout(&format), layout_expected, "{format:?}");
+        }
     }
 
     #[test]
