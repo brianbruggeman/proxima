@@ -13,8 +13,8 @@ use super::block_quantize::consumer_missing;
 use super::int8_gemm::{activation_block_offset, activation_code_offset, activation_code_words, activation_scale_offset};
 use super::{
     EmitDevice,
-    Codec, CudaGridSpec, CudaKernel, EmitError, WARP_SIZE, flat_packed_rows, gather_count, push_reduce_epilogue_write,
-    reduction_dims,
+    Codec, CudaGridSpec, CudaKernel, EmitError, WARP_SIZE, flat_packed_rows, gather_count, gather_slots,
+    lean_gather_admissible, push_gather_fault_check, push_reduce_epilogue_write, reduction_dims,
 };
 use crate::lowering::Binding;
 
@@ -80,6 +80,9 @@ pub(super) struct StagedMatvec {
     /// The block layout of an activation a `BlockQuantize` already produced, so the matvec
     /// neither stages nor pre-passes it.
     pub external: Option<BlockLayout>,
+    /// The gather slot of the weight operand when the rows come from a stacked product's
+    /// selected expert: one fetch per output row folds into the row's block address.
+    pub gather: Option<usize>,
 }
 
 impl StagedMatvec {
@@ -164,6 +167,12 @@ pub(super) fn staged_matvec_plan(
         .map(|(slot, codec)| if slot == activation_slot { None } else { *codec })
         .collect();
     let output_total: u64 = output_axes.iter().map(|axis| resolved.extents[usize::from(*axis)]).product();
+    let gather = gather_slots(resolved).get(weight_slot).copied().flatten();
+    let gather_served = if gather_count(resolved) == 0 {
+        true
+    } else {
+        gather.is_some() && lean_gather_admissible(resolved, &weight_only)
+    };
     let stageable = reduction > 0
         && output_total <= u64::from(u32::MAX)
         && reduction <= MAX_STAGED_REDUCTION
@@ -173,10 +182,11 @@ pub(super) fn staged_matvec_plan(
         && shared_by_every_row
         && epilogue_broadcast_axes.is_empty()
         && readable_activation
-        && gather_count(resolved) == 0
+        && gather_served
         && flat_packed_rows(resolved, &weight_only))
     .then_some(StagedMatvec {
         weight_slot,
+        gather,
         activation_slot,
         reduce_dims,
         contiguous_activation,
@@ -371,10 +381,11 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
             ));
         }
     }
+    let gather_term = push_gather_row_base(source, plan, output_axes);
     let elements = plan.dot.elements;
     let block_bytes = plan.dot.block_bytes;
     source.push_str(&format!(
-        "        const long row_element = u.operand_base[{weight_slot}] + packed_row * {};\n\
+        "        const long row_element = u.operand_base[{weight_slot}] + packed_row * {}{gather_term};\n\
          \x20       if (row_element % {elements} != 0) {{ __trap(); }}\n\
          \x20       row_block[row] = row_element / {elements};\n\
          {publish}\
@@ -389,6 +400,35 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
     if plan.rows_in_shared() {
         source.push_str("    __syncthreads();\n");
     }
+}
+
+/// Fetches the selected expert for one output row, as `push_hoisted_gather_fetch` does for the
+/// lean loop: a fault is recorded only for a real row, the index is clamped, and the element
+/// offset comes back as the term the row address adds. Empty when the weight is not gathered.
+fn push_gather_row_base(source: &mut String, plan: &StagedMatvec, output_axes: &[u16]) -> String {
+    let Some(gather_slot) = plan.gather else {
+        return String::new();
+    };
+    let operand_index = plan.weight_slot;
+    source.push_str(&format!(
+        "        long gather_off{operand_index} = u.gather_index_base[{gather_slot}];\n"
+    ));
+    for (index, axis) in output_axes.iter().enumerate() {
+        source.push_str(&format!(
+            "        gather_off{operand_index} += coord{index} * u.gather_index_strides[{gather_slot}][{axis}];\n"
+        ));
+    }
+    source.push_str(&format!(
+        "        long fetched{operand_index} = (long)gather_idx{gather_slot}[gather_off{operand_index}];\n\
+         \x20       if (lane == 0u && first_row + row < u.output_total) {{\n"
+    ));
+    push_gather_fault_check(source, operand_index, gather_slot, "            ");
+    source.push_str(&format!(
+        "        }}\n\
+         \x20       fetched{operand_index} = max((long)0, min(fetched{operand_index}, u.gather_extent[{gather_slot}] - 1));\n\
+         \x20       const long gather_base{operand_index} = fetched{operand_index} * u.gather_element_stride[{gather_slot}];\n"
+    ));
+    format!(" + gather_base{operand_index}")
 }
 
 fn staged_activation_load() -> String {

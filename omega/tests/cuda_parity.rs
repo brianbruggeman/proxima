@@ -5648,6 +5648,18 @@ async fn q6_k_reader_and_q3_k_reader_share_one_derived_node_and_only_the_eligibl
 }
 
 fn gathered_expert_program(n_experts: u32, rows: u32, k: u32, seq: u32) -> (Vec<Op>, NodeId) {
+    gathered_expert_program_with_activation(n_experts, rows, k, seq, false)
+}
+
+/// With `shared_activation` the activation is one row of `k` that every routed expert reads,
+/// as a decode step's single token feeds all of its selected experts.
+fn gathered_expert_program_with_activation(
+    n_experts: u32,
+    rows: u32,
+    k: u32,
+    seq: u32,
+    shared_activation: bool,
+) -> (Vec<Op>, NodeId) {
     use proxima_tensor::map::{AxisIndex, AxisTerm};
 
     let mut program = Vec::new();
@@ -5662,12 +5674,13 @@ fn gathered_expert_program(n_experts: u32, rows: u32, k: u32, seq: u32) -> (Vec<
         "weight",
     );
     let route = append_input(&mut program, DType::INT32, vec![Extent::Static(seq)], "route");
-    let activation = append_input(
-        &mut program,
-        DType::FLOAT32,
-        vec![Extent::Static(seq), Extent::Static(k)],
-        "activation",
-    );
+    let activation_axes: &[u16] = if shared_activation { &[2] } else { &[0, 2] };
+    let activation_shape = if shared_activation {
+        vec![Extent::Static(k)]
+    } else {
+        vec![Extent::Static(seq), Extent::Static(k)]
+    };
+    let activation = append_input(&mut program, DType::FLOAT32, activation_shape, "activation");
     let axis = |dim: u16| AxisIndex {
         terms: core::iter::once(AxisTerm::projection(dim)).collect(),
         offset: 0,
@@ -5689,7 +5702,7 @@ fn gathered_expert_program(n_experts: u32, rows: u32, k: u32, seq: u32) -> (Vec<
             body: ScalarOp::Multiply,
             operands: vec![
                 (weight, gather_map),
-                (activation, IndexMap::Affine(map::projection(3, &[0, 2]))),
+                (activation, IndexMap::Affine(map::projection(3, activation_axes))),
             ],
             name: None,
         },
@@ -5896,6 +5909,87 @@ fn an_out_of_range_stacked_q8_0_expert_route_faults_on_the_lean_gathered_loop() 
 
     let error = run_q8_0_expert_stack_relaxed(&packed, &route, &activation)
         .expect_err("an out-of-range expert route must fault on cuda, not clamp");
+
+    match error {
+        BackendError::Cuda(omega::CudaDriverError::GatherIndexOutOfRange { index: 999, .. }) => {}
+        other => panic!("expected a cuda GatherIndexOutOfRange at index 999, got {other:?}"),
+    }
+}
+
+fn run_q8_0_expert_stack_staged(
+    packed: &[u8],
+    route: &[f32],
+    activation: &[f32],
+) -> (Vec<String>, Result<Vec<f32>, BackendError>) {
+    let (program, sum) = gathered_expert_program_with_activation(
+        STACKED_EXPERTS as u32,
+        STACKED_ROWS as u32,
+        STACKED_DEPTH as u32,
+        route.len() as u32,
+        true,
+    );
+    let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
+        ("weight", QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: packed }),
+        ("route", QuantizedBlock::Float32(route)),
+        ("activation", QuantizedBlock::Float32(activation)),
+    ];
+    let policy = NumericPolicy::default().with_activation_quantization(true);
+    let mut plan = plan_named(Engine::Gpu, Some(GpuDriver::Cuda), &program, &[], &named, &[sum], policy)
+        .expect("omega::backend plans the stacked q8_0 expert reduce on cuda");
+    let identities = cuda_kernel_identities(&plan).expect("a cuda plan");
+    let result = execute_plan_named(&mut plan, &named).map(|run| run.root().to_vec());
+    (identities, result)
+}
+
+#[test]
+fn a_stacked_q8_0_expert_product_on_the_staged_gathered_dp4a_matches_the_int8_grid_oracle_on_cuda() {
+    let (packed, stored) = q8_0_expert_stack(721);
+    let route = [31.0f32, 0.0, 17.0, 5.0, 22.0, 9.0, 30.0, 12.0];
+    let raw: Vec<f32> = random_vec(722, STACKED_DEPTH).into_iter().map(|value| value * 2.0 - 1.0).collect();
+    let rounded = on_the_int8_grid(&raw);
+
+    let (identities, result) = run_q8_0_expert_stack_staged(&packed, &route, &raw);
+    let output = result.expect("a valid route runs on a real cuda device");
+
+    assert!(
+        identities.iter().any(|identity| identity.contains("_smv") && identity.contains("_sg1")),
+        "the stacked expert product must lower to the gathered staged dp4a matvec, got {:?}",
+        identities.iter().map(|identity| identity.lines().next()).collect::<Vec<_>>()
+    );
+    assert_eq!(output.len(), route.len() * STACKED_ROWS, "one output per (expert slot, row)");
+    let peak = output.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    assert!(peak > 0.0, "an all-zero output would make parity vacuous");
+    let mut worst = 0.0f64;
+    for (slot, &expert) in route.iter().enumerate() {
+        for row in 0..STACKED_ROWS {
+            let start = (expert as usize * STACKED_ROWS + row) * STACKED_DEPTH;
+            let exact: f64 = stored[start..start + STACKED_DEPTH]
+                .iter()
+                .zip(&rounded)
+                .map(|(weight, input)| f64::from(*weight) * f64::from(*input))
+                .sum();
+            worst = worst.max((f64::from(output[slot * STACKED_ROWS + row]) - exact).abs());
+        }
+    }
+    assert!(
+        worst / f64::from(peak) < 1e-5,
+        "staged gathered q8_0 expert product differs from the int8-grid oracle by {worst} of peak {peak}"
+    );
+    assert_ne!(
+        &output[..STACKED_ROWS],
+        &output[STACKED_ROWS..2 * STACKED_ROWS],
+        "degenerate control: slots routed to different experts produced identical rows"
+    );
+}
+
+#[test]
+fn an_out_of_range_stacked_q8_0_expert_route_faults_on_the_staged_gathered_dp4a() {
+    let (packed, _) = q8_0_expert_stack(723);
+    let route = [31.0f32, 0.0, 999.0, 5.0, 22.0, 9.0, 30.0, 12.0];
+    let activation: Vec<f32> = random_vec(724, STACKED_DEPTH);
+
+    let (_, result) = run_q8_0_expert_stack_staged(&packed, &route, &activation);
+    let error = result.expect_err("an out-of-range expert route must fault on cuda, not clamp");
 
     match error {
         BackendError::Cuda(omega::CudaDriverError::GatherIndexOutOfRange { index: 999, .. }) => {}
