@@ -6,6 +6,8 @@ use std::thread;
 
 use proxima_core::kv_carry::{Appended, Extent, KvCarry, KvCarryError, KvCommand, KvEvent, RowPair};
 use proxima_core::{ServingFsmError, ServingState};
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use proxima_numeric::NumericFormat;
 
 use super::drafter::{DrafterSet, draft_limit_for_step};
 use super::host_kv_rounding::HostCacheRounding;
@@ -4832,28 +4834,6 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     // counts read off the `Vec`s themselves (a size, not a timing),
                     // so it is exact and needs no instrumentation to be turned on.
                     #[cfg(feature = "instrument")]
-                    let kv_cache_upload_elements: u64 = layer_caches
-                        .iter()
-                        .map(|cache| match cache {
-                            LayerCacheState::Attention(cache) => {
-                                (cache.k_even.len() + cache.k_odd.len() + cache.v.len()) as u64
-                            }
-                            LayerCacheState::DenseAttention(cache) => {
-                                (cache.k_first.len()
-                                    + cache.k_second.len()
-                                    + cache.k_pass.len()
-                                    + cache.v.len()) as u64
-                            }
-                            LayerCacheState::ShortConv(cache) => {
-                                (cache.history.len() + cache.roll_indices.len()) as u64
-                            }
-                            LayerCacheState::Ssm(cache) => {
-                                (cache.conv_history.len() + cache.state.len()) as u64
-                            }
-                            LayerCacheState::SharedFromLayer => 0,
-                        })
-                        .sum();
-                    #[cfg(feature = "instrument")]
                     let ssm_state_transfer_bytes: u64 = layer_caches
                         .iter()
                         .filter_map(|cache| match cache {
@@ -4987,6 +4967,38 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     };
                     #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
                     let device_cache_codec: (Option<Codec>, Option<Codec>) = (None, None);
+                    // counted after adoption: a device-resident layer binds its device buffers, so none of its
+                    // host cache is uploaded (push_kv_named_blocks skips it)
+                    #[cfg(feature = "instrument")]
+                    let kv_cache_upload_bytes: u64 = layer_caches
+                        .iter()
+                        .enumerate()
+                        .filter(|(layer, _)| {
+                            !device_resident_view.get(*layer).copied().unwrap_or(false)
+                        })
+                        .map(|(_, cache)| match cache {
+                            LayerCacheState::Attention(cache) => {
+                                host_slice_bytes(&cache.k_even)
+                                    + host_slice_bytes(&cache.k_odd)
+                                    + host_slice_bytes(&cache.v)
+                            }
+                            LayerCacheState::DenseAttention(cache) => {
+                                host_slice_bytes(&cache.k_first)
+                                    + host_slice_bytes(&cache.k_second)
+                                    + host_slice_bytes(&cache.k_pass)
+                                    + host_slice_bytes(&cache.v)
+                            }
+                            LayerCacheState::ShortConv(cache) => {
+                                host_slice_bytes(&cache.history)
+                                    + host_slice_bytes(&cache.roll_indices)
+                            }
+                            LayerCacheState::Ssm(cache) => {
+                                host_slice_bytes(&cache.conv_history)
+                                    + host_slice_bytes(&cache.state)
+                            }
+                            LayerCacheState::SharedFromLayer => 0,
+                        })
+                        .sum();
                     let sliding_len_scalar = sliding_cached_len_scalar(&layer_caches, cached_len);
                     #[cfg(feature = "instrument")]
                     let push_named_blocks_started = read_ticks();
@@ -6153,11 +6165,26 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     {
                         runtime.plan_handoff_reuses += metal_stage.plan_handoff_reuses;
                     }
+                    #[cfg(all(
+                        feature = "instrument",
+                        not(all(feature = "metal-output-placement", target_os = "macos"))
+                    ))]
+                    let device_kv_step_write_bytes = 0u64;
+                    #[cfg(all(
+                        feature = "instrument",
+                        feature = "metal-output-placement",
+                        target_os = "macos"
+                    ))]
+                    let mut device_kv_step_write_bytes = 0u64;
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if let Some(device) = device_kv.as_ref() {
                         #[cfg(feature = "instrument")]
                         let narrow_started = read_ticks();
                         device.commit_step(cached_len, new_count)?;
+                        #[cfg(feature = "instrument")]
+                        {
+                            device_kv_step_write_bytes = device.step_write_bytes(new_count);
+                        }
                         #[cfg(feature = "instrument")]
                         debug!(
                             step = step as u64,
@@ -6364,7 +6391,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     #[cfg(feature = "instrument")]
                     let layer_cache_append_started = read_ticks();
                     #[cfg(feature = "instrument")]
-                    let mut layer_cache_append_elements: u64 = 0;
+                    let mut layer_cache_append_host_bytes = 0u64;
                     // History-carry bisection step 3 (the routed history-carry diagnostic):
                     // before-state for layers 0 (GDN) and 3 (this checkpoint's
                     // first attention layer, 3-GDN-to-1-attention interleave) --
@@ -6417,9 +6444,9 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                     .ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
                                 #[cfg(feature = "instrument")]
                                 {
-                                    layer_cache_append_elements +=
-                                        (even_data.len() + odd_data.len() + value_data.len())
-                                            as u64;
+                                    layer_cache_append_host_bytes += host_slice_bytes(even_data)
+                                        + host_slice_bytes(odd_data)
+                                        + host_slice_bytes(value_data);
                                 }
                                 host_cache_rounding.append_attention(
                                     cache,
@@ -6459,11 +6486,10 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                     .ok_or(InteropError::MissingEvaluatedNode { node: *value })?;
                                 #[cfg(feature = "instrument")]
                                 {
-                                    layer_cache_append_elements += (first_data.len()
-                                        + second_data.len()
-                                        + pass_data.len()
-                                        + value_data.len())
-                                        as u64;
+                                    layer_cache_append_host_bytes += host_slice_bytes(first_data)
+                                        + host_slice_bytes(second_data)
+                                        + host_slice_bytes(pass_data)
+                                        + host_slice_bytes(value_data);
                                 }
                                 host_cache_rounding.append_dense(
                                     cache,
@@ -6514,8 +6540,8 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                 };
                                 #[cfg(feature = "instrument")]
                                 {
-                                    layer_cache_append_elements += qkv_mixed_data.len() as u64
-                                        + state_out_data.map_or(0, |data| data.len() as u64);
+                                    layer_cache_append_host_bytes += host_slice_bytes(qkv_mixed_data)
+                                        + state_out_data.map_or(0, host_slice_bytes);
                                     debug!(
                                         layer = layer as u64,
                                         qkv_mixed_elements = qkv_mixed_data.len() as u64,
@@ -6558,7 +6584,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                 )?;
                                 #[cfg(feature = "instrument")]
                                 {
-                                    layer_cache_append_elements += history.len() as u64;
+                                    layer_cache_append_host_bytes += host_slice_bytes(history);
                                 }
                                 cache.replace_history(history, layer)?;
                             }
@@ -7190,11 +7216,12 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                 build_position_inputs_ticks,
                                 named_blocks_weights_ticks,
                                 named_blocks_kv_ticks,
-                                kv_cache_upload_bytes: kv_cache_upload_elements * 4,
+                                kv_cache_upload_bytes,
                                 ssm_state_transfer_bytes,
                                 evaluate_ticks,
                                 layer_cache_append_ticks,
-                                layer_cache_append_bytes: layer_cache_append_elements * 4,
+                                layer_cache_append_bytes: layer_cache_append_host_bytes
+                                    + device_kv_step_write_bytes,
                                 greedy_pick_ticks,
                             });
                             // ROW 130's per-step-reset attribution: kernel / dispatch+
@@ -7561,8 +7588,9 @@ not read this cache format; only the single-row decode kernel reads it from the 
             serving_config.kv_bucket_tokens,
         );
 
-        let row_bytes_even_odd = kv_heads * pairs * core::mem::size_of::<f32>();
-        let row_bytes_v = kv_heads * head_dim * core::mem::size_of::<f32>();
+        let placed_format = NumericFormat::Float32;
+        let row_bytes_even_odd = kv_heads * pairs * placed_format.size_bytes();
+        let row_bytes_v = kv_heads * head_dim * placed_format.size_bytes();
         let capacity_even_odd = positions_needed * row_bytes_even_odd;
         let capacity_v = positions_needed * row_bytes_v;
 
@@ -8057,7 +8085,12 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         // `evaluate_ticks` already timed, so there is no
                         // second cost to attribute here.
                         layer_cache_append_ticks: 0,
-                        layer_cache_append_bytes: 0,
+                        layer_cache_append_bytes: kv_cache_format::step_write_bytes(
+                            (&placed_format, &placed_format),
+                            new_count as u64,
+                            (0..block_count)
+                                .map(|_| ((kv_heads * pairs) as u64, (kv_heads * head_dim) as u64)),
+                        ),
                         greedy_pick_ticks,
                     });
                     #[cfg(all(feature = "metal", target_os = "macos"))]
