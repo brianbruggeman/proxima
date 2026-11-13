@@ -1772,7 +1772,8 @@ fn text_plan_token(
             (true, false) => "g",
             (false, false) => "",
         };
-        format!("_smv{}x{}{source}_gid64c9", staged_matvec::STAGED_WARPS, plan.rows)
+        let gathered = if plan.gather.is_some() { STAGED_GATHER_TOKEN } else { "" };
+        format!("_smv{}x{}{source}{gathered}_gid64c9", staged_matvec::STAGED_WARPS, plan.rows)
     } else if let Some(plan) = target
         .card_asm
         .then(|| mma_gemm_plan(resolved, quantized, numeric_policy))
@@ -1817,6 +1818,10 @@ fn text_plan_token(
 /// Entry-name token for the cooperative reduce whose lean loop folds the hoisted
 /// gather base into the row base (PROXNUM-311).
 const LEAN_GATHER_TOKEN: &str = "_lg1";
+
+/// Entry-name token for the staged matvec whose row address carries the selected expert's
+/// gather base, so a module compiled from the ungathered staged text is never served for it.
+const STAGED_GATHER_TOKEN: &str = "_sg1";
 
 /// The `(weight, activation)` operand slots of a Q4_0-weight matvec that the
 /// int8-activation `dp4a` body can serve: one `Multiply` over exactly two
@@ -3886,11 +3891,18 @@ fn render_reduce(
             1,
         );
         if plan.scratch {
-            source = source.replacen(
-                "const Uniforms* __restrict__ u_ptr\n",
-                "const Uniforms* __restrict__ u_ptr,\n    const int* __restrict__ staged_scratch\n",
-                1,
-            );
+            let (last_parameter, with_scratch) = if gather_count > 0 {
+                (
+                    "unsigned int* __restrict__ fault\n",
+                    "unsigned int* __restrict__ fault,\n    const int* __restrict__ staged_scratch\n",
+                )
+            } else {
+                (
+                    "const Uniforms* __restrict__ u_ptr\n",
+                    "const Uniforms* __restrict__ u_ptr,\n    const int* __restrict__ staged_scratch\n",
+                )
+            };
+            source = source.replacen(last_parameter, with_scratch, 1);
         }
         push_staged_matvec_body(&mut source, resolved, plan)?;
     } else if let Some(plan) = gemm {
@@ -5669,6 +5681,135 @@ mod tests {
         .into_iter()
         .next()
         .expect("one bound emitted")
+    }
+
+    /// `Σ_k experts[ids[s], r, k] * activation[k]` over `(s, r, k)`: a stacked MoE product
+    /// whose one activation row is shared by every routed expert.
+    fn stacked_expert_op(experts: u32, rows: u32, width: u32, slots: u32) -> BoundOp {
+        let mut program = Vec::new();
+        let weight = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::FLOAT32,
+                shape: vec![Extent::Static(experts), Extent::Static(rows), Extent::Static(width)],
+                name: None,
+            },
+        );
+        let ids = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::INT32,
+                shape: vec![Extent::Static(slots)],
+                name: None,
+            },
+        );
+        let activation = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::FLOAT32,
+                shape: vec![Extent::Static(width)],
+                name: None,
+            },
+        );
+        let axis = |dim: u16| map::AxisIndex {
+            terms: vec![AxisTerm::projection(dim)].into(),
+            offset: 0,
+            len: None,
+        };
+        let gathered_map = IndexMap::Computed {
+            indices: ids,
+            index_map: map::projection(3, &[0]),
+            base: map::IndexPattern {
+                iter_rank: 3,
+                axes: vec![map::AxisIndex::default(), axis(1), axis(2)],
+            },
+            gathered_dim: 0,
+        };
+        let product = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Multiply,
+                operands: vec![
+                    (weight, gathered_map),
+                    (activation, IndexMap::Affine(map::projection(3, &[2]))),
+                ],
+                name: None,
+            },
+        );
+        append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: product,
+                in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+                out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
+                keep: Keep::Reduce,
+                name: Some("stacked_expert_product".into()),
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("stacked expert reduce infers");
+        bind(
+            &program,
+            &shapes,
+            &[NodeId((program.len() - 1) as u32)],
+            proxima_numeric::NumericPolicy::default(),
+        )
+        .expect("stacked expert reduce lowers")
+        .into_iter()
+        .next()
+        .expect("one bound emitted")
+    }
+
+    #[test]
+    fn a_stacked_q8_0_expert_product_takes_the_staged_dp4a_with_the_gather_base_in_the_row_address() {
+        let bound = stacked_expert_op(32, 512, 1024, 8);
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        let kernel = emit_cuda_with_policy(
+            &bound,
+            &packed,
+            NumericPolicy::default().with_activation_quantization(true),
+        )
+        .expect("emit succeeds");
+        let source = &kernel.source;
+        let fetch = source.find("long fetched0 =").expect("per-row expert fetch");
+        let row = source
+            .find("const long row_element = u.operand_base[0] + packed_row * 1024 + gather_base0;")
+            .expect("row address carries the gather base");
+        assert!(fetch < row, "the expert fetch precedes the row address");
+        assert!(source.contains("__dp4a"), "the dot is the staged dp4a body");
+        assert!(source.contains("atomicExch(&fault[0]"), "an out-of-range expert records a fault");
+        assert!(kernel.entry.contains("_smv"), "{}", kernel.entry);
+        assert!(kernel.entry.contains("_sg1"), "{}", kernel.entry);
+        assert!(source.contains(&kernel.entry));
+    }
+
+    #[test]
+    fn a_stacked_q8_0_expert_product_without_the_activation_grant_declines_the_staged_plan() {
+        let bound = stacked_expert_op(32, 512, 1024, 8);
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        let kernel = emit_cuda_with_policy(&bound, &packed, NumericPolicy::default()).expect("emit succeeds");
+        assert!(!kernel.entry.contains("_smv"), "{}", kernel.entry);
+        assert!(!kernel.entry.contains("_sg1"), "{}", kernel.entry);
+        assert!(!kernel.source.contains("__dp4a"));
+    }
+
+    #[test]
+    fn a_staged_matvec_without_a_gather_keeps_its_entry_name_and_row_address() {
+        let (bound, weight) = q4_0_matvec_op(8, 64, true);
+        let packed = q4_0_packed(weight);
+        let kernel = emit_cuda_with_policy(
+            &bound,
+            &packed,
+            NumericPolicy::default().with_activation_quantization(true),
+        )
+        .expect("emit succeeds");
+        assert!(!kernel.entry.contains("_sg1"), "{}", kernel.entry);
+        assert!(!kernel.source.contains("gather_base"));
     }
 
     #[test]
