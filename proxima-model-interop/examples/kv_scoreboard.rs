@@ -52,6 +52,28 @@
 //!   --llama-commit ba3c05f71 --prox new=PATH_A --rounds 3 --fa-off-arm on
 //! ```
 //!
+//! Compare mode (`kv_scoreboard compare ...`, PROXNUM-413): the two arms are a baseline and a candidate
+//! build of proxima, not proxima and llama. Per model it runs `decode_gbps_baseline` (Metal,
+//! `--features std,metal`) and/or `bench_local` (CPU, `--features std`), release, one process at a time,
+//! rounds alternating A B / B A / A B. It prints text_hash equality, warm (run_index 1) decode ms/token and
+//! TTFT per round with means, CPU id-array equality, and machine load at start and before each flint
+//! pair; a non-zero exit or differing token counts marks the model INVALID. No verdict words.
+//!
+//! ```sh
+//! cargo build --release -p proxima-model-interop --example kv_scoreboard
+//! # build decode_gbps_baseline (--features std,metal) and bench_local (--features std) in the baseline
+//! # and the candidate checkout, then:
+//! kv_scoreboard compare --out ~/.cache/kvgate/compare \
+//!   --baseline-metal BASE/decode_gbps_baseline --candidate-metal CAND/decode_gbps_baseline \
+//!   --baseline-cpu BASE/bench_local --candidate-cpu CAND/bench_local \
+//!   --model granite=/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80 \
+//!   --model gemma4=/Users/brianbruggeman/.ollama/models/blobs/sha256-3646b4c147cd235a44d91df1546d3b7d8e29b547dbe4e1f80856419aa455e6fd \
+//!   --model flint=/Users/brianbruggeman/models/llm/flint-gguf/flint-UD-Q4_K_XL.gguf
+//! ```
+//!
+//! Optional: `--rounds 3 --cpu-rounds 1 --runs 2 --max-tokens 128 --cpu-tokens 16 --cpu-prompt TEXT`.
+//! Each child's stderr (and CPU stdout) is kept under `--out`.
+//!
 //! Output directory gets `raw.tsv` (one row per process with the parity columns), `logs/` (each
 //! child's stderr) and `scoreboard.md`.
 //!
@@ -3071,8 +3093,379 @@ fn run_stages(config: &Config, directory: &Path) -> Result<(), HarnessError> {
     Ok(())
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Side {
+    Baseline,
+    Candidate,
+}
+
+impl Side {
+    fn name(self) -> &'static str {
+        match self {
+            Side::Baseline => "baseline",
+            Side::Candidate => "candidate",
+        }
+    }
+
+    fn order(round: usize) -> [Side; 2] {
+        if round.is_multiple_of(2) {
+            [Side::Baseline, Side::Candidate]
+        } else {
+            [Side::Candidate, Side::Baseline]
+        }
+    }
+}
+
+/// One `decode_gbps_baseline run=done` line, the fields the compare mode reads.
+#[derive(Clone, Debug, PartialEq)]
+struct DoneRecord {
+    run_index: usize,
+    decode_ms: f64,
+    ttft_ms: f64,
+    tokens: usize,
+    text_hash: String,
+}
+
+struct MetalSample {
+    round: usize,
+    side: Side,
+    exit_code: Option<i32>,
+    records: Vec<DoneRecord>,
+}
+
+struct CpuSample {
+    round: usize,
+    side: Side,
+    exit_code: Option<i32>,
+    ids: Option<Vec<i64>>,
+}
+
+/// Compare mode: two proxima builds (baseline, candidate) of the same two example binaries.
+struct CompareConfig {
+    out: PathBuf,
+    models: Vec<(String, PathBuf)>,
+    metal: Option<(PathBuf, PathBuf)>,
+    cpu: Option<(PathBuf, PathBuf)>,
+    rounds: usize,
+    cpu_rounds: usize,
+    runs: usize,
+    max_tokens: usize,
+    cpu_prompt: String,
+    cpu_tokens: usize,
+}
+
+const COMPARE_VALUE_FLAGS: [&str; 12] = [
+    "--out",
+    "--model",
+    "--baseline-metal",
+    "--candidate-metal",
+    "--baseline-cpu",
+    "--candidate-cpu",
+    "--rounds",
+    "--cpu-rounds",
+    "--runs",
+    "--max-tokens",
+    "--cpu-prompt",
+    "--cpu-tokens",
+];
+
+fn parse_compare_config(arguments: impl IntoIterator<Item = String>) -> Result<CompareConfig, HarnessError> {
+    let mut values: BTreeMap<String, String> = BTreeMap::new();
+    let mut models = Vec::new();
+    let mut iterator = arguments.into_iter();
+    while let Some(flag) = iterator.next() {
+        if !COMPARE_VALUE_FLAGS.contains(&flag.as_str()) {
+            return Err(HarnessError::UnknownFlag(flag));
+        }
+        let value = iterator.next().ok_or_else(|| HarnessError::MissingValue(flag.clone()))?;
+        if flag == "--model" {
+            let (label, path) = value.split_once('=').ok_or_else(|| HarnessError::BadProx(value.clone()))?;
+            models.push((label.to_owned(), PathBuf::from(path)));
+        } else {
+            values.insert(flag, value);
+        }
+    }
+    if models.is_empty() {
+        return Err(HarnessError::MissingFlag("--model"));
+    }
+    let pair = |baseline: &'static str, candidate: &'static str| match (values.get(baseline), values.get(candidate)) {
+        (Some(left), Some(right)) => Ok(Some((PathBuf::from(left), PathBuf::from(right)))),
+        (None, None) => Ok(None),
+        (Some(_), None) => Err(HarnessError::MissingFlag(candidate)),
+        (None, Some(_)) => Err(HarnessError::MissingFlag(baseline)),
+    };
+    let metal = pair("--baseline-metal", "--candidate-metal")?;
+    let cpu = pair("--baseline-cpu", "--candidate-cpu")?;
+    if metal.is_none() && cpu.is_none() {
+        return Err(HarnessError::MissingFlag("--baseline-metal or --baseline-cpu"));
+    }
+    let out = values.get("--out").map(PathBuf::from).ok_or(HarnessError::MissingFlag("--out"))?;
+    Ok(CompareConfig {
+        out,
+        models,
+        metal,
+        cpu,
+        rounds: parse_value(&values, "--rounds", "a positive integer", 3)?,
+        cpu_rounds: parse_value(&values, "--cpu-rounds", "a positive integer", 1)?,
+        runs: parse_value(&values, "--runs", "a positive integer", 2)?,
+        max_tokens: parse_value(&values, "--max-tokens", "a positive integer", 128)?,
+        cpu_prompt: values
+            .get("--cpu-prompt")
+            .cloned()
+            .unwrap_or_else(|| SHORT_PROMPT.to_owned()),
+        cpu_tokens: parse_value(&values, "--cpu-tokens", "a positive integer", 16)?,
+    })
+}
+
+/// Every `run=done` line of a `decode_gbps_baseline` stderr log; `ttft_ms_precise` when the build logs it.
+fn parse_done_records(text: &str) -> Vec<DoneRecord> {
+    text.lines()
+        .filter(|line| line.contains("run=done"))
+        .filter_map(|line| {
+            let ttft = field_value(line, "ttft_ms_precise=").or_else(|| field_value(line, "ttft_ms="))?;
+            Some(DoneRecord {
+                run_index: field_value(line, "run_index=")?.parse().ok()?,
+                decode_ms: field_value(line, "decode_ms_per_token=")?.parse().ok()?,
+                ttft_ms: ttft.parse().ok()?,
+                tokens: field_value(line, "tokens_generated=")?.parse().ok()?,
+                text_hash: field_value(line, "text_hash=")?.to_owned(),
+            })
+        })
+        .collect()
+}
+
+/// The `"ids":[..]` array of the JSON object `bench_local` prints on stdout.
+fn parse_ids(stdout: &str) -> Option<Vec<i64>> {
+    let object = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| line.starts_with('{'))
+        .find_map(|line| serde_json::from_str::<Value>(line).ok())?;
+    object.get("ids")?.as_array()?.iter().map(Value::as_i64).collect()
+}
+
+fn warm_record(records: &[DoneRecord]) -> Option<&DoneRecord> {
+    records.iter().find(|record| record.run_index == 1)
+}
+
+fn distinct<T: Ord>(items: impl Iterator<Item = T>) -> Vec<T> {
+    let mut all: Vec<T> = items.collect();
+    all.sort();
+    all.dedup();
+    all
+}
+
+fn exit_text(code: Option<i32>) -> String {
+    code.map_or_else(|| "signal".to_owned(), |value| value.to_string())
+}
+
+fn number_text(value: Option<f64>) -> String {
+    value.map_or_else(|| "n/a".to_owned(), |number| format!("{number:.3}"))
+}
+
+fn mean_text(values: &[f64]) -> String {
+    if values.is_empty() { "n/a".to_owned() } else { number_text(Some(mean(values))) }
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+fn metal_warm(samples: &[MetalSample], round: usize, side: Side) -> Option<&DoneRecord> {
+    samples
+        .iter()
+        .find(|sample| sample.round == round && sample.side == side)
+        .and_then(|sample| warm_record(&sample.records))
+}
+
+fn metal_report(label: &str, samples: &[MetalSample]) -> String {
+    let mut invalid = Vec::new();
+    for sample in samples {
+        let who = format!("{} round {}", sample.side.name(), sample.round);
+        if sample.exit_code != Some(0) {
+            invalid.push(format!("{who} exited {}", exit_text(sample.exit_code)));
+        }
+        if warm_record(&sample.records).is_none() {
+            invalid.push(format!("{who} has no run_index=1 run=done record"));
+        }
+    }
+    let tokens = |side: Side| {
+        distinct(samples.iter().filter(|sample| sample.side == side).flat_map(|sample| sample.records.iter().map(|record| record.tokens)))
+    };
+    if tokens(Side::Baseline) != tokens(Side::Candidate) {
+        invalid.push(format!(
+            "tokens_generated differs between arms: baseline {:?} candidate {:?}",
+            tokens(Side::Baseline),
+            tokens(Side::Candidate)
+        ));
+    }
+    let hashes = distinct(samples.iter().flat_map(|sample| sample.records.iter().map(|record| record.text_hash.clone())));
+    let mut lines = vec![format!("== metal {label} ==")];
+    lines.push(format!("text_hash equal across all runs: {} hashes={hashes:?}", yes_no(hashes.len() == 1)));
+    let rounds = samples.iter().map(|sample| sample.round).max().map_or(0, |last| last + 1);
+    let mut decode = (Vec::new(), Vec::new());
+    let mut ttft = (Vec::new(), Vec::new());
+    lines.push("round  decode_ms/tok baseline  candidate   warm_ttft_ms baseline  candidate".to_owned());
+    for round in 0..rounds {
+        let base = metal_warm(samples, round, Side::Baseline);
+        let cand = metal_warm(samples, round, Side::Candidate);
+        decode.0.extend(base.map(|record| record.decode_ms));
+        decode.1.extend(cand.map(|record| record.decode_ms));
+        ttft.0.extend(base.map(|record| record.ttft_ms));
+        ttft.1.extend(cand.map(|record| record.ttft_ms));
+        lines.push(format!(
+            "{round:>5}  {:>14} {:>10}   {:>12} {:>10}",
+            number_text(base.map(|record| record.decode_ms)),
+            number_text(cand.map(|record| record.decode_ms)),
+            number_text(base.map(|record| record.ttft_ms)),
+            number_text(cand.map(|record| record.ttft_ms)),
+        ));
+    }
+    lines.push(format!("mean decode_ms/tok baseline {} candidate {}", mean_text(&decode.0), mean_text(&decode.1)));
+    lines.push(format!("mean warm_ttft_ms baseline {} candidate {}", mean_text(&ttft.0), mean_text(&ttft.1)));
+    lines.extend(invalid.iter().map(|reason| format!("INVALID: {reason}")));
+    lines.join("\n")
+}
+
+fn cpu_report(label: &str, samples: &[CpuSample]) -> String {
+    let mut invalid = Vec::new();
+    for sample in samples {
+        let who = format!("{} round {}", sample.side.name(), sample.round);
+        if sample.exit_code != Some(0) {
+            invalid.push(format!("{who} exited {}", exit_text(sample.exit_code)));
+        }
+        if sample.ids.is_none() {
+            invalid.push(format!("{who} printed no ids array"));
+        }
+    }
+    let length = |side: Side| {
+        distinct(samples.iter().filter(|sample| sample.side == side).filter_map(|sample| sample.ids.as_ref().map(Vec::len)))
+    };
+    if length(Side::Baseline) != length(Side::Candidate) {
+        invalid.push(format!(
+            "token counts differ between arms: baseline {:?} candidate {:?}",
+            length(Side::Baseline),
+            length(Side::Candidate)
+        ));
+    }
+    let arrays = distinct(samples.iter().filter_map(|sample| sample.ids.clone()));
+    let mut lines = vec![format!("== cpu {label} ==")];
+    lines.push(format!("ids equal across all runs: {}", yes_no(arrays.len() == 1)));
+    if arrays.len() > 1 {
+        lines.extend(samples.iter().map(|sample| format!("{} round {} ids={:?}", sample.side.name(), sample.round, sample.ids)));
+    } else {
+        lines.extend(arrays.iter().map(|ids| format!("ids={ids:?}")));
+    }
+    lines.extend(invalid.iter().map(|reason| format!("INVALID: {reason}")));
+    lines.join("\n")
+}
+
+fn print_load(why: &str) {
+    println!("load1 {:.2} ({why})", load1());
+}
+
+fn run_metal_sample(
+    config: &CompareConfig,
+    binary: &Path,
+    label: &str,
+    model: &Path,
+    side: Side,
+    round: usize,
+) -> Result<MetalSample, HarnessError> {
+    let output = Command::new(binary)
+        .env("PROXIMA_DECODE_MODEL_GGUF", model)
+        .env("PROXIMA_MAX_TOKENS", config.max_tokens.to_string())
+        .env("PROXIMA_IGNORE_EOS", "1")
+        .env("PROXIMA_RUNS", config.runs.to_string())
+        .env("PROXIMA_MEASURE_QUIET", "1")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(io_error(binary))?;
+    let log = config.out.join(format!("metal_{label}_{}_r{round}.err", side.name()));
+    fs::write(&log, &output.stderr).map_err(io_error(&log))?;
+    let records = parse_done_records(&String::from_utf8_lossy(&output.stderr));
+    Ok(MetalSample { round, side, exit_code: output.status.code(), records })
+}
+
+fn run_cpu_sample(
+    config: &CompareConfig,
+    binary: &Path,
+    label: &str,
+    model: &Path,
+    side: Side,
+    round: usize,
+) -> Result<CpuSample, HarnessError> {
+    let output = Command::new(binary)
+        .arg(model)
+        .arg("cpu")
+        .arg(&config.cpu_prompt)
+        .arg(config.cpu_tokens.to_string())
+        .stdin(Stdio::null())
+        .output()
+        .map_err(io_error(binary))?;
+    let log = config.out.join(format!("cpu_{label}_{}_r{round}.err", side.name()));
+    fs::write(&log, &output.stderr).map_err(io_error(&log))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json = config.out.join(format!("cpu_{label}_{}_r{round}.json", side.name()));
+    fs::write(&json, stdout.as_bytes()).map_err(io_error(&json))?;
+    Ok(CpuSample { round, side, exit_code: output.status.code(), ids: parse_ids(&stdout) })
+}
+
+fn pick(pair: &(PathBuf, PathBuf), side: Side) -> &Path {
+    match side {
+        Side::Baseline => &pair.0,
+        Side::Candidate => &pair.1,
+    }
+}
+
+/// `kv_scoreboard compare ...`: the two arms are two proxima builds, not proxima and llama-server, so
+/// this does not go through `Config`/`run` (which require `--llama`, `--llama-commit` and the llama
+/// parity record). It reuses `field_value`, `mean`, `load1` and `HarnessError` from this file. Children
+/// run one at a time, rounds alternate A B / B A, and no verdict is printed: numbers and equalities.
+fn run_compare(config: &CompareConfig) -> Result<(), HarnessError> {
+    fs::create_dir_all(&config.out).map_err(io_error(&config.out))?;
+    print_load("start");
+    for (label, model) in &config.models {
+        if let Some(pair) = &config.metal {
+            let mut samples = Vec::new();
+            for round in 0..config.rounds {
+                if label.contains("flint") {
+                    print_load(&format!("before metal {label} round {round} pair"));
+                }
+                for side in Side::order(round) {
+                    samples.push(run_metal_sample(config, pick(pair, side), label, model, side, round)?);
+                }
+            }
+            println!("{}", metal_report(label, &samples));
+        }
+        if let Some(pair) = &config.cpu {
+            let mut samples = Vec::new();
+            for round in 0..config.cpu_rounds {
+                if label.contains("flint") {
+                    print_load(&format!("before cpu {label} round {round} pair"));
+                }
+                for side in Side::order(round) {
+                    samples.push(run_cpu_sample(config, pick(pair, side), label, model, side, round)?);
+                }
+            }
+            println!("{}", cpu_report(label, &samples));
+        }
+    }
+    Ok(())
+}
+
 fn main() {
-    let outcome = parse_config(std::env::args().skip(1)).and_then(|config| match &config.stages {
+    let mut arguments = std::env::args().skip(1).peekable();
+    if arguments.peek().map(String::as_str) == Some("compare") {
+        arguments.next();
+        let outcome = parse_compare_config(arguments).and_then(|config| run_compare(&config));
+        if let Err(error) = outcome {
+            eprintln!("kv_scoreboard compare: {error}");
+            std::process::exit(2);
+        }
+        return;
+    }
+    let outcome = parse_config(arguments).and_then(|config| match &config.stages {
         Some(directory) => run_stages(&config, directory),
         None => run(&config),
     });
@@ -4095,6 +4488,85 @@ op_profile_kind step=3 kind=cached_attention_merge op_count=35 gpu_ms=0.500 oper
         let rows = error_rows(0, "llama", "84", 1.5, &error);
         assert_eq!(rows.len(), 1);
         assert!(rows[0].value.is_none() && rows[0].note.contains("25000000000"));
+    }
+
+    const GRANITE_DONE_0: &str = "decode_gbps_baseline run=done run_index=0 wall_ms=2299.042 cpu_user_ms=289.707 cpu_sys_ms=163.703 cpu_ms=453.410 cpu_pct=19.72 tokens_generated=128 prompt_token_count=36 text_hash=fd64fab40cc5300b stopped_by_eos=false decode_ms_per_token=7.048 decode_step_ms_per_token=6.996893 ttft_ms=1404 ttft_ms_precise=1404.338666 gpu_peak_bytes=1449721856";
+    const GRANITE_DONE_1_A: &str = "decode_gbps_baseline run=done run_index=1 wall_ms=641.283 cpu_user_ms=124.377 cpu_sys_ms=65.697 cpu_ms=190.074 cpu_pct=29.64 tokens_generated=128 prompt_token_count=36 text_hash=fd64fab40cc5300b stopped_by_eos=false decode_ms_per_token=4.742 decode_step_ms_per_token=4.681809 ttft_ms=39 ttft_ms_precise=39.920334 gpu_peak_bytes=1449721856";
+    const GRANITE_DONE_1_B: &str = "decode_gbps_baseline run=done run_index=1 wall_ms=639.883 cpu_user_ms=116.291 cpu_sys_ms=71.565 cpu_ms=187.856 cpu_pct=29.36 tokens_generated=128 prompt_token_count=36 text_hash=fd64fab40cc5300b stopped_by_eos=false decode_ms_per_token=4.723 decode_step_ms_per_token=4.674664 ttft_ms=40 ttft_ms_precise=40.380833 gpu_peak_bytes=1449721856";
+    const GRANITE_CPU_JSON: &str = r#"{"model":"/Users/brianbruggeman/.ollama/models/blobs/sha256-cd60b3e8bb445d4c05e0b0b99b1bb41e8bb77211b161e783c71931168131df80","model_bytes":1422239776,"backend":"cpu","generated_tokens":16,"ttft_ms":7065.017958,"stopped_by_eos":false,"ids":[46, 110, 389, 48, 496, 78, 96, 46, 110, 389, 48, 496, 78, 96, 46, 110],"text":"<|turn>user\\n<|turn>user\\n<|","verification":null}"#;
+
+    fn metal_sample(round: usize, side: Side, exit_code: Option<i32>, lines: &[&str]) -> MetalSample {
+        MetalSample { round, side, exit_code, records: parse_done_records(&lines.join("\n")) }
+    }
+
+    #[test]
+    fn done_line_fields_parse_with_precise_ttft_preferred() {
+        let records = parse_done_records(&format!("noise\n{GRANITE_DONE_0}\n{GRANITE_DONE_1_A}\n"));
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].run_index, 0);
+        assert_eq!(records[0].tokens, 128);
+        assert_eq!(records[0].text_hash, "fd64fab40cc5300b");
+        assert!((records[1].decode_ms - 4.742).abs() < 1e-9);
+        assert!((records[1].ttft_ms - 39.920334).abs() < 1e-9);
+    }
+
+    #[test]
+    fn cpu_ids_parse_from_bench_local_stdout() {
+        let ids = parse_ids(&format!("{GRANITE_CPU_JSON}\n")).expect("ids array");
+        assert_eq!(ids.len(), 16);
+        assert_eq!(ids[..3], [46, 110, 389]);
+        assert!(parse_ids("bench_local: task=causal-generation").is_none());
+    }
+
+    #[test]
+    fn metal_report_prints_means_and_equal_hashes() {
+        let samples = vec![
+            metal_sample(0, Side::Baseline, Some(0), &[GRANITE_DONE_0, GRANITE_DONE_1_A]),
+            metal_sample(0, Side::Candidate, Some(0), &[GRANITE_DONE_0, GRANITE_DONE_1_B]),
+        ];
+        let report = metal_report("granite", &samples);
+        assert!(report.contains("text_hash equal across all runs: yes"), "{report}");
+        assert!(report.contains("mean decode_ms/tok baseline 4.742 candidate 4.723"), "{report}");
+        assert!(report.contains("mean warm_ttft_ms baseline 39.920 candidate 40.381"), "{report}");
+        assert!(!report.contains("INVALID"), "{report}");
+    }
+
+    #[test]
+    fn metal_report_is_invalid_on_nonzero_exit_and_differing_tokens() {
+        let short = GRANITE_DONE_1_B.replace("tokens_generated=128", "tokens_generated=64").replace("fd64fab40cc5300b", "0fdd5e0899b16903");
+        let samples = vec![
+            metal_sample(0, Side::Baseline, Some(0), &[GRANITE_DONE_0, GRANITE_DONE_1_A]),
+            metal_sample(0, Side::Candidate, Some(134), &[&short]),
+        ];
+        let report = metal_report("granite", &samples);
+        assert!(report.contains("text_hash equal across all runs: no"), "{report}");
+        assert!(report.contains("INVALID: candidate round 0 exited 134"), "{report}");
+        assert!(report.contains("INVALID: tokens_generated differs between arms"), "{report}");
+    }
+
+    #[test]
+    fn cpu_report_prints_both_arrays_when_they_differ() {
+        let other = GRANITE_CPU_JSON.replace("[46, 110", "[47, 110");
+        let samples = vec![
+            CpuSample { round: 0, side: Side::Baseline, exit_code: Some(0), ids: parse_ids(GRANITE_CPU_JSON) },
+            CpuSample { round: 0, side: Side::Candidate, exit_code: Some(0), ids: parse_ids(&other) },
+        ];
+        let report = cpu_report("granite", &samples);
+        assert!(report.contains("ids equal across all runs: no"), "{report}");
+        assert!(report.contains("baseline round 0 ids=Some([46,") && report.contains("candidate round 0 ids=Some([47,"), "{report}");
+        assert!(!report.contains("INVALID"), "{report}");
+    }
+
+    #[test]
+    fn compare_config_needs_a_complete_binary_pair() {
+        let base = ["--out", "o", "--model", "granite=/m/g.gguf"].map(str::to_owned);
+        let mut arguments = base.to_vec();
+        arguments.extend(["--baseline-metal", "a"].map(str::to_owned));
+        assert!(parse_compare_config(arguments.clone()).is_err());
+        arguments.extend(["--candidate-metal", "b"].map(str::to_owned));
+        let config = parse_compare_config(arguments).expect("metal pair");
+        assert_eq!(config.models.len(), 1);
+        assert_eq!((config.rounds, config.runs, config.max_tokens), (3, 2, 128));
     }
 
     #[test]
