@@ -42,6 +42,12 @@
 //! runtime-prime-bgpool,http1-native,macros" -- <gguf-path> [bind-addr]
 //! [max-tokens]`
 //!
+//! Env read per request, same meaning as `decode_gbps_baseline`: `PROXIMA_IGNORE_EOS`,
+//! `PROXIMA_KV_CACHE_TYPE`, `PROXIMA_KV_CACHE_KEY_TYPE`, `PROXIMA_KV_BUCKET_TOKENS`,
+//! `PROXIMA_EPILOGUE_SOURCES`, `PROXIMA_RESIDENT_PREFILL_PLAN_BYTES`,
+//! `PROXIMA_RESIDENT_KV_BYTES`, `PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD`,
+//! `PROXIMA_SPECULATIVE_*` (read once at startup).
+//!
 //! Set `PROXIMA_QWEN35MOE_SIDECAR` to mmap and validate an expert sidecar at
 //! startup. The model owns the mapping and descriptor index after
 //! `LoadedModel::attach_expert_sidecar`; every routed-expert boundary can
@@ -52,10 +58,12 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::future::Future;
 use std::path::Path;
+use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
+use conflaguration::Settings as _;
 use memmap2::MmapOptions;
 use proxima::SendPipe;
 use proxima::error::ProximaError;
@@ -66,9 +74,10 @@ use proxima::runtime::PrimeServeExt;
 use proxima_gguf::pipe::parse_complete;
 use proxima_gguf::value::MetadataValue;
 use proxima_model_interop::{
-    CheckpointMapping, LoadedModel, MappedExpertSidecar, ServingConfig, ServingSettings,
+    CheckpointMapping, GPU_LAYERS_ALL, LoadedModel, MappedExpertSidecar, PromptCacheConfig,
+    ServingConfig, ServingSettings, SpeculativeSettings,
 };
-use proxima_numeric::NumericFormat;
+use proxima_numeric::{NumericFormat, NumericPolicy};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -122,24 +131,86 @@ fn render_prompt(messages: &[ChatMessage]) -> String {
     prompt
 }
 
-fn supported_serving_config(model_path: &str, moe_pre_gather: bool) -> ServingConfig<'_> {
-    ServingConfig {
+fn env_parsed<T: FromStr>(name: &str, fallback: T) -> Result<T, String> {
+    match std::env::var(name) {
+        Ok(value) => value
+            .parse()
+            .map_err(|_| format!("{name}={value}: not parseable")),
+        Err(_) => Ok(fallback),
+    }
+}
+
+fn env_format(name: &str, fallback: NumericFormat) -> Result<NumericFormat, String> {
+    match std::env::var(name) {
+        Ok(value) => NumericFormat::from_name(&value)
+            .ok_or_else(|| format!("{name}={value}: not a NumericFormat name")),
+        Err(_) => Ok(fallback),
+    }
+}
+
+fn env_epilogue_policy() -> Result<NumericPolicy, String> {
+    let policy = ServingConfig::default().numeric_policy;
+    match std::env::var("PROXIMA_EPILOGUE_SOURCES").as_deref() {
+        Ok("0") => Ok(policy.with_epilogue_sources(false)),
+        Ok("1") => Ok(policy.with_epilogue_sources(true)),
+        Ok(other) => Err(format!("PROXIMA_EPILOGUE_SOURCES={other}: expected 0 or 1")),
+        Err(_) => Ok(policy),
+    }
+}
+
+fn warm_at_load() -> Result<bool, String> {
+    match std::env::var("PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD").as_deref() {
+        Ok("true") => Ok(true),
+        Ok("false") => Ok(false),
+        Ok(other) => Err(format!("PROXIMA_SERVING_WARM_MODEL_BUFFERS_AT_LOAD={other}: expected true or false")),
+        Err(_) => Ok(ServingConfig::default().warm_model_buffers_at_load),
+    }
+}
+
+fn ignore_eos_from_env() -> Result<bool, String> {
+    match std::env::var("PROXIMA_IGNORE_EOS").as_deref() {
+        Ok("1") => Ok(true),
+        Ok("0") | Err(_) => Ok(false),
+        Ok(other) => Err(format!("PROXIMA_IGNORE_EOS={other}: expected 0 or 1")),
+    }
+}
+
+fn supported_serving_config<'config>(
+    model_path: &'config str,
+    moe_pre_gather: bool,
+    speculative: &'config SpeculativeSettings,
+) -> Result<ServingConfig<'config>, String> {
+    let defaults = ServingConfig::default();
+    let value_quant = env_format("PROXIMA_KV_CACHE_TYPE", defaults.kv_cache_value_quant)?;
+    Ok(ServingConfig {
         model_path,
-        kv_cache_key_quant: NumericFormat::Float32,
-        kv_cache_value_quant: NumericFormat::Float32,
+        speculative: speculative.as_speculative_config(),
+        ignore_eos: ignore_eos_from_env()?,
+        warm_model_buffers_at_load: warm_at_load()?,
+        numeric_policy: env_epilogue_policy()?,
+        kv_cache_key_quant: env_format("PROXIMA_KV_CACHE_KEY_TYPE", value_quant)?,
+        kv_cache_value_quant: value_quant,
+        kv_bucket_tokens: env_parsed("PROXIMA_KV_BUCKET_TOKENS", defaults.kv_bucket_tokens)?,
+        resident_prefill_plan_bytes: env_parsed(
+            "PROXIMA_RESIDENT_PREFILL_PLAN_BYTES",
+            defaults.resident_prefill_plan_bytes,
+        )?,
+        resident_kv_bytes: env_parsed("PROXIMA_RESIDENT_KV_BYTES", defaults.resident_kv_bytes)?,
+        prompt_cache: PromptCacheConfig::off(),
         flash_attention: false,
         batch_size: 0,
         ubatch_size: 0,
-        gpu_layers: 0,
+        gpu_layers: GPU_LAYERS_ALL,
         reasoning_budget: 0,
         moe_pre_gather,
-        ..ServingConfig::default()
-    }
+        ..defaults
+    })
 }
 
 struct ChatCompletions {
     served: Arc<ServedModel>,
     gguf_path: String,
+    speculative: SpeculativeSettings,
 }
 
 impl SendPipe for ChatCompletions {
@@ -168,8 +239,12 @@ impl SendPipe for ChatCompletions {
             let prompt = render_prompt(&chat_request.messages);
 
             let sidecar_descriptors = self.served.model.expert_sidecar_descriptor_count();
-            let serving_config =
-                supported_serving_config(&self.gguf_path, sidecar_descriptors != 0);
+            let serving_config = supported_serving_config(
+                &self.gguf_path,
+                sidecar_descriptors != 0,
+                &self.speculative,
+            )
+            .map_err(|error| ProximaError::Decode(format!("serving config: {error}")))?;
             let generate_started = Instant::now();
             let (generated_ids, text, _stopped_by_eos) = self
                 .served
@@ -279,9 +354,12 @@ fn main() -> Result<(), Box<dyn Error>> {
         has_chat_template,
         max_tokens,
     });
+    let speculative = SpeculativeSettings::from_env()
+        .map_err(|error| format!("PROXIMA_SPECULATIVE_* env: {error:?}"))?;
     let pipe = ChatCompletions {
         served,
         gguf_path: gguf_path.clone(),
+        speculative,
     };
     let handle_pipe = into_handle(pipe);
 
