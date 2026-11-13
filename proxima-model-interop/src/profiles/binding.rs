@@ -91,6 +91,13 @@ pub struct BindingProfile {
     #[setting(skip)]
     #[builder(default)]
     pub optional: Vec<String>,
+    /// Tensor-name prefixes the text forward graph never reads, matched from
+    /// the start of the name: a vision tower (`v.`, `mm.`) or a multi-token
+    /// prediction draft head (`mtp.`) stored beside the trunk. The census
+    /// accepts them; nothing binds, decodes or makes them resident.
+    #[setting(skip)]
+    #[builder(default)]
+    pub unread_prefixes: Vec<String>,
 }
 
 impl Validate for BindingProfile {
@@ -158,8 +165,22 @@ impl BindingProfile {
             .any(|extra| extra == name)
     }
 
+    /// `true` when `name` starts with one of [`Self::unread_prefixes`]: the
+    /// census claims it and the binder never touches it.
+    #[must_use]
+    pub fn is_unread(&self, name: &str) -> bool {
+        self.unread_prefixes
+            .iter()
+            .any(|prefix| name.starts_with(prefix.as_str()))
+    }
+
     fn inherits(self, defaults: Self) -> Self {
         Self {
+            unread_prefixes: self
+                .unread_prefixes
+                .into_iter()
+                .chain(defaults.unread_prefixes)
+                .collect(),
             aliases: self.aliases.into_iter().chain(defaults.aliases).collect(),
             decode_f32: self.decode_f32,
             extra: self.extra,
@@ -319,12 +340,50 @@ mod tests {
                 },
             ])
             .optional(vec!["rope_freqs.weight".into()])
+            .unread_prefixes(vec!["v.".into(), "mm.".into(), "mtp.".into()])
             .build();
 
         let loaded = parse("default", DEFAULT_BINDING).expect("default.toml loads");
 
         assert_eq!(built, loaded);
         assert!(built.validate().is_ok());
+    }
+
+    const TENSOR_NAME_FIXTURES: &[(&str, &str)] = &[
+        ("flint", include_str!("../../tests/fixtures/tensor_names/flint.txt")),
+        ("gemma4", include_str!("../../tests/fixtures/tensor_names/gemma4.txt")),
+        ("granite4", include_str!("../../tests/fixtures/tensor_names/granite4.txt")),
+        ("granitemoe", include_str!("../../tests/fixtures/tensor_names/granitemoe.txt")),
+        ("lfm2", include_str!("../../tests/fixtures/tensor_names/lfm2.txt")),
+        ("llama", include_str!("../../tests/fixtures/tensor_names/llama.txt")),
+        ("qwen25", include_str!("../../tests/fixtures/tensor_names/qwen25.txt")),
+        ("qwen3", include_str!("../../tests/fixtures/tensor_names/qwen3.txt")),
+    ];
+
+    #[test]
+    fn no_unread_prefix_matches_a_trunk_tensor_of_any_fixture_model() {
+        let profile = binding_profile("llama").expect("defaults parse");
+        let mut checked = 0;
+
+        for (model, listing) in TENSOR_NAME_FIXTURES {
+            for name in listing.lines().filter_map(|line| line.strip_prefix("tensor name=")) {
+                let name = name.split_whitespace().next().expect("a name follows the key");
+                assert!(!profile.is_unread(name), "{model}: trunk tensor {name} is unread");
+                checked += 1;
+            }
+        }
+
+        assert!(checked > 2000, "the fixtures name real tensors, got {checked}");
+    }
+
+    #[test]
+    fn the_unread_prefixes_match_from_the_start_of_the_name() {
+        let profile = binding_profile("qwen35").expect("qwen35 parses");
+
+        assert!(profile.is_unread("mtp.fc.weight"));
+        assert!(profile.is_unread("v.blk.0.attn_k.bias"));
+        assert!(profile.is_unread("mm.input_projection.weight"));
+        assert!(!profile.is_unread("blk.3.attn_v.weight"));
     }
 
     #[test]

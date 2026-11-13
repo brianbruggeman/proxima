@@ -299,7 +299,7 @@ pub(crate) fn bind_census<'parsed>(
 
     let unclaimed_tensors = directory
         .keys()
-        .filter(|name| !claimed.contains(*name))
+        .filter(|name| !claimed.contains(*name) && !binding.is_unread(name))
         .map(|name| String::from(*name))
         .collect();
     BindCensus {
@@ -1341,6 +1341,30 @@ mod tests {
         assert_eq!(name, "rope_freqs.weight");
         assert_eq!(values, &factors);
         assert_eq!(census, BindCensus::default(), "the tensor is claimed");
+    }
+
+    #[test]
+    fn a_draft_head_and_a_vision_tower_pass_the_census_and_are_never_bound() {
+        let weight = f32_bytes(&[1.0, 2.0, 3.0, 4.0]);
+        let bytes = gguf(&[
+            ("token_embd.weight", &[4], GgmlType::F32, &weight),
+            ("mtp.fc.weight", &[4], GgmlType::F32, &weight),
+            ("v.blk.0.attn_k.bias", &[4], GgmlType::F32, &weight),
+        ]);
+        let parsed = parse_complete(&bytes).expect("parses");
+        let profile = binding_profile("qwen35").expect("qwen35 binds");
+        let mut program = Vec::new();
+        input(&mut program, "token_embd.weight", &[4]);
+
+        let census = bind_census(&parsed, &program, &profile, &[]);
+        let weights = bind(&bytes, &program, &profile).expect("binds");
+
+        assert_eq!(census, BindCensus::default(), "the census accepts both");
+        assert!(
+            weights.owned().iter().all(|(name, _)| !name.starts_with("mtp.") && !name.starts_with("v.")),
+            "neither extra is decoded, got {:?}",
+            weights.owned().iter().map(|(name, _)| name).collect::<Vec<_>>()
+        );
     }
 
     #[test]

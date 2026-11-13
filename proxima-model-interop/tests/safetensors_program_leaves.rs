@@ -281,6 +281,7 @@ fn architecture_matrix_safetensors_program_leaves() {
                 Vec::new()
             },
             optional: Vec::new(),
+            unread_prefixes: Vec::new(),
         };
         let weights = bind_safetensors_program_leaves(
             &manifest,
