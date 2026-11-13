@@ -1742,6 +1742,45 @@ impl<'file> LoadedModel<'file> {
         )
     }
 
+    /// Hands `visit` the program, symbols, output roots and weight blocks the CUDA serving
+    /// decode loop binds for a step of `new_count` rows (`run_decode_loop_observed_seeded`):
+    /// the row-cut program when a multi-row call has one, else the model's own, rewritten
+    /// for separate device memory exactly as that loop does, at symbols
+    /// `[new_count, kv, kv]` with `kv = kv_capacity.max(1)`, the roots
+    /// `kv_padding_probe_roots` names, and the weights minus the hoisted tables
+    /// (`push_weight_blocks`). Nothing is evaluated: a caller binds the graph with
+    /// `omega::cuda_driver::probe_bound_graph`.
+    ///
+    /// # Errors
+    /// The host-rows rewrite or a weight block cannot be built.
+    #[cfg(feature = "cuda")]
+    pub fn with_cuda_bind_inputs<Output>(
+        &self,
+        new_count: usize,
+        kv_capacity: usize,
+        visit: impl FnOnce(&[Op], &[u64], &[NodeId], &[(&str, QuantizedBlock<'_>)]) -> Output,
+    ) -> Result<Output, InteropError> {
+        let (program, logits_root, layer_roots) = match self
+            .prefill_row_cut_program
+            .as_ref()
+            .filter(|_| new_count > 1)
+        {
+            Some((program, logits_root, layer_roots)) => (program, *logits_root, layer_roots),
+            None => (&self.program, self.logits_root, &self.layer_roots),
+        };
+        let executes = Executes::BASE.with_memory(DeviceMemory::Separate);
+        let rewrite = self.host_rewrite_for(&executes, program, new_count as u64)?;
+        let (device_program, hoisted): (&[Op], &[Hoisted]) = match &rewrite {
+            Some((device, _hash, hoisted)) => (device.as_slice(), hoisted.as_slice()),
+            None => (program.as_slice(), &[]),
+        };
+        let mut named_blocks: Vec<(&str, QuantizedBlock)> = Vec::new();
+        self.push_weight_blocks(&mut named_blocks, hoisted)?;
+        let extent = kv_capacity.max(1) as u64;
+        let outputs = kv_padding_probe_roots(logits_root, layer_roots);
+        Ok(visit(device_program, &[new_count as u64, extent, extent], &outputs, &named_blocks))
+    }
+
     /// This checkpoint's own static weight names -- `mark_resident`'s own
     /// caller-supplied classification (`BackendRuntime::evaluate`'s doc),
     /// bound once at [`Self::load`] time and never mutated again. Shared by
