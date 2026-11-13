@@ -16,9 +16,11 @@
 
 use std::fs;
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::slice;
 
 use conflaguration::{Settings, Validate};
+use proxima_telemetry::debug;
 use proxima_tensor::spec::{Activation, ExpertGatingFunc, RopeLayout};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -154,10 +156,7 @@ impl ArchConfigBuilder {
                 self.ffn_activation.is_some(),
                 self.value_norm.is_some(),
             ];
-            return Err(ArchConfig::missing(
-                "",
-                &unset_fields(present),
-            ));
+            return Err(ArchConfig::missing("", &unset_fields(present), &[]));
         };
         Ok(ArchConfig {
             rope_layout,
@@ -277,6 +276,22 @@ impl ArchConfig {
     /// [`InteropError::InvalidFamilyProfile`] when `architecture` is not a
     /// plain file stem, the file cannot be read, or it does not parse.
     pub fn load(dir: &Path, architecture: &str) -> Result<Self, InteropError> {
+        Self::load_from(&[dir.to_path_buf()], architecture)
+    }
+
+    /// Reads `<dir>/<architecture>.toml` from the first directory of `dirs`
+    /// that contains it, logging which one won; later directories are not
+    /// consulted. [`ArchConfigSettings::search_path`](crate::profiles::ArchConfigSettings::search_path)
+    /// builds the ordered list.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::MissingArchField`] when no directory has the file (naming
+    /// all three required fields and every directory searched, in order) or the
+    /// winning file lacks some fields; [`InteropError::InvalidFamilyProfile`]
+    /// when `architecture` is not a plain file stem, the file cannot be read, or
+    /// it does not parse.
+    pub fn load_from(dirs: &[PathBuf], architecture: &str) -> Result<Self, InteropError> {
         let invalid = |message: String| InteropError::InvalidFamilyProfile {
             family: architecture.into(),
             message,
@@ -288,11 +303,20 @@ impl ArchConfig {
         if !plain {
             return Err(invalid("architecture is not a plain file stem".into()));
         }
-        let path = dir.join(format!("{architecture}.toml"));
+        let file_name = format!("{architecture}.toml");
+        let Some(dir) = dirs.iter().find(|dir| dir.join(&file_name).is_file()) else {
+            return Err(Self::missing(architecture, &REQUIRED_FIELDS, dirs));
+        };
+        debug!(
+            family = ?architecture,
+            dir = ?dir,
+            "arch config found in the first search directory that has it"
+        );
+        let path = dir.join(&file_name);
         let text = match fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) if error.kind() == ErrorKind::NotFound => {
-                return Err(Self::missing(architecture, &REQUIRED_FIELDS));
+                return Err(Self::missing(architecture, &REQUIRED_FIELDS, dirs));
             }
             Err(error) => return Err(invalid(format!("{}: {error}", path.display()))),
         };
@@ -308,14 +332,23 @@ impl ArchConfig {
                 score_scale: raw.score_scale,
                 routed_gating: raw.routed_gating,
             }),
-            _ => Err(Self::missing(architecture, &missing)),
+            _ => Err(Self::missing(architecture, &missing, slice::from_ref(dir))),
         }
     }
 
-    fn missing(architecture: &str, fields: &[&str]) -> InteropError {
+    fn missing(architecture: &str, fields: &[&str], searched: &[PathBuf]) -> InteropError {
+        let searched = match searched {
+            [] => "no directory (built, not loaded)".to_owned(),
+            dirs => dirs
+                .iter()
+                .map(|dir| dir.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+        };
         InteropError::MissingArchField {
             architecture: architecture.into(),
             field: fields.join(", "),
+            searched,
         }
     }
 }

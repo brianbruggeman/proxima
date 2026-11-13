@@ -196,8 +196,16 @@ pub enum InteropError {
     /// config file is absent or lacks required fields. `field` names every
     /// missing field, comma separated (`"rope_layout, ffn_activation"`). Never
     /// defaulted: no checkpoint states these, so a guess changes every logit.
-    #[error("architecture {architecture:?} config is missing required field(s): {field}")]
-    MissingArchField { architecture: String, field: String },
+    /// `searched` lists every directory consulted, in order, so an operator
+    /// sees where to put `<architecture>.toml`.
+    #[error(
+        "architecture {architecture:?} config is missing required field(s): {field}; searched, in order: {searched}"
+    )]
+    MissingArchField {
+        architecture: String,
+        field: String,
+        searched: String,
+    },
 
     /// `crate::profiles::binding_profile`: an embedded binding file did not
     /// parse into `crate::profiles::BindingProfile`.
