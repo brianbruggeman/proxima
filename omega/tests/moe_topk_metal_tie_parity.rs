@@ -7,7 +7,7 @@
 //! within `1e-5` (looser: it accumulates `top_k` per-round weights, so its
 //! own floating error budget is `top_k` times a single weight's).
 
-#![cfg(all(feature = "metal", feature = "moe-topk-fusion", target_os = "macos"))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]
 
 use proxima_tensor::spec::{

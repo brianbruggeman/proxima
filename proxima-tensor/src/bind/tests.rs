@@ -687,7 +687,7 @@ fn cached_attention_rewrite_accepts_the_qwen3_gqa_qk_norm_fixture() {
 /// and that rebind used to discard every cached-attention op the earlier
 /// stage had spliced in, so decode ran the zero-padded kv bucket unmasked.
 #[test]
-#[cfg(all(feature = "cached-attention-streaming", feature = "moe-topk-fusion"))]
+#[cfg(feature = "cached-attention-streaming")]
 fn moe_topk_fusion_keeps_the_cached_attention_ops_of_a_moe_decoder() {
     const LAYERS: u32 = 3;
     let (program, roots, cache_roots, _moe_sites) =
@@ -6421,7 +6421,7 @@ mod gated_delta_net_tests {
 /// ROW 569 (`docs/discipline.md`) census: names every bound op
 /// [`crate::spec::append_moe_ffn`]'s own round loop builds
 /// at qwen35moe's real routing shape (256 experts, `expert_used_count`
-/// = 8), the shape `moe-topk-fusion`'s own `BoundOpKind` is meant to
+/// = 8), the shape the MoE top-k fusion's own `BoundOpKind` is meant to
 /// collapse into one bound op per layer -- no fusion runs here yet,
 /// this only counts and names what a future matcher must replace.
 mod moe_routing_census {
@@ -6628,7 +6628,6 @@ mod moe_routing_census {
     /// [`qwen35moe_routing_census_at_real_expert_shape`] does, returning
     /// every node a caller needs to fill inputs and read every routing
     /// output back out.
-    #[cfg(feature = "moe-topk-fusion")]
     struct RoutingProgram {
         program: Vec<Op>,
         x: NodeId,
@@ -6642,17 +6641,14 @@ mod moe_routing_census {
         weights: Vec<NodeId>,
     }
 
-    #[cfg(feature = "moe-topk-fusion")]
     fn build_routing_program() -> RoutingProgram {
         build_routing_program_with(MoeProjectionStrategy::PerRoute)
     }
 
-    #[cfg(feature = "moe-topk-fusion")]
     fn build_routing_program_with(strategy: MoeProjectionStrategy) -> RoutingProgram {
         build_routing_program_gated(strategy, ExpertGatingFunc::Softmax, false)
     }
 
-    #[cfg(feature = "moe-topk-fusion")]
     fn build_routing_program_gated(
         strategy: MoeProjectionStrategy,
         gating: ExpertGatingFunc,
@@ -6750,7 +6746,6 @@ mod moe_routing_census {
     /// "toward the lower index", which ROW 569's own census fixture
     /// proved is stale prose for the real `mask * iota -> reduce(Maximum)`
     /// construction).
-    #[cfg(feature = "moe-topk-fusion")]
     fn reference_topk(scores: &[f32], top_k: usize) -> (Vec<f32>, Vec<f32>, f32) {
         let mut live = scores.to_vec();
         let mut routes = Vec::with_capacity(top_k);
@@ -6800,7 +6795,6 @@ mod moe_routing_census {
     /// already inlines some of `match_moe_topk`'s `absorbed` nodes (e.g.
     /// each round's `candidate` multiply, single-consumer into `route`'s
     /// own reduce) before this fusion ever runs.
-    #[cfg(feature = "moe-topk-fusion")]
     #[test]
     fn fused_moe_topk_matches_unfused_routing_over_random_scores_and_exact_ties() {
         let built = build_routing_program();
@@ -6830,7 +6824,7 @@ mod moe_routing_census {
             .any(|bound| matches!(bound.kind, BoundOpKind::MoeTopK { .. }));
         assert!(
             matcher_fired,
-            "the moe-topk-fusion matcher must fire on the real qwen35moe routing shape, got \
+            "the MoE top-k fusion matcher must fire on the real qwen35moe routing shape, got \
              kinds {:?}",
             fused
                 .iter()
@@ -6839,7 +6833,7 @@ mod moe_routing_census {
         );
         let op_delta = unfused.len() - fused.len();
         println!(
-            "row 569 moe-topk-fusion op census: unfused = {}, fused = {}, delta = {op_delta}",
+            "row 569 MoE top-k fusion op census: unfused = {}, fused = {}, delta = {op_delta}",
             unfused.len(),
             fused.len()
         );
@@ -6967,12 +6961,95 @@ mod moe_routing_census {
         }
     }
 
+    fn moe_topk_op_count(bound: &[BoundOp]) -> usize {
+        bound
+            .iter()
+            .filter(|op| matches!(op.kind, BoundOpKind::MoeTopK { .. }))
+            .count()
+    }
+
+    /// PROXNUM-301: the binder admits the MoE top-k fusion by the backend's
+    /// [`Executes`] value, not by a cargo feature. The reference executor grants
+    /// [`Form::MoeTopK`], so the real-shape routing program (the one
+    /// `fused_moe_topk_matches_unfused_routing_over_random_scores_and_exact_ties`
+    /// builds) binds to exactly one `MoeTopK`; the same program under
+    /// `Executes::CPU.without(Form::MoeTopK)` keeps the unfused chain and
+    /// evaluates to the same routes, weights and weight total.
+    #[test]
+    fn executes_admits_moe_topk_fusion_and_withholding_it_keeps_the_chain_with_equal_routes() {
+        let built = build_routing_program();
+        let shapes = shape::infer(&built.program, &[1]).expect("routing program infers");
+        let mut outputs = alloc::vec![built.output];
+        outputs.extend(built.selected.iter().copied());
+        outputs.extend(built.weights.iter().copied());
+
+        let fused = bind_with_fusion_for(
+            &built.program,
+            &shapes,
+            &outputs,
+            true,
+            NumericPolicy::bit_exact(),
+            &Executes::CPU,
+        )
+        .expect("routing program binds under the reference executor");
+        let withheld = bind_with_fusion_for(
+            &built.program,
+            &shapes,
+            &outputs,
+            true,
+            NumericPolicy::bit_exact(),
+            &Executes::CPU.without(Form::MoeTopK),
+        )
+        .expect("routing program binds with MoeTopK withheld");
+
+        assert_eq!(
+            moe_topk_op_count(&fused),
+            1,
+            "the reference executor must fuse the {EXPERT_USED_COUNT}-round chain into one MoeTopK"
+        );
+        assert_eq!(
+            moe_topk_op_count(&withheld),
+            0,
+            "a target that does not grant Form::MoeTopK must keep the unfused chain"
+        );
+        assert!(
+            withheld.len() > fused.len(),
+            "the unfused chain has more bound ops than the fused bind, got {} and {}",
+            withheld.len(),
+            fused.len()
+        );
+
+        let weight_data = alloc::vec![0.0_f32; EXPERT_COUNT as usize * EMBEDDING as usize * FEED_FORWARD as usize];
+        let x_data = alloc::vec![0.1_f32; EMBEDDING as usize];
+        let mut lcg = crate::test_support::Lcg(301);
+        for case in 0..8 {
+            let scores: Vec<f32> = (0..EXPERT_COUNT as usize)
+                .map(|_| lcg.next_unit() * 10.0)
+                .collect();
+            let inputs = alloc::vec![
+                (built.x, x_data.clone()),
+                (built.logits, scores),
+                (built.expert_w_gate, weight_data.clone()),
+                (built.expert_w_up, weight_data.clone()),
+                (built.expert_w_down, weight_data.clone()),
+            ];
+            let fused_buffers = run_resolved(built.program.len(), &fused, inputs.clone());
+            let withheld_buffers = run_resolved(built.program.len(), &withheld, inputs);
+            for node in outputs.iter() {
+                assert_eq!(
+                    fused_buffers[node.0 as usize], withheld_buffers[node.0 as usize],
+                    "case {case}: node {} must hold the same values with and without the fusion",
+                    node.0
+                );
+            }
+        }
+    }
+
     /// A sigmoid-gated router with the selection bias (the flint shape: `expert_gating_func = 2`
     /// plus `exp_probs_b`) selects on `sigmoid(logit) + bias` but weighs each chosen expert by the
     /// UNBIASED `sigmoid(logit)`. The fusion must fire on it as `MoeWeighting::SelectedScore` and
     /// write the exact routes, weights, weight total and layer output the unfused chain computes,
     /// over random logits with a nonzero bias and over exact selection-score ties.
-    #[cfg(feature = "moe-topk-fusion")]
     #[test]
     fn fused_sigmoid_biased_routing_matches_unfused_over_random_scores_and_exact_ties() {
         for strategy in [MoeProjectionStrategy::PerRoute, MoeProjectionStrategy::Stacked] {
@@ -7073,7 +7150,6 @@ mod moe_routing_census {
     /// width, absorbs the route stack and the weight stack into the same
     /// dispatch, and every route, stacked route, stacked weight and MoE output
     /// is identical between the fused and unfused binds.
-    #[cfg(feature = "moe-topk-fusion")]
     #[test]
     fn stacked_strategy_fuses_routing_and_both_stacks_into_one_moe_topk_for_any_token_count() {
         let built = build_routing_program_with(MoeProjectionStrategy::Stacked);

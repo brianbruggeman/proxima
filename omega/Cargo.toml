@@ -50,15 +50,11 @@ metal-attn-variants = ["alloc", "metal-attn-split-rows"]
 # only effect is whether `proxima_tensor::bind` ever produces the kind for
 # it to render.
 gated-delta-net-fusion = ["proxima-tensor/gated-delta-net-fusion"]
-# Default-off passthrough to `proxima-tensor/moe-topk-fusion` (ROW 569, the
-# `BoundOpKind::MoeTopK` bind-time matcher) -- same shape as
-# `gated-delta-net-fusion` above.
-moe-topk-fusion = ["proxima-tensor/moe-topk-fusion"]
 # Passthrough to `proxima-tensor/moe-stacked-experts`: the model builders lower each routed
 # feed-forward projection as one operation over a `[sequence, selected]` route stack, which
 # `metal-grouped-gemm` runs as one expert-grouped dispatch (tiled rows) or one packed matvec
-# dispatch (decode and verify widths). Implies `moe-topk-fusion`.
-moe-stacked-experts = ["moe-topk-fusion", "proxima-tensor/moe-stacked-experts"]
+# dispatch (decode and verify widths).
+moe-stacked-experts = ["proxima-tensor/moe-stacked-experts"]
 # Default-off passthrough to `proxima-tensor/top-fraction-fusion`: the Metal prepare path binds with
 # `bind_with_top_fraction`, so a rank-count top-fraction mask at or above
 # `selection.top_fraction_min_rows` lowers to the selection kernel instead of the plain expression.
@@ -75,7 +71,7 @@ reduce-epilogue-fusion = ["proxima-tensor/reduce-epilogue-fusion"]
 # Default-off passthrough to `proxima-tensor/identity-copy-alias` (drops
 # pure-copy identity dispatches by redirecting readers at the source buffer)
 # -- same disciplined-component firewall as `gated-delta-net-fusion`/
-# `moe-topk-fusion`: no renderer change needed, the fold happens entirely in
+# `gated-delta-net-fusion`: no renderer change needed, the fold happens entirely in
 # `proxima-tensor::bind` before any kernel is emitted.
 identity-copy-alias = ["proxima-tensor/identity-copy-alias"]
 # Plan-time collapse of sibling elementwise ops (same iteration space, same reads, different body)

@@ -207,6 +207,7 @@ pub(super) fn prepare_with_options(
             fuse_cached_attention,
             numeric_policy,
             &packed_operand_nodes,
+            &executes(),
         )?
     } else {
         bind_unfused(program, &shapes, &effective_outputs, numeric_policy)?
@@ -221,6 +222,7 @@ pub(super) fn prepare_with_options(
             numeric_policy,
             crate::sized::SELECTION_TOP_FRACTION_MIN_ROWS,
             &packed_operand_nodes,
+            &executes(),
         )?
     } else {
         bind_unfused(program, &shapes, &effective_outputs, numeric_policy)?

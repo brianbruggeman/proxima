@@ -77,7 +77,7 @@ use std::time::Instant;
 #[cfg(feature = "cpu")]
 use proxima_tensor::cpu::CpuStepPlan;
 use proxima_tensor::cpu::ExpertSource;
-use proxima_tensor::{Evaluated, NodeId, Op, QuantizedBlock, TensorError};
+use proxima_tensor::{Evaluated, Executes, NodeId, Op, QuantizedBlock, TensorError};
 use proxima_numeric::{NumericPolicy};
 
 #[cfg(feature = "cpu")]
@@ -937,6 +937,27 @@ fn binding_policy(plan: &Plan, numeric: NumericPolicy) -> NumericPolicy {
     }
 }
 
+// the forms a candidate's identity binds with are the forms its own driver binds with
+fn plan_executes(plan: &Plan) -> Executes {
+    match plan {
+        #[cfg(feature = "cpu")]
+        Plan::Cpu(_) => Executes::CPU,
+        #[cfg(all(feature = "metal", target_os = "macos"))]
+        Plan::Metal(_) => crate::metal::executes(),
+        #[cfg(feature = "wgpu-backend")]
+        Plan::Wgpu(_) => crate::wgpu_driver::executes(),
+        #[cfg(feature = "cuda-driver")]
+        Plan::Cuda(_) => crate::cuda::executes(&crate::cuda::target::Target::CUDA),
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend",
+            feature = "cuda-driver"
+        )))]
+        _ => match *plan {},
+    }
+}
+
 fn fill_candidate_identity(
     plan: &Plan,
     config: &RuntimeConfig,
@@ -949,7 +970,7 @@ fn fill_candidate_identity(
     let shapes = proxima_tensor::infer(program, symbols)?;
     let numeric = binding_policy(plan, config.numeric);
     let resolved = if config.allow_fusion {
-        proxima_tensor::bind_with_fusion(program, &shapes, outputs, true, numeric)?
+        proxima_tensor::bind_with_fusion_for(program, &shapes, outputs, true, numeric, &plan_executes(plan))?
     } else {
         proxima_tensor::bind_unfused(program, &shapes, outputs, numeric)?
     };

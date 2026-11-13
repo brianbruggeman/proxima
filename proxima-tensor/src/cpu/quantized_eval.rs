@@ -738,6 +738,7 @@ pub(super) fn bind_step_ops(
             options.fuse_cached_attention,
             options.numeric_policy,
             packed_leaves,
+            &Executes::CPU,
         )
     } else {
         bind::bind_unfused(program, shapes, planning_outputs, options.numeric_policy)
@@ -1367,6 +1368,7 @@ pub fn cpu_tensor_reserved_bytes(
             true,
             config.numeric,
             &packed_leaves,
+            &Executes::CPU,
         )?
     } else {
         bind::bind_unfused(program, &shapes, &effective_outputs, config.numeric)?
@@ -1410,6 +1412,7 @@ fn validate_host_tensor_budget(
             true,
             numeric_policy,
             &packed_leaves,
+            &Executes::CPU,
         )?
     } else {
         bind::bind_unfused(program, shapes, &effective_outputs, numeric_policy)?

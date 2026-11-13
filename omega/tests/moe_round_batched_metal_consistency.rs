@@ -19,7 +19,6 @@
 #![cfg(all(
     feature = "metal",
     feature = "metal-moe-mul-mat-id",
-    feature = "moe-topk-fusion",
     target_os = "macos"
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::too_many_lines)]

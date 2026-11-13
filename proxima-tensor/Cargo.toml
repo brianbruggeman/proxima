@@ -129,14 +129,6 @@ identity-copy-alias = []
 # real-model A/B lands, alloc-tier only (a structural `Op` walk plus a
 # `BTreeMap`/`BTreeSet` rebuild, no platform dependency).
 gated-delta-net-fusion = []
-# Bind-time MoE top-k routing fusion (ROW 569, decode/n_tokens=1 only):
-# collapses `append_moe_ffn_from_logits`'s own `expert_used_count`-round
-# unrolled argmax-with-exclusion chain into one `BoundOpKind::MoeTopK`, the
-# same "matcher walks the exact structural shape a known builder emits"
-# technique `gated-delta-net-fusion` uses -- see `bind.rs`'s
-# `moe_topk_candidates`. Same disciplined-component firewall: default-off
-# until a real-model A/B lands, alloc-tier only.
-moe-topk-fusion = []
 # Bind-time collapse of the rank-count top-fraction mask (`spec::top_fraction_mask`) into one
 # `BoundOpKind::TopFractionSelect` when the score row count reaches a caller-supplied threshold.
 # The matcher rebuilds the expression through `spec::top_fraction_mask`, which lives behind
@@ -151,16 +143,16 @@ top-fraction-fusion = ["config"]
 # other axis already uses. Declines (falls back to k separate `BoundOp`s)
 # whenever the k route/output positions the arena resolved are not already
 # contiguous -- see `bind/gdn_moe_fusion_apply.rs`'s
-# `moe_round_group_candidates`. Same disciplined-component firewall as
-# `moe-topk-fusion`: default-off until a real-model A/B lands.
+# `moe_round_group_candidates`. Default-off until a real-model A/B lands.
 metal-moe-mul-mat-id = []
 # The model builders lower a routed feed-forward block with `MoeProjectionStrategy::Stacked`
 # (one gate, one up and one down operation over a `[sequence, selected]` route stack) instead of
-# one operation per selected expert, at every token count from a decode step up. Implies
-# `moe-topk-fusion`, which is what folds the route stacks into one `MoeTopK`; without it the stack
-# stays a chain of elementwise nodes. `proxima-model-interop`'s `metal` set turns it on; the strategy
-# itself is always available to a caller that names it.
-moe-stacked-experts = ["moe-topk-fusion"]
+# one operation per selected expert, at every token count from a decode step up. A backend whose
+# `Executes` grants `Form::MoeTopK` folds the route stacks into one `MoeTopK`; on a backend without
+# it the stack stays a chain of elementwise nodes.
+# `proxima-model-interop`'s `metal` set turns it on; the strategy itself is always available to a
+# caller that names it.
+moe-stacked-experts = []
 # Default-off. The routed feed-forward block folds the down projection over the selected axis in the
 # same reduce (`MoeProjectionStrategy::StackedCombined`), so the `[sequence, selected, width]` down
 # output is never materialized. Implies `moe-stacked-experts`; the strategy itself is always

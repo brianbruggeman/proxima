@@ -44,7 +44,7 @@ use std::sync::mpsc;
 
 use proxima_telemetry::counter;
 use proxima_telemetry::metric::Counter;
-use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError, bind_unfused, bind_without_reduce_epilogue_fusion, infer, prune_dead, resolve_named_blocks};
+use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError, bind_unfused, bind_without_reduce_epilogue_fusion, infer, prune_dead, resolve_named_blocks};
 use proxima_numeric::{DType, NumericPolicy};
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
@@ -221,6 +221,16 @@ pub struct WgpuPlan {
 /// Which packed codec each of `block_nodes`' [`QuantizedBlock`] carries —
 /// the WGSL driver's counterpart of `crate::metal::packed_operands_of`.
 /// `Float32` maps to `None` (no codec, a plain `array<f32>` operand).
+/// What the wgpu renderer executes: the unfused algebra, since `crate::wgsl::emit_wgsl_with_policy`
+/// returns `UnsupportedOpKind` for every fused kind (`wgsl.rs:232-279`). Composes
+/// [`Executes::BASE`], the value `crate::cuda::executes` and `crate::metal::executes` extend.
+/// `bind_unfused` and `bind_without_reduce_epilogue_fusion`, which this driver binds with, never
+/// reach the fusion gates this value feeds.
+#[must_use]
+pub fn executes() -> Executes {
+    Executes::BASE
+}
+
 fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> PackedOperands {
     block_nodes
         .iter()

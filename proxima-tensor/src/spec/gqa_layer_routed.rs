@@ -855,7 +855,7 @@ impl MoeProjectionStrategy {
     /// The strategy the model builders use: [`Self::StackedCombined`] when
     /// `moe-stacked-combine` is on, else [`Self::Stacked`] when the
     /// `moe-stacked-experts` feature is on (`proxima-model-interop`'s `metal`
-    /// set turns it on, with the `moe-topk-fusion` it implies), so a routed
+    /// set turns it on), so a routed
     /// feed-forward block is one gate, one up and one down operation at any
     /// token count from a decode step up. [`Self::PerRoute`] otherwise: a
     /// build with no fusion and no grouped kernel has nothing that runs a

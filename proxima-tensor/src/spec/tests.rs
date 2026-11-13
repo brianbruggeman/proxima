@@ -405,12 +405,6 @@ fn the_production_strategy_follows_the_stacked_experts_and_combine_features() {
     assert_eq!(MoeProjectionStrategy::production(), expected);
 }
 
-#[cfg(feature = "moe-stacked-experts")]
-const _: () = assert!(
-    cfg!(feature = "moe-topk-fusion"),
-    "moe-stacked-experts must imply the moe-topk-fusion that folds its route stacks"
-);
-
 #[test]
 fn gather_head_permutation_selects_head_rows_without_reordering_tokens_or_features() {
     let sequence = 2u32;
@@ -8426,7 +8420,7 @@ fn the_rule_census_reconciles_against_the_measured_mistral_forward_split() {
                 panic!("this Mistral cached-forward program never binds a GatedDeltaNet op")
             }
             // This program has no MoE routing block at all (Mistral's
-            // own dense FFN), so a `moe-topk-fusion` build never
+            // own dense FFN), so a MoE top-k fusion bind never
             // produces this kind here either.
             crate::bind::BoundOpKind::MoeTopK { .. } => {
                 panic!("this Mistral cached-forward program never binds a MoeTopK op")

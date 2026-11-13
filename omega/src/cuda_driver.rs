@@ -50,7 +50,7 @@ use proxima_tensor::bind::{
     refresh_cached_attention, row_template, rows_enumerable, symbols_shapes_template,
     touched_positions, touches_changed,
 };
-use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, Keep, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, bind_with_fusion, block_node_ids, correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks};
+use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, Keep, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, bind_with_fusion_for, block_node_ids, correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks};
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 /// Errors from CUDA initialization, NVRTC compilation, or execution.
@@ -1853,12 +1853,13 @@ fn bind_resolved(
     let bound = if unfused {
         bind_unfused(program, shapes, outputs, numeric_policy)
     } else {
-        bind_with_fusion(
+        bind_with_fusion_for(
             program,
             shapes,
             outputs,
             numeric_policy.reassociation,
             numeric_policy,
+            &cuda_executes(&Target::CUDA),
         )
     }
     .map_err(|_| CudaDriverError::UnsupportedGraph {
