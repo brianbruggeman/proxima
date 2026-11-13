@@ -1018,6 +1018,14 @@ pub struct LoadedModel<'file> {
     /// never per step, since the program itself never changes.
     pub(super) speculative_verify_program: Option<(Vec<Op>, NodeId, Vec<LayerCacheRoots>)>,
     pub(super) speculative_verify_program_hash: u64,
+    /// The prefill form of `program`: the same weights and cache leaves, but
+    /// after the last layer that writes cache state only the output row runs
+    /// ([`proxima_tensor::spec::build_forward_with_row_cut`]). A multi-row call
+    /// that is not a verify step swaps it in; decode (one new row) keeps
+    /// `program`, which carries no row gathers. `None` when the descriptor has
+    /// no tail to cut ([`ModelDescriptor::has_prefill_row_cut`]).
+    pub(super) prefill_row_cut_program: Option<(Vec<Op>, NodeId, Vec<LayerCacheRoots>)>,
+    pub(super) prefill_row_cut_program_hash: u64,
     /// The decode descriptor of a recurrent target that arms verify
     /// ([`crate::lowering::recurrent_speculative_verify`]): a recurrent layer
     /// unrolls its scan per position, so its verify program is lowered per

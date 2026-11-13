@@ -2833,6 +2833,16 @@ impl<'file> LoadedModel<'file> {
         let speculative_verify_program = source
             .speculative_verify(parsed, file_bytes, kv_layout, descriptor)?
             .map(|verify| (verify.program, verify.logits_root, verify.layer_roots));
+        // routed prefill slices its pre-gather plan from `program`'s own node
+        // ids, which a second graph does not share, so a routed model keeps one
+        // prefill program
+        let prefill_row_cut_program = if profile.ffn_routing == FfnRouting::Routed {
+            None
+        } else {
+            source
+                .prefill_row_cut(parsed, file_bytes, kv_layout, descriptor)?
+                .map(|prefill| (prefill.program, prefill.logits_root, prefill.layer_roots))
+        };
         let recurrent_speculative_verify =
             source.recurrent_speculative_verify(parsed, kv_layout, descriptor)?;
         let checkpoint_bytes = source.checkpoint_bytes(file_bytes);
@@ -2911,6 +2921,10 @@ impl<'file> LoadedModel<'file> {
                 .as_ref()
                 .map_or(0, |(program, ..)| program_hash(program)),
             speculative_verify_program,
+            prefill_row_cut_program_hash: prefill_row_cut_program
+                .as_ref()
+                .map_or(0, |(program, ..)| program_hash(program)),
+            prefill_row_cut_program,
             recurrent_speculative_verify,
             checkpoint_mapping: file_bytes,
         }
@@ -3152,6 +3166,8 @@ impl<'file> LoadedModel<'file> {
             // `Self::load`'s dense-path `None` above).
             speculative_verify_program: None,
             speculative_verify_program_hash: 0,
+            prefill_row_cut_program: None,
+            prefill_row_cut_program_hash: 0,
             recurrent_speculative_verify: None,
             checkpoint_mapping: file_bytes,
         }

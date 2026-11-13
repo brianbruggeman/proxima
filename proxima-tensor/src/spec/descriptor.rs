@@ -361,6 +361,22 @@ impl ModelDescriptor {
         }
     }
 
+    /// Whether [`build_forward_with_row_cut`] with `row_cut` set lowers a
+    /// program that differs from [`build_forward`]'s: the padded two-range
+    /// engine, `last_row_only`, no recurrence, and a layer after the last one
+    /// that writes cache state (a shared-KV tail). A caller that keeps a
+    /// separate prefill program builds it only when this holds.
+    #[must_use]
+    pub fn has_prefill_row_cut(&self) -> bool {
+        let hybrid =
+            self.gated_attention || self.layers.iter().any(|layer| layer.kind == LayerKind::Gdn);
+        matches!(
+            (self.cache_strategy, self.cache_mask),
+            (CacheStrategy::Cached, CacheMask::Padded)
+        ) && !hybrid
+            && row_cut_after(&self.layers, self.last_row_only, self.recurrence.is_some()).is_some()
+    }
+
     /// The descriptor of the verify program for a symbolic row count: this one
     /// with every new row's logits kept. `None` unless
     /// [`Self::verify_at_width`] arms it and no layer is recurrent -- a
@@ -981,6 +997,20 @@ fn validate_recurrence(descriptor: &ModelDescriptor) -> Result<(), TensorError> 
 ///
 /// [`ForwardProgram`]'s own doc names each root and which engine fills it.
 pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, TensorError> {
+    build_forward_with_row_cut(descriptor, false)
+}
+
+/// [`build_forward`] for a prefill program: with `row_cut`, a
+/// [`ModelDescriptor::last_row_only`] program computes only the output row
+/// after the last layer that writes cache state (PROXNUM-262, see
+/// [`ModelDescriptor::has_prefill_row_cut`]). Decode programs pass `false` (through [`build_forward`])
+/// because one new row has nothing to cut and the row gathers would be pure
+/// overhead; only the [`CacheMask::Padded`] engine has a cut, every other
+/// engine lowers as [`build_forward`] does.
+pub fn build_forward_with_row_cut(
+    descriptor: &ModelDescriptor,
+    row_cut: bool,
+) -> Result<ForwardProgram, TensorError> {
     validate_recurrence(descriptor)?;
     if descriptor.gated_attention
         || descriptor
@@ -1037,6 +1067,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
                     descriptor.embedding_scale,
                     descriptor.logit_softcap,
                     descriptor.last_row_only,
+                    row_cut,
                     descriptor.ple_dim,
                     descriptor.sliding_kv_ring,
                     descriptor.l_cache,
@@ -1153,10 +1184,7 @@ pub fn build_forward(descriptor: &ModelDescriptor) -> Result<ForwardProgram, Ten
             // table for every layer, so a rope-off layer built here would apply a
             // rotation the checkpoint never asked for
             refuse_when(
-                descriptor
-                    .layers
-                    .iter()
-                    .any(|layer| !layer.attention.rope),
+                descriptor.layers.iter().any(|layer| !layer.attention.rope),
                 "build_forward(CacheMask::Bounded)",
                 "a layer with rope off (this engine has no per-layer rope channel)",
             )?;

@@ -4313,6 +4313,8 @@ not read this cache format; only the single-row decode kernel reads it from the 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut device_kv_leaves_verify: Option<Vec<Option<KvLeafNodes>>> = None;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut device_kv_leaves_prefill: Option<Vec<Option<KvLeafNodes>>> = None;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut device_resident_flags: Vec<bool> = Vec::new();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut device_kv_attempted = false;
@@ -4334,6 +4336,8 @@ not read this cache format; only the single-row decode kernel reads it from the 
         let mut greedy_program: Option<(Vec<Op>, NodeId, NodeId, PlacedBuffer)> = None;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut greedy_program_hash = 0u64;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut greedy_from_prefill_cut = false;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut greedy_declined = false;
 
@@ -4648,6 +4652,20 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                 .find(|(built_width, ..)| *built_width == width)
                                 .expect("chunk width program built above for every chunk width");
                         (program, layer_roots, false, *prefill_hash)
+                    } else if let Some((program, _logits_root, layer_roots)) =
+                        self.prefill_row_cut_program
+                            .as_ref()
+                            .filter(|_| ids_for_step.len() > 1)
+                    {
+                        // a multi-row call computes one row after the last
+                        // cache-writing layer; decode (one row) never takes
+                        // this arm, so its program is the uncut `self.program`.
+                        (
+                            program,
+                            layer_roots,
+                            false,
+                            self.prefill_row_cut_program_hash,
+                        )
                     } else {
                         (
                             &self.program,
@@ -4673,6 +4691,12 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             .find(|(built_width, ..)| *built_width == width)
                             .expect("chunk width program built above for every chunk width")
                             .2
+                    } else if let Some((_program, logits_root, _layer_roots)) =
+                        self.prefill_row_cut_program
+                            .as_ref()
+                            .filter(|_| ids_for_step.len() > 1)
+                    {
+                        *logits_root
                     } else {
                         self.logits_root
                     };
@@ -4745,9 +4769,15 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         .speculative_verify_program
                         .as_ref()
                         .map(|(program, ..)| program.as_ptr() as usize);
+                    let prefill_cut_address = self
+                        .prefill_row_cut_program
+                        .as_ref()
+                        .map(|(program, ..)| program.as_ptr() as usize);
                     let crosses_verify = kv_carry_program != program_address
                         && (verify_address == Some(program_address)
-                            || verify_address == Some(kv_carry_program));
+                            || verify_address == Some(kv_carry_program)
+                            || prefill_cut_address == Some(program_address)
+                            || prefill_cut_address == Some(kv_carry_program));
                     let step_leaves = (carry_kv_this_step
                         && (kv_carried.is_empty() || crosses_verify))
                         .then(|| kv_carry_leaves(active_program, &cache_names, active_layer_roots));
@@ -5062,8 +5092,10 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     #[cfg(feature = "instrument")]
                     let greedy_build_started = read_ticks();
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let on_prefill_cut = prefill_cut_address == Some(program_address);
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if greedy_on_device
-                        && greedy_program.is_none()
+                        && (greedy_program.is_none() || greedy_from_prefill_cut != on_prefill_cut)
                         && !greedy_declined
                         && !speculative_step
                         && step_batch_needs_logits(split_prefill, is_last_step_batch)
@@ -5080,6 +5112,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                     vocab_size * core::mem::size_of::<f32>(),
                                 )?;
                                 greedy_program_hash = program_hash(&program);
+                                greedy_from_prefill_cut = on_prefill_cut;
                                 greedy_program = Some((program, token, finite, logits_buffer));
                             }
                             None => {
@@ -5100,6 +5133,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     );
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     let greedy_step = greedy_program.is_some()
+                        && greedy_from_prefill_cut == on_prefill_cut
                         && !speculative_step
                         && step_batch_needs_logits(split_prefill, is_last_step_batch)
                         && token_override.is_none_or(|forced| forced.get(step).is_none());
@@ -5512,6 +5546,8 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     if let Some(device) = device_kv.as_ref() {
                         let leaves = if speculative_step {
                             &mut device_kv_leaves_verify
+                        } else if prefill_cut_address == Some(program_address) {
+                            &mut device_kv_leaves_prefill
                         } else {
                             &mut device_kv_leaves_decode
                         };

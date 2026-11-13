@@ -2791,6 +2791,8 @@ pub(super) mod memory_fit_gate_tests {
             single_range: None,
             speculative_verify_program: None,
             speculative_verify_program_hash: 0,
+            prefill_row_cut_program: None,
+            prefill_row_cut_program_hash: 0,
             recurrent_speculative_verify: None,
             expert_slab: Mutex::new(crate::expert_slab::ExpertSlab::new()),
             expert_sidecar: None,

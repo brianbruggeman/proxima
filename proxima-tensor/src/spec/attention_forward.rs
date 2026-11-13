@@ -764,17 +764,46 @@ pub(super) fn gather_last_row(
     last_row_only: bool,
 ) -> NodeId {
     if last_row_only {
-        let lm_head_row = input_leaf(
-            program,
-            DType::INT32,
-            alloc::vec![Extent::Static(1)],
-            "lm_head_row",
-        );
-        let row_dtype = produced_dtype_or_binary32(program, normed_final);
-        embedding_lookup_as(program, normed_final, lm_head_row, row_dtype)
+        let lm_head_row = last_row_index_leaf(program);
+        gather_row_at(program, normed_final, lm_head_row)
     } else {
         normed_final
     }
+}
+
+/// The host-fed `lm_head_row` index leaf ([`gather_last_row`]'s gather index):
+/// one INT32 holding `new_count - 1`. Declare it once per program.
+pub(super) fn last_row_index_leaf(program: &mut Vec<Op>) -> NodeId {
+    input_leaf(
+        program,
+        DType::INT32,
+        alloc::vec![Extent::Static(1)],
+        "lm_head_row",
+    )
+}
+
+/// Element `row_index` of the rank-1 `node` (a per-row scalar such as `eps`) as
+/// a one-element tensor, via [`gather_computed`].
+pub(super) fn gather_element_at(program: &mut Vec<Op>, node: NodeId, row_index: NodeId) -> NodeId {
+    let element_dtype = produced_dtype_or_binary32(program, node);
+    gather_computed(
+        program,
+        node,
+        row_index,
+        map::projection(1, &[0]),
+        IndexPattern {
+            iter_rank: 1,
+            axes: alloc::vec![AxisIndex::default()],
+        },
+        0,
+        element_dtype,
+    )
+}
+
+/// `node`'s row `row_index` as a one-row tensor, via [`embedding_lookup_as`].
+pub(super) fn gather_row_at(program: &mut Vec<Op>, node: NodeId, row_index: NodeId) -> NodeId {
+    let row_dtype = produced_dtype_or_binary32(program, node);
+    embedding_lookup_as(program, node, row_index, row_dtype)
 }
 
 /// [`append_gqa_layer`]'s attention sub-block in isolation (RoPE + GQA +
