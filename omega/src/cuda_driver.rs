@@ -33,7 +33,8 @@ use proxima_core::kv_carry::{
 use proxima_primitives::sync::blocking::Mutex;
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
-use crate::cuda::{CudaGridSpec, CudaKernel, EmitDevice, cuda_cached_attention_class};
+use crate::cuda::target::Target;
+use crate::cuda::{CudaGridSpec, CudaKernel, EmitDevice, cuda_cached_attention_class, executes as cuda_executes};
 use crate::cuda_kernel_cache::{
     CacheKey, decode_binary_entry, decode_entry, encode_binary_entry, encode_entry, header_digest,
 };
@@ -49,7 +50,7 @@ use proxima_tensor::bind::{
     refresh_cached_attention, row_template, rows_enumerable, symbols_shapes_template,
     touched_positions, touches_changed,
 };
-use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Keep, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, bind_with_fusion, block_node_ids, correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks};
+use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Executes, Keep, NodeId, Op, QuantizedBlock, Shapes, bind_unfused, bind_with_fusion, block_node_ids, correct_packed_matmul_layouts, infer, prune_dead, resolve_named_blocks};
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 /// Errors from CUDA initialization, NVRTC compilation, or execution.
@@ -2005,19 +2006,16 @@ fn refresh_bound_resolved(
     Ok((refreshed, packed, touched))
 }
 
-fn cuda_supports_kind(kind: &BoundOpKind, numeric_policy: NumericPolicy) -> bool {
-    match kind {
+fn cuda_admits(executes: &Executes, bound: &BoundOp, numeric_policy: NumericPolicy) -> bool {
+    if executes.admit(bound).is_err() {
+        return false;
+    }
+    match &bound.kind {
         BoundOpKind::CachedAttention { .. } => {
             admit(numeric_policy, NumericRewrite::ContextChunkMerge).is_ok()
-                && cuda_cached_attention_class(kind).is_some()
+                && cuda_cached_attention_class(&bound.kind).is_some()
         }
-        BoundOpKind::Elementwise { .. }
-        | BoundOpKind::Reduce { .. }
-        | BoundOpKind::Iota
-        | BoundOpKind::Constant { .. }
-        | BoundOpKind::BlockQuantize { .. }
-        | BoundOpKind::MoeTopK { .. } => true,
-        _ => false,
+        _ => true,
     }
 }
 
@@ -2027,10 +2025,11 @@ fn reject_unsupported_kinds(
     resolved: &[BoundOp],
     numeric_policy: NumericPolicy,
 ) -> Result<(), CudaDriverError> {
+    let executes = cuda_executes(&Target::CUDA);
     let mut census: BTreeMap<&'static str, (usize, NodeId)> = BTreeMap::new();
     for bound in resolved
         .iter()
-        .filter(|bound| !cuda_supports_kind(&bound.kind, numeric_policy))
+        .filter(|bound| !cuda_admits(&executes, bound, numeric_policy))
     {
         census.entry(bound.kind.name()).or_insert((0, bound.node)).0 += 1;
     }

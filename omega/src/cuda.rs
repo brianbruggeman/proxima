@@ -62,7 +62,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::BlockLayout;
-use proxima_tensor::{BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, ReduceInit, ScalarOp, StepArg};
+use proxima_tensor::{
+    BoundOp, BoundOpKind, ComposedBody, Executes, Form, Keep, Layout, Lookup, NodeId, ReduceInit, Refusal, ScalarOp, StepArg,
+};
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 use crate::cuda_cached_attention::{
@@ -293,6 +295,7 @@ pub(crate) fn emit_on_target(
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
     reject_unserved_prequantized(target, resolved, &quantized, numeric_policy, device)?;
+    let form_refusal = executes(&target).admit(resolved).err().map(refusal_kind);
     let attention_chunks = if target.card_asm {
         split_chunks(&resolved.kind, device)
     } else {
@@ -333,42 +336,18 @@ pub(crate) fn emit_on_target(
         }
         // the cached-attention bodies hardwire a 32-lane sub-warp
         // (`threadIdx.x & 31u`, four warps per block, a 16-step shuffle tree),
-        // so they render only for a target whose wavefront that describes.
-        BoundOpKind::CachedAttention { .. } if !target.card_asm => {
+        // so `executes` grants the form only to a target whose wavefront that describes.
+        _ if form_refusal.is_some() => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
-                kind: "cached_attention_on_this_target",
+                kind: form_refusal.unwrap_or(UNGRANTED_FORM_KIND),
             });
         }
         BoundOpKind::CachedAttention { .. } => match attention_chunks {
             Some(chunks) => render_combine(resolved, &entry, chunks)?,
             None => render_cached_attention_cuda(resolved, &entry, numeric_policy)?,
         },
-        BoundOpKind::GatedDeltaNet { .. } => {
-            return Err(EmitError::CudaUnsupportedOpKind {
-                node: resolved.node,
-                kind: "gated_delta_net",
-            });
-        }
         BoundOpKind::MoeTopK { .. } => render_moe_topk(target, resolved, &entry)?,
-        BoundOpKind::TopFractionSelect { .. } => {
-            return Err(EmitError::CudaUnsupportedOpKind {
-                node: resolved.node,
-                kind: "top_fraction_select",
-            });
-        }
-        BoundOpKind::RoundBatchedReduce { .. } => {
-            return Err(EmitError::CudaUnsupportedOpKind {
-                node: resolved.node,
-                kind: "round_batched_reduce",
-            });
-        }
-        BoundOpKind::CachedSoftmaxWeights { .. } => {
-            return Err(EmitError::CudaUnsupportedOpKind {
-                node: resolved.node,
-                kind: "cached_softmax_weights",
-            });
-        }
         BoundOpKind::BlockQuantize { .. } if !target.card_asm => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
@@ -376,10 +355,14 @@ pub(crate) fn emit_on_target(
             });
         }
         BoundOpKind::BlockQuantize { .. } => render_block_quantize(resolved, &entry)?,
-        BoundOpKind::ElementwiseTwin { .. } => {
+        BoundOpKind::GatedDeltaNet { .. }
+        | BoundOpKind::TopFractionSelect { .. }
+        | BoundOpKind::RoundBatchedReduce { .. }
+        | BoundOpKind::CachedSoftmaxWeights { .. }
+        | BoundOpKind::ElementwiseTwin { .. } => {
             return Err(EmitError::CudaUnsupportedOpKind {
                 node: resolved.node,
-                kind: "elementwise_twin",
+                kind: form_refusal.unwrap_or(UNGRANTED_FORM_KIND),
             });
         }
     };
@@ -4416,6 +4399,42 @@ __device__ __forceinline__ float bf16_element(const unsigned char *block, unsign
 }
 ";
 
+const UNGRANTED_FORM_KIND: &str = "unsupported_form";
+
+/// The forms this target renders. `CachedAttention` is granted only where
+/// `card_asm` holds, because its bodies are built on inline `mma.sync` and a
+/// 32-lane sub-warp; the attention limits inside the form (sink, packed
+/// operands, class) stay with the emitter and
+/// [`cuda_cached_attention_class`]. Composes [`Executes`], the same subset
+/// shape as `NumericPolicy::grants`; the driver's kind rejection and the
+/// emitter's refusal arms both read this one value so admission cannot drift
+/// between them.
+#[must_use]
+pub(crate) fn executes(target: &Target) -> Executes {
+    let base = Executes::BASE
+        .with(Form::BlockQuantize)
+        .with(Form::MoeTopK)
+        .with(Form::ReduceEpilogue);
+    if target.card_asm {
+        base.with(Form::CachedAttention)
+    } else {
+        base
+    }
+}
+
+fn refusal_kind(refusal: Refusal) -> &'static str {
+    match refusal {
+        Refusal::Form(Form::CachedAttention) => "cached_attention_on_this_target",
+        Refusal::Form(Form::GatedDeltaNet) => "gated_delta_net",
+        Refusal::Form(Form::TopFractionSelect) => "top_fraction_select",
+        Refusal::Form(Form::RoundBatchedReduce) => "round_batched_reduce",
+        Refusal::Form(Form::CachedSoftmaxWeights) => "cached_softmax_weights",
+        Refusal::Form(Form::ElementwiseTwin) => "elementwise_twin",
+        // both enums are non_exhaustive across the crate boundary
+        _ => UNGRANTED_FORM_KIND,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CudaAttentionClass {
     Static,
@@ -4537,6 +4556,36 @@ mod tests {
         );
         assert_eq!(cuda_cached_attention_class(&unexpected_count), None);
         assert_eq!(cuda_cached_attention_class(&elementwise), None);
+    }
+
+    #[test]
+    fn executes_grants_cached_attention_only_to_a_card_asm_target() {
+        let attention = attention_op_with(attention_kind(9, 5, 256, 256));
+
+        assert_eq!(executes(&Target::CUDA).admit(&attention), Ok(()));
+        assert_eq!(
+            executes(&Target::HIP).admit(&attention),
+            Err(Refusal::Form(Form::CachedAttention))
+        );
+    }
+
+    #[test]
+    fn executes_without_cached_attention_refuses_an_attention_graph_on_a_card_asm_target() {
+        let attention = attention_op_with(attention_kind(9, 5, 256, 256));
+        let control = executes(&Target::CUDA).without(Form::CachedAttention);
+
+        assert_eq!(control.admit(&attention), Err(Refusal::Form(Form::CachedAttention)));
+        assert_eq!(control.admit(&elementwise_tanh_op(4)), Ok(()));
+    }
+
+    #[test]
+    fn executes_refuses_the_forms_cuda_never_renders_with_their_emit_kind_strings() {
+        assert!(!executes(&Target::CUDA).forms.contains(Form::GatedDeltaNet));
+        assert_eq!(refusal_kind(Refusal::Form(Form::GatedDeltaNet)), "gated_delta_net");
+        assert_eq!(refusal_kind(Refusal::Form(Form::TopFractionSelect)), "top_fraction_select");
+        assert_eq!(refusal_kind(Refusal::Form(Form::RoundBatchedReduce)), "round_batched_reduce");
+        assert_eq!(refusal_kind(Refusal::Form(Form::CachedSoftmaxWeights)), "cached_softmax_weights");
+        assert_eq!(refusal_kind(Refusal::Form(Form::ElementwiseTwin)), "elementwise_twin");
     }
 
     #[test]
