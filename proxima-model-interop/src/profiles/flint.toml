@@ -3,8 +3,6 @@ value_norm = false
 qk_norm = true
 rope_layout = "split_half"
 schedule_source = "sliding_pattern"
-kv_cache_shape = "custom"
-command_buffer_chunks = 8
 
 [ffn]
 post_attention_norm = false

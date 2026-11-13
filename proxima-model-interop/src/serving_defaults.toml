@@ -1,0 +1,26 @@
+# measured serving defaults, one table per `general.architecture` (or HF
+# `model_type`) string. An architecture with no table, or a key absent from its
+# table, takes `MeasuredServingDefaults::default()`. These are serving choices
+# measured on the named checkpoints, not facts about the model: a new
+# architecture needs no entry here, and an explicit `ServingConfig` value wins.
+
+[gemma4]
+speculative_verify = true
+kv_cache_shape = "custom"
+command_buffer_chunks = 8
+
+[flint]
+kv_cache_shape = "custom"
+command_buffer_chunks = 8
+
+[granitemoe]
+command_buffer_chunks = 8
+
+[qwen35]
+kv_cache_shape = "custom"
+
+[qwen35moe]
+kv_cache_shape = "monolithic"
+
+[ouro]
+kv_cache_shape = "custom"

@@ -75,7 +75,7 @@ mod tests {
     use std::path::Path;
     use proxima_tensor::spec::{
         Activation, AttentionScoreScale, EmbeddingScale, ExpertGatingFunc, FfnCombination,
-        KvCacheShape, RopePairing, ScheduleSource,
+        RopePairing, ScheduleSource,
     };
 
     #[test]
@@ -176,7 +176,6 @@ mod tests {
             AttentionScoreScale::InverseSqrtQueryPreAttnScalar(128)
         );
         assert_eq!(profile.schedule_source, ScheduleSource::SlidingPattern);
-        assert_eq!(profile.kv_cache_shape, KvCacheShape::Custom);
         assert_eq!(
             profile.layer_ffn(256).combination,
             FfnCombination::RoutedWithSharedExpert
@@ -197,49 +196,26 @@ mod tests {
         assert!(!profile.ffn.output_scale);
         assert!(!profile.ffn.exclusive_dense_post_norm);
         assert!(profile.recurrence.is_none());
-        assert!(!profile.speculative_verify);
-        assert_eq!(profile.command_buffer_chunks, 8);
     }
 
     #[test]
-    fn only_the_family_whose_verify_step_was_measured_to_pay_arms_it_by_default() {
-        for (family, _) in FAMILY_PROFILES {
-            let armed = family_profile(family)
-                .expect("profile embedded")
-                .speculative_verify;
-
-            assert_eq!(armed, *family == "gemma4", "{family}");
-        }
-    }
-
-    #[test]
-    fn each_profile_names_its_header_reader_cache_shape_and_chunk_default() {
+    fn each_profile_names_its_header_reader() {
         let table = [
-            ("llama", ScheduleSource::Uniform, KvCacheShape::Uniform, 1),
-            ("mixtral", ScheduleSource::Uniform, KvCacheShape::Uniform, 1),
-            ("granitemoe", ScheduleSource::Uniform, KvCacheShape::Uniform, 8),
-            ("qwen2", ScheduleSource::Uniform, KvCacheShape::Uniform, 1),
-            ("qwen3", ScheduleSource::Uniform, KvCacheShape::Uniform, 1),
-            ("lfm2moe", ScheduleSource::Uniform, KvCacheShape::Uniform, 1),
-            ("gemma4", ScheduleSource::SlidingPattern, KvCacheShape::Custom, 8),
-            ("flint", ScheduleSource::SlidingPattern, KvCacheShape::Custom, 8),
-            ("qwen35", ScheduleSource::RecurrentInterval, KvCacheShape::Custom, 1),
-            (
-                "qwen35moe",
-                ScheduleSource::RecurrentRoutedInterval,
-                KvCacheShape::Monolithic,
-                1,
-            ),
+            ("llama", ScheduleSource::Uniform),
+            ("mixtral", ScheduleSource::Uniform),
+            ("granitemoe", ScheduleSource::Uniform),
+            ("qwen2", ScheduleSource::Uniform),
+            ("qwen3", ScheduleSource::Uniform),
+            ("lfm2moe", ScheduleSource::Uniform),
+            ("gemma4", ScheduleSource::SlidingPattern),
+            ("flint", ScheduleSource::SlidingPattern),
+            ("qwen35", ScheduleSource::RecurrentInterval),
+            ("qwen35moe", ScheduleSource::RecurrentRoutedInterval),
         ];
-        for (family, source, shape, chunks) in table {
+        for (family, source) in table {
             let profile = family_profile(family).expect("profile embedded");
 
             assert_eq!(profile.schedule_source, source, "{family} schedule source");
-            assert_eq!(profile.kv_cache_shape, shape, "{family} cache shape");
-            assert_eq!(
-                profile.command_buffer_chunks, chunks,
-                "{family} chunk default"
-            );
         }
     }
 

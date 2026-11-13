@@ -843,19 +843,21 @@ pub struct LoadedModel<'file> {
     /// ([`Self::with_forward_descriptor`]); `None` for a GGUF load.
     pub(super) safetensors_descriptor: Option<ModelDescriptor>,
     pub(super) architecture: ModelHparams,
-    /// The decode-time cache shape this checkpoint's family profile names
-    /// ([`proxima_tensor::spec::FamilyProfile::kv_cache_shape`]); `Uniform` for
-    /// a load that resolves no family profile (safetensors, synthetic
-    /// fixtures).
-    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    /// The decode-time cache shape this checkpoint's architecture was measured
+    /// with ([`crate::serving_defaults::MeasuredServingDefaults::kv_cache_shape`]);
+    /// `Uniform` for a load that resolves no architecture (safetensors,
+    /// synthetic fixtures). Includes the serving override when the model was
+    /// loaded through `LoadedModel::load_with_serving`.
+    #[cfg(any(test, all(feature = "metal-output-placement", target_os = "macos")))]
     pub(super) kv_cache_shape: KvCacheShape,
     /// Whether the checkpoint carries experts: `{arch}.expert_count > 0`
     /// (or the caller's descriptor `expert_count`); `false` for a load with
     /// no expert count, such as safetensors or synthetic fixtures.
     pub(super) has_experts: bool,
-    /// The family profile's measured default for
-    /// `ServingConfig::command_buffer_chunks`; `1` for a load that resolves no
-    /// family profile. Consulted by [`Self::apply_command_buffer_chunks_default`]
+    /// The architecture's measured default for
+    /// `ServingConfig::command_buffer_chunks`
+    /// ([`crate::serving_defaults::MeasuredServingDefaults::command_buffer_chunks`]);
+    /// `1` for a load that resolves no architecture. Consulted by [`Self::apply_command_buffer_chunks_default`]
     /// only when a caller left that field at its own default.
     pub(super) command_buffer_chunks: u32,
     /// The checkpoint's own `{arch}.context_length`

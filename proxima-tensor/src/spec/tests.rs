@@ -19804,12 +19804,8 @@ mod directory_less_parse {
             qk_norm: true,
             rope_layout: RopeLayout::SplitHalf,
             recurrence: None,
-            speculative_verify: false,
             schedule_source: ScheduleSource::SlidingPattern,
-            kv_cache_shape: KvCacheShape::Uniform,
-            command_buffer_chunks: 1,
             ssm_v_head_reordered: false,
-            activation: DType::FLOAT32.numeric_format(),
         }
     }
 

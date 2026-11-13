@@ -3131,12 +3131,12 @@ impl<'file> LoadedModel<'file> {
         Ok(effective_serving_config)
     }
 
-    /// Applies this checkpoint's own family-profile
-    /// [`proxima_tensor::spec::FamilyProfile::command_buffer_chunks`] as
+    /// Applies this checkpoint's architecture-measured
+    /// [`crate::serving_defaults::MeasuredServingDefaults::command_buffer_chunks`] as
     /// `serving_config.command_buffer_chunks`'s default -- only when the
     /// caller left that field at [`ServingConfig`]'s own type default of
     /// `1`, never overriding an explicit non-default caller value. A load
-    /// that resolves no family profile carries `1`, which leaves this a
+    /// that resolves no architecture carries `1`, which leaves this a
     /// no-op: every field this method could write is already `1`.
     pub(super) fn apply_command_buffer_chunks_default(&self, serving_config: &mut ServingConfig) {
         if serving_config.command_buffer_chunks != 1 {
@@ -4018,7 +4018,10 @@ impl<'file> LoadedModel<'file> {
         // KV roots are device-resident on Metal regardless of expert-residency
         // mode, so this gate is the architecture, never the pre-gather flag.
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let monolithic_kv_architecture = self.kv_cache_shape == KvCacheShape::Monolithic;
+        let monolithic_kv_architecture = serving_config
+            .kv_cache_shape_override
+            .unwrap_or(self.kv_cache_shape)
+            == KvCacheShape::Monolithic;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let dense_attention_placement_enabled = !monolithic_all_low_requested
             && dense_attention_placement_supported(

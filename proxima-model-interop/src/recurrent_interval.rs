@@ -34,6 +34,7 @@ use crate::error::InteropError;
 use crate::lowering::StepState;
 use crate::prism_hadamard::{PrismHadamard, prism_hadamard_from_metadata};
 use crate::profiles::{binding_profile, family_profile};
+use crate::serving_defaults::measured_serving_defaults;
 
 /// One layer's real tensor shape, derived from
 /// `{architecture}.full_attention_interval` rather than assumed uniform --
@@ -368,6 +369,7 @@ pub fn descriptor_from_architecture(
     architecture: &RecurrentIntervalHparams,
 ) -> Result<ModelDescriptor, InteropError> {
     let profile = family_profile(&architecture.family)?;
+    let measured = measured_serving_defaults(&architecture.family)?;
     let attention = LayerAttentionConfig {
         head_dim: architecture.attn_head_dim,
         kv_heads: architecture.kv_heads,
@@ -404,7 +406,7 @@ pub fn descriptor_from_architecture(
         .collect();
     Ok(ModelDescriptor {
         network: None,
-        activation: profile.activation,
+        activation: measured.activation,
         vocab: architecture.vocab,
         embedding: architecture.embedding,
         feed_forward: architecture.feed_forward,
@@ -430,7 +432,7 @@ pub fn descriptor_from_architecture(
         fused_qkv_reduce: false,
         head_repeats: 1,
         last_row_only: true,
-        speculative_verify: profile.speculative_verify,
+        speculative_verify: measured.speculative_verify,
         ssm_conv_kernel: architecture.ssm_conv_kernel,
         ssm_state_size: architecture.ssm_state_size,
         ssm_group_count: architecture.ssm_group_count,

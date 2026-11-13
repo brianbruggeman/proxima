@@ -19,6 +19,7 @@ use crate::bind::ModelHparams;
 use crate::error::InteropError;
 use crate::hf_config::{HfConfig, architecture_from_hf_config};
 use crate::profiles::family_profile;
+use crate::serving_defaults::measured_serving_defaults;
 use crate::recurrent_config::RecurrentConfig;
 
 /// Converts a parsed Ouro `config.json` and the requested policy into the
@@ -50,7 +51,8 @@ pub fn ouro_descriptor_from_hf_config(
             key: "total_ut_steps".into(),
         })?;
     let resolved = recurrent.resolve(checkpoint_depth)?;
-    let dense = gqa_descriptor_from_shape(
+    let measured = measured_serving_defaults(&architecture.family)?;
+    let dense = measured.apply_to_descriptor(gqa_descriptor_from_shape(
         architecture.vocab,
         architecture.embedding,
         architecture.feed_forward,
@@ -65,7 +67,7 @@ pub fn ouro_descriptor_from_hf_config(
         false,
         false,
         &profile,
-    );
+    ));
     let mut descriptor = profile.recurring(dense, resolved.iterations.unwrap_or(checkpoint_depth));
     descriptor.loopcd = LoopCdConfig {
         mode: resolved.mode,

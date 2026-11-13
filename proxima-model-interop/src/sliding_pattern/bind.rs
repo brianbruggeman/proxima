@@ -19,6 +19,7 @@ use crate::ffn_inference::with_inferred_ffn;
 use crate::key_inference::with_inferred_keys;
 use crate::lowering::KvLayout;
 use crate::profiles::family_profile;
+use crate::serving_defaults::measured_serving_defaults;
 
 use super::hparams::from_metadata;
 
@@ -33,11 +34,8 @@ pub fn descriptor_from_gguf(
     let expert_count = metadata_u32_optional(parsed, &format!("{family}.expert_count"));
     let profile = with_inferred_ffn(family_profile(family)?, parsed, expert_count);
     let profile = with_inferred_keys(profile, parsed, family)?;
-    Ok(sliding_pattern_descriptor_from_gguf(
-        parsed,
-        sliding_kv_ring,
-        &profile,
-    )?)
+    let descriptor = sliding_pattern_descriptor_from_gguf(parsed, sliding_kv_ring, &profile)?;
+    Ok(measured_serving_defaults(family)?.apply_to_descriptor(descriptor))
 }
 
 /// `PROXIMA_HEAD_REPEATS=1|2|3` (unset or unparsable reads as `1`): the

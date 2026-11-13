@@ -225,6 +225,10 @@ impl PlanIdentity {
             // refit vs rebuild at a bucket crossing: the same ops either way
             plan_refit: _,
             command_buffer_chunks,
+            // descriptor-level choices: the plan is built from the program they already shaped
+            speculative_verify_override: _,
+            kv_cache_shape_override: _,
+            activation_override: _,
             max_command_buffers_per_token: _,
             // device memory held for wide plans between calls: trims, never changes a plan
             resident_prefill_plan_bytes: _,
