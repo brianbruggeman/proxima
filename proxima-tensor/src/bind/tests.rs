@@ -7977,3 +7977,110 @@ fn a_packed_leaf_named_by_the_caller_materializes_its_composed_activation() {
         "a node that is not an Op::Input is ignored, so the binding is the plain one"
     );
 }
+
+#[cfg(feature = "metal-fuse-attn-decode")]
+mod end_aligned_mask_tests {
+    use super::*;
+    use crate::op::Extent;
+    use crate::spec::{
+        causal_mask_cached_end_aligned, causal_mask_cached_windowed, causal_mask_end_aligned,
+        causal_mask_windowed, elementwise, input_leaf,
+    };
+
+    const SLIDING_WINDOW: u32 = 512;
+
+    fn local_program(build: impl FnOnce(&mut Vec<Op>) -> (NodeId, NodeId)) -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let (mask, _) = build(&mut program);
+        (program, mask)
+    }
+
+    fn cached_select_program(
+        build: impl FnOnce(&mut Vec<Op>, NodeId) -> (NodeId, NodeId),
+    ) -> (Vec<Op>, NodeId, NodeId) {
+        let mut program = Vec::new();
+        let cached_len = input_leaf(&mut program, DType::FLOAT32, Vec::new(), "cached_len");
+        let (mask, neg_infinity) = build(&mut program, cached_len);
+        let inner = elementwise(
+            &mut program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            &[(mask, "st->st"), (neg_infinity, "->st")],
+        )
+        .expect("a stand-in score node over the mask shape builds");
+        let selected = elementwise(
+            &mut program,
+            DType::FLOAT32,
+            ScalarOp::Select,
+            &[(mask, "st->st"), (neg_infinity, "->st"), (inner, "st->st")],
+        )
+        .expect("the cached score Select builds");
+        (program, selected, cached_len)
+    }
+
+    #[test]
+    fn end_aligned_local_mask_binds_the_window_and_one_query_row() {
+        for window in [Some(SLIDING_WINDOW), None] {
+            let (program, mask) =
+                local_program(|program| causal_mask_end_aligned(program, window).expect("mask builds"));
+            let shapes = crate::shape::infer(&program, &[4]).expect("N=4 infers");
+            assert_eq!(shapes.of(mask), [1, 4], "one query row over the 4 new keys");
+            let expected = window.map_or(u64::MAX, u64::from);
+            assert_eq!(end_aligned_new_row_bound(&program, mask), Some(expected));
+            assert_eq!(
+                local_causal_mask_new_row_bound(&program, mask),
+                None,
+                "today's recognizer must not claim the end-aligned shape"
+            );
+        }
+    }
+
+    #[test]
+    fn todays_windowed_local_mask_keeps_its_old_recognition() {
+        let (program, mask) = local_program(|program| {
+            causal_mask_windowed(program, Some(SLIDING_WINDOW)).expect("mask builds")
+        });
+        assert_eq!(local_causal_mask_new_row_bound(&program, mask), Some(512));
+        assert_eq!(end_aligned_new_row_bound(&program, mask), None);
+        assert_eq!(end_aligned_offset(false, 600), Some(0));
+        assert_eq!(shift_lower_bound(1 - 512, 0), -511);
+    }
+
+    #[test]
+    fn end_aligned_cached_mask_yields_the_relative_window_for_the_binder_to_shift() {
+        let (program, selected, cached_len) = cached_select_program(|program, cached_len| {
+            causal_mask_cached_end_aligned(program, cached_len, Extent::Symbolic(1), Some(SLIDING_WINDOW))
+                .expect("cached mask builds")
+        });
+        let shapes = crate::shape::infer(&program, &[4, 7]).expect("N=4 over 7 cached rows infers");
+        assert_eq!(shapes.of(selected), [1, 7]);
+        let found = cached_padding_mask_end_aligned_lower_bound(&program, selected, Some(cached_len))
+            .expect("the end-aligned cached window is recognized");
+        assert_eq!(found.1, 1 - 512);
+        assert!(cached_padding_mask_lower_bound(&program, selected, Some(cached_len)).is_none());
+    }
+
+    #[test]
+    fn todays_cached_window_mask_still_binds_its_old_lower_bound() {
+        let (program, selected, cached_len) = cached_select_program(|program, cached_len| {
+            causal_mask_cached_windowed(program, cached_len, Extent::Symbolic(1), Some(SLIDING_WINDOW))
+                .expect("cached mask builds")
+        });
+        let found = cached_padding_mask_lower_bound(&program, selected, Some(cached_len))
+            .expect("today's windowed cached mask is recognized");
+        assert_eq!((found.1, found.2), (1 - 512, true));
+        assert!(cached_padding_mask_end_aligned_lower_bound(&program, selected, Some(cached_len)).is_none());
+    }
+
+    #[test]
+    fn bounds_shift_by_the_last_new_row_for_four_and_six_hundred_rows() {
+        let sliding = 1 - i64::from(SLIDING_WINDOW);
+        for (rows, expected_lower, expected_upper) in [(4u64, -508, 3), (600, 88, 599)] {
+            let offset = end_aligned_offset(true, rows).expect("a non-empty new range");
+            assert_eq!(shift_lower_bound(sliding, offset), expected_lower, "sliding, N={rows}");
+            assert_eq!(offset, expected_upper, "new_upper_inclusive, N={rows}");
+            assert_eq!(shift_lower_bound(i64::MIN, offset), i64::MIN, "global, N={rows}");
+        }
+        assert_eq!(end_aligned_offset(true, 0), None);
+    }
+}
