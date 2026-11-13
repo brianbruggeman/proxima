@@ -83,6 +83,10 @@ pub(super) struct StagedMatvec {
     /// The gather slot of the weight operand when the rows come from a stacked product's
     /// selected expert: one fetch per output row folds into the row's block address.
     pub gather: Option<usize>,
+    /// Each output row reads its own slot's quantized activation rows (a stacked product whose
+    /// activation follows the weight's gather axis); only an external activation can be this, so
+    /// a block never stages one slot's activation for rows of another.
+    pub activation_per_slot: bool,
 }
 
 impl StagedMatvec {
@@ -106,6 +110,35 @@ fn readable_activation_layout(activation: &Codec) -> Option<BlockLayout> {
     let layout = activation.block_layout()?;
     consumer_missing(&layout).ok()?;
     Some(layout)
+}
+
+/// The output axes the activation moves along: nonzero stride over more than one coordinate.
+fn varying_activation_axes(resolved: &BoundOp, output_axes: &[u16], activation: &Layout) -> Vec<u16> {
+    output_axes
+        .iter()
+        .copied()
+        .filter(|axis| activation.stride(*axis) != 0 && resolved.extents[usize::from(*axis)] != 1)
+        .collect()
+}
+
+/// Whether the activation varies only along axes on which the weight's gather index also varies
+/// (the slot axis), in whole quantized blocks, so every row of one slot shares one activation row
+/// and a slot's activation starts on a block boundary of the pre-quantized buffer.
+fn activation_follows_gather(
+    resolved: &BoundOp,
+    varying_axes: &[u16],
+    weight_slot: usize,
+    activation: &Layout,
+    held: Option<&BlockLayout>,
+) -> bool {
+    let (Some(held), Some((_, _, Some(lookup)))) = (held, resolved.operands().get(weight_slot)) else {
+        return false;
+    };
+    let block_elements = i64::from(held.elements);
+    varying_axes.iter().all(|axis| {
+        let stride = activation.stride(*axis);
+        lookup.index_layout.stride(*axis) != 0 && stride > 0 && stride % block_elements == 0
+    })
 }
 
 pub(super) fn staged_matvec_plan(
@@ -156,9 +189,10 @@ pub(super) fn staged_matvec_plan(
         .collect::<Option<_>>()?;
     let reduction: u64 = reduce_extents.iter().product();
     let (_, activation_layout, _) = operands.get(activation_slot)?;
-    let shared_by_every_row = output_axes
-        .iter()
-        .all(|axis| activation_layout.stride(*axis) == 0 || resolved.extents[usize::from(*axis)] == 1);
+    let varying_axes = varying_activation_axes(resolved, output_axes, activation_layout);
+    let shared_by_every_row = varying_axes.is_empty();
+    let activation_per_slot = !shared_by_every_row
+        && activation_follows_gather(resolved, &varying_axes, weight_slot, activation_layout, external.as_ref());
     let contiguous_activation = is_contiguous_run(activation_layout, &reduce_dims, &reduce_extents);
     let readable_activation = external.is_none() || (contiguous_activation && activation_layout.base == 0);
     let weight_only: Vec<Option<Codec>> = quantized
@@ -179,7 +213,7 @@ pub(super) fn staged_matvec_plan(
         && reduction.is_multiple_of(dot.elements as u64);
     (is_product
         && stageable
-        && shared_by_every_row
+        && (shared_by_every_row || activation_per_slot)
         && epilogue_broadcast_axes.is_empty()
         && readable_activation
         && gather_served
@@ -187,6 +221,7 @@ pub(super) fn staged_matvec_plan(
     .then_some(StagedMatvec {
         weight_slot,
         gather,
+        activation_per_slot,
         activation_slot,
         reduce_dims,
         contiguous_activation,
@@ -355,6 +390,9 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
     if plan.rows_in_shared() {
         source.push_str(&format!("    __shared__ long block_row_byte[{}];\n", STAGED_WARPS * rows));
     }
+    if plan.activation_per_slot {
+        source.push_str(&format!("    long act_row_byte[{rows}];\n"));
+    }
     source.push_str(&format!(
         "    const long first_row = ((long)blockIdx.x * {STAGED_WARPS} + (long)warp) * {rows};\n\
          \x20   long row_block[{rows}];\n\
@@ -373,6 +411,7 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
              \x20       coord{index}_rows[row] = coord{index};\n"
         ));
     }
+    push_activation_row_base(source, resolved, plan, output_axes);
     for (index, axis) in output_axes.iter().enumerate() {
         if weight_layout.stride(*axis) != 0 {
             source.push_str(&format!(
@@ -400,6 +439,29 @@ fn push_row_setup(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, 
     if plan.rows_in_shared() {
         source.push_str("    __syncthreads();\n");
     }
+}
+
+/// The byte offset of this row's slot inside the pre-quantized activation, the way the weight
+/// row adds `gather_base`: the activation's element offset over the slot axes, in whole blocks.
+fn push_activation_row_base(source: &mut String, resolved: &BoundOp, plan: &StagedMatvec, output_axes: &[u16]) {
+    let Some(held) = plan.external.as_ref().filter(|_| plan.activation_per_slot) else {
+        return;
+    };
+    let activation_slot = plan.activation_slot;
+    let (_, activation_layout, _) = &resolved.operands()[activation_slot];
+    source.push_str("        long act_row_element = 0;\n");
+    for (index, axis) in varying_activation_axes(resolved, output_axes, activation_layout)
+        .iter()
+        .filter_map(|axis| output_axes.iter().position(|output| output == axis).map(|index| (index, *axis)))
+    {
+        source.push_str(&format!(
+            "        act_row_element += coord{index} * u.operand_strides[{activation_slot}][{axis}];\n"
+        ));
+    }
+    source.push_str(&format!(
+        "        act_row_byte[row] = (act_row_element / {}) * {}L;\n",
+        held.elements, held.block_bytes
+    ));
 }
 
 /// Fetches the selected expert for one output row, as `push_hoisted_gather_fetch` does for the
@@ -439,12 +501,12 @@ fn staged_activation_load() -> String {
         .to_owned()
 }
 
-fn external_activation_load(layout: &BlockLayout) -> String {
+fn external_activation_load(layout: &BlockLayout, slot_term: &str) -> String {
     let block = activation_block_offset(layout, "chunk");
     let scale = activation_scale_offset(layout, "chunk");
     let codes = activation_code_words(layout, &format!("(activation_block + {})", activation_code_offset(layout, "chunk")), "        ");
     format!(
-        "        const unsigned char *activation_block = staged_blocks + {block};\n\
+        "        const unsigned char *activation_block = staged_blocks{slot_term} + {block};\n\
          {codes}\
          \x20       const int activation[8] = {{ (int)activation_low.x, (int)activation_low.y, (int)activation_low.z, (int)activation_low.w, (int)activation_high.x, (int)activation_high.y, (int)activation_high.z, (int)activation_high.w }};\n\
          \x20       const float activation_scale = __half2float(__ushort_as_half(*(const unsigned short *)(activation_block + {scale})));\n"
@@ -476,7 +538,17 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
     } else {
         format!("first_row + row < u.output_total ? row_block[row] * {block_bytes} : -1")
     };
-    let activation_load = plan.external.as_ref().map_or_else(staged_activation_load, external_activation_load);
+    let slot_term = if plan.activation_per_slot { " + act_row_byte[row]" } else { "" };
+    let activation_load = plan
+        .external
+        .as_ref()
+        .map_or_else(staged_activation_load, |layout| external_activation_load(layout, slot_term));
+    let activation_text = format!("{activation_load}{activation_sum}");
+    let (shared_activation, row_activation) = if plan.activation_per_slot {
+        (String::new(), activation_text)
+    } else {
+        (activation_text, String::new())
+    };
     let position = if 32 % chunks_per_block == 0 { format!("lane % {chunks_per_block}u") } else { format!("chunk % {chunks_per_block}u") };
     let row_fold = row_fold_text(name, &position, *chunk_terms, &centered);
     source.push_str(&format!(
@@ -490,13 +562,13 @@ fn push_direct_fold(source: &mut String, plan: &StagedMatvec) {
          \x20   }}\n\
          \x20   #pragma unroll 2\n\
          \x20   for (unsigned int chunk = lane; chunk < {total_chunks}u; chunk += 32u) {{\n\
-{activation_load}\
-         {activation_sum}\
+{shared_activation}\
          \x20       const unsigned int block_offset = (chunk / {chunks_per_block}u) * {block_bytes}u;\n\
          \x20       #pragma unroll\n\
          \x20       for (int row = 0; row < {rows}; row++) {{\n\
          \x20           if (row_start[row] == 0) {{ continue; }}\n\
          \x20           const unsigned char *block = row_start[row] + block_offset;\n\
+         {row_activation}\
          \x20           int words[8];\n\
          \x20           {name}_i8x32(block, {position}, words);\n\
 {row_fold}\

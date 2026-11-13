@@ -5921,12 +5921,21 @@ fn run_q8_0_expert_stack_staged(
     route: &[f32],
     activation: &[f32],
 ) -> (Vec<String>, Result<Vec<f32>, BackendError>) {
+    run_q8_0_expert_stack_staged_with_activation(packed, route, activation, true)
+}
+
+fn run_q8_0_expert_stack_staged_with_activation(
+    packed: &[u8],
+    route: &[f32],
+    activation: &[f32],
+    shared_activation: bool,
+) -> (Vec<String>, Result<Vec<f32>, BackendError>) {
     let (program, sum) = gathered_expert_program_with_activation(
         STACKED_EXPERTS as u32,
         STACKED_ROWS as u32,
         STACKED_DEPTH as u32,
         route.len() as u32,
-        true,
+        shared_activation,
     );
     let named: Vec<(&str, QuantizedBlock<'_>)> = vec![
         ("weight", QuantizedBlock::Packed { codec: Codec::Q8_0, bytes: packed }),
@@ -5979,6 +5988,62 @@ fn a_stacked_q8_0_expert_product_on_the_staged_gathered_dp4a_matches_the_int8_gr
         &output[..STACKED_ROWS],
         &output[STACKED_ROWS..2 * STACKED_ROWS],
         "degenerate control: slots routed to different experts produced identical rows"
+    );
+}
+
+fn stacked_q8_0_worst_error(
+    output: &[f32],
+    stored: &[f32],
+    route: &[f32],
+    activation_for_slot: impl Fn(usize) -> Vec<f32>,
+) -> f64 {
+    let mut worst = 0.0f64;
+    for (slot, &expert) in route.iter().enumerate() {
+        let activation = activation_for_slot(slot);
+        for row in 0..STACKED_ROWS {
+            let start = (expert as usize * STACKED_ROWS + row) * STACKED_DEPTH;
+            let exact: f64 = stored[start..start + STACKED_DEPTH]
+                .iter()
+                .zip(&activation)
+                .map(|(weight, input)| f64::from(*weight) * f64::from(*input))
+                .sum();
+            worst = worst.max((f64::from(output[slot * STACKED_ROWS + row]) - exact).abs());
+        }
+    }
+    worst
+}
+
+#[test]
+fn a_stacked_q8_0_expert_product_with_a_per_slot_activation_matches_the_int8_grid_oracle_on_cuda() {
+    let (packed, stored) = q8_0_expert_stack(731);
+    let route = [31.0f32, 0.0, 17.0, 5.0, 22.0, 9.0, 30.0, 12.0];
+    let raw: Vec<f32> = random_vec(732, route.len() * STACKED_DEPTH)
+        .into_iter()
+        .map(|value| value * 2.0 - 1.0)
+        .collect();
+    let rounded = fake_quantize_blocks(&raw, true);
+    let slot_row = |slot: usize| rounded[slot * STACKED_DEPTH..(slot + 1) * STACKED_DEPTH].to_vec();
+
+    let (identities, result) = run_q8_0_expert_stack_staged_with_activation(&packed, &route, &raw, false);
+    let output = result.expect("a valid route runs on a real cuda device");
+
+    assert!(
+        identities.iter().any(|identity| identity.contains("_smv") && identity.contains("_sg1") && identity.contains("_ss1")),
+        "the per-slot expert product must lower to the per-slot staged dp4a matvec, got {:?}",
+        identities.iter().map(|identity| identity.lines().next()).collect::<Vec<_>>()
+    );
+    assert_eq!(output.len(), route.len() * STACKED_ROWS, "one output per (expert slot, row)");
+    let peak = output.iter().map(|value| value.abs()).fold(0.0f32, f32::max);
+    assert!(peak > 0.0, "an all-zero output would make parity vacuous");
+    let worst = stacked_q8_0_worst_error(&output, &stored, &route, slot_row);
+    assert!(
+        worst / f64::from(peak) < 1e-5,
+        "per-slot staged q8_0 expert product differs from the int8-grid oracle by {worst} of peak {peak}"
+    );
+    let first_slot_for_all = stacked_q8_0_worst_error(&output, &stored, &route, |_| slot_row(0));
+    assert!(
+        first_slot_for_all / f64::from(peak) > 1e-2,
+        "degenerate control: reading slot 0's activation for every slot matched the output (error {first_slot_for_all} of peak {peak})"
     );
 }
 
