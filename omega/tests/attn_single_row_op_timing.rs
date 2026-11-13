@@ -36,7 +36,7 @@ fn largest_ops(timings: &[omega::metal::OpGpuTiming], count: usize) -> Vec<(Stri
         .iter()
         .map(|timing| (timing.kind.to_string(), timing.gpu_ns))
         .collect();
-    sorted.sort_by(|left, right| right.1.cmp(&left.1));
+    sorted.sort_by_key(|entry| core::cmp::Reverse(entry.1));
     sorted.truncate(count);
     sorted
 }
