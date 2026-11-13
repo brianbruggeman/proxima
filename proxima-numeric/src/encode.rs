@@ -937,7 +937,7 @@ mod tests {
         assert_eq!(
             refused,
             [
-                "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "q5_1", "q4_1", "iq1_s", "iq1_m",
+                "q2_k", "q3_k", "q4_k", "q5_k", "q6_k", "iq1_s", "iq1_m",
                 "iq2_xxs", "iq2_xs", "iq2_s", "iq3_xxs", "iq3_s", "iq4_xs",
             ],
             "pinned: the formats a shared scale cannot express"
@@ -947,7 +947,60 @@ mod tests {
             NumericFormat::ALL.len(),
             "pinned: every format is classified"
         );
-        assert_eq!(encodable.len(), 21, "pinned: formats with an encoder");
+        assert_eq!(encodable.len(), 23, "pinned: formats with an encoder");
+    }
+
+    fn oracle_block() -> std::vec::Vec<f32> {
+        (0..32).map(|index| (((index * 37) % 64) as f32 - 20.0) / 16.0).collect()
+    }
+
+    fn hex_of(bytes: &[u8]) -> std::string::String {
+        bytes.iter().map(|byte| std::format!("{byte:02x}")).collect()
+    }
+
+    #[test]
+    fn q4_1_matches_llama_cpp_b12110_quantize_row_q4_1_ref_on_the_oracle_block() {
+        let bytes = packed(&NumericFormat::Q4_1, &oracle_block());
+
+        assert_eq!(hex_of(&bytes), "333400bd40d962fb952eb751da730c953ec851ea");
+    }
+
+    #[test]
+    fn q5_1_matches_llama_cpp_b12110_quantize_row_q5_1_ref_on_the_oracle_block() {
+        let bytes = packed(&NumericFormat::Q5_1, &oracle_block());
+
+        assert_eq!(hex_of(&bytes), "113000bd2ab55aa980a2d5f72a4c7f91c4e6193b6e80b3d5");
+    }
+
+    #[test]
+    fn q4_1_rounds_an_exact_half_up_where_ties_to_even_would_give_zero() {
+        let mut block = std::vec![0.0f32; 32];
+        block[1] = 30.0;
+        block[2] = 1.0;
+
+        let bytes = packed(&NumericFormat::Q4_1, &block);
+
+        // d = 30/15 = 2 (0x4000), min 0; (1.0-0)*0.5+0.5 = 1.0 truncates to code 1; 30 maps to 15
+        let mut expected = std::vec![0u8; 20];
+        expected[..4].copy_from_slice(&[0x00, 0x40, 0x00, 0x00]);
+        expected[4 + 1] = 0x0f;
+        expected[4 + 2] = 0x01;
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn stored_min_formats_round_trip_the_oracle_block_within_half_a_step() {
+        for format in [NumericFormat::Q4_1, NumericFormat::Q5_1] {
+            let input = oracle_block();
+            let bytes = packed(&format, &input);
+            let step = half::f16::from_le_bytes([bytes[0], bytes[1]]).to_f32();
+
+            let output = decoded(&format, &bytes);
+
+            for (index, (before, after)) in input.iter().zip(&output).enumerate() {
+                assert!((before - after).abs() <= step / 2.0 + 1e-6, "{format:?} element {index}: {before} -> {after}");
+            }
+        }
     }
 
     #[test]

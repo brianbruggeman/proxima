@@ -17,13 +17,13 @@
 //! stored `s = d * sum(q)` in the two bytes after the scale (`Q8_1`), a one-bit code with a
 //! multiplier of two to the mean magnitude (`Q1_0`). These are the rules of llama.cpp's
 //! `quantize_row_*_ref` and of the incumbents in `proxima-gguf`, reproduced operation for operation
-//! so the bytes are identical; a layout whose fit is not one of them (a stored min, other free
+//! so the bytes are identical; a layout whose fit is not one of them (other free
 //! bytes beside the scale, a float code) has a decode instantiation and no encode instantiation.
 
 use core::mem::MaybeUninit;
 
 use crate::block_layout::{BlockLayout, Field, MAX_DIGITS, Plane, named_block_table};
-use crate::encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleStatistic};
+use crate::encode_rule::{CodeClamp, CodeRounding, EncodeRule, ScaleStatistic, StoredMin};
 use crate::float_layout::{FloatLayout, SignEncoding};
 use crate::float_layout_codec::{decode, encode};
 use crate::format::{LevelTable, NumericFormat};
@@ -78,8 +78,51 @@ const fn is_sign_code(layout: &BlockLayout) -> bool {
 /// here do not write, unless it is the stored sum [`has_sum_slot`] names.
 const fn accounted_bytes(layout: &BlockLayout) -> usize {
     let scale = layout.scale.layout.width().div_ceil(8) as usize;
+    let min = match &layout.min {
+        Some(field) => field.layout.width().div_ceil(8) as usize,
+        None => 0,
+    };
     let codes = (layout.elements as usize * code_bits(layout) as usize).div_ceil(8);
-    scale + codes
+    scale + min + codes
+}
+
+/// The rule of a layout that stores the low end of its range beside the scale: `min_multiplier`
+/// of one or negative one, an unbiased unsigned integer code, a whole-byte float field that no code
+/// bit lies in, and no stored sum (its slot is where the min sits).
+const fn stored_min_rule(layout: &BlockLayout, stored_sum: bool) -> Option<EncodeRule> {
+    let Some(field) = &layout.min else { return None };
+    let first = field.byte_offset as usize * 8;
+    let end = first + field.layout.width() as usize;
+    let high_touches = match &layout.element.high {
+        Some(plane) => plane_touches(plane, layout.elements as usize, first, end),
+        None => false,
+    };
+    if stored_sum
+        || !is_unsigned_integer(layout)
+        || layout.element.bias != 0
+        || layout.multiplier != 1
+        || !(layout.min_multiplier == 1 || layout.min_multiplier == -1)
+        || field.pieces.is_some()
+        || field.layout.exponent_bits == 0
+        || !field.layout.width().is_multiple_of(8)
+        || end > layout.block_bytes as usize * 8
+        || plane_touches(&layout.element.low, layout.elements as usize, first, end)
+        || high_touches
+    {
+        return None;
+    }
+    let (lowest, highest) = integer_bounds(layout);
+    Some(EncodeRule {
+        statistic: ScaleStatistic::MinMax,
+        divisor: highest - lowest,
+        rounding: CodeRounding::HalfUpThenTruncate,
+        clamp: CodeClamp::Upper,
+        lowest,
+        highest,
+        stored_sum,
+        stored_min: StoredMin::LowEnd { sign: layout.min_multiplier },
+        zero_code: 0,
+    })
 }
 
 /// Bytes of llama's `Q8_1` stored sum `s`, a binary16.
@@ -128,11 +171,10 @@ const fn zero_code_of(layout: &BlockLayout) -> u8 {
 
 /// The layout's [`EncodeRule`], decided from its fields alone: an offset-binary code centred on its
 /// bias fits the signed peak, a signed or off-centre integer code the peak magnitude, a one-bit
-/// code with a multiplier of two the mean magnitude; `None` for any other layout.
+/// code with a multiplier of two the mean magnitude, an unbiased code with a stored min the range ([`stored_min_rule`]); `None` for any other layout.
 pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
     let integer = is_unsigned_integer(layout) || is_twos_complement_integer(layout);
     if !layout.is_simple()
-        || layout.min.is_some()
         || !integer
         || layout.scale.layout.exponent_bits == 0
         || layout.scale.byte_offset as usize + layout.scale.layout.width().div_ceil(8) as usize
@@ -146,6 +188,9 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
     let bias = layout.element.bias as i32;
     let (lowest, highest) = integer_bounds(layout);
     let stored_sum = has_sum_slot(layout);
+    if layout.min.is_some() {
+        return stored_min_rule(layout, stored_sum);
+    }
     if is_sign_code(layout) {
         if stored_sum {
             return None;
@@ -158,6 +203,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             lowest,
             highest,
             stored_sum,
+            stored_min: StoredMin::Absent,
             zero_code: 1,
         });
     }
@@ -176,6 +222,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             lowest,
             highest,
             stored_sum,
+            stored_min: StoredMin::Absent,
             zero_code: zero_code_of(layout),
         });
     }
@@ -188,6 +235,7 @@ pub(crate) const fn encode_rule_of(layout: &BlockLayout) -> Option<EncodeRule> {
             lowest,
             highest,
             stored_sum,
+            stored_min: StoredMin::Absent,
             zero_code: zero_code_of(layout),
         });
     }
@@ -798,25 +846,46 @@ fn inverse_of(scale: f32) -> f32 {
     if scale == 0.0 { 0.0 } else { 1.0 / scale }
 }
 
+/// The C scan of `quantize_row_q4_1_ref`: strict comparisons from the extremes, in element order.
+#[inline(always)]
+fn range_ordered<const ELEMENTS: usize>(input: &[f32; ELEMENTS]) -> (f32, f32) {
+    let mut low = f32::MAX;
+    let mut high = -f32::MAX;
+    for &value in input {
+        if value < low {
+            low = value;
+        }
+        if value > high {
+            high = value;
+        }
+    }
+    (low, high)
+}
+
 /// The block's scale and the inverse the codes are fitted with (unused by a sign code).
 #[inline(always)]
-fn fit_scale<const ELEMENTS: usize>(rule: &EncodeRule, input: &[f32; ELEMENTS]) -> (f32, f32) {
+fn fit_scale<const ELEMENTS: usize>(rule: &EncodeRule, input: &[f32; ELEMENTS]) -> (f32, f32, f32) {
     let divisor = rule.divisor as f32;
     match rule.statistic {
         ScaleStatistic::SignedPeak => {
             let scale = signed_max(input) / divisor;
-            (scale, inverse_of(scale))
+            (scale, inverse_of(scale), 0.0)
         }
         ScaleStatistic::PeakMagnitude => {
             let scale = peak(input) / divisor;
-            (scale, inverse_of(scale))
+            (scale, inverse_of(scale), 0.0)
         }
         ScaleStatistic::MeanMagnitude => {
             let mut sum = 0.0f32;
             for &value in input {
                 sum += value.abs();
             }
-            (sum / ELEMENTS as f32 / divisor, 0.0)
+            (sum / ELEMENTS as f32 / divisor, 0.0, 0.0)
+        }
+        ScaleStatistic::MinMax => {
+            let (low, high) = range_ordered(input);
+            let scale = (high - low) / divisor;
+            (scale, inverse_of(scale), low)
         }
     }
 }
@@ -869,20 +938,21 @@ fn fit_codes<const ELEMENTS: usize, const HIGH_FUSED: bool>(
     rule: &EncodeRule,
     input: &[f32; ELEMENTS],
     codes: &mut [u8; ELEMENTS],
-) -> (f32, u32) {
-    let (scale, inverse) = fit_scale(rule, input);
-    let degenerate = has_degenerate_scale(layout, rule, scale);
+) -> (f32, u32, f32) {
+    let (scale, inverse, low) = fit_scale(rule, input);
+    let shifted = matches!(rule.stored_min, StoredMin::LowEnd { .. });
+    let degenerate = !shifted && has_degenerate_scale(layout, rule, scale);
     let lift = u32::from(layout.element.low.bits);
     let bits = layout.element.high.map_or(0, |plane| u32::from(plane.bits));
     let mask = u32::MAX.checked_shr(32 - bits).unwrap_or(0);
     let mut word = 0u32;
     for (lane, (code, &value)) in codes.iter_mut().zip(input).enumerate() {
-        *code = if degenerate { rule.zero_code } else { code_of(layout, rule, inverse, value) };
+        *code = if degenerate { rule.zero_code } else { code_of(layout, rule, inverse, if shifted { value - low } else { value }) };
         if HIGH_FUSED {
             word = word.wrapping_add(((u32::from(*code) >> lift) & mask).wrapping_shl(lane as u32 * bits));
         }
     }
-    (scale, word)
+    (scale, word, low)
 }
 
 #[inline(always)]
@@ -901,10 +971,17 @@ fn encode_chunk<
 ) {
     let mut block = [0u8; BYTES];
     let mut codes = [0u8; ELEMENTS];
-    let (scale, high_word) = fit_codes::<ELEMENTS, HIGH_FUSED>(layout, rule, input, &mut codes);
+    let (scale, high_word, low) = fit_codes::<ELEMENTS, HIGH_FUSED>(layout, rule, input, &mut codes);
     scatter_codes::<ELEMENTS, BYTES, LOW_BY_WORD, HIGH_BY_WORD, HIGH_FUSED>(layout, &codes, high_word, &mut block);
     let width = layout.scale.layout.width() as u32;
     put_field::<BYTES, SCALE_OWNED>(&mut block, layout.scale.byte_offset as usize, width, encode(scale, layout.scale.layout));
+    if let (StoredMin::LowEnd { sign }, Some(field)) = (rule.stored_min, &layout.min) {
+        // ggml stores the unrounded low end narrowed to the field; the sign undoes min_multiplier
+        let stored = if sign < 0 { -low } else { low };
+        let bytes = (field.layout.width() / 8) as usize;
+        let at = field.byte_offset as usize;
+        block[at..at + bytes].copy_from_slice(&encode(stored, field.layout).to_le_bytes()[..bytes]);
+    }
     if rule.stored_sum {
         // llama: s = f16(sum * d) with d the scale before it is rounded to the stored width
         let total: i32 = codes.iter().map(|&raw| value_of_raw(layout, raw)).sum();
@@ -1027,7 +1104,7 @@ mod tests {
         input[2] = 1.984_375;
         let mut codes = [0u8; 32];
 
-        let (scale, _) = fit_codes::<32, false>(&layout, &layout.encode_rule().expect("a signed-peak layout"), &input, &mut codes);
+        let (scale, _, _) = fit_codes::<32, false>(&layout, &layout.encode_rule().expect("a signed-peak layout"), &input, &mut codes);
 
         assert_eq!(scale, 0.015_625);
         assert_eq!(&codes[..4], &[192, 0, 255, 128]);
@@ -1292,7 +1369,7 @@ mod tests {
         let mut codes = [0u8; 32];
         let mut block = [0u8; 18];
 
-        let (scale, _) = fit_codes::<32, false>(&layout, &rule, &input, &mut codes);
+        let (scale, _, _) = fit_codes::<32, false>(&layout, &rule, &input, &mut codes);
         encode_chunk::<32, 18, false, false, false, SCALE_OWNED>(&layout, &rule, &input, &mut block);
 
         const { assert!(!SCALE_OWNED, "the first code lies in the scale's last byte") };
