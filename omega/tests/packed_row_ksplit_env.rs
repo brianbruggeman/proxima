@@ -22,6 +22,9 @@ const ATTN_Q_ROWS: u32 = 4096;
 const ATTN_Q_K: u32 = 2048;
 const ATTN_OUTPUT_ROWS: u32 = 2048;
 const ATTN_OUTPUT_K: u32 = 4096;
+const SCALAR_16_BIT_BYTES: usize = 2;
+const ROUTER_ROWS: u32 = 256;
+const ROUTER_K: u32 = 2048;
 
 struct Emitted {
     key: String,
@@ -76,9 +79,11 @@ fn emit_op(codec: Codec, rows: u32, reduction: u32) -> Emitted {
 /// `bf16_row_blocked_matvec_parity.rs` does. The emitted entry name has no `_ks` token: only the
 /// cache key carries it (`identity.rs` appends it, `signature_tokens_prelude.rs`'s Reduce arm does not).
 fn plan_kernel_keys(program: &[Op], sum: NodeId, codec: Codec, rows: u32, reduction: u32) -> Vec<String> {
-    let layout = codec.block_layout().expect("a packed codec has a block layout");
-    let blocks_per_row = reduction as usize / layout.elements as usize;
-    let weight_bytes = vec![0u8; rows as usize * blocks_per_row * layout.block_bytes as usize];
+    let (elements, block_bytes) = match codec.block_layout() {
+        Some(layout) => (layout.elements as usize, layout.block_bytes as usize),
+        None => (1, SCALAR_16_BIT_BYTES),
+    };
+    let weight_bytes = vec![0u8; rows as usize * (reduction as usize / elements) * block_bytes];
     let activation = vec![0.5f32; reduction as usize];
     let blocks = [QuantizedBlock::Packed { codec, bytes: &weight_bytes }, QuantizedBlock::Float32(&activation)];
     let plan = omega::plan(program, &[], &blocks, &[sum], NumericPolicy::default()).expect("metal plans the matvec");
@@ -100,49 +105,49 @@ fn env_unset_leaves_the_attn_q_q8_0_op_unsplit_and_byte_identical_to_the_pinned_
     });
 }
 
-#[test]
-fn k_split_2_on_the_attn_q_q8_0_op_splits_two_simdgroups_over_a_64_wide_threadgroup() {
-    temp_env::with_vars([(K_SPLIT_ENV, Some("2")), (ROWS_ENV, None)], || {
-        let emitted = emit_op(Codec::Q8_0, ATTN_Q_ROWS, ATTN_Q_K);
-        let source = &emitted.kernel.source;
+#[proxima::test]
+#[case::split_2_on_attn_q(ATTN_Q_ROWS, ATTN_Q_K, "2")]
+#[case::split_4_on_attn_q(ATTN_Q_ROWS, ATTN_Q_K, "4")]
+#[case::split_4_on_attn_output(ATTN_OUTPUT_ROWS, ATTN_OUTPUT_K, "4")]
+async fn a_whole_block_lane_q8_0_op_never_splits_under_the_env(#[case] rows: u32, #[case] reduction: u32, #[case] split: &str) {
+    temp_env::with_vars([(K_SPLIT_ENV, Some(split)), (ROWS_ENV, None)], || {
+        let emitted = emit_op(Codec::Q8_0, rows, reduction);
 
-        assert!(emitted.key.contains("_ks2"), "{}", emitted.key);
-        assert!(source.contains("partial_sums[2][2]"), "{source}");
-        assert!(source.contains("sgitg"), "{source}");
-        assert!(source.contains("ib_step = 64"), "{source}");
-        assert_eq!(emitted.kernel.grid.threadgroup_width, Some(64));
+        assert!(!emitted.key.contains("_ks"), "{}", emitted.key);
+        assert!(emitted.kernel.source == fixture("q8_0_plain.msl") || rows != ATTN_Q_ROWS, "split {split} changed the Q8_0 attn_q kernel");
+        assert!(!emitted.kernel.source.contains("partial_sums"), "{}", emitted.kernel.source);
+    });
+}
+
+#[proxima::test]
+#[case::split_2_is_64_wide("2", "_ks2", 64)]
+#[case::split_4_is_128_wide("4", "_ks4", 128)]
+async fn k_split_on_the_bf16_router_splits_simdgroups_over_a_threadgroup_of_that_many_warps(#[case] split: &str, #[case] token: &str, #[case] width: u64) {
+    temp_env::with_vars([(K_SPLIT_ENV, Some(split)), (ROWS_ENV, None)], || {
+        let emitted = emit_op(Codec::BFloat16, ROUTER_ROWS, ROUTER_K);
+
+        assert!(emitted.key.contains(token), "{}", emitted.key);
+        assert!(emitted.kernel.source.contains("sgitg"), "{}", emitted.kernel.source);
+        assert_eq!(emitted.kernel.grid.threadgroup_width, Some(width));
     });
 }
 
 #[test]
-fn k_split_4_on_the_attn_output_q8_0_op_splits_four_simdgroups_over_a_128_wide_threadgroup() {
-    temp_env::with_vars([(K_SPLIT_ENV, Some("4")), (ROWS_ENV, None)], || {
-        let emitted = emit_op(Codec::Q8_0, ATTN_OUTPUT_ROWS, ATTN_OUTPUT_K);
-        let source = &emitted.kernel.source;
-
-        assert!(emitted.key.contains("_ks4"), "{}", emitted.key);
-        assert!(source.contains("partial_sums[4][2]"), "{source}");
-        assert_eq!(emitted.kernel.grid.threadgroup_width, Some(128));
-    });
-}
-
-#[test]
-fn k_split_4_on_the_attn_q_op_clamps_to_the_two_simdgroups_its_64_blocks_can_feed() {
-    temp_env::with_vars([(K_SPLIT_ENV, Some("4")), (ROWS_ENV, None)], || {
-        let emitted = emit_op(Codec::Q8_0, ATTN_Q_ROWS, ATTN_Q_K);
-
-        assert!(emitted.key.contains("_ks2"), "{}", emitted.key);
-        assert!(!emitted.key.contains("_ks4"), "{}", emitted.key);
-    });
-}
-
-#[test]
-fn rows_ksplit_4_with_a_split_of_2_folds_four_rows_per_simdgroup() {
+fn rows_ksplit_4_with_a_split_of_2_folds_four_rows_per_simdgroup_of_the_bf16_router() {
     temp_env::with_vars([(K_SPLIT_ENV, Some("2")), (ROWS_ENV, Some("4"))], || {
-        let emitted = emit_op(Codec::Q8_0, ATTN_Q_ROWS, ATTN_Q_K);
+        let emitted = emit_op(Codec::BFloat16, ROUTER_ROWS, ROUTER_K);
 
         assert!(emitted.key.contains("_ks2"), "{}", emitted.key);
         assert!(emitted.kernel.source.contains("partial_sums[2][4]"), "{}", emitted.kernel.source);
+    });
+}
+
+#[test]
+fn env_unset_leaves_the_bf16_router_unsplit() {
+    temp_env::with_vars([(K_SPLIT_ENV, None::<&str>), (ROWS_ENV, None)], || {
+        let emitted = emit_op(Codec::BFloat16, ROUTER_ROWS, ROUTER_K);
+
+        assert!(!emitted.key.contains("_ks"), "{}", emitted.key);
     });
 }
 

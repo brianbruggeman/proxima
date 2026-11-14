@@ -65,10 +65,11 @@ split_k_max_rows = 4096
 
 # ceiling on the simdgroups of one threadgroup that cooperate on the SAME
 # output rows of a packed matvec, each folding a strided share of the reduction
-# (`msl::ksplit_max`, `msl::k_split_for`): a body whose lanes take whole units
-# (Q8_0, F16, BF16, ...) gets `ceil(K / unit / 32)` clamped to `1..=ksplit_max`
-# and rounded down to a power of two, so every simdgroup owns at least one unit
-# per lane sweep. 1 keeps today's geometry and every kernel byte identical;
+# (`msl::ksplit_max`, `msl::k_split_for`): a body whose lane owns a short
+# scalar run of elements (the scalar-run bodies: F16, BF16, ...) gets
+# `ceil(K / run / 32)` clamped to `1..=ksplit_max` and rounded down to a power
+# of two, so every simdgroup owns at least one run per lane sweep. A body whose
+# lane owns a whole block (Q8_0, ...) never splits: measured slower there. 1 keeps today's geometry and every kernel byte identical;
 # raising it launches `ksplit_max * 32` threads per threadgroup (must be a
 # power of two, `<= 32` for the 1024-thread ceiling), cuts the reduction
 # latency of a long-K matvec and re-associates the f32 block sums, so the

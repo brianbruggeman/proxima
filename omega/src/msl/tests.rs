@@ -6593,16 +6593,16 @@ fn packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged() {
 }
 
 #[proxima::test]
-#[case::attn_q_q8_0_k2048(64, 4, 2)]
-#[case::attn_q_q8_0_k2048_wide_ceiling(64, 8, 2)]
-#[case::attn_output_q8_0_k4096(128, 4, 4)]
+#[case::two_sweeps_feed_two_simdgroups(64, 4, 2)]
+#[case::two_sweeps_stay_two_under_a_wide_ceiling(64, 8, 2)]
+#[case::four_sweeps_feed_four_simdgroups(128, 4, 4)]
 #[case::router_bf16_k2048_run8_capped(256, 4, 4)]
 #[case::router_bf16_k2048_run8_uncapped(256, 8, 8)]
-#[case::parity_q8_0_k768_clamps_to_one(24, 4, 1)]
+#[case::under_one_sweep_clamps_to_one(24, 4, 1)]
 #[case::empty_reduction_is_one(0, 4, 1)]
 #[case::three_sweeps_round_down_to_two(96, 8, 2)]
-#[case::attn_q_with_max_one(64, 1, 1)]
-#[case::attn_output_with_max_one(128, 1, 1)]
+#[case::two_sweeps_with_max_one(64, 1, 1)]
+#[case::four_sweeps_with_max_one(128, 1, 1)]
 #[case::router_with_max_one(256, 1, 1)]
 async fn k_split_for_holds_units_over_lanes_to_a_power_of_two(
     #[case] units: u64,
@@ -6629,6 +6629,18 @@ fn only_the_whole_unit_bodies_split_k() {
     for (body, expected) in bodies {
         assert_eq!(body.splits_k(), expected, "{body:?}");
     }
+}
+
+#[proxima::test]
+#[case::bf16_lane_owns_a_scalar_run(Codec::BFloat16, Some(crate::sized::PACKED_ROW_SCALAR_RUN as u64))]
+#[case::f16_lane_owns_a_scalar_run(Codec::Float16, Some(crate::sized::PACKED_ROW_SCALAR_RUN as u64))]
+#[case::q8_0_lane_owns_a_whole_block(Codec::Q8_0, None)]
+#[case::q4k_lane_owns_a_whole_block(Codec::Q4K, None)]
+async fn only_a_lane_owning_a_scalar_run_has_a_k_split_unit(
+    #[case] codec: Codec,
+    #[case] expected: Option<u64>,
+) {
+    assert_eq!(packed_row_lane_unit(codec), expected, "{codec:?}");
 }
 
 #[test]

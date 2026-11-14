@@ -105,7 +105,8 @@ impl PackedBodySelect {
 
     /// Whether the body's lanes own whole units (a block or a scalar run), so simdgroups can
     /// split the reduction between them. The sub-block and lane-spread bodies share a unit across
-    /// lanes and cannot. Exhaustive, so a new body variant must decide.
+    /// lanes and cannot. Exhaustive, so a new body variant must decide. Necessary, not sufficient:
+    /// `packed_row_geometry` additionally requires the lane unit to be a scalar run.
     pub(super) fn splits_k(self) -> bool {
         match self {
             Self::FlatRendered | Self::BlockRendered => true,
