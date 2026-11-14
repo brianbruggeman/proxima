@@ -2041,9 +2041,10 @@ pub(crate) const fn tiled_gemm_block_k_chunk_aligned(block_k: u64, chunk_width: 
 /// high-bit plane), and `Q6_K` (210 B, NOT a mult of 4, hence the `ushort`
 /// loads in [`Q6K_PAIR_DOT_MSL`]) each have one; the flat 32-element legacy
 /// codecs and the two non-quantized codecs do not -- `classify_packed_row_
-/// block` rejects all four before this is ever consulted (`NotKQuantCodec`),
-/// so this only needs to be honest about the four K-quants, not defensive
-/// about the rest. `Q3_K` (110 B) has its own paired-lane body
+/// block` no longer rejects them wholesale (Levels, Block and Scalar codecs
+/// are admitted to the row-blocked kernel), so a caller that reaches this
+/// with one of the four gets `false`, and the pair-dot body is only
+/// selected for the four K-quants. `Q3_K` (110 B) has its own paired-lane body
 /// ([`Q3K_PAIR_DOT_MSL`]) despite a DIFFERENT byte addressing shape from the
 /// other three (four 2-bit levels per byte, not a nibble or nibble-plus-
 /// plane) -- see that body's own doc.

@@ -365,7 +365,7 @@ pub(super) fn push_packed_row_blocked_body(
                 element_fn: codec_element_fn_name(codec),
             };
             let (simdgroups, lanes) = (packed_row_nsg_factor() as usize, SIMD_WIDTH as usize);
-            let geometry = SubBlockMatvecGeometry::decode_levels(rows, simdgroups, lanes);
+            let geometry = SubBlockMatvecGeometry::for_levels(&format.levels, rows, simdgroups, lanes);
             let reduction_bound = packed_row_reduction_bound_token(metal);
             let body = level_matvec_msl(
                 &layout,

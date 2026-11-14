@@ -112,6 +112,8 @@ const ROW_BLOCKED_MARKER: &str = "reduced_row0";
 #[case::fp6e3m2_negated("fp6e3m2_negated", Codec::Fp6E3M2, true, true)]
 #[case::iq4xs_plain("iq4xs_plain", Codec::Iq4Xs, false, true)]
 #[case::iq4xs_negated_declines_row_blocked("iq4xs_negated", Codec::Iq4Xs, true, false)]
+#[case::iq3s_plain("iq3s_plain", Codec::Iq3S, false, true)]
+#[case::iq3s_negated_declines_row_blocked("iq3s_negated", Codec::Iq3S, true, false)]
 #[case::f16_plain_takes_the_scalar_run_body("f16_plain", Codec::Float16, false, true)]
 #[case::bf16_plain_takes_the_scalar_run_body("bf16_plain", Codec::BFloat16, false, true)]async fn single_token_matvec_emits_byte_identical_msl_to_the_pinned_fixture(
     #[case] name: &str,
