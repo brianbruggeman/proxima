@@ -419,9 +419,10 @@ pub struct LayerFfnConfig {
     /// whose routed blocks carry `ffn_{gate,up,down}_shexp.weight` and no
     /// `ffn_gate_inp_shexp.weight` has -- which is what
     /// [`sliding_pattern_descriptor_from_gguf`](crate::spec::sliding_pattern_descriptor_from_gguf)
-    /// reads off such a checkpoint's tensor directory. Absent keeps `true`, the
-    /// only shape the field's first reader lowered.
-    #[serde(default = "default_shared_expert_gate")]
+    /// reads off such a checkpoint's tensor directory. Absent means no gate, the
+    /// same rule as a header that lacks the `ffn_gate_inp_shexp.weight` tensor;
+    /// a config that wants the gate states `shared_expert_gate = true`.
+    #[serde(default)]
     pub shared_expert_gate: bool,
 }
 
@@ -441,13 +442,9 @@ impl LayerFfnConfig {
             dense_feed_forward: None,
             exclusive_dense_post_norm: false,
             ple: false,
-            shared_expert_gate: default_shared_expert_gate(),
+            shared_expert_gate: false,
         }
     }
-}
-
-const fn default_shared_expert_gate() -> bool {
-    true
 }
 
 /// [`ModelDescriptor::expert_shared_feed_forward`] as a parameter type, so a
