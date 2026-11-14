@@ -6650,6 +6650,12 @@ pub(super) fn deliver_token(
         }
     }
     if is_eos {
+        proxima_telemetry::debug!(
+            token_id = token_id,
+            step = step,
+            generated_before = generated_ids.len(),
+            "stopped on an end-of-generation id; it is not recorded in generated_ids"
+        );
         return Ok(ControlFlow::Break(true));
     }
     generated_ids.push(token_id);
@@ -6722,6 +6728,12 @@ pub(super) async fn deliver_token_async<Producer: AsyncTokenProducer>(
         }
     }
     if is_eos {
+        proxima_telemetry::debug!(
+            token_id = token_id,
+            step = step,
+            generated_before = generated_ids.len(),
+            "stopped on an end-of-generation id; it is not recorded in generated_ids"
+        );
         return Ok(ControlFlow::Break(true));
     }
     generated_ids.push(token_id);
