@@ -1073,6 +1073,18 @@ pub(super) fn push_q4k_product_reduce_body(
     );
 }
 
+/// The legacy uniform-`split` fold's slot count. `sized` only generates the
+/// constant under `metal-q4k-split-k`; the fold never takes that arm without it.
+#[cfg(feature = "metal-q4k-split-k")]
+pub(super) fn legacy_split_k_max_split() -> u64 {
+    crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT
+}
+
+#[cfg(not(feature = "metal-q4k-split-k"))]
+pub(super) fn legacy_split_k_max_split() -> u64 {
+    1
+}
+
 /// The row-blocked packed path's tail: combine each simdgroup's per-row
 /// `sumf[q]` and write the output. `metal-q4k-split-k`-off arm -- exactly
 /// [`push_packed_row_blocked_body`]'s original tail, one simdgroup per
@@ -1086,13 +1098,19 @@ pub(super) fn push_q4k_product_reduce_body(
 /// second time here just to re-derive `coord_q` was paying the ladder-vs-
 /// production gap's own named cost twice per thread for zero new
 /// information (`docs/bench-campaigns/2026-09-03-gpu-one-risc/design-2026-09-04/kernel-body-diff.md`).
-#[cfg(not(feature = "metal-q4k-split-k"))]
+///
+/// `k_split` is the number of simdgroups that cooperate on one row group: `1`
+/// is the single-simdgroup tail below, `> 1` hands off to
+/// [`push_packed_row_split_fold`] with `k_split` as a literal in the kernel
+/// text. With `metal-q4k-split-k` on and `k_split == 1` the fold keeps its
+/// uniform-`split` form for the legacy K-quant path.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_packed_row_combine_and_write(
     source: &mut String,
     node: NodeId,
     reduce_op: ScalarOp,
     rows: usize,
+    k_split: usize,
     rank: usize,
     output_axes: &[u16],
     direct_axis: Option<u16>,
@@ -1100,6 +1118,20 @@ pub(super) fn push_packed_row_combine_and_write(
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) -> Result<(), EmitError> {
+    if k_split > 1 || cfg!(feature = "metal-q4k-split-k") {
+        return push_packed_row_split_fold(
+            source,
+            node,
+            reduce_op,
+            rows,
+            k_split,
+            rank,
+            output_axes,
+            element_type,
+            epilogue_body,
+            epilogue_operands,
+        );
+    }
     let combine_fn = simd_combine_fn(node, reduce_op)?;
     if rows <= SIMD_WIDTH as usize {
         push_packed_row_lane_parallel_tail(
@@ -1161,39 +1193,61 @@ pub(super) fn push_packed_row_combine_and_write(
 /// `total == partial_sums[q][0] == reduced`, written by the SAME thread that
 /// computed it -- same value, same order, only the intermediate trip through
 /// `threadgroup` memory differs.
-#[cfg(feature = "metal-q4k-split-k")]
+///
+/// With `k_split > 1` the partials live in `partial_sums[k_split][rows]`
+/// (simdgroup-major) and the fold bound is the literal `k_split`; the
+/// threadgroup is exactly `k_split` simdgroups wide, so no `split` uniform is
+/// read. With `k_split == 1` (feature arm) it keeps the legacy
+/// `partial_sums[rows][max_split]` layout and the runtime `split` bound.
+/// Either way the fold is `partial_sums` slot 0, 1, 2, ... in order, so the
+/// association of the per-simdgroup sums is fixed and no atomics are used.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn push_packed_row_combine_and_write(
+fn push_packed_row_split_fold(
     source: &mut String,
     node: NodeId,
     reduce_op: ScalarOp,
     rows: usize,
+    k_split: usize,
     rank: usize,
     output_axes: &[u16],
-    _direct_axis: Option<u16>,
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) -> Result<(), EmitError> {
     let combine_fn = simd_combine_fn(node, reduce_op)?;
-    let max_split = crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT;
+    let literal = k_split > 1;
+    let (declaration, store, first, next, bound) = if literal {
+        (
+            format!("[{k_split}][{rows}]"),
+            "partial_sums[sgitg][q]",
+            "partial_sums[0][q]",
+            "partial_sums[s][q]",
+            format!("{k_split}u"),
+        )
+    } else {
+        (
+            format!("[{rows}][{}]", legacy_split_k_max_split()),
+            "partial_sums[q][sgitg]",
+            "partial_sums[q][0]",
+            "partial_sums[q][s]",
+            String::from("split"),
+        )
+    };
     source.push_str(&format!(
-        "    threadgroup {element_type} partial_sums[{rows}][{max_split}];\n"
+        "    threadgroup {element_type} partial_sums{declaration};\n"
     ));
     source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str(&format!(
         "        {element_type} reduced = {combine_fn}(sumf[q]);\n"
     ));
-    source.push_str("        if (lane == 0u) { partial_sums[q][sgitg] = reduced; }\n");
+    source.push_str(&format!("        if (lane == 0u) {{ {store} = reduced; }}\n"));
     source.push_str("    }\n");
     source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str("    if (sgitg == 0u && lane == 0u) {\n");
     source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n"));
-    source.push_str(&format!(
-        "            {element_type} total = partial_sums[q][0];\n"
-    ));
-    source.push_str("            for (uint s = 1u; s < split; ++s) {\n");
-    let combine_expr = scalar_op_expr(reduce_op, &["total", "partial_sums[q][s]"]);
+    source.push_str(&format!("            {element_type} total = {first};\n"));
+    source.push_str(&format!("            for (uint s = 1u; s < {bound}; ++s) {{\n"));
+    let combine_expr = scalar_op_expr(reduce_op, &["total", next]);
     source.push_str(&format!("                total = {combine_expr};\n"));
     source.push_str("            }\n");
     source.push_str("            long flat = group_first + q;\n");
@@ -2404,7 +2458,6 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
 /// `cond ? a : (cond ? b : ...)` over `values`, picked by `lane`: the
 /// register-resident way to give each lane its own entry of a short array,
 /// where a private array indexed by `lane` is not.
-#[cfg(not(feature = "metal-q4k-split-k"))]
 fn lane_select_expression(values: &[String]) -> String {
     let last = values.len() - 1;
     values
@@ -2429,7 +2482,6 @@ fn lane_select_expression(values: &[String]) -> String {
 /// and each lane reads the same epilogue operands at the same coordinates,
 /// so the output is unchanged; what changes is that the tail's memory round
 /// trips overlap and one row's epilogue registers are live at a time.
-#[cfg(not(feature = "metal-q4k-split-k"))]
 #[allow(clippy::too_many_arguments)]
 fn push_packed_row_lane_parallel_tail(
     source: &mut String,

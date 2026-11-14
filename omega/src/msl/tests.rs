@@ -481,6 +481,140 @@ fn assert_split_k_combine_rendered(source: &str) {
     }
 }
 
+fn render_split_combine(rows: usize, k_split: usize) -> String {
+    let bound = matmul_op(4, 256, 3);
+    let mut source = String::new();
+    push_packed_row_combine_and_write(
+        &mut source,
+        bound.node,
+        ScalarOp::Add,
+        rows,
+        k_split,
+        2,
+        &[0, 1],
+        None,
+        "float",
+        &ComposedBody::leaf(ScalarOp::Identity),
+        &[],
+    )
+    .expect("an Add reduce has a simd combine, so the packed row tail renders");
+    source
+}
+
+#[proxima::test]
+#[case::two_simdgroups(2)]
+#[case::four_simdgroups(4)]
+async fn split_combine_declares_partials_one_barrier_and_a_fixed_order_fold(#[case] k_split: usize) {
+    let rows = 4;
+
+    let source = render_split_combine(rows, k_split);
+
+    let declaration = format!("threadgroup float partial_sums[{k_split}][{rows}];");
+    assert!(source.contains(&declaration), "{source}");
+    assert!(source.contains("if (lane == 0u) { partial_sums[sgitg][q] = reduced; }"), "{source}");
+    assert_eq!(source.matches("threadgroup_barrier(mem_flags::mem_threadgroup);").count(), 1, "{source}");
+    let barrier_at = source.find("threadgroup_barrier(").expect("barrier is emitted");
+    let writer_at = source.find("if (sgitg == 0u && lane == 0u) {").expect("simdgroup 0 writes the output");
+    assert!(barrier_at < writer_at, "every simdgroup must reach the barrier before simdgroup 0 folds:\n{source}");
+    assert!(source.contains("float total = partial_sums[0][q];"), "{source}");
+    assert!(source.contains(&format!("for (uint s = 1u; s < {k_split}u; ++s) {{")), "{source}");
+    assert!(source.contains("total = (total + partial_sums[s][q]);"), "{source}");
+    assert!(!source.contains("atomic"), "the fold is deterministic, never atomic:\n{source}");
+}
+
+#[test]
+fn split_combine_barrier_is_not_nested_inside_a_branch() {
+    let source = render_split_combine(2, 2);
+
+    let before_barrier = &source[..source.find("threadgroup_barrier(").expect("barrier is emitted")];
+    let opened = before_barrier.matches('{').count();
+    let closed = before_barrier.matches('}').count();
+
+    assert_eq!(opened, closed, "the barrier sits at kernel-body depth, outside every branch:\n{source}");
+}
+
+#[test]
+fn split_combine_at_one_simdgroup_is_the_single_simdgroup_tail() {
+    let source = render_split_combine(2, 1);
+
+    if cfg!(feature = "metal-q4k-split-k") {
+        let legacy_bound = legacy_split_k_max_split();
+        assert!(source.contains(&format!("threadgroup float partial_sums[2][{legacy_bound}];")), "{source}");
+        assert!(source.contains("partial_sums[q][sgitg] = reduced;"), "{source}");
+        assert!(source.contains("for (uint s = 1u; s < split; ++s) {"), "{source}");
+    } else {
+        let expected = concat!(
+            "    float reduced_row0 = simd_sum(sumf[0]);\n",
+            "    float reduced_row1 = simd_sum(sumf[1]);\n",
+            "    if (lane < 2u) {\n",
+            "        float reduced = (lane == 0u ? reduced_row0 : reduced_row1);\n",
+            "        long flat = group_first + (long)lane;\n",
+            "        if (flat < u.output_total) {\n",
+            "            long lane_coord[2];\n",
+            "            lane_coord[0] = (lane == 0u ? coord_q_cache[0][0] : coord_q_cache[1][0]);\n",
+            "            lane_coord[1] = (lane == 0u ? coord_q_cache[0][1] : coord_q_cache[1][1]);\n",
+            "            long out_offset = u.out_base;\n",
+            "            out_offset += lane_coord[0] * u.out_strides[0];\n",
+            "            out_offset += lane_coord[1] * u.out_strides[1];\n",
+            "            out[out_offset] = reduced;\n",
+            "        }\n",
+            "    }\n",
+        );
+        assert_eq!(source, expected);
+    }
+}
+
+#[proxima::test]
+#[case::two_simdgroups(2, "(gid / 32u) % 2u", "(long)gid / 64")]
+#[case::four_simdgroups(4, "(gid / 32u) % 4u", "(long)gid / 128")]
+async fn split_combine_preamble_derives_the_simdgroup_from_the_thread_id(
+    #[case] k_split: usize,
+    #[case] sgitg_expr: &str,
+    #[case] output_index_expr: &str,
+) {
+    let mut source = String::new();
+
+    push_packed_row_split_preamble(&mut source, k_split);
+
+    let expected = format!(
+        "    long output_index = {output_index_expr};\n    uint sgitg = {sgitg_expr};\n    uint lane = gid % 32u;\n"
+    );
+    assert_eq!(source, expected);
+}
+
+/// Host model of the combine's arithmetic: each simdgroup's lanes sum to one
+/// partial (`simd_sum`), lane 0 stores it at `partial_sums[sgitg]`, and
+/// simdgroup 0 folds slots `0, 1, 2, ...` in order. The values are chosen so
+/// float addition is not associative: the fixed order is observable.
+#[test]
+fn split_combine_fold_equals_the_sequential_sum_in_the_fixed_order() {
+    let lane_partials: [[f32; 4]; 4] = [
+        [1.0e8, 0.5, 0.25, 0.125],
+        [-1.0e8, 1.0, 1.0, 1.0],
+        [3.0, 4.0, 5.0, 6.0],
+        [1.0e-3, 2.0e-3, 3.0e-3, 4.0e-3],
+    ];
+    let simdgroup_sums: Vec<f32> = lane_partials.iter().map(|lanes| lanes.iter().sum::<f32>()).collect();
+
+    let mut partial_sums = [0.0_f32; 4];
+    for (sgitg, partial) in simdgroup_sums.iter().enumerate() {
+        partial_sums[sgitg] = *partial;
+    }
+    let mut total = partial_sums[0];
+    for partial in partial_sums.iter().skip(1) {
+        total += partial;
+    }
+
+    let sequential = ((simdgroup_sums[0] + simdgroup_sums[1]) + simdgroup_sums[2]) + simdgroup_sums[3];
+    let reversed = ((simdgroup_sums[3] + simdgroup_sums[2]) + simdgroup_sums[1]) + simdgroup_sums[0];
+    assert_eq!(total.to_bits(), sequential.to_bits());
+    assert_ne!(
+        total.to_bits(),
+        reversed.to_bits(),
+        "the model values must make the fold order observable, otherwise this test proves nothing"
+    );
+}
+
 /// The split-k factor `packed_row_split_factor` must pick, restated from the
 /// build-time keys it reads (`[packed_row_split_k] target_simdgroups` and
 /// `max_split`, `[packed_row_block] split_k_max_rows`): `1` when split-k is
@@ -6168,6 +6302,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
         true,
+        1,
         &MetalOnlyExtras::default(),
     )
     .expect_err("F16 from an expert source has no row-blocked body: the scalar run body excludes expert sources");
@@ -6209,6 +6344,7 @@ fn push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel() {
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
         false,
+        1,
         &MetalOnlyExtras::default(),
     )
     .expect("Q8_0 now reaches the row-blocked path and renders a kernel body");
@@ -6255,6 +6391,7 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
         false,
+        1,
         &MetalOnlyExtras::default(),
     )
     .expect("Q4_0 now reaches the row-blocked path and renders a kernel body");

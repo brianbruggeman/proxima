@@ -14,6 +14,7 @@ pub(super) fn push_packed_row_blocked_body(
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     expert_source_mode: bool,
+    k_split: usize,
     metal: &MetalOnlyExtras,
 ) -> Result<(), EmitError> {
     if packed_row_block_token_total(block, &resolved.extents) > 1 {
@@ -77,7 +78,7 @@ pub(super) fn push_packed_row_blocked_body(
             source.push_str(&format!(
                 "    for (int q = 0; q < {rows}; ++q) {{ sumf[q] = {identity}; }}\n"
             ));
-        } else if cfg!(feature = "metal-q4k-split-k") {
+        } else if k_split > 1 || cfg!(feature = "metal-q4k-split-k") {
             // the true seed folds in exactly ONCE across the WHOLE
             // threadgroup, not once per simdgroup -- at split == 1 `sgitg`
             // is always `0`, so this collapses to the feature-off condition
@@ -308,7 +309,7 @@ pub(super) fn push_packed_row_blocked_body(
             let launch = FlatLaunch {
                 rows,
                 lanes: SIMD_WIDTH as usize,
-                simdgroups: 1,
+                simdgroups: k_split,
                 weight,
                 other,
                 other_stride_is_one,
@@ -345,7 +346,7 @@ pub(super) fn push_packed_row_blocked_body(
             let launch = FlatLaunch {
                 rows,
                 lanes: SIMD_WIDTH as usize,
-                simdgroups: 1,
+                simdgroups: k_split,
                 weight,
                 other,
                 other_stride_is_one,
@@ -925,6 +926,7 @@ pub(super) fn push_packed_row_blocked_body(
             resolved.node,
             reduce_op,
             rows,
+            k_split,
             rank,
             output_axes,
             packed_row_direct_output_axis(resolved, output_axes),
