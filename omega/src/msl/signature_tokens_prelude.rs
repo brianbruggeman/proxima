@@ -9,6 +9,7 @@ pub(super) fn grid_threads(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
+    knobs: &EmitKnobs,
 ) -> Result<u64, EmitError> {
     grid_threads_with_schedule(
         resolved,
@@ -16,6 +17,7 @@ pub(super) fn grid_threads(
         numeric_policy,
         expert_source_mode,
         AttentionRowSchedule::legacy(),
+        knobs,
     )
 }
 
@@ -25,6 +27,7 @@ pub(super) fn grid_threads_with_schedule(
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
     schedule: AttentionRowSchedule,
+    knobs: &EmitKnobs,
 ) -> Result<u64, EmitError> {
     let threads = match &resolved.kind {
         BoundOpKind::CachedAttention {
@@ -135,7 +138,7 @@ pub(super) fn grid_threads_with_schedule(
                     .map(|dim| resolved.extents[*dim as usize]),
             )?;
             if let Some(block) =
-                tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)
+                tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs)
             {
                 // TILED_GEMM_NSG simdgroups per BLOCK_M x BLOCK_N output
                 // tile, tiled over BOTH the feature axis and the token axis
@@ -164,6 +167,7 @@ pub(super) fn grid_threads_with_schedule(
                 *reduce_op,
                 *init,
                 output_axes,
+                knobs,
             ) {
                 // Same tile-grid shape as the arm above -- the batch axes
                 // dispatch over `GridSpec::depth` (z), never widen this `x`
@@ -192,23 +196,21 @@ pub(super) fn grid_threads_with_schedule(
                         .map(|&axis| resolved.extents[axis as usize])
                         .product(),
                 )?
-            } else if let Some(block) = packed_row_block(resolved, quantized) {
+            } else if let Some(block) = packed_row_block(resolved, quantized, knobs) {
                 // one simdgroup per `codec_rows_per_simdgroup(block.codec)`
                 // feature rows, times the split-K factor, tiled again by
                 // `ceil(token_total / PACKED_ROW_ACTIVATION_GROUP)` once
                 // `block.token_axes` folds more than one activation row per
                 // streamed weight row -- `token_total == 1` collapses that
                 // factor to `1`, the byte-identical single-row shape.
-                let (base, split) = packed_row_dispatch(resolved, quantized, &block);
+                let (base, split) = packed_row_dispatch(resolved, quantized, &block, knobs);
                 checked_product(resolved.node, [base, SIMD_WIDTH, split])?
             } else if reduce_is_cooperative_dispatch(
                 resolved,
                 quantized,
                 numeric_policy,
-                *reduce_op,
-                *init,
-                output_axes,
                 expert_source_mode,
+                knobs,
             ) {
                 // one cooperative-reduce threadgroup per output element,
                 // `cooperative_reduce_width` lanes wide (SIMD_WIDTH with
@@ -216,7 +218,7 @@ pub(super) fn grid_threads_with_schedule(
                 // `reduce_is_cooperative`'s prior doc byte-for-byte) — see
                 // that function's own doc for the scaling policy.
                 let lanes = with_reduction_dims(resolved, output_axes, |reduce_dims| {
-                    cooperative_reduce_width(resolved, quantized, reduce_dims)
+                    cooperative_reduce_width(resolved, quantized, reduce_dims, knobs)
                 });
                 checked_product(resolved.node, [output_total, lanes])?
             } else {
@@ -241,7 +243,7 @@ pub(super) fn grid_threads_with_schedule(
         #[cfg(feature = "metal-moe-mul-mat-id")]
         BoundOpKind::RoundBatchedReduce { .. } => {
             let round_zero = round_zero_reduce_bound(resolved);
-            return grid_threads(&round_zero, quantized, numeric_policy, expert_source_mode);
+            return grid_threads(&round_zero, quantized, numeric_policy, expert_source_mode, knobs);
         }
         #[cfg(not(feature = "metal-moe-mul-mat-id"))]
         BoundOpKind::RoundBatchedReduce { .. } => {

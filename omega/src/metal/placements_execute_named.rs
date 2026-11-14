@@ -897,7 +897,7 @@ pub(super) fn execute_plan_with_placements_inner(
             .resolved
             .iter()
             .enumerate()
-            .filter(|(_, bound)| is_packed_multi_token_projection(bound, packed_operands))
+            .filter(|(_, bound)| is_packed_multi_token_projection(bound, packed_operands, &plan.emit_knobs))
             .map(|(position, _)| position + 1)
             .collect::<Vec<usize>>()
     });
@@ -1356,7 +1356,7 @@ pub(super) fn execute_plan_with_placements_inner(
             && let Some(target_index) = target_nodes.iter().position(|node| *node == bound.node)
         {
             let byte_length = bound_output_len(bound).max(1) * device_element_bytes(bound.dtype);
-            let (_, grid) = kernel_dispatch_shape(bound, packed_operands, plan.numeric_policy)?;
+            let (_, grid) = kernel_dispatch_shape(bound, packed_operands, plan.numeric_policy, &plan.emit_knobs)?;
             debug!(
                 target_index = target_index as u64,
                 node = bound.node.0 as u64,
@@ -1516,7 +1516,7 @@ pub(super) fn execute_plan_with_placements_inner(
                     Some(step) => step.bindings.as_slice(),
                     None => {
                         let (bindings, _grid) =
-                            kernel_dispatch_shape(bound, packed_operands, plan.numeric_policy)?;
+                            kernel_dispatch_shape(bound, packed_operands, plan.numeric_policy, &plan.emit_knobs)?;
                         owned_bindings = bindings;
                         owned_bindings.as_slice()
                     }

@@ -1005,9 +1005,10 @@ fn grouped_row_tiles(resolved: &BoundOp, block: &TiledGemmBlock) -> u64 {
 pub(crate) fn route_compaction_indirect_offset(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
+    knobs: &EmitKnobs,
 ) -> Option<usize> {
     let quantized = operand_codecs(resolved, packed_operands);
-    let block = grouped_block(resolved, &quantized)?;
+    let block = grouped_block(resolved, &quantized, knobs)?;
     let slot = grouped_row_tiles(resolved, &block).checked_sub(1)?;
     Some(4 * (1 + 3 * slot as usize))
 }
@@ -1358,13 +1359,14 @@ pub(crate) fn route_prepass(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
 ) -> Result<Option<([Kernel; 2], usize)>, EmitError> {
-    if !route_prepass_active(resolved, packed_operands) {
+    if !route_prepass_active(resolved, packed_operands, knobs) {
         return Ok(None);
     }
     let kernel = emit(resolved, packed_operands, numeric_policy)?;
     let quantized = operand_codecs(resolved, packed_operands);
-    let Some(block) = grouped_block(resolved, &quantized) else {
+    let Some(block) = grouped_block(resolved, &quantized, knobs) else {
         return Ok(None);
     };
     let tokens = grouped_token_total(resolved, &block);
@@ -1391,7 +1393,7 @@ pub(crate) fn route_prepass(
 }
 
 #[cfg(all(feature = "metal-grouped-gemm", any(test, feature = "metal-core")))]
-fn grouped_block(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<TiledGemmBlock> {
+fn grouped_block(resolved: &BoundOp, quantized: &[Option<Codec>], knobs: &EmitKnobs) -> Option<TiledGemmBlock> {
     let BoundOpKind::Reduce {
         reduce_op,
         init,
@@ -1401,7 +1403,7 @@ fn grouped_block(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<Tile
     else {
         return None;
     };
-    tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)
+    tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs)
         .filter(|block| is_expert_grouped(block) && grouped_route_compacted(block))
 }
 
@@ -1411,9 +1413,9 @@ fn grouped_block(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<Tile
     feature = "metal-grouped-gemm",
     any(test, all(feature = "metal", target_os = "macos"))
 ))]
-pub(crate) fn route_prepass_active(resolved: &BoundOp, packed_operands: &PackedOperands) -> bool {
+pub(crate) fn route_prepass_active(resolved: &BoundOp, packed_operands: &PackedOperands, knobs: &EmitKnobs) -> bool {
     let quantized = operand_codecs(resolved, packed_operands);
-    grouped_block(resolved, &quantized).is_some()
+    grouped_block(resolved, &quantized, knobs).is_some()
 }
 
 #[cfg(all(
@@ -1424,6 +1426,7 @@ pub(crate) fn route_prepass_active(resolved: &BoundOp, packed_operands: &PackedO
 pub(crate) fn route_compaction_indirect_offset(
     _resolved: &BoundOp,
     _packed_operands: &PackedOperands,
+    _knobs: &EmitKnobs,
 ) -> Option<usize> {
     None
 }
@@ -1437,6 +1440,7 @@ pub(crate) fn route_prepass(
     _resolved: &BoundOp,
     _packed_operands: &PackedOperands,
     _numeric_policy: NumericPolicy,
+    _knobs: &EmitKnobs,
 ) -> Result<Option<([Kernel; 2], usize)>, EmitError> {
     Ok(None)
 }
@@ -1446,7 +1450,11 @@ pub(crate) fn route_prepass(
     feature = "metal",
     target_os = "macos"
 ))]
-pub(crate) fn route_prepass_active(_resolved: &BoundOp, _packed_operands: &PackedOperands) -> bool {
+pub(crate) fn route_prepass_active(
+    _resolved: &BoundOp,
+    _packed_operands: &PackedOperands,
+    _knobs: &EmitKnobs,
+) -> bool {
     false
 }
 
@@ -1460,9 +1468,10 @@ pub(crate) fn route_prepass_active(_resolved: &BoundOp, _packed_operands: &Packe
 pub(crate) fn route_compaction_key(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
+    knobs: &EmitKnobs,
 ) -> Option<(NodeId, i64, i64, u64, u64)> {
     let quantized = operand_codecs(resolved, packed_operands);
-    let block = grouped_block(resolved, &quantized)?;
+    let block = grouped_block(resolved, &quantized, knobs)?;
     let lookup = resolved.operands()[block.weight].2.as_ref()?;
     let innermost_axis = *block.token_axes.last()?;
     Some((
@@ -1478,6 +1487,7 @@ pub(crate) fn route_compaction_key(
 pub(crate) fn route_compaction_key(
     _resolved: &BoundOp,
     _packed_operands: &PackedOperands,
+    _knobs: &EmitKnobs,
 ) -> Option<(NodeId, i64, i64, u64, u64)> {
     None
 }
@@ -1489,12 +1499,20 @@ pub(super) fn push_grouped_route_prepass_if_compacted(
     source: &mut String,
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
-    reduce_op: ScalarOp,
-    init: ReduceInit,
-    output_axes: &[u16],
     entry: &str,
+    knobs: &EmitKnobs,
 ) -> Result<(), EmitError> {
-    let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes)
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return Ok(());
+    };
+    let (reduce_op, init) = (*reduce_op, *init);
+    let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs)
         .filter(|block| is_expert_grouped(block) && grouped_route_compacted(block))
     else {
         return Ok(());
@@ -1507,10 +1525,8 @@ pub(super) fn push_grouped_route_prepass_if_compacted(
     _source: &mut String,
     _resolved: &BoundOp,
     _quantized: &[Option<Codec>],
-    _reduce_op: ScalarOp,
-    _init: ReduceInit,
-    _output_axes: &[u16],
     _entry: &str,
+    _knobs: &EmitKnobs,
 ) -> Result<(), EmitError> {
     Ok(())
 }

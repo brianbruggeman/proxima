@@ -1002,6 +1002,7 @@ pub fn execute_plan_with_placements_dispatch_timed(
                 epilogue_operands,
                 epilogue_broadcast_axes,
                 "dispatch_timed",
+                &plan.emit_knobs,
             );
         }
     }

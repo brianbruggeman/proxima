@@ -13,6 +13,7 @@ pub(super) fn index_family(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
 ) -> Option<IndexFamily> {
     match &resolved.kind {
         BoundOpKind::Reduce {
@@ -22,7 +23,7 @@ pub(super) fn index_family(
             epilogue_operands,
             ..
         } => {
-            if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
+            if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs).is_some()
                 || dense_batched_gemm_block(
                     resolved,
                     quantized,
@@ -30,12 +31,13 @@ pub(super) fn index_family(
                     *reduce_op,
                     *init,
                     output_axes,
+                    knobs,
                 )
                 .is_some()
             {
                 return None;
             }
-            if let Some(block) = packed_row_block(resolved, quantized) {
+            if let Some(block) = packed_row_block(resolved, quantized, knobs) {
                 return expert_divide_is_rendered(resolved, output_axes, &block)
                     .then_some(IndexFamily::ExpertPrologue);
             }

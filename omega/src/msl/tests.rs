@@ -603,7 +603,7 @@ fn key_source_dispatch(
     let source = emit_with_knobs(bound, codecs, policy, knobs)
         .expect("kernel emits")
         .source;
-    let dispatch = kernel_dispatch_shape(bound, codecs, policy).expect("dispatch shape resolves");
+    let dispatch = kernel_dispatch_shape(bound, codecs, policy, &EmitKnobs::default()).expect("dispatch shape resolves");
     (key, source, dispatch)
 }
 
@@ -1246,7 +1246,7 @@ fn q4k_row_blocked_matmul_uses_paired_nibble_decode() {
     q4k.insert(weight_node, Codec::Q4K);
 
     assert!(
-        packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
+        packed_row_block(&bound, &operand_codecs(&bound, &q4k), &EmitKnobs::default()).is_some(),
         "test fixture must actually take the row-blocked path for this assertion to mean anything"
     );
 
@@ -1680,7 +1680,7 @@ fn q5k_row_blocked_matmul_uses_paired_nibble_decode() {
     q5k.insert(weight_node, Codec::Q5K);
 
     assert!(
-        packed_row_block(&bound, &operand_codecs(&bound, &q5k)).is_some(),
+        packed_row_block(&bound, &operand_codecs(&bound, &q5k), &EmitKnobs::default()).is_some(),
         "test fixture must actually take the row-blocked path for this assertion to mean anything"
     );
 
@@ -1715,7 +1715,7 @@ fn q6k_row_blocked_matmul_uses_paired_nibble_decode() {
     q6k.insert(weight_node, Codec::Q6K);
 
     assert!(
-        packed_row_block(&bound, &operand_codecs(&bound, &q6k)).is_some(),
+        packed_row_block(&bound, &operand_codecs(&bound, &q6k), &EmitKnobs::default()).is_some(),
         "test fixture must actually take the row-blocked path for this assertion to mean anything"
     );
 
@@ -1741,7 +1741,7 @@ fn one_token_gathered_q4k_matmul_uses_row_blocked_gather_body() {
     let codecs = operand_codecs(&bound, &q4k);
 
     assert!(
-        classify_packed_row_block(&bound, &codecs).is_ok(),
+        classify_packed_row_block(&bound, &codecs, &EmitKnobs::default()).is_ok(),
         "one routed activation row selects one expert before the row-blocked reduction"
     );
 
@@ -1854,7 +1854,7 @@ fn flattened_selected_axis_gathered_q4k_matmul_gathers_expert_base_once_per_toke
     let codecs = operand_codecs(&bound, &q4k);
 
     assert!(
-        classify_packed_row_block(&bound, &codecs).is_ok(),
+        classify_packed_row_block(&bound, &codecs, &EmitKnobs::default()).is_ok(),
         "the opt-in gathered packed-row body must admit multiple selected rows"
     );
 
@@ -1982,11 +1982,11 @@ fn q4_0_codec_takes_the_row_blocked_path_at_a_256_extent() {
     q4_0.insert(weight_node, Codec::Q4_0);
 
     assert!(
-        classify_packed_row_block(&bound, &operand_codecs(&bound, &q4_0)).is_ok(),
+        classify_packed_row_block(&bound, &operand_codecs(&bound, &q4_0), &EmitKnobs::default()).is_ok(),
         "Q4_0 must be admitted by codec now that block_super_element_msl emulates its super-block read"
     );
     assert!(
-        packed_row_block(&bound, &operand_codecs(&bound, &q4_0)).is_some(),
+        packed_row_block(&bound, &operand_codecs(&bound, &q4_0), &EmitKnobs::default()).is_some(),
         "packed_row_block must agree with classify_packed_row_block's own admission"
     );
 
@@ -2076,12 +2076,12 @@ async fn half_precision_codec_outside_the_run_body_never_takes_a_k_quant_row_blo
     operands.insert(weight_node, codec);
 
     assert_eq!(
-        classify_packed_row_block(&bound, &operand_codecs(&bound, &operands)).err(),
+        classify_packed_row_block(&bound, &operand_codecs(&bound, &operands), &EmitKnobs::default()).err(),
         Some(PackedRowBlockRejection::BlockBodyNotRendered),
         "{codec:?} at a non-plain-product reduce must be rejected by the run body's own gate"
     );
     assert!(
-        packed_row_block(&bound, &operand_codecs(&bound, &operands)).is_none(),
+        packed_row_block(&bound, &operand_codecs(&bound, &operands), &EmitKnobs::default()).is_none(),
         "packed_row_block must agree with classify_packed_row_block's own rejection"
     );
 
@@ -2113,7 +2113,7 @@ fn q4k_row_blocked_non_add_reduce_keeps_the_per_element_path() {
     q4k.insert(weight_node, Codec::Q4K);
 
     assert!(
-        packed_row_block(&bound, &operand_codecs(&bound, &q4k)).is_some(),
+        packed_row_block(&bound, &operand_codecs(&bound, &q4k), &EmitKnobs::default()).is_some(),
         "test fixture must actually take the row-blocked path for this assertion to mean anything"
     );
 
@@ -2591,6 +2591,7 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
                 reduce_op,
                 init,
                 output_axes,
+                &EmitKnobs::default(),
             )
             .unwrap_or_else(|| panic!("{name} must admit to the dense-batched-gemm path"));
             let _ = block;
@@ -2604,7 +2605,7 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
                 u64::from(feature) * u64::from(token) * u64::from(batch) * SIMD_WIDTH;
 
             let grid_threads_total =
-                grid_threads(&bound, &codecs, NumericPolicy::llama_relaxed(), false)
+                grid_threads(&bound, &codecs, NumericPolicy::llama_relaxed(), false, &EmitKnobs::default())
                     .unwrap_or_else(|err| panic!("{name}: grid_threads must not error: {err:?}"));
             assert_eq!(
                 grid_threads_total, expected_threads,
@@ -2616,7 +2617,7 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
 
             let packed_operands = PackedOperands::new();
             let (_, grid) =
-                kernel_dispatch_shape(&bound, &packed_operands, NumericPolicy::llama_relaxed())
+                kernel_dispatch_shape(&bound, &packed_operands, NumericPolicy::llama_relaxed(), &EmitKnobs::default())
                     .unwrap_or_else(|err| {
                         panic!("{name}: kernel_dispatch_shape must not error: {err:?}")
                     });
@@ -3283,7 +3284,8 @@ fn decode_shape_stays_on_the_row_blocked_path_with_tiled_gemm_compiled_in() {
             &operand_codecs(&bound, &q4k),
             ScalarOp::Add,
             ReduceInit::Zero,
-            &[1, 0]
+            &[1, 0],
+            &EmitKnobs::default()
         )
         .is_none(),
         "one token must never clear TILED_GEMM_MIN_TOKENS"
@@ -3650,7 +3652,7 @@ fn coord_index32_generic_reduce_source_differs_only_in_coordinate_lines() {
         .expect("baseline emits")
         .source;
     let baseline_dispatch =
-        kernel_dispatch_shape(&bound, &empty_codecs, policy).expect("baseline dispatch shape");
+        kernel_dispatch_shape(&bound, &empty_codecs, policy, &EmitKnobs::default()).expect("baseline dispatch shape");
 
     let shared_key = kernel_cache_key_with_knobs(&bound, &empty_codecs, policy, &narrow_knobs)
         .expect("coord-index32 cache key");
@@ -3658,7 +3660,7 @@ fn coord_index32_generic_reduce_source_differs_only_in_coordinate_lines() {
         .expect("coord-index32 emits")
         .source;
     let shared_dispatch =
-        kernel_dispatch_shape(&bound, &empty_codecs, policy).expect("coord-index32 dispatch shape");
+        kernel_dispatch_shape(&bound, &empty_codecs, policy, &EmitKnobs::default()).expect("coord-index32 dispatch shape");
 
     assert!(
         shared_key.contains("_c32") && !baseline_key.contains("_c32"),
@@ -3754,7 +3756,8 @@ fn many_token_matmul_takes_the_tiled_gemm_path() {
             &operand_codecs(&bound, &q4k),
             ScalarOp::Add,
             ReduceInit::Zero,
-            &[1, 0]
+            &[1, 0],
+            &EmitKnobs::default()
         )
         .is_some(),
         "TILED_GEMM_MIN_TOKENS tokens must clear TILED_GEMM_MIN_TOKENS"
@@ -4524,7 +4527,7 @@ fn wide_weight_stage_never_applies_to_the_dense_batched_gemm_path() {
                 panic!("dense_batched_score_shaped_op always builds a Keep::Reduce fold")
             };
             assert!(
-                !wide_weight_stage_active(&bound, &codecs, reduce_op, init, output_axes),
+                !wide_weight_stage_active(&bound, &codecs, reduce_op, init, output_axes, &EmitKnobs::default()),
                 "the dense-batched-gemm path has no codec-decode arm; the wide-weight-stage \
                  switch must never activate for it"
             );
@@ -4556,7 +4559,7 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
             let tiled_kernel =
                 emit(&tiled_bound, &tiled_q4_0, NumericPolicy::default()).expect("tiled emits");
             let (_, tiled_grid) =
-                kernel_dispatch_shape(&tiled_bound, &tiled_q4_0, NumericPolicy::default())
+                kernel_dispatch_shape(&tiled_bound, &tiled_q4_0, NumericPolicy::default(), &EmitKnobs::default())
                     .expect("tiled dispatch shape");
             let tiled_2d_attrs = tiled_kernel
                 .source
@@ -4588,7 +4591,7 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
             let dense_kernel = emit(&dense_bound, &BTreeMap::new(), NumericPolicy::default())
                 .expect("dense emits");
             let (_, dense_grid) =
-                kernel_dispatch_shape(&dense_bound, &BTreeMap::new(), NumericPolicy::default())
+                kernel_dispatch_shape(&dense_bound, &BTreeMap::new(), NumericPolicy::default(), &EmitKnobs::default())
                     .expect("dense dispatch shape");
             let dense_2d_attrs = dense_kernel
                 .source
@@ -4624,7 +4627,8 @@ fn q4_0_never_takes_the_tiled_gemm_path_with_the_switch_explicitly_off() {
                 &operand_codecs(&bound, &q4_0),
                 ScalarOp::Add,
                 ReduceInit::Zero,
-                &[1, 0]
+                &[1, 0],
+                &EmitKnobs::default()
             )
             .is_none(),
             "a Q4_0 weight must never take the tiled GEMM path with the switch explicitly off"
@@ -4658,7 +4662,8 @@ fn q4_0_takes_the_tiled_gemm_path_when_unset() {
                 &operand_codecs(&bound, &q4_0),
                 ScalarOp::Add,
                 ReduceInit::Zero,
-                &[1, 0]
+                &[1, 0],
+                &EmitKnobs::default()
             )
             .is_some(),
             "a Q4_0 weight must take the tiled GEMM path with the switch unset (new default)"
@@ -4710,7 +4715,8 @@ fn q4_0_takes_the_tiled_gemm_path_with_the_switch_on() {
                     &operand_codecs(&bound, &q4_0),
                     ScalarOp::Add,
                     ReduceInit::Zero,
-                    &[1, 0]
+                    &[1, 0],
+                    &EmitKnobs::default()
                 )
                 .is_some(),
                 "a Q4_0 weight must take the tiled GEMM path with the switch on"
@@ -4883,7 +4889,7 @@ fn multi_head_shaped_matmul_stays_on_the_row_blocked_path_regardless_of_token_co
 
     let codecs = operand_codecs(&bound, &q4k);
     assert!(
-        packed_row_block(&bound, &codecs).is_some(),
+        packed_row_block(&bound, &codecs, &EmitKnobs::default()).is_some(),
         "test fixture must actually clear the row-blocked gate for this assertion to mean anything"
     );
     let BoundOpKind::Reduce {
@@ -4896,7 +4902,7 @@ fn multi_head_shaped_matmul_stays_on_the_row_blocked_path_regardless_of_token_co
         panic!("multi_head_matmul_op always builds a Keep::Reduce fold")
     };
     assert!(
-        tiled_gemm_block(&bound, &codecs, *reduce_op, *init, output_axes).is_none(),
+        tiled_gemm_block(&bound, &codecs, *reduce_op, *init, output_axes, &EmitKnobs::default()).is_none(),
         "a 3-output-axis matmul must never take the 2-D tiled GEMM path"
     );
     let source = emit(&bound, &q4k, NumericPolicy::default())
@@ -6399,11 +6405,11 @@ fn packed_row_nsg2_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul
     let quantized = operand_codecs(&bound, &q4k);
 
     assert!(
-        packed_row_block(&bound, &quantized).is_some(),
+        packed_row_block(&bound, &quantized, &EmitKnobs::default()).is_some(),
         "test fixture must actually take the row-blocked path for this assertion to mean anything"
     );
 
-    let width = tiled_gemm_threadgroup_width(&bound, &quantized, NumericPolicy::default())
+    let width = tiled_gemm_threadgroup_width(&bound, &quantized, NumericPolicy::default(), &EmitKnobs::default())
         .expect("a packed row-blocked reduce always has a threadgroup width");
     assert_eq!(
         width,
@@ -6428,11 +6434,11 @@ fn ggml_port_doubles_the_threadgroup_width_for_a_packed_row_blocked_matmul() {
     let quantized = operand_codecs(&bound, &q4k);
 
     assert!(
-        packed_row_block(&bound, &quantized).is_some(),
+        packed_row_block(&bound, &quantized, &EmitKnobs::default()).is_some(),
         "test fixture must actually take the row-blocked path for this assertion to mean anything"
     );
 
-    let width = tiled_gemm_threadgroup_width(&bound, &quantized, NumericPolicy::default())
+    let width = tiled_gemm_threadgroup_width(&bound, &quantized, NumericPolicy::default(), &EmitKnobs::default())
         .expect("a packed row-blocked reduce always has a threadgroup width");
     assert_eq!(
         width,
@@ -6458,14 +6464,14 @@ fn packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged() {
     q4k.insert(weight_node, Codec::Q4K);
     let quantized = operand_codecs(&bound, &q4k);
 
-    let block = packed_row_block(&bound, &quantized).expect(
+    let block = packed_row_block(&bound, &quantized, &EmitKnobs::default()).expect(
         "test fixture must actually take the row-blocked path for this assertion to mean anything",
     );
 
     let (_base, split) = packed_row_dispatch(&bound, &quantized, &block);
     let expected_width = SIMD_WIDTH * split * packed_row_nsg_factor();
 
-    let width = tiled_gemm_threadgroup_width(&bound, &quantized, NumericPolicy::default())
+    let width = tiled_gemm_threadgroup_width(&bound, &quantized, NumericPolicy::default(), &EmitKnobs::default())
         .expect("a packed row-blocked reduce always has a threadgroup width");
     assert_eq!(
         width, expected_width,
@@ -6534,9 +6540,9 @@ fn a_whole_block_lane_default_geometry_is_unsplit_and_leaves_its_kernel_key_with
         let weight_node = bound.operands()[0].0;
         let packed = BTreeMap::from([(weight_node, codec)]);
         let quantized = operand_codecs(&bound, &packed);
-        let block = packed_row_block(&bound, &quantized).expect("fixture takes the row-blocked path");
+        let block = packed_row_block(&bound, &quantized, &EmitKnobs::default()).expect("fixture takes the row-blocked path");
 
-        let geometry = packed_row_geometry(&bound, &quantized, &block);
+        let geometry = packed_row_geometry(&bound, &quantized, &block, &EmitKnobs::default());
         let key = kernel_cache_key(&bound, &packed, NumericPolicy::default()).expect("key");
 
         assert_eq!(
@@ -6557,9 +6563,9 @@ fn level_staging_of_single_row_matvec(codec: Codec) -> LevelStaging {
     let bound = matmul_op_with_reduce(4, 2048, 1, ScalarOp::Add);
     let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
     let quantized = operand_codecs(&bound, &packed);
-    let block = packed_row_block(&bound, &quantized).expect("fixture takes the row-blocked path");
+    let block = packed_row_block(&bound, &quantized, &EmitKnobs::default()).expect("fixture takes the row-blocked path");
 
-    packed_row_geometry(&bound, &quantized, &block).level_staging
+    packed_row_geometry(&bound, &quantized, &block, &EmitKnobs::default()).level_staging
 }
 
 const STAGING_BUDGET_BYTES: usize = 32768;
@@ -6998,9 +7004,9 @@ fn per_query_head_grid_narrows_threadgroup_width_without_changing_total_threads(
 
     let quantized: Vec<Option<Codec>> = Vec::new();
     let narrow_width =
-        tiled_gemm_threadgroup_width(&narrow, &quantized, NumericPolicy::bit_exact())
+        tiled_gemm_threadgroup_width(&narrow, &quantized, NumericPolicy::bit_exact(), &EmitKnobs::default())
             .expect("a CachedAttention op always has a threadgroup width");
-    let wide_width = tiled_gemm_threadgroup_width(&wide, &quantized, NumericPolicy::bit_exact())
+    let wide_width = tiled_gemm_threadgroup_width(&wide, &quantized, NumericPolicy::bit_exact(), &EmitKnobs::default())
         .expect("a CachedAttention op always has a threadgroup width");
     assert_eq!(
         wide_width,
@@ -7009,9 +7015,9 @@ fn per_query_head_grid_narrows_threadgroup_width_without_changing_total_threads(
          (4x the below-the-knee width): narrow={narrow_width} wide={wide_width}"
     );
 
-    let narrow_threads = grid_threads(&narrow, &quantized, NumericPolicy::bit_exact(), false)
+    let narrow_threads = grid_threads(&narrow, &quantized, NumericPolicy::bit_exact(), false, &EmitKnobs::default())
         .expect("a CachedAttention op always has a thread count");
-    let wide_threads = grid_threads(&wide, &quantized, NumericPolicy::bit_exact(), false)
+    let wide_threads = grid_threads(&wide, &quantized, NumericPolicy::bit_exact(), false, &EmitKnobs::default())
         .expect("a CachedAttention op always has a thread count");
     assert_eq!(
         narrow_threads, wide_threads,
@@ -8125,7 +8131,7 @@ mod flat_grid_form {
         for case in &cases {
             let kernel = emit(&case.bound, &case.packed, case.policy)
                 .unwrap_or_else(|error| panic!("{}: emit failed: {error}", case.label));
-            let (_, shape) = kernel_dispatch_shape(&case.bound, &case.packed, case.policy)
+            let (_, shape) = kernel_dispatch_shape(&case.bound, &case.packed, case.policy, &EmitKnobs::default())
                 .unwrap_or_else(|error| panic!("{}: dispatch shape failed: {error}", case.label));
 
             assert!(
@@ -8280,7 +8286,7 @@ mod flat_grid_form {
             kind: BoundOpKind::Iota,
         };
 
-        let overflow = kernel_dispatch_shape(&bound, &BTreeMap::new(), NumericPolicy::default());
+        let overflow = kernel_dispatch_shape(&bound, &BTreeMap::new(), NumericPolicy::default(), &EmitKnobs::default());
 
         assert!(
             matches!(
@@ -8301,7 +8307,7 @@ mod flat_grid_form {
             kind: BoundOpKind::Iota,
         };
 
-        let rejected = kernel_dispatch_shape(&bound, &BTreeMap::new(), NumericPolicy::default());
+        let rejected = kernel_dispatch_shape(&bound, &BTreeMap::new(), NumericPolicy::default(), &EmitKnobs::default());
 
         assert!(
             matches!(rejected, Err(EmitError::GridExceedsThreadIndex { .. })),
@@ -8373,6 +8379,7 @@ mod flat_grid_form {
             &codecs,
             NumericPolicy::bit_exact().with_reassociation(true),
             true,
+            &EmitKnobs::default(),
         )
         .expect("threads");
 
@@ -8383,6 +8390,7 @@ mod flat_grid_form {
             true,
             threads,
             AttentionRowSchedule::legacy(),
+            &EmitKnobs::default(),
         );
 
         assert!(
@@ -8800,7 +8808,7 @@ mod encode_allocation_budget {
     fn encode_pair(case: &EncodeCase) -> usize {
         let policy = NumericPolicy::default();
         let before = allocations();
-        let (_, grid) = kernel_dispatch_shape(&case.bound, &case.packed, policy)
+        let (_, grid) = kernel_dispatch_shape(&case.bound, &case.packed, policy, &EmitKnobs::default())
             .expect("the fixture's grid is describable");
         let key = kernel_cache_key_for_grid(
             &case.bound,
@@ -9050,7 +9058,7 @@ fn rank_select_entry_and_grid_follow_rows_and_keep_flag() {
         "omega_top_fraction_select_r12_k1"
     );
     assert_eq!(
-        grid_threads(&plain, &[], policy, false).expect("grid resolves"),
+        grid_threads(&plain, &[], policy, false, &EmitKnobs::default()).expect("grid resolves"),
         1024
     );
 }
@@ -9441,7 +9449,7 @@ mod expert_grouped_gemm {
         bound: &BoundOp,
         packed: &BTreeMap<NodeId, Codec>,
     ) -> Result<PackedRowBlock, PackedRowBlockRejection> {
-        classify_packed_row_block(bound, &operand_codecs(bound, packed))
+        classify_packed_row_block(bound, &operand_codecs(bound, packed), &EmitKnobs::default())
     }
 
     #[cfg(not(feature = "metal-gathered-packed-row"))]
@@ -9973,6 +9981,7 @@ mod tiled_decode_description {
                 ScalarOp::Add,
                 ReduceInit::Zero,
                 &[1, 0],
+                &EmitKnobs::default(),
             )
         })
         .unwrap_or_else(|| panic!("{codec:?} must take the tiled GEMM at prefill width"));
@@ -10110,7 +10119,7 @@ mod tiled_decode_description {
         let codecs = operand_codecs(&bound, &packed);
 
         let tiled = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
-        let row_blocked = classify_packed_row_block(&bound, &codecs);
+        let row_blocked = classify_packed_row_block(&bound, &codecs, &EmitKnobs::default());
 
         assert!(
             tiled.is_ok(),
@@ -10400,7 +10409,7 @@ fn q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup() {
 
     assert_eq!(codec_rows_per_simdgroup(Codec::Q6K), rows);
     assert!(
-        packed_row_block(&bound, &codecs).is_some(),
+        packed_row_block(&bound, &codecs, &EmitKnobs::default()).is_some(),
         "fixture must take the row-blocked path"
     );
     let source = emit(&bound, &q6k, NumericPolicy::default())
@@ -10411,8 +10420,8 @@ fn q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup() {
         source.contains(&format!("long group_first = output_index * {rows};")),
         "{source}"
     );
-    let block = packed_row_block(&bound, &codecs).expect("fixture must take the row-blocked path");
-    let (groups, split) = packed_row_dispatch(&bound, &codecs, &block);
+    let block = packed_row_block(&bound, &codecs, &EmitKnobs::default()).expect("fixture must take the row-blocked path");
+    let (groups, split) = packed_row_dispatch(&bound, &codecs, &block, &EmitKnobs::default());
     let base_simdgroups = 8u64.div_ceil(rows as u64);
     assert_eq!((groups, split), (base_simdgroups, 1));
     assert_split_k_combine_rendered(&source);
@@ -10564,7 +10573,7 @@ mod expert_grouped_route_segments {
         );
         bound
             .iter()
-            .filter_map(|op| route_compaction_key(op, &packed))
+            .filter_map(|op| route_compaction_key(op, &packed, &EmitKnobs::default()))
             .collect()
     }
 
@@ -10619,11 +10628,11 @@ mod expert_grouped_route_segments {
 
         let with_prepass = bound
             .iter()
-            .filter(|op| route_prepass_active(op, &packed))
+            .filter(|op| route_prepass_active(op, &packed, &EmitKnobs::default()))
             .count();
         let with_key = bound
             .iter()
-            .filter(|op| route_compaction_key(op, &packed).is_some())
+            .filter(|op| route_compaction_key(op, &packed, &EmitKnobs::default()).is_some())
             .count();
 
         assert_eq!(with_prepass, 3);
@@ -10914,7 +10923,7 @@ mod expert_grouped_route_segments {
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
 
         let prepass =
-            route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits");
+            route_prepass(&bound, &packed, NumericPolicy::default(), &EmitKnobs::default()).expect("prepass emits");
         let source = emit(&bound, &packed, NumericPolicy::default())
             .expect("grouped kernel emits")
             .source;
@@ -10959,10 +10968,10 @@ mod expert_grouped_route_segments {
         );
 
         let adjacent = gathered_matmul_op(301, 8, 192, 512);
-        let (_, bound_grid) = kernel_dispatch_shape(&bound, &packed, NumericPolicy::default())
+        let (_, bound_grid) = kernel_dispatch_shape(&bound, &packed, NumericPolicy::default(), &EmitKnobs::default())
             .expect("first grouped shape has a grid");
         let (_, adjacent_grid) =
-            kernel_dispatch_shape(&adjacent, &packed, NumericPolicy::default())
+            kernel_dispatch_shape(&adjacent, &packed, NumericPolicy::default(), &EmitKnobs::default())
                 .expect("adjacent grouped shape has a grid");
         assert_eq!(bound_grid, adjacent_grid);
         let knobs = EmitKnobs::default();
@@ -11209,7 +11218,7 @@ mod expert_grouped_route_segments {
         let bound = gathered_matmul_op(300, 8, 192, 512);
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
         let Some(([count, _], _)) =
-            route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits")
+            route_prepass(&bound, &packed, NumericPolicy::default(), &EmitKnobs::default()).expect("prepass emits")
         else {
             return;
         };
@@ -11238,7 +11247,7 @@ mod expert_grouped_route_segments {
         let bound = gathered_matmul_op(300, 8, 192, 512);
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
         let Some(([_, place], _)) =
-            route_prepass(&bound, &packed, NumericPolicy::default()).expect("prepass emits")
+            route_prepass(&bound, &packed, NumericPolicy::default(), &EmitKnobs::default()).expect("prepass emits")
         else {
             return;
         };
@@ -11653,7 +11662,7 @@ fn qwen25_q5_0_attention_output_row_block_outcome_is_pinned() {
         std::println!("operand {index} base={} strides={:?}", operand.1.base, operand.1.strides);
     }
     std::println!("extents={:?}", bound.extents);
-    let outcome = classify_packed_row_block(&bound, &codecs);
+    let outcome = classify_packed_row_block(&bound, &codecs, &EmitKnobs::default());
     match &outcome {
         Ok(block) => std::println!(
             "outcome=Ok weight={} other={} reduce_dim={} codec={:?} token_axes={:?} feature_axes={:?}",
@@ -11679,7 +11688,7 @@ async fn block_codec_at_a_reduce_that_is_not_a_multiple_of_256_is_admitted_and_e
     let bound = matmul_op_with_reduce(4, 896, 1, ScalarOp::Add);
     let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
 
-    let block = classify_packed_row_block(&bound, &operand_codecs(&bound, &packed))
+    let block = classify_packed_row_block(&bound, &operand_codecs(&bound, &packed), &EmitKnobs::default())
         .expect("a unit-scale plane codec at reduce 896 is a whole number of 32-element blocks");
     let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("the plane body renders");
 
@@ -11696,7 +11705,7 @@ async fn block_codec_at_a_reduce_that_is_not_a_multiple_of_256_is_admitted_and_e
 async fn block_codec_outside_the_plane_body_names_the_property_it_lacks(#[case] bound: BoundOp, #[case] expected: PackedRowBlockRejection) {
     let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q5_0)]);
 
-    assert_eq!(classify_packed_row_block(&bound, &operand_codecs(&bound, &packed)).err(), Some(expected));
+    assert_eq!(classify_packed_row_block(&bound, &operand_codecs(&bound, &packed), &EmitKnobs::default()).err(), Some(expected));
 }
 
 #[test]
@@ -11704,7 +11713,7 @@ fn iq3_s_plain_product_single_token_reduce_is_admitted_to_the_row_blocked_kernel
     let bound = matmul_op_with_reduce(4, 2048, 1, ScalarOp::Add);
     let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Iq3S)]);
 
-    let block = classify_packed_row_block(&bound, &operand_codecs(&bound, &packed)).expect("a signed-grid level codec at a 256-multiple reduce is admitted");
+    let block = classify_packed_row_block(&bound, &operand_codecs(&bound, &packed), &EmitKnobs::default()).expect("a signed-grid level codec at a 256-multiple reduce is admitted");
 
     assert_eq!(block.codec, Codec::Iq3S);
 }
@@ -11733,7 +11742,7 @@ async fn scalar_weight_at_reduce_896_is_admitted_and_emits_the_run_body(#[case] 
     let bound = matmul_op_with_reduce(4, 896, 1, ScalarOp::Add);
     let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
 
-    let block = classify_packed_row_block(&bound, &operand_codecs(&bound, &packed)).expect("a scalar at a run-multiple reduce is admitted");
+    let block = classify_packed_row_block(&bound, &operand_codecs(&bound, &packed), &EmitKnobs::default()).expect("a scalar at a run-multiple reduce is admitted");
     let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("the scalar run body renders");
 
     assert_eq!(block.codec, codec);
@@ -11753,5 +11762,5 @@ async fn scalar_weight_at_reduce_896_is_admitted_and_emits_the_run_body(#[case] 
 async fn scalar_weight_outside_the_run_body_names_the_property_it_lacks(#[case] bound: BoundOp, #[case] expected: PackedRowBlockRejection) {
     let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Float16)]);
 
-    assert_eq!(classify_packed_row_block(&bound, &operand_codecs(&bound, &packed)).err(), Some(expected));
+    assert_eq!(classify_packed_row_block(&bound, &operand_codecs(&bound, &packed), &EmitKnobs::default()).err(), Some(expected));
 }

@@ -595,6 +595,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "metal-tiled-gemm")]
     fn disabled_by(list: &[String]) -> Vec<bool> {
         CODECS
             .iter()
@@ -653,23 +654,21 @@ mod tests {
     }
 
     #[test]
-    fn packed_row_disable_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_PACKED_ROW_DISABLE",
-            &["q4_0", " q4_0 , q8_0 ", "q4_0,,", "Q4_0", "q4k,q6k", ""],
-            |knobs| disabled_by(&knobs.packed_row_disable),
-            || CODECS.iter().map(|codec| packed_row_codec_disabled(*codec)).collect(),
-        );
-    }
-
-    #[test]
-    fn enable_unsafe_metal_expert_sources_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES",
-            &[""],
-            |knobs| knobs.enable_unsafe_metal_expert_sources,
-            unsafe_metal_expert_sources_enabled,
-        );
+    fn packed_row_disable_names_exactly_the_listed_codecs() {
+        let cases: [(&str, &[&str]); 6] = [
+            ("q4_0", &["q4_0"]),
+            (" q4_0 , q8_0 ", &["q4_0", "q8_0"]),
+            ("q4_0,,", &["q4_0"]),
+            ("Q4_0", &[]),
+            ("q4k,q6k", &["q4k", "q6k"]),
+            ("", &[]),
+        ];
+        for (value, listed) in cases {
+            let knobs = with_only("PROXIMA_PACKED_ROW_DISABLE", Some(value), EmitKnobs::from_env);
+            let disabled: Vec<bool> = CODECS.iter().map(|codec| packed_row_codec_disabled(&knobs, *codec)).collect();
+            let expected: Vec<bool> = CODECS.iter().map(|codec| listed.contains(&codec_cache_key(*codec).as_ref())).collect();
+            assert_eq!(disabled, expected, "PROXIMA_PACKED_ROW_DISABLE={value:?}");
+        }
     }
 
     #[test]

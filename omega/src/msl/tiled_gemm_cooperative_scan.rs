@@ -1828,12 +1828,14 @@ pub(super) fn tiled_gemm_threadgroup_width(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
 ) -> Option<u64> {
     tiled_gemm_threadgroup_width_with_schedule(
         resolved,
         quantized,
         numeric_policy,
         AttentionRowSchedule::legacy(),
+        knobs,
     )
 }
 
@@ -1842,6 +1844,7 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     schedule: AttentionRowSchedule,
+    knobs: &EmitKnobs,
 ) -> Option<u64> {
     // `round_zero_reduce_bound`'s own doc: a round-batched fold's per-round
     // dispatch geometry is whatever the round-0 `Reduce` this collapse
@@ -1856,6 +1859,7 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
             quantized,
             numeric_policy,
             schedule,
+            knobs,
         );
     }
     // `head_v_dim` threads per threadgroup -- correctness-load-bearing, not
@@ -1956,7 +1960,7 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
         ..
     } = &resolved.kind
     {
-        if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
+        if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs).is_some() {
             return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
         }
         if dense_batched_gemm_block(
@@ -1966,14 +1970,15 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
             *reduce_op,
             *init,
             output_axes,
+            knobs,
         )
         .is_some()
         {
             return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
         }
-        if let Some(block) = packed_row_block(resolved, quantized) {
-            let (_base, split) = packed_row_dispatch(resolved, quantized, &block);
-            let geometry = packed_row_geometry(resolved, quantized, &block);
+        if let Some(block) = packed_row_block(resolved, quantized, knobs) {
+            let (_base, split) = packed_row_dispatch(resolved, quantized, &block, knobs);
+            let geometry = packed_row_geometry(resolved, quantized, &block, knobs);
             // `metal-packed-row-nsg2`'s own `nsg=2` geometry (ggml's
             // `N_SG_Q4_K`, `ggml-metal-impl.h:33`) has to be applied HERE,
             // not in the `#[cfg(feature = "metal-packed-row-nsg2")]` arm
@@ -2000,7 +2005,7 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
             return Some(SIMD_WIDTH * split * row_widening);
         }
     }
-    if packed_row_block(resolved, quantized).is_some() {
+    if packed_row_block(resolved, quantized, knobs).is_some() {
         return Some(crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS * SIMD_WIDTH);
     }
     if !reduce_is_cooperative(resolved) {
@@ -2015,7 +2020,7 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
         return None;
     };
     Some(with_reduction_dims(resolved, output_axes, |reduce_dims| {
-        cooperative_reduce_width(resolved, quantized, reduce_dims)
+        cooperative_reduce_width(resolved, quantized, reduce_dims, knobs)
     }))
 }
 
@@ -2043,12 +2048,11 @@ pub(super) fn q4k_super_block_tiled(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     reduce_dims: &[u16],
+    knobs: &EmitKnobs,
 ) -> bool {
     // Mixed expert sources have per-entry codecs and compact payload bases;
-    // this Q4-only specialization cannot represent that ABI. Shared with
-    // `emit_and_classify`'s three call sites -- one std-vs-no_std gate, not
-    // four.
-    if super::emit_and_classify::unsafe_metal_expert_sources_enabled() {
+    // this Q4-only specialization cannot represent that ABI.
+    if knobs.enable_unsafe_metal_expert_sources {
         return false;
     }
     if reduce_dims.len() != 1 {
@@ -2144,8 +2148,9 @@ pub(super) fn cooperative_reduce_width(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     reduce_dims: &[u16],
+    knobs: &EmitKnobs,
 ) -> u64 {
-    if q4k_super_block_tiled(resolved, quantized, reduce_dims) {
+    if q4k_super_block_tiled(resolved, quantized, reduce_dims, knobs) {
         return SIMD_WIDTH;
     }
     let reduction_total: u64 = reduce_dims
@@ -2167,6 +2172,7 @@ pub(super) fn cooperative_reduce_width(
     _resolved: &BoundOp,
     _quantized: &[Option<Codec>],
     _reduce_dims: &[u16],
+    _knobs: &EmitKnobs,
 ) -> u64 {
     SIMD_WIDTH
 }
@@ -2229,7 +2235,7 @@ pub(super) fn push_cooperative_reduce_body(
     // `output_index` nor `lane` the way the row-blocked path below does, see
     // `kernel_cache_key`'s own comment for why the two are mutually
     // exclusive by construction.
-    if let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes) {
+    if let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs) {
         if is_expert_grouped(&block) {
             push_expert_grouped_gemm_body(
                 source,
@@ -2267,6 +2273,7 @@ pub(super) fn push_cooperative_reduce_body(
         reduce_op,
         init,
         output_axes,
+        knobs,
     ) {
         push_dense_batched_gemm_body(
             source,
@@ -2292,8 +2299,8 @@ pub(super) fn push_cooperative_reduce_body(
     // [`push_packed_row_blocked_body`]'s own `token_total > 1` branch emits
     // -- one preamble, since both branches dispatch the identical
     // `output_index`/`lane` pair at `SIMD_WIDTH`.
-    if let Some(block) = packed_row_block(resolved, quantized) {
-        let geometry = packed_row_geometry(resolved, quantized, &block);
+    if let Some(block) = packed_row_block(resolved, quantized, knobs) {
+        let geometry = packed_row_geometry(resolved, quantized, &block, knobs);
         if geometry.k_split > 1 {
             push_packed_row_split_preamble(source, geometry.k_split);
         } else {
@@ -2326,7 +2333,7 @@ pub(super) fn push_cooperative_reduce_body(
     // `tiled_gemm_threadgroup_width` compute -- `width` here MUST equal
     // `cooperative_reduce_width`'s return for this exact op, or the grid
     // launched and the lane math emitted below disagree.
-    let width = cooperative_reduce_width(resolved, quantized, reduce_dims);
+    let width = cooperative_reduce_width(resolved, quantized, reduce_dims, knobs);
     source.push_str(&format!("    long output_index = (long)gid / {width};\n"));
     source.push_str("    if (output_index >= u.output_total) { return; }\n");
     source.push_str(&format!("    uint lane = gid % {width}u;\n"));
@@ -2460,7 +2467,7 @@ pub(super) fn push_cooperative_reduce_body(
         // packed operand slipping past that gate still falls through to the
         // supported loop instead of silently skipping the epilogue write.
         let tiled =
-            !is_broadcast_epilogue && q4k_super_block_tiled(resolved, quantized, reduce_dims);
+            !is_broadcast_epilogue && q4k_super_block_tiled(resolved, quantized, reduce_dims, knobs);
         if tiled {
             let weight = packed[0];
             for (index, gather_slot) in gather_slots.iter().copied().enumerate().take(operand_count)

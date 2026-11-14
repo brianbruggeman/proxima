@@ -37,23 +37,6 @@ fn effective_attention_row_schedule(
     row_schedule.without_kv_reuse()
 }
 
-/// `PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES` -- a `std`-only escape knob
-/// (env reads do not exist on the alloc-only `metal-core` tier build,
-/// `cargo check -p proxima-omega --no-default-features --features metal-core
-/// --target x86_64-unknown-linux-gnu`). The non-`std` path returns the
-/// structural default: the knob is never set, so every caller falls through
-/// to the row-blocked/tiled-gemm classification it would take on a `std`
-/// build with the env var unset.
-#[cfg(feature = "std")]
-pub(super) fn unsafe_metal_expert_sources_enabled() -> bool {
-    std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES").is_some()
-}
-
-#[cfg(not(feature = "std"))]
-pub(super) const fn unsafe_metal_expert_sources_enabled() -> bool {
-    false
-}
-
 /// The knobs a caller without an explicit [`EmitKnobs`] gets: the process environment on `std`,
 /// the all-default record on the alloc tier. A temporary shim -- every caller that holds a
 /// [`EmitKnobs`] (a `Plan`, a test) passes it down instead.
@@ -303,6 +286,7 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
         numeric_policy,
         expert_source_mode,
         row_schedule,
+        knobs,
     )?;
     let extras = metal_specialization(
         resolved,
@@ -378,7 +362,7 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
             node: resolved.node,
         }),
     }?;
-    let source = match index_family(resolved, &quantized, numeric_policy) {
+    let source = match index_family(resolved, &quantized, numeric_policy, knobs) {
         Some(family) if extras.coord_index32 => apply_index_family(family, source),
         _ => source,
     };
@@ -1170,6 +1154,7 @@ pub(super) fn is_expert_grouped(block: &TiledGemmBlock) -> bool {
 pub(super) fn packed_row_block_shape_token(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
 ) -> char {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -1180,9 +1165,9 @@ pub(super) fn packed_row_block_shape_token(
     else {
         return 'S';
     };
-    if let Some(block) = tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes) {
+    if let Some(block) = tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs) {
         expert_group_shape_token(&block)
-    } else if let Some(block) = packed_row_block(resolved, quantized) {
+    } else if let Some(block) = packed_row_block(resolved, quantized, knobs) {
         if packed_row_block_token_total(&block, &resolved.extents) > 1 {
             'M'
         } else {
@@ -1206,11 +1191,12 @@ pub(super) fn packed_row_block_shape_token(
 pub(super) fn packed_row_block_stride_is_one(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
 ) -> Option<bool> {
     let BoundOpKind::Reduce { .. } = &resolved.kind else {
         return None;
     };
-    let block = packed_row_block(resolved, quantized)?;
+    let block = packed_row_block(resolved, quantized, knobs)?;
     Some(
         resolved.operands()[block.other]
             .1
@@ -1226,11 +1212,12 @@ pub(super) fn packed_row_block_stride_is_one(
 pub(super) fn packed_row_block_direct_axis(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
 ) -> Option<u16> {
     let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         return None;
     };
-    let block = packed_row_block(resolved, quantized)?;
+    let block = packed_row_block(resolved, quantized, knobs)?;
     if packed_row_block_token_total(&block, &resolved.extents) > 1 {
         return None;
     }
@@ -1250,16 +1237,17 @@ pub(super) fn packed_row_block_direct_axis(
 pub(super) fn packed_row_block_grouped_axes(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
 ) -> Option<(u16, u16)> {
     let BoundOpKind::Reduce { output_axes, .. } = &resolved.kind else {
         return None;
     };
-    let block = packed_row_block(resolved, quantized)?;
+    let block = packed_row_block(resolved, quantized, knobs)?;
     if packed_row_block_token_total(&block, &resolved.extents) > 1 {
         return None;
     }
     let (_, selected_axis, _, out_axis) = packed_row_direct_grouped_axes(resolved, output_axes)?;
-    let rows = packed_row_geometry(resolved, quantized, &block).rows_per_simdgroup as u64;
+    let rows = packed_row_geometry(resolved, quantized, &block, knobs).rows_per_simdgroup as u64;
     if resolved.extents[out_axis as usize].is_multiple_of(rows) {
         Some((selected_axis, out_axis))
     } else {
@@ -1295,7 +1283,7 @@ fn q4_0_multi_row_hoist_active(
     quantized: &[Option<Codec>],
     knobs: &EmitKnobs,
 ) -> bool {
-    let Some(block) = packed_row_block(resolved, quantized) else {
+    let Some(block) = packed_row_block(resolved, quantized, knobs) else {
         return false;
     };
     // `push_packed_row_blocked_body`'s OWN dispatch condition
@@ -1341,7 +1329,7 @@ fn q4_0_multi_row_pair_lane_active(
     quantized: &[Option<Codec>],
     knobs: &EmitKnobs,
 ) -> bool {
-    let Some(block) = packed_row_block(resolved, quantized) else {
+    let Some(block) = packed_row_block(resolved, quantized, knobs) else {
         return false;
     };
     if packed_row_block_token_total(&block, &resolved.extents) <= 1 {
@@ -1384,7 +1372,7 @@ fn multi_row_generic_arm_current(
     if expert_source_mode {
         return None;
     }
-    let block = packed_row_block(resolved, quantized)?;
+    let block = packed_row_block(resolved, quantized, knobs)?;
     if packed_row_block_token_total(&block, &resolved.extents) <= 1 {
         return None;
     }
@@ -1521,13 +1509,13 @@ pub(super) fn coord_index32_active(
         ..
     } = &resolved.kind
     else {
-        return index_family(resolved, quantized, numeric_policy)
+        return index_family(resolved, quantized, numeric_policy, knobs)
             .is_some_and(|family| index_family_fits(resolved, quantized, family));
     };
-    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
+    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs).is_some() {
         return false;
     }
-    if let Some(block) = packed_row_block(resolved, quantized) {
+    if let Some(block) = packed_row_block(resolved, quantized, knobs) {
         return expert_divide_is_rendered(resolved, output_axes, &block)
             && output_total_fits_u32(resolved);
     }
@@ -1535,10 +1523,8 @@ pub(super) fn coord_index32_active(
         resolved,
         quantized,
         numeric_policy,
-        *reduce_op,
-        *init,
-        output_axes,
         expert_source_mode,
+        knobs,
     );
     let coordinates_fit = if cooperative {
         coord_index32_extents_fit(resolved, output_axes)
@@ -1555,6 +1541,7 @@ pub(super) fn coord_index32_active(
             *reduce_op,
             *init,
             output_axes,
+            knobs,
         )
         .is_none();
     coordinates_fit && (!body_family || body_reach_fits(resolved))
@@ -1735,11 +1722,12 @@ fn reduction_literal_value(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> Option<u64> {
     if !reduction_literal_override() {
         return None;
     }
-    let block = packed_row_block(resolved, quantized)?;
+    let block = packed_row_block(resolved, quantized, knobs)?;
     if reduction_literal_decode_only()
         && packed_row_block_token_total(&block, &resolved.extents) > 1
     {
@@ -1768,40 +1756,40 @@ pub(super) fn metal_specialization(
     let quantized = operand_codecs(resolved, packed_operands);
     let reduction_literal = match &resolved.kind {
         BoundOpKind::Reduce { output_axes, .. } => {
-            reduction_literal_value(resolved, &quantized, output_axes)
+            reduction_literal_value(resolved, &quantized, output_axes, knobs)
         }
         _ => None,
     };
     crate::identity::MetalOnlyExtras {
         dense_mma_input_layout: Some(dense_mma_input_layout),
         cooperative_width: grid.threadgroup_width,
-        packed_row_block_shape: Some(packed_row_block_shape_token(resolved, &quantized)),
-        packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized),
-        packed_row_block_direct_axis: packed_row_block_direct_axis(resolved, &quantized),
-        packed_row_block_grouped_axes: packed_row_block_grouped_axes(resolved, &quantized),
+        packed_row_block_shape: Some(packed_row_block_shape_token(resolved, &quantized, knobs)),
+        packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized, knobs),
+        packed_row_block_direct_axis: packed_row_block_direct_axis(resolved, &quantized, knobs),
+        packed_row_block_grouped_axes: packed_row_block_grouped_axes(resolved, &quantized, knobs),
         elementwise_addressing: elementwise_addressing_cache_token(resolved),
         operand_aliases: operand_alias_cache_token(resolved),
         numeric_policy_token: Some(crate::identity::numeric_policy_cache_token(numeric_policy)),
         merged_z: None,
-        packed_row_block_rows_override: packed_row_block(resolved, &quantized).and_then(|block| {
-            let geometry = packed_row_geometry(resolved, &quantized, &block);
+        packed_row_block_rows_override: packed_row_block(resolved, &quantized, knobs).and_then(|block| {
+            let geometry = packed_row_geometry(resolved, &quantized, &block, knobs);
             let rows = geometry.rows_per_simdgroup;
             // a split geometry's rows are its own default, never an override
             (geometry.k_split == 1 && rows != codec_rows_per_simdgroup_default(block.codec))
                 .then_some(rows)
         }),
-        packed_row_k_split: packed_row_block(resolved, &quantized).and_then(|block| {
-            let geometry = packed_row_geometry(resolved, &quantized, &block);
+        packed_row_k_split: packed_row_block(resolved, &quantized, knobs).and_then(|block| {
+            let geometry = packed_row_geometry(resolved, &quantized, &block, knobs);
             let split = u8::try_from(geometry.k_split).ok().filter(|&split| split > 1)?;
             let rows = u8::try_from(geometry.rows_per_simdgroup).ok()?;
             Some((split, rows))
         }),
-        packed_row_activation_cap: packed_row_block(resolved, &quantized).and_then(|block| {
+        packed_row_activation_cap: packed_row_block(resolved, &quantized, knobs).and_then(|block| {
             let token_total = packed_row_block_token_total(&block, &resolved.extents);
             let cap = packed_row_activation_cap(token_total);
             (token_total > 1 && cap != crate::sized::PACKED_ROW_ACTIVATION_GROUP).then_some(cap)
         }),
-        packed_row_level_stage_words: packed_row_level_stage_words(resolved, &quantized),
+        packed_row_level_stage_words: packed_row_level_stage_words(resolved, &quantized, knobs),
         q4_0_multi_row_hoist: q4_0_multi_row_hoist_active(resolved, &quantized, knobs),
         q4_0_multi_row_pair_lane: q4_0_multi_row_pair_lane_active(resolved, &quantized, knobs),
         // no real `expert_source_mode` at cache-key time -- see
@@ -1841,6 +1829,7 @@ pub(super) fn metal_specialization(
                 *reduce_op,
                 *init,
                 output_axes,
+                knobs,
             )
             .map(|block| {
                 (
@@ -1859,7 +1848,7 @@ pub(super) fn metal_specialization(
                 init,
                 output_axes,
                 ..
-            } => wide_activation_load_active(resolved, &quantized, *reduce_op, *init, output_axes),
+            } => wide_activation_load_active(resolved, &quantized, *reduce_op, *init, output_axes, knobs),
             _ => false,
         },
         tiled_gemm_slim_tgmem: match &resolved.kind {
@@ -1875,6 +1864,7 @@ pub(super) fn metal_specialization(
                 *reduce_op,
                 *init,
                 output_axes,
+                knobs,
             ),
             _ => false,
         },
@@ -1895,6 +1885,7 @@ pub(super) fn metal_specialization(
                 output_axes,
                 epilogue_body,
                 epilogue_operands,
+                knobs,
             ),
             _ => false,
         },
@@ -1904,7 +1895,7 @@ pub(super) fn metal_specialization(
                 init,
                 output_axes,
                 ..
-            } => wide_weight_stage_active(resolved, &quantized, *reduce_op, *init, output_axes),
+            } => wide_weight_stage_active(resolved, &quantized, *reduce_op, *init, output_axes, knobs),
             _ => false,
         },
         tiled_gemm_grid2d: match &resolved.kind {
@@ -1920,6 +1911,7 @@ pub(super) fn metal_specialization(
                 *reduce_op,
                 *init,
                 output_axes,
+                knobs,
             ),
             _ => false,
         },
@@ -1929,7 +1921,7 @@ pub(super) fn metal_specialization(
                 init,
                 output_axes,
                 ..
-            } => mm_layout_active(resolved, &quantized, *reduce_op, *init, output_axes),
+            } => mm_layout_active(resolved, &quantized, *reduce_op, *init, output_axes, knobs),
             _ => false,
         },
         tiled_gemm_dynamic_tgmem: match &resolved.kind {
@@ -1945,6 +1937,7 @@ pub(super) fn metal_specialization(
                 *reduce_op,
                 *init,
                 output_axes,
+                knobs,
             ),
             _ => false,
         },
@@ -1980,7 +1973,7 @@ pub(crate) fn kernel_cache_key_with_knobs(
     knobs: &EmitKnobs,
 ) -> Result<String, EmitError> {
     let quantized = operand_codecs(resolved, packed_operands);
-    let grid = grid_spec(resolved, &quantized, numeric_policy, false)?;
+    let grid = grid_spec(resolved, &quantized, numeric_policy, false, knobs)?;
     kernel_cache_key_for_grid(resolved, packed_operands, numeric_policy, knobs, &grid)
 }
 
@@ -2042,7 +2035,7 @@ pub(crate) fn kernel_cache_key_for_grid_with_layout(
         numeric_policy,
     );
     if let Some((_, _, _, tokens, experts)) =
-        crate::msl::route_compaction_key(resolved, packed_operands)
+        crate::msl::route_compaction_key(resolved, packed_operands, knobs)
     {
         identity.push_str("_route");
         identity.push_str(&tokens.to_string());
@@ -2074,12 +2067,14 @@ pub(crate) fn kernel_dispatch_shape(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
 ) -> Result<(Vec<Binding>, GridSpec), EmitError> {
     kernel_dispatch_shape_with_schedule(
         resolved,
         packed_operands,
         numeric_policy,
         AttentionRowSchedule::legacy(),
+        knobs,
     )
 }
 
@@ -2089,6 +2084,7 @@ pub(crate) fn kernel_dispatch_shape_with_schedule(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
     schedule: AttentionRowSchedule,
+    knobs: &EmitKnobs,
 ) -> Result<(Vec<Binding>, GridSpec), EmitError> {
     validate(resolved)?;
     let quantized = operand_codecs(resolved, packed_operands);
@@ -2098,7 +2094,7 @@ pub(crate) fn kernel_dispatch_shape_with_schedule(
     // `kernel_dispatch_shape` has no expert-source caller (it never took
     // `expert_source_mode` before this parameter existed either) -- `false`
     // reproduces that pre-existing scope exactly.
-    let grid = grid_spec_with_tile_height(resolved, &quantized, numeric_policy, false, schedule)?;
+    let grid = grid_spec_with_tile_height(resolved, &quantized, numeric_policy, false, schedule, knobs)?;
     Ok((
         if is_split_cached_attention {
             split_bindings_with_scratch(resolved)
@@ -2132,6 +2128,7 @@ pub(super) fn grid_spec(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
+    knobs: &EmitKnobs,
 ) -> Result<GridSpec, EmitError> {
     grid_spec_with_tile_height(
         resolved,
@@ -2139,6 +2136,7 @@ pub(super) fn grid_spec(
         numeric_policy,
         expert_source_mode,
         AttentionRowSchedule::legacy(),
+        knobs,
     )
 }
 
@@ -2148,9 +2146,10 @@ pub(crate) fn grid_spec_with_tile_height(
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
     schedule: AttentionRowSchedule,
+    knobs: &EmitKnobs,
 ) -> Result<GridSpec, EmitError> {
     let threads = if schedule == AttentionRowSchedule::legacy() {
-        grid_threads(resolved, quantized, numeric_policy, expert_source_mode)?
+        grid_threads(resolved, quantized, numeric_policy, expert_source_mode, knobs)?
     } else {
         grid_threads_with_schedule(
             resolved,
@@ -2158,17 +2157,18 @@ pub(crate) fn grid_spec_with_tile_height(
             numeric_policy,
             expert_source_mode,
             schedule,
+            knobs,
         )?
     };
     let threadgroup_width = if schedule == AttentionRowSchedule::legacy() {
-        tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy)
+        tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy, knobs)
     } else {
-        tiled_gemm_threadgroup_width_with_schedule(resolved, quantized, numeric_policy, schedule)
+        tiled_gemm_threadgroup_width_with_schedule(resolved, quantized, numeric_policy, schedule, knobs)
     };
     Ok(GridSpec {
         threads,
         threadgroup_width,
-        depth: grid_depth_for(resolved, quantized, numeric_policy),
+        depth: grid_depth_for(resolved, quantized, numeric_policy, knobs),
         grid2d: grid2d_for(
             resolved,
             quantized,
@@ -2176,6 +2176,7 @@ pub(crate) fn grid_spec_with_tile_height(
             expert_source_mode,
             threads,
             schedule,
+            knobs,
         )?,
     })
 }
@@ -2269,18 +2270,25 @@ pub(super) fn reduce_is_cooperative_dispatch(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     policy: NumericPolicy,
-    reduce_op: ScalarOp,
-    init: ReduceInit,
-    output_axes: &[u16],
     expert_source_mode: bool,
+    knobs: &EmitKnobs,
 ) -> bool {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return false;
+    };
+    let (reduce_op, init) = (*reduce_op, *init);
     // the dense tile launch (`tiled_gemm_grid2d_spec`, `grid_threads`,
     // `tiled_gemm_threadgroup_width`) is chosen by `classify_dense_batched_gemm`
     // alone, which never reads the generic fold's length rules; asking
     // `reduce_is_cooperative` here would render the serial body into a tile
     // launch and leave every output past the first `gid` row unwritten
-    if dense_batched_gemm_block(resolved, quantized, policy, reduce_op, init, output_axes).is_some()
-    {
+    if dense_batched_gemm_block(resolved, quantized, policy, reduce_op, init, output_axes, knobs).is_some() {
         return true;
     }
     // `emit_with_expert_sources_mode`'s string substitution hunts for the
@@ -2293,8 +2301,8 @@ pub(super) fn reduce_is_cooperative_dispatch(
     // below ever fires for it).
     if expert_source_mode
         || reduce_has_broadcast_epilogue(resolved)
-        || tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
-        || packed_row_block_admitted(resolved, quantized)
+        || tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs).is_some()
+        || packed_row_block_admitted(resolved, quantized, knobs)
     {
         reduce_is_cooperative(resolved)
     } else {
@@ -2311,13 +2319,13 @@ pub(super) fn reduce_is_cooperative_dispatch(
 /// without this, a declined grouped-expert reduce silently fell back to
 /// `reduce-cooperative` with no record of which of the seven
 /// [`classify_packed_row_block`] conditions gave up on it.
-pub(super) fn packed_row_block_admitted(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
+pub(super) fn packed_row_block_admitted(resolved: &BoundOp, quantized: &[Option<Codec>], knobs: &EmitKnobs) -> bool {
     // The experimental mixed-source path must use the descriptor-aware
     // element reader; row-block pointer hoisting has a separate address ABI.
-    if unsafe_metal_expert_sources_enabled() {
+    if knobs.enable_unsafe_metal_expert_sources {
         return false;
     }
-    match classify_packed_row_block(resolved, quantized) {
+    match classify_packed_row_block(resolved, quantized, knobs) {
         Ok(_) => true,
         Err(reason) => {
             debug_packed_row_block_decline(resolved.node, &reason);
@@ -2366,6 +2374,7 @@ pub(crate) fn debug_tiled_gemm_classification(
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     epilogue_broadcast_axes: &[u16],
     cache_key: &str,
+    knobs: &EmitKnobs,
 ) {
     if reduce_op != ScalarOp::Add || init != ReduceInit::Zero {
         return;
@@ -2374,7 +2383,7 @@ pub(crate) fn debug_tiled_gemm_classification(
         .iter()
         .map(|&axis| resolved.extents[axis as usize])
         .product();
-    let packed = classify_packed_row_block(resolved, quantized).ok();
+    let packed = classify_packed_row_block(resolved, quantized, knobs).ok();
     let codec = packed.as_ref().map(|block| block.codec);
     let rows_n: u64 = packed
         .as_ref()
@@ -2971,7 +2980,7 @@ pub enum PackedRowBlockRejection {
     /// A unit-scale block codec has a rendered row-blocked body only for a plain-product f32
     /// reduce (`block_codec_row_body_rendered`); any other op runs on the cooperative kernel.
     BlockBodyNotRendered,
-    /// `PROXIMA_PACKED_ROW_DISABLE` names the codec: the same-binary A/B control that keeps it on
+    /// [`EmitKnobs::packed_row_disable`] names the codec: the same-binary A/B control that keeps it on
     /// the generic cooperative kernel.
     RowBlockSwitchedOff,
     /// The packed operand's stride at the innermost reduce dim is not 1.
@@ -3013,6 +3022,7 @@ pub(super) fn axes_fold_contiguously(dims: &[u16], extents: &[u64], layout: &Lay
 pub(super) fn classify_packed_row_block(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
 ) -> Result<PackedRowBlock, PackedRowBlockRejection> {
     let block = classify_packed_row_block_with(resolved, quantized, false, row_block_extent_multiple)?;
     if matches!(block.codec, Codec::Levels(_)) && packed_row_block_token_total(&block, &resolved.extents) > 1 {
@@ -3029,7 +3039,7 @@ pub(super) fn classify_packed_row_block(
             return Err(PackedRowBlockRejection::BlockBodyNotRendered);
         }
     }
-    if packed_row_codec_disabled(block.codec) {
+    if packed_row_codec_disabled(knobs, block.codec) {
         return Err(PackedRowBlockRejection::RowBlockSwitchedOff);
     }
     Ok(block)
@@ -3336,13 +3346,14 @@ fn below_tiled_minimum(_token_rows: u64) -> bool {
 pub(crate) fn packed_row_block(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
 ) -> Option<PackedRowBlock> {
     // The experimental mixed-source path must use the descriptor-aware
     // element reader; row-block pointer hoisting has a separate address ABI.
-    if unsafe_metal_expert_sources_enabled() {
+    if knobs.enable_unsafe_metal_expert_sources {
         return None;
     }
-    classify_packed_row_block(resolved, quantized).ok()
+    classify_packed_row_block(resolved, quantized, knobs).ok()
 }
 
 /// Public diagnostic seam for `classify_tiled_gemm`, same shape as
@@ -3794,8 +3805,9 @@ pub(super) fn tiled_gemm_block(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> Option<TiledGemmBlock> {
-    if unsafe_metal_expert_sources_enabled() {
+    if knobs.enable_unsafe_metal_expert_sources {
         return None;
     }
     classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes).ok()
@@ -3813,18 +3825,19 @@ fn tiled_gemm_dense_weight_block(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> Option<TiledGemmBlock> {
-    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes)
+    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs)
         .filter(|block| block.gathered.is_none())
 }
 
 /// The z extent of an expert-grouped tiled dispatch: one slice per expert the
 /// gathered weight can name; a single slice when the route is compacted, since
 /// the tiles then carry the expert. `None` for every other op.
-pub(super) fn expert_group_depth(resolved: &BoundOp, quantized: &[Option<Codec>]) -> Option<u64> {
+pub(super) fn expert_group_depth(resolved: &BoundOp, quantized: &[Option<Codec>], knobs: &EmitKnobs) -> Option<u64> {
     #[cfg(not(feature = "metal-tiled-gemm"))]
     {
-        let _ = (resolved, quantized);
+        let _ = (resolved, quantized, knobs);
         None
     }
     #[cfg(feature = "metal-tiled-gemm")]
@@ -3838,7 +3851,7 @@ pub(super) fn expert_group_depth(resolved: &BoundOp, quantized: &[Option<Codec>]
         else {
             return None;
         };
-        let block = tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes)?;
+        let block = tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs)?;
         block.gathered?;
         if grouped_route_compacted(&block) {
             return Some(1);
@@ -3860,12 +3873,13 @@ pub(super) fn wide_activation_load_active(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> bool {
     if !wide_activation_load_override() {
         return false;
     }
     let Some(block) =
-        tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes)
+        tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes, knobs)
     else {
         return false;
     };
@@ -3888,6 +3902,7 @@ pub(super) fn wide_activation_load_active(
     _reduce_op: ScalarOp,
     _init: ReduceInit,
     _output_axes: &[u16],
+    _knobs: &EmitKnobs,
 ) -> bool {
     false
 }
@@ -3907,11 +3922,12 @@ pub(super) fn slim_tgmem_active(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> bool {
     if !slim_tgmem_override() {
         return false;
     }
-    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs).is_some()
         || dense_batched_gemm_block(
             resolved,
             quantized,
@@ -3919,6 +3935,7 @@ pub(super) fn slim_tgmem_active(
             reduce_op,
             init,
             output_axes,
+            knobs,
         )
         .is_some()
 }
@@ -3931,6 +3948,7 @@ pub(super) fn slim_tgmem_active(
     _reduce_op: ScalarOp,
     _init: ReduceInit,
     _output_axes: &[u16],
+    _knobs: &EmitKnobs,
 ) -> bool {
     false
 }
@@ -3965,6 +3983,7 @@ pub(super) fn direct_store_active(
     output_axes: &[u16],
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    knobs: &EmitKnobs,
 ) -> bool {
     if !tiled_gemm_direct_store_override() {
         return false;
@@ -3972,7 +3991,7 @@ pub(super) fn direct_store_active(
     if !crate::identity::reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
         return false;
     }
-    tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+    tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes, knobs).is_some()
         || dense_batched_gemm_block(
             resolved,
             quantized,
@@ -3980,6 +3999,7 @@ pub(super) fn direct_store_active(
             reduce_op,
             init,
             output_axes,
+            knobs,
         )
         .is_some()
 }
@@ -3997,11 +4017,12 @@ pub(super) fn wide_weight_stage_active(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> bool {
     if !tiled_gemm_wide_weight_stage_override() {
         return false;
     }
-    tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+    tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes, knobs).is_some()
 }
 
 #[cfg(not(feature = "metal-tiled-gemm"))]
@@ -4011,6 +4032,7 @@ pub(super) fn wide_weight_stage_active(
     _reduce_op: ScalarOp,
     _init: ReduceInit,
     _output_axes: &[u16],
+    _knobs: &EmitKnobs,
 ) -> bool {
     false
 }
@@ -4028,11 +4050,12 @@ pub(super) fn tiled_gemm_grid2d_active(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> bool {
     if !tiled_gemm_grid2d_override() {
         return false;
     }
-    tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+    tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes, knobs).is_some()
         || dense_batched_gemm_block(
             resolved,
             quantized,
@@ -4040,6 +4063,7 @@ pub(super) fn tiled_gemm_grid2d_active(
             reduce_op,
             init,
             output_axes,
+            knobs,
         )
         .is_some()
 }
@@ -4052,6 +4076,7 @@ pub(super) fn tiled_gemm_grid2d_active(
     _reduce_op: ScalarOp,
     _init: ReduceInit,
     _output_axes: &[u16],
+    _knobs: &EmitKnobs,
 ) -> bool {
     false
 }
@@ -4068,10 +4093,11 @@ pub(super) fn mm_layout_active(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> bool {
     tiled_gemm_mm_layout_override()
         && mm_layout_geometry_supported()
-        && wide_weight_stage_active(resolved, quantized, reduce_op, init, output_axes)
+        && wide_weight_stage_active(resolved, quantized, reduce_op, init, output_axes, knobs)
 }
 
 #[cfg(not(feature = "metal-tiled-gemm"))]
@@ -4081,6 +4107,7 @@ pub(super) fn mm_layout_active(
     _reduce_op: ScalarOp,
     _init: ReduceInit,
     _output_axes: &[u16],
+    _knobs: &EmitKnobs,
 ) -> bool {
     false
 }
@@ -4102,9 +4129,10 @@ pub(super) fn dynamic_tgmem_active(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> bool {
     tiled_gemm_dynamic_tgmem_override()
-        && tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).is_some()
+        && tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs).is_some()
         && slim_tgmem_active(
             resolved,
             quantized,
@@ -4112,6 +4140,7 @@ pub(super) fn dynamic_tgmem_active(
             reduce_op,
             init,
             output_axes,
+            knobs,
         )
         && tiled_gemm_grid2d_active(
             resolved,
@@ -4120,6 +4149,7 @@ pub(super) fn dynamic_tgmem_active(
             reduce_op,
             init,
             output_axes,
+            knobs,
         )
 }
 
@@ -4131,6 +4161,7 @@ pub(super) fn dynamic_tgmem_active(
     _reduce_op: ScalarOp,
     _init: ReduceInit,
     _output_axes: &[u16],
+    _knobs: &EmitKnobs,
 ) -> bool {
     false
 }
@@ -4152,6 +4183,7 @@ pub(super) fn tiled_gemm_grid2d_spec(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> Result<Option<Grid2DSpec>, EmitError> {
     if !tiled_gemm_grid2d_active(
         resolved,
@@ -4160,11 +4192,12 @@ pub(super) fn tiled_gemm_grid2d_spec(
         reduce_op,
         init,
         output_axes,
+        knobs,
     ) {
         return Ok(None);
     }
     let (feature_extent, token_extent) =
-        if let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes) {
+        if let Some(block) = tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs) {
             (
                 block
                     .feature_axes
@@ -4184,6 +4217,7 @@ pub(super) fn tiled_gemm_grid2d_spec(
             reduce_op,
             init,
             output_axes,
+            knobs,
         ) {
             (
                 block
@@ -4215,6 +4249,7 @@ pub(super) fn tiled_gemm_grid2d_spec(
             reduce_op,
             init,
             output_axes,
+            knobs,
         ) {
             tiled_gemm_shared_bytes()
         } else {
@@ -4231,6 +4266,7 @@ pub(super) fn tiled_gemm_grid2d_spec(
     _reduce_op: ScalarOp,
     _init: ReduceInit,
     _output_axes: &[u16],
+    _knobs: &EmitKnobs,
 ) -> Result<Option<Grid2DSpec>, EmitError> {
     Ok(None)
 }
@@ -4264,6 +4300,7 @@ pub(super) fn grid2d_for(
     expert_source_mode: bool,
     threads: u64,
     schedule: AttentionRowSchedule,
+    knobs: &EmitKnobs,
 ) -> Result<Option<Grid2DSpec>, EmitError> {
     if let BoundOpKind::Reduce {
         reduce_op,
@@ -4278,11 +4315,12 @@ pub(super) fn grid2d_for(
             *reduce_op,
             *init,
             output_axes,
+            knobs,
         )?
     {
         return Ok(Some(tiles));
     }
-    let depth = grid_depth_for(resolved, quantized, numeric_policy);
+    let depth = grid_depth_for(resolved, quantized, numeric_policy, knobs);
     if !exceeds_linear_grid(checked_product(resolved.node, [threads, depth])?) {
         return Ok(None);
     }
@@ -4299,12 +4337,12 @@ pub(super) fn grid2d_for(
         });
     }
     let threadgroup_width = if schedule == AttentionRowSchedule::legacy() {
-        tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy)
+        tiled_gemm_threadgroup_width(resolved, quantized, numeric_policy, knobs)
     } else {
-        tiled_gemm_threadgroup_width_with_schedule(resolved, quantized, numeric_policy, schedule)
+        tiled_gemm_threadgroup_width_with_schedule(resolved, quantized, numeric_policy, schedule, knobs)
     };
     let width_is_neutral =
-        pinned_width_is_shape_neutral(resolved, quantized, numeric_policy, expert_source_mode);
+        pinned_width_is_shape_neutral(resolved, quantized, numeric_policy, expert_source_mode, knobs);
     flat_grid2d(resolved.node, threads, threadgroup_width, width_is_neutral).map(Some)
 }
 
@@ -4321,6 +4359,7 @@ fn pinned_width_is_shape_neutral(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     expert_source_mode: bool,
+    knobs: &EmitKnobs,
 ) -> bool {
     let BoundOpKind::Reduce {
         keep: Keep::Reduce,
@@ -4332,7 +4371,7 @@ fn pinned_width_is_shape_neutral(
     else {
         return false;
     };
-    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
+    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs).is_some()
         || dense_batched_gemm_block(
             resolved,
             quantized,
@@ -4340,20 +4379,19 @@ fn pinned_width_is_shape_neutral(
             *reduce_op,
             *init,
             output_axes,
+            knobs,
         )
         .is_some()
     {
         return false;
     }
-    packed_row_block(resolved, quantized).is_some()
+    packed_row_block(resolved, quantized, knobs).is_some()
         || !reduce_is_cooperative_dispatch(
             resolved,
             quantized,
             numeric_policy,
-            *reduce_op,
-            *init,
-            output_axes,
             expert_source_mode,
+            knobs,
         )
 }
 
@@ -4369,8 +4407,9 @@ pub(super) fn tiled_decode_codec_of(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> Option<Codec> {
-    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes).map(|block| block.codec)
+    tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs).map(|block| block.codec)
 }
 
 #[cfg(not(feature = "metal-tiled-gemm"))]
@@ -4380,6 +4419,7 @@ pub(super) fn tiled_decode_codec_of(
     _reduce_op: ScalarOp,
     _init: ReduceInit,
     _output_axes: &[u16],
+    _knobs: &EmitKnobs,
 ) -> Option<Codec> {
     None
 }
@@ -4395,6 +4435,7 @@ pub(super) fn direct_store_active(
     _output_axes: &[u16],
     _epilogue_body: &ComposedBody,
     _epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    _knobs: &EmitKnobs,
 ) -> bool {
     false
 }
@@ -4430,7 +4471,7 @@ pub fn diagnose_packed_row_block(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
 ) -> Result<(), PackedRowBlockRejection> {
-    classify_packed_row_block(resolved, quantized).map(drop)
+    classify_packed_row_block(resolved, quantized, &ambient_knobs()).map(drop)
 }
 
 /// Thread count [`grid_threads`]' tiled-GEMM arm dispatches -- one
@@ -4492,6 +4533,7 @@ pub(super) fn packed_row_dispatch(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     block: &PackedRowBlock,
+    knobs: &EmitKnobs,
 ) -> (u64, u64) {
     let feature_total: u64 = block
         .feature_axes
@@ -4499,7 +4541,7 @@ pub(super) fn packed_row_dispatch(
         .map(|&axis| resolved.extents[axis as usize])
         .product();
     let token_total = packed_row_block_token_total(block, &resolved.extents);
-    let geometry = packed_row_geometry(resolved, quantized, block);
+    let geometry = packed_row_geometry(resolved, quantized, block, knobs);
     let base = feature_total.div_ceil(geometry.rows_per_simdgroup as u64);
     let split = if geometry.k_split > 1 {
         geometry.k_split as u64
@@ -4578,6 +4620,7 @@ fn level_staging_of(
     quantized: &[Option<Codec>],
     block: &PackedRowBlock,
     rows_per_simdgroup: usize,
+    knobs: &EmitKnobs,
 ) -> LevelStaging {
     let BoundOpKind::Reduce { reduce_op, init, output_axes, .. } = &resolved.kind else {
         return LevelStaging::InPlace;
@@ -4586,12 +4629,12 @@ fn level_staging_of(
         return LevelStaging::InPlace;
     };
     // the tiled GEMM body is rendered first and never runs the row-blocked level body
-    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
+    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs).is_some() {
         return LevelStaging::InPlace;
     }
     let single_row = packed_row_block_token_total(block, &resolved.extents) <= 1
         && quantized[block.weight] == Some(block.codec);
-    let selected = PackedBodySelect::for_op(resolved, *reduce_op, block, unsafe_metal_expert_sources_enabled());
+    let selected = PackedBodySelect::for_op(resolved, *reduce_op, block, knobs.enable_unsafe_metal_expert_sources);
     let Some(layout) = format.packing().filter(|_| single_row && selected == PackedBodySelect::LevelsRendered) else {
         return LevelStaging::InPlace;
     };
@@ -4621,7 +4664,7 @@ pub(super) fn k_split_for(units: u64, lanes: u64, max: u64) -> u64 {
 /// Whether the body `resolved` renders splits K between simdgroups. Evaluated against the
 /// process-wide expert-source switch, the same one the emitter's callers pass as
 /// `expert_source_mode`.
-fn packed_row_body_splits_k(resolved: &BoundOp, block: &PackedRowBlock) -> bool {
+fn packed_row_body_splits_k(resolved: &BoundOp, block: &PackedRowBlock, knobs: &EmitKnobs) -> bool {
     let BoundOpKind::Reduce { reduce_op, .. } = &resolved.kind else {
         return false;
     };
@@ -4629,7 +4672,7 @@ fn packed_row_body_splits_k(resolved: &BoundOp, block: &PackedRowBlock) -> bool 
         resolved,
         *reduce_op,
         block,
-        unsafe_metal_expert_sources_enabled(),
+        knobs.enable_unsafe_metal_expert_sources,
     )
     .splits_k()
 }
@@ -4640,9 +4683,10 @@ fn packed_row_body_splits_k(resolved: &BoundOp, block: &PackedRowBlock) -> bool 
 pub(super) fn packed_row_level_stage_words(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
 ) -> Option<usize> {
-    let block = packed_row_block(resolved, quantized)?;
-    match packed_row_geometry(resolved, quantized, &block).level_staging {
+    let block = packed_row_block(resolved, quantized, knobs)?;
+    match packed_row_geometry(resolved, quantized, &block, knobs).level_staging {
         LevelStaging::Workgroup { words } => Some(words),
         LevelStaging::InPlace => None,
     }
@@ -4665,16 +4709,17 @@ pub(crate) fn packed_row_geometry(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     block: &PackedRowBlock,
+    knobs: &EmitKnobs,
 ) -> PackedRowGeometry {
     let rows_per_simdgroup = codec_rows_per_simdgroup(block.codec);
     let whole = PackedRowGeometry {
         rows_per_simdgroup,
         k_split: 1,
-        level_staging: level_staging_of(resolved, quantized, block, rows_per_simdgroup),
+        level_staging: level_staging_of(resolved, quantized, block, rows_per_simdgroup, knobs),
     };
     let splits = packed_row_block_token_total(block, &resolved.extents) <= 1
         && quantized[block.weight] == Some(block.codec)
-        && packed_row_body_splits_k(resolved, block);
+        && packed_row_body_splits_k(resolved, block, knobs);
     let Some(unit) = packed_row_lane_unit(block.codec).filter(|&unit| splits && unit > 0) else {
         return whole;
     };
@@ -5030,8 +5075,9 @@ pub(super) fn dense_batched_gemm_block(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> Option<DenseBatchedGemmBlock> {
-    if unsafe_metal_expert_sources_enabled() {
+    if knobs.enable_unsafe_metal_expert_sources {
         return None;
     }
     classify_dense_batched_gemm(
@@ -5084,6 +5130,7 @@ pub(super) fn dense_batched_gemm_depth(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
 ) -> Option<u64> {
     let BoundOpKind::Reduce {
         reduce_op,
@@ -5101,6 +5148,7 @@ pub(super) fn dense_batched_gemm_depth(
         *reduce_op,
         *init,
         output_axes,
+        knobs,
     )?;
     Some(
         block
@@ -5122,12 +5170,13 @@ pub(super) fn grid_depth_for(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
 ) -> u64 {
     if let Some(depth) = reduce_round_count(resolved) {
         return depth;
     }
-    if let Some(depth) = expert_group_depth(resolved, quantized) {
+    if let Some(depth) = expert_group_depth(resolved, quantized, knobs) {
         return depth;
     }
-    dense_batched_gemm_depth(resolved, quantized, numeric_policy).unwrap_or(1)
+    dense_batched_gemm_depth(resolved, quantized, numeric_policy, knobs).unwrap_or(1)
 }

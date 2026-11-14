@@ -169,7 +169,7 @@ fn a_normalized_attention_output_reduce_binds_as_a_bare_packed_product() {
         .map(|(node, _, _)| prepared.packed_operands.get(node).copied())
         .collect();
     assert!(
-        crate::msl::packed_row_block(bound, &quantized).is_some(),
+        crate::msl::packed_row_block(bound, &quantized, &crate::EmitKnobs::default()).is_some(),
         "a bare Q8_0 weight times one activation over three folded reduce axes takes the row-blocked kernel"
     );
 }

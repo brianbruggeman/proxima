@@ -362,13 +362,11 @@ pub(super) fn render_reduce(
                 resolved,
                 quantized,
                 numeric_policy,
-                *reduce_op,
-                *init,
-                output_axes,
                 expert_source_mode,
+                knobs,
             )
-            || tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some()
-            || packed_row_block(resolved, quantized).is_some()
+            || tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs).is_some()
+            || packed_row_block(resolved, quantized, knobs).is_some()
         {
             return Err(EmitError::EpilogueNotSupported {
                 node: resolved.node,
@@ -394,7 +392,7 @@ pub(super) fn render_reduce(
     push_scaled_float_decoders(&mut source, quantized);
     push_tiled_decode(
         &mut source,
-        tiled_decode_codec_of(resolved, quantized, *reduce_op, *init, output_axes),
+        tiled_decode_codec_of(resolved, quantized, *reduce_op, *init, output_axes, knobs),
     );
 
     source.push_str("struct Uniforms {\n");
@@ -442,17 +440,15 @@ pub(super) fn render_reduce(
         gather_count,
         entry,
         element_type,
-        packed_row_level_stage_words(resolved, quantized).is_some(),
+        packed_row_level_stage_words(resolved, quantized, knobs).is_some(),
     );
 
     if reduce_is_cooperative_dispatch(
         resolved,
         quantized,
         numeric_policy,
-        *reduce_op,
-        *init,
-        output_axes,
         expert_source_mode,
+        knobs,
     ) {
         push_cooperative_reduce_body(
             &mut source,
@@ -494,10 +490,8 @@ pub(super) fn render_reduce(
             &mut source,
             resolved,
             quantized,
-            *reduce_op,
-            *init,
-            output_axes,
             entry,
+            knobs,
         )?;
     }
     Ok(source)

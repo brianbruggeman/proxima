@@ -2513,6 +2513,7 @@ impl Plan {
                     &self.packed_operands,
                     self.numeric_policy,
                     self.attention_row_schedule,
+                    &self.emit_knobs,
                 )?;
                 let dense_mma_input_layout = self.dense_mma_input_layout.unwrap_or_else(|| {
                     crate::msl::default_dense_mma_input_layout(bound, &self.packed_operands)
@@ -2565,6 +2566,7 @@ impl Plan {
                     &self.packed_operands,
                     self.numeric_policy,
                     self.attention_row_schedule,
+                    &self.emit_knobs,
                 )
                 .map(|(_, grid)| grid)
                 .map_err(MetalError::from)

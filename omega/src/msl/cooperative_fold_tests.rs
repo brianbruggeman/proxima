@@ -228,7 +228,7 @@ pub(super) mod normalization_rows {
     }
 
     fn dispatch_width(width: u32) -> u64 {
-        tiled_gemm_threadgroup_width(&rmsnorm_over_row(width), &[], NumericPolicy::default())
+        tiled_gemm_threadgroup_width(&rmsnorm_over_row(width), &[], NumericPolicy::default(), &EmitKnobs::default())
             .expect("a cooperative reduce reports its threadgroup width")
     }
 

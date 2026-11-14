@@ -888,9 +888,10 @@ fn resolve_route_prepass(
     numeric_policy: NumericPolicy,
     cache_key: &str,
     math_mode: MathMode,
+    knobs: &EmitKnobs,
 ) -> Result<Option<ResolvedPrepass>, MetalError> {
     let Some(([count, place], words)) =
-        crate::msl::route_prepass(bound, packed_operands, numeric_policy)?
+        crate::msl::route_prepass(bound, packed_operands, numeric_policy, knobs)?
     else {
         return Ok(None);
     };
@@ -906,7 +907,7 @@ fn resolve_route_prepass(
         place: place_pipeline,
         grid: count.grid,
         words,
-        indirect_offset: crate::msl::route_compaction_indirect_offset(bound, packed_operands),
+        indirect_offset: crate::msl::route_compaction_indirect_offset(bound, packed_operands, knobs),
     }))
 }
 
@@ -933,6 +934,7 @@ pub(super) fn resolve_step(
         packed_operands,
         numeric_policy,
         attention_row_schedule,
+        knobs,
     )?;
     let dense_mma_input_layout = configured_dense_mma_input_layout
         .unwrap_or_else(|| crate::msl::default_dense_mma_input_layout(bound, packed_operands));
@@ -969,6 +971,7 @@ pub(super) fn resolve_step(
             epilogue_operands,
             epilogue_broadcast_axes,
             &cache_key,
+            knobs,
         );
     }
     let pipeline = pipeline_for(
@@ -1012,6 +1015,7 @@ pub(super) fn resolve_step(
         numeric_policy,
         &cache_key,
         math_mode,
+        knobs,
     )?;
     #[cfg(feature = "metal-moe-mul-mat-id")]
     let round_group = match &bound.kind {
@@ -1280,13 +1284,14 @@ pub(super) fn resolve_steps(
 pub(super) fn is_packed_multi_token_projection(
     bound: &BoundOp,
     packed_operands: &PackedOperands,
+    knobs: &EmitKnobs,
 ) -> bool {
     let quantized: Vec<Option<Codec>> = bound
         .operands()
         .iter()
         .map(|(node, _, _)| packed_operands.get(node).copied())
         .collect();
-    let Some(block) = crate::msl::packed_row_block(bound, &quantized) else {
+    let Some(block) = crate::msl::packed_row_block(bound, &quantized, knobs) else {
         return false;
     };
     let token_total: u64 = block
@@ -1322,7 +1327,7 @@ fn capture_dispatch(
     let route_prepass_only = wanted.trim() == "route-prepass";
     let matched = wanted.trim() == "all"
         || (route_prepass_only && prepass.is_some())
-        || (output_only && is_packed_multi_token_projection(bound, packed_operands))
+        || (output_only && is_packed_multi_token_projection(bound, packed_operands, &crate::msl::ambient_knobs()))
         || wanted
             .split(',')
             .filter_map(|token| token.trim().parse::<u32>().ok())
@@ -1513,7 +1518,7 @@ fn capture_dispatch(
             .map(|owner| owner.0);
         let route_prepass_dispatches = ROUTE_PREPASS_DISPATCHES
             * u64::from(
-                crate::msl::route_prepass_active(bound, packed_operands) && prepass_owner.is_none(),
+                crate::msl::route_prepass_active(bound, packed_operands, &crate::msl::ambient_knobs()) && prepass_owner.is_none(),
             );
         let captured_prepass = prepass.and_then(|(resolved_prepass, compaction, _)| {
             live_buffers.push((bindings.len(), compaction.clone(), 0));
@@ -1523,7 +1528,7 @@ fn capture_dispatch(
                 grid: resolved_prepass.grid,
             })
         });
-        let missing_prepass = (crate::msl::route_prepass_active(bound, packed_operands) && prepass.is_none()).then(|| {
+        let missing_prepass = (crate::msl::route_prepass_active(bound, packed_operands, &crate::msl::ambient_knobs()) && prepass.is_none()).then(|| {
             "a compacted grouped gemm needs its route prepass, which this capture call did not receive".to_string()
         });
         let extras_reason =
@@ -3811,7 +3816,7 @@ pub(super) fn encode_op(
             )
         } else if let Some(source_node) = expert_source_node {
             let (binding_identity, grid) =
-                kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
+                kernel_dispatch_shape(bound, packed_operands, numeric_policy, knobs)?;
             let mut cache_key = crate::msl::kernel_cache_key_for_grid_with_layout(
                 bound,
                 packed_operands,
@@ -3873,7 +3878,7 @@ pub(super) fn encode_op(
             };
             let pipeline = pipeline_for_kernel(device, &kernel, &cache_key, math_mode)?;
             owned_bindings = kernel.bindings;
-            if crate::msl::route_prepass_active(bound, packed_operands) {
+            if crate::msl::route_prepass_active(bound, packed_operands, knobs) {
                 return Err(MetalError::ExpertSourceUnsupported {
                     node: source_node,
                     reason: "a compacted grouped gemm has no expert-source lowering",
@@ -3894,7 +3899,7 @@ pub(super) fn encode_op(
             // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
             // called; only a genuine miss inside `pipeline_for` pays for the
             // full render + compile.
-            let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy)?;
+            let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy, knobs)?;
             let mut cache_key = crate::msl::kernel_cache_key_for_grid_with_layout(
                 bound,
                 packed_operands,
@@ -3962,6 +3967,7 @@ pub(super) fn encode_op(
                 numeric_policy,
                 &cache_key,
                 math_mode,
+                knobs,
             )?;
             owned_bindings = bindings;
             (
@@ -4225,7 +4231,7 @@ pub(super) fn encode_op(
             let output_pointer = Retained::as_ptr(&output);
             let shared_key = route_compactions
                 .as_ref()
-                .and_then(|_| crate::msl::route_compaction_key(bound, packed_operands));
+                .and_then(|_| crate::msl::route_compaction_key(bound, packed_operands, knobs));
             let (compaction, owner, reused) = match (route_compactions, shared_key) {
                 (Some(cache), Some(key)) => {
                     let ((compaction, owner), reused) = shared_or_encode(cache, key, || {
@@ -6682,7 +6688,7 @@ pub(super) mod hazard_tracker_tests {
         let mut barrier_by_node = std::collections::BTreeMap::new();
         for bound in &resolved {
             let (bindings, _grid) =
-                kernel_dispatch_shape(bound, &packed_operands, NumericPolicy::default())
+                kernel_dispatch_shape(bound, &packed_operands, NumericPolicy::default(), &crate::EmitKnobs::default())
                     .expect("fixture ops emit a shape");
             let reads: Vec<NodeId> = hazard_read_nodes(&bindings).collect();
             let write = hazard_write_node(&bindings).expect("every bound op writes one node");
@@ -8257,7 +8263,7 @@ mod shared_route_compaction_tests {
         let (bound, packed) = stacked_moe_layers(layers, 1000, 32, 8, 128, 64);
         bound
             .iter()
-            .filter_map(|op| route_compaction_key(op, &packed))
+            .filter_map(|op| route_compaction_key(op, &packed, &crate::EmitKnobs::default()))
             .collect()
     }
 

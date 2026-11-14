@@ -424,9 +424,9 @@ fn eight_kv_head_chunks_split_the_keys_until_the_target_threadgroups_are_filled(
 fn threadgroup_layout(op: &BoundOp) -> (u64, u64) {
     let policy = NumericPolicy::llama_relaxed();
     let no_codecs: Vec<Option<Codec>> = Vec::new();
-    let threads = grid_threads(op, &no_codecs, policy, false)
+    let threads = grid_threads(op, &no_codecs, policy, false, &EmitKnobs::default())
         .expect("a CachedAttention op always has a thread count");
-    let width = tiled_gemm_threadgroup_width(op, &no_codecs, policy)
+    let width = tiled_gemm_threadgroup_width(op, &no_codecs, policy, &EmitKnobs::default())
         .expect("a CachedAttention op always has a threadgroup width");
     (threads / width, width)
 }
@@ -598,7 +598,7 @@ fn a_launch_past_u32_threads_takes_the_flat_form_through_the_one_grid_decision()
     wide.extents = vec![2, 1 << 25, 8, 256];
 
     let kernel = emit(&wide, &PackedOperands::new(), policy).expect("the wide partial emits");
-    let (_, shape) = kernel_dispatch_shape(&wide, &PackedOperands::new(), policy)
+    let (_, shape) = kernel_dispatch_shape(&wide, &PackedOperands::new(), policy, &EmitKnobs::default())
         .expect("the wide partial has a dispatch shape");
 
     assert!(kernel.grid.threads > limit, "{}", kernel.grid.threads);

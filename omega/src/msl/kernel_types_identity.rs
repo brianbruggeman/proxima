@@ -2162,23 +2162,15 @@ pub(crate) fn ksplit_rows() -> usize {
     packed_geometry_env("PROXIMA_PACKED_ROWS_KSPLIT").unwrap_or(crate::sized::PACKED_ROW_KSPLIT_ROWS)
 }
 
-/// `PROXIMA_PACKED_ROW_DISABLE`: a comma-separated list of codec names
+/// The packed-row disable knob: a comma-separated list of codec names
 /// ([`codec_cache_token`] spellings, as [`tiled_gemm_codec_disabled`]'s) kept off the row-blocked
 /// matvec, so their ops render on the generic cooperative kernel instead
 /// (`PackedRowBlockRejection::RowBlockSwitchedOff`). The same-binary A/B control for a codec's
 /// rendered matvec, the way `PROXIMA_TILED_GEMM_DISABLE` is for its tiled GEMM. Unset or empty
-/// disables nothing (the default).
-#[cfg(feature = "std")]
-pub(super) fn packed_row_codec_disabled(codec: Codec) -> bool {
-    std::env::var("PROXIMA_PACKED_ROW_DISABLE").is_ok_and(|list| {
-        list.split(',')
-            .any(|name| name.trim() == codec_cache_key(codec))
-    })
-}
-
-#[cfg(not(feature = "std"))]
-pub(super) const fn packed_row_codec_disabled(_codec: Codec) -> bool {
-    false
+/// disables nothing (the default). Read from [`EmitKnobs::packed_row_disable`], the one place the
+/// environment is parsed.
+pub(super) fn packed_row_codec_disabled(knobs: &EmitKnobs, codec: Codec) -> bool {
+    knobs.packed_row_disable.iter().any(|name| name.as_str() == codec_cache_key(codec))
 }
 
 /// `PROXIMA_TILED_GEMM_DISABLE`: a comma-separated list of codec names

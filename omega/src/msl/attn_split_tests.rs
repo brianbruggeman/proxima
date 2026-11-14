@@ -284,9 +284,9 @@ mod decode_split {
     fn threadgroup_layout(op: &BoundOp) -> (u64, u64) {
         let policy = NumericPolicy::llama_relaxed();
         let no_codecs: Vec<Option<Codec>> = Vec::new();
-        let threads = grid_threads(op, &no_codecs, policy, false)
+        let threads = grid_threads(op, &no_codecs, policy, false, &EmitKnobs::default())
             .expect("a CachedAttention op always has a thread count");
-        let width = tiled_gemm_threadgroup_width(op, &no_codecs, policy)
+        let width = tiled_gemm_threadgroup_width(op, &no_codecs, policy, &EmitKnobs::default())
             .expect("a CachedAttention op always has a threadgroup width");
         (threads / width, width)
     }
@@ -542,7 +542,7 @@ mod decode_split {
         let narrow = attention_op(9, 8, 256, 512, 1, SLIDING_LOWER);
 
         let partial = emit(&wide, &PackedOperands::new(), policy).expect("the wide partial emits");
-        let (_, shape) = kernel_dispatch_shape(&wide, &PackedOperands::new(), policy)
+        let (_, shape) = kernel_dispatch_shape(&wide, &PackedOperands::new(), policy, &EmitKnobs::default())
             .expect("the wide partial has a dispatch shape");
         assert!(partial.grid.threads > limit, "{}", partial.grid.threads);
         assert_eq!(partial.grid, shape, "emit and the cache-hit shape disagree");

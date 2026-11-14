@@ -493,11 +493,11 @@ pub(super) fn pipeline_for(
     #[cfg(feature = "instrument")]
     {
         let quantized = crate::identity::operand_codecs(bound, packed_operands);
-        if let Some(block) = crate::msl::packed_row_block(bound, &quantized) {
-            let geometry = crate::msl::packed_row_geometry(bound, &quantized, &block);
+        if let Some(block) = crate::msl::packed_row_block(bound, &quantized, knobs) {
+            let geometry = crate::msl::packed_row_geometry(bound, &quantized, &block, knobs);
             let rows = geometry.rows_per_simdgroup;
             if let Ok((_, grid)) =
-                crate::msl::kernel_dispatch_shape(bound, packed_operands, numeric_policy)
+                crate::msl::kernel_dispatch_shape(bound, packed_operands, numeric_policy, knobs)
             {
                 let feature_total: u64 = block
                     .feature_axes
