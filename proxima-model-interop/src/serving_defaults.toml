@@ -12,6 +12,8 @@ command_buffer_chunks = 8
 [flint]
 kv_cache_shape = "custom"
 command_buffer_chunks = 8
+# interleaved a/b 2026-11-13: concurrent 18.18 vs serial 18.75 ms/token, same hash
+dispatch = "concurrent"
 
 [granitemoe]
 command_buffer_chunks = 8

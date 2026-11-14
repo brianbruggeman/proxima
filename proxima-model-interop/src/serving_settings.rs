@@ -95,13 +95,26 @@ impl MathModeName {
 
 /// the Metal dispatch encodings a serving configuration can request, spelled in
 /// lowercase; `as_dispatch_type` is the lowering to the backend's own enum,
-/// which is foreign and carries no serde derive.
-#[cfg(all(feature = "metal", target_os = "macos"))]
+/// which is foreign and carries no serde derive. the enum itself is ungated so
+/// the measured per-architecture table can name a dispatch on every target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DispatchTypeName {
     Serial,
     Concurrent,
+}
+
+impl DispatchTypeName {
+    /// `measured` when `self` is still the global default `Serial`, otherwise
+    /// `self`: the same "left at its default" test `command_buffer_chunks` uses,
+    /// so an explicit `Concurrent` is never replaced.
+    #[must_use]
+    pub const fn or_measured(self, measured: Self) -> Self {
+        match self {
+            Self::Serial => measured,
+            Self::Concurrent => Self::Concurrent,
+        }
+    }
 }
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -110,6 +123,13 @@ impl DispatchTypeName {
         match self {
             Self::Serial => DispatchType::Serial,
             Self::Concurrent => DispatchType::Concurrent,
+        }
+    }
+
+    pub const fn from_dispatch_type(dispatch_type: DispatchType) -> Self {
+        match dispatch_type {
+            DispatchType::Serial => Self::Serial,
+            DispatchType::Concurrent => Self::Concurrent,
         }
     }
 }

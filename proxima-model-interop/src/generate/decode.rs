@@ -3364,6 +3364,15 @@ impl<'file> LoadedModel<'file> {
         &self,
         serving_config: &mut ServingConfig,
     ) -> Result<(), InteropError> {
+        let requested = DispatchTypeName::from_dispatch_type(serving_config.dispatch_type);
+        let supplied = requested.or_measured(self.dispatch);
+        debug!(
+            arch = ?self.architecture.family,
+            requested = ?requested,
+            dispatch = ?supplied,
+            "measured serving default fills a dispatch type left at the default"
+        );
+        serving_config.dispatch_type = supplied.as_dispatch_type();
         serving_config.dispatch_type =
             resolve_dispatch_type_override(serving_config.dispatch_type)?;
         debug!(
