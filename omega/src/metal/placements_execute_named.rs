@@ -1488,6 +1488,10 @@ pub(super) fn execute_plan_with_placements_inner(
             let resolved_step = resolved_steps
                 .as_ref()
                 .and_then(|resolved| resolved.steps.get(position));
+            // a twin's second node is as placeable as its first (a K rotation half is a cache root),
+            // and `bound.node` above is only the first: seed the caller's buffer ahead of the arena's.
+            // Runs before the hazard step so every extra output buffer is resolved for its WAW/WAR check.
+            bind_position_outputs(plan, position, bound, &output_placed, &mut device_buffers);
             let resolved_output: Option<DeviceBuffer> = if dispatch_type == DispatchType::Concurrent
             {
                 // The hazard read set is derived from `bindings` -- the exact
@@ -1555,6 +1559,17 @@ pub(super) fn execute_plan_with_placements_inner(
                     ) || crate::msl::hazard_write_node(bindings_for_hazard).is_none()
                 );
                 let hazard_output = Retained::as_ptr(&resolved.0);
+                // an extra output not yet in `device_buffers` is a fresh allocation inside `encode_op`,
+                // which no earlier op can have touched; `encode_op` records it once allocated.
+                hazard_state.outputs.clear();
+                hazard_state.outputs.push(hazard_output);
+                hazard_state.outputs.extend(
+                    extra_output_nodes(bound).filter_map(|(extra_node, _)| {
+                        device_buffers
+                            .get(&extra_node)
+                            .map(|(buffer, _offset)| Retained::as_ptr(buffer))
+                    }),
+                );
                 // Read-only, computed BEFORE `hazard_step` mutates the
                 // tracker below, so it sees the exact same state
                 // `hazard_step`'s own internal check will -- `classify`
@@ -1563,7 +1578,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 #[cfg(feature = "instrument")]
                 let hazard_class = hazard_state
                     .tracker
-                    .classify(&hazard_state.inputs, Some(hazard_output));
+                    .classify(&hazard_state.inputs, hazard_state.outputs.iter().copied());
                 #[cfg(feature = "instrument")]
                 let raw_edges = hazard_state.raw_edges(
                     &crate::msl::hazard_read_nodes(bindings_for_hazard).collect::<Vec<_>>(),
@@ -1571,7 +1586,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 let barrier_fired = hazard_step(
                     &mut hazard_state.tracker,
                     &hazard_state.inputs,
-                    hazard_output,
+                    &hazard_state.outputs,
                 );
                 #[cfg(feature = "instrument")]
                 {
@@ -1624,9 +1639,6 @@ pub(super) fn execute_plan_with_placements_inner(
             #[cfg(feature = "instrument")]
             let placement_resolve_started = read_ticks();
             let uniform_buffer = plan_uniform_buffer(plan, position)?;
-            // a twin's second node is as placeable as its first (a K rotation half is a cache root),
-            // and `bound.node` above is only the first: seed the caller's buffer ahead of the arena's.
-            bind_position_outputs(plan, position, bound, &output_placed, &mut device_buffers);
             // Redesign §4c: the ONE call site that resolves a scratch
             // buffer for `encode_op`'s two-dispatch `CachedAttention` form
             // -- every other `encode_op` caller passes `None` and rejects a

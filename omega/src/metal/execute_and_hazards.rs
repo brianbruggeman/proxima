@@ -1507,22 +1507,35 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
     /// buffer was read since the last barrier — arena slot reuse). Delegates
     /// to [`classify`] so the boolean and the per-cause breakdown can never
     /// drift apart.
-    pub(super) fn needs_barrier(&self, inputs: &[Id], output: Option<Id>) -> bool {
-        self.classify(inputs, output) != HazardClass::None
+    pub(super) fn needs_barrier(
+        &self,
+        inputs: &[Id],
+        outputs: impl IntoIterator<Item = Id>,
+    ) -> bool {
+        self.classify(inputs, outputs) != HazardClass::None
     }
 
     /// [`needs_barrier`]'s own decomposition into which single hazard
     /// explains it, checked in the same order that `||` chain implies (a
     /// RAW input hazard first).
-    pub(super) fn classify(&self, inputs: &[Id], output: Option<Id>) -> HazardClass {
+    pub(super) fn classify(
+        &self,
+        inputs: &[Id],
+        outputs: impl IntoIterator<Item = Id>,
+    ) -> HazardClass {
         if inputs.iter().any(|input| self.written.contains(input)) {
             return HazardClass::Raw;
         }
-        match output {
-            Some(out) if self.written.contains(&out) => HazardClass::Waw,
-            Some(out) if self.read.contains(&out) => HazardClass::War,
-            _ => HazardClass::None,
+        let mut class = HazardClass::None;
+        for output in outputs {
+            if self.written.contains(&output) {
+                return HazardClass::Waw;
+            }
+            if self.read.contains(&output) {
+                class = HazardClass::War;
+            }
         }
+        class
     }
 
     /// Clears both sets — called immediately after a barrier is actually
@@ -1536,10 +1549,8 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
 
     /// Records this op's own effect, called once per op regardless of
     /// whether a barrier fired for it.
-    pub(super) fn record(&mut self, inputs: &[Id], output: Option<Id>) {
-        if let Some(out) = output {
-            self.written.insert(out);
-        }
+    pub(super) fn record(&mut self, inputs: &[Id], outputs: impl IntoIterator<Item = Id>) {
+        self.written.extend(outputs);
         self.read.extend(inputs.iter().copied());
     }
 }
@@ -1673,6 +1684,9 @@ pub(super) enum ExpertSourceCacheState {
 pub(super) struct HazardState {
     pub(super) tracker: HazardTracker<*const ProtocolObject<dyn MTLBuffer>>,
     pub(super) inputs: Vec<*const ProtocolObject<dyn MTLBuffer>>,
+    /// Every buffer the op being stepped writes, primary first; reused like
+    /// `inputs` so a warm step allocates nothing.
+    pub(super) outputs: Vec<*const ProtocolObject<dyn MTLBuffer>>,
     /// The node whose output last wrote each buffer identity, so a RAW barrier
     /// can tell an input that reads the writer's own node from a buffer
     /// identity two unrelated nodes happen to share.
@@ -1689,6 +1703,7 @@ impl HazardState {
         Self {
             tracker: HazardTracker::new(),
             inputs: Vec::new(),
+            outputs: Vec::new(),
             #[cfg(feature = "instrument")]
             writer_nodes: std::collections::HashMap::new(),
             #[cfg(feature = "instrument")]
@@ -1699,6 +1714,7 @@ impl HazardState {
     pub(super) fn reset(&mut self) {
         self.tracker.reset();
         self.inputs.clear();
+        self.outputs.clear();
         #[cfg(feature = "instrument")]
         {
             self.writer_nodes.clear();
@@ -1788,21 +1804,24 @@ pub(super) fn resolve_hazard_inputs_into(
 /// The exact per-op hazard step [`execute_plan_with_placements`]'s loop
 /// runs: check, barrier-and-reset only on a hazard, then always record —
 /// factored out so the tests drive THIS function instead of a hand-written
-/// mirror of the loop body that could silently drift from it. `output` is
-/// the identity of the buffer this op is about to write, already resolved
+/// mirror of the loop body that could silently drift from it. `outputs` is
+/// the identity of every buffer this op is about to write, already resolved
 /// (placement -> arena slot -> fresh allocation) by the caller before this
-/// runs, since every bound op writes exactly one device buffer. Returns
-/// whether the caller must emit a barrier before encoding this op.
+/// runs: its primary output first,
+/// then each extra output buffer a twin, `MoeTopK` or `CachedSoftmaxWeights`
+/// dispatch binds past `bindings` (`extra_output_nodes`). Each is checked for
+/// WAW/WAR and recorded written, so a later reader of any of them is a RAW.
+/// Returns whether the caller must emit a barrier before encoding this op.
 pub(super) fn hazard_step<Id: Eq + core::hash::Hash + Copy>(
     tracker: &mut HazardTracker<Id>,
     inputs: &[Id],
-    output: Id,
+    outputs: &[Id],
 ) -> bool {
-    let needs_barrier = tracker.needs_barrier(inputs, Some(output));
+    let needs_barrier = tracker.needs_barrier(inputs, outputs.iter().copied());
     if needs_barrier {
         tracker.reset();
     }
-    tracker.record(inputs, Some(output));
+    tracker.record(inputs, outputs.iter().copied());
     counter!(HAZARD_STEP_CALLS, 1);
     needs_barrier
 }

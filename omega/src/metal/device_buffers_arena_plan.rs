@@ -1689,7 +1689,7 @@ pub(super) fn handle_merged_position(
         let merged_fired = hazard_step(
             &mut hazard_state.tracker,
             &hazard_state.inputs,
-            output_pointer,
+            &[output_pointer],
         );
         #[cfg(feature = "instrument")]
         {
