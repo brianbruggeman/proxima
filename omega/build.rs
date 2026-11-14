@@ -166,27 +166,6 @@ fn require_multiple_of_thirty_two(name: &str, value: usize) -> usize {
     value
 }
 
-/// Cross-axis validation for split-K's `max_split` (`[packed_row_split_k]`):
-/// `max_split * SIMD_WIDTH`(32) must stay inside `crate::metal::dispatch`'s
-/// clamp headroom (`.min(max_threadgroup)`, typically 1024 on Apple Silicon)
-/// -- `grid_threads` commits to a total thread count that is an EXACT
-/// multiple of `SIMD_WIDTH * split`, and if `dispatch`'s clamp ever shrank
-/// the threadgroup width below what `grid_threads` assumed, the kernel's
-/// `output_index = gid / tptg_width` group indexing would silently read the
-/// wrong row group. 1024 is a conservative, real-hardware floor (Apple GPU
-/// family docs), not this crate's own policy -- kept here rather than in
-/// `sized.rs` because the value being validated is read once, at build time,
-/// long before any device is queried.
-fn require_split_k_headroom(max_split: usize) -> usize {
-    const CONSERVATIVE_MAX_THREADGROUP: usize = 1024;
-    const SIMD_WIDTH: usize = 32;
-    assert!(
-        max_split * SIMD_WIDTH <= CONSERVATIVE_MAX_THREADGROUP,
-        "packed_row_split_k.max_split={max_split} * SIMD_WIDTH(32) must not exceed {CONSERVATIVE_MAX_THREADGROUP}"
-    );
-    max_split
-}
-
 /// `[attention_rows].mma_min_query_rows` below 2 would route K = 1 off the
 /// decode split form.
 fn require_at_least(name: &str, minimum: usize, value: i64) -> usize {
@@ -220,9 +199,9 @@ fn resolve_str(source: &SizingSource, section: &str, key: &str) -> String {
 /// Reads `omega-runtime.toml`, emits `OUT_DIR/omega_sized.rs`. A new
 /// execution-policy key follows the same `resolve_int` + `require_nonzero` +
 /// generated-`pub const` shape `packed_row_block.simdgroups` and
-/// `tiled_gemm.min_tokens` already do (`cooperative_reduce.min_len` and
-/// `packed_row_block.split_k_max_rows` are the exceptions that need
-/// `require_nonneg` instead: 0 is a legal, meaningful value for both).
+/// `tiled_gemm.min_tokens` already do (`cooperative_reduce.min_len` is the
+/// exception that needs `require_nonneg` instead: 0 is a legal, meaningful
+/// value for it).
 /// `TILED_GEMM_MIN_TOKENS` is `feature = "metal-tiled-gemm"`-only in
 /// `src/sized.rs` (the tiled path has no meaning without it), so this only
 /// emits the line when Cargo reports the feature active for THIS build — on
@@ -496,31 +475,6 @@ fn emit_sizing_consts() {
         );
         out.push_str(&format!(
             "pub const BROADCAST_REDUCE_MAX_WIDTH: u64 = {broadcast_max_width};\n"
-        ));
-    }
-
-    if env::var_os("CARGO_FEATURE_METAL_Q4K_SPLIT_K").is_some() {
-        let target_simdgroups = require_nonzero(
-            "packed_row_split_k.target_simdgroups",
-            resolve_int(&root, "packed_row_split_k", "target_simdgroups"),
-        );
-        let max_split = require_split_k_headroom(require_nonzero(
-            "packed_row_split_k.max_split",
-            resolve_int(&root, "packed_row_split_k", "max_split"),
-        ));
-        out.push_str(&format!(
-            "pub const PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS: u64 = {target_simdgroups};\n"
-        ));
-        out.push_str(&format!(
-            "pub const PACKED_ROW_SPLIT_K_MAX_SPLIT: u64 = {max_split};\n"
-        ));
-
-        let split_k_max_rows = require_nonneg(
-            "packed_row_block.split_k_max_rows",
-            resolve_int(&root, "packed_row_block", "split_k_max_rows"),
-        );
-        out.push_str(&format!(
-            "pub const PACKED_ROW_SPLIT_K_MAX_ROWS: u64 = {split_k_max_rows};\n"
         ));
     }
 

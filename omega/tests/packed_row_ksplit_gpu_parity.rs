@@ -7,7 +7,7 @@
 #![cfg(all(
     feature = "metal",
     target_os = "macos",
-    not(any(feature = "metal-q4k-split-k", feature = "metal-q4k-mask-fma"))
+    not(feature = "metal-q4k-mask-fma")
 ))]
 // workspace lints deny unwrap/expect (Cargo.toml:93-94) and an integration test binary is not cfg(test), so a failed fixture read must be an allowed panic.
 #![allow(clippy::unwrap_used, clippy::expect_used)]

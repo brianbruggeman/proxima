@@ -1140,34 +1140,6 @@ static inline float q5k_pair_dot(device const uchar *block, uint iq, uint ir, th
 }
 "#;
 
-/// Batched-unpack fast arm for `Q8_0`, mirroring [`Q4K_UNPACK_MSL`]'s
-/// `q4k_pair_dot`'s posture (decode the block's one scale ONCE, then walk
-/// its packed levels
-/// against the already-gathered activation run) but flat, not paired-lane:
-/// `Q8_0` has no nibble packing at all, so there is no `iq`/`ir` lane split
-/// to thread through -- one lane's `slot` already IS one whole real 32-
-/// element block (`push_packed_row_blocked_body`'s single-row `Codec::Q8_0`
-/// arm), so this takes that lane's already-loaded `acts[32]` run directly
-/// instead of re-deriving a `yl`/`yh` pair the way the K-quant paired-lane
-/// bodies do. `q8_0_super_element`'s `q8_0_element` re-reads `d_bits`
-/// from `block[0..2]` on EVERY call -- the per-element posture this body
-/// replaces -- so decoding `d` once here amortizes that redundant f16 load
-/// across all 32 elements, the same amortization `q4k_header_for` gives
-/// `Q4_K`'s own per-element path.
-pub const Q8_0_PAIR_DOT_MSL: &str = r#"
-static inline float q8_0_pair_dot(device const uchar *superblock, uint slot, thread const float *acts) {
-    device const uchar *block = superblock + (slot / 32u) * 34u;
-    ushort d_bits = (ushort)((uint)block[0] | ((uint)block[1] << 8));
-    float d = (float)as_type<half>(d_bits);
-    device const uchar *levels = block + 2;
-    float result = 0.0f;
-    for (uint j = 0u; j < 32u; ++j) {
-        result += d * (float)((char)levels[j]) * acts[j];
-    }
-    return result;
-}
-"#;
-
 /// Bytes one `Q8_0` block occupies -- read from
 /// `proxima_gguf::quant::q8_0::BLOCK_BYTES`; pinned in
 /// `omega/tests/q8_0_unpack.rs`, same posture as [`Q4K_BLOCK_BYTES`].
@@ -1187,7 +1159,7 @@ pub const Q8_0_BLOCK_ELEMENTS: usize = proxima_gguf::quant::q8_0::QK8_0;
 /// `q4k_pair_dot`/[`Q5K_PAIR_DOT_MSL`]/[`Q6K_PAIR_DOT_MSL`] batched arms
 /// exist to amortize away.
 ///
-/// Same posture as [`Q8_0_PAIR_DOT_MSL`], not the K-quant paired-lane shape:
+/// Flat, not the K-quant paired-lane shape:
 /// `Q4_0` has no super-block scale/min pair and no `iq`/`ir` lane split to
 /// thread through -- `push_packed_row_blocked_body`'s single-row `Codec::
 /// Q4_0` arm already spreads one whole real 32-element block onto one

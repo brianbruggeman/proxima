@@ -274,8 +274,6 @@ metal-plan-stable-buffers = ["omega?/metal-plan-stable-buffers"]
 metal-wide-cooperative-reduce = ["omega?/metal-wide-cooperative-reduce"]
 # passthrough to `omega/metal-q4k-mask-fma` so the decode harness can measure that arm.
 metal-q4k-mask-fma = ["omega?/metal-q4k-mask-fma"]
-# passthrough to `omega/metal-q4k-split-k` so the decode harness can measure that arm.
-metal-q4k-split-k = ["omega?/metal-q4k-split-k"]
 # passthrough to `omega/metal-packed-row-nsg2` so the decode harness can measure that arm.
 metal-packed-row-nsg2 = ["omega?/metal-packed-row-nsg2"]
 # passthrough to the default-off gathered-expert packed-row body in omega.

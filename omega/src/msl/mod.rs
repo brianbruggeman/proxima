@@ -98,10 +98,7 @@ use crate::identity::{
     MetalOnlyExtras, body_token, init_token, keep_token, op_token, operand_codecs,
     reduce_epilogue_is_identity, signed_name_part,
 };
-#[cfg(all(
-    feature = "metal-packed-row-nsg2",
-    not(feature = "metal-q4k-split-k")
-))]
+#[cfg(feature = "metal-packed-row-nsg2")]
 use crate::sized::PACKED_ROW_NSG;
 use crate::sized::SIMD_WIDTH;
 use sub_block_assembled_matvec::{LevelCodes, assembled_multi_row_matvec_msl, level_matvec_msl, level_table_rendered};

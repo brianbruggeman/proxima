@@ -119,8 +119,8 @@ pub(crate) fn fit_flat_width(spec: Grid2DSpec, max_width: u64) -> Grid2DSpec {
 /// A grid attribute a 1D kernel's signature may carry, the definition that
 /// gives the body the same name back under the flat form, and any body text
 /// that reads the attribute's components directly. A kernel reads a subset:
-/// most take `gid`; `CachedAttention`'s split kernel also takes `tgid`; the
-/// row-blocked split-K body `tptg`; `CachedSoftmaxWeights` (one threadgroup
+/// most take `gid`; `CachedAttention`'s split kernel also takes `tgid`;
+/// `CachedSoftmaxWeights` (one threadgroup
 /// per row, no `gid` at all) only `tg`; the dense-batched GEMM's 1D form a
 /// `uint3` whose `x` is the flat index and `z` the batch.
 struct GridAttribute {
@@ -129,7 +129,7 @@ struct GridAttribute {
     body_reads: &'static [(&'static str, &'static str)],
 }
 
-const GRID_ATTRIBUTES: [GridAttribute; 6] = [
+const GRID_ATTRIBUTES: [GridAttribute; 5] = [
     GridAttribute {
         parameter: "uint gid [[thread_position_in_grid]]",
         definition: "    ulong gid = wide_group_index * ulong(wide_width.x) + ulong(wide_lane);\n",
@@ -157,11 +157,6 @@ const GRID_ATTRIBUTES: [GridAttribute; 6] = [
         body_reads: &[],
     },
     GridAttribute {
-        parameter: "uint tptg [[threads_per_threadgroup]]",
-        definition: "    uint tptg = wide_width.x;\n",
-        body_reads: &[],
-    },
-    GridAttribute {
         parameter: "uint local [[thread_position_in_threadgroup]]",
         definition: "    uint local = wide_lane;\n",
         body_reads: &[],
@@ -179,7 +174,7 @@ const WIDE_PROLOGUE: &str = "    ulong wide_group_index = ulong(wide_group.y) * 
 /// four [`flat_grid2d`]'s launch provides and gives the body each name back
 /// before it runs: `gid`, `tgid` and `tg` as `ulong`s rebuilt from the flat
 /// threadgroup index (a 32-bit `threadgroup_position_in_grid` would hold only
-/// the x axis), `tptg` as the `uint` width, and the dense-batched `uint3` by
+/// the x axis), and the dense-batched `uint3` by
 /// rewriting the two reads of it. Metal wants every grid attribute in one
 /// vector width, so the scalar ones cannot stay beside the vector ones.
 pub(super) fn widen_thread_index(node: NodeId, source: &str) -> Result<String, EmitError> {

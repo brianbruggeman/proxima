@@ -56,8 +56,7 @@ impl PackedBodySelect {
             && level_codec_row_body_rendered(plain_product_reduce, real_float);
         let ggml_port = plain_product
             && matches!(codec, Codec::Q4K | Codec::Q5K | Codec::Q6K)
-            && cfg!(feature = "metal")
-            && !cfg!(feature = "metal-q4k-split-k");
+            && cfg!(feature = "metal");
         // the reference body transcribes the Q4_0 LAYOUT, so it is an
         // implementation of that single cell rather than an axis of the
         // selection: its admission is a feature check here, never a
@@ -65,8 +64,7 @@ impl PackedBodySelect {
         let q4_0_reference = matches!(codec, Codec::Q4_0)
             && plain_product_reduce
             && real_float
-            && cfg!(feature = "metal-q4_0-native")
-            && !cfg!(feature = "metal-q4k-split-k");
+            && cfg!(feature = "metal-q4_0-native");
         let flat_rendered = codec
             .block_layout()
             .is_some_and(|layout| FlatBlockForm::plan(&layout).is_ok())
@@ -200,11 +198,9 @@ pub(super) fn push_packed_row_blocked_body(
             source.push_str(&format!(
                 "    for (int q = 0; q < {rows}; ++q) {{ sumf[q] = {identity}; }}\n"
             ));
-        } else if k_split > 1 || cfg!(feature = "metal-q4k-split-k") {
+        } else if k_split > 1 {
             // the true seed folds in exactly ONCE across the WHOLE
-            // threadgroup, not once per simdgroup -- at split == 1 `sgitg`
-            // is always `0`, so this collapses to the feature-off condition
-            // (`lane == 0u`) exactly.
+            // threadgroup, not once per simdgroup.
             source.push_str(&format!(
                 "    for (int q = 0; q < {rows}; ++q) {{ sumf[q] = (lane == 0u && sgitg == 0u) ? ({init_expr}) : ({identity}); }}\n"
             ));
@@ -273,8 +269,7 @@ pub(super) fn push_packed_row_blocked_body(
         // [`push_q5k_ggml_port_body`] (its rendering measured slower, see that doc). Requires
         // `plain_product` (float-only scale-deferred shape, the same gate
         // `q4k_pair_dot`'s own arm below needs) and takes priority over it --
-        // both target the exact same design point. Not `metal-q4k-split-k`-aware:
-        // its `ib` loop has no `sgitg`/`split` stride of its own. ALSO requires the codec be one of `Q4K`, `Q5K`, `Q6K`:
+        // both target the exact same design point. ALSO requires the codec be one of `Q4K`, `Q5K`, `Q6K`:
         // `plain_product` alone is not codec-specific (every codec with
         // `supports_pair_dot` reaches this arm), and routing a `Q5_K` matmul
         // through a body that never reads its `qh` plane gave relative=0.977
@@ -287,8 +282,7 @@ pub(super) fn push_packed_row_blocked_body(
         // supports_pair_dot` entry (its own doc: only the four K-quants have
         // a paired-nibble body), so it never sets `plain_product` above and
         // needs its own gate mirroring `Codec::Q4_0 if is_plain_product_
-        // reduce`'s existing per-element/pair-dot arms below. Not `metal-
-        // q4k-split-k`-aware, same posture as `use_ggml_port`: this body owns
+        // reduce`'s existing per-element/pair-dot arms below. This body owns
         // its own complete `ib` loop with no `sgitg`/`split` stride of its own.
         // (the gate itself now lives in `PackedBodySelect::select` below)
         let packed_body = PackedBodySelect::select(
@@ -446,20 +440,9 @@ pub(super) fn push_packed_row_blocked_body(
                 "    int super_blocks = (int){reduction_bound} / {Q4K_BLOCK_ELEMENTS};\n"
             ));
             let ix_stride = SIMD_WIDTH as usize / lanes_per_block;
-            if cfg!(feature = "metal-q4k-split-k") {
-                // each simdgroup (`sgitg`, 0 at split == 1) owns a disjoint
-                // interleaved slice of super-blocks -- a plain strided loop, so a
-                // `super_blocks` not evenly divisible by `split` is handled by
-                // construction (some simdgroups simply run one fewer iteration),
-                // never a separate ragged-tail branch.
-                source.push_str(&format!(
-                "    int ib_first = (int)(ix + sgitg * {ix_stride}u);\n    int ib_step = (int)({ix_stride}u * split);\n"
+            source.push_str(&format!(
+                "    int ib_first = (int)ix;\n    int ib_step = {ix_stride};\n"
             ));
-            } else {
-                source.push_str(&format!(
-                    "    int ib_first = (int)ix;\n    int ib_step = {ix_stride};\n"
-                ));
-            }
             // HOIST + POINTER INCREMENT (`docs/discipline.md` perf/packed-row-
             // addressing row): `weight_base[q]/Q4K_BLOCK_ELEMENTS` and the y4
             // lane offset (`64*iq + 8*ir`) are invariant across every `ib` this
@@ -751,42 +734,11 @@ pub(super) fn push_packed_row_blocked_body(
                     source.push_str(&format!("                sumf[q] = {combine_expr};\n"));
                     source.push_str("            }\n");
                 }
-                Codec::Q8_0
-                    if cfg!(feature = "metal-q4k-split-k")
-                        && is_plain_product_reduce(resolved, reduce_op, weight, other)
-                        && resolved.dtype == DType::FLOAT32 =>
-                {
-                    // BATCHED ARM, mirroring the K-quant codecs' own
-                    // scale-deferred `is_plain_product_reduce` arms
-                    // (`Codec::Q4K`'s below, `push_q4k_product_reduce_body`):
-                    // `Q8_0`'s whole 32-element slot IS one real block,
-                    // already matching this preamble's `acts[sub]` gather
-                    // one-for-one, so `q8_0_pair_dot` decodes that block's
-                    // one `d` scale ONCE and walks it against `acts` directly
-                    // -- see [`Q8_0_PAIR_DOT_MSL`]'s own doc for why this
-                    // replaces `q8_0_super_element`'s per-element re-decode
-                    // instead of extending `push_q4k_plain_product_y4_
-                    // address`'s `yl`/`yh` pairing (`Q8_0` has no nibble
-                    // packing to pair across). The `DType::FLOAT32` guard
-                    // mirrors `plain_product`'s own gate above (line ~146):
-                    // `acts` is declared `{element_type} acts[sub]`, and
-                    // `q8_0_pair_dot`'s MSL signature is fixed to `float
-                    // *acts` -- a `half`-typed `acts` array would not bind
-                    // to it (found by `metal_matmul_parity_across_codec_and_
-                    // dtype::q4_0_at_float16`'s sibling case, same gap,
-                    // same fix, for `Codec::Q4_0` below).
-                    source.push_str(
-                        "            sumf[q] = sumf[q] + q8_0_pair_dot(blk, slot, acts);\n",
-                    );
-                }
                 Codec::Q8_0 => {
                     // `sub` (32) is exactly `Q8_0_BLOCK_ELEMENTS`: this
                     // lane's whole 32-element slot IS one real `Q8_0` block,
                     // so `q8_0_super_element` decodes it a scale-load-plus-
-                    // level-load at a time. The `is_plain_product_reduce`
-                    // arm above replaces this per-element loop whenever the
-                    // reduce is a plain product; this fallback stays for
-                    // reduce shapes that identity does not cover.
+                    // level-load at a time.
                     source.push_str(&format!("            for (int e = 0; e < {sub}; ++e) {{\n"));
                     source.push_str(&format!(
                         "                {element_type} scratch[{}];\n",
@@ -817,8 +769,7 @@ pub(super) fn push_packed_row_blocked_body(
                     // decode (`reduce-packed-row-blocked`, 39.6%, 275
                     // dispatches/step) ran through the per-element fallback
                     // below on every one of those dispatches. Same posture as
-                    // the `Codec::Q8_0 if is_plain_product_reduce` arm above
-                    // and the K-quant codecs' own scale-deferred arms
+                    // the K-quant codecs' own scale-deferred arms
                     // (`Codec::Q4K`'s below): `Q4_0`'s whole 32-element slot
                     // IS one real block, already matching this preamble's
                     // `acts[sub]` gather one-for-one, so `q4_0_pair_dot`

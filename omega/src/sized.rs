@@ -25,16 +25,6 @@
 //!   `require_multiple_of_sixteen`/`require_divides_q4k_block`/
 //!   `require_multiple_of_eight` enforce the cross-axis constraints
 //!   `omega/src/msl.rs`'s `push_tiled_gemm_body` depends on.
-//! - `PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`/`PACKED_ROW_SPLIT_K_MAX_SPLIT`
-//!   (`metal-q4k-split-k`-only) — the row-blocked packed matmul's split-K
-//!   knobs; see `msl.rs`'s `packed_row_split_factor` and
-//!   `omega-runtime.toml`'s `[packed_row_split_k]` for the measured
-//!   rationale.
-//! - `PACKED_ROW_SPLIT_K_MAX_ROWS` (`metal-q4k-split-k`-only) — the hard
-//!   row-count ceiling above which split-K never engages regardless of the
-//!   simdgroup-target arithmetic above; see `msl.rs`'s
-//!   `packed_row_split_factor` and `omega-runtime.toml`'s
-//!   `[packed_row_block].split_k_max_rows`.
 //! - [`UNIFORM_CACHE_ENTRIES`] (always compiled) — capacity of
 //!   `metal::UNIFORM_BUFFERS`, the content-keyed uploaded-uniform-buffer
 //!   cache; see `omega-runtime.toml`'s `[spans].uniform_cache_entries` for

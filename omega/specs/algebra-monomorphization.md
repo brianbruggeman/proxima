@@ -45,7 +45,7 @@ were hand-writing -- with the cell matrix as a compile-time product instead of a
 | op shape | token-major, feature-major, multi-row fold group | `packed_row_dispatch` |
 | rows per simdgroup | 2, 4, 6K:2, config | `PACKED_ROWS_PER_GROUP`, `q6k_rows` |
 | lane spread | lanes_per_block 8 (K-quant), 2 (Q4_0 pair), 1 | per-body |
-| reduction topology | one simdgroup, nsg 1..16, split-K 1..8 + combine | `[packed_row_block]`, `[packed_row_nsg]`, `[packed_row_split_k]` |
+| reduction topology | one simdgroup, nsg 1..16, split-K 1..8 + combine | `[packed_row_block]` (`ksplit_max`), `[packed_row_nsg]` |
 | epilogue | Identity, Plain, Broadcast, Scatter | `epilogue_body`/`_operands`/`_broadcast_axes`/`out_scatter` |
 | twin output | single, twin | `ElementwiseTwin` |
 | binding | resident mapping-offset, uploaded, interleaved, grouped planes | bind + `KvBufferSource` |
@@ -179,8 +179,9 @@ commit.
   step 0 already shows 47 pipeline misses / 76 ms compile. Instantiate reachable cells only, and add
   a pipeline-count + compile-ms AC per slice.
 - **One feature, not nine.** `metal-algebra-monomorph` for the whole programme, deleted at S9.
-  Feature sprawl is how `metal-q4k-split-k` (inert) and `metal-q4k-single-fetch` (unreachable)
-  shipped dead. (`metal-q4k-single-fetch` was removed entirely under PROXNUM-317.)
+  Feature sprawl is how a legacy split-K feature (inert) and `metal-q4k-single-fetch` (unreachable)
+  shipped dead. (`metal-q4k-single-fetch` was removed entirely under PROXNUM-317; the split-K
+  feature was removed under PROXNUM-561, the generic `k_split_for` geometry replacing it.)
 - **The instrument moves with the bodies.** `classify_kind` buckets by emitted source markers, so
   unifying bodies silently re-buckets every measurement (twice today). Update it in the same commit.
 - **S5 re-decides the fusion default from data.** Fusion currently measures a 2.8% LOSS.

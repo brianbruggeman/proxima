@@ -8,11 +8,7 @@
 //! The tied gemma4-E2B LM head (`token_embd.weight`, `[1536, 262144]`) is the
 //! production shape: K = 1536 reduces over six super-blocks per row.
 
-#![cfg(all(
-    feature = "metal",
-    not(feature = "metal-q4k-split-k"),
-    target_os = "macos"
-))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use proxima_gguf::quant::q6_k::{BLOCK_BYTES, QK_K, quantize};
