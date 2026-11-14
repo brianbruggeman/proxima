@@ -7,6 +7,7 @@
 use conflaguration::{FromEnvStr, Settings, Validate, ValidationMessage};
 use proxima_numeric::float_layout::{FloatLayout, SignEncoding};
 use proxima_numeric::NumericPolicy;
+use crate::msl::EmitKnobs;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
 use std::error::Error as StdError;
@@ -92,6 +93,9 @@ pub struct RuntimeConfig {
     /// Existing numeric permissions shared with binding and emission, such as contraction for an MMA path.
     #[setting(nested)]
     pub numeric: NumericPolicy,
+    /// Metal emit A/B switches, such as `PROXIMA_TILED_GEMM_GRID2D=0`; the env spellings are unchanged.
+    #[setting(nested, override_prefix = "PROXIMA")]
+    pub emit: EmitKnobs,
     /// Dense matrix fragment layout settings; `auto` derives the plan layout from stored operands.
     #[setting(default)]
     pub dense_mma_input_layout: DenseMmaInputLayout,
@@ -128,6 +132,7 @@ impl Default for RuntimeConfig {
             weight_conversion: WeightConversionStrategy::default(),
             moe_grouping: true,
             numeric: NumericPolicy::bit_exact(),
+            emit: EmitKnobs::default(),
             dense_mma_input_layout: DenseMmaInputLayout::default(),
             constraints: ResourceConstraints::default(),
             selection: SelectionConfig::default(),
@@ -850,6 +855,13 @@ impl RuntimeConfigBuilder {
     #[must_use]
     pub fn with_numeric(mut self, value: NumericPolicy) -> Self {
         self.inner.numeric = value;
+        self
+    }
+
+    /// Set the Metal emit A/B switches.
+    #[must_use]
+    pub fn with_emit(mut self, value: EmitKnobs) -> Self {
+        self.inner.emit = value;
         self
     }
 
