@@ -762,11 +762,7 @@ pub(super) fn execute_plan_with_placements_inner(
         // them here, before counting this node as "offered", so a reshape
         // does not re-walk every resident weight block through the upload
         // path just to have it resolve to the same cache hit it already was.
-        if let Some((buffer, offset)) = cross_plan_resident_reuse(
-            resident_name,
-            current_identity.0 as *const c_void,
-            current_identity.1,
-        )? {
+        if let Some((buffer, offset)) = cross_plan_block_reuse(resident_name, block)? {
             device_buffers.insert(*node, (buffer, offset));
             continue;
         }
