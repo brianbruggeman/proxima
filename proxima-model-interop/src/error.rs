@@ -1022,6 +1022,12 @@ pub enum InteropError {
     #[error("PROXIMA_DISPATCH={value:?}: expected `serial` or `concurrent`")]
     InvalidDispatchTypeOverride { value: String },
 
+    /// `PROXIMA_WAVEFRONT` was set to something other than `1` or `0`; a typo
+    /// must not quietly run the configured default.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[error("PROXIMA_WAVEFRONT={value:?}: expected `1` or `0`")]
+    InvalidWavefrontOverride { value: String },
+
     /// mlx-lm's affine mode packs 2, 3, 4, 5, 6 or 8 bits per element.
     #[error("affine bits {bits} is not one of 2, 3, 4, 5, 6, 8")]
     AffineBitsUnsupported { bits: u8 },

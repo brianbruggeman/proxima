@@ -145,7 +145,7 @@ fn a_normalized_attention_output_reduce_binds_as_a_bare_packed_product() {
         &[sum],
         NumericPolicy::default(),
         &[],
-        true,
+        (true, false),
     )
     .expect("the normalized attention output prepares");
 

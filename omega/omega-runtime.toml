@@ -391,6 +391,13 @@ first_chunk_ops = 24
 # Overridable per-build via `OMEGA_COMMAND_BUFFER_GROWTH_PERMILLE`.
 growth_permille = 1350
 
+# 1 reorders the bound program into dependency levels at plan time so
+# independent ops share one concurrent-dispatch barrier interval, and snaps
+# command buffer boundaries to level starts. 0 keeps program order. Seeds
+# `RuntimeConfig::wavefront_schedule`; unmeasured on a model until the A/B run.
+# Overridable per-build via `OMEGA_COMMAND_BUFFER_WAVEFRONT_SCHEDULE`.
+wavefront_schedule = 0
+
 [output_pool]
 # per-`(bucket, dtype)` cap on retained buffers in `metal::OUTPUT_BUFFER_POOL`
 # (`feature = "metal-buffer-pool"`-only) -- see sized::OUTPUT_POOL_MAX_PER_BUCKET

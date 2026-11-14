@@ -182,6 +182,9 @@ impl CacheKey {
             // serial vs concurrent encoder: scheduling, same arithmetic
             #[cfg(all(feature = "metal", target_os = "macos"))]
                 dispatch_type: _,
+            // a reorder of independent ops: same values
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+                wavefront_schedule: _,
             exact_activations,
             // bind-time recode is applied once at load; the decode path
             // never reads this field

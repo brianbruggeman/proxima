@@ -1719,6 +1719,23 @@ fn resolve_dispatch_type_override(
     }
 }
 
+/// Resolves `PROXIMA_WAVEFRONT` (`1`|`0`) against `configured`, read at the same
+/// point as [`resolve_dispatch_type_override`]. Unset keeps `configured`; any
+/// other value is [`InteropError::InvalidWavefrontOverride`], never a silent
+/// fallback.
+#[cfg(all(feature = "metal", target_os = "macos"))]
+pub(super) fn resolve_wavefront_override(configured: bool) -> Result<bool, InteropError> {
+    match std::env::var("PROXIMA_WAVEFRONT") {
+        Err(std::env::VarError::NotPresent) => Ok(configured),
+        Ok(value) if value == "1" => Ok(true),
+        Ok(value) if value == "0" => Ok(false),
+        Ok(other) => Err(InteropError::InvalidWavefrontOverride { value: other }),
+        Err(std::env::VarError::NotUnicode(raw)) => Err(InteropError::InvalidWavefrontOverride {
+            value: raw.to_string_lossy().into_owned(),
+        }),
+    }
+}
+
 impl<'file> LoadedModel<'file> {
     /// [`Self::generate_with_serving_config`] against
     /// [`supported_serving_config`] -- the reachable path every existing
@@ -3378,6 +3395,30 @@ impl<'file> LoadedModel<'file> {
         debug!(
             dispatch_type = ?serving_config.dispatch_type,
             "resolved_dispatch_type"
+        );
+        self.apply_wavefront_override(serving_config)
+    }
+
+    /// [`Self::apply_dispatch_type_override`]'s sibling for
+    /// `serving_config.wavefront_schedule`: a measured architecture default fills
+    /// a `false`, then `PROXIMA_WAVEFRONT` wins over both. Called from that
+    /// function so every caller that resolves the dispatch type resolves this too.
+    ///
+    /// # Errors
+    ///
+    /// [`InteropError::InvalidWavefrontOverride`] when `PROXIMA_WAVEFRONT` is set to
+    /// a value other than `1`/`0`.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    fn apply_wavefront_override(
+        &self,
+        serving_config: &mut ServingConfig,
+    ) -> Result<(), InteropError> {
+        let supplied = serving_config.wavefront_schedule
+            || self.wavefront_schedule.unwrap_or(false);
+        serving_config.wavefront_schedule = resolve_wavefront_override(supplied)?;
+        debug!(
+            wavefront_schedule = serving_config.wavefront_schedule,
+            "resolved_wavefront_schedule"
         );
         Ok(())
     }

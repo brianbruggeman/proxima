@@ -132,7 +132,7 @@ pub use metal::{
     execute_plan_named_with_placements, execute_plan_named_with_placements_and_expert_sources,
     execute_plan_named_with_placements_overlapping, execute_plan_with_placements,
     move_placed_buffer_bytes, narrow_placed_buffer, placed_buffer_len,
-    plan_named_with_placed_inputs, read_placed_buffer, read_placed_buffer_f32_into,
+    plan_named_with_placed_inputs, plan_named_with_placed_inputs_scheduled, read_placed_buffer, read_placed_buffer_f32_into,
     try_read_placed_buffer_f32, try_write_placed_buffer_f32, write_placed_buffer,
     zero_placed_buffer, zero_placed_buffer_range,
 };
