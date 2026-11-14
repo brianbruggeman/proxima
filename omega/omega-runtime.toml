@@ -55,8 +55,8 @@ scalar_run = 8
 # raising it launches `ksplit_max * 32` threads per threadgroup (must be a
 # power of two, `<= 32` for the 1024-thread ceiling), cuts the reduction
 # latency of a long-K matvec and re-associates the f32 block sums, so the
-# output may move in the last ulps. The kernel identity carries `_ks{k}`, so
-# two splits never share a pipeline. Overridable per-build via
+# output may move in the last ulps. The kernel identity carries `_ks{k}r{rows}`,
+# so neither two splits nor two split row counts share a pipeline. Overridable per-build via
 # `OMEGA_PACKED_ROW_BLOCK_KSPLIT_MAX` and per-process, 1..=8, via
 # `PROXIMA_PACKED_K_SPLIT`.
 ksplit_max = 4

@@ -143,6 +143,17 @@ fn rows_ksplit_4_with_a_split_of_2_folds_four_rows_per_simdgroup_of_the_bf16_rou
 }
 
 #[test]
+fn two_split_row_counts_on_one_split_render_different_sources_under_different_kernel_keys() {
+    let two_rows = temp_env::with_vars([(K_SPLIT_ENV, Some("2")), (ROWS_ENV, Some("2"))], || emit_op(Codec::BFloat16, ROUTER_ROWS, ROUTER_K));
+    let four_rows = temp_env::with_vars([(K_SPLIT_ENV, Some("2")), (ROWS_ENV, Some("4"))], || emit_op(Codec::BFloat16, ROUTER_ROWS, ROUTER_K));
+
+    assert!(two_rows.kernel.source != four_rows.kernel.source, "split rows 2 and 4 rendered the same source");
+    assert!(two_rows.key != four_rows.key, "split rows 2 and 4 share one kernel key: {}", two_rows.key);
+    assert!(two_rows.key.contains("_ks2r2"), "{}", two_rows.key);
+    assert!(four_rows.key.contains("_ks2r4"), "{}", four_rows.key);
+}
+
+#[test]
 fn env_unset_splits_the_bf16_router_four_ways_by_default() {
     temp_env::with_vars([(K_SPLIT_ENV, None::<&str>), (ROWS_ENV, None)], || {
         let emitted = emit_op(Codec::BFloat16, ROUTER_ROWS, ROUTER_K);
