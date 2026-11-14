@@ -161,7 +161,7 @@ impl FlatBlockForm {
         source.push_str(&format!("    device const {pointer_type} *blk_ptr[{rows}];\n"));
         source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n        blk_ptr[q] = in{weight} + {origin};\n    }}\n"));
         source.push_str(&format!("    {element_type} acts[{run}];\n"));
-        let acts_stride = if other_stride_is_one { String::new() } else { " * other_stride".to_string() };
+        let acts_stride = if other_stride_is_one { String::new() } else { String::from(" * other_stride") };
         source.push_str(&format!("    long acts_step = (long)ib_step * {run}{acts_stride};\n"));
         source.push_str(&format!("    device const {element_type} *acts_row = in{other} + other_base[0] + (long)ib_first * {run}{acts_stride};\n"));
         source.push_str("    for (int ib = ib_first; ib < blocks; ib += ib_step) {\n");
@@ -169,7 +169,7 @@ impl FlatBlockForm {
         source.push_str(if other_stride_is_one { "            acts[j] = acts_row[j];\n" } else { "            acts[j] = acts_row[(long)j * other_stride];\n" });
         source.push_str("        }\n");
         let value = match accessor {
-            None => "(float)blk[j]".to_string(),
+            None => String::from("(float)blk[j]"),
             Some(name) => format!("{name}(blk, j)"),
         };
         source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n            device const {pointer_type} *blk = blk_ptr[q];\n"));
