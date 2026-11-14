@@ -83,7 +83,12 @@ pub fn plan_named_with_config_and_placed_inputs(
         symbols,
         &blocks,
         outputs,
-        (config.numeric, fuse_cached_attention, config.allow_fusion),
+        (
+            config.numeric,
+            fuse_cached_attention,
+            config.allow_fusion,
+            config.wavefront_schedule,
+        ),
         placed_input_nodes,
     )?;
     let mut plan = plan_from_prepared(program, symbols, prepared, plan_numeric_policy);

@@ -187,9 +187,9 @@ pub(super) fn plan_bind_row_count(symbols: &[u64]) -> u64 {
 /// holding the extra outputs ([`extra_output_nodes`]) with `position_extras[position]`
 /// their range.
 #[cfg(feature = "metal-plan-stable-buffers")]
-struct ArenaAllocations {
-    allocations: Vec<Allocation>,
-    releases: Vec<Vec<usize>>,
+pub(super) struct ArenaAllocations {
+    pub(super) allocations: Vec<Allocation>,
+    pub(super) releases: Vec<Vec<usize>>,
     primary: Vec<Option<usize>>,
     extras: Vec<(NodeId, usize)>,
     position_extras: Vec<core::ops::Range<usize>>,
@@ -204,7 +204,7 @@ struct ArenaAllocations {
 /// execute call writes into caller-owned buffers: an output-placed node never
 /// binds an arena range, so none is allocated for it.
 #[cfg(feature = "metal-plan-stable-buffers")]
-fn arena_allocations(
+pub(super) fn arena_allocations(
     resolved: &[BoundOp],
     retires: &[Vec<NodeId>],
     outputs: &BTreeSet<NodeId>,

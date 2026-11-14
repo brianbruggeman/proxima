@@ -232,7 +232,7 @@ use proxima_tensor::instrument::{
 };
 #[cfg(any(not(feature = "metal-buffer-pool"), test))]
 use proxima_tensor::node_last_reader;
-use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError, block_node_ids, correct_packed_matmul_layouts, index_node_ids, infer, node_retirement, prune_dead, refit_cached_attention_rows, resolve_named_blocks};
+use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError, block_node_ids, correct_packed_matmul_layouts, index_node_ids, infer, node_retirement, op_read_nodes, prune_dead, refit_cached_attention_rows, resolve_named_blocks};
 use proxima_numeric::{DType, NumericPolicy};
 
 use crate::config::{ResourceConstraints, RuntimeConfig};
@@ -267,6 +267,7 @@ mod placements_execute_named;
 mod dispatch_timed_and_classify;
 #[macro_use]
 mod prepare_uniforms_pack;
+mod wavefront_schedule;
 #[macro_use]
 mod pipeline_buffers_upload;
 mod pipeline_disk_cache;
@@ -295,6 +296,7 @@ use pipeline_disk_cache::*;
 pub use pipeline_disk_cache::{pipeline_disk_cache_counts, set_runtime_config};
 pub use placements_execute_named::*;
 use prepare_uniforms_pack::*;
+use wavefront_schedule::*;
 pub use resident_context::{ResidentContext, ResidentContextGuard};
 pub use resident_nocopy_cache::*;
 pub use warm_resident_buffers::warm_resident_buffers;

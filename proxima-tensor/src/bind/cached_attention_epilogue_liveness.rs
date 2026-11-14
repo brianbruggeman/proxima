@@ -1231,10 +1231,19 @@ pub(crate) fn push_indices_node(map: &IndexMap, nodes: &mut BTreeSet<NodeId>) {
 /// (the exact defect this module's own doc says it exists to end).
 pub(super) fn walk_last_reads<F: FnMut(NodeId, usize)>(resolved: &[BoundOp], mut record: F) {
     for (position, node) in resolved.iter().enumerate() {
+        op_read_nodes(node, |read| record(read, position));
+    }
+}
+
+/// Every node one op reads: operand sources, gather and scatter indices, and
+/// every `RoundBatchedReduce` route. The one read set [`walk_last_reads`] (so
+/// retirement) and a dependency graph over `resolved` both consume.
+pub fn op_read_nodes<F: FnMut(NodeId)>(node: &BoundOp, mut record: F) {
+    {
         for (source, _, gather) in node.all_read_sources() {
-            record(*source, position);
+            record(*source);
             if let Some(gather_access) = gather {
-                record(gather_access.indices, position);
+                record(gather_access.indices);
             }
         }
         if let BoundOpKind::Reduce {
@@ -1242,7 +1251,7 @@ pub(super) fn walk_last_reads<F: FnMut(NodeId, usize)>(resolved: &[BoundOp], mut
             ..
         } = &node.kind
         {
-            record(lookup.indices, position);
+            record(lookup.indices);
         }
         // `round_routes[0]` is already the SAME `NodeId` `all_read_sources`
         // just recorded (it is `operands`'s own gather `Lookup::indices` for
@@ -1255,7 +1264,7 @@ pub(super) fn walk_last_reads<F: FnMut(NodeId, usize)>(resolved: &[BoundOp], mut
         // walk and gets retired before this op ever reads it.
         if let BoundOpKind::RoundBatchedReduce { round_routes, .. } = &node.kind {
             for route in round_routes {
-                record(*route, position);
+                record(*route);
             }
         }
     }

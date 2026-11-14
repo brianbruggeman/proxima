@@ -28,6 +28,11 @@ pub struct RuntimeConfig {
     /// Permit bind-time and execution-time algebraic fusion, such as joining a product and reduce.
     #[setting(default = false)]
     pub allow_fusion: bool,
+    /// Reorder the bound program into dependency levels at plan time so independent ops share one
+    /// concurrent-dispatch barrier interval. Composes the plan-time passes `prune_dead`,
+    /// `promote_output_placed_nodes` and `node_retirement`, and the runtime `HazardTracker`.
+    #[setting(default = false)]
+    pub wavefront_schedule: bool,
     /// Require exact activation mode where supported, such as exact CPU activation evaluation.
     #[setting(default = true)]
     pub exact_activations: bool,
@@ -104,6 +109,7 @@ impl Default for RuntimeConfig {
             engine: String::from("cpu"),
             gpu_driver: String::from("auto"),
             allow_fusion: false,
+            wavefront_schedule: false,
             exact_activations: true,
             pipeline_cache: true,
             pipeline_cache_dir: String::new(),
@@ -802,6 +808,13 @@ impl RuntimeConfigBuilder {
     #[must_use]
     pub fn with_allow_fusion(mut self, value: bool) -> Self {
         self.inner.allow_fusion = value;
+        self
+    }
+
+    /// Set the plan-time wavefront (level) schedule permission.
+    #[must_use]
+    pub fn with_wavefront_schedule(mut self, value: bool) -> Self {
+        self.inner.wavefront_schedule = value;
         self
     }
 

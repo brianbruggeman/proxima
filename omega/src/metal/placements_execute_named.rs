@@ -929,6 +929,14 @@ pub(super) fn execute_plan_with_placements_inner(
             );
             (command_buffer_chunk_boundaries(total_ops, count), count, 0)
         };
+    let chunk_boundaries = if plan.prepared.level_starts.is_empty() {
+        chunk_boundaries
+    } else {
+        snap_to_level_starts(&chunk_boundaries, &plan.prepared.level_starts)
+            .into_iter()
+            .filter(|boundary| *boundary > 0)
+            .collect()
+    };
     // read unconditionally so a non-`instrument` build (where the only
     // consumers are the `chunk_record`/`chunk_summary` prints below) does not
     // trip `unused_variables`, matching `command_buffer_chunk_count`'s own
