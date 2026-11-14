@@ -11521,7 +11521,7 @@ fn legacy_super_block_codecs_keep_their_256_extent_and_scalars_take_the_run_exte
 
 #[proxima::test]
 #[case::f16(Codec::Float16, "device const half *blk_ptr", "(float)blk[j] * acts[j]")]
-#[case::bf16(Codec::BFloat16, "device const uchar *blk_ptr", "bf16_element(blk, j) * acts[j]")]
+#[case::bf16(Codec::BFloat16, "device const bfloat *blk_ptr", "(float)blk[j] * acts[j]")]
 async fn scalar_weight_at_reduce_896_is_admitted_and_emits_the_run_body(#[case] codec: Codec, #[case] pointer: &str, #[case] term: &str) {
     let bound = matmul_op_with_reduce(4, 896, 1, ScalarOp::Add);
     let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);

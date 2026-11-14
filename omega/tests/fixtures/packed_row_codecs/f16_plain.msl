@@ -1152,7 +1152,7 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     long blk_step = (long)ib_step * 8;
     device const half *blk_ptr[4];
     for (int q = 0; q < 4; ++q) {
-        blk_ptr[q] = in0 + (long)weight_base[q] + (long)ib_first * 8;
+        blk_ptr[q] = (device const half *)in0 + (long)weight_base[q] + (long)ib_first * 8;
     }
     float acts[8];
     long acts_step = (long)ib_step * 8;
