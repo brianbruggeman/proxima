@@ -1515,16 +1515,51 @@ fn write_attn_read_source_vectors(
 /// `fnv1a64` of `logits`' raw bit patterns -- lets a fused plan and an unfused
 /// plan be compared step-for-step on the same prompt without diffing the
 /// full f32 buffer by hand.
+///
+/// `None` for an empty slice: the greedy device-token path leaves the logits on
+/// the device, and the fold over zero bytes is the FNV offset basis, which says
+/// nothing about the step.
 #[cfg(feature = "gpu")]
-fn logits_bits_hash(logits: &[f32]) -> u64 {
+fn logits_bits_hash(logits: &[f32]) -> Option<u64> {
     const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
     const PRIME: u64 = 0x0000_0100_0000_01b3;
-    logits
-        .iter()
-        .flat_map(|value| value.to_bits().to_le_bytes())
-        .fold(OFFSET_BASIS, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(PRIME)
-        })
+    if logits.is_empty() {
+        return None;
+    }
+    Some(
+        logits
+            .iter()
+            .flat_map(|value| value.to_bits().to_le_bytes())
+            .fold(OFFSET_BASIS, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(PRIME)
+            }),
+    )
+}
+
+#[cfg(all(test, feature = "gpu"))]
+mod logits_hash_tests {
+    use super::logits_bits_hash;
+
+    const OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+
+    #[test]
+    fn logits_hash_of_real_logits_is_not_the_offset_basis() {
+        let logits = [0.5_f32, 11.25, -3.0, 10.75, 2.0];
+        let hash = logits_bits_hash(&logits).expect("non-empty logits hash");
+        assert_ne!(hash, OFFSET_BASIS);
+    }
+
+    #[test]
+    fn logits_hash_differs_between_two_logit_vectors() {
+        let first = [0.5_f32, 11.25, -3.0, 10.75, 2.0];
+        let second = [0.5_f32, 11.25, -3.0, 10.75, 2.5];
+        assert_ne!(logits_bits_hash(&first), logits_bits_hash(&second));
+    }
+
+    #[test]
+    fn logits_hash_of_empty_logits_is_absent_not_the_offset_basis() {
+        assert_eq!(logits_bits_hash(&[]), None);
+    }
 }
 
 /// One-pass top-two scan: `(argmax_index, argmax_logit, second_index,
@@ -7456,11 +7491,17 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         let logits_hash_started = read_ticks();
                         #[cfg(feature = "gpu")]
                         if logits_diag_enabled {
-                            debug!(
-                                step = step as u64,
-                                hash = %format!("0x{:016x}", logits_bits_hash(last_position)),
-                                "logits_hash"
-                            );
+                            match logits_bits_hash(last_position) {
+                                Some(hash) => debug!(
+                                    step = step as u64,
+                                    hash = %format!("0x{hash:016x}"),
+                                    "logits_hash"
+                                ),
+                                None => debug!(
+                                    step = step as u64,
+                                    "logits_hash skipped: logits stay on the device"
+                                ),
+                            }
                         }
                         #[cfg(feature = "instrument")]
                         let logits_hash_ticks = elapsed_ticks(logits_hash_started);
@@ -8326,10 +8367,12 @@ not read this cache format; only the single-row decode kernel reads it from the 
                 logits_sink.observe(last_position, barriers_step);
                 // same debug-level gate as the batch decode path's logits_hash.
                 #[cfg(feature = "gpu")]
-                if event_enabled(module_path!(), Level::DEBUG) {
+                if event_enabled(module_path!(), Level::DEBUG)
+                    && let Some(hash) = logits_bits_hash(last_position)
+                {
                     debug!(
                         step = _step as u64,
-                        hash = %format!("0x{:016x}", logits_bits_hash(last_position)),
+                        hash = %format!("0x{hash:016x}"),
                         "logits_hash"
                     );
                 }
