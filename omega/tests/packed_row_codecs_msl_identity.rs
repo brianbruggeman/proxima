@@ -95,6 +95,10 @@ fn first_difference(actual: &str, expected: &str) -> Option<String> {
 /// cooperative per-element kernel has none.
 const ROW_BLOCKED_MARKER: &str = "reduced_row0";
 
+/// A K-split row-blocked body (the scalar-run codecs at the default `ksplit_max`) reduces its rows
+/// through a threadgroup `partial_sums` table instead of the `reduced_row{n}` simd sums.
+const K_SPLIT_MARKER: &str = "partial_sums";
+
 #[proxima::test]
 #[case::q3k_plain("q3k_plain", Codec::Q3K, false, true)]
 #[case::q3k_negated("q3k_negated", Codec::Q3K, true, true)]
@@ -128,9 +132,9 @@ const ROW_BLOCKED_MARKER: &str = "reduced_row0";
         panic!("{name}: MSL drifted from tests/fixtures/packed_row_codecs/{name}.msl, first difference at {difference}");
     }
     assert_eq!(
-        kernel.source.contains(ROW_BLOCKED_MARKER),
+        kernel.source.contains(ROW_BLOCKED_MARKER) || kernel.source.contains(K_SPLIT_MARKER),
         row_blocked,
-        "{name}: kernel kind (row-blocked = {row_blocked}) changed; `{ROW_BLOCKED_MARKER}` marks the row-blocked body"
+        "{name}: kernel kind (row-blocked = {row_blocked}) changed; `{ROW_BLOCKED_MARKER}` or `{K_SPLIT_MARKER}` marks the row-blocked body"
     );
 }
 

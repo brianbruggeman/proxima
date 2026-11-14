@@ -1128,17 +1128,18 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     constant Uniforms& u [[buffer(3)]],
     uint gid [[thread_position_in_grid]])
 {
-    long output_index = (long)gid / 32;
+    long output_index = (long)gid / 64;
+    uint sgitg = (gid / 32u) % 2u;
     uint lane = gid % 32u;
-    long group_first = output_index * 4;
-    float sumf[4];
-    for (int q = 0; q < 4; ++q) { sumf[q] = 0.0f; }
-    long weight_base[4];
-    long other_base[4];
-    long coord_q_cache[4][3];
+    long group_first = output_index * 2;
+    float sumf[2];
+    for (int q = 0; q < 2; ++q) { sumf[q] = 0.0f; }
+    long weight_base[2];
+    long other_base[2];
+    long coord_q_cache[2][3];
     long weight_row_stride = u.operand_strides[0][1];
     long other_row_stride = u.operand_strides[1][1];
-    for (int q = 0; q < 4; ++q) {
+    for (int q = 0; q < 2; ++q) {
         long flat = group_first + q;
         for (int d = 0; d < 3; ++d) { coord_q_cache[q][d] = 0; }
         coord_q_cache[q][1] = flat;
@@ -1147,11 +1148,11 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     }
     long other_stride = u.operand_strides[1][2];
     int blocks = (int)u.reduction_total / 8;
-    int ib_first = (int)lane;
-    int ib_step = 32;
+    int ib_first = (int)(lane + sgitg * 32u);
+    int ib_step = 64;
     long blk_step = (long)ib_step * 8;
-    device const bfloat *blk_ptr[4];
-    for (int q = 0; q < 4; ++q) {
+    device const bfloat *blk_ptr[2];
+    for (int q = 0; q < 2; ++q) {
         blk_ptr[q] = (device const bfloat *)in0 + (long)weight_base[q] + (long)ib_first * 8;
     }
     float acts[8];
@@ -1161,7 +1162,7 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
         for (int j = 0; j < 8; ++j) {
             acts[j] = acts_row[j];
         }
-        for (int q = 0; q < 4; ++q) {
+        for (int q = 0; q < 2; ++q) {
             device const bfloat *blk = blk_ptr[q];
             float result = 0.0f;
             for (uint j = 0u; j < 8u; ++j) {
@@ -1169,19 +1170,29 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
             }
             sumf[q] = sumf[q] + result;
         }
-        for (int q = 0; q < 4; ++q) { blk_ptr[q] += blk_step; }
+        for (int q = 0; q < 2; ++q) { blk_ptr[q] += blk_step; }
         acts_row += acts_step;
     }
-    float reduced_row0 = simd_sum(sumf[0]);
-    float reduced_row1 = simd_sum(sumf[1]);
-    float reduced_row2 = simd_sum(sumf[2]);
-    float reduced_row3 = simd_sum(sumf[3]);
-    if (lane < 4u) {
-        float reduced = (lane == 0u ? reduced_row0 : (lane == 1u ? reduced_row1 : (lane == 2u ? reduced_row2 : reduced_row3)));
-        long flat = group_first + (long)lane;
-        if (flat < u.output_total) {
-            long out_offset = u.out_base + flat * u.out_strides[1];
-            out[out_offset] = reduced;
+    threadgroup float partial_sums[2][2];
+    for (int q = 0; q < 2; ++q) {
+        float reduced = simd_sum(sumf[q]);
+        if (lane == 0u) { partial_sums[sgitg][q] = reduced; }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sgitg == 0u && lane == 0u) {
+        for (int q = 0; q < 2; ++q) {
+            float total = partial_sums[0][q];
+            for (uint s = 1u; s < 2u; ++s) {
+                total = (total + partial_sums[s][q]);
+            }
+            long flat = group_first + q;
+            if (flat < u.output_total) {
+                long out_offset = u.out_base;
+                out_offset += coord_q_cache[q][0] * u.out_strides[0];
+                out_offset += coord_q_cache[q][1] * u.out_strides[1];
+                out_offset += coord_q_cache[q][2] * u.out_strides[2];
+                out[out_offset] = total;
+            }
         }
     }
 }
