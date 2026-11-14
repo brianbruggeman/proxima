@@ -1166,6 +1166,7 @@ kernel void omega_reduce_r3_o2_n2_fused_multiply_o0_o1__negate_s0_add_zero(
         }
         for (int q = 0; q < 4; ++q) {
             device const uchar *blk = blk_ptr[q];
+            q4k_header hdr = q4k_header_for(blk, slot);
             for (int c = 0; c < 4; ++c) {
                 float levels[8];
                 q4k_run8(blk, slot + (uint)(c * 8), levels);
