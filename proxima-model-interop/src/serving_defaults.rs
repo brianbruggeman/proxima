@@ -235,6 +235,16 @@ mod tests {
     }
 
     #[test]
+    fn only_flint_is_measured_to_take_the_wavefront_schedule() {
+        for (family, _, _, _) in SERVING_BEFORE {
+            let measured = measured_serving_defaults(family).expect("embedded table parses");
+            let expected = if *family == "flint" { Some(true) } else { None };
+
+            assert_eq!(measured.wavefront_schedule, expected, "{family} wavefront_schedule");
+        }
+    }
+
+    #[test]
     fn an_unlisted_architecture_dispatches_the_global_serial_default() {
         let measured = measured_serving_defaults("granite").expect("embedded table parses");
 
