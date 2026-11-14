@@ -259,40 +259,11 @@ fn packed_operands_of(block_nodes: &[NodeId], blocks: &[QuantizedBlock<'_>]) -> 
                 // "decode-only so far" reasoning `Iq4Nl`/`Iq2Xs`/`Iq3Xxs` (and
                 // `Float32`/`Int32`, which have no `Codec` at all) already
                 // take through `codec_from_quantized_block`'s own `None`. The
-                // remaining codecs below join them for the identical reason:
-                // no `crate::wgsl` unpack entry exists for any of them either.
-                Some(
-                    Codec::Q2K
-                    | Codec::Q3K
-                    | Codec::Q5_1
-                    | Codec::Q5_0
-                    | Codec::Q4_1
-                    | Codec::Q8_1
-                    | Codec::Q8_1Grouped
-                    | Codec::Q8K
-                    | Codec::Iq1S
-                    | Codec::Iq1M
-                    | Codec::Iq2Xxs
-                    | Codec::Iq2Xs
-                    | Codec::Iq2S
-                    | Codec::Iq3Xxs
-                    | Codec::Iq3S
-                    | Codec::Iq4Nl
-                    | Codec::Iq4Xs
-                    | Codec::Tq10
-                    | Codec::Tq20
-                    | Codec::Mxfp4
-                    | Codec::Nvfp4
-                    | Codec::Q1_0
-                    | Codec::Q2_0
-                    | Codec::Pq2_0
-                    | Codec::Ptq1_0
-                    | Codec::BFloat8
-                    | Codec::Bf8E5M2
-                    | Codec::Bf4E2M1
-                    | Codec::Fp6E3M2,
-                )
-                | None => None,
+                // remaining formats join them for the identical reason: no
+                // `crate::wgsl` unpack entry exists for any of them, and a
+                // `Codec` is an open `NumericFormat` value, so one wildcard
+                // names them all.
+                _ => None,
             },
         )
         .collect()
@@ -328,6 +299,11 @@ fn packed_block_bytes_slice<'a>(
         // tags it (this function's own doc) -- the codec only matters to the
         // caller decoding those bytes, never to extracting the slice.
         QuantizedBlock::Packed { bytes, .. } => Ok(bytes),
+        QuantizedBlock::PackedStrided { .. } => Err(EmitError::RenderKindMismatch {
+            node,
+            expected: "a contiguous packed block",
+            found: "packed strided",
+        }),
         QuantizedBlock::Int32(_) => Err(EmitError::RenderKindMismatch {
             node,
             expected: "a packed (non-float32) block",
@@ -356,6 +332,7 @@ fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
     match block {
         QuantizedBlock::Float32(_) => "float32",
         QuantizedBlock::Int32(_) => "int32",
+        QuantizedBlock::PackedStrided { .. } => "packed_strided",
         QuantizedBlock::Packed {
             codec: Codec::Q2K,
             bytes: _,
@@ -496,6 +473,8 @@ fn block_codec_name(block: &QuantizedBlock<'_>) -> &'static str {
             codec: Codec::Ptq1_0,
             bytes: _,
         } => "ptq1_0",
+        // a `Codec` is an open `NumericFormat` value; a format with no name above is reported generically
+        QuantizedBlock::Packed { .. } => "packed",
     }
 }
 
