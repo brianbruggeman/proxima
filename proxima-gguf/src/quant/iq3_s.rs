@@ -282,6 +282,46 @@ mod tests {
         assert_eq!(output[0].abs(), 0.25 * f32::from(grid[0]));
     }
 
+    // blk.2.ffn_gate_exps.weight of flint-UD-Q4_K_XL.gguf, expert 0, row 0, block 0,
+    // absolute file offset 986105536.
+    const FLINT_BLK2_GATE_EXPERT0_BLOCK0: [u8; BLOCK_BYTES] = [
+        0x92, 0x00, 0x0e, 0x80, 0x59, 0x91, 0x0e, 0xc7, 0xf8, 0x85, 0xff, 0x44, 0x18, 0xd0, 0x1e,
+        0xe0, 0x80, 0x00, 0x0b, 0x9d, 0xe1, 0xa9, 0x02, 0xeb, 0x1e, 0x19, 0x1e, 0x37, 0x76, 0x95,
+        0xcb, 0xe8, 0x56, 0x32, 0x3d, 0x3f, 0x81, 0x5b, 0x2a, 0x2e, 0xc8, 0x28, 0xa9, 0x3c, 0x52,
+        0x5b, 0x95, 0x92, 0x05, 0xfa, 0x8d, 0x5c, 0x80, 0xaf, 0xe1, 0xee, 0x29, 0xa9, 0x88, 0xc5,
+        0x7b, 0x59, 0x8a, 0x69, 0x4e, 0x34, 0x09, 0x84, 0xa8, 0xc0, 0x5a, 0x41, 0xc3, 0x54, 0xfc,
+        0xd7, 0x94, 0x24, 0x82, 0x05, 0xf4, 0x53, 0x2f, 0x51, 0x58, 0xfa, 0x92, 0xf3, 0x5b, 0x60,
+        0x5b, 0x5a, 0xb0, 0xed, 0x1d, 0xb1, 0xa4, 0xa1, 0x84, 0xdf, 0x7a, 0x5f, 0x4a, 0x0e, 0x6f,
+        0x5c, 0xef, 0xbc, 0xab, 0xea,
+    ];
+
+    #[test]
+    fn flint_blk2_gate_expert0_block0_decodes_like_ggml() {
+        // d = f16 0x0092 is subnormal: 146 * 2^-24. A decoder that flushes
+        // f16 subnormals to zero turns the whole block into zeros.
+        let d = f16_at(&FLINT_BLK2_GATE_EXPERT0_BLOCK0, D_OFFSET).to_f32();
+        assert_ne!(d, 0.0, "subnormal f16 scale must not flush to zero");
+        assert_eq!(d.to_bits(), (146.0f32 / 16_777_216.0).to_bits());
+
+        let mut output = [0.0f32; QK_K];
+        dequantize(&FLINT_BLK2_GATE_EXPERT0_BLOCK0, &mut output)
+            .expect("one whole block decodes");
+
+        // sub-block 0 scale nibble is 15 -> db1 = d * (1 + 2*15) = 31 * 146 * 2^-24
+        // = 4526 * 2^-24; each element is that unit times a signed odd grid magnitude
+        // (hand-derived from ggml dequantize_row_iq3_s, ggml-quants.c:2607-2646).
+        let multiples: [i32; 16] = [5, 1, -13, -5, -3, -1, -3, -3, -3, -9, -11, 1, -3, 11, -15, -9];
+        for (index, multiple) in multiples.iter().enumerate() {
+            let expected = (4526 * multiple) as f32 / 16_777_216.0;
+            assert_eq!(
+                output[index].to_bits(),
+                expected.to_bits(),
+                "element {index}: got {} want {expected}",
+                output[index]
+            );
+        }
+    }
+
     #[test]
     fn rejects_a_short_output_and_a_non_multiple_input() {
         let block = hand_packed();
