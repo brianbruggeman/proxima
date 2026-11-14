@@ -921,7 +921,10 @@ fn binding_policy(plan: &Plan, numeric: NumericPolicy) -> NumericPolicy {
             feature = "wgpu-backend",
             feature = "cuda-driver"
         )))]
-        _ => match *plan {},
+        _ => {
+            let _ = numeric;
+            match *plan {}
+        }
     }
 }
 
@@ -1562,6 +1565,17 @@ pub fn plan_pads_kv(plan: &Plan, is_kv_input: impl Fn(&str) -> bool) -> bool {
         _ => {
             let _ = is_kv_input;
             false
+        }
+        // no backend feature: Plan has no variants, so no plan can reach here
+        #[cfg(not(any(
+            feature = "cpu",
+            all(feature = "metal", target_os = "macos"),
+            feature = "wgpu-backend",
+            feature = "cuda-driver"
+        )))]
+        _ => {
+            let _ = is_kv_input;
+            match *plan {}
         }
     }
 }
