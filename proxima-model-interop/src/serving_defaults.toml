@@ -14,6 +14,8 @@ kv_cache_shape = "custom"
 command_buffer_chunks = 8
 # interleaved a/b 2026-11-13: concurrent 18.18 vs serial 18.75 ms/token, same hash
 dispatch = "concurrent"
+# interleaved a/b 2026-11-13: wavefront on 16.96 vs off 18.32 ms/token, same hash, barriers 836 to 689
+wavefront_schedule = true
 
 [granitemoe]
 command_buffer_chunks = 8
