@@ -598,10 +598,11 @@ pub(super) mod resident_buffer_cache_tests {
             .expect("first upload for a stable resident name");
         assert_eq!(resident_cache_len(), 1);
 
-        let reuses_before = super::RESIDENT_BUFFER_REUSES.get();
-        upload_resident_copy(&device, "resident_weight_stable", pointer, byte_length)
-            .expect("second upload of the same name must hit the cache");
-        assert_eq!(super::RESIDENT_BUFFER_REUSES.get(), reuses_before + 1);
+        let (second_upload, reuses) = super::RESIDENT_BUFFER_REUSES.scoped(|| {
+            upload_resident_copy(&device, "resident_weight_stable", pointer, byte_length)
+        });
+        second_upload.expect("second upload of the same name must hit the cache");
+        assert_eq!(reuses, 1);
         assert_eq!(resident_cache_len(), 1);
     }
 
@@ -626,22 +627,25 @@ pub(super) mod resident_buffer_cache_tests {
         // SAME name -- exactly ROW 331/332's shape, reproduced at the driver
         // level instead of relying on a harness never naming two arms alike.
         let second_host_buffer = vec![5.0_f32; 4096];
-        let uploads_before = super::RESIDENT_BUFFER_UPLOADS.get();
-        let reuses_before = super::RESIDENT_BUFFER_REUSES.get();
-        let error = upload_resident_copy(
-            &device,
-            "resident_weight_rebound",
-            second_host_buffer.as_ptr().cast(),
-            byte_length,
-        )
-        .expect_err("a different host pointer under the same name must never be served");
+        let ((rebound, reuses), uploads) = super::RESIDENT_BUFFER_UPLOADS.scoped(|| {
+            super::RESIDENT_BUFFER_REUSES.scoped(|| {
+                upload_resident_copy(
+                    &device,
+                    "resident_weight_rebound",
+                    second_host_buffer.as_ptr().cast(),
+                    byte_length,
+                )
+            })
+        });
+        let error = rebound
+            .expect_err("a different host pointer under the same name must never be served");
 
         assert!(matches!(
             error,
             super::MetalError::ResidentNameRebound { .. }
         ));
-        assert_eq!(super::RESIDENT_BUFFER_UPLOADS.get(), uploads_before);
-        assert_eq!(super::RESIDENT_BUFFER_REUSES.get(), reuses_before);
+        assert_eq!(uploads, 0);
+        assert_eq!(reuses, 0);
         assert_eq!(resident_cache_len(), 1);
     }
 
@@ -658,18 +662,20 @@ pub(super) mod resident_buffer_cache_tests {
         upload_resident_copy(&device, "resident_weight_grown", pointer, full_length)
             .expect("first upload establishes the cached entry");
 
-        let uploads_before = super::RESIDENT_BUFFER_UPLOADS.get();
-        let reuses_before = super::RESIDENT_BUFFER_REUSES.get();
-        let error =
-            upload_resident_copy(&device, "resident_weight_grown", pointer, full_length / 2)
-                .expect_err("a different byte length under the same name must never be served");
+        let ((rebound, reuses), uploads) = super::RESIDENT_BUFFER_UPLOADS.scoped(|| {
+            super::RESIDENT_BUFFER_REUSES.scoped(|| {
+                upload_resident_copy(&device, "resident_weight_grown", pointer, full_length / 2)
+            })
+        });
+        let error = rebound
+            .expect_err("a different byte length under the same name must never be served");
 
         assert!(matches!(
             error,
             super::MetalError::ResidentNameRebound { .. }
         ));
-        assert_eq!(super::RESIDENT_BUFFER_UPLOADS.get(), uploads_before);
-        assert_eq!(super::RESIDENT_BUFFER_REUSES.get(), reuses_before);
+        assert_eq!(uploads, 0);
+        assert_eq!(reuses, 0);
         assert_eq!(resident_cache_len(), 1);
     }
 
@@ -683,36 +689,36 @@ pub(super) mod resident_buffer_cache_tests {
             return;
         };
         reset_resident_cache_for_test();
-        let _ = super::BLOCK_COPIED_BYTES.snapshot_and_reset();
 
         let host_buffer = vec![7.0_f32; 4096];
         let pointer = host_buffer.as_ptr().cast();
         let byte_length = size_of_val(host_buffer.as_slice());
 
-        let copied_before_miss = super::BLOCK_COPIED_BYTES.get();
-        upload_resident_copy(
-            &device,
-            "resident_weight_copied_counter",
-            pointer,
-            byte_length,
-        )
-        .expect("first upload is a real copy (a cache miss)");
+        let (miss_upload, copied_on_miss) = super::BLOCK_COPIED_BYTES.scoped(|| {
+            upload_resident_copy(
+                &device,
+                "resident_weight_copied_counter",
+                pointer,
+                byte_length,
+            )
+        });
+        miss_upload.expect("first upload is a real copy (a cache miss)");
         assert!(
-            super::BLOCK_COPIED_BYTES.get() >= copied_before_miss + byte_length as u64,
+            copied_on_miss >= byte_length as u64,
             "a genuine copy must add its own byte length"
         );
 
-        let copied_before_hit = super::BLOCK_COPIED_BYTES.get();
-        upload_resident_copy(
-            &device,
-            "resident_weight_copied_counter",
-            pointer,
-            byte_length,
-        )
-        .expect("second upload of the same name hits the cache");
+        let (hit_upload, copied_on_hit) = super::BLOCK_COPIED_BYTES.scoped(|| {
+            upload_resident_copy(
+                &device,
+                "resident_weight_copied_counter",
+                pointer,
+                byte_length,
+            )
+        });
+        hit_upload.expect("second upload of the same name hits the cache");
         assert_eq!(
-            super::BLOCK_COPIED_BYTES.get(),
-            copied_before_hit,
+            copied_on_hit, 0,
             "a cache hit moves zero bytes, so it must add zero"
         );
     }
@@ -760,16 +766,17 @@ pub(super) mod resident_buffer_cache_tests {
             "releasing model A's own name must evict exactly one entry"
         );
 
-        let reuses_before = super::RESIDENT_BUFFER_REUSES.get();
-        upload_resident_copy(
-            &device,
-            "fake_model_b.weight",
-            model_b.as_ptr().cast(),
-            byte_length,
-        )
-        .expect("model B's own name must still resolve after model A's release");
-        assert!(
-            super::RESIDENT_BUFFER_REUSES.get() > reuses_before,
+        let (model_b_upload, reuses) = super::RESIDENT_BUFFER_REUSES.scoped(|| {
+            upload_resident_copy(
+                &device,
+                "fake_model_b.weight",
+                model_b.as_ptr().cast(),
+                byte_length,
+            )
+        });
+        model_b_upload.expect("model B's own name must still resolve after model A's release");
+        assert_eq!(
+            reuses, 1,
             "model B's entry must still be a cache HIT -- it was never released"
         );
     }
@@ -809,10 +816,11 @@ pub(super) mod nocopy_buffer_cache_tests {
             .expect("first upload for a stable no-copy name");
         assert_eq!(nocopy_cache_len(), 1);
 
-        let reuses_before = super::NOCOPY_BUFFER_REUSES.get();
-        upload_block_no_copy(&device, "nocopy_weight_stable", pointer, byte_length)
-            .expect("second upload of the same name must hit the cache");
-        assert_eq!(super::NOCOPY_BUFFER_REUSES.get(), reuses_before + 1);
+        let (second_upload, reuses) = super::NOCOPY_BUFFER_REUSES.scoped(|| {
+            upload_block_no_copy(&device, "nocopy_weight_stable", pointer, byte_length)
+        });
+        second_upload.expect("second upload of the same name must hit the cache");
+        assert_eq!(reuses, 1);
         assert_eq!(nocopy_cache_len(), 1);
     }
 
@@ -843,20 +851,22 @@ pub(super) mod nocopy_buffer_cache_tests {
         // reused name.
         let second_buffer =
             AlignedBuffer::new(page / size_of::<f32>(), page).expect("page-aligned test buffer");
-        let reuses_before = super::NOCOPY_BUFFER_REUSES.get();
-        let error = upload_block_no_copy(
-            &device,
-            "nocopy_weight_rebound",
-            second_buffer.as_ptr().cast(),
-            byte_length,
-        )
-        .expect_err("a different host pointer under the same name must never be served");
+        let (rebound, reuses) = super::NOCOPY_BUFFER_REUSES.scoped(|| {
+            upload_block_no_copy(
+                &device,
+                "nocopy_weight_rebound",
+                second_buffer.as_ptr().cast(),
+                byte_length,
+            )
+        });
+        let error = rebound
+            .expect_err("a different host pointer under the same name must never be served");
 
         assert!(matches!(
             error,
             super::MetalError::ResidentNameRebound { .. }
         ));
-        assert_eq!(super::NOCOPY_BUFFER_REUSES.get(), reuses_before);
+        assert_eq!(reuses, 0);
         assert_eq!(nocopy_cache_len(), 1);
     }
 
@@ -875,15 +885,17 @@ pub(super) mod nocopy_buffer_cache_tests {
         upload_block_no_copy(&device, "nocopy_weight_grown", pointer, full_length)
             .expect("first upload establishes the cached entry");
 
-        let reuses_before = super::NOCOPY_BUFFER_REUSES.get();
-        let error = upload_block_no_copy(&device, "nocopy_weight_grown", pointer, full_length / 2)
+        let (rebound, reuses) = super::NOCOPY_BUFFER_REUSES.scoped(|| {
+            upload_block_no_copy(&device, "nocopy_weight_grown", pointer, full_length / 2)
+        });
+        let error = rebound
             .expect_err("a different byte length under the same name must never be served");
 
         assert!(matches!(
             error,
             super::MetalError::ResidentNameRebound { .. }
         ));
-        assert_eq!(super::NOCOPY_BUFFER_REUSES.get(), reuses_before);
+        assert_eq!(reuses, 0);
         assert_eq!(nocopy_cache_len(), 1);
     }
 
@@ -957,16 +969,17 @@ pub(super) mod nocopy_buffer_cache_tests {
             "releasing model A's own name must evict exactly one entry"
         );
 
-        let reuses_before = super::NOCOPY_BUFFER_REUSES.get();
-        upload_block_no_copy(
-            &device,
-            "fake_model_b.weight",
-            model_b.as_ptr().cast(),
-            byte_length,
-        )
-        .expect("model B's own name must still resolve after model A's release");
-        assert!(
-            super::NOCOPY_BUFFER_REUSES.get() > reuses_before,
+        let (model_b_upload, reuses) = super::NOCOPY_BUFFER_REUSES.scoped(|| {
+            upload_block_no_copy(
+                &device,
+                "fake_model_b.weight",
+                model_b.as_ptr().cast(),
+                byte_length,
+            )
+        });
+        model_b_upload.expect("model B's own name must still resolve after model A's release");
+        assert_eq!(
+            reuses, 1,
             "model B's entry must still be a cache HIT -- it was never released"
         );
     }
@@ -1007,17 +1020,17 @@ pub(super) mod cross_plan_resident_reuse_tests {
         let tensor_bytes = &checkpoint[64..128];
         upload_packed_bytes(&device, tensor_bytes, None).expect("first checkpoint-backed upload");
 
-        let handoffs_before = PLAN_HANDOFF_REUSES.get();
         let pointer = tensor_bytes.as_ptr().cast();
         let byte_length = tensor_bytes.len();
-        let resolved = cross_plan_resident_reuse(None, pointer, byte_length)
+        let (resolved, handoffs) = PLAN_HANDOFF_REUSES
+            .scoped(|| cross_plan_resident_reuse(None, pointer, byte_length));
+        let resolved = resolved
             .expect("a resident block already in the checkpoint mapping must resolve")
             .expect("the checkpoint mapping is registered, so this must be Some");
 
         assert_eq!(resolved.1, 64, "the offset into the shared mapping buffer");
         assert_eq!(
-            PLAN_HANDOFF_REUSES.get(),
-            handoffs_before + 1,
+            handoffs, 1,
             "a global-cache hit must be counted as a handoff, not an offer"
         );
     }
@@ -1195,14 +1208,20 @@ pub(super) mod strided_expert_half_tests {
         let fused = fused_gate_up();
         let name = "blk.0.ffn_gate_exps.weight";
         let up = half_block(&fused, 1);
-        let uploads_before = super::COPYING_BUFFER_UPLOADS.get();
-        let reuses_before = super::RESIDENT_BUFFER_REUSES.get();
 
-        let first = upload_strided_runs(&device, &up, Some(name)).expect("first upload gathers");
-        let second = upload_strided_runs(&device, &up, Some(name)).expect("second upload hits");
+        let ((uploaded, uploads), reuses) = super::RESIDENT_BUFFER_REUSES.scoped(|| {
+            super::COPYING_BUFFER_UPLOADS.scoped(|| {
+                let first = upload_strided_runs(&device, &up, Some(name));
+                let second = upload_strided_runs(&device, &up, Some(name));
+                (first, second)
+            })
+        });
+        let (first, second) = uploaded;
+        let first = first.expect("first upload gathers");
+        let second = second.expect("second upload hits");
 
-        assert_eq!(super::COPYING_BUFFER_UPLOADS.get(), uploads_before + 1, "one gather");
-        assert_eq!(super::RESIDENT_BUFFER_REUSES.get(), reuses_before + 1, "one cache hit");
+        assert_eq!(uploads, 1, "one gather");
+        assert_eq!(reuses, 1, "one cache hit");
         assert_eq!(first.contents(), second.contents(), "the hit is the same buffer");
         let (pointer, byte_length) = super::block_identity_key(&up);
         let keyed = super::RESIDENT_BUFFERS.with(|cache| {

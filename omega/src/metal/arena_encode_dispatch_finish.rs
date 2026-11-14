@@ -5126,13 +5126,10 @@ pub(super) mod uniform_cache_tests {
 
         // touch key 0 -- a cache hit that must refresh its tick, protecting
         // it from the eviction the next insert triggers.
-        let reuses_before_touch = super::UNIFORM_BUFFER_REUSES.get();
-        upload_uniforms(&device, &blob(0)).expect("touch key 0");
-        assert_eq!(
-            super::UNIFORM_BUFFER_REUSES.get(),
-            reuses_before_touch + 1,
-            "touching key 0 must be a cache hit"
-        );
+        let (touch, reuses_on_touch) = super::UNIFORM_BUFFER_REUSES
+            .scoped(|| upload_uniforms(&device, &blob(0)));
+        touch.expect("touch key 0");
+        assert_eq!(reuses_on_touch, 1, "touching key 0 must be a cache hit");
 
         // one more distinct blob forces an eviction; key 1 is now the
         // least recently used (key 0 was just touched, keys 2.. were
@@ -5144,19 +5141,19 @@ pub(super) mod uniform_cache_tests {
             "cache must stay bounded at capacity after eviction"
         );
 
-        let reuses_before_key_zero = super::UNIFORM_BUFFER_REUSES.get();
-        upload_uniforms(&device, &blob(0)).expect("key 0 must still be resident");
+        let (key_zero, reuses_on_key_zero) = super::UNIFORM_BUFFER_REUSES
+            .scoped(|| upload_uniforms(&device, &blob(0)));
+        key_zero.expect("key 0 must still be resident");
         assert_eq!(
-            super::UNIFORM_BUFFER_REUSES.get(),
-            reuses_before_key_zero + 1,
+            reuses_on_key_zero, 1,
             "key 0 (touched) must have survived the eviction"
         );
 
-        let reuses_before_key_one = super::UNIFORM_BUFFER_REUSES.get();
-        upload_uniforms(&device, &blob(1)).expect("key 1 re-upload after eviction");
+        let (key_one, reuses_on_key_one) = super::UNIFORM_BUFFER_REUSES
+            .scoped(|| upload_uniforms(&device, &blob(1)));
+        key_one.expect("key 1 re-upload after eviction");
         assert_eq!(
-            super::UNIFORM_BUFFER_REUSES.get(),
-            reuses_before_key_one,
+            reuses_on_key_one, 0,
             "key 1 was the least recently used entry and must have missed the cache"
         );
     }
@@ -5192,18 +5189,16 @@ pub(super) mod uniform_cache_tests {
         };
         reset_uniform_cache_for_test();
 
-        let reuses_before = super::UNIFORM_BUFFER_REUSES.get();
-        upload_uniforms(&device, &blob(0)).expect("first upload is a miss");
-        assert_eq!(
-            super::UNIFORM_BUFFER_REUSES.get(),
-            reuses_before,
-            "a fresh blob must not count as a reuse"
-        );
+        let (first, reuses_on_first) = super::UNIFORM_BUFFER_REUSES
+            .scoped(|| upload_uniforms(&device, &blob(0)));
+        first.expect("first upload is a miss");
+        assert_eq!(reuses_on_first, 0, "a fresh blob must not count as a reuse");
 
-        upload_uniforms(&device, &blob(0)).expect("second upload of the same bytes is a hit");
+        let (second, reuses_on_second) = super::UNIFORM_BUFFER_REUSES
+            .scoped(|| upload_uniforms(&device, &blob(0)));
+        second.expect("second upload of the same bytes is a hit");
         assert_eq!(
-            super::UNIFORM_BUFFER_REUSES.get(),
-            reuses_before + 1,
+            reuses_on_second, 1,
             "re-uploading identical bytes must count exactly one reuse"
         );
     }
@@ -6290,21 +6285,12 @@ pub(super) mod hazard_tracker_tests {
     /// [`arena_slot_reuse_after_a_read_emits_a_war_barrier`] drives) --
     /// exactly the scenario [`record_hazard_class`] exists to attribute.
     /// Asserts BOTH on `classify`'s own returned [`HazardClass`] (a local
-    /// value) AND on the process-global `BARRIERS_*` counters
-    /// [`record_hazard_class`] feeds -- the counters are shared statics real
-    /// dispatch code and other concurrently running `cargo test` threads also
-    /// increment, so each is read via `.get()` BEFORE this test's own two
-    /// `record_hazard_class` calls and again AFTER, asserting the DELTA is at
-    /// least this test's own contribution (`>=`, never `==`) -- a concurrent
-    /// writer can only add to the delta, never subtract, so `>=` is sound
-    /// under a shared parallel suite. `BARRIERS_WAW`/`BARRIERS_WAW_WAR_
-    /// PERSISTENT` are NOT asserted to stay at exactly this test's own zero
-    /// contribution: an unrelated concurrently running test genuinely can
-    /// fire a WAW or persistent-identity barrier in the same window, and
-    /// there is no sound way to distinguish "this test caused zero" from "a
-    /// concurrent test's own nonzero landed in this window" from outside
-    /// that test's own scope -- asserting `== 0` here would be exactly the
-    /// exact-value-against-shared-state defect this whole fix removes.
+    /// value) AND on the `BARRIERS_*` counters [`record_hazard_class`] feeds.
+    /// The counters are process-global statics other concurrently running
+    /// `cargo test` threads also increment, so each is read through
+    /// `Counter::scoped` around this test's own two `record_hazard_class`
+    /// calls: the scoped delta counts only this thread's adds, so the exact
+    /// expected counts (`== 1`) are sound under a parallel suite.
     #[cfg(feature = "instrument")]
     #[test]
     fn hazard_class_counters_attribute_one_raw_and_one_arena_reuse_war() {
@@ -6315,10 +6301,6 @@ pub(super) mod hazard_tracker_tests {
         assert_eq!(class0, HazardClass::None);
         assert!(!hazard_step(&mut hazards, &[], &["a"]));
 
-        let raw_before = super::BARRIERS_RAW.get();
-        let war_before = super::BARRIERS_WAR.get();
-        let arena_recycled_before = super::BARRIERS_WAW_WAR_ARENA_RECYCLED.get();
-
         // op1: reads `a` (written by op0 since the last barrier) and writes
         // `b` -> RAW, a genuine dataflow edge, never arena-attributed.
         let class1 = hazards.classify(&["a"], Some("b"));
@@ -6328,7 +6310,6 @@ pub(super) mod hazard_tracker_tests {
             "op1 contributed the one RAW barrier"
         );
         assert!(hazard_step(&mut hazards, &["a"], &["b"]));
-        record_hazard_class(class1, false);
 
         // op2: no inputs, output placed by the arena back into `a` -- `a`
         // was READ by op1 since the last barrier (op1's own RAW reset the
@@ -6340,19 +6321,21 @@ pub(super) mod hazard_tracker_tests {
             "op2's WAR fired on the arena-recycled `a` slot"
         );
         assert!(hazard_step(&mut hazards, &[], &["a"]));
-        record_hazard_class(class2, true);
 
-        assert!(
-            super::BARRIERS_RAW.get() - raw_before >= 1,
-            "op1 must have contributed at least one RAW barrier to the shared counter"
-        );
-        assert!(
-            super::BARRIERS_WAR.get() - war_before >= 1,
-            "op2 must have contributed at least one WAR barrier to the shared counter"
-        );
-        assert!(
-            super::BARRIERS_WAW_WAR_ARENA_RECYCLED.get() - arena_recycled_before >= 1,
-            "op2's WAR must have contributed at least one arena-recycled attribution"
+        let ((((), raw), war), arena_recycled) =
+            super::BARRIERS_WAW_WAR_ARENA_RECYCLED.scoped(|| {
+                super::BARRIERS_WAR.scoped(|| {
+                    super::BARRIERS_RAW.scoped(|| {
+                        record_hazard_class(class1, false);
+                        record_hazard_class(class2, true);
+                    })
+                })
+            });
+        assert_eq!(raw, 1, "op1 must have contributed exactly one RAW barrier");
+        assert_eq!(war, 1, "op2 must have contributed exactly one WAR barrier");
+        assert_eq!(
+            arena_recycled, 1,
+            "op2's WAR must have contributed exactly one arena-recycled attribution"
         );
     }
 

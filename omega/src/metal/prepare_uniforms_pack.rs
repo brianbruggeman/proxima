@@ -1306,11 +1306,11 @@ pub(super) mod numeric_policy_construction_tests {
              widest-mode-that-covers-any-permission bug would have produced"
         );
 
-        // shared process-global counter: never reset another thread's
-        // in-flight contribution, use a before/after delta instead.
-        let before_first = PIPELINE_MISSES.get();
-        resolve_steps(&device, &resolved_plan).expect("first resolution compiles under Relaxed");
-        let first_misses = PIPELINE_MISSES.get() - before_first;
+        // process-global counter shared with parallel tests: scoped counts
+        // only this thread's misses, and resolve_steps compiles on this thread.
+        let (first_resolution, first_misses) =
+            PIPELINE_MISSES.scoped(|| resolve_steps(&device, &resolved_plan));
+        first_resolution.expect("first resolution compiles under Relaxed");
         assert!(
             first_misses >= 1,
             "the first resolution of a fresh plan is always a miss, got delta {first_misses}"
@@ -1323,9 +1323,9 @@ pub(super) mod numeric_policy_construction_tests {
         resolved_plan
             .set_math_mode(MathMode::Safe)
             .expect("Safe needs nothing, llama_relaxed() grants it trivially");
-        let before_second = PIPELINE_MISSES.get();
-        resolve_steps(&device, &resolved_plan).expect("second resolution compiles under Safe");
-        let second_misses = PIPELINE_MISSES.get() - before_second;
+        let (second_resolution, second_misses) =
+            PIPELINE_MISSES.scoped(|| resolve_steps(&device, &resolved_plan));
+        second_resolution.expect("second resolution compiles under Safe");
         assert!(
             second_misses >= 1,
             "set_math_mode(Safe) must force a genuine PIPELINE_CACHE miss, never reuse the \
