@@ -11,3 +11,5 @@ routed_gating = "Softmax"
 routed_expert_bias = false
 activation = "Silu"
 exclusive_dense_post_norm = false
+# the converter writes `ffn_gate_inp_shexp.weight`, so the shared expert is scaled
+shared_expert_gate = true
