@@ -26,11 +26,16 @@ use serde::Deserialize;
 
 use crate::error::InteropError;
 use crate::serving::ServingConfig;
+use crate::serving_settings::DispatchTypeName;
 
 const MEASURED_TABLE: &str = include_str!("serving_defaults.toml");
 
 const fn default_command_buffer_chunks() -> u32 {
     1
+}
+
+const fn default_dispatch() -> DispatchTypeName {
+    DispatchTypeName::Serial
 }
 
 const fn default_activation() -> NumericFormat {
@@ -58,6 +63,12 @@ pub struct MeasuredServingDefaults {
     #[serde(default = "default_command_buffer_chunks")]
     #[builder(default = default_command_buffer_chunks())]
     pub command_buffer_chunks: u32,
+    /// The Metal dispatch encoding one decode step runs under, `serial` or
+    /// `concurrent`; an explicit non-default caller value or `PROXIMA_DISPATCH`
+    /// always wins.
+    #[serde(default = "default_dispatch")]
+    #[builder(default = default_dispatch())]
+    pub dispatch: DispatchTypeName,
     /// The numeric format activations and intermediate values are produced at,
     /// as a proxima-numeric format name such as `float32`.
     #[serde(default = "default_activation")]
@@ -201,6 +212,46 @@ mod tests {
         assert_eq!(disarmed.kv_cache_shape, KvCacheShape::Uniform);
         assert_eq!(disarmed.activation, NumericFormat::Float16);
         assert_eq!(disarmed.command_buffer_chunks, 8);
+    }
+
+    #[test]
+    fn only_flint_is_measured_to_dispatch_concurrent() {
+        for (family, _, _, _) in SERVING_BEFORE {
+            let measured = measured_serving_defaults(family).expect("embedded table parses");
+            let expected = if *family == "flint" {
+                DispatchTypeName::Concurrent
+            } else {
+                DispatchTypeName::Serial
+            };
+
+            assert_eq!(measured.dispatch, expected, "{family} dispatch");
+        }
+    }
+
+    #[test]
+    fn an_unlisted_architecture_dispatches_the_global_serial_default() {
+        let measured = measured_serving_defaults("granite").expect("embedded table parses");
+
+        assert_eq!(measured.dispatch, DispatchTypeName::Serial);
+        assert_eq!(
+            DispatchTypeName::Serial.or_measured(measured.dispatch),
+            DispatchTypeName::Serial
+        );
+    }
+
+    #[test]
+    fn the_default_serial_takes_the_measured_dispatch_and_an_explicit_concurrent_is_kept() {
+        let flint = measured_serving_defaults("flint").expect("embedded table parses");
+        let gemma4 = measured_serving_defaults("gemma4").expect("embedded table parses");
+
+        assert_eq!(
+            DispatchTypeName::Serial.or_measured(flint.dispatch),
+            DispatchTypeName::Concurrent
+        );
+        assert_eq!(
+            DispatchTypeName::Concurrent.or_measured(gemma4.dispatch),
+            DispatchTypeName::Concurrent
+        );
     }
 
     #[test]

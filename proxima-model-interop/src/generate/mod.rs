@@ -215,6 +215,8 @@ use crate::lowering::KvCacheShape;
 use crate::lowering::{KvLayout, StepInput, bind_symbols, rope_freq_factors, sliding_rope_inputs};
 use crate::profiles::family_profile;
 use crate::serving_defaults::measured_serving_defaults;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use crate::serving_settings::DispatchTypeName;
 use crate::recurrent_config::RecurrentConfig;
 use crate::rope_scaling::{RopeScaling, f32_from_u32};
 #[cfg(feature = "gpu")]

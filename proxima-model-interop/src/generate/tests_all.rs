@@ -2698,6 +2698,8 @@ pub(super) mod memory_fit_gate_tests {
     use proxima_primitives::sync::blocking::Mutex;
     use proxima_tokenizer::Vocab;
 
+    use crate::serving_settings::DispatchTypeName;
+
     use crate::bind::{BoundWeights, ModelHparams};
     use crate::rope_scaling::RopeScaling;
     use crate::serving::ContextLength;
@@ -2798,6 +2800,8 @@ pub(super) mod memory_fit_gate_tests {
             kv_cache_shape: KvCacheShape::Uniform,
             has_experts: false,
             command_buffer_chunks: 1,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            dispatch: DispatchTypeName::Serial,
             trained_context_length: Some(TRAINED_CONTEXT_LENGTH),
             rope_scaling: RopeScaling::None,
             kv_layers: vec![(2, 64, None); 2],

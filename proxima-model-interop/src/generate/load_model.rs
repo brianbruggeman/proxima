@@ -860,6 +860,13 @@ pub struct LoadedModel<'file> {
     /// `1` for a load that resolves no architecture. Consulted by [`Self::apply_command_buffer_chunks_default`]
     /// only when a caller left that field at its own default.
     pub(super) command_buffer_chunks: u32,
+    /// The architecture's measured default for `ServingConfig::dispatch_type`
+    /// ([`crate::serving_defaults::MeasuredServingDefaults::dispatch`]); `Serial`
+    /// for a load that resolves no architecture. Consulted by
+    /// [`Self::apply_dispatch_type_override`] only when a caller left that field
+    /// at its own default.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub(super) dispatch: DispatchTypeName,
     /// The checkpoint's own `{arch}.context_length`
     /// ([`crate::lowering::trained_context_length`]), `None` when the header
     /// carries none (safetensors loads, synthetic fixtures). Read only
