@@ -36,6 +36,8 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::tensor::TensorInfo;
 use proxima_gguf::types::GgmlType;
 
+#[cfg(feature = "std")]
+use proxima_telemetry::debug;
 use proxima_tensor::IndexPattern;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::op::{Extent, Op, Reduce, ScalarOp};
@@ -551,6 +553,21 @@ fn bind_part<'file>(
     })?;
     let first = (u64::from(part) * part_bytes) as usize;
     let span_bytes = ((outer - 1) * outer_bytes + part_bytes) as usize;
+    #[cfg(feature = "std")]
+    debug!(
+        leaf = %leaf.name,
+        tensor = %tensor.name,
+        part,
+        of,
+        experts = outer,
+        expert_bytes = part_bytes,
+        stride_bytes = outer_bytes,
+        span_bytes = span_bytes as u64,
+        half_offset = first as u64,
+        mapping_offset = (source.as_ptr() as usize - file_bytes.as_ptr() as usize + first) as u64,
+        pointer = (source.as_ptr() as usize + first) as u64,
+        "strided half bound over the mapping"
+    );
     state.packed.push((
         leaf.name.into(),
         QuantizedBlock::PackedStrided {

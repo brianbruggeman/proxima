@@ -196,11 +196,7 @@ pub(super) fn execute_plan_inner(
         |node| effective_expert_buffers.contains_key(&node),
     ) {
         let resident_name = resident_name(plan, node);
-        if let Some((buffer, offset)) = cross_plan_resident_reuse(
-            resident_name,
-            block_identity_key(&block).0 as *const c_void,
-            block_identity_key(&block).1,
-        )? {
+        if let Some((buffer, offset)) = cross_plan_block_reuse(resident_name, &block)? {
             plan.record_scoped_buffer("input", node, &buffer);
             device_buffers.insert(node, (buffer, offset));
             continue;

@@ -92,6 +92,33 @@ pub(super) fn cross_plan_resident_reuse(
     Ok(Some((buffer, address - base)))
 }
 
+/// [`cross_plan_resident_reuse`] for one [`QuantizedBlock`]. A
+/// `PackedStrided` block is a view over the checkpoint mapping whose experts
+/// sit `stride_bytes` apart, while every kernel reads the buffer as `[expert,
+/// ...]` runs `expert_bytes` apart. Serving it as a mapping view would hand
+/// the kernel the fused slab layout, so only the name caches
+/// [`upload_strided_runs`] fills may answer it, under that function's own
+/// `(first byte, logical length)` key; a miss falls through to the gather.
+pub(super) fn cross_plan_block_reuse(
+    resident_name: Option<&str>,
+    block: &QuantizedBlock<'_>,
+) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
+    let QuantizedBlock::PackedStrided { bytes, .. } = block else {
+        let (pointer, byte_length) = block_identity_key(block);
+        return cross_plan_resident_reuse(resident_name, pointer as *const c_void, byte_length);
+    };
+    let (Some(name), Some(byte_length)) = (resident_name, block.packed_len()) else {
+        return Ok(None);
+    };
+    let pointer = bytes.as_ptr().cast::<c_void>();
+    let cached = RESIDENT_BUFFERS
+        .with(|cache| resident_name_lookup(cache, name, pointer, byte_length))?;
+    if cached.is_some() {
+        counter!(PLAN_HANDOFF_REUSES, 1);
+    }
+    Ok(cached.map(|buffer| (buffer, 0)))
+}
+
 /// Counts entries `NOCOPY_BUFFERS` actually holds right now — the direct
 /// witness that gating the cache on `resident` stops it growing without
 /// bound. A non-resident page-aligned block (a KV-cache row that happened to
@@ -405,6 +432,23 @@ pub(super) fn upload_strided_runs(
         });
     };
     let pointer = bytes.as_ptr().cast::<c_void>();
+    if let QuantizedBlock::PackedStrided {
+        expert_bytes,
+        stride_bytes,
+        ..
+    } = block
+    {
+        debug!(
+            resident = %resident_name.unwrap_or("<anonymous>"),
+            experts = (byte_length / (*expert_bytes).max(1)) as u64,
+            expert_bytes = *expert_bytes as u64,
+            stride_bytes = *stride_bytes as u64,
+            span_bytes = bytes.len() as u64,
+            pointer = pointer as usize as u64,
+            byte_length = byte_length as u64,
+            "strided upload keyed on first byte and logical length"
+        );
+    }
     if let Some(name) = resident_name
         && let Some(existing) =
             RESIDENT_BUFFERS.with(|cache| resident_name_lookup(cache, name, pointer, byte_length))?
@@ -1024,6 +1068,144 @@ pub(super) mod cross_plan_resident_reuse_tests {
             error,
             super::MetalError::ResidentNameRebound { .. }
         ));
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+pub(super) mod strided_expert_half_tests {
+    //! A gguf `ffn_gate_up_exps.weight` is expert-major: expert `e`'s slab is
+    //! its gate rows, then its up rows. Two experts of two `Q8_0` rows per
+    //! half (a row is one 34-byte block: an f16 scale and 32 i8 quants) lay
+    //! out as, by hand:
+    //!
+    //! ```text
+    //! half_bytes = 2 rows * 34 = 68      slab = 2 halves * 68 = 136
+    //! expert 0: gate 0..68    up  68..136
+    //! expert 1: gate 136..204 up 204..272
+    //! ```
+    //!
+    //! The gate half binds from byte 0 and the up half from byte 68, both with
+    //! `expert_bytes = 68` and `stride_bytes = 136`; a reader must copy
+    //! `[0..68, 136..204]` for gate and `[68..136, 204..272]` for up.
+
+    use core::ops::Range;
+
+    use half::f16;
+    use objc2_metal::MTLBuffer;
+    use proxima_tensor::cpu::QuantizedBlock;
+
+    use super::{
+        Codec, cross_plan_block_reuse, device_and_queue, register_checkpoint_mapping,
+        reset_nocopy_cache_for_test, reset_resident_cache_for_test, upload_packed_bytes,
+        upload_strided_runs,
+    };
+
+    const BLOCK_BYTES: usize = 34;
+    const HALF_BYTES: usize = 2 * BLOCK_BYTES;
+    const SLAB_BYTES: usize = 2 * HALF_BYTES;
+    const GATE_RANGES: [Range<usize>; 2] = [0..68, 136..204];
+    const UP_RANGES: [Range<usize>; 2] = [68..136, 204..272];
+
+    fn fused_gate_up() -> Vec<u8> {
+        let mut fused = Vec::with_capacity(2 * SLAB_BYTES);
+        for expert in 0..2_u8 {
+            for half in 0..2_u8 {
+                for row in 0..2_u8 {
+                    let tag = expert * 4 + half * 2 + row;
+                    fused.extend_from_slice(&f16::from_f32(f32::from(tag) + 1.0).to_le_bytes());
+                    fused.extend(core::iter::repeat_n(tag, 32));
+                }
+            }
+        }
+        fused
+    }
+
+    fn half_block(fused: &[u8], part: usize) -> QuantizedBlock<'_> {
+        let first = part * HALF_BYTES;
+        QuantizedBlock::PackedStrided {
+            codec: Codec::Q8_0,
+            bytes: &fused[first..first + SLAB_BYTES + HALF_BYTES],
+            expert_bytes: HALF_BYTES,
+            stride_bytes: SLAB_BYTES,
+        }
+    }
+
+    fn gathered(fused: &[u8], ranges: &[Range<usize>; 2]) -> Vec<u8> {
+        ranges
+            .iter()
+            .flat_map(|range| fused[range.clone()].iter().copied())
+            .collect()
+    }
+
+    #[test]
+    fn each_half_reads_its_own_rows_of_every_expert() {
+        let fused = fused_gate_up();
+        for (part, ranges) in [GATE_RANGES, UP_RANGES].iter().enumerate() {
+            let runs: Vec<&[u8]> = half_block(&fused, part).packed_runs().unwrap().collect();
+            assert_eq!(runs.len(), 2, "part {part} has one run per expert");
+            for (run, range) in runs.iter().zip(ranges) {
+                assert_eq!(*run, &fused[range.clone()], "part {part} run {range:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn the_uploaded_buffer_holds_each_half_back_to_back() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        let fused = fused_gate_up();
+        for (part, ranges) in [GATE_RANGES, UP_RANGES].iter().enumerate() {
+            let buffer = upload_strided_runs(&device, &half_block(&fused, part), None)
+                .expect("a strided half uploads");
+            let expected = gathered(&fused, ranges);
+            // SAFETY: the buffer is shared storage of `expected.len()` bytes and no GPU work is in flight.
+            let actual = unsafe {
+                core::slice::from_raw_parts(buffer.contents().as_ptr().cast::<u8>(), expected.len())
+            };
+            assert_eq!(actual, expected.as_slice(), "part {part} device bytes");
+        }
+    }
+
+    #[test]
+    fn a_strided_half_inside_the_checkpoint_mapping_is_never_served_as_a_mapping_view() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_nocopy_cache_for_test();
+        reset_resident_cache_for_test();
+        let page = super::page_size();
+        let mut checkpoint = vec![0_u8; page * 4];
+        let fused = fused_gate_up();
+        checkpoint[page..page + fused.len()].copy_from_slice(&fused);
+        register_checkpoint_mapping(&checkpoint);
+        let slab = &checkpoint[page..page + fused.len()];
+        upload_packed_bytes(&device, &slab[..HALF_BYTES], None)
+            .expect("a contiguous block registers the mapping buffer");
+
+        let contiguous = QuantizedBlock::Packed {
+            codec: Codec::Q8_0,
+            bytes: &slab[..HALF_BYTES],
+        };
+        let served = cross_plan_block_reuse(None, &contiguous)
+            .expect("a contiguous block resolves")
+            .expect("a contiguous block inside the mapping is a mapping view");
+        assert_eq!(served.1, page, "control: the contiguous block is an offset view");
+
+        let up = half_block(slab, 1);
+        assert!(
+            cross_plan_block_reuse(None, &up).expect("a miss is Ok").is_none(),
+            "a strided half has no contiguous bytes in the mapping to view"
+        );
+
+        let uploaded = upload_strided_runs(&device, &up, Some("blk.0.ffn_up_exps.weight"))
+            .expect("the resident upload gathers the runs");
+        let (reused, offset) = cross_plan_block_reuse(Some("blk.0.ffn_up_exps.weight"), &up)
+            .expect("the resident name resolves")
+            .expect("the gathered buffer is cached under its name");
+        assert_eq!(offset, 0, "the gathered buffer starts at its own first byte");
+        assert_eq!(reused.contents(), uploaded.contents(), "same gathered buffer");
     }
 }
 
