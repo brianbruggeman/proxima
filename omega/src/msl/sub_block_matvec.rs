@@ -17,6 +17,8 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+#[cfg(test)]
+use proxima_numeric::LevelTable;
 use proxima_numeric::block_layout::{BlockLayout, Coded, Digit, Field};
 
 use super::layout_render::hardware_type;
@@ -130,6 +132,29 @@ impl SubBlockMatvecGeometry {
             threads_per_block: 16,
             code_read: CodeRead::Bytes,
             ..Self::decode(rows_per_simdgroup, simdgroups, lanes)
+        }
+    }
+
+    /// ggml's `kernel_mul_mv_iq3_s_f32_impl` launch shape (`ib32 = tiisg`): a thread owns one 32-element
+    /// sub-block, eight threads share a block and four blocks are in flight per simdgroup. The run is
+    /// the grid's lanes, because one grid code covers exactly one run.
+    #[cfg(test)]
+    pub(super) const fn decode_signed_grid(rows_per_simdgroup: usize, simdgroups: usize, lanes: usize, grid_lanes: usize) -> Self {
+        Self {
+            run_elements: grid_lanes,
+            threads_per_block: 8,
+            code_read: CodeRead::Bytes,
+            ..Self::decode(rows_per_simdgroup, simdgroups, lanes)
+        }
+    }
+
+    /// The geometry for a level table: [`Self::decode_signed_grid`] for a signed grid, else
+    /// [`Self::decode_levels`], so a caller selecting a rendered level body does not match on the table.
+    #[cfg(test)]
+    pub(super) fn for_levels(table: &LevelTable, rows_per_simdgroup: usize, simdgroups: usize, lanes: usize) -> Self {
+        match table {
+            LevelTable::SignedGrid { lanes: grid_lanes, .. } => Self::decode_signed_grid(rows_per_simdgroup, simdgroups, lanes, usize::from(*grid_lanes)),
+            _ => Self::decode_levels(rows_per_simdgroup, simdgroups, lanes),
         }
     }
 }

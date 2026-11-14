@@ -36,6 +36,9 @@ struct PlaneReads {
     /// Per tile slot: byte offset from the base and in-byte shift.
     slots: Vec<(u32, u32)>,
     bits: u32,
+    /// Whether the plane's address moves across the thread's run. A grid code plane does not: one
+    /// code covers the whole run, so the read drops the run index.
+    per_run: bool,
 }
 
 struct Tile {
@@ -51,7 +54,9 @@ impl Tile {
         ir * self.run + run_index + self.lane_elements * (slot + self.covered * owned)
     }
 
-    fn plane_reads(&self, plane: &Plane) -> Result<PlaneReads, SubBlockMatvecRefusal> {
+    /// `run_step_bits` is how far the plane's address moves per run element: a byte for a per-element
+    /// code, the plane's own width for a sign plane, zero for a grid code shared by the run.
+    fn plane_reads(&self, plane: &Plane, run_step_bits: usize) -> Result<PlaneReads, SubBlockMatvecRefusal> {
         let origin = plane.address(self.element(0, 0, 0, 0));
         let ir_bits = plane.address(self.element(1.min(self.lane_runs - 1), 0, 0, 0)) - origin;
         let owned_bits = plane.address(self.element(0, 1.min(self.owned - 1), 0, 0)) - origin;
@@ -66,7 +71,7 @@ impl Tile {
                 for owned in 0..self.owned {
                     for run_index in 0..self.run {
                         let at = plane.address(self.element(ir, owned, slot, run_index));
-                        let expected = origin + first + ir * ir_bits + owned * owned_bits + run_index * BYTE_BITS as usize;
+                        let expected = origin + first + ir * ir_bits + owned * owned_bits + run_index * run_step_bits;
                         require(at == expected, "plane address is affine in the thread slot")?;
                     }
                 }
@@ -79,14 +84,25 @@ impl Tile {
             owned_bytes: owned_bits as u32 / BYTE_BITS,
             slots,
             bits: u32::from(plane.bits),
+            per_run: run_step_bits != 0,
         })
+    }
+
+    /// The sign plane's per-slot read: the run's sign bits step by the plane's width, so they sit
+    /// contiguously from `shift` and one masked byte read holds all of them.
+    fn sign_reads(&self, sign: &Plane) -> Result<PlaneReads, SubBlockMatvecRefusal> {
+        let reads = self.plane_reads(sign, usize::from(sign.bits))?;
+        let run_bits = self.run as u32 * reads.bits;
+        require(reads.slots.iter().all(|(_, shift)| shift + run_bits <= BYTE_BITS), "a run of sign bits stays in its byte")?;
+        Ok(reads)
     }
 }
 
 fn piece(pointer: &str, reads: &PlaneReads, slot: usize) -> String {
     let (byte, shift) = reads.slots[slot];
     let mask = (1u32 << reads.bits) - 1;
-    format!("(((uint){pointer}[i + {byte}u] >> {shift}u) & {mask:#x}u)")
+    let index = if reads.per_run { format!("i + {byte}u") } else { format!("{byte}u") };
+    format!("(((uint){pointer}[{index}] >> {shift}u) & {mask:#x}u)")
 }
 
 /// Renders the body of the row-blocked decode matvec for a plane-assembled layout: the part between
@@ -246,6 +262,8 @@ struct Assembled<'a> {
     span: usize,
     low_reads: PlaneReads,
     high_reads: Option<PlaneReads>,
+    /// A signed grid's sign plane: per slot, the byte and shift of the first of the run's sign bits.
+    sign_reads: Option<PlaneReads>,
     scale_read: String,
     scales: SubScales,
     scale_base_byte: u32,
@@ -268,10 +286,17 @@ impl<'a> Assembled<'a> {
         }
         let low = layout.element.low;
         let lane_digit = low.digits[0];
-        if let Some(LevelCodes { table: LevelTable::SignedGrid { lanes, .. }, .. }) = codes {
-            require(lane_digit.stride_bits == 0 && lane_digit.radix == u16::from(*lanes), "a grid code covers its lanes")?;
-        }
-        require(u32::from(lane_digit.stride_bits) == BYTE_BITS, "lane digit steps one byte")?;
+        let grid_sign = match codes {
+            Some(LevelCodes { table: LevelTable::SignedGrid { lanes, sign, .. }, .. }) => {
+                require(lane_digit.stride_bits == 0 && lane_digit.radix == u16::from(*lanes), "a grid code covers its lanes")?;
+                require(geometry.run_elements == usize::from(*lanes), "a grid run is its lanes")?;
+                Some(sign)
+            }
+            _ => {
+                require(u32::from(lane_digit.stride_bits) == BYTE_BITS, "lane digit steps one byte")?;
+                None
+            }
+        };
         let lane_elements = usize::from(lane_digit.radix);
         let run = geometry.run_elements;
         require(lane_elements.is_multiple_of(run), "run divides the lane digit")?;
@@ -287,8 +312,10 @@ impl<'a> Assembled<'a> {
         require(!signed_bytes || lane_elements.is_multiple_of(span), "sub-blocks hold whole lane digits")?;
         let tile = Tile { lane_elements, run, lane_runs, owned, covered };
         let scales = if signed_bytes { SubScales::Bytes } else { SubScales::Planes(PlaneScales::of(sub, &tile, span)?) };
-        let low_reads = tile.plane_reads(&low)?;
-        let high_reads = layout.element.high.as_ref().map(|plane| tile.plane_reads(plane)).transpose()?;
+        let code_step = if grid_sign.is_some() { 0 } else { BYTE_BITS as usize };
+        let low_reads = tile.plane_reads(&low, code_step)?;
+        let high_reads = layout.element.high.as_ref().map(|plane| tile.plane_reads(plane, code_step)).transpose()?;
+        let sign_reads = grid_sign.map(|sign| tile.sign_reads(sign)).transpose()?;
         let scale_read = typed_field_read(&layout.scale)?;
         Ok(Self {
             layout,
@@ -303,6 +330,7 @@ impl<'a> Assembled<'a> {
             span,
             low_reads,
             high_reads,
+            sign_reads,
             scale_read,
             scales,
             scale_base_byte: scale_plane.base_bits / BYTE_BITS,
@@ -336,6 +364,9 @@ impl<'a> Assembled<'a> {
         if let Some(reads) = &self.high_reads {
             source.push_str(&format!("    uint high_offset = {}u + ir * {}u + iq * {}u;\n", reads.base_byte, reads.ir_bytes, reads.owned_bytes));
         }
+        if let Some(reads) = &self.sign_reads {
+            source.push_str(&format!("    uint sign_offset = {}u + ir * {}u + iq * {}u;\n", reads.base_byte, reads.ir_bytes, reads.owned_bytes));
+        }
         match &self.scales {
             SubScales::Bytes => {
                 let (span, sub_per_owned) = (self.span, self.owned_elements / self.span);
@@ -349,15 +380,48 @@ impl<'a> Assembled<'a> {
     /// The element's value from its planes for `slot`: the level-table helper for a level format,
     /// else the biased code as a float, what `Plane::address` named.
     fn level_msl(&self, slot: usize) -> String {
-        let mut code = piece("low_codes", &self.low_reads, slot);
-        if let Some(reads) = &self.high_reads {
-            code = format!("{code} | ({} << {}u)", piece("high_codes", reads, slot), self.low_reads.bits);
-        }
+        let code = self.code_msl(slot);
         match self.codes {
+            Some(LevelCodes { table: LevelTable::SignedGrid { .. }, .. }) => format!("level{slot}"),
             Some(levels) => format!("{}_code((uint)({code}))", levels.element_fn),
             None if self.layout.element.bias == 0 => format!("(float)(int)({code})"),
             None => format!("(float)((int)({code}) - {})", self.layout.element.bias),
         }
+    }
+
+    /// The slot's assembled code: the low plane's piece with the high plane's piece above it.
+    fn code_msl(&self, slot: usize) -> String {
+        let code = piece("low_codes", &self.low_reads, slot);
+        match &self.high_reads {
+            Some(reads) => format!("{code} | ({} << {}u)", piece("high_codes", reads, slot), self.low_reads.bits),
+            None => code,
+        }
+    }
+
+    /// A signed grid's per-slot reads, hoisted above the run loop: the four magnitudes the slot's code
+    /// names and the run's sign bits. Empty for every other table.
+    fn slot_prelude_msl(&self, slot: usize) -> String {
+        let (Some(LevelCodes { table: LevelTable::SignedGrid { .. }, element_fn }), Some(reads)) = (self.codes, &self.sign_reads) else {
+            return String::new();
+        };
+        let (byte, shift) = reads.slots[slot];
+        let mask = (1u32 << self.run) - 1;
+        format!(
+            "            uint grid{slot} = {element_fn}_grid[{}];\n            uint sign{slot} = ((uint)sign_codes[{byte}u] >> {shift}u) & {mask:#x}u;\n",
+            self.code_msl(slot)
+        )
+    }
+
+    /// The run element's level for a signed grid, mirroring `layout_render::signed_grid_raw_msl`: the
+    /// lane's magnitude byte, negated when its sign bit is set, scaled by `0.5^unit_shift`.
+    fn level_statements_msl(&self, slot: usize) -> String {
+        let Some(LevelCodes { table: LevelTable::SignedGrid { unit_shift, .. }, .. }) = self.codes else {
+            return String::new();
+        };
+        let unit = if *unit_shift == 0 { String::new() } else { format!(" * {:e}f", 0.5f32.powi(i32::from(*unit_shift))) };
+        format!(
+            "                float level{slot} = (float)((grid{slot} >> (8u * i)) & 0xFFu){unit};\n                level{slot} = ((sign{slot} >> i) & 1u) != 0u ? -level{slot} : level{slot};\n"
+        )
     }
 
     /// The pointers into one block the decode reads, declared at the top of the per-row body.
@@ -367,6 +431,9 @@ impl<'a> Assembled<'a> {
         source.push_str("            device const uchar *low_codes = blk + low_offset;\n");
         if self.high_reads.is_some() {
             source.push_str("            device const uchar *high_codes = blk + high_offset;\n");
+        }
+        if self.sign_reads.is_some() {
+            source.push_str("            device const uchar *sign_codes = blk + sign_offset;\n");
         }
         match &self.scales {
             SubScales::Bytes => source.push_str("            device const uchar *scales = blk + scale_offset;\n"),
@@ -425,9 +492,11 @@ fn render(
     source.push_str(&plan.row_pointers_msl());
     for slot in 0..covered {
         source.push_str(&format!("            float sums{slot} = 0.0f;\n"));
+        source.push_str(&plan.slot_prelude_msl(slot));
     }
     source.push_str(&format!("            {FULL_UNROLL}\n            for (uint i = 0u; i < {run}u; ++i) {{\n"));
     for slot in 0..covered {
+        source.push_str(&plan.level_statements_msl(slot));
         source.push_str(&format!("                sums{slot} += yl[i + {}u] * {};\n", slot * run, plan.level_msl(slot)));
     }
     source.push_str("            }\n");
@@ -503,11 +572,13 @@ pub(super) fn assembled_multi_row_matvec_msl(
 #[cfg(test)]
 mod tests {
     use alloc::string::String;
+    use alloc::vec;
+    use alloc::vec::Vec;
 
     use proxima_numeric::LevelTable;
     use proxima_numeric::block_layout::BlockLayout;
 
-    use super::{LevelCodes, SubBlockMatvecGeometry, SubBlockMatvecRefusal, level_matvec_msl, level_table_rendered};
+    use super::{Assembled, LevelCodes, PlaneReads, SubBlockMatvecGeometry, SubBlockMatvecRefusal, SubScales, level_matvec_msl, level_table_rendered};
     use crate::Codec;
 
     fn iq4_xs_table() -> LevelTable {
@@ -518,8 +589,9 @@ mod tests {
     }
 
     fn render(layout: &BlockLayout, table: &LevelTable) -> Result<String, SubBlockMatvecRefusal> {
-        let codes = LevelCodes { table, element_fn: "iq4_xs_element" };
-        level_matvec_msl(layout, &codes, &SubBlockMatvecGeometry::decode_levels(4, 2, 32), 0, 1, true, "u.reduction_total")
+        let element_fn = if matches!(table, LevelTable::SignedGrid { .. }) { "iq3_s_element" } else { "iq4_xs_element" };
+        let codes = LevelCodes { table, element_fn };
+        level_matvec_msl(layout, &codes, &SubBlockMatvecGeometry::for_levels(table, 4, 2, 32), 0, 1, true, "u.reduction_total")
     }
 
     #[test]
@@ -558,9 +630,114 @@ mod tests {
     }
 
     #[test]
-    fn iq3_s_is_refused_by_the_lane_digit_stride_until_the_grid_walk_lands() {
-        let refusal = render(&BlockLayout::IQ3_S, &level_table_of(Codec::Iq3S)).expect_err("no half-rendered iq3_s kernel is emitted");
-        assert_eq!(refusal, SubBlockMatvecRefusal("lane digit steps one byte"));
+    fn iq3_s_renders_its_level_matvec_from_its_layout() {
+        let source = render(&BlockLayout::IQ3_S, &level_table_of(Codec::Iq3S)).expect("iq3_s renders");
+        assert!(source.contains("iq3_s_element_grid["), "{source}");
+        assert!(source.contains("2 * (int)"), "{source}");
+        assert!(source.contains("sign_codes"), "{source}");
+        assert!(!source.contains("(char)scales"), "{source}");
+    }
+
+    #[test]
+    fn one_field_of_the_iq3_s_layout_changes_the_rendered_kernel() {
+        let mut moved = BlockLayout::IQ3_S;
+        moved.sub.as_mut().expect("iq3_s has sub-blocks").scale.low.base_bits += 64;
+        let table = level_table_of(Codec::Iq3S);
+        assert_ne!(render(&BlockLayout::IQ3_S, &table).expect("iq3_s renders"), render(&moved, &table).expect("the moved layout renders"));
+    }
+
+    // twin of FLINT_BLK2_GATE_EXPERT0_BLOCK0 in proxima-gguf/src/quant/iq3_s.rs (private to that crate's tests): flint-UD-Q4_K_XL.gguf blk.2.ffn_gate_exps.weight, expert 0, row 0, block 0
+    const FLINT_BLK2_GATE_EXPERT0_BLOCK0: [u8; 110] = [
+        0x92, 0x00, 0x0e, 0x80, 0x59, 0x91, 0x0e, 0xc7, 0xf8, 0x85, 0xff, 0x44, 0x18, 0xd0, 0x1e, 0xe0, 0x80, 0x00, 0x0b, 0x9d, 0xe1, 0xa9, 0x02, 0xeb, 0x1e,
+        0x19, 0x1e, 0x37, 0x76, 0x95, 0xcb, 0xe8, 0x56, 0x32, 0x3d, 0x3f, 0x81, 0x5b, 0x2a, 0x2e, 0xc8, 0x28, 0xa9, 0x3c, 0x52, 0x5b, 0x95, 0x92, 0x05, 0xfa,
+        0x8d, 0x5c, 0x80, 0xaf, 0xe1, 0xee, 0x29, 0xa9, 0x88, 0xc5, 0x7b, 0x59, 0x8a, 0x69, 0x4e, 0x34, 0x09, 0x84, 0xa8, 0xc0, 0x5a, 0x41, 0xc3, 0x54, 0xfc,
+        0xd7, 0x94, 0x24, 0x82, 0x05, 0xf4, 0x53, 0x2f, 0x51, 0x58, 0xfa, 0x92, 0xf3, 0x5b, 0x60, 0x5b, 0x5a, 0xb0, 0xed, 0x1d, 0xb1, 0xa4, 0xa1, 0x84, 0xdf,
+        0x7a, 0x5f, 0x4a, 0x0e, 0x6f, 0x5c, 0xef, 0xbc, 0xab, 0xea,
+    ];
+
+    fn reads_at(block: &[u8], reads: &PlaneReads, owned: usize, slot: usize) -> u32 {
+        let (byte, shift) = reads.slots[slot];
+        let at = reads.base_byte + owned as u32 * reads.owned_bytes + byte;
+        (u32::from(block[at as usize]) >> shift) & ((1u32 << reads.bits) - 1)
+    }
+
+    fn sign_run_at(block: &[u8], reads: &PlaneReads, owned: usize, slot: usize, run: u32) -> u32 {
+        let (byte, shift) = reads.slots[slot];
+        let at = reads.base_byte + owned as u32 * reads.owned_bytes + byte;
+        (u32::from(block[at as usize]) >> shift) & ((1u32 << run) - 1)
+    }
+
+    fn iq3_s_plan<'a>(codes: &'a LevelCodes<'a>, geometry: &'a SubBlockMatvecGeometry) -> Assembled<'a> {
+        Assembled::of(&BlockLayout::IQ3_S, Some(codes), geometry).expect("iq3_s plans")
+    }
+
+    #[test]
+    fn the_iq3_s_plan_addresses_the_worked_tile_of_the_flint_block() {
+        let table = level_table_of(Codec::Iq3S);
+        let codes = LevelCodes { table: &table, element_fn: "iq3_s_element" };
+        let geometry = SubBlockMatvecGeometry::for_levels(&table, 4, 2, 32);
+        let plan = iq3_s_plan(&codes, &geometry);
+        assert_eq!((plan.run, plan.lane_runs, plan.covered, plan.span), (4, 1, 8, 32));
+        let high = plan.high_reads.as_ref().expect("iq3_s has a high plane");
+        let sign = plan.sign_reads.as_ref().expect("iq3_s has a sign plane");
+        assert_eq!((plan.low_reads.base_byte, plan.low_reads.owned_bytes, plan.low_reads.per_run), (2, 8, false));
+        assert_eq!((high.base_byte, high.owned_bytes, high.per_run), (66, 1, false));
+        assert_eq!((sign.base_byte, sign.owned_bytes), (74, 4));
+        for slot in 0..8 {
+            assert_eq!(plan.low_reads.slots[slot], (slot as u32, 0));
+            assert_eq!(high.slots[slot], (0, slot as u32));
+            assert_eq!(sign.slots[slot], (slot as u32 / 2, 4 * (slot as u32 % 2)));
+        }
+        let bytes: Vec<u32> = (0..8).map(|slot| reads_at(&FLINT_BLK2_GATE_EXPERT0_BLOCK0, &plan.low_reads, 0, slot)).collect();
+        assert_eq!(bytes, [0x0e, 0x80, 0x59, 0x91, 0x0e, 0xc7, 0xf8, 0x85]);
+        let high_bits: Vec<u32> = (0..8).map(|slot| reads_at(&FLINT_BLK2_GATE_EXPERT0_BLOCK0, high, 0, slot)).collect();
+        assert_eq!(high_bits, [1, 0, 0, 1, 0, 0, 0, 0]);
+        let signs: Vec<u32> = (0..4).map(|slot| sign_run_at(&FLINT_BLK2_GATE_EXPERT0_BLOCK0, sign, 0, slot, 4)).collect();
+        assert_eq!(signs, [0xc, 0xf, 0x7, 0xd]);
+    }
+
+    #[test]
+    fn the_iq3_s_walk_evaluated_on_the_flint_block_reproduces_the_hand_derived_elements() {
+        let table = level_table_of(Codec::Iq3S);
+        let LevelTable::SignedGrid { grid, .. } = &table else {
+            panic!("iq3_s is a signed grid");
+        };
+        let codes = LevelCodes { table: &table, element_fn: "iq3_s_element" };
+        let geometry = SubBlockMatvecGeometry::for_levels(&table, 4, 2, 32);
+        let plan = iq3_s_plan(&codes, &geometry);
+        let SubScales::Planes(scales) = &plan.scales else {
+            panic!("iq3_s sub-block scales are plane coded");
+        };
+        let delta = half::f16::from_bits(u16::from_le_bytes([FLINT_BLK2_GATE_EXPERT0_BLOCK0[0], FLINT_BLK2_GATE_EXPERT0_BLOCK0[1]])).to_f32();
+        let mut walked = vec![0.0f32; 256];
+        for owned in 0..8 {
+            for slot in 0..plan.covered {
+                let per_plane = &scales.distinct[scales.scale_of_slot[slot]];
+                let scale_code: u32 = per_plane
+                    .iter()
+                    .zip(&scales.planes)
+                    .map(|((offsets, shifts), (bits, position))| ((u32::from(FLINT_BLK2_GATE_EXPERT0_BLOCK0[offsets[owned] as usize]) >> shifts[owned]) & ((1u32 << bits) - 1)) << position)
+                    .sum();
+                let scale = i32::from(scales.multiplier) * scale_code as i32 - i32::from(scales.bias);
+                let index = reads_at(&FLINT_BLK2_GATE_EXPERT0_BLOCK0, &plan.low_reads, owned, slot) | (reads_at(&FLINT_BLK2_GATE_EXPERT0_BLOCK0, plan.high_reads.as_ref().expect("high plane"), owned, slot) << 8);
+                let signs = sign_run_at(&FLINT_BLK2_GATE_EXPERT0_BLOCK0, plan.sign_reads.as_ref().expect("sign plane"), owned, slot, 4);
+                for lane in 0..4 {
+                    let magnitude = ((grid[index as usize] >> (8 * lane)) & 0xFF) as f32;
+                    let signed = if (signs >> lane) & 1 != 0 { -magnitude } else { magnitude };
+                    walked[lane + 4 * (slot + 8 * owned)] = delta * scale as f32 * signed;
+                }
+            }
+        }
+        let hand_derived: [i32; 16] = [5, 1, -13, -5, -3, -1, -3, -3, -3, -9, -11, 1, -3, 11, -15, -9];
+        for (element, multiple) in hand_derived.iter().enumerate() {
+            let expected = (4526 * multiple) as f32 / 16_777_216.0;
+            assert_eq!(walked[element].to_bits(), expected.to_bits(), "element {element}: walked {} want {expected}", walked[element]);
+        }
+        let mut decoded = [0.0f32; 256];
+        proxima_gguf::quant::iq3_s::dequantize(&FLINT_BLK2_GATE_EXPERT0_BLOCK0, &mut decoded).expect("one whole block decodes");
+        for (element, (walk, cpu)) in walked.iter().zip(decoded).enumerate() {
+            assert!((walk - cpu).abs() <= cpu.abs() * 1e-6, "element {element}: walked {walk} cpu {cpu}");
+        }
     }
 
     #[test]
