@@ -193,8 +193,39 @@ pub(super) struct PipelineCaptureRecord {
 /// drift onto different digest formats.
 #[cfg(feature = "instrument")]
 fn sha256_hex(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return EMPTY_SOURCE_SKIPPED.to_string();
+    }
     let digest = Sha256::digest(bytes);
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// stands in for the digest when there is no source to hash, so the event never carries the
+/// empty-input sha256 (e3b0c442...) as if it named a real kernel.
+#[cfg(feature = "instrument")]
+const EMPTY_SOURCE_SKIPPED: &str = "<skipped: empty source>";
+
+#[cfg(all(test, feature = "instrument"))]
+mod sha256_hex_tests {
+    use super::{EMPTY_SOURCE_SKIPPED, sha256_hex};
+
+    const EMPTY_INPUT_SHA256: &str =
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    #[test]
+    fn non_empty_msl_source_hashes_to_a_real_digest() {
+        let source = "#include <metal_stdlib>\nkernel void add_f32(device float* out [[buffer(0)]]) {}\n";
+        let digest = sha256_hex(source.as_bytes());
+        assert_eq!(digest.len(), 64, "sha256 hex is 64 chars");
+        assert_ne!(digest, EMPTY_INPUT_SHA256, "non-empty source must not hash to the empty digest");
+    }
+
+    #[test]
+    fn empty_msl_source_is_skipped_not_hashed() {
+        let digest = sha256_hex(b"");
+        assert_eq!(digest, EMPTY_SOURCE_SKIPPED);
+        assert_ne!(digest, EMPTY_INPUT_SHA256, "empty input must never log the empty digest");
+    }
 }
 
 /// `PROXIMA_PIPELINE_CAPTURE=<dir>` writes the exact MSL source text this

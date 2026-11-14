@@ -1777,6 +1777,40 @@ thread_local! {
     pub(super) static CAPTURE_DUMP_PENDING: RefCell<Vec<CaptureDumpEntry>> = const { RefCell::new(Vec::new()) };
 }
 
+/// `None` for an empty slice, so a zero-length output never writes the empty-input sha256 into
+/// `manifest.txt` as if it were a real digest.
+#[cfg(feature = "instrument")]
+fn manifest_digest(bytes: &[u8]) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    if bytes.is_empty() {
+        return None;
+    }
+    Some(format!("{:x}", Sha256::digest(bytes)))
+}
+
+#[cfg(all(test, feature = "instrument"))]
+mod manifest_digest_tests {
+    use super::manifest_digest;
+
+    const EMPTY_INPUT_SHA256: &str =
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
+    #[test]
+    fn non_empty_output_bytes_get_a_manifest_digest() {
+        let bytes: Vec<u8> = [0.25_f32, -1.5, 3.0, 0.0]
+            .iter()
+            .flat_map(|value| value.to_le_bytes())
+            .collect();
+        let digest = manifest_digest(&bytes).expect("non-empty bytes are hashed");
+        assert_ne!(digest, EMPTY_INPUT_SHA256);
+    }
+
+    #[test]
+    fn empty_output_bytes_get_no_manifest_row() {
+        assert_eq!(manifest_digest(&[]), None);
+    }
+}
+
 /// Reads back every [`CaptureDumpEntry`] queued since the last flush and
 /// writes its buffer bytes to `PROXIMA_CAPTURE_DUMP_DIR`. Call ONLY at a
 /// point where every command buffer that could contain a queued dispatch has
@@ -1845,9 +1879,7 @@ pub(super) fn flush_pending_capture_dumps() {
             }
             buffer_records.push(format!("({index}, off={offset}, len={length})"));
             if entry.manifest {
-                use sha2::{Digest, Sha256};
-                let digest = Sha256::digest(bytes);
-                manifest_row = Some((length, format!("{digest:x}")));
+                manifest_row = manifest_digest(bytes).map(|sha256| (length, sha256));
             }
         }
         if let (true, Some((length, sha256))) = (entry.manifest, manifest_row) {
