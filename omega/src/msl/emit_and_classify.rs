@@ -1606,7 +1606,6 @@ pub(super) fn fast_q6k_active(
     expert_source_mode: bool,
 ) -> bool {
     cfg!(feature = "metal")
-        && !cfg!(feature = "metal-q4k-split-k")
         && !expert_source_mode
         && gather_slots(resolved)[block.weight].is_none()
         && block.codec == Codec::Q6K
@@ -4362,50 +4361,6 @@ pub(super) fn tiled_gemm_threadgroups(
     }
 }
 
-/// Split-K factor for a row-blocked packed matmul with `rows` OUTPUT rows
-/// (`output_total`), dispatching `base_simdgroups` simdgroups
-/// (`rows.div_ceil(codec_rows_per_simdgroup(codec))`) -- how many simdgroups per
-/// threadgroup cooperate on ONE row-group's reduction axis so the
-/// dispatch's total simdgroup count reaches
-/// [`crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`], capped at
-/// [`crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT`].
-///
-/// Gated FIRST by [`crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS`] (`0` means
-/// no ceiling): `target_simdgroups` alone lets integer division push a
-/// shape's factor toward `1` as `rows` grows, but that fall-off is gradual,
-/// not a hard cutoff -- a 4096-row op (attn_q/attn_output/ffn_down in the
-/// measured decode-graph table) still clears `factor=2` on
-/// `target_simdgroups` arithmetic alone even though its GB/s was already
-/// close to the `ffn_*` rate at 1024 base simdgroups, which is exactly the
-/// "applied to every packed matvec" loss this ceiling exists to cut off at
-/// a build-time-tunable row count instead. Always `1` once
-/// `base_simdgroups` already meets the target OR `rows` exceeds the
-/// ceiling. Feature-off builds never see this: the caller only reaches
-/// here behind `packed_row_block(..).is_some()` AND the `metal-q4k-split-k`
-/// feature (see `push_cooperative_reduce_body`'s own gate).
-#[cfg(feature = "metal-q4k-split-k")]
-pub(super) fn packed_row_split_factor(base_simdgroups: u64, rows: u64) -> u64 {
-    if base_simdgroups == 0 {
-        return 1;
-    }
-    let max_rows = crate::sized::PACKED_ROW_SPLIT_K_MAX_ROWS;
-    if max_rows != 0 && rows > max_rows {
-        return 1;
-    }
-    (crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS / base_simdgroups)
-        .clamp(1, crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT)
-}
-
-/// The `metal-q4k-split-k`-off arm: split-K never engages, so the factor is
-/// always `1` -- see [`packed_row_split_factor`]'s feature-on twin for the
-/// real policy. Kept as a separate function (not a `cfg!()` branch inline)
-/// so [`crate::sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS`] is never
-/// referenced from a build that never generated it.
-#[cfg(not(feature = "metal-q4k-split-k"))]
-pub(super) fn packed_row_split_factor(_base_simdgroups: u64, _rows: u64) -> u64 {
-    1
-}
-
 /// Activation rows one simdgroup folds per streamed weight row for an op with
 /// `token_total` activation rows: the smallest power of two that holds them,
 /// capped at `crate::sized::PACKED_ROW_ACTIVATION_GROUP`. A fixed cap makes a
@@ -4446,10 +4401,8 @@ pub(super) fn packed_row_dispatch(
     let base = feature_total.div_ceil(geometry.rows_per_simdgroup as u64);
     let split = if geometry.k_split > 1 {
         geometry.k_split as u64
-    } else if packed_row_body_splits_k(resolved, block) {
-        1
     } else {
-        packed_row_split_factor(base, feature_total)
+        1
     };
     let token_groups = token_total.div_ceil(packed_row_activation_cap(token_total));
     (base * token_groups, split)

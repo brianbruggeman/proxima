@@ -194,9 +194,7 @@ pub(super) fn grid_threads_with_schedule(
                 )?
             } else if let Some(block) = packed_row_block(resolved, quantized) {
                 // one simdgroup per `codec_rows_per_simdgroup(block.codec)`
-                // feature rows, times the split-K factor (1 = no-op unless
-                // `metal-q4k-split-k` is active AND this shape is below the
-                // target simdgroup count), tiled again by
+                // feature rows, times the split-K factor, tiled again by
                 // `ceil(token_total / PACKED_ROW_ACTIVATION_GROUP)` once
                 // `block.token_axes` folds more than one activation row per
                 // streamed weight row -- `token_total == 1` collapses that
@@ -684,10 +682,6 @@ pub(super) fn push_body_steps(
     )
 }
 
-// only the row-blocked packed-matmul path's caller ever passes `true` --
-// every other kernel keeps the same signature it always has, so this stays
-// off by construction wherever split-K does not engage (see
-// `push_cooperative_reduce_body`'s own call site for the gate).
 pub(super) fn kernel_signature(
     source: &mut String,
     quantized: &[Option<Codec>],
@@ -695,7 +689,6 @@ pub(super) fn kernel_signature(
     gather_count: usize,
     entry: &str,
     element_type: &str,
-    include_threadgroup_width: bool,
 ) {
     kernel_signature_with_extra_outputs(
         source,
@@ -704,7 +697,6 @@ pub(super) fn kernel_signature(
         gather_count,
         entry,
         element_type,
-        include_threadgroup_width,
         0,
     );
 }
@@ -712,8 +704,6 @@ pub(super) fn kernel_signature(
 // `extra_outputs` second-and-later output buffers, named `extra_out{index}`, bound after the
 // uniforms (and fault) slot at the indices `encode_op` hands an op's extra outputs: right past
 // `Kernel::bindings`, which is where `BoundOp::twin_node` lands.
-// clippy::too_many_arguments: the seven parameters of `kernel_signature` plus the one it forwards
-#[allow(clippy::too_many_arguments)]
 pub(super) fn kernel_signature_with_extra_outputs(
     source: &mut String,
     quantized: &[Option<Codec>],
@@ -721,7 +711,6 @@ pub(super) fn kernel_signature_with_extra_outputs(
     gather_count: usize,
     entry: &str,
     element_type: &str,
-    include_threadgroup_width: bool,
     extra_outputs: usize,
 ) {
     let operand_count = quantized.len();
@@ -788,17 +777,6 @@ pub(super) fn kernel_signature_with_extra_outputs(
         ));
     }
     source.push_str("    uint gid [[thread_position_in_grid]]");
-    if include_threadgroup_width {
-        // the actual per-dispatch threadgroup width -- `crate::metal::dispatch`
-        // sets this from `GridSpec::threadgroup_width`, which
-        // `tiled_gemm_threadgroup_width` computes FRESH per concrete dispatch
-        // (unlike `Kernel::source`, cached and shared across every dispatch
-        // with the same structural `kernel_cache_key`). Reading it back here
-        // is what lets one compiled kernel body serve both a starved shape
-        // (split > 1) and a saturated one (split == 1) without two kernel
-        // bodies existing per structural shape.
-        source.push_str(",\n    uint tptg [[threads_per_threadgroup]]");
-    }
     source.push_str(")\n{\n");
 }
 
@@ -997,12 +975,6 @@ pub(super) fn preamble(source: &mut String) {
     source.push('\n');
     source.push_str(&scaled_float_render::q8_0_unpack_msl());
     source.push('\n');
-    // only `metal-q4k-split-k` builds still render `q8_0_pair_dot`: every other build selects the
-    // layout-rendered flat-block matvec for a plain-product Q8_0 reduce (`PackedBodySelect::FlatRendered`).
-    if cfg!(feature = "metal-q4k-split-k") {
-        source.push_str(Q8_0_PAIR_DOT_MSL);
-        source.push('\n');
-    }
     source.push_str(&scaled_float_render::q4_0_unpack_msl());
     source.push('\n');
     source.push_str(&layout_render::block_super_element_msl(&BlockLayout::Q4_0, "q4_0"));
@@ -1256,7 +1228,7 @@ pub(super) fn render_iota(resolved: &BoundOp, entry: &str) -> Result<String, Emi
     source.push_str("    long total_elements;\n");
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, &[], 0, 0, entry, element_type, false);
+    kernel_signature(&mut source, &[], 0, 0, entry, element_type);
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
     source.push_str(&format!("    out[gid] = ({element_type})gid;\n"));
     source.push_str("}\n");
@@ -1283,7 +1255,7 @@ pub(super) fn render_constant(
     source.push_str("    long total_elements;\n");
     source.push_str("};\n\n");
 
-    kernel_signature(&mut source, &[], 0, 0, entry, element_type, false);
+    kernel_signature(&mut source, &[], 0, 0, entry, element_type);
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
     source.push_str(&format!(
         "    out[gid] = ({element_type}){};\n",

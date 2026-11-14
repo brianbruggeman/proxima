@@ -45,24 +45,6 @@ q6k_rows = 2
 # `OMEGA_PACKED_ROW_BLOCK_SCALAR_RUN`.
 scalar_run = 8
 
-# `metal-q4k-split-k`-only ceiling on the row-blocked packed matmul's OUTPUT
-# row count (`output_total` in `msl.rs`'s `packed_row_dispatch`) above which
-# split-K never engages, regardless of what `[packed_row_split_k]`'s
-# `target_simdgroups`/`max_split` would otherwise compute -- see
-# `msl.rs`'s `packed_row_split_factor` and sized::PACKED_ROW_SPLIT_K_MAX_ROWS.
-# `target_simdgroups`(2048) alone already lets a shape's own base-simdgroup
-# count push its factor to 1 once `base_simdgroups >= target_simdgroups`, but
-# integer division means that fall-off is gradual (a 4096-row op still gets
-# factor=2 through this landing's own measured decode-graph table, even
-# though its GB/s was already close to the `ffn_*` rate at 1024 base
-# simdgroups) -- this key is the hard, row-count-scoped cutoff a caller can
-# tune independently of the simdgroup-target arithmetic, per the sweep in
-# `docs/discipline.md`'s row for this landing. 0 disables the ceiling
-# (split-K then engages purely off `target_simdgroups`/`max_split`, i.e. this
-# landing's pre-existing behaviour). Overridable per-build via
-# `OMEGA_PACKED_ROW_BLOCK_SPLIT_K_MAX_ROWS`.
-split_k_max_rows = 4096
-
 # ceiling on the simdgroups of one threadgroup that cooperate on the SAME
 # output rows of a packed matvec, each folding a strided share of the reduction
 # (`msl::ksplit_max`, `msl::k_split_for`): a body whose lane owns a short
@@ -314,30 +296,6 @@ prefetch_registers = 32
 # key). The two orders differ in the low bits of a sum; the maximum and
 # minimum folds are order-free.
 broadcast_simd_fold = 1
-
-[packed_row_split_k]
-# below this many simdgroups (`output_rows / PACKED_ROWS_PER_GROUP`), the
-# row-blocked packed-matmul kernel splits the reduction (k) axis across
-# multiple simdgroups per threadgroup instead of leaving parallelism pinned
-# to `rows / 4` — see `msl.rs`'s `packed_row_split_factor` and
-# sized::PACKED_ROW_SPLIT_K_TARGET_SIMDGROUPS. The measured decode-graph
-# table (this landing's own discipline row) shows GB/s rising monotonically
-# with simdgroup count through at least 1024 (attn_q/attn_output/ffn_down);
-# 2048 sits one step past that observed range, low enough that
-# `max_split`(8) keeps every real starved shape (attn_k/attn_v at 256 base
-# simdgroups) inside its cap rather than saturating it, high enough to move
-# the two families the measured mechanism actually names as starved.
-# `feature = "metal-q4k-split-k"`-only; emitted only when that feature is
-# active.
-target_simdgroups = 2048
-# ceiling on the split factor — bounds the per-threadgroup thread count to
-# `max_split * SIMD_WIDTH`(32) so `crate::metal::dispatch`'s
-# `.min(max_threadgroup)` clamp (typically 1024 threads) never engages and
-# silently shrinks the threadgroup out from under the grid-thread count
-# `grid_threads` already committed to (`omega-runtime.toml`'s own
-# `require_split_k_headroom` enforces `max_split * 32 <= 1024` at build
-# time) — see sized::PACKED_ROW_SPLIT_K_MAX_SPLIT.
-max_split = 8
 
 [packed_row_multi_activation]
 # maximum number of activation ("token") rows one simdgroup folds against a

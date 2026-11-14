@@ -128,32 +128,12 @@ fn assert_rows4_and_rows8_bit_exact(k: usize, rows: usize, seed: u64) {
     assert_same_accumulation(k, rows, &baseline, &widened);
 }
 
-#[cfg(not(feature = "metal-q4k-split-k"))]
 fn assert_same_accumulation(k: usize, rows: usize, baseline: &[u32], widened: &[u32]) {
     assert_eq!(
         baseline, widened,
         "K={k} rows={rows}: PROXIMA_PACKED_ROWS=8 produced different bits than the rows=4 \
          default -- widening rows-per-simdgroup must not reorder any row's accumulation"
     );
-}
-
-/// Under split-k the K-axis partition is `TARGET_SIMDGROUPS / (rows /
-/// rows_per_group)` simdgroups wide, so changing rows-per-group changes the
-/// split factor (K=6144, rows=1536: 2048/384 = 5 at rows=4, 2048/192 clamped
-/// to 8 at rows=8) and with it the order a row's partial sums combine in.
-/// The contract there is agreement to reassociation error, not identical bits.
-#[cfg(feature = "metal-q4k-split-k")]
-fn assert_same_accumulation(k: usize, rows: usize, baseline: &[u32], widened: &[u32]) {
-    const RELATIVE_TOLERANCE: f32 = 1e-5;
-    for (index, (&want_bits, &got_bits)) in baseline.iter().zip(widened).enumerate() {
-        let (want, got) = (f32::from_bits(want_bits), f32::from_bits(got_bits));
-        let allowed = RELATIVE_TOLERANCE * want.abs().max(got.abs()).max(1.0);
-        assert!(
-            (want - got).abs() <= allowed,
-            "K={k} rows={rows} element {index}: rows=4 gave {want}, rows=8 gave {got}, beyond \
-             the {RELATIVE_TOLERANCE} reassociation tolerance"
-        );
-    }
 }
 
 #[test]
@@ -215,8 +195,7 @@ fn default_env_emits_node_94_shape_for_diffing_against_the_capture() {
     });
     let _ = &packed;
 
-    let native_body_selected =
-        cfg!(feature = "metal-q4_0-native") && !cfg!(feature = "metal-q4k-split-k");
+    let native_body_selected = cfg!(feature = "metal-q4_0-native");
     if native_body_selected {
         assert!(
             source.contains("sumy * -8.0f") && !source.contains("q4_0_pair_dot(blk"),
@@ -228,23 +207,10 @@ fn default_env_emits_node_94_shape_for_diffing_against_the_capture() {
             "node 94's shape must take the batched Q4_0 pair-dot arm:\n{source}"
         );
     }
-    if cfg!(feature = "metal-q4k-split-k") {
-        for fragment in [
-            "int ib_first = (int)(ix + sgitg * ",
-            "threadgroup float partial_sums[",
-            "if (sgitg == 0u && lane == 0u) {",
-        ] {
-            assert!(
-                source.contains(fragment),
-                "node 94's shape is 2048 rows, under split-k's ceiling, so it takes the split route (`{fragment}`):\n{source}"
-            );
-        }
-    } else {
-        assert!(
-            !source.contains("sgitg") && !source.contains("partial_sums["),
-            "without split-k node 94's shape is one simdgroup per row group:\n{source}"
-        );
-    }
+    assert!(
+        !source.contains("sgitg") && !source.contains("partial_sums["),
+        "node 94's shape is one simdgroup per row group:\n{source}"
+    );
     let scratch = tempfile::tempdir().expect("scratch dir creates");
     let out_dir = std::env::var_os("PROXIMA_EMITTED_MSL_OUT")
         .map(std::path::PathBuf::from)

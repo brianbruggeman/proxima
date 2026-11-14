@@ -42,7 +42,6 @@ pub(super) fn render_elementwise(
         gather_count,
         entry,
         element_type,
-        false,
         usize::from(twin_body.is_some()),
     );
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
@@ -435,28 +434,6 @@ pub(super) fn render_reduce(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    // split-K needs the actual per-dispatch threadgroup width back
-    // (`kernel_signature`'s `tptg` param) ONLY on the row-blocked packed
-    // path -- every other reduce kernel keeps its signature untouched, and
-    // with the feature off this is always `false`, which is what makes
-    // "split == 1 reproduces the current kernel exactly" hold at the source
-    // level, not just numerically.
-    // `push_cooperative_reduce_body` tries the tiled and dense-batched GEMM
-    // arms before the row-blocked one, so a shape they claim never reads
-    // `tptg`; declaring it there would mix a scalar `threads_per_threadgroup`
-    // with the tile form's `uint3` threadgroup position, which Metal rejects.
-    let include_threadgroup_width = cfg!(feature = "metal-q4k-split-k")
-        && packed_row_block(resolved, quantized).is_some()
-        && tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_none()
-        && dense_batched_gemm_block(
-            resolved,
-            quantized,
-            numeric_policy,
-            *reduce_op,
-            *init,
-            output_axes,
-        )
-        .is_none();
     kernel_signature(
         &mut source,
         quantized,
@@ -464,7 +441,6 @@ pub(super) fn render_reduce(
         gather_count,
         entry,
         element_type,
-        include_threadgroup_width,
     );
 
     if reduce_is_cooperative_dispatch(
@@ -937,10 +913,7 @@ pub(super) fn is_plain_product_reduce(
 /// that mode removes the packed operand before classification (`emit_with_expert_sources_mode`)
 /// and the env knob is refused in `packed_row_block_admitted`.
 pub(super) const fn level_codec_row_body_rendered(plain_product_reduce: bool, real_float: bool) -> bool {
-    plain_product_reduce
-        && real_float
-        && cfg!(feature = "metal")
-        && !cfg!(feature = "metal-q4k-split-k")
+    plain_product_reduce && real_float && cfg!(feature = "metal")
 }
 
 /// The row-blocked Q4_K header decode, one call site feature-gated between
@@ -1073,20 +1046,8 @@ pub(super) fn push_q4k_product_reduce_body(
     );
 }
 
-/// The legacy uniform-`split` fold's slot count. `sized` only generates the
-/// constant under `metal-q4k-split-k`; the fold never takes that arm without it.
-#[cfg(feature = "metal-q4k-split-k")]
-pub(super) fn legacy_split_k_max_split() -> u64 {
-    crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT
-}
-
-#[cfg(not(feature = "metal-q4k-split-k"))]
-pub(super) fn legacy_split_k_max_split() -> u64 {
-    1
-}
-
 /// The row-blocked packed path's tail: combine each simdgroup's per-row
-/// `sumf[q]` and write the output. `metal-q4k-split-k`-off arm -- exactly
+/// `sumf[q]` and write the output. `k_split == 1` is
 /// [`push_packed_row_blocked_body`]'s original tail, one simdgroup per
 /// row-group, lane 0 writes straight from the SIMD combine.
 ///
@@ -1102,8 +1063,7 @@ pub(super) fn legacy_split_k_max_split() -> u64 {
 /// `k_split` is the number of simdgroups that cooperate on one row group: `1`
 /// is the single-simdgroup tail below, `> 1` hands off to
 /// [`push_packed_row_split_fold`] with `k_split` as a literal in the kernel
-/// text. With `metal-q4k-split-k` on and `k_split == 1` the fold keeps its
-/// uniform-`split` form for the legacy K-quant path.
+/// text.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_packed_row_combine_and_write(
     source: &mut String,
@@ -1118,7 +1078,7 @@ pub(super) fn push_packed_row_combine_and_write(
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) -> Result<(), EmitError> {
-    if k_split > 1 || cfg!(feature = "metal-q4k-split-k") {
+    if k_split > 1 {
         return push_packed_row_split_fold(
             source,
             node,
@@ -1175,32 +1135,16 @@ pub(super) fn push_packed_row_combine_and_write(
     Ok(())
 }
 
-/// The row-blocked packed path's tail: combine each simdgroup's per-row
-/// `sumf[q]` and write the output. `metal-q4k-split-k`-on arm -- SPLIT-K
-/// COMBINE, option 1 from this landing's brief (multiple simdgroups in ONE
-/// threadgroup, threadgroup memory + a barrier, one final fold), over the
-/// second-choice atomic-accumulate (the output dtype can be `half`, which
-/// Metal has no `atomic<half>` for) and the third-choice second-dispatch
-/// partials pass (would double the kernel-launch and uniform-upload cost
-/// this landing exists to avoid paying on the STARVED shapes specifically).
+/// The row-blocked packed path's split-K tail (`k_split > 1`): combine each
+/// simdgroup's per-row `sumf[q]` through threadgroup memory + a barrier and
+/// one final fold, over the atomic-accumulate alternative (the output dtype
+/// can be `half`, which Metal has no `atomic<half>` for).
 ///
-/// Each simdgroup already SIMD-folds its own interleaved slice of
-/// super-blocks (`push_packed_row_blocked_body`'s `ib` loop, strided by
-/// `4 * split` when split-K is active); this only combines the (at most
-/// [`crate::sized::PACKED_ROW_SPLIT_K_MAX_SPLIT`]) per-simdgroup partials
-/// left behind. At `split == 1` (`sgitg` always `0`) this degenerates to
-/// exactly the feature-off tail: the loop over `s` never runs, so
-/// `total == partial_sums[q][0] == reduced`, written by the SAME thread that
-/// computed it -- same value, same order, only the intermediate trip through
-/// `threadgroup` memory differs.
-///
-/// With `k_split > 1` the partials live in `partial_sums[k_split][rows]`
-/// (simdgroup-major) and the fold bound is the literal `k_split`; the
-/// threadgroup is exactly `k_split` simdgroups wide, so no `split` uniform is
-/// read. With `k_split == 1` (feature arm) it keeps the legacy
-/// `partial_sums[rows][max_split]` layout and the runtime `split` bound.
-/// Either way the fold is `partial_sums` slot 0, 1, 2, ... in order, so the
-/// association of the per-simdgroup sums is fixed and no atomics are used.
+/// The partials live in `partial_sums[k_split][rows]` (simdgroup-major) and
+/// the fold bound is the literal `k_split`; the threadgroup is exactly
+/// `k_split` simdgroups wide, so no `split` uniform is read. The fold is
+/// `partial_sums` slot 0, 1, 2, ... in order, so the association of the
+/// per-simdgroup sums is fixed and no atomics are used.
 #[allow(clippy::too_many_arguments)]
 fn push_packed_row_split_fold(
     source: &mut String,
@@ -1215,26 +1159,12 @@ fn push_packed_row_split_fold(
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) -> Result<(), EmitError> {
     let combine_fn = simd_combine_fn(node, reduce_op)?;
-    let literal = k_split > 1;
-    let (declaration, store, first, next, bound) = if literal {
-        (
-            format!("[{k_split}][{rows}]"),
-            "partial_sums[sgitg][q]",
-            "partial_sums[0][q]",
-            "partial_sums[s][q]",
-            format!("{k_split}u"),
-        )
-    } else {
-        (
-            format!("[{rows}][{}]", legacy_split_k_max_split()),
-            "partial_sums[q][sgitg]",
-            "partial_sums[q][0]",
-            "partial_sums[q][s]",
-            String::from("split"),
-        )
-    };
+    let store = "partial_sums[sgitg][q]";
+    let first = "partial_sums[0][q]";
+    let next = "partial_sums[s][q]";
+    let bound = format!("{k_split}u");
     source.push_str(&format!(
-        "    threadgroup {element_type} partial_sums{declaration};\n"
+        "    threadgroup {element_type} partial_sums[{k_split}][{rows}];\n"
     ));
     source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
     source.push_str(&format!(
@@ -2419,17 +2349,15 @@ pub(crate) const PACKED_ROW_BODY_MARKERS: &[&str] = &[
     // through this gap into `"reduce-cooperative"` before these two markers.
     "q4_0_super_element(blk",
     "q8_0_super_element(blk",
-    // `Codec::Q4_0 if is_plain_product_reduce`/`Codec::Q8_0 if is_plain_
-    // product_reduce` (`packed_row_blocked_ggml.rs`, perf/q4_0-pair-dot):
-    // the batched fast arm added alongside this landing, ported from the
-    // K-quant codecs' own `q4k_pair_dot`/`q5k_pair_dot`/`q6k_pair_dot`
-    // shape. Same gap this table's own doc above names for `q4_0_super_
-    // element(blk`/`q8_0_super_element(blk`: a marker added for the OLD
-    // per-element bodies without one for the new batched body silently
-    // undercounts every plain-product `Q4_0`/`Q8_0` dispatch back into
+    // `Codec::Q4_0 if is_plain_product_reduce` (`packed_row_blocked_ggml.rs`,
+    // perf/q4_0-pair-dot): the batched fast arm added alongside this landing,
+    // ported from the K-quant codecs' own `q4k_pair_dot`/`q5k_pair_dot`/
+    // `q6k_pair_dot` shape. Same gap this table's own doc above names for
+    // `q4_0_super_element(blk`/`q8_0_super_element(blk`: a marker added for
+    // the OLD per-element bodies without one for the new batched body
+    // silently undercounts every plain-product `Q4_0` dispatch back into
     // `"reduce-cooperative"`.
     "q4_0_pair_dot(blk",
-    "q8_0_pair_dot(blk",
     "packed_pair = (uint)(*(device const ushort *)(blk",
     // `push_packed_row_multi_row_body`'s generic (non-`fast_q4k`) loop reads
     // through `signature_tokens_prelude::operand_read` instead of the

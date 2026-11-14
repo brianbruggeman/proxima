@@ -19,10 +19,8 @@
 // both are in `metal`'s own default feature list (`omega/Cargo.toml`), so
 // the fixture below IS their emit -- excluding them made this file compile
 // to zero tests under every real `--features metal` build (dead since ROW
-// 311). The three still excluded are non-default and each provably changes
-// this exact op's emitted text: `metal-q4k-split-k` re-routes
-// `push_packed_row_blocked_body`'s own arm selection (split-K combine
-// arms), and `metal-q4k-mask-fma` swaps `push_q4k_header_decode`/
+// 311). The one still excluded is non-default and provably changes
+// this exact op's emitted text: `metal-q4k-mask-fma` swaps `push_q4k_header_decode`/
 // `push_q4k_product_reduce_body`'s scale-deferred arm for a branch-free
 // mask/FMA rewrite. `metal-tiled-gemm` is left OFF this list on purpose --
 // read, not assumed: `classify_tiled_gemm` (`msl.rs`) rejects any op below
@@ -33,10 +31,7 @@
 #![cfg(all(
     feature = "metal",
     target_os = "macos",
-    not(any(
-        feature = "metal-q4k-split-k",
-        feature = "metal-q4k-mask-fma",
-    ))
+    not(feature = "metal-q4k-mask-fma")
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

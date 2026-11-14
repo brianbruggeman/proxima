@@ -3,7 +3,7 @@
 //! equal, bit for bit, what the hand body `push_packed_row_multi_row_q6k_body` produced at main
 //! 97eef4d7. The fixtures hold that body's raw f32 bits; `fixtures/q6k_multi_row_PROVENANCE.txt` records
 //! how they were captured. Setting `PROXNUM69_CAPTURE_DIR` writes the bits instead of comparing.
-#![cfg(all(feature = "metal", not(feature = "metal-q4k-split-k"), target_os = "macos"))]
+#![cfg(all(feature = "metal", target_os = "macos"))]
 // workspace lints deny unwrap/expect (Cargo.toml:93-94) and an integration test binary is not cfg(test), so a failed fixture read must be an allowed panic.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 

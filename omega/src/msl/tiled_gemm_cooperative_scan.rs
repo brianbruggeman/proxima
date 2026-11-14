@@ -1813,8 +1813,7 @@ pub(super) fn push_dense_batched_gemm_body(
 /// `SIMD_WIDTH`), `SIMD_WIDTH * split` for the row-blocked packed path when a
 /// `Reduce`'s own shape carries `reduce_op`/`init`/`output_axes` (see
 /// [`packed_row_dispatch`] -- `split` is `1`, i.e. plain `SIMD_WIDTH`, unless
-/// `metal-q4k-split-k` is active and this shape is below the target
-/// simdgroup count), [`crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS`] *
+/// the geometry splits K), [`crate::sized::PACKED_ROW_BLOCK_SIMDGROUPS`] *
 /// `SIMD_WIDTH` for a packed row-block reached outside that match (widens the
 /// packed row-block arm's threadgroup beyond one simdgroup — see that
 /// constant's doc for why this is dispatch-only and never touches the kernel
@@ -1987,20 +1986,10 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
             // is launched at ggml's own `N_SG_Q4_K`) --
             // [`packed_row_nsg_factor`] is the one place every nsg feature widens
             // from, so they cannot drift into two competing nsg constants.
-            // `!metal-q4k-split-k` too: split-K's own combine (`push_packed_
-            // row_combine_and_write`'s split-K arm) already picks a
-            // cooperating `split` simdgroup count for a REAL reason -- a
-            // starved shape's simdgroups share one output group via
-            // `sgitg`/`threadgroup` memory/a barrier -- and doubling the
-            // dispatched width again on top of that here, unconditionally,
-            // would desync the combine's own `split` from the width the
-            // driver actually dispatches (confirmed: `--all-features`,
-            // ggml-port + split-K together, broke Q4_K parity outright,
-            // relative=1). Every row-blocked body variant addresses its
-            // output group purely from `gid / SIMD_WIDTH`
-            // (`metal-packed-row-nsg2`'s own doc, still true here), so nsg=2
-            // is correctness-neutral whenever split-K is off, regardless of
-            // which body actually runs.
+            // every row-blocked body variant addresses its output group
+            // purely from `gid / SIMD_WIDTH` (`metal-packed-row-nsg2`'s own
+            // doc), so nsg=2 is correctness-neutral regardless of which body
+            // actually runs.
             // a K split already spends every simdgroup of the threadgroup on one row group, so
             // the nsg row-widening does not stack on it
             let row_widening = if geometry.k_split > 1 {
@@ -2183,32 +2172,22 @@ pub(super) fn cooperative_reduce_width(
 }
 
 /// [`tiled_gemm_threadgroup_width`]'s own nsg multiplier for the packed
-/// row-blocked path -- `PACKED_ROW_NSG` with either nsg2 feature on and
-/// `metal-q4k-split-k` off (see that call site's own doc for why split-K
-/// must win when both are compiled in), `1` otherwise. Two functions, not a
-/// `cfg!()` branch inline, so a feature-off build never references
-/// `PACKED_ROW_NSG` from code it does not generate (mirrors
-/// [`packed_row_split_factor`]'s own on/off pair).
-#[cfg(all(
-    any(
-        feature = "metal-packed-row-nsg2",
-        feature = "metal-q4_0-native"
-    ),
-    not(feature = "metal-q4k-split-k")
+/// row-blocked path -- `PACKED_ROW_NSG` with either nsg2 feature on, `1`
+/// otherwise. Two functions, not a `cfg!()` branch inline, so a feature-off
+/// build never references `PACKED_ROW_NSG` from code it does not generate.
+#[cfg(any(
+    feature = "metal-packed-row-nsg2",
+    feature = "metal-q4_0-native"
 ))]
 pub(super) fn packed_row_nsg_factor() -> u64 {
     PACKED_ROW_NSG as u64
 }
 
-/// The nsg2-features-off (or `metal-q4k-split-k`-on) arm: nsg widening never
-/// engages, so the factor is always `1` -- see [`packed_row_nsg_factor`]'s
-/// feature-on twin for the real policy.
-#[cfg(not(all(
-    any(
-        feature = "metal-packed-row-nsg2",
-        feature = "metal-q4_0-native"
-    ),
-    not(feature = "metal-q4k-split-k")
+/// The nsg2-features-off arm: nsg widening never engages, so the factor is
+/// always `1` -- see [`packed_row_nsg_factor`]'s feature-on twin.
+#[cfg(not(any(
+    feature = "metal-packed-row-nsg2",
+    feature = "metal-q4_0-native"
 )))]
 pub(super) fn packed_row_nsg_factor() -> u64 {
     1
@@ -2311,27 +2290,11 @@ pub(super) fn push_cooperative_reduce_body(
     // single-activation-row shape and the multi-row fold
     // [`push_packed_row_blocked_body`]'s own `token_total > 1` branch emits
     // -- one preamble, since both branches dispatch the identical
-    // `output_index`/`lane` pair at `SIMD_WIDTH` (`metal-q4k-split-k`'s own
-    // `tptg`-derived preamble below is the only variant on this pair).
+    // `output_index`/`lane` pair at `SIMD_WIDTH`.
     if let Some(block) = packed_row_block(resolved, quantized) {
         let geometry = packed_row_geometry(resolved, quantized, &block);
         if geometry.k_split > 1 {
             push_packed_row_split_preamble(source, geometry.k_split);
-        } else if cfg!(feature = "metal-q4k-split-k") {
-            // `tptg` is the ACTUAL per-dispatch threadgroup width
-            // (`kernel_signature`'s new param, wired on for this exact
-            // path -- see its call site's own gate). `split == 1` (the
-            // feature-off-equivalent case) makes every line below collapse
-            // to the plain `output_index`/`lane` pair the non-split-K arm
-            // emits: `tptg_width == SIMD_WIDTH`, so `tiitg == gid % SIMD_WIDTH`
-            // (today's `lane`), `sgitg == 0`, and `lane == tiitg` -- the same
-            // value, same bits, same order.
-            source.push_str("    uint tptg_width = tptg;\n");
-            source.push_str("    long output_index = (long)gid / (long)tptg_width;\n");
-            source.push_str("    uint tiitg = (uint)((long)gid % (long)tptg_width);\n");
-            source.push_str(&format!("    uint sgitg = tiitg / {SIMD_WIDTH}u;\n"));
-            source.push_str(&format!("    uint lane = tiitg % {SIMD_WIDTH}u;\n"));
-            source.push_str(&format!("    uint split = tptg_width / {SIMD_WIDTH}u;\n"));
         } else {
             source.push_str(&format!(
                 "    long output_index = (long)gid / {SIMD_WIDTH};\n"
@@ -3447,7 +3410,6 @@ pub(super) fn render_scan(
         gather_count,
         entry,
         element_type,
-        false,
     );
     source.push_str("    if ((long)gid >= u.outer_total) { return; }\n");
 
