@@ -2160,6 +2160,29 @@ pub(crate) fn ksplit_max() -> u64 {
         .map_or(crate::sized::PACKED_ROW_KSPLIT_MAX, |split| split as u64)
 }
 
+/// Bytes of a block's low code plane one lane owns: [`crate::sized::PACKED_ROW_LANE_RUN_BYTES`]
+/// (0 is off), or `PROXIMA_PACKED_LANE_RUN_BYTES` (0 or a power of two `<= 32`) when set. Read
+/// per call like [`ksplit_max`]; unset, unparsable or out of range keeps the sized value.
+/// Name-free: `LaneRun::derive` decides from the layout whether a run exists. Public so the
+/// switch is reachable by an A/B harness and nothing but tests reads it until the render slice.
+#[must_use]
+pub fn lane_run_bytes() -> usize {
+    lane_run_bytes_env("PROXIMA_PACKED_LANE_RUN_BYTES").unwrap_or(crate::sized::PACKED_ROW_LANE_RUN_BYTES)
+}
+
+#[cfg(feature = "std")]
+fn lane_run_bytes_env(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|bytes| *bytes == 0 || (bytes.is_power_of_two() && *bytes <= 32))
+}
+
+#[cfg(not(feature = "std"))]
+const fn lane_run_bytes_env(_name: &str) -> Option<usize> {
+    None
+}
+
 /// Rows one simdgroup folds when the K split is above 1:
 /// [`crate::sized::PACKED_ROW_KSPLIT_ROWS`], or `PROXIMA_PACKED_ROWS_KSPLIT`
 /// (1..=8) when set.

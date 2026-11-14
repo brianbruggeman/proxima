@@ -81,6 +81,63 @@ fn block_walk_start(lanes: usize, simdgroups: usize) -> String {
     format!("    int ib_first = (int)lane;\n    int ib_step = {lanes};\n")
 }
 
+/// The lane map of a block, derived from its layout: a lane owns `run_bytes` bytes of the block's
+/// low code plane and the `elements` codes that sit in them, and lane `l` owns lane 0's elements
+/// shifted by `l * lane_stride`.
+///
+/// Teaching pointer: the address of code `j` is `Plane::address` (proxima-numeric `block_layout`),
+/// the same function `BlockLayout::contiguous_byte_codes` walks; this reads it per element and
+/// groups the elements by the plane byte they fall in. Nothing is named by codec, so a byte-code
+/// layout (8 bytes, 8 elements) and a nibble layout (8 bytes, 16 elements) come out of one rule.
+/// A plain data fact, not a pipe: it is consulted at emit time and carries no behaviour. No wider
+/// type is needed in this slice because the render slice recomputes lane 0's element set from
+/// `elements` and `lane_stride` (consecutive runs for a byte code, two runs half a block apart
+/// for a nibble).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaneRun {
+    /// Bytes of the low code plane one lane loads per sweep.
+    pub run_bytes: usize,
+    /// Lanes one block spreads over: the low plane's bytes over `run_bytes`.
+    pub lanes_per_block: usize,
+    /// Elements one lane owns, 8 for a Q8_0 lane and 16 for a Q4_0 lane.
+    pub elements: usize,
+    /// Element shift between neighbouring lanes' sets.
+    pub lane_stride: usize,
+}
+
+impl LaneRun {
+    /// `None` for a layout with sub-blocks or scale runs, a radix-packed code, a code wider than a
+    /// byte or one that does not divide it, low plane bytes that do not divide into whole runs,
+    /// lanes that own unequal element counts, or lane sets that are not translates of lane 0's.
+    /// `run_bytes == 0` is the switch being off.
+    #[must_use]
+    pub fn derive(layout: &BlockLayout, run_bytes: usize) -> Option<Self> {
+        let plane = layout.element.low;
+        let bits = usize::from(plane.bits);
+        let total = usize::from(layout.elements);
+        let shared_scale = layout.sub.is_none() && layout.scale_runs.is_none() && layout.element.packed_radix == 0;
+        if run_bytes == 0 || !shared_scale || total == 0 || bits == 0 || !8usize.is_multiple_of(bits) {
+            return None;
+        }
+        let byte_of = |index: usize| plane.address(index) / 8;
+        let first_byte = (0..total).map(byte_of).min()?;
+        let plane_bytes = (0..total).map(byte_of).max()? - first_byte + 1;
+        if plane_bytes < run_bytes || !plane_bytes.is_multiple_of(run_bytes) {
+            return None;
+        }
+        let lanes_per_block = plane_bytes / run_bytes;
+        let lane_of = |index: usize| (byte_of(index) - first_byte) / run_bytes;
+        let elements = (0..total).filter(|&index| lane_of(index) == 0).count();
+        if elements * lanes_per_block != total {
+            return None;
+        }
+        let first_in = |lane: usize| (0..total).find(|&index| lane_of(index) == lane);
+        let lane_stride = if lanes_per_block == 1 { elements } else { first_in(1)?.checked_sub(first_in(0)?)? };
+        let translates = (0..total).all(|index| index.checked_sub(lane_of(index) * lane_stride).is_some_and(|base| lane_of(base) == 0));
+        translates.then_some(Self { run_bytes, lanes_per_block, elements, lane_stride })
+    }
+}
+
 /// A layout the flat-block matvec covers, with every fact the renderer reads.
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct FlatBlockForm {
@@ -285,7 +342,67 @@ mod tests {
     use proxima_numeric::float_layout::FloatLayout;
     use proxima_numeric::format::NumericFormat;
 
-    use super::{FlatBlockForm, FlatLaunch, Fold};
+    use super::{FlatBlockForm, FlatLaunch, Fold, LaneRun};
+
+    fn lane_run(layout: &BlockLayout, run_bytes: usize) -> Option<LaneRun> {
+        LaneRun::derive(layout, run_bytes)
+    }
+
+    #[test]
+    fn q8_0_lane_owns_eight_bytes_and_eight_elements_four_lanes_a_block() {
+        let expected = LaneRun { run_bytes: 8, lanes_per_block: 4, elements: 8, lane_stride: 8 };
+        assert_eq!(lane_run(&BlockLayout::Q8_0, 8), Some(expected));
+    }
+
+    #[test]
+    fn nibble_layouts_own_eight_bytes_and_sixteen_elements_two_lanes_a_block() {
+        let expected = LaneRun { run_bytes: 8, lanes_per_block: 2, elements: 16, lane_stride: 8 };
+        for (name, layout) in [("q4_0", BlockLayout::Q4_0), ("q4_1", BlockLayout::Q4_1), ("q5_0", BlockLayout::Q5_0), ("q5_1", BlockLayout::Q5_1)] {
+            assert_eq!(lane_run(&layout, 8), Some(expected), "{name}");
+        }
+    }
+
+    #[test]
+    fn sub_block_layouts_have_no_lane_run() {
+        for (name, layout) in [("q4_k", BlockLayout::Q4_K), ("q6_k", BlockLayout::Q6_K), ("iq4_xs", BlockLayout::IQ4_XS), ("iq3_s", BlockLayout::IQ3_S)] {
+            assert_eq!(lane_run(&layout, 8), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn a_run_that_is_off_does_not_divide_or_exceeds_the_plane_derives_nothing() {
+        for (run_bytes, why) in [(0, "off"), (3, "does not divide 32 plane bytes"), (64, "wider than the 32 plane bytes")] {
+            assert_eq!(lane_run(&BlockLayout::Q8_0, run_bytes), None, "{why}");
+        }
+    }
+
+    #[test]
+    fn a_run_as_wide_as_the_plane_is_one_lane_a_block() {
+        let expected = LaneRun { run_bytes: 32, lanes_per_block: 1, elements: 32, lane_stride: 32 };
+        assert_eq!(lane_run(&BlockLayout::Q8_0, 32), Some(expected));
+    }
+
+    #[test]
+    fn q8_0_run_of_sixteen_bytes_halves_the_lanes() {
+        let expected = LaneRun { run_bytes: 16, lanes_per_block: 2, elements: 16, lane_stride: 16 };
+        assert_eq!(lane_run(&BlockLayout::Q8_0, 16), Some(expected));
+    }
+
+    #[test]
+    fn nibble_run_of_four_bytes_owns_eight_elements_in_two_runs() {
+        let derived = lane_run(&BlockLayout::Q4_0, 4).expect("a nibble plane of 16 bytes divides into 4-byte runs");
+        assert_eq!((derived.lanes_per_block, derived.elements, derived.lane_stride), (4, 8, 4));
+    }
+
+    #[test]
+    fn lane_run_bytes_reads_a_valid_env_and_falls_back_to_the_sized_value() {
+        let sized = crate::sized::PACKED_ROW_LANE_RUN_BYTES;
+        for (value, expected) in [(Some("8"), 8), (Some("0"), 0), (Some(" 16 "), 16), (Some("3"), sized), (Some("64"), sized), (Some("eight"), sized), (None, sized)] {
+            temp_env::with_var("PROXIMA_PACKED_LANE_RUN_BYTES", value, || {
+                assert_eq!(crate::msl::lane_run_bytes(), expected, "{value:?}");
+            });
+        }
+    }
 
     fn render(layout: &BlockLayout) -> String {
         FlatBlockForm::plan(layout)
