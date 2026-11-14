@@ -326,8 +326,8 @@ pub(super) fn push_packed_row_blocked_body(
                 codec: refusal.0,
             };
             let (form, fold) = match scalar_run_read(codec) {
-                Some((scalar, accessor)) => (
-                    FlatBlockForm::plan_scalar(scalar, crate::sized::PACKED_ROW_SCALAR_RUN, accessor).map_err(refused)?,
+                Some(scalar) => (
+                    FlatBlockForm::plan_scalar(scalar, crate::sized::PACKED_ROW_SCALAR_RUN).map_err(refused)?,
                     Fold::Plain,
                 ),
                 None => {

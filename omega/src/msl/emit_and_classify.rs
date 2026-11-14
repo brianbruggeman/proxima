@@ -2,6 +2,7 @@ use alloc::borrow::ToOwned;
 use proxima_numeric::float_layout::FloatLayout;
 use proxima_numeric::{LevelFormat, LevelTable, RowBlockShape, row_block_shape};
 
+use super::layout_render::hardware_type;
 use super::*;
 
 pub(crate) fn default_dense_mma_input_layout(
@@ -2985,8 +2986,8 @@ pub(super) const fn legacy_super_block_arm(codec: Codec) -> bool {
 /// extent need only be a multiple of this, not of 256. Admission here and the emitted body both
 /// derive from this one decision.
 pub(super) fn block_rendered_elements(codec: Codec) -> Option<usize> {
-    if let Some((layout, accessor)) = scalar_run_read(codec) {
-        FlatBlockForm::plan_scalar(layout, crate::sized::PACKED_ROW_SCALAR_RUN, accessor).ok()?;
+    if let Some(layout) = scalar_run_read(codec) {
+        FlatBlockForm::plan_scalar(layout, crate::sized::PACKED_ROW_SCALAR_RUN).ok()?;
         return Some(crate::sized::PACKED_ROW_SCALAR_RUN);
     }
     if legacy_super_block_arm(codec) || matches!(codec, Codec::Levels(_)) {
@@ -3000,19 +3001,15 @@ pub(super) fn block_rendered_elements(codec: Codec) -> Option<usize> {
     Some(usize::from(elements))
 }
 
-/// The scalar float formats the run body reads, with how each binds: `RowBlockShape::Scalar` from
-/// `row_block_shape` and an accessor the preamble renders. `Float16` binds as native `half`
-/// (`kernel_signature`), so it needs none; `BFloat16` binds as `uchar` and reads through
-/// `bf16_element`. A scalar this does not name stays on the cooperative kernel.
-pub(super) fn scalar_run_read(codec: Codec) -> Option<(FloatLayout, Option<&'static str>)> {
+/// The scalar float layout the run body reads, as the Metal hardware type of that layout (`half`,
+/// `bfloat`): `RowBlockShape::Scalar` from `row_block_shape` whose layout `hardware_type` names a
+/// 16-bit type. The run pointer is cast to that type, so `Float16` (bound `half`) and `BFloat16`
+/// (bound `uchar`) take one arm. A scalar this does not name stays on the cooperative kernel.
+pub(super) fn scalar_run_read(codec: Codec) -> Option<FloatLayout> {
     let (Some(RowBlockShape::Scalar), Codec::Scalar(layout)) = (row_block_shape(&codec), codec) else {
         return None;
     };
-    match codec {
-        Codec::Float16 => Some((layout, None)),
-        Codec::BFloat16 => Some((layout, Some("bf16_element"))),
-        _ => None,
-    }
+    matches!(hardware_type(&layout), Some("half" | "bfloat")).then_some(layout)
 }
 
 /// Whether the block body renders the op: a plain-product reduce over real f32 activations, with
