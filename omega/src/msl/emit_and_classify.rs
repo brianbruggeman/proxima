@@ -4418,6 +4418,92 @@ pub(crate) struct PackedRowGeometry {
     pub(crate) rows_per_simdgroup: usize,
     /// simdgroups of one threadgroup that split the reduction of the same rows between them
     pub(crate) k_split: usize,
+    /// whether the body's level table is copied into workgroup memory once per threadgroup
+    /// ([`LevelStaging::decide`]); `InPlace` for every body that reads no level table
+    pub(crate) level_staging: LevelStaging,
+}
+
+/// Where a level-table matvec reads its table: from the `constant` declaration in place, or from a
+/// workgroup copy staged once per threadgroup. Decided from table properties and the kernel's
+/// own geometry, never from a format name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LevelStaging {
+    InPlace,
+    /// `words` 32-bit words copied into threadgroup memory before the first read
+    Workgroup { words: usize },
+}
+
+const LEVEL_STAGING_WORD_BYTES: usize = 4;
+
+impl LevelStaging {
+    /// Stage a table when a lane-divergent table exists (`table_bytes > 0`), the copy is whole
+    /// 32-bit words (`table_bytes % 4 == 0`), the table plus the kernel's other threadgroup
+    /// memory fits the Metal ceiling `budget_bytes`, and one block step of reads
+    /// (`reads_per_lane`) covers each thread's share of the copy
+    /// (`ceil(words / workgroup_threads)`). Otherwise `InPlace`.
+    ///
+    /// Worked by hand, at one simdgroup (32 threads), budget 32768, no other threadgroup memory:
+    /// - a 512 x u32 signed grid: 2048 B, 512 words, share `ceil(512 / 32)` = 16, reads
+    ///   `4 rows * 8 covered` = 32 >= 16, fits => `Workgroup { words: 512 }`
+    /// - a 16 x i8 explicit ladder: 16 B, 4 words, share 1, reads 8 >= 1 => `Workgroup { words: 4 }`
+    /// - a linear ladder: 0 B, no table => `InPlace`
+    /// - 2050 B: not a whole word count => `InPlace`
+    /// - 40000 B: over the budget => `InPlace`
+    ///
+    /// Composes: [`proxima_numeric::LevelTable::table_bytes`] (the size), [`PackedRowGeometry`]
+    /// (the rows and threads the reads and copy share come from), `crate::sized` (the ceiling).
+    pub(crate) const fn decide(
+        table_bytes: usize,
+        other_workgroup_bytes: usize,
+        reads_per_lane: usize,
+        workgroup_threads: usize,
+        budget_bytes: usize,
+    ) -> Self {
+        let words = table_bytes / LEVEL_STAGING_WORD_BYTES;
+        let whole_words = table_bytes > 0 && table_bytes.is_multiple_of(LEVEL_STAGING_WORD_BYTES);
+        let fits = table_bytes + other_workgroup_bytes <= budget_bytes;
+        let amortised = workgroup_threads > 0 && reads_per_lane >= words.div_ceil(workgroup_threads);
+        if whole_words && fits && amortised {
+            Self::Workgroup { words }
+        } else {
+            Self::InPlace
+        }
+    }
+}
+
+/// The staging of the level-table body `block` renders, `InPlace` for any other body. Reads the
+/// same layout, table and launch geometry [`push_packed_row_blocked_body`] hands the level matvec.
+fn level_staging_of(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    block: &PackedRowBlock,
+    rows_per_simdgroup: usize,
+) -> LevelStaging {
+    let BoundOpKind::Reduce { reduce_op, .. } = &resolved.kind else {
+        return LevelStaging::InPlace;
+    };
+    let Codec::Levels(format) = block.codec else {
+        return LevelStaging::InPlace;
+    };
+    let single_row = packed_row_block_token_total(block, &resolved.extents) <= 1
+        && quantized[block.weight] == Some(block.codec);
+    let selected = PackedBodySelect::for_op(resolved, *reduce_op, block, unsafe_metal_expert_sources_enabled());
+    let Some(layout) = format.packing().filter(|_| single_row && selected == PackedBodySelect::LevelsRendered) else {
+        return LevelStaging::InPlace;
+    };
+    let codes = LevelCodes { table: &format.levels, element_fn: codec_element_fn_name(block.codec) };
+    let (simdgroups, lanes) = (packed_row_nsg_factor() as usize, SIMD_WIDTH as usize);
+    let launch = SubBlockMatvecGeometry::for_levels(&format.levels, rows_per_simdgroup, simdgroups, lanes);
+    let Ok(reads_per_lane) = level_reads_per_lane(&layout, &codes, &launch) else {
+        return LevelStaging::InPlace;
+    };
+    LevelStaging::decide(
+        format.levels.table_bytes(),
+        0,
+        reads_per_lane,
+        simdgroups * lanes,
+        crate::sized::PACKED_ROW_LEVEL_STAGE_BUDGET_BYTES,
+    )
 }
 
 /// Simdgroups worth launching on a reduction of `units` whole units read by `lanes` lanes:
@@ -4462,9 +4548,11 @@ pub(crate) fn packed_row_geometry(
     quantized: &[Option<Codec>],
     block: &PackedRowBlock,
 ) -> PackedRowGeometry {
+    let rows_per_simdgroup = codec_rows_per_simdgroup(block.codec);
     let whole = PackedRowGeometry {
-        rows_per_simdgroup: codec_rows_per_simdgroup(block.codec),
+        rows_per_simdgroup,
         k_split: 1,
+        level_staging: level_staging_of(resolved, quantized, block, rows_per_simdgroup),
     };
     let splits = packed_row_block_token_total(block, &resolved.extents) <= 1
         && quantized[block.weight] == Some(block.codec)
@@ -4478,6 +4566,7 @@ pub(crate) fn packed_row_geometry(
         PackedRowGeometry {
             rows_per_simdgroup: ksplit_rows(),
             k_split,
+            level_staging: LevelStaging::InPlace,
         }
     } else {
         whole

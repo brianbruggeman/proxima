@@ -6256,6 +6256,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         PackedRowGeometry {
             rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Float16),
             k_split: 1,
+            level_staging: LevelStaging::InPlace,
         },
         &MetalOnlyExtras::default(),
     )
@@ -6301,6 +6302,7 @@ fn push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel() {
         PackedRowGeometry {
             rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Q8_0),
             k_split: 1,
+            level_staging: LevelStaging::InPlace,
         },
         &MetalOnlyExtras::default(),
     )
@@ -6347,6 +6349,7 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
         PackedRowGeometry {
             rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Q4_0),
             k_split: 1,
+            level_staging: LevelStaging::InPlace,
         },
         &MetalOnlyExtras::default(),
     )
@@ -6536,12 +6539,87 @@ fn a_whole_block_lane_default_geometry_is_unsplit_and_leaves_its_kernel_key_with
             PackedRowGeometry {
                 rows_per_simdgroup: codec_rows_per_simdgroup(codec),
                 k_split: 1,
+                level_staging: LevelStaging::InPlace,
             },
             "{codec:?}"
         );
         assert!(!key.contains("_ks"), "{codec:?}: {key}");
         assert!(!key.contains("_pr"), "{codec:?}: {key}");
     }
+}
+
+fn level_staging_of_single_row_matvec(codec: Codec) -> LevelStaging {
+    let bound = matmul_op_with_reduce(4, 2048, 1, ScalarOp::Add);
+    let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+    let quantized = operand_codecs(&bound, &packed);
+    let block = packed_row_block(&bound, &quantized).expect("fixture takes the row-blocked path");
+
+    packed_row_geometry(&bound, &quantized, &block).level_staging
+}
+
+const STAGING_BUDGET_BYTES: usize = 32768;
+
+/// By hand, one simdgroup: IQ3_S's grid is 512 u32 = 2048 B = 512 words; each of 32 threads
+/// copies ceil(512 / 32) = 16; a lane reads 4 rows * 8 covered = 32 >= 16; 2048 <= 32768.
+#[test]
+fn iq3_s_row_blocked_geometry_stages_its_512_word_grid() {
+    let expected = LevelStaging::Workgroup { words: 512 };
+
+    assert_eq!(level_staging_of_single_row_matvec(Codec::Iq3S), expected);
+}
+
+/// By hand: IQ4_XS's ladder is 16 i8 = 16 B = 4 words; each thread copies ceil(4 / 32) = 1;
+/// a lane's reads are at least 1 (4 rows * covered >= 1); 16 <= 32768.
+#[test]
+fn iq4_xs_row_blocked_geometry_stages_its_four_word_ladder() {
+    let expected = LevelStaging::Workgroup { words: 4 };
+
+    assert_eq!(level_staging_of_single_row_matvec(Codec::Iq4Xs), expected);
+}
+
+/// A body that reads no level table (Q8_0, Q4_K) and a linear ladder (0 B, nothing to stage)
+/// both stay in place.
+#[test]
+fn bodies_without_a_lane_divergent_table_stay_in_place() {
+    for codec in [Codec::Q8_0, Codec::Q4K] {
+        assert_eq!(level_staging_of_single_row_matvec(codec), LevelStaging::InPlace, "{codec:?}");
+    }
+    let Codec::Levels(ternary) = Codec::Tq20 else {
+        panic!("Tq20 is a level format");
+    };
+    assert_eq!(ternary.levels.table_bytes(), 0);
+    assert_eq!(
+        LevelStaging::decide(ternary.levels.table_bytes(), 0, 32, 32, STAGING_BUDGET_BYTES),
+        LevelStaging::InPlace
+    );
+}
+
+/// By hand: 40000 B is 10000 words and exceeds 32768 alone; 2048 B with 31000 B of other
+/// threadgroup memory is 33048 > 32768. Both stay in place; 2048 B with none stages.
+#[test]
+fn a_table_over_the_threadgroup_budget_stays_in_place() {
+    assert_eq!(LevelStaging::decide(40000, 0, 1 << 20, 32, STAGING_BUDGET_BYTES), LevelStaging::InPlace);
+    assert_eq!(LevelStaging::decide(2048, 31000, 32, 32, STAGING_BUDGET_BYTES), LevelStaging::InPlace);
+    assert_eq!(
+        LevelStaging::decide(2048, 0, 32, 32, STAGING_BUDGET_BYTES),
+        LevelStaging::Workgroup { words: 512 }
+    );
+}
+
+/// By hand: 2050 B is not a whole number of 4-byte words, so the word copy cannot cover it.
+#[test]
+fn a_table_that_is_not_whole_words_stays_in_place() {
+    assert_eq!(LevelStaging::decide(2050, 0, 1 << 20, 32, STAGING_BUDGET_BYTES), LevelStaging::InPlace);
+}
+
+/// By hand: 512 words over 32 threads is 16 per thread; 4 reads per lane do not repay it, 16 do.
+#[test]
+fn reads_that_do_not_cover_the_copy_share_stay_in_place() {
+    assert_eq!(LevelStaging::decide(2048, 0, 4, 32, STAGING_BUDGET_BYTES), LevelStaging::InPlace);
+    assert_eq!(
+        LevelStaging::decide(2048, 0, 16, 32, STAGING_BUDGET_BYTES),
+        LevelStaging::Workgroup { words: 512 }
+    );
 }
 
 /// `omega-runtime.toml`'s `[attention_context_chunks]` ships

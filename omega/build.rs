@@ -264,6 +264,14 @@ fn emit_sizing_consts() {
         "pub const PACKED_ROW_KSPLIT_ROWS: usize = {packed_row_ksplit_rows};\n"
     ));
 
+    let packed_row_level_stage_budget_bytes = require_nonzero(
+        "packed_row_block.level_stage_budget_bytes",
+        resolve_int(&root, "packed_row_block", "level_stage_budget_bytes"),
+    );
+    out.push_str(&format!(
+        "pub const PACKED_ROW_LEVEL_STAGE_BUDGET_BYTES: usize = {packed_row_level_stage_budget_bytes};\n"
+    ));
+
     let packed_row_lane_run_bytes = require_nonneg(
         "packed_row_block.lane_run_bytes",
         resolve_int(&root, "packed_row_block", "lane_run_bytes"),

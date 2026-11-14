@@ -137,6 +137,7 @@ pub(super) fn push_packed_row_blocked_body(
     let PackedRowGeometry {
         rows_per_simdgroup: rows,
         k_split,
+        level_staging: _,
     } = geometry;
     if packed_row_block_token_total(block, &resolved.extents) > 1 {
         push_packed_row_multi_row_body(
