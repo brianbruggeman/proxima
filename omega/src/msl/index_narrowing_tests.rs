@@ -31,19 +31,17 @@ fn has_word(text: &str, word: &str) -> bool {
 fn emitted(
     bound: &BoundOp,
     packed: &BTreeMap<NodeId, Codec>,
-    coord_override: Option<&str>,
+    coord_index32: bool,
 ) -> String {
-    temp_env::with_var("PROXIMA_COORD_INDEX32", coord_override, || {
-        emit(bound, packed, NumericPolicy::default())
-            .expect("kernel emits")
-            .source
-    })
+    let knobs = EmitKnobs::default().with_coord_index32(coord_index32);
+    emit_with_knobs(bound, packed, NumericPolicy::default(), &knobs)
+        .expect("kernel emits")
+        .source
 }
 
 fn cache_key(bound: &BoundOp, packed: &BTreeMap<NodeId, Codec>) -> String {
-    temp_env::with_var("PROXIMA_COORD_INDEX32", None::<&str>, || {
-        kernel_cache_key(bound, packed, NumericPolicy::default()).expect("cache key builds")
-    })
+    kernel_cache_key_with_knobs(bound, packed, NumericPolicy::default(), &EmitKnobs::default())
+        .expect("cache key builds")
 }
 
 fn packed_table(bound: &BoundOp, codec: Codec) -> BTreeMap<NodeId, Codec> {
@@ -141,7 +139,7 @@ mod norm_rows {
     fn a_hidden_width_norm_row_renders_its_index_arithmetic_in_32_bit_under_the_c32_key() {
         let bound = rmsnorm_over_row(1536);
 
-        let source = emitted(&bound, &NO_PACKED, None);
+        let source = emitted(&bound, &NO_PACKED, true);
 
         assert!(!has_word(kernel_body(&source), "long"), "{source}");
         assert!(
@@ -160,7 +158,7 @@ mod norm_rows {
     fn the_coordinate_override_set_to_zero_restores_the_64_bit_norm_body() {
         let bound = rmsnorm_over_row(1536);
 
-        let source = emitted(&bound, &NO_PACKED, Some("0"));
+        let source = emitted(&bound, &NO_PACKED, false);
 
         assert!(
             source.contains("long epi_pre_r = (long)lane + (long)slot * "),
@@ -175,7 +173,7 @@ mod norm_rows {
 
         assert!(cache_key(&bound, &NO_PACKED).contains("_c32"));
         assert!(!has_word(
-            kernel_body(&emitted(&bound, &NO_PACKED, None)),
+            kernel_body(&emitted(&bound, &NO_PACKED, true)),
             "long"
         ));
     }
@@ -184,7 +182,7 @@ mod norm_rows {
     fn a_norm_row_one_past_the_reach_limit_keeps_the_64_bit_body_and_drops_the_key_bit() {
         let bound = rmsnorm_over_row((1 << 30) + 1);
 
-        let source = emitted(&bound, &NO_PACKED, None);
+        let source = emitted(&bound, &NO_PACKED, true);
 
         assert!(!cache_key(&bound, &NO_PACKED).contains("_c32"));
         assert!(
@@ -199,7 +197,7 @@ mod norm_rows {
 fn a_gathered_f32_lookup_renders_its_offsets_and_fault_check_in_32_bit() {
     let bound = embedding_lookup_op(50_000, 8, 4);
 
-    let source = emitted(&bound, &BTreeMap::new(), None);
+    let source = emitted(&bound, &BTreeMap::new(), true);
 
     assert!(!has_word(kernel_body(&source), "long"), "{source}");
     assert!(
@@ -214,7 +212,7 @@ fn a_q6_k_embedding_table_past_i32_but_inside_u32_decodes_its_block_in_unsigned_
     let bound = embedding_lookup_op(262_144, 8_960, 1);
     let packed = packed_table(&bound, Codec::Q6K);
 
-    let source = emitted(&bound, &packed, None);
+    let source = emitted(&bound, &packed, true);
 
     assert!(
         source.contains("(long)((uint)off0 / 256u) * 210"),
@@ -230,7 +228,7 @@ fn a_q6_k_embedding_table_past_u32_keeps_the_64_bit_block_decode() {
     let bound = embedding_lookup_op(524_288, 8_960, 1);
     let packed = packed_table(&bound, Codec::Q6K);
 
-    let source = emitted(&bound, &packed, None);
+    let source = emitted(&bound, &packed, true);
 
     assert!(source.contains("(off0 / 256) * 210"), "{source}");
     assert!(source.contains("(uint)(off0 % 256)"), "{source}");
@@ -243,7 +241,7 @@ fn a_routed_q8_0_expert_projection_divides_its_flat_row_in_unsigned_32_bit() {
     let bound = gathered_matmul_op(8, 32, 512, 1024);
     let packed = packed_table(&bound, Codec::Q8_0);
 
-    let source = emitted(&bound, &packed, None);
+    let source = emitted(&bound, &packed, true);
 
     assert!(
         source.contains("long expert_slot = (long)((uint)group_first / (uint)group_out_extent);"),
@@ -262,7 +260,7 @@ fn a_routed_expert_projection_one_row_group_inside_u32_still_narrows() {
     let bound = gathered_matmul_op(63, 2, 67_108_864, 1024);
     let packed = packed_table(&bound, Codec::Q8_0);
 
-    let source = emitted(&bound, &packed, None);
+    let source = emitted(&bound, &packed, true);
 
     assert!(
         source.contains("(uint)group_first / (uint)group_out_extent"),
@@ -283,7 +281,7 @@ fn a_routed_expert_projection_with_outputs_past_u32_keeps_the_64_bit_divides() {
     let bound = gathered_matmul_op(tokens, 2, rows, 1024);
     let packed = packed_table(&bound, Codec::Q8_0);
 
-    let source = emitted(&bound, &packed, None);
+    let source = emitted(&bound, &packed, true);
 
     assert!(
         source.contains("long expert_slot = group_first / group_out_extent;"),
@@ -303,9 +301,9 @@ fn the_coordinate_override_set_to_zero_restores_every_family_to_the_64_bit_form(
     let embedding = embedding_lookup_op(262_144, 8_960, 1);
     let expert = gathered_matmul_op(8, 32, 512, 1024);
 
-    let lookup_source = emitted(&lookup, &BTreeMap::new(), Some("0"));
-    let embedding_source = emitted(&embedding, &packed_table(&embedding, Codec::Q6K), Some("0"));
-    let expert_source = emitted(&expert, &packed_table(&expert, Codec::Q8_0), Some("0"));
+    let lookup_source = emitted(&lookup, &BTreeMap::new(), false);
+    let embedding_source = emitted(&embedding, &packed_table(&embedding, Codec::Q6K), false);
+    let expert_source = emitted(&expert, &packed_table(&expert, Codec::Q8_0), false);
 
     assert!(has_word(kernel_body(&lookup_source), "long"));
     assert!(embedding_source.contains("(off0 / 256) * 210"));

@@ -2211,6 +2211,7 @@ pub(super) fn push_cooperative_reduce_body(
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     is_broadcast_epilogue: bool,
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
     metal: &MetalOnlyExtras,
 ) -> Result<(), EmitError> {
@@ -2313,6 +2314,7 @@ pub(super) fn push_cooperative_reduce_body(
             &block,
             epilogue_body,
             epilogue_operands,
+            knobs,
             expert_source_mode,
             geometry,
             metal,

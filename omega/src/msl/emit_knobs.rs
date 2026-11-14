@@ -653,62 +653,12 @@ mod tests {
     }
 
     #[test]
-    fn q4_0_multi_row_hoist_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_Q4_0_MULTI_ROW_HOIST",
-            &[""],
-            |knobs| knobs.q4_0_multi_row_hoist,
-            q4_0_multi_row_hoist_override,
-        );
-    }
-
-    #[test]
-    fn q4_0_multi_row_pair_lane_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE",
-            &[""],
-            |knobs| knobs.q4_0_multi_row_pair_lane,
-            q4_0_multi_row_pair_lane_override,
-        );
-    }
-
-    #[test]
     fn packed_row_disable_matches_the_current_read_function() {
         assert_parity(
             "PROXIMA_PACKED_ROW_DISABLE",
             &["q4_0", " q4_0 , q8_0 ", "q4_0,,", "Q4_0", "q4k,q6k", ""],
             |knobs| disabled_by(&knobs.packed_row_disable),
             || CODECS.iter().map(|codec| packed_row_codec_disabled(*codec)).collect(),
-        );
-    }
-
-    #[test]
-    fn multi_row_unroll_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_MULTI_ROW_UNROLL",
-            &[""],
-            |knobs| knobs.multi_row_unroll,
-            multi_row_unroll_override,
-        );
-    }
-
-    #[test]
-    fn multi_row_index32_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_MULTI_ROW_INDEX32",
-            &[""],
-            |knobs| knobs.multi_row_index32,
-            multi_row_index32_override,
-        );
-    }
-
-    #[test]
-    fn coord_index32_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_COORD_INDEX32",
-            &[""],
-            |knobs| knobs.coord_index32,
-            coord_index32_override,
         );
     }
 

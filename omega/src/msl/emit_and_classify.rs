@@ -337,6 +337,7 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
             &entry,
             &quantized,
             numeric_policy,
+            knobs,
             expert_source_mode,
             &extras,
         ),
@@ -357,6 +358,7 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
                 &entry,
                 &quantized,
                 numeric_policy,
+                knobs,
                 expert_source_mode,
                 &extras,
             )
@@ -1288,7 +1290,11 @@ pub(super) fn packed_row_block_grouped_axes(
 /// breaks that coincidence (routes an expert without gathering the weight
 /// operand), this predicate would need `expert_source_mode` threaded through
 /// explicitly -- named here as the residual, not silently assumed away.
-fn q4_0_multi_row_hoist_active(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
+fn q4_0_multi_row_hoist_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
+) -> bool {
     let Some(block) = packed_row_block(resolved, quantized) else {
         return false;
     };
@@ -1322,7 +1328,7 @@ fn q4_0_multi_row_hoist_active(resolved: &BoundOp, quantized: &[Option<Codec>]) 
         return false;
     };
     is_plain_product_reduce(resolved, *reduce_op, block.weight, block.other)
-        && q4_0_multi_row_hoist_override()
+        && knobs.q4_0_multi_row_hoist
 }
 
 /// Whether [`push_packed_row_multi_row_body`] renders the `Q4_0` pair-lane
@@ -1330,7 +1336,11 @@ fn q4_0_multi_row_hoist_active(resolved: &BoundOp, quantized: &[Option<Codec>]) 
 /// split from it only because a key is built without `expert_source_mode`
 /// (see [`q4_0_multi_row_hoist_active`]'s own doc for why `!weight_gathered`
 /// stands in for it).
-fn q4_0_multi_row_pair_lane_active(resolved: &BoundOp, quantized: &[Option<Codec>]) -> bool {
+fn q4_0_multi_row_pair_lane_active(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
+) -> bool {
     let Some(block) = packed_row_block(resolved, quantized) else {
         return false;
     };
@@ -1340,7 +1350,7 @@ fn q4_0_multi_row_pair_lane_active(resolved: &BoundOp, quantized: &[Option<Codec
     let BoundOpKind::Reduce { reduce_op, .. } = &resolved.kind else {
         return false;
     };
-    fast_q4_0_pair_lane_active(resolved, quantized, &block, *reduce_op, false)
+    fast_q4_0_pair_lane_active(resolved, quantized, &block, *reduce_op, knobs, false)
 }
 
 /// The multi-row-experiment family's ONE shared admission prefix -- every
@@ -1368,6 +1378,7 @@ fn q4_0_multi_row_pair_lane_active(resolved: &BoundOp, quantized: &[Option<Codec
 fn multi_row_generic_arm_current(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
 ) -> Option<(PackedRowBlock, Codec)> {
     if expert_source_mode {
@@ -1392,7 +1403,7 @@ fn multi_row_generic_arm_current(
         return None;
     };
     if fast_q4k_active(resolved, quantized, &block, *reduce_op, expert_source_mode)
-        || fast_q4_0_active(resolved, quantized, &block, *reduce_op, expert_source_mode)
+        || fast_q4_0_active(resolved, quantized, &block, *reduce_op, knobs, expert_source_mode)
         || fast_q6k_active(resolved, quantized, &block, *reduce_op, expert_source_mode)
     {
         return None;
@@ -1406,10 +1417,11 @@ fn multi_row_generic_arm_current(
 pub(super) fn multi_row_unroll_active(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
 ) -> bool {
-    multi_row_generic_arm_current(resolved, quantized, expert_source_mode).is_some()
-        && multi_row_unroll_override()
+    multi_row_generic_arm_current(resolved, quantized, knobs, expert_source_mode).is_some()
+        && knobs.multi_row_unroll
 }
 
 /// admission for `PROXIMA_MULTI_ROW_INDEX32` (default on): narrows
@@ -1421,10 +1433,11 @@ pub(super) fn multi_row_unroll_active(
 pub(super) fn multi_row_index32_active(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
 ) -> bool {
     let Some((block, codec)) =
-        multi_row_generic_arm_current(resolved, quantized, expert_source_mode)
+        multi_row_generic_arm_current(resolved, quantized, knobs, expert_source_mode)
     else {
         return false;
     };
@@ -1480,7 +1493,7 @@ pub(super) fn multi_row_index32_active(
     if scaled > u64::from(u32::MAX) {
         return false;
     }
-    multi_row_index32_override()
+    knobs.multi_row_index32
 }
 
 /// the one 32-bit index predicate and the `_c32` cache-key bit: the generic
@@ -1494,9 +1507,10 @@ pub(super) fn coord_index32_active(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
 ) -> bool {
-    if !coord_index32_override() {
+    if !knobs.coord_index32 {
         return false;
     }
     let BoundOpKind::Reduce {
@@ -1612,10 +1626,11 @@ pub(super) fn fast_q4_0_active(
     quantized: &[Option<Codec>],
     block: &PackedRowBlock,
     reduce_op: ScalarOp,
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
 ) -> bool {
     fast_q4_0_admitted(resolved, quantized, block, reduce_op, expert_source_mode)
-        && q4_0_multi_row_hoist_override()
+        && knobs.q4_0_multi_row_hoist
 }
 
 /// [`push_packed_row_multi_row_body`]'s `Q4_0` pair-lane arm: the structural
@@ -1630,6 +1645,7 @@ pub(super) fn fast_q4_0_pair_lane_active(
     quantized: &[Option<Codec>],
     block: &PackedRowBlock,
     reduce_op: ScalarOp,
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
 ) -> bool {
     fast_q4_0_admitted(resolved, quantized, block, reduce_op, expert_source_mode)
@@ -1637,8 +1653,8 @@ pub(super) fn fast_q4_0_pair_lane_active(
             .1
             .stride(block.reduce_dim as u16)
             == 1
-        && q4_0_multi_row_pair_lane_override()
-        && multi_row_index32_active(resolved, quantized, expert_source_mode)
+        && knobs.q4_0_multi_row_pair_lane
+        && multi_row_index32_active(resolved, quantized, knobs, expert_source_mode)
 }
 
 fn fast_q4_0_admitted(
@@ -1786,21 +1802,21 @@ pub(super) fn metal_specialization(
             (token_total > 1 && cap != crate::sized::PACKED_ROW_ACTIVATION_GROUP).then_some(cap)
         }),
         packed_row_level_stage_words: packed_row_level_stage_words(resolved, &quantized),
-        q4_0_multi_row_hoist: q4_0_multi_row_hoist_active(resolved, &quantized),
-        q4_0_multi_row_pair_lane: q4_0_multi_row_pair_lane_active(resolved, &quantized),
+        q4_0_multi_row_hoist: q4_0_multi_row_hoist_active(resolved, &quantized, knobs),
+        q4_0_multi_row_pair_lane: q4_0_multi_row_pair_lane_active(resolved, &quantized, knobs),
         // no real `expert_source_mode` at cache-key time -- see
         // `multi_row_generic_arm_current`'s own doc for why `false` is safe
         // here (the `!weight_gathered` check inside already excludes a
         // routed expert's weight).
-        multi_row_unroll: multi_row_unroll_active(resolved, &quantized, false),
-        multi_row_index32: multi_row_index32_active(resolved, &quantized, false),
+        multi_row_unroll: multi_row_unroll_active(resolved, &quantized, knobs, false),
+        multi_row_index32: multi_row_index32_active(resolved, &quantized, knobs, false),
         // no real `expert_source_mode` at cache-key time -- see
         // `coord_index32_active`'s own doc; the same `!weight_gathered`-style
         // reasoning does not apply here (this seam never gathers), but this
         // function's own `reduce_is_cooperative_dispatch` call folds
         // `expert_source_mode` into ITS OWN admission already, matching
         // every other multi-row/coord experiment's posture at this call site.
-        coord_index32: coord_index32_active(resolved, &quantized, numeric_policy, false),
+        coord_index32: coord_index32_active(resolved, &quantized, numeric_policy, knobs, false),
         softmax_runtime_rows: knobs.softmax_runtime_rows,
         tiled_gemm_q4_0: match &resolved.kind {
             BoundOpKind::Reduce {

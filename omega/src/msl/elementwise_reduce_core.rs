@@ -309,6 +309,7 @@ pub(super) fn render_reduce(
     entry: &str,
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
     metal: &MetalOnlyExtras,
 ) -> Result<String, EmitError> {
@@ -467,6 +468,7 @@ pub(super) fn render_reduce(
             epilogue_body,
             epilogue_operands,
             is_broadcast_epilogue,
+            knobs,
             expert_source_mode,
             metal,
         )?;
@@ -1235,6 +1237,7 @@ pub(super) fn push_packed_row_multi_row_body(
     block: &PackedRowBlock,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
     metal: &MetalOnlyExtras,
 ) -> Result<(), EmitError> {
@@ -1255,10 +1258,16 @@ pub(super) fn push_packed_row_multi_row_body(
     let weight_gathered = gather_slots[weight].is_some();
     // zero-init, accumulate, and epilogue all index `sumf[s][q]`; all three
     // must unroll to literals or the array never promotes out of memory.
-    let unroll_active = multi_row_unroll_active(resolved, quantized, expert_source_mode);
-    let index32_active = multi_row_index32_active(resolved, quantized, expert_source_mode);
-    let pair_lane_active =
-        fast_q4_0_pair_lane_active(resolved, quantized, block, reduce_op, expert_source_mode);
+    let unroll_active = multi_row_unroll_active(resolved, quantized, knobs, expert_source_mode);
+    let index32_active = multi_row_index32_active(resolved, quantized, knobs, expert_source_mode);
+    let pair_lane_active = fast_q4_0_pair_lane_active(
+        resolved,
+        quantized,
+        block,
+        reduce_op,
+        knobs,
+        expert_source_mode,
+    );
 
     source.push_str("    long feature_total = 1;\n");
     for index in 0..feature_axes.len() {
@@ -1423,7 +1432,8 @@ pub(super) fn push_packed_row_multi_row_body(
     // `push_packed_row_multi_row_q4_0_body`'s own doc for what it changes.
     // Delegates to [`fast_q4_0_active`] for the same reason `fast_q4k` now
     // delegates to [`fast_q4k_active`].
-    let fast_q4_0 = fast_q4_0_active(resolved, quantized, block, reduce_op, expert_source_mode);
+    let fast_q4_0 =
+        fast_q4_0_active(resolved, quantized, block, reduce_op, knobs, expert_source_mode);
     let fast_q6k = fast_q6k_active(resolved, quantized, block, reduce_op, expert_source_mode);
     if fast_q4k {
         push_packed_row_multi_row_q4k_body(
@@ -1866,7 +1876,7 @@ fn push_q4_0_pair_lane_step(source: &mut String, rows: usize, cap: usize, block_
 
 /// Renders [`push_packed_row_multi_row_body`]'s `Codec::Q4_0` fast-path
 /// reduction loop, gated by `PROXIMA_Q4_0_MULTI_ROW_HOIST=1`
-/// (`q4_0_multi_row_hoist_override`). Byte-for-byte the SAME `for k = lane;
+/// (`EmitKnobs::q4_0_multi_row_hoist`). Byte-for-byte the SAME `for k = lane;
 /// k < reduction_total; k += 32` walk, `q`/`s` nesting, `scratch`/
 /// `push_body_steps`/`sumf[s][q] = sumf[s][q] + value` accumulation and
 /// activation-load placement (inside the per-token `s` loop) the generic
@@ -1962,7 +1972,7 @@ pub(super) fn push_packed_row_multi_row_q4_0_body(
 }
 
 /// [`push_packed_row_multi_row_body`]'s generic (`else`) arm, gated by
-/// `PROXIMA_MULTI_ROW_UNROLL` (`multi_row_unroll_override`, default on):
+/// `PROXIMA_MULTI_ROW_UNROLL` (`EmitKnobs::multi_row_unroll`, default on):
 /// renders the
 /// same per-`k` body with `q`/`s` fully unrolled to literal integers instead
 /// of loop induction variables, so `sumf`/`weight_base`/`other_base` promote
