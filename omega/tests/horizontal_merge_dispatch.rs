@@ -65,18 +65,20 @@ fn dispatch_and_hazard_counts_match_the_design_note() {
     let named = fixture.named();
     let input_placements = fixture.input_placements();
     let output_placements = fixture.output_placements();
+    let execute = || {
+        omega::execute_plan_named_with_placements(
+            &fixture.plan,
+            &named,
+            &input_placements,
+            &output_placements,
+        )
+        .expect("eight independent matvecs execute");
+    };
     #[cfg(feature = "instrument")]
-    {
-        let _ = omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset();
-        let _ = omega::metal::HAZARD_STEP_CALLS.snapshot_and_reset();
-    }
-    omega::execute_plan_named_with_placements(
-        &fixture.plan,
-        &named,
-        &input_placements,
-        &output_placements,
-    )
-    .expect("eight independent matvecs execute");
+    let (((), dispatch_calls), hazard_calls) = omega::metal::HAZARD_STEP_CALLS
+        .scoped(|| omega::metal::ENCODE_DISPATCH_CALLS.scoped(execute));
+    #[cfg(not(feature = "instrument"))]
+    execute();
     fixture.assert_outputs_match_reference(1e-2);
     #[cfg(feature = "instrument")]
     {
@@ -86,13 +88,13 @@ fn dispatch_and_hazard_counts_match_the_design_note() {
             8
         };
         assert_eq!(
-            omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
+            dispatch_calls,
             expected_dispatches,
             "metal-horizontal-merge={}: dispatch count",
             cfg!(feature = "metal-horizontal-merge")
         );
         assert_eq!(
-            omega::metal::HAZARD_STEP_CALLS.snapshot_and_reset(),
+            hazard_calls,
             ROUNDS as u64,
             "every one of the 8 positions must still run its own hazard bookkeeping"
         );
@@ -146,15 +148,19 @@ fn mixed_buffer_member_does_not_merge() {
         0,
     );
     let output_placements = fixture.output_placements();
+    let execute = || {
+        omega::execute_plan_named_with_placements(
+            &fixture.plan,
+            &named,
+            &input_placements,
+            &output_placements,
+        )
+        .expect("seven merged plus one ordinary dispatch execute");
+    };
     #[cfg(feature = "instrument")]
-    let _ = omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset();
-    omega::execute_plan_named_with_placements(
-        &fixture.plan,
-        &named,
-        &input_placements,
-        &output_placements,
-    )
-    .expect("seven merged plus one ordinary dispatch execute");
+    let ((), dispatch_calls) = omega::metal::ENCODE_DISPATCH_CALLS.scoped(execute);
+    #[cfg(not(feature = "instrument"))]
+    execute();
     fixture.assert_outputs_match_reference(1e-2);
     #[cfg(feature = "instrument")]
     {
@@ -164,7 +170,7 @@ fn mixed_buffer_member_does_not_merge() {
             8
         };
         assert_eq!(
-            omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
+            dispatch_calls,
             expected_dispatches,
             "metal-horizontal-merge={}: the mismatched weight buffer must not join the merge group",
             cfg!(feature = "metal-horizontal-merge")
@@ -336,10 +342,19 @@ fn raw_split_member_forces_its_own_dispatch() {
             .map(|(round, &node)| (node, &weight_buffer, round * weight_bytes_per_round)),
     );
 
-    #[cfg(feature = "instrument")]
-    let _ = omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset();
-    omega::execute_plan_named_with_placements(&plan, &named, &input_placements, &output_placements)
+    let execute = || {
+        omega::execute_plan_named_with_placements(
+            &plan,
+            &named,
+            &input_placements,
+            &output_placements,
+        )
         .expect("the raw-split program executes");
+    };
+    #[cfg(feature = "instrument")]
+    let ((), dispatch_calls) = omega::metal::ENCODE_DISPATCH_CALLS.scoped(execute);
+    #[cfg(not(feature = "instrument"))]
+    execute();
     #[cfg(feature = "instrument")]
     {
         let expected_dispatches: u64 = if cfg!(feature = "metal-horizontal-merge") {
@@ -348,7 +363,7 @@ fn raw_split_member_forces_its_own_dispatch() {
             4
         };
         assert_eq!(
-            omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
+            dispatch_calls,
             expected_dispatches,
             "metal-horizontal-merge={}: round 3's read of round 2's output must exclude it from the merge group",
             cfg!(feature = "metal-horizontal-merge")
@@ -522,11 +537,14 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
     // No `output_placements` at all -- every output is a plain plan root,
     // read back through `Evaluated::get` exactly like a real decode step's
     // own MoE projection, never a caller-placed buffer.
-    #[cfg(feature = "instrument")]
-    let _ = omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset();
-    let evaluated =
+    let execute = || {
         omega::execute_plan_named_with_placements(&plan, &named, &input_placements, &[])
-            .expect("the lazy-activation program executes");
+            .expect("the lazy-activation program executes")
+    };
+    #[cfg(feature = "instrument")]
+    let (evaluated, dispatch_calls) = omega::metal::ENCODE_DISPATCH_CALLS.scoped(execute);
+    #[cfg(not(feature = "instrument"))]
+    let evaluated = execute();
     #[cfg(feature = "instrument")]
     {
         // +1 for the intermediate activation's own dispatch
@@ -538,7 +556,7 @@ fn lazy_activation_and_output_exercise_the_fresh_allocation_path() {
             5
         };
         assert_eq!(
-            omega::metal::ENCODE_DISPATCH_CALLS.snapshot_and_reset(),
+            dispatch_calls,
             expected_dispatches,
             "metal-horizontal-merge={}: an intermediate activation and unplaced outputs must still merge",
             cfg!(feature = "metal-horizontal-merge")
