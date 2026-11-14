@@ -176,6 +176,45 @@ while IFS=: read -r crate features tier_features; do
     ran=$((ran + 1))
 done < <(printf '%s\n' "${matrix[@]}")
 
+# pinned-fixture tests compare emitted output against omega/tests/fixtures; they must run, not just compile, or a fixture can drift on main
+# a row that runs zero tests fails: zero reads like a pass
+# set format: features:test names (space separated)
+omega_fixture_sets=(
+    "metal:packed_row_codecs_msl_identity packed_row_blocked_s1_byte_identity q4k_rendered_matvec_parity q56k_rendered_matvec_parity q6k_multi_row_rendered_parity block_codec_render_parity level_codec_tiled_gemm_parity bf16_projection_ouro_q_proj"
+    "metal,metal-grouped-gemm:expert_grouped_gemm_stacked_parity"
+)
+case " $crates " in
+    *" proxima-omega "*)
+        if [ "$(uname -s)" != Darwin ]; then
+            echo '== proxima-omega fixture tests ... skipped (macos-only metal tests)'
+        else
+            for fixture_set in "${omega_fixture_sets[@]}"; do
+                fixture_features="${fixture_set%%:*}"
+                fixture_tests="${fixture_set#*:}"
+                test_args=()
+                for fixture_test in $fixture_tests; do
+                    test_args+=(--test "$fixture_test")
+                done
+                printf '== proxima-omega fixture tests --features %s ... ' "$fixture_features"
+                if output="$(cargo nextest run -p proxima-omega --features "$fixture_features" --no-fail-fast "${test_args[@]}" 2>&1)"; then
+                    run_count="$(printf '%s\n' "$output" | grep -oE '[0-9]+ tests run:' | grep -oE '[0-9]+' | tail -1 || true)"
+                    if [ -z "$run_count" ] || [ "$run_count" = 0 ]; then
+                        printf 'FAIL (0 tests run)\n'
+                        failed=1
+                    else
+                        printf 'ok (%s tests run)\n' "$run_count"
+                    fi
+                else
+                    printf 'FAIL\n'
+                    printf '%s\n' "$output" | grep -E '^ *(FAIL|SIGABRT|SIGSEGV)|^error' | head -20
+                    failed=1
+                fi
+                ran=$((ran + 1))
+            done
+        fi
+        ;;
+esac
+
 if [ "$ran" = 0 ]; then
     echo "feature-target-gate: SELECTED-NOTHING — the crate list and the matrix disagree" >&2
     exit 2
