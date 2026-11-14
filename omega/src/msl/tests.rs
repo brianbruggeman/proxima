@@ -11503,6 +11503,16 @@ async fn block_codec_outside_the_plane_body_names_the_property_it_lacks(#[case] 
 }
 
 #[test]
+fn iq3_s_plain_product_single_token_reduce_is_admitted_to_the_row_blocked_kernel() {
+    let bound = matmul_op_with_reduce(4, 2048, 1, ScalarOp::Add);
+    let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Iq3S)]);
+
+    let block = classify_packed_row_block(&bound, &operand_codecs(&bound, &packed)).expect("a signed-grid level codec at a 256-multiple reduce is admitted");
+
+    assert_eq!(block.codec, Codec::Iq3S);
+}
+
+#[test]
 fn legacy_super_block_codecs_keep_their_256_extent_and_scalars_take_the_run_extent() {
     for codec in [Codec::Q3K, Codec::Q4K, Codec::Q5K, Codec::Q6K, Codec::Q8_0, Codec::Q4_0, Codec::Fp6E3M2] {
         assert_eq!(row_block_extent_multiple(codec), Some(256), "{codec:?}");

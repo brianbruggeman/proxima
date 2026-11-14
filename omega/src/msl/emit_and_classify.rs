@@ -1,6 +1,6 @@
 use alloc::borrow::ToOwned;
 use proxima_numeric::float_layout::FloatLayout;
-use proxima_numeric::{LevelFormat, LevelTable, RowBlockShape, row_block_shape};
+use proxima_numeric::{LevelFormat, RowBlockShape, row_block_shape};
 
 use super::layout_render::hardware_type;
 use super::*;
@@ -3020,13 +3020,13 @@ pub(super) const fn block_codec_row_body_rendered(plain_product_reduce: bool, re
 }
 
 /// The reduce-extent multiple of a level-set format the row-blocked kernel renders: one block of
-/// its packed layout. Decided by the properties `level_matvec_msl` covers (an explicit ladder, sub-block
-/// scales, no block min) and never by a format name, so a refusal there is a refusal here.
+/// its packed layout. Decided by the properties `level_matvec_msl` covers (an explicit ladder or a signed
+/// grid with a per-element sign plane, sub-block scales, no block min) and never by a format name, so a refusal there is a refusal here.
 const fn level_row_block_elements(format: &LevelFormat) -> Option<usize> {
     let Some(layout) = format.packing() else {
         return None;
     };
-    let ladder = matches!(format.levels, LevelTable::Explicit(_));
+    let ladder = level_table_rendered(&format.levels);
     let scaled_sub_blocks = matches!(layout.sub, Some(sub) if sub.min.is_none());
     if ladder && scaled_sub_blocks && layout.min.is_none() && layout.scale_runs.is_none() {
         Some(layout.elements as usize)

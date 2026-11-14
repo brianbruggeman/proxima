@@ -48,6 +48,16 @@ struct Case {
     per_selected_activation: bool,
 }
 
+impl Case {
+    /// The row-blocked kernel's marker in a kernel key: `_c`, the codec's identity letter (`identity.rs` `codec_letter`), `f`, `B`.
+    fn row_blocked_key(&self) -> &'static str {
+        match self.codec {
+            Codec::Iq3S => "_cnfB",
+            _ => "_cpfB",
+        }
+    }
+}
+
 const CASES: [Case; 4] = [
     Case {
         fixture: "level_gemm_iq4xs_blk19_ffn_gate_exps.f32le",
@@ -295,7 +305,7 @@ fn assert_rendered_cooperative_equals_hand(case: &Case) {
     let expected = fixture_bits(case);
     let actual = cooperative(case, &slab);
     assert!(!grouped_tiled_kernel_ran(&actual.kernel_keys),"{}: the cooperative control must not run the tiled kernel: {:?}", case.tensor, actual.kernel_keys);
-    assert!(actual.kernel_keys.iter().all(|key| !key.contains("_cpfB")), "{}: the cooperative control must not run the row-blocked kernel: {:?}", case.tensor, actual.kernel_keys);
+    assert!(actual.kernel_keys.iter().all(|key| !key.contains(case.row_blocked_key())), "{}: the cooperative control must not run the row-blocked kernel: {:?}", case.tensor, actual.kernel_keys);
     assert_eq!(expected.len(), TOKENS * SELECTED * ROWS, "the fixture holds one f32 per token, selected expert and row");
     let mismatches = bits(&actual.output).iter().zip(&expected).filter(|(got, want)| got != want).count();
     assert_eq!(mismatches, 0, "{}: {mismatches} of {} cooperative f32 outputs differ from the hand-written kernel's bits", case.tensor, expected.len());
@@ -314,7 +324,7 @@ fn assert_row_blocked_agrees_with_cooperative(case: &Case) {
     }
     let expected = fixture_bits(case);
     let actual = row_blocked(case, &slab);
-    assert!(actual.kernel_keys.iter().any(|key| key.contains("_cpfB")), "{}: the row-blocked kernel was never selected: {:?}", case.tensor, actual.kernel_keys);
+    assert!(actual.kernel_keys.iter().any(|key| key.contains(case.row_blocked_key())), "{}: the row-blocked kernel was never selected: {:?}", case.tensor, actual.kernel_keys);
     let identical = bits(&actual.output).iter().zip(&expected).filter(|(got, want)| got == want).count();
     let worst = worst_relative_row_error(&expected, &actual.output);
     eprintln!("{}: elements={} bit_identical={identical} worst_relative_row_error={worst:e}", case.tensor, expected.len());
@@ -445,4 +455,9 @@ fn iq4xs_gate_row_blocked_matvec_agrees_with_the_cooperative_bits() {
 #[test]
 fn iq4xs_up_row_blocked_matvec_agrees_with_the_cooperative_bits() {
     assert_row_blocked_agrees_with_cooperative(&CASES[1]);
+}
+
+#[test]
+fn iq3s_gate_row_blocked_matvec_agrees_with_the_cooperative_bits() {
+    assert_row_blocked_agrees_with_cooperative(&CASES[3]);
 }
