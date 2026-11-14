@@ -22,7 +22,8 @@
 use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, evaluate, map};
-use proxima_numeric::{DType};
+use proxima_numeric::codec::Codec;
+use proxima_numeric::{DType, NumericPolicy};
 
 fn random_vec(seed: u64, count: usize, spread: f32) -> Vec<f32> {
     let mut lcg = Lcg(seed);
@@ -136,6 +137,7 @@ fn masked_fma_q4k_matvec_matches_the_dequantized_f32_cpu_path_across_every_sub_b
             QuantizedBlock::Float32(&activation),
         ],
         &[packed_sum],
+        NumericPolicy::default(),
     )
     .expect("metal executes the masked-fma q4_k matmul");
 
