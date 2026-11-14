@@ -2135,6 +2135,38 @@ pub(crate) fn codec_rows_per_simdgroup(codec: Codec) -> usize {
     }
 }
 
+/// One `1..=8` count from the named env var, read once per call like
+/// [`packed_rows_override`]; unset, unparsable or out of range is `None`, so the
+/// sized default stands and the unset-env emit stays byte-identical.
+#[cfg(feature = "std")]
+fn packed_geometry_env(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.trim().parse::<usize>().ok())
+        .filter(|count| (1..=8).contains(count))
+}
+
+#[cfg(not(feature = "std"))]
+const fn packed_geometry_env(_name: &str) -> Option<usize> {
+    None
+}
+
+/// Ceiling on simdgroups cooperating on one row group:
+/// [`crate::sized::PACKED_ROW_KSPLIT_MAX`], or `PROXIMA_PACKED_K_SPLIT` (1..=8)
+/// when set. The kernel identity carries `_ks{k}`, so two splits never share a
+/// pipeline. Name-free: no codec or format is consulted.
+pub(crate) fn ksplit_max() -> u64 {
+    packed_geometry_env("PROXIMA_PACKED_K_SPLIT")
+        .map_or(crate::sized::PACKED_ROW_KSPLIT_MAX, |split| split as u64)
+}
+
+/// Rows one simdgroup folds when the K split is above 1:
+/// [`crate::sized::PACKED_ROW_KSPLIT_ROWS`], or `PROXIMA_PACKED_ROWS_KSPLIT`
+/// (1..=8) when set.
+pub(crate) fn ksplit_rows() -> usize {
+    packed_geometry_env("PROXIMA_PACKED_ROWS_KSPLIT").unwrap_or(crate::sized::PACKED_ROW_KSPLIT_ROWS)
+}
+
 /// `PROXIMA_Q4_0_MULTI_ROW_HOIST=1` A/B switch: same binary, env off/on, for
 /// [`crate::msl::push_packed_row_multi_row_body`]'s `Codec::Q4_0` fast arm
 /// (`docs/discipline.md`, Q4_0 prefill header-decode hoist). Default OFF --

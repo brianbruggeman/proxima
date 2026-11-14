@@ -266,6 +266,25 @@ fn emit_sizing_consts() {
         "pub const PACKED_ROW_SCALAR_RUN: usize = {packed_row_scalar_run};\n"
     ));
 
+    let packed_row_ksplit_max = require_power_of_two_le_32(
+        "packed_row_block.ksplit_max",
+        require_nonzero(
+            "packed_row_block.ksplit_max",
+            resolve_int(&root, "packed_row_block", "ksplit_max"),
+        ),
+    );
+    out.push_str(&format!(
+        "pub const PACKED_ROW_KSPLIT_MAX: u64 = {packed_row_ksplit_max};\n"
+    ));
+
+    let packed_row_ksplit_rows = require_nonzero(
+        "packed_row_block.ksplit_rows",
+        resolve_int(&root, "packed_row_block", "ksplit_rows"),
+    );
+    out.push_str(&format!(
+        "pub const PACKED_ROW_KSPLIT_ROWS: usize = {packed_row_ksplit_rows};\n"
+    ));
+
     let cooperative_reduce_min_len = require_nonneg(
         "cooperative_reduce.min_len",
         resolve_int(&root, "cooperative_reduce", "min_len"),

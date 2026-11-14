@@ -4465,18 +4465,6 @@ pub(crate) struct PackedRowGeometry {
     pub(crate) k_split: usize,
 }
 
-/// Rows one simdgroup folds when the K split is above 1, llama's N_R0 for the whole-unit types.
-/// A constant in this slice; the sized constant and env override replace it in the next.
-const fn ksplit_rows() -> usize {
-    2
-}
-
-/// Ceiling on simdgroups cooperating on one row group. `1` in this slice, so the default geometry
-/// is today's; the sized constant and env override replace it in the next slice.
-const fn ksplit_max() -> u64 {
-    1
-}
-
 /// Simdgroups worth launching on a reduction of `units` whole units read by `lanes` lanes:
 /// `ceil(units / lanes)` held to `1..=max` and rounded DOWN to a power of two, so every simdgroup
 /// owns at least one unit per lane sweep and `lanes * split` divides the dispatch.

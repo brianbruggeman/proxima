@@ -63,6 +63,29 @@ scalar_run = 8
 # `OMEGA_PACKED_ROW_BLOCK_SPLIT_K_MAX_ROWS`.
 split_k_max_rows = 4096
 
+# ceiling on the simdgroups of one threadgroup that cooperate on the SAME
+# output rows of a packed matvec, each folding a strided share of the reduction
+# (`msl::ksplit_max`, `msl::k_split_for`): a body whose lanes take whole units
+# (Q8_0, F16, BF16, ...) gets `ceil(K / unit / 32)` clamped to `1..=ksplit_max`
+# and rounded down to a power of two, so every simdgroup owns at least one unit
+# per lane sweep. 1 keeps today's geometry and every kernel byte identical;
+# raising it launches `ksplit_max * 32` threads per threadgroup (must be a
+# power of two, `<= 32` for the 1024-thread ceiling), cuts the reduction
+# latency of a long-K matvec and re-associates the f32 block sums, so the
+# output may move in the last ulps. The kernel identity carries `_ks{k}`, so
+# two splits never share a pipeline. Overridable per-build via
+# `OMEGA_PACKED_ROW_BLOCK_KSPLIT_MAX` and per-process, 1..=8, via
+# `PROXIMA_PACKED_K_SPLIT`.
+ksplit_max = 1
+
+# output rows one simdgroup folds against a streamed activation when the K
+# split is above 1 (`msl::ksplit_rows`); the default geometry keeps the codec's
+# own rows. Raising it amortizes the activation gather over more rows and
+# costs one accumulator and one block pointer per row per lane. Overridable
+# per-build via `OMEGA_PACKED_ROW_BLOCK_KSPLIT_ROWS` and per-process, 1..=8,
+# via `PROXIMA_PACKED_ROWS_KSPLIT`.
+ksplit_rows = 2
+
 [tiled_gemm]
 # below this many activation rows (tokens) in one dispatch, the row-blocked
 # packed-matmul kernel (`push_packed_row_blocked_body`) runs instead of the
