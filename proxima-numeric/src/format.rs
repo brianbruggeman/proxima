@@ -108,6 +108,22 @@ impl LevelTable {
             | Self::DeltaGrid { .. } => None,
         }
     }
+
+    /// Bytes the rendered level table occupies: 0 for a linear ladder (arithmetic, no array),
+    /// `len` i8 entries for an explicit table, and the grid's entries times their word width for
+    /// a grid. Read from the table's own fields, so a renderer or a budget can size a copy of it
+    /// without knowing which format it came from.
+    #[must_use]
+    pub const fn table_bytes(&self) -> usize {
+        match self {
+            Self::Linear { .. } => 0,
+            Self::Explicit(values) => core::mem::size_of_val(*values),
+            Self::SignedGrid { grid, .. } => core::mem::size_of_val(*grid),
+            Self::SignedGrid64 { grid, .. } | Self::DeltaGrid { grid, .. } => {
+                core::mem::size_of_val(*grid)
+            }
+        }
+    }
 }
 
 /// Where a level-set format's codes live.
@@ -1182,6 +1198,46 @@ mod tests {
             seen.push(name);
         }
         assert_eq!(NumericFormat::from_name("q4_0_almost"), None);
+    }
+
+    #[test]
+    fn table_bytes_of_every_named_level_format() {
+        let expected = [
+            ("bool", 0),
+            ("q1_0", 0),
+            ("q2_0", 0),
+            ("pq2_0", 0),
+            ("ptq1_0", 0),
+            ("tq1_0", 0),
+            ("tq2_0", 0),
+            ("iq4_nl", 16),
+            ("iq4_xs", 16),
+            ("iq3_xxs", 1024),
+            ("iq3_s", 2048),
+            ("iq2_xxs", 2048),
+            ("iq2_xs", 4096),
+            ("iq2_s", 8192),
+            ("iq1_s", 16384),
+            ("iq1_m", 16384),
+        ];
+
+        let mut visited = 0;
+        let named = NumericFormat::ALL
+            .into_iter()
+            .zip(NumericFormat::NAMES)
+            .chain([(NumericFormat::Bool, NumericFormat::BOOL_NAME)]);
+        for (format, name) in named {
+            let NumericFormat::Levels(levels) = format else {
+                continue;
+            };
+            let (_, bytes) = expected
+                .iter()
+                .find(|(expected_name, _)| *expected_name == name)
+                .unwrap_or_else(|| panic!("level format {name} has no expected table size"));
+            assert_eq!(levels.levels.table_bytes(), *bytes, "{name}");
+            visited += 1;
+        }
+        assert_eq!(visited, expected.len(), "every level format is walked");
     }
 
     #[test]
