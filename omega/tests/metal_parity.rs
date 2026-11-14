@@ -1530,35 +1530,33 @@ fn page_aligned_input_takes_the_no_copy_metal_upload_path() {
         "an already-page-sized request must round to itself, no padding"
     );
 
-    let nocopy_before = omega::metal::NOCOPY_BUFFER_UPLOADS.get();
-    let copy_before = omega::metal::COPYING_BUFFER_UPLOADS.get();
-
     let cpu =
         evaluate(&program, &[], &[&aligned[..]], &[]).expect("cpu evaluates the page-sized chain");
-    let metal = omega::execute(
-        &program,
-        &[],
-        &[QuantizedBlock::Float32(&aligned[..])],
-        &[],
-        NumericPolicy::default(),
-    )
-    .expect("metal executes the page-aligned block on a real device");
-
-    let nocopy_after = omega::metal::NOCOPY_BUFFER_UPLOADS.get();
-    let copy_after = omega::metal::COPYING_BUFFER_UPLOADS.get();
+    // scoped: parallel tests in this binary also move these process-global counters
+    let ((metal, copy_delta), nocopy_delta) = omega::metal::NOCOPY_BUFFER_UPLOADS.scoped(|| {
+        omega::metal::COPYING_BUFFER_UPLOADS.scoped(|| {
+            omega::execute(
+                &program,
+                &[],
+                &[QuantizedBlock::Float32(&aligned[..])],
+                &[],
+                NumericPolicy::default(),
+            )
+            .expect("metal executes the page-aligned block on a real device")
+        })
+    });
 
     assert_parity("page_aligned_input", cpu.root(), metal.root());
 
     println!(
-        "page_aligned_input_takes_the_no_copy_metal_upload_path: nocopy {nocopy_before}->{nocopy_after}, copy {copy_before}->{copy_after}"
+        "page_aligned_input_takes_the_no_copy_metal_upload_path: nocopy +{nocopy_delta}, copy +{copy_delta}"
     );
     assert_eq!(
-        nocopy_after - nocopy_before,
-        1,
+        nocopy_delta, 1,
         "a page-aligned {page_elements}-element block must take the zero-copy upload path exactly once"
     );
     assert_eq!(
-        copy_after, copy_before,
+        copy_delta, 0,
         "the page-aligned block must not also count as a copying upload"
     );
 }

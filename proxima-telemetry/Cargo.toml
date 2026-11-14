@@ -176,6 +176,10 @@ deferred-metric-fold = ["instrument-metrics", "lossless-backpressure"]
 otlp-http    = ["std", "dep:prost"]
 otlp-grpc    = ["otlp-http"]
 macros       = ["dep:proxima-macros"]
+# scoped-counters: `Counter::scoped`, a per-thread delta for parallel tests. Adds a
+# thread-local check to every `Counter::add`, so it is for test builds only
+# (enable via a dev-dependency); off, `add` is a single atomic fetch_add.
+scoped-counters = ["std"]
 tee-generic  = ["std"]
 tracing-init = ["std", "dep:tracing-subscriber"]
 # loom: swap the ring's atomics + UnsafeCell to loom's so tests/loom_ring.rs can
