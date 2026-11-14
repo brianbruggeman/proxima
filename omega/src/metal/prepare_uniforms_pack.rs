@@ -850,7 +850,11 @@ pub(super) fn gather_uniform_byte_len(gather_count: usize, rank_len: usize) -> u
 /// just to read `.len()` off the result, allocating and filling a real byte
 /// vector — for every op in the plan — purely to throw it away; this
 /// mirrors [`pack_uniforms`]'s own match arms field-for-field instead.
-pub(super) fn pack_uniforms_byte_len(bound: &BoundOp, numeric_policy: NumericPolicy) -> usize {
+pub(super) fn pack_uniforms_byte_len(
+    bound: &BoundOp,
+    numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
+) -> usize {
     const WORD: usize = size_of::<i64>();
     let rank_len = bound.extents.len().max(1);
     let operand_count = bound.operands().len();
@@ -889,13 +893,13 @@ pub(super) fn pack_uniforms_byte_len(bound: &BoundOp, numeric_policy: NumericPol
         // leaf shape `MoeTopK` packs below -- every other field this kind
         // carries (`cached_key_rows`/`attention_rows`/`head_dim`/...) is
         // baked `constexpr` into the kernel text by whatever renderer lands.
-        // `PROXIMA_SOFTMAX_RUNTIME_ROWS=1` widens this by one word
+        // `knobs.softmax_runtime_rows` widens this by one word
         // (`cached_key_rows`) to match `render_cached_softmax_weights`'s own
         // runtime-uniform `Uniforms` struct -- structural on the switch
         // alone, never on the row count's own value, so a bucket crossing
         // never changes this length.
         BoundOpKind::CachedSoftmaxWeights { .. } => {
-            if crate::msl::softmax_runtime_rows_override() {
+            if knobs.softmax_runtime_rows {
                 2 * WORD
             } else {
                 WORD
@@ -982,10 +986,12 @@ pub(super) fn pack_uniforms_byte_len(bound: &BoundOp, numeric_policy: NumericPol
 pub(super) fn pack_uniforms(
     bound: &BoundOp,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
 ) -> Result<Vec<u8>, EmitError> {
     pack_uniforms_with_schedule(
         bound,
         numeric_policy,
+        knobs,
         crate::msl::AttentionRowSchedule::legacy(),
     )
 }
@@ -993,10 +999,11 @@ pub(super) fn pack_uniforms(
 pub(super) fn pack_uniforms_with_schedule(
     bound: &BoundOp,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     schedule: crate::msl::AttentionRowSchedule,
 ) -> Result<Vec<u8>, EmitError> {
     let mut bytes = Vec::new();
-    pack_uniforms_into_with_schedule(bound, numeric_policy, schedule, &mut bytes)?;
+    pack_uniforms_into_with_schedule(bound, numeric_policy, knobs, schedule, &mut bytes)?;
     Ok(bytes)
 }
 
@@ -1006,6 +1013,7 @@ pub(super) fn pack_uniforms_with_schedule(
 pub(super) fn pack_uniforms_into_with_schedule(
     bound: &BoundOp,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     schedule: crate::msl::AttentionRowSchedule,
     scratch: &mut Vec<u8>,
 ) -> Result<(), EmitError> {
@@ -1091,7 +1099,7 @@ pub(super) fn pack_uniforms_into_with_schedule(
             // struct: the loop-bound field appends ONLY when the switch is
             // on, matching `pack_uniforms_byte_len`'s own structural widening
             // above.
-            if crate::msl::softmax_runtime_rows_override() {
+            if knobs.softmax_runtime_rows {
                 push_i64(scratch, *cached_key_rows as i64);
             }
             Ok(())
@@ -1377,6 +1385,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
     };
 
     use super::{pack_uniforms, pack_uniforms_byte_len};
+    use crate::EmitKnobs;
 
     /// The decode split form packs `(rows * heads, chunks, splits)` -- three
     /// words, not the one a two-range op otherwise gets -- and the byte length
@@ -1417,14 +1426,14 @@ pub(super) mod pack_uniforms_byte_len_tests {
         };
         let policy = NumericPolicy::llama_relaxed();
 
-        let packed = pack_uniforms(&bound, policy).expect("packs uniforms");
+        let packed = pack_uniforms(&bound, policy, &EmitKnobs::default()).expect("packs uniforms");
         let (chunks, _) = packed.as_chunks::<{ size_of::<i64>() }>();
         let words: Vec<i64> = chunks
             .iter()
             .map(|chunk| i64::from_ne_bytes(*chunk))
             .collect();
 
-        assert_eq!(packed.len(), pack_uniforms_byte_len(&bound, policy));
+        assert_eq!(packed.len(), pack_uniforms_byte_len(&bound, policy, &EmitKnobs::default()));
         assert_eq!(
             words,
             vec![8, 4, 17],
@@ -1471,14 +1480,14 @@ pub(super) mod pack_uniforms_byte_len_tests {
         };
         let policy = NumericPolicy::llama_relaxed();
 
-        let packed = pack_uniforms(&bound, policy).expect("packs uniforms");
+        let packed = pack_uniforms(&bound, policy, &EmitKnobs::default()).expect("packs uniforms");
         let (chunks, _) = packed.as_chunks::<{ size_of::<i64>() }>();
         let words: Vec<i64> = chunks
             .iter()
             .map(|chunk| i64::from_ne_bytes(*chunk))
             .collect();
 
-        assert_eq!(packed.len(), pack_uniforms_byte_len(&bound, policy));
+        assert_eq!(packed.len(), pack_uniforms_byte_len(&bound, policy, &EmitKnobs::default()));
         assert_eq!(
             words,
             vec![40, 9],
@@ -1489,7 +1498,7 @@ pub(super) mod pack_uniforms_byte_len_tests {
             unreachable!("the fixture is a CachedAttention");
         };
         *new_key_rows = 4;
-        let decode_words = pack_uniforms(&bound, policy).expect("packs uniforms");
+        let decode_words = pack_uniforms(&bound, policy, &EmitKnobs::default()).expect("packs uniforms");
         assert_ne!(
             decode_words.len(),
             packed.len(),
@@ -1612,8 +1621,8 @@ pub(super) mod pack_uniforms_byte_len_tests {
             "fixture must actually lower to an Elementwise BoundOp"
         );
         assert_eq!(
-            pack_uniforms_byte_len(&bound, NumericPolicy::default()),
-            pack_uniforms(&bound, NumericPolicy::default())
+            pack_uniforms_byte_len(&bound, NumericPolicy::default(), &EmitKnobs::default()),
+            pack_uniforms(&bound, NumericPolicy::default(), &EmitKnobs::default())
                 .expect("packs uniforms")
                 .len()
         );
@@ -1633,8 +1642,8 @@ pub(super) mod pack_uniforms_byte_len_tests {
             "fixture must actually lower to a Keep::Reduce BoundOp"
         );
         assert_eq!(
-            pack_uniforms_byte_len(&bound, NumericPolicy::default()),
-            pack_uniforms(&bound, NumericPolicy::default())
+            pack_uniforms_byte_len(&bound, NumericPolicy::default(), &EmitKnobs::default()),
+            pack_uniforms(&bound, NumericPolicy::default(), &EmitKnobs::default())
                 .expect("packs uniforms")
                 .len()
         );

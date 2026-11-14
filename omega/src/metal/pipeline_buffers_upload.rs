@@ -301,8 +301,9 @@ fn audit_pipeline_key_on_hit(
     packed_operands: &PackedOperands,
     cache_key: &str,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     dense_mma_input_layout: FloatLayout,
-    attention: super::arena_encode_dispatch_finish::AttentionKernelChoice,
+    attention: AttentionKernelChoice,
 ) -> Result<(), MetalError> {
     if !pipeline_key_audit_enabled() {
         return Ok(());
@@ -320,9 +321,9 @@ fn audit_pipeline_key_on_hit(
         bound,
         packed_operands,
         numeric_policy,
+        knobs,
         false,
-        attention.mma_selection,
-        attention.row_schedule,
+        attention,
         dense_mma_input_layout,
     )?;
     let recomputed_sha256 = sha256_hex(kernel.source.as_bytes());
@@ -390,6 +391,7 @@ pub(super) fn pipeline_for(
     cache_key: &str,
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     dense_mma_input_layout: FloatLayout,
     attention_mma_selection: crate::msl::AttentionMmaSelection,
     attention_row_schedule: crate::msl::AttentionRowSchedule,
@@ -420,8 +422,9 @@ pub(super) fn pipeline_for(
             packed_operands,
             cache_key,
             numeric_policy,
+            knobs,
             dense_mma_input_layout,
-            super::arena_encode_dispatch_finish::AttentionKernelChoice {
+            AttentionKernelChoice {
                 mma_selection: attention_mma_selection,
                 row_schedule: attention_row_schedule,
             },
@@ -461,9 +464,12 @@ pub(super) fn pipeline_for(
         bound,
         packed_operands,
         numeric_policy,
+        knobs,
         false,
-        attention_mma_selection,
-        attention_row_schedule,
+        AttentionKernelChoice {
+            mma_selection: attention_mma_selection,
+            row_schedule: attention_row_schedule,
+        },
         dense_mma_input_layout,
     )?;
     trace!(

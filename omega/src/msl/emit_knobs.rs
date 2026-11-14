@@ -494,14 +494,45 @@ fn parse_reduction_literal(raw: &str) -> Result<ReductionLiteral, Infallible> {
     })
 }
 
+/// A record with every field moved off its default: the fixture the parity tests and the
+/// emit-independence tests (`msl/tests.rs`) share.
+#[cfg(test)]
+pub(crate) fn every_knob_moved_by_the_builder() -> EmitKnobs {
+    let staging = FloatLayout::from_name("float16");
+    assert!(staging.is_some(), "float16 is a named layout");
+    EmitKnobs::default()
+        .with_packed_rows(Some(8))
+        .with_packed_k_split(2)
+        .with_packed_rows_ksplit(3)
+        .with_packed_lane_run_bytes(16)
+        .with_q4_0_multi_row_hoist(true)
+        .with_q4_0_multi_row_pair_lane(false)
+        .with_packed_row_disable(alloc::vec![String::from("q4_0"), String::from("q8_0")])
+        .with_tiled_gemm_disable(alloc::vec![String::from("q4k")])
+        .with_tiled_gemm_q4_0(false)
+        .with_tiled_gemm_dense(false)
+        .with_tiled_gemm_wide_act_load(false)
+        .with_tiled_gemm_slim_tgmem(false)
+        .with_tiled_gemm_staging(staging)
+        .with_tiled_gemm_direct_store(false)
+        .with_tiled_gemm_wide_weight_stage(false)
+        .with_tiled_gemm_grid2d(false)
+        .with_tiled_gemm_mm_layout(false)
+        .with_tiled_gemm_dynamic_tgmem(false)
+        .with_multi_row_unroll(false)
+        .with_multi_row_index32(false)
+        .with_coord_index32(false)
+        .with_reduction_literal(ReductionLiteral::DecodeOnly)
+        .with_softmax_runtime_rows(true)
+        .with_enable_unsafe_metal_expert_sources(true)
+}
+
 #[cfg(all(test, feature = "std"))]
 mod tests {
     use core::fmt::Debug;
 
-    use proxima_numeric::float_layout::FloatLayout;
-
     use super::super::*;
-    use super::{EmitKnobs, ReductionLiteral};
+    use super::{EmitKnobs, ReductionLiteral, every_knob_moved_by_the_builder};
     use crate::config::RuntimeConfig;
 
     const ENV_NAMES: [&str; 24] = [
@@ -678,16 +709,6 @@ mod tests {
             &[""],
             |knobs| knobs.coord_index32,
             coord_index32_override,
-        );
-    }
-
-    #[test]
-    fn softmax_runtime_rows_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_SOFTMAX_RUNTIME_ROWS",
-            &[""],
-            |knobs| knobs.softmax_runtime_rows,
-            softmax_runtime_rows_override,
         );
     }
 
@@ -889,36 +910,6 @@ mod tests {
                 assert_eq!(field(&with_only(name, value, EmitKnobs::from_env)), expected, "{name}={value:?}");
             }
         }
-    }
-
-    fn every_knob_moved_by_the_builder() -> EmitKnobs {
-        let staging = FloatLayout::from_name("float16");
-        assert!(staging.is_some(), "float16 is a named layout");
-        EmitKnobs::default()
-            .with_packed_rows(Some(8))
-            .with_packed_k_split(2)
-            .with_packed_rows_ksplit(3)
-            .with_packed_lane_run_bytes(16)
-            .with_q4_0_multi_row_hoist(true)
-            .with_q4_0_multi_row_pair_lane(false)
-            .with_packed_row_disable(vec![String::from("q4_0"), String::from("q8_0")])
-            .with_tiled_gemm_disable(vec![String::from("q4k")])
-            .with_tiled_gemm_q4_0(false)
-            .with_tiled_gemm_dense(false)
-            .with_tiled_gemm_wide_act_load(false)
-            .with_tiled_gemm_slim_tgmem(false)
-            .with_tiled_gemm_staging(staging)
-            .with_tiled_gemm_direct_store(false)
-            .with_tiled_gemm_wide_weight_stage(false)
-            .with_tiled_gemm_grid2d(false)
-            .with_tiled_gemm_mm_layout(false)
-            .with_tiled_gemm_dynamic_tgmem(false)
-            .with_multi_row_unroll(false)
-            .with_multi_row_index32(false)
-            .with_coord_index32(false)
-            .with_reduction_literal(ReductionLiteral::DecodeOnly)
-            .with_softmax_runtime_rows(true)
-            .with_enable_unsafe_metal_expert_sources(true)
     }
 
     fn every_knob_moved_by_the_environment() -> Vec<(&'static str, Option<&'static str>)> {

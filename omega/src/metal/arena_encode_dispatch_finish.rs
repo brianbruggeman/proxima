@@ -3,7 +3,6 @@ use super::*;
 use objc2_metal::MTLBlitCommandEncoder;
 #[cfg(feature = "instrument")]
 use objc2_metal::MTLResource;
-use proxima_numeric::float_layout::FloatLayout;
 #[cfg(feature = "instrument")]
 use std::borrow::Borrow;
 /// CARD 6.5: device output arena, hung off the cached [`Plan`] and built
@@ -290,7 +289,7 @@ pub(super) fn build_buffer_arena(
         .sum();
     let uniform_bytes: usize = resolved
         .iter()
-        .map(|bound| pack_uniforms_byte_len(bound, plan.numeric_policy))
+        .map(|bound| pack_uniforms_byte_len(bound, plan.numeric_policy, &plan.emit_knobs))
         .sum();
     let cap_bytes = ARENA_TRANSIENT_CAP.saturating_mul(query_rows.max(1) as usize);
     let device_limit = device.recommendedMaxWorkingSetSize();
@@ -471,6 +470,7 @@ pub(super) fn build_plan_uniforms(
     device: &ProtocolObject<dyn MTLDevice>,
     resolved: &[BoundOp],
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     attention_row_schedule: crate::msl::AttentionRowSchedule,
 ) -> Result<PlanUniforms, MetalError> {
     let mut buffers = Vec::with_capacity(resolved.len());
@@ -478,7 +478,8 @@ pub(super) fn build_plan_uniforms(
         // read unconditionally so a non-`instrument` build (where the only
         // consumer below is compiled out) does not trip `unused_variables`.
         let _ = position;
-        let bytes = pack_uniforms_with_schedule(bound, numeric_policy, attention_row_schedule)?;
+        let bytes =
+            pack_uniforms_with_schedule(bound, numeric_policy, knobs, attention_row_schedule)?;
         let buffer = device
             .newBufferWithLength_options(bytes.len().max(1), MTLResourceOptions::StorageModeShared)
             .ok_or_else(|| MetalError::CompileFailed {
@@ -637,6 +638,7 @@ pub(super) fn plan_uniform_buffer(
             &device,
             &plan.prepared.resolved,
             plan.numeric_policy,
+            &plan.emit_knobs,
             plan.attention_row_schedule,
         )?;
         #[cfg(feature = "instrument")]
@@ -908,13 +910,6 @@ fn resolve_route_prepass(
     }))
 }
 
-/// The attention kernel-selection pair that travels together through pipeline
-/// resolution and the instrument-only key audit.
-#[derive(Clone, Copy)]
-pub(super) struct AttentionKernelChoice {
-    pub(super) mma_selection: crate::msl::AttentionMmaSelection,
-    pub(super) row_schedule: crate::msl::AttentionRowSchedule,
-}
 
 /// One position's `(pipeline, bindings, grid, merge)`: the per-`bound` body
 /// of [`resolve_steps`], extracted so [`Plan::refit_symbols`] re-resolves
@@ -923,17 +918,16 @@ pub(super) struct AttentionKernelChoice {
 /// position's step equals the one a fresh plan would resolve for it.
 pub(super) fn resolve_step(
     device: &ProtocolObject<dyn MTLDevice>,
+    plan: &Plan,
     bound: &BoundOp,
-    packed_operands: &PackedOperands,
-    numeric_policy: NumericPolicy,
-    configured_dense_mma_input_layout: Option<FloatLayout>,
-    math_mode: MathMode,
-    attention: AttentionKernelChoice,
 ) -> Result<ResolvedStep, MetalError> {
-    let AttentionKernelChoice {
-        mma_selection: attention_mma_selection,
-        row_schedule: attention_row_schedule,
-    } = attention;
+    let packed_operands = &plan.packed_operands;
+    let numeric_policy = plan.numeric_policy;
+    let knobs = &plan.emit_knobs;
+    let configured_dense_mma_input_layout = plan.dense_mma_input_layout;
+    let math_mode = plan.math_mode;
+    let attention_mma_selection = plan.attention_mma_selection;
+    let attention_row_schedule = plan.attention_row_schedule;
     let (bindings, grid) = kernel_dispatch_shape_with_schedule(
         bound,
         packed_operands,
@@ -946,6 +940,7 @@ pub(super) fn resolve_step(
         bound,
         packed_operands,
         numeric_policy,
+        knobs,
         &grid,
         dense_mma_input_layout,
     )?;
@@ -983,6 +978,7 @@ pub(super) fn resolve_step(
         &cache_key,
         math_mode,
         numeric_policy,
+        knobs,
         dense_mma_input_layout,
         attention_mma_selection,
         attention_row_schedule,
@@ -1105,19 +1101,7 @@ fn refit_steps(
     patches
         .iter()
         .map(|(position, bound)| {
-            resolve_step(
-                device,
-                bound,
-                &plan.packed_operands,
-                plan.numeric_policy,
-                plan.dense_mma_input_layout,
-                plan.math_mode,
-                AttentionKernelChoice {
-                    mma_selection: plan.attention_mma_selection,
-                    row_schedule: plan.attention_row_schedule,
-                },
-            )
-            .map(|step| (*position, step))
+            resolve_step(device, plan, bound).map(|step| (*position, step))
         })
         .collect::<Result<Vec<_>, _>>()
         .map(Some)
@@ -1138,6 +1122,7 @@ fn refit_uniform_buffers(
             let bytes = pack_uniforms_with_schedule(
                 bound,
                 plan.numeric_policy,
+                &plan.emit_knobs,
                 plan.attention_row_schedule,
             )?;
             let buffer = device
@@ -1193,18 +1178,7 @@ pub(super) fn resolve_steps(
     plan.merged.borrow_mut().take();
     let mut steps = Vec::with_capacity(plan.prepared.resolved.len());
     for bound in &plan.prepared.resolved {
-        steps.push(resolve_step(
-            device,
-            bound,
-            &plan.packed_operands,
-            plan.numeric_policy,
-            plan.dense_mma_input_layout,
-            plan.math_mode,
-            AttentionKernelChoice {
-                mma_selection: plan.attention_mma_selection,
-                row_schedule: plan.attention_row_schedule,
-            },
-        )?);
+        steps.push(resolve_step(device, plan, bound)?);
     }
     #[cfg(feature = "metal-horizontal-merge")]
     let merge_candidates = {
@@ -3736,6 +3710,7 @@ pub(super) fn encode_op(
     plan_uniform: Option<&MetalBuffer>,
     math_mode: MathMode,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     attention_mma_selection: crate::msl::AttentionMmaSelection,
     attention_row_schedule: crate::msl::AttentionRowSchedule,
     resolved: Option<&ResolvedStep>,
@@ -3841,6 +3816,7 @@ pub(super) fn encode_op(
                 bound,
                 packed_operands,
                 numeric_policy,
+                knobs,
                 &grid,
                 dense_mma_input_layout,
             )?;
@@ -3876,6 +3852,7 @@ pub(super) fn encode_op(
                             bound,
                             packed_operands,
                             numeric_policy,
+                            knobs,
                             source_node,
                             codec,
                         )?
@@ -3884,6 +3861,7 @@ pub(super) fn encode_op(
                             bound,
                             packed_operands,
                             numeric_policy,
+                            knobs,
                             source_node,
                         )?
                     };
@@ -3921,6 +3899,7 @@ pub(super) fn encode_op(
                 bound,
                 packed_operands,
                 numeric_policy,
+                knobs,
                 &grid,
                 dense_mma_input_layout,
             )?;
@@ -3941,6 +3920,7 @@ pub(super) fn encode_op(
                 &cache_key,
                 math_mode,
                 numeric_policy,
+                knobs,
                 dense_mma_input_layout,
                 attention_mma_selection,
                 attention_row_schedule,
@@ -4061,7 +4041,7 @@ pub(super) fn encode_op(
         Some(buffer) => buffer.clone(),
         None => upload_uniforms(
             device,
-            &pack_uniforms_with_schedule(bound, numeric_policy, attention_row_schedule)?,
+            &pack_uniforms_with_schedule(bound, numeric_policy, knobs, attention_row_schedule)?,
         )?,
     };
     let gathers = gather_count(bound);
@@ -5222,6 +5202,7 @@ pub(super) mod arena_tests {
         DispatchType, allocate_placed_buffer, arena_placement, device_and_queue, execute_plan,
         execute_plan_with_placements, plan, plan_uniform_buffer,
     };
+    use crate::EmitKnobs;
 
     /// `Input(a, extent) -> Identity -> Identity -> Input(b, extent) ->
     /// Identity` -- three dispatched (non-`Input`) elementwise ops, `node[0]`
@@ -6024,9 +6005,9 @@ pub(super) mod arena_tests {
         let stage_zero_bound = &resolved_plan.prepared.resolved[position_of(stage_zero)];
         let stage_two_bound = &resolved_plan.prepared.resolved[position_of(stage_two)];
         assert_eq!(
-            super::pack_uniforms(stage_zero_bound, NumericPolicy::default())
+            super::pack_uniforms(stage_zero_bound, NumericPolicy::default(), &EmitKnobs::default())
                 .expect("packs uniforms"),
-            super::pack_uniforms(stage_two_bound, NumericPolicy::default())
+            super::pack_uniforms(stage_two_bound, NumericPolicy::default(), &EmitKnobs::default())
                 .expect("packs uniforms"),
             "degenerate gate: the two ops must genuinely pack identical uniform bytes"
         );
@@ -6921,6 +6902,8 @@ pub(super) mod attention_scratch_len_tests {
 
     #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
     use crate::msl::AttentionRowSchedule;
+    #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+    use crate::EmitKnobs;
 
     use super::{BoundOp, cached_attention_scratch_len};
     #[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
@@ -7177,8 +7160,13 @@ pub(super) mod attention_scratch_len_tests {
         let expected_scratch = 8 * 8 * 2 * selected_splits * (2 + 128);
         assert_eq!(selected_scratch, expected_scratch);
 
-        let partial_uniforms = pack_uniforms_with_schedule(&bound, policy, selected_schedule)
-            .expect("selected row-tiled partial uniforms pack");
+        let partial_uniforms = pack_uniforms_with_schedule(
+            &bound,
+            policy,
+            &EmitKnobs::default(),
+            selected_schedule,
+        )
+        .expect("selected row-tiled partial uniforms pack");
         let merge_uniforms =
             pack_cached_attention_merge_uniforms_with_schedule(&bound, policy, selected_schedule)
                 .expect("selected row-tiled merge uniforms pack");

@@ -163,7 +163,7 @@ pub use msl::{
     Q6K_BLOCK_BYTES, Q6K_UNPACK_MSL, Q8_0_BLOCK_BYTES, Q8_0_BLOCK_ELEMENTS, ReductionLiteral, q4_0_unpack_msl,
     q5_0_unpack_msl, q5_1_unpack_msl, q8_0_unpack_msl,
     cached_attention_key_codec_for, cached_attention_kv_codec_for, cached_attention_kv_codecs_for,
-    cached_attention_row_tiled_kv_codec_for, cached_attention_row_tiled_reads, context_chunks_for, emit,
+    cached_attention_row_tiled_kv_codec_for, cached_attention_row_tiled_reads, context_chunks_for, emit, emit_with_knobs,
 };
 #[cfg(feature = "wgpu-backend")]
 pub use wgpu_driver::{

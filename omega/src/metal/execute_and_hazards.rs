@@ -60,6 +60,7 @@ pub(super) fn plan_with_placed_inputs(
         symbols,
         prepared,
         numeric_policy,
+        crate::msl::ambient_knobs(),
     ))
 }
 
@@ -68,6 +69,7 @@ pub(super) fn plan_from_prepared(
     symbols: &[u64],
     prepared: Prepared,
     numeric_policy: NumericPolicy,
+    emit_knobs: EmitKnobs,
 ) -> Plan {
     // `prepare` already built this attribution once, off the same `blocks`
     // argument, checked count- and shape-consistent against `block_nodes`
@@ -93,6 +95,7 @@ pub(super) fn plan_from_prepared(
         resident_nodes: BTreeSet::new(),
         math_mode: numeric_policy_as_metal_math_mode(numeric_policy),
         numeric_policy,
+        emit_knobs,
         dense_mma_input_layout: None,
         attention_mma_selection: crate::msl::AttentionMmaSelection::Legacy,
         attention_row_schedule: crate::msl::AttentionRowSchedule::legacy(),
@@ -401,6 +404,7 @@ pub(super) fn execute_plan_inner(
             None,
             plan.math_mode,
             plan.numeric_policy,
+            &plan.emit_knobs,
             plan.attention_mma_selection,
             plan.attention_row_schedule,
             None,
@@ -415,7 +419,7 @@ pub(super) fn execute_plan_inner(
             if let Some((buffer, _)) = device_buffers.get(&bound.node) {
                 plan.record_scoped_buffer("output", bound.node, buffer);
             }
-            let uniform_bytes = pack_uniforms(bound, plan.numeric_policy)?;
+            let uniform_bytes = pack_uniforms(bound, plan.numeric_policy, &plan.emit_knobs)?;
             UNIFORM_BUFFERS.with(|cache| {
                 if let Some((buffer, _)) = cache.borrow().get(&uniform_bytes) {
                     plan.record_scoped_buffer("uniform", bound.node, buffer);

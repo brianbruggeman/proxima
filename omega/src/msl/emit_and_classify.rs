@@ -54,18 +54,44 @@ pub(super) const fn unsafe_metal_expert_sources_enabled() -> bool {
     false
 }
 
+/// The knobs a caller without an explicit [`EmitKnobs`] gets: the process environment on `std`,
+/// the all-default record on the alloc tier. A temporary shim -- every caller that holds a
+/// [`EmitKnobs`] (a `Plan`, a test) passes it down instead.
+#[cfg(feature = "std")]
+pub(crate) fn ambient_knobs() -> EmitKnobs {
+    EmitKnobs::from_env()
+}
+
+#[cfg(not(feature = "std"))]
+pub(crate) fn ambient_knobs() -> EmitKnobs {
+    EmitKnobs::default()
+}
+
+/// Emits `resolved` under the process-ambient knobs ([`ambient_knobs`]). Compose
+/// [`emit_with_knobs`] instead when two configurations must coexist in one process.
 pub fn emit(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
 ) -> Result<Kernel, EmitError> {
+    emit_with_knobs(resolved, packed_operands, numeric_policy, &ambient_knobs())
+}
+
+/// [`emit`] under explicit [`EmitKnobs`]: the render reads no environment for the switches the
+/// record carries, so the same op can render under two records side by side.
+pub fn emit_with_knobs(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
+) -> Result<Kernel, EmitError> {
     emit_inner_with_mma_selection(
         resolved,
         packed_operands,
         numeric_policy,
+        knobs,
         false,
-        AttentionMmaSelection::Legacy,
-        AttentionRowSchedule::legacy(),
+        AttentionKernelChoice::legacy(),
     )
 }
 
@@ -96,9 +122,12 @@ pub fn emit_with_attention_variant(
         resolved,
         packed_operands,
         numeric_policy,
+        &EmitKnobs::default(),
         false,
-        mma_selection,
-        row_schedule,
+        AttentionKernelChoice {
+            mma_selection,
+            row_schedule,
+        },
     )
 }
 
@@ -197,33 +226,51 @@ pub(super) fn emit_inner(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
 ) -> Result<Kernel, EmitError> {
     emit_inner_with_mma_selection(
         resolved,
         packed_operands,
         numeric_policy,
+        knobs,
         expert_source_mode,
-        AttentionMmaSelection::Legacy,
-        AttentionRowSchedule::legacy(),
+        AttentionKernelChoice::legacy(),
     )
+}
+
+/// The attention kernel-selection pair that travels together through emit, pipeline
+/// resolution and the instrument-only key audit.
+#[derive(Clone, Copy)]
+pub(crate) struct AttentionKernelChoice {
+    pub(crate) mma_selection: AttentionMmaSelection,
+    pub(crate) row_schedule: AttentionRowSchedule,
+}
+
+impl AttentionKernelChoice {
+    pub(crate) fn legacy() -> Self {
+        Self {
+            mma_selection: AttentionMmaSelection::Legacy,
+            row_schedule: AttentionRowSchedule::legacy(),
+        }
+    }
 }
 
 pub(crate) fn emit_inner_with_mma_selection(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
-    mma_selection: AttentionMmaSelection,
-    row_schedule: AttentionRowSchedule,
+    attention: AttentionKernelChoice,
 ) -> Result<Kernel, EmitError> {
     emit_inner_with_mma_selection_and_layout(
         resolved,
         packed_operands,
         numeric_policy,
+        knobs,
         expert_source_mode,
-        mma_selection,
-        row_schedule,
+        attention,
         default_dense_mma_input_layout(resolved, packed_operands),
     )
 }
@@ -232,15 +279,19 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
-    mma_selection: AttentionMmaSelection,
-    row_schedule: AttentionRowSchedule,
+    attention: AttentionKernelChoice,
     dense_mma_input_layout: FloatLayout,
 ) -> Result<Kernel, EmitError> {
+    let AttentionKernelChoice {
+        mma_selection,
+        row_schedule,
+    } = attention;
     validate(resolved)?;
     #[cfg(feature = "metal-attn-variants")]
     let row_schedule = effective_attention_row_schedule(resolved, numeric_policy, row_schedule);
-    let mut entry = entry_name_with_schedule(resolved, numeric_policy, row_schedule);
+    let mut entry = entry_name_with_schedule(resolved, numeric_policy, knobs, row_schedule);
     if matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {
         entry.push_str(mma_selection.cache_token());
         entry.push_str(&row_schedule.cache_token());
@@ -257,6 +308,7 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
         resolved,
         packed_operands,
         numeric_policy,
+        knobs,
         &grid,
         dense_mma_input_layout,
     );
@@ -272,7 +324,9 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
                     row_schedule,
                 )
             }),
-        BoundOpKind::CachedSoftmaxWeights { .. } => render_cached_softmax_weights(resolved, &entry),
+        BoundOpKind::CachedSoftmaxWeights { .. } => {
+            render_cached_softmax_weights(resolved, &entry, knobs)
+        }
         BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
             render_elementwise(resolved, &entry, &quantized)
         }
@@ -602,9 +656,17 @@ pub fn emit_with_expert_sources(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     source_node: NodeId,
 ) -> Result<Kernel, EmitError> {
-    emit_with_expert_sources_mode(resolved, packed_operands, numeric_policy, source_node, None)
+    emit_with_expert_sources_mode(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        knobs,
+        source_node,
+        None,
+    )
 }
 
 /// Emits a substituted expert kernel while retaining the bound operand's
@@ -614,6 +676,7 @@ pub fn emit_with_uniform_expert_source(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     source_node: NodeId,
     codec: Codec,
 ) -> Result<Kernel, EmitError> {
@@ -621,6 +684,7 @@ pub fn emit_with_uniform_expert_source(
         resolved,
         packed_operands,
         numeric_policy,
+        knobs,
         source_node,
         Some(codec),
     )
@@ -630,6 +694,7 @@ pub(super) fn emit_with_expert_sources_mode(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     source_node: NodeId,
     uniform_codec: Option<Codec>,
 ) -> Result<Kernel, EmitError> {
@@ -649,6 +714,7 @@ pub(super) fn emit_with_expert_sources_mode(
         resolved,
         &source_packed_operands,
         numeric_policy,
+        knobs,
         uniform_codec.is_none(),
     )?;
     // Replace the gathered weight read with the descriptor-aware form. The
@@ -1679,6 +1745,7 @@ pub(super) fn metal_specialization(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     grid: &GridSpec,
     dense_mma_input_layout: FloatLayout,
 ) -> crate::identity::MetalOnlyExtras {
@@ -1734,7 +1801,7 @@ pub(super) fn metal_specialization(
         // `expert_source_mode` into ITS OWN admission already, matching
         // every other multi-row/coord experiment's posture at this call site.
         coord_index32: coord_index32_active(resolved, &quantized, numeric_policy, false),
-        softmax_runtime_rows: softmax_runtime_rows_override(),
+        softmax_runtime_rows: knobs.softmax_runtime_rows,
         tiled_gemm_q4_0: match &resolved.kind {
             BoundOpKind::Reduce {
                 reduce_op,
@@ -1886,9 +1953,19 @@ pub(crate) fn kernel_cache_key(
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
 ) -> Result<String, EmitError> {
+    kernel_cache_key_with_knobs(resolved, packed_operands, numeric_policy, &ambient_knobs())
+}
+
+#[cfg(test)]
+pub(crate) fn kernel_cache_key_with_knobs(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
+) -> Result<String, EmitError> {
     let quantized = operand_codecs(resolved, packed_operands);
     let grid = grid_spec(resolved, &quantized, numeric_policy, false)?;
-    kernel_cache_key_for_grid(resolved, packed_operands, numeric_policy, &grid)
+    kernel_cache_key_for_grid(resolved, packed_operands, numeric_policy, knobs, &grid)
 }
 
 /// [`kernel_cache_key`] for a caller that already holds this op's
@@ -1905,12 +1982,14 @@ pub(crate) fn kernel_cache_key_for_grid(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     grid: &GridSpec,
 ) -> Result<String, EmitError> {
     kernel_cache_key_for_grid_with_layout(
         resolved,
         packed_operands,
         numeric_policy,
+        knobs,
         grid,
         default_dense_mma_input_layout(resolved, packed_operands),
     )
@@ -1921,6 +2000,7 @@ pub(crate) fn kernel_cache_key_for_grid_with_layout(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     grid: &GridSpec,
     dense_mma_input_layout: FloatLayout,
 ) -> Result<String, EmitError> {
@@ -1939,6 +2019,7 @@ pub(crate) fn kernel_cache_key_for_grid_with_layout(
             resolved,
             packed_operands,
             numeric_policy,
+            knobs,
             grid,
             dense_mma_input_layout,
         ),

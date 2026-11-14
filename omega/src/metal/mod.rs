@@ -242,14 +242,14 @@ use crate::error::EmitError;
 #[cfg(feature = "instrument")]
 use crate::msl::diagnose_packed_row_block;
 use crate::msl::{
-    device_scalar_token, gather_count, kernel_dispatch_shape, kernel_dispatch_shape_with_schedule,
+    AttentionKernelChoice, device_scalar_token, gather_count, kernel_dispatch_shape, kernel_dispatch_shape_with_schedule,
     reduction_dims,
 };
 #[cfg(feature = "metal-plan-stable-buffers")]
 use crate::sized::ARENA_TRANSIENT_CAP;
 #[cfg(feature = "metal-buffer-pool")]
 use crate::sized::OUTPUT_POOL_MAX_PER_BUCKET;
-use crate::{Binding, Codec, GridSpec, Kernel, PackedOperands};
+use crate::{Binding, Codec, EmitKnobs, GridSpec, Kernel, PackedOperands};
 
 #[macro_use]
 mod device_buffers_arena_plan;
@@ -523,7 +523,7 @@ pub fn pack_uniforms_for(
     bound: &BoundOp,
     numeric_policy: NumericPolicy,
 ) -> Result<Vec<u8>, EmitError> {
-    prepare_uniforms_pack::pack_uniforms(bound, numeric_policy)
+    prepare_uniforms_pack::pack_uniforms(bound, numeric_policy, &crate::msl::ambient_knobs())
 }
 
 #[cfg(test)]
