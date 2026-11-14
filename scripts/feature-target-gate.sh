@@ -21,7 +21,9 @@
 #
 # usage: scripts/feature-target-gate.sh [base]        (default: origin/main)
 #        scripts/feature-target-gate.sh --all          every crate below
-#        CARGO_TARGET_DIR is honoured; CI=true skips --all-targets colouring
+#        inside a .wt/ worktree every cargo call goes through `git wt cargo`, which pins
+#        the target to <worktree>/target whatever CARGO_TARGET_DIR the env exports;
+#        elsewhere (main checkout, pre-push hook) bare cargo honours CARGO_TARGET_DIR
 set -euo pipefail
 
 # the caller's tree, not the script's: this repo is worked in worktrees, and a
@@ -32,6 +34,20 @@ else
     repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 fi
 cd "$repo_root"
+
+# one source of truth for the target: `git wt cargo` (tools/main-only-worktrees/policy.py)
+# sets CARGO_TARGET_DIR to <worktree>/target itself, so the gate delegates instead of copying the path
+case "$repo_root" in
+    */.wt/*)
+        cargo_cmd=(git wt cargo)
+        target_dir="$repo_root/target"
+        ;;
+    *)
+        cargo_cmd=(cargo)
+        target_dir="${CARGO_TARGET_DIR:-$repo_root/target}"
+        ;;
+esac
+printf 'feature-target-gate: target=%s\n' "$target_dir"
 
 all=0
 base="origin/main"
@@ -159,7 +175,7 @@ while IFS=: read -r crate features tier_features; do
         args=(-p "$crate" --all-targets)
     fi
     printf '== %s ... ' "$label"
-    if output="$(cargo check "${args[@]}" --message-format short 2>&1)"; then
+    if output="$("${cargo_cmd[@]}" check "${args[@]}" --message-format short 2>&1)"; then
         errors="$(printf '%s\n' "$output" | grep -cE '^error' || true)"
         if [ "$errors" != 0 ]; then
             printf 'FAIL (%s errors)\n' "$errors"
@@ -196,7 +212,7 @@ case " $crates " in
                     test_args+=(--test "$fixture_test")
                 done
                 printf '== proxima-omega fixture tests --features %s ... ' "$fixture_features"
-                if output="$(cargo nextest run -p proxima-omega --features "$fixture_features" --no-fail-fast "${test_args[@]}" 2>&1)"; then
+                if output="$("${cargo_cmd[@]}" nextest run -p proxima-omega --features "$fixture_features" --no-fail-fast "${test_args[@]}" 2>&1)"; then
                     run_count="$(printf '%s\n' "$output" | grep -oE '[0-9]+ tests run:' | grep -oE '[0-9]+' | tail -1 || true)"
                     if [ -z "$run_count" ] || [ "$run_count" = 0 ]; then
                         printf 'FAIL (0 tests run)\n'
