@@ -310,3 +310,44 @@ fn iq4xs_row_blocked_matvec_is_no_further_from_the_host_decode_than_the_cooperat
     let (rendered_worst, cooperative_worst) = (worst_distance(&rendered.output, &want), worst_distance(&cooperative.output, &want));
     assert!(rendered_worst <= cooperative_worst, "rendered {rendered_worst:e} is further from the f64 reduction than cooperative {cooperative_worst:e}");
 }
+
+const BIT_FIXTURE_NAME: &str = "row_blocked_iq4xs_blk19_gate_exps_t1.u32le";
+/// the row-blocked output bits of `GATE` (576 f32, little-endian u32) captured from the kernel before level-table staging.
+const BIT_FIXTURE: &[u8] = include_bytes!("fixtures/row_blocked_iq4xs_blk19_gate_exps_t1.u32le");
+
+fn bit_mismatches(output: &[f32], fixture: &[u8]) -> usize {
+    let (words, _) = fixture.as_chunks::<4>();
+    output.iter().zip(words).filter(|(value, word)| value.to_bits() != u32::from_le_bytes(**word)).count()
+}
+
+/// Tolerance tests cannot see a one-bit change; this pins the exact f32 bits of the unmodified kernel.
+#[test]
+fn iq4xs_gate_row_blocked_matvec_is_bit_identical_across_runs_and_to_the_vendored_fixture() {
+    let slab = read_slab(&GATE);
+    let activation = activation(slab.reduction, &GATE);
+    let first = run(&GATE, &slab, &activation);
+    let second = run(&GATE, &slab, &activation);
+    assert!(first.kernel_keys.iter().any(|key| key.contains("_cpfB")), "the row-blocked kernel was never selected: {:?}", first.kernel_keys);
+    let total = GATE.tokens * SELECTED * ROWS;
+    assert_eq!(first.output.len(), total, "one f32 per selected expert and row");
+    assert_eq!(second.output.len(), total, "one f32 per selected expert and row");
+    let run_to_run = first.output.iter().zip(&second.output).filter(|(left, right)| left.to_bits() != right.to_bits()).count();
+    println!("run_to_run mismatches={run_to_run} of {total}");
+    assert_eq!(run_to_run, 0, "a kernel that is not bit-stable run to run cannot carry a bit-identity gate");
+
+    if BIT_FIXTURE.is_empty() {
+        let directory = tempfile::Builder::new().prefix("iq4xs_row_blocked_bits").tempdir().expect("scratch tempdir for the captured bits").keep();
+        let path = directory.join(BIT_FIXTURE_NAME);
+        let bytes: Vec<u8> = first.output.iter().flat_map(|value| value.to_bits().to_le_bytes()).collect();
+        std::fs::write(&path, &bytes).expect("the captured bits are written to the scratch directory");
+        panic!("no vendored fixture: wrote {} bytes ({total} f32) to {}; copy it to omega/tests/fixtures/{BIT_FIXTURE_NAME}", bytes.len(), path.display());
+    }
+    assert_eq!(BIT_FIXTURE.len(), total * 4, "the fixture holds one little-endian u32 per output element");
+    let mismatches = bit_mismatches(&first.output, BIT_FIXTURE);
+    println!("fixture mismatches={mismatches} of {total}");
+    assert_eq!(mismatches, 0, "{mismatches} of {total} output bits differ from the pre-staging fixture");
+
+    let mut flipped = BIT_FIXTURE.to_vec();
+    flipped[0] ^= 1;
+    assert_eq!(bit_mismatches(&first.output, &flipped), 1, "control: one flipped fixture bit must be counted exactly once");
+}
