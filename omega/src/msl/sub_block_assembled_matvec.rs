@@ -131,8 +131,19 @@ pub(super) fn level_matvec_msl(
     other_stride_is_one: bool,
     reduction_bound: &str,
 ) -> Result<String, SubBlockMatvecRefusal> {
-    require(matches!(codes.table, LevelTable::Explicit(_) | LevelTable::Linear { .. }), "a level table that maps one code to one value")?;
+    require(level_table_rendered(codes.table), "a level table the matvec renders")?;
     render(layout, Some(codes), geometry, weight, other, other_stride_is_one, reduction_bound)
+}
+
+/// Whether the level table is one the rendered level matvec can resolve: an explicit or linear
+/// ladder, or a signed grid whose sign is a plane bit. The same set as `layout_render`'s
+/// `renderable_level_layout`, so admission and the renderer share one predicate.
+pub(super) const fn level_table_rendered(table: &LevelTable) -> bool {
+    match table {
+        LevelTable::Explicit(_) | LevelTable::Linear { .. } => true,
+        LevelTable::SignedGrid { sign_table: None, lanes, .. } => *lanes > 0,
+        _ => false,
+    }
 }
 
 /// Where the thread's sub-block scales sit in the block, evaluated for every thread slot.
@@ -145,6 +156,7 @@ enum SubScales {
 }
 
 struct PlaneScales {
+    multiplier: i16,
     bias: i16,
     planes: Vec<(u8, u32)>,
     distinct: Vec<Vec<(Vec<u32>, Vec<u32>)>>,
@@ -181,7 +193,7 @@ impl PlaneScales {
             });
             scale_of_slot.push(index);
         }
-        Ok(Self { bias: sub.scale.bias, planes, distinct, scale_of_slot })
+        Ok(Self { multiplier: sub.scale_multiplier, bias: sub.scale.bias, planes, distinct, scale_of_slot })
     }
 
     fn preamble(&self) -> String {
@@ -207,7 +219,9 @@ impl PlaneScales {
                     if *position == 0 { read } else { format!("({read} << {position}u)") }
                 })
                 .collect();
-            text.push_str(&format!("            float scale{scale} = (float)((int)({}) - {});\n", pieces.join(" | "), self.bias));
+            let code = format!("(int)({})", pieces.join(" | "));
+            let scaled = if self.multiplier == 1 { code } else { format!("{} * {code}", self.multiplier) };
+            text.push_str(&format!("            float scale{scale} = (float)({scaled} - {});\n", self.bias));
         }
         text
     }
@@ -242,10 +256,11 @@ impl<'a> Assembled<'a> {
         let sub = layout.sub.as_ref().ok_or(SubBlockMatvecRefusal("no sub-blocks"))?;
         require(layout.scale_runs.is_none() && layout.multiplier == 1, "plain code multiplier")?;
         require(layout.min.is_none() && sub.min.is_none(), "no min")?;
-        require(layout.element.packed_radix == 0 && sub.scale_multiplier == 1, "plane coded element")?;
+        require(layout.element.packed_radix == 0, "plane coded element")?;
         let scale_plane = sub.scale.low;
         let scale_digit = scale_plane.digits[0];
         let signed_bytes = sub.scale.code == FloatLayout::INT8;
+        require(!signed_bytes || sub.scale_multiplier == 1, "plain Q6_K scale")?;
         if signed_bytes {
             require(sub.scale.high.is_none() && sub.scale.bias == 0, "whole sub-block scale code")?;
             require(scale_plane.bits == 8 && scale_digit.radix == sub.count && u32::from(scale_digit.stride_bits) == BYTE_BITS, "one scale byte per sub-block")?;
@@ -253,6 +268,9 @@ impl<'a> Assembled<'a> {
         }
         let low = layout.element.low;
         let lane_digit = low.digits[0];
+        if let Some(LevelCodes { table: LevelTable::SignedGrid { lanes, .. }, .. }) = codes {
+            require(lane_digit.stride_bits == 0 && lane_digit.radix == u16::from(*lanes), "a grid code covers its lanes")?;
+        }
         require(u32::from(lane_digit.stride_bits) == BYTE_BITS, "lane digit steps one byte")?;
         let lane_elements = usize::from(lane_digit.radix);
         let run = geometry.run_elements;
@@ -489,7 +507,7 @@ mod tests {
     use proxima_numeric::LevelTable;
     use proxima_numeric::block_layout::BlockLayout;
 
-    use super::{LevelCodes, SubBlockMatvecGeometry, SubBlockMatvecRefusal, level_matvec_msl};
+    use super::{LevelCodes, SubBlockMatvecGeometry, SubBlockMatvecRefusal, level_matvec_msl, level_table_rendered};
     use crate::Codec;
 
     fn iq4_xs_table() -> LevelTable {
@@ -521,9 +539,50 @@ mod tests {
         assert_ne!(render(&BlockLayout::IQ4_XS, &table).expect("iq4_xs renders"), render(&moved, &table).expect("the moved layout renders"));
     }
 
+    fn level_table_of(codec: Codec) -> LevelTable {
+        let Codec::Levels(format) = codec else {
+            panic!("{codec:?} is a level-set format");
+        };
+        format.levels
+    }
+
+    #[test]
+    fn the_level_table_predicate_accepts_iq3_s_and_refuses_iq3_xxs() {
+        let iq3_s = level_table_of(Codec::Iq3S);
+        assert!(matches!(iq3_s, LevelTable::SignedGrid { sign_table: None, .. }), "iq3_s is a signed grid with a plane sign");
+        assert!(level_table_rendered(&iq3_s));
+        let iq3_xxs = level_table_of(Codec::Iq3Xxs);
+        assert!(matches!(iq3_xxs, LevelTable::SignedGrid { sign_table: Some(_), .. }), "iq3_xxs signs are a table index");
+        assert!(!level_table_rendered(&iq3_xxs));
+        assert!(level_table_rendered(&iq4_xs_table()));
+    }
+
+    #[test]
+    fn iq3_s_is_refused_by_the_lane_digit_stride_until_the_grid_walk_lands() {
+        let refusal = render(&BlockLayout::IQ3_S, &level_table_of(Codec::Iq3S)).expect_err("no half-rendered iq3_s kernel is emitted");
+        assert_eq!(refusal, SubBlockMatvecRefusal("lane digit steps one byte"));
+    }
+
+    #[test]
+    fn a_scale_multiplier_of_two_renders_the_doubled_scale_term() {
+        let mut doubled = BlockLayout::IQ4_XS;
+        doubled.sub.as_mut().expect("iq4_xs has sub-blocks").scale_multiplier = 2;
+        let source = render(&doubled, &iq4_xs_table()).expect("a doubled scale renders");
+        assert!(source.contains("float scale0 = (float)(2 * (int)("), "{source}");
+        let plain = render(&BlockLayout::IQ4_XS, &iq4_xs_table()).expect("iq4_xs renders");
+        assert!(!plain.contains("2 * (int)"), "{plain}");
+    }
+
+    #[test]
+    fn a_grid_table_on_a_byte_stride_layout_is_refused() {
+        let grid = LevelTable::SignedGrid { grid: &[], lanes: 4, sign: BlockLayout::IQ4_XS.element.low, sign_table: None, unit_shift: 0 };
+        let refusal = render(&BlockLayout::IQ4_XS, &grid).expect_err("a grid on a one-code-per-byte layout is refused");
+        assert_eq!(refusal, SubBlockMatvecRefusal("a grid code covers its lanes"));
+    }
+
     #[test]
     fn a_grid_level_table_is_refused() {
-        let grid = LevelTable::SignedGrid { grid: &[], lanes: 4, sign: BlockLayout::IQ4_XS.element.low, sign_table: None, unit_shift: 0 };
+        let grid = level_table_of(Codec::Iq3Xxs);
         assert!(render(&BlockLayout::IQ4_XS, &grid).is_err());
     }
 }
