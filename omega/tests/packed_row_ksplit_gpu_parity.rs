@@ -239,18 +239,37 @@ fn assert_ksplit_parity(target: Target, split: &str) {
     assert_eq!(outside, 0, "{}: {outside} split-{expected} outputs differ from the split-1 output by more than the f64-reference tolerance (max abs {max_abs:e})", weight.name);
 }
 
+fn assert_whole_block_lane_never_splits(target: Target, split: &str) {
+    let weight = read_weight(target);
+    let activation = activation(weight.reduction);
+
+    let baseline = run_under_split(&weight, &activation, "1");
+    let requested = run_under_split(&weight, &activation, split);
+
+    assert!(requested.keys.iter().all(|key| !key.contains("_ks")), "{}: a whole-block lane took a split under {split}: {:?}", weight.name, requested.keys);
+    assert_eq!(requested.keys, baseline.keys, "{}: the kernel identity moved under split {split}", weight.name);
+    assert_eq!(requested.values.len(), weight.rows, "one f32 per row");
+    assert!(requested.values.iter().all(|value| value.is_finite()), "a non-finite output would pass the bit comparison vacuously");
+    let differing = requested.values.iter().zip(&baseline.values).filter(|(got, base)| got.to_bits() != base.to_bits()).count();
+    assert_eq!(differing, 0, "{}: {differing} of {} outputs differ bit for bit from split 1", weight.name, weight.rows);
+}
+
 #[proxima::test]
 #[case::q8_0_attn_q_split_2("q8_attn_q", "2")]
 #[case::q8_0_attn_output_split_2("q8_attn_output", "2")]
 #[case::q8_0_attn_output_split_4("q8_attn_output", "4")]
-#[case::bf16_router_split_2("bf16_router", "2")]
-#[case::bf16_router_split_4("bf16_router", "4")]
-async fn split_k_matvec_matches_the_host_decode_and_the_unsplit_output(#[case] tensor: &str, #[case] split: &str) {
+async fn a_whole_block_lane_ignores_the_split_and_matches_split_1_bit_for_bit(#[case] tensor: &str, #[case] split: &str) {
     let target = match tensor {
         "q8_attn_q" => Target::Q8AttnQ,
         "q8_attn_output" => Target::Q8AttnOutput,
-        "bf16_router" => Target::Bf16Router,
         other => panic!("unknown target {other}"),
     };
-    assert_ksplit_parity(target, split);
+    assert_whole_block_lane_never_splits(target, split);
+}
+
+#[proxima::test]
+#[case::bf16_router_split_2("2")]
+#[case::bf16_router_split_4("4")]
+async fn split_k_matvec_matches_the_host_decode_and_the_unsplit_output(#[case] split: &str) {
+    assert_ksplit_parity(Target::Bf16Router, split);
 }

@@ -4489,20 +4489,19 @@ fn packed_row_body_splits_k(resolved: &BoundOp, block: &PackedRowBlock) -> bool 
     .splits_k()
 }
 
-/// The elements one lane owns per sweep for a body that splits K: a whole block, or the scalar run.
-fn packed_row_lane_unit(codec: Codec) -> Option<u64> {
-    match scalar_run_read(codec) {
-        Some(_) => Some(crate::sized::PACKED_ROW_SCALAR_RUN as u64),
-        None => codec
-            .block_layout()
-            .map(|layout| u64::from(layout.elements)),
-    }
+/// The elements one lane owns per sweep when it owns a short scalar run, the predicate
+/// (`scalar_run_read`) the emitter uses to pick the scalar-run body. `None` for a body whose lane
+/// owns a whole block: measured on flint (PROXNUM-551/553), splitting K there is 1.0-2.2x slower
+/// while the scalar-run router is 2.1x faster, so only the scalar run takes a split.
+pub(super) fn packed_row_lane_unit(codec: Codec) -> Option<u64> {
+    scalar_run_read(codec).map(|_| crate::sized::PACKED_ROW_SCALAR_RUN as u64)
 }
 
 /// The geometry the body selected for this op needs, derived from the selection inputs the
-/// emitter reads. A body that splits K takes `k_split_for(K / unit, SIMD_WIDTH, ksplit_max())`
-/// and, above 1, [`ksplit_rows`] rows per simdgroup; every other body, a multi-token fold, and a
-/// non-reduce op keep the codec's rows and a split of 1.
+/// emitter reads. A body that splits K and whose lane owns a scalar run takes
+/// `k_split_for(K / run, SIMD_WIDTH, ksplit_max())` and, above 1, [`ksplit_rows`] rows per
+/// simdgroup; every other body (block-per-lane included), a multi-token fold, and a non-reduce op
+/// keep the codec's rows and a split of 1.
 pub(crate) fn packed_row_geometry(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
