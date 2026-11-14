@@ -103,14 +103,14 @@ pub(super) fn cross_plan_block_reuse(
     resident_name: Option<&str>,
     block: &QuantizedBlock<'_>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
-    let QuantizedBlock::PackedStrided { bytes, .. } = block else {
-        let (pointer, byte_length) = block_identity_key(block);
-        return cross_plan_resident_reuse(resident_name, pointer as *const c_void, byte_length);
-    };
-    let (Some(name), Some(byte_length)) = (resident_name, block.packed_len()) else {
+    let (pointer, byte_length) = block_identity_key(block);
+    let pointer = pointer as *const c_void;
+    if !matches!(block, QuantizedBlock::PackedStrided { .. }) {
+        return cross_plan_resident_reuse(resident_name, pointer, byte_length);
+    }
+    let Some(name) = resident_name else {
         return Ok(None);
     };
-    let pointer = bytes.as_ptr().cast::<c_void>();
     let cached = RESIDENT_BUFFERS
         .with(|cache| resident_name_lookup(cache, name, pointer, byte_length))?;
     if cached.is_some() {
@@ -424,14 +424,14 @@ pub(super) fn upload_strided_runs(
     block: &QuantizedBlock<'_>,
     resident_name: Option<&str>,
 ) -> Result<MetalBuffer, MetalError> {
-    let (QuantizedBlock::PackedStrided { bytes, .. }, Some(runs), Some(byte_length)) =
-        (block, block.packed_runs(), block.packed_len())
+    let (QuantizedBlock::PackedStrided { bytes, .. }, Some(runs)) = (block, block.packed_runs())
     else {
         return Err(MetalError::CompileFailed {
             log: "strided upload offered a block without strided runs".to_string(),
         });
     };
-    let pointer = bytes.as_ptr().cast::<c_void>();
+    let (pointer, byte_length) = block_identity_key(block);
+    let pointer = pointer as *const c_void;
     if let QuantizedBlock::PackedStrided {
         expert_bytes,
         stride_bytes,
@@ -1166,6 +1166,49 @@ pub(super) mod strided_expert_half_tests {
             };
             assert_eq!(actual, expected.as_slice(), "part {part} device bytes");
         }
+    }
+
+    #[test]
+    fn a_strided_half_has_one_identity_first_byte_and_gathered_length() {
+        let fused = fused_gate_up();
+        for part in 0..2 {
+            let block = half_block(&fused, part);
+            let QuantizedBlock::PackedStrided { bytes, .. } = block else {
+                unreachable!("half_block builds a strided block");
+            };
+            assert_ne!(bytes.len(), HALF_BYTES * 2, "control: the span is not the gathered length");
+            assert_eq!(
+                super::block_identity_key(&block),
+                (bytes.as_ptr() as usize, HALF_BYTES * 2),
+                "part {part} keys on its first byte and the two gathered expert runs"
+            );
+        }
+    }
+
+    #[test]
+    fn a_strided_half_uploaded_twice_under_one_name_is_a_resident_hit() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_nocopy_cache_for_test();
+        reset_resident_cache_for_test();
+        let fused = fused_gate_up();
+        let name = "blk.0.ffn_gate_exps.weight";
+        let up = half_block(&fused, 1);
+        let uploads_before = super::COPYING_BUFFER_UPLOADS.get();
+        let reuses_before = super::RESIDENT_BUFFER_REUSES.get();
+
+        let first = upload_strided_runs(&device, &up, Some(name)).expect("first upload gathers");
+        let second = upload_strided_runs(&device, &up, Some(name)).expect("second upload hits");
+
+        assert_eq!(super::COPYING_BUFFER_UPLOADS.get(), uploads_before + 1, "one gather");
+        assert_eq!(super::RESIDENT_BUFFER_REUSES.get(), reuses_before + 1, "one cache hit");
+        assert_eq!(first.contents(), second.contents(), "the hit is the same buffer");
+        let (pointer, byte_length) = super::block_identity_key(&up);
+        let keyed = super::RESIDENT_BUFFERS.with(|cache| {
+            cache.borrow().get(name).map(|(cached_pointer, cached_length, _)| (*cached_pointer, *cached_length))
+        });
+        assert_eq!(keyed, Some((pointer, byte_length)), "the cache key is block_identity_key");
     }
 
     #[test]

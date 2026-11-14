@@ -2040,14 +2040,20 @@ pub(super) fn resident_name(plan: &Plan, node: NodeId) -> Option<&str> {
 
 /// A block's own `(pointer, byte_length)` -- every [`QuantizedBlock`] variant
 /// is a borrowed slice, so this is the address identity
-/// [`block_buffer_reusable`] compares, never the bytes themselves.
+/// [`block_buffer_reusable`] compares, never the bytes themselves. A
+/// `PackedStrided` block's length is its gathered `packed_len()`, not the span
+/// over the mapping: that is the key [`upload_strided_runs`] caches its buffer
+/// under, so this one identity serves both the plan-local compare and the
+/// name caches.
 pub(super) fn block_identity_key(block: &QuantizedBlock<'_>) -> (usize, usize) {
     match block {
         QuantizedBlock::Float32(data) => (data.as_ptr().cast::<()>() as usize, size_of_val(*data)),
         QuantizedBlock::Int32(data) => (data.as_ptr().cast::<()>() as usize, size_of_val(*data)),
-        QuantizedBlock::Packed { bytes, .. } | QuantizedBlock::PackedStrided { bytes, .. } => {
-            (bytes.as_ptr().cast::<()>() as usize, bytes.len())
-        }
+        QuantizedBlock::Packed { bytes, .. } => (bytes.as_ptr().cast::<()>() as usize, bytes.len()),
+        QuantizedBlock::PackedStrided { bytes, .. } => (
+            bytes.as_ptr().cast::<()>() as usize,
+            block.packed_len().unwrap_or(bytes.len()),
+        ),
     }
 }
 
