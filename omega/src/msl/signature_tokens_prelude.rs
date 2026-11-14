@@ -336,32 +336,22 @@ pub(crate) fn device_scalar_token(dtype: DType) -> Option<&'static str> {
 /// unchanged from before this existed.
 #[cfg(test)]
 pub(super) fn entry_name(resolved: &BoundOp, numeric_policy: NumericPolicy) -> String {
-    entry_name_with_tile_height(
-        resolved,
-        numeric_policy,
-        AttentionTileHeightSelection::Legacy,
-    )
+    entry_name_with_knobs(resolved, numeric_policy, &EmitKnobs::default())
 }
 
 #[cfg(test)]
-pub(super) fn entry_name_with_tile_height(
+pub(super) fn entry_name_with_knobs(
     resolved: &BoundOp,
     numeric_policy: NumericPolicy,
-    tile_height_selection: AttentionTileHeightSelection,
+    knobs: &EmitKnobs,
 ) -> String {
-    entry_name_with_schedule(
-        resolved,
-        numeric_policy,
-        AttentionRowSchedule {
-            tile_height: tile_height_selection,
-            ..AttentionRowSchedule::legacy()
-        },
-    )
+    entry_name_with_schedule(resolved, numeric_policy, knobs, AttentionRowSchedule::legacy())
 }
 
 pub(super) fn entry_name_with_schedule(
     resolved: &BoundOp,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     schedule: AttentionRowSchedule,
 ) -> String {
     let rank = resolved.extents.len();
@@ -592,7 +582,7 @@ pub(super) fn entry_name_with_schedule(
             ..
         } => {
             let rows_token = softmax_weights_rows_token(*query_rows);
-            if softmax_runtime_rows_override() {
+            if knobs.softmax_runtime_rows {
                 format!(
                     "omega_cached_softmax_weights_rtrows_a{attention_rows}{rows_token}_d{head_dim}"
                 )

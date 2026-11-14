@@ -18,6 +18,7 @@ use core::fmt::Write as _;
 pub(super) fn render_cached_softmax_weights(
     resolved: &BoundOp,
     entry: &str,
+    knobs: &EmitKnobs,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedSoftmaxWeights {
         operands,
@@ -37,7 +38,7 @@ pub(super) fn render_cached_softmax_weights(
     #[cfg(feature = "metal-attn-split-rows")]
     if matches!(&resolved.kind, BoundOpKind::CachedSoftmaxWeights { query_rows, .. } if *query_rows != 1)
     {
-        return render_cached_softmax_weights_rows(resolved, entry);
+        return render_cached_softmax_weights_rows(resolved, entry, knobs);
     }
     if *new_key_rows != 1 {
         return Err(EmitError::CachedSoftmaxWeightsNotSupported {
@@ -82,14 +83,14 @@ pub(super) fn render_cached_softmax_weights(
     let value_stride_row = value_layout.strides[0];
     let value_stride_dim = value_layout.strides[1];
 
-    // `PROXIMA_SOFTMAX_RUNTIME_ROWS=1`: reads `cached_key_rows` off the
+    // `knobs.softmax_runtime_rows`: reads `cached_key_rows` off the
     // runtime `Uniforms` buffer (mirrors `render_cached_attention`'s own
     // `6c48b22f` `in8[0]` precedent) instead of baking it as a `constexpr`
     // loop bound -- `width` (this op's own dispatch/threadgroup sizing) stays
     // a compiled token either way, computed above from the Rust-side value,
     // never from this runtime read. Default off keeps every emitted byte
     // identical to before this switch existed.
-    let runtime_rows = softmax_runtime_rows_override();
+    let runtime_rows = knobs.softmax_runtime_rows;
     let uniforms_struct = if runtime_rows {
         "struct Uniforms { long total_elements; long cached_key_rows; };\n\n"
     } else {
@@ -255,6 +256,7 @@ pub(super) fn render_cached_softmax_weights(
 fn render_cached_softmax_weights_rows(
     resolved: &BoundOp,
     entry: &str,
+    knobs: &EmitKnobs,
 ) -> Result<String, EmitError> {
     let BoundOpKind::CachedSoftmaxWeights {
         operands,
@@ -313,7 +315,7 @@ fn render_cached_softmax_weights_rows(
         return Err(unsupported());
     };
 
-    let runtime_rows = softmax_runtime_rows_override();
+    let runtime_rows = knobs.softmax_runtime_rows;
     let uniforms_struct = if runtime_rows {
         "struct Uniforms { long total_elements; long cached_key_rows; };\n\n"
     } else {

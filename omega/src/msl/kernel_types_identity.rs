@@ -2859,46 +2859,6 @@ pub(super) fn packed_row_reduction_bound_token(metal: &MetalOnlyExtras) -> Strin
     }
 }
 
-/// `PROXIMA_SOFTMAX_RUNTIME_ROWS=1` A/B switch: [`BoundOpKind::
-/// CachedSoftmaxWeights`]'s `cached_key_rows` loop bound is read off the
-/// runtime `Uniforms` buffer (`render_cached_attention`'s own `6c48b22f`
-/// `in8[0]` precedent) instead of baked as a compiled `constexpr` literal.
-/// Default off; unset, empty, or any value other than `"1"` keeps today's
-/// literal-bound emit.
-#[cfg(feature = "std")]
-pub(crate) fn softmax_runtime_rows_override() -> bool {
-    let active =
-        matches!(std::env::var("PROXIMA_SOFTMAX_RUNTIME_ROWS"), Ok(value) if value.trim() == "1");
-    log_softmax_runtime_rows_once(active);
-    active
-}
-
-/// Print whether the softmax-runtime-rows experiment fired exactly once per
-/// process, matching [`log_multi_row_index32_once`]'s own posture. Gated on
-/// `instrument` alone -- the override itself stays `std`-only and fires
-/// regardless of `instrument`.
-#[cfg(feature = "instrument")]
-fn log_softmax_runtime_rows_once(active: bool) {
-    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    LOGGED.get_or_init(|| {
-        let source = if active { "env" } else { "default" };
-        proxima_telemetry::debug!(
-            override_name = "softmax_runtime_rows",
-            active,
-            source,
-            "softmax runtime-rows override resolved"
-        );
-    });
-}
-
-#[cfg(all(feature = "std", not(feature = "instrument")))]
-fn log_softmax_runtime_rows_once(_active: bool) {}
-
-#[cfg(not(feature = "std"))]
-pub(crate) const fn softmax_runtime_rows_override() -> bool {
-    false
-}
-
 /// For every slot of `operands`, the first slot that reads the same data: the
 /// same source node at the same layout through the same gather. A fused body
 /// that mentions one tensor several times (`gelu` reads its gate five times)

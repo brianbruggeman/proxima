@@ -1761,8 +1761,14 @@ fn expert_source_uses_descriptor_codec_instead_of_checkpoint_codec() {
     let weight_node = bound.operands()[0].0;
     let mut q4k = BTreeMap::new();
     q4k.insert(weight_node, Codec::Q4K);
-    let kernel = emit_with_expert_sources(&bound, &q4k, NumericPolicy::default(), weight_node)
-        .expect("emits expert source kernel");
+    let kernel = emit_with_expert_sources(
+        &bound,
+        &q4k,
+        NumericPolicy::default(),
+        &EmitKnobs::default(),
+        weight_node,
+    )
+    .expect("emits expert source kernel");
     assert!(kernel.source.contains("mixed_expert_element_from_offset"));
     assert!(
         kernel
@@ -1793,6 +1799,7 @@ fn uniform_expert_source_retains_packed_row_decoder() {
         &bound,
         &q4k,
         NumericPolicy::default(),
+        &EmitKnobs::default(),
         weight_node,
         Codec::Q4K,
     )
@@ -2914,6 +2921,7 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
         &bound,
         &packed,
         admitted_policy,
+        &ambient_knobs(),
         &admitted.grid,
         FloatLayout::BF16,
     );
@@ -2924,6 +2932,7 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
         &bound,
         &packed,
         admitted_policy,
+        &ambient_knobs(),
         &admitted.grid,
         FloatLayout::BF32,
     )
@@ -2946,6 +2955,7 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
         &bound,
         &packed,
         NumericPolicy::bit_exact(),
+        &ambient_knobs(),
         &denied.grid,
         FloatLayout::BF16,
     );
@@ -5097,6 +5107,7 @@ fn expert_source_emission_appends_payload_and_descriptor_bindings() {
         &bound,
         &BTreeMap::new(),
         NumericPolicy::default(),
+        &EmitKnobs::default(),
         bound.operands()[0].0,
     )
     .expect("expert-source ABI emits");
@@ -5189,6 +5200,7 @@ fn routed_q4k_reduce_kernel() -> Kernel {
         &bound,
         &packed,
         NumericPolicy::default(),
+        &EmitKnobs::default(),
         bound.operands()[0].0,
     )
     .expect("routed reduction emits")
@@ -7560,18 +7572,31 @@ fn cached_softmax_weights_render_is_deterministic_and_width_dependent() {
     let wide_a = cached_softmax_weights_op(8, 512, 256);
     let wide_b = cached_softmax_weights_op(8, 512, 256);
 
-    let narrow_text_a =
-        render_cached_softmax_weights(&narrow_a, "omega_cached_softmax_weights_c32_a8_d256")
-            .expect("narrow shape renders");
-    let narrow_text_b =
-        render_cached_softmax_weights(&narrow_b, "omega_cached_softmax_weights_c32_a8_d256")
-            .expect("narrow shape renders (second construction)");
-    let wide_text_a =
-        render_cached_softmax_weights(&wide_a, "omega_cached_softmax_weights_c512_a8_d256")
-            .expect("wide shape renders");
-    let wide_text_b =
-        render_cached_softmax_weights(&wide_b, "omega_cached_softmax_weights_c512_a8_d256")
-            .expect("wide shape renders (second construction)");
+    let knobs = EmitKnobs::default();
+    let narrow_text_a = render_cached_softmax_weights(
+        &narrow_a,
+        "omega_cached_softmax_weights_c32_a8_d256",
+        &knobs,
+    )
+    .expect("narrow shape renders");
+    let narrow_text_b = render_cached_softmax_weights(
+        &narrow_b,
+        "omega_cached_softmax_weights_c32_a8_d256",
+        &knobs,
+    )
+    .expect("narrow shape renders (second construction)");
+    let wide_text_a = render_cached_softmax_weights(
+        &wide_a,
+        "omega_cached_softmax_weights_c512_a8_d256",
+        &knobs,
+    )
+    .expect("wide shape renders");
+    let wide_text_b = render_cached_softmax_weights(
+        &wide_b,
+        "omega_cached_softmax_weights_c512_a8_d256",
+        &knobs,
+    )
+    .expect("wide shape renders (second construction)");
 
     assert_eq!(
         narrow_text_a, narrow_text_b,
@@ -7613,10 +7638,13 @@ fn cached_softmax_weights_render_is_deterministic_and_width_dependent() {
 #[test]
 fn softmax_runtime_rows_default_off_is_byte_identical_to_the_literal_bound_emit() {
     let narrow = cached_softmax_weights_op(8, 32, 256);
-    let text = temp_env::with_var("PROXIMA_SOFTMAX_RUNTIME_ROWS", None::<&str>, || {
-        render_cached_softmax_weights(&narrow, "omega_cached_softmax_weights_c32_a8_d256")
-            .expect("narrow shape renders with the switch off")
-    });
+    let knobs = EmitKnobs::default();
+    let text = render_cached_softmax_weights(
+        &narrow,
+        "omega_cached_softmax_weights_c32_a8_d256",
+        &knobs,
+    )
+    .expect("narrow shape renders with the switch off");
     let expected_tail = "struct Uniforms { long total_elements; };\n\n\
 kernel void omega_cached_softmax_weights_c32_a8_d256(\n\
 \tdevice const float* cached_scores [[buffer(0)]],\n\
@@ -7675,13 +7703,18 @@ kernel void omega_cached_softmax_weights_c32_a8_d256(\n\
         text.ends_with(expected_tail),
         "switch-off emit must stay byte-identical to the literal-bound kernel:\n{text}"
     );
-    let entry = entry_name(&narrow, NumericPolicy::bit_exact());
+    let entry = entry_name_with_knobs(&narrow, NumericPolicy::bit_exact(), &knobs);
     assert_eq!(
         entry, "omega_cached_softmax_weights_c32_a8_d256",
         "switch-off entry name must keep the c{{n}} token"
     );
-    let key = kernel_cache_key(&narrow, &BTreeMap::new(), NumericPolicy::default())
-        .expect("cache key computes with the switch off");
+    let key = kernel_cache_key_with_knobs(
+        &narrow,
+        &BTreeMap::new(),
+        NumericPolicy::default(),
+        &knobs,
+    )
+    .expect("cache key computes with the switch off");
     assert!(
         key.contains("_c32_"),
         "switch-off cache key must keep the c{{n}} token: {key}"
@@ -7703,18 +7736,35 @@ kernel void omega_cached_softmax_weights_c32_a8_d256(\n\
 fn softmax_runtime_rows_on_changes_only_the_bound_and_the_name() {
     let narrow = cached_softmax_weights_op(8, 32, 256);
 
-    let off_text = temp_env::with_var("PROXIMA_SOFTMAX_RUNTIME_ROWS", None::<&str>, || {
-        render_cached_softmax_weights(&narrow, "omega_cached_softmax_weights_c32_a8_d256")
-            .expect("switch-off renders")
-    });
-    let (on_text, on_entry, on_key) =
-        temp_env::with_var("PROXIMA_SOFTMAX_RUNTIME_ROWS", Some("1"), || {
-            let entry = entry_name(&narrow, NumericPolicy::bit_exact());
-            let text = render_cached_softmax_weights(&narrow, &entry).expect("switch-on renders");
-            let key = kernel_cache_key(&narrow, &BTreeMap::new(), NumericPolicy::default())
-                .expect("switch-on cache key computes");
-            (text, entry, key)
-        });
+    let off_knobs = EmitKnobs::default();
+    let on_knobs = EmitKnobs::default().with_softmax_runtime_rows(true);
+    let off_text = render_cached_softmax_weights(
+        &narrow,
+        "omega_cached_softmax_weights_c32_a8_d256",
+        &off_knobs,
+    )
+    .expect("switch-off renders");
+    let on_entry = entry_name_with_knobs(&narrow, NumericPolicy::bit_exact(), &on_knobs);
+    let on_text = render_cached_softmax_weights(&narrow, &on_entry, &on_knobs)
+        .expect("switch-on renders");
+    let on_key = kernel_cache_key_with_knobs(
+        &narrow,
+        &BTreeMap::new(),
+        NumericPolicy::default(),
+        &on_knobs,
+    )
+    .expect("switch-on cache key computes");
+    let off_key = kernel_cache_key_with_knobs(
+        &narrow,
+        &BTreeMap::new(),
+        NumericPolicy::default(),
+        &off_knobs,
+    )
+    .expect("switch-off cache key computes");
+    assert_ne!(
+        off_key, on_key,
+        "two sources that differ by the runtime-rows switch must not share a pipeline key"
+    );
 
     assert_eq!(
         on_entry, "omega_cached_softmax_weights_rtrows_a8_d256",
@@ -7778,6 +7828,37 @@ fn softmax_runtime_rows_on_changes_only_the_bound_and_the_name() {
         off_normalized, on_normalized,
         "switch-on must change only the entry name, the bound expression, and the uniform declaration"
     );
+}
+
+/// `emit_with_attention_variant` and `inspect_attention_variant` keep their
+/// signatures on default knobs because a `CachedAttention` kernel reads none
+/// of the emit switches: the same op under the default record and under a
+/// record with every field moved renders one source, one entry and one key.
+/// The control below must differ, or the equality would hold of any input.
+#[test]
+fn cached_attention_emit_and_key_do_not_depend_on_any_emit_knob() {
+    let attention = cached_attention_op();
+    let packed = BTreeMap::new();
+    let policy = NumericPolicy::default();
+    let default_knobs = EmitKnobs::default();
+    let moved_knobs = emit_knobs::every_knob_moved_by_the_builder();
+    assert_ne!(
+        default_knobs, moved_knobs,
+        "the control record must differ from the default or this test proves nothing"
+    );
+
+    let default_kernel = emit_with_knobs(&attention, &packed, policy, &default_knobs)
+        .expect("attention emits under the default knobs");
+    let moved_kernel = emit_with_knobs(&attention, &packed, policy, &moved_knobs)
+        .expect("attention emits under every knob moved");
+    let default_key = kernel_cache_key_with_knobs(&attention, &packed, policy, &default_knobs)
+        .expect("attention key under the default knobs");
+    let moved_key = kernel_cache_key_with_knobs(&attention, &packed, policy, &moved_knobs)
+        .expect("attention key under every knob moved");
+
+    assert_eq!(default_kernel.source, moved_kernel.source);
+    assert_eq!(default_kernel.entry, moved_kernel.entry);
+    assert_eq!(default_key, moved_key);
 }
 
 /// A grid wider than the 32 bits of `uint gid [[thread_position_in_grid]]`
@@ -8781,8 +8862,14 @@ mod encode_allocation_budget {
         let before = allocations();
         let (_, grid) = kernel_dispatch_shape(&case.bound, &case.packed, policy)
             .expect("the fixture's grid is describable");
-        let key = kernel_cache_key_for_grid(&case.bound, &case.packed, policy, &grid)
-            .expect("the fixture has a cache key");
+        let key = kernel_cache_key_for_grid(
+            &case.bound,
+            &case.packed,
+            policy,
+            &EmitKnobs::default(),
+            &grid,
+        )
+        .expect("the fixture has a cache key");
         let count = allocations() - before;
         core::hint::black_box(key);
         count
@@ -10947,12 +11034,23 @@ mod expert_grouped_route_segments {
             kernel_dispatch_shape(&adjacent, &packed, NumericPolicy::default())
                 .expect("adjacent grouped shape has a grid");
         assert_eq!(bound_grid, adjacent_grid);
-        let bound_key =
-            kernel_cache_key_for_grid(&bound, &packed, NumericPolicy::default(), &bound_grid)
-                .expect("first grouped shape has a pipeline identity");
-        let adjacent_key =
-            kernel_cache_key_for_grid(&adjacent, &packed, NumericPolicy::default(), &adjacent_grid)
-                .expect("adjacent grouped shape has a pipeline identity");
+        let knobs = EmitKnobs::default();
+        let bound_key = kernel_cache_key_for_grid(
+            &bound,
+            &packed,
+            NumericPolicy::default(),
+            &knobs,
+            &bound_grid,
+        )
+        .expect("first grouped shape has a pipeline identity");
+        let adjacent_key = kernel_cache_key_for_grid(
+            &adjacent,
+            &packed,
+            NumericPolicy::default(),
+            &knobs,
+            &adjacent_grid,
+        )
+        .expect("adjacent grouped shape has a pipeline identity");
         assert_ne!(
             bound_key, adjacent_key,
             "the source bakes token count into scratch_base"

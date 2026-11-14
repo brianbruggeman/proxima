@@ -834,6 +834,11 @@ pub struct Plan {
     /// `msl::context_chunks_for` (the cross-simdgroup attention
     /// context-chunk merge) consults it via [`Plan::numeric_policy`].
     pub(super) numeric_policy: NumericPolicy,
+    /// The emit switches every kernel this plan renders, keys and packs
+    /// uniforms under -- resolved once at construction (`plan_named*` read the
+    /// process environment, `plan_named_with_config*` take
+    /// [`RuntimeConfig::emit`]), so a render and its cache key read one record.
+    pub(super) emit_knobs: EmitKnobs,
     /// Operand fragment format used by dense tiled matrix multiplication.
     pub(super) dense_mma_input_layout: Option<proxima_numeric::float_layout::FloatLayout>,
     /// MMA selection that keys every attention pipeline this plan resolves.
@@ -1247,7 +1252,12 @@ pub(super) fn build_merged_dispatch(
     {
         return Ok(None);
     }
-    let mut kernel = crate::msl::emit(leader, &plan.packed_operands, plan.numeric_policy)?;
+    let mut kernel = crate::msl::emit_with_knobs(
+        leader,
+        &plan.packed_operands,
+        plan.numeric_policy,
+        &plan.emit_knobs,
+    )?;
     // the merge splice rewrites a scalar `gid` and addresses members through
     // its z axis, which a threadgroup-coordinate kernel does not have (the
     // splice returns an error for one --
@@ -1284,6 +1294,7 @@ pub(super) fn build_merged_dispatch(
         leader,
         &plan.packed_operands,
         plan.numeric_policy,
+        &plan.emit_knobs,
         &kernel.grid,
     )?;
     cache_key.push(plan.math_mode.cache_token());
@@ -1739,6 +1750,7 @@ pub(super) fn handle_merged_position(
                 &pack_uniforms_with_schedule(
                     bound,
                     plan.numeric_policy,
+                    &plan.emit_knobs,
                     plan.attention_row_schedule,
                 )?,
             )?;
@@ -2510,6 +2522,7 @@ impl Plan {
                         bound,
                         &self.packed_operands,
                         self.numeric_policy,
+                        &self.emit_knobs,
                         &grid,
                     )
                 } else {
@@ -2517,6 +2530,7 @@ impl Plan {
                         bound,
                         &self.packed_operands,
                         self.numeric_policy,
+                        &self.emit_knobs,
                         &grid,
                         dense_mma_input_layout,
                     )

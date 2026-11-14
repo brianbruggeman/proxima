@@ -987,7 +987,7 @@ pub(crate) fn emit_cached_attention_merge_with_schedule(
     validate(resolved)?;
     let entry = alloc::format!(
         "{}_merge",
-        entry_name_with_schedule(resolved, numeric_policy, schedule)
+        entry_name_with_schedule(resolved, numeric_policy, &EmitKnobs::default(), schedule)
     );
     let source = render_cached_attention_merge(resolved, &entry)?;
     let total_elements = checked_product(resolved.node, resolved.extents.iter().copied())?
