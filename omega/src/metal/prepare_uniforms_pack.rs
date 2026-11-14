@@ -20,6 +20,9 @@ pub(super) struct Prepared {
     pub(super) packed_operands: PackedOperands,
     pub(super) resolved: Vec<BoundOp>,
     pub(super) retires: Vec<Vec<NodeId>>,
+    /// First position of each wavefront level over `resolved`; empty when the schedule is off or
+    /// was declined, in which case chunk boundaries stay in program order.
+    pub(super) level_starts: Vec<u32>,
     /// [`node_last_reader`]'s dense table over `resolved` -- every retirement
     /// decision below is `last_reader[node] == position`, one array read, in
     /// place of a per-op forward scan over remaining ops.
@@ -73,7 +76,7 @@ pub(super) fn prepare(
         symbols,
         blocks,
         outputs,
-        (numeric_policy, fuse_cached_attention, true),
+        (numeric_policy, fuse_cached_attention, true, false),
         placed_input_nodes,
     )
 }
@@ -83,10 +86,10 @@ pub(super) fn prepare_with_options(
     symbols: &[u64],
     blocks: &[QuantizedBlock<'_>],
     outputs: &[NodeId],
-    policy: (NumericPolicy, bool, bool),
+    policy: (NumericPolicy, bool, bool, bool),
     placed_input_nodes: &[NodeId],
 ) -> Result<Prepared, MetalError> {
-    let (numeric_policy, fuse_cached_attention, allow_fusion) = policy;
+    let (numeric_policy, fuse_cached_attention, allow_fusion, wavefront) = policy;
     // this driver binds with `accumulator_narrowing` (see below), so an f64
     // accumulation island never reaches a device buffer: narrow once here so
     // the dtype gate, the inferred shapes and the bind all read one program
@@ -382,9 +385,32 @@ pub(super) fn prepare_with_options(
 
     #[cfg(feature = "instrument")]
     let retire_started = read_ticks();
-    let retires = node_retirement(&resolved, &effective_outputs);
+    let mut level_starts = Vec::new();
+    if wavefront {
+        let chains = chain_keys(&resolved, numeric_policy, placed_input_nodes, &effective_outputs);
+        let cap_bytes =
+            ARENA_TRANSIENT_CAP.saturating_mul(plan_bind_row_count(symbols) as usize);
+        if let Some((reordered, starts)) =
+            wavefront_schedule(&resolved, &chains, program.len(), &effective_outputs, cap_bytes)
+        {
+            resolved = reordered;
+            level_starts = starts;
+        }
+    }
+    let mut retires = node_retirement(&resolved, &effective_outputs);
+    if !level_starts.is_empty() {
+        retires = defer_retires_to_level_end(retires, &level_starts);
+    }
     #[cfg(not(feature = "metal-buffer-pool"))]
-    let last_reader = node_last_reader(&resolved, program.len());
+    let mut last_reader = node_last_reader(&resolved, program.len());
+    #[cfg(not(feature = "metal-buffer-pool"))]
+    for (position, retired) in retires.iter().enumerate() {
+        if !level_starts.is_empty() {
+            for node in retired {
+                last_reader[node.0 as usize] = position as u32;
+            }
+        }
+    }
     let index_nodes = index_node_ids(program);
     let live_block_inputs = live_block_inputs(&block_nodes, &resolved, &effective_outputs);
     #[cfg(feature = "instrument")]
@@ -398,6 +424,7 @@ pub(super) fn prepare_with_options(
         packed_operands,
         resolved,
         retires,
+        level_starts,
         #[cfg(not(feature = "metal-buffer-pool"))]
         last_reader,
         index_nodes,
