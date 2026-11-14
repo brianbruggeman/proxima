@@ -13,6 +13,8 @@
 
 use alloc::vec::Vec;
 
+use crate::rope_scaling::rope_cos_sin;
+
 /// Builds the sliding-window layers' own RoPE `cos`/`sin` table --
 /// [`crate::lowering::sliding_rope_inputs`] feeds this
 /// into the `rope_cos_swa`/`rope_sin_swa` leaves
@@ -36,8 +38,9 @@ pub fn sliding_rope_table(
         for pair in 0..pairs {
             let theta =
                 position as f32 * freq_base.powf(-((2 * pair) as f32) / dimension_count as f32);
-            cos[offset * pairs + pair] = theta.cos();
-            sin[offset * pairs + pair] = theta.sin();
+            let (cos_value, sin_value) = rope_cos_sin(theta, 1.0);
+            cos[offset * pairs + pair] = cos_value;
+            sin[offset * pairs + pair] = sin_value;
         }
     }
     (cos, sin)

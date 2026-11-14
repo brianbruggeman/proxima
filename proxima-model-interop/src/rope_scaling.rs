@@ -100,6 +100,22 @@ fn round_to_f32(value: f64) -> f32 {
     value as f32
 }
 
+/// The one rule for a CPU `RoPE` table entry: `(cos, sin)` of `theta`,
+/// each times `scale`, evaluated in `f64` and rounded to `f32` once.
+/// An `f32` `cosf`/`sinf` pair is fused into one `__sincosf_stret` call
+/// at opt-level 3 and called separately in debug, which differs by an
+/// ulp; the `f64` evaluation is exact enough that either path rounds to
+/// the same `f32`, so the table is a function of its inputs alone. `scale`
+/// is applied before the rounding (one rounding, not two); pass `1.0`
+/// when no `YaRN` `attention_factor` applies.
+#[cfg(feature = "std")]
+#[must_use]
+pub(crate) fn rope_cos_sin(theta: f32, scale: f32) -> (f32, f32) {
+    let (sin, cos) = f64::from(theta).sin_cos();
+    let scale = f64::from(scale);
+    (round_to_f32(cos * scale), round_to_f32(sin * scale))
+}
+
 /// `value` as the nearest `f32`, the same rounding `value as f32` performs;
 /// the lint-clean spelling for the `u32` token ids and head indices the
 /// position table converts.
@@ -277,10 +293,61 @@ fn required_f32(parsed: &ParsedGguf, key: &str) -> Result<f32, InteropError> {
 mod tests {
     use proxima_gguf::value::MetadataValue;
 
-    use super::RopeScaling;
+    use super::{RopeScaling, rope_cos_sin};
     use crate::error::InteropError;
     use crate::serving::{ContextLength, ServingConfig, resolve_context_length};
     use crate::test_support::parsed_header;
+
+    fn reference_table(head_dim: u32, base: f32, positions: u32) -> Vec<(u32, u32)> {
+        let pairs = head_dim / 2;
+        let theta_scale = base.powf(-2.0f32 / head_dim as f32);
+        let mut entries = Vec::new();
+        for position in 0..positions {
+            let mut theta = position as f32;
+            for _ in 0..pairs {
+                let wide = f64::from(theta);
+                let cos = wide.cos() as f32;
+                let sin = wide.sin() as f32;
+                entries.push((cos.to_bits(), sin.to_bits()));
+                theta *= theta_scale;
+            }
+        }
+        entries
+    }
+
+    fn table(head_dim: u32, base: f32, positions: u32) -> Vec<(u32, u32)> {
+        let pairs = head_dim / 2;
+        let theta_scale = base.powf(-2.0f32 / head_dim as f32);
+        let mut entries = Vec::new();
+        for position in 0..positions {
+            let mut theta = position as f32;
+            for _ in 0..pairs {
+                let (cos, sin) = rope_cos_sin(theta, 1.0);
+                entries.push((cos.to_bits(), sin.to_bits()));
+                theta *= theta_scale;
+            }
+        }
+        entries
+    }
+
+    #[test]
+    fn rope_table_head_dim_256_base_1e4_equals_f64_reference_bit_for_bit() {
+        assert_eq!(table(256, 1.0e4, 128), reference_table(256, 1.0e4, 128));
+    }
+
+    #[test]
+    fn rope_table_head_dim_512_base_1e6_equals_f64_reference_bit_for_bit() {
+        assert_eq!(table(512, 1.0e6, 128), reference_table(512, 1.0e6, 128));
+    }
+
+    #[test]
+    fn rope_scale_is_one_rounding_of_the_f64_product() {
+        let (cos, sin) = rope_cos_sin(1.25, 1.0693147);
+        let wide = f64::from(1.25f32);
+        let scale = f64::from(1.0693147f32);
+        assert_eq!(cos.to_bits(), ((wide.cos() * scale) as f32).to_bits());
+        assert_eq!(sin.to_bits(), ((wide.sin() * scale) as f32).to_bits());
+    }
 
     const QWEN3_TRAINED_CONTEXT: u32 = 40_960;
 

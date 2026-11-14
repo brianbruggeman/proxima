@@ -4383,8 +4383,9 @@ mod real_openchat_file {
             for pair in 0..pairs {
                 let theta =
                     position * rope_freq_base.powf(-((2 * pair) as f32) / (head_dim as f32));
-                cos[offset * pairs + pair] = theta.cos();
-                sin[offset * pairs + pair] = theta.sin();
+                let (cos_value, sin_value) = crate::rope_scaling::rope_cos_sin(theta, 1.0);
+                cos[offset * pairs + pair] = cos_value;
+                sin[offset * pairs + pair] = sin_value;
             }
         }
 

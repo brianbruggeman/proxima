@@ -13,6 +13,7 @@ use crate::cuda_async::{
     CudaGpuService, CudaPlanLease, CudaPlanOptions, OwnedBlock, OwnedGpuInputs,
     validate_cuda_plan_options,
 };
+use crate::rope_scaling::rope_cos_sin;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use proxima_core::ProximaError;
 use proxima_core::ServingState;
@@ -2463,8 +2464,9 @@ pub(crate) fn build_position_inputs(
             if let Some(factor) = rope_freqs.and_then(|freqs| freqs.get(pair)) {
                 theta /= factor;
             }
-            cos[offset * pairs + pair] = theta.cos() * attention_factor;
-            sin[offset * pairs + pair] = theta.sin() * attention_factor;
+            let (cos_value, sin_value) = rope_cos_sin(theta, attention_factor);
+            cos[offset * pairs + pair] = cos_value;
+            sin[offset * pairs + pair] = sin_value;
             iterated_theta *= theta_scale;
         }
     }
