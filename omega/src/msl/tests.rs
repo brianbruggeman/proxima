@@ -6645,13 +6645,8 @@ async fn only_a_lane_owning_a_scalar_run_has_a_k_split_unit(
 }
 
 #[test]
-fn the_default_geometry_is_unsplit_and_leaves_every_kernel_key_without_a_split_suffix() {
-    let cases = [
-        (Codec::Q8_0, 2048, 64),
-        (Codec::BFloat16, 2048, 256),
-        (Codec::Float16, 2048, 256),
-        (Codec::Q4K, 2048, 64),
-    ];
+fn a_whole_block_lane_default_geometry_is_unsplit_and_leaves_its_kernel_key_without_a_split_suffix() {
+    let cases = [(Codec::Q8_0, 2048, 64), (Codec::Q4K, 2048, 64)];
 
     for (codec, reduction, rows) in cases {
         let bound = matmul_op(1, reduction, rows);
@@ -11773,7 +11768,7 @@ async fn scalar_weight_at_reduce_896_is_admitted_and_emits_the_run_body(#[case] 
     assert_eq!(block.codec, codec);
     assert!(kernel.source.contains(pointer), "{codec:?} binds the run pointer as {pointer}");
     assert!(kernel.source.contains(term), "{codec:?} folds value * act per term");
-    let tail = if cfg!(feature = "metal-q4k-split-k") {
+    let tail = if cfg!(feature = "metal-q4k-split-k") || super::ksplit_max() > 1 {
         "partial_sums["
     } else {
         "reduced_row0"
