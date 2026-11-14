@@ -108,7 +108,7 @@ impl BufferArena {
 /// `bindings` does not name, so the arena gives each a dedicated slot and
 /// `encode_op` falls back to a fresh allocation only when the caller did not
 /// resolve them.
-fn extra_output_nodes(bound: &BoundOp) -> impl Iterator<Item = (NodeId, usize)> + '_ {
+pub(super) fn extra_output_nodes(bound: &BoundOp) -> impl Iterator<Item = (NodeId, usize)> + '_ {
     let token_count = bound.extents.iter().product::<u64>() as usize;
     let softmax = match &bound.kind {
         BoundOpKind::CachedSoftmaxWeights {
@@ -6212,16 +6212,16 @@ pub(super) mod hazard_tracker_tests {
         let mut hazards: HazardTracker<&str> = HazardTracker::new();
 
         // encode `b = f(a)`: `a` is a fresh input, never written -> no hazard.
-        assert!(!hazard_step(&mut hazards, &["a"], "b"));
+        assert!(!hazard_step(&mut hazards, &["a"], &["b"]));
 
         // encode `c = g(a)`: `a` was only READ (by `b`'s own encode), never
         // WRITTEN, and `c` is a fresh output nothing has touched -> no hazard.
-        assert!(!hazard_step(&mut hazards, &["a"], "c"));
+        assert!(!hazard_step(&mut hazards, &["a"], &["c"]));
 
         // encode `d = h(b, c)`: both inputs were WRITTEN since the last
         // barrier (by the two steps above) -> a barrier is required.
         assert!(
-            hazard_step(&mut hazards, &["b", "c"], "d"),
+            hazard_step(&mut hazards, &["b", "c"], &["d"]),
             "exactly one barrier is required, immediately before encoding d"
         );
     }
@@ -6239,14 +6239,14 @@ pub(super) mod hazard_tracker_tests {
         let mut hazards: HazardTracker<&str> = HazardTracker::new();
 
         // encode `p`, which reads `slot0` (some earlier op's live output).
-        assert!(!hazard_step(&mut hazards, &["slot0"], "p_out"));
+        assert!(!hazard_step(&mut hazards, &["slot0"], &["p_out"]));
 
         // encode `q`, whose output the arena has placed into `slot0` itself
         // -- the exact retired-slot-reuse shape `BufferArena::assign_slot`
         // produces. `q` has no operand overlap with `p` at all; the hazard
         // is purely WAR on the output identity.
         assert!(
-            hazard_step(&mut hazards, &[], "slot0"),
+            hazard_step(&mut hazards, &[], &["slot0"]),
             "writing into a buffer read since the last barrier must be flagged WAR"
         );
     }
@@ -6281,7 +6281,7 @@ pub(super) mod hazard_tracker_tests {
         // op0: writes `a`, no inputs -> no hazard, nothing to attribute.
         let class0 = hazards.classify(&[], Some("a"));
         assert_eq!(class0, HazardClass::None);
-        assert!(!hazard_step(&mut hazards, &[], "a"));
+        assert!(!hazard_step(&mut hazards, &[], &["a"]));
 
         let raw_before = super::BARRIERS_RAW.get();
         let war_before = super::BARRIERS_WAR.get();
@@ -6295,7 +6295,7 @@ pub(super) mod hazard_tracker_tests {
             HazardClass::Raw,
             "op1 contributed the one RAW barrier"
         );
-        assert!(hazard_step(&mut hazards, &["a"], "b"));
+        assert!(hazard_step(&mut hazards, &["a"], &["b"]));
         record_hazard_class(class1, false);
 
         // op2: no inputs, output placed by the arena back into `a` -- `a`
@@ -6307,7 +6307,7 @@ pub(super) mod hazard_tracker_tests {
             HazardClass::War,
             "op2's WAR fired on the arena-recycled `a` slot"
         );
-        assert!(hazard_step(&mut hazards, &[], "a"));
+        assert!(hazard_step(&mut hazards, &[], &["a"]));
         record_hazard_class(class2, true);
 
         assert!(
@@ -6358,20 +6358,20 @@ pub(super) mod hazard_tracker_tests {
         // a RAW hazard (op1) and a genuinely fresh allocation (op3).
         let placement_table = BTreeMap::from([(2, output0)]);
 
-        let barrier0 = hazard_step(&mut hazards, &[], output0);
+        let barrier0 = hazard_step(&mut hazards, &[], &[output0]);
 
         let output1 = resolve_test_output(1, &placement_table, &mut next_fresh);
-        let barrier1 = hazard_step(&mut hazards, &[output0], output1);
+        let barrier1 = hazard_step(&mut hazards, &[output0], &[output1]);
 
         let output2 = resolve_test_output(2, &placement_table, &mut next_fresh);
         assert_eq!(
             output2, output0,
             "degenerate gate: op2 must reuse op0's own identity"
         );
-        let barrier2 = hazard_step(&mut hazards, &[], output2);
+        let barrier2 = hazard_step(&mut hazards, &[], &[output2]);
 
         let output3 = resolve_test_output(3, &placement_table, &mut next_fresh);
-        let barrier3 = hazard_step(&mut hazards, &[], output3);
+        let barrier3 = hazard_step(&mut hazards, &[], &[output3]);
 
         assert_eq!(
             [barrier0, barrier1, barrier2, barrier3],
@@ -6401,7 +6401,7 @@ pub(super) mod hazard_tracker_tests {
 
         // the split kernel writes its partial into scratch.
         assert!(
-            !hazard_step(&mut hazards, &[], "scratch"),
+            !hazard_step(&mut hazards, &[], &["scratch"]),
             "scratch is a fresh identity nothing has touched yet"
         );
 
@@ -6409,14 +6409,14 @@ pub(super) mod hazard_tracker_tests {
         // `DispatchType::Concurrent`, touches a buffer with no relation to
         // `scratch` at all.
         assert!(
-            !hazard_step(&mut hazards, &[], "sibling_out"),
+            !hazard_step(&mut hazards, &[], &["sibling_out"]),
             "an unrelated sibling write must not spuriously barrier"
         );
 
         // the merge kernel reads scratch back -- the RAW hazard the sibling
         // must not have hidden.
         assert!(
-            hazard_step(&mut hazards, &["scratch"], "real_output"),
+            hazard_step(&mut hazards, &["scratch"], &["real_output"]),
             "the merge's read of scratch must still see it as written, sibling or not"
         );
     }
@@ -6444,15 +6444,73 @@ pub(super) mod hazard_tracker_tests {
     #[test]
     fn logical_retirement_preserves_arena_identity_hazards() {
         let mut hazards: HazardTracker<&str> = HazardTracker::new();
-        assert!(!hazard_step(&mut hazards, &["input"], "slot0"));
+        assert!(!hazard_step(&mut hazards, &["input"], &["slot0"]));
         // The production retirement loop removes the logical node only; it
         // intentionally does not mutate `hazards` before a same-slot reuse.
-        assert!(hazard_step(&mut hazards, &[], "slot0"));
-        assert!(!hazard_step(&mut hazards, &[], "slot1"));
+        assert!(hazard_step(&mut hazards, &[], &["slot0"]));
+        assert!(!hazard_step(&mut hazards, &[], &["slot1"]));
         // A second write after the barrier is independent and starts clean.
         assert!(
             !hazards.needs_barrier(&[], Some("input")),
             "the emitted barrier must clear the retired command's old state"
+        );
+    }
+
+    /// A `MoeTopK` writes its route in buffer `a` and its weights in extra
+    /// buffer `b`; the expert-weighting op reads only `b`. The reader shares
+    /// no operand with the primary output, so only recording `b` as written
+    /// by the top-k step makes the RAW visible.
+    #[test]
+    fn a_reader_of_an_extra_output_only_is_a_raw_hazard() {
+        let mut hazards: HazardTracker<&str> = HazardTracker::new();
+
+        assert!(!hazard_step(&mut hazards, &["logits"], &["a", "b"]));
+
+        assert!(
+            hazard_step(&mut hazards, &["b"], &["weighted"]),
+            "b was written by the two-output op since the last barrier"
+        );
+    }
+
+    /// A twin's second output and a top-k's extra outputs are separate
+    /// buffers per op: ops writing disjoint extras and reading nothing the
+    /// other wrote may overlap, so no barrier fires between them.
+    #[test]
+    fn two_ops_writing_disjoint_extra_outputs_share_no_barrier() {
+        let mut hazards: HazardTracker<&str> = HazardTracker::new();
+
+        assert!(!hazard_step(&mut hazards, &["x"], &["rope_q", "rope_q_twin"]));
+        assert!(
+            !hazard_step(&mut hazards, &["x"], &["rope_k", "rope_k_twin"]),
+            "disjoint primary and extra outputs, shared read-only input: no hazard"
+        );
+    }
+
+    /// An arena slot recycled as a later op's EXTRA output, after the slot
+    /// was written by an earlier op, is a WAW on that extra buffer.
+    #[test]
+    fn writing_an_extra_output_into_a_buffer_written_since_the_barrier_is_waw() {
+        let mut hazards: HazardTracker<&str> = HazardTracker::new();
+
+        assert!(!hazard_step(&mut hazards, &[], &["slot7"]));
+
+        assert!(
+            hazard_step(&mut hazards, &[], &["fresh", "slot7"]),
+            "slot7 is the second output of this op and was written since the barrier"
+        );
+    }
+
+    /// An arena slot recycled as a later op's EXTRA output, after the slot
+    /// was read by an earlier op, is a WAR on that extra buffer.
+    #[test]
+    fn writing_an_extra_output_into_a_buffer_read_since_the_barrier_is_war() {
+        let mut hazards: HazardTracker<&str> = HazardTracker::new();
+
+        assert!(!hazard_step(&mut hazards, &["slot7"], &["p_out"]));
+
+        assert!(
+            hazard_step(&mut hazards, &[], &["fresh", "slot7"]),
+            "slot7 is the second output of this op and was read since the barrier"
         );
     }
 
@@ -6632,7 +6690,7 @@ pub(super) mod hazard_tracker_tests {
                     .expect("fixture ops emit a shape");
             let reads: Vec<NodeId> = hazard_read_nodes(&bindings).collect();
             let write = hazard_write_node(&bindings).expect("every bound op writes one node");
-            barrier_by_node.insert(bound.node, hazard_step(&mut hazards, &reads, write));
+            barrier_by_node.insert(bound.node, hazard_step(&mut hazards, &reads, &[write]));
         }
 
         assert!(
@@ -6668,7 +6726,7 @@ pub(super) mod hazard_tracker_tests {
         let barrier0 = hazard_step(
             &mut hazards,
             &hazard_read_nodes(&bindings0).collect::<Vec<_>>(),
-            hazard_write_node(&bindings0).expect("bindings0 names one output"),
+            &[hazard_write_node(&bindings0).expect("bindings0 names one output")],
         );
         assert!(
             !barrier0,
@@ -6689,7 +6747,7 @@ pub(super) mod hazard_tracker_tests {
         let barrier1 = hazard_step(
             &mut hazards,
             &hazard_read_nodes(&bindings1).collect::<Vec<_>>(),
-            hazard_write_node(&bindings1).expect("bindings1 names one output"),
+            &[hazard_write_node(&bindings1).expect("bindings1 names one output")],
         );
 
         assert!(
