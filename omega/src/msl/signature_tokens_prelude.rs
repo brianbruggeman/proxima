@@ -201,13 +201,7 @@ pub(super) fn grid_threads_with_schedule(
                 // `block.token_axes` folds more than one activation row per
                 // streamed weight row -- `token_total == 1` collapses that
                 // factor to `1`, the byte-identical single-row shape.
-                let feature_total: u64 = block
-                    .feature_axes
-                    .iter()
-                    .map(|&axis| resolved.extents[axis as usize])
-                    .product();
-                let token_total = packed_row_block_token_total(&block, &resolved.extents);
-                let (base, split) = packed_row_dispatch(feature_total, token_total, block.codec);
+                let (base, split) = packed_row_dispatch(resolved, quantized, &block);
                 checked_product(resolved.node, [base, SIMD_WIDTH, split])?
             } else if reduce_is_cooperative_dispatch(
                 resolved,

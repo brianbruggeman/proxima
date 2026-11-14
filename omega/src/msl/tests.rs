@@ -6302,7 +6302,10 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
         true,
-        1,
+        PackedRowGeometry {
+            rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Float16),
+            k_split: 1,
+        },
         &MetalOnlyExtras::default(),
     )
     .expect_err("F16 from an expert source has no row-blocked body: the scalar run body excludes expert sources");
@@ -6344,15 +6347,14 @@ fn push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel() {
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
         false,
-        1,
+        PackedRowGeometry {
+            rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Q8_0),
+            k_split: 1,
+        },
         &MetalOnlyExtras::default(),
     )
     .expect("Q8_0 now reaches the row-blocked path and renders a kernel body");
-    let expected = if cfg!(feature = "metal-q4k-split-k") {
-        "q8_0_pair_dot(blk"
-    } else {
-        "flat_block_levels[j]"
-    };
+    let expected = "flat_block_levels[j]";
     assert!(
         source.contains(expected),
         "row-blocked Q8_0 body for a plain-product reduce must contain {expected}: {source}"
@@ -6391,7 +6393,10 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
         false,
-        1,
+        PackedRowGeometry {
+            rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Q4_0),
+            k_split: 1,
+        },
         &MetalOnlyExtras::default(),
     )
     .expect("Q4_0 now reaches the row-blocked path and renders a kernel body");
@@ -6415,6 +6420,16 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
     assert_split_k_combine_rendered(&source);
 }
 
+#[cfg(feature = "metal-q4k-split-k")]
+fn packed_dispatch_of(bound: &BoundOp, codec: Codec) -> (u64, u64) {
+    let weight_node = bound.operands()[0].0;
+    let codecs = BTreeMap::from([(weight_node, codec)]);
+    let quantized = operand_codecs(bound, &codecs);
+    let block = packed_row_block(bound, &quantized)
+        .expect("fixture must take the row-blocked path for the dispatch to mean anything");
+    packed_row_dispatch(bound, &quantized, &block)
+}
+
 /// Reachability proof for [`packed_row_split_factor`]'s row-count gate
 /// (`omega-runtime.toml`'s `[packed_row_block].split_k_max_rows`,
 /// default 4096): a 1024-row op (the `attn_k`/`attn_v` shape) sits
@@ -6429,7 +6444,7 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
 #[cfg(feature = "metal-q4k-split-k")]
 #[test]
 fn split_k_engages_for_a_1024_row_op_and_declines_for_a_14336_row_op() {
-    let (base_starved, split_starved) = packed_row_dispatch(1024, 1, Codec::Q4K);
+    let (base_starved, split_starved) = packed_dispatch_of(&matmul_op(1, 256, 1024), Codec::Q4K);
     assert!(
         split_starved > 1,
         "a 1024-row op (attn_k/attn_v shape) must engage split-K under the default \
@@ -6437,7 +6452,7 @@ fn split_k_engages_for_a_1024_row_op_and_declines_for_a_14336_row_op() {
          base_simdgroups={base_starved}"
     );
 
-    let (base_wide, split_wide) = packed_row_dispatch(14336, 1, Codec::Q4K);
+    let (base_wide, split_wide) = packed_dispatch_of(&matmul_op(1, 256, 14336), Codec::Q4K);
     assert_eq!(
         split_wide, 1,
         "a 14336-row op (ffn_up/ffn_gate shape) must stay split-K's no-op factor: got \
@@ -6565,13 +6580,7 @@ fn packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged() {
         "test fixture must actually take the row-blocked path for this assertion to mean anything",
     );
 
-    let feature_total: u64 = block
-        .feature_axes
-        .iter()
-        .map(|&axis| bound.extents[axis as usize])
-        .product();
-    let token_total = packed_row_block_token_total(&block, &bound.extents);
-    let (_base, split) = packed_row_dispatch(feature_total, token_total, block.codec);
+    let (_base, split) = packed_row_dispatch(&bound, &quantized, &block);
     let expected_width = SIMD_WIDTH * split * packed_row_nsg_factor();
 
     let width = tiled_gemm_threadgroup_width(&bound, &quantized, NumericPolicy::default())
@@ -6581,6 +6590,77 @@ fn packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged() {
         "without either nsg2 feature the packed row-blocked path's width must match \
          production's own SIMD_WIDTH * split * packed_row_nsg_factor() derivation; got {width}"
     );
+}
+
+#[proxima::test]
+#[case::attn_q_q8_0_k2048(64, 4, 2)]
+#[case::attn_q_q8_0_k2048_wide_ceiling(64, 8, 2)]
+#[case::attn_output_q8_0_k4096(128, 4, 4)]
+#[case::router_bf16_k2048_run8_capped(256, 4, 4)]
+#[case::router_bf16_k2048_run8_uncapped(256, 8, 8)]
+#[case::parity_q8_0_k768_clamps_to_one(24, 4, 1)]
+#[case::empty_reduction_is_one(0, 4, 1)]
+#[case::three_sweeps_round_down_to_two(96, 8, 2)]
+#[case::attn_q_with_max_one(64, 1, 1)]
+#[case::attn_output_with_max_one(128, 1, 1)]
+#[case::router_with_max_one(256, 1, 1)]
+async fn k_split_for_holds_units_over_lanes_to_a_power_of_two(
+    #[case] units: u64,
+    #[case] max: u64,
+    #[case] expected: u64,
+) {
+    let split = k_split_for(units, 32, max);
+
+    assert_eq!(split, expected, "{units} units over 32 lanes with max {max}");
+}
+
+#[test]
+fn only_the_whole_unit_bodies_split_k() {
+    let bodies = [
+        (PackedBodySelect::FlatRendered, true),
+        (PackedBodySelect::BlockRendered, true),
+        (PackedBodySelect::Q5KGgmlPort, false),
+        (PackedBodySelect::SubBlockRendered, false),
+        (PackedBodySelect::LevelsRendered, false),
+        (PackedBodySelect::Q4_0Reference, false),
+        (PackedBodySelect::Generic, false),
+    ];
+
+    for (body, expected) in bodies {
+        assert_eq!(body.splits_k(), expected, "{body:?}");
+    }
+}
+
+#[test]
+fn the_default_geometry_is_unsplit_and_leaves_every_kernel_key_without_a_split_suffix() {
+    let cases = [
+        (Codec::Q8_0, 2048, 64),
+        (Codec::BFloat16, 2048, 256),
+        (Codec::Float16, 2048, 256),
+        (Codec::Q4K, 2048, 64),
+    ];
+
+    for (codec, reduction, rows) in cases {
+        let bound = matmul_op(1, reduction, rows);
+        let weight_node = bound.operands()[0].0;
+        let packed = BTreeMap::from([(weight_node, codec)]);
+        let quantized = operand_codecs(&bound, &packed);
+        let block = packed_row_block(&bound, &quantized).expect("fixture takes the row-blocked path");
+
+        let geometry = packed_row_geometry(&bound, &quantized, &block);
+        let key = kernel_cache_key(&bound, &packed, NumericPolicy::default()).expect("key");
+
+        assert_eq!(
+            geometry,
+            PackedRowGeometry {
+                rows_per_simdgroup: codec_rows_per_simdgroup(codec),
+                k_split: 1,
+            },
+            "{codec:?}"
+        );
+        assert!(!key.contains("_ks"), "{codec:?}: {key}");
+        assert!(!key.contains("_pr"), "{codec:?}: {key}");
+    }
 }
 
 /// `omega-runtime.toml`'s `[attention_context_chunks]` ships
@@ -10337,7 +10417,8 @@ fn q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup() {
         source.contains(&format!("long group_first = output_index * {rows};")),
         "{source}"
     );
-    let (groups, split) = packed_row_dispatch(8, 1, Codec::Q6K);
+    let block = packed_row_block(&bound, &codecs).expect("fixture must take the row-blocked path");
+    let (groups, split) = packed_row_dispatch(&bound, &codecs, &block);
     let base_simdgroups = 8u64.div_ceil(rows as u64);
     assert_eq!(
         (groups, split),
@@ -11679,7 +11760,12 @@ async fn scalar_weight_at_reduce_896_is_admitted_and_emits_the_run_body(#[case] 
     assert_eq!(block.codec, codec);
     assert!(kernel.source.contains(pointer), "{codec:?} binds the run pointer as {pointer}");
     assert!(kernel.source.contains(term), "{codec:?} folds value * act per term");
-    assert!(kernel.source.contains("reduced_row0"), "{codec:?} reduces through the row-blocked tail");
+    let tail = if cfg!(feature = "metal-q4k-split-k") {
+        "partial_sums["
+    } else {
+        "reduced_row0"
+    };
+    assert!(kernel.source.contains(tail), "{codec:?} reduces through the row-blocked tail ({tail})");
 }
 
 #[proxima::test]

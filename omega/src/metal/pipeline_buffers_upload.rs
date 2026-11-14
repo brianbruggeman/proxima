@@ -488,7 +488,8 @@ pub(super) fn pipeline_for(
     {
         let quantized = crate::identity::operand_codecs(bound, packed_operands);
         if let Some(block) = crate::msl::packed_row_block(bound, &quantized) {
-            let rows = crate::msl::codec_rows_per_simdgroup(block.codec);
+            let geometry = crate::msl::packed_row_geometry(bound, &quantized, &block);
+            let rows = geometry.rows_per_simdgroup;
             if let Ok((_, grid)) =
                 crate::msl::kernel_dispatch_shape(bound, packed_operands, numeric_policy)
             {

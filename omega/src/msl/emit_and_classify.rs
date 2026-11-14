@@ -1189,7 +1189,7 @@ pub(super) fn packed_row_block_grouped_axes(
         return None;
     }
     let (_, selected_axis, _, out_axis) = packed_row_direct_grouped_axes(resolved, output_axes)?;
-    let rows = codec_rows_per_simdgroup(block.codec) as u64;
+    let rows = packed_row_geometry(resolved, quantized, &block).rows_per_simdgroup as u64;
     if resolved.extents[out_axis as usize].is_multiple_of(rows) {
         Some((selected_axis, out_axis))
     } else {
@@ -1700,8 +1700,15 @@ pub(super) fn metal_specialization(
         numeric_policy_token: Some(crate::identity::numeric_policy_cache_token(numeric_policy)),
         merged_z: None,
         packed_row_block_rows_override: packed_row_block(resolved, &quantized).and_then(|block| {
-            let rows = codec_rows_per_simdgroup(block.codec);
-            (rows != codec_rows_per_simdgroup_default(block.codec)).then_some(rows)
+            let geometry = packed_row_geometry(resolved, &quantized, &block);
+            let rows = geometry.rows_per_simdgroup;
+            // a split geometry's rows are its own default, never an override
+            (geometry.k_split == 1 && rows != codec_rows_per_simdgroup_default(block.codec))
+                .then_some(rows)
+        }),
+        packed_row_k_split: packed_row_block(resolved, &quantized).and_then(|block| {
+            let geometry = packed_row_geometry(resolved, &quantized, &block);
+            u8::try_from(geometry.k_split).ok().filter(|&split| split > 1)
         }),
         packed_row_activation_cap: packed_row_block(resolved, &quantized).and_then(|block| {
             let token_total = packed_row_block_token_total(&block, &resolved.extents);
@@ -3012,11 +3019,11 @@ pub(super) fn scalar_run_read(codec: Codec) -> Option<FloatLayout> {
     matches!(hardware_type(&layout), Some("half" | "bfloat")).then_some(layout)
 }
 
-/// Whether the block body renders the op: a plain-product reduce over real f32 activations, with
-/// the split-k build off. Evaluated by `classify_packed_row_block` (admission) and
+/// Whether the block body renders the op: a plain-product reduce over real f32 activations.
+/// Evaluated by `classify_packed_row_block` (admission) and
 /// `PackedBodySelect::select` (emission), so a codec is admitted exactly where emission renders it.
 pub(super) const fn block_codec_row_body_rendered(plain_product_reduce: bool, real_float: bool) -> bool {
-    plain_product_reduce && real_float && !cfg!(feature = "metal-q4k-split-k")
+    plain_product_reduce && real_float
 }
 
 /// The reduce-extent multiple of a level-set format the row-blocked kernel renders: one block of
@@ -4425,14 +4432,114 @@ pub(crate) fn packed_row_activation_cap(token_total: u64) -> u64 {
 /// so a caller passing `feature_total` for the whole output and `token_total
 /// == 1` gets today's byte-identical single-row dispatch shape.
 pub(super) fn packed_row_dispatch(
-    feature_total: u64,
-    token_total: u64,
-    codec: Codec,
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    block: &PackedRowBlock,
 ) -> (u64, u64) {
-    let base = feature_total.div_ceil(codec_rows_per_simdgroup(codec) as u64);
-    let split = packed_row_split_factor(base, feature_total);
+    let feature_total: u64 = block
+        .feature_axes
+        .iter()
+        .map(|&axis| resolved.extents[axis as usize])
+        .product();
+    let token_total = packed_row_block_token_total(block, &resolved.extents);
+    let geometry = packed_row_geometry(resolved, quantized, block);
+    let base = feature_total.div_ceil(geometry.rows_per_simdgroup as u64);
+    let split = if geometry.k_split > 1 {
+        geometry.k_split as u64
+    } else if packed_row_body_splits_k(resolved, block) {
+        1
+    } else {
+        packed_row_split_factor(base, feature_total)
+    };
     let token_groups = token_total.div_ceil(packed_row_activation_cap(token_total));
     (base * token_groups, split)
+}
+
+/// Simdgroups' rows and K split for one packed matvec: the single pair the dispatch grid, the
+/// threadgroup width, the emitted body and the kernel identity all read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PackedRowGeometry {
+    /// output rows one simdgroup folds against a streamed activation
+    pub(crate) rows_per_simdgroup: usize,
+    /// simdgroups of one threadgroup that split the reduction of the same rows between them
+    pub(crate) k_split: usize,
+}
+
+/// Rows one simdgroup folds when the K split is above 1, llama's N_R0 for the whole-unit types.
+/// A constant in this slice; the sized constant and env override replace it in the next.
+const fn ksplit_rows() -> usize {
+    2
+}
+
+/// Ceiling on simdgroups cooperating on one row group. `1` in this slice, so the default geometry
+/// is today's; the sized constant and env override replace it in the next slice.
+const fn ksplit_max() -> u64 {
+    1
+}
+
+/// Simdgroups worth launching on a reduction of `units` whole units read by `lanes` lanes:
+/// `ceil(units / lanes)` held to `1..=max` and rounded DOWN to a power of two, so every simdgroup
+/// owns at least one unit per lane sweep and `lanes * split` divides the dispatch.
+pub(super) fn k_split_for(units: u64, lanes: u64, max: u64) -> u64 {
+    let wanted = units.div_ceil(lanes.max(1)).clamp(1, max.max(1));
+    1 << wanted.ilog2()
+}
+
+/// Whether the body `resolved` renders splits K between simdgroups. Evaluated against the
+/// process-wide expert-source switch, the same one the emitter's callers pass as
+/// `expert_source_mode`.
+fn packed_row_body_splits_k(resolved: &BoundOp, block: &PackedRowBlock) -> bool {
+    let BoundOpKind::Reduce { reduce_op, .. } = &resolved.kind else {
+        return false;
+    };
+    PackedBodySelect::for_op(
+        resolved,
+        *reduce_op,
+        block,
+        unsafe_metal_expert_sources_enabled(),
+    )
+    .splits_k()
+}
+
+/// The elements one lane owns per sweep for a body that splits K: a whole block, or the scalar run.
+fn packed_row_lane_unit(codec: Codec) -> Option<u64> {
+    match scalar_run_read(codec) {
+        Some(_) => Some(crate::sized::PACKED_ROW_SCALAR_RUN as u64),
+        None => codec
+            .block_layout()
+            .map(|layout| u64::from(layout.elements)),
+    }
+}
+
+/// The geometry the body selected for this op needs, derived from the selection inputs the
+/// emitter reads. A body that splits K takes `k_split_for(K / unit, SIMD_WIDTH, ksplit_max())`
+/// and, above 1, [`ksplit_rows`] rows per simdgroup; every other body, a multi-token fold, and a
+/// non-reduce op keep the codec's rows and a split of 1.
+pub(crate) fn packed_row_geometry(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    block: &PackedRowBlock,
+) -> PackedRowGeometry {
+    let whole = PackedRowGeometry {
+        rows_per_simdgroup: codec_rows_per_simdgroup(block.codec),
+        k_split: 1,
+    };
+    let splits = packed_row_block_token_total(block, &resolved.extents) <= 1
+        && quantized[block.weight] == Some(block.codec)
+        && packed_row_body_splits_k(resolved, block);
+    let Some(unit) = packed_row_lane_unit(block.codec).filter(|&unit| splits && unit > 0) else {
+        return whole;
+    };
+    let units = resolved.extents[block.reduce_dim] / unit;
+    let k_split = k_split_for(units, SIMD_WIDTH, ksplit_max()) as usize;
+    if k_split > 1 {
+        PackedRowGeometry {
+            rows_per_simdgroup: ksplit_rows(),
+            k_split,
+        }
+    } else {
+        whole
+    }
 }
 
 /// Public diagnostic seam for `classify_dense_batched_gemm` -- same shape

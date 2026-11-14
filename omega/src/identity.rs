@@ -182,6 +182,11 @@ pub(crate) struct MetalOnlyExtras {
     /// `_pr{rows}` suffix below so the 4-row and 8-row variants compile as
     /// two distinct pipelines and coexist in the same binary.
     pub packed_row_block_rows_override: Option<usize>,
+    /// simdgroups of one threadgroup that split one packed matvec's reduction between them,
+    /// `Some(k)` only when [`crate::msl::packed_row_geometry`] chose `k > 1`. The count is a
+    /// literal in the kernel text, so two ops that differ only in it must not share a pipeline,
+    /// and the default `k == 1` folds no token. Feeds the `_ks{k}` suffix.
+    pub packed_row_k_split: Option<u8>,
     /// activation rows one simdgroup folds against a streamed weight row,
     /// `Some(cap)` only when [`crate::msl::packed_row_activation_cap`] chose
     /// fewer than `PACKED_ROW_ACTIVATION_GROUP` for this op's concrete token
@@ -964,6 +969,10 @@ mod gated {
         if let Some(rows) = metal.packed_row_block_rows_override {
             identity.push_str("_pr");
             identity.push_str(&rows.to_string());
+        }
+        if let Some(split) = metal.packed_row_k_split {
+            identity.push_str("_ks");
+            identity.push_str(&split.to_string());
         }
         if let Some(cap) = metal.packed_row_activation_cap {
             identity.push_str("_ac");

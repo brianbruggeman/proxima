@@ -1,5 +1,123 @@
 use super::*;
 
+/// the float-only scale-deferred shape the K-quant pair-dot bodies need; shared by the emitter and
+/// [`packed_row_geometry`] so both select the body from the same inputs
+pub(super) fn packed_row_plain_product(
+    resolved: &BoundOp,
+    reduce_op: ScalarOp,
+    block: &PackedRowBlock,
+    expert_source_mode: bool,
+) -> bool {
+    !expert_source_mode
+        && codec_supports_pair_dot(block.codec)
+        && resolved.dtype == DType::FLOAT32
+        && is_plain_product_reduce(resolved, reduce_op, block.weight, block.other)
+}
+
+// ONE exhaustive selection instead of four chained predicates. every axis
+// that used to be a boolean at the dispatch site (which codec family,
+// whether the op is a plain product, which reference body) is a variant
+// here, so a codec or epilogue shape whose body was removed is a
+// non-exhaustive match at compile time rather than a silent fallthrough
+// to the per-element arm -- which is how a missing fast body has cost us
+// an unmeasured regression before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PackedBodySelect {
+    /// ggml's Q5_K body, kept because the rendered Q5_K measured slower (see its doc)
+    Q5KGgmlPort,
+    /// the sub-block matvec rendered from the codec's own block layout (Q4_K, Q6_K)
+    SubBlockRendered,
+    /// the level-set matvec rendered from the format's block layout and level table (IQ4_XS)
+    LevelsRendered,
+    /// the flat-block matvec rendered from a whole-byte-code layout (Q8_0), one block per lane
+    FlatRendered,
+    /// ggml's own Q4_0 lane geometry, kept as a REFERENCE/Oracle body.
+    Q4_0Reference,
+    /// the flat-block matvec reading the layout's coded planes (Q5_0, Q5_1, Q4_1), one
+    /// block per lane, extent a multiple of the block and not of 256
+    BlockRendered,
+    /// the generic lane-spread preamble plus its per-codec decode arms
+    Generic,
+}
+
+impl PackedBodySelect {
+    /// Total function of the op's own numeric configuration. Precedence is
+    /// exactly the previous chain's: ggml-port arms win over the Q4_0
+    /// reference body, which wins over the generic arm.
+    pub(super) fn select(
+        codec: Codec,
+        plain_product: bool,
+        plain_product_reduce: bool,
+        real_float: bool,
+        expert_source_mode: bool,
+    ) -> Self {
+        let levels_rendered = matches!(codec, Codec::Levels(_))
+            && !expert_source_mode
+            && level_codec_row_body_rendered(plain_product_reduce, real_float);
+        let ggml_port = plain_product
+            && matches!(codec, Codec::Q4K | Codec::Q5K | Codec::Q6K)
+            && cfg!(feature = "metal")
+            && !cfg!(feature = "metal-q4k-split-k");
+        // the reference body transcribes the Q4_0 LAYOUT, so it is an
+        // implementation of that single cell rather than an axis of the
+        // selection: its admission is a feature check here, never a
+        // parameter a caller could set for a different codec.
+        let q4_0_reference = matches!(codec, Codec::Q4_0)
+            && plain_product_reduce
+            && real_float
+            && cfg!(feature = "metal-q4_0-native")
+            && !cfg!(feature = "metal-q4k-split-k");
+        let flat_rendered = codec
+            .block_layout()
+            .is_some_and(|layout| FlatBlockForm::plan(&layout).is_ok())
+            && plain_product_reduce
+            && real_float
+            && !expert_source_mode;
+        let block_rendered = block_rendered_elements(codec).is_some()
+            && block_codec_row_body_rendered(plain_product_reduce, real_float)
+            && !expert_source_mode;
+        match (ggml_port, codec, q4_0_reference) {
+            (true, Codec::Q5K, _) => Self::Q5KGgmlPort,
+            (true, _, _) => Self::SubBlockRendered,
+            (false, _, false) if flat_rendered => Self::FlatRendered,
+            (false, _, true) => Self::Q4_0Reference,
+            (false, _, false) if block_rendered => Self::BlockRendered,
+            (false, _, false) if levels_rendered => Self::LevelsRendered,
+            (false, _, false) => Self::Generic,
+        }
+    }
+
+    /// The selection the emitter makes for `resolved`, from the same inputs the emitter reads.
+    pub(super) fn for_op(
+        resolved: &BoundOp,
+        reduce_op: ScalarOp,
+        block: &PackedRowBlock,
+        expert_source_mode: bool,
+    ) -> Self {
+        Self::select(
+            block.codec,
+            packed_row_plain_product(resolved, reduce_op, block, expert_source_mode),
+            is_plain_product_reduce(resolved, reduce_op, block.weight, block.other),
+            resolved.dtype == DType::FLOAT32,
+            expert_source_mode,
+        )
+    }
+
+    /// Whether the body's lanes own whole units (a block or a scalar run), so simdgroups can
+    /// split the reduction between them. The sub-block and lane-spread bodies share a unit across
+    /// lanes and cannot. Exhaustive, so a new body variant must decide.
+    pub(super) fn splits_k(self) -> bool {
+        match self {
+            Self::FlatRendered | Self::BlockRendered => true,
+            Self::Q5KGgmlPort
+            | Self::SubBlockRendered
+            | Self::LevelsRendered
+            | Self::Q4_0Reference
+            | Self::Generic => false,
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) fn push_packed_row_blocked_body(
     source: &mut String,
@@ -14,9 +132,13 @@ pub(super) fn push_packed_row_blocked_body(
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     expert_source_mode: bool,
-    k_split: usize,
+    geometry: PackedRowGeometry,
     metal: &MetalOnlyExtras,
 ) -> Result<(), EmitError> {
+    let PackedRowGeometry {
+        rows_per_simdgroup: rows,
+        k_split,
+    } = geometry;
     if packed_row_block_token_total(block, &resolved.extents) > 1 {
         push_packed_row_multi_row_body(
             source,
@@ -65,7 +187,6 @@ pub(super) fn push_packed_row_blocked_body(
     // one byte load, one mask, one fma (`docs/discipline.md` ROW 74).
     {
         let run = Q4K_BLOCK_ELEMENTS / SIMD_WIDTH as usize;
-        let rows = codec_rows_per_simdgroup(codec);
         source.push_str(&format!("    long group_first = output_index * {rows};\n"));
         source.push_str(&format!("    {element_type} sumf[{rows}];\n"));
         // when the seed and the algebraic identity are the textually same
@@ -144,10 +265,7 @@ pub(super) fn push_packed_row_blocked_body(
         // `Int32`/`UInt32`/`Bool`/`Int8`/`UInt8` (every dtype `type_token`
         // happens to lower to the same MSL `float` storage type) and would
         // have run the scale/minimum float algebra below on integer data.
-        let plain_product = !expert_source_mode
-            && codec_supports_pair_dot(codec)
-            && resolved.dtype == DType::FLOAT32
-            && is_plain_product_reduce(resolved, reduce_op, weight, other);
+        let plain_product = packed_row_plain_product(resolved, reduce_op, block, expert_source_mode);
         // With `metal`: the ggml-geometry bodies. `Q4_K` and `Q6_K` are RENDERED from their
         // `BlockLayout`s ([`sub_block_matvec_msl`]) at the launch geometry their
         // `SubBlockMatvecGeometry` constructor names; `Q5_K` keeps
@@ -172,81 +290,6 @@ pub(super) fn push_packed_row_blocked_body(
         // q4k-split-k`-aware, same posture as `use_ggml_port`: this body owns
         // its own complete `ib` loop with no `sgitg`/`split` stride of its own.
         // (the gate itself now lives in `PackedBodySelect::select` below)
-        // ONE exhaustive selection instead of four chained predicates. every axis
-        // that used to be a boolean at the dispatch site (which codec family,
-        // whether the op is a plain product, which reference body) is a variant
-        // here, so a codec or epilogue shape whose body was removed is a
-        // non-exhaustive match at compile time rather than a silent fallthrough
-        // to the per-element arm -- which is how a missing fast body has cost us
-        // an unmeasured regression before.
-        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-        enum PackedBodySelect {
-            /// ggml's Q5_K body, kept because the rendered Q5_K measured slower (see its doc)
-            Q5KGgmlPort,
-            /// the sub-block matvec rendered from the codec's own block layout (Q4_K, Q6_K)
-            SubBlockRendered,
-            /// the level-set matvec rendered from the format's block layout and level table (IQ4_XS)
-            LevelsRendered,
-            /// the flat-block matvec rendered from a whole-byte-code layout (Q8_0), one block per lane
-            FlatRendered,
-            /// ggml's own Q4_0 lane geometry, kept as a REFERENCE/Oracle body.
-            Q4_0Reference,
-            /// the flat-block matvec reading the layout's coded planes (Q5_0, Q5_1, Q4_1), one
-            /// block per lane, extent a multiple of the block and not of 256
-            BlockRendered,
-            /// the generic lane-spread preamble plus its per-codec decode arms
-            Generic,
-        }
-
-        impl PackedBodySelect {
-            /// Total function of the op's own numeric configuration. Precedence is
-            /// exactly the previous chain's: ggml-port arms win over the Q4_0
-            /// reference body, which wins over the generic arm.
-            fn select(
-                codec: Codec,
-                plain_product: bool,
-                plain_product_reduce: bool,
-                real_float: bool,
-                expert_source_mode: bool,
-            ) -> Self {
-                let levels_rendered = matches!(codec, Codec::Levels(_))
-                    && !expert_source_mode
-                    && level_codec_row_body_rendered(plain_product_reduce, real_float);
-                let ggml_port = plain_product
-                    && matches!(codec, Codec::Q4K | Codec::Q5K | Codec::Q6K)
-                    && cfg!(feature = "metal")
-                    && !cfg!(feature = "metal-q4k-split-k");
-                // the reference body transcribes the Q4_0 LAYOUT, so it is an
-                // implementation of that single cell rather than an axis of the
-                // selection: its admission is a feature check here, never a
-                // parameter a caller could set for a different codec.
-                let q4_0_reference = matches!(codec, Codec::Q4_0)
-                    && plain_product_reduce
-                    && real_float
-                    && cfg!(feature = "metal-q4_0-native")
-                    && !cfg!(feature = "metal-q4k-split-k");
-                let flat_rendered = codec
-                    .block_layout()
-                    .is_some_and(|layout| FlatBlockForm::plan(&layout).is_ok())
-                    && plain_product_reduce
-                    && real_float
-                    && !expert_source_mode
-                    && !cfg!(feature = "metal-q4k-split-k");
-                let block_rendered = block_rendered_elements(codec).is_some()
-                    && block_codec_row_body_rendered(plain_product_reduce, real_float)
-                    && !expert_source_mode;
-                match (ggml_port, codec, q4_0_reference) {
-                    (true, Codec::Q5K, _) => Self::Q5KGgmlPort,
-                    (true, _, _) => Self::SubBlockRendered,
-                    (false, _, false) if flat_rendered => Self::FlatRendered,
-                    (false, _, true) => Self::Q4_0Reference,
-                    (false, _, false) if block_rendered => Self::BlockRendered,
-                    (false, _, false) if levels_rendered => Self::LevelsRendered,
-                    (false, _, false) => Self::Generic,
-                }
-            }
-        }
-
         let packed_body = PackedBodySelect::select(
             codec,
             plain_product,
