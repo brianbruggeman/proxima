@@ -555,6 +555,7 @@ pub(crate) fn splice_round_batched_reduce_base_table(
     tail = replace_whole_word(&tail, "out", "sliced_out");
     kernel.source.truncate(body_after_preamble);
     kernel.source.push_str(&tail);
+    widen_stage_parameters(&mut kernel.source);
     Ok(())
 }
 
@@ -1008,6 +1009,7 @@ pub(crate) fn splice_horizontal_merge_base_table(
     tail = replace_whole_word(&tail, "out", "sliced_out");
     kernel.source.truncate(body_after_preamble);
     kernel.source.push_str(&tail);
+    widen_stage_parameters(&mut kernel.source);
     Ok(())
 }
 
@@ -1716,6 +1718,7 @@ pub(super) fn metal_specialization(
             let cap = packed_row_activation_cap(token_total);
             (token_total > 1 && cap != crate::sized::PACKED_ROW_ACTIVATION_GROUP).then_some(cap)
         }),
+        packed_row_level_stage_words: packed_row_level_stage_words(resolved, &quantized),
         q4_0_multi_row_hoist: q4_0_multi_row_hoist_active(resolved, &quantized),
         q4_0_multi_row_pair_lane: q4_0_multi_row_pair_lane_active(resolved, &quantized),
         // no real `expert_source_mode` at cache-key time -- see
@@ -4479,19 +4482,23 @@ fn level_staging_of(
     block: &PackedRowBlock,
     rows_per_simdgroup: usize,
 ) -> LevelStaging {
-    let BoundOpKind::Reduce { reduce_op, .. } = &resolved.kind else {
+    let BoundOpKind::Reduce { reduce_op, init, output_axes, .. } = &resolved.kind else {
         return LevelStaging::InPlace;
     };
     let Codec::Levels(format) = block.codec else {
         return LevelStaging::InPlace;
     };
+    // the tiled GEMM body is rendered first and never runs the row-blocked level body
+    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes).is_some() {
+        return LevelStaging::InPlace;
+    }
     let single_row = packed_row_block_token_total(block, &resolved.extents) <= 1
         && quantized[block.weight] == Some(block.codec);
     let selected = PackedBodySelect::for_op(resolved, *reduce_op, block, unsafe_metal_expert_sources_enabled());
     let Some(layout) = format.packing().filter(|_| single_row && selected == PackedBodySelect::LevelsRendered) else {
         return LevelStaging::InPlace;
     };
-    let codes = LevelCodes { table: &format.levels, element_fn: codec_element_fn_name(block.codec) };
+    let codes = LevelCodes { table: &format.levels, element_fn: codec_element_fn_name(block.codec), staged: false };
     let (simdgroups, lanes) = (packed_row_nsg_factor() as usize, SIMD_WIDTH as usize);
     let launch = SubBlockMatvecGeometry::for_levels(&format.levels, rows_per_simdgroup, simdgroups, lanes);
     let Ok(reads_per_lane) = level_reads_per_lane(&layout, &codes, &launch) else {
@@ -4528,6 +4535,20 @@ fn packed_row_body_splits_k(resolved: &BoundOp, block: &PackedRowBlock) -> bool 
         unsafe_metal_expert_sources_enabled(),
     )
     .splits_k()
+}
+
+/// The word count of the level table `resolved`'s packed matvec stages into threadgroup memory,
+/// `None` when it reads its table in place. The one answer the kernel signature, the emitted body
+/// and the kernel identity all read.
+pub(super) fn packed_row_level_stage_words(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+) -> Option<usize> {
+    let block = packed_row_block(resolved, quantized)?;
+    match packed_row_geometry(resolved, quantized, &block).level_staging {
+        LevelStaging::Workgroup { words } => Some(words),
+        LevelStaging::InPlace => None,
+    }
 }
 
 /// The elements one lane owns per sweep when it owns a short scalar run, the predicate

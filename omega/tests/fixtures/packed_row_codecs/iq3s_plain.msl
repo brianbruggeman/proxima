@@ -1126,10 +1126,17 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     device const float* in1 [[buffer(1)]],
     device float* out [[buffer(2)]],
     constant Uniforms& u [[buffer(3)]],
-    uint gid [[thread_position_in_grid]])
+    uint gid [[thread_position_in_grid]],
+    uint stage_tid [[thread_position_in_threadgroup]],
+    uint stage_threads [[threads_per_threadgroup]])
 {
     long output_index = (long)gid / 32;
     uint lane = gid % 32u;
+    threadgroup uint iq3_s_element_stage[512];
+    for (uint stage_index = stage_tid; stage_index < 512u; stage_index += stage_threads) {
+        iq3_s_element_stage[stage_index] = iq3_s_element_grid[stage_index];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     long group_first = output_index * 4;
     float sumf[4];
     for (int q = 0; q < 4; ++q) { sumf[q] = 0.0f; }
@@ -1188,28 +1195,28 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
             float scale0 = (float)(2 * (int)((((uint)blk[scale0_offset0] >> scale0_shift0) & 0xfu)) - -1);
             float dall = (float)(*(device const half *)(blk + 0u));
             float sums0 = 0.0f;
-            uint grid0 = iq3_s_element_grid[(((uint)low_codes[0u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 0u) & 0x1u) << 8u)];
+            uint grid0 = iq3_s_element_stage[(((uint)low_codes[0u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 0u) & 0x1u) << 8u)];
             uint sign0 = ((uint)sign_codes[0u] >> 0u) & 0xfu;
             float sums1 = 0.0f;
-            uint grid1 = iq3_s_element_grid[(((uint)low_codes[1u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 1u) & 0x1u) << 8u)];
+            uint grid1 = iq3_s_element_stage[(((uint)low_codes[1u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 1u) & 0x1u) << 8u)];
             uint sign1 = ((uint)sign_codes[0u] >> 4u) & 0xfu;
             float sums2 = 0.0f;
-            uint grid2 = iq3_s_element_grid[(((uint)low_codes[2u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 2u) & 0x1u) << 8u)];
+            uint grid2 = iq3_s_element_stage[(((uint)low_codes[2u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 2u) & 0x1u) << 8u)];
             uint sign2 = ((uint)sign_codes[1u] >> 0u) & 0xfu;
             float sums3 = 0.0f;
-            uint grid3 = iq3_s_element_grid[(((uint)low_codes[3u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 3u) & 0x1u) << 8u)];
+            uint grid3 = iq3_s_element_stage[(((uint)low_codes[3u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 3u) & 0x1u) << 8u)];
             uint sign3 = ((uint)sign_codes[1u] >> 4u) & 0xfu;
             float sums4 = 0.0f;
-            uint grid4 = iq3_s_element_grid[(((uint)low_codes[4u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 4u) & 0x1u) << 8u)];
+            uint grid4 = iq3_s_element_stage[(((uint)low_codes[4u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 4u) & 0x1u) << 8u)];
             uint sign4 = ((uint)sign_codes[2u] >> 0u) & 0xfu;
             float sums5 = 0.0f;
-            uint grid5 = iq3_s_element_grid[(((uint)low_codes[5u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 5u) & 0x1u) << 8u)];
+            uint grid5 = iq3_s_element_stage[(((uint)low_codes[5u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 5u) & 0x1u) << 8u)];
             uint sign5 = ((uint)sign_codes[2u] >> 4u) & 0xfu;
             float sums6 = 0.0f;
-            uint grid6 = iq3_s_element_grid[(((uint)low_codes[6u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 6u) & 0x1u) << 8u)];
+            uint grid6 = iq3_s_element_stage[(((uint)low_codes[6u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 6u) & 0x1u) << 8u)];
             uint sign6 = ((uint)sign_codes[3u] >> 0u) & 0xfu;
             float sums7 = 0.0f;
-            uint grid7 = iq3_s_element_grid[(((uint)low_codes[7u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 7u) & 0x1u) << 8u)];
+            uint grid7 = iq3_s_element_stage[(((uint)low_codes[7u] >> 0u) & 0xffu) | ((((uint)high_codes[0u] >> 7u) & 0x1u) << 8u)];
             uint sign7 = ((uint)sign_codes[3u] >> 4u) & 0xfu;
             #pragma unroll
             for (uint i = 0u; i < 4u; ++i) {

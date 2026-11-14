@@ -129,6 +129,30 @@ pub(super) fn assembled_matvec_msl(
 pub(super) struct LevelCodes<'a> {
     pub table: &'a LevelTable,
     pub element_fn: &'a str,
+    /// Whether the table is read from the threadgroup copy [`level_stage_msl`] declares instead of
+    /// the `constant` declaration; only the address space of the read changes.
+    pub staged: bool,
+}
+
+/// The threadgroup copy of a level table the staged matvec reads: the declaration
+/// `{element_fn}_stage`, a strided copy by every thread of the threadgroup, and the one barrier
+/// that makes it visible. `words` 32-bit words, held in the table's own rendered element type.
+/// Must sit at kernel function scope (Metal rejects a threadgroup declaration in a nested block)
+/// and before any thread-divergent control flow, so every thread reaches the barrier. Empty for a
+/// table the level matvec does not render.
+///
+/// Composes: [`LevelTable`] (the table and its element type), `layout_render`'s
+/// `{element_fn}_grid` / `{element_fn}_levels` constant declarations (the source of the copy).
+pub(super) fn level_stage_msl(table: &LevelTable, element_fn: &str, words: usize) -> String {
+    let (element_type, constant, element_bytes) = match table {
+        LevelTable::Explicit(_) => ("char", "levels", size_of::<i8>()),
+        LevelTable::SignedGrid { .. } => ("uint", "grid", size_of::<u32>()),
+        _ => return String::new(),
+    };
+    let count = words * size_of::<u32>() / element_bytes;
+    format!(
+        "    threadgroup {element_type} {element_fn}_stage[{count}];\n    for (uint stage_index = stage_tid; stage_index < {count}u; stage_index += stage_threads) {{\n        {element_fn}_stage[stage_index] = {element_fn}_{constant}[stage_index];\n    }}\n    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+    )
 }
 
 /// [`assembled_matvec_msl`] for a level-set format (IQ4_XS): the element code is resolved to its
@@ -399,6 +423,7 @@ impl<'a> Assembled<'a> {
         let code = self.code_msl(slot);
         match self.codes {
             Some(LevelCodes { table: LevelTable::SignedGrid { .. }, .. }) => format!("level{slot}"),
+            Some(LevelCodes { staged: true, element_fn, .. }) => format!("(float){element_fn}_stage[(uint)({code})]"),
             Some(levels) => format!("{}_code((uint)({code}))", levels.element_fn),
             None if self.layout.element.bias == 0 => format!("(float)(int)({code})"),
             None => format!("(float)((int)({code}) - {})", self.layout.element.bias),
@@ -417,13 +442,14 @@ impl<'a> Assembled<'a> {
     /// A signed grid's per-slot reads, hoisted above the run loop: the four magnitudes the slot's code
     /// names and the run's sign bits. Empty for every other table.
     fn slot_prelude_msl(&self, slot: usize) -> String {
-        let (Some(LevelCodes { table: LevelTable::SignedGrid { .. }, element_fn }), Some(reads)) = (self.codes, &self.sign_reads) else {
+        let (Some(LevelCodes { table: LevelTable::SignedGrid { .. }, element_fn, staged }), Some(reads)) = (self.codes, &self.sign_reads) else {
             return String::new();
         };
         let (byte, shift) = reads.slots[slot];
         let mask = (1u32 << self.run) - 1;
+        let table = if *staged { "stage" } else { "grid" };
         format!(
-            "            uint grid{slot} = {element_fn}_grid[{}];\n            uint sign{slot} = ((uint)sign_codes[{byte}u] >> {shift}u) & {mask:#x}u;\n",
+            "            uint grid{slot} = {element_fn}_{table}[{}];\n            uint sign{slot} = ((uint)sign_codes[{byte}u] >> {shift}u) & {mask:#x}u;\n",
             self.code_msl(slot)
         )
     }
@@ -606,7 +632,7 @@ mod tests {
 
     fn render(layout: &BlockLayout, table: &LevelTable) -> Result<String, SubBlockMatvecRefusal> {
         let element_fn = if matches!(table, LevelTable::SignedGrid { .. }) { "iq3_s_element" } else { "iq4_xs_element" };
-        let codes = LevelCodes { table, element_fn };
+        let codes = LevelCodes { table, element_fn, staged: false };
         level_matvec_msl(layout, &codes, &SubBlockMatvecGeometry::for_levels(table, 4, 2, 32), 0, 1, true, "u.reduction_total")
     }
 
@@ -690,7 +716,7 @@ mod tests {
     #[test]
     fn the_iq3_s_plan_addresses_the_worked_tile_of_the_flint_block() {
         let table = level_table_of(Codec::Iq3S);
-        let codes = LevelCodes { table: &table, element_fn: "iq3_s_element" };
+        let codes = LevelCodes { table: &table, element_fn: "iq3_s_element", staged: false };
         let geometry = SubBlockMatvecGeometry::for_levels(&table, 4, 2, 32);
         let plan = iq3_s_plan(&codes, &geometry);
         assert_eq!((plan.run, plan.lane_runs, plan.covered, plan.span), (4, 1, 8, 32));
@@ -718,7 +744,7 @@ mod tests {
         let LevelTable::SignedGrid { grid, .. } = &table else {
             panic!("iq3_s is a signed grid");
         };
-        let codes = LevelCodes { table: &table, element_fn: "iq3_s_element" };
+        let codes = LevelCodes { table: &table, element_fn: "iq3_s_element", staged: false };
         let geometry = SubBlockMatvecGeometry::for_levels(&table, 4, 2, 32);
         let plan = iq3_s_plan(&codes, &geometry);
         let SubScales::Planes(scales) = &plan.scales else {

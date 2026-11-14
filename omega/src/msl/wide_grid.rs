@@ -129,7 +129,17 @@ struct GridAttribute {
     body_reads: &'static [(&'static str, &'static str)],
 }
 
-const GRID_ATTRIBUTES: [GridAttribute; 5] = [
+const GRID_ATTRIBUTES: [GridAttribute; 7] = [
+    GridAttribute {
+        parameter: "uint stage_tid [[thread_position_in_threadgroup]]",
+        definition: "    uint stage_tid = wide_lane;\n",
+        body_reads: &[],
+    },
+    GridAttribute {
+        parameter: "uint stage_threads [[threads_per_threadgroup]]",
+        definition: "    uint stage_threads = wide_width.x * wide_width.y * wide_width.z;\n",
+        body_reads: &[],
+    },
     GridAttribute {
         parameter: "uint gid [[thread_position_in_grid]]",
         definition: "    ulong gid = wide_group_index * ulong(wide_width.x) + ulong(wide_lane);\n",

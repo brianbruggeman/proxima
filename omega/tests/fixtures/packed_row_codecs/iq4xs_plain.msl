@@ -1126,10 +1126,17 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     device const float* in1 [[buffer(1)]],
     device float* out [[buffer(2)]],
     constant Uniforms& u [[buffer(3)]],
-    uint gid [[thread_position_in_grid]])
+    uint gid [[thread_position_in_grid]],
+    uint stage_tid [[thread_position_in_threadgroup]],
+    uint stage_threads [[threads_per_threadgroup]])
 {
     long output_index = (long)gid / 32;
     uint lane = gid % 32u;
+    threadgroup char iq4_xs_element_stage[16];
+    for (uint stage_index = stage_tid; stage_index < 16u; stage_index += stage_threads) {
+        iq4_xs_element_stage[stage_index] = iq4_xs_element_levels[stage_index];
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
     long group_first = output_index * 4;
     float sumf[4];
     for (int q = 0; q < 4; ++q) { sumf[q] = 0.0f; }
@@ -1183,8 +1190,8 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
             float sums1 = 0.0f;
             #pragma unroll
             for (uint i = 0u; i < 8u; ++i) {
-                sums0 += yl[i + 0u] * iq4_xs_element_code((uint)((((uint)low_codes[i + 0u] >> 0u) & 0xfu)));
-                sums1 += yl[i + 8u] * iq4_xs_element_code((uint)((((uint)low_codes[i + 0u] >> 4u) & 0xfu)));
+                sums0 += yl[i + 0u] * (float)iq4_xs_element_stage[(uint)((((uint)low_codes[i + 0u] >> 0u) & 0xfu))];
+                sums1 += yl[i + 8u] * (float)iq4_xs_element_stage[(uint)((((uint)low_codes[i + 0u] >> 4u) & 0xfu))];
             }
             sumf[q] = sumf[q] + dall * (sums0 * scale0 + sums1 * scale0);
         }

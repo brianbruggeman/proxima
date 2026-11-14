@@ -197,6 +197,12 @@ pub(crate) struct MetalOnlyExtras {
     /// token extent class must not share a pipeline. Full-group ops fold no
     /// token, keeping their key byte-identical. Feeds the `_ac{cap}` suffix.
     pub packed_row_activation_cap: Option<u64>,
+    /// 32-bit words of the level table a packed matvec copies into threadgroup memory,
+    /// `Some(words)` only when [`crate::msl::packed_row_geometry`] chose
+    /// `LevelStaging::Workgroup`. The count is the staged array's literal length and the kernel
+    /// signature gains the thread-position parameters the copy strides by, so a staged and an
+    /// unstaged kernel must not share a pipeline. Feeds the `_lst{words}` suffix.
+    pub packed_row_level_stage_words: Option<usize>,
     /// `PROXIMA_Q4_0_MULTI_ROW_HOIST=1` (`docs/discipline.md`, prefill
     /// header-decode hoist): `true` only when
     /// [`crate::msl::push_packed_row_multi_row_body`]'s `Codec::Q4_0` fast
@@ -981,6 +987,10 @@ mod gated {
         if let Some(cap) = metal.packed_row_activation_cap {
             identity.push_str("_ac");
             identity.push_str(&cap.to_string());
+        }
+        if let Some(words) = metal.packed_row_level_stage_words {
+            identity.push_str("_lst");
+            identity.push_str(&words.to_string());
         }
         if metal.q4_0_multi_row_hoist {
             identity.push_str("_q0h");

@@ -1285,6 +1285,59 @@ mod horizontal_merge_base_table_splice_tests {
     const STRUCT_DECL: &str =
         "struct SliceBase { ulong weight_base; ulong activation_base; ulong output_base; };\n";
 
+    /// A staged IQ3_S matvec declares scalar stage attributes; the merge widens `gid` to `uint3`,
+    /// and Metal accepts only one vector width, so the stage attributes widen with it and the
+    /// copy still reads the flattened scalars.
+    #[test]
+    fn a_merged_staged_level_kernel_widens_its_stage_attributes_with_the_grid_id() -> Result<(), EmitError> {
+        let bound = super::matmul_op_with_reduce(4, 2048, 1, proxima_tensor::ScalarOp::Add);
+        let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Iq3S)]);
+        let mut merged = emit(&bound, &packed, NumericPolicy::default()).expect("staged level kernel emits");
+        assert!(merged.source.contains("uint stage_tid [[thread_position_in_threadgroup]]"), "{}", merged.source);
+
+        splice_horizontal_merge_base_table(&mut merged, bound.node, 0, "uchar", 1, "float", "float")?;
+
+        let source = &merged.source;
+        assert!(source.contains("uint3 merge_gid [[thread_position_in_grid]]"), "{source}");
+        assert!(source.contains("uint3 stage_tid3 [[thread_position_in_threadgroup]]"), "{source}");
+        assert!(source.contains("uint3 stage_threads3 [[threads_per_threadgroup]]"), "{source}");
+        assert!(!source.contains("uint stage_tid [["), "{source}");
+        assert!(source.contains("    uint stage_tid = stage_tid3.x + stage_threads3.x * (stage_tid3.y + stage_threads3.y * stage_tid3.z);\n"), "{source}");
+        Ok(())
+    }
+
+    /// The text assertions above do not prove Metal accepts the merged signature (the clash this
+    /// widening exists for is a compiler error), so the merged staged kernels are also compiled.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_merged_staged_level_kernel_compiles_with_the_metal_toolchain() -> Result<(), EmitError> {
+        let cases = [(Codec::Iq3S, "iq3_s_element_stage"), (Codec::Iq4Xs, "iq4_xs_element_stage")];
+        let mut compiled = 0usize;
+        for (codec, stage) in cases {
+            let bound = super::matmul_op_with_reduce(4, 2048, 1, proxima_tensor::ScalarOp::Add);
+            let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+            let mut merged = emit(&bound, &packed, NumericPolicy::default()).expect("staged level kernel emits");
+            splice_horizontal_merge_base_table(&mut merged, bound.node, 0, "uchar", 1, "float", "float")?;
+            assert!(merged.source.contains(stage), "{codec:?}: {}", merged.source);
+
+            let directory = tempfile::tempdir().expect("tempdir");
+            let metal_path = directory.path().join("kernel.metal");
+            std::fs::write(&metal_path, &merged.source).expect("write metal source");
+            let output = std::process::Command::new("xcrun")
+                .args(["-sdk", "macosx", "metal", "-c"])
+                .arg(&metal_path)
+                .arg("-o")
+                .arg(directory.path().join("kernel.air"))
+                .output()
+                .expect("metal toolchain is a red gate, not a skip");
+
+            assert!(output.status.success(), "{codec:?}: merged kernel failed to compile:\n{}\n{}", merged.source, String::from_utf8_lossy(&output.stderr));
+            compiled += 1;
+        }
+        assert_eq!(compiled, 2, "compiled {compiled} merged staged kernels, expected 2");
+        Ok(())
+    }
+
     #[test]
     fn merged_kernel_text_differs_from_unmerged_only_by_the_base_table_preamble()
     -> Result<(), EmitError> {
@@ -6575,6 +6628,51 @@ fn iq4_xs_row_blocked_geometry_stages_its_four_word_ladder() {
     let expected = LevelStaging::Workgroup { words: 4 };
 
     assert_eq!(level_staging_of_single_row_matvec(Codec::Iq4Xs), expected);
+}
+
+/// The staged word count is a literal in the kernel text, so the pipeline key carries it: IQ3_S
+/// folds `_lst512`, IQ4_XS `_lst4`, and a body that stages nothing folds no `_lst`.
+#[test]
+fn a_staged_kernel_key_names_its_word_count_and_an_unstaged_key_does_not() {
+    let cases = [(Codec::Iq3S, Some("_lst512")), (Codec::Iq4Xs, Some("_lst4")), (Codec::Q8_0, None)];
+
+    for (codec, token) in cases {
+        let bound = matmul_op_with_reduce(4, 2048, 1, ScalarOp::Add);
+        let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
+        let key = kernel_cache_key(&bound, &packed, NumericPolicy::default()).expect("key");
+
+        match token {
+            Some(token) => assert!(key.contains(token), "{codec:?}: {key}"),
+            None => assert!(!key.contains("_lst"), "{codec:?}: {key}"),
+        }
+    }
+}
+
+/// A splice that widens `gid` to `uint3` must widen the stage's thread attributes with it, since
+/// Metal rejects scalar and vector thread-position attributes in one signature; the stage copy
+/// keeps reading the flattened scalars.
+#[test]
+fn widening_the_stage_parameters_declares_vector_attributes_and_flattens_them_in_the_body() {
+    let mut source = String::from(
+        "kernel void entry(\n    uint3 merge_gid [[thread_position_in_grid]],\n    uint stage_tid [[thread_position_in_threadgroup]],\n    uint stage_threads [[threads_per_threadgroup]])\n{\n    uint gid = merge_gid.x;\n",
+    );
+
+    widen_stage_parameters(&mut source);
+
+    assert!(source.contains("uint3 stage_tid3 [[thread_position_in_threadgroup]]"), "{source}");
+    assert!(source.contains("uint3 stage_threads3 [[threads_per_threadgroup]]"), "{source}");
+    assert!(!source.contains("uint stage_tid [["), "{source}");
+    assert!(source.contains(")\n{\n    uint stage_tid = stage_tid3.x + stage_threads3.x * (stage_tid3.y + stage_threads3.y * stage_tid3.z);\n    uint stage_threads = stage_threads3.x * stage_threads3.y * stage_threads3.z;\n    uint gid"), "{source}");
+}
+
+#[test]
+fn widening_a_source_without_stage_parameters_leaves_it_untouched() {
+    let original = "kernel void entry(\n    uint3 merge_gid [[thread_position_in_grid]])\n{\n";
+    let mut source = String::from(original);
+
+    widen_stage_parameters(&mut source);
+
+    assert_eq!(source, original);
 }
 
 /// A body that reads no level table (Q8_0, Q4_K) and a linear ladder (0 B, nothing to stage)
