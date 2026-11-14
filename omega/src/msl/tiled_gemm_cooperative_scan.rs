@@ -1973,13 +1973,8 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
             return Some((TILED_GEMM_NSG as u64) * SIMD_WIDTH);
         }
         if let Some(block) = packed_row_block(resolved, quantized) {
-            let feature_total: u64 = block
-                .feature_axes
-                .iter()
-                .map(|&axis| resolved.extents[axis as usize])
-                .product();
-            let token_total = packed_row_block_token_total(&block, &resolved.extents);
-            let (_base, split) = packed_row_dispatch(feature_total, token_total, block.codec);
+            let (_base, split) = packed_row_dispatch(resolved, quantized, &block);
+            let geometry = packed_row_geometry(resolved, quantized, &block);
             // `metal-packed-row-nsg2`'s own `nsg=2` geometry (ggml's
             // `N_SG_Q4_K`, `ggml-metal-impl.h:33`) has to be applied HERE,
             // not in the `#[cfg(feature = "metal-packed-row-nsg2")]` arm
@@ -2006,7 +2001,14 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
             // (`metal-packed-row-nsg2`'s own doc, still true here), so nsg=2
             // is correctness-neutral whenever split-K is off, regardless of
             // which body actually runs.
-            return Some(SIMD_WIDTH * split * packed_row_nsg_factor());
+            // a K split already spends every simdgroup of the threadgroup on one row group, so
+            // the nsg row-widening does not stack on it
+            let row_widening = if geometry.k_split > 1 {
+                1
+            } else {
+                packed_row_nsg_factor()
+            };
+            return Some(SIMD_WIDTH * split * row_widening);
         }
     }
     if packed_row_block(resolved, quantized).is_some() {
@@ -2312,12 +2314,9 @@ pub(super) fn push_cooperative_reduce_body(
     // `output_index`/`lane` pair at `SIMD_WIDTH` (`metal-q4k-split-k`'s own
     // `tptg`-derived preamble below is the only variant on this pair).
     if let Some(block) = packed_row_block(resolved, quantized) {
-        // simdgroups cooperating on one row group; the dispatch geometry
-        // (`packed_row_dispatch`) is what makes this > 1, and it stays 1 until
-        // that geometry carries a K split
-        let k_split = 1usize;
-        if k_split > 1 {
-            push_packed_row_split_preamble(source, k_split);
+        let geometry = packed_row_geometry(resolved, quantized, &block);
+        if geometry.k_split > 1 {
+            push_packed_row_split_preamble(source, geometry.k_split);
         } else if cfg!(feature = "metal-q4k-split-k") {
             // `tptg` is the ACTUAL per-dispatch threadgroup width
             // (`kernel_signature`'s new param, wired on for this exact
@@ -2352,7 +2351,7 @@ pub(super) fn push_cooperative_reduce_body(
             epilogue_body,
             epilogue_operands,
             expert_source_mode,
-            k_split,
+            geometry,
             metal,
         )?;
         return Ok(());
