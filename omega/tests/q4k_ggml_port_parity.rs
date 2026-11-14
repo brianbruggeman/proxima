@@ -124,7 +124,7 @@ fn real_tensor_bytes(
 /// bytes" (`UInt8`) from the dequantized `f32` oracle -- restated per
 /// `q4k_real_checkpoint_parity.rs`'s own standalone-integration-test-binary
 /// posture.
-fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
+fn matmul_program(rows: u32, k: u32, weight_dtype: DType, negated: bool) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = append(
         &mut program,
@@ -154,13 +154,26 @@ fn matmul_program(rows: u32, k: u32, weight_dtype: DType) -> (Vec<Op>, NodeId) {
             name: None,
         },
     );
+    let reduced = if negated {
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Negate,
+                operands: vec![(product, IndexMap::Affine(map::projection(3, &[0, 1, 2])))],
+                name: None,
+            },
+        )
+    } else {
+        product
+    };
     let sum = append(
         &mut program,
         Op::Reduce(Reduce {
             dtype: DType::FLOAT32,
             body: ScalarOp::Add,
             init: ReduceInit::Zero,
-            operand: product,
+            operand: reduced,
             in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
             out_map: IndexMap::Affine(map::projection(3, &[0, 1])),
             keep: Keep::Reduce,
@@ -197,6 +210,7 @@ fn assert_matches_dequantized_oracle(
     rows: usize,
     activation: &[f32],
     relative: bool,
+    negated: bool,
 ) {
     let blocks_per_row = in_dim / q4_k::QK_K;
     let row_bytes = blocks_per_row * q4_k::BLOCK_BYTES;
@@ -208,7 +222,7 @@ fn assert_matches_dequantized_oracle(
         q4_k::dequantize(row_blocks, row_f32).expect("a whole number of q4_k super-blocks per row");
     }
 
-    let (packed_program, packed_sum) = matmul_program(rows as u32, in_dim as u32, DType::UINT8);
+    let (packed_program, packed_sum) = matmul_program(rows as u32, in_dim as u32, DType::UINT8, negated);
     let metal = omega::execute(
         &packed_program,
         &[],
@@ -224,7 +238,7 @@ fn assert_matches_dequantized_oracle(
     )
     .unwrap_or_else(|error| panic!("{label}: metal executes the ggml-port q4_k matvec: {error}"));
 
-    let (f32_program, f32_sum) = matmul_program(rows as u32, in_dim as u32, DType::FLOAT32);
+    let (f32_program, f32_sum) = matmul_program(rows as u32, in_dim as u32, DType::FLOAT32, negated);
     let cpu = evaluate(&f32_program, &[], &[&dequantized, activation], &[f32_sum])
         .expect("dequantized f32 cpu matmul evaluates");
 
@@ -308,6 +322,7 @@ fn ggml_port_matches_dequantized_f32_cpu_on_real_attn_q_weight() {
         rows,
         &activation,
         false,
+        false,
     );
 }
 
@@ -346,6 +361,7 @@ fn ggml_port_matches_dequantized_f32_cpu_on_real_ffn_up_weight() {
         in_dim,
         rows,
         &activation,
+        false,
         false,
     );
 }
@@ -405,6 +421,34 @@ fn ggml_port_matches_dequantized_f32_cpu_on_a_ragged_row_count_and_short_k() {
         RAGGED_IN_DIM,
         RAGGED_OUT_DIM,
         &activation,
+        true,
+        false,
+    );
+}
+
+/// A negated body is not the plain `weight * other` product, so `push_packed_row_blocked_body` takes
+/// the per-element Q4_K arm (reads `hdr.scale` / `hdr.minimum` per element) instead of the
+/// scale-deferred arm. The row-blocked kernel must declare `hdr` itself for the pipeline to build.
+#[test]
+fn per_element_arm_matches_dequantized_f32_cpu_on_a_negated_ragged_matvec() {
+    let rows: Vec<Vec<f32>> = (0..RAGGED_OUT_DIM)
+        .map(|row| random_vec(9_000 + row as u64, RAGGED_IN_DIM, 1.0))
+        .collect();
+    let row_bytes = (RAGGED_IN_DIM / QK_K) * BLOCK_BYTES;
+    let mut packed = vec![0u8; RAGGED_OUT_DIM * row_bytes];
+    for (row, row_packed) in rows.iter().zip(packed.chunks_exact_mut(row_bytes)) {
+        quantize(row, row_packed).expect("RAGGED_IN_DIM is a whole multiple of QK_K");
+    }
+
+    let activation = random_vec(31_337, RAGGED_IN_DIM, 1.0);
+
+    assert_matches_dequantized_oracle(
+        "negated ragged synthetic (9 rows, 2 super-blocks/row)",
+        &packed,
+        RAGGED_IN_DIM,
+        RAGGED_OUT_DIM,
+        &activation,
+        true,
         true,
     );
 }
