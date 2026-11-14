@@ -69,6 +69,17 @@ ksplit_max = 4
 # via `PROXIMA_PACKED_ROWS_KSPLIT`.
 ksplit_rows = 2
 
+# threadgroup-memory bytes a level-table matvec may spend, in total, on a
+# workgroup copy of its level table plus the kernel's own `partial_sums`
+# (`LevelStaging::decide`, `msl::level_staging_of`). 32768 is the Apple GPU
+# 32 KiB threadgroup-memory ceiling with nothing reserved: the staged copy and
+# any `partial_sums` must fit under it or the table stays in place. Lowering
+# it keeps larger tables in `constant` memory (fewer staged kernels, no
+# barrier or copy cost for them); raising it past the device ceiling makes
+# the pipeline fail to build. Independent of `[cached_attention]`. Overridable
+# per-build via `OMEGA_PACKED_ROW_BLOCK_LEVEL_STAGE_BUDGET_BYTES`.
+level_stage_budget_bytes = 32768
+
 # bytes of a block's low code plane one lane owns in the lane-run map
 # (`msl::LaneRun::derive`, `msl::lane_run_bytes`): a lane takes that many
 # plane bytes and every element whose code sits in them, so a byte-code layout

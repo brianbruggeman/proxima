@@ -151,6 +151,22 @@ pub(super) fn level_matvec_msl(
     render(layout, Some(codes), geometry, weight, other, other_stride_is_one, reduction_bound)
 }
 
+/// Level-table reads one lane issues per block step of [`level_matvec_msl`]: its rows times the
+/// elements it owns per row. The same `covered` the renderer unrolls, so a staging decision and the
+/// kernel it shapes read one number.
+///
+/// # Errors
+/// The property of `layout` or `geometry` the level matvec does not render.
+#[must_use = "the refusal names why the format has no rendered matvec"]
+pub(super) fn level_reads_per_lane(
+    layout: &BlockLayout,
+    codes: &LevelCodes<'_>,
+    geometry: &SubBlockMatvecGeometry,
+) -> Result<usize, SubBlockMatvecRefusal> {
+    require(level_table_rendered(codes.table), "a level table the matvec renders")?;
+    Ok(geometry.rows_per_simdgroup * Assembled::of(layout, Some(codes), geometry)?.covered)
+}
+
 /// Whether the level table is one the rendered level matvec can resolve: an explicit or linear
 /// ladder, or a signed grid whose sign is a plane bit. The same set as `layout_render`'s
 /// `renderable_level_layout`, so admission and the renderer share one predicate.
