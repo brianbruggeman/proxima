@@ -2260,7 +2260,7 @@ pub fn plan_named(
         outputs,
         numeric_policy,
         &[],
-        true,
+        (true, false),
     )
 }
 
@@ -2280,6 +2280,36 @@ pub fn plan_named_with_placed_inputs(
     placed_input_nodes: &[NodeId],
     fuse_cached_attention: bool,
 ) -> Result<Plan, MetalError> {
+    plan_named_with_placed_inputs_scheduled(
+        program,
+        symbols,
+        named,
+        outputs,
+        numeric_policy,
+        placed_input_nodes,
+        (fuse_cached_attention, false),
+    )
+}
+
+/// [`plan_named_with_placed_inputs`] with `options = (fuse_cached_attention,
+/// wavefront_schedule)`. The second reorders the bound program into dependency
+/// levels at plan time ([`RuntimeConfig::wavefront_schedule`]'s doc names the
+/// passes it composes); the configured-runtime path reads that field instead,
+/// this is the edge a caller without a `RuntimeConfig` uses. A tuple, so every
+/// existing call of the unscheduled function stays as written.
+///
+/// # Errors
+/// Propagates name-resolution and planning failures.
+#[cfg(feature = "metal-output-placement")]
+pub fn plan_named_with_placed_inputs_scheduled(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+    numeric_policy: NumericPolicy,
+    placed_input_nodes: &[NodeId],
+    options: (bool, bool),
+) -> Result<Plan, MetalError> {
     let blocks = resolve_named_blocks_with_placed_nodes(program, named, |node| {
         placed_input_nodes.contains(&node)
     })?;
@@ -2290,7 +2320,7 @@ pub fn plan_named_with_placed_inputs(
         outputs,
         numeric_policy,
         placed_input_nodes,
-        fuse_cached_attention,
+        options,
     )
 }
 

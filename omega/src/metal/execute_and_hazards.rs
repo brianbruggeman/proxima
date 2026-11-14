@@ -15,9 +15,19 @@ pub fn plan(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
 ) -> Result<Plan, MetalError> {
-    plan_with_placed_inputs(program, symbols, blocks, outputs, numeric_policy, &[], true)
+    plan_with_placed_inputs(
+        program,
+        symbols,
+        blocks,
+        outputs,
+        numeric_policy,
+        &[],
+        (true, false),
+    )
 }
 
+/// `options` is `(fuse_cached_attention, wavefront_schedule)`; the second is
+/// the plan-time level schedule (`wavefront_schedule.rs`), off keeps program order.
 pub(super) fn plan_with_placed_inputs(
     program: &[Op],
     symbols: &[u64],
@@ -25,8 +35,9 @@ pub(super) fn plan_with_placed_inputs(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
     placed_input_nodes: &[NodeId],
-    fuse_cached_attention: bool,
+    options: (bool, bool),
 ) -> Result<Plan, MetalError> {
+    let (fuse_cached_attention, wavefront_schedule) = options;
     #[cfg(feature = "instrument")]
     let prepare_started = read_ticks();
     let prepared = prepare(
@@ -36,7 +47,7 @@ pub(super) fn plan_with_placed_inputs(
         outputs,
         numeric_policy,
         placed_input_nodes,
-        fuse_cached_attention,
+        (fuse_cached_attention, wavefront_schedule),
     )?;
     #[cfg(feature = "instrument")]
     {

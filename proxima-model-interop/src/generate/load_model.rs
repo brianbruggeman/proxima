@@ -867,6 +867,12 @@ pub struct LoadedModel<'file> {
     /// at its own default.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub(super) dispatch: DispatchTypeName,
+    /// The architecture's measured default for `ServingConfig::wavefront_schedule`
+    /// ([`crate::serving_defaults::MeasuredServingDefaults::wavefront_schedule`]);
+    /// `None` (unmeasured) leaves the caller's value. Consulted by
+    /// [`Self::apply_dispatch_type_override`]'s wavefront step only when a caller left the field `false`.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub(super) wavefront_schedule: Option<bool>,
     /// The checkpoint's own `{arch}.context_length`
     /// ([`crate::lowering::trained_context_length`]), `None` when the header
     /// carries none (safetensors loads, synthetic fixtures). Read only

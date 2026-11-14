@@ -69,6 +69,12 @@ pub struct MeasuredServingDefaults {
     #[serde(default = "default_dispatch")]
     #[builder(default = default_dispatch())]
     pub dispatch: DispatchTypeName,
+    /// Whether decode plans run the plan-time wavefront (dependency level)
+    /// schedule; `None` leaves the caller's `ServingConfig::wavefront_schedule`
+    /// alone (unmeasured), and `PROXIMA_WAVEFRONT` always wins. Unset for every
+    /// architecture until a model A/B measures it.
+    #[serde(default)]
+    pub wavefront_schedule: Option<bool>,
     /// The numeric format activations and intermediate values are produced at,
     /// as a proxima-numeric format name such as `float32`.
     #[serde(default = "default_activation")]

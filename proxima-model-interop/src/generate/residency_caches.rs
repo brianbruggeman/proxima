@@ -2846,6 +2846,10 @@ pub(super) struct PlanNumerics<'config> {
     /// [`PlanNumerics`] with `false` to render the unfused chain for the
     /// same program/outputs.
     pub(super) fuse_cached_attention: bool,
+    /// `ServingConfig::wavefront_schedule` -- the plan-time level schedule
+    /// `omega::metal::plan_named_with_placed_inputs_scheduled` applies when no
+    /// `omega_runtime` supplies its own.
+    pub(super) wavefront_schedule: bool,
     pub(super) omega_runtime: Option<&'config RuntimeConfig>,
 }
 
@@ -2965,6 +2969,10 @@ pub struct BackendRuntime {
     /// sites) -- same pattern as `math_mode` immediately above.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub(super) dispatch_type: omega::metal::DispatchType,
+    /// `ServingConfig::wavefront_schedule`, read once at construction like
+    /// `dispatch_type`; reaches `prepare` through [`PlanNumerics`].
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub(super) wavefront_schedule: bool,
     /// [`Self::evaluate_with_placements`]'s own plan cache -- same
     /// `(new_count, merged_len)` keying as `plans` above, but holding
     /// `omega::metal::Plan` directly rather than the backend-polymorphic
@@ -3136,6 +3144,8 @@ impl BackendRuntime {
             attention_variant: config.attention_variant,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: config.dispatch_type,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            wavefront_schedule: config.wavefront_schedule,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             placed_plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -4108,6 +4118,7 @@ impl BackendRuntime {
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
+            wavefront_schedule: self.wavefront_schedule,
             omega_runtime: self.omega_runtime.as_ref(),
         };
         let plan = Self::resolve_segment_plan(
@@ -4184,6 +4195,7 @@ impl BackendRuntime {
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
+            wavefront_schedule: self.wavefront_schedule,
             omega_runtime: self.omega_runtime.as_ref(),
         };
         let plan = Self::resolve_segment_plan(
@@ -4262,6 +4274,7 @@ impl BackendRuntime {
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
+            wavefront_schedule: self.wavefront_schedule,
             omega_runtime: self.omega_runtime.as_ref(),
         };
         let decode_shaped = shape.0 == 1;
@@ -4494,14 +4507,14 @@ impl BackendRuntime {
                 },
             )?
         } else {
-            plan_named_with_placed_inputs(
+            plan_named_with_placed_inputs_scheduled(
                 program,
                 symbols,
                 named,
                 outputs,
                 numerics.numeric_policy,
                 &placed_input_nodes,
-                numerics.fuse_cached_attention,
+                (numerics.fuse_cached_attention, numerics.wavefront_schedule),
             )?
         };
         plan.mark_resident(resident_names);
@@ -4576,6 +4589,7 @@ impl BackendRuntime {
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
+            wavefront_schedule: self.wavefront_schedule,
             omega_runtime: self.omega_runtime.as_ref(),
         };
         let plan = Self::resolve_cached_plan(
@@ -4666,6 +4680,7 @@ impl BackendRuntime {
             plan_time_constants: self.plan_time_constants,
             command_buffer_chunks: self.command_buffer_chunks,
             fuse_cached_attention: true,
+            wavefront_schedule: self.wavefront_schedule,
             omega_runtime: self.omega_runtime.as_ref(),
         };
         let plan = Self::resolve_cached_plan(

@@ -726,6 +726,38 @@ pub(super) mod tests {
 
     #[cfg(all(feature = "metal", target_os = "macos"))]
     #[test]
+    fn a_serving_config_wavefront_schedule_reaches_the_backend_runtime() {
+        let on = crate::serving::ServingConfig {
+            wavefront_schedule: true,
+            ..super::supported_serving_config(GPU_LAYERS_ALL, omega::MathMode::default())
+        };
+        let off = super::supported_serving_config(GPU_LAYERS_ALL, omega::MathMode::default());
+
+        let enabled = BackendRuntime::new(&on);
+        let disabled = BackendRuntime::new(&off);
+
+        assert!(enabled.wavefront_schedule);
+        assert!(!disabled.wavefront_schedule);
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn proxima_wavefront_env_overrides_the_configured_value_and_refuses_typos() {
+        let resolve = |value: Option<&str>, configured: bool| {
+            temp_env::with_vars([("PROXIMA_WAVEFRONT", value)], || {
+                crate::generate::decode::resolve_wavefront_override(configured)
+            })
+        };
+
+        assert!(!resolve(None, false).expect("unset keeps the configured value"));
+        assert!(resolve(None, true).expect("unset keeps the configured value"));
+        assert!(resolve(Some("1"), false).expect("1 turns it on"));
+        assert!(!resolve(Some("0"), true).expect("0 turns it off"));
+        assert!(resolve(Some("yes"), false).is_err());
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
     fn metal_router_segment_readback_reaches_the_residency_boundary() {
         let config = super::supported_serving_config(GPU_LAYERS_ALL, omega::MathMode::default());
         let mut runtime = BackendRuntime::new(&config);
@@ -2561,6 +2593,7 @@ pub(super) mod placed_plan_mode_tests {
                 plan_time_constants: false,
                 command_buffer_chunks: 1,
                 fuse_cached_attention: true,
+                wavefront_schedule: false,
                 omega_runtime: None,
             },
         )
@@ -2621,6 +2654,7 @@ pub(super) mod placed_plan_mode_tests {
                 plan_time_constants: false,
                 command_buffer_chunks: 1,
                 fuse_cached_attention: true,
+                wavefront_schedule: false,
                 omega_runtime: None,
             },
         )
@@ -2664,6 +2698,7 @@ pub(super) mod placed_plan_mode_tests {
                 plan_time_constants: false,
                 command_buffer_chunks: 1,
                 fuse_cached_attention: true,
+                wavefront_schedule: false,
                 omega_runtime: None,
             },
         ) {
@@ -2802,6 +2837,8 @@ pub(super) mod memory_fit_gate_tests {
             command_buffer_chunks: 1,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch: DispatchTypeName::Serial,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            wavefront_schedule: None,
             trained_context_length: Some(TRAINED_CONTEXT_LENGTH),
             rope_scaling: RopeScaling::None,
             kv_layers: vec![(2, 64, None); 2],

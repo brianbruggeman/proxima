@@ -335,3 +335,245 @@ mod tests {
         assert!(deferred[1].is_empty());
     }
 }
+
+#[cfg(test)]
+mod real_fixture_tests {
+    use super::*;
+    use proxima_tensor::{
+        CachedAttentionArithmetic, Extent, IndexMap, Keep, Layout, Reduce, ReduceInit, ScalarOp,
+        append, projection,
+    };
+
+    /// flint-shaped cached attention reading nodes 0..9 and writing `node`.
+    fn attention(node: u32) -> BoundOp {
+        let operands = (0..9)
+            .map(|index| {
+                (
+                    NodeId(index),
+                    Layout {
+                        base: 0,
+                        strides: vec![1].into(),
+                    },
+                    None,
+                )
+            })
+            .collect();
+        BoundOp {
+            node: NodeId(node),
+            dtype: DType::FLOAT32,
+            extents: vec![49, 1, 8, 256],
+            kind: BoundOpKind::CachedAttention {
+                operands,
+                query_rows: 49,
+                cached_key_rows: 512,
+                new_key_rows: 49,
+                kv_heads: 1,
+                query_groups: 8,
+                head_dim: 256,
+                rotary_dim: 256,
+                scale: 1.0,
+                cached_lower_inclusive: -511,
+                new_upper_inclusive: 0,
+                arithmetic: CachedAttentionArithmetic::OnlineF32,
+                attention_sink: false,
+            },
+        }
+    }
+
+    /// The program the hazard tests use: `y`, a second reader of `y`, and a reduce with `y` in its
+    /// epilogue; returns the program and its two requested outputs plus the placed leaf.
+    fn program() -> (Vec<Op>, Vec<NodeId>, NodeId) {
+        let mut program = Vec::new();
+        let identity = || IndexMap::Affine(projection(1, &[0]));
+        let raw = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::FLOAT32,
+                shape: vec![Extent::Static(4)],
+                name: None,
+            },
+        );
+        let y = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Identity,
+                operands: vec![(raw, identity())],
+                name: None,
+            },
+        );
+        let weights = append(
+            &mut program,
+            Op::Input {
+                dtype: DType::FLOAT32,
+                shape: vec![Extent::Static(8), Extent::Static(4)],
+                name: None,
+            },
+        );
+        let reduced = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: weights,
+                in_map: IndexMap::Affine(projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(projection(2, &[1])),
+                keep: Keep::Reduce,
+                name: None,
+            }),
+        );
+        let consumer = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Add,
+                operands: vec![(reduced, identity()), (y, identity())],
+                name: None,
+            },
+        );
+        let extra = append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Negate,
+                operands: vec![(y, identity())],
+                name: None,
+            },
+        );
+        (program, vec![consumer, extra], raw)
+    }
+
+    fn prepared(wavefront: bool, placed: &[NodeId]) -> Prepared {
+        let (program, outputs, _) = program();
+        let raw = [0.5f32; 4];
+        let weights = [0.25f32; 32];
+        let blocks = [QuantizedBlock::Float32(&raw), QuantizedBlock::Float32(&weights)];
+        prepare_with_options(
+            &program,
+            &[],
+            &blocks,
+            &outputs,
+            (NumericPolicy::default(), true, true, wavefront),
+            placed,
+        )
+        .expect("the real fixture program prepares")
+    }
+
+    #[test]
+    fn flag_off_plan_equals_the_default_prepare_path_in_program_order() {
+        let (program, outputs, _) = program();
+        let raw = [0.5f32; 4];
+        let weights = [0.25f32; 32];
+        let blocks = [QuantizedBlock::Float32(&raw), QuantizedBlock::Float32(&weights)];
+        let pre_wavefront = prepare(&program, &[], &blocks, &outputs, NumericPolicy::default(), &[], (true, false))
+            .expect("the default path prepares");
+
+        let off = prepared(false, &[]);
+
+        assert!(!off.resolved.is_empty());
+        assert_eq!(off.resolved, pre_wavefront.resolved);
+        assert_eq!(off.retires, pre_wavefront.retires);
+        assert!(off.level_starts.is_empty());
+    }
+
+    #[test]
+    fn the_scheduled_plan_option_reaches_prepare_and_off_leaves_no_levels() {
+        let (program, outputs, _) = program();
+        let raw = [0.5f32; 4];
+        let weights = [0.25f32; 32];
+        let blocks = [QuantizedBlock::Float32(&raw), QuantizedBlock::Float32(&weights)];
+        let plan = |wavefront: bool| {
+            plan_with_placed_inputs(
+                &program,
+                &[],
+                &blocks,
+                &outputs,
+                NumericPolicy::default(),
+                &[],
+                (true, wavefront),
+            )
+            .expect("the real fixture plans")
+        };
+
+        let on = plan(true);
+        let off = plan(false);
+
+        assert!(!on.prepared.level_starts.is_empty());
+        assert!(off.prepared.level_starts.is_empty());
+    }
+
+    #[test]
+    fn flag_on_is_a_permutation_of_the_flag_off_plan_with_level_starts() {
+        let off = prepared(false, &[]);
+
+        let on = prepared(true, &[]);
+
+        assert!(!on.level_starts.is_empty());
+        assert_eq!(on.resolved.len(), off.resolved.len());
+        assert!(off.resolved.iter().all(|bound| on.resolved.contains(bound)));
+        assert_eq!(on.level_starts[0], 0);
+    }
+
+    #[test]
+    fn placed_input_chain_keeps_program_order_of_every_op_touching_it() {
+        let (_, _, raw) = program();
+        let off = prepared(false, &[raw]);
+
+        let on = prepared(true, &[raw]);
+
+        let off_nodes: Vec<NodeId> = off.resolved.iter().map(|bound| bound.node).collect();
+        let on_nodes: Vec<NodeId> = on.resolved.iter().map(|bound| bound.node).collect();
+        let chained = |nodes: &[NodeId]| -> Vec<NodeId> {
+            nodes
+                .iter()
+                .copied()
+                .filter(|node| {
+                    let bound = off.resolved.iter().find(|each| each.node == *node);
+                    bound.is_some_and(|bound| {
+                        off.effective_outputs.contains(node) || {
+                            let mut reads_placed = false;
+                            op_read_nodes(bound, |read| reads_placed |= read == raw);
+                            reads_placed
+                        }
+                    })
+                })
+                .collect()
+        };
+        assert!(chained(&off_nodes).len() >= 2);
+        assert_eq!(chained(&on_nodes), chained(&off_nodes));
+    }
+
+    #[test]
+    fn attention_ops_sharing_a_scratch_never_share_a_level() {
+        let resolved = vec![attention(20), attention(21)];
+        let policy = NumericPolicy::default();
+
+        let chains = chain_keys(&resolved, policy, &[], &[]);
+        let chained = wavefront_levels_for(&resolved, &chains);
+        let unchained = wavefront_levels_for(&resolved, &[0, 0]);
+
+        assert_eq!(chains, [CHAIN_ATTENTION_SCRATCH, CHAIN_ATTENTION_SCRATCH]);
+        assert_eq!(chained, [0, 1]);
+        assert_eq!(unchained, [0, 0]);
+    }
+
+    fn wavefront_levels_for(resolved: &[BoundOp], chains: &[u32]) -> Vec<u32> {
+        let (offsets, targets) = dependency_csr(resolved, 32, chains);
+        wavefront_levels(&offsets, &targets)
+    }
+
+    #[test]
+    fn arena_gate_declines_over_cap_and_accepts_under_it() {
+        let resolved = vec![attention(20), attention(21)];
+        let chains = [0, 0];
+
+        let declined = wavefront_schedule(&resolved, &chains, 32, &[], 0);
+        let accepted = wavefront_schedule(&resolved, &chains, 32, &[], usize::MAX);
+
+        assert!(declined.is_none(), "a zero cap is below any peak, so program order stands");
+        let (reordered, level_starts) = accepted.expect("an unbounded cap admits the reorder");
+        assert_eq!(reordered, resolved);
+        assert_eq!(level_starts, [0]);
+    }
+}

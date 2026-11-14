@@ -280,6 +280,11 @@ pub struct ServingSettings {
     #[setting(resolve_with = "from_name", default_str = "serial")]
     #[builder(default = DispatchTypeName::Serial)]
     pub dispatch_type: DispatchTypeName,
+    /// `ServingConfig::wavefront_schedule`: plan-time dependency-level reorder of each decode plan.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[setting(default = false)]
+    #[builder(default = false)]
+    pub wavefront_schedule: bool,
     /// the simdgroup count for cached attention; `legacy` keeps the sized count.
     #[cfg(all(
         feature = "metal",
@@ -473,6 +478,8 @@ impl ServingSettings {
             math_mode: self.math_mode.as_math_mode(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: self.dispatch_type.as_dispatch_type(),
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            wavefront_schedule: self.wavefront_schedule,
             #[cfg(all(
                 feature = "metal",
                 feature = "metal-attn-variants",
@@ -1007,6 +1014,23 @@ epilogue_sources = true
         );
         assert_eq!(defaults.kv_bucket_tokens, 32);
         assert_eq!(defaults, ServingSettings::default());
+    }
+
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    #[test]
+    fn serving_scalars_wavefront_schedule_lowers_and_round_trips() {
+        let from_toml: ServingSettings = conflaguration::from_toml_str("wavefront_schedule = true")
+            .expect("the wavefront toml parses");
+        let built = ServingSettings::builder().wavefront_schedule(true).build();
+        let from_env = temp_env::with_vars(
+            [("PROXIMA_SERVING_WAVEFRONT_SCHEDULE", Some("true"))],
+            || ServingSettings::from_env().expect("the wavefront env parses"),
+        );
+
+        assert_eq!(from_toml, built, "toml and builder agree");
+        assert_eq!(from_env, built, "env and builder agree");
+        assert!(built.as_serving_config(&[]).wavefront_schedule);
+        assert!(!ServingSettings::default().as_serving_config(&[]).wavefront_schedule);
     }
 
     #[cfg(all(feature = "metal", target_os = "macos"))]

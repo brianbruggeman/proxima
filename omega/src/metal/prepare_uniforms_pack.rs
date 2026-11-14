@@ -69,14 +69,15 @@ pub(super) fn prepare(
     outputs: &[NodeId],
     numeric_policy: NumericPolicy,
     placed_input_nodes: &[NodeId],
-    fuse_cached_attention: bool,
+    options: (bool, bool),
 ) -> Result<Prepared, MetalError> {
+    let (fuse_cached_attention, wavefront_schedule) = options;
     prepare_with_options(
         program,
         symbols,
         blocks,
         outputs,
-        (numeric_policy, fuse_cached_attention, true, false),
+        (numeric_policy, fuse_cached_attention, true, wavefront_schedule),
         placed_input_nodes,
     )
 }

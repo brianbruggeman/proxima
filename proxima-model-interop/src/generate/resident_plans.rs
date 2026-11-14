@@ -117,6 +117,8 @@ pub(super) struct PlanIdentity {
     math_mode: MathMode,
     /// Encoder dispatch mode applied to the plan.
     dispatch_type: DispatchType,
+    /// Plan-time level schedule applied to the bound program.
+    wavefront_schedule: bool,
     /// Cached-attention source and grid selection applied to the plan.
     #[cfg(feature = "metal-attn-variants")]
     attention_variant: Option<omega::AttentionVariant>,
@@ -200,6 +202,7 @@ impl PlanIdentity {
             math_mode,
             numeric_policy,
             dispatch_type,
+            wavefront_schedule,
             #[cfg(feature = "metal-attn-variants")]
             attention_variant,
             // CPU reference path only; a resident plan is a Metal plan
@@ -251,6 +254,7 @@ impl PlanIdentity {
             numeric_policy,
             math_mode,
             dispatch_type,
+            wavefront_schedule,
             #[cfg(feature = "metal-attn-variants")]
             attention_variant,
             plan_time_constants,

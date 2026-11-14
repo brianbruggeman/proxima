@@ -338,6 +338,15 @@ fn emit_sizing_consts() {
         "pub const COMMAND_BUFFER_GROWTH_PERMILLE: u64 = {growth_permille};\n"
     ));
 
+    let wavefront_schedule = require_nonneg(
+        "command_buffer.wavefront_schedule",
+        resolve_int(&root, "command_buffer", "wavefront_schedule"),
+    );
+    out.push_str(&format!(
+        "pub const COMMAND_BUFFER_WAVEFRONT_SCHEDULE: bool = {};\n",
+        wavefront_schedule != 0
+    ));
+
     let uniform_cache_entries = require_nonzero(
         "spans.uniform_cache_entries",
         resolve_int(&root, "spans", "uniform_cache_entries"),

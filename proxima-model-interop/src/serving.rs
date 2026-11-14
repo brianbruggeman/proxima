@@ -969,6 +969,15 @@ pub struct ServingConfig<'model> {
     /// `omega::metal::DispatchType`'s own doc.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub dispatch_type: DispatchType,
+    /// Reorder each decode plan's bound program into dependency levels at plan
+    /// time so independent ops share one concurrent-dispatch barrier interval
+    /// (`omega::RuntimeConfig::wavefront_schedule`'s doc names the passes it
+    /// composes). Resolved like `dispatch_type`: an architecture's measured
+    /// default fills a `false`, and `PROXIMA_WAVEFRONT` (`1`/`0`) overrides
+    /// both. `false` keeps program order, byte-for-byte. A plan built through
+    /// `omega_runtime` reads that config's own `wavefront_schedule` instead.
+    #[cfg(all(feature = "metal", target_os = "macos"))]
+    pub wavefront_schedule: bool,
     /// Not an upstream llama-server flag -- routes the CPU forward's
     /// `Q4_K`/`Q5_K`/`Q6_K` dots through their exact dequantize-then-fold
     /// kernels instead of the `q{4,5,6}k-int8-dot` activation-quantized
@@ -1330,6 +1339,8 @@ impl Default for ServingConfig<'static> {
             numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            wavefront_schedule: false,
             // Correctness-first default: CPU uses the scalar/dequantized
             // reference path so its oracle is comparable with GPU kernels.
             // `PROXIMA_RELAXED_ACTIVATIONS` is an explicit performance
@@ -1929,6 +1940,8 @@ mod tests {
             numeric_policy: NumericPolicy::llama_relaxed(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            wavefront_schedule: false,
             exact_activations: true,
             weight_precision: &[],
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
@@ -2121,6 +2134,8 @@ mod tests {
             numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            wavefront_schedule: false,
             exact_activations: true,
             weight_precision: &[],
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
@@ -2258,6 +2273,8 @@ mod tests {
             numeric_policy: NumericPolicy::bit_exact(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            wavefront_schedule: false,
             exact_activations: true,
             weight_precision: &[],
             gdn_prefill_backend: GdnPrefillBackend::Cpu,
@@ -2368,6 +2385,8 @@ mod tests {
             numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            wavefront_schedule: false,
             exact_activations: true,
             weight_precision: &[],
             moe_pre_gather: false,
@@ -2468,6 +2487,8 @@ mod tests {
             numeric_policy: NumericPolicy::llama_relaxed().with_epilogue_sources(true),
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch_type: DispatchType::Serial,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            wavefront_schedule: false,
             exact_activations: true,
             weight_precision: &[],
             moe_pre_gather: false,

@@ -65,6 +65,7 @@ fn runtime_config_difference_count(left: &RuntimeConfig, right: &RuntimeConfig) 
         left.engine != right.engine,
         left.gpu_driver != right.gpu_driver,
         left.allow_fusion != right.allow_fusion,
+        left.wavefront_schedule != right.wavefront_schedule,
         left.exact_activations != right.exact_activations,
         left.pipeline_cache != right.pipeline_cache,
         left.pipeline_cache_dir != right.pipeline_cache_dir,
@@ -219,6 +220,28 @@ fn dense_mma_layout_rejects_a_valid_float_format_the_lowerer_does_not_support() 
 
     assert!(error.contains("dense_mma_input_layout.layout"));
     assert!(error.contains("only binary32 and bfloat16"));
+}
+
+#[test]
+fn wavefront_schedule_builder_env_and_toml_agree_and_default_is_off() {
+    let from_builder = RuntimeConfig::builder()
+        .with_wavefront_schedule(true)
+        .build()
+        .expect("builder config validates");
+    let from_toml: RuntimeConfig =
+        toml::from_str("wavefront_schedule = true\n").expect("config TOML deserializes");
+    let from_env = temp_env::with_vars([("OMEGA_WAVEFRONT_SCHEDULE", Some("true"))], || {
+        RuntimeConfig::from_env().expect("env config validates")
+    });
+    let defaulted = temp_env::with_vars([("OMEGA_WAVEFRONT_SCHEDULE", None::<&str>)], || {
+        RuntimeConfig::from_env().expect("env config validates")
+    });
+
+    assert!(from_builder.wavefront_schedule);
+    assert_eq!(runtime_config_difference_count(&from_builder, &from_toml), 0);
+    assert_eq!(runtime_config_difference_count(&from_builder, &from_env), 0);
+    assert!(!defaulted.wavefront_schedule);
+    assert_eq!(defaulted, RuntimeConfig::builder().build().expect("default builds"));
 }
 
 #[test]

@@ -109,7 +109,7 @@ impl Default for RuntimeConfig {
             engine: String::from("cpu"),
             gpu_driver: String::from("auto"),
             allow_fusion: false,
-            wavefront_schedule: false,
+            wavefront_schedule: crate::sized::COMMAND_BUFFER_WAVEFRONT_SCHEDULE,
             exact_activations: true,
             pipeline_cache: true,
             pipeline_cache_dir: String::new(),

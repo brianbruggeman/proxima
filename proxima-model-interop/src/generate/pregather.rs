@@ -2968,6 +2968,8 @@ impl<'file> LoadedModel<'file> {
             command_buffer_chunks: measured.command_buffer_chunks,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch: measured.dispatch,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            wavefront_schedule: measured.wavefront_schedule,
             trained_context_length: crate::lowering::trained_context_length(parsed),
             rope_scaling,
             kv_layers,
@@ -3200,6 +3202,8 @@ impl<'file> LoadedModel<'file> {
             command_buffer_chunks: 1,
             #[cfg(all(feature = "metal", target_os = "macos"))]
             dispatch: DispatchTypeName::Serial,
+            #[cfg(all(feature = "metal", target_os = "macos"))]
+            wavefront_schedule: None,
             // safetensors carries no context_length or rope.scaling key this
             // crate reads (`crate::hf_config::architecture_from_hf_config`
             // parses neither), so the limit is the memory fit alone.
