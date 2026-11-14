@@ -1115,39 +1115,8 @@ fn codec_function_name(node: NodeId, codec: Codec) -> Result<&'static str, EmitE
         Codec::Q4_0 => Ok("q4_0_element"),
         Codec::Float16 => Ok("f16_element"),
         Codec::BFloat16 => Ok("bf16_element"),
-        // No WGSL unpack function exists for any of these 20 -- this
-        // renderer's own `operand_read` only ever calls `codec_function_name`
-        // for a codec `crate::identity::operand_codecs` reports as packed by
-        // this backend, mirroring `crate::msl::signature_tokens_prelude::
-        // operand_read`'s trailing arm; kept exhaustive so a future codec
-        // forces a decision here rather than slipping through.
-        Codec::Q5_1
-        | Codec::Q5_0
-        | Codec::Q4_1
-        | Codec::Q8_1
-        | Codec::Q8_1Grouped
-        | Codec::Q8K
-        | Codec::Iq1S
-        | Codec::Iq1M
-        | Codec::Iq2Xxs
-        | Codec::Iq2Xs
-        | Codec::Iq2S
-        | Codec::Iq3Xxs
-        | Codec::Iq3S
-        | Codec::Iq4Nl
-        | Codec::Iq4Xs
-        | Codec::Tq10
-        | Codec::Tq20
-        | Codec::Mxfp4
-        | Codec::Nvfp4
-        | Codec::Q1_0
-        | Codec::Q2_0
-        | Codec::Pq2_0
-        | Codec::Ptq1_0
-        | Codec::BFloat8
-        | Codec::Bf8E5M2
-        | Codec::Bf4E2M1
-        | Codec::Fp6E3M2 => Err(EmitError::UnsupportedCodec { node }),
+        // a `Codec` is a `NumericFormat` value, an open set: only the formats above have a WGSL unpack function, every other format is unsupported here
+        _ => Err(EmitError::UnsupportedCodec { node }),
     }
 }
 
