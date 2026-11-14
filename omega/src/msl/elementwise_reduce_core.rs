@@ -1242,7 +1242,7 @@ pub(super) fn push_packed_row_multi_row_body(
     let feature_axes = &block.feature_axes;
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
-    let rows = codec_rows_per_simdgroup(block.codec);
+    let rows = codec_rows_per_simdgroup(block.codec, knobs);
     let cap_token_total = packed_row_block_token_total(block, &resolved.extents);
     let cap = packed_row_activation_cap(cap_token_total) as usize;
     let (init_expr, _) = fold_init_tokens(init);

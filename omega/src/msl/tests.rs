@@ -6263,7 +6263,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         &EmitKnobs::default(),
         true,
         PackedRowGeometry {
-            rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Float16),
+            rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Float16, &EmitKnobs::default()),
             k_split: 1,
             level_staging: LevelStaging::InPlace,
         },
@@ -6310,7 +6310,7 @@ fn push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel() {
         &EmitKnobs::default(),
         false,
         PackedRowGeometry {
-            rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Q8_0),
+            rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Q8_0, &EmitKnobs::default()),
             k_split: 1,
             level_staging: LevelStaging::InPlace,
         },
@@ -6358,7 +6358,7 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
         &EmitKnobs::default(),
         false,
         PackedRowGeometry {
-            rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Q4_0),
+            rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Q4_0, &EmitKnobs::default()),
             k_split: 1,
             level_staging: LevelStaging::InPlace,
         },
@@ -6548,7 +6548,7 @@ fn a_whole_block_lane_default_geometry_is_unsplit_and_leaves_its_kernel_key_with
         assert_eq!(
             geometry,
             PackedRowGeometry {
-                rows_per_simdgroup: codec_rows_per_simdgroup(codec),
+                rows_per_simdgroup: codec_rows_per_simdgroup(codec, &EmitKnobs::default()),
                 k_split: 1,
                 level_staging: LevelStaging::InPlace,
             },
@@ -10407,7 +10407,7 @@ fn q6k_single_token_matvec_folds_the_configured_rows_per_simdgroup() {
     let q6k = BTreeMap::from([(weight_node, Codec::Q6K)]);
     let codecs = operand_codecs(&bound, &q6k);
 
-    assert_eq!(codec_rows_per_simdgroup(Codec::Q6K), rows);
+    assert_eq!(codec_rows_per_simdgroup(Codec::Q6K, &EmitKnobs::default()), rows);
     assert!(
         packed_row_block(&bound, &codecs, &EmitKnobs::default()).is_some(),
         "fixture must take the row-blocked path"
@@ -11748,7 +11748,7 @@ async fn scalar_weight_at_reduce_896_is_admitted_and_emits_the_run_body(#[case] 
     assert_eq!(block.codec, codec);
     assert!(kernel.source.contains(pointer), "{codec:?} binds the run pointer as {pointer}");
     assert!(kernel.source.contains(term), "{codec:?} folds value * act per term");
-    let tail = if super::ksplit_max() > 1 {
+    let tail = if EmitKnobs::from_env().packed_k_split > 1 {
         "partial_sums["
     } else {
         "reduced_row0"

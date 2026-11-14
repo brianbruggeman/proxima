@@ -1516,7 +1516,7 @@ pub(super) fn coord_index32_active(
         return false;
     }
     if let Some(block) = packed_row_block(resolved, quantized, knobs) {
-        return expert_divide_is_rendered(resolved, output_axes, &block)
+        return expert_divide_is_rendered(resolved, output_axes, &block, knobs)
             && output_total_fits_u32(resolved);
     }
     let cooperative = reduce_is_cooperative_dispatch(
@@ -4702,7 +4702,7 @@ pub(super) fn packed_row_lane_unit(codec: Codec) -> Option<u64> {
 
 /// The geometry the body selected for this op needs, derived from the selection inputs the
 /// emitter reads. A body that splits K and whose lane owns a scalar run takes
-/// `k_split_for(K / run, SIMD_WIDTH, ksplit_max())` and, above 1, [`ksplit_rows`] rows per
+/// `k_split_for(K / run, SIMD_WIDTH, knobs.packed_k_split)` and, above 1, `knobs.packed_rows_ksplit` rows per
 /// simdgroup; every other body (block-per-lane included), a multi-token fold, and a non-reduce op
 /// keep the codec's rows and a split of 1.
 pub(crate) fn packed_row_geometry(
@@ -4711,7 +4711,7 @@ pub(crate) fn packed_row_geometry(
     block: &PackedRowBlock,
     knobs: &EmitKnobs,
 ) -> PackedRowGeometry {
-    let rows_per_simdgroup = codec_rows_per_simdgroup(block.codec);
+    let rows_per_simdgroup = codec_rows_per_simdgroup(block.codec, knobs);
     let whole = PackedRowGeometry {
         rows_per_simdgroup,
         k_split: 1,
@@ -4724,10 +4724,10 @@ pub(crate) fn packed_row_geometry(
         return whole;
     };
     let units = resolved.extents[block.reduce_dim] / unit;
-    let k_split = k_split_for(units, SIMD_WIDTH, ksplit_max()) as usize;
+    let k_split = k_split_for(units, SIMD_WIDTH, knobs.packed_k_split) as usize;
     if k_split > 1 {
         PackedRowGeometry {
-            rows_per_simdgroup: ksplit_rows(),
+            rows_per_simdgroup: knobs.packed_rows_ksplit,
             k_split,
             level_staging: LevelStaging::InPlace,
         }

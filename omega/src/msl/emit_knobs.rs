@@ -614,33 +614,60 @@ mod tests {
     }
 
     #[test]
-    fn packed_rows_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_PACKED_ROWS",
-            &["8", " 8 ", "80", ""],
-            |knobs| knobs.packed_rows.unwrap_or(PACKED_ROWS_PER_GROUP),
-            || codec_rows_per_simdgroup(Codec::Q4_0),
-        );
+    fn packed_rows_is_eight_only_when_the_variable_trims_to_eight() {
+        let cases: [(Option<&str>, Option<usize>); 6] = [
+            (None, None),
+            (Some("8"), Some(8)),
+            (Some(" 8 "), Some(8)),
+            (Some("80"), None),
+            (Some("4"), None),
+            (Some(""), None),
+        ];
+        for (value, expected) in cases {
+            let knobs = with_only("PROXIMA_PACKED_ROWS", value, EmitKnobs::from_env);
+            assert_eq!(knobs.packed_rows, expected, "PROXIMA_PACKED_ROWS={value:?}");
+            let rows = codec_rows_per_simdgroup(Codec::Q4_0, &knobs);
+            assert_eq!(rows, expected.unwrap_or(PACKED_ROWS_PER_GROUP), "PROXIMA_PACKED_ROWS={value:?}");
+            assert_eq!(codec_rows_per_simdgroup(Codec::Q6K, &knobs), codec_rows_per_simdgroup_default(Codec::Q6K));
+        }
     }
 
     #[test]
-    fn packed_k_split_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_PACKED_K_SPLIT",
-            &["2", "8", "9", "-1", ""],
-            |knobs| knobs.packed_k_split,
-            ksplit_max,
-        );
+    fn packed_k_split_takes_one_through_eight_else_the_sized_default() {
+        let sized = crate::sized::PACKED_ROW_KSPLIT_MAX;
+        let cases: [(Option<&str>, u64); 8] = [
+            (None, sized),
+            (Some("2"), 2),
+            (Some(" 8 "), 8),
+            (Some("1"), 1),
+            (Some("9"), sized),
+            (Some("0"), sized),
+            (Some("-1"), sized),
+            (Some(""), sized),
+        ];
+        for (value, expected) in cases {
+            let knobs = with_only("PROXIMA_PACKED_K_SPLIT", value, EmitKnobs::from_env);
+            assert_eq!(knobs.packed_k_split, expected, "PROXIMA_PACKED_K_SPLIT={value:?}");
+        }
     }
 
     #[test]
-    fn packed_rows_ksplit_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_PACKED_ROWS_KSPLIT",
-            &["2", "8", "9", "-1", ""],
-            |knobs| knobs.packed_rows_ksplit,
-            ksplit_rows,
-        );
+    fn packed_rows_ksplit_takes_one_through_eight_else_the_sized_default() {
+        let sized = crate::sized::PACKED_ROW_KSPLIT_ROWS;
+        let cases: [(Option<&str>, usize); 8] = [
+            (None, sized),
+            (Some("2"), 2),
+            (Some(" 8 "), 8),
+            (Some("1"), 1),
+            (Some("9"), sized),
+            (Some("0"), sized),
+            (Some("-1"), sized),
+            (Some(""), sized),
+        ];
+        for (value, expected) in cases {
+            let knobs = with_only("PROXIMA_PACKED_ROWS_KSPLIT", value, EmitKnobs::from_env);
+            assert_eq!(knobs.packed_rows_ksplit, expected, "PROXIMA_PACKED_ROWS_KSPLIT={value:?}");
+        }
     }
 
     #[test]

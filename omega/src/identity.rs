@@ -173,7 +173,7 @@ pub(crate) struct MetalOnlyExtras {
     /// the unmerged N=1 kernel's, nor with a DIFFERENT group size's merged
     /// kernel (a future variable-`k` MoE routing).
     pub merged_z: Option<u32>,
-    /// `PROXIMA_PACKED_ROWS=8` (RUN.md, Intervention 5): `Some(rows)` only
+    /// `EmitKnobs::packed_rows` (RUN.md, Intervention 5): `Some(rows)` only
     /// when [`crate::msl::codec_rows_per_simdgroup`] returned something
     /// OTHER than [`crate::msl::codec_rows_per_simdgroup_default`] for this
     /// op's codec -- so the unset-env default folds no new token and the
@@ -186,7 +186,7 @@ pub(crate) struct MetalOnlyExtras {
     /// `Some(k)` only when [`crate::msl::packed_row_geometry`] chose `k > 1`. The count is a
     /// literal in the kernel text, so two ops that differ only in it must not share a pipeline,
     /// and the default `k == 1` folds no token. Carries `(split, rows_per_simdgroup)`: a split
-    /// geometry's rows come from `PROXIMA_PACKED_ROWS_KSPLIT` and are a literal in the kernel
+    /// geometry's rows come from `EmitKnobs::packed_rows_ksplit` and are a literal in the kernel
     /// text too (`partial_sums[k][rows]`). Feeds the `_ks{k}r{rows}` suffix.
     pub packed_row_k_split: Option<(u8, u8)>,
     /// activation rows one simdgroup folds against a streamed weight row,

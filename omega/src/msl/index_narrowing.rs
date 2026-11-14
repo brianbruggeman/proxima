@@ -38,7 +38,7 @@ pub(super) fn index_family(
                 return None;
             }
             if let Some(block) = packed_row_block(resolved, quantized, knobs) {
-                return expert_divide_is_rendered(resolved, output_axes, &block)
+                return expert_divide_is_rendered(resolved, output_axes, &block, knobs)
                     .then_some(IndexFamily::ExpertPrologue);
             }
             let unpacked = quantized.iter().all(Option::is_none);
@@ -61,8 +61,9 @@ pub(super) fn expert_divide_is_rendered(
     resolved: &BoundOp,
     output_axes: &[u16],
     block: &PackedRowBlock,
+    knobs: &EmitKnobs,
 ) -> bool {
-    let rows = codec_rows_per_simdgroup(block.codec) as u64;
+    let rows = codec_rows_per_simdgroup(block.codec, knobs) as u64;
     packed_row_block_token_total(block, &resolved.extents) <= 1
         && packed_row_direct_output_axis(resolved, output_axes).is_none()
         && packed_row_direct_grouped_axes(resolved, output_axes).is_some_and(

@@ -2043,7 +2043,7 @@ pub(crate) const fn codec_supports_pair_dot(codec: Codec) -> bool {
 /// [`codec_rows_per_simdgroup`] with any runtime override stripped back
 /// out -- the structural default per codec, so a caller can tell whether an
 /// override actually changed anything for THIS codec (`Q6_K` never does;
-/// `PROXIMA_PACKED_ROWS` only feeds the `_ => PACKED_ROWS_PER_GROUP` arm).
+/// `EmitKnobs::packed_rows` only feeds the `_ => PACKED_ROWS_PER_GROUP` arm).
 pub(super) const fn codec_rows_per_simdgroup_default(codec: Codec) -> usize {
     match codec {
         Codec::Q6K => crate::sized::PACKED_ROWS_PER_GROUP_Q6K,
@@ -2051,90 +2051,19 @@ pub(super) const fn codec_rows_per_simdgroup_default(codec: Codec) -> usize {
     }
 }
 
-/// `PROXIMA_PACKED_ROWS=8` A/B switch (RUN.md, Intervention 5): same binary,
-/// env off/on, for the packed row-blocked reduce renderer's rows-per-
-/// simdgroup count. Read once per call, not cached -- this is a cold-path
-/// emit/dispatch-shape decision, not a hot inner loop, matching every other
-/// `PROXIMA_*` knob this crate reads with a bare `std::env::var` (e.g.
-/// `PROXIMA_METAL_KIND_FILTER`, `execute_and_hazards.rs`). Only the literal
-/// `"8"` is recognized; unset, empty, or any other value keeps today's
-/// default untouched, so the unset-env emit stays byte-identical to before
-/// this override existed.
-#[cfg(feature = "std")]
-fn packed_rows_override() -> Option<usize> {
-    let result = match std::env::var("PROXIMA_PACKED_ROWS") {
-        Ok(value) if value.trim() == "8" => Some(8),
-        _ => None,
-    };
-    log_packed_rows_variant_once(result);
-    result
-}
-
-/// Owner addition to Intervention 5 (RUN.md "Intervention 5"): print the
-/// selected variant exactly once per process, at the first row-blocked emit
-/// -- `source=env` when `PROXIMA_PACKED_ROWS=8` was honored, `source=default`
-/// otherwise (unset, empty, or any value other than `"8"`). Gated on
-/// `instrument`, matching every other diagnostic `eprintln!` in this crate
-/// (e.g. `token_breakdown_gpu`, `placements_execute_named.rs`) -- the
-/// override itself (`packed_rows_override`, above) stays `std`-only and
-/// fires regardless of `instrument`, so `PROXIMA_PACKED_ROWS` still changes
-/// behavior on a non-instrument build; only the proof line is instrument-
-/// gated.
-#[cfg(feature = "instrument")]
-fn log_packed_rows_variant_once(override_rows: Option<usize>) {
-    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    LOGGED.get_or_init(|| {
-        let (rows, source) = match override_rows {
-            Some(rows) => (rows, "env"),
-            None => (PACKED_ROWS_PER_GROUP, "default"),
-        };
-        proxima_telemetry::debug!(rows = rows as u64, source, "packed_rows_variant");
-    });
-}
-
-#[cfg(all(feature = "std", not(feature = "instrument")))]
-fn log_packed_rows_variant_once(_override_rows: Option<usize>) {}
-
-#[cfg(not(feature = "std"))]
-const fn packed_rows_override() -> Option<usize> {
-    None
-}
-
-pub(crate) fn codec_rows_per_simdgroup(codec: Codec) -> usize {
+/// Rows one simdgroup folds for `codec`: [`EmitKnobs::packed_rows`] when set
+/// (`Q6_K` ignores it), else [`codec_rows_per_simdgroup_default`]. Read from
+/// the knobs, the one place the environment is parsed.
+pub(crate) fn codec_rows_per_simdgroup(codec: Codec, knobs: &EmitKnobs) -> usize {
     match codec {
         Codec::Q6K => codec_rows_per_simdgroup_default(codec),
-        _ => packed_rows_override().unwrap_or_else(|| codec_rows_per_simdgroup_default(codec)),
+        _ => knobs.packed_rows.unwrap_or_else(|| codec_rows_per_simdgroup_default(codec)),
     }
-}
-
-/// One `1..=8` count from the named env var, read once per call like
-/// [`packed_rows_override`]; unset, unparsable or out of range is `None`, so the
-/// sized default stands and the unset-env emit stays byte-identical.
-#[cfg(feature = "std")]
-fn packed_geometry_env(name: &str) -> Option<usize> {
-    std::env::var(name)
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|count| (1..=8).contains(count))
-}
-
-#[cfg(not(feature = "std"))]
-const fn packed_geometry_env(_name: &str) -> Option<usize> {
-    None
-}
-
-/// Ceiling on simdgroups cooperating on one row group:
-/// [`crate::sized::PACKED_ROW_KSPLIT_MAX`], or `PROXIMA_PACKED_K_SPLIT` (1..=8)
-/// when set. The kernel identity carries `_ks{k}`, so two splits never share a
-/// pipeline. Name-free: no codec or format is consulted.
-pub(crate) fn ksplit_max() -> u64 {
-    packed_geometry_env("PROXIMA_PACKED_K_SPLIT")
-        .map_or(crate::sized::PACKED_ROW_KSPLIT_MAX, |split| split as u64)
 }
 
 /// Bytes of a block's low code plane one lane owns: [`crate::sized::PACKED_ROW_LANE_RUN_BYTES`]
 /// (0 is off), or `PROXIMA_PACKED_LANE_RUN_BYTES` (0 or a power of two `<= 32`) when set. Read
-/// per call like [`ksplit_max`]; unset, unparsable or out of range keeps the sized value.
+/// per call; unset, unparsable or out of range keeps the sized value.
 /// Name-free: `LaneRun::derive` decides from the layout whether a run exists. Public so the
 /// switch is reachable by an A/B harness and nothing but tests reads it until the render slice.
 #[must_use]
@@ -2153,13 +2082,6 @@ fn lane_run_bytes_env(name: &str) -> Option<usize> {
 #[cfg(not(feature = "std"))]
 const fn lane_run_bytes_env(_name: &str) -> Option<usize> {
     None
-}
-
-/// Rows one simdgroup folds when the K split is above 1:
-/// [`crate::sized::PACKED_ROW_KSPLIT_ROWS`], or `PROXIMA_PACKED_ROWS_KSPLIT`
-/// (1..=8) when set.
-pub(crate) fn ksplit_rows() -> usize {
-    packed_geometry_env("PROXIMA_PACKED_ROWS_KSPLIT").unwrap_or(crate::sized::PACKED_ROW_KSPLIT_ROWS)
 }
 
 /// The packed-row disable knob: a comma-separated list of codec names
@@ -2222,7 +2144,7 @@ pub(super) fn tiled_gemm_q4_0_override() -> bool {
 }
 
 /// Print the selected tiled-GEMM `Q4_0` admission exactly once per process,
-/// matching [`log_packed_rows_variant_once`]'s own posture. Gated on
+/// matching the other `log_*_once` diagnostics. Gated on
 /// `instrument` alone -- the override itself stays `std`-only and fires
 /// regardless of `instrument`.
 #[cfg(all(feature = "instrument", feature = "metal-tiled-gemm"))]
@@ -2604,7 +2526,7 @@ pub(super) fn reduction_literal_decode_only() -> bool {
 }
 
 /// Print whether the reduction-literal experiment fired exactly once per
-/// process, matching [`log_packed_rows_variant_once`]'s own posture. Gated on
+/// process, matching the other `log_*_once` diagnostics. Gated on
 /// `instrument` alone -- the override itself stays `std`-only and fires
 /// regardless of `instrument`.
 #[cfg(all(feature = "metal-reduction-literal", feature = "instrument"))]
