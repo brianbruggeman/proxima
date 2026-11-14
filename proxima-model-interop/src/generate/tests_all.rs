@@ -1350,22 +1350,24 @@ pub(super) mod tests {
             ..base_config
         };
         let mut unbucketed_runtime = BackendRuntime::new(&unbucketed_config);
-        let _ = omega::metal::OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset();
-        let unbucketed = loaded
-            .run_decode_loop("A", max_tokens, &unbucketed_config, &mut unbucketed_runtime)
-            .expect("runs the unbucketed two-range MoE decode loop on the metal backend");
-        let unbucketed_allocations = omega::metal::OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset();
+        let (unbucketed, unbucketed_allocations) =
+            omega::metal::OUTPUT_BUFFER_ALLOCATIONS.scoped(|| {
+                loaded
+                    .run_decode_loop("A", max_tokens, &unbucketed_config, &mut unbucketed_runtime)
+                    .expect("runs the unbucketed two-range MoE decode loop on the metal backend")
+            });
 
         let bucketed_config = ServingConfig {
             kv_bucket_tokens: 32,
             ..base_config
         };
         let mut bucketed_runtime = BackendRuntime::new(&bucketed_config);
-        let _ = omega::metal::OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset();
-        let bucketed = loaded
-            .run_decode_loop("A", max_tokens, &bucketed_config, &mut bucketed_runtime)
-            .expect("runs the bucketed two-range MoE decode loop on the metal backend");
-        let bucketed_allocations = omega::metal::OUTPUT_BUFFER_ALLOCATIONS.snapshot_and_reset();
+        let (bucketed, bucketed_allocations) =
+            omega::metal::OUTPUT_BUFFER_ALLOCATIONS.scoped(|| {
+                loaded
+                    .run_decode_loop("A", max_tokens, &bucketed_config, &mut bucketed_runtime)
+                    .expect("runs the bucketed two-range MoE decode loop on the metal backend")
+            });
 
         assert_eq!(
             unbucketed.0.len(),

@@ -22,9 +22,7 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::path::{Path, PathBuf};
 #[cfg(all(feature = "metal", target_os = "macos"))]
-use std::sync::OnceLock;
-#[cfg(all(feature = "metal", target_os = "macos"))]
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::cell::{Cell, OnceCell};
 
 use proxima_gguf::parse_complete;
 use proxima_model_interop::{
@@ -2241,11 +2239,14 @@ fn model_config_file_layer_turns_the_decode_config_into_the_verify_program() {
 #[cfg(all(feature = "metal", target_os = "macos"))]
 const ARENA_BYTES: usize = 4 << 30;
 #[cfg(all(feature = "metal", target_os = "macos"))]
-static ARENA_BASE: OnceLock<usize> = OnceLock::new();
-#[cfg(all(feature = "metal", target_os = "macos"))]
-static ARENA_USED: AtomicUsize = AtomicUsize::new(0);
-#[cfg(all(feature = "metal", target_os = "macos"))]
-static ARENA_REQUESTS: AtomicUsize = AtomicUsize::new(0);
+// thread-local: the three kv tests run in parallel and each decodes on its own test thread, so a
+// shared arena would interleave their offsets and request counts; one arena per thread keeps
+// every exact comparison about this test's own decode
+thread_local! {
+    static ARENA_BASE: OnceCell<usize> = const { OnceCell::new() };
+    static ARENA_USED: Cell<usize> = const { Cell::new(0) };
+    static ARENA_REQUESTS: Cell<usize> = const { Cell::new(0) };
+}
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 fn map_arena() -> usize {
@@ -2271,13 +2272,13 @@ fn map_arena() -> usize {
 fn arena_source(byte_len: usize) -> Result<omega::PlacedBuffer, omega::MetalError> {
     let page = omega::page_size();
     let length = byte_len.max(1).div_ceil(page) * page;
-    let offset = ARENA_USED.fetch_add(length, Ordering::SeqCst);
+    let offset = ARENA_USED.with(|used| used.replace(used.get() + length));
     assert!(
         offset + length <= ARENA_BYTES,
         "the kv arena is exhausted at {offset} bytes"
     );
-    ARENA_REQUESTS.fetch_add(1, Ordering::SeqCst);
-    let base = *ARENA_BASE.get_or_init(map_arena);
+    ARENA_REQUESTS.with(|requests| requests.set(requests.get() + 1));
+    let base = ARENA_BASE.with(|base| *base.get_or_init(map_arena));
     unsafe { omega::allocate_placed_buffer_over((base + offset) as *mut u8, length) }
 }
 
@@ -2318,12 +2319,12 @@ fn kv_in_caller_memory(checkpoint: &Checkpoint, kv_owning_layers: usize, matches
 
     let default_ids = generated_ids(&model, &cases, &config);
     assert_eq!(
-        ARENA_REQUESTS.load(Ordering::SeqCst),
+        ARENA_REQUESTS.with(Cell::get),
         0,
         "the default buffer source never touches the arena"
     );
-    ARENA_USED.store(0, Ordering::SeqCst);
-    ARENA_REQUESTS.store(0, Ordering::SeqCst);
+    ARENA_USED.with(|used| used.set(0));
+    ARENA_REQUESTS.with(|requests| requests.set(0));
 
     let hooked = model.with_kv_buffer_source(arena_source);
     let hooked_ids = generated_ids(&hooked, &cases, &config);
@@ -2357,12 +2358,12 @@ fn kv_in_caller_memory(checkpoint: &Checkpoint, kv_owning_layers: usize, matches
         checkpoint.name
     );
     assert_eq!(
-        ARENA_REQUESTS.load(Ordering::SeqCst),
+        ARENA_REQUESTS.with(Cell::get),
         3 * kv_owning_layers * calls_with_a_decode_evaluation,
         "the arena serves three buffers per kv-owning layer per generate call that decodes"
     );
     assert!(
-        ARENA_USED.load(Ordering::SeqCst) > 0,
+        ARENA_USED.with(Cell::get) > 0,
         "the arena served no bytes"
     );
 }

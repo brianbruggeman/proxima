@@ -372,6 +372,7 @@ temp-env.workspace = true
 proptest.workspace = true
 sha2 = { version = "0.10.9", default-features = false }
 prime = { package = "proxima-prime", path = "../prime", version = "0.1.0", features = ["runtime-prime-executor", "runtime-prime-inbox-alloc", "runtime-prime-reactor"] }
+proxima-telemetry = { workspace = true, features = ["scoped-counters"] }
 
 [[bin]]
 name = "granite-cold-quantize"

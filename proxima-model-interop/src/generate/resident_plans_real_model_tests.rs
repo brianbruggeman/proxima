@@ -73,20 +73,19 @@ fn run_prompt(
         ResumeFrom::Resident => model.backend_runtime(&effective),
         ResumeFrom::Nothing => BackendRuntime::new(&effective),
     };
-    let _ = PLAN_HANDOFF_REUSES.snapshot_and_reset();
-    let (ids, _text, _stopped) = model
-        .run_decode_loop(prompt, TOKENS, &effective, &mut runtime)
-        .expect("greedy decode on the real gemma4-E2B checkpoint");
-    #[cfg(feature = "instrument")]
-    let drained_reuses = runtime.plan_handoff_reuses;
-    #[cfg(not(feature = "instrument"))]
-    let drained_reuses = 0;
+    // the scoped delta counts every add this thread made, including the ones the decode loop
+    // drains into `runtime.plan_handoff_reuses`, so the drained field is not added again
+    let ((ids, _text, _stopped), weight_blocks_rebound) = PLAN_HANDOFF_REUSES.scoped(|| {
+        model
+            .run_decode_loop(prompt, TOKENS, &effective, &mut runtime)
+            .expect("greedy decode on the real gemma4-E2B checkpoint")
+    });
     Generation {
         ids,
         plan_hits: runtime.plan_hits,
         plan_misses: runtime.plan_misses,
         plan_refits: runtime.plan_refits,
-        weight_blocks_rebound: PLAN_HANDOFF_REUSES.snapshot_and_reset() + drained_reuses,
+        weight_blocks_rebound,
     }
 }
 
