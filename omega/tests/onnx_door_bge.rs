@@ -6,6 +6,13 @@
 #[path = "support/bge.rs"]
 mod bge;
 
+#[cfg(feature = "metal")]
+use std::pin::pin;
+#[cfg(feature = "metal")]
+use std::task::{self, Poll, Waker};
+
+#[cfg(feature = "metal")]
+use anyhow::bail;
 use anyhow::{Context, Result, anyhow, ensure};
 use omega::onnx_door::{DoorBatch, DoorConfig, OnnxDoor};
 use proxima_primitives::pipe::Pipe;
@@ -645,19 +652,28 @@ async fn device_run_of_first_b1_sentence(target: Target) -> Result<DeviceRun> {
     let record = bge::read_record("b1")?;
     let batch = record.batches.first().context("b1 record has no batch")?;
     let allocated_before = omega::metal::current_allocated_size().unwrap_or(0);
-    let nocopy_before = omega::metal::BLOCK_NOCOPY_BOUND_BYTES.get();
-    let copied_before = omega::metal::BLOCK_COPIED_BYTES.get();
-    let door = build_door(target)?;
-
-    door_cls_rows(&door, batch, MaskPolicy::Recorded).await?;
+    // the door call is polled once on this thread inside the scopes: a thread-local
+    // tally only sees this thread's adds, so the call must neither yield nor offload
+    let ((outcome, nocopy_bytes), copied_bytes) = omega::metal::BLOCK_COPIED_BYTES.scoped(|| {
+        omega::metal::BLOCK_NOCOPY_BOUND_BYTES.scoped(|| {
+            let door = build_door(target)?;
+            let mut call = pin!(door_cls_rows(&door, batch, MaskPolicy::Recorded));
+            let mut poll_context = task::Context::from_waker(Waker::noop());
+            match call.as_mut().poll(&mut poll_context) {
+                Poll::Ready(rows) => rows?,
+                Poll::Pending => bail!("the door call yielded inside the counter scope"),
+            };
+            Ok::<u64, anyhow::Error>(door.stats().decoded_bytes)
+        })
+    });
 
     Ok(DeviceRun {
         allocated_bytes: omega::metal::current_allocated_size()
             .unwrap_or(0)
             .saturating_sub(allocated_before),
-        decoded_bytes: door.stats().decoded_bytes,
-        nocopy_bytes: omega::metal::BLOCK_NOCOPY_BOUND_BYTES.get() - nocopy_before,
-        copied_bytes: omega::metal::BLOCK_COPIED_BYTES.get() - copied_before,
+        decoded_bytes: outcome?,
+        nocopy_bytes,
+        copied_bytes,
     })
 }
 
