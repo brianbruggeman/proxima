@@ -308,6 +308,7 @@ pub(super) fn push_packed_row_blocked_body(
             let launch = FlatLaunch {
                 rows,
                 lanes: SIMD_WIDTH as usize,
+                simdgroups: 1,
                 weight,
                 other,
                 other_stride_is_one,
@@ -344,6 +345,7 @@ pub(super) fn push_packed_row_blocked_body(
             let launch = FlatLaunch {
                 rows,
                 lanes: SIMD_WIDTH as usize,
+                simdgroups: 1,
                 weight,
                 other,
                 other_stride_is_one,

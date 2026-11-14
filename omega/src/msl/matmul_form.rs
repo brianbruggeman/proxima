@@ -40,12 +40,15 @@ pub(super) enum Fold {
     Plain,
 }
 
-/// The launch the matvec is rendered for: rows per simdgroup, lanes per simdgroup, and which
-/// operands are the weight and the activations.
+/// The launch the matvec is rendered for: rows per simdgroup, lanes per simdgroup, the
+/// simdgroups of one threadgroup that split the reduction between them, and which operands are
+/// the weight and the activations. `simdgroups > 1` renders `ib_first` from the kernel-scope
+/// `sgitg` (the simdgroup's index in its threadgroup, a `uint`), which the preamble must declare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct FlatLaunch {
     pub(super) rows: usize,
     pub(super) lanes: usize,
+    pub(super) simdgroups: usize,
     pub(super) weight: usize,
     pub(super) other: usize,
     pub(super) other_stride_is_one: bool,
@@ -65,6 +68,17 @@ pub(super) enum CodeRead {
     /// (`layout_render::hardware_type`: `half`, `bfloat`). The run pointer is cast from the bound
     /// buffer, so a `uchar` payload (`BFloat16`) and a native `half` one (`Float16`) read alike.
     Scalar { element: &'static str },
+}
+
+/// The `ib_first`/`ib_step` pair a lane's block walk starts from. One simdgroup is the lane
+/// index and the lane count; several interleave their lanes through the same blocks, offset by
+/// the `sgitg` the preamble declares.
+fn block_walk_start(lanes: usize, simdgroups: usize) -> String {
+    if simdgroups > 1 {
+        let step = lanes * simdgroups;
+        return format!("    int ib_first = (int)(lane + sgitg * {lanes}u);\n    int ib_step = {step};\n");
+    }
+    format!("    int ib_first = (int)lane;\n    int ib_step = {lanes};\n")
 }
 
 /// A layout the flat-block matvec covers, with every fact the renderer reads.
@@ -149,11 +163,11 @@ impl FlatBlockForm {
     }
 
     fn scalar_run_msl(&self, launch: &FlatLaunch, reduction_bound: &str, element_type: &str, pointer_type: &str) -> String {
-        let FlatLaunch { rows, lanes, weight, other, other_stride_is_one } = *launch;
+        let FlatLaunch { rows, lanes, simdgroups, weight, other, other_stride_is_one } = *launch;
         let run = self.elements;
         let mut source = String::new();
         source.push_str(&format!("    int blocks = (int){reduction_bound} / {run};\n"));
-        source.push_str(&format!("    int ib_first = (int)lane;\n    int ib_step = {lanes};\n"));
+        source.push_str(&block_walk_start(lanes, simdgroups));
         source.push_str(&format!("    long blk_step = (long)ib_step * {run};\n"));
         source.push_str(&format!("    device const {pointer_type} *blk_ptr[{rows}];\n"));
         source.push_str(&format!(
@@ -177,11 +191,11 @@ impl FlatBlockForm {
     }
 
     fn block_msl(&self, launch: &FlatLaunch, reduction_bound: &str, element_type: &str, fold: Fold) -> Result<String, SubBlockMatvecRefusal> {
-        let FlatLaunch { rows, lanes, weight, other, other_stride_is_one } = *launch;
+        let FlatLaunch { rows, lanes, simdgroups, weight, other, other_stride_is_one } = *launch;
         let (elements, block_bytes) = (self.elements, self.block_bytes);
         let mut source = String::new();
         source.push_str(&format!("    int blocks = (int){reduction_bound} / {elements};\n"));
-        source.push_str(&format!("    int ib_first = (int)lane;\n    int ib_step = {lanes};\n"));
+        source.push_str(&block_walk_start(lanes, simdgroups));
         source.push_str(&format!("    long blk_step = (long)ib_step * {block_bytes};\n"));
         source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
         source.push_str(&format!("    for (int q = 0; q < {rows}; ++q) {{\n"));
@@ -277,7 +291,7 @@ mod tests {
         FlatBlockForm::plan(layout)
             .expect("the layout has a flat-block form")
             .matvec_msl(
-                &FlatLaunch { rows: 4, lanes: 32, weight: 0, other: 1, other_stride_is_one: true },
+                &FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true },
                 "u.reduction_total",
                 "float",
                 Fold::ScaleEachTerm,
@@ -332,7 +346,7 @@ mod tests {
         FlatBlockForm::plan_planes(layout)
             .expect("the layout has a plane-read form")
             .matvec_msl(
-                &FlatLaunch { rows: 4, lanes: 32, weight: 0, other: 1, other_stride_is_one: true },
+                &FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true },
                 "u.reduction_total",
                 "float",
                 Fold::ScaleEachTerm,
@@ -456,7 +470,7 @@ mod tests {
         FlatBlockForm::plan_scalar(layout, 8)
             .expect("an eight-element run of a 16-bit float is whole bytes")
             .matvec_msl(
-                &FlatLaunch { rows: 4, lanes: 32, weight: 0, other: 1, other_stride_is_one: true },
+                &FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true },
                 "u.reduction_total",
                 "float",
                 Fold::Plain,
@@ -487,9 +501,49 @@ mod tests {
         assert!(!source.contains("<< 8"), "{source}");
     }
 
+    fn split_launch(simdgroups: usize) -> FlatLaunch {
+        FlatLaunch { rows: 2, lanes: 32, simdgroups, weight: 0, other: 1, other_stride_is_one: true }
+    }
+
+    #[test]
+    fn two_simdgroups_offset_the_block_walk_by_sgitg_in_the_block_body() {
+        let source = FlatBlockForm::plan(&BlockLayout::Q8_0)
+            .expect("q8_0 form")
+            .matvec_msl(&split_launch(2), "u.reduction_total", "float", Fold::ScaleEachTerm)
+            .expect("q8_0 renders under the scale fold");
+        assert!(source.contains("    int ib_first = (int)(lane + sgitg * 32u);\n    int ib_step = 64;\n"), "{source}");
+        assert!(!source.contains("int ib_first = (int)lane;"), "{source}");
+    }
+
+    #[test]
+    fn four_simdgroups_offset_the_block_walk_by_sgitg_in_the_scalar_run_body() {
+        let source = FlatBlockForm::plan_scalar(FloatLayout::F16, 8)
+            .expect("f16 run")
+            .matvec_msl(&split_launch(4), "u.reduction_total", "float", Fold::Plain)
+            .expect("f16 renders under the plain fold");
+        assert!(source.contains("    int ib_first = (int)(lane + sgitg * 32u);\n    int ib_step = 128;\n"), "{source}");
+        assert!(source.contains("long blk_step = (long)ib_step * 8;"), "{source}");
+    }
+
+    #[test]
+    fn one_simdgroup_emits_the_unsplit_block_walk_in_both_bodies() {
+        let block = FlatBlockForm::plan(&BlockLayout::Q8_0)
+            .expect("q8_0 form")
+            .matvec_msl(&split_launch(1), "u.reduction_total", "float", Fold::ScaleEachTerm)
+            .expect("q8_0 renders under the scale fold");
+        let scalar = FlatBlockForm::plan_scalar(FloatLayout::BF16, 8)
+            .expect("bf16 run")
+            .matvec_msl(&split_launch(1), "u.reduction_total", "float", Fold::Plain)
+            .expect("bf16 renders under the plain fold");
+        for source in [block, scalar] {
+            assert!(source.contains("    int ib_first = (int)lane;\n    int ib_step = 32;\n"), "{source}");
+            assert!(!source.contains("sgitg"), "{source}");
+        }
+    }
+
     #[test]
     fn a_fold_the_read_has_no_meaning_under_is_refused() {
-        let launch = FlatLaunch { rows: 4, lanes: 32, weight: 0, other: 1, other_stride_is_one: true };
+        let launch = FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true };
         let scalar = FlatBlockForm::plan_scalar(FloatLayout::F16, 8).expect("f16 run");
         assert!(scalar.matvec_msl(&launch, "u.reduction_total", "float", Fold::ScaleEachTerm).is_err());
         let scaled = FlatBlockForm::plan(&BlockLayout::Q8_0).expect("q8_0 form");
