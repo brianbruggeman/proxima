@@ -2162,78 +2162,6 @@ pub(crate) fn ksplit_rows() -> usize {
     packed_geometry_env("PROXIMA_PACKED_ROWS_KSPLIT").unwrap_or(crate::sized::PACKED_ROW_KSPLIT_ROWS)
 }
 
-/// `PROXIMA_Q4_0_MULTI_ROW_HOIST=1` A/B switch: same binary, env off/on, for
-/// [`crate::msl::push_packed_row_multi_row_body`]'s `Codec::Q4_0` fast arm
-/// (`docs/discipline.md`, Q4_0 prefill header-decode hoist). Default OFF --
-/// unset, empty, or any value other than `"1"` keeps today's generic
-/// per-element loop, so the unset-env emit stays byte-identical to before
-/// this switch existed. Read once per call, matching `packed_rows_override`'s
-/// own posture (a cold-path emit decision, not a hot inner loop).
-#[cfg(feature = "std")]
-pub(super) fn q4_0_multi_row_hoist_override() -> bool {
-    let active =
-        matches!(std::env::var("PROXIMA_Q4_0_MULTI_ROW_HOIST"), Ok(value) if value.trim() == "1");
-    log_q4_0_multi_row_hoist_once(active);
-    active
-}
-
-/// Print the selected `Codec::Q4_0` multi-row hoist variant exactly once per
-/// process, matching [`log_packed_rows_variant_once`]'s own posture:
-/// `source=env` when `PROXIMA_Q4_0_MULTI_ROW_HOIST=1` was honored,
-/// `source=default` otherwise. Gated on `instrument` alone -- the override
-/// itself stays `std`-only and fires regardless of `instrument`.
-#[cfg(feature = "instrument")]
-fn log_q4_0_multi_row_hoist_once(active: bool) {
-    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    LOGGED.get_or_init(|| {
-        let source = if active { "env" } else { "default" };
-        proxima_telemetry::debug!(active, source, "q4_0_multi_row_hoist");
-    });
-}
-
-#[cfg(all(feature = "std", not(feature = "instrument")))]
-fn log_q4_0_multi_row_hoist_once(_active: bool) {}
-
-#[cfg(not(feature = "std"))]
-pub(super) const fn q4_0_multi_row_hoist_override() -> bool {
-    false
-}
-
-/// `PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE` A/B switch: selects
-/// [`crate::msl::push_packed_row_multi_row_q4_0_pair_lane_body`], the
-/// `Q4_0` multi-row body that decodes each lane's four weight elements once and folds them
-/// against every token of the group, over the generic per-element
-/// arm. Default ON -- unset keeps the pair-lane body; only explicit `"0"`
-/// falls back, so the same binary measures both arms. Takes priority over
-/// [`q4_0_multi_row_hoist_override`] when both are set.
-#[cfg(feature = "std")]
-pub(super) fn q4_0_multi_row_pair_lane_override() -> bool {
-    let active = !matches!(std::env::var("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE"), Ok(value) if value.trim() == "0");
-    log_q4_0_multi_row_pair_lane_once(active);
-    active
-}
-
-#[cfg(feature = "instrument")]
-fn log_q4_0_multi_row_pair_lane_once(active: bool) {
-    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    LOGGED.get_or_init(|| {
-        let source = if std::env::var_os("PROXIMA_Q4_0_MULTI_ROW_PAIR_LANE").is_some() {
-            "env"
-        } else {
-            "default"
-        };
-        proxima_telemetry::debug!(active, source, "q4_0_multi_row_pair_lane");
-    });
-}
-
-#[cfg(all(feature = "std", not(feature = "instrument")))]
-fn log_q4_0_multi_row_pair_lane_once(_active: bool) {}
-
-#[cfg(not(feature = "std"))]
-pub(super) const fn q4_0_multi_row_pair_lane_override() -> bool {
-    true
-}
-
 /// `PROXIMA_PACKED_ROW_DISABLE`: a comma-separated list of codec names
 /// ([`codec_cache_token`] spellings, as [`tiled_gemm_codec_disabled`]'s) kept off the row-blocked
 /// matvec, so their ops render on the generic cooperative kernel instead
@@ -2292,9 +2220,7 @@ pub(super) const fn tiled_gemm_codec_disabled(_codec: Codec) -> bool {
 // gated on `metal-tiled-gemm`, not just `std`: this switch has no meaning
 // outside the tiled-GEMM admission path, and every caller (`emit_and_
 // classify.rs`'s `classify_tiled_gemm`/`tiled_gemm_q4_0_active`) already
-// lives behind that same feature -- unlike `q4_0_multi_row_hoist_override`
-// above, which a `metal`-only build (no `metal-tiled-gemm`) still calls from
-// its own unconditional seam.
+// lives behind that same feature.
 #[cfg(all(feature = "std", feature = "metal-tiled-gemm"))]
 pub(super) fn tiled_gemm_q4_0_override() -> bool {
     let active =
@@ -2304,7 +2230,7 @@ pub(super) fn tiled_gemm_q4_0_override() -> bool {
 }
 
 /// Print the selected tiled-GEMM `Q4_0` admission exactly once per process,
-/// matching [`log_q4_0_multi_row_hoist_once`]'s own posture. Gated on
+/// matching [`log_packed_rows_variant_once`]'s own posture. Gated on
 /// `instrument` alone -- the override itself stays `std`-only and fires
 /// regardless of `instrument`.
 #[cfg(all(feature = "instrument", feature = "metal-tiled-gemm"))]
@@ -2655,130 +2581,6 @@ pub(super) const fn tiled_gemm_dynamic_tgmem_override() -> bool {
     true
 }
 
-/// `PROXIMA_MULTI_ROW_UNROLL` A/B switch: literal indices let the `sumf`
-/// accumulator promote out of private memory instead of surviving as a
-/// dynamically-indexed array. Default ON as of `docs/model-interop/
-/// discipline.md` (bit-identical by construction; measured 599-token
-/// prefill first-token 74.8 -> 9.75 s, decode 17.9 -> 16.9 ms) -- unset
-/// keeps the literal-index emit; only explicit `"0"` falls back to today's
-/// dynamically-indexed loop.
-#[cfg(feature = "std")]
-pub(super) fn multi_row_unroll_override() -> bool {
-    let active =
-        !matches!(std::env::var("PROXIMA_MULTI_ROW_UNROLL"), Ok(value) if value.trim() == "0");
-    log_multi_row_unroll_once(active);
-    active
-}
-
-/// Print whether the unroll experiment fired exactly once per process,
-/// matching [`log_q4_0_multi_row_hoist_once`]'s own posture. Gated on
-/// `instrument` alone -- the override itself stays `std`-only and fires
-/// regardless of `instrument`.
-#[cfg(feature = "instrument")]
-fn log_multi_row_unroll_once(active: bool) {
-    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    LOGGED.get_or_init(|| {
-        let source = if active { "env" } else { "default" };
-        proxima_telemetry::debug!(
-            override_name = "multi_row_unroll",
-            active,
-            source,
-            "multi-row override resolved"
-        );
-    });
-}
-
-#[cfg(all(feature = "std", not(feature = "instrument")))]
-fn log_multi_row_unroll_once(_active: bool) {}
-
-#[cfg(not(feature = "std"))]
-pub(super) const fn multi_row_unroll_override() -> bool {
-    true
-}
-
-/// `PROXIMA_MULTI_ROW_INDEX32` A/B switch: emulates the k loop's 64-bit
-/// div/rem in `uint`, bit-exact when `weight_base + k` and the block-index
-/// arithmetic stay within `u32` (the checked-fit fallback still applies
-/// today's `long`-indexed emit whenever that proof fails, regardless of this
-/// switch). Default ON as of `docs/model-interop/discipline.md` (bit-identical
-/// by construction; measured alongside `PROXIMA_MULTI_ROW_UNROLL`) -- unset
-/// keeps the narrowed-index emit for shapes that fit; only explicit `"0"`
-/// falls back to today's `long`-indexed emit unconditionally.
-#[cfg(feature = "std")]
-pub(super) fn multi_row_index32_override() -> bool {
-    let active =
-        !matches!(std::env::var("PROXIMA_MULTI_ROW_INDEX32"), Ok(value) if value.trim() == "0");
-    log_multi_row_index32_once(active);
-    active
-}
-
-/// Print whether the index32 experiment fired exactly once per process,
-/// matching [`log_multi_row_unroll_once`]'s own posture. Gated on
-/// `instrument` alone -- the override itself stays `std`-only and fires
-/// regardless of `instrument`.
-#[cfg(feature = "instrument")]
-fn log_multi_row_index32_once(active: bool) {
-    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    LOGGED.get_or_init(|| {
-        let source = if active { "env" } else { "default" };
-        proxima_telemetry::debug!(
-            override_name = "multi_row_index32",
-            active,
-            source,
-            "multi-row override resolved"
-        );
-    });
-}
-
-#[cfg(all(feature = "std", not(feature = "instrument")))]
-fn log_multi_row_index32_once(_active: bool) {}
-
-#[cfg(not(feature = "std"))]
-pub(super) const fn multi_row_index32_override() -> bool {
-    true
-}
-
-/// `PROXIMA_COORD_INDEX32` A/B switch: narrows the coordinate
-/// decomposition's divisors to `uint` only when every output extent fits
-/// `u32` (the checked-fit fallback still applies today's `long`-decomposed
-/// emit whenever that proof fails, regardless of this switch). Default ON as
-/// of `docs/model-interop/discipline.md` (bit-identical by construction) --
-/// unset keeps the narrowed-index emit for shapes that fit; only explicit
-/// `"0"` falls back to today's `long`-decomposed emit unconditionally.
-#[cfg(feature = "std")]
-pub(super) fn coord_index32_override() -> bool {
-    let active =
-        !matches!(std::env::var("PROXIMA_COORD_INDEX32"), Ok(value) if value.trim() == "0");
-    log_coord_index32_once(active);
-    active
-}
-
-/// Print whether the coordinate-index32 experiment fired exactly once per
-/// process, matching [`log_multi_row_index32_once`]'s own posture. Gated on
-/// `instrument` alone -- the override itself stays `std`-only and fires
-/// regardless of `instrument`.
-#[cfg(feature = "instrument")]
-fn log_coord_index32_once(active: bool) {
-    static LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-    LOGGED.get_or_init(|| {
-        let source = if active { "env" } else { "default" };
-        proxima_telemetry::debug!(
-            override_name = "coord_index32",
-            active,
-            source,
-            "coordinate-index32 override resolved"
-        );
-    });
-}
-
-#[cfg(all(feature = "std", not(feature = "instrument")))]
-fn log_coord_index32_once(_active: bool) {}
-
-#[cfg(not(feature = "std"))]
-pub(super) const fn coord_index32_override() -> bool {
-    true
-}
-
 /// `PROXIMA_REDUCTION_LITERAL` A/B/C switch, admitted only when the
 /// `metal-reduction-literal` compile feature is also on: whether a
 /// packed-row op's flattened reduction length may be baked as a compiled
@@ -2810,7 +2612,7 @@ pub(super) fn reduction_literal_decode_only() -> bool {
 }
 
 /// Print whether the reduction-literal experiment fired exactly once per
-/// process, matching [`log_coord_index32_once`]'s own posture. Gated on
+/// process, matching [`log_packed_rows_variant_once`]'s own posture. Gated on
 /// `instrument` alone -- the override itself stays `std`-only and fires
 /// regardless of `instrument`.
 #[cfg(all(feature = "metal-reduction-literal", feature = "instrument"))]

@@ -130,6 +130,7 @@ pub(super) fn push_packed_row_blocked_body(
     block: &PackedRowBlock,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    knobs: &EmitKnobs,
     expert_source_mode: bool,
     geometry: PackedRowGeometry,
     metal: &MetalOnlyExtras,
@@ -151,6 +152,7 @@ pub(super) fn push_packed_row_blocked_body(
             block,
             epilogue_body,
             epilogue_operands,
+            knobs,
             expert_source_mode,
             metal,
         )?;

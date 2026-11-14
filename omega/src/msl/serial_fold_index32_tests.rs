@@ -75,19 +75,21 @@ fn product_fold_op(extents: &[u32], reduce_axes: &[u16]) -> BoundOp {
         .expect("one fused bound emitted")
 }
 
-fn emitted_source(bound: &BoundOp, coord_override: Option<&str>) -> String {
-    temp_env::with_var("PROXIMA_COORD_INDEX32", coord_override, || {
-        emit(bound, &BTreeMap::new(), NumericPolicy::default())
-            .expect("serial fold emits")
-            .source
-    })
+fn emitted_source(bound: &BoundOp, coord_index32: bool) -> String {
+    let knobs = EmitKnobs::default().with_coord_index32(coord_index32);
+    emit_with_knobs(bound, &BTreeMap::new(), NumericPolicy::default(), &knobs)
+        .expect("serial fold emits")
+        .source
 }
 
 fn cache_key(bound: &BoundOp) -> String {
-    temp_env::with_var("PROXIMA_COORD_INDEX32", None::<&str>, || {
-        kernel_cache_key(bound, &BTreeMap::new(), NumericPolicy::default())
-            .expect("cache key builds")
-    })
+    kernel_cache_key_with_knobs(
+        bound,
+        &BTreeMap::new(),
+        NumericPolicy::default(),
+        &EmitKnobs::default(),
+    )
+    .expect("cache key builds")
 }
 
 const NARROW_OUTPUT_DECODE: &str = "output_coord[1] = (long)((uint)remaining % (uint)u.output_extents[1]); \
@@ -97,7 +99,7 @@ const NARROW_OUTPUT_DECODE: &str = "output_coord[1] = (long)((uint)remaining % (
 fn prefill_combine_fold_decodes_outputs_in_32_bit_and_drops_the_sole_axis_divmod() {
     let bound = product_fold_op(&PREFILL_COMBINE_EXTENTS, &[1]);
 
-    let source = emitted_source(&bound, None);
+    let source = emitted_source(&bound, true);
 
     assert!(
         !source.contains("simd_sum"),
@@ -126,7 +128,7 @@ fn prefill_combine_fold_decodes_outputs_in_32_bit_and_drops_the_sole_axis_divmod
 fn an_iteration_space_past_u32_keeps_the_64_bit_decode() {
     let bound = product_fold_op(&[70_000, 8, 70_000], &[1]);
 
-    let source = emitted_source(&bound, None);
+    let source = emitted_source(&bound, true);
 
     assert!(source.contains(
         "output_coord[1] = remaining % u.output_extents[1]; remaining /= u.output_extents[1];"
@@ -142,7 +144,7 @@ fn an_iteration_space_past_u32_keeps_the_64_bit_decode() {
 fn the_coordinate_override_set_to_zero_restores_the_64_bit_decode() {
     let bound = product_fold_op(&PREFILL_COMBINE_EXTENTS, &[1]);
 
-    let source = emitted_source(&bound, Some("0"));
+    let source = emitted_source(&bound, false);
 
     assert!(source.contains("output_coord[1] = remaining % u.output_extents[1];"));
     assert!(!source.contains("(uint)remaining"));
@@ -152,7 +154,7 @@ fn the_coordinate_override_set_to_zero_restores_the_64_bit_decode() {
 fn a_two_axis_reduction_narrows_its_inner_divmod_and_hands_the_outer_axis_the_remainder() {
     let bound = product_fold_op(&PREFILL_COMBINE_EXTENTS, &[1, 2]);
 
-    let source = emitted_source(&bound, None);
+    let source = emitted_source(&bound, true);
 
     assert!(source.contains("long remaining_r = r;"), "{source}");
     assert!(

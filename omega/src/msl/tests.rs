@@ -588,22 +588,23 @@ fn split_combine_fold_equals_the_sequential_sum_in_the_fixed_order() {
     );
 }
 
-/// Every multi-row-experiment test in this module reads a `PROXIMA_MULTI_
-/// ROW_*` env var, and `cargo test` (unlike `cargo nextest run`, which gives
-/// each test its own process) runs this module's tests as multiple THREADS
-/// sharing one process -- env vars are process-global, so an unguarded
-/// "baseline" read (no override set) can observe a DIFFERENT test's
-/// concurrently-active `temp_env::with_var` override. `temp_env`'s own
-/// internal lock serializes `with_var` calls against each other but not
-/// against an unguarded read, so every baseline capture must ALSO go
-/// through `with_var` (explicitly unset) to take that same lock.
+/// The cache key, emitted source and dispatch shape of `bound` under explicit
+/// `knobs`: the multi-row experiments are passed as [`EmitKnobs`] fields, so
+/// two configurations coexist in one test thread without touching the process
+/// environment.
 #[cfg(feature = "metal-core")]
-fn with_every_multi_row_env_unset<T>(closure: impl FnOnce() -> T) -> T {
-    temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", None::<&str>, || {
-        temp_env::with_var("PROXIMA_MULTI_ROW_INDEX32", None::<&str>, || {
-            temp_env::with_var("PROXIMA_COORD_INDEX32", None::<&str>, closure)
-        })
-    })
+fn key_source_dispatch(
+    bound: &BoundOp,
+    codecs: &BTreeMap<NodeId, Codec>,
+    knobs: &EmitKnobs,
+) -> (String, String, (Vec<Binding>, GridSpec)) {
+    let policy = NumericPolicy::default();
+    let key = kernel_cache_key_with_knobs(bound, codecs, policy, knobs).expect("cache key builds");
+    let source = emit_with_knobs(bound, codecs, policy, knobs)
+        .expect("kernel emits")
+        .source;
+    let dispatch = kernel_dispatch_shape(bound, codecs, policy).expect("dispatch shape resolves");
+    (key, source, dispatch)
 }
 
 /// A gathered expert projection over every selected expert at once: output
@@ -3312,28 +3313,11 @@ fn multi_row_unroll_decode_shape_keeps_current_key_source_grid_and_width() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    let (baseline_key, baseline_source, baseline_dispatch) = with_every_multi_row_env_unset(|| {
-        let key =
-            kernel_cache_key(&bound, &q4_0, NumericPolicy::default()).expect("baseline cache key");
-        let source = emit(&bound, &q4_0, NumericPolicy::default())
-            .expect("baseline emits")
-            .source;
-        let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
-            .expect("baseline dispatch shape");
-        (key, source, dispatch)
-    });
+    let (baseline_key, baseline_source, baseline_dispatch) =
+        key_source_dispatch(&bound, &q4_0, &EmitKnobs::default().with_multi_row_unroll(false));
 
     let (shared_key, shared_source, shared_dispatch) =
-        temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", Some("1"), || {
-            let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
-                .expect("unroll-env cache key");
-            let source = emit(&bound, &q4_0, NumericPolicy::default())
-                .expect("unroll-env emits")
-                .source;
-            let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
-                .expect("unroll-env dispatch shape");
-            (key, source, dispatch)
-        });
+        key_source_dispatch(&bound, &q4_0, &EmitKnobs::default().with_multi_row_unroll(true));
 
     assert!(
         !baseline_key.contains("_u"),
@@ -3486,23 +3470,15 @@ fn multi_row_unroll_27_token_shape_gets_u_suffix_with_unchanged_geometry() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    let baseline_dispatch = with_every_multi_row_env_unset(|| {
-        kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
-            .expect("baseline dispatch shape")
-    });
+    let (_, _, baseline_dispatch) =
+        key_source_dispatch(&bound, &q4_0, &EmitKnobs::default().with_multi_row_unroll(false));
 
-    let (shared_key, shared_dispatch) =
-        temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", Some("1"), || {
-            let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
-                .expect("unroll-env cache key");
-            let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
-                .expect("unroll-env dispatch shape");
-            (key, dispatch)
-        });
+    let (shared_key, _, shared_dispatch) =
+        key_source_dispatch(&bound, &q4_0, &EmitKnobs::default().with_multi_row_unroll(true));
 
     assert!(
         shared_key.contains("_u"),
-        "a 27-token op with PROXIMA_MULTI_ROW_UNROLL=1 must carry the _u suffix: {shared_key}"
+        "a 27-token op with multi_row_unroll on must carry the _u suffix: {shared_key}"
     );
     assert_eq!(
         shared_dispatch.1.threads, baseline_dispatch.1.threads,
@@ -3525,31 +3501,18 @@ fn multi_row_index32_decode_shape_keeps_current_key_source_grid_and_width() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    let (baseline_key, baseline_source, baseline_dispatch) = with_every_multi_row_env_unset(|| {
-        let key =
-            kernel_cache_key(&bound, &q4_0, NumericPolicy::default()).expect("baseline cache key");
-        let source = emit(&bound, &q4_0, NumericPolicy::default())
-            .expect("baseline emits")
-            .source;
-        let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
-            .expect("baseline dispatch shape");
-        (key, source, dispatch)
-    });
+    let baseline_knobs = EmitKnobs::default()
+        .with_multi_row_unroll(false)
+        .with_multi_row_index32(false);
+    let (baseline_key, baseline_source, baseline_dispatch) =
+        key_source_dispatch(&bound, &q4_0, &baseline_knobs);
 
-    for (label, unroll_env) in [("index32 alone", None), ("unroll+index32", Some("1"))] {
+    for (label, unroll) in [("index32 alone", false), ("unroll+index32", true)] {
+        let shared_knobs = EmitKnobs::default()
+            .with_multi_row_unroll(unroll)
+            .with_multi_row_index32(true);
         let (shared_key, shared_source, shared_dispatch) =
-            temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
-                temp_env::with_var("PROXIMA_MULTI_ROW_INDEX32", Some("1"), || {
-                    let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
-                        .expect("index32-env cache key");
-                    let source = emit(&bound, &q4_0, NumericPolicy::default())
-                        .expect("index32-env emits")
-                        .source;
-                    let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
-                        .expect("index32-env dispatch shape");
-                    (key, source, dispatch)
-                })
-            });
+            key_source_dispatch(&bound, &q4_0, &shared_knobs);
 
         assert!(
             !baseline_key.contains("_i32"),
@@ -3588,35 +3551,29 @@ fn multi_row_index32_27_token_shape_gets_i32_suffix_with_unchanged_geometry() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    let baseline_dispatch = with_every_multi_row_env_unset(|| {
-        kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
-            .expect("baseline dispatch shape")
-    });
+    let baseline_knobs = EmitKnobs::default()
+        .with_multi_row_unroll(false)
+        .with_multi_row_index32(false);
+    let (_, _, baseline_dispatch) = key_source_dispatch(&bound, &q4_0, &baseline_knobs);
 
-    for (unroll_env, expected_suffix) in [(None, "_i32"), (Some("1"), "_u_i32")] {
-        let (shared_key, shared_dispatch) =
-            temp_env::with_var("PROXIMA_MULTI_ROW_UNROLL", unroll_env, || {
-                temp_env::with_var("PROXIMA_MULTI_ROW_INDEX32", Some("1"), || {
-                    let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
-                        .expect("index32-env cache key");
-                    let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
-                        .expect("index32-env dispatch shape");
-                    (key, dispatch)
-                })
-            });
+    for (unroll, expected_suffix) in [(false, "_i32"), (true, "_u_i32")] {
+        let shared_knobs = EmitKnobs::default()
+            .with_multi_row_unroll(unroll)
+            .with_multi_row_index32(true);
+        let (shared_key, _, shared_dispatch) = key_source_dispatch(&bound, &q4_0, &shared_knobs);
 
         assert!(
             shared_key.contains(expected_suffix),
-            "a 27-token op with unroll_env={unroll_env:?} PROXIMA_MULTI_ROW_INDEX32=1 must carry \
+            "a 27-token op with multi_row_unroll={unroll} multi_row_index32 on must carry \
              the {expected_suffix} suffix: {shared_key}"
         );
         assert_eq!(
             shared_dispatch.1.threads, baseline_dispatch.1.threads,
-            "index32 must not change grid_threads (unroll_env={unroll_env:?})"
+            "index32 must not change grid_threads (multi_row_unroll={unroll})"
         );
         assert_eq!(
             shared_dispatch.1.threadgroup_width, baseline_dispatch.1.threadgroup_width,
-            "index32 must not change threadgroup_width (unroll_env={unroll_env:?})"
+            "index32 must not change threadgroup_width (multi_row_unroll={unroll})"
         );
     }
 }
@@ -3638,28 +3595,11 @@ fn multi_row_index32_oversized_shape_not_admitted() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    let (baseline_key, baseline_source, baseline_dispatch) = with_every_multi_row_env_unset(|| {
-        let key =
-            kernel_cache_key(&bound, &q4_0, NumericPolicy::default()).expect("baseline cache key");
-        let source = emit(&bound, &q4_0, NumericPolicy::default())
-            .expect("baseline emits")
-            .source;
-        let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
-            .expect("baseline dispatch shape");
-        (key, source, dispatch)
-    });
+    let (baseline_key, baseline_source, baseline_dispatch) =
+        key_source_dispatch(&bound, &q4_0, &EmitKnobs::default().with_multi_row_index32(false));
 
     let (shared_key, shared_source, shared_dispatch) =
-        temp_env::with_var("PROXIMA_MULTI_ROW_INDEX32", Some("1"), || {
-            let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
-                .expect("index32-env cache key");
-            let source = emit(&bound, &q4_0, NumericPolicy::default())
-                .expect("index32-env emits")
-                .source;
-            let dispatch = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
-                .expect("index32-env dispatch shape");
-            (key, source, dispatch)
-        });
+        key_source_dispatch(&bound, &q4_0, &EmitKnobs::default().with_multi_row_index32(true));
 
     assert!(
         !shared_key.contains("_i32"),
@@ -3699,34 +3639,26 @@ fn coord_index32_generic_reduce_source_differs_only_in_coordinate_lines() {
     let bound = matmul_op(4, 65536, 5);
     let empty_codecs = BTreeMap::new();
 
-    // `PROXIMA_COORD_INDEX32` now defaults ON, so the "baseline" this test
-    // means -- the wide, non-narrowed coordinate decomposition -- must be
-    // pinned explicitly rather than read off `with_every_multi_row_env_unset`.
-    let (baseline_key, baseline_source, baseline_dispatch) =
-        temp_env::with_var("PROXIMA_COORD_INDEX32", Some("0"), || {
-            let key = kernel_cache_key(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-                .expect("baseline cache key");
-            let source = emit(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-                .expect("baseline emits")
-                .source;
-            let dispatch =
-                kernel_dispatch_shape(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-                    .expect("baseline dispatch shape");
-            (key, source, dispatch)
-        });
+    // `coord_index32` defaults ON, so the "baseline" this test means -- the
+    // wide, non-narrowed coordinate decomposition -- is pinned explicitly.
+    let wide_knobs = EmitKnobs::default().with_coord_index32(false);
+    let narrow_knobs = EmitKnobs::default().with_coord_index32(true);
+    let policy = NumericPolicy::llama_relaxed();
+    let baseline_key = kernel_cache_key_with_knobs(&bound, &empty_codecs, policy, &wide_knobs)
+        .expect("baseline cache key");
+    let baseline_source = emit_with_knobs(&bound, &empty_codecs, policy, &wide_knobs)
+        .expect("baseline emits")
+        .source;
+    let baseline_dispatch =
+        kernel_dispatch_shape(&bound, &empty_codecs, policy).expect("baseline dispatch shape");
 
-    let (shared_key, shared_source, shared_dispatch) =
-        temp_env::with_var("PROXIMA_COORD_INDEX32", Some("1"), || {
-            let key = kernel_cache_key(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-                .expect("coord-index32-env cache key");
-            let source = emit(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-                .expect("coord-index32-env emits")
-                .source;
-            let dispatch =
-                kernel_dispatch_shape(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-                    .expect("coord-index32-env dispatch shape");
-            (key, source, dispatch)
-        });
+    let shared_key = kernel_cache_key_with_knobs(&bound, &empty_codecs, policy, &narrow_knobs)
+        .expect("coord-index32 cache key");
+    let shared_source = emit_with_knobs(&bound, &empty_codecs, policy, &narrow_knobs)
+        .expect("coord-index32 emits")
+        .source;
+    let shared_dispatch =
+        kernel_dispatch_shape(&bound, &empty_codecs, policy).expect("coord-index32 dispatch shape");
 
     assert!(
         shared_key.contains("_c32") && !baseline_key.contains("_c32"),
@@ -3790,10 +3722,13 @@ fn coord_index32_single_token_shape_is_admitted_with_same_narrowing() {
     let bound = matmul_op(4, 4096, 1);
     let empty_codecs = BTreeMap::new();
 
-    let shared_key = temp_env::with_var("PROXIMA_COORD_INDEX32", Some("1"), || {
-        kernel_cache_key(&bound, &empty_codecs, NumericPolicy::llama_relaxed())
-            .expect("coord-index32-env cache key")
-    });
+    let shared_key = kernel_cache_key_with_knobs(
+        &bound,
+        &empty_codecs,
+        NumericPolicy::llama_relaxed(),
+        &EmitKnobs::default().with_coord_index32(true),
+    )
+    .expect("coord-index32 cache key");
 
     assert!(
         shared_key.contains("_c32"),
@@ -6180,6 +6115,7 @@ fn render_reduce_rejects_an_elementwise_bound_op() {
         "entry",
         &[None],
         NumericPolicy::default(),
+        &EmitKnobs::default(),
         false,
         &MetalOnlyExtras::default(),
     )
@@ -6220,6 +6156,7 @@ fn render_reduce_rejects_a_broadcast_reduce_epilogue() {
         "entry",
         &[None],
         NumericPolicy::default(),
+        &EmitKnobs::default(),
         false,
         &MetalOnlyExtras::default(),
     )
@@ -6317,6 +6254,7 @@ fn push_packed_row_blocked_body_rejects_a_non_k_quant_codec() {
         &block,
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
+        &EmitKnobs::default(),
         true,
         PackedRowGeometry {
             rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Float16),
@@ -6363,6 +6301,7 @@ fn push_packed_row_blocked_body_emits_a_q8_0_row_blocked_kernel() {
         &block,
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
+        &EmitKnobs::default(),
         false,
         PackedRowGeometry {
             rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Q8_0),
@@ -6410,6 +6349,7 @@ fn push_packed_row_blocked_body_emits_a_q4_0_row_blocked_kernel() {
         &block,
         &ComposedBody::leaf(ScalarOp::Identity),
         &[],
+        &EmitKnobs::default(),
         false,
         PackedRowGeometry {
             rows_per_simdgroup: codec_rows_per_simdgroup(Codec::Q4_0),
@@ -8989,14 +8929,12 @@ fn q6k_multi_row_kernel_decodes_each_super_block_once_for_the_token_group() {
         let mut q6k = BTreeMap::new();
         q6k.insert(weight_node, Codec::Q6K);
 
-        let (key, source) = with_every_multi_row_env_unset(|| {
-            let key = kernel_cache_key(&bound, &q6k, NumericPolicy::default())
-                .expect("q6k multi-row cache key");
-            let source = emit(&bound, &q6k, NumericPolicy::default())
-                .expect("q6k multi-row emits")
-                .source;
-            (key, source)
-        });
+        let knobs = EmitKnobs::default();
+        let key = kernel_cache_key_with_knobs(&bound, &q6k, NumericPolicy::default(), &knobs)
+            .expect("q6k multi-row cache key");
+        let source = emit_with_knobs(&bound, &q6k, NumericPolicy::default(), &knobs)
+            .expect("q6k multi-row emits")
+            .source;
 
         assert!(
             source.contains("level0[i] = (float)((int)((((uint)low_codes[i + 0u] >> 0u) & 0xfu) | ((((uint)high_codes[i + 0u] >> 0u) & 0x3u) << 4u)) - 32);")
@@ -9045,16 +8983,9 @@ fn multi_row_kernel_folds_only_the_activation_rows_the_op_has() {
         let mut q4_0 = BTreeMap::new();
         q4_0.insert(weight_node, Codec::Q4_0);
 
-        let (key, source, threads) = with_every_multi_row_env_unset(|| {
-            let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
-                .expect("multi-row cache key");
-            let source = emit(&bound, &q4_0, NumericPolicy::default())
-                .expect("multi-row emits")
-                .source;
-            let (_, grid) = kernel_dispatch_shape(&bound, &q4_0, NumericPolicy::default())
-                .expect("multi-row dispatch shape");
-            (key, source, grid.threads)
-        });
+        let (key, source, (_, grid)) =
+            key_source_dispatch(&bound, &q4_0, &EmitKnobs::default());
+        let threads = grid.threads;
 
         match cap_suffix {
             Some(suffix) => assert!(
