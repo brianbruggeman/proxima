@@ -12,7 +12,9 @@
 
 use std::collections::BTreeMap;
 
-use omega::backend::{BackendError, Engine, GpuDriver};
+#[cfg(not(feature = "wgpu-backend"))]
+use omega::backend::BackendError;
+use omega::backend::{Engine, GpuDriver};
 use omega::onnx_door::{
     DoorBatch, DoorConfig, DoorError, DoorOutput, DoorStage, DoorStats, OnnxDoor, StageKind,
     ValidationError,

@@ -82,7 +82,7 @@ fn mil_sink_package_equals_the_bytes_of_calling_the_writer_directly() {
         .zip(&encoded)
         .map(|((name, _), bytes)| WeightView {
             name,
-            dtype: SourceDType::FLOAT32,
+            dtype: SourceDType::Float32,
             bytes,
         })
         .collect();

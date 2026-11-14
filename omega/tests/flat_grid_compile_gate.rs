@@ -428,6 +428,7 @@ fn round_batched_gathered_matmul(round_count: u32) -> BoundOp {
         epilogue_body,
         epilogue_operands,
         epilogue_broadcast_axes,
+        accumulator: _,
     } = kind
     else {
         unreachable!("a gathered matmul binds to a reduce fold")

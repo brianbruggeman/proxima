@@ -65,7 +65,7 @@ fn mil_emit_embedding_lookup_is_one_gather_of_int32_rows_from_a_blob_table() {
         .collect();
     let weights = [WeightView {
         name: "table",
-        dtype: SourceDType::FLOAT32,
+        dtype: SourceDType::Float32,
         bytes: &table,
     }];
     let mut program = vec![
@@ -137,7 +137,7 @@ fn mil_emit_bge_small_pinned_batch1_seq16_has_96_matmul_39_gather_and_12_head_me
         .iter()
         .map(|(name, bytes)| WeightView {
             name,
-            dtype: SourceDType::FLOAT32,
+            dtype: SourceDType::Float32,
             bytes,
         })
         .collect();
