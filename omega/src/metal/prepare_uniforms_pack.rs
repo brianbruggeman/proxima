@@ -51,10 +51,11 @@ pub(super) fn block_byte_len(block: &QuantizedBlock<'_>) -> usize {
     match block {
         QuantizedBlock::Float32(data) => size_of_val(*data),
         QuantizedBlock::Int32(data) => size_of_val(*data),
-        // every other variant carries packed bytes directly --
-        // `QuantizedBlock::packed_bytes` is the one place that per-variant
-        // byte-slice extraction lives, instead of restating this match here.
-        _ => block.packed_bytes().unwrap_or(&[]).len(),
+        // a strided block has no contiguous bytes (`packed_bytes` is `None`);
+        // the gathered `packed_len` is what `upload_strided_runs` copies, so
+        // that is what was offered.
+        QuantizedBlock::PackedStrided { .. } => block.packed_len().unwrap_or(0),
+        QuantizedBlock::Packed { .. } => block.packed_bytes().unwrap_or(&[]).len(),
     }
 }
 
