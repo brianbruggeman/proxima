@@ -477,10 +477,29 @@ fn resident_source_identity(block: QuantizedBlock<'_>) -> (usize, usize) {
             (values.as_ptr() as usize, core::mem::size_of_val(values))
         }
         QuantizedBlock::Int32(values) => (values.as_ptr() as usize, core::mem::size_of_val(values)),
-        QuantizedBlock::Packed { bytes, .. } | QuantizedBlock::PackedStrided { bytes, .. } => {
-            (bytes.as_ptr() as usize, bytes.len())
-        }
+        QuantizedBlock::Packed { bytes, .. } => (bytes.as_ptr() as usize, bytes.len()),
+        // the owned copy of a strided block is its gathered runs, so the
+        // identity carries that length, not the span over the mapping
+        QuantizedBlock::PackedStrided { bytes, .. } => (
+            bytes.as_ptr() as usize,
+            block.packed_len().unwrap_or(bytes.len()),
+        ),
     }
+}
+
+#[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
+fn gathered_runs_match<'run>(cached: &[u8], runs: impl Iterator<Item = &'run [u8]>) -> bool {
+    let mut rest = cached;
+    for run in runs {
+        let Some((head, tail)) = rest.split_at_checked(run.len()) else {
+            return false;
+        };
+        if head != run {
+            return false;
+        }
+        rest = tail;
+    }
+    rest.is_empty()
 }
 
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
@@ -501,6 +520,18 @@ fn resident_payload_matches(owned: &OwnedBlock, source: QuantizedBlock<'_>) -> b
             },
             QuantizedBlock::Packed { codec, bytes },
         ) => **cached_codec == codec && cached.as_ref() == bytes,
+        (
+            OwnedBlock::Packed {
+                codec: cached_codec,
+                bytes: cached,
+            },
+            QuantizedBlock::PackedStrided { codec, .. },
+        ) => {
+            **cached_codec == codec
+                && source
+                    .packed_runs()
+                    .is_some_and(|runs| gathered_runs_match(cached, runs))
+        }
         _ => false,
     }
 }
@@ -5458,6 +5489,104 @@ impl BackendRuntime {
             &mut self.validated_weight_nodes,
             expert_sources,
         )?)
+    }
+}
+
+#[cfg(all(test, feature = "cuda", feature = "interop-bgpool"))]
+mod resident_strided_identity_tests {
+    use super::*;
+    use crate::cuda_async::OwnedByteBudget;
+    use proxima_numeric::codec::Codec;
+
+    const EXPERTS: usize = 3;
+    const RUN_BYTES: usize = 144;
+
+    fn fused_gate_up() -> Vec<u8> {
+        (0..EXPERTS * 2 * RUN_BYTES)
+            .map(|index| (index % 251) as u8)
+            .collect()
+    }
+
+    fn up_half(fused: &[u8]) -> QuantizedBlock<'_> {
+        QuantizedBlock::PackedStrided {
+            codec: Codec::Q4K,
+            bytes: &fused[RUN_BYTES..RUN_BYTES + (EXPERTS - 1) * 2 * RUN_BYTES + RUN_BYTES],
+            expert_bytes: RUN_BYTES,
+            stride_bytes: 2 * RUN_BYTES,
+        }
+    }
+
+    #[test]
+    fn a_strided_block_has_one_identity_first_byte_and_gathered_length() {
+        let fused = fused_gate_up();
+        let block = up_half(&fused);
+        let QuantizedBlock::PackedStrided { bytes, .. } = block else {
+            unreachable!("up_half builds a strided block");
+        };
+        assert_ne!(
+            bytes.len(),
+            EXPERTS * RUN_BYTES,
+            "control: the span is not the gathered length"
+        );
+
+        assert_eq!(
+            resident_source_identity(block),
+            (bytes.as_ptr() as usize, EXPERTS * RUN_BYTES),
+            "a strided block keys on its first byte and its gathered runs"
+        );
+    }
+
+    #[proxima::test]
+    async fn a_strided_resident_block_is_unchanged_on_the_second_identical_call() {
+        let fused = fused_gate_up();
+        let block = up_half(&fused);
+        let budget = OwnedByteBudget::new(1 << 20).expect("valid test byte budget");
+        let owned = budget
+            .copy_named_blocks(&[("blk.0.ffn_up_exps.weight", block)])
+            .await
+            .expect("strided block should be admitted");
+        let cached_identity = resident_source_identity(block);
+
+        let second_identity = resident_source_identity(block);
+        let payload_unchanged = resident_payload_matches(&owned.blocks[0].block, block);
+
+        assert_eq!(second_identity, cached_identity, "identity is stable across calls");
+        assert!(
+            payload_unchanged,
+            "the gathered Packed bytes the cuda path owns equal the strided source's runs"
+        );
+    }
+
+    #[proxima::test]
+    async fn a_strided_resident_block_whose_expert_bytes_differ_is_changed() {
+        let mut fused = fused_gate_up();
+        let budget = OwnedByteBudget::new(1 << 20).expect("valid test byte budget");
+        let owned = budget
+            .copy_named_blocks(&[("blk.0.ffn_up_exps.weight", up_half(&fused))])
+            .await
+            .expect("strided block should be admitted");
+        fused[RUN_BYTES + 2 * RUN_BYTES + 7] ^= 0xff;
+
+        assert!(
+            !resident_payload_matches(&owned.blocks[0].block, up_half(&fused)),
+            "control: a flipped byte inside a gathered run is a payload change"
+        );
+    }
+
+    #[proxima::test]
+    async fn a_strided_resident_block_whose_skipped_half_differs_is_unchanged() {
+        let mut fused = fused_gate_up();
+        let budget = OwnedByteBudget::new(1 << 20).expect("valid test byte budget");
+        let owned = budget
+            .copy_named_blocks(&[("blk.0.ffn_up_exps.weight", up_half(&fused))])
+            .await
+            .expect("strided block should be admitted");
+        fused[2 * RUN_BYTES + 7] ^= 0xff;
+
+        assert!(
+            resident_payload_matches(&owned.blocks[0].block, up_half(&fused)),
+            "a byte in the other half is outside the gathered runs and is not part of the payload"
+        );
     }
 }
 
