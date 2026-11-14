@@ -1707,7 +1707,9 @@ pub(super) fn metal_specialization(
         }),
         packed_row_k_split: packed_row_block(resolved, &quantized).and_then(|block| {
             let geometry = packed_row_geometry(resolved, &quantized, &block);
-            u8::try_from(geometry.k_split).ok().filter(|&split| split > 1)
+            let split = u8::try_from(geometry.k_split).ok().filter(|&split| split > 1)?;
+            let rows = u8::try_from(geometry.rows_per_simdgroup).ok()?;
+            Some((split, rows))
         }),
         packed_row_activation_cap: packed_row_block(resolved, &quantized).and_then(|block| {
             let token_total = packed_row_block_token_total(&block, &resolved.extents);
