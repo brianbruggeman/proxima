@@ -2028,6 +2028,16 @@ pub(super) fn tiled_gemm_threadgroup_width_with_schedule(
     }))
 }
 
+/// The row-blocked packed preamble when `k_split` simdgroups share one row
+/// group: `k_split` is a literal, so the kernel needs no `tptg` parameter.
+/// Thread `gid` is `((output_index * k_split) + sgitg) * 32 + lane`.
+pub(super) fn push_packed_row_split_preamble(source: &mut String, k_split: usize) {
+    let width = SIMD_WIDTH as usize * k_split;
+    source.push_str(&format!("    long output_index = (long)gid / {width};\n"));
+    source.push_str(&format!("    uint sgitg = (gid / {SIMD_WIDTH}u) % {k_split}u;\n"));
+    source.push_str(&format!("    uint lane = gid % {SIMD_WIDTH}u;\n"));
+}
+
 /// Whether `resolved` takes [`push_cooperative_reduce_body`]'s "SUPER-BLOCK
 /// TILED PACKED READ" arm -- exactly one Q4_K-packed operand, contiguous
 /// along the single reduction dim, whose extent is a whole number of
@@ -2302,7 +2312,13 @@ pub(super) fn push_cooperative_reduce_body(
     // `output_index`/`lane` pair at `SIMD_WIDTH` (`metal-q4k-split-k`'s own
     // `tptg`-derived preamble below is the only variant on this pair).
     if let Some(block) = packed_row_block(resolved, quantized) {
-        if cfg!(feature = "metal-q4k-split-k") {
+        // simdgroups cooperating on one row group; the dispatch geometry
+        // (`packed_row_dispatch`) is what makes this > 1, and it stays 1 until
+        // that geometry carries a K split
+        let k_split = 1usize;
+        if k_split > 1 {
+            push_packed_row_split_preamble(source, k_split);
+        } else if cfg!(feature = "metal-q4k-split-k") {
             // `tptg` is the ACTUAL per-dispatch threadgroup width
             // (`kernel_signature`'s new param, wired on for this exact
             // path -- see its call site's own gate). `split == 1` (the
@@ -2336,6 +2352,7 @@ pub(super) fn push_cooperative_reduce_body(
             epilogue_body,
             epilogue_operands,
             expert_source_mode,
+            k_split,
             metal,
         )?;
         return Ok(());
