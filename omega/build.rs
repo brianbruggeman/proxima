@@ -285,6 +285,17 @@ fn emit_sizing_consts() {
         "pub const PACKED_ROW_KSPLIT_ROWS: usize = {packed_row_ksplit_rows};\n"
     ));
 
+    let packed_row_lane_run_bytes = require_nonneg(
+        "packed_row_block.lane_run_bytes",
+        resolve_int(&root, "packed_row_block", "lane_run_bytes"),
+    );
+    if packed_row_lane_run_bytes != 0 {
+        require_power_of_two_le_32("packed_row_block.lane_run_bytes", packed_row_lane_run_bytes);
+    }
+    out.push_str(&format!(
+        "pub const PACKED_ROW_LANE_RUN_BYTES: usize = {packed_row_lane_run_bytes};\n"
+    ));
+
     let cooperative_reduce_min_len = require_nonneg(
         "cooperative_reduce.min_len",
         resolve_int(&root, "cooperative_reduce", "min_len"),

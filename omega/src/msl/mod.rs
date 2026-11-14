@@ -106,6 +106,7 @@ use crate::sized::PACKED_ROW_NSG;
 use crate::sized::SIMD_WIDTH;
 use sub_block_assembled_matvec::{LevelCodes, assembled_multi_row_matvec_msl, level_matvec_msl, level_table_rendered};
 use matmul_form::{FlatBlockForm, FlatLaunch, Fold};
+pub use matmul_form::LaneRun;
 use sub_block_matvec::{SubBlockMatvecGeometry, sub_block_matvec_msl};
 
 #[macro_use]

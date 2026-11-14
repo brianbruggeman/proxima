@@ -87,6 +87,18 @@ ksplit_max = 4
 # via `PROXIMA_PACKED_ROWS_KSPLIT`.
 ksplit_rows = 2
 
+# bytes of a block's low code plane one lane owns in the lane-run map
+# (`msl::LaneRun::derive`, `msl::lane_run_bytes`): a lane takes that many
+# plane bytes and every element whose code sits in them, so a byte-code layout
+# (8 -> 8 elements) and a nibble layout (8 -> 16 elements) share one rule.
+# 0 (default) is off and nothing reads it yet; a power of two `<= 32`
+# otherwise. Raising it narrows each lane's share of a block and raises the
+# lanes a block spreads over (`plane bytes / run`); a layout whose plane bytes
+# do not divide into whole translate-equal runs derives no lane run.
+# Overridable per-build via `OMEGA_PACKED_ROW_BLOCK_LANE_RUN_BYTES` and
+# per-process, 0 or a power of two `<= 32`, via `PROXIMA_PACKED_LANE_RUN_BYTES`.
+lane_run_bytes = 0
+
 [tiled_gemm]
 # below this many activation rows (tokens) in one dispatch, the row-blocked
 # packed-matmul kernel (`push_packed_row_blocked_body`) runs instead of the
