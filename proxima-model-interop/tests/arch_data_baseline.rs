@@ -1274,6 +1274,26 @@ fn first_divergence(expected: &[u32], actual: &[u32]) -> Option<usize> {
         .or_else(|| (expected.len() != actual.len()).then_some(shared))
 }
 
+/// llama.cpp's captured ids end with the end-of-generation token it stopped on;
+/// proxima's serving path stops on that same token without recording it
+/// (`deliver_token`), so a stop at the step where llama's list ends on an EOG id
+/// is agreement, not a length divergence.
+fn first_divergence_through_stop(
+    expected: &[u32],
+    generated: &[u32],
+    stopped_by_eos: bool,
+    vocab: &proxima_tokenizer::Vocab,
+) -> Option<usize> {
+    let compared = &generated[..generated.len().min(expected.len())];
+    let divergence = first_divergence(expected, compared);
+    let llama_ends_on_stop = expected.len() == generated.len() + 1
+        && vocab.is_eog(expected[generated.len()]);
+    match divergence {
+        Some(index) if stopped_by_eos && llama_ends_on_stop && index == generated.len() => None,
+        other => other,
+    }
+}
+
 fn llama_parity(checkpoint: &Checkpoint) {
     let mapping = checkpoint.open();
     let file_bytes: &[u8] = &mapping;
@@ -1332,16 +1352,16 @@ fn assert_llama_ids_for(
                 checkpoint.name, case.prompt, case.prompt_ids, own_prompt_ids
             ));
         }
-        let (generated, _text, _stopped) = model
+        let (generated, _text, stopped_by_eos) = model
             .generate_from_ids(&case.prompt_ids, generated_tokens, &config, &mut |_event| {
                 ControlFlow::Continue(())
             })
             .unwrap_or_else(|error| {
                 panic!("{}: generate_from_ids failed: {error:?}", checkpoint.name)
             });
-        let compared_len = generated.len().min(case.generated_ids.len());
-        let compared = &generated[..compared_len];
-        if let Some(index) = first_divergence(&case.generated_ids, compared) {
+        if let Some(index) =
+            first_divergence_through_stop(&case.generated_ids, &generated, stopped_by_eos, &vocab)
+        {
             failures.push(format!(
                 "MODEL {} prompt {:?}: first divergent index {index}; llama {:?}, proxima {:?}; {}",
                 checkpoint.name,
@@ -1491,12 +1511,14 @@ fn generic_verify_llama_parity(checkpoint: &Checkpoint) {
         ..ServingConfig::default()
     };
     let cases = llama_cases(checkpoint);
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("builds the vocab from the checkpoint metadata");
     let mut verify_steps_total = 0;
     let mut failures = Vec::new();
     for case in &cases {
         for width in FORCED_DRAFT_WIDTHS {
             let mut stats = SpeculativeDecodeStats::default();
-            let (generated, _text, _stopped) = model
+            let (generated, _text, stopped_by_eos) = model
                 .generate_from_ids_with_speculative_stats(
                     &case.prompt_ids,
                     LLAMA_GENERATED_TOKENS,
@@ -1512,8 +1534,12 @@ fn generic_verify_llama_parity(checkpoint: &Checkpoint) {
                     )
                 });
             verify_steps_total += stats.verify_steps;
-            let compared = &generated[..generated.len().min(case.generated_ids.len())];
-            if let Some(index) = first_divergence(&case.generated_ids, compared) {
+            if let Some(index) = first_divergence_through_stop(
+                &case.generated_ids,
+                &generated,
+                stopped_by_eos,
+                &vocab,
+            ) {
                 failures.push(format!(
                     "{} prompt {:?} draft width {width}: first divergent index {index}; llama {:?}, proxima {:?}",
                     checkpoint.name, case.prompt, case.generated_ids, generated
@@ -1583,6 +1609,8 @@ fn serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps() {
     }
     .with_speculative(SpeculativeConfig::none());
     let cases = llama_cases(&GEMMA4_E2B);
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("builds the vocab from the checkpoint metadata");
 
     for case in &cases {
         let mut stats = SpeculativeDecodeStats::default();
@@ -1597,12 +1625,14 @@ fn serving_fsm_drives_a_plain_decode_through_prefill_then_decode_steps() {
             )
             .expect("plain decode runs on the real checkpoint");
 
-        let compared = &generated[..generated.len().min(case.generated_ids.len())];
         assert_eq!(
-            first_divergence(&case.generated_ids, compared),
+            first_divergence_through_stop(&case.generated_ids, &generated, stopped_by_eos, &vocab),
             None,
-            "prompt {:?}: ids differ from llama.cpp",
-            case.prompt
+            "prompt {:?}: ids differ from llama.cpp (llama {:?}, proxima {:?}, stopped_by_eos {})",
+            case.prompt,
+            case.generated_ids,
+            generated,
+            stopped_by_eos
         );
         let evaluations = generated.len() + usize::from(stopped_by_eos);
         assert_eq!(
@@ -1896,13 +1926,17 @@ fn zero_rust_variant_full_attention_gemma4_e2b_lowers_and_runs() {
     assert_llama_ids(&GEMMA4_E2B, &parsed, &model);
 }
 
-fn first_llama_divergence_step(model: &LoadedModel<'_>, case: &LlamaCase) -> Option<usize> {
+fn first_llama_divergence_step(
+    model: &LoadedModel<'_>,
+    case: &LlamaCase,
+    vocab: &proxima_tokenizer::Vocab,
+) -> Option<usize> {
     let serving = ServingConfig {
         prompt_cache: PromptCacheConfig::off(),
         ..ServingConfig::default()
     };
 
-    let (generated, _text, _stopped) = model
+    let (generated, _text, stopped_by_eos) = model
         .generate_from_ids(
             &case.prompt_ids,
             LLAMA_GENERATED_TOKENS,
@@ -1914,8 +1948,7 @@ fn first_llama_divergence_step(model: &LoadedModel<'_>, case: &LlamaCase) -> Opt
         )
         .expect("the edited config runs");
 
-    let compared = &generated[..generated.len().min(case.generated_ids.len())];
-    first_divergence(&case.generated_ids, compared)
+    first_divergence_through_stop(&case.generated_ids, &generated, stopped_by_eos, vocab)
 }
 
 fn generated_ids_diverge_from_llama(checkpoint: &Checkpoint, config: &ModelDescriptor) -> bool {
@@ -1924,8 +1957,10 @@ fn generated_ids_diverge_from_llama(checkpoint: &Checkpoint, config: &ModelDescr
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
     let model = load_from_config(&parsed, file_bytes, config);
     let case = &llama_cases(checkpoint)[0];
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("builds the vocab from the checkpoint metadata");
 
-    let step = first_llama_divergence_step(&model, case);
+    let step = first_llama_divergence_step(&model, case, &vocab);
     eprintln!(
         "{}: first divergence from llama at prompt_index=0 step={step:?}",
         checkpoint.name
@@ -1938,11 +1973,13 @@ fn any_case_diverges_from_llama(checkpoint: &Checkpoint, config: &ModelDescripto
     let file_bytes: &[u8] = &mapping;
     let parsed = parse_complete(file_bytes).expect("parses the real checkpoint's GGUF header");
     let model = load_from_config(&parsed, file_bytes, config);
+    let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+        .expect("builds the vocab from the checkpoint metadata");
     llama_cases(checkpoint)
         .iter()
         .enumerate()
         .any(|(prompt_index, case)| {
-            let step = first_llama_divergence_step(&model, case);
+            let step = first_llama_divergence_step(&model, case, &vocab);
             eprintln!(
                 "{}: first divergence from llama at prompt_index={prompt_index} step={step:?}",
                 checkpoint.name
@@ -2249,11 +2286,11 @@ fn generated_ids(
     model: &LoadedModel<'_>,
     cases: &[LlamaCase],
     config: &ServingConfig<'_>,
-) -> Vec<Vec<u32>> {
+) -> Vec<(Vec<u32>, bool)> {
     cases
         .iter()
         .map(|case| {
-            let (generated, _text, _stopped) = model
+            let (generated, _text, stopped_by_eos) = model
                 .generate_from_ids(
                     &case.prompt_ids,
                     LLAMA_GENERATED_TOKENS,
@@ -2261,7 +2298,7 @@ fn generated_ids(
                     &mut |_event| ControlFlow::Continue(()),
                 )
                 .unwrap_or_else(|error| panic!("generate_from_ids failed: {error:?}"));
-            generated
+            (generated, stopped_by_eos)
         })
         .collect()
 }
@@ -2296,10 +2333,11 @@ fn kv_in_caller_memory(checkpoint: &Checkpoint, kv_owning_layers: usize, matches
     );
 
     if matches_llama {
-        for (index, case) in cases.iter().enumerate() {
-            let compared = hooked_ids[index].len().min(case.generated_ids.len());
+        let vocab = proxima_tokenizer::gguf::vocab_from_metadata(&parsed)
+            .expect("builds the vocab from the checkpoint metadata");
+        for (case, (ids, stopped_by_eos)) in cases.iter().zip(&hooked_ids) {
             assert_eq!(
-                first_divergence(&case.generated_ids, &hooked_ids[index][..compared]),
+                first_divergence_through_stop(&case.generated_ids, ids, *stopped_by_eos, &vocab),
                 None,
                 "{} prompt {:?} diverges from the recorded llama ids",
                 checkpoint.name,
@@ -2307,10 +2345,21 @@ fn kv_in_caller_memory(checkpoint: &Checkpoint, kv_owning_layers: usize, matches
             );
         }
     }
+    // the device kv cache is adopted at a call's first decode evaluation, so a call that
+    // stops on its first sampled token (one prefill evaluation, zero decode) never asks the arena
+    let calls_with_a_decode_evaluation = hooked_ids
+        .iter()
+        .filter(|(ids, stopped_by_eos)| ids.len() + usize::from(*stopped_by_eos) > 1)
+        .count();
+    assert!(
+        calls_with_a_decode_evaluation > 0,
+        "{}: no call reached a decode evaluation, so nothing was checked",
+        checkpoint.name
+    );
     assert_eq!(
         ARENA_REQUESTS.load(Ordering::SeqCst),
-        3 * kv_owning_layers * cases.len(),
-        "the arena serves three buffers per kv-owning layer per generate call"
+        3 * kv_owning_layers * calls_with_a_decode_evaluation,
+        "the arena serves three buffers per kv-owning layer per generate call that decodes"
     );
     assert!(
         ARENA_USED.load(Ordering::SeqCst) > 0,
