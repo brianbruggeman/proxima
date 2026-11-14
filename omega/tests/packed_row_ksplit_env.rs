@@ -143,8 +143,18 @@ fn rows_ksplit_4_with_a_split_of_2_folds_four_rows_per_simdgroup_of_the_bf16_rou
 }
 
 #[test]
-fn env_unset_leaves_the_bf16_router_unsplit() {
+fn env_unset_splits_the_bf16_router_four_ways_by_default() {
     temp_env::with_vars([(K_SPLIT_ENV, None::<&str>), (ROWS_ENV, None)], || {
+        let emitted = emit_op(Codec::BFloat16, ROUTER_ROWS, ROUTER_K);
+
+        assert!(emitted.key.contains("_ks4"), "{}", emitted.key);
+        assert_eq!(emitted.kernel.grid.threadgroup_width, Some(128));
+    });
+}
+
+#[test]
+fn env_split_1_leaves_the_bf16_router_unsplit() {
+    temp_env::with_vars([(K_SPLIT_ENV, Some("1")), (ROWS_ENV, None)], || {
         let emitted = emit_op(Codec::BFloat16, ROUTER_ROWS, ROUTER_K);
 
         assert!(!emitted.key.contains("_ks"), "{}", emitted.key);
