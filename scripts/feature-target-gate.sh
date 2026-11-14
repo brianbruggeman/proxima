@@ -113,7 +113,9 @@ changed_crates() {
         return
     fi
     local dir
-    git diff --name-only "$base"...HEAD 2>/dev/null \
+    { git diff --name-only "$base"...HEAD 2>/dev/null
+      git diff --name-only HEAD 2>/dev/null
+      git ls-files --others --exclude-standard 2>/dev/null; } \
         | cut -d/ -f1 \
         | sort -u \
         | while IFS= read -r dir; do package_name "$dir"; done \
