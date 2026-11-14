@@ -701,10 +701,101 @@ pub(super) fn kernel_signature(
     );
 }
 
+/// [`kernel_signature`] that, when `threadgroup_threads`, also binds `stage_tid` and
+/// `stage_threads`: the thread's index in its threadgroup and the threadgroup's thread count,
+/// which a copy into threadgroup memory strides by.
+pub(super) fn kernel_signature_with_threadgroup_threads(
+    source: &mut String,
+    quantized: &[Option<Codec>],
+    epilogue_operand_count: usize,
+    gather_count: usize,
+    entry: &str,
+    element_type: &str,
+    threadgroup_threads: bool,
+) {
+    push_signature_operands(
+        source,
+        quantized,
+        epilogue_operand_count,
+        gather_count,
+        entry,
+        element_type,
+        0,
+    );
+    push_signature_tail(source, threadgroup_threads);
+}
+
 // `extra_outputs` second-and-later output buffers, named `extra_out{index}`, bound after the
 // uniforms (and fault) slot at the indices `encode_op` hands an op's extra outputs: right past
 // `Kernel::bindings`, which is where `BoundOp::twin_node` lands.
 pub(super) fn kernel_signature_with_extra_outputs(
+    source: &mut String,
+    quantized: &[Option<Codec>],
+    epilogue_operand_count: usize,
+    gather_count: usize,
+    entry: &str,
+    element_type: &str,
+    extra_outputs: usize,
+) {
+    push_signature_operands(
+        source,
+        quantized,
+        epilogue_operand_count,
+        gather_count,
+        entry,
+        element_type,
+        extra_outputs,
+    );
+    push_signature_tail(source, false);
+}
+
+const STAGE_SCALAR_PARAMETERS: &str = "    uint stage_tid [[thread_position_in_threadgroup]],\n    uint stage_threads [[threads_per_threadgroup]]";
+#[cfg(any(
+    test,
+    all(feature = "metal-horizontal-merge", feature = "metal", target_os = "macos"),
+    feature = "metal-moe-mul-mat-id"
+))]
+const STAGE_VECTOR_PARAMETERS: &str = "    uint3 stage_tid3 [[thread_position_in_threadgroup]],\n    uint3 stage_threads3 [[threads_per_threadgroup]]";
+#[cfg(any(
+    test,
+    all(feature = "metal-horizontal-merge", feature = "metal", target_os = "macos"),
+    feature = "metal-moe-mul-mat-id"
+))]
+const STAGE_FLATTEN: &str = "\n    uint stage_tid = stage_tid3.x + stage_threads3.x * (stage_tid3.y + stage_threads3.y * stage_tid3.z);\n    uint stage_threads = stage_threads3.x * stage_threads3.y * stage_threads3.z;";
+
+fn push_signature_tail(source: &mut String, threadgroup_threads: bool) {
+    source.push_str("    uint gid [[thread_position_in_grid]]");
+    if threadgroup_threads {
+        source.push_str(",\n");
+        source.push_str(STAGE_SCALAR_PARAMETERS);
+    }
+    source.push_str(")\n{\n");
+}
+
+/// Re-types the thread attributes [`kernel_signature_with_threadgroup_threads`] added to the
+/// vector width a splice just gave the grid id: Metal rejects a signature mixing scalar and
+/// vector thread-position attributes. Declares `uint3` forms and flattens them back to the
+/// scalar `stage_tid` / `stage_threads` the stage copy reads. A source with no stage attributes
+/// is left untouched. Call after the splice has rewritten `gid`.
+#[cfg(any(
+    test,
+    all(feature = "metal-horizontal-merge", feature = "metal", target_os = "macos"),
+    feature = "metal-moe-mul-mat-id"
+))]
+pub(super) fn widen_stage_parameters(source: &mut String) {
+    let Some(start) = source.find(STAGE_SCALAR_PARAMETERS) else {
+        return;
+    };
+    source.replace_range(start..start + STAGE_SCALAR_PARAMETERS.len(), STAGE_VECTOR_PARAMETERS);
+    // the merge splices land their preamble right after the `{`, before its newline, so the
+    // anchor is `)\n{` and the flatten carries its own leading newline
+    let Some(terminator) = source[start..].find(")\n{") else {
+        return;
+    };
+    source.insert_str(start + terminator + ")\n{".len(), STAGE_FLATTEN);
+}
+
+fn push_signature_operands(
     source: &mut String,
     quantized: &[Option<Codec>],
     epilogue_operand_count: usize,
@@ -776,8 +867,6 @@ pub(super) fn kernel_signature_with_extra_outputs(
             extra_base + index
         ));
     }
-    source.push_str("    uint gid [[thread_position_in_grid]]");
-    source.push_str(")\n{\n");
 }
 
 /// Declares the `Uniforms` fields a gather needs — `index_base`/`index_strides`

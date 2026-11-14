@@ -137,7 +137,7 @@ pub(super) fn push_packed_row_blocked_body(
     let PackedRowGeometry {
         rows_per_simdgroup: rows,
         k_split,
-        level_staging: _,
+        level_staging,
     } = geometry;
     if packed_row_block_token_total(block, &resolved.extents) > 1 {
         push_packed_row_multi_row_body(
@@ -174,6 +174,9 @@ pub(super) fn push_packed_row_blocked_body(
     let block_bytes = codec_row_block_step_bytes(codec);
     let rank_len = rank.max(1);
     let operand_count = resolved.operands().len();
+    if let (LevelStaging::Workgroup { words }, Codec::Levels(format)) = (level_staging, codec) {
+        source.push_str(&level_stage_msl(&format.levels, codec_element_fn_name(codec), words));
+    }
     // seeded on lane 0 only, exactly as the general cooperative path does:
     // the true seed folds in once and every other lane starts at the
     // algebraic identity, so `simd_*` can combine them unconditionally.
@@ -405,6 +408,7 @@ pub(super) fn push_packed_row_blocked_body(
             let codes = LevelCodes {
                 table: &format.levels,
                 element_fn: codec_element_fn_name(codec),
+                staged: matches!(level_staging, LevelStaging::Workgroup { .. }),
             };
             let (simdgroups, lanes) = (packed_row_nsg_factor() as usize, SIMD_WIDTH as usize);
             let geometry = SubBlockMatvecGeometry::for_levels(&format.levels, rows, simdgroups, lanes);

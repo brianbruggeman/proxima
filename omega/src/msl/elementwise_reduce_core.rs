@@ -434,13 +434,14 @@ pub(super) fn render_reduce(
     push_gather_uniform_fields(&mut source, gather_count, rank_len);
     source.push_str("};\n\n");
 
-    kernel_signature(
+    kernel_signature_with_threadgroup_threads(
         &mut source,
         quantized,
         epilogue_operand_count,
         gather_count,
         entry,
         element_type,
+        packed_row_level_stage_words(resolved, quantized).is_some(),
     );
 
     if reduce_is_cooperative_dispatch(
