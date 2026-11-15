@@ -93,7 +93,7 @@ pub struct RuntimeConfig {
     /// Existing numeric permissions shared with binding and emission, such as contraction for an MMA path.
     #[setting(nested)]
     pub numeric: NumericPolicy,
-    /// Metal emit A/B switches, such as `PROXIMA_TILED_GEMM_GRID2D=0`; the env spellings are unchanged.
+    /// Metal emit A/B switches, such as `tiled_gemm_grid2d = false`; the `PROXIMA_*` env spellings are unchanged.
     #[setting(nested, override_prefix = "PROXIMA")]
     pub emit: EmitKnobs,
     /// Dense matrix fragment layout settings; `auto` derives the plan layout from stored operands.

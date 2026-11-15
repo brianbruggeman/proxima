@@ -231,7 +231,7 @@ pub(super) fn push_tiled_gemm_body(
         Ok(terms.join(" * "))
     };
 
-    // `PROXIMA_TILED_GEMM_GRID2D` (see `docs/model-interop/discipline.md`
+    // `EmitKnobs::tiled_gemm_grid2d` (see `docs/model-interop/discipline.md`
     // ROW C4.19, `MetalOnlyExtras::tiled_gemm_grid2d`'s own doc): swaps the flattened
     // `uint gid [[thread_position_in_grid]]` `kernel_signature` already
     // emitted for ggml's own 2D attribute triple, and derives `row_tile`/
@@ -290,7 +290,7 @@ pub(super) fn push_tiled_gemm_body(
         source.push_str("    long col_half = sgitg >> 1;\n");
     }
     // phase 2 (see `docs/model-interop/discipline.md` ROW C4.10,
-    // `PROXIMA_TILED_GEMM_SLIM_TGMEM=1`):
+    // `EmitKnobs::tiled_gemm_slim_tgmem` on):
     // `weight_tile`/`act_tile` are dead by the time `out_tile` needs its
     // bytes (the K-loop's own trailing `threadgroup_barrier` below already
     // fences the last read before any thread could reach the aliased
@@ -344,7 +344,7 @@ pub(super) fn push_tiled_gemm_body(
         "    device const uchar *weight_bytes = (device const uchar *)in{weight};\n"
     ));
 
-    // `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` (see `docs/model-interop/
+    // `EmitKnobs::tiled_gemm_wide_weight_stage` (see `docs/model-interop/
     // discipline.md` ROW C4.12, `MetalOnlyExtras::tiled_gemm_wide_weight_stage`'s own doc): admitted
     // only when a thread's half-chunk is exactly one decode run (the chunk is
     // one K step of 32) AND the block/K-step ratio is a clean whole number
@@ -464,7 +464,7 @@ pub(super) fn push_tiled_gemm_body(
             source.push_str("            }\n");
             source.push_str("        }\n");
         }
-        // item 3c (`PROXIMA_TILED_GEMM_WIDE_ACT_LOAD=1`, `STAGING.md` §5.3):
+        // item 3c (`EmitKnobs::tiled_gemm_wide_act_load` on, `STAGING.md` §5.3):
         // admitted (by `wide_activation_load_active`, at classification time)
         // only when the activation operand's stride along the reduce dim is
         // exactly 1, so four LOGICALLY consecutive `a_k` values are four
@@ -954,7 +954,7 @@ fn push_mm_layout_multiply(source: &mut String, staging: &ActivationStaging) {
     source.push_str("        }\n");
 }
 
-/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE`'s setup half: computed ONCE, before
+/// `EmitKnobs::tiled_gemm_wide_weight_stage`'s setup half: computed ONCE, before
 /// the `k0` reduction loop opens, for each of the (typically one)
 /// `half_units` this thread iterates -- a HALF-BLOCK unit `h = tiitg +
 /// unit * block_threads` decomposes into `(row, chunk, half)` via division
@@ -1064,7 +1064,7 @@ fn fragment_load_offset_stride(
     )
 }
 
-/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE`'s decode half, emitted inside the
+/// `EmitKnobs::tiled_gemm_wide_weight_stage`'s decode half, emitted inside the
 /// `k0` reduction loop: decodes one run at each unit's current
 /// `(wws_blk, wws_slot)` cursor, writes it into `weight_tile` via `half4`
 /// vector stores (a run is [`DECODE_RUN_ELEMENTS`] wide and `koff`'s two
@@ -1360,7 +1360,7 @@ pub(super) fn push_tiled_gemm_body(
 /// operand tiles load straight `float` reads (no codec decode arm, so
 /// `weight_tile` is `float` here, not `half`, and both `simdgroup_load`s
 /// build `simdgroup_float8x8` fragments) -- the sliding-pattern family's GQA attention score
-/// (`Q.K^T`) and value (`P.V`) folds, ported behind `PROXIMA_TILED_GEMM_DENSE=1`
+/// (`Q.K^T`) and value (`P.V`) folds, ported behind `EmitKnobs::tiled_gemm_dense`
 /// (`classify_dense_batched_gemm`'s own doc).
 ///
 /// Adds ONE thing [`push_tiled_gemm_body`] has no shape for: `block.batch_axes`,
@@ -1451,7 +1451,7 @@ pub(super) fn push_dense_batched_gemm_body(
         Ok(terms.join(" * "))
     };
 
-    // `PROXIMA_TILED_GEMM_GRID2D` (see `docs/model-interop/discipline.md`
+    // `EmitKnobs::tiled_gemm_grid2d` (see `docs/model-interop/discipline.md`
     // ROW C4.19, `MetalOnlyExtras::tiled_gemm_grid2d`'s own doc): the SAME 2D-attribute
     // swap `push_tiled_gemm_body` performs, with one simplification unique to
     // the dense-batched body -- `tgpig.z` already IS the batch index (the

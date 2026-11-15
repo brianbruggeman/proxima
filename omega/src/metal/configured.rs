@@ -99,7 +99,7 @@ pub fn plan_named_with_config_and_placed_inputs(
         config.emit.clone(),
     );
     let has_dense_bf16_candidate = plan.prepared.resolved.iter().any(|bound| {
-        crate::msl::has_dense_bf16_mma_candidate(bound, &plan.packed_operands, plan.numeric_policy)
+        crate::msl::has_dense_bf16_mma_candidate(bound, &plan.packed_operands, plan.numeric_policy, &plan.emit_knobs)
     });
     if !config.dense_mma_input_layout.derive_from_operands
         && config

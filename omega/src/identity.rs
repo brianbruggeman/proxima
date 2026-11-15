@@ -243,7 +243,7 @@ pub(crate) struct MetalOnlyExtras {
     /// `_rtrows` so the runtime-rows pipeline can never collide with the
     /// per-bucket specialized one. `false` is a no-op for every other kind.
     pub softmax_runtime_rows: bool,
-    /// `PROXIMA_TILED_GEMM_Q4_0`: `true` when
+    /// `EmitKnobs::tiled_gemm_q4_0`: `true` when
     /// [`crate::msl::push_tiled_gemm_body`] actually rendered its `Codec::
     /// Q4_0` decode arm for this op (admission on AND `classify_tiled_gemm`'s
     /// own admission passed). Default ON (unset admits; only explicit `"0"`
@@ -277,13 +277,13 @@ pub(crate) struct MetalOnlyExtras {
     /// now folds this token; the explicit-`"0"` default is what stays
     /// byte-identical to before this field existed.
     pub dense_batched_gemm_axes: Option<(u16, u16, Vec<u16>, usize, usize)>,
-    /// `PROXIMA_TILED_GEMM_WIDE_ACT_LOAD`: `true` when
+    /// `EmitKnobs::tiled_gemm_wide_act_load`: `true` when
     /// [`crate::msl::push_tiled_gemm_body`] renders the vectorized
     /// `float4` activation-tile load for this op. Default ON (unset renders
     /// it; only explicit `"0"` falls back to the scalar load). Feeds the
     /// `_wal` suffix.
     pub tiled_gemm_wide_act_load: bool,
-    /// `PROXIMA_TILED_GEMM_SLIM_TGMEM` (phase 2, see `docs/model-interop/
+    /// `EmitKnobs::tiled_gemm_slim_tgmem` (phase 2, see `docs/model-interop/
     /// discipline.md` ROW C4.10):
     /// `true` when [`crate::msl::push_tiled_gemm_body`]/[`crate::msl::
     /// push_dense_batched_gemm_body`] alias `out_tile`'s epilogue-staging
@@ -297,7 +297,7 @@ pub(crate) struct MetalOnlyExtras {
     /// Default ON (unset aliases; only explicit `"0"` keeps the three
     /// separately-sized arrays). Feeds the `_slim` suffix.
     pub tiled_gemm_slim_tgmem: bool,
-    /// `PROXIMA_TILED_GEMM_DIRECT_STORE` (see `docs/model-interop/
+    /// `EmitKnobs::tiled_gemm_direct_store` (see `docs/model-interop/
     /// discipline.md` ROW C4.11): `true`
     /// when [`crate::msl::push_tiled_gemm_body`]/[`crate::msl::
     /// push_dense_batched_gemm_body`] emit the device-direct
@@ -312,7 +312,7 @@ pub(crate) struct MetalOnlyExtras {
     /// axis but disagreeing on this flag must still render, and cache,
     /// distinct kernels. Feeds the `_dstore` suffix.
     pub tiled_gemm_direct_store: bool,
-    /// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` (see `docs/model-interop/
+    /// `EmitKnobs::tiled_gemm_wide_weight_stage` (see `docs/model-interop/
     /// discipline.md` ROW C4.12): `true`
     /// when [`crate::msl::push_tiled_gemm_body`]'s `Codec::Q4_0`/`Codec::Q4K`
     /// weight-tile staging loop spreads each row across TWO threads (one per
@@ -330,7 +330,7 @@ pub(crate) struct MetalOnlyExtras {
     /// are two distinct compiled pipelines and must never share a cache
     /// entry. Feeds the `_wws` suffix.
     pub tiled_gemm_wide_weight_stage: bool,
-    /// `PROXIMA_TILED_GEMM_GRID2D` (see `docs/model-interop/
+    /// `EmitKnobs::tiled_gemm_grid2d` (see `docs/model-interop/
     /// discipline.md` ROW C4.19, measured -4.20% on A2's
     /// own shape via the harness-only `S2_2d_index_attrs` ablation before
     /// this switch existed): `true` when [`crate::msl::push_tiled_gemm_body`]/
@@ -350,7 +350,7 @@ pub(crate) struct MetalOnlyExtras {
     /// render, and dispatch, as distinct kernels. Feeds the `_grid2d`
     /// suffix.
     pub tiled_gemm_grid2d: bool,
-    /// `PROXIMA_TILED_GEMM_MM_LAYOUT`: `true` when
+    /// `EmitKnobs::tiled_gemm_mm_layout`: `true` when
     /// [`crate::msl::push_tiled_gemm_body`] stages and multiplies in ggml's
     /// own `kernel_mul_mm` tile layout (`mul_mm.metal:164-316`) instead of
     /// row-major tiles read through a transposed fragment load: the weight tile
@@ -364,7 +364,7 @@ pub(crate) struct MetalOnlyExtras {
     /// with the row-major kernel. Default ON (unset admits; only explicit
     /// `"0"` keeps the row-major tile). Feeds the `_mml` suffix.
     pub tiled_gemm_mm_layout: bool,
-    /// `PROXIMA_TILED_GEMM_DYNAMIC_TGMEM`: `true` when the packed tiled-GEMM
+    /// `EmitKnobs::tiled_gemm_dynamic_tgmem`: `true` when the packed tiled-GEMM
     /// kernel takes its slim threadgroup backing store as its `[[threadgroup(0)]]`
     /// argument instead of declaring the array, and the launch binds
     /// [`crate::msl::Grid2DSpec::threadgroup_bytes`] through

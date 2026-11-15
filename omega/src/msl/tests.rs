@@ -2408,11 +2408,14 @@ fn dense_batched_score_shaped_op_with_operand_order(
 #[test]
 fn dense_batched_restage_msl_dump_for_the_real_weather_score_shape() {
     let bound = dense_batched_score_shaped_op(563, 576, 8, 128);
-    let source = temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", Some("1"), || {
-        emit(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed())
-            .expect("emits")
-            .source
-    });
+    let source = emit_with_knobs(
+        &bound,
+        &BTreeMap::new(),
+        NumericPolicy::llama_relaxed(),
+        &EmitKnobs::default().with_tiled_gemm_dense(true),
+    )
+    .expect("emits")
+    .source;
     assert!(
         source.contains("out_offset_base"),
         "rewritten copy-out loop must hoist the batch/base offset out of the per-element loop"
@@ -2433,11 +2436,14 @@ fn dense_batched_restage_msl_dump_for_the_real_weather_score_shape() {
 fn dense_weight_staging_loads_a_register_array_before_the_tile_stores() {
     let bound = dense_batched_score_shaped_op(1000, 32, 1, 1024);
 
-    let source = temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", Some("1"), || {
-        emit(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed())
-            .expect("emits")
-            .source
-    });
+    let source = emit_with_knobs(
+        &bound,
+        &BTreeMap::new(),
+        NumericPolicy::llama_relaxed(),
+        &EmitKnobs::default().with_tiled_gemm_dense(true),
+    )
+    .expect("emits")
+    .source;
 
     let block_k = crate::sized::TILED_GEMM_BLOCK_K;
     assert!(
@@ -2473,7 +2479,7 @@ fn dense_weight_staging_loads_a_register_array_before_the_tile_stores() {
 }
 
 /// Coordinator-required proof (2026-09-27 mid-task addition, updated when
-/// `PROXIMA_TILED_GEMM_DENSE` flipped to default-on): a small
+/// `tiled_gemm_dense` flipped to default-on): a small
 /// assertion-bearing test, run against THIS tree's own `classify_dense_
 /// batched_gemm`, that the dense-batched admission count is nonzero with the
 /// switch on (either unset, the new default, or explicit `"1"`) and exactly
@@ -2492,40 +2498,39 @@ fn dense_batched_gemm_admission_is_switch_gated() {
         (TILED_ADMITTED_TOKENS + 32, 96, TILED_ADMITTED_BATCH, 256),
     ];
 
-    let count_admitted = |var_value: Option<&str>| -> usize {
-        temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", var_value, || {
-            shapes
-                .iter()
-                .filter(|&&(token, feature, batch, reduce_len)| {
-                    let bound = dense_batched_score_shaped_op(token, feature, batch, reduce_len);
-                    let codecs = operand_codecs(&bound, &BTreeMap::new());
-                    let BoundOpKind::Reduce {
-                        reduce_op,
-                        init,
-                        ref output_axes,
-                        ..
-                    } = bound.kind
-                    else {
-                        panic!("dense_batched_score_shaped_op always builds a Keep::Reduce fold")
-                    };
-                    classify_dense_batched_gemm(
-                        &bound,
-                        &codecs,
-                        NumericPolicy::llama_relaxed(),
-                        reduce_op,
-                        init,
-                        output_axes,
-                    )
-                    .is_ok()
-                })
-                .count()
-        })
+    let count_admitted = |knobs: &EmitKnobs| -> usize {
+        shapes
+            .iter()
+            .filter(|&&(token, feature, batch, reduce_len)| {
+                let bound = dense_batched_score_shaped_op(token, feature, batch, reduce_len);
+                let codecs = operand_codecs(&bound, &BTreeMap::new());
+                let BoundOpKind::Reduce {
+                    reduce_op,
+                    init,
+                    ref output_axes,
+                    ..
+                } = bound.kind
+                else {
+                    panic!("dense_batched_score_shaped_op always builds a Keep::Reduce fold")
+                };
+                classify_dense_batched_gemm(
+                    &bound,
+                    &codecs,
+                    NumericPolicy::llama_relaxed(),
+                    reduce_op,
+                    init,
+                    output_axes,
+                    knobs,
+                )
+                .is_ok()
+            })
+            .count()
     };
 
-    let admitted_on = count_admitted(Some("1"));
+    let admitted_on = count_admitted(&EmitKnobs::default().with_tiled_gemm_dense(true));
     assert!(
         admitted_on > 0,
-        "PROXIMA_TILED_GEMM_DENSE=1 must admit at least one of the real score-shaped ops"
+        "tiled_gemm_dense=true must admit at least one of the real score-shaped ops"
     );
     assert_eq!(
         admitted_on,
@@ -2533,18 +2538,17 @@ fn dense_batched_gemm_admission_is_switch_gated() {
         "every one of these no-broadcast-batch score-shaped ops must admit when the switch is on"
     );
 
-    let admitted_default = count_admitted(None);
+    let admitted_default = count_admitted(&EmitKnobs::default());
     assert_eq!(
         admitted_default,
         shapes.len(),
-        "PROXIMA_TILED_GEMM_DENSE unset (new default) must admit every one of these ops, same as \
-         explicit \"1\""
+        "the default knobs (tiled_gemm_dense on) must admit every one of these ops, same as explicit on"
     );
 
-    let admitted_off = count_admitted(Some("0"));
+    let admitted_off = count_admitted(&EmitKnobs::default().with_tiled_gemm_dense(false));
     assert_eq!(
         admitted_off, 0,
-        "PROXIMA_TILED_GEMM_DENSE=0 must admit none of these ops (explicit disable)"
+        "tiled_gemm_dense=false must admit none of these ops (explicit disable)"
     );
 }
 
@@ -2571,7 +2575,8 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
         ("node162_value", 510, 256, 8, 512),
     ];
 
-    temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", Some("1"), || {
+    let knobs = EmitKnobs::default().with_tiled_gemm_dense(true);
+    {
         for &(name, token, feature, batch, reduce_len) in cases {
             let bound = dense_batched_score_shaped_op(token, feature, batch, reduce_len);
             let codecs = operand_codecs(&bound, &BTreeMap::new());
@@ -2591,7 +2596,7 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
                 reduce_op,
                 init,
                 output_axes,
-                &EmitKnobs::default(),
+                &knobs,
             )
             .unwrap_or_else(|| panic!("{name} must admit to the dense-batched-gemm path"));
             let _ = block;
@@ -2605,7 +2610,7 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
                 u64::from(feature) * u64::from(token) * u64::from(batch) * SIMD_WIDTH;
 
             let grid_threads_total =
-                grid_threads(&bound, &codecs, NumericPolicy::llama_relaxed(), false, &EmitKnobs::default())
+                grid_threads(&bound, &codecs, NumericPolicy::llama_relaxed(), false, &knobs)
                     .unwrap_or_else(|err| panic!("{name}: grid_threads must not error: {err:?}"));
             assert_eq!(
                 grid_threads_total, expected_threads,
@@ -2617,7 +2622,7 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
 
             let packed_operands = PackedOperands::new();
             let (_, grid) =
-                kernel_dispatch_shape(&bound, &packed_operands, NumericPolicy::llama_relaxed(), &EmitKnobs::default())
+                kernel_dispatch_shape(&bound, &packed_operands, NumericPolicy::llama_relaxed(), &knobs)
                     .unwrap_or_else(|err| {
                         panic!("{name}: kernel_dispatch_shape must not error: {err:?}")
                     });
@@ -2643,7 +2648,7 @@ fn dense_batched_gemm_grid_spec_matches_tiled_shape() {
                  tile grid ({expected_threadgroups}), not a cooperative-reduce blowup"
             );
         }
-    });
+    }
 }
 
 #[cfg(feature = "metal-tiled-gemm")]
@@ -2673,6 +2678,7 @@ fn programmable_tiled_float_storage_codec_pairs_admit_with_both_rewrites() {
             reduce_op,
             init,
             output_axes,
+            &EmitKnobs::default(),
         )
         .expect("supported float-storage codec pair admits");
         assert_eq!(block.weight_codec, codecs[0]);
@@ -2701,6 +2707,7 @@ fn programmable_tiled_float_storage_codec_pairs_admit_with_both_rewrites() {
             reduce_op,
             init,
             output_axes,
+            &EmitKnobs::default(),
         ),
         Err(DenseBatchedGemmRejection::TokenExtentBelowMinimum {
             token_extent: 1,
@@ -2757,6 +2764,7 @@ fn programmable_tiled_unsupported_codec_is_rejected_by_dense_classifier() {
                 reduce_op,
                 init,
                 output_axes,
+                &EmitKnobs::default(),
             ),
             Err(DenseBatchedGemmRejection::OperandIsPacked)
         ));
@@ -2768,6 +2776,7 @@ fn programmable_tiled_unsupported_codec_is_rejected_by_dense_classifier() {
             reduce_op,
             init,
             output_axes,
+            &EmitKnobs::default(),
         )
         .is_err()
     );
@@ -2833,7 +2842,7 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
     ];
     for (policy, rewrite) in cases {
         assert!(matches!(
-            classify_dense_batched_gemm(&bound, &[None, None], policy, reduce_op, init, output_axes),
+            classify_dense_batched_gemm(&bound, &[None, None], policy, reduce_op, init, output_axes, &EmitKnobs::default()),
             Err(DenseBatchedGemmRejection::NumericPolicyDenied(denied)) if denied == rewrite
         ));
         let kernel = emit(&bound, &BTreeMap::new(), policy).expect("policy fallback emits");
@@ -2847,6 +2856,7 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
             reduce_op,
             init,
             output_axes,
+            &EmitKnobs::default(),
         )
         .is_ok()
     );
@@ -2860,6 +2870,7 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
             reduce_op,
             init,
             output_axes,
+            &EmitKnobs::default(),
         ),
         Err(DenseBatchedGemmRejection::NumericPolicyDenied(
             NumericRewrite::Bf16InputRounding
@@ -2873,6 +2884,7 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
             reduce_op,
             init,
             output_axes,
+            &EmitKnobs::default(),
         )
         .is_ok()
     );
@@ -2886,6 +2898,7 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
             reduce_op,
             init,
             output_axes,
+            &EmitKnobs::default(),
         ),
         Err(DenseBatchedGemmRejection::NumericPolicyDenied(
             NumericRewrite::Bf16InputRounding
@@ -2899,6 +2912,7 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
             reduce_op,
             init,
             output_axes,
+            &EmitKnobs::default(),
         )
         .is_ok()
     );
@@ -3000,6 +3014,7 @@ fn programmable_tiled_classifier_follows_ownership_for_reversed_operand_order() 
                 reduce_op,
                 init,
                 output_axes,
+                &EmitKnobs::default(),
             )
             .expect("supported float-storage codec pair admits in either operand order");
             assert_eq!(block.weight, weight_operand, "reversed={reversed}");
@@ -3101,6 +3116,7 @@ fn programmable_tiled_float_storage_does_not_depend_on_build_gate() {
                 reduce_op,
                 init,
                 output_axes,
+                &EmitKnobs::default(),
             )
             .is_ok()
         );
@@ -3114,6 +3130,7 @@ fn programmable_tiled_float_storage_does_not_depend_on_build_gate() {
                 reduce_op,
                 init,
                 output_axes,
+                &EmitKnobs::default(),
             ),
             Err(DenseBatchedGemmRejection::NumericPolicyDenied(
                 NumericRewrite::Bf16InputRounding
@@ -3128,6 +3145,7 @@ fn programmable_tiled_float_storage_does_not_depend_on_build_gate() {
             reduce_op,
             init,
             output_axes,
+            &EmitKnobs::default(),
         )
         .is_ok()
     );
@@ -3863,16 +3881,22 @@ fn wide_weight_stage_msl_dump_for_the_real_q4_0_shape() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    let off_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0"), || {
-        emit(&bound, &q4_0, NumericPolicy::default())
-            .expect("emits")
-            .source
-    });
-    let on_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1"), || {
-        emit(&bound, &q4_0, NumericPolicy::default())
-            .expect("emits")
-            .source
-    });
+    let off_source = emit_with_knobs(
+        &bound,
+        &q4_0,
+        NumericPolicy::default(),
+        &EmitKnobs::default().with_tiled_gemm_wide_weight_stage(false),
+    )
+    .expect("emits")
+    .source;
+    let on_source = emit_with_knobs(
+        &bound,
+        &q4_0,
+        NumericPolicy::default(),
+        &EmitKnobs::default().with_tiled_gemm_wide_weight_stage(true),
+    )
+    .expect("emits")
+    .source;
     assert_ne!(
         off_source, on_source,
         "the switch must change the emitted source"
@@ -3886,42 +3910,28 @@ fn wide_weight_stage_msl_dump_for_the_real_q4_0_shape() {
     }
 }
 
-/// The staging-loop switches (`PROXIMA_TILED_GEMM_WIDE_ACT_LOAD`, item 3c,
-/// and `PROXIMA_TILED_GEMM_SLIM_TGMEM`, phase 2), now default ON: explicit
-/// `"0"` must leave the emitted source and cache key byte-identical to the
-/// phase-1 (pre-switch) baseline -- same posture as `switch_off_keeps_the_
-/// source_and_cache_key_on_the_serial_path` (`dense_batched_tiled_gemm_
-/// parity.rs`) and every other override in this file. Unset (the new
-/// default) must render the same marker and cache key as explicit `"1"`, so
-/// this test cannot pass by the new code paths silently never firing on the
-/// default path either.
+/// The staging-loop switches (`tiled_gemm_wide_act_load`, item 3c, and
+/// `tiled_gemm_slim_tgmem`, phase 2), now default ON: explicitly off must leave
+/// the emitted source and cache key byte-identical to the phase-1 (pre-switch)
+/// baseline -- same posture as `switch_off_keeps_the_source_and_cache_key_on_the_
+/// serial_path` (`dense_batched_tiled_gemm_parity.rs`) and every other switch in
+/// this file. The default knobs must render the same marker and cache key as
+/// explicit on, so this test cannot pass by the new code paths silently never
+/// firing on the default path either.
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn staging_switches_default_on_render_unless_explicitly_disabled() {
     let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let mut q4k = BTreeMap::new();
     q4k.insert(weight_node, Codec::Q4K);
+    let policy = NumericPolicy::default();
 
-    let off_source = temp_env::with_vars(
-        [
-            ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some("0")),
-            ("PROXIMA_TILED_GEMM_SLIM_TGMEM", Some("0")),
-            ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
-        ],
-        || {
-            emit(&bound, &q4k, NumericPolicy::default())
-                .expect("emits")
-                .source
-        },
-    );
-    let off_key = temp_env::with_vars(
-        [
-            ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some("0")),
-            ("PROXIMA_TILED_GEMM_SLIM_TGMEM", Some("0")),
-            ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
-        ],
-        || kernel_cache_key(&bound, &q4k, NumericPolicy::default()).expect("cache key derives"),
-    );
+    let all_off = EmitKnobs::default()
+        .with_tiled_gemm_wide_act_load(false)
+        .with_tiled_gemm_slim_tgmem(false)
+        .with_tiled_gemm_mm_layout(false);
+    let off_source = emit_with_knobs(&bound, &q4k, policy, &all_off).expect("emits").source;
+    let off_key = kernel_cache_key_with_knobs(&bound, &q4k, policy, &all_off).expect("cache key derives");
     for marker in ["act_tile_interior", "tg_shared"] {
         assert!(
             !off_source.contains(marker),
@@ -3929,79 +3939,51 @@ fn staging_switches_default_on_render_unless_explicitly_disabled() {
         );
     }
 
-    // each case holds the OTHER staging switch explicitly at "0" while
-    // varying the named one, so this isolates a single switch's own effect
-    // instead of letting the other switch's now-default-on behavior leak in
-    // (both switches default ON unset, so an unwrapped ambient env would
-    // silently fold the other switch's marker into every arm here).
-    let cases: &[(&str, &str, &str)] = &[
+    // each case holds the OTHER staging switch explicitly off while varying the
+    // named one, so this isolates a single switch's own effect instead of
+    // letting the other switch's default-on behavior leak into every arm.
+    type Setter = fn(EmitKnobs, bool) -> EmitKnobs;
+    let cases: [(&str, Setter, Setter, &str); 2] = [
         (
-            "PROXIMA_TILED_GEMM_WIDE_ACT_LOAD",
-            "PROXIMA_TILED_GEMM_SLIM_TGMEM",
+            "tiled_gemm_wide_act_load",
+            EmitKnobs::with_tiled_gemm_wide_act_load,
+            EmitKnobs::with_tiled_gemm_slim_tgmem,
             "act_tile_interior",
         ),
         (
-            "PROXIMA_TILED_GEMM_SLIM_TGMEM",
-            "PROXIMA_TILED_GEMM_WIDE_ACT_LOAD",
+            "tiled_gemm_slim_tgmem",
+            EmitKnobs::with_tiled_gemm_slim_tgmem,
+            EmitKnobs::with_tiled_gemm_wide_act_load,
             "tg_shared",
         ),
     ];
-    for &(var, other_var, marker) in cases {
-        let source_with = |value: Option<&str>| {
-            temp_env::with_vars(
-                [
-                    (var, value),
-                    (other_var, Some("0")),
-                    ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
-                ],
-                || {
-                    emit(&bound, &q4k, NumericPolicy::default())
-                        .expect("emits")
-                        .source
-                },
-            )
-        };
-        let key_with = |value: Option<&str>| {
-            temp_env::with_vars(
-                [
-                    (var, value),
-                    (other_var, Some("0")),
-                    ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
-                ],
-                || {
-                    kernel_cache_key(&bound, &q4k, NumericPolicy::default())
-                        .expect("cache key derives")
-                },
-            )
-        };
-
-        let on_source = source_with(Some("1"));
+    for (name, set_named, set_other, marker) in cases {
+        let isolated = set_other(EmitKnobs::default().with_tiled_gemm_mm_layout(false), false);
+        let on_knobs = set_named(isolated.clone(), true);
+        let on_source = emit_with_knobs(&bound, &q4k, policy, &on_knobs).expect("emits").source;
         assert!(
             on_source.contains(marker),
-            "{var}=1 must actually render its new code path (missing {marker:?}):\n{on_source}"
+            "{name}=on must actually render its new code path (missing {marker:?}):\n{on_source}"
         );
-        let on_key = key_with(Some("1"));
+        let on_key = kernel_cache_key_with_knobs(&bound, &q4k, policy, &on_knobs).expect("cache key derives");
         assert_ne!(
             on_key, off_key,
-            "{var}=1 must render under a DIFFERENT cache key than the off baseline, or the two \
+            "{name}=on must render under a DIFFERENT cache key than the off baseline, or the two \
              kernels would collide in the pipeline cache"
         );
 
-        let unset_source = source_with(None);
+        let default_named = EmitKnobs::default().with_tiled_gemm_mm_layout(false);
+        let default_knobs = set_other(default_named, false);
         assert_eq!(
-            unset_source, on_source,
-            "{var} unset (new default) must be byte-identical to explicit \"1\""
-        );
-        let unset_key = key_with(None);
-        assert_eq!(
-            unset_key, on_key,
-            "{var} unset (new default) must share explicit \"1\"'s cache key"
+            default_knobs, on_knobs,
+            "{name}: the default knobs must equal explicit on, which is what makes the default render the marker"
         );
 
-        let zero_source = source_with(Some("0"));
+        let zero_knobs = set_named(isolated, false);
+        let zero_source = emit_with_knobs(&bound, &q4k, policy, &zero_knobs).expect("emits").source;
         assert_eq!(
             zero_source, off_source,
-            "{var}=0 must be byte-identical to the all-off baseline"
+            "{name}=off must be byte-identical to the all-off baseline"
         );
     }
 }
@@ -4030,7 +4012,8 @@ async fn codec_without_a_tiled_decode_description_never_takes_the_tiled_gemm_pat
             &operand_codecs(&bound, &packed),
             ScalarOp::Add,
             ReduceInit::Zero,
-            &[1, 0]
+            &[1, 0],
+            &EmitKnobs::default()
         )
         .err(),
         Some(TiledGemmRejection::NotPackedRowBlock(
@@ -4047,7 +4030,7 @@ async fn codec_without_a_tiled_decode_description_never_takes_the_tiled_gemm_pat
     );
 }
 
-/// `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` default ON: explicit `"0"` emits the
+/// `tiled_gemm_wide_weight_stage` default ON: explicitly off emits the
 /// one-thread-per-row staging loop (no `wws_`-prefixed locals at all);
 /// unset or `"1"` emits the per-thread block-pointer setup and `half4`
 /// vector stores this switch adds, and a `Q4_K` weight decodes through its
@@ -4060,30 +4043,30 @@ fn wide_weight_stage_emits_wide_decode_and_vector_stores_when_switch_on() {
     let mut q4k = BTreeMap::new();
     q4k.insert(weight_node, Codec::Q4K);
 
-    let off_source = temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0"), || {
-        emit(&bound, &q4k, NumericPolicy::default())
-            .expect("emits")
-            .source
-    });
+    let off_source = emit_with_knobs(
+        &bound,
+        &q4k,
+        NumericPolicy::default(),
+        &EmitKnobs::default().with_tiled_gemm_wide_weight_stage(false),
+    )
+    .expect("emits")
+    .source;
     assert!(
         !off_source.contains("wws_blk0"),
         "the explicitly disabled path must not emit the wide-weight-stage schedule:\n{off_source}"
     );
 
-    let on_source = temp_env::with_vars(
-        [
-            ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None::<&str>),
-            ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
-        ],
-        || {
-            emit(&bound, &q4k, NumericPolicy::default())
-                .expect("emits")
-                .source
-        },
-    );
+    let on_source = emit_with_knobs(
+        &bound,
+        &q4k,
+        NumericPolicy::default(),
+        &EmitKnobs::default().with_tiled_gemm_mm_layout(false),
+    )
+    .expect("emits")
+    .source;
     assert!(
         on_source.contains("wws_blk0") && on_source.contains("half4("),
-        "PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE=1 must emit the per-thread block pointer and half4 \
+        "tiled_gemm_wide_weight_stage=on must emit the per-thread block pointer and half4 \
          vector stores:\n{on_source}"
     );
     assert!(
@@ -4105,17 +4088,16 @@ fn wide_weight_stage_emits_the_described_q4_0_decode_when_switch_on() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    let on_source = temp_env::with_vars(
-        [
-            ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1")),
-            ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
-        ],
-        || {
-            emit(&bound, &q4_0, NumericPolicy::default())
-                .expect("emits")
-                .source
-        },
-    );
+    let on_source = emit_with_knobs(
+        &bound,
+        &q4_0,
+        NumericPolicy::default(),
+        &EmitKnobs::default()
+            .with_tiled_gemm_wide_weight_stage(true)
+            .with_tiled_gemm_mm_layout(false),
+    )
+    .expect("emits")
+    .source;
     assert!(
         on_source.contains("q4_0_dequant_half16(wws_blk0, wws_slot0, wws_decoded)"),
         "a Q4_0 weight with the switch on must decode through its description at the per-thread cursor:\n{on_source}"
@@ -4123,7 +4105,7 @@ fn wide_weight_stage_emits_the_described_q4_0_decode_when_switch_on() {
 }
 
 /// [`preamble`]'s own doc: a description's `msl` is spliced only into a kernel
-/// that calls it. With `PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE` unset (default
+/// that calls it. With `tiled_gemm_wide_weight_stage` at its default (
 /// ON) a Q4_0 shape that admits the tiled-GEMM path renders byte-identically
 /// to explicit `"1"` and stages through the per-thread cursor; explicit `"0"`
 /// stages through the per-row cursor instead -- the same description either
@@ -4141,64 +4123,54 @@ fn wide_weight_stage_unset_stages_tiled_q4_0_through_the_cursor_decoder_and_pack
     let tiled_weight = tiled_bound.operands()[0].0;
     let mut tiled_q4_0 = BTreeMap::new();
     tiled_q4_0.insert(tiled_weight, Codec::Q4_0);
-    temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
-        let render = |value: Option<&str>| {
-            temp_env::with_vars(
-                [
-                    ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", value),
-                    ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
-                ],
-                || {
-                    emit(&tiled_bound, &tiled_q4_0, NumericPolicy::default())
-                        .expect("emits")
-                        .source
-                },
-            )
-        };
-        let unset_source = render(None);
-        assert_eq!(
-            unset_source,
-            render(Some("1")),
-            "a Q4_0 tiled-GEMM shape must render identically whether the switch is unset or \
-             explicitly enabled"
-        );
-        assert!(
-            unset_source.contains("q4_0_dequant_half16(wws_blk0, wws_slot0, wws_decoded)"),
-            "the default must decode Q4_0 at the per-thread cursor:\n{unset_source}"
-        );
-        let disabled_source = render(Some("0"));
-        assert!(
-            !disabled_source.contains("wws_blk0")
-                && disabled_source.contains("q4_0_dequant_half16(blk, slot + 0u, decoded)"),
-            "the per-thread cursor must not appear while the switch is explicitly off, and the \
-             per-row schedule decodes through the same description:\n{disabled_source}"
-        );
-    });
+    let render = |wide_weight_stage: Option<bool>| {
+        let base = EmitKnobs::default()
+            .with_tiled_gemm_q4_0(true)
+            .with_tiled_gemm_mm_layout(false);
+        let knobs = wide_weight_stage.map_or(base.clone(), |value| base.with_tiled_gemm_wide_weight_stage(value));
+        emit_with_knobs(&tiled_bound, &tiled_q4_0, NumericPolicy::default(), &knobs)
+            .expect("emits")
+            .source
+    };
+    let unset_source = render(None);
+    assert_eq!(
+        unset_source,
+        render(Some(true)),
+        "a Q4_0 tiled-GEMM shape must render identically whether the switch is default or \
+         explicitly enabled"
+    );
+    assert!(
+        unset_source.contains("q4_0_dequant_half16(wws_blk0, wws_slot0, wws_decoded)"),
+        "the default must decode Q4_0 at the per-thread cursor:\n{unset_source}"
+    );
+    let disabled_source = render(Some(false));
+    assert!(
+        !disabled_source.contains("wws_blk0")
+            && disabled_source.contains("q4_0_dequant_half16(blk, slot + 0u, decoded)"),
+        "the per-thread cursor must not appear while the switch is explicitly off, and the \
+         per-row schedule decodes through the same description:\n{disabled_source}"
+    );
 
     let packed_row_bound = tiled_gemm_op(1, 256, 4);
     let packed_row_weight = packed_row_bound.operands()[0].0;
     let mut packed_row_q4_0 = BTreeMap::new();
     packed_row_q4_0.insert(packed_row_weight, Codec::Q4_0);
-    let unset_source =
-        temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None::<&str>, || {
-            emit(
-                &packed_row_bound,
-                &packed_row_q4_0,
-                NumericPolicy::default(),
-            )
-            .expect("emits")
-            .source
-        });
-    let disabled_source =
-        temp_env::with_var("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0"), || {
-            emit(
-                &packed_row_bound,
-                &packed_row_q4_0,
-                NumericPolicy::default(),
-            )
-            .expect("emits")
-            .source
-        });
+    let unset_source = emit_with_knobs(
+        &packed_row_bound,
+        &packed_row_q4_0,
+        NumericPolicy::default(),
+        &EmitKnobs::default(),
+    )
+    .expect("emits")
+    .source;
+    let disabled_source = emit_with_knobs(
+        &packed_row_bound,
+        &packed_row_q4_0,
+        NumericPolicy::default(),
+        &EmitKnobs::default().with_tiled_gemm_wide_weight_stage(false),
+    )
+    .expect("emits")
+    .source;
     assert_eq!(
         unset_source, disabled_source,
         "a packed-row (non-tiled) Q4_0 shape must render identically whether the switch is \
@@ -4210,7 +4182,7 @@ fn wide_weight_stage_unset_stages_tiled_q4_0_through_the_cursor_decoder_and_pack
     );
 }
 
-/// `PROXIMA_TILED_GEMM_MM_LAYOUT` default ON: unset renders byte-identically to
+/// `tiled_gemm_mm_layout` default ON: the default renders byte-identically to
 /// explicit `"1"` under the same cache key, explicit `"0"` renders the
 /// row-major tile under a different one, and the layout needs the wide weight
 /// stage (it reuses its two-threads-per-row schedule): with that switch off the
@@ -4220,27 +4192,20 @@ fn wide_weight_stage_unset_stages_tiled_q4_0_through_the_cursor_decoder_and_pack
 fn mm_layout_default_on_renders_unless_explicitly_disabled_or_the_weight_stage_is_off() {
     let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 1536, 128);
     let q4_0 = BTreeMap::from([(weight_node, Codec::Q4_0)]);
-    let render =
-        |mm_layout: Option<&str>, weight_stage: Option<&str>, packed: &BTreeMap<NodeId, Codec>| {
-            temp_env::with_vars(
-                [
-                    ("PROXIMA_TILED_GEMM_MM_LAYOUT", mm_layout),
-                    ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", weight_stage),
-                ],
-                || {
-                    let source = emit(&bound, packed, NumericPolicy::default())
-                        .expect("emits")
-                        .source;
-                    let key = kernel_cache_key(&bound, packed, NumericPolicy::default())
-                        .expect("cache key derives");
-                    (source, key)
-                },
-            )
-        };
+    let render = |mm_layout: Option<bool>, weight_stage: Option<bool>, packed: &BTreeMap<NodeId, Codec>| {
+        let with_layout = mm_layout.map_or(EmitKnobs::default(), |value| EmitKnobs::default().with_tiled_gemm_mm_layout(value));
+        let knobs = weight_stage.map_or(with_layout.clone(), |value| with_layout.with_tiled_gemm_wide_weight_stage(value));
+        let source = emit_with_knobs(&bound, packed, NumericPolicy::default(), &knobs)
+            .expect("emits")
+            .source;
+        let key = kernel_cache_key_with_knobs(&bound, packed, NumericPolicy::default(), &knobs)
+            .expect("cache key derives");
+        (source, key)
+    };
 
     let (unset_source, unset_key) = render(None, None, &q4_0);
-    let (enabled_source, enabled_key) = render(Some("1"), None, &q4_0);
-    let (disabled_source, disabled_key) = render(Some("0"), None, &q4_0);
+    let (enabled_source, enabled_key) = render(Some(true), None, &q4_0);
+    let (disabled_source, disabled_key) = render(Some(false), None, &q4_0);
     assert_eq!(
         unset_source, enabled_source,
         "unset must render exactly what explicit \"1\" renders"
@@ -4264,7 +4229,7 @@ fn mm_layout_default_on_renders_unless_explicitly_disabled_or_the_weight_stage_i
         "an explicit \"0\" must keep the row-major tile:\n{disabled_source}"
     );
 
-    let (without_stage, _) = render(None, Some("0"), &q4_0);
+    let (without_stage, _) = render(None, Some(false), &q4_0);
     assert!(
         !without_stage.contains("mm_weight_store"),
         "without the wide weight stage the mm layout has no schedule to ride and must not render:\n{without_stage}"
@@ -4281,15 +4246,18 @@ fn mm_layout_default_on_renders_unless_explicitly_disabled_or_the_weight_stage_i
 fn mm_layout_loads_fragments_untransposed_and_stores_the_accumulators_transposed() {
     let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 1536, 128);
     let q4_0 = BTreeMap::from([(weight_node, Codec::Q4_0)]);
-    let render = |mm_layout: &str| {
-        temp_env::with_var("PROXIMA_TILED_GEMM_MM_LAYOUT", Some(mm_layout), || {
-            emit(&bound, &q4_0, NumericPolicy::default())
-                .expect("emits")
-                .source
-        })
+    let render = |mm_layout: bool| {
+        emit_with_knobs(
+            &bound,
+            &q4_0,
+            NumericPolicy::default(),
+            &EmitKnobs::default().with_tiled_gemm_mm_layout(mm_layout),
+        )
+        .expect("emits")
+        .source
     };
 
-    let mm_layout = render("1");
+    let mm_layout = render(true);
     assert!(mm_layout.contains(
         "simdgroup_multiply_accumulate(acc[(i % 4) * 2 + i / 4], mb[i / 4], ma[i % 4], acc[(i % 4) * 2 + i / 4])"
     ));
@@ -4307,7 +4275,7 @@ fn mm_layout_loads_fragments_untransposed_and_stores_the_accumulators_transposed
         "the accumulators are token x feature and must be stored transposed:\n{mm_layout}"
     );
 
-    let row_major = render("0");
+    let row_major = render(false);
     assert!(
         row_major
             .lines()
@@ -4330,21 +4298,16 @@ fn mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_
     let unit_codecs = BTreeMap::from([(unit_weight, Codec::Q4K)]);
     let strided_bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let strided_codecs = BTreeMap::from([(strided_bound.operands()[0].0, Codec::Q4K)]);
-    let render = |bound: &BoundOp, codecs: &BTreeMap<NodeId, Codec>, wide_activation: &str| {
-        temp_env::with_vars(
-            [
-                ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("1")),
-                ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", Some(wide_activation)),
-            ],
-            || {
-                emit(bound, codecs, NumericPolicy::default())
-                    .expect("emits")
-                    .source
-            },
-        )
+    let render = |bound: &BoundOp, codecs: &BTreeMap<NodeId, Codec>, wide_activation: bool| {
+        let knobs = EmitKnobs::default()
+            .with_tiled_gemm_mm_layout(true)
+            .with_tiled_gemm_wide_act_load(wide_activation);
+        emit_with_knobs(bound, codecs, NumericPolicy::default(), &knobs)
+            .expect("emits")
+            .source
     };
 
-    let unit_stride = render(&unit_bound, &unit_codecs, "1");
+    let unit_stride = render(&unit_bound, &unit_codecs, true);
     assert!(
         unit_stride.contains("device const float *mm_act_ptr = in"),
         "{unit_stride}"
@@ -4358,11 +4321,11 @@ fn mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_
     for (label, source) in [
         (
             "wide activation load off",
-            render(&unit_bound, &unit_codecs, "0"),
+            render(&unit_bound, &unit_codecs, false),
         ),
         (
             "activation K axis not contiguous",
-            render(&strided_bound, &strided_codecs, "1"),
+            render(&strided_bound, &strided_codecs, true),
         ),
     ] {
         assert!(
@@ -4442,27 +4405,22 @@ fn dynamic_tgmem_kernel_argument_and_launch_length_always_agree() {
     let dense = dense_batched_score_shaped_op(510, 512, 8, 128);
     let render = |bound: &BoundOp,
                   codecs: &BTreeMap<NodeId, Codec>,
-                  lever: Option<&str>,
-                  slim: Option<&str>,
-                  grid2d: Option<&str>| {
-        temp_env::with_vars(
-            [
-                ("PROXIMA_TILED_GEMM_DYNAMIC_TGMEM", lever),
-                ("PROXIMA_TILED_GEMM_SLIM_TGMEM", slim),
-                ("PROXIMA_TILED_GEMM_GRID2D", grid2d),
-                ("PROXIMA_TILED_GEMM_DENSE", Some("1")),
-            ],
-            || {
-                let kernel = emit(bound, codecs, NumericPolicy::default()).expect("emits");
-                let bytes = kernel.grid.grid2d.map_or(0, |spec| spec.threadgroup_bytes);
-                (kernel.source.contains("[[threadgroup(0)]]"), bytes)
-            },
-        )
+                  lever: bool,
+                  slim: bool,
+                  grid2d: bool| {
+        let knobs = EmitKnobs::default()
+            .with_tiled_gemm_dynamic_tgmem(lever)
+            .with_tiled_gemm_slim_tgmem(slim)
+            .with_tiled_gemm_grid2d(grid2d)
+            .with_tiled_gemm_dense(true);
+        let kernel = emit_with_knobs(bound, codecs, NumericPolicy::default(), &knobs).expect("emits");
+        let bytes = kernel.grid.grid2d.map_or(0, |spec| spec.threadgroup_bytes);
+        (kernel.source.contains("[[threadgroup(0)]]"), bytes)
     };
     let none = BTreeMap::new();
 
     for (label, codecs) in [("q4_0", &q4_0), ("q4k", &q4k)] {
-        let (declared, bytes) = render(&packed, codecs, None, None, None);
+        let (declared, bytes) = render(&packed, codecs, true, true, true);
         assert!(declared, "{label}: the default declares the argument");
         assert_eq!(
             bytes,
@@ -4476,14 +4434,14 @@ fn dynamic_tgmem_kernel_argument_and_launch_length_always_agree() {
         );
 
         for (reason, off) in [
-            ("lever off", render(&packed, codecs, Some("0"), None, None)),
+            ("lever off", render(&packed, codecs, false, true, true)),
             (
                 "slim store off",
-                render(&packed, codecs, None, Some("0"), None),
+                render(&packed, codecs, true, false, true),
             ),
             (
                 "grid launch off",
-                render(&packed, codecs, None, None, Some("0")),
+                render(&packed, codecs, true, true, false),
             ),
         ] {
             assert_eq!(
@@ -4494,7 +4452,7 @@ fn dynamic_tgmem_kernel_argument_and_launch_length_always_agree() {
         }
     }
 
-    let (declared, bytes) = render(&dense, &none, None, None, None);
+    let (declared, bytes) = render(&dense, &none, true, true, true);
     assert_eq!(
         (declared, bytes),
         (false, 0),
@@ -4509,29 +4467,24 @@ fn dynamic_tgmem_kernel_argument_and_launch_length_always_agree() {
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn wide_weight_stage_never_applies_to_the_dense_batched_gemm_path() {
-    temp_env::with_vars(
-        [
-            ("PROXIMA_TILED_GEMM_DENSE", Some("1")),
-            ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("1")),
-        ],
-        || {
-            let bound = dense_batched_score_shaped_op(510, 512, 8, 128);
-            let codecs = operand_codecs(&bound, &BTreeMap::new());
-            let BoundOpKind::Reduce {
-                reduce_op,
-                init,
-                ref output_axes,
-                ..
-            } = bound.kind
-            else {
-                panic!("dense_batched_score_shaped_op always builds a Keep::Reduce fold")
-            };
-            assert!(
-                !wide_weight_stage_active(&bound, &codecs, reduce_op, init, output_axes, &EmitKnobs::default()),
-                "the dense-batched-gemm path has no codec-decode arm; the wide-weight-stage \
-                 switch must never activate for it"
-            );
-        },
+    let knobs = EmitKnobs::default()
+        .with_tiled_gemm_dense(true)
+        .with_tiled_gemm_wide_weight_stage(true);
+    let bound = dense_batched_score_shaped_op(510, 512, 8, 128);
+    let codecs = operand_codecs(&bound, &BTreeMap::new());
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        ref output_axes,
+        ..
+    } = bound.kind
+    else {
+        panic!("dense_batched_score_shaped_op always builds a Keep::Reduce fold")
+    };
+    assert!(
+        !wide_weight_stage_active(&bound, &codecs, reduce_op, init, output_axes, &knobs),
+        "the dense-batched-gemm path has no codec-decode arm; the wide-weight-stage \
+         switch must never activate for it"
     );
 }
 
@@ -4554,12 +4507,13 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
 
     let dense_bound = dense_batched_score_shaped_op(510, 512, 8, 128);
 
-    for grid2d_env in [Some("0"), None] {
-        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", grid2d_env, || {
-            let tiled_kernel =
-                emit(&tiled_bound, &tiled_q4_0, NumericPolicy::default()).expect("tiled emits");
+    for grid2d_env in [false, true] {
+        let knobs = EmitKnobs::default().with_tiled_gemm_grid2d(grid2d_env);
+        {
+            let tiled_kernel = emit_with_knobs(&tiled_bound, &tiled_q4_0, NumericPolicy::default(), &knobs)
+                .expect("tiled emits");
             let (_, tiled_grid) =
-                kernel_dispatch_shape(&tiled_bound, &tiled_q4_0, NumericPolicy::default(), &EmitKnobs::default())
+                kernel_dispatch_shape(&tiled_bound, &tiled_q4_0, NumericPolicy::default(), &knobs)
                     .expect("tiled dispatch shape");
             let tiled_2d_attrs = tiled_kernel
                 .source
@@ -4568,7 +4522,7 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
                 tiled_2d_attrs,
                 tiled_grid.grid2d.is_some(),
                 "tiled body: source carries 2D attributes ({tiled_2d_attrs}) must match \
-                 grid.grid2d.is_some() ({:?}) at PROXIMA_TILED_GEMM_GRID2D={grid2d_env:?}",
+                 grid.grid2d.is_some() ({:?}) at tiled_gemm_grid2d={grid2d_env:?}",
                 tiled_grid.grid2d,
             );
             if let Some(grid2d) = tiled_grid.grid2d {
@@ -4588,10 +4542,10 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
                 );
             }
 
-            let dense_kernel = emit(&dense_bound, &BTreeMap::new(), NumericPolicy::default())
+            let dense_kernel = emit_with_knobs(&dense_bound, &BTreeMap::new(), NumericPolicy::default(), &knobs)
                 .expect("dense emits");
             let (_, dense_grid) =
-                kernel_dispatch_shape(&dense_bound, &BTreeMap::new(), NumericPolicy::default(), &EmitKnobs::default())
+                kernel_dispatch_shape(&dense_bound, &BTreeMap::new(), NumericPolicy::default(), &knobs)
                     .expect("dense dispatch shape");
             let dense_2d_attrs = dense_kernel
                 .source
@@ -4600,18 +4554,18 @@ fn grid2d_kernel_attribute_form_and_dispatched_grid_always_agree() {
                 dense_2d_attrs,
                 dense_grid.grid2d.is_some(),
                 "dense body: source carries 2D attributes ({dense_2d_attrs}) must match \
-                 grid.grid2d.is_some() ({:?}) at PROXIMA_TILED_GEMM_GRID2D={grid2d_env:?}",
+                 grid.grid2d.is_some() ({:?}) at tiled_gemm_grid2d={grid2d_env:?}",
                 dense_grid.grid2d,
             );
-        });
+        }
     }
 }
 
-/// `PROXIMA_TILED_GEMM_Q4_0` default ON: a `Q4_0` weight, otherwise
+/// `tiled_gemm_q4_0` default ON: a `Q4_0` weight, otherwise
 /// tiled-GEMM-eligible (same shape [`many_token_matmul_takes_the_tiled_gemm_path`]
 /// admits for `Q4_K`), falls back to the row-blocked path only when the
-/// switch is EXPLICITLY disabled (`"0"`) -- the emitted MSL for that
-/// fallback is asserted here, matching `tiled_gemm_q4_0_override`'s own doc.
+/// switch is EXPLICITLY disabled -- the emitted MSL for that fallback is
+/// asserted here.
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn q4_0_never_takes_the_tiled_gemm_path_with_the_switch_explicitly_off() {
@@ -4619,75 +4573,75 @@ fn q4_0_never_takes_the_tiled_gemm_path_with_the_switch_explicitly_off() {
     let weight_node = bound.operands()[0].0;
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
+    let knobs = EmitKnobs::default().with_tiled_gemm_q4_0(false);
 
-    temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("0"), || {
-        assert!(
-            tiled_gemm_block(
-                &bound,
-                &operand_codecs(&bound, &q4_0),
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                &[1, 0],
-                &EmitKnobs::default()
-            )
-            .is_none(),
-            "a Q4_0 weight must never take the tiled GEMM path with the switch explicitly off"
-        );
+    assert!(
+        tiled_gemm_block(
+            &bound,
+            &operand_codecs(&bound, &q4_0),
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &[1, 0],
+            &knobs
+        )
+        .is_none(),
+        "a Q4_0 weight must never take the tiled GEMM path with the switch explicitly off"
+    );
 
-        let off_source = emit(&bound, &q4_0, NumericPolicy::default())
-            .expect("emits")
-            .source;
-        assert!(
-            !off_source.contains("simdgroup_multiply_accumulate"),
-            "a Q4_0 weight must not emit the tiled GEMM kernel with the switch explicitly off:\n{off_source}"
-        );
-    });
+    let off_source = emit_with_knobs(&bound, &q4_0, NumericPolicy::default(), &knobs)
+        .expect("emits")
+        .source;
+    assert!(
+        !off_source.contains("simdgroup_multiply_accumulate"),
+        "a Q4_0 weight must not emit the tiled GEMM kernel with the switch explicitly off:\n{off_source}"
+    );
 }
 
-/// `PROXIMA_TILED_GEMM_Q4_0` unset (the new default): the same `Q4_0` weight
-/// must take the tiled path exactly as explicit `"1"` does, byte-identically
-/// -- unset is no longer a no-op for this switch.
+/// `tiled_gemm_q4_0` at its default (on): the same `Q4_0` weight must take
+/// the tiled path exactly as explicit on does, byte-identically.
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
-fn q4_0_takes_the_tiled_gemm_path_when_unset() {
+fn q4_0_takes_the_tiled_gemm_path_by_default() {
     let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let weight_node = bound.operands()[0].0;
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
+    let default_knobs = EmitKnobs::default();
 
-    let unset_source = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", None::<&str>, || {
-        assert!(
-            tiled_gemm_block(
-                &bound,
-                &operand_codecs(&bound, &q4_0),
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                &[1, 0],
-                &EmitKnobs::default()
-            )
-            .is_some(),
-            "a Q4_0 weight must take the tiled GEMM path with the switch unset (new default)"
-        );
-        emit(&bound, &q4_0, NumericPolicy::default())
-            .expect("emits")
-            .source
-    });
+    assert!(
+        tiled_gemm_block(
+            &bound,
+            &operand_codecs(&bound, &q4_0),
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &[1, 0],
+            &default_knobs
+        )
+        .is_some(),
+        "a Q4_0 weight must take the tiled GEMM path with the default knobs"
+    );
+    let unset_source = emit_with_knobs(&bound, &q4_0, NumericPolicy::default(), &default_knobs)
+        .expect("emits")
+        .source;
     assert!(
         unset_source.contains("simdgroup_multiply_accumulate"),
-        "a Q4_0 weight must emit the tiled GEMM kernel with the switch unset:\n{unset_source}"
+        "a Q4_0 weight must emit the tiled GEMM kernel with the default knobs:\n{unset_source}"
     );
-    let on_source = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
-        emit(&bound, &q4_0, NumericPolicy::default())
-            .expect("emits")
-            .source
-    });
+    let on_source = emit_with_knobs(
+        &bound,
+        &q4_0,
+        NumericPolicy::default(),
+        &EmitKnobs::default().with_tiled_gemm_q4_0(true),
+    )
+    .expect("emits")
+    .source;
     assert_eq!(
         unset_source, on_source,
-        "unset (new default) and explicit \"1\" must emit byte-identical MSL for a Q4_0 weight"
+        "the default and explicit on must emit byte-identical MSL for a Q4_0 weight"
     );
 }
 
-/// `PROXIMA_TILED_GEMM_Q4_0=1`: the same `Q4_0` weight now takes the
+/// `tiled_gemm_q4_0` on: the same `Q4_0` weight now takes the
 /// `simdgroup_matrix`-tiled path, decoding through the per-element
 /// `q4_0_element` accessor (already unconditional in the prelude via
 /// [`crate::identity`]'s own `q4_0_unpack_msl`) rather than `Q4_K`'s
@@ -4703,44 +4657,39 @@ fn q4_0_takes_the_tiled_gemm_path_with_the_switch_on() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
 
-    temp_env::with_vars(
-        [
-            ("PROXIMA_TILED_GEMM_Q4_0", Some("1")),
-            ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0")),
-        ],
-        || {
-            assert!(
-                tiled_gemm_block(
-                    &bound,
-                    &operand_codecs(&bound, &q4_0),
-                    ScalarOp::Add,
-                    ReduceInit::Zero,
-                    &[1, 0],
-                    &EmitKnobs::default()
-                )
-                .is_some(),
-                "a Q4_0 weight must take the tiled GEMM path with the switch on"
-            );
-            let source = emit(&bound, &q4_0, NumericPolicy::default())
-                .expect("emits")
-                .source;
-            assert!(
-                source.contains("simdgroup_multiply_accumulate"),
-                "a Q4_0 weight with the switch on must take the tiled GEMM path:\n{source}"
-            );
-            assert!(
-                source.contains("q4_0_dequant_half16(blk, slot + 0u, decoded)"),
-                "the Q4_0 tiled-GEMM arm must decode through its description's function:\n{source}"
-            );
-            // the prelude declares `q4k_header_for`/`q4k_run8` unconditionally
-            // (every decode helper is always emitted, see `signature_tokens_
-            // prelude.rs`'s own comment), so this checks the BODY invocation
-            // pattern, not mere textual presence of the declaration.
-            assert!(
-                !source.contains("q4k_dequant_half16(blk") && !source.contains("q4k_run8(blk"),
-                "a Q4_0 weight must never call the Q4_K decode helpers:\n{source}"
-            );
-        },
+    let knobs = EmitKnobs::default()
+        .with_tiled_gemm_q4_0(true)
+        .with_tiled_gemm_wide_weight_stage(false);
+    assert!(
+        tiled_gemm_block(
+            &bound,
+            &operand_codecs(&bound, &q4_0),
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &[1, 0],
+            &knobs
+        )
+        .is_some(),
+        "a Q4_0 weight must take the tiled GEMM path with the switch on"
+    );
+    let source = emit_with_knobs(&bound, &q4_0, NumericPolicy::default(), &knobs)
+        .expect("emits")
+        .source;
+    assert!(
+        source.contains("simdgroup_multiply_accumulate"),
+        "a Q4_0 weight with the switch on must take the tiled GEMM path:\n{source}"
+    );
+    assert!(
+        source.contains("q4_0_dequant_half16(blk, slot + 0u, decoded)"),
+        "the Q4_0 tiled-GEMM arm must decode through its description's function:\n{source}"
+    );
+    // the prelude declares `q4k_header_for`/`q4k_run8` unconditionally
+    // (every decode helper is always emitted, see `signature_tokens_
+    // prelude.rs`'s own comment), so this checks the BODY invocation
+    // pattern, not mere textual presence of the declaration.
+    assert!(
+        !source.contains("q4k_dequant_half16(blk") && !source.contains("q4k_run8(blk"),
+        "a Q4_0 weight must never call the Q4_K decode helpers:\n{source}"
     );
 }
 
@@ -4776,25 +4725,23 @@ fn q4_0_broadcast_epilogue_declines_tiled_gemm_admission_without_erroring() {
     *epilogue_broadcast_axes = output_axes.clone();
 
     let codecs = operand_codecs(&bound, &q4_0);
-    temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
-        let admission =
-            classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
-        assert!(
-            matches!(
-                admission,
-                Err(TiledGemmRejection::BroadcastEpilogueNotSupported)
-            ),
-            "a broadcast-reduce epilogue must decline tiled-GEMM admission naming that gate, \
-             not error later at render time"
-        );
-        let key = kernel_cache_key(&bound, &q4_0, NumericPolicy::default())
-            .expect("an admission decline must fall back, never error, at cache-key time");
-        assert!(
-            !key.contains("_tgq0"),
-            "a declined broadcast epilogue must never fold the tiled-Q4_0 token into the \
-             cache key: {key}"
-        );
-    });
+    let knobs = EmitKnobs::default().with_tiled_gemm_q4_0(true);
+    let admission = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0], &knobs);
+    assert!(
+        matches!(
+            admission,
+            Err(TiledGemmRejection::BroadcastEpilogueNotSupported)
+        ),
+        "a broadcast-reduce epilogue must decline tiled-GEMM admission naming that gate, \
+         not error later at render time"
+    );
+    let key = kernel_cache_key_with_knobs(&bound, &q4_0, NumericPolicy::default(), &knobs)
+        .expect("an admission decline must fall back, never error, at cache-key time");
+    assert!(
+        !key.contains("_tgq0"),
+        "a declined broadcast epilogue must never fold the tiled-Q4_0 token into the \
+         cache key: {key}"
+    );
 }
 
 /// [`TiledGemmRejection::BlockKNotChunkAligned`]'s own doc: the predicate
@@ -4850,7 +4797,8 @@ fn classify_tiled_gemm_admits_todays_real_sized_block_k_for_both_codecs() {
     let mut q4k = BTreeMap::new();
     q4k.insert(weight_node, Codec::Q4K);
     let codecs = operand_codecs(&bound, &q4k);
-    let admission = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
+    let knobs = EmitKnobs::default().with_tiled_gemm_q4_0(true);
+    let admission = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0], &knobs);
     assert!(
         admission.is_ok(),
         "today's build-time TILED_GEMM_BLOCK_K must stay chunk-aligned for Q4_K"
@@ -4859,14 +4807,11 @@ fn classify_tiled_gemm_admits_todays_real_sized_block_k_for_both_codecs() {
     let mut q4_0 = BTreeMap::new();
     q4_0.insert(weight_node, Codec::Q4_0);
     let codecs = operand_codecs(&bound, &q4_0);
-    temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", Some("1"), || {
-        let admission =
-            classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
-        assert!(
-            admission.is_ok(),
-            "today's build-time TILED_GEMM_BLOCK_K must stay chunk-aligned for Q4_0"
-        );
-    });
+    let admission = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0], &knobs);
+    assert!(
+        admission.is_ok(),
+        "today's build-time TILED_GEMM_BLOCK_K must stay chunk-aligned for Q4_0"
+    );
 }
 
 #[cfg(feature = "metal-tiled-gemm")]
@@ -8430,10 +8375,11 @@ mod flat_grid_form {
         let weight = wide.operands()[0].0;
         let packed = BTreeMap::from([(weight, Codec::Q4_0)]);
 
-        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
-            let kernel = emit(&wide, &packed, NumericPolicy::default()).expect("wide tiled emits");
-            let sibling =
-                emit(&narrow, &packed, NumericPolicy::default()).expect("narrow tiled emits");
+        let knobs = EmitKnobs::default().with_tiled_gemm_grid2d(false);
+        {
+            let kernel = emit_with_knobs(&wide, &packed, NumericPolicy::default(), &knobs).expect("wide tiled emits");
+            let sibling = emit_with_knobs(&narrow, &packed, NumericPolicy::default(), &knobs)
+                .expect("narrow tiled emits");
 
             assert!(kernel.grid.threads > u64::from(u32::MAX));
             let spec = kernel
@@ -8457,7 +8403,7 @@ mod flat_grid_form {
             );
             assert_eq!(sibling.grid.grid2d, None);
             assert!(!sibling.source.contains(FLAT_MARKER));
-        });
+        }
     }
 
     #[cfg(feature = "metal-tiled-gemm")]
@@ -8467,8 +8413,9 @@ mod flat_grid_form {
         let weight = wide.operands()[0].0;
         let packed = BTreeMap::from([(weight, Codec::Q4_0)]);
 
-        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("1"), || {
-            let kernel = emit(&wide, &packed, NumericPolicy::default()).expect("wide tiled emits");
+        let knobs = EmitKnobs::default().with_tiled_gemm_grid2d(true);
+        {
+            let kernel = emit_with_knobs(&wide, &packed, NumericPolicy::default(), &knobs).expect("wide tiled emits");
 
             assert!(kernel.grid.threads > u64::from(u32::MAX));
             let spec = kernel
@@ -8477,7 +8424,7 @@ mod flat_grid_form {
                 .expect("the lever dispatches threadgroup coordinates");
             assert_eq!(spec.form, Grid2DForm::TileCoordinates);
             assert!(!kernel.source.contains(FLAT_MARKER), "{}", kernel.source);
-        });
+        }
     }
 
     #[cfg(feature = "metal-tiled-gemm")]
@@ -8486,8 +8433,9 @@ mod flat_grid_form {
      {
         let bound = dense_batched_score_shaped_op(2_000_000, 2_000_000, 8, 128);
 
-        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
-            let kernel = emit(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed())
+        let knobs = EmitKnobs::default().with_tiled_gemm_grid2d(false);
+        {
+            let kernel = emit_with_knobs(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed(), &knobs)
                 .expect("dense batched emits");
 
             assert!(kernel.grid.threads > u64::from(u32::MAX));
@@ -8507,17 +8455,18 @@ mod flat_grid_form {
                 kernel.source
             );
             assert!(kernel.source.contains(FLAT_MARKER));
-        });
+        }
     }
 
     #[cfg(feature = "metal-tiled-gemm")]
     #[test]
     fn a_batched_launch_whose_slice_fits_but_whose_whole_grid_does_not_takes_the_flat_form() {
         let bound = dense_batched_score_shaped_op(102_400, 200_000, 8, 128);
+        let knobs = EmitKnobs::default().with_tiled_gemm_grid2d(false);
 
-        temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("0"), || {
-            let kernel =
-                emit(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed()).expect("emits");
+        {
+            let kernel = emit_with_knobs(&bound, &BTreeMap::new(), NumericPolicy::llama_relaxed(), &knobs)
+                .expect("emits");
 
             assert!(
                 kernel.grid.threads <= u64::from(u32::MAX),
@@ -8532,7 +8481,7 @@ mod flat_grid_form {
                 "the launch covers threads x depth, and that product is what a 32-bit width cannot hold"
             );
             assert!(kernel.source.contains(FLAT_MARKER));
-        });
+        }
     }
 
     #[test]
@@ -8861,8 +8810,9 @@ fn the_merge_splice_has_no_scalar_gid_to_widen_in_a_tile_form_kernel() {
     let weight = bound.operands()[0].0;
     let packed = BTreeMap::from([(weight, Codec::Q4_0)]);
 
-    temp_env::with_var("PROXIMA_TILED_GEMM_GRID2D", Some("1"), || {
-        let mut kernel = emit(&bound, &packed, NumericPolicy::default()).expect("tiled emits");
+    let knobs = EmitKnobs::default().with_tiled_gemm_grid2d(true);
+    {
+        let mut kernel = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &knobs).expect("tiled emits");
         assert_eq!(
             kernel.grid.grid2d.map(|spec| spec.form),
             Some(Grid2DForm::TileCoordinates),
@@ -8889,7 +8839,7 @@ fn the_merge_splice_has_no_scalar_gid_to_widen_in_a_tile_form_kernel() {
             ),
             "{outcome:?}"
         );
-    });
+    }
 }
 
 #[test]
@@ -9141,6 +9091,7 @@ mod expert_grouped_gemm {
             ScalarOp::Add,
             ReduceInit::Zero,
             &OUTPUT_AXES,
+            &EmitKnobs::default(),
         )
     }
 
@@ -9354,6 +9305,7 @@ mod expert_grouped_gemm {
             ScalarOp::Add,
             ReduceInit::Zero,
             &STACKED_OUTPUT_AXES,
+            &EmitKnobs::default(),
         )
     }
 
@@ -9825,33 +9777,26 @@ mod tiled_decode_description {
         Codec::Q5K,
         Codec::Q6K,
     ];
-    const DEFAULT_SCHEDULE: [(&str, Option<&str>); 4] = [
-        ("PROXIMA_TILED_GEMM_MM_LAYOUT", None),
-        ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None),
-        ("PROXIMA_TILED_GEMM_Q4_0", None),
-        ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", None),
-    ];
-    const WIDE_SCHEDULE: [(&str, Option<&str>); 4] = [
-        ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
-        ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", None),
-        ("PROXIMA_TILED_GEMM_Q4_0", None),
-        ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", None),
-    ];
-    const PER_ROW_SCHEDULE: [(&str, Option<&str>); 4] = [
-        ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("0")),
-        ("PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE", Some("0")),
-        ("PROXIMA_TILED_GEMM_Q4_0", None),
-        ("PROXIMA_TILED_GEMM_WIDE_ACT_LOAD", None),
-    ];
+    fn default_schedule() -> EmitKnobs {
+        EmitKnobs::default()
+    }
 
-    fn dense_source(codec: Codec, schedule: [(&str, Option<&str>); 4]) -> String {
+    fn wide_schedule() -> EmitKnobs {
+        EmitKnobs::default().with_tiled_gemm_mm_layout(false)
+    }
+
+    fn per_row_schedule() -> EmitKnobs {
+        EmitKnobs::default()
+            .with_tiled_gemm_mm_layout(false)
+            .with_tiled_gemm_wide_weight_stage(false)
+    }
+
+    fn dense_source(codec: Codec, schedule: &EmitKnobs) -> String {
         let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
         let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
-        temp_env::with_vars(schedule, || {
-            emit(&bound, &packed, NumericPolicy::default())
-                .unwrap_or_else(|error| panic!("{codec:?} emits a tiled kernel: {error}"))
-                .source
-        })
+        emit_with_knobs(&bound, &packed, NumericPolicy::default(), schedule)
+            .unwrap_or_else(|error| panic!("{codec:?} emits a tiled kernel: {error}"))
+            .source
     }
 
     fn described(codec: Codec) -> TiledDecode {
@@ -9974,21 +9919,19 @@ mod tiled_decode_description {
     ) {
         let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
         let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
-        let block = temp_env::with_vars(DEFAULT_SCHEDULE, || {
-            tiled_gemm_block(
-                &bound,
-                &operand_codecs(&bound, &packed),
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                &[1, 0],
-                &EmitKnobs::default(),
-            )
-        })
+        let block = tiled_gemm_block(
+            &bound,
+            &operand_codecs(&bound, &packed),
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &[1, 0],
+            &default_schedule(),
+        )
         .unwrap_or_else(|| panic!("{codec:?} must take the tiled GEMM at prefill width"));
         assert_eq!(block.codec, codec);
         assert_eq!(block.gathered, None);
 
-        let source = dense_source(codec, DEFAULT_SCHEDULE);
+        let source = dense_source(codec, &default_schedule());
         let decode = described(codec);
         assert!(source.contains("simdgroup_multiply_accumulate"), "{source}");
         assert!(
@@ -10026,7 +9969,7 @@ mod tiled_decode_description {
     ) {
         let decode = described(codec);
 
-        let wide = dense_source(codec, WIDE_SCHEDULE);
+        let wide = dense_source(codec, &wide_schedule());
         assert!(
             wide.contains(&decode.call("wws_blk0", "wws_slot0", "wws_decoded")),
             "{codec:?} wide schedule:\n{wide}"
@@ -10036,7 +9979,7 @@ mod tiled_decode_description {
             "{codec:?}: the wide schedule keeps the row-major tile"
         );
 
-        let per_row = dense_source(codec, PER_ROW_SCHEDULE);
+        let per_row = dense_source(codec, &per_row_schedule());
         assert!(
             per_row.contains(&decode.call("blk", "slot + 0u", "decoded")),
             "{codec:?} per-row schedule:\n{per_row}"
@@ -10062,7 +10005,7 @@ mod tiled_decode_description {
             (Codec::Float16, 2 * STAGED_K_STEP_ELEMENTS as usize),
         ];
         for (codec, block_bytes) in whole_block {
-            let source = dense_source(codec, DEFAULT_SCHEDULE);
+            let source = dense_source(codec, &default_schedule());
             assert!(
                 source.contains(&format!("wws_blk0 += 1u * {block_bytes};")),
                 "{codec:?}: one block per K step:\n{source}"
@@ -10080,7 +10023,7 @@ mod tiled_decode_description {
             (Codec::Q6K, Q6K_BLOCK_BYTES),
         ];
         for (codec, block_bytes) in wrapping {
-            let source = dense_source(codec, DEFAULT_SCHEDULE);
+            let source = dense_source(codec, &default_schedule());
             assert!(source.contains("wws_slot0 += 32u;"), "{codec:?}:\n{source}");
             assert!(
                 source.contains(&format!(
@@ -10093,7 +10036,7 @@ mod tiled_decode_description {
 
     #[test]
     fn a_float16_weight_binds_as_half_and_is_viewed_as_bytes_for_the_cursor() {
-        let source = dense_source(Codec::Float16, DEFAULT_SCHEDULE);
+        let source = dense_source(Codec::Float16, &default_schedule());
 
         assert!(
             source.contains("device const half* in0 [[buffer(0)]]"),
@@ -10118,7 +10061,7 @@ mod tiled_decode_description {
         let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
         let codecs = operand_codecs(&bound, &packed);
 
-        let tiled = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0]);
+        let tiled = classify_tiled_gemm(&bound, &codecs, ScalarOp::Add, ReduceInit::Zero, &[1, 0], &EmitKnobs::default());
         let row_blocked = classify_packed_row_block(&bound, &codecs, &EmitKnobs::default());
 
         assert!(
@@ -10148,6 +10091,7 @@ mod tiled_decode_description {
             ScalarOp::Add,
             ReduceInit::Zero,
             &[1, 0],
+            &EmitKnobs::default(),
         )
         .err();
 
@@ -10164,23 +10108,17 @@ mod tiled_decode_description {
         let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
         let q4_0 = BTreeMap::from([(bound.operands()[0].0, Codec::Q4_0)]);
         let q8_0 = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
+        let knobs = EmitKnobs::default().with_tiled_gemm_q4_0(false);
         let classify = |packed: &BTreeMap<NodeId, Codec>| {
-            temp_env::with_vars(
-                [
-                    ("PROXIMA_TILED_GEMM_Q4_0", Some("0")),
-                    ("PROXIMA_TILED_GEMM_DISABLE", None),
-                ],
-                || {
-                    classify_tiled_gemm(
-                        &bound,
-                        &operand_codecs(&bound, packed),
-                        ScalarOp::Add,
-                        ReduceInit::Zero,
-                        &[1, 0],
-                    )
-                    .err()
-                },
+            classify_tiled_gemm(
+                &bound,
+                &operand_codecs(&bound, packed),
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                &[1, 0],
+                &knobs,
             )
+            .err()
         };
 
         assert_eq!(
@@ -10204,46 +10142,35 @@ mod tiled_decode_description {
     ) {
         let bound = tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
         let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);
-        let classify = |disable: Option<&str>| {
-            temp_env::with_vars(
-                [
-                    ("PROXIMA_TILED_GEMM_DISABLE", disable),
-                    ("PROXIMA_TILED_GEMM_Q4_0", None),
-                ],
-                || {
-                    classify_tiled_gemm(
-                        &bound,
-                        &operand_codecs(&bound, &packed),
-                        ScalarOp::Add,
-                        ReduceInit::Zero,
-                        &[1, 0],
-                    )
-                    .err()
-                },
+        let classify = |disable: &[&str]| {
+            let knobs = EmitKnobs::default()
+                .with_tiled_gemm_disable(disable.iter().map(|listed| (*listed).to_owned()).collect());
+            classify_tiled_gemm(
+                &bound,
+                &operand_codecs(&bound, &packed),
+                ScalarOp::Add,
+                ReduceInit::Zero,
+                &[1, 0],
+                &knobs,
             )
+            .err()
         };
-        let listed = format!("q4_0, {name} ,q4k");
-        let others = "q4_0,q4k,not_a_codec";
+        let others = ["q4_0", "q4k", "not_a_codec"];
 
         assert_eq!(
-            classify(None),
+            classify(&[]),
             None,
             "{codec:?}: nothing is disabled by default"
         );
         assert_eq!(
-            classify(Some("")),
-            None,
-            "{codec:?}: an empty list disables nothing"
-        );
-        assert_eq!(
-            classify(Some(&listed)),
+            classify(&["q4_0", name, "q4k"]),
             Some(TiledGemmRejection::CodecSwitchedOff {
                 codec: codec.name().unwrap_or("unnamed"),
             }),
-            "{codec:?}: a listed codec is kept off, spaces around a name are ignored"
+            "{codec:?}: a listed codec is kept off"
         );
         assert_eq!(
-            classify(Some(others)),
+            classify(&others),
             None,
             "{codec:?}: a list naming other codecs leaves it on"
         );
@@ -10318,22 +10245,19 @@ mod expert_grouped_decode_description {
         let (bound, packed) = gathered(codec);
         let decode = tiled_decode(codec).expect("described");
 
-        let (block, source) = temp_env::with_var("PROXIMA_TILED_GEMM_Q4_0", None::<&str>, || {
-            let block = classify_tiled_gemm(
-                &bound,
-                &operand_codecs(&bound, &packed),
-                ScalarOp::Add,
-                ReduceInit::Zero,
-                &[0, 1],
-            )
-            .unwrap_or_else(|rejection| {
-                panic!("{codec:?} experts at prefill width: {rejection:?}")
-            });
-            let source = emit(&bound, &packed, NumericPolicy::default())
-                .expect("grouped kernel emits")
-                .source;
-            (block, source)
-        });
+        let knobs = EmitKnobs::default();
+        let block = classify_tiled_gemm(
+            &bound,
+            &operand_codecs(&bound, &packed),
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            &[0, 1],
+            &knobs,
+        )
+        .unwrap_or_else(|rejection| panic!("{codec:?} experts at prefill width: {rejection:?}"));
+        let source = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &knobs)
+            .expect("grouped kernel emits")
+            .source;
         assert_eq!(
             block.gathered,
             Some(ExpertGather {
@@ -11390,6 +11314,7 @@ fn a_dense_product_whose_tile_grid_cannot_occupy_the_device_stays_on_the_coopera
         reduce_op,
         init,
         output_axes,
+        &EmitKnobs::default(),
     )
     .err()
     .expect("96 positions pass the token minimum but 4 batches of one tile do not fill the grid");
@@ -11412,20 +11337,15 @@ fn activation_staging_layout_renders_the_tile_type_in_every_gemm_schedule() {
         ("float16", "half", "simdgroup_half8x8"),
         ("bfloat16", "bfloat", "simdgroup_bfloat8x8"),
     ] {
-        for (label, mml) in [("mm_layout", "1"), ("row_major", "0")] {
+        for (label, mml) in [("mm_layout", true), ("row_major", false)] {
             let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
             let packed = BTreeMap::from([(weight_node, Codec::Q4K)]);
-            let source = temp_env::with_vars(
-                [
-                    ("PROXIMA_TILED_GEMM_STAGING", Some(name)),
-                    ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some(mml)),
-                ],
-                || {
-                    emit(&bound, &packed, NumericPolicy::default())
-                        .expect("emits")
-                        .source
-                },
-            );
+            let knobs = EmitKnobs::default()
+                .with_tiled_gemm_staging(FloatLayout::from_name(name))
+                .with_tiled_gemm_mm_layout(mml);
+            let source = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &knobs)
+                .expect("emits")
+                .source;
             assert!(
                 source.contains(&format!("threadgroup {element} *act_tile"))
                     || source.contains(&format!("threadgroup {element} act_tile[")),
@@ -11437,11 +11357,10 @@ fn activation_staging_layout_renders_the_tile_type_in_every_gemm_schedule() {
         let bound = gathered_matmul_op(300, 8, 192, 512);
         let weight_node = bound.operands()[0].0;
         let packed = BTreeMap::from([(weight_node, Codec::Q8_0)]);
-        let source = temp_env::with_var("PROXIMA_TILED_GEMM_STAGING", Some(name), || {
-            emit(&bound, &packed, NumericPolicy::default())
-                .expect("emits")
-                .source
-        });
+        let knobs = EmitKnobs::default().with_tiled_gemm_staging(FloatLayout::from_name(name));
+        let source = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &knobs)
+            .expect("emits")
+            .source;
         assert!(
             source.contains(&format!("threadgroup {element} *act_tile")),
             "grouped {name}: activation tile is {element}"
@@ -11461,21 +11380,17 @@ fn staging_pipeline_compiles() {
     for name in ["float16", "bfloat16"] {
         let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
         let packed = BTreeMap::from([(weight_node, Codec::Q4K)]);
-        let dense = temp_env::with_vars(
-            [
-                ("PROXIMA_TILED_GEMM_STAGING", Some(name)),
-                ("PROXIMA_TILED_GEMM_MM_LAYOUT", Some("1")),
-            ],
-            || emit(&bound, &packed, NumericPolicy::default()).expect("dense emits"),
-        );
+        let dense_knobs = EmitKnobs::default()
+            .with_tiled_gemm_staging(FloatLayout::from_name(name))
+            .with_tiled_gemm_mm_layout(true);
+        let dense = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &dense_knobs).expect("dense emits");
         super::layout_render_tests::compile_on_the_metal_compiler(&dense.source, &dense.entry);
 
         let bound = gathered_matmul_op(300, 8, 192, 512);
         let weight_node = bound.operands()[0].0;
         let packed = BTreeMap::from([(weight_node, Codec::Q8_0)]);
-        let grouped = temp_env::with_var("PROXIMA_TILED_GEMM_STAGING", Some(name), || {
-            emit(&bound, &packed, NumericPolicy::default()).expect("grouped emits")
-        });
+        let grouped_knobs = EmitKnobs::default().with_tiled_gemm_staging(FloatLayout::from_name(name));
+        let grouped = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &grouped_knobs).expect("grouped emits");
         super::layout_render_tests::compile_on_the_metal_compiler(&grouped.source, &grouped.entry);
     }
 }
@@ -11486,9 +11401,11 @@ fn activation_staging_layout_changes_the_kernel_identity_only_off_binary32() {
     let (bound, weight_node) = real_shaped_tiled_gemm_op(TILED_ADMITTED_TOKENS, 256, 4);
     let packed = BTreeMap::from([(weight_node, Codec::Q4K)]);
     let key = |staging: Option<&str>| {
-        temp_env::with_var("PROXIMA_TILED_GEMM_STAGING", staging, || {
-            kernel_cache_key(&bound, &packed, NumericPolicy::default()).expect("cache key derives")
-        })
+        let layout = staging
+            .and_then(FloatLayout::from_name)
+            .filter(|layout| !layout.same_format(&FloatLayout::BF32));
+        let knobs = EmitKnobs::default().with_tiled_gemm_staging(layout);
+        kernel_cache_key_with_knobs(&bound, &packed, NumericPolicy::default(), &knobs).expect("cache key derives")
     };
     let unset = key(None);
     assert_eq!(key(Some("float32")), unset, "binary32 keeps today's identity");

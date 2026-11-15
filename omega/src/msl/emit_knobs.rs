@@ -532,7 +532,7 @@ mod tests {
     use core::fmt::Debug;
 
     use super::super::*;
-    use super::{EmitKnobs, ReductionLiteral, every_knob_moved_by_the_builder};
+    use super::{EmitKnobs, FloatLayout, ReductionLiteral, every_knob_moved_by_the_builder};
     use crate::config::RuntimeConfig;
 
     const ENV_NAMES: [&str; 24] = [
@@ -708,113 +708,45 @@ mod tests {
 
     #[cfg(feature = "metal-tiled-gemm")]
     #[test]
-    fn tiled_gemm_disable_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_TILED_GEMM_DISABLE",
-            &["q4_0", " q4k , q6k ", "q4k,,", "Q4K", "f16", ""],
-            |knobs| disabled_by(&knobs.tiled_gemm_disable),
-            || CODECS.iter().map(|codec| tiled_gemm_codec_disabled(*codec)).collect(),
-        );
+    fn tiled_gemm_disable_names_exactly_the_listed_codecs() {
+        let cases: [(&str, &[&str]); 7] = [
+            ("q4_0", &["q4_0"]),
+            (" q4k , q6k ", &["q4k", "q6k"]),
+            ("q4k,,", &["q4k"]),
+            ("Q4K", &[]),
+            ("f16", &["f16"]),
+            ("", &[]),
+            ("not_a_codec", &[]),
+        ];
+        for (value, listed) in cases {
+            let knobs = with_only("PROXIMA_TILED_GEMM_DISABLE", Some(value), EmitKnobs::from_env);
+            let disabled: Vec<bool> = CODECS.iter().map(|codec| tiled_gemm_codec_disabled(&knobs, *codec)).collect();
+            let expected: Vec<bool> = CODECS.iter().map(|codec| listed.contains(&codec_cache_key(*codec).as_ref())).collect();
+            assert_eq!(disabled, expected, "PROXIMA_TILED_GEMM_DISABLE={value:?}");
+            assert_eq!(disabled, disabled_by(&knobs.tiled_gemm_disable), "PROXIMA_TILED_GEMM_DISABLE={value:?}");
+        }
     }
 
     #[cfg(feature = "metal-tiled-gemm")]
     #[test]
-    fn tiled_gemm_q4_0_matches_the_current_read_function() {
-        assert_parity("PROXIMA_TILED_GEMM_Q4_0", &[""], |knobs| knobs.tiled_gemm_q4_0, tiled_gemm_q4_0_override);
-    }
-
-    #[cfg(feature = "metal-tiled-gemm")]
-    #[test]
-    fn tiled_gemm_dense_matches_the_current_read_function() {
-        assert_parity("PROXIMA_TILED_GEMM_DENSE", &[""], |knobs| knobs.tiled_gemm_dense, tiled_gemm_dense_override);
-    }
-
-    #[cfg(feature = "metal-tiled-gemm")]
-    #[test]
-    fn tiled_gemm_wide_act_load_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_TILED_GEMM_WIDE_ACT_LOAD",
-            &[""],
-            |knobs| knobs.tiled_gemm_wide_act_load,
-            wide_activation_load_override,
-        );
-    }
-
-    #[cfg(feature = "metal-tiled-gemm")]
-    #[test]
-    fn tiled_gemm_slim_tgmem_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_TILED_GEMM_SLIM_TGMEM",
-            &[""],
-            |knobs| knobs.tiled_gemm_slim_tgmem,
-            slim_tgmem_override,
-        );
-    }
-
-    #[cfg(feature = "metal-tiled-gemm")]
-    #[test]
-    fn tiled_gemm_staging_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_TILED_GEMM_STAGING",
-            &["float32", "float16", "bfloat16", " float16 ", "Float16", ""],
-            |knobs| knobs.tiled_gemm_staging,
-            tiled_gemm_staging_layout_override,
-        );
-    }
-
-    #[cfg(feature = "metal-tiled-gemm")]
-    #[test]
-    fn tiled_gemm_direct_store_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_TILED_GEMM_DIRECT_STORE",
-            &[""],
-            |knobs| knobs.tiled_gemm_direct_store,
-            tiled_gemm_direct_store_override,
-        );
-    }
-
-    #[cfg(feature = "metal-tiled-gemm")]
-    #[test]
-    fn tiled_gemm_wide_weight_stage_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_TILED_GEMM_WIDE_WEIGHT_STAGE",
-            &[""],
-            |knobs| knobs.tiled_gemm_wide_weight_stage,
-            tiled_gemm_wide_weight_stage_override,
-        );
-    }
-
-    #[cfg(feature = "metal-tiled-gemm")]
-    #[test]
-    fn tiled_gemm_grid2d_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_TILED_GEMM_GRID2D",
-            &[""],
-            |knobs| knobs.tiled_gemm_grid2d,
-            tiled_gemm_grid2d_override,
-        );
-    }
-
-    #[cfg(feature = "metal-tiled-gemm")]
-    #[test]
-    fn tiled_gemm_mm_layout_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_TILED_GEMM_MM_LAYOUT",
-            &[""],
-            |knobs| knobs.tiled_gemm_mm_layout,
-            tiled_gemm_mm_layout_override,
-        );
-    }
-
-    #[cfg(feature = "metal-tiled-gemm")]
-    #[test]
-    fn tiled_gemm_dynamic_tgmem_matches_the_current_read_function() {
-        assert_parity(
-            "PROXIMA_TILED_GEMM_DYNAMIC_TGMEM",
-            &[""],
-            |knobs| knobs.tiled_gemm_dynamic_tgmem,
-            tiled_gemm_dynamic_tgmem_override,
-        );
+    fn tiled_gemm_staging_names_a_hardware_layout_other_than_binary32() {
+        let float16 = FloatLayout::from_name("float16");
+        let bfloat16 = FloatLayout::from_name("bfloat16");
+        assert!(float16.is_some() && bfloat16.is_some() && float16 != bfloat16, "the layout names this table relies on");
+        let cases: [(Option<&str>, Option<FloatLayout>); 8] = [
+            (None, None),
+            (Some("float32"), None),
+            (Some("float16"), float16),
+            (Some("bfloat16"), bfloat16),
+            (Some(" float16 "), float16),
+            (Some("Float16"), None),
+            (Some("garbage"), None),
+            (Some(""), None),
+        ];
+        for (value, expected) in cases {
+            let knobs = with_only("PROXIMA_TILED_GEMM_STAGING", value, EmitKnobs::from_env);
+            assert_eq!(knobs.tiled_gemm_staging, expected, "PROXIMA_TILED_GEMM_STAGING={value:?}");
+        }
     }
 
     #[cfg(feature = "metal-reduction-literal")]

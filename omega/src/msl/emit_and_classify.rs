@@ -1812,7 +1812,7 @@ pub(super) fn metal_specialization(
                 init,
                 output_axes,
                 ..
-            } => tiled_gemm_q4_0_active(resolved, &quantized, *reduce_op, *init, output_axes),
+            } => tiled_gemm_q4_0_active(resolved, &quantized, *reduce_op, *init, output_axes, knobs),
             _ => false,
         },
         reduction_literal,
@@ -1941,7 +1941,11 @@ pub(super) fn metal_specialization(
             ),
             _ => false,
         },
-        tiled_gemm_staging_layout: tiled_gemm_staging_layout_override(),
+        // only a reduce can render a GEMM schedule; any other kind never reads the staging layout
+        tiled_gemm_staging_layout: match &resolved.kind {
+            BoundOpKind::Reduce { .. } => knobs.tiled_gemm_staging,
+            _ => None,
+        },
         wide_grid: matches!(
             grid.grid2d,
             Some(Grid2DSpec {
@@ -2412,7 +2416,7 @@ pub(crate) fn debug_tiled_gemm_classification(
     } else {
         "plain"
     };
-    match classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes) {
+    match classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes, knobs) {
         Ok(_) => proxima_telemetry::debug!(
             node = resolved.node.0,
             codec = ?codec,
@@ -2450,6 +2454,7 @@ pub(crate) fn debug_tiled_gemm_classification(
         reduce_op,
         init,
         output_axes,
+        knobs,
     ) {
         Ok(block) => {
             // `classify_dense_batched_gemm`'s own `NotReduceKeepReduce` gate already
@@ -3374,9 +3379,9 @@ pub enum TiledGemmRejection {
     /// can only narrow that gate's `Ok`, never rescue its `Err`.
     NotPackedRowBlock(PackedRowBlockRejection),
     /// The codec's tiled admission is switched off at runtime:
-    /// `PROXIMA_TILED_GEMM_Q4_0=0` keeps `Q4_0` on the row-blocked kernel, and
-    /// `PROXIMA_TILED_GEMM_DISABLE` names any codec to keep off, the same-binary
-    /// A/B controls `tiled_gemm_q4_0_override` and `tiled_gemm_codec_disabled`
+    /// `EmitKnobs::tiled_gemm_q4_0 = false` keeps `Q4_0` on the row-blocked kernel, and
+    /// `EmitKnobs::tiled_gemm_disable` names any codec to keep off, the same-binary
+    /// A/B controls `classify_tiled_gemm` and `tiled_gemm_codec_disabled`
     /// document. A codec with no `tiled_decode` description is rejected
     /// earlier, as `NotPackedRowBlock(NotKQuantCodec)`.
     CodecSwitchedOff { codec: &'static str },
@@ -3494,7 +3499,7 @@ pub(super) struct TiledGemmBlock {
     /// side walks the flattened product of these.
     pub(super) feature_axes: Vec<u16>,
     /// the weight operand's codec, one with a [`tiled_decode`] description
-    /// (`Q4_0` only while [`tiled_gemm_q4_0_override`] admits it).
+    /// (`Q4_0` only while `EmitKnobs::tiled_gemm_q4_0` admits it).
     /// [`push_tiled_gemm_body`] and [`push_expert_grouped_gemm_body`] read the
     /// description off it; every other line of those functions (tiling,
     /// `simdgroup_matrix` staging, write-back) is codec-generic, matching the
@@ -3525,10 +3530,11 @@ pub(super) fn classify_tiled_gemm(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> Result<TiledGemmBlock, TiledGemmRejection> {
     #[cfg(not(feature = "metal-tiled-gemm"))]
     {
-        let _ = (resolved, quantized, reduce_op, init, output_axes);
+        let _ = (resolved, quantized, reduce_op, init, output_axes, knobs);
         Err(TiledGemmRejection::FeatureDisabled)
     }
     #[cfg(feature = "metal-tiled-gemm")]
@@ -3549,12 +3555,11 @@ pub(super) fn classify_tiled_gemm(
         let mut gathered = classify_expert_gather(resolved, weight)?;
         // Every codec with a `tiled_decode` description is admitted by the
         // gate above (that table is the whitelist). The runtime switches are
-        // same-binary A/B controls: `PROXIMA_TILED_GEMM_Q4_0` (default ON:
-        // unset admits, only explicit `"0"` falls back) which the row-blocked
-        // `Q4_0` tests rely on, and `PROXIMA_TILED_GEMM_DISABLE`, the same
+        // same-binary A/B controls: `EmitKnobs::tiled_gemm_q4_0` (default ON:
+        // only an explicit off falls back) which the row-blocked
+        // `Q4_0` tests rely on, and `EmitKnobs::tiled_gemm_disable`, the same
         // control for any codec.
-        if (codec == Codec::Q4_0 && !tiled_gemm_q4_0_override()) || tiled_gemm_codec_disabled(codec)
-        {
+        if (codec == Codec::Q4_0 && !knobs.tiled_gemm_q4_0) || tiled_gemm_codec_disabled(knobs, codec) {
             return Err(TiledGemmRejection::CodecSwitchedOff {
                 codec: codec.name().unwrap_or("unnamed"),
             });
@@ -3765,7 +3770,7 @@ fn expert_route_follows_token_axes(
 }
 
 /// `true` only when [`push_tiled_gemm_body`] actually renders its `Codec::
-/// Q4_0` decode arm for this op -- `PROXIMA_TILED_GEMM_Q4_0` admits (default
+/// Q4_0` decode arm for this op -- `EmitKnobs::tiled_gemm_q4_0` admits (default
 /// ON: unset admits, only explicit `"0"` disables) AND [`classify_tiled_gemm`]'s
 /// own admission passed. Folds the `_tgq0` token into [`kernel_cache_key`] on
 /// the (now default) admitted path; explicit `"0"` is what stays byte-identical
@@ -3778,9 +3783,10 @@ fn tiled_gemm_q4_0_active(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> bool {
     matches!(
-        classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes),
+        classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes, knobs),
         Ok(TiledGemmBlock {
             codec: Codec::Q4_0,
             ..
@@ -3795,6 +3801,7 @@ fn tiled_gemm_q4_0_active(
     _reduce_op: ScalarOp,
     _init: ReduceInit,
     _output_axes: &[u16],
+    _knobs: &EmitKnobs,
 ) -> bool {
     false
 }
@@ -3810,7 +3817,7 @@ pub(super) fn tiled_gemm_block(
     if knobs.enable_unsafe_metal_expert_sources {
         return None;
     }
-    classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes).ok()
+    classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes, knobs).ok()
 }
 
 /// [`tiled_gemm_block`] restricted to the dense-weight form. The env-switched
@@ -3863,8 +3870,8 @@ pub(super) fn expert_group_depth(resolved: &BoundOp, quantized: &[Option<Codec>]
     }
 }
 
-/// item 3c (`STAGING.md` §5.3): `true` only when `PROXIMA_TILED_GEMM_WIDE_
-/// ACT_LOAD` admits (default ON: unset admits, only explicit `"0"` disables)
+/// item 3c (`STAGING.md` §5.3): `true` only when `EmitKnobs::tiled_gemm_wide_act_load`
+/// admits (default ON: unset admits, only explicit `"0"` disables)
 /// AND `resolved` takes the packed [`tiled_gemm_block`] path.
 #[cfg(feature = "metal-tiled-gemm")]
 pub(super) fn wide_activation_load_active(
@@ -3875,7 +3882,7 @@ pub(super) fn wide_activation_load_active(
     output_axes: &[u16],
     knobs: &EmitKnobs,
 ) -> bool {
-    if !wide_activation_load_override() {
+    if !knobs.tiled_gemm_wide_act_load {
         return false;
     }
     let Some(block) =
@@ -3908,7 +3915,7 @@ pub(super) fn wide_activation_load_active(
 }
 
 /// phase 2 (see `docs/model-interop/discipline.md` ROW C4.10): `true` only when
-/// `PROXIMA_TILED_GEMM_SLIM_TGMEM` admits (default ON: unset admits, only
+/// `EmitKnobs::tiled_gemm_slim_tgmem` admits (default ON: unset admits, only
 /// explicit `"0"` disables) AND `resolved` takes EITHER tiled-GEMM
 /// path -- unlike [`wide_activation_load_active`] above, the aliasing this
 /// feeds is a pure memory-layout change with no dependency on the
@@ -3924,7 +3931,7 @@ pub(super) fn slim_tgmem_active(
     output_axes: &[u16],
     knobs: &EmitKnobs,
 ) -> bool {
-    if !slim_tgmem_override() {
+    if !knobs.tiled_gemm_slim_tgmem {
         return false;
     }
     tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs).is_some()
@@ -3953,8 +3960,8 @@ pub(super) fn slim_tgmem_active(
     false
 }
 
-/// lever 2 (see `docs/model-interop/discipline.md` ROW C4.11): `true` only when `PROXIMA_TILED_GEMM_
-/// DIRECT_STORE` admits (default ON: unset admits,
+/// lever 2 (see `docs/model-interop/discipline.md` ROW C4.11): `true` only when `EmitKnobs::tiled_gemm_direct_store`
+/// admits (default ON: unset admits,
 /// only explicit `"0"` declines) AND `resolved` takes EITHER
 /// tiled-GEMM path AND its fused epilogue is the untouched identity default.
 /// The epilogue gate exists because [`push_tiled_gemm_body`]'s epilogue tail
@@ -3985,7 +3992,7 @@ pub(super) fn direct_store_active(
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     knobs: &EmitKnobs,
 ) -> bool {
-    if !tiled_gemm_direct_store_override() {
+    if !knobs.tiled_gemm_direct_store {
         return false;
     }
     if !crate::identity::reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
@@ -4004,8 +4011,8 @@ pub(super) fn direct_store_active(
         .is_some()
 }
 
-/// see `docs/model-interop/discipline.md` ROW C4.12: `true` only when `PROXIMA_TILED_GEMM_WIDE_WEIGHT_
-/// STAGE` admits (default ON: unset admits, only explicit `"0"` declines) AND `resolved` takes the packed (quantized)
+/// see `docs/model-interop/discipline.md` ROW C4.12: `true` only when `EmitKnobs::tiled_gemm_wide_weight_stage`
+/// admits (default ON: unset admits, only explicit `"0"` declines) AND `resolved` takes the packed (quantized)
 /// tiled-GEMM path -- unlike [`direct_store_active`],
 /// this NEVER applies to [`push_dense_batched_gemm_body`]: that body has no
 /// codec-decode arm at all (both operands are plain `float`), so there is no
@@ -4019,7 +4026,7 @@ pub(super) fn wide_weight_stage_active(
     output_axes: &[u16],
     knobs: &EmitKnobs,
 ) -> bool {
-    if !tiled_gemm_wide_weight_stage_override() {
+    if !knobs.tiled_gemm_wide_weight_stage {
         return false;
     }
     tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes, knobs).is_some()
@@ -4037,7 +4044,7 @@ pub(super) fn wide_weight_stage_active(
     false
 }
 
-/// see `docs/model-interop/discipline.md` ROW C4.19: `true` only when `PROXIMA_TILED_GEMM_GRID2D` admits
+/// see `docs/model-interop/discipline.md` ROW C4.19: `true` only when `EmitKnobs::tiled_gemm_grid2d` admits
 /// (default ON: unset admits, only explicit `"0"` declines) AND `resolved` takes either the tiled (packed) or the
 /// dense-batched GEMM path -- unlike [`wide_weight_stage_active`], this
 /// applies to BOTH bodies: the 2D-attribute signature/dispatch swap is
@@ -4052,7 +4059,7 @@ pub(super) fn tiled_gemm_grid2d_active(
     output_axes: &[u16],
     knobs: &EmitKnobs,
 ) -> bool {
-    if !tiled_gemm_grid2d_override() {
+    if !knobs.tiled_gemm_grid2d {
         return false;
     }
     tiled_gemm_dense_weight_block(resolved, quantized, reduce_op, init, output_axes, knobs).is_some()
@@ -4081,7 +4088,7 @@ pub(super) fn tiled_gemm_grid2d_active(
     false
 }
 
-/// `true` only when `PROXIMA_TILED_GEMM_MM_LAYOUT` admits (default ON: unset
+/// `true` only when `EmitKnobs::tiled_gemm_mm_layout` admits (default ON: unset
 /// admits, only explicit `"0"` declines), the tile sizing is the geometry that
 /// layout is written for ([`mm_layout_geometry_supported`]), AND
 /// [`wide_weight_stage_active`] does: the layout reuses the wide weight
@@ -4095,7 +4102,7 @@ pub(super) fn mm_layout_active(
     output_axes: &[u16],
     knobs: &EmitKnobs,
 ) -> bool {
-    tiled_gemm_mm_layout_override()
+    knobs.tiled_gemm_mm_layout
         && mm_layout_geometry_supported()
         && wide_weight_stage_active(resolved, quantized, reduce_op, init, output_axes, knobs)
 }
@@ -4112,7 +4119,7 @@ pub(super) fn mm_layout_active(
     false
 }
 
-/// `true` only when `PROXIMA_TILED_GEMM_DYNAMIC_TGMEM` admits (default ON:
+/// `true` only when `EmitKnobs::tiled_gemm_dynamic_tgmem` admits (default ON:
 /// unset admits, only explicit `"0"` declines), `resolved` takes the packed
 /// tiled-GEMM path, and both things the lever rides on hold: the slim
 /// backing store ([`slim_tgmem_active`], the one array handed over as the
@@ -4131,7 +4138,7 @@ pub(super) fn dynamic_tgmem_active(
     output_axes: &[u16],
     knobs: &EmitKnobs,
 ) -> bool {
-    tiled_gemm_dynamic_tgmem_override()
+    knobs.tiled_gemm_dynamic_tgmem
         && tiled_gemm_block(resolved, quantized, reduce_op, init, output_axes, knobs).is_some()
         && slim_tgmem_active(
             resolved,
@@ -4455,7 +4462,7 @@ pub fn diagnose_tiled_gemm_block(
     init: ReduceInit,
     output_axes: &[u16],
 ) -> Result<(), TiledGemmRejection> {
-    classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes).map(drop)
+    classify_tiled_gemm(resolved, quantized, reduce_op, init, output_axes, &ambient_knobs()).map(drop)
 }
 
 /// Public diagnostic seam: which condition, if any, rejected `resolved`
@@ -4745,7 +4752,7 @@ pub(crate) fn packed_row_geometry(
 pub enum DenseBatchedGemmRejection {
     /// The `metal-tiled-gemm` feature is not compiled in.
     FeatureDisabled,
-    /// `PROXIMA_TILED_GEMM_DENSE` is explicitly `"0"` -- default ON, so
+    /// `EmitKnobs::tiled_gemm_dense` is explicitly off -- default ON, so
     /// unset admits and only this explicit disable falls back to the
     /// cooperative-reduce path this switch's existence used to be a no-op
     /// for.
@@ -4842,7 +4849,7 @@ pub(super) struct DenseBatchedGemmBlock {
 ///
 /// Feature-gated exactly like [`classify_tiled_gemm`]: without
 /// `metal-tiled-gemm` this always returns `Err(DenseBatchedGemmRejection::FeatureDisabled)`,
-/// and with the feature on but `PROXIMA_TILED_GEMM_DENSE` explicitly `"0"` it
+/// and with the feature on but `EmitKnobs::tiled_gemm_dense` explicitly off it
 /// always returns `Err(DenseBatchedGemmRejection::EnvDisabled)` -- with the
 /// feature on and the switch at its new default (unset, admitting), a
 /// dispatch that satisfies the remaining conditions below takes this path;
@@ -4855,6 +4862,7 @@ pub(super) fn classify_dense_batched_gemm(
     reduce_op: ScalarOp,
     init: ReduceInit,
     output_axes: &[u16],
+    knobs: &EmitKnobs,
 ) -> Result<DenseBatchedGemmBlock, DenseBatchedGemmRejection> {
     #[cfg(not(feature = "metal-tiled-gemm"))]
     {
@@ -4865,12 +4873,13 @@ pub(super) fn classify_dense_batched_gemm(
             reduce_op,
             init,
             output_axes,
+            knobs,
         );
         Err(DenseBatchedGemmRejection::FeatureDisabled)
     }
     #[cfg(feature = "metal-tiled-gemm")]
     {
-        if !tiled_gemm_dense_override() {
+        if !knobs.tiled_gemm_dense {
             return Err(DenseBatchedGemmRejection::EnvDisabled);
         }
         let BoundOpKind::Reduce {
@@ -5041,6 +5050,7 @@ pub(crate) fn has_dense_bf16_mma_candidate(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
     numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
 ) -> bool {
     let quantized = operand_codecs(resolved, packed_operands);
     if !quantized.contains(&Some(Codec::BFloat16)) {
@@ -5062,6 +5072,7 @@ pub(crate) fn has_dense_bf16_mma_candidate(
         *reduce_op,
         *init,
         output_axes,
+        knobs,
     )
     .is_ok()
 }
@@ -5087,6 +5098,7 @@ pub(super) fn dense_batched_gemm_block(
         reduce_op,
         init,
         output_axes,
+        knobs,
     )
     .ok()
 }
@@ -5114,6 +5126,7 @@ pub fn diagnose_dense_batched_gemm_block(
         reduce_op,
         init,
         output_axes,
+        &ambient_knobs(),
     )
     .map(drop)
 }
