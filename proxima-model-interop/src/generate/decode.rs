@@ -8,6 +8,8 @@ use std::thread;
 use proxima_core::kv_carry::{Appended, Extent, KvCarry, KvCarryError, KvCommand, KvEvent, RowPair};
 use proxima_core::{ServingFsmError, ServingState};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use alloc::collections::btree_map::Entry;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_numeric::{NumericFormat, PackedRows};
 
 use super::drafter::{DrafterSet, draft_limit_for_step};
@@ -4578,6 +4580,9 @@ not read this cache format; only the single-row decode kernel reads it from the 
         let mut device_resident_flags: Vec<bool> = Vec::new();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut device_kv_attempted = false;
+        // keyed by the source program hash: the program with its K and V roots cast to the layout the cache stores
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut direct_kv_rows: BTreeMap<u64, Option<(u64, DirectKvRows)>> = BTreeMap::new();
         // plain greedy ends on the device: the pick is the last ops of the program and the
         // host reads one index (`greedy_device.rs`); everything that needs the row keeps the host path
         // a one-token call never repays it: the greedy program is its own plan, and a prefill restore
@@ -4946,6 +4951,36 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             }
                             None => (active_program, active_program_hash, &[]),
                         };
+                    // identity of the program the step belongs to, taken before the cache-row cast rewrite below swaps the pointer
+                    let program_address = active_program.as_ptr() as usize;
+                    let active_layer_roots: &[LayerCacheRoots] = active_layer_roots;
+                    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+                    let (active_program, active_program_hash, active_layer_roots): (
+                        &[Op],
+                        u64,
+                        &[LayerCacheRoots],
+                    ) = if device_kv_eligible {
+                        let direct = match direct_kv_rows.entry(active_program_hash) {
+                            Entry::Occupied(entry) => entry.into_mut(),
+                            Entry::Vacant(entry) => entry.insert(
+                                with_direct_kv_rows(
+                                    active_program,
+                                    active_layer_roots,
+                                    (
+                                        &serving_config.kv_cache_key_quant,
+                                        &serving_config.kv_cache_value_quant,
+                                    ),
+                                )?
+                                .map(|rows| (program_hash(&rows.program), rows)),
+                            ),
+                        };
+                        match direct {
+                            Some((hash, rows)) => (&rows.program, *hash, &rows.layer_roots),
+                            None => (active_program, active_program_hash, active_layer_roots),
+                        }
+                    } else {
+                        (active_program, active_program_hash, active_layer_roots)
+                    };
                     #[allow(clippy::expect_used)]
                     let active_logits_root = if let Some(forward) = recurrent_verify {
                         forward.logits
@@ -5054,7 +5089,6 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             "kv_carry_step_decision: logged when the per-step answer changes, not every token"
                         );
                     }
-                    let program_address = active_program.as_ptr() as usize;
                     let verify_address = self
                         .speculative_verify_program
                         .as_ref()

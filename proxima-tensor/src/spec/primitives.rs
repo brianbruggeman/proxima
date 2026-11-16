@@ -191,6 +191,20 @@ pub fn elementwise(
     ))
 }
 
+/// Appends one [`ScalarOp::Identity`] [`elementwise`] of `dtype` over `node`, a rank-3
+/// `[new rows, kv heads, head dim]` cache-row producer (`CachedLayerRoots`): the node's f32 value is
+/// computed as before and rounded to `dtype` once, on the store, so a backend places the rows in
+/// a cache stored as `dtype` without a host narrowing pass. Composes [`elementwise`]; the cast
+/// is its own node because an op computes in its own dtype, and retyping the producer would
+/// round every intermediate.
+pub fn store_rows_as(
+    program: &mut Vec<Op>,
+    node: NodeId,
+    dtype: DType,
+) -> Result<NodeId, TensorError> {
+    elementwise(program, dtype, ScalarOp::Identity, &[(node, "sui->sui")])
+}
+
 /// The dtype the node `node` already produces; the one place an activation-side
 /// op reads the model's activation format, which entered the graph at
 /// [`embedding_lookup_as`].

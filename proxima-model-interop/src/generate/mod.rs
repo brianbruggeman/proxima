@@ -345,7 +345,7 @@ mod warm_buffers;
 pub use cuda_serving_pipe::CudaServingPipe;
 use decode::*;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-use device_kv::{DeviceKv, KvLeafNodes, kv_leaf_nodes};
+use device_kv::{DeviceKv, DirectKvRows, KvLeafNodes, kv_leaf_nodes, with_direct_kv_rows};
 use draft_model::ModelProposer;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use greedy_device::{device_token, with_greedy_argmax};

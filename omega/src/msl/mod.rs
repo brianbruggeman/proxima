@@ -233,6 +233,7 @@ pub use cached_attention_render::{
 };
 #[cfg(feature = "metal-attn-split-rows")]
 use cached_attention_render::{ROW_TILED_KV_REASON, row_tiled_cached_type};
+pub use layout_render::device_row_store_dtype;
 pub use scaled_float_render::{q4_0_unpack_msl, q5_0_unpack_msl, q5_1_unpack_msl, q8_0_unpack_msl};
 use scaled_float_render::*;
 use selection_render::render_top_fraction_select;

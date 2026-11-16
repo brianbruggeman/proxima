@@ -14,7 +14,7 @@ use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::{BlockLayout, CodeRegion, Coded, Field, Plane};
 use proxima_numeric::float_layout::{FloatLayout, SignEncoding, Specials};
-use proxima_numeric::{FormatCodec, LevelFormat, LevelGeometry, LevelTable, NumericFormat};
+use proxima_numeric::{DType, FormatCodec, LevelFormat, LevelGeometry, LevelTable, NumericFormat};
 
 pub(crate) const F32_FRACTION_BITS: u32 = 23;
 pub(crate) const F32_INFINITY_BITS: u32 = 0x7f80_0000;
@@ -40,6 +40,23 @@ pub fn hardware_type(layout: &FloatLayout) -> Option<&'static str> {
                 && layout.sign == SignEncoding::Magnitude
         })
         .map(|entry| entry.4)
+}
+
+/// The dtype a kernel can write one element of a `format` cache row as, at the cache's own width,
+/// or `None` when it cannot. A scalar layout equal field by field to the Metal `half` is stored
+/// and computed at 16 bits; every other scalar layout (`bfloat` included) is computed in `float`
+/// ([`device_scalar_token`](super::signature_tokens_prelude::device_scalar_token)), so its device
+/// element is wider than its stored element and a row of it needs a host narrowing. A block or
+/// level format has no scalar element at all.
+///
+/// Teaching pointer: [`hardware_type`] is the field comparison; a producer node typed with the
+/// returned dtype is placed straight into a cache buffer of `format` (see `DeviceKv`).
+#[must_use]
+pub fn device_row_store_dtype(format: &NumericFormat) -> Option<DType> {
+    let NumericFormat::Scalar(layout) = format else {
+        return None;
+    };
+    (hardware_type(layout) == Some("half")).then_some(DType::Layout(*layout))
 }
 
 pub(crate) const fn exponent_ones(layout: &FloatLayout) -> u32 {
