@@ -24,7 +24,7 @@ use proxima_telemetry::tag::{ScalarValue, Tag};
 
 use super::{
     BackendRuntime, LayerCacheState, LoadedModel, LogitsSink, NodeValuesSink, PrefixState,
-    ServingConfig, ubatch_forgoes_row_kernel, ubatch_prefill_chunks,
+    ServingConfig, ubatch_forgoes_row_kernel, ubatch_prefill_chunks, wide,
 };
 
 const DENSE_LAYERS: u64 = 2;
@@ -296,9 +296,9 @@ fn cache_rows(state: &PrefixState) -> Vec<f32> {
         .iter()
         .flat_map(|cache| match cache {
             LayerCacheState::Attention(layer) => [
-                layer.k_even.as_slice(),
-                layer.k_odd.as_slice(),
-                layer.v.as_slice(),
+                wide(&layer.k_even).as_slice(),
+                wide(&layer.k_odd).as_slice(),
+                wide(&layer.v).as_slice(),
             ]
             .concat(),
             _ => Vec::new(),

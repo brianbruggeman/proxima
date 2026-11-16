@@ -53,10 +53,10 @@ fn rows_of(ids: &[u32]) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
 
 fn entry_with_rows(ids: &[u32]) -> CacheEntry {
     let (even, odd, value) = rows_of(ids);
-    let mut full = LayerCache::new();
-    full.append(&even, &odd, &value);
-    let mut ring = LayerCache::ring(KvRing::new(2, 1, 2, 1, 0), ids.len());
-    ring.append_at(0, &even, &odd, &value);
+    let mut full = LayerCache::test_new();
+    full.append(&even, &odd, &value).expect("kv rows store");
+    let mut ring = LayerCache::test_ring(KvRing::new(2, 1, 2, 1, 0), ids.len());
+    ring.append_at(0, &even, &odd, &value).expect("kv rows store");
     CacheEntry::new(
         PrefixState {
             ids: ids.to_vec(),
@@ -72,7 +72,7 @@ fn entry_with_rows(ids: &[u32]) -> CacheEntry {
 }
 
 fn disk_cache(directory: &Path, max_entries: usize) -> PromptCache {
-    let tier = Arc::new(DiskTier::open(directory, [0x22; 16]).expect("the spill directory opens"));
+    let tier = Arc::new(DiskTier::open(directory, [0x22; 16], (&NumericFormat::Float32, &NumericFormat::Float32)).expect("the spill directory opens"));
     let mut cache = PromptCache::new();
     cache.set_cold(tier, max_entries, 1 << 30);
     cache

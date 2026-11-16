@@ -143,10 +143,10 @@ mod tests {
                     .collect();
                 match state {
                     LayerCacheState::Attention(layer_cache) => {
-                        layer_cache.append(&synthetic, &synthetic, &synthetic);
+                        layer_cache.append(&synthetic, &synthetic, &synthetic).expect("kv rows store");
                     }
                     LayerCacheState::DenseAttention(layer_cache) => {
-                        layer_cache.append(&synthetic, &synthetic, &synthetic, &synthetic);
+                        layer_cache.append(&synthetic, &synthetic, &synthetic, &synthetic).expect("kv rows store");
                     }
                     LayerCacheState::Ssm(layer_cache) => {
                         layer_cache.advance(&synthetic, &synthetic, synthetic.len());
@@ -169,7 +169,7 @@ mod tests {
 
     fn fresh_cache() -> ServingCache {
         alloc::vec![
-            LayerCacheState::Attention(LayerCache::new()),
+            LayerCacheState::Attention(LayerCache::test_new()),
             LayerCacheState::ShortConv(ShortConvLayerCache::new(4, 2)),
             LayerCacheState::Ssm(SsmLayerCache::new(4, 2)),
         ]
@@ -205,7 +205,7 @@ mod tests {
             panic!("layer 0 is Attention");
         };
         assert_eq!(
-            attention.k_even.len(),
+            attention.k_even.elements(),
             prompt_rows,
             "prefill placed every prompt row into layer 0's cache"
         );
@@ -242,7 +242,7 @@ mod tests {
             panic!("layer 0 is Attention");
         };
         assert_eq!(
-            attention.k_even.len(),
+            attention.k_even.elements(),
             prompt_rows + 1,
             "3 prefill rows plus this one decode row"
         );

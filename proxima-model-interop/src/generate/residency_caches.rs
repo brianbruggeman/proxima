@@ -17,7 +17,7 @@ use crate::rope_scaling::rope_cos_sin;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 use proxima_core::ProximaError;
 use proxima_core::ServingState;
-use proxima_numeric::NumericFormat;
+use proxima_numeric::{NumericFormat, PackedRows};
 #[cfg(all(
     feature = "instrument",
     feature = "gpu",
@@ -647,21 +647,61 @@ impl LogitsSink<'_> {
     }
 }
 
-/// Bytes a host slice occupies, read off the container itself: the host layer caches are `Vec<f32>`
-/// whatever `-ctk`/`-ctv` is (it rounds on write, host_kv_rounding.rs), so the count names no format.
+/// Bytes a host slice occupies, read off the container itself.
+#[cfg(feature = "instrument")]
+pub(super) fn packed_rows_bytes(rows: &PackedRows) -> u64 {
+    rows.as_bytes().len() as u64
+}
+
 #[cfg(feature = "instrument")]
 pub(super) fn host_slice_bytes<T>(slice: &[T]) -> u64 {
     core::mem::size_of_val(slice) as u64
 }
 
-/// This call's growable per-layer key/value cache, stored as binary32 whatever the serving
-/// `kv_cache_key_quant`/`kv_cache_value_quant` is: admission accepts any format that encodes, and the host
-/// rounds each appended row to that format on write (host_kv_rounding.rs).
+/// The formats the host KV rows are stored in: the serving config's `kv_cache_key_quant` for
+/// every K plane and `kv_cache_value_quant` for V.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct KvFormats {
+    pub(super) key: NumericFormat,
+    pub(super) value: NumericFormat,
+}
+
+impl KvFormats {
+    /// The pair the serving config's `-ctk`/`-ctv` name.
+    pub(super) fn of(config: &ServingConfig) -> Self {
+        Self {
+            key: config.kv_cache_key_quant,
+            value: config.kv_cache_value_quant,
+        }
+    }
+}
+
+/// A run decoded to binary32 for an assertion to read.
+#[cfg(test)]
+pub(super) fn wide(rows: &PackedRows) -> Vec<f32> {
+    let mut values = Vec::new();
+    rows.decode_all(&mut values).expect("a held run decodes");
+    values
+}
+
+#[cfg(test)]
+impl KvFormats {
+    pub(super) fn binary32() -> Self {
+        Self {
+            key: NumericFormat::Float32,
+            value: NumericFormat::Float32,
+        }
+    }
+}
+
+/// This call's growable per-layer key/value cache: each plane is the packed bytes of its
+/// configured format ([`PackedRows`]), encoded at the write; a reader decodes the rows it needs
+/// into scratch it owns.
 #[derive(Clone)]
 pub(super) struct LayerCache {
-    pub(super) k_even: Vec<f32>,
-    pub(super) k_odd: Vec<f32>,
-    pub(super) v: Vec<f32>,
+    pub(super) k_even: PackedRows,
+    pub(super) k_odd: PackedRows,
+    pub(super) v: PackedRows,
     /// `Some` for a sliding-window layer whose rows live in a ring
     /// ([`LayerCache::ring`]); `None` for a layer that stores every position.
     pub(super) ring: Option<KvRing>,
@@ -675,17 +715,30 @@ pub(super) struct LayerCache {
     pub(super) block_summaries: Vec<Vec<f32>>,
 }
 
+#[cfg(test)]
 impl LayerCache {
-    pub(super) fn new() -> Self {
-        Self {
-            k_even: Vec::new(),
-            k_odd: Vec::new(),
-            v: Vec::new(),
+    pub(super) fn test_new() -> Self {
+        Self::new(&KvFormats::binary32()).expect("binary32 has a codec")
+    }
+
+    pub(super) fn test_ring(ring: KvRing, positions_needed: usize) -> Self {
+        Self::ring(&KvFormats::binary32(), ring, positions_needed).expect("binary32 has a codec")
+    }
+}
+
+impl LayerCache {
+    /// # Errors
+    /// [`InteropError::Numeric`] when a format has no codec that encodes.
+    pub(super) fn new(formats: &KvFormats) -> Result<Self, InteropError> {
+        Ok(Self {
+            k_even: PackedRows::new(&formats.key)?,
+            k_odd: PackedRows::new(&formats.key)?,
+            v: PackedRows::new(&formats.value)?,
             ring: None,
             sealed_end: 0,
             block_tokens: 0,
             block_summaries: Vec::new(),
-        }
+        })
     }
 
     /// Raises the sealed end to what `kv_decision::sealed_blocks` allows and returns the newly sealed block range.
@@ -704,7 +757,7 @@ impl LayerCache {
             self.block_tokens = block_tokens;
             self.block_summaries.clear();
         }
-        let rows = self.k_even.len() / even_odd_row;
+        let rows = self.k_even.elements() / even_odd_row;
         let blocks = proxima_core::kv_decision::sealed_blocks(
             self.sealed_end,
             rows,
@@ -715,10 +768,13 @@ impl LayerCache {
         blocks
     }
 
-    pub(super) fn append(&mut self, even: &[f32], odd: &[f32], value: &[f32]) {
-        self.k_even.extend_from_slice(even);
-        self.k_odd.extend_from_slice(odd);
-        self.v.extend_from_slice(value);
+    /// # Errors
+    /// [`InteropError::Numeric`] when a row is not whole blocks of its format.
+    pub(super) fn append(&mut self, even: &[f32], odd: &[f32], value: &[f32]) -> Result<(), InteropError> {
+        self.k_even.extend(even)?;
+        self.k_odd.extend(odd)?;
+        self.v.extend(value)?;
+        Ok(())
     }
 
     /// [`Self::append`]'s inverse for speculative decode's KV-rewind: a
@@ -743,19 +799,25 @@ impl LayerCache {
     /// The whole-state rewinds (prompt cache lookup, ring checkpoint restore,
     /// chunk shift) discard rows they rebuild, so they lower the sealed end
     /// with the rows.
-    pub(super) fn truncate(&mut self, keep_positions: usize, even_odd_row: usize, v_row: usize) {
+    pub(super) fn truncate(
+        &mut self,
+        keep_positions: usize,
+        even_odd_row: usize,
+        v_row: usize,
+    ) -> Result<(), InteropError> {
         if self.ring.is_some() {
-            return;
+            return Ok(());
         }
-        self.k_even.truncate(keep_positions * even_odd_row);
-        self.k_odd.truncate(keep_positions * even_odd_row);
-        self.v.truncate(keep_positions * v_row);
+        self.k_even.truncate(keep_positions * even_odd_row)?;
+        self.k_odd.truncate(keep_positions * even_odd_row)?;
+        self.v.truncate(keep_positions * v_row)?;
         self.sealed_end = self.sealed_end.min(keep_positions);
         if self.block_tokens > 0 {
             self.sealed_end -= self.sealed_end % self.block_tokens;
             self.block_summaries
                 .truncate(self.sealed_end / self.block_tokens);
         }
+        Ok(())
     }
 
     /// Brings the per-block records up to the sealed blocks, one `summarize` call per block that has none.
@@ -764,26 +826,29 @@ impl LayerCache {
         even_odd_row: usize,
         v_row: usize,
         summarize: BlockSummarizer,
-    ) {
+    ) -> Result<(), InteropError> {
         if self.ring_geometry().is_some() || self.block_tokens == 0 {
-            return;
+            return Ok(());
         }
+        let (mut even, mut odd, mut value) = (Vec::new(), Vec::new(), Vec::new());
         let sealed_blocks = self.sealed_end / self.block_tokens;
         self.block_summaries.truncate(sealed_blocks);
         for block in self.block_summaries.len()..sealed_blocks {
             let k_rows = self.block_tokens * even_odd_row;
             let v_rows = self.block_tokens * v_row;
-            let record = summarize(
-                &self.k_even[block * k_rows..(block + 1) * k_rows],
-                &self.k_odd[block * k_rows..(block + 1) * k_rows],
-                &self.v[block * v_rows..(block + 1) * v_rows],
-                even_odd_row,
-            );
+            even.resize(k_rows, 0.0);
+            odd.resize(k_rows, 0.0);
+            value.resize(v_rows, 0.0);
+            self.k_even.decode_range(block * k_rows, &mut even)?;
+            self.k_odd.decode_range(block * k_rows, &mut odd)?;
+            self.v.decode_range(block * v_rows, &mut value)?;
+            let record = summarize(&even, &odd, &value, even_odd_row);
             self.block_summaries.push(record);
         }
+        Ok(())
     }
 
-    /// The in-flight rewind: refuses to cut into sealed rows; the whole-state rewinds keep the infallible `truncate`.
+    /// The in-flight rewind: refuses to cut into sealed rows; the whole-state rewinds call `truncate` directly.
     pub(super) fn try_truncate(
         &mut self,
         keep_positions: usize,
@@ -796,8 +861,7 @@ impl LayerCache {
                 sealed_end: self.sealed_end,
             });
         }
-        self.truncate(keep_positions, even_odd_row, v_row);
-        Ok(())
+        self.truncate(keep_positions, even_odd_row, v_row)
     }
 }
 
@@ -823,12 +887,12 @@ mod layer_cache_truncate_tests {
             (vec![4.0, 4.1, 4.2], vec![4.3, 4.4, 4.5], vec![4.6, 4.7]),
         ];
 
-        let mut incremental = LayerCache::new();
+        let mut incremental = LayerCache::test_new();
         for (even, odd, value) in positions.iter().take(2) {
-            incremental.append(even, odd, value);
+            incremental.append(even, odd, value).expect("kv rows store");
         }
 
-        let mut speculative = LayerCache::new();
+        let mut speculative = LayerCache::test_new();
         let even_batch: Vec<f32> = positions
             .iter()
             .flat_map(|(even, _, _)| even.clone())
@@ -841,8 +905,8 @@ mod layer_cache_truncate_tests {
             .iter()
             .flat_map(|(_, _, value)| value.clone())
             .collect();
-        speculative.append(&even_batch, &odd_batch, &value_batch);
-        speculative.truncate(2, even_odd_row, v_row);
+        speculative.append(&even_batch, &odd_batch, &value_batch).expect("kv rows store");
+        speculative.truncate(2, even_odd_row, v_row).expect("kv rows store");
 
         assert_eq!(speculative.k_even, incremental.k_even);
         assert_eq!(speculative.k_odd, incremental.k_odd);
@@ -853,11 +917,11 @@ mod layer_cache_truncate_tests {
     /// truncate is a no-op, the common case when the draft is fully right.
     #[test]
     fn truncate_at_full_length_is_a_no_op() {
-        let mut cache = LayerCache::new();
-        cache.append(&[1.0, 2.0], &[3.0, 4.0], &[5.0]);
+        let mut cache = LayerCache::test_new();
+        cache.append(&[1.0, 2.0], &[3.0, 4.0], &[5.0]).expect("kv rows store");
         let before = cache.clone();
 
-        cache.truncate(1, 2, 1);
+        cache.truncate(1, 2, 1).expect("kv rows store");
 
         assert_eq!(cache.k_even, before.k_even);
         assert_eq!(cache.k_odd, before.k_odd);
@@ -868,10 +932,10 @@ mod layer_cache_truncate_tests {
     /// disagreed): rewinds all the way back to empty.
     #[test]
     fn truncate_to_zero_positions_empties_every_leaf() {
-        let mut cache = LayerCache::new();
-        cache.append(&[1.0, 2.0], &[3.0, 4.0], &[5.0, 6.0]);
+        let mut cache = LayerCache::test_new();
+        cache.append(&[1.0, 2.0], &[3.0, 4.0], &[5.0, 6.0]).expect("kv rows store");
 
-        cache.truncate(0, 2, 2);
+        cache.truncate(0, 2, 2).expect("kv rows store");
 
         assert!(cache.k_even.is_empty());
         assert!(cache.k_odd.is_empty());
@@ -893,7 +957,7 @@ pub(super) fn seal_attention_layers(
     block_tokens: usize,
     horizon_rows: usize,
     summarize: Option<BlockSummarizer>,
-) {
+) -> Result<(), InteropError> {
     for (state, width) in layer_caches.iter_mut().zip(widths) {
         let (
             LayerCacheState::Attention(cache),
@@ -907,14 +971,16 @@ pub(super) fn seal_attention_layers(
         };
         cache.seal(*even_odd_row, block_tokens, horizon_rows);
         if let Some(summarizer) = summarize {
-            cache.summarize_sealed(*even_odd_row, *v_row, summarizer);
+            cache.summarize_sealed(*even_odd_row, *v_row, summarizer)?;
         }
     }
+    Ok(())
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod layer_cache_sealing_tests {
+    use super::wide;
     use super::{
         BlockSummarizer, LayerCache, LayerCacheState, LayerPadRowWidths, seal_attention_layers,
     };
@@ -952,7 +1018,7 @@ mod layer_cache_sealing_tests {
         summarize: Option<BlockSummarizer>,
     ) {
         let widths = widths_for(layers);
-        seal_attention_layers(layers, &widths, block_tokens, horizon_rows, summarize);
+        seal_attention_layers(layers, &widths, block_tokens, horizon_rows, summarize).expect("kv rows store");
     }
 
     fn value_sum(_k_even: &[f32], _k_odd: &[f32], value: &[f32], _even_odd_row: usize) -> Vec<f32> {
@@ -960,10 +1026,10 @@ mod layer_cache_sealing_tests {
     }
 
     fn ring_of_eight_rows() -> LayerCache {
-        let mut cache = LayerCache::ring(KvRing::new(4, 0, 2, 1, 0), 8);
+        let mut cache = LayerCache::test_ring(KvRing::new(4, 0, 2, 1, 0), 8);
         for position in 0..8 {
             let (even, odd, value) = row_at(position);
-            cache.append_at(position, &even, &odd, &value);
+            cache.append_at(position, &even, &odd, &value).expect("kv rows store");
         }
         cache
     }
@@ -974,10 +1040,10 @@ mod layer_cache_sealing_tests {
     }
 
     fn cache_with_rows(rows: usize) -> LayerCache {
-        let mut cache = LayerCache::new();
+        let mut cache = LayerCache::test_new();
         for position in 0..rows {
             let (even, odd, value) = row_at(position);
-            cache.append(&even, &odd, &value);
+            cache.append(&even, &odd, &value).expect("kv rows store");
         }
         cache
     }
@@ -989,7 +1055,7 @@ mod layer_cache_sealing_tests {
         assert_eq!(cache.sealed_end, 4);
         for position in 5..10 {
             let (even, odd, value) = row_at(position);
-            cache.append(&even, &odd, &value);
+            cache.append(&even, &odd, &value).expect("kv rows store");
         }
         assert_eq!(cache.seal(2, 4, 1), 1..2);
         assert_eq!(cache.sealed_end, 8);
@@ -1040,14 +1106,14 @@ mod layer_cache_sealing_tests {
         let cache = attention(&mut layers, 0);
         assert_eq!(cache.sealed_end, 4);
         let (even, odd, value) = (
-            cache.k_even[..8].to_vec(),
-            cache.k_odd[..8].to_vec(),
-            cache.v[..4].to_vec(),
+            wide(&cache.k_even)[..8].to_vec(),
+            wide(&cache.k_odd)[..8].to_vec(),
+            wide(&cache.v)[..4].to_vec(),
         );
 
         for position in 5..10 {
             let (row_even, row_odd, row_value) = row_at(position);
-            attention(&mut layers, 0).append(&row_even, &row_odd, &row_value);
+            attention(&mut layers, 0).append(&row_even, &row_odd, &row_value).expect("kv rows store");
         }
         seal(&mut layers, 4, 1, None);
 
@@ -1059,9 +1125,9 @@ mod layer_cache_sealing_tests {
                 .map(|value| value.to_bits())
                 .collect::<Vec<u32>>()
         };
-        assert_eq!(bits(&cache.k_even[..8]), bits(&even));
-        assert_eq!(bits(&cache.k_odd[..8]), bits(&odd));
-        assert_eq!(bits(&cache.v[..4]), bits(&value));
+        assert_eq!(bits(&wide(&cache.k_even)[..8]), bits(&even));
+        assert_eq!(bits(&wide(&cache.k_odd)[..8]), bits(&odd));
+        assert_eq!(bits(&wide(&cache.v)[..4]), bits(&value));
     }
 
     #[test]
@@ -1092,14 +1158,14 @@ mod layer_cache_sealing_tests {
         let mut cache = cache_with_rows(6);
         cache.sealed_end = 4;
 
-        cache.truncate(2, 2, 1);
+        cache.truncate(2, 2, 1).expect("kv rows store");
 
-        assert_eq!(cache.k_even.len(), 4);
+        assert_eq!(cache.k_even.elements(), 4);
         assert_eq!(cache.sealed_end, 2);
 
-        cache.truncate(5, 2, 1);
+        cache.truncate(5, 2, 1).expect("kv rows store");
 
-        assert_eq!(cache.k_even.len(), 4);
+        assert_eq!(cache.k_even.elements(), 4);
         assert_eq!(cache.sealed_end, 2);
     }
 
@@ -1110,7 +1176,7 @@ mod layer_cache_sealing_tests {
         assert_eq!(cache.sealed_end, 8);
         cache.block_summaries = vec![vec![60.0f32], vec![220.0f32]];
 
-        cache.truncate(5, 2, 1);
+        cache.truncate(5, 2, 1).expect("kv rows store");
 
         assert_eq!(cache.sealed_end, 4);
         assert_eq!(cache.block_summaries, vec![vec![60.0f32]]);
@@ -1157,13 +1223,13 @@ mod layer_cache_sealing_tests {
         let mut cache = cache_with_rows(9);
         cache.seal(2, 4, 1);
 
-        cache.summarize_sealed(2, 1, value_sum);
+        cache.summarize_sealed(2, 1, value_sum).expect("kv rows store");
         assert_eq!(cache.block_summaries, vec![vec![60.0f32], vec![220.0f32]]);
-        cache.summarize_sealed(2, 1, value_sum);
+        cache.summarize_sealed(2, 1, value_sum).expect("kv rows store");
         assert_eq!(cache.block_summaries, vec![vec![60.0f32], vec![220.0f32]]);
 
-        cache.truncate(5, 2, 1);
-        cache.summarize_sealed(2, 1, value_sum);
+        cache.truncate(5, 2, 1).expect("kv rows store");
+        cache.summarize_sealed(2, 1, value_sum).expect("kv rows store");
         assert_eq!(cache.block_summaries, vec![vec![60.0f32]]);
     }
 
@@ -1193,14 +1259,14 @@ mod layer_cache_sealing_tests {
                 sealed_end: 4
             })
         ));
-        assert_eq!(cache.k_even.len(), 12);
+        assert_eq!(cache.k_even.elements(), 12);
 
         assert!(cache.try_truncate(4, 2, 1).is_ok());
-        assert_eq!(cache.k_even.len(), 8);
-        assert_eq!(cache.v.len(), 4);
+        assert_eq!(cache.k_even.elements(), 8);
+        assert_eq!(cache.v.elements(), 4);
 
         assert!(cache.try_truncate(9, 2, 1).is_ok());
-        assert_eq!(cache.k_even.len(), 8);
+        assert_eq!(cache.k_even.elements(), 8);
     }
 
     #[test]
@@ -1224,14 +1290,14 @@ mod layer_cache_sealing_tests {
 
     fn append_and_seal(cache: &mut LayerCache, position: usize) {
         let (even, odd, value) = row_at(position);
-        cache.append(&even, &odd, &value);
+        cache.append(&even, &odd, &value).expect("kv rows store");
         cache.seal(2, 4, 1);
-        cache.summarize_sealed(2, 1, key_minmax);
+        cache.summarize_sealed(2, 1, key_minmax).expect("kv rows store");
     }
 
     #[test]
     fn seal_worked_trace() {
-        let mut cache = LayerCache::new();
+        let mut cache = LayerCache::test_new();
         let mut appends = 0_usize;
         let mut rewinds = 0_usize;
         let appended: [(usize, usize); 5] = [(1, 0), (2, 0), (3, 0), (4, 0), (5, 4)];
@@ -1239,7 +1305,7 @@ mod layer_cache_sealing_tests {
             append_and_seal(&mut cache, position);
             appends += 1;
             assert_eq!(
-                (cache.k_even.len() / 2, cache.sealed_end),
+                (cache.k_even.elements() / 2, cache.sealed_end),
                 (rows, sealed_end)
             );
         }
@@ -1248,13 +1314,13 @@ mod layer_cache_sealing_tests {
         cache
             .try_truncate(4, 2, 1)
             .expect("a rewind to the sealed end is allowed");
-        assert_eq!((cache.k_even.len() / 2, cache.sealed_end), (4, 4));
+        assert_eq!((cache.k_even.elements() / 2, cache.sealed_end), (4, 4));
         let regrown: [(usize, usize); 5] = [(5, 4), (6, 4), (7, 4), (8, 4), (9, 8)];
         for (position, (rows, sealed_end)) in (4..).zip(regrown) {
             append_and_seal(&mut cache, position);
             appends += 1;
             assert_eq!(
-                (cache.k_even.len() / 2, cache.sealed_end),
+                (cache.k_even.elements() / 2, cache.sealed_end),
                 (rows, sealed_end)
             );
         }
@@ -1263,7 +1329,7 @@ mod layer_cache_sealing_tests {
         cache
             .try_truncate(8, 2, 1)
             .expect("a rewind to the sealed end is allowed");
-        assert_eq!((cache.k_even.len() / 2, cache.sealed_end), (8, 8));
+        assert_eq!((cache.k_even.elements() / 2, cache.sealed_end), (8, 8));
 
         rewinds += 1;
         let refused = cache.try_truncate(7, 2, 1);
@@ -1274,7 +1340,7 @@ mod layer_cache_sealing_tests {
                 sealed_end: 8
             })
         ));
-        assert_eq!(cache.k_even.len(), 16);
+        assert_eq!(cache.k_even.elements(), 16);
         assert_eq!(cache.sealed_end, 8);
 
         assert_eq!((appends, rewinds), (10, 3));
@@ -1313,7 +1379,7 @@ mod layer_cache_sealing_tests {
             .run(
                 &(0usize..=3, vec(operation, 1..60)),
                 |(horizon, operations)| {
-                    let mut cache = LayerCache::new();
+                    let mut cache = LayerCache::test_new();
                     let mut rows = 0_usize;
                     for operation in operations {
                         let before = cache.sealed_end;
@@ -1321,7 +1387,7 @@ mod layer_cache_sealing_tests {
                             Op::Append(count) => {
                                 for position in rows..rows + count {
                                     let (even, odd, value) = row_at(position);
-                                    cache.append(&even, &odd, &value);
+                                    cache.append(&even, &odd, &value).expect("kv rows store");
                                 }
                                 rows += count;
                                 cache.seal(2, 4, horizon);
@@ -1353,7 +1419,7 @@ mod layer_cache_sealing_tests {
                                 }
                             }
                         }
-                        prop_assert_eq!(cache.k_even.len(), rows * 2);
+                        prop_assert_eq!(cache.k_even.elements(), rows * 2);
                         prop_assert_eq!(cache.sealed_end % 4, 0);
                         prop_assert!(cache.sealed_end >= before);
                         prop_assert!(cache.sealed_end <= rows);
@@ -1383,23 +1449,34 @@ mod layer_cache_sealing_tests {
 /// reuse-across-steps shape [`run_decode_loop_placed_kv`]'s own
 /// single-range path's placeholder scratch.
 pub(super) struct KvPadScratch {
-    pub(super) k_even: Vec<f32>,
-    pub(super) k_odd: Vec<f32>,
-    pub(super) v: Vec<f32>,
+    /// The padded rows in the stored format, held for a plane the kernel reads packed.
+    packed: [PackedRows; 3],
+    /// The padded rows decoded to binary32, held for a plane whose kernel reads wide values.
+    wide: [Vec<f32>; 3],
+    read_packed: [bool; 3],
 }
 
 impl KvPadScratch {
-    pub(super) fn new() -> Self {
-        Self {
-            k_even: Vec::new(),
-            k_odd: Vec::new(),
-            v: Vec::new(),
-        }
+    /// # Errors
+    /// [`InteropError::Numeric`] when a format has no codec that encodes.
+    pub(super) fn new(formats: &KvFormats) -> Result<Self, InteropError> {
+        Ok(Self {
+            packed: [
+                PackedRows::new(&formats.key)?,
+                PackedRows::new(&formats.key)?,
+                PackedRows::new(&formats.value)?,
+            ],
+            wide: [Vec::new(), Vec::new(), Vec::new()],
+            read_packed: [false; 3],
+        })
     }
 
-    /// A ring `source` ([`KvRing`]) is unrolled instead of copied whole: its
-    /// most recent `min(cached_len, window)` rows land oldest-first at the
-    /// front of the scratch, `cached_len` being the positions cached before
+    /// Pads `source` to `shape`. A plane whose kernel reads the stored format
+    /// (`read_packed`, the `(key, value)` answer of the cached-attention kernel's own capability
+    /// query) is copied byte for byte and bound packed; any other plane is decoded through the
+    /// format's codec into this scratch's binary32 buffer. A ring `source` ([`KvRing`]) is
+    /// unrolled instead of copied whole: its most recent `min(cached_len, window)` rows land
+    /// oldest-first at the front of the scratch, `cached_len` being the positions cached before
     /// this step.
     ///
     /// # Errors
@@ -1418,31 +1495,51 @@ impl KvPadScratch {
         shape: &KvPadShape,
         layer: usize,
         cached_len: usize,
+        read_packed: (bool, bool),
     ) -> Result<(), InteropError> {
-        let even_odd_len = shape.even_odd_len();
-        let v_len = shape.v_len();
-        if self.k_even.len() < even_odd_len {
-            self.k_even.resize(even_odd_len, 0.0);
+        #[cfg(feature = "instrument")]
+        let fill_started = read_ticks();
+        let unrolled = source.unroll_live_packed(cached_len)?;
+        let planes = match &unrolled {
+            Some([even, odd, value]) => [even, odd, value],
+            None => [&source.k_even, &source.k_odd, &source.v],
+        };
+        let lens = [shape.even_odd_len(), shape.even_odd_len(), shape.v_len()];
+        let leaves = ["k_even", "k_odd", "v"];
+        let flags = [read_packed.0, read_packed.0, read_packed.1];
+        for (index, plane) in planes.into_iter().enumerate() {
+            let (len, found) = (lens[index], plane.elements());
+            if found > len {
+                return Err(InteropError::CacheScratchShapeMismatch {
+                    layer,
+                    leaf: leaves[index],
+                    expected: len,
+                    found,
+                });
+            }
+            self.read_packed[index] = flags[index];
+            if flags[index] {
+                self.packed[index].grow_zeroed(len)?;
+                self.packed[index].overwrite_from(0, plane, 0, found)?;
+            } else {
+                if self.wide[index].len() < len {
+                    self.wide[index].resize(len, 0.0);
+                }
+                plane.decode_range(0, &mut self.wide[index][..found])?;
+            }
         }
-        if self.k_odd.len() < even_odd_len {
-            self.k_odd.resize(even_odd_len, 0.0);
-        }
-        if self.v.len() < v_len {
-            self.v.resize(v_len, 0.0);
-        }
-        if source.ring.is_some() {
-            source.unroll_live_rows(
-                cached_len,
-                &mut self.k_even,
-                &mut self.k_odd,
-                &mut self.v,
-                layer,
-            )?;
-            return Ok(());
-        }
-        copy_into_padded(&mut self.k_even, &source.k_even, layer, "k_even")?;
-        copy_into_padded(&mut self.k_odd, &source.k_odd, layer, "k_odd")?;
-        copy_into_padded(&mut self.v, &source.v, layer, "v")?;
+        #[cfg(feature = "instrument")]
+        debug!(
+            layer = layer as u64,
+            cached_len = cached_len as u64,
+            ring = source.ring.is_some(),
+            key_packed = read_packed.0,
+            value_packed = read_packed.1,
+            k_even_found = planes[0].elements() as u64,
+            v_found = planes[2].elements() as u64,
+            fill_ns = ticks_to_nanos(elapsed_ticks(fill_started)),
+            "kv_pad_scratch_fill: planes the kernel reads packed bind as bytes, the rest are decoded wide"
+        );
         Ok(())
     }
 
@@ -1452,18 +1549,26 @@ impl KvPadScratch {
         k_odd_name: &'cache str,
         v_name: &'cache str,
         shape: &KvPadShape,
-    ) -> [(&'cache str, QuantizedBlock<'cache>); 3] {
-        [
-            (
-                k_even_name,
-                QuantizedBlock::Float32(&self.k_even[..shape.even_odd_len()]),
-            ),
-            (
-                k_odd_name,
-                QuantizedBlock::Float32(&self.k_odd[..shape.even_odd_len()]),
-            ),
-            (v_name, QuantizedBlock::Float32(&self.v[..shape.v_len()])),
-        ]
+    ) -> Result<[(&'cache str, QuantizedBlock<'cache>); 3], InteropError> {
+        let lens = [shape.even_odd_len(), shape.even_odd_len(), shape.v_len()];
+        let names = [k_even_name, k_odd_name, v_name];
+        let mut blocks = [(k_even_name, QuantizedBlock::Float32(&[])); 3];
+        for index in 0..3 {
+            blocks[index] = (names[index], self.block(index, lens[index])?);
+        }
+        Ok(blocks)
+    }
+
+    fn block(&self, index: usize, len: usize) -> Result<QuantizedBlock<'_>, InteropError> {
+        if !self.read_packed[index] {
+            return Ok(QuantizedBlock::Float32(&self.wide[index][..len]));
+        }
+        let rows = &self.packed[index];
+        let bytes = rows.bytes_of(len)?;
+        Ok(QuantizedBlock::Packed {
+            codec: *rows.format(),
+            bytes,
+        })
     }
 }
 
@@ -1526,12 +1631,12 @@ impl KvPadShape {
 /// dest.len()`.
 pub(super) fn copy_into_padded(
     dest: &mut [f32],
-    source: &[f32],
+    source: &PackedRows,
     layer: usize,
     leaf: &'static str,
 ) -> Result<(), InteropError> {
     let expected = dest.len();
-    let found = source.len();
+    let found = source.elements();
     if found > expected {
         return Err(InteropError::CacheScratchShapeMismatch {
             layer,
@@ -1540,7 +1645,7 @@ pub(super) fn copy_into_padded(
             found,
         });
     }
-    dest[..found].copy_from_slice(source);
+    source.decode_range(0, &mut dest[..found])?;
     Ok(())
 }
 
@@ -1553,27 +1658,45 @@ pub(super) fn copy_into_padded(
 /// name for the plain single-section-RoPE checkpoints.
 #[derive(Clone)]
 pub(super) struct DenseAttentionCache {
-    pub(super) k_first: Vec<f32>,
-    pub(super) k_second: Vec<f32>,
-    pub(super) k_pass: Vec<f32>,
-    pub(super) v: Vec<f32>,
+    pub(super) k_first: PackedRows,
+    pub(super) k_second: PackedRows,
+    pub(super) k_pass: PackedRows,
+    pub(super) v: PackedRows,
+}
+
+#[cfg(test)]
+impl DenseAttentionCache {
+    pub(super) fn test_new() -> Self {
+        Self::new(&KvFormats::binary32()).expect("binary32 has a codec")
+    }
 }
 
 impl DenseAttentionCache {
-    pub(super) fn new() -> Self {
-        Self {
-            k_first: Vec::new(),
-            k_second: Vec::new(),
-            k_pass: Vec::new(),
-            v: Vec::new(),
-        }
+    /// # Errors
+    /// [`InteropError::Numeric`] when a format has no codec that encodes.
+    pub(super) fn new(formats: &KvFormats) -> Result<Self, InteropError> {
+        Ok(Self {
+            k_first: PackedRows::new(&formats.key)?,
+            k_second: PackedRows::new(&formats.key)?,
+            k_pass: PackedRows::new(&formats.key)?,
+            v: PackedRows::new(&formats.value)?,
+        })
     }
 
-    pub(super) fn append(&mut self, first: &[f32], second: &[f32], pass: &[f32], value: &[f32]) {
-        self.k_first.extend_from_slice(first);
-        self.k_second.extend_from_slice(second);
-        self.k_pass.extend_from_slice(pass);
-        self.v.extend_from_slice(value);
+    /// # Errors
+    /// [`InteropError::Numeric`] when a row is not whole blocks of its format.
+    pub(super) fn append(
+        &mut self,
+        first: &[f32],
+        second: &[f32],
+        pass: &[f32],
+        value: &[f32],
+    ) -> Result<(), InteropError> {
+        self.k_first.extend(first)?;
+        self.k_second.extend(second)?;
+        self.k_pass.extend(pass)?;
+        self.v.extend(value)?;
+        Ok(())
     }
 }
 
@@ -1857,17 +1980,21 @@ pub(super) enum LayerCacheState {
 pub(super) fn layer_cache_checksum(cache: &LayerCacheState) -> (usize, f64) {
     let sum_abs =
         |values: &[f32]| -> f64 { values.iter().map(|value| f64::from(value.abs())).sum() };
+    let sum_abs_packed = |rows: &PackedRows| -> f64 {
+        let mut values = Vec::new();
+        rows.decode_all(&mut values).map_or(0.0, |()| sum_abs(&values))
+    };
     match cache {
         LayerCacheState::Attention(cache) => (
-            cache.k_even.len() + cache.k_odd.len() + cache.v.len(),
-            sum_abs(&cache.k_even) + sum_abs(&cache.k_odd) + sum_abs(&cache.v),
+            cache.k_even.elements() + cache.k_odd.elements() + cache.v.elements(),
+            sum_abs_packed(&cache.k_even) + sum_abs_packed(&cache.k_odd) + sum_abs_packed(&cache.v),
         ),
         LayerCacheState::DenseAttention(cache) => (
-            cache.k_first.len() + cache.k_second.len() + cache.k_pass.len() + cache.v.len(),
-            sum_abs(&cache.k_first)
-                + sum_abs(&cache.k_second)
-                + sum_abs(&cache.k_pass)
-                + sum_abs(&cache.v),
+            cache.k_first.elements() + cache.k_second.elements() + cache.k_pass.elements() + cache.v.elements(),
+            sum_abs_packed(&cache.k_first)
+                + sum_abs_packed(&cache.k_second)
+                + sum_abs_packed(&cache.k_pass)
+                + sum_abs_packed(&cache.v),
         ),
         LayerCacheState::ShortConv(cache) => (cache.history.len(), sum_abs(&cache.history)),
         LayerCacheState::Ssm(cache) => (
@@ -1890,7 +2017,7 @@ pub(super) fn layer_cache_checksum(cache: &LayerCacheState) -> (usize, f64) {
 /// nonzero `cached_len` and a suffix-only `next_ids` to start from rather
 /// than the whole prompt at `cached_len == 0`.
 ///
-/// Plain host `Vec<f32>` buffers throughout (`LayerCache`'s own field
+/// Plain host buffers throughout (`LayerCache`'s own field
 /// list) -- the two-range decode path never registers a named,
 /// device-resident buffer for the KV cache the way
 /// `LoadedModel::resident_names`'s STATIC weights do (only re-uploads it
@@ -2294,7 +2421,13 @@ pub(super) fn push_kv_named_blocks<'call>(
                 if device_resident.get(layer).copied().unwrap_or(false) {
                     continue;
                 }
-                kv_pad_scratch[layer].fill(cache, &shape, layer, cached_len)?;
+                kv_pad_scratch[layer].fill(
+                    cache,
+                    &shape,
+                    layer,
+                    cached_len,
+                    (device_codec.0.is_some(), device_codec.1.is_some()),
+                )?;
             }
             (
                 LayerCacheState::DenseAttention(cache),
@@ -2349,7 +2482,7 @@ pub(super) fn push_kv_named_blocks<'call>(
                     ]);
                     continue;
                 }
-                named_blocks.extend(kv_pad_scratch[layer].named_blocks(k_even, k_odd, v, &shape));
+                named_blocks.extend(kv_pad_scratch[layer].named_blocks(k_even, k_odd, v, &shape)?);
             }
             (
                 LayerCacheNames::DenseAttention {
@@ -7258,25 +7391,28 @@ impl Drop for BackendRuntime {
 
 #[cfg(all(test, feature = "instrument"))]
 mod host_cache_format_tests {
-    use super::host_slice_bytes;
+    use super::packed_rows_bytes;
     use crate::gemma4_fixture::SLIDING_HEAD_DIM;
     use crate::kv_cache_format;
-    use proxima_numeric::NumericFormat;
+    use proxima_numeric::{NumericFormat, PackedRows};
 
-    /// A sliding gemma4 layer under the binary16 serving default: the host rows are `f32` slices counted
-    /// off the container, 4 bytes an element, while the device cache for the same rows is 2 bytes an element.
+    /// A sliding gemma4 layer under the binary16 serving default: the host rows are the format's packed
+    /// bytes, 2 bytes an element, the same as the device cache holds for the same rows.
     #[test]
-    fn binary16_serving_quant_leaves_host_bytes_at_four_and_device_bytes_at_two() {
+    fn binary16_serving_quant_holds_host_bytes_and_device_bytes_at_two() {
         let row_elements = SLIDING_HEAD_DIM as usize;
         let even_plane = vec![0.5f32; row_elements / 2];
         let odd_plane = vec![-0.25f32; row_elements / 2];
         let value_row = vec![1.0f32; row_elements];
         let half = NumericFormat::Float16;
 
-        let host = host_slice_bytes(&even_plane) + host_slice_bytes(&odd_plane) + host_slice_bytes(&value_row);
+        let held = |plane: &[f32]| {
+            packed_rows_bytes(&PackedRows::from_values(&half, plane).expect("binary16 encodes"))
+        };
+        let host = held(&even_plane) + held(&odd_plane) + held(&value_row);
         let device = kv_cache_format::step_write_bytes((&half, &half), 1, [(SLIDING_HEAD_DIM / 2, SLIDING_HEAD_DIM)]);
 
-        assert_eq!(host, 4 * 2 * SLIDING_HEAD_DIM);
+        assert_eq!(host, 2 * 2 * SLIDING_HEAD_DIM);
         assert_eq!(device, 2 * 2 * SLIDING_HEAD_DIM);
     }
 }

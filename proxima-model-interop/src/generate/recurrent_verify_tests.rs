@@ -13,6 +13,7 @@ use crate::lowering::{KvLayout, header_descriptor};
 use crate::serving::{NgramMapParams, SpeculativeType, SpeculativeTypeSet};
 use crate::{ContextLength, SpeculativeConfig};
 
+use super::wide;
 use super::drafter::DrafterSet;
 use super::recurrent_checkpoint_fixture::{
     HEAD_DIM, INNER, LAYERS, QUERY_HEADS, recurrent_checkpoint, recurrent_checkpoint_shaped,
@@ -166,23 +167,23 @@ fn assert_caches(reference: &PrefixState, candidate: &PrefixState) {
             (LayerCacheState::DenseAttention(expected), LayerCacheState::DenseAttention(found)) => {
                 assert_payload(
                     &alloc::format!("layer {layer} first key"),
-                    &expected.k_first,
-                    &found.k_first,
+                    &wide(&expected.k_first),
+                    &wide(&found.k_first),
                 );
                 assert_payload(
                     &alloc::format!("layer {layer} second key"),
-                    &expected.k_second,
-                    &found.k_second,
+                    &wide(&expected.k_second),
+                    &wide(&found.k_second),
                 );
                 assert_payload(
                     &alloc::format!("layer {layer} pass key"),
-                    &expected.k_pass,
-                    &found.k_pass,
+                    &wide(&expected.k_pass),
+                    &wide(&found.k_pass),
                 );
                 assert_payload(
                     &alloc::format!("layer {layer} value"),
-                    &expected.v,
-                    &found.v,
+                    &wide(&expected.v),
+                    &wide(&found.v),
                 );
             }
             _ => panic!("layer {layer} must preserve its fixture cache kind"),

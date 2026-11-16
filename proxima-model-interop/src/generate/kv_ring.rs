@@ -17,6 +17,7 @@
 //! directly only for a full layer; [`LayerCache::append_at`] is the one write
 //! that is right for both.
 
+use proxima_numeric::PackedRows;
 use proxima_tokenizer::draft::DEFAULT_N_DRAFT;
 
 use super::*;
@@ -88,11 +89,15 @@ impl KvRing {
 impl LayerCache {
     /// A ring cache with rows for `positions_needed` positions allocated up
     /// front (zeroed; a row is only ever read after it was written).
-    pub(super) fn ring(ring: KvRing, positions_needed: usize) -> Self {
-        let mut cache = Self::new();
+    pub(super) fn ring(
+        formats: &KvFormats,
+        ring: KvRing,
+        positions_needed: usize,
+    ) -> Result<Self, InteropError> {
+        let mut cache = Self::new(formats)?;
         cache.ring = Some(ring);
-        cache.reserve_ring_rows(positions_needed);
-        cache
+        cache.reserve_ring_rows(positions_needed)?;
+        Ok(cache)
     }
 
     pub(super) fn ring_geometry(&self) -> Option<&KvRing> {
@@ -102,16 +107,15 @@ impl LayerCache {
     /// Grows a ring cache to hold rows for `positions_needed` positions.
     /// Never shrinks, and never grows past the ring's capacity: a cache
     /// carried across calls ([`PrefixState`]) reaches further on the next one.
-    pub(super) fn reserve_ring_rows(&mut self, positions_needed: usize) {
+    pub(super) fn reserve_ring_rows(&mut self, positions_needed: usize) -> Result<(), InteropError> {
         let Some(ring) = self.ring else {
-            return;
+            return Ok(());
         };
         let rows = ring.rows_for(positions_needed);
-        self.k_even
-            .resize(self.k_even.len().max(rows * ring.even_odd_row), 0.0);
-        self.k_odd
-            .resize(self.k_odd.len().max(rows * ring.even_odd_row), 0.0);
-        self.v.resize(self.v.len().max(rows * ring.v_row), 0.0);
+        self.k_even.grow_zeroed(rows * ring.even_odd_row)?;
+        self.k_odd.grow_zeroed(rows * ring.even_odd_row)?;
+        self.v.grow_zeroed(rows * ring.v_row)?;
+        Ok(())
     }
 
     /// [`Self::append`] for a block whose first row is absolute position
@@ -124,19 +128,78 @@ impl LayerCache {
         even: &[f32],
         odd: &[f32],
         value: &[f32],
-    ) {
+    ) -> Result<(), InteropError> {
         let Some(ring) = self.ring else {
-            self.append(even, odd, value);
-            return;
+            return self.append(even, odd, value);
         };
         let rows = even.len() / ring.even_odd_row.max(1);
         let skipped = rows.saturating_sub(ring.capacity);
         for row in skipped..rows {
             let slot = ring.write_row(start_position + row);
-            copy_row(&mut self.k_even, slot, ring.even_odd_row, even, row);
-            copy_row(&mut self.k_odd, slot, ring.even_odd_row, odd, row);
-            copy_row(&mut self.v, slot, ring.v_row, value, row);
+            copy_row(&mut self.k_even, slot, ring.even_odd_row, even, row)?;
+            copy_row(&mut self.k_odd, slot, ring.even_odd_row, odd, row)?;
+            copy_row(&mut self.v, slot, ring.v_row, value, row)?;
         }
+        Ok(())
+    }
+
+    /// The `min(cached_len, window)` most recent rows, oldest first, as packed bytes in this
+    /// cache's own formats: no decode, so a snapshot holds exactly what the cache held.
+    /// `None` for a layer that is not a ring.
+    pub(super) fn unroll_live_packed(
+        &self,
+        cached_len: usize,
+    ) -> Result<Option<[PackedRows; 3]>, InteropError> {
+        let Some(ring) = self.ring else {
+            return Ok(None);
+        };
+        let live = ring.live_rows(cached_len);
+        let first = cached_len - live;
+        let mut planes = [
+            PackedRows::new(self.k_even.format())?,
+            PackedRows::new(self.k_odd.format())?,
+            PackedRows::new(self.v.format())?,
+        ];
+        for (plane, (source, width)) in planes.iter_mut().zip([
+            (&self.k_even, ring.even_odd_row),
+            (&self.k_odd, ring.even_odd_row),
+            (&self.v, ring.v_row),
+        ]) {
+            for offset in 0..live {
+                let slot = ring.read_row(first + offset);
+                plane.extend_from(source, slot * width, width)?;
+            }
+            plane.shrink_to_fit();
+        }
+        Ok(Some(planes))
+    }
+
+    /// [`Self::append_at`] for rows already packed in this cache's formats, written byte for byte.
+    pub(super) fn append_packed_at(
+        &mut self,
+        start_position: usize,
+        [even, odd, value]: [&PackedRows; 3],
+    ) -> Result<(), InteropError> {
+        let Some(ring) = self.ring else {
+            self.k_even.extend_from(even, 0, even.elements())?;
+            self.k_odd.extend_from(odd, 0, odd.elements())?;
+            self.v.extend_from(value, 0, value.elements())?;
+            return Ok(());
+        };
+        let rows = even.elements() / ring.even_odd_row.max(1);
+        let skipped = rows.saturating_sub(ring.capacity);
+        for row in skipped..rows {
+            let slot = ring.write_row(start_position + row);
+            for (plane, source, width) in [
+                (&mut self.k_even, even, ring.even_odd_row),
+                (&mut self.k_odd, odd, ring.even_odd_row),
+                (&mut self.v, value, ring.v_row),
+            ] {
+                plane.grow_zeroed((slot + 1) * width)?;
+                plane.overwrite_from(slot * width, source, row * width, width)?;
+            }
+        }
+        Ok(())
     }
 
     /// Copies the `min(cached_len, window)` most recent rows, oldest first,
@@ -147,6 +210,7 @@ impl LayerCache {
     /// [`InteropError::CacheScratchShapeMismatch`] when a scratch buffer is
     /// shorter than the live rows need, which means the bound extent the
     /// caller sized it to disagrees with the ring's window.
+    #[cfg(test)]
     pub(super) fn unroll_live_rows(
         &self,
         cached_len: usize,
@@ -180,8 +244,7 @@ impl LayerCache {
             }
             for offset in 0..live {
                 let slot = ring.read_row(first + offset);
-                scratch[offset * width..(offset + 1) * width]
-                    .copy_from_slice(&source[slot * width..(slot + 1) * width]);
+                source.decode_range(slot * width, &mut scratch[offset * width..(offset + 1) * width])?;
             }
         }
         Ok(live)
@@ -192,6 +255,26 @@ impl LayerCache {
 /// `window` is `Some`, a growing full cache otherwise. The one constructor
 /// `LoadedModel::attention_layer_cache` and the allocation test share.
 pub(super) fn attention_cache(
+    formats: &KvFormats,
+    window: Option<usize>,
+    slack: usize,
+    even_odd_row: usize,
+    v_row: usize,
+    write_offset: usize,
+    positions_needed: usize,
+) -> Result<LayerCache, InteropError> {
+    match window {
+        Some(window) => LayerCache::ring(
+            formats,
+            KvRing::new(window, slack, even_odd_row, v_row, write_offset),
+            positions_needed,
+        ),
+        None => LayerCache::new(formats),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn test_attention_cache(
     window: Option<usize>,
     slack: usize,
     even_odd_row: usize,
@@ -199,13 +282,16 @@ pub(super) fn attention_cache(
     write_offset: usize,
     positions_needed: usize,
 ) -> LayerCache {
-    match window {
-        Some(window) => LayerCache::ring(
-            KvRing::new(window, slack, even_odd_row, v_row, write_offset),
-            positions_needed,
-        ),
-        None => LayerCache::new(),
-    }
+    attention_cache(
+        &KvFormats::binary32(),
+        window,
+        slack,
+        even_odd_row,
+        v_row,
+        write_offset,
+        positions_needed,
+    )
+    .expect("binary32 has a codec")
 }
 
 /// The most rows one speculative verify step can write past the last accepted
@@ -287,12 +373,16 @@ pub(super) fn rings_cover_speculation(
     })
 }
 
-fn copy_row(destination: &mut Vec<f32>, slot: usize, width: usize, source: &[f32], row: usize) {
-    let end = (slot + 1) * width;
-    if destination.len() < end {
-        destination.resize(end, 0.0);
-    }
-    destination[slot * width..end].copy_from_slice(&source[row * width..(row + 1) * width]);
+fn copy_row(
+    destination: &mut PackedRows,
+    slot: usize,
+    width: usize,
+    source: &[f32],
+    row: usize,
+) -> Result<(), InteropError> {
+    destination.grow_zeroed((slot + 1) * width)?;
+    destination.overwrite(slot * width, &source[row * width..(row + 1) * width])?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -308,7 +398,7 @@ mod tests {
     const WINDOW: usize = 4;
 
     fn ring_cache(slack: usize, write_offset: usize, positions_needed: usize) -> LayerCache {
-        LayerCache::ring(
+        LayerCache::test_ring(
             KvRing::new(WINDOW, slack, EVEN_ODD_ROW, V_ROW, write_offset),
             positions_needed,
         )
@@ -317,7 +407,7 @@ mod tests {
     /// Position `position`'s three leaves, each element a distinct value so a
     /// misplaced row cannot pass by coincidence.
     fn allocated_rows(cache: &LayerCache) -> usize {
-        cache.k_even.len() / EVEN_ODD_ROW
+        cache.k_even.elements() / EVEN_ODD_ROW
     }
 
     fn position_rows(position: usize) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
@@ -344,7 +434,7 @@ mod tests {
             odd.extend(row_odd);
             value.extend(row_value);
         }
-        cache.append_at(start, &even, &odd, &value);
+        cache.append_at(start, &even, &odd, &value).expect("kv rows store");
     }
 
     fn unrolled(cache: &LayerCache, cached_len: usize) -> (usize, Vec<f32>, Vec<f32>, Vec<f32>) {
@@ -422,10 +512,10 @@ mod tests {
         let mut cache = ring_cache(0, 0, 3);
         assert_eq!(allocated_rows(&cache), 3);
 
-        cache.reserve_ring_rows(100);
+        cache.reserve_ring_rows(100).expect("kv rows store");
         assert_eq!(allocated_rows(&cache), WINDOW);
 
-        cache.reserve_ring_rows(2);
+        cache.reserve_ring_rows(2).expect("kv rows store");
         assert_eq!(allocated_rows(&cache), WINDOW, "a ring cache never shrinks");
     }
 
@@ -503,7 +593,7 @@ mod tests {
             .map(|&(kv_heads, head_dim, window)| {
                 let even_odd_row = (kv_heads * head_dim / 2) as usize;
                 let value_row = (kv_heads * head_dim) as usize;
-                let mut cache = attention_cache(
+                let mut cache = test_attention_cache(
                     window.map(|width| width as usize),
                     0,
                     even_odd_row,
@@ -516,8 +606,8 @@ mod tests {
                     &vec![0.5; positions_needed * even_odd_row],
                     &vec![0.5; positions_needed * even_odd_row],
                     &vec![0.5; positions_needed * value_row],
-                );
-                (window, cache.k_even.len() / even_odd_row)
+                ).expect("kv rows store");
+                (window, cache.k_even.elements() / even_odd_row)
             })
             .collect();
 

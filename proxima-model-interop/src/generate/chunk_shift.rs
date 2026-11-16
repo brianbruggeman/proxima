@@ -200,6 +200,14 @@ fn rotate_rows(even: &mut [f32], odd: &mut [f32], cos: &[f32], sin: &[f32]) -> O
     Some(())
 }
 
+/// `len` elements of `plane` from `start`, still packed in its own format.
+fn packed_window(plane: &PackedRows, start: usize, len: usize) -> Option<PackedRows> {
+    let mut window = PackedRows::new(plane.format()).ok()?;
+    window.extend_from(plane, start, len).ok()?;
+    window.shrink_to_fit();
+    Some(window)
+}
+
 impl LayerRows {
     /// The rows of `run` that `cache` holds, oldest first: every row of a
     /// full layer's chunk, the last `min(len, window)` rows of a ring.
@@ -211,35 +219,23 @@ impl LayerRows {
         v_row: usize,
     ) -> Option<Self> {
         let Some(ring) = cache.ring_geometry() else {
-            let range = |width: usize| run.old_start * width..run.old_end() * width;
             return Some(Self {
                 layer,
-                k_even: cache.k_even.get(range(even_odd_row))?.to_vec(),
-                k_odd: cache.k_odd.get(range(even_odd_row))?.to_vec(),
-                v: cache.v.get(range(v_row))?.to_vec(),
+                k_even: packed_window(&cache.k_even, run.old_start * even_odd_row, run.len * even_odd_row)?,
+                k_odd: packed_window(&cache.k_odd, run.old_start * even_odd_row, run.len * even_odd_row)?,
+                v: packed_window(&cache.v, run.old_start * v_row, run.len * v_row)?,
             });
         };
         let live = ring.live_rows(run.old_end());
-        let mut rows = Self {
-            layer,
-            k_even: vec![0.0; live * ring.even_odd_row],
-            k_odd: vec![0.0; live * ring.even_odd_row],
-            v: vec![0.0; live * ring.v_row],
-        };
-        cache
-            .unroll_live_rows(
-                run.old_end(),
-                &mut rows.k_even,
-                &mut rows.k_odd,
-                &mut rows.v,
-                layer,
-            )
-            .ok()?;
+        let [k_even, k_odd, v] = cache.unroll_live_packed(run.old_end()).ok()??;
         let skipped = live - run.len.min(ring.window);
-        rows.k_even.drain(..skipped * ring.even_odd_row);
-        rows.k_odd.drain(..skipped * ring.even_odd_row);
-        rows.v.drain(..skipped * ring.v_row);
-        Some(rows)
+        let kept = live - skipped;
+        Some(Self {
+            layer,
+            k_even: packed_window(&k_even, skipped * ring.even_odd_row, kept * ring.even_odd_row)?,
+            k_odd: packed_window(&k_odd, skipped * ring.even_odd_row, kept * ring.even_odd_row)?,
+            v: packed_window(&v, skipped * ring.v_row, kept * ring.v_row)?,
+        })
     }
 }
 
@@ -272,7 +268,12 @@ pub(super) fn extract_run(
         };
         let (cos, sin) = rotation.as_ref()?;
         let mut rows = LayerRows::of_run(layer, cache, &run, *even_odd_row, *v_row)?;
-        rotate_rows(&mut rows.k_even, &mut rows.k_odd, cos, sin)?;
+        let (mut even, mut odd) = (Vec::new(), Vec::new());
+        rows.k_even.decode_all(&mut even).ok()?;
+        rows.k_odd.decode_all(&mut odd).ok()?;
+        rotate_rows(&mut even, &mut odd, cos, sin)?;
+        rows.k_even = PackedRows::from_values(rows.k_even.format(), &even).ok()?;
+        rows.k_odd = PackedRows::from_values(rows.k_odd.format(), &odd).ok()?;
         layers.push(rows);
     }
     let ids = state.ids.get(run.old_start..run.old_end())?.to_vec();
@@ -310,17 +311,23 @@ impl PrefixState {
             };
             match cache.ring_geometry().copied() {
                 Some(ring) => {
-                    let kept = rows.k_even.len() / ring.even_odd_row.max(1);
-                    cache.append_at(run.new_end() - kept, &rows.k_even, &rows.k_odd, &rows.v);
+                    let kept = rows.k_even.elements() / ring.even_odd_row.max(1);
+                    cache
+                        .append_packed_at(run.new_end() - kept, [&rows.k_even, &rows.k_odd, &rows.v])
+                        .map_err(|_| "a ring layer could not take the run's rows")?;
                 }
                 None => {
-                    let even_odd_row = rows.k_even.len() / run.len.max(1);
-                    let v_row = rows.v.len() / run.len.max(1);
-                    cache.truncate(run.new_start, even_odd_row, v_row);
-                    if cache.k_even.len() != run.new_start * even_odd_row {
+                    let even_odd_row = rows.k_even.elements() / run.len.max(1);
+                    let v_row = rows.v.elements() / run.len.max(1);
+                    cache
+                        .truncate(run.new_start, even_odd_row, v_row)
+                        .map_err(|_| "a full layer could not drop the rows past the run")?;
+                    if cache.k_even.elements() != run.new_start * even_odd_row {
                         return Err("a full layer does not hold exactly the rows before the run");
                     }
-                    cache.append(&rows.k_even, &rows.k_odd, &rows.v);
+                    cache
+                        .append_packed_at(run.new_start, [&rows.k_even, &rows.k_odd, &rows.v])
+                        .map_err(|_| "a full layer could not take the run's rows")?;
                 }
             }
         }
@@ -928,15 +935,15 @@ mod tests {
                 &[value; EVEN_ODD_ROW],
                 &[value * 0.5; EVEN_ODD_ROW],
                 &[value; V_ROW],
-            );
+            ).expect("kv rows store");
         });
     }
 
     fn state(stored_len: usize) -> PrefixState {
         let ring = KvRing::new(WINDOW, SLACK, EVEN_ODD_ROW, V_ROW, 0);
-        let mut ring_layer = LayerCache::ring(ring, stored_len);
+        let mut ring_layer = LayerCache::test_ring(ring, stored_len);
         fill(&mut ring_layer, stored_len);
-        let mut full_layer = LayerCache::new();
+        let mut full_layer = LayerCache::test_new();
         fill(&mut full_layer, stored_len);
         PrefixState {
             ids: (0..stored_len as u32).collect(),
@@ -966,7 +973,7 @@ mod tests {
         match &state.layer_caches[0] {
             LayerCacheState::Attention(cache) => {
                 let ring = cache.ring_geometry().expect("layer 0 is a ring");
-                cache.k_even[(position % ring.capacity) * EVEN_ODD_ROW]
+                wide(&cache.k_even)[(position % ring.capacity) * EVEN_ODD_ROW]
             }
             _ => 0.0,
         }
@@ -974,7 +981,7 @@ mod tests {
 
     fn full_rows(state: &PrefixState) -> usize {
         match &state.layer_caches[1] {
-            LayerCacheState::Attention(cache) => cache.k_even.len() / EVEN_ODD_ROW,
+            LayerCacheState::Attention(cache) => cache.k_even.elements() / EVEN_ODD_ROW,
             _ => 0,
         }
     }
@@ -1059,7 +1066,7 @@ mod tests {
         let LayerCacheState::Attention(full) = &entry.state.layer_caches[1] else {
             panic!("layer 1 is attention");
         };
-        let moved_keys: Vec<f32> = (9..19).map(|row| full.k_even[row * EVEN_ODD_ROW]).collect();
+        let moved_keys: Vec<f32> = (9..19).map(|row| wide(&full.k_even)[row * EVEN_ODD_ROW]).collect();
         let source_keys: Vec<f32> = (20..30).map(marker).collect();
         assert_eq!(moved_keys, source_keys);
         assert!(

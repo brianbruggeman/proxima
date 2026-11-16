@@ -27,9 +27,9 @@ use super::*;
 /// position, or the rows of a chunk a request moves ([`super::chunk_shift`]).
 pub(super) struct LayerRows {
     pub(super) layer: usize,
-    pub(super) k_even: Vec<f32>,
-    pub(super) k_odd: Vec<f32>,
-    pub(super) v: Vec<f32>,
+    pub(super) k_even: PackedRows,
+    pub(super) k_odd: PackedRows,
+    pub(super) v: PackedRows,
 }
 
 /// The ring rows every sliding layer needs at `position` tokens.
@@ -51,8 +51,7 @@ impl RingCheckpoint {
         self.layers
             .iter()
             .map(|rows| {
-                (rows.k_even.capacity() + rows.k_odd.capacity() + rows.v.capacity())
-                    * size_of::<f32>()
+                rows.k_even.capacity_bytes() + rows.k_odd.capacity_bytes() + rows.v.capacity_bytes()
             })
             .sum::<usize>()
             + self
@@ -144,13 +143,7 @@ impl LayerRows {
         if ring.write_offset != 0 {
             return None;
         }
-        let live = ring.live_rows(position);
-        let mut k_even = vec![0.0; live * ring.even_odd_row];
-        let mut k_odd = vec![0.0; live * ring.even_odd_row];
-        let mut v = vec![0.0; live * ring.v_row];
-        cache
-            .unroll_live_rows(position, &mut k_even, &mut k_odd, &mut v, layer)
-            .ok()?;
+        let [k_even, k_odd, v] = cache.unroll_live_packed(position).ok()??;
         Some(Some(Self {
             layer,
             k_even,
@@ -170,7 +163,7 @@ impl PrefixState {
         &mut self,
         checkpoint: &RingCheckpoint,
         widths: &[LayerPadRowWidths],
-    ) {
+    ) -> Result<(), InteropError> {
         let position = checkpoint.position;
         for (state, width) in self.layer_caches.iter_mut().zip(widths) {
             match (state, width) {
@@ -180,7 +173,7 @@ impl PrefixState {
                         even_odd_row,
                         v_row,
                     },
-                ) => cache.truncate(position, *even_odd_row, *v_row),
+                ) => cache.truncate(position, *even_odd_row, *v_row)?,
                 (
                     LayerCacheState::DenseAttention(cache),
                     LayerPadRowWidths::DenseAttention {
@@ -189,10 +182,10 @@ impl PrefixState {
                         v_row,
                     },
                 ) => {
-                    cache.k_first.truncate(position * even_odd_row);
-                    cache.k_second.truncate(position * even_odd_row);
-                    cache.k_pass.truncate(position * pass_row);
-                    cache.v.truncate(position * v_row);
+                    cache.k_first.truncate(position * even_odd_row)?;
+                    cache.k_second.truncate(position * even_odd_row)?;
+                    cache.k_pass.truncate(position * pass_row)?;
+                    cache.v.truncate(position * v_row)?;
                 }
                 _ => {}
             }
@@ -202,7 +195,7 @@ impl PrefixState {
                 && let Some(ring) = cache.ring_geometry().copied()
             {
                 let first = position - ring.live_rows(position);
-                cache.append_at(first, &rows.k_even, &rows.k_odd, &rows.v);
+                cache.append_packed_at(first, [&rows.k_even, &rows.k_odd, &rows.v])?;
             }
         }
         for (layer, snapshot) in &checkpoint.fixed_layers {
@@ -212,6 +205,7 @@ impl PrefixState {
         }
         self.ids.truncate(position);
         self.cached_len = position;
+        Ok(())
     }
 }
 
@@ -297,7 +291,7 @@ mod tests {
 
     fn ring_layer(positions: usize) -> LayerCache {
         let ring = KvRing::new(WINDOW, SLACK, EVEN_ODD_ROW, V_ROW, 0);
-        let mut cache = LayerCache::ring(ring, positions);
+        let mut cache = LayerCache::test_ring(ring, positions);
         (0..positions).for_each(|position| {
             let value = marker(position);
             cache.append_at(
@@ -305,20 +299,20 @@ mod tests {
                 &[value; EVEN_ODD_ROW],
                 &[value; EVEN_ODD_ROW],
                 &[value; V_ROW],
-            );
+            ).expect("kv rows store");
         });
         cache
     }
 
     fn full_layer(positions: usize) -> LayerCache {
-        let mut cache = LayerCache::new();
+        let mut cache = LayerCache::test_new();
         (0..positions).for_each(|position| {
             let value = marker(position);
             cache.append(
                 &[value; EVEN_ODD_ROW],
                 &[value; EVEN_ODD_ROW],
                 &[value; V_ROW],
-            );
+            ).expect("kv rows store");
         });
         cache
     }
@@ -347,7 +341,7 @@ mod tests {
         match &state.layer_caches[0] {
             LayerCacheState::Attention(cache) => {
                 let ring = cache.ring_geometry().expect("layer 0 is a ring");
-                cache.k_even[(position % ring.capacity) * EVEN_ODD_ROW]
+                wide(&cache.k_even)[(position % ring.capacity) * EVEN_ODD_ROW]
             }
             _ => 0.0,
         }
@@ -371,7 +365,7 @@ mod tests {
         let mut later = state(44);
         assert_ne!(ring_marker_at(&later, 12), marker(12));
 
-        later.restore_checkpoint(&checkpoint, &widths());
+        later.restore_checkpoint(&checkpoint, &widths()).expect("kv rows store");
 
         assert_eq!(later.cached_len, 20);
         assert_eq!(later.ids.len(), 20);
@@ -381,7 +375,7 @@ mod tests {
         );
         match &later.layer_caches[1] {
             LayerCacheState::Attention(cache) => {
-                assert_eq!(cache.k_even.len(), 20 * EVEN_ODD_ROW);
+                assert_eq!(cache.k_even.elements(), 20 * EVEN_ODD_ROW);
             }
             _ => panic!("layer 1 is a full-attention layer"),
         }
@@ -420,7 +414,7 @@ mod tests {
     }
 
     fn dense_layer(positions: usize) -> DenseAttentionCache {
-        let mut cache = DenseAttentionCache::new();
+        let mut cache = DenseAttentionCache::test_new();
         for position in 0..positions {
             let value = marker(position);
             cache.append(
@@ -428,7 +422,7 @@ mod tests {
                 &[value + 10.0; 2],
                 &[value + 20.0],
                 &[value + 30.0; 3],
-            );
+            ).expect("kv rows store");
         }
         cache
     }
@@ -475,7 +469,7 @@ mod tests {
         branch.ids.extend_from_slice(&[3, 4, 5]);
         branch.cached_len = 5;
 
-        branch.restore_checkpoint(&checkpoint, &recurrent_dense_widths());
+        branch.restore_checkpoint(&checkpoint, &recurrent_dense_widths()).expect("kv rows store");
 
         assert_eq!(branch.cached_len, 2);
         assert_eq!(branch.ids, [1, 2]);
@@ -488,10 +482,10 @@ mod tests {
         }
         match &branch.layer_caches[1] {
             LayerCacheState::DenseAttention(cache) => {
-                assert_eq!(cache.k_first, [1.0, 1.0, 2.0, 2.0]);
-                assert_eq!(cache.k_second, [11.0, 11.0, 12.0, 12.0]);
-                assert_eq!(cache.k_pass, [21.0, 22.0]);
-                assert_eq!(cache.v, [31.0, 31.0, 31.0, 32.0, 32.0, 32.0]);
+                assert_eq!(wide(&cache.k_first), [1.0, 1.0, 2.0, 2.0]);
+                assert_eq!(wide(&cache.k_second), [11.0, 11.0, 12.0, 12.0]);
+                assert_eq!(wide(&cache.k_pass), [21.0, 22.0]);
+                assert_eq!(wide(&cache.v), [31.0, 31.0, 31.0, 32.0, 32.0, 32.0]);
             }
             _ => panic!("the restored second layer remains dense attention"),
         }
@@ -517,14 +511,14 @@ mod tests {
                 even_odd_row: EVEN_ODD_ROW,
                 v_row: V_ROW,
             }],
-        );
+        ).expect("kv rows store");
 
         assert_eq!(branch.ids, [1, 2]);
         assert_eq!(branch.cached_len, 2);
         match &branch.layer_caches[0] {
             LayerCacheState::Attention(cache) => {
-                assert_eq!(cache.k_even, [1.0, 1.0, 2.0, 2.0]);
-                assert_eq!(cache.v, [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
+                assert_eq!(wide(&cache.k_even), [1.0, 1.0, 2.0, 2.0]);
+                assert_eq!(wide(&cache.v), [1.0, 1.0, 1.0, 2.0, 2.0, 2.0]);
             }
             _ => panic!("the full attention fixture keeps its cache kind"),
         }
@@ -551,7 +545,7 @@ mod tests {
         branch.ids.extend_from_slice(&[1, 2]);
         branch.cached_len = 2;
 
-        branch.restore_checkpoint(&checkpoint, &recurrent_dense_widths());
+        branch.restore_checkpoint(&checkpoint, &recurrent_dense_widths()).expect("kv rows store");
 
         assert!(branch.ids.is_empty());
         assert_eq!(branch.cached_len, 0);
@@ -569,7 +563,7 @@ mod tests {
         let displaced = KvRing::new(WINDOW, SLACK, EVEN_ODD_ROW, V_ROW, 1);
         let branch = PrefixState {
             ids: vec![1, 2],
-            layer_caches: vec![LayerCacheState::Attention(LayerCache::ring(displaced, 2))],
+            layer_caches: vec![LayerCacheState::Attention(LayerCache::test_ring(displaced, 2))],
             cached_len: 2,
         };
 

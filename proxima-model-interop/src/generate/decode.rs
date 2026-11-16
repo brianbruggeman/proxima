@@ -8,10 +8,9 @@ use std::thread;
 use proxima_core::kv_carry::{Appended, Extent, KvCarry, KvCarryError, KvCommand, KvEvent, RowPair};
 use proxima_core::{ServingFsmError, ServingState};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-use proxima_numeric::NumericFormat;
+use proxima_numeric::{NumericFormat, PackedRows};
 
 use super::drafter::{DrafterSet, draft_limit_for_step};
-use super::host_kv_rounding::HostCacheRounding;
 use super::*;
 use crate::host_rows;
 use crate::kv_cache_format;
@@ -29,6 +28,14 @@ use proxima_core::ProximaError;
 
 /// One chunk width's program with its logits root, cache roots and content hash.
 type ChunkWidthProgram = (usize, Vec<Op>, NodeId, Vec<LayerCacheRoots>, u64);
+
+/// one attention layer's leaf name and padded row widths: what [`LoadedModel::attention_layer_cache`] sizes the cache from.
+#[derive(Clone, Copy)]
+struct AttentionCacheRows<'name> {
+    k_even_name: &'name str,
+    even_odd_row: usize,
+    v_row: usize,
+}
 
 struct DecodeStepEvaluation<'step, 'name, 'block> {
     program: &'step [Op],
@@ -2086,6 +2093,7 @@ impl<'file> LoadedModel<'file> {
     /// cache is sized from.
     pub(super) fn fresh_layer_caches(
         &self,
+        formats: &KvFormats,
         cache_names: &[LayerCacheNames],
         layer_row_widths: &[LayerPadRowWidths],
         positions_needed: usize,
@@ -2104,19 +2112,22 @@ impl<'file> LoadedModel<'file> {
                     },
                 ) => self
                     .attention_layer_cache(
+                        formats,
                         layer,
-                        k_even,
-                        *even_odd_row,
-                        *v_row,
+                        AttentionCacheRows {
+                            k_even_name: k_even,
+                            even_odd_row: *even_odd_row,
+                            v_row: *v_row,
+                        },
                         positions_needed,
                         draft_slack,
                     )
                     .map(LayerCacheState::Attention),
                 (LayerCacheNames::Attention { .. }, _) => {
-                    Ok(LayerCacheState::Attention(LayerCache::new()))
+                    LayerCache::new(formats).map(LayerCacheState::Attention)
                 }
                 (LayerCacheNames::DenseAttention { .. }, _) => {
-                    Ok(LayerCacheState::DenseAttention(DenseAttentionCache::new()))
+                    DenseAttentionCache::new(formats).map(LayerCacheState::DenseAttention)
                 }
                 (
                     LayerCacheNames::ShortConv { history, .. },
@@ -2188,30 +2199,30 @@ impl<'file> LoadedModel<'file> {
     /// ring leaf for a layer the checkpoint gives no window.
     fn attention_layer_cache(
         &self,
+        formats: &KvFormats,
         layer: usize,
-        k_even_name: &str,
-        even_odd_row: usize,
-        v_row: usize,
+        rows: AttentionCacheRows<'_>,
         positions_needed: usize,
         draft_slack: usize,
     ) -> Result<LayerCache, InteropError> {
-        let bound_slot = cache_leaf_bound_slot(&self.program, k_even_name);
+        let bound_slot = cache_leaf_bound_slot(&self.program, rows.k_even_name);
         if bound_slot != Some(proxima_tensor::spec::SLIDING_KV_SYMBOL) {
-            return Ok(LayerCache::new());
+            return LayerCache::new(formats);
         }
         let window = self
             .kv_layers
             .get(layer)
             .and_then(|(_, _, window)| *window)
             .ok_or(InteropError::SlidingRingWindowMissing { layer })?;
-        Ok(attention_cache(
+        attention_cache(
+            formats,
             Some(window as usize),
             draft_slack,
-            even_odd_row,
-            v_row,
+            rows.even_odd_row,
+            rows.v_row,
             self.ring_write_offset,
             positions_needed,
-        ))
+        )
     }
 
     /// Pushes one step's position/RoPE inputs, `cached_len`/`lm_head_row`
@@ -3934,13 +3945,13 @@ impl<'file> LoadedModel<'file> {
         // below, byte-for-byte unchanged.
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         {
-            let key_binary32 = kv_cache_format::is_binary32(&serving_config.kv_cache_key_quant);
+            let key_stores_graph_output = kv_cache_format::stores_graph_output(&serving_config.kv_cache_key_quant);
             let reason = if force_two_range {
                 "force_two_range"
             } else if !runtime.is_metal() {
                 "backend_not_metal"
-            } else if !key_binary32 {
-                "key_cache_not_binary32"
+            } else if !key_stores_graph_output {
+                "key_cache_not_graph_output"
             } else if self.single_range.is_none() {
                 "no_single_range_program"
             } else {
@@ -3949,7 +3960,7 @@ impl<'file> LoadedModel<'file> {
             debug!(
                 key_format = ?serving_config.kv_cache_key_quant,
                 value_format = ?serving_config.kv_cache_value_quant,
-                key_binary32,
+                key_stores_graph_output,
                 has_single_range_program = self.single_range.is_some(),
                 chosen = reason == "all_gates_passed",
                 reason,
@@ -3959,7 +3970,7 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if !force_two_range
             && runtime.is_metal()
-            && kv_cache_format::is_binary32(&serving_config.kv_cache_key_quant)
+            && kv_cache_format::stores_graph_output(&serving_config.kv_cache_key_quant)
             && let Some(single_range) = &self.single_range
         {
             let mut placed_token_error: Option<InteropError> = None;
@@ -4067,6 +4078,7 @@ impl<'file> LoadedModel<'file> {
         let mut layer_caches: Vec<LayerCacheState> = match seed {
             Some(state) => state.layer_caches,
             None => self.fresh_layer_caches(
+                &KvFormats::of(serving_config),
                 &cache_names,
                 &layer_row_widths,
                 positions_needed,
@@ -4075,7 +4087,7 @@ impl<'file> LoadedModel<'file> {
         };
         for state in &mut layer_caches {
             if let LayerCacheState::Attention(cache) = state {
-                cache.reserve_ring_rows(positions_needed);
+                cache.reserve_ring_rows(positions_needed)?;
             }
         }
         // One [`KvPadScratch`] per layer, reused across every step of this
@@ -4086,8 +4098,8 @@ impl<'file> LoadedModel<'file> {
         let mut kv_pad_scratch: Vec<KvPadScratch> = self
             .layer_roots
             .iter()
-            .map(|_| KvPadScratch::new())
-            .collect();
+            .map(|_| KvPadScratch::new(&KvFormats::of(serving_config)))
+            .collect::<Result<_, _>>()?;
         // [`DenseAttentionPadScratch`]'s own doc: the `Attention` arm's
         // padding above is not enough on its own -- a `DenseAttention` layer
         // shares the identical `Extent::Symbolic(1)` slot, so it needs the
@@ -4597,11 +4609,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
         let mut step = 0usize;
         let mut carried_layers: Vec<(usize, NodeId)> = Vec::new();
         let mut carried_program = 0usize;
-        let mut host_cache_rounding = HostCacheRounding::new(
-            &serving_config.kv_cache_key_quant,
-            &serving_config.kv_cache_value_quant,
-        )?;
-        let kv_carry_eligible = kv_cache_format::is_binary32(&serving_config.kv_cache_key_quant)
+        let kv_carry_eligible = kv_cache_format::stores_graph_output(&serving_config.kv_cache_key_quant)
             && layer_caches.iter().all(|state| match state {
                 LayerCacheState::Attention(cache) => cache.ring.is_none(),
                 _ => true,
@@ -4609,7 +4617,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
         debug!(
             key_format = ?serving_config.kv_cache_key_quant,
             value_format = ?serving_config.kv_cache_value_quant,
-            key_binary32 = kv_cache_format::is_binary32(&serving_config.kv_cache_key_quant),
+            key_stores_graph_output = kv_cache_format::stores_graph_output(&serving_config.kv_cache_key_quant),
             no_ring_attention = layer_caches.iter().all(|state| match state {
                 LayerCacheState::Attention(cache) => cache.ring.is_none(),
                 _ => true,
@@ -5305,15 +5313,15 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         })
                         .map(|(_, cache)| match cache {
                             LayerCacheState::Attention(cache) => {
-                                host_slice_bytes(&cache.k_even)
-                                    + host_slice_bytes(&cache.k_odd)
-                                    + host_slice_bytes(&cache.v)
+                                packed_rows_bytes(&cache.k_even)
+                                    + packed_rows_bytes(&cache.k_odd)
+                                    + packed_rows_bytes(&cache.v)
                             }
                             LayerCacheState::DenseAttention(cache) => {
-                                host_slice_bytes(&cache.k_first)
-                                    + host_slice_bytes(&cache.k_second)
-                                    + host_slice_bytes(&cache.k_pass)
-                                    + host_slice_bytes(&cache.v)
+                                packed_rows_bytes(&cache.k_first)
+                                    + packed_rows_bytes(&cache.k_second)
+                                    + packed_rows_bytes(&cache.k_pass)
+                                    + packed_rows_bytes(&cache.v)
                             }
                             LayerCacheState::ShortConv(cache) => {
                                 host_slice_bytes(&cache.history)
@@ -6791,11 +6799,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                         + host_slice_bytes(odd_data)
                                         + host_slice_bytes(value_data);
                                 }
-                                host_cache_rounding.append_attention(
-                                    cache,
-                                    cached_len,
-                                    (even_data, odd_data, value_data),
-                                )?;
+                                cache.append_at(cached_len, even_data, odd_data, value_data)?;
                             }
                             (
                                 LayerCacheRoots::DenseAttention((first, second, pass, value)),
@@ -6834,10 +6838,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                         + host_slice_bytes(pass_data)
                                         + host_slice_bytes(value_data);
                                 }
-                                host_cache_rounding.append_dense(
-                                    cache,
-                                    (first_data, second_data, pass_data, value_data),
-                                )?;
+                                cache.append(first_data, second_data, pass_data, value_data)?;
                             }
                             (
                                 LayerCacheRoots::Ssm {
@@ -7016,7 +7017,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             block_tokens,
                             seal_horizon_rows,
                             summarizer,
-                        );
+                        )?;
                     }
 
                     // Everything below samples a token off THIS batch's logits.
@@ -7151,10 +7152,10 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                         LayerCacheState::DenseAttention(cache),
                                         _,
                                     ) => {
-                                        cache.k_first.truncate(keep_positions * even_odd_row);
-                                        cache.k_second.truncate(keep_positions * even_odd_row);
-                                        cache.k_pass.truncate(keep_positions * pass_row);
-                                        cache.v.truncate(keep_positions * v_row);
+                                        cache.k_first.truncate(keep_positions * even_odd_row)?;
+                                        cache.k_second.truncate(keep_positions * even_odd_row)?;
+                                        cache.k_pass.truncate(keep_positions * pass_row)?;
+                                        cache.v.truncate(keep_positions * v_row)?;
                                     }
                                     (
                                         LayerPadRowWidths::Ssm {
@@ -7278,7 +7279,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             block_tokens,
                             seal_horizon_rows,
                             summarizer,
-                        );
+                        )?;
                         settled_tokens.extend_from_slice(&emitted);
                         serving = Some(resumed);
                         break 'evaluate;
@@ -7755,7 +7756,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     block_tokens,
                     seal_horizon_rows,
                     summarizer,
-                );
+                )?;
             }
         }
         #[cfg(feature = "cuda")]
@@ -7782,10 +7783,10 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         },
                         LayerCacheState::DenseAttention(cache),
                     ) => {
-                        cache.k_first.truncate(cached_len * even_odd_row);
-                        cache.k_second.truncate(cached_len * even_odd_row);
-                        cache.k_pass.truncate(cached_len * pass_row);
-                        cache.v.truncate(cached_len * v_row);
+                        cache.k_first.truncate(cached_len * even_odd_row)?;
+                        cache.k_second.truncate(cached_len * even_odd_row)?;
+                        cache.k_pass.truncate(cached_len * pass_row)?;
+                        cache.v.truncate(cached_len * v_row)?;
                     }
                     _ => {}
                 }
@@ -7827,7 +7828,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
                 block_tokens,
                 seal_horizon_rows,
                 summarizer,
-            );
+            )?;
         }
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if let Some(device) = device_kv.take() {
@@ -8653,12 +8654,18 @@ not read this cache format; only the single-row decode kernel reads it from the 
         // cache over the WHOLE prompt (this method's own doc).
         let (cache_names, layer_row_widths) = self.declared_layer_cache_names_and_widths()?;
         let layer_caches =
-            self.fresh_layer_caches(&cache_names, &layer_row_widths, ids.len(), 0)?;
+            self.fresh_layer_caches(
+                &KvFormats::of(&serving_config),
+                &cache_names,
+                &layer_row_widths,
+                ids.len(),
+                0,
+            )?;
         let mut kv_pad_scratch: Vec<KvPadScratch> = self
             .layer_roots
             .iter()
-            .map(|_| KvPadScratch::new())
-            .collect();
+            .map(|_| KvPadScratch::new(&KvFormats::of(&serving_config)))
+            .collect::<Result<_, _>>()?;
         let mut dense_attention_pad_scratch: Vec<DenseAttentionPadScratch> = self
             .layer_roots
             .iter()
@@ -9116,18 +9123,19 @@ fn kv_leaves_share_inputs(carried: &[KvCarryLeaf], next: &[KvCarryLeaf]) -> bool
             .all(|(left, right)| (left.input, left.layer, left.field) == (right.input, right.layer, right.field))
 }
 
-fn write_kv_field(
-state: &mut LayerCacheState, field: usize, values: Vec<f32>) {
-    match (state, field) {
-        (LayerCacheState::Attention(cache), 0) => cache.k_even = values,
-        (LayerCacheState::Attention(cache), 1) => cache.k_odd = values,
-        (LayerCacheState::Attention(cache), 2) => cache.v = values,
-        (LayerCacheState::DenseAttention(cache), 0) => cache.k_first = values,
-        (LayerCacheState::DenseAttention(cache), 1) => cache.k_second = values,
-        (LayerCacheState::DenseAttention(cache), 2) => cache.k_pass = values,
-        (LayerCacheState::DenseAttention(cache), 3) => cache.v = values,
-        _ => {}
-    }
+fn write_kv_field(state: &mut LayerCacheState, field: usize, values: &[f32]) -> Result<(), InteropError> {
+    let plane = match (state, field) {
+        (LayerCacheState::Attention(cache), 0) => &mut cache.k_even,
+        (LayerCacheState::Attention(cache), 1) => &mut cache.k_odd,
+        (LayerCacheState::Attention(cache), 2) => &mut cache.v,
+        (LayerCacheState::DenseAttention(cache), 0) => &mut cache.k_first,
+        (LayerCacheState::DenseAttention(cache), 1) => &mut cache.k_second,
+        (LayerCacheState::DenseAttention(cache), 2) => &mut cache.k_pass,
+        (LayerCacheState::DenseAttention(cache), 3) => &mut cache.v,
+        _ => return Ok(()),
+    };
+    *plane = PackedRows::from_values(plane.format(), values)?;
+    Ok(())
 }
 
 fn flush_carried_kv(
@@ -9142,7 +9150,7 @@ fn flush_carried_kv(
             .iter()
             .find(|leaf| leaf.input == input)
             .ok_or(InteropError::MissingEvaluatedNode { node: input })?;
-        write_kv_field(&mut layer_caches[leaf.layer], leaf.field, values);
+        write_kv_field(&mut layer_caches[leaf.layer], leaf.field, &values)?;
     }
     runtime.set_kv_carry(Vec::new(), 0);
     Ok(any_drained)

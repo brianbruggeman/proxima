@@ -158,7 +158,7 @@ fn draft_chain_proposer<'draft>(
             Ok(())
         })();
         if let Some(state) = retained.as_mut() {
-            state.restore_checkpoint(&checkpoint, widths);
+            state.restore_checkpoint(&checkpoint, widths)?;
         }
         chained?;
         // upstream casts its signed minimum to size_t before comparing lengths.

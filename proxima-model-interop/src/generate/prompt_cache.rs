@@ -138,6 +138,8 @@ impl CachePath {
 pub enum MissReason {
     /// The cache holds no entry.
     Empty,
+    /// A layer's rows could not be cut back to whole rows of their stored format.
+    StoreFault,
     /// Every entry was built under a different `CacheKey`: its rows are not
     /// the rows this request would compute.
     ConfigMismatch,
@@ -186,6 +188,7 @@ impl MissReason {
             Self::RingRowsStale { .. } => "ring_rows_stale",
             Self::UnrewindableLayer => "unrewindable_layer",
             Self::TierRestoreFailed => "tier_restore_failed",
+            Self::StoreFault => "store_fault",
         }
     }
 }
@@ -370,7 +373,9 @@ impl PrefixState {
                 },
             ) = (state, width)
             {
-                cache.truncate(target_len, *even_odd_row, *v_row);
+                cache
+                    .truncate(target_len, *even_odd_row, *v_row)
+                    .map_err(|_| MissReason::StoreFault)?;
             }
         }
         self.ids.truncate(target_len);
@@ -386,12 +391,15 @@ impl PrefixState {
                 .map(|rows| rows.capacity() * size_of::<f32>())
                 .sum()
         };
+        let packed_bytes = |rows: &[&PackedRows]| -> usize {
+            rows.iter().map(|rows| rows.capacity_bytes()).sum()
+        };
         let layer_bytes: usize = self
             .layer_caches
             .iter()
             .map(|state| match state {
                 LayerCacheState::Attention(cache) => {
-                    float_bytes(&[&cache.k_even, &cache.k_odd, &cache.v])
+                    packed_bytes(&[&cache.k_even, &cache.k_odd, &cache.v])
                         + cache.block_summaries.capacity() * size_of::<Vec<f32>>()
                         + cache
                             .block_summaries
@@ -400,7 +408,7 @@ impl PrefixState {
                             .sum::<usize>()
                 }
                 LayerCacheState::DenseAttention(cache) => {
-                    float_bytes(&[&cache.k_first, &cache.k_second, &cache.k_pass, &cache.v])
+                    packed_bytes(&[&cache.k_first, &cache.k_second, &cache.k_pass, &cache.v])
                 }
                 LayerCacheState::ShortConv(cache) => {
                     float_bytes(&[&cache.history])
@@ -695,7 +703,8 @@ impl CacheEntry {
         self.checkpoints.truncate(index + 1);
         let position = self.checkpoints[index].position();
         self.state
-            .restore_checkpoint(&self.checkpoints[index], widths);
+            .restore_checkpoint(&self.checkpoints[index], widths)
+            .ok()?;
         self.restored_at = position;
         Some(CachePath::Checkpoint)
     }
@@ -1511,12 +1520,18 @@ impl<'file> LoadedModel<'file> {
     }
 
     /// Installs the directory-backed cold tier when `settings` names a directory; `false` leaves the cache without one.
-    pub fn install_cold_tier(&self, settings: &ReclaimSettings) -> Result<bool, InteropError> {
+    /// `kv_formats` is the `(key, value)` pair the promoted rows are packed in: the serving config's
+    /// `kv_cache_key_quant`/`kv_cache_value_quant`.
+    pub fn install_cold_tier(
+        &self,
+        settings: &ReclaimSettings,
+        kv_formats: (&NumericFormat, &NumericFormat),
+    ) -> Result<bool, InteropError> {
         let Some(directory) = settings.cold_dir.as_deref() else {
             return Ok(false);
         };
         let digest = model_digest(&self.program);
-        let tier = Arc::new(DiskColdTier::open(Path::new(directory), digest)?);
+        let tier = Arc::new(DiskColdTier::open(Path::new(directory), digest, kv_formats)?);
         tier.install(self, settings.cold_max_entries as usize, settings.cold_byte_budget);
         Ok(true)
     }
@@ -2597,21 +2612,21 @@ mod tests {
     }
 
     fn full_layer(positions: usize) -> LayerCache {
-        let mut cache = LayerCache::new();
+        let mut cache = LayerCache::test_new();
         (0..positions).for_each(|position| {
             let value = marker(position);
             cache.append(
                 &[value; EVEN_ODD_ROW],
                 &[value; EVEN_ODD_ROW],
                 &[value; V_ROW],
-            );
+            ).expect("kv rows store");
         });
         cache
     }
 
     fn ring_layer(window: usize, slack: usize, positions: usize) -> LayerCache {
         let ring = KvRing::new(window, slack, EVEN_ODD_ROW, V_ROW, 0);
-        let mut cache = LayerCache::ring(ring, positions);
+        let mut cache = LayerCache::test_ring(ring, positions);
         (0..positions).for_each(|position| {
             let value = marker(position);
             cache.append_at(
@@ -2619,7 +2634,7 @@ mod tests {
                 &[value; EVEN_ODD_ROW],
                 &[value; EVEN_ODD_ROW],
                 &[value; V_ROW],
-            );
+            ).expect("kv rows store");
         });
         cache
     }
@@ -2663,7 +2678,7 @@ mod tests {
 
     fn full_layer_rows(state: &PrefixState) -> usize {
         match &state.layer_caches[1] {
-            LayerCacheState::Attention(cache) => cache.k_even.len() / EVEN_ODD_ROW,
+            LayerCacheState::Attention(cache) => cache.k_even.elements() / EVEN_ODD_ROW,
             _ => 0,
         }
     }
@@ -2674,7 +2689,7 @@ mod tests {
     fn rewind_within_ring_slack_truncates_the_full_layer_and_keeps_the_ring() {
         let mut state = gemma_like_state(40);
         let ring_before = match &state.layer_caches[0] {
-            LayerCacheState::Attention(cache) => cache.k_even.clone(),
+            LayerCacheState::Attention(cache) => wide(&cache.k_even),
             _ => Vec::new(),
         };
 
@@ -2686,7 +2701,7 @@ mod tests {
         assert_eq!(state.ids.len(), 36);
         assert_eq!(full_layer_rows(&state), 36);
         match &state.layer_caches[0] {
-            LayerCacheState::Attention(cache) => assert_eq!(cache.k_even, ring_before),
+            LayerCacheState::Attention(cache) => assert_eq!(wide(&cache.k_even), ring_before),
             _ => panic!("layer 0 is an attention layer"),
         }
     }
@@ -2739,7 +2754,7 @@ mod tests {
                     for target_len in 0..=stored_len {
                         let rows_survive =
                             (target_len.saturating_sub(window)..target_len).all(|position| {
-                                cache.k_even[(position % ring.capacity) * EVEN_ODD_ROW]
+                                wide(&cache.k_even)[(position % ring.capacity) * EVEN_ODD_ROW]
                                     == marker(position)
                             });
                         assert_eq!(
@@ -2813,7 +2828,7 @@ mod tests {
         match &state.layer_caches[0] {
             LayerCacheState::Attention(cache) => {
                 let ring = cache.ring_geometry().expect("layer 0 is a ring");
-                cache.k_even[(position % ring.capacity) * EVEN_ODD_ROW]
+                wide(&cache.k_even)[(position % ring.capacity) * EVEN_ODD_ROW]
             }
             _ => 0.0,
         }
@@ -2847,7 +2862,7 @@ mod tests {
                         &[value; EVEN_ODD_ROW],
                         &[value; EVEN_ODD_ROW],
                         &[value; V_ROW],
-                    );
+                    ).expect("kv rows store");
                 }
             }
             state.ids.push(position as u32);

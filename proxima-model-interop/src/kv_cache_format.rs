@@ -15,8 +15,12 @@ use proxima_numeric::NumericFormat;
 
 use crate::error::InteropError;
 
-fn is_binary32_format(format: &NumericFormat) -> bool {
-    format.is_identity_of(&NumericFormat::Float32)
+/// The format the graph evaluates its K and V rows in, which a placed cache buffer or a device carry
+/// receives without a conversion step.
+const GRAPH_OUTPUT: NumericFormat = NumericFormat::Float32;
+
+fn stores_graph_output_format(format: &NumericFormat) -> bool {
+    format.is_identity_of(&GRAPH_OUTPUT)
 }
 
 /// The codec the kernel reads a K cache stored as `format` with, whatever the V cache is.
@@ -38,12 +42,12 @@ fn kernel_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String>
         .map_err(|error| error.to_string())
 }
 
-/// Without a cached-attention kernel the host reads the cache: each row is rounded through the
-/// format's own codec at the write (`generate::host_kv_rounding`), so any format that encodes is read.
+/// Without a cached-attention kernel the host reads the cache: each row is encoded through the
+/// format's own codec at the write (the host store is `PackedRows`), so any format that encodes is read.
 #[cfg(not(feature = "gpu"))]
 fn kernel_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(), String> {
     for format in [key, value] {
-        let encodes = is_binary32_format(format)
+        let encodes = stores_graph_output_format(format)
             || proxima_numeric::FormatCodec::for_format(format).is_some_and(|codec| codec.can_encode());
         if !encodes {
             return Err(String::from("the format has no codec that encodes"));
@@ -59,7 +63,7 @@ fn row_tiled_reads_format(format: &NumericFormat, head_dim: u64) -> bool {
 
 #[cfg(all(feature = "std", not(feature = "gpu")))]
 fn row_tiled_reads_format(format: &NumericFormat, _head_dim: u64) -> bool {
-    is_binary32_format(format)
+    stores_graph_output_format(format)
 }
 
 /// Admits a `-ctk`/`-ctv` pair: key and value in one type that is binary32 or that the
@@ -89,10 +93,10 @@ pub(crate) fn admit_pair(key: &NumericFormat, value: &NumericFormat) -> Result<(
     })
 }
 
-/// Whether the cache is the graph's own binary32 output, so the step's rows land in it directly.
+/// Whether the cache is held in the format the graph evaluates in, so the step's rows land in it directly.
 #[cfg(feature = "std")]
-pub(crate) fn is_binary32(format: &NumericFormat) -> bool {
-    is_binary32_format(format)
+pub(crate) fn stores_graph_output(format: &NumericFormat) -> bool {
+    stores_graph_output_format(format)
 }
 
 /// Whether the cache is narrower than the graph's binary32 output: the kernel reads it through a
@@ -210,10 +214,10 @@ mod tests {
 
     #[cfg(feature = "std")]
     #[test]
-    fn only_f32_is_binary32() {
-        assert!(is_binary32(&NumericFormat::Float32));
+    fn only_the_graph_output_format_stores_graph_output() {
+        assert!(stores_graph_output(&GRAPH_OUTPUT));
         for element in [NumericFormat::Float16, NumericFormat::BFloat16, NumericFormat::Q8_0] {
-            assert!(!is_binary32(&element), "{element:?}");
+            assert!(!stores_graph_output(&element), "{element:?}");
         }
     }
 

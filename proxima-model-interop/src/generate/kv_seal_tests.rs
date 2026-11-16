@@ -3,6 +3,7 @@
 
 use super::chunked_prefill_tests::{config, gemma4_checkpoint, prefill_with, prompt_of};
 use super::residency_caches::LayerCache;
+use super::wide;
 use super::{LayerCacheState, LoadedModel, ServingConfig};
 use crate::PromptCacheConfig;
 
@@ -96,11 +97,11 @@ fn key_minmax_summaries_equal_an_independent_fold_of_the_decoded_rows() {
     let (full, rows) = prefill_full_layer(4);
 
     assert_eq!(
-        full.k_even.len() % rows,
+        full.k_even.elements() % rows,
         0,
         "the key rows divide evenly by the cached rows"
     );
-    let even_odd_row = full.k_even.len() / rows;
+    let even_odd_row = full.k_even.elements() / rows;
     assert_eq!(
         full.block_summaries.len(),
         4,
@@ -114,9 +115,9 @@ fn key_minmax_summaries_equal_an_independent_fold_of_the_decoded_rows() {
             "a record is the minimum then the maximum of the concatenated key"
         );
         let span = block * 8 * even_odd_row..(block + 1) * 8 * even_odd_row;
-        let key_rows: Vec<Vec<f32>> = full.k_even[span.clone()]
+        let key_rows: Vec<Vec<f32>> = wide(&full.k_even)[span.clone()]
             .chunks_exact(even_odd_row)
-            .zip(full.k_odd[span].chunks_exact(even_odd_row))
+            .zip(wide(&full.k_odd)[span].chunks_exact(even_odd_row))
             .map(|(even_row, odd_row)| even_row.iter().chain(odd_row).copied().collect())
             .collect();
         for slot in 0..2 * even_odd_row {

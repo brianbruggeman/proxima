@@ -8,6 +8,7 @@ use crate::ContextLength;
 use crate::lowering::{KvLayout, header_descriptor};
 use crate::serving::{PromptCacheConfig, SpeculativeConfig, SpeculativeType, SpeculativeTypeSet};
 
+use super::wide;
 use super::chunked_prefill_tests::{dense_checkpoint, dense_moe_checkpoint, gemma4_checkpoint};
 use super::{
     BackendRuntime, LayerCacheState, LoadedModel, LogitsSink, NodeValuesSink, Phase, PrefixState,
@@ -209,11 +210,11 @@ fn assert_cache_state_equal(roundoff: f32, expected: &PrefixState, actual: &Pref
                 assert_payload(
                     roundoff,
                     &label("key even"),
-                    &expected.k_even,
-                    &actual.k_even,
+                    &wide(&expected.k_even),
+                    &wide(&actual.k_even),
                 );
-                assert_payload(roundoff, &label("key odd"), &expected.k_odd, &actual.k_odd);
-                assert_payload(roundoff, &label("value"), &expected.v, &actual.v);
+                assert_payload(roundoff, &label("key odd"), &wide(&expected.k_odd), &wide(&actual.k_odd));
+                assert_payload(roundoff, &label("value"), &wide(&expected.v), &wide(&actual.v));
             }
             (
                 LayerCacheState::DenseAttention(expected),
@@ -222,22 +223,22 @@ fn assert_cache_state_equal(roundoff: f32, expected: &PrefixState, actual: &Pref
                 assert_payload(
                     roundoff,
                     &label("first key"),
-                    &expected.k_first,
-                    &actual.k_first,
+                    &wide(&expected.k_first),
+                    &wide(&actual.k_first),
                 );
                 assert_payload(
                     roundoff,
                     &label("second key"),
-                    &expected.k_second,
-                    &actual.k_second,
+                    &wide(&expected.k_second),
+                    &wide(&actual.k_second),
                 );
                 assert_payload(
                     roundoff,
                     &label("pass key"),
-                    &expected.k_pass,
-                    &actual.k_pass,
+                    &wide(&expected.k_pass),
+                    &wide(&actual.k_pass),
                 );
-                assert_payload(roundoff, &label("value"), &expected.v, &actual.v);
+                assert_payload(roundoff, &label("value"), &wide(&expected.v), &wide(&actual.v));
             }
             (LayerCacheState::Ssm(expected), LayerCacheState::Ssm(actual)) => {
                 assert_payload(

@@ -302,19 +302,15 @@ impl DeviceKvLayer {
         even_odd_row: usize,
         v_row: usize,
     ) -> Result<(), InteropError> {
-        let even_odd = slot_start * even_odd_row..(slot_start + rows) * even_odd_row;
-        let value = slot_start * v_row..(slot_start + rows) * v_row;
-        self.store_f32(
-            &self.k_even,
-            target_row * self.even_odd_row_bytes,
-            &cache.k_even[even_odd.clone()],
-        )?;
-        self.store_f32(
-            &self.k_odd,
-            target_row * self.even_odd_row_bytes,
-            &cache.k_odd[even_odd],
-        )?;
-        self.store_value_f32(&self.v, target_row * self.v_row_bytes, &cache.v[value])
+        let mut wide = alloc::vec![0.0f32; rows * even_odd_row.max(v_row)];
+        let even_odd = &mut wide[..rows * even_odd_row];
+        cache.k_even.decode_range(slot_start * even_odd_row, even_odd)?;
+        self.store_f32(&self.k_even, target_row * self.even_odd_row_bytes, even_odd)?;
+        cache.k_odd.decode_range(slot_start * even_odd_row, even_odd)?;
+        self.store_f32(&self.k_odd, target_row * self.even_odd_row_bytes, even_odd)?;
+        let value = &mut wide[..rows * v_row];
+        cache.v.decode_range(slot_start * v_row, value)?;
+        self.store_value_f32(&self.v, target_row * self.v_row_bytes, value)
     }
 
     fn make_room(
@@ -517,7 +513,7 @@ impl DeviceKv {
                         v_row,
                     },
                 ) => {
-                    let host_rows = cache.k_even.len() / (*even_odd_row).max(1);
+                    let host_rows = cache.k_even.elements() / (*even_odd_row).max(1);
                     let holds_every_position =
                         cache.ring_geometry().is_some() || host_rows == cached_len;
                     if !holds_every_position {
@@ -543,9 +539,9 @@ impl DeviceKv {
         }
         for state in layer_caches.iter_mut() {
             if let LayerCacheState::Attention(cache) = state {
-                cache.k_even = Vec::new();
-                cache.k_odd = Vec::new();
-                cache.v = Vec::new();
+                cache.k_even.release();
+                cache.k_odd.release();
+                cache.v.release();
             }
         }
         Ok(Some(Self {
@@ -754,11 +750,11 @@ impl DeviceKv {
             )?;
             let value =
                 layer.load_value_f32(&layer.v, first_row * layer.v_row_bytes, live * v_row)?;
-            cache.k_even.clear();
-            cache.k_odd.clear();
-            cache.v.clear();
-            cache.reserve_ring_rows(positions_needed);
-            cache.append_at(first, &even, &odd, &value);
+            cache.k_even.release();
+            cache.k_odd.release();
+            cache.v.release();
+            cache.reserve_ring_rows(positions_needed)?;
+            cache.append_at(first, &even, &odd, &value)?;
         }
         #[cfg(feature = "instrument")]
         debug!(
@@ -777,10 +773,7 @@ fn host_mirror_bytes(layer_caches: &[LayerCacheState]) -> usize {
     layer_caches
         .iter()
         .filter_map(|state| match state {
-            LayerCacheState::Attention(cache) => Some(
-                (cache.k_even.capacity() + cache.k_odd.capacity() + cache.v.capacity())
-                    * size_of::<f32>(),
-            ),
+            LayerCacheState::Attention(cache) => Some(cache.k_even.capacity_bytes() + cache.k_odd.capacity_bytes() + cache.v.capacity_bytes()),
             _ => None,
         })
         .sum()
@@ -851,13 +844,13 @@ mod tests {
     }
 
     fn host_cache(window: Option<usize>, positions: usize) -> LayerCache {
-        let mut cache = attention_cache(window, 2, EVEN_ODD_ROW, V_ROW, 0, positions);
+        let mut cache = test_attention_cache(window, 2, EVEN_ODD_ROW, V_ROW, 0, positions);
         cache.append_at(
             0,
             &rows(0, positions, EVEN_ODD_ROW, 0),
             &rows(0, positions, EVEN_ODD_ROW, 1),
             &rows(0, positions, V_ROW, 2),
-        );
+        ).expect("kv rows store");
         cache
     }
 
@@ -924,9 +917,9 @@ mod tests {
         let LayerCacheState::Attention(restored) = &caches[0] else {
             panic!("layer 0 stays an attention cache");
         };
-        assert_eq!(restored.k_even, rows(0, 37, EVEN_ODD_ROW, 0));
-        assert_eq!(restored.k_odd, rows(0, 37, EVEN_ODD_ROW, 1));
-        assert_eq!(restored.v, rows(0, 37, V_ROW, 2));
+        assert_eq!(wide(&restored.k_even), rows(0, 37, EVEN_ODD_ROW, 0));
+        assert_eq!(wide(&restored.k_odd), rows(0, 37, EVEN_ODD_ROW, 1));
+        assert_eq!(wide(&restored.v), rows(0, 37, V_ROW, 2));
     }
 
     #[test]
@@ -971,12 +964,12 @@ mod tests {
         for position in final_len - ring.capacity..final_len {
             let slot = position % ring.capacity;
             assert_eq!(
-                restored.k_even[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
+                wide(&restored.k_even)[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
                 row_values(position, EVEN_ODD_ROW, 0)[..],
                 "position {position} survives in its ring slot"
             );
             assert_eq!(
-                restored.v[slot * V_ROW..(slot + 1) * V_ROW],
+                wide(&restored.v)[slot * V_ROW..(slot + 1) * V_ROW],
                 row_values(position, V_ROW, 2)[..]
             );
         }
@@ -1001,8 +994,8 @@ mod tests {
         for position in positions - ring.capacity..positions {
             let slot = position % ring.capacity;
             assert_eq!(
-                restored.k_even[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
-                before.k_even[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
+                wide(&restored.k_even)[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
+                wide(&before.k_even)[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
                 "position {position}, older than the window but inside the slack, is still there"
             );
         }
@@ -1126,9 +1119,9 @@ mod tests {
         let LayerCacheState::Attention(restored) = &caches[0] else {
             panic!("layer 0 stays an attention cache");
         };
-        assert_eq!(restored.k_even, rows(0, prefill_rows, EVEN_ODD_ROW, 0));
-        assert_eq!(restored.k_odd, rows(0, prefill_rows, EVEN_ODD_ROW, 1));
-        assert_eq!(restored.v, rows(0, prefill_rows, V_ROW, 2));
+        assert_eq!(wide(&restored.k_even), rows(0, prefill_rows, EVEN_ODD_ROW, 0));
+        assert_eq!(wide(&restored.k_odd), rows(0, prefill_rows, EVEN_ODD_ROW, 1));
+        assert_eq!(wide(&restored.v), rows(0, prefill_rows, V_ROW, 2));
     }
 
     #[test]
@@ -1160,12 +1153,12 @@ mod tests {
         for position in prefill_rows - ring.capacity..prefill_rows {
             let slot = position % ring.capacity;
             assert_eq!(
-                restored.k_even[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
+                wide(&restored.k_even)[slot * EVEN_ODD_ROW..(slot + 1) * EVEN_ODD_ROW],
                 row_values(position, EVEN_ODD_ROW, 0)[..],
                 "position {position} of the prefill survives in its ring slot"
             );
             assert_eq!(
-                restored.v[slot * V_ROW..(slot + 1) * V_ROW],
+                wide(&restored.v)[slot * V_ROW..(slot + 1) * V_ROW],
                 row_values(position, V_ROW, 2)[..]
             );
         }
@@ -1331,7 +1324,7 @@ mod tests {
             panic!("layer 0 stays an attention cache");
         };
         assert_eq!(
-            untouched.k_even.len(),
+            untouched.k_even.elements(),
             10 * EVEN_ODD_ROW,
             "a declined cache keeps its host rows"
         );
@@ -1350,13 +1343,13 @@ mod tests {
     }
 
     fn half_exact_cache(positions: usize) -> LayerCache {
-        let mut cache = attention_cache(None, 2, EVEN_ODD_ROW, V_ROW, 0, positions);
+        let mut cache = test_attention_cache(None, 2, EVEN_ODD_ROW, V_ROW, 0, positions);
         cache.append_at(
             0,
             &half_exact_rows(0, positions, EVEN_ODD_ROW, 0),
             &half_exact_rows(0, positions, EVEN_ODD_ROW, 1),
             &half_exact_rows(0, positions, V_ROW, 2),
-        );
+        ).expect("kv rows store");
         cache
     }
 
@@ -1389,13 +1382,13 @@ mod tests {
     }
 
     fn bf16_exact_cache(positions: usize) -> LayerCache {
-        let mut cache = attention_cache(None, 2, EVEN_ODD_ROW, V_ROW, 0, positions);
+        let mut cache = test_attention_cache(None, 2, EVEN_ODD_ROW, V_ROW, 0, positions);
         cache.append_at(
             0,
             &bf16_exact_rows(0, positions, EVEN_ODD_ROW, 0),
             &bf16_exact_rows(0, positions, EVEN_ODD_ROW, 1),
             &bf16_exact_rows(0, positions, V_ROW, 2),
-        );
+        ).expect("kv rows store");
         cache
     }
 
@@ -1457,9 +1450,9 @@ mod tests {
         expected_odd.extend(rounded(&odd));
         let mut expected_value = bf16_exact_rows(0, cached_len, V_ROW, 2);
         expected_value.extend(rounded(&value));
-        assert_eq!(restored.k_even, expected_even);
-        assert_eq!(restored.k_odd, expected_odd);
-        assert_eq!(restored.v, expected_value);
+        assert_eq!(wide(&restored.k_even), expected_even);
+        assert_eq!(wide(&restored.k_odd), expected_odd);
+        assert_eq!(wide(&restored.v), expected_value);
     }
 
     include!("../../../proxima-numeric/tests/support/production_text.rs");
@@ -1538,9 +1531,9 @@ mod tests {
         let LayerCacheState::Attention(restored) = &caches[0] else {
             panic!("layer 0 stays an attention cache");
         };
-        assert_eq!(restored.k_even, rows(0, 37, EVEN_ODD_ROW, 0));
-        assert_eq!(restored.k_odd, rows(0, 37, EVEN_ODD_ROW, 1));
-        assert_eq!(restored.v, rows(0, 37, V_ROW, 2));
+        assert_eq!(wide(&restored.k_even), rows(0, 37, EVEN_ODD_ROW, 0));
+        assert_eq!(wide(&restored.k_odd), rows(0, 37, EVEN_ODD_ROW, 1));
+        assert_eq!(wide(&restored.v), rows(0, 37, V_ROW, 2));
     }
 
     fn bf8_exact_rows(first: usize, count: usize, width: usize, leaf: usize) -> Vec<f32> {
@@ -1553,13 +1546,13 @@ mod tests {
     }
 
     fn adopted_bf8(positions: usize, total_positions: usize) -> (DeviceKv, Vec<LayerCacheState>) {
-        let mut cache = attention_cache(None, 2, EVEN_ODD_ROW, V_ROW, 0, positions);
+        let mut cache = test_attention_cache(None, 2, EVEN_ODD_ROW, V_ROW, 0, positions);
         cache.append_at(
             0,
             &bf8_exact_rows(0, positions, EVEN_ODD_ROW, 0),
             &bf8_exact_rows(0, positions, EVEN_ODD_ROW, 1),
             &bf8_exact_rows(0, positions, V_ROW, 2),
-        );
+        ).expect("kv rows store");
         let mut caches = alloc::vec![LayerCacheState::Attention(cache)];
         let widths = [LayerPadRowWidths::Attention {
             even_odd_row: EVEN_ODD_ROW,
@@ -1611,20 +1604,20 @@ mod tests {
         expected_odd.extend(odd);
         let mut expected_value = bf8_exact_rows(0, cached_len, V_ROW, 2);
         expected_value.extend(value);
-        assert_eq!(restored.k_even, expected_even);
-        assert_eq!(restored.k_odd, expected_odd);
-        assert_eq!(restored.v, expected_value);
+        assert_eq!(wide(&restored.k_even), expected_even);
+        assert_eq!(wide(&restored.k_odd), expected_odd);
+        assert_eq!(wide(&restored.v), expected_value);
     }
 
     #[test]
     fn a_q4_0_key_beside_a_float16_value_sizes_blocks_for_k_and_halves_for_v_and_flushes_what_the_codecs_decode() {
         const WIDE_ROW: usize = 64;
         let positions = 9;
-        let mut cache = attention_cache(None, 2, WIDE_ROW, V_ROW, 0, positions);
+        let mut cache = test_attention_cache(None, 2, WIDE_ROW, V_ROW, 0, positions);
         let even = rows(0, positions, WIDE_ROW, 0);
         let odd = rows(0, positions, WIDE_ROW, 1);
         let value = rows(0, positions, V_ROW, 2);
-        cache.append_at(0, &even, &odd, &value);
+        cache.append_at(0, &even, &odd, &value).expect("kv rows store");
         let mut caches = alloc::vec![LayerCacheState::Attention(cache)];
         let widths = [LayerPadRowWidths::Attention { even_odd_row: WIDE_ROW, v_row: V_ROW }];
         let q4_0 = NumericFormat::Q4_0;
@@ -1661,8 +1654,8 @@ mod tests {
             // decode returned Ok, which initialises every slot of its output
             (packed, slots.iter().map(|slot| unsafe { slot.assume_init() }).collect::<Vec<f32>>())
         };
-        assert_eq!(restored.k_even, decoded_even, "the key rows read back as the Q4_0 codec decodes them");
-        assert_eq!(restored.v, value, "the value rows are exact binary16 values");
+        assert_eq!(wide(&restored.k_even), decoded_even, "the key rows read back as the Q4_0 codec decodes them");
+        assert_eq!(wide(&restored.v), value, "the value rows are exact binary16 values");
     }
 
     #[test]
@@ -1699,9 +1692,9 @@ mod tests {
         let LayerCacheState::Attention(restored) = &caches[0] else {
             panic!("layer 0 stays an attention cache");
         };
-        assert_eq!(restored.k_even, half_exact_rows(0, 37, EVEN_ODD_ROW, 0));
-        assert_eq!(restored.k_odd, half_exact_rows(0, 37, EVEN_ODD_ROW, 1));
-        assert_eq!(restored.v, half_exact_rows(0, 37, V_ROW, 2));
+        assert_eq!(wide(&restored.k_even), half_exact_rows(0, 37, EVEN_ODD_ROW, 0));
+        assert_eq!(wide(&restored.k_odd), half_exact_rows(0, 37, EVEN_ODD_ROW, 1));
+        assert_eq!(wide(&restored.v), half_exact_rows(0, 37, V_ROW, 2));
     }
 
     #[test]

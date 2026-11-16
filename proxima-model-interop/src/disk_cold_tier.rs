@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
+use proxima_numeric::NumericFormat;
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 
 use crate::block_file::MappedBlockFile;
@@ -12,10 +13,16 @@ use crate::{ColdTier, InteropError, PrefixState};
 pub struct DiskColdTier {
     directory: PathBuf,
     descriptor_digest: [u8; 16],
+    key_format: NumericFormat,
+    value_format: NumericFormat,
 }
 
 impl DiskColdTier {
-    pub fn open(directory: &Path, descriptor_digest: [u8; 16]) -> Result<Self, InteropError> {
+    pub fn open(
+        directory: &Path,
+        descriptor_digest: [u8; 16],
+        (key_format, value_format): (&NumericFormat, &NumericFormat),
+    ) -> Result<Self, InteropError> {
         std::fs::create_dir_all(directory).map_err(|source| InteropError::BlockFileIo {
             path: directory.to_path_buf(),
             source,
@@ -23,6 +30,8 @@ impl DiskColdTier {
         Ok(Self {
             directory: directory.to_path_buf(),
             descriptor_digest,
+            key_format: *key_format,
+            value_format: *value_format,
         })
     }
 
@@ -63,7 +72,7 @@ impl ColdTier for DiskColdTier {
         let mapped = MappedBlockFile::open(&self.path_of(stamp))?;
         let view = mapped.view()?;
         view.require_digest(self.descriptor_digest)?;
-        PrefixState::from_block_file(ids.to_vec(), cached_len, &view)
+        PrefixState::from_block_file(ids.to_vec(), cached_len, &view, &self.key_format, &self.value_format)
     }
 }
 

@@ -17,15 +17,15 @@ fn row_bytes(floats_per_row: usize) -> Result<u32, InteropError> {
 }
 
 fn full_layer(cache: &LayerCache, cached_len: usize) -> Result<BlockFileLayer, InteropError> {
-    let whole = |plane: &[f32]| plane.len().is_multiple_of(cached_len);
-    if cache.k_odd.len() != cache.k_even.len() || !whole(&cache.k_even) || !whole(&cache.v) {
+    let whole = |plane: &PackedRows| plane.elements().is_multiple_of(cached_len);
+    if cache.k_odd.elements() != cache.k_even.elements() || !whole(&cache.k_even) || !whole(&cache.v) {
         return Err(malformed("layer rows disagree with the cached length"));
     }
     Ok(BlockFileLayer {
         rows: narrow(cached_len)?,
-        k_even_row_bytes: row_bytes(cache.k_even.len() / cached_len)?,
-        k_odd_row_bytes: row_bytes(cache.k_odd.len() / cached_len)?,
-        v_row_bytes: row_bytes(cache.v.len() / cached_len)?,
+        k_even_row_bytes: row_bytes(cache.k_even.elements() / cached_len)?,
+        k_odd_row_bytes: row_bytes(cache.k_odd.elements() / cached_len)?,
+        v_row_bytes: row_bytes(cache.v.elements() / cached_len)?,
         ring_window: 0,
         ring_capacity: 0,
     })
@@ -36,10 +36,10 @@ fn ring_layer(cache: &LayerCache, ring: &KvRing) -> Result<BlockFileLayer, Inter
     if ring.even_odd_row == 0 || ring.v_row == 0 {
         return Err(disagree);
     }
-    let rows = cache.k_even.len() / ring.even_odd_row;
-    let whole = cache.k_even.len().is_multiple_of(ring.even_odd_row)
-        && cache.k_odd.len() == cache.k_even.len()
-        && cache.v.len() == rows * ring.v_row;
+    let rows = cache.k_even.elements() / ring.even_odd_row;
+    let whole = cache.k_even.elements().is_multiple_of(ring.even_odd_row)
+        && cache.k_odd.elements() == cache.k_even.elements()
+        && cache.v.elements() == rows * ring.v_row;
     if !whole {
         return Err(disagree);
     }
@@ -77,11 +77,17 @@ fn layer_record(
     }
 }
 
-fn layer_planes(entry: &LayerCacheState) -> [&[f32]; 3] {
-    match entry {
-        LayerCacheState::Attention(cache) => [&cache.k_even, &cache.k_odd, &cache.v],
-        _ => [&[], &[], &[]],
+/// The file's planes are binary32, its own wire format, so each plane is decoded through the
+/// stored format's codec into scratch the caller owns.
+fn layer_planes(entry: &LayerCacheState) -> Result<[Vec<f32>; 3], InteropError> {
+    let LayerCacheState::Attention(cache) = entry else {
+        return Ok([Vec::new(), Vec::new(), Vec::new()]);
+    };
+    let mut planes = [Vec::new(), Vec::new(), Vec::new()];
+    for (wide, plane) in planes.iter_mut().zip([&cache.k_even, &cache.k_odd, &cache.v]) {
+        plane.decode_all(wide)?;
     }
+    Ok(planes)
 }
 
 fn read_plane(
@@ -115,18 +121,22 @@ fn restored_ring(record: &BlockFileLayer) -> Result<Option<KvRing>, InteropError
     )))
 }
 
-fn restored_layer(view: &BlockFileView<'_>, layer: usize) -> Result<LayerCacheState, InteropError> {
+fn restored_layer(
+    view: &BlockFileView<'_>,
+    layer: usize,
+    (key, value): (&NumericFormat, &NumericFormat),
+) -> Result<LayerCacheState, InteropError> {
     let record = &view.header.layers[layer];
     if record.rows == 0 {
         return Ok(LayerCacheState::SharedFromLayer);
     }
     let ring = restored_ring(record)?;
     Ok(LayerCacheState::Attention(LayerCache {
-        k_even: read_plane(view, layer, 0)?,
-        k_odd: read_plane(view, layer, 1)?,
-        v: read_plane(view, layer, 2)?,
+        k_even: PackedRows::from_values(key, &read_plane(view, layer, 0)?)?,
+        k_odd: PackedRows::from_values(key, &read_plane(view, layer, 1)?)?,
+        v: PackedRows::from_values(value, &read_plane(view, layer, 2)?)?,
         ring,
-        ..LayerCache::new()
+        ..LayerCache::new(&KvFormats { key: *key, value: *value })?
     }))
 }
 
@@ -162,10 +172,14 @@ impl PrefixState {
             base_position: 0,
             layers,
         };
-        let planes = self
+        let wide = self
             .layer_caches
             .iter()
-            .flat_map(layer_planes)
+            .map(layer_planes)
+            .collect::<Result<Vec<_>, _>>()?;
+        let planes = wide
+            .iter()
+            .flat_map(|layer| layer.iter().map(Vec::as_slice))
             .collect::<Vec<_>>();
         encode_block(&header, &planes, out)
     }
@@ -184,12 +198,14 @@ impl PrefixState {
         ids: Vec<u32>,
         cached_len: usize,
         view: &BlockFileView<'_>,
+        key_format: &NumericFormat,
+        value_format: &NumericFormat,
     ) -> Result<PrefixState, InteropError> {
         if cached_len > ids.len() {
             return Err(malformed("cached length exceeds ids"));
         }
         let layer_caches = (0..view.header.layers.len())
-            .map(|layer| restored_layer(view, layer))
+            .map(|layer| restored_layer(view, layer, (key_format, value_format)))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(PrefixState {
             ids,
@@ -210,10 +226,10 @@ mod tests {
     }
 
     fn three_layer_state() -> PrefixState {
-        let mut full = LayerCache::new();
-        full.append(&ramp(0.0, 8), &ramp(100.0, 8), &ramp(200.0, 4));
-        let mut ring = LayerCache::ring(KvRing::new(2, 1, 2, 1, 0), 4);
-        ring.append_at(0, &ramp(0.0, 8), &ramp(100.0, 8), &ramp(200.0, 4));
+        let mut full = LayerCache::test_new();
+        full.append(&ramp(0.0, 8), &ramp(100.0, 8), &ramp(200.0, 4)).expect("kv rows store");
+        let mut ring = LayerCache::test_ring(KvRing::new(2, 1, 2, 1, 0), 4);
+        ring.append_at(0, &ramp(0.0, 8), &ramp(100.0, 8), &ramp(200.0, 4)).expect("kv rows store");
         PrefixState {
             ids: vec![2, 818, 5279, 529],
             layer_caches: vec![
@@ -265,9 +281,9 @@ mod tests {
         let mut plane = Vec::new();
         view.plane_f32(0, 0, &mut plane)
             .expect("layer 0 k_even plane");
-        assert_eq!(bits(&plane), bits(&full.k_even));
+        assert_eq!(bits(&plane), bits(&wide(&full.k_even)));
         view.plane_f32(1, 2, &mut plane).expect("layer 1 v plane");
-        assert_eq!(bits(&plane), bits(&ring.v));
+        assert_eq!(bits(&plane), bits(&wide(&ring.v)));
         assert_eq!(view.plane_f32(2, 1, &mut plane), Some(()));
         assert!(plane.is_empty());
     }
@@ -293,8 +309,8 @@ mod tests {
 
     #[test]
     fn prefix_state_file_refuses_a_displaced_ring() {
-        let mut ring = LayerCache::ring(KvRing::new(2, 1, 2, 1, 1), 4);
-        ring.append_at(0, &ramp(0.0, 8), &ramp(100.0, 8), &ramp(200.0, 4));
+        let mut ring = LayerCache::test_ring(KvRing::new(2, 1, 2, 1, 1), 4);
+        ring.append_at(0, &ramp(0.0, 8), &ramp(100.0, 8), &ramp(200.0, 4)).expect("kv rows store");
         let state = PrefixState {
             ids: vec![2, 818, 5279, 529],
             layer_caches: vec![LayerCacheState::Attention(ring)],
@@ -360,7 +376,7 @@ mod tests {
             .expect("the state encodes");
         let view = decode_block(&first).expect("the encoded state decodes");
 
-        let restored = PrefixState::from_block_file(state.ids.clone(), state.cached_len, &view)
+        let restored = PrefixState::from_block_file(state.ids.clone(), state.cached_len, &view, &NumericFormat::Float32, &NumericFormat::Float32)
             .expect("the decoded state restores");
 
         let attention = |state: &PrefixState, layer: usize| match &state.layer_caches[layer] {
@@ -369,9 +385,9 @@ mod tests {
         };
         for layer in 0..2 {
             let (source, back) = (attention(&state, layer), attention(&restored, layer));
-            assert_eq!(bits(&back.k_even), bits(&source.k_even));
-            assert_eq!(bits(&back.k_odd), bits(&source.k_odd));
-            assert_eq!(bits(&back.v), bits(&source.v));
+            assert_eq!(bits(&wide(&back.k_even)), bits(&wide(&source.k_even)));
+            assert_eq!(bits(&wide(&back.k_odd)), bits(&wide(&source.k_odd)));
+            assert_eq!(bits(&wide(&back.v)), bits(&wide(&source.v)));
         }
         assert_eq!(
             attention(&restored, 1).ring_geometry(),
@@ -395,7 +411,7 @@ mod tests {
         let bytes = one_row_bytes(&one_row_header(4, 3));
         let view = decode_block(&bytes).expect("the hand built block decodes");
 
-        let refused = PrefixState::from_block_file(vec![2], 1, &view);
+        let refused = PrefixState::from_block_file(vec![2], 1, &view, &NumericFormat::Float32, &NumericFormat::Float32);
 
         assert!(matches!(
             refused,
@@ -410,7 +426,7 @@ mod tests {
         let bytes = one_row_bytes(&one_row_header(0, 0));
         let view = decode_block(&bytes).expect("the hand built block decodes");
 
-        let refused = PrefixState::from_block_file(vec![2, 818, 5279, 529], 5, &view);
+        let refused = PrefixState::from_block_file(vec![2, 818, 5279, 529], 5, &view, &NumericFormat::Float32, &NumericFormat::Float32);
 
         assert!(matches!(
             refused,
@@ -427,7 +443,7 @@ mod tests {
         bytes.extend_from_slice(&[0, 0]);
         let view = decode_block(&bytes).expect("the patched block still decodes");
 
-        let refused = PrefixState::from_block_file(vec![2], 1, &view);
+        let refused = PrefixState::from_block_file(vec![2], 1, &view, &NumericFormat::Float32, &NumericFormat::Float32);
 
         assert!(matches!(
             refused,

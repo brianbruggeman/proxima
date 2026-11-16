@@ -63,6 +63,7 @@ use memmap2::Advice;
 use memmap2::Mmap;
 #[cfg(feature = "mlx-gdn")]
 use omega::mlx;
+use proxima_numeric::{NumericFormat, PackedRows};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::sync::blocking::Mutex;
@@ -246,7 +247,6 @@ mod pregather;
 #[cfg(feature = "cuda")]
 mod cuda_resident_plans;
 mod residency_caches;
-mod host_kv_rounding;
 #[macro_use]
 mod decode;
 #[cfg(test)]
@@ -349,6 +349,8 @@ use device_kv::{DeviceKv, KvLeafNodes, kv_leaf_nodes};
 use draft_model::ModelProposer;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use greedy_device::{device_token, with_greedy_argmax};
+#[cfg(test)]
+use kv_ring::test_attention_cache;
 use kv_ring::{
     KvRing, attention_cache, ring_slack_rows, rings_cover_speculation, sliding_cached_len_scalar,
     sliding_ring_geometry, speculative_draft_limit,

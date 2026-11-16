@@ -153,9 +153,9 @@ fn measure_shift(
             let fresh = LayerRows::of_run(moved_rows.layer, cache, &in_place, even_odd_row, v_row)
                 .expect("the fresh state holds the rows");
             let (even_diff, even_scale) =
-                row_maxima(&moved_rows.k_even, &fresh.k_even, even_odd_row);
-            let (odd_diff, odd_scale) = row_maxima(&moved_rows.k_odd, &fresh.k_odd, even_odd_row);
-            let (value_diff, _) = row_maxima(&moved_rows.v, &fresh.v, v_row);
+                row_maxima(&wide(&moved_rows.k_even), &wide(&fresh.k_even), even_odd_row);
+            let (odd_diff, odd_scale) = row_maxima(&wide(&moved_rows.k_odd), &wide(&fresh.k_odd), even_odd_row);
+            let (value_diff, _) = row_maxima(&wide(&moved_rows.v), &wide(&fresh.v), v_row);
             let rows = even_diff.len();
             LayerDiffs {
                 layer: moved_rows.layer,
@@ -593,14 +593,13 @@ fn key_difference(left: &LayerRows, right: &LayerRows) -> (f32, f32) {
             .map(|(left, right)| (left - right).abs())
             .fold(0.0_f32, f32::max)
     };
-    let scale = right
-        .k_even
+    let scale = wide(&right.k_even)
         .iter()
-        .chain(&right.k_odd)
+        .chain(&wide(&right.k_odd))
         .map(|value| value.abs())
         .fold(0.0_f32, f32::max);
     (
-        worst(&left.k_even, &right.k_even).max(worst(&left.k_odd, &right.k_odd)),
+        worst(&wide(&left.k_even), &wide(&right.k_even)).max(worst(&wide(&left.k_odd), &wide(&right.k_odd))),
         scale,
     )
 }
@@ -765,12 +764,12 @@ fn the_squash_stores_the_lifted_rows_in_every_layer_not_the_fresh_ones() {
                     } else {
                         0
                     };
-                    let count = lifted_rows.k_even.len() / even_odd_row - skipped;
+                    let count = lifted_rows.k_even.elements() / even_odd_row - skipped;
                     let lifted_rows = &LayerRows {
                         layer,
-                        k_even: lifted_rows.k_even[skipped * even_odd_row..].to_vec(),
-                        k_odd: lifted_rows.k_odd[skipped * even_odd_row..].to_vec(),
-                        v: Vec::new(),
+                        k_even: PackedRows::from_values(lifted_rows.k_even.format(), &wide(&lifted_rows.k_even)[skipped * even_odd_row..]).expect("rows re-encode"),
+                        k_odd: PackedRows::from_values(lifted_rows.k_odd.format(), &wide(&lifted_rows.k_odd)[skipped * even_odd_row..]).expect("rows re-encode"),
+                        v: PackedRows::new(lifted_rows.v.format()).expect("a codec"),
                     };
                     let window = ChunkRun {
                         old_start: lifted_run.new_end() - count,

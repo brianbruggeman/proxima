@@ -352,6 +352,10 @@ pub enum InteropError {
     #[error(transparent)]
     Tensor(#[from] proxima_tensor::TensorError),
 
+    /// A KV row run could not be encoded to, or decoded from, the cache's stored format.
+    #[error(transparent)]
+    Numeric(#[from] proxima_numeric::NumericError),
+
     /// `crate::generate`'s prompt encode/decode step failed --
     /// propagated from `proxima_tokenizer` rather than re-derived.
     #[cfg(feature = "std")]

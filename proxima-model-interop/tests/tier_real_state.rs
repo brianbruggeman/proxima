@@ -91,7 +91,13 @@ fn real_state() -> &'static (Vec<u32>, usize, Vec<u8>) {
 fn restore_and_encode(bytes: &[u8]) -> (PrefixState, Vec<u8>) {
     let (prompt_ids, cached_len, _) = real_state();
     let view = decode_block(bytes).expect("decodes the block file");
-    let restored = PrefixState::from_block_file(prompt_ids.clone(), *cached_len, &view)
+    let restored = PrefixState::from_block_file(
+        prompt_ids.clone(),
+        *cached_len,
+        &view,
+        &ServingConfig::default().kv_cache_key_quant,
+        &ServingConfig::default().kv_cache_value_quant,
+    )
         .expect("restores the state");
     let mut again = Vec::new();
     restored
@@ -154,7 +160,13 @@ fn tier_real_state_disk_to_host() {
     let mapped = MappedBlockFile::open(&path).expect("maps the block file");
     let view = mapped.view().expect("decodes the mapped bytes");
     let (prompt_ids, cached_len, _) = real_state();
-    let restored = PrefixState::from_block_file(prompt_ids.clone(), *cached_len, &view)
+    let restored = PrefixState::from_block_file(
+        prompt_ids.clone(),
+        *cached_len,
+        &view,
+        &ServingConfig::default().kv_cache_key_quant,
+        &ServingConfig::default().kv_cache_value_quant,
+    )
         .expect("restores from disk");
     let mut again = Vec::new();
     restored

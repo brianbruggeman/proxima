@@ -98,7 +98,10 @@ impl CheckpointMapping {
         let serving_config = settings.as_serving_config(&weight_precision);
         let model = LoadedModel::load_with_serving(&parsed, self.bytes(), &serving_config)?
             .with_residency(residency);
-        model.install_cold_tier(&settings.reclaim)?;
+        model.install_cold_tier(
+            &settings.reclaim,
+            (&serving_config.kv_cache_key_quant, &serving_config.kv_cache_value_quant),
+        )?;
         Ok(model)
     }
 
