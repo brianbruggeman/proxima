@@ -76,10 +76,19 @@ pub(super) fn lay_out_whole_slots(allocations: &[Allocation], releases: &[Vec<us
 /// One buffer per output that is never released, plus one shared buffer holding
 /// every released output at a byte offset. Offsets are chosen largest first,
 /// each at the lowest aligned offset that no output live at the same time
-/// occupies, so two outputs overlap in bytes only when one is released before
-/// the other is first written.
-pub(super) fn lay_out_packed(allocations: &[Allocation], releases: &[Vec<usize>]) -> Layout {
+/// occupies. `group_of[position]` is the position's barrier group (non-decreasing;
+/// a serial plan passes each position its own group, see [`serial_groups`]).
+/// Ops in one group may run at once, so an output is live from the first
+/// position of the group that first writes it to the last position of the
+/// group that last reads it: two outputs overlap in bytes only when one's group
+/// ends before the other's group begins, which a barrier separates.
+pub(super) fn lay_out_packed(
+    allocations: &[Allocation],
+    releases: &[Vec<usize>],
+    group_of: &[usize],
+) -> Layout {
     let released_at = released_positions(allocations.len(), releases);
+    let spans = lifted_spans(allocations, &released_at, group_of);
     let mut places: Vec<(usize, usize)> = vec![(0, 0); allocations.len()];
     let mut slot_bytes: Vec<usize> = vec![0];
     let mut packable: Vec<usize> = Vec::new();
@@ -95,11 +104,7 @@ pub(super) fn lay_out_packed(allocations: &[Allocation], releases: &[Vec<usize>]
     let mut placed: Vec<(usize, usize, usize)> = Vec::with_capacity(packable.len());
     for index in packable {
         let extent = footprint(allocations[index].bytes);
-        let lifetime = (
-            allocations[index].first,
-            released_at[index].unwrap_or(usize::MAX),
-        );
-        let offset = first_free_offset(&placed, allocations, &released_at, lifetime, extent);
+        let offset = first_free_offset(&placed, &spans, spans[index], extent);
         places[index] = (0, offset);
         slot_bytes[0] = slot_bytes[0].max(offset + extent);
         placed.push((index, offset, extent));
@@ -128,6 +133,29 @@ pub(super) fn peak_live_bytes(allocations: &[Allocation], releases: &[Vec<usize>
     peak
 }
 
+/// Every position its own barrier group: the serial dispatch order, where a
+/// range released at `p` is reusable by a write at `p + 1`.
+pub(super) fn serial_groups(positions: usize) -> Vec<usize> {
+    (0..positions).collect()
+}
+
+/// Each allocation's lifetime lifted to whole barrier groups: from the first
+/// position of the group holding its first write through the last position of
+/// the group holding its last read (`usize::MAX` when never released).
+fn lifted_spans(
+    allocations: &[Allocation],
+    released_at: &[Option<usize>],
+    group_of: &[usize],
+) -> Vec<(usize, usize)> {
+    let group_start = |position: usize| group_of.partition_point(|group| *group < group_of[position]);
+    let group_end = |position: usize| group_of.partition_point(|group| *group <= group_of[position]) - 1;
+    allocations
+        .iter()
+        .zip(released_at)
+        .map(|(each, last)| (group_start(each.first), last.map_or(usize::MAX, group_end)))
+        .collect()
+}
+
 fn footprint(bytes: usize) -> usize {
     (bytes + RANGE_GUARD).next_multiple_of(RANGE_ALIGNMENT)
 }
@@ -144,18 +172,14 @@ fn released_positions(count: usize, releases: &[Vec<usize>]) -> Vec<Option<usize
 
 fn first_free_offset(
     placed: &[(usize, usize, usize)],
-    allocations: &[Allocation],
-    released_at: &[Option<usize>],
+    spans: &[(usize, usize)],
     lifetime: (usize, usize),
     extent: usize,
 ) -> usize {
     let mut occupied: Vec<(usize, usize)> = placed
         .iter()
         .filter(|(index, _, _)| {
-            let other = (
-                allocations[*index].first,
-                released_at[*index].unwrap_or(usize::MAX),
-            );
+            let other = spans[*index];
             other.0 <= lifetime.1 && lifetime.0 <= other.1
         })
         .map(|(_, offset, other_extent)| (*offset, *other_extent))
@@ -285,7 +309,7 @@ mod tests {
         ];
         let releases = vec![vec![0], vec![1], vec![2]];
 
-        let layout = lay_out_packed(&allocations, &releases);
+        let layout = lay_out_packed(&allocations, &releases, &serial_groups(releases.len()));
 
         assert_eq!(
             layout.slot_bytes.len(),
@@ -302,7 +326,7 @@ mod tests {
     #[test]
     fn packed_outputs_live_together_never_share_bytes() {
         let (allocations, releases) = stacked_block_layers();
-        let packed = lay_out_packed(&allocations, &releases);
+        let packed = lay_out_packed(&allocations, &releases, &serial_groups(releases.len()));
         let whole = lay_out_whole_slots(&allocations, &releases);
 
         assert_live_ranges_are_disjoint(&allocations, &releases, &packed);
@@ -313,7 +337,7 @@ mod tests {
     fn packed_stacked_block_needs_the_hidden_and_down_buffers_not_the_sum_of_size_classes() {
         let (allocations, releases) = stacked_block_layers();
 
-        let packed = lay_out_packed(&allocations, &releases);
+        let packed = lay_out_packed(&allocations, &releases, &serial_groups(releases.len()));
         let whole = lay_out_whole_slots(&allocations, &releases);
 
         let packed_total: usize = packed.slot_bytes.iter().sum();
@@ -333,7 +357,7 @@ mod tests {
     fn packed_buffer_is_never_smaller_than_the_live_peak() {
         let (allocations, releases) = stacked_block_layers();
 
-        let layout = lay_out_packed(&allocations, &releases);
+        let layout = lay_out_packed(&allocations, &releases, &serial_groups(releases.len()));
 
         let pinned: usize = allocations
             .iter()
@@ -372,7 +396,7 @@ mod tests {
                 }
             }
 
-            let packed = lay_out_packed(&allocations, &releases);
+            let packed = lay_out_packed(&allocations, &releases, &serial_groups(releases.len()));
             let whole = lay_out_whole_slots(&allocations, &releases);
 
             assert_live_ranges_are_disjoint(&allocations, &releases, &packed);
@@ -385,9 +409,154 @@ mod tests {
         }
     }
 
+    /// Worked example, derived by hand before the code (`FP(n) = (n + 256)
+    /// rounded up to 256`): six ops in two barrier groups, `group_of =
+    /// [0, 0, 0, 1, 1, 1]`, so ops 0..=2 may run at once and ops 3..=5 may
+    /// run at once, with a barrier between the groups. Op 5 is output-placed
+    /// and owns no allocation; ops 0..=4 write five outputs of distinct size:
+    ///
+    /// | out | bytes | FP   | first | last read | released at |
+    /// |-----|-------|------|-------|-----------|-------------|
+    /// | A   | 1792  | 2048 | 0     | 1         | 1           |
+    /// | B   | 1280  | 1536 | 1     | 2         | 2           |
+    /// | C   |  768  | 1024 | 2     | 3         | 3           |
+    /// | D   |  512  |  768 | 3     | 5         | 5           |
+    /// | E   |  256  |  512 | 4     | 5         | 5           |
+    ///
+    /// Lifted to groups (first write -> start of its group, last read -> end
+    /// of its group; group 0 is positions 0..=2, group 1 is 3..=5):
+    /// A [0,2], B [0,2], C [0,5] (written in group 0, read in group 1),
+    /// D [3,5], E [3,5].
+    ///
+    /// Placement is largest first, each at the lowest offset clear of every
+    /// output whose lifted span meets its own:
+    /// - A: nothing placed yet, offset 0, ends at 2048.
+    /// - B: meets A, so offset 2048, ends at 3584.
+    /// - C: meets A and B, so offset 3584, ends at 4608.
+    /// - D: meets only C (A and B end at 2 < 3), so the gap at 0 holds its 768
+    ///   bytes before C at 3584: offset 0.
+    /// - E: meets C and D, D occupies [0, 768), so offset 768, and 768 + 512
+    ///   = 1280 <= 3584 fits before C.
+    ///
+    /// Slot 0 is `max(end) = 4608` bytes; no output is pinned, so there is no
+    /// other slot.
+    #[test]
+    fn concurrent_two_group_plan_packs_to_the_hand_derived_offsets() {
+        let allocations = vec![
+            allocation(1792, 0),
+            allocation(1280, 1),
+            allocation(768, 2),
+            allocation(512, 3),
+            allocation(256, 4),
+        ];
+        let releases = vec![vec![], vec![0], vec![1], vec![2], vec![], vec![3, 4]];
+        let group_of = vec![0, 0, 0, 1, 1, 1];
+
+        let layout = lay_out_packed(&allocations, &releases, &group_of);
+
+        assert_eq!(
+            layout.places,
+            vec![(0, 0), (0, 2048), (0, 3584), (0, 0), (0, 768)]
+        );
+        assert_eq!(layout.slot_bytes, vec![4608]);
+    }
+
+    #[test]
+    fn concurrent_outputs_sharing_a_barrier_group_never_share_bytes_even_when_positions_are_disjoint() {
+        let allocations = vec![allocation(1024, 0), allocation(1024, 2)];
+        let releases = vec![vec![], vec![0], vec![], vec![1]];
+        let one_group = vec![0, 0, 0, 0];
+
+        let concurrent = lay_out_packed(&allocations, &releases, &one_group);
+        let serial = lay_out_packed(&allocations, &releases, &serial_groups(4));
+
+        assert_eq!(serial.places, vec![(0, 0), (0, 0)], "serial reuses the range");
+        assert_eq!(
+            concurrent.places,
+            vec![(0, 0), (0, footprint(1024))],
+            "ops 0 and 2 may run at once, so the second range sits beside the first"
+        );
+        assert_eq!(concurrent.slot_bytes, vec![2 * footprint(1024)]);
+    }
+
+    #[test]
+    fn concurrent_packed_placement_is_disjoint_for_every_pair_that_meets_in_a_group() {
+        let mut state = 0xd1b5_4a32_d192_ed03_u64;
+        let mut next = move |bound: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % bound as u64) as usize
+        };
+        for _ in 0..200 {
+            let positions = 8 + next(40);
+            let mut group = 0;
+            let group_of: Vec<usize> = (0..positions)
+                .map(|_| {
+                    group += usize::from(next(3) == 0);
+                    group
+                })
+                .collect();
+            let count = 4 + next(60);
+            let mut allocations: Vec<Allocation> = (0..count)
+                .map(|_| Allocation {
+                    bytes: 1 + next(1 << 16),
+                    first: next(positions),
+                    resident: next(9) == 0,
+                })
+                .collect();
+            allocations.sort_by_key(|each| each.first);
+            let mut releases: Vec<Vec<usize>> = vec![Vec::new(); positions];
+            for (index, each) in allocations.iter().enumerate() {
+                if !each.resident && next(4) != 0 {
+                    releases[each.first + next(positions - each.first)].push(index);
+                }
+            }
+
+            let layout = lay_out_packed(&allocations, &releases, &group_of);
+
+            let released_at = released_positions(allocations.len(), &releases);
+            let spans = lifted_spans(&allocations, &released_at, &group_of);
+            for first in 0..allocations.len() {
+                for second in first + 1..allocations.len() {
+                    let meet = spans[first].0 <= spans[second].1 && spans[second].0 <= spans[first].1;
+                    let (slot_a, offset_a) = layout.places[first];
+                    let (slot_b, offset_b) = layout.places[second];
+                    let overlap = slot_a == slot_b
+                        && offset_a < offset_b + allocations[second].bytes
+                        && offset_b < offset_a + allocations[first].bytes;
+                    assert!(!(meet && overlap), "{first} and {second} meet in a group yet share bytes");
+                }
+            }
+        }
+    }
+
+    /// The decode plan's attention scratch: one `532_480`-byte range per
+    /// attention op (the compiled split ceiling), written by the op's partial
+    /// dispatch and read by its merge dispatch, so released at its own position.
+    /// 49 ops, each in the barrier group opened by the previous op's output
+    /// being read, never share a group, so the 49 ranges reuse one.
+    #[test]
+    fn sequential_attention_scratch_in_different_groups_shares_one_range() {
+        const SCRATCH_BYTES: usize = 532_480;
+        const ATTENTION_OPS: usize = 49;
+        let allocations: Vec<Allocation> = (0..ATTENTION_OPS)
+            .map(|position| allocation(SCRATCH_BYTES, position))
+            .collect();
+        let releases: Vec<Vec<usize>> = (0..ATTENTION_OPS).map(|index| vec![index]).collect();
+        let group_of: Vec<usize> = (0..ATTENTION_OPS).collect();
+
+        let layout = lay_out_packed(&allocations, &releases, &group_of);
+
+        assert!(layout.places.iter().all(|place| *place == (0, 0)));
+        assert_eq!(layout.slot_bytes, vec![footprint(SCRATCH_BYTES)]);
+        assert_eq!(footprint(SCRATCH_BYTES), 532_736);
+        assert_eq!(ATTENTION_OPS * SCRATCH_BYTES, 26_091_520);
+    }
+
     #[test]
     fn packing_an_empty_plan_allocates_only_the_empty_shared_buffer() {
-        let layout = lay_out_packed(&[], &[]);
+        let layout = lay_out_packed(&[], &[], &[]);
 
         assert_eq!(layout.slot_bytes, vec![0]);
         assert!(layout.places.is_empty());

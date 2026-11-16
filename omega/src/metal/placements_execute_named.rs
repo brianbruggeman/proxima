@@ -1566,7 +1566,7 @@ pub(super) fn execute_plan_with_placements_inner(
                         Some(node) if node == bound.node
                     ) || crate::msl::hazard_write_node(bindings_for_hazard).is_none()
                 );
-                let hazard_output = Retained::as_ptr(&resolved.0);
+                let hazard_output = (Retained::as_ptr(&resolved.0), resolved.1);
                 // an extra output not yet in `device_buffers` is a fresh allocation inside `encode_op`,
                 // which no earlier op can have touched; `encode_op` records it once allocated.
                 hazard_state.outputs.clear();
@@ -1575,9 +1575,20 @@ pub(super) fn execute_plan_with_placements_inner(
                     extra_output_nodes(bound).filter_map(|(extra_node, _)| {
                         device_buffers
                             .get(&extra_node)
-                            .map(|(buffer, _offset)| Retained::as_ptr(buffer))
+                            .map(|(buffer, offset)| (Retained::as_ptr(buffer), *offset))
                     }),
                 );
+                // a packed range is reused only across a barrier group, so the
+                // group boundary is a barrier whatever the buffer tracker saw
+                if plan
+                    .arena
+                    .get()
+                    .is_some_and(|arena| arena.opens_barrier_group(position))
+                {
+                    hazard_state.tracker.reset();
+                    encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
+                    counter!(BARRIERS_EMITTED, 1);
+                }
                 // Read-only, computed BEFORE `hazard_step` mutates the
                 // tracker below, so it sees the exact same state
                 // `hazard_step`'s own internal check will -- `classify`
@@ -1652,7 +1663,7 @@ pub(super) fn execute_plan_with_placements_inner(
             // -- every other `encode_op` caller passes `None` and rejects a
             // `Binding::Scratch` kernel instead (that function's own doc).
             let attention_scratch =
-                attention_scratch_buffer(plan, position)?.map(|buffer| (buffer, 0usize));
+                attention_scratch_buffer(plan, position)?;
             #[cfg(feature = "instrument")]
             {
                 counter!(PLACEMENT_RESOLVE_CALLS, 1);

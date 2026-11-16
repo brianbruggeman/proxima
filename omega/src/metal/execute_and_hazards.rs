@@ -1486,6 +1486,11 @@ pub fn move_placed_buffer_bytes(
     Ok(())
 }
 
+/// What the concurrent hazard tracker names a resource by: the device buffer
+/// object and the byte offset a range starts at, so two packed arena ranges in
+/// one buffer are two resources. Pointer identity from [`Retained::as_ptr`].
+pub(super) type HazardId = (*const ProtocolObject<dyn MTLBuffer>, usize);
+
 /// [`DispatchType::Concurrent`]'s dataflow-hazard set, generic over the
 /// identity type so this logic is testable without a real Metal device
 /// (`Id = usize`/`&str` in tests, `Id = *const ProtocolObject<dyn MTLBuffer>`
@@ -1697,17 +1702,17 @@ pub(super) enum ExpertSourceCacheState {
 /// capacity, so only the very first call after a plan's own construction
 /// ever allocates.
 pub(super) struct HazardState {
-    pub(super) tracker: HazardTracker<*const ProtocolObject<dyn MTLBuffer>>,
-    pub(super) inputs: Vec<*const ProtocolObject<dyn MTLBuffer>>,
+    pub(super) tracker: HazardTracker<HazardId>,
+    pub(super) inputs: Vec<HazardId>,
     /// Every buffer the op being stepped writes, primary first; reused like
     /// `inputs` so a warm step allocates nothing.
-    pub(super) outputs: Vec<*const ProtocolObject<dyn MTLBuffer>>,
+    pub(super) outputs: Vec<HazardId>,
     /// The node whose output last wrote each buffer identity, so a RAW barrier
     /// can tell an input that reads the writer's own node from a buffer
     /// identity two unrelated nodes happen to share.
     #[cfg(feature = "instrument")]
     pub(super) writer_nodes:
-        std::collections::HashMap<*const ProtocolObject<dyn MTLBuffer>, NodeId>,
+        std::collections::HashMap<HazardId, NodeId>,
     /// Dispatching positions encoded since the last barrier this state saw.
     #[cfg(feature = "instrument")]
     pub(super) dispatches_since_barrier: u64,
@@ -1761,7 +1766,7 @@ impl HazardState {
     #[cfg(feature = "instrument")]
     pub(super) fn note_dispatch(
         &mut self,
-        output: *const ProtocolObject<dyn MTLBuffer>,
+        output: HazardId,
         node: NodeId,
         barrier_fired: bool,
     ) {
@@ -1789,7 +1794,7 @@ impl HazardState {
 pub(super) fn resolve_hazard_inputs(
     nodes: impl Iterator<Item = NodeId>,
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
-) -> Result<Vec<*const ProtocolObject<dyn MTLBuffer>>, MetalError> {
+) -> Result<Vec<HazardId>, MetalError> {
     let mut resolved = Vec::new();
     resolve_hazard_inputs_into(nodes, device_buffers, &mut resolved)?;
     Ok(resolved)
@@ -1803,13 +1808,13 @@ pub(super) fn resolve_hazard_inputs(
 pub(super) fn resolve_hazard_inputs_into(
     nodes: impl Iterator<Item = NodeId>,
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
-    resolved: &mut Vec<*const ProtocolObject<dyn MTLBuffer>>,
+    resolved: &mut Vec<HazardId>,
 ) -> Result<(), MetalError> {
     resolved.clear();
     for operand in nodes {
         let pointer = device_buffers
             .get(&operand)
-            .map(|(buffer, _offset)| Retained::as_ptr(buffer))
+            .map(|(buffer, offset)| (Retained::as_ptr(buffer), *offset))
             .ok_or(MetalError::UnresolvedHazardOperand { node: operand })?;
         resolved.push(pointer);
     }

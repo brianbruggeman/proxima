@@ -1689,7 +1689,7 @@ pub(super) fn handle_merged_position(
         )?;
         let output_pointer = device_buffers
             .get(&bound.node)
-            .map(|(buffer, _)| Retained::as_ptr(buffer))
+            .map(|(buffer, offset)| (Retained::as_ptr(buffer), *offset))
             .ok_or(MetalError::UnresolvedHazardOperand { node: bound.node })?;
         #[cfg(feature = "instrument")]
         let merged_class = hazard_state

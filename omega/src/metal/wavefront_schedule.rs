@@ -206,7 +206,7 @@ fn reordered_peak_bytes(
 ) -> Option<usize> {
     let outputs: BTreeSet<NodeId> = effective_outputs.iter().copied().collect();
     let retires = defer_retires_to_level_end(node_retirement(reordered, effective_outputs), level_starts);
-    let found = arena_allocations(reordered, &retires, &outputs, &BTreeSet::new(), |_| false);
+    let found = arena_allocations(reordered, &retires, &outputs, &BTreeSet::new(), |_| false, |_| None);
     Some(peak_live_bytes(&found.allocations, &found.releases))
 }
 

@@ -14,14 +14,17 @@ use std::borrow::Borrow;
 ///
 /// # Two layouts, one retirement order
 ///
-/// A plan dispatched [`DispatchType::Serial`] is laid out by
-/// [`lay_out_packed`]: every output that some later op retires shares one
-/// buffer, each at its own aligned byte offset, so a retired range serves a
-/// later output of any size that fits and the buffer is as long as the plan's
-/// live peak. Every other plan is laid out by [`lay_out_whole_slots`]: one
-/// buffer per output, handed to a later output of the SAME byte length. The
-/// concurrent hazard tracker names a buffer by pointer alone, so a packed
-/// buffer would read as one resource and barrier every dispatch.
+/// Every plan is laid out by [`lay_out_packed`]: every output that some later
+/// op retires shares one buffer, each at its own aligned byte offset, so a
+/// retired range serves a later output of any size that fits and the buffer is
+/// as long as the plan's live peak. A serial plan treats each position as its
+/// own barrier group; a concurrent plan lifts lifetimes to the groups from
+/// [`barrier_groups`] and the dispatch loop emits a barrier at each group
+/// start ([`BufferArena::group_starts`]), so a range is reused only across a
+/// barrier. The hazard tracker names a range by (buffer, offset). A layout
+/// that would exceed the device's buffer limit falls back to
+/// [`lay_out_whole_slots`]: one buffer per output, handed to a later output of
+/// the SAME byte length.
 ///
 /// # Outputs are pinned by construction
 ///
@@ -51,6 +54,14 @@ pub(super) struct BufferArena {
     /// Live-bytes high-water mark reached while building -- MG-3's own
     /// witness against [`ARENA_TRANSIENT_CAP`].
     pub(super) peak_bytes: usize,
+    /// Parallel to `prepared.resolved`: `true` where a position opens a new barrier
+    /// group of a [`DispatchType::Concurrent`] plan. [`BufferArena`]'s packed ranges
+    /// are reused only across such a boundary, so the dispatch loop emits a barrier
+    /// at every `true`. Empty for a serial or whole-slot plan.
+    pub(super) group_starts: Vec<bool>,
+    /// Parallel to `prepared.resolved`: the `(slot, byte offset)` of a decode attention
+    /// position's scratch, `None` for a position whose scratch the plan owns.
+    pub(super) position_scratch: Vec<Option<(usize, usize)>>,
     /// Per-slot count of outputs ever assigned that slot -- `instrument`-
     /// only, ROW 539's witness for whether a WAW/WAR barrier's colliding
     /// identity is a genuinely recycled slot (`> 1`) rather than a slot this
@@ -93,10 +104,21 @@ impl BufferArena {
         self.slot_bytes[slot]
     }
 
+    /// The arena range holding `position`'s attention scratch, when it has one.
+    pub(super) fn scratch_range(&self, position: usize) -> Option<(&MetalBuffer, usize)> {
+        let (slot, offset) = (*self.position_scratch.get(position)?)?;
+        Some((&self.slots[slot], offset))
+    }
+
+    /// True when `position` opens a barrier group of the packed concurrent layout.
+    pub(super) fn opens_barrier_group(&self, position: usize) -> bool {
+        self.group_starts.get(position).copied().unwrap_or(false)
+    }
+
+    #[cfg(feature = "instrument")]
     /// True when `position`'s own slot was assigned to more than one
     /// output over this plan's whole program -- a recycled slot, ROW 539's
     /// arena-reuse witness for [`record_hazard_class`].
-    #[cfg(feature = "instrument")]
     pub(super) fn slot_is_recycled(&self, position: usize) -> bool {
         self.position_slot[position].is_some_and(|slot| self.slot_occupancy[slot] > 1)
     }
@@ -192,6 +214,9 @@ pub(super) struct ArenaAllocations {
     primary: Vec<Option<usize>>,
     extras: Vec<(NodeId, usize)>,
     position_extras: Vec<core::ops::Range<usize>>,
+    /// The allocation backing each position's attention scratch, `None` where the
+    /// position keeps a plan-owned scratch buffer.
+    scratch: Vec<Option<usize>>,
 }
 
 /// Walks `resolved` in program order, mirroring the retirement ordering
@@ -209,6 +234,7 @@ pub(super) fn arena_allocations(
     outputs: &BTreeSet<NodeId>,
     resident_nodes: &BTreeSet<NodeId>,
     is_placed: impl Fn(NodeId) -> bool,
+    scratch_bytes: impl Fn(&BoundOp) -> Option<usize>,
 ) -> ArenaAllocations {
     let mut found = ArenaAllocations {
         allocations: Vec::with_capacity(resolved.len()),
@@ -216,6 +242,7 @@ pub(super) fn arena_allocations(
         primary: Vec::with_capacity(resolved.len()),
         extras: Vec::new(),
         position_extras: Vec::with_capacity(resolved.len()),
+        scratch: Vec::with_capacity(resolved.len()),
     };
     let mut live_index: BTreeMap<NodeId, usize> = BTreeMap::new();
     for (position, bound) in resolved.iter().enumerate() {
@@ -246,6 +273,18 @@ pub(super) fn arena_allocations(
         }
         found.position_extras.push(extras_start..found.extras.len());
         let mut released = Vec::new();
+        // written by the partial dispatch and read by the merge dispatch of this one op, so
+        // it is released at its own position
+        let scratch = scratch_bytes(bound).map(|bytes| {
+            found.allocations.push(Allocation {
+                bytes: bytes.max(1),
+                first: position,
+                resident: false,
+            });
+            found.allocations.len() - 1
+        });
+        found.scratch.push(scratch);
+        released.extend(scratch);
         for retired in &retires[position] {
             debug_assert!(
                 !outputs.contains(retired),
@@ -256,6 +295,61 @@ pub(super) fn arena_allocations(
         found.releases.push(released);
     }
     found
+}
+
+/// Bytes of scratch the arena holds for a decode attention position: a single-row op
+/// reserves the compiled split ceiling whatever its key range, so the size survives a
+/// refit; a multi-row op sizes by its key range and a shared scratch is one buffer for
+/// every op, so both stay plan-owned ([`attention_scratch_buffer`]).
+#[cfg(feature = "metal-plan-stable-buffers")]
+fn arena_scratch_bytes(plan: &Plan, bound: &BoundOp) -> Option<usize> {
+    let decode = matches!(bound.kind, BoundOpKind::CachedAttention { query_rows: 1, .. });
+    let shared = scratch_is_shared_with_schedule(bound, plan.numeric_policy, plan.attention_row_schedule);
+    (decode && !shared)
+        .then(|| {
+            cached_attention_scratch_len_with_schedule(
+                bound,
+                plan.numeric_policy,
+                plan.attention_row_schedule,
+            )
+        })
+        .flatten()
+        .map(|elements| elements as usize * 4)
+}
+
+/// The barrier group of each position of a concurrent plan: a new group opens at
+/// the first op that reads a node an earlier op of the current group wrote,
+/// found by walking [`HazardTracker`] over node identities (each node is written
+/// once, so only its RAW edge can fire). A barrier is forced at each opening, so
+/// the groups are exact for [`lay_out_packed`] whatever else the buffer-identity
+/// tracker adds.
+fn barrier_groups(resolved: &[BoundOp]) -> Vec<usize> {
+    let mut tracker: HazardTracker<NodeId> = HazardTracker::new();
+    let mut group = 0usize;
+    let mut reads: Vec<NodeId> = Vec::new();
+    let mut writes: Vec<NodeId> = Vec::new();
+    let mut groups = Vec::with_capacity(resolved.len());
+    for bound in resolved {
+        reads.clear();
+        reads.extend(bound.operands().iter().map(|(node, ..)| *node));
+        writes.clear();
+        writes.push(bound.node);
+        writes.extend(extra_output_nodes(bound).map(|(node, _)| node));
+        if tracker.needs_barrier(&reads, writes.iter().copied()) {
+            tracker.reset();
+            group += 1;
+        }
+        tracker.record(&reads, writes.iter().copied());
+        groups.push(group);
+    }
+    groups
+}
+
+/// `true` at each position whose group differs from the previous position's.
+fn group_starts(group_of: &[usize]) -> Vec<bool> {
+    (0..group_of.len())
+        .map(|position| position > 0 && group_of[position] != group_of[position - 1])
+        .collect()
 }
 
 /// Builds [`BufferArena`]: collects the plan's outputs ([`arena_allocations`]),
@@ -304,7 +398,14 @@ pub(super) fn build_buffer_arena(
         "buffer arena sized against the naive (no-reuse) transient sum"
     );
 
-    let found = arena_allocations(resolved, retires, &outputs, &plan.resident_nodes, is_placed);
+    let mut found = arena_allocations(
+        resolved,
+        retires,
+        &outputs,
+        &plan.resident_nodes,
+        is_placed,
+        |bound| arena_scratch_bytes(plan, bound),
+    );
     let peak_bytes = peak_live_bytes(&found.allocations, &found.releases);
     let reuse_factor = naive_transient_bytes as f64 / peak_bytes.max(1) as f64;
     debug!(
@@ -327,8 +428,17 @@ pub(super) fn build_buffer_arena(
         });
     }
 
-    let packed = (plan.dispatch_type == DispatchType::Serial)
-        .then(|| lay_out_packed(&found.allocations, &found.releases))
+    let concurrent = plan.dispatch_type == DispatchType::Concurrent;
+    let group_of = if concurrent {
+        barrier_groups(resolved)
+    } else {
+        serial_groups(resolved.len())
+    };
+    let packed = Some(lay_out_packed(
+        &found.allocations,
+        &found.releases,
+        &group_of,
+    ))
         .filter(|layout| {
             layout
                 .slot_bytes
@@ -336,6 +446,13 @@ pub(super) fn build_buffer_arena(
                 .all(|bytes| *bytes <= device.maxBufferLength())
         });
     let was_packed = packed.is_some();
+    if !was_packed && concurrent {
+        // whole-slot reuse leans on the buffer tracker, which does not see a scratch write
+        // before its own barrier, so scratch keeps a buffer of its own there
+        for index in found.scratch.iter().flatten() {
+            found.allocations[*index].resident = true;
+        }
+    }
     let layout = packed.unwrap_or_else(|| lay_out_whole_slots(&found.allocations, &found.releases));
     let mut slots: Vec<MetalBuffer> = Vec::with_capacity(layout.slot_bytes.len());
     for bytes in &layout.slot_bytes {
@@ -377,6 +494,16 @@ pub(super) fn build_buffer_arena(
             .collect(),
         position_extras: found.position_extras,
         peak_bytes,
+        position_scratch: found
+            .scratch
+            .iter()
+            .map(|index| index.map(|each| layout.places[each]))
+            .collect(),
+        group_starts: if was_packed && concurrent {
+            group_starts(&group_of)
+        } else {
+            Vec::new()
+        },
         #[cfg(feature = "instrument")]
         slot_occupancy: {
             let mut occupancy = vec![0usize; layout.slot_bytes.len()];
@@ -832,17 +959,26 @@ fn shared_scratch_elements(resolved: &[BoundOp], numeric_policy: NumericPolicy) 
 pub(super) fn attention_scratch_buffer(
     plan: &Plan,
     position: usize,
-) -> Result<Option<&MetalBuffer>, MetalError> {
+) -> Result<Option<(&MetalBuffer, usize)>, MetalError> {
+    if let Some(range) = plan
+        .arena
+        .get()
+        .and_then(|arena| arena.scratch_range(position))
+    {
+        return Ok(Some(range));
+    }
     if plan.attention_scratch.get().is_none() {
         let (device, _queue) = device_and_queue()?;
         let mut buffers = Vec::with_capacity(plan.prepared.resolved.len());
         let shared = shared_attention_scratch(&device, plan)?;
         for bound in &plan.prepared.resolved {
+            let in_arena = arena_scratch_bytes(plan, bound).is_some();
             let buffer = match cached_attention_scratch_len_with_schedule(
                 bound,
                 plan.numeric_policy,
                 plan.attention_row_schedule,
             ) {
+                Some(_) if in_arena => None,
                 Some(_)
                     if scratch_is_shared_with_schedule(
                         bound,
@@ -868,13 +1004,14 @@ pub(super) fn attention_scratch_buffer(
     Ok(plan
         .attention_scratch
         .get()
-        .and_then(|buffers| buffers[position].as_ref()))
+        .and_then(|buffers| buffers[position].as_ref())
+        .map(|buffer| (buffer, 0)))
 }
 #[cfg(not(feature = "metal-plan-stable-buffers"))]
 pub(super) fn attention_scratch_buffer(
     _plan: &Plan,
     _position: usize,
-) -> Result<Option<&MetalBuffer>, MetalError> {
+) -> Result<Option<(&MetalBuffer, usize)>, MetalError> {
     Ok(None)
 }
 
@@ -1684,7 +1821,7 @@ fn capture_copy_pipeline(
 fn encode_capture_copy(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     copy: &CaptureCopy,
-    hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
+    hazard: Option<&mut HazardTracker<HazardId>>,
 ) -> Result<(), MetalError> {
     if copy.bytes == 0 {
         return Ok(());
@@ -3738,7 +3875,7 @@ pub(super) fn encode_op(
     // `mut` so `GatedDeltaNet`'s own `state_out` write below can reborrow it
     // (`as_deref_mut`) AFTER the merge block's own reborrow, instead of the
     // merge block's tuple match moving this `Option` outright.
-    mut hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
+    mut hazard: Option<&mut HazardTracker<HazardId>>,
     expert_buffers: Option<&ExpertSourceBuffers>,
     // `Some` from the callers that encode a whole step: compacted grouped ops that read one
     // route share the first one's compaction instead of each running a prepass.
@@ -4174,7 +4311,7 @@ pub(super) fn encode_op(
             encoder.setBuffer_offset_atIndex(Some(&state_buffer), state_offset, bindings.len());
         }
         if let Some(tracker) = hazard.as_deref_mut() {
-            tracker.record(&[], Some(Retained::as_ptr(&state_buffer)));
+            tracker.record(&[], Some((Retained::as_ptr(&state_buffer), state_offset)));
         }
         device_buffers.insert(*state_out, (state_buffer, state_offset));
     }
@@ -4192,7 +4329,7 @@ pub(super) fn encode_op(
             encoder.setBuffer_offset_atIndex(Some(&extra_buffer), extra_offset, buffer_index);
         }
         if let Some(tracker) = hazard.as_deref_mut() {
-            tracker.record(&[], Some(Retained::as_ptr(&extra_buffer)));
+            tracker.record(&[], Some((Retained::as_ptr(&extra_buffer), extra_offset)));
         }
         device_buffers.insert(extra_node, (extra_buffer, extra_offset));
     }
@@ -4214,7 +4351,16 @@ pub(super) fn encode_op(
             encoder.setBuffer_offset_atIndex(Some(&group.round_table), 0, bindings.len());
         }
         if let Some(tracker) = hazard.as_deref_mut() {
-            tracker.record(&[], Some(Retained::as_ptr(&group.output_buffer)));
+            // every round reads back at its own offset into this one buffer
+            for round in 0..round_outputs.len() {
+                tracker.record(
+                    &[],
+                    Some((
+                        Retained::as_ptr(&group.output_buffer),
+                        round * group.output_member_bytes,
+                    )),
+                );
+            }
         }
         for (round, round_node) in round_outputs.iter().enumerate().skip(1) {
             device_buffers.insert(
@@ -4228,7 +4374,7 @@ pub(super) fn encode_op(
     }
     let compaction = match prepass {
         Some(prepass) => {
-            let output_pointer = Retained::as_ptr(&output);
+            let output_pointer = (Retained::as_ptr(&output), output_offset);
             let shared_key = route_compactions
                 .as_ref()
                 .and_then(|_| crate::msl::route_compaction_key(bound, packed_operands, knobs));
@@ -4275,7 +4421,7 @@ pub(super) fn encode_op(
                 unsafe { encoder.setBuffer_offset_atIndex(Some(&compaction), 0, bindings.len()) };
             }
             if let Some(tracker) = hazard.as_deref_mut()
-                && hazard_read_compaction(tracker, Retained::as_ptr(&compaction), output_pointer)
+                && hazard_read_compaction(tracker, (Retained::as_ptr(&compaction), 0), output_pointer)
             {
                 encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
                 counter!(BARRIERS_EMITTED, 1);
@@ -4331,9 +4477,9 @@ pub(super) fn encode_op(
     // `Binding::Scratch` maps to its own buffer identity exactly like
     // `Binding::Output`/`Binding::Input` do (see that variant's own doc).
     if let Some(merge) = merge {
-        if let (Some(tracker), Some((scratch_buffer, _))) = (&mut hazard, scratch) {
-            let scratch_pointer = Retained::as_ptr(scratch_buffer);
-            let output_pointer = Retained::as_ptr(&output);
+        if let (Some(tracker), Some((scratch_buffer, scratch_offset))) = (&mut hazard, scratch) {
+            let scratch_pointer = (Retained::as_ptr(scratch_buffer), scratch_offset);
+            let output_pointer = (Retained::as_ptr(&output), output_offset);
             // the split dispatch above just wrote `scratch` -- record it,
             // then ask the tracker whether the merge's own read needs a
             // barrier first (always true: a write is never already visible
@@ -4424,8 +4570,8 @@ fn encode_route_prepass(
     encoder: &ProtocolObject<dyn MTLComputeCommandEncoder>,
     prepass: &ResolvedPrepass,
     slot: usize,
-    output_pointer: *const ProtocolObject<dyn MTLBuffer>,
-    hazard: Option<&mut HazardTracker<*const ProtocolObject<dyn MTLBuffer>>>,
+    output_pointer: HazardId,
+    hazard: Option<&mut HazardTracker<HazardId>>,
 ) -> Result<MetalBuffer, MetalError> {
     let compaction = allocate_buffer_for(
         "route_compaction",
@@ -4448,7 +4594,7 @@ fn encode_route_prepass(
     encoder.setComputePipelineState(&prepass.place);
     dispatch(encoder, &prepass.place, prepass.grid);
     if let Some(tracker) = hazard
-        && hazard_write_compaction(tracker, Retained::as_ptr(&compaction), output_pointer)
+        && hazard_write_compaction(tracker, (Retained::as_ptr(&compaction), 0), output_pointer)
     {
         encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
         counter!(BARRIERS_EMITTED, 1);
@@ -5837,6 +5983,7 @@ pub(super) mod arena_tests {
             &outputs.iter().copied().collect(),
             &resolved_plan.resident_nodes,
             |_| false,
+            |_| None,
         );
 
         let placed = super::arena_allocations(
@@ -5845,6 +5992,7 @@ pub(super) mod arena_tests {
             &outputs.iter().copied().collect(),
             &resolved_plan.resident_nodes,
             |node| node == stage_one,
+            |_| None,
         );
 
         assert_eq!(

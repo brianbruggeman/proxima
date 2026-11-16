@@ -286,7 +286,7 @@ pub use arena_encode_dispatch_finish::{
     CapturedDispatch, flush_gpu_caches, take_captured_dispatches, time_empty_command_buffer_gpu_ns,
 };
 #[cfg(feature = "metal-plan-stable-buffers")]
-use arena_layout::{Allocation, lay_out_packed, lay_out_whole_slots, peak_live_bytes};
+use arena_layout::{Allocation, lay_out_packed, lay_out_whole_slots, peak_live_bytes, serial_groups};
 pub use device_buffers_arena_plan::*;
 #[cfg(feature = "instrument")]
 pub use dispatch_timed_and_classify::*;
