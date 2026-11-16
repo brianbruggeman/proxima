@@ -5227,7 +5227,11 @@ not read this cache format; only the single-row decode kernel reads it from the 
                                 positions_needed + device_kv_decode_rows,
                                 serving_config.kv_bucket_tokens,
                             ),
-                            (device_kv_step_rows, adopted_step_rows),
+                            (
+                                device_kv_step_rows,
+                                adopted_step_rows,
+                                omega::sized::KV_WINDOW_COMPACTION_GRANULE_ROWS as usize,
+                            ),
                             |bytes| {
                                 let kept = self
                                     .kv_buffer_source

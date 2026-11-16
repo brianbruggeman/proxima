@@ -787,6 +787,14 @@ fn emit_sizing_consts() {
         "pub const LOAD_TIME_FIT_ARENA_BYTES_PER_PREFILL_ROW: u64 = {arena_bytes_per_prefill_row};\n"
     ));
 
+    let kv_window_compaction_granule_rows = require_nonzero(
+        "kv_window.compaction_granule_rows",
+        resolve_int(&root, "kv_window", "compaction_granule_rows"),
+    );
+    out.push_str(&format!(
+        "pub const KV_WINDOW_COMPACTION_GRANULE_ROWS: u64 = {kv_window_compaction_granule_rows};\n"
+    ));
+
     let selection_top_fraction_min_rows = require_nonzero(
         "selection.top_fraction_min_rows",
         resolve_int(&root, "selection", "top_fraction_min_rows"),

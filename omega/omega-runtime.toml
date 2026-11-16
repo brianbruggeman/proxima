@@ -700,6 +700,16 @@ arena_allowance_bytes = 28_311_552
 # `OMEGA_LOAD_TIME_FIT_ARENA_BYTES_PER_PREFILL_ROW`.
 arena_bytes_per_prefill_row = 894_647
 
+[kv_window]
+# a sliding-window layer's device kv buffer holds `retain + step` rows at minimum (`retain` kept
+# positions plus the widest step, `ubatch_size` rows in prefill), rounded up to a multiple of this
+# many rows. The rounding is the compaction slack: the buffer fills, `DeviceKvLayer::make_room`
+# slides the kept rows to the front, and the slack rows are how many steps pass between those
+# copies. Raising it trades device memory (3 buffers x rows x row bytes per sliding layer) for
+# fewer compactions; lowering it does the reverse. 256 makes a 513-row window with 512-row steps 1280 rows, the cell count llama's sliding cache
+# reports for it (proxnum251 stage-r0-llama-4069.err), and compacts every 255 tokens. Overridable per-build via `OMEGA_KV_WINDOW_COMPACTION_GRANULE_ROWS`.
+compaction_granule_rows = 256
+
 [grid]
 # widest 1D grid, in threads, a Metal kernel's `uint gid
 # [[thread_position_in_grid]]` can address. A dispatch wider than this launches

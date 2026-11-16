@@ -19,12 +19,12 @@
 //!
 //! A full layer's rows live at their absolute position. A sliding layer keeps
 //! the rows its host ring would hold (window plus rewind slack, `retain`) in a
-//! linear buffer of `2 * retain + step rows`: the leaf placement slides forward
+//! linear buffer of `retain + step` rows rounded up to a compaction granule (`omega::sized::KV_WINDOW_COMPACTION_GRANULE_ROWS`): the leaf placement slides forward
 //! by one row per token (the program reads `min(cached_len, window)` rows
 //! starting `window` back), and when the read would run off the end the kept
 //! rows are moved to the front. That trades the ring's modular indexing, which
 //! the kernel does not do, for an amortised `retain`-row move once every
-//! `retain + step` tokens.
+//! granule-slack tokens (`capacity - retain - step`, 255 for a 513-row window with 512-row steps).
 
 use proxima_core::kv_carry::KvCommand;
 use proxima_numeric::{FormatCodec, NumericError, NumericFormat};
@@ -142,13 +142,21 @@ fn acquire(
     Ok(source(bytes)?)
 }
 
+/// Rows of a sliding layer's linear buffer: `retain + step` is the least `make_room` can work in (its
+/// `reach` is at most `retain + new_count`, `new_count <= step`), rounded up to `granule` rows. The
+/// rounding is the slack between compactions, `granule - 1` tokens for a 513-row window with 512-row steps; see
+/// `omega-runtime.toml` `[kv_window]` for the memory-versus-copy trade. A zero granule adds no slack.
+fn window_capacity_rows(retain: usize, step: usize, granule: usize) -> usize {
+    (retain + step).next_multiple_of(granule.max(1))
+}
+
 impl DeviceKvLayer {
     fn allocate(
         layer: usize,
         cache: &LayerCache,
         (even_odd_row, v_row): (usize, usize),
         full_capacity_rows: usize,
-        (window_step_rows, staging_rows): (usize, usize),
+        (window_step_rows, staging_rows, compaction_granule_rows): (usize, usize, usize),
         source: &mut impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
         (key_format, value_format): (&NumericFormat, &NumericFormat),
     ) -> Result<Self, InteropError> {
@@ -172,7 +180,12 @@ impl DeviceKvLayer {
         let window = cache.ring_geometry().map(|ring| ring.window);
         let retain = cache.ring_geometry().map_or(0, |ring| ring.capacity);
         let capacity_rows = if window.is_some() {
-            (2 * retain + window_step_rows).min(full_capacity_rows)
+            window_capacity_rows(
+                retain,
+                window_step_rows,
+                compaction_granule_rows,
+            )
+            .min(full_capacity_rows)
         } else {
             full_capacity_rows
         };
@@ -475,6 +488,10 @@ impl DeviceKvLayer {
     }
 }
 
+/// A granule of one rows is `retain + step` exactly, the tightest buffer: the tests that count compactions use it.
+#[cfg(test)]
+const BARE_MINIMUM_GRANULE_ROWS: usize = 1;
+
 impl DeviceKv {
     /// Moves every attention layer's host rows onto the device, or `None`
     /// when this call's caches are not the plain attention shape
@@ -490,6 +507,10 @@ impl DeviceKv {
     /// cache, which a cache adopted after its prefill does not need prefill-wide. A
     /// prefill batch ends inside `positions_needed`, so it adds no full-layer rows.
     ///
+    /// `compaction_granule_rows` rounds a sliding layer's `retain + window_step_rows` buffer up to a
+    /// multiple: the slack is how many tokens pass between compactions. A serving call passes
+    /// `omega::sized::KV_WINDOW_COMPACTION_GRANULE_ROWS`, set in `omega-runtime.toml` `[kv_window]`.
+    ///
     /// `key_format` stores the K planes and `value_format` the V rows; a block key layout beside
     /// a scalar value is the one pair that differs, see [`kernel_codecs`].
     pub(super) fn adopt_pair(
@@ -497,7 +518,7 @@ impl DeviceKv {
         layer_row_widths: &[LayerPadRowWidths],
         cached_len: usize,
         (capacity_positions, bucket_tokens): (usize, usize),
-        (window_step_rows, step_rows): (usize, usize),
+        (window_step_rows, step_rows, compaction_granule_rows): (usize, usize, usize),
         mut source: impl FnMut(usize) -> Result<PlacedBuffer, omega::MetalError>,
         (key_format, value_format): (NumericFormat, NumericFormat),
     ) -> Result<Option<Self>, InteropError> {
@@ -524,7 +545,7 @@ impl DeviceKv {
                         cache,
                         (*even_odd_row, *v_row),
                         full_capacity_rows,
-                        (window_step_rows, step_rows),
+                        (window_step_rows, step_rows, compaction_granule_rows),
                         &mut source,
                         (&key_format, &value_format),
                     )?;
@@ -568,7 +589,7 @@ impl DeviceKv {
             layer_row_widths,
             cached_len,
             capacity,
-            (max_step_rows, max_step_rows),
+            (max_step_rows, max_step_rows, BARE_MINIMUM_GRANULE_ROWS),
             source,
             (format, format),
         )
@@ -923,6 +944,18 @@ mod tests {
     }
 
     #[test]
+    fn a_513_row_window_with_512_row_steps_gets_1280_rows_not_the_doubled_1538() {
+        let (retain, step) = (513, 512);
+        assert_eq!(
+            window_capacity_rows(retain, step, omega::sized::KV_WINDOW_COMPACTION_GRANULE_ROWS as usize),
+            1280,
+            "retain + step = 1025 rounds up to five 256-row granules, llama's sliding cell count"
+        );
+        assert_eq!(window_capacity_rows(retain, step, 1), retain + step, "a granule of one is the bare minimum");
+        assert_eq!(window_capacity_rows(retain, step, 0), retain + step, "a zero granule adds no slack");
+    }
+
+    #[test]
     fn a_sliding_layer_keeps_its_whole_ring_across_every_compaction() {
         let window = 8;
         let start = 21;
@@ -1011,7 +1044,7 @@ mod tests {
             &cache,
             (EVEN_ODD_ROW, V_ROW),
             capacity_rows,
-            (3, 3),
+            (3, 3, BARE_MINIMUM_GRANULE_ROWS),
             &mut allocate_placed_buffer,
             (
                 &NumericFormat::Float32,
@@ -1627,7 +1660,7 @@ mod tests {
             &widths,
             positions,
             (40, 4),
-            (3, 3),
+            (3, 3, BARE_MINIMUM_GRANULE_ROWS),
             allocate_placed_buffer,
             (q4_0, NumericFormat::Float16),
         )
@@ -1670,7 +1703,7 @@ mod tests {
             &widths,
             10,
             (40, 4),
-            (3, 3),
+            (3, 3, BARE_MINIMUM_GRANULE_ROWS),
             allocate_placed_buffer,
             (NumericFormat::Float16, NumericFormat::Q4_0),
         )
@@ -1828,7 +1861,7 @@ mod tests {
             &widths,
             positions,
             (positions + 1, 4),
-            (3, step_rows),
+            (3, step_rows, BARE_MINIMUM_GRANULE_ROWS),
             |bytes| {
                 acquired_bytes.push(bytes);
                 allocate_placed_buffer(bytes)
@@ -1888,7 +1921,7 @@ mod tests {
             &widths,
             10,
             (40, 4),
-            (3, 3),
+            (3, 3, BARE_MINIMUM_GRANULE_ROWS),
             allocate_placed_buffer,
             (NumericFormat::Q8_0, NumericFormat::Float32),
         )

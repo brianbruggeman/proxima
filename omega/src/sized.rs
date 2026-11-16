@@ -78,6 +78,7 @@
 //!   `row_tiled_splits`), read only under `metal-attn-split-rows`; see
 //!   `omega-runtime.toml`'s `[attention_rows]`.
 //! - `SELECTION_TOP_FRACTION_MIN_ROWS` (always compiled) -- the row count at which the rank-count top-fraction expression lowers to one selection kernel; see `omega-runtime.toml`'s `[selection]`.
+//! - `KV_WINDOW_COMPACTION_GRANULE_ROWS` (always compiled) -- the row multiple a sliding-window device kv buffer rounds up to; see `omega-runtime.toml`'s `[kv_window]`.
 //! - [`RUNTIME_WARMUP_RUNS`] and [`RUNTIME_MEASUREMENT_RUNS`] — build-time
 //!   fallback counts for measured candidate selection. `std` runtime config
 //!   overrides these values; the alloc tier has only these generated constants.
@@ -204,6 +205,9 @@ pub const SIMD_WIDTH: u64 = 32;
 // at any of N in {1,2,4,8} on 0.6B (30.6-31.6 ms/token, all within ~2%
 // noise), and a directional REGRESSION on 4B at N=2 (75.1 vs 63.98 ms/token,
 // n=8 steady steps). Left at the TOML default of 1.
+
+// `KV_WINDOW_COMPACTION_GRANULE_ROWS` comes in through the `include!` above -- the row multiple a
+// sliding layer's device kv buffer is rounded up to; see `omega-runtime.toml`'s `[kv_window]`.
 
 // `LOAD_TIME_FIT_OS_HEADROOM_BYTES`/`LOAD_TIME_FIT_ARENA_ALLOWANCE_BYTES`/
 // `LOAD_TIME_FIT_ARENA_BYTES_PER_PREFILL_ROW`
