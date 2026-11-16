@@ -109,7 +109,7 @@ lane_run_bytes = 0
 # steps up at every 32-row tile edge, so 129..144 lose again. Ubatch-32
 # prefill: 495 tok/s row-blocked, 364 tiled.
 min_tokens = 64
-# 64, down from 160. flint-UD-Q4_K_XL, 84-token prefill, per-dispatch gpu us
+# 64, down from 160. a 49-layer Q4_K_XL checkpoint, 84-token prefill, per-dispatch gpu us
 # per op, row-blocked/cooperative at 160 -> tiled at 64 (PROXNUM-78, dispatch
 # profile of the 1662-op program): attn_q [84,32,128,2048] 1984 -> 278,
 # attn_output [84,4,8,128,2048] 1557 -> 315, shared-expert gate/up
@@ -121,7 +121,7 @@ min_tokens = 64
 # a DENSE (unquantized) batched product runs on the `simdgroup_matrix` tile only when its grid holds at
 # least this many threadgroups (row tiles x column tiles x batch depth); `min_tokens` alone admitted a
 # decode step's attention scores, whose 96 cached positions pass the token minimum while the grid is
-# 8 threadgroups on a 32-core device. flint-UD-Q4_K_XL, one decode step, 49 attention layers, per-op
+# 8 threadgroups on a 32-core device. a 49-layer Q4_K_XL checkpoint, one decode step, 49 attention layers, per-op
 # gpu us from the dispatch profile at 96 cached positions, scores [1,96,4,8,64]: 39-47 tiled
 # (8 threadgroups), cooperative ~19 (`PROXIMA_TILED_GEMM_DENSE=0` same binary: 23.2 -> 21.6 ms/token,
 # text identical). The 84-token prefill scores [84,84,4,8,64] hold 672 threadgroups (205 us tiled,
@@ -170,7 +170,7 @@ route_segments = 2
 # exactly the realized token tiles per row tile and each threadgroup reads its
 # (expert, tile) from the table in two loads, so an expert with many tokens gets
 # proportionally many threadgroups and no threadgroup walks the counts.
-# flint-UD-Q4_K_XL, M1 Max, 84-token prefill, dispatch profile run 2 of 2
+# a 49-layer Q4_K_XL checkpoint, M1 Max, 84-token prefill, dispatch profile run 2 of 2
 # (PROXNUM-86): before, ffn_gate/up_exps Iq4_XS 836/840 us regression intercept
 # at 9.9 us per touched expert; after, 11/91 us at 12.0/11.6 us per touched
 # expert. Walking the counts was the intercept: with the walk replaced by an
@@ -185,7 +185,7 @@ route_mode = "compacted"
 # Most 64-row tiles of output features an op may have and still take the
 # compacted route; an op with more takes the segment scan. The compacted
 # route's locate walk runs once per threadgroup and an op with more row tiles
-# launches more threadgroups for the same weight bytes. flint-UD-Q4_K_XL,
+# launches more threadgroups for the same weight bytes. a 49-layer Q4_K_XL checkpoint,
 # M1 Max, 84-token prefill, mean gpu us per op from the dispatch profile
 # (PROXNUM-82), compacted / segments: Q5_K ffn_down_exps (2048 features, 32
 # row tiles) 2305 / 1748; Iq4_XS ffn_down_exps 580 / 497; Q5_K ffn_gate/up_exps
