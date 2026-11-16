@@ -4,6 +4,7 @@ pub(super) fn render_elementwise(
     resolved: &BoundOp,
     entry: &str,
     quantized: &[Option<Codec>],
+    knobs: &EmitKnobs,
 ) -> Result<String, EmitError> {
     let rank = resolved.extents.len();
     let rank_len = rank.max(1);
@@ -11,6 +12,7 @@ pub(super) fn render_elementwise(
     let gather_count = gather_count(resolved);
     let gather_slots = gather_slots(resolved);
     let element_type = type_token(resolved.node, resolved.dtype)?;
+    let operand_types = elementwise_operand_types(resolved, knobs)?;
     let coordinate_dims = elementwise_coordinate_dims(resolved, gather_count);
 
     let mut source = String::new();
@@ -41,7 +43,7 @@ pub(super) fn render_elementwise(
         0,
         gather_count,
         entry,
-        element_type,
+        SignatureTypes { element_type, operand_types: &operand_types },
         usize::from(twin_body.is_some()),
     );
     source.push_str("    if ((long)gid >= u.total_elements) { return; }\n");
@@ -90,10 +92,14 @@ pub(super) fn render_elementwise(
         operand_count.max(1)
     ));
     for (index, &codec) in quantized.iter().enumerate() {
-        source.push_str(&format!(
-            "    scratch[{index}] = {};\n",
-            operand_read(index, &format!("off{index}"), codec)
-        ));
+        let read = operand_read(index, &format!("off{index}"), codec);
+        // a plain operand of another float width converts explicitly: half(float) rounds to nearest even
+        let read = if codec.is_none() && operand_types[index] != element_type {
+            format!("({element_type}){read}")
+        } else {
+            read
+        };
+        source.push_str(&format!("    scratch[{index}] = {read};\n"));
     }
 
     let result = push_body_steps(&mut source, resolved.element_body(), "    ", element_type);
@@ -252,7 +258,10 @@ pub(super) fn elementwise_coordinate_type(resolved: &BoundOp) -> &'static str {
 /// The exact stride-layout decisions [`render_elementwise`] bakes into MSL:
 /// coordinate integer width, which axes it decodes, and which operands take
 /// the dense `base + gid` path. Concrete stride values remain uniforms.
-pub(super) fn elementwise_addressing_cache_token(resolved: &BoundOp) -> Option<String> {
+pub(super) fn elementwise_addressing_cache_token(
+    resolved: &BoundOp,
+    knobs: &EmitKnobs,
+) -> Option<String> {
     if !matches!(
         resolved.kind,
         BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. }
@@ -286,6 +295,15 @@ pub(super) fn elementwise_addressing_cache_token(resolved: &BoundOp) -> Option<S
         } else {
             '0'
         });
+    }
+    // an operand read in another width than the op computes in renders a different signature and read
+    let own = type_token(resolved.node, resolved.dtype).ok()?;
+    let operand_types = elementwise_operand_types(resolved, knobs).ok()?;
+    if operand_types.iter().any(|&operand| operand != own) {
+        token.push_str("_od");
+        for operand in operand_types {
+            token.push(if operand == "half" { 'h' } else { 'f' });
+        }
     }
     Some(token)
 }
@@ -2481,4 +2499,18 @@ fn push_packed_row_lane_parallel_tail(
     );
     source.push_str("        }\n");
     source.push_str("    }\n");
+}
+
+/// The MSL scalar each operand's buffer holds: the dtype of the node that produced it, which
+/// `plan_from_prepared` records in [`EmitKnobs::operand_dtypes`]; the op's own dtype when none is
+/// recorded. Only the two float widths a Metal device buffer holds are readable here.
+pub(super) fn elementwise_operand_types(
+    resolved: &BoundOp,
+    knobs: &EmitKnobs,
+) -> Result<Vec<&'static str>, EmitError> {
+    resolved
+        .operands()
+        .iter()
+        .map(|(node, _, _)| type_token(*node, knobs.operand_dtype(*node, resolved.dtype)))
+        .collect()
 }

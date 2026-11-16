@@ -8,10 +8,13 @@
 //! through `RuntimeConfig::builder().with_emit(..)`, or read the environment once with
 //! [`EmitKnobs::from_env`] and pass the value on.
 
+use alloc::collections::BTreeMap;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+use proxima_numeric::DType;
 use proxima_numeric::float_layout::FloatLayout;
+use proxima_tensor::NodeId;
 
 #[cfg(feature = "std")]
 use core::convert::Infallible;
@@ -126,6 +129,9 @@ pub struct EmitKnobs {
     /// Escape knob: admit expert sources the classifier would reject. Presence alone enables it, even set to the empty string.
     #[cfg_attr(feature = "std", setting(default = false, resolve_with = "parse_presence"))]
     pub enable_unsafe_metal_expert_sources: bool,
+    /// Element type of every node a plan's elementwise ops read, keyed by producing node. Not a switch: `plan_from_prepared` fills it from the program so an operand is read in the dtype of the node that wrote it; an absent node reads in the op's own dtype.
+    #[cfg_attr(feature = "std", serde(skip), setting(skip))]
+    pub operand_dtypes: BTreeMap<NodeId, DType>,
 }
 
 impl Default for EmitKnobs {
@@ -155,11 +161,25 @@ impl Default for EmitKnobs {
             reduction_literal: ReductionLiteral::Off,
             softmax_runtime_rows: false,
             enable_unsafe_metal_expert_sources: false,
+            operand_dtypes: BTreeMap::new(),
         }
     }
 }
 
 impl EmitKnobs {
+    /// Set the producing-node dtype table elementwise operands are read in.
+    #[must_use]
+    pub fn with_operand_dtypes(mut self, value: BTreeMap<NodeId, DType>) -> Self {
+        self.operand_dtypes = value;
+        self
+    }
+
+    /// The dtype `node` is read in, or `fallback` for a node the plan never recorded.
+    #[must_use]
+    pub fn operand_dtype(&self, node: NodeId, fallback: DType) -> DType {
+        self.operand_dtypes.get(&node).copied().unwrap_or(fallback)
+    }
+
     /// Set the packed rows-per-simdgroup override.
     #[must_use]
     pub fn with_packed_rows(mut self, value: Option<usize>) -> Self {
@@ -412,6 +432,7 @@ impl EmitKnobs {
             // var_os, not var: the original read counts a non-unicode value as present
             enable_unsafe_metal_expert_sources: std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES")
                 .is_some(),
+            operand_dtypes: base.operand_dtypes,
         }
     }
 }

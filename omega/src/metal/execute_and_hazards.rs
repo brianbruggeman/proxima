@@ -78,6 +78,14 @@ pub(super) fn plan_from_prepared(
     // `prepared`'s own from being two independent computations that could
     // silently drift apart.
     let packed_operands = prepared.packed_operands.clone();
+    let operand_dtypes = prepared
+        .resolved
+        .iter()
+        .flat_map(|bound| bound.operands().iter().map(|(node, _, _)| *node))
+        .filter(|node| !packed_operands.contains_key(node))
+        .map(|node| (node, gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, node)))
+        .collect();
+    let emit_knobs = emit_knobs.with_operand_dtypes(operand_dtypes);
     let block_dtypes = prepared
         .block_nodes
         .iter()

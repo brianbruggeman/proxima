@@ -688,7 +688,7 @@ pub(super) fn kernel_signature(
         epilogue_operand_count,
         gather_count,
         entry,
-        element_type,
+        SignatureTypes::uniform(element_type),
         0,
     );
 }
@@ -711,10 +711,24 @@ pub(super) fn kernel_signature_with_threadgroup_threads(
         epilogue_operand_count,
         gather_count,
         entry,
-        element_type,
+        SignatureTypes::uniform(element_type),
         0,
     );
     push_signature_tail(source, threadgroup_threads);
+}
+
+/// The MSL scalars a signature declares: `element_type` for the output (and any epilogue operand),
+/// `operand_types` per input when an operand's producer holds another width (empty: all `element_type`).
+#[derive(Clone, Copy)]
+pub(super) struct SignatureTypes<'a> {
+    pub(super) element_type: &'a str,
+    pub(super) operand_types: &'a [&'a str],
+}
+
+impl<'a> SignatureTypes<'a> {
+    pub(super) fn uniform(element_type: &'a str) -> Self {
+        Self { element_type, operand_types: &[] }
+    }
 }
 
 // `extra_outputs` second-and-later output buffers, named `extra_out{index}`, bound after the
@@ -726,7 +740,7 @@ pub(super) fn kernel_signature_with_extra_outputs(
     epilogue_operand_count: usize,
     gather_count: usize,
     entry: &str,
-    element_type: &str,
+    types: SignatureTypes,
     extra_outputs: usize,
 ) {
     push_signature_operands(
@@ -735,7 +749,7 @@ pub(super) fn kernel_signature_with_extra_outputs(
         epilogue_operand_count,
         gather_count,
         entry,
-        element_type,
+        types,
         extra_outputs,
     );
     push_signature_tail(source, false);
@@ -793,9 +807,10 @@ fn push_signature_operands(
     epilogue_operand_count: usize,
     gather_count: usize,
     entry: &str,
-    element_type: &str,
+    types: SignatureTypes,
     extra_outputs: usize,
 ) {
+    let SignatureTypes { element_type, operand_types } = types;
     let operand_count = quantized.len();
     source.push_str(&format!("kernel void {entry}(\n"));
     for (index, &codec) in quantized.iter().enumerate() {
@@ -808,7 +823,7 @@ fn push_signature_operands(
         // binds as `half` directly rather than `uchar` -- see
         // `FLOAT16_BLOCK_BYTES`'s own doc.
         let binding_type = match codec {
-            None => element_type,
+            None => operand_types.get(index).copied().unwrap_or(element_type),
             Some(Codec::Float16) => "half",
             Some(_) => "uchar",
         };

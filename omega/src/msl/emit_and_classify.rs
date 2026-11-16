@@ -312,7 +312,7 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
             render_cached_softmax_weights(resolved, &entry, knobs)
         }
         BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. } => {
-            render_elementwise(resolved, &entry, &quantized)
+            render_elementwise(resolved, &entry, &quantized, knobs)
         }
         BoundOpKind::Reduce {
             keep: Keep::Reduce, ..
@@ -1767,7 +1767,7 @@ pub(super) fn metal_specialization(
         packed_row_block_stride_is_one: packed_row_block_stride_is_one(resolved, &quantized, knobs),
         packed_row_block_direct_axis: packed_row_block_direct_axis(resolved, &quantized, knobs),
         packed_row_block_grouped_axes: packed_row_block_grouped_axes(resolved, &quantized, knobs),
-        elementwise_addressing: elementwise_addressing_cache_token(resolved),
+        elementwise_addressing: elementwise_addressing_cache_token(resolved, knobs),
         operand_aliases: operand_alias_cache_token(resolved),
         numeric_policy_token: Some(crate::identity::numeric_policy_cache_token(numeric_policy)),
         merged_z: None,

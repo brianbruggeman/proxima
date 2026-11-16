@@ -125,7 +125,7 @@ fn elementwise_broadcast_decodes_omitted_axes_before_selected_axes() {
     .into_iter()
     .find(|candidate| candidate.node == equal)
     .expect("broadcast elementwise bound op");
-    let source = render_elementwise(&bound, "broadcast_test", &[None, None])
+    let source = render_elementwise(&bound, "broadcast_test", &[None, None], &EmitKnobs::default())
         .expect("broadcast elementwise renders");
     let divide_axis_one = "remaining /= (uint)u.extents[1];";
     let assign_axis_zero = "coord[0] = remaining;";
@@ -251,7 +251,7 @@ fn elementwise_unit_leading_axis_is_never_decoded() {
     .into_iter()
     .find(|candidate| candidate.node == scaled)
     .expect("hidden-width scale bound op");
-    let source = render_elementwise(&bound, "unit_axis_test", &[None, None])
+    let source = render_elementwise(&bound, "unit_axis_test", &[None, None], &EmitKnobs::default())
         .expect("hidden-width scale renders");
     assert!(source.contains("coord[1] = remaining;"));
     assert!(!source.contains("u.extents[0]"));
@@ -262,7 +262,7 @@ fn elementwise_unit_leading_axis_is_never_decoded() {
 fn a_large_elementwise_grid_decodes_its_thread_index_without_an_integer_divide() {
     let prefill_wide = broadcast_over_trailing_axes(64);
 
-    let source = render_elementwise(&prefill_wide, "wide_scale", &[None, None])
+    let source = render_elementwise(&prefill_wide, "wide_scale", &[None, None], &EmitKnobs::default())
         .expect("a 98,304-element plane scale renders");
 
     assert!(source.contains("inline uint divmod_reciprocal("));
@@ -283,7 +283,7 @@ fn a_large_elementwise_grid_decodes_its_thread_index_without_an_integer_divide()
 fn a_small_elementwise_grid_keeps_the_integer_decode() {
     let small = broadcast_over_trailing_axes(2);
 
-    let source = render_elementwise(&small, "small_scale", &[None, None])
+    let source = render_elementwise(&small, "small_scale", &[None, None], &EmitKnobs::default())
         .expect("a 3,072-element plane scale renders");
 
     assert!(!source.contains("divmod_reciprocal"));
@@ -296,8 +296,8 @@ fn the_reciprocal_decode_is_part_of_the_pipeline_identity() {
     let small = broadcast_over_trailing_axes(2);
     let wide = broadcast_over_trailing_axes(64);
 
-    let small_token = elementwise_addressing_cache_token(&small).expect("elementwise has a token");
-    let wide_token = elementwise_addressing_cache_token(&wide).expect("elementwise has a token");
+    let small_token = elementwise_addressing_cache_token(&small, &EmitKnobs::default()).expect("elementwise has a token");
+    let wide_token = elementwise_addressing_cache_token(&wide, &EmitKnobs::default()).expect("elementwise has a token");
 
     assert!(wide_token.starts_with("_ear"), "wide token {wide_token}");
     assert!(small_token.starts_with("_ea4"), "small token {small_token}");
@@ -11703,4 +11703,68 @@ async fn scalar_weight_outside_the_run_body_names_the_property_it_lacks(#[case] 
     let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Float16)]);
 
     assert_eq!(classify_packed_row_block(&bound, &operand_codecs(&bound, &packed), &EmitKnobs::default()).err(), Some(expected));
+}
+
+/// `Input(dtype) -> Elementwise(half, Identity)`, bound; the input's dtype is what varies.
+fn identity_to_half_bound(input_dtype: DType) -> (BoundOp, NodeId) {
+    let mut program = Vec::new();
+    let source = append(
+        &mut program,
+        Op::Input {
+            dtype: input_dtype,
+            shape: vec![Extent::Static(9)],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT16,
+            body: ScalarOp::Identity,
+            operands: vec![(source, IndexMap::Affine(map::projection(1, &[0])))],
+            name: None,
+        },
+    );
+    let shapes = infer(&program, &[]).expect("identity infers");
+    let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+        .expect("identity binds")
+        .into_iter()
+        .next()
+        .expect("one bound op");
+    (bound, source)
+}
+
+fn knobs_reading(node: NodeId, dtype: DType) -> EmitKnobs {
+    EmitKnobs::default().with_operand_dtypes(BTreeMap::from([(node, dtype)]))
+}
+
+#[test]
+fn an_f32_operand_of_a_half_identity_is_declared_float_and_converted_to_half() {
+    let (bound, source_node) = identity_to_half_bound(DType::FLOAT32);
+    let knobs = knobs_reading(source_node, DType::FLOAT32);
+    let kernel = emit_with_knobs(&bound, &BTreeMap::new(), NumericPolicy::default(), &knobs)
+        .expect("a mixed-width identity emits");
+    assert!(kernel.source.contains("device const float* in0"), "{}", kernel.source);
+    assert!(kernel.source.contains("device half* out"), "{}", kernel.source);
+    assert!(kernel.source.contains("(half)in0["), "{}", kernel.source);
+}
+
+#[test]
+fn f32_in_half_out_and_half_in_half_out_get_different_kernel_keys() {
+    let (bound, source_node) = identity_to_half_bound(DType::FLOAT32);
+    let mixed = kernel_cache_key_with_knobs(
+        &bound,
+        &BTreeMap::new(),
+        NumericPolicy::default(),
+        &knobs_reading(source_node, DType::FLOAT32),
+    )
+    .expect("mixed key");
+    let uniform = kernel_cache_key_with_knobs(
+        &bound,
+        &BTreeMap::new(),
+        NumericPolicy::default(),
+        &knobs_reading(source_node, DType::FLOAT16),
+    )
+    .expect("uniform key");
+    assert_ne!(mixed, uniform);
 }
