@@ -217,6 +217,72 @@ pub(super) fn packed_weight_window<'bytes>(
     weights.get(start / block_elements * block_bytes..end / block_elements * block_bytes)
 }
 
+/// The flat slot (within one `k`-wide row) each contraction position
+/// (iteration order, last dim fastest) occupies under `layout`, or `None` when
+/// `layout`'s strides over `dims` already are the iteration-ordered row-major
+/// strides, so slot == position. `Err` when the strides are not a permutation
+/// of `0..k`, which no flat `[rows, k]` row can express. The packed kernel dots
+/// two flat rows, so it computes the program's contraction only when the weight
+/// and the activation share these slots.
+pub(super) fn contraction_slots(
+    resolved: &BoundOp,
+    layout: &Layout,
+    dims: &[u16],
+    k: usize,
+) -> Result<Option<Vec<usize>>, TensorError> {
+    let extent_of = |dim: u16| resolved.extents[dim as usize];
+    let spanning: Vec<u16> = dims
+        .iter()
+        .copied()
+        .filter(|&dim| extent_of(dim) != 1)
+        .collect();
+    let Some(&fastest) = spanning.last() else {
+        return Ok(None);
+    };
+    // strides are in the leaf's own element units (a `[k, n]` weight strides
+    // its contraction by `n`), so order is judged relative to the fastest dim.
+    let mut expected_stride = layout.stride(fastest);
+    let mut iteration_ordered = true;
+    for &dim in spanning.iter().rev() {
+        iteration_ordered &= layout.stride(dim) == expected_stride;
+        expected_stride = expected_stride.saturating_mul(extent_of(dim) as i64);
+    }
+    if iteration_ordered {
+        return Ok(None);
+    }
+    let not_permutation = TensorError::NotLowerable {
+        node: resolved.node,
+        reason: "quantized matmul weight strides over the contraction are not a permutation of \
+                 its packed row",
+    };
+    let unit = spanning
+        .iter()
+        .map(|&dim| layout.stride(dim))
+        .min()
+        .filter(|&stride| stride > 0)
+        .ok_or_else(|| not_permutation.clone())?;
+    let mut seen = vec![false; k];
+    let mut permutation = Vec::with_capacity(k);
+    for position in 0..k {
+        let mut remainder = position as u64;
+        let mut offset = 0_i64;
+        for &dim in spanning.iter().rev() {
+            let extent = extent_of(dim);
+            offset += layout.stride(dim) * (remainder % extent) as i64;
+            remainder /= extent;
+        }
+        if offset % unit != 0 {
+            return Err(not_permutation);
+        }
+        let slot = usize::try_from(offset / unit).map_err(|_| not_permutation.clone())?;
+        if slot >= k || core::mem::replace(&mut seen[slot], true) {
+            return Err(not_permutation);
+        }
+        permutation.push(slot);
+    }
+    Ok(Some(permutation))
+}
+
 /// [`run_reduce_quantized`]'s admission contract, checked BEFORE it ever
 /// touches a buffer: the fused reduce's `element_body` must be exactly one
 /// step, `Multiply`, over exactly two physical operands (the packed weight
@@ -582,6 +648,46 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
     {
         return Err(shape_error());
     }
+
+    // the kernel dots flat rows; when the weight map and the activation map
+    // order the contraction differently, the activation is moved into the
+    // weight's slots so the dot is the contraction the program describes.
+    // matching orders (every previously working program) keep the slice as is.
+    let contraction_dims: Vec<u16> = axis_shape
+        .reduction_dims
+        .iter()
+        .copied()
+        .filter(|dim| !selection_dims.contains(dim))
+        .collect();
+    let weight_slots =
+        contraction_slots(resolved, weight_layout, &contraction_dims, k)?;
+    let activation_slots =
+        contraction_slots(resolved, activation_layout, &contraction_dims, k)?;
+    let permuted_activation: Vec<f32>;
+    let activation = if weight_slots == activation_slots {
+        activation
+    } else if weight_gather.is_some() {
+        return Err(TensorError::NotLowerable {
+            node: resolved.node,
+            reason: "gathered quantized weight with a non-iteration-ordered contraction",
+        });
+    } else {
+        let slot_of = |position: usize, slots: &Option<Vec<usize>>| {
+            slots.as_ref().map_or(position, |slots| slots[position])
+        };
+        let mut reordered = vec![0.0_f32; activation.len()];
+        for (source, target) in activation
+            .chunks_exact(k)
+            .zip(reordered.chunks_exact_mut(k))
+        {
+            for position in 0..k {
+                target[slot_of(position, &weight_slots)] =
+                    source[slot_of(position, &activation_slots)];
+            }
+        }
+        permuted_activation = reordered;
+        permuted_activation.as_slice()
+    };
 
     #[cfg(feature = "instrument")]
     counter!(instrument::MATMUL_REDUCE_QUANTIZED_CALLS, 1);

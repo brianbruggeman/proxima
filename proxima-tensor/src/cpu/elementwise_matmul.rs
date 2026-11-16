@@ -1391,6 +1391,16 @@ pub(super) fn build_matmul_stage_plan<'weights>(
         return Err(shape_error());
     }
 
+    // the staged dot reads the activation as laid out; a contraction the
+    // weight and activation maps order differently needs
+    // `run_reduce_quantized`'s reorder, so that node takes the plain path.
+    let weight_slots = contraction_slots(resolved, weight_layout, &axis_shape.reduction_dims, k)?;
+    let activation_slots =
+        contraction_slots(resolved, activation_layout, &axis_shape.reduction_dims, k)?;
+    if weight_slots != activation_slots {
+        return Ok(None);
+    }
+
     let Some(dot_fn) = dot_fn_for(weight_block) else {
         return Ok(None);
     };

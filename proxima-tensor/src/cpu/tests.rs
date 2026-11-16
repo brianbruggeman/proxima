@@ -274,6 +274,202 @@ fn run_reduce_quantized_rejects_a_composed_body_wider_than_a_bare_weight_activat
     );
 }
 
+/// `out[row] = sum over (u, j) of weight * activation` as a bound reduce:
+/// dims `0 = row`, `1 = u`, `2 = j`; weight is node 0, activation node 1,
+/// the reduce node 2. The activation is iteration-ordered
+/// (`position = joints * u + j`); the weight is too unless `opposed`, in
+/// which case it strides `slot = units * j + u` (u fastest).
+fn two_dim_contraction_reduce(rows: usize, units: usize, joints: usize, opposed: bool) -> BoundOp {
+    let contraction = (units * joints) as i64;
+    let weight_strides = if opposed {
+        smallvec::smallvec![contraction, 1, units as i64]
+    } else {
+        smallvec::smallvec![contraction, joints as i64, 1]
+    };
+    BoundOp {
+        node: NodeId(2),
+        dtype: DType::FLOAT32,
+        extents: alloc::vec![rows as u64, units as u64, joints as u64],
+        kind: BoundOpKind::Reduce {
+            element_body: ComposedBody::leaf(ScalarOp::Multiply),
+            reduce_op: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            keep: Keep::Reduce,
+            operands: alloc::vec![
+                (
+                    NodeId(0),
+                    bind::Layout {
+                        base: 0,
+                        strides: weight_strides
+                    },
+                    None
+                ),
+                (
+                    NodeId(1),
+                    bind::Layout {
+                        base: 0,
+                        strides: smallvec::smallvec![0, joints as i64, 1]
+                    },
+                    None
+                ),
+            ],
+            output_axes: smallvec::smallvec![0],
+            out_layout: bind::Layout {
+                base: 0,
+                strides: smallvec::smallvec![1, 0, 0],
+            },
+            out_scatter: None,
+            epilogue_body: ComposedBody::leaf(ScalarOp::Identity),
+            epilogue_operands: Vec::new(),
+            epilogue_broadcast_axes: smallvec::smallvec![],
+            accumulator: DType::FLOAT32,
+        },
+    }
+}
+
+/// A packed weight whose map strides the two contraction dims against
+/// iteration order (`slot = UNITS * j + u`, the shape a fused
+/// `in_proj` / gated-delta-net projection binds) while the activation is
+/// iteration-ordered (`position = JOINTS * u + j`). `run_reduce_quantized`
+/// used to dot the weight's packed row against the activation slice as
+/// laid out, which is the contraction of a different program; it must
+/// move the activation into the weight's slots and equal the plain f32
+/// contraction over the dequantized weight, within the Q8_K activation
+/// rounding the packed path adds.
+#[test]
+fn run_reduce_quantized_honors_a_weight_whose_contraction_strides_oppose_iteration_order() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, dequantize, quantize};
+
+    const ROWS: usize = 2;
+    const UNITS: usize = 4;
+    const JOINTS: usize = QK_K / UNITS;
+    const K: usize = UNITS * JOINTS;
+
+    let weight_f32 = random_vec(801, ROWS * K);
+    let activation = random_vec(802, K);
+    let mut weight_bytes = vec![0u8; ROWS * BLOCK_BYTES];
+    for (row_f32, row_packed) in weight_f32
+        .as_chunks::<K>()
+        .0
+        .iter()
+        .zip(weight_bytes.as_chunks_mut::<BLOCK_BYTES>().0)
+    {
+        quantize(row_f32, row_packed).expect("one whole super-block per row quantizes");
+    }
+    let mut dequantized = vec![0.0f32; ROWS * K];
+    for (row_packed, row_f32) in weight_bytes
+        .as_chunks::<BLOCK_BYTES>()
+        .0
+        .iter()
+        .zip(dequantized.as_chunks_mut::<K>().0)
+    {
+        dequantize(row_packed, row_f32).expect("one whole super-block per row dequantizes");
+    }
+    let expected: Vec<f32> = (0..ROWS)
+        .map(|row| {
+            let mut total = 0.0f32;
+            for unit in 0..UNITS {
+                for joint in 0..JOINTS {
+                    total += dequantized[row * K + UNITS * joint + unit]
+                        * activation[JOINTS * unit + joint];
+                }
+            }
+            total
+        })
+        .collect();
+
+    let weight_node = NodeId(0);
+    let resolved = two_dim_contraction_reduce(ROWS, UNITS, JOINTS, true);
+    let buffers: Vec<Option<Cow<'_, [f32]>>> =
+        alloc::vec![None, Some(Cow::Borrowed(activation.as_slice()))];
+    let mut output = vec![0.0f32; ROWS];
+
+    run_reduce_quantized(
+        &resolved,
+        &buffers,
+        QuantizedBlock::Packed {
+            codec: Codec::Q4K,
+            bytes: &weight_bytes,
+        },
+        weight_node,
+        None,
+        None,
+        false,
+        &mut output,
+    )
+    .expect("a permuted-stride packed weight is a lowerable matmul");
+
+    let max_diff = output
+        .iter()
+        .zip(&expected)
+        .map(|(got, want)| (got - want).abs())
+        .fold(0.0f32, f32::max);
+    // the packed kernel quantizes the activation to Q8_K, so the f32
+    // reference differs by that rounding (0.022 measured); a mis-ordered
+    // contraction differs by O(1), an order of magnitude past this bound.
+    assert!(
+        max_diff < 1e-1,
+        "max_diff={max_diff}: got {output:?}, want {expected:?}"
+    );
+}
+
+/// The staged-batch planner reads the activation as laid out too, so a
+/// weight whose contraction strides oppose iteration order must decline the
+/// plan (`None`, which routes the node through `run_reduce_quantized`'s
+/// reorder), while the iteration-ordered twin of the same shape is staged.
+#[cfg(feature = "cohort-staged-graph")]
+#[test]
+fn build_matmul_stage_plan_declines_a_weight_whose_contraction_strides_oppose_iteration_order() {
+    use proxima_gguf::quant::q4_k::{BLOCK_BYTES, QK_K, quantize};
+
+    const ROWS: usize = 256;
+    const UNITS: usize = 4;
+    const JOINTS: usize = 2 * QK_K / UNITS;
+    const K: usize = UNITS * JOINTS;
+
+    let weight_f32 = random_vec(811, ROWS * K);
+    let activation = random_vec(812, K);
+    const ROW_BYTES: usize = K / QK_K * BLOCK_BYTES;
+    let mut weight_bytes = vec![0u8; ROWS * ROW_BYTES];
+    for (row_f32, row_packed) in weight_f32
+        .as_chunks::<K>()
+        .0
+        .iter()
+        .zip(weight_bytes.as_chunks_mut::<ROW_BYTES>().0)
+    {
+        quantize(row_f32, row_packed).expect("whole super-blocks per row quantize");
+    }
+    let buffers: Vec<Option<Cow<'_, [f32]>>> =
+        alloc::vec![None, Some(Cow::Borrowed(activation.as_slice()))];
+    let cohort = nest_cohort().expect("the process cohort builds on a test host");
+    let session = cohort.enter().expect("no other forward holds the cohort");
+    let mut quantize_cache: Vec<Option<Arc<[u8]>>> = vec![None; 3];
+
+    let mut plan_for = |opposed: bool| {
+        build_matmul_stage_plan(
+            &two_dim_contraction_reduce(ROWS, UNITS, JOINTS, opposed),
+            &buffers,
+            QuantizedBlock::Packed {
+                codec: Codec::Q4K,
+                bytes: &weight_bytes,
+            },
+            NodeId(0),
+            &session,
+            &mut quantize_cache,
+        )
+        .expect("a lowerable matmul shape")
+    };
+
+    assert!(
+        plan_for(false).is_some(),
+        "an iteration-ordered weight over a threshold-clearing shape is staged"
+    );
+    assert!(
+        plan_for(true).is_none(),
+        "an opposed-stride weight must fall back to the plain path that reorders the activation"
+    );
+}
+
 /// `b = a * scale; c = b + bias; d = c * c` -- the same shape
 /// `bind::tests::elementwise_chain_program` builds (private to that
 /// module's own test scope), inlined here rather than reused across the
