@@ -81,8 +81,11 @@ slow-timeout = { period = "10s", terminate-after = 2 }
 
 # real-checkpoint tests mmap multi-GB gguf files and run decode through the gpu; two at once
 # page-thrash the mapping and contend for the one device, so they serialize against each other.
+# the whole package joins, not only its integration tests: the in-source unit tests (flint greedy
+# parity at 25 GB, the gemma4 memory-fit gate, the qwen35 tests, resident plans) open real
+# checkpoints with no env var, and ten of them running at once nearly crashed the box on 2026-11-16.
 [[profile.default.overrides]]
-filter = 'package(proxima-model-interop) and kind(test)'
+filter = 'package(proxima-model-interop)'
 test-group = 'real-checkpoint'
 
 # the bge parity cells each hold the 133 MB model decoded to f32 plus one arena per pin set (about 1 GB at four pin sets); together they pressure the shared box's memory, so they serialise with the other real-checkpoint tests.
