@@ -4560,6 +4560,13 @@ not read this cache format; only the single-row decode kernel reads it from the 
             ubatch => ids.len().min(ubatch as usize),
         });
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let device_kv_early_adopt = !kv_cache_format::is_narrow(&serving_config.kv_cache_key_quant)
+            || kv_cache_format::row_tiled_reads(
+                &serving_config.kv_cache_key_quant,
+                &serving_config.kv_cache_value_quant,
+                u64::from(self.architecture.head_dim),
+            );
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut device_kv: Option<DeviceKv> = None;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut device_kv_leaves_decode: Option<Vec<Option<KvLeafNodes>>> = None;
@@ -5187,13 +5194,11 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     // calls -- position/RoPE inputs, `cached_len`/`lm_head_row`,
                     // `sliding_rope_inputs`' leaves, and every KV/SSM
                     // cache leaf -- so the leaf names are fed identically whether decoding or tapping one node.
-                    // a narrow cache is read only by the decode-split kernel, so it is adopted at the first
-                    // decode step; an f32 cache is adopted before the first evaluation and takes the prefill rows
+                    // a pair the row-tiled kernel reads is adopted before the first evaluation like f32; only a pair it rejects waits for the decode step
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if !device_kv_attempted
                         && device_kv_eligible
-                        && (!kv_cache_format::is_narrow(&serving_config.kv_cache_key_quant)
-                            || (cached_len > 0 && is_last_step_batch))
+                        && (device_kv_early_adopt || (cached_len > 0 && is_last_step_batch))
                         && new_count <= device_kv_step_rows
                     {
                         device_kv_attempted = true;
@@ -5205,10 +5210,11 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         let mut buffers_allocated = 0u64;
                         #[cfg(all(feature = "instrument", feature = "metal"))]
                         emit_gpu_phase("before_adopt", step);
-                        // a narrow cache adopts after the prefill batches are done, so its f32 staging
-                        // only needs the rows of this step and the decode steps after it
+                        // a late-adopted narrow cache stages only this step and the decode steps after it
                         let adopted_step_rows =
-                            if kv_cache_format::is_narrow(&serving_config.kv_cache_key_quant) {
+                            if !device_kv_early_adopt
+                                && kv_cache_format::is_narrow(&serving_config.kv_cache_key_quant)
+                            {
                                 device_kv_decode_rows.max(new_count)
                             } else {
                                 device_kv_step_rows

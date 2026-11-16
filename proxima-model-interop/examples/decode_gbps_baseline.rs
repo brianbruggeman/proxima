@@ -27,8 +27,9 @@
 //! field; unset keeps the serving default, ngram-simple.
 //! `PROXIMA_IGNORE_EOS=1` sets `ServingConfig::ignore_eos`: generate exactly the
 //! requested max tokens instead of stopping at the end-of-generation id.
-//! A half-width KV cache (`PROXIMA_KV_CACHE_TYPE=f16`) requires it, because a
-//! verify step reads the cache through a kernel that only reads f32.
+//! A half-width KV cache (`PROXIMA_KV_CACHE_TYPE=f16`) runs with speculation on: a verify step
+//! reads it through the row-tiled kernel (`kv_cache_format::row_tiled_reads`); only a pair that
+//! predicate rejects needs speculation off.
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use core::ops::ControlFlow;

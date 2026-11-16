@@ -78,7 +78,7 @@ const CACHED_KV_OPERANDS: [usize; 3] = [2, 3, 6];
 
 /// Classifies a cached attention bind's operand codecs: `None` when every
 /// operand is a plain buffer (every kernel form reads this), or a uniform
-/// Float16/BFloat16/BFloat8 cache triple (decode split reads all three; row-tiled reads BF16 and BF8), an
+/// Float16/BFloat16/BFloat8 cache triple (the decode split and the row-tiled kernel read all three), an
 /// error for any other packing. `quantized` is `operand_codecs`'
 /// answer; entries past its end count as plain, so a hand-built bind with no
 /// packed operands passes `&[]`.
@@ -1075,7 +1075,7 @@ pub fn cached_attention_row_tiled_reads(format: &Codec, head_dim: u64) -> Result
 
 /// The row-tiled counterpart of [`cached_attention_kv_codec_for`]: the codec a cache stored as
 /// `format` is read with, or the emitter's error when the cached-attention kernels read `format`
-/// but the row-tiled (speculative verify) kernel does not, as for Float16.
+/// but the row-tiled (speculative verify) kernel does not, as for a block K beside a differently coded V.
 ///
 /// # Errors
 /// [`EmitError::CachedAttentionKvCodecNotSupported`] for a format the row-tiled kernel cannot read.
