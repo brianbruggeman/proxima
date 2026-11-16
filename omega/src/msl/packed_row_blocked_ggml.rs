@@ -357,7 +357,9 @@ pub(super) fn push_packed_row_blocked_body(
                 weight,
                 other,
                 other_stride_is_one,
-                lane_run: None,
+                lane_run: metal
+                    .packed_row_lane_run
+                    .and_then(|bytes| LaneRun::derive(&layout, usize::from(bytes))),
             };
             source.push_str(
                 &form

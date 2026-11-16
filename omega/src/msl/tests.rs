@@ -6504,6 +6504,27 @@ fn a_whole_block_lane_default_geometry_is_unsplit_and_leaves_its_kernel_key_with
     }
 }
 
+#[test]
+fn a_lane_run_is_selected_only_at_k_split_one_and_only_when_the_policy_admits_both_rewrites() {
+    let bound = matmul_op(1, 2048, 64);
+    let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
+    let quantized = operand_codecs(&bound, &packed);
+    let knobs = EmitKnobs::default();
+    let block = packed_row_block(&bound, &quantized, &knobs).expect("fixture takes the row-blocked path");
+    let expected = LaneRun { run_bytes: 8, lanes_per_block: 4, elements: 8, lane_stride: 8 };
+
+    temp_env::with_var("PROXIMA_PACKED_LANE_RUN_BYTES", Some("8"), || {
+        let relaxed = NumericPolicy::llama_relaxed();
+        assert_eq!(packed_row_lane_run(&bound, &block, relaxed, &knobs, 1), Some(expected), "k_split 1 under llama_relaxed");
+        assert_eq!(packed_row_lane_run(&bound, &block, relaxed, &knobs, 2), None, "k_split 2 is owned by the K-split slice");
+        assert_eq!(packed_row_lane_run(&bound, &block, relaxed, &knobs, 4), None, "k_split 4 is owned by the K-split slice");
+        assert_eq!(packed_row_lane_run(&bound, &block, NumericPolicy::default(), &knobs, 1), None, "bit_exact grants neither rewrite");
+    });
+    temp_env::with_var("PROXIMA_PACKED_LANE_RUN_BYTES", Some("0"), || {
+        assert_eq!(packed_row_lane_run(&bound, &block, NumericPolicy::llama_relaxed(), &knobs, 1), None, "run_bytes 0 is off");
+    });
+}
+
 fn level_staging_of_single_row_matvec(codec: Codec) -> LevelStaging {
     let bound = matmul_op_with_reduce(4, 2048, 1, ScalarOp::Add);
     let packed = BTreeMap::from([(bound.operands()[0].0, codec)]);

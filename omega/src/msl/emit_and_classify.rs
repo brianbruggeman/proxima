@@ -1784,6 +1784,11 @@ pub(super) fn metal_specialization(
             let rows = u8::try_from(geometry.rows_per_simdgroup).ok()?;
             Some((split, rows))
         }),
+        packed_row_lane_run: packed_row_block(resolved, &quantized, knobs).and_then(|block| {
+            let geometry = packed_row_geometry(resolved, &quantized, &block, knobs);
+            let run = packed_row_lane_run(resolved, &block, numeric_policy, knobs, geometry.k_split)?;
+            u8::try_from(run.run_bytes).ok()
+        }),
         packed_row_activation_cap: packed_row_block(resolved, &quantized, knobs).and_then(|block| {
             let token_total = packed_row_block_token_total(&block, &resolved.extents);
             let cap = packed_row_activation_cap(token_total);
@@ -4741,6 +4746,39 @@ pub(crate) fn packed_row_geometry(
     } else {
         whole
     }
+}
+
+/// The lane-run map the flat-block matvec renders, `None` for the lane-per-block map. The one
+/// answer the emitted body ([`push_packed_row_blocked_body`]) and the kernel identity
+/// ([`metal_specialization`]'s `_lr` token) both read, so the key and the text cannot disagree.
+///
+/// `Some` only when every condition holds: the knob or `PROXIMA_PACKED_LANE_RUN_BYTES` names a run
+/// ([`lane_run_bytes`]); the body is the flat byte-run one the run renders in
+/// ([`PackedBodySelect::FlatRendered`]) at one activation row; [`LaneRun::derive`] accepts the
+/// layout; `policy` admits both [`NumericRewrite::DequantScaleFactoring`] (the scale moves out of
+/// the term) and [`NumericRewrite::TreeReduce`] (the block sum becomes independent partials); and
+/// `k_split == 1`, because splitting K on the run unit is not rendered. No codec is named: the
+/// layout decides.
+pub(crate) fn packed_row_lane_run(
+    resolved: &BoundOp,
+    block: &PackedRowBlock,
+    policy: NumericPolicy,
+    knobs: &EmitKnobs,
+    k_split: usize,
+) -> Option<LaneRun> {
+    let run_bytes = lane_run_bytes();
+    let BoundOpKind::Reduce { reduce_op, .. } = &resolved.kind else {
+        return None;
+    };
+    let flat = PackedBodySelect::for_op(resolved, *reduce_op, block, knobs.enable_unsafe_metal_expert_sources)
+        == PackedBodySelect::FlatRendered;
+    let admitted = admit(policy, NumericRewrite::DequantScaleFactoring).is_ok() && admit(policy, NumericRewrite::TreeReduce).is_ok();
+    let selectable = run_bytes > 0
+        && flat
+        && admitted
+        && k_split == 1
+        && packed_row_block_token_total(block, &resolved.extents) <= 1;
+    selectable.then(|| LaneRun::derive(&block.codec.block_layout()?, run_bytes)).flatten()
 }
 
 /// Public diagnostic seam for `classify_dense_batched_gemm` -- same shape

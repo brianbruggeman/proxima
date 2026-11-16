@@ -189,6 +189,12 @@ pub(crate) struct MetalOnlyExtras {
     /// geometry's rows come from `EmitKnobs::packed_rows_ksplit` and are a literal in the kernel
     /// text too (`partial_sums[k][rows]`). Feeds the `_ks{k}r{rows}` suffix.
     pub packed_row_k_split: Option<(u8, u8)>,
+    /// bytes of a block's low code plane one lane owns in the lane-run map, `Some(bytes)` only when
+    /// [`crate::msl::packed_row_lane_run`] selected one. The run is a literal in the kernel text
+    /// (the lane-per-block map, the activation stride), so two ops that differ only in it must not
+    /// share a pipeline; off folds no token, keeping every existing key byte-identical. Feeds the
+    /// `_lr{bytes}` suffix beside `_ks`.
+    pub packed_row_lane_run: Option<u8>,
     /// activation rows one simdgroup folds against a streamed weight row,
     /// `Some(cap)` only when [`crate::msl::packed_row_activation_cap`] chose
     /// fewer than `PACKED_ROW_ACTIVATION_GROUP` for this op's concrete token
@@ -983,6 +989,10 @@ mod gated {
             identity.push_str(&split.to_string());
             identity.push('r');
             identity.push_str(&rows.to_string());
+        }
+        if let Some(bytes) = metal.packed_row_lane_run {
+            identity.push_str("_lr");
+            identity.push_str(&bytes.to_string());
         }
         if let Some(cap) = metal.packed_row_activation_cap {
             identity.push_str("_ac");
