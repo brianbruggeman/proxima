@@ -27,6 +27,8 @@ extern crate alloc;
 extern crate std;
 
 mod bind;
+#[cfg(all(test, feature = "std"))]
+mod gguf_numeric_parity;
 #[cfg(feature = "std")]
 mod bind_leaves;
 #[cfg(feature = "std")]
