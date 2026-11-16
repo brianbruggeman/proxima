@@ -104,7 +104,7 @@ mod layout_text_tests;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{
-    CudaGridSpec, CudaKernel, EmitDevice, WARP_SIZE, emit_cuda, emit_cuda_on_device, emit_cuda_reusing,
+    CudaGridSpec, CudaKernel, EmitDevice, WARP_SIZE, emit_cuda, emit_cuda_for_program, emit_cuda_on_device, emit_cuda_reusing,
     emit_cuda_with_policy,
 };
 #[cfg(feature = "cuda-driver")]
@@ -172,7 +172,7 @@ pub use wgpu_driver::{
     plan_named as plan_named_wgpu, probe as probe_wgpu,
 };
 #[cfg(feature = "wgpu-backend")]
-pub use wgsl::{WORKGROUP_SIZE, WgslCaps, WgslKernel, emit_wgsl};
+pub use wgsl::{WORKGROUP_SIZE, WgslCaps, WgslKernel, emit_wgsl, emit_wgsl_for_program};
 #[cfg(test)]
 #[cfg(feature = "cuda-driver")]
 mod int8_emit_snapshot;

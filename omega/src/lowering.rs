@@ -3,6 +3,11 @@ use alloc::vec::Vec;
 
 pub use proxima_numeric::codec::Codec;
 use proxima_tensor::{BoundOp, NodeId, ScalarOp};
+#[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
+use proxima_tensor::{BoundOpKind, Op};
+
+#[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
+use crate::error::EmitError;
 
 /// What buffer index `n` in `Kernel::bindings` is for, in dispatch order:
 /// index `0..operands.len()` are inputs, then one `Indices` buffer per
@@ -211,4 +216,48 @@ mod tests {
             );
         }
     }
+}
+
+// both consumers are feature-gated emitters; a metal-only build has none
+#[cfg(any(feature = "cuda", feature = "wgpu-backend"))]
+/// Rejects an elementwise op that reads an operand whose dtype differs from the op's own.
+///
+/// The Metal emitter converts such a read from a per-plan operand-dtype table
+/// (`EmitKnobs::operand_dtypes`); the WGSL and CUDA emitters declare every elementwise input in
+/// the op's dtype and have no table, so a mixed read there would reinterpret the buffer's bits
+/// silently. A packed operand is read through its codec and is exempt. `program` is the node
+/// list `resolved` was bound from: it names the dtype each producing node wrote.
+///
+/// # Errors
+/// [`EmitError::MixedDTypeOperand`] naming the op, the operand, and both dtypes.
+pub fn reject_mixed_dtype_elementwise(
+    program: &[Op],
+    resolved: &[BoundOp],
+    packed_operands: &PackedOperands,
+) -> Result<(), EmitError> {
+    for bound in resolved {
+        if !matches!(
+            bound.kind,
+            BoundOpKind::Elementwise { .. } | BoundOpKind::ElementwiseTwin { .. }
+        ) {
+            continue;
+        }
+        for (operand, _, _) in bound.operands() {
+            if packed_operands.contains_key(operand) {
+                continue;
+            }
+            let Some(operand_dtype) = program.get(operand.0 as usize).map(Op::dtype) else {
+                continue;
+            };
+            if operand_dtype != bound.dtype {
+                return Err(EmitError::MixedDTypeOperand {
+                    node: bound.node,
+                    operand: *operand,
+                    own: bound.dtype,
+                    operand_dtype,
+                });
+            }
+        }
+    }
+    Ok(())
 }

@@ -63,7 +63,7 @@ use alloc::vec::Vec;
 
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_tensor::{
-    ActivationLimits, BoundOp, BoundOpKind, ComposedBody, DeviceMemory, Executes, Form, Keep, Layout, Lookup, NodeId, ReduceInit, Refusal, ScalarOp, StepArg,
+    ActivationLimits, BoundOp, BoundOpKind, ComposedBody, DeviceMemory, Executes, Form, Keep, Layout, Lookup, NodeId, Op, ReduceInit, Refusal, ScalarOp, StepArg,
 };
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
@@ -81,7 +81,7 @@ use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use target::Target;
 use crate::lowering::{
     Binding, Codec, PackedOperands, dispatch_bindings, gather_count, gather_is_reduction_invariant,
-    gather_slots, is_cooperative_reduce_op, reduction_dims,
+    gather_slots, is_cooperative_reduce_op, reduction_dims, reject_mixed_dtype_elementwise,
 };
 
 pub mod target;
@@ -256,6 +256,22 @@ pub fn emit_cuda(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EmitDevice {
     pub multiprocessors: u32,
+}
+
+/// [`emit_cuda_with_policy`] for an op bound from `program`: first refuses an elementwise op that
+/// reads an operand of another dtype than its own, which this emitter has no table to convert and
+/// would misread. Composes [`reject_mixed_dtype_elementwise`].
+///
+/// # Errors
+/// [`EmitError::MixedDTypeOperand`], else whatever [`emit_cuda_with_policy`] returns.
+pub fn emit_cuda_for_program(
+    program: &[Op],
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> Result<CudaKernel, EmitError> {
+    reject_mixed_dtype_elementwise(program, core::slice::from_ref(resolved), packed_operands)?;
+    emit_cuda_with_policy(resolved, packed_operands, numeric_policy)
 }
 
 pub fn emit_cuda_with_policy(

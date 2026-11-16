@@ -99,7 +99,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use proxima_tensor::{BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, ScalarOp};
+use proxima_tensor::{BoundOp, BoundOpKind, ComposedBody, Keep, Layout, Lookup, NodeId, Op, ScalarOp};
 use proxima_numeric::{DType, NumericPolicy, NumericRewrite, admit};
 
 use crate::error::EmitError;
@@ -107,7 +107,7 @@ use crate::grid::checked_product;
 use crate::identity::{op_token, operand_codecs, reduce_epilogue_is_identity};
 use crate::lowering::{
     Binding, Codec, PackedOperands, dispatch_bindings, gather_count, gather_slots,
-    is_cooperative_reduce_op, reduction_dims,
+    is_cooperative_reduce_op, reduction_dims, reject_mixed_dtype_elementwise,
 };
 
 /// Threads per workgroup every v1 WGSL kernel dispatches with. See
@@ -186,6 +186,24 @@ pub fn emit_wgsl(
     packed_operands: &PackedOperands,
 ) -> Result<WgslKernel, EmitError> {
     emit_wgsl_with_policy(resolved, caps, packed_operands, NumericPolicy::default())
+}
+
+/// [`emit_wgsl_with_policy`] for an op bound from `program`: first refuses an elementwise op that
+/// reads an operand of another dtype than its own, which this emitter has no table to convert and
+/// would misread. Composes [`reject_mixed_dtype_elementwise`]; call it wherever the source program
+/// is in hand, as the wgpu driver does.
+///
+/// # Errors
+/// [`EmitError::MixedDTypeOperand`], else whatever [`emit_wgsl_with_policy`] returns.
+pub fn emit_wgsl_for_program(
+    program: &[Op],
+    resolved: &BoundOp,
+    caps: WgslCaps,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+) -> Result<WgslKernel, EmitError> {
+    reject_mixed_dtype_elementwise(program, core::slice::from_ref(resolved), packed_operands)?;
+    emit_wgsl_with_policy(resolved, caps, packed_operands, numeric_policy)
 }
 
 /// Emits one bound operation with explicit numerical permissions.
@@ -2128,6 +2146,45 @@ mod tests {
         assert!(kernel.source.contains("tanh("));
         assert_eq!(kernel.bindings.len(), 3);
         assert_eq!(kernel.threads, 8);
+    }
+
+    #[test]
+    fn elementwise_reading_a_half_operand_into_a_float_op_is_a_loud_emit_error() {
+        let mut program = Vec::new();
+        let half_source = append(
+            &mut program,
+            Op::Input { dtype: DType::FLOAT16, shape: vec![Extent::Static(8)], name: None },
+        );
+        append(
+            &mut program,
+            Op::Elementwise {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Tanh,
+                operands: vec![(half_source, IndexMap::Affine(map::projection(1, &[0])))],
+                name: None,
+            },
+        );
+        let shapes = infer(&program, &[]).expect("infer succeeds");
+        let bound = bind(
+            &program,
+            &shapes,
+            &[NodeId((program.len() - 1) as u32)],
+            proxima_numeric::NumericPolicy::default(),
+        )
+        .expect("bind succeeds");
+        let op = bound.into_iter().next().expect("one bound op");
+        let refusal = emit_wgsl_for_program(
+            &program,
+            &op,
+            WgslCaps::default(),
+            &PackedOperands::new(),
+            NumericPolicy::default(),
+        )
+        .expect_err("a half operand under a float op must not emit");
+        assert!(matches!(
+            refusal,
+            EmitError::MixedDTypeOperand { own: DType::FLOAT32, operand_dtype: DType::FLOAT16, .. }
+        ));
     }
 
     #[test]
