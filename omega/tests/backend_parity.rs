@@ -17,7 +17,7 @@ use omega::metal::metal_stage_totals;
 use proxima_numeric::NumericPolicy;
 
 mod support;
-use support::{as_named_blocks, real_forward_fixture};
+use support::{as_named_blocks, gpu_oracle_numeric_policy, real_forward_fixture};
 
 #[test]
 fn the_wrapper_agrees_with_itself_across_cpu_and_metal() {
@@ -33,7 +33,7 @@ fn the_wrapper_agrees_with_itself_across_cpu_and_metal() {
         &symbols,
         &named,
         &roots,
-        NumericPolicy::default(),
+        gpu_oracle_numeric_policy(),
     )
     .expect("omega::backend plans the real forward on cpu");
     let cpu = execute_plan_named(&mut cpu_plan, &named)
