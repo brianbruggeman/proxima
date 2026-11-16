@@ -1074,7 +1074,7 @@ pub(super) fn resolve_step(
         knobs,
     )?;
     let dense_mma_input_layout = configured_dense_mma_input_layout
-        .unwrap_or_else(|| crate::msl::default_dense_mma_input_layout(bound, packed_operands));
+        .unwrap_or_else(|| crate::msl::default_dense_mma_input_layout(bound, packed_operands, numeric_policy));
     let mut cache_key = crate::msl::kernel_cache_key_for_grid_with_layout(
         bound,
         packed_operands,
@@ -3882,7 +3882,7 @@ pub(super) fn encode_op(
     route_compactions: Option<&mut RouteCompactions>,
 ) -> Result<Option<(MetalBuffer, usize)>, MetalError> {
     let dense_mma_input_layout = resolved.map_or_else(
-        || crate::msl::default_dense_mma_input_layout(bound, packed_operands),
+        || crate::msl::default_dense_mma_input_layout(bound, packed_operands, numeric_policy),
         |step| step.dense_mma_input_layout,
     );
     let expert_source_node = match expert_buffers {

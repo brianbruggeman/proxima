@@ -2516,7 +2516,7 @@ impl Plan {
                     &self.emit_knobs,
                 )?;
                 let dense_mma_input_layout = self.dense_mma_input_layout.unwrap_or_else(|| {
-                    crate::msl::default_dense_mma_input_layout(bound, &self.packed_operands)
+                    crate::msl::default_dense_mma_input_layout(bound, &self.packed_operands, self.numeric_policy)
                 });
                 let cache_key = if self.dense_mma_input_layout.is_none() {
                     crate::msl::kernel_cache_key_for_grid(

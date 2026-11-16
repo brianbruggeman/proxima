@@ -5,11 +5,21 @@ use proxima_numeric::{LevelFormat, RowBlockShape, row_block_shape};
 use super::layout_render::hardware_type;
 use super::*;
 
+/// The tile layout a dense MMA stages its operands in when the config does not name one: bfloat16
+/// tiles exactly when a bfloat16 operand is present AND either every operand is bfloat16 (nothing is
+/// rounded) or the policy grants [`NumericRewrite::Bf16InputRounding`] (the other operand is then
+/// rounded to bf16, as llama.cpp does); otherwise binary32 tiles, which
+/// read the bfloat16 operand through its layout and keep the other operand unrounded.
 pub(crate) fn default_dense_mma_input_layout(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
 ) -> FloatLayout {
-    if operand_codecs(resolved, packed_operands).contains(&Some(Codec::BFloat16)) {
+    let codecs = operand_codecs(resolved, packed_operands);
+    let all_bf16 = codecs.iter().all(|codec| *codec == Some(Codec::BFloat16));
+    if codecs.contains(&Some(Codec::BFloat16))
+        && (all_bf16 || admit(numeric_policy, NumericRewrite::Bf16InputRounding).is_ok())
+    {
         FloatLayout::BF16
     } else {
         FloatLayout::BF32
@@ -254,7 +264,7 @@ pub(crate) fn emit_inner_with_mma_selection(
         knobs,
         expert_source_mode,
         attention,
-        default_dense_mma_input_layout(resolved, packed_operands),
+        default_dense_mma_input_layout(resolved, packed_operands, numeric_policy),
     )
 }
 
@@ -2009,7 +2019,7 @@ pub(crate) fn kernel_cache_key_for_grid(
         numeric_policy,
         knobs,
         grid,
-        default_dense_mma_input_layout(resolved, packed_operands),
+        default_dense_mma_input_layout(resolved, packed_operands, numeric_policy),
     )
 }
 
@@ -4943,19 +4953,6 @@ pub(super) fn classify_dense_batched_gemm(
             if admit(numeric_policy, rewrite).is_err() {
                 return Err(DenseBatchedGemmRejection::NumericPolicyDenied(rewrite));
             }
-        }
-        let rounds_wider_operand =
-            quantized.contains(&Some(Codec::BFloat16)) || numeric_policy.bf16_input_rounding;
-        let has_non_bf16_operand = quantized
-            .iter()
-            .any(|codec| *codec != Some(Codec::BFloat16));
-        if rounds_wider_operand
-            && has_non_bf16_operand
-            && admit(numeric_policy, NumericRewrite::Bf16InputRounding).is_err()
-        {
-            return Err(DenseBatchedGemmRejection::NumericPolicyDenied(
-                NumericRewrite::Bf16InputRounding,
-            ));
         }
         if reduce_op != ScalarOp::Add || init != ReduceInit::Zero {
             return Err(DenseBatchedGemmRejection::NotAddZeroReduce);

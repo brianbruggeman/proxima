@@ -2862,7 +2862,7 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
     );
 
     let packed = [Some(Codec::BFloat16), None];
-    assert!(matches!(
+    assert!(
         classify_dense_batched_gemm(
             &bound,
             &packed,
@@ -2871,11 +2871,9 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
             init,
             output_axes,
             &EmitKnobs::default(),
-        ),
-        Err(DenseBatchedGemmRejection::NumericPolicyDenied(
-            NumericRewrite::Bf16InputRounding
-        ))
-    ));
+        )
+        .is_ok()
+    );
     assert!(
         classify_dense_batched_gemm(
             &bound,
@@ -2890,7 +2888,7 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
     );
 
     let mixed = [Some(Codec::BFloat16), Some(Codec::Float16)];
-    assert!(matches!(
+    assert!(
         classify_dense_batched_gemm(
             &bound,
             &mixed,
@@ -2899,11 +2897,9 @@ fn programmable_tiled_numeric_policy_requires_both_rewrites() {
             init,
             output_axes,
             &EmitKnobs::default(),
-        ),
-        Err(DenseBatchedGemmRejection::NumericPolicyDenied(
-            NumericRewrite::Bf16InputRounding
-        ))
-    ));
+        )
+        .is_ok()
+    );
     assert!(
         classify_dense_batched_gemm(
             &bound,
@@ -3122,7 +3118,7 @@ fn programmable_tiled_float_storage_does_not_depend_on_build_gate() {
         );
     }
     for codecs in [[Some(Codec::BFloat16), None], [None, Some(Codec::BFloat16)]] {
-        assert!(matches!(
+        assert!(
             classify_dense_batched_gemm(
                 &bound,
                 &codecs,
@@ -3131,11 +3127,9 @@ fn programmable_tiled_float_storage_does_not_depend_on_build_gate() {
                 init,
                 output_axes,
                 &EmitKnobs::default(),
-            ),
-            Err(DenseBatchedGemmRejection::NumericPolicyDenied(
-                NumericRewrite::Bf16InputRounding
-            ))
-        ));
+            )
+            .is_ok()
+        );
     }
     assert!(
         classify_dense_batched_gemm(
@@ -11767,4 +11761,80 @@ fn f32_in_half_out_and_half_in_half_out_get_different_kernel_keys() {
     )
     .expect("uniform key");
     assert_ne!(mixed, uniform);
+}
+
+/// The MoE router matmul as the flint prefill chunk binds it: extents `[tokens, reduce, features]`
+/// with the reduce axis between the two output axes (`output_axes = [0, 2]`), activation
+/// `[tokens, k]`, weight `[features, k]`.
+#[cfg(feature = "metal-tiled-gemm")]
+fn router_shaped_op(tokens: u32, k: u32, features: u32) -> (BoundOp, proxima_tensor::NodeId) {
+    let mut program = Vec::new();
+    let activation = append(
+        &mut program,
+        Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(tokens), Extent::Static(k)], name: None },
+    );
+    let weight = append(
+        &mut program,
+        Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(features), Extent::Static(k)], name: None },
+    );
+    let product = append(
+        &mut program,
+        Op::Elementwise {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Multiply,
+            operands: vec![
+                (activation, IndexMap::Affine(map::projection(3, &[0, 1]))),
+                (weight, IndexMap::Affine(map::projection(3, &[2, 1]))),
+            ],
+            name: None,
+        },
+    );
+    append(
+        &mut program,
+        Op::Reduce(Reduce {
+            dtype: DType::FLOAT32,
+            body: ScalarOp::Add,
+            init: ReduceInit::Zero,
+            operand: product,
+            in_map: IndexMap::Affine(map::projection(3, &[0, 1, 2])),
+            out_map: IndexMap::Affine(map::projection(3, &[0, 2])),
+            keep: Keep::Reduce,
+            name: Some("router_shaped".into()),
+        }),
+    );
+    let shapes = infer(&program, &[]).expect("router op infers");
+    let bound = bind(&program, &shapes, &[terminal(&program)], NumericPolicy::default())
+        .expect("router op lowers")
+        .into_iter()
+        .next()
+        .expect("one fused bound emitted");
+    (bound, weight)
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn router_bf16_weight_without_input_rounding_permission_takes_the_float_tile_mma() {
+    let (bound, weight_node) = router_shaped_op(512, 2048, 256);
+    let BoundOpKind::Reduce { reduce_op, init, ref output_axes, .. } = bound.kind else {
+        panic!("router fixture reduces")
+    };
+    assert_eq!(bound.extents, vec![512, 2048, 256], "the flint chunk-4 router extents");
+    let serving_policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true);
+    assert!(!serving_policy.bf16_input_rounding, "the serving default grants no activation rounding");
+
+    for codecs in [[Some(Codec::BFloat16), None], [None, Some(Codec::BFloat16)]] {
+        let block = classify_dense_batched_gemm(&bound, &codecs, serving_policy, reduce_op, init, output_axes, &EmitKnobs::default())
+            .expect("a bf16 weight with f32 activations admits without the rounding permission");
+        assert_eq!(bound.extents[usize::from(block.feature_axes[0])], 256);
+        assert_eq!(bound.extents[usize::from(block.token_axes[0])], 512);
+    }
+
+    let packed = BTreeMap::from([(weight_node, Codec::BFloat16)]);
+    let source = emit(&bound, &packed, serving_policy).expect("router emits").source;
+    assert!(source.contains("simdgroup_multiply_accumulate"), "the router must take the MMA kernel");
+    assert!(source.contains("simdgroup_float8x8") && !source.contains("simdgroup_bfloat8x8"), "activations stay f32, so tiles are f32");
+    assert!(!source.contains("simd_sum("), "no cooperative reduce remains");
+
+    let rounded = emit(&bound, &packed, serving_policy.with_bf16_input_rounding(true)).expect("router emits").source;
+    assert!(rounded.contains("simdgroup_bfloat8x8"), "granting the permission selects bf16 tiles");
 }
