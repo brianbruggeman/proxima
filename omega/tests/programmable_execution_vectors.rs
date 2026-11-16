@@ -9,6 +9,10 @@ use proxima_tensor::spec::{elementwise, input_leaf, reduce};
 use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock, ReduceInit, ScalarOp};
 use proxima_numeric::{DType, NumericPolicy};
 
+// one feature tile wide, so this many rows fill exactly the dense gate's minimum grid
+const DENSE_ROWS: u32 =
+    (omega::sized::DENSE_TILED_MIN_THREADGROUPS * omega::sized::TILED_GEMM_BLOCK_N) as u32;
+
 fn matrix_program(rows: u32, reduction: u32, columns: u32) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let activation = input_leaf(
@@ -152,7 +156,7 @@ fn execute_literal(
         records[0].selected,
         "configured candidate must be identified"
     );
-    if backend == "metal" && rows >= 160 {
+    if backend == "metal" && rows >= DENSE_ROWS {
         assert!(
             records[0]
                 .kernel_identities
@@ -204,19 +208,19 @@ fn programmable_vector_cpu_bf16() {
 
 #[test]
 fn programmable_vector_metal_bf16() {
-    execute_literal("metal", 160, Some(Codec::BFloat16), None, false);
+    execute_literal("metal", DENSE_ROWS, Some(Codec::BFloat16), None, false);
 }
 
 #[test]
 fn programmable_vector_metal_f16() {
-    execute_literal("metal", 160, Some(Codec::Float16), None, false);
+    execute_literal("metal", DENSE_ROWS, Some(Codec::Float16), None, false);
 }
 
 #[test]
 fn programmable_vector_metal_two_bf16_operands() {
     execute_literal(
         "metal",
-        160,
+        DENSE_ROWS,
         Some(Codec::BFloat16),
         Some(Codec::BFloat16),
         false,
@@ -227,7 +231,7 @@ fn programmable_vector_metal_two_bf16_operands() {
 fn programmable_vector_metal_ragged_mixed_storage() {
     execute_literal(
         "metal",
-        160,
+        DENSE_ROWS,
         Some(Codec::BFloat16),
         Some(Codec::Float16),
         true,

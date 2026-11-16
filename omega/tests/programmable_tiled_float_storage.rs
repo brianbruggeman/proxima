@@ -24,7 +24,10 @@ use proxima_tensor::{Extent, NodeId, Op, QuantizedBlock, ReduceInit, ScalarOp};
 use proxima_numeric::{DType, NumericPolicy};
 
 const TOKENS: u32 = 197;
-const FEATURES: u32 = 45;
+const TOKEN_TILES: u64 = (TOKENS as u64).div_ceil(omega::sized::TILED_GEMM_BLOCK_N);
+const FEATURE_TILES: u64 = omega::sized::DENSE_TILED_MIN_THREADGROUPS.div_ceil(TOKEN_TILES);
+// one element past a tile boundary keeps the feature edge ragged while the grid meets the dense gate
+const FEATURES: u32 = ((FEATURE_TILES - 1) * omega::sized::TILED_GEMM_BLOCK_M + 1) as u32;
 const REDUCTION: u32 = 131;
 
 fn weight_first_program() -> (Vec<Op>, NodeId) {
