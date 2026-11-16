@@ -2310,3 +2310,24 @@ fn codec_name_for_error(codec: Codec) -> &'static str {
         None => "unnamed",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proxima_numeric::format::NumericFormat;
+
+    #[test]
+    fn every_ggml_decodable_format_packs_to_its_ggml_wire_shape() {
+        let mut compared = 0_usize;
+        for codec in NumericFormat::ALL {
+            let Some(ggml) = codec_to_decodable_ggml_type(codec) else {
+                continue;
+            };
+            let wire = ggml.wire_shape();
+            let numeric = (u64::from(codec.packed_bytes()), u64::from(codec.packed_elements()));
+            assert_eq!(numeric, (wire.block_bytes, wire.block_elements), "{codec:?} against {ggml:?}");
+            compared += 1;
+        }
+        assert!(compared > 0, "no format resolved to a ggml type");
+    }
+}
