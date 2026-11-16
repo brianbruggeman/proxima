@@ -944,7 +944,14 @@ pub(crate) fn decode_slice(
 ) -> Result<(), SliceFault> {
     named_layout_table!(dispatch_named_layout!(
         *layout,
-        NAMED => decode_run(NAMED, data, out),
+        NAMED => {
+            // one function per layout: forty inlined loop bodies in this dispatch decoded binary16 16x slower than the same loop alone
+            #[inline(never)]
+            fn run(data: &[u8], out: &mut [f32]) -> Result<(), SliceFault> {
+                decode_run(NAMED, data, out)
+            }
+            run(data, out)
+        },
         else {
             require_storage(layout).map_err(|_| SliceFault::Layout)?;
             decode_run(*layout, data, out)
