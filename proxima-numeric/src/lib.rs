@@ -61,6 +61,8 @@ pub mod fused;
 pub mod int8_dot;
 pub mod numeric;
 pub mod numerics;
+#[cfg(feature = "alloc")]
+pub mod packed_rows;
 pub mod range_fit;
 pub mod row_block;
 pub mod tables;
@@ -83,3 +85,5 @@ pub use numerics::Numerics;
 pub use row_block::{RowBlockShape, row_block_shape};
 pub use format_codec::FormatCodec;
 pub use value::Numeric;
+#[cfg(feature = "alloc")]
+pub use packed_rows::PackedRows;
