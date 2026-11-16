@@ -4706,7 +4706,7 @@ pub(super) fn packed_row_level_stage_words(
 
 /// The elements one lane owns per sweep when it owns a short scalar run, the predicate
 /// (`scalar_run_read`) the emitter uses to pick the scalar-run body. `None` for a body whose lane
-/// owns a whole block: measured on flint (PROXNUM-551/553), splitting K there is 1.0-2.2x slower
+/// owns a whole block: measured (PROXNUM-551/553), splitting K there is 1.0-2.2x slower
 /// while the scalar-run router is 2.1x faster, so only the scalar run takes a split.
 pub(super) fn packed_row_lane_unit(codec: Codec) -> Option<u64> {
     scalar_run_read(codec).map(|_| crate::sized::PACKED_ROW_SCALAR_RUN as u64)
