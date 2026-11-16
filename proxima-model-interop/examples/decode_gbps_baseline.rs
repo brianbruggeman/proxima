@@ -330,6 +330,18 @@ fn main() {
         Ok("0") | Err(_) => false,
         Ok(other) => panic!("PROXIMA_IGNORE_EOS={other}: expected `0` or `1`"),
     };
+    let batch_size: u32 = match std::env::var("PROXIMA_BATCH_SIZE") {
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|_| panic!("PROXIMA_BATCH_SIZE={value}: expected an integer")),
+        Err(_) => 0,
+    };
+    let ubatch_size: u32 = match std::env::var("PROXIMA_UBATCH_SIZE") {
+        Ok(value) => value
+            .parse()
+            .unwrap_or_else(|_| panic!("PROXIMA_UBATCH_SIZE={value}: expected an integer")),
+        Err(_) => 0,
+    };
     let serving_config = ServingConfig {
         ignore_eos,
         warm_model_buffers_at_load,
@@ -339,8 +351,8 @@ fn main() {
         kv_cache_key_quant: kv_cache_key_type,
         kv_cache_value_quant: kv_cache_type,
         flash_attention: false,
-        batch_size: 0,
-        ubatch_size: 0,
+        batch_size,
+        ubatch_size,
         reasoning_budget: 0,
         kv_bucket_tokens,
         resident_prefill_plan_bytes,
@@ -394,11 +406,14 @@ fn main() {
         run = "start",
         prompt = ?prompt,
         max_tokens = max_tokens as u64,
+        batch_size = u64::from(serving_config.batch_size),
+        ubatch_size = u64::from(serving_config.ubatch_size),
         "decode_gbps_baseline"
     );
     #[cfg(not(feature = "instrument"))]
     eprintln!(
-        "decode_gbps_baseline run=start prompt={prompt:?} max_tokens={max_tokens}"
+        "decode_gbps_baseline run=start prompt={prompt:?} max_tokens={max_tokens} batch_size={} ubatch_size={}",
+        serving_config.batch_size, serving_config.ubatch_size
     );
 
     // owner rollout check (2026-09-22, intervention6): K=1 vs K=8 chunked
