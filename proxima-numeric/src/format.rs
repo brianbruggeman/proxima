@@ -307,17 +307,31 @@ impl NumericFormat {
     }
 
     /// Bytes `elements` values occupy packed in this format, `None` unless `elements` is a whole
-    /// number of blocks: 64 values of Q4_0 are 2 blocks, 36 bytes; 17 are not whole.
+    /// number of blocks: 64 values of Q4_0 are 2 blocks, 36 bytes; 17 are not whole. A four-bit scalar
+    /// packs two values a byte, so an odd count is not whole.
     #[must_use]
     pub const fn packed_len(&self, elements: usize) -> Option<usize> {
-        let block_elements = match self.elements_per_block() {
+        let unit_elements = match self.packed_elements() {
             0 => 1,
             count => count as usize,
         };
-        if !elements.is_multiple_of(block_elements) {
+        if !elements.is_multiple_of(unit_elements) {
             return None;
         }
-        Some(elements / block_elements * self.bytes_per_block() as usize)
+        Some(elements / unit_elements * self.packed_bytes() as usize)
+    }
+
+    /// Elements `byte_len` packed bytes hold, `None` unless `byte_len` is a whole number of
+    /// storage units: 36 bytes of Q4_0 are 64 elements; 37 are not whole. The inverse of
+    /// [`Self::packed_len`], counted by the smallest whole-byte unit so a four-bit scalar is two
+    /// elements a byte. A zero-width format stores no bytes and answers `None`.
+    #[must_use]
+    pub const fn element_count(&self, byte_len: usize) -> Option<usize> {
+        let unit_bytes = self.packed_bytes() as usize;
+        if unit_bytes == 0 || !byte_len.is_multiple_of(unit_bytes) {
+            return None;
+        }
+        Some(byte_len / unit_bytes * self.packed_elements() as usize)
     }
 
     /// Whether two formats are scalar layouts that convert into each other changing no bit
@@ -1008,6 +1022,46 @@ mod tests {
         assert_eq!(NumericFormat::Float16.packed_len(512), Some(1024));
         assert_eq!(NumericFormat::Q4_0.packed_len(64), Some(36));
         assert_eq!(NumericFormat::Q4_0.packed_len(17), None);
+    }
+
+    #[test]
+    fn element_count_inverts_packed_len_for_every_format_on_whole_blocks() {
+        let formats = NumericFormat::ALL.into_iter().chain(NumericFormat::UNTAGGED.map(|(format, _)| format));
+        for format in formats {
+            let block = usize::from(format.packed_elements());
+            for blocks in [0_usize, 1, 7, 64] {
+                let elements = blocks * block;
+                let bytes = format.packed_len(elements).expect("whole blocks pack");
+                assert_eq!(format.element_count(bytes), Some(elements), "{format:?} at {blocks} blocks");
+            }
+        }
+    }
+
+    #[test]
+    fn element_count_rejects_a_byte_length_that_is_not_a_whole_block() {
+        for format in NumericFormat::ALL {
+            let unit = usize::from(format.packed_bytes());
+            if unit > 1 {
+                assert_eq!(format.element_count(unit + 1), None, "{format:?}");
+                assert_eq!(format.element_count(unit - 1), None, "{format:?}");
+            }
+        }
+        assert_eq!(NumericFormat::Q4_0.element_count(37), None);
+        assert_eq!(NumericFormat::Q4_0.element_count(36), Some(64));
+    }
+
+    #[test]
+    fn a_zero_width_scalar_has_no_element_count() {
+        let empty = FloatLayout {
+            exponent_bits: 0,
+            mantissa_bits: 0,
+            specials: Specs::None,
+            bias_override: None,
+            sign: Sign::Absent,
+            nan: Default::default(),
+        };
+        assert_eq!(NumericFormat::Scalar(empty).element_count(0), None);
+        assert_eq!(NumericFormat::Scalar(empty).element_count(4), None);
     }
 
     #[test]
