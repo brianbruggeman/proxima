@@ -268,14 +268,18 @@ fn group_elements(storage: Option<NumericFormat>) -> u64 {
     storage.map_or(ACTIVATION_GROUP_ELEMENTS, |format| u64::from(format.packed_elements()))
 }
 
-/// The format an activation of this depth is stored in: the configured one, else the default pair
-/// (the aligned grouped Q8_1 layout where the depth fills whole groups, else the plain one).
+/// The format an activation of this depth is stored in: the configured one, else the quantized-activation
+/// format (`is_quantized_activation`) with the widest block the depth fills whole, else the narrowest.
 fn activation_codec(depth: u64, storage: Option<NumericFormat>) -> NumericFormat {
     if let Some(format) = storage {
         return format;
     }
-    let grouped = BlockLayout::Q8_1_GROUPED;
-    if depth.is_multiple_of(u64::from(grouped.elements)) { NumericFormat::Q8_1Grouped } else { NumericFormat::Q8_1 }
+    let quantized = || NumericFormat::ALL.into_iter().filter(NumericFormat::is_quantized_activation);
+    quantized()
+        .filter(|format| depth.is_multiple_of(u64::from(format.elements_per_block())))
+        .max_by_key(NumericFormat::elements_per_block)
+        .or_else(|| quantized().min_by_key(NumericFormat::elements_per_block))
+        .unwrap_or_default()
 }
 
 /// Adds one quantize node per activation that has an int8-dot reader, positioned just before the

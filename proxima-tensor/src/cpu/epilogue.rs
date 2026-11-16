@@ -1947,15 +1947,21 @@ pub fn expert_entries_from_stack(
     // executor snapshots this table when the step begins"), not once per
     // position inside a step, so this is bounded setup-path allocation
     // (`expert_count` entries), never a hot-path allocation.
-    Ok(bytes
+    bytes
         .chunks_exact(per_expert_bytes)
-        .map(|chunk| ExpertEntry {
-            block: stack.with_bytes(chunk),
-            out_dim,
-            in_dim,
-            epoch,
+        .map(|chunk| {
+            stack.with_bytes(chunk).map(|block| ExpertEntry {
+                block,
+                out_dim,
+                in_dim,
+                epoch,
+            })
         })
-        .collect())
+        .collect::<Option<Vec<_>>>()
+        .ok_or(TensorError::ExpertStackNotAligned {
+            expert_count,
+            bytes: bytes.len(),
+        })
 }
 
 impl<'a> QuantizedBlock<'a> {
@@ -2012,10 +2018,8 @@ impl<'a> QuantizedBlock<'a> {
     /// entry -- the one table `run_reduce_quantized`, `build_matmul_stage_plan`,
     /// and `dequantize_row` all compose down to instead of each
     /// hand-matching the same per-codec constants a second and third time.
-    /// Sourced from [`proxima_gguf::GgmlType::wire_shape`], the
-    /// authoritative on-disk-layout table `codec_to_decodable_ggml_type`
-    /// resolves `codec` against, rather than a parallel hand-copied set of
-    /// `Q*_BLOCK_BYTES`/`Q*_BLOCK_ELEMENTS` constants.
+    /// Geometry is `NumericFormat::packed_bytes` and `packed_elements`; a
+    /// codec is admitted when it has a ggml type or a matmul kernel.
     #[must_use]
     pub const fn block_layout(&self) -> Option<(usize, usize)> {
         let (QuantizedBlock::Packed { codec, .. } | QuantizedBlock::PackedStrided { codec, .. }) =
@@ -2023,19 +2027,10 @@ impl<'a> QuantizedBlock<'a> {
         else {
             return None;
         };
-        match *codec {
-            Codec::Bf8E5M2 => return Some((1, 1)),
-            Codec::Bf4E2M1 => return Some((1, 2)),
-            Codec::Fp6E3M2 => {
-                return Some((Codec::FP6_E3M2_BLOCK_BYTES, Codec::FP6_E3M2_BLOCK_ELEMENTS));
-            }
-            _ => {}
-        }
-        let Some(ggml_type) = codec_to_decodable_ggml_type(*codec) else {
+        if codec_to_decodable_ggml_type(*codec).is_none() && codec_matmul_f32_kernel(*codec).is_none() {
             return None;
-        };
-        let layout = ggml_type.wire_shape();
-        Some((layout.block_bytes as usize, layout.block_elements as usize))
+        }
+        Some((codec.packed_bytes() as usize, codec.packed_elements() as usize))
     }
 
     /// This codec's single-shot `matmul_*_f32` kernel -- see
@@ -2078,25 +2073,17 @@ impl<'a> QuantizedBlock<'a> {
     /// slice -- [`expert_entries_from_stack`]'s own per-expert slicing, and
     /// `run_reduce_quantized`'s per-position gather read, both need "the
     /// same codec, different bytes" without restating this crate's own
-    /// codec list a second time. [`Self::Float32`]/[`Self::Int32`] cannot
-    /// themselves hold `&'a [u8]`, so that arm rewraps to an arbitrary
-    /// packed codec (`Codec::Q4K`) instead -- never reached in practice,
-    /// since [`Self::packed_bytes`] already returns `None` for `Float32`/
-    /// `Int32` and every caller of this method checks that first before
-    /// ever reaching here. Kept total rather than partial so this stays a
-    /// plain function, not a fallible one, at every other call site.
+    /// codec list a second time. [`Self::Float32`]/[`Self::Int32`] carry
+    /// decoded values and have no codec to rewrap, so they give `None`.
     #[must_use]
-    pub const fn with_bytes(&self, bytes: &'a [u8]) -> Self {
+    pub const fn with_bytes(&self, bytes: &'a [u8]) -> Option<Self> {
         match self {
-            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => QuantizedBlock::Packed {
-                codec: Codec::Q4K,
-                bytes,
-            },
+            QuantizedBlock::Float32(_) | QuantizedBlock::Int32(_) => None,
             QuantizedBlock::Packed { codec, .. } | QuantizedBlock::PackedStrided { codec, .. } => {
-                QuantizedBlock::Packed {
+                Some(QuantizedBlock::Packed {
                     codec: *codec,
                     bytes,
-                }
+                })
             }
         }
     }

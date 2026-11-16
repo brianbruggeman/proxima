@@ -982,7 +982,7 @@ pub(super) fn run_reduce_quantized<B: Deref<Target = [f32]>>(
         // (paired with `weights` above, already re-sliced for this
         // position) on every path that predates `ExpertSource`.
         let resolved_weight = if stride_bytes.is_some() {
-            weight_block.with_bytes(weights)
+            weight_block.with_bytes(weights).ok_or_else(shape_error)?
         } else {
             weight_block
         };
