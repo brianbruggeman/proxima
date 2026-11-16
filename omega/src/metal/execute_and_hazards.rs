@@ -189,8 +189,8 @@ pub(super) fn execute_plan_inner(
         expert_source_nodes = ?effective_expert_buffers.keys().collect::<Vec<_>>(),
         "effective_expert_source_nodes"
     );
-    for index in 0..plan.program.len().min(24) {
-        debug!(op = index as u64, name = ?plan.program[index].name(), "plan_op");
+    for (index, operation) in plan.program.iter().enumerate().take(24) {
+        debug!(op = index as u64, name = ?operation.name(), "plan_op");
     }
 
     let (device, queue) = device_and_queue()?;
