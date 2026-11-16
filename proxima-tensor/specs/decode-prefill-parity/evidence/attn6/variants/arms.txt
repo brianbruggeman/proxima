@@ -3,7 +3,7 @@ how each arm file is built (one file per arm, named <base sha16>.<tag>.metal in 
 half_master.metal (granite), half_master_d256.metal, half_master_d512.metal = the base emitted source of that shape plus the edits in half_master_vs_base.*.diff
 (typedef/macro block before `struct Uniforms`, the kernel signature types for in2..in7, and the load / multiply-accumulate call sites).
 
-cell 2 arms (defines; unlisted defines are 0; .f16 = comma list of binding indices narrowed to half by the replay, CapturedDispatch::with_f16_buffers):
+cell 2 arms (defines; unlisted defines are 0; .f16 = comma list of binding indices narrowed to half by the replay, CapturedDispatch::with_narrowed_buffers(.., Float16)):
   f32mma             (none)
   qk_cvt             MMA_QK_HALF=1
   pv_cvt             MMA_PV_HALF=1

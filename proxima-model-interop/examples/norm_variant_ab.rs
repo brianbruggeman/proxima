@@ -527,7 +527,7 @@ mod harness {
                         replaced
                     } else {
                         replaced
-                            .with_f16_buffers(&narrowed)
+                            .with_narrowed_buffers(&narrowed, omega::Codec::Float16)
                             .unwrap_or_else(|error| panic!("variant {name} f16 buffers: {error}"))
                     }
                 })

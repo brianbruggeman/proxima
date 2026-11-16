@@ -2714,94 +2714,26 @@ impl CapturedDispatch {
             .sum()
     }
 
-    /// A copy of this record whose buffers at the given binding indices hold the
-    /// same values narrowed to `f16`, half the bytes, for a variant kernel that
-    /// declares `device const half*` there (an f16 K/V cache against the f32 one).
+    /// A copy of this record whose buffers at `indices` hold the same values
+    /// narrowed to `codec`, so a variant kernel that reads `half*`, `ushort4` or
+    /// `uchar4` there runs on the data the f32 kernel ran on. The narrowing is
+    /// [`proxima_numeric::FormatCodec::for_format`] plus its `encode`, the same
+    /// codec [`narrow_placed_buffer`] applies, for any format that encodes.
     ///
     /// # Errors
     ///
-    /// [`MetalError::CompileFailed`] when a binding is not bound or the device
-    /// refuses an allocation.
-    pub fn with_f16_buffers(&self, indices: &[usize]) -> Result<Self, MetalError> {
-        let (device, _queue) = device_and_queue()?;
-        let mut buffers = self.buffers.clone();
-        for index in indices {
-            let slot = buffers
-                .iter_mut()
-                .find(|(bound_index, _, _)| bound_index == index)
-                .ok_or_else(|| MetalError::CompileFailed {
-                    log: format!("binding {index} is not bound in this record"),
-                })?;
-            let (_, source, offset) = slot.clone();
-            let count = source.length().saturating_sub(offset) / core::mem::size_of::<f32>();
-            // SAFETY: shared-storage buffer idle between replays; `offset + count * 4 <= length`.
-            let floats = unsafe {
-                core::slice::from_raw_parts(
-                    source
-                        .contents()
-                        .as_ptr()
-                        .cast::<u8>()
-                        .add(offset)
-                        .cast::<f32>(),
-                    count,
-                )
-            };
-            let halves: Vec<u8> = floats
-                .iter()
-                .flat_map(|value| f16::from_f32(*value).to_le_bytes())
-                .collect();
-            *slot = (*index, shared_buffer_from(&device, &halves)?, 0);
-        }
-        Ok(Self {
-            step: self.step,
-            node: self.node,
-            kind_name: self.kind_name,
-            entry: self.entry.clone(),
-            msl_sha256: String::new(),
-            operands: self.operands.clone(),
-            chunk_index: self.chunk_index,
-            extents: self.extents.clone(),
-            grid: self.grid,
-            bindings: self.bindings.clone(),
-            unreplayable: self.unreplayable.clone(),
-            route_prepass_dispatches: self.route_prepass_dispatches,
-            route_prepass_grid: self.route_prepass_grid,
-            route_prepass_max_threads: self.route_prepass_max_threads,
-            uniform_bytes: self.uniform_bytes.clone(),
-            pipeline: self.pipeline.clone(),
-            buffers,
-            uniforms_index: self.uniforms_index,
-            fault_index: self.fault_index,
-            prepass: self.prepass.clone(),
-            prepass_owner: self.prepass_owner,
-            barrier_before: self.barrier_before,
-        })
-    }
-
-    /// [`Self::with_f16_buffers`] for the cache codecs the decode split reads:
-    /// the buffers at `indices` hold the same values narrowed to `codec`
-    /// (`Float16`, `BFloat16` or `BFloat8`), so a variant kernel that reads
-    /// `ushort4` or `uchar4` there runs on the data the f32 kernel ran on.
-    ///
-    /// # Errors
-    ///
-    /// [`MetalError::CompileFailed`] for a codec with no narrow cache read, a
-    /// binding that is not bound, or a refused allocation.
+    /// [`MetalError::CompileFailed`] for a codec with no encode, a binding that
+    /// is not bound, a count that is not whole blocks, or a refused allocation.
     pub fn with_narrowed_buffers(
         &self,
         indices: &[usize],
         codec: Codec,
     ) -> Result<Self, MetalError> {
-        let narrow: fn(f32) -> Vec<u8> = match codec {
-            Codec::Float16 => |value| f16::from_f32(value).to_le_bytes().to_vec(),
-            Codec::BFloat16 => |value| half::bf16::from_f32(value).to_le_bytes().to_vec(),
-            Codec::BFloat8 => |value| vec![proxima_tensor::BFloat8::from_f32(value).to_bits()],
-            other => {
-                return Err(MetalError::CompileFailed {
-                    log: format!("codec {other:?} has no narrow cache read"),
-                });
-            }
-        };
+        let format_codec = proxima_numeric::FormatCodec::for_format(&codec)
+            .filter(proxima_numeric::FormatCodec::can_encode)
+            .ok_or_else(|| MetalError::CompileFailed {
+                log: format!("codec {codec:?} has no narrow cache read"),
+            })?;
         let (device, _queue) = device_and_queue()?;
         let mut narrowed = self.clone_record();
         for index in indices {
@@ -2826,7 +2758,12 @@ impl CapturedDispatch {
                     count,
                 )
             };
-            let bytes: Vec<u8> = floats.iter().flat_map(|value| narrow(*value)).collect();
+            let mut bytes = vec![0u8; format_codec.packed_len(count).unwrap_or(0)];
+            format_codec
+                .encode(floats, &mut bytes)
+                .map_err(|error| MetalError::CompileFailed {
+                    log: format!("binding {index} does not narrow to {codec:?}: {error}"),
+                })?;
             *slot = (*index, shared_buffer_from(&device, &bytes)?, 0);
         }
         Ok(narrowed)
@@ -8702,5 +8639,115 @@ mod shared_route_compaction_tests {
         assert!(needs_barrier);
         assert!(tracker.wrote(&"down_out") && !tracker.wrote(&"compaction"));
         assert!(tracker.was_read(&"compaction"));
+    }
+}
+
+#[cfg(all(test, feature = "instrument", feature = "metal-output-placement"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+pub(super) mod narrowed_buffer_parity_tests {
+    use super::{CapturedDispatch, device_and_queue, shared_buffer_from};
+    use crate::GridSpec;
+    use crate::metal::{allocate_placed_buffer, narrow_placed_buffer, try_write_placed_buffer_f32};
+    use half::{bf16, f16};
+    use objc2_foundation::NSString;
+    use objc2_metal::{MTLBuffer, MTLCompileOptions, MTLDevice, MTLLibrary};
+    use proxima_numeric::{FormatCodec, NumericFormat};
+    use proxima_tensor::BFloat8;
+
+    const CACHE_FORMATS: [NumericFormat; 3] = [
+        NumericFormat::Float16,
+        NumericFormat::BFloat16,
+        NumericFormat::BFloat8,
+    ];
+
+    /// zeros, signed zero, ordinary values, f16 subnormals, f16 overflow, a large outlier, infinities and nan
+    fn cache_row() -> Vec<f32> {
+        vec![
+            0.0, -0.0, 1.0, -1.5, 2.718_281_7, 0.1, 6.0e-8, -2.5e-5, 448.0, 65504.0, 70000.0,
+            3.0e38, f32::INFINITY, f32::NEG_INFINITY, f32::NAN, -0.007_812_5,
+        ]
+    }
+
+    fn removed_arm_bytes(format: &NumericFormat, value: f32) -> Vec<u8> {
+        match *format {
+            NumericFormat::Float16 => f16::from_f32(value).to_le_bytes().to_vec(),
+            NumericFormat::BFloat16 => bf16::from_f32(value).to_le_bytes().to_vec(),
+            NumericFormat::BFloat8 => vec![BFloat8::from_f32(value).to_bits()],
+            other => panic!("{other:?} had no removed arm"),
+        }
+    }
+
+    fn dispatch_over(values: &[f32]) -> CapturedDispatch {
+        let (device, _queue) = device_and_queue().expect("a metal device");
+        let source = NSString::from_str(
+            "#include <metal_stdlib>\nkernel void narrow_probe(device float* sink [[buffer(0)]]) {}\n",
+        );
+        let library = device
+            .newLibraryWithSource_options_error(&source, Some(&MTLCompileOptions::new()))
+            .expect("probe kernel compiles");
+        let function = library
+            .newFunctionWithName(&NSString::from_str("narrow_probe"))
+            .expect("probe entry exists");
+        let pipeline = device
+            .newComputePipelineStateWithFunction_error(&function)
+            .expect("probe pipeline builds");
+        let bytes: Vec<u8> = values.iter().flat_map(|value| value.to_le_bytes()).collect();
+        let buffer = shared_buffer_from(&device, &bytes).expect("f32 row uploads");
+        CapturedDispatch {
+            step: 0,
+            node: 0,
+            kind_name: "narrow_probe",
+            entry: "narrow_probe".to_string(),
+            msl_sha256: String::new(),
+            operands: Vec::new(),
+            chunk_index: 0,
+            extents: Vec::new(),
+            grid: GridSpec { threads: 1, threadgroup_width: None, depth: 1, grid2d: None },
+            bindings: Vec::new(),
+            unreplayable: None,
+            route_prepass_dispatches: 0,
+            route_prepass_grid: None,
+            route_prepass_max_threads: None,
+            uniform_bytes: Vec::new(),
+            pipeline,
+            buffers: vec![(0, buffer, 0)],
+            uniforms_index: None,
+            fault_index: None,
+            prepass: None,
+            prepass_owner: None,
+            barrier_before: false,
+        }
+    }
+
+    fn placed_bytes(values: &[f32], format: &NumericFormat) -> Vec<u8> {
+        let codec = FormatCodec::for_format(format).expect("a scalar format resolves");
+        let staging = allocate_placed_buffer(values.len() * 4).expect("allocates f32 staging");
+        let packed_len = codec.packed_len(values.len()).expect("whole elements");
+        let cache = allocate_placed_buffer(packed_len).expect("allocates cache");
+        try_write_placed_buffer_f32(&staging, 0, values).expect("row fits staging");
+        narrow_placed_buffer(&staging, 0, &cache, 0, &codec, values.len()).expect("row narrows");
+        // idle shared buffer, `packed_len` bytes were just written
+        unsafe { core::slice::from_raw_parts(cache.contents().as_ptr().cast::<u8>(), packed_len) }.to_vec()
+    }
+
+    #[test]
+    fn narrowed_buffers_match_per_value_encoding_and_narrow_placed_buffer_for_every_cache_format() {
+        let row = cache_row();
+        assert_eq!(CACHE_FORMATS.len(), 3, "the parity loop must visit every cache format");
+        for format in &CACHE_FORMATS {
+            let narrowed = dispatch_over(&row)
+                .with_narrowed_buffers(&[0], *format)
+                .expect("a cache format narrows");
+            let actual = narrowed.bound_buffer_bytes_at(0).expect("binding 0 is bound");
+            let expected: Vec<u8> = row.iter().flat_map(|value| removed_arm_bytes(format, *value)).collect();
+            assert_eq!(actual, expected, "{format:?} against the removed per-value closures");
+            assert_eq!(actual, placed_bytes(&row, format), "{format:?} against narrow_placed_buffer");
+        }
+    }
+
+    #[test]
+    fn narrowing_an_unbound_binding_is_refused() {
+        let unbound = dispatch_over(&cache_row()).with_narrowed_buffers(&[7], NumericFormat::Float16);
+        assert!(unbound.is_err(), "binding 7 is not bound in this record");
     }
 }
