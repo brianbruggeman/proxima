@@ -21,19 +21,23 @@
 ))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use proxima_tensor::cpu::evaluate_quantized_named_with_scratch;
 use proxima_tensor::{BoundOpKind, bind};
 use proxima_numeric::{NumericPolicy};
 
 mod support;
-use support::{as_named_blocks, production_numeric_policy, qwen35_partial_rotary_forward_fixture};
+use support::{
+    as_named_blocks, evaluate_gpu_oracle, production_numeric_policy,
+    qwen35_partial_rotary_forward_fixture,
+};
 
 /// Shared body: binds the fixture, asserts the fusion actually carries the
 /// pass-plane operand count `BoundOpKind::CachedAttention`'s own doc
 /// describes (twelve: eight base sources, the runtime `cached_len`, and the
 /// three pass-plane sources), then runs CPU and Metal against the same
 /// named-block data and compares the fused output within `1e-5` relative
-/// error -- the CPU fused path is itself proven against an f64 reference
+/// error. The CPU arm is `evaluate_gpu_oracle` (flash narrowing granted) because
+/// Metal runs the f32 online attention, not llama.cpp's f16 flash arithmetic
+/// the CPU binds by default -- the CPU fused path is itself proven against an f64 reference
 /// (`proxima_tensor::bind`'s own `qwen35_partial_rotary_dense_attention_
 /// matches_an_independent_f64_reference`), so this test's job is only to
 /// prove the Metal kernel agrees with that already-proven CPU path.
@@ -67,17 +71,7 @@ fn assert_partial_rotary_parity_at(cached_extent: u64, cached_len: u64, policy: 
          eight base sources, the runtime cached_len, and the three pass-plane sources"
     );
 
-    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
-    let mut validated = None;
-    let cpu = evaluate_quantized_named_with_scratch(
-        &program,
-        &symbols,
-        &named,
-        &roots,
-        &mut free_buffers,
-        &mut validated,
-    )
-    .expect("cpu runs the qwen35 partial-rotary program");
+    let cpu = evaluate_gpu_oracle(&program, &symbols, &named, &roots);
 
     let plan = omega::plan_named(&program, &symbols, &named, &roots, policy)
         .expect("metal plans the qwen35 partial-rotary program");

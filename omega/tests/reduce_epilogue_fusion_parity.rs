@@ -25,7 +25,9 @@ use proxima_tensor::{BoundOp, BoundOpKind, Extent, IndexMap, Keep, Op, Reduce, R
 use proxima_numeric::{DType, NumericPolicy};
 
 mod support;
-use support::{as_named_blocks, real_single_range_forward_fixture_with_padding};
+use support::{
+    as_named_blocks, evaluate_gpu_oracle, real_single_range_forward_fixture_with_padding,
+};
 
 fn epilogued_reduce_count(resolved: &[BoundOp]) -> usize {
     resolved
@@ -63,17 +65,7 @@ fn assert_parity_at_padding(padding: u64) {
          reduce+elementwise pair or the fusion pass regressed"
     );
 
-    let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
-    let mut validated = None;
-    let cpu = evaluate_quantized_named_with_scratch(
-        &program,
-        &symbols,
-        &named,
-        &output_roots,
-        &mut free_buffers,
-        &mut validated,
-    )
-    .expect("cpu runs the padded single-range program");
+    let cpu = evaluate_gpu_oracle(&program, &symbols, &named, &output_roots);
 
     let plan = omega::plan_named(
         &program,

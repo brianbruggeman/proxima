@@ -4,7 +4,7 @@
 //!
 //! On the sliding-and-global two-layer program (`gemma4_rows_support`) at the
 //! speculative-verify and prefill shapes, and on a two-query-group shape,
-//! with the production policy:
+//! with the production policy plus the flash narrowing the Metal driver grants:
 //! - both attention ops bind as `CachedAttention` and emit the row-tiled kernel
 //!   (entry `_rt`), with the form's split count and threadgroup count;
 //! - the CPU interpreter's relaxed `CachedAttention` over those ops agrees with
@@ -22,6 +22,7 @@
 use core::pin::pin;
 use core::task::{Context, Poll, Waker};
 
+use proxima_numeric::NumericPolicy;
 use proxima_primitives::pipe::Pipe;
 use proxima_tensor::bind::{READY_BATCH_CAPACITY, ReadyBatch};
 use proxima_tensor::{
@@ -105,6 +106,14 @@ fn entry_number(entry: &str, marker: &str) -> i64 {
 }
 const TOLERANCE: f32 = 1e-4;
 
+/// The production policy as the Metal driver binds it (`prepare_with_options`
+/// grants `flash_narrowing`): without the grant the fused op carries llama.cpp's
+/// f16 flash arithmetic, which the f32 unfused chain and the f32 kernel
+/// transcription this gate compares against do not share.
+fn oracle_policy() -> NumericPolicy {
+    production_numeric_policy().with_flash_narrowing(true)
+}
+
 fn relative_difference(expected: &[f32], actual: &[f32]) -> f32 {
     assert_eq!(expected.len(), actual.len());
     assert!(!expected.is_empty(), "an empty root compares nothing");
@@ -167,7 +176,7 @@ fn attention_ops(resolved: &[BoundOp]) -> Vec<&BoundOp> {
 
 #[test]
 fn the_verify_program_binds_row_tiled_attention_and_the_cpu_oracle_agrees_with_the_unfused_chain() {
-    let policy = production_numeric_policy();
+    let policy = oracle_policy();
     let mut cells = 0_usize;
 
     for Cell {
@@ -268,7 +277,7 @@ fn with_garbage_tail(buffer: &[f32], row_width: usize, live_rows: usize) -> Vec<
 /// the bound program, reproduces the CPU oracle's output for that op.
 #[test]
 fn the_kernel_transcription_reproduces_the_cpu_oracle_on_the_programs_own_activations() {
-    let policy = production_numeric_policy();
+    let policy = oracle_policy();
     let mut compared = 0_usize;
 
     for Cell {
@@ -383,7 +392,7 @@ fn the_kernel_transcription_reproduces_the_cpu_oracle_on_the_programs_own_activa
 #[test]
 fn rows_under_one_fragment_of_a_two_group_head_keep_the_one_dispatch_kernel_and_the_cpu_oracle_agrees()
  {
-    let policy = production_numeric_policy();
+    let policy = oracle_policy();
     let rows = 5;
     let cached_len = 33;
     let fixture = fixture_with(rows, cached_len, Geometry::TWO_QUERY_GROUPS);
