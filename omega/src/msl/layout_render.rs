@@ -368,8 +368,10 @@ fn straddling_unpack_msl(width: u32) -> String {
     )
 }
 
-fn plane_expression(plane: &Plane, index: &str, binding: &str) -> String {
-    let mask = (1u32 << plane.bits) - 1;
+/// The statements that bind `{binding}_address` to the bit address of the plane's field for
+/// element `index`: the plane's digits split the index least significant first, each adding its
+/// stride (`Plane::address`, as MSL).
+fn plane_address_msl(plane: &Plane, index: &str, binding: &str) -> String {
     let steps = plane
         .digits
         .iter()
@@ -382,9 +384,145 @@ fn plane_expression(plane: &Plane, index: &str, binding: &str) -> String {
         })
         .collect::<String>();
     format!(
-        "    uint {binding}_rest = {index};\n    uint {binding}_address = {}u;\n{steps}    uint {binding} = ((uint)block[{binding}_address / 8u] >> ({binding}_address % 8u)) & {mask:#x}u;\n",
+        "    uint {binding}_rest = {index};\n    uint {binding}_address = {}u;\n{steps}",
         plane.base_bits
     )
+}
+
+/// The most bytes any element's field of `plane` touches: one when every field sits inside a byte,
+/// two or more when a field straddles a byte boundary (a 6-bit plane at bit 6 spans two bytes).
+fn plane_byte_span(plane: &Plane) -> u32 {
+    let elements: usize = plane.digits.iter().map(|digit| usize::from(digit.radix)).product();
+    (0..elements)
+        .map(|index| (plane.address(index) as u32 % 8 + u32::from(plane.bits)).div_ceil(8))
+        .max()
+        .unwrap_or(1)
+}
+
+/// Reads one field of `plane` for element `index` into `uint {binding}`. A field inside one byte is
+/// one byte load shifted and masked. A field that straddles bytes joins the bytes that cover it,
+/// each trailing byte read only when the field reaches into it (`shift + bits > 8 * byte`), so the
+/// last field of a block never reads past the block, and no high bit of the field is dropped.
+fn plane_expression(plane: &Plane, index: &str, binding: &str) -> String {
+    let mask = (1u32 << plane.bits) - 1;
+    let address = plane_address_msl(plane, index, binding);
+    let bits = plane.bits;
+    let span = plane_byte_span(plane);
+    if span <= 1 {
+        return format!(
+            "{address}    uint {binding} = ((uint)block[{binding}_address / 8u] >> ({binding}_address % 8u)) & {mask:#x}u;\n"
+        );
+    }
+    let joined = (1..span)
+        .map(|byte| {
+            format!(
+                " | ({binding}_address % 8u + {bits}u > {}u ? (uint)block[{binding}_address / 8u + {byte}u] << {}u : 0u)",
+                byte * 8,
+                byte * 8
+            )
+        })
+        .collect::<String>();
+    format!(
+        "{address}    uint {binding}_joined = (uint)block[{binding}_address / 8u]{joined};\n    uint {binding} = ({binding}_joined >> ({binding}_address % 8u)) & {mask:#x}u;\n"
+    )
+}
+
+/// How a run of consecutive elements of one plane is read with word loads: every lane `r` of the
+/// run sits at bit `A + r * stride_bits`, with `A` the address of the run's first element.
+struct RunWords {
+    stride_bits: u32,
+    /// The shift `A % 8` when every run of the block has the same one, else `None` (it is then read
+    /// at run time and the stride is a whole number of bytes).
+    static_shift: Option<u32>,
+    words: u32,
+    /// `safe[w]`: word `w` lies inside the block for every run, so it may be one `uint` load.
+    safe: Vec<bool>,
+}
+
+/// Decides whether `plane`'s fields for the `run` elements starting at any multiple of `run` can
+/// be read from a window of `uint` words, and how. The rule: the plane's first non-trivial digit
+/// must be a multiple of `run` wide, so no run crosses a digit carry and its fields lie at the
+/// constant bit stride of that digit; the run's fields must then fit in the window under one of
+/// two cases. If every run starts at the same bit shift inside its first byte, each field's bit
+/// position is a compile-time constant and a field that crosses a word boundary is joined from the
+/// two words that hold it. If the shift varies per run, the stride must be whole bytes and every
+/// field must sit inside its word at the largest shift. A plane that fits neither is read per
+/// element ([`plane_expression`]).
+fn run_words(plane: &Plane, layout: &BlockLayout, run: u64) -> Option<RunWords> {
+    let digit = plane.digits.iter().find(|digit| digit.radix > 1)?;
+    let run = u32::try_from(run).ok()?;
+    if run == 0 || u32::from(digit.radix) % run != 0 {
+        return None;
+    }
+    let stride = u32::from(digit.stride_bits);
+    let bits = u32::from(plane.bits);
+    let starts: Vec<u32> = (0..u32::from(layout.elements)).step_by(run as usize).map(|slot| plane.address(slot as usize) as u32).collect();
+    let shifts: Vec<u32> = starts.iter().map(|address| address % 8).collect();
+    let first = *shifts.first()?;
+    let static_shift = shifts.iter().all(|shift| *shift == first).then_some(first);
+    let max_shift = shifts.iter().copied().max()?;
+    let reach = (run - 1) * stride + bits;
+    if static_shift.is_none() {
+        let lanes_fit = stride % 8 == 0 && (0..run).all(|lane| (lane * stride) % 32 + max_shift + bits <= 32);
+        if !lanes_fit {
+            return None;
+        }
+    }
+    let words = (max_shift + reach).div_ceil(32);
+    let safe = (0..words)
+        .map(|word| starts.iter().all(|address| address / 8 + 4 * (word + 1) <= u32::from(layout.block_bytes)))
+        .collect();
+    Some(RunWords { stride_bits: stride, static_shift, words, safe })
+}
+
+/// Statements binding `uint {binding}_codes[run]` to the plane's field for each element of the
+/// run starting at `slot`: each word is one aligned `uint` load (a runtime pointer-alignment check
+/// falls back to assembling the word from guarded byte reads), and each lane is a constant shift
+/// and mask of its word, joined across a word boundary where its field straddles one.
+fn run_words_msl(plane: &Plane, plan: &RunWords, layout: &BlockLayout, run: u64, slot: &str, binding: &str) -> String {
+    let mask = (1u32 << plane.bits) - 1;
+    let bits = u32::from(plane.bits);
+    let block_bytes = layout.block_bytes;
+    let mut text = plane_address_msl(plane, slot, binding);
+    text.push_str(&format!(
+        "    uint {binding}_first = {binding}_address / 8u;\n    uint {binding}_shift = {binding}_address % 8u;\n    device const uchar *{binding}_bytes = block + {binding}_first;\n    bool {binding}_aligned = (((ulong){binding}_bytes) & 3ul) == 0ul;\n"
+    ));
+    for word in 0..plan.words {
+        let assembled = (0..4)
+            .map(|byte| {
+                let offset = 4 * word + byte;
+                format!("({binding}_first + {offset}u < {block_bytes}u ? (uint){binding}_bytes[{offset}u] << {}u : 0u)", byte * 8)
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        let load = if plan.safe[word as usize] {
+            format!("{binding}_aligned ? ((device const uint *){binding}_bytes)[{word}u] : ({assembled})")
+        } else {
+            assembled
+        };
+        text.push_str(&format!("    uint {binding}_w{word} = {load};\n"));
+    }
+    text.push_str(&format!("    uint {binding}_codes[{run}];\n"));
+    for lane in 0..run as u32 {
+        let offset = lane * plan.stride_bits;
+        text.push_str(&match plan.static_shift {
+            Some(shift) => {
+                let position = shift + offset;
+                let (word, at) = (position / 32, position % 32);
+                if at + bits <= 32 {
+                    format!("    {binding}_codes[{lane}] = ({binding}_w{word} >> {at}u) & {mask:#x}u;\n")
+                } else {
+                    format!("    {binding}_codes[{lane}] = (({binding}_w{word} >> {at}u) | ({binding}_w{} << {}u)) & {mask:#x}u;\n", word + 1, 32 - at)
+                }
+            }
+            None => format!(
+                "    {binding}_codes[{lane}] = ({binding}_w{} >> ({}u + {binding}_shift)) & {mask:#x}u;\n",
+                offset / 32,
+                offset % 32
+            ),
+        });
+    }
+    text
 }
 
 fn coded_expression(coded: &Coded, index: &str, binding: &str, helper: &str) -> String {
@@ -659,9 +797,43 @@ pub fn level_run_decode_msl(
         ));
         scale = "effective_scale";
     }
+    if let Some(words) = word_run_level_msl(layout, &format.levels, function, name, run, &head, scale) {
+        return Ok(words);
+    }
     let raw = raw_level_msl(layout, Codes::Levels(&format.levels), name);
     Ok(format!(
         "\nstatic inline void {function}(device const uchar *block, uint slot, thread half *out) {{\n{head}    for (uint run = 0u; run < {run}u; ++run) {{\n        uint index = slot + run;\n{raw}        out[run] = (half)(raw * {scale});\n    }}\n}}\n"
+    ))
+}
+
+/// The word-load form of [`level_run_decode_msl`]'s body, from the planes' description alone: each
+/// plane of the element code is read as `uint` words ([`run_words`]) and the run's codes are
+/// shifted and masked out of them, instead of one byte load and address recompute per element.
+/// `None` when the format's code is not a plain plane (or two) whose run fits [`run_words`]'s rule,
+/// so the caller keeps the per-element body.
+fn word_run_level_msl(
+    layout: &BlockLayout,
+    levels: &LevelTable,
+    function: &str,
+    name: &str,
+    run: u64,
+    head: &str,
+    scale: &str,
+) -> Option<String> {
+    if matches!(levels, LevelTable::SignedGrid { .. }) || layout.element.packed_radix > 1 {
+        return None;
+    }
+    let coded = &layout.element;
+    let low_plan = run_words(&coded.low, layout, run)?;
+    let mut body = run_words_msl(&coded.low, &low_plan, layout, run, "slot", "low");
+    let mut code = "low_codes[run]".to_string();
+    if let Some(high) = &coded.high {
+        let high_plan = run_words(high, layout, run)?;
+        body.push_str(&run_words_msl(high, &high_plan, layout, run, "slot", "high"));
+        code = format!("(low_codes[run] | (high_codes[run] << {}u))", coded.low.bits);
+    }
+    Some(format!(
+        "\nstatic inline void {function}(device const uchar *block, uint slot, thread half *out) {{\n{head}{body}    for (uint run = 0u; run < {run}u; ++run) {{\n        float raw = {name}_code({code});\n        out[run] = (half)(raw * {scale});\n    }}\n}}\n"
     ))
 }
 
