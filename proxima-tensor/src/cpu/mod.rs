@@ -182,7 +182,7 @@ use half::{bf16, f16};
 // float types.
 use proxima_gguf::quant::{
     bf16 as gguf_bf16, f16 as gguf_f16, iq2_xs, iq3_s, iq3_xxs, iq4_nl, iq4_xs, pq2_0, ptq1_0,
-    q1_0, q2_0, q2_k, q3_k, q4_0, q4_k, q5_0, q5_1, q5_k, q6_k, q8_0,
+    q1_0, q2_0, q2_k, q3_k, q4_k, q5_1, q5_k, q6_k, q8_0,
 };
 
 use crate::bind::{

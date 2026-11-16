@@ -2088,19 +2088,10 @@ impl<'a> QuantizedBlock<'a> {
         }
     }
 
-    /// Element count this block decodes to, derived from its own codec's
-    /// block geometry -- [`proxima_gguf::quant`]'s per-format
-    /// `blocks_for_bytes`/`elements_for_blocks` pair, never `bytes.len()`
-    /// directly (a `Q4_K` super-block is 144 bytes carrying 256 elements;
-    /// bytes and elements are not the same unit). The one definition every
-    /// caller that needs "how many f32 elements does this packed buffer
-    /// decode to" composes down to, instead of restating this per-codec
-    /// table itself. Keyed on `codec`, not the removed per-codec variants --
-    /// each module's own `blocks_for_bytes`/`elements_for_blocks` pair has
-    /// no uniform signature across codecs (f16/bf16 have no
-    /// `elements_for_blocks` at all, a block already being one element
-    /// wide), so this stays a per-codec match rather than a shared function
-    /// pointer table.
+    /// Element count this block decodes to, from its codec's own packing: [`Codec::element_count`]
+    /// over the byte length (a `Q4_K` super-block is 144 bytes carrying 256 elements, so bytes are
+    /// never the count). The one definition every caller asking how many elements a packed buffer
+    /// decodes to composes down to.
     ///
     /// # Errors
     /// [`TensorError::PackedBlockBytesNotAMultiple`] if a
@@ -2108,9 +2099,9 @@ impl<'a> QuantizedBlock<'a> {
     /// its codec's block size -- never legitimate GGUF, only ever corrupt,
     /// truncated, or misattributed bytes.
     pub fn element_count(&self) -> Result<usize, TensorError> {
-        let (codec_name, bytes, block_bytes, blocks) = match self {
-            QuantizedBlock::Float32(data) => return Ok(data.len()),
-            QuantizedBlock::Int32(data) => return Ok(data.len()),
+        match self {
+            QuantizedBlock::Float32(data) => Ok(data.len()),
+            QuantizedBlock::Int32(data) => Ok(data.len()),
             QuantizedBlock::PackedStrided {
                 codec,
                 bytes,
@@ -2122,188 +2113,20 @@ impl<'a> QuantizedBlock<'a> {
                     codec: *codec,
                     bytes: &bytes[..(*expert_bytes).min(bytes.len())],
                 };
-                return Ok(run.element_count()? * runs);
+                Ok(run.element_count()? * runs)
             }
-            QuantizedBlock::Packed { codec, bytes } => match *codec {
-                Codec::Q4K => (
-                    "q4_k",
-                    bytes.len(),
-                    q4_k::BLOCK_BYTES,
-                    q4_k::blocks_for_bytes(bytes.len()).map(q4_k::elements_for_blocks),
-                ),
-                Codec::Q5K => (
-                    "q5_k",
-                    bytes.len(),
-                    q5_k::BLOCK_BYTES,
-                    q5_k::blocks_for_bytes(bytes.len()).map(q5_k::elements_for_blocks),
-                ),
-                Codec::Q3K => (
-                    "q3_k",
-                    bytes.len(),
-                    q3_k::BLOCK_BYTES,
-                    q3_k::blocks_for_bytes(bytes.len()).map(q3_k::elements_for_blocks),
-                ),
-                Codec::Q2K => (
-                    "q2_k",
-                    bytes.len(),
-                    q2_k::BLOCK_BYTES,
-                    q2_k::blocks_for_bytes(bytes.len()).map(q2_k::elements_for_blocks),
-                ),
-                Codec::Q6K => (
-                    "q6_k",
-                    bytes.len(),
-                    q6_k::BLOCK_BYTES,
-                    q6_k::blocks_for_bytes(bytes.len()).map(q6_k::elements_for_blocks),
-                ),
-                Codec::Q8_0 => (
-                    "q8_0",
-                    bytes.len(),
-                    q8_0::BLOCK_BYTES,
-                    q8_0::blocks_for_bytes(bytes.len()).map(q8_0::elements_for_blocks),
-                ),
-                Codec::Q4_0 => (
-                    "q4_0",
-                    bytes.len(),
-                    q4_0::BLOCK_BYTES,
-                    q4_0::blocks_for_bytes(bytes.len()).map(q4_0::elements_for_blocks),
-                ),
-                Codec::Q5_1 => (
-                    "q5_1",
-                    bytes.len(),
-                    q5_1::BLOCK_BYTES,
-                    q5_1::blocks_for_bytes(bytes.len()).map(q5_1::elements_for_blocks),
-                ),
-                Codec::Q5_0 => (
-                    "q5_0",
-                    bytes.len(),
-                    q5_0::BLOCK_BYTES,
-                    q5_0::blocks_for_bytes(bytes.len()).map(q5_0::elements_for_blocks),
-                ),
-                Codec::Iq4Nl => (
-                    "iq4_nl",
-                    bytes.len(),
-                    iq4_nl::BLOCK_BYTES,
-                    iq4_nl::blocks_for_bytes(bytes.len()).map(iq4_nl::elements_for_blocks),
-                ),
-                Codec::Iq2Xs => (
-                    "iq2_xs",
-                    bytes.len(),
-                    iq2_xs::BLOCK_BYTES,
-                    iq2_xs::blocks_for_bytes(bytes.len()).map(iq2_xs::elements_for_blocks),
-                ),
-                Codec::Iq3Xxs => (
-                    "iq3_xxs",
-                    bytes.len(),
-                    iq3_xxs::BLOCK_BYTES,
-                    iq3_xxs::blocks_for_bytes(bytes.len()).map(iq3_xxs::elements_for_blocks),
-                ),
-                Codec::Iq3S => (
-                    "iq3_s",
-                    bytes.len(),
-                    iq3_s::BLOCK_BYTES,
-                    iq3_s::blocks_for_bytes(bytes.len()).map(iq3_s::elements_for_blocks),
-                ),
-                Codec::Iq4Xs => (
-                    "iq4_xs",
-                    bytes.len(),
-                    iq4_xs::BLOCK_BYTES,
-                    iq4_xs::blocks_for_bytes(bytes.len()).map(iq4_xs::elements_for_blocks),
-                ),
-                // f16/bf16 blocks and scalar bf8 bytes each hold one element,
-                // so their storage-unit count is already the element count.
-                Codec::Float16 => (
-                    "float16",
-                    bytes.len(),
-                    gguf_f16::BLOCK_BYTES,
-                    gguf_f16::blocks_for_bytes(bytes.len()),
-                ),
-                Codec::BFloat16 => (
-                    "bfloat16",
-                    bytes.len(),
-                    gguf_bf16::BLOCK_BYTES,
-                    gguf_bf16::blocks_for_bytes(bytes.len()),
-                ),
-                Codec::Fp6E3M2 => (
-                    "fp6_e3m2",
-                    bytes.len(),
-                    scaled_float::BLOCK_BYTES,
-                    bytes
-                        .len()
-                        .is_multiple_of(scaled_float::BLOCK_BYTES)
-                        .then(|| {
-                            bytes.len() / scaled_float::BLOCK_BYTES * scaled_float::BLOCK_ELEMENTS
-                        }),
-                ),
-                Codec::Q1_0 => (
-                    "q1_0",
-                    bytes.len(),
-                    q1_0::BLOCK_BYTES,
-                    whole_blocks(bytes.len(), q1_0::BLOCK_BYTES, q1_0::QK_Q1_0),
-                ),
-                Codec::Q2_0 => (
-                    "q2_0",
-                    bytes.len(),
-                    q2_0::BLOCK_BYTES,
-                    whole_blocks(bytes.len(), q2_0::BLOCK_BYTES, q2_0::QK_Q2_0),
-                ),
-                Codec::Pq2_0 => (
-                    "pq2_0",
-                    bytes.len(),
-                    pq2_0::BLOCK_BYTES,
-                    whole_blocks(bytes.len(), pq2_0::BLOCK_BYTES, pq2_0::QK_PQ2_0),
-                ),
-                Codec::Ptq1_0 => (
-                    "ptq1_0",
-                    bytes.len(),
-                    ptq1_0::BLOCK_BYTES,
-                    whole_blocks(bytes.len(), ptq1_0::BLOCK_BYTES, ptq1_0::QK_PTQ1_0),
-                ),
-                Codec::BFloat8 => ("bfloat8", bytes.len(), 1, Some(bytes.len())),
-                Codec::Bf8E5M2 => ("bf8_e5m2", bytes.len(), 1, Some(bytes.len())),
-                Codec::Bf4E2M1 => ("bf4_e2m1", bytes.len(), 1, Some(bytes.len() * 2)),
-                // an unnamed scalar split counts by its own description: `packed_elements`
-                // codes per `packed_bytes` storage unit, as the flat Metal accessor addresses it
-                other @ Codec::Scalar(_) if other.packed_bytes() != 0 => (
-                    codec_name_for_error(other),
-                    bytes.len(),
-                    usize::from(other.packed_bytes()),
-                    whole_blocks(
-                        bytes.len(),
-                        usize::from(other.packed_bytes()),
-                        usize::from(other.packed_elements()),
-                    ),
-                ),
-                // No packed-block construction site (`gguf_tensor_as_packed_block`/
-                // `as_block` in `proxima-model-interop`) ever produces a
-                // `Packed` carrying one of these 15 undecodable codecs -- see
-                // this type's own doc.
-                other => {
-                    return Err(TensorError::PackedBlockBytesNotAMultiple {
-                        codec: codec_name_for_error(other),
-                        bytes: bytes.len(),
-                        block_bytes: 0,
-                    });
-                }
-            },
-        };
-        blocks.ok_or(TensorError::PackedBlockBytesNotAMultiple {
-            codec: codec_name,
-            bytes,
-            block_bytes,
-        })
+            QuantizedBlock::Packed { codec, bytes } => {
+                codec.element_count(bytes.len()).ok_or(TensorError::PackedBlockBytesNotAMultiple {
+                    codec: codec_name_for_error(*codec),
+                    bytes: bytes.len(),
+                    block_bytes: usize::from(codec.packed_bytes()),
+                })
+            }
+        }
     }
 }
 
-fn whole_blocks(byte_len: usize, block_bytes: usize, block_elements: usize) -> Option<usize> {
-    byte_len
-        .is_multiple_of(block_bytes)
-        .then(|| byte_len / block_bytes * block_elements)
-}
-
-/// A stable diagnostic name for a [`Codec`] this crate never packs into a
-/// [`QuantizedBlock::Packed`] -- reached only if [`QuantizedBlock::element_count`]
-/// is ever called on a block a caller assembled by hand from a codec outside
-/// this crate's own construction sites, never through normal GGUF loading.
+/// The codec's name for error text, `"unnamed"` for a layout the format table does not name.
 fn codec_name_for_error(codec: Codec) -> &'static str {
     match codec.name() {
         Some(name) => name,

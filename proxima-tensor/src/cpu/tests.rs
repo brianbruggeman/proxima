@@ -13,6 +13,7 @@ use core::slice;
 use crate::bind::{bind, bind_without_reduce_epilogue_fusion};
 use crate::test_support::{Lcg, WidenedSumOfSquares};
 use proptest::proptest;
+use proxima_gguf::quant::q4_0;
 use proxima_primitives::block_on as block_on_pipe;
 use proxima_primitives::pipe::Pipe as PipeCall;
 
