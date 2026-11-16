@@ -134,7 +134,9 @@ fn elementwise_tanh_2d() -> BoundOp {
 
 /// The F16 projection stands for the cooperative reduce; F16 has a tiled
 /// decode description now, so [`every_flat_form_kernel_compiles_with_the_metal_toolchain`]
-/// keeps it off the tiled GEMM with `PROXIMA_TILED_GEMM_DISABLE=f16`.
+/// keeps it off the packed tiled GEMM with `PROXIMA_TILED_GEMM_DISABLE=f16`
+/// and off the dense tiled GEMM with `PROXIMA_TILED_GEMM_DENSE=0`, scoped to
+/// this emit so the dense batched-scores fixture keeps the dense flat form.
 fn per_layer_projection() -> (BoundOp, BTreeMap<NodeId, Codec>) {
     let mut program = Vec::new();
     let weights = input(&mut program, DType::FLOAT16, &[8960, 1536]);
@@ -495,12 +497,14 @@ fn flat_kernels() -> Vec<(&'static str, Kernel)> {
         ),
         (
             "cooperative reduce",
-            emit_flat(
-                "cooperative reduce",
-                &projection,
-                &projection_codecs,
-                NumericPolicy::llama_relaxed(),
-            ),
+            temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", Some("0"), || {
+                emit_flat(
+                    "cooperative reduce",
+                    &projection,
+                    &projection_codecs,
+                    NumericPolicy::llama_relaxed(),
+                )
+            }),
         ),
         (
             "serial reduce",

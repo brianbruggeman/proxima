@@ -11,7 +11,8 @@
 //!
 //! The F16 weight has a tiled decode description, so at these row counts it
 //! takes the tiled GEMM by default, whose grid (tiles, not lanes) never nears
-//! `2^32` threads. `PROXIMA_TILED_GEMM_DISABLE=f16` keeps the projection on the
+//! `2^32` threads. `PROXIMA_TILED_GEMM_DISABLE=f16` with
+//! `PROXIMA_TILED_GEMM_DENSE=0` keeps the projection off both tiled GEMMs, on the
 //! cooperative kernel whose wide grid this regression guards; each row count
 //! also runs on the tiled GEMM, where the same three checks must hold.
 //!
@@ -114,18 +115,25 @@ fn run_on_metal(
         },
         QuantizedBlock::Float32(activations),
     ];
-    temp_env::with_var("PROXIMA_TILED_GEMM_DISABLE", disabled_tiled, || {
-        omega::execute(
-            &program,
-            &[],
-            &blocks,
-            &[sum],
-            NumericPolicy::llama_relaxed(),
-        )
-        .expect("metal executes the per-layer projection")
-        .root()
-        .to_vec()
-    })
+    let dense = disabled_tiled.map(|_| "0");
+    temp_env::with_vars(
+        [
+            ("PROXIMA_TILED_GEMM_DISABLE", disabled_tiled),
+            ("PROXIMA_TILED_GEMM_DENSE", dense),
+        ],
+        || {
+            omega::execute(
+                &program,
+                &[],
+                &blocks,
+                &[sum],
+                NumericPolicy::llama_relaxed(),
+            )
+            .expect("metal executes the per-layer projection")
+            .root()
+            .to_vec()
+        },
+    )
 }
 
 fn run_on_cpu(rows: u32, activations: &[f32], dequantized_weights: &[f32]) -> Vec<f32> {
