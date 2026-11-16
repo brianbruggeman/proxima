@@ -52,6 +52,11 @@ pub(super) struct FlatLaunch {
     pub(super) weight: usize,
     pub(super) other: usize,
     pub(super) other_stride_is_one: bool,
+    /// `Some` renders the lane-run body under `Fold::ScaleEachTerm`: `sumq += code * act` over a
+    /// lane's run, then `sumf += sumq * d` once per run. That reassociates the scale and the block
+    /// sum, so the numeric policy gate belongs to the selecting slice. `None` is the
+    /// one-block-per-lane body every existing identity is keyed on.
+    pub(super) lane_run: Option<LaneRun>,
 }
 
 /// How a block's codes are read: the whole-byte run Q8_0 stores, or the bit planes any other
@@ -215,12 +220,57 @@ impl FlatBlockForm {
         match (fold, self.read) {
             (Fold::Plain, CodeRead::Scalar { element }) => Ok(self.scalar_run_msl(launch, reduction_bound, element_type, element)),
             (Fold::Plain, _) => Err(SubBlockMatvecRefusal("a plain fold needs an unscaled scalar read")),
+            (Fold::ScaleEachTerm, CodeRead::ByteRun { codes, signed }) if launch.lane_run.is_some() => {
+                self.run_msl(launch, reduction_bound, element_type, codes, signed)
+            }
+            (Fold::ScaleEachTerm, _) if launch.lane_run.is_some() => Err(SubBlockMatvecRefusal("a lane run needs a whole-byte code read")),
             (Fold::ScaleEachTerm, _) => self.block_msl(launch, reduction_bound, element_type, fold),
         }
     }
 
+    fn run_msl(&self, launch: &FlatLaunch, reduction_bound: &str, element_type: &str, codes: ByteCodes, signed: bool) -> Result<String, SubBlockMatvecRefusal> {
+        let FlatLaunch { rows, lanes, simdgroups, weight, other, other_stride_is_one, lane_run } = *launch;
+        let run = lane_run.ok_or(SubBlockMatvecRefusal("a run fold needs a lane run"))?;
+        let (elements, block_bytes) = (self.elements, self.block_bytes);
+        require(run.elements * run.lanes_per_block == elements && run.lane_stride == run.elements, "a lane run of consecutive elements")?;
+        require(run.run_bytes == run.elements && lanes.is_multiple_of(run.lanes_per_block), "one byte per code and whole lanes per block")?;
+        let (per_block, run_elements) = (run.lanes_per_block, run.elements);
+        let sweep = lanes / per_block;
+        let step = sweep * simdgroups;
+        let cast = if signed { "char" } else { "uchar" };
+        let acts_stride = if other_stride_is_one { String::new() } else { String::from(" * other_stride") };
+        let first = if simdgroups > 1 { format!("(int)(lane / {per_block}u + sgitg * {sweep}u)") } else { format!("(int)(lane / {per_block}u)") };
+        let mut source = String::new();
+        source.push_str(&format!("    int blocks = (int){reduction_bound} / {elements};\n"));
+        source.push_str(&format!("    int ib_first = {first};\n    int il = (int)(lane % {per_block}u);\n    int ib_step = {step};\n"));
+        source.push_str(&format!("    long blk_step = (long)ib_step * {block_bytes};\n"));
+        source.push_str(&format!("    device const uchar *blk_ptr[{rows}];\n"));
+        source.push_str(&format!(
+            "    for (int q = 0; q < {rows}; ++q) {{\n        blk_ptr[q] = in{weight} + ((long)((int)weight_base[q] / {elements}) + (long)ib_first) * {block_bytes};\n    }}\n"
+        ));
+        source.push_str(&format!("    {element_type} acts[{run_elements}];\n"));
+        source.push_str(&format!("    long acts_step = (long)ib_step * {elements}{acts_stride};\n"));
+        source.push_str(&format!(
+            "    device const {element_type} *acts_row = in{other} + other_base[0] + ((long)ib_first * {elements} + (long)il * {run_elements}){acts_stride};\n"
+        ));
+        source.push_str("    for (int ib = ib_first; ib < blocks; ib += ib_step) {\n");
+        source.push_str(&format!("        for (int j = 0; j < {run_elements}; ++j) {{\n"));
+        source.push_str(if other_stride_is_one { "            acts[j] = acts_row[j];\n" } else { "            acts[j] = acts_row[(long)j * other_stride];\n" });
+        source.push_str("        }\n");
+        source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{\n            device const uchar *blk = blk_ptr[q];\n"));
+        source.push_str(&format!(
+            "            float d = {};\n            device const uchar *{levels} = blk + {base} + il * {run_elements};\n            float sumq = 0.0f;\n            for (uint j = 0u; j < {run_elements}u; ++j) {{\n                sumq += (float)(({cast}){levels}[j]) * acts[j];\n            }}\n            sumf[q] = sumf[q] + sumq * d;\n        }}\n",
+            self.scale_read,
+            levels = FLAT_BLOCK_LEVELS_MARKER,
+            base = codes.base_byte,
+        ));
+        source.push_str(&format!("        for (int q = 0; q < {rows}; ++q) {{ blk_ptr[q] += blk_step; }}\n"));
+        source.push_str("        acts_row += acts_step;\n    }\n");
+        Ok(source)
+    }
+
     fn scalar_run_msl(&self, launch: &FlatLaunch, reduction_bound: &str, element_type: &str, pointer_type: &str) -> String {
-        let FlatLaunch { rows, lanes, simdgroups, weight, other, other_stride_is_one } = *launch;
+        let FlatLaunch { rows, lanes, simdgroups, weight, other, other_stride_is_one, .. } = *launch;
         let run = self.elements;
         let mut source = String::new();
         source.push_str(&format!("    int blocks = (int){reduction_bound} / {run};\n"));
@@ -248,7 +298,7 @@ impl FlatBlockForm {
     }
 
     fn block_msl(&self, launch: &FlatLaunch, reduction_bound: &str, element_type: &str, fold: Fold) -> Result<String, SubBlockMatvecRefusal> {
-        let FlatLaunch { rows, lanes, simdgroups, weight, other, other_stride_is_one } = *launch;
+        let FlatLaunch { rows, lanes, simdgroups, weight, other, other_stride_is_one, .. } = *launch;
         let (elements, block_bytes) = (self.elements, self.block_bytes);
         let mut source = String::new();
         source.push_str(&format!("    int blocks = (int){reduction_bound} / {elements};\n"));
@@ -408,7 +458,7 @@ mod tests {
         FlatBlockForm::plan(layout)
             .expect("the layout has a flat-block form")
             .matvec_msl(
-                &FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true },
+                &FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true, lane_run: None },
                 "u.reduction_total",
                 "float",
                 Fold::ScaleEachTerm,
@@ -463,7 +513,7 @@ mod tests {
         FlatBlockForm::plan_planes(layout)
             .expect("the layout has a plane-read form")
             .matvec_msl(
-                &FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true },
+                &FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true, lane_run: None },
                 "u.reduction_total",
                 "float",
                 Fold::ScaleEachTerm,
@@ -587,7 +637,7 @@ mod tests {
         FlatBlockForm::plan_scalar(layout, 8)
             .expect("an eight-element run of a 16-bit float is whole bytes")
             .matvec_msl(
-                &FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true },
+                &FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true, lane_run: None },
                 "u.reduction_total",
                 "float",
                 Fold::Plain,
@@ -619,7 +669,7 @@ mod tests {
     }
 
     fn split_launch(simdgroups: usize) -> FlatLaunch {
-        FlatLaunch { rows: 2, lanes: 32, simdgroups, weight: 0, other: 1, other_stride_is_one: true }
+        FlatLaunch { rows: 2, lanes: 32, simdgroups, weight: 0, other: 1, other_stride_is_one: true, lane_run: None }
     }
 
     #[test]
@@ -660,7 +710,7 @@ mod tests {
 
     #[test]
     fn a_fold_the_read_has_no_meaning_under_is_refused() {
-        let launch = FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true };
+        let launch = FlatLaunch { rows: 4, lanes: 32, simdgroups: 1, weight: 0, other: 1, other_stride_is_one: true, lane_run: None };
         let scalar = FlatBlockForm::plan_scalar(FloatLayout::F16, 8).expect("f16 run");
         assert!(scalar.matvec_msl(&launch, "u.reduction_total", "float", Fold::ScaleEachTerm).is_err());
         let scaled = FlatBlockForm::plan(&BlockLayout::Q8_0).expect("q8_0 form");
@@ -694,6 +744,124 @@ mod tests {
         let expected = [1.0f32, -2.0, (1.0 + 43.0 / 128.0) * 0.25];
         let bits = |row: &[f32]| row.iter().map(|value| value.to_bits()).collect::<Vec<_>>();
         assert_eq!(bits(&values), bits(&expected));
+    }
+
+    fn run_launch(simdgroups: usize, run: Option<LaneRun>) -> FlatLaunch {
+        FlatLaunch { rows: 4, lanes: 32, simdgroups, weight: 0, other: 1, other_stride_is_one: true, lane_run: run }
+    }
+
+    fn render_run(simdgroups: usize) -> String {
+        temp_env::with_var("PROXIMA_PACKED_LANE_RUN_BYTES", Some("8"), || {
+            let run = LaneRun::derive(&BlockLayout::Q8_0, crate::msl::lane_run_bytes());
+            FlatBlockForm::plan(&BlockLayout::Q8_0)
+                .expect("q8_0 form")
+                .matvec_msl(&run_launch(simdgroups, run), "u.reduction_total", "float", Fold::ScaleEachTerm)
+                .expect("a byte-code lane run renders under the run fold")
+        })
+    }
+
+    #[test]
+    fn q8_0_run_body_loads_eight_activations_and_scales_once_per_run() {
+        let source = render_run(1);
+        for needle in [
+            "int ib_first = (int)(lane / 4u);",
+            "int il = (int)(lane % 4u);",
+            "int ib_step = 8;",
+            "float acts[8];",
+            "long acts_step = (long)ib_step * 32;",
+            "((long)ib_first * 32 + (long)il * 8)",
+            "device const uchar *flat_block_levels = blk + 2 + il * 8;",
+            "sumq += (float)((char)flat_block_levels[j]) * acts[j];",
+            "sumf[q] = sumf[q] + sumq * d;",
+        ] {
+            assert!(source.contains(needle), "`{needle}` missing from\n{source}");
+        }
+        assert!(!source.contains("float acts[32]") && !source.contains("result += d *"), "{source}");
+    }
+
+    #[test]
+    fn q8_0_run_body_offsets_the_walk_by_sgitg_per_simdgroup() {
+        let source = render_run(2);
+        assert!(source.contains("int ib_first = (int)(lane / 4u + sgitg * 8u);"), "{source}");
+        assert!(source.contains("int ib_step = 16;"), "{source}");
+    }
+
+    #[test]
+    fn a_lane_run_on_a_plane_read_or_a_run_that_is_not_consecutive_is_refused() {
+        let run = LaneRun::derive(&BlockLayout::Q8_0, 8);
+        let planes = FlatBlockForm::plan_planes(&BlockLayout::Q5_0).expect("q5_0 plane form");
+        assert!(planes.matvec_msl(&run_launch(1, run), "u.reduction_total", "float", Fold::ScaleEachTerm).is_err());
+        let nibble_run = LaneRun::derive(&BlockLayout::Q4_0, 8);
+        let bytes = FlatBlockForm::plan(&BlockLayout::Q8_0).expect("q8_0 form");
+        assert!(bytes.matvec_msl(&run_launch(1, nibble_run), "u.reduction_total", "float", Fold::ScaleEachTerm).is_err());
+    }
+
+    #[test]
+    fn knob_at_zero_renders_exactly_the_one_block_per_lane_body() {
+        let source = temp_env::with_var("PROXIMA_PACKED_LANE_RUN_BYTES", Some("0"), || {
+            let run = LaneRun::derive(&BlockLayout::Q8_0, crate::msl::lane_run_bytes());
+            assert_eq!(run, None, "a zero run is the switch being off");
+            FlatBlockForm::plan(&BlockLayout::Q8_0)
+                .expect("q8_0 form")
+                .matvec_msl(&run_launch(1, run), "u.reduction_total", "float", Fold::ScaleEachTerm)
+                .expect("q8_0 renders under the scale fold")
+        });
+        assert_eq!(source, Q8_0_BODY);
+    }
+
+    /// Worked example (algorithm-development, derived by hand before the renderer was written).
+    ///
+    /// One Q8_0 row, K = 64, two 34-byte blocks. Block 0: d = 0.5, codes q_j = j - 16. Block 1:
+    /// d = 0.25, codes q_j = 15 - j. Activations y_k = (k mod 4) - 1, so every run of 8 sees
+    /// -1, 0, 1, 2, -1, 0, 1, 2. Everything is a small integer or a dyadic, exact in f32.
+    ///
+    /// Plain dot product: block 0 = 0.5 * (-40 - 8 + 24 + 56) = 16; block 1 = 0.25 * (36 + 4 - 28 - 60) = -12; total 4.
+    ///
+    /// Lane l owns block l/4, code bytes 8*(l%4)..+8 (blk + 2 + il*8) and y[32*block + 8*il ..+8]:
+    ///
+    /// | lane | block | q values | sumq = sum q*y | d | sumf = sumq*d |
+    /// |---|---|---|---|---|---|
+    /// | 0 | 0 | -16..-9 | 16+0-14-26+12+0-10-18 = -40 | 0.5 | -20 |
+    /// | 1 | 0 | -8..-1 | 8+0-6-10+4+0-2-2 = -8 | 0.5 | -4 |
+    /// | 2 | 0 | 0..7 | 0+0+2+6-4+0+6+14 = 24 | 0.5 | 12 |
+    /// | 3 | 0 | 8..15 | -8+0+10+22-12+0+14+30 = 56 | 0.5 | 28 |
+    /// | 4 | 1 | 15..8 | -15+0+13+24-11+0+9+16 = 36 | 0.25 | 9 |
+    /// | 5 | 1 | 7..0 | -7+0+5+8-3+0+1+0 = 4 | 0.25 | 1 |
+    /// | 6 | 1 | -1..-8 | 1+0-3-8+5+0-7-16 = -28 | 0.25 | -7 |
+    /// | 7 | 1 | -9..-16 | 9+0-11-24+13+0-15-32 = -60 | 0.25 | -15 |
+    ///
+    /// Sum of the 8 lanes: (-20 - 4 + 12 + 28) + (9 + 1 - 7 - 15) = 16 + (-12) = 4, equal to the
+    /// dot product. Lanes 8..31 start at block >= 2 and own nothing. No MSL interpreter exists in
+    /// this tree, so this simulates the index arithmetic the rendered constants name (`lane / 4`,
+    /// `lane % 4`, `blk + 2 + il * 8`, `ib_first * 32 + il * 8`) from the derived `LaneRun`.
+    #[test]
+    fn q8_0_run_worked_example_eight_lane_partials_sum_to_the_hand_derived_dot_product() {
+        let run = LaneRun::derive(&BlockLayout::Q8_0, 8).expect("q8_0 derives a run of 8 bytes");
+        let (block_bytes, elements, code_base) = (34usize, 32usize, 2usize);
+        let mut row = Vec::new();
+        for (scale_bits, code_of) in [(0x3800u16, (|index: i32| index - 16) as fn(i32) -> i32), (0x3400u16, |index: i32| 15 - index)] {
+            row.extend_from_slice(&scale_bits.to_le_bytes());
+            row.extend((0..32).map(|index| code_of(index) as i8 as u8));
+        }
+        assert_eq!(row.len(), 2 * block_bytes);
+        let acts: Vec<f32> = (0..64).map(|index| (index % 4) as f32 - 1.0).collect();
+        let scale_of = |block: usize| if block == 0 { 0.5f32 } else { 0.25f32 };
+        let blocks = 2usize;
+        let sweep = 32 / run.lanes_per_block;
+        let partials: Vec<f32> = (0..32usize)
+            .map(|lane| {
+                let (first, lane_in_block) = (lane / run.lanes_per_block, lane % run.lanes_per_block);
+                (first..blocks).step_by(sweep).map(|block| {
+                    let codes = &row[block * block_bytes + code_base + lane_in_block * run.elements..][..run.elements];
+                    let window = &acts[block * elements + lane_in_block * run.elements..][..run.elements];
+                    let sumq: f32 = codes.iter().zip(window).map(|(&code, &act)| f32::from(code as i8) * act).sum();
+                    sumq * scale_of(block)
+                }).sum()
+            })
+            .collect();
+        assert_eq!(&partials[..8], &[-20.0, -4.0, 12.0, 28.0, 9.0, 1.0, -7.0, -15.0]);
+        assert!(partials[8..].iter().all(|&partial| partial == 0.0), "lanes past the last block own nothing");
+        assert_eq!(partials.iter().sum::<f32>(), 4.0);
     }
 
     #[test]

@@ -357,6 +357,7 @@ pub(super) fn push_packed_row_blocked_body(
                 weight,
                 other,
                 other_stride_is_one,
+                lane_run: None,
             };
             source.push_str(
                 &form
@@ -394,6 +395,7 @@ pub(super) fn push_packed_row_blocked_body(
                 weight,
                 other,
                 other_stride_is_one,
+                lane_run: None,
             };
             source.push_str(&form.matvec_msl(&launch, &reduction_bound, element_type, fold).map_err(refused)?);
         } else if packed_body == PackedBodySelect::LevelsRendered {

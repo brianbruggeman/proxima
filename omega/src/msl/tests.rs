@@ -11218,12 +11218,14 @@ fn dense_bf16_weight_read_parenthesizes_the_compound_offset() {
     let operands = bound.operands();
     let packed = BTreeMap::from([(operands[0].0, Codec::BFloat16)]);
 
-    let kernel = emit(
-        &bound,
-        &packed,
-        NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
-    )
-    .expect("bf16 dense weight emits");
+    let kernel = temp_env::with_var("PROXIMA_TILED_GEMM_DENSE", None::<&str>, || {
+        emit(
+            &bound,
+            &packed,
+            NumericPolicy::llama_relaxed().with_bf16_input_rounding(true),
+        )
+        .expect("bf16 dense weight emits")
+    });
 
     assert!(
         kernel.source.contains("as_type<bfloat>(ushort("),
