@@ -195,6 +195,11 @@ impl LoadedModel<'_> {
         let Some(_slot) = self.prewarm_gate.try_begin() else {
             return Ok(PrewarmReport::idle(Some(PrewarmSkip::Busy), false));
         };
+        // the gate serializes this model's evaluations; the context puts its buffers and mapping on this thread, so a prewarm leaves nothing in the thread's ambient cache
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut serving = proxima_primitives::driver::block_on(self.serving.lock());
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let _active = serving.metal_mut().activate();
         if self.prewarm_gate.request_waiting() {
             return Ok(PrewarmReport::idle(None, true));
         }

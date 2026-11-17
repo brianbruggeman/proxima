@@ -148,4 +148,108 @@ mod tests {
             fixture.len()
         );
     }
+
+    fn cached_gpu_config(follow_up_branches: u32) -> ServingConfig<'static> {
+        let mut prompt_cache = PromptCacheConfig::standard();
+        prompt_cache.follow_up_branches = follow_up_branches;
+        prompt_cache.follow_up_max_tokens = 2;
+        ServingConfig {
+            gpu_layers: GPU_LAYERS_ALL,
+            prompt_cache,
+            ..ServingConfig::default()
+        }
+    }
+
+    /// bytes the thread copied and weights it bound by offset while `work` ran on it.
+    fn on_new_thread<Output: Send>(work: impl FnOnce() -> Output + Send) -> (Output, u64, u64) {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let offsets_before = MAPPING_OFFSET_UPLOADS.get();
+                    let copied_before = BLOCK_COPIED_BYTES.get();
+                    let output = work();
+                    (
+                        output,
+                        MAPPING_OFFSET_UPLOADS.get() - offsets_before,
+                        BLOCK_COPIED_BYTES.get() - copied_before,
+                    )
+                })
+                .join()
+                .expect("the worker thread did not panic")
+        })
+    }
+
+    fn assert_bound_by_offset(role: &str, offset_uploads: u64, copied_bytes: u64, checkpoint_len: usize) {
+        assert!(offset_uploads > 0, "{role} bound no weight by mapping offset: {offset_uploads}");
+        assert!(
+            (copied_bytes as usize) < checkpoint_len,
+            "{role} copied {copied_bytes} bytes against a {checkpoint_len} byte checkpoint: the weights were copied"
+        );
+    }
+
+    /// a prewarm on a thread that never loaded the model evaluates inside the
+    /// model's context, and a request on yet another thread follows it
+    /// without rebinding a resident name or copying the weights.
+    #[test]
+    fn a_prewarm_then_a_request_on_other_threads_bind_by_offset_and_do_not_collide() {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads on thread A");
+        let config = cached_gpu_config(0);
+
+        let (report, prewarm_offsets, prewarm_copied) = on_new_thread(|| {
+            model.prewarm(&PROMPT, &config).expect("the prewarm runs on thread B")
+        });
+        let (generated, request_offsets, request_copied) = on_new_thread(|| {
+            model
+                .generate_from_ids(&PROMPT, 3, &config, &mut |_| ControlFlow::Continue(()))
+                .expect("the request runs on thread C after the prewarm")
+        });
+
+        assert!(report.prefilled_tokens > 0, "the prewarm prefilled nothing: {report:?}");
+        assert!(!generated.0.is_empty(), "the request generated nothing");
+        assert_bound_by_offset("the prewarm thread", prewarm_offsets, prewarm_copied, fixture.len());
+        // the prewarm already bound every weight into the shared context, so the request finds them resident and uploads none
+        assert_eq!(request_offsets, 0, "the request re-bound weights the prewarm had already made resident");
+        assert!(
+            (request_copied as usize) < fixture.len(),
+            "the request thread copied {request_copied} bytes against a {} byte checkpoint",
+            fixture.len()
+        );
+    }
+
+    /// the follow-up branch drafts and their restoring prefill run inside the
+    /// model's context on a thread that never loaded it.
+    #[test]
+    fn follow_up_branches_on_a_thread_that_did_not_load_the_model_bind_by_offset() {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads on thread A");
+        let config = cached_gpu_config(1);
+        model.set_follow_up_closing(&[5, 60]);
+
+        model
+            .generate_from_ids(&PROMPT, 3, &config, &mut |_| ControlFlow::Continue(()))
+            .expect("the opening request stores the answer entry");
+        let (branches, offsets, copied) = on_new_thread(|| {
+            model
+                .prewarm_follow_ups(&PROMPT, &config)
+                .expect("the follow-up prewarm runs on thread B")
+        });
+
+        let _ = branches;
+        // the opening request left every weight resident in the shared context, so the follow-up uploads none and copies none
+        assert_eq!(offsets, 0, "the follow-up re-bound weights the opening request had made resident");
+        assert!(
+            (copied as usize) < fixture.len(),
+            "the follow-up thread copied {copied} bytes against a {} byte checkpoint",
+            fixture.len()
+        );
+    }
 }
