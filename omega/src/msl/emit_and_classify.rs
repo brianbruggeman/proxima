@@ -4944,8 +4944,7 @@ pub(super) fn classify_dense_batched_gemm(
         }
         if quantized.iter().any(|codec| match codec {
             None => false,
-            Some(Codec::Float16 | Codec::BFloat16) => false,
-            Some(_) => true,
+            Some(codec) => layout_render::one_element_float_layout(codec).is_none(),
         }) {
             return Err(DenseBatchedGemmRejection::OperandIsPacked);
         }

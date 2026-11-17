@@ -1356,6 +1356,193 @@ pub(super) fn push_tiled_gemm_body(
     Err(EmitError::TiledGemmFeatureDisabled { node })
 }
 
+/// How a dense weight operand's contiguous K run is read as 16-byte vectors and decoded from its
+/// element codes in registers. The plan is derived from the operand's numeric description: a
+/// codec that is one element per block with a [`FloatLayout`] whose width is a whole number of
+/// bytes dividing 32 bits reads and decodes through [`layout_render::layout_load_msl`], the
+/// renderer the K/V cache reads use; unpacked binary32 is that same path on `FloatLayout::F32`.
+/// No format is named here, so a codec joins by having such a description, not by a list row.
+#[cfg(feature = "metal-tiled-gemm")]
+struct WideRunPlan {
+    /// Bytes of one element's code: the layout's width over eight.
+    element_bytes: u64,
+    /// Elements one thread loads: [`DECODE_RUN_ELEMENTS`], as `llama.cpp`'s `kernel_mul_mm` does.
+    run: u64,
+    /// Threads sharing one weight row.
+    threads_per_row: u64,
+    /// `float name(uint code)` the layout renders, called once per element.
+    decode_name: String,
+    /// The text defining `decode_name`, spliced once ahead of the kernel's uniforms.
+    decode_helper: String,
+    /// The binding is raw bytes (`uchar`), so a code is assembled from `element_bytes` loads;
+    /// otherwise it is a typed pointer whose elements are the codes themselves.
+    byte_buffer: bool,
+}
+
+/// `None` unless the weight is one element per block with a whole-byte float layout of at most 32
+/// bits and the tile geometry gives each thread a [`DECODE_RUN_ELEMENTS`] run of whole vectors.
+/// A plain operand is binary32 only when its binding (`binding`, the type the emitter bound the
+/// buffer with) is `float`.
+#[cfg(feature = "metal-tiled-gemm")]
+fn wide_run_plan(
+    binding: &str,
+    codec: Option<Codec>,
+    block_m: u64,
+    block_k: u64,
+    block_threads: u64,
+) -> Option<WideRunPlan> {
+    let layout = match codec {
+        None if binding == "float" => FloatLayout::BF32,
+        None => return None,
+        Some(codec) => layout_render::one_element_float_layout(&codec)?,
+    };
+    let width = u64::from(layout.width());
+    if !block_threads.is_multiple_of(block_m) {
+        return None;
+    }
+    let element_bytes = width / 8;
+    let threads_per_row = block_threads / block_m;
+    let run = block_k / threads_per_row;
+    if run != DECODE_RUN_ELEMENTS || run * threads_per_row != block_k || !(run * element_bytes).is_multiple_of(16) {
+        return None;
+    }
+    let decode_name = format!("omega_dense_run_{}", crate::identity::description_fingerprint(&layout));
+    Some(WideRunPlan {
+        element_bytes,
+        run,
+        threads_per_row,
+        decode_helper: layout_render::layout_load_msl(layout, &decode_name),
+        decode_name,
+        byte_buffer: binding == "uchar",
+    })
+}
+
+/// Weight staging for the dense MMA tile: every thread takes `run` contiguous K elements of one
+/// feature row (`threads_per_row` threads per row, the way `kernel_mul_mm` hands each of two
+/// threads a 16-element run), reads them as `uint4` vectors when the K stride is one, the run
+/// lies inside the reduction and the address is 16-byte aligned, decodes in registers and stores
+/// the tile. Otherwise the same run is read element by element with the per-load k guard,
+/// through the same derived decode. Tile values and their k order are those of the
+/// one-thread-per-row loop.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_wide_weight_stage(
+    source: &mut String,
+    plan: &WideRunPlan,
+    weight: usize,
+    reduce_dim: usize,
+    feature_axis: u16,
+    block_m: u64,
+    block_k: u64,
+) {
+    let WideRunPlan {
+        element_bytes,
+        run,
+        threads_per_row,
+        ref decode_name,
+        ref decode_helper,
+        byte_buffer,
+    } = *plan;
+    let vectors = run * element_bytes / 16;
+    if let Some(anchor) = source.find("struct Uniforms {") {
+        source.insert_str(anchor, &format!("{decode_helper}\n"));
+    }
+    source.push_str(&format!(
+        "        {{\n            long w_row = tiitg / {threads_per_row};\n            long w_part_k = (tiitg % {threads_per_row}) * {run};\n            long w_feat = row_tile * {block_m} + w_row;\n"
+    ));
+    source.push_str("            if (w_feat < feature_extent) {\n");
+    source.push_str(&format!(
+        "                long w_stride = u.operand_strides[{weight}][{reduce_dim}];\n                long row_base = u.operand_base[{weight}] + dense_weight_batch_base + w_feat * u.operand_strides[{weight}][{feature_axis}] + (k0 + w_part_k) * w_stride;\n                float w_regs[{run}];\n"
+    ));
+    let run_pointer = if byte_buffer {
+        format!("in{weight} + row_base * {element_bytes}")
+    } else {
+        format!("(device const uchar *)(in{weight} + row_base)")
+    };
+    source.push_str(&format!(
+        "                device const uchar *w_run = {run_pointer};\n                if (w_stride == 1 && k0 + w_part_k + {run} <= u.reduction_total && (((ulong)w_run) & 15ul) == 0ul) {{\n                    uint4 w_vec[{vectors}];\n"
+    ));
+    source.push_str("                    #pragma unroll\n");
+    source.push_str(&format!(
+        "                    for (int vec = 0; vec < {vectors}; ++vec) {{ w_vec[vec] = ((device const uint4 *)w_run)[vec]; }}\n"
+    ));
+    for element in 0..run {
+        let byte = element * element_bytes;
+        let word = format!("w_vec[{}][{}]", byte / 16, (byte % 16) / 4);
+        let code = match element_bytes {
+            4 => word,
+            width => format!(
+                "(({word} >> {}u) & {:#x}u)",
+                (byte % 4) * 8,
+                (1u64 << (width * 8)) - 1
+            ),
+        };
+        source.push_str(&format!("                    w_regs[{element}] = {decode_name}({code});\n"));
+    }
+    source.push_str("                } else {\n");
+    source.push_str("                    #pragma unroll\n");
+    source.push_str(&format!(
+        "                    for (int w_k = 0; w_k < {run}; ++w_k) {{\n                        long w_element = row_base + (long)w_k * w_stride;\n"
+    ));
+    let element_read = if byte_buffer {
+        let codes = (0..element_bytes)
+            .map(|byte| format!("((uint)in{weight}[w_element * {element_bytes} + {byte}] << {}u)", byte * 8))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        format!("{decode_name}({codes})")
+    } else {
+        format!("in{weight}[w_element]")
+    };
+    source.push_str(&format!(
+        "                        w_regs[w_k] = (k0 + w_part_k + w_k < u.reduction_total) ? {element_read} : 0.0f;\n"
+    ));
+    source.push_str("                    }\n                }\n");
+    source.push_str("                #pragma unroll\n");
+    source.push_str(&format!(
+        "                for (int w_k = 0; w_k < {run}; ++w_k) {{ weight_tile[w_row * {block_k} + w_part_k + w_k] = w_regs[w_k]; }}\n"
+    ));
+    source.push_str("            } else {\n");
+    source.push_str(&format!(
+        "                for (long fill_k = 0; fill_k < {run}; ++fill_k) {{ weight_tile[w_row * {block_k} + w_part_k + fill_k] = 0.0f; }}\n"
+    ));
+    source.push_str("            }\n        }\n");
+}
+
+/// Activation staging for the f32 dense tile: each thread takes four contiguous K elements of one
+/// token as one `float4` when the K stride is one, the four lie inside the reduction and the
+/// address is 16-byte aligned; otherwise element by element with the same guards as the scalar
+/// loop. The tile holds the same values at the same indices.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_wide_activation_stage(
+    source: &mut String,
+    other: usize,
+    token_axis: u16,
+    reduce_dim: usize,
+    block_n: u64,
+    block_k: u64,
+    block_threads: u64,
+) {
+    let lanes = 4u64;
+    let vectors = block_n * block_k / lanes;
+    source.push_str(&format!(
+        "        for (long vec = tiitg; vec < {vectors}; vec += {block_threads}) {{\n            long a_col = vec / {};\n            long a_k = (vec % {}) * {lanes};\n            long a_tok = col_tile * {block_n} + a_col;\n            long a_k_global = k0 + a_k;\n            float4 a_value = float4(0.0f);\n",
+        block_k / lanes,
+        block_k / lanes
+    ));
+    source.push_str("            if (a_tok < token_extent) {\n");
+    source.push_str(&format!(
+        "                long aoff = u.operand_base[{other}] + dense_other_batch_base + a_tok * u.operand_strides[{other}][{token_axis}] + a_k_global * u.operand_strides[{other}][{reduce_dim}];\n                long a_stride = u.operand_strides[{other}][{reduce_dim}];\n"
+    ));
+    source.push_str(&format!(
+        "                if (a_stride == 1 && a_k_global + {lanes} <= u.reduction_total && (((ulong)(in{other} + aoff)) & 15ul) == 0ul) {{\n                    a_value = *((device const float4 *)(in{other} + aoff));\n                }} else {{\n"
+    ));
+    source.push_str(&format!(
+        "                    for (int lane = 0; lane < {lanes}; ++lane) {{ if (a_k_global + lane < u.reduction_total) {{ a_value[lane] = in{other}[aoff + (long)lane * a_stride]; }} }}\n                }}\n            }}\n"
+    ));
+    source.push_str(&format!(
+        "            for (int lane = 0; lane < {lanes}; ++lane) {{ act_tile[a_col * {block_k} + a_k + lane] = a_value[lane]; }}\n        }}\n"
+    ));
+}
+
 /// The dense (unquantized) counterpart to [`push_tiled_gemm_body`]: BOTH
 /// operand tiles load straight `float` reads (no codec decode arm, so
 /// `weight_tile` is `float` here, not `half`, and both `simdgroup_load`s
@@ -1399,6 +1586,7 @@ pub(super) fn push_dense_batched_gemm_body(
     rank: usize,
     block: &DenseBatchedGemmBlock,
     element_type: &str,
+    weight_binding: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     metal: &crate::identity::MetalOnlyExtras,
@@ -1585,6 +1773,16 @@ pub(super) fn push_dense_batched_gemm_body(
     source.push_str(&format!(
         "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
     ));
+    let wide_weight = if bf16_mma {
+        None
+    } else {
+        wide_run_plan(weight_binding, weight_codec, block_m, block_k, block_threads)
+    };
+    if let Some(plan) = wide_weight {
+        push_wide_weight_stage(
+            source, &plan, weight, reduce_dim, feature_axis, block_m, block_k,
+        );
+    } else {
     source.push_str(&format!(
         "        for (long w_row = tiitg; w_row < {block_m}; w_row += {block_threads}) {{\n"
     ));
@@ -1644,6 +1842,12 @@ pub(super) fn push_dense_batched_gemm_body(
     ));
     source.push_str("            }\n");
     source.push_str("        }\n");
+    }
+    if !bf16_mma && other_codec.is_none() {
+        push_wide_activation_stage(
+            source, other, token_axis, reduce_dim, block_n, block_k, block_threads,
+        );
+    } else {
     source.push_str(&format!(
         "        for (long idx = tiitg; idx < {act_tile_elems}; idx += {block_threads}) {{\n"
     ));
@@ -1680,6 +1884,7 @@ pub(super) fn push_dense_batched_gemm_body(
         "            act_tile[{dense_act_index}] = a_value;\n"
     ));
     source.push_str("        }\n");
+    }
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str(&format!(
         "        for (int sub_k = 0; sub_k < {sub_k_steps}; ++sub_k) {{\n"
@@ -1788,6 +1993,7 @@ pub(super) fn push_dense_batched_gemm_body(
     rank: usize,
     block: &DenseBatchedGemmBlock,
     element_type: &str,
+    weight_binding: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
     metal: &crate::identity::MetalOnlyExtras,
@@ -1798,6 +2004,7 @@ pub(super) fn push_dense_batched_gemm_body(
         rank,
         block,
         element_type,
+        weight_binding,
         epilogue_body,
         epilogue_operands,
         metal,
@@ -2275,6 +2482,8 @@ pub(super) fn push_cooperative_reduce_body(
         output_axes,
         knobs,
     ) {
+        let operand_types = elementwise_operand_types(resolved, knobs)?;
+        let weight_binding = operand_binding_type(quantized[block.weight], operand_types[block.weight]);
         push_dense_batched_gemm_body(
             source,
             resolved.node,
@@ -2282,6 +2491,7 @@ pub(super) fn push_cooperative_reduce_body(
             rank,
             &block,
             element_type,
+            weight_binding,
             epilogue_body,
             epilogue_operands,
             metal,

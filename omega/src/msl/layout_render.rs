@@ -658,6 +658,22 @@ pub fn readable_scalar_cache(format: &NumericFormat) -> Option<(FloatLayout, &'s
         .then_some((*layout, storage))
 }
 
+/// The float layout of a format that stores one element per packed block in a whole number of
+/// bytes dividing 32 bits (8, 16 or 32), which a kernel can read as a typed or byte buffer and
+/// decode one code at a time with [`layout_load_msl`]. `None` for a block or level format, a
+/// sub-byte or odd-width scalar, and an integer layout (no exponent field). Decided from the
+/// description alone, never from a format name: the dense GEMM's admission and its wide weight
+/// stage both ask this one question.
+#[must_use]
+pub fn one_element_float_layout(format: &NumericFormat) -> Option<FloatLayout> {
+    let NumericFormat::Scalar(layout) = format else {
+        return None;
+    };
+    let width = layout.width();
+    let whole = matches!(width, 8 | 16 | 32) && format.packed_elements() == 1;
+    (whole && layout.exponent_bits > 0).then_some(*layout)
+}
+
 /// What a kernel needs to read a whole-byte scalar K/V cache: the buffer element type, the
 /// per-code decode name and the helper text that defines it.
 pub(super) struct ScalarCacheRead {

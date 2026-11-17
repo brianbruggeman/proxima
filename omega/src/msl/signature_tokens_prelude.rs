@@ -801,6 +801,18 @@ pub(super) fn widen_stage_parameters(source: &mut String) {
     source.insert_str(start + terminator + ")\n{".len(), STAGE_FLATTEN);
 }
 
+/// The MSL element type an operand's buffer binds as: the producer's own float width for a plain
+/// operand (`plain_type`), `half` for `Float16` (its bytes already are valid `half` elements), and
+/// raw `uchar` bytes for every other packed codec. [`push_signature_operands`] declares the
+/// buffer with this and the dense stager reads it back, so the two cannot disagree.
+pub(super) fn operand_binding_type(codec: Option<Codec>, plain_type: &str) -> &str {
+    match codec {
+        None => plain_type,
+        Some(Codec::Float16) => "half",
+        Some(_) => "uchar",
+    }
+}
+
 fn push_signature_operands(
     source: &mut String,
     quantized: &[Option<Codec>],
@@ -822,11 +834,8 @@ fn push_signature_operands(
         // `element_type`: its bytes ARE valid `half` elements already, so it
         // binds as `half` directly rather than `uchar` -- see
         // `FLOAT16_BLOCK_BYTES`'s own doc.
-        let binding_type = match codec {
-            None => operand_types.get(index).copied().unwrap_or(element_type),
-            Some(Codec::Float16) => "half",
-            Some(_) => "uchar",
-        };
+        let binding_type =
+            operand_binding_type(codec, operand_types.get(index).copied().unwrap_or(element_type));
         source.push_str(&format!(
             "    device const {binding_type}* in{index} [[buffer({index})]],\n"
         ));

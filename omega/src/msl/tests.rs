@@ -2451,14 +2451,14 @@ fn dense_weight_staging_loads_a_register_array_before_the_tile_stores() {
         "the dense GEMM body must render\n{source}"
     );
     assert!(
-        source.contains(&format!("float w_regs[{block_k}];")),
+        source.contains(&format!("float w_regs[{}];", block_k / 2)),
         "{source}"
     );
     assert!(source.contains(
-        "w_regs[w_k] = (k0 + w_k < u.reduction_total) ? in0[(row_base + (long)w_k * w_stride)] : 0.0f;"
+        "w_regs[w_k] = (k0 + w_part_k + w_k < u.reduction_total) ? in0[w_element] : 0.0f;"
     ), "the partial-k guard stays per load\n{source}");
     assert!(source.contains(&format!(
-        "weight_tile[w_row * {block_k} + w_k] = w_regs[w_k];"
+        "weight_tile[w_row * {block_k} + w_part_k + w_k] = w_regs[w_k];"
     )));
     assert!(
         !source.contains("long w_off = row_base"),
@@ -2476,6 +2476,110 @@ fn dense_weight_staging_loads_a_register_array_before_the_tile_stores() {
         source.matches("#pragma unroll").count() >= 2,
         "both staging loops unroll"
     );
+}
+
+/// The router's dense MMA staging (`ffn_gate_inp`: a BF16 weight, an f32 activation, 2048-long
+/// reduction): all 128 threads take part (two per weight row, 16 contiguous K elements each),
+/// the run is read as `uint4` vectors and decoded in registers, and the activation is read as
+/// `float4`. The scalar per-element read stays as the guarded fallback, so the tile values are
+/// those of the one-thread-per-row loop.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn dense_weight_staging_uses_every_thread_and_wide_loads_for_the_router_shape() {
+    let bound = dense_batched_score_shaped_op_with_operand_order(512, 256, 1, 2048, true);
+    let packed = BTreeMap::from([(bound.operands()[1].0, Codec::BFloat16)]);
+    let source = emit_with_knobs(
+        &bound,
+        &packed,
+        NumericPolicy::llama_relaxed(),
+        &EmitKnobs::default().with_tiled_gemm_dense(true),
+    )
+    .expect("emits")
+    .source;
+
+    let block_m = crate::sized::TILED_GEMM_BLOCK_M;
+    let threads = TILED_GEMM_NSG as u64 * SIMD_WIDTH;
+    assert_eq!(threads / block_m, 2, "two threads share a weight row");
+    assert!(source.contains("long w_row = tiitg / 2;"), "{source}");
+    assert!(
+        !source.contains(&format!("for (long w_row = tiitg; w_row < {block_m}; w_row += {threads})")),
+        "no thread idles through a strided row loop\n{source}"
+    );
+    assert!(source.contains("uint4 w_vec[2];"), "{source}");
+    assert!(
+        source.contains("w_vec[vec] = ((device const uint4 *)w_run)[vec];"),
+        "{source}"
+    );
+    let decode = format!(
+        "omega_dense_run_{}",
+        crate::identity::description_fingerprint(&FloatLayout::BF16)
+    );
+    assert!(
+        source.contains(&format!("w_regs[0] = {decode}(((w_vec[0][0] >> 0u) & 0xffffu));")),
+        "{source}"
+    );
+    assert!(
+        source.contains(&format!("w_regs[1] = {decode}(((w_vec[0][0] >> 16u) & 0xffffu));")),
+        "the second element of a word shifts, in the codec's k order\n{source}"
+    );
+    assert!(
+        source.contains(&layout_render::layout_load_msl(FloatLayout::BF16, &decode)),
+        "the decode is the layout renderer's text, spliced once\n{source}"
+    );
+    assert_eq!(source.matches(&format!("static inline float {decode}(")).count(), 1);
+    assert!(!source.contains("bf16_element(in1"), "no hand-listed accessor in the stage\n{source}");
+    assert!(source.contains("a_value = *((device const float4 *)("), "{source}");
+    assert!(
+        source.contains(&format!("{decode}(((uint)in1[w_element * 2 + 0] << 0u) | ((uint)in1[w_element * 2 + 1] << 8u))")),
+        "the guarded per-element read assembles the code and decodes it the same way\n{source}"
+    );
+    if let Ok(dir) = std::env::var("PROXIMA_STAGE_DUMP_DIR") {
+        std::fs::write(format!("{dir}/dense_router_wide_stage.metal"), &source)
+            .expect("writes the router MSL dump");
+    }
+}
+
+/// The wide stage is derived from the weight's numeric description, so a second one-element float
+/// codec takes it with no new rule: f16 binds as typed `half` (no byte assembly), is two bytes,
+/// and decodes through the helper rendered from its own layout, distinct from bf16's.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn dense_weight_staging_wide_path_is_derived_for_an_f16_weight_too() {
+    let bound = dense_batched_score_shaped_op_with_operand_order(512, 256, 1, 2048, true);
+    let packed = BTreeMap::from([(bound.operands()[1].0, Codec::Float16)]);
+    let source = emit_with_knobs(
+        &bound,
+        &packed,
+        NumericPolicy::llama_relaxed(),
+        &EmitKnobs::default().with_tiled_gemm_dense(true),
+    )
+    .expect("emits")
+    .source;
+
+    let decode = format!(
+        "omega_dense_run_{}",
+        crate::identity::description_fingerprint(&FloatLayout::F16)
+    );
+    let bf16_decode = format!(
+        "omega_dense_run_{}",
+        crate::identity::description_fingerprint(&FloatLayout::BF16)
+    );
+    assert_ne!(decode, bf16_decode, "each layout renders its own helper");
+    assert!(source.contains("device const half* in1"), "f16 binds as typed half\n{source}");
+    assert!(source.contains("uint4 w_vec[2];"), "{source}");
+    assert!(
+        source.contains("device const uchar *w_run = (device const uchar *)(in1 + row_base);"),
+        "a typed binding is addressed by element, then viewed as bytes\n{source}"
+    );
+    assert!(
+        source.contains(&format!("w_regs[15] = {decode}(((w_vec[1][3] >> 16u) & 0xffffu));")),
+        "{source}"
+    );
+    assert!(
+        source.contains(&layout_render::layout_load_msl(FloatLayout::F16, &decode)),
+        "{source}"
+    );
+    assert!(source.contains("? in1[w_element] : 0.0f;"), "typed fallback reads the element\n{source}");
 }
 
 /// Coordinator-required proof (2026-09-27 mid-task addition, updated when
@@ -2738,7 +2842,7 @@ fn programmable_tiled_f16_renderer_uses_existing_float_tiles() {
             || kernel.source.contains("threadgroup float act_tile[")
     );
     assert!(!kernel.source.contains("threadgroup half"));
-    assert!(kernel.source.contains("in0[(row_base"));
+    assert!(kernel.source.contains("in0[w_element]"));
     assert!(kernel.source.contains("in1[aoff]"));
 }
 
@@ -3065,7 +3169,8 @@ fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
         let read = |index: usize, offset: &str| {
             signature_tokens_prelude::operand_read(index, offset, codec)
         };
-        let weight_offset = "(row_base + (long)w_k * w_stride)";
+        let weight_offset = "w_element";
+        let activation_offset = "aoff + (long)lane * a_stride";
         if same_codecs {
             assert!(
                 original_kernel
@@ -3083,9 +3188,9 @@ fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
             assert!(!reversed_kernel.source.contains("bf16_element(in"));
         } else {
             assert!(original_kernel.source.contains(&read(0, weight_offset)));
-            assert!(original_kernel.source.contains(&read(1, "aoff")));
+            assert!(original_kernel.source.contains(&read(1, activation_offset)));
             assert!(reversed_kernel.source.contains(&read(1, weight_offset)));
-            assert!(reversed_kernel.source.contains(&read(0, "aoff")));
+            assert!(reversed_kernel.source.contains(&read(0, activation_offset)));
         }
     }
 }
@@ -3142,6 +3247,68 @@ fn programmable_tiled_float_storage_does_not_depend_on_build_gate() {
             &EmitKnobs::default(),
         )
         .is_ok()
+    );
+}
+
+/// Dense admission follows the description, not a name list: any scalar float layout with one
+/// element per packed block in 8, 16 or 32 bits is admitted as a weight (FP8 here, which no list
+/// ever named), and a sub-byte scalar, an integer layout and a block format are refused. The
+/// admitted FP8 weight renders the wide stage with one-byte codes: 16 elements are one `uint4`.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn dense_admission_is_derived_from_the_description_and_admits_fp8() {
+    let bound = dense_batched_score_shaped_op_with_operand_order(512, 256, 1, 2048, true);
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        ref output_axes,
+        ..
+    } = bound.kind
+    else {
+        panic!("dense fixture reduces")
+    };
+    let admitted = |codec: Codec| {
+        classify_dense_batched_gemm(
+            &bound,
+            &[None, Some(codec)],
+            NumericPolicy::llama_relaxed(),
+            reduce_op,
+            init,
+            output_axes,
+            &EmitKnobs::default(),
+        )
+        .is_ok()
+    };
+    for codec in [Codec::Float8E4M3Fn, Codec::Float16, Codec::BFloat16] {
+        assert!(admitted(codec), "{codec:?} is a one-element whole-byte float");
+    }
+    for codec in [Codec::Bf4E2M1, Codec::Q4K, Codec::Q8_0] {
+        assert!(!admitted(codec), "{codec:?} has no one-element whole-byte float layout");
+    }
+
+    let packed = BTreeMap::from([(bound.operands()[1].0, Codec::Float8E4M3Fn)]);
+    let source = emit_with_knobs(
+        &bound,
+        &packed,
+        NumericPolicy::llama_relaxed(),
+        &EmitKnobs::default().with_tiled_gemm_dense(true),
+    )
+    .expect("an fp8 weight emits the dense kernel")
+    .source;
+    let decode = format!(
+        "omega_dense_run_{}",
+        crate::identity::description_fingerprint(&FloatLayout::E4M3FN)
+    );
+    assert!(source.contains("device const uchar* in1"), "{source}");
+    assert!(source.contains("uint4 w_vec[1];"), "{source}");
+    assert!(
+        source.contains(&format!("w_regs[15] = {decode}(((w_vec[0][3] >> 24u) & 0xff));"))
+            || source.contains(&format!("w_regs[15] = {decode}(((w_vec[0][3] >> 24u) & 0xffu));")),
+        "{source}"
+    );
+    assert!(
+        source.contains(&layout_render::layout_load_msl(FloatLayout::E4M3FN, &decode)),
+        "{source}"
     );
 }
 
