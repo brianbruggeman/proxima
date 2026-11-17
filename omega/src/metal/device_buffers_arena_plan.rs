@@ -312,6 +312,13 @@ pub enum MetalError {
     },
     #[error("metal driver error: {log}")]
     CompileFailed { log: String },
+    /// The driver declined to hand out an object it normally returns (a
+    /// command buffer, a compute command encoder, a residency set). The
+    /// request was well-formed and nothing was compiled; `object` names what
+    /// was asked for, `reason` the driver's message or the call that returned
+    /// nothing.
+    #[error("metal driver refused to hand out {object}: {reason}")]
+    DriverRefusedObject { object: &'static str, reason: String },
     #[error(transparent)]
     Tensor(#[from] TensorError),
     #[error(transparent)]

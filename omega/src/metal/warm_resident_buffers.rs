@@ -65,12 +65,14 @@ pub fn warm_resident_buffers() -> Result<usize, MetalError> {
     materialize_mapping_buffers(&device)?;
     let buffers = resident_buffers();
     let command_buffer = new_labeled_command_buffer(&queue, "omega.warm_resident_buffers")
-        .ok_or_else(|| MetalError::CompileFailed {
-            log: "command queue refused to hand out a command buffer".to_string(),
+        .ok_or_else(|| MetalError::DriverRefusedObject {
+            object: "command buffer",
+            reason: "command queue returned none".to_string(),
         })?;
     let encoder = EncoderGuard::new(command_buffer.computeCommandEncoder().ok_or_else(|| {
-        MetalError::CompileFailed {
-            log: "command buffer refused to hand out a compute encoder".to_string(),
+        MetalError::DriverRefusedObject {
+            object: "compute command encoder",
+            reason: "command buffer returned none".to_string(),
         }
     })?);
     for buffer in &buffers {
