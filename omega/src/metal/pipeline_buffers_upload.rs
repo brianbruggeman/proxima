@@ -415,7 +415,8 @@ pub(super) fn pipeline_for(
     // enough: `Plan::set_math_mode` narrows the compiled mode for an
     // UNCHANGED `numeric_policy`, so a `math_mode` token distinct from the
     // policy token is required too (see `MathMode::cache_token`'s own doc).
-    if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(cache_key).cloned()) {
+    let shared = MetalDevice::current()?;
+    if let Some(pipeline) = shared.pipeline(cache_key) {
         trace!(cache_key = %cache_key, hit = true, "pipeline cache lookup");
         #[cfg(feature = "instrument")]
         counter!(PIPELINE_HITS, 1);
@@ -537,12 +538,7 @@ pub(super) fn pipeline_for(
             "pipeline_footprint"
         );
     }
-    PIPELINE_CACHE.with(|cache| {
-        cache
-            .borrow_mut()
-            .insert(cache_key.to_string(), pipeline.clone());
-    });
-    Ok(pipeline)
+    Ok(shared.insert_pipeline(cache_key, pipeline))
 }
 
 /// [`pipeline_for`]'s counterpart for a [`Kernel`] already in hand (the
@@ -558,7 +554,8 @@ pub(super) fn pipeline_for_kernel(
     cache_key: &str,
     math_mode: MathMode,
 ) -> Result<Retained<ProtocolObject<dyn MTLComputePipelineState>>, MetalError> {
-    if let Some(pipeline) = PIPELINE_CACHE.with(|cache| cache.borrow().get(cache_key).cloned()) {
+    let shared = MetalDevice::current()?;
+    if let Some(pipeline) = shared.pipeline(cache_key) {
         return Ok(pipeline);
     }
     #[cfg(feature = "instrument")]
@@ -566,12 +563,7 @@ pub(super) fn pipeline_for_kernel(
     let pipeline = compile_pipeline(device, kernel, math_mode)?;
     #[cfg(feature = "instrument")]
     register_pipeline_capture(&pipeline, cache_key, &kernel.entry, captured_sha256);
-    PIPELINE_CACHE.with(|cache| {
-        cache
-            .borrow_mut()
-            .insert(cache_key.to_string(), pipeline.clone());
-    });
-    Ok(pipeline)
+    Ok(shared.insert_pipeline(cache_key, pipeline))
 }
 
 pub(super) fn allocation_capacity(element_count: usize, dtype: DType) -> Result<usize, MetalError> {

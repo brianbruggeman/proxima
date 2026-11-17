@@ -277,6 +277,8 @@ mod resident_nocopy_cache;
 mod shared_transient;
 mod env_flags;
 mod metal_context;
+mod metal_device;
+pub use metal_device::MetalDevice;
 mod warm_resident_buffers;
 #[macro_use]
 mod arena_encode_dispatch_finish;

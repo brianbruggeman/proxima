@@ -122,7 +122,7 @@ pub use metal::{
 };
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal::{
-    DispatchType, MathMode, MetalError, Plan, checkpoint_mmap_resident_pages,
+    DispatchType, MathMode, MetalDevice, MetalError, Plan, pipeline_cache_len, checkpoint_mmap_resident_pages,
     discard_checkpoint_mmap_range, discard_checkpoint_mmap_range_immediate, execute, execute_plan,
     execute_plan_named, page_size, plan, plan_named,
 };

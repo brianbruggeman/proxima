@@ -8,12 +8,13 @@
 //! is keyed against); what a hit skips is the pipeline backend compile.
 //!
 //! Composes: `MTLBinaryArchive` (Apple's persisted-pipeline primitive),
-//! [`PIPELINE_CACHE`] (the in-process cache this sits underneath: a hit there
-//! never reaches this module) and [`RuntimeConfig`] (the `OMEGA_PIPELINE_CACHE*`
+//! [`MetalDevice`] (the in-process, per-device pipeline cache this sits
+//! underneath: a hit there never reaches this module) and [`RuntimeConfig`] (the `OMEGA_PIPELINE_CACHE*`
 //! knobs). One file per pipeline, not one archive per process, because a
-//! thread-local Metal object cannot be shared across threads while a file
-//! can: concurrent threads and processes publish with an atomic rename and
-//! never write the same bytes in place.
+//! file is shared across processes as well as threads: concurrent threads and
+//! processes publish with an atomic rename and never write the same bytes in
+//! place. (Within a process, compiled pipelines are `Send + Sync` and are
+//! shared per device, not per thread.)
 //!
 //! The digest covers the kernel source, entry point, math mode, device name,
 //! and the OS version and build string. The Metal compiler ships inside the

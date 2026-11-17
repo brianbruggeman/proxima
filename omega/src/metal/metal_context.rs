@@ -13,6 +13,7 @@ use super::arena_encode_dispatch_finish::{
 };
 use super::device_buffers_arena_plan::{EXPERT_SOURCE_CACHE, StagedExpertSource};
 use super::device_buffers_arena_plan::ACTIVE_QUEUE;
+use super::metal_device::{ACTIVE_DEVICE, MetalDevice};
 use super::pipeline_buffers_upload::{CHECKPOINT_MAPPING, NOCOPY_BUFFERS};
 use super::resident_nocopy_cache::RESIDENT_BUFFERS;
 use super::warm_resident_buffers::{WARM_RESIDENCY_SET, warm_active_context};
@@ -33,6 +34,7 @@ pub struct MetalContext {
     checkpoint: Option<(usize, usize)>,
     experts: ExpertSources,
     queue: Option<Retained<ProtocolObject<dyn MTLCommandQueue>>>,
+    device: Option<MetalDevice>,
     residency: Option<Retained<ProtocolObject<dyn MTLResidencySet>>>,
     #[cfg(feature = "instrument")]
     capture_dumps: Vec<CaptureDumpEntry>,
@@ -105,6 +107,7 @@ impl MetalContext {
 
     fn swap_residency(&mut self) {
         ACTIVE_QUEUE.with(|queue| mem::swap(&mut self.queue, &mut *queue.borrow_mut()));
+        ACTIVE_DEVICE.with(|device| mem::swap(&mut self.device, &mut *device.borrow_mut()));
         WARM_RESIDENCY_SET.with(|set| mem::swap(&mut self.residency, &mut *set.borrow_mut()));
         self.swap_caches();
     }

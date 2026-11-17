@@ -15,10 +15,10 @@
 //!
 //! A [`Plan`] holds `objc2` `Retained` Metal objects, which are not `Send`, so
 //! it cannot live on [`LoadedModel`] behind a `Mutex` without making the model
-//! `!Sync` (it is served from a `SendPipe` behind an `Arc`). It lives where the
-//! compiled-pipeline cache already lives, in thread-local storage
-//! (`omega::metal::PIPELINE_CACHE`), under the same constraint: a thread
-//! reuses the plans it built itself.
+//! `!Sync` (it is served from a `SendPipe` behind an `Arc`). It lives in
+//! thread-local storage under that constraint: a thread reuses the plans it
+//! built itself. (Compiled pipelines are `Send + Sync` and are shared per
+//! device by `omega::metal::MetalDevice`, not per thread.)
 //!
 //! Ownership: [`LoadedModel::plan_life`] is the model's identity. An entry
 //! holds only a [`Weak`] to it, so dropping the model orphans every thread's

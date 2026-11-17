@@ -4055,7 +4055,8 @@ pub(super) fn encode_op(
                 trace!(node = ?source_node, "expert lowering mode mixed");
             }
             cache_key.push_str(&format!("_{binding_identity:?}"));
-            let kernel = MIXED_KERNEL_CACHE.with(|cache| cache.borrow().get(&cache_key).cloned());
+            let shared_device = MetalDevice::current()?;
+            let kernel = shared_device.mixed_kernel(&cache_key);
             let kernel = match kernel {
                 Some(kernel) => kernel,
                 None => {
@@ -4077,9 +4078,7 @@ pub(super) fn encode_op(
                             source_node,
                         )?
                     };
-                    MIXED_KERNEL_CACHE.with(|cache| {
-                        cache.borrow_mut().insert(cache_key.clone(), kernel.clone());
-                    });
+                    shared_device.insert_mixed_kernel(&cache_key, &kernel);
                     kernel
                 }
             };

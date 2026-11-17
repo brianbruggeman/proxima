@@ -555,22 +555,6 @@ pub(super) type DeviceAndQueue = (
 );
 
 thread_local! {
-    /// Compiled pipelines, keyed by [`kernel_cache_key`]'s cheap structural
-    /// fingerprint (not [`Kernel::source`] — deriving that string is exactly
-    /// the cost this cache exists to avoid on a hit), for the lifetime of
-    /// the thread rather than of one [`execute`] call.
-    ///
-    /// This was per-call, which meant EVERY `execute` compiled every kernel
-    /// from MSL source before dispatching it. A serving loop runs the same
-    /// graph thousands of times, so that is thousands of redundant
-    /// compiles — measured at 3.2 ms for a 2.36 MB matvec and 8.3 ms for a
-    /// 9.44 MB one, against llama.cpp's 17.62 ms for an entire 7B token.
-    /// `thread_local` rather than a process-wide `OnceLock`: `Retained<_>` of
-    /// an `objc2` protocol object is not `Send`/`Sync`, and a per-thread
-    /// cache needs no lock on the dispatch path anyway.
-    pub(super) static PIPELINE_CACHE: RefCell<BTreeMap<String, Retained<ProtocolObject<dyn MTLComputePipelineState>>>> =
-        RefCell::new(BTreeMap::new());
-
     /// `pipeline_for`/`pipeline_for_kernel`'s own creation record, keyed by
     /// the compiled pipeline's object pointer (`Retained::as_ptr`) rather
     /// than `PIPELINE_CACHE`'s string key -- a dispatch site holds only the
@@ -583,24 +567,17 @@ thread_local! {
     pub(super) static PIPELINE_CAPTURE: RefCell<BTreeMap<usize, PipelineCaptureRecord>> =
         const { RefCell::new(BTreeMap::new()) };
 
-    /// `PROXIMA_PIPELINE_KEY_AUDIT=1`'s own tally: every [`PIPELINE_CACHE`]
-    /// hit `pipeline_for` re-emits and sha256-compares increments the first
+    /// `PROXIMA_PIPELINE_KEY_AUDIT=1`'s own tally: every
+    /// [`MetalDevice`] pipeline cache hit `pipeline_for` re-emits and sha256-compares increments the first
     /// counter; a disagreement (see [`MetalError::PipelineKeyAuditMismatch`])
-    /// increments the second. Thread-local for the same reason
-    /// `PIPELINE_CACHE` itself is: the audit walks one thread's own cache.
+    /// increments the second. Thread-local because the audit tallies
+    /// the calling thread's own hits.
     #[cfg(feature = "instrument")]
     pub(super) static PIPELINE_KEY_AUDIT_AUDITED: core::cell::Cell<u64> =
         const { core::cell::Cell::new(0) };
     #[cfg(feature = "instrument")]
     pub(super) static PIPELINE_KEY_AUDIT_MISMATCHED: core::cell::Cell<u64> =
         const { core::cell::Cell::new(0) };
-
-    /// Emitted mixed-expert kernels persist beside their compiled pipeline.
-    /// The source body depends only on the bound shape, codec policy, math
-    /// mode, and source node; the resident payload bytes are bound separately
-    /// per step, so re-rendering MSL on every routed gather is unnecessary.
-    pub(super) static MIXED_KERNEL_CACHE: RefCell<BTreeMap<String, crate::msl::Kernel>> =
-        const { RefCell::new(BTreeMap::new()) };
 
     /// Staged HOBBIT payloads persist across token steps on this Metal
     /// execution thread. Segment programs intentionally reuse local `NodeId`s
@@ -636,30 +613,37 @@ pub fn current_allocated_size() -> Option<u64> {
 }
 
 /// Every distinct [`kernel_cache_key`](crate::msl::kernel_cache_key) string
-/// currently compiled on this thread's [`PIPELINE_CACHE`] -- a query-only
-/// read of the same thread-local `pipeline_for` already maintains, for a test
+/// currently compiled on the shared [`MetalDevice`] -- a query-only
+/// read of the same per-device cache `pipeline_for` already maintains, for a test
 /// to confirm how many distinct pipelines two ops actually shared without
 /// re-deriving `pipeline_for`'s own hit/miss logic.
 #[cfg(feature = "instrument")]
 #[must_use]
 pub fn pipeline_cache_keys() -> Vec<String> {
-    PIPELINE_CACHE.with(|cache| cache.borrow().keys().cloned().collect())
+    MetalDevice::current()
+        .map(|device| device.pipeline_keys())
+        .unwrap_or_default()
 }
 
 /// The `staticThreadgroupMemoryLength` Metal reports for the compiled
 /// pipeline cached under `key` (one of [`pipeline_cache_keys`]) -- the bytes
 /// of threadgroup memory the kernel declares, which bound how many
 /// threadgroups are resident on one GPU core. `None` when no pipeline is
-/// cached under `key` on this thread.
+/// cached under `key` on the shared device.
 #[cfg(feature = "instrument")]
 #[must_use]
 pub fn pipeline_static_threadgroup_memory(key: &str) -> Option<usize> {
-    PIPELINE_CACHE.with(|cache| {
-        cache
-            .borrow()
-            .get(key)
-            .map(|pipeline| pipeline.staticThreadgroupMemoryLength())
-    })
+    let device = MetalDevice::current().ok()?;
+    device
+        .pipeline(key)
+        .map(|pipeline| pipeline.staticThreadgroupMemoryLength())
+}
+
+/// How many distinct pipelines the shared [`MetalDevice`] has compiled -- the
+/// always-on counterpart of the instrument-gated [`pipeline_cache_keys`].
+#[must_use]
+pub fn pipeline_cache_len() -> usize {
+    MetalDevice::current().map_or(0, |device| device.pipeline_count())
 }
 
 /// `PROXIMA_PIPELINE_KEY_AUDIT=1`'s own tally, `(audited, mismatched)` --
@@ -681,12 +665,10 @@ pub fn pipeline_key_audit_counts() -> (u64, u64) {
 /// `dispatch_capture` lines -- printed from whichever thread Metal dispatch
 /// actually runs on, not necessarily the decode loop's own thread -- can
 /// still carry a `step=` field lining up with those diagnostics. A
-/// process-wide atomic, not a `thread_local!`: `PIPELINE_CACHE`'s own
-/// per-thread cache is sound because compiled pipelines never cross a
-/// thread, but the decode loop's step boundary and the encode/dispatch call
-/// it triggers are not guaranteed to share one thread, so a thread-local
-/// counter here silently reads 0 forever on any thread but the one that
-/// calls [`set_capture_step`].
+/// process-wide atomic, not a `thread_local!`: the decode loop's step boundary
+/// and the encode/dispatch call it triggers are not guaranteed to share one
+/// thread, so a thread-local counter here silently reads 0 forever on any
+/// thread but the one that calls [`set_capture_step`].
 #[cfg(feature = "instrument")]
 pub(super) static CAPTURE_STEP: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);

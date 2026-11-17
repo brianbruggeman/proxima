@@ -331,8 +331,8 @@ pub(super) fn execute_plan_inner(
     #[cfg(feature = "metal-buffer-pool")]
     let mut reclaim_stash: Vec<(MetalBuffer, usize, DType)> = Vec::new();
 
-    // pipelines live in this thread's `PIPELINE_CACHE`, not here: see that
-    // static's own doc for why per-call was the defect.
+    // pipelines live in the shared `MetalDevice`, not here: a per-call cache
+    // recompiled every kernel on every execute.
     // (bound op, its fault buffer, gather count) for every op that gathered —
     // checked only after the single end-of-program wait below, since a fault
     // buffer is not CPU-visible until the command buffer it was written in
