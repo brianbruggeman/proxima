@@ -94,7 +94,7 @@ fn draft_chain_proposer<'draft>(
     serving_config: &ServingConfig<'draft>,
     target_vocab_size: usize,
     #[cfg(all(feature = "metal", target_os = "macos"))]
-    residency: &'draft mut omega::metal::ResidentContext,
+    residency: &'draft mut omega::metal::MetalContext,
 ) -> impl FnMut(&[u32], usize, &mut Vec<u32>) -> Result<(), InteropError> + 'draft {
     let speculative = serving_config.speculative;
     let greedy = greedy_config(serving_config);
@@ -208,7 +208,7 @@ impl LoadedModel<'_> {
             return serve(None);
         };
         #[cfg(all(feature = "metal", target_os = "macos"))]
-        let mut residency = omega::metal::ResidentContext::default();
+        let mut residency = omega::metal::MetalContext::default();
         let (draft, widths) = {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             let _active = residency.activate();

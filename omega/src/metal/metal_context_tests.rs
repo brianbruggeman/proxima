@@ -15,7 +15,7 @@ use super::super::resident_nocopy_cache::{
     release_resident_names, reset_nocopy_cache_for_test, reset_resident_cache_for_test,
     resident_cache_len, upload_block_no_copy, upload_resident_copy,
 };
-use super::{ResidentContext, ResidentContextGuard};
+use super::{MetalContext, MetalContextGuard};
 
 const TARGET_WEIGHT: &str = "resident_context_target.weight";
 const DRAFT_WEIGHT: &str = "resident_context_draft.weight";
@@ -33,7 +33,7 @@ fn upload_named_f32(
         .expect("resident context accepts the named weight upload")
 }
 
-fn activate(context: &mut ResidentContext) -> ResidentContextGuard<'_> {
+fn activate(context: &mut MetalContext) -> MetalContextGuard<'_> {
     context.activate()
 }
 
@@ -45,8 +45,8 @@ fn nested_contexts_restore_distinct_payloads_and_reuse_each_owner_buffer() {
 
     let target_values = [1.0_f32, 2.0];
     let draft_values = [3.0_f32, 4.0];
-    let mut target = ResidentContext::default();
-    let mut draft = ResidentContext::default();
+    let mut target = MetalContext::default();
+    let mut draft = MetalContext::default();
     let target_buffer;
     let draft_buffer;
 
@@ -113,7 +113,7 @@ fn same_owner_rebound_is_rejected_without_replacing_its_payload() {
 
     let first_values = [1.0_f32, 2.0];
     let rebound_values = [3.0_f32, 4.0];
-    let mut context = ResidentContext::default();
+    let mut context = MetalContext::default();
     let _guard = activate(&mut context);
     let first = upload_named_f32(&device, TARGET_WEIGHT, &first_values);
     let error = upload_resident_copy(
@@ -148,8 +148,8 @@ fn nested_contexts_keep_same_named_nocopy_payloads_separate() {
     draft_values[0] = 3.0;
     draft_values[1] = 4.0;
     let byte_length = target_values.len() * size_of::<f32>();
-    let mut target = ResidentContext::default();
-    let mut draft = ResidentContext::default();
+    let mut target = MetalContext::default();
+    let mut draft = MetalContext::default();
 
     {
         let _target_guard = activate(&mut target);
@@ -201,8 +201,8 @@ fn releasing_draft_names_does_not_evict_target_buffers() {
 
     let target_values = [1.0_f32, 2.0];
     let draft_values = [3.0_f32, 4.0];
-    let mut target = ResidentContext::default();
-    let mut draft = ResidentContext::default();
+    let mut target = MetalContext::default();
+    let mut draft = MetalContext::default();
     let target_buffer;
 
     {
@@ -240,8 +240,8 @@ fn clear_releases_active_aliases_and_restores_the_enclosing_context() {
     let draft_checkpoint = [3_u8; 32];
     reset_checkpoint_mapping_for_test();
     register_checkpoint_mapping(&enclosing_checkpoint);
-    let mut target = ResidentContext::default();
-    let mut draft = ResidentContext::default();
+    let mut target = MetalContext::default();
+    let mut draft = MetalContext::default();
     let target_buffer;
 
     {
@@ -296,7 +296,7 @@ fn clear_releases_active_aliases_and_restores_the_enclosing_context() {
 }
 
 fn return_error_after_checkpoint_registration(
-    context: &mut ResidentContext,
+    context: &mut MetalContext,
     checkpoint: &[u8],
 ) -> Result<(), ()> {
     let _guard = activate(context);
@@ -311,8 +311,8 @@ fn checkpoint_mapping_restores_on_return_error_and_unwind() {
     let draft_checkpoint = [3_u8; 32];
     reset_checkpoint_mapping_for_test();
     register_checkpoint_mapping(&prior_checkpoint);
-    let mut target = ResidentContext::default();
-    let mut draft = ResidentContext::default();
+    let mut target = MetalContext::default();
+    let mut draft = MetalContext::default();
 
     {
         let _target_guard = activate(&mut target);
@@ -363,4 +363,23 @@ fn checkpoint_mapping_restores_on_return_error_and_unwind() {
         "outer return restores the prior mapping"
     );
     reset_checkpoint_mapping_for_test();
+}
+
+#[test]
+fn new_context_owns_the_queue_it_is_given_and_default_owns_none() {
+    let Ok((_device, queue)) = device_and_queue() else {
+        return;
+    };
+    let queue_address = Retained::as_ptr(&queue).cast::<()>();
+
+    let context = MetalContext::new(Some(queue), None);
+
+    assert_eq!(
+        context
+            .queue()
+            .map(|owned| core::ptr::from_ref(owned).cast::<()>()),
+        Some(queue_address)
+    );
+    assert!(context.residency().is_none());
+    assert!(MetalContext::default().queue().is_none());
 }

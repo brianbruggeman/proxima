@@ -3,6 +3,10 @@ use core::mem;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use objc2::rc::Retained;
+use objc2::runtime::ProtocolObject;
+use objc2_metal::{MTLCommandQueue, MTLResidencySet};
+
 #[cfg(feature = "instrument")]
 use super::arena_encode_dispatch_finish::{
     CAPTURE_DUMP_PENDING, CAPTURE_LIVE_PENDING, CaptureDumpEntry, CapturedDispatch,
@@ -21,22 +25,49 @@ type ExpertSources = BTreeMap<(usize, NodeId), (u64, StagedExpertSource)>;
 /// before their model, while active, so no borrowed weight buffer outlives its
 /// allocation. expert sidecar registration remains outside this context.
 #[derive(Default)]
-pub struct ResidentContext {
+pub struct MetalContext {
     resident: ResidentBuffers,
     nocopy: ResidentBuffers,
     checkpoint: Option<(usize, usize)>,
     experts: ExpertSources,
+    queue: Option<Retained<ProtocolObject<dyn MTLCommandQueue>>>,
+    residency: Option<Retained<ProtocolObject<dyn MTLResidencySet>>>,
     #[cfg(feature = "instrument")]
     capture_dumps: Vec<CaptureDumpEntry>,
     #[cfg(feature = "instrument")]
     capture_live: Vec<CapturedDispatch>,
 }
 
-impl ResidentContext {
+impl MetalContext {
+    /// a context that owns the queue its model submits to and the residency
+    /// set that keeps the model's wired weight pages resident. `None` for
+    /// either means the thread's own queue, or no residency set, applies.
+    #[must_use]
+    pub fn new(
+        queue: Option<Retained<ProtocolObject<dyn MTLCommandQueue>>>,
+        residency: Option<Retained<ProtocolObject<dyn MTLResidencySet>>>,
+    ) -> Self {
+        Self {
+            queue,
+            residency,
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub fn queue(&self) -> Option<&ProtocolObject<dyn MTLCommandQueue>> {
+        self.queue.as_deref()
+    }
+
+    #[must_use]
+    pub fn residency(&self) -> Option<&ProtocolObject<dyn MTLResidencySet>> {
+        self.residency.as_deref()
+    }
+
     /// restores the enclosing context when the guard drops, including unwind.
-    pub fn activate(&mut self) -> ResidentContextGuard<'_> {
+    pub fn activate(&mut self) -> MetalContextGuard<'_> {
         self.swap_active();
-        ResidentContextGuard {
+        MetalContextGuard {
             context: self,
             thread: PhantomData,
         }
@@ -83,12 +114,12 @@ impl ResidentContext {
 
 /// thread-bound activation; dropping it restores the enclosing model's caches.
 #[must_use]
-pub struct ResidentContextGuard<'context> {
-    context: &'context mut ResidentContext,
+pub struct MetalContextGuard<'context> {
+    context: &'context mut MetalContext,
     thread: PhantomData<Rc<()>>,
 }
 
-impl ResidentContextGuard<'_> {
+impl MetalContextGuard<'_> {
     /// releases active aliases after plans drop and before their backing model.
     pub fn clear(&mut self) {
         #[cfg(feature = "instrument")]
@@ -103,12 +134,12 @@ impl ResidentContextGuard<'_> {
     }
 }
 
-impl Drop for ResidentContextGuard<'_> {
+impl Drop for MetalContextGuard<'_> {
     fn drop(&mut self) {
         self.context.swap_active();
     }
 }
 
 #[cfg(test)]
-#[path = "resident_context_tests.rs"]
-mod resident_context_tests;
+#[path = "metal_context_tests.rs"]
+mod metal_context_tests;

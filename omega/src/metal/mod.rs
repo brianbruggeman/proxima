@@ -276,7 +276,7 @@ mod resident_nocopy_cache;
 #[cfg(feature = "metal-plan-stable-buffers")]
 mod shared_transient;
 mod env_flags;
-mod resident_context;
+mod metal_context;
 mod warm_resident_buffers;
 #[macro_use]
 mod arena_encode_dispatch_finish;
@@ -301,7 +301,7 @@ pub use pipeline_disk_cache::{pipeline_disk_cache_counts, set_runtime_config};
 pub use placements_execute_named::*;
 use prepare_uniforms_pack::*;
 use wavefront_schedule::*;
-pub use resident_context::{ResidentContext, ResidentContextGuard};
+pub use metal_context::{MetalContext, MetalContextGuard};
 pub use resident_nocopy_cache::*;
 pub use warm_resident_buffers::warm_resident_buffers;
 
