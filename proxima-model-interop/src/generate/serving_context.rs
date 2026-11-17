@@ -10,33 +10,33 @@
 //! from a sync entry point with `proxima_primitives::driver::block_on(gate.lock())`.
 //! The gate is the exclusion; this type adds no lock of its own.
 
-use omega::metal::MetalContext;
+use omega::metal::{MetalContext, MetalContextGuard};
+
+use super::resident_plans::{self, ResidentStore};
 
 pub(super) struct ServingContext {
+    plans: ResidentStore,
     metal: MetalContext,
 }
 
-// SAFETY: `ServingContext` holds one `MetalContext`: maps of `Retained<MTLBuffer>`
-// (resident, no-copy, expert-source and uniform-cache buffers), the fault-buffer
-// pool (owned `Retained<MTLBuffer>`s keyed by gather count), a `Vec<u8>` of staged
-// expert bytes, a `u64` uniform-cache clock, a `(usize, usize)` mapping identity,
-// and an optional queue and residency set. The uniform cache and fault pool hold
-// owned buffers only: no `Rc`, no `Weak`. The transient arena and attention pools
-// (`Weak` into plan-held `Rc` leases) are not in the context until the plans are. objc2-metal marks buffers and residency sets neither `Send`
-// nor `Sync`, so this impl is what lets the aggregate cross threads. It holds
-// because (1) every handle is owned by this value alone: nothing here is an
-// `Rc`, a `Weak`, a clone shared with another thread's slot, or a borrow; the
-// thread-local slots only ever hold a context's contents between `activate`
-// and the guard's drop, which is on the same thread; (2) the value moves only
-// as a whole, and is reached only through `&mut` taken from the model's
-// `AsyncMutex`, so no two threads touch a handle at once; (3) it changes
-// threads only between requests, when every command buffer that used these
-// buffers has been waited, so no GPU work or other thread is mid-use; (4)
-// Metal resource objects carry no thread affinity (ASSUMED, Apple's Metal
-// documentation, not read here; the cross-thread acceptance test is the
-// runtime evidence). The `plans` field the design adds in a later slice holds
-// `Rc` leases into pools of this context, so that slice must re-argue this
-// impl for the larger closed graph. Not `Sync`: access is exclusive.
+// SAFETY: the aggregate is one closed graph. `metal` owns the maps of `Retained<MTLBuffer>`
+// (resident, no-copy, expert-source, uniform and fault buffers), the two transient pools
+// (a `Weak<MetalBuffer>` each), the queue and the residency set. `plans` owns every plan and
+// every `Rc<MetalBuffer>` lease: each lease is taken from one of `metal`'s two pools
+// (`ARENA_TRANSIENT`, `ATTENTION_SCRATCH_TRANSIENT`, swapped in by `activate`), so each `Rc`
+// and `Weak` reachable from `plans` points at a buffer whose other handles are in `plans`
+// or in `metal`'s pools, and nowhere else: no `Rc`, `Weak` or buffer handle is cloned to a
+// thread-local that outlives an activation, since the guard swaps every slot back on drop
+// (same thread) and `BackendRuntime` returns its plans before the guard drops. objc2-metal
+// marks buffers and residency sets neither `Send` nor `Sync`, and `Rc` counts are non-atomic,
+// so this impl is what lets the graph cross threads. It holds because (1) the graph is
+// closed as above, so a move leaves no `Rc` count reachable from the old thread; (2) it moves
+// only as a whole, and is reached only through `&mut` taken from the model's `AsyncMutex`,
+// so no two threads touch a handle or a count at once; (3) it changes threads only between
+// requests, when every command buffer that used these buffers has been waited
+// (`shared_transient.rs` module doc), so no GPU work is mid-use; (4) Metal resource objects
+// carry no thread affinity (ASSUMED, Apple's Metal documentation, not read here; the
+// cross-thread tests are the runtime evidence). Not `Sync`: access is exclusive.
 unsafe impl Send for ServingContext {}
 
 const fn assert_send<Value: Send>() {}
@@ -54,11 +54,61 @@ const _: () = {
     let _ = <ServingContext as AmbiguousIfSync<_>>::marker;
 };
 
+/// both contexts active on this thread; dropping it hands each back to its owner.
+#[must_use]
+pub(super) struct ServingGuard<'context> {
+    plans: &'context mut ResidentStore,
+    _metal: MetalContextGuard<'context>,
+}
+
+impl Drop for ServingGuard<'_> {
+    fn drop(&mut self) {
+        self.plans.swap_active();
+    }
+}
+
+impl Drop for ServingContext {
+    fn drop(&mut self) {
+        self.clear_plans();
+    }
+}
+
 impl ServingContext {
     pub(super) fn new() -> Self {
         Self {
+            plans: ResidentStore::default(),
             metal: MetalContext::new(None, None),
         }
+    }
+
+    /// activates the metal context and this context's plans on the calling thread; both
+    /// go back when the guard drops.
+    pub(super) fn activate(&mut self) -> ServingGuard<'_> {
+        let Self { plans, metal } = self;
+        let metal = metal.activate();
+        plans.swap_active();
+        ServingGuard {
+            plans,
+            _metal: metal,
+        }
+    }
+
+    /// frees every resident plan, while the context is active so their buffers
+    /// drop against their own queue and mapping.
+    pub(super) fn clear_plans(&mut self) {
+        let _active = self.activate();
+        resident_plans::clear_active();
+    }
+
+    /// decode and wide plans held while this context is inactive.
+    #[cfg(test)]
+    pub(super) fn plan_count(&self) -> usize {
+        self.plans.plan_count()
+    }
+
+    #[cfg(test)]
+    pub(super) fn wide_plan_count(&self) -> usize {
+        self.plans.wide_count()
     }
 
     /// registers the checkpoint mapping into this context rather than the
@@ -77,6 +127,11 @@ impl ServingContext {
 
     pub(super) fn metal_mut(&mut self) -> &mut MetalContext {
         &mut self.metal
+    }
+
+    #[cfg(test)]
+    pub(super) fn metal(&self) -> &MetalContext {
+        &self.metal
     }
 }
 
@@ -254,5 +309,91 @@ mod tests {
             "the follow-up thread copied {copied} bytes against a {} byte checkpoint",
             fixture.len()
         );
+    }
+
+    /// ragd serves each request from a new thread. The plans belong to the model's context, so the
+    /// second thread resumes what the first built instead of planning again.
+    #[test]
+    fn a_second_thread_resumes_the_plans_the_first_thread_built() {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads");
+        let config = gpu_config();
+
+        let (first, second) = std::thread::scope(|scope| {
+            let request = || scope.spawn(|| decode_counts(&model, &config)).join().expect("the request thread did not panic");
+            let first = request();
+            let second = request();
+            (first, second)
+        });
+
+        assert!(first.misses > 0, "thread A built no plan: {} misses", first.misses);
+        assert_eq!(second.misses, 0, "thread B built {} plans instead of resuming", second.misses);
+        assert!(second.hits > 0, "thread B hit no resident plan: {} hits", second.hits);
+        assert!(
+            proxima_primitives::driver::block_on(model.serving.lock()).plan_count() > 0,
+            "the context holds no plan after the requests"
+        );
+    }
+
+    /// the plans, arena lease and attention scratch a request leaves in the context are the
+    /// only owners of their Metal buffers, so dropping the model must release every one.
+    #[test]
+    fn dropping_the_model_releases_the_metal_buffers_its_requests_left_resident() {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads");
+        let config = gpu_config();
+        decode_counts(&model, &config);
+
+        let (plans, arena, attention) = {
+            let serving = proxima_primitives::driver::block_on(model.serving.lock());
+            let (arena, attention) = serving.metal().transient_handles();
+            (serving.plan_count(), arena, attention)
+        };
+        assert!(plans > 0, "the request left no resident plan: {plans}");
+        assert!(arena.upgrade().is_some(), "the request left no arena buffer for the model to free");
+        assert!(attention.upgrade().is_some(), "the request left no attention scratch for the model to free");
+
+        drop(model);
+
+        assert!(arena.upgrade().is_none(), "the arena buffer outlived the model");
+        assert!(attention.upgrade().is_none(), "the attention scratch outlived the model");
+    }
+
+    struct Counts {
+        hits: usize,
+        misses: usize,
+    }
+
+    fn decode_counts(model: &LoadedModel<'_>, config: &ServingConfig<'_>) -> Counts {
+        let mut runtime = model.backend_runtime(config);
+        model
+            .run_decode_loop_through_cache(
+                PROMPT.to_vec(),
+                &[],
+                3,
+                config,
+                &mut runtime,
+                None,
+                &mut crate::generate::LogitsSink::Discard,
+                &mut crate::generate::NodeValuesSink::Discard,
+                &mut |_| ControlFlow::Continue(()),
+                None,
+                false,
+                None,
+                None,
+            )
+            .expect("the request decodes on the dense fixture");
+        Counts {
+            hits: runtime.plan_hits,
+            misses: runtime.plan_misses,
+        }
     }
 }

@@ -10,13 +10,14 @@
 //!
 //! # Why serial execution is guaranteed
 //!
-//! The pool is thread-local, like [`device_and_queue`]: every plan that leases
-//! from it submits to this thread's one command queue, and
+//! The pool is a field of the serving context, swapped into this thread's slot
+//! while the context is active: every plan that leases from it submits to the
+//! context's one command queue, and
 //! `execute_plan_with_placements` commits and `waitUntilCompleted`s its command
 //! buffers before returning (`execute_and_hazards.rs`, "Cross-invocation
-//! aliasing"). Two plans on one thread therefore never have the buffer in
+//! aliasing"). Two plans on one context therefore never have the buffer in
 //! flight together. A plan holds `Retained` buffers and `RefCell`s, so it is
-//! not `Send` and cannot reach another thread's queue.
+//! not `Send` on its own: it moves only inside the context that owns this pool.
 //!
 //! Only transient contents may be leased. Outputs, resident nodes and
 //! never-released nodes keep slots of their own (`lay_out_packed` puts exactly
@@ -63,6 +64,11 @@ impl TransientPool {
     /// [`Self::lease`], plus whether the buffer was joined (`true`) or freshly
     /// allocated (`false`): the per-lease record a test reads instead of a
     /// process-wide allocation counter other threads also move.
+    /// Exchanges the pooled handle with `other`; a context swaps its own in and out.
+    pub(super) fn swap_live(&self, other: &mut Weak<MetalBuffer>) {
+        core::mem::swap(&mut *self.live.borrow_mut(), other);
+    }
+
     pub(super) fn lease_outcome(
         &self,
         owner: &'static str,

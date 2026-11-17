@@ -44,6 +44,7 @@ use proxima_telemetry::{debug, error, warn};
 use super::block_bloom::{BlockBloom, content_hashes};
 use super::chunk_shift::MovedRun;
 use super::prefix_trie::{PrefixTrie, SubBlock, TrieError};
+use super::prewarm_gate::PendingRequest;
 use super::*;
 
 /// Length of the shared token prefix of `left` and `right`.
@@ -1687,11 +1688,52 @@ impl<'file> LoadedModel<'file> {
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
         self.admit_recurrent(serving_config)?;
         let pending = self.prewarm_gate.enter_request();
-        // the gate serializes requests on this model; the context puts its buffers and mapping on this thread for the request
+        // the gate serializes requests on this model; the context puts its buffers, mapping and resident plans on this thread for the request
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut serving = proxima_primitives::driver::block_on(self.serving.lock());
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let _active = serving.metal_mut().activate();
+        let _active = serving.activate();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        runtime.resume_active();
+        let outcome = self.run_decode_loop_through_cache_active(
+            ids,
+            turn_ends,
+            max_tokens,
+            serving_config,
+            runtime,
+            token_override,
+            logits_sink,
+            node_values_sink,
+            on_token,
+            seed,
+            force_two_range,
+            speculative_stats,
+            forced_draft_width,
+            pending,
+        );
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        runtime.park_active();
+        outcome
+    }
+
+    #[allow(clippy::too_many_arguments)] // the wrapper's parameter list plus the request token
+    fn run_decode_loop_through_cache_active(
+        &self,
+        ids: Vec<u32>,
+        turn_ends: &[usize],
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+        token_override: Option<&[u32]>,
+        logits_sink: &mut LogitsSink,
+        node_values_sink: &mut NodeValuesSink,
+        on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
+        seed: Option<PrefixState>,
+        force_two_range: bool,
+        speculative_stats: Option<&mut SpeculativeDecodeStats>,
+        forced_draft_width: Option<u16>,
+        pending: PendingRequest<'_>,
+    ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
         let config = serving_config.prompt_cache;
         let cacheable = config.is_enabled()
             && seed.is_none()

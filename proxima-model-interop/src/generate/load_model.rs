@@ -1095,15 +1095,9 @@ pub struct LoadedModel<'file> {
     pub(super) prompt_cache: Mutex<super::PromptCache>,
     /// Weights and expert-sidecar mapping tracker; `None` leaves the model without idle or pressure release.
     pub(super) residency: Option<Arc<crate::mapped_residency::MappedResidency<'file>>>,
-    /// This model's identity for [`super::resident_plans`]: every thread's
-    /// resident decode plans hold only a `Weak` to it, so dropping the model,
-    /// or replacing the token because a `&mut self` method changed what a
-    /// plan was built against ([`Self::attach_indexed_expert_sidecar`]),
-    /// orphans them.
-    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    pub(super) plan_life: Arc<()>,
     /// Everything this model's requests share on the device: the checkpoint mapping
-    /// registration, the weight buffers, the queue and residency set. A request holds
+    /// registration, the weight buffers, the queue and residency set, and the resident plans
+    /// with the transient pools their leases point into. A request holds
     /// the gate for its whole decode and activates the context on its own thread
     /// ([`super::serving_context`]'s module doc), so any thread can serve the model.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -1399,31 +1393,6 @@ fn block_host_range(block: &QuantizedBlock<'_>) -> Range<usize> {
         QuantizedBlock::Int32(values) => host_range(values),
         QuantizedBlock::Packed { bytes, .. } | QuantizedBlock::PackedStrided { bytes, .. } => {
             host_range(bytes)
-        }
-    }
-}
-
-/// Releases every device buffer this checkpoint's own load caused: the
-/// no-copy/resident-copy buffers keyed under `Self::resident_names`, and
-/// (GGUF checkpoints only -- see `Self::checkpoint_mapping`'s own doc) the
-/// whole-mapping no-copy buffer `omega::backend::register_checkpoint_mapping`
-/// registered. Both releases are BY NAME/IDENTITY, never a blanket cache
-/// clear, so a second `LoadedModel` loaded on this same thread keeps its
-/// own weights resident regardless of drop order -- see
-/// `omega::metal::release_resident_names`'s and
-/// `omega::metal::unregister_checkpoint_mapping`'s own docs for the
-/// mechanism. A no-op unless this build was compiled with the `metal`
-/// feature: the CPU evaluator has no device buffer to release.
-#[cfg(feature = "gpu")]
-impl Drop for LoadedModel<'_> {
-    fn drop(&mut self) {
-        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        {
-            // orphan, then free, this thread's resident plans before the
-            // checkpoint mapping they were built over goes away; other
-            // threads free theirs on their next access
-            self.plan_life = Arc::new(());
-            super::resident_plans::release_orphans();
         }
     }
 }

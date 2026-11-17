@@ -142,7 +142,7 @@ fn a_zero_prefill_budget_rebuilds_the_prompt_plan_and_keeps_only_the_decode_plan
             "with no prefill budget the next generation builds the prompt plan again"
         );
         assert_eq!(
-            resident_plans::resident_wide_len(&model.plan_life),
+            context_wide_len(model),
             0,
             "no prompt-width plan outlives the generation that built it"
         );
@@ -173,7 +173,7 @@ fn a_prompt_of_another_length_leaves_the_first_prompt_plan_resident() {
             "the first prompt's plan survived the other prompt's miss"
         );
         assert_eq!(
-            resident_plans::resident_wide_len(&model.plan_life),
+            context_wide_len(model),
             2,
             "both prompt-shaped plans are resident"
         );
@@ -200,7 +200,7 @@ fn a_runtime_built_with_new_keeps_every_plan_call_local() {
             "the control: with nothing resumed the next generation builds both again"
         );
         assert_eq!(
-            resident_plans::resident_len(&model.plan_life),
+            context_len(model),
             0,
             "a call-local runtime leaves nothing resident"
         );
@@ -257,20 +257,23 @@ fn a_changed_dispatch_type_does_not_resume_the_resident_plan() {
 }
 
 #[test]
-fn dropping_the_model_frees_the_plans_it_left_resident() {
+fn the_context_keeps_the_plans_a_generation_left_resident_and_the_thread_keeps_none() {
     with_model(|model| {
         generate(model, &serving_config());
-        assert_eq!(
-            resident_plans::resident_len(&model.plan_life),
-            2,
-            "one decode plan and one prompt-shaped plan stay resident after a generation"
-        );
-        assert_eq!(resident_plans::entry_count(), 1);
-    });
 
-    assert_eq!(
-        resident_plans::entry_count(),
-        0,
-        "the model's drop releases the plans this thread held for it"
-    );
+        assert_eq!(
+            context_len(model),
+            2,
+            "one decode plan and one prompt-shaped plan stay resident in the context after a generation"
+        );
+        assert_eq!(resident_plans::resident_len(), 0, "the thread keeps none of them");
+    });
+}
+
+fn context_len(model: &LoadedModel<'_>) -> usize {
+    proxima_primitives::driver::block_on(model.serving.lock()).plan_count()
+}
+
+fn context_wide_len(model: &LoadedModel<'_>) -> usize {
+    proxima_primitives::driver::block_on(model.serving.lock()).wide_plan_count()
 }

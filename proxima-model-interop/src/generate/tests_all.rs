@@ -2883,8 +2883,6 @@ pub(super) mod memory_fit_gate_tests {
             prompt_cache: Mutex::new(crate::generate::PromptCache::new()),
             residency: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            plan_life: crate::generate::Arc::new(()),
-            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             serving: crate::generate::AsyncMutex::new(crate::generate::ServingContext::new()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_buffer_source: None,

@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 use core::mem;
 use std::collections::BTreeMap;
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use objc2::rc::Retained;
 use objc2::runtime::ProtocolObject;
@@ -11,13 +11,13 @@ use objc2_metal::{MTLCommandQueue, MTLResidencySet};
 use super::arena_encode_dispatch_finish::{
     CAPTURE_DUMP_PENDING, CAPTURE_LIVE_PENDING, CaptureDumpEntry, CapturedDispatch,
 };
-use super::device_buffers_arena_plan::{EXPERT_SOURCE_CACHE, StagedExpertSource};
-use super::device_buffers_arena_plan::ACTIVE_QUEUE;
+use super::device_buffers_arena_plan::{ACTIVE_QUEUE, EXPERT_SOURCE_CACHE, StagedExpertSource};
 use super::metal_device::{ACTIVE_DEVICE, MetalDevice};
 use super::pipeline_buffers_upload::{CHECKPOINT_MAPPING, NOCOPY_BUFFERS};
 use super::resident_nocopy_cache::{
     FAULT_BUFFER_POOL, RESIDENT_BUFFERS, UNIFORM_BUFFERS, UNIFORM_CACHE_CLOCK,
 };
+use super::shared_transient::{ARENA_TRANSIENT, ATTENTION_SCRATCH_TRANSIENT};
 use super::warm_resident_buffers::{WARM_RESIDENCY_SET, warm_active_context};
 use super::{MetalBuffer, NodeId};
 
@@ -40,6 +40,8 @@ pub struct MetalContext {
     uniforms: UniformBuffers,
     uniform_clock: u64,
     fault_buffers: FaultBuffers,
+    arena_transient: Weak<MetalBuffer>,
+    attention_transient: Weak<MetalBuffer>,
     queue: Option<Retained<ProtocolObject<dyn MTLCommandQueue>>>,
     device: Option<MetalDevice>,
     residency: Option<Retained<ProtocolObject<dyn MTLResidencySet>>>,
@@ -73,6 +75,15 @@ impl MetalContext {
     #[must_use]
     pub fn residency(&self) -> Option<&ProtocolObject<dyn MTLResidencySet>> {
         self.residency.as_deref()
+    }
+
+    /// weak handles to the pooled arena and attention-scratch buffers while this context is
+    /// inactive. They hold no allocation alive: once every plan leasing a buffer and the
+    /// context itself are gone, `upgrade` returns `None`, which is how a test reads that
+    /// dropping a model released its Metal buffers.
+    #[must_use]
+    pub fn transient_handles(&self) -> (Weak<MetalBuffer>, Weak<MetalBuffer>) {
+        (self.arena_transient.clone(), self.attention_transient.clone())
     }
 
     /// warms this context's resident buffers on its own queue: activates itself,
@@ -121,6 +132,11 @@ impl MetalContext {
     }
 
     fn swap_scratch(&mut self) {
+        self.swap_buffer_caches();
+        self.swap_transient();
+    }
+
+    fn swap_buffer_caches(&mut self) {
         UNIFORM_BUFFERS.with(|uniforms| {
             UNIFORM_CACHE_CLOCK.with(|clock| {
                 FAULT_BUFFER_POOL.with(|faults| {
@@ -133,6 +149,12 @@ impl MetalContext {
                 });
             });
         });
+    }
+
+    fn swap_transient(&mut self) {
+        ARENA_TRANSIENT.with(|arena| arena.swap_live(&mut self.arena_transient));
+        ATTENTION_SCRATCH_TRANSIENT
+            .with(|attention| attention.swap_live(&mut self.attention_transient));
     }
 
     fn swap_caches(&mut self) {

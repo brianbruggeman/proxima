@@ -96,7 +96,25 @@ impl LoadedModel<'_> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut serving = proxima_primitives::driver::block_on(self.serving.lock());
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let _active = serving.metal_mut().activate();
+        let _active = serving.activate();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        runtime.resume_active();
+        let drafts = self.follow_up_branches_active(base_ids, serving_config, runtime, forced_draft_width, on_branch, &closing);
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        runtime.park_active();
+        drafts
+    }
+
+    fn follow_up_branches_active(
+        &self,
+        base_ids: &[u32],
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+        forced_draft_width: Option<u16>,
+        on_branch: &mut dyn FnMut(usize),
+        closing: &[u32],
+    ) -> Result<Vec<Vec<u32>>, InteropError> {
+        let config = serving_config.prompt_cache;
         if self.prewarm_gate.request_waiting() {
             return Ok(Vec::new());
         }
@@ -125,7 +143,7 @@ impl LoadedModel<'_> {
             let drafted = self.draft_branch(
                 &base,
                 base_ids,
-                &closing,
+                closing,
                 index,
                 serving_config,
                 runtime,

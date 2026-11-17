@@ -2957,7 +2957,6 @@ impl<'file> LoadedModel<'file> {
             prompt_cache: Mutex::new(PromptCache::new()),
             residency: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            plan_life: Arc::new(()),
             
             serving: AsyncMutex::new(serving_context),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3192,8 +3191,6 @@ impl<'file> LoadedModel<'file> {
             expert_sidecar: None,
             prompt_cache: Mutex::new(PromptCache::new()),
             residency: None,
-            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-            plan_life: Arc::new(()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             serving: AsyncMutex::new(ServingContext::new()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

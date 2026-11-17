@@ -2517,7 +2517,7 @@ impl<'file> LoadedModel<'file> {
         {
             // resident decode plans were built against the whole-checkpoint
             // mapping unregistered just above
-            self.plan_life = Arc::new(());
+            proxima_primitives::driver::block_on(self.serving.lock()).clear_plans();
         }
         Ok(())
     }
@@ -2832,7 +2832,7 @@ impl<'file> LoadedModel<'file> {
     /// instead when the call must start from empty plans.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) fn backend_runtime(&self, serving_config: &ServingConfig) -> BackendRuntime {
-        BackendRuntime::resuming(&self.plan_life, serving_config)
+        BackendRuntime::resuming(serving_config)
     }
 
     #[cfg(all(feature = "cuda", not(all(feature = "metal-output-placement", target_os = "macos"))))]
@@ -8703,7 +8703,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut serving = proxima_primitives::driver::block_on(self.serving.lock());
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let _active = serving.metal_mut().activate();
+        let _active = serving.activate();
         let (mut runtime, _pinned) = self.pinned_runtime(&serving_config);
         apply_serving_config(&serving_config, ids.len())?;
         let inputs = build_position_inputs(

@@ -175,7 +175,6 @@ impl LoadedModel<'_> {
         self.prewarm_ids(ids, &effective, &mut runtime, None, on_chunk)
     }
 
-    #[allow(clippy::too_many_lines)] // one flow: gate, lookup, chunked prefill, store, report
     pub(super) fn prewarm_ids(
         &self,
         ids: &[u32],
@@ -199,7 +198,25 @@ impl LoadedModel<'_> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut serving = proxima_primitives::driver::block_on(self.serving.lock());
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let _active = serving.metal_mut().activate();
+        let _active = serving.activate();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        runtime.resume_active();
+        let outcome = self.prewarm_ids_active(ids, serving_config, runtime, forced_draft_width, on_chunk);
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        runtime.park_active();
+        outcome
+    }
+
+    #[allow(clippy::too_many_lines)] // one flow: lookup, chunked prefill, store, report
+    fn prewarm_ids_active(
+        &self,
+        ids: &[u32],
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+        forced_draft_width: Option<u16>,
+        on_chunk: &mut dyn FnMut(usize),
+    ) -> Result<PrewarmReport, InteropError> {
+        let config = serving_config.prompt_cache;
         if self.prewarm_gate.request_waiting() {
             return Ok(PrewarmReport::idle(None, true));
         }

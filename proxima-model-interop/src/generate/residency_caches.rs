@@ -3184,7 +3184,7 @@ pub struct BackendRuntime {
     /// The model token and numeric identity [`Self::decode_plans`] return to
     /// on drop; `None` for a runtime built by [`Self::new`] directly.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    resident_home: Option<(Arc<()>, resident_plans::PlanIdentity)>,
+    resident_home: Option<resident_plans::PlanIdentity>,
     pub(crate) plan_hits: usize,
     pub(crate) plan_misses: usize,
     /// `(state input, state output)` pairs the next CUDA evaluation keeps on the device; empty
@@ -3243,7 +3243,32 @@ pub struct BackendRuntime {
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 impl Drop for BackendRuntime {
     fn drop(&mut self) {
-        if let Some((owner, identity)) = self.resident_home.take() {
+        self.park_active();
+    }
+}
+
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+impl BackendRuntime {
+    /// Takes the active context's plans when this runtime holds none, for a runtime
+    /// built before the request activated its context.
+    pub(super) fn resume_active(&mut self) {
+        let Some(identity) = self.resident_home else {
+            return;
+        };
+        if !self.decode_plans.is_empty() || !self.placed_plans.is_empty() || !self.kv_buffers.is_empty() {
+            return;
+        }
+        let resident = resident_plans::take(&identity);
+        self.decode_plans = resident.decode;
+        self.placed_plans = resident.wide;
+        self.placed_order = resident.wide_order;
+        self.kv_buffers = resident.kv_buffers;
+    }
+
+    /// Returns the plans to the active context's slot; called before the request
+    /// deactivates it, and again from `Drop`, where it finds nothing left to return.
+    pub(super) fn park_active(&mut self) {
+        if let Some(identity) = self.resident_home {
             let mut wide = core::mem::take(&mut self.placed_plans);
             wide.retain(|key, _| key.0 > 1);
             let mut wide_order = core::mem::take(&mut self.placed_order);
@@ -3260,7 +3285,7 @@ impl Drop for BackendRuntime {
                 wide_order,
                 kv_buffers: core::mem::take(&mut self.kv_buffers),
             };
-            resident_plans::put(&owner, identity, plans);
+            resident_plans::put(identity, plans);
         }
     }
 }
@@ -3348,22 +3373,22 @@ impl BackendRuntime {
         }
     }
 
-    /// A runtime that resumes `owner`'s resident decode plans on this thread
+    /// A runtime that resumes the active context's resident plans on this thread
     /// when they were built under the same [`resident_plans::PlanIdentity`]
     /// as `config`, and returns them on drop. The plain [`Self::new`] keeps
     /// every plan call-local. Only a Gpu runtime resumes anything: the
     /// plans are Metal plans.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    pub(super) fn resuming(owner: &Arc<()>, config: &ServingConfig) -> Self {
+    pub(super) fn resuming(config: &ServingConfig) -> Self {
         let mut runtime = Self::new(config);
         if runtime.is_metal() {
             let identity = resident_plans::PlanIdentity::of(config);
-            let resident = resident_plans::take(owner, &identity);
+            let resident = resident_plans::take(&identity);
             runtime.decode_plans = resident.decode;
             runtime.placed_plans = resident.wide;
             runtime.placed_order = resident.wide_order;
             runtime.kv_buffers = resident.kv_buffers;
-            runtime.resident_home = Some((Arc::clone(owner), identity));
+            runtime.resident_home = Some(identity);
         }
         runtime
     }

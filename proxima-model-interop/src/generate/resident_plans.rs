@@ -13,25 +13,23 @@
 //! `ServingConfig::resident_prefill_plan_bytes` of output slots, least
 //! recently used leaving first ([`evict_to`], [`make_room`]).
 //!
-//! A [`Plan`] holds `objc2` `Retained` Metal objects, which are not `Send`, so
-//! it cannot live on [`LoadedModel`] behind a `Mutex` without making the model
-//! `!Sync` (it is served from a `SendPipe` behind an `Arc`). It lives in
-//! thread-local storage under that constraint: a thread reuses the plans it
-//! built itself. (Compiled pipelines are `Send + Sync` and are shared per
-//! device by `omega::metal::MetalDevice`, not per thread.)
+//! A [`Plan`] holds `objc2` `Retained` Metal objects and `Rc` leases into the
+//! transient pools of `omega::metal::MetalContext`, so it is not `Send`. The
+//! plans live in [`ResidentStore`], a field of `ServingContext` beside that
+//! context: the plans and the pools their leases point into move as one
+//! closed graph, so any thread that serves the model resumes the plans
+//! another thread built. (Compiled pipelines are `Send + Sync` and are shared
+//! per device by `omega::metal::MetalDevice`.)
 //!
-//! Ownership: [`LoadedModel::plan_life`] is the model's identity. An entry
-//! holds only a [`Weak`] to it, so dropping the model orphans every thread's
-//! entry and the next access on that thread frees it; replacing the token
-//! (what `&mut self` methods that change the model do) orphans them the same
-//! way. Nothing is held across a decode: [`BackendRuntime`] takes the entry at
-//! construction and puts it back in `Drop`.
+//! Ownership: the context owns the store; dropping the model drops the
+//! plans. While a request holds the context active, the store sits in this
+//! thread's active slot; [`BackendRuntime`] takes the plans at construction
+//! and puts them back in `Drop`.
 //!
 //! Composes: [`CacheKey`](super::prompt_cache_key::CacheKey)'s rule, that a
 //! [`ServingConfig`] field is either in the key or named `_` with the reason.
 
 use alloc::collections::BTreeMap;
-use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
@@ -276,44 +274,58 @@ impl PlanIdentity {
     }
 }
 
-struct Resident {
-    owner: Weak<()>,
-    identity: PlanIdentity,
+/// One model's resident plans and the [`PlanIdentity`] they were built under.
+/// `ServingContext` owns one; activating the context swaps it into this
+/// thread's active slot for a request, and the swap back on the guard's drop
+/// returns it. Plans change threads only inside that context, together with
+/// the transient pools their `Rc` leases point into.
+#[derive(Default)]
+pub(super) struct ResidentStore {
+    identity: Option<PlanIdentity>,
     plans: ResidentPlans,
 }
 
+impl ResidentStore {
+    #[cfg(test)]
+    pub(super) fn wide_count(&self) -> usize {
+        self.plans.wide.len()
+    }
+
+    /// Decode and wide plans held.
+    #[cfg(test)]
+    pub(super) fn plan_count(&self) -> usize {
+        self.plans.decode.len() + self.plans.wide.len()
+    }
+
+    /// Exchanges this store with the calling thread's active slot.
+    pub(super) fn swap_active(&mut self) {
+        ACTIVE.with(|slot| core::mem::swap(self, &mut *slot.borrow_mut()));
+    }
+}
+
 thread_local! {
-    static RESIDENT: RefCell<Vec<Resident>> = const { RefCell::new(Vec::new()) };
+    /// The store of the context active on this thread; empty when none is.
+    static ACTIVE: RefCell<ResidentStore> = RefCell::new(ResidentStore::default());
 }
 
-fn sweep_orphans(entries: &mut Vec<Resident>) {
-    entries.retain(|entry| entry.owner.strong_count() > 0);
+/// Frees every plan in the calling thread's active slot.
+pub(super) fn clear_active() {
+    drop(ACTIVE.with(|slot| core::mem::take(&mut *slot.borrow_mut())));
 }
 
-/// Frees every entry on this thread whose model is gone.
-pub(super) fn release_orphans() {
-    RESIDENT.with(|cell| sweep_orphans(&mut cell.borrow_mut()));
+/// Removes and returns the active store's plans when they were built under
+/// `identity`; plans built under anything else are dropped, not returned.
+pub(super) fn take(identity: &PlanIdentity) -> ResidentPlans {
+    let store = ACTIVE.with(|slot| core::mem::take(&mut *slot.borrow_mut()));
+    match store.identity {
+        Some(held) if held == *identity => store.plans,
+        _ => ResidentPlans::default(),
+    }
 }
 
-/// Removes and returns `owner`'s resident plans when they were built under
-/// `identity`; an entry built under anything else is dropped, not returned.
-pub(super) fn take(owner: &Arc<()>, identity: &PlanIdentity) -> ResidentPlans {
-    RESIDENT.with(|cell| {
-        let mut entries = cell.borrow_mut();
-        sweep_orphans(&mut entries);
-        let position = entries
-            .iter()
-            .position(|entry| Weak::ptr_eq(&entry.owner, &Arc::downgrade(owner)));
-        match position.map(|index| entries.swap_remove(index)) {
-            Some(entry) if entry.identity == *identity => entry.plans,
-            _ => ResidentPlans::default(),
-        }
-    })
-}
-
-/// Stores `plans` as `owner`'s resident entry on this thread. Nothing to keep
+/// Stores `plans` in the active slot under `identity`. Nothing to keep
 /// stores nothing.
-pub(super) fn put(owner: &Arc<()>, identity: PlanIdentity, plans: ResidentPlans) {
+pub(super) fn put(identity: PlanIdentity, plans: ResidentPlans) {
     if plans.is_empty() {
         return;
     }
@@ -327,14 +339,11 @@ pub(super) fn put(owner: &Arc<()>, identity: PlanIdentity, plans: ResidentPlans)
         kv_bytes = kv_bytes(&plans.kv_buffers) as u64,
         "resident_plans_held"
     );
-    RESIDENT.with(|cell| {
-        let mut entries = cell.borrow_mut();
-        sweep_orphans(&mut entries);
-        entries.push(Resident {
-            owner: Arc::downgrade(owner),
-            identity,
+    ACTIVE.with(|slot| {
+        *slot.borrow_mut() = ResidentStore {
+            identity: Some(identity),
             plans,
-        });
+        };
     });
 }
 
@@ -463,35 +472,12 @@ pub(super) fn make_room<Entry>(
     )
 }
 
-/// Plans `owner` holds resident on this thread right now, decode and wide.
+/// Plans the active slot holds right now, decode and wide.
 #[cfg(test)]
-pub(super) fn resident_len(owner: &Arc<()>) -> usize {
-    RESIDENT.with(|cell| {
-        cell.borrow()
-            .iter()
-            .filter(|entry| Weak::ptr_eq(&entry.owner, &Arc::downgrade(owner)))
-            .map(|entry| entry.plans.decode.len() + entry.plans.wide.len())
-            .sum()
-    })
+pub(super) fn resident_len() -> usize {
+    ACTIVE.with(|slot| slot.borrow().plan_count())
 }
 
-/// Wide plans `owner` holds resident on this thread right now.
-#[cfg(test)]
-pub(super) fn resident_wide_len(owner: &Arc<()>) -> usize {
-    RESIDENT.with(|cell| {
-        cell.borrow()
-            .iter()
-            .filter(|entry| Weak::ptr_eq(&entry.owner, &Arc::downgrade(owner)))
-            .map(|entry| entry.plans.wide.len())
-            .sum()
-    })
-}
-
-/// Entries this thread holds, for any model.
-#[cfg(test)]
-pub(super) fn entry_count() -> usize {
-    RESIDENT.with(|cell| cell.borrow().len())
-}
 
 #[cfg(test)]
 mod tests {
@@ -773,12 +759,12 @@ mod tests {
 
     #[test]
     fn an_empty_resident_set_is_not_stored() {
-        let owner = Arc::new(());
         let identity = PlanIdentity::of(&ServingConfig::default());
 
-        put(&owner, identity, ResidentPlans::default());
+        put(identity, ResidentPlans::default());
 
-        assert_eq!(entry_count(), 0);
+        assert_eq!(resident_len(), 0);
+        assert!(ACTIVE.with(|slot| slot.borrow().identity.is_none()));
     }
 
     #[test]
