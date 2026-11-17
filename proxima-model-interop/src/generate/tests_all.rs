@@ -2885,6 +2885,8 @@ pub(super) mod memory_fit_gate_tests {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: crate::generate::Arc::new(()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            serving: crate::generate::AsyncMutex::new(crate::generate::ServingContext::new()),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_buffer_source: None,
             #[cfg(feature = "cuda")]
             cuda_resident: crate::generate::Arc::default(),

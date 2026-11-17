@@ -32,8 +32,7 @@ impl LoadedModel<'_> {
     /// the first command buffer that references them, when
     /// [`ServingConfig::warm_model_buffers_at_load`] asks for it. Returns how
     /// many buffers were declared; `Ok(0)` when the setting is off or the
-    /// configuration does not keep the mapping. Must run on the thread that
-    /// will serve: the buffer caches are thread-local.
+    /// configuration does not keep the mapping.
     #[cfg(all(feature = "metal", target_os = "macos"))]
     pub fn warm_resident_buffers(
         &self,
@@ -42,6 +41,12 @@ impl LoadedModel<'_> {
         if !should_warm(serving_config, self.has_experts) {
             return Ok(0);
         }
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        {
+            let mut serving = proxima_primitives::driver::block_on(self.serving.lock());
+            serving.metal_mut().warm().map_err(InteropError::from)
+        }
+        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
         omega::metal::warm_resident_buffers().map_err(InteropError::from)
     }
 }

@@ -1098,3 +1098,18 @@ fn a_requested_early_residual_evaluates_through_the_f64_norm_islands() {
         values[0]
     );
 }
+
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+#[test]
+fn two_models_loaded_in_sequence_on_one_thread_each_evaluate_through_their_own_context() {
+    let bytes = tiny_ouro_gguf(2, false);
+    let parsed = parse_complete(&bytes).expect("parse the tiny recurrent GGUF");
+    let config = ServingConfig::default();
+
+    let first = LoadedModel::load(&parsed, &bytes).expect("load the first model");
+    near(&logits_of(&first, &config), &second_pass());
+    drop(first);
+
+    let second = LoadedModel::load(&parsed, &bytes).expect("load the second model");
+    near(&logits_of(&second, &config), &second_pass());
+}

@@ -67,6 +67,10 @@ use proxima_numeric::{NumericFormat, PackedRows};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::sync::blocking::Mutex;
+
+use proxima_primitives::sync::AsyncMutex;
+
+use serving_context::ServingContext;
 #[cfg(any(
     not(feature = "gpu"),
     all(feature = "instrument", feature = "metal", target_os = "macos")
@@ -114,7 +118,7 @@ use omega::backend::{
 // only the metal-gated `SharedWeights` drop calls these; ungated, they are unused on cuda-only builds.
 #[cfg(feature = "cuda")]
 use omega::backend::release_resident_ranges;
-#[cfg(feature = "metal")]
+#[cfg(all(feature = "metal", not(all(feature = "metal-output-placement", target_os = "macos"))))]
 use omega::backend::{release_resident_names, unregister_checkpoint_mapping};
 // `set_math_mode` (unlike `mark_resident` above) takes `metal::MathMode` in
 // its own signature, so unlike the ungated import above it needs the same
@@ -296,6 +300,8 @@ mod prefix_trie;
 mod prewarm;
 mod prewarm_follow_up;
 mod prewarm_gate;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+mod serving_context;
 mod prewarm_queue;
 #[cfg(all(test, feature = "metal", target_os = "macos"))]
 mod prewarm_real_model_tests;

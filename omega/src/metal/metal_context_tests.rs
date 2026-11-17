@@ -9,7 +9,8 @@ use super::super::MetalError;
 use super::super::arena_encode_dispatch_finish::read_back_as_device_f32;
 use super::super::device_buffers_arena_plan::device_and_queue;
 use super::super::pipeline_buffers_upload::{
-    CHECKPOINT_MAPPING, page_size, register_checkpoint_mapping, reset_checkpoint_mapping_for_test,
+    CHECKPOINT_MAPPING, checkpoint_mapping_offset, page_size, register_checkpoint_mapping,
+    reset_checkpoint_mapping_for_test,
 };
 use super::super::resident_nocopy_cache::{
     release_resident_names, reset_nocopy_cache_for_test, reset_resident_cache_for_test,
@@ -382,4 +383,50 @@ fn new_context_owns_the_queue_it_is_given_and_default_owns_none() {
     );
     assert!(context.residency().is_none());
     assert!(MetalContext::default().queue().is_none());
+}
+
+/// a context moves between threads only at quiescence; this test-only carrier
+/// stands in for the owner (`ServingContext` in proxima-model-interop) whose
+/// audited `Send` impl lets a model hand its context to a serving thread.
+struct QuiescentContext(MetalContext);
+
+// SAFETY: the context holds no buffers here and is used by one thread at a time.
+unsafe impl Send for QuiescentContext {}
+
+/// ragd serves each request from a fresh thread while the model loaded on
+/// another. The mapping is registered into the model's context, so a thread
+/// that activates that context resolves a tensor's offset inside it.
+#[test]
+fn checkpoint_mapping_resolves_on_a_thread_that_did_not_register_it() {
+    let Ok((_device, _queue)) = device_and_queue() else {
+        return;
+    };
+    reset_checkpoint_mapping_for_test();
+    let page = page_size();
+    let mapping = proxima_tensor::AlignedBuffer::new(2 * page / size_of::<f32>(), page)
+        .expect("page-aligned fixture standing in for a loaded checkpoint mmap");
+    // SAFETY: the buffer owns `2 * page` bytes for the whole test.
+    let mapping_bytes = unsafe { core::slice::from_raw_parts(mapping.as_ptr().cast::<u8>(), 2 * page) };
+    let tensor = &mapping_bytes[page + 64..page + 64 + 4096];
+    let (tensor_address, tensor_length) = (tensor.as_ptr() as usize, tensor.len());
+
+    let mut context = MetalContext::default();
+    {
+        let _active = context.activate();
+        register_checkpoint_mapping(mapping_bytes);
+    }
+    assert_eq!(checkpoint_identity(), None, "registration stays in the context, off the loading thread");
+
+    let carried = QuiescentContext(context);
+    let resolved = std::thread::spawn(move || {
+        let mut carried = carried;
+        let (device, _queue) = device_and_queue().expect("a second thread opens a device");
+        let _active = carried.0.activate();
+        checkpoint_mapping_offset(&device, tensor_address as *const _, tensor_length)
+            .map(|resolved| resolved.expect("the whole mapping binds without copying").1)
+    })
+    .join()
+    .expect("serving thread did not panic");
+
+    assert_eq!(resolved, Some(page + 64));
 }

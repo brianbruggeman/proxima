@@ -1687,6 +1687,11 @@ impl<'file> LoadedModel<'file> {
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
         self.admit_recurrent(serving_config)?;
         let pending = self.prewarm_gate.enter_request();
+        // the gate serializes requests on this model; the context puts its buffers and mapping on this thread for the request
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut serving = proxima_primitives::driver::block_on(self.serving.lock());
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let _active = serving.metal_mut().activate();
         let config = serving_config.prompt_cache;
         let cacheable = config.is_enabled()
             && seed.is_none()

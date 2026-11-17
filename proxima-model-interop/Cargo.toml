@@ -325,7 +325,7 @@ prime = { package = "proxima-prime", version = "0.1.0", path = "../prime", featu
 proxima-autograd = { version = "0.1.0", path = "../proxima-autograd", optional = true }
 proxima-core = { workspace = true, features = ["alloc"], optional = true }
 proxima-gguf = { path = "../proxima-gguf", version = "0.1.0", default-features = false }
-proxima-primitives = { workspace = true, default-features = false }
+proxima-primitives = { workspace = true, default-features = false, features = ["async-mutex"] }
 proxima-safetensors = { path = "../proxima-safetensors", version = "0.1.0", default-features = false, features = ["alloc"] }
 proxima-storage = { version = "0.1.0", path = "../proxima-storage", optional = true }
 proxima-telemetry = { workspace = true, optional = true }

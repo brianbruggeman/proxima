@@ -1102,6 +1102,12 @@ pub struct LoadedModel<'file> {
     /// orphans them.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) plan_life: Arc<()>,
+    /// Everything this model's requests share on the device: the checkpoint mapping
+    /// registration, the weight buffers, the queue and residency set. A request holds
+    /// the gate for its whole decode and activates the context on its own thread
+    /// ([`super::serving_context`]'s module doc), so any thread can serve the model.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) serving: AsyncMutex<ServingContext>,
     #[cfg(feature = "cuda")]
     pub(super) cuda_resident: Arc<super::cuda_resident_plans::CudaResidentPlans>,
     /// Where the device-resident kv buffers of a decode come from: `None` is `allocate_placed_buffer` through the resident store (`ServingConfig::resident_kv_bytes`), which a finished generation hands its buffers back to; `Some` is a caller's replacement, asked per buffer every generation and never pooled because the memory behind its buffers is the caller's. Placement only, so no cache key changes: the same values land in other memory.
@@ -1295,8 +1301,11 @@ pub(super) struct SharedWeights<'file> {
     #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
     resident_identity: Arc<()>,
     #[cfg_attr(
-        not(any(feature = "metal", feature = "cuda")),
-        allow(dead_code, reason = "only `Drop`, itself gpu-driver-gated, reads this")
+        not(any(
+            all(feature = "metal", not(all(feature = "metal-output-placement", target_os = "macos"))),
+            feature = "cuda"
+        )),
+        allow(dead_code, reason = "only `Drop` reads this, and a model-owned context releases the metal mapping")
     )]
     mapping: &'file [u8],
 }
@@ -1330,7 +1339,7 @@ impl Drop for SharedWeights<'_> {
     fn drop(&mut self) {
         #[cfg(feature = "cuda")]
         release_resident_ranges(&self.host_ranges());
-        #[cfg(feature = "metal")]
+        #[cfg(all(feature = "metal", not(all(feature = "metal-output-placement", target_os = "macos"))))]
         self.release_metal_residency();
     }
 }
@@ -1352,7 +1361,7 @@ impl SharedWeights<'_> {
             .collect()
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", not(all(feature = "metal-output-placement", target_os = "macos"))))]
     fn release_metal_residency(&self) {
         let names = self
             .bound

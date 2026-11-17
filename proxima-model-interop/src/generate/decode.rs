@@ -2500,6 +2500,10 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal", target_os = "macos"))]
         {
             sidecar.discard_checkpoint_expert_pages(self.checkpoint_mapping)?;
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            proxima_primitives::driver::block_on(self.serving.lock())
+                .unregister_checkpoint_mapping(self.checkpoint_mapping);
+            #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
             omega::backend::unregister_checkpoint_mapping(self.checkpoint_mapping);
         }
         if let Some(residency) = &self.residency {
@@ -8695,6 +8699,11 @@ not read this cache format; only the single-row decode kernel reads it from the 
         #[cfg(feature = "gpu")]
         validate_omega_runtime_config(&serving_config)?;
         self.apply_context_resolution(&mut serving_config)?;
+        // same gate and activation as `run_decode_loop_through_cache`: without it this evaluation fills the thread's ambient resident cache, which no model owns once it drops
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let mut serving = proxima_primitives::driver::block_on(self.serving.lock());
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let _active = serving.metal_mut().activate();
         let (mut runtime, _pinned) = self.pinned_runtime(&serving_config);
         apply_serving_config(&serving_config, ids.len())?;
         let inputs = build_position_inputs(

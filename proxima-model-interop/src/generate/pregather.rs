@@ -2843,7 +2843,12 @@ impl<'file> LoadedModel<'file> {
         // `omega::metal::register_checkpoint_mapping`'s own doc. `omega` is
         // an optional dependency gated behind the `metal` feature, so this
         // registration is a no-op (compiled out) when that feature is off.
-        #[cfg(feature = "gpu")]
+        // the model owns the mapping registration: a thread serving it later activates this context
+        
+        let mut serving_context = ServingContext::new();
+        
+        serving_context.register_checkpoint_mapping(file_bytes);
+        #[cfg(all(feature = "gpu", not(all(feature = "metal-output-placement", target_os = "macos"))))]
         omega::backend::register_checkpoint_mapping(file_bytes);
         // `crate::memory_fit`'s own load-time gate needs these three sums
         // long after `parsed` has gone out of scope -- computed once, here,
@@ -2953,6 +2958,8 @@ impl<'file> LoadedModel<'file> {
             residency: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
+            
+            serving: AsyncMutex::new(serving_context),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_buffer_source: None,
             #[cfg(feature = "cuda")]
@@ -3187,6 +3194,8 @@ impl<'file> LoadedModel<'file> {
             residency: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             plan_life: Arc::new(()),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            serving: AsyncMutex::new(ServingContext::new()),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_buffer_source: None,
             #[cfg(feature = "cuda")]
