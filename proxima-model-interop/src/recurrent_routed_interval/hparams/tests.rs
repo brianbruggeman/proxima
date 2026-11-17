@@ -8,7 +8,9 @@ use crate::test_support::parsed_header;
 
 /// `qwen3.6:35b-a3b`'s KV-relevant header (`ollama /api/show`,
 /// 2026-09-29): 40 blocks, `head_count_kv` of 2 on every fourth layer
-/// and 0 on the 30 GDN layers, key length 256.
+/// and 0 on the 30 GDN layers, key length 256, `full_attention_interval` 4 and
+/// `expert_count` 256. Those two keys are what select this reader: a header
+/// carrying neither is read as a uniform dense checkpoint.
 #[test]
 fn memory_budget_qwen35moe() {
     let parsed = parsed_header(vec![
@@ -17,6 +19,8 @@ fn memory_budget_qwen35moe() {
             Value::String("qwen35moe".to_string()),
         ),
         ("qwen35moe.block_count", Value::U32(40)),
+        ("qwen35moe.full_attention_interval", Value::U32(4)),
+        ("qwen35moe.expert_count", Value::U32(256)),
         (
             "qwen35moe.attention.head_count_kv",
             Value::Array(MetadataArray::U32(

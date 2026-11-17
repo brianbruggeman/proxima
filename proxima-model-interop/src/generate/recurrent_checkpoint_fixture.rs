@@ -288,15 +288,26 @@ pub(super) fn recurrent_checkpoint_shaped(
         ("ssm.group_count", key_heads),
         ("ssm.time_step_rank", RANK),
         ("ssm.inner_size", INNER),
-        ("expert_count", EXPERTS),
-        ("expert_used_count", 1),
-        ("expert_feed_forward_length", FEED_FORWARD),
-        ("expert_shared_feed_forward_length", FEED_FORWARD),
     ] {
         metadata.push(key(
             &alloc::format!("{family}.{suffix}"),
             MetadataValue::U32(value as u32),
         ));
+    }
+    // a dense checkpoint carries no expert keys: the header reader is chosen by
+    // `{family}.expert_count > 0`, so writing them here selects the routed reader
+    if routed {
+        for (suffix, value) in [
+            ("expert_count", EXPERTS),
+            ("expert_used_count", 1),
+            ("expert_feed_forward_length", FEED_FORWARD),
+            ("expert_shared_feed_forward_length", FEED_FORWARD),
+        ] {
+            metadata.push(key(
+                &alloc::format!("{family}.{suffix}"),
+                MetadataValue::U32(value as u32),
+            ));
+        }
     }
     encode_with(metadata, &tensors, |tensor| {
         quantized && holds_q8_0_blocks(tensor)
