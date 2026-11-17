@@ -1267,14 +1267,14 @@ fn card_14_k_reuse_stages_each_k_fragment_and_preserves_row_masks() {
             .source
             .matches("simdgroup_store(key_even_tile")
             .count(),
-        1
+        2
     );
     assert_eq!(
         shared_k
             .source
             .matches("simdgroup_store(key_odd_tile")
             .count(),
-        1
+        2
     );
     assert!(
         shared_k
