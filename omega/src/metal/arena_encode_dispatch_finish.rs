@@ -37,6 +37,9 @@ use std::borrow::Borrow;
 #[cfg(feature = "metal-plan-stable-buffers")]
 pub(super) struct BufferArena {
     pub(super) slots: Vec<MetalBuffer>,
+    /// Keeps slot 0's buffer in [`ARENA_TRANSIENT`]'s pool while this plan uses it. `None`
+    /// for a whole-slot layout, whose slots mix outputs and residents with transients.
+    pub(super) transient_lease: Option<SharedBuffer>,
     pub(super) slot_bytes: Vec<usize>,
     /// Parallel to `prepared.resolved`. `None` for a position whose node the
     /// caller output-placed when the arena was built: that node is written into
@@ -455,7 +458,18 @@ pub(super) fn build_buffer_arena(
     }
     let layout = packed.unwrap_or_else(|| lay_out_whole_slots(&found.allocations, &found.releases));
     let mut slots: Vec<MetalBuffer> = Vec::with_capacity(layout.slot_bytes.len());
-    for bytes in &layout.slot_bytes {
+    let mut transient_lease = None;
+    for (slot, bytes) in layout.slot_bytes.iter().enumerate() {
+        // slot 0 of a packed layout holds only released, non-resident outputs, dead at the
+        // end of each call, so plans that never overlap in time lease one buffer
+        if was_packed && slot == 0 {
+            let shared = ARENA_TRANSIENT.with(|pool| {
+                pool.lease("arena_slot", device, bytes.div_ceil(4), DType::FLOAT32)
+            })?;
+            slots.push((*shared).clone());
+            transient_lease = Some(shared);
+            continue;
+        }
         slots.push(allocate_buffer_for(
             "arena_slot",
             "plan",
@@ -477,6 +491,7 @@ pub(super) fn build_buffer_arena(
 
     Ok(BufferArena {
         slots,
+        transient_lease,
         position_slot: found
             .primary
             .iter()
@@ -907,20 +922,23 @@ fn scratch_is_shared(bound: &BoundOp, numeric_policy: NumericPolicy) -> bool {
 fn shared_attention_scratch(
     device: &ProtocolObject<dyn MTLDevice>,
     plan: &Plan,
-) -> Result<Option<MetalBuffer>, MetalError> {
+) -> Result<Option<SharedBuffer>, MetalError> {
+    // written by a position's split dispatch and read by its merge dispatch inside one call, so
+    // plans that never overlap in time lease one buffer
     shared_scratch_elements_with_schedule(
         &plan.prepared.resolved,
         plan.numeric_policy,
         plan.attention_row_schedule,
     )
     .map(|elements| {
-        allocate_buffer_for(
-            "attention_scratch",
-            "plan",
-            device,
-            elements as usize,
-            DType::FLOAT32,
-        )
+        ATTENTION_SCRATCH_TRANSIENT.with(|pool| {
+            pool.lease(
+                "attention_scratch",
+                device,
+                elements as usize,
+                DType::FLOAT32,
+            )
+        })
     })
     .transpose()
 }
@@ -950,6 +968,14 @@ fn shared_scratch_elements(resolved: &[BoundOp], numeric_policy: NumericPolicy) 
         numeric_policy,
         crate::msl::AttentionRowSchedule::legacy(),
     )
+}
+
+/// [`Plan::attention_scratch`]'s payload: the per-position buffers, and the lease that keeps
+/// the shared one in [`ATTENTION_SCRATCH_TRANSIENT`]'s pool while this plan uses it.
+#[cfg(feature = "metal-plan-stable-buffers")]
+pub(super) struct PlanAttentionScratch {
+    buffers: Vec<Option<MetalBuffer>>,
+    _lease: Option<SharedBuffer>,
 }
 
 /// [`Plan::attention_scratch`]'s lazy builder, built alongside [`PlanUniforms`]
@@ -986,7 +1012,7 @@ pub(super) fn attention_scratch_buffer(
                         plan.attention_row_schedule,
                     ) =>
                 {
-                    shared.clone()
+                    shared.as_deref().cloned()
                 }
                 Some(elements) => Some(allocate_buffer_for(
                     "attention_scratch",
@@ -999,12 +1025,15 @@ pub(super) fn attention_scratch_buffer(
             };
             buffers.push(buffer);
         }
-        let _ = plan.attention_scratch.set(buffers);
+        let _ = plan.attention_scratch.set(PlanAttentionScratch {
+            buffers,
+            _lease: shared,
+        });
     }
     Ok(plan
         .attention_scratch
         .get()
-        .and_then(|buffers| buffers[position].as_ref())
+        .and_then(|scratch| scratch.buffers[position].as_ref())
         .map(|buffer| (buffer, 0)))
 }
 #[cfg(not(feature = "metal-plan-stable-buffers"))]

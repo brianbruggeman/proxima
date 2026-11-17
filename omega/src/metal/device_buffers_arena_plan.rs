@@ -945,7 +945,7 @@ pub struct Plan {
     /// folding this into the arena's own reuse is free to do so without
     /// changing this field's read side ([`attention_scratch_buffer`]).
     #[cfg(feature = "metal-plan-stable-buffers")]
-    pub(super) attention_scratch: core::cell::OnceCell<Vec<Option<MetalBuffer>>>,
+    pub(super) attention_scratch: core::cell::OnceCell<PlanAttentionScratch>,
     /// Per-position `(pipeline, bindings, grid)` resolved once, lazily, on
     /// this plan's first [`execute_plan_with_placements`] call -- see
     /// [`resolve_steps`]'s own doc for why a hit no longer builds
@@ -2466,6 +2466,23 @@ impl Plan {
         #[cfg(feature = "metal-plan-stable-buffers")]
         {
             Some(self.arena.get()?.slot_count())
+        }
+        #[cfg(not(feature = "metal-plan-stable-buffers"))]
+        {
+            None
+        }
+    }
+
+    /// The address of the device buffer behind the arena's transient slot (slot 0 of a packed
+    /// layout): equal across two plans on one thread exactly when they share it. `None` when
+    /// the feature is off, the plan has never built its arena, or its layout is whole-slot.
+    #[must_use]
+    pub fn arena_transient_buffer_id(&self) -> Option<usize> {
+        #[cfg(feature = "metal-plan-stable-buffers")]
+        {
+            let arena = self.arena.get()?;
+            arena.transient_lease.as_ref()?;
+            Some(Retained::as_ptr(arena.slots.first()?).cast::<u8>() as usize)
         }
         #[cfg(not(feature = "metal-plan-stable-buffers"))]
         {

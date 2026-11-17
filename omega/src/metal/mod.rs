@@ -273,6 +273,8 @@ mod pipeline_buffers_upload;
 mod pipeline_disk_cache;
 #[macro_use]
 mod resident_nocopy_cache;
+#[cfg(feature = "metal-plan-stable-buffers")]
+mod shared_transient;
 mod env_flags;
 mod resident_context;
 mod warm_resident_buffers;
@@ -281,6 +283,8 @@ mod arena_encode_dispatch_finish;
 #[cfg(feature = "metal-plan-stable-buffers")]
 mod arena_layout;
 use arena_encode_dispatch_finish::*;
+#[cfg(feature = "metal-plan-stable-buffers")]
+use shared_transient::*;
 #[cfg(feature = "instrument")]
 pub use arena_encode_dispatch_finish::{
     CapturedDispatch, flush_gpu_caches, take_captured_dispatches, time_empty_command_buffer_gpu_ns,
