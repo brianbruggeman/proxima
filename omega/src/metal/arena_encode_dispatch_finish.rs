@@ -3071,6 +3071,36 @@ impl CapturedDispatch {
     /// [`Self::unreplayable`], the device refuses an allocation, or the
     /// command buffer ends in an error status.
     pub fn time_gpu_ns(&self, batch: usize) -> Result<f64, MetalError> {
+        self.time_gpu_ns_launch(batch, None)
+    }
+
+    /// [`Self::time_gpu_ns`] with the gemm launched the way the live step
+    /// launches a compacted expert-grouped op: indirectly, through the three
+    /// threadgroup-count words at `indirect_offset` bytes into the compaction
+    /// buffer bound at `bindings.len()` (what the prepass of an earlier replay
+    /// left there), instead of the static upper-bound grid.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::time_gpu_ns`], plus [`MetalError::CompileFailed`] when no
+    /// buffer is bound at `bindings.len()`.
+    pub fn time_gpu_ns_indirect(&self, batch: usize, indirect_offset: usize) -> Result<f64, MetalError> {
+        self.time_gpu_ns_launch(batch, Some(indirect_offset))
+    }
+
+    fn time_gpu_ns_launch(&self, batch: usize, indirect_offset: Option<usize>) -> Result<f64, MetalError> {
+        let arguments = match indirect_offset {
+            Some(_) => Some(
+                self.buffers
+                    .iter()
+                    .find(|(index, _, _)| *index == self.bindings.len())
+                    .map(|(_, buffer, offset)| (buffer.clone(), *offset))
+                    .ok_or_else(|| MetalError::CompileFailed {
+                        log: "captured dispatch has no compaction buffer for an indirect launch".to_string(),
+                    })?,
+            ),
+            None => None,
+        };
         if let Some(reason) = &self.unreplayable {
             return Err(MetalError::CompileFailed {
                 log: reason.clone(),
@@ -3106,7 +3136,12 @@ impl CapturedDispatch {
                 prepass.dispatch_passes(&encoder);
                 encoder.setComputePipelineState(&self.pipeline);
             }
-            dispatch(&encoder, &self.pipeline, self.grid);
+            match (&arguments, indirect_offset) {
+                (Some((buffer, base)), Some(offset)) => {
+                    dispatch_indirect(&encoder, &self.pipeline, self.grid, buffer, base + offset);
+                }
+                _ => dispatch(&encoder, &self.pipeline, self.grid),
+            }
         }
         encoder.endEncoding();
         command_buffer.commit();
