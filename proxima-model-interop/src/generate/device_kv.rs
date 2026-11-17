@@ -716,6 +716,12 @@ impl DeviceKv {
     /// Leaves this cache in place as a [`ResidentSlot`] holding `ids`, the positions its rows cover.
     /// Call it only after every command buffer of the request completed, since the slot changes
     /// threads between requests. [`Self::adopt_resident`] is the inverse.
+    ///
+    /// Each sliding layer's `base_position` is the oldest position its buffer holds: `0` until the
+    /// buffer first compacts, then `len - capacity_rows` at most. A slot whose rows were written by
+    /// its own steps, never seeded, keeps that value, so [`DeviceKvLayer::holds_rewind_to`] admits
+    /// a rewind of up to `capacity_rows - retain` rows in place; only a seed pins the base at
+    /// `first_kept(len)` and refuses every rewind.
     #[cfg(test)]
     pub(super) fn into_slot(self, ids: Vec<u32>, key: CacheKey, checkpoints: Vec<RingCheckpoint>) -> ResidentSlot {
         ResidentSlot { ids, key, device: self, checkpoints }
@@ -2171,6 +2177,112 @@ mod tests {
         assert_eq!(sliding.base_position, 10, "the sliding buffer still starts at the position it was seeded from");
         let key = CacheKey::of(&ServingConfig::default(), false, RopeScaling::None, 0, 0);
         device.into_slot((0..ids_len as u32).collect(), key, Vec::new())
+    }
+
+    const UNSEEDED_GRANULE_ROWS: usize = 32;
+    const UNSEEDED_RETAIN: usize = SLIDING_WINDOW;
+
+    /// A sliding layer (no slack, so `retain == window`) and a full layer that start empty and are
+    /// written by decode steps only, never seeded from host rows, until `stop` says the slot is
+    /// ready. Returns the slot and the length it holds.
+    fn decoded_slot(stop: impl Fn(&DeviceKvLayer, usize) -> bool) -> (ResidentSlot, usize) {
+        let mut caches = alloc::vec![
+            LayerCacheState::Attention(test_attention_cache(Some(SLIDING_WINDOW), 0, EVEN_ODD_ROW, V_ROW, 0, 0)),
+            LayerCacheState::Attention(test_attention_cache(None, 0, EVEN_ODD_ROW, V_ROW, 0, 0)),
+        ];
+        let attention = || LayerPadRowWidths::Attention { even_odd_row: EVEN_ODD_ROW, v_row: V_ROW };
+        let mut device = DeviceKv::adopt_pair(
+            &mut caches,
+            &[attention(), attention()],
+            0,
+            (100, 4),
+            (3, 3, UNSEEDED_GRANULE_ROWS),
+            allocate_placed_buffer,
+            (NumericFormat::Float32, NumericFormat::Float32),
+        )
+        .expect("device kv allocates on the real Metal device")
+        .expect("empty attention caches are adoptable");
+        let mut len = 0;
+        loop {
+            for layer in device.layers.iter_mut().flatten() {
+                layer.make_room(len, 1, SLIDING_WINDOW).expect("the kept rows lie inside the buffers");
+                write_position_rows(layer, len);
+            }
+            len += 1;
+            let sliding = device.layers[0].as_ref().expect("layer 0 is resident");
+            if stop(sliding, len) {
+                break;
+            }
+        }
+        let key = CacheKey::of(&ServingConfig::default(), false, RopeScaling::None, 0, 0);
+        (device.into_slot((0..len as u32).collect(), key, Vec::new()), len)
+    }
+
+    /// Reads back every row a rewind to `keep` keeps in each layer and returns how many it compared.
+    fn kept_rows_match_what_was_written(device: &DeviceKv, keep: usize) -> usize {
+        let mut compared = 0;
+        for (index, slot) in device.layers.iter().enumerate() {
+            let layer = slot.as_ref().expect("an attention layer is resident");
+            for position in layer.first_kept(keep)..keep {
+                let row = position - layer.base_position;
+                let even = layer.load_f32(&layer.k_even, row * layer.even_odd_row_bytes, EVEN_ODD_ROW).expect("k_even row reads");
+                let odd = layer.load_f32(&layer.k_odd, row * layer.even_odd_row_bytes, EVEN_ODD_ROW).expect("k_odd row reads");
+                let value = layer.load_value_f32(&layer.v, row * layer.v_row_bytes, V_ROW).expect("v row reads");
+                assert_eq!(even, row_values(position, EVEN_ODD_ROW, 0), "layer {index} position {position} k_even");
+                assert_eq!(odd, row_values(position, EVEN_ODD_ROW, 1), "layer {index} position {position} k_odd");
+                assert_eq!(value, row_values(position, V_ROW, 2), "layer {index} position {position} v");
+                compared += 1;
+            }
+        }
+        compared
+    }
+
+    #[test]
+    fn an_unseeded_wrapped_sliding_layer_rewinds_in_place_up_to_capacity_minus_window_rows() {
+        let (slot, len) = decoded_slot(|sliding, len| sliding.base_position > 0 && len - sliding.base_position == sliding.capacity_rows);
+        let (capacity, base) = {
+            let sliding = slot.device.layers[0].as_ref().expect("layer 0 is resident");
+            (sliding.capacity_rows, sliding.base_position)
+        };
+        assert_eq!(capacity, 32, "11 rows of window plus step round up to one 32-row granule");
+        assert_eq!(len - base, capacity, "the ring wrapped and the buffer holds exactly its capacity, the oldest row is len - capacity");
+        let furthest = capacity - SLIDING_WINDOW;
+        assert_eq!(furthest, 24, "capacity minus window is the slack the rewind may use");
+
+        let mut compared_total = 0;
+        for back in [1, 12, furthest] {
+            let keep = len - back;
+            let slot = decoded_slot(|_, next| next == len).0;
+            let (device, outcome) = DeviceKv::adopt_resident(slot, keep).expect("keep lies inside the slot");
+            assert_eq!(outcome, RewindOutcome::InPlace, "a rewind of {back} rows is inside the {furthest} the buffer holds");
+            let compared = kept_rows_match_what_was_written(&device, keep);
+            assert_eq!(compared, UNSEEDED_RETAIN + keep, "retain rows of the sliding layer plus every row of the full layer, compared for a rewind of {back}");
+            compared_total += compared;
+        }
+        assert_eq!(compared_total, 3 * UNSEEDED_RETAIN + (len - 1) + (len - 12) + (len - furthest), "every kept row of three rewinds was compared");
+
+        let keep = len - furthest - 1;
+        let (_, outcome) = DeviceKv::adopt_resident(decoded_slot(|_, next| next == len).0, keep).expect("keep lies inside the slot");
+        assert!(
+            matches!(outcome, RewindOutcome::Refused(MissReason::RingSlackExceeded { .. })),
+            "one row past the slack needs a row the buffer no longer holds, and no checkpoint covers it: {outcome:?}"
+        );
+        assert_ne!(outcome, RewindOutcome::InPlace);
+    }
+
+    #[test]
+    fn a_slot_that_never_wrapped_rewinds_in_place_to_every_keep() {
+        let (slot, len) = decoded_slot(|sliding, len| len == 20 && sliding.base_position == 0);
+        let capacity = slot.device.layers[0].as_ref().expect("layer 0 is resident").capacity_rows;
+        assert!(len < capacity, "20 positions fit the 32-row buffer, so the ring never wrapped");
+        let mut counted = 0;
+        for keep in 1..=len {
+            let slot = decoded_slot(|_, next| next == len).0;
+            let (_, outcome) = DeviceKv::adopt_resident(slot, keep).expect("keep lies inside the slot");
+            assert_eq!(outcome, RewindOutcome::InPlace, "keep {keep} of {len}: row 0 is held, so every rewind is in place");
+            counted += 1;
+        }
+        assert_eq!(counted, len, "every keep from 1 to len was asked");
     }
 
     fn checkpoint_at(position: usize) -> RingCheckpoint {
