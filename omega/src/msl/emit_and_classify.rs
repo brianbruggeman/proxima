@@ -153,7 +153,7 @@ pub fn inspect_attention_variant(
         "{}{}{}_variant_{effective_variant:?}",
         kernel.entry,
         mma_selection.cache_token_for(resolved),
-        row_schedule.cache_token_for(resolved),
+        row_schedule.cache_token_for(resolved, numeric_policy),
     );
     Ok(AttentionDispatchManifest {
         variant: effective_variant,

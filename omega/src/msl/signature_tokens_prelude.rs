@@ -2403,10 +2403,57 @@ impl AttentionRowSchedule {
         feature = "metal-attn-variants",
         all(feature = "metal", target_os = "macos")
     ))]
-    pub(crate) fn cache_token_for(self, bound: &BoundOp) -> String {
+    pub(crate) fn cache_token_for(self, bound: &BoundOp, policy: NumericPolicy) -> String {
         if matches!(bound.kind, BoundOpKind::CachedAttention { .. }) {
-            self.cache_token()
+            let mut token = self.cache_token();
+            token.push_str(&self.row_tile_class_token(bound, policy));
+            token
         } else {
+            String::new()
+        }
+    }
+
+    /// The identity of a row-tiled op names the tile class its LEGACY schedule
+    /// resolves; this names where the active schedule leaves that class (a
+    /// different simdgroup count or tile height, or a fall back off the row-tiled
+    /// form), so two row counts share a key only when they share a kernel.
+    #[cfg(any(
+        feature = "metal-attn-variants",
+        all(feature = "metal", target_os = "macos")
+    ))]
+    fn row_tile_class_token(self, bound: &BoundOp, policy: NumericPolicy) -> String {
+        #[cfg(feature = "metal-attn-split-rows")]
+        {
+            let BoundOpKind::CachedAttention {
+                query_rows,
+                cached_key_rows,
+                new_key_rows,
+                ..
+            } = &bound.kind
+            else {
+                return String::new();
+            };
+            let legacy = cached_attention_form(&bound.kind, policy);
+            let active = cached_attention_form_with_schedule(&bound.kind, policy, self);
+            let class = |form: Option<CachedAttentionForm>| match form {
+                Some(CachedAttentionForm::TwoRangeRowTiled {
+                    rows_per_threadgroup,
+                    simdgroups,
+                    ..
+                }) => Some((rows_per_threadgroup, simdgroups)),
+                _ => None,
+            };
+            match (class(legacy), class(active)) {
+                (Some(from), Some(to)) if from != to => alloc::format!("_rt{}_{}", to.0, to.1),
+                (Some(_), None) => {
+                    alloc::format!("_nrt_q{query_rows}_c{cached_key_rows}_n{new_key_rows}")
+                }
+                _ => String::new(),
+            }
+        }
+        #[cfg(not(feature = "metal-attn-split-rows"))]
+        {
+            let _ = (bound, policy);
             String::new()
         }
     }

@@ -2647,3 +2647,81 @@ fn a_step_loop_template_missing_either_marker_is_a_loud_emit_error() {
         );
     }
 }
+
+fn row_tile_class(op: &BoundOp) -> (u64, u64) {
+    let Some(CachedAttentionForm::TwoRangeRowTiled {
+        rows_per_threadgroup,
+        simdgroups,
+        ..
+    }) = relaxed_form(op)
+    else {
+        panic!("not the row-tiled form");
+    };
+    (rows_per_threadgroup, simdgroups)
+}
+
+#[test]
+fn two_row_counts_in_one_tile_class_share_one_key_and_byte_identical_source() {
+    assert_default_sizing();
+    let policy = NumericPolicy::llama_relaxed();
+    let packed = PackedOperands::new();
+    for (groups, head_dim, lower) in [(8_u64, 256_u64, SLIDING_LOWER), (8, 512, GLOBAL_LOWER)] {
+        let chunk = attention_rows_op(9, groups, head_dim, 4224, 512, lower);
+        let tail = attention_rows_op(9, groups, head_dim, 4224, 485, lower);
+        assert_eq!(row_tile_class(&chunk), row_tile_class(&tail), "same tile class");
+
+        let chunk_key = kernel_cache_key(&chunk, &packed, policy).expect("chunk key");
+        let tail_key = kernel_cache_key(&tail, &packed, policy).expect("tail key");
+        assert_eq!(chunk_key, tail_key, "groups {groups} head_dim {head_dim}");
+        let chunk_source = emit(&chunk, &packed, policy).expect("chunk emits").source;
+        let tail_source = emit(&tail, &packed, policy).expect("tail emits").source;
+        assert_eq!(chunk_source, tail_source, "groups {groups} head_dim {head_dim}");
+    }
+}
+
+#[test]
+fn the_cached_lower_bound_stays_in_the_key() {
+    assert_default_sizing();
+    let policy = NumericPolicy::llama_relaxed();
+    let packed = PackedOperands::new();
+    let sliding = attention_rows_op(9, 8, 256, 4224, 512, SLIDING_LOWER);
+    let global = attention_rows_op(9, 8, 256, 4224, 512, GLOBAL_LOWER);
+
+    let sliding_key = kernel_cache_key(&sliding, &packed, policy).expect("sliding key");
+    let global_key = kernel_cache_key(&global, &packed, policy).expect("global key");
+
+    assert_ne!(sliding_key, global_key, "the cached lower bound is a compiled constexpr");
+}
+
+#[test]
+fn two_tile_classes_get_different_keys_and_different_source() {
+    assert_default_sizing();
+    let policy = NumericPolicy::llama_relaxed();
+    let packed = PackedOperands::new();
+    let (groups, head_dim, tall_rows, short_rows) = [(8_u64, 256_u64), (2, 64), (8, 512), (8, 128)]
+        .into_iter()
+        .find_map(|(groups, head_dim)| {
+            let classes: Vec<(u64, (u64, u64))> = [8_u64, 17, 49, 64, 971]
+                .into_iter()
+                .map(|rows| {
+                    let op = attention_rows_op(9, groups, head_dim, 512, rows, SLIDING_LOWER);
+                    (rows, row_tile_class(&op))
+                })
+                .collect();
+            let first = classes.first()?;
+            let other = classes.iter().find(|(_, class)| *class != first.1)?;
+            Some((groups, head_dim, first.0, other.0))
+        })
+        .expect("some shape straddles a tile class within these row counts");
+    let tall = attention_rows_op(9, groups, head_dim, 512, tall_rows, SLIDING_LOWER);
+    let short = attention_rows_op(9, groups, head_dim, 512, short_rows, SLIDING_LOWER);
+    assert_ne!(row_tile_class(&tall), row_tile_class(&short), "fixture must straddle a tile class");
+
+    let tall_key = kernel_cache_key(&tall, &packed, policy).expect("tall key");
+    let short_key = kernel_cache_key(&short, &packed, policy).expect("short key");
+
+    assert_ne!(tall_key, short_key);
+    let tall_source = emit(&tall, &packed, policy).expect("tall emits").source;
+    let short_source = emit(&short, &packed, policy).expect("short emits").source;
+    assert_ne!(tall_source, short_source);
+}

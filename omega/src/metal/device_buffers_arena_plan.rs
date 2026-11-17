@@ -2573,7 +2573,7 @@ impl Plan {
                     .map(|mut key| {
                         key.push(self.math_mode.cache_token());
                         key.push_str(self.attention_mma_selection.cache_token_for(bound));
-                        key.push_str(&self.attention_row_schedule.cache_token_for(bound));
+                        key.push_str(&self.attention_row_schedule.cache_token_for(bound, self.numeric_policy));
                         key
                     })
                     .map_err(MetalError::from)

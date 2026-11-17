@@ -1114,7 +1114,7 @@ pub(super) fn resolve_step(
     )?;
     cache_key.push(math_mode.cache_token());
     cache_key.push_str(attention_mma_selection.cache_token_for(bound));
-    cache_key.push_str(&attention_row_schedule.cache_token_for(bound));
+    cache_key.push_str(&attention_row_schedule.cache_token_for(bound, numeric_policy));
     #[cfg(feature = "instrument")]
     if let BoundOpKind::Reduce {
         reduce_op,
@@ -4028,7 +4028,7 @@ pub(super) fn encode_op(
             )?;
             cache_key.push(math_mode.cache_token());
             cache_key.push_str(attention_mma_selection.cache_token_for(bound));
-            cache_key.push_str(&attention_row_schedule.cache_token_for(bound));
+            cache_key.push_str(&attention_row_schedule.cache_token_for(bound, numeric_policy));
             let uniform_codec = expert_buffers.and_then(|buffers| {
                 let mut codecs = buffers
                     .descriptor_records
@@ -4111,7 +4111,7 @@ pub(super) fn encode_op(
             )?;
             cache_key.push(math_mode.cache_token());
             cache_key.push_str(attention_mma_selection.cache_token_for(bound));
-            cache_key.push_str(&attention_row_schedule.cache_token_for(bound));
+            cache_key.push_str(&attention_row_schedule.cache_token_for(bound, numeric_policy));
             #[cfg(feature = "instrument")]
             {
                 counter!(EMIT_CALLS, 1);

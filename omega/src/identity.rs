@@ -580,6 +580,8 @@ mod gated {
     use proxima_numeric::{DType};
 
     use super::*;
+    #[cfg(feature = "metal-attn-split-rows")]
+    use crate::msl::{CachedAttentionForm, row_tiled_block};
 
     impl KernelLanguage {
         const fn prefix(self) -> &'static str {
@@ -759,11 +761,35 @@ mod gated {
                     format!("_r{rotary_dim}")
                 };
                 let sink_token = if *attention_sink { "_sk" } else { "" };
-                format!(
-                    "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_x{context_chunks}{cached_bound_token}{sink_token}",
-                    scale.to_bits(),
-                    signed_name_part(*cached_lower_inclusive),
-                )
+                // the row-tiled source reads its row count from `u.total_elements`
+                // and the cached bound from `in8`, so the key names the tile class
+                // (rows per threadgroup, simdgroups, block) instead of `q`/`c`/`n`/`x`:
+                // two row counts in one class share one compiled pipeline.
+                #[cfg(feature = "metal-attn-split-rows")]
+                let row_tile_class = match form {
+                    Some(CachedAttentionForm::TwoRangeRowTiled {
+                        rows_per_threadgroup,
+                        simdgroups,
+                        ..
+                    }) => Some((rows_per_threadgroup, simdgroups)),
+                    _ => None,
+                };
+                #[cfg(not(feature = "metal-attn-split-rows"))]
+                let row_tile_class: Option<(u64, u64)> = None;
+                if let Some((rows_per_threadgroup, simdgroups)) = row_tile_class {
+                    format!(
+                        "{prefix}_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}_n{simdgroups}_b{}{cached_bound_token}{sink_token}",
+                        scale.to_bits(),
+                        signed_name_part(*cached_lower_inclusive),
+                        row_tiled_block(*head_dim),
+                    )
+                } else {
+                    format!(
+                        "{prefix}_cached_attention_q{query_rows}_c{cached_key_rows}_n{new_key_rows}_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_x{context_chunks}{cached_bound_token}{sink_token}",
+                        scale.to_bits(),
+                        signed_name_part(*cached_lower_inclusive),
+                    )
+                }
             }
             BoundOpKind::Elementwise { .. } => {
                 let body = body_token(resolved.element_body());
