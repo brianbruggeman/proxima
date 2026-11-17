@@ -334,6 +334,8 @@ mod resident_plans_real_model_tests;
 #[cfg(all(test, feature = "cuda"))]
 mod resident_weights_tests;
 mod ring_checkpoint;
+#[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
+mod resident_slot;
 #[cfg(all(test, feature = "cuda"))]
 mod row_refit_oracle_tests;
 #[cfg(all(test, feature = "cuda"))]
