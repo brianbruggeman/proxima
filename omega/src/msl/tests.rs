@@ -9191,27 +9191,82 @@ mod expert_grouped_gemm {
         }
     }
 
+    fn emitted_source(rows: u32) -> String {
+        let bound = gathered_matmul_op(TOKENS, EXPERTS, rows, REDUCTION);
+        let mut packed = BTreeMap::new();
+        packed.insert(bound.operands()[0].0, Codec::Q8_0);
+        emit(&bound, &packed, NumericPolicy::default())
+            .expect("grouped kernel emits")
+            .source
+    }
+
+    /// An op with more row tiles than `GROUPED_GEMM_COMPACTED_MAX_ROW_TILES`
+    /// takes the segment scan whatever the build's route mode, so the scan
+    /// kernel is reachable under any `route_mode`.
+    fn scan_route_rows() -> u32 {
+        let tiles = crate::sized::GROUPED_GEMM_COMPACTED_MAX_ROW_TILES + 1;
+        (tiles * GROUPED_TILE_ROWS) as u32
+    }
+
     #[test]
-    fn the_pending_token_list_holds_a_tile_plus_one_whole_scan_step() {
-        let (bound, packed) = gathered_q8_0(TOKENS);
+    fn the_scan_kernel_holds_a_tile_plus_one_whole_scan_step_of_pending_tokens() {
+        let source = emitted_source(scan_route_rows());
         let step_entries = 128 * crate::sized::GROUPED_GEMM_SCAN_AHEAD;
 
-        let source = emit(&bound, &packed, NumericPolicy::default())
-            .expect("grouped kernel emits")
-            .source;
-
         let capacity = format!("threadgroup int tile_token[{}];", 32 + step_entries);
+        assert!(source.contains(&capacity), "{capacity} missing from {source}");
         assert!(
-            source.contains(&capacity),
-            "{capacity} missing from {source}"
+            source.contains("threadgroup uint scan_counts[4];"),
+            "{source}"
         );
-        let step = format!(
-            "scan_base += 128l * {}l;",
-            crate::sized::GROUPED_GEMM_SCAN_AHEAD
+        assert!(
+            source.contains(&format!(
+                "scan_base += 128l * {}l;",
+                crate::sized::GROUPED_GEMM_SCAN_AHEAD
+            )),
+            "{source}"
         );
+        assert!(
+            source.contains(
+                "long a_tok = (a_row < (long)tile_count) ? (long)tile_token[a_row] : -1;",
+            ),
+            "{source}"
+        );
+        assert!(
+            source.contains("long o_tok = (long)tile_token[j];"),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn the_compacted_kernel_declares_only_tg_shared_and_reads_ids_from_the_device_tile_list() {
+        if !crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
+            return;
+        }
+        let source = emitted_source(ROWS);
+
+        assert!(!source.contains("tile_token"), "{source}");
+        assert!(!source.contains("scan_counts"), "{source}");
+        assert_eq!(source.matches("threadgroup uchar tg_shared[8192];").count(), 1, "{source}");
+        let gemm = source
+            .split("_route_prepass")
+            .next()
+            .expect("the gemm kernel precedes its appended prepass kernels");
         assert_eq!(
-            source.contains(&step),
-            !crate::sized::GROUPED_GEMM_ROUTE_COMPACTED,
+            gemm.matches("threadgroup uchar").count()
+                + gemm.matches("threadgroup int ").count()
+                + gemm.matches("threadgroup uint ").count(),
+            1,
+            "tg_shared is the only threadgroup array\n{gemm}"
+        );
+        assert!(
+            source.contains(
+                "long a_tok = (a_row < (long)tile_count) ? (long)tile_list[a_row] : -1;",
+            ),
+            "{source}"
+        );
+        assert!(
+            source.contains("long o_tok = (long)tile_list[j];"),
             "{source}"
         );
     }

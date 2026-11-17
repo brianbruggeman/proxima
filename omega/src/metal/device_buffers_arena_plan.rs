@@ -633,6 +633,22 @@ pub fn pipeline_cache_keys() -> Vec<String> {
     PIPELINE_CACHE.with(|cache| cache.borrow().keys().cloned().collect())
 }
 
+/// The `staticThreadgroupMemoryLength` Metal reports for the compiled
+/// pipeline cached under `key` (one of [`pipeline_cache_keys`]) -- the bytes
+/// of threadgroup memory the kernel declares, which bound how many
+/// threadgroups are resident on one GPU core. `None` when no pipeline is
+/// cached under `key` on this thread.
+#[cfg(feature = "instrument")]
+#[must_use]
+pub fn pipeline_static_threadgroup_memory(key: &str) -> Option<usize> {
+    PIPELINE_CACHE.with(|cache| {
+        cache
+            .borrow()
+            .get(key)
+            .map(|pipeline| pipeline.staticThreadgroupMemoryLength())
+    })
+}
+
 /// `PROXIMA_PIPELINE_KEY_AUDIT=1`'s own tally, `(audited, mismatched)` --
 /// see [`PIPELINE_KEY_AUDIT_AUDITED`]/[`PIPELINE_KEY_AUDIT_MISMATCHED`]'s own
 /// doc. `(0, 0)` when the audit never ran on this thread.

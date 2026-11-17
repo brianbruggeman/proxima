@@ -102,7 +102,7 @@ pub(super) fn push_expert_grouped_gemm_body(
     let geometry = GroupedGeometry::new(block, output_axes, resolved)?;
     let compaction_buffer = grouped_route_compacted(block).then(|| bindings(resolved).len());
     push_grouped_entry(source, node, &geometry, compaction_buffer)?;
-    push_grouped_threadgroup_memory(source, &geometry, &staging);
+    push_grouped_threadgroup_memory(source, &geometry, &staging, compaction_buffer.is_some());
     source.push_str(&format!(
         "    device const uchar *weight_bytes = (device const uchar *)in{};\n",
         block.weight
@@ -171,6 +171,7 @@ struct GroupedGeometry {
     token_axes: Vec<u16>,
     token_positions: Vec<usize>,
     route_flat: bool,
+    token_list: &'static str,
     feature_extent_expr: String,
     token_extent_expr: String,
 }
@@ -210,6 +211,7 @@ impl GroupedGeometry {
             token_axes: block.token_axes.clone(),
             token_positions,
             route_flat,
+            token_list: if grouped_route_compacted(block) { "tile_list" } else { "tile_token" },
             feature_extent_expr: group_extent(node, output_axes, &block.feature_axes)?,
             token_extent_expr: group_extent(node, output_axes, &block.token_axes)?,
         })
@@ -398,10 +400,6 @@ fn push_grouped_locate(
     source.push_str(&format!(
         "    device const uint *tile_list = route_compaction + {GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts + route_compaction[{GROUPED_ROUTE_HEADER_WORDS}u + experts + (uint)grouped_expert] + (uint)expert_tile * {tile_tokens}u;\n"
     ));
-    source.push_str(
-        "    if ((uint)tiitg < tile_count) { tile_token[tiitg] = (int)tile_list[tiitg]; }\n",
-    );
-    source.push_str("    threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     Ok(())
 }
 
@@ -433,6 +431,7 @@ fn push_grouped_threadgroup_memory(
     source: &mut String,
     geometry: &GroupedGeometry,
     staging: &ActivationStaging,
+    compacted: bool,
 ) {
     let weight_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_DEPTH * 2;
     let act_tile_bytes = GROUPED_TILE_TOKENS * GROUPED_TILE_DEPTH * staging.element_bytes();
@@ -447,6 +446,9 @@ fn push_grouped_threadgroup_memory(
         "    threadgroup {element} *act_tile = (threadgroup {element} *)(tg_shared + {weight_tile_bytes});\n"
     ));
     source.push_str("    threadgroup float *out_tile = (threadgroup float *)tg_shared;\n");
+    if compacted {
+        return;
+    }
     source.push_str(&format!(
         "    threadgroup int tile_token[{}];\n",
         GROUPED_TILE_TOKENS + GROUPED_THREADS * geometry.scan_ahead
@@ -616,7 +618,7 @@ fn push_grouped_tile(
     decode: &TiledDecode,
     element_type: &str,
     epilogue: GroupedEpilogue<'_>,
-    staging:&ActivationStaging,
+    staging: &ActivationStaging,
 ) {
     let (epilogue_body, epilogue_operands) = epilogue;
     source.push_str("            simdgroup_float8x8 acc[8];\n");
@@ -677,6 +679,7 @@ fn push_grouped_stage_pointers(
 ) {
     let weight = block.weight;
     let other = block.other;
+    let token_list = geometry.token_list;
     let feature_axis = geometry.feature_axis;
     source.push_str("            long w_row = tiitg / 2;\n");
     source.push_str("            long w_half = tiitg % 2;\n");
@@ -697,9 +700,9 @@ fn push_grouped_stage_pointers(
         "            bool a_staged = a_row < {} || has_hi;\n",
         GROUPED_TILE_TOKENS / 2
     ));
-    source.push_str(
-        "            long a_tok = (a_row < (long)tile_count) ? (long)tile_token[a_row] : -1;\n",
-    );
+    source.push_str(&format!(
+        "            long a_tok = (a_row < (long)tile_count) ? (long){token_list}[a_row] : -1;\n"
+    ));
     let vector = staging.vector();
     source.push_str(&format!(
         "            threadgroup {vector} *a_slot = (threadgroup {vector} *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));\n"
@@ -844,6 +847,7 @@ fn push_grouped_writeback(
 ) {
     let output_axes = &geometry.output_axes;
     let rank = geometry.rank;
+    let token_list = geometry.token_list;
     let rank_len = rank.max(1);
     let feature_axis = geometry.feature_axis;
     source.push_str("            if ((sgitg >> 1) == 0 || has_hi) {\n");
@@ -864,7 +868,7 @@ fn push_grouped_writeback(
     source.push_str(&format!(
         "            for (long j = sgitg; j < (long)tile_count; j += {TILED_GEMM_NSG}) {{\n"
     ));
-    source.push_str("                long o_tok = (long)tile_token[j];\n");
+    source.push_str(&format!("                long o_tok = (long){token_list}[j];\n"));
     push_token_coordinates(source, geometry, "                ", "o_tok", "o_c");
     let output_token_offset =
         token_offset_expr(geometry, "o_c", |axis| format!("u.out_strides[{axis}]"));

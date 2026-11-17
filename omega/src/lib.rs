@@ -117,8 +117,8 @@ pub use error::EmitError;
 #[cfg(all(feature = "metal", feature = "instrument", target_os = "macos"))]
 pub use metal::{
     CapturedDispatch, execute_plan_timed, flush_gpu_caches, pipeline_cache_keys,
-    pipeline_key_audit_counts, set_capture_step, take_captured_dispatches,
-    time_empty_command_buffer_gpu_ns,
+    pipeline_key_audit_counts, pipeline_static_threadgroup_memory, set_capture_step,
+    take_captured_dispatches, time_empty_command_buffer_gpu_ns,
 };
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub use metal::{

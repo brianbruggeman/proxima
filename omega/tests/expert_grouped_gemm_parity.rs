@@ -489,3 +489,41 @@ fn control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor() {
         "a metal result compared against an oracle routed elsewhere must not pass: {gross:e}"
     );
 }
+
+/// The bytes of threadgroup memory a compacted expert-grouped kernel declares:
+/// exactly the `tg_shared` staging tile (64 rows x 32 depth of `half` weights
+/// plus 32 tokens x 32 depth of `float` activations = 8192), the same figure
+/// llama.cpp's `kernel_mul_mm_id` declares. Read off the compiled
+/// `MTLComputePipelineState`, not derived from the source.
+#[cfg(feature = "instrument")]
+#[test]
+fn the_compacted_pipeline_declares_exactly_the_staging_tile_of_threadgroup_memory() {
+    const STAGING_TILE_BYTES: usize = 8192;
+    if !omega::sized::GROUPED_GEMM_ROUTE_COMPACTED {
+        return;
+    }
+    let shape = Shape {
+        tokens: 300,
+        rows: 192,
+        k: 512,
+        experts: 8,
+    };
+    let route = heavy_expert_route(shape.tokens, shape.experts);
+    let outputs = run(&Case {
+        shape,
+        route,
+        fuse_gate: false,
+    });
+    assert!(grouped_kernel_ran(&outputs.kernel_keys), "{:?}", outputs.kernel_keys);
+    let lengths: Vec<(String, usize)> = omega::pipeline_cache_keys()
+        .into_iter()
+        .filter(|key| key.contains("_g10") && key.contains("E_w128") && !key.contains("prepass"))
+        .filter_map(|key| {
+            omega::pipeline_static_threadgroup_memory(&key).map(|length| (key, length))
+        })
+        .collect();
+    assert!(!lengths.is_empty(), "degenerate: no grouped pipeline was compiled");
+    for (key, length) in &lengths {
+        assert_eq!(*length, STAGING_TILE_BYTES, "{key}");
+    }
+}
