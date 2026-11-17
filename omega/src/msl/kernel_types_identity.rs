@@ -1800,6 +1800,19 @@ pub(crate) struct TiledDecode {
     /// MSL source defining [`Self::function`], spliced into the preamble of a
     /// kernel that stages this codec and nowhere else.
     pub(crate) source: DecodeSource,
+    /// Which twin a call renders; [`DecodeVariant::Select`] unless a kernel hoisted the branch.
+    pub(crate) variant: DecodeVariant,
+}
+
+/// Which decode function [`TiledDecode::call`] names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DecodeVariant {
+    /// Select per call on [`WORD_ALIGNED_FLAG`].
+    Select,
+    /// The guarded decode only (the kernel copy taken when the weight is not word-aligned).
+    Guarded,
+    /// The `_words` twin only (the kernel copy taken when it is).
+    Words,
 }
 
 /// Where a [`TiledDecode`]'s MSL comes from.
@@ -1834,6 +1847,7 @@ impl TiledDecode {
             block_bytes: block_bytes as u64,
             function,
             source,
+            variant: DecodeVariant::Select,
         }
     }
 
@@ -1841,18 +1855,57 @@ impl TiledDecode {
     pub(crate) fn msl(&self) -> Cow<'static, str> {
         match self.source {
             DecodeSource::Static(source) => Cow::Borrowed(source),
-            DecodeSource::Element(element, codec) => Cow::Owned(
-                scaled_float_render::level_half16_decode_msl(self.function, element, codec),
-            ),
+            DecodeSource::Element(element, codec) => {
+                let mut source = scaled_float_render::level_half16_decode_msl(self.function, element, codec);
+                source.push_str(&self.word_variant_msl().unwrap_or_default());
+                Cow::Owned(source)
+            }
         }
+    }
+
+    /// Whether [`Self::msl`] also defines `{function}_words`, the decode that assumes a
+    /// word-aligned block origin. Its call sites then declare [`WORD_ALIGNED_FLAG`].
+    pub(crate) fn has_word_variant(&self) -> bool {
+        self.word_variant_msl().is_some()
+    }
+
+    fn word_variant_msl(&self) -> Option<String> {
+        let DecodeSource::Element(element, codec) = self.source else {
+            return None;
+        };
+        scaled_float_render::level_half16_word_decode_msl(&format!("{}_words", self.function), element, codec)
     }
 
     /// The MSL expression that decodes the run at `(block, slot)` into `out`.
     #[cfg(feature = "metal-tiled-gemm")]
     pub(crate) fn call(&self, block: &str, slot: &str, out: &str) -> String {
+        if self.has_word_variant() && self.variant == DecodeVariant::Words {
+            return format!("{}_words({block}, {slot}, {out})", self.function);
+        }
+        if self.has_word_variant() && self.variant == DecodeVariant::Select {
+            return format!(
+                "({WORD_ALIGNED_FLAG} ? {function}_words({block}, {slot}, {out}) : {function}({block}, {slot}, {out}))",
+                function = self.function
+            );
+        }
         format!("{}({block}, {slot}, {out})", self.function)
     }
+
+    /// The statement declaring [`WORD_ALIGNED_FLAG`] from the weight byte pointer, or empty when
+    /// this decode has no word variant (so kernels without one render unchanged).
+    pub(crate) fn word_aligned_flag_msl(&self, weight_bytes: &str) -> String {
+        if !self.has_word_variant() {
+            return String::new();
+        }
+        format!("    bool {WORD_ALIGNED_FLAG} = (((ulong){weight_bytes}) & 3ul) == 0ul;\n")
+    }
 }
+
+/// The kernel-level uniform a decode call selects its word-aligned variant on: the weight
+/// buffer-plus-offset Metal binds is 4-aligned. Every block origin is that pointer plus whole
+/// blocks of a multiple-of-4 size (`RunWords::word_aligned`), so this one fact is the whole
+/// run-time proof.
+pub(crate) const WORD_ALIGNED_FLAG: &str = "weight_words_aligned";
 
 /// The decode description of every codec the tiled and expert-grouped GEMM stages,
 /// `None` for a codec that has none and so keeps the row-blocked or generic

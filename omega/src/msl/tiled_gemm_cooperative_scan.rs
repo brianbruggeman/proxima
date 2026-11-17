@@ -343,6 +343,7 @@ pub(super) fn push_tiled_gemm_body(
     source.push_str(&format!(
         "    device const uchar *weight_bytes = (device const uchar *)in{weight};\n"
     ));
+    source.push_str(&decode.word_aligned_flag_msl("weight_bytes"));
 
     // `EmitKnobs::tiled_gemm_wide_weight_stage` (see `docs/model-interop/
     // discipline.md` ROW C4.12, `MetalOnlyExtras::tiled_gemm_wide_weight_stage`'s own doc): admitted

@@ -107,33 +107,75 @@ pub(super) fn push_expert_grouped_gemm_body(
         "    device const uchar *weight_bytes = (device const uchar *)in{};\n",
         block.weight
     ));
-    if compaction_buffer.is_some() {
+    source.push_str(&decode.word_aligned_flag_msl("weight_bytes"));
+    let tail = GroupedTail {
+        resolved,
+        block,
+        geometry: &geometry,
+        element_type,
+        epilogue,
+        staging: &staging,
+        expert_slot: expert.slot,
+        compacted: compaction_buffer.is_some(),
+    };
+    if decode.has_word_variant() {
+        let words = TiledDecode { variant: DecodeVariant::Words, ..decode };
+        let guarded = TiledDecode { variant: DecodeVariant::Guarded, ..decode };
+        source.push_str(&format!("    if ({WORD_ALIGNED_FLAG}) {{\n"));
+        tail.push(source, &words)?;
+        source.push_str("    } else {\n");
+        tail.push(source, &guarded)?;
+        source.push_str("    }\n");
+        return Ok(());
+    }
+    tail.push(source, &decode)
+}
+
+/// The kernel body after the weight pointer and alignment flag, rendered once per decode variant so the alignment branch is one uniform `if` around two whole tile loops and no decode call selects.
+#[cfg(feature = "metal-grouped-gemm")]
+#[derive(Clone, Copy)]
+struct GroupedTail<'a> {
+    resolved: &'a BoundOp,
+    block: &'a TiledGemmBlock,
+    geometry: &'a GroupedGeometry,
+    element_type: &'a str,
+    epilogue: GroupedEpilogue<'a>,
+    staging: &'a ActivationStaging,
+    expert_slot: usize,
+    compacted: bool,
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+impl GroupedTail<'_> {
+    fn push(&self, source: &mut String, decode: &TiledDecode) -> Result<(), EmitError> {
+        let Self { resolved, block, geometry, element_type, epilogue, staging, expert_slot, compacted } = *self;
+    if compacted {
         push_grouped_locate(source, resolved, block)?;
         source.push_str(&format!(
             "    long grouped_expert_base = grouped_expert * u.gather_element_stride[{}];\n",
-            expert.slot
+            expert_slot
         ));
         source.push_str("    {\n");
         push_grouped_tile(
             source,
             block,
-            &geometry,
-            &decode,
+            geometry,
+            decode,
             element_type,
             epilogue,
-            &staging,
+            staging,
         );
         source.push_str("    }\n");
         return Ok(());
     }
     source.push_str(&format!(
         "    long grouped_expert_base = grouped_expert * u.gather_element_stride[{}];\n",
-        expert.slot
+        expert_slot
     ));
     source.push_str("    uint pending_fill = 0u;\n");
-    push_route_segment_bounds(source, &geometry);
+    push_route_segment_bounds(source, geometry);
     source.push_str("    for (;;) {\n");
-    push_grouped_refill(source, block.weight, expert.slot, &geometry);
+    push_grouped_refill(source, block.weight, expert_slot, geometry);
     source.push_str("        if (pending_fill == 0u) { break; }\n");
     source.push_str(&format!(
         "        uint tile_count = min(pending_fill, {GROUPED_TILE_TOKENS}u);\n"
@@ -146,16 +188,17 @@ pub(super) fn push_expert_grouped_gemm_body(
     push_grouped_tile(
         source,
         block,
-        &geometry,
-        &decode,
+        geometry,
+        decode,
         element_type,
         epilogue,
-        &staging,
+        staging,
     );
     source.push_str("        }\n");
-    push_grouped_consume(source, &geometry);
+    push_grouped_consume(source, geometry);
     source.push_str("    }\n");
     Ok(())
+}
 }
 
 #[cfg(feature = "metal-grouped-gemm")]

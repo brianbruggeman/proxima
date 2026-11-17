@@ -728,3 +728,38 @@ fn q4_0_super_element_rendered_from_its_layout_equals_the_retired_literal() {
 
     assert_eq!(rendered, RETIRED_Q4_0_SUPER_ELEMENT_MSL);
 }
+
+#[test]
+fn iq4_xs_word_decode_loads_every_word_without_an_alignment_select() {
+    let format = level_format_of(NumericFormat::Iq4Xs);
+
+    let words = super::layout_render::level_run_word_decode_msl(&format, "iq4_xs_dequant_half16_words", "iq4_xs_element", 16)
+        .expect("iq4_xs block bytes and plane offsets are word multiples");
+
+    assert!(!words.contains("_aligned"), "no per-load alignment flag or select:\n{words}");
+    assert!(words.contains("((device const uint *)low_bytes)["), "the aligned word load:\n{words}");
+}
+
+#[test]
+fn iq4_xs_guarded_decode_keeps_the_runtime_alignment_select() {
+    let format = level_format_of(NumericFormat::Iq4Xs);
+
+    let guarded = super::layout_render::level_run_decode_msl(&format, "iq4_xs_dequant_half16", "iq4_xs_element", 16).expect("renders");
+
+    assert!(guarded.contains("low_aligned ? ((device const uint *)low_bytes)["), "{guarded}");
+}
+
+#[test]
+fn a_block_size_that_is_not_a_word_multiple_has_no_word_decode_and_keeps_the_guarded_one() {
+    let mut format = level_format_of(NumericFormat::Iq4Xs);
+    let proxima_numeric::LevelGeometry::Packed(layout) = &mut format.geometry else {
+        panic!("iq4_xs is a packed level format");
+    };
+    layout.block_bytes += 1;
+
+    let words = super::layout_render::level_run_word_decode_msl(&format, "iq4_xs_dequant_half16_words", "iq4_xs_element", 16);
+    let guarded = super::layout_render::level_run_decode_msl(&format, "iq4_xs_dequant_half16", "iq4_xs_element", 16).expect("renders");
+
+    assert!(words.is_none(), "a 137-byte block puts later blocks off word boundaries");
+    assert!(guarded.contains("low_aligned ?"), "{guarded}");
+}

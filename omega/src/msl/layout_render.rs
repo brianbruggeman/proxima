@@ -454,6 +454,9 @@ struct RunWords {
     words: u32,
     /// `safe[w]`: word `w` lies inside the block for every run, so it may be one `uint` load.
     safe: Vec<bool>,
+    /// Every run's first byte is a multiple of 4 inside a block whose size is a multiple of 4, so
+    /// a block origin that is word-aligned makes every `safe` word an aligned `uint` load.
+    word_aligned: bool,
 }
 
 /// Decides whether `plane`'s fields for the `run` elements starting at any multiple of `run` can
@@ -489,21 +492,25 @@ fn run_words(plane: &Plane, layout: &BlockLayout, run: u64) -> Option<RunWords> 
     let safe = (0..words)
         .map(|word| starts.iter().all(|address| address / 8 + 4 * (word + 1) <= u32::from(layout.block_bytes)))
         .collect();
-    Some(RunWords { stride_bits: stride, static_shift, words, safe })
+    let word_aligned = layout.block_bytes.is_multiple_of(4) && starts.iter().all(|address| (address / 8).is_multiple_of(4));
+    Some(RunWords { stride_bits: stride, static_shift, words, safe, word_aligned })
 }
 
 /// Statements binding `uint {binding}_codes[run]` to the plane's field for each element of the
 /// run starting at `slot`: each word is one aligned `uint` load (a runtime pointer-alignment check
 /// falls back to assembling the word from guarded byte reads), and each lane is a constant shift
 /// and mask of its word, joined across a word boundary where its field straddles one.
-fn run_words_msl(plane: &Plane, plan: &RunWords, layout: &BlockLayout, run: u64, slot: &str, binding: &str) -> String {
+fn run_words_msl(plane: &Plane, plan: &RunWords, layout: &BlockLayout, run: u64, slot: &str, binding: &str, aligned: bool) -> String {
     let mask = (1u32 << plane.bits) - 1;
     let bits = u32::from(plane.bits);
     let block_bytes = layout.block_bytes;
     let mut text = plane_address_msl(plane, slot, binding);
     text.push_str(&format!(
-        "    uint {binding}_first = {binding}_address / 8u;\n    uint {binding}_shift = {binding}_address % 8u;\n    device const uchar *{binding}_bytes = block + {binding}_first;\n    bool {binding}_aligned = (((ulong){binding}_bytes) & 3ul) == 0ul;\n"
+        "    uint {binding}_first = {binding}_address / 8u;\n    uint {binding}_shift = {binding}_address % 8u;\n    device const uchar *{binding}_bytes = block + {binding}_first;\n"
     ));
+    if !aligned {
+        text.push_str(&format!("    bool {binding}_aligned = (((ulong){binding}_bytes) & 3ul) == 0ul;\n"));
+    }
     for word in 0..plan.words {
         let assembled = (0..4)
             .map(|byte| {
@@ -512,7 +519,9 @@ fn run_words_msl(plane: &Plane, plan: &RunWords, layout: &BlockLayout, run: u64,
             })
             .collect::<Vec<_>>()
             .join(" | ");
-        let load = if plan.safe[word as usize] {
+        let load = if plan.safe[word as usize] && aligned {
+            format!("((device const uint *){binding}_bytes)[{word}u]")
+        } else if plan.safe[word as usize] {
             format!("{binding}_aligned ? ((device const uint *){binding}_bytes)[{word}u] : ({assembled})")
         } else {
             assembled
@@ -808,6 +817,21 @@ pub fn level_run_decode_msl(
     name: &str,
     run: u64,
 ) -> Result<String, LevelRenderRefusal> {
+    run_decode_msl(format, function, name, run, false)
+}
+
+/// The variant of [`level_run_decode_msl`] that loads every in-block word as one `uint` with no
+/// alignment select, or `None` when the layout does not prove it: it requires a block size and
+/// every run's plane byte offset to be multiples of 4 ([`RunWords::word_aligned`]), so the only
+/// remaining fact is that the block origin is word-aligned, which the caller selects on at run time
+/// (one uniform per kernel) and which a misaligned binding never satisfies. The decision reads the
+/// layout description alone, never a format name.
+#[must_use = "None means the layout cannot prove word alignment"]
+pub fn level_run_word_decode_msl(format: &LevelFormat, function: &str, name: &str, run: u64) -> Option<String> {
+    run_decode_msl(format, function, name, run, true).ok()
+}
+
+fn run_decode_msl(format: &LevelFormat, function: &str, name: &str, run: u64, aligned: bool) -> Result<String, LevelRenderRefusal> {
     let layout = renderable_level_layout(format)?;
     let mut head = field_expression(&layout.scale, "scale", &format!("{name}_scale"));
     let mut scale = "scale";
@@ -830,8 +854,11 @@ pub fn level_run_decode_msl(
         ));
         scale = "effective_scale";
     }
-    if let Some(words) = word_run_level_msl(layout, &format.levels, function, name, run, &head, scale) {
+    if let Some(words) = word_run_level_msl(layout, &format.levels, (function, name), run, (&head, scale), aligned) {
         return Ok(words);
+    }
+    if aligned {
+        return Err(LevelRenderRefusal("no word-aligned run decode"));
     }
     let raw = raw_level_msl(layout, Codes::Levels(&format.levels), name);
     Ok(format!(
@@ -847,22 +874,27 @@ pub fn level_run_decode_msl(
 fn word_run_level_msl(
     layout: &BlockLayout,
     levels: &LevelTable,
-    function: &str,
-    name: &str,
+    (function, name): (&str, &str),
     run: u64,
-    head: &str,
-    scale: &str,
+    (head, scale): (&str, &str),
+    aligned: bool,
 ) -> Option<String> {
     if matches!(levels, LevelTable::SignedGrid { .. }) || layout.element.packed_radix > 1 {
         return None;
     }
     let coded = &layout.element;
     let low_plan = run_words(&coded.low, layout, run)?;
-    let mut body = run_words_msl(&coded.low, &low_plan, layout, run, "slot", "low");
+    if aligned && !(low_plan.word_aligned && low_plan.safe.contains(&true)) {
+        return None;
+    }
+    let mut body = run_words_msl(&coded.low, &low_plan, layout, run, "slot", "low", aligned);
     let mut code = "low_codes[run]".to_string();
     if let Some(high) = &coded.high {
         let high_plan = run_words(high, layout, run)?;
-        body.push_str(&run_words_msl(high, &high_plan, layout, run, "slot", "high"));
+        if aligned && !high_plan.word_aligned {
+            return None;
+        }
+        body.push_str(&run_words_msl(high, &high_plan, layout, run, "slot", "high", aligned));
         code = format!("(low_codes[run] | (high_codes[run] << {}u))", coded.low.bits);
     }
     Some(format!(

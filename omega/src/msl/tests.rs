@@ -10095,15 +10095,18 @@ mod tiled_decode_description {
                 decode.msl().contains(&signature),
                 "{codec:?}: `{signature}` missing from its msl"
             );
+            let expected_functions = 1 + usize::from(decode.has_word_variant());
             assert_eq!(
                 decode.msl().matches("static inline void").count(),
-                1,
-                "{codec:?}: a description's msl defines only its own function"
+                expected_functions,
+                "{codec:?}: a description's msl defines its own function and, when the layout proves word alignment, its `_words` twin"
             );
-            assert_eq!(
-                decode.call("blk", "slot", "out"),
-                format!("{}(blk, slot, out)", decode.function)
-            );
+            if !decode.has_word_variant() {
+                assert_eq!(
+                    decode.call("blk", "slot", "out"),
+                    format!("{}(blk, slot, out)", decode.function)
+                );
+            }
             assert!(
                 functions.insert(decode.function),
                 "{codec:?}: function names are unique"
@@ -12132,4 +12135,22 @@ fn router_bf16_weight_without_input_rounding_permission_takes_the_float_tile_mma
 
     let rounded = emit(&bound, &packed, serving_policy.with_bf16_input_rounding(true)).expect("router emits").source;
     assert!(rounded.contains("simdgroup_bfloat8x8"), "granting the permission selects bf16 tiles");
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn decode_call_selects_the_word_twin_on_the_weight_alignment_flag_only_where_the_layout_proves_it() {
+    let words = tiled_decode(Codec::Iq4Xs).expect("iq4_xs has a tiled decode");
+    let bytes_only = tiled_decode(Codec::Q5K).expect("q5_k has a tiled decode");
+
+    let selected = words.call("blk", "slot", "out");
+
+    assert!(words.has_word_variant());
+    assert_eq!(
+        selected,
+        "(weight_words_aligned ? iq4_xs_dequant_half16_words(blk, slot, out) : iq4_xs_dequant_half16(blk, slot, out))"
+    );
+    assert!(words.word_aligned_flag_msl("weight_bytes").contains("(ulong)weight_bytes) & 3ul) == 0ul"));
+    assert!(!bytes_only.has_word_variant());
+    assert!(bytes_only.word_aligned_flag_msl("weight_bytes").is_empty());
 }

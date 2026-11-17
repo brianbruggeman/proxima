@@ -2,7 +2,7 @@ use const_format::formatcp;
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::float_layout::FloatLayout;
 
-use super::layout_render::{block_element_msl, block_super_element_msl, layout_unpack_msl, level_block_element_msl, level_run_decode_msl};
+use super::layout_render::{block_element_msl, block_super_element_msl, layout_unpack_msl, level_block_element_msl, level_run_decode_msl, level_run_word_decode_msl};
 use super::*;
 
 pub(super) const FP6_E3M2_ELEMENTS: usize = Codec::FP6_E3M2_BLOCK_ELEMENTS;
@@ -195,6 +195,15 @@ pub fn level_half16_decode_msl(function: &str, element: &str, format: &Codec) ->
     };
     level_run_decode_msl(levels, function, element, DECODE_RUN_ELEMENTS)
         .unwrap_or_else(|_| level_half16_scalar_decode_msl(function, element))
+}
+
+/// The word-aligned twin of [`level_half16_decode_msl`] (`layout_render::level_run_word_decode_msl`), or `None` when the layout does not prove word alignment.
+#[must_use]
+pub fn level_half16_word_decode_msl(function: &str, element: &str, format: &Codec) -> Option<String> {
+    let Codec::Levels(levels) = format else {
+        return None;
+    };
+    level_run_word_decode_msl(levels, function, element, DECODE_RUN_ELEMENTS)
 }
 
 fn level_half16_scalar_decode_msl(function: &str, element: &str) -> String {
