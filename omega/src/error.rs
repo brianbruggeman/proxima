@@ -311,6 +311,12 @@ pub enum EmitError {
         found: &'static str,
     },
 
+    /// A kernel template the renderer post-processes is missing a marker the
+    /// post-processing keys on; emitting the unprocessed source would produce a
+    /// kernel with no loop header, so it is rejected here instead.
+    #[error("node {node} kernel template is missing the {marker} marker")]
+    KernelTemplateMarkerMissing { node: NodeId, marker: &'static str },
+
     /// A cooperative-reduce combine helper (`shuffle_combine_expr`/
     /// `cooperative_identity_token`/`subgroup_combine_fn` across the cuda and
     /// wgsl backends, and `simd_combine_fn`/`cooperative_identity_token` here

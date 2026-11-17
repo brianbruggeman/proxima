@@ -479,8 +479,11 @@ fn card_10_bf16_row_selects_the_bf16_source_and_declines_mixed_cache_codecs() {
                 .contains("key_even_tile[group][step_index] = even_float;")
         );
         assert!(emitted.source.contains("simdgroup_float8x8"));
-        assert!(emitted.source.contains("else if (true && mode == 0L)"));
-        assert!(emitted.source.contains("else if (false && mode == 0L)"));
+        assert!(emitted.source.contains("else if (true && true)"));
+        assert!(emitted.source.contains("else if (true && false)"));
+        assert!(emitted.source.contains("else if (false && true)"));
+        assert!(emitted.source.contains("else if (false && false)"));
+        assert!(!emitted.source.contains("mode == 0L"));
         assert!(!emitted.source.contains("simdgroup_half8x8 weights["));
 
         let mixed = [
@@ -714,8 +717,11 @@ fn card_11_bf8_row_selects_the_bf8_source_and_declines_mixed_cache_codecs() {
                 .contains("omega_zero_padded_value_rows(value_float")
         );
         assert!(emitted.source.contains("simdgroup_float8x8"));
-        assert!(emitted.source.contains("else if (true && mode == 0L)"));
-        assert!(emitted.source.contains("else if (false && mode == 0L)"));
+        assert!(emitted.source.contains("else if (true && true)"));
+        assert!(emitted.source.contains("else if (true && false)"));
+        assert!(emitted.source.contains("else if (false && true)"));
+        assert!(emitted.source.contains("else if (false && false)"));
+        assert!(!emitted.source.contains("mode == 0L"));
         assert!(!emitted.source.contains("simdgroup_half8x8 weights["));
 
         let mixed = [

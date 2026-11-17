@@ -490,7 +490,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
     for (token, value) in &substitutions {
         body = body.replace(token, value);
     }
-    source.push_str(&body);
+    source.push_str(&split_step_loop(resolved.node, &body)?);
     Ok(source)
 }
 
@@ -516,6 +516,51 @@ const SINK_INIT: &str = "if (split == 0L) {
             row_maximum[index] = sink;
             row_sum[index] = (sink == -INFINITY) ? 0.0f : 1.0f;
         }";
+
+const STEP_BODY_BEGIN: &str = "    //@STEP_BODY_BEGIN@\n";
+const STEP_BODY_END: &str = "    //@STEP_BODY_END@\n";
+
+/// Folds the per-step `mode` tests of one step-loop body to constants. `mode == 0L`
+/// is the cached range and `mode` 1 or 2 the new range, so each phase knows which
+/// side of every load site it is on and a narrow cache's loads and the f32
+/// new-row loads stop sharing one live branch inside the unrolled K and V loops.
+fn fold_step_mode(body: &str, cached_phase: bool) -> String {
+    if cached_phase {
+        body.replace("mode == 0L", "true")
+            .replace("mode != 2L", "true")
+            .replace("mode == 1L", "false")
+            .replace("mode == 2L", "false")
+    } else {
+        body.replace("mode == 0L", "false")
+    }
+}
+
+/// Renders the one step-loop body twice: a cached phase over steps
+/// `0..cached_blocks` and a new-rows phase over `cached_blocks..`, so no load
+/// site carries a runtime `mode == 0L` test. Same math and step order as one loop
+/// that derives `mode` per step.
+pub(super) fn split_step_loop(node: NodeId, source: &str) -> Result<String, EmitError> {
+    let begin = source.find(STEP_BODY_BEGIN).ok_or(EmitError::KernelTemplateMarkerMissing {
+        node,
+        marker: "STEP_BODY_BEGIN",
+    })?;
+    let end = source.find(STEP_BODY_END).ok_or(EmitError::KernelTemplateMarkerMissing {
+        node,
+        marker: "STEP_BODY_END",
+    })?;
+    let body = &source[begin + STEP_BODY_BEGIN.len()..end];
+    let mut out = String::with_capacity(source.len() + body.len());
+    out.push_str(&source[..begin]);
+    out.push_str("    for (long step = 0L; step < cached_blocks; step++) {\n");
+    out.push_str(&fold_step_mode(body, true));
+    out.push_str("    }\n");
+    out.push_str("    for (long step = cached_blocks; step < cached_blocks + new_blocks + tail_steps; step++) {\n");
+    out.push_str("        long mode = step < cached_blocks + new_blocks ? 1L : 2L;\n");
+    out.push_str(&fold_step_mode(body, false));
+    out.push_str("    }\n");
+    out.push_str(&source[end + STEP_BODY_END.len()..]);
+    Ok(out)
+}
 
 const ROW_TILED_KERNEL: &str = r#"struct Uniforms { long total_elements; long splits; };@MMA_HELPERS@
 
@@ -617,8 +662,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
     bool last_split = split == splits - 1L;
     long new_blocks = (last_split && mma_end > new_start) ? (mma_end - new_start + block - 1L) / block : 0L;
     long tail_steps = (last_split && new_end > total_aligned && new_first < total_rows) ? 1L : 0L;
-    for (long step = 0L; step < cached_blocks + new_blocks + tail_steps; step++) {
-        long mode = step < cached_blocks ? 0L : (step < cached_blocks + new_blocks ? 1L : 2L);
+    //@STEP_BODY_BEGIN@
         long key0 = mode == 0L ? slice_start + step * block : (mode == 1L ? new_start + (step - cached_blocks) * block : total_aligned);
         long columns = mode == 0L ? min(block, slice_end - key0) : (mode == 1L ? min(block, mma_end - key0) : total_rows - total_aligned);
         if (mode != 2L) {
@@ -1042,7 +1086,7 @@ kernel void @ENTRY@(device const float* in0 [[buffer(0)]], device const float* i
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-    }
+    //@STEP_BODY_END@
     if (@QUERY_OWNER_ROWS@) {
         for (int vector_block = (int)simdgroup_slot; vector_block < (int)tile_blocks; vector_block += (int)simdgroups) {
             int vector_slot = vector_block / (int)simdgroups;

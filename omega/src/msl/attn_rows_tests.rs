@@ -64,6 +64,9 @@ fn card_12_variant_config_stores_each_axis_independently() {
 
 const SLIDING_LOWER: i64 = -511;
 const GLOBAL_LOWER: i64 = i64::MIN;
+/// The step loop is rendered once for the cached range and once for the new rows, so a
+/// per-block token appears once per phase.
+const STEP_PHASES: usize = 2;
 const VERIFY_ROWS: [u64; 4] = [2, 5, 17, 49];
 const CAPACITIES: [u64; 3] = [32, 512, 2048];
 const THREADGROUP_BUDGET: u64 = 32_768;
@@ -1007,20 +1010,20 @@ fn the_row_tiled_softmax_is_one_online_pass_per_vector_with_one_max_and_one_sum_
 
     assert_eq!(
         source.matches("simd_max(").count(),
-        1,
-        "one block max reduction"
+        STEP_PHASES,
+        "one block max reduction in each step phase"
     );
     assert_eq!(
         source.matches("simd_sum(").count(),
-        1,
-        "one block sum reduction"
+        STEP_PHASES,
+        "one block sum reduction in each step phase"
     );
     assert_eq!(
         source
             .matches("exp(local_scores[item] - next_maximum)")
             .count(),
-        1,
-        "the weights are written once, in f32, against the final block maximum"
+        STEP_PHASES,
+        "the weights are written once per step phase, in f32, against the final block maximum"
     );
     for required in [
         "for (long vector = (long)simdgroup_slot; vector < tile_vectors; vector += simdgroups) {",
@@ -1057,8 +1060,8 @@ fn the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers()
     );
     assert_eq!(
         source.matches("threadgroup_barrier(").count(),
-        9,
-        "four live barriers plus five that sit in the shared-K, shared-V and prefetch variants"
+        1 + STEP_PHASES * 8,
+        "the setup barrier plus, per step phase, three live barriers and five that sit in the shared-K, shared-V and prefetch variants"
     );
     let live_barriers = source
         .lines()
@@ -1066,8 +1069,9 @@ fn the_row_tiled_kernel_stages_the_query_tile_once_and_keeps_its_four_barriers()
         .filter(|line| line.len() - line.trim_start().len() <= 8)
         .count();
     assert_eq!(
-        live_barriers, 4,
-        "one after the setup and the staging, three per key block, outside every variant branch"
+        live_barriers,
+        1 + STEP_PHASES * 3,
+        "one after the setup and the staging, three per key block in each step phase, outside every variant branch"
     );
     let setup_end = source
         .find("threadgroup_barrier(")
@@ -2554,4 +2558,92 @@ fn explicit_four_simdgroup_dispatch_preserves_row_and_key_tiles() {
             .source
             .contains("constexpr long simdgroups = 4")
     );
+}
+
+const CACHED_PHASE_HEAD: &str = "    for (long step = 0L; step < cached_blocks; step++) {\n";
+const NEW_PHASE_HEAD: &str = "    for (long step = cached_blocks; step < cached_blocks + new_blocks + tail_steps; step++) {\n";
+
+fn step_phases(source: &str) -> (&str, &str) {
+    let cached_start = source
+        .find(CACHED_PHASE_HEAD)
+        .expect("the cached phase loop is emitted");
+    let new_start = source
+        .find(NEW_PHASE_HEAD)
+        .expect("the new-rows phase loop is emitted");
+    assert!(cached_start < new_start, "the cached phase runs first");
+    (&source[cached_start..new_start], &source[new_start..])
+}
+
+/// The unrolled K and V load loops once tested `mode == 0L` at run time, and for a
+/// narrow cache that was a live branch whose two sides load different source types
+/// (cached rows narrow, new rows f32): 9,160 against 6,086 us/op on a full layer.
+/// Splitting the step loop per phase folds the test, so the cached phase carries
+/// the narrow loads alone and the new-rows phase the f32 loads alone.
+#[test]
+fn the_f16_cache_row_tiled_cached_phase_carries_no_runtime_mode_test() {
+    for (label, op) in [
+        ("sliding 5 rows", sliding_op(512, 5)),
+        (
+            "full layer 512 rows",
+            attention_rows_op(9, 8, 128, 2048, 512, GLOBAL_LOWER),
+        ),
+    ] {
+        let packed = packed_operands_at(&op, &[2, 3, 6], Codec::Float16);
+        let source = emit(&op, &packed, NumericPolicy::llama_relaxed())
+            .expect("the row-tiled kernel reads a Float16 cache")
+            .source;
+        let (cached, new_rows) = step_phases(&source);
+
+        assert!(
+            !cached.contains("mode"),
+            "{label}: the cached phase must hold no runtime mode test"
+        );
+        assert!(
+            cached.contains("(device const half*)in2") && cached.contains("(device const half*)in6"),
+            "{label}: the cached phase loads K and V through half pointers"
+        );
+        assert!(
+            !new_rows.contains("mode == 0L") && new_rows.contains("else if (true && false)"),
+            "{label}: the new-rows phase folds the half-cache load sites to a constant false"
+        );
+        assert!(
+            new_rows.contains("long mode = step < cached_blocks + new_blocks ? 1L : 2L;"),
+            "{label}: the new-rows phase still tells the MMA blocks from the scalar tail"
+        );
+        assert_eq!(
+            source.matches("for (long step = ").count(),
+            STEP_PHASES,
+            "{label}: exactly the two phase loops walk the steps"
+        );
+    }
+}
+
+#[test]
+fn an_f32_cache_row_tiled_kernel_splits_into_the_same_two_phases() {
+    let source = row_tiled_source(&sliding_op(512, 5));
+    let (cached, new_rows) = step_phases(&source);
+
+    assert!(!cached.contains("mode"));
+    assert!(!new_rows.contains("mode == 0L"));
+}
+
+#[test]
+fn a_step_loop_template_missing_either_marker_is_a_loud_emit_error() {
+    for (label, source, marker) in [
+        ("no begin marker", "    //@STEP_BODY_END@\n", "STEP_BODY_BEGIN"),
+        ("no end marker", "    //@STEP_BODY_BEGIN@\n", "STEP_BODY_END"),
+        ("neither marker", "kernel void entry() {}\n", "STEP_BODY_BEGIN"),
+    ] {
+        let error = cached_attention_row_tiled::split_step_loop(NodeId(7), source)
+            .expect_err(label);
+
+        assert_eq!(
+            error,
+            EmitError::KernelTemplateMarkerMissing {
+                node: NodeId(7),
+                marker
+            },
+            "{label}"
+        );
+    }
 }
