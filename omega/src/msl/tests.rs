@@ -9406,7 +9406,7 @@ mod expert_grouped_gemm {
         );
         assert!(
             source.contains(
-                "long a_tok = (a_row < (long)tile_count) ? (long)tile_token[a_row] : -1;",
+                "long a_tok = (long)tile_token[min(a_row, (long)tile_count - 1)];",
             ),
             "{source}"
         );
@@ -9439,7 +9439,7 @@ mod expert_grouped_gemm {
         );
         assert!(
             source.contains(
-                "long a_tok = (a_row < (long)tile_count) ? (long)tile_list[a_row] : -1;",
+                "long a_tok = (long)tile_list[min(a_row, (long)tile_count - 1)];",
             ),
             "{source}"
         );

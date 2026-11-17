@@ -657,17 +657,22 @@ fn push_grouped_tile(
 
 /// What each thread stages, fixed for the whole tile. Weights: two threads
 /// per tile row, `w_blk` and `w_pos` the row's weight cursor for this K step
-/// (valid only while `w_valid`, a row past `feature_extent` stages zeros so its
-/// accumulators stay zero; `w_half` offsets the second thread by one decode run),
+/// (a row past `feature_extent` clamps to the last feature, as `ggml-metal`
+/// clamps `lr0`, so it stages real weights and no K step branches on
+/// validity; its accumulators are never written back; `w_half` offsets the
+/// second thread by one decode run),
 /// `w_slot` its slot in the 8x8-block layout (block
 /// `8 * k_block + row_block`, element `8 * (k % 8) + (row % 8)`).
 /// Activations: four threads per pending token, `a_ptr` the token's row at
 /// this thread's eight-element K block, `a_slot` its 16-byte row of the 8x8
-/// block `4 * k_block + token_block`. `a_staged` is false for the upper token
-/// half of a tile that has no token there (`has_hi`), `a_vector` selects
-/// `float4` loads when the operand base and token stride keep every row
-/// 16-byte aligned, else the scalar loop runs -- a runtime test on two
-/// uniforms, uniform across the threadgroup.
+/// block `4 * k_block + token_block`. A row past `tile_count` clamps to the
+/// tile's last token (`ggml-metal`'s `lr1` clamp), so it stages that token's
+/// real activations and the tile's accumulator rows past `tile_count` are
+/// never written back. `a_vector` selects `float4` loads when the operand
+/// base and token strides keep every row 16-byte aligned, else the scalar
+/// loop runs; those are runtime uniforms of the dispatch, so alignment is not
+/// provable at emit time and the one select stays, loop-invariant and uniform
+/// across the threadgroup.
 #[cfg(feature = "metal-grouped-gemm")]
 fn push_grouped_stage_pointers(
     source: &mut String,
@@ -683,24 +688,19 @@ fn push_grouped_stage_pointers(
     source.push_str("            long w_row = tiitg / 2;\n");
     source.push_str("            long w_half = tiitg % 2;\n");
     source.push_str(&format!(
-        "            long w_feat = row_tile * {GROUPED_TILE_ROWS} + w_row;\n"
+        "            long w_feat = min((long)row_tile * {GROUPED_TILE_ROWS} + w_row, (long)feature_extent - 1);\n"
     ));
-    source.push_str("            bool w_valid = w_feat < feature_extent;\n");
     source.push_str(
         "            threadgroup half *w_slot = weight_tile + 1024 * w_half + 64 * (w_row / 8) + (w_row % 8);\n",
     );
     source.push_str(&format!(
-        "            long w_elem = u.operand_base[{weight}] + grouped_expert_base + (w_valid ? w_feat : 0) * u.operand_strides[{weight}][{feature_axis}] + w_half * {DECODE_RUN_ELEMENTS};\n"
+        "            long w_elem = u.operand_base[{weight}] + grouped_expert_base + w_feat * u.operand_strides[{weight}][{feature_axis}] + w_half * {DECODE_RUN_ELEMENTS};\n"
     ));
     push_weight_cursor(source, "            ", decode, "w_blk", "w_pos", "w_elem");
     source.push_str("            long a_row = tiitg / 4;\n");
     source.push_str("            long a_k_block = tiitg % 4;\n");
     source.push_str(&format!(
-        "            bool a_staged = a_row < {} || has_hi;\n",
-        GROUPED_TILE_TOKENS / 2
-    ));
-    source.push_str(&format!(
-        "            long a_tok = (a_row < (long)tile_count) ? (long){token_list}[a_row] : -1;\n"
+        "            long a_tok = (long){token_list}[min(a_row, (long)tile_count - 1)];\n"
     ));
     let vector = staging.vector();
     source.push_str(&format!(
@@ -710,7 +710,7 @@ fn push_grouped_stage_pointers(
         source,
         geometry,
         "            ",
-        "(a_tok < 0 ? 0 : a_tok)",
+        "a_tok",
         "a_c",
     );
     let activation_offset = token_offset_expr(geometry, "a_c", |axis| {
@@ -731,19 +731,14 @@ fn push_grouped_stage_pointers(
 
 /// Issues one step's global loads and decodes into `w_regs`/`a_regs`: the row's
 /// [`DECODE_RUN_ELEMENTS`] weights decode through the codec's [`tiled_decode`]
-/// function (a row past `feature_extent` stages zeros), the activation row's
+/// function (a row past `feature_extent` is clamped, see
+/// [`push_grouped_stage_pointers`]), the activation row's
 /// eight floats are two `float4` loads kept as `float`.
 #[cfg(feature = "metal-grouped-gemm")]
 fn push_grouped_load(source: &mut String, decode: &TiledDecode, indent: &str) {
     let weight_load = [
         format!("half w_regs[{DECODE_RUN_ELEMENTS}];"),
-        "if (w_valid) {".to_string(),
-        format!("    {};", decode.call("w_blk", "w_pos", "w_regs")),
-        "} else {".to_string(),
-        format!(
-            "    for (int element = 0; element < {DECODE_RUN_ELEMENTS}; ++element) {{ w_regs[element] = 0.0h; }}"
-        ),
-        "}".to_string(),
+        format!("{};", decode.call("w_blk", "w_pos", "w_regs")),
     ];
     for line in weight_load {
         source.push_str(indent);
@@ -751,16 +746,12 @@ fn push_grouped_load(source: &mut String, decode: &TiledDecode, indent: &str) {
         source.push('\n');
     }
     let lines = [
-        "if (a_staged) {",
-        "    if (a_tok < 0) {",
-        "        a_regs[0] = float4(0.0f); a_regs[1] = float4(0.0f);",
-        "    } else if (a_vector) {",
-        "        device const float4 *a_src = (device const float4 *)a_ptr;",
-        "        a_regs[0] = a_src[0]; a_regs[1] = a_src[1];",
-        "    } else {",
-        "        for (int lane = 0; lane < 4; ++lane) {",
-        "            a_regs[0][lane] = a_ptr[lane]; a_regs[1][lane] = a_ptr[4 + lane];",
-        "        }",
+        "if (a_vector) {",
+        "    device const float4 *a_src = (device const float4 *)a_ptr;",
+        "    a_regs[0] = a_src[0]; a_regs[1] = a_src[1];",
+        "} else {",
+        "    for (int lane = 0; lane < 4; ++lane) {",
+        "        a_regs[0][lane] = a_ptr[lane]; a_regs[1][lane] = a_ptr[4 + lane];",
         "    }",
         "}",
     ];
@@ -783,7 +774,7 @@ fn push_grouped_store(source: &mut String, staging: &ActivationStaging) {
         ));
     }
     source.push_str(&format!(
-        "                if (a_staged) {{ a_slot[0] = {}; a_slot[1] = {}; }}\n",
+        "                a_slot[0] = {}; a_slot[1] = {};\n",
         staging.convert_vector("a_regs[0]"),
         staging.convert_vector("a_regs[1]")
     ));
@@ -806,24 +797,28 @@ fn push_grouped_multiply_accumulate(source: &mut String, staging: &ActivationSta
         "                    threadgroup const {} *lsmb = act_tile + 2 * 64 * (sgitg / 2);\n",
         staging.element()
     ));
+    source.push_str("                    simdgroup_half8x8 ma[4];\n");
     source.push_str(&format!(
-        "                    for (short ik = 0; ik < {}; ++ik) {{\n",
-        GROUPED_TILE_DEPTH / 8
-    ));
-    source.push_str("                        simdgroup_half8x8 ma[4];\n");
-    source.push_str(&format!(
-        "                        {} mb[2];\n",
+        "                    {} mb[2];\n",
         staging.matrix()
     ));
-    source.push_str(
-        "                        for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, ulong2(0), false); }\n",
-    );
-    source.push_str(
-        "                        for (short i = 0; i < 2; ++i) { simdgroup_load(mb[i], lsmb + 64 * i, 8, ulong2(0), false); }\n",
-    );
-    source.push_str(
-        "                        for (short i = 0; i < 8; ++i) { simdgroup_multiply_accumulate(acc[i], mb[i / 4], ma[i % 4], acc[i]); }\n",
-    );
+    let unroll = "_Pragma(\"clang loop unroll(full)\")";
+    source.push_str(&format!(
+        "                    {unroll} for (short ik = 0; ik < {}; ++ik) {{\n",
+        GROUPED_TILE_DEPTH / 8
+    ));
+    source.push_str("                        simdgroup_barrier(mem_flags::mem_none);\n");
+    source.push_str(&format!(
+        "                        {unroll} for (short i = 0; i < 4; ++i) {{ simdgroup_load(ma[i], lsma + 64 * i, 8, ulong2(0), false); }}\n"
+    ));
+    source.push_str("                        simdgroup_barrier(mem_flags::mem_none);\n");
+    source.push_str(&format!(
+        "                        {unroll} for (short i = 0; i < 2; ++i) {{ simdgroup_load(mb[i], lsmb + 64 * i, 8, ulong2(0), false); }}\n"
+    ));
+    source.push_str("                        simdgroup_barrier(mem_flags::mem_none);\n");
+    source.push_str(&format!(
+        "                        {unroll} for (short i = 0; i < 8; ++i) {{ simdgroup_multiply_accumulate(acc[i], mb[i / 4], ma[i % 4], acc[i]); }}\n"
+    ));
     source.push_str("                        lsma += 8 * 64;\n");
     source.push_str("                        lsmb += 4 * 64;\n");
     source.push_str("                    }\n");

@@ -1183,18 +1183,16 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero_g10(
             for (int i = 0; i < 8; ++i) { acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }
             int w_row = tiitg / 2;
             int w_half = tiitg % 2;
-            int w_feat = row_tile * 64 + w_row;
-            bool w_valid = w_feat < feature_extent;
+            int w_feat = min((int)row_tile * 64 + w_row, (int)feature_extent - 1);
             threadgroup half *w_slot = weight_tile + 1024 * w_half + 64 * (w_row / 8) + (w_row % 8);
-            int w_elem = ((int)u.operand_base[0]) + grouped_expert_base + (w_valid ? w_feat : 0) * ((int)u.operand_strides[0][2]) + w_half * 16;
+            int w_elem = ((int)u.operand_base[0]) + grouped_expert_base + w_feat * ((int)u.operand_strides[0][2]) + w_half * 16;
             device const uchar *w_blk = weight_bytes + ((w_elem) / 32) * 34;
             uint w_pos = (uint)((w_elem) % 32);
             int a_row = tiitg / 4;
             int a_k_block = tiitg % 4;
-            bool a_staged = a_row < 16 || has_hi;
-            int a_tok = (a_row < (int)tile_count) ? (int)tile_list[a_row] : -1;
+            int a_tok = (int)tile_list[min(a_row, (int)tile_count - 1)];
             threadgroup float4 *a_slot = (threadgroup float4 *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));
-            uint a_c_rest = (uint)((a_tok < 0 ? 0 : a_tok));
+            uint a_c_rest = (uint)(a_tok);
             int a_c1 = (int)(a_c_rest % (uint)((int)u.output_extents[1]));
             a_c_rest /= (uint)((int)u.output_extents[1]);
             int a_c0 = (int)a_c_rest;
@@ -1203,21 +1201,13 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero_g10(
             for (int k0 = 0; k0 < ((int)u.reduction_total); k0 += 32) {
                 float4 a_regs[2];
                 half w_regs[16];
-                if (w_valid) {
-                    q8_0_dequant_half16(w_blk, w_pos, w_regs);
+                q8_0_dequant_half16(w_blk, w_pos, w_regs);
+                if (a_vector) {
+                    device const float4 *a_src = (device const float4 *)a_ptr;
+                    a_regs[0] = a_src[0]; a_regs[1] = a_src[1];
                 } else {
-                    for (int element = 0; element < 16; ++element) { w_regs[element] = 0.0h; }
-                }
-                if (a_staged) {
-                    if (a_tok < 0) {
-                        a_regs[0] = float4(0.0f); a_regs[1] = float4(0.0f);
-                    } else if (a_vector) {
-                        device const float4 *a_src = (device const float4 *)a_ptr;
-                        a_regs[0] = a_src[0]; a_regs[1] = a_src[1];
-                    } else {
-                        for (int lane = 0; lane < 4; ++lane) {
-                            a_regs[0][lane] = a_ptr[lane]; a_regs[1][lane] = a_ptr[4 + lane];
-                        }
+                    for (int lane = 0; lane < 4; ++lane) {
+                        a_regs[0][lane] = a_ptr[lane]; a_regs[1][lane] = a_ptr[4 + lane];
                     }
                 }
                 threadgroup_barrier(mem_flags::mem_threadgroup);
@@ -1237,17 +1227,20 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero_g10(
                 w_slot[552] = w_regs[13];
                 w_slot[560] = w_regs[14];
                 w_slot[568] = w_regs[15];
-                if (a_staged) { a_slot[0] = a_regs[0]; a_slot[1] = a_regs[1]; }
+                a_slot[0] = a_regs[0]; a_slot[1] = a_regs[1];
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 if ((sgitg >> 1) == 0 || has_hi) {
                     threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);
                     threadgroup const float *lsmb = act_tile + 2 * 64 * (sgitg / 2);
-                    for (short ik = 0; ik < 4; ++ik) {
-                        simdgroup_half8x8 ma[4];
-                        simdgroup_float8x8 mb[2];
-                        for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, ulong2(0), false); }
-                        for (short i = 0; i < 2; ++i) { simdgroup_load(mb[i], lsmb + 64 * i, 8, ulong2(0), false); }
-                        for (short i = 0; i < 8; ++i) { simdgroup_multiply_accumulate(acc[i], mb[i / 4], ma[i % 4], acc[i]); }
+                    simdgroup_half8x8 ma[4];
+                    simdgroup_float8x8 mb[2];
+                    _Pragma("clang loop unroll(full)") for (short ik = 0; ik < 4; ++ik) {
+                        simdgroup_barrier(mem_flags::mem_none);
+                        _Pragma("clang loop unroll(full)") for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, ulong2(0), false); }
+                        simdgroup_barrier(mem_flags::mem_none);
+                        _Pragma("clang loop unroll(full)") for (short i = 0; i < 2; ++i) { simdgroup_load(mb[i], lsmb + 64 * i, 8, ulong2(0), false); }
+                        simdgroup_barrier(mem_flags::mem_none);
+                        _Pragma("clang loop unroll(full)") for (short i = 0; i < 8; ++i) { simdgroup_multiply_accumulate(acc[i], mb[i / 4], ma[i % 4], acc[i]); }
                         lsma += 8 * 64;
                         lsmb += 4 * 64;
                     }
