@@ -15,7 +15,11 @@
 //!   [`ScheduleSource::SlidingPattern`]; else a `{arch}.full_attention_interval`
 //!   is [`ScheduleSource::RecurrentInterval`], or
 //!   [`ScheduleSource::RecurrentRoutedInterval`] when `{arch}.expert_count` is
-//!   nonzero; else [`ScheduleSource::Uniform`] (scalar keys, short-conv layers
+//!   nonzero, after cross-checking that key against the profile's
+//!   [`FfnCombination`] (a routed interval header needs
+//!   [`FfnCombination::RoutedWithSharedExpert`], a dense one anything else;
+//!   a disagreement is [`InteropError::HeaderExpertKeysContradictProfile`], never
+//!   resolved toward either side); else [`ScheduleSource::Uniform`] (scalar keys, short-conv layers
 //!   marked by zeros in `head_count_kv`). Vestigial keys such as granite-4.0's
 //!   `granite.ssm.*` are not consulted.
 //! - [`infer_score_scale`]: `{arch}.attention.scale` when present and nonzero,
@@ -31,7 +35,9 @@
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::MetadataValue;
 use proxima_telemetry::debug;
-use proxima_tensor::spec::{ExpertGatingFunc, FamilyProfile, ScheduleSource, expert_gating_func};
+use proxima_tensor::spec::{
+    ExpertGatingFunc, FamilyProfile, FfnCombination, ScheduleSource, expert_gating_func,
+};
 
 use crate::bind::{metadata_f32_optional, metadata_u32_optional};
 use crate::error::InteropError;
@@ -71,8 +77,23 @@ pub(crate) fn infer_routed_gating(
 }
 
 /// The header reader this header's key shape selects.
-#[must_use]
-pub(crate) fn infer_schedule_source(parsed: &ParsedGguf, family: &str) -> ScheduleSource {
+///
+/// `combination` is the family profile's per-layer
+/// [`LayerFfnConfig::combination`](proxima_tensor::spec::LayerFfnConfig): the
+/// interval branch's dense-vs-routed choice rests on `{family}.expert_count`,
+/// so that key is checked against it rather than trusted alone. The profile
+/// "says routed" exactly when it names [`FfnCombination::RoutedWithSharedExpert`],
+/// the combination [`ScheduleSource::RecurrentRoutedInterval`] reads.
+///
+/// # Errors
+///
+/// [`InteropError::HeaderExpertKeysContradictProfile`] when an interval header's
+/// `expert_count` and the profile's combination disagree.
+pub(crate) fn infer_schedule_source(
+    parsed: &ParsedGguf,
+    family: &str,
+    combination: FfnCombination,
+) -> Result<ScheduleSource, InteropError> {
     let pattern_key = format!("{family}.attention.sliding_window_pattern");
     let interval_key = format!("{family}.full_attention_interval");
     let sliding = matches!(
@@ -80,13 +101,25 @@ pub(crate) fn infer_schedule_source(parsed: &ParsedGguf, family: &str) -> Schedu
         Some(MetadataValue::Array(_))
     );
     let interval = parsed.metadata_value(&interval_key).is_some();
-    let expert_count = metadata_u32_optional(parsed, &format!("{family}.expert_count"));
+    let expert_key = format!("{family}.expert_count");
+    let expert_count = metadata_u32_optional(parsed, &expert_key);
     let source = if sliding {
         ScheduleSource::SlidingPattern
-    } else if interval && expert_count > 0 {
-        ScheduleSource::RecurrentRoutedInterval
     } else if interval {
-        ScheduleSource::RecurrentInterval
+        let profile_routed = combination == FfnCombination::RoutedWithSharedExpert;
+        if (expert_count > 0) != profile_routed {
+            return Err(InteropError::HeaderExpertKeysContradictProfile {
+                key: expert_key,
+                value: expert_count,
+                family: family.into(),
+                combination: format!("{combination:?}"),
+            });
+        }
+        if profile_routed {
+            ScheduleSource::RecurrentRoutedInterval
+        } else {
+            ScheduleSource::RecurrentInterval
+        }
     } else {
         ScheduleSource::Uniform
     };
@@ -96,9 +129,10 @@ pub(crate) fn infer_schedule_source(parsed: &ParsedGguf, family: &str) -> Schedu
         sliding_window_pattern_array = sliding,
         full_attention_interval = interval,
         expert_count = expert_count,
+        profile_combination = ?combination,
         "key fact inferred from metadata"
     );
-    source
+    Ok(source)
 }
 
 /// `{family}.attention.scale` when the header states one (zero reads as
@@ -128,14 +162,14 @@ pub(crate) fn infer_score_scale(parsed: &ParsedGguf, family: &str) -> InferredSc
 ///
 /// # Errors
 ///
-/// Whatever [`infer_routed_gating`] refuses.
+/// Whatever [`infer_routed_gating`] or [`infer_schedule_source`] refuses.
 pub(crate) fn with_inferred_keys(
     profile: FamilyProfile,
     parsed: &ParsedGguf,
     family: &str,
 ) -> Result<FamilyProfile, InteropError> {
     let routed_gating = infer_routed_gating(parsed, family)?.unwrap_or(profile.ffn.routed_gating);
-    let schedule_source = infer_schedule_source(parsed, family);
+    let schedule_source = infer_schedule_source(parsed, family, profile.ffn.combination)?;
     Ok(FamilyProfile {
         ffn: proxima_tensor::spec::LayerFfnConfig {
             routed_gating,
@@ -237,7 +271,11 @@ mod tests {
         for (model, profiled, expert_count, text) in FIXTURES {
             let parsed = header(text);
             let family = family_of(text);
-            let schedule = infer_schedule_source(&parsed, &family);
+            let combination = profiled
+                .map(|name| family_profile(name).expect("profile embedded").ffn.combination)
+                .unwrap_or(FfnCombination::Exclusive);
+            let schedule = infer_schedule_source(&parsed, &family, combination)
+                .expect("local headers agree with their profiles");
             let scale = infer_score_scale(&parsed, &family);
             let gating = infer_routed_gating(&parsed, &family).expect("local headers state supported gating");
             let (expected_schedule, profile_scale_inverse_sqrt, profile_gating) = match profiled {
@@ -290,14 +328,20 @@ mod tests {
         let parsed = header(text);
 
         assert_eq!(infer_score_scale(&parsed, "granite"), InferredScoreScale::Factor(0.015_625));
-        assert_eq!(infer_schedule_source(&parsed, "granite"), ScheduleSource::Uniform);
+        assert_eq!(
+            infer_schedule_source(&parsed, "granite", FfnCombination::Exclusive).expect("no interval key"),
+            ScheduleSource::Uniform
+        );
     }
 
     #[test]
     fn a_short_conv_header_with_zeros_in_head_count_kv_stays_uniform() {
         let parsed = header(FIXTURES[5].3);
 
-        assert_eq!(infer_schedule_source(&parsed, "lfm2"), ScheduleSource::Uniform);
+        assert_eq!(
+            infer_schedule_source(&parsed, "lfm2", FfnCombination::Exclusive).expect("no interval key"),
+            ScheduleSource::Uniform
+        );
     }
 
     #[test]
@@ -318,10 +362,46 @@ mod tests {
             &[],
         );
 
-        assert_eq!(infer_schedule_source(&dense, "qwen35"), ScheduleSource::RecurrentInterval);
         assert_eq!(
-            infer_schedule_source(&routed, "qwen35moe"),
+            infer_schedule_source(&dense, "qwen35", FfnCombination::Exclusive).expect("dense agrees"),
+            ScheduleSource::RecurrentInterval
+        );
+        assert_eq!(
+            infer_schedule_source(&routed, "qwen35moe", FfnCombination::RoutedWithSharedExpert)
+                .expect("routed agrees"),
             ScheduleSource::RecurrentRoutedInterval
+        );
+    }
+
+    #[test]
+    fn an_interval_header_whose_expert_count_contradicts_the_profile_combination_is_refused_both_ways() {
+        let stating = crate::test_support::parsed_header_with_extra_tensors(
+            vec![
+                ("qwen35.full_attention_interval", MetadataValue::U32(4)),
+                ("qwen35.expert_count", MetadataValue::U32(2)),
+            ],
+            4,
+            4,
+            &[],
+        );
+        let silent = crate::test_support::parsed_header_with_extra_tensors(
+            vec![("qwen35moe.full_attention_interval", MetadataValue::U32(4))],
+            4,
+            4,
+            &[],
+        );
+
+        let dense_profile = infer_schedule_source(&stating, "qwen35", FfnCombination::Exclusive);
+        let routed_profile =
+            infer_schedule_source(&silent, "qwen35moe", FfnCombination::RoutedWithSharedExpert);
+
+        assert!(
+            matches!(&dense_profile, Err(InteropError::HeaderExpertKeysContradictProfile { value: 2, combination, .. }) if combination == "Exclusive"),
+            "{dense_profile:?}"
+        );
+        assert!(
+            matches!(&routed_profile, Err(InteropError::HeaderExpertKeysContradictProfile { value: 0, combination, .. }) if combination == "RoutedWithSharedExpert"),
+            "{routed_profile:?}"
         );
     }
 

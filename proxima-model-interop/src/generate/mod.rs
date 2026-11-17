@@ -310,6 +310,8 @@ mod prompt_cache_real_model_tests;
 #[cfg(test)]
 mod recurrent_checkpoint_fixture;
 #[cfg(test)]
+mod recurrent_header_profile_tests;
+#[cfg(test)]
 mod recurrent_hf_tests;
 #[cfg(test)]
 mod recurrent_mainline_tests;

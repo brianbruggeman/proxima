@@ -37,6 +37,29 @@ pub(super) fn recurrent_checkpoint_shaped(
     quantized: bool,
     attention_heads: (u64, u64),
 ) -> Vec<u8> {
+    recurrent_checkpoint_keyed(routed, routed, eos, key_heads, convolution, quantized, attention_heads)
+}
+
+/// A dense `qwen35` checkpoint (dense tensors, dense family name) whose header
+/// nevertheless states `qwen35.expert_count`: the contradiction the schedule
+/// source refuses, built apart from [`recurrent_checkpoint`] so the shared dense
+/// fixture never carries expert keys.
+pub(super) fn dense_checkpoint_stating_experts() -> Vec<u8> {
+    recurrent_checkpoint_keyed(false, true, None, 1, CONVOLUTION, false, (QUERY_HEADS, 1))
+}
+
+/// `routed` picks the family name and the tensor directory; `expert_keys`
+/// picks whether the header writes `{family}.expert_*`. They agree for every
+/// real checkpoint; they differ only to build a contradicting header.
+fn recurrent_checkpoint_keyed(
+    routed: bool,
+    expert_keys: bool,
+    eos: Option<u32>,
+    key_heads: u64,
+    convolution: u64,
+    quantized: bool,
+    attention_heads: (u64, u64),
+) -> Vec<u8> {
     let (query_heads, kv_heads) = attention_heads;
     let family = if routed { "qwen35moe" } else { "qwen35" };
     let mut random = Lcg(0x6a09_e667_f3bc_c909);
@@ -296,7 +319,7 @@ pub(super) fn recurrent_checkpoint_shaped(
     }
     // a dense checkpoint carries no expert keys: the header reader is chosen by
     // `{family}.expert_count > 0`, so writing them here selects the routed reader
-    if routed {
+    if expert_keys {
         for (suffix, value) in [
             ("expert_count", EXPERTS),
             ("expert_used_count", 1),

@@ -26,6 +26,20 @@ pub enum InteropError {
     /// ordinary forward.
     #[error("model {family:?} does not support recurrent configuration")]
     UnsupportedRecurrentConfig { family: String },
+    /// A recurrent-interval header's `{family}.expert_count` disagrees with the
+    /// family profile's per-layer ffn combination about whether the model is
+    /// routed. Neither side is preferred: serving either would run a graph the
+    /// other side says is wrong.
+    #[error(
+        "header key {key:?} = {value} contradicts the ffn combination {combination} of family {family:?}'s profile: \
+         a recurrent-interval header is routed only when the profile says RoutedWithSharedExpert"
+    )]
+    HeaderExpertKeysContradictProfile {
+        key: String,
+        value: u32,
+        family: String,
+        combination: String,
+    },
     #[error("synchronous decode evaluator suspended before completion")]
     SyncDecodePending,
 
