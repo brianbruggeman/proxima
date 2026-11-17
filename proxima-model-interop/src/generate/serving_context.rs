@@ -17,9 +17,12 @@ pub(super) struct ServingContext {
 }
 
 // SAFETY: `ServingContext` holds one `MetalContext`: maps of `Retained<MTLBuffer>`
-// (resident, no-copy and expert-source buffers), a `Vec<u8>` of staged expert
-// bytes, a `(usize, usize)` mapping identity, and an optional queue and
-// residency set. objc2-metal marks buffers and residency sets neither `Send`
+// (resident, no-copy, expert-source and uniform-cache buffers), the fault-buffer
+// pool (owned `Retained<MTLBuffer>`s keyed by gather count), a `Vec<u8>` of staged
+// expert bytes, a `u64` uniform-cache clock, a `(usize, usize)` mapping identity,
+// and an optional queue and residency set. The uniform cache and fault pool hold
+// owned buffers only: no `Rc`, no `Weak`. The transient arena and attention pools
+// (`Weak` into plan-held `Rc` leases) are not in the context until the plans are. objc2-metal marks buffers and residency sets neither `Send`
 // nor `Sync`, so this impl is what lets the aggregate cross threads. It holds
 // because (1) every handle is owned by this value alone: nothing here is an
 // `Rc`, a `Weak`, a clone shared with another thread's slot, or a borrow; the

@@ -14,7 +14,7 @@ use super::super::pipeline_buffers_upload::{
 };
 use super::super::resident_nocopy_cache::{
     release_resident_names, reset_nocopy_cache_for_test, reset_resident_cache_for_test,
-    resident_cache_len, upload_block_no_copy, upload_resident_copy,
+    resident_cache_len, uniform_cache_len, upload_block_no_copy, upload_resident_copy, upload_uniforms,
 };
 use super::{MetalContext, MetalContextGuard};
 
@@ -429,4 +429,49 @@ fn checkpoint_mapping_resolves_on_a_thread_that_did_not_register_it() {
     .expect("serving thread did not panic");
 
     assert_eq!(resolved, Some(page + 64));
+}
+
+/// the uniform blob a decode plan would bind: real extents and strides, 16 longs.
+fn uniform_blob() -> Vec<u8> {
+    (0_i64..16).flat_map(|value| (value * 4096).to_le_bytes()).collect()
+}
+
+/// thread A uploads the blob (cache miss) then the serving thread uploads the same bytes;
+/// the returned handle's address says whether thread B was served from A's cache.
+fn second_thread_buffer_is_first_threads(carry_context: bool) -> (bool, usize) {
+    let blob = uniform_blob();
+    let mut context = MetalContext::default();
+    let first_address = {
+        let _active = carry_context.then(|| context.activate());
+        let (device, _queue) = device_and_queue().expect("thread A opens a device");
+        let buffer = upload_uniforms(&device, &blob).expect("thread A uploads the uniform blob");
+        (Retained::as_ptr(&buffer) as usize, uniform_cache_len())
+    };
+    let carried = QuiescentContext(context);
+    let blob_for_b = blob.clone();
+    let (second_address, held) = std::thread::spawn(move || {
+        let mut carried = carried;
+        let _active = carry_context.then(|| carried.0.activate());
+        let (device, _queue) = device_and_queue().expect("thread B opens a device");
+        let buffer = upload_uniforms(&device, &blob_for_b).expect("thread B uploads the uniform blob");
+        (Retained::as_ptr(&buffer) as usize, uniform_cache_len())
+    })
+    .join()
+    .expect("thread B did not panic");
+    assert_eq!(first_address.1, 1, "thread A's cache holds the one blob it uploaded");
+    (first_address.0 == second_address, held)
+}
+
+#[test]
+fn uniform_cache_held_by_the_context_serves_a_second_thread_the_same_buffer() {
+    let (reused, held) = second_thread_buffer_is_first_threads(true);
+    assert!(reused, "thread B allocated its own uniform buffer instead of A's cached one");
+    assert_eq!(held, 1, "the context's cache holds exactly the one blob on thread B");
+}
+
+#[test]
+fn without_a_context_a_second_thread_rebuilds_its_own_uniform_buffer() {
+    let (reused, held) = second_thread_buffer_is_first_threads(false);
+    assert!(!reused, "control: thread B must not see thread A's thread-local cache");
+    assert_eq!(held, 1, "control: thread B's own cache holds the one blob it uploaded");
 }

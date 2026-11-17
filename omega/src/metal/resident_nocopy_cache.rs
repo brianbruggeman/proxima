@@ -1295,7 +1295,7 @@ thread_local! {
     /// [`check_gather_fault`] has read it, so a steady decode step allocates none:
     /// 576 gathered expert dispatches per routed decode step were 576 `newBuffer`
     /// calls. Bounded by the largest count of gathered dispatches in one program.
-    static FAULT_BUFFER_POOL: RefCell<BTreeMap<usize, Vec<MetalBuffer>>> =
+    pub(super) static FAULT_BUFFER_POOL: RefCell<BTreeMap<usize, Vec<MetalBuffer>>> =
         const { RefCell::new(BTreeMap::new()) };
 }
 
@@ -1370,7 +1370,7 @@ thread_local! {
     /// Monotonic use counter driving LRU eviction -- incremented on every
     /// hit and every insert, so the entry with the smallest stored tick is
     /// always the one least recently touched.
-    static UNIFORM_CACHE_CLOCK: RefCell<u64> = const { RefCell::new(0) };
+    pub(super) static UNIFORM_CACHE_CLOCK: RefCell<u64> = const { RefCell::new(0) };
 }
 
 /// Counts uniform buffers served from cache rather than allocated.

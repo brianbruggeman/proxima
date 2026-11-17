@@ -15,11 +15,15 @@ use super::device_buffers_arena_plan::{EXPERT_SOURCE_CACHE, StagedExpertSource};
 use super::device_buffers_arena_plan::ACTIVE_QUEUE;
 use super::metal_device::{ACTIVE_DEVICE, MetalDevice};
 use super::pipeline_buffers_upload::{CHECKPOINT_MAPPING, NOCOPY_BUFFERS};
-use super::resident_nocopy_cache::RESIDENT_BUFFERS;
+use super::resident_nocopy_cache::{
+    FAULT_BUFFER_POOL, RESIDENT_BUFFERS, UNIFORM_BUFFERS, UNIFORM_CACHE_CLOCK,
+};
 use super::warm_resident_buffers::{WARM_RESIDENCY_SET, warm_active_context};
 use super::{MetalBuffer, NodeId};
 
 type ResidentBuffers = BTreeMap<String, (usize, usize, MetalBuffer)>;
+type UniformBuffers = BTreeMap<Vec<u8>, (MetalBuffer, u64)>;
+type FaultBuffers = BTreeMap<usize, Vec<MetalBuffer>>;
 type ExpertSources = BTreeMap<(usize, NodeId), (u64, StagedExpertSource)>;
 
 /// independent model residency, retaining uploads between activations.
@@ -33,6 +37,9 @@ pub struct MetalContext {
     nocopy: ResidentBuffers,
     checkpoint: Option<(usize, usize)>,
     experts: ExpertSources,
+    uniforms: UniformBuffers,
+    uniform_clock: u64,
+    fault_buffers: FaultBuffers,
     queue: Option<Retained<ProtocolObject<dyn MTLCommandQueue>>>,
     device: Option<MetalDevice>,
     residency: Option<Retained<ProtocolObject<dyn MTLResidencySet>>>,
@@ -110,6 +117,22 @@ impl MetalContext {
         ACTIVE_DEVICE.with(|device| mem::swap(&mut self.device, &mut *device.borrow_mut()));
         WARM_RESIDENCY_SET.with(|set| mem::swap(&mut self.residency, &mut *set.borrow_mut()));
         self.swap_caches();
+        self.swap_scratch();
+    }
+
+    fn swap_scratch(&mut self) {
+        UNIFORM_BUFFERS.with(|uniforms| {
+            UNIFORM_CACHE_CLOCK.with(|clock| {
+                FAULT_BUFFER_POOL.with(|faults| {
+                    let mut uniforms = uniforms.borrow_mut();
+                    let mut clock = clock.borrow_mut();
+                    let mut faults = faults.borrow_mut();
+                    mem::swap(&mut self.uniforms, &mut uniforms);
+                    mem::swap(&mut self.uniform_clock, &mut clock);
+                    mem::swap(&mut self.fault_buffers, &mut faults);
+                });
+            });
+        });
     }
 
     fn swap_caches(&mut self) {
