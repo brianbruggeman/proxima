@@ -295,6 +295,10 @@ fn pipeline_key_audit_enabled() -> bool {
 /// rather than this function's `emit`-driven one), or when the two hashes
 /// agree.
 #[cfg(feature = "instrument")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the audit re-emits with exactly the values pipeline_for resolved, which arrive as separate values from its caller"
+)]
 fn audit_pipeline_key_on_hit(
     pipeline: &Retained<ProtocolObject<dyn MTLComputePipelineState>>,
     bound: &BoundOp,
