@@ -2058,12 +2058,11 @@ pub(crate) fn kernel_cache_key_for_grid_with_layout(
         ),
         numeric_policy,
     );
-    if let Some((_, _, _, tokens, experts)) =
+    if let Some((_, _, _, _, experts)) =
         crate::msl::route_compaction_key(resolved, packed_operands, knobs)
     {
+        // the token count is a uniform read (`token_extent`), not source, so only the expert count keys the kernel
         identity.push_str("_route");
-        identity.push_str(&tokens.to_string());
-        identity.push('_');
         identity.push_str(&experts.to_string());
     }
     Ok(identity)

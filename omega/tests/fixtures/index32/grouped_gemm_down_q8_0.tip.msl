@@ -1170,7 +1170,7 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero_g10(
         }
         return;
     }
-    constexpr uint tile_start_base = 97u + 2u * experts + 3072u;
+    uint tile_start_base = 97u + 2u * experts + (uint)token_extent;
     int grouped_expert = (int)route_compaction[tile_start_base + experts + (uint)tile_index];
     int expert_tile = tile_index - (int)route_compaction[tile_start_base + (uint)grouped_expert];
     uint expert_tokens = route_compaction[97u + (uint)grouped_expert];
@@ -1299,11 +1299,12 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero_g10_route_prepass(
 {
     constexpr uint experts = 256u;
     constexpr uint list_base = 97u + 2u * experts;
-    constexpr uint tile_start_base = list_base + 3072u;
-    constexpr uint tile_expert_base = tile_start_base + experts;
-    constexpr uint scratch_base = tile_start_base + 608u;
+    long route_extent = u.output_extents[0] * u.output_extents[1];
+    uint tile_start_base = list_base + (uint)route_extent;
+    uint tile_expert_base = tile_start_base + experts;
+    uint scratch_base = tile_start_base + 2u * experts + ((uint)route_extent + 31u) / 32u;
     long chunk_begin = (long)tgid * 256l;
-    long chunk_end = min(u.output_extents[0] * u.output_extents[1], chunk_begin + 256l);
+    long chunk_end = min(route_extent, chunk_begin + 256l);
     for (uint scan_expert = sgitg; scan_expert < experts; scan_expert += sgcount) {
         uint tally = 0u;
         for (long scan_base = chunk_begin; scan_base < chunk_end; scan_base += 32l) {
@@ -1340,11 +1341,12 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero_g10_route_prepass_place(
 {
     constexpr uint experts = 256u;
     constexpr uint list_base = 97u + 2u * experts;
-    constexpr uint tile_start_base = list_base + 3072u;
-    constexpr uint tile_expert_base = tile_start_base + experts;
-    constexpr uint scratch_base = tile_start_base + 608u;
+    long route_extent = u.output_extents[0] * u.output_extents[1];
+    uint tile_start_base = list_base + (uint)route_extent;
+    uint tile_expert_base = tile_start_base + experts;
+    uint scratch_base = tile_start_base + 2u * experts + ((uint)route_extent + 31u) / 32u;
     long chunk_begin = (long)tgid * 256l;
-    long chunk_end = min(u.output_extents[0] * u.output_extents[1], chunk_begin + 256l);
+    long chunk_end = min(route_extent, chunk_begin + 256l);
     threadgroup uint expert_count_tg[experts];
     threadgroup uint expert_before_tg[experts];
     threadgroup uint expert_base_tg[experts];

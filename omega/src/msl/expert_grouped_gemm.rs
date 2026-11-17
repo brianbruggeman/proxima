@@ -377,9 +377,8 @@ fn push_grouped_locate(
     source.push_str("        }\n");
     source.push_str("        return;\n");
     source.push_str("    }\n");
-    let tokens = grouped_token_total(resolved, block);
     source.push_str(&format!(
-        "    constexpr uint tile_start_base = {GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts + {tokens}u;\n"
+        "    uint tile_start_base = {GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts + (uint)token_extent;\n"
     ));
     source.push_str(
         "    long grouped_expert = (long)route_compaction[tile_start_base + experts + (uint)tile_index];\n",
@@ -1173,7 +1172,6 @@ pub(super) fn push_grouped_route_prepass(
     let fault_buffer = slot_index(|binding| matches!(binding, Binding::Fault));
     let compaction_buffer = layout.len();
     let experts = grouped_expert_count(resolved, block);
-    let tokens = grouped_token_total(resolved, block);
     let slot = expert.slot;
     let innermost_axis = geometry.token_axes.last().copied().unwrap_or(0);
     let weight = block.weight;
@@ -1183,10 +1181,10 @@ pub(super) fn push_grouped_route_prepass(
         )
     };
     let chunk = crate::sized::GROUPED_GEMM_PREPASS_ENTRIES;
-    let tile_table = grouped_tile_table_words(tokens, experts);
     let constants = format!(
-        "    constexpr uint experts = {experts}u;\n    constexpr uint list_base = {GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts;\n    constexpr uint tile_start_base = list_base + {tokens}u;\n    constexpr uint tile_expert_base = tile_start_base + experts;\n    constexpr uint scratch_base = tile_start_base + {tile_table}u;\n    long chunk_begin = (long)tgid * {chunk}l;\n    long chunk_end = min({token_extent}, chunk_begin + {chunk}l);\n",
-        token_extent = geometry.token_extent_expr
+        "    constexpr uint experts = {experts}u;\n    constexpr uint list_base = {GROUPED_ROUTE_HEADER_WORDS}u + 2u * experts;\n    long route_extent = {token_extent};\n    uint tile_start_base = list_base + (uint)route_extent;\n    uint tile_expert_base = tile_start_base + experts;\n    uint scratch_base = tile_start_base + 2u * experts + ((uint)route_extent + {tile_round}u) / {GROUPED_TILE_TOKENS}u;\n    long chunk_begin = (long)tgid * {chunk}l;\n    long chunk_end = min(route_extent, chunk_begin + {chunk}l);\n",
+        tile_round = GROUPED_TILE_TOKENS - 1,
+        token_extent = geometry.token_extent_expr,
     );
     let fetch = |with_fault: bool| {
         let mut fetch = String::new();

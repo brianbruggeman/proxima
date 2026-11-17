@@ -10811,6 +10811,65 @@ mod expert_grouped_route_segments {
         assert_eq!(with_prepass, 3);
         assert_eq!(with_key, with_prepass);
     }
+
+    fn tail_ops(sequence: usize) -> (Vec<BoundOp>, PackedOperands) {
+        stacked_moe_layers(
+            1,
+            sequence as u32,
+            EXPERTS as u32,
+            SELECTED as u32,
+            EMBEDDING,
+            EXPERT_HIDDEN,
+        )
+    }
+
+    #[test]
+    fn two_token_counts_share_one_pipeline_key_and_byte_identical_source() {
+        let policy = NumericPolicy::default();
+        let (full, full_packed) = tail_ops(512);
+        let (tail, tail_packed) = tail_ops(485);
+        let knobs = EmitKnobs::default();
+        let mut compared = 0_usize;
+
+        for (full_op, tail_op) in full.iter().zip(&tail) {
+            if route_compaction_key(full_op, &full_packed, &knobs).is_none() {
+                continue;
+            }
+            let full_key = kernel_cache_key(full_op, &full_packed, policy).expect("key");
+            let tail_key = kernel_cache_key(tail_op, &tail_packed, policy).expect("key");
+            assert_eq!(full_key, tail_key, "token count must not key the pipeline");
+            let full_source = emit(full_op, &full_packed, policy).expect("emits").source;
+            let tail_source = emit(tail_op, &tail_packed, policy).expect("emits").source;
+            assert_eq!(full_source, tail_source, "main kernel source");
+            let full_prepass = route_prepass(full_op, &full_packed, policy, &knobs)
+                .expect("prepass")
+                .expect("active");
+            let tail_prepass = route_prepass(tail_op, &tail_packed, policy, &knobs)
+                .expect("prepass")
+                .expect("active");
+            assert_eq!(full_prepass.0[0].source, tail_prepass.0[0].source, "prepass source");
+            compared += 1;
+        }
+
+        assert_eq!(compared, 3, "gate, up and down of one layer");
+    }
+
+    #[test]
+    fn the_compaction_sharing_identity_still_names_the_token_count() {
+        let knobs = EmitKnobs::default();
+        let (full, full_packed) = tail_ops(512);
+        let (tail, tail_packed) = tail_ops(485);
+
+        let keys = |ops: &[BoundOp], packed: &PackedOperands| -> Vec<u64> {
+            ops.iter()
+                .filter_map(|op| route_compaction_key(op, packed, &knobs))
+                .map(|key| key.3)
+                .collect()
+        };
+
+        assert_eq!(keys(&full, &full_packed), vec![512 * SELECTED as u64; 3]);
+        assert_eq!(keys(&tail, &tail_packed), vec![485 * SELECTED as u64; 3]);
+    }
     #[test]
     fn the_top_k_fixture_is_a_skewed_32_expert_8_selected_route_over_1000_tokens() {
         let route = top_k_route();
@@ -11164,9 +11223,9 @@ mod expert_grouped_route_segments {
             &adjacent_grid,
         )
         .expect("adjacent grouped shape has a pipeline identity");
-        assert_ne!(
+        assert_eq!(
             bound_key, adjacent_key,
-            "the source bakes token count into scratch_base"
+            "the token count is a uniform read, so it must not key the pipeline"
         );
     }
 
