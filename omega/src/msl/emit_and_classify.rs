@@ -1520,10 +1520,25 @@ pub(super) fn coord_index32_active(
     } = &resolved.kind
     else {
         return index_family(resolved, quantized, numeric_policy, knobs)
-            .is_some_and(|family| index_family_fits(resolved, quantized, family));
+            .is_some_and(|family| {
+                index_family_fits(resolved, quantized, numeric_policy, knobs, family)
+            });
     };
-    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs).is_some() {
-        return false;
+    if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs).is_some()
+        || dense_batched_gemm_block(
+            resolved,
+            quantized,
+            numeric_policy,
+            *reduce_op,
+            *init,
+            output_axes,
+            knobs,
+        )
+        .is_some()
+    {
+        return index_family(resolved, quantized, numeric_policy, knobs).is_some_and(|family| {
+            index_family_fits(resolved, quantized, numeric_policy, knobs, family)
+        });
     }
     if let Some(block) = packed_row_block(resolved, quantized, knobs) {
         return expert_divide_is_rendered(resolved, output_axes, &block, knobs)
@@ -1543,17 +1558,7 @@ pub(super) fn coord_index32_active(
     };
     let body_family = quantized.iter().all(Option::is_none)
         && !epilogue_operands.is_empty()
-        && gather_count(resolved) == 0
-        && dense_batched_gemm_block(
-            resolved,
-            quantized,
-            numeric_policy,
-            *reduce_op,
-            *init,
-            output_axes,
-            knobs,
-        )
-        .is_none();
+        && gather_count(resolved) == 0;
     coordinates_fit && (!body_family || body_reach_fits(resolved))
 }
 

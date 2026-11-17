@@ -613,7 +613,7 @@ fn key_source_dispatch(
 /// activation its own `[sequence, selected, k]` rows (a down projection)
 /// instead of one `[sequence, k]` row shared by every selected expert (gate and up).
 #[cfg(feature = "metal-grouped-gemm")]
-fn stacked_gathered_matmul_op(
+pub(super) fn stacked_gathered_matmul_op(
     sequence: u32,
     selected: u32,
     experts: u32,
@@ -2309,7 +2309,7 @@ fn multi_head_matmul_op(seq: u32, heads: u32, head_dim: u32, embed: u32) -> Boun
 /// the exact shape `classify_dense_batched_gemm` classifies as one row
 /// axis, one column axis, one batch axis.
 #[cfg(feature = "metal-tiled-gemm")]
-fn dense_batched_score_shaped_op(token: u32, feature: u32, batch: u32, reduce_len: u32) -> BoundOp {
+pub(super) fn dense_batched_score_shaped_op(token: u32, feature: u32, batch: u32, reduce_len: u32) -> BoundOp {
     dense_batched_score_shaped_op_with_operand_order(token, feature, batch, reduce_len, false)
 }
 
@@ -2440,7 +2440,9 @@ fn dense_weight_staging_loads_a_register_array_before_the_tile_stores() {
         &bound,
         &BTreeMap::new(),
         NumericPolicy::llama_relaxed(),
-        &EmitKnobs::default().with_tiled_gemm_dense(true),
+        &EmitKnobs::default()
+            .with_tiled_gemm_dense(true)
+            .with_coord_index32(false),
     )
     .expect("emits")
     .source;
@@ -3149,8 +3151,11 @@ fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
         let policy = NumericPolicy::llama_relaxed();
         let original_packed = packed_for(&original);
         let reversed_packed = packed_for(&reversed);
-        let original_kernel = emit(&original, &original_packed, policy).expect("original emits");
-        let reversed_kernel = emit(&reversed, &reversed_packed, policy).expect("reversed emits");
+        let wide = EmitKnobs::default().with_coord_index32(false);
+        let original_kernel =
+            emit_with_knobs(&original, &original_packed, policy, &wide).expect("original emits");
+        let reversed_kernel =
+            emit_with_knobs(&reversed, &reversed_packed, policy, &wide).expect("reversed emits");
         let original_key =
             kernel_cache_key(&original, &original_packed, policy).expect("original identity");
         let reversed_key =
@@ -4462,7 +4467,8 @@ fn mm_layout_reads_a_unit_stride_activation_at_k0_and_a_strided_one_through_the_
     let render = |bound: &BoundOp, codecs: &BTreeMap<NodeId, Codec>, wide_activation: bool| {
         let knobs = EmitKnobs::default()
             .with_tiled_gemm_mm_layout(true)
-            .with_tiled_gemm_wide_act_load(wide_activation);
+            .with_tiled_gemm_wide_act_load(wide_activation)
+            .with_coord_index32(false);
         emit_with_knobs(bound, codecs, NumericPolicy::default(), &knobs)
             .expect("emits")
             .source
@@ -9324,7 +9330,12 @@ mod expert_grouped_gemm {
     fn the_rendered_kernel_ranks_tokens_by_prefix_sum_and_reports_a_bad_route() {
         let (bound, packed) = gathered_q8_0(TOKENS);
 
-        let source = emit(&bound, &packed, NumericPolicy::default())
+        let source = emit_with_knobs(
+            &bound,
+            &packed,
+            NumericPolicy::default(),
+            &EmitKnobs::default().with_coord_index32(false),
+        )
             .expect("grouped kernel emits")
             .source;
 
@@ -9362,7 +9373,7 @@ mod expert_grouped_gemm {
         let bound = gathered_matmul_op(TOKENS, EXPERTS, rows, REDUCTION);
         let mut packed = BTreeMap::new();
         packed.insert(bound.operands()[0].0, Codec::Q8_0);
-        emit(&bound, &packed, NumericPolicy::default())
+        emit_with_knobs(&bound, &packed, NumericPolicy::default(), &EmitKnobs::default().with_coord_index32(false))
             .expect("grouped kernel emits")
             .source
     }
@@ -9578,7 +9589,8 @@ mod expert_grouped_gemm {
     fn the_stacked_op_renders_one_kernel_that_decomposes_the_flat_token_into_both_axes() {
         let (bound, packed) = stacked_q8_0(TOKENS, false);
 
-        let kernel = emit(&bound, &packed, NumericPolicy::default()).expect("stacked kernel emits");
+        let kernel = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &EmitKnobs::default().with_coord_index32(false))
+            .expect("stacked kernel emits");
 
         let depth = if crate::sized::GROUPED_GEMM_ROUTE_COMPACTED {
             1
@@ -10482,7 +10494,7 @@ mod expert_grouped_decode_description {
         let (bound, packed) = gathered(codec);
         let decode = tiled_decode(codec).expect("described");
 
-        let knobs = EmitKnobs::default();
+        let knobs = EmitKnobs::default().with_coord_index32(false);
         let block = classify_tiled_gemm(
             &bound,
             &operand_codecs(&bound, &packed),
@@ -10920,7 +10932,7 @@ mod expert_grouped_route_segments {
         let bound = gathered_matmul_op(300, 8, 192, 512);
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
 
-        let source = emit(&bound, &packed, NumericPolicy::default())
+        let source = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &EmitKnobs::default().with_coord_index32(false))
             .expect("grouped kernel emits")
             .source;
 
@@ -11166,7 +11178,7 @@ mod expert_grouped_route_segments {
         let bound = gathered_matmul_op(300, 8, 192, 512);
         let packed = BTreeMap::from([(bound.operands()[0].0, Codec::Q8_0)]);
 
-        let source = emit(&bound, &packed, NumericPolicy::default())
+        let source = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &EmitKnobs::default().with_coord_index32(false))
             .expect("grouped kernel emits")
             .source;
 

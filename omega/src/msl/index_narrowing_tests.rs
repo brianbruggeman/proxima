@@ -1,5 +1,7 @@
 use alloc::collections::BTreeMap;
 
+use crate::epilogue::index32_reach_fits;
+
 use super::tests::embedding_lookup_op;
 #[cfg(feature = "metal-grouped-gemm")]
 use super::tests::gathered_matmul_op;
@@ -20,6 +22,19 @@ const LOOKUP_BASE: &str =
     include_str!("../../tests/fixtures/index32/embedding_lookup_f32.base.msl");
 const LOOKUP_TIP: &str = include_str!("../../tests/fixtures/index32/embedding_lookup_f32.tip.msl");
 
+#[cfg(feature = "metal-grouped-gemm")]
+const GROUPED_BASE: &str =
+    include_str!("../../tests/fixtures/index32/grouped_gemm_down_q8_0.base.msl");
+#[cfg(feature = "metal-grouped-gemm")]
+const GROUPED_TIP: &str =
+    include_str!("../../tests/fixtures/index32/grouped_gemm_down_q8_0.tip.msl");
+#[cfg(feature = "metal-tiled-gemm")]
+const DENSE_BASE: &str =
+    include_str!("../../tests/fixtures/index32/dense_batched_gemm_score.base.msl");
+#[cfg(feature = "metal-tiled-gemm")]
+const DENSE_TIP: &str =
+    include_str!("../../tests/fixtures/index32/dense_batched_gemm_score.tip.msl");
+
 fn kernel_body(source: &str) -> &str {
     &source[source.find("kernel void ").expect("a kernel entry")..]
 }
@@ -37,6 +52,36 @@ fn emitted(
     emit_with_knobs(bound, packed, NumericPolicy::default(), &knobs)
         .expect("kernel emits")
         .source
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+fn dense_knobs(coord_index32: bool) -> EmitKnobs {
+    EmitKnobs::default()
+        .with_tiled_gemm_dense(true)
+        .with_coord_index32(coord_index32)
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+fn emitted_dense(bound: &BoundOp, coord_index32: bool) -> String {
+    emit_with_knobs(
+        bound,
+        &BTreeMap::new(),
+        NumericPolicy::llama_relaxed(),
+        &dense_knobs(coord_index32),
+    )
+    .expect("dense tiled kernel emits")
+    .source
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+fn dense_cache_key(bound: &BoundOp) -> String {
+    kernel_cache_key_with_knobs(
+        bound,
+        &BTreeMap::new(),
+        NumericPolicy::llama_relaxed(),
+        &dense_knobs(true),
+    )
+    .expect("cache key builds")
 }
 
 fn cache_key(bound: &BoundOp, packed: &BTreeMap<NodeId, Codec>) -> String {
@@ -308,4 +353,114 @@ fn the_coordinate_override_set_to_zero_restores_every_family_to_the_64_bit_form(
     assert!(has_word(kernel_body(&lookup_source), "long"));
     assert!(embedding_source.contains("(off0 / 256) * 210"));
     assert!(expert_source.contains("long expert_slot = group_first / group_out_extent;"));
+}
+
+fn first_kernel(source: &str) -> &str {
+    let body = kernel_body(source);
+    &body[..body[1..].find("kernel void ").map_or(body.len(), |at| at + 1)]
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+fn flint_down(experts: u32, rows: u32, k: u32) -> (BoundOp, BTreeMap<NodeId, Codec>) {
+    let bound = super::tests::stacked_gathered_matmul_op(512, 6, experts, rows, k, true);
+    let packed = packed_table(&bound, Codec::Q8_0);
+    (bound, packed)
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+#[test]
+fn the_captured_grouped_down_projection_narrows_to_the_recorded_32_bit_kernel() {
+    assert_eq!(narrow_tiled_gemm(GROUPED_BASE), GROUPED_TIP);
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+#[test]
+fn a_grouped_down_projection_renders_the_recorded_fixtures_under_each_coordinate_setting() {
+    let (bound, packed) = flint_down(256, 2048, 512);
+
+    assert_eq!(emitted(&bound, &packed, false), GROUPED_BASE);
+    assert_eq!(emitted(&bound, &packed, true), GROUPED_TIP);
+    assert!(cache_key(&bound, &packed).contains("_c32"));
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+#[test]
+fn the_grouped_gemm_kernel_drops_every_long_but_its_route_prepass_keeps_them() {
+    assert!(!has_word(first_kernel(GROUPED_TIP), "long"));
+    assert!(has_word(first_kernel(GROUPED_BASE), "long"));
+    let prepass = |source: &'static str| &source[source.find("_route_prepass(").expect("prepass kernel")..];
+    assert_eq!(prepass(GROUPED_TIP), prepass(GROUPED_BASE));
+    assert!(has_word(prepass(GROUPED_TIP), "long"));
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+#[test]
+fn a_grouped_weight_stack_past_the_reach_limit_keeps_the_64_bit_kernel() {
+    let (bound, packed) = flint_down(256, 2048, 4096);
+
+    let source = emitted(&bound, &packed, true);
+
+    assert_eq!(source, emitted(&bound, &packed, false));
+    assert!(source.contains("long w_elem = u.operand_base[0]"), "{source}");
+    assert!(!cache_key(&bound, &packed).contains("_c32"));
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+#[test]
+fn a_grouped_weight_stack_whose_elements_fit_but_whose_q8_0_bytes_do_not_keeps_long() {
+    let (bound, packed) = flint_down(256, 2000, 2048);
+    assert!(
+        gathered_reach(
+            &bound.operands()[0].1,
+            bound.operands()[0].2.as_ref(),
+            &bound.extents
+        )
+        .is_some_and(index32_reach_fits),
+        "the element reach must fit for this test to isolate the byte reach"
+    );
+
+    assert!(!cache_key(&bound, &packed).contains("_c32"));
+    assert!(emitted(&bound, &packed, true).contains("long w_elem"));
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn the_captured_dense_batched_gemm_narrows_to_the_recorded_32_bit_kernel() {
+    assert_eq!(narrow_tiled_gemm(DENSE_BASE), DENSE_TIP);
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn a_dense_batched_gemm_renders_the_recorded_fixtures_under_each_coordinate_setting() {
+    let bound = super::tests::dense_batched_score_shaped_op(563, 576, 8, 128);
+
+    assert_eq!(emitted_dense(&bound, false), DENSE_BASE);
+    assert_eq!(emitted_dense(&bound, true), DENSE_TIP);
+    assert!(dense_cache_key(&bound).contains("_c32"));
+    assert!(!has_word(kernel_body(DENSE_TIP), "long"));
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn a_dense_batched_gemm_whose_operand_reach_passes_the_limit_keeps_the_64_bit_kernel() {
+    let bound = super::tests::dense_batched_score_shaped_op(563, 576, 8, 1 << 20);
+
+    let source = emitted_dense(&bound, true);
+
+    assert_eq!(source, emitted_dense(&bound, false));
+    assert!(source.contains("long aoff = u.operand_base[1]"), "{source}");
+    assert!(!dense_cache_key(&bound).contains("_c32"));
+}
+
+#[test]
+fn the_body_pass_drops_a_lowercase_64_bit_literal_suffix_but_not_an_identifier_ending_in_l() {
+    let source = "struct Uniforms {\n    long n;\n};\nkernel void entry() {\n    long tiles = (u.n + 63l) / 64l;\n    long call1 = 2;\n}\n";
+
+    let narrowed = narrow_body_to_int32(source);
+
+    assert!(
+        narrowed.contains("int tiles = (((int)u.n) + 63) / 64;"),
+        "{narrowed}"
+    );
+    assert!(narrowed.contains("int call1 = 2;"), "{narrowed}");
 }

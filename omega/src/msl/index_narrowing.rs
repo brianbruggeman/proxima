@@ -1,12 +1,13 @@
 use super::*;
 
-use crate::epilogue::index32_reach_fits;
+use crate::epilogue::{INDEX32_REACH_LIMIT, index32_reach_fits};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum IndexFamily {
     Body,
     ExpertPrologue,
     BlockDecode,
+    TiledGemm,
 }
 
 pub(super) fn index_family(
@@ -35,7 +36,7 @@ pub(super) fn index_family(
                 )
                 .is_some()
             {
-                return None;
+                return Some(IndexFamily::TiledGemm);
             }
             if let Some(block) = packed_row_block(resolved, quantized, knobs) {
                 return expert_divide_is_rendered(resolved, output_axes, &block, knobs)
@@ -74,9 +75,12 @@ pub(super) fn expert_divide_is_rendered(
 pub(super) fn index_family_fits(
     resolved: &BoundOp,
     quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
     family: IndexFamily,
 ) -> bool {
     match family {
+        IndexFamily::TiledGemm => tiled_gemm_reach_fits(resolved, quantized, numeric_policy, knobs),
         IndexFamily::Body => body_reach_fits(resolved),
         IndexFamily::ExpertPrologue => output_total_fits_u32(resolved),
         IndexFamily::BlockDecode => block_decode_reach_fits(resolved, quantized),
@@ -96,7 +100,7 @@ fn layout_reach(layout: &Layout, extents: &[u64]) -> Option<u64> {
     )
 }
 
-fn gathered_reach(layout: &Layout, lookup: Option<&Lookup>, extents: &[u64]) -> Option<u64> {
+pub(super) fn gathered_reach(layout: &Layout, lookup: Option<&Lookup>, extents: &[u64]) -> Option<u64> {
     let direct = layout_reach(layout, extents)?;
     let Some(lookup) = lookup else {
         return Some(direct);
@@ -109,14 +113,7 @@ fn gathered_reach(layout: &Layout, lookup: Option<&Lookup>, extents: &[u64]) -> 
     direct.checked_add(fetched)?.checked_add(index_reach)
 }
 
-pub(super) fn body_reach_fits(resolved: &BoundOp) -> bool {
-    let Some(iteration_space) = resolved
-        .extents
-        .iter()
-        .try_fold(1u64, |total, extent| total.checked_mul(*extent))
-    else {
-        return false;
-    };
+fn operand_reaches(resolved: &BoundOp) -> Vec<Option<u64>> {
     let mut reaches: Vec<Option<u64>> = resolved
         .operands()
         .iter()
@@ -135,11 +132,65 @@ pub(super) fn body_reach_fits(resolved: &BoundOp) -> bool {
             }),
         );
     }
+    reaches
+}
+
+pub(super) fn body_reach_fits(resolved: &BoundOp) -> bool {
+    let Some(iteration_space) = resolved
+        .extents
+        .iter()
+        .try_fold(1u64, |total, extent| total.checked_mul(*extent))
+    else {
+        return false;
+    };
     iteration_space > 0
         && index32_reach_fits(iteration_space)
-        && reaches
+        && operand_reaches(resolved)
             .iter()
             .all(|reach| reach.is_some_and(index32_reach_fits))
+}
+
+/// the tiled and expert-grouped GEMM never walks the iteration space (its
+/// product is tokens x used x rows x k for a gathered projection), so the
+/// proof is over what its 32-bit variables actually hold: every operand's
+/// element reach, the packed weight's byte reach (the block cursor is a byte
+/// offset), each extent, and the launched thread and slice counts.
+fn tiled_gemm_reach_fits(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
+) -> bool {
+    let reaches = operand_reaches(resolved);
+    let element_reach_fits = reaches
+        .iter()
+        .all(|reach| reach.is_some_and(index32_reach_fits));
+    let extents_fit = resolved
+        .extents
+        .iter()
+        .all(|extent| (1..=INDEX32_REACH_LIMIT).contains(extent));
+    let launch_fits = grid_threads(resolved, quantized, numeric_policy, false, knobs)
+        .is_ok_and(index32_reach_fits)
+        && index32_reach_fits(grid_depth_for(resolved, quantized, numeric_policy, knobs));
+    element_reach_fits
+        && extents_fit
+        && launch_fits
+        && packed_byte_reach_fits(&reaches, quantized)
+}
+
+fn packed_byte_reach_fits(reaches: &[Option<u64>], quantized: &[Option<Codec>]) -> bool {
+    quantized
+        .iter()
+        .zip(reaches)
+        .all(|(codec, reach)| match (codec, reach) {
+            (None, _) => true,
+            (Some(codec), Some(reach)) => tiled_decode(*codec).is_some_and(|decode| {
+                (reach / decode.block_elements + 1)
+                    .checked_mul(decode.block_bytes)
+                    .is_some_and(index32_reach_fits)
+            }),
+            (Some(_), None) => false,
+        })
 }
 
 pub(super) fn output_total_fits_u32(resolved: &BoundOp) -> bool {
@@ -206,7 +257,7 @@ fn strip_long_suffix(text: &str) -> String {
             && (digits_start == 0
                 || !(bytes[digits_start - 1].is_ascii_alphabetic()
                     || bytes[digits_start - 1] == b'_'));
-        let suffix = byte == b'L'
+        let suffix = (byte == b'L' || byte == b'l')
             && after_number
             && bytes.get(index + 1).is_none_or(|next| !is_word_byte(*next));
         if !suffix {
@@ -298,6 +349,23 @@ pub(super) fn narrow_body_to_int32(source: &str) -> String {
     format!("{head}{}", strip_long_suffix(&body))
 }
 
+/// narrows the tiled or grouped GEMM kernel only: the route prepass the
+/// compacted grouped op appends after it is a second kernel whose indices
+/// this proof does not cover, so its text is left 64-bit.
+pub(super) fn narrow_tiled_gemm(source: &str) -> String {
+    let Some(first) = source.find("kernel void ") else {
+        return source.to_string();
+    };
+    let second = source[first + 1..]
+        .find("kernel void ")
+        .map_or(source.len(), |offset| first + 1 + offset);
+    format!(
+        "{}{}",
+        narrow_body_to_int32(&source[..second]),
+        &source[second..]
+    )
+}
+
 pub(super) fn narrow_expert_prologue(source: &str) -> String {
     source
         .replace(
@@ -384,5 +452,6 @@ pub(super) fn apply_index_family(family: IndexFamily, source: String) -> String 
         IndexFamily::Body => narrow_body_to_int32(&source),
         IndexFamily::ExpertPrologue => narrow_expert_prologue(&source),
         IndexFamily::BlockDecode => narrow_block_remainders(&narrow_block_decode(&source)),
+        IndexFamily::TiledGemm => narrow_tiled_gemm(&source),
     }
 }
