@@ -616,6 +616,12 @@ thread_local! {
     /// run.
     static DEVICE_AND_QUEUE: RefCell<Option<DeviceAndQueue>> = const { RefCell::new(None) };
 
+    /// The active [`MetalContext`](super::MetalContext)'s own command queue,
+    /// swapped in by `activate()`. While `Some`, [`device_and_queue`] returns it
+    /// in place of this thread's queue.
+    pub(super) static ACTIVE_QUEUE: RefCell<Option<Retained<ProtocolObject<dyn MTLCommandQueue>>>> =
+        const { RefCell::new(None) };
+
 }
 
 /// This thread's `MTLDevice::currentAllocatedSize` -- Metal's own count of
@@ -790,8 +796,16 @@ pub(super) fn physical_memory_bytes() -> u64 {
     value
 }
 
-/// This thread's Metal device and command queue, created on first use.
+/// This thread's Metal device and the command queue to submit to: the active
+/// context's own queue when one is active, else this thread's queue.
 pub(super) fn device_and_queue() -> Result<DeviceAndQueue, MetalError> {
+    let (device, thread_queue) = thread_device_and_queue()?;
+    let queue = ACTIVE_QUEUE.with(|slot| slot.borrow().clone());
+    Ok((device, queue.unwrap_or(thread_queue)))
+}
+
+/// This thread's own device and queue, created on first use.
+fn thread_device_and_queue() -> Result<DeviceAndQueue, MetalError> {
     DEVICE_AND_QUEUE.with(|slot| {
         let mut slot = slot.borrow_mut();
         if let Some(existing) = slot.as_ref() {

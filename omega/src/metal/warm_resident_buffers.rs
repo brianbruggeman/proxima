@@ -29,8 +29,9 @@ use std::time::Instant;
 thread_local! {
     /// The residency set [`warm_resident_buffers`] requested, kept alive so
     /// the kernel does not reclaim the wired weight pages while the model
-    /// serves. Thread-local like the buffer caches it was built from.
-    static WARM_RESIDENCY_SET: RefCell<Option<Retained<ProtocolObject<dyn MTLResidencySet>>>> =
+    /// serves. Thread-local while no context is active; an active [`MetalContext`] swaps its own
+    /// set in, so the set follows the model that built it.
+    pub(super) static WARM_RESIDENCY_SET: RefCell<Option<Retained<ProtocolObject<dyn MTLResidencySet>>>> =
         const { RefCell::new(None) };
 }
 
@@ -113,6 +114,35 @@ fn nothing_to_warm() -> bool {
 /// buffer and returns how many it declared. Returns `Ok(0)` without touching
 /// the device when nothing is registered or resident.
 pub fn warm_resident_buffers() -> Result<usize, MetalError> {
+    warm_body()
+}
+
+/// Warm for the active [`MetalContext`]: idempotent while its residency set is
+/// held, and the set attaches to the context's queue, created here if absent.
+pub(super) fn warm_active_context() -> Result<usize, MetalError> {
+    let held = WARM_RESIDENCY_SET.with(|slot| slot.borrow().as_ref().map(|set| set.allocationCount()));
+    if let Some(count) = held {
+        return Ok(count);
+    }
+    if nothing_to_warm() {
+        return Ok(0);
+    }
+    let (device, queue) = device_and_queue()?;
+    ACTIVE_QUEUE.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(device.newCommandQueue().ok_or_else(|| MetalError::DriverRefusedObject {
+                object: "command queue",
+                reason: "device returned none".to_string(),
+            })?);
+        }
+        Ok::<(), MetalError>(())
+    })?;
+    drop(queue);
+    warm_body()
+}
+
+fn warm_body() -> Result<usize, MetalError> {
     if nothing_to_warm() {
         return Ok(0);
     }
@@ -211,5 +241,76 @@ mod tests {
         } else {
             assert_eq!(held_residency_allocations(), None, "no residency sets on this OS");
         }
+    }
+}
+
+#[cfg(test)]
+mod context_tests {
+    use super::*;
+    use crate::metal::MetalContext;
+    use std::thread;
+
+    const WEIGHT_NAMES: [&str; 2] = ["blk.0.attn_q.weight", "blk.0.ffn_down.weight"];
+
+    fn queue_identity(queue: &ProtocolObject<dyn MTLCommandQueue>) -> *const () {
+        core::ptr::from_ref(queue).cast()
+    }
+
+    /// Two real resident weights uploaded into a fresh context, then warmed on
+    /// this thread. `None` when this host has no Metal device.
+    fn warmed_context() -> Option<MetalContext> {
+        let (device, _queue) = device_and_queue().ok()?;
+        let mut context = MetalContext::default();
+        {
+            let _active = context.activate();
+            let page = page_size();
+            for (index, name) in WEIGHT_NAMES.iter().enumerate() {
+                let weight: Vec<u8> = (0..page * (index + 1)).map(|byte| (byte % 251) as u8).collect();
+                upload_resident_copy(&device, name, weight.as_ptr().cast(), weight.len())
+                    .expect("a resident weight uploads");
+            }
+        }
+        assert_eq!(context.warm().expect("warming two real buffers succeeds"), 2);
+        assert_eq!(context.warm().expect("a second warm returns the held set"), 2);
+        Some(context)
+    }
+
+    /// The context is built and warmed on a spawned thread (its own empty
+    /// thread-locals); `MetalContext` is not `Send` before S3, so the
+    /// assertions run on that same thread.
+    fn on_fresh_thread(assertions: fn(&mut MetalContext)) {
+        thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    if let Some(mut context) = warmed_context() {
+                        assertions(&mut context);
+                    }
+                })
+                .join()
+                .expect("the context thread finishes without panicking");
+        });
+    }
+
+    #[test]
+    fn active_context_serves_its_own_queue_and_holds_its_two_allocation_residency_set() {
+        on_fresh_thread(|context| {
+            let own_queue = queue_identity(context.queue().expect("warm gave the context a queue"));
+            let _active = context.activate();
+            let (_device, queue) = device_and_queue().expect("device while active");
+            assert_eq!(queue_identity(&queue), own_queue, "the active queue is the context's");
+            if _device.respondsToSelector(sel!(newResidencySetWithDescriptor:error:)) {
+                assert_eq!(held_residency_allocations(), Some(2));
+            }
+        });
+    }
+
+    #[test]
+    fn inactive_context_neither_owns_the_thread_queue_nor_the_thread_residency_set() {
+        on_fresh_thread(|context| {
+            let own_queue = queue_identity(context.queue().expect("warm gave the context a queue"));
+            let (_device, queue) = device_and_queue().expect("device while inactive");
+            assert_ne!(queue_identity(&queue), own_queue, "the thread queue is not the context's");
+            assert_eq!(held_residency_allocations(), None, "the set sits in the context, not the thread");
+        });
     }
 }

@@ -12,8 +12,10 @@ use super::arena_encode_dispatch_finish::{
     CAPTURE_DUMP_PENDING, CAPTURE_LIVE_PENDING, CaptureDumpEntry, CapturedDispatch,
 };
 use super::device_buffers_arena_plan::{EXPERT_SOURCE_CACHE, StagedExpertSource};
+use super::device_buffers_arena_plan::ACTIVE_QUEUE;
 use super::pipeline_buffers_upload::{CHECKPOINT_MAPPING, NOCOPY_BUFFERS};
 use super::resident_nocopy_cache::RESIDENT_BUFFERS;
+use super::warm_resident_buffers::{WARM_RESIDENCY_SET, warm_active_context};
 use super::{MetalBuffer, NodeId};
 
 type ResidentBuffers = BTreeMap<String, (usize, usize, MetalBuffer)>;
@@ -64,6 +66,16 @@ impl MetalContext {
         self.residency.as_deref()
     }
 
+    /// warms this context's resident buffers on its own queue: activates itself,
+    /// gives itself a queue if it has none, and requests the residency set it
+    /// keeps. A second call with a held set returns the held count. Composes
+    /// the same body as [`super::warm_resident_buffers`], which stays the
+    /// no-context entry on the thread's queue.
+    pub fn warm(&mut self) -> Result<usize, super::MetalError> {
+        let _guard = self.activate();
+        warm_active_context()
+    }
+
     /// restores the enclosing context when the guard drops, including unwind.
     pub fn activate(&mut self) -> MetalContextGuard<'_> {
         self.swap_active();
@@ -92,6 +104,12 @@ impl MetalContext {
     }
 
     fn swap_residency(&mut self) {
+        ACTIVE_QUEUE.with(|queue| mem::swap(&mut self.queue, &mut *queue.borrow_mut()));
+        WARM_RESIDENCY_SET.with(|set| mem::swap(&mut self.residency, &mut *set.borrow_mut()));
+        self.swap_caches();
+    }
+
+    fn swap_caches(&mut self) {
         RESIDENT_BUFFERS.with(|resident| {
             NOCOPY_BUFFERS.with(|nocopy| {
                 CHECKPOINT_MAPPING.with(|checkpoint| {
