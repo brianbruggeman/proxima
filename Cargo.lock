@@ -4641,6 +4641,7 @@ dependencies = [
 name = "proxima-model-interop"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "arrayvec",
  "bon",
  "conflaguration",
