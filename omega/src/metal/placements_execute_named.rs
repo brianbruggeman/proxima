@@ -1524,6 +1524,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 resolve_hazard_inputs_into(
                     crate::msl::hazard_read_nodes(bindings_for_hazard),
                     &device_buffers,
+                    &plan.hazard_node_bytes,
                     &mut hazard_state.inputs,
                 )?;
                 // resolved ONCE, before the hazard check, from the exact same
@@ -1566,16 +1567,17 @@ pub(super) fn execute_plan_with_placements_inner(
                         Some(node) if node == bound.node
                     ) || crate::msl::hazard_write_node(bindings_for_hazard).is_none()
                 );
-                let hazard_output = (Retained::as_ptr(&resolved.0), resolved.1);
+                let hazard_output = hazard_region(&resolved.0, resolved.1, hazard_output_bytes(bound));
                 // an extra output not yet in `device_buffers` is a fresh allocation inside `encode_op`,
                 // which no earlier op can have touched; `encode_op` records it once allocated.
                 hazard_state.outputs.clear();
                 hazard_state.outputs.push(hazard_output);
                 hazard_state.outputs.extend(
-                    extra_output_nodes(bound).filter_map(|(extra_node, _)| {
-                        device_buffers
-                            .get(&extra_node)
-                            .map(|(buffer, offset)| (Retained::as_ptr(buffer), *offset))
+                    extra_output_nodes(bound).filter_map(|(extra_node, element_count)| {
+                        device_buffers.get(&extra_node).map(|(buffer, offset)| {
+                            let bytes = element_count.max(1) * device_element_bytes(bound.dtype);
+                            hazard_region(buffer, *offset, bytes)
+                        })
                     }),
                 );
                 // a packed range is reused only across a barrier group, so the

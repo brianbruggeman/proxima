@@ -832,6 +832,9 @@ pub struct Plan {
     pub(super) prepared: Prepared,
     pub(super) packed_operands: PackedOperands,
     pub(super) block_dtypes: Vec<DType>,
+    /// [`hazard_node_bytes`]: the byte extent of each node's buffer, which gives every
+    /// hazard access its range so overlap is decided per byte, not per buffer offset.
+    pub(super) hazard_node_bytes: Vec<usize>,
     /// Every block-input node a caller has told this plan, via
     /// [`Plan::mark_resident`], is bound to data that never changes across
     /// calls -- empty until that method runs, since [`plan`] itself has no
@@ -1701,11 +1704,14 @@ pub(super) fn handle_merged_position(
         resolve_hazard_inputs_into(
             operand_nodes.iter().copied(),
             device_buffers,
+            &plan.hazard_node_bytes,
             &mut hazard_state.inputs,
         )?;
         let output_pointer = device_buffers
             .get(&bound.node)
-            .map(|(buffer, offset)| (Retained::as_ptr(buffer), *offset))
+            .map(|(buffer, offset)| {
+                hazard_region(buffer, *offset, hazard_output_bytes(bound))
+            })
             .ok_or(MetalError::UnresolvedHazardOperand { node: bound.node })?;
         #[cfg(feature = "instrument")]
         let merged_class = hazard_state

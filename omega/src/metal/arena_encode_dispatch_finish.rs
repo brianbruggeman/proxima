@@ -4375,7 +4375,14 @@ pub(super) fn encode_op(
             encoder.setBuffer_offset_atIndex(Some(&state_buffer), state_offset, bindings.len());
         }
         if let Some(tracker) = hazard.as_deref_mut() {
-            tracker.record(&[], Some((Retained::as_ptr(&state_buffer), state_offset)));
+            tracker.record(
+                &[],
+                Some(hazard_region(
+                    &state_buffer,
+                    state_offset,
+                    state_elements * device_element_bytes(bound.dtype),
+                )),
+            );
         }
         device_buffers.insert(*state_out, (state_buffer, state_offset));
     }
@@ -4393,7 +4400,14 @@ pub(super) fn encode_op(
             encoder.setBuffer_offset_atIndex(Some(&extra_buffer), extra_offset, buffer_index);
         }
         if let Some(tracker) = hazard.as_deref_mut() {
-            tracker.record(&[], Some((Retained::as_ptr(&extra_buffer), extra_offset)));
+            tracker.record(
+                &[],
+                Some(hazard_region(
+                    &extra_buffer,
+                    extra_offset,
+                    element_count.max(1) * device_element_bytes(bound.dtype),
+                )),
+            );
         }
         device_buffers.insert(extra_node, (extra_buffer, extra_offset));
     }
@@ -4419,9 +4433,10 @@ pub(super) fn encode_op(
             for round in 0..round_outputs.len() {
                 tracker.record(
                     &[],
-                    Some((
-                        Retained::as_ptr(&group.output_buffer),
+                    Some(hazard_region(
+                        &group.output_buffer,
                         round * group.output_member_bytes,
+                        group.output_member_bytes,
                     )),
                 );
             }
@@ -4438,7 +4453,7 @@ pub(super) fn encode_op(
     }
     let compaction = match prepass {
         Some(prepass) => {
-            let output_pointer = (Retained::as_ptr(&output), output_offset);
+            let output_pointer = hazard_region(&output, output_offset, hazard_output_bytes(bound));
             let shared_key = route_compactions
                 .as_ref()
                 .and_then(|_| crate::msl::route_compaction_key(bound, packed_operands, knobs));
@@ -4485,7 +4500,7 @@ pub(super) fn encode_op(
                 unsafe { encoder.setBuffer_offset_atIndex(Some(&compaction), 0, bindings.len()) };
             }
             if let Some(tracker) = hazard.as_deref_mut()
-                && hazard_read_compaction(tracker, (Retained::as_ptr(&compaction), 0), output_pointer)
+                && hazard_read_compaction(tracker, hazard_region(&compaction, 0, 0), output_pointer)
             {
                 encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
                 counter!(BARRIERS_EMITTED, 1);
@@ -4542,8 +4557,14 @@ pub(super) fn encode_op(
     // `Binding::Output`/`Binding::Input` do (see that variant's own doc).
     if let Some(merge) = merge {
         if let (Some(tracker), Some((scratch_buffer, scratch_offset))) = (&mut hazard, scratch) {
-            let scratch_pointer = (Retained::as_ptr(scratch_buffer), scratch_offset);
-            let output_pointer = (Retained::as_ptr(&output), output_offset);
+            let scratch_bytes = cached_attention_scratch_len_with_schedule(
+                bound,
+                numeric_policy,
+                attention_row_schedule,
+            )
+            .map_or(0, |elements| elements as usize * size_of::<f32>());
+            let scratch_pointer = hazard_region(scratch_buffer, scratch_offset, scratch_bytes);
+            let output_pointer = hazard_region(&output, output_offset, hazard_output_bytes(bound));
             // the split dispatch above just wrote `scratch` -- record it,
             // then ask the tracker whether the merge's own read needs a
             // barrier first (always true: a write is never already visible
@@ -4658,7 +4679,7 @@ fn encode_route_prepass(
     encoder.setComputePipelineState(&prepass.place);
     dispatch(encoder, &prepass.place, prepass.grid);
     if let Some(tracker) = hazard
-        && hazard_write_compaction(tracker, (Retained::as_ptr(&compaction), 0), output_pointer)
+        && hazard_write_compaction(tracker, hazard_region(&compaction, 0, 0), output_pointer)
     {
         encoder.memoryBarrierWithScope(MTLBarrierScope::Buffers);
         counter!(BARRIERS_EMITTED, 1);
@@ -4688,7 +4709,7 @@ fn shared_or_encode<Key: Ord, Value: Clone, Failure>(
 /// The prepass wrote `compaction`: record the write, and since the gemm reads
 /// it next, a barrier is due (returned) that resets the tracker, after which
 /// `output` (recorded as written before this op encoded) is restored.
-fn hazard_write_compaction<Id: Eq + core::hash::Hash + Copy>(
+fn hazard_write_compaction<Id: HazardResource>(
     tracker: &mut HazardTracker<Id>,
     compaction: Id,
     output: Id,
@@ -4700,7 +4721,7 @@ fn hazard_write_compaction<Id: Eq + core::hash::Hash + Copy>(
 /// A gemm reads `compaction`: a barrier is due (returned) when a prepass wrote
 /// it since the last barrier, and the read is recorded either way, so each of
 /// a route's consumers is an edge in the tracker, not only the first.
-fn hazard_read_compaction<Id: Eq + core::hash::Hash + Copy>(
+fn hazard_read_compaction<Id: HazardResource>(
     tracker: &mut HazardTracker<Id>,
     compaction: Id,
     output: Id,
@@ -6420,8 +6441,83 @@ pub(super) mod hazard_tracker_tests {
     use super::record_hazard_class;
     use super::{
         Binding, DeviceBuffer, HazardClass, HazardTracker, MetalError, NodeId, PackedOperands,
-        hazard_step, kernel_dispatch_shape, resolve_hazard_inputs,
+        Region, hazard_step, kernel_dispatch_shape, resolve_hazard_inputs,
     };
+
+    /// The placed-cache shape: op A writes one row at byte `[64, 80)` of a
+    /// caller's 128-byte buffer, and op B, which no graph edge connects to A,
+    /// reads that buffer's whole `[0, 128)` extent. The two accesses share a
+    /// buffer and overlap, so B needs a barrier -- keyed by `(buffer, offset)`
+    /// the write at 64 and the read at 0 were different resources and none fired.
+    #[test]
+    fn a_read_of_a_whole_buffer_overlapping_an_earlier_row_write_needs_a_barrier() {
+        let mut hazards: HazardTracker<Region<&str>> = HazardTracker::new();
+
+        let row_write = Region::new("cache", 64, 16);
+        let whole_read = Region::new("cache", 0, 128);
+
+        assert!(!hazard_step(&mut hazards, &[], &[row_write]));
+        assert_eq!(
+            hazards.classify(&[whole_read], None),
+            HazardClass::Raw,
+            "the read covers the written row, so it is a RAW hazard"
+        );
+        assert!(hazard_step(&mut hazards, &[whole_read], &[Region::new("out", 0, 128)]));
+    }
+
+    /// Two packed ranges of one arena slot: `[0, 64)` written, `[64, 128)` read.
+    /// Same buffer, disjoint bytes, so the GPU may overlap the two dispatches
+    /// and no barrier is due -- the concurrency the packed layout exists for.
+    #[test]
+    fn disjoint_ranges_of_one_buffer_need_no_barrier() {
+        let mut hazards: HazardTracker<Region<&str>> = HazardTracker::new();
+
+        assert!(!hazard_step(&mut hazards, &[], &[Region::new("slot", 0, 64)]));
+        assert!(!hazard_step(
+            &mut hazards,
+            &[Region::new("slot", 64, 64)],
+            &[Region::new("out", 0, 64)]
+        ));
+        assert!(
+            !hazards.wrote(&Region::new("slot", 64, 64)),
+            "the neighbouring range was never written"
+        );
+    }
+
+    /// A write that lands on bytes an earlier op read is a WAR hazard even when
+    /// the two ranges only partly overlap; ranges that merely touch at an edge
+    /// do not overlap.
+    #[test]
+    fn a_write_overlapping_an_earlier_read_is_war_and_an_adjacent_one_is_not() {
+        let mut hazards: HazardTracker<Region<&str>> = HazardTracker::new();
+        hazards.record(&[Region::new("slot", 32, 64)], None);
+
+        assert_eq!(
+            hazards.classify(&[], [Region::new("slot", 80, 32)]),
+            HazardClass::War
+        );
+        assert_eq!(
+            hazards.classify(&[], [Region::new("slot", 96, 32)]),
+            HazardClass::None
+        );
+        assert_eq!(
+            hazards.classify(&[], [Region::new("slot", 0, 32)]),
+            HazardClass::None
+        );
+    }
+
+    /// A barrier publishes every earlier write: after `reset` the same overlapping
+    /// read no longer conflicts, and the scratch lists keep their capacity.
+    #[test]
+    fn a_barrier_clears_every_recorded_range() {
+        let mut hazards: HazardTracker<Region<&str>> = HazardTracker::new();
+        hazards.record(&[], [Region::new("cache", 64, 16)]);
+        assert!(hazards.wrote(&Region::new("cache", 0, 128)));
+
+        hazards.reset();
+
+        assert!(!hazards.wrote(&Region::new("cache", 0, 128)));
+    }
     use crate::msl::{hazard_read_nodes, hazard_write_node};
 
     /// `a -> b`, `a -> c` (independent, both only read `a`), then `b, c ->
@@ -6643,7 +6739,7 @@ pub(super) mod hazard_tracker_tests {
         let device_buffers: BTreeMap<NodeId, DeviceBuffer> = BTreeMap::new();
         let missing = NodeId(7);
 
-        let result = resolve_hazard_inputs(core::iter::once(missing), &device_buffers);
+        let result = resolve_hazard_inputs(core::iter::once(missing), &device_buffers, &[]);
 
         match result {
             Err(MetalError::UnresolvedHazardOperand { node }) => assert_eq!(node, missing),
@@ -6991,12 +7087,12 @@ pub(super) mod hazard_tracker_tests {
         );
         hazards.record(&shared_inputs, None);
         for output in &outputs {
-            hazards.written.insert(output.as_str());
+            hazards.record(&[], Some(output.as_str()));
         }
 
         for output in &outputs {
             assert!(
-                hazards.written.contains(output.as_str()),
+                hazards.wrote(&output.as_str()),
                 "every merged member's own output must be a recorded hazard write, not just the \
                  group's first member"
             );
@@ -8565,12 +8661,12 @@ mod shared_route_compaction_tests {
             "the gemm that follows the prepass must wait for it"
         );
         assert!(!owner_read_needs_barrier && !up_read_needs_barrier && !down_read_needs_barrier);
-        assert!(tracker.read.contains("compaction"));
+        assert!(tracker.was_read(&"compaction"));
         assert!(
-            !tracker.written.contains("compaction"),
+            !tracker.wrote(&"compaction"),
             "the barrier published the write"
         );
-        assert!(tracker.written.contains("up_out") && tracker.written.contains("down_out"));
+        assert!(tracker.wrote(&"up_out") && tracker.wrote(&"down_out"));
     }
 
     #[test]
@@ -8581,7 +8677,7 @@ mod shared_route_compaction_tests {
         let needs_barrier = hazard_read_compaction(&mut tracker, "compaction", "down_out");
 
         assert!(needs_barrier);
-        assert!(tracker.written.contains("down_out") && !tracker.written.contains("compaction"));
-        assert!(tracker.read.contains("compaction"));
+        assert!(tracker.wrote(&"down_out") && !tracker.wrote(&"compaction"));
+        assert!(tracker.was_read(&"compaction"));
     }
 }

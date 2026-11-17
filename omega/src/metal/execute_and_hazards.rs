@@ -86,11 +86,12 @@ pub(super) fn plan_from_prepared(
         .map(|node| (node, gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, node)))
         .collect();
     let emit_knobs = emit_knobs.with_operand_dtypes(operand_dtypes);
-    let block_dtypes = prepared
+    let block_dtypes: Vec<DType> = prepared
         .block_nodes
         .iter()
         .map(|node| gpu_dtype(program, &prepared.index_nodes, &prepared.resolved, *node))
         .collect();
+    let hazard_node_bytes = hazard_node_bytes(&prepared, &packed_operands, &block_dtypes);
     Plan {
         configured_constraints: None,
         configured_input_contract: Vec::new(),
@@ -100,6 +101,7 @@ pub(super) fn plan_from_prepared(
         prepared,
         packed_operands,
         block_dtypes,
+        hazard_node_bytes,
         resident_nodes: BTreeSet::new(),
         math_mode: numeric_policy_as_metal_math_mode(numeric_policy),
         numeric_policy,
@@ -1494,45 +1496,193 @@ pub fn move_placed_buffer_bytes(
     Ok(())
 }
 
-/// What the concurrent hazard tracker names a resource by: the device buffer
-/// object and the byte offset a range starts at, so two packed arena ranges in
-/// one buffer are two resources. Pointer identity from [`Retained::as_ptr`].
-pub(super) type HazardId = (*const ProtocolObject<dyn MTLBuffer>, usize);
+/// A resource the concurrent hazard tracker names by device buffer and the
+/// byte extent of one access inside it. Two accesses conflict when they share a
+/// [`HazardResource::buffer`] and their [`HazardResource::bytes`] overlap, so a
+/// write to `[64, 80)` of a caller's cache buffer meets a read of its whole
+/// `[0, 128)` extent, while two packed arena ranges `[0, 64)` and `[64, 128)`
+/// of one slot stay independent and may overlap on the GPU.
+pub(super) trait HazardResource: Copy {
+    type Buffer: Eq + core::hash::Hash + Copy;
+
+    fn buffer(&self) -> Self::Buffer;
+
+    fn bytes(&self) -> core::ops::Range<usize>;
+}
+
+/// One access: the buffer object (pointer identity from [`Retained::as_ptr`]
+/// on the driver path) and the half-open byte range `[start, end)` it touches.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(super) struct Region<Buffer> {
+    pub(super) buffer: Buffer,
+    pub(super) start: usize,
+    pub(super) end: usize,
+}
+
+impl<Buffer> Region<Buffer> {
+    pub(super) fn new(buffer: Buffer, offset: usize, bytes: usize) -> Self {
+        Self {
+            buffer,
+            start: offset,
+            end: offset.saturating_add(bytes),
+        }
+    }
+}
+
+impl<Buffer: Eq + core::hash::Hash + Copy> HazardResource for Region<Buffer> {
+    type Buffer = Buffer;
+
+    fn buffer(&self) -> Buffer {
+        self.buffer
+    }
+
+    fn bytes(&self) -> core::ops::Range<usize> {
+        self.start..self.end
+    }
+}
+
+pub(super) type HazardId = Region<*const ProtocolObject<dyn MTLBuffer>>;
+
+/// A whole-resource identity: every access to a `NodeId` is the same single
+/// byte, which is the pre-extent behaviour for graph-level analyses that name
+/// a node, not a buffer range.
+impl HazardResource for NodeId {
+    type Buffer = NodeId;
+
+    fn buffer(&self) -> NodeId {
+        *self
+    }
+
+    fn bytes(&self) -> core::ops::Range<usize> {
+        0..1
+    }
+}
+
+#[cfg(test)]
+impl HazardResource for &str {
+    type Buffer = Self;
+
+    fn buffer(&self) -> Self {
+        self
+    }
+
+    fn bytes(&self) -> core::ops::Range<usize> {
+        0..1
+    }
+}
+
+#[cfg(test)]
+impl HazardResource for usize {
+    type Buffer = Self;
+
+    fn buffer(&self) -> Self {
+        *self
+    }
+
+    fn bytes(&self) -> core::ops::Range<usize> {
+        0..1
+    }
+}
+
+const NO_ACCESS: u32 = u32::MAX;
+
+/// Byte ranges accessed per buffer since the last barrier: a map from buffer to
+/// the head of its chain in one flat node list, so a lookup walks only the
+/// ranges of the buffer it names. `clear` keeps both capacities, so a warm
+/// step allocates nothing.
+#[derive(Debug)]
+pub(super) struct AccessSet<Buffer: Eq + core::hash::Hash + Copy> {
+    heads: std::collections::HashMap<Buffer, u32>,
+    nodes: Vec<(core::ops::Range<usize>, u32)>,
+}
+
+impl<Buffer: Eq + core::hash::Hash + Copy> AccessSet<Buffer> {
+    fn new() -> Self {
+        Self {
+            heads: std::collections::HashMap::new(),
+            nodes: Vec::new(),
+        }
+    }
+
+    fn chain<'set>(
+        &'set self,
+        buffer: &Buffer,
+    ) -> impl Iterator<Item = &'set core::ops::Range<usize>> + 'set {
+        let mut next = self.heads.get(buffer).copied().unwrap_or(NO_ACCESS);
+        core::iter::from_fn(move || {
+            let (range, following) = self.nodes.get(next as usize)?;
+            next = *following;
+            Some(range)
+        })
+    }
+
+    fn overlaps(&self, buffer: &Buffer, bytes: &core::ops::Range<usize>) -> bool {
+        self.chain(buffer)
+            .any(|held| held.start < bytes.end && bytes.start < held.end)
+    }
+
+    fn insert(&mut self, buffer: Buffer, bytes: core::ops::Range<usize>) {
+        if bytes.is_empty()
+            || self
+                .chain(&buffer)
+                .any(|held| held.start <= bytes.start && bytes.end <= held.end)
+        {
+            return;
+        }
+        let head = self.heads.get(&buffer).copied().unwrap_or(NO_ACCESS);
+        self.nodes.push((bytes, head));
+        self.heads.insert(buffer, (self.nodes.len() - 1) as u32);
+    }
+
+    fn clear(&mut self) {
+        self.heads.clear();
+        self.nodes.clear();
+    }
+}
 
 /// [`DispatchType::Concurrent`]'s dataflow-hazard set, generic over the
-/// identity type so this logic is testable without a real Metal device
-/// (`Id = usize`/`&str` in tests, `Id = *const ProtocolObject<dyn MTLBuffer>`
-/// — pointer identity from [`Retained::as_ptr`] — on the real driver path).
+/// resource type so this logic is testable without a real Metal device
+/// (`Id = usize`/`&str` in tests, [`HazardId`] on the real driver path).
 /// Tracks two sets since the same buffer position is bound differently on
-/// each side of a hazard: `written` names every buffer some op since the
+/// each side of a hazard: `written` names every byte range some op since the
 /// last barrier has WRITTEN (a RAW or WAW hazard for a later op that reads
-/// or writes it); `read` names every buffer READ since the last barrier (a
-/// WAR hazard for a later op that writes it — real here because
-/// [`BufferArena`] reuses a whole retired slot's buffer object for a later
-/// position). A fresh, never-before-seen buffer (this op's own freshly
-/// [`allocate_buffer`]d output) triggers neither: nothing else has touched
-/// that pointer yet. Only instantiated on [`DispatchType::Concurrent`]'s
+/// or writes an overlapping range); `read` names every range READ since the
+/// last barrier (a WAR hazard for a later op that writes an overlapping
+/// range -- real here because [`BufferArena`] reuses a retired slot's range
+/// for a later position). A fresh, never-before-seen buffer (this op's own
+/// freshly [`allocate_buffer`]d output) triggers neither: nothing else has
+/// touched that buffer yet. Only instantiated on [`DispatchType::Concurrent`]'s
 /// path -- [`DispatchType::Serial`] never allocates one, since a serial
 /// encoder already orders every dispatch for it.
 #[derive(Debug)]
-pub(super) struct HazardTracker<Id: Eq + core::hash::Hash + Copy> {
-    pub(super) written: std::collections::HashSet<Id>,
-    pub(super) read: std::collections::HashSet<Id>,
+pub(super) struct HazardTracker<Id: HazardResource> {
+    pub(super) written: AccessSet<Id::Buffer>,
+    pub(super) read: AccessSet<Id::Buffer>,
 }
 
-impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
+impl<Id: HazardResource> HazardTracker<Id> {
     pub(super) fn new() -> Self {
         Self {
-            written: std::collections::HashSet::new(),
-            read: std::collections::HashSet::new(),
+            written: AccessSet::new(),
+            read: AccessSet::new(),
         }
+    }
+
+    /// True when some write since the last barrier overlaps `resource`.
+    pub(super) fn wrote(&self, resource: &Id) -> bool {
+        self.written.overlaps(&resource.buffer(), &resource.bytes())
+    }
+
+    /// True when some read since the last barrier overlaps `resource`.
+    pub(super) fn was_read(&self, resource: &Id) -> bool {
+        self.read.overlaps(&resource.buffer(), &resource.bytes())
     }
 
     /// True when encoding the next op without a barrier first would let a
     /// concurrent-dispatch-scheduled GPU thread race a still-in-flight one:
-    /// RAW (an input was written since the last barrier), WAW (the output
-    /// buffer was written since the last barrier), or WAR (the output
-    /// buffer was read since the last barrier — arena slot reuse). Delegates
+    /// RAW (an input overlaps a range written since the last barrier), WAW
+    /// (the output overlaps one), or WAR (the output overlaps a range read
+    /// since the last barrier -- arena slot reuse). Delegates
     /// to [`classify`] so the boolean and the per-cause breakdown can never
     /// drift apart.
     pub(super) fn needs_barrier(
@@ -1551,15 +1701,15 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
         inputs: &[Id],
         outputs: impl IntoIterator<Item = Id>,
     ) -> HazardClass {
-        if inputs.iter().any(|input| self.written.contains(input)) {
+        if inputs.iter().any(|input| self.wrote(input)) {
             return HazardClass::Raw;
         }
         let mut class = HazardClass::None;
         for output in outputs {
-            if self.written.contains(&output) {
+            if self.wrote(&output) {
                 return HazardClass::Waw;
             }
-            if self.read.contains(&output) {
+            if self.was_read(&output) {
                 class = HazardClass::War;
             }
         }
@@ -1578,8 +1728,12 @@ impl<Id: Eq + core::hash::Hash + Copy> HazardTracker<Id> {
     /// Records this op's own effect, called once per op regardless of
     /// whether a barrier fired for it.
     pub(super) fn record(&mut self, inputs: &[Id], outputs: impl IntoIterator<Item = Id>) {
-        self.written.extend(outputs);
-        self.read.extend(inputs.iter().copied());
+        for output in outputs {
+            self.written.insert(output.buffer(), output.bytes());
+        }
+        for input in inputs {
+            self.read.insert(input.buffer(), input.bytes());
+        }
     }
 }
 
@@ -1759,7 +1913,7 @@ impl HazardState {
         read_nodes
             .iter()
             .zip(&self.inputs)
-            .filter(|(_, pointer)| self.tracker.written.contains(*pointer))
+            .filter(|(_, pointer)| self.tracker.wrote(pointer))
             .fold((0, 0), |(true_edges, alias_edges), (node, pointer)| {
                 if self.writer_nodes.get(pointer) == Some(node) {
                     (true_edges + 1, alias_edges)
@@ -1786,10 +1940,70 @@ impl HazardState {
     }
 }
 
+/// Bytes each node's device buffer holds, indexed by `NodeId`: a computed
+/// node's output (and each extra output an op writes), a program input's
+/// block. `0` marks a node with no recorded extent (an expert payload buffer
+/// the caller binds, a round-batched member past the leader), which
+/// [`hazard_region`] widens to the rest of its buffer rather than guess.
+pub(super) fn hazard_node_bytes(
+    prepared: &Prepared,
+    packed_operands: &PackedOperands,
+    block_dtypes: &[DType],
+) -> Vec<usize> {
+    let mut bytes: Vec<usize> = Vec::new();
+    let mut note = |node: NodeId, node_bytes: usize| {
+        let index = node.0 as usize;
+        if bytes.len() <= index {
+            bytes.resize(index + 1, 0);
+        }
+        bytes[index] = node_bytes;
+    };
+    for (node, dtype) in prepared.block_nodes.iter().zip(block_dtypes) {
+        let elements = prepared
+            .shapes
+            .of(*node)
+            .iter()
+            .fold(1_u64, |count, extent| count.saturating_mul(*extent));
+        let node_bytes = match packed_operands.get(node) {
+            Some(codec) => elements
+                .div_ceil(crate::msl::codec_block_elements(*codec) as u64)
+                .saturating_mul(crate::msl::codec_block_bytes(*codec) as u64),
+            None => elements.saturating_mul(device_element_bytes(*dtype) as u64),
+        };
+        note(*node, usize::try_from(node_bytes).unwrap_or(usize::MAX));
+    }
+    for bound in &prepared.resolved {
+        let element_bytes = device_element_bytes(bound.dtype);
+        note(bound.node, bound_output_len(bound).max(1) * element_bytes);
+        for (extra_node, element_count) in extra_output_nodes(bound) {
+            note(extra_node, element_count.max(1) * element_bytes);
+        }
+    }
+    bytes
+}
+
+/// Bytes `bound`'s primary output buffer holds, the extent every write to it
+/// is recorded over.
+pub(super) fn hazard_output_bytes(bound: &BoundOp) -> usize {
+    bound_output_len(bound).max(1) * device_element_bytes(bound.dtype)
+}
+
+/// One access's [`HazardId`]: `bytes` from [`hazard_node_bytes`] when the node
+/// has an extent, else everything the buffer holds past `offset` -- a wider
+/// range only ever adds a barrier, never drops one.
+pub(super) fn hazard_region(buffer: &MetalBuffer, offset: usize, bytes: usize) -> HazardId {
+    let bytes = match bytes {
+        0 => buffer.length().saturating_sub(offset),
+        known => known,
+    };
+    Region::new(Retained::as_ptr(buffer), offset, bytes)
+}
+
 /// The one adapter from a dispatch's read `NodeId`s (see
 /// `crate::msl::hazard_read_nodes`, the caller's own source for `nodes` below)
-/// to the hazard tracker's buffer-pointer identities, resolved from
-/// `device_buffers` — erroring on the first node with none instead of
+/// to the hazard tracker's byte-range identities, resolved from
+/// `device_buffers` and sized by `node_bytes` ([`hazard_node_bytes`]) --
+/// erroring on the first node with none instead of
 /// silently dropping it from the hazard set (the previous `filter_map`
 /// behavior) — a node missing from `device_buffers` means the encode this
 /// identity feeds is already wrong, so hiding it from the hazard check only
@@ -1802,9 +2016,10 @@ impl HazardState {
 pub(super) fn resolve_hazard_inputs(
     nodes: impl Iterator<Item = NodeId>,
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    node_bytes: &[usize],
 ) -> Result<Vec<HazardId>, MetalError> {
     let mut resolved = Vec::new();
-    resolve_hazard_inputs_into(nodes, device_buffers, &mut resolved)?;
+    resolve_hazard_inputs_into(nodes, device_buffers, node_bytes, &mut resolved)?;
     Ok(resolved)
 }
 
@@ -1816,15 +2031,19 @@ pub(super) fn resolve_hazard_inputs(
 pub(super) fn resolve_hazard_inputs_into(
     nodes: impl Iterator<Item = NodeId>,
     device_buffers: &BTreeMap<NodeId, DeviceBuffer>,
+    node_bytes: &[usize],
     resolved: &mut Vec<HazardId>,
 ) -> Result<(), MetalError> {
     resolved.clear();
     for operand in nodes {
-        let pointer = device_buffers
+        let region = device_buffers
             .get(&operand)
-            .map(|(buffer, offset)| (Retained::as_ptr(buffer), *offset))
+            .map(|(buffer, offset)| {
+                let bytes = node_bytes.get(operand.0 as usize).copied().unwrap_or(0);
+                hazard_region(buffer, *offset, bytes)
+            })
             .ok_or(MetalError::UnresolvedHazardOperand { node: operand })?;
-        resolved.push(pointer);
+        resolved.push(region);
     }
     Ok(())
 }
@@ -1840,7 +2059,7 @@ pub(super) fn resolve_hazard_inputs_into(
 /// dispatch binds past `bindings` (`extra_output_nodes`). Each is checked for
 /// WAW/WAR and recorded written, so a later reader of any of them is a RAW.
 /// Returns whether the caller must emit a barrier before encoding this op.
-pub(super) fn hazard_step<Id: Eq + core::hash::Hash + Copy>(
+pub(super) fn hazard_step<Id: HazardResource>(
     tracker: &mut HazardTracker<Id>,
     inputs: &[Id],
     outputs: &[Id],
