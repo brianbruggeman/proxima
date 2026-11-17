@@ -95,6 +95,24 @@ pub fn emit_with_attention_variant(
     numeric_policy: NumericPolicy,
     variant: AttentionVariant,
 ) -> Result<Kernel, EmitError> {
+    emit_with_attention_variant_and_knobs(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        variant,
+        &EmitKnobs::default(),
+    )
+}
+
+/// [`emit_with_attention_variant`] under explicit [`EmitKnobs`], the way [`emit_with_knobs`] is to [`emit`].
+#[cfg(feature = "metal-attn-variants")]
+pub(crate) fn emit_with_attention_variant_and_knobs(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    variant: AttentionVariant,
+    knobs: &EmitKnobs,
+) -> Result<Kernel, EmitError> {
     validate_attention_variant_storage(resolved, packed_operands, variant.kv_storage)?;
     let (mma_selection, row_schedule) =
         AttentionMmaSelection::from_variant(variant).map_err(|(axis, value)| {
@@ -115,7 +133,7 @@ pub fn emit_with_attention_variant(
         resolved,
         packed_operands,
         numeric_policy,
-        &EmitKnobs::default(),
+        knobs,
         false,
         AttentionKernelChoice {
             mma_selection,
@@ -131,7 +149,30 @@ pub fn inspect_attention_variant(
     numeric_policy: NumericPolicy,
     variant: AttentionVariant,
 ) -> Result<AttentionDispatchManifest, EmitError> {
-    let kernel = emit_with_attention_variant(resolved, packed_operands, numeric_policy, variant)?;
+    inspect_attention_variant_and_knobs(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        variant,
+        &EmitKnobs::default(),
+    )
+}
+
+#[cfg(feature = "metal-attn-variants")]
+pub(crate) fn inspect_attention_variant_and_knobs(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    variant: AttentionVariant,
+    knobs: &EmitKnobs,
+) -> Result<AttentionDispatchManifest, EmitError> {
+    let kernel = emit_with_attention_variant_and_knobs(
+        resolved,
+        packed_operands,
+        numeric_policy,
+        variant,
+        knobs,
+    )?;
     let quantized = operand_codecs(resolved, packed_operands);
     let cache_codec = cached_attention_kv_codec(resolved.node, &quantized)?;
     let (mma_selection, selected_schedule) =
@@ -305,6 +346,7 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
         knobs,
         &grid,
         dense_mma_input_layout,
+        row_schedule,
     );
     let source = match &resolved.kind {
         BoundOpKind::CachedAttention { .. } => cached_attention_kv_codecs(resolved.node, &quantized)
@@ -372,7 +414,7 @@ pub(crate) fn emit_inner_with_mma_selection_and_layout(
             node: resolved.node,
         }),
     }?;
-    let source = match index_family(resolved, &quantized, numeric_policy, knobs) {
+    let source = match index_family(resolved, &quantized, numeric_policy, knobs, row_schedule) {
         Some(family) if extras.coord_index32 => apply_index_family(family, source),
         _ => source,
     };
@@ -1506,6 +1548,7 @@ pub(super) fn coord_index32_active(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     knobs: &EmitKnobs,
+    row_schedule: AttentionRowSchedule,
     expert_source_mode: bool,
 ) -> bool {
     if !knobs.coord_index32 {
@@ -1519,10 +1562,11 @@ pub(super) fn coord_index32_active(
         ..
     } = &resolved.kind
     else {
-        return index_family(resolved, quantized, numeric_policy, knobs)
-            .is_some_and(|family| {
-                index_family_fits(resolved, quantized, numeric_policy, knobs, family)
-            });
+        return index_family(resolved, quantized, numeric_policy, knobs, row_schedule).is_some_and(
+            |family| {
+                index_family_fits(resolved, quantized, numeric_policy, knobs, row_schedule, family)
+            },
+        );
     };
     if tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs).is_some()
         || dense_batched_gemm_block(
@@ -1536,9 +1580,11 @@ pub(super) fn coord_index32_active(
         )
         .is_some()
     {
-        return index_family(resolved, quantized, numeric_policy, knobs).is_some_and(|family| {
-            index_family_fits(resolved, quantized, numeric_policy, knobs, family)
-        });
+        return index_family(resolved, quantized, numeric_policy, knobs, row_schedule).is_some_and(
+            |family| {
+                index_family_fits(resolved, quantized, numeric_policy, knobs, row_schedule, family)
+            },
+        );
     }
     if let Some(block) = packed_row_block(resolved, quantized, knobs) {
         return expert_divide_is_rendered(resolved, output_axes, &block, knobs)
@@ -1767,6 +1813,7 @@ pub(super) fn metal_specialization(
     knobs: &EmitKnobs,
     grid: &GridSpec,
     dense_mma_input_layout: FloatLayout,
+    row_schedule: AttentionRowSchedule,
 ) -> crate::identity::MetalOnlyExtras {
     let quantized = operand_codecs(resolved, packed_operands);
     let reduction_literal = match &resolved.kind {
@@ -1824,7 +1871,14 @@ pub(super) fn metal_specialization(
         // function's own `reduce_is_cooperative_dispatch` call folds
         // `expert_source_mode` into ITS OWN admission already, matching
         // every other multi-row/coord experiment's posture at this call site.
-        coord_index32: coord_index32_active(resolved, &quantized, numeric_policy, knobs, false),
+        coord_index32: coord_index32_active(
+            resolved,
+            &quantized,
+            numeric_policy,
+            knobs,
+            row_schedule,
+            false,
+        ),
         softmax_runtime_rows: knobs.softmax_runtime_rows,
         tiled_gemm_q4_0: match &resolved.kind {
             BoundOpKind::Reduce {
@@ -2055,6 +2109,7 @@ pub(crate) fn kernel_cache_key_for_grid_with_layout(
             knobs,
             grid,
             dense_mma_input_layout,
+            AttentionRowSchedule::legacy(),
         ),
         numeric_policy,
     );

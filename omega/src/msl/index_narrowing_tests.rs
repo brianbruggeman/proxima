@@ -464,3 +464,174 @@ fn the_body_pass_drops_a_lowercase_64_bit_literal_suffix_but_not_an_identifier_e
     );
     assert!(narrowed.contains("int call1 = 2;"), "{narrowed}");
 }
+
+#[cfg(feature = "metal-attn-split-rows")]
+const FULL_LAYER_BASE: &str =
+    include_str!("../../tests/fixtures/index32/cached_attention_full_layer.base.msl");
+#[cfg(feature = "metal-attn-split-rows")]
+const FULL_LAYER_TIP: &str =
+    include_str!("../../tests/fixtures/index32/cached_attention_full_layer.tip.msl");
+#[cfg(feature = "metal-attn-split-rows")]
+const SLIDING_LAYER_BASE: &str =
+    include_str!("../../tests/fixtures/index32/cached_attention_sliding_layer.base.msl");
+#[cfg(feature = "metal-attn-split-rows")]
+const SLIDING_LAYER_TIP: &str =
+    include_str!("../../tests/fixtures/index32/cached_attention_sliding_layer.tip.msl");
+
+/// the shape of one flint prefill chunk's attention: `query_rows` new rows over
+/// a `cached_key_rows` cache, f16 K and V, a sink, and the llama-relaxed policy
+/// that selects the row-tiled form.
+#[cfg(feature = "metal-attn-split-rows")]
+fn row_tiled_attention_op(
+    query_rows: u64,
+    cached_key_rows: u64,
+    kv_heads: u64,
+    head_dim: u64,
+    cached_lower_inclusive: i64,
+) -> (BoundOp, BTreeMap<NodeId, Codec>) {
+    let bound = BoundOp {
+        node: NodeId(10),
+        dtype: DType::FLOAT32,
+        extents: vec![query_rows, 1, 8, head_dim],
+        kind: BoundOpKind::CachedAttention {
+            operands: (0..10)
+                .map(|index| {
+                    (
+                        NodeId(index),
+                        Layout {
+                            base: 0,
+                            strides: vec![1_i64].into(),
+                        },
+                        None,
+                    )
+                })
+                .collect(),
+            query_rows,
+            cached_key_rows,
+            new_key_rows: query_rows,
+            kv_heads,
+            query_groups: 8,
+            head_dim,
+            rotary_dim: head_dim,
+            scale: 0.088388346,
+            cached_lower_inclusive,
+            new_upper_inclusive: 0,
+            arithmetic: proxima_tensor::CachedAttentionArithmetic::OnlineF32,
+            attention_sink: true,
+        },
+    };
+    let packed = [2, 3, 6]
+        .into_iter()
+        .map(|index| (bound.operands()[index].0, Codec::Float16))
+        .collect();
+    (bound, packed)
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+fn full_layer_op() -> (BoundOp, BTreeMap<NodeId, Codec>) {
+    row_tiled_attention_op(512, 2048, 4, 128, i64::MIN)
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+fn sliding_layer_op() -> (BoundOp, BTreeMap<NodeId, Codec>) {
+    row_tiled_attention_op(512, 2048, 1, 256, -511)
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+fn emitted_attention(bound: &BoundOp, packed: &BTreeMap<NodeId, Codec>, coord_index32: bool) -> String {
+    let knobs = EmitKnobs::default().with_coord_index32(coord_index32);
+    let kernel = emit_with_knobs(bound, packed, NumericPolicy::llama_relaxed(), &knobs)
+        .expect("row-tiled attention emits");
+    assert!(kernel.entry.contains("_rt"), "not the row-tiled form: {}", kernel.entry);
+    kernel.source
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+fn attention_cache_key(bound: &BoundOp, packed: &BTreeMap<NodeId, Codec>) -> String {
+    kernel_cache_key_with_knobs(
+        bound,
+        packed,
+        NumericPolicy::llama_relaxed(),
+        &EmitKnobs::default(),
+    )
+    .expect("cache key builds")
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+#[test]
+fn the_captured_full_layer_attention_narrows_to_the_recorded_32_bit_kernel() {
+    assert_eq!(narrow_row_tiled_attention(FULL_LAYER_BASE), FULL_LAYER_TIP);
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+#[test]
+fn the_captured_sliding_layer_attention_narrows_to_the_recorded_32_bit_kernel() {
+    assert_eq!(narrow_row_tiled_attention(SLIDING_LAYER_BASE), SLIDING_LAYER_TIP);
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+#[test]
+fn a_full_layer_attention_renders_the_recorded_fixtures_under_each_coordinate_setting() {
+    let (bound, packed) = full_layer_op();
+
+    assert_eq!(emitted_attention(&bound, &packed, false), FULL_LAYER_BASE);
+    assert_eq!(emitted_attention(&bound, &packed, true), FULL_LAYER_TIP);
+    assert!(attention_cache_key(&bound, &packed).contains("_c32"));
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+#[test]
+fn a_sliding_layer_attention_renders_the_recorded_fixtures_under_each_coordinate_setting() {
+    let (bound, packed) = sliding_layer_op();
+
+    assert_eq!(emitted_attention(&bound, &packed, false), SLIDING_LAYER_BASE);
+    assert_eq!(emitted_attention(&bound, &packed, true), SLIDING_LAYER_TIP);
+    assert!(attention_cache_key(&bound, &packed).contains("_c32"));
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+#[test]
+fn the_narrowed_attention_kernel_drops_every_long_and_the_unbounded_mask_literal() {
+    for tip in [FULL_LAYER_TIP, SLIDING_LAYER_TIP] {
+        assert!(!has_word(kernel_body(tip), "long"));
+        assert!(!tip.contains("-9223372036854775807"));
+        assert!(tip.contains("struct Uniforms { long total_elements; long splits; };"));
+    }
+    assert!(FULL_LAYER_TIP.contains("constexpr int cached_lower = -2147483647;"));
+    assert!(SLIDING_LAYER_TIP.contains("constexpr int cached_lower = -511;"));
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+#[test]
+fn an_attention_cache_past_the_reach_limit_keeps_the_64_bit_kernel() {
+    let (bound, packed) = row_tiled_attention_op(512, 1 << 24, 8, 256, i64::MIN);
+
+    let source = emitted_attention(&bound, &packed, true);
+
+    assert_eq!(source, emitted_attention(&bound, &packed, false));
+    assert!(has_word(kernel_body(&source), "long"));
+    assert!(!attention_cache_key(&bound, &packed).contains("_c32"));
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+#[test]
+fn a_sliding_window_past_the_reach_limit_keeps_the_64_bit_kernel() {
+    let (bound, packed) = row_tiled_attention_op(512, 2048, 1, 256, -(1 << 31));
+
+    let source = emitted_attention(&bound, &packed, true);
+
+    assert_eq!(source, emitted_attention(&bound, &packed, false));
+    assert!(!attention_cache_key(&bound, &packed).contains("_c32"));
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+#[test]
+fn the_coordinate_override_set_to_zero_restores_the_64_bit_attention_kernel() {
+    let (bound, packed) = full_layer_op();
+
+    assert!(has_word(kernel_body(&emitted_attention(&bound, &packed, false)), "long"));
+    assert_ne!(
+        emitted_attention(&bound, &packed, true),
+        emitted_attention(&bound, &packed, false)
+    );
+}

@@ -8,6 +8,7 @@ pub(super) enum IndexFamily {
     ExpertPrologue,
     BlockDecode,
     TiledGemm,
+    RowTiledAttention,
 }
 
 pub(super) fn index_family(
@@ -15,6 +16,7 @@ pub(super) fn index_family(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     knobs: &EmitKnobs,
+    row_schedule: AttentionRowSchedule,
 ) -> Option<IndexFamily> {
     match &resolved.kind {
         BoundOpKind::Reduce {
@@ -46,6 +48,8 @@ pub(super) fn index_family(
             (unpacked && !epilogue_operands.is_empty() && gather_count(resolved) == 0)
                 .then_some(IndexFamily::Body)
         }
+        BoundOpKind::CachedAttention { .. } => row_tiled_form(resolved, numeric_policy, row_schedule)
+            .map(|_| IndexFamily::RowTiledAttention),
         BoundOpKind::Elementwise { .. } => {
             let gathered = gather_count(resolved) > 0;
             match (gathered, quantized.iter().all(Option::is_none)) {
@@ -77,6 +81,7 @@ pub(super) fn index_family_fits(
     quantized: &[Option<Codec>],
     numeric_policy: NumericPolicy,
     knobs: &EmitKnobs,
+    row_schedule: AttentionRowSchedule,
     family: IndexFamily,
 ) -> bool {
     match family {
@@ -84,6 +89,11 @@ pub(super) fn index_family_fits(
         IndexFamily::Body => body_reach_fits(resolved),
         IndexFamily::ExpertPrologue => output_total_fits_u32(resolved),
         IndexFamily::BlockDecode => block_decode_reach_fits(resolved, quantized),
+        IndexFamily::RowTiledAttention => {
+            row_tiled_form(resolved, numeric_policy, row_schedule).is_some_and(|(rows, splits)| {
+                row_tiled_attention_reach_fits(&resolved.kind, rows, splits)
+            })
+        }
     }
 }
 
@@ -453,5 +463,122 @@ pub(super) fn apply_index_family(family: IndexFamily, source: String) -> String 
         IndexFamily::ExpertPrologue => narrow_expert_prologue(&source),
         IndexFamily::BlockDecode => narrow_block_remainders(&narrow_block_decode(&source)),
         IndexFamily::TiledGemm => narrow_tiled_gemm(&source),
+        IndexFamily::RowTiledAttention => narrow_row_tiled_attention(&source),
     }
+}
+
+/// the row-tiled cached-attention form's `(rows per threadgroup, splits)` under
+/// `row_schedule`, or `None` for any other form: the proof below is only about
+/// the row-tiled kernel text, so every other attention form stays 64-bit.
+#[cfg(feature = "metal-attn-split-rows")]
+fn row_tiled_form(
+    resolved: &BoundOp,
+    numeric_policy: NumericPolicy,
+    row_schedule: AttentionRowSchedule,
+) -> Option<(u64, u64)> {
+    match cached_attention_form_with_schedule(&resolved.kind, numeric_policy, row_schedule) {
+        Some(CachedAttentionForm::TwoRangeRowTiled {
+            rows_per_threadgroup,
+            splits,
+            ..
+        }) => Some((rows_per_threadgroup, splits)),
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "metal-attn-split-rows"))]
+fn row_tiled_form(
+    _resolved: &BoundOp,
+    _numeric_policy: NumericPolicy,
+    _row_schedule: AttentionRowSchedule,
+) -> Option<(u64, u64)> {
+    None
+}
+
+/// the row-tiled kernel never walks an iteration space, so the proof is over
+/// what its 32-bit variables hold, all read off the op's own extents: the query
+/// and output element reach, the split scratch (`query elements x splits`), the
+/// key and value cache reach (the larger of the cached and new ranges plus one
+/// block of fragment overrun), the launched threadgroup count (`tgid`), and one
+/// bound over the scalar row arithmetic (`live + cached_lower + row0`,
+/// `last_row + new_upper + 1`), which sums every row count and both mask bounds
+/// so no partial sum of them can wrap. An unbounded lower mask
+/// (`cached_lower == i64::MIN`) is rendered as `-i32::MAX`, which no row
+/// arithmetic subtracts from, so it adds nothing to the bound.
+#[cfg(feature = "metal-attn-split-rows")]
+fn row_tiled_attention_reach_fits(kind: &BoundOpKind, rows_per_threadgroup: u64, splits: u64) -> bool {
+    row_tiled_attention_reaches(kind, rows_per_threadgroup, splits)
+        .is_some_and(|reaches| reaches.into_iter().all(index32_reach_fits))
+}
+
+#[cfg(not(feature = "metal-attn-split-rows"))]
+fn row_tiled_attention_reach_fits(_kind: &BoundOpKind, _rows_per_threadgroup: u64, _splits: u64) -> bool {
+    false
+}
+
+#[cfg(feature = "metal-attn-split-rows")]
+fn row_tiled_attention_reaches(
+    kind: &BoundOpKind,
+    rows_per_threadgroup: u64,
+    splits: u64,
+) -> Option<[u64; 5]> {
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        cached_key_rows,
+        new_key_rows,
+        kv_heads,
+        query_groups,
+        head_dim,
+        cached_lower_inclusive,
+        new_upper_inclusive,
+        ..
+    } = kind
+    else {
+        return None;
+    };
+    let overrun = row_tiled_block(*head_dim) + 8;
+    let query_elements = query_rows
+        .checked_mul(*kv_heads)?
+        .checked_mul(*query_groups)?
+        .checked_mul(*head_dim)?;
+    let scratch_elements = query_elements.checked_mul(splits)?.checked_add(4)?;
+    let key_elements = (*cached_key_rows.max(new_key_rows))
+        .checked_add(overrun)?
+        .checked_mul(*kv_heads)?
+        .checked_mul(*head_dim)?;
+    let lower_bound = if *cached_lower_inclusive == i64::MIN {
+        0
+    } else {
+        cached_lower_inclusive.unsigned_abs()
+    };
+    let scalar_rows = [
+        *cached_key_rows,
+        *new_key_rows,
+        *query_rows,
+        overrun,
+        lower_bound,
+        new_upper_inclusive.unsigned_abs(),
+        1,
+    ]
+    .into_iter()
+    .try_fold(0u64, u64::checked_add)?;
+    let threadgroups = row_tiled_threadgroups(kind, rows_per_threadgroup, splits);
+    (*query_rows > 0 && *kv_heads > 0 && *head_dim > 0).then_some([
+        query_elements,
+        scratch_elements,
+        key_elements,
+        scalar_rows,
+        threadgroups,
+    ])
+}
+
+/// narrows the row-tiled attention kernel's indices. the unbounded lower mask
+/// is the one 64-bit literal with no 32-bit spelling, so it is rewritten to
+/// `-i32::MAX` (still below every reachable `key - live - row`) before the
+/// shared `long` to `int` pass.
+pub(super) fn narrow_row_tiled_attention(source: &str) -> String {
+    narrow_body_to_int32(&source.replace(
+        "constexpr long cached_lower = -9223372036854775807L;",
+        "constexpr long cached_lower = -2147483647L;",
+    ))
 }

@@ -3042,6 +3042,7 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
         &ambient_knobs(),
         &admitted.grid,
         FloatLayout::BF16,
+        AttentionRowSchedule::legacy(),
     );
     assert!(admitted_extras.dense_batched_gemm_axes.is_some());
     let admitted_key =
@@ -3076,6 +3077,7 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
         &ambient_knobs(),
         &denied.grid,
         FloatLayout::BF16,
+        AttentionRowSchedule::legacy(),
     );
     assert!(denied_extras.dense_batched_gemm_axes.is_none());
     let denied_key = kernel_cache_key(&bound, &packed, NumericPolicy::bit_exact())

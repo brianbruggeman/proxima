@@ -3,6 +3,48 @@ use std::collections::BTreeSet;
 use super::attn_golden_tests::{attention_op, attention_rows_op};
 use super::*;
 
+/// emits with the 64-bit index text, which the kernel-structure assertions below read; the 32-bit
+/// narrowing of the same kernel is pinned by `index_narrowing_tests`.
+#[cfg(feature = "metal-attn-variants")]
+fn emit_variant_wide(
+    op: &BoundOp,
+    packed: &PackedOperands,
+    policy: NumericPolicy,
+    variant: AttentionVariant,
+) -> Result<Kernel, EmitError> {
+    emit_with_attention_variant_and_knobs(
+        op,
+        packed,
+        policy,
+        variant,
+        &EmitKnobs::default().with_coord_index32(false),
+    )
+}
+
+#[cfg(feature = "metal-attn-variants")]
+fn inspect_variant_wide(
+    op: &BoundOp,
+    packed: &PackedOperands,
+    policy: NumericPolicy,
+    variant: AttentionVariant,
+) -> Result<AttentionDispatchManifest, EmitError> {
+    inspect_attention_variant_and_knobs(
+        op,
+        packed,
+        policy,
+        variant,
+        &EmitKnobs::default().with_coord_index32(false),
+    )
+}
+
+fn emit_wide(
+    op: &BoundOp,
+    packed: &PackedOperands,
+    policy: NumericPolicy,
+) -> Result<Kernel, EmitError> {
+    emit_with_knobs(op, packed, policy, &EmitKnobs::default().with_coord_index32(false))
+}
+
 #[cfg(feature = "metal-attn-variants")]
 #[test]
 fn card_12_variant_config_defaults_preserve_the_legacy_axes() {
@@ -295,7 +337,7 @@ fn the_declared_arrays_stay_inside_the_budget_at_every_admitted_shape() {
             declared <= THREADGROUP_BUDGET,
             "groups {groups} head_dim {head_dim}: {declared} bytes declared"
         );
-        let kernel = emit(&op, &PackedOperands::new(), NumericPolicy::llama_relaxed())
+        let kernel = emit_wide(&op, &PackedOperands::new(), NumericPolicy::llama_relaxed())
             .expect("the row-tiled kernel emits");
         for declaration in [
             format!("constexpr long tile_rows = {rows};"),
@@ -471,7 +513,7 @@ fn the_kernel_source_carries_the_tile_decode_the_band_and_the_interleaved_store(
         for rows in VERIFY_ROWS {
             for capacity in CAPACITIES {
                 let op = build(capacity, rows);
-                let kernel = emit(&op, &PackedOperands::new(), NumericPolicy::llama_relaxed())
+                let kernel = emit_wide(&op, &PackedOperands::new(), NumericPolicy::llama_relaxed())
                     .expect("the row-tiled kernel emits");
                 let cell = format!("{label} rows {rows} cached {capacity}");
 
@@ -994,7 +1036,7 @@ fn row_tiled_source(op: &BoundOp) -> String {
     let relaxed = NumericPolicy::bit_exact()
         .with_contraction(true)
         .with_reassociation(true);
-    emit(op, &PackedOperands::new(), relaxed)
+    emit_wide(op, &PackedOperands::new(), relaxed)
         .expect("the row-tiled kernel emits")
         .source
 }
@@ -2056,7 +2098,7 @@ fn card_18_prefetch_stages_the_next_kv_block_in_f16_operands() {
 #[test]
 fn card_18_prefetch_guards_a_partial_final_cached_block() {
     let op = attention_rows_op(9, 2, 64, 520, 1000, SLIDING_LOWER);
-    let kernel = emit_with_attention_variant(
+    let kernel = emit_variant_wide(
         &op,
         &PackedOperands::new(),
         NumericPolicy::llama_relaxed(),
@@ -2101,7 +2143,7 @@ fn card_19_simd_topology_assigns_each_granite_query_head_once() {
     let op = card_17_granite_attention(1000);
     let packed = PackedOperands::new();
     let policy = NumericPolicy::llama_relaxed();
-    let per_head = emit_with_attention_variant(
+    let per_head = emit_variant_wide(
         &op,
         &packed,
         policy,
@@ -2114,7 +2156,7 @@ fn card_19_simd_topology_assigns_each_granite_query_head_once() {
         },
     )
     .expect("per-head topology emits for Granite GQA");
-    let grouped = emit_with_attention_variant(
+    let grouped = emit_variant_wide(
         &op,
         &packed,
         policy,
@@ -2443,14 +2485,14 @@ fn card_21_cross_axis_reports_exact_prefetch_budget_decline() {
 fn explicit_four_simdgroup_dispatch_preserves_row_and_key_tiles() {
     let operation = card_17_granite_attention(1000);
     let policy = NumericPolicy::llama_relaxed();
-    let baseline = inspect_attention_variant(
+    let baseline = inspect_variant_wide(
         &operation,
         &PackedOperands::new(),
         policy,
         AttentionVariant::default(),
     )
     .expect("legacy row-tiled dispatch is available");
-    let selected = inspect_attention_variant(
+    let selected = inspect_variant_wide(
         &operation,
         &PackedOperands::new(),
         policy,
@@ -2510,7 +2552,7 @@ fn explicit_four_simdgroup_dispatch_preserves_row_and_key_tiles() {
     );
     assert_ne!(baseline.dispatch_identity, selected.dispatch_identity);
 
-    let composed = inspect_attention_variant(
+    let composed = inspect_variant_wide(
         &operation,
         &PackedOperands::new(),
         policy,
@@ -2589,7 +2631,7 @@ fn the_f16_cache_row_tiled_cached_phase_carries_no_runtime_mode_test() {
         ),
     ] {
         let packed = packed_operands_at(&op, &[2, 3, 6], Codec::Float16);
-        let source = emit(&op, &packed, NumericPolicy::llama_relaxed())
+        let source = emit_wide(&op, &packed, NumericPolicy::llama_relaxed())
             .expect("the row-tiled kernel reads a Float16 cache")
             .source;
         let (cached, new_rows) = step_phases(&source);
