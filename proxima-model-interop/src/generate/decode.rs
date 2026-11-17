@@ -3656,21 +3656,26 @@ impl<'file> LoadedModel<'file> {
         logits_sink: &mut LogitsSink,
         on_token: &mut dyn FnMut(TokenEvent<'_>) -> ControlFlow<(), ()>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        let (generated_ids, text, stopped_by_eos, _prefix_state) = self
-            .run_decode_loop_observed_seeded(
-                prompt,
-                max_tokens,
-                serving_config,
-                runtime,
-                token_override,
-                logits_sink,
-                &mut NodeValuesSink::Discard,
-                on_token,
-                None,
-                false,
-                None,
-                None,
-            )?;
+        let retention = core::mem::replace(
+            &mut runtime.prefix_retention,
+            PrefixRetention::for_discarding_caller(serving_config),
+        );
+        let outcome = self.run_decode_loop_observed_seeded(
+            prompt,
+            max_tokens,
+            serving_config,
+            runtime,
+            token_override,
+            logits_sink,
+            &mut NodeValuesSink::Discard,
+            on_token,
+            None,
+            false,
+            None,
+            None,
+        );
+        runtime.prefix_retention = retention;
+        let (generated_ids, text, stopped_by_eos, _prefix_state) = outcome?;
         Ok((generated_ids, text, stopped_by_eos))
     }
 
@@ -3696,21 +3701,26 @@ impl<'file> LoadedModel<'file> {
         speculative_stats: &mut SpeculativeDecodeStats,
         forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool), InteropError> {
-        let (generated_ids, text, stopped_by_eos, _prefix_state) = self
-            .run_decode_loop_observed_seeded(
-                prompt,
-                max_tokens,
-                serving_config,
-                runtime,
-                token_override,
-                logits_sink,
-                &mut NodeValuesSink::Discard,
-                on_token,
-                None,
-                false,
-                Some(speculative_stats),
-                forced_draft_width,
-            )?;
+        let retention = core::mem::replace(
+            &mut runtime.prefix_retention,
+            PrefixRetention::for_discarding_caller(serving_config),
+        );
+        let outcome = self.run_decode_loop_observed_seeded(
+            prompt,
+            max_tokens,
+            serving_config,
+            runtime,
+            token_override,
+            logits_sink,
+            &mut NodeValuesSink::Discard,
+            on_token,
+            None,
+            false,
+            Some(speculative_stats),
+            forced_draft_width,
+        );
+        runtime.prefix_retention = retention;
+        let (generated_ids, text, stopped_by_eos, _prefix_state) = outcome?;
         Ok((generated_ids, text, stopped_by_eos))
     }
 
@@ -7864,7 +7874,10 @@ not read this cache format; only the single-row decode kernel reads it from the 
         }
 
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        if let Some(device) = device_kv.as_ref() {
+        if let Some(device) = device_kv
+            .as_ref()
+            .filter(|_| runtime.prefix_retention == PrefixRetention::Keep)
+        {
             device.flush(&mut layer_caches, cached_len, positions_needed)?;
             seal_attention_layers(
                 &mut layer_caches,
@@ -7914,10 +7927,18 @@ not read this cache format; only the single-row decode kernel reads it from the 
             .saturating_sub(final_ids.len())
             .min(generated_ids.len());
         final_ids.extend_from_slice(&generated_ids[..forwarded_generated]);
-        let final_state = PrefixState {
-            ids: final_ids,
-            layer_caches,
-            cached_len,
+        // a discarding caller got no flush, so the host rows are stale: hand back the hollow state the single-range path returns
+        let final_state = match runtime.prefix_retention {
+            PrefixRetention::Keep => PrefixState {
+                ids: final_ids,
+                layer_caches,
+                cached_len,
+            },
+            PrefixRetention::Discard => PrefixState {
+                ids: Vec::new(),
+                layer_caches: Vec::new(),
+                cached_len: 0,
+            },
         };
         emit_request_speculative_stats(&speculative_stats.since(&initial_speculative_stats));
         Ok((generated_ids, text, stopped_by_eos, final_state))

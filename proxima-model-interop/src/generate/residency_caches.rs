@@ -1951,6 +1951,33 @@ impl ShortConvLayerCache {
     }
 }
 
+/// Whether the caller of a decode loop reads the [`PrefixState`] the loop
+/// returns. A loop whose caller discards it need not copy the device-resident
+/// K/V rows back into host caches ([`DeviceKv::flush`]) -- on a 4069-token
+/// prompt that read-back is a ~115 MiB host heap spike for a value dropped
+/// the moment the loop returns. [`Self::Keep`] is the default: only an entry
+/// point that discards the state with the prompt cache off selects
+/// [`Self::Discard`] (see [`Self::for_discarding_caller`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) enum PrefixRetention {
+    #[default]
+    Keep,
+    Discard,
+}
+
+impl PrefixRetention {
+    /// The retention for an entry point that drops the returned
+    /// [`PrefixState`]. An enabled prompt cache may store that state, so it
+    /// keeps the host rows.
+    pub(super) fn for_discarding_caller(serving_config: &ServingConfig) -> Self {
+        if serving_config.prompt_cache.is_enabled() {
+            Self::Keep
+        } else {
+            Self::Discard
+        }
+    }
+}
+
 /// [`LayerCache::new`]/[`SsmLayerCache::new`] threaded per forward-program
 /// layer, matching [`LoadedModel::layer_roots`]'s own per-layer discriminant
 /// -- an attention layer's cache append/readback shape genuinely differs
@@ -3042,6 +3069,9 @@ pub struct BackendRuntime {
     /// prefill flips this off before its first batch; the release boundary
     /// then hands ownership to the bounded DynaExq sources.
     pub(super) retain_monolithic_prefill_sources: bool,
+    /// Set by an entry point around a loop whose returned [`PrefixState`] it
+    /// drops; restored after, so a runtime reused across calls does not leak it.
+    pub(super) prefix_retention: PrefixRetention,
     /// Keyed by `(new_count, kv_bound_extent)` -- the two symbols
     /// `gqa_cached_forward_program`'s cached-attention read extent
     /// resolves against (`Extent::Symbolic(1) == kv_bound_extent`). A
@@ -3264,6 +3294,7 @@ impl BackendRuntime {
             active_cuda_shape: None,
             engine: select_backend(config),
             retain_monolithic_prefill_sources: false,
+            prefix_retention: PrefixRetention::Keep,
             plans: alloc::collections::BTreeMap::new(),
             segment_plans: alloc::collections::BTreeMap::new(),
             #[cfg(all(feature = "metal", target_os = "macos"))]
@@ -5467,6 +5498,8 @@ pub(crate) struct BackendRuntime {
     /// Whether the cached K/V range of a `(program hash, new-token count)` class binds
     /// padded to its capacity bucket, as `proxima_tensor::cpu::probe_kv_padding` decided.
     kv_pad: alloc::collections::BTreeMap<(u64, usize), bool>,
+    /// See the gpu runtime's field of the same name.
+    pub(super) prefix_retention: PrefixRetention,
 }
 
 #[cfg(not(feature = "gpu"))]
@@ -5482,6 +5515,7 @@ impl BackendRuntime {
                 .with_flash_narrowing(_config.numeric_policy.flash_narrowing),
             cpu_plans: alloc::collections::BTreeMap::new(),
             kv_pad: alloc::collections::BTreeMap::new(),
+            prefix_retention: PrefixRetention::Keep,
         }
     }
 
