@@ -771,17 +771,16 @@ mod gated {
                         rows_per_threadgroup,
                         simdgroups,
                         ..
-                    }) => Some((rows_per_threadgroup, simdgroups)),
+                    }) => Some((rows_per_threadgroup, simdgroups, row_tiled_block(*head_dim))),
                     _ => None,
                 };
                 #[cfg(not(feature = "metal-attn-split-rows"))]
-                let row_tile_class: Option<(u64, u64)> = None;
-                if let Some((rows_per_threadgroup, simdgroups)) = row_tile_class {
+                let row_tile_class: Option<(u64, u64, u64)> = None;
+                if let Some((rows_per_threadgroup, simdgroups, block)) = row_tile_class {
                     format!(
-                        "{prefix}_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}_n{simdgroups}_b{}{cached_bound_token}{sink_token}",
+                        "{prefix}_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}{rotary_token}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}_n{simdgroups}_b{block}{cached_bound_token}{sink_token}",
                         scale.to_bits(),
                         signed_name_part(*cached_lower_inclusive),
-                        row_tiled_block(*head_dim),
                     )
                 } else {
                     format!(
