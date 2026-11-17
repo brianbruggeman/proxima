@@ -527,3 +527,148 @@ fn the_compacted_pipeline_declares_exactly_the_staging_tile_of_threadgroup_memor
         assert_eq!(*length, STAGING_TILE_BYTES, "{key}");
     }
 }
+
+/// Words the IQ4_XS decode may read with a plain `uint` load only when the weight binding's byte origin
+/// is a multiple of 4. `GroupedTail` renders both tile loops behind one `if (weight_words_aligned)`;
+/// every fixture above binds at an aligned origin, so the guarded loop (the `else`) never ran. These
+/// tests bind the same IQ4_XS bytes at origin 0 and at origin 2 of a registered checkpoint mapping
+/// (`checkpoint_mapping_offset` binds `address - mapping_base` as the `setBuffer` offset).
+///
+/// proxima-numeric has no IQ4_XS encoder (`encode.rs:28`). Every bit pattern of scales and nibbles is a
+/// valid IQ4_XS block, so the blocks are synthesized from real row values the way
+/// `expert_gemm_types_vs_llama.rs::synthesize_iq4_xs` does, with a fixed finite f16 super-scale. The gap:
+/// the bytes are structurally valid IQ4_XS, not the output of a production quantizer on a trained tensor.
+mod iq4_xs_binding_origin {
+    use super::*;
+    use proxima_gguf::quant::iq4_xs;
+    use proxima_tensor::AlignedBuffer;
+
+    const MISALIGNED_ORIGIN: usize = 2;
+
+    fn synthesize_iq4_xs(row: &[f32], out: &mut [u8]) {
+        const HALF_SCALE: [u8; 2] = 0x10AFu16.to_le_bytes();
+        for (values, block) in row.as_chunks::<{ iq4_xs::QK_K }>().0.iter().zip(out.as_chunks_mut::<{ iq4_xs::BLOCK_BYTES }>().0.iter_mut()) {
+            let byte_of = |value: f32| ((value + 1.0) * 127.5) as u8;
+            block[..2].copy_from_slice(&HALF_SCALE);
+            let scales_h = u16::from_le_bytes([byte_of(values[0]), byte_of(values[1])]);
+            block[2..4].copy_from_slice(&scales_h.to_le_bytes());
+            for (slot, value) in block[4..8].iter_mut().zip(&values[2..6]) {
+                *slot = byte_of(*value);
+            }
+            for (slot, pair) in block[8..].iter_mut().zip(values.as_chunks::<2>().0) {
+                *slot = (byte_of(pair[0]) & 0x0f) | (byte_of(pair[1]) << 4);
+            }
+        }
+    }
+
+    fn iq4_xs_expert_stack(shape: &Shape) -> Vec<u8> {
+        let row_bytes = shape.k / iq4_xs::QK_K * iq4_xs::BLOCK_BYTES;
+        let mut stack = vec![0u8; shape.experts * shape.rows * row_bytes];
+        let values = unit_values(1000, shape.experts * shape.rows * shape.k, -1.0, 1.0);
+        for (row, target) in values.chunks_exact(shape.k).zip(stack.chunks_exact_mut(row_bytes)) {
+            synthesize_iq4_xs(row, target);
+        }
+        stack
+    }
+
+    struct Mapping {
+        buffer: AlignedBuffer,
+    }
+
+    impl Mapping {
+        fn holding(regions: &[(usize, &[u8])], total: usize) -> Self {
+            let mut buffer = AlignedBuffer::new(total.div_ceil(4), omega::page_size()).expect("page-aligned mapping");
+            let base = buffer.as_mut_ptr().cast::<u8>();
+            for (origin, bytes) in regions {
+                assert!(origin + bytes.len() <= buffer.len() * 4, "region fits the mapping");
+                // SAFETY: the region lies inside the allocation (asserted above) and `bytes` is a distinct borrow, so the ranges cannot overlap.
+                unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), base.add(*origin), bytes.len()) };
+            }
+            Self { buffer }
+        }
+
+        fn all_bytes(&self) -> &[u8] {
+            // SAFETY: the allocation is `len * 4` initialized bytes, alive as long as `self`.
+            unsafe { core::slice::from_raw_parts(self.buffer.as_ptr().cast::<u8>(), self.buffer.len() * 4) }
+        }
+
+        fn region(&self, origin: usize, length: usize) -> &[u8] {
+            &self.all_bytes()[origin..origin + length]
+        }
+    }
+
+    struct Bound {
+        output: Vec<f32>,
+        oracle: Vec<f32>,
+        origin: usize,
+        kernel_keys: Vec<String>,
+    }
+
+    fn run_at(case: &Case, mapping: &Mapping, origin: usize, length: usize) -> Bound {
+        let (program, output) = program(&case.shape, false);
+        let weight = mapping.region(origin, length);
+        let base = mapping.all_bytes().as_ptr() as usize;
+        let activation = unit_values(2000, case.shape.tokens * case.shape.k, -1.0, 1.0);
+        let named = [
+            ("weight", QuantizedBlock::Packed { codec: Codec::Iq4Xs, bytes: weight }),
+            ("route", QuantizedBlock::Float32(&case.route)),
+            ("activation", QuantizedBlock::Float32(&activation)),
+        ];
+        let outputs = [output];
+        let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
+        let mut validated = None;
+        let oracle = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(&program, &[], &named, &outputs, &mut free_buffers, &mut validated)
+            .expect("cpu evaluates the gathered iq4_xs expert product");
+        let plan = omega::plan_named(&program, &[], &named, &outputs, NumericPolicy::default()).expect("metal plans the gathered iq4_xs expert product");
+        let kernel_keys = plan.kernel_keys().expect("plan exposes its kernel keys");
+        let metal = omega::execute_plan_named(&plan, &named).expect("metal runs the gathered iq4_xs expert product");
+        Bound {
+            output: metal.root().to_vec(),
+            oracle: oracle.root().to_vec(),
+            origin: weight.as_ptr() as usize - base,
+            kernel_keys,
+        }
+    }
+
+    fn emitted_source(shape: &Shape) -> String {
+        let (program, output) = program(shape, false);
+        let shapes = proxima_tensor::infer(&program, &[]).expect("the program infers");
+        let packed: omega::PackedOperands = [(NodeId(0), Codec::Iq4Xs)].into_iter().collect();
+        let bound = proxima_tensor::bind(&program, &shapes, &[output], NumericPolicy::default()).expect("the program binds");
+        let resolved = bound.iter().find(|op| op.node == output).expect("the reduce node is bound");
+        omega::emit(resolved, &packed, NumericPolicy::default()).expect("the grouped kernel emits").source
+    }
+
+    fn assert_source_has_both_tile_loops(source: &str) {
+        assert!(source.contains("bool weight_words_aligned = (((ulong)weight_bytes) & 3ul) == 0ul;"), "the kernel derives the flag from the bound address");
+        assert!(source.contains("if (weight_words_aligned) {"), "the aligned branch is rendered");
+        assert!(source.contains("    } else {\n"), "the guarded branch is rendered");
+    }
+
+    #[test]
+    fn iq4_xs_experts_bound_at_a_non_word_origin_take_the_guarded_loop_and_match_the_aligned_run_bit_for_bit() {
+        let shape = Shape { tokens: 161, rows: 100, k: 512, experts: 6 };
+        let route = heavy_expert_route(shape.tokens, shape.experts);
+        let stack = iq4_xs_expert_stack(&shape);
+        let misaligned_origin = stack.len().next_multiple_of(4) + MISALIGNED_ORIGIN;
+        let mapping = Mapping::holding(&[(0, &stack), (misaligned_origin, &stack)], misaligned_origin + stack.len());
+        omega::backend::register_checkpoint_mapping(mapping.all_bytes());
+        let case = Case { shape, route, fuse_gate: false };
+
+        let aligned = run_at(&case, &mapping, 0, stack.len());
+        let misaligned = run_at(&case, &mapping, misaligned_origin, stack.len());
+        omega::backend::unregister_checkpoint_mapping(mapping.all_bytes());
+
+        assert_eq!(aligned.origin % 4, 0, "the control binds the weights at a word origin");
+        assert_eq!(misaligned.origin % 4, MISALIGNED_ORIGIN, "the weights are bound {MISALIGNED_ORIGIN} bytes past a word");
+        assert_source_has_both_tile_loops(&emitted_source(&case.shape));
+        for run in [&aligned, &misaligned] {
+            assert!(grouped_kernel_ran(&run.kernel_keys), "the expert-grouped tiled kernel was never selected: {:?}", run.kernel_keys);
+            assert_eq!(run.output.len(), case.shape.tokens * case.shape.rows, "degenerate: metal produced no output");
+            let worst = worst_relative_row_error(&run.oracle, &run.output, case.shape.rows);
+            assert!(worst <= RELATIVE_TOLERANCE, "origin {} drifted from the f32 oracle by {worst:e} of a row's norm", run.origin);
+        }
+        let differing = aligned.output.iter().zip(&misaligned.output).filter(|(left, right)| left.to_bits() != right.to_bits()).count();
+        assert_eq!(differing, 0, "{differing} of {} outputs differ between the aligned and the misaligned binding", aligned.output.len());
+    }
+}
