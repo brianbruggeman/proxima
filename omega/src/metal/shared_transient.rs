@@ -57,11 +57,24 @@ impl TransientPool {
         element_count: usize,
         dtype: DType,
     ) -> Result<SharedBuffer, MetalError> {
+        Ok(self.lease_outcome(owner, device, element_count, dtype)?.0)
+    }
+
+    /// [`Self::lease`], plus whether the buffer was joined (`true`) or freshly
+    /// allocated (`false`): the per-lease record a test reads instead of a
+    /// process-wide allocation counter other threads also move.
+    pub(super) fn lease_outcome(
+        &self,
+        owner: &'static str,
+        device: &ProtocolObject<dyn MTLDevice>,
+        element_count: usize,
+        dtype: DType,
+    ) -> Result<(SharedBuffer, bool), MetalError> {
         let needed = allocation_capacity(element_count, dtype)?;
         if let Some(live) = self.live.borrow().upgrade()
             && live.length() >= needed
         {
-            return Ok(live);
+            return Ok((live, true));
         }
         let fresh = Rc::new(allocate_buffer_for(
             owner,
@@ -71,7 +84,7 @@ impl TransientPool {
             dtype,
         )?);
         *self.live.borrow_mut() = Rc::downgrade(&fresh);
-        Ok(fresh)
+        Ok((fresh, false))
     }
 }
 

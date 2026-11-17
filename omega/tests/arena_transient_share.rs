@@ -8,7 +8,6 @@
 #![cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use omega::metal::OUTPUT_BUFFER_ALLOCATIONS;
 use proxima_numeric::{DType, NumericPolicy};
 use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, append, projection};
 
@@ -91,23 +90,16 @@ fn a_smaller_plan_reuses_the_larger_plans_transient_arena_buffer() {
     let (large, large_roots, large_input) = plan_for(LARGE_ROWS);
     let (small, small_roots, small_input) = plan_for(SMALL_ROWS);
 
-    let before = OUTPUT_BUFFER_ALLOCATIONS.get();
     let large_out = run(&large, large_roots, &large_input);
-    let after_large = OUTPUT_BUFFER_ALLOCATIONS.get();
     let small_out = run(&small, small_roots, &small_input);
-    let after_small = OUTPUT_BUFFER_ALLOCATIONS.get();
 
     let large_id = large.arena_transient_buffer_id().expect("large plan leases its transient slot");
     let small_id = small.arena_transient_buffer_id().expect("small plan leases its transient slot");
     assert_eq!(large_id, small_id, "both plans must hold one arena allocation");
-    assert_eq!(
-        (after_large - before) - (after_small - after_large),
-        1,
-        "the small plan must allocate exactly one device buffer fewer than the large plan \
-         (large={}, small={})",
-        after_large - before,
-        after_small - after_large,
-    );
+    // the lease's own record for each plan, not a process-wide allocation counter that other
+    // test threads also move: the large plan's lease allocated the buffer, the small one joined it
+    assert_eq!(large.arena_transient_reused(), Some(false), "the large plan leases first, so it allocates");
+    assert_eq!(small.arena_transient_reused(), Some(true), "the small plan joins the large plan's buffer");
     assert_eq!(large_out, vec![large_input.iter().sum::<f32>(), 3.0]);
     assert_eq!(small_out.len(), 2);
 }

@@ -40,6 +40,9 @@ pub(super) struct BufferArena {
     /// Keeps slot 0's buffer in [`ARENA_TRANSIENT`]'s pool while this plan uses it. `None`
     /// for a whole-slot layout, whose slots mix outputs and residents with transients.
     pub(super) transient_lease: Option<SharedBuffer>,
+    /// Whether slot 0 joined a buffer another plan already held (`true`) or was freshly
+    /// allocated by the lease (`false`); `false` when this layout leases nothing.
+    pub(super) transient_reused: bool,
     pub(super) slot_bytes: Vec<usize>,
     /// Parallel to `prepared.resolved`. `None` for a position whose node the
     /// caller output-placed when the arena was built: that node is written into
@@ -459,15 +462,17 @@ pub(super) fn build_buffer_arena(
     let layout = packed.unwrap_or_else(|| lay_out_whole_slots(&found.allocations, &found.releases));
     let mut slots: Vec<MetalBuffer> = Vec::with_capacity(layout.slot_bytes.len());
     let mut transient_lease = None;
+    let mut transient_reused = false;
     for (slot, bytes) in layout.slot_bytes.iter().enumerate() {
         // slot 0 of a packed layout holds only released, non-resident outputs, dead at the
         // end of each call, so plans that never overlap in time lease one buffer
         if was_packed && slot == 0 {
-            let shared = ARENA_TRANSIENT.with(|pool| {
-                pool.lease("arena_slot", device, bytes.div_ceil(4), DType::FLOAT32)
+            let (shared, reused) = ARENA_TRANSIENT.with(|pool| {
+                pool.lease_outcome("arena_slot", device, bytes.div_ceil(4), DType::FLOAT32)
             })?;
             slots.push((*shared).clone());
             transient_lease = Some(shared);
+            transient_reused = reused;
             continue;
         }
         slots.push(allocate_buffer_for(
@@ -492,6 +497,7 @@ pub(super) fn build_buffer_arena(
     Ok(BufferArena {
         slots,
         transient_lease,
+        transient_reused,
         position_slot: found
             .primary
             .iter()

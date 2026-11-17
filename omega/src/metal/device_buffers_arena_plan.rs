@@ -2496,6 +2496,23 @@ impl Plan {
         }
     }
 
+    /// Whether this plan's transient slot joined a buffer another plan on the thread
+    /// already held (`Some(true)`) or the lease allocated a new one (`Some(false)`).
+    /// `None` when the feature is off, the arena is unbuilt, or its layout leases nothing.
+    #[must_use]
+    pub fn arena_transient_reused(&self) -> Option<bool> {
+        #[cfg(feature = "metal-plan-stable-buffers")]
+        {
+            let arena = self.arena.get()?;
+            arena.transient_lease.as_ref()?;
+            Some(arena.transient_reused)
+        }
+        #[cfg(not(feature = "metal-plan-stable-buffers"))]
+        {
+            None
+        }
+    }
+
     /// Total bytes retained by this plan's physical output slots. This is
     /// distinct from [`Self::arena_peak_bytes`]: the peak is a liveness
     /// high-water mark, while this sum is the device allocation kept alive
