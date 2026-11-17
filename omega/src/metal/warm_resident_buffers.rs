@@ -17,7 +17,62 @@
 //! a caller needs only part of the set.
 
 use super::*;
-use objc2_metal::MTLResourceUsage;
+use objc2::rc::Retained;
+use objc2::sel;
+use objc2_foundation::NSObjectProtocol;
+use objc2_metal::{
+    MTLCommandQueue, MTLResidencySet, MTLResidencySetDescriptor, MTLResourceUsage,
+};
+use std::cell::RefCell;
+use std::time::Instant;
+
+thread_local! {
+    /// The residency set [`warm_resident_buffers`] requested, kept alive so
+    /// the kernel does not reclaim the wired weight pages while the model
+    /// serves. Thread-local like the buffer caches it was built from.
+    static WARM_RESIDENCY_SET: RefCell<Option<Retained<ProtocolObject<dyn MTLResidencySet>>>> =
+        const { RefCell::new(None) };
+}
+
+/// Wraps `MTLResidencySet` (macOS 15+): adds every buffer, `commit`s, attaches
+/// the set to `queue` (`addResidencySet`), and `requestResidency`s it, which
+/// asks the driver to wire the buffers' pages now instead of at the first
+/// command buffer that references them. The same sequence ggml-metal's
+/// `ggml_metal_buffer_rset_init` runs per model buffer. Returns `false` when
+/// the OS has no residency sets.
+fn request_residency(
+    device: &ProtocolObject<dyn MTLDevice>,
+    queue: &ProtocolObject<dyn MTLCommandQueue>,
+    buffers: &[MetalBuffer],
+) -> Result<bool, MetalError> {
+    if !device.respondsToSelector(sel!(newResidencySetWithDescriptor:error:)) {
+        return Ok(false);
+    }
+    let descriptor = MTLResidencySetDescriptor::new();
+    // SAFETY: initialCapacity is a sizing hint the driver may exceed.
+    unsafe { descriptor.setInitialCapacity(buffers.len()) };
+    let set = device
+        .newResidencySetWithDescriptor_error(&descriptor)
+        .map_err(|error| MetalError::DriverRefusedObject {
+            object: "residency set",
+            reason: error.localizedDescription().to_string(),
+        })?;
+    for buffer in buffers {
+        set.addAllocation(ProtocolObject::from_ref(&**buffer));
+    }
+    set.commit();
+    queue.addResidencySet(&set);
+    set.requestResidency();
+    WARM_RESIDENCY_SET.with(|slot| *slot.borrow_mut() = Some(set));
+    Ok(true)
+}
+
+/// Allocations in the residency set the last warm requested, `None` when no
+/// set is held. Test-only: callers never need to read the set back.
+#[cfg(test)]
+fn held_residency_allocations() -> Option<usize> {
+    WARM_RESIDENCY_SET.with(|slot| slot.borrow().as_ref().map(|set| set.allocationCount()))
+}
 
 /// Every buffer the no-copy and resident-copy caches hold on this thread.
 pub(super) fn resident_buffers() -> Vec<MetalBuffer> {
@@ -64,6 +119,9 @@ pub fn warm_resident_buffers() -> Result<usize, MetalError> {
     let (device, queue) = device_and_queue()?;
     materialize_mapping_buffers(&device)?;
     let buffers = resident_buffers();
+    let residency_started = Instant::now();
+    let residency_requested = request_residency(&device, &queue, &buffers)?;
+    let residency_ms = residency_started.elapsed().as_secs_f64() * 1000.0;
     let command_buffer = new_labeled_command_buffer(&queue, "omega.warm_resident_buffers")
         .ok_or_else(|| MetalError::DriverRefusedObject {
             object: "command buffer",
@@ -90,7 +148,12 @@ pub fn warm_resident_buffers() -> Result<usize, MetalError> {
             encoder_status_requested: encoder_error_status_requested(),
         },
     )?;
-    debug!(buffers = buffers.len() as u64, "warmed resident buffers");
+    debug!(
+        buffers = buffers.len() as u64,
+        residency_requested = residency_requested,
+        residency_ms = residency_ms,
+        "warmed resident buffers"
+    );
     Ok(buffers.len())
 }
 
@@ -114,5 +177,39 @@ mod tests {
             matches!(warm_resident_buffers(), Ok(0)),
             "an empty set needs no device"
         );
+    }
+
+    #[test]
+    fn warming_two_resident_weights_holds_exactly_two_allocations_in_the_residency_set() {
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_nocopy_cache_for_test();
+        reset_resident_cache_for_test();
+        reset_checkpoint_mapping_for_test();
+        WARM_RESIDENCY_SET.with(|slot| *slot.borrow_mut() = None);
+        let page = page_size();
+        let first_weight: Vec<u8> = (0..page).map(|index| (index % 251) as u8).collect();
+        let second_weight: Vec<u8> = (0..page * 2).map(|index| (index % 241) as u8).collect();
+        for (name, weight) in [
+            ("blk.0.attn_q.weight", &first_weight),
+            ("blk.0.ffn_down.weight", &second_weight),
+        ] {
+            upload_resident_copy(&device, name, weight.as_ptr().cast(), weight.len())
+                .expect("a resident weight uploads");
+        }
+
+        let warmed = warm_resident_buffers().expect("warming two real buffers succeeds");
+
+        assert_eq!(warmed, 2, "both resident weights are declared");
+        if device.respondsToSelector(sel!(newResidencySetWithDescriptor:error:)) {
+            assert_eq!(
+                held_residency_allocations(),
+                Some(2),
+                "the held residency set carries one allocation per warmed buffer"
+            );
+        } else {
+            assert_eq!(held_residency_allocations(), None, "no residency sets on this OS");
+        }
     }
 }

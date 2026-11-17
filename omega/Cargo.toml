@@ -555,25 +555,7 @@ objc2 = { version = "0.6.4", optional = true }
 # nothing on the production `execute`/`execute_plan` path calls either.
 # `MTLBlitCommandEncoder` is test-only (`omega/tests/device_streaming_ceiling.rs`'s
 # `storageModePrivate` arm needs a blit fill; no production call site uses it).
-objc2-metal = { version = "0.3.2", default-features = false, features = [
-    "MTLDevice",
-    "MTLLibrary",
-    "MTLBuffer",
-    "MTLResource",
-    "MTLAllocation",
-    "MTLCommandQueue",
-    "MTLCommandBuffer",
-    "MTLCommandEncoder",
-    "MTLComputeCommandEncoder",
-    "MTLComputePipeline",
-    "MTLTypes",
-    "MTLBlitCommandEncoder",
-    "MTLCounters",
-    "MTLBinaryArchive",
-    "MTLComputePass",
-    "block2",
-    "objc2-core-foundation",
-], optional = true }
+objc2-metal = { version = "0.3.2", default-features = false, features = ["MTLDevice", "MTLLibrary", "MTLBuffer", "MTLResource", "MTLAllocation", "MTLCommandQueue", "MTLCommandBuffer", "MTLCommandEncoder", "MTLComputeCommandEncoder", "MTLComputePipeline", "MTLTypes", "MTLBlitCommandEncoder", "MTLCounters", "MTLBinaryArchive", "MTLComputePass", "block2", "objc2-core-foundation", "MTLResidencySet"], optional = true }
 # objc2-foundation: NSString (kernel source and entry name go in), NSError
 # (a compile failure's localizedDescription comes out) — the two Foundation
 # types the driver actually touches. `NSRange` is pulled in transitively by
