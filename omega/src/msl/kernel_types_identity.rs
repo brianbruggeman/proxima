@@ -1810,8 +1810,10 @@ pub(crate) enum DecodeVariant {
     /// Select per call on [`WORD_ALIGNED_FLAG`].
     Select,
     /// The guarded decode only (the kernel copy taken when the weight is not word-aligned).
+    #[cfg(feature = "metal-tiled-gemm")]
     Guarded,
     /// The `_words` twin only (the kernel copy taken when it is).
+    #[cfg(feature = "metal-tiled-gemm")]
     Words,
 }
 
@@ -1865,6 +1867,7 @@ impl TiledDecode {
 
     /// Whether [`Self::msl`] also defines `{function}_words`, the decode that assumes a
     /// word-aligned block origin. Its call sites then declare [`WORD_ALIGNED_FLAG`].
+    #[cfg(feature = "metal-tiled-gemm")]
     pub(crate) fn has_word_variant(&self) -> bool {
         self.word_variant_msl().is_some()
     }
@@ -1893,6 +1896,7 @@ impl TiledDecode {
 
     /// The statement declaring [`WORD_ALIGNED_FLAG`] from the weight byte pointer, or empty when
     /// this decode has no word variant (so kernels without one render unchanged).
+    #[cfg(feature = "metal-tiled-gemm")]
     pub(crate) fn word_aligned_flag_msl(&self, weight_bytes: &str) -> String {
         if !self.has_word_variant() {
             return String::new();
@@ -1905,6 +1909,7 @@ impl TiledDecode {
 /// buffer-plus-offset Metal binds is 4-aligned. Every block origin is that pointer plus whole
 /// blocks of a multiple-of-4 size (`RunWords::word_aligned`), so this one fact is the whole
 /// run-time proof.
+#[cfg(feature = "metal-tiled-gemm")]
 pub(crate) const WORD_ALIGNED_FLAG: &str = "weight_words_aligned";
 
 /// The decode description of every codec the tiled and expert-grouped GEMM stages,
