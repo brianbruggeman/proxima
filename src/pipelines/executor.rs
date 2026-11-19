@@ -11,7 +11,7 @@ use tokio::sync::watch;
 use crate::error::ProximaError;
 use crate::log_buffer::{DEFAULT_LOG_BUFFER_CAPACITY, LogBuffer};
 use crate::pipelines::dag::topological_order;
-use crate::pipelines::spec::{PipelineSpec, StageSpec};
+use crate::pipelines::spec::{PipelineSpec, StageBody, StageSpec};
 use crate::recording::event::{
     InteractionId, PipelineEvent, PipelineOutcome, ProtocolEvent, RecordingEvent,
 };
@@ -117,7 +117,8 @@ impl PipelineExecutor {
             // workspace default: if the executor has a workspace_root set and
             // the stage didn't pick a cwd, materialize per-stage workspace
             // under <root>/<pipeline_id>/workspace/<stage_name>/.
-            if stage_spec.cwd.is_none()
+            if let StageBody::Process { cwd, .. } = &mut stage_spec.body
+                && cwd.is_none()
                 && let Some(root) = &self.workspace_root
             {
                 let workspace = root
@@ -129,7 +130,7 @@ impl PipelineExecutor {
                         "create stage workspace {workspace:?}: {err}"
                     )))
                 })?;
-                stage_spec.cwd = Some(workspace);
+                *cwd = Some(workspace);
             }
             let stage_id = stage_ids[name];
             let parent_receivers: Vec<watch::Receiver<StageCompletion>> = stage_spec
@@ -285,11 +286,17 @@ async fn run_stage(
         }
     }
 
+    let StageBody::Process { command, args, env, cwd } = spec.body else {
+        return Err(ProximaError::Config(format!(
+            "stage `{}` is a pipe stage; the executor runs only process stages",
+            spec.name
+        )));
+    };
     let process_spec = ProcessSpec {
-        command: spec.command,
-        args: spec.args,
-        working_dir: spec.cwd,
-        env: spec.env,
+        command,
+        args,
+        working_dir: cwd,
+        env,
         restart: RestartPolicy::Never,
         restart_delay_ms: 0,
         max_restart_attempts: 0,
@@ -359,10 +366,12 @@ mod tests {
         };
         StageSpec {
             name: name.into(),
-            command: cmd.into(),
-            args: vec![flag.into(), script.into()],
-            env: BTreeMap::new(),
-            cwd: None,
+            body: StageBody::Process {
+                command: cmd.into(),
+                args: vec![flag.into(), script.into()],
+                env: BTreeMap::new(),
+                cwd: None,
+            },
             depends_on: deps.iter().map(|raw| (*raw).into()).collect(),
         }
     }

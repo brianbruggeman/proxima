@@ -74,15 +74,17 @@ pub fn topological_order(spec: &PipelineSpec) -> Result<Vec<String>, ProximaErro
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::pipelines::spec::StageSpec;
+    use crate::pipelines::spec::{StageBody, StageSpec};
 
     fn stage(name: &str, deps: &[&str]) -> StageSpec {
         StageSpec {
             name: name.into(),
-            command: "/bin/true".into(),
-            args: Vec::new(),
-            env: Default::default(),
-            cwd: None,
+            body: StageBody::Process {
+                command: "/bin/true".into(),
+                args: Vec::new(),
+                env: Default::default(),
+                cwd: None,
+            },
             depends_on: deps.iter().map(|raw| (*raw).into()).collect(),
         }
     }

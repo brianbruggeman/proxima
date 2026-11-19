@@ -360,7 +360,7 @@ fn strip_artifact_suffix(path: &str) -> Option<&str> {
 mod tests {
     use super::*;
     use crate::pipelines::control_plane::InMemoryPipelineControlPlane;
-    use crate::pipelines::spec::{PipelineSpec, StageSpec};
+    use crate::pipelines::spec::{PipelineSpec, StageBody, StageSpec};
     use std::collections::BTreeMap;
     use std::sync::Arc;
     use std::time::Duration;
@@ -373,10 +373,12 @@ mod tests {
         };
         StageSpec {
             name: name.into(),
-            command: cmd.into(),
-            args: vec![flag.into(), script.into()],
-            env: BTreeMap::new(),
-            cwd: None,
+            body: StageBody::Process {
+                command: cmd.into(),
+                args: vec![flag.into(), script.into()],
+                env: BTreeMap::new(),
+                cwd: None,
+            },
             depends_on: deps.iter().map(|raw| (*raw).into()).collect(),
         }
     }

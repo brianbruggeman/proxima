@@ -552,7 +552,7 @@ fn hex_encode(bytes: &[u8; 32]) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-    use crate::pipelines::spec::StageSpec;
+    use crate::pipelines::spec::{StageBody, StageSpec};
     use futures::StreamExt;
     use std::collections::BTreeMap;
 
@@ -564,10 +564,12 @@ mod tests {
         };
         StageSpec {
             name: name.into(),
-            command: cmd.into(),
-            args: vec![flag.into(), script.into()],
-            env: BTreeMap::new(),
-            cwd: None,
+            body: StageBody::Process {
+                command: cmd.into(),
+                args: vec![flag.into(), script.into()],
+                env: BTreeMap::new(),
+                cwd: None,
+            },
             depends_on: deps.iter().map(|raw| (*raw).into()).collect(),
         }
     }

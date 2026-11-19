@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use crate::error::ProximaError;
 use crate::log_buffer::{DEFAULT_LOG_BUFFER_CAPACITY, LogBuffer};
 use crate::pipelines::dag::topological_order;
-use crate::pipelines::spec::{PipelineSpec, StageSpec};
+use crate::pipelines::spec::{PipelineSpec, StageBody, StageSpec};
 use crate::recording::event::{
     InteractionId, PipelineEvent, PipelineOutcome, ProcessEvent, ProtocolEvent, RecordingEvent,
 };
@@ -224,7 +224,10 @@ fn derive_original_stage_ids(
             continue;
         };
         for stage in &spec.stages {
-            if &stage.command == command && &stage.args == args && !output.contains_key(&stage.name)
+            if let StageBody::Process { command: stage_command, args: stage_args, .. } = &stage.body
+                && stage_command == command
+                && stage_args == args
+                && !output.contains_key(&stage.name)
             {
                 output.insert(stage.name.clone(), event.id);
                 break;
@@ -293,11 +296,17 @@ async fn run_stage_live(
     spec: StageSpec,
     sink: DynRecordingSink,
 ) -> Result<StageOutcome, ProximaError> {
+    let StageBody::Process { command, args, env, cwd } = spec.body else {
+        return Err(ProximaError::Config(format!(
+            "stage `{}` is a pipe stage; the executor runs only process stages",
+            spec.name
+        )));
+    };
     let process_spec = ProcessSpec {
-        command: spec.command,
-        args: spec.args,
-        working_dir: spec.cwd,
-        env: spec.env,
+        command,
+        args,
+        working_dir: cwd,
+        env,
         restart: RestartPolicy::Never,
         restart_delay_ms: 0,
         max_restart_attempts: 0,
@@ -366,7 +375,7 @@ async fn replay_recorded_stage(
 mod tests {
     use super::*;
     use crate::pipelines::executor::PipelineExecutor;
-    use crate::pipelines::spec::StageSpec;
+    use crate::pipelines::spec::{StageBody, StageSpec};
     use crate::recording::sink::{AppendFuture, DynRecordingSink, RecordingSink};
     use std::sync::Mutex as StdMutex;
 
@@ -394,10 +403,12 @@ mod tests {
         };
         StageSpec {
             name: name.into(),
-            command: cmd.into(),
-            args: vec![flag.into(), script.into()],
-            env: BTreeMap::new(),
-            cwd: None,
+            body: StageBody::Process {
+                command: cmd.into(),
+                args: vec![flag.into(), script.into()],
+                env: BTreeMap::new(),
+                cwd: None,
+            },
             depends_on: deps.iter().map(|raw| (*raw).into()).collect(),
         }
     }
