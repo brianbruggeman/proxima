@@ -1955,9 +1955,9 @@ impl ShortConvLayerCache {
 /// returns. A loop whose caller discards it need not copy the device-resident
 /// K/V rows back into host caches ([`DeviceKv::flush`]) -- on a 4069-token
 /// prompt that read-back is a ~115 MiB host heap spike for a value dropped
-/// the moment the loop returns. [`Self::Keep`] is the default: only an entry
-/// point that discards the state with the prompt cache off selects
-/// [`Self::Discard`] (see [`Self::for_discarding_caller`]).
+/// the moment the loop returns. [`Self::Keep`] is the default: an entry point
+/// that discards the state selects [`Self::Discard`] with the prompt cache off
+/// and [`Self::Lease`] with it on (see [`Self::for_discarding_caller`]).
 ///
 /// [`Self::Lease`] is the third answer: neither flush nor drop. The device rows stay
 /// where they are and the loop hands its [`DeviceKv`] out whole as a `ResidentSlot`
@@ -1974,11 +1974,12 @@ pub(super) enum PrefixRetention {
 
 impl PrefixRetention {
     /// The retention for an entry point that drops the returned
-    /// [`PrefixState`]. An enabled prompt cache may store that state, so it
-    /// keeps the host rows.
+    /// [`PrefixState`]. An enabled prompt cache keeps the conversation, and keeps it
+    /// once: the device rows stay where they are as a resident slot ([`Self::Lease`])
+    /// rather than being copied to the host as well.
     pub(super) fn for_discarding_caller(serving_config: &ServingConfig) -> Self {
         if serving_config.prompt_cache.is_enabled() {
-            Self::Keep
+            Self::Lease
         } else {
             Self::Discard
         }
@@ -3187,6 +3188,12 @@ pub struct BackendRuntime {
     /// The device KV a loop run under [`PrefixRetention::Lease`] left in place, for its caller to take.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) leased_slot: Option<ResidentSlot>,
+    /// The in-channel beside [`Self::leased_slot`]: the device KV a request starts from and the
+    /// positions it keeps. The caller sets it (after [`DeviceKv::adopt_resident`] answered
+    /// `InPlace`) together with a seed of that many positions whose host rows are hollow; the
+    /// decode loop takes it where it would otherwise adopt host rows.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) resident_start: Option<(DeviceKv, usize)>,
     /// `ServingConfig::resident_kv_bytes`, read once at construction: the bytes
     /// of [`Self::kv_buffers`] that outlive a generation.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3359,6 +3366,8 @@ impl BackendRuntime {
             kv_buffers: Vec::new(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             leased_slot: None,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            resident_start: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             resident_kv_bytes: config.resident_kv_bytes,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

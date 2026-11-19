@@ -6,7 +6,6 @@
 //! takes it apart. Reach for a `PromptCache` entry for a conversation that is not the live one:
 //! entries hold host rows, a slot holds device rows held once.
 
-#[cfg(test)]
 use super::prompt_cache::{entry_is_reusable, longest_common_prefix};
 use super::*;
 
@@ -27,8 +26,35 @@ impl ResidentSlot {
     }
 }
 
+/// Why a slot [`ResidentSlots::take`] found reusable still starts no request in place: the request
+/// then flushes it to a host entry ([`LoadedModel::prompt_cache_store`]) and takes the host path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ResidentRefusal {
+    /// The tokens past the shared prefix need a wider step than a device evaluation is sized for
+    /// ([`device_step_rows`]).
+    TailPastDeviceStep { tail: usize, step_rows: usize },
+    /// A narrow cache the row-tiled kernel cannot read adopts only for decode steps, so a prefill
+    /// tail cannot run against it.
+    NarrowCacheDecodesOneRow,
+    /// The slot's buffers were sized for a shorter request ([`DeviceKv::fits_request`]).
+    BuffersTooSmall,
+    /// A sliding layer lost rows the rewind needs ([`RewindOutcome`] was not `InPlace`).
+    RewindNotInPlace,
+}
+
+impl ResidentRefusal {
+    /// The telemetry label.
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::TailPastDeviceStep { .. } => "tail_past_device_step",
+            Self::NarrowCacheDecodesOneRow => "narrow_cache_decodes_one_row",
+            Self::BuffersTooSmall => "buffers_too_small",
+            Self::RewindNotInPlace => "rewind_not_in_place",
+        }
+    }
+}
+
 /// What [`ResidentSlots::take`] found for a request's ids.
-#[cfg(test)]
 #[must_use]
 pub(super) enum SlotTake {
     /// Nothing is resident.
@@ -81,7 +107,6 @@ impl ResidentSlots {
     /// - a slot under another key, which can never be reused: `Evicted`, even with room to spare;
     /// - otherwise `Empty` while the table has room (llama fills an idle slot before it evicts
     ///   one), and `Evicted` with the least recently put slot once it is full.
-    #[cfg(test)]
     pub(super) fn take(&mut self, ids: &[u32], key: &CacheKey, min_similarity_milli: u32) -> SlotTake {
         if self.slots.is_empty() {
             return SlotTake::Empty;
@@ -98,7 +123,6 @@ impl ResidentSlots {
         SlotTake::Evicted(self.slots.remove(0))
     }
 
-    #[cfg(test)]
     fn reusable(&self, ids: &[u32], key: &CacheKey, min_similarity_milli: u32) -> Option<(usize, usize)> {
         self.slots
             .iter()

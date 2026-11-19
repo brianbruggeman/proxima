@@ -115,6 +115,9 @@ pub enum CachePath {
     /// The entry that served the request came back from a cold tier;
     /// `lcp` and `reused_tokens` say how much of it was used.
     Tier,
+    /// The live conversation's device KV served the request in place: rewound to `lcp`, with no
+    /// host rows read or written, and only the tokens past `lcp` prefilled.
+    Resident,
     /// No entry could be reused; the whole prompt was prefilled.
     Miss,
 }
@@ -129,6 +132,7 @@ impl CachePath {
             Self::Checkpoint => "checkpoint",
             Self::Shift => "shift",
             Self::Tier => "tier",
+            Self::Resident => "resident",
             Self::Miss => "miss",
         }
     }
@@ -232,6 +236,21 @@ pub struct CacheReport {
 }
 
 impl CacheReport {
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    fn resident(keep: usize, prompt_tokens: usize) -> Self {
+        Self {
+            lcp: keep,
+            reused_tokens: keep,
+            prefilled_tokens: prompt_tokens - keep,
+            path: CachePath::Resident,
+            miss: None,
+            prewarm_hit_tokens: 0,
+            prewarm_wait: Duration::ZERO,
+            follow_up_hit_tokens: 0,
+            shifted_tokens: 0,
+        }
+    }
+
     fn miss(prompt_tokens: usize, reason: MissReason) -> Self {
         Self {
             lcp: 0,
@@ -1745,7 +1764,7 @@ impl<'file> LoadedModel<'file> {
             && matches!(logits_sink, LogitsSink::Discard)
             && matches!(node_values_sink, NodeValuesSink::Discard);
         if !cacheable {
-            return self.run_decode_loop_from_ids(
+            let outcome = self.run_decode_loop_from_ids(
                 ids,
                 max_tokens,
                 serving_config,
@@ -1759,34 +1778,53 @@ impl<'file> LoadedModel<'file> {
                 speculative_stats,
                 forced_draft_width,
             );
+            // a discarding caller the cache cannot serve (a forced stream, a sink) still leaves its device rows for the next request
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            if let Some(slot) = runtime.leased_slot.take() {
+                self.lease_slot(slots, slot, serving_config, forced_draft_width);
+            }
+            return outcome;
         }
         // before the lookup: a request this rejects must not take an entry out
         apply_serving_config(serving_config, ids.len())?;
         let (_, widths) = self.declared_layer_cache_names_and_widths()?;
         let key = self.cache_key(serving_config, runtime, forced_draft_width);
-        let (found, _) =
-            self.prompt_cache_lookup(&ids, &key, &widths, pending.waited(), serving_config);
-        let entry = found.unwrap_or_else(|| CacheEntry::empty(key));
-        let positions = planned_positions(
-            &entry.checkpoint_positions(),
-            entry.state.cached_len,
-            ids.len(),
-            turn_ends,
-            &config,
-        );
-        let mut entry = self
-            .prefill_through_runs(
-                &ids,
-                entry,
-                &positions,
-                &widths,
-                &config,
-                serving_config,
-                runtime,
-                forced_draft_width,
-            )
-            .inspect_err(log_entry_dropped)?;
-        let resumed_at = entry.state.cached_len;
+        // the live conversation first: its device rows serve the request in place, else it is
+        // flushed to a host entry the lookup below then finds
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let resident = self.resume_resident(slots, &ids, max_tokens, serving_config, runtime, forced_draft_width)?;
+        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+        let resident: Option<(CacheEntry, usize, PrefixState)> = None;
+        let (mut entry, resumed_at, seed_state) = match resident {
+            Some((entry, keep, state)) => (entry, keep, Some(state)),
+            None => {
+                let (found, _) =
+                    self.prompt_cache_lookup(&ids, &key, &widths, pending.waited(), serving_config);
+                let entry = found.unwrap_or_else(|| CacheEntry::empty(key));
+                let positions = planned_positions(
+                    &entry.checkpoint_positions(),
+                    entry.state.cached_len,
+                    ids.len(),
+                    turn_ends,
+                    &config,
+                );
+                let mut entry = self
+                    .prefill_through_runs(
+                        &ids,
+                        entry,
+                        &positions,
+                        &widths,
+                        &config,
+                        serving_config,
+                        runtime,
+                        forced_draft_width,
+                    )
+                    .inspect_err(log_entry_dropped)?;
+                let resumed_at = entry.state.cached_len;
+                let state = entry.take_state();
+                (entry, resumed_at, state)
+            }
+        };
         let (generated_ids, text, stopped_by_eos, final_state) = self
             .run_decode_loop_from_ids(
                 ids[resumed_at..].to_vec(),
@@ -1797,7 +1835,7 @@ impl<'file> LoadedModel<'file> {
                 logits_sink,
                 node_values_sink,
                 on_token,
-                entry.take_state(),
+                seed_state,
                 true,
                 speculative_stats,
                 forced_draft_width,
@@ -1839,16 +1877,136 @@ impl<'file> LoadedModel<'file> {
         forced_draft_width: Option<u16>,
     ) {
         slots.limit_to(serving_config.parallel_sequences as usize, serving_config.resident_kv_bytes);
-        let Some(given_up) = slots.put(slot) else {
-            return;
-        };
+        if let Some(given_up) = slots.put(slot) {
+            self.spill_slot(given_up, serving_config, forced_draft_width);
+        }
+    }
+
+    /// Flushes `slot` to a host entry and stores it: the conversation stops being live and becomes
+    /// a [`PromptCache`] entry the host lookup can find. A flush that fails costs that entry only.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    fn spill_slot(&self, slot: ResidentSlot, serving_config: &ServingConfig, forced_draft_width: Option<u16>) {
         let config = serving_config.prompt_cache;
-        match self.flushed_entry(given_up, serving_config, forced_draft_width) {
+        match self.flushed_entry(slot, serving_config, forced_draft_width) {
             Ok(entry) => {
                 self.prompt_cache_store(entry, &config);
             }
             Err(error) => log_entry_dropped(&error),
         }
+    }
+
+    /// Takes the live conversation out of `slots` for a request on `ids` and, when it can serve the
+    /// request in place, starts the decode loop from its device rows: `Some((entry, keep, seed))`
+    /// where `seed` is `keep` positions with hollow host caches, and the device KV waits in
+    /// [`BackendRuntime::resident_start`]. `None` means the host path runs: nothing was resident, or
+    /// the slot was flushed to a host entry first (another key, a tail past the device step, buffers
+    /// too small, a rewind the ring rows no longer cover).
+    ///
+    /// Composes [`ResidentSlots::take`] and [`DeviceKv::adopt_resident`]; the report is
+    /// [`CachePath::Resident`], readable from [`LoadedModel::last_prompt_cache_report`].
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    fn resume_resident(
+        &self,
+        slots: &mut ResidentSlots,
+        ids: &[u32],
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+        forced_draft_width: Option<u16>,
+    ) -> Result<Option<(CacheEntry, usize, PrefixState)>, InteropError> {
+        let key = self.cache_key(serving_config, runtime, forced_draft_width);
+        let (mut slot, keep) = match slots.take(ids, &key, serving_config.prompt_cache.min_similarity_milli) {
+            SlotTake::Empty => return Ok(None),
+            SlotTake::Evicted(slot) => {
+                self.spill_slot(slot, serving_config, forced_draft_width);
+                return Ok(None);
+            }
+            SlotTake::Reused { slot, keep } => (slot, keep),
+        };
+        if let Err(refusal) = self.admit_resident(&slot.device, ids.len(), keep, max_tokens, serving_config, forced_draft_width) {
+            return Ok(self.refuse_resident(slot, refusal, serving_config, forced_draft_width));
+        }
+        let held_ids = slot.ids.clone();
+        let mut checkpoints = core::mem::take(&mut slot.checkpoints);
+        let (device, outcome) = DeviceKv::adopt_resident(slot, keep)?;
+        match outcome {
+            RewindOutcome::InPlace => {}
+            RewindOutcome::Checkpoint(checkpoint) => {
+                checkpoints.push(checkpoint);
+                let slot = device.into_slot(held_ids, key, checkpoints);
+                return Ok(self.refuse_resident(slot, ResidentRefusal::RewindNotInPlace, serving_config, forced_draft_width));
+            }
+            RewindOutcome::Refused(_) => {
+                let slot = device.into_slot(held_ids, key, checkpoints);
+                return Ok(self.refuse_resident(slot, ResidentRefusal::RewindNotInPlace, serving_config, forced_draft_width));
+            }
+        }
+        let (names, widths) = self.declared_layer_cache_names_and_widths()?;
+        let hollow = self.fresh_layer_caches(
+            &KvFormats::of(serving_config),
+            &names,
+            &widths,
+            0,
+            ring_slack_rows(serving_config, forced_draft_width),
+        )?;
+        runtime.resident_start = Some((device, keep));
+        // a checkpoint past `keep` holds ring rows of a sequence this request no longer shares
+        checkpoints.retain(|checkpoint| checkpoint.position() <= keep);
+        let mut entry = CacheEntry::empty(key);
+        entry.checkpoints = checkpoints;
+        let report = CacheReport::resident(keep, ids.len());
+        self.prompt_cache.lock().last_report = Some(report);
+        debug!(
+            cache_lcp = report.lcp as u64,
+            cache_reused_tokens = report.reused_tokens as u64,
+            cache_prefilled_tokens = report.prefilled_tokens as u64,
+            cache_path = report.path.as_str(),
+            "prompt cache lookup"
+        );
+        let seed = PrefixState { ids: ids[..keep].to_vec(), layer_caches: hollow, cached_len: keep };
+        Ok(Some((entry, keep, seed)))
+    }
+
+    /// Whether `device`, sized by the request that left it, can run this request's tail in place.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    fn admit_resident(
+        &self,
+        device: &DeviceKv,
+        prompt_tokens: usize,
+        keep: usize,
+        max_tokens: usize,
+        serving_config: &ServingConfig,
+        forced_draft_width: Option<u16>,
+    ) -> Result<(), ResidentRefusal> {
+        let tail = prompt_tokens - keep;
+        let draft_limit = speculative_draft_limit(&serving_config.speculative, forced_draft_width).unwrap_or(0);
+        let step_rows = device_step_rows(serving_config, draft_limit, tail);
+        if tail > step_rows {
+            return Err(ResidentRefusal::TailPastDeviceStep { tail, step_rows });
+        }
+        if !self.device_kv_early_adopt(serving_config) {
+            return Err(ResidentRefusal::NarrowCacheDecodesOneRow);
+        }
+        // the loop adopts for `positions_needed + draft rows`; the slot must hold what that would allocate
+        let capacity_positions = prompt_tokens + max_tokens + draft_limit + 1;
+        if !device.fits_request(capacity_positions, serving_config.kv_bucket_tokens, step_rows) {
+            return Err(ResidentRefusal::BuffersTooSmall);
+        }
+        Ok(())
+    }
+
+    /// Spills a slot the request cannot use in place and reports why; the host path takes over.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    fn refuse_resident(
+        &self,
+        slot: ResidentSlot,
+        refusal: ResidentRefusal,
+        serving_config: &ServingConfig,
+        forced_draft_width: Option<u16>,
+    ) -> Option<(CacheEntry, usize, PrefixState)> {
+        debug!(resident_refusal = refusal.as_str(), "prompt cache resident slot flushed to a host entry");
+        self.spill_slot(slot, serving_config, forced_draft_width);
+        None
     }
 
     /// The host entry a slot's device rows make once flushed into fresh layer caches.

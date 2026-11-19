@@ -179,7 +179,7 @@ mod tests {
     use proxima_tensor::AlignedBuffer;
 
     use crate::generate::chunked_prefill_tests::dense_checkpoint;
-    use crate::generate::{LoadedModel, PrefixRetention, PrefixState, ResidentSlot};
+    use crate::generate::{CachePath, LoadedModel, PrefixRetention, PrefixState, ResidentSlot};
     use crate::serving::{GPU_LAYERS_ALL, PromptCacheConfig, ServingConfig};
 
     const PROMPT: [u32; 9] = [4, 17, 33, 8, 91, 12, 5, 60, 7];
@@ -509,6 +509,165 @@ mod tests {
         assert_eq!(after_first, (1, 0), "after one lease: (slots resident, host entries)");
         assert_eq!(after_second, (1, 1), "after two leases the first was given up and stored");
         assert_eq!(&stored_ids[0][..PROMPT.len()], &PROMPT, "the stored entry is the first request's rows");
+    }
+
+    const GENERATED_TOKENS: usize = 6;
+
+    fn greedy(config: ServingConfig<'static>) -> ServingConfig<'static> {
+        ServingConfig { temperature: 0.0, ..config }
+    }
+
+    /// `length` token ids spread over the fixture's vocabulary, none of them 0.
+    fn prompt_of(length: usize) -> Vec<u32> {
+        (0..length).map(|index| (index as u32 * 37 + 11) % 250 + 1).collect()
+    }
+
+    /// `prompt` with every id from `from` on replaced by a different one.
+    fn changed_from(prompt: &[u32], from: usize) -> Vec<u32> {
+        prompt.iter().enumerate().map(|(index, id)| if index < from { *id } else { id % 250 + 1 }).collect()
+    }
+
+    fn with_dense_model<Output>(work: impl FnOnce(&LoadedModel<'_>) -> Output) -> Output {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads");
+        work(&model)
+    }
+
+    /// one request as ragd serves it: a new thread, the retention a discarding caller gets for this config.
+    fn serve(model: &LoadedModel<'_>, config: &ServingConfig<'_>, prompt: &[u32]) -> Vec<u32> {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| {
+                    let mut runtime = model.backend_runtime(config);
+                    runtime.prefix_retention = PrefixRetention::for_discarding_caller(config);
+                    let (generated, _, _, _) = model
+                        .run_decode_loop_through_cache(
+                            prompt.to_vec(),
+                            &[],
+                            GENERATED_TOKENS,
+                            config,
+                            &mut runtime,
+                            None,
+                            &mut crate::generate::LogitsSink::Discard,
+                            &mut crate::generate::NodeValuesSink::Discard,
+                            &mut |_| ControlFlow::Continue(()),
+                            None,
+                            false,
+                            None,
+                            None,
+                        )
+                        .expect("the request decodes on the dense fixture");
+                    generated
+                })
+                .join()
+                .expect("the request thread did not panic")
+        })
+    }
+
+    /// (host entries, resident slots) the cache holds right now.
+    fn held(model: &LoadedModel<'_>) -> (usize, usize) {
+        (
+            model.prompt_cache.lock().held().len(),
+            proxima_primitives::driver::block_on(model.serving.lock()).slots.len(),
+        )
+    }
+
+    struct ResidentCase {
+        name: &'static str,
+        first_prompt: usize,
+        changed_from: usize,
+        second_ubatch: u32,
+        expected_path: CachePath,
+        expected_keep: usize,
+    }
+
+    /// request 2 against the live conversation of request 1 for each case; returns the cases run.
+    /// Request 2 answers what a cache-off run of the same prompt answers.
+    fn run_resident_cases(cases: &[ResidentCase]) -> usize {
+        let mut ran = 0;
+        for case in cases {
+            with_dense_model(|model| {
+                let config = greedy(cached_gpu_config(0));
+                let second_config = ServingConfig { ubatch_size: case.second_ubatch, ..config };
+                let off = greedy(ServingConfig { ubatch_size: case.second_ubatch, ..gpu_config() });
+                let first = prompt_of(case.first_prompt);
+                let second = if case.changed_from == first.len() { first.clone() } else { changed_from(&first, case.changed_from) };
+
+                serve(model, &config, &first);
+                assert_eq!(held(model), (0, 1), "{}: request 1 leaves one slot and no host entry", case.name);
+                let answered = serve(model, &second_config, &second);
+                let report = model.last_prompt_cache_report().expect("request 2 reported its path");
+                let reference = serve(model, &off, &second);
+
+                assert_eq!(report.path, case.expected_path, "{}: {report:?}", case.name);
+                assert_eq!(report.lcp, case.expected_keep, "{}: tokens kept", case.name);
+                assert_eq!(report.prefilled_tokens, second.len() - case.expected_keep, "{}: tokens prefilled", case.name);
+                assert_eq!(held(model), (0, 1), "{}: (host entries, slots) after request 2", case.name);
+                assert_eq!(answered, reference, "{}: ids against the cache-off run", case.name);
+            });
+            ran += 1;
+        }
+        ran
+    }
+
+    /// llama's identical repeat: 1 token re-evaluated, the slot rewound in place.
+    #[test]
+    fn a_repeated_prompt_resumes_the_live_slot_and_prefills_one_token() {
+        let cases = [ResidentCase {
+            name: "repeat",
+            first_prompt: 40,
+            changed_from: 40,
+            second_ubatch: 512,
+            expected_path: CachePath::Resident,
+            expected_keep: 39,
+        }];
+
+        assert_eq!(run_resident_cases(&cases), 1, "cases run");
+    }
+
+    /// llama's B1: the last 12 of 40 ids changed, so 28 are kept and 12 prefilled, in place.
+    #[test]
+    fn a_prompt_with_its_last_12_ids_changed_resumes_the_live_slot_and_prefills_12() {
+        let cases = [ResidentCase {
+            name: "last_12_ids_changed",
+            first_prompt: 40,
+            changed_from: 28,
+            second_ubatch: 512,
+            expected_path: CachePath::Resident,
+            expected_keep: 28,
+        }];
+
+        assert_eq!(run_resident_cases(&cases), 1, "cases run");
+    }
+
+    /// 60 tokens to prefill against a device step of 49 (the draft rows): the slot is flushed to a
+    /// host entry and the host path serves the request, as it did before slots.
+    #[test]
+    fn a_tail_wider_than_the_device_step_flushes_the_slot_and_takes_the_host_path() {
+        let cases = [ResidentCase {
+            name: "tail_wider_than_the_device_step",
+            first_prompt: 80,
+            changed_from: 20,
+            second_ubatch: 4,
+            expected_path: CachePath::Rewind,
+            expected_keep: 20,
+        }];
+
+        assert_eq!(run_resident_cases(&cases), 1, "cases run");
+    }
+
+    /// the retention a caller that drops the state gets: a lease with the prompt cache on, a discard with it off.
+    #[test]
+    fn a_discarding_caller_leases_with_the_cache_on_and_discards_with_it_off() {
+        let on = cached_gpu_config(0);
+        let off = gpu_config();
+
+        assert_eq!(PrefixRetention::for_discarding_caller(&on), PrefixRetention::Lease);
+        assert_eq!(PrefixRetention::for_discarding_caller(&off), PrefixRetention::Discard);
     }
 
     struct Counts {

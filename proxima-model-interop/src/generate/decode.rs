@@ -3222,6 +3222,20 @@ impl<'file> LoadedModel<'file> {
         serving_config.rope_scaling.unwrap_or(self.rope_scaling)
     }
 
+    /// Whether a prefill step can run against a device KV cache of this call's formats: a pair the
+    /// row-tiled kernel reads is adopted before the first evaluation like f32; only a pair it rejects
+    /// waits for the decode step. One reader for the decode loop's adoption and for a caller deciding
+    /// whether a resident slot can serve a prefill tail.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn device_kv_early_adopt(&self, serving_config: &ServingConfig) -> bool {
+        !kv_cache_format::is_narrow(&serving_config.kv_cache_key_quant)
+            || kv_cache_format::row_tiled_reads(
+                &serving_config.kv_cache_key_quant,
+                &serving_config.kv_cache_value_quant,
+                u64::from(self.architecture.head_dim),
+            )
+    }
+
     /// The context length this call serves at, before the memory fit clamps
     /// it: [`resolve_context_length`] over the checkpoint's trained context
     /// and [`Self::effective_rope_scaling`]. Every reader of
@@ -4101,9 +4115,18 @@ impl<'file> LoadedModel<'file> {
                 ring_slack,
             )?,
         };
-        for state in &mut layer_caches {
-            if let LayerCacheState::Attention(cache) = state {
-                cache.reserve_ring_rows(positions_needed)?;
+        // a resident start's host rows are never read, so a ring is not grown to hold rows the device has
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let resident_start = runtime.resident_start.take();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let hollow_host_caches = resident_start.is_some();
+        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+        let hollow_host_caches = false;
+        if !hollow_host_caches {
+            for state in &mut layer_caches {
+                if let LayerCacheState::Attention(cache) = state {
+                    cache.reserve_ring_rows(positions_needed)?;
+                }
             }
         }
         // One [`KvPadScratch`] per layer, reused across every step of this
@@ -4571,17 +4594,9 @@ not read this cache format; only the single-row decode kernel reads it from the 
         // the widest evaluation of the call, a prefill batch included: the first evaluation
         // places its K and V rows straight into the device buffers instead of reading them back
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let device_kv_step_rows = device_kv_decode_rows.max(match serving_config.ubatch_size {
-            0 => ids.len(),
-            ubatch => ids.len().min(ubatch as usize),
-        });
+        let device_kv_step_rows = device_step_rows(serving_config, draft_limit, ids.len());
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let device_kv_early_adopt = !kv_cache_format::is_narrow(&serving_config.kv_cache_key_quant)
-            || kv_cache_format::row_tiled_reads(
-                &serving_config.kv_cache_key_quant,
-                &serving_config.kv_cache_value_quant,
-                u64::from(self.architecture.head_dim),
-            );
+        let device_kv_early_adopt = self.device_kv_early_adopt(serving_config);
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut device_kv: Option<DeviceKv> = None;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -4594,6 +4609,21 @@ not read this cache format; only the single-row decode kernel reads it from the 
         let mut device_resident_flags: Vec<bool> = Vec::new();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut device_kv_attempted = false;
+        // the caller's resident slot stands in for the adoption below: its rows are the first `keep`
+        // positions, which the hollow host caches of the seed never held, so no host read of those
+        // layers can see rows the device has not (every reader already skips a device-resident layer)
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        if let Some((device, keep)) = resident_start {
+            if !device_kv_eligible || keep != seed_cached_len {
+                return Err(InteropError::UnsupportedServingConfig(alloc::format!(
+                    "a resident start keeping {keep} positions reached a loop seeded with {seed_cached_len} \
+                     (device kv eligible: {device_kv_eligible})"
+                )));
+            }
+            device_resident_flags = device.resident_layers();
+            device_kv = Some(device);
+            device_kv_attempted = true;
+        }
         // keyed by the source program hash: the program with its K and V roots cast to the layout the cache stores
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut direct_kv_rows: BTreeMap<u64, Option<(u64, DirectKvRows)>> = BTreeMap::new();

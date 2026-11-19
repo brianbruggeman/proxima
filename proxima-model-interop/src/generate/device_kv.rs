@@ -112,7 +112,6 @@ struct DeviceKvLayer {
 /// What [`DeviceKv::adopt_resident`] found when it rewound a resident slot to `keep` positions.
 /// Composes [`MissReason`] (why nothing is reusable) and [`RingCheckpoint`] positions (llama's
 /// `do_reset`-or-restore branch, `tools/server/server-context.cpp:3276-3365`).
-#[cfg(test)]
 #[must_use]
 pub(super) enum RewindOutcome {
     /// Every layer still holds the rows a rewind to `keep` keeps; nothing moved or was written.
@@ -125,7 +124,6 @@ pub(super) enum RewindOutcome {
     Refused(MissReason),
 }
 
-#[cfg(test)]
 impl core::fmt::Debug for RewindOutcome {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
@@ -178,6 +176,16 @@ fn acquire(
 /// `omega-runtime.toml` `[kv_window]` for the memory-versus-copy trade. A zero granule adds no slack.
 fn window_capacity_rows(retain: usize, step: usize, granule: usize) -> usize {
     (retain + step).next_multiple_of(granule.max(1))
+}
+
+/// The widest evaluation of a call that prefills `new_ids` tokens: a decode step with its draft
+/// (`draft_limit + 1` rows) or a prefill batch, whichever is wider. The one reader for the decode
+/// loop's adoption and for the caller deciding whether a resident slot can serve the call.
+pub(super) fn device_step_rows(serving_config: &ServingConfig, draft_limit: usize, new_ids: usize) -> usize {
+    (draft_limit + 1).max(match serving_config.ubatch_size {
+        0 => new_ids,
+        ubatch => new_ids.min(ubatch as usize),
+    })
 }
 
 impl DeviceKvLayer {
@@ -391,7 +399,6 @@ impl DeviceKvLayer {
     /// Whether the buffer still holds every row a rewind to `keep` positions would keep: a full
     /// layer always does, a sliding layer only when its `retain` rows behind `keep` lie at or after
     /// the buffer's first row (the same rows [`Self::first_kept`] hands [`DeviceKv::flush`]).
-    #[cfg(test)]
     fn holds_rewind_to(&self, keep: usize) -> bool {
         self.first_kept(keep) >= self.base_position
     }
@@ -696,7 +703,6 @@ impl DeviceKv {
     ///
     /// # Errors
     /// `keep` past the positions the slot holds, which is a caller bug.
-    #[cfg(test)]
     pub(super) fn adopt_resident(
         slot: ResidentSlot,
         keep: usize,
@@ -712,7 +718,6 @@ impl DeviceKv {
         Ok((device, outcome))
     }
 
-    #[cfg(test)]
     fn rewind_outcome(&self, keep: usize, held: usize, checkpoints: Vec<RingCheckpoint>) -> RewindOutcome {
         if keep == 0 {
             return RewindOutcome::Refused(MissReason::NoCommonPrefix);
@@ -755,6 +760,19 @@ impl DeviceKv {
 
     pub(super) fn max_step_rows(&self) -> usize {
         self.max_step_rows
+    }
+
+    /// Whether these buffers, sized by an earlier request, hold what a request reaching
+    /// `capacity_positions` (its `positions_needed` plus draft rows) with steps of up to `step_rows`
+    /// would have allocated: [`Self::adopt_pair`]'s own sizing, read as a lower bound. A buffer is
+    /// never grown after adoption, so a request that does not fit must not start from it.
+    pub(super) fn fits_request(&self, capacity_positions: usize, bucket_tokens: usize, step_rows: usize) -> bool {
+        let full_capacity_rows = kv_extent(capacity_positions, usize::MAX, bucket_tokens) + bucket_tokens;
+        step_rows <= self.max_step_rows
+            && self.layers.iter().flatten().all(|layer| match layer.window {
+                Some(_) => layer.capacity_rows >= (layer.retain + step_rows).min(full_capacity_rows),
+                None => layer.capacity_rows >= full_capacity_rows,
+            })
     }
 
     /// The packed codec the leaf placements read this cache as, or `None` for
@@ -896,12 +914,20 @@ impl DeviceKv {
         cached_len: usize,
         positions_needed: usize,
     ) -> Result<(), InteropError> {
+        #[cfg(feature = "instrument")]
+        let flush_started = read_ticks();
+        #[cfg(feature = "instrument")]
+        let mut rows_written = 0u64;
         for (slot, state) in self.layers.iter().zip(layer_caches.iter_mut()) {
             let (Some(layer), LayerCacheState::Attention(cache)) = (slot, state) else {
                 continue;
             };
             let first = layer.first_kept(cached_len);
             let live = cached_len - first;
+            #[cfg(feature = "instrument")]
+            {
+                rows_written += live as u64;
+            }
             let first_row = first - layer.base_position;
             let even_odd_row = layer.even_odd_row;
             let v_row = layer.v_row;
@@ -923,6 +949,13 @@ impl DeviceKv {
             cache.reserve_ring_rows(positions_needed)?;
             cache.append_at(first, &even, &odd, &value)?;
         }
+        #[cfg(feature = "instrument")]
+        debug!(
+            rows_written,
+            cached_len = cached_len as u64,
+            flush_ns = ticks_to_nanos(elapsed_ticks(flush_started)),
+            "kv_flush"
+        );
         #[cfg(feature = "instrument")]
         debug!(
             host_mirror_bytes = host_mirror_bytes(layer_caches) as u64,
