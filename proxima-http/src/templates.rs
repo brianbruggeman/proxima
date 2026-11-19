@@ -3,8 +3,11 @@
 //! crate — used by `crate::http1::client` and `crate::http1::upstream`
 //! for dynamic header injection, so it rides `http1`/`http1-stream-client`.
 
+use std::convert::Infallible;
 use std::env;
+use std::iter::Peekable;
 use std::process;
+use std::str::CharIndices;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
@@ -22,36 +25,70 @@ pub struct TemplateContext<'request> {
 
 #[must_use]
 pub fn expand(input: &str, context: &TemplateContext<'_>) -> String {
+    let Ok(output) = expand_with(input, |key| Ok::<_, Infallible>(resolve(key, context)));
+    output
+}
+
+/// Like [`expand`], but a `{{body.<path>}}` whose path is absent from
+/// `context.body` returns `Err(<trimmed placeholder key>)`.
+#[must_use = "the Err names the first body path that did not resolve"]
+pub fn expand_strict(input: &str, context: &TemplateContext<'_>) -> Result<String, String> {
+    expand_with(input, |key| resolve_strict(key, context))
+}
+
+fn expand_with<E>(
+    input: &str,
+    resolver: impl FnMut(&str) -> Result<String, E>,
+) -> Result<String, E> {
     if !input.contains("{{") {
-        return input.to_string();
+        return Ok(input.to_string());
     }
+    expand_placeholders(input, resolver)
+}
+
+fn expand_placeholders<E>(
+    input: &str,
+    mut resolver: impl FnMut(&str) -> Result<String, E>,
+) -> Result<String, E> {
     let mut output = String::with_capacity(input.len());
     let mut chars = input.char_indices().peekable();
     while let Some((index, character)) = chars.next() {
-        if character == '{' && chars.peek().map(|(_, next)| *next) == Some('{') {
-            chars.next();
-            let start = index + 2;
-            let mut end = start;
-            let mut found = false;
-            while let Some((position, next)) = chars.next() {
-                if next == '}' && chars.peek().map(|(_, peeked)| *peeked) == Some('}') {
-                    chars.next();
-                    end = position;
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                output.push_str(&input[index..]);
-                return output;
-            }
-            let key = input[start..end].trim();
-            output.push_str(&resolve(key, context));
+        if !opens_placeholder(character, &mut chars) {
+            output.push(character);
             continue;
         }
-        output.push(character);
+        let Some(end) = find_close(&mut chars) else {
+            output.push_str(&input[index..]);
+            break;
+        };
+        output.push_str(&resolver(input[index + 2..end].trim())?);
     }
-    output
+    Ok(output)
+}
+
+fn opens_placeholder(character: char, chars: &mut Peekable<CharIndices<'_>>) -> bool {
+    let opens = character == '{' && chars.peek().map(|(_, next)| *next) == Some('{');
+    if opens {
+        chars.next();
+    }
+    opens
+}
+
+fn find_close(chars: &mut Peekable<CharIndices<'_>>) -> Option<usize> {
+    while let Some((position, next)) = chars.next() {
+        if next == '}' && chars.peek().map(|(_, peeked)| *peeked) == Some('}') {
+            chars.next();
+            return Some(position);
+        }
+    }
+    None
+}
+
+fn resolve_strict(key: &str, context: &TemplateContext<'_>) -> Result<String, String> {
+    match key.strip_prefix("body.") {
+        Some(path) => lookup_body_path(context.body, path).ok_or_else(|| key.to_string()),
+        None => Ok(resolve(key, context)),
+    }
 }
 
 fn resolve(key: &str, context: &TemplateContext<'_>) -> String {
@@ -89,26 +126,19 @@ fn resolve_env(name: &str) -> String {
 }
 
 fn resolve_body_path(root: Option<&Value>, path: &str) -> String {
-    let Some(mut current) = root else {
-        return String::new();
-    };
+    lookup_body_path(root, path).unwrap_or_default()
+}
+
+fn lookup_body_path(root: Option<&Value>, path: &str) -> Option<String> {
+    let mut current = root?;
     for segment in path.split('.') {
-        match current {
-            Value::Object(map) => match map.get(segment) {
-                Some(next) => current = next,
-                None => return String::new(),
-            },
-            Value::Array(items) => match segment.parse::<usize>() {
-                Ok(index) => match items.get(index) {
-                    Some(next) => current = next,
-                    None => return String::new(),
-                },
-                Err(_) => return String::new(),
-            },
-            _ => return String::new(),
-        }
+        current = match current {
+            Value::Object(map) => map.get(segment)?,
+            Value::Array(items) => items.get(segment.parse::<usize>().ok()?)?,
+            _ => return None,
+        };
     }
-    value_to_display(current)
+    Some(value_to_display(current))
 }
 
 fn value_to_display(value: &Value) -> String {
@@ -228,5 +258,81 @@ mod tests {
             stamp.parse::<u64>().is_ok(),
             "timestamp should parse as u64: {stamp}"
         );
+    }
+
+    fn ticket_scope() -> Value {
+        serde_json::json!({"in":{"ticket":"PROXIMA-24"},"ticket":{"repo":"brianbruggeman/proxima","pr":42}})
+    }
+
+    fn strict_matches(result: &Result<String, String>, expected: &Result<String, String>) -> bool {
+        result == expected
+    }
+
+    #[test]
+    fn expand_strict_resolves_single_body_path() {
+        let scope = ticket_scope();
+        let context = TemplateContext {
+            body: Some(&scope),
+            ..Default::default()
+        };
+        let outcome = expand_strict("{{body.in.ticket}}", &context);
+        assert!(strict_matches(&outcome, &Ok("PROXIMA-24".to_string())));
+    }
+
+    #[test]
+    fn expand_strict_resolves_paths_inside_a_url() {
+        let scope = ticket_scope();
+        let context = TemplateContext {
+            body: Some(&scope),
+            ..Default::default()
+        };
+        let outcome = expand_strict(
+            "/repos/{{body.ticket.repo}}/pulls/{{body.ticket.pr}}",
+            &context,
+        );
+        let expected = Ok("/repos/brianbruggeman/proxima/pulls/42".to_string());
+        assert!(strict_matches(&outcome, &expected));
+    }
+
+    #[test]
+    fn expand_strict_names_the_missing_body_path() {
+        let scope = ticket_scope();
+        let context = TemplateContext {
+            body: Some(&scope),
+            ..Default::default()
+        };
+        let outcome = expand_strict("{{body.ticket.missing}}", &context);
+        assert!(strict_matches(
+            &outcome,
+            &Err("body.ticket.missing".to_string())
+        ));
+    }
+
+    #[test]
+    fn ctl_expand_matches_strict_on_present_paths() {
+        let scope = ticket_scope();
+        let context = TemplateContext {
+            body: Some(&scope),
+            ..Default::default()
+        };
+        let ticket = expand("{{body.in.ticket}}", &context);
+        let url = expand(
+            "/repos/{{body.ticket.repo}}/pulls/{{body.ticket.pr}}",
+            &context,
+        );
+        assert_eq!(ticket, "PROXIMA-24");
+        assert_eq!(url, "/repos/brianbruggeman/proxima/pulls/42");
+    }
+
+    #[test]
+    fn ctl_expand_lenient_empty_is_rejected() {
+        let scope = ticket_scope();
+        let context = TemplateContext {
+            body: Some(&scope),
+            ..Default::default()
+        };
+        let lenient = Ok(expand("{{body.ticket.missing}}", &context));
+        let expected = Err("body.ticket.missing".to_string());
+        assert!(!strict_matches(&lenient, &expected));
     }
 }
