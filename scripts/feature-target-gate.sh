@@ -62,12 +62,16 @@ esac
 # plus those features (empty = bare). --lib because tests and examples need std;
 # the tier claim is that the library itself builds without it, and a default-
 # features --all-targets build can never notice that break.
+# crate:@nodefault:feature-set is `cargo check --all-targets --no-default-features`
+# plus those features: it compiles TEST targets for a feature set that excludes the
+# crate's default features (omega defaults to metal; std,cuda never builds with it).
 matrix=(
     "proxima-tensor:std"
     "proxima-model-interop:std"
     "proxima-model-interop:std,metal,instrument"
     "proxima-model-interop:std,cuda"
     "proxima-omega:"
+    "proxima-omega:@nodefault:std,cuda"
     "proxima-numeric:std"
     "proxima-numeric:config"
     "proxima-gguf:"
@@ -167,6 +171,9 @@ while IFS=: read -r crate features tier_features; do
             label="$crate --lib --no-default-features"
             args=(-p "$crate" --lib --no-default-features)
         fi
+    elif [ "$features" = "@nodefault" ]; then
+        label="$crate --all-targets --no-default-features --features $tier_features"
+        args=(-p "$crate" --all-targets --no-default-features --features "$tier_features")
     elif [ -n "$features" ]; then
         label="$crate --features $features"
         args=(-p "$crate" --all-targets --features "$features")
