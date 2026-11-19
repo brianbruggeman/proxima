@@ -179,6 +179,7 @@ mod tests {
     use proxima_tensor::AlignedBuffer;
 
     use crate::generate::chunked_prefill_tests::dense_checkpoint;
+    use crate::generate::prompt_cache::CacheEntry;
     use crate::generate::residency_caches::KvFormats;
     use crate::generate::{
         CachePath, LoadedModel, PrefixRetention, PrefixState, ResidentAsk, ResidentRefusal, ResidentSlot, SlotTake,
@@ -543,11 +544,15 @@ mod tests {
 
     /// one request as ragd serves it: a new thread, the retention a discarding caller gets for this config.
     fn serve(model: &LoadedModel<'_>, config: &ServingConfig<'_>, prompt: &[u32]) -> Vec<u32> {
+        serve_under(model, config, prompt, PrefixRetention::for_discarding_caller(config))
+    }
+
+    fn serve_under(model: &LoadedModel<'_>, config: &ServingConfig<'_>, prompt: &[u32], retention: PrefixRetention) -> Vec<u32> {
         std::thread::scope(|scope| {
             scope
                 .spawn(|| {
                     let mut runtime = model.backend_runtime(config);
-                    runtime.prefix_retention = PrefixRetention::for_discarding_caller(config);
+                    runtime.prefix_retention = retention;
                     let (generated, _, _, _) = model
                         .run_decode_loop_through_cache(
                             prompt.to_vec(),
@@ -616,6 +621,113 @@ mod tests {
             ran += 1;
         }
         ran
+    }
+
+    /// a cache with `checkpoint_interval` 16, so a 40-id prompt plans stops at 16 and 32 wherever stops are planned.
+    fn stopping_config() -> ServingConfig<'static> {
+        let mut config = greedy(cached_gpu_config(0));
+        config.prompt_cache.checkpoint_interval = 16;
+        config
+    }
+
+    /// the lease miss prefills each token once, as cache-off does, and leaves one slot with the request's ids.
+    #[test]
+    fn a_miss_under_lease_prefills_the_prompt_once_and_leaves_one_slot_with_its_ids() {
+        let mut ran = 0;
+        with_dense_model(|model| {
+            let config = stopping_config();
+            let off = greedy(gpu_config());
+            let prompt = prompt_of(40);
+            assert_eq!(PrefixRetention::for_discarding_caller(&config), PrefixRetention::Lease);
+
+            let answered = serve(model, &config, &prompt);
+            let report = model.last_prompt_cache_report().expect("request 1 reported its path");
+
+            assert_eq!(report.path, CachePath::Miss, "{report:?}");
+            assert_eq!(report.prefilled_tokens, prompt.len(), "every token prefilled exactly once: {report:?}");
+            assert_eq!(held(model), (0, 1), "(host entries, slots) after the miss");
+            let key = {
+                let runtime = model.backend_runtime(&config);
+                model.cache_key(&config, &runtime, None)
+            };
+            let mut serving = proxima_primitives::driver::block_on(model.serving.lock());
+            let SlotTake::Reused { slot, .. } = serving.slots.take(&prompt, &key, config.prompt_cache.min_similarity_milli) else {
+                panic!("the miss left no slot sharing the prompt");
+            };
+            assert!(slot.ids.starts_with(&prompt) && slot.ids.len() >= prompt.len(), "the slot holds the request's ids: {:?}", slot.ids);
+            assert!(slot.checkpoints.is_empty(), "a lease plans no stops, so captures no checkpoints");
+            drop(serving);
+            assert_eq!(answered, serve(model, &off, &prompt), "ids against the cache-off run");
+            ran += 1;
+        });
+        assert_eq!(ran, 1, "cases run");
+    }
+
+    /// the repeat of a lease miss resumes the slot: one token prefilled.
+    #[test]
+    fn a_repeat_after_a_lease_miss_resumes_the_slot_and_prefills_one_token() {
+        let mut ran = 0;
+        with_dense_model(|model| {
+            let config = stopping_config();
+            let off = greedy(gpu_config());
+            let prompt = prompt_of(40);
+
+            serve(model, &config, &prompt);
+            let answered = serve(model, &config, &prompt);
+            let report = model.last_prompt_cache_report().expect("request 2 reported its path");
+
+            assert_eq!(report.path, CachePath::Resident, "{report:?}");
+            assert_eq!(report.prefilled_tokens, 1, "{report:?}");
+            assert_eq!(answered, serve(model, &off, &prompt), "ids against the cache-off run");
+            ran += 1;
+        });
+        assert_eq!(ran, 1, "cases run");
+    }
+
+    /// the stop loop under either caller retention runs its stretches on host state: the entry it returns holds the rows up
+    /// to the last stop, no slot is leased, and the caller's retention is back as it was. The dense fixture has no ring
+    /// layers, so `RingCheckpoint::capture` has nothing to snapshot on it and no checkpoint is counted here.
+    #[test]
+    fn the_stop_loop_returns_a_real_state_and_restores_the_callers_retention() {
+        let mut ran = 0;
+        for caller in [PrefixRetention::Lease, PrefixRetention::Keep] {
+            with_dense_model(|model| {
+                let config = stopping_config();
+                let prompt = prompt_of(40);
+                let stops = [16_usize, 32];
+                let mut runtime = model.backend_runtime(&config);
+                runtime.prefix_retention = caller;
+                let key = model.cache_key(&config, &runtime, None);
+                let (_, widths) = model.declared_layer_cache_names_and_widths().expect("the fixture declares its layers");
+                let mut serving = proxima_primitives::driver::block_on(model.serving.lock());
+                let _active = serving.activate();
+                runtime.resume_active();
+
+                let entry = model
+                    .prefill_through_stops(
+                        &prompt,
+                        CacheEntry::empty(key),
+                        &stops,
+                        &stops,
+                        &widths,
+                        &config.prompt_cache,
+                        &config,
+                        &mut runtime,
+                        None,
+                        &mut |_position| ControlFlow::Continue(()),
+                    )
+                    .expect("the stops prefill on the dense fixture");
+                runtime.park_active();
+
+                assert_eq!(entry.state.cached_len, 32, "{caller:?}: the entry holds the rows up to the last stop");
+                assert_eq!(&entry.state.ids[..32], &prompt[..32], "{caller:?}: the entry's ids");
+                assert!(!entry.state.layer_caches.is_empty(), "{caller:?}: the state came back hollow");
+                assert!(runtime.leased_slot.is_none(), "{caller:?}: a stop leased its rows to a slot");
+                assert_eq!(runtime.prefix_retention, caller, "{caller:?}: the caller's retention was restored");
+                ran += 1;
+            });
+        }
+        assert_eq!(ran, 2, "cases run");
     }
 
     /// llama's identical repeat: 1 token re-evaluated, the slot rewound in place.

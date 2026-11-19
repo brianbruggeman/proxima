@@ -1614,8 +1614,44 @@ impl<'file> LoadedModel<'file> {
     /// sampled end-of-sequence token is forwarded and cached, so the state is
     /// rewound the one row back to the stop. That rewind fits the ring's
     /// slack because [`planned_positions`] plans nothing without any.
+    ///
+    /// The stretches consume the host state they get back, so they run under
+    /// [`PrefixRetention::Keep`] whatever the caller's retention is (a lease
+    /// would move the rows to a slot and hand back a hollow state); the
+    /// caller's retention is restored before this returns, error or not.
     #[allow(clippy::too_many_arguments)] // the seeded decode's own knobs, minus the sinks it fixes
     pub(super) fn prefill_through_stops(
+        &self,
+        ids: &[u32],
+        entry: CacheEntry,
+        stops: &[usize],
+        checkpoints: &[usize],
+        widths: &[LayerPadRowWidths],
+        config: &PromptCacheConfig,
+        serving_config: &ServingConfig,
+        runtime: &mut BackendRuntime,
+        forced_draft_width: Option<u16>,
+        after_stop: &mut dyn FnMut(usize) -> ControlFlow<(), ()>,
+    ) -> Result<CacheEntry, InteropError> {
+        let caller_retention = core::mem::replace(&mut runtime.prefix_retention, PrefixRetention::Keep);
+        let outcome = self.prefill_stops_keeping_state(
+            ids,
+            entry,
+            stops,
+            checkpoints,
+            widths,
+            config,
+            serving_config,
+            runtime,
+            forced_draft_width,
+            after_stop,
+        );
+        runtime.prefix_retention = caller_retention;
+        outcome
+    }
+
+    #[allow(clippy::too_many_arguments)] // `prefill_through_stops`'s own, which it forwards to
+    fn prefill_stops_keeping_state(
         &self,
         ids: &[u32],
         mut entry: CacheEntry,
@@ -1801,13 +1837,17 @@ impl<'file> LoadedModel<'file> {
                 let (found, _) =
                     self.prompt_cache_lookup(&ids, &key, &widths, pending.waited(), serving_config);
                 let entry = found.unwrap_or_else(|| CacheEntry::empty(key));
-                let positions = planned_positions(
-                    &entry.checkpoint_positions(),
-                    entry.state.cached_len,
-                    ids.len(),
-                    turn_ends,
-                    &config,
-                );
+                // a lease keeps no host rows to snapshot, and a stop would prefill its stretch twice: the tail loop prefills it all once
+                let positions = match runtime.prefix_retention {
+                    PrefixRetention::Lease => Vec::new(),
+                    PrefixRetention::Keep | PrefixRetention::Discard => planned_positions(
+                        &entry.checkpoint_positions(),
+                        entry.state.cached_len,
+                        ids.len(),
+                        turn_ends,
+                        &config,
+                    ),
+                };
                 let mut entry = self
                     .prefill_through_runs(
                         &ids,
