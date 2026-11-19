@@ -38,6 +38,7 @@ use omega::metal::{DispatchType, MathMode, Plan};
 use proxima_numeric::{NumericFormat, NumericPolicy};
 use proxima_tensor::op::NodeId;
 
+use super::program_cache::ProgramCache;
 use crate::serving::{GdnPrefillBackend, ServingConfig};
 
 /// The wire tags ([`crate::bind::Codec::tag`]) of the codecs a plan reads its
@@ -97,11 +98,16 @@ pub(super) struct ResidentPlans {
     pub(super) wide: DecodePlans,
     pub(super) wide_order: Vec<DecodePlanKey>,
     pub(super) kv_buffers: Vec<PlacedBuffer>,
+    /// the greedy and direct kv rows programs, which a request would otherwise rebuild
+    pub(super) programs: ProgramCache,
 }
 
 impl ResidentPlans {
     fn is_empty(&self) -> bool {
-        self.decode.is_empty() && self.wide.is_empty() && self.kv_buffers.is_empty()
+        self.decode.is_empty()
+            && self.wide.is_empty()
+            && self.kv_buffers.is_empty()
+            && self.programs.is_empty()
     }
 }
 
@@ -295,6 +301,11 @@ impl ResidentStore {
     #[cfg(test)]
     pub(super) fn plan_count(&self) -> usize {
         self.plans.decode.len() + self.plans.wide.len()
+    }
+
+    #[cfg(test)]
+    pub(super) fn programs(&self) -> &ProgramCache {
+        &self.plans.programs
     }
 
     /// Exchanges this store with the calling thread's active slot.

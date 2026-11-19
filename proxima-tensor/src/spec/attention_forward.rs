@@ -3418,7 +3418,7 @@ pub(super) fn gqa_cached_forward_program_with_experts_and_layer_taps_with_rope_p
 /// kept as its own variant rather than folded into `DenseAttention` so that
 /// caller's cache-threading loop, and its `LayerCache`, are unaffected by
 /// this checkpoint's own partial-rotary gap.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LayerCacheRoots {
     Attention(CachedLayerRoots),
     DenseAttention(DenseAttentionRoots),

@@ -1827,8 +1827,16 @@ impl<'file> LoadedModel<'file> {
         let key = self.cache_key(serving_config, runtime, forced_draft_width);
         // the live conversation first: its device rows serve the request in place, else it is
         // flushed to a host entry the lookup below then finds
+        #[cfg(all(feature = "instrument", feature = "metal-output-placement", target_os = "macos"))]
+        let resident_take_started = read_ticks();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let resident = self.resume_resident(slots, &ids, max_tokens, serving_config, runtime, forced_draft_width)?;
+        #[cfg(all(feature = "instrument", feature = "metal-output-placement", target_os = "macos"))]
+        debug!(
+            resident = resident.is_some(),
+            ms = ticks_to_nanos(elapsed_ticks(resident_take_started)) as f64 / 1e6,
+            "resident_take_ms"
+        );
         #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
         let resident: Option<(CacheEntry, usize, PrefixState)> = None;
         let (mut entry, resumed_at, seed_state) = match resident {

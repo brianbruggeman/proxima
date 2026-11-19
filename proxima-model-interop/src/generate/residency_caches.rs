@@ -3185,6 +3185,10 @@ pub struct BackendRuntime {
     /// more; they come from and go back to [`resident_plans`] with the plans.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) kv_buffers: Vec<PlacedBuffer>,
+    /// The greedy and direct kv rows programs the last generation kept, which the next one
+    /// reuses instead of rebuilding; they come from and go back to [`resident_plans`] with the plans.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) programs: super::program_cache::ProgramCache,
     /// The device KV a loop run under [`PrefixRetention::Lease`] left in place, for its caller to take.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) leased_slot: Option<ResidentSlot>,
@@ -3280,6 +3284,7 @@ impl BackendRuntime {
         self.placed_plans = resident.wide;
         self.placed_order = resident.wide_order;
         self.kv_buffers = resident.kv_buffers;
+        self.programs = resident.programs;
     }
 
     /// Returns the plans to the active context's slot; called before the request
@@ -3301,6 +3306,7 @@ impl BackendRuntime {
                 wide,
                 wide_order,
                 kv_buffers: core::mem::take(&mut self.kv_buffers),
+                programs: core::mem::take(&mut self.programs),
             };
             resident_plans::put(identity, plans);
         }
@@ -3365,6 +3371,8 @@ impl BackendRuntime {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_buffers: Vec::new(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            programs: super::program_cache::ProgramCache::default(),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             leased_slot: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             resident_start: None,
@@ -3409,6 +3417,7 @@ impl BackendRuntime {
             runtime.placed_plans = resident.wide;
             runtime.placed_order = resident.wide_order;
             runtime.kv_buffers = resident.kv_buffers;
+            runtime.programs = resident.programs;
             runtime.resident_home = Some(identity);
         }
         runtime

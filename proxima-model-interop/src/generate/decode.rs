@@ -8,11 +8,11 @@ use std::thread;
 use proxima_core::kv_carry::{Appended, Extent, KvCarry, KvCarryError, KvCommand, KvEvent, RowPair};
 use proxima_core::{ServingFsmError, ServingState};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-use alloc::collections::btree_map::Entry;
-#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_numeric::{NumericFormat, PackedRows};
 
 use super::drafter::{DrafterSet, draft_limit_for_step};
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use super::program_cache::{GreedyKey, GreedyProgram};
 use super::*;
 use crate::host_rows;
 use crate::kv_cache_format;
@@ -3813,6 +3813,8 @@ impl<'file> LoadedModel<'file> {
         speculative_stats: Option<&mut SpeculativeDecodeStats>,
         forced_draft_width: Option<u16>,
     ) -> Result<(Vec<u32>, String, bool, PrefixState), InteropError> {
+        #[cfg(feature = "instrument")]
+        let tokenize_started = read_ticks();
         let ids = if seed.is_some() {
             proxima_tokenizer::encode_with_bos_eos(prompt, &self.vocab, false, false)?
         } else {
@@ -3823,6 +3825,13 @@ impl<'file> LoadedModel<'file> {
                 self.vocab.add_eos_token().unwrap_or(false),
             )?
         };
+        #[cfg(feature = "instrument")]
+        debug!(
+            chars = prompt.len() as u64,
+            tokens = ids.len() as u64,
+            ms = ticks_to_nanos(elapsed_ticks(tokenize_started)) as f64 / 1e6,
+            "tokenize_ms"
+        );
         if ids.is_empty() && seed.is_none() {
             return Err(InteropError::EmptyForwardTokens);
         }
@@ -4639,7 +4648,10 @@ not read this cache format; only the single-row decode kernel reads it from the 
         }
         // keyed by the source program hash: the program with its K and V roots cast to the layout the cache stores
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let mut direct_kv_rows: BTreeMap<u64, Option<(u64, DirectKvRows)>> = BTreeMap::new();
+        let mut direct_kv_rows = runtime.programs.take_direct_kv((
+            serving_config.kv_cache_key_quant,
+            serving_config.kv_cache_value_quant,
+        ));
         // plain greedy ends on the device: the pick is the last ops of the program and the
         // host reads one index (`greedy_device.rs`); everything that needs the row keeps the host path
         // a one-token call never repays it: the greedy program is its own plan, and a prefill restore
@@ -4655,11 +4667,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
             && sample_config.presence_penalty == 0.0
             && std::env::var_os("PROXIMA_LOGITS_DIAG").is_none();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let mut greedy_program: Option<(Vec<Op>, NodeId, NodeId, PlacedBuffer)> = None;
-        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let mut greedy_program_hash = 0u64;
-        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let mut greedy_from_prefill_cut = false;
+        let mut greedy_program: Option<GreedyProgram> = None;
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut greedy_declined = false;
 
@@ -5017,22 +5025,13 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         u64,
                         &[LayerCacheRoots],
                     ) = if device_kv_eligible {
-                        let direct = match direct_kv_rows.entry(active_program_hash) {
-                            Entry::Occupied(entry) => entry.into_mut(),
-                            Entry::Vacant(entry) => entry.insert(
-                                with_direct_kv_rows(
-                                    active_program,
-                                    active_layer_roots,
-                                    (
-                                        &serving_config.kv_cache_key_quant,
-                                        &serving_config.kv_cache_value_quant,
-                                    ),
-                                )?
-                                .map(|rows| (program_hash(&rows.program), rows)),
-                            ),
-                        };
+                        let direct = direct_kv_rows.rows_for(
+                            active_program,
+                            active_program_hash,
+                            active_layer_roots,
+                        )?;
                         match direct {
-                            Some((hash, rows)) => (&rows.program, *hash, &rows.layer_roots),
+                            Some((hash, rows)) => (&rows.program, hash, &rows.layer_roots),
                             None => (active_program, active_program_hash, active_layer_roots),
                         }
                     } else {
@@ -5487,26 +5486,26 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     let on_prefill_cut = prefill_cut_address == Some(program_address);
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     if greedy_on_device
-                        && (greedy_program.is_none() || greedy_from_prefill_cut != on_prefill_cut)
+                        && greedy_program
+                            .as_ref()
+                            .is_none_or(|held| held.key().is_prefill_cut() != on_prefill_cut)
                         && !greedy_declined
                         && !speculative_step
                         && step_batch_needs_logits(split_prefill, is_last_step_batch)
                     {
-                        match with_greedy_argmax(
-                            active_program,
+                        if let Some(replaced) = greedy_program.take() {
+                            runtime.programs.keep_greedy(replaced);
+                        }
+                        let key = GreedyKey::new(
+                            active_program_hash,
                             active_logits_root,
                             vocab_size as u32,
                             &symbols,
                             suppressed_ids,
-                        ) {
-                            Some((program, token, finite)) => {
-                                let logits_buffer = allocate_placed_buffer(
-                                    vocab_size * core::mem::size_of::<f32>(),
-                                )?;
-                                greedy_program_hash = program_hash(&program);
-                                greedy_from_prefill_cut = on_prefill_cut;
-                                greedy_program = Some((program, token, finite, logits_buffer));
-                            }
+                            on_prefill_cut,
+                        );
+                        match runtime.programs.greedy_for(key, active_program)? {
+                            Some(program) => greedy_program = Some(program),
                             None => {
                                 greedy_declined = true;
                                 debug!(
@@ -5524,21 +5523,21 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         "named_blocks_phase"
                     );
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    let greedy_step = greedy_program.is_some()
-                        && greedy_from_prefill_cut == on_prefill_cut
+                    let greedy_step = greedy_program
+                        .as_ref()
+                        .is_some_and(|held| held.key().is_prefill_cut() == on_prefill_cut)
                         && !speculative_step
                         && step_batch_needs_logits(split_prefill, is_last_step_batch)
                         && token_override.is_none_or(|forced| forced.get(step).is_none());
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                     let active_program: &[Op] = match &greedy_program {
-                        Some((program, ..)) if greedy_step => program,
+                        Some(held) if greedy_step => &held.program,
                         _ => active_program,
                     };
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    let active_program_hash = if greedy_step {
-                        greedy_program_hash
-                    } else {
-                        active_program_hash
+                    let active_program_hash = match &greedy_program {
+                        Some(held) if greedy_step => held.hash,
+                        _ => active_program_hash,
                     };
                     if active_program.iter().any(|operation| {
                         operation.name().is_some_and(|name| {
@@ -5636,9 +5635,9 @@ not read this cache format; only the single-row decode kernel reads it from the 
                     }
                     roots.extend_from_slice(node_values_sink.nodes());
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    if let (true, Some((_, token, finite, _))) = (greedy_step, &greedy_program) {
-                        roots.push(*token);
-                        roots.push(*finite);
+                    if let (true, Some(held)) = (greedy_step, &greedy_program) {
+                        roots.push(held.token);
+                        roots.push(held.finite);
                     }
                     if monolithic_prefill_requested {
                         roots.extend(self.router_roots.iter().copied());
@@ -5948,8 +5947,8 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         ssm_output_placements.extend(placements.outputs);
                     }
                     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-                    if let (true, Some((_, _, _, logits_buffer))) = (greedy_step, &greedy_program) {
-                        ssm_output_placements.push((active_logits_root, logits_buffer, 0));
+                    if let (true, Some(held)) = (greedy_step, &greedy_program) {
+                        ssm_output_placements.push((active_logits_root, &held.logits, 0));
                     }
                     // The `StepGuard` (`step_guard`, below) closes this
                     // step on every exit -- normal return and an early `?`
@@ -7397,8 +7396,8 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
                         let greedy_device_token: Option<u32> = match (greedy_step, &greedy_program)
                         {
-                            (true, Some((_, token, finite, _))) => {
-                                device_token(&evaluated, *token, *finite, vocab_size)
+                            (true, Some(held)) => {
+                                device_token(&evaluated, held.token, held.finite, vocab_size)
                             }
                             _ => None,
                         };
@@ -7410,9 +7409,9 @@ not read this cache format; only the single-row decode kernel reads it from the 
                         let logits: &[f32] =
                             match (greedy_step, &greedy_program, greedy_device_token) {
                                 (true, _, Some(_)) => &[],
-                                (true, Some((_, _, _, logits_buffer)), None) => {
+                                (true, Some(held), None) => {
                                     placed_logits = omega::try_read_placed_buffer_f32(
-                                        logits_buffer,
+                                        &held.logits,
                                         0,
                                         vocab_size,
                                     )?;
@@ -7956,6 +7955,13 @@ not read this cache format; only the single-row decode kernel reads it from the 
                 seal_horizon_rows,
                 summarizer,
             )?;
+        }
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        {
+            if let Some(held) = greedy_program.take() {
+                runtime.programs.keep_greedy(held);
+            }
+            runtime.programs.keep_direct_kv(direct_kv_rows);
         }
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if let Some(device) = device_kv.take() {

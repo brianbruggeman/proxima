@@ -288,6 +288,8 @@ mod follow_up_conditioning_tests;
 mod forward_from_ids_tests;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 mod greedy_device;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+mod program_cache;
 mod kv_ring;
 #[cfg(test)]
 mod kv_seal_tests;
@@ -355,12 +357,12 @@ mod warm_buffers;
 pub use cuda_serving_pipe::CudaServingPipe;
 use decode::*;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-use device_kv::{DeviceKv, DirectKvRows, KvLeafNodes, RewindOutcome, device_step_rows, kv_leaf_nodes, with_direct_kv_rows};
+use device_kv::{DeviceKv, KvLeafNodes, RewindOutcome, device_step_rows, kv_leaf_nodes};
 use draft_model::ModelProposer;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use resident_slot::{ResidentAsk, ResidentRefusal, ResidentSlot, ResidentSlots, SlotTake};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-use greedy_device::{device_token, with_greedy_argmax};
+use greedy_device::device_token;
 #[cfg(test)]
 use kv_ring::test_attention_cache;
 use kv_ring::{

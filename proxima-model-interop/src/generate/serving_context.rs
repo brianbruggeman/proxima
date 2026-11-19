@@ -141,6 +141,13 @@ impl ServingContext {
         self.plans.plan_count()
     }
 
+    /// `(greedy builds, direct kv rows builds)` the resident programs cost so far.
+    #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn program_builds(&self) -> (usize, usize) {
+        let programs = self.plans.programs();
+        (programs.greedy_builds(), programs.direct_kv_builds())
+    }
+
     #[cfg(test)]
     pub(super) fn wide_plan_count(&self) -> usize {
         self.plans.wide_count()
@@ -176,9 +183,13 @@ mod tests {
 
     use omega::metal::{BLOCK_COPIED_BYTES, MAPPING_OFFSET_UPLOADS, page_size};
     use proxima_gguf::parse_complete;
+    use proxima_numeric::NumericFormat;
     use proxima_tensor::AlignedBuffer;
+    use proxima_tensor::op::NodeId;
 
     use crate::generate::chunked_prefill_tests::dense_checkpoint;
+    use crate::generate::device_kv::with_direct_kv_rows;
+    use crate::generate::program_cache::{GreedyKey, ProgramCache};
     use crate::generate::prompt_cache::CacheEntry;
     use crate::generate::residency_caches::KvFormats;
     use crate::generate::{
@@ -866,5 +877,170 @@ mod tests {
             hits: runtime.plan_hits,
             misses: runtime.plan_misses,
         }
+    }
+
+    /// one greedy request on `model` through the cache path, a fresh runtime as the request path builds.
+    fn greedy_ids(model: &LoadedModel<'_>, config: &ServingConfig<'_>, prompt: &[u32]) -> Vec<u32> {
+        let mut runtime = model.backend_runtime(config);
+        let (ids, ..) = model
+            .run_decode_loop_through_cache(
+                prompt.to_vec(),
+                &[],
+                4,
+                config,
+                &mut runtime,
+                None,
+                &mut crate::generate::LogitsSink::Discard,
+                &mut crate::generate::NodeValuesSink::Discard,
+                &mut |_| ControlFlow::Continue(()),
+                None,
+                false,
+                None,
+                None,
+            )
+            .expect("the request decodes on the dense fixture");
+        ids
+    }
+
+    /// `(greedy builds, direct kv rows builds)` the model's resident programs have cost.
+    fn program_builds(model: &LoadedModel<'_>) -> (usize, usize) {
+        proxima_primitives::driver::block_on(model.serving.lock()).program_builds()
+    }
+
+    fn fresh_ids(config: &ServingConfig<'_>, prompt: &[u32]) -> Vec<u32> {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads");
+        greedy_ids(&model, config, prompt)
+    }
+
+    /// the second request of a model reuses the greedy program the first built, and decodes what a fresh model does.
+    #[test]
+    fn a_second_greedy_request_reuses_the_cached_program_and_decodes_the_same_ids() {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads");
+        let config = gpu_config();
+        let mut cases_run = 0;
+
+        let first = greedy_ids(&model, &config, &PROMPT);
+        let after_first = program_builds(&model);
+        let second = greedy_ids(&model, &config, &PROMPT);
+        let after_second = program_builds(&model);
+        let fresh = fresh_ids(&config, &PROMPT);
+
+        assert_eq!(after_first.0, 1, "the first request builds the greedy program once: {after_first:?}");
+        cases_run += 1;
+        assert_eq!(after_second, after_first, "the second request rebuilt a program: {after_first:?} then {after_second:?}");
+        cases_run += 1;
+        assert_eq!(second, fresh, "the reusing request decoded other ids than a fresh model");
+        cases_run += 1;
+        assert_eq!(first, fresh, "the building request decoded other ids than a fresh model");
+        cases_run += 1;
+        assert_eq!(cases_run, 4);
+    }
+
+    /// a request whose key differs (the symbols of its last prefill batch) rebuilds and decodes as a fresh model.
+    #[test]
+    fn a_request_with_another_greedy_key_rebuilds_and_decodes_the_same_ids_as_a_fresh_model() {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads");
+        let config = gpu_config();
+        let mut cases_run = 0;
+
+        greedy_ids(&model, &config, &PROMPT);
+        let base = program_builds(&model).0;
+
+        let shorter = greedy_ids(&model, &config, &PROMPT[..5]);
+        let after_shorter = program_builds(&model).0;
+        assert_eq!(after_shorter, base + 1, "another prompt length (the symbols) must rebuild");
+        cases_run += 1;
+        assert_eq!(shorter, fresh_ids(&config, &PROMPT[..5]), "the rebuilt program decoded other ids");
+        cases_run += 1;
+
+        let again = greedy_ids(&model, &config, &PROMPT);
+        assert_eq!(program_builds(&model).0, after_shorter, "the first key is still held beside the second, so it must not rebuild");
+        cases_run += 1;
+        assert_eq!(again, fresh_ids(&config, &PROMPT), "the program reused after a rebuild decoded other ids");
+        cases_run += 1;
+        assert_eq!(cases_run, 4);
+    }
+
+    /// the fixture vocabulary has no end-of-generation id, so `ignore_eos` cannot reach the loop here: every other input the
+    /// constructors read is checked at the key, where one differing field must make the keys unequal.
+    #[test]
+    fn a_greedy_key_differs_in_each_input_the_constructor_reads() {
+        let base = GreedyKey::new(7, NodeId(3), 64, &[1, 8], &[], false);
+        let others = [
+            ("program hash", GreedyKey::new(8, NodeId(3), 64, &[1, 8], &[], false)),
+            ("logits root", GreedyKey::new(7, NodeId(4), 64, &[1, 8], &[], false)),
+            ("vocab", GreedyKey::new(7, NodeId(3), 128, &[1, 8], &[], false)),
+            ("symbols", GreedyKey::new(7, NodeId(3), 64, &[9, 8], &[], false)),
+            ("suppressed ids", GreedyKey::new(7, NodeId(3), 64, &[1, 8], &[2], false)),
+            ("prefill cut", GreedyKey::new(7, NodeId(3), 64, &[1, 8], &[], true)),
+        ];
+        let mut cases_run = 0;
+        for (input, other) in others {
+            assert_ne!(base, other, "a key differing in the {input} compared equal");
+            cases_run += 1;
+        }
+        assert_eq!(base, GreedyKey::new(7, NodeId(3), 64, &[1, 8], &[], false));
+        assert_eq!(cases_run, 6);
+    }
+
+    /// the direct kv rows program is reused for the same source, and rebuilt for other roots or other cache formats.
+    #[test]
+    fn the_direct_kv_rows_program_is_reused_for_one_key_and_rebuilt_for_another() {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads");
+        let half = (NumericFormat::Float16, NumericFormat::Float16);
+        let wide = (NumericFormat::Float32, NumericFormat::Float32);
+        let mut other_roots = model.layer_roots.clone();
+        other_roots.pop();
+        let mut cache = ProgramCache::default();
+        let mut cases_run = 0;
+        let mut request = |formats, roots: &[crate::generate::LayerCacheRoots]| {
+            let mut rows = cache.take_direct_kv(formats);
+            let hash = rows
+                .rows_for(&model.program, model.program_hash, roots)
+                .expect("the rows build")
+                .map(|(hash, _)| hash);
+            cache.keep_direct_kv(rows);
+            (hash, cache.direct_kv_builds())
+        };
+
+        let (built_hash, builds) = request(half, &model.layer_roots);
+        assert!(built_hash.is_some() && builds == 1, "a binary16 cache takes direct rows, built once: {built_hash:?} {builds}");
+        cases_run += 1;
+        let (reused_hash, builds) = request(half, &model.layer_roots);
+        assert!(reused_hash == built_hash && builds == 1, "the same key must reuse: {reused_hash:?} {builds}");
+        cases_run += 1;
+        let (_, builds) = request(half, &other_roots);
+        assert_eq!(builds, 2, "other source roots must rebuild");
+        cases_run += 1;
+        let (none_hash, builds) = request(wide, &model.layer_roots);
+        assert!(none_hash.is_none() && builds == 3, "other formats must rebuild, and f32 takes no direct rows: {none_hash:?} {builds}");
+        cases_run += 1;
+        let (back_hash, builds) = request(half, &model.layer_roots);
+        let expected = with_direct_kv_rows(&model.program, &model.layer_roots, (&half.0, &half.1))
+            .expect("the rows build")
+            .map(|rows| crate::generate::program_hash(&rows.program));
+        assert!(back_hash == expected && builds == 4, "the rebuilt rows are those a fresh build gives: {back_hash:?} {expected:?} {builds}");
+        cases_run += 1;
+        assert_eq!(cases_run, 5);
     }
 }
