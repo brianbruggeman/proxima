@@ -26,6 +26,20 @@ impl ResidentSlot {
     }
 }
 
+/// What a request asks of a slot [`ResidentSlots::take`] found reusable, read by
+/// [`LoadedModel::admit_resident`]; the sizes it checks the device buffers against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ResidentAsk {
+    /// Positions the slot keeps, e.g. 28 of a 40-token prompt.
+    pub(super) keep: usize,
+    /// Tokens in the whole prompt, e.g. 40.
+    pub(super) prompt_tokens: usize,
+    /// Tokens the request may decode.
+    pub(super) max_tokens: usize,
+    /// Draft rows a speculative step adds, 0 without a drafter.
+    pub(super) draft_limit: usize,
+}
+
 /// Why a slot [`ResidentSlots::take`] found reusable still starts no request in place: the request
 /// then flushes it to a host entry ([`LoadedModel::prompt_cache_store`]) and takes the host path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +54,9 @@ pub(super) enum ResidentRefusal {
     BuffersTooSmall,
     /// A sliding layer lost rows the rewind needs ([`RewindOutcome`] was not `InPlace`).
     RewindNotInPlace,
+    /// This request's config does not keep its KV on the device (`LoadedModel::device_kv_eligible`),
+    /// so the loop would not adopt the slot even though its [`CacheKey`] matched.
+    DeviceKvIneligible,
 }
 
 impl ResidentRefusal {
@@ -50,6 +67,7 @@ impl ResidentRefusal {
             Self::NarrowCacheDecodesOneRow => "narrow_cache_decodes_one_row",
             Self::BuffersTooSmall => "buffers_too_small",
             Self::RewindNotInPlace => "rewind_not_in_place",
+            Self::DeviceKvIneligible => "device_kv_ineligible",
         }
     }
 }

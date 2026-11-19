@@ -179,7 +179,11 @@ mod tests {
     use proxima_tensor::AlignedBuffer;
 
     use crate::generate::chunked_prefill_tests::dense_checkpoint;
-    use crate::generate::{CachePath, LoadedModel, PrefixRetention, PrefixState, ResidentSlot};
+    use crate::generate::residency_caches::KvFormats;
+    use crate::generate::{
+        CachePath, LoadedModel, PrefixRetention, PrefixState, ResidentAsk, ResidentRefusal, ResidentSlot, SlotTake,
+        ring_slack_rows,
+    };
     use crate::serving::{GPU_LAYERS_ALL, PromptCacheConfig, ServingConfig};
 
     const PROMPT: [u32; 9] = [4, 17, 33, 8, 91, 12, 5, 60, 7];
@@ -658,6 +662,58 @@ mod tests {
         }];
 
         assert_eq!(run_resident_cases(&cases), 1, "cases run");
+    }
+
+    /// No `ServingConfig` field flips `device_kv_eligible` on the dense fixture while keeping the
+    /// `CacheKey`: the runtime's engine (`gpu_layers`) and `ring_write_offset` are key fields, and
+    /// `moe_pre_gather` only counts with experts, which the fixture has none of. So the refusal is
+    /// asked directly of the slot request 1 left, with a CPU runtime standing in for the ineligible loop.
+    #[test]
+    fn a_resident_start_the_loop_cannot_adopt_is_refused_and_flushed_to_the_host_path() {
+        with_dense_model(|model| {
+            let config = greedy(cached_gpu_config(0));
+            let off = greedy(gpu_config());
+            let prompt = prompt_of(40);
+            serve(model, &config, &prompt);
+            assert_eq!(held(model), (0, 1), "request 1 leaves one slot and no host entry");
+
+            let refusal = std::thread::scope(|scope| {
+                scope
+                    .spawn(|| {
+                        let gpu_runtime = model.backend_runtime(&config);
+                        let cpu_runtime = model.backend_runtime(&ServingConfig { gpu_layers: 0, ..config });
+                        let key = model.cache_key(&config, &gpu_runtime, None);
+                        let mut serving = proxima_primitives::driver::block_on(model.serving.lock());
+                        let SlotTake::Reused { slot, keep } =
+                            serving.slots.take(&prompt, &key, config.prompt_cache.min_similarity_milli)
+                        else {
+                            panic!("request 1's slot shares the prompt with request 2");
+                        };
+                        let _active = serving.activate();
+                        let (names, widths) = model.declared_layer_cache_names_and_widths().expect("the fixture declares its layers");
+                        let seed = model
+                            .fresh_layer_caches(&KvFormats::of(&config), &names, &widths, 0, ring_slack_rows(&config, None))
+                            .expect("hollow caches build");
+                        let admit = |runtime| {
+                            let ask = ResidentAsk { keep, prompt_tokens: prompt.len(), max_tokens: GENERATED_TOKENS, draft_limit: 0 };
+                            model.admit_resident(&slot.device, ask, &config, runtime, &seed)
+                        };
+                        assert_eq!(admit(&gpu_runtime), Ok(()), "control: the same slot is admitted by an eligible loop");
+                        let refusal = admit(&cpu_runtime).expect_err("an ineligible loop refuses the slot");
+                        assert!(model.refuse_resident(slot, refusal, &config, None).is_none(), "the host path runs");
+                        refusal
+                    })
+                    .join()
+                    .expect("the refusal thread did not panic")
+            });
+
+            assert_eq!(refusal, ResidentRefusal::DeviceKvIneligible);
+            assert_eq!(held(model), (1, 0), "the slot was flushed and stored as one host entry");
+            let answered = serve(model, &config, &prompt);
+            let report = model.last_prompt_cache_report().expect("request 2 reported its path");
+            assert_ne!(report.path, CachePath::Resident, "{report:?}");
+            assert_eq!(answered, serve(model, &off, &prompt), "ids against the cache-off run");
+        });
     }
 
     /// the retention a caller that drops the state gets: a lease with the prompt cache on, a discard with it off.

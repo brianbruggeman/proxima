@@ -1923,7 +1923,19 @@ impl<'file> LoadedModel<'file> {
             }
             SlotTake::Reused { slot, keep } => (slot, keep),
         };
-        if let Err(refusal) = self.admit_resident(&slot.device, ids.len(), keep, max_tokens, serving_config, forced_draft_width) {
+        // the loop's seed: the same caches eligibility is judged on there
+        let (names, widths) = self.declared_layer_cache_names_and_widths()?;
+        let hollow = self.fresh_layer_caches(
+            &KvFormats::of(serving_config),
+            &names,
+            &widths,
+            0,
+            ring_slack_rows(serving_config, forced_draft_width),
+        )?;
+        let draft_limit = speculative_draft_limit(&serving_config.speculative, forced_draft_width).unwrap_or(0);
+        let ask = ResidentAsk { keep, prompt_tokens: ids.len(), max_tokens, draft_limit };
+        let admitted = self.admit_resident(&slot.device, ask, serving_config, runtime, &hollow);
+        if let Err(refusal) = admitted {
             return Ok(self.refuse_resident(slot, refusal, serving_config, forced_draft_width));
         }
         let held_ids = slot.ids.clone();
@@ -1941,14 +1953,6 @@ impl<'file> LoadedModel<'file> {
                 return Ok(self.refuse_resident(slot, ResidentRefusal::RewindNotInPlace, serving_config, forced_draft_width));
             }
         }
-        let (names, widths) = self.declared_layer_cache_names_and_widths()?;
-        let hollow = self.fresh_layer_caches(
-            &KvFormats::of(serving_config),
-            &names,
-            &widths,
-            0,
-            ring_slack_rows(serving_config, forced_draft_width),
-        )?;
         runtime.resident_start = Some((device, keep));
         // a checkpoint past `keep` holds ring rows of a sequence this request no longer shares
         checkpoints.retain(|checkpoint| checkpoint.position() <= keep);
@@ -1969,17 +1973,20 @@ impl<'file> LoadedModel<'file> {
 
     /// Whether `device`, sized by the request that left it, can run this request's tail in place.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    fn admit_resident(
+    pub(super) fn admit_resident(
         &self,
         device: &DeviceKv,
-        prompt_tokens: usize,
-        keep: usize,
-        max_tokens: usize,
+        ask: ResidentAsk,
         serving_config: &ServingConfig,
-        forced_draft_width: Option<u16>,
+        runtime: &BackendRuntime,
+        seed_caches: &[LayerCacheState],
     ) -> Result<(), ResidentRefusal> {
+        // the Metal evaluator always runs the expert protocol, so `has_experts` is the loop's value
+        if !self.device_kv_eligible(runtime, serving_config, self.has_experts, seed_caches) {
+            return Err(ResidentRefusal::DeviceKvIneligible);
+        }
+        let ResidentAsk { keep, prompt_tokens, max_tokens, draft_limit } = ask;
         let tail = prompt_tokens - keep;
-        let draft_limit = speculative_draft_limit(&serving_config.speculative, forced_draft_width).unwrap_or(0);
         let step_rows = device_step_rows(serving_config, draft_limit, tail);
         if tail > step_rows {
             return Err(ResidentRefusal::TailPastDeviceStep { tail, step_rows });
@@ -1997,7 +2004,7 @@ impl<'file> LoadedModel<'file> {
 
     /// Spills a slot the request cannot use in place and reports why; the host path takes over.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    fn refuse_resident(
+    pub(super) fn refuse_resident(
         &self,
         slot: ResidentSlot,
         refusal: ResidentRefusal,

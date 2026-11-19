@@ -3236,6 +3236,29 @@ impl<'file> LoadedModel<'file> {
             )
     }
 
+    /// Whether this call keeps its attention KV on the device from the first evaluation: a Metal
+    /// runtime, no ring offset, no expert pre-gather, and layers that are all attention (or share
+    /// one's cache) with at least one attention layer. One reader for the decode loop's adoption and
+    /// for [`Self::admit_resident`], so a resident slot is never installed into a loop that would
+    /// not adopt it. `expert_protocol` is `has_experts` on a backend that runs the expert protocol;
+    /// the Metal evaluator always does, so a caller before the loop passes `self.has_experts`.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn device_kv_eligible(
+        &self,
+        runtime: &BackendRuntime,
+        serving_config: &ServingConfig,
+        expert_protocol: bool,
+        layer_caches: &[LayerCacheState],
+    ) -> bool {
+        runtime.is_metal()
+            && self.ring_write_offset == 0
+            && !moe_pre_gather_enabled(serving_config.moe_pre_gather, expert_protocol)
+            && layer_caches.iter().any(|state| matches!(state, LayerCacheState::Attention(_)))
+            && layer_caches
+                .iter()
+                .all(|state| matches!(state, LayerCacheState::Attention(_) | LayerCacheState::SharedFromLayer))
+    }
+
     /// The context length this call serves at, before the memory fit clamps
     /// it: [`resolve_context_length`] over the checkpoint's trained context
     /// and [`Self::effective_rope_scaling`]. Every reader of
@@ -4566,18 +4589,7 @@ not read this cache format; only the single-row decode kernel reads it from the 
         // the sliding-pattern family's attention layers keep their KV on the device from the call's first
         // evaluation (`DeviceKv`'s own doc); every other architecture keeps the host path
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let device_kv_eligible = runtime.is_metal()
-            && self.ring_write_offset == 0
-            && !moe_pre_gather_enabled(serving_config.moe_pre_gather, expert_protocol)
-            && layer_caches
-                .iter()
-                .any(|state| matches!(state, LayerCacheState::Attention(_)))
-            && layer_caches.iter().all(|state| {
-                matches!(
-                    state,
-                    LayerCacheState::Attention(_) | LayerCacheState::SharedFromLayer
-                )
-            });
+        let device_kv_eligible = self.device_kv_eligible(runtime, serving_config, expert_protocol, &layer_caches);
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         debug!(
             key_format = ?serving_config.kv_cache_key_quant,
@@ -4614,10 +4626,11 @@ not read this cache format; only the single-row decode kernel reads it from the 
         // layers can see rows the device has not (every reader already skips a device-resident layer)
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         if let Some((device, keep)) = resident_start {
-            if !device_kv_eligible || keep != seed_cached_len {
+            // `admit_resident` already checked eligibility through `device_kv_eligible`, so only the
+            // seed's length can still disagree with the slot
+            if keep != seed_cached_len {
                 return Err(InteropError::UnsupportedServingConfig(alloc::format!(
-                    "a resident start keeping {keep} positions reached a loop seeded with {seed_cached_len} \
-                     (device kv eligible: {device_kv_eligible})"
+                    "a resident start keeping {keep} positions reached a loop seeded with {seed_cached_len}"
                 )));
             }
             device_resident_flags = device.resident_layers();
