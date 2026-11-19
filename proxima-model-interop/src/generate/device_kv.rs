@@ -88,6 +88,9 @@ struct DeviceKvLayer {
     /// here, because the program cannot place its f32 outputs in a narrower buffer, and [`DeviceKvLayer::commit`] narrows them into the cache once the step's command
     /// buffers have completed.
     staging: [Option<PlacedBuffer>; 3],
+    /// Bytes asked of the allocator for the `Some` planes of `staging`, summed.
+    #[cfg(test)]
+    staging_bytes: usize,
     key_format: NumericFormat,
     /// The key planes' codec, resolved once at allocation.
     key_codec: FormatCodec,
@@ -114,15 +117,26 @@ struct DeviceKvLayer {
 /// `do_reset`-or-restore branch, `tools/server/server-context.cpp:3276-3365`).
 #[cfg(test)]
 #[must_use]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum RewindOutcome {
     /// Every layer still holds the rows a rewind to `keep` keeps; nothing moved or was written.
     InPlace,
-    /// A sliding layer lost rows the rewind needs: restore the checkpoint at this position
-    /// (the newest one at or before `keep`) and prefill from there.
-    Checkpoint { nearest: usize },
+    /// A sliding layer lost rows the rewind needs: the newest checkpoint at or before `keep`,
+    /// moved out of the slot so the caller restores it ([`PrefixState::restore_checkpoint`], the
+    /// path `PromptCache::restore_nearest` takes) and prefills from [`RingCheckpoint::position`].
+    Checkpoint(RingCheckpoint),
     /// No checkpoint covers the rewind either, or the slot cannot serve `keep` at all.
     Refused(MissReason),
+}
+
+#[cfg(test)]
+impl core::fmt::Debug for RewindOutcome {
+    fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::InPlace => formatter.write_str("InPlace"),
+            Self::Checkpoint(checkpoint) => formatter.debug_tuple("Checkpoint").field(&checkpoint.position()).finish(),
+            Self::Refused(reason) => formatter.debug_tuple("Refused").field(reason).finish(),
+        }
+    }
 }
 
 pub(super) struct DeviceKv {
@@ -226,6 +240,12 @@ impl DeviceKvLayer {
             staged(narrow_codecs.0.is_some(), key_format, even_odd_bytes)?,
             staged(narrow_codecs.1.is_some(), value_format, value_bytes)?,
         ];
+        #[cfg(test)]
+        let staging_bytes = staging
+            .iter()
+            .zip([even_odd_bytes, even_odd_bytes, value_bytes])
+            .filter_map(|(buffer, bytes)| buffer.as_ref().map(|_| bytes))
+            .sum();
         Ok(Self {
             #[cfg(feature = "instrument")]
             layer,
@@ -233,6 +253,8 @@ impl DeviceKvLayer {
             k_odd,
             v,
             staging,
+            #[cfg(test)]
+            staging_bytes,
             key_format: *key_format,
             key_codec,
             value_format: *value_format,
@@ -673,10 +695,9 @@ impl DeviceKv {
     /// is: no seed (host to device) and no `zero_tail`, because a rewound layer only exposes rows
     /// it already wrote, finite values the program masks. A full layer is always [`RewindOutcome::InPlace`];
     /// a sliding layer is only when [`DeviceKvLayer::holds_rewind_to`], else the newest
-    /// [`RingCheckpoint`] at or before `keep` is named, else the rewind is refused with
-    /// [`MissReason::RingSlackExceeded`]. On anything but `InPlace` the returned cache is
-    /// unchanged and the checkpoints are dropped with the slot: the caller restores from the
-    /// named position. Staleness by [`CacheKey`] is the slot table's call, not this one's.
+    /// [`RingCheckpoint`] at or before `keep` is handed back in [`RewindOutcome::Checkpoint`], else
+    /// the rewind is refused with [`MissReason::RingSlackExceeded`]. On anything but `InPlace` the
+    /// returned cache is unchanged; the caller restores the checkpoint it was given. Staleness by [`CacheKey`] is the slot table's call, not this one's.
     ///
     /// # Errors
     /// `keep` past the positions the slot holds, which is a caller bug.
@@ -692,20 +713,20 @@ impl DeviceKv {
                 "resident slot holds {held} positions, a rewind asked to keep {keep}"
             )));
         }
-        let outcome = device.rewind_outcome(keep, held, &checkpoints);
+        let outcome = device.rewind_outcome(keep, held, checkpoints);
         Ok((device, outcome))
     }
 
     #[cfg(test)]
-    fn rewind_outcome(&self, keep: usize, held: usize, checkpoints: &[RingCheckpoint]) -> RewindOutcome {
+    fn rewind_outcome(&self, keep: usize, held: usize, checkpoints: Vec<RingCheckpoint>) -> RewindOutcome {
         if keep == 0 {
             return RewindOutcome::Refused(MissReason::NoCommonPrefix);
         }
         let Some(short) = self.layers.iter().flatten().find(|layer| !layer.holds_rewind_to(keep)) else {
             return RewindOutcome::InPlace;
         };
-        match checkpoints.iter().rev().map(RingCheckpoint::position).find(|position| *position <= keep) {
-            Some(nearest) => RewindOutcome::Checkpoint { nearest },
+        match checkpoints.into_iter().rev().find(|checkpoint| checkpoint.position() <= keep) {
+            Some(checkpoint) => RewindOutcome::Checkpoint(checkpoint),
             None => RewindOutcome::Refused(MissReason::RingSlackExceeded {
                 rewind_rows: held - keep,
                 slack_rows: short.retain - short.window.unwrap_or(short.retain),
@@ -725,6 +746,18 @@ impl DeviceKv {
     #[cfg(test)]
     pub(super) fn into_slot(self, ids: Vec<u32>, key: CacheKey, checkpoints: Vec<RingCheckpoint>) -> ResidentSlot {
         ResidentSlot { ids, key, device: self, checkpoints }
+    }
+
+    /// Bytes of device KV this cache holds: the three planes of every resident layer, each sized as
+    /// [`DeviceKvLayer::allocate`] asked the allocator for it (`capacity_rows` times the row bytes).
+    /// Plus each layer's f32 staging buffers, as recorded in `staging_bytes` at allocation.
+    #[cfg(test)]
+    pub(super) fn resident_bytes(&self) -> usize {
+        self.layers
+            .iter()
+            .flatten()
+            .map(|layer| layer.capacity_rows * (2 * layer.even_odd_row_bytes + layer.v_row_bytes) + layer.staging_bytes)
+            .sum()
     }
 
     pub(super) fn max_step_rows(&self) -> usize {
@@ -964,7 +997,7 @@ pub(super) fn kv_leaf_nodes(
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
-mod tests {
+pub(in crate::generate) mod tests {
     use proxima_numeric::{FloatLayout, NumericPolicy};
 
     use super::*;
@@ -2148,7 +2181,7 @@ mod tests {
 
     /// A sliding layer and a full layer seeded at 20 positions, then decoded to 45 with a 64-row
     /// compaction granule: the sliding buffer never compacts, so its first row stays at position 10.
-    fn grown_slot(ids_len: usize) -> ResidentSlot {
+    pub(in crate::generate) fn grown_slot(ids_len: usize) -> ResidentSlot {
         let mut caches = alloc::vec![
             LayerCacheState::Attention(host_cache(Some(SLIDING_WINDOW), SEEDED_LEN)),
             LayerCacheState::Attention(host_cache(None, SEEDED_LEN)),
@@ -2254,7 +2287,7 @@ mod tests {
             let keep = len - back;
             let slot = decoded_slot(|_, next| next == len).0;
             let (device, outcome) = DeviceKv::adopt_resident(slot, keep).expect("keep lies inside the slot");
-            assert_eq!(outcome, RewindOutcome::InPlace, "a rewind of {back} rows is inside the {furthest} the buffer holds");
+            assert!(matches!(outcome, RewindOutcome::InPlace), "a rewind of {back} rows is inside the {furthest} the buffer holds: {outcome:?}");
             let compared = kept_rows_match_what_was_written(&device, keep);
             assert_eq!(compared, UNSEEDED_RETAIN + keep, "retain rows of the sliding layer plus every row of the full layer, compared for a rewind of {back}");
             compared_total += compared;
@@ -2267,7 +2300,6 @@ mod tests {
             matches!(outcome, RewindOutcome::Refused(MissReason::RingSlackExceeded { .. })),
             "one row past the slack needs a row the buffer no longer holds, and no checkpoint covers it: {outcome:?}"
         );
-        assert_ne!(outcome, RewindOutcome::InPlace);
     }
 
     #[test]
@@ -2279,7 +2311,7 @@ mod tests {
         for keep in 1..=len {
             let slot = decoded_slot(|_, next| next == len).0;
             let (_, outcome) = DeviceKv::adopt_resident(slot, keep).expect("keep lies inside the slot");
-            assert_eq!(outcome, RewindOutcome::InPlace, "keep {keep} of {len}: row 0 is held, so every rewind is in place");
+            assert!(matches!(outcome, RewindOutcome::InPlace), "keep {keep} of {len}: row 0 is held, so every rewind is in place: {outcome:?}");
             counted += 1;
         }
         assert_eq!(counted, len, "every keep from 1 to len was asked");
@@ -2304,7 +2336,7 @@ mod tests {
         assert_eq!(slot.key, CacheKey::of(&ServingConfig::default(), false, RopeScaling::None, 0, 0), "into_slot keeps the identity the rows were built under");
         assert_eq!(slot.ids.len(), GROWN_LEN, "and the positions they cover");
         let (device, outcome) = DeviceKv::adopt_resident(slot, keep).expect("keep lies inside the slot");
-        assert_eq!(outcome, RewindOutcome::InPlace, "both layers still hold every row a rewind to 40 keeps");
+        assert!(matches!(outcome, RewindOutcome::InPlace), "both layers still hold every row a rewind to 40 keeps: {outcome:?}");
 
         let references = [host_cache(Some(SLIDING_WINDOW), keep), host_cache(None, keep)];
         let (mut compared, mut uninitialised, mut zero_rows, mut stale_rows) = (0, 0, 0, 0);
@@ -2347,23 +2379,36 @@ mod tests {
     #[test]
     fn a_keep_past_the_sliding_retained_rows_is_never_in_place() {
         let (device, outcome) = DeviceKv::adopt_resident(grown_slot(GROWN_LEN), 14).expect("keep lies inside the slot");
-        assert_eq!(
-            outcome,
-            RewindOutcome::Refused(MissReason::RingSlackExceeded { rewind_rows: GROWN_LEN - 14, slack_rows: 2 }),
-            "the sliding layer starts at position 10 but keep 14 needs positions from 4, and no checkpoint is held"
+        assert!(
+            matches!(
+                outcome,
+                RewindOutcome::Refused(MissReason::RingSlackExceeded { rewind_rows, slack_rows: 2 }) if rewind_rows == GROWN_LEN - 14
+            ),
+            "the sliding layer starts at position 10 but keep 14 needs positions from 4, and no checkpoint is held: {outcome:?}"
         );
         assert_eq!(device.layers.len(), ATTENTION_LAYERS + 1, "the cache comes back whole");
 
         let mut slot = grown_slot(GROWN_LEN);
         slot.checkpoints = alloc::vec![checkpoint_at(6), checkpoint_at(12), checkpoint_at(30)];
         let (_, outcome) = DeviceKv::adopt_resident(slot, 14).expect("keep lies inside the slot");
-        assert_eq!(outcome, RewindOutcome::Checkpoint { nearest: 12 }, "the newest checkpoint at or before keep");
+        let RewindOutcome::Checkpoint(checkpoint) = outcome else {
+            panic!("a checkpoint at 12 covers keep 14, got {outcome:?}");
+        };
+        assert_eq!(checkpoint.position(), 12, "the newest checkpoint at or before keep, not 6 and not 30");
+
+        let mut slot = grown_slot(GROWN_LEN);
+        slot.checkpoints = alloc::vec![checkpoint_at(20), checkpoint_at(30)];
+        let (_, outcome) = DeviceKv::adopt_resident(slot, 14).expect("keep lies inside the slot");
+        assert!(
+            matches!(outcome, RewindOutcome::Refused(MissReason::RingSlackExceeded { .. })),
+            "both checkpoints lie past keep 14, so none qualifies: {outcome:?}"
+        );
     }
 
     #[test]
     fn adopt_resident_refuses_a_zero_keep_and_errors_on_a_keep_past_the_slot() {
         let (_, outcome) = DeviceKv::adopt_resident(grown_slot(GROWN_LEN), 0).expect("zero lies inside the slot");
-        assert_eq!(outcome, RewindOutcome::Refused(MissReason::NoCommonPrefix));
+        assert!(matches!(outcome, RewindOutcome::Refused(MissReason::NoCommonPrefix)), "{outcome:?}");
         assert!(DeviceKv::adopt_resident(grown_slot(GROWN_LEN), GROWN_LEN + 1).is_err(), "46 positions are not held");
     }
 }
