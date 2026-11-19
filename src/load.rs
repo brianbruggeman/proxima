@@ -1,3 +1,5 @@
+#[cfg(feature = "tokio")]
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -24,8 +26,18 @@ use crate::middlewares::validate::ValidateFactory;
 use crate::middlewares::write_back::{WriteBack, WriteBackTarget};
 use crate::pipe::{PipeHandle, into_handle};
 use crate::pipe_factory::PipeFactoryRegistry;
+#[cfg(feature = "tokio")]
+use crate::pipelines::dag::topological_order;
+#[cfg(feature = "tokio")]
+use crate::pipelines::executor::{PipelineExecutor, PipelineRunReport};
+#[cfg(feature = "tokio")]
+use crate::pipelines::spec::{PipelineSpec, StageBody, StageSpec};
+#[cfg(feature = "tokio")]
+use crate::recording::event::PipelineOutcome;
 #[cfg(feature = "recording")]
 use crate::recording::factory::RecordingSourceRegistry;
+#[cfg(feature = "tokio")]
+use crate::recording::{AccumulatingSink, DynRecordingSink, LazyFanOut, deferred_runtime};
 #[cfg(feature = "recording")]
 use crate::recording::{BinSourceFactory, JsonlSourceFactory};
 use crate::request::{Request, Response};
@@ -266,7 +278,10 @@ impl LoadContext {
         spec.get("type")
             .and_then(Value::as_str)
             .and_then(|type_field| self.registry.get(type_field).ok())
-            .map_or_else(|| spec.clone(), |factory| self.anchor_spec(spec, factory.as_ref()))
+            .map_or_else(
+                || spec.clone(),
+                |factory| self.anchor_spec(spec, factory.as_ref()),
+            )
     }
 
     fn anchor_paths(&self, spec: &Value, fields: &[&str]) -> Value {
@@ -662,6 +677,8 @@ fn build_pipe<'context>(
                 // skip the post-process step below to avoid double-wrapping.
                 let handle = build_composed(value, context).await?;
                 return Ok((handle, None));
+            } else if value.get("pipeline").is_some() {
+                (build_pipeline(value, context).await?, None)
             } else if let Some(type_field) = value.get("type").and_then(Value::as_str) {
                 let factory = context.registry.get(type_field)?;
                 let anchored = context.anchor_spec(value, factory.as_ref());
@@ -813,6 +830,168 @@ async fn build_composed(spec: &Value, context: &LoadContext) -> Result<PipeHandl
     // now (TARGET 3), so `outer_label`'s only remaining job is the
     // `DispatchPipe` label above.
     Ok(handle)
+}
+
+#[cfg(not(feature = "tokio"))]
+async fn build_pipeline(spec: &Value, _context: &LoadContext) -> Result<PipeHandle, ProximaError> {
+    let name = spec
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("pipeline");
+    Err(ProximaError::Config(format!(
+        "`pipeline` requires the `tokio` feature (pipe `{name}`)"
+    )))
+}
+
+/// Builds a `pipeline` spec: `pipes` go through [`build_pipe`] like
+/// `upstreams` do in [`build_composed`], `stages` parse as a
+/// [`PipelineSpec`] and are validated here so a bad pipeline never serves.
+/// The handle runs the pipeline per request; see `PipelinePipe`.
+#[cfg(feature = "tokio")]
+async fn build_pipeline(spec: &Value, context: &LoadContext) -> Result<PipeHandle, ProximaError> {
+    let pipeline = spec.get("pipeline").unwrap_or(&Value::Null);
+    let pipes = build_pipeline_pipes(pipeline, context).await?;
+    let pipeline_spec = parse_pipeline_spec(spec, pipeline)?;
+    let output = pipeline.get("output").and_then(Value::as_str);
+    check_pipeline(&pipeline_spec, &pipes, output)?;
+    Ok(into_handle(PipelinePipe {
+        executor: pipeline_executor().with_pipes(pipes),
+        spec: pipeline_spec,
+        output: output.unwrap_or_default().to_string(),
+    }))
+}
+
+#[cfg(feature = "tokio")]
+fn parse_pipeline_spec(spec: &Value, pipeline: &Value) -> Result<PipelineSpec, ProximaError> {
+    let stages = pipeline.get("stages").cloned().unwrap_or(Value::Null);
+    let stages: Vec<StageSpec> = serde_json::from_value(stages)
+        .map_err(|err| ProximaError::Config(format!("pipeline `stages`: {err}")))?;
+    let name = spec.get("name").and_then(Value::as_str).map(str::to_string);
+    Ok(PipelineSpec { name, stages })
+}
+
+#[cfg(feature = "tokio")]
+fn pipeline_executor() -> PipelineExecutor {
+    let sink: DynRecordingSink = Arc::new(AccumulatingSink::with_defaults(Arc::new(
+        LazyFanOut::new(Vec::new(), deferred_runtime()),
+    )));
+    PipelineExecutor::new(sink)
+}
+
+#[cfg(feature = "tokio")]
+async fn build_pipeline_pipes(
+    pipeline: &Value,
+    context: &LoadContext,
+) -> Result<BTreeMap<String, PipeHandle>, ProximaError> {
+    let pipe_specs = pipeline
+        .get("pipes")
+        .and_then(Value::as_object)
+        .ok_or_else(|| ProximaError::Config("`pipeline.pipes` must be a map".into()))?;
+    let mut pipes = BTreeMap::new();
+    for (name, entry) in pipe_specs {
+        let (handle, _) = build_pipe(&ResolvedSpec::Value(entry.clone()), context).await?;
+        pipes.insert(name.clone(), handle);
+    }
+    Ok(pipes)
+}
+
+#[cfg(feature = "tokio")]
+fn check_pipeline(
+    spec: &PipelineSpec,
+    pipes: &BTreeMap<String, PipeHandle>,
+    output: Option<&str>,
+) -> Result<(), ProximaError> {
+    spec.validate()?;
+    topological_order(spec)?;
+    check_stage_pipes(spec, pipes)?;
+    check_output_stage(spec, output)
+}
+
+#[cfg(feature = "tokio")]
+fn check_stage_pipes(
+    spec: &PipelineSpec,
+    pipes: &BTreeMap<String, PipeHandle>,
+) -> Result<(), ProximaError> {
+    for stage in &spec.stages {
+        if let StageBody::Pipe { pipe, .. } = &stage.body
+            && !pipes.contains_key(pipe)
+        {
+            return Err(ProximaError::Config(format!(
+                "stage `{}` uses unknown pipe `{pipe}`",
+                stage.name
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "tokio")]
+fn check_output_stage(spec: &PipelineSpec, output: Option<&str>) -> Result<(), ProximaError> {
+    match output {
+        Some(name) if spec.stages.iter().any(|stage| stage.name == name) => Ok(()),
+        _ => Err(ProximaError::Config(
+            "`pipeline.output` must name a stage".into(),
+        )),
+    }
+}
+
+/// The pipe a `pipeline` spec builds: request body JSON is the pipeline
+/// input, the response is the `output` stage's value.
+#[cfg(feature = "tokio")]
+struct PipelinePipe {
+    executor: PipelineExecutor,
+    spec: PipelineSpec,
+    output: String,
+}
+
+#[cfg(feature = "tokio")]
+impl PipelinePipe {
+    async fn respond(&self, request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
+        let (_, body) = request.body_bytes().await?;
+        let input = match parse_pipeline_input(&body) {
+            Ok(input) => input,
+            Err(err) => {
+                return Ok(Response::new(400).with_body(format!("pipeline input: {err}")));
+            }
+        };
+        let report = self
+            .executor
+            .run_with_input(self.spec.clone(), input)
+            .await?;
+        Ok(render_pipeline_report(&report, &self.output))
+    }
+}
+
+#[cfg(feature = "tokio")]
+fn parse_pipeline_input(body: &[u8]) -> Result<Value, serde_json::Error> {
+    if body.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(body)
+}
+
+#[cfg(feature = "tokio")]
+fn render_pipeline_report(report: &PipelineRunReport, output: &str) -> Response<Bytes> {
+    let value = report.outputs.get(output);
+    match (&report.outcome, value.map(serde_json::to_vec)) {
+        (PipelineOutcome::Completed, Some(Ok(bytes))) => Response::ok(bytes),
+        (PipelineOutcome::Failed { reason }, _) => Response::new(502).with_body(reason.clone()),
+        _ => Response::new(502).with_body(format!("stage `{output}` produced no output")),
+    }
+}
+
+#[cfg(feature = "tokio")]
+impl SendPipe for PipelinePipe {
+    type In = Request<Bytes>;
+    type Out = Response<Bytes>;
+    type Err = ProximaError;
+
+    fn call(
+        &self,
+        request: Request<Bytes>,
+    ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+        self.respond(request)
+    }
 }
 
 /// Wraps `handle` with every middleware declared on `spec`, in the canonical

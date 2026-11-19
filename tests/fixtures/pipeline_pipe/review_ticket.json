@@ -1,0 +1,46 @@
+{
+  "name": "review_ticket",
+  "pipeline": {
+    "pipes": {
+      "vault": { "type": "vault" },
+      "github": { "type": "github" },
+      "llm": { "type": "llm" }
+    },
+    "stages": [
+      {
+        "name": "ticket",
+        "pipe": "vault",
+        "request": { "method": "GET", "path": "/{{body.in.ticket}}/state.json" }
+      },
+      {
+        "name": "pr",
+        "pipe": "github",
+        "depends_on": ["ticket"],
+        "request": { "method": "GET", "path": "/repos/{{body.ticket.repo}}/pulls/{{body.ticket.pr}}" }
+      },
+      {
+        "name": "files",
+        "pipe": "github",
+        "depends_on": ["ticket"],
+        "request": { "method": "GET", "path": "/repos/{{body.ticket.repo}}/pulls/{{body.ticket.pr}}/files" }
+      },
+      {
+        "name": "notes",
+        "pipe": "vault",
+        "depends_on": ["ticket"],
+        "request": { "method": "GET", "path": "/{{body.in.ticket}}/notes" }
+      },
+      {
+        "name": "review",
+        "pipe": "llm",
+        "depends_on": ["pr", "files", "notes"],
+        "request": {
+          "method": "POST",
+          "path": "/v1/messages",
+          "body": "Review this change.\npull request: {{body.pr}}\nfiles: {{body.files}}\nnotes: {{body.notes}}"
+        }
+      }
+    ],
+    "output": "review"
+  }
+}
