@@ -392,6 +392,10 @@ required-features = ["std"]
 name = "generate_compatibility_doc"
 
 [[example]]
+name = "serve_thread_per_request"
+required-features = ["std"]
+
+[[example]]
 name = "plan_rows_diff"
 required-features = ["std", "cuda"]
 
