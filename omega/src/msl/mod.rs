@@ -143,7 +143,10 @@ mod wide_grid;
 pub(crate) use emit_and_classify::emit_inner_with_mma_selection_and_layout;
 #[cfg(all(feature = "metal", target_os = "macos"))]
 pub(crate) use emit_and_classify::has_dense_bf16_mma_candidate;
-#[cfg(any(test, all(feature = "metal", target_os = "macos")))]
+#[cfg(any(
+    all(test, feature = "metal-tiled-gemm"),
+    all(feature = "metal", target_os = "macos")
+))]
 pub(crate) use emit_and_classify::kernel_cache_key_for_grid_with_layout;
 #[cfg(all(
     feature = "metal-attn-variants",

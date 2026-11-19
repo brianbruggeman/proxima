@@ -1,5 +1,6 @@
 use alloc::collections::BTreeMap;
 
+#[cfg(feature = "metal-grouped-gemm")]
 use crate::epilogue::index32_reach_fits;
 
 use super::tests::embedding_lookup_op;
@@ -355,6 +356,7 @@ fn the_coordinate_override_set_to_zero_restores_every_family_to_the_64_bit_form(
     assert!(expert_source.contains("long expert_slot = group_first / group_out_extent;"));
 }
 
+#[cfg(feature = "metal-grouped-gemm")]
 fn first_kernel(source: &str) -> &str {
     let body = kernel_body(source);
     &body[..body[1..].find("kernel void ").map_or(body.len(), |at| at + 1)]

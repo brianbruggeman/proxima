@@ -692,6 +692,7 @@ fn control_one_changed_sub_scale_bias_changes_the_rendered_iq4_xs_element() {
     assert!(altered.contains("sub_scale_raw - 31.0f"));
 }
 
+#[cfg(feature = "metal-attn-split-decode")]
 #[test]
 fn scalar_cache_read_is_the_text_the_decode_split_emits_for_each_scalar_width() {
     use super::attn_golden_tests::attention_op;

@@ -4537,6 +4537,7 @@ mod tests {
     use proxima_numeric::{DType};
 
     use super::*;
+    #[cfg(feature = "metal-attn-split-decode")]
     use crate::msl::{CachedAttentionForm, cached_attention_form};
     use proxima_tensor::test_support::Lcg;
 
@@ -5064,6 +5065,7 @@ mod tests {
         assert_ne!(small.grid.threads, large.grid.threads);
     }
 
+    #[cfg(feature = "reduce-epilogue-fusion")]
     #[test]
     fn emit_text_equal_across_kv_extents() {
         let short = emit_cuda(&row_sum_plus_bias_op(4, 8), &no_packed()).expect("emit succeeds");
@@ -5074,11 +5076,12 @@ mod tests {
 
     #[test]
     fn reuse_matches_fresh_emit_for_every_op() {
-        let pairs = [
-            (elementwise_tanh_op(4), elementwise_tanh_op(4096)),
-            (row_sum_plus_bias_op(4, 8), row_sum_plus_bias_op(4, 16)),
-            (scan_op(8), scan_op(64)),
-        ];
+        let pairs = [(elementwise_tanh_op(4), elementwise_tanh_op(4096)), (scan_op(8), scan_op(64))];
+        #[cfg(feature = "reduce-epilogue-fusion")]
+        let pairs = pairs
+            .into_iter()
+            .chain([(row_sum_plus_bias_op(4, 8), row_sum_plus_bias_op(4, 16))])
+            .collect::<Vec<_>>();
         for (previous, resolved) in pairs {
             let previous_kernel = emit_cuda(&previous, &no_packed()).expect("emit succeeds");
             let (kernels, reused) = emit_cuda_reusing(

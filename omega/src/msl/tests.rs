@@ -1838,7 +1838,7 @@ fn flattened_selected_axis_gathered_q4k_matmul_is_not_row_blocked_without_featur
     q4k.insert(weight_node, Codec::Q4K);
 
     assert_eq!(
-        classify_packed_row_block(&bound, &operand_codecs(&bound, &q4k)).err(),
+        classify_packed_row_block(&bound, &operand_codecs(&bound, &q4k), &EmitKnobs::default()).err(),
         Some(PackedRowBlockRejection::GatheredOperand),
         "flattened selected rows may route to different expert slabs, so the packed multi-row body must not share one weight row"
     );
@@ -6582,7 +6582,7 @@ fn packed_row_nsg2_off_leaves_the_threadgroup_width_unchanged() {
         "test fixture must actually take the row-blocked path for this assertion to mean anything",
     );
 
-    let (_base, split) = packed_row_dispatch(&bound, &quantized, &block);
+    let (_base, split) = packed_row_dispatch(&bound, &quantized, &block, &EmitKnobs::default());
     let expected_width = SIMD_WIDTH * split * packed_row_nsg_factor();
 
     let width = tiled_gemm_threadgroup_width(&bound, &quantized, NumericPolicy::default(), &EmitKnobs::default())

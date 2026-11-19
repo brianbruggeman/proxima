@@ -1,6 +1,8 @@
 use proxima_numeric::float_layout::FloatLayout;
 
-use super::golden_support::{e3m2_kernel_source, full_matvec_source, matvec_source};
+#[cfg(feature = "metal-tiled-gemm")]
+use super::golden_support::{e3m2_kernel_source, full_matvec_source};
+use super::golden_support::matvec_source;
 #[cfg(feature = "metal-tiled-gemm")]
 use super::tests::{TILED_ADMITTED_TOKENS, gathered_matmul_op, tiled_gemm_op};
 use super::*;

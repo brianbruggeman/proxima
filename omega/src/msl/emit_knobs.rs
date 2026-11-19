@@ -553,7 +553,9 @@ mod tests {
     use core::fmt::Debug;
 
     use super::super::*;
-    use super::{EmitKnobs, FloatLayout, ReductionLiteral, every_knob_moved_by_the_builder};
+    #[cfg(feature = "metal-tiled-gemm")]
+    use super::FloatLayout;
+    use super::{EmitKnobs, ReductionLiteral, every_knob_moved_by_the_builder};
     use crate::config::RuntimeConfig;
 
     const ENV_NAMES: [&str; 24] = [
