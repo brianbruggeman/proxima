@@ -68,8 +68,9 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_primitives::pipe::Pipe;
 use proxima_primitives::sync::blocking::Mutex;
 
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use proxima_primitives::sync::AsyncMutex;
-
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use serving_context::ServingContext;
 #[cfg(any(
     not(feature = "gpu"),
@@ -363,7 +364,7 @@ use draft_model::ModelProposer;
 use resident_slot::{ResidentAsk, ResidentRefusal, ResidentSlot, ResidentSlots, SlotTake};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use greedy_device::device_token;
-#[cfg(test)]
+#[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
 use kv_ring::test_attention_cache;
 use kv_ring::{
     KvRing, attention_cache, ring_slack_rows, rings_cover_speculation, sliding_cached_len_scalar,

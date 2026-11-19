@@ -2845,8 +2845,9 @@ impl<'file> LoadedModel<'file> {
         // registration is a no-op (compiled out) when that feature is off.
         // the model owns the mapping registration: a thread serving it later activates this context
         
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut serving_context = ServingContext::new();
-        
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         serving_context.register_checkpoint_mapping(file_bytes);
         #[cfg(all(feature = "gpu", not(all(feature = "metal-output-placement", target_os = "macos"))))]
         omega::backend::register_checkpoint_mapping(file_bytes);
