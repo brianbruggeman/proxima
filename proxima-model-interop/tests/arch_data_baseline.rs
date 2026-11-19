@@ -2346,21 +2346,22 @@ fn kv_in_caller_memory(checkpoint: &Checkpoint, kv_owning_layers: usize, matches
             );
         }
     }
-    // the device kv cache is adopted at a call's first decode evaluation, so a call that
-    // stops on its first sampled token (one prefill evaluation, zero decode) never asks the arena
-    let calls_with_a_decode_evaluation = hooked_ids
+    // the default key/value cache is binary16, which the row-tiled kernel reads, so the loop adopts
+    // device kv at a call's first evaluation, prefill included (`device_kv_early_adopt`); every call
+    // that evaluated at least once asks the arena, whether or not it went on to decode
+    let calls_with_an_evaluation = hooked_ids
         .iter()
-        .filter(|(ids, stopped_by_eos)| ids.len() + usize::from(*stopped_by_eos) > 1)
+        .filter(|(ids, stopped_by_eos)| !ids.is_empty() || *stopped_by_eos)
         .count();
     assert!(
-        calls_with_a_decode_evaluation > 0,
-        "{}: no call reached a decode evaluation, so nothing was checked",
+        calls_with_an_evaluation > 0,
+        "{}: no call evaluated, so nothing was checked",
         checkpoint.name
     );
     assert_eq!(
         ARENA_REQUESTS.with(Cell::get),
-        3 * kv_owning_layers * calls_with_a_decode_evaluation,
-        "the arena serves three buffers per kv-owning layer per generate call that decodes"
+        3 * kv_owning_layers * calls_with_an_evaluation,
+        "the arena serves three buffers per kv-owning layer per generate call that evaluates"
     );
     assert!(
         ARENA_USED.with(Cell::get) > 0,
