@@ -1692,10 +1692,12 @@ impl<'file> LoadedModel<'file> {
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         let mut serving = proxima_primitives::driver::block_on(self.serving.lock());
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        let _active = serving.activate();
+        let mut active = serving.activate();
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
         runtime.resume_active();
         let outcome = self.run_decode_loop_through_cache_active(
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            active.slots(),
             ids,
             turn_ends,
             max_tokens,
@@ -1719,6 +1721,7 @@ impl<'file> LoadedModel<'file> {
     #[allow(clippy::too_many_arguments)] // the wrapper's parameter list plus the request token
     fn run_decode_loop_through_cache_active(
         &self,
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))] slots: &mut ResidentSlots,
         ids: Vec<u32>,
         turn_ends: &[usize],
         max_tokens: usize,
@@ -1800,6 +1803,13 @@ impl<'file> LoadedModel<'file> {
                 forced_draft_width,
             )
             .inspect_err(log_entry_dropped)?;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        if let Some(mut slot) = runtime.leased_slot.take() {
+            slot.checkpoints = core::mem::take(&mut entry.checkpoints);
+            self.lease_slot(slots, slot, serving_config, forced_draft_width);
+            drop(pending);
+            return Ok((generated_ids, text, stopped_by_eos, final_state));
+        }
         entry.state = final_state;
         let stored = self.prompt_cache_store(entry, &config);
         drop(pending);
@@ -1812,6 +1822,64 @@ impl<'file> LoadedModel<'file> {
             cached_len: 0,
         };
         Ok((generated_ids, text, stopped_by_eos, hollow))
+    }
+
+    /// Keeps `slot` resident under the request's limits. The slot a full table gives up is
+    /// flushed ([`DeviceKv::flush`]) into a fresh host entry and stored with
+    /// [`Self::prompt_cache_store`]: a conversation that is no longer the live one is a host entry
+    /// again. A flush that fails costs the cache that entry, never the request's answer.
+    ///
+    /// Compose [`ResidentSlots::put`] for the table and [`Self::prompt_cache_store`] for the spill.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    fn lease_slot(
+        &self,
+        slots: &mut ResidentSlots,
+        slot: ResidentSlot,
+        serving_config: &ServingConfig,
+        forced_draft_width: Option<u16>,
+    ) {
+        slots.limit_to(serving_config.parallel_sequences as usize, serving_config.resident_kv_bytes);
+        let Some(given_up) = slots.put(slot) else {
+            return;
+        };
+        let config = serving_config.prompt_cache;
+        match self.flushed_entry(given_up, serving_config, forced_draft_width) {
+            Ok(entry) => {
+                self.prompt_cache_store(entry, &config);
+            }
+            Err(error) => log_entry_dropped(&error),
+        }
+    }
+
+    /// The host entry a slot's device rows make once flushed into fresh layer caches.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    fn flushed_entry(
+        &self,
+        slot: ResidentSlot,
+        serving_config: &ServingConfig,
+        forced_draft_width: Option<u16>,
+    ) -> Result<CacheEntry, InteropError> {
+        let ResidentSlot { ids, key, device, checkpoints } = slot;
+        let (names, widths) = self.declared_layer_cache_names_and_widths()?;
+        let cached_len = ids.len();
+        let mut layer_caches = self.fresh_layer_caches(
+            &KvFormats::of(serving_config),
+            &names,
+            &widths,
+            cached_len,
+            ring_slack_rows(serving_config, forced_draft_width),
+        )?;
+        device.flush(&mut layer_caches, cached_len, cached_len)?;
+        seal_attention_layers(
+            &mut layer_caches,
+            &widths,
+            serving_config.prompt_cache.block_tokens as usize,
+            serving_config.prompt_cache.seal_horizon_rows as usize,
+            self.block_summarizer,
+        )?;
+        let mut entry = CacheEntry::new(PrefixState { ids, layer_caches, cached_len }, key);
+        entry.checkpoints = checkpoints;
+        Ok(entry)
     }
 }
 

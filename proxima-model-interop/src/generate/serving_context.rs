@@ -13,10 +13,15 @@
 use omega::metal::{MetalContext, MetalContextGuard};
 
 use super::resident_plans::{self, ResidentStore};
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use super::resident_slot::ResidentSlots;
 
 pub(super) struct ServingContext {
     plans: ResidentStore,
     metal: MetalContext,
+    /// Conversations whose device KV a request left in place; limits come from each request's `ServingConfig`.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    slots: ResidentSlots,
 }
 
 // SAFETY: the aggregate is one closed graph. `metal` owns the maps of `Retained<MTLBuffer>`
@@ -37,6 +42,17 @@ pub(super) struct ServingContext {
 // (`shared_transient.rs` module doc), so no GPU work is mid-use; (4) Metal resource objects
 // carry no thread affinity (ASSUMED, Apple's Metal documentation, not read here; the
 // cross-thread tests are the runtime evidence). Not `Sync`: access is exclusive.
+//
+// `slots` extends the same closed graph. A `ResidentSlot` owns the `PlacedBuffer`s of its
+// `DeviceKv` (`Retained<MTLBuffer>` planes and f32 staging), which no `Rc`, `Weak` or other
+// handle shares once the decode loop released the plans' clones (`release_placed_buffers`).
+// Under point (3) a slot enters `slots` only through `DeviceKv::into_slot`, which the decode
+// loop calls after its last `evaluate`: every step of the request executed its one command
+// buffer and `waitUntilCompleted` returned before the next step began
+// (`omega/src/metal/pipeline_buffers_upload.rs:1365`), and the loop's final step read its
+// logits back from the device, so no command buffer that touched a slot's planes is
+// in flight when it leaves the loop. From there it moves only inside the context.
+// `flush` and the drop of a slot run while the context is active on the calling thread.
 unsafe impl Send for ServingContext {}
 
 const fn assert_send<Value: Send>() {}
@@ -59,6 +75,16 @@ const _: () = {
 pub(super) struct ServingGuard<'context> {
     plans: &'context mut ResidentStore,
     _metal: MetalContextGuard<'context>,
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    slots: &'context mut ResidentSlots,
+}
+
+impl ServingGuard<'_> {
+    /// the context's slots, reachable while it is active: a slot is flushed and dropped against its own queue.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn slots(&mut self) -> &mut ResidentSlots {
+        self.slots
+    }
 }
 
 impl Drop for ServingGuard<'_> {
@@ -70,6 +96,8 @@ impl Drop for ServingGuard<'_> {
 impl Drop for ServingContext {
     fn drop(&mut self) {
         self.clear_plans();
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        self.activate().slots().clear();
     }
 }
 
@@ -78,18 +106,25 @@ impl ServingContext {
         Self {
             plans: ResidentStore::default(),
             metal: MetalContext::new(None, None),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            slots: ResidentSlots::new(0, 0),
         }
     }
 
     /// activates the metal context and this context's plans on the calling thread; both
     /// go back when the guard drops.
     pub(super) fn activate(&mut self) -> ServingGuard<'_> {
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        let Self { plans, metal, slots } = self;
+        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
         let Self { plans, metal } = self;
         let metal = metal.activate();
         plans.swap_active();
         ServingGuard {
             plans,
             _metal: metal,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            slots,
         }
     }
 
@@ -144,7 +179,7 @@ mod tests {
     use proxima_tensor::AlignedBuffer;
 
     use crate::generate::chunked_prefill_tests::dense_checkpoint;
-    use crate::generate::LoadedModel;
+    use crate::generate::{LoadedModel, PrefixRetention, PrefixState, ResidentSlot};
     use crate::serving::{GPU_LAYERS_ALL, PromptCacheConfig, ServingConfig};
 
     const PROMPT: [u32; 9] = [4, 17, 33, 8, 91, 12, 5, 60, 7];
@@ -365,6 +400,115 @@ mod tests {
 
         assert!(arena.upgrade().is_none(), "the arena buffer outlived the model");
         assert!(attention.upgrade().is_none(), "the attention scratch outlived the model");
+    }
+
+    const OTHER_PROMPT: [u32; 9] = [9, 41, 3, 77, 25, 6, 88, 14, 2];
+
+    /// the decode loop as the request path runs it: the model's context active, the state the
+    /// loop returns and the slot it left in the runtime.
+    fn loop_under(
+        model: &LoadedModel<'_>,
+        config: &ServingConfig<'_>,
+        retention: PrefixRetention,
+    ) -> (PrefixState, Option<ResidentSlot>) {
+        let mut runtime = model.backend_runtime(config);
+        runtime.prefix_retention = retention;
+        let mut serving = proxima_primitives::driver::block_on(model.serving.lock());
+        let _active = serving.activate();
+        runtime.resume_active();
+        let (_, _, _, state) = model
+            .run_decode_loop_from_ids(
+                PROMPT.to_vec(),
+                3,
+                config,
+                &mut runtime,
+                None,
+                &mut crate::generate::LogitsSink::Discard,
+                &mut crate::generate::NodeValuesSink::Discard,
+                &mut |_| ControlFlow::Continue(()),
+                None,
+                true,
+                None,
+                None,
+            )
+            .expect("the loop decodes on the dense fixture");
+        runtime.park_active();
+        (state, runtime.leased_slot.take())
+    }
+
+    /// a lease leaves the device rows where they are: no host rows come back, and the slot holds
+    /// exactly the ids a `Keep` run of the same request flushes.
+    #[test]
+    fn a_leased_loop_flushes_no_rows_and_hands_out_a_slot_holding_the_request_ids() {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads");
+        let config = cached_gpu_config(0);
+
+        let (kept, no_slot) = loop_under(&model, &config, PrefixRetention::Keep);
+        let (leased, slot) = loop_under(&model, &config, PrefixRetention::Lease);
+
+        assert!(no_slot.is_none(), "a Keep run left a slot");
+        assert!(kept.cached_len > PROMPT.len() && !kept.layer_caches.is_empty(), "the Keep run flushed no host rows: {}", kept.cached_len);
+        assert_eq!(leased.cached_len, 0, "the leased loop flushed rows to the host");
+        assert!(leased.layer_caches.is_empty(), "the leased loop returned host layer caches");
+        let slot = slot.expect("the leased loop handed out no slot");
+        assert_eq!(slot.ids, kept.ids, "the slot's ids are the request's final ids");
+        assert!(slot.checkpoints.is_empty(), "the loop holds no checkpoints to pass");
+    }
+
+    /// through the cache with room for one slot: the first lease stays resident and writes no host
+    /// entry; the second makes the table give the first back, flushed into the host cache.
+    #[test]
+    fn a_second_lease_in_a_table_of_one_flushes_and_stores_the_first_slot() {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads");
+        let config = cached_gpu_config(0);
+        assert_eq!(config.parallel_sequences, 1, "the table holds one slot");
+        let mut runtime = model.backend_runtime(&config);
+        runtime.prefix_retention = PrefixRetention::Lease;
+        let mut request = |prompt: &[u32]| {
+            model
+                .run_decode_loop_through_cache(
+                    prompt.to_vec(),
+                    &[],
+                    3,
+                    &config,
+                    &mut runtime,
+                    None,
+                    &mut crate::generate::LogitsSink::Discard,
+                    &mut crate::generate::NodeValuesSink::Discard,
+                    &mut |_| ControlFlow::Continue(()),
+                    None,
+                    false,
+                    None,
+                    None,
+                )
+                .expect("the request decodes on the dense fixture")
+        };
+
+        request(&PROMPT);
+        let after_first = (
+            proxima_primitives::driver::block_on(model.serving.lock()).slots.len(),
+            model.prompt_cache.lock().held().len(),
+        );
+        request(&OTHER_PROMPT);
+        let after_second = (
+            proxima_primitives::driver::block_on(model.serving.lock()).slots.len(),
+            model.prompt_cache.lock().held().len(),
+        );
+        let stored_ids: Vec<Vec<u32>> = model.prompt_cache.lock().entry_states().map(|state| state.ids.clone()).collect();
+
+        assert_eq!(after_first, (1, 0), "after one lease: (slots resident, host entries)");
+        assert_eq!(after_second, (1, 1), "after two leases the first was given up and stored");
+        assert_eq!(&stored_ids[0][..PROMPT.len()], &PROMPT, "the stored entry is the first request's rows");
     }
 
     struct Counts {

@@ -31,8 +31,6 @@ use proxima_numeric::{DType, FormatCodec, NumericError, NumericFormat};
 use proxima_tensor::spec::store_rows_as;
 
 use super::*;
-#[cfg(test)]
-use super::resident_slot::ResidentSlot;
 #[cfg(feature = "instrument")]
 use crate::kv_cache_format;
 
@@ -89,7 +87,6 @@ struct DeviceKvLayer {
     /// buffers have completed.
     staging: [Option<PlacedBuffer>; 3],
     /// Bytes asked of the allocator for the `Some` planes of `staging`, summed.
-    #[cfg(test)]
     staging_bytes: usize,
     key_format: NumericFormat,
     /// The key planes' codec, resolved once at allocation.
@@ -240,7 +237,6 @@ impl DeviceKvLayer {
             staged(narrow_codecs.0.is_some(), key_format, even_odd_bytes)?,
             staged(narrow_codecs.1.is_some(), value_format, value_bytes)?,
         ];
-        #[cfg(test)]
         let staging_bytes = staging
             .iter()
             .zip([even_odd_bytes, even_odd_bytes, value_bytes])
@@ -253,7 +249,6 @@ impl DeviceKvLayer {
             k_odd,
             v,
             staging,
-            #[cfg(test)]
             staging_bytes,
             key_format: *key_format,
             key_codec,
@@ -736,14 +731,13 @@ impl DeviceKv {
 
     /// Leaves this cache in place as a [`ResidentSlot`] holding `ids`, the positions its rows cover.
     /// Call it only after every command buffer of the request completed, since the slot changes
-    /// threads between requests. [`Self::adopt_resident`] is the inverse.
+    /// threads between requests. `DeviceKv::adopt_resident` is the inverse.
     ///
     /// Each sliding layer's `base_position` is the oldest position its buffer holds: `0` until the
     /// buffer first compacts, then `len - capacity_rows` at most. A slot whose rows were written by
     /// its own steps, never seeded, keeps that value, so [`DeviceKvLayer::holds_rewind_to`] admits
     /// a rewind of up to `capacity_rows - retain` rows in place; only a seed pins the base at
     /// `first_kept(len)` and refuses every rewind.
-    #[cfg(test)]
     pub(super) fn into_slot(self, ids: Vec<u32>, key: CacheKey, checkpoints: Vec<RingCheckpoint>) -> ResidentSlot {
         ResidentSlot { ids, key, device: self, checkpoints }
     }
@@ -751,7 +745,6 @@ impl DeviceKv {
     /// Bytes of device KV this cache holds: the three planes of every resident layer, each sized as
     /// [`DeviceKvLayer::allocate`] asked the allocator for it (`capacity_rows` times the row bytes).
     /// Plus each layer's f32 staging buffers, as recorded in `staging_bytes` at allocation.
-    #[cfg(test)]
     pub(super) fn resident_bytes(&self) -> usize {
         self.layers
             .iter()

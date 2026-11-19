@@ -1958,11 +1958,18 @@ impl ShortConvLayerCache {
 /// the moment the loop returns. [`Self::Keep`] is the default: only an entry
 /// point that discards the state with the prompt cache off selects
 /// [`Self::Discard`] (see [`Self::for_discarding_caller`]).
+///
+/// [`Self::Lease`] is the third answer: neither flush nor drop. The device rows stay
+/// where they are and the loop hands its [`DeviceKv`] out whole as a `ResidentSlot`
+/// in [`BackendRuntime::leased_slot`], for the caller to keep resident. The returned
+/// [`PrefixState`] is as hollow as under `Discard`. A loop that never adopted a device
+/// cache has nothing to lease and returns the host state as `Keep` does.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) enum PrefixRetention {
     #[default]
     Keep,
     Discard,
+    Lease,
 }
 
 impl PrefixRetention {
@@ -3177,6 +3184,9 @@ pub struct BackendRuntime {
     /// more; they come from and go back to [`resident_plans`] with the plans.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
     pub(super) kv_buffers: Vec<PlacedBuffer>,
+    /// The device KV a loop run under [`PrefixRetention::Lease`] left in place, for its caller to take.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) leased_slot: Option<ResidentSlot>,
     /// `ServingConfig::resident_kv_bytes`, read once at construction: the bytes
     /// of [`Self::kv_buffers`] that outlive a generation.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
@@ -3347,6 +3357,8 @@ impl BackendRuntime {
             decode_plans: resident_plans::DecodePlans::new(),
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             kv_buffers: Vec::new(),
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            leased_slot: None,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             resident_kv_bytes: config.resident_kv_bytes,
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]

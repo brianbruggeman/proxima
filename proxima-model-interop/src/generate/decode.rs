@@ -7877,11 +7877,34 @@ not read this cache format; only the single-row decode kernel reads it from the 
             }
         }
 
+        // Exactly the tokens `cached_len` now covers: `seed_ids ++ ids`
+        // (this call's own new range) plus however many of its OWN
+        // generated tokens have themselves been forward-passed since --
+        // every generated token except the last is (the last is only
+        // just-sampled, never yet fed back through `evaluate`). Derived
+        // from `cached_len` itself rather than re-counting loop iterations,
+        // so it is correct on every exit path `decode_until_stop_or_budget`
+        // has (`max_tokens` exhaustion, model EOS, `ControlFlow::Break(())`
+        // from either phase) without special-casing any of them.
+        let mut final_ids = seed_ids;
+        final_ids.extend_from_slice(&ids);
+        let forwarded_generated = cached_len
+            .saturating_sub(final_ids.len())
+            .min(generated_ids.len());
+        final_ids.extend_from_slice(&generated_ids[..forwarded_generated]);
+        // a lease needs a device cache whose rows are exactly `final_ids`; anything else flushes as `Keep` does
         #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-        if let Some(device) = device_kv
-            .as_ref()
-            .filter(|_| runtime.prefix_retention == PrefixRetention::Keep)
-        {
+        let leased = runtime.prefix_retention == PrefixRetention::Lease
+            && device_kv.is_some()
+            && final_ids.len() == cached_len;
+        #[cfg(not(all(feature = "metal-output-placement", target_os = "macos")))]
+        let leased = false;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        if let Some(device) = device_kv.as_ref().filter(|_| match runtime.prefix_retention {
+            PrefixRetention::Keep => true,
+            PrefixRetention::Discard => false,
+            PrefixRetention::Lease => !leased,
+        }) {
             device.flush(&mut layer_caches, cached_len, positions_needed)?;
             seal_attention_layers(
                 &mut layer_caches,
@@ -7896,7 +7919,11 @@ not read this cache format; only the single-row decode kernel reads it from the 
             #[cfg(all(feature = "instrument", feature = "metal"))]
             emit_gpu_phase("before_release", step);
             runtime.release_placed_buffers();
-            if self.kv_buffer_source.is_none() {
+            if leased {
+                let key = self.cache_key(serving_config, runtime, forced_draft_width);
+                // this loop holds no checkpoints; the caller owns the request's and attaches them
+                runtime.leased_slot = Some(device.into_slot(core::mem::take(&mut final_ids), key, Vec::new()));
+            } else if self.kv_buffer_source.is_none() {
                 runtime.keep_kv_buffers(device.into_buffers());
             }
             #[cfg(all(feature = "instrument", feature = "metal"))]
@@ -7916,32 +7943,22 @@ not read this cache format; only the single-row decode kernel reads it from the 
         }
 
         let text = proxima_tokenizer::decode(&generated_ids, &self.vocab)?;
-        // Exactly the tokens `cached_len` now covers: `seed_ids ++ ids`
-        // (this call's own new range) plus however many of its OWN
-        // generated tokens have themselves been forward-passed since --
-        // every generated token except the last is (the last is only
-        // just-sampled, never yet fed back through `evaluate`). Derived
-        // from `cached_len` itself rather than re-counting loop iterations,
-        // so it is correct on every exit path `decode_until_stop_or_budget`
-        // has (`max_tokens` exhaustion, model EOS, `ControlFlow::Break(())`
-        // from either phase) without special-casing any of them.
-        let mut final_ids = seed_ids;
-        final_ids.extend_from_slice(&ids);
-        let forwarded_generated = cached_len
-            .saturating_sub(final_ids.len())
-            .min(generated_ids.len());
-        final_ids.extend_from_slice(&generated_ids[..forwarded_generated]);
-        // a discarding caller got no flush, so the host rows are stale: hand back the hollow state the single-range path returns
+        // a discarding caller got no flush, so the host rows are stale: hand back the hollow state the single-range path returns; a lease moved the rows out whole
         let final_state = match runtime.prefix_retention {
-            PrefixRetention::Keep => PrefixState {
-                ids: final_ids,
-                layer_caches,
-                cached_len,
-            },
             PrefixRetention::Discard => PrefixState {
                 ids: Vec::new(),
                 layer_caches: Vec::new(),
                 cached_len: 0,
+            },
+            PrefixRetention::Lease if leased => PrefixState {
+                ids: Vec::new(),
+                layer_caches: Vec::new(),
+                cached_len: 0,
+            },
+            PrefixRetention::Keep | PrefixRetention::Lease => PrefixState {
+                ids: final_ids,
+                layer_caches,
+                cached_len,
             },
         };
         emit_request_speculative_stats(&speculative_stats.since(&initial_speculative_stats));

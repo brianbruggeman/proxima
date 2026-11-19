@@ -334,7 +334,7 @@ mod resident_plans_real_model_tests;
 #[cfg(all(test, feature = "cuda"))]
 mod resident_weights_tests;
 mod ring_checkpoint;
-#[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 mod resident_slot;
 #[cfg(all(test, feature = "cuda"))]
 mod row_refit_oracle_tests;
@@ -357,6 +357,8 @@ use decode::*;
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use device_kv::{DeviceKv, DirectKvRows, KvLeafNodes, kv_leaf_nodes, with_direct_kv_rows};
 use draft_model::ModelProposer;
+#[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+use resident_slot::{ResidentSlot, ResidentSlots};
 #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
 use greedy_device::{device_token, with_greedy_argmax};
 #[cfg(test)]
