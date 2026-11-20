@@ -1,0 +1,70 @@
+[[pipe]]
+name = "review_ticket"
+
+[pipe.pipeline]
+output = "review"
+
+[pipe.pipeline.pipes.tracker.process_rpc]
+name = "tracker"
+command = "/bin/sh"
+args = ["<dir>/tracker.sh"]
+
+[[pipe.pipeline.pipes.tracker.process_rpc.init]]
+send = { jsonrpc = "2.0", id = 0, method = "initialize", params = { protocolVersion = "2024-11-05", capabilities = {}, clientInfo = { name = "proxima", version = "0" } } }
+
+[[pipe.pipeline.pipes.tracker.process_rpc.init]]
+send = { jsonrpc = "2.0", method = "notifications/initialized" }
+reply = false
+
+[pipe.pipeline.pipes.github.synth]
+status = 200
+body = { title = "split stage body", body = "adds StageBody" }
+
+[pipe.pipeline.pipes.llm.synth]
+status = 200
+body_template = { content = [{ type = "text", text = "review of {{body.prompt}}" }] }
+
+[[pipe.pipeline.stages]]
+name = "ticket"
+pipe = "tracker"
+
+[pipe.pipeline.stages.request]
+method = "POST"
+path = "/"
+body = { jsonrpc = "2.0", id = 1, method = "tools/call", params = { name = "get_ticket", arguments = { id = "{{body.in.ticket}}" } } }
+
+[[pipe.pipeline.stages]]
+name = "pr"
+pipe = "github"
+depends_on = ["ticket"]
+
+[pipe.pipeline.stages.request]
+method = "GET"
+path = "/repos/{{body.ticket.result.structuredContent.repo}}/pulls/{{body.ticket.result.structuredContent.pr}}"
+
+[[pipe.pipeline.stages]]
+name = "review"
+pipe = "llm"
+depends_on = ["ticket", "pr"]
+
+[pipe.pipeline.stages.request]
+method = "POST"
+path = "/v1/messages"
+body = { prompt = "{{body.ticket.result.structuredContent.ticket}}: {{body.pr.body}}" }
+
+[[listen]]
+type = "mcp"
+transport = "stdio"
+bind = "127.0.0.1:0"
+pipe = "review_ticket"
+
+[[listen.tools]]
+name = "review_ticket"
+description = "Review the PR linked from a ticket"
+
+[listen.tools.inputSchema]
+type = "object"
+required = ["ticket"]
+
+[listen.tools.inputSchema.properties.ticket]
+type = "string"
