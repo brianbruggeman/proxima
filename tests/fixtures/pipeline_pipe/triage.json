@@ -1,0 +1,39 @@
+{
+  "name": "triage",
+  "pipeline": {
+    "pipes": {
+      "tracker": { "type": "tracker" },
+      "github": { "type": "github" },
+      "llm": { "type": "llm" },
+      "brief": { "type": "brief" }
+    },
+    "stages": [
+      {
+        "name": "ticket",
+        "pipe": "tracker",
+        "request": { "method": "GET", "path": "/tickets/{{body.in.ticket}}" }
+      },
+      {
+        "name": "pr",
+        "pipe": "github",
+        "depends_on": ["ticket"],
+        "when": "ticket.pr != null",
+        "request": { "method": "GET", "path": "/repos/{{body.ticket.repo}}/pulls/{{body.ticket.pr}}" }
+      },
+      {
+        "name": "review",
+        "pipe": "llm",
+        "depends_on": ["ticket", "pr"],
+        "request": { "method": "POST", "path": "/v1/messages", "body": "{\"pr\":\"{{body.pr.body}}\"}" }
+      },
+      {
+        "name": "summary",
+        "pipe": "brief",
+        "depends_on": ["ticket"],
+        "when": "ticket.pr == null",
+        "request": { "method": "POST", "path": "/v1/summary", "body": "{\"ticket\":\"{{body.in.ticket}}\"}" }
+      }
+    ],
+    "output": ["review", "summary"]
+  }
+}

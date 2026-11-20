@@ -41,10 +41,14 @@ use crate::recording::{AccumulatingSink, DynRecordingSink, LazyFanOut, deferred_
 #[cfg(feature = "recording")]
 use crate::recording::{BinSourceFactory, JsonlSourceFactory};
 use crate::request::{Request, Response};
+#[cfg(feature = "tokio")]
+use crate::scenarios::cel::compile_expression;
 use crate::schema::SchemaRegistry;
 #[cfg(feature = "http1")]
 use crate::shared_http::SharedHttpClient;
 use crate::telemetry::{Metrics, NoopTelemetry, TelemetryHandle};
+#[cfg(feature = "tokio")]
+use crate::scenarios::cel::Program;
 
 /// The shared hyper client pool, when the `http1` feature (hyper-backed)
 /// is built; a zero-sized placeholder otherwise. `LoadContext::http_client`
@@ -852,13 +856,56 @@ async fn build_pipeline(spec: &Value, context: &LoadContext) -> Result<PipeHandl
     let pipeline = spec.get("pipeline").unwrap_or(&Value::Null);
     let pipes = build_pipeline_pipes(pipeline, context).await?;
     let pipeline_spec = parse_pipeline_spec(spec, pipeline)?;
-    let output = pipeline.get("output").and_then(Value::as_str);
-    check_pipeline(&pipeline_spec, &pipes, output)?;
+    let output = parse_pipeline_output(pipeline.get("output"))?;
+    check_pipeline(&pipeline_spec, &pipes, &output)?;
+    let guards = compile_guards(&pipeline_spec)?;
     Ok(into_handle(PipelinePipe {
-        executor: pipeline_executor().with_pipes(pipes),
+        sink: pipeline_sink(),
+        pipes,
         spec: pipeline_spec,
-        output: output.unwrap_or_default().to_string(),
+        guards,
+        output,
     }))
+}
+
+/// The pipeline `output`: one stage's value, or the first of a list that ran.
+#[cfg(feature = "tokio")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PipelineOutput {
+    Stage(String),
+    FirstOf(Vec<String>),
+}
+
+#[cfg(feature = "tokio")]
+fn parse_pipeline_output(output: Option<&Value>) -> Result<PipelineOutput, ProximaError> {
+    match output {
+        Some(Value::String(name)) => Ok(PipelineOutput::Stage(name.clone())),
+        Some(Value::Array(names)) => names
+            .iter()
+            .map(|name| name.as_str().map(str::to_string))
+            .collect::<Option<Vec<String>>>()
+            .map(PipelineOutput::FirstOf)
+            .ok_or_else(|| {
+                ProximaError::Config("`pipeline.output` list must hold stage names".into())
+            }),
+        _ => Err(ProximaError::Config(
+            "`pipeline.output` must name a stage or list stages".into(),
+        )),
+    }
+}
+
+/// Compiles every stage `when` once, at load; the pipe reuses the programs
+/// on each call through `PipelineExecutor::with_guards`.
+#[cfg(feature = "tokio")]
+fn compile_guards(spec: &PipelineSpec) -> Result<BTreeMap<String, Arc<Program>>, ProximaError> {
+    let mut guards = BTreeMap::new();
+    for stage in &spec.stages {
+        let Some(when) = &stage.when else { continue };
+        let program = compile_expression(when)
+            .map_err(|err| ProximaError::Config(format!("stage `{}` when: {err}", stage.name)))?;
+        guards.insert(stage.name.clone(), Arc::new(program));
+    }
+    Ok(guards)
 }
 
 #[cfg(feature = "tokio")]
@@ -871,11 +918,11 @@ fn parse_pipeline_spec(spec: &Value, pipeline: &Value) -> Result<PipelineSpec, P
 }
 
 #[cfg(feature = "tokio")]
-fn pipeline_executor() -> PipelineExecutor {
-    let sink: DynRecordingSink = Arc::new(AccumulatingSink::with_defaults(Arc::new(
-        LazyFanOut::new(Vec::new(), deferred_runtime()),
-    )));
-    PipelineExecutor::new(sink)
+fn pipeline_sink() -> DynRecordingSink {
+    Arc::new(AccumulatingSink::with_defaults(Arc::new(LazyFanOut::new(
+        Vec::new(),
+        deferred_runtime(),
+    ))))
 }
 
 #[cfg(feature = "tokio")]
@@ -899,7 +946,7 @@ async fn build_pipeline_pipes(
 fn check_pipeline(
     spec: &PipelineSpec,
     pipes: &BTreeMap<String, PipeHandle>,
-    output: Option<&str>,
+    output: &PipelineOutput,
 ) -> Result<(), ProximaError> {
     spec.validate()?;
     topological_order(spec)?;
@@ -926,12 +973,19 @@ fn check_stage_pipes(
 }
 
 #[cfg(feature = "tokio")]
-fn check_output_stage(spec: &PipelineSpec, output: Option<&str>) -> Result<(), ProximaError> {
-    match output {
-        Some(name) if spec.stages.iter().any(|stage| stage.name == name) => Ok(()),
-        _ => Err(ProximaError::Config(
-            "`pipeline.output` must name a stage".into(),
-        )),
+fn check_output_stage(spec: &PipelineSpec, output: &PipelineOutput) -> Result<(), ProximaError> {
+    let names: &[String] = match output {
+        PipelineOutput::Stage(name) => std::slice::from_ref(name),
+        PipelineOutput::FirstOf(names) => names,
+    };
+    match names
+        .iter()
+        .find(|name| !spec.stages.iter().any(|stage| &stage.name == *name))
+    {
+        None => Ok(()),
+        Some(name) => Err(ProximaError::Config(format!(
+            "`pipeline.output` must name a stage; `{name}` is not one"
+        ))),
     }
 }
 
@@ -939,13 +993,21 @@ fn check_output_stage(spec: &PipelineSpec, output: Option<&str>) -> Result<(), P
 /// input, the response is the `output` stage's value.
 #[cfg(feature = "tokio")]
 struct PipelinePipe {
-    executor: PipelineExecutor,
+    sink: DynRecordingSink,
+    pipes: BTreeMap<String, PipeHandle>,
     spec: PipelineSpec,
-    output: String,
+    guards: BTreeMap<String, Arc<Program>>,
+    output: PipelineOutput,
 }
 
 #[cfg(feature = "tokio")]
 impl PipelinePipe {
+    fn executor(&self) -> PipelineExecutor {
+        PipelineExecutor::new(self.sink.clone())
+            .with_pipes(self.pipes.clone())
+            .with_guards(self.guards.clone())
+    }
+
     async fn respond(&self, request: Request<Bytes>) -> Result<Response<Bytes>, ProximaError> {
         let (_, body) = request.body_bytes().await?;
         let input = match parse_pipeline_input(&body) {
@@ -955,7 +1017,7 @@ impl PipelinePipe {
             }
         };
         let report = self
-            .executor
+            .executor()
             .run_with_input(self.spec.clone(), input)
             .await?;
         Ok(render_pipeline_report(&report, &self.output))
@@ -971,12 +1033,27 @@ fn parse_pipeline_input(body: &[u8]) -> Result<Value, serde_json::Error> {
 }
 
 #[cfg(feature = "tokio")]
-fn render_pipeline_report(report: &PipelineRunReport, output: &str) -> Response<Bytes> {
-    let value = report.outputs.get(output);
-    match (&report.outcome, value.map(serde_json::to_vec)) {
-        (PipelineOutcome::Completed, Some(Ok(bytes))) => Response::ok(bytes),
-        (PipelineOutcome::Failed { reason }, _) => Response::new(502).with_body(reason.clone()),
-        _ => Response::new(502).with_body(format!("stage `{output}` produced no output")),
+fn render_pipeline_report(report: &PipelineRunReport, output: &PipelineOutput) -> Response<Bytes> {
+    if let PipelineOutcome::Failed { reason } = &report.outcome {
+        return Response::new(502).with_body(reason.clone());
+    }
+    match output {
+        PipelineOutput::Stage(name) => render_stage_output(report, name),
+        PipelineOutput::FirstOf(names) => {
+            match names.iter().find(|name| report.outputs.contains_key(*name)) {
+                Some(name) => render_stage_output(report, name),
+                None => Response::new(502)
+                    .with_body(format!("no output stage ran: {}", names.join(", "))),
+            }
+        }
+    }
+}
+
+#[cfg(feature = "tokio")]
+fn render_stage_output(report: &PipelineRunReport, name: &str) -> Response<Bytes> {
+    match report.outputs.get(name).map(serde_json::to_vec) {
+        Some(Ok(bytes)) => Response::ok(bytes),
+        _ => Response::new(502).with_body(format!("stage `{name}` produced no output")),
     }
 }
 

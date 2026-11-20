@@ -9,9 +9,16 @@
 use serde_json::Value;
 
 const REVIEW_TICKET: &str = include_str!("fixtures/pipeline_pipe/review_ticket.json");
+#[cfg(feature = "tokio")]
+const TRIAGE: &str = include_str!("fixtures/pipeline_pipe/triage.json");
 
 fn fixture() -> Value {
     serde_json::from_str(REVIEW_TICKET).expect("review_ticket fixture is valid json")
+}
+
+#[cfg(feature = "tokio")]
+fn triage_fixture() -> Value {
+    serde_json::from_str(TRIAGE).expect("triage fixture is valid json")
 }
 
 #[cfg(feature = "tokio")]
@@ -30,7 +37,7 @@ mod with_tokio {
     use proxima_primitives::pipe::SendPipe;
     use serde_json::{Value, json};
 
-    use super::fixture;
+    use super::{fixture, triage_fixture};
 
     const STATE: &str = r#"{"repo":"brianbruggeman/proxima","pr":42}"#;
     const NOTES: &str = r#"["design.md"]"#;
@@ -481,6 +488,239 @@ mod with_tokio {
         let error = "pipeline DAG has a cycle involving stages: [\"pr\", \"review\", \"ticket\"]";
 
         assert!(check_refusal(error, &CYCLE).is_err());
+    }
+
+    const TICKET_WITH_PR: &str = r#"{"repo":"brianbruggeman/proxima","pr":42}"#;
+    const TICKET_WITHOUT_PR: &str = r#"{"repo":"brianbruggeman/proxima","pr":null}"#;
+    const TRIAGE_PULL: &str = r#"{"title":"split stage body","body":"adds StageBody"}"#;
+    const TRIAGE_REVIEW: &str = r#"{"content":[{"type":"text","text":"LGTM with one nit"}]}"#;
+    const TRIAGE_BRIEF: &str = r#"{"content":[{"type":"text","text":"no PR yet; ticket only"}]}"#;
+    const REVIEW_SORTED: &[u8] = br#"{"content":[{"text":"LGTM with one nit","type":"text"}]}"#;
+    const BRIEF_SORTED: &[u8] = br#"{"content":[{"text":"no PR yet; ticket only","type":"text"}]}"#;
+    const NO_OUTPUT_RAN: &[u8] = b"no output stage ran: review, summary";
+    const PR_NOT_FOUND: &[u8] = b"stage `pr` failed: stage `pr` pipe `github`: returned status 404";
+
+    struct TriageRig {
+        context: LoadContext,
+        stubs: [StubPipe; 4],
+    }
+
+    #[derive(Debug)]
+    struct TriageExpect {
+        status: u16,
+        body: &'static [u8],
+        calls: [usize; 4],
+    }
+
+    fn triage_rig() -> TriageRig {
+        let context = LoadContext::with_default_registry().expect("default load context");
+        let tracker = stub(
+            &[
+                ("/tickets/PROXIMA-24", TICKET_WITH_PR),
+                ("/tickets/PROXIMA-25", TICKET_WITHOUT_PR),
+            ],
+            None,
+        );
+        let github = stub(
+            &[("/repos/brianbruggeman/proxima/pulls/42", TRIAGE_PULL)],
+            None,
+        );
+        let llm = stub(&[("/v1/messages", TRIAGE_REVIEW)], None);
+        let brief = stub(&[("/v1/summary", TRIAGE_BRIEF)], None);
+        register(&context, "tracker", tracker.clone());
+        register(&context, "github", github.clone());
+        register(&context, "llm", llm.clone());
+        register(&context, "brief", brief.clone());
+        TriageRig {
+            context,
+            stubs: [tracker, github, llm, brief],
+        }
+    }
+
+    fn triage_calls(rig: &TriageRig) -> [usize; 4] {
+        rig.stubs
+            .clone()
+            .map(|stub| stub.calls.load(Ordering::SeqCst))
+    }
+
+    fn check_triage(
+        response: (u16, &[u8]),
+        calls: [usize; 4],
+        expected: &TriageExpect,
+    ) -> Result<(), String> {
+        let (status, body) = response;
+        if status != expected.status || body != expected.body {
+            return Err(format!(
+                "status {status} body {}; want {} {}",
+                String::from_utf8_lossy(body),
+                expected.status,
+                String::from_utf8_lossy(expected.body)
+            ));
+        }
+        (calls == expected.calls)
+            .then_some(())
+            .ok_or_else(|| format!("calls {calls:?}; want {:?}", expected.calls))
+    }
+
+    async fn call_triage(handle: &PipeHandle, ticket: &str) -> (u16, Bytes) {
+        let request = Request::builder()
+            .method("POST")
+            .path("/")
+            .body(Bytes::from(format!(r#"{{"ticket":"{ticket}"}}"#)))
+            .build()
+            .expect("request");
+        let response = SendPipe::call(handle, request)
+            .await
+            .expect("pipeline call");
+        let status = response.status;
+        (status, response.collect_body().await.expect("body"))
+    }
+
+    async fn load_triage(rig: &TriageRig, spec: Value) -> PipeHandle {
+        load(Spec::Inline(spec), &rig.context)
+            .await
+            .expect("load triage")
+    }
+
+    async fn load_error_triage(rig: &TriageRig, spec: Value) -> String {
+        match load(Spec::Inline(spec), &rig.context).await {
+            Ok(_) => "loaded without error".to_string(),
+            Err(error) => error.to_string(),
+        }
+    }
+
+    async fn triage_once(spec: Value, ticket: &str) -> (u16, Bytes) {
+        let rig = triage_rig();
+        let handle = load_triage(&rig, spec).await;
+        call_triage(&handle, ticket).await
+    }
+
+    fn without_when(spec: &mut Value, stage: &str) {
+        stage_mut(spec, stage)
+            .as_object_mut()
+            .expect("stage is an object")
+            .remove("when");
+    }
+
+    const BRANCH_PR: TriageExpect = TriageExpect {
+        status: 200,
+        body: REVIEW_SORTED,
+        calls: [1, 1, 1, 0],
+    };
+    const BRANCH_SUMMARY: TriageExpect = TriageExpect {
+        status: 200,
+        body: BRIEF_SORTED,
+        calls: [2, 1, 1, 1],
+    };
+
+    #[proxima::test]
+    async fn pipeline_guard_refuses_an_unparseable_when_naming_the_stage() {
+        let rig = triage_rig();
+        let mut spec = triage_fixture();
+        stage_mut(&mut spec, "pr")["when"] = json!("ticket.pr !=");
+
+        let error = load_error_triage(&rig, spec).await;
+
+        assert!(
+            error.contains("stage `pr`") && error.contains("when"),
+            "{error}"
+        );
+        assert_eq!(triage_calls(&rig), [0, 0, 0, 0]);
+    }
+
+    #[proxima::test]
+    async fn pipeline_guard_refuses_an_output_naming_no_stage() {
+        let rig = triage_rig();
+        let mut spec = triage_fixture();
+        spec["pipeline"]["output"] = json!(["review", "sumary"]);
+
+        let error = load_error_triage(&rig, spec).await;
+
+        assert!(error.contains("sumary"), "{error}");
+        assert_eq!(triage_calls(&rig), [0, 0, 0, 0]);
+    }
+
+    #[proxima::test]
+    async fn pipeline_guard_branch_one_pipe_takes_each_branch_on_its_own_input() {
+        let rig = triage_rig();
+        let handle = load_triage(&rig, triage_fixture()).await;
+
+        let first = call_triage(&handle, "PROXIMA-24").await;
+        assert_eq!(
+            check_triage((first.0, &first.1), triage_calls(&rig), &BRANCH_PR),
+            Ok(())
+        );
+        let second = call_triage(&handle, "PROXIMA-25").await;
+
+        assert_eq!(
+            check_triage((second.0, &second.1), triage_calls(&rig), &BRANCH_SUMMARY),
+            Ok(())
+        );
+    }
+
+    #[proxima::test]
+    async fn pipeline_guard_output_answers_502_when_no_listed_stage_ran() {
+        let mut spec = triage_fixture();
+        stage_mut(&mut spec, "summary")["when"] = json!("false");
+
+        let (status, body) = triage_once(spec, "PROXIMA-25").await;
+
+        assert_eq!((status, body.as_ref()), (502, NO_OUTPUT_RAN));
+    }
+
+    #[proxima::test]
+    async fn pipeline_guard_output_prefers_the_first_listed_stage_that_ran() {
+        let mut spec = triage_fixture();
+        without_when(&mut spec, "summary");
+
+        let (status, body) = triage_once(spec, "PROXIMA-24").await;
+
+        assert_eq!((status, body.as_ref()), (200, REVIEW_SORTED));
+    }
+
+    #[proxima::test]
+    async fn pipeline_guard_output_follows_list_order_not_stage_order() {
+        let mut spec = triage_fixture();
+        without_when(&mut spec, "summary");
+        spec["pipeline"]["output"] = json!(["summary", "review"]);
+
+        let (status, body) = triage_once(spec, "PROXIMA-24").await;
+
+        assert_eq!((status, body.as_ref()), (200, BRIEF_SORTED));
+    }
+
+    #[proxima::test]
+    async fn ctl_branch_unguarded_triage_fails_the_second_call_and_the_check_notices() {
+        let rig = triage_rig();
+        let mut spec = triage_fixture();
+        without_when(&mut spec, "pr");
+        without_when(&mut spec, "summary");
+        let handle = load_triage(&rig, spec).await;
+
+        call_triage(&handle, "PROXIMA-24").await;
+        let second = call_triage(&handle, "PROXIMA-25").await;
+
+        let calls = triage_calls(&rig);
+        let observed = TriageExpect {
+            status: 502,
+            body: PR_NOT_FOUND,
+            calls: [2, 2, 1, 2],
+        };
+        assert_eq!(
+            check_triage((second.0, &second.1), calls, &observed),
+            Ok(())
+        );
+        assert!(check_triage((second.0, &second.1), calls, &BRANCH_SUMMARY).is_err());
+    }
+
+    #[test]
+    fn ctl_branch_accepts_a_hand_built_summary_branch_response() {
+        let response = (200, BRIEF_SORTED);
+
+        assert_eq!(
+            check_triage(response, [2, 1, 1, 1], &BRANCH_SUMMARY),
+            Ok(())
+        );
     }
 }
 
