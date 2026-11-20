@@ -1312,12 +1312,14 @@ pub(super) fn build_merged_dispatch(
         "float",
         "float",
     )?;
-    let mut cache_key = crate::msl::kernel_cache_key_for_grid(
+    let mut cache_key = crate::msl::kernel_cache_key_for_grid_with_layout(
         leader,
         &plan.packed_operands,
         plan.numeric_policy,
         &plan.emit_knobs,
         &kernel.grid,
+        crate::msl::default_dense_mma_input_layout(leader, &plan.packed_operands, plan.numeric_policy),
+        plan.attention_row_schedule,
     )?;
     cache_key.push(plan.math_mode.cache_token());
     cache_key.push_str(&format!("_z{}", group.len()));
@@ -2578,24 +2580,15 @@ impl Plan {
                 let dense_mma_input_layout = self.dense_mma_input_layout.unwrap_or_else(|| {
                     crate::msl::default_dense_mma_input_layout(bound, &self.packed_operands, self.numeric_policy)
                 });
-                let cache_key = if self.dense_mma_input_layout.is_none() {
-                    crate::msl::kernel_cache_key_for_grid(
-                        bound,
-                        &self.packed_operands,
-                        self.numeric_policy,
-                        &self.emit_knobs,
-                        &grid,
-                    )
-                } else {
-                    crate::msl::kernel_cache_key_for_grid_with_layout(
-                        bound,
-                        &self.packed_operands,
-                        self.numeric_policy,
-                        &self.emit_knobs,
-                        &grid,
-                        dense_mma_input_layout,
-                    )
-                };
+                let cache_key = crate::msl::kernel_cache_key_for_grid_with_layout(
+                    bound,
+                    &self.packed_operands,
+                    self.numeric_policy,
+                    &self.emit_knobs,
+                    &grid,
+                    dense_mma_input_layout,
+                    self.attention_row_schedule,
+                );
                 cache_key
                     .map(|mut key| {
                         key.push(self.math_mode.cache_token());

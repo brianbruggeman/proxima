@@ -3054,6 +3054,7 @@ fn programmable_tiled_grid_emit_and_cache_follow_one_admission() {
         &ambient_knobs(),
         &admitted.grid,
         FloatLayout::BF32,
+        AttentionRowSchedule::legacy(),
     )
     .expect("explicit F32 identity resolves");
     assert_ne!(admitted_key, f32_layout_key);

@@ -1117,6 +1117,7 @@ pub(super) fn resolve_step(
         knobs,
         &grid,
         dense_mma_input_layout,
+        attention_row_schedule,
     )?;
     cache_key.push(math_mode.cache_token());
     cache_key.push_str(attention_mma_selection.cache_token_for(bound));
@@ -4031,6 +4032,7 @@ pub(super) fn encode_op(
                 knobs,
                 &grid,
                 dense_mma_input_layout,
+                attention_row_schedule,
             )?;
             cache_key.push(math_mode.cache_token());
             cache_key.push_str(attention_mma_selection.cache_token_for(bound));
@@ -4119,6 +4121,7 @@ pub(super) fn encode_op(
                 knobs,
                 &grid,
                 dense_mma_input_layout,
+                attention_row_schedule,
             )?;
             cache_key.push(math_mode.cache_token());
             cache_key.push_str(attention_mma_selection.cache_token_for(bound));

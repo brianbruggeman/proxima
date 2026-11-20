@@ -2063,11 +2063,7 @@ pub(crate) fn kernel_cache_key_with_knobs(
 /// walks the op's reduction axes, so a caller that needs both the key and the
 /// shape asks for the shape first and hands it here instead of paying for the
 /// decision twice per encode.
-#[cfg(any(test, feature = "metal-core"))]
-#[cfg_attr(
-    not(all(feature = "metal", target_os = "macos")),
-    allow(dead_code, reason = "sole caller is the macOS-only metal driver")
-)]
+#[cfg(test)]
 pub(crate) fn kernel_cache_key_for_grid(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
@@ -2082,6 +2078,7 @@ pub(crate) fn kernel_cache_key_for_grid(
         knobs,
         grid,
         default_dense_mma_input_layout(resolved, packed_operands, numeric_policy),
+        AttentionRowSchedule::legacy(),
     )
 }
 
@@ -2093,6 +2090,7 @@ pub(crate) fn kernel_cache_key_for_grid_with_layout(
     knobs: &EmitKnobs,
     grid: &GridSpec,
     dense_mma_input_layout: FloatLayout,
+    row_schedule: AttentionRowSchedule,
 ) -> Result<String, EmitError> {
     // Called for its unsupported-dtype rejection alone -- `kernel_identity`
     // reads `resolved.dtype` directly for the actual half/wide classing (the
@@ -2101,6 +2099,8 @@ pub(crate) fn kernel_cache_key_for_grid_with_layout(
     // it, so this stays the one place that fails fast on a dtype `emit`
     // would also reject.
     type_token(resolved.node, resolved.dtype)?;
+    #[cfg(feature = "metal-attn-variants")]
+    let row_schedule = effective_attention_row_schedule(resolved, numeric_policy, row_schedule);
     let mut identity = crate::identity::kernel_identity(
         crate::identity::KernelLanguage::Metal,
         resolved,
@@ -2112,7 +2112,7 @@ pub(crate) fn kernel_cache_key_for_grid_with_layout(
             knobs,
             grid,
             dense_mma_input_layout,
-            AttentionRowSchedule::legacy(),
+            row_schedule,
         ),
         numeric_policy,
     );

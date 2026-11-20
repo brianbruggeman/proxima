@@ -637,3 +637,130 @@ fn the_coordinate_override_set_to_zero_restores_the_64_bit_attention_kernel() {
         emitted_attention(&bound, &packed, false)
     );
 }
+
+#[cfg(feature = "metal-attn-variants")]
+const FLASH_FULL_LAYER_BASE: &str =
+    include_str!("../../tests/fixtures/index32/cached_attention_full_layer_flash.base.msl");
+#[cfg(feature = "metal-attn-variants")]
+const FLASH_FULL_LAYER_TIP: &str =
+    include_str!("../../tests/fixtures/index32/cached_attention_full_layer_flash.tip.msl");
+#[cfg(feature = "metal-attn-variants")]
+const FLASH_SLIDING_LAYER_BASE: &str =
+    include_str!("../../tests/fixtures/index32/cached_attention_sliding_layer_flash.base.msl");
+#[cfg(feature = "metal-attn-variants")]
+const FLASH_SLIDING_LAYER_TIP: &str =
+    include_str!("../../tests/fixtures/index32/cached_attention_sliding_layer_flash.tip.msl");
+
+#[cfg(feature = "metal-attn-variants")]
+fn flash_variant() -> AttentionVariant {
+    AttentionVariant {
+        kv_storage: AttentionKvStorage::F16,
+        decomposition: AttentionDecomposition::Flash,
+        ..AttentionVariant::default()
+    }
+}
+
+#[cfg(feature = "metal-attn-variants")]
+fn emitted_flash(bound: &BoundOp, packed: &BTreeMap<NodeId, Codec>, coord_index32: bool) -> String {
+    let knobs = EmitKnobs::default().with_coord_index32(coord_index32);
+    let kernel = emit_with_attention_variant_and_knobs(
+        bound,
+        packed,
+        NumericPolicy::llama_relaxed(),
+        flash_variant(),
+        &knobs,
+    )
+    .expect("flash attention emits");
+    assert!(kernel.entry.contains("_flash"), "not the flash form: {}", kernel.entry);
+    kernel.source
+}
+
+/// the key a plan resolves for the flash schedule: the grid and the coordinate bit are both read
+/// under the flash row schedule, the way `resolve_step` computes them.
+#[cfg(feature = "metal-attn-variants")]
+fn flash_cache_key(bound: &BoundOp, packed: &BTreeMap<NodeId, Codec>) -> String {
+    let policy = NumericPolicy::llama_relaxed();
+    let knobs = EmitKnobs::default();
+    let (_, schedule) = AttentionMmaSelection::from_variant(flash_variant()).expect("flash selects");
+    let quantized = operand_codecs(bound, packed);
+    let grid = grid_spec_with_tile_height(bound, &quantized, policy, false, schedule, &knobs)
+        .expect("flash grid");
+    kernel_cache_key_for_grid_with_layout(
+        bound,
+        packed,
+        policy,
+        &knobs,
+        &grid,
+        default_dense_mma_input_layout(bound, packed, policy),
+        schedule,
+    )
+    .expect("cache key builds")
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn the_captured_flash_full_layer_attention_narrows_to_the_recorded_32_bit_kernel() {
+    assert_eq!(narrow_row_tiled_attention(FLASH_FULL_LAYER_BASE), FLASH_FULL_LAYER_TIP);
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn the_captured_flash_sliding_layer_attention_narrows_to_the_recorded_32_bit_kernel() {
+    assert_eq!(narrow_row_tiled_attention(FLASH_SLIDING_LAYER_BASE), FLASH_SLIDING_LAYER_TIP);
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn a_flash_full_layer_renders_the_recorded_fixtures_under_each_coordinate_setting() {
+    let (bound, packed) = full_layer_op();
+
+    assert_eq!(emitted_flash(&bound, &packed, false), FLASH_FULL_LAYER_BASE);
+    assert_eq!(emitted_flash(&bound, &packed, true), FLASH_FULL_LAYER_TIP);
+    assert!(flash_cache_key(&bound, &packed).contains("_c32"));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn a_flash_sliding_layer_renders_the_recorded_fixtures_under_each_coordinate_setting() {
+    let (bound, packed) = sliding_layer_op();
+
+    assert_eq!(emitted_flash(&bound, &packed, false), FLASH_SLIDING_LAYER_BASE);
+    assert_eq!(emitted_flash(&bound, &packed, true), FLASH_SLIDING_LAYER_TIP);
+    assert!(flash_cache_key(&bound, &packed).contains("_c32"));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn the_narrowed_flash_kernel_drops_every_long_and_the_unbounded_mask_literal() {
+    for tip in [FLASH_FULL_LAYER_TIP, FLASH_SLIDING_LAYER_TIP] {
+        assert!(!has_word(kernel_body(tip), "long"));
+        assert!(!tip.contains("-9223372036854775807"));
+    }
+    assert!(FLASH_FULL_LAYER_TIP.contains("constexpr int cached_lower = -2147483647;"));
+    assert!(FLASH_SLIDING_LAYER_TIP.contains("constexpr int cached_lower = -511;"));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn a_flash_cache_past_the_reach_limit_keeps_the_64_bit_kernel() {
+    let (bound, packed) = row_tiled_attention_op(512, 1 << 24, 8, 256, i64::MIN);
+
+    let source = emitted_flash(&bound, &packed, true);
+
+    assert_eq!(source, emitted_flash(&bound, &packed, false));
+    assert!(has_word(kernel_body(&source), "long"));
+    assert!(!flash_cache_key(&bound, &packed).contains("_c32"));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn a_flash_sliding_window_past_the_reach_limit_keeps_the_64_bit_kernel() {
+    let (bound, packed) = row_tiled_attention_op(512, 2048, 1, 256, -(1 << 31));
+
+    let source = emitted_flash(&bound, &packed, true);
+
+    assert_eq!(source, emitted_flash(&bound, &packed, false));
+    assert!(has_word(kernel_body(&source), "long"));
+    assert!(!flash_cache_key(&bound, &packed).contains("_c32"));
+}
+
