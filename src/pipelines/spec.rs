@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use blake3::Hasher;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::error::ProximaError;
 
@@ -69,7 +70,7 @@ pub struct StageRequest {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub query: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub body: Option<String>,
+    pub body: Option<Value>,
 }
 
 fn default_method() -> String {

@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use bytes::Bytes;
 use crate::scenarios::cel::Program;
-use proxima_http::templates::{TemplateContext, expand_strict};
+use proxima_http::templates::{TemplateContext, expand_strict, expand_value_strict};
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::sync::task::JoinSet;
 use proxima_telemetry::error;
@@ -701,9 +701,15 @@ fn build_request(request: &StageRequest, scope: &Value) -> Result<Request<Bytes>
     for (name, value) in &request.query {
         builder = builder.query_param(name.as_str(), expand(value)?);
     }
-    if let Some(body) = &request.body {
-        builder = builder.body(Bytes::from(expand(body)?));
-    }
+    builder = match &request.body {
+        None => builder,
+        Some(Value::String(text)) => builder.body(Bytes::from(expand(text)?)),
+        Some(value) => {
+            let expanded = expand_value_strict(value, &context)?;
+            let bytes = serde_json::to_vec(&expanded).map_err(|err| err.to_string())?;
+            builder.body(Bytes::from(bytes))
+        }
+    };
     builder.build().map_err(|err| err.to_string())
 }
 
@@ -1010,6 +1016,7 @@ mod tests {
     struct Probe {
         calls: Arc<AtomicUsize>,
         paths: Arc<StdMutex<Vec<String>>>,
+        bodies: Arc<StdMutex<Vec<Bytes>>>,
     }
 
     struct StubPipe {
@@ -1030,6 +1037,8 @@ mod tests {
             self.probe.calls.fetch_add(1, Ordering::SeqCst);
             let path = String::from_utf8_lossy(&request.path).into_owned();
             self.probe.paths.lock().expect("paths").push(path);
+            let received = request.payload.clone();
+            self.probe.bodies.lock().expect("bodies").push(received);
             let response = Response::new(self.status).with_body(Bytes::from_static(self.body));
             async move { Ok(response) }
         }
@@ -1119,6 +1128,39 @@ mod tests {
                 observed.received, observed.calls, observed.failure
             )),
         }
+    }
+
+    fn check_received(probe: &Probe, expected: &Value) -> Result<(), String> {
+        let bodies = probe.bodies.lock().expect("bodies");
+        let [body] = bodies.as_slice() else {
+            return Err(format!("expected exactly one body, got {}", bodies.len()));
+        };
+        let parsed: Value = serde_json::from_slice(body).map_err(|err| err.to_string())?;
+        if &parsed == expected {
+            return Ok(());
+        }
+        Err(format!("received {parsed} differs from {expected}"))
+    }
+
+    fn payload_stage(body: Value) -> Vec<StageSpec> {
+        let mut stage = pipe_stage("pr", "github", "/pr", &["ticket"]);
+        if let StageBody::Pipe { request, .. } = &mut stage.body {
+            request.body = Some(body);
+        }
+        vec![pipe_stage("ticket", "vault", "/PROXIMA-24/state.json", &[]), stage]
+    }
+
+    async fn run_payload(body: Value) -> (PipelineRunReport, Probe) {
+        let (ticket, _) = stub(200, TICKET_BODY);
+        let (github, probe) = stub(200, b"{}");
+        let pipes = vec![("vault", ticket), ("github", github)];
+        let report = run_pipes(
+            payload_stage(body),
+            pipes,
+            json!({"ticket": "PROXIMA-24"}),
+        )
+        .await;
+        (report, probe)
     }
 
     fn check_failure(
@@ -1726,5 +1768,71 @@ mod tests {
         let outcome = PipelineOutcome::Failed { reason: "stage `pr` failed".into() };
         let report = hand_report(StageCompletion::Declined, outcome);
         assert!(check_branch(&report, &[("github", 0)], &declined_branch()).is_err());
+    }
+
+    #[proxima::test]
+    async fn stage_payload_whole_placeholder_keeps_the_number() {
+        let (_, probe) = run_payload(json!({"pr": "{{body.ticket.pr}}"})).await;
+        assert_eq!(check_received(&probe, &json!({"pr": 42})), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn stage_payload_embedded_placeholders_render_as_text() {
+        let body = json!({"title": "#{{body.ticket.pr}} in {{body.ticket.repo}}"});
+        let (_, probe) = run_payload(body).await;
+        let expected = json!({"title": "#42 in brianbruggeman/proxima"});
+        assert_eq!(check_received(&probe, &expected), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn stage_payload_whole_placeholder_takes_an_object() {
+        let (_, probe) = run_payload(json!({"ticket": "{{body.ticket}}"})).await;
+        let expected = json!({"ticket": {"pr": 42, "repo": "brianbruggeman/proxima"}});
+        assert_eq!(check_received(&probe, &expected), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn stage_payload_plain_leaves_pass_unchanged() {
+        let body = json!({"n": 3, "ok": true, "none": null});
+        let (_, probe) = run_payload(body.clone()).await;
+        assert_eq!(check_received(&probe, &body), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn stage_payload_nested_list_expands_every_leaf() {
+        let body = json!(["{{body.in.ticket}}", {"deep": ["{{body.ticket.repo}}"]}]);
+        let (_, probe) = run_payload(body).await;
+        let expected = json!(["PROXIMA-24", {"deep": ["brianbruggeman/proxima"]}]);
+        assert_eq!(check_received(&probe, &expected), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn stage_payload_missing_path_fails_without_calling_the_pipe() {
+        let (report, probe) = run_payload(json!({"x": "{{body.missing.path}}"})).await;
+        let observed = observe(&probe, &report, "pr");
+        assert_eq!(
+            check_template(&observed, &Expect::Missing("body.missing.path")),
+            Ok(())
+        );
+    }
+
+    #[proxima::test]
+    async fn stage_payload_padded_braces_resolve_and_outside_text_makes_text() {
+        let body = json!({"a": "{{ body.ticket.pr }}", "b": " {{body.ticket.pr}}"});
+        let (_, probe) = run_payload(body).await;
+        assert_eq!(
+            check_received(&probe, &json!({"a": 42, "b": " 42"})),
+            Ok(())
+        );
+    }
+
+    #[proxima::test]
+    async fn ctl_payload_string_body_keeps_the_text_path() {
+        let body = Value::String(r#"{"pr":"{{body.ticket.pr}}"}"#.to_string());
+        let (_, probe) = run_payload(body).await;
+        let received = probe.bodies.lock().expect("bodies").clone();
+        assert_eq!(received, vec![Bytes::from_static(br#"{"pr":"42"}"#)]);
+        assert_eq!(check_received(&probe, &json!({"pr": "42"})), Ok(()));
+        assert!(check_received(&probe, &json!({"pr": 42})).is_err());
     }
 }

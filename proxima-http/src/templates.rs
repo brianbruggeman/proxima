@@ -10,7 +10,7 @@ use std::process;
 use std::str::CharIndices;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde_json::Value;
+use serde_json::{Map, Value};
 use xxhash_rust::xxh3::Xxh3;
 
 #[derive(Debug, Default)]
@@ -34,6 +34,70 @@ pub fn expand(input: &str, context: &TemplateContext<'_>) -> String {
 #[must_use = "the Err names the first body path that did not resolve"]
 pub fn expand_strict(input: &str, context: &TemplateContext<'_>) -> Result<String, String> {
     expand_with(input, |key| resolve_strict(key, context))
+}
+
+#[must_use]
+pub fn expand_value(value: &Value, context: &TemplateContext<'_>) -> Value {
+    match value {
+        Value::String(text) => match whole_body_key(text) {
+            Some(key) => lookup_body_value(context.body, key)
+                .cloned()
+                .unwrap_or_else(|| Value::String(String::new())),
+            None => Value::String(expand(text, context)),
+        },
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| expand_value(item, context))
+                .collect(),
+        ),
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(name, item)| (name.clone(), expand_value(item, context)))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// Like [`expand_value`], but a body path absent from `context.body` returns
+/// `Err(<trimmed placeholder key>)`.
+#[must_use = "the Err names the first body path that did not resolve"]
+pub fn expand_value_strict(value: &Value, context: &TemplateContext<'_>) -> Result<Value, String> {
+    match value {
+        Value::String(text) => match whole_body_key(text) {
+            Some(key) => lookup_body_value(context.body, key)
+                .cloned()
+                .ok_or_else(|| key.to_string()),
+            None => expand_strict(text, context).map(Value::String),
+        },
+        Value::Array(items) => items
+            .iter()
+            .map(|item| expand_value_strict(item, context))
+            .collect::<Result<Vec<_>, _>>()
+            .map(Value::Array),
+        Value::Object(map) => map
+            .iter()
+            .map(|(name, item)| Ok((name.clone(), expand_value_strict(item, context)?)))
+            .collect::<Result<Map<String, Value>, String>>()
+            .map(Value::Object),
+        other => Ok(other.clone()),
+    }
+}
+
+fn whole_body_key(text: &str) -> Option<&str> {
+    let key = text.strip_prefix("{{")?.strip_suffix("}}")?.trim();
+    if key.contains("}}") || key.contains("{{") {
+        return None;
+    }
+    (key == "body" || key.starts_with("body.")).then_some(key)
+}
+
+fn lookup_body_value<'value>(root: Option<&'value Value>, key: &str) -> Option<&'value Value> {
+    match key.strip_prefix("body.") {
+        Some(path) => walk_body_path(root, path),
+        None => root,
+    }
 }
 
 fn expand_with<E>(
@@ -130,6 +194,10 @@ fn resolve_body_path(root: Option<&Value>, path: &str) -> String {
 }
 
 fn lookup_body_path(root: Option<&Value>, path: &str) -> Option<String> {
+    walk_body_path(root, path).map(value_to_display)
+}
+
+fn walk_body_path<'value>(root: Option<&'value Value>, path: &str) -> Option<&'value Value> {
     let mut current = root?;
     for segment in path.split('.') {
         current = match current {
@@ -138,7 +206,7 @@ fn lookup_body_path(root: Option<&Value>, path: &str) -> Option<String> {
             _ => return None,
         };
     }
-    Some(value_to_display(current))
+    Some(current)
 }
 
 fn value_to_display(value: &Value) -> String {
