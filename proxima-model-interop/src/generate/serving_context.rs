@@ -148,6 +148,11 @@ impl ServingContext {
         (programs.greedy_builds(), programs.direct_kv_builds())
     }
 
+    #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn program_footprint(&self) -> crate::generate::program_cache::ProgramFootprint {
+        self.plans.programs().footprint()
+    }
+
     #[cfg(test)]
     pub(super) fn wide_plan_count(&self) -> usize {
         self.plans.wide_count()
@@ -944,6 +949,32 @@ mod tests {
         assert_eq!(first, fresh, "the building request decoded other ids than a fresh model");
         cases_run += 1;
         assert_eq!(cases_run, 4);
+    }
+
+    /// three requests of different lengths leave the cache at one greedy program and the direct rows of the one decode program.
+    #[test]
+    fn the_program_cache_holds_the_same_programs_after_one_two_and_three_requests() {
+        let fixture = dense_checkpoint();
+        let storage = page_aligned(&fixture);
+        // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
+        let checkpoint = unsafe { core::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), fixture.len()) };
+        let parsed = parse_complete(checkpoint).expect("the dense fixture parses");
+        let model = LoadedModel::load(&parsed, checkpoint).expect("the dense fixture loads");
+        let config = gpu_config();
+
+        let mut held = Vec::new();
+        for prompt in [&PROMPT[..], &PROMPT[..5], &PROMPT[..7]] {
+            greedy_ids(&model, &config, prompt);
+            held.push(proxima_primitives::driver::block_on(model.serving.lock()).program_footprint());
+        }
+
+        let first = held[0];
+        assert_eq!(first.greedy_entries, 1, "the fixture's decode and prefill cut share one greedy program: {first:?}");
+        assert_eq!(first.greedy_ops, 256, "{first:?}");
+        assert_eq!(first.greedy_logits_bytes, 257 * size_of::<f32>(), "one logits row of the fixture vocabulary: {first:?}");
+        assert_eq!(first.direct_kv_entries, 1, "{first:?}");
+        assert_eq!(first.direct_kv_ops, 235, "{first:?}");
+        assert_eq!(held, [first; 3], "the cache grew with the request count: {held:?}");
     }
 
     /// a request at another cached length binds other symbol values to the same program, so it reuses the held greedy program

@@ -76,6 +76,11 @@ impl GreedyProgram {
     pub(super) fn key(&self) -> &GreedyKey {
         &self.key
     }
+
+    fn logits_bytes(&self) -> usize {
+        self.key.vocab as usize * core::mem::size_of::<f32>()
+    }
+
     /// `None` when the program does not accept the argmax ops.
     fn build(key: GreedyKey, program: &[Op], symbols: &[u64]) -> Result<Option<Self>, InteropError> {
         let Some((extended, token, finite)) = with_greedy_argmax(
@@ -164,6 +169,16 @@ impl DirectKvPrograms {
     }
 }
 
+/// Entry, op and logits-byte counts of what a [`ProgramCache`] holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ProgramFootprint {
+    pub(super) greedy_entries: usize,
+    pub(super) greedy_ops: usize,
+    pub(super) greedy_logits_bytes: usize,
+    pub(super) direct_kv_entries: usize,
+    pub(super) direct_kv_ops: usize,
+}
+
 /// The programs one model keeps between requests.
 #[derive(Default)]
 pub(super) struct ProgramCache {
@@ -225,6 +240,31 @@ impl ProgramCache {
     pub(super) fn keep_direct_kv(&mut self, held: DirectKvPrograms) {
         if held.entries.len() <= DIRECT_KV_PROGRAMS_KEPT {
             self.direct_kv = Some(held);
+        }
+        let footprint = self.footprint();
+        debug!(
+            greedy_entries = footprint.greedy_entries as u64,
+            greedy_ops = footprint.greedy_ops as u64,
+            greedy_logits_bytes = footprint.greedy_logits_bytes as u64,
+            direct_kv_entries = footprint.direct_kv_entries as u64,
+            direct_kv_ops = footprint.direct_kv_ops as u64,
+            "program_cache_held"
+        );
+    }
+
+    /// What the cache holds right now, for the `program_cache_held` event and the tests that
+    /// bound it.
+    pub(super) fn footprint(&self) -> ProgramFootprint {
+        let direct = self.direct_kv.iter().flat_map(|held| held.entries.values());
+        ProgramFootprint {
+            greedy_entries: self.greedy.len(),
+            greedy_ops: self.greedy.iter().map(|held| held.program.len()).sum(),
+            greedy_logits_bytes: self.greedy.iter().map(|held| held.logits_bytes()).sum(),
+            direct_kv_entries: direct.clone().filter(|entry| entry.built.is_some()).count(),
+            direct_kv_ops: direct
+                .filter_map(|entry| entry.built.as_ref())
+                .map(|(_, rows)| rows.program.len())
+                .sum(),
         }
     }
 
