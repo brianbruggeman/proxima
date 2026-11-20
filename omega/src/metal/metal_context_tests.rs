@@ -422,7 +422,7 @@ fn checkpoint_mapping_resolves_on_a_thread_that_did_not_register_it() {
         let mut carried = carried;
         let (device, _queue) = device_and_queue().expect("a second thread opens a device");
         let _active = carried.0.activate();
-        checkpoint_mapping_offset(&device, tensor_address as *const _, tensor_length)
+        checkpoint_mapping_offset(&device, tensor_address as *const _, tensor_length, None)
             .map(|resolved| resolved.expect("the whole mapping binds without copying").1)
     })
     .join()

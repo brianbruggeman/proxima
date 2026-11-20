@@ -1,6 +1,7 @@
-//! A BF16 weight served as an OFFSET view into the registered checkpoint mapping must sit on an
-//! 8-byte boundary: the packed matvec's output matches the host decode at offsets 0 and 8 and does
-//! not at the odd offsets 1 and 3 (the logits come back NaN), which are where a safetensors file
+//! A BF16 weight is bound as an OFFSET view into the registered checkpoint mapping only on an
+//! 8-byte boundary; the matvec matches the host decode at offsets 0 and 8, and a misaligned offset
+//! (1, 3, 3611) takes the copy path and matches too. Bound as a view, the odd offsets 1 and 3 came
+//! back NaN (PROXNUM-569). Those offsets are where a safetensors file
 //! whose JSON header is not padded (`8 + header_len` not a multiple of 8) places its first tensor:
 //! e2b's `per_layer_model_proj.weight` sat at mapping offset 3611 and every decode after token 0
 //! was 0 (PROXNUM-565). The weight has that tensor's shape, 8960 rows of 1536 `bf16`, filled from
@@ -126,11 +127,11 @@ fn a_bf16_weight_at_an_eight_byte_aligned_mapping_offset_matches_the_host_decode
 }
 
 #[test]
-fn a_bf16_weight_at_an_odd_mapping_offset_does_not_match_the_host_decode() {
+fn a_bf16_weight_at_an_odd_mapping_offset_is_copied_and_matches_the_host_decode() {
     let (weight, activation) = (bf16_weight(), activation());
-    for offset in [1, 3] {
+    for offset in [1, 3, 3611] {
         let (wrong, got) = logits_out_of_tolerance_at(offset, &weight, &activation);
-        let non_finite = got.iter().filter(|value| !value.is_finite()).count();
-        assert!(wrong > ROWS / 2, "offset {offset}: only {wrong} of {ROWS} logits left tolerance ({non_finite} non-finite), so an odd offset is no longer read wrongly");
+        assert_eq!(got.len(), ROWS, "one f32 per row at offset {offset}");
+        assert_eq!(wrong, 0, "offset {offset}: {wrong} of {ROWS} logits differ from the host decode (PROXNUM-569: a misaligned offset must take the copy path); first logits {:?}", &got[..4]);
     }
 }

@@ -1396,10 +1396,10 @@ pub(super) fn upload_block_as_float(
     // OFFSET views into an already-registered mapping before ever minting a
     // new buffer; only a genuinely separate allocation (a KV-cache row, a
     // scratch buffer) falls through to the page-aligned no-copy path.
-    if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
+    if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length, resident_name) {
         return result;
     }
-    if let Some(result) = expert_mapping_offset(device, pointer, byte_length) {
+    if let Some(result) = expert_mapping_offset(device, pointer, byte_length, resident_name) {
         return result;
     }
     if is_page_aligned(pointer, byte_length) {
@@ -1459,7 +1459,7 @@ pub(super) fn upload_packed_bytes(
     if mapping_published {
         counter!(EXPERT_MAPPING_CANDIDATE_UPLOADS, 1);
     }
-    if let Some(result) = expert_mapping_offset(device, pointer, byte_length) {
+    if let Some(result) = expert_mapping_offset(device, pointer, byte_length, resident_name) {
         return result;
     }
     if mapping_published {
@@ -1470,7 +1470,7 @@ pub(super) fn upload_packed_bytes(
     // served as a zero-cost offset view before minting a duplicate
     // dedicated buffer -- this is the path every GGUF quantized weight
     // (e.g. `blk.N.ffn_down_exps.weight`) actually takes.
-    if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length) {
+    if let Some(result) = checkpoint_mapping_offset(device, pointer, byte_length, resident_name) {
         return result;
     }
     if is_page_aligned(pointer, byte_length) {
@@ -1750,10 +1750,14 @@ pub(super) fn checkpoint_mapping_offset(
     device: &ProtocolObject<dyn MTLDevice>,
     pointer: *const c_void,
     byte_length: usize,
+    tensor_name: Option<&str>,
 ) -> Option<Result<(MetalBuffer, usize), MetalError>> {
     let (base, mapping_length) = CHECKPOINT_MAPPING.with(|mapping| *mapping.borrow())?;
     let address = pointer as usize;
     if address < base || address + byte_length > base + mapping_length {
+        return None;
+    }
+    if !mapping_offset_is_aligned(address - base, tensor_name) {
         return None;
     }
     counter!(MAPPING_OFFSET_UPLOADS, 1);
@@ -1762,6 +1766,37 @@ pub(super) fn checkpoint_mapping_offset(
         mapping_buffer(device, CHECKPOINT_MAPPING_NOCOPY_NAME, base, mapping_length)
             .map(|buffer| (buffer, address - base)),
     )
+}
+
+/// Byte alignment a tensor's offset inside a registered mapping must have to
+/// be bound as a view. The packed matvec reads its weight with 4-byte and
+/// wider vector loads that Metal does not guarantee at an unaligned address:
+/// `bf16_matvec_mapping_offset_alignment` measures NaN logits at offsets 1
+/// and 3 and exact ones at 0 and 8 (PROXNUM-569), and Metal's own
+/// `setBuffer` offset rule is a multiple of the largest element loaded. 8 is
+/// the widest scalar load the kernels issue.
+pub(super) const MAPPING_VIEW_OFFSET_ALIGNMENT: usize = 8;
+
+/// Counts tensors inside a registered mapping that took the copy path
+/// because their offset broke [`MAPPING_VIEW_OFFSET_ALIGNMENT`].
+pub static MISALIGNED_MAPPING_OFFSET_COPIES: Counter =
+    Counter::new("omega.metal.upload_block.misaligned_mapping_offset_copy");
+
+/// Whether `offset` may be bound as a no-copy view. A misaligned offset
+/// returns `false` after a `debug!` event naming the tensor, and the caller
+/// falls through to the copy path: correct, only slower.
+pub(super) fn mapping_offset_is_aligned(offset: usize, tensor_name: Option<&str>) -> bool {
+    if offset.is_multiple_of(MAPPING_VIEW_OFFSET_ALIGNMENT) {
+        return true;
+    }
+    counter!(MISALIGNED_MAPPING_OFFSET_COPIES, 1);
+    debug!(
+        tensor = ?tensor_name,
+        offset = offset as u64,
+        required_alignment = MAPPING_VIEW_OFFSET_ALIGNMENT as u64,
+        "metal_misaligned_mapping_offset_copied"
+    );
+    false
 }
 
 /// The whole-mapping no-copy buffer for a registered mapping, created once
@@ -1782,12 +1817,16 @@ pub(super) fn expert_mapping_offset(
     device: &ProtocolObject<dyn MTLDevice>,
     pointer: *const c_void,
     byte_length: usize,
+    tensor_name: Option<&str>,
 ) -> Option<Result<(MetalBuffer, usize), MetalError>> {
     let (base, mapping_length) = expert_mapping_identity()?;
     let address = pointer as usize;
     let end = address.checked_add(byte_length)?;
     let mapping_end = base.checked_add(mapping_length)?;
     if address < base || end > mapping_end {
+        return None;
+    }
+    if !mapping_offset_is_aligned(address - base, tensor_name) {
         return None;
     }
     counter!(MAPPING_OFFSET_UPLOADS, 1);
@@ -1842,7 +1881,8 @@ pub(super) mod checkpoint_mapping_release_tests {
 
     use super::{
         checkpoint_mapping_offset, clear_expert_source_cache, device_and_queue,
-        expert_mapping_offset, mapping_buffer_allocated_bytes, page_size,
+        expert_mapping_offset, mapping_buffer_allocated_bytes, mapping_offset_is_aligned,
+        page_size, MISALIGNED_MAPPING_OFFSET_COPIES,
         register_checkpoint_mapping, register_expert_mapping, reset_checkpoint_mapping_for_test,
         unregister_checkpoint_mapping, unregister_expert_mapping, upload_packed_bytes,
     };
@@ -1887,7 +1927,7 @@ pub(super) mod checkpoint_mapping_release_tests {
         // (now-stale) identity must not disturb B's live mapping.
         unregister_checkpoint_mapping(model_a_bytes);
         assert!(
-            checkpoint_mapping_offset(&device, model_b_bytes.as_ptr().cast(), model_b_bytes.len())
+            checkpoint_mapping_offset(&device, model_b_bytes.as_ptr().cast(), model_b_bytes.len(), None)
                 .is_some(),
             "model B's own mapping must survive a stale release of model A's superseded one"
         );
@@ -1895,7 +1935,7 @@ pub(super) mod checkpoint_mapping_release_tests {
         // model B's own drop releases its own, still-current identity.
         unregister_checkpoint_mapping(model_b_bytes);
         assert!(
-            checkpoint_mapping_offset(&device, model_b_bytes.as_ptr().cast(), model_b_bytes.len())
+            checkpoint_mapping_offset(&device, model_b_bytes.as_ptr().cast(), model_b_bytes.len(), None)
                 .is_none(),
             "releasing the CURRENTLY registered identity must actually clear it"
         );
@@ -1916,28 +1956,83 @@ pub(super) mod checkpoint_mapping_release_tests {
             .expect("page-aligned fixture for an expert sidecar mapping");
         let mapping_bytes =
             unsafe { core::slice::from_raw_parts(mapping.as_ptr().cast::<u8>(), page) };
-        let arena = &mapping_bytes[17..101];
+        let arena = &mapping_bytes[16..101];
 
         register_expert_mapping(mapping_bytes);
-        let (_buffer, offset) = expert_mapping_offset(&device, arena.as_ptr().cast(), arena.len())
+        let (_buffer, offset) = expert_mapping_offset(&device, arena.as_ptr().cast(), arena.len(), None)
             .expect("the arena lies inside the registered expert mapping")
             .expect("the whole expert mapping binds without copying");
-        assert_eq!(offset, 17);
+        assert_eq!(offset, 16);
         assert_eq!(mapping_buffer_allocated_bytes(), (0, page as u64));
 
         clear_expert_source_cache();
         assert_eq!(mapping_buffer_allocated_bytes(), (0, 0));
         assert!(
-            expert_mapping_offset(&device, arena.as_ptr().cast(), arena.len()).is_some(),
+            expert_mapping_offset(&device, arena.as_ptr().cast(), arena.len(), None).is_some(),
             "clearing staged sources must preserve the registered expert mapping"
         );
 
         unregister_expert_mapping(mapping_bytes);
         assert_eq!(mapping_buffer_allocated_bytes(), (0, 0));
         assert!(
-            expert_mapping_offset(&device, arena.as_ptr().cast(), arena.len()).is_none(),
+            expert_mapping_offset(&device, arena.as_ptr().cast(), arena.len(), None).is_none(),
             "unregistering the current expert mapping removes the offset alias"
         );
+    }
+
+    #[test]
+    fn mapping_view_offsets_are_bound_only_when_eight_byte_aligned() {
+        let table = [
+            (0usize, true),
+            (8, true),
+            (16, true),
+            (16384, true),
+            (1, false),
+            (3, false),
+            (4, false),
+            (7, false),
+            (3611, false),
+        ];
+        for (offset, aligned) in table {
+            assert_eq!(
+                mapping_offset_is_aligned(offset, Some("table.weight")),
+                aligned,
+                "offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn packed_upload_at_an_odd_checkpoint_offset_takes_the_copy_path() {
+        let _guard = MAPPING_TEST_LOCK
+            .lock()
+            .expect("mapping test lock is healthy");
+        let Ok((device, _queue)) = device_and_queue() else {
+            return;
+        };
+        reset_checkpoint_mapping_for_test();
+
+        let page = page_size();
+        let mapping = AlignedBuffer::new(page / core::mem::size_of::<f32>(), page)
+            .expect("page-aligned fixture for a checkpoint mapping");
+        let mapping_bytes =
+            unsafe { core::slice::from_raw_parts(mapping.as_ptr().cast::<u8>(), page) };
+        register_checkpoint_mapping(mapping_bytes);
+
+        let copies_before = MISALIGNED_MAPPING_OFFSET_COPIES.get();
+        let (_view, aligned_offset) =
+            upload_packed_bytes(&device, &mapping_bytes[8..72], Some("aligned.weight"))
+                .expect("aligned tensor uploads");
+        assert_eq!(aligned_offset, 8, "an aligned tensor stays a view into the mapping");
+        assert_eq!(MISALIGNED_MAPPING_OFFSET_COPIES.get(), copies_before);
+
+        let (_copy, odd_offset) =
+            upload_packed_bytes(&device, &mapping_bytes[3..67], Some("odd.weight"))
+                .expect("misaligned tensor still uploads");
+        assert_eq!(odd_offset, 0, "a misaligned tensor is copied into its own buffer");
+        assert!(MISALIGNED_MAPPING_OFFSET_COPIES.get() > copies_before);
+
+        unregister_checkpoint_mapping(mapping_bytes);
     }
 
     #[test]
