@@ -558,6 +558,9 @@ fn run_words_msl(plane: &Plane, plan: &RunWords, layout: &BlockLayout, run: u64,
         text.push_str(&format!("    uint {binding}_w{word} = {load};\n"));
     }
     text.push_str(&format!("    uint {binding}_codes[{run}];\n"));
+    if plan.static_shift.is_none() {
+        text.push_str(&word_lane_masks_msl(plan, bits, run as u32, binding));
+    }
     for lane in 0..run as u32 {
         let offset = lane * plan.stride_bits;
         text.push_str(&match plan.static_shift {
@@ -571,13 +574,35 @@ fn run_words_msl(plane: &Plane, plan: &RunWords, layout: &BlockLayout, run: u64,
                 }
             }
             None => format!(
-                "    {binding}_codes[{lane}] = ({binding}_w{} >> ({}u + {binding}_shift)) & {mask:#x}u;\n",
+                "    {binding}_codes[{lane}] = ({binding}_a{} >> {}u) & {mask:#x}u;\n",
                 offset / 32,
                 offset % 32
             ),
         });
     }
     text
+}
+
+// the run loop indexes `codes[]` and `out[]` per trip; only the clang spelling forces the full
+// unroll that keeps them in registers (proxnum-589).
+const RUN_UNROLL: &str = "_Pragma(\"clang loop unroll(full)\")";
+
+/// The runtime-shift word form: each loaded word is shifted by the run's bit shift and masked to
+/// its lanes' fields once (ggml's `(q4[i] >> 4*il) & 0x0f0f0f0f`), so a lane is then a constant
+/// shift of that word instead of a shift by a runtime sum.
+fn word_lane_masks_msl(plan: &RunWords, bits: u32, run: u32, binding: &str) -> String {
+    let field = (1u32 << bits) - 1;
+    (0..plan.words)
+        .filter_map(|word| {
+            let offsets = (0..run).map(|lane| lane * plan.stride_bits);
+            let in_word = offsets.filter(|offset| offset / 32 == word);
+            let lanes_mask = in_word.fold(0u32, |joined, offset| joined | (field << (offset % 32)));
+            (lanes_mask != 0).then(|| {
+                let shifted = format!("({binding}_w{word} >> {binding}_shift)");
+                format!("    uint {binding}_a{word} = {shifted} & {lanes_mask:#x}u;\n")
+            })
+        })
+        .collect()
 }
 
 fn coded_expression(coded: &Coded, index: &str, binding: &str, helper: &str) -> String {
@@ -1037,9 +1062,34 @@ fn word_run_level_msl(
         body.push_str(&run_words_msl(high, &high_plan, layout, run, "slot", "high", aligned));
         code = format!("(low_codes[run] | (high_codes[run] << {}u))", coded.low.bits);
     }
-    Some(format!(
-        "\nstatic inline void {function}(device const uchar *block, uint slot, thread half *out) {{\n{head}{body}    for (uint run = 0u; run < {run}u; ++run) {{\n        float raw = {name}_code({code});\n        out[run] = (half)(raw * {scale});\n    }}\n}}\n"
-    ))
+    let (table, raw) = level_lookup_msl(levels, name, &code);
+    let params = "(device const uchar *block, uint slot, thread half *out)";
+    let lane = format!("        float raw = {raw};\n        out[run] = (half)(raw * {scale});\n");
+    let open = format!("    {RUN_UNROLL} for (uint run = 0u; run < {run}u; ++run) {{\n");
+    let (setup, close) = (format!("{head}{body}"), "    }\n}\n");
+    Some(format!("{table}\nstatic inline void {function}{params} {{\n{setup}{open}{lane}{close}"))
+}
+
+/// The run decode's level lookup: an explicit table becomes a `constant float` array, read as
+/// float like ggml's `kvalues_iq4nl_f` with no per-lookup conversion. It is defined once under a
+/// guard so the guarded and word-aligned twins share it: two copies cost 2,113 vs 1,792 us on the
+/// IQ4_XS expert GEMM. Every other table keeps its `_code` helper. Returns the table definition
+/// (empty when none) and the lookup expression.
+fn level_lookup_msl(levels: &LevelTable, name: &str, code: &str) -> (String, String) {
+    match levels {
+        LevelTable::Explicit(values) => {
+            let floats = values.iter().map(|value| format!("{value}.0f"));
+            let entries = floats.collect::<Vec<_>>().join(", ");
+            let guard = format!("{name}_levels_f_defined");
+            let count = values.len();
+            let table = format!(
+                "\n#ifndef {guard}\n#define {guard}\n\
+constant float {name}_levels_f[{count}] = {{ {entries} }};\n#endif\n"
+            );
+            (table, format!("{name}_levels_f[{code}]"))
+        }
+        _ => (String::new(), format!("{name}_code({code})")),
+    }
 }
 
 fn sub_scale_product(scale_multiplier: i16) -> String {
