@@ -20,7 +20,7 @@ pub fn plan(
         symbols,
         blocks,
         outputs,
-        numeric_policy,
+        (numeric_policy, None),
         &[],
         (true, false),
     )
@@ -28,15 +28,21 @@ pub fn plan(
 
 /// `options` is `(fuse_cached_attention, wavefront_schedule)`; the second is
 /// the plan-time level schedule (`wavefront_schedule.rs`), off keeps program order.
+///
+/// `numeric` is the caller's policy plus the configured dense MMA layout; `None` is
+/// unconfigured (no grant, plan layout left to the emitter), `Some` goes through
+/// [`DenseMmaInputLayout::apply_to`] and [`DenseMmaInputLayout::plan_layout`].
 pub(super) fn plan_with_placed_inputs(
     program: &[Op],
     symbols: &[u64],
     blocks: &[QuantizedBlock<'_>],
     outputs: &[NodeId],
-    numeric_policy: NumericPolicy,
+    numeric: (NumericPolicy, Option<DenseMmaInputLayout>),
     placed_input_nodes: &[NodeId],
     options: (bool, bool),
 ) -> Result<Plan, MetalError> {
+    let (requested_policy, layout) = numeric;
+    let numeric_policy = layout.map_or(requested_policy, |layout| layout.apply_to(requested_policy));
     let (fuse_cached_attention, wavefront_schedule) = options;
     #[cfg(feature = "instrument")]
     let prepare_started = read_ticks();
@@ -45,7 +51,7 @@ pub(super) fn plan_with_placed_inputs(
         symbols,
         blocks,
         outputs,
-        numeric_policy,
+        requested_policy,
         placed_input_nodes,
         (fuse_cached_attention, wavefront_schedule),
     )?;
@@ -55,20 +61,22 @@ pub(super) fn plan_with_placed_inputs(
         counter!(PREPARE_TICKS, elapsed_ticks(prepare_started));
         emit_step_phase("prepare", prepare_started.as_raw(), read_ticks().as_raw());
     }
-    Ok(plan_from_prepared(
+    let mut plan = plan_from_prepared(
         program,
         symbols,
         prepared,
         numeric_policy,
         crate::msl::ambient_knobs(),
         RebindContext {
-            numeric_policy,
+            numeric_policy: requested_policy,
             fuse_cached_attention,
             allow_fusion: true,
             wavefront: wavefront_schedule,
             placed_input_nodes: placed_input_nodes.to_vec(),
         },
-    ))
+    );
+    plan.dense_mma_input_layout = layout.and_then(|layout| layout.plan_layout());
+    Ok(plan)
 }
 
 pub(super) fn plan_from_prepared(

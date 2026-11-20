@@ -236,7 +236,7 @@ use proxima_tensor::bind::{RowTemplate, apply_row_template, refresh_cached_atten
 use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError, block_node_ids, correct_packed_matmul_layouts, index_node_ids, infer, node_retirement, op_read_nodes, prune_dead, refit_cached_attention_rows, resolve_named_blocks};
 use proxima_numeric::{DType, NumericPolicy};
 
-use crate::config::{ResourceConstraints, RuntimeConfig};
+use crate::config::{DenseMmaInputLayout, ResourceConstraints, RuntimeConfig};
 #[cfg(feature = "instrument")]
 use crate::emit;
 use crate::error::EmitError;
@@ -568,3 +568,6 @@ mod command_buffer_failed_label_tests {
         assert_eq!(label_or_unlabeled(Some("")), "");
     }
 }
+#[cfg(all(test, feature = "metal-tiled-gemm"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod layout_rule_tests;

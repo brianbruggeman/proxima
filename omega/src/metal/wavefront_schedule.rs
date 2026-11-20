@@ -489,7 +489,7 @@ mod real_fixture_tests {
                 &[],
                 &blocks,
                 &outputs,
-                NumericPolicy::default(),
+                (NumericPolicy::default(), None),
                 &[],
                 (true, wavefront),
             )

@@ -2277,7 +2277,7 @@ pub fn plan_named(
         symbols,
         &blocks,
         outputs,
-        numeric_policy,
+        (numeric_policy, None),
         &[],
         (true, false),
     )
@@ -2337,7 +2337,7 @@ pub fn plan_named_with_placed_inputs_scheduled(
         symbols,
         &blocks,
         outputs,
-        numeric_policy,
+        (numeric_policy, None),
         placed_input_nodes,
         options,
     )

@@ -73,11 +73,7 @@ pub fn plan_named_with_config_and_placed_inputs(
         });
     }
     // Fragment selection is a Metal lowering permission, not a tensor-bind rewrite permission.
-    let plan_numeric_policy = if config.dense_mma_input_layout.uses_bf16_input_rounding() {
-        config.numeric.with_bf16_input_rounding(true)
-    } else {
-        config.numeric
-    };
+    let plan_numeric_policy = config.dense_mma_input_layout.apply_to(config.numeric);
     let prepared = prepare_with_options(
         program,
         symbols,
@@ -120,8 +116,7 @@ pub fn plan_named_with_config_and_placed_inputs(
                 .to_string(),
         });
     }
-    plan.dense_mma_input_layout = (!config.dense_mma_input_layout.derive_from_operands)
-        .then_some(config.dense_mma_input_layout.layout);
+    plan.dense_mma_input_layout = config.dense_mma_input_layout.plan_layout();
     plan.configured_input_contract = blocks
         .iter()
         .map(input_contract)
