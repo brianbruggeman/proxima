@@ -933,6 +933,27 @@ impl<'de> serde::Deserialize<'de> for NumericFormat {
     }
 }
 
+/// The env spelling a [`NumericFormat`] could not be resolved from.
+#[cfg(feature = "config")]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown numeric format `{0}`; expected a name such as float32, bfloat16 or q4_k")]
+pub struct NumericFormatParseError(pub std::string::String);
+
+/// An environment value is the format's config spelling, [`NumericFormat::from_name`]: a
+/// canonical name, an alias such as `bf16`, or the name of a `FloatLayout`.
+#[cfg(feature = "config")]
+impl conflaguration::FromEnvStr for NumericFormat {
+    type Err = NumericFormatParseError;
+
+    fn from_env_str(value: &str) -> Result<Self, Self::Err> {
+        Self::from_name(value).ok_or_else(|| NumericFormatParseError(value.into()))
+    }
+
+    fn type_name() -> &'static str {
+        "NumericFormat"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

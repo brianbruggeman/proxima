@@ -2,7 +2,8 @@ use std::io::Write;
 
 use moe_test_json as serde_json;
 use proxima_numeric::float_layout::{FloatLayout, NanPolicy, SignEncoding, Specials};
-use proxima_numeric::NumericPolicy;
+use conflaguration::FromEnvStr;
+use proxima_numeric::{NumericFormat, NumericPolicy, Numerics};
 use tempfile::NamedTempFile;
 
 use super::{
@@ -84,6 +85,7 @@ fn runtime_config_difference_count(left: &RuntimeConfig, right: &RuntimeConfig) 
         left.weight_conversion != right.weight_conversion,
         left.moe_grouping != right.moe_grouping,
         left.numeric != right.numeric,
+        left.numerics != right.numerics,
         left.dense_mma_input_layout != right.dense_mma_input_layout,
         left.constraints != right.constraints,
         left.selection != right.selection,
@@ -882,4 +884,73 @@ fn runtime_config_pipeline_cache_builder_matches_serde_config() {
         3,
         "the difference count must see all three pipeline cache fields"
     );
+}
+
+fn mixed_numerics() -> Numerics {
+    Numerics {
+        weights: NumericFormat::Q4K,
+        activation: NumericFormat::Float16,
+        accumulator: NumericFormat::Scalar(FloatLayout::F64),
+        epilogue: None,
+        policy: NumericPolicy::bit_exact().with_contraction(true),
+    }
+}
+
+#[test]
+fn numerics_default_is_the_reference_run_and_survives_a_round_trip() {
+    let config = RuntimeConfig::builder().build().expect("default builds");
+    let text = toml::to_string(&config).expect("runtime config serializes");
+    let restored: RuntimeConfig = toml::from_str(&text).expect("runtime config round-trips");
+
+    assert_eq!(config.numerics, Numerics::REFERENCE);
+    assert_eq!(restored, config);
+}
+
+#[test]
+fn numerics_builder_env_and_toml_agree() {
+    let source = "[numerics]\nweights = 'q4_k'\nactivation = 'float16'\n\
+                  accumulator = 'float64'\n[numerics.policy]\ncontraction = true\n";
+    let from_toml: RuntimeConfig = toml::from_str(source).expect("numerics TOML deserializes");
+    let from_builder = RuntimeConfig::builder()
+        .with_numerics(mixed_numerics())
+        .build()
+        .expect("numerics builder config validates");
+    let mut environment: Vec<(&str, Option<&str>)> = CLEAN_ENVIRONMENT.into_iter().collect();
+    environment.extend([
+        ("OMEGA_NUMERICS_WEIGHTS", Some("q4_k")),
+        ("OMEGA_NUMERICS_ACTIVATION", Some("float16")),
+        ("OMEGA_NUMERICS_ACCUMULATOR", Some("float64")),
+        ("OMEGA_NUMERICS_POLICY_CONTRACTION", Some("true")),
+    ]);
+    let from_env = temp_env::with_vars(environment, || {
+        RuntimeConfig::from_env().expect("numerics env config validates")
+    });
+
+    assert_eq!(from_toml.numerics, mixed_numerics());
+    assert_eq!(runtime_config_difference_count(&from_builder, &from_toml), 0);
+    assert_eq!(runtime_config_difference_count(&from_builder, &from_env), 0);
+}
+
+#[test]
+fn numerics_rejects_an_unknown_format_name_and_an_unknown_key() {
+    assert!(toml::from_str::<RuntimeConfig>("[numerics]\nweights = 'q9_9'\n").is_err());
+    assert!(toml::from_str::<RuntimeConfig>("[numerics]\nweight = 'q4_k'\n").is_err());
+    let mut environment: Vec<(&str, Option<&str>)> = CLEAN_ENVIRONMENT.into_iter().collect();
+    environment.push(("OMEGA_NUMERICS_WEIGHTS", Some("q9_9")));
+    temp_env::with_vars(environment, || assert!(RuntimeConfig::from_env().is_err()));
+}
+
+#[test]
+fn dense_mma_layout_env_spelling_falls_back_to_any_float_layout_name() {
+    let aliases = [
+        ("auto", DenseMmaInputLayout::derived()),
+        ("f32", DenseMmaInputLayout::explicit(FloatLayout::BF32)),
+        ("bf16", DenseMmaInputLayout::explicit(FloatLayout::BF16)),
+        ("float16", DenseMmaInputLayout::explicit(FloatLayout::F16)),
+        ("fp6_e3m2", DenseMmaInputLayout::explicit(FloatLayout::E3M2)),
+    ];
+    for (spelling, expected) in aliases {
+        assert_eq!(DenseMmaInputLayout::from_env_str(spelling), Ok(expected), "{spelling}");
+    }
+    assert!(DenseMmaInputLayout::from_env_str("float7").is_err());
 }

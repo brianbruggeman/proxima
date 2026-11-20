@@ -13,18 +13,36 @@ use crate::format::NumericFormat;
 use crate::numeric::NumericPolicy;
 
 /// One run's numeric decisions.
+///
+/// With the `config` feature this is a conflaguration `Settings` (env prefix `NUMERICS`, e.g.
+/// `NUMERICS_WEIGHTS=q4_k`, `NUMERICS_POLICY_CONTRACTION=true`) and a serde struct, and the
+/// defaults are [`Numerics::REFERENCE`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "config", derive(conflaguration::Settings))]
+#[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "config", settings(prefix = "NUMERICS"))]
+#[cfg_attr(feature = "config", serde(default, deny_unknown_fields))]
 pub struct Numerics {
     /// How stored weights are packed, e.g. [`NumericFormat::Q4K`].
+    #[cfg_attr(feature = "config", setting(default_str = "float32"))]
     pub weights: NumericFormat,
     /// How activations are stored between ops, e.g. [`NumericFormat::Float16`].
+    #[cfg_attr(feature = "config", setting(default_str = "float32"))]
     pub activation: NumericFormat,
     /// How a reduction accumulates, e.g. [`NumericFormat::Scalar`] over binary32.
+    #[cfg_attr(feature = "config", setting(default_str = "float32"))]
     pub accumulator: NumericFormat,
     /// The dtype a fused epilogue reads its operand at, `None` when no epilogue is fused.
     pub epilogue: Option<NumericFormat>,
     /// Which bit-changing rewrites the plan may apply.
+    #[cfg_attr(feature = "config", setting(nested))]
     pub policy: NumericPolicy,
+}
+
+impl Default for Numerics {
+    fn default() -> Self {
+        Self::REFERENCE
+    }
 }
 
 impl Numerics {
@@ -80,5 +98,74 @@ mod tests {
         assert_eq!(blocks, 1);
         assert_eq!(&out[..2], &[-8.0, -8.0]);
         assert_eq!(BlockLayout::Q4_0.elements, 32);
+    }
+}
+
+#[cfg(all(test, feature = "config"))]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn the_settings_default_is_the_reference_run() {
+        assert_eq!(Numerics::default(), Numerics::REFERENCE);
+        let defaulted: Numerics = toml::from_str("").expect("an empty table is the default");
+        assert_eq!(defaulted, Numerics::REFERENCE);
+    }
+
+    #[test]
+    fn builder_env_and_toml_agree_for_a_mixed_run() {
+        use conflaguration::Settings;
+
+        let expected = Numerics {
+            weights: NumericFormat::Q4K,
+            activation: NumericFormat::BFloat16,
+            accumulator: NumericFormat::Scalar(FloatLayout::F64),
+            epilogue: Some(NumericFormat::Float16),
+            policy: NumericPolicy::bit_exact().with_contraction(true),
+        };
+        let from_toml: Numerics = toml::from_str(
+            "weights = 'q4_k'\nactivation = 'bf16'\naccumulator = 'float64'\n\
+             epilogue = 'float16'\n[policy]\ncontraction = true\n",
+        )
+        .expect("numerics TOML deserializes");
+        let from_env = temp_env::with_vars(
+            [
+                ("NUMERICS_WEIGHTS", Some("q4_k")),
+                ("NUMERICS_ACTIVATION", Some("bf16")),
+                ("NUMERICS_ACCUMULATOR", Some("float64")),
+                ("NUMERICS_EPILOGUE", Some("float16")),
+                ("NUMERICS_POLICY_CONTRACTION", Some("true")),
+            ],
+            || Numerics::from_env().expect("numerics env parses"),
+        );
+        let from_fields = Numerics::with_weights(NumericFormat::Q4K);
+        let from_fields = Numerics {
+            activation: NumericFormat::BFloat16,
+            accumulator: NumericFormat::Scalar(FloatLayout::F64),
+            epilogue: Some(NumericFormat::Float16),
+            policy: NumericPolicy::bit_exact().with_contraction(true),
+            ..from_fields
+        };
+
+        assert_eq!(from_toml, expected);
+        assert_eq!(from_env, expected);
+        assert_eq!(from_fields, expected);
+    }
+
+    #[test]
+    fn an_unset_environment_resolves_to_the_reference_run() {
+        use conflaguration::Settings;
+
+        let cleared = [
+            "NUMERICS_WEIGHTS",
+            "NUMERICS_ACTIVATION",
+            "NUMERICS_ACCUMULATOR",
+            "NUMERICS_EPILOGUE",
+            "NUMERICS_POLICY_CONTRACTION",
+        ]
+        .map(|name| (name, None::<&str>));
+        let resolved = temp_env::with_vars(cleared, || Numerics::from_env().expect("resolves"));
+
+        assert_eq!(resolved, Numerics::REFERENCE);
     }
 }

@@ -6,7 +6,7 @@
 
 use conflaguration::{FromEnvStr, Settings, Validate, ValidationMessage};
 use proxima_numeric::float_layout::{FloatLayout, SignEncoding};
-use proxima_numeric::NumericPolicy;
+use proxima_numeric::{NumericPolicy, Numerics};
 use crate::msl::EmitKnobs;
 use serde::de::{self, MapAccess, Visitor};
 use serde::{Deserialize, Deserializer, Serialize};
@@ -93,6 +93,10 @@ pub struct RuntimeConfig {
     /// Existing numeric permissions shared with binding and emission, such as contraction for an MMA path.
     #[setting(nested)]
     pub numeric: NumericPolicy,
+    /// Storage, activation and accumulator formats of a run, such as `weights = "q4_k"`.
+    /// Recorded here; lowering does not read it yet.
+    #[setting(nested)]
+    pub numerics: Numerics,
     /// Metal emit A/B switches, such as `tiled_gemm_grid2d = false`; the `PROXIMA_*` env spellings are unchanged.
     #[setting(nested, override_prefix = "PROXIMA")]
     pub emit: EmitKnobs,
@@ -132,6 +136,7 @@ impl Default for RuntimeConfig {
             weight_conversion: WeightConversionStrategy::default(),
             moe_grouping: true,
             numeric: NumericPolicy::bit_exact(),
+            numerics: Numerics::REFERENCE,
             emit: EmitKnobs::default(),
             dense_mma_input_layout: DenseMmaInputLayout::default(),
             constraints: ResourceConstraints::default(),
@@ -256,7 +261,9 @@ impl FromEnvStr for DenseMmaInputLayout {
             "auto" => Ok(Self::derived()),
             "f32" => Ok(Self::explicit(FloatLayout::BF32)),
             "bf16" => Ok(Self::explicit(FloatLayout::BF16)),
-            _ => Err(DenseMmaInputLayoutParseError(value.to_owned())),
+            other => FloatLayout::from_name(other)
+                .map(Self::explicit)
+                .ok_or_else(|| DenseMmaInputLayoutParseError(value.to_owned())),
         }
     }
 
@@ -272,7 +279,7 @@ impl fmt::Display for DenseMmaInputLayoutParseError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
-            "unknown value '{}'; expected auto|f32|bf16",
+            "unknown value '{}'; expected auto|f32|bf16 or a float layout name",
             self.0
         )
     }
@@ -879,6 +886,13 @@ impl RuntimeConfigBuilder {
     #[must_use]
     pub fn with_numeric(mut self, value: NumericPolicy) -> Self {
         self.inner.numeric = value;
+        self
+    }
+
+    /// Set the run's storage, activation and accumulator formats.
+    #[must_use]
+    pub fn with_numerics(mut self, value: Numerics) -> Self {
+        self.inner.numerics = value;
         self
     }
 

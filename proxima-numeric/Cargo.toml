@@ -33,6 +33,7 @@ workspace = true
 criterion.workspace = true
 proxima-gguf.workspace = true
 serde_json.workspace = true
+temp-env.workspace = true
 toml.workspace = true
 
 [[bench]]
