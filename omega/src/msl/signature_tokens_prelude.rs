@@ -402,7 +402,7 @@ pub(super) fn entry_name_with_schedule(
                 &resolved.kind,
                 form,
                 &upper_token,
-                schedule.is_flash(),
+                schedule.for_op(&resolved.kind).is_flash(),
             );
             #[cfg(not(feature = "metal-attn-split-rows"))]
             let row_tiled_name: Option<String> = None;
@@ -1926,10 +1926,16 @@ pub struct AttentionVariant {
 /// `cached_attention_flash_tiled.rs`, which keeps the same dispatch contract (buffers, `Uniforms`, grid)
 /// and so composes with every other axis the row-tiled form reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "std", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "std", serde(rename_all = "snake_case"))]
 pub enum AttentionDecomposition {
     Legacy,
     #[cfg(feature = "metal-attn-variants")]
     Flash,
+    /// Flash on every op `flash_admission` admits, Legacy on every op it refuses: the per-op form of `Flash`, which instead
+    /// refuses the whole plan when any op is not admitted. A run that cannot know its shapes up front selects this.
+    #[cfg(feature = "metal-attn-variants")]
+    FlashWhereAdmitted,
 }
 
 #[cfg(feature = "metal-attn-variants")]
@@ -2247,12 +2253,33 @@ impl AttentionRowSchedule {
         }
     }
 
+    /// The schedule one op runs: `FlashWhereAdmitted` resolves to `Flash` where [`flash_admission`] admits `kind` and to
+    /// `Legacy` where it refuses; every other decomposition is already per-plan and passes through.
+    #[cfg(feature = "metal-attn-split-rows")]
+    pub(crate) fn for_op(self, kind: &BoundOpKind) -> Self {
+        #[cfg(not(feature = "metal-attn-variants"))]
+        let _ = kind;
+        match self.decomposition {
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionDecomposition::FlashWhereAdmitted if flash_admission(kind).is_ok() => {
+                self.with_decomposition(AttentionDecomposition::Flash)
+            }
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionDecomposition::FlashWhereAdmitted => {
+                self.with_decomposition(AttentionDecomposition::Legacy)
+            }
+            _ => self,
+        }
+    }
+
     #[cfg(feature = "metal-attn-split-rows")]
     pub(crate) const fn is_flash(self) -> bool {
         match self.decomposition {
             AttentionDecomposition::Legacy => false,
             #[cfg(feature = "metal-attn-variants")]
             AttentionDecomposition::Flash => true,
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionDecomposition::FlashWhereAdmitted => false,
         }
     }
 
@@ -2270,7 +2297,7 @@ impl AttentionRowSchedule {
                 self.simdgroup_count,
                 AttentionSimdgroupCountSelection::Legacy
             )
-            && !self.is_flash()
+            && matches!(self.decomposition, AttentionDecomposition::Legacy)
     }
 
     #[cfg(feature = "metal-attn-variants")]
@@ -2437,6 +2464,8 @@ impl AttentionRowSchedule {
             AttentionDecomposition::Legacy => "",
             #[cfg(feature = "metal-attn-variants")]
             AttentionDecomposition::Flash => "_flash",
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionDecomposition::FlashWhereAdmitted => "_flash_if_admitted",
         };
         alloc::format!(
             "{reuse}{}{query}{prefetch}{topology}{simdgroup_count}{decomposition}",
@@ -2449,9 +2478,13 @@ impl AttentionRowSchedule {
         all(feature = "metal", target_os = "macos")
     ))]
     pub(crate) fn cache_token_for(self, bound: &BoundOp, policy: NumericPolicy) -> String {
+        #[cfg(feature = "metal-attn-split-rows")]
+        let this = self.for_op(&bound.kind);
+        #[cfg(not(feature = "metal-attn-split-rows"))]
+        let this = self;
         if matches!(bound.kind, BoundOpKind::CachedAttention { .. }) {
-            let mut token = self.cache_token();
-            token.push_str(&self.row_tile_class_token(bound, policy));
+            let mut token = this.cache_token();
+            token.push_str(&this.row_tile_class_token(bound, policy));
             token
         } else {
             String::new()
@@ -2748,6 +2781,9 @@ pub(crate) fn cached_attention_form_with_schedule(
     else {
         return None;
     };
+    // a where-admitted decomposition is per-op: every reader of the form (the kernel, the grid, the identity) sees the resolved one
+    #[cfg(feature = "metal-attn-split-rows")]
+    let schedule = schedule.for_op(kind);
     #[cfg(not(feature = "metal-attn-split-rows"))]
     let _ = schedule;
     let base_operand_len = if rotary_dim < head_dim { 11 } else { 8 };
@@ -2778,6 +2814,7 @@ pub(crate) fn validate_tile_height_selection(
     policy: NumericPolicy,
     schedule: AttentionRowSchedule,
 ) -> Result<(), EmitError> {
+    let schedule = schedule.for_op(&resolved.kind);
     let selection = schedule.tile_height();
     let Some(rows) = selection.explicit_rows() else {
         return Ok(());
@@ -2887,6 +2924,7 @@ pub(crate) fn validate_simd_topology_selection(
     policy: NumericPolicy,
     schedule: AttentionRowSchedule,
 ) -> Result<(), EmitError> {
+    let schedule = schedule.for_op(&resolved.kind);
     if !schedule.has_explicit_simd_topology() {
         return Ok(());
     }

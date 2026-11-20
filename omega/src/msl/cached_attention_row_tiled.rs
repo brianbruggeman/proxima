@@ -191,7 +191,7 @@ pub(super) fn render_cached_attention_row_tiled_with(
             dtype: resolved.dtype,
         });
     }
-    if row_schedule.is_flash() {
+    if row_schedule.for_op(&resolved.kind).is_flash() {
         return render_cached_attention_flash_tiled(resolved, entry, cached_kv_codec);
     }
     let cached_lower = if *cached_lower_inclusive == i64::MIN {

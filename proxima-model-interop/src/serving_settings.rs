@@ -5,7 +5,7 @@ use conflaguration::{Settings, Validate};
     feature = "metal-attn-variants",
     target_os = "macos"
 ))]
-use omega::{AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant};
+use omega::{AttentionDecomposition, AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
 use proxima_numeric::{NumericFormat, NumericPolicy};
@@ -303,6 +303,17 @@ pub struct ServingSettings {
     #[setting(resolve_with = "from_name", default_str = "legacy")]
     #[builder(default = AttentionTileHeightSetting::Legacy)]
     pub attention_tile_height: AttentionTileHeightSetting,
+    /// how each row-tiled cached-attention op walks its keys: `legacy` (default), `flash_where_admitted` (flash on every op
+    /// `omega`'s flash admission accepts, legacy on the rest), or `flash` (flash on every op, refusing the plan if one is not
+    /// admitted). env `PROXIMA_SERVING_ATTENTION_DECOMPOSITION`.
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    #[setting(resolve_with = "from_name", default_str = "legacy")]
+    #[builder(default = AttentionDecomposition::Legacy)]
+    pub attention_decomposition: AttentionDecomposition,
     /// `ServingConfig::weight_precision`: ordered per-tensor recode rules, first match wins.
     #[setting(resolve_with = "from_json", default_str = "[]")]
     #[builder(default)]
@@ -489,10 +500,12 @@ impl ServingSettings {
                 let variant = AttentionVariant {
                     simdgroup_count: self.attention_simdgroup_count,
                     tile_height: self.attention_tile_height.as_tile_height(),
+                    decomposition: self.attention_decomposition,
                     ..AttentionVariant::default()
                 };
                 if variant.simdgroup_count == AttentionSimdgroupCount::Legacy
                     && variant.tile_height == AttentionTileHeight::Legacy
+                    && variant.decomposition == AttentionDecomposition::Legacy
                 {
                     None
                 } else {
@@ -1163,6 +1176,32 @@ epilogue_sources = true
         let invalid: Result<ServingSettings, _> =
             conflaguration::from_toml_str("attention_tile_height = \"rows32\"");
         assert!(invalid.is_err(), "unsupported tile heights are rejected");
+    }
+
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    #[test]
+    fn attention_decomposition_setting_round_trips_and_is_legacy_by_default() {
+        let built = ServingSettings::builder()
+            .attention_decomposition(AttentionDecomposition::FlashWhereAdmitted)
+            .build();
+        round_trip::assert_three_ways(
+            "attention_decomposition = \"flash_where_admitted\"",
+            &[("PROXIMA_SERVING_ATTENTION_DECOMPOSITION", "flash_where_admitted")],
+            &built,
+        );
+        let lowered = built
+            .as_serving_config(&[])
+            .attention_variant
+            .expect("flash where admitted lowers to an attention variant");
+        assert_eq!(lowered.decomposition, AttentionDecomposition::FlashWhereAdmitted);
+
+        let default = ServingSettings::default();
+        assert_eq!(default.attention_decomposition, AttentionDecomposition::Legacy);
+        assert!(default.as_serving_config(&[]).attention_variant.is_none());
     }
 
     #[test]

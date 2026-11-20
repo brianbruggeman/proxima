@@ -32,6 +32,8 @@ fn effective_attention_row_schedule(
     numeric_policy: NumericPolicy,
     row_schedule: AttentionRowSchedule,
 ) -> AttentionRowSchedule {
+    #[cfg(feature = "metal-attn-split-rows")]
+    let row_schedule = row_schedule.for_op(&resolved.kind);
     if !row_schedule.has_shared_k() {
         return row_schedule;
     }

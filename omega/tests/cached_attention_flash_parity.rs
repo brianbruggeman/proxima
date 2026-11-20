@@ -77,13 +77,17 @@ fn schedule(window: Option<u32>, head_dim: u32) -> Vec<LayerSchedule> {
 }
 
 fn fixture(rows: u64, cached_len: u64, window: Option<u32>, head_dim: u32) -> Fixture {
+    fixture_with_query_heads(rows, cached_len, window, head_dim, QUERY_HEADS)
+}
+
+fn fixture_with_query_heads(rows: u64, cached_len: u64, window: Option<u32>, head_dim: u32, query_heads: u32) -> Fixture {
     let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
         scheduled_two_range_cached_forward_program_with_experts(
             VOCAB,
             EMBEDDING,
             FEED_FORWARD,
             0,
-            QUERY_HEADS,
+            query_heads,
             LAYERS,
             0,
             0,
@@ -273,4 +277,82 @@ fn flash_holds_bit_parity_with_legacy_at_head_dim_512_on_whole_blocks_and_tail_r
 #[test]
 fn flash_holds_bit_parity_with_legacy_at_head_dim_512_under_sliding_windows() {
     assert_all_cells_match(512, &SLIDING_CELLS);
+}
+
+fn changed_elements(left: &[u32], right: &[u32]) -> usize {
+    left.iter().zip(right).filter(|(a, b)| a != b).count() + left.len().abs_diff(right.len())
+}
+
+fn where_admitted_vs_legacy(
+    head_dim: u32,
+    label: &str,
+    rows: u64,
+    cached_len: u64,
+    window: Option<u32>,
+) -> Result<(), String> {
+    let cell = format!("d{head_dim} {label}: rows {rows} cached_len {cached_len} window {window:?}");
+    let fixture = fixture(rows, cached_len, window, head_dim);
+    let (legacy, _) = logits_under(&fixture, omega::AttentionDecomposition::Legacy);
+    let (_, flash_keys) = logits_under(&fixture, omega::AttentionDecomposition::Flash);
+    let (admitted, admitted_keys) = logits_under(&fixture, omega::AttentionDecomposition::FlashWhereAdmitted);
+    assert!(!legacy.is_empty(), "{cell}: an empty root compares nothing");
+    assert!(
+        flash_keys.iter().any(|key| key.contains("_flash")),
+        "{cell}: the flash oracle must run the flash kernel"
+    );
+    let differing = changed_elements(&legacy, &admitted);
+    let flash_attention: Vec<&String> = flash_keys.iter().filter(|key| key.contains("cached_attention")).collect();
+    let admitted_attention: Vec<&String> = admitted_keys.iter().filter(|key| key.contains("cached_attention")).collect();
+    eprintln!(
+        "where_admitted parity: {cell} elements={} differing={differing} flash_kernels={flash_attention:?} admitted_kernels={admitted_attention:?}",
+        legacy.len()
+    );
+    if admitted_keys != flash_keys {
+        return Err(format!(
+            "{cell}: flash_where_admitted ran different kernels than Flash, differing={differing}, flash {flash_attention:?} admitted {admitted_attention:?}"
+        ));
+    }
+    if admitted_keys.iter().any(|key| key.contains("_flash_if_admitted")) {
+        return Err(format!("{cell}: an unresolved decomposition reached a kernel identity"));
+    }
+    if differing == 0 {
+        return Ok(());
+    }
+    Err(format!("{cell}: {differing} of {} elements differ from legacy", legacy.len()))
+}
+
+fn assert_where_admitted_cells_match(head_dim: u32, cells: &[Cell]) {
+    let failures: Vec<String> = cells
+        .iter()
+        .filter_map(|(label, rows, cached_len, window)| {
+            where_admitted_vs_legacy(head_dim, label, *rows, *cached_len, *window).err()
+        })
+        .collect();
+    eprintln!("where_admitted parity SUMMARY: cells={} failing={}", cells.len(), failures.len());
+    assert!(failures.is_empty(), "{} of {} cells differ:\n{}", failures.len(), cells.len(), failures.join("\n"));
+}
+
+#[test]
+fn flash_where_admitted_runs_flash_with_legacy_parity_at_head_dim_128_on_whole_blocks_and_tail_rows() {
+    assert_where_admitted_cells_match(128, &WHOLE_AND_TAIL_CELLS);
+}
+
+#[test]
+fn flash_where_admitted_runs_flash_with_legacy_parity_at_head_dim_128_under_sliding_windows() {
+    assert_where_admitted_cells_match(128, &SLIDING_CELLS);
+}
+
+#[test]
+fn flash_where_admitted_keeps_legacy_for_an_op_flash_refuses() {
+    let query_heads = 64;
+    let fixture = fixture_with_query_heads(64, 64, None, 128, query_heads);
+    let (legacy, legacy_keys) = logits_under(&fixture, omega::AttentionDecomposition::Legacy);
+    let (admitted, admitted_keys) = logits_under(&fixture, omega::AttentionDecomposition::FlashWhereAdmitted);
+    assert!(!legacy.is_empty(), "an empty root compares nothing");
+    assert!(
+        admitted_keys.iter().all(|key| !key.contains("_flash")),
+        "a refused op must run the legacy kernel, keys {admitted_keys:?}"
+    );
+    assert_eq!(admitted_keys, legacy_keys);
+    assert_eq!(changed_elements(&legacy, &admitted), 0);
 }

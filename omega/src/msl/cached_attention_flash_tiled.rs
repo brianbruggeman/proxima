@@ -10,7 +10,7 @@ pub(super) const FLASH_SIMDGROUPS: u64 = crate::sized::ATTENTION_ROWS_FLASH_SIMD
 /// Keys per MMA tile: the unit the body's tile loads never leave the cached extent by.
 const FLASH_KEY_TILE: u64 = 8;
 
-/// The head widths flash is verified against Legacy for: flint's three attention shapes. Each is
+/// The head widths flash is verified against Legacy for: the three served attention widths. Each is
 /// a whole number of float4 per lane of one simdgroup (`head_dim / 128` per lane), which is what
 /// the body's O rescale and row write step by.
 const FLASH_HEAD_DIMS: [u64; 3] = [128, 256, 512];

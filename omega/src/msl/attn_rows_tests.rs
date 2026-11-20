@@ -3016,3 +3016,47 @@ fn selecting_flash_for_a_refused_shape_reports_the_named_refusal() {
         })
     );
 }
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn flash_where_admitted_gives_flash_to_an_admitted_op_and_legacy_to_a_refused_one() {
+    let admitted = flash_full_layer_op(128);
+    let refused = flash_op(16, 128, 2048, 512, i64::MIN);
+    assert_eq!(flash_admission(&refused.kind), Err(FlashRefusal::QueryGroups));
+    let variant = flash_f16_variant(AttentionDecomposition::FlashWhereAdmitted);
+    let (_, schedule) = AttentionMmaSelection::from_variant(variant).expect("the variant maps to a schedule");
+
+    assert!(schedule.for_op(&admitted.kind).is_flash());
+    assert!(!schedule.for_op(&refused.kind).is_flash());
+    let flash = emit_variant_wide(&admitted, &f16_cache_operands(&admitted), NumericPolicy::llama_relaxed(), variant)
+        .expect("an admitted op emits the flash kernel");
+    let legacy = emit_variant_wide(&refused, &f16_cache_operands(&refused), NumericPolicy::llama_relaxed(), variant)
+        .expect("a refused op keeps legacy instead of failing the run");
+    assert!(flash.source.contains("flash_block<half>"));
+    assert!(!legacy.source.contains("flash_block"));
+    assert!(emit_variant_wide(
+        &refused,
+        &f16_cache_operands(&refused),
+        NumericPolicy::llama_relaxed(),
+        flash_f16_variant(AttentionDecomposition::Flash),
+    )
+    .is_err());
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn flash_is_off_by_default_even_for_an_admitted_op() {
+    let admitted = flash_full_layer_op(128);
+    assert_eq!(AttentionVariant::default().decomposition, AttentionDecomposition::Legacy);
+    let (_, schedule) = AttentionMmaSelection::from_variant(AttentionVariant::default()).expect("default maps");
+
+    assert!(!schedule.for_op(&admitted.kind).is_flash());
+    let kernel = emit_variant_wide(
+        &admitted,
+        &f16_cache_operands(&admitted),
+        NumericPolicy::llama_relaxed(),
+        flash_f16_variant(AttentionDecomposition::Legacy),
+    )
+    .expect("legacy emits");
+    assert!(!kernel.source.contains("flash_block"));
+}
