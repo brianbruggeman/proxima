@@ -121,6 +121,7 @@ http1 = [
     "dep:tokio",
     "dep:tokio-util",
     "dep:xxhash-rust",
+    "templates",
     # `listener/mod.rs`'s legacy no-`AcceptorFactory` accept loop (only
     # compiled when `http-listener` is also enabled) needs the tokio-io
     # compat bridge, the tokio proxy-protocol reader, and proxima-listen's
@@ -130,6 +131,7 @@ http1 = [
     "proxima-protocols/proxy_protocol-tokio-runtime",
     "proxima-listen/tokio",
 ]
+templates = ["dep:xxhash-rust"]
 http1-tls = ["http1", "dep:hyper-rustls"]
 # tokio-free: the prime-native h1 client (client.rs/prime_upstream.rs) needs
 # only the sans-IO h1 codec, not the hyper/tokio-backed `http1` feature —
@@ -142,6 +144,7 @@ http1-stream-client = [
     "dep:proxima-tls",
     "dep:url",
     "dep:xxhash-rust",
+    "templates",
 ]
 # webpki-roots is a mandatory (non-optional) dep here — proxima-h3's
 # quinn-compat/native-upstream paths reference it directly regardless

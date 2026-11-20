@@ -34,7 +34,7 @@ pub mod http2;
 pub mod http3;
 #[cfg(feature = "http-listener")]
 pub mod listener;
-#[cfg(any(feature = "http1", feature = "http1-stream-client"))]
+#[cfg(feature = "templates")]
 pub mod templates;
 #[cfg(feature = "websocket")]
 pub mod websocket;

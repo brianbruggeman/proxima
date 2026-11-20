@@ -744,6 +744,7 @@ tokio = [
     # bodies — without this, `--no-default-features --features tokio` fails
     # to compile on an unresolved `crate::recording`/`crate::verify::replay_walker`.
     "recording",
+    "proxima-http/templates",
 ]
 
 # Runtime-agnostic: `proxima-listen`'s `stream` module
