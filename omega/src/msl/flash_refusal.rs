@@ -5,7 +5,7 @@
 /// A caller that selected `AttentionDecomposition::Flash` and is refused can log
 /// [`FlashRefusal::reason`] and re-select `Legacy`; the validator surfaces the same reason as
 /// `EmitError::CachedAttentionVariantAxisNotSupported { axis: "decomposition", .. }`. Head
-/// dimension 512 is a `ThreadgroupBytes` refusal.
+/// dimension 512 reads Q from device; `ThreadgroupBytes` refuses a shape whose tiles exceed the budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum FlashRefusal {
     /// The op is not a cached attention at all.

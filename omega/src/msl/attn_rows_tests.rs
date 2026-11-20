@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use super::attn_golden_tests::{attention_op, attention_rows_op};
 #[cfg(feature = "metal-attn-variants")]
-use super::cached_attention_flash_tiled::{flash_admission, flash_threadgroup_bytes};
+use super::cached_attention_flash_tiled::{flash_admission, flash_admission_within, flash_threadgroup_bytes_within};
 #[cfg(feature = "metal-attn-variants")]
 use super::flash_refusal::FlashRefusal;
 use super::*;
@@ -2870,26 +2870,29 @@ fn legacy_decomposition_emits_no_flash_body_for_the_same_op() {
 
 #[cfg(feature = "metal-attn-variants")]
 #[test]
-fn flash_decomposition_refuses_a_head_whose_stages_overflow_threadgroup_memory() {
+fn flash_decomposition_emits_head_dim_512_reading_q_from_device() {
     let op = flash_full_layer_op(512);
     let packed = f16_cache_operands(&op);
 
-    let outcome = emit_variant_wide(
+    let emitted = emit_variant_wide(
         &op,
         &packed,
         NumericPolicy::llama_relaxed(),
         flash_f16_variant(AttentionDecomposition::Flash),
-    );
+    )
+    .expect("flash emits at head dim 512");
 
-    assert!(outcome.is_err(), "flash must not silently fall back to another body");
-    assert_eq!(
-        outcome.err(),
-        Some(EmitError::CachedAttentionVariantAxisNotSupported {
-            axis: "decomposition",
-            value: FlashRefusal::ThreadgroupBytes.reason(),
-        }),
-        "the refusal names the threadgroup bytes, not a generic row-tiled failure"
-    );
+    assert!(emitted.source.contains("device const float* qe_base = in0 + qbase;"));
+    assert!(!emitted.source.contains("sq["));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn flash_decomposition_refuses_a_head_whose_tiles_overflow_the_budget() {
+    let op = flash_full_layer_op(512);
+
+    assert_eq!(flash_admission_within(&op.kind, 20_480), Ok(()));
+    assert_eq!(flash_admission_within(&op.kind, 20_479), Err(FlashRefusal::ThreadgroupBytes));
 }
 
 #[test]
@@ -2897,8 +2900,8 @@ fn flash_sized_keys_equal_the_constants_they_replaced() {
     assert_eq!(crate::sized::ATTENTION_ROWS_FLASH_SIMDGROUPS, 4);
 }
 
-/// Head dim 256 is admitted at its own 128-key block (20,992 B); 512 needs 37,376 B against the
-/// 32,768 B ceiling and 96 is no flint shape.
+/// Head dim 256 is admitted at its own 128-key block (20,992 B); 512 reads Q from device (20,480 B; staged it would need 37,376 B against the
+/// 32,768 B ceiling) and 96 is no flint shape.
 #[cfg(feature = "metal-attn-variants")]
 #[test]
 fn flash_admission_table_names_the_condition_each_shape_fails() {
@@ -2917,20 +2920,16 @@ fn flash_admission_table_names_the_condition_each_shape_fails() {
         ("sliding_window_is_admitted", flash_op(8, 128, 2048, 512, SLIDING_LOWER), Ok(())),
         ("flint_window_513_tail_rows", flash_op(8, 128, 3584, 487, -512), Ok(())),
         ("d256_fits_at_the_128_key_block", flash_op(8, 256, 2048, 512, i64::MIN), Ok(())),
-        (
-            "d512_stages_overflow_threadgroup_memory",
-            flash_op(8, 512, 2048, 512, i64::MIN),
-            Err(FlashRefusal::ThreadgroupBytes),
-        ),
+        ("d512_reads_q_from_device", flash_op(8, 512, 2048, 512, i64::MIN), Ok(())),
         ("d96_is_no_flint_shape", flash_op(8, 96, 2048, 512, i64::MIN), Err(FlashRefusal::HeadDim)),
     ];
 
     for (name, op, expected) in cases {
         assert_eq!(flash_admission(&op.kind), expected, "{name}");
     }
-    assert_eq!(flash_threadgroup_bytes(128), 10_752);
-    assert_eq!(flash_threadgroup_bytes(256), 20_992);
-    assert_eq!(flash_threadgroup_bytes(512), 37_376);
+    assert_eq!(flash_threadgroup_bytes_within(128, crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES), 10_752);
+    assert_eq!(flash_threadgroup_bytes_within(256, crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES), 20_992);
+    assert_eq!(flash_threadgroup_bytes_within(512, crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES), 20_480);
 }
 
 #[cfg(feature = "metal-attn-variants")]

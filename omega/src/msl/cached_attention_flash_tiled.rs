@@ -21,12 +21,26 @@ fn flash_block(head_dim: u64) -> u64 {
     row_tiled_block(head_dim)
 }
 
-/// Static threadgroup bytes the flash body declares for `head_dim`: the Q stage `sq`
-/// (`16 * (head_dim / 2 + 8)` floats), the output `so` (`8 * head_dim`) and the scores `ss`
-/// (`8 * block`), each one accumulator scalar wide.
-pub(super) fn flash_threadgroup_bytes(head_dim: u64) -> u64 {
-    let floats = 16 * (head_dim / 2 + 8) + 8 * head_dim + 8 * flash_block(head_dim);
+/// Whether the flash body stages Q in threadgroup memory for `head_dim` under `budget`: it does
+/// while the stage `sq` (`16 * (head_dim / 2 + 8)` floats) fits beside the output and scores, and
+/// otherwise reads Q from device f32, as Legacy does once its query tile is over
+/// `query_tile_staged`'s limits (`signature_tokens_prelude.rs`). Both are binary32 reads of the same
+/// values, so the choice moves no rounding.
+fn flash_stages_query(head_dim: u64, budget: u64) -> bool {
+    flash_bytes(head_dim, true) <= budget
+}
+
+fn flash_bytes(head_dim: u64, staged: bool) -> u64 {
+    let stage = if staged { 16 * (head_dim / 2 + 8) } else { 0 };
+    let floats = stage + 8 * head_dim + 8 * flash_block(head_dim);
     floats * core::mem::size_of::<f32>() as u64
+}
+
+/// Static threadgroup bytes the flash body declares for `head_dim` within `budget`: the Q stage
+/// `sq` when [`flash_stages_query`] (`16 * (head_dim / 2 + 8)` floats), the output `so`
+/// (`8 * head_dim`) and the scores `ss` (`8 * block`), each one accumulator scalar wide.
+pub(super) fn flash_threadgroup_bytes_within(head_dim: u64, budget: u64) -> u64 {
+    flash_bytes(head_dim, flash_stages_query(head_dim, budget))
 }
 
 /// The query heads per kv head the flash body's fragment map assumes.
@@ -35,8 +49,9 @@ const FLASH_QUERY_GROUPS: u64 = 8;
 /// Admits `kind` for the flash body, or names the one condition it fails: a sinked, causal op,
 /// full or sliding-window over the cached keys, of eight query heads per kv head whose cached extent is a whole
 /// number of 8-key tiles. Conditions are checked in the order of [`FlashRefusal`]; the first
-/// failure is the reason. Head dims 128, 256 and 512 are the shapes verified; 512 fails
-/// `ThreadgroupBytes` (its stages exceed `CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES`).
+/// failure is the reason. Head dims 128, 256 and 512 are the shapes verified; 512 reads Q
+/// from device (its Q stage would not fit); a shape whose tiles exceed the budget even so fails
+/// `ThreadgroupBytes`.
 ///
 /// Any query row count is admitted: the keys of the new rows past the last whole tile run the
 /// scalar `flash_tail` step, as the row-tiled kernel's `mode == 2`. Tile loads are guarded by the
@@ -46,6 +61,11 @@ const FLASH_QUERY_GROUPS: u64 = 8;
 /// inside the live keys ends inside the buffer. Keys between the live length and the tile end
 /// are masked to -inf by `visible` and their V rows zeroed, as the row-tiled kernel.
 pub(super) fn flash_admission(kind: &BoundOpKind) -> Result<(), FlashRefusal> {
+    flash_admission_within(kind, crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES)
+}
+
+/// [`flash_admission`] against an explicit threadgroup-memory `budget`.
+pub(super) fn flash_admission_within(kind: &BoundOpKind, budget: u64) -> Result<(), FlashRefusal> {
     let BoundOpKind::CachedAttention {
         query_rows,
         cached_key_rows,
@@ -70,7 +90,7 @@ pub(super) fn flash_admission(kind: &BoundOpKind) -> Result<(), FlashRefusal> {
             FlashRefusal::CachedRowsNotWholeTiles,
         ),
         (
-            flash_threadgroup_bytes(*head_dim) <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
+            flash_threadgroup_bytes_within(*head_dim, budget) <= budget,
             FlashRefusal::ThreadgroupBytes,
         ),
     ];
@@ -136,10 +156,20 @@ pub(super) fn render_cached_attention_flash_tiled(
         format!("{cached_lower_inclusive}L")
     };
     let half_dim = head_dim / 2;
+    let staged = flash_stages_query(*head_dim, crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES);
+    let (q_space, q_stride, q_decl, q_setup) = if staged {
+        ("threadgroup", half_dim + 8, STAGED_Q_DECL, STAGED_Q_SETUP)
+    } else {
+        ("device", half_dim, "", DEVICE_Q_SETUP)
+    };
     let simdgroups = FLASH_SIMDGROUPS;
     let block = flash_block(*head_dim);
     let substitutions = [
         ("@ENTRY@", entry.to_string()),
+        ("@QSPACE@", q_space.to_string()),
+        ("@QSTRIDE@", q_stride.to_string()),
+        ("@Q_DECL@", q_decl.to_string()),
+        ("@Q_SETUP@", q_setup.to_string()),
         ("@KV_HEADS@", kv_heads.to_string()),
         ("@GROUPS@", query_groups.to_string()),
         ("@HEAD_DIM@", head_dim.to_string()),
@@ -170,10 +200,20 @@ pub(super) fn render_cached_attention_flash_tiled(
     Ok(source)
 }
 
+const STAGED_Q_DECL: &str = "threadgroup @ACC@ sq[16 * (half_dim + 8)];";
+
+const STAGED_Q_SETUP: &str = r#"for (int i = (int)sg * 32 + (int)lane; i < 8 * half_dim; i += @THREADS@) {
+        int v = i / half_dim, c = i % half_dim;
+        sq[v * qstride + c] = @ACC@(in0[qbase + i]); sq[(8 + v) * qstride + c] = @ACC@(in1[qbase + i]);
+    }
+    threadgroup const @ACC@* qe_base = sq; threadgroup const @ACC@* qo_base = sq + 8 * qstride;"#;
+
+const DEVICE_Q_SETUP: &str = "device const @ACC@* qe_base = in0 + qbase; device const @ACC@* qo_base = in1 + qbase;";
+
 const FLASH_TILED_KERNEL: &str = r#"#define FOR_UNROLL _Pragma("clang loop unroll(full)")
 struct Uniforms { long total_elements; long splits; };
 constant constexpr int kv_heads = @KV_HEADS@, groups = @GROUPS@, head_dim = @HEAD_DIM@, half_dim = @HALF_DIM@;
-constant constexpr int nsg = @NSG@, block = @BLOCK@, nq = @NQ@, no = @NO@, lane_vectors = @LANE_VECTORS@, stage = half_dim + 8, tiles = block / 8;
+constant constexpr int nsg = @NSG@, block = @BLOCK@, nq = @NQ@, no = @NO@, lane_vectors = @LANE_VECTORS@, qstride = @QSTRIDE@, tiles = block / 8;
 constant constexpr @ACC@ scale = @SCALE@f;
 
 template <typename T> struct k_frag;
@@ -228,7 +268,7 @@ inline void flash_softmax(threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @
 
 template <typename T>
 inline void flash_block(device const T* ke, device const T* ko, device const T* vv, int key0, int columns, int valid_end, bool cached_phase, int row, long lower,
-                        threadgroup const @ACC@* sq, threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq],
+                        @QSPACE@ const @ACC@* qe_base, @QSPACE@ const @ACC@* qo_base, threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq],
                         int kv_head, ushort lane, ushort sg) {
     const int kstride = kv_heads * half_dim, vstride = kv_heads * head_dim;
     FOR_UNROLL for (int cc = 0; cc < @QK_PER_SG@; ++cc) {                       // QK: key tiles sg and sg + 4
@@ -241,8 +281,8 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
                 FOR_UNROLL for (int j = 0; j < half_dim / 8; ++j) {   // chain e0,o0,e1,o1,... as the row-tiled kernel
                     simdgroup_barrier(mem_flags::mem_none);
                     @ACC_FRAG@ qe, qo; typename k_frag<T>::type kef, kof;
-                    simdgroup_load(qe, sq + 8 * j, (ulong)stage);
-                    simdgroup_load(qo, sq + 8 * stage + 8 * j, (ulong)stage);
+                    simdgroup_load(qe, qe_base + 8 * j, (ulong)qstride);
+                    simdgroup_load(qo, qo_base + 8 * j, (ulong)qstride);
                     load_k(kef, kep + 8 * j, kstride);
                     load_k(kof, kop + 8 * j, kstride);
                     simdgroup_barrier(mem_flags::mem_none);
@@ -274,7 +314,7 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
 }
 
 inline void flash_tail(device const @ACC@* ke, device const @ACC@* ko, device const @ACC@* vv, int key0, int columns, int row, long lower,
-                       threadgroup const @ACC@* sq, threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq],
+                       @QSPACE@ const @ACC@* qe_base, @QSPACE@ const @ACC@* qo_base, threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq],
                        int kv_head, ushort lane, ushort sg) {
     const int kstride = kv_heads * half_dim, vstride = kv_heads * head_dim;
     const int pairs = 8 * columns;                                    // the new keys past the last whole 8-key tile: the row-tiled scalar step
@@ -284,8 +324,8 @@ inline void flash_tail(device const @ACC@* ke, device const @ACC@* ko, device co
         int v = pair / columns, column = pair % columns;
         @ACC@ partial = 0.0f;
         if (pair < pairs) {
-            threadgroup const @ACC@4* qe4 = (threadgroup const @ACC@4*)(sq + v * stage);
-            threadgroup const @ACC@4* qo4 = (threadgroup const @ACC@4*)(sq + (8 + v) * stage);
+            @QSPACE@ const @ACC@4* qe4 = (@QSPACE@ const @ACC@4*)(qe_base + v * qstride);
+            @QSPACE@ const @ACC@4* qo4 = (@QSPACE@ const @ACC@4*)(qo_base + v * qstride);
             device const @ACC@4* ke4 = (device const @ACC@4*)(ke + (key0 + column) * kstride + kv_head * half_dim);
             device const @ACC@4* ko4 = (device const @ACC@4*)(ko + (key0 + column) * kstride + kv_head * half_dim);
             for (short index = tx; index < (short)(half_dim / 4); index += 8) {
@@ -322,13 +362,10 @@ kernel void @ENTRY@(device const @ACC@* in0 [[buffer(0)]], device const @ACC@* i
     int row = rows - 1 - ((int)tgid % rows);                          // heaviest first, as the row-tiled form
     int kv_head = (int)tgid / rows;
     int live = (int)in8[0];
-    threadgroup @ACC@ sq[16 * stage]; threadgroup @ACC@4 so4[8 * head_dim / 4]; threadgroup @ACC@ ss[8 * block];
+    @Q_DECL@ threadgroup @ACC@4 so4[8 * head_dim / 4]; threadgroup @ACC@ ss[8 * block];
     threadgroup @ACC@* so = (threadgroup @ACC@*)so4;
     int qbase = (row * (kv_heads * groups) + kv_head * groups) * half_dim;
-    for (int i = (int)sg * 32 + (int)lane; i < 8 * half_dim; i += @THREADS@) {
-        int v = i / half_dim, c = i % half_dim;
-        sq[v * stage + c] = @ACC@(in0[qbase + i]); sq[(8 + v) * stage + c] = @ACC@(in1[qbase + i]);
-    }
+    @Q_SETUP@
     for (int i = (int)sg * 32 + (int)lane; i < 8 * head_dim; i += @THREADS@) { so[i] = 0.0f; }
     @ACC@ M[nq], S[nq];
     FOR_UNROLL for (int jj = 0; jj < nq; ++jj) {
@@ -341,14 +378,14 @@ kernel void @ENTRY@(device const @ACC@* in0 [[buffer(0)]], device const @ACC@* i
     long row0 = (long)row - (long)row % tile_rows;
     long first_key = max(0L, (long)live + cached_lower + row0) & ~7L;   // legacy block boundaries start at the window, not at 0
     for (long key0 = first_key; key0 < live; key0 += block) {
-        flash_block<@ELEM@>(in2, in3, in6, (int)key0, min(block, live - (int)key0), live, true, row, cached_lower, sq, ss, so, M, S, kv_head, lane, sg);
+        flash_block<@ELEM@>(in2, in3, in6, (int)key0, min(block, live - (int)key0), live, true, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg);
     }
     int whole = rows & ~7, mma_end = min(row + 1, whole);
     long new_start = max(0L, row0 + cached_lower) & ~7L;
     for (long key0 = new_start; key0 < mma_end; key0 += block) {
-        flash_block<@ACC@>(in4, in5, in7, (int)key0, min(block, mma_end - (int)key0), mma_end, false, row, cached_lower, sq, ss, so, M, S, kv_head, lane, sg);
+        flash_block<@ACC@>(in4, in5, in7, (int)key0, min(block, mma_end - (int)key0), mma_end, false, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg);
     }
-    if (row >= whole) { flash_tail(in4, in5, in7, whole, rows - whole, row, cached_lower, sq, ss, so, M, S, kv_head, lane, sg); }
+    if (row >= whole) { flash_tail(in4, in5, in7, whole, rows - whole, row, cached_lower, qe_base, qo_base, ss, so, M, S, kv_head, lane, sg); }
     FOR_UNROLL for (int jj = 0; jj < nq; ++jj) {
         int v = jj * nsg + sg;
         @ACC@ inverse = S[jj] == 0.0f ? 0.0f : 1.0f / S[jj];

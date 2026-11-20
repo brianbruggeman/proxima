@@ -1,7 +1,7 @@
 //! Flash-vs-legacy bit parity for the cached-attention flash decomposition
 //! (`AttentionDecomposition::Flash`, `omega/src/msl/cached_attention_flash_tiled.rs`) against the
 //! row-tiled legacy kernel it replaces, on flint's full-layer shape: 32 query heads on 4 kv heads
-//! (eight per kv head), head_dim 128, an attention sink, a binary16 cache. Each cell plans one
+//! (eight per kv head), head_dim 128, 256 or 512, an attention sink, a binary16 cache. Each cell plans one
 //! two-layer prefill twice over the same packed cache, once per decomposition, and asserts the
 //! logits are bit-identical, so every difference between the two kernels shows up as a nonzero
 //! `max_abs_diff`. The legacy kernel is the oracle: a difference here is a flash defect.
@@ -263,4 +263,14 @@ fn flash_holds_bit_parity_with_legacy_at_head_dim_256_under_sliding_windows() {
 #[test]
 fn flash_holds_bit_parity_with_legacy_under_the_flint_sliding_window() {
     assert_all_cells_match(128, &SLIDING_CELLS);
+}
+
+#[test]
+fn flash_holds_bit_parity_with_legacy_at_head_dim_512_on_whole_blocks_and_tail_rows() {
+    assert_all_cells_match(512, &WHOLE_AND_TAIL_CELLS);
+}
+
+#[test]
+fn flash_holds_bit_parity_with_legacy_at_head_dim_512_under_sliding_windows() {
+    assert_all_cells_match(512, &SLIDING_CELLS);
 }
