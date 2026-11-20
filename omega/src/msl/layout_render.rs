@@ -47,6 +47,13 @@ impl HardwareType {
     pub fn matrix(&self) -> String {
         format!("simdgroup_{}8x8", self.scalar)
     }
+
+    /// Two 4-wide vectors as one 8-element value, e.g. `matrix<half, 2, 4>` (`float2x4` for a
+    /// `float` tile); a spelled-out template so narrow scalars need no typedef.
+    #[must_use]
+    pub fn pair_of_vectors(&self) -> String {
+        format!("matrix<{}, 2, 4>", self.scalar)
+    }
 }
 
 /// The Metal type whose fields equal `layout`'s, compared field by field and never by name.

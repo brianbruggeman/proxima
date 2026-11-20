@@ -2483,7 +2483,7 @@ fn dense_weight_staging_loads_a_register_array_before_the_tile_stores() {
 /// The router's dense MMA staging (`ffn_gate_inp`: a BF16 weight, an f32 activation, 2048-long
 /// reduction): all 128 threads take part (two per weight row, 16 contiguous K elements each),
 /// the run is read as `uint4` vectors and decoded in registers, and the activation is read as
-/// `float4`. The scalar per-element read stays as the guarded fallback, so the tile values are
+/// one `float2x4`. The scalar per-element read stays as the guarded fallback, so the tile values are
 /// those of the one-thread-per-row loop.
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
@@ -2530,7 +2530,7 @@ fn dense_weight_staging_uses_every_thread_and_wide_loads_for_the_router_shape() 
     );
     assert_eq!(source.matches(&format!("static inline float {decode}(")).count(), 1);
     assert!(!source.contains("bf16_element(in1"), "no hand-listed accessor in the stage\n{source}");
-    assert!(source.contains("a_value = *((device const float4 *)("), "{source}");
+    assert!(source.contains("float2x4 a_value = *((device const float2x4 *)("), "{source}");
     assert!(
         source.contains(&format!("{decode}(((uint)in1[w_element * 2 + 0] << 0u) | ((uint)in1[w_element * 2 + 1] << 8u))")),
         "the guarded per-element read assembles the code and decodes it the same way\n{source}"
@@ -12315,7 +12315,7 @@ fn router_bf16_weight_without_input_rounding_permission_takes_the_float_tile_mma
 
 /// The router under the default serving config (`dense_mma_input_layout = derived` grants bf16 input
 /// rounding, so the tiles are `bfloat`): the weight is staged by all 128 threads as `uint4` runs
-/// decoded in registers straight into the bf16 tile, and the activation is read as `float4` and
+/// decoded in registers straight into the bf16 tile, and the activation is read as one `float2x4` and
 /// converted with the scalar loop's own `bfloat(float)`; the guarded scalar reads stay as fallback.
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
@@ -12333,8 +12333,8 @@ fn router_bf16_tile_stages_weights_and_activations_with_wide_loads() {
     assert!(source.contains("w_vec[vec] = ((device const uint4 *)w_run)[vec];"), "{source}");
     assert!(source.contains("= bfloat(w_regs[w_k]); }"), "the decoded run converts into the bf16 tile\n{source}");
     assert!(source.contains("= bfloat(0.0f); }"), "{source}");
-    assert!(source.contains("a_value = *((device const float4 *)("), "the activation loads as float4\n{source}");
-    assert!(source.contains("act_tile[a_col * 32 + a_k + lane] = bfloat(a_value[lane]);"), "{source}");
+    assert!(source.contains("float2x4 a_value = *((device const float2x4 *)("), "the activation loads as one float2x4\n{source}");
+    assert!(source.contains("*((threadgroup matrix<bfloat, 2, 4> *)a_dst) = matrix<bfloat, 2, 4>(a_value);"), "one bf16 store as wide as the tile type times the lanes\n{source}");
     assert!(!source.contains("for (long idx = tiitg; idx < 1024;"), "no strided scalar activation loop\n{source}");
     if let Ok(dir) = std::env::var("PROXIMA_STAGE_DUMP_DIR") {
         std::fs::write(format!("{dir}/dense_router_bf16_stage.metal"), &source).expect("writes the router MSL dump");

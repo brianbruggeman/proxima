@@ -1358,6 +1358,10 @@ pub(super) fn push_tiled_gemm_body(
     Err(EmitError::TiledGemmFeatureDisabled { node })
 }
 
+/// Elements one thread stages per activation vector: one `float2x4` load, the widest single vector
+/// read Metal offers for binary32, as `kernel_mul_mm` loads `float2x4`.
+#[cfg(feature = "metal-tiled-gemm")]
+const ACTIVATION_STAGE_LANES: u64 = 8;
 /// How a value staged into a dense MMA tile is written: `open`/`close` wrap the decoded float
 /// (`bfloat(` `)` for bf16 tiles, empty for f32 tiles) and `zero` fills out-of-range slots. The wrap
 /// is the same `bfloat(float)` conversion the one-thread-per-element loop applies.
@@ -1533,10 +1537,13 @@ fn push_wide_weight_stage(
     source.push_str("            }\n        }\n");
 }
 
-/// Activation staging for the dense tile (f32, or bf16 through `tile_cast`): each thread takes four contiguous K elements of one
-/// token as one `float4` when the K stride is one, the four lie inside the reduction and the
-/// address is 16-byte aligned; otherwise element by element with the same guards as the scalar
-/// loop. The tile holds the same values at the same indices.
+/// Activation staging for the dense tile (f32, or any narrower tile type through `tile_cast`), in
+/// `kernel_mul_mm`'s per-thread form: each thread takes [`ACTIVATION_STAGE_LANES`] contiguous K
+/// elements of one token as one `float2x4` load when the K stride is one, the run lies inside the
+/// reduction and the address is 16-byte aligned, converts in registers to the tile's own matrix
+/// type (`pair_of_vectors`, from `hardware_stage_type`) and writes the run as one store
+/// `tile bytes * lanes` wide. Otherwise the same run is read element by element with the scalar
+/// loop's guards. The tile holds the same values at the same indices.
 #[cfg(feature = "metal-tiled-gemm")]
 #[allow(clippy::too_many_arguments)]
 fn push_wide_activation_stage(
@@ -1547,29 +1554,36 @@ fn push_wide_activation_stage(
     block_n: u64,
     block_k: u64,
     block_threads: u64,
+    tile_stage: layout_render::HardwareType,
     tile_cast: &TileCast,
 ) {
     let TileCast { open, close, .. } = tile_cast;
-    let lanes = 4u64;
+    let lanes = ACTIVATION_STAGE_LANES;
+    let tile_scalar = tile_stage.scalar;
+    let tile_pair = tile_stage.pair_of_vectors();
     let vectors = block_n * block_k / lanes;
+    let per_row = block_k / lanes;
+    let (head, tail) = if vectors == block_threads {
+        ("        {\n            long vec = tiitg;\n".to_string(), "        }\n")
+    } else if vectors < block_threads {
+        (format!("        if (tiitg < {vectors}) {{\n            long vec = tiitg;\n"), "        }\n")
+    } else {
+        (format!("        for (long vec = tiitg; vec < {vectors}; vec += {block_threads}) {{\n"), "        }\n")
+    };
+    source.push_str(&head);
     source.push_str(&format!(
-        "        for (long vec = tiitg; vec < {vectors}; vec += {block_threads}) {{\n            long a_col = vec / {};\n            long a_k = (vec % {}) * {lanes};\n            long a_tok = col_tile * {block_n} + a_col;\n            long a_k_global = k0 + a_k;\n            float4 a_value = float4(0.0f);\n",
-        block_k / lanes,
-        block_k / lanes
-    ));
-    source.push_str("            if (a_tok < token_extent) {\n");
-    source.push_str(&format!(
-        "                long aoff = u.operand_base[{other}] + dense_other_batch_base + a_tok * u.operand_strides[{other}][{token_axis}] + a_k_global * u.operand_strides[{other}][{reduce_dim}];\n                long a_stride = u.operand_strides[{other}][{reduce_dim}];\n"
-    ));
-    source.push_str(&format!(
-        "                if (a_stride == 1 && a_k_global + {lanes} <= u.reduction_total && (((ulong)(in{other} + aoff)) & 15ul) == 0ul) {{\n                    a_value = *((device const float4 *)(in{other} + aoff));\n                }} else {{\n"
-    ));
-    source.push_str(&format!(
-        "                    for (int lane = 0; lane < {lanes}; ++lane) {{ if (a_k_global + lane < u.reduction_total) {{ a_value[lane] = in{other}[aoff + (long)lane * a_stride]; }} }}\n                }}\n            }}\n"
+        "            long a_col = vec / {per_row};\n            long a_k = (vec % {per_row}) * {lanes};\n            long a_tok = col_tile * {block_n} + a_col;\n            long a_k_global = k0 + a_k;\n            threadgroup {tile_scalar} *a_dst = act_tile + a_col * {block_k} + a_k;\n"
     ));
     source.push_str(&format!(
-        "            for (int lane = 0; lane < {lanes}; ++lane) {{ act_tile[a_col * {block_k} + a_k + lane] = {open}a_value[lane]{close}; }}\n        }}\n"
+        "            long aoff = u.operand_base[{other}] + dense_other_batch_base + a_tok * u.operand_strides[{other}][{token_axis}] + a_k_global * u.operand_strides[{other}][{reduce_dim}];\n            long a_stride = u.operand_strides[{other}][{reduce_dim}];\n"
     ));
+    source.push_str(&format!(
+        "            if (a_tok < token_extent && a_stride == 1 && a_k_global + {lanes} <= u.reduction_total && (((ulong)(in{other} + aoff)) & 15ul) == 0ul) {{\n                float2x4 a_value = *((device const float2x4 *)(in{other} + aoff));\n                *((threadgroup {tile_pair} *)a_dst) = {tile_pair}(a_value);\n            }} else {{\n"
+    ));
+    source.push_str(&format!(
+        "                for (int lane = 0; lane < {lanes}; ++lane) {{ a_dst[lane] = {open}(a_tok < token_extent && a_k_global + lane < u.reduction_total) ? in{other}[aoff + (long)lane * a_stride] : 0.0f{close}; }}\n            }}\n"
+    ));
+    source.push_str(tail);
 }
 
 /// The dense (unquantized) counterpart to [`push_tiled_gemm_body`]: BOTH
@@ -1871,7 +1885,7 @@ pub(super) fn push_dense_batched_gemm_body(
     }
     if other_codec.is_none() {
         push_wide_activation_stage(
-            source, other, token_axis, reduce_dim, block_n, block_k, block_threads, &tile_cast,
+            source, other, token_axis, reduce_dim, block_n, block_k, block_threads, tile_stage, &tile_cast,
         );
     } else {
     source.push_str(&format!(

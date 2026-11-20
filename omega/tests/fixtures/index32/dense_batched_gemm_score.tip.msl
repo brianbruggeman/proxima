@@ -1197,22 +1197,21 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero(
                 for (int fill_k = 0; fill_k < 16; ++fill_k) { weight_tile[w_row * 32 + w_part_k + fill_k] = 0.0f; }
             }
         }
-        for (int vec = tiitg; vec < 256; vec += 128) {
-            int a_col = vec / 8;
-            int a_k = (vec % 8) * 4;
+        {
+            int vec = tiitg;
+            int a_col = vec / 4;
+            int a_k = (vec % 4) * 8;
             int a_tok = col_tile * 32 + a_col;
             int a_k_global = k0 + a_k;
-            float4 a_value = float4(0.0f);
-            if (a_tok < token_extent) {
-                int aoff = ((int)u.operand_base[1]) + dense_other_batch_base + a_tok * ((int)u.operand_strides[1][0]) + a_k_global * ((int)u.operand_strides[1][3]);
-                int a_stride = ((int)u.operand_strides[1][3]);
-                if (a_stride == 1 && a_k_global + 4 <= ((int)u.reduction_total) && (((ulong)(in1 + aoff)) & 15ul) == 0ul) {
-                    a_value = *((device const float4 *)(in1 + aoff));
-                } else {
-                    for (int lane = 0; lane < 4; ++lane) { if (a_k_global + lane < ((int)u.reduction_total)) { a_value[lane] = in1[aoff + (int)lane * a_stride]; } }
-                }
+            threadgroup float *a_dst = act_tile + a_col * 32 + a_k;
+            int aoff = ((int)u.operand_base[1]) + dense_other_batch_base + a_tok * ((int)u.operand_strides[1][0]) + a_k_global * ((int)u.operand_strides[1][3]);
+            int a_stride = ((int)u.operand_strides[1][3]);
+            if (a_tok < token_extent && a_stride == 1 && a_k_global + 8 <= ((int)u.reduction_total) && (((ulong)(in1 + aoff)) & 15ul) == 0ul) {
+                float2x4 a_value = *((device const float2x4 *)(in1 + aoff));
+                *((threadgroup matrix<float, 2, 4> *)a_dst) = matrix<float, 2, 4>(a_value);
+            } else {
+                for (int lane = 0; lane < 8; ++lane) { a_dst[lane] = (a_tok < token_extent && a_k_global + lane < ((int)u.reduction_total)) ? in1[aoff + (int)lane * a_stride] : 0.0f; }
             }
-            for (int lane = 0; lane < 4; ++lane) { act_tile[a_col * 32 + a_k + lane] = a_value[lane]; }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (int sub_k = 0; sub_k < 4; ++sub_k) {
