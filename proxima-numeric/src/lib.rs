@@ -64,6 +64,7 @@ pub mod numerics;
 #[cfg(feature = "alloc")]
 pub mod packed_rows;
 pub mod range_fit;
+pub mod rng;
 pub mod row_block;
 pub mod tables;
 mod two_level;
@@ -82,6 +83,7 @@ pub use format_id::FormatId;
 pub use int8_dot::{Int8DotShape, int8_dot_shape};
 pub use numeric::{NumericPolicy, NumericRewrite, admit, dense_matmul_uses_bf16_tiles};
 pub use numerics::Numerics;
+pub use rng::{Philox, RngError, RngKind};
 pub use row_block::{RowBlockShape, row_block_shape};
 pub use format_codec::FormatCodec;
 pub use value::Numeric;

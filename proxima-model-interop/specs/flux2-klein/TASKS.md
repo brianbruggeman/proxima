@@ -8,7 +8,7 @@ A missing fixture is a failure; `0 passed` is red.
 - [ ] **S0 oracle dumps and measured floor.**
   Build a patched copy of sd.cpp outside the repo (`~/.cache/kvgate/proxnum588/sdcpp-dump/`), run the reference command, dump noise, text embedding, 4 step latents and the VAE output; run the same inputs on sd.cpp CPU vs Metal to get the incumbent's own floor; confirm Metal from the log; measure reference-image RMS; write the effective thresholds into SPEC.md.
   Validate: `ls ~/.cache/kvgate/proxnum588/ref` lists 8 files; `grep -c "mu=2.29" ~/.cache/kvgate/proxnum588/ref/ref.log` prints 1.
-- [ ] **S1 Philox noise.** Philox4x32-10 + Box-Muller generator, config key `rng`; `std_default` and `cpu` refused with a named reason.
+- [x] **S1 Philox noise.** Philox4x32-10 + Box-Muller generator, config key `rng`; `std_default` and `cpu` refused with a named reason.
   Validate: `cargo val -p proxima-model-interop --test flux2_klein philox::` -> `3 passed` (AC2).
 - [ ] **S2 flow-match scheduler + Euler step.** Config `mu` coefficients, `steps`, `image_seq_len`; the Euler update is one Elementwise.
   Validate: `cargo val -p proxima-model-interop --test flux2_klein scheduler::` -> `3 passed` (AC4).
