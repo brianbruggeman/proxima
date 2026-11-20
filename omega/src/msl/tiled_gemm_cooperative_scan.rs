@@ -1358,6 +1358,27 @@ pub(super) fn push_tiled_gemm_body(
     Err(EmitError::TiledGemmFeatureDisabled { node })
 }
 
+/// How a value staged into a dense MMA tile is written: `open`/`close` wrap the decoded float
+/// (`bfloat(` `)` for bf16 tiles, empty for f32 tiles) and `zero` fills out-of-range slots. The wrap
+/// is the same `bfloat(float)` conversion the one-thread-per-element loop applies.
+#[cfg(feature = "metal-tiled-gemm")]
+struct TileCast {
+    open: String,
+    close: &'static str,
+    zero: String,
+}
+
+#[cfg(feature = "metal-tiled-gemm")]
+impl TileCast {
+    /// binary32 tiles take the decoded float as is; any narrower hardware type converts through its own constructor.
+    fn for_stage(stage: layout_render::HardwareType) -> Self {
+        if stage.scalar == "float" {
+            return Self { open: String::new(), close: "", zero: "0.0f".into() };
+        }
+        Self { open: format!("{}(", stage.scalar), close: ")", zero: format!("{}(0.0f)", stage.scalar) }
+    }
+}
+
 /// How a dense weight operand's contiguous K run is read as 16-byte vectors and decoded from its
 /// element codes in registers. The plan is derived from the operand's numeric description: a
 /// codec that is one element per block with a [`FloatLayout`] whose width is a whole number of
@@ -1427,6 +1448,7 @@ fn wide_run_plan(
 /// through the same derived decode. Tile values and their k order are those of the
 /// one-thread-per-row loop.
 #[cfg(feature = "metal-tiled-gemm")]
+#[allow(clippy::too_many_arguments)]
 fn push_wide_weight_stage(
     source: &mut String,
     plan: &WideRunPlan,
@@ -1435,6 +1457,7 @@ fn push_wide_weight_stage(
     feature_axis: u16,
     block_m: u64,
     block_k: u64,
+    tile_cast: &TileCast,
 ) {
     let WideRunPlan {
         element_bytes,
@@ -1444,6 +1467,7 @@ fn push_wide_weight_stage(
         ref decode_helper,
         byte_buffer,
     } = *plan;
+    let TileCast { open, close, zero } = tile_cast;
     let vectors = run * element_bytes / 16;
     if let Some(anchor) = source.find("struct Uniforms {") {
         source.insert_str(anchor, &format!("{decode_helper}\n"));
@@ -1500,20 +1524,21 @@ fn push_wide_weight_stage(
     source.push_str("                    }\n                }\n");
     source.push_str("                #pragma unroll\n");
     source.push_str(&format!(
-        "                for (int w_k = 0; w_k < {run}; ++w_k) {{ weight_tile[w_row * {block_k} + w_part_k + w_k] = w_regs[w_k]; }}\n"
+        "                for (int w_k = 0; w_k < {run}; ++w_k) {{ weight_tile[w_row * {block_k} + w_part_k + w_k] = {open}w_regs[w_k]{close}; }}\n"
     ));
     source.push_str("            } else {\n");
     source.push_str(&format!(
-        "                for (long fill_k = 0; fill_k < {run}; ++fill_k) {{ weight_tile[w_row * {block_k} + w_part_k + fill_k] = 0.0f; }}\n"
+        "                for (long fill_k = 0; fill_k < {run}; ++fill_k) {{ weight_tile[w_row * {block_k} + w_part_k + fill_k] = {zero}; }}\n"
     ));
     source.push_str("            }\n        }\n");
 }
 
-/// Activation staging for the f32 dense tile: each thread takes four contiguous K elements of one
+/// Activation staging for the dense tile (f32, or bf16 through `tile_cast`): each thread takes four contiguous K elements of one
 /// token as one `float4` when the K stride is one, the four lie inside the reduction and the
 /// address is 16-byte aligned; otherwise element by element with the same guards as the scalar
 /// loop. The tile holds the same values at the same indices.
 #[cfg(feature = "metal-tiled-gemm")]
+#[allow(clippy::too_many_arguments)]
 fn push_wide_activation_stage(
     source: &mut String,
     other: usize,
@@ -1522,7 +1547,9 @@ fn push_wide_activation_stage(
     block_n: u64,
     block_k: u64,
     block_threads: u64,
+    tile_cast: &TileCast,
 ) {
+    let TileCast { open, close, .. } = tile_cast;
     let lanes = 4u64;
     let vectors = block_n * block_k / lanes;
     source.push_str(&format!(
@@ -1541,7 +1568,7 @@ fn push_wide_activation_stage(
         "                    for (int lane = 0; lane < {lanes}; ++lane) {{ if (a_k_global + lane < u.reduction_total) {{ a_value[lane] = in{other}[aoff + (long)lane * a_stride]; }} }}\n                }}\n            }}\n"
     ));
     source.push_str(&format!(
-        "            for (int lane = 0; lane < {lanes}; ++lane) {{ act_tile[a_col * {block_k} + a_k + lane] = a_value[lane]; }}\n        }}\n"
+        "            for (int lane = 0; lane < {lanes}; ++lane) {{ act_tile[a_col * {block_k} + a_k + lane] = {open}a_value[lane]{close}; }}\n        }}\n"
     ));
 }
 
@@ -1734,17 +1761,18 @@ pub(super) fn push_dense_batched_gemm_body(
     let bf16_mma = metal
         .dense_mma_input_layout
         .is_some_and(|layout| layout.same_format(&FloatLayout::BF16));
-    let dense_element_type = if bf16_mma { "bfloat" } else { "float" };
-    let dense_value_cast = if bf16_mma { "bfloat(" } else { "" };
-    let dense_value_cast_close = if bf16_mma { ")" } else { "" };
-    let dense_zero_literal = if bf16_mma { "bfloat(0.0f)" } else { "0.0f" };
-    let dense_simdgroup_type = if bf16_mma {
-        "simdgroup_bfloat8x8"
-    } else {
-        "simdgroup_float8x8"
-    };
+    let tile_layout = if bf16_mma { FloatLayout::BF16 } else { FloatLayout::BF32 };
+    let tile_stage = layout_render::hardware_stage_type(&tile_layout).ok_or(EmitError::RenderKindMismatch {
+        node,
+        expected: "dense tile layout with a metal hardware type",
+        found: "dense mma input layout",
+    })?;
+    let tile_cast = TileCast::for_stage(tile_stage);
+    let (dense_value_cast, dense_value_cast_close, dense_zero_literal) = (tile_cast.open.as_str(), tile_cast.close, tile_cast.zero.as_str());
+    let dense_element_type = tile_stage.scalar;
+    let dense_simdgroup_type = tile_stage.matrix();
     let slim_tgmem_active = metal.tiled_gemm_slim_tgmem;
-    let dense_element_bytes = if bf16_mma { 2u64 } else { 4u64 };
+    let dense_element_bytes = tile_stage.bytes;
     let weight_tile_bytes = weight_tile_elems * dense_element_bytes;
     let act_tile_bytes = act_tile_elems * dense_element_bytes;
     let out_tile_bytes = out_tile_elems * 4;
@@ -1775,14 +1803,10 @@ pub(super) fn push_dense_batched_gemm_body(
     source.push_str(&format!(
         "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
     ));
-    let wide_weight = if bf16_mma {
-        None
-    } else {
-        wide_run_plan(weight_binding, weight_codec, block_m, block_k, block_threads)
-    };
+    let wide_weight = wide_run_plan(weight_binding, weight_codec, block_m, block_k, block_threads);
     if let Some(plan) = wide_weight {
         push_wide_weight_stage(
-            source, &plan, weight, reduce_dim, feature_axis, block_m, block_k,
+            source, &plan, weight, reduce_dim, feature_axis, block_m, block_k, &tile_cast,
         );
     } else {
     source.push_str(&format!(
@@ -1845,9 +1869,9 @@ pub(super) fn push_dense_batched_gemm_body(
     source.push_str("            }\n");
     source.push_str("        }\n");
     }
-    if !bf16_mma && other_codec.is_none() {
+    if other_codec.is_none() {
         push_wide_activation_stage(
-            source, other, token_axis, reduce_dim, block_n, block_k, block_threads,
+            source, other, token_axis, reduce_dim, block_n, block_k, block_threads, &tile_cast,
         );
     } else {
     source.push_str(&format!(
@@ -1859,7 +1883,7 @@ pub(super) fn push_dense_batched_gemm_body(
         "            long a_tok = col_tile * {block_n} + a_col;\n"
     ));
     source.push_str("            long a_k_global = k0 + a_k;\n");
-    let activation_scalar_type = if bf16_mma { "bfloat" } else { "float" };
+    let activation_scalar_type = dense_element_type;
     source.push_str(&format!(
         "            {activation_scalar_type} a_value = {dense_zero_literal};\n"
     ));

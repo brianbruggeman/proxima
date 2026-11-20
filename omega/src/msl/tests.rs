@@ -2912,7 +2912,7 @@ fn programmable_tiled_ragged_k_and_feature_tail_keep_bounds_masks() {
 
     assert!(kernel.source.contains("simdgroup_bfloat8x8"));
     assert!(!kernel.source.contains("bf16_element(in"));
-    assert!(kernel.source.contains("k0 + w_k < u.reduction_total"));
+    assert!(kernel.source.contains("k0 + w_part_k + w_k < u.reduction_total"));
     assert!(kernel.source.contains("a_k_global < u.reduction_total"));
     assert!(kernel.source.contains("if (w_feat < feature_extent)"));
     assert!(
@@ -3183,13 +3183,13 @@ fn programmable_tiled_cache_key_role_suffix_separates_operand_order() {
             assert!(
                 original_kernel
                     .source
-                    .contains("as_type<bfloat>(ushort((ushort)in0[")
+                    .contains("((uint)in0[w_element * 2 + 0] << 0u)")
             );
             assert!(original_kernel.source.contains("in1[aoff * 2]"));
             assert!(
                 reversed_kernel
                     .source
-                    .contains("as_type<bfloat>(ushort((ushort)in1[")
+                    .contains("((uint)in1[w_element * 2 + 0] << 0u)")
             );
             assert!(reversed_kernel.source.contains("in0[aoff * 2]"));
             assert!(!original_kernel.source.contains("bf16_element(in"));
@@ -11626,8 +11626,8 @@ fn dense_bf16_weight_read_parenthesizes_the_compound_offset() {
     });
 
     assert!(
-        kernel.source.contains("as_type<bfloat>(ushort("),
-        "dense bf16 weights stay native in the emitted fragment path\n{}",
+        kernel.source.contains("w_vec[vec] = ((device const uint4 *)w_run)[vec];"),
+        "dense bf16 weights stage as native uint4 runs in the emitted fragment path\n{}",
         kernel.source,
     );
     assert!(!kernel.source.contains("bf16_element(in0"));
@@ -12220,6 +12220,63 @@ fn router_bf16_weight_without_input_rounding_permission_takes_the_float_tile_mma
 
     let rounded = emit(&bound, &packed, serving_policy.with_bf16_input_rounding(true)).expect("router emits").source;
     assert!(rounded.contains("simdgroup_bfloat8x8"), "granting the permission selects bf16 tiles");
+}
+
+/// The router under the default serving config (`dense_mma_input_layout = derived` grants bf16 input
+/// rounding, so the tiles are `bfloat`): the weight is staged by all 128 threads as `uint4` runs
+/// decoded in registers straight into the bf16 tile, and the activation is read as `float4` and
+/// converted with the scalar loop's own `bfloat(float)`; the guarded scalar reads stay as fallback.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn router_bf16_tile_stages_weights_and_activations_with_wide_loads() {
+    let (bound, weight_node) = router_shaped_op(512, 2048, 256);
+    let packed = BTreeMap::from([(weight_node, Codec::BFloat16)]);
+    let policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true).with_bf16_input_rounding(true);
+    let source = emit(&bound, &packed, policy).expect("router emits").source;
+
+    assert!(source.contains("threadgroup bfloat weight_tile[") || source.contains("(threadgroup bfloat *)tg_shared"), "bf16 tiles\n{source}");
+    assert!(source.contains("simdgroup_bfloat8x8"), "{source}");
+    assert!(source.contains("long w_row = tiitg / 2;"), "every thread stages a weight run\n{source}");
+    assert!(!source.contains("for (long w_row = tiitg; w_row < "), "no strided one-thread-per-row loop\n{source}");
+    assert!(source.contains("uint4 w_vec[2];"), "{source}");
+    assert!(source.contains("w_vec[vec] = ((device const uint4 *)w_run)[vec];"), "{source}");
+    assert!(source.contains("= bfloat(w_regs[w_k]); }"), "the decoded run converts into the bf16 tile\n{source}");
+    assert!(source.contains("= bfloat(0.0f); }"), "{source}");
+    assert!(source.contains("a_value = *((device const float4 *)("), "the activation loads as float4\n{source}");
+    assert!(source.contains("act_tile[a_col * 32 + a_k + lane] = bfloat(a_value[lane]);"), "{source}");
+    assert!(!source.contains("for (long idx = tiitg; idx < 1024;"), "no strided scalar activation loop\n{source}");
+    if let Ok(dir) = std::env::var("PROXIMA_STAGE_DUMP_DIR") {
+        std::fs::write(format!("{dir}/dense_router_bf16_stage.metal"), &source).expect("writes the router MSL dump");
+    }
+}
+
+/// One staging path for every stored weight format: a bf16, f16 or f32 weight takes the same
+/// all-thread `uint4` run (the element codes' width sets the vector count) decoded in registers, and
+/// the tile type follows the tile layout, not the weight format.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn dense_tile_staging_takes_the_same_wide_path_for_every_stored_weight_format() {
+    {
+        let (name, codec, vectors) = ("bf16", Some(Codec::BFloat16), "uint4 w_vec[2];");
+        let (bound, weight_node) = router_shaped_op(512, 2048, 256);
+        let packed: BTreeMap<_, _> = codec.map(|codec| (weight_node, codec)).into_iter().collect();
+        let policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true).with_bf16_input_rounding(true);
+        let source = emit(&bound, &packed, policy).expect("router emits").source;
+        assert!(source.contains("long w_row = tiitg / 2;"), "{name}\n{source}");
+        assert!(source.contains(vectors), "{name}\n{source}");
+        assert!(source.contains("w_vec[vec] = ((device const uint4 *)w_run)[vec];"), "{name}\n{source}");
+        assert!(!source.contains("for (long w_row = tiitg; w_row < "), "{name}\n{source}");
+    }
+
+    let plain = dense_batched_score_shaped_op_with_operand_order(512, 256, 1, 2048, true);
+    let source = emit_with_knobs(&plain, &BTreeMap::new(), NumericPolicy::llama_relaxed(), &EmitKnobs::default().with_tiled_gemm_dense(true)).expect("emits").source;
+    assert!(source.contains("w_row = tiitg / 2;") && source.contains("uint4 w_vec[4];"), "f32 stored weight\n{source}");
+    assert!(source.contains("w_vec[vec] = ((device const uint4 *)w_run)[vec];"), "f32 stored weight\n{source}");
+    let score = dense_batched_score_shaped_op_with_operand_order(512, 256, 1, 2048, true);
+    let packed = BTreeMap::from([(score.operands()[1].0, Codec::Float16)]);
+    let source = emit_with_knobs(&score, &packed, NumericPolicy::llama_relaxed(), &EmitKnobs::default().with_tiled_gemm_dense(true)).expect("emits").source;
+    assert!(source.contains("w_row = tiitg / 2;") && source.contains("uint4 w_vec[2];"), "f16 stored weight\n{source}");
+    assert!(source.contains("w_vec[vec] = ((device const uint4 *)w_run)[vec];"), "f16 stored weight\n{source}");
 }
 
 #[cfg(feature = "metal-tiled-gemm")]
