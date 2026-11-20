@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
+use cel_interpreter::Program;
 use proxima_http::templates::{TemplateContext, expand_strict};
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::sync::task::JoinSet;
@@ -23,6 +24,7 @@ use crate::recording::event::{
 use crate::recording::process_bridge::{BridgeHandle, ProcessEventBridge};
 use crate::recording::sink::DynRecordingSink;
 use crate::request::Request;
+use crate::scenarios::cel::evaluate_guard;
 use crate::upstreams::{ProcessSpec, ProcessUpstream, ReadyProbe, RestartPolicy, ShutdownSignal};
 
 /// Strict-mode DAG executor: stages run when ALL their parents have
@@ -34,6 +36,7 @@ pub struct PipelineExecutor {
     sink: DynRecordingSink,
     workspace_root: Option<PathBuf>,
     pipes: Arc<BTreeMap<String, PipeHandle>>,
+    guards: Arc<BTreeMap<String, Arc<Program>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,6 +44,7 @@ enum StageCompletion {
     Pending,
     Skipped,
     Failed,
+    Declined,
     Completed { exit_code: Option<i32> },
 }
 
@@ -55,6 +59,7 @@ type StageFailure = Option<(String, String)>;
 struct StageLinks {
     parents: Vec<ParentLink>,
     pipes: Arc<BTreeMap<String, PipeHandle>>,
+    guard: Option<Arc<Program>>,
     input: Arc<Value>,
 }
 
@@ -113,7 +118,7 @@ impl RunPlan {
         }
     }
 
-    fn links_for(&self, spec: &StageSpec, pipes: &Arc<BTreeMap<String, PipeHandle>>) -> StageLinks {
+    fn links_for(&self, spec: &StageSpec, executor: &PipelineExecutor) -> StageLinks {
         let parents = spec
             .depends_on
             .iter()
@@ -125,7 +130,8 @@ impl RunPlan {
             .collect();
         StageLinks {
             parents,
-            pipes: pipes.clone(),
+            pipes: executor.pipes.clone(),
+            guard: executor.guards.get(&spec.name).cloned(),
             input: self.input.clone(),
         }
     }
@@ -241,6 +247,7 @@ fn failure_reason(name: &str, state: StageCompletion, failures: &Failures) -> Op
             let reason = failures.get(name).map_or("", String::as_str);
             Some(format!("stage `{name}` failed: {reason}"))
         }
+        StageCompletion::Declined => None,
         StageCompletion::Pending => Some(format!("stage `{name}` never completed")),
     }
 }
@@ -284,6 +291,7 @@ impl PipelineExecutor {
             sink,
             workspace_root: None,
             pipes: Arc::new(BTreeMap::new()),
+            guards: Arc::new(BTreeMap::new()),
         }
     }
 
@@ -293,6 +301,15 @@ impl PipelineExecutor {
     #[must_use]
     pub fn with_pipes(mut self, pipes: BTreeMap<String, PipeHandle>) -> Self {
         self.pipes = Arc::new(pipes);
+        self
+    }
+
+    /// Supply the compiled `when` guards, keyed by stage name. The executor
+    /// never compiles CEL: compile once with `scenarios::cel::compile_expression`
+    /// and reuse. A run whose spec has a `when` stage without a guard is refused.
+    #[must_use]
+    pub fn with_guards(mut self, guards: BTreeMap<String, Arc<Program>>) -> Self {
+        self.guards = Arc::new(guards);
         self
     }
 
@@ -338,6 +355,7 @@ impl PipelineExecutor {
         input: Value,
     ) -> Result<PipelineRunReport, ProximaError> {
         spec.validate()?;
+        self.require_guards(&spec)?;
         let mut plan = RunPlan::new(&spec, pipeline_id, input)?;
         let started = Instant::now();
         self.record_started(pipeline_id, &spec).await?;
@@ -345,6 +363,20 @@ impl PipelineExecutor {
         let (stage_report, outcome) = plan.fold_outcome(&mut failures);
         self.record_ended(pipeline_id, started, &outcome).await?;
         Ok(plan.into_report(outcome, &stage_report, failures))
+    }
+
+    fn require_guards(&self, spec: &PipelineSpec) -> Result<(), ProximaError> {
+        let unguarded = spec
+            .stages
+            .iter()
+            .find(|stage| stage.when.is_some() && !self.guards.contains_key(&stage.name));
+        match unguarded {
+            Some(stage) => Err(ProximaError::Config(format!(
+                "stage `{}` has `when` but no compiled guard was supplied",
+                stage.name
+            ))),
+            None => Ok(()),
+        }
     }
 
     async fn record_started(
@@ -406,7 +438,7 @@ impl PipelineExecutor {
 
     async fn stage_task(&self, plan: &mut RunPlan, name: &str) -> Result<StageTask, ProximaError> {
         let spec = self.prepare_stage(plan, name).await?;
-        let links = plan.links_for(&spec, &self.pipes);
+        let links = plan.links_for(&spec, self);
         let (completion, output) = plan.take_senders(name)?;
         Ok(StageTask {
             name: name.to_owned(),
@@ -494,6 +526,11 @@ impl StageReport {
     pub fn was_failed(&self) -> bool {
         matches!(self.completion, StageCompletion::Failed)
     }
+
+    #[must_use]
+    pub fn was_declined(&self) -> bool {
+        matches!(self.completion, StageCompletion::Declined)
+    }
 }
 
 enum StageOutcome {
@@ -501,6 +538,7 @@ enum StageOutcome {
     Succeeded { output: Value },
     Failed { reason: String },
     Skipped,
+    Declined,
 }
 
 fn settle(
@@ -516,6 +554,7 @@ fn settle(
             (StageCompletion::Completed { exit_code: Some(0) }, None)
         }
         Ok(StageOutcome::Failed { reason }) => (StageCompletion::Failed, Some(reason)),
+        Ok(StageOutcome::Declined) => (StageCompletion::Declined, None),
         Ok(StageOutcome::Skipped) | Err(_) => (StageCompletion::Skipped, None),
     }
 }
@@ -527,8 +566,8 @@ async fn run_stage(
     mut links: StageLinks,
     sink: DynRecordingSink,
 ) -> Result<StageOutcome, ProximaError> {
-    if !parents_succeeded(&mut links.parents).await {
-        return Ok(StageOutcome::Skipped);
+    if let Some(early) = pre_run_outcome(&spec.name, &mut links).await {
+        return Ok(early);
     }
     match spec.body {
         StageBody::Process {
@@ -543,26 +582,65 @@ async fn run_stage(
     }
 }
 
-// strict policy: every parent must complete with exit_code Some(0). any
-// non-success short-circuits to Skipped without running the stage.
-async fn parents_succeeded(parents: &mut [ParentLink]) -> bool {
+// Some ends the stage before its body runs.
+async fn pre_run_outcome(stage: &str, links: &mut StageLinks) -> Option<StageOutcome> {
+    match settle_parents(&mut links.parents).await {
+        ParentGate::Skipped => Some(StageOutcome::Skipped),
+        ParentGate::Declined => Some(StageOutcome::Declined),
+        ParentGate::Ready => guard_verdict(stage, links),
+    }
+}
+
+enum ParentGate {
+    Ready,
+    Declined,
+    Skipped,
+}
+
+// a failed, skipped or nonzero parent skips the stage and wins over a
+// declined one wherever it sits in depends_on; a declined parent declines it.
+async fn settle_parents(parents: &mut [ParentLink]) -> ParentGate {
+    let mut gate = ParentGate::Ready;
     for parent in parents {
-        loop {
-            if !matches!(*parent.completion.borrow(), StageCompletion::Pending) {
-                break;
-            }
-            if parent.completion.changed().await.is_err() {
-                return false;
-            }
-        }
-        if !matches!(
-            *parent.completion.borrow(),
-            StageCompletion::Completed { exit_code: Some(0) }
-        ) {
-            return false;
+        match settled_completion(parent).await {
+            Some(StageCompletion::Completed { exit_code: Some(0) }) => {}
+            Some(StageCompletion::Declined) => gate = ParentGate::Declined,
+            _ => return ParentGate::Skipped,
         }
     }
-    true
+    gate
+}
+
+// None when the parent's task ended without ever settling.
+async fn settled_completion(parent: &mut ParentLink) -> Option<StageCompletion> {
+    while matches!(*parent.completion.borrow(), StageCompletion::Pending) {
+        parent.completion.changed().await.ok()?;
+    }
+    let state = *parent.completion.borrow();
+    Some(state)
+}
+
+// None runs the stage: no guard, or a guard that held.
+fn guard_verdict(stage: &str, links: &StageLinks) -> Option<StageOutcome> {
+    let guard = links.guard.as_ref()?;
+    match eval_guard(guard, links) {
+        Ok(true) => None,
+        Ok(false) => Some(StageOutcome::Declined),
+        Err(reason) => Some(StageOutcome::Failed {
+            reason: format!("stage `{stage}` when: {reason}"),
+        }),
+    }
+}
+
+fn eval_guard(guard: &Program, links: &StageLinks) -> Result<bool, String> {
+    let outputs: Vec<(&str, Arc<Value>)> = links
+        .parents
+        .iter()
+        .filter_map(|parent| Some((parent.name.as_str(), parent.output.borrow().clone()?)))
+        .collect();
+    let mut bindings: Vec<(&str, &Value)> = vec![("input", links.input.as_ref())];
+    bindings.extend(outputs.iter().map(|(name, value)| (*name, value.as_ref())));
+    evaluate_guard(guard, &bindings)
 }
 
 async fn run_pipe_stage(
@@ -727,6 +805,7 @@ mod tests {
     use crate::recording::event::{ProcessEvent, ProtocolEvent};
     use crate::recording::sink::{AppendFuture, DynRecordingSink, RecordingSink};
     use crate::request::Response;
+    use crate::scenarios::cel::compile_expression;
     use proxima_http::templates::expand;
     use proxima_primitives::pipe::into_handle;
     use serde_json::json;
@@ -767,6 +846,7 @@ mod tests {
                 cwd: None,
             },
             depends_on: deps.iter().map(|raw| (*raw).into()).collect(),
+            when: None,
         }
     }
 
@@ -982,6 +1062,7 @@ mod tests {
                 request,
             },
             depends_on: deps.iter().map(|raw| (*raw).into()).collect(),
+            when: None,
         }
     }
 
@@ -1281,5 +1362,369 @@ mod tests {
     async fn ctl_output_empty_string_is_rejected_by_the_text_check() {
         let expected = Value::String("plain text review".into());
         assert!(check_output(&Value::String(String::new()), &expected).is_err());
+    }
+
+    const NO_PR_BODY: &[u8] = br#"{"repo":"brianbruggeman/proxima","pr":null}"#;
+    const HAS_PR: &str = "ticket.pr != null";
+    const NO_PR: &str = "ticket.pr == null";
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Want {
+        Completed,
+        Declined,
+        Skipped,
+        Failed,
+    }
+
+    struct Branch<'a> {
+        stages: &'a [(&'a str, Want)],
+        calls: &'a [(&'a str, usize)],
+        run_failed: bool,
+    }
+
+    fn want_of(completion: StageCompletion) -> Want {
+        match completion {
+            StageCompletion::Declined => Want::Declined,
+            StageCompletion::Skipped => Want::Skipped,
+            StageCompletion::Failed => Want::Failed,
+            StageCompletion::Completed { .. } | StageCompletion::Pending => Want::Completed,
+        }
+    }
+
+    fn check_branch(
+        report: &PipelineRunReport,
+        calls: &[(&str, usize)],
+        expected: &Branch<'_>,
+    ) -> Result<(), String> {
+        for (name, want) in expected.stages {
+            let got = report.stages.get(*name).map(|stage| want_of(stage.completion));
+            if got != Some(*want) {
+                return Err(format!("stage `{name}` is {got:?}, wanted {want:?}"));
+            }
+        }
+        if calls != expected.calls {
+            return Err(format!("calls {calls:?}, wanted {:?}", expected.calls));
+        }
+        let run_failed = matches!(report.outcome, PipelineOutcome::Failed { .. });
+        if run_failed != expected.run_failed {
+            return Err(format!("run outcome {:?}", report.outcome));
+        }
+        Ok(())
+    }
+
+    fn tally(probes: &[(&'static str, &Probe)]) -> Vec<(&'static str, usize)> {
+        let count = |probe: &Probe| probe.calls.load(Ordering::SeqCst);
+        probes.iter().map(|(name, probe)| (*name, count(probe))).collect()
+    }
+
+    fn guarded(stage: StageSpec, when: &str) -> StageSpec {
+        StageSpec {
+            when: Some(when.into()),
+            ..stage
+        }
+    }
+
+    fn compiled(stages: &[StageSpec]) -> BTreeMap<String, Arc<Program>> {
+        stages
+            .iter()
+            .filter_map(|stage| {
+                let program = compile_expression(stage.when.as_deref()?).expect("compile");
+                Some((stage.name.clone(), Arc::new(program)))
+            })
+            .collect()
+    }
+
+    async fn run_guarded(
+        stages: Vec<StageSpec>,
+        pipes: Vec<(&str, PipeHandle)>,
+        guards: BTreeMap<String, Arc<Program>>,
+        input: Value,
+    ) -> Result<PipelineRunReport, ProximaError> {
+        let sink: DynRecordingSink = Arc::new(MemorySink::default());
+        let pipes = pipes
+            .into_iter()
+            .map(|(name, handle)| (name.to_string(), handle))
+            .collect();
+        let executor = PipelineExecutor::new(sink)
+            .with_pipes(pipes)
+            .with_guards(guards);
+        let spec = PipelineSpec { name: None, stages };
+        executor.run_with_input(spec, input).await
+    }
+
+    struct Rig {
+        report: PipelineRunReport,
+        github: Probe,
+        llm: Probe,
+    }
+
+    impl Rig {
+        fn calls(&self) -> Vec<(&'static str, usize)> {
+            tally(&[("github", &self.github), ("llm", &self.llm)])
+        }
+    }
+
+    // ticket -> pr(when) plus extra stages; github and llm count their calls.
+    async fn run_rig(ticket_body: &'static [u8], pr_when: &str, extra: Vec<StageSpec>) -> Rig {
+        let (ticket, _) = stub(200, ticket_body);
+        let (github, github_probe) = stub(200, b"{}");
+        let (llm, llm_probe) = stub(200, b"{}");
+        let (broken, _) = stub(500, b"boom");
+        let pr = pipe_stage("pr", "github", PR_PATH, &["ticket"]);
+        let mut stages = vec![
+            pipe_stage("ticket", "vault", "/PROXIMA-24/state.json", &[]),
+            guarded(pr, pr_when),
+        ];
+        stages.extend(extra);
+        let guards = compiled(&stages);
+        let pipes = vec![("vault", ticket), ("github", github), ("llm", llm), ("broken", broken)];
+        let report = run_guarded(stages, pipes, guards, json!({"ticket": "PROXIMA-24"}))
+            .await
+            .expect("run");
+        Rig {
+            report,
+            github: github_probe,
+            llm: llm_probe,
+        }
+    }
+
+    fn broken_stage() -> StageSpec {
+        pipe_stage("broken", "broken", "/x", &["ticket"])
+    }
+
+    fn join_stage(parents: &[&str]) -> StageSpec {
+        pipe_stage("join", "llm", "/join", parents)
+    }
+
+    fn process_guarded(script: &str, when: &str) -> StageSpec {
+        guarded(shell_stage("proc", script, &[]), when)
+    }
+
+    async fn run_process_guard(script: &str, input: Value) -> PipelineRunReport {
+        let stages = vec![process_guarded(script, "input.go == true")];
+        let guards = compiled(&stages);
+        run_guarded(stages, vec![], guards, input)
+            .await
+            .expect("run")
+    }
+
+    async fn check_join(parents: &[&str], extra: Vec<StageSpec>, want: &[(&str, Want)]) {
+        let mut stages = vec![join_stage(parents)];
+        stages.extend(extra);
+        let rig = run_rig(NO_PR_BODY, HAS_PR, stages).await;
+        let expected = Branch {
+            stages: want,
+            calls: &[("github", 0), ("llm", 0)],
+            run_failed: true,
+        };
+        assert_eq!(check_branch(&rig.report, &rig.calls(), &expected), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn guard_runs_pipe_stage_when_ticket_has_a_pr() {
+        let rig = run_rig(TICKET_BODY, HAS_PR, vec![]).await;
+        let expected = Branch {
+            stages: &[("ticket", Want::Completed), ("pr", Want::Completed)],
+            calls: &[("github", 1), ("llm", 0)],
+            run_failed: false,
+        };
+        assert_eq!(check_branch(&rig.report, &rig.calls(), &expected), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn guard_runs_process_stage_when_input_says_go() {
+        let report = run_process_guard("exit 0", json!({"go": true})).await;
+        let expected = Branch {
+            stages: &[("proc", Want::Completed)],
+            calls: &[],
+            run_failed: false,
+        };
+        assert_eq!(check_branch(&report, &[], &expected), Ok(()));
+        assert_eq!(report.stages["proc"].exit_code(), Some(Some(0)));
+    }
+
+    #[proxima::test]
+    async fn guard_declines_pipe_stage_when_ticket_has_no_pr() {
+        let rig = run_rig(NO_PR_BODY, HAS_PR, vec![]).await;
+        let expected = Branch {
+            stages: &[("pr", Want::Declined)],
+            calls: &[("github", 0), ("llm", 0)],
+            run_failed: false,
+        };
+        assert_eq!(check_branch(&rig.report, &rig.calls(), &expected), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn guard_declines_child_of_declined_stage_without_evaluating_its_own_when() {
+        let review = guarded(pipe_stage("review", "llm", "/r", &["pr"]), "ticket.missing == 1");
+        let rig = run_rig(NO_PR_BODY, HAS_PR, vec![review]).await;
+        let expected = Branch {
+            stages: &[("pr", Want::Declined), ("review", Want::Declined)],
+            calls: &[("github", 0), ("llm", 0)],
+            run_failed: false,
+        };
+        assert_eq!(check_branch(&rig.report, &rig.calls(), &expected), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn guard_declines_never_hides_a_failed_parent_declined_first() {
+        let want = [("pr", Want::Declined), ("broken", Want::Failed), ("join", Want::Skipped)];
+        check_join(&["pr", "broken"], vec![broken_stage()], &want).await;
+    }
+
+    #[proxima::test]
+    async fn guard_declines_never_hides_a_failed_parent_declined_last() {
+        let want = [("pr", Want::Declined), ("broken", Want::Failed), ("join", Want::Skipped)];
+        check_join(&["broken", "pr"], vec![broken_stage()], &want).await;
+    }
+
+    #[proxima::test]
+    async fn guard_declines_process_stage_and_never_spawns_it() {
+        let marker_dir = TempDir::new().expect("tempdir");
+        let marker = marker_dir.path().join("ran");
+        let script = format!("touch {}", marker.display());
+        let report = run_process_guard(&script, json!({"go": false})).await;
+        let expected = Branch {
+            stages: &[("proc", Want::Declined)],
+            calls: &[],
+            run_failed: false,
+        };
+        assert_eq!(check_branch(&report, &[], &expected), Ok(()));
+        assert!(!marker.exists(), "declined process must not run");
+    }
+
+    #[proxima::test]
+    async fn guard_declines_loses_to_a_skipped_parent() {
+        let after = pipe_stage("after", "llm", "/after", &["broken"]);
+        let want = [("pr", Want::Declined), ("after", Want::Skipped), ("join", Want::Skipped)];
+        check_join(&["pr", "after"], vec![broken_stage(), after], &want).await;
+    }
+
+    #[proxima::test]
+    async fn guard_declines_loses_to_a_nonzero_exit_parent() {
+        let exit3 = shell_stage("exit3", "exit 3", &[]);
+        let want = [("pr", Want::Declined), ("exit3", Want::Completed), ("join", Want::Skipped)];
+        check_join(&["pr", "exit3"], vec![exit3], &want).await;
+    }
+
+    async fn failed_reason(ticket_body: &'static [u8], when: &str) -> String {
+        let rig = run_rig(ticket_body, when, vec![]).await;
+        let expected = Branch {
+            stages: &[("pr", Want::Failed)],
+            calls: &[("github", 0), ("llm", 0)],
+            run_failed: true,
+        };
+        assert_eq!(check_branch(&rig.report, &rig.calls(), &expected), Ok(()));
+        rig.report.failures["pr"].clone()
+    }
+
+    #[proxima::test]
+    async fn guard_eval_fails_on_an_undeclared_field() {
+        let reason = failed_reason(TICKET_BODY, "ticket.missing == 1").await;
+        assert!(reason.starts_with("stage `pr` when"), "{reason}");
+    }
+
+    #[proxima::test]
+    async fn guard_eval_fails_on_a_non_bool_result() {
+        let reason = failed_reason(TICKET_BODY, "ticket.repo").await;
+        assert!(reason.starts_with("stage `pr` when"), "{reason}");
+        assert!(reason.contains("bool"), "{reason}");
+    }
+
+    #[proxima::test]
+    async fn guard_eval_fails_on_a_parent_without_output() {
+        let prep = shell_stage("prep", "true", &[]);
+        let child = guarded(pipe_stage("child", "github", "/c", &["prep"]), "prep == null");
+        let stages = vec![prep, child];
+        let guards = compiled(&stages);
+        let (github, probe) = stub(200, b"{}");
+        let report = run_guarded(stages, vec![("github", github)], guards, Value::Null)
+            .await
+            .expect("run");
+        let expected = Branch {
+            stages: &[("prep", Want::Completed), ("child", Want::Failed)],
+            calls: &[("github", 0)],
+            run_failed: true,
+        };
+        assert_eq!(check_branch(&report, &tally(&[("github", &probe)]), &expected), Ok(()));
+        assert!(report.failures["child"].starts_with("stage `child` when"));
+    }
+
+    #[proxima::test]
+    async fn guard_compiled_run_without_supplied_guard_is_refused() {
+        let (ticket, ticket_probe) = stub(200, TICKET_BODY);
+        let (github, github_probe) = stub(200, b"{}");
+        let pr = guarded(pipe_stage("pr", "github", PR_PATH, &["ticket"]), HAS_PR);
+        let stages = vec![pipe_stage("ticket", "vault", "/t", &[]), pr];
+        let pipes = vec![("vault", ticket), ("github", github)];
+        let outcome = run_guarded(stages, pipes, BTreeMap::new(), Value::Null).await;
+        let message = outcome.expect_err("refused").to_string();
+        assert!(message.contains("stage `pr`") && message.contains("guard"), "{message}");
+        let calls = tally(&[("vault", &ticket_probe), ("github", &github_probe)]);
+        assert_eq!(calls, [("vault", 0), ("github", 0)]);
+    }
+
+    #[proxima::test]
+    async fn guard_compiled_supplied_program_decides_not_the_when_string() {
+        let (ticket, _) = stub(200, TICKET_BODY);
+        let (github, probe) = stub(200, b"{}");
+        let pr = guarded(pipe_stage("pr", "github", PR_PATH, &["ticket"]), "ticket.pr !=");
+        let stages = vec![pipe_stage("ticket", "vault", "/t", &[]), pr];
+        let supplied = compile_expression(NO_PR).expect("compile");
+        let guards = BTreeMap::from([("pr".to_string(), Arc::new(supplied))]);
+        let pipes = vec![("vault", ticket), ("github", github)];
+        let report = run_guarded(stages, pipes, guards, Value::Null)
+            .await
+            .expect("run");
+        let expected = Branch {
+            stages: &[("pr", Want::Declined)],
+            calls: &[("github", 0)],
+            run_failed: false,
+        };
+        assert_eq!(check_branch(&report, &tally(&[("github", &probe)]), &expected), Ok(()));
+    }
+
+    fn hand_report(pr: StageCompletion, outcome: PipelineOutcome) -> PipelineRunReport {
+        let stage = |completion| StageReport {
+            id: InteractionId::new(),
+            completion,
+        };
+        PipelineRunReport {
+            pipeline_id: InteractionId::new(),
+            outcome,
+            stages: BTreeMap::from([
+                ("ticket".to_string(), stage(StageCompletion::Completed { exit_code: Some(0) })),
+                ("pr".to_string(), stage(pr)),
+            ]),
+            outputs: BTreeMap::new(),
+            failures: BTreeMap::new(),
+        }
+    }
+
+    fn declined_branch() -> Branch<'static> {
+        Branch {
+            stages: &[("ticket", Want::Completed), ("pr", Want::Declined)],
+            calls: &[("github", 0)],
+            run_failed: false,
+        }
+    }
+
+    #[proxima::test]
+    async fn ctl_branch_hand_built_declined_report_passes_the_check() {
+        let report = hand_report(StageCompletion::Declined, PipelineOutcome::Completed);
+        assert_eq!(check_branch(&report, &[("github", 0)], &declined_branch()), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn ctl_branch_skipped_instead_of_declined_is_rejected() {
+        let report = hand_report(StageCompletion::Skipped, PipelineOutcome::Completed);
+        assert!(check_branch(&report, &[("github", 0)], &declined_branch()).is_err());
+    }
+
+    #[proxima::test]
+    async fn ctl_branch_failed_outcome_is_rejected() {
+        let outcome = PipelineOutcome::Failed { reason: "stage `pr` failed".into() };
+        let report = hand_report(StageCompletion::Declined, outcome);
+        assert!(check_branch(&report, &[("github", 0)], &declined_branch()).is_err());
     }
 }

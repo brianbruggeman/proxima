@@ -1,9 +1,35 @@
 use std::collections::HashMap;
 
 use cel_interpreter::{Context, Program, Value as CelValue};
+use serde_json::Value as JsonValue;
 
 use crate::error::ProximaError;
 use crate::scenarios::orchestrator::CelBindings;
+
+/// The one place a CEL source string becomes a `Program`; compile once, reuse.
+pub fn compile_expression(expression: &str) -> Result<Program, ProximaError> {
+    Program::compile(expression)
+        .map_err(|err| ProximaError::Config(format!("cel compile: {err}")))
+}
+
+/// Run a compiled guard against named JSON values; the result must be a bool.
+/// A variable the expression names but `bindings` lacks is an evaluation error.
+pub fn evaluate_guard(
+    program: &Program,
+    bindings: &[(&str, &JsonValue)],
+) -> Result<bool, String> {
+    let mut context = Context::default();
+    for (name, value) in bindings {
+        context
+            .add_variable(*name, *value)
+            .map_err(|err| format!("cel bind {name}: {err}"))?;
+    }
+    match program.execute(&context) {
+        Ok(CelValue::Bool(flag)) => Ok(flag),
+        Ok(other) => Err(format!("cel guard must yield bool; got {other:?}")),
+        Err(err) => Err(format!("cel evaluate: {err}")),
+    }
+}
 
 /// CEL evaluator against scenario runtime state. Bindings:
 /// `success_rate` (f64, 1.0 when `completed == 0`), `successes` /
@@ -11,8 +37,7 @@ use crate::scenarios::orchestrator::CelBindings;
 /// across label sets), `histogram_p99[<name>]` (double, ms; max across
 /// label sets).
 pub fn evaluate(expression: &str, bindings: &CelBindings<'_>) -> Result<bool, ProximaError> {
-    let program = Program::compile(expression)
-        .map_err(|err| ProximaError::Config(format!("cel compile: {err}")))?;
+    let program = compile_expression(expression)?;
     let mut context = Context::default();
     let success_rate = if bindings.completed > 0 {
         (bindings.successes as f64) / (bindings.completed as f64)

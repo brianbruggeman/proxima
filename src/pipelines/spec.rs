@@ -34,6 +34,9 @@ pub struct StageSpec {
     /// Names of stages that must complete successfully before this stage runs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub depends_on: Vec<String>,
+    /// CEL guard over `input` and the parents' outputs; false declines the stage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -90,6 +93,8 @@ struct RawStageSpec {
     request: Option<StageRequest>,
     #[serde(default)]
     depends_on: Vec<String>,
+    #[serde(default)]
+    when: Option<String>,
 }
 
 fn refusal(name: &str, has_process: bool, has_pipe: bool) -> String {
@@ -106,7 +111,7 @@ impl TryFrom<RawStageSpec> for StageSpec {
     type Error = String;
 
     fn try_from(raw: RawStageSpec) -> Result<Self, Self::Error> {
-        let RawStageSpec { name, command, args, env, cwd, pipe, request, depends_on } = raw;
+        let RawStageSpec { name, command, args, env, cwd, pipe, request, depends_on, when } = raw;
         let has_process =
             command.is_some() || !args.is_empty() || !env.is_empty() || cwd.is_some();
         let has_pipe = pipe.is_some() || request.is_some();
@@ -115,7 +120,7 @@ impl TryFrom<RawStageSpec> for StageSpec {
             (None, Some(pipe), Some(request)) if !has_process => StageBody::Pipe { pipe, request },
             _ => return Err(refusal(&name, has_process, has_pipe)),
         };
-        Ok(Self { name, body, depends_on })
+        Ok(Self { name, body, depends_on, when })
     }
 }
 
@@ -188,6 +193,7 @@ mod tests {
                 cwd: None,
             },
             depends_on: deps.iter().map(|raw| (*raw).into()).collect(),
+            when: None,
         }
     }
 
@@ -274,6 +280,7 @@ mod tests {
                 },
             },
             depends_on: Vec::new(),
+            when: None,
         }
     }
 
@@ -293,6 +300,7 @@ mod tests {
                 cwd: None,
             },
             depends_on: Vec::new(),
+            when: None,
         };
         assert_eq!(stage, expected);
     }

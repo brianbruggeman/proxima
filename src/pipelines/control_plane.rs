@@ -571,6 +571,7 @@ mod tests {
                 cwd: None,
             },
             depends_on: deps.iter().map(|raw| (*raw).into()).collect(),
+            when: None,
         }
     }
 
