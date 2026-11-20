@@ -1456,6 +1456,7 @@ fn wide_run_plan(
 fn push_wide_weight_stage(
     source: &mut String,
     plan: &WideRunPlan,
+    fast: bool,
     weight: usize,
     reduce_dim: usize,
     feature_axis: u16,
@@ -1468,32 +1469,41 @@ fn push_wide_weight_stage(
         run,
         threads_per_row,
         ref decode_name,
-        ref decode_helper,
         byte_buffer,
+        ..
     } = *plan;
     let TileCast { open, close, zero } = tile_cast;
     let vectors = run * element_bytes / 16;
-    if let Some(anchor) = source.find("struct Uniforms {") {
-        source.insert_str(anchor, &format!("{decode_helper}\n"));
-    }
     source.push_str(&format!(
         "        {{\n            long w_row = tiitg / {threads_per_row};\n            long w_part_k = (tiitg % {threads_per_row}) * {run};\n            long w_feat = row_tile * {block_m} + w_row;\n"
     ));
-    source.push_str("            if (w_feat < feature_extent) {\n");
+    let (indent, w_stride) = if fast {
+        ("            ", "1".to_string())
+    } else {
+        source.push_str("            if (w_feat < feature_extent) {\n");
+        source.push_str(&format!(
+            "                long w_stride = u.operand_strides[{weight}][{reduce_dim}];\n"
+        ));
+        ("                ", "w_stride".to_string())
+    };
     source.push_str(&format!(
-        "                long w_stride = u.operand_strides[{weight}][{reduce_dim}];\n                long row_base = u.operand_base[{weight}] + dense_weight_batch_base + w_feat * u.operand_strides[{weight}][{feature_axis}] + (k0 + w_part_k) * w_stride;\n                float w_regs[{run}];\n"
+        "{indent}long row_base = u.operand_base[{weight}] + dense_weight_batch_base + w_feat * u.operand_strides[{weight}][{feature_axis}] + (k0 + w_part_k) * {w_stride};\n{indent}float w_regs[{run}];\n"
     ));
     let run_pointer = if byte_buffer {
         format!("in{weight} + row_base * {element_bytes}")
     } else {
         format!("(device const uchar *)(in{weight} + row_base)")
     };
+    source.push_str(&format!("{indent}device const uchar *w_run = {run_pointer};\n"));
+    if !fast {
+        source.push_str(&format!(
+            "{indent}if (w_stride == 1 && k0 + w_part_k + {run} <= u.reduction_total && (((ulong)w_run) & 15ul) == 0ul) {{\n"
+        ));
+    }
+    let inner = if fast { indent } else { "                    " };
+    source.push_str(&format!("{inner}uint4 w_vec[{vectors}];\n{inner}{FULL_UNROLL}\n"));
     source.push_str(&format!(
-        "                device const uchar *w_run = {run_pointer};\n                if (w_stride == 1 && k0 + w_part_k + {run} <= u.reduction_total && (((ulong)w_run) & 15ul) == 0ul) {{\n                    uint4 w_vec[{vectors}];\n"
-    ));
-    source.push_str(&format!("                    {FULL_UNROLL}\n"));
-    source.push_str(&format!(
-        "                    for (int vec = 0; vec < {vectors}; ++vec) {{ w_vec[vec] = ((device const uint4 *)w_run)[vec]; }}\n"
+        "{inner}for (int vec = 0; vec < {vectors}; ++vec) {{ w_vec[vec] = ((device const uint4 *)w_run)[vec]; }}\n"
     ));
     for element in 0..run {
         let byte = element * element_bytes;
@@ -1506,35 +1516,49 @@ fn push_wide_weight_stage(
                 (1u64 << (width * 8)) - 1
             ),
         };
-        source.push_str(&format!("                    w_regs[{element}] = {decode_name}({code});\n"));
+        source.push_str(&format!("{inner}w_regs[{element}] = {decode_name}({code});\n"));
     }
-    source.push_str("                } else {\n");
-    source.push_str(&format!("                    {FULL_UNROLL}\n"));
+    if !fast {
+        source.push_str("                } else {\n");
+        source.push_str(&format!("                    {FULL_UNROLL}\n"));
+        source.push_str(&format!(
+            "                    for (int w_k = 0; w_k < {run}; ++w_k) {{\n                        long w_element = row_base + (long)w_k * w_stride;\n"
+        ));
+        let element_read = if byte_buffer {
+            let codes = (0..element_bytes)
+                .map(|byte| format!("((uint)in{weight}[w_element * {element_bytes} + {byte}] << {}u)", byte * 8))
+                .collect::<Vec<_>>()
+                .join(" | ");
+            format!("{decode_name}({codes})")
+        } else {
+            format!("in{weight}[w_element]")
+        };
+        source.push_str(&format!(
+            "                        w_regs[w_k] = (k0 + w_part_k + w_k < u.reduction_total) ? {element_read} : 0.0f;\n"
+        ));
+        source.push_str("                    }\n                }\n");
+    }
+    source.push_str(&format!("{indent}{FULL_UNROLL}\n"));
     source.push_str(&format!(
-        "                    for (int w_k = 0; w_k < {run}; ++w_k) {{\n                        long w_element = row_base + (long)w_k * w_stride;\n"
+        "{indent}for (int w_k = 0; w_k < {run}; ++w_k) {{ weight_tile[w_row * {block_k} + w_part_k + w_k] = {open}w_regs[w_k]{close}; }}\n"
     ));
-    let element_read = if byte_buffer {
-        let codes = (0..element_bytes)
-            .map(|byte| format!("((uint)in{weight}[w_element * {element_bytes} + {byte}] << {}u)", byte * 8))
-            .collect::<Vec<_>>()
-            .join(" | ");
-        format!("{decode_name}({codes})")
-    } else {
-        format!("in{weight}[w_element]")
-    };
-    source.push_str(&format!(
-        "                        w_regs[w_k] = (k0 + w_part_k + w_k < u.reduction_total) ? {element_read} : 0.0f;\n"
-    ));
-    source.push_str("                    }\n                }\n");
-    source.push_str(&format!("                {FULL_UNROLL}\n"));
-    source.push_str(&format!(
-        "                for (int w_k = 0; w_k < {run}; ++w_k) {{ weight_tile[w_row * {block_k} + w_part_k + w_k] = {open}w_regs[w_k]{close}; }}\n"
-    ));
-    source.push_str("            } else {\n");
-    source.push_str(&format!(
-        "                for (long fill_k = 0; fill_k < {run}; ++fill_k) {{ weight_tile[w_row * {block_k} + w_part_k + fill_k] = {zero}; }}\n"
-    ));
-    source.push_str("            }\n        }\n");
+    if !fast {
+        source.push_str("            } else {\n");
+        source.push_str(&format!(
+            "                for (long fill_k = 0; fill_k < {run}; ++fill_k) {{ weight_tile[w_row * {block_k} + w_part_k + fill_k] = {zero}; }}\n"
+        ));
+        source.push_str("            }\n");
+    }
+    source.push_str("        }\n");
+}
+
+/// Splices the weight's derived decode helper once ahead of the kernel's uniforms, so both the fast
+/// and the guarded k-loop body call it.
+#[cfg(feature = "metal-tiled-gemm")]
+fn splice_wide_weight_decode_helper(source: &mut String, plan: &WideRunPlan) {
+    if let Some(anchor) = source.find("struct Uniforms {") {
+        source.insert_str(anchor, &format!("{}\n", plan.decode_helper));
+    }
 }
 
 /// Activation staging for the dense tile (f32, or any narrower tile type through `tile_cast`), in
@@ -1548,6 +1572,7 @@ fn push_wide_weight_stage(
 #[allow(clippy::too_many_arguments)]
 fn push_wide_activation_stage(
     source: &mut String,
+    fast: bool,
     other: usize,
     token_axis: u16,
     reduce_dim: usize,
@@ -1563,6 +1588,10 @@ fn push_wide_activation_stage(
     let tile_pair = tile_stage.pair_of_vectors();
     let vectors = block_n * block_k / lanes;
     let per_row = block_k / lanes;
+    if fast {
+        push_fast_activation_stage(source, other, token_axis, block_n, block_k, per_row, tile_stage);
+        return;
+    }
     let (head, tail) = if vectors == block_threads {
         ("        {\n            long vec = tiitg;\n".to_string(), "        }\n")
     } else if vectors < block_threads {
@@ -1814,13 +1843,20 @@ pub(super) fn push_dense_batched_gemm_body(
         "    for (int i = 0; i < {mc_count}; ++i) {{ acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }}\n"
     ));
     let k0_counter_type = if grid2d_active { "int" } else { "long" };
-    source.push_str(&format!(
-        "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
-    ));
     let wide_weight = wide_run_plan(weight_binding, weight_codec, block_m, block_k, block_threads);
-    if let Some(plan) = wide_weight {
+    let act_vectors = block_n * block_k / ACTIVATION_STAGE_LANES;
+    let versioned = wide_weight.is_some() && other_codec.is_none() && act_vectors == block_threads;
+    let loop_mark = source.len();
+    if versioned {
+        source.push_str(&format!("    for (; k0 < u.reduction_total; k0 += {block_k}) {{\n"));
+    } else {
+        source.push_str(&format!(
+            "    for ({k0_counter_type} k0 = 0; k0 < u.reduction_total; k0 += {block_k}) {{\n"
+        ));
+    }
+    if let Some(plan) = wide_weight.as_ref() {
         push_wide_weight_stage(
-            source, &plan, weight, reduce_dim, feature_axis, block_m, block_k, &tile_cast,
+            source, plan, false, weight, reduce_dim, feature_axis, block_m, block_k, &tile_cast,
         );
     } else {
     source.push_str(&format!(
@@ -1885,7 +1921,7 @@ pub(super) fn push_dense_batched_gemm_body(
     }
     if other_codec.is_none() {
         push_wide_activation_stage(
-            source, other, token_axis, reduce_dim, block_n, block_k, block_threads, tile_stage, &tile_cast,
+            source, false, other, token_axis, reduce_dim, block_n, block_k, block_threads, tile_stage, &tile_cast,
         );
     } else {
     source.push_str(&format!(
@@ -1925,6 +1961,7 @@ pub(super) fn push_dense_batched_gemm_body(
     ));
     source.push_str("        }\n");
     }
+    let mma_start = source.len();
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
     source.push_str(&format!(
         "        for (int sub_k = 0; sub_k < {sub_k_steps}; ++sub_k) {{\n"
@@ -1967,7 +2004,27 @@ pub(super) fn push_dense_batched_gemm_body(
     source.push_str("            }\n");
     source.push_str("        }\n");
     source.push_str("        threadgroup_barrier(mem_flags::mem_threadgroup);\n");
+    let mma_end = source.len();
     source.push_str("    }\n");
+    if let (true, Some(plan)) = (versioned, wide_weight.as_ref()) {
+        let guarded = source.split_off(loop_mark);
+        let mma = guarded[mma_start - loop_mark..mma_end - loop_mark].to_string();
+        splice_wide_weight_decode_helper(source, plan);
+        push_versioned_k_loop_head(
+            source,
+            plan,
+            &DenseKLoopShape { weight, other, reduce_dim, feature_axis, token_axis, block_m, block_n, block_k, k0_counter_type },
+        );
+        push_wide_weight_stage(source, plan, true, weight, reduce_dim, feature_axis, block_m, block_k, &tile_cast);
+        push_wide_activation_stage(
+            source, true, other, token_axis, reduce_dim, block_n, block_k, block_threads, tile_stage, &tile_cast,
+        );
+        source.push_str(&mma);
+        source.push_str("        }\n    }\n");
+        source.push_str(&guarded);
+    } else if let Some(plan) = wide_weight.as_ref() {
+        splice_wide_weight_decode_helper(source, plan);
+    }
     if slim_tgmem_active {
         source.push_str("    threadgroup float *out_tile = (threadgroup float *)tg_shared;\n");
     } else {
@@ -3774,4 +3831,66 @@ pub(super) fn render_scan(
     source.push_str("    }\n");
     source.push_str("}\n");
     Ok(source)
+}
+
+/// The unguarded activation step of the versioned k-loop: one `float2x4` load and one tile store per
+/// thread, with the K stride, tile bounds and 16-byte alignment already proven by the loop's hoisted
+/// predicate. Needs one vector per thread (`block_n * block_k / lanes == block_threads`).
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_fast_activation_stage(
+    source: &mut String,
+    other: usize,
+    token_axis: u16,
+    block_n: u64,
+    block_k: u64,
+    per_row: u64,
+    tile_stage: layout_render::HardwareType,
+) {
+    let lanes = ACTIVATION_STAGE_LANES;
+    let tile_scalar = tile_stage.scalar;
+    let tile_pair = tile_stage.pair_of_vectors();
+    source.push_str(&format!(
+        "        {{\n            long a_col = tiitg / {per_row};\n            long a_k = (tiitg % {per_row}) * {lanes};\n            long a_tok = col_tile * {block_n} + a_col;\n            threadgroup {tile_scalar} *a_dst = act_tile + a_col * {block_k} + a_k;\n            long aoff = u.operand_base[{other}] + dense_other_batch_base + a_tok * u.operand_strides[{other}][{token_axis}] + k0 + a_k;\n            float2x4 a_value = *((device const float2x4 *)(in{other} + aoff));\n            *((threadgroup {tile_pair} *)a_dst) = {tile_pair}(a_value);\n        }}\n"
+    ));
+}
+
+/// Geometry and operand slots the versioned dense k-loop head needs.
+#[cfg(feature = "metal-tiled-gemm")]
+struct DenseKLoopShape {
+    weight: usize,
+    other: usize,
+    reduce_dim: usize,
+    feature_axis: u16,
+    token_axis: u16,
+    block_m: u64,
+    block_n: u64,
+    block_k: u64,
+    k0_counter_type: &'static str,
+}
+
+/// Opens the versioned dense k-loop. Both fast-path predicates are hoisted out of the loop and built
+/// only from uniforms and tile indices, so every thread of the threadgroup takes the same branch and
+/// the barriers inside stay convergent: unit K stride, a tile that lies fully inside its extent, a
+/// 16-byte aligned base and a 16-byte aligned row stride (alignment at `k0 = 0` holds for every step
+/// because `block_k` elements are a multiple of 16 bytes). The fast loop covers only whole `block_k`
+/// steps, so it needs no k guard; the caller then emits the guarded loop, which resumes at `k0` and
+/// covers the slow steps and the ragged tail.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_versioned_k_loop_head(source: &mut String, plan: &WideRunPlan, shape: &DenseKLoopShape) {
+    let DenseKLoopShape { weight, other, reduce_dim, feature_axis, token_axis, block_m, block_n, block_k, k0_counter_type } = *shape;
+    let element_bytes = plan.element_bytes;
+    let weight_origin = if plan.byte_buffer {
+        format!("in{weight} + (u.operand_base[{weight}] + dense_weight_batch_base) * {element_bytes}")
+    } else {
+        format!("(device const uchar *)(in{weight} + u.operand_base[{weight}] + dense_weight_batch_base)")
+    };
+    source.push_str(&format!(
+        "    bool w_fast = u.operand_strides[{weight}][{reduce_dim}] == 1 && (row_tile + 1) * {block_m} <= feature_extent && (((ulong)({weight_origin})) & 15ul) == 0ul && ((u.operand_strides[{weight}][{feature_axis}] * {element_bytes}) & 15) == 0;\n"
+    ));
+    source.push_str(&format!(
+        "    bool a_fast = u.operand_strides[{other}][{reduce_dim}] == 1 && (col_tile + 1) * {block_n} <= token_extent && (((ulong)(in{other} + u.operand_base[{other}] + dense_other_batch_base)) & 15ul) == 0ul && ((u.operand_strides[{other}][{token_axis}] * 4) & 15) == 0;\n"
+    ));
+    source.push_str(&format!(
+        "    {k0_counter_type} k0 = 0;\n    {k0_counter_type} k_full = ({k0_counter_type})((u.reduction_total / {block_k}) * {block_k});\n    if (w_fast && a_fast) {{\n        for (; k0 < k_full; k0 += {block_k}) {{\n"
+    ));
 }

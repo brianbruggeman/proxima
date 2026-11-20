@@ -1154,7 +1154,75 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero(
     threadgroup float *act_tile = (threadgroup float *)(tg_shared + 8192);
     simdgroup_float8x8 acc[8];
     for (int i = 0; i < 8; ++i) { acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }
-    for (int k0 = 0; k0 < ((int)u.reduction_total); k0 += 32) {
+    bool w_fast = ((int)u.operand_strides[0][3]) == 1 && (row_tile + 1) * 64 <= feature_extent && (((ulong)((device const uchar *)(in0 + ((int)u.operand_base[0]) + dense_weight_batch_base))) & 15ul) == 0ul && ((((int)u.operand_strides[0][1]) * 4) & 15) == 0;
+    bool a_fast = ((int)u.operand_strides[1][3]) == 1 && (col_tile + 1) * 32 <= token_extent && (((ulong)(in1 + ((int)u.operand_base[1]) + dense_other_batch_base)) & 15ul) == 0ul && ((((int)u.operand_strides[1][0]) * 4) & 15) == 0;
+    int k0 = 0;
+    int k_full = (int)((((int)u.reduction_total) / 32) * 32);
+    if (w_fast && a_fast) {
+        for (; k0 < k_full; k0 += 32) {
+        {
+            int w_row = tiitg / 2;
+            int w_part_k = (tiitg % 2) * 16;
+            int w_feat = row_tile * 64 + w_row;
+            int row_base = ((int)u.operand_base[0]) + dense_weight_batch_base + w_feat * ((int)u.operand_strides[0][1]) + (k0 + w_part_k) * 1;
+            float w_regs[16];
+            device const uchar *w_run = (device const uchar *)(in0 + row_base);
+            uint4 w_vec[4];
+            #pragma clang loop unroll(full)
+            for (int vec = 0; vec < 4; ++vec) { w_vec[vec] = ((device const uint4 *)w_run)[vec]; }
+            w_regs[0] = omega_dense_run_2b1fe2a4facb2acf(w_vec[0][0]);
+            w_regs[1] = omega_dense_run_2b1fe2a4facb2acf(w_vec[0][1]);
+            w_regs[2] = omega_dense_run_2b1fe2a4facb2acf(w_vec[0][2]);
+            w_regs[3] = omega_dense_run_2b1fe2a4facb2acf(w_vec[0][3]);
+            w_regs[4] = omega_dense_run_2b1fe2a4facb2acf(w_vec[1][0]);
+            w_regs[5] = omega_dense_run_2b1fe2a4facb2acf(w_vec[1][1]);
+            w_regs[6] = omega_dense_run_2b1fe2a4facb2acf(w_vec[1][2]);
+            w_regs[7] = omega_dense_run_2b1fe2a4facb2acf(w_vec[1][3]);
+            w_regs[8] = omega_dense_run_2b1fe2a4facb2acf(w_vec[2][0]);
+            w_regs[9] = omega_dense_run_2b1fe2a4facb2acf(w_vec[2][1]);
+            w_regs[10] = omega_dense_run_2b1fe2a4facb2acf(w_vec[2][2]);
+            w_regs[11] = omega_dense_run_2b1fe2a4facb2acf(w_vec[2][3]);
+            w_regs[12] = omega_dense_run_2b1fe2a4facb2acf(w_vec[3][0]);
+            w_regs[13] = omega_dense_run_2b1fe2a4facb2acf(w_vec[3][1]);
+            w_regs[14] = omega_dense_run_2b1fe2a4facb2acf(w_vec[3][2]);
+            w_regs[15] = omega_dense_run_2b1fe2a4facb2acf(w_vec[3][3]);
+            #pragma clang loop unroll(full)
+            for (int w_k = 0; w_k < 16; ++w_k) { weight_tile[w_row * 32 + w_part_k + w_k] = w_regs[w_k]; }
+        }
+        {
+            int a_col = tiitg / 4;
+            int a_k = (tiitg % 4) * 8;
+            int a_tok = col_tile * 32 + a_col;
+            threadgroup float *a_dst = act_tile + a_col * 32 + a_k;
+            int aoff = ((int)u.operand_base[1]) + dense_other_batch_base + a_tok * ((int)u.operand_strides[1][0]) + k0 + a_k;
+            float2x4 a_value = *((device const float2x4 *)(in1 + aoff));
+            *((threadgroup matrix<float, 2, 4> *)a_dst) = matrix<float, 2, 4>(a_value);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (int sub_k = 0; sub_k < 4; ++sub_k) {
+            simdgroup_float8x8 a_frag[4];
+#pragma clang loop unroll(full)
+            for (int i = 0; i < 4; ++i) {
+                simdgroup_load(a_frag[i], weight_tile + (row_half * 4 + i) * 8 * 32 + sub_k * 8, 32);
+            }
+            simdgroup_barrier(mem_flags::mem_none);
+            simdgroup_float8x8 b_frag[2];
+#pragma clang loop unroll(full)
+            for (int j = 0; j < 2; ++j) {
+                simdgroup_load(b_frag[j], act_tile + (col_half * 2 + j) * 8 * 32 + sub_k * 8, 32, ulong2(0), true);
+            }
+#pragma clang loop unroll(full)
+            for (int i = 0; i < 4; ++i) {
+#pragma clang loop unroll(full)
+                for (int j = 0; j < 2; ++j) {
+                    simdgroup_multiply_accumulate(acc[i * 2 + j], a_frag[i], b_frag[j], acc[i * 2 + j]);
+                }
+            }
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+    }
+    for (; k0 < ((int)u.reduction_total); k0 += 32) {
         {
             int w_row = tiitg / 2;
             int w_part_k = (tiitg % 2) * 16;

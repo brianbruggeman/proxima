@@ -2466,10 +2466,11 @@ fn dense_weight_staging_loads_a_register_array_before_the_tile_stores() {
         !source.contains("long w_off = row_base"),
         "the serial per-element staging is gone"
     );
-    let loads = source
+    let guarded_loop = &source[source.rfind("for (; k0 < ").expect("the guarded k-loop renders")..];
+    let loads = guarded_loop
         .find("w_regs[w_k] = (k0")
         .expect("register loads render");
-    let stores = source.find("= w_regs[w_k];").expect("tile stores render");
+    let stores = guarded_loop.find("= w_regs[w_k];").expect("tile stores render");
     assert!(
         loads < stores,
         "all loads are issued before the first tile store"
@@ -12417,4 +12418,25 @@ fn uniform_expert_source_rewrites_the_scalar_read_of_every_descriptor_codec() {
             "{codec:?} scalar read must fetch from the expert payload"
         );
     }
+}
+
+/// The router's dense k-loop is versioned: the fast-path predicates are hoisted once, uniform per
+/// threadgroup, one unguarded loop covers whole `block_k` steps, and one guarded loop resumes at the
+/// same `k0` for the slow steps and the ragged tail.
+#[cfg(feature = "metal-tiled-gemm")]
+#[test]
+fn router_dense_k_loop_is_versioned_on_hoisted_uniform_predicates() {
+    let (bound, weight_node) = router_shaped_op(512, 2048, 256);
+    let packed = BTreeMap::from([(weight_node, Codec::BFloat16)]);
+    let policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true).with_bf16_input_rounding(true);
+    let source = emit(&bound, &packed, policy).expect("router emits").source;
+
+    let predicates = source.find("bool w_fast = ").expect("weight predicate is hoisted");
+    let fast_loop = source.find("if (w_fast && a_fast) {").expect("the fast loop is selected once");
+    let guarded_loop = source.find("    for (; k0 < u.reduction_total; k0 += 32) {").expect("the guarded loop resumes at k0");
+    assert!(predicates < fast_loop && fast_loop < guarded_loop, "{source}");
+    assert!(source.contains("bool a_fast = "), "{source}");
+    assert!(source.contains("for (; k0 < k_full; k0 += 32) {"), "{source}");
+    assert_eq!(source.matches("for (int sub_k = 0;").count(), 2, "the MMA renders once per loop\n{source}");
+    assert!(!source[fast_loop..guarded_loop].contains("k0 + w_part_k +"), "the fast loop carries no k guard");
 }
