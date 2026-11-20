@@ -79,7 +79,6 @@ edition = "2024"
 rust-version = "1.96"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/brianbruggeman/proxima"
-homepage = "https://github.com/brianbruggeman/proxima"
 readme = "README.md"
 
 [workspace.lints.rust]
@@ -283,7 +282,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme = "README.md"
 include = ["src/**", "Cargo.toml", "README.md", "LICENSE*"]
 

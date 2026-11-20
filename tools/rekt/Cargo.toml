@@ -5,7 +5,6 @@ edition = "2024"
 description = "command your rest api to get wrecked — a load tester on proxima"
 license.workspace = true
 repository.workspace = true
-homepage.workspace = true
 readme = "README.md"
 
 [lib]
