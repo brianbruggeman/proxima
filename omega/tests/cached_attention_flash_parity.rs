@@ -36,6 +36,7 @@ const QUERY_HEADS: u32 = 32;
 const KV_HEADS: u32 = 4;
 const HEAD_DIM: u32 = 128;
 const LAYERS: u32 = 2;
+const FLINT_WINDOW: u32 = 513;
 
 struct Fixture {
     program: Vec<Op>,
@@ -201,8 +202,9 @@ fn flash_vs_legacy(label: &str, rows: u64, cached_len: u64, window: Option<u32>)
         .map(|(left, right)| (f32::from_bits(*left) - f32::from_bits(*right)).abs())
         .fold(0.0f32, f32::max);
     let sample = first.map(|index| (f32::from_bits(legacy[index]), f32::from_bits(flash[index])));
+    let legacy_attention: Vec<&String> = legacy_keys.iter().filter(|key| key.contains("cached_attention")).collect();
     eprintln!(
-        "flash parity: {cell} elements={} differing={differing} max_abs_diff={max_abs_diff:e} first={first:?} sample={sample:?}",
+        "flash parity: {cell} elements={} differing={differing} max_abs_diff={max_abs_diff:e} first={first:?} sample={sample:?} legacy_kernels={legacy_attention:?}",
         legacy.len()
     );
     if differing == 0 && flash == flash_again {
@@ -233,5 +235,17 @@ fn flash_holds_bit_parity_with_legacy_on_whole_blocks_and_tail_rows() {
         ("tail q84 over c520", 84, 520, None),
         ("tail q130 over c1000", 130, 1000, None),
         ("tail q71 over c72", 71, 72, None),
+    ]);
+}
+
+#[test]
+fn flash_holds_bit_parity_with_legacy_under_the_flint_sliding_window() {
+    assert_all_cells_match(&[
+        ("window 513 whole blocks", 512, 2048, Some(FLINT_WINDOW)),
+        ("window 513 tail q485 over c2048", 485, 2048, Some(FLINT_WINDOW)),
+        ("window 513 flint last chunk", 487, 3584, Some(FLINT_WINDOW)),
+        ("window 513 small q64 over c64", 64, 64, Some(FLINT_WINDOW)),
+        ("window 100 unaligned tail q130 over c1000", 130, 1000, Some(100)),
+        ("window 33 tail q71 over c72", 71, 72, Some(33)),
     ]);
 }
