@@ -16,12 +16,12 @@ and `requests.jsonl` = two lines, `{"jsonrpc":"2.0","id":1,"method":"initialize"
 | 1 | `process_rpc` `init` frames, label set in `RpcState` | AC1, AC2, AC4 | `cargo val -p proxima-lib --features tokio --lib -E 'test(process_rpc_init_) or test(ctl_rpc_)'` | 11 passed (AC1 3 + AC2 3 + AC4 5); AC11 19; AC17 0 | [x] | 2026-11-20 PROXIMA-36: 3/3/5 in gate1.log (run with slice 2, 31 total, wall 15 s), AC11 19, clippy `-D warnings` clean, AC17 0; logs `<tickets>/PROXIMA-37/evidence/` |
 | 2 | MCP listener `tools` from its spec: list, call, refusals | AC5-AC8 | `cargo val -p proxima-lib --features tokio --lib -E 'test(mcp_tools_) or test(ctl_tools_)'` | 20 passed (AC5 1 + AC6 3 + AC7 8 + AC8 8); AC11 19; AC17 0 | [x] | 2026-11-20 PROXIMA-37: 1/3/8/8 in gate1.log (run with slice 1, 31 total), AC11 19, clippy `-D warnings` clean, AC17 0; L21 = `tests/fixtures/mcp_stub/incumbent_tools.json` from base `proximad` (PROXIMA-35) |
 | 3 | an `mcp` listener runs one lane and reports no bind address | AC9, AC10 | `cargo val -p proxima-listen --lib -E 'test(mcp_lane_) or test(ctl_lanes_)'` | 5 passed (AC9 2 + AC10 3); AC14(a) unchanged; AC17 0 | [x] | 2026-11-20 PROXIMA-38: 5 passed (gate-a.log, wall 28 s), AC14(a) 124 (gate-b.log), clippy `-D warnings` clean, AC17 0 over 106 new fns; logs `<tickets>/PROXIMA-39/evidence/` |
-| 4 | the review-ticket MCP fixture served end to end by `proxima serve` over stdio | AC12, AC13 | `cargo val -p proxima-cli --test integration -E 'test(mcp_config_tool_) or test(ctl_serve_)'` | 5 passed (AC12 1 + AC13 4); AC14(b) 1; AC15 0; AC16 5 and 1; AC17 0 | [ ] | |
+| 4 | the review-ticket MCP fixture served end to end by `proxima serve` over stdio | AC12, AC13 | `cargo val -p proxima-cli --test integration -E 'test(mcp_config_tool_) or test(ctl_serve_)'` | 5 passed (AC12 1 + AC13 4); AC14(b) 1; AC15 0; AC16 5 and 1; AC17 0 | [x] | 2026-11-20 PROXIMA-39: 5 passed (gate-c.log after one fixture fix: the `llm` synth needs `body_template`, `body` is static; the spec's fixture text was wrong and is corrected), AC14(b) 1 (gate-d.log), clippy `-D warnings` clean, AC15 0, AC16(a) 5, AC17 0 over 106 new fns |
 
 ## resume
 
-Last landed slice: none (spec round 4; PROXIMA-33 rounds 1-3 REFUSE, amended)
-Next action: 0b and 0c when load is under 30, write their numbers here and into AC14(a), audit round 3
+Last landed slice: 4 (all slices green on branch card/proxima-34, 2026-11-20)
+Next action: landing gate (scripts/feature-target-gate.sh, doc-tests nonzero), rebase onto main, ff-merge
 Open question, if any: none
 
 ## struck

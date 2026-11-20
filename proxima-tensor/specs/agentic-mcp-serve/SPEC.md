@@ -107,7 +107,7 @@ Reuse map (nothing in this list is built):
 | tool response mapping | the incumbent tail of `tool_call` | `src/listeners/mcp.rs:525-550` |
 | request to a dispatch path | `build_request` | `src/listeners/mcp.rs:808-834` |
 | newline-framed child RPC, respawn, timeout | `ProcessRpcUpstream`, `ensure_alive`, `dispatch_one` | `src/upstreams/process_rpc.rs:111-246` |
-| stubs | `synth` (expands `{{body.<field>}}` from a JSON request body) and `/bin/sh` scripts | `src/upstreams/synth.rs:182-215` |
+| stubs | `synth` (its `body_template`, not `body`, expands `{{body.<field>}}` from a JSON request body; measured in slice 4, where `body` returned the placeholder unexpanded) and `/bin/sh` scripts | `src/upstreams/synth.rs:182-215,261-267,314-334` |
 | the lane rule being extended | `is_http` name check | `proxima-listen/src/handle.rs:195-211` |
 | lane test doubles | `ReadySignalProtocol`, `ThreadRuntime` | `proxima-listen/src/handle.rs:854-935` |
 
@@ -138,7 +138,7 @@ Fixture (slice 4, JSON; `<dir>` is replaced by the test's tempdir path):
       "tracker": { "process_rpc": { "name": "tracker", "command": "/bin/sh", "args": ["<dir>/tracker.sh"],
                    "init": [ { "send": "<L1>" }, { "send": "<L2>", "reply": false } ] } },
       "github": { "synth": { "status": 200, "body": "{\"title\":\"split stage body\",\"body\":\"adds StageBody\"}" } },
-      "llm":    { "synth": { "status": 200, "body": "{\"content\":[{\"type\":\"text\",\"text\":\"review of {{body.prompt}}\"}]}" } } },
+      "llm":    { "synth": { "status": 200, "body_template": "{\"content\":[{\"type\":\"text\",\"text\":\"review of {{body.prompt}}\"}]}" } } },
     "stages": [
       { "name": "ticket", "pipe": "tracker", "request": { "method": "POST", "path": "/",
         "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_ticket\",\"arguments\":{\"id\":\"{{body.in.ticket}}\"}}}" } },

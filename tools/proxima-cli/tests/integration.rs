@@ -4,6 +4,8 @@ mod daemon_cli;
 mod hello_name;
 #[path = "integration/load_smoke.rs"]
 mod load_smoke;
+#[path = "integration/mcp_config_tool.rs"]
+mod mcp_config_tool;
 #[path = "integration/mcp_stdio.rs"]
 mod mcp_stdio;
 #[path = "integration/model_export.rs"]

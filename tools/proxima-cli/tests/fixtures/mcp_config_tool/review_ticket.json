@@ -1,0 +1,18 @@
+{ "pipe": [ { "name": "review_ticket", "pipeline": {
+    "pipes": {
+      "tracker": { "process_rpc": { "name": "tracker", "command": "/bin/sh", "args": ["<dir>/tracker.sh"],
+                   "init": [
+                     { "send": "{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\",\"capabilities\":{},\"clientInfo\":{\"name\":\"proxima\",\"version\":\"0\"}}}" },
+                     { "send": "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}", "reply": false } ] } },
+      "github": { "synth": { "status": 200, "body": "{\"title\":\"split stage body\",\"body\":\"adds StageBody\"}" } },
+      "llm":    { "synth": { "status": 200, "body_template": "{\"content\":[{\"type\":\"text\",\"text\":\"review of {{body.prompt}}\"}]}" } } },
+    "stages": [
+      { "name": "ticket", "pipe": "tracker", "request": { "method": "POST", "path": "/",
+        "body": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{\"name\":\"get_ticket\",\"arguments\":{\"id\":\"{{body.in.ticket}}\"}}}" } },
+      { "name": "pr", "pipe": "github", "depends_on": ["ticket"], "request": { "method": "GET",
+        "path": "/repos/{{body.ticket.result.structuredContent.repo}}/pulls/{{body.ticket.result.structuredContent.pr}}" } },
+      { "name": "review", "pipe": "llm", "depends_on": ["ticket", "pr"], "request": { "method": "POST", "path": "/v1/messages",
+        "body": "{\"prompt\":\"{{body.ticket.result.structuredContent.ticket}}: {{body.pr.body}}\"}" } } ],
+    "output": "review" } } ],
+  "listen": [ { "type": "mcp", "transport": "stdio", "bind": "127.0.0.1:0", "pipe": "review_ticket",
+    "tools": [ {"name":"review_ticket","description":"Review the PR linked from a ticket","inputSchema":{"type":"object","properties":{"ticket":{"type":"string"}},"required":["ticket"]}} ] } ] }
