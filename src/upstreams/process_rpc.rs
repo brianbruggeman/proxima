@@ -42,6 +42,20 @@ pub struct ProcessRpcSpec {
     pub env: BTreeMap<String, String>,
     pub restart: bool,
     pub request_timeout_ms: u64,
+    pub init: Vec<ProcessRpcInitFrame>,
+}
+
+/// One line written to a freshly spawned child before the call's own
+/// request; `reply` says whether exactly one reply line is read and
+/// discarded. Runs through the same framing as [`ProcessRpcUpstream`] calls.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct ProcessRpcInitFrame {
+    /// The line to write, without its trailing newline.
+    pub send: String,
+
+    /// Read and discard one reply line after writing.
+    #[serde(default = "default_reply")]
+    pub reply: bool,
 }
 
 struct RpcState {
@@ -87,13 +101,14 @@ impl Drop for RpcChild {
 
 impl ProcessRpcUpstream {
     pub fn new(label: impl Into<String>, spec: ProcessRpcSpec) -> Self {
+        let label = label.into();
         Self {
-            label: label.into(),
             state: Arc::new(RpcState {
                 spec,
-                label: String::new(),
+                label: label.clone(),
                 child: AsyncMutex::new(None),
             }),
+            label,
         }
     }
 }
@@ -129,7 +144,7 @@ impl SendPipe for ProcessRpcUpstream {
                 ))
             })?;
             let timeout = Duration::from_millis(state.spec.request_timeout_ms);
-            let outcome = time::timeout(timeout, dispatch_one(rpc_child, body)).await;
+            let outcome = time::timeout(timeout, dispatch_one(rpc_child, body, true)).await;
             match outcome {
                 Ok(Ok(line)) => Ok(Response::ok(line)),
                 Ok(Err(error)) => {
@@ -151,29 +166,55 @@ async fn ensure_alive(
     state: &Arc<RpcState>,
     guard: &mut AsyncMutexGuard<'_, Option<RpcChild>>,
 ) -> Result<(), ProximaError> {
-    if let Some(rpc_child) = guard.as_mut() {
-        match rpc_child.child_mut()?.try_wait() {
-            Ok(Some(_code)) => {
-                if !state.spec.restart {
-                    return Err(ProximaError::Upstream(format!(
-                        "process_rpc `{}`: subprocess exited and restart=false",
-                        state.label,
-                    )));
-                }
-                **guard = None;
-            }
-            Ok(None) => return Ok(()),
-            Err(error) => {
-                **guard = None;
-                return Err(ProximaError::Upstream(format!(
-                    "process_rpc `{}`: try_wait: {error}",
-                    state.label,
-                )));
-            }
+    if child_is_live(state, guard)? {
+        return Ok(());
+    }
+    let mut child = spawn_child(&state.spec, &state.label)?;
+    run_init(state, &mut child).await?;
+    **guard = Some(child);
+    Ok(())
+}
+
+fn child_is_live(state: &RpcState, slot: &mut Option<RpcChild>) -> Result<bool, ProximaError> {
+    let Some(rpc_child) = slot.as_mut() else {
+        return Ok(false);
+    };
+    match rpc_child.child_mut()?.try_wait() {
+        Ok(None) => Ok(true),
+        Ok(Some(_code)) if !state.spec.restart => {
+            Err(state_error(state, "subprocess exited and restart=false"))
+        }
+        Ok(Some(_code)) => {
+            *slot = None;
+            Ok(false)
+        }
+        Err(error) => {
+            *slot = None;
+            Err(state_error(state, &format!("try_wait: {error}")))
         }
     }
-    let child = spawn_child(&state.spec, &state.label)?;
-    **guard = Some(child);
+}
+
+fn state_error(state: &RpcState, detail: &str) -> ProximaError {
+    ProximaError::Upstream(format!("process_rpc `{}`: {detail}", state.label))
+}
+
+async fn run_init(state: &RpcState, rpc_child: &mut RpcChild) -> Result<(), ProximaError> {
+    let timeout = Duration::from_millis(state.spec.request_timeout_ms);
+    for (index, frame) in state.spec.init.iter().enumerate() {
+        let body = Bytes::from(frame.send.clone());
+        let outcome = time::timeout(timeout, dispatch_one(rpc_child, body, frame.reply)).await;
+        let detail = match outcome {
+            Ok(Ok(_discarded)) => continue,
+            Ok(Err(ProximaError::Upstream(text))) => text,
+            Ok(Err(other)) => other.to_string(),
+            Err(_elapsed) => format!("timed out after {timeout:?}"),
+        };
+        return Err(ProximaError::Upstream(format!(
+            "process_rpc `{}` init frame {index}: {detail}",
+            state.label
+        )));
+    }
     Ok(())
 }
 
@@ -210,59 +251,64 @@ fn spawn_child(spec: &ProcessRpcSpec, label: &str) -> Result<RpcChild, ProximaEr
     })
 }
 
-async fn dispatch_one(rpc_child: &mut RpcChild, body: Bytes) -> Result<Bytes, ProximaError> {
-    let stdin_fd = rpc_child.stdin.as_raw_fd();
-    let stdout_fd = rpc_child.stdout.as_raw_fd();
-    let needs_newline = !body.ends_with(b"\n");
-    let framing = std::mem::replace(&mut rpc_child.framing, DelimiterFraming::new());
+type RoundTrip = Result<(Bytes, DelimiterFraming), ProximaError>;
 
-    // duped so the worker owns independent descriptors: `time::timeout`
-    // cancels this future, not the OS thread, and a timed-out `call` drops
-    // RpcChild (closing its fds) while the orphaned worker may still be
-    // blocked in read/write on the same fd numbers.
-    let stdin_owned = dup_fd(stdin_fd, "stdin")?;
-    let stdout_owned = dup_fd(stdout_fd, "stdout")?;
-
-    let (sender, receiver) = oneshot::channel();
-    thread::spawn(move || {
-        let stdin_fd = stdin_owned.as_raw_fd();
-        let stdout_fd = stdout_owned.as_raw_fd();
-        let outcome = blocking_round_trip(stdin_fd, stdout_fd, &body, needs_newline, framing);
-        let _ = sender.send(outcome);
-    });
+async fn dispatch_one(
+    rpc_child: &mut RpcChild,
+    body: Bytes,
+    expect_reply: bool,
+) -> Result<Bytes, ProximaError> {
+    let receiver = spawn_round_trip(rpc_child, body, expect_reply)?;
     let outcome = receiver.await.unwrap_or_else(|_| {
         Err(ProximaError::Upstream(
             "process_rpc round-trip worker thread dropped".into(),
         ))
     });
-
-    match outcome {
-        Ok((line, framing)) => {
-            rpc_child.framing = framing;
-            Ok(line)
-        }
-        Err(error) => Err(error),
-    }
+    let (line, framing) = outcome?;
+    rpc_child.framing = framing;
+    Ok(line)
 }
 
 // one background thread owns the whole write-then-read round trip for a
 // single call — mirrors fd_pipe.rs's "spawn once per call, not per syscall"
 // discipline. Safe because the AsyncMutex already serializes calls per
 // child, so nothing else touches these fds while this thread runs.
-fn blocking_round_trip(
-    stdin_fd: RawFd,
-    stdout_fd: RawFd,
-    body: &[u8],
-    needs_newline: bool,
-    mut framing: DelimiterFraming,
-) -> Result<(Bytes, DelimiterFraming), ProximaError> {
+// the fds are duped so the worker owns independent descriptors: `time::timeout`
+// cancels this future, not the OS thread, and a timed-out `call` drops
+// RpcChild (closing its fds) while the orphaned worker may still be
+// blocked in read/write on the same fd numbers.
+fn spawn_round_trip(
+    rpc_child: &mut RpcChild,
+    body: Bytes,
+    expect_reply: bool,
+) -> Result<oneshot::Receiver<RoundTrip>, ProximaError> {
+    let needs_newline = !body.ends_with(b"\n");
+    let framing = std::mem::replace(&mut rpc_child.framing, DelimiterFraming::new());
+    let stdin_owned = dup_fd(rpc_child.stdin.as_raw_fd(), "stdin")?;
+    let stdout_owned = dup_fd(rpc_child.stdout.as_raw_fd(), "stdout")?;
+    let (sender, receiver) = oneshot::channel();
+    thread::spawn(move || {
+        let sent = write_request(stdin_owned.as_raw_fd(), &body, needs_newline);
+        let outcome = sent.and_then(|()| match expect_reply {
+            true => read_reply(stdout_owned.as_raw_fd(), framing),
+            false => Ok((Bytes::new(), framing)),
+        });
+        let _ = sender.send(outcome);
+    });
+    Ok(receiver)
+}
+
+fn write_request(stdin_fd: RawFd, body: &[u8], needs_newline: bool) -> Result<(), ProximaError> {
     write_all_raw(stdin_fd, body)
         .map_err(|err| ProximaError::Upstream(format!("write rpc body: {err}")))?;
     if needs_newline {
         write_all_raw(stdin_fd, b"\n")
             .map_err(|err| ProximaError::Upstream(format!("write rpc newline: {err}")))?;
     }
+    Ok(())
+}
 
+fn read_reply(stdout_fd: RawFd, mut framing: DelimiterFraming) -> RoundTrip {
     let codec = DelimiterCodec::unbounded(b"\n");
     loop {
         let (next_state, frame) = framing
@@ -378,6 +424,9 @@ fn default_restart() -> bool {
     true
 }
 
+fn default_reply() -> bool {
+    true
+}
 fn default_request_timeout_ms() -> u64 {
     30_000
 }
@@ -426,6 +475,12 @@ pub struct ProcessRpcConfig {
     #[serde(default = "default_request_timeout_ms")]
     #[builder(default = default_request_timeout_ms())]
     pub request_timeout_ms: u64,
+
+    /// Frames written to every freshly spawned child before the call's own request.
+    #[setting(skip)]
+    #[serde(default)]
+    #[builder(default)]
+    pub init: Vec<ProcessRpcInitFrame>,
 }
 
 impl Validate for ProcessRpcConfig {
@@ -454,6 +509,7 @@ impl ProcessRpcConfig {
             env: self.env,
             restart: self.restart,
             request_timeout_ms: self.request_timeout_ms,
+            init: self.init,
         })
     }
 }
@@ -707,5 +763,166 @@ mod tests {
             libc::close(recycled[0]);
             libc::close(recycled[1]);
         }
+    }
+
+    const STUB: &str = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/mcp_stub/tracker.sh"
+    );
+    const INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"proxima","version":"0"}}}"#;
+    const INITIALIZED: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+    const TOOLS_CALL: &str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_ticket","arguments":{"id":"PROXIMA-24"}}}"#;
+    const REPLY_READY: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"inits=1"}],"structuredContent":{"ticket":"PROXIMA-24","repo":"brianbruggeman/proxima","pr":42}}}"#;
+    const REPLY_NOT_READY: &str =
+        r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32002,"message":"server not initialized"}}"#;
+    const EXIT: &str = r#"{"jsonrpc":"2.0","id":9,"method":"exit"}"#;
+    const HANG: &str = r#"{"jsonrpc":"2.0","id":5,"method":"hang"}"#;
+    const INIT_ERROR: &str =
+        "process_rpc `tracker` init frame 0: process_rpc subprocess closed stdout";
+    const INIT_ERROR_NO_LABEL: &str =
+        "process_rpc `` init frame 0: process_rpc subprocess closed stdout";
+
+    fn check_reply(body: &[u8], expected: &str) -> Result<(), String> {
+        if body == expected.as_bytes() {
+            return Ok(());
+        }
+        Err(format!(
+            "reply {:?} is not {expected:?}",
+            String::from_utf8_lossy(body)
+        ))
+    }
+
+    fn check_init_error(error: &str, label: &str, index: usize) -> Result<(), String> {
+        let named = format!("process_rpc `{label}`");
+        let frame = format!("init frame {index}");
+        if error.contains(&named) && error.contains(&frame) {
+            return Ok(());
+        }
+        Err(format!("error {error:?} lacks {named:?} or {frame:?}"))
+    }
+
+    fn handshake() -> Value {
+        json!([{"send": INITIALIZE}, {"send": INITIALIZED, "reply": false}])
+    }
+
+    async fn load_rpc(fields: Value) -> PipeHandle {
+        let context = crate::load::LoadContext::with_default_registry().expect("default context");
+        let spec = json!({"process_rpc": fields});
+        crate::load::load(spec, &context)
+            .await
+            .expect("load process_rpc spec")
+    }
+
+    async fn call_line(handle: &PipeHandle, line: &str) -> Result<Bytes, ProximaError> {
+        let request = Request::builder()
+            .method("POST")
+            .path("/")
+            .body(line.to_string())
+            .build()
+            .expect("request");
+        SendPipe::call(handle, request).await?.collect_body().await
+    }
+
+    fn stub_spec(init: Value) -> Value {
+        json!({"name": "tracker", "command": "/bin/sh", "args": [STUB], "init": init})
+    }
+
+    #[proxima::test]
+    async fn process_rpc_init_runs_handshake_before_first_call() {
+        let handle = load_rpc(stub_spec(handshake())).await;
+        let body = call_line(&handle, TOOLS_CALL).await.expect("call");
+        check_reply(&body, REPLY_READY).expect("initialized reply");
+    }
+
+    #[proxima::test]
+    async fn process_rpc_init_runs_once_per_live_child() {
+        let handle = load_rpc(stub_spec(handshake())).await;
+        for _ in 0..2 {
+            let body = call_line(&handle, TOOLS_CALL).await.expect("call");
+            check_reply(&body, REPLY_READY).expect("inits=1 on both calls");
+        }
+    }
+
+    #[proxima::test]
+    async fn process_rpc_init_runs_again_on_respawned_child() {
+        let handle = load_rpc(stub_spec(handshake())).await;
+        call_line(&handle, EXIT)
+            .await
+            .expect_err("exit closes stdout");
+        let body = call_line(&handle, TOOLS_CALL)
+            .await
+            .expect("call after respawn");
+        check_reply(&body, REPLY_READY).expect("respawned child initialized");
+    }
+
+    #[proxima::test]
+    async fn process_rpc_init_fails_when_child_exits_before_reply() {
+        let handle = load_rpc(json!({
+            "name": "tracker", "command": "/bin/sh", "args": ["-c", "exit 0"],
+            "init": [{"send": INITIALIZE}],
+        }))
+        .await;
+        let error = call_line(&handle, TOOLS_CALL)
+            .await
+            .expect_err("init must fail");
+        check_init_error(&error.to_string(), "tracker", 0).expect("frame 0 named");
+    }
+
+    #[proxima::test]
+    async fn process_rpc_init_fails_when_frame_times_out() {
+        let mut fields = stub_spec(json!([{"send": INITIALIZE}, {"send": HANG}]));
+        fields["request_timeout_ms"] = json!(200);
+        let handle = load_rpc(fields).await;
+        let error = call_line(&handle, TOOLS_CALL)
+            .await
+            .expect_err("init must time out");
+        check_init_error(&error.to_string(), "tracker", 1).expect("frame 1 named");
+    }
+
+    #[proxima::test]
+    async fn process_rpc_init_fails_then_respawned_child_initializes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("marker");
+        let script = "if [ -e \"$0\" ]; then exec /bin/sh \"$1\"; fi; : > \"$0\"";
+        let handle = load_rpc(json!({
+            "name": "tracker", "command": "/bin/sh",
+            "args": ["-c", script, marker.to_str().expect("utf8 path"), STUB],
+            "init": handshake(),
+        }))
+        .await;
+        let error = call_line(&handle, TOOLS_CALL)
+            .await
+            .expect_err("first child exits");
+        check_init_error(&error.to_string(), "tracker", 0).expect("frame 0 named");
+        let body = call_line(&handle, TOOLS_CALL).await.expect("second call");
+        check_reply(&body, REPLY_READY).expect("respawned child initialized");
+    }
+
+    #[proxima::test]
+    async fn ctl_rpc_without_init_stub_refuses_tools_call() {
+        let handle = load_rpc(stub_spec(json!([]))).await;
+        let body = call_line(&handle, TOOLS_CALL).await.expect("call");
+        check_reply(&body, REPLY_NOT_READY).expect("stub refuses before initialize");
+        check_reply(&body, REPLY_READY).expect_err("helper rejects the refusal");
+    }
+
+    #[test]
+    fn ctl_rpc_check_reply_accepts_equal_bytes() {
+        check_reply(REPLY_READY.as_bytes(), REPLY_READY).expect("equal bytes");
+    }
+
+    #[test]
+    fn ctl_rpc_check_init_error_accepts_label_and_index() {
+        check_init_error(INIT_ERROR, "tracker", 0).expect("label and index present");
+    }
+
+    #[test]
+    fn ctl_rpc_check_init_error_rejects_wrong_index() {
+        check_init_error(INIT_ERROR, "tracker", 1).expect_err("index is checked");
+    }
+
+    #[test]
+    fn ctl_rpc_check_init_error_rejects_empty_label() {
+        check_init_error(INIT_ERROR_NO_LABEL, "tracker", 0).expect_err("empty label caught");
     }
 }
