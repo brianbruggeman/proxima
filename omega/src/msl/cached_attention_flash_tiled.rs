@@ -3,12 +3,14 @@ use super::layout_render::{hardware_type, readable_scalar_cache};
 use super::*;
 use proxima_numeric::float_layout::FloatLayout;
 
-/// Simdgroups per flash threadgroup: llama.cpp's `nsg` for a head of fewer than 512 elements.
-pub(super) const FLASH_SIMDGROUPS: u64 = 4;
+/// Simdgroups per flash threadgroup: llama.cpp's `nsg` for a head of fewer than 512 elements,
+/// read from `[attention_rows].flash_simdgroups` in `omega-runtime.toml`.
+pub(super) const FLASH_SIMDGROUPS: u64 = crate::sized::ATTENTION_ROWS_FLASH_SIMDGROUPS;
 
-/// Keys one flash block walks: llama.cpp's `OP_FLASH_ATTN_EXT_NCPSG`. Equal to the row-tiled
-/// block of the same head so the entry name and scratch layout keep meaning one thing.
-pub(super) const FLASH_KEYS_PER_BLOCK: u64 = 64;
+/// Keys one flash block walks: llama.cpp's `OP_FLASH_ATTN_EXT_NCPSG`, read from
+/// `[attention_rows].flash_keys_per_block`. Equal to the row-tiled block of the same head so the
+/// entry name and scratch layout keep meaning one thing.
+pub(super) const FLASH_KEYS_PER_BLOCK: u64 = crate::sized::ATTENTION_ROWS_FLASH_KEYS_PER_BLOCK;
 
 /// The head width the flash body's row write assumes: one float4 per lane of one simdgroup.
 const FLASH_HEAD_DIM: u64 = 128;

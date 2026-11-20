@@ -741,6 +741,23 @@ fn emit_sizing_consts() {
     out.push_str(&format!(
         "pub const ATTENTION_ROWS_TARGET_SIMDGROUPS: u64 = {attention_rows_target_simdgroups};\n"
     ));
+    let attention_rows_flash_simdgroups = require_nonzero(
+        "attention_rows.flash_simdgroups",
+        resolve_int(&root, "attention_rows", "flash_simdgroups"),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_FLASH_SIMDGROUPS: u64 = {attention_rows_flash_simdgroups};\n"
+    ));
+    let attention_rows_flash_keys_per_block = require_multiple_of_thirty_two(
+        "attention_rows.flash_keys_per_block",
+        require_nonzero(
+            "attention_rows.flash_keys_per_block",
+            resolve_int(&root, "attention_rows", "flash_keys_per_block"),
+        ),
+    );
+    out.push_str(&format!(
+        "pub const ATTENTION_ROWS_FLASH_KEYS_PER_BLOCK: u64 = {attention_rows_flash_keys_per_block};\n"
+    ));
 
     let workgroup_size = require_nonzero(
         "wgsl.workgroup_size",

@@ -2892,6 +2892,12 @@ fn flash_decomposition_refuses_a_head_it_has_no_lane_map_for() {
     );
 }
 
+#[test]
+fn flash_sized_keys_equal_the_constants_they_replaced() {
+    assert_eq!(crate::sized::ATTENTION_ROWS_FLASH_SIMDGROUPS, 4);
+    assert_eq!(crate::sized::ATTENTION_ROWS_FLASH_KEYS_PER_BLOCK, 64);
+}
+
 /// Head dims 256 and 512 are DESIGN admits, but the template is d128-only until slice 6
 /// generalises it, so they are `HeadDim` refusals here.
 #[cfg(feature = "metal-attn-variants")]
