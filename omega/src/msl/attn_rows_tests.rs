@@ -2932,6 +2932,50 @@ fn flash_admission_table_names_the_condition_each_shape_fails() {
 }
 
 #[cfg(feature = "metal-attn-variants")]
+fn flash_schedule(decomposition: AttentionDecomposition) -> AttentionRowSchedule {
+    AttentionMmaSelection::from_variant(flash_f16_variant(decomposition))
+        .expect("the variant maps to a schedule")
+        .1
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn flash_variant_round_trips_through_schedule_and_cache_token() {
+    let flash = flash_schedule(AttentionDecomposition::Flash);
+    let legacy = flash_schedule(AttentionDecomposition::Legacy);
+
+    assert!(flash.is_flash());
+    assert!(!legacy.is_flash());
+    assert!(flash.cache_token().ends_with("_flash"));
+    assert!(!legacy.cache_token().contains("_flash"));
+    assert_eq!(
+        flash.cache_token().strip_suffix("_flash"),
+        Some(legacy.cache_token().as_str()),
+        "the decomposition suffix is the only difference, so the token recovers Flash"
+    );
+}
+
+/// Every admitted length lands on one unit-row tile and one simdgroup count, so lengths that
+/// are whole blocks share a kernel. q485 is not a whole 64-key block (a `QueryRowsNotWholeBlocks`
+/// refusal in the admission table), so q448 and q576 stand in as the second admitted lengths.
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn flash_cache_key_is_shared_by_every_admitted_prompt_length_of_one_shape() {
+    let flash = flash_schedule(AttentionDecomposition::Flash);
+    let policy = NumericPolicy::llama_relaxed();
+    let token = |rows: u64| flash.cache_token_for(&flash_op(8, 128, 2048, rows, i64::MIN), policy);
+
+    let base = token(512);
+
+    assert!(base.contains("_flash"));
+    assert_eq!(token(448), base, "q448 shares the q512 key");
+    assert_eq!(token(576), base, "q576 shares the q512 key");
+    let legacy = flash_schedule(AttentionDecomposition::Legacy)
+        .cache_token_for(&flash_op(8, 128, 2048, 512, i64::MIN), policy);
+    assert_ne!(legacy, base, "flash and legacy never share a key");
+}
+
+#[cfg(feature = "metal-attn-variants")]
 #[test]
 fn selecting_flash_for_a_refused_shape_reports_the_named_refusal() {
     let op = flash_op(16, 128, 2048, 512, i64::MIN);
