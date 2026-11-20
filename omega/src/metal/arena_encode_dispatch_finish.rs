@@ -4105,7 +4105,13 @@ pub(super) fn encode_op(
             // case, `plan_hits`/`gpu_exec`'s own row) `emit` itself is never
             // called; only a genuine miss inside `pipeline_for` pays for the
             // full render + compile.
-            let (bindings, grid) = kernel_dispatch_shape(bound, packed_operands, numeric_policy, knobs)?;
+            let (bindings, grid) = kernel_dispatch_shape_with_schedule(
+                bound,
+                packed_operands,
+                numeric_policy,
+                attention_row_schedule,
+                knobs,
+            )?;
             let mut cache_key = crate::msl::kernel_cache_key_for_grid_with_layout(
                 bound,
                 packed_operands,

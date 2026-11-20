@@ -1515,8 +1515,13 @@ pub(super) fn execute_plan_with_placements_inner(
                 let bindings_for_hazard: &[Binding] = match resolved_step {
                     Some(step) => step.bindings.as_slice(),
                     None => {
-                        let (bindings, _grid) =
-                            kernel_dispatch_shape(bound, packed_operands, plan.numeric_policy, &plan.emit_knobs)?;
+                        let (bindings, _grid) = kernel_dispatch_shape_with_schedule(
+                            bound,
+                            packed_operands,
+                            plan.numeric_policy,
+                            plan.attention_row_schedule,
+                            &plan.emit_knobs,
+                        )?;
                         owned_bindings = bindings;
                         owned_bindings.as_slice()
                     }
