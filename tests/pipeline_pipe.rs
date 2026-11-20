@@ -19,6 +19,7 @@ mod with_tokio {
     use std::future::Future;
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::sync::OnceLock;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use bytes::Bytes;
@@ -37,12 +38,16 @@ mod with_tokio {
     const FILES: &str = r#"[{"filename":"src/pipelines/spec.rs"}]"#;
     const REVIEW: &str = r#"{"content":[{"type":"text","text":"LGTM with one nit"}]}"#;
     const PULL_PATH: &str = "/repos/brianbruggeman/proxima/pulls/42";
+    const FILES_PATH: &str = "/repos/brianbruggeman/proxima/pulls/42/files";
+    const REVIEW_BODY: &[u8] = br#"{"content":[{"text":"LGTM with one nit","type":"text"}]}"#;
+    const LLM_REQUEST_PARTS: &[&str] = &["adds StageBody", "src/pipelines/spec.rs", "design.md"];
 
     #[derive(Clone)]
     struct StubPipe {
         routes: &'static [(&'static str, &'static str)],
         fail_path: Option<&'static str>,
         calls: Arc<AtomicUsize>,
+        seen: Arc<OnceLock<Bytes>>,
     }
 
     impl StubPipe {
@@ -71,6 +76,7 @@ mod with_tokio {
             request: Request<Bytes>,
         ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            let _ = self.seen.set(request.payload.clone());
             let response = self.respond(&request.path);
             async move { Ok(response) }
         }
@@ -97,7 +103,9 @@ mod with_tokio {
 
     struct Rig {
         context: LoadContext,
-        llm_calls: Arc<AtomicUsize>,
+        vault: StubPipe,
+        github: StubPipe,
+        llm: StubPipe,
     }
 
     fn register(context: &LoadContext, kind: &'static str, stub: StubPipe) {
@@ -116,37 +124,30 @@ mod with_tokio {
             routes,
             fail_path,
             calls: Arc::new(AtomicUsize::new(0)),
+            seen: Arc::new(OnceLock::new()),
         }
     }
 
     fn rig(github_fail_path: Option<&'static str>) -> Rig {
         let context = LoadContext::with_default_registry().expect("default load context");
+        let vault = stub(
+            &[
+                ("/PROXIMA-24/state.json", STATE),
+                ("/PROXIMA-24/notes", NOTES),
+            ],
+            None,
+        );
+        let github = stub(&[(PULL_PATH, PULL), (FILES_PATH, FILES)], github_fail_path);
         let llm = stub(&[("/v1/messages", REVIEW)], None);
-        let llm_calls = llm.calls.clone();
-        register(
-            &context,
-            "vault",
-            stub(
-                &[
-                    ("/PROXIMA-24/state.json", STATE),
-                    ("/PROXIMA-24/notes", NOTES),
-                ],
-                None,
-            ),
-        );
-        register(
-            &context,
-            "github",
-            stub(
-                &[
-                    (PULL_PATH, PULL),
-                    ("/repos/brianbruggeman/proxima/pulls/42/files", FILES),
-                ],
-                github_fail_path,
-            ),
-        );
-        register(&context, "llm", llm);
-        Rig { context, llm_calls }
+        register(&context, "vault", vault.clone());
+        register(&context, "github", github.clone());
+        register(&context, "llm", llm.clone());
+        Rig {
+            context,
+            vault,
+            github,
+            llm,
+        }
     }
 
     fn stage_mut<'spec>(spec: &'spec mut Value, name: &str) -> &'spec mut Value {
@@ -239,7 +240,29 @@ mod with_tokio {
             .expect("fixture stages parse")
     }
 
-    async fn run_review(rig: &Rig) -> Response<Bytes> {
+    #[derive(Debug, Default)]
+    struct Run {
+        status: u16,
+        body: Bytes,
+        vault: usize,
+        github: usize,
+        llm: usize,
+        llm_request: String,
+    }
+
+    fn observe(rig: &Rig, status: u16, body: Bytes) -> Run {
+        let llm_request = rig.llm.seen.get().map(|seen| seen.to_vec());
+        Run {
+            status,
+            body,
+            vault: rig.vault.calls.load(Ordering::SeqCst),
+            github: rig.github.calls.load(Ordering::SeqCst),
+            llm: rig.llm.calls.load(Ordering::SeqCst),
+            llm_request: String::from_utf8_lossy(&llm_request.unwrap_or_default()).into_owned(),
+        }
+    }
+
+    async fn run_review(rig: &Rig) -> Run {
         let handle = load(Spec::Inline(fixture()), &rig.context)
             .await
             .expect("load review_ticket");
@@ -249,23 +272,154 @@ mod with_tokio {
             .body(Bytes::from_static(br#"{"ticket":"PROXIMA-24"}"#))
             .build()
             .expect("request");
-        SendPipe::call(&handle, request)
+        let response = SendPipe::call(&handle, request)
             .await
-            .expect("pipeline call")
+            .expect("pipeline call");
+        let status = response.status;
+        let body = response.collect_body().await.expect("body");
+        observe(rig, status, body)
+    }
+
+    async fn fetch(stub: &StubPipe, path: &str, body: &str) -> Bytes {
+        let request = Request::builder()
+            .method("GET")
+            .path(path)
+            .body(Bytes::from(body.to_string()))
+            .build()
+            .expect("request");
+        let response = SendPipe::call(stub, request).await.expect("stub call");
+        response.collect_body().await.expect("stub body")
+    }
+
+    async fn wired_llm_reply(rig: &Rig) -> Bytes {
+        let state = fetch(&rig.vault, "/PROXIMA-24/state.json", "").await;
+        let pull = fetch(&rig.github, PULL_PATH, "").await;
+        let files = fetch(&rig.github, FILES_PATH, "").await;
+        let notes = fetch(&rig.vault, "/PROXIMA-24/notes", "").await;
+        assert_eq!(state, STATE.as_bytes());
+        let prompt = format!(
+            "pull request: {}\nfiles: {}\nnotes: {}",
+            String::from_utf8_lossy(&pull),
+            String::from_utf8_lossy(&files),
+            String::from_utf8_lossy(&notes),
+        );
+        fetch(&rig.llm, "/v1/messages", &prompt).await
+    }
+
+    fn reserialize(raw: &[u8]) -> Bytes {
+        let parsed: Value = serde_json::from_slice(raw).expect("llm reply is json");
+        Bytes::from(serde_json::to_vec(&parsed).expect("serialize"))
+    }
+
+    fn check_counts(run: &Run) -> Result<(), String> {
+        match (run.vault, run.github, run.llm) {
+            (2, 2, 1) => Ok(()),
+            (vault, github, llm) => Err(format!("calls vault {vault} github {github} llm {llm}")),
+        }
+    }
+
+    fn check_response(run: &Run) -> Result<(), String> {
+        if run.status != 200 {
+            return Err(format!("status {}", run.status));
+        }
+        if run.body != REVIEW_BODY {
+            return Err(format!("body {}", String::from_utf8_lossy(&run.body)));
+        }
+        let parsed: Value = serde_json::from_slice(&run.body).map_err(|error| error.to_string())?;
+        let want = json!({"content":[{"type":"text","text":"LGTM with one nit"}]});
+        (parsed == want)
+            .then_some(())
+            .ok_or_else(|| format!("parsed {parsed}"))
+    }
+
+    fn check_review(run: &Run) -> Result<(), String> {
+        check_counts(run)?;
+        check_response(run)?;
+        match LLM_REQUEST_PARTS
+            .iter()
+            .find(|part| !run.llm_request.contains(**part))
+        {
+            None => Ok(()),
+            Some(part) => Err(format!("`{part}` missing from: {}", run.llm_request)),
+        }
+    }
+
+    fn check_failure(run: &Run) -> Result<(), String> {
+        let body = String::from_utf8_lossy(&run.body);
+        if run.status != 502 || !body.contains("stage `pr`") || run.llm != 0 {
+            return Err(format!(
+                "status {} llm {} body: {body}",
+                run.status, run.llm
+            ));
+        }
+        Ok(())
+    }
+
+    #[proxima::test]
+    async fn pipeline_pipe_review_ticket() {
+        let run = run_review(&rig(None)).await;
+
+        assert_eq!(check_review(&run), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn ctl_review_accepts_a_hand_wired_sequence_with_the_parsed_llm_reply() {
+        let rig = rig(None);
+        let reply = wired_llm_reply(&rig).await;
+
+        let run = observe(&rig, 200, reserialize(&reply));
+
+        assert_eq!(check_review(&run), Ok(()));
+    }
+
+    #[proxima::test]
+    async fn ctl_review_rejects_the_raw_unparsed_llm_bytes() {
+        let rig = rig(None);
+        let reply = wired_llm_reply(&rig).await;
+
+        let run = observe(&rig, 200, reply);
+
+        assert!(check_review(&run).is_err());
+    }
+
+    #[proxima::test]
+    async fn ctl_review_rejects_a_run_where_the_llm_was_never_called() {
+        let rig = rig(None);
+        fetch(&rig.vault, "/PROXIMA-24/state.json", "").await;
+
+        let run = observe(&rig, 200, Bytes::from_static(REVIEW_BODY));
+
+        assert!(check_review(&run).is_err());
     }
 
     #[proxima::test]
     async fn pipeline_pipe_failure_names_the_failing_stage_and_skips_the_llm() {
-        let rig = rig(Some(PULL_PATH));
+        let run = run_review(&rig(Some(PULL_PATH))).await;
 
-        let response = run_review(&rig).await;
+        assert_eq!(check_failure(&run), Ok(()));
+    }
 
-        let status = response.status;
-        let body =
-            String::from_utf8(response.collect_body().await.expect("body").to_vec()).expect("utf8");
-        assert_eq!(status, 502, "body: {body}");
-        assert!(body.contains("stage `pr`"), "body: {body}");
-        assert_eq!(rig.llm_calls.load(Ordering::SeqCst), 0);
+    #[test]
+    fn ctl_failure_accepts_a_hand_built_502_naming_the_pr_stage() {
+        let body = Bytes::from_static(b"stage `pr` failed: status 500");
+        let run = Run {
+            status: 502,
+            body,
+            ..Run::default()
+        };
+
+        assert_eq!(check_failure(&run), Ok(()));
+    }
+
+    #[test]
+    fn ctl_failure_rejects_a_200_success_response() {
+        let run = Run {
+            status: 200,
+            body: Bytes::from_static(REVIEW_BODY),
+            ..Run::default()
+        };
+
+        assert!(check_failure(&run).is_err());
     }
 
     #[proxima::test]
