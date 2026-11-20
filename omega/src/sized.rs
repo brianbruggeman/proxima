@@ -73,7 +73,7 @@
 //!   `ATTENTION_ROWS_MMA_MIN_QUERY_ROWS`/`ATTENTION_ROWS_VECTOR_BLOCKS_PER_TILE`/
 //!   `ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS`/`ATTENTION_ROWS_TARGET_SIMDGROUPS`/
 //!   `ATTENTION_ROWS_MAX_STAGED_QUERY_BYTES`/`ATTENTION_ROWS_MMA_HALF`/
-//!   `ATTENTION_ROWS_FLASH_SIMDGROUPS`/`ATTENTION_ROWS_FLASH_KEYS_PER_BLOCK` (always compiled; the last two are read by `crate::msl`'s flash decomposition) -- the row-tiled cached attention form's block width, split
+//!   `ATTENTION_ROWS_FLASH_SIMDGROUPS` (always compiled; the last two are read by `crate::msl`'s flash decomposition, whose key block is the head's `row_tiled_block`) -- the row-tiled cached attention form's block width, split
 //!   granule, simdgroup rule, smallest K, tile height, per-simdgroup register
 //!   budget, split target, staged query-tile byte cap and matrix-multiply operand precision (`crate::msl::rows_per_threadgroup`, `query_tile_staged`, `row_tiled_simdgroups`,
 //!   `row_tiled_splits`), read only under `metal-attn-split-rows`; see

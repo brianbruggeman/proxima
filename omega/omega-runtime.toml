@@ -634,12 +634,6 @@ mma_precision = "float"
 # simdgroups split the key block finer at the cost of one more barrier participant each.
 # must be nonzero. override via OMEGA_ATTENTION_ROWS_FLASH_SIMDGROUPS.
 flash_simdgroups = 4
-# keys one flash block walks: llama.cpp's OP_FLASH_ATTN_EXT_NCPSG (ggml-metal-impl.h:114).
-# must equal the row-tiled block of the head (`crate::msl::row_tiled_block`) or flash is
-# refused, and cached and new key extents must be whole multiples of it. a wider block halves
-# the barriers per key at the cost of a score tile twice as wide. must be a multiple of 32.
-# override via OMEGA_ATTENTION_ROWS_FLASH_KEYS_PER_BLOCK.
-flash_keys_per_block = 64
 
 [selection]
 # smallest row count at which the rank-count top-fraction expression lowers to one selection

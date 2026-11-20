@@ -34,7 +34,6 @@ const EMBEDDING: u32 = 256;
 const FEED_FORWARD: u32 = 128;
 const QUERY_HEADS: u32 = 32;
 const KV_HEADS: u32 = 4;
-const HEAD_DIM: u32 = 128;
 const LAYERS: u32 = 2;
 const FLINT_WINDOW: u32 = 513;
 
@@ -50,9 +49,9 @@ fn random_vec(seed: u64, count: usize) -> Vec<f32> {
     (0..count).map(|_| lcg.next_unit()).collect()
 }
 
-fn schedule(window: Option<u32>) -> Vec<LayerSchedule> {
+fn schedule(window: Option<u32>, head_dim: u32) -> Vec<LayerSchedule> {
     let attention = LayerAttentionConfig {
-        head_dim: HEAD_DIM,
+        head_dim,
         kv_heads: KV_HEADS,
         mask_window: window,
         value_source_kind: ValueSourceKind::ProjectedV,
@@ -62,7 +61,7 @@ fn schedule(window: Option<u32>) -> Vec<LayerSchedule> {
             sin_name: "rope_sin".into(),
         },
         rope_pairing: RopePairing::Interleaved,
-        score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(HEAD_DIM),
+        score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(head_dim),
         value_norm: false,
         qk_norm: true,
         attention_sinks: true,
@@ -77,7 +76,7 @@ fn schedule(window: Option<u32>) -> Vec<LayerSchedule> {
         .collect()
 }
 
-fn fixture(rows: u64, cached_len: u64, window: Option<u32>) -> Fixture {
+fn fixture(rows: u64, cached_len: u64, window: Option<u32>, head_dim: u32) -> Fixture {
     let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
         scheduled_two_range_cached_forward_program_with_experts(
             VOCAB,
@@ -89,7 +88,7 @@ fn fixture(rows: u64, cached_len: u64, window: Option<u32>) -> Fixture {
             0,
             0,
             LAYERS,
-            &schedule(window),
+            &schedule(window, head_dim),
             None,
             None,
             false,
@@ -172,9 +171,9 @@ fn logits_under(fixture: &Fixture, decomposition: omega::AttentionDecomposition)
     (output.root().iter().map(|value| value.to_bits()).collect(), keys)
 }
 
-fn flash_vs_legacy(label: &str, rows: u64, cached_len: u64, window: Option<u32>) -> Result<(), String> {
-    let cell = format!("{label}: rows {rows} cached_len {cached_len} window {window:?}");
-    let fixture = fixture(rows, cached_len, window);
+fn flash_vs_legacy(head_dim: u32, label: &str, rows: u64, cached_len: u64, window: Option<u32>) -> Result<(), String> {
+    let cell = format!("d{head_dim} {label}: rows {rows} cached_len {cached_len} window {window:?}");
+    let fixture = fixture(rows, cached_len, window, head_dim);
     let (legacy, legacy_keys) = logits_under(&fixture, omega::AttentionDecomposition::Legacy);
     let (flash, flash_keys) = logits_under(&fixture, omega::AttentionDecomposition::Flash);
     let (flash_again, _) = logits_under(&fixture, omega::AttentionDecomposition::Flash);
@@ -216,36 +215,52 @@ fn flash_vs_legacy(label: &str, rows: u64, cached_len: u64, window: Option<u32>)
     ))
 }
 
-fn assert_all_cells_match(cells: &[(&str, u64, u64, Option<u32>)]) {
+fn assert_all_cells_match(head_dim: u32, cells: &[Cell]) {
     let failures: Vec<String> = cells
         .iter()
-        .filter_map(|(label, rows, cached_len, window)| flash_vs_legacy(label, *rows, *cached_len, *window).err())
+        .filter_map(|(label, rows, cached_len, window)| flash_vs_legacy(head_dim, label, *rows, *cached_len, *window).err())
         .collect();
     eprintln!("flash parity SUMMARY: cells={} failing={}", cells.len(), failures.len());
     assert!(failures.is_empty(), "{} of {} cells differ:\n{}", failures.len(), cells.len(), failures.join("\n"));
 }
 
+type Cell = (&'static str, u64, u64, Option<u32>);
+
+const WHOLE_AND_TAIL_CELLS: [Cell; 7] = [
+    ("whole blocks", 512, 2048, None),
+    ("whole small", 64, 64, None),
+    ("tail q485 over c2048", 485, 2048, None),
+    ("tail q487 flint last chunk", 487, 3584, None),
+    ("tail q84 over c520", 84, 520, None),
+    ("tail q130 over c1000", 130, 1000, None),
+    ("tail q71 over c72", 71, 72, None),
+];
+
+const SLIDING_CELLS: [Cell; 6] = [
+    ("window 513 whole blocks", 512, 2048, Some(FLINT_WINDOW)),
+    ("window 513 tail q485 over c2048", 485, 2048, Some(FLINT_WINDOW)),
+    ("window 513 flint last chunk", 487, 3584, Some(FLINT_WINDOW)),
+    ("window 513 small q64 over c64", 64, 64, Some(FLINT_WINDOW)),
+    ("window 100 unaligned tail q130 over c1000", 130, 1000, Some(100)),
+    ("window 33 tail q71 over c72", 71, 72, Some(33)),
+];
+
 #[test]
 fn flash_holds_bit_parity_with_legacy_on_whole_blocks_and_tail_rows() {
-    assert_all_cells_match(&[
-        ("whole blocks", 512, 2048, None),
-        ("whole small", 64, 64, None),
-        ("tail q485 over c2048", 485, 2048, None),
-        ("tail q487 flint last chunk", 487, 3584, None),
-        ("tail q84 over c520", 84, 520, None),
-        ("tail q130 over c1000", 130, 1000, None),
-        ("tail q71 over c72", 71, 72, None),
-    ]);
+    assert_all_cells_match(128, &WHOLE_AND_TAIL_CELLS);
+}
+
+#[test]
+fn flash_holds_bit_parity_with_legacy_at_head_dim_256_on_whole_blocks_and_tail_rows() {
+    assert_all_cells_match(256, &WHOLE_AND_TAIL_CELLS);
+}
+
+#[test]
+fn flash_holds_bit_parity_with_legacy_at_head_dim_256_under_sliding_windows() {
+    assert_all_cells_match(256, &SLIDING_CELLS);
 }
 
 #[test]
 fn flash_holds_bit_parity_with_legacy_under_the_flint_sliding_window() {
-    assert_all_cells_match(&[
-        ("window 513 whole blocks", 512, 2048, Some(FLINT_WINDOW)),
-        ("window 513 tail q485 over c2048", 485, 2048, Some(FLINT_WINDOW)),
-        ("window 513 flint last chunk", 487, 3584, Some(FLINT_WINDOW)),
-        ("window 513 small q64 over c64", 64, 64, Some(FLINT_WINDOW)),
-        ("window 100 unaligned tail q130 over c1000", 130, 1000, Some(100)),
-        ("window 33 tail q71 over c72", 71, 72, Some(33)),
-    ]);
+    assert_all_cells_match(128, &SLIDING_CELLS);
 }

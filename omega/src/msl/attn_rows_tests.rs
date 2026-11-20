@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use super::attn_golden_tests::{attention_op, attention_rows_op};
 #[cfg(feature = "metal-attn-variants")]
-use super::cached_attention_flash_tiled::flash_admission;
+use super::cached_attention_flash_tiled::{flash_admission, flash_threadgroup_bytes};
 #[cfg(feature = "metal-attn-variants")]
 use super::flash_refusal::FlashRefusal;
 use super::*;
@@ -2870,8 +2870,8 @@ fn legacy_decomposition_emits_no_flash_body_for_the_same_op() {
 
 #[cfg(feature = "metal-attn-variants")]
 #[test]
-fn flash_decomposition_refuses_a_head_it_has_no_lane_map_for() {
-    let op = flash_full_layer_op(256);
+fn flash_decomposition_refuses_a_head_whose_stages_overflow_threadgroup_memory() {
+    let op = flash_full_layer_op(512);
     let packed = f16_cache_operands(&op);
 
     let outcome = emit_variant_wide(
@@ -2886,24 +2886,23 @@ fn flash_decomposition_refuses_a_head_it_has_no_lane_map_for() {
         outcome.err(),
         Some(EmitError::CachedAttentionVariantAxisNotSupported {
             axis: "decomposition",
-            value: FlashRefusal::HeadDim.reason(),
+            value: FlashRefusal::ThreadgroupBytes.reason(),
         }),
-        "the refusal names the head dim, not a generic row-tiled failure"
+        "the refusal names the threadgroup bytes, not a generic row-tiled failure"
     );
 }
 
 #[test]
 fn flash_sized_keys_equal_the_constants_they_replaced() {
     assert_eq!(crate::sized::ATTENTION_ROWS_FLASH_SIMDGROUPS, 4);
-    assert_eq!(crate::sized::ATTENTION_ROWS_FLASH_KEYS_PER_BLOCK, 64);
 }
 
-/// Head dims 256 and 512 are DESIGN admits, but the template is d128-only until slice 6
-/// generalises it, so they are `HeadDim` refusals here.
+/// Head dim 256 is admitted at its own 128-key block (20,992 B); 512 needs 37,376 B against the
+/// 32,768 B ceiling and 96 is no flint shape.
 #[cfg(feature = "metal-attn-variants")]
 #[test]
 fn flash_admission_table_names_the_condition_each_shape_fails() {
-    let cases: [(&str, BoundOp, Result<(), FlashRefusal>); 11] = [
+    let cases: [(&str, BoundOp, Result<(), FlashRefusal>); 12] = [
         ("harness_flint_d128_g8_q512_c2048", flash_op(8, 128, 2048, 512, i64::MIN), Ok(())),
         ("groups_16", flash_op(16, 128, 2048, 512, i64::MIN), Err(FlashRefusal::QueryGroups)),
         ("groups_2", flash_op(2, 128, 2048, 512, i64::MIN), Err(FlashRefusal::QueryGroups)),
@@ -2917,13 +2916,21 @@ fn flash_admission_table_names_the_condition_each_shape_fails() {
         ),
         ("sliding_window_is_admitted", flash_op(8, 128, 2048, 512, SLIDING_LOWER), Ok(())),
         ("flint_window_513_tail_rows", flash_op(8, 128, 3584, 487, -512), Ok(())),
-        ("d256_waits_on_slice_6", flash_op(8, 256, 2048, 512, i64::MIN), Err(FlashRefusal::HeadDim)),
-        ("d512_waits_on_slice_6", flash_op(8, 512, 2048, 512, i64::MIN), Err(FlashRefusal::HeadDim)),
+        ("d256_fits_at_the_128_key_block", flash_op(8, 256, 2048, 512, i64::MIN), Ok(())),
+        (
+            "d512_stages_overflow_threadgroup_memory",
+            flash_op(8, 512, 2048, 512, i64::MIN),
+            Err(FlashRefusal::ThreadgroupBytes),
+        ),
+        ("d96_is_no_flint_shape", flash_op(8, 96, 2048, 512, i64::MIN), Err(FlashRefusal::HeadDim)),
     ];
 
     for (name, op, expected) in cases {
         assert_eq!(flash_admission(&op.kind), expected, "{name}");
     }
+    assert_eq!(flash_threadgroup_bytes(128), 10_752);
+    assert_eq!(flash_threadgroup_bytes(256), 20_992);
+    assert_eq!(flash_threadgroup_bytes(512), 37_376);
 }
 
 #[cfg(feature = "metal-attn-variants")]

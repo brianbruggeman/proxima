@@ -4,8 +4,8 @@
 ///
 /// A caller that selected `AttentionDecomposition::Flash` and is refused can log
 /// [`FlashRefusal::reason`] and re-select `Legacy`; the validator surfaces the same reason as
-/// `EmitError::CachedAttentionVariantAxisNotSupported { axis: "decomposition", .. }`. The head
-/// dimensions 256 and 512 are `HeadDim` refusals until the template is generalised past 128.
+/// `EmitError::CachedAttentionVariantAxisNotSupported { axis: "decomposition", .. }`. Head
+/// dimension 512 is a `ThreadgroupBytes` refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum FlashRefusal {
     /// The op is not a cached attention at all.
@@ -22,8 +22,8 @@ pub(super) enum FlashRefusal {
     QueryRowsDifferFromNewKeys,
     /// The cached key extent is not a whole number of 8-key tiles.
     CachedRowsNotWholeTiles,
-    /// The row-tiled block of this head is not the flash key block.
-    RowTiledBlockDiffers,
+    /// The Q stage, output and score tiles together exceed the threadgroup memory ceiling.
+    ThreadgroupBytes,
 }
 
 impl FlashRefusal {
@@ -34,11 +34,11 @@ impl FlashRefusal {
             Self::NotCachedAttention => "flash serves cached attention ops only",
             Self::NoAttentionSink => "flash needs an attention sink",
             Self::QueryGroups => "flash needs 8 query groups per kv head",
-            Self::HeadDim => "flash needs head dim 128 (256 and 512 wait on the generalised template)",
+            Self::HeadDim => "flash needs head dim 128, 256 or 512",
             Self::NewKeysNotCausal => "flash needs causally masked new keys",
             Self::QueryRowsDifferFromNewKeys => "flash needs as many query rows as new key rows",
             Self::CachedRowsNotWholeTiles => "flash needs a cached key extent that is a whole number of 8-key tiles",
-            Self::RowTiledBlockDiffers => "flash needs the row-tiled block to equal the flash key block",
+            Self::ThreadgroupBytes => "flash needs its staged Q, output and score tiles inside the threadgroup memory ceiling",
         }
     }
 }

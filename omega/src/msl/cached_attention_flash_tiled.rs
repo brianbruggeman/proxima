@@ -7,16 +7,27 @@ use proxima_numeric::float_layout::FloatLayout;
 /// read from `[attention_rows].flash_simdgroups` in `omega-runtime.toml`.
 pub(super) const FLASH_SIMDGROUPS: u64 = crate::sized::ATTENTION_ROWS_FLASH_SIMDGROUPS;
 
-/// Keys one flash block walks: llama.cpp's `OP_FLASH_ATTN_EXT_NCPSG`, read from
-/// `[attention_rows].flash_keys_per_block`. Equal to the row-tiled block of the same head so the
-/// entry name and scratch layout keep meaning one thing.
-pub(super) const FLASH_KEYS_PER_BLOCK: u64 = crate::sized::ATTENTION_ROWS_FLASH_KEYS_PER_BLOCK;
-
 /// Keys per MMA tile: the unit the body's tile loads never leave the cached extent by.
 const FLASH_KEY_TILE: u64 = 8;
 
-/// The head width the flash body's row write assumes: one float4 per lane of one simdgroup.
-const FLASH_HEAD_DIM: u64 = 128;
+/// The head widths flash is verified against Legacy for: flint's three attention shapes. Each is
+/// a whole number of float4 per lane of one simdgroup (`head_dim / 128` per lane), which is what
+/// the body's O rescale and row write step by.
+const FLASH_HEAD_DIMS: [u64; 3] = [128, 256, 512];
+
+/// Keys one flash block walks for `head_dim`: the head's row-tiled block, because bit parity with
+/// Legacy needs the same block boundaries (the online-softmax rescale lands per block).
+fn flash_block(head_dim: u64) -> u64 {
+    row_tiled_block(head_dim)
+}
+
+/// Static threadgroup bytes the flash body declares for `head_dim`: the Q stage `sq`
+/// (`16 * (head_dim / 2 + 8)` floats), the output `so` (`8 * head_dim`) and the scores `ss`
+/// (`8 * block`), each one accumulator scalar wide.
+pub(super) fn flash_threadgroup_bytes(head_dim: u64) -> u64 {
+    let floats = 16 * (head_dim / 2 + 8) + 8 * head_dim + 8 * flash_block(head_dim);
+    floats * core::mem::size_of::<f32>() as u64
+}
 
 /// The query heads per kv head the flash body's fragment map assumes.
 const FLASH_QUERY_GROUPS: u64 = 8;
@@ -24,8 +35,8 @@ const FLASH_QUERY_GROUPS: u64 = 8;
 /// Admits `kind` for the flash body, or names the one condition it fails: a sinked, causal op,
 /// full or sliding-window over the cached keys, of eight query heads per kv head whose cached extent is a whole
 /// number of 8-key tiles. Conditions are checked in the order of [`FlashRefusal`]; the first
-/// failure is the reason. Head dims 256 and 512 are `HeadDim` refusals until the template
-/// generalises past 128.
+/// failure is the reason. Head dims 128, 256 and 512 are the shapes verified; 512 fails
+/// `ThreadgroupBytes` (its stages exceed `CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES`).
 ///
 /// Any query row count is admitted: the keys of the new rows past the last whole tile run the
 /// scalar `flash_tail` step, as the row-tiled kernel's `mode == 2`. Tile loads are guarded by the
@@ -51,7 +62,7 @@ pub(super) fn flash_admission(kind: &BoundOpKind) -> Result<(), FlashRefusal> {
     let checks = [
         (*attention_sink, FlashRefusal::NoAttentionSink),
         (*query_groups == FLASH_QUERY_GROUPS, FlashRefusal::QueryGroups),
-        (*head_dim == FLASH_HEAD_DIM, FlashRefusal::HeadDim),
+        (FLASH_HEAD_DIMS.contains(head_dim), FlashRefusal::HeadDim),
         (*new_upper_inclusive == 0, FlashRefusal::NewKeysNotCausal),
         (query_rows == new_key_rows, FlashRefusal::QueryRowsDifferFromNewKeys),
         (
@@ -59,8 +70,8 @@ pub(super) fn flash_admission(kind: &BoundOpKind) -> Result<(), FlashRefusal> {
             FlashRefusal::CachedRowsNotWholeTiles,
         ),
         (
-            row_tiled_block(*head_dim) == FLASH_KEYS_PER_BLOCK,
-            FlashRefusal::RowTiledBlockDiffers,
+            flash_threadgroup_bytes(*head_dim) <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES,
+            FlashRefusal::ThreadgroupBytes,
         ),
     ];
     checks
@@ -126,7 +137,7 @@ pub(super) fn render_cached_attention_flash_tiled(
     };
     let half_dim = head_dim / 2;
     let simdgroups = FLASH_SIMDGROUPS;
-    let block = FLASH_KEYS_PER_BLOCK;
+    let block = flash_block(*head_dim);
     let substitutions = [
         ("@ENTRY@", entry.to_string()),
         ("@KV_HEADS@", kv_heads.to_string()),
@@ -137,6 +148,7 @@ pub(super) fn render_cached_attention_flash_tiled(
         ("@BLOCK@", block.to_string()),
         ("@NQ@", (query_groups / simdgroups).to_string()),
         ("@NO@", (head_dim / 8 / simdgroups).to_string()),
+        ("@LANE_VECTORS@", (head_dim / 4 / 32).to_string()),
         ("@QK_PER_SG@", (block / 8 / simdgroups).to_string()),
         ("@ITEMS@", (block / 32).to_string()),
         ("@THREADS@", (simdgroups * 32).to_string()),
@@ -161,7 +173,7 @@ pub(super) fn render_cached_attention_flash_tiled(
 const FLASH_TILED_KERNEL: &str = r#"#define FOR_UNROLL _Pragma("clang loop unroll(full)")
 struct Uniforms { long total_elements; long splits; };
 constant constexpr int kv_heads = @KV_HEADS@, groups = @GROUPS@, head_dim = @HEAD_DIM@, half_dim = @HALF_DIM@;
-constant constexpr int nsg = @NSG@, block = @BLOCK@, nq = @NQ@, no = @NO@, stage = half_dim + 8, tiles = block / 8;
+constant constexpr int nsg = @NSG@, block = @BLOCK@, nq = @NQ@, no = @NO@, lane_vectors = @LANE_VECTORS@, stage = half_dim + 8, tiles = block / 8;
 constant constexpr @ACC@ scale = @SCALE@f;
 
 template <typename T> struct k_frag;
@@ -210,7 +222,7 @@ inline void flash_softmax(threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @
         bs = simd_sum(bs);
         M[jj] = next; S[jj] = S[jj] * rescale + bs;
         threadgroup @ACC@4* o4 = (threadgroup @ACC@4*)(so + v * head_dim);
-        o4[lane] *= rescale;                                          // O rescale by the row owner, 32 lanes x 4 = 128 dims
+        FOR_UNROLL for (int part = 0; part < lane_vectors; ++part) { o4[part * 32 + lane] *= rescale; }   // O rescale by the row owner, 32 lanes x float4 x lane_vectors dims
     }
 }
 
@@ -340,7 +352,9 @@ kernel void @ENTRY@(device const @ACC@* in0 [[buffer(0)]], device const @ACC@* i
     FOR_UNROLL for (int jj = 0; jj < nq; ++jj) {
         int v = jj * nsg + sg;
         @ACC@ inverse = S[jj] == 0.0f ? 0.0f : 1.0f / S[jj];
-        ((device @ACC@4*)(out + (row * (kv_heads * groups) + kv_head * groups + v) * head_dim))[lane] = so4[v * (head_dim / 4) + lane] * inverse;
+        FOR_UNROLL for (int part = 0; part < lane_vectors; ++part) {
+            ((device @ACC@4*)(out + (row * (kv_heads * groups) + kv_head * groups + v) * head_dim))[part * 32 + lane] = so4[v * (head_dim / 4) + part * 32 + lane] * inverse;
+        }
     }
 }
 "#;
