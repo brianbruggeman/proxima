@@ -19,6 +19,7 @@
 use half::f16;
 use proxima_tensor::cpu::QuantizedBlock;
 use proxima_tensor::spec::{
+    SLIDING_CACHED_LEN_INPUT,
     AttentionScoreScale, KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind,
     LayerSchedule, RopePairing, RopeTableSel, SharedExpertWidth, ValueSourceKind,
     scheduled_two_range_cached_forward_program_with_experts,
@@ -81,6 +82,13 @@ fn fixture(rows: u64, cached_len: u64, window: Option<u32>, head_dim: u32) -> Fi
 }
 
 fn fixture_with_query_heads(rows: u64, cached_len: u64, window: Option<u32>, head_dim: u32, query_heads: u32) -> Fixture {
+    fixture_with_ring(rows, cached_len, window, head_dim, query_heads, false)
+}
+
+/// `ring` lays every windowed layer out as flint's serving path does: its cache leaves are bounded by the
+/// sliding symbol at the whole window (`proxima-model-interop/src/generate/kv_ring.rs:76`, bound at
+/// `decode.rs:2324`), a 513-row extent whatever the live rows, and its mask reads `cached_len_swa`.
+fn fixture_with_ring(rows: u64, cached_len: u64, window: Option<u32>, head_dim: u32, query_heads: u32, ring: bool) -> Fixture {
     let (program, logits, _cache_roots, _moe_sites, _head_repeats) =
         scheduled_two_range_cached_forward_program_with_experts(
             VOCAB,
@@ -97,11 +105,12 @@ fn fixture_with_query_heads(rows: u64, cached_len: u64, window: Option<u32>, hea
             None,
             false,
             None,
-            false,
+            ring,
             SharedExpertWidth::NONE,
         )
         .expect("the flint-shaped flash prefill program builds");
-    let symbols = vec![rows, cached_len];
+    let ring_extent = u64::from(window.unwrap_or(0));
+    let symbols = if ring { vec![rows, cached_len, ring_extent] } else { vec![rows, cached_len] };
     let shapes = infer(&program, &symbols).expect("the prefill program infers");
     let mut named = Vec::new();
     for (position, op) in program.iter().enumerate() {
@@ -116,6 +125,7 @@ fn fixture_with_query_heads(rows: u64, cached_len: u64, window: Option<u32>, hea
             "ids" => (0..count).map(|index| (index % VOCAB as usize) as f32).collect(),
             "eps" => vec![1e-5f32; count],
             "cached_len" => vec![cached_len as f32],
+            SLIDING_CACHED_LEN_INPUT => vec![cached_len.min(ring_extent) as f32],
             _ if name.ends_with(".attn_sinks.weight") => random_vec(position as u64 + 1, count)
                 .into_iter()
                 .map(|value| value * 4.0)
@@ -175,9 +185,9 @@ fn logits_under(fixture: &Fixture, decomposition: omega::AttentionDecomposition)
     (output.root().iter().map(|value| value.to_bits()).collect(), keys)
 }
 
-fn flash_vs_legacy(head_dim: u32, label: &str, rows: u64, cached_len: u64, window: Option<u32>) -> Result<(), String> {
-    let cell = format!("d{head_dim} {label}: rows {rows} cached_len {cached_len} window {window:?}");
-    let fixture = fixture(rows, cached_len, window, head_dim);
+fn flash_vs_legacy(head_dim: u32, label: &str, rows: u64, cached_len: u64, window: Option<u32>, ring: bool) -> Result<(), String> {
+    let cell = format!("d{head_dim} {label}: rows {rows} cached_len {cached_len} window {window:?} ring {ring}");
+    let fixture = fixture_with_ring(rows, cached_len, window, head_dim, QUERY_HEADS, ring);
     let (legacy, legacy_keys) = logits_under(&fixture, omega::AttentionDecomposition::Legacy);
     let (flash, flash_keys) = logits_under(&fixture, omega::AttentionDecomposition::Flash);
     let (flash_again, _) = logits_under(&fixture, omega::AttentionDecomposition::Flash);
@@ -220,9 +230,13 @@ fn flash_vs_legacy(head_dim: u32, label: &str, rows: u64, cached_len: u64, windo
 }
 
 fn assert_all_cells_match(head_dim: u32, cells: &[Cell]) {
+    assert_cells_match(head_dim, cells, false);
+}
+
+fn assert_cells_match(head_dim: u32, cells: &[Cell], ring: bool) {
     let failures: Vec<String> = cells
         .iter()
-        .filter_map(|(label, rows, cached_len, window)| flash_vs_legacy(head_dim, label, *rows, *cached_len, *window).err())
+        .filter_map(|(label, rows, cached_len, window)| flash_vs_legacy(head_dim, label, *rows, *cached_len, *window, ring).err())
         .collect();
     eprintln!("flash parity SUMMARY: cells={} failing={}", cells.len(), failures.len());
     assert!(failures.is_empty(), "{} of {} cells differ:\n{}", failures.len(), cells.len(), failures.join("\n"));
@@ -238,6 +252,15 @@ const WHOLE_AND_TAIL_CELLS: [Cell; 7] = [
     ("tail q84 over c520", 84, 520, None),
     ("tail q130 over c1000", 130, 1000, None),
     ("tail q71 over c72", 71, 72, None),
+];
+
+const SLIDING_RING_CELLS: [Cell; 6] = [
+    ("ring window 513 middle chunk q512 over c2048", 512, 2048, Some(FLINT_WINDOW)),
+    ("ring window 513 last chunk q485 over c3584", 485, 3584, Some(FLINT_WINDOW)),
+    ("ring window 513 chunk q512 over c1536", 512, 1536, Some(FLINT_WINDOW)),
+    ("ring window 513 second chunk q512 over c512", 512, 512, Some(FLINT_WINDOW)),
+    ("ring window 513 tail q485 over c2048", 485, 2048, Some(FLINT_WINDOW)),
+    ("ring window 513 small q64 over c64", 64, 64, Some(FLINT_WINDOW)),
 ];
 
 const SLIDING_CELLS: [Cell; 6] = [
@@ -272,6 +295,11 @@ fn flash_holds_bit_parity_with_legacy_under_the_flint_sliding_window() {
 #[test]
 fn flash_holds_bit_parity_with_legacy_at_head_dim_512_on_whole_blocks_and_tail_rows() {
     assert_all_cells_match(512, &WHOLE_AND_TAIL_CELLS);
+}
+
+#[test]
+fn flash_holds_bit_parity_with_legacy_on_flints_ring_cache_sliding_prefill_chunks() {
+    assert_cells_match(128, &SLIDING_RING_CELLS, true);
 }
 
 #[test]

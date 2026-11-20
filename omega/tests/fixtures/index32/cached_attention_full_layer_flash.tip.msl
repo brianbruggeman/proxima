@@ -1131,6 +1131,21 @@ inline void load_v(thread simdgroup_float8x8& dst, device const half* src, int s
 }
 inline void load_v(thread simdgroup_float8x8& dst, device const float* src, int stride) { simdgroup_load(dst, src, (ulong)stride); }
 
+// a tile that ends past the live keys reads only the rows inside them, as the row-tiled kernel's clamped key load and zero-padded value rows: the cache extent need not be a whole number of tiles
+template <typename T>
+inline void load_k_rows(thread simdgroup_float8x8& dst, device const T* src, int stride, ushort lane, int rows_left) {
+    short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
+    int last_key = max(rows_left - 1, 0);
+    dst.thread_elements()[0] = float(src[min((int)column, last_key) * stride + row]);
+    dst.thread_elements()[1] = float(src[min((int)column + 1, last_key) * stride + row]);
+}
+template <typename T>
+inline void load_v_rows(thread simdgroup_float8x8& dst, device const T* src, int stride, ushort lane, int rows_left) {
+    short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
+    dst.thread_elements()[0] = row < rows_left ? float(src[row * stride + column]) : 0.0f;
+    dst.thread_elements()[1] = row < rows_left ? float(src[row * stride + column + 1]) : 0.0f;
+}
+
 inline void zero_rows(thread simdgroup_float8x8& frag, int key_start, int valid_end, ushort lane) {
     short quad = (short)(lane / 4); short frag_row = (short)((quad & 4) + ((lane / 2) % 4));
     if (key_start + frag_row >= valid_end) { frag.thread_elements()[0] = 0.0f; frag.thread_elements()[1] = 0.0f; }
@@ -1176,6 +1191,7 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
         {
             simdgroup_float8x8 acc = make_filled_simdgroup_matrix<float, 8, 8>(0.0f);
             if (kt * 8 < columns) {                                   // a tile wholly past the live keys loads nothing, as the row-tiled kernel
+                int key_rows_left = valid_end - (key0 + kt * 8);
                 device const T* kep = ke + (key0 + kt * 8) * kstride + kv_head * half_dim;
                 device const T* kop = ko + (key0 + kt * 8) * kstride + kv_head * half_dim;
                 FOR_UNROLL for (int j = 0; j < half_dim / 8; ++j) {   // chain e0,o0,e1,o1,... as the row-tiled kernel
@@ -1183,8 +1199,13 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
                     simdgroup_float8x8 qe, qo; typename k_frag<T>::type kef, kof;
                     simdgroup_load(qe, qe_base + 8 * j, (ulong)qstride);
                     simdgroup_load(qo, qo_base + 8 * j, (ulong)qstride);
-                    load_k(kef, kep + 8 * j, kstride);
-                    load_k(kof, kop + 8 * j, kstride);
+                    if (key_rows_left >= 8) {
+                        load_k(kef, kep + 8 * j, kstride);
+                        load_k(kof, kop + 8 * j, kstride);
+                    } else {
+                        load_k_rows(kef, kep + 8 * j, kstride, lane, key_rows_left);
+                        load_k_rows(kof, kop + 8 * j, kstride, lane, key_rows_left);
+                    }
                     simdgroup_barrier(mem_flags::mem_none);
                     simdgroup_multiply_accumulate(acc, qe, kef, acc);
                     simdgroup_multiply_accumulate(acc, qo, kof, acc);
@@ -1203,7 +1224,9 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
             simdgroup_float8x8 p; simdgroup_load(p, ss + kt * 8, (ulong)block);
             FOR_UNROLL for (int i = 0; i < no; ++i) {
                 simdgroup_float8x8 vf;
-                load_v(vf, vv + (key0 + kt * 8) * vstride + kv_head * head_dim + 8 * (sg + nsg * i), vstride);
+                device const T* vp = vv + (key0 + kt * 8) * vstride + kv_head * head_dim + 8 * (sg + nsg * i);
+                int value_rows_left = key0 + columns - (key0 + kt * 8);
+                if (value_rows_left >= 8) { load_v(vf, vp, vstride); } else { load_v_rows(vf, vp, vstride, lane, value_rows_left); }
                 zero_rows(vf, key0 + kt * 8, key0 + columns, lane);
                 simdgroup_multiply_accumulate(lo[i], p, vf, lo[i]);
             }

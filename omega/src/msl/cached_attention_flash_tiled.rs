@@ -7,9 +7,6 @@ use proxima_numeric::float_layout::FloatLayout;
 /// read from `[attention_rows].flash_simdgroups` in `omega-runtime.toml`.
 pub(super) const FLASH_SIMDGROUPS: u64 = crate::sized::ATTENTION_ROWS_FLASH_SIMDGROUPS;
 
-/// Keys per MMA tile: the unit the body's tile loads never leave the cached extent by.
-const FLASH_KEY_TILE: u64 = 8;
-
 /// The head widths flash is verified against Legacy for: the three served attention widths. Each is
 /// a whole number of float4 per lane of one simdgroup (`head_dim / 128` per lane), which is what
 /// the body's O rescale and row write step by.
@@ -47,8 +44,7 @@ pub(super) fn flash_threadgroup_bytes_within(head_dim: u64, budget: u64) -> u64 
 const FLASH_QUERY_GROUPS: u64 = 8;
 
 /// Admits `kind` for the flash body, or names the one condition it fails: a sinked, causal op,
-/// full or sliding-window over the cached keys, of eight query heads per kv head whose cached extent is a whole
-/// number of 8-key tiles. Conditions are checked in the order of [`FlashRefusal`]; the first
+/// full or sliding-window over the cached keys, of eight query heads per kv head. Conditions are checked in the order of [`FlashRefusal`]; the first
 /// failure is the reason. Head dims 128, 256 and 512 are the shapes verified; 512 reads Q
 /// from device (its Q stage would not fit); a shape whose tiles exceed the budget even so fails
 /// `ThreadgroupBytes`.
@@ -57,8 +53,7 @@ const FLASH_QUERY_GROUPS: u64 = 8;
 /// scalar `flash_tail` step, as the row-tiled kernel's `mode == 2`. Tile loads are guarded by the
 /// block's live column count, so a tile never starts past the live keys; the K and V buffers are
 /// bound from the cached extent (`proxima-tensor/src/physical.rs:47`, `cached_key_width =
-/// cached_key_rows * head_dim`), so with the extent a whole number of tiles a tile that starts
-/// inside the live keys ends inside the buffer. Keys between the live length and the tile end
+/// cached_key_rows * head_dim`), so a tile that ends past the live keys loads only the rows inside them (`load_k_rows` clamps the key row as the row-tiled kernel's `omega_load_key_matrix`, `load_v_rows` zeroes the rest), whatever the extent. Keys between the live length and the tile end
 /// are masked to -inf by `visible` and their V rows zeroed, as the row-tiled kernel.
 pub(super) fn flash_admission(kind: &BoundOpKind) -> Result<(), FlashRefusal> {
     flash_admission_within(kind, crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES)
@@ -68,7 +63,6 @@ pub(super) fn flash_admission(kind: &BoundOpKind) -> Result<(), FlashRefusal> {
 pub(super) fn flash_admission_within(kind: &BoundOpKind, budget: u64) -> Result<(), FlashRefusal> {
     let BoundOpKind::CachedAttention {
         query_rows,
-        cached_key_rows,
         new_key_rows,
         query_groups,
         head_dim,
@@ -85,10 +79,6 @@ pub(super) fn flash_admission_within(kind: &BoundOpKind, budget: u64) -> Result<
         (FLASH_HEAD_DIMS.contains(head_dim), FlashRefusal::HeadDim),
         (*new_upper_inclusive == 0, FlashRefusal::NewKeysNotCausal),
         (query_rows == new_key_rows, FlashRefusal::QueryRowsDifferFromNewKeys),
-        (
-            cached_key_rows.is_multiple_of(FLASH_KEY_TILE),
-            FlashRefusal::CachedRowsNotWholeTiles,
-        ),
         (
             flash_threadgroup_bytes_within(*head_dim, budget) <= budget,
             FlashRefusal::ThreadgroupBytes,
@@ -258,6 +248,21 @@ inline void load_v(thread @ACC_FRAG@& dst, device const @ELEM@* src, int stride)
 }
 inline void load_v(thread @ACC_FRAG@& dst, device const @ACC@* src, int stride) { simdgroup_load(dst, src, (ulong)stride); }
 
+// a tile that ends past the live keys reads only the rows inside them, as the row-tiled kernel's clamped key load and zero-padded value rows: the cache extent need not be a whole number of tiles
+template <typename T>
+inline void load_k_rows(thread @ACC_FRAG@& dst, device const T* src, int stride, ushort lane, int rows_left) {
+    short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
+    int last_key = max(rows_left - 1, 0);
+    dst.thread_elements()[0] = @ACC@(src[min((int)column, last_key) * stride + row]);
+    dst.thread_elements()[1] = @ACC@(src[min((int)column + 1, last_key) * stride + row]);
+}
+template <typename T>
+inline void load_v_rows(thread @ACC_FRAG@& dst, device const T* src, int stride, ushort lane, int rows_left) {
+    short quad = (short)(lane / 4); short row = (short)((quad & 4) + ((lane / 2) % 4)); short column = (short)((quad & 2) * 2 + (lane % 2) * 2);
+    dst.thread_elements()[0] = row < rows_left ? @ACC@(src[row * stride + column]) : 0.0f;
+    dst.thread_elements()[1] = row < rows_left ? @ACC@(src[row * stride + column + 1]) : 0.0f;
+}
+
 inline void zero_rows(thread @ACC_FRAG@& frag, int key_start, int valid_end, ushort lane) {
     short quad = (short)(lane / 4); short frag_row = (short)((quad & 4) + ((lane / 2) % 4));
     if (key_start + frag_row >= valid_end) { frag.thread_elements()[0] = 0.0f; frag.thread_elements()[1] = 0.0f; }
@@ -303,6 +308,7 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
         {
             @ACC_FRAG@ acc = make_filled_simdgroup_matrix<@ACC@, 8, 8>(0.0f);
             if (kt * 8 < columns) {                                   // a tile wholly past the live keys loads nothing, as the row-tiled kernel
+                int key_rows_left = valid_end - (key0 + kt * 8);
                 device const T* kep = ke + (key0 + kt * 8) * kstride + kv_head * half_dim;
                 device const T* kop = ko + (key0 + kt * 8) * kstride + kv_head * half_dim;
                 FOR_UNROLL for (int j = 0; j < half_dim / 8; ++j) {   // chain e0,o0,e1,o1,... as the row-tiled kernel
@@ -310,8 +316,13 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
                     @ACC_FRAG@ qe, qo; typename k_frag<T>::type kef, kof;
                     simdgroup_load(qe, qe_base + 8 * j, (ulong)qstride);
                     simdgroup_load(qo, qo_base + 8 * j, (ulong)qstride);
-                    load_k(kef, kep + 8 * j, kstride);
-                    load_k(kof, kop + 8 * j, kstride);
+                    if (key_rows_left >= 8) {
+                        load_k(kef, kep + 8 * j, kstride);
+                        load_k(kof, kop + 8 * j, kstride);
+                    } else {
+                        load_k_rows(kef, kep + 8 * j, kstride, lane, key_rows_left);
+                        load_k_rows(kof, kop + 8 * j, kstride, lane, key_rows_left);
+                    }
                     simdgroup_barrier(mem_flags::mem_none);
                     simdgroup_multiply_accumulate(acc, qe, kef, acc);
                     simdgroup_multiply_accumulate(acc, qo, kof, acc);
@@ -330,7 +341,9 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
             @ACC_FRAG@ p; simdgroup_load(p, ss + kt * 8, (ulong)block);
             FOR_UNROLL for (int i = 0; i < no; ++i) {
                 @ACC_FRAG@ vf;
-                load_v(vf, vv + (key0 + kt * 8) * vstride + kv_head * head_dim + 8 * (sg + nsg * i), vstride);
+                device const T* vp = vv + (key0 + kt * 8) * vstride + kv_head * head_dim + 8 * (sg + nsg * i);
+                int value_rows_left = key0 + columns - (key0 + kt * 8);
+                if (value_rows_left >= 8) { load_v(vf, vp, vstride); } else { load_v_rows(vf, vp, vstride, lane, value_rows_left); }
                 zero_rows(vf, key0 + kt * 8, key0 + columns, lane);
                 simdgroup_multiply_accumulate(lo[i], p, vf, lo[i]);
             }

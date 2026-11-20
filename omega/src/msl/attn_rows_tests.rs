@@ -2935,18 +2935,16 @@ fn flash_sized_keys_equal_the_constants_they_replaced() {
 #[cfg(feature = "metal-attn-variants")]
 #[test]
 fn flash_admission_table_names_the_condition_each_shape_fails() {
-    let cases: [(&str, BoundOp, Result<(), FlashRefusal>); 12] = [
+    let cases: [(&str, BoundOp, Result<(), FlashRefusal>); 14] = [
         ("harness_flint_d128_g8_q512_c2048", flash_op(8, 128, 2048, 512, i64::MIN), Ok(())),
         ("groups_16", flash_op(16, 128, 2048, 512, i64::MIN), Err(FlashRefusal::QueryGroups)),
         ("groups_2", flash_op(2, 128, 2048, 512, i64::MIN), Err(FlashRefusal::QueryGroups)),
         ("q485_tail_rows_are_admitted", flash_op(8, 128, 2048, 485, i64::MIN), Ok(())),
         ("flint_last_chunk_q487_c3584", flash_op(8, 128, 3584, 487, i64::MIN), Ok(())),
         ("cached_2000_is_whole_tiles_not_whole_blocks", flash_op(8, 128, 2000, 512, i64::MIN), Ok(())),
-        (
-            "cached_2003_not_a_whole_tile",
-            flash_op(8, 128, 2003, 512, i64::MIN),
-            Err(FlashRefusal::CachedRowsNotWholeTiles),
-        ),
+        ("cached_2003_partial_tile_is_loaded_row_limited", flash_op(8, 128, 2003, 512, i64::MIN), Ok(())),
+        ("flint_sliding_ring_c513_middle_chunk_q512", flash_op(8, 128, 513, 512, -512), Ok(())),
+        ("flint_sliding_ring_c513_last_chunk_q485", flash_op(8, 128, 513, 485, -512), Ok(())),
         ("sliding_window_is_admitted", flash_op(8, 128, 2048, 512, SLIDING_LOWER), Ok(())),
         ("flint_window_513_tail_rows", flash_op(8, 128, 3584, 487, -512), Ok(())),
         ("d256_fits_at_the_128_key_block", flash_op(8, 256, 2048, 512, i64::MIN), Ok(())),

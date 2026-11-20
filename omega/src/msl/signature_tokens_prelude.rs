@@ -3123,9 +3123,7 @@ fn decode_split_serves_rows(query_rows: u64) -> bool {
 /// The row-tiled form of a two-range cached-bound op, when the op and the
 /// policy both admit it: `K = query_rows = new_key_rows` rows from
 /// `[attention_rows].mma_min_query_rows` up, a full-rotary head whose width is
-/// a whole number of 8-wide MMA fragments per simdgroup, a bucket extent that
-/// is a whole number of 8-key fragments (so no fragment read leaves the cache
-/// buffer), a key block that is a whole number of fragments per simdgroup,
+/// a whole number of 8-wide MMA fragments per simdgroup, a key block that is a whole number of fragments per simdgroup,
 /// eight rows at least when the query groups do not fill whole 8-row MMA
 /// blocks (so a fragment can be eight rows of one head), one tile unit that
 /// fits the register and threadgroup memory budgets ([`tile_unit_fragments`],
