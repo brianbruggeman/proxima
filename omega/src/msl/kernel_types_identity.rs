@@ -1712,6 +1712,13 @@ static inline void q3k_dequant_half16(device const uchar *block, uint slot, thre
 /// rather than 16 because the high nibble is read unshifted (`mask = 0xF0`). The
 /// `(scale, min)` pair comes from [`Q5K_UNPACK_MSL`]'s `q5k_scale_min`, the same
 /// bit-interleaved unpack llama.cpp's `get_scale_min_k4_just2` spells out.
+///
+/// Where llama.cpp reads the 16 `qh` and `q` bytes one at a time (`dequantize_q5_K`), this reads
+/// each as four `uint` words (the same 4-byte block alignment `q4k_run8` assumes: a 176-byte block
+/// at a word-aligned origin), masks every word once and takes each lane by a constant shift. Each
+/// level is the same integer (`q & mask`, plus `qh_val` when the lane's `qh` byte holds the bit),
+/// so the output is bit-identical. The loops are fully unrolled with the clang spelling so the
+/// 16-lane run stays in registers (proxnum-589).
 pub const Q5K_DEQUANT_HALF16_MSL: &str = r#"
 static inline void q5k_dequant_half16(device const uchar *block, uint slot, thread half *out) {
     uint il = slot >> 4u;
@@ -1728,9 +1735,18 @@ static inline void q5k_dequant_half16(device const uchar *block, uint slot, thre
     float ml = dmin * (float)sc.y;
     uint mask = chunk < 2u ? 0x0Fu : 0xF0u;
     float qh_val = chunk < 2u ? 16.0f : 256.0f;
-    for (uint i = 0u; i < 16u; ++i) {
-        float high = ((uint)qh[i] & ul) != 0u ? qh_val : 0.0f;
-        out[i] = (half)(dl * ((float)((uint)q[i] & mask) + high) - ml);
+    device const uint *q_words = (device const uint *)q;
+    device const uint *qh_words = (device const uint *)qh;
+    uint q_mask = mask * 0x01010101u;
+    uint qh_mask = ul * 0x01010101u;
+    _Pragma("clang loop unroll(full)") for (uint word = 0u; word < 4u; ++word) {
+        uint q_bits = q_words[word] & q_mask;
+        uint qh_bits = qh_words[word] & qh_mask;
+        _Pragma("clang loop unroll(full)") for (uint lane = 0u; lane < 4u; ++lane) {
+            float high = ((qh_bits >> (8u * lane)) & 0xFFu) != 0u ? qh_val : 0.0f;
+            float level = (float)((q_bits >> (8u * lane)) & 0xFFu) + high;
+            out[4u * word + lane] = (half)(dl * level - ml);
+        }
     }
 }
 "#;
