@@ -6,7 +6,7 @@ note IN THE SAME COMMIT as the slice. Every cargo command runs as `timeout -k 30
 
 | # | slice | discharges | validation command | expected | done | note |
 |---|---|---|---|---|---|---|
-| 0 | baseline counts for AC7 (a)-(d) at `285b519e5`, before any change | AC7 | AC7 (a), (b), (c), (d) | four nonzero counts, 0 failed, recorded here | [ ] | |
+| 0 | baseline counts for AC7 (a)-(d) at `285b519e5`, before any change | AC7 | AC7 (a), (b), (c), (d) | four nonzero counts, 0 failed, recorded here | [x] | 2026-11-20 at `0c5398122` (source = `285b519e5`), `<tickets>/PROXIMA-49/evidence/baseline-{a,b,c,d}.log`: (a) 108 passed 0 failed; (b) 24 passed 0 failed; (c) 5 passed 0 failed; (d) 10 passed 0 failed |
 | 1 | `expand_value` / `expand_value_strict` in `proxima-http/src/templates.rs`; `StageRequest.body: Option<Value>`; `build_request` structured arm; executor `Probe.bodies`; call sites | AC1, AC6 lib (2) | `cargo val -p proxima-lib --features tokio --lib -E 'test(stage_payload_) or test(ctl_payload_)'` | 9 passed (AC1 8 + AC6 (2); AC6 (1) lands in slice 2) | [ ] | |
 | 2 | `ProcessRpcInitFrame.send: Value`; `run_init` structured arm | AC2, AC6 lib (1) | `cargo val -p proxima-lib --features tokio --lib -E 'test(process_rpc_payload_) or test(ctl_payload_)'` | 3 passed (AC2 1 + AC6 lib 2) | [ ] | |
 | 3 | `SynthConfig.body` / `body_template: Option<Value>`, structured arms, env as text, `#[builder(into)]` | AC3 | `cargo val -p proxima-lib --lib -E 'test(synth_payload_)'` | 4 passed | [ ] | |
