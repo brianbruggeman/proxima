@@ -80,7 +80,7 @@ pub use float_layout::{FloatLayout, SignEncoding, Specials};
 pub use format::{LevelFormat, LevelGeometry, LevelTable, NumericFormat};
 pub use format_id::FormatId;
 pub use int8_dot::{Int8DotShape, int8_dot_shape};
-pub use numeric::{NumericPolicy, NumericRewrite, admit};
+pub use numeric::{NumericPolicy, NumericRewrite, admit, dense_matmul_uses_bf16_tiles};
 pub use numerics::Numerics;
 pub use row_block::{RowBlockShape, row_block_shape};
 pub use format_codec::FormatCodec;

@@ -17,9 +17,8 @@ pub(crate) fn default_dense_mma_input_layout(
 ) -> FloatLayout {
     let codecs = operand_codecs(resolved, packed_operands);
     let all_bf16 = codecs.iter().all(|codec| *codec == Some(Codec::BFloat16));
-    if codecs.contains(&Some(Codec::BFloat16))
-        && (all_bf16 || admit(numeric_policy, NumericRewrite::Bf16InputRounding).is_ok())
-    {
+    let has_bf16 = codecs.contains(&Some(Codec::BFloat16));
+    if proxima_numeric::dense_matmul_uses_bf16_tiles(numeric_policy, has_bf16, all_bf16) {
         FloatLayout::BF16
     } else {
         FloatLayout::BF32

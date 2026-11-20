@@ -364,6 +364,22 @@ impl NumericRewrite {
     }
 }
 
+/// Whether a dense matmul stages its operands as bf16 tiles: a bf16 operand is present AND either
+/// every operand is bf16 (nothing is rounded) or `policy` grants [`NumericRewrite::Bf16InputRounding`]
+/// (the f32 operand is then rounded to bf16, round-to-nearest-even, as llama.cpp does).
+///
+/// The one predicate the Metal emitter's tile-layout choice and the CPU evaluator's operand rounding
+/// both call, so the two cannot drift. Composes [`admit`].
+#[must_use]
+pub fn dense_matmul_uses_bf16_tiles(
+    policy: NumericPolicy,
+    has_bf16_operand: bool,
+    all_operands_bf16: bool,
+) -> bool {
+    has_bf16_operand
+        && (all_operands_bf16 || admit(policy, NumericRewrite::Bf16InputRounding).is_ok())
+}
+
 /// The one admission check every rewrite site calls before firing — a typed
 /// error, never a silent numerics change.
 ///
@@ -502,6 +518,28 @@ mod tests {
                 NumericRewrite::Bf16InputRounding
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn dense_matmul_takes_bf16_tiles_by_operand_mix_and_grant() {
+        let granted = NumericPolicy::bit_exact().with_bf16_input_rounding(true);
+        let withheld = NumericPolicy::bit_exact();
+        assert!(
+            dense_matmul_uses_bf16_tiles(granted, true, false),
+            "bf16 x f32 under the grant rounds"
+        );
+        assert!(
+            !dense_matmul_uses_bf16_tiles(withheld, true, false),
+            "bf16 x f32 without the grant stays f32"
+        );
+        assert!(
+            dense_matmul_uses_bf16_tiles(withheld, true, true),
+            "bf16 x bf16 rounds nothing"
+        );
+        assert!(
+            !dense_matmul_uses_bf16_tiles(granted, false, false),
+            "no bf16 operand, no bf16 tiles"
         );
     }
 
