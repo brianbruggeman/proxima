@@ -1156,7 +1156,7 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     int ib_step = 2;
     long blk_step = (long)ib_step * 210;
     device const uchar *blk_ptr[2];
-    #pragma unroll
+    #pragma clang loop unroll(full)
     for (int q = 0; q < 2; ++q) {
         blk_ptr[q] = in0 + ((long)((int)weight_base[q] / 256) + (long)ib_first) * 210;
     }
@@ -1166,14 +1166,14 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     long y4_step = (long)ib_step * 256;
     device const float *y4 = in1 + other_base[0] + (long)ib_first * 256 + (long)(4u * ir + 128u * iq);
     for (int ib = ib_first; ib < super_blocks; ib += ib_step) {
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (uint i = 0u; i < 4u; ++i) {
             yl[i + 0u] = y4[i + 0u];
             yl[i + 4u] = y4[i + 32u];
             yl[i + 8u] = y4[i + 64u];
             yl[i + 12u] = y4[i + 96u];
         }
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (int q = 0; q < 2; ++q) {
             device const uchar *blk = blk_ptr[q];
             device const uchar *low_codes = blk + low_offset;
@@ -1184,7 +1184,7 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
             float sums1 = 0.0f;
             float sums2 = 0.0f;
             float sums3 = 0.0f;
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (uint i = 0u; i < 4u; ++i) {
                 sums0 += yl[i + 0u] * (float)((int)((((uint)low_codes[i + 0u] >> 0u) & 0xfu) | ((((uint)high_codes[i + 0u] >> 0u) & 0x3u) << 4u)) - 32);
                 sums1 += yl[i + 4u] * (float)((int)((((uint)low_codes[i + 32u] >> 0u) & 0xfu) | ((((uint)high_codes[i + 0u] >> 2u) & 0x3u) << 4u)) - 32);
@@ -1193,7 +1193,7 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
             }
             sumf[q] = sumf[q] + dall * (sums0 * (float)(char)scales[0u] + sums1 * (float)(char)scales[2u] + sums2 * (float)(char)scales[4u] + sums3 * (float)(char)scales[6u]);
         }
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (int q = 0; q < 2; ++q) { blk_ptr[q] += blk_step; }
         y4 += y4_step;
     }

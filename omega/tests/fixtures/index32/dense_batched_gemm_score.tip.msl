@@ -1166,7 +1166,7 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero(
                 device const uchar *w_run = (device const uchar *)(in0 + row_base);
                 if (w_stride == 1 && k0 + w_part_k + 16 <= ((int)u.reduction_total) && (((ulong)w_run) & 15ul) == 0ul) {
                     uint4 w_vec[4];
-                    #pragma unroll
+                    #pragma clang loop unroll(full)
                     for (int vec = 0; vec < 4; ++vec) { w_vec[vec] = ((device const uint4 *)w_run)[vec]; }
                     w_regs[0] = omega_dense_run_2b1fe2a4facb2acf(w_vec[0][0]);
                     w_regs[1] = omega_dense_run_2b1fe2a4facb2acf(w_vec[0][1]);
@@ -1185,13 +1185,13 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero(
                     w_regs[14] = omega_dense_run_2b1fe2a4facb2acf(w_vec[3][2]);
                     w_regs[15] = omega_dense_run_2b1fe2a4facb2acf(w_vec[3][3]);
                 } else {
-                    #pragma unroll
+                    #pragma clang loop unroll(full)
                     for (int w_k = 0; w_k < 16; ++w_k) {
                         int w_element = row_base + (int)w_k * w_stride;
                         w_regs[w_k] = (k0 + w_part_k + w_k < ((int)u.reduction_total)) ? in0[w_element] : 0.0f;
                     }
                 }
-                #pragma unroll
+                #pragma clang loop unroll(full)
                 for (int w_k = 0; w_k < 16; ++w_k) { weight_tile[w_row * 32 + w_part_k + w_k] = w_regs[w_k]; }
             } else {
                 for (int fill_k = 0; fill_k < 16; ++fill_k) { weight_tile[w_row * 32 + w_part_k + fill_k] = 0.0f; }

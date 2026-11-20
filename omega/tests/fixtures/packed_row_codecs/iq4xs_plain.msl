@@ -1163,7 +1163,7 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     int ib_step = 2;
     long blk_step = (long)ib_step * 136;
     device const uchar *blk_ptr[4];
-    #pragma unroll
+    #pragma clang loop unroll(full)
     for (int q = 0; q < 4; ++q) {
         blk_ptr[q] = in0 + ((long)((int)weight_base[q] / 256) + (long)ib_first) * 136;
     }
@@ -1175,12 +1175,12 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
     long y4_step = (long)ib_step * 256;
     device const float *y4 = in1 + other_base[0] + (long)ib_first * 256 + (long)(8u * ir + 32u * iq);
     for (int ib = ib_first; ib < super_blocks; ib += ib_step) {
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (uint i = 0u; i < 8u; ++i) {
             yl[i + 0u] = y4[i + 0u];
             yl[i + 8u] = y4[i + 16u];
         }
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (int q = 0; q < 4; ++q) {
             device const uchar *blk = blk_ptr[q];
             device const uchar *low_codes = blk + low_offset;
@@ -1188,14 +1188,14 @@ kernel void omega_reduce_r3_o2_n2_multiply_add_zero(
             float dall = (float)(*(device const half *)(blk + 0u));
             float sums0 = 0.0f;
             float sums1 = 0.0f;
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (uint i = 0u; i < 8u; ++i) {
                 sums0 += yl[i + 0u] * (float)iq4_xs_element_stage[(uint)((((uint)low_codes[i + 0u] >> 0u) & 0xfu))];
                 sums1 += yl[i + 8u] * (float)iq4_xs_element_stage[(uint)((((uint)low_codes[i + 0u] >> 4u) & 0xfu))];
             }
             sumf[q] = sumf[q] + dall * (sums0 * scale0 + sums1 * scale0);
         }
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (int q = 0; q < 4; ++q) { blk_ptr[q] += blk_step; }
         y4 += y4_step;
     }

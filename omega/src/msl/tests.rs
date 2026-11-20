@@ -2475,7 +2475,7 @@ fn dense_weight_staging_loads_a_register_array_before_the_tile_stores() {
         "all loads are issued before the first tile store"
     );
     assert!(
-        source.matches("#pragma unroll").count() >= 2,
+        source.matches(FULL_UNROLL).count() >= 2,
         "both staging loops unroll"
     );
 }
@@ -10806,17 +10806,17 @@ fn ported_matvec_bodies_unroll_their_row_and_lane_loops_fully() {
         );
         assert_eq!(
             trimmed_line_above(&source, rows_loop, 2),
-            "#pragma unroll",
+            FULL_UNROLL,
             "{codec:?}: the row loop is unrolled\n{source}"
         );
         assert_eq!(
             trimmed_line_above(&source, "blk_ptr[q] = in", 2),
-            "#pragma unroll",
+            FULL_UNROLL,
             "{codec:?}: the block pointer setup is unrolled\n{source}"
         );
         assert_eq!(
             trimmed_line_above(&source, "blk_ptr[q] += blk_step; }", 1),
-            "#pragma unroll",
+            FULL_UNROLL,
             "{codec:?}: the block pointer advance is unrolled\n{source}"
         );
     }

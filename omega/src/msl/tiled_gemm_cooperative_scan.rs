@@ -548,7 +548,7 @@ pub(super) fn push_tiled_gemm_body(
             "            simdgroup_half8x8 a_frag[{thread_mat_m}];\n"
         ));
         source.push_str(&format!(
-            "{K_STEP_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
+            "{FULL_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
         ));
         let (a_frag_offset, a_frag_stride) =
             fragment_load_offset_stride("row_half", "i", thread_mat_m, block_k);
@@ -561,7 +561,7 @@ pub(super) fn push_tiled_gemm_body(
             "            {act_simdgroup_type} b_frag[{thread_mat_n}];\n"
         ));
         source.push_str(&format!(
-            "{K_STEP_UNROLL}\n            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
+            "{FULL_UNROLL}\n            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
         ));
         let (b_frag_offset, b_frag_stride) =
             fragment_load_offset_stride("col_half", "j", thread_mat_n, block_k);
@@ -570,10 +570,10 @@ pub(super) fn push_tiled_gemm_body(
         ));
         source.push_str("            }\n");
         source.push_str(&format!(
-            "{K_STEP_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
+            "{FULL_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
         ));
         source.push_str(&format!(
-            "{K_STEP_UNROLL}\n                for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
+            "{FULL_UNROLL}\n                for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
         ));
         source.push_str(&format!(
             "                    simdgroup_multiply_accumulate(acc[i * {thread_mat_n} + j], a_frag[i], b_frag[j], acc[i * {thread_mat_n} + j]);\n"
@@ -1487,7 +1487,7 @@ fn push_wide_weight_stage(
     source.push_str(&format!(
         "                device const uchar *w_run = {run_pointer};\n                if (w_stride == 1 && k0 + w_part_k + {run} <= u.reduction_total && (((ulong)w_run) & 15ul) == 0ul) {{\n                    uint4 w_vec[{vectors}];\n"
     ));
-    source.push_str("                    #pragma unroll\n");
+    source.push_str(&format!("                    {FULL_UNROLL}\n"));
     source.push_str(&format!(
         "                    for (int vec = 0; vec < {vectors}; ++vec) {{ w_vec[vec] = ((device const uint4 *)w_run)[vec]; }}\n"
     ));
@@ -1505,7 +1505,7 @@ fn push_wide_weight_stage(
         source.push_str(&format!("                    w_regs[{element}] = {decode_name}({code});\n"));
     }
     source.push_str("                } else {\n");
-    source.push_str("                    #pragma unroll\n");
+    source.push_str(&format!("                    {FULL_UNROLL}\n"));
     source.push_str(&format!(
         "                    for (int w_k = 0; w_k < {run}; ++w_k) {{\n                        long w_element = row_base + (long)w_k * w_stride;\n"
     ));
@@ -1522,7 +1522,7 @@ fn push_wide_weight_stage(
         "                        w_regs[w_k] = (k0 + w_part_k + w_k < u.reduction_total) ? {element_read} : 0.0f;\n"
     ));
     source.push_str("                    }\n                }\n");
-    source.push_str("                #pragma unroll\n");
+    source.push_str(&format!("                {FULL_UNROLL}\n"));
     source.push_str(&format!(
         "                for (int w_k = 0; w_k < {run}; ++w_k) {{ weight_tile[w_row * {block_k} + w_part_k + w_k] = {open}w_regs[w_k]{close}; }}\n"
     ));
@@ -1835,7 +1835,7 @@ pub(super) fn push_dense_batched_gemm_body(
     source.push_str(&format!(
         "                long w_stride = u.operand_strides[{weight}][{reduce_dim}];\n"
     ));
-    source.push_str("                #pragma unroll\n");
+    source.push_str(&format!("                {FULL_UNROLL}\n"));
     source.push_str(&format!(
         "                for (int w_k = 0; w_k < {block_k}; ++w_k) {{\n"
     ));
@@ -1853,7 +1853,7 @@ pub(super) fn push_dense_batched_gemm_body(
         "                    w_regs[w_k] = (k0 + w_k < u.reduction_total) ? {weight_read} : {dense_zero_literal};\n"
     ));
     source.push_str("                }\n");
-    source.push_str("                #pragma unroll\n");
+    source.push_str(&format!("                {FULL_UNROLL}\n"));
     source.push_str(&format!(
         "                for (int w_k = 0; w_k < {block_k}; ++w_k) {{\n"
     ));
@@ -1919,7 +1919,7 @@ pub(super) fn push_dense_batched_gemm_body(
         "            {dense_simdgroup_type} a_frag[{thread_mat_m}];\n"
     ));
     source.push_str(&format!(
-        "{K_STEP_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
+        "{FULL_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
     ));
     let (dense_a_frag_offset, dense_a_frag_stride) =
         fragment_load_offset_stride("row_half", "i", thread_mat_m, block_k);
@@ -1932,7 +1932,7 @@ pub(super) fn push_dense_batched_gemm_body(
         "            {dense_simdgroup_type} b_frag[{thread_mat_n}];\n"
     ));
     source.push_str(&format!(
-        "{K_STEP_UNROLL}\n            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
+        "{FULL_UNROLL}\n            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
     ));
     let (dense_b_frag_offset, dense_b_frag_stride) =
         fragment_load_offset_stride("col_half", "j", thread_mat_n, block_k);
@@ -1941,10 +1941,10 @@ pub(super) fn push_dense_batched_gemm_body(
     ));
     source.push_str("            }\n");
     source.push_str(&format!(
-        "{K_STEP_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
+        "{FULL_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
     ));
     source.push_str(&format!(
-        "{K_STEP_UNROLL}\n                for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
+        "{FULL_UNROLL}\n                for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
     ));
     source.push_str(&format!(
         "                    simdgroup_multiply_accumulate(acc[i * {thread_mat_n} + j], a_frag[i], b_frag[j], acc[i * {thread_mat_n} + j]);\n"
@@ -3305,13 +3305,10 @@ pub(super) fn push_broadcast_epilogue_write(
 }
 
 // the slot loops index per-thread arrays, which only stay in registers when
-// every trip is unrolled; the trip count is a literal, so full unroll is legal
-pub(super) const FULL_UNROLL: &str = "#pragma unroll";
-
-// the K-step fragment loops: bare `#pragma unroll` left the bf16 ones rolled
-// (2,325 us vs 203 us at the router shape); llama spells it `FOR_UNROLL`
-#[cfg(feature = "metal-tiled-gemm")]
-pub(super) const K_STEP_UNROLL: &str = "#pragma clang loop unroll(full)";
+// every trip is unrolled; the trip count is a literal, so full unroll is legal.
+// metal ignores "#pragma unroll" on these loops; only the clang spelling forces a full
+// unroll (proxnum-589: bf16 fragment loop 2,328 vs 235 us); llama's `FOR_UNROLL` is the same
+pub(super) const FULL_UNROLL: &str = "#pragma clang loop unroll(full)";
 
 /// The cooperative fold's accumulate loop with its loads issued ahead of its
 /// folds: each trip loads `unroll` strided elements of every operand into

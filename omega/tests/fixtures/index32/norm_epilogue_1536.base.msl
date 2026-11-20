@@ -55,7 +55,7 @@ kernel void omega_reduce_r2_o1_n2_multiply_add_zero_epi5_fused_identity_o5__mult
     float epi_pre0[8];
     float epi_pre1[8];
     float epi_pre2[8];
-    #pragma unroll
+    #pragma clang loop unroll(full)
     for (int slot = 0; slot < 8; ++slot) {
         long epi_pre_r = (long)lane + (long)slot * 256;
         long epi_pre_off0 = u.epilogue_operand_base[0];
@@ -63,7 +63,7 @@ kernel void omega_reduce_r2_o1_n2_multiply_add_zero_epi5_fused_identity_o5__mult
         epi_pre_off0 += epi_pre_r * u.epilogue_operand_strides[0][1];
         epi_pre0[slot] = epi_pre_r < u.reduction_total ? epi0[epi_pre_off0] : (float)0;
     }
-    #pragma unroll
+    #pragma clang loop unroll(full)
     for (int slot = 0; slot < 8; ++slot) {
         long epi_pre_r = (long)lane + (long)slot * 256;
         long epi_pre_off1 = u.epilogue_operand_base[1];
@@ -71,7 +71,7 @@ kernel void omega_reduce_r2_o1_n2_multiply_add_zero_epi5_fused_identity_o5__mult
         epi_pre_off1 += epi_pre_r * u.epilogue_operand_strides[1][1];
         epi_pre1[slot] = epi_pre_r < u.reduction_total ? epi1[epi_pre_off1] : (float)0;
     }
-    #pragma unroll
+    #pragma clang loop unroll(full)
     for (int slot = 0; slot < 8; ++slot) {
         long epi_pre_r = (long)lane + (long)slot * 256;
         long epi_pre_off2 = u.epilogue_operand_base[2];
@@ -94,13 +94,13 @@ kernel void omega_reduce_r2_o1_n2_multiply_add_zero_epi5_fused_identity_o5__mult
     int total_r = (int)u.reduction_total;
     for (int r = (int)lane; r < total_r; r += 2048) {
         float batch[8][2];
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (int slot = 0; slot < 8; ++slot) {
             bool in_range = (r + slot * 256) < total_r;
             batch[slot][0] = in_range ? in0[walk0 + slot * advance0] : (float)0;
             batch[slot][1] = in_range ? in1[walk1 + slot * advance1] : (float)0;
         }
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (int slot = 0; slot < 8; ++slot) {
             if ((r + slot * 256) < total_r) {
                 float scratch[2];
@@ -128,7 +128,7 @@ kernel void omega_reduce_r2_o1_n2_multiply_add_zero_epi5_fused_identity_o5__mult
     float epi_step4 = (1.0f / epi_step3);
     for (long block_start = (long)lane; block_start < u.reduction_total; block_start += 2048) {
         if (block_start != (long)lane) {
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (int slot = 0; slot < 8; ++slot) {
                 long epi_pre_r = block_start + (long)slot * 256;
                 long epi_pre_off0 = u.epilogue_operand_base[0];
@@ -136,7 +136,7 @@ kernel void omega_reduce_r2_o1_n2_multiply_add_zero_epi5_fused_identity_o5__mult
                 epi_pre_off0 += epi_pre_r * u.epilogue_operand_strides[0][1];
                 epi_pre0[slot] = epi_pre_r < u.reduction_total ? epi0[epi_pre_off0] : (float)0;
             }
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (int slot = 0; slot < 8; ++slot) {
                 long epi_pre_r = block_start + (long)slot * 256;
                 long epi_pre_off1 = u.epilogue_operand_base[1];
@@ -144,7 +144,7 @@ kernel void omega_reduce_r2_o1_n2_multiply_add_zero_epi5_fused_identity_o5__mult
                 epi_pre_off1 += epi_pre_r * u.epilogue_operand_strides[1][1];
                 epi_pre1[slot] = epi_pre_r < u.reduction_total ? epi1[epi_pre_off1] : (float)0;
             }
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (int slot = 0; slot < 8; ++slot) {
                 long epi_pre_r = block_start + (long)slot * 256;
                 long epi_pre_off2 = u.epilogue_operand_base[2];
@@ -153,7 +153,7 @@ kernel void omega_reduce_r2_o1_n2_multiply_add_zero_epi5_fused_identity_o5__mult
                 epi_pre2[slot] = epi_pre_r < u.reduction_total ? epi2[epi_pre_off2] : (float)0;
             }
         }
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (int slot = 0; slot < 8; ++slot) {
             long r = block_start + (long)slot * 256;
             if (r < u.reduction_total) {

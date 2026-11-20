@@ -937,7 +937,7 @@ pub(super) fn push_static_reduce_fold(
             }
         }
         if unroll {
-            source.push_str(&format!("{level_indent}#pragma unroll\n"));
+            source.push_str(&format!("{level_indent}{FULL_UNROLL}\n"));
         }
         source.push_str(&format!(
             "{level_indent}for (long fold{level} = 0; fold{level} < {extent}L; fold{level}++) {{\n"
