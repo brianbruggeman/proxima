@@ -106,8 +106,6 @@ pub(super) fn prepare_with_options(
     #[cfg(feature = "instrument")]
     counter!(PREPARE_INFER_TICKS, elapsed_ticks(infer_started));
 
-    #[cfg(feature = "instrument")]
-    let validate_started = read_ticks();
     // ROW 327: `block_nodes[i]` is the ONLY node `blocks[i]` may be
     // attributed to -- this crate's positional contract, identical to
     // `proxima_tensor::cpu::evaluate`'s (see `execute`'s own doc). Every
@@ -161,6 +159,36 @@ pub(super) fn prepare_with_options(
     }
 
     let packed_operands = packed_operands_of(&block_nodes, blocks)?;
+    prepare_bound(
+        program,
+        symbols,
+        shapes,
+        block_nodes,
+        packed_operands,
+        outputs,
+        (numeric_policy, fuse_cached_attention, allow_fusion, wavefront),
+        placed_input_nodes,
+    )
+}
+
+/// The bind-and-schedule half of [`prepare_with_options`]: everything after the block pairing is
+/// validated. [`Plan::refit_symbols`] re-enters here at another row count with the packed operands
+/// the plan already holds, since a plan keeps no block data. `program` and `numeric_policy` are the
+/// narrowed forms.
+#[allow(clippy::too_many_arguments)]
+fn prepare_bound(
+    program: &[Op],
+    symbols: &[u64],
+    #[allow(unused_mut)] mut shapes: Shapes,
+    block_nodes: Vec<NodeId>,
+    packed_operands: PackedOperands,
+    outputs: &[NodeId],
+    policy: (NumericPolicy, bool, bool, bool),
+    placed_input_nodes: &[NodeId],
+) -> Result<Prepared, MetalError> {
+    let (numeric_policy, fuse_cached_attention, allow_fusion, wavefront) = policy;
+    #[cfg(feature = "instrument")]
+    let validate_started = read_ticks();
     // every packed codec's declared dtype is the "these are bytes" marker
     // `reject_unsupported_gpu_dtype`'s own doc already claims as its
     // exemption's rationale, and the set is exactly the codecs
@@ -2030,4 +2058,48 @@ fn is_gpu_float(dtype: DType) -> bool {
         DType::Layout(layout) => layout.exponent_bits > 0 && layout.width() <= 32,
         DType::Bool => false,
     }
+}
+
+/// What [`prepare_with_options`] was given besides the program, symbols and blocks, kept on the
+/// [`Plan`] so [`Plan::refit_symbols`] can bind the same program at another row count the way
+/// the plan was first bound.
+#[derive(Clone, Debug)]
+pub(super) struct RebindContext {
+    /// The policy as the caller passed it, before the driver narrows it.
+    pub(super) numeric_policy: NumericPolicy,
+    pub(super) fuse_cached_attention: bool,
+    pub(super) allow_fusion: bool,
+    pub(super) wavefront: bool,
+    pub(super) placed_input_nodes: Vec<NodeId>,
+}
+
+/// [`prepare_with_options`] at `symbols` over the packed operands `previous` already attributed,
+/// for a plan that no longer holds its blocks. CPU only: no device is touched.
+pub(super) fn rebind_at(
+    program: &[Op],
+    symbols: &[u64],
+    previous: &Prepared,
+    context: &RebindContext,
+) -> Result<Prepared, MetalError> {
+    let numeric_policy = context
+        .numeric_policy
+        .with_accumulator_narrowing()
+        .with_flash_narrowing(true);
+    let narrowed = narrow_accumulations(program, numeric_policy);
+    let shapes = infer(&narrowed, symbols)?;
+    prepare_bound(
+        &narrowed,
+        symbols,
+        shapes,
+        previous.block_nodes.clone(),
+        previous.packed_operands.clone(),
+        &previous.effective_outputs,
+        (
+            numeric_policy,
+            context.fuse_cached_attention,
+            context.allow_fusion,
+            context.wavefront,
+        ),
+        &context.placed_input_nodes,
+    )
 }

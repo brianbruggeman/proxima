@@ -61,6 +61,13 @@ pub(super) fn plan_with_placed_inputs(
         prepared,
         numeric_policy,
         crate::msl::ambient_knobs(),
+        RebindContext {
+            numeric_policy,
+            fuse_cached_attention,
+            allow_fusion: true,
+            wavefront: wavefront_schedule,
+            placed_input_nodes: placed_input_nodes.to_vec(),
+        },
     ))
 }
 
@@ -70,6 +77,7 @@ pub(super) fn plan_from_prepared(
     prepared: Prepared,
     numeric_policy: NumericPolicy,
     emit_knobs: EmitKnobs,
+    rebind: RebindContext,
 ) -> Plan {
     // `prepare` already built this attribution once, off the same `blocks`
     // argument, checked count- and shape-consistent against `block_nodes`
@@ -113,6 +121,10 @@ pub(super) fn plan_from_prepared(
         command_buffer_chunks: 0,
         command_buffer_chunks_decode_shaped: false,
         bind_row_count: plan_bind_row_count(symbols),
+        bound_symbols: symbols.to_vec(),
+        row_capacity: core::cell::Cell::new(plan_bind_row_count(symbols)),
+        rebind,
+        rows_template: RefCell::new(None),
         #[cfg(feature = "instrument")]
         encoder_split_at: None,
         #[cfg(feature = "metal-plan-stable-buffers")]

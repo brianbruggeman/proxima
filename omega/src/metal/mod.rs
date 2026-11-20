@@ -232,6 +232,7 @@ use proxima_tensor::instrument::{
 };
 #[cfg(any(not(feature = "metal-buffer-pool"), test))]
 use proxima_tensor::node_last_reader;
+use proxima_tensor::bind::{RowTemplate, apply_row_template, refresh_cached_attention, row_template, rows_enumerable};
 use proxima_tensor::{BoundOp, BoundOpKind, Evaluated, Keep, Lookup, NodeId, Op, QuantizedBlock, Shapes, TensorError, block_node_ids, correct_packed_matmul_layouts, index_node_ids, infer, node_retirement, op_read_nodes, prune_dead, refit_cached_attention_rows, resolve_named_blocks};
 use proxima_numeric::{DType, NumericPolicy};
 
@@ -267,6 +268,7 @@ mod placements_execute_named;
 mod dispatch_timed_and_classify;
 #[macro_use]
 mod prepare_uniforms_pack;
+mod refit_rows;
 mod wavefront_schedule;
 #[macro_use]
 mod pipeline_buffers_upload;
@@ -541,6 +543,9 @@ mod layout_bytes_tests;
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod packed_normalized_projection_tests;
+#[cfg(all(test, feature = "metal-output-placement", feature = "metal-plan-stable-buffers"))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod refit_rows_tests;
 #[cfg(test)]
 mod command_buffer_failed_label_tests {
     use super::label_or_unlabeled;

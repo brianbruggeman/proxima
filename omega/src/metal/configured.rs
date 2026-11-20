@@ -97,6 +97,13 @@ pub fn plan_named_with_config_and_placed_inputs(
         prepared,
         plan_numeric_policy,
         config.emit.clone(),
+        RebindContext {
+            numeric_policy: config.numeric,
+            fuse_cached_attention,
+            allow_fusion: config.allow_fusion,
+            wavefront: config.wavefront_schedule,
+            placed_input_nodes: placed_input_nodes.to_vec(),
+        },
     );
     let has_dense_bf16_candidate = plan.prepared.resolved.iter().any(|bound| {
         crate::msl::has_dense_bf16_mma_candidate(bound, &plan.packed_operands, plan.numeric_policy, &plan.emit_knobs)

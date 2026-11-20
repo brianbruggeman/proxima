@@ -905,6 +905,17 @@ pub struct Plan {
     /// MG-3 should have rejected. `1` for a symbols-less `plan()` caller (a
     /// bare `Op` unit test), matching decode's own row count.
     pub(super) bind_row_count: u64,
+    /// The `symbols` this plan is currently bound to; `refit_symbols` moves it. Its first entry is the
+    /// row count the bound ops carry now, which `bind_row_count` (the arena cap input) never follows.
+    pub(super) bound_symbols: Vec<u64>,
+    /// The widest row count the plan-owned arena covers: the bound row count when the arena was built
+    /// (or, while it is not built yet, the current one). A rows refit never goes above it.
+    pub(super) row_capacity: core::cell::Cell<u64>,
+    /// How this plan was bound, so a rows refit binds the same program at other row counts.
+    pub(super) rebind: RebindContext,
+    /// The row template fitted on the first rows refit: `None` until then, `Some(None)` once the
+    /// program was proven not to refit by rows, so that proof is paid once.
+    pub(super) rows_template: RefCell<Option<Option<RowTemplate>>>,
     /// ROW 329 diagnostic: when `Some(position)`,
     /// [`execute_plan_with_placements_dispatch_timed`]'s stage-boundary
     /// fallback (the only branch this device's own `AtStageBoundary`-only
@@ -2383,6 +2394,9 @@ impl Plan {
         if self.configured_constraints.is_some() {
             return Ok(false);
         }
+        if symbols.first() != self.bound_symbols.first() {
+            return super::refit_rows::refit_rows(self, symbols);
+        }
         let next_shapes = infer(&self.program, symbols)?;
         let Some(patches) = refit_cached_attention_rows(
             &self.prepared.resolved,
@@ -2393,6 +2407,7 @@ impl Plan {
             return Ok(false);
         };
         apply_refit(self, patches, next_shapes)?;
+        self.bound_symbols = symbols.to_vec();
         Ok(true)
     }
 
