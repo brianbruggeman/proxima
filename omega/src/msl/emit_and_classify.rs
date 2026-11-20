@@ -191,6 +191,14 @@ pub(crate) fn inspect_attention_variant_and_knobs(
             value: "dispatch manifests require a supported cached-attention form",
         })?;
     let mut effective_variant = variant;
+    if variant.kv_storage == AttentionKvStorage::Bound {
+        effective_variant.kv_storage = match cache_codec {
+            Some(Codec::BFloat16) => AttentionKvStorage::Bf16,
+            Some(Codec::BFloat8) => AttentionKvStorage::Bf8,
+            Some(Codec::Float16) => AttentionKvStorage::F16,
+            _ => AttentionKvStorage::F32,
+        };
+    }
     if selected_schedule.has_shared_k() && !row_schedule.has_shared_k() {
         effective_variant.kv_reuse = AttentionKvReuse::Legacy;
     }
@@ -239,18 +247,19 @@ pub(crate) fn validate_attention_variant_storage(
     }
     let quantized = operand_codecs(resolved, packed_operands);
     let codec = cached_attention_kv_codec(resolved.node, &quantized)?;
+    let selected_storage = match storage {
+        AttentionKvStorage::Bound => return Ok(()),
+        AttentionKvStorage::F32 => "f32",
+        AttentionKvStorage::F16 => "f16",
+        AttentionKvStorage::Bf16 => "bf16",
+        AttentionKvStorage::Bf8 => "bf8",
+    };
     let bound_storage = match codec {
         None => "f32",
         Some(Codec::BFloat16) => "bf16",
         Some(Codec::BFloat8) => "bf8",
         Some(Codec::Float16) => "f16",
         Some(_) => "unsupported packed storage",
-    };
-    let selected_storage = match storage {
-        AttentionKvStorage::F32 => "f32",
-        AttentionKvStorage::F16 => "f16",
-        AttentionKvStorage::Bf16 => "bf16",
-        AttentionKvStorage::Bf8 => "bf8",
     };
     if selected_storage != bound_storage {
         return Err(EmitError::CachedAttentionVariantStorageMismatch {

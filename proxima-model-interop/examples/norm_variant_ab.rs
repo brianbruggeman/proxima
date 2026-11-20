@@ -173,7 +173,7 @@ fn granite_dispatch_manifest(
     };
     let mut packed_operands = PackedOperands::new();
     let codec = match variant.kv_storage {
-        AttentionKvStorage::F32 => None,
+        AttentionKvStorage::Bound | AttentionKvStorage::F32 => None,
         AttentionKvStorage::F16 => Some(omega::Codec::Float16),
         AttentionKvStorage::Bf16 => Some(omega::Codec::BFloat16),
         AttentionKvStorage::Bf8 => Some(omega::Codec::BFloat8),
@@ -226,6 +226,7 @@ fn describe_attention_variant(variant: AttentionVariant) -> Result<(), String> {
 #[cfg(feature = "metal-attn-variants")]
 fn attention_variant_labels(variant: AttentionVariant) -> [&'static str; 7] {
     let kv_storage = match variant.kv_storage {
+        AttentionKvStorage::Bound => "bound",
         AttentionKvStorage::F32 => "f32",
         AttentionKvStorage::F16 => "f16",
         AttentionKvStorage::Bf16 => "bf16",

@@ -2352,7 +2352,7 @@ fn card_20_dispatch_matrix_exposes_legacy_and_eight_one_factor_flips() {
     for selected in flips {
         let mut packed_operands = PackedOperands::new();
         let codec = match selected.kv_storage {
-            AttentionKvStorage::F32 => None,
+            AttentionKvStorage::Bound | AttentionKvStorage::F32 => None,
             AttentionKvStorage::F16 => Some(Codec::Float16),
             AttentionKvStorage::Bf16 => Some(Codec::BFloat16),
             AttentionKvStorage::Bf8 => Some(Codec::BFloat8),
@@ -2403,6 +2403,36 @@ fn card_20_dispatch_matrix_refuses_a_cache_storage_mismatch() {
             bound: "f32",
         }
     ));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn card_61_bound_storage_follows_the_cache_codec_and_the_manifest_reports_it() {
+    let operation = card_17_granite_attention(1000);
+    let policy = NumericPolicy::llama_relaxed();
+    let bound = AttentionVariant {
+        kv_storage: AttentionKvStorage::Bound,
+        ..AttentionVariant::default()
+    };
+    let plain = inspect_attention_variant(&operation, &PackedOperands::new(), policy, bound)
+        .expect("a bound selection admits plain F32 cache buffers");
+    assert_eq!(plain.variant.kv_storage, AttentionKvStorage::F32);
+    assert_eq!(plain.cache_codec, None);
+
+    for (codec, storage) in [
+        (Codec::Float16, AttentionKvStorage::F16),
+        (Codec::BFloat16, AttentionKvStorage::Bf16),
+        (Codec::BFloat8, AttentionKvStorage::Bf8),
+    ] {
+        let mut packed_operands = PackedOperands::new();
+        for operand_index in [2, 3, 6] {
+            packed_operands.insert(NodeId(operand_index), codec);
+        }
+        let manifest = inspect_attention_variant(&operation, &packed_operands, policy, bound)
+            .expect("a bound selection admits whatever codec the cache carries");
+        assert_eq!(manifest.cache_codec, Some(codec));
+        assert_eq!(manifest.variant.kv_storage, storage);
+    }
 }
 
 #[cfg(feature = "metal-attn-variants")]

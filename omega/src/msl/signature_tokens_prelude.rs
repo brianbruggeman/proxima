@@ -1894,7 +1894,7 @@ pub(crate) fn cached_attention_merge_needed_with_schedule(
         .is_some_and(CachedAttentionForm::needs_merge)
 }
 
-/// One explicit cached-attention selection across seven independent axes.
+/// One explicit cached-attention selection across independent axes.
 /// The default preserves F32 cache storage, the sized MMA rule, and the
 /// current scheduling choices; a Granite caller can override one axis, such
 /// as `tile_height: AttentionTileHeight::Rows8`, without changing the others.
@@ -1959,6 +1959,10 @@ impl Default for AttentionVariant {
 #[cfg(feature = "metal-attn-variants")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttentionKvStorage {
+    /// Follows whatever codec the cache is bound with, the way a plan with no variant does; selects nothing and
+    /// validates nothing. A caller that changes other axes without naming a storage uses this, so its selection
+    /// cannot disagree with the cache. A manifest reports the storage it resolved to.
+    Bound,
     F32,
     F16,
     Bf16,

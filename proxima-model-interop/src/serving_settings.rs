@@ -5,7 +5,9 @@ use conflaguration::{Settings, Validate};
     feature = "metal-attn-variants",
     target_os = "macos"
 ))]
-use omega::{AttentionDecomposition, AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant};
+use omega::{
+    AttentionDecomposition, AttentionKvStorage, AttentionSimdgroupCount, AttentionTileHeight, AttentionVariant,
+};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use omega::{DispatchType, MathMode};
 use proxima_numeric::{NumericFormat, NumericPolicy};
@@ -498,6 +500,7 @@ impl ServingSettings {
             ))]
             attention_variant: {
                 let variant = AttentionVariant {
+                    kv_storage: AttentionKvStorage::Bound,
                     simdgroup_count: self.attention_simdgroup_count,
                     tile_height: self.attention_tile_height.as_tile_height(),
                     decomposition: self.attention_decomposition,
@@ -1644,5 +1647,179 @@ ngram_mod_n_min = 48\n";
             "[prompt_cache]\nbyte_budget = \"large\"\n",
         );
         assert!(refused.is_err(), "a string byte budget is refused");
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "metal",
+    feature = "metal-attn-variants",
+    target_os = "macos"
+))]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+mod serving_attention_variant_tests {
+    use super::*;
+    use half::f16;
+    use proxima_tensor::cpu::QuantizedBlock;
+    use proxima_tensor::spec::{
+        AttentionScoreScale, KeySourceKind, LayerAttentionConfig, LayerFfnConfig, LayerKind,
+        LayerSchedule, RopePairing, RopeTableSel, SharedExpertWidth, ValueSourceKind,
+        scheduled_two_range_cached_forward_program_with_experts,
+    };
+    use proxima_tensor::{NodeId, Op, infer};
+
+    const VOCAB: u32 = 64;
+    const EMBEDDING: u32 = 256;
+    const FEED_FORWARD: u32 = 128;
+    const QUERY_HEADS: u32 = 32;
+    const KV_HEADS: u32 = 4;
+    const LAYERS: u32 = 2;
+    const HEAD_DIM: u32 = 128;
+    const ROWS: u64 = 64;
+    const CACHED_LEN: u64 = 64;
+
+    fn flint_shaped_layers() -> Vec<LayerSchedule> {
+        let attention = LayerAttentionConfig {
+            head_dim: HEAD_DIM,
+            kv_heads: KV_HEADS,
+            mask_window: None,
+            value_source_kind: ValueSourceKind::ProjectedV,
+            key_source_kind: KeySourceKind::ProjectedK,
+            rope_table: RopeTableSel {
+                cos_name: "rope_cos".into(),
+                sin_name: "rope_sin".into(),
+            },
+            rope_pairing: RopePairing::Interleaved,
+            score_scale: AttentionScoreScale::InverseSqrtQueryPreAttnScalar(HEAD_DIM),
+            value_norm: false,
+            qk_norm: true,
+            attention_sinks: true,
+            rope: true,
+        };
+        (0..LAYERS)
+            .map(|_| LayerSchedule {
+                kind: LayerKind::Attention,
+                attention: attention.clone(),
+                ffn: LayerFfnConfig::exclusive(),
+            })
+            .collect()
+    }
+
+    fn f16_bytes(values: &[f32]) -> Vec<u8> {
+        values
+            .iter()
+            .flat_map(|value| f16::from_f32(*value).to_bits().to_le_bytes())
+            .collect()
+    }
+
+    fn deterministic_values(seed: usize, count: usize) -> Vec<f32> {
+        (0..count)
+            .map(|index| (((index * 31 + seed * 17) % 97) as f32 - 48.0) / 96.0)
+            .collect()
+    }
+
+    // plans the flint-shaped prefill chunk over a binary16 KV cache, the storage flint binds
+    fn plan_with_f16_cache() -> omega::Plan {
+        let (program, logits, _roots, _moe_sites, _head_repeats) =
+            scheduled_two_range_cached_forward_program_with_experts(
+                VOCAB,
+                EMBEDDING,
+                FEED_FORWARD,
+                0,
+                QUERY_HEADS,
+                LAYERS,
+                0,
+                0,
+                LAYERS,
+                &flint_shaped_layers(),
+                None,
+                None,
+                false,
+                None,
+                false,
+                SharedExpertWidth::NONE,
+            )
+            .expect("the flint-shaped prefill program builds");
+        let symbols = vec![ROWS, CACHED_LEN];
+        let shapes = infer(&program, &symbols).expect("the program infers");
+        let mut named = Vec::new();
+        for (position, op) in program.iter().enumerate() {
+            let Op::Input { name, .. } = op else { continue };
+            let count: usize = shapes
+                .of(NodeId(position as u32))
+                .iter()
+                .map(|extent| *extent as usize)
+                .product();
+            let name = name.clone().expect("every block input is named");
+            let data = match name.as_str() {
+                "ids" => (0..count).map(|index| (index % VOCAB as usize) as f32).collect(),
+                "eps" => vec![1e-5f32; count],
+                "cached_len" => vec![CACHED_LEN as f32],
+                _ => deterministic_values(position, count),
+            };
+            named.push((name, data));
+        }
+        let packed: Vec<Option<Vec<u8>>> = named
+            .iter()
+            .map(|(name, values)| name.starts_with("kv_cache.").then(|| f16_bytes(values)))
+            .collect();
+        let blocks: Vec<(&str, QuantizedBlock<'_>)> = named
+            .iter()
+            .zip(&packed)
+            .map(|((name, values), bytes)| match bytes {
+                Some(bytes) => (
+                    name.as_str(),
+                    QuantizedBlock::Packed {
+                        codec: omega::Codec::Float16,
+                        bytes,
+                    },
+                ),
+                None => (name.as_str(), QuantizedBlock::Float32(values)),
+            })
+            .collect();
+        omega::plan_named(
+            &program,
+            &symbols,
+            &blocks,
+            &[logits],
+            NumericPolicy::llama_relaxed(),
+        )
+        .expect("metal plans the flint-shaped prefill over an f16 cache")
+    }
+
+    fn flash_where_admitted_variant() -> AttentionVariant {
+        ServingSettings::builder()
+            .attention_decomposition(AttentionDecomposition::FlashWhereAdmitted)
+            .build()
+            .as_serving_config(&[])
+            .attention_variant
+            .expect("flash where admitted lowers to an attention variant")
+    }
+
+    #[test]
+    fn flash_where_admitted_setting_plans_over_an_f16_cache_like_the_unset_setting() {
+        let variant = flash_where_admitted_variant();
+
+        let mut plan = plan_with_f16_cache();
+        plan.set_attention_variant(variant)
+            .expect("the serving setting selects a decomposition and leaves storage to the bound f16 cache");
+
+        let keys = plan.kernel_keys().expect("pipeline identities are collected");
+        assert!(
+            keys.iter().any(|key| key.contains("_flash")),
+            "flash where admitted runs flash on the admitted head_dim 128 attention: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn serving_setting_lowers_to_the_default_variant_on_every_axis_but_storage_and_decomposition() {
+        let lowered = flash_where_admitted_variant();
+
+        let expected = AttentionVariant {
+            kv_storage: AttentionKvStorage::Bound,
+            decomposition: AttentionDecomposition::FlashWhereAdmitted,
+            ..AttentionVariant::default()
+        };
+        assert_eq!(lowered, expected);
     }
 }
