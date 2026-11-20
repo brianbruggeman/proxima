@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use bytes::Bytes;
-use cel_interpreter::Program;
+use crate::scenarios::cel::Program;
 use proxima_http::templates::{TemplateContext, expand_strict};
 use proxima_primitives::pipe::SendPipe;
 use proxima_primitives::sync::task::JoinSet;

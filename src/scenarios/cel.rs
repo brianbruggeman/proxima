@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
-use cel_interpreter::{Context, Program, Value as CelValue};
+use ::cel::{Context, Value as CelValue};
+pub use ::cel::Program;
 use serde_json::Value as JsonValue;
 
 use crate::error::ProximaError;
@@ -174,6 +175,13 @@ mod tests {
         let bindings = bindings_with_snapshot(&snapshot);
         let outcome = evaluate("not valid &^&* cel", &bindings);
         assert!(matches!(outcome, Err(ProximaError::Config(_))));
+    }
+
+    #[test]
+    fn cel_compile_rejects_incomplete_expression() {
+        let outcome = compile_expression("ticket.pr !=");
+        let message = outcome.expect_err("incomplete expression must not compile").to_string();
+        assert!(message.contains("Syntax error"), "got: {message}");
     }
 
     #[test]

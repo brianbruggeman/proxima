@@ -150,7 +150,7 @@ blake3 = "1.8.5"
 bon = "3.9.1"
 bumpalo = { version = "3.16", default-features = false }
 bytes = { version = "1.7", default-features = false }
-cel-interpreter = "0.10.0"
+cel = "0.16.0"
 clap = "4.5"
 conflaguration = { version = "2.0.0" }
 core_affinity = "0.8.3"
@@ -322,7 +322,6 @@ base64 = { workspace = true }
 bumpalo = { workspace = true, features = ["collections"] }
 futures-timer = { workspace = true, optional = true }
 bytes.workspace = true
-cel-interpreter = { workspace = true }
 core_affinity = { workspace = true, optional = true }
 crossbeam-queue = { workspace = true }
 dashmap.workspace = true
@@ -399,6 +398,7 @@ proxima-vm = { version = "0.1.0", path = "tools/proxima-vm", default-features = 
 proxima-onnx = { workspace = true, features = ["std"], optional = true }
 proxima-tensor = { workspace = true, features = ["std"], optional = true }
 proxima-tokenizer = { version = "0.1.0", path = "proxima-tokenizer", features = ["gguf"] }
+cel = { workspace = true }
 
 [dependencies.tracing-subscriber]
 workspace = true
