@@ -764,3 +764,21 @@ fn a_flash_sliding_window_past_the_reach_limit_keeps_the_64_bit_kernel() {
     assert!(!flash_cache_key(&bound, &packed).contains("_c32"));
 }
 
+#[cfg(feature = "metal-grouped-gemm")]
+#[test]
+fn a_grouped_write_back_stores_four_features_as_one_vector_with_a_scalar_tail_fallback() {
+    let vector_store = concat!(
+        "*(device float4 *)(out + out_offset) = ",
+        "float4(out_vals[0], out_vals[1], out_vals[2], out_vals[3]);"
+    );
+    let scalar_tail = "out[out_offset + lane_elem * ((int)u.out_strides[2])] = out_vals[lane_elem];";
+    for rows in [2048, 2050] {
+        let (bound, packed) = flint_down(256, rows, 512);
+        let kernel = first_kernel(&emitted(&bound, &packed, true)).to_string();
+
+        assert!(kernel.contains(vector_store), "rows {rows}");
+        assert!(kernel.contains("o_valid == 4 && ((int)u.out_strides[2]) == 1"), "rows {rows}");
+        assert!(kernel.contains(scalar_tail), "rows {rows}");
+        assert!(!has_word(&kernel, "long"), "rows {rows}");
+    }
+}

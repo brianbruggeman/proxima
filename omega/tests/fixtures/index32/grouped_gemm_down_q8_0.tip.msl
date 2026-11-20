@@ -1258,20 +1258,32 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero_g10(
             threadgroup_barrier(mem_flags::mem_threadgroup);
             int coord[4];
             for (int d = 0; d < 4; ++d) { coord[d] = 0; }
-            for (int j = sgitg; j < (int)tile_count; j += 4) {
+            for (int j = 2 * sgitg + (grouped_lane >> 4); j < (int)tile_count; j += 8) {
                 int o_tok = (int)tile_list[j];
                 uint o_c_rest = (uint)(o_tok);
                 int o_c1 = (int)(o_c_rest % (uint)((int)u.output_extents[1]));
                 o_c_rest /= (uint)((int)u.output_extents[1]);
                 int o_c0 = (int)o_c_rest;
-                for (int o_col = (int)grouped_lane; o_col < 64; o_col += 32) {
-                    int o_feat = row_tile * 64 + o_col;
-                    if (o_feat < feature_extent) {
-                        coord[2] = o_feat;
-                        coord[0] = o_c0;
-                        coord[1] = o_c1;
-                        int out_offset = ((int)u.out_base) + o_feat * ((int)u.out_strides[2]) + o_c0 * ((int)u.out_strides[0]) + o_c1 * ((int)u.out_strides[1]);
-                        out[out_offset] = (float)out_tile[j * 64 + o_col];
+                int o_col = (int)(grouped_lane & 15u) * 4;
+                int o_feat = row_tile * 64 + o_col;
+                int o_valid = min((int)4, (int)feature_extent - o_feat);
+                if (o_valid > 0) {
+                    coord[0] = o_c0;
+                    coord[1] = o_c1;
+                    int out_offset = ((int)u.out_base) + o_feat * ((int)u.out_strides[2]) + o_c0 * ((int)u.out_strides[0]) + o_c1 * ((int)u.out_strides[1]);
+                    float out_vals[4];
+                    _Pragma("clang loop unroll(full)") for (short lane_elem = 0; lane_elem < 4; ++lane_elem) {
+                        if (lane_elem < o_valid) {
+                            coord[2] = o_feat + lane_elem;
+                            out_vals[lane_elem] = (float)out_tile[j * 64 + o_col + lane_elem];
+                        }
+                    }
+                    if (o_valid == 4 && ((int)u.out_strides[2]) == 1 && (((ulong)(out + out_offset)) % (4 * sizeof(float))) == 0) {
+                        *(device float4 *)(out + out_offset) = float4(out_vals[0], out_vals[1], out_vals[2], out_vals[3]);
+                    } else {
+                        for (short lane_elem = 0; lane_elem < o_valid; ++lane_elem) {
+                            out[out_offset + lane_elem * ((int)u.out_strides[2])] = out_vals[lane_elem];
+                        }
                     }
                 }
             }

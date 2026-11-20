@@ -1065,11 +1065,12 @@ fn push_grouped_multiply_accumulate(source: &mut String, stages: &GroupedStages)
 }
 
 /// The accumulators go to `out_tile` token-major (`out_tile[token][feature]`,
-/// feature contiguous), then each simdgroup walks the pending tokens four
-/// apart while its 32 lanes walk the tile's features, so a store instruction
-/// touches 32 consecutive features of one token. The fused epilogue runs per
-/// element through [`push_reduce_epilogue_write`], reading its operands at the
-/// element's real `(token, feature)` coordinate.
+/// feature contiguous), then each lane owns 4 consecutive features of one
+/// token (16 lanes per token, two tokens per simdgroup step). The fused
+/// epilogue runs per element through [`push_reduce_epilogue_value`], reading
+/// its operands at the element.s real `(token, feature)` coordinate, and the 4
+/// results leave as one vector store when the feature stride is 1, all 4 are
+/// in range and the address is aligned; otherwise as scalar stores.
 #[cfg(feature = "metal-grouped-gemm")]
 fn push_grouped_writeback(
     source: &mut String,
@@ -1100,46 +1101,84 @@ fn push_grouped_writeback(
     source.push_str(&format!(
         "            for (int d = 0; d < {rank}; ++d) {{ coord[d] = 0; }}\n"
     ));
+    let step = 2 * TILED_GEMM_NSG;
     source.push_str(&format!(
-        "            for (long j = sgitg; j < (long)tile_count; j += {TILED_GEMM_NSG}) {{\n"
+        "            for (long j = 2 * sgitg + (grouped_lane >> 4); \
+j < (long)tile_count; j += {step}) {{\n"
     ));
     source.push_str(&format!("                long o_tok = (long){token_list}[j];\n"));
     push_token_coordinates(source, geometry, "                ", "o_tok", "o_c");
     let output_token_offset =
         token_offset_expr(geometry, "o_c", |axis| format!("u.out_strides[{axis}]"));
+    source.push_str("                long o_col = (long)(grouped_lane & 15u) * 4;\n");
     source.push_str(&format!(
-        "                for (long o_col = (long)grouped_lane; o_col < {GROUPED_TILE_ROWS}; o_col += {SIMD_WIDTH}) {{\n"
+        "                long o_feat = row_tile * {GROUPED_TILE_ROWS} + o_col;\n"
     ));
-    source.push_str(&format!(
-        "                    long o_feat = row_tile * {GROUPED_TILE_ROWS} + o_col;\n"
-    ));
-    source.push_str("                    if (o_feat < feature_extent) {\n");
-    source.push_str(&format!(
-        "                        coord[{feature_axis}] = o_feat;\n"
-    ));
+    source.push_str("                long o_valid = min((long)4, (long)feature_extent - o_feat);\n");
+    source.push_str("                if (o_valid > 0) {\n");
     for (ordinal, axis) in geometry.token_axes.iter().enumerate() {
         source.push_str(&format!(
-            "                        coord[{axis}] = o_c{ordinal};\n"
+            "                    coord[{axis}] = o_c{ordinal};\n"
         ));
     }
     source.push_str(&format!(
-        "                        long out_offset = u.out_base + o_feat * u.out_strides[{feature_axis}] + {output_token_offset};\n"
+        "                    long out_offset = u.out_base \
++ o_feat * u.out_strides[{feature_axis}] + {output_token_offset};\n"
     ));
-    let accumulator_expr = format!("({element_type})out_tile[j * {GROUPED_TILE_ROWS} + o_col]");
-    push_reduce_epilogue_write(
+    source.push_str(&format!("                    {element_type} out_vals[4];\n"));
+    source.push_str("                    _Pragma(\"clang loop unroll(full)\") ");
+    source.push_str("for (short lane_elem = 0; lane_elem < 4; ++lane_elem) {\n");
+    source.push_str("                        if (lane_elem < o_valid) {\n");
+    source.push_str(&format!(
+        "                            coord[{feature_axis}] = o_feat + lane_elem;\n"
+    ));
+    let accumulator_expr =
+        format!("({element_type})out_tile[j * {GROUPED_TILE_ROWS} + o_col + lane_elem]");
+    let value = push_reduce_epilogue_value(
         source,
         epilogue_body,
         epilogue_operands,
         output_axes.len(),
         element_type,
-        "                        ",
+        "                            ",
         |dim| format!("coord[{}]", output_axes[dim]),
         &accumulator_expr,
-        "out_offset",
     );
+    source.push_str(&format!("                            out_vals[lane_elem] = {value};\n"));
+    source.push_str("                        }\n");
     source.push_str("                    }\n");
+    if element_type == out_scalar {
+        let vector = stages.out_tile.vector();
+        let aligned = format!("(((ulong)(out + out_offset)) % (4 * sizeof({out_scalar}))) == 0");
+        source.push_str(&format!(
+            "                    if (o_valid == 4 && u.out_strides[{feature_axis}] == 1 \
+&& {aligned}) {{\n"
+        ));
+        source.push_str(&format!(
+            "                        *(device {vector} *)(out + out_offset) = \
+{vector}(out_vals[0], out_vals[1], out_vals[2], out_vals[3]);\n"
+        ));
+        source.push_str("                    } else {\n");
+        push_grouped_scalar_store(source, feature_axis);
+        source.push_str("                    }\n");
+    } else {
+        push_grouped_scalar_store(source, feature_axis);
+    }
     source.push_str("                }\n");
     source.push_str("            }\n");
+}
+
+/// The tail and non-contiguous fallback of [`push_grouped_writeback`]: one
+/// scalar store per valid element at its feature-strided offset.
+#[cfg(feature = "metal-grouped-gemm")]
+fn push_grouped_scalar_store(source: &mut String, feature_axis: u16) {
+    source.push_str("                        ");
+    source.push_str("for (short lane_elem = 0; lane_elem < o_valid; ++lane_elem) {\n");
+    source.push_str(&format!(
+        "                            out[out_offset + lane_elem * u.out_strides[{feature_axis}]] \
+= out_vals[lane_elem];\n"
+    ));
+    source.push_str("                        }\n");
 }
 
 /// The token extent [`tiled_gemm_threadgroups`] is asked to launch for an

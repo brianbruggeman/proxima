@@ -541,11 +541,36 @@ pub(super) fn push_reduce_epilogue_write(
     accumulator_expr: &str,
     out_offset_expr: &str,
 ) {
+    let value = push_reduce_epilogue_value(
+        source,
+        epilogue_body,
+        epilogue_operands,
+        output_rank,
+        element_type,
+        indent,
+        coord,
+        accumulator_expr,
+    );
+    source.push_str(&format!("{indent}out[{out_offset_expr}] = {value};\n"));
+}
+
+/// The value half of [`push_reduce_epilogue_write`]: emits the operand reads
+/// and body steps and returns the expression holding the element to store, so
+/// a caller that packs several elements into one vector store runs the same
+/// epilogue arithmetic per element.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn push_reduce_epilogue_value(
+    source: &mut String,
+    epilogue_body: &ComposedBody,
+    epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
+    output_rank: usize,
+    element_type: &str,
+    indent: &str,
+    coord: impl Fn(usize) -> String,
+    accumulator_expr: &str,
+) -> String {
     if reduce_epilogue_is_identity(epilogue_body, epilogue_operands) {
-        source.push_str(&format!(
-            "{indent}out[{out_offset_expr}] = {accumulator_expr};\n"
-        ));
-        return;
+        return accumulator_expr.to_string();
     }
     let epilogue_operand_count = epilogue_operands.len();
     source.push_str(&format!(
@@ -563,8 +588,7 @@ pub(super) fn push_reduce_epilogue_write(
     source.push_str(&format!(
         "{indent}epi_scratch[{epilogue_operand_count}] = {accumulator_expr};\n"
     ));
-    let epi_value = push_epilogue_body_steps(source, epilogue_body, indent, element_type);
-    source.push_str(&format!("{indent}out[{out_offset_expr}] = {epi_value};\n"));
+    push_epilogue_body_steps(source, epilogue_body, indent, element_type)
 }
 
 /// The per-element epilogue-operand read loop [`push_reduce_epilogue_write`]
