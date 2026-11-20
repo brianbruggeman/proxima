@@ -5500,11 +5500,10 @@ not read this cache format; only the single-row decode kernel reads it from the 
                             active_program_hash,
                             active_logits_root,
                             vocab_size as u32,
-                            &symbols,
                             suppressed_ids,
                             on_prefill_cut,
                         );
-                        match runtime.programs.greedy_for(key, active_program)? {
+                        match runtime.programs.greedy_for(key, active_program, &symbols)? {
                             Some(program) => greedy_program = Some(program),
                             None => {
                                 greedy_declined = true;

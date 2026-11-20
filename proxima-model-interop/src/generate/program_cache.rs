@@ -33,8 +33,6 @@ pub(super) struct GreedyKey {
     program_hash: u64,
     logits_root: NodeId,
     vocab: u32,
-    /// the symbol values `shape::infer` checked the extended program against
-    symbols: Vec<u64>,
     suppressed_ids: Vec<u32>,
     /// whether the extended program is the prefill cut, which the loop alternates with decode
     from_prefill_cut: bool,
@@ -45,7 +43,6 @@ impl GreedyKey {
         program_hash: u64,
         logits_root: NodeId,
         vocab: u32,
-        symbols: &[u64],
         suppressed_ids: &[u32],
         from_prefill_cut: bool,
     ) -> Self {
@@ -53,7 +50,6 @@ impl GreedyKey {
             program_hash,
             logits_root,
             vocab,
-            symbols: symbols.to_vec(),
             suppressed_ids: suppressed_ids.to_vec(),
             from_prefill_cut,
         }
@@ -80,14 +76,13 @@ impl GreedyProgram {
     pub(super) fn key(&self) -> &GreedyKey {
         &self.key
     }
-
     /// `None` when the program does not accept the argmax ops.
-    fn build(key: GreedyKey, program: &[Op]) -> Result<Option<Self>, InteropError> {
+    fn build(key: GreedyKey, program: &[Op], symbols: &[u64]) -> Result<Option<Self>, InteropError> {
         let Some((extended, token, finite)) = with_greedy_argmax(
             program,
             key.logits_root,
             key.vocab,
-            &key.symbols,
+            symbols,
             &key.suppressed_ids,
         ) else {
             return Ok(None);
@@ -184,11 +179,14 @@ impl ProgramCache {
     }
 
     /// The greedy program for `key`: a held one when its key is equal, else built from
-    /// `program`. `None` when the program declines the argmax ops.
+    /// `program`. `None` when the program declines the argmax ops. `symbols` are the step's
+    /// bound values: a build checks the extended program against them, a hit does not read
+    /// them, because the appended ops are shaped by `[rows, vocab]` with `rows` symbolic.
     pub(super) fn greedy_for(
         &mut self,
         key: GreedyKey,
         program: &[Op],
+        symbols: &[u64],
     ) -> Result<Option<GreedyProgram>, InteropError> {
         if let Some(position) = self.greedy.iter().position(|held| held.key == key) {
             return Ok(Some(self.greedy.remove(position)));
@@ -197,7 +195,7 @@ impl ProgramCache {
         {
             self.greedy_builds += 1;
         }
-        GreedyProgram::build(key, program)
+        GreedyProgram::build(key, program, symbols)
     }
 
     /// Keeps `program` for the next request, replacing an entry with its key and evicting the

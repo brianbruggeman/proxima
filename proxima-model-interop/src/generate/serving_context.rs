@@ -946,9 +946,10 @@ mod tests {
         assert_eq!(cases_run, 4);
     }
 
-    /// a request whose key differs (the symbols of its last prefill batch) rebuilds and decodes as a fresh model.
+    /// a request at another cached length binds other symbol values to the same program, so it reuses the held greedy program
+    /// and decodes as a fresh model: the built program never read the values, only `shape::infer` checked them.
     #[test]
-    fn a_request_with_another_greedy_key_rebuilds_and_decodes_the_same_ids_as_a_fresh_model() {
+    fn a_request_at_another_cached_length_reuses_the_greedy_program_and_decodes_the_same_ids_as_a_fresh_model() {
         let fixture = dense_checkpoint();
         let storage = page_aligned(&fixture);
         // SAFETY: `storage` outlives every borrow below and holds `fixture.len()` initialized bytes.
@@ -963,39 +964,40 @@ mod tests {
 
         let shorter = greedy_ids(&model, &config, &PROMPT[..5]);
         let after_shorter = program_builds(&model).0;
-        assert_eq!(after_shorter, base + 1, "another prompt length (the symbols) must rebuild");
+        assert_eq!(base, 1, "the first request builds the greedy program once");
         cases_run += 1;
-        assert_eq!(shorter, fresh_ids(&config, &PROMPT[..5]), "the rebuilt program decoded other ids");
+        assert_eq!(after_shorter, base, "another prompt length (other symbol values) rebuilt the greedy program");
+        cases_run += 1;
+        assert_eq!(shorter, fresh_ids(&config, &PROMPT[..5]), "the program reused at another length decoded other ids");
         cases_run += 1;
 
         let again = greedy_ids(&model, &config, &PROMPT);
-        assert_eq!(program_builds(&model).0, after_shorter, "the first key is still held beside the second, so it must not rebuild");
+        assert_eq!(program_builds(&model).0, base, "returning to the first length rebuilt the greedy program");
         cases_run += 1;
-        assert_eq!(again, fresh_ids(&config, &PROMPT), "the program reused after a rebuild decoded other ids");
+        assert_eq!(again, fresh_ids(&config, &PROMPT), "the program reused at the first length decoded other ids");
         cases_run += 1;
-        assert_eq!(cases_run, 4);
+        assert_eq!(cases_run, 5);
     }
 
     /// the fixture vocabulary has no end-of-generation id, so `ignore_eos` cannot reach the loop here: every other input the
     /// constructors read is checked at the key, where one differing field must make the keys unequal.
     #[test]
     fn a_greedy_key_differs_in_each_input_the_constructor_reads() {
-        let base = GreedyKey::new(7, NodeId(3), 64, &[1, 8], &[], false);
+        let base = GreedyKey::new(7, NodeId(3), 64, &[], false);
         let others = [
-            ("program hash", GreedyKey::new(8, NodeId(3), 64, &[1, 8], &[], false)),
-            ("logits root", GreedyKey::new(7, NodeId(4), 64, &[1, 8], &[], false)),
-            ("vocab", GreedyKey::new(7, NodeId(3), 128, &[1, 8], &[], false)),
-            ("symbols", GreedyKey::new(7, NodeId(3), 64, &[9, 8], &[], false)),
-            ("suppressed ids", GreedyKey::new(7, NodeId(3), 64, &[1, 8], &[2], false)),
-            ("prefill cut", GreedyKey::new(7, NodeId(3), 64, &[1, 8], &[], true)),
+            ("program hash", GreedyKey::new(8, NodeId(3), 64, &[], false)),
+            ("logits root", GreedyKey::new(7, NodeId(4), 64, &[], false)),
+            ("vocab", GreedyKey::new(7, NodeId(3), 128, &[], false)),
+            ("suppressed ids", GreedyKey::new(7, NodeId(3), 64, &[2], false)),
+            ("prefill cut", GreedyKey::new(7, NodeId(3), 64, &[], true)),
         ];
         let mut cases_run = 0;
         for (input, other) in others {
             assert_ne!(base, other, "a key differing in the {input} compared equal");
             cases_run += 1;
         }
-        assert_eq!(base, GreedyKey::new(7, NodeId(3), 64, &[1, 8], &[], false));
-        assert_eq!(cases_run, 6);
+        assert_eq!(base, GreedyKey::new(7, NodeId(3), 64, &[], false));
+        assert_eq!(cases_run, 5);
     }
 
     /// the direct kv rows program is reused for the same source, and rebuilt for other roots or other cache formats.

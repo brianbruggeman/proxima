@@ -250,6 +250,34 @@ mod tests {
         assert!(masked.len() > direct.len());
     }
 
+    /// a resident repeat request binds `new_count` and the kv bound at values the first request never did; the extended
+    /// program is the same ops either way, so its hash is too and a cache can serve both.
+    #[test]
+    fn other_symbol_values_over_the_same_shape_build_the_same_program() {
+        let mut program = Vec::new();
+        let logits = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            alloc::vec![
+                proxima_tensor::Extent::Symbolic(0),
+                proxima_tensor::Extent::Static(VOCAB as u32)
+            ],
+            "logits",
+        );
+        let mut cases_run = 0;
+
+        let (first, first_token, first_finite) =
+            with_greedy_argmax(&program, logits, VOCAB as u32, &[1], &[]).expect("fits at one row");
+        for symbols in [[7u64], [4_070], [4_071]] {
+            let (other, token, finite) = with_greedy_argmax(&program, logits, VOCAB as u32, &symbols, &[])
+                .expect("fits at another symbol value");
+            assert_eq!(program_hash(&other), program_hash(&first), "symbols {symbols:?} built another program");
+            assert_eq!((token, finite), (first_token, first_finite), "symbols {symbols:?} moved the result nodes");
+            cases_run += 1;
+        }
+        assert_eq!(cases_run, 3);
+    }
+
     #[test]
     fn the_masked_device_path_still_returns_a_pick_instead_of_handing_the_row_to_the_host() {
         let mut row = softcapped_row();
