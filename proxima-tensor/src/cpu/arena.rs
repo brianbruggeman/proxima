@@ -1625,46 +1625,87 @@ pub(super) const ARENA_CACHE_CAPACITY: usize = 8;
 /// check back in afterward, so the cache is warm again for the next call —
 /// wasted work under first-use concurrency, never a data race or a wrong
 /// answer.
-pub(super) static ARENA_CACHE: Mutex<Vec<CachedArena>> = Mutex::new(Vec::new());
+#[cfg(not(test))]
+pub(super) static ARENA_CACHE: ArenaCache = ArenaCache::new();
 
-/// [`ARENA_CACHE`]'s own lock, recovered rather than propagated on
-/// poisoning (`instrument::worker_busy_snapshot`'s own established
-/// pattern in this crate): a panic while another caller held the lock
-/// leaves the `Vec<CachedArena>` in whatever state that caller's own
-/// operation reached, never a torn/half-written entry (every mutation
-/// under this lock is a whole-`Vec` `remove`/`push`), so recovering and
-/// continuing is safe and matches this crate's own "no unwrap/expect
-/// outside tests" discipline better than propagating a poison panic would.
-pub(super) fn lock_arena_cache() -> MutexGuard<'static, Vec<CachedArena>> {
-    ARENA_CACHE.lock().unwrap_or_else(PoisonError::into_inner)
+/// One plan cache: the warm-arena entries plus the engagement counters
+/// that describe THEM, so a reader of one cache's totals never sees
+/// another cache's traffic. Same "a gate that cannot report its N is not a
+/// gate" shape [`epilogue_fuse_totals`] serves for the fusion laws.
+///
+/// Production has one instance, [`ARENA_CACHE`], process-wide. Under
+/// `cfg(test)` each test thread gets its own instance (see
+/// [`with_arena_cache`]), so a test's entries and `(builds, hits)` are its
+/// own and the parallel test runner cannot move them.
+pub(super) struct ArenaCache {
+    entries: Mutex<Vec<CachedArena>>,
+    builds: EpilogueFuseAtomicU64,
+    hits: EpilogueFuseAtomicU64,
 }
 
-/// Engagement evidence for the cache above: how many [`checkout_arena`]
-/// calls built a fresh [`StaticArena`] (a miss) versus reused a checked-in
-/// one (a hit) — same "a gate that cannot report its N is not a gate" shape
-/// [`epilogue_fuse_totals`] already serves for the fusion laws. Read via
-/// [`arena_cache_totals`].
-pub(super) static ARENA_CACHE_BUILDS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
-pub(super) static ARENA_CACHE_HITS: EpilogueFuseAtomicU64 = EpilogueFuseAtomicU64::new(0);
+impl ArenaCache {
+    const fn new() -> Self {
+        Self {
+            entries: Mutex::new(Vec::new()),
+            builds: EpilogueFuseAtomicU64::new(0),
+            hits: EpilogueFuseAtomicU64::new(0),
+        }
+    }
 
-/// `(builds, hits)` since process start or the last [`arena_cache_reset`].
+    /// Recovered rather than propagated on poisoning
+    /// (`instrument::worker_busy_snapshot`'s own pattern in this crate): every
+    /// mutation under this lock is a whole-`Vec` `remove`/`push`, so a panic
+    /// while held never leaves a torn entry.
+    fn lock(&self) -> MutexGuard<'_, Vec<CachedArena>> {
+        self.entries.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn totals(&self) -> (u64, u64) {
+        (
+            self.builds.load(EpilogueFuseOrdering::Relaxed),
+            self.hits.load(EpilogueFuseOrdering::Relaxed),
+        )
+    }
+
+    fn reset(&self) {
+        self.lock().clear();
+        self.builds.store(0, EpilogueFuseOrdering::Relaxed);
+        self.hits.store(0, EpilogueFuseOrdering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static THREAD_ARENA_CACHE: ArenaCache = const { ArenaCache::new() };
+}
+
+/// Runs `body` against the cache this call belongs to: [`ARENA_CACHE`] in
+/// production, the calling thread's own cache under `cfg(test)`.
+fn with_arena_cache<Out>(body: impl FnOnce(&ArenaCache) -> Out) -> Out {
+    #[cfg(test)]
+    {
+        THREAD_ARENA_CACHE.with(body)
+    }
+    #[cfg(not(test))]
+    {
+        body(&ARENA_CACHE)
+    }
+}
+
+/// `(builds, hits)` of this call's cache since process start (this test
+/// thread's start under `cfg(test)`) or the last [`arena_cache_reset`].
 #[must_use]
 pub fn arena_cache_totals() -> (u64, u64) {
-    (
-        ARENA_CACHE_BUILDS.load(EpilogueFuseOrdering::Relaxed),
-        ARENA_CACHE_HITS.load(EpilogueFuseOrdering::Relaxed),
-    )
+    with_arena_cache(ArenaCache::totals)
 }
 
-/// Test/bench-only reset: empties [`ARENA_CACHE`] and zeroes
+/// Test/bench-only reset: empties the cache and zeroes
 /// [`arena_cache_totals`], so a re-prove command measuring "N arenas built
-/// over M calls" gets a clean process-relative count instead of whatever
-/// an earlier pass in the same process already warmed.
+/// over M calls" gets a clean count instead of whatever an earlier pass in
+/// the same process already warmed.
 #[doc(hidden)]
 pub fn arena_cache_reset() {
-    lock_arena_cache().clear();
-    ARENA_CACHE_BUILDS.store(0, EpilogueFuseOrdering::Relaxed);
-    ARENA_CACHE_HITS.store(0, EpilogueFuseOrdering::Relaxed);
+    with_arena_cache(ArenaCache::reset);
 }
 
 /// [`arena_packed_node_count`], summed over every [`StaticArena`] currently
@@ -1674,10 +1715,13 @@ pub fn arena_cache_reset() {
 #[doc(hidden)]
 #[must_use]
 pub fn arena_cache_packed_node_count() -> usize {
-    lock_arena_cache()
-        .iter()
-        .map(|entry| arena_packed_node_count(&entry.arena))
-        .sum()
+    with_arena_cache(|cache| {
+        cache
+            .lock()
+            .iter()
+            .map(|entry| arena_packed_node_count(&entry.arena))
+            .sum()
+    })
 }
 
 /// Checks a [`StaticArena`] matching `(program, symbols, outputs)` out of
@@ -1721,8 +1765,8 @@ pub(super) fn checkout_arena<'operand, Operand>(
 where
     Operand: Into<QuantizedBlock<'operand>> + Copy,
 {
-    {
-        let mut cache = lock_arena_cache();
+    let hit = with_arena_cache(|arena_cache| {
+        let mut cache = arena_cache.lock();
         #[cfg(feature = "instrument")]
         let compare_started = instrument::read_ticks();
         let found = cache.iter().position(|entry| {
@@ -1735,12 +1779,18 @@ where
         instrument::record_checkout_arena_key_compare_ticks(instrument::elapsed_ticks(
             compare_started,
         ));
-        if let Some(index) = found {
-            ARENA_CACHE_HITS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
-            return Ok(cache.remove(index));
-        }
+        let entry = found.map(|index| cache.remove(index));
+        let counter = if entry.is_some() {
+            &arena_cache.hits
+        } else {
+            &arena_cache.builds
+        };
+        counter.fetch_add(1, EpilogueFuseOrdering::Relaxed);
+        entry
+    });
+    if let Some(entry) = hit {
+        return Ok(entry);
     }
-    ARENA_CACHE_BUILDS.fetch_add(1, EpilogueFuseOrdering::Relaxed);
     let input_names = block_node_ids(program);
     let constant_inputs: Vec<(&str, &[f32])> = named
         .iter()
@@ -1777,11 +1827,13 @@ where
 /// dropping it and rebuilding fresh on the next miss is the safe,
 /// self-healing choice (see [`checkout_arena`]'s own callers).
 pub(super) fn checkin_arena(entry: CachedArena) {
-    let mut cache = lock_arena_cache();
-    if cache.len() >= ARENA_CACHE_CAPACITY {
-        cache.remove(0);
-    }
-    cache.push(entry);
+    with_arena_cache(|arena_cache| {
+        let mut cache = arena_cache.lock();
+        if cache.len() >= ARENA_CACHE_CAPACITY {
+            cache.remove(0);
+        }
+        cache.push(entry);
+    });
 }
 
 /// [`evaluate_named`]'s own body: binds `named` into a cached
