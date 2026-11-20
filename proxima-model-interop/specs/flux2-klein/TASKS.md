@@ -10,7 +10,7 @@ A missing fixture is a failure; `0 passed` is red.
   Validate: `ls ~/.cache/kvgate/proxnum588/ref` lists 8 files; `grep -c "mu=2.29" ~/.cache/kvgate/proxnum588/ref/ref.log` prints 1.
 - [x] **S1 Philox noise.** Philox4x32-10 + Box-Muller generator, config key `rng`; `std_default` and `cpu` refused with a named reason.
   Validate: `cargo val -p proxima-model-interop --test flux2_klein philox::` -> `3 passed` (AC2).
-- [ ] **S2 flow-match scheduler + Euler step.** Config `mu` coefficients, `steps`, `image_seq_len`; the Euler update is one Elementwise.
+- [x] **S2 flow-match scheduler + Euler step.** Config `mu` coefficients, `steps`, `image_seq_len`; the Euler update is one Elementwise.
   Validate: `cargo val -p proxima-model-interop --test flux2_klein scheduler::` -> `3 passed` (AC4).
 - [ ] **S3 generic lowerings, no model attached.** `layer_norm_no_affine` + `modulate`, `non_causal_attention`, `multi_axis_rope`, `tap_layers`, each with a non-FLUX unit test.
   Validate: `cargo val -p proxima-model-interop generic_lowering::` -> `4 passed` (4 of the 6 in AC10; the other 2 land in S7).
