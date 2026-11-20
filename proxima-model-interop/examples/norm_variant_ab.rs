@@ -76,6 +76,7 @@ fn parse_attention_variant(value: &str) -> Result<AttentionVariant, String> {
         }
         match (name, selected_value) {
             ("kv_storage", "f32") => selected.kv_storage = AttentionKvStorage::F32,
+            ("kv_storage", "f16") => selected.kv_storage = AttentionKvStorage::F16,
             ("kv_storage", "bf16") => selected.kv_storage = AttentionKvStorage::Bf16,
             ("kv_storage", "bf8") => selected.kv_storage = AttentionKvStorage::Bf8,
             ("mma_precision", "legacy") => selected.mma_precision = AttentionMmaPrecision::Legacy,
@@ -173,6 +174,7 @@ fn granite_dispatch_manifest(
     let mut packed_operands = PackedOperands::new();
     let codec = match variant.kv_storage {
         AttentionKvStorage::F32 => None,
+        AttentionKvStorage::F16 => Some(omega::Codec::Float16),
         AttentionKvStorage::Bf16 => Some(omega::Codec::BFloat16),
         AttentionKvStorage::Bf8 => Some(omega::Codec::BFloat8),
     };
@@ -225,6 +227,7 @@ fn describe_attention_variant(variant: AttentionVariant) -> Result<(), String> {
 fn attention_variant_labels(variant: AttentionVariant) -> [&'static str; 7] {
     let kv_storage = match variant.kv_storage {
         AttentionKvStorage::F32 => "f32",
+        AttentionKvStorage::F16 => "f16",
         AttentionKvStorage::Bf16 => "bf16",
         AttentionKvStorage::Bf8 => "bf8",
     };

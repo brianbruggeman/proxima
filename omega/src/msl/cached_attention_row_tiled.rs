@@ -1,3 +1,4 @@
+use super::cached_attention_flash_tiled::render_cached_attention_flash_tiled;
 use super::layout_render::{
     block_element_msl, hardware_type, layout_load_msl, readable_block_layout, readable_scalar_cache,
 };
@@ -189,6 +190,9 @@ pub(super) fn render_cached_attention_row_tiled_with(
             node: resolved.node,
             dtype: resolved.dtype,
         });
+    }
+    if row_schedule.is_flash() {
+        return render_cached_attention_flash_tiled(resolved, entry, cached_kv_codec);
     }
     let cached_lower = if *cached_lower_inclusive == i64::MIN {
         "-9223372036854775807L".to_string()

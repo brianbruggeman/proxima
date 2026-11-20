@@ -148,7 +148,7 @@ pub use metal::{
 };
 #[cfg(all(feature = "alloc", feature = "metal-attn-variants"))]
 pub use msl::{
-    AttentionDispatchManifest, AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision,
+    AttentionDecomposition, AttentionDispatchManifest, AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision,
     AttentionPrefetch, AttentionQueryParallelism, AttentionSimdTopology, AttentionSimdgroupCount,
     AttentionTileHeight, AttentionVariant, emit_with_attention_variant, inspect_attention_variant,
 };

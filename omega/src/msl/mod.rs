@@ -118,6 +118,8 @@ mod cached_attention_render;
 #[cfg(feature = "metal-attn-split-decode")]
 mod cached_attention_decode_split;
 #[cfg(feature = "metal-attn-split-rows")]
+mod cached_attention_flash_tiled;
+#[cfg(feature = "metal-attn-split-rows")]
 mod cached_attention_row_tiled;
 mod cached_softmax_weights_render;
 mod selection_render;
@@ -162,7 +164,7 @@ pub use signature_tokens_prelude::context_chunks_for;
 pub(crate) use signature_tokens_prelude::*;
 #[cfg(feature = "metal-attn-variants")]
 pub use signature_tokens_prelude::{
-    AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision, AttentionPrefetch,
+    AttentionDecomposition, AttentionKvReuse, AttentionKvStorage, AttentionMmaPrecision, AttentionPrefetch,
     AttentionQueryParallelism, AttentionSimdTopology, AttentionSimdgroupCount, AttentionTileHeight,
     AttentionVariant,
 };

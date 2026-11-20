@@ -244,6 +244,7 @@ pub(crate) fn validate_attention_variant_storage(
     };
     let selected_storage = match storage {
         AttentionKvStorage::F32 => "f32",
+        AttentionKvStorage::F16 => "f16",
         AttentionKvStorage::Bf16 => "bf16",
         AttentionKvStorage::Bf8 => "bf8",
     };

@@ -1,3 +1,7 @@
+#[cfg(feature = "metal-attn-split-rows")]
+use super::cached_attention_flash_tiled::{
+    FLASH_KEYS_PER_BLOCK, FLASH_SIMDGROUPS, flash_shape_admits,
+};
 use super::*;
 use proxima_numeric::block_layout::BlockLayout;
 use proxima_numeric::float_layout::FloatLayout;
@@ -1908,6 +1912,19 @@ pub struct AttentionVariant {
     pub simdgroup_count: AttentionSimdgroupCount,
     /// Whether the following cached K/V block is prefetched.
     pub prefetch: AttentionPrefetch,
+    /// How one threadgroup decomposes the key walk: the row-tiled form, or llama.cpp's flash form.
+    pub decomposition: AttentionDecomposition,
+}
+
+/// How a row-tiled attention threadgroup walks the keys. `Legacy` is the row-tiled body
+/// (`ROW_TILED_KERNEL`); `Flash` is the one-vector-block, four-simdgroup flash body of
+/// `cached_attention_flash_tiled.rs`, which keeps the same dispatch contract (buffers, `Uniforms`, grid)
+/// and so composes with every other axis the row-tiled form reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AttentionDecomposition {
+    Legacy,
+    #[cfg(feature = "metal-attn-variants")]
+    Flash,
 }
 
 #[cfg(feature = "metal-attn-variants")]
@@ -1922,6 +1939,7 @@ impl Default for AttentionVariant {
             simd_topology: AttentionSimdTopology::Legacy,
             simdgroup_count: AttentionSimdgroupCount::Legacy,
             prefetch: AttentionPrefetch::Off,
+            decomposition: AttentionDecomposition::Legacy,
         }
     }
 }
@@ -1931,6 +1949,7 @@ impl Default for AttentionVariant {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttentionKvStorage {
     F32,
+    F16,
     Bf16,
     Bf8,
 }
@@ -2098,6 +2117,7 @@ impl AttentionMmaSelection {
                     AttentionSimdgroupCount::Groups4 => AttentionSimdgroupCountSelection::Groups4,
                     AttentionSimdgroupCount::Groups8 => AttentionSimdgroupCountSelection::Groups8,
                 })
+                .with_decomposition(variant.decomposition)
             },
         ))
     }
@@ -2120,6 +2140,7 @@ pub(crate) struct AttentionRowSchedule {
     prefetch: AttentionPrefetchSelection,
     simd_topology: AttentionSimdTopologySelection,
     simdgroup_count: AttentionSimdgroupCountSelection,
+    decomposition: AttentionDecomposition,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2209,6 +2230,24 @@ impl AttentionRowSchedule {
             prefetch: AttentionPrefetchSelection::Off,
             simd_topology: AttentionSimdTopologySelection::Legacy,
             simdgroup_count: AttentionSimdgroupCountSelection::Legacy,
+            decomposition: AttentionDecomposition::Legacy,
+        }
+    }
+
+    #[cfg(feature = "metal-attn-variants")]
+    const fn with_decomposition(self, decomposition: AttentionDecomposition) -> Self {
+        Self {
+            decomposition,
+            ..self
+        }
+    }
+
+    #[cfg(feature = "metal-attn-split-rows")]
+    pub(crate) const fn is_flash(self) -> bool {
+        match self.decomposition {
+            AttentionDecomposition::Legacy => false,
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionDecomposition::Flash => true,
         }
     }
 
@@ -2226,17 +2265,14 @@ impl AttentionRowSchedule {
                 self.simdgroup_count,
                 AttentionSimdgroupCountSelection::Legacy
             )
+            && !self.is_flash()
     }
 
     #[cfg(feature = "metal-attn-variants")]
     pub(crate) const fn shared_k() -> Self {
         Self {
             kv_reuse: AttentionKvReuseMode::SharedK,
-            tile_height: AttentionTileHeightSelection::Legacy,
-            query_parallelism: AttentionQueryParallelismSelection::Legacy,
-            prefetch: AttentionPrefetchSelection::Off,
-            simd_topology: AttentionSimdTopologySelection::Legacy,
-            simdgroup_count: AttentionSimdgroupCountSelection::Legacy,
+            ..Self::legacy()
         }
     }
 
@@ -2244,11 +2280,7 @@ impl AttentionRowSchedule {
     pub(crate) const fn shared_kv() -> Self {
         Self {
             kv_reuse: AttentionKvReuseMode::SharedKv,
-            tile_height: AttentionTileHeightSelection::Legacy,
-            query_parallelism: AttentionQueryParallelismSelection::Legacy,
-            prefetch: AttentionPrefetchSelection::Off,
-            simd_topology: AttentionSimdTopologySelection::Legacy,
-            simdgroup_count: AttentionSimdgroupCountSelection::Legacy,
+            ..Self::legacy()
         }
     }
 
@@ -2330,6 +2362,9 @@ impl AttentionRowSchedule {
 
     #[cfg(feature = "metal-attn-split-rows")]
     fn resolved_simdgroup_count(self, head_dim: u64) -> u64 {
+        if self.is_flash() {
+            return FLASH_SIMDGROUPS;
+        }
         match self.simdgroup_count {
             AttentionSimdgroupCountSelection::Legacy => row_tiled_simdgroups(head_dim),
             #[cfg(feature = "metal-attn-variants")]
@@ -2393,8 +2428,13 @@ impl AttentionRowSchedule {
             #[cfg(feature = "metal-attn-variants")]
             AttentionSimdgroupCountSelection::Groups8 => "_simdgroups8",
         };
+        let decomposition = match self.decomposition {
+            AttentionDecomposition::Legacy => "",
+            #[cfg(feature = "metal-attn-variants")]
+            AttentionDecomposition::Flash => "_flash",
+        };
         alloc::format!(
-            "{reuse}{}{query}{prefetch}{topology}{simdgroup_count}",
+            "{reuse}{}{query}{prefetch}{topology}{simdgroup_count}{decomposition}",
             self.tile_height.cache_token()
         )
     }
@@ -3039,7 +3079,12 @@ fn row_tiled_form(
     let simdgroups = schedule.resolved_simdgroup_count(*head_dim);
     let tile_height_selection = schedule.tile_height();
     let (unit_rows, _) = tile_unit(*query_groups);
-    let selected_rows = tile_height_selection.explicit_rows();
+    let flash = schedule.is_flash();
+    let selected_rows = if flash {
+        Some(unit_rows)
+    } else {
+        tile_height_selection.explicit_rows()
+    };
     let requested_rows = selected_rows.unwrap_or(unit_rows);
     let units = requested_rows.checked_div(unit_rows).unwrap_or(0);
     let requested_fits = selected_rows.is_none()
@@ -3062,7 +3107,9 @@ fn row_tiled_form(
             <= crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
         && row_tile_bytes(unit_rows, *query_groups, row_tiled_block(*head_dim))
             <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES;
-    if !admitted || !shape_fits {
+    let flash_fits = !flash
+        || (flash_shape_admits(kind) && row_tiled_block(*head_dim) == FLASH_KEYS_PER_BLOCK);
+    if !admitted || !shape_fits || !flash_fits {
         return None;
     }
     let capacity = cached_key_rows + new_key_rows;
@@ -3078,7 +3125,11 @@ fn row_tiled_form(
     });
     let tiles = query_rows.div_ceil(rows_per_threadgroup);
     Some(CachedAttentionForm::TwoRangeRowTiled {
-        splits: row_tiled_splits(capacity, *kv_heads, tiles, simdgroups),
+        splits: if flash {
+            1
+        } else {
+            row_tiled_splits(capacity, *kv_heads, tiles, simdgroups)
+        },
         rows_per_threadgroup,
         simdgroups,
     })

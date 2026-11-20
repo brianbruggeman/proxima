@@ -59,6 +59,7 @@ fn card_12_variant_config_defaults_preserve_the_legacy_axes() {
             simd_topology: AttentionSimdTopology::Legacy,
             simdgroup_count: AttentionSimdgroupCount::Legacy,
             prefetch: AttentionPrefetch::Off,
+            decomposition: AttentionDecomposition::Legacy,
         }
     );
 }
@@ -75,9 +76,11 @@ fn card_12_variant_config_stores_each_axis_independently() {
         simd_topology: AttentionSimdTopology::PerHead,
         simdgroup_count: AttentionSimdgroupCount::Legacy,
         prefetch: AttentionPrefetch::NextBlock,
+        decomposition: AttentionDecomposition::Flash,
     };
     let root_export: crate::AttentionVariant = selected;
     assert_eq!(root_export, selected);
+    assert_eq!(selected.decomposition, AttentionDecomposition::Flash);
     assert_eq!(selected.kv_storage, AttentionKvStorage::Bf8);
     assert_eq!(selected.mma_precision, AttentionMmaPrecision::F16);
     assert_eq!(selected.kv_reuse, AttentionKvReuse::SharedK);
@@ -2346,6 +2349,7 @@ fn card_20_dispatch_matrix_exposes_legacy_and_eight_one_factor_flips() {
         let mut packed_operands = PackedOperands::new();
         let codec = match selected.kv_storage {
             AttentionKvStorage::F32 => None,
+            AttentionKvStorage::F16 => Some(Codec::Float16),
             AttentionKvStorage::Bf16 => Some(Codec::BFloat16),
             AttentionKvStorage::Bf8 => Some(Codec::BFloat8),
         };
@@ -2414,6 +2418,7 @@ fn card_21_cross_axis_admits_the_selected_granite_composition() {
         simd_topology: AttentionSimdTopology::PerHead,
         simdgroup_count: AttentionSimdgroupCount::Legacy,
         prefetch: AttentionPrefetch::Off,
+        decomposition: AttentionDecomposition::Legacy,
     };
     let manifest = inspect_attention_variant(
         &operation,
@@ -2465,6 +2470,7 @@ fn card_21_cross_axis_reports_exact_prefetch_budget_decline() {
             simd_topology: AttentionSimdTopology::PerHead,
             simdgroup_count: AttentionSimdgroupCount::Legacy,
             prefetch: AttentionPrefetch::NextBlock,
+            decomposition: AttentionDecomposition::Legacy,
         },
     )
     .expect_err("F32 shared V plus next-block prefetch exceeds 32 KiB");
@@ -2766,4 +2772,92 @@ fn two_tile_classes_get_different_keys_and_different_source() {
     let tall_source = emit(&tall, &packed, policy).expect("tall emits").source;
     let short_source = emit(&short, &packed, policy).expect("short emits").source;
     assert_ne!(tall_source, short_source);
+}
+
+#[cfg(feature = "metal-attn-variants")]
+fn flash_full_layer_op(head_dim: u64) -> BoundOp {
+    let mut op = attention_rows_op(10, 8, head_dim, 2048, 512, i64::MIN);
+    let BoundOpKind::CachedAttention {
+        attention_sink,
+        new_upper_inclusive,
+        ..
+    } = &mut op.kind
+    else {
+        unreachable!("attention_rows_op always builds a CachedAttention kind");
+    };
+    *attention_sink = true;
+    *new_upper_inclusive = 0;
+    op
+}
+
+#[cfg(feature = "metal-attn-variants")]
+fn flash_f16_variant(decomposition: AttentionDecomposition) -> AttentionVariant {
+    AttentionVariant {
+        kv_storage: AttentionKvStorage::F16,
+        decomposition,
+        ..AttentionVariant::default()
+    }
+}
+
+#[cfg(feature = "metal-attn-variants")]
+fn f16_cache_operands(op: &BoundOp) -> PackedOperands {
+    let mut packed = PackedOperands::new();
+    for index in [2, 3, 6] {
+        packed.insert(op.operands()[index].0, Codec::Float16);
+    }
+    packed
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn flash_decomposition_emits_the_flash_kernel_for_the_full_layer_shape() {
+    let op = flash_full_layer_op(128);
+    let packed = f16_cache_operands(&op);
+
+    let flash = emit_variant_wide(
+        &op,
+        &packed,
+        NumericPolicy::llama_relaxed(),
+        flash_f16_variant(AttentionDecomposition::Flash),
+    )
+    .expect("the flash kernel emits for a sinked full-attention 8-group head-128 op");
+
+    assert!(flash.source.contains("flash_block<half>(in2, in3, in6,"));
+    assert!(flash.source.contains("flash_block<float>(in4, in5, in7,"));
+    assert!(flash.source.contains("constant constexpr int nsg = 4, block = 64, nq = 2, no = 4,"));
+    assert!(!flash.source.contains('@'), "every flash placeholder is substituted");
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn legacy_decomposition_emits_no_flash_body_for_the_same_op() {
+    let op = flash_full_layer_op(128);
+    let packed = f16_cache_operands(&op);
+
+    let legacy = emit_variant_wide(
+        &op,
+        &packed,
+        NumericPolicy::llama_relaxed(),
+        flash_f16_variant(AttentionDecomposition::Legacy),
+    )
+    .expect("the legacy row-tiled kernel emits for the same op");
+
+    assert!(!legacy.source.contains("flash_block"));
+    assert!(legacy.source.contains("constexpr long tile_rows = 2; constexpr long simdgroups = 2;"));
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn flash_decomposition_refuses_a_head_it_has_no_lane_map_for() {
+    let op = flash_full_layer_op(256);
+    let packed = f16_cache_operands(&op);
+
+    let outcome = emit_variant_wide(
+        &op,
+        &packed,
+        NumericPolicy::llama_relaxed(),
+        flash_f16_variant(AttentionDecomposition::Flash),
+    );
+
+    assert!(outcome.is_err(), "flash must not silently fall back to another body");
 }
