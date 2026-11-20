@@ -2903,7 +2903,7 @@ fn flash_sized_keys_equal_the_constants_they_replaced() {
 #[cfg(feature = "metal-attn-variants")]
 #[test]
 fn flash_admission_table_names_the_condition_each_shape_fails() {
-    let cases: [(&str, BoundOp, Result<(), FlashRefusal>); 10] = [
+    let cases: [(&str, BoundOp, Result<(), FlashRefusal>); 11] = [
         ("harness_flint_d128_g8_q512_c2048", flash_op(8, 128, 2048, 512, i64::MIN), Ok(())),
         ("groups_16", flash_op(16, 128, 2048, 512, i64::MIN), Err(FlashRefusal::QueryGroups)),
         ("groups_2", flash_op(2, 128, 2048, 512, i64::MIN), Err(FlashRefusal::QueryGroups)),
@@ -2915,11 +2915,8 @@ fn flash_admission_table_names_the_condition_each_shape_fails() {
             flash_op(8, 128, 2003, 512, i64::MIN),
             Err(FlashRefusal::CachedRowsNotWholeTiles),
         ),
-        (
-            "sliding_window",
-            flash_op(8, 128, 2048, 512, SLIDING_LOWER),
-            Err(FlashRefusal::SlidingWindow),
-        ),
+        ("sliding_window_is_admitted", flash_op(8, 128, 2048, 512, SLIDING_LOWER), Ok(())),
+        ("flint_window_513_tail_rows", flash_op(8, 128, 3584, 487, -512), Ok(())),
         ("d256_waits_on_slice_6", flash_op(8, 256, 2048, 512, i64::MIN), Err(FlashRefusal::HeadDim)),
         ("d512_waits_on_slice_6", flash_op(8, 512, 2048, 512, i64::MIN), Err(FlashRefusal::HeadDim)),
     ];
@@ -2972,6 +2969,26 @@ fn flash_cache_key_is_shared_by_every_admitted_prompt_length_of_one_shape() {
     let legacy = flash_schedule(AttentionDecomposition::Legacy)
         .cache_token_for(&flash_op(8, 128, 2048, 512, i64::MIN), policy);
     assert_ne!(legacy, base, "flash and legacy never share a key");
+}
+
+/// The window start of a flash row sits on the key-block grid of Legacy's row tile, so lengths
+/// whose Legacy tile differs must not share a flash kernel, while lengths with one tile do.
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn flash_cache_key_follows_the_row_tile_alignment_legacy_resolves() {
+    let flash = flash_schedule(AttentionDecomposition::Flash);
+    let policy = NumericPolicy::llama_relaxed();
+    let op = |rows: u64| flash_op(8, 128, 2048, rows, SLIDING_LOWER);
+    let token = |rows: u64| flash.cache_token_for(&op(rows), policy);
+    let alignment = |rows: u64| flash_row_alignment(&op(rows).kind);
+
+    assert_eq!(alignment(512), 2, "a full chunk resolves a two-row tile");
+    assert_eq!(alignment(485), 2);
+    assert_eq!(alignment(2), 1, "a two-row verify keeps one unit per tile");
+    assert_eq!(token(512), token(485), "one alignment, one key");
+    assert_ne!(token(512), token(2), "two alignments, two keys");
+    assert!(token(512).contains("_a2"), "{}", token(512));
+    assert!(token(2).contains("_a1"), "{}", token(2));
 }
 
 #[cfg(feature = "metal-attn-variants")]

@@ -21,8 +21,8 @@ const FLASH_HEAD_DIM: u64 = 128;
 /// The query heads per kv head the flash body's fragment map assumes.
 const FLASH_QUERY_GROUPS: u64 = 8;
 
-/// Admits `kind` for the flash body, or names the one condition it fails: a sinked,
-/// full-attention, causal op of eight query heads per kv head whose cached extent is a whole
+/// Admits `kind` for the flash body, or names the one condition it fails: a sinked, causal op,
+/// full or sliding-window over the cached keys, of eight query heads per kv head whose cached extent is a whole
 /// number of 8-key tiles. Conditions are checked in the order of [`FlashRefusal`]; the first
 /// failure is the reason. Head dims 256 and 512 are `HeadDim` refusals until the template
 /// generalises past 128.
@@ -41,7 +41,6 @@ pub(super) fn flash_admission(kind: &BoundOpKind) -> Result<(), FlashRefusal> {
         new_key_rows,
         query_groups,
         head_dim,
-        cached_lower_inclusive,
         new_upper_inclusive,
         attention_sink,
         ..
@@ -53,7 +52,6 @@ pub(super) fn flash_admission(kind: &BoundOpKind) -> Result<(), FlashRefusal> {
         (*attention_sink, FlashRefusal::NoAttentionSink),
         (*query_groups == FLASH_QUERY_GROUPS, FlashRefusal::QueryGroups),
         (*head_dim == FLASH_HEAD_DIM, FlashRefusal::HeadDim),
-        (*cached_lower_inclusive == i64::MIN, FlashRefusal::SlidingWindow),
         (*new_upper_inclusive == 0, FlashRefusal::NewKeysNotCausal),
         (query_rows == new_key_rows, FlashRefusal::QueryRowsDifferFromNewKeys),
         (
@@ -90,6 +88,7 @@ pub(super) fn render_cached_attention_flash_tiled(
         query_groups,
         head_dim,
         scale,
+        cached_lower_inclusive,
         ..
     } = &resolved.kind
     else {
@@ -120,6 +119,11 @@ pub(super) fn render_cached_attention_flash_tiled(
             node: resolved.node,
             reason: "flash reads a narrow scalar cache through the matrix hardware type of its layout",
         })?;
+    let cached_lower = if *cached_lower_inclusive == i64::MIN {
+        "-9223372036854775807L".to_string()
+    } else {
+        format!("{cached_lower_inclusive}L")
+    };
     let half_dim = head_dim / 2;
     let simdgroups = FLASH_SIMDGROUPS;
     let block = FLASH_KEYS_PER_BLOCK;
@@ -137,6 +141,8 @@ pub(super) fn render_cached_attention_flash_tiled(
         ("@ITEMS@", (block / 32).to_string()),
         ("@THREADS@", (simdgroups * 32).to_string()),
         ("@SCALE@", msl_literal(*scale)),
+        ("@CACHED_LOWER@", cached_lower),
+        ("@ALIGN_ROWS@", flash_row_alignment(&resolved.kind).to_string()),
         ("@ELEM_FRAG@", format!("simdgroup_{element}8x8")),
         ("@ACC_FRAG@", format!("simdgroup_{accumulator}8x8")),
         ("@ELEM@", element.to_string()),
@@ -179,7 +185,7 @@ inline void zero_rows(thread @ACC_FRAG@& frag, int key_start, int valid_end, ush
 }
 
 inline void flash_softmax(threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq], int key0, int columns, int valid_end,
-                          bool cached_phase, int row, ushort lane, ushort sg) {
+                          bool cached_phase, int row, long lower, ushort lane, ushort sg) {
     FOR_UNROLL for (int jj = 0; jj < nq; ++jj) {                      // softmax: this simdgroup owns vectors jj*nsg + sg
         int v = jj * nsg + sg;
         @ACC@ local[@ITEMS@]; @ACC@ bm = -INFINITY;
@@ -187,7 +193,8 @@ inline void flash_softmax(threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @
             int column = (int)lane + item * 32; @ACC@ raw = -INFINITY;
             if (item * 32 < columns) {
                 int key = key0 + column;
-                bool visible = cached_phase ? (key < valid_end) : (column < columns && key <= row);
+                bool visible = cached_phase ? (key < valid_end && (long)(key - valid_end - row) >= lower)
+                                            : (column < columns && key <= row && (long)(key - row) >= lower);
                 if (visible) { raw = ss[v * block + column] * scale; }
             }
             local[item] = raw; bm = max(bm, raw);
@@ -208,7 +215,7 @@ inline void flash_softmax(threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @
 }
 
 template <typename T>
-inline void flash_block(device const T* ke, device const T* ko, device const T* vv, int key0, int columns, int valid_end, bool cached_phase, int row,
+inline void flash_block(device const T* ke, device const T* ko, device const T* vv, int key0, int columns, int valid_end, bool cached_phase, int row, long lower,
                         threadgroup const @ACC@* sq, threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq],
                         int kv_head, ushort lane, ushort sg) {
     const int kstride = kv_heads * half_dim, vstride = kv_heads * head_dim;
@@ -235,7 +242,7 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
         }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    flash_softmax(ss, so, M, S, key0, columns, valid_end, cached_phase, row, lane, sg);
+    flash_softmax(ss, so, M, S, key0, columns, valid_end, cached_phase, row, lower, lane, sg);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     @ACC_FRAG@ lo[no];                                       // PV: this simdgroup owns dimension blocks sg + nsg * i
     FOR_UNROLL for (int i = 0; i < no; ++i) { simdgroup_load(lo[i], so + 8 * (sg + nsg * i), (ulong)head_dim); }
@@ -254,7 +261,7 @@ inline void flash_block(device const T* ke, device const T* ko, device const T* 
     threadgroup_barrier(mem_flags::mem_threadgroup);
 }
 
-inline void flash_tail(device const @ACC@* ke, device const @ACC@* ko, device const @ACC@* vv, int key0, int columns, int row,
+inline void flash_tail(device const @ACC@* ke, device const @ACC@* ko, device const @ACC@* vv, int key0, int columns, int row, long lower,
                        threadgroup const @ACC@* sq, threadgroup @ACC@* ss, threadgroup @ACC@* so, thread @ACC@ (&M)[nq], thread @ACC@ (&S)[nq],
                        int kv_head, ushort lane, ushort sg) {
     const int kstride = kv_heads * half_dim, vstride = kv_heads * head_dim;
@@ -280,7 +287,7 @@ inline void flash_tail(device const @ACC@* ke, device const @ACC@* ko, device co
         if (tx == 0 && pair < pairs) { ss[v * block + column] = partial; }
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    flash_softmax(ss, so, M, S, key0, columns, key0 + columns, false, row, lane, sg);
+    flash_softmax(ss, so, M, S, key0, columns, key0 + columns, false, row, lower, lane, sg);
     threadgroup_barrier(mem_flags::mem_threadgroup);
     for (int element = (int)sg * 32 + (int)lane; element < 8 * head_dim; element += @THREADS@) {
         int v = element / head_dim, dim = element % head_dim;
@@ -317,14 +324,19 @@ kernel void @ENTRY@(device const @ACC@* in0 [[buffer(0)]], device const @ACC@* i
         M[jj] = sink; S[jj] = (sink == -INFINITY) ? 0.0f : 1.0f;      // sink = softmax initial state, as SINK_INIT
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
-    for (int key0 = 0; key0 < live; key0 += block) {
-        flash_block<@ELEM@>(in2, in3, in6, key0, min(block, live - key0), live, true, row, sq, ss, so, M, S, kv_head, lane, sg);
+    constexpr long cached_lower = @CACHED_LOWER@;                     // in the kernel body so the index narrowing rewrites it with the arithmetic below
+    constexpr long tile_rows = @ALIGN_ROWS@L;                          // legacy's rows per threadgroup; flash launches one row but keeps its block grid
+    long row0 = (long)row - (long)row % tile_rows;
+    long first_key = max(0L, (long)live + cached_lower + row0) & ~7L;   // legacy block boundaries start at the window, not at 0
+    for (long key0 = first_key; key0 < live; key0 += block) {
+        flash_block<@ELEM@>(in2, in3, in6, (int)key0, min(block, live - (int)key0), live, true, row, cached_lower, sq, ss, so, M, S, kv_head, lane, sg);
     }
     int whole = rows & ~7, mma_end = min(row + 1, whole);
-    for (int key0 = 0; key0 < mma_end; key0 += block) {
-        flash_block<@ACC@>(in4, in5, in7, key0, min(block, mma_end - key0), mma_end, false, row, sq, ss, so, M, S, kv_head, lane, sg);
+    long new_start = max(0L, row0 + cached_lower) & ~7L;
+    for (long key0 = new_start; key0 < mma_end; key0 += block) {
+        flash_block<@ACC@>(in4, in5, in7, (int)key0, min(block, mma_end - (int)key0), mma_end, false, row, cached_lower, sq, ss, so, M, S, kv_head, lane, sg);
     }
-    if (row >= whole) { flash_tail(in4, in5, in7, whole, rows - whole, row, sq, ss, so, M, S, kv_head, lane, sg); }
+    if (row >= whole) { flash_tail(in4, in5, in7, whole, rows - whole, row, cached_lower, sq, ss, so, M, S, kv_head, lane, sg); }
     FOR_UNROLL for (int jj = 0; jj < nq; ++jj) {
         int v = jj * nsg + sg;
         @ACC@ inverse = S[jj] == 0.0f ? 0.0f : 1.0f / S[jj];

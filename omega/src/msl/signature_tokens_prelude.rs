@@ -398,7 +398,12 @@ pub(super) fn entry_name_with_schedule(
                 signed_name_part(*new_upper_inclusive)
             };
             #[cfg(feature = "metal-attn-split-rows")]
-            let row_tiled_name = row_tiled_entry_name(&resolved.kind, form, &upper_token);
+            let row_tiled_name = row_tiled_entry_name(
+                &resolved.kind,
+                form,
+                &upper_token,
+                schedule.is_flash(),
+            );
             #[cfg(not(feature = "metal-attn-split-rows"))]
             let row_tiled_name: Option<String> = None;
             #[cfg(feature = "metal-attn-split-decode")]
@@ -2484,7 +2489,14 @@ impl AttentionRowSchedule {
                 _ => None,
             };
             match (class(legacy), class(active)) {
-                (Some(from), Some(to)) if from != to => alloc::format!("_rt{}_{}", to.0, to.1),
+                (Some(from), Some(to)) if from != to => {
+                    let alignment = if self.is_flash() {
+                        alloc::format!("_a{}", from.0)
+                    } else {
+                        String::new()
+                    };
+                    alloc::format!("_rt{}_{}{alignment}", to.0, to.1)
+                }
                 (Some(_), None) => {
                     alloc::format!("_nrt_q{query_rows}_c{cached_key_rows}_n{new_key_rows}")
                 }
@@ -2643,6 +2655,7 @@ fn row_tiled_entry_name(
     kind: &BoundOpKind,
     form: Option<CachedAttentionForm>,
     upper_token: &str,
+    flash: bool,
 ) -> Option<String> {
     let BoundOpKind::CachedAttention {
         kv_heads,
@@ -2656,6 +2669,11 @@ fn row_tiled_entry_name(
     else {
         return None;
     };
+    let alignment = if flash {
+        format!("_a{}", flash_row_alignment(kind))
+    } else {
+        String::new()
+    };
     let Some(CachedAttentionForm::TwoRangeRowTiled {
         rows_per_threadgroup,
         simdgroups,
@@ -2665,7 +2683,7 @@ fn row_tiled_entry_name(
         return None;
     };
     Some(format!(
-        "omega_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}_n{simdgroups}_b{}_rt{}",
+        "omega_cached_attention_h{kv_heads}_g{query_groups}_d{head_dim}_s{:08x}_l{}_u{upper_token}_r{rows_per_threadgroup}{alignment}_n{simdgroups}_b{}_rt{}",
         scale.to_bits(),
         signed_name_part(*cached_lower_inclusive),
         row_tiled_block(*head_dim),
@@ -3279,6 +3297,36 @@ pub(crate) fn rows_per_threadgroup(
         head_dim,
         context_capacity,
         row_tiled_simdgroups(head_dim),
+    )
+}
+
+/// The row tile the LEGACY schedule resolves for `kind`: the key-block grid a flash threadgroup
+/// aligns to so its window starts (`row0 = row - row % tile`) land on the blocks Legacy's tile
+/// walks. Flash still launches one row per threadgroup; this value only places block boundaries.
+/// Not a power of two in general, so the alignment is a remainder, not a mask. `1` for a
+/// non-attention op.
+#[cfg(feature = "metal-attn-split-rows")]
+#[must_use]
+pub(crate) fn flash_row_alignment(kind: &BoundOpKind) -> u64 {
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        cached_key_rows,
+        new_key_rows,
+        kv_heads,
+        query_groups,
+        head_dim,
+        ..
+    } = kind
+    else {
+        return 1;
+    };
+    rows_per_threadgroup_for(
+        *query_rows,
+        *kv_heads,
+        *query_groups,
+        *head_dim,
+        cached_key_rows + new_key_rows,
+        row_tiled_simdgroups(*head_dim),
     )
 }
 

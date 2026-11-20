@@ -16,8 +16,6 @@ pub(super) enum FlashRefusal {
     QueryGroups,
     /// The head width is not the one the body's lane map assumes.
     HeadDim,
-    /// The op has a sliding window over the cached keys.
-    SlidingWindow,
     /// The new keys are not causally masked to their own row.
     NewKeysNotCausal,
     /// The query rows and the new key rows differ.
@@ -37,7 +35,6 @@ impl FlashRefusal {
             Self::NoAttentionSink => "flash needs an attention sink",
             Self::QueryGroups => "flash needs 8 query groups per kv head",
             Self::HeadDim => "flash needs head dim 128 (256 and 512 wait on the generalised template)",
-            Self::SlidingWindow => "flash needs full attention over the cached keys, not a sliding window",
             Self::NewKeysNotCausal => "flash needs causally masked new keys",
             Self::QueryRowsDifferFromNewKeys => "flash needs as many query rows as new key rows",
             Self::CachedRowsNotWholeTiles => "flash needs a cached key extent that is a whole number of 8-key tiles",
