@@ -1,6 +1,6 @@
 # agentic-config-payloads -- every step's payload written in the config's own format
 
-status: draft, round 2 (round 1 REFUSE 2 gates, 5 reasons; each amended)
+status: draft, round 3 (round 1 REFUSE 2 gates, 5 reasons; round 2 REFUSE 1; each amended)
 owner: brian
 created: 2026-11-20
 
@@ -88,17 +88,24 @@ P5 is the line `tracker.sh` answers a `tools/call` with after `initialize` and `
 synth payloads (lines 7, 8) as structures. T1 and T2 are the triage fixture's `review` and `summary`
 bodies (lines 27, 34) after expansion for PROXIMA-24 and PROXIMA-25.
 
-C8, the lint command for AC8:
+C8, the lint run for AC8 (`<E>` is `<tickets>/PROXIMA-49/evidence`); it prints three lines, the
+clippy exit status, the count of diagnostic lines, and the count of `Finished` lines:
 
 ```
-cargo clippy -p proxima-lib -p proxima-http -p proxima-cli --all-targets --features tokio -- -D warnings 2>&1 | grep -cE '^(error|warning)'
+cargo clippy -p proxima-lib -p proxima-http -p proxima-cli --all-targets --features tokio -- -D warnings > "<E>/clippy.log" 2>&1; echo "exit=$?"; grep -cE '^(error|warning)' "<E>/clippy.log"; grep -cE '^ *Finished ' "<E>/clippy.log"
+```
+
+C8x, the control that C8's counter counts a diagnostic:
+
+```
+printf 'warning: unused variable: `contents`\nerror: could not compile `proxima-lib`\n' | grep -cE '^(error|warning)'
 ```
 
 ## architecture
 
-Reuse map: the strict and non-strict template engine (`proxima-http/src/templates.rs:27-35`, the
+Reuse map: the strict and non-strict template engine (`proxima-http/src/templates.rs:27-37`, the
 body lookup `lookup_body_path`, `:132-142`), the stage request builder (`executor.rs:689-708`),
-init frames (`process_rpc.rs:51-59,202-206`), synth's body resolution (`synth.rs:314-332`) and
+init frames (`process_rpc.rs:51-59`, `run_init` `:202-219`), synth's body resolution (`synth.rs:314-335`) and
 template expansion (`:183-218`), proxima's TOML format (`proxima-config/src/lib.rs:272-276`), the
 executor test rig (`executor.rs:1009-1096`), the triage rig and its expectations
 (`tests/pipeline_pipe.rs:493-614`), and the CLI session harness
@@ -132,7 +139,7 @@ pub struct ProcessRpcInitFrame { pub send: Value, pub reply: bool }
 |---|---|---|
 | payload type | `serde_json::Value`, a string meaning text | a `Payload { Text, Structured }` enum restates what `Value::String` versus map/list already says; a caller can do nothing with it they cannot do with `Value` |
 | a value taken whole from an earlier stage | a leaf that is exactly one body placeholder keeps the value's JSON type | without it a structured payload cannot carry a number or object from an earlier stage, which a text body does today with an unquoted splice (`{"pr": {{body.ticket.pr}}}`), so the TOML form would be strictly weaker (the refutation condition) |
-| only body placeholders keep a type | yes | `trace_id`, `uuid`, `env.*` and the rest resolve to strings already (`templates.rs:96-125`) |
+| only body placeholders keep a type | yes | `trace_id`, `uuid`, `env.*` and the rest resolve to strings already (`templates.rs:101-126`) |
 | where structured expansion lives | `proxima-http/src/templates.rs`, beside `expand` / `expand_strict` | one engine for text and structure; the executor and synth both call it |
 | serialization | compact `serde_json::to_vec`, keys in `serde_json`'s map order (sorted: no `preserve_order`, `Cargo.toml:223,512`) | receivers compare JSON values, not key order: the tracker stub matches substrings that compact output keeps (`"method":"initialize"`, `"arguments":{"id":"`, `tests/fixtures/mcp_stub/tracker.sh`), and the CLI test compares parsed values (`check_tool_text`) |
 | synth from the environment | text, as today | `Value: FromStr` parses JSON, so `PROXIMA_SYNTH_BODY=plain text` would stop loading |
@@ -174,7 +181,7 @@ all compiled in each run.
 | AC5 | R4 | `cargo val -p proxima-cli --test integration -E 'test(mcp_config_payload_)'` | 2 passed: (1) `tools/proxima-cli/tests/fixtures/mcp_config_tool/review_ticket.toml`, the CLI fixture in TOML with all 6 payloads as tables, `<dir>` replaced as `write_config` does, served by `proxima serve <tempdir>/review_ticket.toml` through the incumbent session: line 1 `result.protocolVersion` = `2024-11-05`; line 2 `check_tool_list(.., &[configured_tool()])` Ok; line 3 `check_tool_text(line, TOOL_TEXT_OK)` Ok; stdout holds exactly those 3 lines and the exit status is success, as `mcp_config_tool_review_ticket_served_over_stdio` asserts; (2) `json_text_leaves(twin)` -> 0 |
 | AC6 | R1-R4 controls | (lib) `cargo val -p proxima-lib --features tokio --lib -E 'test(ctl_payload_)'`; (pipe) `cargo val -p proxima-lib --features tokio --test pipeline_pipe -E 'test(ctl_payload_)'`; (cli) `cargo val -p proxima-cli --test integration -E 'test(ctl_payload_)'` | lib 6 passed: (1) `check_initialized(P5)` Ok; (2) the AC2 rig with no init frames, the same P4 call -> the answer's `error.code` is `-32002` and `check_initialized(answer)` Err; (3) S1 given as a string (today's text path) -> the received bytes are exactly X1, `check_received(_, X1)` Ok and `check_received(_, E1)` Err; (4) `body` Y1 given as a string -> `check_body_json(response, Y1)` Ok; (5) `body_template` Y2 given as a string, request body Y3 -> `check_body_json(response, Y4)` Ok; (6) `check_body_json(Y1, Y4)` Err. pipe 4 passed, each on a fresh `triage_rig()` with the JSON `triage.json`: (1) PROXIMA-24 -> the AC4 (1) checks, all Ok; (2) PROXIMA-25 -> the AC4 (2) checks, all Ok; (3) the PROXIMA-25 run's `github` stub (never called) -> `check_seen(github, T2)` Err; (4) `json_text_leaves(triage.json)` -> 2. cli 1 passed: `json_text_leaves(review_ticket.json)` -> 6 |
 | AC7 | R5 | (a) `cargo val -p proxima-lib --features tokio --lib -E 'test(pipelines::) or test(upstreams::process_rpc::) or test(upstreams::synth::)'`; (b) `cargo val -p proxima-lib --features tokio --test pipeline_pipe`; (c) `cargo val -p proxima-cli --test integration -E 'test(mcp_config_tool_) or test(ctl_serve_)'`; (d) `cargo val -p proxima-lib --features tokio --lib -E 'test(load::)'` | 0 failed in each, and: (a) 126 passed (slice-0 108 + AC1 7, AC2 1, AC3 4, AC6 lib 6); (b) 31 passed (slice-0 24 + AC4 3, AC6 pipe 4); (c) 5 passed (slice-0 5); (d) 10 passed (slice-0 10). Slice-0 logs: `<tickets>/PROXIMA-49/evidence/baseline-{a,b,c,d}.log` |
-| AC8 | R5 | C8 | `0` |
+| AC8 | R5 | C8; then C8x | C8 prints exactly `exit=0`, `0`, `1` (clippy succeeded, 0 diagnostic lines, and it reached `Finished`: a run killed by the timeout or failing to compile has a nonzero exit and no `Finished` line); C8x prints `2` |
 
 Counts: AC1 7 + AC2 1 + AC3 4 + AC4 3 + AC5 2 + AC6 11 (lib 6, pipe 4, cli 1) = 28 new tests.
 

@@ -12,12 +12,12 @@ note IN THE SAME COMMIT as the slice. Every cargo command runs as `timeout -k 30
 | 3 | `SynthConfig.body` / `body_template: Option<Value>`, structured arms, env as text, `#[builder(into)]`; `check_body_json` | AC3, AC6 lib (4)-(6) | `cargo val -p proxima-lib --features tokio --lib -E 'test(synth_payload_) or test(ctl_payload_)'` | 10 passed (AC3 4 + AC6 lib 6) | [ ] | |
 | 4 | `triage.toml` twin, `check_seen`, `json_text_leaves`, the twin tests and their JSON controls | AC4, AC6 pipe | `cargo val -p proxima-lib --features tokio --test pipeline_pipe -E 'test(pipeline_payload_) or test(ctl_payload_)'` | 7 passed (AC4 3 + AC6 pipe 4) | [ ] | |
 | 5 | CLI `review_ticket.toml` twin and its session test | AC5, AC6 cli | `cargo val -p proxima-cli --test integration -E 'test(mcp_config_payload_) or test(ctl_payload_)'` | 3 passed (AC5 2 + AC6 cli 1) | [ ] | |
-| 6 | incumbents and lints | AC7, AC8 | AC7 (a)-(d); AC8 (C8) | 126, 31, 5, 10 passed, 0 failed; C8 prints 0 | [ ] | |
+| 6 | incumbents and lints | AC7, AC8 | AC7 (a)-(d); AC8 (C8, C8x) | 126, 31, 5, 10 passed, 0 failed; C8 prints `exit=0`, `0`, `1`; C8x prints `2` | [ ] | |
 
 ## resume
 
 Last landed slice: none
-Next action: audit round 2
+Next action: audit round 3
 Open question, if any: none
 
 ## struck
