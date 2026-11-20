@@ -97,6 +97,10 @@ fn visit_integers(bound: &mut BoundOp, counts: bool, unsigned: Unsigned<'_>, sig
             signed(new_upper_inclusive);
             true
         }
+        BoundOpKind::MoeTopK { operands, .. } => {
+            visit_operands(operands, unsigned, signed);
+            true
+        }
         _ => false,
     }
 }
@@ -510,5 +514,48 @@ mod tests {
 
         assert_eq!(symbols_shapes_template(&[(&[16, 100], &base), (&[40, 100], &rows_move)]), None);
         Ok(())
+    }
+
+    fn moe_topk_at(rows: u64, top_k: u64, score_stride: i64) -> BoundOp {
+        let scores = Layout {
+            base: 0,
+            strides: [score_stride, 1].into_iter().collect(),
+        };
+        BoundOp {
+            node: NodeId(7),
+            dtype: DType::INT32,
+            extents: vec![rows],
+            kind: BoundOpKind::MoeTopK {
+                operands: vec![(NodeId(3), scores, None)],
+                weighting: super::super::types_layout_boundop::MoeWeighting::ShiftedExponential,
+                expert_count: 64,
+                top_k,
+                routes: vec![NodeId(7), NodeId(8)],
+                weights: vec![NodeId(9), NodeId(10)],
+                weight_total: NodeId(11),
+                stacked: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_template_fitted_at_three_row_counts_reproduces_a_fourth_moe_topk_bind() -> Check {
+        let bind = |rows: u64| vec![moe_topk_at(rows, 2, 64)];
+        let (base, next, between) = (bind(16), bind(40), bind(28));
+        let template = row_template(&[(16, &base), (40, &next), (28, &between)]).ok_or("moe top-k integers are affine in rows")?;
+
+        let mut moved = base.clone();
+        let attention = apply_row_template(&template, 123, &mut moved).ok_or("the template fits these ops")?;
+
+        assert!(attention.is_empty());
+        assert_eq!(moved, bind(123));
+        Ok(())
+    }
+
+    #[test]
+    fn a_moe_topk_whose_top_k_differs_between_binds_refuses_the_template() {
+        let (base, next, between) = (vec![moe_topk_at(16, 2, 64)], vec![moe_topk_at(40, 3, 64)], vec![moe_topk_at(28, 2, 64)]);
+
+        assert_eq!(row_template(&[(16, &base), (40, &next), (28, &between)]), None);
     }
 }
