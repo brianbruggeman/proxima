@@ -17,7 +17,7 @@ note IN THE SAME COMMIT as the slice. Every cargo command runs as `timeout -k 30
 ## resume
 
 Last landed slice: none
-Next action: audit round 4
+Next action: slice 1
 Open question, if any: none
 
 ## struck
