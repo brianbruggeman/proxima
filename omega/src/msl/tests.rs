@@ -11432,13 +11432,13 @@ mod expert_grouped_route_segments {
     }
 
     #[test]
-    fn the_prepass_chunk_default_is_256_entries_and_whole_simd_steps() {
+    fn the_prepass_chunk_default_is_128_entries_and_whole_simd_steps() {
         let manifest = include_str!("../../omega-runtime.toml");
 
         assert!(
             manifest
                 .lines()
-                .any(|line| line.trim() == "prepass_entries = 256"),
+                .any(|line| line.trim() == "prepass_entries = 128"),
             "{manifest}"
         );
         assert_eq!(
@@ -11446,8 +11446,8 @@ mod expert_grouped_route_segments {
             0
         );
         if option_env!("OMEGA_GROUPED_GEMM_PREPASS_ENTRIES").is_none() {
-            assert_eq!(crate::sized::GROUPED_GEMM_PREPASS_ENTRIES, 256);
-            assert_eq!(grouped_prepass_threadgroups(8000), 32);
+            assert_eq!(crate::sized::GROUPED_GEMM_PREPASS_ENTRIES, 128);
+            assert_eq!(grouped_prepass_threadgroups(8000), 63);
         }
     }
 
