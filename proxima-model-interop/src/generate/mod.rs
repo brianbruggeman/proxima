@@ -354,6 +354,9 @@ mod thread_index_census_tests;
 #[cfg(test)]
 mod verify_bound_tests;
 mod warm_buffers;
+mod warm_prefill;
+#[cfg(all(test, feature = "metal", target_os = "macos"))]
+mod warm_prefill_tests;
 #[cfg(all(feature = "cuda", feature = "interop-bgpool"))]
 pub use cuda_serving_pipe::CudaServingPipe;
 use decode::*;

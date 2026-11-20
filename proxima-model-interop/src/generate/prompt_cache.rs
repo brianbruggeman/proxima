@@ -768,6 +768,11 @@ pub(super) struct BloomCandidates {
 }
 
 impl PromptCache {
+    #[cfg(all(test, feature = "metal", target_os = "macos"))]
+    pub(super) fn entry_count(&self) -> usize {
+        self.entries.len()
+    }
+
     pub(super) fn new() -> Self {
         let standard = PromptCacheConfig::standard();
         Self {
