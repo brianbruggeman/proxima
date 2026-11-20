@@ -2903,19 +2903,17 @@ fn flash_sized_keys_equal_the_constants_they_replaced() {
 #[cfg(feature = "metal-attn-variants")]
 #[test]
 fn flash_admission_table_names_the_condition_each_shape_fails() {
-    let cases: [(&str, BoundOp, Result<(), FlashRefusal>); 8] = [
+    let cases: [(&str, BoundOp, Result<(), FlashRefusal>); 10] = [
         ("harness_flint_d128_g8_q512_c2048", flash_op(8, 128, 2048, 512, i64::MIN), Ok(())),
         ("groups_16", flash_op(16, 128, 2048, 512, i64::MIN), Err(FlashRefusal::QueryGroups)),
         ("groups_2", flash_op(2, 128, 2048, 512, i64::MIN), Err(FlashRefusal::QueryGroups)),
+        ("q485_tail_rows_are_admitted", flash_op(8, 128, 2048, 485, i64::MIN), Ok(())),
+        ("flint_last_chunk_q487_c3584", flash_op(8, 128, 3584, 487, i64::MIN), Ok(())),
+        ("cached_2000_is_whole_tiles_not_whole_blocks", flash_op(8, 128, 2000, 512, i64::MIN), Ok(())),
         (
-            "q485_not_a_whole_block",
-            flash_op(8, 128, 2048, 485, i64::MIN),
-            Err(FlashRefusal::QueryRowsNotWholeBlocks),
-        ),
-        (
-            "cached_2000_not_a_whole_block",
-            flash_op(8, 128, 2000, 512, i64::MIN),
-            Err(FlashRefusal::CachedRowsNotWholeBlocks),
+            "cached_2003_not_a_whole_tile",
+            flash_op(8, 128, 2003, 512, i64::MIN),
+            Err(FlashRefusal::CachedRowsNotWholeTiles),
         ),
         (
             "sliding_window",
@@ -2955,9 +2953,8 @@ fn flash_variant_round_trips_through_schedule_and_cache_token() {
     );
 }
 
-/// Every admitted length lands on one unit-row tile and one simdgroup count, so lengths that
-/// are whole blocks share a kernel. q485 is not a whole 64-key block (a `QueryRowsNotWholeBlocks`
-/// refusal in the admission table), so q448 and q576 stand in as the second admitted lengths.
+/// Every admitted length lands on one unit-row tile and one simdgroup count, so lengths share a
+/// kernel; q485 and q487 are tail lengths and share it too.
 #[cfg(feature = "metal-attn-variants")]
 #[test]
 fn flash_cache_key_is_shared_by_every_admitted_prompt_length_of_one_shape() {
@@ -2970,6 +2967,8 @@ fn flash_cache_key_is_shared_by_every_admitted_prompt_length_of_one_shape() {
     assert!(base.contains("_flash"));
     assert_eq!(token(448), base, "q448 shares the q512 key");
     assert_eq!(token(576), base, "q576 shares the q512 key");
+    assert_eq!(token(485), base, "q485 shares the q512 key");
+    assert_eq!(token(487), base, "q487 shares the q512 key");
     let legacy = flash_schedule(AttentionDecomposition::Legacy)
         .cache_token_for(&flash_op(8, 128, 2048, 512, i64::MIN), policy);
     assert_ne!(legacy, base, "flash and legacy never share a key");

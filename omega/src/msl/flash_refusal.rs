@@ -22,10 +22,8 @@ pub(super) enum FlashRefusal {
     NewKeysNotCausal,
     /// The query rows and the new key rows differ.
     QueryRowsDifferFromNewKeys,
-    /// The query row count is not a whole number of key blocks.
-    QueryRowsNotWholeBlocks,
-    /// The cached key extent is not a whole number of key blocks.
-    CachedRowsNotWholeBlocks,
+    /// The cached key extent is not a whole number of 8-key tiles.
+    CachedRowsNotWholeTiles,
     /// The row-tiled block of this head is not the flash key block.
     RowTiledBlockDiffers,
 }
@@ -42,8 +40,7 @@ impl FlashRefusal {
             Self::SlidingWindow => "flash needs full attention over the cached keys, not a sliding window",
             Self::NewKeysNotCausal => "flash needs causally masked new keys",
             Self::QueryRowsDifferFromNewKeys => "flash needs as many query rows as new key rows",
-            Self::QueryRowsNotWholeBlocks => "flash needs a query row count that is a whole number of key blocks",
-            Self::CachedRowsNotWholeBlocks => "flash needs a cached key extent that is a whole number of key blocks",
+            Self::CachedRowsNotWholeTiles => "flash needs a cached key extent that is a whole number of 8-key tiles",
             Self::RowTiledBlockDiffers => "flash needs the row-tiled block to equal the flash key block",
         }
     }
