@@ -2453,7 +2453,7 @@ pub(super) fn push_cooperative_reduce_body(
                 &block,
                 element_type,
                 (epilogue_body, epilogue_operands),
-                &GroupedGemmFormats::with_activation_tile(metal.activation_staging()),
+                &GroupedGemmFormats::from_staging(metal.tiled_gemm_staging_layout),
             )?;
             return Ok(());
         }

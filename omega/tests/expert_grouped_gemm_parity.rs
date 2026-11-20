@@ -1,10 +1,10 @@
 //! Correctness gate for the expert-grouped tiled GEMM (`metal-grouped-gemm`):
 //! a `Q8_0` expert slab gathered per token by a route index, reduced over the
 //! input axis, at prefill width. The oracle is `proxima_tensor::cpu`'s own
-//! evaluator on the same packed bytes, which dequantizes in f32 and folds in
-//! source order; the Metal kernel stages the dequantized weight tile as
-//! `half`, so the two agree to half-precision weight rounding and the
-//! tolerance below is that rounding, not a reduction-order excuse.
+//! f32 evaluator over the operands staged in the kernel's [`GroupedGemmFormats`]: the
+//! dequantized weight and the activation rounded to `half` through `proxima_numeric`, multiplied
+//! exactly and folded in f32 in source order. The tolerance is the accumulation order, not a
+//! format difference.
 //!
 //! Every case routes with a distribution a real router produces and a unit
 //! test usually does not: experts that receive no token, one expert that
@@ -15,12 +15,18 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use omega::MetalError;
-use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, quantize};
+use omega::msl::GroupedGemmFormats;
+use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
 use proxima_numeric::codec::Codec;
 use proxima_tensor::map::{self, AxisIndex, AxisTerm};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, TensorError, append};
 use proxima_numeric::{DType, NumericPolicy};
+
+#[path = "support/grouped_gemm_oracle.rs"]
+mod grouped_gemm_oracle;
+
+use grouped_gemm_oracle::staged_operands;
 
 const MIN_TOKENS_FOR_TILES: usize = omega::sized::TILED_GEMM_MIN_TOKENS as usize;
 const RELATIVE_TOLERANCE: f32 = 2.0e-3;
@@ -77,10 +83,14 @@ fn expert_gather_map(route: NodeId) -> IndexMap {
 }
 
 fn program(shape: &Shape, fuse_gate: bool) -> (Vec<Op>, NodeId) {
+    program_with_weight(shape, fuse_gate, DType::UINT8)
+}
+
+fn program_with_weight(shape: &Shape, fuse_gate: bool, weight_dtype: DType) -> (Vec<Op>, NodeId) {
     let mut program = Vec::new();
     let weight = input(
         &mut program,
-        DType::UINT8,
+        weight_dtype,
         &[shape.experts, shape.rows, shape.k],
         "weight",
     );
@@ -201,6 +211,16 @@ fn run(case: &Case) -> Outputs {
     let stack = quantized_expert_stack(shape);
     let activation = unit_values(2000, shape.tokens * shape.k, -1.0, 1.0);
     let gate = unit_values(3000, shape.tokens * shape.rows, 0.5, 1.5);
+    let formats = GroupedGemmFormats::default();
+    let mut dequantized = vec![0.0f32; shape.experts * shape.rows * shape.k];
+    dequantize(&stack, &mut dequantized).expect("the stack is whole q8_0 blocks");
+    let (staged_weight, staged_activation) = staged_operands(&formats, &dequantized, &activation);
+    let (reference_program, reference_output) = program_with_weight(shape, *fuse_gate, DType::FLOAT32);
+    let mut reference_named = vec![
+        ("weight", QuantizedBlock::Float32(&staged_weight)),
+        ("route", QuantizedBlock::Float32(route)),
+        ("activation", QuantizedBlock::Float32(&staged_activation)),
+    ];
     let mut named = vec![
         (
             "weight",
@@ -214,19 +234,20 @@ fn run(case: &Case) -> Outputs {
     ];
     if *fuse_gate {
         named.push(("gate", QuantizedBlock::Float32(&gate)));
+        reference_named.push(("gate", QuantizedBlock::Float32(&gate)));
     }
     let outputs = [output];
     let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
     let mut validated = None;
     let oracle = proxima_tensor::cpu::evaluate_quantized_named_with_scratch(
-        &program,
+        &reference_program,
         &[],
-        &named,
-        &outputs,
+        &reference_named,
+        &[reference_output],
         &mut free_buffers,
         &mut validated,
     )
-    .expect("cpu evaluates the gathered q8_0 expert product");
+    .expect("cpu evaluates the gathered q8_0 expert product over the half-staged operands");
     let plan = omega::plan_named(&program, &[], &named, &outputs, NumericPolicy::default())
         .expect("metal plans the gathered q8_0 expert product");
     let kernel_keys = plan.kernel_keys().expect("plan exposes its kernel keys");

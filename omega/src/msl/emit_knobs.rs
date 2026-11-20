@@ -93,7 +93,7 @@ pub struct EmitKnobs {
     /// Alias the epilogue staging onto the weight and activation tiles.
     #[cfg_attr(feature = "std", setting(default = true, resolve_with = "parse_on_unless_zero"))]
     pub tiled_gemm_slim_tgmem: bool,
-    /// Activation staging layout, such as `float16`; `None` keeps binary32.
+    /// Activation staging layout, such as `float16`; `None` is binary32 for the dense GEMM and llama's half for the expert-grouped GEMM; `float32` pins binary32 for both.
     #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_staging_layout"))]
     pub tiled_gemm_staging: Option<FloatLayout>,
     /// Store interior output tiles straight to device memory.
@@ -502,8 +502,7 @@ fn parse_codec_list(raw: &str) -> Result<Vec<String>, Infallible> {
 #[cfg(feature = "std")]
 fn parse_staging_layout(raw: &str) -> Result<Option<FloatLayout>, Infallible> {
     Ok(FloatLayout::from_name(raw.trim())
-        .filter(|layout| super::layout_render::hardware_type(layout).is_some())
-        .filter(|layout| !layout.same_format(&FloatLayout::BF32)))
+        .filter(|layout| super::layout_render::hardware_type(layout).is_some()))
 }
 
 #[cfg(feature = "std")]
@@ -752,13 +751,13 @@ mod tests {
 
     #[cfg(feature = "metal-tiled-gemm")]
     #[test]
-    fn tiled_gemm_staging_names_a_hardware_layout_other_than_binary32() {
+    fn tiled_gemm_staging_names_a_hardware_layout() {
         let float16 = FloatLayout::from_name("float16");
         let bfloat16 = FloatLayout::from_name("bfloat16");
         assert!(float16.is_some() && bfloat16.is_some() && float16 != bfloat16, "the layout names this table relies on");
         let cases: [(Option<&str>, Option<FloatLayout>); 8] = [
             (None, None),
-            (Some("float32"), None),
+            (Some("float32"), Some(FloatLayout::BF32)),
             (Some("float16"), float16),
             (Some("bfloat16"), bfloat16),
             (Some(" float16 "), float16),

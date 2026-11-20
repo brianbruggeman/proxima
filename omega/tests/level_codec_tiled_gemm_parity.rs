@@ -24,6 +24,7 @@ use std::path::PathBuf;
 use proxima_gguf::parser::{GgufEvent, GgufParser};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::types::GgmlType;
+use omega::msl::GroupedGemmFormats;
 use proxima_numeric::codec::Codec;
 use proxima_numeric::{DType, NumericPolicy};
 use proxima_tensor::test_support::Lcg;
@@ -37,6 +38,11 @@ const SELECTED: usize = 6;
 const EXPERTS: usize = 16;
 const ROWS: usize = 96;
 const HALF_RELATIVE_TOLERANCE: f32 = 2.0e-3;
+
+#[path = "support/grouped_gemm_oracle.rs"]
+mod grouped_gemm_oracle;
+
+use grouped_gemm_oracle::{rounded_through, worst_relative_row_error_with_specials};
 
 #[derive(Clone, Copy)]
 struct Case {
@@ -403,22 +409,54 @@ fn flint_gated_activation_rows() -> Vec<Vec<f32>> {
         .collect()
 }
 
+fn half_range_activation(slab: &Slab) -> Vec<f32> {
+    let captured = flint_gated_activation_rows();
+    assert!(captured.iter().all(|row| row.len() == slab.reduction && row.iter().any(|value| value.abs() > HALF_MAX)), "degenerate: the fixture rows must overflow half");
+    (0..TOKENS * SELECTED)
+        .flat_map(|index| {
+            let scale = if index % 3 == 0 { 1.0 } else { 1.0 / 64.0 };
+            captured[index % 2].iter().map(move |value| value * scale)
+        })
+        .collect()
+}
+
+/// llama b12110 stages the activation tile as `half` with a direct cast (`mul_mm.metal:716,729`), so
+/// a value past 65504 becomes infinity there and in the default grouped kernel. The oracle is the
+/// cooperative kernel fed the activation rounded to the default `activation_tile` format through
+/// `proxima_numeric`; the two must overflow the same elements and agree elsewhere.
 #[test]
-fn iq4_xs_down_projection_activation_past_the_half_range_stays_finite_and_matches_the_cooperative_kernel() {
+fn iq4_xs_down_projection_activation_past_the_half_range_goes_infinite_like_llama_and_matches_the_cooperative_kernel_on_half_activations() {
     if std::env::var_os("PROXNUM77_CAPTURE_DIR").is_some() {
         return;
     }
     let case = &CASES[2];
     let slab = read_slab(case);
-    let captured = flint_gated_activation_rows();
-    assert!(captured.iter().all(|row| row.len() == slab.reduction && row.iter().any(|value| value.abs() > HALF_MAX)), "degenerate: the fixture rows must overflow half");
-    let activation: Vec<f32> = (0..TOKENS * SELECTED)
-        .flat_map(|index| {
-            let scale = if index % 3 == 0 { 1.0 } else { 1.0 / 64.0 };
-            captured[index % 2].iter().map(move |value| value * scale)
-        })
-        .collect();
-    let tiled_run = temp_env::with_var("PROXIMA_TILED_GEMM_DISABLE", None::<&str>, || run_with(case, &slab, &activation));
+    let activation = half_range_activation(&slab);
+    let staged = rounded_through(&activation, GroupedGemmFormats::default().activation_tile);
+    let tiled_run = temp_env::with_vars([("PROXIMA_TILED_GEMM_DISABLE", None::<&str>), ("PROXIMA_TILED_GEMM_STAGING", None)], || run_with(case, &slab, &activation));
+    let cooperative_run = cooperative_with(case, &slab, &staged);
+    assert!(grouped_tiled_kernel_ran(&tiled_run.kernel_keys), "the tiled kernel must run: {:?}", tiled_run.kernel_keys);
+    let want: Vec<f32> = bits(&cooperative_run.output).iter().map(|word| f32::from_bits(*word)).collect();
+    let want_non_finite = want.iter().filter(|value| !value.is_finite()).count();
+    let got_non_finite = tiled_run.output.iter().filter(|value| !value.is_finite()).count();
+    assert!(want_non_finite > 0, "degenerate: the half-staged oracle must overflow on these rows");
+    assert_eq!(got_non_finite, want_non_finite, "tiled and the half-staged oracle must overflow the same elements");
+    let worst = worst_relative_row_error_with_specials(&want, &tiled_run.output, ROWS);
+    assert!(worst <= HALF_RELATIVE_TOLERANCE, "tiled drifted from the half-staged cooperative kernel by {worst:e} of a row's norm");
+}
+
+/// With `PROXIMA_TILED_GEMM_STAGING=float32` the grouped kernel stages the activation in `float`
+/// as it did before matching llama, so the old guarantee holds: finite output past 65504, equal
+/// to the cooperative kernel on the unrounded activation.
+#[test]
+fn iq4_xs_down_projection_activation_past_the_half_range_stays_finite_with_f32_staging_and_matches_the_cooperative_kernel() {
+    if std::env::var_os("PROXNUM77_CAPTURE_DIR").is_some() {
+        return;
+    }
+    let case = &CASES[2];
+    let slab = read_slab(case);
+    let activation = half_range_activation(&slab);
+    let tiled_run = temp_env::with_vars([("PROXIMA_TILED_GEMM_DISABLE", None::<&str>), ("PROXIMA_TILED_GEMM_STAGING", Some("float32"))], || run_with(case, &slab, &activation));
     let cooperative_run = cooperative_with(case, &slab, &activation);
     assert!(grouped_tiled_kernel_ran(&tiled_run.kernel_keys), "the tiled kernel must run: {:?}", tiled_run.kernel_keys);
     let non_finite = tiled_run.output.iter().filter(|value| !value.is_finite()).count();

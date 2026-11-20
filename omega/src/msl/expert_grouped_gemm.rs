@@ -35,10 +35,13 @@ const DECODE_OUTPUT_LAYOUT: FloatLayout = FloatLayout::F16;
 /// [`EmitError::RenderKindMismatch`], never a fallback. Composes `proxima_numeric::FloatLayout`;
 /// [`ActivationStaging`] is the activation tile's conversion from the device `float`.
 ///
-/// `Default` is the configuration the kernel has always rendered: half weight tile and MMA A,
-/// float activation tile and MMA B, float accumulator and out tile.
+/// `Default` is llama b12110's `kernel_mul_mm_id` (`kernels/mul_mm.metal:561-562,615,716,729`): half
+/// weight tile and MMA A, half activation tile and MMA B (a round-to-nearest-even cast from the
+/// device `float`, no scale), float accumulator and out tile. An activation past 65504 becomes
+/// infinity at staging, in llama as here. [`GroupedGemmFormats::with_activation_tile`] with
+/// `FloatLayout::BF32` is the f32-activation configuration this kernel rendered before.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct GroupedGemmFormats {
+pub struct GroupedGemmFormats {
     /// What the codec's decode function writes.
     pub dequant_out: FloatLayout,
     /// The threadgroup weight tile element.
@@ -60,8 +63,9 @@ pub(super) struct GroupedGemmFormats {
 }
 
 impl GroupedGemmFormats {
-    /// Today's configuration with `activation_tile` (and the MMA B operand loaded from it) as given.
-    pub(super) const fn with_activation_tile(activation_tile: FloatLayout) -> Self {
+    /// The default weight, accumulator and out formats with `activation_tile` (and the MMA B operand
+    /// loaded from it) as given.
+    pub const fn with_activation_tile(activation_tile: FloatLayout) -> Self {
         Self {
             dequant_out: FloatLayout::F16,
             weight_tile: FloatLayout::F16,
@@ -74,11 +78,20 @@ impl GroupedGemmFormats {
             out_tile: FloatLayout::BF32,
         }
     }
+
+    /// The configuration a `MetalOnlyExtras::tiled_gemm_staging_layout` selects: `None` is the
+    /// default, `Some(layout)` stages the activation tile in `layout`.
+    pub const fn from_staging(staging: Option<FloatLayout>) -> Self {
+        match staging {
+            Some(layout) => Self::with_activation_tile(layout),
+            None => Self::with_activation_tile(FloatLayout::F16),
+        }
+    }
 }
 
 impl Default for GroupedGemmFormats {
     fn default() -> Self {
-        Self::with_activation_tile(FloatLayout::BF32)
+        Self::with_activation_tile(FloatLayout::F16)
     }
 }
 
@@ -177,11 +190,10 @@ impl GroupedStages {
 /// bad index raises the same `GatherIndexOutOfRange`.
 ///
 /// Tile layout and thread mapping are `ggml-metal`'s `kernel_mul_mm_id`
-/// (`kernels/mul_mm.metal`) except the activation tile: the weight tile is
-/// `half` and the activation tile is `float`, as in the dense tiled GEMM
-/// (`push_mm_layout_multiply`'s `ma`/`mb`), because a `half` activation
-/// turns any value past 65504 into infinity and a gated expert intermediate
-/// reaches 8e4 on real checkpoints. Both are stored as 8x8
+/// (`kernels/mul_mm.metal`): the weight tile and the activation tile are `half`
+/// ([`GroupedGemmFormats`]), so a value past 65504 becomes infinity at staging, as it does in
+/// llama; `tiled_gemm_staging_layout = Some(binary32)` stages the activation in `float` instead
+/// (as the dense tiled GEMM does, `push_mm_layout_multiply`'s `ma`/`mb`). Both are stored as 8x8
 /// blocks of 64 contiguous elements so each `simdgroup_load` reads one
 /// contiguous block; two threads per weight row each decode one
 /// [`DECODE_RUN_ELEMENTS`] run of the codec through the stager the dense tiled

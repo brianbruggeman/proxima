@@ -7,7 +7,7 @@
 //! or its own row per selected expert (down). The oracle is
 //! `proxima_tensor::cpu`'s evaluator over the same Q8_0 bytes dequantized to
 //! f32 (the CPU quantized-matmul path expresses one token axis only); the Metal
-//! kernel stages the weight tile as `half`, so the tolerance is that rounding.
+//! kernel's staged formats ([`GroupedGemmFormats`]) are applied to the oracle's operands.
 //!
 //! Routing is what a top-k router produces: every token names `selected`
 //! distinct experts, some experts receive no token, and one expert receives far
@@ -16,13 +16,22 @@
 #![cfg(all(feature = "metal", feature = "metal-grouped-gemm", target_os = "macos"))]
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::sync::RwLock;
+
 use omega::MetalError;
+use omega::msl::GroupedGemmFormats;
 use proxima_gguf::quant::q8_0::{BLOCK_BYTES, QK8_0, dequantize, quantize};
 use proxima_numeric::codec::Codec;
 use proxima_tensor::map::{self, AxisIndex, AxisTerm};
 use proxima_tensor::test_support::Lcg;
 use proxima_tensor::{Extent, IndexMap, Keep, NodeId, Op, QuantizedBlock, Reduce, ReduceInit, ScalarOp, TensorError, append};
+use proxima_numeric::float_layout::FloatLayout;
 use proxima_numeric::{DType, NumericPolicy};
+
+#[path = "support/grouped_gemm_oracle.rs"]
+mod grouped_gemm_oracle;
+
+use grouped_gemm_oracle::{staged_operands, worst_relative_row_error_with_specials};
 
 const MIN_TOKENS_FOR_TILES: usize = omega::sized::TILED_GEMM_MIN_TOKENS as usize;
 const RELATIVE_TOLERANCE: f32 = 2.0e-3;
@@ -254,12 +263,35 @@ fn activation_len(case: &Case) -> usize {
     }
 }
 
-fn run(case: &Case) -> Outputs {
-    let activation = unit_values(2000, activation_len(case), -1.0, 1.0);
-    run_with_activation(case, activation)
+/// Plans read `PROXIMA_TILED_GEMM_STAGING` from the process environment, so a test that pins the
+/// f32 activation tile holds the write side while it sets it and every other planning test holds
+/// the read side.
+static STAGING_ENV: RwLock<()> = RwLock::new(());
+
+fn with_staging_env<T>(formats: &GroupedGemmFormats, body: impl FnOnce() -> T) -> T {
+    if *formats == GroupedGemmFormats::default() {
+        let _reading = STAGING_ENV.read().expect("staging env lock");
+        return body();
+    }
+    assert_eq!(
+        *formats,
+        GroupedGemmFormats::with_activation_tile(FloatLayout::BF32),
+        "the knob selects the default or the f32 activation tile"
+    );
+    let _writing = STAGING_ENV.write().expect("staging env lock");
+    // SAFETY: the write lock excludes every other planning thread in this binary
+    unsafe { std::env::set_var("PROXIMA_TILED_GEMM_STAGING", "float32") };
+    let result = body();
+    unsafe { std::env::remove_var("PROXIMA_TILED_GEMM_STAGING") };
+    result
 }
 
-fn run_with_activation(case: &Case, activation: Vec<f32>) -> Outputs {
+fn run(case: &Case) -> Outputs {
+    let activation = unit_values(2000, activation_len(case), -1.0, 1.0);
+    run_with_activation(case, activation, &GroupedGemmFormats::default())
+}
+
+fn run_with_activation(case: &Case, activation: Vec<f32>, formats: &GroupedGemmFormats) -> Outputs {
     let Shape {
         sequence,
         selected,
@@ -267,13 +299,13 @@ fn run_with_activation(case: &Case, activation: Vec<f32>) -> Outputs {
         ..
     } = case.shape;
     let stack = quantized_expert_stack(&case.shape);
-    let reference_stack = dequantized(&case.shape, &stack);
+    let (reference_stack, staged_activation) = staged_operands(formats, &dequantized(&case.shape, &stack), &activation);
     let gate = unit_values(3000, sequence * selected * rows, 0.5, 1.5);
     let (reference_program, reference_output) = program(case, DType::FLOAT32);
     let reference_named = named_blocks(
         case,
         QuantizedBlock::Float32(&reference_stack),
-        &activation,
+        &staged_activation,
         &gate,
     );
     let mut free_buffers = proxima_tensor::cpu::BufferPools::default();
@@ -298,11 +330,14 @@ fn run_with_activation(case: &Case, activation: Vec<f32>) -> Outputs {
         &gate,
     );
     let outputs = [output];
-    let plan = omega::plan_named(&program, &[], &named, &outputs, NumericPolicy::default())
-        .expect("metal plans the stacked q8_0 expert product");
-    let kernel_keys = plan.kernel_keys().expect("plan exposes its kernel keys");
-    let metal = omega::execute_plan_named(&plan, &named)
-        .expect("metal runs the stacked q8_0 expert product on a real device");
+    let (kernel_keys, metal) = with_staging_env(formats, || {
+        let plan = omega::plan_named(&program, &[], &named, &outputs, NumericPolicy::default())
+            .expect("metal plans the stacked q8_0 expert product");
+        let kernel_keys = plan.kernel_keys().expect("plan exposes its kernel keys");
+        let metal = omega::execute_plan_named(&plan, &named)
+            .expect("metal runs the stacked q8_0 expert product on a real device");
+        (kernel_keys, metal)
+    });
     Outputs {
         oracle: oracle.root().to_vec(),
         metal: metal.root().to_vec(),
@@ -485,12 +520,9 @@ fn flint_gated_activation_rows() -> Vec<Vec<f32>> {
         .collect()
 }
 
-/// Real gated activations reach 8e4, past the largest finite `half`; a
-/// `half`-staged activation tile turns every output of such a token into
-/// infinity (observed: all 2048 features of the row, +inf and -inf mixed),
-/// and the following sum over the selected experts into NaN.
-#[test]
-fn a_down_projection_activation_past_the_half_range_stays_finite_and_matches_the_f32_oracle() {
+/// 60 tokens, four selected experts, each token's down-projection row built from the captured
+/// flint rows (past `half` for one token in three, scaled by 1/64 into range for the rest).
+fn half_range_case() -> (Case, Vec<f32>) {
     let shape = Shape {
         sequence: 60,
         selected: 4,
@@ -519,7 +551,52 @@ fn a_down_projection_activation_past_the_half_range_stays_finite_and_matches_the
         activation_per_selected: true,
         fuse_gate: false,
     };
-    let outputs = run_with_activation(&case, activation);
+    (case, activation)
+}
+
+/// Real gated activations reach 8e4, past the largest finite `half`. llama b12110's
+/// `kernel_mul_mm_id` stages the activation tile as `half` with a direct cast and no scaling
+/// (`kernels/mul_mm.metal:716,729`), so a value past 65504 becomes infinity in the tile and
+/// every output of that token is +inf, -inf or NaN (observed on the flint checkpoint: all 2048
+/// features of the row, +inf and -inf mixed). The default configuration matches llama, so the
+/// guarantee is not finiteness but equality with the same-format oracle: the activation rounded
+/// to `half` (overflow to infinity) through `proxima_numeric`, multiplied exactly, summed in
+/// f32. Each element must agree in kind (same-signed infinity, NaN) or in value.
+#[test]
+fn a_down_projection_activation_past_the_half_range_goes_infinite_like_llama_and_matches_the_half_staged_oracle() {
+    let (case, activation) = half_range_case();
+    let formats = GroupedGemmFormats::default();
+    let outputs = run_with_activation(&case, activation, &formats);
+    let oracle_non_finite = outputs.oracle.iter().filter(|value| !value.is_finite()).count();
+    let metal_non_finite = outputs.metal.iter().filter(|value| !value.is_finite()).count();
+    assert!(
+        oracle_non_finite > 0,
+        "degenerate: a half-staged oracle must overflow on these rows"
+    );
+    assert_eq!(
+        metal_non_finite, oracle_non_finite,
+        "metal and the half-staged oracle must overflow the same elements"
+    );
+    assert!(
+        stacked_grouped_kernel_ran(&outputs.kernel_keys),
+        "the stacked expert-grouped kernel was never selected: {:?}",
+        outputs.kernel_keys
+    );
+    let worst = worst_relative_row_error_with_specials(&outputs.oracle, &outputs.metal, case.shape.rows);
+    assert!(
+        worst <= RELATIVE_TOLERANCE,
+        "metal drifted from the half-staged oracle by {worst:e} of a row's norm"
+    );
+}
+
+/// The f32 activation tile (`tiled_gemm_staging_layout = Some(binary32)`, the configuration this
+/// kernel rendered before it matched llama) keeps the old guarantee: an activation past 65504
+/// stays finite and equals the f32 oracle.
+#[test]
+fn a_down_projection_activation_past_the_half_range_stays_finite_with_f32_staging_and_matches_the_f32_oracle() {
+    let (case, activation) = half_range_case();
+    let formats = GroupedGemmFormats::with_activation_tile(FloatLayout::BF32);
+    let outputs = run_with_activation(&case, activation, &formats);
     let non_finite = outputs
         .metal
         .iter()
@@ -610,6 +687,7 @@ fn an_expert_index_past_the_slab_raises_the_same_error_as_cpu() {
         &[],
     );
     let outputs = [output];
+    let _reading = STAGING_ENV.read().expect("staging env lock");
     let plan = omega::plan_named(&program, &[], &named, &outputs, NumericPolicy::default())
         .expect("metal plans the stacked q8_0 expert product");
     let metal_error = omega::execute_plan_named(&plan, &named)
@@ -674,7 +752,10 @@ fn control_an_oracle_routed_to_other_experts_disagrees_by_a_gross_factor() {
 const DECODE_AND_VERIFY_WIDTHS: [usize; 4] = [1, 2, 3, 4];
 
 fn assert_matches_oracle_below_the_tile_minimum(case: &Case) -> Vec<String> {
-    let outputs = run(case);
+    // below the minimum the dense gather or packed matvec runs, not the grouped kernel, so its
+    // activation is not staged in half: the oracle keeps f32 activations
+    let activation = unit_values(2000, activation_len(case), -1.0, 1.0);
+    let outputs = run_with_activation(case, activation, &GroupedGemmFormats::with_activation_tile(FloatLayout::BF32));
     let Shape {
         sequence,
         selected,

@@ -10471,41 +10471,73 @@ mod expert_grouped_decode_description {
         (bound, packed)
     }
 
+    const SHARED_STAGES: [&str; 12] = [
+        "threadgroup half *weight_tile = (threadgroup half *)tg_shared;",
+        "threadgroup float *out_tile = (threadgroup float *)tg_shared;",
+        "half w_regs[16];",
+        "float4 a_regs[2];",
+        "device const float *a_ptr = in1",
+        "device const float4 *a_src = (device const float4 *)a_ptr;",
+        "threadgroup half *w_slot = weight_tile",
+        "simdgroup_float8x8 acc[8];",
+        "make_filled_simdgroup_matrix<float, 8>(0.0f)",
+        "threadgroup const half *lsma = weight_tile",
+        "simdgroup_half8x8 ma[4];",
+        "threadgroup float *temp_str = out_tile",
+    ];
+
+    fn assert_renders_stages(codec: Codec, knobs: &EmitKnobs, stages: &[&str]) {
+        let (bound, packed) = gathered(codec);
+        let source = emit_with_knobs(&bound, &packed, NumericPolicy::default(), knobs)
+            .expect("grouped kernel emits")
+            .source;
+        for stage in SHARED_STAGES.iter().chain(stages) {
+            assert!(source.contains(stage), "{codec:?}: `{stage}` missing:\n{source}");
+        }
+    }
+
     #[proxima::test]
     #[case::iq4_xs(Codec::Iq4Xs)]
     #[case::q5k(Codec::Q5K)]
-    async fn the_default_formats_render_every_stage_at_the_types_the_kernel_always_used(
-        #[case] codec: Codec,
-    ) {
-        let (bound, packed) = gathered(codec);
-        let knobs = EmitKnobs::default().with_coord_index32(false);
-        let source = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &knobs)
-            .expect("grouped kernel emits")
-            .source;
+    async fn the_default_formats_are_llamas_half_activation_tile_and_half_mma(#[case] codec: Codec) {
         let formats = GroupedGemmFormats::default();
         assert_eq!(formats.weight_tile, FloatLayout::F16);
-        assert_eq!(formats.activation_tile, FloatLayout::BF32);
+        assert_eq!(formats.activation_tile, FloatLayout::F16);
+        assert_eq!(formats.mma_b, FloatLayout::F16);
         assert_eq!(formats.accumulator, FloatLayout::BF32);
-        for stage in [
-            "threadgroup half *weight_tile = (threadgroup half *)tg_shared;",
-            "threadgroup float *act_tile = (threadgroup float *)(tg_shared + ",
-            "threadgroup float *out_tile = (threadgroup float *)tg_shared;",
-            "half w_regs[16];",
-            "float4 a_regs[2];",
-            "device const float *a_ptr = in1",
-            "device const float4 *a_src = (device const float4 *)a_ptr;",
-            "threadgroup half *w_slot = weight_tile",
-            "threadgroup float4 *a_slot = (threadgroup float4 *)(act_tile",
-            "simdgroup_float8x8 acc[8];",
-            "make_filled_simdgroup_matrix<float, 8>(0.0f)",
-            "threadgroup const half *lsma = weight_tile",
-            "threadgroup const float *lsmb = act_tile",
-            "simdgroup_half8x8 ma[4];",
-            "simdgroup_float8x8 mb[2];",
-            "threadgroup float *temp_str = out_tile",
-        ] {
-            assert!(source.contains(stage), "{codec:?}: `{stage}` missing:\n{source}");
-        }
+        let knobs = EmitKnobs::default().with_coord_index32(false);
+        assert_renders_stages(
+            codec,
+            &knobs,
+            &[
+                "threadgroup half *act_tile = (threadgroup half *)(tg_shared + ",
+                "threadgroup half4 *a_slot = (threadgroup half4 *)(act_tile",
+                "a_slot[0] = half4(a_regs[0]); a_slot[1] = half4(a_regs[1]);",
+                "threadgroup const half *lsmb = act_tile",
+                "simdgroup_half8x8 mb[2];",
+            ],
+        );
+    }
+
+    #[proxima::test]
+    #[case::iq4_xs(Codec::Iq4Xs)]
+    #[case::q5k(Codec::Q5K)]
+    async fn the_float_staging_knob_renders_the_f32_activation_tile_the_kernel_had_before(#[case] codec: Codec) {
+        let formats = GroupedGemmFormats::from_staging(Some(FloatLayout::BF32));
+        assert_eq!(formats, GroupedGemmFormats::with_activation_tile(FloatLayout::BF32));
+        let knobs = EmitKnobs::default()
+            .with_coord_index32(false)
+            .with_tiled_gemm_staging(Some(FloatLayout::BF32));
+        assert_renders_stages(
+            codec,
+            &knobs,
+            &[
+                "threadgroup float *act_tile = (threadgroup float *)(tg_shared + ",
+                "threadgroup float4 *a_slot = (threadgroup float4 *)(act_tile",
+                "threadgroup const float *lsmb = act_tile",
+                "simdgroup_float8x8 mb[2];",
+            ],
+        );
     }
 
     #[test]

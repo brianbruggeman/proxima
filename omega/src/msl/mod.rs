@@ -160,6 +160,7 @@ pub(crate) use emit_and_classify::kernel_cache_key_for_grid_with_layout;
 pub(crate) use emit_and_classify::validate_attention_variant_storage;
 pub use emit_and_classify::*;
 pub use emit_knobs::{EmitKnobs, ReductionLiteral};
+pub use expert_grouped_gemm::GroupedGemmFormats;
 pub use kernel_types_identity::*;
 pub use signature_tokens_prelude::CachedAttentionForm;
 pub use signature_tokens_prelude::context_chunks_for;

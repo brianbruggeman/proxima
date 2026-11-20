@@ -1160,7 +1160,7 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero_g10(
     uint grouped_lane = (uint)(tiitg % 32);
     threadgroup uchar tg_shared[8192];
     threadgroup half *weight_tile = (threadgroup half *)tg_shared;
-    threadgroup float *act_tile = (threadgroup float *)(tg_shared + 4096);
+    threadgroup half *act_tile = (threadgroup half *)(tg_shared + 4096);
     threadgroup float *out_tile = (threadgroup float *)tg_shared;
     device const uchar *weight_bytes = (device const uchar *)in0;
     constexpr uint experts = 256u;
@@ -1191,7 +1191,7 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero_g10(
             int a_row = tiitg / 4;
             int a_k_block = tiitg % 4;
             int a_tok = (int)tile_list[min(a_row, (int)tile_count - 1)];
-            threadgroup float4 *a_slot = (threadgroup float4 *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));
+            threadgroup half4 *a_slot = (threadgroup half4 *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));
             uint a_c_rest = (uint)(a_tok);
             int a_c1 = (int)(a_c_rest % (uint)((int)u.output_extents[1]));
             a_c_rest /= (uint)((int)u.output_extents[1]);
@@ -1227,13 +1227,13 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero_g10(
                 w_slot[552] = w_regs[13];
                 w_slot[560] = w_regs[14];
                 w_slot[568] = w_regs[15];
-                a_slot[0] = a_regs[0]; a_slot[1] = a_regs[1];
+                a_slot[0] = half4(a_regs[0]); a_slot[1] = half4(a_regs[1]);
                 threadgroup_barrier(mem_flags::mem_threadgroup);
                 if ((sgitg >> 1) == 0 || has_hi) {
                     threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);
-                    threadgroup const float *lsmb = act_tile + 2 * 64 * (sgitg / 2);
+                    threadgroup const half *lsmb = act_tile + 2 * 64 * (sgitg / 2);
                     simdgroup_half8x8 ma[4];
-                    simdgroup_float8x8 mb[2];
+                    simdgroup_half8x8 mb[2];
                     _Pragma("clang loop unroll(full)") for (short ik = 0; ik < 4; ++ik) {
                         simdgroup_barrier(mem_flags::mem_none);
                         _Pragma("clang loop unroll(full)") for (short i = 0; i < 4; ++i) { simdgroup_load(ma[i], lsma + 64 * i, 8, ulong2(0), false); }

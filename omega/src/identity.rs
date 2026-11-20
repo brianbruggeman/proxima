@@ -392,9 +392,9 @@ pub(crate) struct MetalOnlyExtras {
     /// The numeric format the tiled and expert-grouped GEMMs stage their
     /// activation tile and activation simdgroup matrix in, as a
     /// `proxima_numeric` description ([`FloatLayout::F16`] for a `half` tile).
-    /// `None` is binary32, the format every GEMM staged in before this field
-    /// existed, and renders byte-identical source and an unchanged identity.
-    /// A `Some` layout other than binary32 appends a `_stg` suffix naming it.
+    /// `None` is binary32 for the dense tiled GEMM and llama's half for the expert-grouped
+    /// GEMM. Any `Some` layout, binary32 included, appends a `_stg` suffix naming it, so the
+    /// grouped kernel's binary32 form never shares a pipeline with its default.
     pub tiled_gemm_staging_layout: Option<FloatLayout>,
 }
 
@@ -1096,9 +1096,7 @@ mod gated {
         if metal.wide_grid {
             identity.push_str("_wg");
         }
-        if let Some(layout) = metal.tiled_gemm_staging_layout
-            && !layout.same_format(&FloatLayout::BF32)
-        {
+        if let Some(layout) = metal.tiled_gemm_staging_layout {
             identity.push_str("_stg");
             identity.push_str(layout.format_name().unwrap_or("custom"));
         }
