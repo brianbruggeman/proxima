@@ -219,6 +219,7 @@ fn assert_all_cells_match(cells: &[(&str, u64, u64, Option<u32>)]) {
         .iter()
         .filter_map(|(label, rows, cached_len, window)| flash_vs_legacy(label, *rows, *cached_len, *window).err())
         .collect();
+    eprintln!("flash parity SUMMARY: cells={} failing={}", cells.len(), failures.len());
     assert!(failures.is_empty(), "{} of {} cells differ:\n{}", failures.len(), cells.len(), failures.join("\n"));
 }
 
@@ -227,5 +228,10 @@ fn flash_holds_bit_parity_with_legacy_on_whole_blocks_and_tail_rows() {
     assert_all_cells_match(&[
         ("whole blocks", 512, 2048, None),
         ("whole small", 64, 64, None),
+        ("tail q485 over c2048", 485, 2048, None),
+        ("tail q487 flint last chunk", 487, 3584, None),
+        ("tail q84 over c520", 84, 520, None),
+        ("tail q130 over c1000", 130, 1000, None),
+        ("tail q71 over c72", 71, 72, None),
     ]);
 }
