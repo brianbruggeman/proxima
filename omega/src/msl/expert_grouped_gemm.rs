@@ -23,11 +23,6 @@ pub(super) const GROUPED_TILE_TOKENS: u64 = 32;
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) const GROUPED_TILE_DEPTH: u64 = STAGED_K_STEP_ELEMENTS;
 
-/// The layout the tiled decode functions write their output run in
-/// (`thread half *out`, see `push_tiled_decode_signature` in `layout_render`): a codec's
-/// dequantized run lands here before it is staged, so `dequant_out` must equal it.
-pub const DECODE_OUTPUT_LAYOUT: FloatLayout = FloatLayout::F16;
-
 /// Every stage's number format in the expert-grouped GEMM, one value so a test can name the whole
 /// configuration. The MSL type names, vector and `simdgroup` spellings and byte sizes all derive
 /// from these through [`layout_render::hardware_stage_type`]; a layout with no Metal type is a
@@ -91,7 +86,7 @@ impl GroupedGemmFormats {
     /// weight tile and the MMA A operand, the activation tile is the MMA B operand, and the
     /// accumulators leave through an out tile of their own type.
     fn joined(&self) -> bool {
-        self.dequant_out == DECODE_OUTPUT_LAYOUT
+        self.dequant_out == FloatLayout::F16
             && self.dequant_out == self.weight_regs
             && self.weight_regs == self.weight_tile
             && self.weight_tile == self.mma_a
@@ -112,7 +107,8 @@ impl GroupedGemmFormats {
                 ));
             }
         }
-        if self.dequant_out != DECODE_OUTPUT_LAYOUT {
+        // the tiled decode signature writes `thread half *out` (`push_tiled_decode_signature`)
+        if self.dequant_out != FloatLayout::F16 {
             faults.push((
                 "dequant_out",
                 "must be float16: the decode signature writes `thread half *out`",
