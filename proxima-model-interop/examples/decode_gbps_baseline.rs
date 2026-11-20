@@ -25,6 +25,9 @@
 //! settings' own key (`SpeculativeSettings`, `speculative_settings.rs`), read
 //! through `SpeculativeSettings::from_env` with every other `PROXIMA_SPECULATIVE_*`
 //! field; unset keeps the serving default, ngram-simple.
+//! `PROXIMA_SERVING_ATTENTION_DECOMPOSITION=flash_where_admitted` selects Flash attention on every op
+//! the flash admission accepts (needs `metal` + `metal-attn-variants`); it is `ServingSettings`' own
+//! key, lowered through `as_serving_config`, default `legacy`. `PROXIMA_PROMPT` carries the prompt text.
 //! `PROXIMA_IGNORE_EOS=1` sets `ServingConfig::ignore_eos`: generate exactly the
 //! requested max tokens instead of stopping at the end-of-generation id.
 //! A half-width KV cache (`PROXIMA_KV_CACHE_TYPE=f16`) runs with speculation on: a verify step
@@ -343,6 +346,17 @@ fn main() {
             .unwrap_or_else(|_| panic!("PROXIMA_UBATCH_SIZE={value}: expected an integer")),
         Err(_) => 0,
     };
+    // the one serving setting this example reads through `ServingSettings`: the attention variant
+    // (`PROXIMA_SERVING_ATTENTION_DECOMPOSITION=flash_where_admitted` selects Flash where admitted).
+    #[cfg(all(
+        feature = "metal",
+        feature = "metal-attn-variants",
+        target_os = "macos"
+    ))]
+    let attention_variant = proxima_model_interop::ServingSettings::from_env()
+        .expect("PROXIMA_SERVING_* env parses as the serving settings")
+        .as_serving_config(&[])
+        .attention_variant;
     let serving_config = ServingConfig {
         ignore_eos,
         warm_model_buffers_at_load,
@@ -361,6 +375,12 @@ fn main() {
         prompt_cache: PromptCacheConfig::off(),
         #[cfg(all(feature = "metal", target_os = "macos"))]
         dispatch_type,
+        #[cfg(all(
+            feature = "metal",
+            feature = "metal-attn-variants",
+            target_os = "macos"
+        ))]
+        attention_variant,
         ..ServingConfig::default()
     };
     let model = LoadedModel::load_with_serving(&parsed, &bytes, &serving_config)
