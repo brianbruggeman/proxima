@@ -1217,15 +1217,19 @@ kernel void omega_reduce_r4_o3_n2_multiply_add_zero(
         threadgroup_barrier(mem_flags::mem_threadgroup);
         for (int sub_k = 0; sub_k < 4; ++sub_k) {
             simdgroup_float8x8 a_frag[4];
+#pragma clang loop unroll(full)
             for (int i = 0; i < 4; ++i) {
                 simdgroup_load(a_frag[i], weight_tile + (row_half * 4 + i) * 8 * 32 + sub_k * 8, 32);
             }
             simdgroup_barrier(mem_flags::mem_none);
             simdgroup_float8x8 b_frag[2];
+#pragma clang loop unroll(full)
             for (int j = 0; j < 2; ++j) {
                 simdgroup_load(b_frag[j], act_tile + (col_half * 2 + j) * 8 * 32 + sub_k * 8, 32, ulong2(0), true);
             }
+#pragma clang loop unroll(full)
             for (int i = 0; i < 4; ++i) {
+#pragma clang loop unroll(full)
                 for (int j = 0; j < 2; ++j) {
                     simdgroup_multiply_accumulate(acc[i * 2 + j], a_frag[i], b_frag[j], acc[i * 2 + j]);
                 }

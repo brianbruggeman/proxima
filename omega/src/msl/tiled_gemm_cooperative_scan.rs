@@ -548,7 +548,7 @@ pub(super) fn push_tiled_gemm_body(
             "            simdgroup_half8x8 a_frag[{thread_mat_m}];\n"
         ));
         source.push_str(&format!(
-            "            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
+            "{K_STEP_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
         ));
         let (a_frag_offset, a_frag_stride) =
             fragment_load_offset_stride("row_half", "i", thread_mat_m, block_k);
@@ -561,7 +561,7 @@ pub(super) fn push_tiled_gemm_body(
             "            {act_simdgroup_type} b_frag[{thread_mat_n}];\n"
         ));
         source.push_str(&format!(
-            "            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
+            "{K_STEP_UNROLL}\n            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
         ));
         let (b_frag_offset, b_frag_stride) =
             fragment_load_offset_stride("col_half", "j", thread_mat_n, block_k);
@@ -570,10 +570,10 @@ pub(super) fn push_tiled_gemm_body(
         ));
         source.push_str("            }\n");
         source.push_str(&format!(
-            "            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
+            "{K_STEP_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
         ));
         source.push_str(&format!(
-            "                for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
+            "{K_STEP_UNROLL}\n                for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
         ));
         source.push_str(&format!(
             "                    simdgroup_multiply_accumulate(acc[i * {thread_mat_n} + j], a_frag[i], b_frag[j], acc[i * {thread_mat_n} + j]);\n"
@@ -1919,7 +1919,7 @@ pub(super) fn push_dense_batched_gemm_body(
         "            {dense_simdgroup_type} a_frag[{thread_mat_m}];\n"
     ));
     source.push_str(&format!(
-        "            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
+        "{K_STEP_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
     ));
     let (dense_a_frag_offset, dense_a_frag_stride) =
         fragment_load_offset_stride("row_half", "i", thread_mat_m, block_k);
@@ -1932,7 +1932,7 @@ pub(super) fn push_dense_batched_gemm_body(
         "            {dense_simdgroup_type} b_frag[{thread_mat_n}];\n"
     ));
     source.push_str(&format!(
-        "            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
+        "{K_STEP_UNROLL}\n            for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
     ));
     let (dense_b_frag_offset, dense_b_frag_stride) =
         fragment_load_offset_stride("col_half", "j", thread_mat_n, block_k);
@@ -1941,10 +1941,10 @@ pub(super) fn push_dense_batched_gemm_body(
     ));
     source.push_str("            }\n");
     source.push_str(&format!(
-        "            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
+        "{K_STEP_UNROLL}\n            for (int i = 0; i < {thread_mat_m}; ++i) {{\n"
     ));
     source.push_str(&format!(
-        "                for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
+        "{K_STEP_UNROLL}\n                for (int j = 0; j < {thread_mat_n}; ++j) {{\n"
     ));
     source.push_str(&format!(
         "                    simdgroup_multiply_accumulate(acc[i * {thread_mat_n} + j], a_frag[i], b_frag[j], acc[i * {thread_mat_n} + j]);\n"
@@ -3307,6 +3307,11 @@ pub(super) fn push_broadcast_epilogue_write(
 // the slot loops index per-thread arrays, which only stay in registers when
 // every trip is unrolled; the trip count is a literal, so full unroll is legal
 pub(super) const FULL_UNROLL: &str = "#pragma unroll";
+
+// the K-step fragment loops: bare `#pragma unroll` left the bf16 ones rolled
+// (2,325 us vs 203 us at the router shape); llama spells it `FOR_UNROLL`
+#[cfg(feature = "metal-tiled-gemm")]
+pub(super) const K_STEP_UNROLL: &str = "#pragma clang loop unroll(full)";
 
 /// The cooperative fold's accumulate loop with its loads issued ahead of its
 /// folds: each trip loads `unroll` strided elements of every operand into
