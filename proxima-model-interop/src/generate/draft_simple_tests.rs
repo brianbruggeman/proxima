@@ -76,6 +76,11 @@ fn decode_prompt(
     token_override: Option<&[u32]>,
     stop_after: Option<usize>,
 ) -> DecodeResult {
+    // the request path runs a model with its own device context active; without it the weights land in the thread's ambient resident cache, which outlives the model and rebinds the next test's names
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    let mut serving_context = proxima_primitives::driver::block_on(model.serving.lock());
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    let _active = serving_context.activate();
     let mut runtime = BackendRuntime::new(serving);
     let mut stats = SpeculativeDecodeStats::default();
     let mut residuals = Vec::new();
@@ -446,6 +451,10 @@ fn resume_logits(
     state: PrefixState,
     token: u32,
 ) -> Vec<f32> {
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    let mut serving_context = proxima_primitives::driver::block_on(model.serving.lock());
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    let _active = serving_context.activate();
     let mut runtime = BackendRuntime::new(serving);
     let mut logits = Vec::new();
     model
