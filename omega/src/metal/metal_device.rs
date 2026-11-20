@@ -154,8 +154,20 @@ mod tests {
         }
     }
 
-    fn resolve_on_new_thread(kernel: Kernel, key: &'static str) -> Result<usize, MetalError> {
+    fn private_device() -> Result<MetalDevice, MetalError> {
+        Ok(MetalDevice::new(MTLCreateSystemDefaultDevice().ok_or(MetalError::NoDevice)?))
+    }
+
+    // a spawned thread has no active context and would resolve the process default,
+    // whose cache every other test mutates; `shared` scopes the cache to this test
+    fn resolve_on_new_thread(
+        shared: &MetalDevice,
+        kernel: Kernel,
+        key: &'static str,
+    ) -> Result<usize, MetalError> {
+        let shared = shared.clone();
         let handle = std::thread::spawn(move || {
+            ACTIVE_DEVICE.with(|slot| *slot.borrow_mut() = Some(shared));
             let device = MetalDevice::current()?;
             let pipeline = pipeline_for_kernel(device.device(), &kernel, key, MathMode::Relaxed)?;
             Ok(Retained::as_ptr(&pipeline) as *const u8 as usize)
@@ -165,11 +177,11 @@ mod tests {
 
     #[test]
     fn two_threads_share_one_compiled_pipeline() -> Result<(), MetalError> {
-        let device = MetalDevice::system_default()?;
-        let before = device.pipeline_count();
-        let first = resolve_on_new_thread(probe_kernel(), "s5_two_threads_key")?;
-        let second = resolve_on_new_thread(probe_kernel(), "s5_two_threads_key")?;
-        assert_eq!(device.pipeline_count(), before + 1, "one key compiled once across two threads");
+        let device = private_device()?;
+        assert_eq!(device.pipeline_count(), 0, "a fresh device starts with an empty cache");
+        let first = resolve_on_new_thread(&device, probe_kernel(), "s5_two_threads_key")?;
+        let second = resolve_on_new_thread(&device, probe_kernel(), "s5_two_threads_key")?;
+        assert_eq!(device.pipeline_keys(), ["s5_two_threads_key"], "one key compiled once across two threads");
         assert_eq!(first, second, "the second thread must hit the first thread's pipeline");
         assert!(first != 0, "N==0 is red: no pipeline pointer came back");
         Ok(())
