@@ -499,14 +499,14 @@ fn run_attn_fuse_parity_probe(
         input_placements.iter().map(|(node, _, _)| *node).collect();
 
     let build_plan = |fuse_cached_attention: bool| -> Result<omega::metal::Plan, InteropError> {
-        let mut plan = plan_named_with_placed_inputs(
+        let mut plan = plan_named_with_placed_inputs_laid_out(
             program,
             symbols,
             named_blocks,
             &parity_outputs,
-            runtime.numeric_policy,
+            (runtime.numeric_policy, Some(runtime.dense_mma_input_layout)),
             &placed_input_nodes,
-            fuse_cached_attention,
+            (fuse_cached_attention, false),
         )?;
         plan.mark_resident(resident_names);
         if runtime.plan_time_constants {
@@ -940,14 +940,14 @@ fn write_attn_layer0_failure_report(
     // request them as outputs of the same production plan so the dump below
     // reads real Metal-computed bytes, not a CPU stand-in.
     intermediate_outputs.extend_from_slice(&operand_nodes);
-    let mut unfused_intermediates_plan = plan_named_with_placed_inputs(
+    let mut unfused_intermediates_plan = plan_named_with_placed_inputs_laid_out(
         program,
         symbols,
         named_blocks,
         &intermediate_outputs,
-        numeric_policy,
+        (numeric_policy, Some(runtime.dense_mma_input_layout)),
         &placed_input_nodes,
-        false,
+        (false, false),
     )?;
     unfused_intermediates_plan.mark_resident(resident_names);
     if runtime.plan_time_constants {
@@ -1402,14 +1402,14 @@ fn write_attn_read_source_vectors(
 
     let placed_input_nodes: Vec<NodeId> =
         input_placements.iter().map(|(node, _, _)| *node).collect();
-    let mut plan = plan_named_with_placed_inputs(
+    let mut plan = plan_named_with_placed_inputs_laid_out(
         program,
         symbols,
         named_blocks,
         &outputs,
-        runtime.numeric_policy,
+        (runtime.numeric_policy, Some(runtime.dense_mma_input_layout)),
         &placed_input_nodes,
-        false,
+        (false, false),
     )?;
     plan.mark_resident(resident_names);
     if runtime.plan_time_constants {

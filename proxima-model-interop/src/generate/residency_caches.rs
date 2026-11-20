@@ -85,6 +85,29 @@ mod configured_runtime_tests {
     use proxima_tensor::map::{self, IndexMap};
     use proxima_tensor::{ScalarOp};
     use proxima_numeric::{DType};
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    use omega::config::DenseMmaInputLayout;
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    use proxima_numeric::float_layout::FloatLayout;
+
+    #[test]
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    fn the_serving_runtime_reads_the_dense_mma_layout_from_the_omega_config() {
+        let runtime_config = RuntimeConfig {
+            dense_mma_input_layout: DenseMmaInputLayout::explicit(FloatLayout::BF16),
+            ..RuntimeConfig::default()
+        };
+        let configured = ServingConfig::default().with_omega_runtime(&runtime_config);
+
+        let from_config = BackendRuntime::new(&configured).dense_mma_input_layout;
+        let from_default = BackendRuntime::new(&ServingConfig::default()).dense_mma_input_layout;
+
+        assert_eq!(from_config, DenseMmaInputLayout::explicit(FloatLayout::BF16));
+        assert_eq!(from_default, RuntimeConfig::default().dense_mma_input_layout);
+        let oracle_policy = from_config.apply_to(configured.numeric_policy);
+        assert!(oracle_policy.bf16_input_rounding, "the cpu oracle gets the grant the plan gets");
+        assert!(!configured.numeric_policy.bf16_input_rounding);
+    }
 
     #[test]
     fn configured_runtime_plans_once_and_zero_budget_refuses() {
@@ -2996,6 +3019,7 @@ pub(super) fn select_backend(config: &ServingConfig) -> Engine {
 pub(super) struct PlanNumerics<'config> {
     pub(super) math_mode: omega::metal::MathMode,
     pub(super) numeric_policy: proxima_numeric::NumericPolicy,
+    pub(super) dense_mma_input_layout: omega::config::DenseMmaInputLayout,
     pub(super) dispatch_type: omega::metal::DispatchType,
     #[cfg(feature = "metal-attn-variants")]
     pub(super) attention_variant: Option<omega::AttentionVariant>,
@@ -3129,6 +3153,9 @@ pub struct BackendRuntime {
     /// plan_named`'s signature now takes it on every engine arm, not only
     /// the Metal one.
     pub(super) numeric_policy: proxima_numeric::NumericPolicy,
+    /// The dense MMA layout from omega's own config: `omega_runtime`'s when set, else omega's default.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) dense_mma_input_layout: omega::config::DenseMmaInputLayout,
     #[cfg(all(
         feature = "metal",
         feature = "metal-attn-variants",
@@ -3348,6 +3375,10 @@ impl BackendRuntime {
             #[cfg(all(feature = "metal", target_os = "macos"))]
             math_mode: config.math_mode,
             numeric_policy: config.numeric_policy,
+            #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+            dense_mma_input_layout: config
+                .omega_runtime
+                .map_or_else(omega::config::DenseMmaInputLayout::default, |runtime| runtime.dense_mma_input_layout),
             #[cfg(all(
                 feature = "metal",
                 feature = "metal-attn-variants",
@@ -4331,6 +4362,7 @@ impl BackendRuntime {
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
+            dense_mma_input_layout: self.dense_mma_input_layout,
             dispatch_type: self.dispatch_type,
             #[cfg(feature = "metal-attn-variants")]
             attention_variant: self.attention_variant,
@@ -4408,6 +4440,7 @@ impl BackendRuntime {
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
+            dense_mma_input_layout: self.dense_mma_input_layout,
             dispatch_type: omega::metal::DispatchType::Serial,
             #[cfg(feature = "metal-attn-variants")]
             attention_variant: self.attention_variant,
@@ -4487,6 +4520,7 @@ impl BackendRuntime {
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
+            dense_mma_input_layout: self.dense_mma_input_layout,
             dispatch_type: self.dispatch_type,
             #[cfg(feature = "metal-attn-variants")]
             attention_variant: self.attention_variant,
@@ -4735,12 +4769,12 @@ impl BackendRuntime {
                 },
             )?
         } else {
-            plan_named_with_placed_inputs_scheduled(
+            plan_named_with_placed_inputs_laid_out(
                 program,
                 symbols,
                 named,
                 outputs,
-                numerics.numeric_policy,
+                (numerics.numeric_policy, Some(numerics.dense_mma_input_layout)),
                 &placed_input_nodes,
                 (numerics.fuse_cached_attention, numerics.wavefront_schedule),
             )?
@@ -4811,6 +4845,7 @@ impl BackendRuntime {
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
+            dense_mma_input_layout: self.dense_mma_input_layout,
             dispatch_type: self.dispatch_type,
             #[cfg(feature = "metal-attn-variants")]
             attention_variant: self.attention_variant,
@@ -4902,6 +4937,7 @@ impl BackendRuntime {
         let numerics = PlanNumerics {
             math_mode: self.math_mode,
             numeric_policy: self.numeric_policy,
+            dense_mma_input_layout: self.dense_mma_input_layout,
             dispatch_type: self.dispatch_type,
             #[cfg(feature = "metal-attn-variants")]
             attention_variant: self.attention_variant,

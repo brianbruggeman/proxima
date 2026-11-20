@@ -183,7 +183,7 @@ use omega::try_read_placed_buffer_f32;
 use omega::{
     PlacedBuffer, allocate_placed_buffer, execute_plan_named_with_placements,
     execute_plan_named_with_placements_and_expert_sources,
-    execute_plan_named_with_placements_overlapping, plan_named_with_placed_inputs, plan_named_with_placed_inputs_scheduled,
+    execute_plan_named_with_placements_overlapping, plan_named_with_placed_inputs, plan_named_with_placed_inputs_laid_out,
 };
 // this module is only compiled under `feature = "std"` (lib.rs's own
 // `#[cfg(feature = "std")] mod generate;`), and `std` pulls in

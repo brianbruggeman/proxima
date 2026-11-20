@@ -2329,6 +2329,34 @@ pub fn plan_named_with_placed_inputs_scheduled(
     placed_input_nodes: &[NodeId],
     options: (bool, bool),
 ) -> Result<Plan, MetalError> {
+    plan_named_with_placed_inputs_laid_out(
+        program,
+        symbols,
+        named,
+        outputs,
+        (numeric_policy, None),
+        placed_input_nodes,
+        options,
+    )
+}
+
+/// [`plan_named_with_placed_inputs_scheduled`] with the configured dense MMA layout: `numeric`
+/// is `(policy, layout)`, and `Some(layout)` goes through [`DenseMmaInputLayout::apply_to`] and
+/// [`DenseMmaInputLayout::plan_layout`] (the rule `plan_named_with_config` uses), so a caller
+/// without a `RuntimeConfig` takes the layout from its own config, never from a model check.
+///
+/// # Errors
+/// Propagates name-resolution and planning failures.
+#[cfg(feature = "metal-output-placement")]
+pub fn plan_named_with_placed_inputs_laid_out(
+    program: &[Op],
+    symbols: &[u64],
+    named: &[(&str, QuantizedBlock<'_>)],
+    outputs: &[NodeId],
+    numeric: (NumericPolicy, Option<DenseMmaInputLayout>),
+    placed_input_nodes: &[NodeId],
+    options: (bool, bool),
+) -> Result<Plan, MetalError> {
     let blocks = resolve_named_blocks_with_placed_nodes(program, named, |node| {
         placed_input_nodes.contains(&node)
     })?;
@@ -2337,7 +2365,7 @@ pub fn plan_named_with_placed_inputs_scheduled(
         symbols,
         &blocks,
         outputs,
-        (numeric_policy, None),
+        numeric,
         placed_input_nodes,
         options,
     )

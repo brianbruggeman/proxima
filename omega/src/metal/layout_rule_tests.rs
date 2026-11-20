@@ -96,3 +96,54 @@ fn an_unconfigured_layout_keeps_the_float_tiles_and_fixes_no_plan_layout() {
     assert!(source.contains("simdgroup_float8x8") && !source.contains("simdgroup_bfloat8x8"));
     assert_eq!(fixed, None);
 }
+
+#[cfg(feature = "metal-output-placement")]
+fn named_router_source_under_env_layout(layout: &str) -> String {
+    let runtime = temp_env::with_vars(
+        [("OMEGA_DENSE_MMA_INPUT_LAYOUT", Some(layout))],
+        RuntimeConfig::from_env,
+    )
+    .expect("the layout value parses from the environment");
+    let (program, output) = router_program();
+    let weight_bytes = vec![0u8; FEATURES * REDUCTION * 2];
+    let activation = vec![0.5f32; TOKENS * REDUCTION];
+    let named = [
+        (
+            "weight",
+            QuantizedBlock::Packed {
+                codec: Codec::BFloat16,
+                bytes: &weight_bytes,
+            },
+        ),
+        ("activation", QuantizedBlock::Float32(&activation)),
+    ];
+    let serving = NumericPolicy::llama_relaxed().with_epilogue_sources(true);
+    let plan = plan_named_with_placed_inputs_laid_out(
+        &program,
+        &[],
+        &named,
+        &[output],
+        (serving, Some(runtime.dense_mma_input_layout)),
+        &[],
+        (true, false),
+    )
+    .expect("the router plans through the serving entry point");
+    let bound = plan.prepared.resolved.first().expect("one fused router op");
+    crate::msl::emit(bound, &plan.packed_operands, plan.numeric_policy)
+        .expect("router emits")
+        .source
+}
+
+#[cfg(feature = "metal-output-placement")]
+#[test]
+fn the_serving_entry_renders_bf16_tiles_for_a_runtime_config_layout_of_bf16() {
+    let source = named_router_source_under_env_layout("bf16");
+    assert!(source.contains("simdgroup_bfloat8x8"));
+}
+
+#[cfg(feature = "metal-output-placement")]
+#[test]
+fn the_serving_entry_renders_float_tiles_for_a_runtime_config_layout_of_f32() {
+    let source = named_router_source_under_env_layout("f32");
+    assert!(source.contains("simdgroup_float8x8") && !source.contains("simdgroup_bfloat8x8"));
+}
