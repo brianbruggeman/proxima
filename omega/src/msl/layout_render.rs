@@ -831,7 +831,29 @@ pub fn level_run_word_decode_msl(format: &LevelFormat, function: &str, name: &st
     run_decode_msl(format, function, name, run, true).ok()
 }
 
+/// The per-element form of [`level_run_decode_msl`]: one plane walk and one level lookup per
+/// element, never the word or grouped run reads. It is the reference the grouped signed-grid run
+/// decode is compared against bit for bit.
+///
+/// # Errors
+/// What [`level_run_decode_msl`] refuses.
+#[doc(hidden)]
+#[must_use = "the refusal names why the format has no rendered run decode"]
+pub fn level_run_decode_per_element_msl(format: &LevelFormat, function: &str, name: &str, run: u64) -> Result<String, LevelRenderRefusal> {
+    run_decode_form_msl(format, function, name, run, RunForm::PerElement)
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RunForm {
+    Runs { aligned: bool },
+    PerElement,
+}
+
 fn run_decode_msl(format: &LevelFormat, function: &str, name: &str, run: u64, aligned: bool) -> Result<String, LevelRenderRefusal> {
+    run_decode_form_msl(format, function, name, run, RunForm::Runs { aligned })
+}
+
+fn run_decode_form_msl(format: &LevelFormat, function: &str, name: &str, run: u64, form: RunForm) -> Result<String, LevelRenderRefusal> {
     let layout = renderable_level_layout(format)?;
     let mut head = field_expression(&layout.scale, "scale", &format!("{name}_scale"));
     let mut scale = "scale";
@@ -854,16 +876,102 @@ fn run_decode_msl(format: &LevelFormat, function: &str, name: &str, run: u64, al
         ));
         scale = "effective_scale";
     }
+    let RunForm::Runs { aligned } = form else {
+        return Ok(per_element_run_msl(layout, &format.levels, (function, name), run, (&head, scale)));
+    };
     if let Some(words) = word_run_level_msl(layout, &format.levels, (function, name), run, (&head, scale), aligned) {
         return Ok(words);
     }
     if aligned {
         return Err(LevelRenderRefusal("no word-aligned run decode"));
     }
-    let raw = raw_level_msl(layout, Codes::Levels(&format.levels), name);
-    Ok(format!(
+    Ok(per_element_run_msl(layout, &format.levels, (function, name), run, (&head, scale)))
+}
+
+fn per_element_run_msl(layout: &BlockLayout, levels: &LevelTable, (function, name): (&str, &str), run: u64, (head, scale): (&str, &str)) -> String {
+    let raw = raw_level_msl(layout, Codes::Levels(levels), name);
+    format!(
         "\nstatic inline void {function}(device const uchar *block, uint slot, thread half *out) {{\n{head}    for (uint run = 0u; run < {run}u; ++run) {{\n        uint index = slot + run;\n{raw}        out[run] = (half)(raw * {scale});\n    }}\n}}\n"
-    ))
+    )
+}
+
+/// How `count` fields of one plane, `step` elements apart, are read from a window of `nbytes`
+/// bytes that starts at the first field's byte: field `i` sits at bit `shift + i * stride_bits`.
+struct PlaneWindow {
+    stride_bits: u32,
+    nbytes: u32,
+}
+
+/// Decides whether, for every run start, the plane's fields of the `count` elements `slot`,
+/// `slot + step`, ... lie at a constant bit stride and fit in a `uint` window inside the block.
+/// `None` sends the caller to the per-element form.
+fn plane_window(plane: &Plane, layout: &BlockLayout, run: u32, (count, step): (u32, u32)) -> Option<PlaneWindow> {
+    let stride = if count > 1 { plane.address(step as usize).checked_sub(plane.address(0))? as u32 } else { 0 };
+    let starts: Vec<usize> = (0..usize::from(layout.elements)).step_by(run as usize).collect();
+    let steady = starts
+        .iter()
+        .all(|start| (0..count).all(|field| plane.address(start + (field * step) as usize) == plane.address(*start) + (field * stride) as usize));
+    let max_shift = starts.iter().map(|start| plane.address(*start) as u32 % 8).max()?;
+    let nbytes = (max_shift + (count - 1) * stride + u32::from(plane.bits)).div_ceil(8);
+    let inside = starts.iter().all(|start| plane.address(*start) as u32 / 8 + nbytes <= u32::from(layout.block_bytes));
+    (steady && inside && nbytes <= 4).then_some(PlaneWindow { stride_bits: stride, nbytes })
+}
+
+/// Statements binding `uint {binding}_window` (the plane's bytes for the run, little endian) and
+/// `uint {binding}_shift` (the bit position of the run's first field in it).
+fn plane_window_msl(plane: &Plane, window: &PlaneWindow, binding: &str) -> String {
+    let mut text = plane_address_msl(plane, "slot", binding);
+    text.push_str(&format!("    device const uchar *{binding}_bytes = block + {binding}_address / 8u;\n    uint {binding}_shift = {binding}_address % 8u;\n"));
+    let joined = (0..window.nbytes).map(|byte| format!("((uint){binding}_bytes[{byte}u] << {}u)", byte * 8)).collect::<Vec<_>>().join(" | ");
+    text.push_str(&format!("    uint {binding}_window = {joined};\n"));
+    text
+}
+
+/// The run decode of a signed grid (IQ3_S): the run's code and sign bytes are read once into `uint`
+/// windows, then one grid word is fetched per `lanes` elements and its magnitude bytes are split
+/// with constant shifts; the sign is XORed into the float's sign bit, so no per-element branch,
+/// byte load or plane address remains. Every element is the same value `signed_grid_raw_msl` gives.
+fn signed_grid_run_msl(layout: &BlockLayout, levels: &LevelTable, (function, name): (&str, &str), run: u64, (head, scale): (&str, &str)) -> Option<String> {
+    let LevelTable::SignedGrid { lanes, sign, unit_shift, sign_table: None, .. } = levels else {
+        return None;
+    };
+    let (run, lanes) = (u32::try_from(run).ok()?, u32::from(*lanes));
+    if lanes == 0 || run % lanes != 0 {
+        return None;
+    }
+    let groups = run / lanes;
+    let coded = &layout.element;
+    let low_window = plane_window(&coded.low, layout, run, (groups, lanes))?;
+    let high = coded.high.as_ref();
+    let high_window = match high {
+        Some(plane) => Some(plane_window(plane, layout, run, (groups, lanes))?),
+        None => None,
+    };
+    let sign_window = plane_window(sign, layout, run, (run, 1))?;
+    let mut body = plane_window_msl(&coded.low, &low_window, "low");
+    if let (Some(plane), Some(window)) = (high, &high_window) {
+        body.push_str(&plane_window_msl(plane, window, "high"));
+    }
+    body.push_str(&plane_window_msl(sign, &sign_window, "sign"));
+    let unit = if *unit_shift == 0 { String::new() } else { format!(" * {:e}f", 0.5f32.powi(i32::from(*unit_shift))) };
+    let low_mask = (1u32 << coded.low.bits) - 1;
+    for group in 0..groups {
+        let mut code = format!("((low_window >> (low_shift + {}u)) & {low_mask:#x}u)", group * low_window.stride_bits);
+        if let (Some(plane), Some(window)) = (high, &high_window) {
+            let mask = (1u32 << plane.bits) - 1;
+            code.push_str(&format!(" | (((high_window >> (high_shift + {}u)) & {mask:#x}u) << {}u)", group * window.stride_bits, coded.low.bits));
+        }
+        body.push_str(&format!("    uint grid{group} = {name}_grid[{code}];\n"));
+    }
+    for element in 0..run {
+        let (group, lane) = (element / lanes, element % lanes);
+        body.push_str(&format!(
+            "    out[{element}] = (half)(as_type<float>(as_type<uint>((float)((grid{group} >> {}u) & 0xFFu){unit}) ^ (((sign_window >> (sign_shift + {}u)) & 1u) << 31u)) * {scale});\n",
+            8 * lane,
+            element * sign_window.stride_bits
+        ));
+    }
+    Some(format!("\nstatic inline void {function}(device const uchar *block, uint slot, thread half *out) {{\n{head}{body}}}\n"))
 }
 
 /// The word-load form of [`level_run_decode_msl`]'s body, from the planes' description alone: each
@@ -879,7 +987,10 @@ fn word_run_level_msl(
     (head, scale): (&str, &str),
     aligned: bool,
 ) -> Option<String> {
-    if matches!(levels, LevelTable::SignedGrid { .. }) || layout.element.packed_radix > 1 {
+    if matches!(levels, LevelTable::SignedGrid { .. }) {
+        return if aligned { None } else { signed_grid_run_msl(layout, levels, (function, name), run, (head, scale)) };
+    }
+    if layout.element.packed_radix > 1 {
         return None;
     }
     let coded = &layout.element;
