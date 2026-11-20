@@ -209,6 +209,8 @@ impl Listener {
         } else {
             num_cores
         };
+        let (num_lanes, advertised_addr) =
+            lane_plan(&self.protocol_name, num_lanes, resolved_addr);
 
         let shutdown_notify = Arc::new(proxima_primitives::sync::Notify::new());
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -327,10 +329,24 @@ impl Listener {
             }
         }
         Ok(ListenerHandle {
-            bind_addr: Some(resolved_addr),
+            bind_addr: advertised_addr,
             shutdown: Some(shutdown_tx),
             _runtime: Some(runtime_for_handle),
         })
+    }
+}
+
+/// An `mcp` listener serves one stdio-style lane and advertises no bind
+/// address, so `proxima serve` neither probes nor prints READY for it;
+/// every other protocol keeps its lane count and resolved address.
+fn lane_plan(
+    protocol_name: &str,
+    lanes: usize,
+    resolved_addr: SocketAddr,
+) -> (usize, Option<SocketAddr>) {
+    match protocol_name {
+        "mcp" => (1, None),
+        _ => (lanes, Some(resolved_addr)),
     }
 }
 
@@ -660,7 +676,7 @@ impl Drop for ListenerHandle {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use std::any::Any;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use bytes::Bytes;
     use proxima_primitives::pipe::SendPipe;
@@ -852,12 +868,14 @@ mod tests {
     /// `run_with_runtime` resolution test below stays a unit test instead
     /// of a real end-to-end bind.
     struct ReadySignalProtocol {
+        name: &'static str,
         served: Arc<AtomicBool>,
+        serve_calls: Arc<AtomicUsize>,
     }
 
     impl ListenProtocol for ReadySignalProtocol {
         fn name(&self) -> &str {
-            "ready-signal-fake"
+            self.name
         }
 
         fn serve(
@@ -869,6 +887,7 @@ mod tests {
             shutdown: oneshot::Receiver<()>,
         ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
             self.served.store(true, Ordering::SeqCst);
+            self.serve_calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async move {
                 if let Some(sender) = context.ready_signal {
                     let _ = sender.send(Ok(()));
@@ -884,7 +903,9 @@ mod tests {
     /// blocking on `run_with_runtime`'s ready-ack recv, without pulling in
     /// tokio or prime as a dev-dependency. Methods `run_with_runtime`
     /// never calls panic loudly instead of silently no-op'ing.
-    struct ThreadRuntime;
+    struct ThreadRuntime {
+        cores: usize,
+    }
 
     impl Runtime for ThreadRuntime {
         fn spawn_on_current_core(&self, _future: Pin<Box<dyn Future<Output = ()> + 'static>>) {
@@ -926,7 +947,7 @@ mod tests {
         }
 
         fn num_cores(&self) -> usize {
-            1
+            self.cores
         }
 
         fn current_core(&self) -> CoreId {
@@ -939,14 +960,16 @@ mod tests {
         let served = Arc::new(AtomicBool::new(false));
         let bind: SocketAddr = "127.0.0.1:0".parse().expect("address parses");
         let protocol: Arc<dyn ListenProtocol> = Arc::new(ReadySignalProtocol {
+            name: "ready-signal-fake",
             served: served.clone(),
+            serve_calls: Arc::new(AtomicUsize::new(0)),
         });
         let listener = ListenerSpec::protocol(bind, protocol).attach(null_dispatch());
 
         // Empty registry — proves resolution never reaches `registry.get`.
         let registry = ListenRegistry::new();
         let telemetry: TelemetryHandle = Arc::new(NoopTelemetry);
-        let runtime: Arc<dyn Runtime> = Arc::new(ThreadRuntime);
+        let runtime: Arc<dyn Runtime> = Arc::new(ThreadRuntime { cores: 1 });
 
         let handle = listener
             .run_with_runtime(&registry, telemetry, Some(runtime), None, None)
@@ -966,7 +989,7 @@ mod tests {
 
         let registry = ListenRegistry::new();
         let telemetry: TelemetryHandle = Arc::new(NoopTelemetry);
-        let runtime: Arc<dyn Runtime> = Arc::new(ThreadRuntime);
+        let runtime: Arc<dyn Runtime> = Arc::new(ThreadRuntime { cores: 1 });
 
         let outcome = listener.run_with_runtime(&registry, telemetry, Some(runtime), None, None);
         let error = match outcome {
@@ -1021,7 +1044,7 @@ mod tests {
 
         let registry = ListenRegistry::new();
         let telemetry: TelemetryHandle = Arc::new(NoopTelemetry);
-        let runtime: Arc<dyn Runtime> = Arc::new(ThreadRuntime);
+        let runtime: Arc<dyn Runtime> = Arc::new(ThreadRuntime { cores: 1 });
 
         let outcome = listener.run_with_runtime(&registry, telemetry, Some(runtime), None, None);
         let error = match outcome {
@@ -1039,5 +1062,66 @@ mod tests {
             "a listener that failed BEFORE ever reporting ready must not present as \
              a bare timeout; got: {message}"
         );
+    }
+
+    /// Starts a carried protocol named `name` on a 4-core runtime and
+    /// returns the live handle plus how many lanes called `serve`.
+    fn start_on_four_cores(name: &'static str) -> (ListenerHandle, usize) {
+        let serve_calls = Arc::new(AtomicUsize::new(0));
+        let bind: SocketAddr = "127.0.0.1:0".parse().expect("address parses");
+        let protocol: Arc<dyn ListenProtocol> = Arc::new(ReadySignalProtocol {
+            name,
+            served: Arc::new(AtomicBool::new(false)),
+            serve_calls: serve_calls.clone(),
+        });
+        let listener = ListenerSpec::protocol(bind, protocol).attach(null_dispatch());
+        let telemetry: TelemetryHandle = Arc::new(NoopTelemetry);
+        let runtime: Arc<dyn Runtime> = Arc::new(ThreadRuntime { cores: 4 });
+        let handle = listener
+            .run_with_runtime(&ListenRegistry::new(), telemetry, Some(runtime), None, None)
+            .expect("fake protocol starts on every lane");
+        (handle, serve_calls.load(Ordering::SeqCst))
+    }
+
+    fn check_lanes(count: usize, expected: usize) -> Result<(), String> {
+        if count == expected {
+            Ok(())
+        } else {
+            Err(format!("expected {expected} serve lane(s), got {count}"))
+        }
+    }
+
+    #[test]
+    fn mcp_lane_runs_one_serve_lane_on_four_cores() {
+        let (handle, count) = start_on_four_cores("mcp");
+        futures::executor::block_on(handle.stop());
+        assert_eq!(check_lanes(count, 1), Ok(()));
+    }
+
+    #[test]
+    fn mcp_lane_reports_no_bind_addr() {
+        let (handle, _count) = start_on_four_cores("mcp");
+        assert_eq!(handle.bind_addr(), None);
+        futures::executor::block_on(handle.stop());
+    }
+
+    #[test]
+    fn ctl_lanes_stream_keeps_one_lane_per_core_with_bind_addr() {
+        let (handle, count) = start_on_four_cores("stream");
+        let bind_addr = handle.bind_addr();
+        futures::executor::block_on(handle.stop());
+        let expected = if cfg!(windows) { 1 } else { 4 };
+        assert_eq!(check_lanes(count, expected), Ok(()));
+        assert!(bind_addr.is_some(), "non-mcp listener must report its bind");
+    }
+
+    #[test]
+    fn ctl_lanes_rejects_four_lane_count_when_one_expected() {
+        assert!(check_lanes(4, 1).is_err());
+    }
+
+    #[test]
+    fn ctl_lanes_accepts_matching_single_lane_count() {
+        assert_eq!(check_lanes(1, 1), Ok(()));
     }
 }
