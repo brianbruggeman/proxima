@@ -13,6 +13,16 @@ const PREFILL_COMBINE_EXTENTS: [u32; 3] = [1000, 8, 1024];
 /// serial combine fold's shape (two operands, `Add`, `Zero` init), built for
 /// any rank so the same fixture covers the sole-axis and multi-axis decode.
 fn product_fold_op(extents: &[u32], reduce_axes: &[u16]) -> BoundOp {
+    product_fold_op_seeded(extents, reduce_axes, ReduceInit::Zero)
+}
+
+/// [`product_fold_op`] with an explicit init: `FirstElement` is the one seed the
+/// static-extent body does not own, so it keeps the runtime-extent body under test.
+fn runtime_extent_fold_op(extents: &[u32], reduce_axes: &[u16]) -> BoundOp {
+    product_fold_op_seeded(extents, reduce_axes, ReduceInit::FirstElement)
+}
+
+fn product_fold_op_seeded(extents: &[u32], reduce_axes: &[u16], init: ReduceInit) -> BoundOp {
     let rank = extents.len() as u16;
     let shape: Vec<Extent> = extents
         .iter()
@@ -58,7 +68,7 @@ fn product_fold_op(extents: &[u32], reduce_axes: &[u16]) -> BoundOp {
         Op::Reduce(Reduce {
             dtype: DType::FLOAT32,
             body: ScalarOp::Add,
-            init: ReduceInit::Zero,
+            init,
             operand: product,
             in_map: IndexMap::Affine(map::projection(rank, &all_axes)),
             out_map: IndexMap::Affine(map::projection(rank, &output_axes)),
@@ -97,7 +107,7 @@ const NARROW_OUTPUT_DECODE: &str = "output_coord[1] = (long)((uint)remaining % (
 
 #[test]
 fn prefill_combine_fold_decodes_outputs_in_32_bit_and_drops_the_sole_axis_divmod() {
-    let bound = product_fold_op(&PREFILL_COMBINE_EXTENTS, &[1]);
+    let bound = runtime_extent_fold_op(&PREFILL_COMBINE_EXTENTS, &[1]);
 
     let source = emitted_source(&bound, true);
 
@@ -126,7 +136,7 @@ fn prefill_combine_fold_decodes_outputs_in_32_bit_and_drops_the_sole_axis_divmod
 
 #[test]
 fn an_iteration_space_past_u32_keeps_the_64_bit_decode() {
-    let bound = product_fold_op(&[70_000, 8, 70_000], &[1]);
+    let bound = runtime_extent_fold_op(&[70_000, 8, 70_000], &[1]);
 
     let source = emitted_source(&bound, true);
 
@@ -142,7 +152,7 @@ fn an_iteration_space_past_u32_keeps_the_64_bit_decode() {
 
 #[test]
 fn the_coordinate_override_set_to_zero_restores_the_64_bit_decode() {
-    let bound = product_fold_op(&PREFILL_COMBINE_EXTENTS, &[1]);
+    let bound = runtime_extent_fold_op(&PREFILL_COMBINE_EXTENTS, &[1]);
 
     let source = emitted_source(&bound, false);
 
@@ -152,7 +162,7 @@ fn the_coordinate_override_set_to_zero_restores_the_64_bit_decode() {
 
 #[test]
 fn a_two_axis_reduction_narrows_its_inner_divmod_and_hands_the_outer_axis_the_remainder() {
-    let bound = product_fold_op(&PREFILL_COMBINE_EXTENTS, &[1, 2]);
+    let bound = runtime_extent_fold_op(&PREFILL_COMBINE_EXTENTS, &[1, 2]);
 
     let source = emitted_source(&bound, true);
 
@@ -217,4 +227,62 @@ fn the_narrow_unflatten_equals_the_wide_one_across_the_captured_output_space() {
 
     assert_eq!(output_total, 1_024_000);
     assert_eq!(mismatches, 0);
+}
+
+#[test]
+fn a_static_fold_bakes_its_extents_and_carries_no_runtime_loop_bound_or_output_divmod() {
+    let bound = product_fold_op(&[512, 6, 2048], &[1]);
+
+    let source = emitted_source(&bound, true);
+
+    assert!(!source.contains("simd_sum"), "serial body\n{source}");
+    assert!(!source.contains("u.reduction_total;"), "{source}");
+    assert!(!source.contains("% u.output_extents"), "{source}");
+    assert!(!source.contains("u.output_extents["), "{source}");
+    assert!(!source.contains("u.reduction_extents"), "{source}");
+    assert!(!source.contains("seeded"), "{source}");
+    assert!(source.contains("fold0 < 6L"), "{source}");
+    assert!(source.contains("(uint)2048L"), "{source}");
+    assert!(source.contains("output_coord[0] = remaining;"), "{source}");
+    assert!(cache_key(&bound).contains("_sf2048x6"), "{}", cache_key(&bound));
+}
+
+#[test]
+fn a_static_fold_advances_each_operand_by_its_reduce_stride_instead_of_recomputing_offsets() {
+    let bound = product_fold_op(&[512, 6, 2048], &[1]);
+
+    let source = emitted_source(&bound, true);
+
+    assert!(source.contains("run0_0 += u.operand_strides[0][1];"), "{source}");
+    assert!(source.contains("run1_0 += u.operand_strides[1][1];"), "{source}");
+    assert!(
+        !source.contains("off0 += full_coord"),
+        "the per-step offset recompute must be gone\n{source}"
+    );
+}
+
+#[test]
+fn a_static_two_axis_fold_nests_one_loop_per_reduced_axis_in_flat_order() {
+    let bound = product_fold_op(&PREFILL_COMBINE_EXTENTS, &[1, 2]);
+
+    let source = emitted_source(&bound, true);
+
+    let outer = source.find("fold0 < 8L").expect("outer reduced axis loop");
+    let inner = source.find("fold1 < 1024L").expect("inner reduced axis loop");
+    assert!(outer < inner, "{source}");
+    assert!(!source.contains("remaining_r"), "{source}");
+}
+
+#[test]
+fn the_baked_extents_are_part_of_the_pipeline_identity() {
+    let six = product_fold_op(&[512, 6, 2048], &[1]);
+    let eight = product_fold_op(&[512, 8, 2048], &[1]);
+    let other_tokens = product_fold_op(&[256, 6, 2048], &[1]);
+
+    assert_ne!(cache_key(&six), cache_key(&eight));
+    assert_eq!(
+        cache_key(&six),
+        cache_key(&other_tokens),
+        "the outermost output extent stays a runtime uniform, so token-count changes share a pipeline"
+    );
 }

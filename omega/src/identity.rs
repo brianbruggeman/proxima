@@ -274,6 +274,11 @@ pub(crate) struct MetalOnlyExtras {
     /// folds no new token and every emitted byte stays identical to before
     /// this field existed.
     pub reduction_literal: Option<u64>,
+    /// the serial reduce body bakes these extents as literals so its fold has a
+    /// constant trip count: every output extent but the outermost (the guard
+    /// bounds that one) followed by every reduced extent. `None` keeps the
+    /// runtime-extent body. Feeds the `_sf` suffix.
+    pub serial_fold_extents: Option<Vec<u64>>,
     /// dense tiled source roles: feature axis, token axis, batch axes, weight
     /// operand index and activation operand index. The renderer bakes all five
     /// into addressing source, so operand-order changes must not share a cache
@@ -1048,6 +1053,10 @@ mod gated {
         if let Some(literal) = metal.reduction_literal {
             identity.push_str("_rl");
             identity.push_str(&literal.to_string());
+        }
+        if let Some(extents) = &metal.serial_fold_extents {
+            identity.push_str("_sf");
+            identity.push_str(&extents.iter().map(u64::to_string).collect::<Vec<_>>().join("x"));
         }
         if let Some((feature_axis, token_axis, batch_axes, weight_operand, other_operand)) =
             metal.dense_batched_gemm_axes

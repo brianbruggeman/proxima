@@ -691,6 +691,7 @@ pub(super) fn push_serial_reduce_body(
     metal: &MetalOnlyExtras,
 ) -> Result<(), EmitError> {
     let narrow = metal.coord_index32;
+    let literals = metal.serial_fold_extents.as_deref();
     source.push_str("    if ((long)gid >= u.output_total) { return; }\n");
 
     source.push_str(&format!("    long full_coord[{rank_len}];\n"));
@@ -702,20 +703,41 @@ pub(super) fn push_serial_reduce_body(
         source.push_str(&format!("    long output_coord[{output_rank_len}];\n"));
         source.push_str("    long remaining = (long)gid;\n");
         for index in (0..output_rank).rev() {
-            source.push_str(&serial_decode_step(
-                "    ",
-                "remaining",
-                &format!("output_coord[{index}]"),
-                &format!("u.output_extents[{index}]"),
-                narrow,
-            ));
+            match literals {
+                Some(_) if index == 0 => {
+                    source.push_str("    output_coord[0] = remaining;\n");
+                }
+                Some(extents) => source.push_str(&serial_decode_step(
+                    "    ",
+                    "remaining",
+                    &format!("output_coord[{index}]"),
+                    &format!("{}L", extents[index - 1]),
+                    narrow,
+                )),
+                None => source.push_str(&serial_decode_step(
+                    "    ",
+                    "remaining",
+                    &format!("output_coord[{index}]"),
+                    &format!("u.output_extents[{index}]"),
+                    narrow,
+                )),
+            }
         }
         for (index, dim) in output_axes.iter().enumerate() {
             source.push_str(&format!("    full_coord[{dim}] = output_coord[{index}];\n"));
         }
     }
 
-    push_ordered_reduce_fold(source, resolved, quantized, "    ", narrow)?;
+    match literals {
+        Some(extents) => push_static_reduce_fold(
+            source,
+            resolved,
+            quantized,
+            "    ",
+            &extents[output_rank.saturating_sub(1)..],
+        )?,
+        None => push_ordered_reduce_fold(source, resolved, quantized, "    ", narrow)?,
+    }
 
     source.push_str("    long out_offset = u.out_base;\n");
     for dim in 0..rank {
@@ -852,6 +874,103 @@ pub(super) fn push_ordered_reduce_fold(
     ));
     source.push_str(&format!("{body_indent}seeded = true;\n"));
     source.push_str(&format!("{indent}}}\n"));
+    Ok(())
+}
+
+/// [`push_ordered_reduce_fold`] for a fold whose reduced extents are baked as
+/// literals (`reduce_extents`, one per reduced dim in index order): one loop
+/// per reduced axis with a constant trip count, outermost axis first, which
+/// walks the same flat order `r = 0..reduction_total` does. Each operand's
+/// offset is computed once from the output coordinate, then advanced by that
+/// operand's stride on the loop's own axis -- no per-step recompute over all
+/// dims, no coordinate decode. The init is seeded from the start, so the
+/// first step combines with it exactly as the runtime body's `seeded` select
+/// does after step 0 (`0.0f + -0.0f` is `+0.0f`; assigning the first element
+/// would flip that sign, so the combine stays). Ungathered operands only.
+pub(super) fn push_static_reduce_fold(
+    source: &mut String,
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    indent: &str,
+    reduce_extents: &[u64],
+) -> Result<(), EmitError> {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return Err(EmitError::RenderKindMismatch {
+            node: resolved.node,
+            expected: "reduce fold",
+            found: resolved.kind.name(),
+        });
+    };
+    let reduce_dims = reduction_dims(resolved, output_axes);
+    let operand_count = resolved.operands().len();
+    let element_type = type_token(resolved.node, resolved.dtype)?;
+    let (init_expr, _) = fold_init_tokens(*init);
+    let total: u64 = reduce_extents.iter().product();
+    let unroll = total < crate::sized::COOPERATIVE_SERIAL_BELOW_LEN;
+    source.push_str(&format!(
+        "{indent}{element_type} accumulator = {init_expr};\n"
+    ));
+    for index in 0..operand_count {
+        source.push_str(&format!(
+            "{indent}long run{index}_0 = u.operand_base[{index}];\n"
+        ));
+        for dim in output_axes {
+            source.push_str(&format!(
+                "{indent}run{index}_0 += full_coord[{dim}] * u.operand_strides[{index}][{dim}];\n"
+            ));
+        }
+    }
+    let mut level_indent = indent.to_string();
+    for (level, extent) in reduce_extents.iter().enumerate() {
+        if level > 0 {
+            for index in 0..operand_count {
+                source.push_str(&format!(
+                    "{level_indent}long run{index}_{level} = run{index}_{previous};\n",
+                    previous = level - 1
+                ));
+            }
+        }
+        if unroll {
+            source.push_str(&format!("{level_indent}#pragma unroll\n"));
+        }
+        source.push_str(&format!(
+            "{level_indent}for (long fold{level} = 0; fold{level} < {extent}L; fold{level}++) {{\n"
+        ));
+        level_indent.push_str("    ");
+    }
+    let last = reduce_extents.len().saturating_sub(1);
+    for index in 0..operand_count {
+        source.push_str(&format!("{level_indent}long off{index} = run{index}_{last};\n"));
+    }
+    source.push_str(&format!(
+        "{level_indent}{element_type} scratch[{}];\n",
+        operand_count.max(1)
+    ));
+    for (index, &codec) in quantized.iter().enumerate() {
+        source.push_str(&format!(
+            "{level_indent}scratch[{index}] = {};\n",
+            operand_read(index, &format!("off{index}"), codec)
+        ));
+    }
+    let value_expr = push_body_steps(source, resolved.element_body(), &level_indent, element_type);
+    source.push_str(&format!("{level_indent}{element_type} value = {value_expr};\n"));
+    let combine_expr = scalar_op_expr(*reduce_op, &["accumulator", "value"]);
+    source.push_str(&format!("{level_indent}accumulator = {combine_expr};\n"));
+    for (level, dim) in reduce_dims.iter().enumerate().rev() {
+        level_indent.truncate(level_indent.len() - 4);
+        for index in 0..operand_count {
+            source.push_str(&format!(
+                "{level_indent}    run{index}_{level} += u.operand_strides[{index}][{dim}];\n"
+            ));
+        }
+        source.push_str(&format!("{level_indent}}}\n"));
+    }
     Ok(())
 }
 

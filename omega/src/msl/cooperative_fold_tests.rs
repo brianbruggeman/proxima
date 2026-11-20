@@ -112,7 +112,7 @@ fn bit_exact_policy_keeps_the_serial_fold_and_never_batches() {
         "no cooperative fold means no batched loads"
     );
     assert!(
-        source.contains("accumulator = seeded ? (accumulator + value) : value;"),
+        source.contains("accumulator = (accumulator + value);"),
         "{source}"
     );
 }

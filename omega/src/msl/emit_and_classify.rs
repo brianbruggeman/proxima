@@ -1865,6 +1865,59 @@ fn reduction_literal_value(
     Some(reduction_len(resolved, output_axes))
 }
 
+/// The extents the serial reduce body bakes as literals (see
+/// [`MetalOnlyExtras::serial_fold_extents`]): every output extent but the
+/// outermost, then every reduced extent. `None` unless this op renders the
+/// serial body over plain, ungathered operands with a seeded init -- the shapes
+/// the runtime-extent body still owns. Read at key time with the same
+/// `expert_source_mode = false` posture as [`coord_index32_active`].
+fn serial_fold_extents_value(
+    resolved: &BoundOp,
+    quantized: &[Option<Codec>],
+    numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
+) -> Option<Vec<u64>> {
+    let BoundOpKind::Reduce {
+        reduce_op,
+        init,
+        output_axes,
+        ..
+    } = &resolved.kind
+    else {
+        return None;
+    };
+    if matches!(init, ReduceInit::FirstElement)
+        || gather_count(resolved) != 0
+        || tiled_gemm_block(resolved, quantized, *reduce_op, *init, output_axes, knobs).is_some()
+        || dense_batched_gemm_block(
+            resolved,
+            quantized,
+            numeric_policy,
+            *reduce_op,
+            *init,
+            output_axes,
+            knobs,
+        )
+        .is_some()
+        || packed_row_block(resolved, quantized, knobs).is_some()
+        || reduce_is_cooperative_dispatch(resolved, quantized, numeric_policy, false, knobs)
+    {
+        return None;
+    }
+    let reduce_dims = reduction_dims(resolved, output_axes);
+    let extents: Vec<u64> = output_axes
+        .iter()
+        .skip(1)
+        .chain(reduce_dims.iter())
+        .map(|&axis| resolved.extents[axis as usize])
+        .collect();
+    let reduced_present = !reduce_dims.is_empty();
+    let outer_ok = output_axes
+        .first()
+        .is_none_or(|&axis| resolved.extents[axis as usize] >= 1);
+    (reduced_present && outer_ok && extents.iter().all(|&extent| extent >= 1)).then_some(extents)
+}
+
 /// The one function that builds a Metal kernel's full specialization record —
 /// every axis [`kernel_identity`](crate::identity::kernel_identity) needs
 /// beyond the language-neutral fields it derives on its own.
@@ -1958,6 +2011,7 @@ pub(super) fn metal_specialization(
             _ => false,
         },
         reduction_literal,
+        serial_fold_extents: serial_fold_extents_value(resolved, &quantized, numeric_policy, knobs),
         dense_batched_gemm_axes: match &resolved.kind {
             BoundOpKind::Reduce {
                 reduce_op,
