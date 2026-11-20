@@ -16,6 +16,8 @@ use proxima_numeric::DType;
 use proxima_numeric::float_layout::FloatLayout;
 use proxima_tensor::NodeId;
 
+use super::GroupedGemmFormats;
+
 #[cfg(feature = "std")]
 use core::convert::Infallible;
 
@@ -129,6 +131,55 @@ pub struct EmitKnobs {
     /// Escape knob: admit expert sources the classifier would reject. Presence alone enables it, even set to the empty string.
     #[cfg_attr(feature = "std", setting(default = false, resolve_with = "parse_presence"))]
     pub enable_unsafe_metal_expert_sources: bool,
+    /// Expert-grouped GEMM stage: what the codec decode function writes; must be `float16`, the
+    /// type of the decode signature's `thread half *out`.
+    /// `None` keeps the built-in default of `GroupedGemmFormats`; a name such as `float16`,
+    /// `bfloat16` or `float32` sets it.
+    #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_stage_layout"))]
+    pub grouped_gemm_dequant_out: Option<FloatLayout>,
+    /// Expert-grouped GEMM stage: threadgroup weight tile element.
+    /// `None` keeps the built-in default of `GroupedGemmFormats`; a name such as `float16`,
+    /// `bfloat16` or `float32` sets it.
+    #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_stage_layout"))]
+    pub grouped_gemm_weight_tile: Option<FloatLayout>,
+    /// Expert-grouped GEMM stage: per-thread register type the decode lands in before the tile
+    /// store.
+    /// `None` keeps the built-in default of `GroupedGemmFormats`; a name such as `float16`,
+    /// `bfloat16` or `float32` sets it.
+    #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_stage_layout"))]
+    pub grouped_gemm_weight_regs: Option<FloatLayout>,
+    /// Expert-grouped GEMM stage: device activation operand the kernel reads.
+    /// `None` keeps the built-in default of `GroupedGemmFormats`; a name such as `float16`,
+    /// `bfloat16` or `float32` sets it.
+    #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_stage_layout"))]
+    pub grouped_gemm_activation_source: Option<FloatLayout>,
+    /// Expert-grouped GEMM stage: threadgroup activation tile element; `None` follows
+    /// `tiled_gemm_staging`, then llama's `float16`.
+    /// `None` keeps the built-in default of `GroupedGemmFormats`; a name such as `float16`,
+    /// `bfloat16` or `float32` sets it.
+    #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_stage_layout"))]
+    pub grouped_gemm_activation_tile: Option<FloatLayout>,
+    /// Expert-grouped GEMM stage: `simdgroup` matrix A (weight) operand element.
+    /// `None` keeps the built-in default of `GroupedGemmFormats`; a name such as `float16`,
+    /// `bfloat16` or `float32` sets it.
+    #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_stage_layout"))]
+    pub grouped_gemm_mma_a: Option<FloatLayout>,
+    /// Expert-grouped GEMM stage: `simdgroup` matrix B (activation) operand element; `None`
+    /// follows the resolved activation tile.
+    /// `None` keeps the built-in default of `GroupedGemmFormats`; a name such as `float16`,
+    /// `bfloat16` or `float32` sets it.
+    #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_stage_layout"))]
+    pub grouped_gemm_mma_b: Option<FloatLayout>,
+    /// Expert-grouped GEMM stage: `simdgroup` accumulator element.
+    /// `None` keeps the built-in default of `GroupedGemmFormats`; a name such as `float16`,
+    /// `bfloat16` or `float32` sets it.
+    #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_stage_layout"))]
+    pub grouped_gemm_accumulator: Option<FloatLayout>,
+    /// Expert-grouped GEMM stage: threadgroup tile the accumulators leave through.
+    /// `None` keeps the built-in default of `GroupedGemmFormats`; a name such as `float16`,
+    /// `bfloat16` or `float32` sets it.
+    #[cfg_attr(feature = "std", setting(default, resolve_with = "parse_stage_layout"))]
+    pub grouped_gemm_out_tile: Option<FloatLayout>,
     /// Element type of every node a plan's elementwise ops read, keyed by producing node. Not a switch: `plan_from_prepared` fills it from the program so an operand is read in the dtype of the node that wrote it; an absent node reads in the op's own dtype.
     #[cfg_attr(feature = "std", serde(skip), setting(skip))]
     pub operand_dtypes: BTreeMap<NodeId, DType>,
@@ -161,12 +212,45 @@ impl Default for EmitKnobs {
             reduction_literal: ReductionLiteral::Off,
             softmax_runtime_rows: false,
             enable_unsafe_metal_expert_sources: false,
+            grouped_gemm_dequant_out: None,
+            grouped_gemm_weight_tile: None,
+            grouped_gemm_weight_regs: None,
+            grouped_gemm_activation_source: None,
+            grouped_gemm_activation_tile: None,
+            grouped_gemm_mma_a: None,
+            grouped_gemm_mma_b: None,
+            grouped_gemm_accumulator: None,
+            grouped_gemm_out_tile: None,
             operand_dtypes: BTreeMap::new(),
         }
     }
 }
 
 impl EmitKnobs {
+    /// The expert-grouped GEMM's nine stage formats this record selects. The one place a stage
+    /// default lives is `GroupedGemmFormats`; `tiled_gemm_staging` seeds the activation tile and
+    /// its MMA B operand, and a `grouped_gemm_*` field overrides its own stage.
+    #[must_use]
+    pub fn grouped_gemm_formats(&self) -> GroupedGemmFormats {
+        let base = GroupedGemmFormats::from_staging(self.tiled_gemm_staging);
+        let activation_tile = self
+            .grouped_gemm_activation_tile
+            .unwrap_or(base.activation_tile);
+        GroupedGemmFormats {
+            dequant_out: self.grouped_gemm_dequant_out.unwrap_or(base.dequant_out),
+            weight_tile: self.grouped_gemm_weight_tile.unwrap_or(base.weight_tile),
+            weight_regs: self.grouped_gemm_weight_regs.unwrap_or(base.weight_regs),
+            activation_source: self
+                .grouped_gemm_activation_source
+                .unwrap_or(base.activation_source),
+            activation_tile,
+            mma_a: self.grouped_gemm_mma_a.unwrap_or(base.mma_a),
+            mma_b: self.grouped_gemm_mma_b.unwrap_or(activation_tile),
+            accumulator: self.grouped_gemm_accumulator.unwrap_or(base.accumulator),
+            out_tile: self.grouped_gemm_out_tile.unwrap_or(base.out_tile),
+        }
+    }
+
     /// Set the producing-node dtype table elementwise operands are read in.
     #[must_use]
     pub fn with_operand_dtypes(mut self, value: BTreeMap<NodeId, DType>) -> Self {
@@ -348,6 +432,69 @@ impl EmitKnobs {
         self
     }
 
+    /// Set the expert-grouped GEMM `dequant_out` stage layout.
+    #[must_use]
+    pub fn with_grouped_gemm_dequant_out(mut self, value: Option<FloatLayout>) -> Self {
+        self.grouped_gemm_dequant_out = value;
+        self
+    }
+
+    /// Set the expert-grouped GEMM `weight_tile` stage layout.
+    #[must_use]
+    pub fn with_grouped_gemm_weight_tile(mut self, value: Option<FloatLayout>) -> Self {
+        self.grouped_gemm_weight_tile = value;
+        self
+    }
+
+    /// Set the expert-grouped GEMM `weight_regs` stage layout.
+    #[must_use]
+    pub fn with_grouped_gemm_weight_regs(mut self, value: Option<FloatLayout>) -> Self {
+        self.grouped_gemm_weight_regs = value;
+        self
+    }
+
+    /// Set the expert-grouped GEMM `activation_source` stage layout.
+    #[must_use]
+    pub fn with_grouped_gemm_activation_source(mut self, value: Option<FloatLayout>) -> Self {
+        self.grouped_gemm_activation_source = value;
+        self
+    }
+
+    /// Set the expert-grouped GEMM `activation_tile` stage layout.
+    #[must_use]
+    pub fn with_grouped_gemm_activation_tile(mut self, value: Option<FloatLayout>) -> Self {
+        self.grouped_gemm_activation_tile = value;
+        self
+    }
+
+    /// Set the expert-grouped GEMM `mma_a` stage layout.
+    #[must_use]
+    pub fn with_grouped_gemm_mma_a(mut self, value: Option<FloatLayout>) -> Self {
+        self.grouped_gemm_mma_a = value;
+        self
+    }
+
+    /// Set the expert-grouped GEMM `mma_b` stage layout.
+    #[must_use]
+    pub fn with_grouped_gemm_mma_b(mut self, value: Option<FloatLayout>) -> Self {
+        self.grouped_gemm_mma_b = value;
+        self
+    }
+
+    /// Set the expert-grouped GEMM `accumulator` stage layout.
+    #[must_use]
+    pub fn with_grouped_gemm_accumulator(mut self, value: Option<FloatLayout>) -> Self {
+        self.grouped_gemm_accumulator = value;
+        self
+    }
+
+    /// Set the expert-grouped GEMM `out_tile` stage layout.
+    #[must_use]
+    pub fn with_grouped_gemm_out_tile(mut self, value: Option<FloatLayout>) -> Self {
+        self.grouped_gemm_out_tile = value;
+        self
+    }
+
     /// Read every `PROXIMA_*` switch from the process environment once, with the lenient rules
     /// the per-call reads used: a value that does not parse keeps the default, it never errors.
     ///
@@ -432,6 +579,51 @@ impl EmitKnobs {
             // var_os, not var: the original read counts a non-unicode value as present
             enable_unsafe_metal_expert_sources: std::env::var_os("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES")
                 .is_some(),
+            grouped_gemm_dequant_out: read_env(
+                "PROXIMA_GROUPED_GEMM_DEQUANT_OUT",
+                parse_stage_layout,
+                base.grouped_gemm_dequant_out,
+            ),
+            grouped_gemm_weight_tile: read_env(
+                "PROXIMA_GROUPED_GEMM_WEIGHT_TILE",
+                parse_stage_layout,
+                base.grouped_gemm_weight_tile,
+            ),
+            grouped_gemm_weight_regs: read_env(
+                "PROXIMA_GROUPED_GEMM_WEIGHT_REGS",
+                parse_stage_layout,
+                base.grouped_gemm_weight_regs,
+            ),
+            grouped_gemm_activation_source: read_env(
+                "PROXIMA_GROUPED_GEMM_ACTIVATION_SOURCE",
+                parse_stage_layout,
+                base.grouped_gemm_activation_source,
+            ),
+            grouped_gemm_activation_tile: read_env(
+                "PROXIMA_GROUPED_GEMM_ACTIVATION_TILE",
+                parse_stage_layout,
+                base.grouped_gemm_activation_tile,
+            ),
+            grouped_gemm_mma_a: read_env(
+                "PROXIMA_GROUPED_GEMM_MMA_A",
+                parse_stage_layout,
+                base.grouped_gemm_mma_a,
+            ),
+            grouped_gemm_mma_b: read_env(
+                "PROXIMA_GROUPED_GEMM_MMA_B",
+                parse_stage_layout,
+                base.grouped_gemm_mma_b,
+            ),
+            grouped_gemm_accumulator: read_env(
+                "PROXIMA_GROUPED_GEMM_ACCUMULATOR",
+                parse_stage_layout,
+                base.grouped_gemm_accumulator,
+            ),
+            grouped_gemm_out_tile: read_env(
+                "PROXIMA_GROUPED_GEMM_OUT_TILE",
+                parse_stage_layout,
+                base.grouped_gemm_out_tile,
+            ),
             operand_dtypes: base.operand_dtypes,
         }
     }
@@ -506,6 +698,11 @@ fn parse_staging_layout(raw: &str) -> Result<Option<FloatLayout>, Infallible> {
 }
 
 #[cfg(feature = "std")]
+fn parse_stage_layout(raw: &str) -> Result<Option<FloatLayout>, Infallible> {
+    Ok(FloatLayout::from_name(raw.trim()))
+}
+
+#[cfg(feature = "std")]
 fn parse_reduction_literal(raw: &str) -> Result<ReductionLiteral, Infallible> {
     Ok(match raw.trim() {
         "1" => ReductionLiteral::All,
@@ -545,6 +742,11 @@ pub(crate) fn every_knob_moved_by_the_builder() -> EmitKnobs {
         .with_reduction_literal(ReductionLiteral::DecodeOnly)
         .with_softmax_runtime_rows(true)
         .with_enable_unsafe_metal_expert_sources(true)
+        .with_grouped_gemm_activation_source(FloatLayout::from_name("float16"))
+        .with_grouped_gemm_activation_tile(FloatLayout::from_name("bfloat16"))
+        .with_grouped_gemm_mma_b(FloatLayout::from_name("bfloat16"))
+        .with_grouped_gemm_accumulator(FloatLayout::from_name("float16"))
+        .with_grouped_gemm_out_tile(FloatLayout::from_name("float16"))
 }
 
 #[cfg(all(test, feature = "std"))]
@@ -552,12 +754,11 @@ mod tests {
     use core::fmt::Debug;
 
     use super::super::*;
-    #[cfg(feature = "metal-tiled-gemm")]
     use super::FloatLayout;
     use super::{EmitKnobs, ReductionLiteral, every_knob_moved_by_the_builder};
     use crate::config::RuntimeConfig;
 
-    const ENV_NAMES: [&str; 24] = [
+    const ENV_NAMES: [&str; 33] = [
         "PROXIMA_PACKED_ROWS",
         "PROXIMA_PACKED_K_SPLIT",
         "PROXIMA_PACKED_ROWS_KSPLIT",
@@ -582,6 +783,15 @@ mod tests {
         "PROXIMA_REDUCTION_LITERAL",
         "PROXIMA_SOFTMAX_RUNTIME_ROWS",
         "PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES",
+        "PROXIMA_GROUPED_GEMM_DEQUANT_OUT",
+        "PROXIMA_GROUPED_GEMM_WEIGHT_TILE",
+        "PROXIMA_GROUPED_GEMM_WEIGHT_REGS",
+        "PROXIMA_GROUPED_GEMM_ACTIVATION_SOURCE",
+        "PROXIMA_GROUPED_GEMM_ACTIVATION_TILE",
+        "PROXIMA_GROUPED_GEMM_MMA_A",
+        "PROXIMA_GROUPED_GEMM_MMA_B",
+        "PROXIMA_GROUPED_GEMM_ACCUMULATOR",
+        "PROXIMA_GROUPED_GEMM_OUT_TILE",
     ];
 
     const COMMON_VALUES: [&str; 4] = ["0", "1", " 1 ", "garbage"];
@@ -868,6 +1078,11 @@ mod tests {
             ("PROXIMA_REDUCTION_LITERAL", Some("decode")),
             ("PROXIMA_SOFTMAX_RUNTIME_ROWS", Some("1")),
             ("PROXIMA_ENABLE_UNSAFE_METAL_EXPERT_SOURCES", Some("")),
+            ("PROXIMA_GROUPED_GEMM_ACTIVATION_SOURCE", Some("float16")),
+            ("PROXIMA_GROUPED_GEMM_ACTIVATION_TILE", Some("bfloat16")),
+            ("PROXIMA_GROUPED_GEMM_MMA_B", Some("bfloat16")),
+            ("PROXIMA_GROUPED_GEMM_ACCUMULATOR", Some("float16")),
+            ("PROXIMA_GROUPED_GEMM_OUT_TILE", Some("float16")),
         ]
     }
 
@@ -931,5 +1146,109 @@ mod tests {
         assert_eq!(parsed, Some(built));
         assert!(unknown.is_err(), "deny_unknown_fields must reject an unknown key");
         assert_eq!(toml::from_str::<EmitKnobs>("").ok(), Some(EmitKnobs::default()));
+    }
+
+    fn validation_paths(knobs: EmitKnobs) -> Vec<String> {
+        let config = RuntimeConfig::builder().with_emit(knobs).build();
+        match config {
+            Ok(_) => Vec::new(),
+            Err(conflaguration::Error::Validation { errors }) => errors
+                .into_iter()
+                .map(|error| format!("{}: {}", error.path, error.message))
+                .collect(),
+            Err(other) => vec![format!("{other}")],
+        }
+    }
+
+    #[test]
+    fn the_default_and_the_renderable_overrides_validate() {
+        assert!(validation_paths(EmitKnobs::default()).is_empty());
+        assert!(validation_paths(every_knob_moved_by_the_builder()).is_empty());
+    }
+
+    #[test]
+    fn a_dequant_out_other_than_float16_fails_validation_naming_the_decode_signature() {
+        let bfloat16 = FloatLayout::from_name("bfloat16");
+        let messages =
+            validation_paths(EmitKnobs::default().with_grouped_gemm_dequant_out(bfloat16));
+
+        assert!(
+            messages.iter().any(
+                |message| message.starts_with("emit.grouped_gemm.dequant_out")
+                    && message.contains("thread half *out")
+            ),
+            "{messages:?}"
+        );
+    }
+
+    #[test]
+    fn a_stage_with_no_metal_type_or_a_broken_join_fails_validation() {
+        let e4m3 = FloatLayout::from_name("float8_e4m3fn");
+        let no_type = validation_paths(
+            EmitKnobs::default()
+                .with_grouped_gemm_accumulator(e4m3)
+                .with_grouped_gemm_out_tile(e4m3),
+        );
+        assert!(
+            no_type
+                .iter()
+                .any(|message| message.starts_with("emit.grouped_gemm.accumulator")),
+            "{no_type:?}"
+        );
+
+        let unjoined = validation_paths(
+            EmitKnobs::default().with_grouped_gemm_weight_tile(FloatLayout::from_name("bfloat16")),
+        );
+        assert!(
+            unjoined
+                .iter()
+                .any(|message| message.starts_with("emit.grouped_gemm.stages")),
+            "{unjoined:?}"
+        );
+    }
+
+    #[test]
+    fn the_grouped_stage_environment_resolves_through_runtime_config() {
+        let variables = vec![
+            ("PROXIMA_TILED_GEMM_STAGING", Some("float32")),
+            ("PROXIMA_GROUPED_GEMM_ACTIVATION_SOURCE", Some("float16")),
+            ("PROXIMA_GROUPED_GEMM_ACCUMULATOR", Some("float16")),
+            ("PROXIMA_GROUPED_GEMM_OUT_TILE", Some("float16")),
+            ("OMEGA_ENGINE", None),
+            ("OMEGA_GPU_DRIVER", None),
+        ];
+
+        let loaded = temp_env::with_vars(variables, || RuntimeConfig::from_env().ok());
+
+        let formats = loaded.map(|config| config.emit.grouped_gemm_formats());
+        assert_eq!(
+            formats,
+            Some(GroupedGemmFormats {
+                activation_source: FloatLayout::F16,
+                activation_tile: FloatLayout::BF32,
+                mma_b: FloatLayout::BF32,
+                accumulator: FloatLayout::F16,
+                out_tile: FloatLayout::F16,
+                ..GroupedGemmFormats::default()
+            })
+        );
+    }
+
+    #[test]
+    fn the_legacy_staging_variable_alone_sets_the_activation_tile_and_mma_b() {
+        let knobs = with_only(
+            "PROXIMA_TILED_GEMM_STAGING",
+            Some("float32"),
+            EmitKnobs::from_env,
+        );
+
+        assert_eq!(
+            knobs.grouped_gemm_formats(),
+            GroupedGemmFormats::from_staging(Some(FloatLayout::BF32))
+        );
+        assert_eq!(
+            with_all_unset(EmitKnobs::from_env).grouped_gemm_formats(),
+            GroupedGemmFormats::default()
+        );
     }
 }

@@ -345,6 +345,12 @@ impl Validate for RuntimeConfig {
 
         self.constraints.append_validation_errors(&mut errors);
         self.selection.append_validation_errors(&mut errors);
+        for (stage, message) in self.emit.grouped_gemm_formats().stage_faults() {
+            errors.push(ValidationMessage::new(
+                format!("emit.grouped_gemm.{stage}"),
+                message,
+            ));
+        }
 
         if errors.is_empty() {
             Ok(())

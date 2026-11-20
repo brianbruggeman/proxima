@@ -26,8 +26,7 @@ pub(super) const GROUPED_TILE_DEPTH: u64 = STAGED_K_STEP_ELEMENTS;
 /// The layout the tiled decode functions write their output run in
 /// (`thread half *out`, see `push_tiled_decode_signature` in `layout_render`): a codec's
 /// dequantized run lands here before it is staged, so `dequant_out` must equal it.
-#[cfg(feature = "metal-grouped-gemm")]
-const DECODE_OUTPUT_LAYOUT: FloatLayout = FloatLayout::F16;
+pub const DECODE_OUTPUT_LAYOUT: FloatLayout = FloatLayout::F16;
 
 /// Every stage's number format in the expert-grouped GEMM, one value so a test can name the whole
 /// configuration. The MSL type names, vector and `simdgroup` spellings and byte sizes all derive
@@ -87,6 +86,65 @@ impl GroupedGemmFormats {
             None => Self::with_activation_tile(FloatLayout::F16),
         }
     }
+
+    /// Whether the stages join: the decode output is the register type, the register type is the
+    /// weight tile and the MMA A operand, the activation tile is the MMA B operand, and the
+    /// accumulators leave through an out tile of their own type.
+    fn joined(&self) -> bool {
+        self.dequant_out == DECODE_OUTPUT_LAYOUT
+            && self.dequant_out == self.weight_regs
+            && self.weight_regs == self.weight_tile
+            && self.weight_tile == self.mma_a
+            && self.activation_tile == self.mma_b
+            && self.accumulator == self.out_tile
+    }
+
+    /// Every reason this configuration cannot render, as `(stage, message)`: the config's
+    /// validation reports what `GroupedStages::resolve` would refuse at emit time.
+    #[must_use]
+    pub fn stage_faults(&self) -> Vec<(&'static str, &'static str)> {
+        let mut faults = Vec::new();
+        for (stage, layout) in self.stages() {
+            if layout_render::hardware_stage_type(&layout).is_none() {
+                faults.push((
+                    stage,
+                    "has no Metal hardware type; expected float32, float16 or bfloat16",
+                ));
+            }
+        }
+        if self.dequant_out != DECODE_OUTPUT_LAYOUT {
+            faults.push((
+                "dequant_out",
+                "must be float16: the decode signature writes `thread half *out`",
+            ));
+        }
+        if !self.joined() {
+            faults.push((
+                "stages",
+                concat!(
+                    "must join: weight_regs, weight_tile and mma_a equal dequant_out, ",
+                    "mma_b equals activation_tile, out_tile equals accumulator"
+                ),
+            ));
+        }
+        faults
+    }
+
+    /// Each stage's field name and layout, in declaration order.
+    #[must_use]
+    pub fn stages(&self) -> [(&'static str, FloatLayout); 9] {
+        [
+            ("dequant_out", self.dequant_out),
+            ("weight_tile", self.weight_tile),
+            ("weight_regs", self.weight_regs),
+            ("activation_source", self.activation_source),
+            ("activation_tile", self.activation_tile),
+            ("mma_a", self.mma_a),
+            ("mma_b", self.mma_b),
+            ("accumulator", self.accumulator),
+            ("out_tile", self.out_tile),
+        ]
+    }
 }
 
 impl Default for GroupedGemmFormats {
@@ -123,13 +181,7 @@ impl GroupedStages {
             layout_render::hardware_stage_type(layout)
                 .ok_or_else(|| mismatch("stage layout with a metal hardware type"))
         };
-        let joined = formats.dequant_out == DECODE_OUTPUT_LAYOUT
-            && formats.dequant_out == formats.weight_regs
-            && formats.weight_regs == formats.weight_tile
-            && formats.weight_tile == formats.mma_a
-            && formats.activation_tile == formats.mma_b
-            && formats.accumulator == formats.out_tile;
-        if !joined {
+        if !formats.joined() {
             return Err(mismatch("stage layouts the decode, tile loads and stores can join"));
         }
         Ok(Self {

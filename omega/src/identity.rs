@@ -401,6 +401,11 @@ pub(crate) struct MetalOnlyExtras {
     /// GEMM. Any `Some` layout, binary32 included, appends a `_stg` suffix naming it, so the
     /// grouped kernel's binary32 form never shares a pipeline with its default.
     pub tiled_gemm_staging_layout: Option<FloatLayout>,
+    /// The nine stage formats of the expert-grouped GEMM, resolved from the emit knobs. Each stage
+    /// that differs from what `tiled_gemm_staging_layout` alone selects appends a `_g<stage><name>`
+    /// suffix, so two configs that render different grouped kernels never share a pipeline while
+    /// the default and staging-only identities stay what they were.
+    pub grouped_gemm_formats: crate::msl::GroupedGemmFormats,
 }
 
 impl MetalOnlyExtras {
@@ -1109,8 +1114,31 @@ mod gated {
             identity.push_str("_stg");
             identity.push_str(layout.format_name().unwrap_or("custom"));
         }
+        push_grouped_gemm_tokens(
+            &mut identity,
+            metal.tiled_gemm_staging_layout,
+            metal.grouped_gemm_formats,
+        );
 
         identity
+    }
+
+    /// One `_g<stage>_<layout>` suffix per grouped-GEMM stage that differs from the formats
+    /// `tiled_gemm_staging_layout` alone selects, so a default config's identity is unchanged.
+    fn push_grouped_gemm_tokens(
+        identity: &mut String,
+        staging: Option<FloatLayout>,
+        formats: crate::msl::GroupedGemmFormats,
+    ) {
+        let baseline = crate::msl::GroupedGemmFormats::from_staging(staging);
+        for ((stage, layout), (_, base)) in formats.stages().into_iter().zip(baseline.stages()) {
+            if layout != base {
+                identity.push_str("_g");
+                identity.push_str(stage);
+                identity.push('_');
+                identity.push_str(layout.format_name().unwrap_or("custom"));
+            }
+        }
     }
 
     #[cfg(test)]

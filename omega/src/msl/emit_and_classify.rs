@@ -2141,6 +2141,10 @@ pub(super) fn metal_specialization(
             BoundOpKind::Reduce { .. } => knobs.tiled_gemm_staging,
             _ => None,
         },
+        grouped_gemm_formats: match &resolved.kind {
+            BoundOpKind::Reduce { .. } => knobs.grouped_gemm_formats(),
+            _ => GroupedGemmFormats::default(),
+        },
         wide_grid: matches!(
             grid.grid2d,
             Some(Grid2DSpec {

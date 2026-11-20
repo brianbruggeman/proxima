@@ -2477,7 +2477,7 @@ pub(super) fn push_cooperative_reduce_body(
                 &block,
                 element_type,
                 (epilogue_body, epilogue_operands),
-                &GroupedGemmFormats::from_staging(metal.tiled_gemm_staging_layout),
+                &metal.grouped_gemm_formats,
             )?;
             return Ok(());
         }

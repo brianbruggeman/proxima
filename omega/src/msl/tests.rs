@@ -10540,6 +10540,97 @@ mod expert_grouped_decode_description {
         );
     }
 
+    fn grouped_source(codec: Codec, knobs: &EmitKnobs) -> String {
+        let (bound, packed) = gathered(codec);
+        emit_with_knobs(&bound, &packed, NumericPolicy::default(), knobs)
+            .expect("grouped kernel emits")
+            .source
+    }
+
+    fn grouped_key(codec: Codec, knobs: &EmitKnobs) -> String {
+        let (bound, packed) = gathered(codec);
+        kernel_cache_key_with_knobs(&bound, &packed, NumericPolicy::default(), knobs)
+            .expect("grouped kernel keys")
+    }
+
+    #[test]
+    fn the_default_knobs_resolve_to_the_default_formats_and_staging_seeds_the_activation_tile() {
+        assert_eq!(
+            EmitKnobs::default().grouped_gemm_formats(),
+            GroupedGemmFormats::default()
+        );
+        let staged = EmitKnobs::default().with_tiled_gemm_staging(Some(FloatLayout::BF32));
+        assert_eq!(
+            staged.grouped_gemm_formats(),
+            GroupedGemmFormats::from_staging(Some(FloatLayout::BF32))
+        );
+        let explicit = staged.with_grouped_gemm_activation_tile(Some(FloatLayout::F16));
+        assert_eq!(
+            explicit.grouped_gemm_formats().activation_tile,
+            FloatLayout::F16
+        );
+        assert_eq!(explicit.grouped_gemm_formats().mma_b, FloatLayout::F16);
+    }
+
+    #[test]
+    fn each_renderable_stage_override_changes_the_source_and_the_kernel_key() {
+        let base = EmitKnobs::default();
+        let overrides: [(&str, EmitKnobs); 3] = [
+            (
+                "activation_source",
+                base.clone()
+                    .with_grouped_gemm_activation_source(Some(FloatLayout::F16)),
+            ),
+            (
+                "activation_tile+mma_b",
+                base.clone()
+                    .with_grouped_gemm_activation_tile(Some(FloatLayout::BF16)),
+            ),
+            (
+                "accumulator+out_tile",
+                base.clone()
+                    .with_grouped_gemm_accumulator(Some(FloatLayout::F16))
+                    .with_grouped_gemm_out_tile(Some(FloatLayout::F16)),
+            ),
+        ];
+        let default_source = grouped_source(Codec::Q5K, &base);
+        let default_key = grouped_key(Codec::Q5K, &base);
+        let mut keys = vec![default_key];
+        for (name, knobs) in &overrides {
+            assert!(
+                knobs.grouped_gemm_formats().stage_faults().is_empty(),
+                "{name}"
+            );
+            assert_ne!(
+                grouped_source(Codec::Q5K, knobs),
+                default_source,
+                "{name} must change the source"
+            );
+            keys.push(grouped_key(Codec::Q5K, knobs));
+        }
+        let distinct: BTreeSet<&String> = keys.iter().collect();
+        assert_eq!(
+            distinct.len(),
+            keys.len(),
+            "no two configs share a kernel key: {keys:?}"
+        );
+    }
+
+    #[test]
+    fn a_weight_stage_override_changes_the_key_and_is_refused_at_emit() {
+        let knobs = EmitKnobs::default().with_grouped_gemm_weight_tile(Some(FloatLayout::BF16));
+        assert_ne!(
+            grouped_key(Codec::Q5K, &knobs),
+            grouped_key(Codec::Q5K, &EmitKnobs::default())
+        );
+        let (bound, packed) = gathered(Codec::Q5K);
+        let refusal = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &knobs).err();
+        assert!(
+            matches!(refusal, Some(EmitError::RenderKindMismatch { .. })),
+            "{refusal:?}"
+        );
+    }
+
     #[test]
     fn a_stage_layout_with_no_metal_type_is_refused_not_rendered_as_a_fallback() {
         let (bound, _) = gathered(Codec::Q5K);
