@@ -11701,6 +11701,10 @@ mod expert_grouped_route_segments {
     }
 }
 
+/// The raw vector copy staging emits when the stored weight layout is the tile layout.
+#[cfg(feature = "metal-tiled-gemm")]
+const IDENTITY_WEIGHT_COPY: &str = "((threadgroup uint4 *)(weight_tile + w_row * ";
+
 #[cfg(feature = "metal-tiled-gemm")]
 #[test]
 fn dense_bf16_weight_read_parenthesizes_the_compound_offset() {
@@ -11718,8 +11722,8 @@ fn dense_bf16_weight_read_parenthesizes_the_compound_offset() {
     });
 
     assert!(
-        kernel.source.contains("w_vec[vec] = ((device const uint4 *)w_run)[vec];"),
-        "dense bf16 weights stage as native uint4 runs in the emitted fragment path\n{}",
+        kernel.source.contains(IDENTITY_WEIGHT_COPY) && !kernel.source.contains("uint4 w_vec["),
+        "dense bf16 weights stage as a raw uint4 copy into the bf16 tile in the emitted fragment path\n{}",
         kernel.source,
     );
     assert!(!kernel.source.contains("bf16_element(in0"));
@@ -12330,9 +12334,9 @@ fn router_bf16_tile_stages_weights_and_activations_with_wide_loads() {
     assert!(source.contains("simdgroup_bfloat8x8"), "{source}");
     assert!(source.contains("long w_row = tiitg / 2;"), "every thread stages a weight run\n{source}");
     assert!(!source.contains("for (long w_row = tiitg; w_row < "), "no strided one-thread-per-row loop\n{source}");
-    assert!(source.contains("uint4 w_vec[2];"), "{source}");
-    assert!(source.contains("w_vec[vec] = ((device const uint4 *)w_run)[vec];"), "{source}");
-    assert!(source.contains("= bfloat(w_regs[w_k]); }"), "the decoded run converts into the bf16 tile\n{source}");
+    assert!(source.contains(IDENTITY_WEIGHT_COPY), "a bf16 weight stored into a bf16 tile is a raw uint4 copy\n{source}");
+    assert!(!source.contains("uint4 w_vec["), "the identity copy decodes nothing\n{source}");
+    assert!(source.contains("= bfloat(w_regs[w_k]); }"), "the guarded scalar run still converts into the bf16 tile\n{source}");
     assert!(source.contains("= bfloat(0.0f); }"), "{source}");
     assert!(source.contains("float2x4 a_value = *((device const float2x4 *)("), "the activation loads as one float2x4\n{source}");
     assert!(source.contains("*((threadgroup matrix<bfloat, 2, 4> *)a_dst) = matrix<bfloat, 2, 4>(a_value);"), "one bf16 store as wide as the tile type times the lanes\n{source}");
@@ -12355,15 +12359,15 @@ fn dense_tile_staging_takes_the_same_wide_path_for_every_stored_weight_format() 
         let policy = NumericPolicy::llama_relaxed().with_epilogue_sources(true).with_bf16_input_rounding(true);
         let source = emit(&bound, &packed, policy).expect("router emits").source;
         assert!(source.contains("long w_row = tiitg / 2;"), "{name}\n{source}");
-        assert!(source.contains(vectors), "{name}\n{source}");
-        assert!(source.contains("w_vec[vec] = ((device const uint4 *)w_run)[vec];"), "{name}\n{source}");
+        assert!(!source.contains(vectors), "{name}: a same-format weight decodes nothing\n{source}");
+        assert!(source.contains(IDENTITY_WEIGHT_COPY), "{name}\n{source}");
         assert!(!source.contains("for (long w_row = tiitg; w_row < "), "{name}\n{source}");
     }
 
     let plain = dense_batched_score_shaped_op_with_operand_order(512, 256, 1, 2048, true);
     let source = emit_with_knobs(&plain, &BTreeMap::new(), NumericPolicy::llama_relaxed(), &EmitKnobs::default().with_tiled_gemm_dense(true)).expect("emits").source;
-    assert!(source.contains("w_row = tiitg / 2;") && source.contains("uint4 w_vec[4];"), "f32 stored weight\n{source}");
-    assert!(source.contains("w_vec[vec] = ((device const uint4 *)w_run)[vec];"), "f32 stored weight\n{source}");
+    assert!(source.contains("w_row = tiitg / 2;") && !source.contains("uint4 w_vec["), "f32 stored weight\n{source}");
+    assert!(source.contains(IDENTITY_WEIGHT_COPY), "f32 stored weight\n{source}");
     let score = dense_batched_score_shaped_op_with_operand_order(512, 256, 1, 2048, true);
     let packed = BTreeMap::from([(score.operands()[1].0, Codec::Float16)]);
     let source = emit_with_knobs(&score, &packed, NumericPolicy::llama_relaxed(), &EmitKnobs::default().with_tiled_gemm_dense(true)).expect("emits").source;

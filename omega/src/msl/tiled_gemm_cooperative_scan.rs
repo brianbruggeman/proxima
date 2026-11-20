@@ -1404,6 +1404,9 @@ struct WideRunPlan {
     /// The binding is raw bytes (`uchar`), so a code is assembled from `element_bytes` loads;
     /// otherwise it is a typed pointer whose elements are the codes themselves.
     byte_buffer: bool,
+    /// The stored layout is the tile layout (`same_format`, and the same bytes per element), so
+    /// staging is a raw `uint4` copy from device to threadgroup with no decode and no narrowing.
+    identity: bool,
 }
 
 /// `None` unless the weight is one element per block with a whole-byte float layout of at most 32
@@ -1417,6 +1420,8 @@ fn wide_run_plan(
     block_m: u64,
     block_k: u64,
     block_threads: u64,
+    tile_layout: &FloatLayout,
+    tile_bytes: u64,
 ) -> Option<WideRunPlan> {
     let layout = match codec {
         None if binding == "float" => FloatLayout::BF32,
@@ -1441,7 +1446,36 @@ fn wide_run_plan(
         decode_helper: layout_render::layout_load_msl(layout, &decode_name),
         decode_name,
         byte_buffer: binding == "uchar",
+        identity: layout.same_format(tile_layout) && element_bytes == tile_bytes,
     })
+}
+
+/// Loads a run as `uint4` vectors and decodes each element's code into `w_regs`.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_wide_weight_decode(source: &mut String, inner: &str, decode_name: &str, run: u64, element_bytes: u64, vectors: u64) {
+    source.push_str(&format!("{inner}uint4 w_vec[{vectors}];\n{inner}{FULL_UNROLL}\n"));
+    source.push_str(&format!(
+        "{inner}for (int vec = 0; vec < {vectors}; ++vec) {{ w_vec[vec] = ((device const uint4 *)w_run)[vec]; }}\n"
+    ));
+    for element in 0..run {
+        let byte = element * element_bytes;
+        let word = format!("w_vec[{}][{}]", byte / 16, (byte % 16) / 4);
+        let code = match element_bytes {
+            4 => word,
+            width => format!("(({word} >> {}u) & {:#x}u)", (byte % 4) * 8, (1u64 << (width * 8)) - 1),
+        };
+        source.push_str(&format!("{inner}w_regs[{element}] = {decode_name}({code});\n"));
+    }
+}
+
+/// Narrows `w_regs` into the weight tile through the tile cast, one element per store.
+#[cfg(feature = "metal-tiled-gemm")]
+fn push_wide_weight_narrow_store(source: &mut String, indent: &str, run: u64, block_k: u64, tile_cast: &TileCast) {
+    let TileCast { open, close, .. } = tile_cast;
+    source.push_str(&format!("{indent}{FULL_UNROLL}\n"));
+    source.push_str(&format!(
+        "{indent}for (int w_k = 0; w_k < {run}; ++w_k) {{ weight_tile[w_row * {block_k} + w_part_k + w_k] = {open}w_regs[w_k]{close}; }}\n"
+    ));
 }
 
 /// Weight staging for the dense MMA tile: every thread takes `run` contiguous K elements of one
@@ -1470,9 +1504,10 @@ fn push_wide_weight_stage(
         threads_per_row,
         ref decode_name,
         byte_buffer,
+        identity,
         ..
     } = *plan;
-    let TileCast { open, close, zero } = tile_cast;
+    let TileCast { zero, .. } = tile_cast;
     let vectors = run * element_bytes / 16;
     source.push_str(&format!(
         "        {{\n            long w_row = tiitg / {threads_per_row};\n            long w_part_k = (tiitg % {threads_per_row}) * {run};\n            long w_feat = row_tile * {block_m} + w_row;\n"
@@ -1487,8 +1522,11 @@ fn push_wide_weight_stage(
         ("                ", "w_stride".to_string())
     };
     source.push_str(&format!(
-        "{indent}long row_base = u.operand_base[{weight}] + dense_weight_batch_base + w_feat * u.operand_strides[{weight}][{feature_axis}] + (k0 + w_part_k) * {w_stride};\n{indent}float w_regs[{run}];\n"
+        "{indent}long row_base = u.operand_base[{weight}] + dense_weight_batch_base + w_feat * u.operand_strides[{weight}][{feature_axis}] + (k0 + w_part_k) * {w_stride};\n"
     ));
+    if !(identity && fast) {
+        source.push_str(&format!("{indent}float w_regs[{run}];\n"));
+    }
     let run_pointer = if byte_buffer {
         format!("in{weight} + row_base * {element_bytes}")
     } else {
@@ -1501,22 +1539,13 @@ fn push_wide_weight_stage(
         ));
     }
     let inner = if fast { indent } else { "                    " };
-    source.push_str(&format!("{inner}uint4 w_vec[{vectors}];\n{inner}{FULL_UNROLL}\n"));
-    source.push_str(&format!(
-        "{inner}for (int vec = 0; vec < {vectors}; ++vec) {{ w_vec[vec] = ((device const uint4 *)w_run)[vec]; }}\n"
-    ));
-    for element in 0..run {
-        let byte = element * element_bytes;
-        let word = format!("w_vec[{}][{}]", byte / 16, (byte % 16) / 4);
-        let code = match element_bytes {
-            4 => word,
-            width => format!(
-                "(({word} >> {}u) & {:#x}u)",
-                (byte % 4) * 8,
-                (1u64 << (width * 8)) - 1
-            ),
-        };
-        source.push_str(&format!("{inner}w_regs[{element}] = {decode_name}({code});\n"));
+    if identity {
+        source.push_str(&format!("{inner}{FULL_UNROLL}\n"));
+        source.push_str(&format!(
+            "{inner}for (int vec = 0; vec < {vectors}; ++vec) {{ ((threadgroup uint4 *)(weight_tile + w_row * {block_k} + w_part_k))[vec] = ((device const uint4 *)w_run)[vec]; }}\n"
+        ));
+    } else {
+        push_wide_weight_decode(source, inner, decode_name, run, element_bytes, vectors);
     }
     if !fast {
         source.push_str("                } else {\n");
@@ -1536,12 +1565,15 @@ fn push_wide_weight_stage(
         source.push_str(&format!(
             "                        w_regs[w_k] = (k0 + w_part_k + w_k < u.reduction_total) ? {element_read} : 0.0f;\n"
         ));
-        source.push_str("                    }\n                }\n");
+        source.push_str("                    }\n");
+        if identity {
+            push_wide_weight_narrow_store(source, "                    ", run, block_k, tile_cast);
+        }
+        source.push_str("                }\n");
     }
-    source.push_str(&format!("{indent}{FULL_UNROLL}\n"));
-    source.push_str(&format!(
-        "{indent}for (int w_k = 0; w_k < {run}; ++w_k) {{ weight_tile[w_row * {block_k} + w_part_k + w_k] = {open}w_regs[w_k]{close}; }}\n"
-    ));
+    if !identity {
+        push_wide_weight_narrow_store(source, indent, run, block_k, tile_cast);
+    }
     if !fast {
         source.push_str("            } else {\n");
         source.push_str(&format!(
@@ -1843,7 +1875,7 @@ pub(super) fn push_dense_batched_gemm_body(
         "    for (int i = 0; i < {mc_count}; ++i) {{ acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }}\n"
     ));
     let k0_counter_type = if grid2d_active { "int" } else { "long" };
-    let wide_weight = wide_run_plan(weight_binding, weight_codec, block_m, block_k, block_threads);
+    let wide_weight = wide_run_plan(weight_binding, weight_codec, block_m, block_k, block_threads, &tile_layout, tile_stage.bytes);
     let act_vectors = block_n * block_k / ACTIVATION_STAGE_LANES;
     let versioned = wide_weight.is_some() && other_codec.is_none() && act_vectors == block_threads;
     let loop_mark = source.len();
