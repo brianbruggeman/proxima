@@ -1,11 +1,15 @@
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use alloc::string::String;
+#[cfg(all(feature = "metal", target_os = "macos"))]
 use alloc::vec::Vec;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_numeric::encode_rule::{CodeRounding, EncodeRule, ScaleRounding};
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use proxima_numeric::BlockLayout;
-use proxima_numeric::{FormatCodec, NumericFormat};
+use proxima_numeric::NumericFormat;
+#[cfg(all(feature = "metal", target_os = "macos"))]
+use proxima_numeric::FormatCodec;
 
 #[cfg(all(feature = "metal", target_os = "macos"))]
 use super::encode_render::{RenderedEncode, block_encode_kernel_by_rule};
@@ -33,6 +37,7 @@ const EMITTER_SOURCE: &str = include_str!("encode_render.rs");
 
 /// K/V-shaped rows: per-head magnitudes that differ by orders of magnitude, a few outlier channels,
 /// sign-symmetric spread, the shape of a projected and rotated attention row.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn attention_rows(seed: u64, rows: usize, width: usize) -> Vec<f32> {
     let mut state = seed;
     let mut next = move || {
@@ -52,6 +57,7 @@ fn attention_rows(seed: u64, rows: usize, width: usize) -> Vec<f32> {
 
 /// Rows a cache must survive: all zeros, f16's largest finite values and the first overflow,
 /// f16 and f32 subnormals, negative zero, a block whose scale underflows the stored width.
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn edge_rows(width: usize) -> Vec<f32> {
     let patterns: [&dyn Fn(usize) -> f32; 9] = [
         &|_| 0.0,
@@ -67,6 +73,7 @@ fn edge_rows(width: usize) -> Vec<f32> {
     patterns.iter().flat_map(|pattern| (0..width).map(pattern)).collect()
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn host_encode(format: &NumericFormat, values: &[f32]) -> Vec<u8> {
     let codec = FormatCodec::for_format(format).expect("the format has a host codec");
     let bytes = format.packed_len(values.len()).expect("whole blocks");
@@ -129,6 +136,7 @@ fn device_run(rendered: &RenderedEncode, values: &[f32]) -> Vec<u8> {
     unsafe { core::slice::from_raw_parts(output.contents().as_ptr().cast::<u8>(), out_bytes) }.to_vec()
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn cache_formats() -> [(&'static str, NumericFormat); 5] {
     [
         ("f16", NumericFormat::Float16),
@@ -204,6 +212,7 @@ fn fp4_formats() -> [(&'static str, NumericFormat); 2] {
     [("block of 32 under a shared exponent", NumericFormat::Mxfp4), ("runs of 16 under an E4M3 scale", NumericFormat::Nvfp4)]
 }
 
+#[cfg(all(feature = "metal", target_os = "macos"))]
 fn kv_shaped_values() -> Vec<f32> {
     let mut values = attention_rows(0x5eed, 512, 256);
     values.extend(attention_rows(0xface, 64, 128));
