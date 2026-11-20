@@ -51,7 +51,7 @@ pub struct ProcessRpcSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 pub struct ProcessRpcInitFrame {
     /// The line to write, without its trailing newline.
-    pub send: String,
+    pub send: Value,
 
     /// Read and discard one reply line after writing.
     #[serde(default = "default_reply")]
@@ -199,11 +199,22 @@ fn state_error(state: &RpcState, detail: &str) -> ProximaError {
     ProximaError::Upstream(format!("process_rpc `{}`: {detail}", state.label))
 }
 
+fn init_body(send: &Value) -> Result<Bytes, ProximaError> {
+    match send {
+        Value::String(text) => Ok(Bytes::from(text.clone())),
+        other => serde_json::to_vec(other)
+            .map(Bytes::from)
+            .map_err(|error| ProximaError::Upstream(error.to_string())),
+    }
+}
+
 async fn run_init(state: &RpcState, rpc_child: &mut RpcChild) -> Result<(), ProximaError> {
     let timeout = Duration::from_millis(state.spec.request_timeout_ms);
     for (index, frame) in state.spec.init.iter().enumerate() {
-        let body = Bytes::from(frame.send.clone());
-        let outcome = time::timeout(timeout, dispatch_one(rpc_child, body, frame.reply)).await;
+        let outcome = match init_body(&frame.send) {
+            Ok(body) => time::timeout(timeout, dispatch_one(rpc_child, body, frame.reply)).await,
+            Err(error) => Ok(Err(error)),
+        };
         let detail = match outcome {
             Ok(Ok(_discarded)) => continue,
             Ok(Err(ProximaError::Upstream(text))) => text,
@@ -896,6 +907,46 @@ mod tests {
         check_init_error(&error.to_string(), "tracker", 0).expect("frame 0 named");
         let body = call_line(&handle, TOOLS_CALL).await.expect("second call");
         check_reply(&body, REPLY_READY).expect("respawned child initialized");
+    }
+
+    const PAYLOAD_INITIALIZE: &str = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"proxima","version":"0"}}}"#;
+    const PAYLOAD_INITIALIZED: &str = r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#;
+
+    fn check_initialized(answer: &[u8]) -> Result<(), String> {
+        let parsed: Value = serde_json::from_slice(answer)
+            .map_err(|error| format!("answer is not JSON: {error}"))?;
+        let text = parsed["result"]["content"][0]["text"].as_str();
+        if text == Some("inits=1") {
+            return Ok(());
+        }
+        Err(format!("answer text {text:?} is not \"inits=1\""))
+    }
+
+    fn payload_frames() -> Value {
+        let initialize: Value = serde_json::from_str(PAYLOAD_INITIALIZE).expect("P1 parses");
+        let initialized: Value = serde_json::from_str(PAYLOAD_INITIALIZED).expect("P2 parses");
+        json!([{"send": initialize}, {"send": initialized, "reply": false}])
+    }
+
+    #[proxima::test]
+    async fn process_rpc_payload_structured_init_frames_initialize_child() {
+        let handle = load_rpc(stub_spec(payload_frames())).await;
+        let body = call_line(&handle, TOOLS_CALL).await.expect("call");
+        check_initialized(&body).expect("structured frames initialized the child");
+    }
+
+    #[test]
+    fn ctl_payload_check_initialized_accepts_ready_reply() {
+        check_initialized(REPLY_READY.as_bytes()).expect("P5 reports inits=1");
+    }
+
+    #[proxima::test]
+    async fn ctl_payload_without_init_frames_refuses_and_helper_rejects() {
+        let handle = load_rpc(stub_spec(json!([]))).await;
+        let body = call_line(&handle, TOOLS_CALL).await.expect("call");
+        let parsed: Value = serde_json::from_slice(&body).expect("answer is JSON");
+        assert_eq!(parsed["error"]["code"], json!(-32002));
+        check_initialized(&body).expect_err("refusal is not initialized");
     }
 
     #[proxima::test]
