@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::convert::Infallible;
 use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
@@ -18,6 +19,8 @@ use crate::error::ProximaError;
 use crate::pipe::{PipeHandle, into_handle};
 use crate::pipe_factory::PipeFactory;
 use crate::request::{Request, Response};
+#[cfg(any(feature = "http1", feature = "http-prime-deps"))]
+use crate::templates::{TemplateContext, expand, expand_value};
 
 enum SynthBody {
     Buffered(Bytes),
@@ -42,7 +45,7 @@ struct ChunkSpec {
 #[derive(Debug, Clone)]
 enum BodySource {
     Static(Bytes),
-    Template(String),
+    Template(Value),
     Chunks(Vec<ChunkSpec>),
 }
 
@@ -129,21 +132,21 @@ impl SendPipe for SynthUpstream {
         let headers = self.headers.clone();
         let pre_body = self.non_template_body();
         let template = match &self.body {
-            BodySource::Template(text) => Some(text.clone()),
+            BodySource::Template(value) => Some(value.clone()),
             _ => None,
         };
         let static_body_len = self.static_body_len();
         async move {
             let body = match (pre_body, template) {
                 (Some(body), _) => body,
-                (None, Some(template_text)) => {
+                (None, Some(template_value)) => {
                     #[cfg(any(feature = "http1", feature = "http-prime-deps"))]
                     {
-                        expand_template_body(&template_text, request).await?
+                        expand_template_body(&template_value, request).await?
                     }
                     #[cfg(not(any(feature = "http1", feature = "http-prime-deps")))]
                     {
-                        let _ = (template_text, request);
+                        let _ = (template_value, request);
                         return Err(ProximaError::Config(
                             "synth template body requires the `http1` or \
                              `http-prime-deps` feature (templates engine)"
@@ -181,12 +184,16 @@ impl SendPipe for SynthUpstream {
 
 #[cfg(any(feature = "http1", feature = "http-prime-deps"))]
 async fn expand_template_body(
-    template: &str,
+    template: &Value,
     request: Request<Bytes>,
 ) -> Result<SynthBody, ProximaError> {
+    let references_body = match template {
+        Value::String(text) => text.contains("{{body"),
+        structured => structured.to_string().contains("{{body"),
+    };
     // only materialize the request body when the template references it —
     // otherwise leave it for downstream middleware / upstreams.
-    let (request, body_value) = if template.contains("{{body") {
+    let (request, body_value) = if references_body {
         let (request, buffered) = request.body_bytes().await?;
         let value = if buffered.is_empty() {
             None
@@ -207,14 +214,26 @@ async fn expand_template_body(
         .pipe_label
         .as_deref()
         .and_then(|bytes| std::str::from_utf8(bytes).ok());
-    let context = crate::templates::TemplateContext {
+    let context = TemplateContext {
         request_id: None,
         trace_id: trace_id_str,
         pipe: pipe_str,
         body: body_value.as_ref(),
     };
-    let expanded = crate::templates::expand(template, &context);
-    Ok(SynthBody::Buffered(Bytes::from(expanded.into_bytes())))
+    let bytes = match template {
+        Value::String(text) => expand(text, &context).into_bytes(),
+        structured => value_bytes(&expand_value(structured, &context))?,
+    };
+    Ok(SynthBody::Buffered(Bytes::from(bytes)))
+}
+
+fn value_bytes(value: &Value) -> Result<Vec<u8>, ProximaError> {
+    serde_json::to_vec(value)
+        .map_err(|err| ProximaError::Config(format!("synth structured body: {err}")))
+}
+
+fn parse_env_text(raw: &str) -> Result<Option<Value>, Infallible> {
+    Ok(Some(Value::String(raw.to_string())))
 }
 
 /// Base64-encoded timed chunk in a synth streaming body — the config twin of
@@ -256,15 +275,19 @@ pub struct SynthConfig {
     #[builder(default)]
     pub headers: BTreeMap<String, String>,
 
-    /// Static string body — lowest body priority.
-    #[setting(default)]
+    /// Static body — lowest body priority. A string is sent as text; a map or
+    /// list is sent as compact JSON. The environment always sets text.
+    #[setting(default, resolve_with = "parse_env_text")]
     #[serde(default)]
-    pub body: Option<String>,
+    #[builder(into)]
+    pub body: Option<Value>,
 
     /// Per-request template body (e.g. `trace={{trace_id}}`) — middle priority.
-    #[setting(default)]
+    /// A map or list has each string leaf expanded, then is sent as compact JSON.
+    #[setting(default, resolve_with = "parse_env_text")]
     #[serde(default)]
-    pub body_template: Option<String>,
+    #[builder(into)]
+    pub body_template: Option<Value>,
 
     /// Timed base64 chunks — highest priority; produces a streaming body.
     #[setting(skip)]
@@ -329,7 +352,11 @@ impl SynthConfig {
             return Ok(BodySource::Template(template.clone()));
         }
         if let Some(body) = &self.body {
-            return Ok(BodySource::Static(Bytes::from(body.clone().into_bytes())));
+            let bytes = match body {
+                Value::String(text) => text.clone().into_bytes(),
+                structured => value_bytes(structured)?,
+            };
+            return Ok(BodySource::Static(Bytes::from(bytes)));
         }
         Ok(BodySource::Static(Bytes::new()))
     }
@@ -546,5 +573,106 @@ mod tests {
             .expect("builder");
         let response = SendPipe::call(&handle, request).await.expect("call");
         assert_eq!(response.metadata.get_str("x-custom"), Some("value"));
+    }
+
+    fn check_body_json(body: &[u8], expected: &Value) -> Result<(), String> {
+        let parsed: Value = serde_json::from_slice(body).map_err(|err| format!("not json: {err}"))?;
+        if &parsed == expected {
+            Ok(())
+        } else {
+            Err(format!("expected {expected}, got {parsed}"))
+        }
+    }
+
+    fn y1() -> Value {
+        json!({"title": "split stage body", "body": "adds StageBody"})
+    }
+
+    fn y2() -> Value {
+        json!({"content": [{"type": "text", "text": "review of {{body.prompt}}"}]})
+    }
+
+    fn y3() -> Bytes {
+        Bytes::from_static(br#"{"prompt":"PROXIMA-24: adds StageBody"}"#)
+    }
+
+    fn y4() -> Value {
+        json!({"content": [{"type": "text", "text": "review of PROXIMA-24: adds StageBody"}]})
+    }
+
+    async fn respond(spec: Value, request_body: Bytes) -> Vec<u8> {
+        let handle = SynthPipeFactory.build(&spec, None).await.expect("build");
+        let request = Request::builder()
+            .method("POST")
+            .path("/")
+            .body(request_body)
+            .build()
+            .expect("builder");
+        let response = SendPipe::call(&handle, request).await.expect("call");
+        response.collect_body().await.expect("collect").to_vec()
+    }
+
+    #[proxima::test]
+    async fn synth_payload_structured_body_is_compact_json() {
+        let answer = respond(json!({"body": y1()}), Bytes::new()).await;
+        check_body_json(&answer, &y1()).expect("body json");
+    }
+
+    #[proxima::test]
+    async fn synth_payload_structured_template_expands_nested_string() {
+        let answer = respond(json!({"body_template": y2()}), y3()).await;
+        check_body_json(&answer, &y4()).expect("template json");
+    }
+
+    #[proxima::test]
+    async fn synth_payload_structured_template_keeps_whole_value_and_blanks_absent() {
+        let template = json!({"echo": "{{body.n}}", "miss": "{{body.absent}}"});
+        let answer = respond(
+            json!({"body_template": template}),
+            Bytes::from_static(br#"{"n":5}"#),
+        )
+        .await;
+        check_body_json(&answer, &json!({"echo": 5, "miss": ""})).expect("template json");
+    }
+
+    #[proxima::test]
+    async fn synth_payload_env_body_stays_text() {
+        let config = temp_env::with_vars(
+            [
+                ("PROXIMA_SYNTH_BODY", Some("plain text")),
+                ("PROXIMA_SYNTH_BODY_TEMPLATE", None::<&str>),
+            ],
+            || SynthConfig::from_env().expect("from_env"),
+        );
+        assert_eq!(config.body, Some(Value::String("plain text".to_string())));
+        let handle = into_handle(config.from_config().expect("from_config"));
+        let request = Request::builder()
+            .method("GET")
+            .path("/")
+            .build()
+            .expect("builder");
+        let response = SendPipe::call(&handle, request).await.expect("call");
+        let answer = response.collect_body().await.expect("collect");
+        assert_eq!(&answer[..], b"plain text");
+    }
+
+    #[proxima::test]
+    async fn ctl_payload_string_body_is_text() {
+        let text = y1().to_string();
+        let answer = respond(json!({"body": text}), Bytes::new()).await;
+        check_body_json(&answer, &y1()).expect("body json");
+    }
+
+    #[proxima::test]
+    async fn ctl_payload_string_template_expands_text() {
+        let text = y2().to_string();
+        let answer = respond(json!({"body_template": text}), y3()).await;
+        check_body_json(&answer, &y4()).expect("template json");
+    }
+
+    #[test]
+    fn ctl_payload_check_body_json_rejects_mismatch() {
+        let bytes = serde_json::to_vec(&y1()).expect("bytes");
+        assert!(check_body_json(&bytes, &y4()).is_err());
     }
 }
