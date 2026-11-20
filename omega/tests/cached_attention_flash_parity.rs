@@ -356,3 +356,25 @@ fn flash_where_admitted_keeps_legacy_for_an_op_flash_refuses() {
     assert_eq!(admitted_keys, legacy_keys);
     assert_eq!(changed_elements(&legacy, &admitted), 0);
 }
+
+fn where_admitted_runs_legacy(head_dim: u32, rows: u64, cached_len: u64) {
+    let cell = format!("d{head_dim}: rows {rows} cached_len {cached_len}");
+    let fixture = fixture(rows, cached_len, None, head_dim);
+    let (legacy, legacy_keys) = logits_under(&fixture, omega::AttentionDecomposition::Legacy);
+    let (admitted, admitted_keys) = logits_under(&fixture, omega::AttentionDecomposition::FlashWhereAdmitted);
+    assert!(!legacy.is_empty(), "{cell}: an empty root compares nothing");
+    let differing = changed_elements(&legacy, &admitted);
+    eprintln!("where_admitted split parity: {cell} elements={} differing={differing} kernels={admitted_keys:?}", legacy.len());
+    assert!(
+        admitted_keys.iter().all(|key| !key.contains("flash")),
+        "{cell}: an op Legacy splits must run Legacy, keys {admitted_keys:?}"
+    );
+    assert_eq!(admitted_keys, legacy_keys, "{cell}");
+    assert_eq!(differing, 0, "{cell}");
+}
+
+#[test]
+fn flash_where_admitted_runs_legacy_for_ops_legacy_splits() {
+    where_admitted_runs_legacy(128, 8, 2048);
+    where_admitted_runs_legacy(128, 16, 4096);
+}

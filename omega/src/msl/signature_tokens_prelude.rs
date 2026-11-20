@@ -3370,7 +3370,7 @@ pub(crate) fn flash_row_alignment(kind: &BoundOpKind) -> u64 {
 
 #[cfg(feature = "metal-attn-split-rows")]
 #[must_use]
-fn rows_per_threadgroup_for(
+pub(super) fn rows_per_threadgroup_for(
     query_rows: u64,
     kv_heads: u64,
     query_groups: u64,

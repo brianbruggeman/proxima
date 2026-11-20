@@ -97,7 +97,34 @@ pub(super) fn flash_admission_within(kind: &BoundOpKind, budget: u64) -> Result<
     checks
         .into_iter()
         .find_map(|(holds, refusal)| (!holds).then_some(refusal))
-        .map_or(Ok(()), Err)
+        .map_or_else(|| legacy_split_refusal(kind), Err)
+}
+
+/// Refuses an op whose Legacy row-tiled form splits the key range: the same `rows_per_threadgroup_for` and
+/// `row_tiled_splits` Legacy's `row_tiled_form` calls, over Legacy's simdgroup count. One rule for `Flash` and
+/// `FlashWhereAdmitted`, so a flash op never runs one pass where Legacy runs several.
+fn legacy_split_refusal(kind: &BoundOpKind) -> Result<(), FlashRefusal> {
+    let BoundOpKind::CachedAttention {
+        query_rows,
+        cached_key_rows,
+        new_key_rows,
+        kv_heads,
+        query_groups,
+        head_dim,
+        ..
+    } = kind
+    else {
+        return Err(FlashRefusal::NotCachedAttention);
+    };
+    let simdgroups = row_tiled_simdgroups(*head_dim);
+    let capacity = cached_key_rows + new_key_rows;
+    let rows_per_threadgroup =
+        rows_per_threadgroup_for(*query_rows, *kv_heads, *query_groups, *head_dim, capacity, simdgroups);
+    let tiles = query_rows.div_ceil(rows_per_threadgroup);
+    match row_tiled_splits(capacity, *kv_heads, tiles, simdgroups) {
+        1 => Ok(()),
+        splits => Err(FlashRefusal::LegacySplits { splits }),
+    }
 }
 
 /// The flash-decomposition kernel (`AttentionDecomposition::Flash`) for the cached-attention

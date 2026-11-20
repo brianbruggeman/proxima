@@ -24,6 +24,9 @@ pub(super) enum FlashRefusal {
     CachedRowsNotWholeTiles,
     /// The Q stage, output and score tiles together exceed the threadgroup memory ceiling.
     ThreadgroupBytes,
+    /// Legacy would split the key range of this op across `splits` threadgroups and merge them; flash runs one pass, so
+    /// its rounding would differ from Legacy (splitting inside flash is not bit-identical yet, PROXNUM-574).
+    LegacySplits { splits: u64 },
 }
 
 impl FlashRefusal {
@@ -39,6 +42,7 @@ impl FlashRefusal {
             Self::QueryRowsDifferFromNewKeys => "flash needs as many query rows as new key rows",
             Self::CachedRowsNotWholeTiles => "flash needs a cached key extent that is a whole number of 8-key tiles",
             Self::ThreadgroupBytes => "flash needs its staged Q, output and score tiles inside the threadgroup memory ceiling",
+            Self::LegacySplits { .. } => "flash runs one pass where legacy would split the key range",
         }
     }
 }

@@ -2978,7 +2978,7 @@ fn flash_cache_key_is_shared_by_every_admitted_prompt_length_of_one_shape() {
 }
 
 /// The window start of a flash row sits on the key-block grid of Legacy's row tile, so lengths
-/// whose Legacy tile differs must not share a flash kernel, while lengths with one tile do.
+/// with one tile share a flash kernel. The one-unit tile (q2) is a Legacy split shape, which flash refuses.
 #[cfg(feature = "metal-attn-variants")]
 #[test]
 fn flash_cache_key_follows_the_row_tile_alignment_legacy_resolves() {
@@ -2992,9 +2992,8 @@ fn flash_cache_key_follows_the_row_tile_alignment_legacy_resolves() {
     assert_eq!(alignment(485), 2);
     assert_eq!(alignment(2), 1, "a two-row verify keeps one unit per tile");
     assert_eq!(token(512), token(485), "one alignment, one key");
-    assert_ne!(token(512), token(2), "two alignments, two keys");
     assert!(token(512).contains("_a2"), "{}", token(512));
-    assert!(token(2).contains("_a1"), "{}", token(2));
+    assert!(matches!(flash_admission(&op(2).kind), Err(FlashRefusal::LegacySplits { .. })), "a one-unit tile is a split op, which flash refuses");
 }
 
 #[cfg(feature = "metal-attn-variants")]
@@ -3060,3 +3059,15 @@ fn flash_is_off_by_default_even_for_an_admitted_op() {
     .expect("legacy emits");
     assert!(!kernel.source.contains("flash_block"));
 }
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn flash_admission_refuses_an_op_legacy_splits_and_admits_one_it_runs_whole() {
+    let split = flash_op(8, 128, 2048, 8, i64::MIN);
+    let Err(FlashRefusal::LegacySplits { splits }) = flash_admission(&split.kind) else {
+        panic!("q8 over 2048 cached keys at d128 g8 kv4 must refuse on Legacy's splits");
+    };
+    assert!(splits > 1, "the refusal names the split count Legacy resolves, got {splits}");
+    assert_eq!(flash_admission(&flash_op(8, 128, 2048, 512, i64::MIN).kind), Ok(()));
+}
+
