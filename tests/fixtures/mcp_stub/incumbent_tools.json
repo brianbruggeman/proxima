@@ -1,0 +1,292 @@
+[
+  {
+    "description": "List every pipe the proxima daemon knows with its current state.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "list_pipes"
+  },
+  {
+    "description": "Return the status of one named pipe.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "description": "pipe name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "pipe_status"
+  },
+  {
+    "description": "Snapshot the daemon's counters / gauges / histograms.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "metrics_snapshot"
+  },
+  {
+    "description": "Tail the most recent stdout/stderr lines from one supervised pipe.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_lines": {
+          "default": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "name": {
+          "description": "pipe name",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "pipe_logs"
+  },
+  {
+    "description": "Start a pipe. Walks the configured dep graph and starts every required pipe in topological order.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "start_pipe"
+  },
+  {
+    "description": "Stop a pipe. Does not cascade to dependents — caller manages dep order on the way down.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "stop_pipe"
+  },
+  {
+    "description": "Restart a pipe (stop + start, bumps restart count).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name"
+      ],
+      "type": "object"
+    },
+    "name": "restart_pipe"
+  },
+  {
+    "description": "Re-read the daemon's config from disk and apply any new pipe definitions.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "daemon_reload"
+  },
+  {
+    "description": "Submit a new pipeline (DAG of stages) to the daemon. Spec is JSON shaped like proxima::PipelineSpec.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "spec": {
+          "description": "PipelineSpec body (JSON form)",
+          "type": "object"
+        }
+      },
+      "required": [
+        "spec"
+      ],
+      "type": "object"
+    },
+    "name": "pipelines_submit"
+  },
+  {
+    "description": "List submitted pipelines, newest first. Optional filters narrow by name or spec_hash_hex.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "spec_hash_hex": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "pipelines_list"
+  },
+  {
+    "description": "Resolve a query string (id / name / prefix) to a canonical pipeline id.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "description": "id, name, or unique id/name prefix",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "pipelines_resolve"
+  },
+  {
+    "description": "Inspect a pipeline by canonical id (use pipelines_resolve first).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "pipelines_inspect"
+  },
+  {
+    "description": "Walk a stage's depends_on chain. Returns ordered ancestor list (depth 0 = queried stage).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "stage": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "stage"
+      ],
+      "type": "object"
+    },
+    "name": "pipelines_explain"
+  },
+  {
+    "description": "Replay a recorded pipeline under a new id. Optional substitutes map replaces selected stages with fresh StageSpecs that run live; non-substituted stages re-emit their recorded events.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "substitutes": {
+          "description": "stage_name → StageSpec map; omit to replay verbatim",
+          "type": "object"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    "name": "pipelines_replay"
+  },
+  {
+    "description": "Walk a parsed proxima spec and report policy violations (cycle detection, timeout coverage, custom rules). Pass either spec_path or spec_inline; same for policy. Returns a text+json report.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "policy_inline": {
+          "type": "object"
+        },
+        "policy_path": {
+          "type": "string"
+        },
+        "spec_inline": {
+          "type": "object"
+        },
+        "spec_path": {
+          "type": "string"
+        },
+        "strict": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "name": "verify_static"
+  },
+  {
+    "description": "Stream a .bin recording and run replay-policy assertions. recording_path is required (no inline body — recordings are binary). Returns a text+json report.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "policy_inline": {
+          "type": "object"
+        },
+        "policy_path": {
+          "type": "string"
+        },
+        "recording_path": {
+          "type": "string"
+        },
+        "strict": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "recording_path"
+      ],
+      "type": "object"
+    },
+    "name": "verify_replay"
+  },
+  {
+    "description": "Run a proxima load scenario by file path or inline value. Drives the target Pipe via the closed-loop or open-loop branch (chosen by workload.mode()), evaluates expectations, returns a structured ScenarioReport with passed/completed/successes/failures/failed_expectations/windows/metrics_snapshot.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "scenario_inline": {
+          "description": "Scenario value inline (alternative to scenario_path)",
+          "type": "object"
+        },
+        "scenario_path": {
+          "description": "path to a scenario.toml file",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "scenario_run"
+  }
+]

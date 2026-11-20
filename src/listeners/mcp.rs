@@ -3,10 +3,12 @@ use std::net::SocketAddr;
 #[cfg(unix)]
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::channel::oneshot;
 use futures::{FutureExt, select};
+use serde::Deserialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 #[cfg(unix)]
@@ -14,7 +16,7 @@ use tokio::net::{UnixListener, UnixStream};
 
 use proxima_primitives::pipe::Method;
 use proxima_primitives::pipe::SendPipe;
-use proxima_protocols::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse};
+use proxima_protocols::jsonrpc::{JsonRpcError, JsonRpcRequest, JsonRpcResponse, RequestId};
 use proxima_telemetry::debug;
 #[cfg(unix)]
 use proxima_telemetry::warn;
@@ -64,40 +66,65 @@ impl ListenProtocol for McpListenProtocol {
         context: ServeContext,
         shutdown: oneshot::Receiver<()>,
     ) -> Pin<Box<dyn Future<Output = Result<(), ProximaError>> + Send + '_>> {
-        let transport = spec
-            .get("transport")
-            .and_then(Value::as_str)
-            .unwrap_or("stdio")
-            .to_string();
-        #[cfg(unix)]
-        let path: Option<PathBuf> = spec.get("path").and_then(Value::as_str).map(PathBuf::from);
+        let transport = spec.get("transport").and_then(Value::as_str);
+        let transport = transport.unwrap_or("stdio").to_string();
+        let path = spec.get("path").and_then(Value::as_str).map(str::to_string);
         let ready_signal = context.ready_signal.clone();
+        let configured = configured_tools(spec);
         Box::pin(async move {
-            match transport.as_str() {
-                "stdio" => serve_stdio(dispatch, shutdown, ready_signal).await,
-                #[cfg(unix)]
-                "unix" | "uds" => {
-                    let path = path.ok_or_else(|| {
-                        ProximaError::Config(
-                            "mcp transport `unix` requires `path = \"/...\"`".into(),
-                        )
-                    })?;
-                    serve_unix(path, dispatch, shutdown, ready_signal).await
-                }
-                #[cfg(not(unix))]
-                "unix" | "uds" => Err(ProximaError::Config(
-                    "mcp Unix socket transport is unavailable on this platform".into(),
-                )),
-                other => Err(ProximaError::Config(format!(
-                    "unknown mcp transport `{other}` — expected stdio | unix"
-                ))),
-            }
+            let tools: Arc<[ConfiguredTool]> = configured?.into();
+            serve_transport(&transport, path, dispatch, tools, shutdown, ready_signal).await
         })
     }
 }
 
+async fn serve_transport(
+    transport: &str,
+    path: Option<String>,
+    dispatch: PipeHandle,
+    tools: Arc<[ConfiguredTool]>,
+    shutdown: oneshot::Receiver<()>,
+    ready_signal: Option<proxima_listen::ReadySignal>,
+) -> Result<(), ProximaError> {
+    match transport {
+        "stdio" => serve_stdio(dispatch, tools, shutdown, ready_signal).await,
+        "unix" | "uds" => serve_unix_path(path, dispatch, tools, shutdown, ready_signal).await,
+        other => Err(ProximaError::Config(format!(
+            "unknown mcp transport `{other}` — expected stdio | unix"
+        ))),
+    }
+}
+
+#[cfg(unix)]
+async fn serve_unix_path(
+    path: Option<String>,
+    dispatch: PipeHandle,
+    tools: Arc<[ConfiguredTool]>,
+    shutdown: oneshot::Receiver<()>,
+    ready_signal: Option<proxima_listen::ReadySignal>,
+) -> Result<(), ProximaError> {
+    let path = path.map(PathBuf::from).ok_or_else(|| {
+        ProximaError::Config("mcp transport `unix` requires `path = \"/...\"`".into())
+    })?;
+    serve_unix(path, dispatch, tools, shutdown, ready_signal).await
+}
+
+#[cfg(not(unix))]
+async fn serve_unix_path(
+    _path: Option<String>,
+    _dispatch: PipeHandle,
+    _tools: Arc<[ConfiguredTool]>,
+    _shutdown: oneshot::Receiver<()>,
+    _ready_signal: Option<proxima_listen::ReadySignal>,
+) -> Result<(), ProximaError> {
+    Err(ProximaError::Config(
+        "mcp Unix socket transport is unavailable on this platform".into(),
+    ))
+}
+
 async fn serve_stdio(
     dispatch: PipeHandle,
+    tools: Arc<[ConfiguredTool]>,
     mut shutdown: oneshot::Receiver<()>,
     ready_signal: Option<proxima_listen::ReadySignal>,
 ) -> Result<(), ProximaError> {
@@ -111,7 +138,7 @@ async fn serve_stdio(
     let reader = BufReader::new(stdin);
     let writer = stdout;
     let writer_mutex = std::sync::Arc::new(tokio::sync::Mutex::new(writer));
-    let serve = serve_jsonrpc_loop(reader, writer_mutex, dispatch).fuse();
+    let serve = serve_jsonrpc_loop(reader, writer_mutex, dispatch, tools).fuse();
     futures::pin_mut!(serve);
     select! {
         outcome = serve => outcome,
@@ -123,6 +150,7 @@ async fn serve_stdio(
 async fn serve_unix(
     path: PathBuf,
     dispatch: PipeHandle,
+    tools: Arc<[ConfiguredTool]>,
     mut shutdown: oneshot::Receiver<()>,
     ready_signal: Option<proxima_listen::ReadySignal>,
 ) -> Result<(), ProximaError> {
@@ -142,7 +170,7 @@ async fn serve_unix(
     loop {
         select! {
             outcome = listener.accept().fuse() => match outcome {
-                Ok((stream, _peer)) => spawn_mcp_unix_handler(stream, dispatch.clone()),
+                Ok((stream, _peer)) => spawn_mcp_unix_handler(stream, dispatch.clone(), tools.clone()),
                 Err(error) => warn!(?error, "mcp uds accept error"),
             },
             _ = (&mut shutdown).fuse() => {
@@ -154,7 +182,7 @@ async fn serve_unix(
 }
 
 #[cfg(unix)]
-fn spawn_mcp_unix_handler(stream: UnixStream, dispatch: PipeHandle) {
+fn spawn_mcp_unix_handler(stream: UnixStream, dispatch: PipeHandle, tools: Arc<[ConfiguredTool]>) {
     // spawn_local: surrounding listener serve runs on a TokioPerCoreRuntime
     // worker (current-thread runtime + LocalSet). `?Send` per-request futures
     // (Pipe::call) stay on this core for life.
@@ -162,7 +190,7 @@ fn spawn_mcp_unix_handler(stream: UnixStream, dispatch: PipeHandle) {
         let (read_half, write_half) = stream.into_split();
         let writer_mutex = std::sync::Arc::new(tokio::sync::Mutex::new(write_half));
         if let Err(error) =
-            serve_jsonrpc_loop(BufReader::new(read_half), writer_mutex, dispatch).await
+            serve_jsonrpc_loop(BufReader::new(read_half), writer_mutex, dispatch, tools).await
         {
             warn!(?error, "mcp uds connection error");
         }
@@ -173,6 +201,7 @@ async fn serve_jsonrpc_loop<R, W>(
     mut reader: BufReader<R>,
     writer: std::sync::Arc<tokio::sync::Mutex<W>>,
     dispatch: PipeHandle,
+    tools: Arc<[ConfiguredTool]>,
 ) -> Result<(), ProximaError>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -191,7 +220,7 @@ where
         if trimmed.is_empty() {
             continue;
         }
-        let response = handle_jsonrpc(trimmed, &dispatch).await;
+        let response = handle_jsonrpc(trimmed, &dispatch, &tools).await;
         if let Some(response_text) = response {
             let mut guard = writer.lock().await;
             guard
@@ -210,23 +239,28 @@ where
     }
 }
 
-async fn handle_jsonrpc(line: &str, dispatch: &PipeHandle) -> Option<String> {
+async fn handle_jsonrpc(
+    line: &str,
+    dispatch: &PipeHandle,
+    tools: &[ConfiguredTool],
+) -> Option<String> {
     let request: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(parsed) => parsed,
-        Err(err) => {
-            let response = JsonRpcResponse::failure(
-                None,
-                JsonRpcError::parse_error(format!("parse error: {err}")),
-            );
-            return Some(to_wire(&response));
-        }
+        Err(err) => return Some(parse_error_wire(&err)),
     };
-    let Some(id) = request.id.clone() else {
-        // notification — dispatch but don't respond.
-        let _ = dispatch_method(&request, dispatch).await;
-        return None;
-    };
-    let response = match dispatch_method(&request, dispatch).await {
+    let outcome = dispatch_method(&request, dispatch, tools).await;
+    // notification: dispatched, never answered
+    let id = request.id?;
+    Some(to_wire(&outcome_response(id, outcome)))
+}
+
+fn parse_error_wire(err: &serde_json::Error) -> String {
+    let error = JsonRpcError::parse_error(format!("parse error: {err}"));
+    to_wire(&JsonRpcResponse::failure(None, error))
+}
+
+fn outcome_response(id: RequestId, outcome: Result<Value, (i32, String)>) -> JsonRpcResponse {
+    match outcome {
         Ok(result) => JsonRpcResponse::success(id, result),
         Err((code, message)) => JsonRpcResponse::failure(
             Some(id),
@@ -236,8 +270,7 @@ async fn handle_jsonrpc(line: &str, dispatch: &PipeHandle) -> Option<String> {
                 data: None,
             },
         ),
-    };
-    Some(to_wire(&response))
+    }
 }
 
 fn to_wire(response: &JsonRpcResponse) -> String {
@@ -247,14 +280,112 @@ fn to_wire(response: &JsonRpcResponse) -> String {
 async fn dispatch_method(
     request: &JsonRpcRequest,
     dispatch: &PipeHandle,
+    tools: &[ConfiguredTool],
 ) -> Result<Value, (i32, String)> {
+    let params = request.params.as_ref().unwrap_or(&Value::Null);
     match request.method.as_str() {
         "initialize" => Ok(initialize_response()),
         "initialized" | "notifications/initialized" => Ok(Value::Null),
-        "tools/list" => Ok(tools_list_response()),
-        "tools/call" => tool_call(request.params.as_ref().unwrap_or(&Value::Null), dispatch).await,
+        "tools/list" => Ok(tools_list_with(tools)),
+        "tools/call" => tool_call(params, dispatch, tools).await,
         other => Err((-32601, format!("method `{other}` not found"))),
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfiguredTool {
+    name: String,
+    description: String,
+    #[serde(rename = "inputSchema")]
+    input_schema: Value,
+    #[serde(default = "default_tool_method")]
+    method: String,
+    #[serde(default = "default_tool_path")]
+    path: String,
+}
+
+fn default_tool_method() -> String {
+    "POST".to_string()
+}
+
+fn default_tool_path() -> String {
+    "/".to_string()
+}
+
+impl ConfiguredTool {
+    fn descriptor(&self) -> Value {
+        serde_json::json!({
+            "name": self.name,
+            "description": self.description,
+            "inputSchema": self.input_schema,
+        })
+    }
+}
+
+fn configured_tools(spec: &Value) -> Result<Vec<ConfiguredTool>, ProximaError> {
+    let Some(raw) = spec.get("tools") else {
+        return Ok(Vec::new());
+    };
+    let items = raw
+        .as_array()
+        .ok_or_else(|| ProximaError::Config("mcp `tools` must be an array".to_string()))?;
+    let builtin = builtin_tool_names();
+    let mut tools: Vec<ConfiguredTool> = Vec::with_capacity(items.len());
+    for (index, item) in items.iter().enumerate() {
+        let tool = parse_tool(index, item)?;
+        check_tool_name(index, &tool.name, &builtin, &tools)?;
+        tools.push(tool);
+    }
+    Ok(tools)
+}
+
+fn parse_tool(index: usize, item: &Value) -> Result<ConfiguredTool, ProximaError> {
+    let tool: ConfiguredTool = serde_json::from_value(item.clone())
+        .map_err(|err| ProximaError::Config(format!("mcp tools[{index}]: {err}")))?;
+    if !tool.input_schema.is_object() {
+        return Err(ProximaError::Config(format!(
+            "mcp tools[{index}] `{}` inputSchema must be an object",
+            tool.name
+        )));
+    }
+    Ok(tool)
+}
+
+fn check_tool_name(
+    index: usize,
+    name: &str,
+    builtin: &[String],
+    earlier: &[ConfiguredTool],
+) -> Result<(), ProximaError> {
+    if builtin.iter().any(|known| known == name) {
+        return Err(ProximaError::Config(format!(
+            "mcp tools[{index}] `{name}` is a built-in tool name"
+        )));
+    }
+    match earlier.iter().position(|tool| tool.name == name) {
+        Some(first) => Err(ProximaError::Config(format!(
+            "mcp tools[{index}] `{name}` duplicates tools[{first}]"
+        ))),
+        None => Ok(()),
+    }
+}
+
+fn builtin_tool_names() -> Vec<String> {
+    tools_list_response()["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool["name"].as_str().map(str::to_string))
+        .collect()
+}
+
+fn tools_list_with(configured: &[ConfiguredTool]) -> Value {
+    let mut list = tools_list_response();
+    if let Some(entries) = list.get_mut("tools").and_then(Value::as_array_mut) {
+        entries.extend(configured.iter().map(ConfiguredTool::descriptor));
+    }
+    list
 }
 
 fn initialize_response() -> Value {
@@ -470,25 +601,44 @@ fn tools_list_response() -> Value {
     })
 }
 
-async fn tool_call(params: &Value, dispatch: &PipeHandle) -> Result<Value, (i32, String)> {
+async fn tool_call(
+    params: &Value,
+    dispatch: &PipeHandle,
+    tools: &[ConfiguredTool],
+) -> Result<Value, (i32, String)> {
     let tool_name = params
         .get("name")
         .and_then(Value::as_str)
         .ok_or((-32602, "tools/call requires `name`".to_string()))?;
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+    match tools.iter().find(|tool| tool.name == tool_name) {
+        Some(tool) => configured_tool_call(tool, &arguments, dispatch).await,
+        None => built_in_tool_call(tool_name, &arguments, dispatch).await,
+    }
+}
 
-    // Verify tools call the library directly — they do not go through
-    // the daemon control plane. Same library entry points the CLI uses.
+async fn built_in_tool_call(
+    tool_name: &str,
+    arguments: &Value,
+    dispatch: &PipeHandle,
+) -> Result<Value, (i32, String)> {
+    // verify tools call the library directly, not the daemon control plane
     match tool_name {
-        "verify_static" => return verify_static_tool(&arguments).await,
-        "verify_replay" => return verify_replay_tool(&arguments).await,
-        "scenario_run" => return scenario_run_tool(&arguments).await,
+        "verify_static" => return verify_static_tool(arguments).await,
+        "verify_replay" => return verify_replay_tool(arguments).await,
+        "scenario_run" => return scenario_run_tool(arguments).await,
         _ => {}
     }
+    let (method, path, body) = built_in_route(tool_name, arguments)?;
+    send_tool_request(tool_name, &method, &path, body, dispatch).await
+}
 
-    // body-carrying tools route to (method, path, body) inline; otherwise the
-    // (method, path) variant from `route_for_tool` with empty body.
-    let (method, path, body) = match tool_name {
+type ToolRoute = (String, String, Option<Vec<u8>>);
+
+// body-carrying tools route to (method, path, body) inline; otherwise the
+// (method, path) pair from `route_for_tool` with empty body.
+fn built_in_route(tool_name: &str, arguments: &Value) -> Result<ToolRoute, (i32, String)> {
+    match tool_name {
         "pipelines_submit" => {
             let spec = arguments
                 .get("spec")
@@ -496,40 +646,77 @@ async fn tool_call(params: &Value, dispatch: &PipeHandle) -> Result<Value, (i32,
                 .ok_or((-32602, "pipelines_submit requires `spec` argument".into()))?;
             let body = serde_json::to_vec(&spec)
                 .map_err(|err| (-32603, format!("encode pipelines_submit body: {err}")))?;
-            ("POST".into(), "/pipelines/submit".to_string(), Some(body))
+            Ok(("POST".into(), "/pipelines/submit".to_string(), Some(body)))
         }
-        "pipelines_replay" => {
-            let id = arguments
-                .get("id")
-                .and_then(Value::as_str)
-                .ok_or((-32602, "pipelines_replay requires `id`".into()))?
-                .to_string();
-            let substitutes = arguments
-                .get("substitutes")
-                .cloned()
-                .unwrap_or(Value::Object(Default::default()));
-            let body = serde_json::to_vec(&substitutes).map_err(|err| {
-                (
-                    -32603,
-                    format!("encode pipelines_replay substitutes: {err}"),
-                )
-            })?;
-            ("POST".into(), format!("/pipelines/{id}/replay"), Some(body))
-        }
+        "pipelines_replay" => replay_route(arguments),
         _ => {
             let (method, path) =
-                route_for_tool(tool_name, &arguments).map_err(|err| (-32602, err))?;
-            (method, path, None)
+                route_for_tool(tool_name, arguments).map_err(|err| (-32602, err))?;
+            Ok((method, path, None))
         }
+    }
+}
+
+fn replay_route(arguments: &Value) -> Result<ToolRoute, (i32, String)> {
+    let id = arguments
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or((-32602, "pipelines_replay requires `id`".into()))?;
+    let substitutes = arguments
+        .get("substitutes")
+        .cloned()
+        .unwrap_or(Value::Object(Default::default()));
+    let body = serde_json::to_vec(&substitutes)
+        .map_err(|err| (-32603, format!("encode pipelines_replay substitutes: {err}")))?;
+    Ok(("POST".into(), format!("/pipelines/{id}/replay"), Some(body)))
+}
+
+async fn configured_tool_call(
+    tool: &ConfiguredTool,
+    arguments: &Value,
+    dispatch: &PipeHandle,
+) -> Result<Value, (i32, String)> {
+    let payload = if arguments.is_null() {
+        b"{}".to_vec()
+    } else {
+        serde_json::to_vec(arguments)
+            .map_err(|err| (-32603, format!("encode {} arguments: {err}", tool.name)))?
     };
+    send_tool_request(&tool.name, &tool.method, &tool.path, Some(payload), dispatch).await
+}
+
+async fn send_tool_request(
+    tool_name: &str,
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+    dispatch: &PipeHandle,
+) -> Result<Value, (i32, String)> {
+    let request = build_tool_request(method, path, body)?;
+    call_tool_dispatch(tool_name, request, dispatch).await
+}
+
+fn build_tool_request(
+    method: &str,
+    path: &str,
+    body: Option<Vec<u8>>,
+) -> Result<Request<Bytes>, (i32, String)> {
     let mut request =
-        build_request(&method, &path).map_err(|err| (-32603, format!("build request: {err}")))?;
+        build_request(method, path).map_err(|err| (-32603, format!("build request: {err}")))?;
     if let Some(body_bytes) = body {
         request
             .metadata
             .insert("content-type".to_string(), "application/json".to_string());
         request.payload = Bytes::from(body_bytes);
     }
+    Ok(request)
+}
+
+async fn call_tool_dispatch(
+    tool_name: &str,
+    request: Request<Bytes>,
+    dispatch: &PipeHandle,
+) -> Result<Value, (i32, String)> {
     let response = SendPipe::call(dispatch, request)
         .await
         .map_err(|err| (-32603, format!("dispatch: {err}")))?;
@@ -540,10 +727,7 @@ async fn tool_call(params: &Value, dispatch: &PipeHandle) -> Result<Value, (i32,
         .map_err(|err| (-32603, format!("read body: {err}")))?;
     let text = String::from_utf8_lossy(&body).to_string();
     if !(200..400).contains(&status) {
-        return Err((
-            -32603,
-            format!("tool `{tool_name}` returned {status}: {text}"),
-        ));
+        return Err((-32603, format!("tool `{tool_name}` returned {status}: {text}")));
     }
     Ok(serde_json::json!({
         "content": [{ "type": "text", "text": text }],
@@ -840,7 +1024,8 @@ mod tests {
     use crate::control_plane::{ControlPlanePipe, PipeState, PipeStatus, StaticControlPlane};
     use crate::pipe::into_handle;
     use serde_json::json;
-    use std::sync::Arc;
+    use crate::request::Response;
+    use std::sync::{Arc, mpsc};
 
     fn fixture_handle() -> PipeHandle {
         let plane = Arc::new(StaticControlPlane::new(vec![PipeStatus {
@@ -862,7 +1047,7 @@ mod tests {
             "method": "initialize",
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["id"], 1);
@@ -874,7 +1059,7 @@ mod tests {
     async fn tools_list_advertises_control_plane_tools() {
         let dispatch = fixture_handle();
         let line = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let tools = parsed["result"]["tools"].as_array().expect("tools array");
         let names: Vec<&str> = tools
@@ -924,7 +1109,7 @@ mod tests {
             }
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let text = parsed["result"]["content"][0]["text"]
             .as_str()
@@ -947,7 +1132,7 @@ mod tests {
             "params": { "name": "scenario_run", "arguments": {} }
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         assert!(
             parsed["error"]["message"]
@@ -981,7 +1166,7 @@ mod tests {
             }
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let text = parsed["result"]["content"][0]["text"]
             .as_str()
@@ -1013,7 +1198,7 @@ mod tests {
             }
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let text = parsed["result"]["content"][0]["text"]
             .as_str()
@@ -1031,7 +1216,7 @@ mod tests {
             "params": { "name": "verify_static", "arguments": {} }
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         assert!(parsed.get("error").is_some(), "expected error: {parsed}");
     }
@@ -1046,7 +1231,7 @@ mod tests {
             "params": { "name": "list_pipes", "arguments": {} },
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let text = parsed["result"]["content"][0]["text"]
             .as_str()
@@ -1065,7 +1250,7 @@ mod tests {
             "params": { "name": "pipe_status", "arguments": { "name": "cart_api" } },
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let text = parsed["result"]["content"][0]["text"]
             .as_str()
@@ -1084,7 +1269,7 @@ mod tests {
             "params": { "name": "definitely_not_a_tool", "arguments": {} },
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         assert!(parsed.get("error").is_some(), "expected error: {parsed}");
         let code = parsed["error"]["code"].as_i64().expect("code");
@@ -1095,7 +1280,7 @@ mod tests {
     async fn unknown_method_returns_method_not_found() {
         let dispatch = fixture_handle();
         let line = json!({"jsonrpc":"2.0","id":6,"method":"prompts/list"}).to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         assert_eq!(parsed["error"]["code"], -32601);
     }
@@ -1103,7 +1288,7 @@ mod tests {
     #[proxima::test]
     async fn malformed_json_returns_parse_error_with_null_id() {
         let dispatch = fixture_handle();
-        let response = handle_jsonrpc("{not json", &dispatch)
+        let response = handle_jsonrpc("{not json", &dispatch, &[])
             .await
             .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
@@ -1115,7 +1300,366 @@ mod tests {
     async fn notification_without_id_returns_no_response() {
         let dispatch = fixture_handle();
         let line = json!({"jsonrpc":"2.0","method":"notifications/initialized"}).to_string();
-        let response = handle_jsonrpc(&line, &dispatch).await;
+        let response = handle_jsonrpc(&line, &dispatch, &[]).await;
         assert!(response.is_none());
+    }
+
+    const CALL_REVIEW: &str = r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"review_ticket","arguments":{"ticket":"PROXIMA-24"}}}"#;
+    const CALL_REVIEW_NO_ARGUMENTS: &str =
+        r#"{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"review_ticket"}}"#;
+    const REVIEW_REPLY: &str = r#"{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"{\"content\":[{\"text\":\"LGTM\",\"type\":\"text\"}]}"}]}}"#;
+    const LGTM_BODY: &str = r#"{"content":[{"text":"LGTM","type":"text"}]}"#;
+    const GITHUB_500: &str = "stage `pr` pipe `github`: returned status 500";
+    const REVIEW_502: &str = "tool `review_ticket` returned 502: stage `pr` pipe `github`: returned status 500";
+    const DUPLICATE_REFUSAL: &str = "mcp tools[1] `review_ticket` duplicates tools[0]";
+    const DUPLICATE_WRONG_FORM: &str = "mcp tools[0] duplicate";
+
+    #[derive(Debug, Clone, PartialEq)]
+    struct Recorded {
+        method: String,
+        path: String,
+        content_type: String,
+        payload: Vec<u8>,
+    }
+
+    struct RecordingStub {
+        seen: mpsc::Sender<Recorded>,
+        status: u16,
+        body: &'static str,
+    }
+
+    impl SendPipe for RecordingStub {
+        type In = Request<Bytes>;
+        type Out = Response<Bytes>;
+        type Err = ProximaError;
+
+        fn call(
+            &self,
+            request: Request<Bytes>,
+        ) -> impl Future<Output = Result<Response<Bytes>, ProximaError>> + Send {
+            let recorded = Recorded {
+                method: request.method.as_str().unwrap_or_default().to_string(),
+                path: String::from_utf8_lossy(&request.path).to_string(),
+                content_type: request
+                    .metadata
+                    .get_str("content-type")
+                    .unwrap_or_default()
+                    .to_string(),
+                payload: request.payload.to_vec(),
+            };
+            let _ = self.seen.send(recorded);
+            let response = Response::new(self.status).with_body(Bytes::from(self.body));
+            async move { Ok(response) }
+        }
+    }
+
+    fn recording_handle(status: u16, body: &'static str) -> (PipeHandle, mpsc::Receiver<Recorded>) {
+        let (seen, receiver) = mpsc::channel();
+        (into_handle(RecordingStub { seen, status, body }), receiver)
+    }
+
+    fn review_tool() -> Value {
+        json!({
+            "name": "review_ticket",
+            "description": "Review the PR linked from a ticket",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "ticket": { "type": "string" } },
+                "required": ["ticket"],
+            },
+        })
+    }
+
+    fn triage_tool() -> Value {
+        json!({
+            "name": "triage_ticket",
+            "description": "Triage a ticket",
+            "inputSchema": { "type": "object" },
+        })
+    }
+
+    fn with_route(tool: Value, method: &str, path: &str) -> Value {
+        let mut routed = tool;
+        routed["method"] = json!(method);
+        routed["path"] = json!(path);
+        routed
+    }
+
+    fn incumbent_tools() -> Vec<Value> {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/mcp_stub/incumbent_tools.json"
+        );
+        let text = std::fs::read_to_string(path).expect("incumbent_tools.json is captured from the base binary");
+        serde_json::from_str(&text).expect("incumbent_tools.json is a json array")
+    }
+
+    fn parsed_tools(tools: Value) -> Vec<ConfiguredTool> {
+        configured_tools(&json!({ "tools": tools })).expect("tools in this test are valid")
+    }
+
+    fn refusal_of(tools: Value) -> ProximaError {
+        configured_tools(&json!({ "tools": tools })).expect_err("tools in this test are invalid")
+    }
+
+    async fn answer(tools: &[ConfiguredTool], dispatch: &PipeHandle, line: &str) -> Value {
+        let text = handle_jsonrpc(line, dispatch, tools)
+            .await
+            .expect("a request carrying an id is answered");
+        serde_json::from_str(&text).expect("response is json")
+    }
+
+    async fn listed_tools(tools: &[ConfiguredTool]) -> Value {
+        let line = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string();
+        answer(tools, &fixture_handle(), &line).await["result"]["tools"].clone()
+    }
+
+    fn check_tool_list(tools: &Value, configured: &[Value]) -> Result<(), String> {
+        let incumbent = incumbent_tools();
+        let listed = tools
+            .as_array()
+            .ok_or_else(|| "tools is not an array".to_string())?;
+        if listed.len() != incumbent.len() + configured.len() {
+            return Err(format!(
+                "expected {} tools, listed {}",
+                incumbent.len() + configured.len(),
+                listed.len()
+            ));
+        }
+        let (head, tail) = listed.split_at(incumbent.len());
+        if head != incumbent.as_slice() {
+            return Err("the incumbent descriptors changed".to_string());
+        }
+        if tail != configured {
+            return Err(format!("configured descriptors {tail:?} != {configured:?}"));
+        }
+        Ok(())
+    }
+
+    fn check_dispatch(recorded: &[Recorded], expected: &[Recorded]) -> Result<(), String> {
+        if recorded == expected {
+            return Ok(());
+        }
+        Err(format!("recorded {recorded:?} != expected {expected:?}"))
+    }
+
+    fn check_refusal(error: &ProximaError, required: &[&str]) -> Result<(), String> {
+        let ProximaError::Config(text) = error else {
+            return Err(format!("not a ProximaError::Config: {error:?}"));
+        };
+        match required.iter().find(|needle| !text.contains(**needle)) {
+            Some(missing) => Err(format!("`{text}` lacks `{missing}`")),
+            None => Ok(()),
+        }
+    }
+
+    fn put_review(payload: &str) -> Recorded {
+        Recorded {
+            method: "PUT".into(),
+            path: "/review".into(),
+            content_type: "application/json".into(),
+            payload: payload.as_bytes().to_vec(),
+        }
+    }
+
+    #[proxima::test]
+    async fn mcp_tools_list_appends_configured_descriptors_after_the_incumbent_seventeen() {
+        let tools = parsed_tools(json!([
+            with_route(review_tool(), "PUT", "/review"),
+            triage_tool()
+        ]));
+
+        let listed = listed_tools(&tools).await;
+
+        check_tool_list(&listed, &[review_tool(), triage_tool()]).expect("incumbent then configured, no method or path");
+    }
+
+    #[proxima::test]
+    async fn mcp_tools_call_sends_arguments_on_the_configured_method_and_path() {
+        let tools = parsed_tools(json!([with_route(review_tool(), "PUT", "/review")]));
+        let (dispatch, seen) = recording_handle(200, LGTM_BODY);
+
+        let reply = answer(&tools, &dispatch, CALL_REVIEW).await;
+
+        let recorded: Vec<Recorded> = seen.try_iter().collect();
+        check_dispatch(&recorded, &[put_review(r#"{"ticket":"PROXIMA-24"}"#)]).expect("one PUT /review");
+        let expected: Value = serde_json::from_str(REVIEW_REPLY).expect("literal parses");
+        assert_eq!(reply, expected);
+    }
+
+    #[proxima::test]
+    async fn mcp_tools_call_defaults_to_post_root_with_an_empty_object_payload() {
+        let tools = parsed_tools(json!([review_tool()]));
+        let (dispatch, seen) = recording_handle(200, LGTM_BODY);
+
+        let _ = answer(&tools, &dispatch, CALL_REVIEW_NO_ARGUMENTS).await;
+
+        let recorded: Vec<Recorded> = seen.try_iter().collect();
+        let expected = Recorded {
+            method: "POST".into(),
+            path: "/".into(),
+            content_type: "application/json".into(),
+            payload: b"{}".to_vec(),
+        };
+        check_dispatch(&recorded, &[expected]).expect("one POST / with {}");
+    }
+
+    #[proxima::test]
+    async fn mcp_tools_call_maps_a_failing_status_to_the_incumbent_jsonrpc_error() {
+        let tools = parsed_tools(json!([review_tool()]));
+        let (dispatch, _seen) = recording_handle(502, GITHUB_500);
+
+        let reply = answer(&tools, &dispatch, CALL_REVIEW).await;
+
+        assert_eq!(reply["error"]["code"], -32603);
+        assert_eq!(reply["error"]["message"], REVIEW_502);
+    }
+
+    #[test]
+    fn mcp_tools_refuses_a_tools_value_that_is_not_an_array() {
+        let error = refusal_of(json!({}));
+        check_refusal(&error, &["mcp", "tools", "array"]).expect("names mcp tools array");
+    }
+
+    #[test]
+    fn mcp_tools_refuses_a_repeated_tool_name() {
+        let error = refusal_of(json!([review_tool(), review_tool()]));
+        check_refusal(&error, &["mcp tools[1]", "review_ticket"]).expect("names tools[1]");
+    }
+
+    #[test]
+    fn mcp_tools_refuses_a_built_in_tool_name() {
+        let mut tool = review_tool();
+        tool["name"] = json!("list_pipes");
+        let error = refusal_of(json!([tool]));
+        check_refusal(&error, &["mcp tools[0]", "list_pipes"]).expect("names the built-in");
+    }
+
+    #[test]
+    fn mcp_tools_refuses_an_input_schema_that_is_not_an_object() {
+        let mut tool = review_tool();
+        tool["inputSchema"] = json!([]);
+        let error = refusal_of(json!([tool]));
+        check_refusal(&error, &["mcp tools[0]", "inputSchema"]).expect("names inputSchema");
+    }
+
+    #[test]
+    fn mcp_tools_refuses_a_tool_without_a_description() {
+        let mut tool = review_tool();
+        tool.as_object_mut().expect("object").remove("description");
+        let error = refusal_of(json!([tool]));
+        check_refusal(&error, &["mcp tools[0]", "description"]).expect("names description");
+    }
+
+    #[test]
+    fn mcp_tools_refuses_an_unknown_tool_field() {
+        let mut tool = review_tool();
+        tool["pipe"] = json!("x");
+        let error = refusal_of(json!([tool]));
+        check_refusal(&error, &["mcp tools[0]", "pipe"]).expect("names the unknown field");
+    }
+
+    #[test]
+    fn mcp_tools_refuses_a_tool_without_a_name() {
+        let mut tool = review_tool();
+        tool.as_object_mut().expect("object").remove("name");
+        let error = refusal_of(json!([tool]));
+        check_refusal(&error, &["mcp tools[0]", "name"]).expect("names name");
+    }
+
+    #[cfg(unix)]
+    #[proxima::test]
+    async fn mcp_tools_refuses_a_repeated_name_in_serve_before_binding() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let socket = dir.path().join("mcp.sock");
+        let spec = json!({
+            "transport": "unix",
+            "path": socket.to_str().expect("utf-8 tempdir"),
+            "tools": [review_tool(), review_tool()],
+        });
+        let (dispatch, seen) = recording_handle(200, LGTM_BODY);
+        let context = ServeContext::new(Arc::new(
+            proxima_primitives::pipe::telemetry_surface::NoopTelemetry,
+        ));
+        let (_keep_open, shutdown) = oneshot::channel::<()>();
+        let protocol = McpListenProtocol::new();
+
+        let outcome = protocol
+            .serve(SocketAddr::from(([127, 0, 0, 1], 0)), dispatch, &spec, context, shutdown)
+            .await;
+
+        let error = outcome.expect_err("serve refuses the duplicate");
+        check_refusal(&error, &["mcp tools[1]", "review_ticket"]).expect("names tools[1]");
+        assert!(!socket.exists(), "refused before binding the socket");
+        assert_eq!(seen.try_iter().count(), 0);
+    }
+
+    #[proxima::test]
+    async fn ctl_tools_listing_without_config_is_exactly_the_incumbent_seventeen() {
+        let listed = listed_tools(&[]).await;
+
+        assert_eq!(listed, Value::Array(incumbent_tools()));
+        assert!(check_tool_list(&listed, &[review_tool()]).is_err());
+    }
+
+    #[test]
+    fn ctl_tools_list_check_requires_configured_order() {
+        let mut listed = incumbent_tools();
+        listed.extend([review_tool(), triage_tool()]);
+        let swapped = [triage_tool(), review_tool()];
+
+        let in_order = check_tool_list(&Value::Array(listed.clone()), &[review_tool(), triage_tool()]);
+        let out_of_order = check_tool_list(&Value::Array(listed), &swapped);
+
+        assert!(in_order.is_ok());
+        assert!(out_of_order.is_err());
+    }
+
+    #[test]
+    fn ctl_tools_refusal_check_rejects_a_non_config_variant() {
+        let wrong = ProximaError::Upstream(DUPLICATE_REFUSAL.to_string());
+        assert!(check_refusal(&wrong, &["mcp tools[1]", "review_ticket"]).is_err());
+    }
+
+    #[test]
+    fn ctl_tools_dispatch_check_rejects_an_extra_payload_field() {
+        let recorded = [put_review(r#"{"ticket":"PROXIMA-24","extra":1}"#)];
+        let expected = [put_review(r#"{"ticket":"PROXIMA-24"}"#)];
+        assert!(check_dispatch(&recorded, &expected).is_err());
+    }
+
+    #[test]
+    fn ctl_tools_dispatch_check_accepts_the_exact_payload() {
+        let recorded = [put_review(r#"{"ticket":"PROXIMA-24"}"#)];
+        let expected = [put_review(r#"{"ticket":"PROXIMA-24"}"#)];
+        assert!(check_dispatch(&recorded, &expected).is_ok());
+    }
+
+    #[test]
+    fn ctl_tools_refusal_check_rejects_the_wrong_message_form() {
+        let wrong = ProximaError::Config(DUPLICATE_WRONG_FORM.to_string());
+        assert!(check_refusal(&wrong, &["mcp tools[1]", "review_ticket"]).is_err());
+    }
+
+    #[test]
+    fn ctl_tools_refusal_check_accepts_the_duplicate_form() {
+        let right = ProximaError::Config(DUPLICATE_REFUSAL.to_string());
+        assert!(check_refusal(&right, &["mcp tools[1]", "review_ticket"]).is_ok());
+    }
+
+    #[proxima::test]
+    async fn ctl_tools_unknown_tool_still_returns_invalid_params_with_config() {
+        let tools = parsed_tools(json!([review_tool()]));
+        let line = json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "method": "tools/call",
+            "params": { "name": "definitely_not_a_tool", "arguments": {} },
+        })
+        .to_string();
+
+        let reply = answer(&tools, &fixture_handle(), &line).await;
+
+        assert_eq!(reply["error"]["code"], -32602);
     }
 }
