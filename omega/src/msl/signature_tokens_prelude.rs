@@ -1,6 +1,6 @@
 #[cfg(feature = "metal-attn-split-rows")]
 use super::cached_attention_flash_tiled::{
-    FLASH_KEYS_PER_BLOCK, FLASH_SIMDGROUPS, flash_shape_admits,
+    FLASH_SIMDGROUPS, flash_admission,
 };
 use super::*;
 use proxima_numeric::block_layout::BlockLayout;
@@ -2932,6 +2932,24 @@ pub(crate) fn validate_simdgroup_count_selection(
     })
 }
 
+/// Refuses a flash decomposition the op does not admit, with the [`FlashRefusal`] reason
+/// ([`flash_admission`] is the decision; this only renders it as the axis error).
+#[cfg(all(feature = "metal-attn-variants", feature = "metal-attn-split-rows"))]
+pub(crate) fn validate_decomposition_selection(
+    resolved: &BoundOp,
+    schedule: AttentionRowSchedule,
+) -> Result<(), EmitError> {
+    if !schedule.is_flash() {
+        return Ok(());
+    }
+    flash_admission(&resolved.kind).map_err(|refusal| {
+        EmitError::CachedAttentionVariantAxisNotSupported {
+            axis: "decomposition",
+            value: refusal.reason(),
+        }
+    })
+}
+
 /// The decode split form of a two-range cached-bound op, when the op and the
 /// policy both admit it: one new key per query row and a row count
 /// [`decode_split_serves_rows`] admits (a single decode row, with
@@ -3107,8 +3125,7 @@ fn row_tiled_form(
             <= crate::sized::ATTENTION_ROWS_ACCUMULATOR_FRAGMENTS
         && row_tile_bytes(unit_rows, *query_groups, row_tiled_block(*head_dim))
             <= crate::sized::CACHED_ATTENTION_THREADGROUP_MEMORY_BYTES;
-    let flash_fits = !flash
-        || (flash_shape_admits(kind) && row_tiled_block(*head_dim) == FLASH_KEYS_PER_BLOCK);
+    let flash_fits = !flash || flash_admission(kind).is_ok();
     if !admitted || !shape_fits || !flash_fits {
         return None;
     }

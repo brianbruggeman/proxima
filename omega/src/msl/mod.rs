@@ -120,6 +120,8 @@ mod cached_attention_decode_split;
 #[cfg(feature = "metal-attn-split-rows")]
 mod cached_attention_flash_tiled;
 #[cfg(feature = "metal-attn-split-rows")]
+mod flash_refusal;
+#[cfg(feature = "metal-attn-split-rows")]
 mod cached_attention_row_tiled;
 mod cached_softmax_weights_render;
 mod selection_render;

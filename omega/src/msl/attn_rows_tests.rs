@@ -1,6 +1,10 @@
 use std::collections::BTreeSet;
 
 use super::attn_golden_tests::{attention_op, attention_rows_op};
+#[cfg(feature = "metal-attn-variants")]
+use super::cached_attention_flash_tiled::flash_admission;
+#[cfg(feature = "metal-attn-variants")]
+use super::flash_refusal::FlashRefusal;
 use super::*;
 
 /// emits with the 64-bit index text, which the kernel-structure assertions below read; the 32-bit
@@ -2776,7 +2780,25 @@ fn two_tile_classes_get_different_keys_and_different_source() {
 
 #[cfg(feature = "metal-attn-variants")]
 fn flash_full_layer_op(head_dim: u64) -> BoundOp {
-    let mut op = attention_rows_op(10, 8, head_dim, 2048, 512, i64::MIN);
+    flash_op(8, head_dim, 2048, 512, i64::MIN)
+}
+
+#[cfg(feature = "metal-attn-variants")]
+fn flash_op(
+    groups: u64,
+    head_dim: u64,
+    cached_key_rows: u64,
+    rows: u64,
+    cached_lower_inclusive: i64,
+) -> BoundOp {
+    let mut op = attention_rows_op(
+        10,
+        groups,
+        head_dim,
+        cached_key_rows,
+        rows,
+        cached_lower_inclusive,
+    );
     let BoundOpKind::CachedAttention {
         attention_sink,
         new_upper_inclusive,
@@ -2860,4 +2882,65 @@ fn flash_decomposition_refuses_a_head_it_has_no_lane_map_for() {
     );
 
     assert!(outcome.is_err(), "flash must not silently fall back to another body");
+    assert_eq!(
+        outcome.err(),
+        Some(EmitError::CachedAttentionVariantAxisNotSupported {
+            axis: "decomposition",
+            value: FlashRefusal::HeadDim.reason(),
+        }),
+        "the refusal names the head dim, not a generic row-tiled failure"
+    );
+}
+
+/// Head dims 256 and 512 are DESIGN admits, but the template is d128-only until slice 6
+/// generalises it, so they are `HeadDim` refusals here.
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn flash_admission_table_names_the_condition_each_shape_fails() {
+    let cases: [(&str, BoundOp, Result<(), FlashRefusal>); 8] = [
+        ("harness_flint_d128_g8_q512_c2048", flash_op(8, 128, 2048, 512, i64::MIN), Ok(())),
+        ("groups_16", flash_op(16, 128, 2048, 512, i64::MIN), Err(FlashRefusal::QueryGroups)),
+        ("groups_2", flash_op(2, 128, 2048, 512, i64::MIN), Err(FlashRefusal::QueryGroups)),
+        (
+            "q485_not_a_whole_block",
+            flash_op(8, 128, 2048, 485, i64::MIN),
+            Err(FlashRefusal::QueryRowsNotWholeBlocks),
+        ),
+        (
+            "cached_2000_not_a_whole_block",
+            flash_op(8, 128, 2000, 512, i64::MIN),
+            Err(FlashRefusal::CachedRowsNotWholeBlocks),
+        ),
+        (
+            "sliding_window",
+            flash_op(8, 128, 2048, 512, SLIDING_LOWER),
+            Err(FlashRefusal::SlidingWindow),
+        ),
+        ("d256_waits_on_slice_6", flash_op(8, 256, 2048, 512, i64::MIN), Err(FlashRefusal::HeadDim)),
+        ("d512_waits_on_slice_6", flash_op(8, 512, 2048, 512, i64::MIN), Err(FlashRefusal::HeadDim)),
+    ];
+
+    for (name, op, expected) in cases {
+        assert_eq!(flash_admission(&op.kind), expected, "{name}");
+    }
+}
+
+#[cfg(feature = "metal-attn-variants")]
+#[test]
+fn selecting_flash_for_a_refused_shape_reports_the_named_refusal() {
+    let op = flash_op(16, 128, 2048, 512, i64::MIN);
+    let (_, schedule) = AttentionMmaSelection::from_variant(flash_f16_variant(
+        AttentionDecomposition::Flash,
+    ))
+    .expect("the flash variant maps to a schedule");
+
+    let outcome = validate_decomposition_selection(&op, schedule);
+
+    assert_eq!(
+        outcome,
+        Err(EmitError::CachedAttentionVariantAxisNotSupported {
+            axis: "decomposition",
+            value: FlashRefusal::QueryGroups.reason(),
+        })
+    );
 }

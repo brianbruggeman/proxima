@@ -129,6 +129,8 @@ pub(crate) fn emit_with_attention_variant_and_knobs(
     validate_simd_topology_selection(resolved, numeric_policy, row_schedule)?;
     #[cfg(feature = "metal-attn-split-rows")]
     validate_simdgroup_count_selection(resolved, numeric_policy, row_schedule)?;
+    #[cfg(feature = "metal-attn-split-rows")]
+    validate_decomposition_selection(resolved, row_schedule)?;
     emit_inner_with_mma_selection(
         resolved,
         packed_operands,

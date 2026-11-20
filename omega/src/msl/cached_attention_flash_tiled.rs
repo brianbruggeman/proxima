@@ -1,3 +1,4 @@
+use super::flash_refusal::FlashRefusal;
 use super::layout_render::{hardware_type, readable_scalar_cache};
 use super::*;
 use proxima_numeric::float_layout::FloatLayout;
@@ -12,16 +13,21 @@ pub(super) const FLASH_KEYS_PER_BLOCK: u64 = 64;
 /// The head width the flash body's row write assumes: one float4 per lane of one simdgroup.
 const FLASH_HEAD_DIM: u64 = 128;
 
-/// Whether the flash body can serve `kind`: a sinked, full-attention, causal op of eight query
-/// heads per kv head whose cached extent and new-row extent are whole key blocks.
+/// The query heads per kv head the flash body's fragment map assumes.
+const FLASH_QUERY_GROUPS: u64 = 8;
+
+/// Admits `kind` for the flash body, or names the one condition it fails: a sinked,
+/// full-attention, causal op of eight query heads per kv head whose cached extent and new-row
+/// extent are whole key blocks. Conditions are checked in the order of [`FlashRefusal`]; the
+/// first failure is the reason. Head dims 256 and 512 are `HeadDim` refusals until the template
+/// generalises past 128.
 ///
 /// The whole-block rule is what lets the body drop every edge-tile load guard. The K and V
 /// buffers are bound from these same extents (`proxima-tensor/src/physical.rs:47`,
 /// `cached_key_width = cached_key_rows * head_dim`), so a cached extent that is a whole number
 /// of blocks is a buffer a block-aligned read never leaves; the keys between the live length and
 /// the extent are masked to -inf by the softmax's `visible` predicate, not by the loads.
-#[must_use]
-pub(super) fn flash_shape_admits(kind: &BoundOpKind) -> bool {
+pub(super) fn flash_admission(kind: &BoundOpKind) -> Result<(), FlashRefusal> {
     let BoundOpKind::CachedAttention {
         query_rows,
         cached_key_rows,
@@ -34,16 +40,32 @@ pub(super) fn flash_shape_admits(kind: &BoundOpKind) -> bool {
         ..
     } = kind
     else {
-        return false;
+        return Err(FlashRefusal::NotCachedAttention);
     };
-    *attention_sink
-        && *query_groups == 8
-        && *head_dim == FLASH_HEAD_DIM
-        && *cached_lower_inclusive == i64::MIN
-        && *new_upper_inclusive == 0
-        && query_rows == new_key_rows
-        && query_rows.is_multiple_of(FLASH_KEYS_PER_BLOCK)
-        && cached_key_rows.is_multiple_of(FLASH_KEYS_PER_BLOCK)
+    let checks = [
+        (*attention_sink, FlashRefusal::NoAttentionSink),
+        (*query_groups == FLASH_QUERY_GROUPS, FlashRefusal::QueryGroups),
+        (*head_dim == FLASH_HEAD_DIM, FlashRefusal::HeadDim),
+        (*cached_lower_inclusive == i64::MIN, FlashRefusal::SlidingWindow),
+        (*new_upper_inclusive == 0, FlashRefusal::NewKeysNotCausal),
+        (query_rows == new_key_rows, FlashRefusal::QueryRowsDifferFromNewKeys),
+        (
+            query_rows.is_multiple_of(FLASH_KEYS_PER_BLOCK),
+            FlashRefusal::QueryRowsNotWholeBlocks,
+        ),
+        (
+            cached_key_rows.is_multiple_of(FLASH_KEYS_PER_BLOCK),
+            FlashRefusal::CachedRowsNotWholeBlocks,
+        ),
+        (
+            row_tiled_block(*head_dim) == FLASH_KEYS_PER_BLOCK,
+            FlashRefusal::RowTiledBlockDiffers,
+        ),
+    ];
+    checks
+        .into_iter()
+        .find_map(|(holds, refusal)| (!holds).then_some(refusal))
+        .map_or(Ok(()), Err)
 }
 
 /// The flash-decomposition kernel (`AttentionDecomposition::Flash`) for the cached-attention
@@ -74,12 +96,12 @@ pub(super) fn render_cached_attention_flash_tiled(
             found: resolved.kind.name(),
         });
     };
-    if !flash_shape_admits(&resolved.kind) {
-        return Err(EmitError::CachedAttentionVariantAxisNotSupported {
+    flash_admission(&resolved.kind).map_err(|refusal| {
+        EmitError::CachedAttentionVariantAxisNotSupported {
             axis: "decomposition",
-            value: "flash needs a sinked full-attention causal op of 8 query groups, head dim 128, and whole 64-key cached and new extents",
-        });
-    }
+            value: refusal.reason(),
+        }
+    })?;
     let accumulator = hardware_type(&FloatLayout::BF32).ok_or(
         EmitError::CachedAttentionKvCodecNotSupported {
             node: resolved.node,
