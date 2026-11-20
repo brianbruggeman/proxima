@@ -92,7 +92,7 @@ mod configured_runtime_tests {
 
     #[test]
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    fn the_serving_runtime_reads_the_dense_mma_layout_from_the_omega_config() {
+    fn the_serving_runtime_carries_a_dense_mma_layout_only_when_omega_is_configured() {
         let runtime_config = RuntimeConfig {
             dense_mma_input_layout: DenseMmaInputLayout::explicit(FloatLayout::BF16),
             ..RuntimeConfig::default()
@@ -102,9 +102,10 @@ mod configured_runtime_tests {
         let from_config = BackendRuntime::new(&configured).dense_mma_input_layout;
         let from_default = BackendRuntime::new(&ServingConfig::default()).dense_mma_input_layout;
 
-        assert_eq!(from_config, DenseMmaInputLayout::explicit(FloatLayout::BF16));
-        assert_eq!(from_default, RuntimeConfig::default().dense_mma_input_layout);
-        let oracle_policy = from_config.apply_to(configured.numeric_policy);
+        assert_eq!(from_config, Some(DenseMmaInputLayout::explicit(FloatLayout::BF16)));
+        assert_eq!(from_default, None);
+        let oracle_policy =
+            DenseMmaInputLayout::explicit(FloatLayout::BF16).apply_to(configured.numeric_policy);
         assert!(oracle_policy.bf16_input_rounding, "the cpu oracle gets the grant the plan gets");
         assert!(!configured.numeric_policy.bf16_input_rounding);
     }
@@ -3019,7 +3020,7 @@ pub(super) fn select_backend(config: &ServingConfig) -> Engine {
 pub(super) struct PlanNumerics<'config> {
     pub(super) math_mode: omega::metal::MathMode,
     pub(super) numeric_policy: proxima_numeric::NumericPolicy,
-    pub(super) dense_mma_input_layout: omega::config::DenseMmaInputLayout,
+    pub(super) dense_mma_input_layout: Option<omega::config::DenseMmaInputLayout>,
     pub(super) dispatch_type: omega::metal::DispatchType,
     #[cfg(feature = "metal-attn-variants")]
     pub(super) attention_variant: Option<omega::AttentionVariant>,
@@ -3153,9 +3154,10 @@ pub struct BackendRuntime {
     /// plan_named`'s signature now takes it on every engine arm, not only
     /// the Metal one.
     pub(super) numeric_policy: proxima_numeric::NumericPolicy,
-    /// The dense MMA layout from omega's own config: `omega_runtime`'s when set, else omega's default.
+    /// The dense MMA layout from `omega_runtime` when configured; `None` keeps the
+    /// policy's own tiles.
     #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
-    pub(super) dense_mma_input_layout: omega::config::DenseMmaInputLayout,
+    pub(super) dense_mma_input_layout: Option<omega::config::DenseMmaInputLayout>,
     #[cfg(all(
         feature = "metal",
         feature = "metal-attn-variants",
@@ -3378,7 +3380,7 @@ impl BackendRuntime {
             #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
             dense_mma_input_layout: config
                 .omega_runtime
-                .map_or_else(omega::config::DenseMmaInputLayout::default, |runtime| runtime.dense_mma_input_layout),
+                .map(|runtime| runtime.dense_mma_input_layout),
             #[cfg(all(
                 feature = "metal",
                 feature = "metal-attn-variants",
@@ -4774,7 +4776,7 @@ impl BackendRuntime {
                 symbols,
                 named,
                 outputs,
-                (numerics.numeric_policy, Some(numerics.dense_mma_input_layout)),
+                (numerics.numeric_policy, numerics.dense_mma_input_layout),
                 &placed_input_nodes,
                 (numerics.fuse_cached_attention, numerics.wavefront_schedule),
             )?

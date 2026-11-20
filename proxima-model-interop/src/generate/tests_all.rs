@@ -2589,7 +2589,7 @@ pub(super) mod placed_plan_mode_tests {
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_numeric::NumericPolicy::bit_exact(),
-                dense_mma_input_layout: omega::config::DenseMmaInputLayout::default(),
+                dense_mma_input_layout: None,
                 dispatch_type: omega::metal::DispatchType::Serial,
                 #[cfg(feature = "metal-attn-variants")]
                 attention_variant: None,
@@ -2651,7 +2651,7 @@ pub(super) mod placed_plan_mode_tests {
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Safe,
                 numeric_policy: proxima_numeric::NumericPolicy::llama_relaxed(),
-                dense_mma_input_layout: omega::config::DenseMmaInputLayout::default(),
+                dense_mma_input_layout: None,
                 dispatch_type: omega::metal::DispatchType::Serial,
                 #[cfg(feature = "metal-attn-variants")]
                 attention_variant: None,
@@ -2696,7 +2696,7 @@ pub(super) mod placed_plan_mode_tests {
             &super::PlanNumerics {
                 math_mode: omega::metal::MathMode::Fast,
                 numeric_policy: proxima_numeric::NumericPolicy::bit_exact(),
-                dense_mma_input_layout: omega::config::DenseMmaInputLayout::default(),
+                dense_mma_input_layout: None,
                 dispatch_type: omega::metal::DispatchType::Serial,
                 #[cfg(feature = "metal-attn-variants")]
                 attention_variant: None,

@@ -504,7 +504,7 @@ fn run_attn_fuse_parity_probe(
             symbols,
             named_blocks,
             &parity_outputs,
-            (runtime.numeric_policy, Some(runtime.dense_mma_input_layout)),
+            (runtime.numeric_policy, runtime.dense_mma_input_layout),
             &placed_input_nodes,
             (fuse_cached_attention, false),
         )?;
@@ -945,7 +945,7 @@ fn write_attn_layer0_failure_report(
         symbols,
         named_blocks,
         &intermediate_outputs,
-        (numeric_policy, Some(runtime.dense_mma_input_layout)),
+        (numeric_policy, runtime.dense_mma_input_layout),
         &placed_input_nodes,
         (false, false),
     )?;
@@ -1407,7 +1407,7 @@ fn write_attn_read_source_vectors(
         symbols,
         named_blocks,
         &outputs,
-        (runtime.numeric_policy, Some(runtime.dense_mma_input_layout)),
+        (runtime.numeric_policy, runtime.dense_mma_input_layout),
         &placed_input_nodes,
         (false, false),
     )?;
