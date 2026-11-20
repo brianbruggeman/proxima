@@ -12155,3 +12155,34 @@ fn decode_call_selects_the_word_twin_on_the_weight_alignment_flag_only_where_the
     assert!(!bytes_only.has_word_variant());
     assert!(bytes_only.word_aligned_flag_msl("weight_bytes").is_empty());
 }
+
+#[test]
+fn uniform_expert_source_rewrites_the_scalar_read_of_every_descriptor_codec() {
+    for codec in [Codec::Q2K, Codec::Q3K, Codec::Q4K, Codec::Q6K] {
+        let spelling = codec_cache_key(codec);
+        let knobs = EmitKnobs::default().with_packed_row_disable(vec![spelling.clone()]);
+        let bound = gathered_matmul_op(2, 3, 4, 256);
+        let weight_node = bound.operands()[0].0;
+        let packed = BTreeMap::from([(weight_node, codec)]);
+        let kernel = emit_with_uniform_expert_source(
+            &bound,
+            &packed,
+            NumericPolicy::default(),
+            &knobs,
+            weight_node,
+            codec,
+        )
+        .expect("emits uniform expert source kernel");
+        assert!(
+            !kernel.source.contains(&format!("{spelling}_element(in0")),
+            "{codec:?} kept a raw read of the stripped plan operand:\n{}",
+            kernel.source
+        );
+        assert!(
+            kernel
+                .source
+                .contains(&format!("uniform_expert_element_from_offset_{spelling}(expert_payloads")),
+            "{codec:?} scalar read must fetch from the expert payload"
+        );
+    }
+}

@@ -822,48 +822,55 @@ pub(super) fn emit_with_expert_sources_mode(
             .count();
         let row_block_source = kernel.source.contains("long weight_base[");
         let offset = format!("off{weight_index}");
-        for codec in [
-            None,
-            Some(Codec::Q2K),
-            Some(Codec::Q4K),
-            Some(Codec::Q5K),
-            Some(Codec::Q6K),
+        // The base render read this operand with exactly one codec: none on the mixed path (the
+        // source operand is stripped above) and `uniform_codec` on the uniform path. Take it from
+        // the same operands the render used, so no hand list can fall behind the codecs a source
+        // may carry (a Q3_K uniform source with its packed rows off kept its raw reads).
+        let base_codec = source_packed_operands.get(&source_node).copied();
+        if let Some(codec) = uniform_codec
+            && !kernel.source.contains(&format!("uniform_expert_element_from_offset_{}(", codec_cache_key(codec)))
+        {
+            return Err(EmitError::RenderKindMismatch {
+                node: resolved.node,
+                expected: "a uniform expert read helper for the source codec",
+                found: "no helper in the preamble",
+            });
+        }
+        let codec = base_codec;
+        for offset_name in [
+            offset.as_str(),
+            &format!("walk{weight_index}"),
+            &format!("read_off{weight_index}"),
+            &format!("running{weight_index}"),
+            "(weight_base[q] + k)",
         ] {
-            for offset_name in [
-                offset.as_str(),
-                &format!("walk{weight_index}"),
-                &format!("read_off{weight_index}"),
-                &format!("running{weight_index}"),
-                "(weight_base[q] + k)",
-            ] {
-                let expert_stride = if row_block_source {
-                    String::from("0l")
-                } else {
-                    format!("u.gather_element_stride[{gather_slot}]")
-                };
-                let old = operand_read(weight_index, offset_name, codec);
-                let replacement = if offset_name == format!("walk{weight_index}") {
-                    format!(
-                        "mixed_expert_element_from_local(expert_base{weight_index}, expert_codec{weight_index}, {offset_name})"
-                    )
-                } else {
-                    format!(
-                        "mixed_expert_element_from_offset(expert_payloads, expert_descriptors, (uint)fetched{weight_index}, {offset_name}, {}, expert_codec{weight_index})",
-                        expert_stride,
-                    )
-                };
-                let replacement = if let Some(codec) = uniform_codec {
-                    format!(
-                        "uniform_expert_element_from_offset_{}(expert_payloads, expert_descriptors, (uint)fetched{}, {offset_name}, {})",
-                        codec_cache_key(codec),
-                        weight_index,
-                        expert_stride,
-                    )
-                } else {
-                    replacement
-                };
-                kernel.source = kernel.source.replace(&old, &replacement);
-            }
+            let expert_stride = if row_block_source {
+                String::from("0l")
+            } else {
+                format!("u.gather_element_stride[{gather_slot}]")
+            };
+            let old = operand_read(weight_index, offset_name, codec);
+            let replacement = if offset_name == format!("walk{weight_index}") {
+                format!(
+                    "mixed_expert_element_from_local(expert_base{weight_index}, expert_codec{weight_index}, {offset_name})"
+                )
+            } else {
+                format!(
+                    "mixed_expert_element_from_offset(expert_payloads, expert_descriptors, (uint)fetched{weight_index}, {offset_name}, {}, expert_codec{weight_index})",
+                    expert_stride,
+                )
+            };
+            let replacement = if let Some(codec) = uniform_codec {
+                format!(
+                    "uniform_expert_element_from_offset_{}(expert_payloads, expert_descriptors, (uint)fetched{}, {offset_name}, {})",
+                    codec_cache_key(codec),
+                    weight_index,
+                    expert_stride,
+                )
+            } else {
+                replacement
+            };
+            kernel.source = kernel.source.replace(&old, &replacement);
         }
         let expert_base =
             String::from("expert_payloads + expert_descriptors[expert_route_index[q]].byte_offset");
@@ -990,6 +997,17 @@ pub(super) fn emit_with_expert_sources_mode(
             })
             .collect::<Vec<_>>()
             .join("\n");
+        // every read of the stripped plan operand must be gone: one left would index the
+        // placeholder block instead of the selected expert's payload, with no error at run time
+        let direct_read = format!("in{weight_index}[");
+        let element_read = format!("_element(in{weight_index} +");
+        if kernel.source.contains(&direct_read) || kernel.source.contains(&element_read) {
+            return Err(EmitError::RenderKindMismatch {
+                node: resolved.node,
+                expected: "every weight read rewritten to an expert payload fetch",
+                found: "a read of the stripped plan operand",
+            });
+        }
         // `instrument`-gated structured event -- the previous `std`-only
         // `eprintln!` compiled out on the alloc-only `metal-core` tier build
         // (no `env`/stderr there); `debug!` is a no-op off that tier too, via
