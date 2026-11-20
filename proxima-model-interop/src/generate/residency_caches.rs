@@ -4530,8 +4530,8 @@ impl BackendRuntime {
             &mut self.placed_plans
         };
         let near_plan = if self.plan_refit {
-            Self::take_near_plan(cache, &shape, |key, wanted, _| {
-                key.0 == wanted.0 && key.2 == wanted.2 && key.3 == wanted.3 && key.4 == wanted.4
+            Self::take_widest_near_plan(cache, &shape, |key, wanted, _| {
+                resident_plans::admits_near_plan(key, wanted)
             })
         } else {
             None
@@ -4547,13 +4547,19 @@ impl BackendRuntime {
             near_plan = near_plan.is_some(),
             "decode_plan_lookup: a resident key hits, a near plan refits, anything else builds"
         );
+        let mut declined = None;
         let build = || {
-            if let Some(mut near) = near_plan
-                && near.refit_symbols(symbols)?
-            {
-                self.plan_refits += 1;
-                return Ok(near);
+            if let Some((near_key, mut near)) = near_plan {
+                match resident_plans::refit_near_plan(&mut near, &near_key, symbols)? {
+                    None => {
+                        self.plan_refits += 1;
+                        resident_plans::PLAN_REFITS.add(1, &[]);
+                        return Ok(near);
+                    }
+                    Some(standing) => declined = Some((standing, near)),
+                }
             }
+            resident_plans::PLAN_BUILDS.add(1, &[]);
             let plan = Self::build_placed_plan(
                 program,
                 symbols,
@@ -4612,6 +4618,9 @@ impl BackendRuntime {
             self.placed_plans.clear();
             self.placed_order.clear();
         } else if !decode_shaped {
+            if let Some((key, plan)) = declined {
+                self.placed_plans.entry(key).or_insert(plan);
+            }
             // the plan just run has built its arena, so its bytes are known
             // only now; it stays, whatever it costs, and older plans pay
             drop(resident_plans::evict_to(
@@ -5077,6 +5086,27 @@ impl BackendRuntime {
                 "dispatch_profile_kernel: the kernel key and launch grid this position runs"
             );
         }
+    }
+
+    /// [`Self::take_near_plan`] that takes the widest compatible plan: keys sort by
+    /// `new_count` first, so the last match is the widest, the one that admits the
+    /// most rows after a refit. Returns the key too, so a plan
+    /// whose refit is declined goes back where it was.
+    #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+    pub(super) fn take_widest_near_plan<Key: Ord + Clone, PlanType>(
+        cache: &mut alloc::collections::BTreeMap<Key, PlanType>,
+        shape: &Key,
+        compatible: impl Fn(&Key, &Key, &PlanType) -> bool,
+    ) -> Option<(Key, PlanType)> {
+        if cache.contains_key(shape) {
+            return None;
+        }
+        let near = cache
+            .iter()
+            .rev()
+            .find(|(key, plan)| compatible(key, shape, plan))
+            .map(|(key, _)| key.clone())?;
+        cache.remove(&near).map(|plan| (near, plan))
     }
 
     /// The cached plan a miss at `shape` can be refitted from: removed from

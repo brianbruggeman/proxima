@@ -2,16 +2,18 @@
 
 use core::ops::ControlFlow;
 
+#[cfg(feature = "instrument")]
 use omega::metal::PIPELINE_MISSES;
 use proxima_gguf::parse_complete;
 use proxima_numeric::NumericFormat;
 
 use super::chunked_prefill_tests::dense_checkpoint;
+use super::resident_plans::{PLAN_BUILDS, PLAN_REFITS};
 use super::{LoadedModel, ServingConfig};
 use crate::serving::{GPU_LAYERS_ALL, PromptCacheConfig};
 
 const CHUNK_ROWS: usize = 24;
-const PROMPT_ROWS: usize = 3 * CHUNK_ROWS / 2 + 5;
+const PROMPT_ROWS: usize = 2 * CHUNK_ROWS - 5;
 const NEW_TOKENS: usize = 6;
 
 fn config() -> ServingConfig<'static> {
@@ -34,8 +36,12 @@ fn prompt() -> Vec<u32> {
 }
 
 fn request(model: &LoadedModel<'_>) -> Vec<u32> {
+    request_of(model, &prompt())
+}
+
+fn request_of(model: &LoadedModel<'_>, ids: &[u32]) -> Vec<u32> {
     model
-        .generate_from_ids(&prompt(), NEW_TOKENS, &config(), &mut |_| ControlFlow::Continue(()))
+        .generate_from_ids(ids, NEW_TOKENS, &config(), &mut |_| ControlFlow::Continue(()))
         .expect("request on the tiny dense checkpoint")
         .0
 }
@@ -51,11 +57,12 @@ fn a_request_after_warm_prefill_matches_the_same_request_on_a_fresh_model() {
     let expected = request(&fresh);
     let actual = request(&warmed);
 
-    assert_eq!(rows, CHUNK_ROWS + CHUNK_ROWS / 2, "the throwaway prompt is one chunk plus a half-chunk tail");
+    assert_eq!(rows, 2 * CHUNK_ROWS, "the throwaway prompt is two full chunks, so its last chunk is chunk-width");
     assert_eq!(expected.len(), NEW_TOKENS, "the reference request generated every token");
     assert_eq!(actual, expected, "warm_prefill changed a later request's token ids");
 }
 
+#[cfg(feature = "instrument")]
 #[test]
 fn warm_prefill_leaves_the_first_request_no_pipeline_to_compile() {
     let bytes = dense_checkpoint();
@@ -65,7 +72,7 @@ fn warm_prefill_leaves_the_first_request_no_pipeline_to_compile() {
     let (rows, warm_misses) = PIPELINE_MISSES.scoped(|| model.warm_prefill(&config(), CHUNK_ROWS).expect("warm prefill"));
     let (ids, request_misses) = PIPELINE_MISSES.scoped(|| request(&model));
 
-    assert_eq!(rows, CHUNK_ROWS + CHUNK_ROWS / 2);
+    assert_eq!(rows, 2 * CHUNK_ROWS);
     assert_eq!(ids.len(), NEW_TOKENS);
     assert_eq!(request_misses, 0, "the request compiled a pipeline after warm_prefill (warm compiled {warm_misses})");
 }
@@ -95,14 +102,15 @@ fn warm_prefill_leaves_no_more_resident_than_one_real_request_does() {
 
     warmed.warm_prefill(&config(), CHUNK_ROWS).expect("warm prefill");
     let after_warm = footprint(&warmed);
-    request(&fresh);
+    let two_full_chunks: Vec<u32> = (0..2 * CHUNK_ROWS).map(|row| ((row * 11 + 5) % 250 + 1) as u32).collect();
+    request_of(&fresh, &two_full_chunks);
     let after_request = footprint(&fresh);
     eprintln!("FOOTPRINT after_warm={after_warm:?}");
     eprintln!("FOOTPRINT after_one_request={after_request:?}");
 
     assert!(
         after_warm.wide_bytes() <= after_request.wide_bytes(),
-        "warm_prefill kept {} wide-plan bytes, one real request keeps {}",
+        "warm_prefill kept {} wide-plan bytes, one real request of two full chunks keeps {}",
         after_warm.wide_bytes(),
         after_request.wide_bytes()
     );
@@ -115,7 +123,7 @@ fn warm_prefill_leaves_no_more_resident_than_one_real_request_does() {
 }
 
 #[test]
-fn the_first_request_after_warm_prefill_builds_its_own_tail_plan_and_refits_the_chunk_plan() {
+fn the_first_request_after_warm_prefill_refits_the_warmed_last_chunk_plan_to_its_tail() {
     let bytes = dense_checkpoint();
     let parsed = parse_complete(&bytes).expect("parse the dense fixture");
     let warmed = LoadedModel::load(&parsed, &bytes).expect("load the warmed model");
@@ -126,5 +134,28 @@ fn the_first_request_after_warm_prefill_builds_its_own_tail_plan_and_refits_the_
     request(&fresh);
 
     let keys = |model: &LoadedModel<'_>| footprint(model).wide.iter().map(|(new_count, outputs, _)| (*new_count, *outputs)).collect::<Vec<_>>();
-    assert_eq!(keys(&warmed), keys(&fresh), "after one request the warmed model holds the plans a fresh model holds, and no warm-up tail");
+    assert_eq!(keys(&warmed), keys(&fresh), "after one request the warmed model holds the plans a fresh model holds, with no plan left from the warm-up");
+}
+
+#[test]
+fn a_short_tail_after_warm_prefill_refits_the_warmed_plan_and_builds_none() {
+    let bytes = dense_checkpoint();
+    let parsed = parse_complete(&bytes).expect("parse the dense fixture");
+    let fresh = LoadedModel::load(&parsed, &bytes).expect("load a fresh model");
+    let warmed = LoadedModel::load(&parsed, &bytes).expect("load the warmed model");
+    let tail_prompt: Vec<u32> = (0..3 * CHUNK_ROWS - 5).map(|row| ((row * 13 + 7) % 250 + 1) as u32).collect();
+    let run = |model: &LoadedModel<'_>| {
+        model
+            .generate_from_ids(&tail_prompt, NEW_TOKENS, &config(), &mut |_| ControlFlow::Continue(()))
+            .expect("request on the tiny dense checkpoint")
+            .0
+    };
+
+    warmed.warm_prefill(&config(), CHUNK_ROWS).expect("warm prefill");
+    let ((actual, builds), refits) = PLAN_REFITS.scoped(|| PLAN_BUILDS.scoped(|| run(&warmed)));
+    let expected = run(&fresh);
+
+    assert_eq!(builds, 0, "the request built a plan after warm_prefill");
+    assert!(refits >= 1, "the request refit no warmed plan to its {}-row tail", CHUNK_ROWS - 5);
+    assert_eq!(actual, expected, "refitting the warmed last-chunk plan changed the request's token ids");
 }

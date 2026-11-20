@@ -19,11 +19,11 @@ use core::ops::ControlFlow;
 
 use super::*;
 
-/// Rows of the throwaway prompt that run after the first full chunk: enough to
-/// clear the tiled-GEMM row threshold, so the tail chunk compiles the kernels a
-/// real tail does rather than the one-row matvec path.
+/// Rows of the throwaway prompt that run after the first full chunk: a second
+/// full chunk, so the last chunk is a chunk-width plan of the last-chunk shape
+/// (it reads logits) that a shorter real tail refits instead of building.
 const fn tail_rows(chunk_rows: usize) -> usize {
-    chunk_rows / 2
+    chunk_rows
 }
 
 /// Token ids for a throwaway prompt of `rows` rows: a fixed pattern that
@@ -42,21 +42,22 @@ fn throwaway_ids(rows: usize, vocab: &proxima_tokenizer::Vocab) -> Vec<u32> {
 
 impl LoadedModel<'_> {
     /// Compiles the prefill pipelines and builds the chunk plans now instead of
-    /// in the first request. Runs `chunk_rows + chunk_rows / 2` throwaway rows
-    /// at `ubatch_size = chunk_rows` (one full non-final chunk, then a tail),
+    /// in the first request. Runs `2 * chunk_rows` throwaway rows
+    /// at `ubatch_size = chunk_rows` (one full non-final chunk, then a full last chunk),
     /// then one greedy decode step, with the prompt cache off. Returns the
     /// number of prompt rows it prefilled.
     ///
     /// Pass the `serving_config` requests will run under and the `chunk_rows`
     /// they chunk at (the `ubatch_size`): pipelines and plans are keyed by what
-    /// the config selects, so a different config warms different ones. The
-    /// Afterwards only what a request reuses stays resident: the chunk-width plan
-    /// (a refit keeps `new_count`, so a plan of the tail's width is never found
-    /// again) and the decode plan stay; the tail plan and the device KV buffers
-    /// sized for the throwaway context are freed. The first request builds its
-    /// own tail plan.
+    /// the config selects, so a different config warms different ones.
     ///
-    /// output of any later request is unchanged; the prompt cache holds no
+    /// Afterwards only what a request reuses stays resident: the two
+    /// chunk-width plans (the non-final chunk, and the last chunk with logits) and
+    /// the decode plan; the device KV buffers sized for the throwaway context are
+    /// freed. A request whose last chunk is shorter refits the last-chunk plan to
+    /// its row count (`Plan::refit_symbols`), so it builds no plan.
+    ///
+    /// The output of any later request is unchanged; the prompt cache holds no
     /// entry and the KV the throwaway prompt built is dropped with the call.
     ///
     /// Composes [`Self::generate_from_ids`] (the real prefill and decode path)

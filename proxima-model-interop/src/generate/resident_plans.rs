@@ -37,6 +37,7 @@ use omega::PlacedBuffer;
 use omega::metal::{DispatchType, MathMode, Plan};
 use proxima_numeric::{NumericFormat, NumericPolicy};
 use proxima_tensor::op::NodeId;
+use proxima_telemetry::metric::Counter;
 
 use super::program_cache::ProgramCache;
 use crate::serving::{GdnPrefillBackend, ServingConfig};
@@ -45,6 +46,58 @@ use crate::serving::{GdnPrefillBackend, ServingConfig};
 /// cached K and V leaves through; `None` is the f32 host or device cache. A
 /// tag is `Ord`, which the 520-byte [`crate::bind::Codec`] is not.
 pub(super) type KvBinding = (Option<u8>, Option<u8>);
+
+/// Plans built from scratch by the placed path; a test reads the delta with
+/// `PLAN_BUILDS.scoped`. Beside [`PLAN_REFITS`], `builds` is what a request
+/// compiled and `refits` what it moved from a resident plan instead.
+pub(super) static PLAN_BUILDS: Counter = Counter::new("proxima_model_interop.residency.plan_builds");
+
+/// Placed plans moved to a new row count or KV length by `refit_symbols`.
+pub(super) static PLAN_REFITS: Counter = Counter::new("proxima_model_interop.residency.plan_refits");
+
+/// Rows at which prefill kernels change form: below it cached attention runs untiled.
+const WIDE_PREFILL_ROWS: usize = 16;
+
+fn plan_class(key: &DecodePlanKey) -> (bool, bool, bool, &[NodeId], bool, KvBinding) {
+    (key.0 == 1, key.0 < WIDE_PREFILL_ROWS, key.1 == 0, key.2.as_slice(), key.3, key.4)
+}
+
+/// Moves `near`, cached under `cached`, to `symbols`: the KV extent first at the
+/// cached width (the plan's attention refit), then the rows (`Plan::refit_symbols`
+/// refuses a rows move that also moves the extent). `None` means the plan now
+/// serves `symbols`; `Some(key)` means the refit was declined and the plan still
+/// stands at `key`, which is `cached` with the extent it was moved to, so the
+/// caller can put it back without a stale label.
+///
+/// # Errors
+/// Shape inference or kernel resolution failing; the plan stays at `cached`'s symbols.
+pub(super) fn refit_near_plan(
+    near: &mut Plan,
+    cached: &DecodePlanKey,
+    symbols: &[u64],
+) -> Result<Option<DecodePlanKey>, crate::error::InteropError> {
+    let extent_moved = symbols.get(1).is_some_and(|extent| *extent as usize != cached.1);
+    let rows_moved = symbols.first().is_some_and(|rows| *rows as usize != cached.0);
+    let mut standing = cached.clone();
+    if extent_moved && rows_moved {
+        let mut staged = symbols.to_vec();
+        staged[0] = cached.0 as u64;
+        if !near.refit_symbols(&staged)? {
+            return Ok(Some(standing));
+        }
+        standing.1 = staged[1] as usize;
+    }
+    Ok(if near.refit_symbols(symbols)? { None } else { Some(standing) })
+}
+
+/// Whether `cached` can be refitted to serve `wanted`: the same width class
+/// (one row, under 16 rows, empty cache, output set, epilogue switch and KV
+/// binding all agree; the CUDA counterpart is `cuda_resident_plans::same_width_class`)
+/// and a cached plan at least as wide as the request, since a refit never
+/// grows past the arena it was built with.
+pub(super) fn admits_near_plan(cached: &DecodePlanKey, wanted: &DecodePlanKey) -> bool {
+    cached.0 >= wanted.0 && plan_class(cached) == plan_class(wanted)
+}
 
 /// `(new_count, kv_bound_extent, outputs, epilogue_sources, kv_binding)` -- the
 /// key [`BackendRuntime::resolve_cached_plan`] uses for placed plans. The
@@ -350,8 +403,8 @@ thread_local! {
 }
 
 /// Drops from the calling thread's active slot what a warm-up at `chunk_rows`
-/// left that no request reuses: wide plans of any other `new_count` (a refit
-/// keeps `new_count`, so only a plan of the chunk width is found again) and the
+/// left that no request reuses: wide plans of any other `new_count` (a refit keeps
+/// `new_count` and never grows, so only plans of the chunk width serve a tail) and the
 /// kept device KV buffers, which are sized for the warm-up's short context.
 pub(super) fn trim_active(chunk_rows: usize) {
     let (dropped_plans, dropped_buffers) = ACTIVE.with(|slot| {
@@ -882,5 +935,43 @@ mod tests {
             }),
             "the residency budget trims plans and never changes one, so it is not part of the identity"
         );
+    }
+}
+
+#[cfg(test)]
+mod near_plan_tests {
+    use super::*;
+
+    const LOGITS: u32 = 570;
+
+    fn key(new_count: usize, outputs: &[u32]) -> DecodePlanKey {
+        (new_count, 512, outputs.iter().copied().map(NodeId).collect(), false, (None, None))
+    }
+
+    #[test]
+    fn near_plan_admits_a_wider_plan_in_the_same_class() {
+        assert!(admits_near_plan(&key(512, &[LOGITS]), &key(487, &[LOGITS])));
+    }
+
+    #[test]
+    fn near_plan_refuses_a_different_output_set() {
+        assert!(!admits_near_plan(&key(512, &[]), &key(487, &[LOGITS])));
+    }
+
+    #[test]
+    fn near_plan_refuses_a_different_width_class() {
+        assert!(!admits_near_plan(&key(512, &[LOGITS]), &key(8, &[LOGITS])));
+    }
+
+    #[test]
+    fn near_plan_refuses_a_narrower_cached_plan() {
+        assert!(!admits_near_plan(&key(256, &[LOGITS]), &key(487, &[LOGITS])));
+    }
+
+    #[test]
+    fn near_plan_refuses_a_different_kv_binding() {
+        let mut other = key(512, &[LOGITS]);
+        other.4 = (Some(1), Some(1));
+        assert!(!admits_near_plan(&other, &key(487, &[LOGITS])));
     }
 }
