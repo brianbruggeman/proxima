@@ -742,6 +742,47 @@ pub fn emit_with_uniform_expert_source(
     )
 }
 
+/// The launch grid [`emit_with_expert_sources`] / [`emit_with_uniform_expert_source`] render for `resolved`, without rendering.
+/// It differs from [`kernel_dispatch_shape`]'s grid (the ordinary kernel's, `expert_source_mode` false), and a cached expert
+/// kernel's own grid belongs to the call that rendered it, so a cache-hit launch takes this one for its own row count.
+///
+/// # Errors
+/// [`validate`]'s structural rejection and [`grid_threads`]' unlaunchable grid.
+pub fn expert_source_grid(
+    resolved: &BoundOp,
+    packed_operands: &PackedOperands,
+    numeric_policy: NumericPolicy,
+    knobs: &EmitKnobs,
+    source_node: NodeId,
+    uniform_codec: Option<Codec>,
+) -> Result<GridSpec, EmitError> {
+    validate(resolved)?;
+    let source_packed_operands = expert_source_packed_operands(packed_operands, source_node, uniform_codec);
+    let quantized = operand_codecs(resolved, &source_packed_operands);
+    grid_spec_with_tile_height(
+        resolved,
+        &quantized,
+        numeric_policy,
+        uniform_codec.is_none(),
+        AttentionRowSchedule::legacy(),
+        knobs,
+    )
+}
+
+fn expert_source_packed_operands(
+    packed_operands: &PackedOperands,
+    source_node: NodeId,
+    uniform_codec: Option<Codec>,
+) -> PackedOperands {
+    let mut source_packed_operands = packed_operands.clone();
+    if let Some(codec) = uniform_codec {
+        source_packed_operands.insert(source_node, codec);
+    } else {
+        source_packed_operands.remove(&source_node);
+    }
+    source_packed_operands
+}
+
 pub(super) fn emit_with_expert_sources_mode(
     resolved: &BoundOp,
     packed_operands: &PackedOperands,
@@ -756,12 +797,7 @@ pub(super) fn emit_with_expert_sources_mode(
     // and would interpret a low-copy Q2_K expert as Q4_K. Rendering the source
     // operand as scalar first leaves every read visible to the descriptor-aware
     // replacement below, whose codec tag selects the decoder at runtime.
-    let mut source_packed_operands = packed_operands.clone();
-    if let Some(codec) = uniform_codec {
-        source_packed_operands.insert(source_node, codec);
-    } else {
-        source_packed_operands.remove(&source_node);
-    }
+    let source_packed_operands = expert_source_packed_operands(packed_operands, source_node, uniform_codec);
     let mut kernel = emit_inner(
         resolved,
         &source_packed_operands,

@@ -4085,6 +4085,15 @@ pub(super) fn encode_op(
                 }
             };
             let pipeline = pipeline_for_kernel(device, &kernel, &cache_key, math_mode)?;
+            // the cache key omits the grid, so a hit's kernel carries the row count of the call that rendered it
+            let expert_grid = crate::msl::expert_source_grid(
+                bound,
+                packed_operands,
+                numeric_policy,
+                knobs,
+                source_node,
+                uniform_codec,
+            )?;
             owned_bindings = kernel.bindings;
             if crate::msl::route_prepass_active(bound, packed_operands, knobs) {
                 return Err(MetalError::ExpertSourceUnsupported {
@@ -4096,7 +4105,7 @@ pub(super) fn encode_op(
             (
                 pipeline,
                 owned_bindings.as_slice(),
-                kernel.grid,
+                expert_grid,
                 None,
                 owned_prepass.as_ref(),
             )
