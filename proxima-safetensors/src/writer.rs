@@ -17,6 +17,11 @@ use proxima_numeric::DType;
 use crate::dtype::dtype_to_wire;
 use crate::error::SafetensorsError;
 
+/// The header is padded with spaces so the tensor data starts on an 8-byte
+/// boundary, as the reference `safetensors` writer does: a mapped file then
+/// holds every 2-, 4- and 8-byte element at an address its own width divides.
+const DATA_ALIGNMENT_BYTES: usize = 8;
+
 /// One tensor to be written: name, dtype, shape, and its raw byte payload,
 /// borrowed from whatever buffer the caller already holds it in.
 #[derive(Debug, Clone, PartialEq)]
@@ -165,11 +170,12 @@ pub fn encode_header(
         header.insert(tensor.name.clone(), serde_json::Value::Object(entry));
     }
 
-    let header_bytes = serde_json::to_vec(&serde_json::Value::Object(header)).map_err(|error| {
+    let mut header_bytes = serde_json::to_vec(&serde_json::Value::Object(header)).map_err(|error| {
         SafetensorsError::MalformedJson {
             reason: error.to_string(),
         }
     })?;
+    header_bytes.resize(header_bytes.len().next_multiple_of(DATA_ALIGNMENT_BYTES), b' ');
 
     let mut prefix = Vec::with_capacity(8 + header_bytes.len());
     prefix.extend_from_slice(&(header_bytes.len() as u64).to_le_bytes());
@@ -263,6 +269,35 @@ mod tests {
                 .position(|(candidate, ..)| candidate == name)
                 .expect("entry present")];
             assert_eq!(actual, payload.as_slice(), "tensor {name} payload bytes");
+        }
+    }
+
+    #[test]
+    fn write_complete_starts_tensor_data_on_an_eight_byte_boundary_for_every_header_length() {
+        let data = [0u8; 4];
+
+        for name_length in 1..=16 {
+            let model = SafetensorsModel {
+                tensors: vec![TensorPayload {
+                    name: "t".repeat(name_length),
+                    dtype: DType::BFLOAT16,
+                    shape: vec![2],
+                    data: &data,
+                }],
+                metadata: BTreeMap::new(),
+            };
+
+            let written = write_complete(&model).expect("writes");
+
+            let header_len = u64::from_le_bytes(written[..8].try_into().expect("8 bytes")) as usize;
+            assert_eq!(
+                (8 + header_len) % DATA_ALIGNMENT_BYTES,
+                0,
+                "tensor name length {name_length}"
+            );
+            let manifest = parse_whole(&written).expect("a padded header still parses");
+            assert!(manifest.tensor(&"t".repeat(name_length)).is_some());
+            assert_eq!(&written[8 + header_len..], data.as_slice());
         }
     }
 
