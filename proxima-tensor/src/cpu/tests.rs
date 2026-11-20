@@ -15682,3 +15682,179 @@ async fn one_end_aligned_query_equals_the_last_row_of_the_full_prefill_attention
         "control: bounds left at query index 0 see key 0 only and must differ"
     );
 }
+
+#[cfg(feature = "config")]
+mod bf16_input_rounding {
+    use super::*;
+    use crate::config::TensorExecutionConfig;
+    use crate::op::ReduceInit;
+    use crate::spec::reduce;
+    use proxima_numeric::NumericPolicy;
+
+    const TOKENS: usize = 3;
+    const FEATURES: usize = 2;
+    const REDUCTION: usize = 8;
+
+    fn router_program() -> (Vec<Op>, NodeId) {
+        let mut program = Vec::new();
+        let weight = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            vec![
+                Extent::Static(FEATURES as u32),
+                Extent::Static(REDUCTION as u32),
+            ],
+            "weight",
+        );
+        let activation = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            vec![
+                Extent::Static(TOKENS as u32),
+                Extent::Static(REDUCTION as u32),
+            ],
+            "activation",
+        );
+        let product = append_elementwise(
+            &mut program,
+            DType::FLOAT32,
+            ScalarOp::Multiply,
+            &[(weight, "fi->tfi"), (activation, "ti->tfi")],
+        )
+        .expect("router product axes");
+        let output = reduce(
+            &mut program,
+            DType::FLOAT32,
+            ScalarOp::Add,
+            ReduceInit::Zero,
+            product,
+            "tfi->tfi",
+            "tf->tfi",
+        )
+        .expect("router reduction axes");
+        (program, output)
+    }
+
+    fn run(policy: NumericPolicy, weight_bytes: &[u8], activation: &[f32]) -> Vec<f32> {
+        let (program, output) = router_program();
+        let named = [
+            (
+                "weight",
+                QuantizedBlock::Packed {
+                    codec: Codec::BFloat16,
+                    bytes: weight_bytes,
+                },
+            ),
+            ("activation", QuantizedBlock::Float32(activation)),
+        ];
+        let config = TensorExecutionConfig::builder()
+            .numeric(policy)
+            .exact_activations(true)
+            .build();
+        let evaluated = evaluate_quantized_named_with_config(
+            &program,
+            &[],
+            &named,
+            &[output],
+            (&mut BufferPools::default(), &mut None),
+            None,
+            &config,
+        )
+        .expect("the bf16 router matmul evaluates");
+        evaluated.get(output).expect("root is present").0.to_vec()
+    }
+
+    fn bf16_through_numeric(value: f32) -> f32 {
+        let code = proxima_numeric::float_layout_codec::encode(
+            value,
+            proxima_numeric::float_layout::FloatLayout::BF16,
+        );
+        let decoded = proxima_numeric::float_layout_codec::decode(
+            code,
+            proxima_numeric::float_layout::FloatLayout::BF16,
+        );
+        assert_eq!(
+            decoded.to_bits(),
+            bf16::from_f32(value).to_f32().to_bits(),
+            "numeric BF16 rounding equals half RNE for {value}"
+        );
+        decoded
+    }
+
+    fn fold(weight: &[f32], activation: &[f32], round_activation: bool) -> Vec<f32> {
+        let mut sums = Vec::new();
+        for token in 0..TOKENS {
+            for feature in 0..FEATURES {
+                let mut sum = 0.0f32;
+                for index in 0..REDUCTION {
+                    let stored = activation[token * REDUCTION + index];
+                    let seen = if round_activation {
+                        bf16_through_numeric(stored)
+                    } else {
+                        stored
+                    };
+                    sum = weight[feature * REDUCTION + index].mul_add(seen, sum);
+                }
+                sums.push(sum);
+            }
+        }
+        sums
+    }
+
+    fn fixture() -> (Vec<u8>, Vec<f32>, Vec<f32>) {
+        let mut lcg = Lcg(584);
+        let weight: Vec<f32> = (0..FEATURES * REDUCTION)
+            .map(|_| bf16::from_f32(lcg.next_unit()).to_f32())
+            .collect();
+        let bytes: Vec<u8> = weight
+            .iter()
+            .flat_map(|value| bf16::from_f32(*value).to_bits().to_le_bytes())
+            .collect();
+        let activation: Vec<f32> = (0..TOKENS * REDUCTION)
+            .map(|_| lcg.next_unit() * 3.0 + 0.123_457)
+            .collect();
+        (bytes, weight, activation)
+    }
+
+    fn close(actual: &[f32], expected: &[f32]) -> bool {
+        actual.len() == expected.len()
+            && actual
+                .iter()
+                .zip(expected)
+                .all(|(got, want)| (got - want).abs() <= 1.0e-5 * want.abs().max(1.0))
+    }
+
+    #[test]
+    fn granted_policy_rounds_the_f32_operand_to_bf16_before_a_bf16_weight_matmul() {
+        let (bytes, weight, activation) = fixture();
+        let actual = run(
+            NumericPolicy::bit_exact().with_bf16_input_rounding(true),
+            &bytes,
+            &activation,
+        );
+        let rounded = fold(&weight, &activation, true);
+        assert!(
+            !close(&rounded, &fold(&weight, &activation, false)),
+            "the fixture must separate the two folds"
+        );
+        assert!(
+            close(&actual, &rounded),
+            "actual {actual:?} vs rounded fold {rounded:?}"
+        );
+    }
+
+    #[test]
+    fn bit_exact_policy_keeps_the_f32_operand_unrounded() {
+        let (bytes, weight, activation) = fixture();
+        let actual = run(NumericPolicy::bit_exact(), &bytes, &activation);
+        let unrounded = fold(&weight, &activation, false);
+        assert!(
+            close(&actual, &unrounded),
+            "actual {actual:?} vs unrounded fold {unrounded:?}"
+        );
+        assert!(
+            !close(&actual, &fold(&weight, &activation, true)),
+            "bit_exact must not round"
+        );
+    }
+}

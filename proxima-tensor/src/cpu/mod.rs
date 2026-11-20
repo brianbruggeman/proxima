@@ -203,6 +203,7 @@ use crate::shape;
 use crate::sized::COHORT_SPIN_POLLS;
 use proxima_numeric::DType;
 use proxima_numeric::NumericPolicy;
+use proxima_numeric::dense_matmul_uses_bf16_tiles;
 
 #[macro_use]
 mod arena;

@@ -1,5 +1,7 @@
 use super::*;
 use crate::live;
+use proxima_numeric::float_layout::FloatLayout;
+use proxima_numeric::float_layout_codec;
 
 /// The buffers a CPU evaluation reuses across calls: `.0` holds freed f32
 /// node outputs, `.1` the f64 ones of a norm's widened accumulation. A caller
@@ -505,6 +507,8 @@ pub(super) struct StepPrepared {
     pub(super) effective_outputs: Vec<NodeId>,
     pub(super) planning_outputs: Vec<NodeId>,
     dense_packed_nodes: BTreeSet<NodeId>,
+    /// Matmul node -> its f32 activation node, for every matmul the policy rounds to bf16.
+    bf16_rounded_activations: BTreeMap<NodeId, NodeId>,
     pub(super) unadjusted: Vec<BoundOp>,
     resolved: Vec<BoundOp>,
     retires: Vec<Vec<NodeId>>,
@@ -695,6 +699,7 @@ pub(super) fn prepare_step(
         quantized_weights,
         (shapes, root, effective_outputs, planning_outputs),
         unadjusted,
+        options.numeric_policy,
     ))
 }
 
@@ -750,6 +755,7 @@ pub(super) fn assemble_step(
     quantized_weights: &BTreeMap<NodeId, QuantizedBlock<'_>>,
     request: (shape::Shapes, NodeId, Vec<NodeId>, Vec<NodeId>),
     unadjusted: Vec<BoundOp>,
+    numeric_policy: NumericPolicy,
 ) -> StepPrepared {
     let (shapes, root, effective_outputs, planning_outputs) = request;
     let quantized_weight_nodes: BTreeSet<NodeId> = quantized_weights.keys().copied().collect();
@@ -774,6 +780,8 @@ pub(super) fn assemble_step(
         .filter(|(node, _)| !dense_packed_nodes.contains(node))
         .map(|(node, block)| (*node, *block))
         .collect();
+    let bf16_rounded_activations =
+        bf16_rounded_activations(&resolved, quantized_weights, numeric_policy);
     let retires = node_retirement(&resolved, &effective_outputs);
     let (mut epilogue_fuse_plan, mut layer_norm_cluster_plan, rewrite_fires) = run_rewrite_worklist(
         &resolved,
@@ -807,6 +815,7 @@ pub(super) fn assemble_step(
         effective_outputs,
         planning_outputs,
         dense_packed_nodes,
+        bf16_rounded_activations,
         unadjusted,
         resolved,
         retires,
@@ -1070,7 +1079,17 @@ pub(super) fn run_prepared_step(
                     computed,
                     &activation_layouts,
                 )?;
-                run_node_into_with_round_sink(
+                let rounded_original =
+                    prepared
+                        .bf16_rounded_activations
+                        .get(&computed.node)
+                        .map(|&activation| {
+                            (
+                                activation,
+                                round_activation_to_bf16(&mut buffers, activation),
+                            )
+                        });
+                let ran = run_node_into_with_round_sink(
                     computed,
                     &buffers,
                     Some(&quantized_weights),
@@ -1081,7 +1100,11 @@ pub(super) fn run_prepared_step(
                     Some(&mut gdn_state),
                     Some(&mut moe_topk_extra),
                     Some(&mut round_extra),
-                )?;
+                );
+                if let Some((activation, original)) = rounded_original {
+                    buffers[activation.0 as usize] = original;
+                }
+                ran?;
             }
             #[cfg(feature = "epilogue-profile-probe")]
             epilogue_profile_record(
@@ -3077,3 +3100,56 @@ pub(super) fn initial_value(init: ReduceInit) -> Option<f32> {
 // `evaluate_pooled`'s doc for why), so this allocate-and-run wrapper only
 // remains for tests that want a whole node's output as a `Vec` to compare
 // against hand-run chunks.
+
+/// The matmuls whose f32 activation the policy rounds to bf16: a bare `weight * activation` reduce
+/// whose weight is a packed bf16 block, when [`dense_matmul_uses_bf16_tiles`] (the predicate the
+/// Metal emitter's tile-layout choice calls) says the plan runs bf16 tiles. Maps the matmul's node
+/// to its activation node.
+fn bf16_rounded_activations(
+    resolved: &[BoundOp],
+    quantized_weights: &BTreeMap<NodeId, QuantizedBlock<'_>>,
+    numeric_policy: NumericPolicy,
+) -> BTreeMap<NodeId, NodeId> {
+    resolved
+        .iter()
+        .filter_map(|op| {
+            let weight = quantized_operand(op, quantized_weights)?;
+            let QuantizedBlock::Packed {
+                codec: Codec::BFloat16,
+                ..
+            } = quantized_weights.get(&weight)?
+            else {
+                return None;
+            };
+            let activation =
+                super::run_reduce_scan::packed_reduce_activation_operand(op, weight).ok()?;
+            let activation_is_f32 = !quantized_weights.contains_key(&activation);
+            (activation_is_f32 && dense_matmul_uses_bf16_tiles(numeric_policy, true, false))
+                .then_some((op.node, activation))
+        })
+        .collect()
+}
+
+/// Replaces `buffers[node]` with its round-to-nearest-even bf16 rounding (every value stays an
+/// f32) and returns the original, so the caller restores it after the one matmul that reads the
+/// rounded copy: other readers of the node still see the unrounded values.
+fn round_activation_to_bf16<'call>(
+    buffers: &mut [Option<Cow<'call, [f32]>>],
+    node: NodeId,
+) -> Option<Cow<'call, [f32]>> {
+    let slot = &mut buffers[node.0 as usize];
+    let rounded = slot.as_deref().map(|values| {
+        values
+            .iter()
+            .map(|value| {
+                float_layout_codec::decode(
+                    float_layout_codec::encode(*value, FloatLayout::BF16),
+                    FloatLayout::BF16,
+                )
+            })
+            .collect::<Vec<f32>>()
+    });
+    let original = slot.take();
+    *slot = rounded.map(Cow::Owned);
+    original
+}

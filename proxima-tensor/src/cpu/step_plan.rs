@@ -173,7 +173,13 @@ impl CpuStepPlan {
                     outputs,
                     weight_kinds,
                     options,
-                    prepared: assemble_step(ops, &quantized_weights, request, unadjusted),
+                    prepared: assemble_step(
+                        ops,
+                        &quantized_weights,
+                        request,
+                        unadjusted,
+                        options.numeric_policy,
+                    ),
                 })
             }
             Err(_) => {
