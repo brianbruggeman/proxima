@@ -11,6 +11,8 @@ use serde_json::Value;
 const REVIEW_TICKET: &str = include_str!("fixtures/pipeline_pipe/review_ticket.json");
 #[cfg(feature = "tokio")]
 const TRIAGE: &str = include_str!("fixtures/pipeline_pipe/triage.json");
+#[cfg(feature = "tokio")]
+const TRIAGE_TOML: &str = include_str!("fixtures/pipeline_pipe/triage.toml");
 
 fn fixture() -> Value {
     serde_json::from_str(REVIEW_TICKET).expect("review_ticket fixture is valid json")
@@ -19,6 +21,14 @@ fn fixture() -> Value {
 #[cfg(feature = "tokio")]
 fn triage_fixture() -> Value {
     serde_json::from_str(TRIAGE).expect("triage fixture is valid json")
+}
+
+#[cfg(feature = "tokio")]
+fn triage_twin() -> Value {
+    proxima::default_config_format_registry()
+        .expect("default config format registry")
+        .parse_with_hint(TRIAGE_TOML, Some("toml"))
+        .expect("triage twin is valid toml")
 }
 
 #[cfg(feature = "tokio")]
@@ -37,7 +47,7 @@ mod with_tokio {
     use proxima_primitives::pipe::SendPipe;
     use serde_json::{Value, json};
 
-    use super::{fixture, triage_fixture};
+    use super::{fixture, triage_fixture, triage_twin};
 
     const STATE: &str = r#"{"repo":"brianbruggeman/proxima","pr":42}"#;
     const NOTES: &str = r#"["design.md"]"#;
@@ -600,6 +610,98 @@ mod with_tokio {
             .as_object_mut()
             .expect("stage is an object")
             .remove("when");
+    }
+
+    fn check_seen(stub: &StubPipe, expected: &Value) -> Result<(), String> {
+        let bytes = stub.seen.get().ok_or_else(|| "stub saw no request".to_string())?;
+        let parsed: Value = serde_json::from_slice(bytes)
+            .map_err(|error| format!("seen bytes are not json: {error}"))?;
+        (&parsed == expected)
+            .then_some(())
+            .ok_or_else(|| format!("seen {parsed}; want {expected}"))
+    }
+
+    fn json_text_leaves(value: &Value) -> usize {
+        match value {
+            Value::String(text) => usize::from(
+                serde_json::from_str::<Value>(text)
+                    .is_ok_and(|parsed| parsed.is_object() || parsed.is_array()),
+            ),
+            Value::Array(items) => items.iter().map(json_text_leaves).sum(),
+            Value::Object(fields) => fields.values().map(json_text_leaves).sum(),
+            _ => 0,
+        }
+    }
+
+    const BODY_SUMMARY_FRESH: TriageExpect = TriageExpect {
+        status: BRANCH_SUMMARY.status,
+        body: BRANCH_SUMMARY.body,
+        calls: [1, 0, 0, 1],
+    };
+
+    async fn run_pr(spec: Value) -> (TriageRig, Result<(), String>) {
+        let rig = triage_rig();
+        let handle = load_triage(&rig, spec).await;
+        let (status, body) = call_triage(&handle, "PROXIMA-24").await;
+        let verdict = check_triage((status, &body), triage_calls(&rig), &BRANCH_PR)
+            .and_then(|()| check_seen(&rig.stubs[2], &json!({"pr": "adds StageBody"})));
+        (rig, verdict)
+    }
+
+    async fn run_summary(spec: Value) -> (TriageRig, Result<(), String>) {
+        let rig = triage_rig();
+        let handle = load_triage(&rig, spec).await;
+        let (status, body) = call_triage(&handle, "PROXIMA-25").await;
+        let verdict = check_triage((status, &body), triage_calls(&rig), &BODY_SUMMARY_FRESH)
+            .and_then(|()| check_seen(&rig.stubs[3], &json!({"ticket": "PROXIMA-25"})));
+        (rig, verdict)
+    }
+
+    #[proxima::test]
+    async fn pipeline_payload_twin_answers_the_pr_branch_with_the_body_table() {
+        let (_rig, verdict) = run_pr(triage_twin()).await;
+
+        assert_eq!(verdict, Ok(()));
+    }
+
+    #[proxima::test]
+    async fn pipeline_payload_twin_answers_the_summary_branch_with_the_body_table() {
+        let (_rig, verdict) = run_summary(triage_twin()).await;
+
+        assert_eq!(verdict, Ok(()));
+    }
+
+    #[test]
+    fn pipeline_payload_twin_holds_no_json_text_leaf() {
+        assert_eq!(json_text_leaves(&triage_twin()), 0);
+    }
+
+    #[proxima::test]
+    async fn ctl_payload_json_fixture_answers_the_pr_branch() {
+        let (_rig, verdict) = run_pr(triage_fixture()).await;
+
+        assert_eq!(verdict, Ok(()));
+    }
+
+    #[proxima::test]
+    async fn ctl_payload_json_fixture_answers_the_summary_branch() {
+        let (_rig, verdict) = run_summary(triage_fixture()).await;
+
+        assert_eq!(verdict, Ok(()));
+    }
+
+    #[proxima::test]
+    async fn ctl_payload_unreached_github_stub_fails_check_seen() {
+        let (rig, _verdict) = run_summary(triage_fixture()).await;
+
+        let result = check_seen(&rig.stubs[1], &json!({"ticket": "PROXIMA-25"}));
+
+        assert!(result.is_err(), "{result:?}");
+    }
+
+    #[test]
+    fn ctl_payload_json_fixture_holds_two_json_text_leaves() {
+        assert_eq!(json_text_leaves(&triage_fixture()), 2);
     }
 
     const BRANCH_PR: TriageExpect = TriageExpect {
