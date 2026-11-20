@@ -2564,6 +2564,55 @@ impl Plan {
         }
     }
 
+    /// Bytes of each physical arena slot, slot 0 first; slot 0 is the leased transient when
+    /// [`Self::arena_transient_buffer_id`] is `Some`. `None` when the arena is unbuilt or the
+    /// feature is off.
+    #[must_use]
+    pub fn arena_slot_bytes(&self) -> Option<&[usize]> {
+        #[cfg(feature = "metal-plan-stable-buffers")]
+        {
+            Some(self.arena.get()?.slot_bytes.as_slice())
+        }
+        #[cfg(not(feature = "metal-plan-stable-buffers"))]
+        {
+            None
+        }
+    }
+
+    /// Moves this plan's transient slot onto the pool's live buffer when that buffer is a
+    /// different one that holds the slot, and frees the plan's own. A plan built before a larger
+    /// one keeps the smaller buffer the pool has since replaced ([`TransientPool::lease_outcome`]);
+    /// calling this once all plans are built leaves them one allocation, the largest. `&mut self`
+    /// means no execute is in flight, and the slot is looked up per execute, so no cached binding
+    /// names the old buffer. Returns whether the plan moved. Call with the serving context active:
+    /// the pool is that context's.
+    pub fn rejoin_transient(&mut self) -> bool {
+        #[cfg(feature = "metal-plan-stable-buffers")]
+        {
+            let Some(arena) = self.arena.get_mut() else {
+                return false;
+            };
+            let Some(own) = arena.transient_lease.as_ref() else {
+                return false;
+            };
+            let needed = arena.slot_bytes.first().copied().unwrap_or(0);
+            let Some(live) = super::shared_transient::ARENA_TRANSIENT.with(|pool| pool.live_holding(needed)) else {
+                return false;
+            };
+            if alloc::rc::Rc::ptr_eq(own, &live) {
+                return false;
+            }
+            arena.slots[0] = (*live).clone();
+            arena.transient_lease = Some(live);
+            arena.transient_reused = true;
+            true
+        }
+        #[cfg(not(feature = "metal-plan-stable-buffers"))]
+        {
+            false
+        }
+    }
+
     /// Total bytes retained by this plan's physical output slots. This is
     /// distinct from [`Self::arena_peak_bytes`]: the peak is a liveness
     /// high-water mark, while this sum is the device allocation kept alive

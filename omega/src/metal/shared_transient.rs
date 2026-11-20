@@ -69,6 +69,11 @@ impl TransientPool {
         core::mem::swap(&mut *self.live.borrow_mut(), other);
     }
 
+    /// The pooled buffer when it is alive and at least `bytes` long; allocates nothing.
+    pub(super) fn live_holding(&self, bytes: usize) -> Option<SharedBuffer> {
+        self.live.borrow().upgrade().filter(|live| live.length() >= bytes)
+    }
+
     pub(super) fn lease_outcome(
         &self,
         owner: &'static str,

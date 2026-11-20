@@ -379,6 +379,16 @@ impl ResidentStore {
         }
     }
 
+    /// Each wide plan as `(new_count, output_count, slot_bytes, transient_buffer_id)`, for tests.
+    #[cfg(test)]
+    pub(super) fn wide_arenas(&self) -> Vec<(usize, usize, Vec<usize>, Option<usize>)> {
+        self.plans
+            .wide
+            .iter()
+            .map(|(key, plan)| (key.0, key.2.len(), plan.arena_slot_bytes().map(<[usize]>::to_vec).unwrap_or_default(), plan.arena_transient_buffer_id()))
+            .collect()
+    }
+
     /// Exchanges this store with the calling thread's active slot.
     pub(super) fn swap_active(&mut self) {
         ACTIVE.with(|slot| core::mem::swap(self, &mut *slot.borrow_mut()));
@@ -444,6 +454,18 @@ pub(super) fn prime_active_row_templates() -> Result<usize, crate::error::Intero
             primed += usize::from(plan.prime_row_template(&symbols)?);
         }
         Ok(primed)
+    })
+}
+
+/// Moves every plan in the calling thread's active slot onto the pool's live transient buffer
+/// ([`Plan::rejoin_transient`]), so plans built before a larger one stop holding the smaller
+/// buffer the pool has replaced. Returns how many plans moved.
+pub(super) fn rejoin_active_transients() -> usize {
+    ACTIVE.with(|slot| {
+        let mut store = slot.borrow_mut();
+        let plans = &mut store.plans;
+        let moved = plans.decode.values_mut().chain(plans.wide.values_mut()).map(Plan::rejoin_transient);
+        moved.filter(|moved| *moved).count()
     })
 }
 

@@ -141,12 +141,18 @@ impl ServingContext {
     pub(super) fn trim_warm_residue(&mut self, chunk_rows: usize) -> Result<usize, crate::error::InteropError> {
         let _active = self.activate();
         resident_plans::trim_active(chunk_rows);
+        resident_plans::rejoin_active_transients();
         resident_plans::prime_active_row_templates()
     }
 
     #[cfg(test)]
     pub(super) fn footprint(&self) -> resident_plans::ResidentFootprint {
         self.plans.footprint()
+    }
+
+    #[cfg(test)]
+    pub(super) fn wide_arenas(&self) -> Vec<(usize, usize, Vec<usize>, Option<usize>)> {
+        self.plans.wide_arenas()
     }
 
     /// decode and wide plans held while this context is inactive.

@@ -165,3 +165,70 @@ fn a_short_tail_after_warm_prefill_refits_the_warmed_plan_and_builds_none() {
     assert!(refits >= 1, "the request refit no warmed plan to its {}-row tail", CHUNK_ROWS - 5);
     assert_eq!(actual, expected, "refitting the warmed last-chunk plan changed the request's token ids");
 }
+
+fn arenas(model: &LoadedModel<'_>) -> Vec<(usize, usize, Vec<usize>, Option<usize>)> {
+    proxima_primitives::driver::block_on(model.serving.lock()).wide_arenas()
+}
+
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+/// Records `phys_footprint` and the wide plans' arena slots around each warm phase, the way
+/// `warm_prefill` runs them (generate, trim, prime), then one short-tail request. Read with
+/// `--nocapture`; it asserts only that each phase ran.
+#[test]
+fn warm_phases_footprint_is_recorded_for_plans_templates_and_a_tail_request() {
+    let bytes = dense_checkpoint();
+    let parsed = parse_complete(&bytes).expect("parse the dense fixture");
+    let model = LoadedModel::load(&parsed, &bytes).expect("load the model");
+    let mut warm_config = config();
+    warm_config.ubatch_size = CHUNK_ROWS as u32;
+    let ids: Vec<u32> = (0..2 * CHUNK_ROWS).map(|row| ((row * 11 + 5) % 250 + 1) as u32).collect();
+    let tail_prompt: Vec<u32> = (0..3 * CHUNK_ROWS - 5).map(|row| ((row * 13 + 7) % 250 + 1) as u32).collect();
+
+    let before_plans = super::load_model::phys_footprint_bytes();
+    model.generate_from_ids(&ids, 2, &warm_config, &mut |_| ControlFlow::Continue(())).expect("warm generate");
+    let after_plans = super::load_model::phys_footprint_bytes();
+    measure(format!("MEASURE plans_built before={before_plans} after={after_plans} delta={}", after_plans as i64 - before_plans as i64));
+    measure(format!("MEASURE arenas_after_warm_generate={:?}", arenas(&model)));
+
+    let before_trim = super::load_model::phys_footprint_bytes();
+    let primed = proxima_primitives::driver::block_on(model.serving.lock()).trim_warm_residue(CHUNK_ROWS).expect("trim and prime");
+    let after_prime = super::load_model::phys_footprint_bytes();
+    measure(format!("MEASURE trim_and_prime primed={primed} before={before_trim} after={after_prime} delta={}", after_prime as i64 - before_trim as i64));
+    measure(format!("MEASURE arenas_after_trim={:?}", arenas(&model)));
+
+    let before_request = super::load_model::phys_footprint_bytes();
+    let (out, ..) = model
+        .generate_from_ids(&tail_prompt, NEW_TOKENS, &config(), &mut |_| ControlFlow::Continue(()))
+        .expect("tail request");
+    let after_request = super::load_model::phys_footprint_bytes();
+    measure(format!("MEASURE tail_request before={before_request} after={after_request} delta={}", after_request as i64 - before_request as i64));
+    measure(format!("MEASURE arenas_after_request={:?}", arenas(&model)));
+    assert_eq!(out.len(), NEW_TOKENS);
+    assert!(primed >= 1, "no wide plan learned its template");
+}
+
+#[cfg(all(feature = "instrument", feature = "metal", target_os = "macos"))]
+fn measure(line: String) {
+    eprintln!("{line}");
+    if let Some(path) = std::env::var_os("PROXIMA_MEASURE_OUT")
+        && let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{line}");
+    }
+}
+
+#[test]
+fn warm_prefill_leaves_every_kept_wide_plan_on_one_transient_buffer() {
+    let bytes = dense_checkpoint();
+    let parsed = parse_complete(&bytes).expect("parse the dense fixture");
+    let model = LoadedModel::load(&parsed, &bytes).expect("load the model");
+
+    model.warm_prefill(&config(), CHUNK_ROWS).expect("warm prefill");
+
+    let arenas = arenas(&model);
+    assert!(arenas.len() >= 2, "the warm kept fewer than two wide plans: {arenas:?}");
+    let first = arenas[0].3;
+    assert!(first.is_some(), "a kept wide plan leases no transient slot");
+    assert!(arenas.iter().all(|arena| arena.3 == first), "kept wide plans hold distinct slot-0 buffers: {arenas:?}");
+}

@@ -144,3 +144,19 @@ fn a_larger_plan_built_after_a_smaller_one_gets_its_own_sufficient_buffer() {
     assert_eq!(large_out.len(), 2);
     assert!(small.arena_allocated_bytes() < large.arena_allocated_bytes());
 }
+
+#[test]
+fn rejoining_after_a_larger_plan_leaves_both_plans_one_buffer_and_the_same_outputs() {
+    let (mut small, small_roots, small_input) = plan_for(SMALL_ROWS);
+    let before = run(&small, small_roots, &small_input);
+    let (large, large_roots, large_input) = plan_for(LARGE_ROWS);
+    let large_out = run(&large, large_roots, &large_input);
+    assert_ne!(small.arena_transient_buffer_id(), large.arena_transient_buffer_id());
+
+    assert!(small.rejoin_transient(), "the small plan moves onto the large plan's buffer");
+
+    assert_eq!(small.arena_transient_buffer_id(), large.arena_transient_buffer_id());
+    assert_eq!(run(&small, small_roots, &small_input), before, "the moved plan matches its own earlier output");
+    assert_eq!(run(&large, large_roots, &large_input), large_out);
+    assert!(!small.rejoin_transient(), "a plan already on the live buffer does not move");
+}
