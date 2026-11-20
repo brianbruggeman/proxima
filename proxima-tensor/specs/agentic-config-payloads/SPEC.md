@@ -1,6 +1,6 @@
 # agentic-config-payloads -- every step's payload written in the config's own format
 
-status: audited -- ADMIT by spec-auditor round 4, 2026-11-20 (round 1 REFUSE 2 gates, 5 reasons; rounds 2-3 REFUSE 1 each; each amended)
+status: landed 2026-11-20 -- ADMIT by spec-auditor round 4 (round 1 REFUSE 2 gates, 5 reasons; rounds 2-3 REFUSE 1 each; each amended)
 owner: brian
 created: 2026-11-20
 

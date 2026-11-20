@@ -12,12 +12,12 @@ note IN THE SAME COMMIT as the slice. Every cargo command runs as `timeout -k 30
 | 3 | `SynthConfig.body` / `body_template: Option<Value>`, structured arms, env as text, `#[builder(into)]`; `check_body_json` | AC3, AC6 lib (4)-(6) | `cargo val -p proxima-lib --features tokio --lib -E 'test(synth_payload_) or test(ctl_payload_)'` | 10 passed (AC3 4 + AC6 lib 6) | [x] | 2026-11-20: 10 passed (worker `slice3.log`, after review `slice3-fix.log`); `upstreams::synth::` 14 (7 + 7); clippy clean; env text through `#[setting(default, resolve_with = "parse_env_text")]` (the derive accepts it on `Option<Value>`, so the `skip` fallback was not needed); review moved inline `crate::templates::` paths to a gated import; no other `SynthConfig` construction in the workspace |
 | 4 | `triage.toml` twin, `check_seen`, `json_text_leaves`, the twin tests and their JSON controls | AC4, AC6 pipe | `cargo val -p proxima-lib --features tokio --test pipeline_pipe -E 'test(pipeline_payload_) or test(ctl_payload_)'` | 7 passed (AC4 3 + AC6 pipe 4) | [x] | 2026-11-20: 7 passed (worker `slice4.log`, independent `rerun-slice4.log`); `pipeline_pipe` 31 (24 + 7); clippy clean on the test target; `triage.toml` matches `triage.json` key for key except the two bodies, now tables; the fresh-rig summary expectation reuses `BRANCH_SUMMARY`'s status and body with calls `[1, 0, 0, 1]` |
 | 5 | CLI `review_ticket.toml` twin and its session test | AC5, AC6 cli | `cargo val -p proxima-cli --test integration -E 'test(mcp_config_payload_) or test(ctl_payload_)'` | 3 passed (AC5 2 + AC6 cli 1) | [x] | 2026-11-20: 3 passed (`slice5.log`); incumbent CLI 5 passed (`slice5-incumbent.log`); clippy clean on the integration target; the TOML twin, all 6 payloads as tables, reproduces `TOOL_TEXT_OK` through `proxima serve`; review added the incumbent's per-line `jsonrpc` assertion; `write_config` / `bounded_session` now take the fixture path. Independent re-run of slices 1-5 is slice 6's run on the rebased tip |
-| 6 | incumbents and lints | AC7, AC8 | AC7 (a)-(e); AC8 (C8, C8x) | 126, 31, 5, 10, 13 passed, 0 failed; C8 prints `exit=0`, `0`, `1`; C8x prints `2` | [ ] | |
+| 6 | incumbents and lints | AC7, AC8 | AC7 (a)-(e); AC8 (C8, C8x) | 126, 31, 5, 10, 13 passed, 0 failed; C8 prints `exit=0`, `0`, `1`; C8x prints `2` | [x] | 2026-11-20 on the branch rebased onto main `679dc6ba7` (tip `7dca5724e`), `<tickets>/PROXIMA-49/evidence/s6-*.log`, `clippy.log`: AC1 7, AC2 1, AC3 4, AC4 3, AC5 2, AC6 lib 6 / pipe 4 / cli 1, AC7 (a) 126, (b) 31, (c) 5, (d) 10, (e) 13, 0 failed each; C8 `exit=0`, `0`, `1`; C8x `2`. Re-rebased onto main `88e07443d` (an `omega/`-only commit, no file overlap) before landing |
 
 ## resume
 
-Last landed slice: 5 (CLI TOML twin)
-Next action: rebase onto main `679dc6ba7`, then slice 6 on the rebased tip
+Last landed slice: 6 (spec complete)
+Next action: none in this spec; XML and the conflaguration format layer are PROXIMA-50
 Open question, if any: none
 
 ## struck
