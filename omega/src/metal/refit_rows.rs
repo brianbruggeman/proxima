@@ -122,3 +122,29 @@ fn learn_template(plan: &Plan, symbols: &[u64], rows: u64) -> Result<bool, Metal
     *plan.rows_template.borrow_mut() = Some(template);
     Ok(fitted)
 }
+
+/// A row count to fit the template at that is not the plan's own: half of it, else one below, else
+/// one above, inside the wide class and the arena's capacity.
+fn probe_rows(bound: u64, capacity: u64) -> Option<u64> {
+    [bound / 2, bound.saturating_sub(1), bound.saturating_add(1)]
+        .into_iter()
+        .find(|candidate| *candidate >= ROW_CLASS_MIN && *candidate <= capacity && *candidate != bound)
+}
+
+/// Fits and remembers `plan`'s row template without moving the plan, so the first
+/// [`refit_rows`] only applies it. Runs the same [`learn_template`] a refit would, at a probe row
+/// count inside the wide class and the arena's capacity; the bound ops, uniforms, grids and
+/// `bound_symbols` are untouched. `Ok(true)` when the plan is row-affine and the template is
+/// cached (already or now); `Ok(false)` when the plan cannot refit by rows.
+///
+/// # Errors
+/// Binding failing at a probe row count; the plan is unchanged on `Err`.
+pub(super) fn prime_row_template(plan: &Plan, symbols: &[u64]) -> Result<bool, MetalError> {
+    let Some(probe) = probe_rows(bound_rows(plan), plan.row_capacity.get()) else {
+        return Ok(false);
+    };
+    if !admits_rows(plan, symbols, probe) {
+        return Ok(false);
+    }
+    learn_template(plan, symbols, probe)
+}

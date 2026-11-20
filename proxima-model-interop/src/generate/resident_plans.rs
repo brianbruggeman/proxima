@@ -345,6 +345,12 @@ pub(super) struct ResidentStore {
 }
 
 impl ResidentStore {
+    /// each wide plan's learned row-template verdict.
+    #[cfg(test)]
+    pub(super) fn wide_template_verdicts(&self) -> Vec<Option<bool>> {
+        self.plans.wide.values().map(Plan::row_template_verdict).collect()
+    }
+
     #[cfg(test)]
     pub(super) fn wide_count(&self) -> usize {
         self.plans.wide.len()
@@ -420,6 +426,25 @@ pub(super) fn trim_active(chunk_rows: usize) {
     });
     drop(dropped_plans);
     drop(dropped_buffers);
+}
+
+/// Fits the row template of each wide plan in the calling thread's active slot, so a refit
+/// across row counts (a short last chunk) applies it instead of binding the program again in
+/// the first request. Returns how many plans cached a template; a plan that cannot refit by
+/// rows counts none and builds its own verdict later, as before.
+///
+/// # Errors
+/// Binding failing at a probe row count ([`Plan::prime_row_template`]).
+pub(super) fn prime_active_row_templates() -> Result<usize, crate::error::InteropError> {
+    ACTIVE.with(|slot| {
+        let mut store = slot.borrow_mut();
+        let mut primed = 0;
+        for plan in store.plans.wide.values_mut() {
+            let symbols = plan.bound_symbols().to_vec();
+            primed += usize::from(plan.prime_row_template(&symbols)?);
+        }
+        Ok(primed)
+    })
 }
 
 /// Frees every plan in the calling thread's active slot.

@@ -171,3 +171,57 @@ fn rows_above_the_build_width_or_below_the_wide_class_are_not_refit() {
         assert_eq!(plan.prepared.resolved, before, "{rows} rows: the plan is untouched");
     }
 }
+
+#[test]
+fn priming_the_row_template_leaves_the_plan_as_built_and_caches_what_a_refit_learns() {
+    let (program, output) = projection_program();
+    let mut primed = plan_at(&program, output, BUILD_ROWS);
+    run_bits(&primed, output, BUILD_ROWS);
+    let (ops, uniforms, step_grids) = (primed.prepared.resolved.clone(), uniform_bytes(&primed), grids(&primed));
+    assert_eq!(primed.row_template_verdict(), None, "a built plan has not learned a template");
+
+    assert!(primed.prime_row_template(&[BUILD_ROWS]).expect("priming binds"));
+
+    assert_eq!(primed.row_template_verdict(), Some(true), "the template is cached before any refit");
+    assert_eq!(primed.bound_symbols, vec![BUILD_ROWS], "priming does not move the plan");
+    assert_eq!(primed.prepared.resolved, ops, "priming leaves the bound ops");
+    assert_eq!(uniform_bytes(&primed), uniforms, "priming leaves the uniforms");
+    assert_eq!(grids(&primed), step_grids, "priming leaves the grids");
+
+    let mut learned_by_refit = plan_at(&program, output, BUILD_ROWS);
+    run_bits(&learned_by_refit, output, BUILD_ROWS);
+    assert!(refit_rows(&mut learned_by_refit, &[487]).expect("the refit resolves"));
+    assert_eq!(
+        primed.rows_template.borrow().as_ref().expect("primed").as_ref().expect("affine"),
+        learned_by_refit.rows_template.borrow().as_ref().expect("learned").as_ref().expect("affine"),
+        "priming fits the template the first refit would"
+    );
+}
+
+#[test]
+fn a_primed_512_row_plan_refits_to_487_rows_as_a_fresh_plan_does_without_learning() {
+    let (program, output) = projection_program();
+    let mut plan = plan_at(&program, output, BUILD_ROWS);
+    run_bits(&plan, output, BUILD_ROWS);
+    assert!(plan.prime_row_template(&[BUILD_ROWS]).expect("priming binds"));
+    let cached = plan.row_template_verdict();
+
+    assert!(refit_rows(&mut plan, &[487]).expect("the refit resolves"));
+
+    assert_eq!(cached, Some(true), "the refit started from a cached template");
+    let fresh = plan_at(&program, output, 487);
+    let refit_bits = run_bits(&plan, output, 487);
+    let fresh_bits = run_bits(&fresh, output, 487);
+    assert_eq!(plan.prepared.resolved, fresh.prepared.resolved, "bound ops");
+    assert_eq!(uniform_bytes(&plan), uniform_bytes(&fresh), "uniform bytes");
+    assert_eq!(refit_bits, fresh_bits, "executed output");
+}
+
+#[test]
+fn a_plan_outside_the_wide_class_primes_nothing() {
+    let (program, output) = projection_program();
+    let mut narrow = plan_at(&program, output, 8);
+
+    assert!(!narrow.prime_row_template(&[8]).expect("a declined prime is not an error"));
+    assert_eq!(narrow.row_template_verdict(), None);
+}

@@ -2369,6 +2369,36 @@ impl Plan {
         }
     }
 
+    /// The symbols this plan is bound at now: its build symbols, or those of its last refit.
+    #[must_use]
+    pub fn bound_symbols(&self) -> &[u64] {
+        &self.bound_symbols
+    }
+
+    /// Whether this plan has learned its row template: `None` before, `Some(true)` when it refits
+    /// by rows, `Some(false)` when its ops are not row-affine.
+    pub fn row_template_verdict(&self) -> Option<bool> {
+        self.rows_template.borrow().as_ref().map(Option::is_some)
+    }
+
+    /// Fits and caches the row template a rows refit needs, without moving the plan, so the
+    /// first refit across row counts (a short last prefill chunk reusing a warmed chunk-width
+    /// plan) only applies it instead of binding the program at two more row counts. `symbols`
+    /// are the plan's own bound symbols. Returns `true` when the plan is row-affine and the
+    /// template is cached; `false` when it cannot refit by rows (configured, outside the wide
+    /// class, or not affine). Leaves the bound ops, uniforms, grids and symbols untouched.
+    ///
+    /// Compose with [`Plan::refit_symbols`]: call this once after [`plan_named`] at load time.
+    ///
+    /// # Errors
+    /// Binding failing at a probe row count; the plan is unchanged on `Err`.
+    pub fn prime_row_template(&mut self, symbols: &[u64]) -> Result<bool, MetalError> {
+        if self.configured_constraints.is_some() {
+            return Ok(false);
+        }
+        super::refit_rows::prime_row_template(self, symbols)
+    }
+
     /// Moves this plan to `symbols` in place when the move only changes the
     /// key range of its fused cached-attention ops -- the one thing a KV
     /// bucket crossing changes in a decode plan -- and returns `true`;

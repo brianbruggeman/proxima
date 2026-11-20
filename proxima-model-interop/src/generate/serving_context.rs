@@ -135,11 +135,13 @@ impl ServingContext {
         resident_plans::clear_active();
     }
 
-    /// frees what a warm-up at `chunk_rows` left that no request reuses, while the
-    /// context is active so the buffers drop against their own queue.
-    pub(super) fn trim_warm_residue(&mut self, chunk_rows: usize) {
+    /// frees what a warm-up at `chunk_rows` left that no request reuses, then fits the row
+    /// template of each plan kept, while the context is active so the buffers drop against their
+    /// own queue.
+    pub(super) fn trim_warm_residue(&mut self, chunk_rows: usize) -> Result<usize, crate::error::InteropError> {
         let _active = self.activate();
         resident_plans::trim_active(chunk_rows);
+        resident_plans::prime_active_row_templates()
     }
 
     #[cfg(test)]
@@ -163,6 +165,11 @@ impl ServingContext {
     #[cfg(all(test, feature = "metal-output-placement", target_os = "macos"))]
     pub(super) fn program_footprint(&self) -> crate::generate::program_cache::ProgramFootprint {
         self.plans.programs().footprint()
+    }
+
+    #[cfg(test)]
+    pub(super) fn wide_template_verdicts(&self) -> Vec<Option<bool>> {
+        self.plans.wide_template_verdicts()
     }
 
     #[cfg(test)]

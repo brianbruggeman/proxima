@@ -152,6 +152,12 @@ fn a_short_tail_after_warm_prefill_refits_the_warmed_plan_and_builds_none() {
     };
 
     warmed.warm_prefill(&config(), CHUNK_ROWS).expect("warm prefill");
+    let verdicts = proxima_primitives::driver::block_on(warmed.serving.lock()).wide_template_verdicts();
+    assert!(!verdicts.is_empty(), "the warm kept no wide plan");
+    assert!(
+        verdicts.iter().all(|verdict| verdict.is_some()),
+        "a kept wide plan has not learned its row template during the warm: {verdicts:?}"
+    );
     let ((actual, builds), refits) = PLAN_REFITS.scoped(|| PLAN_BUILDS.scoped(|| run(&warmed)));
     let expected = run(&fresh);
 
