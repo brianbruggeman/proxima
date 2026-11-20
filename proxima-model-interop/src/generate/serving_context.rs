@@ -135,6 +135,18 @@ impl ServingContext {
         resident_plans::clear_active();
     }
 
+    /// frees what a warm-up at `chunk_rows` left that no request reuses, while the
+    /// context is active so the buffers drop against their own queue.
+    pub(super) fn trim_warm_residue(&mut self, chunk_rows: usize) {
+        let _active = self.activate();
+        resident_plans::trim_active(chunk_rows);
+    }
+
+    #[cfg(test)]
+    pub(super) fn footprint(&self) -> resident_plans::ResidentFootprint {
+        self.plans.footprint()
+    }
+
     /// decode and wide plans held while this context is inactive.
     #[cfg(test)]
     pub(super) fn plan_count(&self) -> usize {

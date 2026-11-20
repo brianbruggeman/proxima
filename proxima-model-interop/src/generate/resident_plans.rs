@@ -308,15 +308,65 @@ impl ResidentStore {
         &self.plans.programs
     }
 
+    /// `(new_count, outputs, bytes)` of each wide plan, then the device KV buffers
+    /// as `(count, bytes)`, for tests that compare what a call left resident.
+    #[cfg(test)]
+    pub(super) fn footprint(&self) -> ResidentFootprint {
+        ResidentFootprint {
+            decode: self.plans.decode.values().map(plan_bytes).sum(),
+            wide: self.plans.wide.iter().map(|(key, plan)| (key.0, key.2.len(), plan_bytes(plan))).collect(),
+            kv_buffers: self.plans.kv_buffers.len(),
+            kv_bytes: kv_bytes(&self.plans.kv_buffers),
+        }
+    }
+
     /// Exchanges this store with the calling thread's active slot.
     pub(super) fn swap_active(&mut self) {
         ACTIVE.with(|slot| core::mem::swap(self, &mut *slot.borrow_mut()));
     }
 }
 
+/// What a store holds, for tests: decode plan bytes, each wide plan as
+/// `(new_count, output_count, bytes)`, and the kept device KV buffers.
+#[cfg(test)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ResidentFootprint {
+    pub(super) decode: usize,
+    pub(super) wide: Vec<(usize, usize, usize)>,
+    pub(super) kv_buffers: usize,
+    pub(super) kv_bytes: usize,
+}
+
+#[cfg(test)]
+impl ResidentFootprint {
+    pub(super) fn wide_bytes(&self) -> usize {
+        self.wide.iter().map(|(_, _, bytes)| bytes).sum()
+    }
+}
+
 thread_local! {
     /// The store of the context active on this thread; empty when none is.
     static ACTIVE: RefCell<ResidentStore> = RefCell::new(ResidentStore::default());
+}
+
+/// Drops from the calling thread's active slot what a warm-up at `chunk_rows`
+/// left that no request reuses: wide plans of any other `new_count` (a refit
+/// keeps `new_count`, so only a plan of the chunk width is found again) and the
+/// kept device KV buffers, which are sized for the warm-up's short context.
+pub(super) fn trim_active(chunk_rows: usize) {
+    let (dropped_plans, dropped_buffers) = ACTIVE.with(|slot| {
+        let mut store = slot.borrow_mut();
+        let plans = &mut store.plans;
+        let (kept, dropped): (Vec<_>, Vec<_>) = core::mem::take(&mut plans.wide)
+            .into_iter()
+            .partition(|(key, _)| key.0 == chunk_rows);
+        plans.wide = kept.into_iter().collect();
+        let wide = &plans.wide;
+        plans.wide_order.retain(|key| wide.contains_key(key));
+        (dropped, core::mem::take(&mut plans.kv_buffers))
+    });
+    drop(dropped_plans);
+    drop(dropped_buffers);
 }
 
 /// Frees every plan in the calling thread's active slot.

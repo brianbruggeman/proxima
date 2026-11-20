@@ -50,6 +50,12 @@ impl LoadedModel<'_> {
     /// Pass the `serving_config` requests will run under and the `chunk_rows`
     /// they chunk at (the `ubatch_size`): pipelines and plans are keyed by what
     /// the config selects, so a different config warms different ones. The
+    /// Afterwards only what a request reuses stays resident: the chunk-width plan
+    /// (a refit keeps `new_count`, so a plan of the tail's width is never found
+    /// again) and the decode plan stay; the tail plan and the device KV buffers
+    /// sized for the throwaway context are freed. The first request builds its
+    /// own tail plan.
+    ///
     /// output of any later request is unchanged; the prompt cache holds no
     /// entry and the KV the throwaway prompt built is dropped with the call.
     ///
@@ -75,6 +81,8 @@ impl LoadedModel<'_> {
         let rows = chunk_rows + tail_rows(chunk_rows);
         let ids = throwaway_ids(rows, &self.vocab);
         self.generate_from_ids(&ids, 2, &warm_config, &mut |_| ControlFlow::Continue(()))?;
+        #[cfg(all(feature = "metal-output-placement", target_os = "macos"))]
+        proxima_primitives::driver::block_on(self.serving.lock()).trim_warm_residue(chunk_rows);
         Ok(rows)
     }
 }

@@ -81,3 +81,50 @@ fn warm_prefill_stores_no_prompt_cache_entry() {
 
     assert_eq!(model.prompt_cache.lock().entry_count(), 0, "warm_prefill left a prompt-cache entry");
 }
+
+fn footprint(model: &LoadedModel<'_>) -> super::resident_plans::ResidentFootprint {
+    proxima_primitives::driver::block_on(model.serving.lock()).footprint()
+}
+
+#[test]
+fn warm_prefill_leaves_no_more_resident_than_one_real_request_does() {
+    let bytes = dense_checkpoint();
+    let parsed = parse_complete(&bytes).expect("parse the dense fixture");
+    let warmed = LoadedModel::load(&parsed, &bytes).expect("load the warmed model");
+    let fresh = LoadedModel::load(&parsed, &bytes).expect("load a fresh model");
+
+    warmed.warm_prefill(&config(), CHUNK_ROWS).expect("warm prefill");
+    let after_warm = footprint(&warmed);
+    request(&fresh);
+    let after_request = footprint(&fresh);
+    eprintln!("FOOTPRINT after_warm={after_warm:?}");
+    eprintln!("FOOTPRINT after_one_request={after_request:?}");
+
+    assert!(
+        after_warm.wide_bytes() <= after_request.wide_bytes(),
+        "warm_prefill kept {} wide-plan bytes, one real request keeps {}",
+        after_warm.wide_bytes(),
+        after_request.wide_bytes()
+    );
+    assert!(
+        after_warm.wide.iter().all(|(new_count, _, _)| *new_count == CHUNK_ROWS),
+        "warm_prefill kept a wide plan no request of this chunking refits: {:?}",
+        after_warm.wide
+    );
+    assert_eq!(after_warm.kv_buffers, 0, "warm_prefill kept device KV buffers sized for its short context");
+}
+
+#[test]
+fn the_first_request_after_warm_prefill_builds_its_own_tail_plan_and_refits_the_chunk_plan() {
+    let bytes = dense_checkpoint();
+    let parsed = parse_complete(&bytes).expect("parse the dense fixture");
+    let warmed = LoadedModel::load(&parsed, &bytes).expect("load the warmed model");
+    let fresh = LoadedModel::load(&parsed, &bytes).expect("load a fresh model");
+
+    warmed.warm_prefill(&config(), CHUNK_ROWS).expect("warm prefill");
+    request(&warmed);
+    request(&fresh);
+
+    let keys = |model: &LoadedModel<'_>| footprint(model).wide.iter().map(|(new_count, outputs, _)| (*new_count, *outputs)).collect::<Vec<_>>();
+    assert_eq!(keys(&warmed), keys(&fresh), "after one request the warmed model holds the plans a fresh model holds, and no warm-up tail");
+}
