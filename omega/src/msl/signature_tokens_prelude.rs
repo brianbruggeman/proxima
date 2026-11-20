@@ -2939,7 +2939,7 @@ pub(crate) fn validate_decomposition_selection(
     resolved: &BoundOp,
     schedule: AttentionRowSchedule,
 ) -> Result<(), EmitError> {
-    if !schedule.is_flash() {
+    if !schedule.is_flash() || !matches!(resolved.kind, BoundOpKind::CachedAttention { .. }) {
         return Ok(());
     }
     flash_admission(&resolved.kind).map_err(|refusal| {
