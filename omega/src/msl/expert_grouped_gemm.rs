@@ -23,6 +23,124 @@ pub(super) const GROUPED_TILE_TOKENS: u64 = 32;
 #[cfg(feature = "metal-grouped-gemm")]
 pub(super) const GROUPED_TILE_DEPTH: u64 = STAGED_K_STEP_ELEMENTS;
 
+/// The layout the tiled decode functions write their output run in
+/// (`thread half *out`, see `push_tiled_decode_signature` in `layout_render`): a codec's
+/// dequantized run lands here before it is staged, so `dequant_out` must equal it.
+#[cfg(feature = "metal-grouped-gemm")]
+const DECODE_OUTPUT_LAYOUT: FloatLayout = FloatLayout::F16;
+
+/// Every stage's number format in the expert-grouped GEMM, one value so a test can name the whole
+/// configuration. The MSL type names, vector and `simdgroup` spellings and byte sizes all derive
+/// from these through [`layout_render::hardware_stage_type`]; a layout with no Metal type is a
+/// [`EmitError::RenderKindMismatch`], never a fallback. Composes `proxima_numeric::FloatLayout`;
+/// [`ActivationStaging`] is the activation tile's conversion from the device `float`.
+///
+/// `Default` is the configuration the kernel has always rendered: half weight tile and MMA A,
+/// float activation tile and MMA B, float accumulator and out tile.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct GroupedGemmFormats {
+    /// What the codec's decode function writes.
+    pub dequant_out: FloatLayout,
+    /// The threadgroup weight tile element.
+    pub weight_tile: FloatLayout,
+    /// The per-thread `w_regs` the decode lands in before the tile store.
+    pub weight_regs: FloatLayout,
+    /// The device activation operand (`in{other}`) the kernel reads.
+    pub activation_source: FloatLayout,
+    /// The threadgroup activation tile element.
+    pub activation_tile: FloatLayout,
+    /// The `simdgroup` matrix A (weight) operand element.
+    pub mma_a: FloatLayout,
+    /// The `simdgroup` matrix B (activation) operand element.
+    pub mma_b: FloatLayout,
+    /// The `simdgroup` accumulator element.
+    pub accumulator: FloatLayout,
+    /// The threadgroup tile the accumulators leave through.
+    pub out_tile: FloatLayout,
+}
+
+impl GroupedGemmFormats {
+    /// Today's configuration with `activation_tile` (and the MMA B operand loaded from it) as given.
+    pub(super) const fn with_activation_tile(activation_tile: FloatLayout) -> Self {
+        Self {
+            dequant_out: FloatLayout::F16,
+            weight_tile: FloatLayout::F16,
+            weight_regs: FloatLayout::F16,
+            activation_source: FloatLayout::BF32,
+            activation_tile,
+            mma_a: FloatLayout::F16,
+            mma_b: activation_tile,
+            accumulator: FloatLayout::BF32,
+            out_tile: FloatLayout::BF32,
+        }
+    }
+}
+
+impl Default for GroupedGemmFormats {
+    fn default() -> Self {
+        Self::with_activation_tile(FloatLayout::BF32)
+    }
+}
+
+/// [`GroupedGemmFormats`] resolved to Metal types.
+#[cfg(feature = "metal-grouped-gemm")]
+pub(super) struct GroupedStages {
+    staging: ActivationStaging,
+    weight_tile: layout_render::HardwareType,
+    weight_regs: layout_render::HardwareType,
+    activation_source: layout_render::HardwareType,
+    mma_a: layout_render::HardwareType,
+    mma_b: layout_render::HardwareType,
+    accumulator: layout_render::HardwareType,
+    out_tile: layout_render::HardwareType,
+}
+
+#[cfg(feature = "metal-grouped-gemm")]
+impl GroupedStages {
+    /// Fails with `RenderKindMismatch` for a layout with no Metal type or for stages the
+    /// hardware cannot join: the decode output must be the register type, a `simdgroup_load`
+    /// needs its tile's element type, and `simdgroup_store` its out tile's.
+    pub(super) fn resolve(node: NodeId, formats: &GroupedGemmFormats) -> Result<Self, EmitError> {
+        let mismatch = |expected: &'static str| EmitError::RenderKindMismatch {
+            node,
+            expected,
+            found: "grouped gemm stage formats",
+        };
+        let stage = |layout: &FloatLayout| {
+            layout_render::hardware_stage_type(layout)
+                .ok_or_else(|| mismatch("stage layout with a metal hardware type"))
+        };
+        let joined = formats.dequant_out == DECODE_OUTPUT_LAYOUT
+            && formats.dequant_out == formats.weight_regs
+            && formats.weight_regs == formats.weight_tile
+            && formats.weight_tile == formats.mma_a
+            && formats.activation_tile == formats.mma_b
+            && formats.accumulator == formats.out_tile;
+        if !joined {
+            return Err(mismatch("stage layouts the decode, tile loads and stores can join"));
+        }
+        Ok(Self {
+            staging: ActivationStaging::new(node, &formats.activation_tile)?,
+            weight_tile: stage(&formats.weight_tile)?,
+            weight_regs: stage(&formats.weight_regs)?,
+            activation_source: stage(&formats.activation_source)?,
+            mma_a: stage(&formats.mma_a)?,
+            mma_b: stage(&formats.mma_b)?,
+            accumulator: stage(&formats.accumulator)?,
+            out_tile: stage(&formats.out_tile)?,
+        })
+    }
+
+    /// The accumulator's zero as a literal of its own type.
+    fn accumulator_zero(&self) -> String {
+        if self.accumulator.bytes == 4 {
+            "0.0f".to_string()
+        } else {
+            format!("{}(0.0f)", self.accumulator.scalar)
+        }
+    }
+}
+
 /// The expert-grouped counterpart of [`push_tiled_gemm_body`]: a gathered
 /// expert slab `[expert, feature, reduce]` in any codec with a
 /// [`tiled_decode`] description, multiplied against a dense
@@ -83,10 +201,10 @@ pub(super) fn push_expert_grouped_gemm_body(
     block: &TiledGemmBlock,
     element_type: &str,
     epilogue: GroupedEpilogue<'_>,
-    staging_layout: &FloatLayout,
+    formats: &GroupedGemmFormats,
 ) -> Result<(), EmitError> {
     let node = resolved.node;
-    let staging = ActivationStaging::new(node, staging_layout)?;
+    let stages = GroupedStages::resolve(node, formats)?;
     let Some(expert) = block.gathered else {
         return Err(EmitError::RenderKindMismatch {
             node,
@@ -102,7 +220,7 @@ pub(super) fn push_expert_grouped_gemm_body(
     let geometry = GroupedGeometry::new(block, output_axes, resolved)?;
     let compaction_buffer = grouped_route_compacted(block).then(|| bindings(resolved).len());
     push_grouped_entry(source, node, &geometry, compaction_buffer)?;
-    push_grouped_threadgroup_memory(source, &geometry, &staging, compaction_buffer.is_some());
+    push_grouped_threadgroup_memory(source, &geometry, &stages, compaction_buffer.is_some());
     source.push_str(&format!(
         "    device const uchar *weight_bytes = (device const uchar *)in{};\n",
         block.weight
@@ -114,7 +232,7 @@ pub(super) fn push_expert_grouped_gemm_body(
         geometry: &geometry,
         element_type,
         epilogue,
-        staging: &staging,
+        stages: &stages,
         expert_slot: expert.slot,
         compacted: compaction_buffer.is_some(),
     };
@@ -140,7 +258,7 @@ struct GroupedTail<'a> {
     geometry: &'a GroupedGeometry,
     element_type: &'a str,
     epilogue: GroupedEpilogue<'a>,
-    staging: &'a ActivationStaging,
+    stages: &'a GroupedStages,
     expert_slot: usize,
     compacted: bool,
 }
@@ -148,7 +266,7 @@ struct GroupedTail<'a> {
 #[cfg(feature = "metal-grouped-gemm")]
 impl GroupedTail<'_> {
     fn push(&self, source: &mut String, decode: &TiledDecode) -> Result<(), EmitError> {
-        let Self { resolved, block, geometry, element_type, epilogue, staging, expert_slot, compacted } = *self;
+        let Self { resolved, block, geometry, element_type, epilogue, stages, expert_slot, compacted } = *self;
     if compacted {
         push_grouped_locate(source, resolved, block)?;
         source.push_str(&format!(
@@ -163,7 +281,7 @@ impl GroupedTail<'_> {
             decode,
             element_type,
             epilogue,
-            staging,
+            stages,
         );
         source.push_str("    }\n");
         return Ok(());
@@ -192,7 +310,7 @@ impl GroupedTail<'_> {
         decode,
         element_type,
         epilogue,
-        staging,
+        stages,
     );
     source.push_str("        }\n");
     push_grouped_consume(source, geometry);
@@ -472,22 +590,28 @@ fn push_route_segment_bounds(source: &mut String, geometry: &GroupedGeometry) {
 fn push_grouped_threadgroup_memory(
     source: &mut String,
     geometry: &GroupedGeometry,
-    staging: &ActivationStaging,
+    stages: &GroupedStages,
     compacted: bool,
 ) {
-    let weight_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_DEPTH * 2;
-    let act_tile_bytes = GROUPED_TILE_TOKENS * GROUPED_TILE_DEPTH * staging.element_bytes();
-    let out_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_TOKENS * 4;
+    let weight_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_DEPTH * stages.weight_tile.bytes;
+    let act_tile_bytes = GROUPED_TILE_TOKENS * GROUPED_TILE_DEPTH * stages.staging.element_bytes();
+    let out_tile_bytes = GROUPED_TILE_ROWS * GROUPED_TILE_TOKENS * stages.out_tile.bytes;
     let shared_bytes = (weight_tile_bytes + act_tile_bytes).max(out_tile_bytes);
     source.push_str(&format!(
         "    threadgroup uchar tg_shared[{shared_bytes}];\n"
     ));
-    source.push_str("    threadgroup half *weight_tile = (threadgroup half *)tg_shared;\n");
-    let element = staging.element();
+    let weight = stages.weight_tile.scalar;
+    source.push_str(&format!(
+        "    threadgroup {weight} *weight_tile = (threadgroup {weight} *)tg_shared;\n"
+    ));
+    let element = stages.staging.element();
     source.push_str(&format!(
         "    threadgroup {element} *act_tile = (threadgroup {element} *)(tg_shared + {weight_tile_bytes});\n"
     ));
-    source.push_str("    threadgroup float *out_tile = (threadgroup float *)tg_shared;\n");
+    let out = stages.out_tile.scalar;
+    source.push_str(&format!(
+        "    threadgroup {out} *out_tile = (threadgroup {out} *)tg_shared;\n"
+    ));
     if compacted {
         return;
     }
@@ -660,23 +784,25 @@ fn push_grouped_tile(
     decode: &TiledDecode,
     element_type: &str,
     epilogue: GroupedEpilogue<'_>,
-    staging: &ActivationStaging,
+    stages: &GroupedStages,
 ) {
     let (epilogue_body, epilogue_operands) = epilogue;
-    source.push_str("            simdgroup_float8x8 acc[8];\n");
-    source.push_str(
-        "            for (int i = 0; i < 8; ++i) { acc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f); }\n",
-    );
-    push_grouped_stage_pointers(source, block, geometry, decode, staging);
+    source.push_str(&format!("            {} acc[8];\n", stages.accumulator.matrix()));
+    source.push_str(&format!(
+        "            for (int i = 0; i < 8; ++i) {{ acc[i] = make_filled_simdgroup_matrix<{}, 8>({}); }}\n",
+        stages.accumulator.scalar,
+        stages.accumulator_zero()
+    ));
+    push_grouped_stage_pointers(source, block, geometry, decode, stages);
     source.push_str(&format!(
         "            for (long k0 = 0; k0 < u.reduction_total; k0 += {GROUPED_TILE_DEPTH}) {{\n"
     ));
-    source.push_str("                float4 a_regs[2];\n");
-    push_grouped_load(source, decode, "                ");
+    source.push_str(&format!("                {} a_regs[2];\n", stages.activation_source.vector()));
+    push_grouped_load(source, decode, stages, "                ");
     source.push_str("                threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    push_grouped_store(source, staging);
+    push_grouped_store(source, stages);
     source.push_str("                threadgroup_barrier(mem_flags::mem_threadgroup);\n");
-    push_grouped_multiply_accumulate(source, staging);
+    push_grouped_multiply_accumulate(source, stages);
     push_block_cursor_advance(
         source,
         "                ",
@@ -691,6 +817,7 @@ fn push_grouped_tile(
     push_grouped_writeback(
         source,
         geometry,
+        stages,
         element_type,
         epilogue_body,
         epilogue_operands,
@@ -722,7 +849,7 @@ fn push_grouped_stage_pointers(
     block: &TiledGemmBlock,
     geometry: &GroupedGeometry,
     decode: &TiledDecode,
-    staging: &ActivationStaging,
+    stages: &GroupedStages,
 ) {
     let weight = block.weight;
     let other = block.other;
@@ -733,9 +860,10 @@ fn push_grouped_stage_pointers(
     source.push_str(&format!(
         "            long w_feat = min((long)row_tile * {GROUPED_TILE_ROWS} + w_row, (long)feature_extent - 1);\n"
     ));
-    source.push_str(
-        "            threadgroup half *w_slot = weight_tile + 1024 * w_half + 64 * (w_row / 8) + (w_row % 8);\n",
-    );
+    source.push_str(&format!(
+        "            threadgroup {} *w_slot = weight_tile + 1024 * w_half + 64 * (w_row / 8) + (w_row % 8);\n",
+        stages.weight_tile.scalar
+    ));
     source.push_str(&format!(
         "            long w_elem = u.operand_base[{weight}] + grouped_expert_base + w_feat * u.operand_strides[{weight}][{feature_axis}] + w_half * {DECODE_RUN_ELEMENTS};\n"
     ));
@@ -745,7 +873,7 @@ fn push_grouped_stage_pointers(
     source.push_str(&format!(
         "            long a_tok = (long){token_list}[min(a_row, (long)tile_count - 1)];\n"
     ));
-    let vector = staging.vector();
+    let vector = stages.staging.vector();
     source.push_str(&format!(
         "            threadgroup {vector} *a_slot = (threadgroup {vector} *)(act_tile + 64 * (4 * a_k_block + a_row / 8) + 8 * (a_row % 8));\n"
     ));
@@ -756,11 +884,12 @@ fn push_grouped_stage_pointers(
         "a_tok",
         "a_c",
     );
+    let activation_scalar = stages.activation_source.scalar;
     let activation_offset = token_offset_expr(geometry, "a_c", |axis| {
         format!("u.operand_strides[{other}][{axis}]")
     });
     source.push_str(&format!(
-        "            device const float *a_ptr = in{other} + u.operand_base[{other}] + {activation_offset} + a_k_block * 8;\n"
+        "            device const {activation_scalar} *a_ptr = in{other} + u.operand_base[{other}] + {activation_offset} + a_k_block * 8;\n"
     ));
     let alignment_terms = geometry
         .token_axes
@@ -778,9 +907,9 @@ fn push_grouped_stage_pointers(
 /// [`push_grouped_stage_pointers`]), the activation row's
 /// eight floats are two `float4` loads kept as `float`.
 #[cfg(feature = "metal-grouped-gemm")]
-fn push_grouped_load(source: &mut String, decode: &TiledDecode, indent: &str) {
+fn push_grouped_load(source: &mut String, decode: &TiledDecode, stages: &GroupedStages, indent: &str) {
     let weight_load = [
-        format!("half w_regs[{DECODE_RUN_ELEMENTS}];"),
+        format!("{} w_regs[{DECODE_RUN_ELEMENTS}];", stages.weight_regs.scalar),
         format!("{};", decode.call("w_blk", "w_pos", "w_regs")),
     ];
     for line in weight_load {
@@ -788,9 +917,11 @@ fn push_grouped_load(source: &mut String, decode: &TiledDecode, indent: &str) {
         source.push_str(&line);
         source.push('\n');
     }
+    let vector = stages.activation_source.vector();
+    let a_src = format!("    device const {vector} *a_src = (device const {vector} *)a_ptr;");
     let lines = [
         "if (a_vector) {",
-        "    device const float4 *a_src = (device const float4 *)a_ptr;",
+        a_src.as_str(),
         "    a_regs[0] = a_src[0]; a_regs[1] = a_src[1];",
         "} else {",
         "    for (int lane = 0; lane < 4; ++lane) {",
@@ -809,7 +940,7 @@ fn push_grouped_load(source: &mut String, decode: &TiledDecode, indent: &str) {
 /// into their 8x8-block slots (element `i` of the 16 sits at `512 * (i / 8) +
 /// 8 * (i % 8)` from `w_slot`), the activation row as two 16-byte stores.
 #[cfg(feature = "metal-grouped-gemm")]
-fn push_grouped_store(source: &mut String, staging: &ActivationStaging) {
+fn push_grouped_store(source: &mut String, stages: &GroupedStages) {
     for element in 0..DECODE_RUN_ELEMENTS {
         let slot = 512 * (element / 8) + 8 * (element % 8);
         source.push_str(&format!(
@@ -818,8 +949,8 @@ fn push_grouped_store(source: &mut String, staging: &ActivationStaging) {
     }
     source.push_str(&format!(
         "                a_slot[0] = {}; a_slot[1] = {};\n",
-        staging.convert_vector("a_regs[0]"),
-        staging.convert_vector("a_regs[1]")
+        stages.staging.convert_vector("a_regs[0]"),
+        stages.staging.convert_vector("a_regs[1]")
     ));
 }
 
@@ -831,19 +962,20 @@ fn push_grouped_store(source: &mut String, staging: &ActivationStaging) {
 /// half skip the step when the tile has no token there; their accumulators
 /// stay zero.
 #[cfg(feature = "metal-grouped-gemm")]
-fn push_grouped_multiply_accumulate(source: &mut String, staging: &ActivationStaging) {
+fn push_grouped_multiply_accumulate(source: &mut String, stages: &GroupedStages) {
     source.push_str("                if ((sgitg >> 1) == 0 || has_hi) {\n");
-    source.push_str(
-        "                    threadgroup const half *lsma = weight_tile + 4 * 64 * (sgitg % 2);\n",
-    );
+    source.push_str(&format!(
+        "                    threadgroup const {} *lsma = weight_tile + 4 * 64 * (sgitg % 2);\n",
+        stages.mma_a.scalar
+    ));
     source.push_str(&format!(
         "                    threadgroup const {} *lsmb = act_tile + 2 * 64 * (sgitg / 2);\n",
-        staging.element()
+        stages.staging.element()
     ));
-    source.push_str("                    simdgroup_half8x8 ma[4];\n");
+    source.push_str(&format!("                    {} ma[4];\n", stages.mma_a.matrix()));
     source.push_str(&format!(
         "                    {} mb[2];\n",
-        staging.matrix()
+        stages.mma_b.matrix()
     ));
     let unroll = "_Pragma(\"clang loop unroll(full)\")";
     source.push_str(&format!(
@@ -878,10 +1010,12 @@ fn push_grouped_multiply_accumulate(source: &mut String, staging: &ActivationSta
 fn push_grouped_writeback(
     source: &mut String,
     geometry: &GroupedGeometry,
+    stages: &GroupedStages,
     element_type: &str,
     epilogue_body: &ComposedBody,
     epilogue_operands: &[(NodeId, Layout, Option<Lookup>)],
 ) {
+    let out_scalar = stages.out_tile.scalar;
     let output_axes = &geometry.output_axes;
     let rank = geometry.rank;
     let token_list = geometry.token_list;
@@ -889,7 +1023,7 @@ fn push_grouped_writeback(
     let feature_axis = geometry.feature_axis;
     source.push_str("            if ((sgitg >> 1) == 0 || has_hi) {\n");
     source.push_str(&format!(
-        "                threadgroup float *temp_str = out_tile + 32 * (sgitg & 1) + (16 * (sgitg >> 1)) * {GROUPED_TILE_ROWS};\n"
+        "                threadgroup {out_scalar} *temp_str = out_tile + 32 * (sgitg & 1) + (16 * (sgitg >> 1)) * {GROUPED_TILE_ROWS};\n"
     ));
     source.push_str("                for (short i = 0; i < 8; ++i) {\n");
     source.push_str(&format!(
@@ -989,7 +1123,7 @@ pub(super) fn push_expert_grouped_gemm_body(
     _block: &TiledGemmBlock,
     _element_type: &str,
     _epilogue: GroupedEpilogue<'_>,
-    _staging_layout: &FloatLayout,
+    _formats: &GroupedGemmFormats,
 ) -> Result<(), EmitError> {
     Err(EmitError::RenderKindMismatch {
         node: resolved.node,

@@ -13,14 +13,15 @@ use proxima_numeric::float_layout::FloatLayout;
 #[cfg(any(feature = "metal-tiled-gemm", feature = "metal-grouped-gemm"))]
 pub(super) struct ActivationStaging {
     element: &'static str,
+    bytes: u64,
 }
 
 #[cfg(any(feature = "metal-tiled-gemm", feature = "metal-grouped-gemm"))]
 impl ActivationStaging {
     /// Fails with `RenderKindMismatch` when `layout` has no Metal hardware type.
     pub(super) fn new(node: NodeId, layout: &FloatLayout) -> Result<Self, EmitError> {
-        layout_render::hardware_type(layout)
-            .map(|element| Self { element })
+        layout_render::hardware_stage_type(layout)
+            .map(|stage| Self { element: stage.scalar, bytes: stage.bytes })
             .ok_or(EmitError::RenderKindMismatch {
                 node,
                 expected: "activation staging layout with a metal hardware type",
@@ -42,7 +43,7 @@ impl ActivationStaging {
 
     /// Bytes one staged element occupies in the threadgroup tile.
     pub(super) fn element_bytes(&self) -> u64 {
-        if self.is_binary32() { 4 } else { 2 }
+        self.bytes
     }
 
     pub(super) fn is_binary32(&self) -> bool {
@@ -2452,7 +2453,7 @@ pub(super) fn push_cooperative_reduce_body(
                 &block,
                 element_type,
                 (epilogue_body, epilogue_operands),
-                &metal.activation_staging(),
+                &GroupedGemmFormats::with_activation_tile(metal.activation_staging()),
             )?;
             return Ok(());
         }

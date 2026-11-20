@@ -21,25 +21,54 @@ pub(crate) const F32_INFINITY_BITS: u32 = 0x7f80_0000;
 pub(crate) const F32_QUIET_BIT: u32 = 1 << 22;
 pub(crate) const F32_ABS_MASK: u32 = 0x7fff_ffff;
 
-const HARDWARE_TYPES: [(u8, u8, Specials, i16, &str); 3] = [
-    (8, 23, Specials::InfinityOnOverflow, 127, "float"),
-    (5, 10, Specials::InfinityOnOverflow, 15, "half"),
-    (8, 7, Specials::InfinityOnOverflow, 127, "bfloat"),
+const HARDWARE_TYPES: [(u8, u8, Specials, i16, &str, u64); 3] = [
+    (8, 23, Specials::InfinityOnOverflow, 127, "float", 4),
+    (5, 10, Specials::InfinityOnOverflow, 15, "half", 2),
+    (8, 7, Specials::InfinityOnOverflow, 127, "bfloat", 2),
 ];
 
+/// A Metal scalar type a [`FloatLayout`] equals field by field: its name and the bytes one
+/// element occupies. The vector and `simdgroup` 8x8 spellings derive from the name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HardwareType {
+    pub scalar: &'static str,
+    pub bytes: u64,
+}
+
+impl HardwareType {
+    /// The 4-wide vector type, e.g. `half4`.
+    #[must_use]
+    pub fn vector(&self) -> String {
+        format!("{}4", self.scalar)
+    }
+
+    /// The `simdgroup` 8x8 matrix type, e.g. `simdgroup_half8x8`.
+    #[must_use]
+    pub fn matrix(&self) -> String {
+        format!("simdgroup_{}8x8", self.scalar)
+    }
+}
+
 /// The Metal type whose fields equal `layout`'s, compared field by field and never by name.
+/// The one table every stage type derives from; a layout with no row is `None`, never a fallback.
 #[must_use]
-pub fn hardware_type(layout: &FloatLayout) -> Option<&'static str> {
+pub fn hardware_stage_type(layout: &FloatLayout) -> Option<HardwareType> {
     HARDWARE_TYPES
         .iter()
-        .find(|(exponent_bits, mantissa_bits, specials, bias, _)| {
+        .find(|(exponent_bits, mantissa_bits, specials, bias, _, _)| {
             *exponent_bits == layout.exponent_bits
                 && *mantissa_bits == layout.mantissa_bits
                 && *specials == layout.specials
                 && *bias == layout.bias()
                 && layout.sign == SignEncoding::Magnitude
         })
-        .map(|entry| entry.4)
+        .map(|entry| HardwareType { scalar: entry.4, bytes: entry.5 })
+}
+
+/// The Metal scalar type name of [`hardware_stage_type`].
+#[must_use]
+pub fn hardware_type(layout: &FloatLayout) -> Option<&'static str> {
+    hardware_stage_type(layout).map(|stage| stage.scalar)
 }
 
 /// The dtype a kernel can write one element of a `format` cache row as, at the cache's own width,

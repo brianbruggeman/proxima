@@ -10471,6 +10471,58 @@ mod expert_grouped_decode_description {
         (bound, packed)
     }
 
+    #[proxima::test]
+    #[case::iq4_xs(Codec::Iq4Xs)]
+    #[case::q5k(Codec::Q5K)]
+    async fn the_default_formats_render_every_stage_at_the_types_the_kernel_always_used(
+        #[case] codec: Codec,
+    ) {
+        let (bound, packed) = gathered(codec);
+        let knobs = EmitKnobs::default().with_coord_index32(false);
+        let source = emit_with_knobs(&bound, &packed, NumericPolicy::default(), &knobs)
+            .expect("grouped kernel emits")
+            .source;
+        let formats = GroupedGemmFormats::default();
+        assert_eq!(formats.weight_tile, FloatLayout::F16);
+        assert_eq!(formats.activation_tile, FloatLayout::BF32);
+        assert_eq!(formats.accumulator, FloatLayout::BF32);
+        for stage in [
+            "threadgroup half *weight_tile = (threadgroup half *)tg_shared;",
+            "threadgroup float *act_tile = (threadgroup float *)(tg_shared + ",
+            "threadgroup float *out_tile = (threadgroup float *)tg_shared;",
+            "half w_regs[16];",
+            "float4 a_regs[2];",
+            "device const float *a_ptr = in1",
+            "device const float4 *a_src = (device const float4 *)a_ptr;",
+            "threadgroup half *w_slot = weight_tile",
+            "threadgroup float4 *a_slot = (threadgroup float4 *)(act_tile",
+            "simdgroup_float8x8 acc[8];",
+            "make_filled_simdgroup_matrix<float, 8>(0.0f)",
+            "threadgroup const half *lsma = weight_tile",
+            "threadgroup const float *lsmb = act_tile",
+            "simdgroup_half8x8 ma[4];",
+            "simdgroup_float8x8 mb[2];",
+            "threadgroup float *temp_str = out_tile",
+        ] {
+            assert!(source.contains(stage), "{codec:?}: `{stage}` missing:\n{source}");
+        }
+    }
+
+    #[test]
+    fn a_stage_layout_with_no_metal_type_is_refused_not_rendered_as_a_fallback() {
+        let (bound, _) = gathered(Codec::Q5K);
+        let node = bound.node;
+        let formats = GroupedGemmFormats {
+            weight_tile: FloatLayout::E4M3FN,
+            weight_regs: FloatLayout::E4M3FN,
+            mma_a: FloatLayout::E4M3FN,
+            dequant_out: FloatLayout::E4M3FN,
+            ..GroupedGemmFormats::default()
+        };
+        let refusal = GroupedStages::resolve(node, &formats).err().expect("e4m3 has no metal type");
+        assert!(matches!(refusal, EmitError::RenderKindMismatch { .. }), "{refusal:?}");
+    }
+
     #[test]
     fn the_grouped_k_step_is_the_staged_k_step_every_description_divides_into_or_out_of() {
         assert_eq!(GROUPED_TILE_DEPTH, STAGED_K_STEP_ELEMENTS);
