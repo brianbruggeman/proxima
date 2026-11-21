@@ -666,8 +666,12 @@ fn replay_route(arguments: &Value) -> Result<ToolRoute, (i32, String)> {
         .get("substitutes")
         .cloned()
         .unwrap_or(Value::Object(Default::default()));
-    let body = serde_json::to_vec(&substitutes)
-        .map_err(|err| (-32603, format!("encode pipelines_replay substitutes: {err}")))?;
+    let body = serde_json::to_vec(&substitutes).map_err(|err| {
+        (
+            -32603,
+            format!("encode pipelines_replay substitutes: {err}"),
+        )
+    })?;
     Ok(("POST".into(), format!("/pipelines/{id}/replay"), Some(body)))
 }
 
@@ -682,7 +686,14 @@ async fn configured_tool_call(
         serde_json::to_vec(arguments)
             .map_err(|err| (-32603, format!("encode {} arguments: {err}", tool.name)))?
     };
-    send_tool_request(&tool.name, &tool.method, &tool.path, Some(payload), dispatch).await
+    send_tool_request(
+        &tool.name,
+        &tool.method,
+        &tool.path,
+        Some(payload),
+        dispatch,
+    )
+    .await
 }
 
 async fn send_tool_request(
@@ -727,7 +738,10 @@ async fn call_tool_dispatch(
         .map_err(|err| (-32603, format!("read body: {err}")))?;
     let text = String::from_utf8_lossy(&body).to_string();
     if !(200..400).contains(&status) {
-        return Err((-32603, format!("tool `{tool_name}` returned {status}: {text}")));
+        return Err((
+            -32603,
+            format!("tool `{tool_name}` returned {status}: {text}"),
+        ));
     }
     Ok(serde_json::json!({
         "content": [{ "type": "text", "text": text }],
@@ -1023,8 +1037,8 @@ mod tests {
     use super::*;
     use crate::control_plane::{ControlPlanePipe, PipeState, PipeStatus, StaticControlPlane};
     use crate::pipe::into_handle;
-    use serde_json::json;
     use crate::request::Response;
+    use serde_json::json;
     use std::sync::{Arc, mpsc};
 
     fn fixture_handle() -> PipeHandle {
@@ -1047,7 +1061,9 @@ mod tests {
             "method": "initialize",
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[])
+            .await
+            .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         assert_eq!(parsed["jsonrpc"], "2.0");
         assert_eq!(parsed["id"], 1);
@@ -1059,7 +1075,9 @@ mod tests {
     async fn tools_list_advertises_control_plane_tools() {
         let dispatch = fixture_handle();
         let line = json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}).to_string();
-        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[])
+            .await
+            .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let tools = parsed["result"]["tools"].as_array().expect("tools array");
         let names: Vec<&str> = tools
@@ -1109,7 +1127,9 @@ mod tests {
             }
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[])
+            .await
+            .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let text = parsed["result"]["content"][0]["text"]
             .as_str()
@@ -1132,7 +1152,9 @@ mod tests {
             "params": { "name": "scenario_run", "arguments": {} }
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[])
+            .await
+            .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         assert!(
             parsed["error"]["message"]
@@ -1166,7 +1188,9 @@ mod tests {
             }
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[])
+            .await
+            .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let text = parsed["result"]["content"][0]["text"]
             .as_str()
@@ -1198,7 +1222,9 @@ mod tests {
             }
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[])
+            .await
+            .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let text = parsed["result"]["content"][0]["text"]
             .as_str()
@@ -1216,7 +1242,9 @@ mod tests {
             "params": { "name": "verify_static", "arguments": {} }
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[])
+            .await
+            .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         assert!(parsed.get("error").is_some(), "expected error: {parsed}");
     }
@@ -1231,7 +1259,9 @@ mod tests {
             "params": { "name": "list_pipes", "arguments": {} },
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[])
+            .await
+            .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let text = parsed["result"]["content"][0]["text"]
             .as_str()
@@ -1250,7 +1280,9 @@ mod tests {
             "params": { "name": "pipe_status", "arguments": { "name": "cart_api" } },
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[])
+            .await
+            .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         let text = parsed["result"]["content"][0]["text"]
             .as_str()
@@ -1269,7 +1301,9 @@ mod tests {
             "params": { "name": "definitely_not_a_tool", "arguments": {} },
         })
         .to_string();
-        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[])
+            .await
+            .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         assert!(parsed.get("error").is_some(), "expected error: {parsed}");
         let code = parsed["error"]["code"].as_i64().expect("code");
@@ -1280,7 +1314,9 @@ mod tests {
     async fn unknown_method_returns_method_not_found() {
         let dispatch = fixture_handle();
         let line = json!({"jsonrpc":"2.0","id":6,"method":"prompts/list"}).to_string();
-        let response = handle_jsonrpc(&line, &dispatch, &[]).await.expect("response");
+        let response = handle_jsonrpc(&line, &dispatch, &[])
+            .await
+            .expect("response");
         let parsed: Value = serde_json::from_str(&response).expect("parse");
         assert_eq!(parsed["error"]["code"], -32601);
     }
@@ -1310,7 +1346,8 @@ mod tests {
     const REVIEW_REPLY: &str = r#"{"jsonrpc":"2.0","id":7,"result":{"content":[{"type":"text","text":"{\"content\":[{\"text\":\"LGTM\",\"type\":\"text\"}]}"}]}}"#;
     const LGTM_BODY: &str = r#"{"content":[{"text":"LGTM","type":"text"}]}"#;
     const GITHUB_500: &str = "stage `pr` pipe `github`: returned status 500";
-    const REVIEW_502: &str = "tool `review_ticket` returned 502: stage `pr` pipe `github`: returned status 500";
+    const REVIEW_502: &str =
+        "tool `review_ticket` returned 502: stage `pr` pipe `github`: returned status 500";
     const DUPLICATE_REFUSAL: &str = "mcp tools[1] `review_ticket` duplicates tools[0]";
     const DUPLICATE_WRONG_FORM: &str = "mcp tools[0] duplicate";
 
@@ -1390,7 +1427,8 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/tests/fixtures/mcp_stub/incumbent_tools.json"
         );
-        let text = std::fs::read_to_string(path).expect("incumbent_tools.json is captured from the base binary");
+        let text = std::fs::read_to_string(path)
+            .expect("incumbent_tools.json is captured from the base binary");
         serde_json::from_str(&text).expect("incumbent_tools.json is a json array")
     }
 
@@ -1471,7 +1509,8 @@ mod tests {
 
         let listed = listed_tools(&tools).await;
 
-        check_tool_list(&listed, &[review_tool(), triage_tool()]).expect("incumbent then configured, no method or path");
+        check_tool_list(&listed, &[review_tool(), triage_tool()])
+            .expect("incumbent then configured, no method or path");
     }
 
     #[proxima::test]
@@ -1482,7 +1521,8 @@ mod tests {
         let reply = answer(&tools, &dispatch, CALL_REVIEW).await;
 
         let recorded: Vec<Recorded> = seen.try_iter().collect();
-        check_dispatch(&recorded, &[put_review(r#"{"ticket":"PROXIMA-24"}"#)]).expect("one PUT /review");
+        check_dispatch(&recorded, &[put_review(r#"{"ticket":"PROXIMA-24"}"#)])
+            .expect("one PUT /review");
         let expected: Value = serde_json::from_str(REVIEW_REPLY).expect("literal parses");
         assert_eq!(reply, expected);
     }
@@ -1585,7 +1625,13 @@ mod tests {
         let protocol = McpListenProtocol::new();
 
         let outcome = protocol
-            .serve(SocketAddr::from(([127, 0, 0, 1], 0)), dispatch, &spec, context, shutdown)
+            .serve(
+                SocketAddr::from(([127, 0, 0, 1], 0)),
+                dispatch,
+                &spec,
+                context,
+                shutdown,
+            )
             .await;
 
         let error = outcome.expect_err("serve refuses the duplicate");
@@ -1608,7 +1654,10 @@ mod tests {
         listed.extend([review_tool(), triage_tool()]);
         let swapped = [triage_tool(), review_tool()];
 
-        let in_order = check_tool_list(&Value::Array(listed.clone()), &[review_tool(), triage_tool()]);
+        let in_order = check_tool_list(
+            &Value::Array(listed.clone()),
+            &[review_tool(), triage_tool()],
+        );
         let out_of_order = check_tool_list(&Value::Array(listed), &swapped);
 
         assert!(in_order.is_ok());
