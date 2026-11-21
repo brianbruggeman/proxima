@@ -14,9 +14,10 @@ use alloc::vec::Vec;
 use proxima_numeric::DType;
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::{
-    RopePairing, cross_kv, elementwise_like, fused_rope_pair, layer_norm, layer_norm_no_affine,
-    modulate, multi_axis_rope_tables, non_causal_attention, reduce_like, scalar_constant_like,
-    tap_layers,
+    RopePairing, STFT_COS_INPUT, STFT_SIN_INPUT, STFT_WINDOW_INPUT, StftLogMelConfig, cross_kv,
+    elementwise_like, fused_rope_pair, layer_norm, layer_norm_no_affine, modulate,
+    multi_axis_rope_tables, non_causal_attention, reduce_like, scalar_constant_like, stft_log_mel,
+    stft_tables, tap_layers,
 };
 
 // central difference of an f32 loss of magnitude L at step h errs by about
@@ -598,4 +599,161 @@ async fn grad_cross_attention_cached_and_recomputed_kv_give_equal_outputs_and_qu
     );
     assert!(output_gap <= 1e-6, "outputs differ by {output_gap}");
     assert!(grad_gap <= 1e-6, "query gradients differ by {grad_gap}");
+}
+
+const STFT_STEP: f32 = 5e-3;
+const STFT_CEILING: f32 = 5e-4;
+
+fn decode_table(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect()
+}
+
+/// `max|g_ad - g_fd| / max|g_fd|` for `L = sum(out^2)` against central differences.
+fn relative_gradient_error(
+    program: &[Op],
+    loss: NodeId,
+    bound: &[(&str, Vec<f32>)],
+    target: &str,
+) -> (f32, usize) {
+    let differentiated = crate::adjoint::differentiate(program, loss).expect("loss differentiates");
+    let grad = differentiated
+        .gradient_of_named(target)
+        .expect("target feeds the loss and has a gradient");
+    let owned: Vec<(String, Vec<f32>)> = bound
+        .iter()
+        .map(|(name, values)| ((*name).into(), values.clone()))
+        .collect();
+    let analytic = proxima_tensor::cpu::evaluate_named(
+        &differentiated.program,
+        &[],
+        &borrowed(&owned),
+        &[grad],
+    )
+    .expect("adjoint program evaluates")
+    .get(grad)
+    .expect("gradient requested")
+    .0
+    .to_vec();
+    let slot = owned
+        .iter()
+        .position(|(name, _)| name == target)
+        .expect("bound");
+    let loss_at = |values: &[(String, Vec<f32>)]| {
+        proxima_tensor::cpu::evaluate_named(program, &[], &borrowed(values), &[loss])
+            .expect("forward evaluates")
+            .get(loss)
+            .expect("loss requested")
+            .0[0]
+    };
+    let mut probe = owned.clone();
+    let mut numeric = Vec::with_capacity(analytic.len());
+    for index in 0..analytic.len() {
+        let original = probe[slot].1[index];
+        probe[slot].1[index] = original + STFT_STEP;
+        let plus = loss_at(&probe);
+        probe[slot].1[index] = original - STFT_STEP;
+        let minus = loss_at(&probe);
+        probe[slot].1[index] = original;
+        numeric.push((plus - minus) / (2.0 * STFT_STEP));
+    }
+    let worst = analytic
+        .iter()
+        .zip(&numeric)
+        .map(|(ad, fd)| (ad - fd).abs())
+        .fold(0f32, f32::max);
+    let scale = numeric.iter().map(|fd| fd.abs()).fold(0f32, f32::max);
+    (worst / scale, analytic.len())
+}
+
+fn stft_loss_program(
+    config: &StftLogMelConfig,
+    samples: u32,
+    mels: u32,
+) -> (Vec<Op>, NodeId, NodeId) {
+    let mut program = Vec::new();
+    let signal = input(&mut program, "signal", &[samples]);
+    let filterbank = input(&mut program, "filterbank", &[mels, config.bins()]);
+    let out = stft_log_mel(&mut program, config, signal, samples, filterbank)
+        .expect("stft log-mel builds");
+    let squared = elementwise_like(
+        &mut program,
+        out,
+        ScalarOp::Multiply,
+        &[(out, "mf->mf"), (out, "mf->mf")],
+    )
+    .expect("square builds");
+    let loss = reduce_like(
+        &mut program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        squared,
+        "mf->mf",
+        "->mf",
+    )
+    .expect("loss reduces");
+    (program, out, loss)
+}
+
+#[proxima::test]
+async fn grad_stft_log_mel_matches_central_differences_for_waveform_and_filterbank() {
+    let (samples, mels) = (64u32, 4u32);
+    let mut config = StftLogMelConfig {
+        n_fft: 16,
+        hop: 8,
+        offset: 0.0,
+        ..StftLogMelConfig::default()
+    };
+    let tables = stft_tables(&config, DType::FLOAT32).expect("tables encode");
+    let waveform: Vec<f32> = Lcg::values(21, samples as usize)
+        .iter()
+        .enumerate()
+        .map(|(index, noise)| 1.0 * (0.7 * index as f32).sin() + 0.3 * noise)
+        .collect();
+    let bank: Vec<f32> = Lcg::values(22, (mels * config.bins()) as usize)
+        .iter()
+        .map(|noise| 0.8 + 1.6 * (noise + 1.0))
+        .collect();
+    let bound = [
+        ("signal", waveform),
+        ("filterbank", bank),
+        (STFT_WINDOW_INPUT, decode_table(&tables.window)),
+        (STFT_COS_INPUT, decode_table(&tables.cos)),
+        (STFT_SIN_INPUT, decode_table(&tables.sin)),
+    ];
+    // centre the output on zero so sum(out^2) stays small: an f32 central difference of a loss L
+    // is quantised at ulp(L) / 2h, which swamps these (~0.1) gradients when L is in the hundreds
+    let (program, out, _) = stft_loss_program(&config, samples, mels);
+    let first =
+        proxima_tensor::cpu::evaluate_named(&program, &[], &borrowed(&owned_bound(&bound)), &[out])
+            .expect("forward evaluates");
+    let values = first.get(out).expect("output requested").0.to_vec();
+    config.offset = -values.iter().sum::<f32>() / values.len() as f32;
+    let (program, _, loss) = stft_loss_program(&config, samples, mels);
+    let reports: Vec<(&str, f32, usize)> = ["signal", "filterbank"]
+        .into_iter()
+        .map(|target| {
+            let (error, compared) = relative_gradient_error(&program, loss, &bound, target);
+            std::println!("grad_stft_log_mel wrt={target} compared={compared} max_rel={error:e}");
+            (target, error, compared)
+        })
+        .collect();
+    for (target, error, compared) in &reports {
+        assert!(*compared > 0, "{target}: no elements compared");
+        assert!(
+            *error <= STFT_CEILING,
+            "{target}: gradient relative error {error} exceeds {STFT_CEILING}; all: {reports:?}"
+        );
+    }
+}
+
+fn owned_bound(bound: &[(&str, Vec<f32>)]) -> Vec<(String, Vec<f32>)> {
+    bound
+        .iter()
+        .map(|(name, values)| ((*name).into(), values.clone()))
+        .collect()
 }

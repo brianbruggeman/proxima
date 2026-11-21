@@ -18,7 +18,9 @@ use crate::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_numeric::{DType, FormatCodec};
 
 use super::attention_forward::append_masked_softmax_mix;
-use super::{elementwise_like, produced_dtype_or_binary32, reduce_like, scalar_constant_like};
+use super::{
+    elementwise_like, input_leaf, produced_dtype_or_binary32, reduce_like, scalar_constant_like,
+};
 
 fn row_mean(program: &mut Vec<Op>, x: NodeId, inv_width: NodeId) -> Result<NodeId, TensorError> {
     let sum = reduce_like(
@@ -374,6 +376,303 @@ pub fn tap_layers(
     Ok(stacked)
 }
 
+/// Window applied to each frame before the DFT.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "config", serde(rename_all = "snake_case"))]
+pub enum WindowKind {
+    /// Hann, periodic form: `0.5 * (1 - cos(2*pi*i / n_fft))`.
+    #[default]
+    HannPeriodic,
+    /// `0.5 * (1 - cos(2*pi*i / (n_fft - 1)))`.
+    HannSymmetric,
+    /// All ones: the bare DFT of each frame.
+    Rectangular,
+}
+
+/// Every constant of [`stft_log_mel`]; the defaults are one family's reference values (sourced in
+/// the spec's reference table, not here), and none is selected by a name.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(feature = "config", derive(serde::Serialize, serde::Deserialize))]
+pub struct StftLogMelConfig {
+    /// Window applied to each frame before the DFT.
+    pub window: WindowKind,
+    /// DFT length and frame length in samples, default 400.
+    pub n_fft: u32,
+    /// Stride between frames in samples, default 160.
+    pub hop: u32,
+    /// Lower bound on a mel energy before the log, default 1e-10.
+    pub floor: f32,
+    /// Decades below the whole-tensor peak at which log values are raised, default 8.
+    pub dynamic_range: f32,
+    /// Multiplier of the final affine rescale, default 0.25 (`(x + 4) / 4` with the offset).
+    pub scale: f32,
+    /// Addend of the final affine rescale, default 1.0.
+    pub offset: f32,
+}
+
+impl Default for StftLogMelConfig {
+    fn default() -> Self {
+        Self {
+            window: WindowKind::HannPeriodic,
+            n_fft: 400,
+            hop: 160,
+            floor: 1e-10,
+            dynamic_range: 8.0,
+            scale: 0.25,
+            offset: 1.0,
+        }
+    }
+}
+
+/// Name of the `[n_fft]` window leaf [`stft_log_mel`] declares.
+pub const STFT_WINDOW_INPUT: &str = "stft_window";
+/// Name of the `[n_fft, bins]` cosine-table leaf [`stft_log_mel`] declares.
+pub const STFT_COS_INPUT: &str = "stft_cos";
+/// Name of the `[n_fft, bins]` sine-table leaf [`stft_log_mel`] declares.
+pub const STFT_SIN_INPUT: &str = "stft_sin";
+
+/// Host-built leaf bytes for [`stft_log_mel`], each encoded as the leaf's dtype.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StftTables {
+    /// `[n_fft]`, bound to [`STFT_WINDOW_INPUT`].
+    pub window: Vec<u8>,
+    /// `[n_fft, bins]`, bound to [`STFT_COS_INPUT`].
+    pub cos: Vec<u8>,
+    /// `[n_fft, bins]`, bound to [`STFT_SIN_INPUT`].
+    pub sin: Vec<u8>,
+}
+
+impl StftLogMelConfig {
+    /// Frequency bins kept from the DFT: `n_fft / 2 + 1`.
+    #[must_use]
+    pub const fn bins(&self) -> u32 {
+        self.n_fft / 2 + 1
+    }
+
+    fn frame_count(&self, samples: u32) -> Result<u32, TensorError> {
+        if self.n_fft < 2 || self.hop == 0 || samples < self.n_fft {
+            return Err(TensorError::NotLowerable {
+                node: NodeId(0),
+                reason: "stft needs n_fft >= 2, a nonzero hop and at least one whole frame",
+            });
+        }
+        Ok((samples - self.n_fft) / self.hop + 1)
+    }
+
+    fn window_values(&self) -> Vec<f32> {
+        let length = f64::from(self.n_fft);
+        (0..self.n_fft)
+            .map(|index| {
+                let phase = f64::from(index) * core::f64::consts::TAU;
+                match self.window {
+                    WindowKind::HannPeriodic => 0.5 * (1.0 - libm::cos(phase / length)),
+                    WindowKind::HannSymmetric => 0.5 * (1.0 - libm::cos(phase / (length - 1.0))),
+                    WindowKind::Rectangular => 1.0,
+                }
+            })
+            .map(|value| value as f32)
+            .collect()
+    }
+}
+
+/// Host tables for [`stft_log_mel`]: the window and the `[n_fft, bins]` cosine and sine matrices
+/// (`cos(2*pi*t*k / n_fft)`, `sin(...)`), encoded as `dtype` through [`FormatCodec`] like
+/// [`multi_axis_rope_tables`]. The sine table is positive; the power spectrum squares it, so the
+/// sign convention of the DFT is immaterial.
+///
+/// # Errors
+///
+/// [`TensorError::NotLowerable`] when `n_fft < 2` or `dtype` cannot be encoded.
+pub fn stft_tables(config: &StftLogMelConfig, dtype: DType) -> Result<StftTables, TensorError> {
+    if config.n_fft < 2 {
+        return Err(TensorError::NotLowerable {
+            node: NodeId(0),
+            reason: "stft needs n_fft >= 2",
+        });
+    }
+    let length = f64::from(config.n_fft);
+    let (mut cos, mut sin) = (Vec::new(), Vec::new());
+    for tap in 0..config.n_fft {
+        for bin in 0..config.bins() {
+            let angle = core::f64::consts::TAU * f64::from(tap) * f64::from(bin) / length;
+            cos.push(libm::cos(angle) as f32);
+            sin.push(libm::sin(angle) as f32);
+        }
+    }
+    Ok(StftTables {
+        window: encode_table(&config.window_values(), dtype)?,
+        cos: encode_table(&cos, dtype)?,
+        sin: encode_table(&sin, dtype)?,
+    })
+}
+
+/// Log-mel spectrogram of a waveform `signal` (`[samples]`) as `[mels, frames]`, with
+/// `frames = (samples - n_fft) / hop + 1`: window each frame, DFT as a matmul against host
+/// cos/sin tables, power, projection through `filterbank` (`[mels, bins]`, a bound operand),
+/// `Maximum` floor, `log10`, a whole-tensor `Reduce Maximum` then `Maximum` for the dynamic-range
+/// clamp, and the affine rescale. It declares the window, cosine and sine leaves
+/// ([`STFT_WINDOW_INPUT`], [`STFT_COS_INPUT`], [`STFT_SIN_INPUT`]) in the signal's dtype; bind them
+/// from [`stft_tables`]. Framing is an `Elementwise` read through the two-term window map
+/// `hop*frame + tap`, which autograd differentiates by mask composition; every other step is
+/// `Elementwise` or an Add/Maximum `Reduce`, so the whole front end is trainable to the waveform
+/// and to the filterbank. Padding the signal is the caller's job. Compose [`layer_norm`] or a
+/// convolution after it; [`non_causal_attention`] shows the same leaf-plus-table pattern.
+///
+/// # Errors
+///
+/// [`TensorError::NotLowerable`] when `n_fft < 2`, `hop == 0` or `samples < n_fft`.
+pub fn stft_log_mel(
+    program: &mut Vec<Op>,
+    config: &StftLogMelConfig,
+    signal: NodeId,
+    samples: u32,
+    filterbank: NodeId,
+) -> Result<NodeId, TensorError> {
+    let frames = config.frame_count(samples)?;
+    let dtype = produced_dtype_or_binary32(program, signal);
+    let table = |extents: &[u32]| {
+        extents
+            .iter()
+            .map(|&e| Extent::Static(e))
+            .collect::<Vec<_>>()
+    };
+    let window = input_leaf(program, dtype, table(&[config.n_fft]), STFT_WINDOW_INPUT);
+    let shape = table(&[config.n_fft, config.bins()]);
+    let cos = input_leaf(program, dtype, shape.clone(), STFT_COS_INPUT);
+    let sin = input_leaf(program, dtype, shape, STFT_SIN_INPUT);
+    let stamp = op::append(
+        program,
+        Op::Constant {
+            dtype,
+            shape: table(&[frames, config.n_fft]),
+            value: 1.0,
+        },
+    );
+    let window_map = alloc::format!("{}*f+t->ft", config.hop);
+    let framed = elementwise_like(
+        program,
+        signal,
+        ScalarOp::Multiply,
+        &[(signal, window_map.as_str()), (stamp, "ft->ft")],
+    )?;
+    let windowed = elementwise_like(
+        program,
+        signal,
+        ScalarOp::Multiply,
+        &[(framed, "ft->ft"), (window, "t->ft")],
+    )?;
+    let real = dft_half(program, windowed, cos)?;
+    let imaginary = dft_half(program, windowed, sin)?;
+    let real_sq = elementwise_like(
+        program,
+        signal,
+        ScalarOp::Multiply,
+        &[(real, "fk->fk"), (real, "fk->fk")],
+    )?;
+    let imaginary_sq = elementwise_like(
+        program,
+        signal,
+        ScalarOp::Multiply,
+        &[(imaginary, "fk->fk"), (imaginary, "fk->fk")],
+    )?;
+    let power = elementwise_like(
+        program,
+        signal,
+        ScalarOp::Add,
+        &[(real_sq, "fk->fk"), (imaginary_sq, "fk->fk")],
+    )?;
+    let weighted = elementwise_like(
+        program,
+        signal,
+        ScalarOp::Multiply,
+        &[(power, "fk->mfk"), (filterbank, "mk->mfk")],
+    )?;
+    let mel = reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        weighted,
+        "mfk->mfk",
+        "mf->mfk",
+    )?;
+    clamp_and_rescale(program, config, mel)
+}
+
+fn dft_half(program: &mut Vec<Op>, windowed: NodeId, table: NodeId) -> Result<NodeId, TensorError> {
+    let product = elementwise_like(
+        program,
+        windowed,
+        ScalarOp::Multiply,
+        &[(windowed, "ft->ftk"), (table, "tk->ftk")],
+    )?;
+    reduce_like(
+        program,
+        ScalarOp::Add,
+        ReduceInit::Zero,
+        product,
+        "ftk->ftk",
+        "fk->ftk",
+    )
+}
+
+fn clamp_and_rescale(
+    program: &mut Vec<Op>,
+    config: &StftLogMelConfig,
+    mel: NodeId,
+) -> Result<NodeId, TensorError> {
+    let floor = scalar_constant_like(program, config.floor, mel)?;
+    let floored = elementwise_like(
+        program,
+        mel,
+        ScalarOp::Maximum,
+        &[(mel, "mf->mf"), (floor, "->mf")],
+    )?;
+    let natural = elementwise_like(program, mel, ScalarOp::Logarithm, &[(floored, "mf->mf")])?;
+    let per_decade = scalar_constant_like(program, core::f32::consts::LOG10_E, mel)?;
+    let decades = elementwise_like(
+        program,
+        mel,
+        ScalarOp::Multiply,
+        &[(natural, "mf->mf"), (per_decade, "->mf")],
+    )?;
+    let peak = reduce_like(
+        program,
+        ScalarOp::Maximum,
+        ReduceInit::NegativeInfinity,
+        decades,
+        "mf->mf",
+        "->mf",
+    )?;
+    let range = scalar_constant_like(program, config.dynamic_range, mel)?;
+    let lowest = elementwise_like(
+        program,
+        mel,
+        ScalarOp::Subtract,
+        &[(peak, "->"), (range, "->")],
+    )?;
+    let clamped = elementwise_like(
+        program,
+        mel,
+        ScalarOp::Maximum,
+        &[(decades, "mf->mf"), (lowest, "->mf")],
+    )?;
+    let scale = scalar_constant_like(program, config.scale, mel)?;
+    let scaled = elementwise_like(
+        program,
+        mel,
+        ScalarOp::Multiply,
+        &[(clamped, "mf->mf"), (scale, "->mf")],
+    )?;
+    let offset = scalar_constant_like(program, config.offset, mel)?;
+    elementwise_like(
+        program,
+        mel,
+        ScalarOp::Add,
+        &[(scaled, "mf->mf"), (offset, "->mf")],
+    )
+}
+
 #[cfg(test)]
 mod layer_norm_tests {
     use super::*;
@@ -433,5 +732,192 @@ mod layer_norm_tests {
                 "element {index}: {actual} vs {expected}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod stft_log_mel_tests {
+    use super::*;
+    use crate::spec::input_leaf;
+
+    const SAMPLES: usize = 64;
+    const MELS: usize = 4;
+
+    fn config() -> StftLogMelConfig {
+        StftLogMelConfig {
+            n_fft: 16,
+            hop: 4,
+            ..StftLogMelConfig::default()
+        }
+    }
+
+    fn decode(bytes: &[u8]) -> Vec<f32> {
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
+            .collect()
+    }
+
+    fn waveform() -> Vec<f32> {
+        (0..SAMPLES)
+            .map(|index| {
+                let time = index as f32;
+                3.0 * (0.9 * time).sin() + 1.5 * (2.1 * time).cos() + 0.1 * ((index * 5 % 7) as f32)
+            })
+            .collect()
+    }
+
+    fn filterbank(bins: usize, silent_row: Option<usize>) -> Vec<f32> {
+        let mut rows = Vec::new();
+        for mel in 0..MELS {
+            for bin in 0..bins {
+                let center = (mel as f32 + 0.5) * bins as f32 / MELS as f32;
+                let weight = (1.0 - (bin as f32 - center).abs() / 3.0).max(0.0);
+                rows.push(if silent_row == Some(mel) { 0.0 } else { weight });
+            }
+        }
+        rows
+    }
+
+    fn reference(signal: &[f32], bank: &[f32], config: &StftLogMelConfig) -> Vec<f64> {
+        let (n_fft, hop, bins) = (
+            config.n_fft as usize,
+            config.hop as usize,
+            config.bins() as usize,
+        );
+        let window = config.window_values();
+        let frames = (signal.len() - n_fft) / hop + 1;
+        let mut decades = vec![0f64; MELS * frames];
+        for frame in 0..frames {
+            let power: Vec<f64> = (0..bins)
+                .map(|bin| {
+                    let (mut real, mut imaginary) = (0f64, 0f64);
+                    for tap in 0..n_fft {
+                        let sample = f64::from(signal[frame * hop + tap]) * f64::from(window[tap]);
+                        let angle = core::f64::consts::TAU * (tap * bin) as f64 / n_fft as f64;
+                        real += sample * angle.cos();
+                        imaginary -= sample * angle.sin();
+                    }
+                    real * real + imaginary * imaginary
+                })
+                .collect();
+            for mel in 0..MELS {
+                let energy: f64 = (0..bins)
+                    .map(|bin| power[bin] * f64::from(bank[mel * bins + bin]))
+                    .sum();
+                decades[mel * frames + frame] = energy.max(f64::from(config.floor)).log10();
+            }
+        }
+        let peak = decades.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        decades
+            .iter()
+            .map(|value| {
+                value.max(peak - f64::from(config.dynamic_range)) * f64::from(config.scale)
+                    + f64::from(config.offset)
+            })
+            .collect()
+    }
+
+    fn run(config: &StftLogMelConfig, bank: &[f32]) -> (Vec<f32>, Vec<f32>) {
+        let bins = config.bins();
+        let mut program = Vec::new();
+        let signal = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            vec![Extent::Static(SAMPLES as u32)],
+            "signal",
+        );
+        let fb = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            vec![Extent::Static(MELS as u32), Extent::Static(bins)],
+            "filterbank",
+        );
+        let out = stft_log_mel(&mut program, config, signal, SAMPLES as u32, fb)
+            .expect("stft log-mel builds");
+        let tables = stft_tables(config, DType::FLOAT32).expect("tables encode");
+        let (window, cos, sin) = (
+            decode(&tables.window),
+            decode(&tables.cos),
+            decode(&tables.sin),
+        );
+        let wave = waveform();
+        let evaluated = crate::cpu::evaluate_named(
+            &program,
+            &[],
+            &[
+                ("signal", &wave),
+                ("filterbank", bank),
+                (STFT_WINDOW_INPUT, &window),
+                (STFT_COS_INPUT, &cos),
+                (STFT_SIN_INPUT, &sin),
+            ],
+            &[out],
+        )
+        .expect("stft log-mel evaluates");
+        (
+            evaluated.get(out).expect("output requested").0.to_vec(),
+            wave,
+        )
+    }
+
+    #[test]
+    fn stft_log_mel_matches_a_direct_dft_reference_on_a_64_sample_signal() {
+        let config = config();
+        let bank = filterbank(config.bins() as usize, None);
+        let (got, wave) = run(&config, &bank);
+        let want = reference(&wave, &bank, &config);
+        assert_eq!(got.len(), MELS * 13);
+        for (index, (actual, expected)) in got.iter().zip(&want).enumerate() {
+            assert!(
+                (f64::from(*actual) - expected).abs() < 1e-4,
+                "element {index}: {actual} vs {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn stft_log_mel_raises_a_bin_far_below_the_peak_to_max_minus_range() {
+        let config = config();
+        let bank = filterbank(config.bins() as usize, Some(3));
+        let (got, wave) = run(&config, &bank);
+        let frames = 13;
+        let peak_decades = (0..MELS - 1)
+            .flat_map(|mel| (0..frames).map(move |frame| (mel, frame)))
+            .map(|(mel, frame)| (f64::from(got[mel * frames + frame]) - 1.0) / 0.25)
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            peak_decades - 8.0 > -10.0,
+            "silent bin must sit below the clamp"
+        );
+        let want = (peak_decades - 8.0) * 0.25 + 1.0;
+        let silent = &got[3 * frames..4 * frames];
+        assert!(
+            silent
+                .iter()
+                .all(|value| (f64::from(*value) - want).abs() < 1e-4)
+        );
+        let reference = reference(&wave, &bank, &config);
+        assert!((f64::from(silent[0]) - reference[3 * frames]).abs() < 1e-4);
+    }
+
+    #[test]
+    fn stft_log_mel_rejects_a_signal_shorter_than_one_frame() {
+        let mut program = Vec::new();
+        let signal = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            vec![Extent::Static(8)],
+            "signal",
+        );
+        let fb = input_leaf(
+            &mut program,
+            DType::FLOAT32,
+            vec![Extent::Static(1), Extent::Static(9)],
+            "fb",
+        );
+        assert!(stft_log_mel(&mut program, &config(), signal, 8, fb).is_err());
     }
 }
