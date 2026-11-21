@@ -26,6 +26,9 @@ pub struct RuntimeConfig {
     /// GPU driver for planning, such as `metal` on Apple Silicon.
     #[setting(default = "auto")]
     pub gpu_driver: String,
+    /// Wavefront width the HIP dialect is emitted for: 0 reads `warpSize` from the device, 32 (RDNA) or 64 (CDNA) overrides it.
+    #[setting(default = 0)]
+    pub hip_wave: u32,
     /// Permit bind-time and execution-time algebraic fusion, such as joining a product and reduce.
     #[setting(default = false)]
     pub allow_fusion: bool,
@@ -116,6 +119,7 @@ impl Default for RuntimeConfig {
         Self {
             engine: String::from("cpu"),
             gpu_driver: String::from("auto"),
+            hip_wave: 0,
             allow_fusion: false,
             wavefront_schedule: crate::sized::COMMAND_BUFFER_WAVEFRONT_SCHEDULE,
             exact_activations: true,
@@ -297,11 +301,17 @@ impl Validate for RuntimeConfig {
                 format!("unknown engine '{}'; expected cpu|gpu", self.engine),
             ));
         }
-        if !matches!(self.gpu_driver.as_str(), "auto" | "metal" | "wgpu" | "cuda" | "rocm") {
+        if !matches!(self.hip_wave, 0 | 32 | 64) {
+            errors.push(ValidationMessage::new(
+                "hip_wave",
+                format!("unsupported hip wave width {}; expected 0 (device), 32 or 64", self.hip_wave),
+            ));
+        }
+        if !matches!(self.gpu_driver.as_str(), "auto" | "metal" | "wgpu" | "cuda" | "hip" | "rocm") {
             errors.push(ValidationMessage::new(
                 "gpu_driver",
                 format!(
-                    "unknown gpu driver '{}'; expected auto|metal|wgpu|cuda|rocm",
+                    "unknown gpu driver '{}'; expected auto|metal|wgpu|cuda|hip|rocm",
                     self.gpu_driver
                 ),
             ));
@@ -844,6 +854,13 @@ impl RuntimeConfigBuilder {
     #[must_use]
     pub fn with_allow_fusion(mut self, value: bool) -> Self {
         self.inner.allow_fusion = value;
+        self
+    }
+
+    /// Set the HIP wavefront width: 0 derives it from the device, 32 or 64 overrides it.
+    #[must_use]
+    pub fn with_hip_wave(mut self, value: u32) -> Self {
+        self.inner.hip_wave = value;
         self
     }
 
