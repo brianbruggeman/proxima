@@ -50,6 +50,7 @@ fn synthetic_architecture(layer_count: u32) -> RecurrentRoutedIntervalHparams {
         .collect();
     RecurrentRoutedIntervalHparams {
         family: String::from("qwen35moe"),
+        profile: proxima_model_interop::profiles::family_profile("qwen35moe").expect("qwen35moe profile"),
         vocab: 16,
         embedding: 8,
         query_heads: 2,

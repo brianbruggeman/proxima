@@ -2604,7 +2604,7 @@ impl<'file> LoadedModel<'file> {
         fused_qkv_reduce: bool,
     ) -> Result<Self, InteropError> {
         let family = metadata_str(parsed, "general.architecture")?;
-        if family_profile(family)?.schedule_source != ScheduleSource::Uniform {
+        if crate::inferred_profile::resolved_profile(parsed, family)?.schedule_source != ScheduleSource::Uniform {
             return Self::load(parsed, file_bytes);
         }
         let header = crate::lowering::header_descriptor(parsed, KvLayout::SlidingRing)?;
@@ -2863,7 +2863,7 @@ impl<'file> LoadedModel<'file> {
         // chunk default; `crate::lowering` binds and lowers from that one
         // config, so no per-family branch exists here.
         let architecture_name = metadata_str(parsed, "general.architecture")?;
-        let profile = family_profile(architecture_name)?;
+        let profile = crate::inferred_profile::resolved_profile(parsed, architecture_name)?;
         let measured = serving_config.map_or_else(
             || measured_serving_defaults(architecture_name),
             |config| Ok(measured_serving_defaults(architecture_name)?.with_overrides(config)),

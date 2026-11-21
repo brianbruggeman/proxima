@@ -16,9 +16,11 @@ use bon::Builder;
 use conflaguration::{Settings, Validate};
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_tensor::spec::FamilyProfile;
+use proxima_telemetry::warn;
 use serde::{Deserialize, Serialize};
 
 use crate::error::InteropError;
+use crate::profiles::family_profile;
 use crate::families::{
     CheckpointSha, DecoderFamily, FactsTable, TensorShape, gguf_config, infer, infer_profile,
 };
@@ -103,4 +105,32 @@ pub fn inferred_profile(
     };
     let read = infer_profile(&family, &inferred, &config).map_err(|error| invalid(error.to_string()))?;
     Ok(Some(read.settle(facts, architecture)?.into_profile(architecture)?))
+}
+
+/// The one place a GGUF load's family profile is resolved: the inferred
+/// profile of [`inferred_profile`], or, transitionally and only here, the
+/// per-family row when the facts refuse or have no section (PROXNUM-624 and
+/// PROXNUM-625 delete that arm). Every GGUF header reader takes the result;
+/// none looks a row up itself.
+///
+/// # Errors
+///
+/// The settings or family cannot be read, a fact contradicts the file, or the
+/// fallback row is absent.
+pub(crate) fn resolved_profile(parsed: &ParsedGguf, family: &str) -> Result<FamilyProfile, InteropError> {
+    let settings = ProfileSourceSettings::from_env().map_err(|error| InteropError::InvalidFamilyProfile {
+        family: family.into(),
+        message: error.to_string(),
+    })?;
+    if settings.inferred {
+        match inferred_profile(parsed, family, &settings) {
+            Ok(Some(profile)) => return Ok(profile),
+            Ok(None) => {}
+            Err(InteropError::FamilyFacts(refusal)) => {
+                warn!(family = ?family, refusal = ?refusal, "architecture facts refused; serving from the family row");
+            }
+            Err(other) => return Err(other),
+        }
+    }
+    family_profile(family)
 }

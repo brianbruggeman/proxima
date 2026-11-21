@@ -27,6 +27,7 @@ claim_prefixes = ["v.", "mm.", "mtp."]
 attn_q = "attn_q.weight"
 qk_norm = "attn_q_norm.weight"
 post_attention_norm = "post_attention_norm.weight"
+ffn_norm = "ffn_norm.weight"
 output_scale = "layer_output_scale.weight"
 router = "ffn_gate_inp.weight"
 router_scale = "ffn_gate_inp.scale"

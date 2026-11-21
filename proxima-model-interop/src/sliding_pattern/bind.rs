@@ -11,14 +11,14 @@
 //! knob the descriptor sets is documented there, not here.
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::spec::{ModelDescriptor, sliding_pattern_descriptor_from_gguf};
+use proxima_tensor::spec::{FamilyProfile, ModelDescriptor, sliding_pattern_descriptor_from_gguf};
 
 use crate::bind::{ModelHparams, SlidingRope, find_tensor, metadata_str, metadata_u32_optional};
 use crate::error::InteropError;
 use crate::ffn_inference::with_inferred_ffn;
 use crate::key_inference::with_inferred_keys;
 use crate::lowering::KvLayout;
-use crate::profiles::family_profile;
+use crate::inferred_profile::resolved_profile;
 use crate::serving_defaults::measured_serving_defaults;
 
 use super::hparams::from_metadata;
@@ -31,8 +31,18 @@ pub fn descriptor_from_gguf(
     sliding_kv_ring: bool,
 ) -> Result<ModelDescriptor, InteropError> {
     let family = metadata_str(parsed, "general.architecture")?;
+    descriptor_with_profile(parsed, sliding_kv_ring, resolved_profile(parsed, family)?)
+}
+
+/// [`descriptor_from_gguf`] over a profile the caller already resolved.
+pub(crate) fn descriptor_with_profile(
+    parsed: &ParsedGguf,
+    sliding_kv_ring: bool,
+    profile: FamilyProfile,
+) -> Result<ModelDescriptor, InteropError> {
+    let family = metadata_str(parsed, "general.architecture")?;
     let expert_count = metadata_u32_optional(parsed, &format!("{family}.expert_count"));
-    let profile = with_inferred_ffn(family_profile(family)?, parsed, expert_count);
+    let profile = with_inferred_ffn(profile, parsed, expert_count);
     let profile = with_inferred_keys(profile, parsed, family)?;
     let descriptor = sliding_pattern_descriptor_from_gguf(parsed, sliding_kv_ring, &profile)?;
     Ok(measured_serving_defaults(family)?.apply_to_descriptor(descriptor))
@@ -59,9 +69,10 @@ fn head_repeats_from_env() -> u32 {
 pub(crate) fn header(
     parsed: &ParsedGguf,
     layout: KvLayout,
+    profile: &FamilyProfile,
 ) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
     let hparams = from_metadata(parsed)?;
-    let descriptor = descriptor_from_gguf(parsed, layout == KvLayout::SlidingRing)?;
+    let descriptor = descriptor_with_profile(parsed, layout == KvLayout::SlidingRing, *profile)?;
     #[cfg(feature = "instrument")]
     let descriptor = ModelDescriptor {
         head_repeats: head_repeats_from_env(),

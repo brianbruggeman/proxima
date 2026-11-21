@@ -518,3 +518,19 @@ fn write_facts(name: &str, text: &str) -> String {
     fs::write(&path, text).expect("write facts");
     path.display().to_string()
 }
+
+#[test]
+fn every_local_checkpoint_yields_a_complete_inferred_profile() {
+    let locations = locations();
+    let mut served = 0usize;
+    for (label, path) in checkpoints(&locations) {
+        let parsed = read_header(&path);
+        let arch = match parsed.metadata_value("general.architecture") {
+            Some(proxima_gguf::value::MetadataValue::String(arch)) => arch.clone(),
+            other => panic!("{label}: no architecture, got {other:?}"),
+        };
+        serving(&parsed, &arch).unwrap_or_else(|error| panic!("{label}: {error}"));
+        served += 1;
+    }
+    assert_eq!(served, 16, "every local checkpoint yields a complete profile");
+}

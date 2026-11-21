@@ -31,7 +31,6 @@ pub use proxima_tensor::spec::MoeLayerDiagnostics;
 
 use super::hparams::{LayerKind as HeaderLayerKind, RecurrentRoutedIntervalHparams};
 use crate::error::InteropError;
-use crate::profiles::family_profile;
 use crate::serving_defaults::measured_serving_defaults;
 
 /// [`recurrent_routed_interval_forward_program`]'s own return shape: the built `Vec<Op>`,
@@ -57,7 +56,7 @@ pub fn descriptor_from_architecture(
     architecture: &RecurrentRoutedIntervalHparams,
     width: Option<u32>,
 ) -> Result<ModelDescriptor, InteropError> {
-    let profile = family_profile(&architecture.family)?;
+    let profile = architecture.profile;
     let measured = measured_serving_defaults(&architecture.family)?;
     let attention = LayerAttentionConfig {
         head_dim: architecture.attn_head_dim,

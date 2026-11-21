@@ -33,7 +33,7 @@ use crate::bind::{
 use crate::error::InteropError;
 use crate::ffn_inference::with_inferred_ffn;
 use crate::key_inference::{InferredScoreScale, infer_score_scale, with_inferred_keys};
-use crate::profiles::family_profile;
+use crate::inferred_profile::resolved_profile;
 use crate::serving_defaults::measured_serving_defaults;
 use crate::task::{ModelTask, classify_task};
 
@@ -44,9 +44,12 @@ use crate::task::{ModelTask, classify_task};
 ///
 /// Whatever [`architecture_from_metadata`] and [`descriptor_from_gguf`] can
 /// fail with.
-pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
+pub(crate) fn header(
+    parsed: &ParsedGguf,
+    profile: &FamilyProfile,
+) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
     let architecture = architecture_from_metadata(parsed)?;
-    let descriptor = descriptor_from_gguf(parsed, &architecture)?;
+    let descriptor = descriptor_with_profile(parsed, &architecture, *profile)?;
     Ok((descriptor, architecture))
 }
 
@@ -65,8 +68,17 @@ pub fn descriptor_from_gguf(
     parsed: &ParsedGguf,
     architecture: &ModelHparams,
 ) -> Result<ModelDescriptor, InteropError> {
+    descriptor_with_profile(parsed, architecture, resolved_profile(parsed, &architecture.family)?)
+}
+
+/// [`descriptor_from_gguf`] over a profile the caller already resolved.
+pub(crate) fn descriptor_with_profile(
+    parsed: &ParsedGguf,
+    architecture: &ModelHparams,
+    profile: FamilyProfile,
+) -> Result<ModelDescriptor, InteropError> {
     let profile = with_inferred_ffn(
-        family_profile(&architecture.family)?,
+        profile,
         parsed,
         architecture.expert_count,
     );

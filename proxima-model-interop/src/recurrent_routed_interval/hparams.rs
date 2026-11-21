@@ -3,11 +3,13 @@ use alloc::vec::Vec;
 
 use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
+use proxima_tensor::spec::FamilyProfile;
 
 use crate::bind::{
     find_tensor, metadata_f32_optional, metadata_str, metadata_u32, metadata_u32_optional_or,
 };
 use crate::error::InteropError;
+use crate::inferred_profile::resolved_profile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LayerKind {
@@ -39,6 +41,8 @@ impl LayerKind {
 pub struct RecurrentRoutedIntervalHparams {
     /// `general.architecture` as the file declares it, the key the family and binding profiles resolve through.
     pub family: String,
+    /// The family profile resolved once for this load.
+    pub profile: FamilyProfile,
     pub vocab: u32,
     pub embedding: u32,
     pub query_heads: u32,
@@ -96,6 +100,15 @@ fn per_layer_kv(
 
 pub fn from_metadata(parsed: &ParsedGguf) -> Result<RecurrentRoutedIntervalHparams, InteropError> {
     let family = metadata_str(parsed, "general.architecture")?;
+    hparams_with_profile(parsed, resolved_profile(parsed, family)?)
+}
+
+/// [`from_metadata`] over a profile the caller already resolved.
+pub(crate) fn hparams_with_profile(
+    parsed: &ParsedGguf,
+    profile: FamilyProfile,
+) -> Result<RecurrentRoutedIntervalHparams, InteropError> {
+    let family = metadata_str(parsed, "general.architecture")?;
     let prefix = |name: &str| format!("{family}.{name}");
     let embedding = metadata_u32(parsed, &prefix("embedding_length"))?;
     let block_count = metadata_u32(parsed, &prefix("block_count"))?;
@@ -140,6 +153,7 @@ pub fn from_metadata(parsed: &ParsedGguf) -> Result<RecurrentRoutedIntervalHpara
     );
     Ok(RecurrentRoutedIntervalHparams {
         family: family.to_owned(),
+        profile,
         vocab: crate::bind::vocab_from_token_embedding(parsed, embedding)?,
         embedding,
         query_heads: metadata_u32(parsed, &prefix("attention.head_count"))?,

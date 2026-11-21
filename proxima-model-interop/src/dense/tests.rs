@@ -1,4 +1,5 @@
 use super::*;
+use crate::profiles::family_profile;
 use arrayvec::ArrayVec;
 use proxima_gguf::types::GgmlType;
 use proxima_gguf::value::MetadataArray;

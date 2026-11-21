@@ -12,7 +12,8 @@
 //! cutover card deletes it.
 //!
 //! Rules, each over `blk.{N}.<leaf>` on any block:
-//! - `post_attention_norm`: `post_attention_norm.weight` present
+//! - `post_attention_norm`: `post_attention_norm.weight` present beside `ffn_norm.weight`
+//!   (a hybrid layer with no `ffn_norm` uses that tensor as the FFN's own pre-norm)
 //! - `output_scale`: `layer_output_scale.weight` present
 //! - `routed_expert_bias`: `exp_probs_b.bias` present
 //! - `exclusive_dense_post_norm`: `post_ffw_norm.weight` present and neither
@@ -55,6 +56,7 @@ pub(crate) struct InferredFfn {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct PatternCounts {
     pub post_attention_norm: u32,
+    pub ffn_norm: u32,
     pub layer_output_scale: u32,
     pub exp_probs_b: u32,
     pub post_ffw_norm: u32,
@@ -77,6 +79,8 @@ pub(crate) fn infer_ffn_from_tensor_names<'a>(
         };
         let slot = if rest.ends_with(".post_attention_norm.weight") {
             &mut counts.post_attention_norm
+        } else if rest.ends_with(".ffn_norm.weight") {
+            &mut counts.ffn_norm
         } else if rest.ends_with(".layer_output_scale.weight") {
             &mut counts.layer_output_scale
         } else if rest.ends_with(".exp_probs_b.bias") {
@@ -111,7 +115,7 @@ pub(crate) fn infer_ffn_from_tensor_names<'a>(
         InferredCombination::Exclusive
     };
     InferredFfn {
-        post_attention_norm: counts.post_attention_norm > 0,
+        post_attention_norm: counts.post_attention_norm > 0 && counts.ffn_norm > 0,
         output_scale: counts.layer_output_scale > 0,
         routed_expert_bias: counts.exp_probs_b > 0,
         exclusive_dense_post_norm: counts.post_ffw_norm > 0

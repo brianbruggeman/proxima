@@ -21,8 +21,8 @@ use proxima_gguf::pipe::ParsedGguf;
 use proxima_gguf::value::{MetadataArray, MetadataValue};
 use proxima_tensor::op::{NodeId, Op};
 use proxima_tensor::spec::{
-    CacheMask, CacheStrategy, ForwardProgram, KeySourceKind, LayerAttentionConfig, LayerKind,
-    LayerSchedule, LoopCdConfig, ModelDescriptor, RopeTableSel, ValueSourceKind, build_forward,
+    CacheMask, CacheStrategy, FamilyProfile, ForwardProgram, KeySourceKind, LayerAttentionConfig,
+    LayerKind, LayerSchedule, LoopCdConfig, ModelDescriptor, RopeTableSel, ValueSourceKind, build_forward,
 };
 
 use crate::bind::{
@@ -33,7 +33,8 @@ use crate::bind_leaves::bind_program_leaves;
 use crate::error::InteropError;
 use crate::lowering::StepState;
 use crate::prism_hadamard::{PrismHadamard, prism_hadamard_from_metadata};
-use crate::profiles::{binding_profile, family_profile};
+use crate::inferred_profile::resolved_profile;
+use crate::profiles::binding_profile;
 use crate::serving_defaults::measured_serving_defaults;
 
 /// One layer's real tensor shape, derived from
@@ -75,6 +76,8 @@ impl IntervalLayerKind {
 pub struct RecurrentIntervalHparams {
     /// `general.architecture` as the file declares it, the key the family and binding profiles resolve through.
     pub family: String,
+    /// The family profile resolved once for this load ([`crate::inferred_profile`]).
+    pub profile: FamilyProfile,
     pub vocab: u32,
     pub embedding: u32,
     pub feed_forward: u32,
@@ -127,6 +130,15 @@ const RECURRENT_INTERVAL_RMS_EPSILON_DEFAULT: f32 = 1e-6;
 pub fn recurrent_interval_architecture_from_metadata(
     parsed: &ParsedGguf,
 ) -> Result<RecurrentIntervalHparams, InteropError> {
+    let family = metadata_str(parsed, "general.architecture")?;
+    hparams_with_profile(parsed, resolved_profile(parsed, family)?)
+}
+
+/// [`recurrent_interval_architecture_from_metadata`] over a profile the caller already resolved.
+fn hparams_with_profile(
+    parsed: &ParsedGguf,
+    profile: FamilyProfile,
+) -> Result<RecurrentIntervalHparams, InteropError> {
     let architecture = metadata_str(parsed, "general.architecture")?;
     let embedding = metadata_u32(parsed, &format!("{architecture}.embedding_length"))?;
     let feed_forward = metadata_u32(parsed, &format!("{architecture}.feed_forward_length"))?;
@@ -162,7 +174,7 @@ pub fn recurrent_interval_architecture_from_metadata(
     let v_head_reordered =
         match parsed.metadata_value(&format!("{architecture}.ssm.v_head_reordered")) {
             Some(MetadataValue::Bool(value)) => *value,
-            _ => family_profile(architecture)?.ssm_v_head_reordered,
+            _ => profile.ssm_v_head_reordered,
         };
 
     let hadamard = prism_hadamard_from_metadata(parsed)?;
@@ -172,6 +184,7 @@ pub fn recurrent_interval_architecture_from_metadata(
 
     Ok(RecurrentIntervalHparams {
         family: architecture.to_owned(),
+        profile,
         vocab,
         embedding,
         feed_forward,
@@ -368,7 +381,7 @@ pub fn recurrent_interval_ssm_state_bytes(shape: SsmShape, block_count: u32) -> 
 pub fn descriptor_from_architecture(
     architecture: &RecurrentIntervalHparams,
 ) -> Result<ModelDescriptor, InteropError> {
-    let profile = family_profile(&architecture.family)?;
+    let profile = architecture.profile;
     let measured = measured_serving_defaults(&architecture.family)?;
     let attention = LayerAttentionConfig {
         head_dim: architecture.attn_head_dim,
@@ -479,8 +492,11 @@ pub fn recurrent_interval_forward_program(
 ///
 /// Whatever [`recurrent_interval_architecture_from_metadata`] and
 /// [`descriptor_from_architecture`] can fail with.
-pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
-    let hparams = recurrent_interval_architecture_from_metadata(parsed)?;
+pub(crate) fn header(
+    parsed: &ParsedGguf,
+    profile: &FamilyProfile,
+) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
+    let hparams = hparams_with_profile(parsed, *profile)?;
     let descriptor = descriptor_from_architecture(&hparams)?;
     let architecture = ModelHparams {
         vocab: hparams.vocab,

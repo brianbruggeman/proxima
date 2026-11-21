@@ -7,18 +7,21 @@
 //! from it.
 
 use proxima_gguf::pipe::ParsedGguf;
-use proxima_tensor::spec::ModelDescriptor;
+use proxima_tensor::spec::{FamilyProfile, ModelDescriptor};
 
 use crate::bind::ModelHparams;
 use crate::error::InteropError;
 
-use super::hparams::from_metadata;
+use super::hparams::hparams_with_profile;
 use super::program::descriptor_from_architecture;
 
 /// This header's descriptor and hyperparameters, the two values
 /// [`crate::lowering`] lowers and binds from.
-pub(crate) fn header(parsed: &ParsedGguf) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
-    let hparams = from_metadata(parsed)?;
+pub(crate) fn header(
+    parsed: &ParsedGguf,
+    profile: &FamilyProfile,
+) -> Result<(ModelDescriptor, ModelHparams), InteropError> {
+    let hparams = hparams_with_profile(parsed, *profile)?;
     let descriptor = descriptor_from_architecture(&hparams, None)?;
     let architecture = ModelHparams {
         vocab: hparams.vocab,

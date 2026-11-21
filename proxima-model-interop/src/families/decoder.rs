@@ -245,6 +245,13 @@ struct Reading<'file> {
     config: &'file Json,
 }
 
+/// A `post_attention_norm` tensor is a norm after attention only where the FFN has its own
+/// `ffn_norm`; a hybrid layer with no `ffn_norm` uses that tensor as the FFN's own pre-norm.
+fn post_attention_norm(reading: &Reading<'_>) -> Option<bool> {
+    let present = reading.flag("post_attention_norm")?;
+    Some(present && reading.flag("ffn_norm").unwrap_or(true))
+}
+
 impl Reading<'_> {
     fn flag(&self, role: &str) -> Option<bool> {
         match self.inferred.facts.get(role)?.value {
@@ -284,7 +291,7 @@ pub fn infer_profile(
     let layer_combination = combination(&reading);
     Ok(ProfileFacts {
         embedding_scale: embedding_scale(&reading),
-        post_attention_norm: Slot::from_option(reading.flag("post_attention_norm")),
+        post_attention_norm: Slot::from_option(post_attention_norm(&reading)),
         shared_expert_gate: shared_gate(&reading, layer_combination),
         layer_combination,
         output_scale: Slot::from_option(reading.flag("output_scale")),
