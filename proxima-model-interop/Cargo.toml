@@ -45,7 +45,8 @@ std = [
     "proxima-tensor/std",
     "proxima-tensor/config",
     "interop-bgpool",
-    "dep:proxima-tokenizer",
+    "proxima-tokenizer/gguf",
+    "proxima-tokenizer/hf",
     "dep:fastrand",
     "dep:xxhash-rust",
     "conflaguration",
@@ -334,11 +335,6 @@ proxima-safetensors = { path = "../proxima-safetensors", version = "0.1.0", defa
 proxima-storage = { version = "0.1.0", path = "../proxima-storage", optional = true }
 proxima-telemetry = { workspace = true, optional = true }
 proxima-tensor = { path = "../proxima-tensor", version = "0.1.0", default-features = false, features = ["alloc"] }
-# `gguf` implies its own `std`, which is exactly the tier `generate::LoadedModel`
-# already requires (it evaluates through `proxima_tensor::cpu`, itself std-gated)
-# -- optional, wired on only by this crate's own `std` feature above, so the
-# alloc-only floor never pulls it in.
-proxima-tokenizer = { path = "../proxima-tokenizer", version = "0.1.0", default-features = false, features = ["gguf", "hf"], optional = true }
 rustix = { version = "1.1", features = ["std", "mm"], optional = true }
 serde = { workspace = true, features = ["derive", "alloc"] }
 # `hf_config::HfConfig` deserializes a real HF config.json (alloc-tier, no
@@ -351,6 +347,9 @@ sha2 = { version = "0.10.9", default-features = false }
 thiserror.workspace = true
 toml = { workspace = true, optional = true }
 xxhash-rust = { workspace = true, features = ["xxh3"], optional = true }
+# alloc tier only: `proxima_tokenizer::greedy_pick` serves the encoder-decoder decode policy;
+# the `gguf`/`hf` readers (each implies std) come in through this crate's `std` feature.
+proxima-tokenizer = { version = "0.1.0", path = "../proxima-tokenizer", default-features = false, features = ["alloc"] }
 
 [lints]
 workspace = true

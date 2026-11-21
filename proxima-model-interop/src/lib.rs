@@ -49,6 +49,7 @@ mod ffn_inference;
 #[cfg(feature = "std")]
 mod key_inference;
 mod dtype;
+pub mod decode_policy;
 pub mod families;
 mod error;
 #[cfg(feature = "std")]

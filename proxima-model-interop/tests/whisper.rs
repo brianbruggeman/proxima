@@ -323,3 +323,154 @@ mod accept {
         assert_eq!(recovered.inferred().digest(), inferred.digest());
     }
 }
+
+mod decode_semantics {
+    use proxima_model_interop::decode_policy::{DecodeConfig, DecodePolicy, DecodePolicyError};
+
+    use super::*;
+
+    const VOCAB: usize = 51_865;
+    const SPACE: usize = 220;
+    const EOT: usize = 50_257;
+
+    fn read_json(name: &str) -> Result<serde_json::Value> {
+        let text =
+            std::fs::read_to_string(fixture_dir()?.join(name)).with_context(|| name.to_string())?;
+        Ok(serde_json::from_str(&text)?)
+    }
+
+    fn policy_with(settings: &DecodeConfig) -> Result<DecodePolicy> {
+        let generation = read_json("generation_config.json")?;
+        let config = read_json("config.json")?;
+        Ok(DecodePolicy::from_checkpoint(
+            &generation,
+            &config,
+            settings,
+        )?)
+    }
+
+    fn policy() -> Result<DecodePolicy> {
+        policy_with(&DecodeConfig::default())
+    }
+
+    fn flat_logits() -> Vec<f32> {
+        vec![1.0; VOCAB]
+    }
+
+    #[test]
+    fn prompt_is_sot_language_task_notimestamps_for_tiny() -> Result<()> {
+        assert_eq!(policy()?.prompt(), &[50258, 50259, 50359, 50363]);
+        Ok(())
+    }
+
+    #[test]
+    fn every_timestamp_logit_is_negative_infinity_at_every_step() -> Result<()> {
+        let policy = policy()?;
+        let first = policy.timestamp_begin() as usize;
+        assert_eq!(first, 50_364);
+        for step in [0, 1, 7, 219] {
+            let mut logits = flat_logits();
+            policy.filter(&mut logits, step);
+            let masked = logits[first..]
+                .iter()
+                .filter(|v| **v == f32::NEG_INFINITY)
+                .count();
+            assert_eq!(masked, VOCAB - first, "step {step}");
+            assert!(masked > 0);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn always_suppressed_set_is_negative_infinity_at_every_step() -> Result<()> {
+        let policy = policy()?;
+        let generation = read_json("generation_config.json")?;
+        let languages = generation["lang_to_id"].as_object().context("lang_to_id")?;
+        let mut ids: Vec<usize> = vec![50_258, 50_358, 50_359, 50_363];
+        ids.extend(
+            languages
+                .values()
+                .filter_map(|id| id.as_u64())
+                .map(|id| id as usize),
+        );
+        assert!(languages.len() > 90, "tiny lists its language tokens");
+        for step in [0, 3] {
+            let mut logits = flat_logits();
+            policy.filter(&mut logits, step);
+            for id in &ids {
+                assert_eq!(logits[*id], f32::NEG_INFINITY, "id {id} step {step}");
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn end_and_space_tokens_are_suppressed_at_step_zero_only() -> Result<()> {
+        let policy = policy()?;
+        let mut first = flat_logits();
+        policy.filter(&mut first, 0);
+        let mut later = flat_logits();
+        policy.filter(&mut later, 1);
+        assert_eq!(
+            (first[EOT], first[SPACE]),
+            (f32::NEG_INFINITY, f32::NEG_INFINITY)
+        );
+        assert_eq!((later[EOT], later[SPACE]), (1.0, 1.0));
+        let mut unblanked = flat_logits();
+        let relaxed = DecodeConfig {
+            suppress_blank: false,
+            ..DecodeConfig::default()
+        };
+        policy_with(&relaxed)?.filter(&mut unblanked, 0);
+        assert_eq!((unblanked[EOT], unblanked[SPACE]), (1.0, 1.0));
+        Ok(())
+    }
+
+    #[test]
+    fn ties_resolve_to_the_lowest_index() -> Result<()> {
+        let policy = policy()?;
+        let mut logits = flat_logits();
+        for id in [7_000, 400, 100, 30_000] {
+            logits[id] = 9.0;
+        }
+        assert_eq!(policy.pick(&mut logits, 1)?, 100);
+        Ok(())
+    }
+
+    #[test]
+    fn decoding_stops_at_the_220_step_cap_and_the_checkpoint_cap_is_an_override() -> Result<()> {
+        let policy = policy()?;
+        assert_eq!(policy.step_cap(), 220);
+        let mut calls = 0_u32;
+        let decoded = policy.decode::<DecodePolicyError>(|_| {
+            calls += 1;
+            let mut logits = flat_logits();
+            logits[400] = 5.0;
+            Ok(logits)
+        })?;
+        assert_eq!(
+            (decoded.tokens.len(), calls, decoded.ended_on_end_token),
+            (220, 220, false)
+        );
+        let hf = DecodeConfig {
+            use_checkpoint_max_length: true,
+            ..DecodeConfig::default()
+        };
+        assert_eq!(policy_with(&hf)?.step_cap(), 448 - 4);
+        Ok(())
+    }
+
+    #[test]
+    fn end_token_ends_decoding_and_is_kept() -> Result<()> {
+        let policy = policy()?;
+        let decoded = policy.decode::<DecodePolicyError>(|sequence| {
+            let mut logits = flat_logits();
+            logits[EOT] = 9.0;
+            logits[400] = if sequence.len() < 4 + 3 { 10.0 } else { 0.0 };
+            Ok(logits)
+        })?;
+        assert_eq!(decoded.tokens, vec![400, 400, 400, 50_257]);
+        assert!(decoded.ended_on_end_token);
+        Ok(())
+    }
+}
