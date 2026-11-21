@@ -1,0 +1,6 @@
+learning_rate = 0.01
+beta1 = 0.95
+beta2 = 0.999
+epsilon = 1.0e-8
+first_moment_layout = "float32"
+second_moment_layout = "float32"

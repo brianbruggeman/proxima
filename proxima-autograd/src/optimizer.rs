@@ -41,6 +41,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::future::Future;
+#[cfg(feature = "config")]
+use std::path::Path;
 
 use proxima_numeric::{DType, FloatLayout, NumericError, Overflow, Rounding, narrow_to_layout};
 use proxima_primitives::pipe::Pipe;
@@ -280,6 +282,20 @@ impl Default for AdamConfig {
 }
 
 impl AdamConfig {
+    /// Load a TOML/JSON/YAML file and validate the resolved config, the same
+    /// source layering `omega::config::RuntimeConfig::from_file` provides.
+    ///
+    /// # Errors
+    /// [`conflaguration::Error`] when the file does not parse, and
+    /// [`conflaguration::Error::Validation`] naming the field when [`Self`]'s
+    /// `Validate` rejects a value.
+    #[cfg(feature = "config")]
+    pub fn from_file(path: impl AsRef<Path>) -> conflaguration::Result<Self> {
+        let config: Self = conflaguration::from_file(path.as_ref())?;
+        conflaguration::Validate::validate(&config)?;
+        Ok(config)
+    }
+
     /// Rounds a step's `new_m` read-back through [`Self::first_moment_layout`] ([`store_moment`]).
     ///
     /// # Errors

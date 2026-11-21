@@ -9,7 +9,7 @@ use conflaguration::{Settings, Validate};
 use proxima_numeric::{DType, FloatLayout};
 use proxima_tensor::op::{Extent, NodeId, Op};
 
-use crate::optimizer::{AdamOperands, AdamwConfig, OptimizerError, adamw_step, step_input};
+use crate::optimizer::{AdamConfig, AdamOperands, AdamwConfig, OptimizerError, adamw_step, step_input};
 
 const LANES: usize = 8;
 
@@ -154,6 +154,26 @@ fn builder_toml_and_env_agree() {
         .first_moment_layout(FloatLayout::F64)
         .build();
     assert!(wide.validate().is_err(), "a 64-bit layout must be refused");
+}
+
+#[test]
+fn adam_config_from_file_loads_the_shipped_example_and_refuses_a_zero_step_size() {
+    let shipped = concat!(env!("CARGO_MANIFEST_DIR"), "/examples/adam.toml");
+    let loaded = AdamConfig::from_file(shipped).expect("the shipped adam config loads");
+    assert_eq!(loaded.learning_rate, 0.01, "the file value is read");
+    assert_eq!(loaded.beta1, 0.95, "the second file value is read");
+    assert_eq!(loaded.beta2, 0.999, "the file value is read");
+    assert_eq!(loaded.epsilon, 1.0e-8, "the file value is read");
+
+    let directory = tempfile::tempdir().expect("scratch directory");
+    let bad = directory.path().join("bad.toml");
+    std::fs::write(&bad, "learning_rate = 0.0\n").expect("toml written");
+    let refused = AdamConfig::from_file(&bad).expect_err("a zero step size must be refused");
+    let message = refused.to_string();
+    assert!(
+        message.contains("learning_rate"),
+        "the refusal names the offending field: {message}"
+    );
 }
 
 #[test]
