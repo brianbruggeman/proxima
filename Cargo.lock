@@ -4853,6 +4853,7 @@ dependencies = [
  "cudarc",
  "half",
  "libc",
+ "libloading 0.9.0",
  "naga",
  "objc2",
  "objc2-foundation",

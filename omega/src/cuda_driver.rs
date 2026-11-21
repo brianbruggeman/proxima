@@ -4681,7 +4681,6 @@ mod tests {
 
 // ---- ROCm runtime boundary -------------------------------------------------
 
-#[cfg(unix)]
 pub mod rocm {
     //! The ROCm runtime boundary over the HIP half of the [`crate::cuda`] emitter.
     //!
@@ -4736,6 +4735,7 @@ pub mod rocm {
     /// Shared objects the runtime half probes, in order. The versioned names come
     /// first so a host with several ROCm installs resolves the one on its linker
     /// path rather than an arbitrary sibling.
+    #[cfg(not(windows))]
     pub const RUNTIME_LIBRARIES: [&str; 4] = [
         "libamdhip64.so.6",
         "libamdhip64.so",
@@ -4743,8 +4743,44 @@ pub mod rocm {
         "libamdhip64.dylib",
     ];
 
-    /// hipRTC — the runtime compiler the emitter's source needs.
+    /// The HIP runtime DLL on Windows, newest first: `amdhip64_7.dll` (HIP 7),
+    /// `amdhip64_6.dll` (HIP 6, renamed from `amdhip64.dll` as of ROCm 6.1.2) and
+    /// `amdhip64.dll` (5.x). Source: the ROCm on Windows release notes,
+    /// <https://rocm.docs.amd.com/projects/install-on-windows/en/latest/about/releasenotes.html>
+    /// and <https://rocm.docs.amd.com/projects/install-on-windows/en/docs-6.2.4/>.
+    #[cfg(windows)]
+    pub const RUNTIME_LIBRARIES: [&str; 3] = ["amdhip64_7.dll", "amdhip64_6.dll", "amdhip64.dll"];
+
+    /// hipRTC — the runtime compiler the emitter's source needs. On Linux its
+    /// symbols are also exported by `libamdhip64.so`.
+    #[cfg(not(windows))]
     pub const RTC_LIBRARIES: [&str; 3] = ["libhiprtc.so.6", "libhiprtc.so", "libhiprtc.dylib"];
+
+    /// Windows hipRTC: `amdhip64.dll` does not carry the HIPRTC symbols, so
+    /// `hiprtc.dll` (or the versioned `hiprtcXXYY.dll`, XX major and YY minor,
+    /// two digits each: HIP 5.3 is `hiprtc0503.dll`) must be loaded. The
+    /// versioned name is derived from the runtime version by
+    /// [`hiprtc_windows_candidates`]; this is the unversioned fallback. Source:
+    /// <https://rocm.docs.amd.com/projects/HIP/en/latest/how-to/hip_rtc.html>.
+    #[cfg(windows)]
+    pub const RTC_LIBRARIES: [&str; 1] = ["hiprtc.dll"];
+
+    /// The Windows hipRTC names to probe for a runtime that reported `version`
+    /// from `hipRuntimeGetVersion` (HIP's `HIP_VERSION_MAJOR * 10000000 + HIP_VERSION_MINOR * 100000
+    /// + HIP_VERSION_PATCH` encoding, per
+    /// <https://rocm.docs.amd.com/projects/HIP/en/docs-6.1.0/how-to/faq.html>): the
+    /// versioned DLL first, then plain `hiprtc.dll`.
+    #[must_use]
+    pub fn hiprtc_windows_candidates(version: c_int) -> Vec<String> {
+        let major = version / 10_000_000;
+        let minor = (version / 100_000) % 100;
+        let mut names = Vec::new();
+        if major > 0 {
+            names.push(format!("hiprtc{major:02}{minor:02}.dll"));
+        }
+        names.push(String::from("hiprtc.dll"));
+        names
+    }
 
     /// `hipMemcpyHostToDevice`.
     const MEMCPY_HOST_TO_DEVICE: c_int = 1;
@@ -4752,7 +4788,6 @@ pub mod rocm {
     const MEMCPY_DEVICE_TO_HOST: c_int = 2;
     const HIP_SUCCESS: c_int = 0;
     const RTC_SUCCESS: c_int = 0;
-    const RTLD_NOW: c_int = 2;
 
     /// Errors from loading the ROCm runtime, compiling HIP C++, or executing.
     #[derive(Debug, thiserror::Error)]
@@ -4790,23 +4825,6 @@ pub mod rocm {
         GridTooLarge { threads: u64 },
         #[error("smoke input is too large for the launch ABI: {0} elements")]
         InputTooLarge(usize),
-    }
-
-    #[cfg(target_os = "linux")]
-    #[link(name = "dl")]
-    unsafe extern "C" {
-        fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
-        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-        fn dlclose(handle: *mut c_void) -> c_int;
-        fn dlerror() -> *mut c_char;
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    unsafe extern "C" {
-        fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
-        fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-        fn dlclose(handle: *mut c_void) -> c_int;
-        fn dlerror() -> *mut c_char;
     }
 
     type HipInit = unsafe extern "C" fn(u32) -> c_int;
@@ -4850,60 +4868,29 @@ pub mod rocm {
     type RtcWriteText = unsafe extern "C" fn(*mut c_void, *mut c_char) -> c_int;
     type RtcDestroyProgram = unsafe extern "C" fn(*mut *mut c_void) -> c_int;
     type RtcGetErrorString = unsafe extern "C" fn(c_int) -> *const c_char;
+    #[cfg(windows)]
+    type HipRuntimeGetVersion = unsafe extern "C" fn(*mut c_int) -> c_int;
 
-    /// One `dlopen` handle. Kept alive for as long as any symbol resolved from it
-    /// is callable, which is why every device, module and buffer holds an `Arc`
-    /// of the [`HipApi`] that owns it.
-    struct Library(*mut c_void);
+    /// One loaded shared object (`dlopen` on unix, `LoadLibrary` on Windows,
+    /// through `libloading`). Kept alive for as long as any symbol resolved from
+    /// it is callable, which is why every device, module and buffer holds an
+    /// `Arc` of the [`HipApi`] that owns it.
+    #[derive(Debug)]
+    struct Library(libloading::Library);
 
-    impl core::fmt::Debug for Library {
-        fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-            formatter.write_str("Library")
-        }
-    }
-
-    impl Drop for Library {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                // SAFETY: the handle came from `dlopen` and is closed exactly once.
-                unsafe { dlclose(self.0) };
-            }
-        }
-    }
-
-    // SAFETY: a `dlopen` handle is process-global library state, not thread-affine
-    // data, and `dlclose` runs only when the last `Arc` owning it drops.
-    unsafe impl Send for Library {}
-    // SAFETY: see above.
-    unsafe impl Sync for Library {}
-
-    fn last_dl_error() -> String {
-        // SAFETY: `dlerror` returns NULL or a NUL-terminated string owned by libdl.
-        let message = unsafe { dlerror() };
-        if message.is_null() {
-            return String::from("unknown dlopen failure");
-        }
-        // SAFETY: non-NULL pointer from `dlerror`, valid until the next libdl call.
-        unsafe { CStr::from_ptr(message) }
-            .to_string_lossy()
-            .into_owned()
-    }
-
-    fn open_library(
-        candidates: &[&'static str],
+    fn open_library<S: AsRef<str>>(
+        candidates: &[S],
         absent: fn(String) -> HipDriverError,
     ) -> Result<Library, HipDriverError> {
         let mut tried = Vec::new();
         for name in candidates {
-            let Ok(name_c) = CString::new(*name) else {
-                continue;
-            };
-            // SAFETY: `name_c` is NUL-terminated and outlives the call.
-            let handle = unsafe { dlopen(name_c.as_ptr(), RTLD_NOW) };
-            if !handle.is_null() {
-                return Ok(Library(handle));
+            let name = name.as_ref();
+            // SAFETY: loading a library runs its initializers; the names are the
+            // vendor runtime's own, and a failure is reported, never ignored.
+            match unsafe { libloading::Library::new(name) } {
+                Ok(library) => return Ok(Library(library)),
+                Err(error) => tried.push(format!("{name} ({error})")),
             }
-            tried.push(format!("{name} ({})", last_dl_error()));
         }
         Err(absent(tried.join(", ")))
     }
@@ -4913,23 +4900,34 @@ pub mod rocm {
         library_name: &'static str,
         symbol: &'static str,
     ) -> Result<T, HipDriverError> {
-        let Ok(symbol_c) = CString::new(symbol) else {
-            return Err(HipDriverError::MissingSymbol {
+        // SAFETY: the caller names `T` as the exported signature of `symbol`, and
+        // the copied function pointer is only called while the `Library` is held.
+        unsafe { library.0.get::<T>(symbol.as_bytes()) }
+            .map(|address| *address)
+            .map_err(|_| HipDriverError::MissingSymbol {
                 library: library_name,
                 symbol,
-            });
-        };
-        // SAFETY: `library` is open and `symbol_c` is NUL-terminated.
-        let address = unsafe { dlsym(library.0, symbol_c.as_ptr()) };
-        if address.is_null() {
-            return Err(HipDriverError::MissingSymbol {
-                library: library_name,
-                symbol,
-            });
-        }
-        // SAFETY: the caller names `T` as the exported signature of `symbol`; a
-        // function pointer is pointer-sized on every target this crate builds for.
-        Ok(unsafe { core::mem::transmute_copy::<*mut c_void, T>(&address) })
+            })
+    }
+
+    #[cfg(windows)]
+    fn open_rtc(runtime: &Library) -> Result<Library, HipDriverError> {
+        let version = resolve::<HipRuntimeGetVersion>(runtime, "amdhip64", "hipRuntimeGetVersion")
+            .ok()
+            .and_then(|query| {
+                let mut version: c_int = 0;
+                // SAFETY: `version` is a valid out-parameter.
+                (unsafe { query(&mut version) } == HIP_SUCCESS).then_some(version)
+            })
+            .unwrap_or(0);
+        open_library(&hiprtc_windows_candidates(version), |tried| {
+            HipDriverError::RtcNotInstalled { tried }
+        })
+    }
+
+    #[cfg(not(windows))]
+    fn open_rtc(_runtime: &Library) -> Result<Library, HipDriverError> {
+        open_library(&RTC_LIBRARIES, |tried| HipDriverError::RtcNotInstalled { tried })
     }
 
     /// The resolved ROCm entry points, shared by every device, module and buffer.
@@ -4977,7 +4975,7 @@ pub mod rocm {
             let runtime = open_library(&RUNTIME_LIBRARIES, |tried| {
                 HipDriverError::RuntimeNotInstalled { tried }
             })?;
-            let rtc = open_library(&RTC_LIBRARIES, |tried| HipDriverError::RtcNotInstalled { tried })?;
+            let rtc = open_rtc(&runtime)?;
             let runtime_name = "libamdhip64";
             let rtc_name = "libhiprtc";
             Ok(Arc::new(Self {
@@ -5569,10 +5567,23 @@ pub mod rocm {
                 // unexercised and the device test below is the live one
                 Ok(_) => {}
                 Err(HipDriverError::RuntimeNotInstalled { tried }) => {
-                    assert!(tried.contains("libamdhip64"), "tried: {tried}");
+                    assert!(tried.contains("amdhip64"), "tried: {tried}");
                 }
                 Err(other) => panic!("unexpected load error: {other:?}"),
             }
+        }
+
+        #[test]
+        fn the_windows_hiprtc_name_is_derived_from_the_runtime_version_with_a_plain_fallback() {
+            assert_eq!(
+                hiprtc_windows_candidates(50_300_000),
+                vec![String::from("hiprtc0503.dll"), String::from("hiprtc.dll")]
+            );
+            assert_eq!(
+                hiprtc_windows_candidates(60_241_133),
+                vec![String::from("hiprtc0602.dll"), String::from("hiprtc.dll")]
+            );
+            assert_eq!(hiprtc_windows_candidates(0), vec![String::from("hiprtc.dll")]);
         }
 
         #[test]
