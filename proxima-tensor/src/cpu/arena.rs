@@ -806,7 +806,7 @@ pub(super) fn build_static_arena_with_packed(
     let recyclable = recyclable_nodes(&resolved, &dead, &static_nodes, &effective_outputs);
     for computed in &resolved {
         if !recyclable.contains(&computed.node) {
-            buffers[computed.node.0 as usize] = Some(vec![0.0f32; node_output_len(computed)]);
+            buffers[computed.node.0 as usize] = Some(vec![0.0f32; computed.output_len()]);
         }
         // `state_out` (ROW 547, `docs/discipline.md`): `GatedDeltaNet`'s own
         // second output never appears as any resolved node's `.node`, so the
@@ -858,9 +858,9 @@ pub(super) fn build_static_arena_with_packed(
         // round-sibling nodes this fusion dropped from `resolved` never
         // appear as any resolved node's own `.node` either -- size each
         // one's slot here, same length as `round_outputs[0]`'s own
-        // `node_output_len` (every round shares one output shape).
+        // `BoundOp::output_len` (every round shares one output shape).
         if let BoundOpKind::RoundBatchedReduce { round_outputs, .. } = &computed.kind {
-            let round_len = node_output_len(computed);
+            let round_len = computed.output_len();
             for extra_node in round_outputs.iter().skip(1) {
                 buffers[extra_node.0 as usize] = Some(vec![0.0f32; round_len]);
             }
@@ -1393,7 +1393,7 @@ pub(super) fn run_resolved_nodes_in_arena(
             let mut output = output_buffer(
                 &mut arena.buffers[node_index],
                 &mut arena.free_buffers,
-                node_output_len(computed),
+                computed.output_len(),
             );
             #[cfg(feature = "epilogue-profile-probe")]
             let profile_start = std::time::Instant::now();
@@ -1499,7 +1499,7 @@ pub(super) fn run_resolved_nodes_in_arena(
                 let mut output = output_buffer(
                     &mut arena.buffers[consumer_node.0 as usize],
                     &mut arena.free_buffers,
-                    node_output_len(&arena.resolved[consumer_index]),
+                    arena.resolved[consumer_index].output_len(),
                 );
                 let reduce_values = arena.buffers[reduce_node.0 as usize]
                     .as_deref()
@@ -1536,7 +1536,7 @@ pub(super) fn run_resolved_nodes_in_arena(
                 let mut output = output_buffer(
                     &mut arena.buffers[tail_node.0 as usize],
                     &mut arena.free_buffers,
-                    node_output_len(&arena.resolved[cluster.tail_index]),
+                    arena.resolved[cluster.tail_index].output_len(),
                 );
                 let fuse_started = std::time::Instant::now();
                 apply_layer_norm_cluster_fused(

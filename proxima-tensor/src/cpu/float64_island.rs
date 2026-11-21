@@ -49,7 +49,7 @@ pub(super) fn step<B: Deref<Target = [f32]>>(
         if wide.is_empty() {
             wide.resize(program_len, None);
         }
-        let mut output = take_or_allocate(wide_pool, node_output_len(computed));
+        let mut output = take_or_allocate(wide_pool, computed.output_len());
         output.fill(0.0);
         run_wide(computed, buffers, wide, &mut output)?;
         // an f64 constant's literal is an f32, so its f32 copy is exact: a
@@ -90,7 +90,7 @@ fn single_wide_operand<'wide>(
         return None;
     };
     let data = wide.get(source.0 as usize)?.as_deref()?;
-    (data.len() == node_output_len(computed)).then_some(data)
+    (data.len() == computed.output_len()).then_some(data)
 }
 
 fn run_wide<B: Deref<Target = [f32]>>(
@@ -395,7 +395,7 @@ fn run_widened_fold<B: Deref<Target = [f32]>>(
         .map(|&axis| computed.extents[axis as usize])
         .collect();
     let fold_len = if epilogue_broadcast_axes.is_empty() {
-        node_output_len(computed)
+        computed.output_len()
     } else {
         odometer_len(&fold_extents) as usize
     };

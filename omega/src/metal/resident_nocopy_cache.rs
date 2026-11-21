@@ -1719,6 +1719,7 @@ pub(super) fn dispatch(
     pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
     grid: GridSpec,
 ) {
+    // dispatch-layer assertion for non-op callers (prepass, merge, chunk audit); op-level skips use `BoundOp::launches`.
     if grid.threads == 0 {
         return;
     }

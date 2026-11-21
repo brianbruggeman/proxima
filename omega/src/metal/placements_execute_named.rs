@@ -1238,7 +1238,7 @@ pub(super) fn execute_plan_with_placements_inner(
                         .iter()
                         .map(|(node, layout, _lookup)| format!("{}:{:?}", node.0, layout.strides))
                         .collect();
-                    let output_len = bound_output_len(dump_bound).max(1)
+                    let output_len = dump_bound.output_len().max(1)
                         * device_element_bytes(dump_bound.dtype);
                     debug!(
                         plan_shape,
@@ -1278,7 +1278,7 @@ pub(super) fn execute_plan_with_placements_inner(
             let (dest_buffer, dest_offset) = match placement {
                 Some((buffer, offset)) => (buffer.clone(), offset),
                 None => (
-                    allocate_buffer(&device, bound_output_len(bound), bound.dtype)?,
+                    allocate_buffer(&device, bound.output_len(), bound.dtype)?,
                     0,
                 ),
             };
@@ -1366,7 +1366,7 @@ pub(super) fn execute_plan_with_placements_inner(
         if let (Some(target_nodes), Some((buffer, offset))) = (head_debug_target_nodes(), placement)
             && let Some(target_index) = target_nodes.iter().position(|node| *node == bound.node)
         {
-            let byte_length = bound_output_len(bound).max(1) * device_element_bytes(bound.dtype);
+            let byte_length = bound.output_len().max(1) * device_element_bytes(bound.dtype);
             let (_, grid) = kernel_dispatch_shape(bound, packed_operands, plan.numeric_policy, &plan.emit_knobs)?;
             debug!(
                 target_index = target_index as u64,
@@ -1375,7 +1375,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 buffer_pointer = Retained::as_ptr(buffer) as u64,
                 offset = offset as u64,
                 byte_length = byte_length as u64,
-                output_total = bound_output_len(bound) as u64,
+                output_total = bound.output_len() as u64,
                 grid_threads = grid.threads,
                 grid_threadgroup_width = grid.threadgroup_width.unwrap_or(0),
                 grid_depth = grid.depth,
@@ -1406,7 +1406,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 .iter()
                 .any(|(_, copies)| copies.contains(&bound.node))
         {
-            let byte_length = bound_output_len(bound).max(1) * device_element_bytes(bound.dtype);
+            let byte_length = bound.output_len().max(1) * device_element_bytes(bound.dtype);
             chunk_audit_record_write(
                 Retained::as_ptr(buffer) as usize,
                 offset,
@@ -1556,7 +1556,7 @@ pub(super) fn execute_plan_with_placements_inner(
                 let resolved: DeviceBuffer = match placement {
                     Some((buffer, offset)) => (buffer.clone(), offset),
                     None => (
-                        allocate_buffer(&device, bound_output_len(bound), bound.dtype)?,
+                        allocate_buffer(&device, bound.output_len(), bound.dtype)?,
                         0,
                     ),
                 };

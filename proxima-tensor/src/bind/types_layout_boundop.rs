@@ -504,7 +504,7 @@ pub enum BoundOpKind {
         /// bias/residual/gate tail whose own iteration space already equals
         /// `output_axes`'s shape with no further axis to re-broadcast over):
         /// `output_axes` alone already names that epilogue's iteration
-        /// space, so `node_output_len`/`apply_reduce_epilogue`
+        /// space, so `BoundOp::output_len`/`apply_reduce_epilogue`
         /// (`crate::cpu`) walk it unchanged when this is empty. When
         /// non-empty, both instead walk `output_axes` UNION
         /// `epilogue_broadcast_axes` (i.e. `extents` in full), addressing
@@ -741,27 +741,71 @@ impl BoundOpKind {
 pub(super) static EMPTY_BODY: ComposedBody = ComposedBody { steps: Vec::new() };
 
 impl BoundOp {
-    /// The element count of this op's output buffer: the surviving axes of a
-    /// `Keep::Reduce` reduce, the packed `f32` words of a block quantize, else
-    /// the product of [`Self::extents`]. The one definition every backend
-    /// executor reads; none recomputes it.
+    /// The element count of this op's output buffer, in the op's own
+    /// [`Self::dtype`] elements. The one definition every backend executor
+    /// reads (CPU, Metal, CUDA, HIP, wgpu); none recomputes it.
+    ///
+    /// - `CachedAttention`: one `head_dim` vector per `(query row, kv head,
+    ///   query group)`, read from the op's own fields.
+    /// - A `Keep::Reduce` fold or round-batched fold with an `out_scatter`:
+    ///   the surviving axes' product times `out_scatter.extent`, because the
+    ///   scattered axis is excluded from `output_axes` (its position is
+    ///   data-dependent) and its static width survives only there.
+    /// - A `Keep::Reduce` fold or round-batched fold with a non-empty
+    ///   `epilogue_broadcast_axes`: the full `extents` product, since the
+    ///   epilogue re-broadcasts the scalar over the reduced axes.
+    /// - Any other `Keep::Reduce` fold: the product of `output_axes`' extents
+    ///   (one round's shape for a round-batched fold; `round_outputs` are
+    ///   independent single-round buffers).
+    /// - `BlockQuantize`: its `extents` are the packed output byte shape
+    ///   (`[.., blocks * block_bytes]`, dtype `UINT8`), so the length is the
+    ///   extents product in bytes. The op carries a `BlockLayout`
+    ///   (`elements`, `block_bytes`) but no `NumericFormat`; the extents
+    ///   already encode that geometry, and no host word size enters here.
+    /// - Everything else (elementwise, `Keep::Scan`, `GatedDeltaNet`, ...):
+    ///   the product of `extents`.
     #[must_use]
     pub fn output_len(&self) -> usize {
         match &self.kind {
+            BoundOpKind::CachedAttention {
+                query_rows,
+                kv_heads,
+                query_groups,
+                head_dim,
+                ..
+            } => *query_rows as usize * *kv_heads as usize * *query_groups as usize * *head_dim as usize,
             BoundOpKind::Reduce {
                 keep: Keep::Reduce,
                 output_axes,
+                out_scatter: Some(target),
+                ..
+            }
+            | BoundOpKind::RoundBatchedReduce {
+                keep: Keep::Reduce,
+                output_axes,
+                out_scatter: Some(target),
+                ..
+            } => self.axes_product(output_axes) * target.extent as usize,
+            BoundOpKind::Reduce {
+                keep: Keep::Reduce,
+                output_axes,
+                out_scatter: None,
                 epilogue_broadcast_axes,
                 ..
-            } if epilogue_broadcast_axes.is_empty() => output_axes
-                .iter()
-                .map(|axis| self.extents[*axis as usize] as usize)
-                .product(),
-            BoundOpKind::BlockQuantize { .. } => {
-                self.extents.iter().map(|extent| *extent as usize).product::<usize>() / core::mem::size_of::<f32>()
             }
+            | BoundOpKind::RoundBatchedReduce {
+                keep: Keep::Reduce,
+                output_axes,
+                out_scatter: None,
+                epilogue_broadcast_axes,
+                ..
+            } if epilogue_broadcast_axes.is_empty() => self.axes_product(output_axes),
             _ => self.extents.iter().map(|extent| *extent as usize).product(),
         }
+    }
+
+    fn axes_product(&self, axes: &[u16]) -> usize {
+        axes.iter().map(|axis| self.extents[*axis as usize] as usize).product()
     }
 
     /// Whether an executor launches anything for this op. A zero-extent op is
@@ -1168,4 +1212,153 @@ pub(super) struct HeldElementwise {
     pub(super) dtype: DType,
     pub(super) body: ScalarOp,
     pub(super) operands: Vec<(NodeId, IndexMap)>,
+}
+
+#[cfg(test)]
+mod output_len_tests {
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use proxima_numeric::block_layout::BlockLayout;
+    use proxima_numeric::{DType, NumericPolicy};
+
+    use super::*;
+    use crate::bind::bind;
+    use crate::map::{self, IndexMap};
+    use crate::op::{Extent, NodeId, Op, Reduce, ReduceInit, ScalarOp, append};
+    use crate::shape::infer;
+
+    fn bound_sum(keep: Keep) -> BoundOp {
+        let mut program = Vec::new();
+        let source = append(
+            &mut program,
+            Op::Input { dtype: DType::FLOAT32, shape: vec![Extent::Static(4), Extent::Static(8)], name: None },
+        );
+        let folded = append(
+            &mut program,
+            Op::Reduce(Reduce {
+                dtype: DType::FLOAT32,
+                body: ScalarOp::Add,
+                init: ReduceInit::Zero,
+                operand: source,
+                in_map: IndexMap::Affine(map::projection(2, &[0, 1])),
+                out_map: IndexMap::Affine(map::projection(2, &[0])),
+                keep,
+                name: None,
+            }),
+        );
+        let shapes = infer(&program, &[]).expect("a static reduce infers");
+        bind(&program, &shapes, &[folded], NumericPolicy::default())
+            .expect("a static reduce binds")
+            .pop()
+            .expect("the reduce binds to one op")
+    }
+
+    fn scatter_target(extent: u64) -> Lookup {
+        Lookup {
+            indices: NodeId(0),
+            index_layout: Layout { base: 0, strides: Default::default() },
+            element_stride: 1,
+            extent,
+        }
+    }
+
+    fn round_batched(reduce: BoundOp) -> BoundOp {
+        let BoundOpKind::Reduce {
+            element_body, reduce_op, init, keep, operands, output_axes, out_layout, out_scatter, epilogue_body,
+            epilogue_operands, epilogue_broadcast_axes, ..
+        } = reduce.kind
+        else {
+            panic!("the fixture is a reduce");
+        };
+        BoundOp {
+            kind: BoundOpKind::RoundBatchedReduce {
+                element_body, reduce_op, init, keep, operands, output_axes, out_layout, out_scatter, epilogue_body,
+                epilogue_operands, epilogue_broadcast_axes, round_count: 2,
+                round_routes: vec![NodeId(0), NodeId(0)], round_outputs: vec![NodeId(1), NodeId(1)],
+            },
+            ..reduce
+        }
+    }
+
+    fn set_reduce(bound: &mut BoundOp, scatter: Option<Lookup>, broadcast: &[u16]) {
+        if let BoundOpKind::Reduce { out_scatter, epilogue_broadcast_axes, .. }
+        | BoundOpKind::RoundBatchedReduce { out_scatter, epilogue_broadcast_axes, .. } = &mut bound.kind
+        {
+            *out_scatter = scatter;
+            epilogue_broadcast_axes.clear();
+            epilogue_broadcast_axes.extend_from_slice(broadcast);
+        }
+    }
+
+    #[test]
+    fn reduce_fold_is_the_surviving_axes_and_a_scan_is_the_whole_space() {
+        assert_eq!(bound_sum(Keep::Reduce).output_len(), 4);
+        assert_eq!(bound_sum(Keep::Scan).output_len(), 32);
+    }
+
+    #[test]
+    fn broadcast_epilogue_widens_a_fold_back_to_the_whole_space() {
+        let mut fold = bound_sum(Keep::Reduce);
+        set_reduce(&mut fold, None, &[1]);
+        assert_eq!(fold.output_len(), 32);
+    }
+
+    #[test]
+    fn scattered_fold_carries_the_scatter_target_extent_not_the_dropped_axis() {
+        let mut fold = bound_sum(Keep::Reduce);
+        set_reduce(&mut fold, Some(scatter_target(16)), &[]);
+        assert_eq!(fold.output_len(), 4 * 16, "output_axes excludes the scattered axis; its width is out_scatter.extent");
+    }
+
+    #[test]
+    fn round_batched_fold_is_one_round_not_round_count_times() {
+        let mut batched = round_batched(bound_sum(Keep::Reduce));
+        assert_eq!(batched.output_len(), 4);
+        set_reduce(&mut batched, Some(scatter_target(16)), &[]);
+        assert_eq!(batched.output_len(), 64);
+        set_reduce(&mut batched, None, &[1]);
+        assert_eq!(batched.output_len(), 32);
+    }
+
+    #[test]
+    fn cached_attention_is_rows_by_heads_by_groups_by_head_dim() {
+        let attention = BoundOp {
+            node: NodeId(0),
+            dtype: DType::FLOAT32,
+            extents: vec![2, 3, 4, 8],
+            kind: BoundOpKind::CachedAttention {
+                operands: Vec::new(), query_rows: 2, cached_key_rows: 5, new_key_rows: 2, kv_heads: 3, query_groups: 4,
+                head_dim: 8, rotary_dim: 8, scale: 1.0, cached_lower_inclusive: i64::MIN, new_upper_inclusive: 0,
+                arithmetic: crate::bind::CachedAttentionArithmetic::OnlineF32, attention_sink: false,
+            },
+        };
+        assert_eq!(attention.output_len(), 2 * 3 * 4 * 8);
+    }
+
+    #[test]
+    fn block_quantize_is_the_packed_byte_count_of_its_layout() {
+        let layout = BlockLayout::Q8_1;
+        let blocks_per_row = 4_u64;
+        let bytes = blocks_per_row * u64::from(layout.block_bytes);
+        let quantize = BoundOp {
+            node: NodeId(1),
+            dtype: DType::UINT8,
+            extents: vec![3, bytes],
+            kind: BoundOpKind::BlockQuantize {
+                operands: vec![(NodeId(0), Layout { base: 0, strides: [blocks_per_row as i64 * i64::from(layout.elements), 1].into_iter().collect() }, None)],
+                layout: Box::new(layout),
+            },
+        };
+        assert_eq!(quantize.output_len(), 3 * 4 * usize::from(layout.block_bytes));
+        assert!(quantize.launches());
+    }
+
+    #[test]
+    fn zero_extent_op_does_not_launch() {
+        let mut fold = bound_sum(Keep::Scan);
+        fold.extents[0] = 0;
+        assert_eq!(fold.output_len(), 0);
+        assert!(!fold.launches());
+    }
 }

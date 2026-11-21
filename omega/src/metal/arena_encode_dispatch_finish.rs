@@ -154,7 +154,7 @@ pub(super) fn extra_output_nodes(bound: &BoundOp) -> impl Iterator<Item = (NodeI
     };
     let twin = match &bound.kind {
         BoundOpKind::ElementwiseTwin { twin_node, .. } => {
-            Some((*twin_node, bound_output_len(bound)))
+            Some((*twin_node, bound.output_len()))
         }
         _ => None,
     };
@@ -260,7 +260,7 @@ pub(super) fn arena_allocations(
             live_index.insert(bound.node, found.allocations.len());
             found.primary.push(Some(found.allocations.len()));
             found.allocations.push(Allocation {
-                bytes: bound_output_len(bound).max(1) * element_bytes,
+                bytes: bound.output_len().max(1) * element_bytes,
                 first: position,
                 resident,
             });
@@ -385,7 +385,7 @@ pub(super) fn build_buffer_arena(
     let outputs: BTreeSet<NodeId> = plan.prepared.effective_outputs.iter().copied().collect();
     let naive_transient_bytes: usize = resolved
         .iter()
-        .map(|bound| bound_output_len(bound).max(1) * device_element_bytes(bound.dtype))
+        .map(|bound| bound.output_len().max(1) * device_element_bytes(bound.dtype))
         .sum();
     let uniform_bytes: usize = resolved
         .iter()
@@ -1796,7 +1796,7 @@ fn output_snapshot(
     buffer: &MetalBuffer,
     offset: usize,
 ) -> Option<(CaptureCopy, OutputSource)> {
-    let elements = bound_output_len(bound).max(1);
+    let elements = bound.output_len().max(1);
     let bytes = (elements * device_element_bytes(bound.dtype)).min(buffer.length().saturating_sub(offset));
     let destination = buffer
         .device()
@@ -2227,6 +2227,7 @@ fn dispatch_shape(
     pipeline: &ProtocolObject<dyn MTLComputePipelineState>,
     grid: GridSpec,
 ) -> Option<DispatchShape> {
+    // dispatch-layer assertion for non-op callers (prepass, merge, chunk audit); op-level skips use `BoundOp::launches`.
     if grid.threads == 0 {
         return None;
     }
@@ -3793,7 +3794,7 @@ fn record_chunk_audit_dispatch(
     output: (&MetalBuffer, usize),
 ) {
     let position = bound.node.0 as usize;
-    let output_len = bound_output_len(bound).max(1) * device_element_bytes(bound.dtype);
+    let output_len = bound.output_len().max(1) * device_element_bytes(bound.dtype);
     chunk_audit_record_dispatch(
         Retained::as_ptr(output.0) as usize,
         output.1,
@@ -4146,7 +4147,7 @@ pub(super) fn encode_op(
     // contiguous buffer the spliced kernel addresses via `round_gid.z`
     // (`splice_round_batched_reduce_base_table`'s own doc), so round 0's own
     // output slot must be THIS group's own buffer at offset `0`, never a
-    // caller placement or a bare `bound_output_len(bound)`-sized allocation
+    // caller placement or a bare `bound.output_len()`-sized allocation
     // sized for round 0 alone. The routes need no such handling: each round's
     // own route buffer is bound through its own trailing `Binding::Indices`
     // (`bindings`'s doc), so `bind_buffers` and the hazard walk see them.
@@ -4172,7 +4173,7 @@ pub(super) fn encode_op(
         _ => match placement {
             Some((buffer, offset)) => (buffer.clone(), offset),
             None => (
-                allocate_buffer(device, bound_output_len(bound), bound.dtype)?,
+                allocate_buffer(device, bound.output_len(), bound.dtype)?,
                 0,
             ),
         },

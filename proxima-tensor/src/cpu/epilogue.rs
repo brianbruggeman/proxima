@@ -1263,7 +1263,7 @@ pub fn evaluate_named_with_arena_masked(
         let mut output = output_buffer(
             &mut arena.buffers[node_index],
             &mut arena.free_buffers,
-            node_output_len(computed),
+            computed.output_len(),
         );
         run_node_into(
             computed,

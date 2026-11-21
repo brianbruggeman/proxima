@@ -1053,7 +1053,7 @@ pub(super) fn run_prepared_step(
         if !epilogue_fused_away && !island_handled {
             #[cfg(feature = "instrument")]
             let alloc_started = instrument::read_ticks();
-            let mut output = take_or_allocate(free_buffers, node_output_len(computed));
+            let mut output = take_or_allocate(free_buffers, computed.output_len());
             #[cfg(feature = "instrument")]
             {
                 loop_overhead_ticks += instrument::elapsed_ticks(alloc_started);
@@ -1216,7 +1216,7 @@ pub(super) fn run_prepared_step(
                 let consumer = &resolved[consumer_index];
                 super::run_int8_activation_dot::refuse_quantized_activation_reader(consumer, &activation_layouts)?;
                 let reduce_values = buffers[reduce_node.0 as usize].as_deref().unwrap_or(&[]);
-                let mut fused_output = take_or_allocate(free_buffers, node_output_len(consumer));
+                let mut fused_output = take_or_allocate(free_buffers, consumer.output_len());
                 let fuse_started = std::time::Instant::now();
                 apply_epilogue_fused_monomorphic(
                     EpilogueFuseKernel {
@@ -1253,7 +1253,7 @@ pub(super) fn run_prepared_step(
                 };
                 let tail = &resolved[cluster.tail_index];
                 super::run_int8_activation_dot::refuse_quantized_activation_reader(tail, &activation_layouts)?;
-                let mut fused_output = take_or_allocate(free_buffers, node_output_len(tail));
+                let mut fused_output = take_or_allocate(free_buffers, tail.output_len());
                 let fuse_started = std::time::Instant::now();
                 apply_layer_norm_cluster_fused(
                     tail,
@@ -1983,7 +1983,7 @@ pub(super) fn evaluate_pooled(
                 #[cfg(feature = "instrument")]
                 let alloc_site_guard =
                     instrument::AllocSiteGuard::enter(instrument::AllocSite::OutputBuffer);
-                let mut output = take_or_allocate(free_buffers, node_output_len(computed));
+                let mut output = take_or_allocate(free_buffers, computed.output_len());
                 #[cfg(feature = "instrument")]
                 drop(alloc_site_guard);
                 run_node_into(computed, &buffers, None, None, None, false, &mut output)?;
@@ -2359,7 +2359,7 @@ pub(super) fn evaluate_node_parallel<B: Deref<Target = [f32]> + Sync>(
     let alloc_site_guard = instrument::AllocSiteGuard::enter(instrument::AllocSite::OutputBuffer);
     #[cfg(feature = "instrument")]
     let alloc_start = instrument::read_ticks();
-    let mut output = vec![0.0f32; node_output_len(resolved)];
+    let mut output = vec![0.0f32; resolved.output_len()];
     #[cfg(feature = "instrument")]
     counter!(
         instrument::SERIAL_ALLOC_TICKS,
@@ -2492,7 +2492,7 @@ pub(super) fn run_chunks_threaded<B: Deref<Target = [f32]> + Sync>(
     let mut slices = Vec::with_capacity(chunks.len());
     let mut remaining = output;
     for chunk in chunks {
-        let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
+        let (this_chunk, rest) = remaining.split_at_mut(chunk.output_len());
         slices.push(this_chunk);
         remaining = rest;
     }

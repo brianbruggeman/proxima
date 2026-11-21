@@ -6413,7 +6413,7 @@ fn splitting_an_elementwise_node_and_running_its_chunks_matches_the_unsplit_resu
     let mut split_output = vec![0.0f32; unsplit.len()];
     let mut remaining = split_output.as_mut_slice();
     for chunk in &chunks {
-        let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
+        let (this_chunk, rest) = remaining.split_at_mut(chunk.output_len());
         run_node_into(chunk, &buffers, None, None, None, false, this_chunk).expect("chunk runs");
         remaining = rest;
     }
@@ -6449,7 +6449,7 @@ fn splitting_a_fused_matmul_reduction_and_running_its_chunks_matches_the_unsplit
     let mut split_output = vec![0.0f32; unsplit.len()];
     let mut remaining = split_output.as_mut_slice();
     for chunk in &chunks {
-        let (this_chunk, rest) = remaining.split_at_mut(node_output_len(chunk));
+        let (this_chunk, rest) = remaining.split_at_mut(chunk.output_len());
         run_node_into(chunk, &buffers, None, None, None, false, this_chunk).expect("chunk runs");
         remaining = rest;
     }

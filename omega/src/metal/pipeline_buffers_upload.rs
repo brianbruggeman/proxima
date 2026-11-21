@@ -705,7 +705,7 @@ thread_local! {
     /// # Why bucketing (not exact-size keying)
     ///
     /// Decode's cached-attention extent grows every token, so an op whose
-    /// output size tracks it (`bound_output_len` scales with the KV extent)
+    /// output size tracks it (`BoundOp::output_len` scales with the KV extent)
     /// would get a NEW exact key every token under exact-size keying, which
     /// (a) never gets reused again -- an unbounded, one-orphaned-buffer-per-
     /// token leak over a long decode session -- and (b) MISSES every time on

@@ -1345,7 +1345,7 @@ pub(super) fn build_merged_dispatch(
         depth: group.len() as u64,
         grid2d: None,
     };
-    let member_bytes = bound_output_len(leader).max(1) * device_element_bytes(leader.dtype);
+    let member_bytes = leader.output_len().max(1) * device_element_bytes(leader.dtype);
     Ok(Some(MergedDispatch {
         members: group.to_vec(),
         pipeline,
@@ -1648,7 +1648,7 @@ pub(super) fn ensure_round_group_resolved(
         });
     };
     let round_count = round_routes.len();
-    let output_member_bytes = bound_output_len(bound) * device_element_bytes(bound.dtype);
+    let output_member_bytes = bound.output_len() * device_element_bytes(bound.dtype);
     let output_buffer = allocate_buffer_for(
         "merged_output",
         "call",

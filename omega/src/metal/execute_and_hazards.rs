@@ -335,7 +335,7 @@ pub(super) fn execute_plan_inner(
 
     // `metal-buffer-pool` reclaim bookkeeping: which node ids are op OUTPUTS
     // (never block inputs) and their `(bucket, dtype)` pool key -- built once,
-    // off `prepared.resolved`'s own node ids and the same `bound_output_len`/
+    // off `prepared.resolved`'s own node ids and the same `BoundOp::output_len`/
     // `dtype` `allocate_buffer` sizes from inside `encode_op`, run through the
     // IDENTICAL `pool_bucket` function `allocate_buffer` itself uses. That
     // identity is what keeps a reclaimed buffer's stored key equal to its own
@@ -346,7 +346,7 @@ pub(super) fn execute_plan_inner(
         .resolved
         .iter()
         .map(|bound| {
-            let byte_length = bound_output_len(bound).max(1) * device_element_bytes(bound.dtype);
+            let byte_length = bound.output_len().max(1) * device_element_bytes(bound.dtype);
             (bound.node, (pool_bucket(byte_length), bound.dtype))
         })
         .collect();
@@ -1150,7 +1150,7 @@ pub type PlacedBuffer = Retained<ProtocolObject<dyn MTLBuffer>>;
 /// the buffer is dropped. Mirrors `allocate_buffer`'s own device call,
 /// public and un-sized-to-an-op because a placed buffer's size is the
 /// caller's own layout decision (e.g. a whole KV-cache page), not one op's
-/// `bound_output_len`.
+/// `BoundOp::output_len`.
 ///
 /// # Errors
 /// Propagates a Metal device/driver failure to allocate.
@@ -1948,7 +1948,7 @@ pub(super) fn hazard_node_bytes(
     }
     for bound in &prepared.resolved {
         let element_bytes = device_element_bytes(bound.dtype);
-        note(bound.node, bound_output_len(bound).max(1) * element_bytes);
+        note(bound.node, bound.output_len().max(1) * element_bytes);
         for (extra_node, element_count) in extra_output_nodes(bound) {
             note(extra_node, element_count.max(1) * element_bytes);
         }
@@ -1959,7 +1959,7 @@ pub(super) fn hazard_node_bytes(
 /// Bytes `bound`'s primary output buffer holds, the extent every write to it
 /// is recorded over.
 pub(super) fn hazard_output_bytes(bound: &BoundOp) -> usize {
-    bound_output_len(bound).max(1) * device_element_bytes(bound.dtype)
+    bound.output_len().max(1) * device_element_bytes(bound.dtype)
 }
 
 /// One access's [`HazardId`]: `bytes` from [`hazard_node_bytes`] when the node
@@ -2330,7 +2330,7 @@ pub(super) fn register_skipped_output(
     let (buffer, offset) = match placement {
         Some((buffer, offset)) => (buffer.clone(), offset),
         None => (
-            allocate_buffer(device, bound_output_len(bound), bound.dtype)?,
+            allocate_buffer(device, bound.output_len(), bound.dtype)?,
             0,
         ),
     };

@@ -7,7 +7,7 @@ pub(super) fn run_node(
     resolved: &BoundOp,
     buffers: &[Option<Vec<f32>>],
 ) -> Result<Vec<f32>, TensorError> {
-    let mut output = vec![0.0f32; node_output_len(resolved)];
+    let mut output = vec![0.0f32; resolved.output_len()];
     run_node_into(resolved, buffers, None, None, None, false, &mut output)?;
     Ok(output)
 }
@@ -41,7 +41,7 @@ pub fn evaluate_bound_f32_into(
             });
         }
     }
-    let expected = node_output_len(resolved);
+    let expected = resolved.output_len();
     if output.len() != expected {
         return Err(TensorError::InputSizeMismatch {
             node: resolved.node,
@@ -1488,107 +1488,6 @@ pub(super) fn run_iota(output: &mut [f32]) -> Result<(), TensorError> {
     Ok(())
 }
 
-/// The output length [`run_node_into`] expects from `resolved`: the full
-/// iteration space for an elementwise node or a `Keep::Scan` scan (neither
-/// drops any dim), or the reduced (leading dims x width) shape for a
-/// `Keep::Reduce` fold.
-pub(super) fn node_output_len(resolved: &BoundOp) -> usize {
-    match &resolved.kind {
-        BoundOpKind::CachedAttention { .. } => {
-            let (query_rows, kv_heads, query_groups, head_dim) = match &resolved.kind {
-                BoundOpKind::CachedAttention {
-                    query_rows,
-                    kv_heads,
-                    query_groups,
-                    head_dim,
-                    ..
-                } => (*query_rows, *kv_heads, *query_groups, *head_dim),
-                _ => unreachable!("cached-attention output shape match is exhaustive"),
-            };
-            query_rows as usize * kv_heads as usize * query_groups as usize * head_dim as usize
-        }
-        BoundOpKind::GatedDeltaNet { .. } => element_count(&resolved.extents),
-        // `output_axes` excludes the scattered axis entirely (its position
-        // is data-dependent, never a pure projection — see
-        // `bind::pure_projection_axes`), so the ordinary leading/width
-        // product below would silently drop that axis from the length.
-        // `out_scatter.extent` is the one place that axis's static width
-        // survives past shape inference (`bind::build_reduce_op`'s doc).
-        BoundOpKind::Reduce {
-            keep: Keep::Reduce,
-            output_axes,
-            out_scatter: Some(target),
-            ..
-        } => {
-            let non_scattered_product: u64 = output_axes
-                .iter()
-                .map(|dim| resolved.extents[*dim as usize])
-                .product();
-            non_scattered_product as usize * target.extent as usize
-        }
-        // A non-empty `epilogue_broadcast_axes` (the "broadcast-reduce"
-        // epilogue shape — see `bind::BoundOpKind::Reduce::epilogue_
-        // broadcast_axes`'s own doc) re-broadcasts the fold's scalar back
-        // over an axis the fold itself reduced away, so the MATERIALIZED
-        // output this op writes is the full `extents` product, not just the
-        // fold's own smaller `output_axes` shape — `apply_reduce_epilogue`
-        // walks that same full space.
-        BoundOpKind::Reduce {
-            keep: Keep::Reduce,
-            out_scatter: None,
-            epilogue_broadcast_axes,
-            ..
-        } if !epilogue_broadcast_axes.is_empty() => element_count(&resolved.extents),
-        BoundOpKind::Reduce {
-            keep: Keep::Reduce,
-            output_axes,
-            out_scatter: None,
-            ..
-        } => {
-            let (leading_output_axes, last_output_dim) = output_axes_split(output_axes.as_slice());
-            let leading_product: u64 = leading_output_axes
-                .iter()
-                .map(|dim| resolved.extents[*dim as usize])
-                .product();
-            let width = last_output_dim.map_or(1, |dim| resolved.extents[dim as usize] as usize);
-            leading_product as usize * width
-        }
-        // Mirrors the `Reduce` arm directly above -- one round's own output
-        // shape, exactly what round 0's own `Reduce` had before
-        // `bind::apply_moe_round_group_fusion` re-kinded it. `round_count`
-        // never widens this: each of `round_outputs`'s buffers is an
-        // independent, single-round-shaped allocation (this variant's own
-        // doc), not one `round_count`-times-wider buffer.
-        BoundOpKind::RoundBatchedReduce {
-            keep: Keep::Reduce,
-            output_axes,
-            out_scatter: None,
-            ..
-        } => {
-            let (leading_output_axes, last_output_dim) = output_axes_split(output_axes.as_slice());
-            let leading_product: u64 = leading_output_axes
-                .iter()
-                .map(|dim| resolved.extents[*dim as usize])
-                .product();
-            let width = last_output_dim.map_or(1, |dim| resolved.extents[dim as usize] as usize);
-            leading_product as usize * width
-        }
-        BoundOpKind::RoundBatchedReduce {
-            keep: Keep::Reduce,
-            output_axes,
-            out_scatter: Some(target),
-            ..
-        } => {
-            let non_scattered_product: u64 = output_axes
-                .iter()
-                .map(|dim| resolved.extents[*dim as usize])
-                .product();
-            non_scattered_product as usize * target.extent as usize
-        }
-        _ => element_count(&resolved.extents),
-    }
-}
-
 /// The execution stage: a [`Pipe`] over a batch of ready [`BoundOp`]
 /// nodes — exactly the batch one upstream [`crate::bind::BoundOpBuilder`]
 /// push readies.
@@ -1668,7 +1567,7 @@ impl<'buffers, B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Interpreter<'bu
             if self.fold_island(resolved)? {
                 continue;
             }
-            let mut output = vec![0.0f32; node_output_len(resolved)];
+            let mut output = vec![0.0f32; resolved.output_len()];
             // `state_out` (ROW 547, `docs/discipline.md`): `GatedDeltaNet`'s
             // own second output. `Vec::new()` costs nothing until
             // `run_gated_delta_net` actually fills it (every other kind
@@ -1768,7 +1667,7 @@ impl<B: Deref<Target = [f32]> + Sync + From<Vec<f32>>> Pipe for Interpreter<'_, 
 }
 
 /// A fold's `output_axes`, split into the leading (outer) dims and the
-/// innermost one (if any) — shared by [`run_reduce`] and [`node_output_len`]
+/// innermost one (if any) — shared by [`run_reduce`] and `BoundOp::output_len`
 /// so the two agree on shape by construction.
 pub(super) fn output_axes_split(output_axes: &[u16]) -> (&[u16], Option<u16>) {
     match output_axes.split_last() {

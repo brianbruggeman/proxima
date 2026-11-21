@@ -369,12 +369,22 @@ struct PoolSchedule {
     peak: BTreeMap<usize, usize>,
 }
 
+/// The `f32` words the device buffer for `bound` holds. A `BlockQuantize` output is `UINT8`
+/// bytes (`BoundOp::output_len`) that this driver stores packed into `f32` words, which
+/// `cuda::block_quantize::servable_layout` guarantees by requiring word-sized blocks.
+fn device_words(bound: &BoundOp) -> usize {
+    match &bound.kind {
+        BoundOpKind::BlockQuantize { .. } => bound.output_len() / core::mem::size_of::<f32>(),
+        _ => bound.output_len(),
+    }
+}
+
 impl PoolSchedule {
     fn build(resolved: &[BoundOp], kernels: &[CudaKernel], outputs: &[NodeId]) -> Self {
         let plan = ReleasePlan::build(resolved, kernels, outputs);
         let produced: Vec<(NodeId, usize)> = resolved
             .iter()
-            .map(|bound| (bound.node, bound.output_len()))
+            .map(|bound| (bound.node, device_words(bound)))
             .collect();
         let peak = plan.pool_shape(&produced);
         Self { plan, peak }
@@ -383,7 +393,7 @@ impl PoolSchedule {
     fn relength(&mut self, resolved: &[BoundOp]) {
         let produced: Vec<(NodeId, usize)> = resolved
             .iter()
-            .map(|bound| (bound.node, bound.output_len()))
+            .map(|bound| (bound.node, device_words(bound)))
             .collect();
         self.peak = self.plan.pool_shape(&produced);
     }
@@ -2846,7 +2856,7 @@ impl CudaPlan {
         }
         for (bound, uniform) in self.resolved.iter().zip(&self.uniforms) {
             let bytes = match &bound.kind {
-                BoundOpKind::BlockQuantize { .. } => bound.output_len() as u64 * 4,
+                BoundOpKind::BlockQuantize { .. } => device_words(bound) as u64 * 4,
                 _ => cuda_float_bytes(self.shapes.of(bound.node))?,
             };
             let pooled = release_plan.pooled.contains(&bound.node);
@@ -3647,7 +3657,7 @@ impl CudaPlan {
                     kernel.bindings
                 );
             }
-            let output_len = bound.output_len();
+            let output_len = device_words(bound);
             if trace {
                 eprintln!(
                     "cuda_trace: node={:?} kind={} extents={:?} bindings={:?} grid={} output_len={} uniforms={} detail={}",

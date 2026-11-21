@@ -350,7 +350,7 @@ impl Plan {
                 .iter()
                 .try_fold(1_u64, |total, extent| checked_bytes(total, *extent))?;
             checked_bytes(elements.max(1), 4)?;
-            let output = allocation_capacity(bound_output_len(bound), DType::FLOAT32)? as u64;
+            let output = allocation_capacity(bound.output_len(), DType::FLOAT32)? as u64;
             let uniform = pack_uniforms_byte_len(bound, self.numeric_policy, &self.emit_knobs).max(1) as u64;
             for physical in [output, uniform] {
                 check_limit("max_buffer_length", physical, Some(hardware_limit))?;

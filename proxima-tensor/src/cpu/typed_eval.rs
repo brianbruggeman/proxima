@@ -878,7 +878,7 @@ pub(super) fn run_typed_program<T: Element>(
     let retires = node_retirement(&resolved, &effective_outputs);
     let mut free_buffers: Vec<Vec<T>> = Vec::new();
     for (position, node) in resolved.iter().enumerate() {
-        let mut output = typed_take_or_allocate(&mut free_buffers, node_output_len(node));
+        let mut output = typed_take_or_allocate(&mut free_buffers, node.output_len());
         match &node.kind {
             BoundOpKind::CachedAttention { .. } => {
                 return Err(TensorError::NotLowerable {
@@ -1073,7 +1073,7 @@ where
 
     for (position, node) in resolved.iter().enumerate() {
         if node.dtype == TIn::DTYPE {
-            let mut output = typed_take_or_allocate(&mut free_in, node_output_len(node));
+            let mut output = typed_take_or_allocate(&mut free_in, node.output_len());
             match &node.kind {
                 BoundOpKind::CachedAttention { .. } => {
                     return Err(TensorError::NotLowerable {
@@ -1156,7 +1156,7 @@ where
                     buffers_out[source.0 as usize] = Some(Cow::Owned(widened));
                 }
             }
-            let mut output = typed_take_or_allocate(&mut free_out, node_output_len(node));
+            let mut output = typed_take_or_allocate(&mut free_out, node.output_len());
             match &node.kind {
                 BoundOpKind::CachedAttention { .. } => {
                     return Err(TensorError::NotLowerable {

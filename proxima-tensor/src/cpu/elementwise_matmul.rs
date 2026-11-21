@@ -1547,7 +1547,7 @@ pub(super) fn run_staged_batch(
 ) -> Result<(), TensorError> {
     let mut run_outputs: Vec<Vec<f32>> = run
         .iter()
-        .map(|node| take_or_allocate(free_buffers, node_output_len(node)))
+        .map(|node| take_or_allocate(free_buffers, node.output_len()))
         .collect();
     let buffers_ref: &[Option<Cow<'_, [f32]>>] = buffers;
 

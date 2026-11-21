@@ -715,55 +715,6 @@ pub(super) fn promote_output_placed_nodes(
     }
 }
 
-/// The output length an op needs allocated: the reduced (product of
-/// surviving axes) length for a `Keep::Reduce` reduce, or the full
-/// iteration space otherwise (elementwise and `Keep::Scan` both write one
-/// value per coordinate). Deliberately independent of [`Kernel::grid`]'s
-/// thread count — a `Keep::Scan` scan dispatches one thread per *line* but
-/// writes `inner_len` values per thread, so grid threads and output length
-/// diverge there.
-///
-/// A non-empty `epilogue_broadcast_axes` (`bind::BoundOpKind::Reduce::
-/// epilogue_broadcast_axes`'s own doc, `proxima_tensor::cpu`'s own
-/// `node_output_len` mirrors this same widening) re-broadcasts the fold's
-/// scalar back over the axes it reduced away, so the MATERIALIZED output is
-/// the full `extents` product, not just `output_axes`'s smaller fold shape —
-/// falls through to the same full-iteration-space arm every other kind
-/// takes.
-pub(super) fn bound_output_len(bound: &BoundOp) -> usize {
-    match &bound.kind {
-        BoundOpKind::Reduce {
-            keep: Keep::Reduce,
-            output_axes,
-            epilogue_broadcast_axes,
-            ..
-        }
-        // A round-batched fold's own `round_outputs[0]` is round 0's own
-        // reduce output -- the identical `output_axes`-projected length its
-        // `BoundOpKind::Reduce` sibling arm above computes, never the wider
-        // pre-reduction `extents` product the fallback arm below assumes.
-        // Without this arm, `encode_op`'s own unplaced fallback allocation
-        // (`allocate_buffer(device, bound_output_len(bound), ..)`) over-
-        // allocates by the reduced axis's own factor -- wasteful, not
-        // unsound, but still the wrong number for anything that reads this
-        // length as this op's true output size (`ensure_round_group_resolved`'s
-        // own `output_member_bytes`).
-        | BoundOpKind::RoundBatchedReduce {
-            output_axes,
-            epilogue_broadcast_axes,
-            ..
-        } if epilogue_broadcast_axes.is_empty() => output_axes
-            .iter()
-            .map(|axis| bound.extents[*axis as usize] as usize)
-            .product(),
-        _ => bound
-            .extents
-            .iter()
-            .map(|extent| *extent as usize)
-            .product(),
-    }
-}
-
 pub(super) fn push_i64(bytes: &mut Vec<u8>, value: i64) {
     bytes.extend_from_slice(&value.to_ne_bytes());
 }
