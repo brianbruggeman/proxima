@@ -21,6 +21,15 @@ engine — no SPDK dependency) are frontier surfaces, not the start-here
 path. Config-driven throughout — one spec drives the library, the CLI, and an MCP
 (Model Context Protocol) control plane; dependencies can be faked, recorded, or replayed.
 
+**The protocol surface.** Twenty-plus wire protocols, each a sans-IO codec plus a
+transport: HTTP/1, HTTP/2 (+HPACK), HTTP/3 (+QPACK), QUIC, WebSocket, gRPC
+framing, protobuf wire, DNS, Kafka, Redis, PgWire, Memcached, MQTT, AMQP, PROXY
+protocol, JSON-RPC, JSON framing, Ethernet/IPv4/TCP, NVMe, virtio, and process.
+The codecs live in `proxima-protocols` (one feature-gated module each); the
+clients and listeners live in `proxima-http`, `proxima-quic`, `proxima-kafka`,
+and siblings. Every codec has a criterion bench; the full matrix is
+[`docs/protocols.md`](docs/protocols.md).
+
 ## learn proxima
 
 Start with the **example curriculum** — a scope-and-sequence where each rung

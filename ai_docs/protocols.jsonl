@@ -1,0 +1,26 @@
+{"protocol":"HTTP/1","module":"http1_codec","kind":"protocol","feature":"http1_codec","transport":"proxima-http","bench":"bench_http1_codec_trait","status":"codec","last_result":"2026-07"}
+{"protocol":"HTTP/2","module":"http2_codec","kind":"protocol","feature":"http2_codec","transport":"proxima-http","bench":"bench_http2_codec_trait","status":"codec","last_result":"2026-07"}
+{"protocol":"HPACK","module":"hpack","kind":"protocol","feature":"hpack","transport":"proxima-http","bench":"hpack_block, hpack_decode_into, hpack_huffman, hpack_integer, hpack_static_table, bench_hpack_codec_trait","status":"codec","last_result":""}
+{"protocol":"HTTP/3 + QPACK","module":"http3_codec","kind":"protocol","feature":"http3_codec","transport":"proxima-http","bench":"bench_http3_codec_trait","status":"codec","last_result":""}
+{"protocol":"QUIC","module":"quic","kind":"protocol","feature":"quic","transport":"proxima-quic","bench":"quic_bench_c1..c15, quic_bench_codec_trait","status":"codec","last_result":""}
+{"protocol":"WebSocket frame","module":"websocket_frame","kind":"protocol","feature":"websocket_frame","transport":"proxima-http","bench":"bench_websocket_frame, bench_websocket_frame_codec_trait","status":"codec","last_result":""}
+{"protocol":"WebSocket handshake","module":"websocket_handshake","kind":"protocol","feature":"websocket_handshake","transport":"proxima-http","bench":"","status":"codec","last_result":""}
+{"protocol":"gRPC framing","module":"grpc_framing","kind":"protocol","feature":"grpc_framing","transport":"proxima-http","bench":"bench_grpc_framing, bench_grpc_framing_codec_trait","status":"codec","last_result":""}
+{"protocol":"protobuf wire","module":"protobuf_wire","kind":"protocol","feature":"protobuf_wire","transport":"","bench":"bench_protobuf_wire, bench_protobuf_wire_codec_trait","status":"codec","last_result":""}
+{"protocol":"JSON-RPC","module":"jsonrpc","kind":"protocol","feature":"jsonrpc","transport":"proxima-http","bench":"","status":"codec","last_result":""}
+{"protocol":"JSON framing","module":"json_framing","kind":"protocol","feature":"json_framing","transport":"proxima-http","bench":"","status":"codec","last_result":""}
+{"protocol":"Redis","module":"redis","kind":"protocol","feature":"redis","transport":"proxima-redis","bench":"bench_redis","status":"codec","last_result":""}
+{"protocol":"Memcached","module":"memcached","kind":"protocol","feature":"memcached","transport":"proxima-memcached","bench":"bench_memcached, bench_memcached_frame_ownership","status":"codec","last_result":""}
+{"protocol":"Kafka","module":"kafka","kind":"protocol","feature":"kafka","transport":"proxima-kafka","bench":"bench_kafka","status":"codec","last_result":""}
+{"protocol":"MQTT","module":"mqtt","kind":"protocol","feature":"mqtt","transport":"proxima-mqtt","bench":"bench_mqtt","status":"codec","last_result":""}
+{"protocol":"AMQP","module":"amqp","kind":"protocol","feature":"amqp","transport":"proxima-amqp","bench":"bench_amqp","status":"codec","last_result":""}
+{"protocol":"PgWire","module":"pgwire_codec","kind":"protocol","feature":"pgwire_codec","transport":"proxima-pgwire","bench":"bench_pgwire_codec","status":"codec","last_result":""}
+{"protocol":"DNS","module":"dns","kind":"protocol","feature":"dns","transport":"proxima-dns","bench":"bench_dns","status":"codec","last_result":""}
+{"protocol":"Ethernet/IPv4/TCP","module":"inet","kind":"protocol","feature":"inet","transport":"proxima-net","bench":"","status":"codec","last_result":""}
+{"protocol":"TCP FSM","module":"tcp","kind":"protocol","feature":"tcp","transport":"proxima-net","bench":"","status":"codec","last_result":""}
+{"protocol":"NVMe","module":"nvme","kind":"protocol","feature":"nvme","transport":"","bench":"bench_nvme_codec","status":"codec","last_result":""}
+{"protocol":"virtio","module":"virtio","kind":"protocol","feature":"virtio","transport":"tools/proxima-vm","bench":"","status":"codec","last_result":""}
+{"protocol":"process protocol","module":"process","kind":"protocol","feature":"process","transport":"proxima-process","bench":"","status":"codec","last_result":""}
+{"protocol":"PROXY protocol","module":"proxy_protocol","kind":"protocol","feature":"proxy_protocol","transport":"proxima-listen","bench":"","status":"codec","last_result":""}
+{"protocol":"codec to Pipe adapter","module":"codec_pipe","kind":"support","feature":"codec-pipe","transport":"","bench":"","status":"support","last_result":""}
+{"protocol":"QUIC/TCP time","module":"time","kind":"support","feature":"quic, tcp","transport":"","bench":"","status":"support","last_result":""}

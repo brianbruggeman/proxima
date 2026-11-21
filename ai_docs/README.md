@@ -44,6 +44,8 @@ resolve to the prose that owns the rule.
 - `task-routes.jsonl` - task-specific read plans and done criteria.
 - `invariants.jsonl` - decisions, failures, and open questions, with
   their evidence. Not rules.
+- `protocols.jsonl` - the protocol surface, one record per codec
+  (generated from `proxima-protocols/src/inventory.rs`).
 - `examples-index.jsonl` - the combinator vocabulary and where each
   example lives.
 - `projections/` - long-form readable documents for a named audience

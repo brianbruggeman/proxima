@@ -15,6 +15,7 @@ repository. Read this file first. It is the entry point; the detail lives in
 | `.claude/skills/conflag/SKILL.md` | `conflaguration` config across the tier matrix — the `Settings`+`Builder` house pattern and the build-time `sized` constants. |
 | `.claude/skills/disciplined-component/SKILL.md` | Bench-driven greenfield primitives: default-off flag, baselines, discipline log. |
 | `.claude/skills/bench-metrics/SKILL.md` | The signals a benchmark must capture. Throughput alone is not a benchmark. |
+| `docs/protocols.md` | The protocol surface: 20+ sans-IO codecs, their features, transport crates, benches, and last recorded result. Generated from `proxima-protocols/src/inventory.rs`. |
 | `.claude/agents/` | The specialist workers (architect, critic, judge, debugger, integrator, migrator, security, test-writer, bencher, concentrator, teacher). |
 
 Claude Code loads `.claude/agents/` and `.claude/skills/` automatically. Other
