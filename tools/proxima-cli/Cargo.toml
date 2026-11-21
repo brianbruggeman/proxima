@@ -23,7 +23,9 @@ path = "src/daemon.rs"
 [features]
 vm = ["proxima/vm"]
 # builds the HIP driver into the binary: `OMEGA_GPU_DRIVER=hip` (and `OMEGA_HIP_WAVE`) then select it through omega's RuntimeConfig
-hip = ["proxima-model-interop/hip"]
+hip = ["proxima-model-interop/hip", "proxima-omega/cuda-driver"]
+# builds omega's Metal driver in, so `OMEGA_ENGINE=gpu OMEGA_GPU_DRIVER=metal` runs /tensor/run on the GPU
+metal = ["proxima-omega/metal"]
 
 [dependencies]
 proxima-numeric = { version = "0.1.0", path = "../../proxima-numeric" }
@@ -40,6 +42,7 @@ proxima-telemetry = { workspace = true, features = ["emit", "std"] }
 proxima-model-interop = { version = "0.1.0", path = "../../proxima-model-interop", features = ["std"] }
 proxima-tensor = { workspace = true, features = ["std", "config"] }
 proxima-safetensors = { version = "0.1.0", path = "../../proxima-safetensors" }
+proxima-omega = { version = "0.1.0", path = "../../omega", default-features = false, features = ["cpu", "std"] }
 
 [dev-dependencies]
 proxima = { workspace = true, features = ["test-support-tokio"] }

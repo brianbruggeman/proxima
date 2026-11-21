@@ -8,19 +8,44 @@ use crate::cpu;
 use crate::error::TensorError;
 use crate::op::{NodeId, Op};
 
-type NamedTensor = (String, Vec<u64>, Vec<f32>);
+/// One plan output: its declared name, shape and values.
+pub type NamedTensor = (String, Vec<u64>, Vec<f32>);
+
+/// A plan lowered for a backend: the ops, each bound input as `(name, values)`
+/// and the output nodes in declaration order.
+pub type PlanParts<'a> = (Vec<Op>, Vec<(&'a str, &'a [f32])>, Vec<NodeId>);
 
 impl ProgramSpec {
     /// Evaluates the plan on the cpu. Each `[[bind]]` takes its tensor from
     /// `inputs` by the bind's `name`; each `[[output]]` returns
     /// `(name, shape, values)` in declaration order.
     pub fn evaluate_cpu(&self, inputs: &[(&str, &[f32])]) -> Result<Vec<NamedTensor>, TensorError> {
+        let (program, named, outputs) = self.plan_parts(inputs)?;
+        let evaluated = cpu::evaluate_named(&program, &[], &named, &outputs)?;
+        self.collect_outputs(&evaluated)
+    }
+
+    /// Validates and lowers the plan for a backend other than the cpu
+    /// evaluator: the ops, the bound inputs and the output nodes.
+    ///
+    /// # Errors
+    /// [`TensorError::InvalidPlan`] when validation fails, and the lowering
+    /// errors for an unbound or unnamed input or an unknown output node.
+    pub fn plan_parts<'a>(&'a self, inputs: &[(&str, &'a [f32])]) -> Result<PlanParts<'a>, TensorError> {
         self.validate()
             .map_err(|error| TensorError::InvalidPlan(error.to_string()))?;
         let program = Vec::<Op>::try_from(self)?;
         let named = self.bound_inputs(inputs)?;
         let outputs = self.output_nodes()?;
-        let evaluated = cpu::evaluate_named(&program, &[], &named, &outputs)?;
+        Ok((program, named, outputs))
+    }
+
+    /// Reads each declared `[[output]]` out of `evaluated`, in declaration order.
+    ///
+    /// # Errors
+    /// [`TensorError::UnknownOutput`] when an output node was not evaluated.
+    pub fn collect_outputs(&self, evaluated: &cpu::Evaluated) -> Result<Vec<NamedTensor>, TensorError> {
+        let outputs = self.output_nodes()?;
         self.outputs
             .iter()
             .zip(&outputs)

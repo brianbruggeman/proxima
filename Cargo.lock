@@ -4209,6 +4209,7 @@ dependencies = [
  "proxima-lib",
  "proxima-model-interop",
  "proxima-numeric",
+ "proxima-omega",
  "proxima-safetensors",
  "proxima-telemetry",
  "proxima-tensor",

@@ -5,7 +5,10 @@ use proxima::{
     Bytes, PipeHandle, ProximaError, Request, Response, RoutingPipe, SendPipe, into_handle,
 };
 use proxima_cli::tensor_wire::{TensorRecord, decode_request, encode_response};
+use omega::backend::{execute_plan_named, plan_named_with_config};
+use omega::config::RuntimeConfig;
 use proxima_telemetry::info;
+use proxima_tensor::QuantizedBlock;
 use proxima_tensor::spec::ProgramSpec;
 
 const TENSOR_RUN_PATH: &str = "/tensor/run";
@@ -53,10 +56,36 @@ fn evaluate_body(body: &[u8]) -> Result<(usize, Vec<TensorRecord>), String> {
         .iter()
         .map(|(name, _, values)| (name.as_str(), values.as_slice()))
         .collect();
-    let outputs = spec
-        .evaluate_cpu(&inputs)
-        .map_err(|error| format!("plan did not evaluate: {error}"))?;
+    let config = RuntimeConfig::from_env()
+        .map_err(|error| format!("omega runtime configuration is invalid: {error}"))?;
+    let outputs = evaluate(&spec, &inputs, &config)?;
     Ok((inputs.len(), outputs))
+}
+
+/// Runs the plan on the cpu evaluator unless `config` selects the gpu engine, in
+/// which case omega plans and executes it on the configured driver.
+fn evaluate(spec: &ProgramSpec, inputs: &[(&str, &[f32])], config: &RuntimeConfig) -> Result<Vec<TensorRecord>, String> {
+    if config.engine == "gpu" {
+        return evaluate_through_omega(spec, inputs, config);
+    }
+    spec.evaluate_cpu(inputs)
+        .map_err(|error| format!("plan did not evaluate: {error}"))
+}
+
+fn evaluate_through_omega(spec: &ProgramSpec, inputs: &[(&str, &[f32])], config: &RuntimeConfig) -> Result<Vec<TensorRecord>, String> {
+    let (program, bound, outputs) = spec
+        .plan_parts(inputs)
+        .map_err(|error| format!("plan did not evaluate: {error}"))?;
+    let named: Vec<(&str, QuantizedBlock<'_>)> = bound
+        .iter()
+        .map(|(name, values)| (*name, QuantizedBlock::Float32(values)))
+        .collect();
+    let (mut plan, _) = plan_named_with_config(config, &program, &[], &named, &outputs)
+        .map_err(|error| format!("omega could not plan the program: {error}"))?;
+    let evaluated = execute_plan_named(&mut plan, &named)
+        .map_err(|error| format!("omega could not run the program: {error}"))?;
+    spec.collect_outputs(&evaluated)
+        .map_err(|error| format!("plan did not evaluate: {error}"))
 }
 
 pub fn mount(fallback: PipeHandle) -> PipeHandle {
@@ -78,7 +107,9 @@ mod tests {
     use proxima_tensor::spec::ProgramSpec;
     use proxima_tensor::test_support::Lcg;
 
-    use super::{SAFETENSORS_CONTENT_TYPE, TensorRunPipe, mount};
+    use omega::config::RuntimeConfig;
+
+    use super::{SAFETENSORS_CONTENT_TYPE, TensorRunPipe, evaluate, evaluate_through_omega, mount};
 
     const PLAN_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -96,6 +127,60 @@ mod tests {
         let x: Vec<f32> = (0..8).map(|_| lcg.next_unit() - 0.5).collect();
         let w: Vec<f32> = (0..12).map(|_| lcg.next_unit() - 0.5).collect();
         (x, w)
+    }
+
+    fn assert_outputs_agree(omega_outputs: &[(String, Vec<u64>, Vec<f32>)], cpu_outputs: &[(String, Vec<u64>, Vec<f32>)], tolerance: f32) {
+        assert_eq!(omega_outputs.len(), cpu_outputs.len(), "one output per declared output");
+        for ((omega_name, omega_shape, omega_values), (cpu_name, cpu_shape, cpu_values)) in omega_outputs.iter().zip(cpu_outputs) {
+            assert_eq!(omega_name, cpu_name);
+            assert_eq!(omega_shape, cpu_shape);
+            for (found, expected) in omega_values.iter().zip(cpu_values) {
+                assert!((found - expected).abs() <= tolerance, "omega {found} vs cpu {expected} for output {omega_name}");
+            }
+        }
+    }
+
+    #[test]
+    fn omega_cpu_engine_agrees_with_the_cpu_evaluator_on_matmul_silu_softmax() {
+        let spec: ProgramSpec = toml::from_str(&plan_text()).expect("plan parses");
+        let (x, w) = matmul_inputs();
+        let inputs: [(&str, &[f32]); 2] = [("x", &x), ("w", &w)];
+        let config = RuntimeConfig::builder().with_engine("cpu").build().expect("cpu config validates");
+
+        let through_omega = evaluate_through_omega(&spec, &inputs, &config).expect("omega runs the program");
+        let direct = spec.evaluate_cpu(&inputs).expect("direct evaluation succeeds");
+
+        assert_outputs_agree(&through_omega, &direct, 1e-6);
+    }
+
+    #[cfg(all(target_os = "macos", feature = "metal"))]
+    #[test]
+    fn omega_metal_engine_agrees_with_the_cpu_evaluator_on_matmul_silu_softmax() {
+        let spec: ProgramSpec = toml::from_str(&plan_text()).expect("plan parses");
+        let (x, w) = matmul_inputs();
+        let inputs: [(&str, &[f32]); 2] = [("x", &x), ("w", &w)];
+        let config = RuntimeConfig::builder()
+            .with_engine("gpu")
+            .with_gpu_driver("metal")
+            .build()
+            .expect("metal config validates");
+
+        let routed = evaluate(&spec, &inputs, &config).expect("the gpu engine routes through omega");
+        let direct = spec.evaluate_cpu(&inputs).expect("direct evaluation succeeds");
+
+        assert_outputs_agree(&routed, &direct, 1e-4);
+    }
+
+    #[test]
+    fn the_default_config_stays_on_the_cpu_evaluator() {
+        let spec: ProgramSpec = toml::from_str(&plan_text()).expect("plan parses");
+        let (x, w) = matmul_inputs();
+        let inputs: [(&str, &[f32]); 2] = [("x", &x), ("w", &w)];
+
+        let routed = evaluate(&spec, &inputs, &RuntimeConfig::default()).expect("default config evaluates");
+        let direct = spec.evaluate_cpu(&inputs).expect("direct evaluation succeeds");
+
+        assert_eq!(routed, direct, "an unset engine runs evaluate_cpu unchanged");
     }
 
     fn tensor_run_request(plan: &str, inputs: &[(&str, &[u64], &[f32])]) -> Request<Bytes> {
