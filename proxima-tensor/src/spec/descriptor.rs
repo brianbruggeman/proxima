@@ -588,6 +588,16 @@ pub enum RopeLayout {
     Adjacent,
 }
 
+/// How the K cache stores a rotated key: the pair halves in two planes, or
+/// both halves in one contiguous `[even_half | odd_half]` row per key.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum KeyCacheLayout {
+    #[default]
+    Planes,
+    Rows,
+}
+
 /// How a recurrent family's passes join, as data on
 /// [`FamilyProfile::recurrence`]. The pass count is the checkpoint's own
 /// (`{family}.num_loops`); this carries what a header does not spell.

@@ -132,3 +132,6 @@ mod row_liveness_tests;
 
 #[cfg(test)]
 mod fused_softmax_gap_tests;
+
+#[cfg(test)]
+mod rope_rows_tests;

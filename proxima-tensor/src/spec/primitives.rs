@@ -456,6 +456,110 @@ pub fn fused_rope_pair(
     Ok((rotated_same, rotated_partner))
 }
 
+fn rope_pair_count(
+    program: &[Op],
+    cos_new: NodeId,
+    pairing: RopePairing,
+) -> Result<u32, TensorError> {
+    match pairing {
+        RopePairing::SplitHalf { pairs } => Ok(pairs),
+        RopePairing::Interleaved => crate::shape::infer(program, &[])?
+            .of(cos_new)
+            .last()
+            .and_then(|&extent| u32::try_from(extent).ok())
+            .ok_or(TensorError::NotLowerable {
+                node: cos_new,
+                reason: "rope rows need the cos table's pair axis to be a static extent",
+            }),
+    }
+}
+
+/// [`fused_rope_pair`]'s two halves as ONE `[s, head, 2, P]` node (`p = 0` is its
+/// first output, `p = 1` its second), so a K cache row is written contiguously
+/// instead of as two planes; `half_select` is a `[2]` leaf holding `[1, 0]`, which
+/// both picks each half's source channels through [`ScalarOp::Select`] and gives
+/// the `p` axis the extent the reverted one-op form lacked.
+pub fn fused_rope_rows(
+    program: &mut Vec<Op>,
+    source: NodeId,
+    head_letter: char,
+    cos_new: NodeId,
+    sin_new: NodeId,
+    pairing: RopePairing,
+    half_select: NodeId,
+) -> Result<NodeId, TensorError> {
+    let pairs = rope_pair_count(program, cos_new, pairing)?;
+    let (first_offset, second_offset) = pairing.offsets_sized(pairs);
+    let out_axes = alloc::format!("s{head_letter}pi");
+    let out_identity = alloc::format!("{out_axes}->{out_axes}");
+    let first_read = alloc::format!("s,{head_letter},{first_offset}->{out_axes}");
+    let second_read = alloc::format!("s,{head_letter},{second_offset}->{out_axes}");
+    let half_read = alloc::format!("p->{out_axes}");
+    let trig_read = alloc::format!("s,i->{out_axes}");
+
+    let same = elementwise_like(
+        program,
+        source,
+        ScalarOp::Select,
+        &[
+            (half_select, half_read.as_str()),
+            (source, first_read.as_str()),
+            (source, second_read.as_str()),
+        ],
+    )?;
+    let partner = elementwise_like(
+        program,
+        source,
+        ScalarOp::Select,
+        &[
+            (half_select, half_read.as_str()),
+            (source, second_read.as_str()),
+            (source, first_read.as_str()),
+        ],
+    )?;
+    let same_cos = elementwise_like(
+        program,
+        source,
+        ScalarOp::Multiply,
+        &[(same, out_identity.as_str()), (cos_new, trig_read.as_str())],
+    )?;
+    let partner_sin = elementwise_like(
+        program,
+        source,
+        ScalarOp::Multiply,
+        &[
+            (partner, out_identity.as_str()),
+            (sin_new, trig_read.as_str()),
+        ],
+    )?;
+    let negative = scalar_constant_like(program, -1.0, source)?;
+    let positive = scalar_constant_like(program, 1.0, source)?;
+    let sign = elementwise_like(
+        program,
+        source,
+        ScalarOp::Select,
+        &[(half_select, "p->p"), (negative, "->p"), (positive, "->p")],
+    )?;
+    let signed = elementwise_like(
+        program,
+        source,
+        ScalarOp::Multiply,
+        &[
+            (partner_sin, out_identity.as_str()),
+            (sign, half_read.as_str()),
+        ],
+    )?;
+    elementwise_like(
+        program,
+        source,
+        ScalarOp::Add,
+        &[
+            (same_cos, out_identity.as_str()),
+            (signed, out_identity.as_str()),
+        ],
+    )
+}
+
 /// [`fused_rope_pair`]'s own two output halves with NO rotation: llama.cpp's
 /// `has_rope(il) == false` (`llama.hparams.rope_pattern`, GGUF
 /// `<arch>.attention.rope_pattern`) means the layer applies no `ggml_rope_ext`

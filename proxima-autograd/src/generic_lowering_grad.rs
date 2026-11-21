@@ -15,7 +15,7 @@ use proxima_numeric::DType;
 use proxima_tensor::op::{self, Extent, NodeId, Op, ReduceInit, ScalarOp};
 use proxima_tensor::spec::{
     RopePairing, STFT_COS_INPUT, STFT_SIN_INPUT, STFT_WINDOW_INPUT, StftLogMelConfig, cross_kv,
-    elementwise_like, fused_rope_pair, layer_norm, layer_norm_no_affine, modulate,
+    elementwise_like, fused_rope_pair, fused_rope_rows, layer_norm, layer_norm_no_affine, modulate,
     multi_axis_rope_tables, non_causal_attention, reduce_like, scalar_constant_like, stft_log_mel,
     stft_tables, tap_layers,
 };
@@ -294,6 +294,41 @@ async fn fused_rope_pair_gradient_matches_finite_differences_with_multi_axis_tab
         ("w2", Lcg::values(13, (s * h * pairs) as usize)),
     ];
     let reports = check("fused_rope_pair", &program, loss, &bound, &["x"]);
+    assert_eq!(reports.len(), 1);
+}
+
+#[proxima::test]
+#[case::split_half(RopePairing::SplitHalf { pairs: 2 })]
+#[case::adjacent_pairs(RopePairing::Interleaved)]
+async fn fused_rope_rows_gradient_matches_finite_differences(#[case] pairing: RopePairing) {
+    let (s, h, pairs) = (3u32, 2u32, 2u32);
+    let width = 2 * pairs;
+    let (cos_bytes, sin_bytes) =
+        multi_axis_rope_tables(&[37.0, 38.0, 39.0], &[width], &[10000.0], DType::FLOAT32)
+            .expect("tables build");
+    let decode = |bytes: &[u8]| -> Vec<f32> {
+        bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
+            .collect()
+    };
+    let mut program = Vec::new();
+    let x = input(&mut program, "x", &[s, h, width]);
+    let cos = input(&mut program, "cos", &[s, pairs]);
+    let sin = input(&mut program, "sin", &[s, pairs]);
+    let half = input(&mut program, "half", &[2]);
+    let rows = fused_rope_rows(&mut program, x, 'h', cos, sin, pairing, half).expect("rows build");
+    let loss = weighted_loss_named(&mut program, rows, "shpi", "w", &[s, h, 2, pairs]);
+    let bound = [
+        ("x", Lcg::values(21, (s * h * width) as usize)),
+        ("cos", decode(&cos_bytes)),
+        ("sin", decode(&sin_bytes)),
+        ("half", alloc::vec![1.0, 0.0]),
+        ("w", Lcg::values(22, (s * h * 2 * pairs) as usize)),
+    ];
+    let reports = check("fused_rope_rows", &program, loss, &bound, &["x"]);
     assert_eq!(reports.len(), 1);
 }
 
