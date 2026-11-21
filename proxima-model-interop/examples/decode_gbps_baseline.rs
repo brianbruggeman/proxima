@@ -440,6 +440,15 @@ fn main() {
     let default_prompt = "<|turn>user\nWhich of these is smaller in size: a hippopotamus or a large office building?<turn|>\n<|turn>model\n";
     let prompt_override = std::env::var("PROXIMA_PROMPT").ok();
     let prompt: &str = prompt_override.as_deref().unwrap_or(default_prompt);
+    let prompt_ids_override = std::env::var("PROXIMA_PROMPT_IDS").ok().map(|raw| {
+        raw.split(',')
+            .map(|id| {
+                id.trim()
+                    .parse::<u32>()
+                    .unwrap_or_else(|_| panic!("PROXIMA_PROMPT_IDS={raw}: not a u32 list"))
+            })
+            .collect::<Vec<u32>>()
+    });
     let max_tokens: usize = std::env::var("PROXIMA_MAX_TOKENS")
         .ok()
         .and_then(|value| value.parse().ok())
@@ -565,8 +574,11 @@ fn main() {
         };
         let cpu_before = process_cpu_ms();
         let start = Instant::now();
-        let (token_ids, text, stopped_by_eos) = model
-            .generate_streaming(prompt, max_tokens, serving_config, &mut on_token)
+        let generated = match &prompt_ids_override {
+            Some(ids) => model.generate_from_ids(ids, max_tokens, &serving_config, &mut on_token),
+            None => model.generate_streaming(prompt, max_tokens, serving_config, &mut on_token),
+        };
+        let (token_ids, text, stopped_by_eos) = generated
             .expect("greedy decode on the real gemma4-E2B checkpoint");
         let wall_ms = start.elapsed().as_secs_f64() * 1000.0;
         let cpu_after = process_cpu_ms();
