@@ -1905,7 +1905,7 @@ fn gathered_packed_row_reads_each_selected_experts_slab_exactly_once() {
     let mut gathered_codecs = BTreeMap::new();
     gathered_codecs.insert(gathered_weight, Codec::Q4K);
     let gathered_block =
-        classify_packed_row_block(&gathered, &operand_codecs(&gathered, &gathered_codecs))
+        classify_packed_row_block(&gathered, &operand_codecs(&gathered, &gathered_codecs), &EmitKnobs::default())
             .expect("the gathered decode matvec shape classifies as packed-row");
     let gathered_feature_total: u64 = gathered_block
         .feature_axes
@@ -1936,7 +1936,7 @@ fn gathered_packed_row_reads_each_selected_experts_slab_exactly_once() {
     let dense_weight = dense.operands()[0].0;
     let mut dense_codecs = BTreeMap::new();
     dense_codecs.insert(dense_weight, Codec::Q4K);
-    let dense_block = classify_packed_row_block(&dense, &operand_codecs(&dense, &dense_codecs))
+    let dense_block = classify_packed_row_block(&dense, &operand_codecs(&dense, &dense_codecs), &EmitKnobs::default())
         .expect(
             "the dense decode matvec of the identical [rows, k] shape classifies as packed-row",
         );
