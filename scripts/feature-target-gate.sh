@@ -84,6 +84,7 @@ matrix=(
     "proxima-omega:instrument,alloc-count,metal-attn-variants"
     "proxima-omega:onnx-door,mil-writer,coreml-lane"
     "proxima-omega:instrument,top-fraction-fusion"
+    "proxima-omega:train,cpu"
     "proxima-omega:instrument,metal-reduction-literal"
     "proxima-omega:metal-q4k-mask-fma"
     "proxima-omega:metal-attn-variants"
