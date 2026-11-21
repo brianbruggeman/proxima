@@ -6852,6 +6852,7 @@ fn architecture_matrix_mixed_cached_conv_roots() {
             LoopCdConfig::default(),
             SharedExpertWidth::NONE,
             DType::FLOAT32,
+            KeyCacheLayout::default(),
         )
         .expect("mixed attention and short-convolution schedule lowers");
 

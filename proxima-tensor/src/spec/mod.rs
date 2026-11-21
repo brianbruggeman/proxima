@@ -120,7 +120,9 @@ pub use scheduled_cached::*;
 pub use short_conv_delta_net::*;
 pub use single_range_moe_cached::*;
 use two_block_attention::{
-    append_cached_block_scores, append_local_block_and_combine, group_queries,
+    PLANE_CACHE_READS, PLANE_NEW_READS, append_cached_block_scores,
+    append_cached_block_scores_with_reads, append_local_block_and_combine,
+    append_local_block_and_combine_with_reads, group_queries,
 };
 
 #[cfg(test)]
@@ -135,3 +137,6 @@ mod fused_softmax_gap_tests;
 
 #[cfg(test)]
 mod rope_rows_tests;
+
+#[cfg(test)]
+mod scheduled_cached_rows_tests;

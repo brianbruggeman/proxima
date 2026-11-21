@@ -1062,6 +1062,7 @@ pub fn build_forward_with_row_cut(
                     descriptor.loopcd,
                     SharedExpertWidth(descriptor.expert_shared_feed_forward),
                     descriptor.activation_dtype(),
+                    KeyCacheLayout::default(),
                 )?;
             Ok(ForwardProgram {
                 program,

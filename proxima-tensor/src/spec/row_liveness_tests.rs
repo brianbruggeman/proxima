@@ -92,6 +92,7 @@ fn build(schedule: &[LayerSchedule], last_row_only: bool, row_cut: bool) -> Vec<
         LoopCdConfig::default(),
         SharedExpertWidth::NONE,
         DType::FLOAT32,
+        KeyCacheLayout::default(),
     )
     .expect("the gemma4-shaped two-range cached program lowers");
     program

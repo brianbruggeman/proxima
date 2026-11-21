@@ -49,7 +49,12 @@ pub(super) fn group_queries(
 /// Scores the query range against every cached key `t` (symbol 1's extent, or
 /// the sliding slot's), scaled by `inv_sqrt_head_dim`, then applies `cache_mask`
 /// when the graph masks the cached block.
-pub(super) fn append_cached_block_scores(
+/// `key_reads` are the two operand maps over the cache, one per half of the pair: two planes read `tui`, one row reads the halves of one leaf.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the two key reads are the layout; folding them into a struct would be a type that only carries arguments"
+)]
+pub(super) fn append_cached_block_scores_with_reads(
     program: &mut Vec<Op>,
     q_even_grouped: NodeId,
     q_odd_grouped: NodeId,
@@ -57,15 +62,13 @@ pub(super) fn append_cached_block_scores(
     k_odd_cache: NodeId,
     inv_sqrt_head_dim: NodeId,
     cache_mask: Option<(NodeId, NodeId)>,
+    key_reads: (&str, &str),
 ) -> Result<NodeId, TensorError> {
     let score_cached_even_product = elementwise_like(
         program,
         q_even_grouped,
         ScalarOp::Multiply,
-        &[
-            (q_even_grouped, "sugi->stugi"),
-            (k_even_cache, "tui->stugi"),
-        ],
+        &[(q_even_grouped, "sugi->stugi"), (k_even_cache, key_reads.0)],
     )?;
     let score_cached_even = reduce(
         program,
@@ -80,7 +83,7 @@ pub(super) fn append_cached_block_scores(
         program,
         q_odd_grouped,
         ScalarOp::Multiply,
-        &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, "tui->stugi")],
+        &[(q_odd_grouped, "sugi->stugi"), (k_odd_cache, key_reads.1)],
     )?;
     let score_cached_odd = reduce(
         program,
@@ -138,7 +141,7 @@ pub(super) fn append_cached_block_scores(
     clippy::too_many_arguments,
     reason = "the combine reads both blocks' operands; folding them into a struct would be a type that only carries arguments"
 )]
-pub(super) fn append_local_block_and_combine(
+pub(super) fn append_local_block_and_combine_with_reads(
     program: &mut Vec<Op>,
     q_even_grouped: NodeId,
     q_odd_grouped: NodeId,
@@ -152,6 +155,7 @@ pub(super) fn append_local_block_and_combine(
     neg_infinity_local: Option<NodeId>,
     attention_sink: Option<NodeId>,
     group: u32,
+    key_reads: (&str, &str),
 ) -> Result<(NodeId, NodeId), TensorError> {
     let score_new_even_product = elementwise_like(
         program,
@@ -159,7 +163,7 @@ pub(super) fn append_local_block_and_combine(
         ScalarOp::Multiply,
         &[
             (q_even_grouped, "sugi->swugi"),
-            (rotated_k_new_even, "wui->swugi"),
+            (rotated_k_new_even, key_reads.0),
         ],
     )?;
     let score_new_even = reduce(
@@ -177,7 +181,7 @@ pub(super) fn append_local_block_and_combine(
         ScalarOp::Multiply,
         &[
             (q_odd_grouped, "sugi->swugi"),
-            (rotated_k_new_odd, "wui->swugi"),
+            (rotated_k_new_odd, key_reads.1),
         ],
     )?;
     let score_new_odd = reduce(
@@ -358,4 +362,67 @@ pub(super) fn append_local_block_and_combine(
         &[(attended_sum, "sugd->sugd"), (inv_weight_sum, "sug->sugd")],
     )?;
     Ok((attended, score_max_cached))
+}
+
+pub(super) const PLANE_CACHE_READS: (&str, &str) = ("tui->stugi", "tui->stugi");
+pub(super) const PLANE_NEW_READS: (&str, &str) = ("wui->swugi", "wui->swugi");
+
+/// [`append_cached_block_scores_with_reads`] over two separate key planes.
+pub(super) fn append_cached_block_scores(
+    program: &mut Vec<Op>,
+    q_even_grouped: NodeId,
+    q_odd_grouped: NodeId,
+    k_even_cache: NodeId,
+    k_odd_cache: NodeId,
+    inv_sqrt_head_dim: NodeId,
+    cache_mask: Option<(NodeId, NodeId)>,
+) -> Result<NodeId, TensorError> {
+    append_cached_block_scores_with_reads(
+        program,
+        q_even_grouped,
+        q_odd_grouped,
+        k_even_cache,
+        k_odd_cache,
+        inv_sqrt_head_dim,
+        cache_mask,
+        PLANE_CACHE_READS,
+    )
+}
+
+/// [`append_local_block_and_combine_with_reads`] over two separate key planes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors append_local_block_and_combine_with_reads minus the layout"
+)]
+pub(super) fn append_local_block_and_combine(
+    program: &mut Vec<Op>,
+    q_even_grouped: NodeId,
+    q_odd_grouped: NodeId,
+    rotated_k_new_even: NodeId,
+    rotated_k_new_odd: NodeId,
+    v_new: NodeId,
+    v_cache: NodeId,
+    inv_sqrt_head_dim: NodeId,
+    score_cached_scaled: NodeId,
+    is_future_local: NodeId,
+    neg_infinity_local: Option<NodeId>,
+    attention_sink: Option<NodeId>,
+    group: u32,
+) -> Result<(NodeId, NodeId), TensorError> {
+    append_local_block_and_combine_with_reads(
+        program,
+        q_even_grouped,
+        q_odd_grouped,
+        rotated_k_new_even,
+        rotated_k_new_odd,
+        v_new,
+        v_cache,
+        inv_sqrt_head_dim,
+        score_cached_scaled,
+        is_future_local,
+        neg_infinity_local,
+        attention_sink,
+        group,
+        PLANE_NEW_READS,
+    )
 }

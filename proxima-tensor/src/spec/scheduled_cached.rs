@@ -20,6 +20,58 @@
 
 use super::*;
 
+type KeyReads = (String, String);
+
+/// The cache-block and local-block operand maps for each half of a rotated key:
+/// two planes read `tui`/`wui`; one row reads the `[even | odd]` halves of one
+/// leaf, through [`RopePairing`]'s own half offsets, the same two maps whatever
+/// the pairing, because the row's halves are stored in that order.
+fn key_reads(key_layout: KeyCacheLayout, pairs: u32) -> (KeyReads, KeyReads) {
+    let owned = |reads: (&str, &str)| (String::from(reads.0), String::from(reads.1));
+    match key_layout {
+        KeyCacheLayout::Planes => (owned(PLANE_CACHE_READS), owned(PLANE_NEW_READS)),
+        KeyCacheLayout::Rows => {
+            let (first, second) = RopePairing::SplitHalf { pairs }.offsets_sized(pairs);
+            (
+                (
+                    alloc::format!("t,u,{first}->stugi"),
+                    alloc::format!("t,u,{second}->stugi"),
+                ),
+                (
+                    String::from("w,u,0,i->swugi"),
+                    String::from("w,u,1,i->swugi"),
+                ),
+            )
+        }
+    }
+}
+
+/// `[1, 0]` over a `[2]` axis from `Iota == 0`, the `half_select` leaf
+/// [`fused_rope_rows`] needs, built in-graph so no new input is declared.
+fn rope_key_rows(
+    program: &mut Vec<Op>,
+    k_new: NodeId,
+    cos: NodeId,
+    sin: NodeId,
+    rope_pairing: RopePairing,
+) -> Result<NodeId, TensorError> {
+    let halves = op::append(
+        program,
+        Op::Iota {
+            dtype: DType::FLOAT32,
+            extent: Extent::Static(2),
+        },
+    );
+    let zero = scalar_constant(program, 0.0);
+    let half_select = elementwise(
+        program,
+        DType::FLOAT32,
+        ScalarOp::Equal,
+        &[(halves, "p->p"), (zero, "->p")],
+    )?;
+    fused_rope_rows(program, k_new, 'u', cos, sin, rope_pairing, half_select)
+}
+
 /// [`append_attention_mixer`]'s single-range-cached counterpart: the same
 /// per-layer knobs ([`ValueSource`], [`RopePairing`], `post_attention_norm`,
 /// `value_norm`), but scored against a MERGED key/value cache
@@ -474,6 +526,7 @@ pub fn append_two_range_cached_attention(
     k_even_cache: NodeId,
     k_odd_cache: NodeId,
     v_cache: NodeId,
+    key_layout: KeyCacheLayout,
 ) -> Result<(NodeId, CachedLayerRoots), TensorError> {
     let normed = rmsnorm(program, x, attn_norm_weight, inv_dim, eps)?;
 
@@ -525,9 +578,23 @@ pub fn append_two_range_cached_attention(
                 Some(gamma) => rmsnorm_per_head(program, k_new_raw, gamma, inv_head_dim, eps, "u")?,
                 None => k_new_raw,
             };
-            let (rotated_even, rotated_odd) = match rope {
-                Some((cos, sin)) => fused_rope_pair(program, k_new, 'u', cos, sin, rope_pairing)?,
-                None => unrotated_head_pair(program, k_new, 'u', rope_pairing, pairs)?,
+            let (rotated_even, rotated_odd) = match (key_layout, rope) {
+                (KeyCacheLayout::Planes, Some((cos, sin))) => {
+                    fused_rope_pair(program, k_new, 'u', cos, sin, rope_pairing)?
+                }
+                (KeyCacheLayout::Planes, None) => {
+                    unrotated_head_pair(program, k_new, 'u', rope_pairing, pairs)?
+                }
+                (KeyCacheLayout::Rows, Some((cos, sin))) => {
+                    let rows = rope_key_rows(program, k_new, cos, sin, rope_pairing)?;
+                    (rows, rows)
+                }
+                (KeyCacheLayout::Rows, None) => {
+                    return Err(TensorError::NotLowerable {
+                        node: k_new,
+                        reason: "a one-row key cache needs rope tables to write the rotated row",
+                    });
+                }
             };
             (Some(k_new_raw), rotated_even, rotated_odd)
         }
@@ -572,7 +639,8 @@ pub fn append_two_range_cached_attention(
 
     let (q_even_grouped, q_odd_grouped) =
         group_queries(program, rotated_q_even, rotated_q_odd, group, group_ones)?;
-    let score_cached_scaled = append_cached_block_scores(
+    let (cache_reads, new_reads) = key_reads(key_layout, pairs);
+    let score_cached_scaled = append_cached_block_scores_with_reads(
         program,
         q_even_grouped,
         q_odd_grouped,
@@ -580,8 +648,9 @@ pub fn append_two_range_cached_attention(
         k_odd_cache,
         inv_sqrt_head_dim,
         Some((is_future_cached, neg_infinity_cached)),
+        (cache_reads.0.as_str(), cache_reads.1.as_str()),
     )?;
-    let (attended, _) = append_local_block_and_combine(
+    let (attended, _) = append_local_block_and_combine_with_reads(
         program,
         q_even_grouped,
         q_odd_grouped,
@@ -595,6 +664,7 @@ pub fn append_two_range_cached_attention(
         Some(neg_infinity_local),
         attention_sink,
         group,
+        (new_reads.0.as_str(), new_reads.1.as_str()),
     )?;
 
     let wo_product = elementwise_like(
@@ -1133,6 +1203,7 @@ pub fn scheduled_two_range_cached_forward_program_with_experts_and_head_repeats(
             LoopCdConfig::default(),
             expert_shared_feed_forward,
             DType::FLOAT32,
+            KeyCacheLayout::default(),
         )?;
     let mut cache_roots = Vec::with_capacity(layer_roots.len());
     for roots in layer_roots {
@@ -1282,6 +1353,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
     loopcd: LoopCdConfig,
     expert_shared_feed_forward: SharedExpertWidth,
     activation: DType,
+    key_cache_layout: KeyCacheLayout,
 ) -> Result<TwoRangeLayerRootForwardProgram, TensorError> {
     if schedule.len() != block_count as usize {
         return Err(TensorError::LayerScheduleCountMismatch {
@@ -1716,18 +1788,43 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
                         });
                     }
                 };
-                let k_even_cache = input_leaf(
-                    &mut program,
-                    DType::FLOAT32,
-                    alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
-                    &alloc::format!("kv_cache.{logical}.k_even"),
-                );
-                let k_odd_cache = input_leaf(
-                    &mut program,
-                    DType::FLOAT32,
-                    alloc::vec![cache_bound, Extent::Static(kv_heads), Extent::Static(pairs)],
-                    &alloc::format!("kv_cache.{logical}.k_odd"),
-                );
+                let (k_even_cache, k_odd_cache) = match key_cache_layout {
+                    KeyCacheLayout::Planes => (
+                        input_leaf(
+                            &mut program,
+                            DType::FLOAT32,
+                            alloc::vec![
+                                cache_bound,
+                                Extent::Static(kv_heads),
+                                Extent::Static(pairs)
+                            ],
+                            &alloc::format!("kv_cache.{logical}.k_even"),
+                        ),
+                        input_leaf(
+                            &mut program,
+                            DType::FLOAT32,
+                            alloc::vec![
+                                cache_bound,
+                                Extent::Static(kv_heads),
+                                Extent::Static(pairs)
+                            ],
+                            &alloc::format!("kv_cache.{logical}.k_odd"),
+                        ),
+                    ),
+                    KeyCacheLayout::Rows => {
+                        let rows = input_leaf(
+                            &mut program,
+                            DType::FLOAT32,
+                            alloc::vec![
+                                cache_bound,
+                                Extent::Static(kv_heads),
+                                Extent::Static(2 * pairs)
+                            ],
+                            &alloc::format!("kv_cache.{logical}.k"),
+                        );
+                        (rows, rows)
+                    }
+                };
                 let v_cache = input_leaf(
                     &mut program,
                     DType::FLOAT32,
@@ -1796,6 +1893,7 @@ pub(super) fn scheduled_two_range_cached_forward_program_with_layer_roots(
             k_even_cache,
             k_odd_cache,
             v_cache,
+            key_cache_layout,
         )?;
 
         if shared_source.is_none() {

@@ -83,6 +83,7 @@ fn model_program() -> (Vec<Op>, NodeId) {
         LoopCdConfig::default(),
         SharedExpertWidth::NONE,
         DType::FLOAT32,
+        KeyCacheLayout::Planes,
     )
     .expect("a two-layer cached model builds");
     (program, logits)
