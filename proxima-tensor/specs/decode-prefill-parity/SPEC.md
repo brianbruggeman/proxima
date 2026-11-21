@@ -2946,7 +2946,7 @@ cargo nextest run -p proxima-model-interop --features std,metal --cargo-profile 
 decode_arms --prompt-file prompt1k.txt --processes 3 --runs 7 --arm base=<9015ad1a binary> --arm tip=<256c9d23 binary> --arm control=<copy of tip> --case gemma4_e2b=<E2B blob> --case granite_moe=<granite blob>
 decode_arms --prompt-file prompt_short_hippo.txt ... --case gemma4_e2b=<E2B blob>
 OMEGA_WIDE_COOPERATIVE_REDUCE_BROADCAST_MAX_WIDTH=256 cargo build --release -p proxima-model-interop --example decode_gbps_baseline --features std,metal   # the width-cap toggle
-decode_arms ... --arm nospec=<tipx> --arm nospec_f16=<tipx> --arm-env gemma4_e2b.nospec:PROXIMA_DECODE_SPECULATIVE=none --arm-env gemma4_e2b.nospec_f16:PROXIMA_DECODE_SPECULATIVE=none --arm-env gemma4_e2b.nospec_f16:PROXIMA_KV_CACHE_TYPE=f16   # arm-env labels are case-qualified
+decode_arms ... --arm nospec=<tipx> --arm nospec_f16=<tipx> --arm-env gemma4_e2b.nospec:PROXIMA_DECODE_SPECULATIVE=none --arm-env gemma4_e2b.nospec_f16:PROXIMA_DECODE_SPECULATIVE=none --arm-env gemma4_e2b.nospec_f16:PROXIMA_KV_CACHE_TYPE=f16   # arm-env labels are case-qualified; historical env, current keys are PROXIMA_SPECULATIVE_TYPES=none and PROXIMA_SERVING_KV_CACHE_VALUE_QUANT=f16
 ```
 
 Missing for CI: no job runs the Metal tests, a GPU bench or `decode_arms`; the nextest runs and the bench numbers re-prove only on this box. The bench binaries are under `/Users/brianbruggeman/repos/slot-0/.long_ctx_backups/combine2/bin/` (sha256 in `bench/binaries.sha256`), not in the tree.
@@ -3152,7 +3152,7 @@ step_timeline evidence/attr3/census/census_granite_decode/telemetry_events.log e
 PROXIMA_GEMMA4_E2B_GGUF=<granite blob> PROXIMA_PROMPT_FILE=prompt1k.txt AB_VARIANT_DIR=evidence/attr3/probes/variants_q AB_SHA=17b21f30 AB_STEP=0 AB_ROUNDS=30 norm_variant_ab        # twin variants; variants_router (AB_SHA=7cc38fcb), variants_combine (2c18a81c), variants_gemm/2/3 (6cd35d13, AB_PACKED=1)
 PROXIMA_GEMMA4_E2B_GGUF=<E2B blob> PROXIMA_PROMPT_FILE=prompt1k.txt AB_VARIANT_DIR=<empty dir> AB_OMIT_ALL=1 AB_PACKED=1 AB_STEP=5 AB_ROUNDS=30 AB_FLUSH_MIB=0 AB_SKIP_GROUPS='a638c75f896670e1:[1, 8, 256];2417697c78307ab2:[1, 8, 512]' norm_variant_ab   # E2B; granite: no skip list; prefill: AB_STEP=0 AB_ROUNDS=15
 PROXIMA_DISABLE_TWIN_ELEMENTWISE_FUSION=1 M0_OUT_DIR=<dir> M0_MODEL_GGUF=<granite blob> M0_MAX_TOKENS=2 M0_CAPTURE_STEPS=0 PROXIMA_PROMPT_FILE=prompt1k.txt gemma4_decode_kernel_census
-PROXIMA_DECODE_MODEL_GGUF=<granite blob> PROXIMA_PROMPT="$(cat prompt1k.txt)" PROXIMA_MAX_TOKENS=96 PROXIMA_DECODE_SPECULATIVE=none PROXIMA_KV_CACHE_TYPE=<f32|f16> decode_gbps_baseline
+PROXIMA_DECODE_MODEL_GGUF=<granite blob> PROXIMA_PROMPT="$(cat prompt1k.txt)" PROXIMA_MAX_TOKENS=96 PROXIMA_DECODE_SPECULATIVE=none PROXIMA_KV_CACHE_TYPE=<f32|f16> decode_gbps_baseline   # historical env; current keys are PROXIMA_SPECULATIVE_TYPES=none and PROXIMA_SERVING_KV_CACHE_VALUE_QUANT=<f32|f16>
 PROXIMA_DEBUG_METAL_SOURCE=1 PROXIMA_METAL_COMPARE_BOUND_NODE=<node> ... AB_DESCRIBE=1 AB_STEP=0 norm_variant_ab 2> source.txt   # emitted MSL of one node (nodes: 47 Q twin, 103 router, 226 gate, 249 combine)
 ```
 Missing for CI: no job runs the Metal tests, the censuses or the AB tool; every row re-proves on this box only. The binaries are under `.long_ctx_backups/attr3/bin/` (sha256 in `evidence/attr3/bin.sha256`).
