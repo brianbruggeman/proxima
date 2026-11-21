@@ -168,10 +168,13 @@ Messages are lowercase, terse, causal — they say *why*; the fields carry *what
 
 ## Testing
 
-- `cargo nextest run` is the default runner. Fall back to `cargo test` only for
-  doctests — **nextest does not run them** — or when nextest is unavailable.
-- **The landing gate is not just nextest.** `cargo check --all-targets` compiles
-  examples but never *runs* them, and nextest never runs doctests. Both classes
+- `cargo val` is the landing gate's runner — inside a worktree run it as
+  `git wt cargo val`, which pins `CARGO_TARGET_DIR` to that worktree. It runs
+  each test as an isolated process and is the workspace binding rule. Use
+  `cargo nextest run` only for a filterset or display `cargo val` cannot
+  express; use `cargo test --doc` for doctests — neither runs them.
+- **The landing gate is not just val.** `cargo check --all-targets` compiles
+  examples but never *runs* them, and val never runs doctests. Both classes
   have shipped broken to public main. A landing gate must add `cargo test --doc`
   with the right features, and actually run the examples.
 - **`cargo test --doc` exits 0 when it matched nothing.** Zero-passed is
