@@ -68,6 +68,27 @@ static int create_vm(char *error_buffer, size_t error_capacity) {
     return 0;
 }
 
+/* HVF starts a vcpu with CPACR_EL1 == 0 (measured), so any FP/SIMD
+ * instruction at EL1 raises EC 0x07 into the GUEST's own vector table
+ * (VBAR_EL1 == 0), never a VM exit. A bare-metal guest's compiler-emitted
+ * `memset` uses NEON (`dup v0.4h`), so without FPEN == 0b11 its first
+ * `memset` vectors into the middle of its own text. VBAR_EL1 is pointed at
+ * unmapped guest-physical space for the same reason: the guest's `udf` abort
+ * must fault out to the host (EC 0x20) rather than vector into mapped text. */
+#define CPACR_EL1_FPEN_FULL 0x300000u
+
+static int enable_guest_fp_simd(hv_vcpu_t vcpu, char *error_buffer, size_t error_capacity) {
+    hv_return_t status = hv_vcpu_set_sys_reg(vcpu, HV_SYS_REG_CPACR_EL1, CPACR_EL1_FPEN_FULL);
+    if (status != HV_SUCCESS) {
+        return set_hv_error(error_buffer, error_capacity, "set guest cpacr_el1", status);
+    }
+    status = hv_vcpu_set_sys_reg(vcpu, HV_SYS_REG_VBAR_EL1, 0x80000000ull);
+    if (status != HV_SUCCESS) {
+        return set_hv_error(error_buffer, error_capacity, "set guest vbar_el1", status);
+    }
+    return 0;
+}
+
 /* Shared vcpu-create-and-register-init step. `*vcpu_created_out` is set the
  * moment `hv_vcpu_create` succeeds — before either register write, which can
  * still fail — so a caller's cleanup always knows whether `hv_vcpu_destroy`
@@ -94,7 +115,7 @@ static int create_and_start_vcpu(
     if (status != HV_SUCCESS) {
         return set_hv_error(error_buffer, error_capacity, "set guest cpsr", status);
     }
-    return 0;
+    return enable_guest_fp_simd(*vcpu_out, error_buffer, error_capacity);
 }
 
 /* Shared teardown halves, split so `proxima_vm_run_dispatch_loop`'s cleanup
@@ -210,7 +231,7 @@ static int device_create_and_start_vcpu(
     if (status != HV_SUCCESS) {
         return set_hv_error(error_buffer, error_capacity, "set guest cpsr", status);
     }
-    return 0;
+    return enable_guest_fp_simd(*vcpu_out, error_buffer, error_capacity);
 }
 
 /* Diagnostic-only, opt-in wall-clock forced exit: `proxima_vm_run_device_dispatch_loop`'s
