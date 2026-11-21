@@ -1894,6 +1894,7 @@ fn run_proxima(context: &RunContext, cell: &Cell, binary: &Path, row: &mut Row) 
     command.env("PROXIMA_STEP_TIMES", "1");
     command.env("PROXIMA_MAX_TOKENS", MAX_TOKENS.to_string());
     command.env("PROXIMA_RUNS", "3");
+    command.env("PROXIMA_DECODE_MODEL_GGUF", &context.config.model);
     command.env("PROXIMA_SERVING_CONFIG", serving_config_path());
     command.env(
         "PROXIMA_SERVING_CONTEXT_LENGTH",
