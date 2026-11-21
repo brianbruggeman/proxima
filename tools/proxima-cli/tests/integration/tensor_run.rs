@@ -233,6 +233,10 @@ fn tensor_run_returns_softmax_bit_equal_to_in_process() {
     let output_path = sockets.path().join("outputs.safetensors");
     let (x, w) = matmul_inputs();
     write_inputs(&inputs_path, &x, &w);
+    let spec: ProgramSpec = toml::from_str(&plan_text()).expect("plan parses");
+    let local = spec
+        .evaluate_cpu(&[("x", &x), ("w", &w)])
+        .expect("in-process evaluation succeeds");
 
     let output = run_cli(&[
         "tensor",
@@ -252,10 +256,14 @@ fn tensor_run_returns_softmax_bit_equal_to_in_process() {
         "cli exits 0; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let expected_stdout = format!(
+        "softmax [2, 3] {}",
+        proxima_cli::summary::summarize_values(&local[0].2)
+    );
     assert_eq!(
         String::from_utf8_lossy(&output.stdout).trim_end(),
-        "softmax [2, 3] 6 floats",
-        "stdout names the one output, its shape and its float count"
+        expected_stdout,
+        "stdout names the one output, its shape, and prints the same values in-process evaluation returns"
     );
     let remote = decode_response(&std::fs::read(&output_path).expect("output file exists"))
         .expect("output file decodes");
@@ -263,10 +271,6 @@ fn tensor_run_returns_softmax_bit_equal_to_in_process() {
     let (name, shape, remote_values) = &remote[0];
     assert_eq!(name, "softmax");
     assert_eq!(shape.as_slice(), &[2_u64, 3]);
-    let spec: ProgramSpec = toml::from_str(&plan_text()).expect("plan parses");
-    let local = spec
-        .evaluate_cpu(&[("x", &x), ("w", &w)])
-        .expect("in-process evaluation succeeds");
     let local_values = &local[0].2;
     assert_eq!(remote_values.len(), 6, "six output floats came back");
     let remote_bits: Vec<u32> = remote_values.iter().map(|value| value.to_bits()).collect();

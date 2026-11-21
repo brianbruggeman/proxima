@@ -8,6 +8,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
 use proxima::ProximaError;
+use proxima_cli::summary::summarize_values;
 use proxima_cli::tensor_wire::{TensorRecord, decode_response, encode_request};
 
 use crate::pipeline::PipelineTransport;
@@ -24,7 +25,8 @@ pub struct TensorArgs {
 #[derive(Subcommand, Debug)]
 pub enum TensorAction {
     /// Evaluate a tensor plan on a running `proximad` over its UDS.
-    /// Prints `<name> <shape> <n> floats` for each output.
+    /// Prints `<name> <shape> [values]` for each output, eliding past
+    /// eight values.
     Run(RunArgs),
 }
 
@@ -102,7 +104,7 @@ fn borrow_inputs(inputs: &[TensorRecord]) -> Vec<(&str, &[u64], &[f32])> {
 
 fn print_summary(outputs: &[TensorRecord]) {
     for (name, shape, values) in outputs {
-        println!("{name} {shape:?} {} floats", values.len());
+        println!("{name} {shape:?} {}", summarize_values(values));
     }
 }
 
