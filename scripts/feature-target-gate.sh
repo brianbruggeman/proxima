@@ -75,10 +75,14 @@ matrix=(
     "proxima-numeric:std"
     "proxima-numeric:config"
     "proxima-gguf:"
+    "proxima-autograd:std"
+    "proxima-autograd:std,safetensors"
+    "proxima-autograd:train-step-profile"
     "proxima-tensor:@nostd:alloc"
     "proxima-numeric:@nostd:alloc"
     "proxima-numeric:@nostd:"
     "proxima-gguf:@nostd:alloc"
+    "proxima-autograd:@nostd:alloc"
     "proxima-omega:@nostd:alloc"
     "proxima-omega:@nostd:"
     "proxima-model-interop:@nostd:"
@@ -129,7 +133,7 @@ fi
 
 changed_crates() {
     if [ "$all" = 1 ]; then
-        printf '%s\n' proxima-tensor proxima-model-interop proxima-omega proxima-numeric proxima-gguf
+        printf '%s\n' proxima-tensor proxima-model-interop proxima-omega proxima-numeric proxima-gguf proxima-autograd
         return
     fi
     local dir
@@ -139,7 +143,7 @@ changed_crates() {
         | cut -d/ -f1 \
         | sort -u \
         | while IFS= read -r dir; do package_name "$dir"; done \
-        | grep -Ex 'proxima-tensor|proxima-model-interop|proxima-omega|proxima-numeric|proxima-gguf' || true
+        | grep -Ex 'proxima-tensor|proxima-model-interop|proxima-omega|proxima-numeric|proxima-gguf|proxima-autograd' || true
 }
 
 # a gate measures the working tree, not the commit: say which one, because a
